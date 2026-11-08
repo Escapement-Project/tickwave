@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+# The benchmark builds its own crates, outside the workspace.
+exclude = ["bench"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Escapement-Project/chrono"
+publish = false
+
+# The browser's decoder: size and speed matter more than build time.
+[profile.wasm]
+inherits = "release"
+lto = true
+codegen-units = 1
