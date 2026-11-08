@@ -9,9 +9,11 @@
 //! header    JSON       Header
 //! index     binary     one row a block: i64 start tick, u64 offset, u32 length, u32 decoded
 //!                      length, then a u32 a channel (digital: edge count, level at the block's
-//!                      start in bit 31; analog: sample count)
+//!                      start in bit 31; analog: sample count); then one row an overview block:
+//!                      u64 offset, u32 length, u32 decoded length
 //! overview  zstd       the rest of the head
 //! blocks    zstd       one frame a block
+//! overview  zstd       one frame an overview block, for levels too fine for the head
 //! ```
 
 use std::collections::BTreeMap;
@@ -86,10 +88,19 @@ pub struct Header {
     pub blocks: u32,
     /// The overview levels in the head, as bucket widths of 2^shift ticks, finest first.
     pub overview: Vec<u8>,
+    /// The finer overview levels kept in overview blocks after the data blocks, finest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overview_blocks: Vec<OverviewLevel>,
     /// The sidecar's files by name, the hand-written TOML file and what it includes; in a
     /// bundled file only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub annotations: Option<BTreeMap<String, String>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverviewLevel {
+    pub shift: u8,
+    pub blocks: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -191,6 +202,34 @@ impl BlockRow {
             length: u32_at(16),
             decoded_length: u32_at(20),
             channels: (0..channels).map(|c| u32_at(ROW_FIXED + 4 * c)).collect(),
+        }
+    }
+}
+
+/// An overview block's place in the file. The index holds these after the data blocks' rows, by
+/// level in the header's order, then in time order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OverviewRow {
+    pub offset: u64,
+    pub length: u32,
+    pub decoded_length: u32,
+}
+
+impl OverviewRow {
+    pub const SIZE: usize = 16;
+
+    pub fn write(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.offset.to_le_bytes());
+        out.extend_from_slice(&self.length.to_le_bytes());
+        out.extend_from_slice(&self.decoded_length.to_le_bytes());
+    }
+
+    /// `bytes` is exactly one row.
+    pub fn parse(bytes: &[u8]) -> Self {
+        Self {
+            offset: u64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+            length: u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+            decoded_length: u32::from_le_bytes(bytes[12..16].try_into().unwrap()),
         }
     }
 }

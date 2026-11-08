@@ -8,10 +8,11 @@ use ruzstd::decoding::FrameDecoder;
 use crate::codec::get_uleb;
 use crate::hash::{self, ChannelHasher};
 use crate::header::{
-    AnalogCoding, BlockRow, ChannelKind, Header, LEVEL_BIT, MAGIC, MAJOR, PREAMBLE_LEN, Preamble,
+    AnalogCoding, BlockRow, ChannelKind, Header, LEVEL_BIT, MAGIC, MAJOR, OverviewRow,
+    PREAMBLE_LEN, Preamble,
 };
-use crate::model::{ChannelData, Ratio, Recording, Samples};
-use crate::overview::{self, Level};
+use crate::model::{ChannelData, Ratio, Recording, Samples, sample_tick};
+use crate::overview::{self, AnalogBuilder, DigitalBuilder, Level};
 
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {
@@ -63,8 +64,17 @@ pub struct Head {
     pub header: Header,
     pub rows: Vec<BlockRow>,
     pub overview: Vec<Level>,
+    /// For each level in `header.overview_blocks`, its overview blocks' places in the file.
+    pub overview_rows: Vec<Vec<OverviewRow>>,
     /// For each analog channel, the index of its first sample in each block.
     first_sample: Vec<Vec<u64>>,
+    analog: Vec<bool>,
+}
+
+/// One overview block, decoded: buckets `first..first + level.buckets` of its level.
+pub struct OverviewBlock {
+    pub first: u64,
+    pub level: Level,
 }
 
 pub enum BlockChannel {
@@ -115,12 +125,48 @@ impl Head {
             return Err(corrupt("the preamble's lengths do not fit together"));
         }
         let header: Header = serde_json::from_slice(&bytes[PREAMBLE_LEN..header_end])?;
+        // Bounds every level's size before anything is allocated for it, whatever the header says.
+        let too_fine =
+            |shift: u8, limit: u64| shift > 62 || overview::buckets(header.length, shift) > limit;
+        if header
+            .overview
+            .iter()
+            .any(|&s| too_fine(s, overview::HEAD_BUCKETS))
+            || header
+                .overview_blocks
+                .iter()
+                .any(|l| too_fine(l.shift, overview::BLOCK_LEVEL_BUCKETS))
+        {
+            return Err(corrupt(
+                "an overview level has more buckets than the format allows",
+            ));
+        }
+        for level in &header.overview_blocks {
+            if u64::from(level.blocks) != overview::block_count(header.length, level.shift) {
+                return Err(corrupt(format!(
+                    "overview level 2^{} has {} blocks, not the {} its buckets need",
+                    level.shift,
+                    level.blocks,
+                    overview::block_count(header.length, level.shift)
+                )));
+            }
+        }
         let channels = header.channels.len();
         let row_size = BlockRow::size(channels);
-        if preamble.index_len as usize != header.blocks as usize * row_size {
+        let overview_count: u64 = header
+            .overview_blocks
+            .iter()
+            .map(|l| u64::from(l.blocks))
+            .sum();
+        // In u64: a corrupt header's counts must not wrap a 32-bit usize into a plausible length.
+        if u64::from(preamble.index_len)
+            != u64::from(header.blocks) * row_size as u64
+                + overview_count * OverviewRow::SIZE as u64
+        {
             return Err(corrupt("the index does not hold one row a block"));
         }
-        let rows: Vec<BlockRow> = bytes[header_end..index_end]
+        let data_len = header.blocks as usize * row_size;
+        let rows: Vec<BlockRow> = bytes[header_end..header_end + data_len]
             .chunks_exact(row_size)
             .map(|row| BlockRow::parse(row, channels))
             .collect();
@@ -130,6 +176,21 @@ impl Head {
                 return Err(corrupt(format!("block {i}'s row is out of place")));
             }
             expect_offset += u64::from(row.length);
+        }
+        let mut overview_rows = Vec::with_capacity(header.overview_blocks.len());
+        let mut pos = header_end + data_len;
+        for level in &header.overview_blocks {
+            let mut level_rows = Vec::with_capacity(level.blocks as usize);
+            for _ in 0..level.blocks {
+                let row = OverviewRow::parse(&bytes[pos..pos + OverviewRow::SIZE]);
+                pos += OverviewRow::SIZE;
+                if row.offset != expect_offset {
+                    return Err(corrupt("an overview block's row is out of place"));
+                }
+                expect_offset += u64::from(row.length);
+                level_rows.push(row);
+            }
+            overview_rows.push(level_rows);
         }
         if expect_offset != preamble.file_len || rows.first().is_some_and(|r| r.start != 0) {
             return Err(corrupt("the blocks do not fill the file"));
@@ -145,13 +206,7 @@ impl Head {
         let overview_len: usize = header
             .overview
             .iter()
-            .map(|&shift| {
-                let n = overview::buckets(header.length, shift) as usize;
-                analog
-                    .iter()
-                    .map(|&a| if a { 8 * n } else { 2 * n.div_ceil(8) })
-                    .sum::<usize>()
-            })
+            .map(|&shift| overview::decoded_len(overview::buckets(header.length, shift), &analog))
             .sum();
         let raw = inflate(&bytes[index_end..head_len], overview_len)?;
         let overview = overview::parse(&raw, &header.overview, header.length, &analog)
@@ -183,8 +238,56 @@ impl Head {
             header,
             rows,
             overview,
+            overview_rows,
             first_sample,
+            analog,
         })
+    }
+
+    /// Where overview block `k` of `header.overview_blocks[level]` sits: offset and length.
+    pub fn overview_block_location(&self, level: usize, k: usize) -> (u64, u32) {
+        let row = self.overview_rows[level][k];
+        (row.offset, row.length)
+    }
+
+    /// The overview blocks of `header.overview_blocks[level]` holding any tick in `[start, end)`.
+    pub fn overview_blocks_covering(&self, level: usize, start: i64, end: i64) -> Range<usize> {
+        let shift = self.header.overview_blocks[level].shift;
+        let length = self.header.length.max(0);
+        // Every tick in 0..=length falls in a block, so clamping keeps the range inside the level.
+        let block = |tick: i64| {
+            ((tick.clamp(0, length) as u64 >> shift) / overview::BLOCK_BUCKETS) as usize
+        };
+        let first = block(start);
+        first..block(end.max(start.saturating_add(1)) - 1) + 1
+    }
+
+    /// Decodes overview block `k` of `header.overview_blocks[level]` from exactly its bytes.
+    pub fn decode_overview_block(
+        &self,
+        level: usize,
+        k: usize,
+        frame: &[u8],
+    ) -> Result<OverviewBlock, DecodeError> {
+        let row = self.overview_rows[level][k];
+        if frame.len() != row.length as usize {
+            return Err(corrupt(format!(
+                "overview block {k} is {} bytes, the index says {}",
+                frame.len(),
+                row.length
+            )));
+        }
+        let shift = self.header.overview_blocks[level].shift;
+        let (first, n) = overview::block_buckets(self.header.length, shift, k as u64);
+        if row.decoded_length as usize != overview::decoded_len(n, &self.analog) {
+            return Err(corrupt(format!(
+                "overview block {k}'s decoded length is wrong"
+            )));
+        }
+        let raw = inflate(frame, row.decoded_length as usize)?;
+        let level = overview::parse_block(&raw, shift, n, &self.analog)
+            .ok_or_else(|| corrupt(format!("overview block {k} does not parse")))?;
+        Ok(OverviewBlock { first, level })
     }
 
     pub fn block_end(&self, i: usize) -> i64 {
@@ -337,9 +440,22 @@ pub fn verify(file: &[u8], source: Recording) -> Result<(), VerifyError> {
     if h.channels.len() != source.channels.len() {
         return Err(mismatch("the channel count differs"));
     }
+    let plan = overview::plan(h.length);
+    let listed: Vec<u8> = h.overview_blocks.iter().map(|l| l.shift).collect();
+    if h.overview != plan.head || listed != plan.blocks {
+        return Err(mismatch(
+            "the overview levels are not the ones the format sets for this length",
+        ));
+    }
+    let finest = plan.finest();
     enum Want {
-        Digital(Box<dyn Iterator<Item = i64> + Send>, bool),
-        Analog(Box<dyn Iterator<Item = f32> + Send>),
+        Digital(Box<dyn Iterator<Item = i64> + Send>, bool, DigitalBuilder),
+        Analog(
+            Box<dyn Iterator<Item = f32> + Send>,
+            AnalogBuilder,
+            i64,
+            Ratio,
+        ),
     }
     let mut wants = Vec::new();
     let mut hashers = Vec::new();
@@ -354,7 +470,8 @@ pub fn verify(file: &[u8], source: Recording) -> Result<(), VerifyError> {
                     return Err(mismatch(format!("channel {name}: initial or end differs")));
                 }
                 hashers.push(ChannelHasher::digital(name, d.initial, d.end));
-                wants.push(Want::Digital(d.edges, d.initial));
+                let builder = DigitalBuilder::new(h.length, finest, d.initial);
+                wants.push(Want::Digital(d.edges, d.initial, builder));
             }
             (
                 ChannelKind::Analog {
@@ -375,7 +492,8 @@ pub fn verify(file: &[u8], source: Recording) -> Result<(), VerifyError> {
                 }
                 hashers.push(ChannelHasher::analog(name, unit, *first, *period, *count));
                 let Samples::F32(samples) = a.samples;
-                wants.push(Want::Analog(samples));
+                let builder = AnalogBuilder::new(h.length, finest);
+                wants.push(Want::Analog(samples, builder, a.first, a.period));
             }
             _ => return Err(mismatch(format!("channel {name}: the kind differs"))),
         }
@@ -387,7 +505,7 @@ pub fn verify(file: &[u8], source: Recording) -> Result<(), VerifyError> {
         for (c, got) in block.channels.into_iter().enumerate() {
             let name = &h.channels[c].name;
             match (got, &mut wants[c]) {
-                (BlockChannel::Digital { initial, edges }, Want::Digital(want, level)) => {
+                (BlockChannel::Digital { initial, edges }, Want::Digital(want, level, ov)) => {
                     if initial != *level {
                         return Err(mismatch(format!(
                             "channel {name}, block {i}: the starting level differs"
@@ -400,27 +518,36 @@ pub fn verify(file: &[u8], source: Recording) -> Result<(), VerifyError> {
                             )));
                         }
                         hashers[c].edge(tick);
+                        ov.edge(tick);
                         *level = !*level;
                     }
                 }
-                (BlockChannel::Analog { values, .. }, Want::Analog(want)) => {
-                    for value in values {
+                (
+                    BlockChannel::Analog {
+                        values,
+                        first_index,
+                    },
+                    Want::Analog(want, ov, first, period),
+                ) => {
+                    for (index, value) in (first_index..).zip(values) {
                         if want.next().map(f32::to_bits) != Some(value.to_bits()) {
                             return Err(mismatch(format!(
                                 "channel {name}, block {i}: a sample differs"
                             )));
                         }
                         hashers[c].sample(value);
+                        ov.sample(sample_tick(*first, *period, index), value);
                     }
                 }
                 _ => unreachable!("decode_block follows the header's kinds"),
             }
         }
     }
-    for (c, want) in wants.iter_mut().enumerate() {
-        let left = match want {
-            Want::Digital(it, _) => it.next().is_some(),
-            Want::Analog(it) => it.next().is_some(),
+    let mut finest_channels = Vec::with_capacity(wants.len());
+    for (c, want) in wants.into_iter().enumerate() {
+        let (left, channel) = match want {
+            Want::Digital(mut it, _, ov) => (it.next().is_some(), ov.finish()),
+            Want::Analog(mut it, ov, ..) => (it.next().is_some(), ov.finish()),
         };
         if left {
             return Err(mismatch(format!(
@@ -428,10 +555,43 @@ pub fn verify(file: &[u8], source: Recording) -> Result<(), VerifyError> {
                 h.channels[c].name
             )));
         }
+        finest_channels.push(channel);
     }
     let digests: Vec<_> = hashers.into_iter().map(ChannelHasher::finish).collect();
     if hash::content_id(h.timebase, h.length, &digests) != h.content_id {
         return Err(mismatch("the content id does not match the content"));
+    }
+    let finest = Level {
+        shift: finest,
+        buckets: overview::buckets(h.length, finest),
+        channels: finest_channels,
+    };
+    let level_at = |shift: u8| {
+        if shift == finest.shift {
+            finest.clone()
+        } else {
+            overview::coarsen(&finest, shift, h.length)
+        }
+    };
+    for (stored, &shift) in head.overview.iter().zip(&plan.head) {
+        if *stored != level_at(shift) {
+            return Err(mismatch(format!(
+                "the head's overview level 2^{shift} differs from the content"
+            )));
+        }
+    }
+    for (l, &shift) in plan.blocks.iter().enumerate() {
+        let level = level_at(shift);
+        for k in 0..head.overview_rows[l].len() {
+            let (offset, len) = head.overview_block_location(l, k);
+            let frame = &file[offset as usize..offset as usize + len as usize];
+            let block = head.decode_overview_block(l, k, frame)?;
+            if block.level != level.slice(block.first, block.level.buckets) {
+                return Err(mismatch(format!(
+                    "overview level 2^{shift}, block {k}: differs from the content"
+                )));
+            }
+        }
     }
     Ok(())
 }

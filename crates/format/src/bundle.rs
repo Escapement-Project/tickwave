@@ -1,11 +1,11 @@
 //! Bundling: a copy of a recording with its sidecar's files in the header, for a single-file
-//! share. The blocks and the overview are copied as they are; only the header and the index's
+//! share. The blocks and the overviews are copied as they are; only the header and the index's
 //! offsets change.
 
 use std::collections::BTreeMap;
 
 use crate::decode::{DecodeError, Head};
-use crate::header::{BlockRow, PREAMBLE_LEN, Preamble};
+use crate::header::{BlockRow, OverviewRow, PREAMBLE_LEN, Preamble};
 
 /// `file` with `annotations` (file name to text) in its header, replacing any already there.
 pub fn bundle(file: &[u8], annotations: BTreeMap<String, String>) -> Result<Vec<u8>, DecodeError> {
@@ -21,14 +21,23 @@ pub fn bundle(file: &[u8], annotations: BTreeMap<String, String>) -> Result<Vec<
     let head_len = u32::try_from(head_len)
         .map_err(|_| DecodeError::Corrupt("the bundled head passes 4 GiB".into()))?;
     let shift = i64::from(head_len) - i64::from(old.head_len);
+    let moved = |offset: u64| {
+        offset
+            .checked_add_signed(shift)
+            .expect("blocks follow the head")
+    };
     let mut index = Vec::with_capacity(index_len);
     for row in &head.rows {
         BlockRow {
-            offset: row
-                .offset
-                .checked_add_signed(shift)
-                .expect("blocks follow the head"),
+            offset: moved(row.offset),
             ..row.clone()
+        }
+        .write(&mut index);
+    }
+    for row in head.overview_rows.iter().flatten() {
+        OverviewRow {
+            offset: moved(row.offset),
+            ..*row
         }
         .write(&mut index);
     }

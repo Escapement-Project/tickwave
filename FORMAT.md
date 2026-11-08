@@ -26,9 +26,10 @@ All integers are little-endian.
 | --- | --- | --- |
 | preamble | 32 bytes | magic, version, the lengths below |
 | header | `header_len` | JSON: what the recording is |
-| index | `index_len` | one row a block |
+| index | `index_len` | one row a block, then one row an overview block |
 | overview | the rest of the head | a zstd frame: each channel summarised |
-| blocks | the rest of the file | one zstd frame a block |
+| blocks | after the head | one zstd frame a block |
+| overview blocks | the rest of the file | one zstd frame an overview block, for the finer overview levels |
 
 The head is the preamble, header, index and overview: `head_len` bytes from the start. A reader
 fetches a fixed amount first (64 KiB), reads `head_len` from the preamble, and fetches the rest of
@@ -67,6 +68,7 @@ UTF-8 JSON. Every integer in it is below 2^53, so a JavaScript reader parses it 
 | `content_id` | string | `blake3:` and a hex digest of the content (below) |
 | `blocks` | integer | the number of blocks |
 | `overview` | array of integers | the overview levels in the head, as shifts, finest first |
+| `overview_blocks` | array, optional | the overview levels in overview blocks, finest first: `{"shift": s, "blocks": n}` each; absent when there are none |
 | `annotations` | object of strings, optional | a bundled sidecar: each file's name and text |
 
 A channel entry has `name`, `source_name` (the source's own name for it) and `kind`:
@@ -93,7 +95,8 @@ a script working from the source can map its times), `extra` (anything else the 
 
 ### Index
 
-One row a block, in time order. A row is 24 bytes, then 4 bytes for each channel:
+One row a block, in time order, then one row an overview block. A block's row is 24 bytes, then 4
+bytes for each channel:
 
 | Offset | Type | Field |
 | --- | --- | --- |
@@ -104,7 +107,13 @@ One row a block, in time order. A row is 24 bytes, then 4 bytes for each channel
 | 24 + 4c | u32 | channel c: for a digital channel, its edge count in the block, with the level at the block's start in bit 31; for an analog channel, its sample count in the block |
 
 Block i covers ticks `[start_i, start_{i+1})`, and the last block runs to the end. The first block
-starts at tick 0. Blocks follow the head with no gaps, and the last one ends at `file_len`.
+starts at tick 0.
+
+An overview block's row is 16 bytes: its offset (u64), compressed length (u32) and decoded length
+(u32). The rows go by level, in the order of `overview_blocks`, then in time order.
+
+The blocks follow the head with no gaps, then the overview blocks in the order of their rows. The
+last one ends at `file_len`.
 
 ### Blocks
 
@@ -122,18 +131,26 @@ in channel order:
 
 ### Overview
 
-The overview lets a reader draw a wide view without fetching blocks. Each level summarises every
-channel in buckets of `2^shift` ticks; a level has `(length >> shift) + 1` buckets. The levels
-the head holds are shifts 12, 16, 20 and so on in steps of 4, keeping those with at most 2^17
-buckets and stopping at the first with at most 1,024.
+The overview lets a reader draw a view without decoding blocks. Each level summarises every
+channel in buckets of `2^shift` ticks; a level has `(length >> shift) + 1` buckets.
 
-The decoded overview holds, for each level in the header's order, then each channel:
+The levels are shifts 12, 16, 20 and so on in steps of 4, stopping at the first with at most 1,024
+buckets. A level with at most 2^17 buckets goes in the head. A finer level with at most 2^26
+buckets goes in overview blocks, which a reader fetches like blocks, for the span it shows. A level
+with more is left out. A reader refuses a header that lists a level with more buckets than its
+place allows.
+
+The head's decoded overview holds, for each level in the header's order, then each channel:
 
 - **Digital.** The level bits, then the change bits, each `ceil(n / 8)` bytes. Bucket i is bit
-  `i % 8` of byte `i / 8`. The level bit is the level at the bucket's start; the change bit says
-  whether the level changes inside the bucket.
+  `i % 8` of byte `i / 8`. The level bit is the level entering the bucket, before any edge at its
+  first tick; the change bit says whether an edge falls in the bucket.
 - **Analog.** n minimum values, then n maximum values, as f32. A bucket with no sample holds +∞ and
   −∞. NaN samples are left out.
+
+An overview block holds 65,536 buckets of one level, the last block of a level the rest: block k
+starts at bucket `65,536 k`. Its decoded payload is laid out as one level of the head's overview,
+for its own n buckets.
 
 ### Content id
 

@@ -44,6 +44,7 @@ fn header() -> Header {
         content_id: ID.into(),
         blocks: 1,
         overview: vec![12],
+        overview_blocks: vec![],
         annotations: None,
     }
 }

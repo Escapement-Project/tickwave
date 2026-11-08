@@ -17,7 +17,7 @@ use crate::codec::put_uleb;
 use crate::hash::{self, ChannelHasher};
 use crate::header::{
     AnalogCoding, BlockRow, ChannelHeader, ChannelKind, Header, JSON_SAFE, LEVEL_BIT, MAJOR, MINOR,
-    PREAMBLE_LEN, Preamble, SourceHeader,
+    OverviewLevel, OverviewRow, PREAMBLE_LEN, Preamble, SourceHeader,
 };
 use crate::model::{ChannelData, Edges, Ratio, Recording, Samples};
 use crate::overview::{self, AnalogBuilder, DigitalBuilder, Level};
@@ -152,8 +152,7 @@ enum Stream {
 
 impl AnalogStream {
     fn tick(&self, index: u64) -> i64 {
-        self.first
-            + (u128::from(index) * u128::from(self.period.num) / u128::from(self.period.den)) as i64
+        crate::model::sample_tick(self.first, self.period, index)
     }
 }
 
@@ -198,8 +197,8 @@ pub fn encode(recording: Recording, options: &Options) -> Result<Vec<u8>, Encode
     check_safe("timebase numerator", timebase.num)?;
     check_safe("timebase denominator", timebase.den)?;
     check_safe("length", length.max(0) as u64)?;
-    let shifts = overview::levels(length);
-    let finest = shifts[0];
+    let plan = overview::plan(length);
+    let finest = plan.finest();
 
     let mut names = Vec::with_capacity(channels.len());
     let mut kinds = Vec::with_capacity(channels.len());
@@ -459,14 +458,37 @@ pub fn encode(recording: Recording, options: &Options) -> Result<Vec<u8>, Encode
         buckets: overview::buckets(length, finest),
         channels: finest_channels,
     };
-    let mut levels = vec![];
-    for &shift in &shifts[1..] {
-        levels.push(overview::coarsen(&finest_level, shift, length));
-    }
-    levels.insert(0, finest_level);
+    let level_at = |shift: u8| {
+        if shift == finest {
+            finest_level.clone()
+        } else {
+            overview::coarsen(&finest_level, shift, length)
+        }
+    };
+    let head_levels: Vec<Level> = plan.head.iter().map(|&s| level_at(s)).collect();
     let mut overview_raw = Vec::new();
-    overview::write(&levels, &mut overview_raw);
+    overview::write(&head_levels, &mut overview_raw);
     let overview_frame = compress(&overview_raw, options.level)?;
+    let mut overview_raws = Vec::new();
+    let mut overview_levels = Vec::new();
+    for &shift in &plan.blocks {
+        let level = level_at(shift);
+        let count = overview::block_count(length, shift);
+        for k in 0..count {
+            let (first, n) = overview::block_buckets(length, shift, k);
+            let mut raw = Vec::new();
+            overview::write(&[level.slice(first, n)], &mut raw);
+            overview_raws.push(raw);
+        }
+        overview_levels.push(OverviewLevel {
+            shift,
+            blocks: count as u32,
+        });
+    }
+    let overview_frames = overview_raws
+        .par_iter()
+        .map(|raw| compress(raw, options.level))
+        .collect::<Result<Vec<_>, _>>()?;
 
     let timebase = [timebase.num, timebase.den];
     let header = Header {
@@ -494,11 +516,13 @@ pub fn encode(recording: Recording, options: &Options) -> Result<Vec<u8>, Encode
         meta: options.meta.clone(),
         content_id: hash::content_id(timebase, length, &digests),
         blocks: blocks.len() as u32,
-        overview: shifts,
+        overview: plan.head.clone(),
+        overview_blocks: overview_levels,
         annotations: None,
     };
     let header_json = serde_json::to_vec(&header).expect("a header always serialises");
-    let index_len = blocks.len() * BlockRow::size(header.channels.len());
+    let index_len = blocks.len() * BlockRow::size(header.channels.len())
+        + overview_frames.len() * OverviewRow::SIZE;
     let head_len = PREAMBLE_LEN + header_json.len() + index_len + overview_frame.len();
     let head_len_u32 = u32::try_from(head_len).map_err(|_| EncodeError::HeadTooLarge(head_len))?;
     let mut offset = head_len as u64;
@@ -507,6 +531,15 @@ pub fn encode(recording: Recording, options: &Options) -> Result<Vec<u8>, Encode
         row.offset = offset;
         offset += frame.len() as u64;
         row.write(&mut index);
+    }
+    for (frame, raw) in overview_frames.iter().zip(&overview_raws) {
+        OverviewRow {
+            offset,
+            length: frame.len() as u32,
+            decoded_length: raw.len() as u32,
+        }
+        .write(&mut index);
+        offset += frame.len() as u64;
     }
     let preamble = Preamble {
         major: MAJOR,
@@ -522,6 +555,9 @@ pub fn encode(recording: Recording, options: &Options) -> Result<Vec<u8>, Encode
     out.extend_from_slice(&index);
     out.extend_from_slice(&overview_frame);
     for (_, frame) in &blocks {
+        out.extend_from_slice(frame);
+    }
+    for frame in &overview_frames {
         out.extend_from_slice(frame);
     }
     debug_assert_eq!(out.len() as u64, offset);

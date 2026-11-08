@@ -76,6 +76,11 @@ pub struct Analog {
     pub samples: Samples,
 }
 
+/// The tick of sample `index`: `first + floor(index × period)`.
+pub fn sample_tick(first: i64, period: Ratio, index: u64) -> i64 {
+    first + (u128::from(index) * u128::from(period.num) / u128::from(period.den)) as i64
+}
+
 pub enum Samples {
     /// The values exactly as the source stored them.
     F32(Box<dyn Iterator<Item = f32> + Send>),

@@ -19,20 +19,61 @@ pub fn buckets(length: i64, shift: u8) -> u64 {
     (length.max(0) as u64 >> shift) + 1
 }
 
-/// The shifts of the levels a recording of `length` ticks keeps in its head, finest first.
-pub fn levels(length: i64) -> Vec<u8> {
-    let mut out = Vec::new();
+/// Buckets in one overview block, for a level kept outside the head.
+pub const BLOCK_BUCKETS: u64 = 1 << 16;
+/// A level too large for the head is kept in blocks if it has at most this many buckets; a finer
+/// one is left out.
+pub const BLOCK_LEVEL_BUCKETS: u64 = 1 << 26;
+
+/// Which levels a recording keeps, as shifts, finest first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Plan {
+    /// In the head, fetched with it.
+    pub head: Vec<u8>,
+    /// In overview blocks after the data blocks, fetched as a view needs them.
+    pub blocks: Vec<u8>,
+}
+
+impl Plan {
+    /// The finest level kept anywhere: the one the others are derived from.
+    pub fn finest(&self) -> u8 {
+        self.blocks
+            .first()
+            .or(self.head.first())
+            .copied()
+            .unwrap_or(FINEST)
+    }
+}
+
+pub fn plan(length: i64) -> Plan {
+    let mut plan = Plan {
+        head: Vec::new(),
+        blocks: Vec::new(),
+    };
     let mut shift = FINEST;
     loop {
         let n = buckets(length, shift);
         if n <= HEAD_BUCKETS {
-            out.push(shift);
+            plan.head.push(shift);
+        } else if n <= BLOCK_LEVEL_BUCKETS {
+            plan.blocks.push(shift);
         }
         if n <= WHOLE_VIEW || shift + STEP > 62 {
-            return out;
+            return plan;
         }
         shift += STEP;
     }
+}
+
+/// The number of overview blocks a level kept outside the head is cut into.
+pub fn block_count(length: i64, shift: u8) -> u64 {
+    buckets(length, shift).div_ceil(BLOCK_BUCKETS)
+}
+
+/// The buckets overview block `k` of a level holds: `(first bucket, count)`.
+pub fn block_buckets(length: i64, shift: u8, k: u64) -> (u64, u64) {
+    let first = k * BLOCK_BUCKETS;
+    (first, BLOCK_BUCKETS.min(buckets(length, shift) - first))
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -46,6 +87,35 @@ pub struct Level {
     pub shift: u8,
     pub buckets: u64,
     pub channels: Vec<ChannelOverview>,
+}
+
+impl Level {
+    /// Buckets `first..first + n` as a level of their own. `first` is a multiple of 8, and the
+    /// slice either ends on a multiple of 8 or at the level's end, so the bit arrays cut on byte
+    /// boundaries.
+    pub fn slice(&self, first: u64, n: u64) -> Level {
+        assert!(first.is_multiple_of(8) && (n.is_multiple_of(8) || first + n == self.buckets));
+        let bits = |b: &Vec<u8>| b[(first / 8) as usize..][..bit_bytes(n)].to_vec();
+        let floats = |v: &Vec<f32>| v[first as usize..][..n as usize].to_vec();
+        Level {
+            shift: self.shift,
+            buckets: n,
+            channels: self
+                .channels
+                .iter()
+                .map(|c| match c {
+                    ChannelOverview::Digital { level, change } => ChannelOverview::Digital {
+                        level: bits(level),
+                        change: bits(change),
+                    },
+                    ChannelOverview::Analog { min, max } => ChannelOverview::Analog {
+                        min: floats(min),
+                        max: floats(max),
+                    },
+                })
+                .collect(),
+        }
+    }
 }
 
 fn bit(bits: &[u8], i: u64) -> bool {
@@ -218,44 +288,75 @@ pub fn write(levels: &[Level], out: &mut Vec<u8>) {
     }
 }
 
-/// Parses the decoded overview. `analog[c]` says whether channel c is analog. None if `bytes`
-/// is not exactly the size the levels need.
-pub fn parse(bytes: &[u8], shifts: &[u8], length: i64, analog: &[bool]) -> Option<Vec<Level>> {
-    let mut pos = 0;
-    let mut take = |n: usize| {
-        let slice = bytes.get(pos..pos + n)?;
-        pos += n;
+struct Cursor<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Cursor<'a> {
+    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+        let slice = self.bytes.get(self.pos..self.pos + n)?;
+        self.pos += n;
         Some(slice)
+    }
+}
+
+fn parse_channels(c: &mut Cursor<'_>, n: u64, analog: &[bool]) -> Option<Vec<ChannelOverview>> {
+    let floats = |b: &[u8]| {
+        b.as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&c| f32::from_le_bytes(c))
+            .collect()
     };
+    let mut channels = Vec::with_capacity(analog.len());
+    for &is_analog in analog {
+        channels.push(if is_analog {
+            let min = floats(c.take(4 * n as usize)?);
+            let max = floats(c.take(4 * n as usize)?);
+            ChannelOverview::Analog { min, max }
+        } else {
+            let level = c.take(bit_bytes(n))?.to_vec();
+            let change = c.take(bit_bytes(n))?.to_vec();
+            ChannelOverview::Digital { level, change }
+        });
+    }
+    Some(channels)
+}
+
+/// The decoded size of `n` buckets of every channel.
+pub fn decoded_len(n: u64, analog: &[bool]) -> usize {
+    analog
+        .iter()
+        .map(|&a| if a { 8 * n as usize } else { 2 * bit_bytes(n) })
+        .sum()
+}
+
+/// Parses the head's decoded overview. `analog[c]` says whether channel c is analog. None if
+/// `bytes` is not exactly the size the levels need.
+pub fn parse(bytes: &[u8], shifts: &[u8], length: i64, analog: &[bool]) -> Option<Vec<Level>> {
+    let mut cursor = Cursor { bytes, pos: 0 };
     let mut levels = Vec::with_capacity(shifts.len());
     for &shift in shifts {
         let n = buckets(length, shift);
-        let mut channels = Vec::with_capacity(analog.len());
-        for &is_analog in analog {
-            channels.push(if is_analog {
-                let floats = |b: &[u8]| {
-                    b.as_chunks::<4>()
-                        .0
-                        .iter()
-                        .map(|&c| f32::from_le_bytes(c))
-                        .collect()
-                };
-                let min = floats(take(4 * n as usize)?);
-                let max = floats(take(4 * n as usize)?);
-                ChannelOverview::Analog { min, max }
-            } else {
-                let level = take(bit_bytes(n))?.to_vec();
-                let change = take(bit_bytes(n))?.to_vec();
-                ChannelOverview::Digital { level, change }
-            });
-        }
         levels.push(Level {
             shift,
             buckets: n,
-            channels,
+            channels: parse_channels(&mut cursor, n, analog)?,
         });
     }
-    (pos == bytes.len()).then_some(levels)
+    (cursor.pos == bytes.len()).then_some(levels)
+}
+
+/// Parses one decoded overview block of `n` buckets.
+pub fn parse_block(bytes: &[u8], shift: u8, n: u64, analog: &[bool]) -> Option<Level> {
+    let mut cursor = Cursor { bytes, pos: 0 };
+    let channels = parse_channels(&mut cursor, n, analog)?;
+    (cursor.pos == bytes.len()).then_some(Level {
+        shift,
+        buckets: n,
+        channels,
+    })
 }
 
 #[cfg(test)]
@@ -299,11 +400,34 @@ mod tests {
     }
 
     #[test]
-    fn levels_stop_at_a_whole_view() {
-        // 120 s at 1 GS/s: 2^12 and 2^16 have too many buckets for the head.
-        assert_eq!(levels(120_000_000_000), [20, 24, 28]);
-        // 1 ms at 1 GS/s: one level already covers the whole view.
-        assert_eq!(levels(1_000_000), [12]);
+    fn plans_split_head_and_blocks() {
+        // 120 s at 1 GS/s: 2^12 (29.3M buckets) and 2^16 (1.8M) are too many for the head, few
+        // enough for blocks; 2^28 is the first with at most 1,024 (448).
+        let p = plan(120_000_000_000);
+        assert_eq!(
+            (p.head.as_slice(), p.blocks.as_slice()),
+            (&[20, 24, 28][..], &[12, 16][..])
+        );
+        assert_eq!(p.finest(), 12);
+        // 1 ms at 1 GS/s: one level in the head covers it all.
+        assert_eq!(
+            plan(1_000_000),
+            Plan {
+                head: vec![12],
+                blocks: vec![]
+            }
+        );
+        // 2^30 ticks: 2^12 has 262,145 buckets, so five blocks, the last holding one bucket.
+        assert_eq!(block_count(1 << 30, 12), 5);
+        assert_eq!(block_buckets(1 << 30, 12, 4), (4 * 65536, 1));
+        // 3,600 s at 1 ps a tick: 2^12 and 2^16 would pass 2^26 buckets, so they are left out.
+        let p = plan(3_600_000_000_000_000);
+        assert!(
+            p.blocks
+                .iter()
+                .all(|&s| buckets(3_600_000_000_000_000, s) <= BLOCK_LEVEL_BUCKETS)
+        );
+        assert!(!p.blocks.contains(&12) && !p.blocks.contains(&16));
     }
 
     #[test]
