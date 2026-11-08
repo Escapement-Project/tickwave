@@ -437,12 +437,16 @@ fn info(file: &Path, json: bool) -> Result<()> {
     lengths.sort_unstable();
     let median = lengths.get(lengths.len() / 2).copied().unwrap_or(0);
     let blocks_total: u64 = lengths.iter().map(|&l| u64::from(l)).sum();
+    let overview_rows = head.overview_rows.iter().flatten();
+    let overview_count = overview_rows.clone().count();
+    let overview_total: u64 = overview_rows.map(|r| u64::from(r.length)).sum();
     if json {
         let out = serde_json::json!({
             "header": h,
             "file_bytes": bytes.len(),
             "head_bytes": head.preamble.head_len,
             "block_bytes": { "total": blocks_total, "min": lengths.first(), "median": median, "max": lengths.last() },
+            "overview_block_bytes": { "count": overview_count, "total": overview_total },
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
@@ -492,6 +496,17 @@ fn info(file: &Path, json: bool) -> Result<()> {
         lengths.first().unwrap_or(&0),
         lengths.last().unwrap_or(&0),
     );
+    if overview_count > 0 {
+        let shifts: Vec<String> = h
+            .overview_blocks
+            .iter()
+            .map(|l| format!("2^{}", l.shift))
+            .collect();
+        println!(
+            "  overview levels {} in {overview_count} blocks, {overview_total} bytes",
+            shifts.join(", ")
+        );
+    }
     for (k, v) in &h.meta {
         println!("  {k} = {v}");
     }
