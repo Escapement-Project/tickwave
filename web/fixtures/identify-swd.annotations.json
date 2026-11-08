@@ -1,0 +1,26 @@
+{
+  "format": "chrono-annotations/1",
+  "recording": "identify-swd.chronofx",
+  "include": ["identify-swd.swd.jsonl"],
+  "annotation": [
+    {
+      "id": "attach",
+      "start": "376.719436 ms",
+      "end": "377.140560 ms",
+      "channels": ["SWCLK", "SWDIO"],
+      "kind": "attach",
+      "label": "Attaching: line reset, select, line reset, then the first read"
+    },
+    { "id": "line-reset", "ref": "swd/reset/376719436", "label": "Line reset: SWDIO held high for 51 clocks" },
+    { "id": "jtag-to-swd", "ref": "swd/select/376845430", "label": "The JTAG-to-SWD select sequence, 0xE79E" },
+    {
+      "id": "dpidr-read",
+      "ref": "swd/read/377094557",
+      "label": "Reading the debug port's ID register",
+      "measure": { "channel": "SWCLK", "what": "rate" }
+    },
+    { "id": "dpidr-request", "ref": "swd/request/377094557", "label": "request 0xA5" },
+    { "id": "dpidr-ack", "ref": "swd/ack/377103058", "label": "ack OK" },
+    { "id": "first-wait", "ref": "swd/wait/379065159", "label": "The target answers WAIT" }
+  ]
+}

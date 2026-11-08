@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>chrono: dev page</title>
+<link rel="stylesheet" href="vendor/tokens.css">
+<script type="importmap">{ "imports": { "chrono": "../dist/chrono.js" } }</script>
+<script type="module" src="../dist/chrono.js"></script>
+<script type="module" src="../dist/dev-loader.js"></script>
+<style>
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--page); color: var(--ink); }
+body { font: 400 17px/1.6 var(--font-text); }
+header, main { max-width: 880px; margin: 0 auto; padding: 0 clamp(14px, 4vw, 40px); }
+header { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 64px; border-bottom: 1px solid var(--hair); }
+header b { font: var(--display-weight) 15px/1 var(--font-display); font-stretch: var(--display-stretch); letter-spacing: .04em; }
+h1 { font: var(--display-weight) clamp(22px, 3vw, 30px)/1.25 var(--font-display); font-stretch: var(--display-stretch); margin: 36px 0 16px; }
+h2 { font: var(--display-weight) 19px/1.3 var(--font-display); font-stretch: var(--display-stretch); margin: 44px 0 10px; }
+p { margin: 0 0 14px; max-width: 38em; }
+figure { margin: 18px 0 26px; }
+figcaption { font-size: 14px; color: var(--ink-2); margin-top: 8px; max-width: 42em; }
+figcaption b { color: var(--ink); font-weight: 600; }
+.pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 14px; }
+chrono-inset { max-width: 440px; }
+chrono-inset::part(inset) { background: var(--surface); border-radius: 10px; padding: 8px 6px 6px; }
+chrono-view { margin: 16px 0 6px; }
+.face { font: inherit; font-size: 14px; color: var(--ink); background: transparent; border: 1.5px solid var(--rule); border-radius: 999px; padding: 4px 14px; cursor: pointer; }
+.face:hover { background: var(--wash); }
+:focus-visible { outline: var(--focus-width) solid var(--ink); outline-offset: 3px; }
+#errors { font: 500 12px/1.5 var(--font-code); color: var(--ink-2); white-space: pre-wrap; margin: 40px 0; }
+#errors:empty { display: none; }
+footer { height: 80px; }
+</style>
+</head>
+<body>
+<header><b>chrono</b><button class="face" id="face" type="button" aria-pressed="false">Night</button></header>
+<main>
+<h1>Reading a debug port's ID over SWD</h1>
+
+<p>A probe opens an SWD session with a <chrono-ref for="identify" annotation="line-reset">line reset</chrono-ref>,
+holding SWDIO high while it clocks. It then sends the
+<chrono-ref for="identify" annotation="jtag-to-swd">JTAG-to-SWD select sequence</chrono-ref>, resets the line again,
+and <chrono-ref for="identify" annotation="dpidr-read">reads the debug port's ID register</chrono-ref>. That read starts with
+a <chrono-ref for="identify" annotation="dpidr-request">request</chrono-ref> the probe drives and the target's
+<chrono-ref for="identify" annotation="dpidr-ack">acknowledge</chrono-ref>. Later in the same capture the target
+<chrono-ref for="identify" annotation="first-wait">answers WAIT</chrono-ref> to a read it is not ready for.</p>
+
+<figure>
+  <chrono-inset id="inset-dpidr" src="../fixtures/identify-swd.chronofx" annotations="../fixtures/identify-swd.annotations.json"
+                annotation="dpidr-read" channels="SWCLK SWDIO" series="verge"></chrono-inset>
+  <figcaption><b>Figure 1.</b> The first transfer of an attach: a DP read of DPIDR, which returns 0x6BA02477.
+  The probe drives the request; the target drives the acknowledge and the data.</figcaption>
+</figure>
+
+<p>The whole capture is below, collapsed until you open it.</p>
+<chrono-view id="identify" src="../fixtures/identify-swd.chronofx" annotations="../fixtures/identify-swd.annotations.json"
+             series="verge"></chrono-view>
+
+<h2>The same read, ours against stock, at one scale</h2>
+<p>Both insets draw 50 ns to a pixel, so the read that takes longer is wider.</p>
+<div class="pair">
+  <chrono-inset id="inset-ours" src="../fixtures-local/gcc-swd-reads.chronofx" annotations="../fixtures-local/gcc-swd-reads.annotations.json"
+                annotation="dpidr-read" scale="50 ns/px" pad="0 ns" series="verge"></chrono-inset>
+  <chrono-inset id="inset-stock" src="../fixtures-local/stock-swd-reads.chronofx" annotations="../fixtures-local/stock-swd-reads.annotations.json"
+                annotation="dpidr-read" scale="50 ns/px" pad="0 ns" series="nxp"></chrono-inset>
+</div>
+
+<h2>Six million edges</h2>
+<p>Verge's GCC build reading over SWD: 6.3 million SWCLK edges. Step through every WAIT the target answered.</p>
+<chrono-view id="gcc" open src="../fixtures-local/gcc-swd-reads.chronofx" annotations="../fixtures-local/gcc-swd-reads.annotations.json"
+             series="verge"></chrono-view>
+
+<h2>Stock firmware's uneven TCK</h2>
+<p>NXP's firmware reading over JTAG. Its TCK periods vary from one clock to the next; select a span on the time axis to read them.</p>
+<chrono-view id="stock" open src="../fixtures-local/stock-reads.chronofx" series="nxp"></chrono-view>
+
+<h2>An energy capture</h2>
+<p>verge's energy capture at 100 kHz: the target's supply voltage and current, DIO3, and the markers its firmware wrote.</p>
+<chrono-view id="energy" open src="../fixtures-local/markers-100000.chronofx" annotations="../fixtures-local/markers-100000.markers.jsonl"
+             channels="voltage current DIO3"></chrono-view>
+
+<h2>Over a slow link</h2>
+<p>The identify capture again, with every answer from its source delayed by 400 ms. The view draws what it has and fills in as data arrives.</p>
+<chrono-view id="slow" open src="../fixtures/identify-swd.chronofx?latency=400" annotations="../fixtures/identify-swd.annotations.json"
+             window="dpidr-read" series="verge"></chrono-view>
+
+<pre id="errors" aria-live="polite"></pre>
+<footer></footer>
+</main>
+<script>
+const face = document.getElementById("face");
+const shown = () => getComputedStyle(document.documentElement).colorScheme === "dark" ? "night" : "day";
+const label = () => { const night = shown() === "night"; face.textContent = night ? "Day" : "Night"; face.setAttribute("aria-pressed", String(night)); };
+face.addEventListener("click", () => { document.documentElement.dataset.face = shown() === "night" ? "day" : "night"; label(); });
+label();
+const errors = document.getElementById("errors");
+document.addEventListener("chrono-error", (e) => { errors.textContent += `${e.target.id || e.target.localName}: ${e.detail.message}\n`; });
+</script>
+</body>
+</html>

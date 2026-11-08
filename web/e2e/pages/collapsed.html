@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>A collapsed view and a reference below the fold</title>
+<script type="importmap">{ "imports": { "chrono": "../../dist/chrono.js" } }</script>
+<script type="module" src="../../dist/chrono.js"></script>
+<script type="module" src="../../dist/dev-loader.js"></script>
+</head>
+<body>
+<chrono-view id="v" src="../../fixtures/identify-swd.chronofx" annotations="../../fixtures/identify-swd.annotations.json"></chrono-view>
+<div style="height: 3000px"></div>
+<p id="far">The <chrono-ref for="v" annotation="dpidr-read">first read</chrono-ref>.</p>
+</body>
+</html>

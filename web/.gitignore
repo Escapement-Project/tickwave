@@ -1,0 +1,5 @@
+# The design system's tokens and fonts, copied by scripts/vendor.ts for the dev page.
+/dev/vendor/
+/test-results/
+/playwright-report/
+/screenshots/

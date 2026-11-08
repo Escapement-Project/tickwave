@@ -1,0 +1,31 @@
+{
+  "name": "chrono-web",
+  "version": "0.0.0",
+  "private": true,
+  "description": "chrono's web elements: the canvas renderer, its interaction, and the custom elements",
+  "license": "MIT OR Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "build": "node build.ts",
+    "dev": "node build.ts --serve",
+    "typecheck": "tsc -p .",
+    "test": "node --test \"test/**/*.test.ts\"",
+    "e2e": "playwright test",
+    "fixtures": "node scripts/fixtures.ts",
+    "vendor": "node scripts/vendor.ts",
+    "check": "npm run typecheck && npm test && npm run build && npm run e2e"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.65.0",
+    "@types/node": "^26.6.6",
+    "csv-parse": "^7.0.3",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "@floating-ui/dom": "^1.8.0"
+  },
+  "allowScripts": {
+    "esbuild": false
+  }
+}
