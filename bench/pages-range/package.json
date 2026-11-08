@@ -1,0 +1,9 @@
+{
+  "name": "pages-range-check",
+  "private": true,
+  "type": "module",
+  "description": "Checks that a static host serves byte ranges of chrono recordings unchanged.",
+  "dependencies": {
+    "playwright": "^1.65.0"
+  }
+}

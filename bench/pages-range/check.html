@@ -1,0 +1,45 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>range check</title>
+<pre id="out">running</pre>
+<script type="module">
+// Fetches each range in files.json and checks it: 206, no Content-Encoding, the right length, the
+// right bytes. `?base=URL` checks files at another origin (the cross-origin case). Two passes:
+// `no-store` reaches the server or CDN every time; `default` lets the browser's cache answer.
+const params = new URLSearchParams(location.search);
+const base = params.get("base") ?? new URL(".", location.href).href;
+const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+const results = [];
+let manifest = [];
+try {
+  manifest = await (await fetch(new URL("files.json", base), { cache: "no-store" })).json();
+} catch (e) {
+  results.push({ file: "files.json", error: String(e), pass: false });
+}
+for (const cache of ["no-store", "default", "default"]) {
+  for (const file of manifest) {
+    for (const r of file.ranges) {
+      const row = { cache, file: file.name, range: `${r.start}-${r.end}` };
+      try {
+        const res = await fetch(new URL(file.name, base), { headers: { Range: `bytes=${r.start}-${r.end}` }, cache });
+        const body = await res.arrayBuffer();
+        Object.assign(row, {
+          status: res.status,
+          encoding: res.headers.get("content-encoding"),
+          type: res.headers.get("content-type"),
+          contentRange: res.headers.get("content-range"),
+          xCache: res.headers.get("x-cache"),
+          length: body.byteLength,
+          bytesRight: res.status === 206 && hex(await crypto.subtle.digest("SHA-256", body)) === r.sha256,
+        });
+      } catch (e) {
+        row.error = String(e);
+      }
+      row.pass = row.status === 206 && !row.encoding && row.length === r.end - r.start + 1 && row.bytesRight === true;
+      results.push(row);
+    }
+  }
+}
+document.getElementById("out").textContent = JSON.stringify(results, null, 1);
+document.title = "done";
+</script>
