@@ -160,6 +160,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "chrono-wasm"
+version = "0.1.0"
+dependencies = [
+ "chrono-format",
+ "js-sys",
+ "serde_json",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "clap"
 version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
