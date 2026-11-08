@@ -3,7 +3,7 @@
 
 #[cfg(feature = "annotations")]
 use chrono_format::annotations::{self, Included};
-use chrono_format::decode::{BlockChannel, DecodeError, Head};
+use chrono_format::decode::{self, BlockChannel, DecodeError, Head};
 use chrono_format::header::PREAMBLE_LEN;
 use chrono_format::overview::ChannelOverview;
 use js_sys::{Float32Array, Float64Array, Uint8Array};
@@ -108,28 +108,95 @@ impl Recording {
     }
 
     /// The overview's level bits and change bits for a digital channel, one byte array each,
-    /// bucket i in bit i % 8 of byte i / 8.
+    /// bucket i in bit i % 8 of byte i / 8. `level` indexes the header's `overview`.
     #[wasm_bindgen(js_name = overviewDigital)]
     pub fn overview_digital(&self, level: usize, channel: usize) -> Option<Vec<Uint8Array>> {
-        match &self.head.overview.get(level)?.channels.get(channel)? {
-            ChannelOverview::Digital { level, change } => Some(vec![
-                Uint8Array::from(&level[..]),
-                Uint8Array::from(&change[..]),
-            ]),
-            ChannelOverview::Analog { .. } => None,
-        }
+        digital(self.head.overview.get(level)?.channels.get(channel)?)
     }
 
     /// The overview's minimums and maximums for an analog channel.
     #[wasm_bindgen(js_name = overviewAnalog)]
     pub fn overview_analog(&self, level: usize, channel: usize) -> Option<Vec<Float32Array>> {
-        match &self.head.overview.get(level)?.channels.get(channel)? {
-            ChannelOverview::Analog { min, max } => Some(vec![
-                Float32Array::from(&min[..]),
-                Float32Array::from(&max[..]),
-            ]),
-            ChannelOverview::Digital { .. } => None,
-        }
+        analog(self.head.overview.get(level)?.channels.get(channel)?)
+    }
+
+    /// The first and one past the last overview block of a finer level holding any tick in
+    /// `[start, end)`. `level` indexes the header's `overview_blocks`.
+    #[wasm_bindgen(js_name = overviewBlocksCovering)]
+    pub fn overview_blocks_covering(&self, level: usize, start: f64, end: f64) -> Vec<u32> {
+        let range = self
+            .head
+            .overview_blocks_covering(level, start as i64, end as i64);
+        vec![range.start as u32, range.end as u32]
+    }
+
+    /// Overview block `k`'s byte range in the file, `[offset, end)`.
+    #[wasm_bindgen(js_name = overviewBlockRange)]
+    pub fn overview_block_range(&self, level: usize, k: usize) -> Vec<f64> {
+        let (offset, len) = self.head.overview_block_location(level, k);
+        vec![offset as f64, (offset + u64::from(len)) as f64]
+    }
+
+    /// Decodes overview block `k` from exactly its bytes.
+    #[wasm_bindgen(js_name = decodeOverviewBlock)]
+    pub fn decode_overview_block(
+        &self,
+        level: usize,
+        k: usize,
+        frame: &[u8],
+    ) -> Result<OverviewBlock, JsError> {
+        Ok(OverviewBlock(
+            self.head
+                .decode_overview_block(level, k, frame)
+                .map_err(js)?,
+        ))
+    }
+}
+
+fn digital(channel: &ChannelOverview) -> Option<Vec<Uint8Array>> {
+    match channel {
+        ChannelOverview::Digital { level, change } => Some(vec![
+            Uint8Array::from(&level[..]),
+            Uint8Array::from(&change[..]),
+        ]),
+        ChannelOverview::Analog { .. } => None,
+    }
+}
+
+fn analog(channel: &ChannelOverview) -> Option<Vec<Float32Array>> {
+    match channel {
+        ChannelOverview::Analog { min, max } => Some(vec![
+            Float32Array::from(&min[..]),
+            Float32Array::from(&max[..]),
+        ]),
+        ChannelOverview::Digital { .. } => None,
+    }
+}
+
+/// Buckets `first..first + buckets` of a finer overview level, laid out as the head's levels.
+#[wasm_bindgen]
+pub struct OverviewBlock(decode::OverviewBlock);
+
+#[wasm_bindgen]
+impl OverviewBlock {
+    #[wasm_bindgen(getter)]
+    pub fn first(&self) -> f64 {
+        self.0.first as f64
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn buckets(&self) -> f64 {
+        self.0.level.buckets as f64
+    }
+
+    /// As `Recording.overviewDigital`; bucket `first + i` is bit i.
+    pub fn digital(&self, channel: usize) -> Option<Vec<Uint8Array>> {
+        digital(self.0.level.channels.get(channel)?)
+    }
+
+    /// As `Recording.overviewAnalog`; bucket `first + i` is element i.
+    pub fn analog(&self, channel: usize) -> Option<Vec<Float32Array>> {
+        analog(self.0.level.channels.get(channel)?)
     }
 }
 
