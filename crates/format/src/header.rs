@@ -104,6 +104,7 @@ pub struct OverviewLevel {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "RawChannel")]
 pub struct ChannelHeader {
     pub name: String,
     pub source_name: String,
@@ -111,7 +112,7 @@ pub struct ChannelHeader {
     pub data: ChannelKind,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum ChannelKind {
     Digital {
@@ -130,7 +131,7 @@ pub enum ChannelKind {
 }
 
 /// How a block stores an analog channel's samples.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum AnalogCoding {
     /// The source's f32 values, little-endian.
@@ -147,6 +148,87 @@ impl AnalogCoding {
             Self::F32 => 4,
             Self::Codes { .. } => 2,
         }
+    }
+}
+
+/// A channel as the JSON holds it, every kind's fields inline and optional. Deriving
+/// `Deserialize` for the flattened, internally tagged form instead makes serde buffer each channel
+/// before parsing it, which costs the browser's decoder a large share of its size.
+#[derive(Deserialize)]
+struct RawChannel {
+    name: String,
+    source_name: String,
+    kind: RawKind,
+    initial: Option<bool>,
+    end: Option<i64>,
+    edges: Option<u64>,
+    unit: Option<String>,
+    first: Option<i64>,
+    period: Option<[u64; 2]>,
+    count: Option<u64>,
+    coding: Option<RawCoding>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum RawKind {
+    Digital,
+    Analog,
+}
+
+#[derive(Deserialize)]
+struct RawCoding {
+    #[serde(rename = "type")]
+    kind: RawCodingKind,
+    bits: Option<u8>,
+    scale: Option<f64>,
+    offset: Option<f64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum RawCodingKind {
+    F32,
+    Codes,
+}
+
+fn need<T>(value: Option<T>, field: &str) -> Result<T, String> {
+    value.ok_or_else(|| format!("missing field `{field}`"))
+}
+
+impl TryFrom<RawChannel> for ChannelHeader {
+    type Error = String;
+
+    fn try_from(raw: RawChannel) -> Result<Self, String> {
+        let data = match raw.kind {
+            RawKind::Digital => ChannelKind::Digital {
+                initial: need(raw.initial, "initial")?,
+                end: need(raw.end, "end")?,
+                edges: need(raw.edges, "edges")?,
+            },
+            RawKind::Analog => {
+                let coding = need(raw.coding, "coding")?;
+                ChannelKind::Analog {
+                    unit: need(raw.unit, "unit")?,
+                    first: need(raw.first, "first")?,
+                    period: need(raw.period, "period")?,
+                    count: need(raw.count, "count")?,
+                    coding: match coding.kind {
+                        RawCodingKind::F32 => AnalogCoding::F32,
+                        RawCodingKind::Codes => AnalogCoding::Codes {
+                            bits: need(coding.bits, "bits")?,
+                            scale: need(coding.scale, "scale")?,
+                            offset: need(coding.offset, "offset")?,
+                        },
+                    },
+                }
+            }
+        };
+        Ok(Self {
+            name: raw.name,
+            source_name: raw.source_name,
+            data,
+        })
     }
 }
 
@@ -230,6 +312,73 @@ impl OverviewRow {
             offset: u64::from_le_bytes(bytes[0..8].try_into().unwrap()),
             length: u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
             decoded_length: u32::from_le_bytes(bytes[12..16].try_into().unwrap()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(json: &str) -> Result<ChannelHeader, serde_json::Error> {
+        serde_json::from_str(json)
+    }
+
+    #[test]
+    fn channels_parse_as_the_encoder_writes_them() {
+        let analog = |coding| ChannelKind::Analog {
+            unit: "V".into(),
+            first: 2,
+            period: [3, 2],
+            count: 9,
+            coding,
+        };
+        for data in [
+            ChannelKind::Digital {
+                initial: true,
+                end: 7,
+                edges: 3,
+            },
+            analog(AnalogCoding::F32),
+            analog(AnalogCoding::Codes {
+                bits: 12,
+                scale: 0.001,
+                offset: -1.5,
+            }),
+        ] {
+            let channel = ChannelHeader {
+                name: "a".into(),
+                source_name: "b".into(),
+                data,
+            };
+            let json = serde_json::to_string(&channel).unwrap();
+            assert_eq!(parse(&json).unwrap(), channel, "{json}");
+        }
+    }
+
+    #[test]
+    fn a_channel_missing_a_field_of_its_kind_is_refused() {
+        let named = r#""name":"a","source_name":"b""#;
+        let analog = r#""kind":"analog","unit":"V","first":0,"period":[1,1],"count":1"#;
+        for (json, problem) in [
+            (
+                format!(r#"{{{named},"kind":"digital","initial":true,"end":7}}"#),
+                "missing field `edges`",
+            ),
+            (format!("{{{named},{analog}}}"), "missing field `coding`"),
+            (
+                format!(
+                    r#"{{{named},{analog},"coding":{{"type":"codes","bits":12,"scale":1.0}}}}"#
+                ),
+                "missing field `offset`",
+            ),
+            (
+                format!(r#"{{{named},"kind":"logic"}}"#),
+                "unknown variant `logic`",
+            ),
+        ] {
+            let err = parse(&json).unwrap_err().to_string();
+            assert!(err.contains(problem), "{json}: {err}");
         }
     }
 }
