@@ -19,6 +19,7 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.65.0",
+    "@types/d3-scale": "^4.0.9",
     "@types/markdown-it": "^14.2.0",
     "@types/node": "^26.6.6",
     "@types/send": "^1.2.1",
@@ -31,6 +32,7 @@
   },
   "dependencies": {
     "@floating-ui/dom": "^1.8.0",
+    "d3-scale": "^4.0.3",
     "lru-cache": "^11.5.3",
     "smol-toml": "^1.9.1"
   },

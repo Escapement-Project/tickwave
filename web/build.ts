@@ -1,6 +1,7 @@
-// Builds dist/: tickwave.js (the elements, one ES module), tickwave-worker.js (the decoder's worker),
-// tickwave.wasm (the decoder, copied from crates/wasm/pkg), and dev-loader.js (the dev page's
-// fixture loader, which imports "tickwave" through the page's import map).
+// Builds dist/: tickwave.js (the elements, one ES module), tickwave-chart.js (the chart element,
+// its own module), tickwave-worker.js (the decoder's worker), tickwave.wasm (the decoder, copied
+// from crates/wasm/pkg), and dev-loader.js (the dev page's fixture loader, which imports
+// "tickwave" through the page's import map).
 //
 //   node build.ts                 build once
 //   node build.ts --serve [PORT]  rebuild on change and serve web/ (the dev page is /dev/)
@@ -20,7 +21,7 @@ mkdirSync("dist", { recursive: true });
 copyFileSync(wasm, "dist/tickwave.wasm");
 
 const options: esbuild.BuildOptions = {
-  entryPoints: { tickwave: "src/index.ts", "tickwave-worker": "src/wasm/worker.ts", "dev-loader": "dev/loader.ts" },
+  entryPoints: { tickwave: "src/index.ts", "tickwave-chart": "src/chart/index.ts", "tickwave-worker": "src/wasm/worker.ts", "dev-loader": "dev/loader.ts" },
   outdir: "dist",
   bundle: true,
   format: "esm",

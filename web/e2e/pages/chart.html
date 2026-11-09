@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Charts</title>
+<link rel="stylesheet" href="/dist/site/tokens.css">
+<style>
+body { margin: 0; padding: 20px; background: var(--page); color: var(--ink); font: 400 15px/1.5 var(--font-text); }
+figure { margin: 0 0 40px; width: 620px; }
+/* Pushes the third chart below the fold, so its sweep waits for the reader. */
+.spacer { height: 1600px; }
+</style>
+<script type="module" src="/dist/tickwave-chart.js"></script>
+</head>
+<body>
+<figure>
+<tickwave-chart id="c1" src="/fixtures/figure1.chart.json" legend="above" end-labels table="t1" group="g"></tickwave-chart>
+<figcaption>Figure 1. 4 KiB writes against the SWD clock asked for.</figcaption>
+</figure>
+<table id="t1">
+<caption>Figure 1's figures</caption>
+<tr><th>MHz</th><th>Verge</th><th>NXP</th></tr>
+<tr><td>20</td><td>1,238.6</td><td>666.7</td></tr>
+</table>
+<figure>
+<tickwave-chart id="c2" src="/fixtures/figure1.chart.json" group="g" readout="below" show="clang gcc"></tickwave-chart>
+<figcaption>Figure 2. The two builds.</figcaption>
+</figure>
+<div class="spacer"></div>
+<figure>
+<tickwave-chart id="c3" src="/fixtures/figure1.chart.json" end-labels></tickwave-chart>
+<figcaption>Figure 3. Below the fold.</figcaption>
+</figure>
+</body>
+</html>

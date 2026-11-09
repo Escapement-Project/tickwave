@@ -20,7 +20,7 @@ export interface Palette {
 let scratch: CanvasRenderingContext2D | null = null;
 
 /** A computed colour as the canvas serialises it; null when the canvas does not parse it. */
-function normalise(css: string): string | null {
+export function normalise(css: string): string | null {
   scratch ??= document.createElement("canvas").getContext("2d");
   const ctx = scratch!;
   // Assigning an unparsable colour leaves fillStyle as it was: start from a sentinel to tell.

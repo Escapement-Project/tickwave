@@ -1,0 +1,131 @@
+{
+  "format": "tickwave-chart/1",
+  "source": "mculink-bench results/throughput/2026-11-04: SWD, probe-rs 4 KiB writes on an MSPM0L1306, the median of two runs; stock reads right up to 20 MHz",
+  "x": {
+    "name": "SWD clock asked for",
+    "unit": "MHz",
+    "scale": "log",
+    "values": [
+      "1",
+      "2",
+      "5",
+      "10",
+      "20",
+      "30",
+      "50"
+    ]
+  },
+  "y": {
+    "name": "4 KiB writes",
+    "unit": "KiB/s",
+    "scale": "linear",
+    "max": "2500",
+    "step": "500"
+  },
+  "series": [
+    {
+      "id": "clang",
+      "name": "Verge, Clang build",
+      "short": "Verge",
+      "colour": "verge",
+      "pattern": "solid",
+      "marker": "circle",
+      "fails": "mark",
+      "points": [
+        {
+          "value": "81.0"
+        },
+        {
+          "value": "162.8"
+        },
+        {
+          "value": "395.3"
+        },
+        {
+          "value": "744.8"
+        },
+        {
+          "value": "1238.6"
+        },
+        {
+          "value": "1779.8"
+        },
+        {
+          "value": "2257.8"
+        }
+      ]
+    },
+    {
+      "id": "stock",
+      "name": "NXP's firmware V3.174",
+      "short": "NXP",
+      "colour": "nxp",
+      "pattern": "solid",
+      "marker": "circle",
+      "points": [
+        {
+          "value": "76.7"
+        },
+        {
+          "value": "148.1"
+        },
+        {
+          "value": "297.8"
+        },
+        {
+          "value": "524.9"
+        },
+        {
+          "value": "666.7"
+        },
+        {
+          "failed": true
+        },
+        {
+          "value": "744.6",
+          "verdict": "wrong"
+        }
+      ]
+    },
+    {
+      "id": "gcc",
+      "name": "Verge, GCC build",
+      "short": "GCC",
+      "colour": "verge",
+      "pattern": "second-build",
+      "marker": "square",
+      "fails": "mark",
+      "hidden": true,
+      "points": [
+        {
+          "value": "81.3"
+        },
+        {
+          "value": "162.0"
+        },
+        {
+          "value": "394.9"
+        },
+        {
+          "value": "746.0"
+        },
+        {
+          "value": "1184.2"
+        },
+        {
+          "value": "1641.9"
+        },
+        {
+          "value": "2176.0"
+        }
+      ]
+    }
+  ],
+  "limits": [
+    {
+      "x": "20",
+      "series": "stock",
+      "label": "NXP's firmware reads right up to 20 MHz"
+    }
+  ]
+}

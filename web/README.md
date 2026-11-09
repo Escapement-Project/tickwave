@@ -153,7 +153,8 @@ tickwave session's converted recordings, linked into `fixtures-local/` by `scrip
 
 tickwave puts a capture into a web page with three custom elements. `<tickwave-view>` shows a whole
 recording. `<tickwave-inset>` shows one annotated stretch of it, magnified. `<tickwave-ref>` turns a
-phrase in the text into a reference: pointing at it opens an inset beside the text.
+phrase in the text into a reference: pointing at it opens an inset beside the text. A fourth,
+`<tickwave-chart>`, in a module of its own, draws measurements against a setting.
 
 ### Loading
 
@@ -262,6 +263,31 @@ closes the popover. A click, or Enter, opens its view at the annotation.
 
 A reference fetches nothing until it scrolls into view. Then it fetches the recording's head and
 the sidecar, and the inset fetches the data when it opens.
+
+### `<tickwave-chart>`
+
+Measurements against a setting, such as throughput against the clock asked for: a line through
+each series' points. It is its own module, `tickwave-chart.js`, and loads nothing else:
+
+```html
+<script type="module" src="tickwave-chart.js"></script>
+
+<figure>
+  <tickwave-chart src="figure1.chart.json" legend="above" end-labels table="table-1"></tickwave-chart>
+  <figcaption>Figure 1. 4 KiB writes against the SWD clock asked for.</figcaption>
+</figure>
+```
+
+The chart draws SVG into its own children, not a shadow root, and writes its colours as
+attributes. So Firefox's reader view, and a page without its CSS, still show the figure. Its
+caption names it, and the table it names describes it. A reader picks a setting by pointing at it,
+tapping it or stepping to it with the arrow keys, and picks a series from the legend or a line's
+end label.
+
+`CHARTS.md`, at the repository's root, specifies the data format, `tickwave-chart/1`, and every
+attribute, property and event. Besides the properties below, the chart reads the line patterns
+(`--dash-second-build`, `--dash-reference`, `--dash-capture-second`, `--dash-misread`),
+`--capture-width`, `--capture-opacity` and `--fault-ink`.
 
 ### Styling
 
