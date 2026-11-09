@@ -210,6 +210,9 @@ export class TickwaveChart extends HTMLElement {
       this.#name();
       this.#build();
       this.#draw();
+    } else if (name === "highlight" && value !== null && (this.#sweep !== null || this.#labels !== null)) {
+      // A claim pointed at while the sweep plays: its rings would land on points not drawn yet.
+      this.#finishSweep();
     } else this.#draw();
   }
 
@@ -445,7 +448,7 @@ export class TickwaveChart extends HTMLElement {
       {
         x: this.#x,
         series: this.#series,
-        limit: this.#limit,
+        limit: this.#limit || this.#highlightsLimits,
         rings: this.#rings(),
         sweep: sweepX,
         labels: this.#sweep !== null ? 0 : this.#labels,
@@ -467,14 +470,22 @@ export class TickwaveChart extends HTMLElement {
     }
   }
 
+  /** `highlight`'s points to ring: its `series@x` tokens. */
   #rings(): [string, number][] {
     const spec = this.getAttribute("highlight");
     if (!spec || !this.#data) return [];
     return spec.split(/\s+/).flatMap((ref) => {
+      if (!ref.includes("@")) return [];
       const [id, x] = ref.split("@");
       const i = this.#indexOf(x ?? null);
       return id && i !== null ? [[id, i] as [string, number]] : [];
     });
+  }
+
+  /** Whether `highlight` names the limits, a bare `limits`: their lines strengthen, as their legend
+   * entry does. A point's token always holds "@", so no series id reads as this. */
+  get #highlightsLimits(): boolean {
+    return (this.getAttribute("highlight") ?? "").split(/\s+/).includes("limits");
   }
 
   #drawLegend(data: ChartData, c: Colours): void {

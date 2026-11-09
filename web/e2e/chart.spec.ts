@@ -231,6 +231,17 @@ test.describe("at rest", () => {
     }
   });
 
+  test("highlight rings its points, and `limits` strengthens the limit as its legend entry does", async ({ page }) => {
+    const c1 = page.locator("#c1");
+    const limit = c1.locator("line.tw-limit");
+    await expect(limit).toHaveAttribute("stroke-width", "1");
+    await c1.evaluate((c) => c.setAttribute("highlight", "clang@50 limits"));
+    await expect(limit).toHaveAttribute("stroke-width", "2");
+    await expect(c1.locator('svg circle[r="9"]')).toHaveCount(1);
+    await c1.evaluate((c) => c.setAttribute("highlight", "clang@50"));
+    await expect(limit).toHaveAttribute("stroke-width", "1");
+  });
+
   test("a hidden series draws while the page picks it", async ({ page }) => {
     const c1 = page.locator("#c1");
     await c1.evaluate((c) => (c as HTMLElement & { pick(x: string, s: string): void }).pick("20", "gcc"));
@@ -324,6 +335,24 @@ test("a chart a fifth on screen waits; its sweep plays once 60 % of it shows", a
   await expect(c3).toHaveAttribute("data-pending", "");
   await page.evaluate((y) => scrollTo(0, y), box.y - 700 + box.height * 0.7);
   await expect(c3).not.toHaveAttribute("data-pending", "");
+});
+
+test("a highlight set while the sweep plays ends it at once", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.setViewportSize({ width: 900, height: 700 });
+  await page.goto(PAGE);
+  const c1 = page.locator("#c1");
+  await expect(c1).not.toHaveAttribute("data-pending", "");
+  const elapsed = await c1.evaluate(async (c) => {
+    const t = performance.now();
+    c.setAttribute("highlight", "clang@50 limits");
+    await (c as HTMLElement & { settled(): Promise<void> }).settled();
+    return performance.now() - t;
+  });
+  // The sweep takes 750 ms and the end labels 200 ms more; a highlight leaves neither to play.
+  expect(elapsed).toBeLessThan(150);
+  await expect(c1.locator('g.tw-series[data-series="clang"] circle.tw-pt')).toHaveCount(7);
+  await expect(c1.locator("text.tw-end")).toHaveText(["Verge", "NXP"]);
 });
 
 test("data set on the element before the module defines it still draws", async ({ page }) => {

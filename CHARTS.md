@@ -142,7 +142,7 @@ that series' point during the entry sweep.
 | `show` | the series to draw, by id. Without it, every series not `hidden` |
 | `selected` | an x selected from the start. With it, a selection stays until another replaces it. Without it, the selection follows the pointer and clears |
 | `group` | charts with the same group share their selected x |
-| `highlight` | points to ring, as `series@x`: `"clang@50 stock@20"`. A claim in the prose sets it |
+| `highlight` | points to ring, as `series@x`, and `limits` to strengthen the limit lines as their legend entry does: `"clang@50 stock@20 limits"`. A claim in the prose sets it |
 | `readout` | `tooltip`, beside the selected x, or `below`, a row under the plot |
 | `legend` | `above` draws a legend over the plot. Without it, the page has its own key |
 | `end-labels` | names each line at its last point, with its `short`. Labels that would overlap move apart, and the plot leaves room for the widest |
@@ -206,11 +206,11 @@ recording from a setting.
 ### Motion
 
 A chart sweeps in once, when 60 % of it first shows, or 60 % of the window for a chart taller than
-the window. The lines draw from the first x to the last over 750 ms, easing out. A limit grows
-from its series' point as the sweep crosses it. The end labels then appear a whole character at a
-time over 200 ms. A reader who prefers reduced motion, a printed page, and a chart that already has
-a highlight get the end state at once. A redraw for a face change, a resize or new data never plays
-the sweep again.
+the window. The lines draw from the first x to the last over 750 ms, easing out. A limit grows from
+its series' point as the sweep crosses it. The end labels then appear a whole character at a time
+over 200 ms. A reader who prefers reduced motion, a printed page, and a chart that already has a
+highlight get the end state at once, and a highlight set while the sweep plays ends it. A redraw for
+a face change, a resize or new data never plays the sweep again.
 
 ### Accessibility
 
