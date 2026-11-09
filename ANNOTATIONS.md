@@ -10,7 +10,8 @@ Status: draft, with the recording format.
 
 A recording `rec.tickwave` has one hand-written TOML file, `rec.annotations.toml`. A program that
 generates annotations, such as a protocol decoder, writes its own JSON Lines file, which the TOML
-file includes: `rec.wire_swd.jsonl`. A generator rewrites its file whole on each run. Nothing
+file includes: `rec.wire_swd.jsonl`. An included file sits beside the hand-written one and is named
+on its own, without a directory. A generator rewrites its file whole on each run. Nothing
 machine-edits the hand-written file, so a rerun cannot touch a hand edit.
 
 A generator runs after the recording is converted. It reads the recording's id from
@@ -65,7 +66,7 @@ The first line names the generator. Each later line is one annotation. Blank lin
 | `values` | Figures the annotation states, by name, each a decimal and a unit (below). |
 | `ref` | Hand-written only: the full id of a generated annotation. This one takes its span and channels, and any field it leaves out. |
 
-A file may hold no other fields: a misspelt one is an error, not ignored.
+A file may hold no other fields, `measure`'s included: a misspelt one is an error, not ignored.
 
 ## Measures
 
@@ -138,8 +139,9 @@ the prose cites breaks the build instead of the page. It checks that:
 - both files declare format `tickwave-annotations/1`, and their `recording_id` matches the
   recording;
 - `recording`, if given, names the recording's file;
-- every included file is provided, and every provided file is included;
-- ids are unique, hand-written ids hold no `/`, and every `ref` resolves;
+- every included file is named without a directory, is provided, and every provided file is
+  included;
+- ids are unique, hand-written ids hold no `/`, and every `ref` names a generated annotation;
 - every channel exists, and every time lies inside the capture with `end` not before `start`;
 - every `measure` names a digital channel, a known measure, and sits on a span;
 - every value is a decimal and a unit, under a name of lower-case letters, digits and `_`.

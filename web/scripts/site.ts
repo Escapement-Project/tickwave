@@ -73,6 +73,7 @@ const NAV: [string, string][] = [
   ["index.html", "Viewer"],
   ["demo.html", "Demo"],
   ["docs/elements.html", "Elements"],
+  ["docs/charts.html", "Charts"],
   ["docs/format.html", "Format"],
   ["docs/annotations.html", "Sidecar"],
   ["docs/converter.html", "Converter"],
@@ -168,6 +169,7 @@ if (from < 0) throw new Error("web/README.md has no \"The elements\" section");
 const next = readme.indexOf("\n## ", from + 1);
 const elements = readme.slice(from + 1, next < 0 ? undefined : next).replace(/^##(#*) /gm, "#$1 ");
 doc("docs/elements.html", elements, "tickwave's elements: attributes, methods, events, parts and custom properties.");
+doc("docs/charts.html", readFileSync(join(repo, "CHARTS.md"), "utf8"), "tickwave's charts: measurements drawn against a setting, and their data.");
 doc("docs/format.html", readFileSync(join(repo, "FORMAT.md"), "utf8"), "The tickwave recording format.");
 doc("docs/annotations.html", readFileSync(join(repo, "ANNOTATIONS.md"), "utf8"), "tickwave's sidecar annotations.");
 doc("docs/converter.html", readFileSync(join(site, "docs/converter.md"), "utf8"), "Building tickwave's converter, and converting, describing, verifying and bundling recordings.");

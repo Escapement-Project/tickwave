@@ -1,9 +1,10 @@
 # tickwave's web elements
 
-The canvas renderer, its interaction, and the three custom elements: `<tickwave-view>`,
-`<tickwave-inset>` and `<tickwave-ref>`. They draw from a small data-source interface,
-`src/source.ts`. Behind it, `.tickwave` recordings are read by the Rust core compiled to WASM, in a
-worker; the dev page's in-memory fixtures are read by a second loader.
+The canvas renderer, its interaction, and four custom elements: `<tickwave-view>`,
+`<tickwave-inset>`, `<tickwave-ref>` and, in a module of its own, `<tickwave-chart>`. The first three
+draw from a small data-source interface, `src/source.ts`. Behind it, the Rust core compiled to WASM
+reads `.tickwave` recordings in a worker, and a second loader reads the dev page's in-memory
+fixtures.
 
 ## Running it
 
@@ -14,13 +15,13 @@ repository root: `crates/wasm/build.sh`. Then, from `web/`:
 npm install
 npx playwright install chromium firefox   # once, for the browser tests
 node scripts/vendor.ts                    # tokens.css and fonts for the dev page, into dev/vendor/
-node scripts/fixtures.ts                  # the local fixtures, from the project's exports
+node scripts/fixtures.ts                  # the local fixtures, from the project's exports (optional)
 npm run dev                               # http://127.0.0.1:8123/dev/
 ```
 
 | Command | Does |
 |---|---|
-| `npm run build` | `dist/`: `tickwave.js`, `tickwave-worker.js`, `tickwave.wasm` and the dev page's `dev-loader.js` |
+| `npm run build` | `dist/`: `tickwave.js`, `tickwave-chart.js`, `tickwave-worker.js`, `tickwave.wasm`, the dev page's `dev-loader.js`, and the site |
 | `npm run generate` | the files the tests generate rather than commit (below) |
 | `npm run typecheck` | `tsc` over the sources, tests and scripts |
 | `npm test` | the unit tests, with Node's test runner |
@@ -33,7 +34,8 @@ HTTP Range, on 8125 it ignores it. It logs every request, a worker's included, s
 what was fetched.
 
 The stress cases and the screenshots need the ignored `fixtures-local/`, which
-`scripts/fixtures.ts` writes from the exports. Tests that need it skip without it.
+`scripts/fixtures.ts` writes from the Escapement Project's captures, outside this repository. Tests
+that need it skip without it.
 
 ## The site
 
@@ -45,7 +47,8 @@ shared header: its links lead to the project's other pages at the published site
 - `index.html`, the viewer: a recording by its address (`?src=`, `?annotations=`) or from files
 - `demo.html`, a short page citing the committed fixtures as a project page would
 - `docs/elements.html`, rendered from this file's "The elements" section
-- `docs/format.html` and `docs/annotations.html`, rendered from `FORMAT.md` and `ANNOTATIONS.md`
+- `docs/charts.html`, `docs/format.html` and `docs/annotations.html`, rendered from `CHARTS.md`,
+  `FORMAT.md` and `ANNOTATIONS.md`
 - `docs/converter.html`, rendered from `site/docs/converter.md`
 
 `site/tokens.css`, `site/fonts/`, `site/favicon.ico` and `site/dial.svg` are copies of the design
@@ -101,7 +104,8 @@ opened once, in one worker that holds the WASM module.
 An element's `annotations` attribute names a sidecar's TOML file. The worker fetches it and the
 files it includes, relative to its URL, and resolves them with the Rust core. Without the
 attribute, a recording with a bundled sidecar uses that. A sidecar's problems go to the console and
-to a short notice in the element; the recording still draws.
+to a short notice in the element, and the recording still draws. A notice goes with its cause: a
+new recording or sidecar starts without the last one's.
 
 Resolved annotations keep sidecar order: the hand-written file's, then each included file's. The
 order says which kind a view steps through first. The lane and the stepping sort by time
@@ -117,9 +121,11 @@ Committed, in `fixtures/`:
 | `identify-swd.tickwave` | `tickwave convert saleae testdata/saleae/identify-swd --channel digital_3_0=SWCLK --channel digital_3_1=SWDIO` |
 | `identify-swd.4k.tickwave` | the same with `--block-kib 4`: nine blocks, for edges across block boundaries |
 | `identify-jtag.tickwave` | the `identify-jtag-cjtag` export's TCK, TDI and TMS (`digital_4_0`, `_4_2`, `_4_3`): long enough that its 2^12 level sits in overview blocks |
-| `swd50-cut.tickwave` | `tickwave convert saleae testdata/saleae/swd50-cut --channel analog_0=SWCLK --channel analog_1=SWDIO --channel digital_4_0=NRST`: 50 µs of the MSO's analog inputs as 12-bit codes, in an 11 ms capture |
+| `swd50-cut.tickwave` | `tickwave convert saleae testdata/saleae/swd50-cut --channel analog_0=SWCLK --channel analog_1=SWDIO --channel digital_4_0=NRST`: 50 µs of a mixed-signal oscilloscope's analog inputs as 12-bit codes, in an 11 ms capture |
 | `identify-swd.annotations.toml` | the hand-written sidecar for `identify-swd.tickwave` |
 | `identify-swd.tickwavefx` | the in-memory route's fixture, cut from the same export by `scripts/extract-fixtures.ts` |
+| `figure1.chart.json`, `evidence.chart.json`, `wire.chart.json` | chart data: the landing page's Figure 1, a chart whose points name annotations, and the 2026-11-04 request-clock chart |
+| `crafted/` | recordings built to break a reader that trusts what a file states; its README says what each states |
 
 Generated by `scripts/generate.ts`, not committed: `identify-swd.swd.jsonl`, the SWD decoder's
 annotations of `identify-swd.tickwave` with its `recording_id`, which the TOML file includes; and
@@ -150,7 +156,7 @@ edge. An analog channel's entry has `name`, `end`, `unit`, `scale`, `offset`, `f
 difference. A value is `code × scale + offset`.
 
 The dev page's stress sections read these by default. `dev/?stress=tickwave` switches them to the
-tickwave session's converted recordings, linked into `fixtures-local/` by `scripts/fixtures.ts`.
+same captures converted to `.tickwave`, linked into `fixtures-local/` by `scripts/fixtures.ts`.
 
 ## The elements
 
@@ -177,7 +183,8 @@ shows. A server that ignores ranges still works, as long as it sends the whole f
 A whole recording. Closed, it shows one line: the recording's title, its length to three
 significant figures, its channels and its size, and an Open button. It fetches the recording's
 head, and nothing else, once it scrolls into view. Open, it shows the time axis, one row a
-channel, the annotations above them, and a readout under them.
+channel, the annotations above them, and a readout under them. Open puts the focus on the plot, and
+Close puts it back on Open. Each button names its recording to a screen reader.
 
 | Attribute | Means |
 |---|---|
@@ -214,7 +221,7 @@ Clicking an annotation's label shows its span.
 |---|---|
 | `show(id)` | opens the view at an annotation. Resolves once it has drawn |
 | `reveal(id)` | `show(id)`, then brings the view into sight and puts the focus on its plot, as a reference or a chart's point does |
-| `setWindow(start, end)` | shows a span: ticks, or times such as `"317.8 ms"` |
+| `setWindow(start, end)` | shows a span: ticks, or times such as `"317.8 ms"`. Called before the head arrives, it shows the span once it has |
 | `settled()` | resolves once the view has drawn everything it shows |
 | `tickAt(clientX)` | the tick under a point in the window, or null before the view has drawn |
 | `open` | whether the view is open; setting it opens or closes it |
@@ -256,8 +263,10 @@ final height. `sweeping` says whether the sweep is playing.
 ### `<tickwave-ref>`
 
 A phrase that cites an annotation. Pointing at it, or reaching it with Tab, opens an inset in a
-popover beside the text, so nothing on the page moves. Moving the pointer or the focus away, or Escape,
-closes the popover. A click, or Enter, opens its view at the annotation.
+popover beside the text, so nothing on the page moves. Moving the pointer or the focus away, or
+Escape, closes the popover. A click, Enter or Space opens its view at the annotation. A screen
+reader cannot reach into the drawn inset, so the annotation's label and text describe the
+reference itself.
 
 | Attribute | Means |
 |---|---|
@@ -315,11 +324,12 @@ While a zoom's finer data loads, a row draws the coarser data it has. Where that
 change it cannot yet place, the row draws it in the trace's colour, faded. A read still going
 after 5 s puts "Still loading" in the element's notice until it lands. A read that fails puts
 "Data did not load" there, with the cause, and the stretch stays faded. The row asks again when
-the view next redraws, 3 s or more later.
+the view next redraws, 3 s or more later, and the notice goes once the read lands.
 
 The key under an inset names the roles it shows: "probe drives" and "target drives", and any
-other role by its name. The elements follow a change of face, a `data-face` on `<html>` or the
-system's preference, as it happens.
+other role by its name. The elements follow a change of face as it happens: a `data-face`, a class
+or a style on `<html>` that changes the tokens, or the system's preference. A change there that
+leaves the tokens alone, such as a header marking the page scrolled, redraws nothing.
 
 Each element exposes its pieces to `::part()`. On the view: `summary`, `title`, `facts`,
 `open-button`, `viewer`, `toolbar`, `plot`, `hint`, `readout`, `steps`, `notice` and `button`.

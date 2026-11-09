@@ -78,12 +78,13 @@ A channel entry has `name`, `source_name` (the source's own name for it) and `ki
 
 - `"digital"`: `initial` (the level at tick 0, a boolean), `end` (the tick up to which the level is
   known; a source can stop knowing one channel before another), `edges` (the count).
-- `"analog"`: `unit` (empty when the source states none), `first` (the first sample's tick), `period` (ticks from one sample to the
-  next, `[num, den]`), `count`, and `coding`:
+- `"analog"`: `unit` (empty when the source states none), `first` (the first sample's tick),
+  `period` (ticks from one sample to the next, `[num, den]`), `count`, and `coding`:
   - `{"type": "f32"}`: the source's f32 values.
   - `{"type": "codes", "bits": b, "scale": s, "offset": o}`: u16 codes, stored in two byte
-    planes: every code's low byte, then every code's high byte (12 % smaller after zstd than
-    interleaved codes on the MSO's analog captures). A sample's value is
+    planes: every code's low byte, then every code's high byte. Split this way, the captures we
+    tried came out 12 % smaller after zstd than with each code's two bytes together. A sample's
+    value is
     `code × s` in f64, then `o +` that in f64, then rounded to f32: two separately rounded f64
     operations, never a fused multiply-add, which can round to a different f32. In JavaScript,
     `Math.fround(o + code * s)`. A converter picks this coding only after checking that every
@@ -92,9 +93,9 @@ A channel entry has `name`, `source_name` (the source's own name for it) and `ki
 Sample `i` of an analog channel sits at tick `first + floor(i × period)`.
 
 Every tick in the file lies in `0..=length`, and `length` is below 2^53: a digital channel's `end`,
-every edge, every sample, every block's start. No term of `timebase` or `period` is zero, and
-`bits` lies in `1..=16`. A reader refuses a header that breaks any of these before it reads a
-block.
+every edge, every sample, every block's start. So do the terms of `timebase` and `period`, and
+every `edges` and `count`. No term of `timebase` or `period` is zero, and `bits` lies in `1..=16`.
+A reader refuses a header that breaks any of these before it reads a block.
 
 `source` has `format` (`saleae-binary-1`, `sigrok-sr`, `vcd`), `files` (names, no directories),
 and optionally `instrument`, `software`, `begin_s` (the source's own time of tick 0, in seconds, so
@@ -127,8 +128,9 @@ last one ends at `file_len`.
 
 ### Blocks
 
-A block is cut by time across every channel. An encoder takes items in tick order and closes a
-block once its decoded size reaches a target. It never closes one between two items at the same
+A block is cut by time across every channel: it holds exactly the edges and samples whose ticks lie
+in its span, and a reader refuses an index that places any elsewhere. An encoder takes items in tick
+order and closes a block once its decoded size reaches a target. It never closes one between two items at the same
 tick, so a sample and an edge at one tick always share a block. The format sets no maximum size. A
 reader may refuse anything that decodes to more than it is set to hold: a block, an overview block
 or the head's overview. tickwave's reader holds 64 MiB unless it is configured otherwise.
@@ -151,8 +153,8 @@ channel in buckets of `2^shift` ticks; a level has `(length >> shift) + 1` bucke
 The levels are shifts 12, 16, 20 and so on in steps of 4, stopping at the first with at most 1,024
 buckets. A level with at most 2^17 buckets goes in the head. A finer level with at most 2^26
 buckets goes in overview blocks, which a reader fetches like blocks, for the span it shows. A level
-with more is left out. The head always holds at least one level. A reader refuses a header that
-lists a level with more buckets than its place allows.
+with more is left out. The head always holds at least one level. The levels follow from `length`
+alone, and a reader refuses a header that lists any others.
 
 The head's decoded overview holds, for each level in the header's order, then each channel:
 

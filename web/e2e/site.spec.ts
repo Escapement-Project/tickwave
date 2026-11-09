@@ -217,9 +217,9 @@ test("every internal link resolves, fragments included", async ({ request, baseU
     }
   }
   expect(failures).toEqual([]);
-  // The six pages, each reached by a link.
+  // The seven pages, each reached by a link.
   expect([...pages.keys()].map((u) => u.slice(u.indexOf(SITE) + SITE.length)).sort()).toEqual(
-    ["demo.html", "docs/annotations.html", "docs/converter.html", "docs/elements.html", "docs/format.html", "index.html"],
+    ["demo.html", "docs/annotations.html", "docs/charts.html", "docs/converter.html", "docs/elements.html", "docs/format.html", "index.html"],
   );
   expect(links).toBeGreaterThan(40);
 });

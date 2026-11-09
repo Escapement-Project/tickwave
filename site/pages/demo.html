@@ -10,7 +10,7 @@
 
 <figure>
   <tickwave-inset src="fixtures/identify-swd.tickwave" annotations="fixtures/identify-swd.annotations.toml" annotation="dpidr-read" channels="SWCLK SWDIO"></tickwave-inset>
-  <figcaption><b>Figure 1.</b> The read of the debug port's ID register, which returns 0x6BA02477. The clock rate under the trace comes from the capture's own edges. It is the mean of the clock's periods. It shows only the digits those edges support.</figcaption>
+  <figcaption><b>Figure 1.</b> The read of the debug port's ID register, which returns 0x6BA02477. The clock rate under the trace comes from the capture's own edges. It is the mean of the clock's periods, leaving out pauses. It shows only the digits those edges support.</figcaption>
 </figure>
 
 <p>Here is the whole capture, closed. Its line says what it holds before any of its data downloads. Open it to zoom, place cursors and measure.</p>

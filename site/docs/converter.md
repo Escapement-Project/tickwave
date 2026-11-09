@@ -69,9 +69,11 @@ If the source doesn't state a channel's unit, give it with `--unit <name>=<unit>
 | `--title <text>` | the recording's title, which a view shows; without one, a view shows the file's name |
 | `--meta <key>=<value>` | free metadata, such as `--meta probe=verge`, as often as you like |
 | `--level <n>` | the zstd compression level, 19 by default |
-| `--block-kib <n>` | how much decoded data each block aims to hold, 1024 KiB by default |
+| `--block-kib <n>` | how much decoded data each block aims to hold, 1024 KiB by default and at most 65,536 |
 
 A block is the smallest piece of data a viewer fetches. Smaller blocks mean less waiting for a narrow view of a long capture, and a larger file.
+
+Every command that reads a recording takes `--max-decoded-mib <n>`: the most it decodes from one block, 64 MiB by default. A recording that needs more is refused, as a page's viewer refuses it unless the page sets a larger limit. A block at the largest `--block-kib` stays under the default.
 
 ## Describing a recording
 
@@ -81,13 +83,13 @@ tickwave info identify-swd.tickwave
 
 ```text
 identify-swd
-0.523583 s at 1000000000/1 ticks a second, 2 channels, blake3:930db20d55ecede1084b73ebbdc7edd306268b900746c08abd0bdfdb0f121623
-  SWCLK        digital, 15286 edges, starts 1, known to 0.523583 s (digital_3_0)
-  SWDIO        digital, 1874 edges, starts 1, known to 0.523583 s (digital_3_1)
-0.005 MB: head 1765 bytes (3 overview levels), 1 blocks of 3086-3086 bytes, median 3086
+0.523583100 s at 1000000000/1 ticks a second, 2 channels, blake3:930db20d55ecede1084b73ebbdc7edd306268b900746c08abd0bdfdb0f121623
+  SWCLK        digital, 15286 edges, starts 1, known to 0.523583070 s (digital_3_0)
+  SWDIO        digital, 1874 edges, starts 1, known to 0.523583100 s (digital_3_1)
+0.005 MB: head 1767 bytes (3 overview levels), 1 blocks of 3086-3086 bytes, median 3086
 ```
 
-`--json` prints the header and the block statistics as JSON, for a script.
+Times are in seconds to one tick, here a nanosecond: never more digits than the recording carries. `--json` prints the header and the block statistics as JSON, for a script.
 
 ## Checking a recording against its capture
 
@@ -115,7 +117,7 @@ tickwave annotations check identify-swd.tickwave identify-swd.annotations.toml
 identify-swd.annotations.toml: 695 annotations, 8 hand-written and 687 generated, all check
 ```
 
-It reads the included files from beside the TOML file. If it finds a problem, it lists every one and exits with a non-zero status, so a page's build stops instead of publishing a broken reference:
+It reads the included files from beside the TOML file, and refuses an included name with a directory in it. If it finds a problem, it lists every one and exits with a non-zero status, so a page's build stops instead of publishing a broken reference:
 
 ```text
 identify-swd.annotations.toml: annotation 1: ref "swd/wait/1" does not resolve
