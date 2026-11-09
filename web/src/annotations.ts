@@ -1,5 +1,5 @@
 // Annotations as the elements draw them: resolved, with times in ticks and full ids, in sidecar
-// order (ANNOTATIONS.md). A `.chrono` recording's sidecar is resolved by the Rust core
+// order (ANNOTATIONS.md). A `.tickwave` recording's sidecar is resolved by the Rust core
 // (`Recording.resolveAnnotations`); `resolveRaw` does the same for the dev page's JSON fixtures.
 
 import type { Ratio } from "./source.ts";

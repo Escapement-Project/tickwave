@@ -1,4 +1,4 @@
-/* chrono's site. Colours, type and interaction come from the design system's tokens.css. */
+/* tickwave's site. Colours, type and interaction come from the design system's tokens.css. */
 * { box-sizing: border-box; }
 html, body { margin: 0; background: var(--page); color: var(--ink); }
 body { font: 400 17px/1.6 var(--font-text); overflow-wrap: break-word; }
@@ -69,12 +69,12 @@ button.primary:hover, .button:hover { background: var(--wash); }
 /* The demo. */
 .demo figure { margin: 18px 0 26px; }
 .demo figcaption { font-size: 14px; color: var(--ink-2); margin-top: 8px; max-width: 42em; }
-.demo chrono-inset { max-width: 440px; }
-.demo chrono-inset::part(inset) { background: var(--surface); border-radius: 10px; padding: 8px 6px 6px; }
-chrono-view { margin: 12px 0; }
+.demo tickwave-inset { max-width: 440px; }
+.demo tickwave-inset::part(inset) { background: var(--surface); border-radius: 10px; padding: 8px 6px 6px; }
+tickwave-view { margin: 12px 0; }
 /* The demo cites a capture whose probe the page does not name: probe-driven lines in secondary
    ink, the target's in ink, and no series hue. */
-.demo { --chrono-probe: var(--ink-2); }
+.demo { --tickwave-probe: var(--ink-2); }
 
 /* A heading's link to itself shows where the reader is looking for it. */
 .doc .anchor { opacity: 0; }

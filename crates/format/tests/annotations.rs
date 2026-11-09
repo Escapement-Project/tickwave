@@ -1,5 +1,5 @@
-use chrono_format::annotations::{Included, resolve};
-use chrono_format::header::{AnalogCoding, ChannelHeader, ChannelKind, Header, SourceHeader};
+use tickwave_format::annotations::{Included, resolve};
+use tickwave_format::header::{AnalogCoding, ChannelHeader, ChannelKind, Header, SourceHeader};
 
 const ID: &str = "blake3:00ff";
 
@@ -50,8 +50,8 @@ fn header() -> Header {
 }
 
 const HAND: &str = r#"
-format = "chrono-annotations/1"
-recording = "rec.chrono"
+format = "tickwave-annotations/1"
+recording = "rec.tickwave"
 recording_id = "blake3:00ff"
 include = ["rec.wire_swd.jsonl"]
 
@@ -69,7 +69,7 @@ ref = "wire_swd/misread/412000"
 label = "Misreads at 25 MHz"
 "#;
 
-const GENERATED: &str = r#"{"format": "chrono-annotations/1", "source": "wire_swd", "version": "9f3c2e1", "recording_id": "blake3:00ff"}
+const GENERATED: &str = r#"{"format": "tickwave-annotations/1", "source": "wire_swd", "version": "9f3c2e1", "recording_id": "blake3:00ff"}
 {"id": "misread/412000", "kind": "misread", "start": 412000, "end": 412900, "channels": ["SWDIO"], "label": "parity wrong"}
 
 {"id": "drive/400000", "kind": "drive", "start": 400000, "end": 400369, "channels": ["SWDIO"], "paint": "target"}
@@ -84,7 +84,7 @@ fn included(text: &str) -> Vec<Included<'_>> {
 
 #[test]
 fn resolves_hand_written_generated_and_refs() {
-    let got = resolve(HAND, &included(GENERATED), &header(), Some("rec.chrono")).unwrap();
+    let got = resolve(HAND, &included(GENERATED), &header(), Some("rec.tickwave")).unwrap();
     let ids: Vec<&str> = got.iter().map(|a| a.id.as_str()).collect();
     // Sidecar order, not time order: the generated misread at 412,000 comes before the drive at
     // 400,000 because its file lists it first.
@@ -123,7 +123,7 @@ fn included_files_follow_the_include_list_not_the_callers_order() {
         r#"include = ["rec.wire_swd.jsonl"]"#,
         r#"include = ["rec.b.jsonl", "rec.wire_swd.jsonl"]"#,
     );
-    let b = r#"{"format": "chrono-annotations/1", "source": "b", "recording_id": "blake3:00ff"}
+    let b = r#"{"format": "tickwave-annotations/1", "source": "b", "recording_id": "blake3:00ff"}
 {"id": "x/1", "start": 1}
 "#;
     let given = [
@@ -136,7 +136,7 @@ fn included_files_follow_the_include_list_not_the_callers_order() {
             text: b,
         },
     ];
-    let got = resolve(&hand, &given, &header(), Some("rec.chrono")).unwrap();
+    let got = resolve(&hand, &given, &header(), Some("rec.tickwave")).unwrap();
     let ids: Vec<&str> = got.iter().map(|a| a.id.as_str()).collect();
     assert_eq!(
         ids,
@@ -152,7 +152,7 @@ fn included_files_follow_the_include_list_not_the_callers_order() {
 
 /// Resolves, expecting problems, and returns them.
 fn problems(hand: &str, generated: &str) -> Vec<String> {
-    resolve(hand, &included(generated), &header(), Some("rec.chrono")).unwrap_err()
+    resolve(hand, &included(generated), &header(), Some("rec.tickwave")).unwrap_err()
 }
 
 fn assert_problem(found: &[String], needle: &str) {
@@ -207,7 +207,7 @@ fn measure_wants_a_digital_span() {
 fn measure_knows_rate_period_and_duration_only() {
     for what in ["period", "duration"] {
         let hand = HAND.replace("what = \"rate\"", &format!("what = \"{what}\""));
-        resolve(&hand, &included(GENERATED), &header(), Some("rec.chrono")).unwrap();
+        resolve(&hand, &included(GENERATED), &header(), Some("rec.tickwave")).unwrap();
     }
     let hand = HAND.replace("what = \"rate\"", "what = \"mean\"");
     assert_problem(&problems(&hand, GENERATED), "\"mean\" is not one of");
@@ -223,8 +223,14 @@ fn includes_must_match() {
 
 #[test]
 fn the_file_name_must_match_when_known() {
-    let found = resolve(HAND, &included(GENERATED), &header(), Some("other.chrono")).unwrap_err();
-    assert_problem(&found, "names \"rec.chrono\", not \"other.chrono\"");
+    let found = resolve(
+        HAND,
+        &included(GENERATED),
+        &header(),
+        Some("other.tickwave"),
+    )
+    .unwrap_err();
+    assert_problem(&found, "names \"rec.tickwave\", not \"other.tickwave\"");
 }
 
 #[test]

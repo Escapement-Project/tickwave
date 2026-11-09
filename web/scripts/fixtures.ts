@@ -2,14 +2,14 @@
 //
 //   node scripts/fixtures.ts [--exports DIR] [--energy CSV] [--converted DIR]
 //
-// - <name>.chronofx: cut from the Saleae exports and verge's energy CSV (extract-fixtures.ts).
-// - <name>.chrono: a link to the chrono session's converted recording, where one exists, so the
-//   dev page can draw its stress sections through the WASM decoder (dev/?stress=chrono).
-// - <name>.swd.jsonl: the SWD decoder's annotations, from the .chrono where there is one (then
-//   with its recording_id), else from the .chronofx. Long captures keep only the rare kinds and
+// - <name>.tickwavefx: cut from the Saleae exports and verge's energy CSV (extract-fixtures.ts).
+// - <name>.tickwave: a link to the tickwave session's converted recording, where one exists, so the
+//   dev page can draw its stress sections through the WASM decoder (dev/?stress=tickwave).
+// - <name>.swd.jsonl: the SWD decoder's annotations, from the .tickwave where there is one (then
+//   with its recording_id), else from the .tickwavefx. Long captures keep only the rare kinds and
 //   everything up to a tick: a full decode is the scale of a decoded track, not a sidecar.
 // - <name>.annotations.json and .annotations.toml: a hand-written sidecar naming the first DPIDR
-//   read, for the .chronofx and the .chrono route.
+//   read, for the .tickwavefx and the .tickwave route.
 //
 // The committed fixtures and generated files in fixtures/ are scripts/generate.ts's.
 
@@ -18,7 +18,7 @@ import { existsSync, lstatSync, rmSync, symlinkSync, writeFileSync } from "node:
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { openChrono } from "./node-wasm.ts";
+import { openTickwave } from "./node-wasm.ts";
 
 const web = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const { values } = parseArgs({
@@ -38,8 +38,8 @@ process.stdout.write(
 // The converted recordings the stress sections can switch to.
 const CONVERTED = ["gcc-swd-reads", "stock-reads", "gcc-swd-matrix-capture100000", "session50"];
 for (const name of CONVERTED) {
-  const target = join(values.converted!, `${name}.1024.chrono`);
-  const link = local(`${name}.chrono`);
+  const target = join(values.converted!, `${name}.1024.tickwave`);
+  const link = local(`${name}.tickwave`);
   if (existsSync(link) || lstatSync(link, { throwIfNoEntry: false })) rmSync(link);
   if (!existsSync(target)) continue;
   symlinkSync(relative(dirname(link), target), link);
@@ -52,18 +52,18 @@ const STRESS = [
   { name: "stock-swd-reads", until: 372000000, first: 371911979 },
 ];
 for (const s of STRESS) {
-  const chrono = existsSync(local(`${s.name}.chrono`));
-  const input = chrono ? local(`${s.name}.chrono`) : local(`${s.name}.chronofx`);
+  const tickwave = existsSync(local(`${s.name}.tickwave`));
+  const input = tickwave ? local(`${s.name}.tickwave`) : local(`${s.name}.tickwavefx`);
   if (!existsSync(input)) continue;
   node("scripts/swd-annotations.ts", input, "--kinds", "reset,select,write,wait,fault,no-ack", "--until", String(s.until), "--out", local(`${s.name}.swd.jsonl`));
   const read = { id: "dpidr-read", ref: `swd/read/${s.first}`, label: "The first DPIDR read", measure: { channel: "SWCLK", what: "rate" } };
-  const json = { format: "chrono-annotations/1", recording: `${s.name}.chronofx`, include: [`${s.name}.swd.jsonl`], annotation: [read] };
+  const json = { format: "tickwave-annotations/1", recording: `${s.name}.tickwavefx`, include: [`${s.name}.swd.jsonl`], annotation: [read] };
   writeFileSync(local(`${s.name}.annotations.json`), JSON.stringify(json, null, 2) + "\n");
-  if (chrono) {
-    const id = (await openChrono(input)).header.content_id;
+  if (tickwave) {
+    const id = (await openTickwave(input)).header.content_id;
     const toml = [
-      `format = "chrono-annotations/1"`,
-      `recording = "${s.name}.chrono"`,
+      `format = "tickwave-annotations/1"`,
+      `recording = "${s.name}.tickwave"`,
       `recording_id = "${id}"`,
       `include = ["${s.name}.swd.jsonl"]`,
       ``,

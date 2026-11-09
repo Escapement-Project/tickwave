@@ -1,13 +1,16 @@
 # GitHub Pages and byte ranges, 2026-11-08
 
-A reader of a chrono recording fetches the head, then only the blocks a view covers, by HTTP
-Range. This checks that GitHub Pages serves those ranges unchanged to the browsers chrono targets.
+A reader of a tickwave recording fetches the head, then only the blocks a view covers, by HTTP
+Range. This checks that GitHub Pages serves those ranges unchanged to the browsers tickwave targets.
 
 ## Result
 
 GitHub Pages serves byte ranges correctly to Chromium and Firefox, from the same origin and across
-origins: 144 of 144 ranges right, byte for byte. chrono can rely on Range requests on Pages. The
+origins: 144 of 144 ranges right, byte for byte. tickwave can rely on Range requests on Pages. The
 fallback of one file per block is not needed there.
+
+The check ran before chrono was renamed tickwave, so its recording files were `.chrono`. Pages
+knows neither extension. The rerun at launch checks `.tickwave`.
 
 ## What was checked
 
@@ -59,7 +62,7 @@ above, not a gap in the check.
   because curl had fetched the same ranges first. Those curl requests were cache misses, and they
   returned the right ranges.
 - WebKit and Safari.
-- Several ranges in one request (`bytes=0-9,20-29`); chrono's reader never sends one.
+- Several ranges in one request (`bytes=0-9,20-29`); tickwave's reader never sends one.
 - A file over 60 MiB. Pages' published-site limit is 1 GB, and a repository refuses files over
   100 MB.
 

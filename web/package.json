@@ -1,15 +1,15 @@
 {
-  "name": "chrono-web",
+  "name": "tickwave-web",
   "version": "0.0.0",
   "private": true,
-  "description": "chrono's web elements: the canvas renderer, its interaction, and the custom elements",
+  "description": "tickwave's web elements: the canvas renderer, its interaction, and the custom elements",
   "license": "MIT OR Apache-2.0",
   "type": "module",
   "scripts": {
     "build": "node build.ts && node scripts/site.ts",
     "dev": "node scripts/generate.ts && node build.ts --serve",
     "typecheck": "tsc -p .",
-    "test": "node --test \"test/**/*.test.ts\"",
+    "test": "node --test --test-timeout=60000 \"test/**/*.test.ts\"",
     "e2e": "node scripts/generate.ts && playwright test",
     "fixtures": "node scripts/fixtures.ts",
     "vendor": "node scripts/vendor.ts",

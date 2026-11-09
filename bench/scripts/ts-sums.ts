@@ -1,6 +1,6 @@
 // Decodes a recording with the TypeScript reader (fzstd, XXH64 from hash-wasm) and prints each
 // digital channel's edge count, tick sum and XOR, in crates/wasm/check.mjs's format.
-//   node scripts/ts-sums.ts FILE.chrono
+//   node scripts/ts-sums.ts FILE.tickwave
 import { readFileSync } from "node:fs";
 import { createXXHash64 } from "hash-wasm";
 import { Head, headLength } from "../src/format.ts";

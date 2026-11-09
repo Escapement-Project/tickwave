@@ -49,7 +49,7 @@ export interface RecordingInfo {
   readonly channels: readonly Channel[];
   /** The recording's download size in bytes, where the source knows it. */
   readonly bytes?: number;
-  /** What a .chrono header states: its content id, where it came from, and free metadata. */
+  /** What a .tickwave header states: its content id, where it came from, and free metadata. */
   readonly contentId?: string;
   readonly source?: Readonly<Record<string, unknown>>;
   readonly meta?: Readonly<Record<string, string>>;
@@ -136,9 +136,9 @@ export function sampleAtOrBefore(c: AnalogChannel, tick: number): number | null 
 }
 
 /**
- * An error whose `name` says what went wrong, so a page can explain it: `ChronoNetworkError` (no
- * answer, which a refused cross-origin request looks like too), `ChronoHttpError` (an answer that
- * was not the bytes), `ChronoNotRecording`, `ChronoSidecarError`.
+ * An error whose `name` says what went wrong, so a page can explain it: `TickwaveNetworkError` (no
+ * answer, which a refused cross-origin request looks like too), `TickwaveHttpError` (an answer that
+ * was not the bytes), `TickwaveNotRecording`, `TickwaveSidecarError`.
  */
 export function named(name: string, message: string): Error {
   const e = new Error(message);

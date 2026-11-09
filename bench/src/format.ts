@@ -1,11 +1,11 @@
-// A reader for the chrono recording format, written from FORMAT.md (version 1.0) alone, as a
+// A reader for the tickwave recording format, written from FORMAT.md (version 1.0) alone, as a
 // second implementation of the spec. The zstd inflate is the caller's: every frame's bytes go out
 // through `frame()`/`overviewFrame` and come back decoded, so the same reader serves a synchronous
 // inflate (fzstd) and an asynchronous one (DecompressionStream).
 
 export const PREAMBLE_LEN = 32;
 export const FIRST_FETCH = 65536;
-const MAGIC = [0x89, 0x63, 0x68, 0x72, 0x6f, 0x6e, 0x6f, 0x0a];
+const MAGIC = [0x89, 0x54, 0x4b, 0x57, 0x0d, 0x0a, 0x1a, 0x0a];
 const TWO32 = 4294967296;
 
 export class FormatError extends Error {}
@@ -43,7 +43,7 @@ export interface Preamble {
 
 export function parsePreamble(b: Uint8Array): Preamble {
   if (b.length < PREAMBLE_LEN) fail("shorter than the preamble");
-  for (let i = 0; i < MAGIC.length; i++) if (b[i] !== MAGIC[i]) fail("not a chrono recording");
+  for (let i = 0; i < MAGIC.length; i++) if (b[i] !== MAGIC[i]) fail("not a tickwave recording");
   const v = new DataView(b.buffer, b.byteOffset, PREAMBLE_LEN);
   const major = v.getUint16(8, true);
   if (major !== 1) fail(`major version ${major} is not 1`);

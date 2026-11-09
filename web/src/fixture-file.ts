@@ -1,11 +1,11 @@
 // Reads the dev fixture files that scripts/extract-fixtures.ts writes. The layout is in
-// web/README.md, "Fixture files". Not part of chrono's format: the decoder in crates/format
+// web/README.md, "Fixture files". Not part of tickwave's format: the decoder in crates/format
 // replaces this once it exists.
 
 import type { MemoryAnalog, MemoryDigital, MemoryRecording } from "./memory-source.ts";
 
-export const FIXTURE_MAGIC = "chronofx";
-export const FIXTURE_FORMAT = "chrono-fixture/1";
+export const FIXTURE_MAGIC = "tkwavefx";
+export const FIXTURE_FORMAT = "tickwave-fixture/1";
 
 export interface FixtureHeader {
   format: string;
@@ -49,7 +49,7 @@ export async function readFixture(file: ArrayBuffer | Uint8Array): Promise<Memor
   const stored = bytes.length;
   if (bytes[0] === 0x1f && bytes[1] === 0x8b) bytes = await gunzip(bytes);
   const magic = new TextDecoder().decode(bytes.subarray(0, 8));
-  if (magic !== FIXTURE_MAGIC) throw new Error("not a chrono fixture file");
+  if (magic !== FIXTURE_MAGIC) throw new Error("not a tickwave fixture file");
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const headerLength = view.getUint32(8, true);
   const header = JSON.parse(new TextDecoder().decode(bytes.subarray(12, 12 + headerLength))) as FixtureHeader;

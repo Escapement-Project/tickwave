@@ -1,10 +1,10 @@
 //! Inputs a reader must refuse: frames that are not exactly one checksummed zstd frame, codes wider
 //! than their coding, and headers whose extents leave the capture.
 
-use chrono_format::decode::{Head, inflate};
-use chrono_format::encode::{Options, encode};
-use chrono_format::header::AnalogCoding;
-use chrono_format::model::{
+use tickwave_format::decode::{Head, inflate};
+use tickwave_format::encode::{Options, encode};
+use tickwave_format::header::AnalogCoding;
+use tickwave_format::model::{
     Analog, Channel, ChannelData, Digital, Ratio, Recording, Samples, Source,
 };
 use zstd::zstd_safe::CParameter;
@@ -227,7 +227,7 @@ fn a_header_reaching_past_the_capture_is_refused() {
 
 #[test]
 fn a_block_starting_at_the_wrong_level_is_refused() {
-    use chrono_format::header::{BlockRow, LEVEL_BIT, PREAMBLE_LEN};
+    use tickwave_format::header::{BlockRow, LEVEL_BIT, PREAMBLE_LEN};
     // Small blocks, so channel C's second edge starts a block of its own at the level after one
     // edge.
     let (rec, options) = analog(None, vec![0.0; 11]);

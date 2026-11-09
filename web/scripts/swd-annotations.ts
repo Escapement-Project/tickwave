@@ -1,10 +1,10 @@
 // Finds SWD line resets, the JTAG-to-SWD select sequence and every transfer in a recording, and
 // writes them as a generator's annotation file (ANNOTATIONS.md, JSON Lines). Run from web/:
 //
-//   node scripts/swd-annotations.ts fixtures/identify-swd.chrono --out fixtures/identify-swd.swd.jsonl
+//   node scripts/swd-annotations.ts fixtures/identify-swd.tickwave --out fixtures/identify-swd.swd.jsonl
 //
-// A .chrono file is read through the WASM decoder, and the file names its recording_id. A
-// .chronofx fixture has no content id, and its file names none.
+// A .tickwave file is read through the WASM decoder, and the file names its recording_id. A
+// .tickwavefx fixture has no content id, and its file names none.
 //
 // A long capture holds hundreds of thousands of transfers, more than a sidecar is for. There,
 // --kinds wait,fault keeps only those kinds, and --until TICK keeps everything before TICK too.
@@ -18,7 +18,7 @@ import { parseArgs } from "node:util";
 import { readFixture } from "../src/fixture-file.ts";
 import type { MemoryDigital } from "../src/memory-source.ts";
 import { lowerBound } from "../src/search.ts";
-import { openChrono } from "./node-wasm.ts";
+import { openTickwave } from "./node-wasm.ts";
 
 const { values: opts, positionals } = parseArgs({
   allowPositionals: true,
@@ -26,11 +26,11 @@ const { values: opts, positionals } = parseArgs({
 });
 /** The named digital channels' edges, and the recording's content id where it has one. */
 async function load(path: string): Promise<{ channels: MemoryDigital[]; id: string | null }> {
-  if (!path.endsWith(".chrono")) {
+  if (!path.endsWith(".tickwave")) {
     const rec = await readFixture(readFileSync(path));
     return { channels: rec.channels.filter((c): c is MemoryDigital => c.kind === "digital"), id: null };
   }
-  const r = await openChrono(path);
+  const r = await openTickwave(path);
   const channels: MemoryDigital[] = [];
   for (const [i, c] of r.info.channels.entries()) {
     if (c.kind !== "digital") continue;
@@ -127,7 +127,7 @@ const kinds = opts.kinds ? new Set(opts.kinds.split(",")) : null;
 const until = opts.until ? Number(opts.until) : -Infinity;
 const kept = (out as Note[]).filter((a) => kinds === null || kinds.has(a.kind) || a.start < until);
 kept.sort((a, b) => a.start - b.start);
-const lines = [JSON.stringify({ format: "chrono-annotations/1", source: "swd", ...(rec.id && { recording_id: rec.id }) })];
+const lines = [JSON.stringify({ format: "tickwave-annotations/1", source: "swd", ...(rec.id && { recording_id: rec.id }) })];
 for (const a of kept) lines.push(JSON.stringify(a));
 if (opts.out) writeFileSync(opts.out, lines.join("\n") + "\n");
 else console.log(lines.join("\n"));

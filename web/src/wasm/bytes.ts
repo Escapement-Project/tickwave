@@ -48,13 +48,13 @@ export class HttpBytes implements Bytes {
       res = await this.#fetch(this.#url, { headers: { Range: `bytes=${from}-${to - 1}` }, signal });
     } catch (e) {
       if (signal?.aborted) throw aborted();
-      throw named("ChronoNetworkError", `${this.name}: no answer from ${new URL(this.#url).host || "the server"} (${e instanceof Error ? e.message : e})`);
+      throw named("TickwaveNetworkError", `${this.name}: no answer from ${new URL(this.#url).host || "the server"} (${e instanceof Error ? e.message : e})`);
     }
     if (res.status === 200) {
       this.#whole = new Uint8Array(await res.arrayBuffer());
       return this.#whole.subarray(from, Math.min(to, this.#whole.length));
     }
-    if (res.status !== 206) throw named("ChronoHttpError", `${this.name}: HTTP ${res.status}`);
+    if (res.status !== 206) throw named("TickwaveHttpError", `${this.name}: HTTP ${res.status}`);
     // A compressed response's ranges count bytes of the compressed stream (PLAN.md §0).
     const encoding = res.headers.get("content-encoding");
     if (encoding && encoding !== "identity") {

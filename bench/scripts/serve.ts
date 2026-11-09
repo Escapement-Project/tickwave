@@ -19,7 +19,7 @@ function isolate(res: http.ServerResponse, path: string) {
   res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
   res.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
   res.setHeader("Cache-Control", "no-cache");
-  if (/\.(chrono|bin)$/.test(path)) res.setHeader("Content-Type", "application/octet-stream");
+  if (/\.(tickwave|bin)$/.test(path)) res.setHeader("Content-Type", "application/octet-stream");
 }
 
 export function start(port = 0): Promise<{ url: string; close: () => void }> {

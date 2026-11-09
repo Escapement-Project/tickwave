@@ -111,45 +111,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
-name = "chrono-bench-native"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono-format",
- "clap",
- "indicatif",
- "serde",
- "serde_json",
- "sha2",
- "zstd",
-]
-
-[[package]]
-name = "chrono-format"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "rayon",
- "ruzstd",
- "serde",
- "serde_json",
- "thiserror",
- "toml",
- "zstd",
-]
-
-[[package]]
-name = "chrono-wasm-libzstd"
-version = "0.1.0"
-dependencies = [
- "chrono-format",
- "js-sys",
- "serde_json",
- "wasm-bindgen",
- "zstd",
-]
-
-[[package]]
 name = "clap"
 version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -614,6 +575,45 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "tickwave-bench-native"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "indicatif",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tickwave-format",
+ "zstd",
+]
+
+[[package]]
+name = "tickwave-format"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "rayon",
+ "ruzstd",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "toml",
+ "zstd",
+]
+
+[[package]]
+name = "tickwave-wasm-libzstd"
+version = "0.1.0"
+dependencies = [
+ "js-sys",
+ "serde_json",
+ "tickwave-format",
+ "wasm-bindgen",
+ "zstd",
 ]
 
 [[package]]

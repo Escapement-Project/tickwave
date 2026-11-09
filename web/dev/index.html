@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>chrono: dev page</title>
+<title>tickwave: dev page</title>
 <link rel="stylesheet" href="vendor/tokens.css">
-<script type="importmap">{ "imports": { "chrono": "../dist/chrono.js" } }</script>
-<script type="module" src="../dist/chrono.js"></script>
+<script type="importmap">{ "imports": { "tickwave": "../dist/tickwave.js" } }</script>
+<script type="module" src="../dist/tickwave.js"></script>
 <script type="module" src="../dist/dev-loader.js"></script>
 <style>
 * { box-sizing: border-box; }
@@ -22,9 +22,9 @@ figure { margin: 18px 0 26px; }
 figcaption { font-size: 14px; color: var(--ink-2); margin-top: 8px; max-width: 42em; }
 figcaption b { color: var(--ink); font-weight: 600; }
 .pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 14px; }
-chrono-inset { max-width: 440px; }
-chrono-inset::part(inset) { background: var(--surface); border-radius: 10px; padding: 8px 6px 6px; }
-chrono-view { margin: 16px 0 6px; }
+tickwave-inset { max-width: 440px; }
+tickwave-inset::part(inset) { background: var(--surface); border-radius: 10px; padding: 8px 6px 6px; }
+tickwave-view { margin: 16px 0 6px; }
 .face { font: inherit; font-size: 14px; color: var(--ink); background: transparent; border: 1.5px solid var(--rule); border-radius: 999px; padding: 4px 14px; cursor: pointer; }
 .face:hover { background: var(--wash); }
 .controls { display: flex; align-items: center; gap: 16px; font-size: 14px; }
@@ -36,13 +36,13 @@ footer { height: 80px; }
 </style>
 </head>
 <body>
-<header><b>chrono</b><span class="controls"><a id="stress" href="?stress=chrono">Stress from .chrono</a><button class="face" id="face" type="button" aria-pressed="false">Night</button></span></header>
+<header><b>tickwave</b><span class="controls"><a id="stress" href="?stress=tickwave">Stress from .tickwave</a><button class="face" id="face" type="button" aria-pressed="false">Night</button></span></header>
 <script>
-// ?stress=chrono draws the stress sections from the converted recordings, through the WASM decoder.
+// ?stress=tickwave draws the stress sections from the converted recordings, through the WASM decoder.
 // It runs before the elements upgrade, so they read the rewritten attributes.
-if (new URLSearchParams(location.search).get("stress") === "chrono") {
+if (new URLSearchParams(location.search).get("stress") === "tickwave") {
   for (const el of document.querySelectorAll("[data-stress]")) {
-    el.setAttribute("src", el.getAttribute("src").replace(/\.chronofx$/, ".chrono"));
+    el.setAttribute("src", el.getAttribute("src").replace(/\.tickwavefx$/, ".tickwave"));
     if (el.hasAttribute("annotations")) el.setAttribute("annotations", el.getAttribute("annotations").replace(/\.json$/, ".toml"));
   }
 }
@@ -50,65 +50,65 @@ if (new URLSearchParams(location.search).get("stress") === "chrono") {
 <main>
 <h1>Reading a debug port's ID over SWD</h1>
 
-<p>A probe opens an SWD session with a <chrono-ref for="identify" annotation="line-reset">line reset</chrono-ref>,
+<p>A probe opens an SWD session with a <tickwave-ref for="identify" annotation="line-reset">line reset</tickwave-ref>,
 holding SWDIO high while it clocks. It then sends the
-<chrono-ref for="identify" annotation="jtag-to-swd">JTAG-to-SWD select sequence</chrono-ref>, resets the line again,
-and <chrono-ref for="identify" annotation="dpidr-read">reads the debug port's ID register</chrono-ref>. That read starts with
-a <chrono-ref for="identify" annotation="dpidr-request">request</chrono-ref> the probe drives and the target's
-<chrono-ref for="identify" annotation="dpidr-ack">acknowledge</chrono-ref>. Later in the same capture the target
-<chrono-ref for="identify" annotation="first-wait">answers WAIT</chrono-ref> to a read it is not ready for.</p>
+<tickwave-ref for="identify" annotation="jtag-to-swd">JTAG-to-SWD select sequence</tickwave-ref>, resets the line again,
+and <tickwave-ref for="identify" annotation="dpidr-read">reads the debug port's ID register</tickwave-ref>. That read starts with
+a <tickwave-ref for="identify" annotation="dpidr-request">request</tickwave-ref> the probe drives and the target's
+<tickwave-ref for="identify" annotation="dpidr-ack">acknowledge</tickwave-ref>. Later in the same capture the target
+<tickwave-ref for="identify" annotation="first-wait">answers WAIT</tickwave-ref> to a read it is not ready for.</p>
 
 <figure>
-  <chrono-inset id="inset-dpidr" src="../fixtures/identify-swd.chrono" annotations="../fixtures/identify-swd.annotations.toml"
-                annotation="dpidr-read" channels="SWCLK SWDIO" series="verge"></chrono-inset>
+  <tickwave-inset id="inset-dpidr" src="../fixtures/identify-swd.tickwave" annotations="../fixtures/identify-swd.annotations.toml"
+                annotation="dpidr-read" channels="SWCLK SWDIO" series="verge"></tickwave-inset>
   <figcaption><b>Figure 1.</b> The first transfer of an attach: a DP read of DPIDR, which returns 0x6BA02477.
   The probe drives the request; the target drives the acknowledge and the data.</figcaption>
 </figure>
 
 <p>The whole capture is below, collapsed until you open it.</p>
-<chrono-view id="identify" src="../fixtures/identify-swd.chrono" annotations="../fixtures/identify-swd.annotations.toml"
-             series="verge"></chrono-view>
+<tickwave-view id="identify" src="../fixtures/identify-swd.tickwave" annotations="../fixtures/identify-swd.annotations.toml"
+             series="verge"></tickwave-view>
 
 <h2>The same read, ours against stock, at one scale</h2>
 <p>Both insets draw 50 ns to a pixel, so the read that takes longer is wider.</p>
 <div class="pair">
-  <chrono-inset id="inset-ours" data-stress src="../fixtures-local/gcc-swd-reads.chronofx" annotations="../fixtures-local/gcc-swd-reads.annotations.json"
-                annotation="dpidr-read" scale="50 ns/px" pad="0 ns" series="verge"></chrono-inset>
-  <chrono-inset id="inset-stock" src="../fixtures-local/stock-swd-reads.chronofx" annotations="../fixtures-local/stock-swd-reads.annotations.json"
-                annotation="dpidr-read" scale="50 ns/px" pad="0 ns" series="nxp"></chrono-inset>
+  <tickwave-inset id="inset-ours" data-stress src="../fixtures-local/gcc-swd-reads.tickwavefx" annotations="../fixtures-local/gcc-swd-reads.annotations.json"
+                annotation="dpidr-read" scale="50 ns/px" pad="0 ns" series="verge"></tickwave-inset>
+  <tickwave-inset id="inset-stock" src="../fixtures-local/stock-swd-reads.tickwavefx" annotations="../fixtures-local/stock-swd-reads.annotations.json"
+                annotation="dpidr-read" scale="50 ns/px" pad="0 ns" series="nxp"></tickwave-inset>
 </div>
 
 <h2>Six million edges</h2>
 <p>Verge's GCC build reading over SWD: 6.3 million SWCLK edges. Step through every WAIT the target answered.</p>
-<chrono-view id="gcc" open data-stress src="../fixtures-local/gcc-swd-reads.chronofx" annotations="../fixtures-local/gcc-swd-reads.annotations.json"
-             series="verge"></chrono-view>
+<tickwave-view id="gcc" open data-stress src="../fixtures-local/gcc-swd-reads.tickwavefx" annotations="../fixtures-local/gcc-swd-reads.annotations.json"
+             series="verge"></tickwave-view>
 
 <h2>Stock firmware's uneven TCK</h2>
 <p>NXP's firmware reading over JTAG. Its TCK periods vary from one clock to the next; select a span on the time axis to read them.</p>
-<chrono-view id="stock" open data-stress src="../fixtures-local/stock-reads.chronofx" series="nxp"></chrono-view>
+<tickwave-view id="stock" open data-stress src="../fixtures-local/stock-reads.tickwavefx" series="nxp"></tickwave-view>
 
 <section id="matrix-section" hidden>
 <h2>A two-minute matrix</h2>
 <p>Verge's GCC build over the whole SWD clock matrix: 637 million edges, 46 MB, read block by block as the view needs them.</p>
-<chrono-view id="matrix" data-stress-only src="../fixtures-local/gcc-swd-matrix-capture100000.chrono" series="verge"></chrono-view>
+<tickwave-view id="matrix" data-stress-only src="../fixtures-local/gcc-swd-matrix-capture100000.tickwave" series="verge"></tickwave-view>
 </section>
 
 <h2>SWD as the analog inputs saw it</h2>
 <p>The MSO's two analog inputs on SWCLK and SWDIO at 1 GS/s, stored as the 12-bit codes the instrument read. Place two cursors to read each input's voltage, to the millivolt one code step allows.</p>
-<chrono-view id="analog" open src="../fixtures/swd50-cut.chrono" channels="SWCLK SWDIO" window="0 ns 50 us"></chrono-view>
+<tickwave-view id="analog" open src="../fixtures/swd50-cut.tickwave" channels="SWCLK SWDIO" window="0 ns 50 us"></tickwave-view>
 
 <h2>An energy capture</h2>
 <p>verge's energy capture at 100 kHz: the target's supply voltage and current, DIO3, and the markers its firmware wrote.</p>
-<chrono-view id="energy" open src="../fixtures-local/markers-100000.chronofx" annotations="../fixtures-local/markers-100000.markers.jsonl"
-             channels="voltage current DIO3"></chrono-view>
+<tickwave-view id="energy" open src="../fixtures-local/markers-100000.tickwavefx" annotations="../fixtures-local/markers-100000.markers.jsonl"
+             channels="voltage current DIO3"></tickwave-view>
 
 <h2>Over a slow link</h2>
 <p>The identify capture again, from the in-memory fixture with every answer delayed by 400 ms. The view draws what it has and fills in as data arrives.</p>
-<chrono-view id="slow" open src="../fixtures/identify-swd.chronofx?latency=400" window="377.09 ms 377.145 ms" series="verge"></chrono-view>
+<tickwave-view id="slow" open src="../fixtures/identify-swd.tickwavefx?latency=400" window="377.09 ms 377.145 ms" series="verge"></tickwave-view>
 
 <pre id="errors" aria-live="polite"></pre>
 <script>
-if (new URLSearchParams(location.search).get("stress") === "chrono") {
+if (new URLSearchParams(location.search).get("stress") === "tickwave") {
   document.getElementById("matrix-section").hidden = false;
   const a = document.getElementById("stress");
   a.textContent = "Stress from memory";
@@ -124,7 +124,7 @@ const label = () => { const night = shown() === "night"; face.textContent = nigh
 face.addEventListener("click", () => { document.documentElement.dataset.face = shown() === "night" ? "day" : "night"; label(); });
 label();
 const errors = document.getElementById("errors");
-document.addEventListener("chrono-error", (e) => { errors.textContent += `${e.target.id || e.target.localName}: ${e.detail.message}\n`; });
+document.addEventListener("tickwave-error", (e) => { errors.textContent += `${e.target.id || e.target.localName}: ${e.detail.message}\n`; });
 </script>
 </body>
 </html>

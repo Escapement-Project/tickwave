@@ -11,7 +11,7 @@ const median = (xs: number[]) => [...xs].sort((a, b) => a - b)[Math.floor(xs.len
 async function once(browser: Browser) {
   const ctx = await browser.newContext();
   const page = await ctx.newPage();
-  await page.goto(`${server.url}/inset.html?dec=${dec}&rec=/rec/gcc-swd-reads.1024.chrono`);
+  await page.goto(`${server.url}/inset.html?dec=${dec}&rec=/rec/gcc-swd-reads.1024.tickwave`);
   const r: any = await (await page.waitForFunction(() => window.__result)).jsonValue();
   await ctx.close();
   return r.phases.init - r.phases.message;

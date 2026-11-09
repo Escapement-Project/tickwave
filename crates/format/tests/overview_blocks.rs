@@ -1,8 +1,8 @@
-use chrono_format::bundle::bundle;
-use chrono_format::decode::{Head, verify};
-use chrono_format::encode::{Options, encode};
-use chrono_format::header::{BlockRow, OverviewLevel, OverviewRow, PREAMBLE_LEN, Preamble};
-use chrono_format::model::{
+use tickwave_format::bundle::bundle;
+use tickwave_format::decode::{Head, verify};
+use tickwave_format::encode::{Options, encode};
+use tickwave_format::header::{BlockRow, OverviewLevel, OverviewRow, PREAMBLE_LEN, Preamble};
+use tickwave_format::model::{
     Analog, Channel, ChannelData, Digital, Ratio, Recording, Samples, Source,
 };
 
@@ -101,7 +101,7 @@ fn a_long_recording_keeps_its_finest_level_in_blocks() {
     assert_eq!(digital(4, 0), (true, true));
 
     let block = decode(0);
-    let chrono_format::overview::ChannelOverview::Analog { min, max } = &block.level.channels[1]
+    let tickwave_format::overview::ChannelOverview::Analog { min, max } = &block.level.channels[1]
     else {
         panic!("V is analog");
     };
@@ -109,7 +109,7 @@ fn a_long_recording_keeps_its_finest_level_in_blocks() {
     assert_eq!((min[1], max[1]), (f32::INFINITY, f32::NEG_INFINITY));
     assert_eq!((min[256], max[256]), (1.0, 1.0));
     let last = decode(4);
-    let chrono_format::overview::ChannelOverview::Analog { min, .. } = &last.level.channels[1]
+    let tickwave_format::overview::ChannelOverview::Analog { min, .. } = &last.level.channels[1]
     else {
         panic!("V is analog");
     };
@@ -189,7 +189,7 @@ fn verify_refuses_overview_blocks_that_differ_from_the_content() {
         .unwrap();
     assert!(bit(
         match &block.level.channels[0] {
-            chrono_format::overview::ChannelOverview::Digital { change, .. } => change,
+            tickwave_format::overview::ChannelOverview::Digital { change, .. } => change,
             _ => unreachable!(),
         },
         (600_000_000 >> 12) - block.first

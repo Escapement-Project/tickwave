@@ -14,7 +14,7 @@ import shutil
 import sys
 from pathlib import Path
 
-FILES = [("small.chrono", 1 << 20), ("small.bin", 1 << 20), ("small.zst", 1 << 20), ("large.chrono", 60 << 20)]
+FILES = [("small.tickwave", 1 << 20), ("small.bin", 1 << 20), ("small.zst", 1 << 20), ("large.tickwave", 60 << 20)]
 
 
 def ranges(size: int) -> list[tuple[int, int]]:

@@ -9,7 +9,7 @@ import { formatLevels, MemorySource } from "../src/memory-source.ts";
 import { fromCore, indexAnnotations, laneAnnotations, ofKind, resolveRaw, type RawAnnotation } from "../src/annotations.ts";
 import { sampleAtOrBefore, type AnalogChannel } from "../src/source.ts";
 
-const file = readFileSync(new URL("../fixtures/identify-swd.chronofx", import.meta.url));
+const file = readFileSync(new URL("../fixtures/identify-swd.tickwavefx", import.meta.url));
 
 test("identify-swd: counts, ends and first edges match the export", async () => {
   const rec = await readFixture(file);

@@ -1,7 +1,7 @@
-use chrono_format::decode::{BlockChannel, DecodeError, Head, VerifyError, verify};
-use chrono_format::encode::{EncodeError, Options, encode};
-use chrono_format::header::{AnalogCoding, PREAMBLE_LEN};
-use chrono_format::model::{
+use tickwave_format::decode::{BlockChannel, DecodeError, Head, VerifyError, verify};
+use tickwave_format::encode::{EncodeError, Options, encode};
+use tickwave_format::header::{AnalogCoding, PREAMBLE_LEN};
+use tickwave_format::model::{
     Analog, Channel, ChannelData, Digital, Ratio, Recording, Samples, Source,
 };
 
@@ -264,7 +264,7 @@ fn a_short_head_asks_for_more() {
     ));
     assert!(matches!(
         Head::parse(b"not a recording at all, no"),
-        Err(DecodeError::NotChrono)
+        Err(DecodeError::NotTickwave)
     ));
 }
 
@@ -285,12 +285,12 @@ fn the_content_id_ignores_how_the_file_is_cut() {
 
 #[test]
 fn a_bundle_keeps_the_content_and_carries_the_files() {
-    use chrono_format::bundle::bundle;
+    use tickwave_format::bundle::bundle;
     let file = encode(recording(EDGES_A.to_vec(), values()), &small_blocks()).unwrap();
     let files: std::collections::BTreeMap<String, String> = [
         (
             "rec.annotations.toml".to_string(),
-            "format = \"chrono-annotations/1\"\n".to_string(),
+            "format = \"tickwave-annotations/1\"\n".to_string(),
         ),
         ("rec.gen.jsonl".to_string(), "{}\n".to_string()),
     ]
@@ -313,7 +313,7 @@ fn a_bundle_keeps_the_content_and_carries_the_files() {
 
 #[test]
 fn codes_are_stored_in_byte_planes() {
-    use chrono_format::decode::inflate;
+    use tickwave_format::decode::inflate;
     let coding = AnalogCoding::Codes {
         bits: 16,
         scale: 1.0,

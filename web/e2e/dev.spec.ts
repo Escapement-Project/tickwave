@@ -5,17 +5,17 @@ import { test, expect, type Page, type Locator } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
 
-const LOCAL = existsSync("fixtures-local/gcc-swd-reads.chronofx") && existsSync("fixtures-local/stock-reads.chronofx");
+const LOCAL = existsSync("fixtures-local/gcc-swd-reads.tickwavefx") && existsSync("fixtures-local/stock-reads.tickwavefx");
 const VENDOR = existsSync("dev/vendor/tokens.css");
 
-/** Records every chrono-ready by element id, from before the page's own scripts run. */
+/** Records every tickwave-ready by element id, from before the page's own scripts run. */
 async function recordReady(page: Page): Promise<void> {
   await page.addInitScript(() => {
     const w = window as unknown as { ready: Set<string>; errors: string[] };
     w.ready = new Set();
     w.errors = [];
-    document.addEventListener("chrono-ready", (e) => w.ready.add((e.target as Element).id));
-    document.addEventListener("chrono-error", (e) => w.errors.push(`${(e.target as Element).id}: ${(e as CustomEvent).detail.message}`));
+    document.addEventListener("tickwave-ready", (e) => w.ready.add((e.target as Element).id));
+    document.addEventListener("tickwave-error", (e) => w.errors.push(`${(e.target as Element).id}: ${(e as CustomEvent).detail.message}`));
   });
 }
 
@@ -96,17 +96,17 @@ test.describe("stress fixtures zoomed fully out and fully in", () => {
 /** The requests the e2e server logged for the recording URLs holding `tag`. */
 async function served(tag: string): Promise<{ port: number; url: string; range: string | null; status: number }[]> {
   const log = (await (await fetch(`http://127.0.0.1:8124/__log?tag=${tag}`)).json()) as { port: number; url: string; range: string | null; status: number }[];
-  return log.filter((e) => new URL(e.url, "http://x").pathname.endsWith(".chrono"));
+  return log.filter((e) => new URL(e.url, "http://x").pathname.endsWith(".tickwave"));
 }
 
 const tagged = (info: { project: { name: string } }, what: string) => `${what}-${info.project.name}-${Date.now()}`;
 
 test("a collapsed view fetches its head, and only its head, once it scrolls into view", async ({ page }, info) => {
   const tag = tagged(info, "collapsed");
-  // A small first read, so the head (1,742 bytes, the converter says) and the block are separate.
+  // A small first read, so the head (1,744 bytes, the converter says) and the block are separate.
   await page.goto(`/e2e/pages/view.html?below&firstRead=512&tag=${tag}`);
   const view = page.locator("#v");
-  await expect(view.locator(".summary .title")).toHaveText("identify-swd.chrono");
+  await expect(view.locator(".summary .title")).toHaveText("identify-swd.tickwave");
   await page.waitForTimeout(300);
   expect(await served(tag)).toEqual([]);
   await view.scrollIntoViewIfNeeded();
@@ -114,19 +114,19 @@ test("a collapsed view fetches its head, and only its head, once it scrolls into
   await page.waitForTimeout(300);
   expect((await served(tag)).map((e) => [e.range, e.status])).toEqual([
     ["bytes=0-511", 206],
-    ["bytes=512-1741", 206],
+    ["bytes=512-1743", 206],
   ]);
   // Opened at the whole capture, it draws from the head's overview: still no block.
   await view.locator(".open").click();
   await view.evaluate((v) => (v as unknown as { settled(): Promise<void> }).settled());
-  expect((await served(tag)).map((e) => e.range)).toEqual(["bytes=0-511", "bytes=512-1741"]);
-  // Zoomed to the first read, it needs edges, and reads the block by its range: 1,742 to 4,828.
+  expect((await served(tag)).map((e) => e.range)).toEqual(["bytes=0-511", "bytes=512-1743"]);
+  // Zoomed to the first read, it needs edges, and reads the block by its range: 1,744 to 4,830.
   await view.evaluate((v) => {
     const view = v as unknown as { setWindow(a: number, b: number): void; settled(): Promise<void> };
     view.setWindow(377094000, 377141000);
     return view.settled();
   });
-  expect((await served(tag)).map((e) => e.range)).toEqual(["bytes=0-511", "bytes=512-1741", "bytes=1742-4827"]);
+  expect((await served(tag)).map((e) => e.range)).toEqual(["bytes=0-511", "bytes=512-1743", "bytes=1744-4829"]);
 });
 
 test("a server that ignores Range: one whole-file response serves the view", async ({ page }, info) => {
@@ -138,7 +138,7 @@ test("a server that ignores Range: one whole-file response serves the view", asy
   const box = (await plotOf(view).boundingBox())!;
   const y = box.y + box.height - 10;
   const selected = view.evaluate(
-    (v) => new Promise((resolve) => v.addEventListener("chrono-select", (e) => resolve((e as CustomEvent).detail), { once: true })),
+    (v) => new Promise((resolve) => v.addEventListener("tickwave-select", (e) => resolve((e as CustomEvent).detail), { once: true })),
   );
   await page.mouse.move(box.x + 70, y);
   await page.mouse.down();
@@ -151,13 +151,13 @@ test("a server that ignores Range: one whole-file response serves the view", asy
 test("a finer overview level comes from overview blocks by range, not from the data", async ({ page }, info) => {
   const tag = tagged(info, "levels");
   await recordReady(page);
-  // The JTAG identify capture: head bytes 0 to 1,251, its data block to 10,378, its three overview
-  // blocks of 2^12 ticks to 13,678 (the converter's report).
-  await page.goto(`/e2e/pages/view.html?open&src=fixtures/identify-jtag.chrono&firstRead=1024&tag=${tag}`);
+  // The JTAG identify capture: head bytes 0 to 1,253, its data block to 10,380, its three overview
+  // blocks of 2^12 ticks to 13,680 (the converter's report).
+  await page.goto(`/e2e/pages/view.html?open&src=fixtures/identify-jtag.tickwave&firstRead=1024&tag=${tag}`);
   await waitReady(page, ["v"]);
   const view = page.locator("#v");
   // At the whole capture a column is about 400,000 ticks: the head's 2^16 level draws it.
-  expect((await served(tag)).map((e) => e.range)).toEqual(["bytes=0-1023", "bytes=1024-1250"]);
+  expect((await served(tag)).map((e) => e.range)).toEqual(["bytes=0-1023", "bytes=1024-1252"]);
   // 20 ms over the view's columns is about 13,000 ticks a column: the 2^12 level, from blocks.
   // 465 to 485 ms is the capture's busiest stretch.
   await view.evaluate((v) => {
@@ -166,11 +166,11 @@ test("a finer overview level comes from overview blocks by range, not from the d
     return view.settled();
   });
   const ranges = (await served(tag)).map((e) => e.range!);
-  expect(ranges.slice(0, 2)).toEqual(["bytes=0-1023", "bytes=1024-1250"]);
+  expect(ranges.slice(0, 2)).toEqual(["bytes=0-1023", "bytes=1024-1252"]);
   expect(ranges.length).toBe(3);
   const [, from, to] = /^bytes=(\d+)-(\d+)$/.exec(ranges[2])!.map(Number);
-  expect(from).toBeGreaterThanOrEqual(10378);
-  expect(to).toBeLessThan(13678);
+  expect(from).toBeGreaterThanOrEqual(10380);
+  expect(to).toBeLessThan(13680);
   mkdirSync("screenshots", { recursive: true });
   await view.screenshot({ path: `screenshots/${info.project.name}-overview-blocks.png` });
 });
@@ -179,12 +179,12 @@ test("a read that fails says the data did not load, and is not asked again at on
   const tag = tagged(info, "fail");
   await recordReady(page);
   // The JTAG identify capture's head takes two reads; the third, of its overview blocks, fails.
-  await page.goto(`/e2e/pages/view.html?open&src=fixtures/identify-jtag.chrono&firstRead=1024&tag=${tag}&after=2&fail=503`);
+  await page.goto(`/e2e/pages/view.html?open&src=fixtures/identify-jtag.tickwave&firstRead=1024&tag=${tag}&after=2&fail=503`);
   await waitReady(page, ["v"]);
   const view = page.locator("#v");
   await view.evaluate((v) => (v as unknown as { setWindow(a: number, b: number): void }).setWindow(465e6, 485e6));
   const notice = view.locator(".notice");
-  await expect(notice).toContainText("Data did not load: identify-jtag.chrono: HTTP 503");
+  await expect(notice).toContainText("Data did not load: identify-jtag.tickwave: HTTP 503");
   // Hovering redraws, and every redraw asks for the data; the failed read waits before it is asked again.
   const box = (await view.locator("canvas").boundingBox())!;
   for (let i = 0; i < 10; i++) await page.mouse.move(box.x + 100 + i * 30, box.y + box.height / 2);
@@ -195,7 +195,7 @@ test("a read that fails says the data did not load, and is not asked again at on
 test("a read still going after five seconds says so, until it lands", async ({ page }, info) => {
   const tag = tagged(info, "stall");
   await recordReady(page);
-  await page.goto(`/e2e/pages/view.html?open&src=fixtures/identify-jtag.chrono&firstRead=1024&tag=${tag}&after=2&stall=7000`);
+  await page.goto(`/e2e/pages/view.html?open&src=fixtures/identify-jtag.tickwave&firstRead=1024&tag=${tag}&after=2&stall=7000`);
   await waitReady(page, ["v"]);
   const view = page.locator("#v");
   await view.evaluate((v) => (v as unknown as { setWindow(a: number, b: number): void }).setWindow(465e6, 485e6));
@@ -209,13 +209,13 @@ test("analog through the WASM path: the head's overview, the samples, and readou
   const tag = tagged(info, "analog");
   await page.setViewportSize({ width: 700, height: 600 });
   await recordReady(page);
-  // swd50-cut: 50,000 samples a channel at 1 GS/s in an 11 ms capture; its head is 1,152 bytes.
-  await page.goto(`/e2e/pages/view.html?open&src=fixtures/swd50-cut.chrono&firstRead=1024&tag=${tag}`);
+  // swd50-cut: 50,000 samples a channel at 1 GS/s in an 11 ms capture; its head is 1,154 bytes.
+  await page.goto(`/e2e/pages/view.html?open&src=fixtures/swd50-cut.tickwave&firstRead=1024&tag=${tag}`);
   await waitReady(page, ["v"]);
   const view = page.locator("#v");
   // At the whole capture a column is several thousand ticks: the head's 2^12 level draws the
   // analog rows, and no block is read.
-  expect((await served(tag)).map((e) => e.range)).toEqual(["bytes=0-1023", "bytes=1024-1151"]);
+  expect((await served(tag)).map((e) => e.range)).toEqual(["bytes=0-1023", "bytes=1024-1153"]);
   const drawn = await view.evaluate((v) => {
     const canvas = v.shadowRoot!.querySelector("canvas")!;
     const data = canvas.getContext("2d")!.getImageData(0, 0, canvas.width, Math.round(canvas.height / 2)).data;
@@ -237,7 +237,7 @@ test("analog through the WASM path: the head's overview, the samples, and readou
   await win(1000, 1100);
   const ranges = (await served(tag)).map((e) => e.range!);
   expect(ranges.length).toBe(3);
-  expect(ranges[2]).toMatch(/^bytes=1152-\d+$/);
+  expect(ranges[2]).toMatch(/^bytes=1154-\d+$/);
   // Cursors at ticks 1020 and 1060, on the SWCLK row.
   const box = (await plotOf(view).boundingBox())!;
   const tickAt = (x: number) => view.evaluate((v, x) => (v as unknown as { tickAt(x: number): number }).tickAt(x), x);
@@ -261,7 +261,7 @@ test("analog through the WASM path: the head's overview, the samples, and readou
 test("an inset's duration: first edge to last of the edges in [start, end)", async ({ page }) => {
   // Expected values from the edges, read by a process of the test's own through the decoder.
   const edges = (ch: number, s: number, e: number) =>
-    JSON.parse(execFileSync(process.execPath, ["scripts/edges.ts", "fixtures/identify-swd.chrono", String(ch), String(s), String(e)], { encoding: "utf8" })) as { ticks: number[] };
+    JSON.parse(execFileSync(process.execPath, ["scripts/edges.ts", "fixtures/identify-swd.tickwave", String(ch), String(s), String(e)], { encoding: "utf8" })) as { ticks: number[] };
   const ms = (ticks: number[]) => `${((ticks[ticks.length - 1] - ticks[0]) / 1000).toFixed(3)}\u00a0\u00b5s`;
   for (const [id, s, e, want] of [
     // The line reset: SWCLK from its first fall to the 51st rise.
@@ -272,7 +272,7 @@ test("an inset's duration: first edge to last of the edges in [start, end)", asy
   ] as const) {
     expect(ms(edges(0, s, e).ticks)).toBe(want);
     await recordReady(page);
-    await page.goto(`/e2e/pages/inset.html?src=fixtures/identify-swd.chrono&annotations=fixtures/identify-swd.annotations.toml&annotation=${id}`);
+    await page.goto(`/e2e/pages/inset.html?src=fixtures/identify-swd.tickwave&annotations=fixtures/identify-swd.annotations.toml&annotation=${id}`);
     await waitReady(page, ["i"]);
     await expect(page.locator("#i").locator(".measure")).toHaveText(`SWCLK ${want} first edge to last`);
   }
@@ -281,18 +281,18 @@ test("an inset's duration: first edge to last of the edges in [start, end)", asy
 test("a local file reads through slice", async ({ page }) => {
   await recordReady(page);
   await page.goto("/e2e/pages/file.html");
-  await page.locator("#pick").setInputFiles("fixtures/identify-swd.4k.chrono");
+  await page.locator("#pick").setInputFiles("fixtures/identify-swd.4k.tickwave");
   const view = page.locator("#v");
   await waitReady(page, ["v"]);
-  await expect(view.locator(".toolbar .title")).toHaveText("identify-swd.4k.chrono");
+  await expect(view.locator(".toolbar .title")).toHaveText("identify-swd.4k.tickwave");
   const w = await view.evaluate((v) => (v as unknown as { window: { start: number; end: number } }).window);
   expect(w).toEqual({ start: 0, end: 523583100 });
 });
 
 test("a bundled sidecar serves when the view names none", async ({ page }) => {
-  test.skip(!existsSync("fixtures/identify-swd.bundle.chrono"), "needs target/release/chrono: scripts/generate.ts bundles with it");
+  test.skip(!existsSync("fixtures/identify-swd.bundle.tickwave"), "needs target/release/tickwave: scripts/generate.ts bundles with it");
   await recordReady(page);
-  await page.goto("/e2e/pages/view.html?open&src=fixtures/identify-swd.bundle.chrono");
+  await page.goto("/e2e/pages/view.html?open&src=fixtures/identify-swd.bundle.tickwave");
   const view = page.locator("#v");
   await waitReady(page, ["v"]);
   await view.evaluate((v) => (v as unknown as { show(id: string): Promise<void> }).show("first-wait"));
@@ -307,15 +307,15 @@ test("a sidecar's problems show in the element and the console; the trace still 
   page.on("console", (m) => {
     if (m.type() === "warning") warnings.push(m.text());
   });
-  // The sidecar names identify-swd.chrono; this file is identify-swd.4k.chrono.
+  // The sidecar names identify-swd.tickwave; this file is identify-swd.4k.tickwave.
   await recordReady(page);
-  await page.goto("/e2e/pages/view.html?open&src=fixtures/identify-swd.4k.chrono&annotations=fixtures/identify-swd.annotations.toml");
+  await page.goto("/e2e/pages/view.html?open&src=fixtures/identify-swd.4k.tickwave&annotations=fixtures/identify-swd.annotations.toml");
   const view = page.locator("#v");
   await waitReady(page, ["v"]);
   const notice = view.locator(".notice");
   await expect(notice).toBeVisible();
-  await expect(notice).toContainText('names "identify-swd.chrono", not "identify-swd.4k.chrono"');
-  expect(warnings.some((w) => w.includes('not "identify-swd.4k.chrono"'))).toBe(true);
+  await expect(notice).toContainText('names "identify-swd.tickwave", not "identify-swd.4k.tickwave"');
+  expect(warnings.some((w) => w.includes('not "identify-swd.4k.tickwave"'))).toBe(true);
   expect(await view.evaluate((v) => (v as unknown as { window: unknown }).window)).toEqual({ start: 0, end: 523583100 });
 });
 
@@ -333,7 +333,7 @@ test.describe("the identify view", () => {
     const view = page.locator("#identify");
     const box = (await plotOf(view).boundingBox())!;
     const selected = view.evaluate(
-      (v) => new Promise((resolve) => v.addEventListener("chrono-select", (e) => resolve((e as CustomEvent).detail), { once: true })),
+      (v) => new Promise((resolve) => v.addEventListener("tickwave-select", (e) => resolve((e as CustomEvent).detail), { once: true })),
     );
     // Every edge is between 376.7 ms and 389.8 ms of 523.6 ms; drag across nearly the whole axis.
     const y = box.y + box.height - 10;
@@ -411,8 +411,8 @@ test.describe("the identify view", () => {
     const announced = view.evaluate(
       (v) =>
         new Promise((resolve, reject) => {
-          v.addEventListener("chrono-window", (e) => resolve((e as CustomEvent).detail), { once: true });
-          setTimeout(() => reject(new Error("no chrono-window within 5 s")), 5000);
+          v.addEventListener("tickwave-window", (e) => resolve((e as CustomEvent).detail), { once: true });
+          setTimeout(() => reject(new Error("no tickwave-window within 5 s")), 5000);
         }),
     );
     await page.mouse.move(x, box.y + 60);
@@ -477,7 +477,7 @@ test.describe("a reference", () => {
   test("hover opens an inset beside the text and moves nothing; Escape closes it", async ({ page }) => {
     await page.setViewportSize({ width: 1100, height: 900 });
     await open(page, { reduced: true });
-    const ref = page.locator("chrono-ref[annotation=line-reset]");
+    const ref = page.locator("tickwave-ref[annotation=line-reset]");
     const figure = page.locator("figure").first();
     // Figure 1 grows when its annotation's text arrives; measure it after that.
     await waitReady(page, ["inset-dpidr"]);
@@ -485,7 +485,7 @@ test.describe("a reference", () => {
     await ref.hover();
     const pop = ref.locator(".pop");
     await expect(pop).toBeVisible();
-    await expect(pop.locator("chrono-inset figcaption")).toHaveText("Line reset: SWDIO held high for 51 clocks");
+    await expect(pop.locator("tickwave-inset figcaption")).toHaveText("Line reset: SWDIO held high for 51 clocks");
     expect(await figure.boundingBox()).toEqual(before);
     // Beside the text: below the reference, starting near it.
     const r = (await ref.boundingBox())!;
@@ -498,7 +498,7 @@ test.describe("a reference", () => {
 
   test("focus opens it, blur closes it, Enter opens the view at the annotation", async ({ page }) => {
     await open(page, { reduced: true });
-    const ref = page.locator("chrono-ref[annotation=dpidr-ack]");
+    const ref = page.locator("tickwave-ref[annotation=dpidr-ack]");
     await ref.focus();
     await expect(ref.locator(".pop")).toBeVisible();
     await page.keyboard.press("Enter");
@@ -516,7 +516,7 @@ test.describe("a reference", () => {
 
   test("the sweep plays once per appearance, not on a quick reopen", async ({ page }) => {
     await open(page);
-    const ref = page.locator("chrono-ref[annotation=dpidr-read]");
+    const ref = page.locator("tickwave-ref[annotation=dpidr-read]");
     // A sweep lasts 420 ms, shorter than a poll's gaps, so the page samples it every frame.
     const watch = () =>
       ref.evaluate((r) => {
@@ -524,7 +524,7 @@ test.describe("a reference", () => {
         w.swept = false;
         cancelAnimationFrame(w.watching);
         const frame = () => {
-          const inset = r.shadowRoot!.querySelector("chrono-inset") as unknown as { sweeping: boolean } | null;
+          const inset = r.shadowRoot!.querySelector("tickwave-inset") as unknown as { sweeping: boolean } | null;
           if (inset?.sweeping) w.swept = true;
           w.watching = requestAnimationFrame(frame);
         };

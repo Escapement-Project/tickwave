@@ -2,7 +2,7 @@
 // decoded on demand, kept in an LRU. Runs in the worker; the unit tests run it in Node.
 
 import { LRUCache } from "lru-cache";
-import type { Recording as WasmRecording } from "../../../crates/wasm/pkg/chrono_wasm.js";
+import type { Recording as WasmRecording } from "../../../crates/wasm/pkg/tickwave_wasm.js";
 import { lowerBound } from "../search.ts";
 import {
   aborted,
@@ -261,7 +261,7 @@ export class Opened {
       try {
         return api.headLength(b);
       } catch (e) {
-        throw named("ChronoNotRecording", `${bytes.name}: ${e instanceof Error ? e.message : e}`);
+        throw named("TickwaveNotRecording", `${bytes.name}: ${e instanceof Error ? e.message : e}`);
       }
     };
     for (let need = headLength(head); need > head.length; need = headLength(head)) {

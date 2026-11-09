@@ -24,9 +24,9 @@ const f = (x: number, d = 1) => (Number.isFinite(x) ? x.toFixed(d) : "–");
 const short = (rec: string) => rec.replace(/\.1024$/, "");
 
 const NAMES: Record<string, string> = {
-  "ruzstd-full": "chrono-wasm, default build (ruzstd)",
-  ruzstd: "chrono-wasm, decoder only (ruzstd)",
-  "ruzstd#2": "chrono-wasm, decoder only (ruzstd), A-A copy",
+  "ruzstd-full": "tickwave-wasm, default build (ruzstd)",
+  ruzstd: "tickwave-wasm, decoder only (ruzstd)",
+  "ruzstd#2": "tickwave-wasm, decoder only (ruzstd), A-A copy",
   libzstd: "libzstd in WASM",
   fzstd: "fzstd + TypeScript",
   "fzstd-jsxxh": "fzstd + TypeScript, pure-JS XXH64",
@@ -75,7 +75,7 @@ if (machine) {
   const clean = machine.decoderDiff === "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
   if (machine.base)
     out.push(
-      `Decoders built from chrono ${machine.base.slice(0, 7)} ${clean ? "with no uncommitted changes to crates/format or crates/wasm" : `with uncommitted crates/format and crates/wasm changes (build/decoder.diff, SHA-256 ${machine.decoderDiff.slice(0, 16)}...)`}. Modules served, SHA-256: ${Object.entries(machine.served as Record<string, string>).filter(([k]) => k.endsWith(".wasm")).map(([k, v]) => `${k} ${v.slice(0, 16)}...`).join(", ")}.\n`,
+      `Decoders built from tickwave ${machine.base.slice(0, 7)} ${clean ? "with no uncommitted changes to crates/format or crates/wasm" : `with uncommitted crates/format and crates/wasm changes (build/decoder.diff, SHA-256 ${machine.decoderDiff.slice(0, 16)}...)`}. Modules served, SHA-256: ${Object.entries(machine.served as Record<string, string>).filter(([k]) => k.endsWith(".wasm")).map(([k, v]) => `${k} ${v.slice(0, 16)}...`).join(", ")}.\n`,
     );
 }
 
@@ -363,7 +363,7 @@ if (barRows.length)
     barAt,
     0,
     "### Against the bar (PLAN.md §7)\n",
-    "A JavaScript decoder (fzstd) against chrono-wasm. A gap within the A-A floor is \"same\".\n",
+    "A JavaScript decoder (fzstd) against tickwave-wasm. A gap within the A-A floor is \"same\".\n",
     table(["measure", "recording", "medians", "A-A floor", "verdict"], barRows),
     "",
   );

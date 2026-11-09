@@ -12,10 +12,10 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use chrono_format::model::{
+use memmap2::Mmap;
+use tickwave_format::model::{
     Analog, Channel, ChannelData, Digital, Ratio, Recording, Samples, Source,
 };
-use memmap2::Mmap;
 
 const MAGIC: &[u8; 8] = b"<SALEAE>";
 const DIGITAL_HEADER: usize = 60;
@@ -89,7 +89,7 @@ impl Mapped {
             source,
         };
         let file = File::open(path).map_err(io)?;
-        // SAFETY: nothing may truncate or write the export while it is mapped. chrono never
+        // SAFETY: nothing may truncate or write the export while it is mapped. tickwave never
         // writes its input, and a converter run over a finished export holds that.
         let map = unsafe { Mmap::map(&file) }.map_err(io)?;
         let path = path.to_owned();

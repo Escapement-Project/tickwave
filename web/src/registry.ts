@@ -1,5 +1,5 @@
 // Shared state across every element on the page: one Source and one annotation list per URL.
-// What reads a URL is up to the loaders registered here: chrono.js registers one for .chrono
+// What reads a URL is up to the loaders registered here: tickwave.js registers one for .tickwave
 // files; the dev page registers one for its fixtures.
 
 import type { Annotation } from "./annotations.ts";
@@ -22,7 +22,7 @@ const heads = new Map<string, RecordingInfo>();
 const annotationLists = new Map<string, Promise<Annotation[] | null>>();
 const waiting: (() => void)[] = [];
 
-/** Fires `chrono-head` with the URL once a recording's head is here. */
+/** Fires `tickwave-head` with the URL once a recording's head is here. */
 export const events = new EventTarget();
 
 export function absolute(url: string, base: string = document.baseURI): URL {
@@ -64,7 +64,7 @@ export function infoFor(url: URL): Promise<RecordingInfo> {
     p.then(
       (info) => {
         heads.set(key, info);
-        events.dispatchEvent(new CustomEvent("chrono-head", { detail: key }));
+        events.dispatchEvent(new CustomEvent("tickwave-head", { detail: key }));
       },
       () => infos.delete(key),
     );
@@ -104,7 +104,7 @@ export function bundledFor(recording: URL): Promise<Annotation[] | null> {
   });
 }
 
-/** The head and the sidecar, ahead of a view: `<chrono-ref>` calls this when it scrolls into view. */
+/** The head and the sidecar, ahead of a view: `<tickwave-ref>` calls this when it scrolls into view. */
 export async function prefetch(src: URL, annotations: URL | null): Promise<void> {
   const s = await sourceFor(src);
   await s.prefetch();

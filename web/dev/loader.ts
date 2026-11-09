@@ -5,7 +5,7 @@
 // A fixture URL may carry ?latency=MS to delay every answer, so the page can show the renderer
 // drawing what it has while blocks are on their way.
 
-import { registerLoader, type Annotation, type RawAnnotation, type Source } from "chrono";
+import { registerLoader, type Annotation, type RawAnnotation, type Source } from "tickwave";
 import { resolveRaw } from "../src/annotations.ts";
 import { readFixture } from "../src/fixture-file.ts";
 import { MemorySource } from "../src/memory-source.ts";
@@ -46,7 +46,7 @@ class FixtureSource implements Source {
 function jsonLines(text: string): RawAnnotation[] {
   const lines = text.split("\n").filter((l) => l.trim() !== "");
   const head = JSON.parse(lines[0]) as { format?: string; source?: string };
-  if (head.format !== "chrono-annotations/1" || !head.source) throw new Error("not a generator's annotation file");
+  if (head.format !== "tickwave-annotations/1" || !head.source) throw new Error("not a generator's annotation file");
   return lines.slice(1).map((l) => ({ ...(JSON.parse(l) as RawAnnotation), source: head.source }));
 }
 
@@ -71,7 +71,7 @@ async function annotations(url: URL, _recording: URL, source: Source): Promise<A
 }
 
 registerLoader({
-  accepts: (url) => url.pathname.endsWith(".chronofx"),
+  accepts: (url) => url.pathname.endsWith(".tickwavefx"),
   source: (url) => new FixtureSource(url),
   annotations,
 });

@@ -1,6 +1,6 @@
-# The chrono recording format, version 1.0
+# The tickwave recording format, version 1.0
 
-A chrono recording holds digital and analog channels of one capture on one time axis, exactly as
+A tickwave recording holds digital and analog channels of one capture on one time axis, exactly as
 the instrument recorded them. A reader fetches the head first and then only the blocks a view
 covers, so a page can show a few microseconds of a two-minute capture without downloading it.
 
@@ -45,7 +45,7 @@ last checksum, so a valid empty frame after a corrupted block would hide the cor
 
 | Offset | Type | Field |
 | --- | --- | --- |
-| 0 | 8 bytes | magic: `89 63 68 72 6f 6e 6f 0a` (`\x89chrono\n`) |
+| 0 | 8 bytes | magic: `89 54 4b 57 0d 0a 1a 0a` (`\x89TKW\r\n\x1a\n`) |
 | 8 | u16 | major version, 1 |
 | 10 | u16 | minor version, 0 |
 | 12 | u32 | `header_len` |

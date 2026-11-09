@@ -1,13 +1,13 @@
-// <chrono-ref>: text that cites an annotation. Hover or focus opens a <chrono-inset> in a popover
+// <tickwave-ref>: text that cites an annotation. Hover or focus opens a <tickwave-inset> in a popover
 // beside the text, so nothing on the page moves; a click or Enter opens the `for` view there.
 
 import { autoUpdate, computePosition, flip, inline, offset, shift } from "@floating-ui/dom";
 import { REF_ATTRIBUTES } from "../attributes.ts";
 import { reducedMotion } from "../face.ts";
 import { absolute, prefetch } from "../registry.ts";
-import { ChronoElement } from "./base.ts";
-import type { ChronoInset } from "./inset.ts";
-import type { ChronoView } from "./view.ts";
+import { TickwaveElement } from "./base.ts";
+import type { TickwaveInset } from "./inset.ts";
+import type { TickwaveView } from "./view.ts";
 
 const CSS = `
 :host { display: inline; font: inherit; line-height: inherit; color: inherit;
@@ -21,10 +21,10 @@ const CSS = `
   text-decoration: none; cursor: default; overflow: visible; }
 `;
 
-export class ChronoRef extends ChronoElement {
+export class TickwaveRef extends TickwaveElement {
   static observedAttributes = REF_ATTRIBUTES;
   readonly #pop: HTMLElement;
-  #inset: ChronoInset | null = null;
+  #inset: TickwaveInset | null = null;
   #stopPosition: (() => void) | null = null;
   #intersect: IntersectionObserver;
   #prefetched = "";
@@ -70,10 +70,10 @@ export class ChronoRef extends ChronoElement {
   };
 
   /** The view named by `for`, if any. */
-  get #view(): ChronoView | null {
+  get #view(): TickwaveView | null {
     const id = this.getAttribute("for");
     const el = id ? document.getElementById(id) : null;
-    return el?.localName === "chrono-view" ? (el as ChronoView) : null;
+    return el?.localName === "tickwave-view" ? (el as TickwaveView) : null;
   }
 
   /** src, annotations, channels and series: the ref's own, else its view's. */
@@ -103,7 +103,7 @@ export class ChronoRef extends ChronoElement {
     prefetch(absolute(src), annotations ? absolute(annotations) : null).catch((e) => this.fail(e));
   }
 
-  #configure(inset: ChronoInset): void {
+  #configure(inset: TickwaveInset): void {
     for (const name of ["src", "annotations", "channels", "series"]) {
       const v = this.#borrowed(name);
       if (v === null) inset.removeAttribute(name);
@@ -116,7 +116,7 @@ export class ChronoRef extends ChronoElement {
   #open(): void {
     if (!this.#borrowed("src") || this.#pop.matches(":popover-open")) return;
     if (!this.#inset) {
-      this.#inset = document.createElement("chrono-inset") as ChronoInset;
+      this.#inset = document.createElement("tickwave-inset") as TickwaveInset;
       this.#configure(this.#inset);
       this.#pop.append(this.#inset);
     }

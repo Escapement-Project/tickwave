@@ -1,4 +1,4 @@
-// <chrono-view>: the full capture. Collapsed to one line until `open`; open, a time axis, one row
+// <tickwave-view>: the full capture. Collapsed to one line until `open`; open, a time axis, one row
 // a channel and an annotation lane, with zoom, pan, cursors, a selection and its readouts.
 
 import { ofKind, type Annotation } from "../annotations.ts";
@@ -9,7 +9,7 @@ import { lowerBound } from "../search.ts";
 import { channelIndices, Plot } from "../render/plot.ts";
 import { isAbort, named, sampleAtOrBefore, sampleTick, type RecordingInfo } from "../source.ts";
 import { parseTime, toTicks } from "../time.ts";
-import { ChronoElement, loadRecording, type Loaded } from "./base.ts";
+import { TickwaveElement, loadRecording, type Loaded } from "./base.ts";
 
 const CSS = `
 .box { background: var(--surface, Canvas); border: 1px solid var(--hair, GrayText); border-radius: 10px; }
@@ -82,7 +82,7 @@ interface Drag {
   moved: boolean;
 }
 
-export class ChronoView extends ChronoElement {
+export class TickwaveView extends TickwaveElement {
   static observedAttributes = VIEW_ATTRIBUTES;
   readonly #plot: Plot;
   readonly #summary: HTMLElement;
@@ -157,14 +157,14 @@ export class ChronoView extends ChronoElement {
     super.connectedCallback();
     this.#resize.observe(this.#plotBox);
     this.#seen.observe(this);
-    registryEvents.addEventListener("chrono-head", this.#onHead);
+    registryEvents.addEventListener("tickwave-head", this.#onHead);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.#resize.disconnect();
     this.#seen.disconnect();
-    registryEvents.removeEventListener("chrono-head", this.#onHead);
+    registryEvents.removeEventListener("tickwave-head", this.#onHead);
   }
 
   get #src(): URL | null {
@@ -194,7 +194,7 @@ export class ChronoView extends ChronoElement {
     const open = this.open;
     this.#summary.hidden = open;
     this.#viewer.hidden = !open;
-    if (open && !this.#wasOpen) this.emit("chrono-open", { src: this.getAttribute("src") });
+    if (open && !this.#wasOpen) this.emit("tickwave-open", { src: this.getAttribute("src") });
     this.#wasOpen = open;
     if (!open) {
       this.#renderSummary();
@@ -212,7 +212,7 @@ export class ChronoView extends ChronoElement {
         (l) => {
           if (this.#loadKey !== key) return null;
           this.#loaded = l;
-          for (const e of l.annotations.errors) this.fail(named("ChronoSidecarError", e));
+          for (const e of l.annotations.errors) this.fail(named("TickwaveSidecarError", e));
           this.#windowAttr = null;
           this.#apply();
           return l;
@@ -374,14 +374,14 @@ export class ChronoView extends ChronoElement {
     this.#windowEventQueued = true;
     requestAnimationFrame(() => {
       this.#windowEventQueued = false;
-      this.emit("chrono-window", this.window);
+      this.emit("tickwave-window", this.window);
     });
   }
 
   #drawn(): void {
     if (this.#readyFired || !this.#plot.settled) return;
     this.#readyFired = true;
-    queueMicrotask(() => this.emit("chrono-ready", { height: this.offsetHeight }));
+    queueMicrotask(() => this.emit("tickwave-ready", { height: this.offsetHeight }));
   }
 
   /** Resolves after the next frame drawn with every row's data. */
@@ -711,7 +711,7 @@ export class ChronoView extends ChronoElement {
     }
     if (seq !== this.#readoutSeq) return;
     this.#setReadout(lines);
-    if (announce && detail) this.emit("chrono-select", detail);
+    if (announce && detail) this.emit("tickwave-select", detail);
   }
 
   #setReadout(lines: HTMLElement[]): void {

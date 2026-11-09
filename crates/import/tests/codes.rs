@@ -4,11 +4,11 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
 
-use chrono_format::model::{ChannelData, Samples};
-use chrono_import::codes::{Codes, recover_codes};
-use chrono_import::sigrok;
 use common::{testdata, verge_csv};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use tickwave_format::model::{ChannelData, Samples};
+use tickwave_import::codes::{Codes, recover_codes};
+use tickwave_import::sigrok;
 
 #[test]
 fn hand_worked() {

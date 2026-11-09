@@ -3,7 +3,7 @@
 import { chromium, firefox } from "playwright";
 import { start } from "./serve.ts";
 
-const rec = process.argv[2] ?? "gcc-swd-reads.1024.chrono";
+const rec = process.argv[2] ?? "gcc-swd-reads.1024.tickwave";
 const server = await start();
 for (const type of [chromium, firefox]) {
   const browser = await type.launch();

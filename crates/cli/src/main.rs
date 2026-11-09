@@ -1,4 +1,4 @@
-//! `chrono`: convert captures into chrono's recording format, describe a recording, and check one
+//! `tickwave`: convert captures into tickwave's recording format, describe a recording, and check one
 //! against its source.
 
 use std::collections::BTreeMap;
@@ -8,15 +8,15 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
-use chrono_format::annotations::{self, Included};
-use chrono_format::decode::{Head, verify};
-use chrono_format::encode::{Options, encode};
-use chrono_format::header::{AnalogCoding, ChannelKind, Header};
-use chrono_format::model::{Channel, ChannelData, Recording, Samples};
-use chrono_import::sigrok::Skipped;
-use chrono_import::{codes, saleae, sigrok, vcd};
 use clap::{Args, Parser, Subcommand};
 use indicatif::ProgressStyle;
+use tickwave_format::annotations::{self, Included};
+use tickwave_format::decode::{Head, verify};
+use tickwave_format::encode::{Options, encode};
+use tickwave_format::header::{AnalogCoding, ChannelKind, Header};
+use tickwave_format::model::{Channel, ChannelData, Recording, Samples};
+use tickwave_import::sigrok::Skipped;
+use tickwave_import::{codes, saleae, sigrok, vcd};
 use tracing::{Span, info, info_span, warn};
 use tracing_indicatif::IndicatifLayer;
 use tracing_indicatif::span_ext::IndicatifSpanExt;
@@ -25,9 +25,9 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 #[derive(Parser)]
 #[command(
-    name = "chrono",
+    name = "tickwave",
     version,
-    about = "Convert, describe and verify chrono recordings"
+    about = "Convert, describe and verify tickwave recordings"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -36,7 +36,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Convert a capture into a chrono recording. The output is checked against the source
+    /// Convert a capture into a tickwave recording. The output is checked against the source
     /// before it is written.
     Convert {
         #[command(subcommand)]
@@ -376,7 +376,7 @@ fn convert(open: &dyn Fn() -> Result<Recording>, output: &Path, common: &Common)
         title: common.title.clone(),
         meta: common.meta.iter().cloned().collect::<BTreeMap<_, _>>(),
         converter: Some(format!(
-            "chrono {} (zstd {}, blocks of {} KiB)",
+            "tickwave {} (zstd {}, blocks of {} KiB)",
             env!("CARGO_PKG_VERSION"),
             common.level,
             common.block_kib
@@ -618,7 +618,7 @@ fn check_annotations(recording: &Path, sidecar: &Path, json: bool) -> Result<()>
 fn bundle_file(recording: &Path, sidecar: &Path, output: &Path) -> Result<()> {
     let (bytes, _) = read_head(recording)?;
     let (resolved, files) = load_sidecar(&bytes, recording, sidecar)?;
-    let bundled = chrono_format::bundle::bundle(&bytes, files.into_iter().collect())?;
+    let bundled = tickwave_format::bundle::bundle(&bytes, files.into_iter().collect())?;
     let check = Head::parse(&bundled)?;
     if check.header.content_id != Head::parse(&bytes)?.header.content_id {
         bail!("bundling changed the content id");

@@ -1,4 +1,4 @@
-# chrono sidecar annotations, version 1
+# tickwave sidecar annotations, version 1
 
 Annotations mark spans and points on a recording: a transfer, an acknowledge, a misread, a
 stretched clock period. They live beside the recording in text files, so they diff, take hand
@@ -8,19 +8,19 @@ Status: draft, with the recording format.
 
 ## Files
 
-A recording `rec.chrono` has one hand-written TOML file, `rec.annotations.toml`. A program that
+A recording `rec.tickwave` has one hand-written TOML file, `rec.annotations.toml`. A program that
 generates annotations, such as a protocol decoder, writes its own JSON Lines file, which the TOML
 file includes: `rec.wire_swd.jsonl`. A generator rewrites its file whole on each run. Nothing
 machine-edits the hand-written file, so a rerun cannot touch a hand edit.
 
 A generator runs after the recording is converted. It reads the recording's id from
-`chrono info --json` (`header.content_id`).
+`tickwave info --json` (`header.content_id`).
 
 ## The hand-written file
 
 ```toml
-format = "chrono-annotations/1"
-recording = "rec.chrono"                 # optional; checked against the file name when known
+format = "tickwave-annotations/1"
+recording = "rec.tickwave"               # optional; checked against the file name when known
 recording_id = "blake3:4f2a…"            # the recording's content id
 include = ["rec.wire_swd.jsonl"]         # generator files, beside this one
 
@@ -44,7 +44,7 @@ label = "NXP's firmware misreads at 25 MHz"
 The first line names the generator. Each later line is one annotation. Blank lines are skipped.
 
 ```
-{"format": "chrono-annotations/1", "source": "wire_swd", "version": "9f3c2e1", "recording_id": "blake3:4f2a…"}
+{"format": "tickwave-annotations/1", "source": "wire_swd", "version": "9f3c2e1", "recording_id": "blake3:4f2a…"}
 {"id": "misread/412093311", "kind": "misread", "start": 412093311, "end": 412094105, "channels": ["SWDIO"], "label": "parity wrong"}
 ```
 
@@ -105,18 +105,19 @@ annotation of the kind a page steps through.
 
 ## Resolved annotations
 
-`chrono annotations check --json` prints the annotations resolved, in sidecar order, and the
+`tickwave annotations check --json` prints the annotations resolved, in sidecar order, and the
 browser's decoder hands the page the same. Each has its full id, `source` (the generator's name;
 null for a hand-written one), `start` and `end` in ticks, and the fields above. An alias keeps
 `ref`, the full id of the generated annotation it names, so a page can tell the two apart.
 
 ## Checks
 
-`chrono annotations check rec.chrono rec.annotations.toml` reports every problem it finds, then exits
-non-zero if there was any. A page's build runs it, so a decoder rerun that drops an annotation the
-prose cites breaks the build instead of the page. It checks that:
+`tickwave annotations check rec.tickwave rec.annotations.toml` reports every problem it finds, then
+exits non-zero if there was any. A page's build runs it, so a decoder rerun that drops an annotation
+the prose cites breaks the build instead of the page. It checks that:
 
-- both files declare format `chrono-annotations/1`, and their `recording_id` matches the recording;
+- both files declare format `tickwave-annotations/1`, and their `recording_id` matches the
+  recording;
 - `recording`, if given, names the recording's file;
 - every included file is provided, and every provided file is included;
 - ids are unique, hand-written ids hold no `/`, and every `ref` resolves;
@@ -125,6 +126,6 @@ prose cites breaks the build instead of the page. It checks that:
 
 ## Bundling
 
-`chrono bundle rec.chrono rec.annotations.toml -o shared.chrono` checks the sidecar, then writes a
-copy of the recording with the sidecar's files in its header (`annotations`, each file's name and
-text), for a single-file share. The content id stays the same.
+`tickwave bundle rec.tickwave rec.annotations.toml -o shared.tickwave` checks the sidecar, then
+writes a copy of the recording with the sidecar's files in its header (`annotations`, each file's
+name and text), for a single-file share. The content id stays the same.

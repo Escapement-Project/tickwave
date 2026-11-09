@@ -434,7 +434,7 @@ export class Plot {
   /**
    * The device-pixel stretches of a channel's row between px0 and px1, each in the colour that
    * draws it: the role of the last annotation in the list that paints the channel there
-   * (`--chrono-<role>`), else the trace's.
+   * (`--tickwave-<role>`), else the trace's.
    */
   #stretches(channel: string, px0: number, px1: number): { px0: number; px1: number; colour: string }[] {
     const p = this.palette!;

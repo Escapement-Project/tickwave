@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <title>One view, set up by the query</title>
 <!--
-  ?src=   the recording, relative to web/ (default fixtures/identify-swd.chrono)
+  ?src=   the recording, relative to web/ (default fixtures/identify-swd.tickwave)
   ?tag=   appended to the recording's URL, so the server's log can tell this page's requests apart
   ?annotations=  a sidecar, relative to web/
   ?open   open the view; otherwise it stays collapsed
@@ -13,17 +13,17 @@
   ?after=N&fail=S, ?after=N&stall=MS  passed on to the server with the recording's URL
 -->
 <script type="module">
-import { configure } from "../../dist/chrono.js";
+import { configure } from "../../dist/tickwave.js";
 const q = new URLSearchParams(location.search);
 if (q.get("firstRead")) configure({ firstRead: Number(q.get("firstRead")) });
 const served = new URLSearchParams([...q].filter(([k]) => ["tag", "after", "fail", "stall"].includes(k)));
-const src = `../../${q.get("src") ?? "fixtures/identify-swd.chrono"}${served.size > 0 ? `?${served}` : ""}`;
-const view = document.createElement("chrono-view");
+const src = `../../${q.get("src") ?? "fixtures/identify-swd.tickwave"}${served.size > 0 ? `?${served}` : ""}`;
+const view = document.createElement("tickwave-view");
 view.id = "v";
 view.setAttribute("src", src);
 if (q.get("annotations")) view.setAttribute("annotations", `../../${q.get("annotations")}`);
 if (q.has("open")) view.setAttribute("open", "");
-const ref = document.createElement("chrono-ref");
+const ref = document.createElement("tickwave-ref");
 ref.setAttribute("for", "v");
 ref.setAttribute("annotation", "dpidr-read");
 ref.textContent = "the first read";

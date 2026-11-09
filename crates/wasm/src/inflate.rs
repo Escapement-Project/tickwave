@@ -1,12 +1,12 @@
-//! The browser's zstd decoder: libzstd, compiled to wasm32 with clang, in place of chrono-format's
+//! The browser's zstd decoder: libzstd, compiled to wasm32 with clang, in place of tickwave-format's
 //! ruzstd `inflate`. It decodes a digital block about a quarter faster and an analog block about
 //! four times as fast (bench/RESULTS.md). ruzstd stays out of the module only while nothing here
-//! calls chrono-format's `inflate`, `Head::parse`, `decode_block` or `decode_overview_block`;
+//! calls tickwave-format's `inflate`, `Head::parse`, `decode_block` or `decode_overview_block`;
 //! everything goes through their `_with` forms and `Inflater::inflate`.
 
 use std::cell::RefCell;
 
-use chrono_format::decode::DecodeError;
+use tickwave_format::decode::DecodeError;
 use zstd::zstd_safe::{self, DCtx};
 
 fn zstd_error(code: usize) -> DecodeError {
@@ -21,7 +21,7 @@ impl Inflater {
         Self(RefCell::new(DCtx::create()))
     }
 
-    /// What chrono-format's `inflate` does: exactly one frame filling `frame`, with a checksum,
+    /// What tickwave-format's `inflate` does: exactly one frame filling `frame`, with a checksum,
     /// naming no dictionary, decoding to exactly `len` bytes. libzstd checks a checksum the frame
     /// declares, but accepts a frame that declares none, and decodes every frame in its input, so
     /// those two are checked here first.

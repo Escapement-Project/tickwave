@@ -6,13 +6,13 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail, ensure};
-use chrono_format::decode::{Block, BlockChannel, Head, OverviewBlock};
-use chrono_format::header::{PREAMBLE_LEN, Preamble};
-use chrono_format::overview::ChannelOverview;
 use clap::{Parser, Subcommand};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use tickwave_format::decode::{Block, BlockChannel, Head, OverviewBlock};
+use tickwave_format::header::{PREAMBLE_LEN, Preamble};
+use tickwave_format::overview::ChannelOverview;
 
 #[derive(Parser)]
 struct Cli {
@@ -123,7 +123,7 @@ fn frame<'a>(bytes: &'a [u8], head: &Head, i: usize) -> &'a [u8] {
 
 fn stem(path: &Path) -> String {
     let name = path.file_name().unwrap().to_string_lossy();
-    name.strip_suffix(".chrono").unwrap_or(&name).to_owned()
+    name.strip_suffix(".tickwave").unwrap_or(&name).to_owned()
 }
 
 fn bar(m: &MultiProgress, len: u64, what: String) -> ProgressBar {
@@ -270,7 +270,7 @@ fn zero_interval(head: &Head, payload: &mut [u8]) -> Result<String> {
         let section = at..at + len;
         if matches!(
             head.header.channels[c].data,
-            chrono_format::header::ChannelKind::Digital { .. }
+            tickwave_format::header::ChannelKind::Digital { .. }
         ) && *len > 2
         {
             // Walk to the second interval; replace the first single-byte one after it.
@@ -466,7 +466,7 @@ fn corrupt(out: &Path, block: Option<usize>, path: &Path) -> Result<()> {
             Ok(_) => "accepted".to_owned(),
             Err(e) => e.to_string(),
         };
-        let fp = out.join(format!("{name}.b{i}.{kind}.chrono"));
+        let fp = out.join(format!("{name}.b{i}.{kind}.tickwave"));
         fs::write(&fp, &file)?;
         corruptions.push(Corruption {
             kind,
@@ -553,7 +553,7 @@ fn settled_rules(
     head: &Head,
     i: usize,
 ) -> Result<Vec<Corruption>> {
-    use chrono_format::header::{BlockRow, ChannelKind};
+    use tickwave_format::header::{BlockRow, ChannelKind};
     let mut list: Vec<Pending> = Vec::new();
     let nch = head.header.channels.len();
     let index_at = PREAMBLE_LEN + head.preamble.header_len as usize;
@@ -766,7 +766,7 @@ fn settled_rules(
         };
         let path = out.join(format!(
             "{name}.b{block}.{kind}.{}",
-            if whole_file { "chrono" } else { "bin" }
+            if whole_file { "tickwave" } else { "bin" }
         ));
         fs::write(&path, &g)?;
         out_list.push(Corruption {

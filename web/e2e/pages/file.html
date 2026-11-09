@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <title>A recording from a local file</title>
 <script type="module">
-import { registerFile } from "../../dist/chrono.js";
+import { registerFile } from "../../dist/tickwave.js";
 document.getElementById("pick").addEventListener("change", (e) => {
-  const view = document.createElement("chrono-view");
+  const view = document.createElement("tickwave-view");
   view.id = "v";
   view.setAttribute("src", registerFile(e.target.files[0]));
   view.setAttribute("open", "");
@@ -14,5 +14,5 @@ document.getElementById("pick").addEventListener("change", (e) => {
 });
 </script>
 </head>
-<body><input type="file" id="pick" accept=".chrono"></body>
+<body><input type="file" id="pick" accept=".tickwave"></body>
 </html>

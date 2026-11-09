@@ -1,9 +1,9 @@
 mod common;
 
-use chrono_format::model::Ratio;
-use chrono_import::sigrok;
-use chrono_import::vcd::{self, Import, Skipped};
 use common::{Oracle, drain, testdata};
+use tickwave_format::model::Ratio;
+use tickwave_import::sigrok;
+use tickwave_import::vcd::{self, Import, Skipped};
 
 /// sigrok-cli's VCD of each fixture, read by this reader, against the `.sr` read by the sigrok
 /// reader and against sigrok-cli's own reading. sigrok-cli writes a time of

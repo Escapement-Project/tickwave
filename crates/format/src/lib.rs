@@ -1,4 +1,4 @@
-//! chrono's recording format: the model of a recording's content, the file's head and blocks,
+//! tickwave's recording format: the model of a recording's content, the file's head and blocks,
 //! the encoder and the decoder.
 
 #[cfg(feature = "annotations")]

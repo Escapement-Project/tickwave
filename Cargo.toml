@@ -7,7 +7,7 @@ exclude = ["bench"]
 [workspace.package]
 edition = "2024"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/Escapement-Project/chrono"
+repository = "https://github.com/Escapement-Project/tickwave"
 publish = false
 
 # The browser's decoder: size and speed matter more than build time.

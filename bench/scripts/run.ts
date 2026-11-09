@@ -102,7 +102,7 @@ async function available(page: Page, labels: string[]): Promise<string[]> {
 
 async function setup(page: Page, labels: string[], rec: string): Promise<number> {
   await page.evaluate((d) => (globalThis as any).bench.setup(d), Object.fromEntries(labels.map((l) => [l, dir(l)])));
-  return page.evaluate((u) => (globalThis as any).bench.load(u), `/rec/${rec}.chrono`);
+  return page.evaluate((u) => (globalThis as any).bench.load(u), `/rec/${rec}.tickwave`);
 }
 
 async function correct(name: Name, browser: Browser) {
@@ -145,7 +145,7 @@ async function correct(name: Name, browser: Browser) {
     await setup(page, labels, "identify-swd");
     for (const c of m.corruptions) {
       for (const l of labels) {
-        const url = c.whole_file ? `/corrupt/${c.path}` : `/rec/${file}.chrono`;
+        const url = c.whole_file ? `/corrupt/${c.path}` : `/rec/${file}.tickwave`;
         const frame = c.whole_file ? null : `/corrupt/${c.path}`;
         const block = c.block ?? m.block;
         const expected = c.stage ?? "block";
@@ -175,7 +175,7 @@ async function coldInset(name: Name, dec: string, rec: string, throttle: boolean
       await cdp.send("Network.enable");
       await cdp.send("Network.emulateNetworkConditions", SLOW_4G);
     }
-    await page.goto(`${server.url}/inset.html?dec=${dec}&rec=/rec/${rec}.chrono`);
+    await page.goto(`${server.url}/inset.html?dec=${dec}&rec=/rec/${rec}.tickwave`);
     const r: any = await (await page.waitForFunction(() => window.__result, null, { timeout: 120000 })).jsonValue();
     if (r.error) throw new Error(`${dec} ${rec}: ${r.error}`);
     return { ...r, at, end: Date.now(), busy: busyBetween(at, Date.now()) };
@@ -260,7 +260,7 @@ async function whole(name: Name, browser: Browser) {
   save(`whole.${name}`, out);
 }
 
-// What was measured: the chrono tree build.sh built from, and the exact modules served.
+// What was measured: the tickwave tree build.sh built from, and the exact modules served.
 const sha = (b: string | Buffer) => createHash("sha256").update(b).digest("hex");
 
 // The recordings must be the ones reference.sh hashed, from start to end: a reconversion during a
@@ -268,7 +268,7 @@ const sha = (b: string | Buffer) => createHash("sha256").update(b).digest("hex")
 function checkRecordings(when: string) {
   for (const rec of ["identify-swd", ...recs]) {
     const want = JSON.parse(readFileSync(`build/reference/${rec}.json`, "utf8")).file_sha256;
-    if (sha(readFileSync(`${CONVERTED}/${rec}.chrono`)) !== want) throw new Error(`${rec}.chrono changed ${when}; rerun reference.sh and this`);
+    if (sha(readFileSync(`${CONVERTED}/${rec}.tickwave`)) !== want) throw new Error(`${rec}.tickwave changed ${when}; rerun reference.sh and this`);
   }
 }
 checkRecordings("since reference.sh hashed it");

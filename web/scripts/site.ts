@@ -1,7 +1,7 @@
-// Builds chrono's site into dist/site/, from site/ at the repository's root. Run from web/ after
+// Builds tickwave's site into dist/site/, from site/ at the repository's root. Run from web/ after
 // build.ts: node scripts/site.ts
 //
-// Every URL in the site is relative: it is published under a subpath (/chrono/).
+// Every URL in the site is relative: it is published under a subpath (/tickwave/).
 
 import * as esbuild from "esbuild";
 import MarkdownIt from "markdown-it";
@@ -21,9 +21,9 @@ mkdirSync(join(out, "docs"), { recursive: true });
 mkdirSync(join(out, "fixtures"), { recursive: true });
 
 // The elements, as build.ts made them.
-for (const f of ["chrono.js", "chrono-worker.js", "chrono.wasm"]) copyFileSync(join(web, "dist", f), join(out, f));
+for (const f of ["tickwave.js", "tickwave-worker.js", "tickwave.wasm"]) copyFileSync(join(web, "dist", f), join(out, f));
 
-// The page script, which imports the elements from the chrono.js beside it.
+// The page script, which imports the elements from the tickwave.js beside it.
 await esbuild.build({
   entryPoints: [join(site, "site.ts")],
   outfile: join(out, "site.js"),
@@ -34,9 +34,9 @@ await esbuild.build({
   logLevel: "warning",
   plugins: [
     {
-      name: "chrono-beside",
+      name: "tickwave-beside",
       setup(b) {
-        b.onResolve({ filter: /^chrono$/ }, () => ({ path: "./chrono.js", external: true }));
+        b.onResolve({ filter: /^tickwave$/ }, () => ({ path: "./tickwave.js", external: true }));
       },
     },
   ],
@@ -47,10 +47,10 @@ for (const f of ["tokens.css", "favicon.ico", "site.css"]) copyFileSync(join(sit
 cpSync(join(site, "fonts"), join(out, "fonts"), { recursive: true });
 
 // The demo's and the viewer's examples: committed fixtures, and the SWD annotations made from one.
-for (const f of ["identify-swd.chrono", "identify-swd.annotations.toml", "swd50-cut.chrono"]) {
+for (const f of ["identify-swd.tickwave", "identify-swd.annotations.toml", "swd50-cut.tickwave"]) {
   copyFileSync(join(web, "fixtures", f), join(out, "fixtures", f));
 }
-execFileSync(process.execPath, ["scripts/swd-annotations.ts", "fixtures/identify-swd.chrono", "--out", join(out, "fixtures/identify-swd.swd.jsonl")], { cwd: web });
+execFileSync(process.execPath, ["scripts/swd-annotations.ts", "fixtures/identify-swd.tickwave", "--out", join(out, "fixtures/identify-swd.swd.jsonl")], { cwd: web });
 
 /** A heading's id: its text, lower case, letters, digits and hyphens. The contents list uses it too. */
 const slugify = (text: string) =>
@@ -128,7 +128,7 @@ function doc(path: string, markdown: string, description: string): void {
           .join(" · ")}</p></nav>`
       : "";
   const content = `<article class="doc">${body.replace(/(<\/h1>\n)/, `$1${contents}\n`)}</article>`;
-  page(path, { title: `chrono: ${title}`, description, kind: "doc", content });
+  page(path, { title: `tickwave: ${title}`, description, kind: "doc", content });
 }
 
 // The elements: web/README.md's own section, its headings one level up. One source, no copy.
@@ -137,9 +137,9 @@ const from = readme.indexOf("\n## The elements\n");
 if (from < 0) throw new Error("web/README.md has no \"The elements\" section");
 const next = readme.indexOf("\n## ", from + 1);
 const elements = readme.slice(from + 1, next < 0 ? undefined : next).replace(/^##(#*) /gm, "#$1 ");
-doc("docs/elements.html", elements, "chrono's elements: attributes, methods, events, parts and custom properties.");
-doc("docs/format.html", readFileSync(join(repo, "FORMAT.md"), "utf8"), "The chrono recording format.");
-doc("docs/annotations.html", readFileSync(join(repo, "ANNOTATIONS.md"), "utf8"), "chrono's sidecar annotations.");
-doc("docs/converter.html", readFileSync(join(site, "docs/converter.md"), "utf8"), "Building chrono's converter, and converting, describing, verifying and bundling recordings.");
+doc("docs/elements.html", elements, "tickwave's elements: attributes, methods, events, parts and custom properties.");
+doc("docs/format.html", readFileSync(join(repo, "FORMAT.md"), "utf8"), "The tickwave recording format.");
+doc("docs/annotations.html", readFileSync(join(repo, "ANNOTATIONS.md"), "utf8"), "tickwave's sidecar annotations.");
+doc("docs/converter.html", readFileSync(join(site, "docs/converter.md"), "utf8"), "Building tickwave's converter, and converting, describing, verifying and bundling recordings.");
 
 console.log(`site: ${out}`);

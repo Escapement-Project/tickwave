@@ -1,5 +1,5 @@
-// chrono's site, built into dist/site/ and served under that subpath, as Pages will serve it under
-// /chrono/. Expected values come from the converter's own report or by hand, not from the site.
+// tickwave's site, built into dist/site/ and served under that subpath, as Pages will serve it under
+// /tickwave/. Expected values come from the converter's own report or by hand, not from the site.
 
 import { test, expect, type Page } from "@playwright/test";
 import { mkdirSync, readFileSync } from "node:fs";
@@ -19,18 +19,18 @@ async function facts(page: Page): Promise<Record<string, string>> {
 }
 
 async function viewReady(page: Page): Promise<void> {
-  await page.locator("chrono-view").evaluate(
-    (v) => new Promise<void>((resolve) => (v.shadowRoot!.querySelector("canvas")!.width > 0 ? resolve() : v.addEventListener("chrono-ready", () => resolve(), { once: true }))),
+  await page.locator("tickwave-view").evaluate(
+    (v) => new Promise<void>((resolve) => (v.shadowRoot!.querySelector("canvas")!.width > 0 ? resolve() : v.addEventListener("tickwave-ready", () => resolve(), { once: true }))),
   );
 }
 
 test.describe("the viewer", () => {
   test("opens a recording and its sidecar from ?src= and ?annotations=", async ({ page }) => {
-    await page.goto(`${SITE}index.html?src=fixtures/identify-swd.chrono&annotations=fixtures/identify-swd.annotations.toml`);
+    await page.goto(`${SITE}index.html?src=fixtures/identify-swd.tickwave&annotations=fixtures/identify-swd.annotations.toml`);
     const f = await facts(page);
-    // From the converter's report: no title, 0.523583100 s at 1 GS/s, two channels, 4828 bytes.
+    // From the converter's report: no title, 0.523583100 s at 1 GS/s, two channels, 4830 bytes.
     expect(f).toMatchObject({
-      Recording: "identify-swd.chrono",
+      Recording: "identify-swd.tickwave",
       Length: "523.583100 ms",
       "One tick": "1 ns",
       Channels: "SWCLK, SWDIO",
@@ -39,40 +39,40 @@ test.describe("the viewer", () => {
     });
     await viewReady(page);
     // The sidecar's first annotation is a WAIT, and there are 16 to step through.
-    const view = page.locator("chrono-view");
+    const view = page.locator("tickwave-view");
     await expect(view.locator(".kind")).toHaveValue("wait");
     await view.locator(".next").click();
     await expect(view.locator(".steps .count")).toHaveText("1 of 16");
-    await expect(page.locator("#share a")).toHaveAttribute("href", /\?src=fixtures%2Fidentify-swd\.chrono&annotations=/);
+    await expect(page.locator("#share a")).toHaveAttribute("href", /\?src=fixtures%2Fidentify-swd\.tickwave&annotations=/);
     await expect(page.locator("#problem")).toBeHidden();
   });
 
   test("opens a URL from the field, and puts it in the address", async ({ page }) => {
     await page.goto(`${SITE}index.html`);
-    await page.locator("#src").fill("fixtures/swd50-cut.chrono");
+    await page.locator("#src").fill("fixtures/swd50-cut.tickwave");
     await page.getByRole("button", { name: "Open" }).click();
     const f = await facts(page);
     expect(f.Channels).toBe("SWCLK (analog, V), SWDIO (analog, V), NRST");
     await viewReady(page);
-    expect(new URL(page.url()).searchParams.get("src")).toBe("fixtures/swd50-cut.chrono");
+    expect(new URL(page.url()).searchParams.get("src")).toBe("fixtures/swd50-cut.tickwave");
   });
 
-  test("opens a local .chrono through the file input", async ({ page }) => {
+  test("opens a local .tickwave through the file input", async ({ page }) => {
     await page.goto(`${SITE}index.html`);
-    await page.locator("#files").setInputFiles("fixtures/identify-swd.4k.chrono");
+    await page.locator("#files").setInputFiles("fixtures/identify-swd.4k.tickwave");
     const f = await facts(page);
-    // The same capture in nine blocks: the same content id, a file of 6633 bytes.
-    expect(f).toMatchObject({ Recording: "identify-swd.4k.chrono", Size: "6.5 KiB", "Content id": IDENTIFY_ID });
+    // The same capture in nine blocks: the same content id, a file of 6635 bytes.
+    expect(f).toMatchObject({ Recording: "identify-swd.4k.tickwave", Size: "6.5 KiB", "Content id": IDENTIFY_ID });
     await viewReady(page);
     await expect(page.locator("#share")).toHaveText("Files from this computer can't be shared by link.");
   });
 
-  test("opens a local .chrono with its sidecar's files", async ({ page }) => {
+  test("opens a local .tickwave with its sidecar's files", async ({ page }) => {
     await page.goto(`${SITE}index.html`);
-    await page.locator("#files").setInputFiles(["fixtures/identify-swd.chrono", "fixtures/identify-swd.annotations.toml", "dist/site/fixtures/identify-swd.swd.jsonl"]);
+    await page.locator("#files").setInputFiles(["fixtures/identify-swd.tickwave", "fixtures/identify-swd.annotations.toml", "dist/site/fixtures/identify-swd.swd.jsonl"]);
     await facts(page);
     await viewReady(page);
-    const view = page.locator("chrono-view");
+    const view = page.locator("tickwave-view");
     await expect(view.locator(".kind")).toHaveValue("wait");
     await view.locator(".next").click();
     await expect(view.locator(".steps .count")).toHaveText("1 of 16");
@@ -81,31 +81,31 @@ test.describe("the viewer", () => {
 
   test("says what is wrong with a sidecar, and still shows the recording", async ({ page }) => {
     await page.goto(`${SITE}index.html`);
-    // The sidecar names identify-swd.chrono; this file is identify-swd.4k.chrono.
-    await page.locator("#files").setInputFiles(["fixtures/identify-swd.4k.chrono", "fixtures/identify-swd.annotations.toml", "dist/site/fixtures/identify-swd.swd.jsonl"]);
+    // The sidecar names identify-swd.tickwave; this file is identify-swd.4k.tickwave.
+    await page.locator("#files").setInputFiles(["fixtures/identify-swd.4k.tickwave", "fixtures/identify-swd.annotations.toml", "dist/site/fixtures/identify-swd.swd.jsonl"]);
     const problem = page.locator("#problem");
     await expect(problem).toContainText("The sidecar has problems, so the recording shows without its annotations:");
-    await expect(problem.locator("li")).toContainText(['names "identify-swd.chrono", not "identify-swd.4k.chrono"']);
+    await expect(problem.locator("li")).toContainText(['names "identify-swd.tickwave", not "identify-swd.4k.tickwave"']);
     await expect(page.locator("#stage")).toBeVisible();
   });
 
   test("says a file that is not a recording isn't one", async ({ page }) => {
     await page.goto(`${SITE}index.html`);
     await page.locator("#files").setInputFiles("../site/favicon.ico");
-    await expect(page.locator("#problem")).toHaveText("favicon.ico isn't a chrono recording. The viewer reads .chrono files, which the converter makes from a capture.");
+    await expect(page.locator("#problem")).toHaveText("favicon.ico isn't a tickwave recording. The viewer reads .tickwave files, which the converter makes from a capture.");
     await expect(page.locator("#stage")).toBeHidden();
   });
 
   test("explains a server that refuses a read from another site", async ({ page }) => {
     // Port 8125 is another origin, and sends no Access-Control-Allow-Origin.
-    const src = "http://127.0.0.1:8125/dist/site/fixtures/identify-swd.chrono";
+    const src = "http://127.0.0.1:8125/dist/site/fixtures/identify-swd.tickwave";
     await page.goto(`${SITE}index.html?src=${encodeURIComponent(src)}`);
     await expect(page.locator("#problem")).toContainText("127.0.0.1:8125 didn't send the recording.");
     await expect(page.locator("#problem")).toContainText("(CORS)");
   });
 
   test("explains an address with nothing there", async ({ page }) => {
-    await page.goto(`${SITE}index.html?src=fixtures/nothing.chrono`);
+    await page.goto(`${SITE}index.html?src=fixtures/nothing.tickwave`);
     await expect(page.locator("#problem")).toContainText("There's no file at");
     await expect(page.locator("#problem")).toContainText("the server answered 404.");
   });
@@ -114,19 +114,19 @@ test.describe("the viewer", () => {
 test("the demo's references, inset and views work", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto(`${SITE}demo.html`);
-  const inset = page.locator("figure chrono-inset");
+  const inset = page.locator("figure tickwave-inset");
   await expect(inset.locator(".measure")).toHaveText("SWCLK 999.93 kHz mean of 45 periods");
   await expect(inset.locator(".key > span")).toHaveText(["probe drives", "target drives"]);
-  const ref = page.locator("chrono-ref[annotation=line-reset]");
+  const ref = page.locator("tickwave-ref[annotation=line-reset]");
   await ref.hover();
-  await expect(ref.locator(".pop chrono-inset figcaption")).toHaveText("Line reset: SWDIO held high for 51 clocks");
-  await expect(ref.locator(".pop chrono-inset .measure")).toHaveText("SWCLK 54.644 µs first edge to last");
+  await expect(ref.locator(".pop tickwave-inset figcaption")).toHaveText("Line reset: SWDIO held high for 51 clocks");
+  await expect(ref.locator(".pop tickwave-inset .measure")).toHaveText("SWCLK 54.644 µs first edge to last");
   await page.mouse.move(0, 0);
   const capture = page.locator("#capture");
   await expect(capture.locator(".summary .facts")).toHaveText("524 ms · 2 channels: SWCLK, SWDIO · 4.7 KiB");
-  await page.locator("chrono-ref[annotation=dpidr-ack]").click();
+  await page.locator("tickwave-ref[annotation=dpidr-ack]").click();
   await expect(capture).toHaveAttribute("open", "");
-  await expect(page.locator("#analog").locator(".toolbar .title")).toHaveText("swd50-cut.chrono");
+  await expect(page.locator("#analog").locator(".toolbar .title")).toHaveText("swd50-cut.tickwave");
 });
 
 test("every internal link resolves, fragments included", async ({ request, baseURL }) => {
@@ -196,7 +196,7 @@ test("the docs carry FORMAT.md's and ANNOTATIONS.md's headings", async ({ page }
 });
 
 const PAGES = [
-  ["viewer", "index.html?src=fixtures/identify-swd.chrono&annotations=fixtures/identify-swd.annotations.toml"],
+  ["viewer", "index.html?src=fixtures/identify-swd.tickwave&annotations=fixtures/identify-swd.annotations.toml"],
   ["demo", "demo.html"],
   ["elements", "docs/elements.html"],
   ["format", "docs/format.html"],

@@ -1,4 +1,4 @@
-// <chrono-inset>: one annotation's span, magnified, with its label, the annotations inside it as
+// <tickwave-inset>: one annotation's span, magnified, with its label, the annotations inside it as
 // notes, and an optional `measure` readout. It sweeps in left to right once per appearance.
 
 import { covers, type Annotation } from "../annotations.ts";
@@ -8,7 +8,7 @@ import { measureReading } from "../readouts.ts";
 import { channelIndices, Plot } from "../render/plot.ts";
 import { isAbort, named, type RecordingInfo } from "../source.ts";
 import { secondsValue, toTicks } from "../time.ts";
-import { ChronoElement, loadRecording, type Loaded } from "./base.ts";
+import { TickwaveElement, loadRecording, type Loaded } from "./base.ts";
 
 const CSS = `
 :host { max-width: 100%; }
@@ -37,7 +37,7 @@ const SWEEP_MS = 420;
 /** Reopened this soon after closing, an inset shows already drawn. */
 const REAPPEAR_MS = 800;
 
-export class ChronoInset extends ChronoElement {
+export class TickwaveInset extends TickwaveElement {
   static observedAttributes = INSET_ATTRIBUTES;
   readonly #plot: Plot;
   readonly #caption: HTMLElement;
@@ -145,7 +145,7 @@ export class ChronoInset extends ChronoElement {
         (l) => {
           if (this.#loadKey !== key) return;
           this.#loaded = l;
-          for (const e of l.annotations.errors) this.fail(named("ChronoSidecarError", e));
+          for (const e of l.annotations.errors) this.fail(named("TickwaveSidecarError", e));
           this.#show();
         },
         (e) => this.fail(e),
@@ -266,7 +266,7 @@ export class ChronoInset extends ChronoElement {
       if (!this.#visible || this.#annotation === null || `${this.#loadKey}\n${this.#annotation.id}` !== id) return;
       if (this.#ready !== id) {
         this.#ready = id;
-        this.emit("chrono-ready", { annotation: this.#annotation.id, height: this.offsetHeight });
+        this.emit("tickwave-ready", { annotation: this.#annotation.id, height: this.offsetHeight });
       }
       if (!this.#sweepWanted || this.#sweepFrame) return;
       if (!parseSweep(this.getAttribute("sweep")) || reducedMotion()) {

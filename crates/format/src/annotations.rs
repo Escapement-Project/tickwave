@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::header::{ChannelKind, Header};
 
-pub const FORMAT: &str = "chrono-annotations/1";
+pub const FORMAT: &str = "tickwave-annotations/1";
 
 /// A time as a file writes it: a tick count, or a decimal with a unit.
 #[derive(Clone, Debug, PartialEq, Deserialize)]

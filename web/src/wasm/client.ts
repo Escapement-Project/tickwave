@@ -1,4 +1,4 @@
-// The page's side of the decoder: a Source for each .chrono recording, answered by one worker that
+// The page's side of the decoder: a Source for each .tickwave recording, answered by one worker that
 // holds the WASM module. The worker starts when something first needs a recording.
 
 import { fromCore, type Annotation, type CoreAnnotation } from "../annotations.ts";
@@ -19,7 +19,7 @@ const pending = new Map<number, { resolve(v: unknown): void; reject(e: unknown):
 
 function start(): Worker {
   if (worker) return worker;
-  const w = new Worker(new URL("./chrono-worker.js", import.meta.url), { type: "module", name: "chrono" });
+  const w = new Worker(new URL("./tickwave-worker.js", import.meta.url), { type: "module", name: "tickwave" });
   w.onmessage = (e: MessageEvent<Reply>) => {
     const r = e.data;
     const p = pending.get(r.id);
@@ -29,7 +29,7 @@ function start(): Worker {
     else p.reject(r.name === "AbortError" ? aborted() : Object.assign(new Error(r.message), { name: r.name }));
   };
   w.onerror = (e) => {
-    const error = new Error(`chrono's decoder failed to start: ${e.message || "see the console"}`);
+    const error = new Error(`tickwave's decoder failed to start: ${e.message || "see the console"}`);
     for (const p of pending.values()) p.reject(error);
     pending.clear();
     worker = null;
@@ -166,8 +166,8 @@ export function registerFile(file: File, sidecar: readonly File[] = []): string 
   return url;
 }
 
-export const chronoLoader: Loader = {
-  accepts: (url) => url.pathname.endsWith(".chrono") || files.has(url.href),
+export const tickwaveLoader: Loader = {
+  accepts: (url) => url.pathname.endsWith(".tickwave") || files.has(url.href),
   source: (url) => {
     const local = files.get(url.href);
     return new WasmSource(url.href, local ?? { url: url.href });

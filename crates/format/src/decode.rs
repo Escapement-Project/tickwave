@@ -16,8 +16,8 @@ use crate::overview::{self, AnalogBuilder, DigitalBuilder, Level};
 
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {
-    #[error("not a chrono recording")]
-    NotChrono,
+    #[error("not a tickwave recording")]
+    NotTickwave,
     #[error("format version {major}.{minor}: this reader reads major version {MAJOR}")]
     Version { major: u16, minor: u16 },
     #[error("the head needs {0} bytes")]
@@ -165,10 +165,10 @@ impl Head {
             return if MAGIC.starts_with(&bytes[..bytes.len().min(8)]) {
                 Err(DecodeError::NeedMore(PREAMBLE_LEN))
             } else {
-                Err(DecodeError::NotChrono)
+                Err(DecodeError::NotTickwave)
             };
         }
-        let preamble = Preamble::parse(bytes).ok_or(DecodeError::NotChrono)?;
+        let preamble = Preamble::parse(bytes).ok_or(DecodeError::NotTickwave)?;
         if preamble.major != MAJOR {
             return Err(DecodeError::Version {
                 major: preamble.major,

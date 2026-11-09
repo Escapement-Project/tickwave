@@ -48,7 +48,7 @@ export async function loadRecording(src: string, annotations: string | null): Pr
   return { src: url, source, info, annotations: indexAnnotations(list, errors) };
 }
 
-export abstract class ChronoElement extends HTMLElement {
+export abstract class TickwaveElement extends HTMLElement {
   protected readonly root: ShadowRoot;
   readonly #probe: HTMLSpanElement;
   protected palette: Palette | null = null;
@@ -113,7 +113,7 @@ export abstract class ChronoElement extends HTMLElement {
   }
 
   /**
-   * Reports a problem once: as `chrono-error`, in the console, and in a short notice in the
+   * Reports a problem once: as `tickwave-error`, in the console, and in a short notice in the
    * element, so a page's author sees it. The element goes on with what it has.
    */
   protected fail(e: unknown): void {
@@ -121,7 +121,7 @@ export abstract class ChronoElement extends HTMLElement {
     if (this.#reportedErrors.has(message)) return;
     this.#reportedErrors.add(message);
     console.warn(`<${this.localName}${this.id ? ` id="${this.id}"` : ""}>: ${message}`);
-    this.dispatchEvent(new CustomEvent("chrono-error", { detail: { message, error: e }, bubbles: true, composed: true }));
+    this.dispatchEvent(new CustomEvent("tickwave-error", { detail: { message, error: e }, bubbles: true, composed: true }));
     this.#showNotice();
   }
 

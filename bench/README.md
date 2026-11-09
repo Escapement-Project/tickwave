@@ -1,9 +1,9 @@
-# chrono's decode benchmark
+# tickwave's decode benchmark
 
 Rust/WASM decoding against JavaScript decoding, on real recordings, in Chromium and Firefox. The
 numbers and what they mean are in `RESULTS.md`; this file says how to get them again.
 
-`pages-range/` is the chrono session's Pages range check, not part of this harness.
+`pages-range/` is the tickwave session's Pages range check, not part of this harness.
 
 ## What is here
 
@@ -16,7 +16,7 @@ numbers and what they mean are in `RESULTS.md`; this file says how to get them a
 | `src/page-inset.ts`, `src/draw.ts` | The cold first-inset page and its stand-in drawing |
 | `src/page-bench.ts` | The block-decode page the runner drives |
 | `src/canonical.ts` | The bytes each decoded block is hashed over (SHA-256) |
-| `libzstd/` | chrono-wasm's decoder surface with libzstd (zstd-sys) for every inflate; its `probe` feature times inflate and parse apart |
+| `libzstd/` | tickwave-wasm's decoder surface with libzstd (zstd-sys) for every inflate; its `probe` feature times inflate and parse apart |
 | `native/` | The native baseline: hashes, corrupted blocks, native timings |
 | `scripts/run.ts` | Runs the measures through Playwright and writes `results/raw/` |
 | `scripts/report.ts` | Turns `results/raw/` (and `results/native/`) into the tables |
@@ -36,7 +36,7 @@ The decoders:
 | `fzstd-jsxxh` | `dec/fzstd-jsxxh` | the same with a pure-JavaScript XXH64 (`@intrnl/xxhash64`) |
 | `stream` | `dec/stream` | `DecompressionStream("zstd")` and `src/format.ts` |
 | `probe-libzstd` | `dec/probe-libzstd` | `bench/libzstd --features probe`: inflate and parse timed apart |
-| `probe-ruzstd` | `dec/probe-ruzstd` | the same with chrono-format's ruzstd `inflate` (`--no-default-features --features probe`) |
+| `probe-ruzstd` | `dec/probe-ruzstd` | the same with tickwave-format's ruzstd `inflate` (`--no-default-features --features probe`) |
 
 ## Needs
 
@@ -53,17 +53,17 @@ The decoders:
 From `bench/`:
 
 ```sh
-./build.sh          # both chrono-wasm builds, the libzstd and probe builds, the native tool, the bundles
+./build.sh          # both tickwave-wasm builds, the libzstd and probe builds, the native tool, the bundles
 ./reference.sh      # native hashes of every block and overview block, and the corrupted blocks
 node scripts/run.ts # every measure in both browsers
-node scripts/cpu.ts && target/release/chrono-bench-native time --runs 20 --out results/native \
-  $(printf "$CONVERTED/%s.1024.chrono " gcc-swd-reads stock-reads \
+node scripts/cpu.ts && target/release/tickwave-bench-native time --runs 20 --out results/native \
+  $(printf "$CONVERTED/%s.1024.tickwave " gcc-swd-reads stock-reads \
     swo-24000000 gcc-oscan1-probe-rs gcc-swd-matrix-capture100000 session50)
 node scripts/report.ts > results/tables.md
 ```
 
-`build.sh` builds chrono-wasm from `crates/wasm` with `--locked` into `bench/target/`, so it never
-touches the chrono workspace's `target/` or `crates/wasm/pkg/`. It records the chrono commit in
+`build.sh` builds tickwave-wasm from `crates/wasm` with `--locked` into `bench/target/`, so it never
+touches the tickwave workspace's `target/` or `crates/wasm/pkg/`. It records the tickwave commit in
 `build/base.txt` and any uncommitted `crates/format` and `crates/wasm` changes in
 `build/decoder.diff`. The runner writes both, with the SHA-256 of every module it serves, to
 `results/raw/machine.json`. Run `build.sh` again after `crates/format` or `crates/wasm` change,
@@ -71,7 +71,7 @@ then `reference.sh`.
 
 `scripts/run.ts` takes `--measures` (any of `correct,inset,blocks,whole,checksum`),
 `--browsers chromium,firefox`, `--runs 20`, `--recs` (comma-separated recording names, without
-`.chrono`) and `--decoders` (labels from the table above, in place of each measure's own list).
+`.tickwave`) and `--decoders` (labels from the table above, in place of each measure's own list).
 Each measure writes `results/raw/<measure>.<browser>.json` as it goes. Every run
 first checks that each recording is the one `reference.sh` hashed, and checks again at the end;
 a recording that changed fails the run.
@@ -83,7 +83,7 @@ waits until three seconds in a row have the CPUs less than 10 % busy. Neither gi
 in the log every 10 minutes that it is still waiting. Each unit records the busy fraction while it
 ran, `results/raw/cpu.json` keeps every second's, and each result file has the load average at
 its start and end. `node scripts/cpu.ts` runs both gates for other commands, such as the native
-timing: `node scripts/cpu.ts && target/release/chrono-bench-native time ...`.
+timing: `node scripts/cpu.ts && target/release/tickwave-bench-native time ...`.
 
 The first-inset measure launches a fresh browser for every run. In Firefox, a new context in a
 running browser is not cold for a WASM decoder: the first module a process compiles takes about
@@ -100,12 +100,12 @@ running browser is not cold for a WASM decoder: the first module a process compi
 Quicker checks:
 
 ```sh
-node scripts/smoke.ts [recording.chrono]          # one cold inset per decoder, both browsers
-node scripts/ts-sums.ts FILE.chrono               # the TypeScript reader's per-channel sums...
-node ../crates/wasm/check.mjs FILE.chrono         # ...against chrono-wasm's
-node scripts/serve.ts 8080                        # then http://127.0.0.1:8080/inset.html?dec=fzstd&rec=/rec/gcc-swd-reads.1024.chrono
+node scripts/smoke.ts [recording.tickwave]          # one cold inset per decoder, both browsers
+node scripts/ts-sums.ts FILE.tickwave               # the TypeScript reader's per-channel sums...
+node ../crates/wasm/check.mjs FILE.tickwave         # ...against tickwave-wasm's
+node scripts/serve.ts 8080                        # then http://127.0.0.1:8080/inset.html?dec=fzstd&rec=/rec/gcc-swd-reads.1024.tickwave
 npx tsc -p .                                      # type-check
-cargo clippy -p chrono-bench-native -p chrono-wasm-libzstd -- -D warnings
+cargo clippy -p tickwave-bench-native -p tickwave-wasm-libzstd -- -D warnings
 ```
 
 ## Firefox and `DecompressionStream("zstd")`

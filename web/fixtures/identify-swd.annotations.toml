@@ -1,5 +1,5 @@
-format = "chrono-annotations/1"
-recording = "identify-swd.chrono"
+format = "tickwave-annotations/1"
+recording = "identify-swd.tickwave"
 recording_id = "blake3:930db20d55ecede1084b73ebbdc7edd306268b900746c08abd0bdfdb0f121623"
 # Written by scripts/swd-annotations.ts from the recording; not committed.
 include = ["identify-swd.swd.jsonl"]

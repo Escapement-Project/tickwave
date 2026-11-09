@@ -1,5 +1,5 @@
 {
-  "name": "chrono-bench",
+  "name": "tickwave-bench",
   "private": true,
   "type": "module",
   "license": "MIT OR Apache-2.0",

@@ -52,7 +52,7 @@ export function resolvePalette(probe: HTMLElement, series: string | null): Palet
     let c = roles.get(name);
     if (c === undefined) {
       const fallback = name === "probe" ? seriesExpr : inkExpr;
-      c = read(`var(--chrono-${name}, ${fallback})`, ink);
+      c = read(`var(--tickwave-${name}, ${fallback})`, ink);
       roles.set(name, c);
     }
     return c;

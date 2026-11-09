@@ -3,11 +3,11 @@
 // recording has overview blocks, it also checks the finest level against the blocks: a digital
 // channel's change bits against its edges, an analog channel's minimums and maximums against its
 // samples.
-//   node crates/wasm/check.mjs FILE.chrono
+//   node crates/wasm/check.mjs FILE.tickwave
 import { readFileSync } from "node:fs";
-import { initSync, headLength, Recording } from "./pkg/chrono_wasm.js";
+import { initSync, headLength, Recording } from "./pkg/tickwave_wasm.js";
 
-initSync({ module: readFileSync(new URL("./pkg/chrono_wasm_bg.wasm", import.meta.url)) });
+initSync({ module: readFileSync(new URL("./pkg/tickwave_wasm_bg.wasm", import.meta.url)) });
 const file = readFileSync(process.argv[2]);
 const head = file.subarray(0, headLength(file.subarray(0, 65536)));
 const rec = new Recording(head);

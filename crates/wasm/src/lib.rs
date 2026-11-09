@@ -1,12 +1,12 @@
-//! chrono's decoder for the browser. JavaScript fetches the bytes (the head, then the blocks a view
+//! tickwave's decoder for the browser. JavaScript fetches the bytes (the head, then the blocks a view
 //! covers) and hands them in; this decodes them.
 
-#[cfg(feature = "annotations")]
-use chrono_format::annotations::{self, Included};
-use chrono_format::decode::{self, BlockChannel, DecodeError, Head};
-use chrono_format::header::PREAMBLE_LEN;
-use chrono_format::overview::ChannelOverview;
 use js_sys::{Float32Array, Float64Array, Uint8Array};
+#[cfg(feature = "annotations")]
+use tickwave_format::annotations::{self, Included};
+use tickwave_format::decode::{self, BlockChannel, DecodeError, Head};
+use tickwave_format::header::PREAMBLE_LEN;
+use tickwave_format::overview::ChannelOverview;
 use wasm_bindgen::prelude::*;
 
 mod inflate;
@@ -17,7 +17,7 @@ fn js(e: DecodeError) -> JsError {
 }
 
 /// How many bytes the head needs, from the file's first bytes: 32 until the preamble is in hand.
-/// Throws when the bytes are not a chrono recording.
+/// Throws when the bytes are not a tickwave recording.
 #[wasm_bindgen(js_name = headLength)]
 pub fn head_length(bytes: &[u8]) -> Result<u32, JsError> {
     let inflater = Inflater::new();

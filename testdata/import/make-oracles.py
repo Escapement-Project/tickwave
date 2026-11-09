@@ -1,7 +1,7 @@
 # /// script
 # requires-python = ">=3.11"
 # ///
-"""Writes what libsigrok reads from each .sr fixture here, for the chrono-import tests.
+"""Writes what libsigrok reads from each .sr fixture here, for the tickwave-import tests.
 
     uv run make-oracles.py [FILE.sr ...]       (from this directory; default: every .sr here)
 

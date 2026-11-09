@@ -165,7 +165,7 @@ function saleae(spec: (typeof SALEAE)[number]) {
       worstOffGrid: worst,
     },
   };
-  writeFixture(join(web, spec.dir, `${spec.name}.chronofx`), header, payloads);
+  writeFixture(join(web, spec.dir, `${spec.name}.tickwavefx`), header, payloads);
 }
 
 // verge's energy capture CSV. A row with a sequence number is a sample (integer mV and nA, and the
@@ -234,10 +234,10 @@ function energy() {
     source: { kind: "verge-energy-csv", file: values.energy, columns: ["millivolts", "nanoamps", "dio3"] },
   };
   console.log(`  ${mv.length} samples, ${dio.length} DIO3 edges, ${markers.length} markers`);
-  writeFixture(join(web, ENERGY.dir, `${ENERGY.name}.chronofx`), header, payloads);
+  writeFixture(join(web, ENERGY.dir, `${ENERGY.name}.tickwavefx`), header, payloads);
   // The markers are in the capture itself, so they are generated annotations.
   const jsonl = [
-    JSON.stringify({ format: "chrono-annotations/1", source: "markers" }),
+    JSON.stringify({ format: "tickwave-annotations/1", source: "markers" }),
     ...markers.map((m) =>
       JSON.stringify({ id: `marker/${m.tick}`, kind: "marker", start: m.tick, label: m.label, channels: ["voltage", "current"] }),
     ),

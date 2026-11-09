@@ -1,5 +1,5 @@
 [package]
-name = "chrono-wasm"
+name = "tickwave-wasm"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
@@ -7,7 +7,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-chrono-format = { version = "0.1.0", path = "../format", default-features = false }
+tickwave-format = { version = "0.1.0", path = "../format", default-features = false }
 js-sys = "0.3.107"
 serde_json = "1.0.154"
 wasm-bindgen = "0.2.130"
@@ -18,4 +18,4 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["annotations"]
-annotations = ["chrono-format/annotations"]
+annotations = ["tickwave-format/annotations"]

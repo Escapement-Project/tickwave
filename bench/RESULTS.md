@@ -1,9 +1,12 @@
-# chrono decode benchmark: results
+# tickwave decode benchmark: results
+
+These runs were made before chrono was renamed tickwave. The names here are the new ones, and the
+figures stand.
 
 Rust/WASM decoding against JavaScript decoding, on the protocol in ROUND.md. `README.md` says how
 to rerun every number here.
 
-The decoders were built from chrono `48d7f58`, with no uncommitted changes to `crates/format` or
+The decoders were built from tickwave `48d7f58`, with no uncommitted changes to `crates/format` or
 `crates/wasm`. The recordings are the ones reconverted with overview blocks on 2026-11-08 at 23:50.
 Since the run, `c8b1b17` changed the sidecar resolution: at `6b82dda` the default build is 527,039
 bytes, 3,737 more gzipped than the one measured (zlib level 9, as `bundle.ts` compresses), about
@@ -17,20 +20,20 @@ first inset more than 50 ms sooner on the throttled profile, or it decodes block
 The user set no bar in advance; they decide from these numbers. The tables below still mark the
 draft bar, for reference only. The JavaScript decoder here is fzstd with the TypeScript reader.
 
-- **First inset on Slow 4G.** fzstd draws the first inset 545-558 ms sooner than chrono-wasm's
+- **First inset on Slow 4G.** fzstd draws the first inset 545-558 ms sooner than tickwave-wasm's
   decoder-only build on all six recordings, and 1,088-1,107 ms sooner than its default build. The
   A-A floor is 0.2 %, under 10 ms. The gap is the decoder's own download: 112 KB gzipped for the
   decoder-only build and 210 KB for the default, against 13 KB for fzstd's worker, on a link that
-  carries 180 KB a second. fzstd's decoder is ready at 1.8 s; chrono-wasm's at 3.3 s and 3.8 s.
+  carries 180 KB a second. fzstd's decoder is ready at 1.8 s; tickwave-wasm's at 3.3 s and 3.8 s.
   Only Chromium was throttled.
 - **First inset, unthrottled.** In Chromium, fzstd is within the 3.4 % floor on four recordings
   and 7-12 % (5 and 8 ms) later on two. In Firefox, the two are within the 2.6 % floor on four
   recordings; fzstd is 5 % sooner on one and 4 % later on another. A fresh Firefox takes about
-  47 ms over its first fetch, the head's, and chrono-wasm compiles in that time.
-- **Block decode depends on the browser.** In Chromium, chrono-wasm is faster on every recording;
+  47 ms over its first fetch, the head's, and tickwave-wasm compiles in that time.
+- **Block decode depends on the browser.** In Chromium, tickwave-wasm is faster on every recording;
   fzstd is 11-35 % slower. In Firefox, fzstd is faster on four of six (11-39 %) and slower on two:
   gcc-oscan1-probe-rs by 5 % and session50 by 12 %. The A-A floors are 2.2 % and 1.5 %. The whole
-  largest recording takes 4.42 s with chrono-wasm and 6.75 s with fzstd in Chromium, and 5.13 s
+  largest recording takes 4.42 s with tickwave-wasm and 6.75 s with fzstd in Chromium, and 5.13 s
   and 4.73 s in Firefox.
 
 Beside the bar:
@@ -48,7 +51,7 @@ Beside the bar:
   steps, summed).
 - **Correctness.** In both browsers, every decoder matches the native decoder on all 1,505 blocks,
   and every decoder that can decode overview blocks matches it on all 610 of them. The native
-  decoder accepts bytes after a block's frame, and with them a corrupted block. chrono-wasm
+  decoder accepts bytes after a block's frame, and with them a corrupted block. tickwave-wasm
   inherits that (see "A defect in the native decoder" below).
 
 ## How it was measured
@@ -71,15 +74,15 @@ blocks. session50 holds its analog as 12-bit codes in byte planes.
 
 **Decoders.**
 
-- chrono-wasm, default build: `crates/wasm` as it builds by default, with the sidecar parser.
+- tickwave-wasm, default build: `crates/wasm` as it builds by default, with the sidecar parser.
   `build.sh` builds it as `crates/wasm/build.sh` does; the module came out byte-identical to the
-  chrono session's `crates/wasm/pkg` build of the same commit.
-- chrono-wasm, decoder only: `--no-default-features`. The reference row in every comparison.
-- libzstd in WASM (`bench/libzstd`): chrono-wasm's decoder surface, with blocks inflated by libzstd
-  through `Head::decode_block_with`. zstd-sys compiles libzstd for `wasm32-unknown-unknown` with
-  clang against its own shim headers, which hand `malloc`, `memcpy` and `qsort` to Rust. Nothing
-  else was needed. `Head::parse` inflates the overview with ruzstd, so this module carries both
-  zstd decoders. `decode_overview_block` takes no inflate, so this build cannot decode overview
+  tickwave session's `crates/wasm/pkg` build of the same commit.
+- tickwave-wasm, decoder only: `--no-default-features`. The reference row in every comparison.
+- libzstd in WASM (`bench/libzstd`): tickwave-wasm's decoder surface, with blocks inflated by
+  libzstd through `Head::decode_block_with`. zstd-sys compiles libzstd for `wasm32-unknown-unknown`
+  with clang against its own shim headers, which hand `malloc`, `memcpy` and `qsort` to Rust.
+  Nothing else was needed. `Head::parse` inflates the overview with ruzstd, so this module carries
+  both zstd decoders. `decode_overview_block` takes no inflate, so this build cannot decode overview
   blocks.
 - fzstd with a TypeScript reader (`src/format.ts`), written from FORMAT.md without reading the
   Rust. fzstd skips the content checksum, so XXH64 from hash-wasm (a small WASM module) checks it
@@ -93,11 +96,11 @@ served gzip -9 from a local static server that answers byte ranges. The server i
 (COOP and COEP), so timers resolve to microseconds rather than Firefox's 1 ms.
 
 **First inset.** A fresh browser for every run. In Firefox, a new context in a running browser is
-not cold for a WASM decoder. `scripts/cold-check.ts`, 8 runs each: chrono-wasm is ready in a median
-58.7-60.2 ms in a fresh browser, against 9.0-12.9 ms in a new context. Chromium takes 4-5 ms either
-way. Most of that cost falls on the first module a Firefox process compiles, not on each module: in
-a probe run once on the build before the overview-blocks change, the default build took 11-23 ms
-when the libzstd module had compiled first.
+not cold for a WASM decoder. `scripts/cold-check.ts`, 8 runs each: tickwave-wasm is ready in a
+median 58.7-60.2 ms in a fresh browser, against 9.0-12.9 ms in a new context. Chromium takes 4-5 ms
+either way. Most of that cost falls on the first module a Firefox process compiles, not on each
+module: in a probe run once on the build before the overview-blocks change, the default build took
+11-23 ms when the libzstd module had compiled first.
 
 The worker starts fetching and compiling its decoder, and fetches the head's first 64 KiB at the
 same time. Then it parses the head, fetches the middle block by range and decodes it. The page
@@ -119,7 +122,7 @@ page times the round trip from its request to the arrays arriving back.
 nothing, 20 times per decoder in rotation after one discarded run.
 
 **Statistics.** Percentiles are nearest-rank over every sample pooled. For a rate, "p95" means
-the slow side: the rate 95 % of samples reach. The A-A pair is the decoder-only chrono-wasm run as
+the slow side: the rate 95 % of samples reach. The A-A pair is the decoder-only tickwave-wasm run as
 two decoders. A table's A-A floor is the largest relative gap between the pair's medians over the
 table's recordings. A gap to the reference smaller than that floor is printed as "same".
 
@@ -134,15 +137,15 @@ native timing ran behind the same gate, with a load average of 0.94 before and 1
 The tables below are `scripts/report.ts`'s output for this run.
 
 Machine: AMD RYZEN AI MAX+ 395 w/ Radeon 8060S, 32 threads; Node v26.13.0; run started 2026-11-09T00:06:27.011Z.
-Decoders built from chrono 48d7f58 with no uncommitted changes to crates/format or crates/wasm. Modules served, SHA-256: libzstd/chrono_wasm_libzstd_bg.wasm ba096641f6cc3fd6..., ruzstd/chrono_wasm_bg.wasm 3a0060f992d1e5f3..., ruzstd-full/chrono_wasm_bg.wasm df0ee3bf3cf6d328....
+Decoders built from tickwave 48d7f58 with no uncommitted changes to crates/format or crates/wasm. Modules served, SHA-256: libzstd/tickwave_wasm_libzstd_bg.wasm ba096641f6cc3fd6..., ruzstd/tickwave_wasm_bg.wasm 3a0060f992d1e5f3..., ruzstd-full/tickwave_wasm_bg.wasm df0ee3bf3cf6d328....
 
 ### Decoder transfer size
 
 | decoder | files | bytes | gzip -9 |
 | --- | --- | --- | --- |
-| chrono-wasm, default build (ruzstd) | chrono_wasm_bg.wasm, worker.js | 530231 | 209697 |
-| chrono-wasm, decoder only (ruzstd) | chrono_wasm_bg.wasm, worker.js | 271369 | 111913 |
-| libzstd in WASM | chrono_wasm_libzstd_bg.wasm, worker.js | 357954 | 136489 |
+| tickwave-wasm, default build (ruzstd) | tickwave_wasm_bg.wasm, worker.js | 530231 | 209697 |
+| tickwave-wasm, decoder only (ruzstd) | tickwave_wasm_bg.wasm, worker.js | 271369 | 111913 |
+| libzstd in WASM | tickwave_wasm_libzstd_bg.wasm, worker.js | 357954 | 136489 |
 | fzstd + TypeScript | worker.js | 30130 | 12559 |
 | DecompressionStream("zstd") + TypeScript | worker.js | 13720 | 5219 |
 
@@ -150,23 +153,23 @@ Every decoder also loads the page (inset.html, inset.js: 1219 bytes gzipped).
 
 ### Against the draft bar (PLAN.md §7)
 
-A JavaScript decoder (fzstd) against chrono-wasm. A gap within the A-A floor is "same". The
+A JavaScript decoder (fzstd) against tickwave-wasm. A gap within the A-A floor is "same". The
 verdicts apply the early draft's bar, which the user did not adopt.
 
 | measure | recording | medians | A-A floor | verdict |
 | --- | --- | --- | --- | --- |
-| first inset, Slow 4G, chromium | gcc-swd-reads | fzstd 3732 ms against chrono-wasm, decoder only (ruzstd) 4283 ms: 551 ms sooner | 7 ms | passes: more than 50 ms sooner |
-| first inset, Slow 4G, chromium | gcc-swd-reads | fzstd 3732 ms against chrono-wasm, default build (ruzstd) 4824 ms: 1093 ms sooner | 7 ms | passes: more than 50 ms sooner |
-| first inset, Slow 4G, chromium | stock-reads | fzstd 3511 ms against chrono-wasm, decoder only (ruzstd) 4070 ms: 558 ms sooner | 6 ms | passes: more than 50 ms sooner |
-| first inset, Slow 4G, chromium | stock-reads | fzstd 3511 ms against chrono-wasm, default build (ruzstd) 4618 ms: 1107 ms sooner | 7 ms | passes: more than 50 ms sooner |
-| first inset, Slow 4G, chromium | swo-24000000 | fzstd 4044 ms against chrono-wasm, decoder only (ruzstd) 4592 ms: 549 ms sooner | 7 ms | passes: more than 50 ms sooner |
-| first inset, Slow 4G, chromium | swo-24000000 | fzstd 4044 ms against chrono-wasm, default build (ruzstd) 5134 ms: 1090 ms sooner | 8 ms | passes: more than 50 ms sooner |
-| first inset, Slow 4G, chromium | gcc-oscan1-probe-rs | fzstd 3542 ms against chrono-wasm, decoder only (ruzstd) 4087 ms: 545 ms sooner | 6 ms | passes: more than 50 ms sooner |
-| first inset, Slow 4G, chromium | gcc-oscan1-probe-rs | fzstd 3542 ms against chrono-wasm, default build (ruzstd) 4629 ms: 1088 ms sooner | 7 ms | passes: more than 50 ms sooner |
-| first inset, Slow 4G, chromium | gcc-swd-matrix-capture100000 | fzstd 3771 ms against chrono-wasm, decoder only (ruzstd) 4324 ms: 552 ms sooner | 7 ms | passes: more than 50 ms sooner |
-| first inset, Slow 4G, chromium | gcc-swd-matrix-capture100000 | fzstd 3771 ms against chrono-wasm, default build (ruzstd) 4866 ms: 1095 ms sooner | 7 ms | passes: more than 50 ms sooner |
-| first inset, Slow 4G, chromium | session50 | fzstd 4817 ms against chrono-wasm, decoder only (ruzstd) 5372 ms: 555 ms sooner | 8 ms | passes: more than 50 ms sooner |
-| first inset, Slow 4G, chromium | session50 | fzstd 4817 ms against chrono-wasm, default build (ruzstd) 5912 ms: 1095 ms sooner | 9 ms | passes: more than 50 ms sooner |
+| first inset, Slow 4G, chromium | gcc-swd-reads | fzstd 3732 ms against tickwave-wasm, decoder only (ruzstd) 4283 ms: 551 ms sooner | 7 ms | passes: more than 50 ms sooner |
+| first inset, Slow 4G, chromium | gcc-swd-reads | fzstd 3732 ms against tickwave-wasm, default build (ruzstd) 4824 ms: 1093 ms sooner | 7 ms | passes: more than 50 ms sooner |
+| first inset, Slow 4G, chromium | stock-reads | fzstd 3511 ms against tickwave-wasm, decoder only (ruzstd) 4070 ms: 558 ms sooner | 6 ms | passes: more than 50 ms sooner |
+| first inset, Slow 4G, chromium | stock-reads | fzstd 3511 ms against tickwave-wasm, default build (ruzstd) 4618 ms: 1107 ms sooner | 7 ms | passes: more than 50 ms sooner |
+| first inset, Slow 4G, chromium | swo-24000000 | fzstd 4044 ms against tickwave-wasm, decoder only (ruzstd) 4592 ms: 549 ms sooner | 7 ms | passes: more than 50 ms sooner |
+| first inset, Slow 4G, chromium | swo-24000000 | fzstd 4044 ms against tickwave-wasm, default build (ruzstd) 5134 ms: 1090 ms sooner | 8 ms | passes: more than 50 ms sooner |
+| first inset, Slow 4G, chromium | gcc-oscan1-probe-rs | fzstd 3542 ms against tickwave-wasm, decoder only (ruzstd) 4087 ms: 545 ms sooner | 6 ms | passes: more than 50 ms sooner |
+| first inset, Slow 4G, chromium | gcc-oscan1-probe-rs | fzstd 3542 ms against tickwave-wasm, default build (ruzstd) 4629 ms: 1088 ms sooner | 7 ms | passes: more than 50 ms sooner |
+| first inset, Slow 4G, chromium | gcc-swd-matrix-capture100000 | fzstd 3771 ms against tickwave-wasm, decoder only (ruzstd) 4324 ms: 552 ms sooner | 7 ms | passes: more than 50 ms sooner |
+| first inset, Slow 4G, chromium | gcc-swd-matrix-capture100000 | fzstd 3771 ms against tickwave-wasm, default build (ruzstd) 4866 ms: 1095 ms sooner | 7 ms | passes: more than 50 ms sooner |
+| first inset, Slow 4G, chromium | session50 | fzstd 4817 ms against tickwave-wasm, decoder only (ruzstd) 5372 ms: 555 ms sooner | 8 ms | passes: more than 50 ms sooner |
+| first inset, Slow 4G, chromium | session50 | fzstd 4817 ms against tickwave-wasm, default build (ruzstd) 5912 ms: 1095 ms sooner | 9 ms | passes: more than 50 ms sooner |
 | block decode in worker, chromium | gcc-swd-reads | fzstd 101.6 against 155.3 M/s | 2.2 % | WASM faster |
 | block decode in worker, chromium | stock-reads | fzstd 86.1 against 121.5 M/s | 2.2 % | WASM faster |
 | block decode in worker, chromium | swo-24000000 | fzstd 98.5 against 110.4 M/s | 2.2 % | WASM faster |
@@ -186,34 +189,34 @@ Milliseconds from navigation start to the drawn inset, median (p95) of 20 cold r
 
 | recording | decoder | drawn | worker up | decoder ready | block fetched | decode | vs ruzstd |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| gcc-swd-reads | chrono-wasm, default build (ruzstd) | 74.6 (76.2) | 33.7 | 44.9 | 52.4 | 13.7 | same |
-| gcc-swd-reads | chrono-wasm, decoder only (ruzstd) | 72.3 (74.9) | 32.2 | 42.6 | 50.2 | 13.9 |  |
-| gcc-swd-reads | chrono-wasm, decoder only (ruzstd), A-A copy | 72.6 (75.9) | 32.9 | 43.0 | 50.5 | 13.8 |  |
+| gcc-swd-reads | tickwave-wasm, default build (ruzstd) | 74.6 (76.2) | 33.7 | 44.9 | 52.4 | 13.7 | same |
+| gcc-swd-reads | tickwave-wasm, decoder only (ruzstd) | 72.3 (74.9) | 32.2 | 42.6 | 50.2 | 13.9 |  |
+| gcc-swd-reads | tickwave-wasm, decoder only (ruzstd), A-A copy | 72.6 (75.9) | 32.9 | 43.0 | 50.5 | 13.8 |  |
 | gcc-swd-reads | libzstd in WASM | 75.8 (78.8) | 32.2 | 42.7 | 50.8 | 15.3 | +5 % (worse) |
 | gcc-swd-reads | fzstd + TypeScript | 73.8 (83.3) | 33.4 | 40.4 | 44.6 | 21.9 | same |
-| stock-reads | chrono-wasm, default build (ruzstd) | 70.1 (75.4) | 32.7 | 44.5 | 53.6 | 9.8 | +4 % (worse) |
-| stock-reads | chrono-wasm, decoder only (ruzstd) | 67.1 (70.5) | 33.0 | 43.3 | 51.5 | 9.7 |  |
-| stock-reads | chrono-wasm, decoder only (ruzstd), A-A copy | 69.4 (72.6) | 33.2 | 43.4 | 52.6 | 10.3 |  |
+| stock-reads | tickwave-wasm, default build (ruzstd) | 70.1 (75.4) | 32.7 | 44.5 | 53.6 | 9.8 | +4 % (worse) |
+| stock-reads | tickwave-wasm, decoder only (ruzstd) | 67.1 (70.5) | 33.0 | 43.3 | 51.5 | 9.7 |  |
+| stock-reads | tickwave-wasm, decoder only (ruzstd), A-A copy | 69.4 (72.6) | 33.2 | 43.4 | 52.6 | 10.3 |  |
 | stock-reads | libzstd in WASM | 71.4 (75.4) | 32.9 | 43.5 | 52.7 | 12.2 | +6 % (worse) |
 | stock-reads | fzstd + TypeScript | 65.1 (67.6) | 33.6 | 40.7 | 48.3 | 11.3 | same |
-| swo-24000000 | chrono-wasm, default build (ruzstd) | 72.7 (77.8) | 32.1 | 43.4 | 51.1 | 15.5 | same |
-| swo-24000000 | chrono-wasm, decoder only (ruzstd) | 72.7 (76.1) | 32.7 | 43.4 | 51.1 | 15.1 |  |
-| swo-24000000 | chrono-wasm, decoder only (ruzstd), A-A copy | 73.4 (75.7) | 32.8 | 42.9 | 51.1 | 15.1 |  |
+| swo-24000000 | tickwave-wasm, default build (ruzstd) | 72.7 (77.8) | 32.1 | 43.4 | 51.1 | 15.5 | same |
+| swo-24000000 | tickwave-wasm, decoder only (ruzstd) | 72.7 (76.1) | 32.7 | 43.4 | 51.1 | 15.1 |  |
+| swo-24000000 | tickwave-wasm, decoder only (ruzstd), A-A copy | 73.4 (75.7) | 32.8 | 42.9 | 51.1 | 15.1 |  |
 | swo-24000000 | libzstd in WASM | 74.4 (77.8) | 32.6 | 43.0 | 51.1 | 16.5 | same |
 | swo-24000000 | fzstd + TypeScript | 74.3 (76.7) | 33.3 | 40.7 | 45.5 | 22.3 | same |
-| gcc-oscan1-probe-rs | chrono-wasm, default build (ruzstd) | 69.6 (72.6) | 32.0 | 43.5 | 51.0 | 11.6 | same |
-| gcc-oscan1-probe-rs | chrono-wasm, decoder only (ruzstd) | 68.9 (72.4) | 32.4 | 42.8 | 50.6 | 11.5 |  |
-| gcc-oscan1-probe-rs | chrono-wasm, decoder only (ruzstd), A-A copy | 67.6 (71.7) | 32.3 | 42.5 | 50.0 | 11.3 |  |
+| gcc-oscan1-probe-rs | tickwave-wasm, default build (ruzstd) | 69.6 (72.6) | 32.0 | 43.5 | 51.0 | 11.6 | same |
+| gcc-oscan1-probe-rs | tickwave-wasm, decoder only (ruzstd) | 68.9 (72.4) | 32.4 | 42.8 | 50.6 | 11.5 |  |
+| gcc-oscan1-probe-rs | tickwave-wasm, decoder only (ruzstd), A-A copy | 67.6 (71.7) | 32.3 | 42.5 | 50.0 | 11.3 |  |
 | gcc-oscan1-probe-rs | libzstd in WASM | 73.8 (77.8) | 32.3 | 42.8 | 52.1 | 14.1 | +7 % (worse) |
 | gcc-oscan1-probe-rs | fzstd + TypeScript | 77.1 (80.8) | 33.8 | 40.8 | 46.6 | 24.2 | +12 % (worse) |
-| gcc-swd-matrix-capture100000 | chrono-wasm, default build (ruzstd) | 74.7 (77.6) | 32.5 | 43.8 | 52.4 | 14.1 | same |
-| gcc-swd-matrix-capture100000 | chrono-wasm, decoder only (ruzstd) | 74.0 (76.6) | 32.6 | 42.5 | 51.3 | 14.9 |  |
-| gcc-swd-matrix-capture100000 | chrono-wasm, decoder only (ruzstd), A-A copy | 72.7 (76.9) | 32.2 | 41.6 | 50.1 | 14.1 |  |
+| gcc-swd-matrix-capture100000 | tickwave-wasm, default build (ruzstd) | 74.7 (77.6) | 32.5 | 43.8 | 52.4 | 14.1 | same |
+| gcc-swd-matrix-capture100000 | tickwave-wasm, decoder only (ruzstd) | 74.0 (76.6) | 32.6 | 42.5 | 51.3 | 14.9 |  |
+| gcc-swd-matrix-capture100000 | tickwave-wasm, decoder only (ruzstd), A-A copy | 72.7 (76.9) | 32.2 | 41.6 | 50.1 | 14.1 |  |
 | gcc-swd-matrix-capture100000 | libzstd in WASM | 75.6 (79.3) | 31.8 | 42.2 | 51.4 | 16.1 | same |
 | gcc-swd-matrix-capture100000 | fzstd + TypeScript | 75.8 (80.2) | 32.3 | 39.6 | 47.6 | 21.0 | same |
-| session50 | chrono-wasm, default build (ruzstd) | 74.1 (78.1) | 32.4 | 43.4 | 53.8 | 9.9 | same |
-| session50 | chrono-wasm, decoder only (ruzstd) | 72.7 (75.7) | 32.2 | 42.2 | 53.2 | 9.5 |  |
-| session50 | chrono-wasm, decoder only (ruzstd), A-A copy | 71.5 (76.1) | 32.3 | 42.2 | 52.0 | 9.5 |  |
+| session50 | tickwave-wasm, default build (ruzstd) | 74.1 (78.1) | 32.4 | 43.4 | 53.8 | 9.9 | same |
+| session50 | tickwave-wasm, decoder only (ruzstd) | 72.7 (75.7) | 32.2 | 42.2 | 53.2 | 9.5 |  |
+| session50 | tickwave-wasm, decoder only (ruzstd), A-A copy | 71.5 (76.1) | 32.3 | 42.2 | 52.0 | 9.5 |  |
 | session50 | libzstd in WASM | 69.4 (71.7) | 31.8 | 42.2 | 53.0 | 5.9 | -5 % (better) |
 | session50 | fzstd + TypeScript | 77.5 (80.5) | 32.9 | 40.2 | 56.1 | 12.3 | +7 % (worse) |
 
@@ -227,39 +230,39 @@ Milliseconds from navigation start to the drawn inset, median (p95) of 20 cold r
 
 | recording | decoder | drawn | worker up | decoder ready | block fetched | decode | vs ruzstd |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| gcc-swd-reads | chrono-wasm, default build (ruzstd) | 254.4 (303.4) | 168.7 | 226.4 | 233.9 | 14.0 | same |
-| gcc-swd-reads | chrono-wasm, decoder only (ruzstd) | 254.8 (266.9) | 169.5 | 226.7 | 234.4 | 13.9 |  |
-| gcc-swd-reads | chrono-wasm, decoder only (ruzstd), A-A copy | 254.1 (273.4) | 168.8 | 224.1 | 232.6 | 15.1 |  |
+| gcc-swd-reads | tickwave-wasm, default build (ruzstd) | 254.4 (303.4) | 168.7 | 226.4 | 233.9 | 14.0 | same |
+| gcc-swd-reads | tickwave-wasm, decoder only (ruzstd) | 254.8 (266.9) | 169.5 | 226.7 | 234.4 | 13.9 |  |
+| gcc-swd-reads | tickwave-wasm, decoder only (ruzstd), A-A copy | 254.1 (273.4) | 168.8 | 224.1 | 232.6 | 15.1 |  |
 | gcc-swd-reads | libzstd in WASM | 257.5 (270.1) | 173.6 | 228.9 | 237.0 | 13.3 | same |
 | gcc-swd-reads | fzstd + TypeScript | 250.3 (264.2) | 168.9 | 171.0 | 227.4 | 16.3 | same |
 | gcc-swd-reads | DecompressionStream("zstd") + TypeScript | 240.3 (253.6) | 170.2 | 170.6 | 226.4 | 7.2 | -6 % (better) |
-| stock-reads | chrono-wasm, default build (ruzstd) | 252.7 (271.3) | 170.8 | 230.3 | 237.4 | 9.8 | same |
-| stock-reads | chrono-wasm, decoder only (ruzstd) | 253.0 (264.1) | 169.7 | 228.1 | 237.3 | 9.9 |  |
-| stock-reads | chrono-wasm, decoder only (ruzstd), A-A copy | 255.6 (267.8) | 173.9 | 229.7 | 239.8 | 10.2 |  |
+| stock-reads | tickwave-wasm, default build (ruzstd) | 252.7 (271.3) | 170.8 | 230.3 | 237.4 | 9.8 | same |
+| stock-reads | tickwave-wasm, decoder only (ruzstd) | 253.0 (264.1) | 169.7 | 228.1 | 237.3 | 9.9 |  |
+| stock-reads | tickwave-wasm, decoder only (ruzstd), A-A copy | 255.6 (267.8) | 173.9 | 229.7 | 239.8 | 10.2 |  |
 | stock-reads | libzstd in WASM | 250.6 (268.5) | 168.6 | 219.7 | 236.6 | 8.8 | same |
 | stock-reads | fzstd + TypeScript | 239.2 (261.7) | 168.6 | 171.2 | 223.7 | 10.1 | -5 % (better) |
 | stock-reads | DecompressionStream("zstd") + TypeScript | 243.7 (253.4) | 172.3 | 173.0 | 231.6 | 6.4 | -4 % (better) |
-| swo-24000000 | chrono-wasm, default build (ruzstd) | 257.4 (269.1) | 169.3 | 226.2 | 236.6 | 15.3 | same |
-| swo-24000000 | chrono-wasm, decoder only (ruzstd) | 256.7 (270.0) | 168.3 | 227.6 | 234.9 | 16.1 |  |
-| swo-24000000 | chrono-wasm, decoder only (ruzstd), A-A copy | 255.7 (267.6) | 168.6 | 226.0 | 233.3 | 16.0 |  |
+| swo-24000000 | tickwave-wasm, default build (ruzstd) | 257.4 (269.1) | 169.3 | 226.2 | 236.6 | 15.3 | same |
+| swo-24000000 | tickwave-wasm, decoder only (ruzstd) | 256.7 (270.0) | 168.3 | 227.6 | 234.9 | 16.1 |  |
+| swo-24000000 | tickwave-wasm, decoder only (ruzstd), A-A copy | 255.7 (267.6) | 168.6 | 226.0 | 233.3 | 16.0 |  |
 | swo-24000000 | libzstd in WASM | 254.9 (269.2) | 169.2 | 228.3 | 235.2 | 13.3 | same |
 | swo-24000000 | fzstd + TypeScript | 256.7 (269.1) | 172.6 | 175.1 | 236.0 | 15.2 | same |
 | swo-24000000 | DecompressionStream("zstd") + TypeScript | 236.4 (252.4) | 167.0 | 167.4 | 223.1 | 6.9 | -8 % (better) |
-| gcc-oscan1-probe-rs | chrono-wasm, default build (ruzstd) | 251.9 (267.1) | 169.7 | 227.2 | 234.2 | 11.7 | same |
-| gcc-oscan1-probe-rs | chrono-wasm, decoder only (ruzstd) | 248.2 (259.8) | 166.7 | 225.1 | 231.1 | 11.0 |  |
-| gcc-oscan1-probe-rs | chrono-wasm, decoder only (ruzstd), A-A copy | 254.7 (267.4) | 169.9 | 225.5 | 237.9 | 10.9 |  |
+| gcc-oscan1-probe-rs | tickwave-wasm, default build (ruzstd) | 251.9 (267.1) | 169.7 | 227.2 | 234.2 | 11.7 | same |
+| gcc-oscan1-probe-rs | tickwave-wasm, decoder only (ruzstd) | 248.2 (259.8) | 166.7 | 225.1 | 231.1 | 11.0 |  |
+| gcc-oscan1-probe-rs | tickwave-wasm, decoder only (ruzstd), A-A copy | 254.7 (267.4) | 169.9 | 225.5 | 237.9 | 10.9 |  |
 | gcc-oscan1-probe-rs | libzstd in WASM | 256.8 (269.8) | 170.9 | 223.3 | 240.0 | 10.9 | +3 % (worse) |
 | gcc-oscan1-probe-rs | fzstd + TypeScript | 257.6 (267.6) | 170.5 | 172.8 | 235.1 | 16.3 | +4 % (worse) |
 | gcc-oscan1-probe-rs | DecompressionStream("zstd") + TypeScript | 243.7 (254.3) | 170.1 | 170.5 | 231.2 | 6.4 | same |
-| gcc-swd-matrix-capture100000 | chrono-wasm, default build (ruzstd) | 262.4 (279.1) | 171.6 | 235.2 | 241.9 | 13.9 | same |
-| gcc-swd-matrix-capture100000 | chrono-wasm, decoder only (ruzstd) | 257.6 (273.1) | 169.9 | 225.8 | 235.9 | 14.3 |  |
-| gcc-swd-matrix-capture100000 | chrono-wasm, decoder only (ruzstd), A-A copy | 260.7 (268.8) | 170.0 | 231.4 | 240.1 | 14.2 |  |
+| gcc-swd-matrix-capture100000 | tickwave-wasm, default build (ruzstd) | 262.4 (279.1) | 171.6 | 235.2 | 241.9 | 13.9 | same |
+| gcc-swd-matrix-capture100000 | tickwave-wasm, decoder only (ruzstd) | 257.6 (273.1) | 169.9 | 225.8 | 235.9 | 14.3 |  |
+| gcc-swd-matrix-capture100000 | tickwave-wasm, decoder only (ruzstd), A-A copy | 260.7 (268.8) | 170.0 | 231.4 | 240.1 | 14.2 |  |
 | gcc-swd-matrix-capture100000 | libzstd in WASM | 259.3 (271.3) | 172.1 | 230.9 | 238.5 | 13.8 | same |
 | gcc-swd-matrix-capture100000 | fzstd + TypeScript | 257.4 (274.2) | 173.4 | 175.6 | 232.8 | 17.2 | same |
 | gcc-swd-matrix-capture100000 | DecompressionStream("zstd") + TypeScript | 244.7 (255.9) | 168.3 | 168.7 | 231.6 | 6.3 | -5 % (better) |
-| session50 | chrono-wasm, default build (ruzstd) | 255.8 (269.8) | 170.0 | 231.1 | 238.4 | 10.1 | same |
-| session50 | chrono-wasm, decoder only (ruzstd) | 258.7 (270.0) | 173.0 | 233.1 | 240.2 | 10.6 |  |
-| session50 | chrono-wasm, decoder only (ruzstd), A-A copy | 255.1 (263.1) | 170.6 | 226.0 | 237.4 | 10.5 |  |
+| session50 | tickwave-wasm, default build (ruzstd) | 255.8 (269.8) | 170.0 | 231.1 | 238.4 | 10.1 | same |
+| session50 | tickwave-wasm, decoder only (ruzstd) | 258.7 (270.0) | 173.0 | 233.1 | 240.2 | 10.6 |  |
+| session50 | tickwave-wasm, decoder only (ruzstd), A-A copy | 255.1 (263.1) | 170.6 | 226.0 | 237.4 | 10.5 |  |
 | session50 | libzstd in WASM | 248.0 (265.3) | 169.9 | 228.2 | 237.4 | 3.6 | -4 % (better) |
 | session50 | fzstd + TypeScript | 258.3 (278.7) | 175.1 | 177.8 | 241.9 | 10.3 | same |
 | session50 | DecompressionStream("zstd") + TypeScript | 244.7 (259.3) | 175.2 | 175.6 | 234.4 | 3.5 | -5 % (better) |
@@ -274,34 +277,34 @@ Milliseconds from navigation start to the drawn inset, median (p95) of 20 cold r
 
 | recording | decoder | drawn | worker up | decoder ready | block fetched | decode | vs ruzstd |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| gcc-swd-reads | chrono-wasm, default build (ruzstd) | 4824.3 (4840.2) | 1760.3 | 3835.5 | 4800.6 | 14.7 | +13 % (worse) |
-| gcc-swd-reads | chrono-wasm, decoder only (ruzstd) | 4283.0 (4295.4) | 1760.8 | 3293.4 | 4259.2 | 14.2 |  |
-| gcc-swd-reads | chrono-wasm, decoder only (ruzstd), A-A copy | 4283.8 (4290.9) | 1760.5 | 3293.1 | 4259.1 | 14.7 |  |
+| gcc-swd-reads | tickwave-wasm, default build (ruzstd) | 4824.3 (4840.2) | 1760.3 | 3835.5 | 4800.6 | 14.7 | +13 % (worse) |
+| gcc-swd-reads | tickwave-wasm, decoder only (ruzstd) | 4283.0 (4295.4) | 1760.8 | 3293.4 | 4259.2 | 14.2 |  |
+| gcc-swd-reads | tickwave-wasm, decoder only (ruzstd), A-A copy | 4283.8 (4290.9) | 1760.5 | 3293.1 | 4259.1 | 14.7 |  |
 | gcc-swd-reads | libzstd in WASM | 4419.5 (4428.0) | 1752.1 | 3426.8 | 4392.6 | 16.4 | +3 % (worse) |
 | gcc-swd-reads | fzstd + TypeScript | 3731.8 (3755.0) | 1803.3 | 1806.5 | 3701.0 | 23.0 | -13 % (better) |
-| stock-reads | chrono-wasm, default build (ruzstd) | 4618.1 (4753.8) | 1760.4 | 3835.9 | 4600.6 | 10.4 | +13 % (worse) |
-| stock-reads | chrono-wasm, decoder only (ruzstd) | 4069.7 (4116.1) | 1760.5 | 3293.6 | 4051.3 | 10.7 |  |
-| stock-reads | chrono-wasm, decoder only (ruzstd), A-A copy | 4075.9 (4085.6) | 1760.6 | 3293.4 | 4059.0 | 9.9 |  |
+| stock-reads | tickwave-wasm, default build (ruzstd) | 4618.1 (4753.8) | 1760.4 | 3835.9 | 4600.6 | 10.4 | +13 % (worse) |
+| stock-reads | tickwave-wasm, decoder only (ruzstd) | 4069.7 (4116.1) | 1760.5 | 3293.6 | 4051.3 | 10.7 |  |
+| stock-reads | tickwave-wasm, decoder only (ruzstd), A-A copy | 4075.9 (4085.6) | 1760.6 | 3293.4 | 4059.0 | 9.9 |  |
 | stock-reads | libzstd in WASM | 4212.8 (4221.8) | 1752.3 | 3427.1 | 4192.4 | 12.8 | +4 % (worse) |
 | stock-reads | fzstd + TypeScript | 3511.3 (3519.4) | 1803.1 | 1806.1 | 3492.3 | 13.0 | -14 % (better) |
-| swo-24000000 | chrono-wasm, default build (ruzstd) | 5134.0 (5150.4) | 1760.3 | 3835.9 | 5109.1 | 16.9 | +12 % (worse) |
-| swo-24000000 | chrono-wasm, decoder only (ruzstd) | 4592.3 (4613.7) | 1760.4 | 3293.5 | 4567.8 | 17.1 |  |
-| swo-24000000 | chrono-wasm, decoder only (ruzstd), A-A copy | 4592.2 (4622.9) | 1760.6 | 3293.6 | 4568.2 | 16.4 |  |
+| swo-24000000 | tickwave-wasm, default build (ruzstd) | 5134.0 (5150.4) | 1760.3 | 3835.9 | 5109.1 | 16.9 | +12 % (worse) |
+| swo-24000000 | tickwave-wasm, decoder only (ruzstd) | 4592.3 (4613.7) | 1760.4 | 3293.5 | 4567.8 | 17.1 |  |
+| swo-24000000 | tickwave-wasm, decoder only (ruzstd), A-A copy | 4592.2 (4622.9) | 1760.6 | 3293.6 | 4568.2 | 16.4 |  |
 | swo-24000000 | libzstd in WASM | 4726.8 (4736.0) | 1751.9 | 3426.7 | 4701.3 | 17.7 | +3 % (worse) |
 | swo-24000000 | fzstd + TypeScript | 4043.8 (4048.5) | 1803.2 | 1806.8 | 4009.7 | 27.2 | -12 % (better) |
-| gcc-oscan1-probe-rs | chrono-wasm, default build (ruzstd) | 4629.4 (4645.1) | 1760.8 | 3835.9 | 4610.0 | 11.8 | +13 % (worse) |
-| gcc-oscan1-probe-rs | chrono-wasm, decoder only (ruzstd) | 4086.5 (4096.4) | 1760.1 | 3293.3 | 4067.3 | 11.6 |  |
-| gcc-oscan1-probe-rs | chrono-wasm, decoder only (ruzstd), A-A copy | 4086.3 (4096.5) | 1760.4 | 3293.5 | 4067.2 | 12.0 |  |
+| gcc-oscan1-probe-rs | tickwave-wasm, default build (ruzstd) | 4629.4 (4645.1) | 1760.8 | 3835.9 | 4610.0 | 11.8 | +13 % (worse) |
+| gcc-oscan1-probe-rs | tickwave-wasm, decoder only (ruzstd) | 4086.5 (4096.4) | 1760.1 | 3293.3 | 4067.3 | 11.6 |  |
+| gcc-oscan1-probe-rs | tickwave-wasm, decoder only (ruzstd), A-A copy | 4086.3 (4096.5) | 1760.4 | 3293.5 | 4067.2 | 12.0 |  |
 | gcc-oscan1-probe-rs | libzstd in WASM | 4223.8 (4232.3) | 1751.9 | 3426.5 | 4201.0 | 14.7 | +3 % (worse) |
 | gcc-oscan1-probe-rs | fzstd + TypeScript | 3541.6 (3548.6) | 1802.9 | 1806.3 | 3508.9 | 25.7 | -13 % (better) |
-| gcc-swd-matrix-capture100000 | chrono-wasm, default build (ruzstd) | 4866.0 (4890.0) | 1760.6 | 3835.4 | 4842.7 | 15.0 | +13 % (worse) |
-| gcc-swd-matrix-capture100000 | chrono-wasm, decoder only (ruzstd) | 4323.6 (4332.5) | 1760.6 | 3293.4 | 4301.2 | 14.4 |  |
-| gcc-swd-matrix-capture100000 | chrono-wasm, decoder only (ruzstd), A-A copy | 4323.8 (4340.6) | 1760.6 | 3293.6 | 4301.3 | 14.7 |  |
+| gcc-swd-matrix-capture100000 | tickwave-wasm, default build (ruzstd) | 4866.0 (4890.0) | 1760.6 | 3835.4 | 4842.7 | 15.0 | +13 % (worse) |
+| gcc-swd-matrix-capture100000 | tickwave-wasm, decoder only (ruzstd) | 4323.6 (4332.5) | 1760.6 | 3293.4 | 4301.2 | 14.4 |  |
+| gcc-swd-matrix-capture100000 | tickwave-wasm, decoder only (ruzstd), A-A copy | 4323.8 (4340.6) | 1760.6 | 3293.6 | 4301.3 | 14.7 |  |
 | gcc-swd-matrix-capture100000 | libzstd in WASM | 4467.9 (4476.5) | 1752.5 | 3427.2 | 4442.3 | 16.8 | +3 % (worse) |
 | gcc-swd-matrix-capture100000 | fzstd + TypeScript | 3771.5 (3781.1) | 1802.7 | 1806.1 | 3742.4 | 22.4 | -13 % (better) |
-| session50 | chrono-wasm, default build (ruzstd) | 5912.5 (5920.0) | 1760.4 | 3835.5 | 5892.8 | 8.9 | +10 % (worse) |
-| session50 | chrono-wasm, decoder only (ruzstd) | 5372.0 (5380.1) | 1760.9 | 3293.9 | 5351.7 | 9.5 |  |
-| session50 | chrono-wasm, decoder only (ruzstd), A-A copy | 5372.3 (5581.2) | 1760.3 | 3293.4 | 5351.3 | 8.7 |  |
+| session50 | tickwave-wasm, default build (ruzstd) | 5912.5 (5920.0) | 1760.4 | 3835.5 | 5892.8 | 8.9 | +10 % (worse) |
+| session50 | tickwave-wasm, decoder only (ruzstd) | 5372.0 (5380.1) | 1760.9 | 3293.9 | 5351.7 | 9.5 |  |
+| session50 | tickwave-wasm, decoder only (ruzstd), A-A copy | 5372.3 (5581.2) | 1760.3 | 3293.4 | 5351.3 | 8.7 |  |
 | session50 | libzstd in WASM | 5502.9 (5530.8) | 1752.1 | 3427.1 | 5484.5 | 6.2 | +2 % (worse) |
 | session50 | fzstd + TypeScript | 4817.4 (4851.2) | 1803.2 | 1806.8 | 4792.9 | 14.7 | -10 % (better) |
 
@@ -315,28 +318,28 @@ Millions of edges a second (session50: of samples), median (p95, slow side) over
 
 | recording | decoder | in worker | round trip | hop ms | in worker vs ruzstd |
 | --- | --- | --- | --- | --- | --- |
-| gcc-swd-reads | chrono-wasm, decoder only (ruzstd) | 155.3 (137.6) | 151.6 (129.3) | 0.14 |  |
-| gcc-swd-reads | chrono-wasm, decoder only (ruzstd), A-A copy | 158.4 (139.3) | 153.9 (132.0) | 0.14 |  |
+| gcc-swd-reads | tickwave-wasm, decoder only (ruzstd) | 155.3 (137.6) | 151.6 (129.3) | 0.14 |  |
+| gcc-swd-reads | tickwave-wasm, decoder only (ruzstd), A-A copy | 158.4 (139.3) | 153.9 (132.0) | 0.14 |  |
 | gcc-swd-reads | libzstd in WASM | 139.7 (124.5) | 137.1 (120.8) | 0.14 | -10 % (worse) |
 | gcc-swd-reads | fzstd + TypeScript | 101.6 (90.3) | 100.3 (89.4) | 0.11 | -35 % (worse) |
-| stock-reads | chrono-wasm, decoder only (ruzstd) | 121.5 (96.4) | 119.3 (91.1) | 0.10 |  |
-| stock-reads | chrono-wasm, decoder only (ruzstd), A-A copy | 118.8 (96.2) | 117.1 (93.0) | 0.10 |  |
+| stock-reads | tickwave-wasm, decoder only (ruzstd) | 121.5 (96.4) | 119.3 (91.1) | 0.10 |  |
+| stock-reads | tickwave-wasm, decoder only (ruzstd), A-A copy | 118.8 (96.2) | 117.1 (93.0) | 0.10 |  |
 | stock-reads | libzstd in WASM | 118.7 (96.5) | 116.3 (93.2) | 0.10 | -2 % (worse) |
 | stock-reads | fzstd + TypeScript | 86.1 (60.1) | 83.9 (59.3) | 0.12 | -29 % (worse) |
-| swo-24000000 | chrono-wasm, decoder only (ruzstd) | 110.4 (101.2) | 108.8 (98.8) | 0.12 |  |
-| swo-24000000 | chrono-wasm, decoder only (ruzstd), A-A copy | 110.6 (100.9) | 109.0 (98.9) | 0.12 |  |
+| swo-24000000 | tickwave-wasm, decoder only (ruzstd) | 110.4 (101.2) | 108.8 (98.8) | 0.12 |  |
+| swo-24000000 | tickwave-wasm, decoder only (ruzstd), A-A copy | 110.6 (100.9) | 109.0 (98.9) | 0.12 |  |
 | swo-24000000 | libzstd in WASM | 116.1 (105.5) | 114.3 (103.0) | 0.12 | +5 % (better) |
 | swo-24000000 | fzstd + TypeScript | 98.5 (91.2) | 97.3 (89.7) | 0.10 | -11 % (worse) |
-| gcc-oscan1-probe-rs | chrono-wasm, decoder only (ruzstd) | 157.5 (121.0) | 153.7 (114.8) | 0.11 |  |
-| gcc-oscan1-probe-rs | chrono-wasm, decoder only (ruzstd), A-A copy | 156.7 (116.8) | 152.8 (111.3) | 0.11 |  |
+| gcc-oscan1-probe-rs | tickwave-wasm, decoder only (ruzstd) | 157.5 (121.0) | 153.7 (114.8) | 0.11 |  |
+| gcc-oscan1-probe-rs | tickwave-wasm, decoder only (ruzstd), A-A copy | 156.7 (116.8) | 152.8 (111.3) | 0.11 |  |
 | gcc-oscan1-probe-rs | libzstd in WASM | 138.2 (111.8) | 135.4 (106.8) | 0.11 | -12 % (worse) |
 | gcc-oscan1-probe-rs | fzstd + TypeScript | 116.2 (81.2) | 112.4 (76.1) | 0.09 | -26 % (worse) |
-| gcc-swd-matrix-capture100000 | chrono-wasm, decoder only (ruzstd) | 145.5 (104.6) | 142.4 (100.0) | 0.11 |  |
-| gcc-swd-matrix-capture100000 | chrono-wasm, decoder only (ruzstd), A-A copy | 142.2 (100.2) | 139.4 (97.0) | 0.11 |  |
+| gcc-swd-matrix-capture100000 | tickwave-wasm, decoder only (ruzstd) | 145.5 (104.6) | 142.4 (100.0) | 0.11 |  |
+| gcc-swd-matrix-capture100000 | tickwave-wasm, decoder only (ruzstd), A-A copy | 142.2 (100.2) | 139.4 (97.0) | 0.11 |  |
 | gcc-swd-matrix-capture100000 | libzstd in WASM | 133.1 (106.8) | 130.8 (102.5) | 0.11 | -8 % (worse) |
 | gcc-swd-matrix-capture100000 | fzstd + TypeScript | 107.4 (62.0) | 103.6 (57.3) | 0.15 | -26 % (worse) |
-| session50 | chrono-wasm, decoder only (ruzstd) | 89.6 (73.5) | 88.2 (71.4) | 0.09 |  |
-| session50 | chrono-wasm, decoder only (ruzstd), A-A copy | 88.6 (55.8) | 87.1 (53.0) | 0.09 |  |
+| session50 | tickwave-wasm, decoder only (ruzstd) | 89.6 (73.5) | 88.2 (71.4) | 0.09 |  |
+| session50 | tickwave-wasm, decoder only (ruzstd), A-A copy | 88.6 (55.8) | 87.1 (53.0) | 0.09 |  |
 | session50 | libzstd in WASM | 346.1 (182.7) | 329.7 (173.0) | 0.07 | +286 % (better) |
 | session50 | fzstd + TypeScript | 70.9 (59.9) | 70.0 (57.6) | 0.09 | -21 % (worse) |
 
@@ -346,7 +349,7 @@ Median ms a block by step, every recording pooled:
 
 | decoder | steps |
 | --- | --- |
-| chrono-wasm, decoder only (ruzstd) | decode 4.64, copyOut 1.34 |
+| tickwave-wasm, decoder only (ruzstd) | decode 4.64, copyOut 1.34 |
 | libzstd in WASM | decode 4.68, copyOut 1.34 |
 | fzstd + TypeScript | inflate 2.84, checksum 0.09, parse 4.70 |
 
@@ -356,33 +359,33 @@ Millions of edges a second (session50: of samples), median (p95, slow side) over
 
 | recording | decoder | in worker | round trip | hop ms | in worker vs ruzstd |
 | --- | --- | --- | --- | --- | --- |
-| gcc-swd-reads | chrono-wasm, decoder only (ruzstd) | 137.9 (119.1) | 133.8 (114.0) | 0.22 |  |
-| gcc-swd-reads | chrono-wasm, decoder only (ruzstd), A-A copy | 138.8 (123.5) | 135.3 (103.9) | 0.20 |  |
+| gcc-swd-reads | tickwave-wasm, decoder only (ruzstd) | 137.9 (119.1) | 133.8 (114.0) | 0.22 |  |
+| gcc-swd-reads | tickwave-wasm, decoder only (ruzstd), A-A copy | 138.8 (123.5) | 135.3 (103.9) | 0.20 |  |
 | gcc-swd-reads | libzstd in WASM | 153.7 (138.2) | 148.8 (132.1) | 0.22 | +12 % (better) |
 | gcc-swd-reads | fzstd + TypeScript | 168.2 (127.8) | 162.2 (114.2) | 0.16 | +22 % (better) |
 | gcc-swd-reads | DecompressionStream("zstd") + TypeScript | 205.6 (174.0) | 196.0 (139.7) | 0.18 | +49 % (better) |
-| stock-reads | chrono-wasm, decoder only (ruzstd) | 107.2 (84.4) | 103.9 (81.3) | 0.14 |  |
-| stock-reads | chrono-wasm, decoder only (ruzstd), A-A copy | 105.6 (83.8) | 102.2 (80.2) | 0.16 |  |
+| stock-reads | tickwave-wasm, decoder only (ruzstd) | 107.2 (84.4) | 103.9 (81.3) | 0.14 |  |
+| stock-reads | tickwave-wasm, decoder only (ruzstd), A-A copy | 105.6 (83.8) | 102.2 (80.2) | 0.16 |  |
 | stock-reads | libzstd in WASM | 131.5 (106.4) | 126.3 (99.8) | 0.14 | +23 % (better) |
 | stock-reads | fzstd + TypeScript | 119.3 (91.9) | 114.6 (83.1) | 0.14 | +11 % (better) |
 | stock-reads | DecompressionStream("zstd") + TypeScript | 149.7 (114.1) | 142.1 (104.3) | 0.14 | +40 % (better) |
-| swo-24000000 | chrono-wasm, decoder only (ruzstd) | 86.4 (77.4) | 84.9 (74.7) | 0.16 |  |
-| swo-24000000 | chrono-wasm, decoder only (ruzstd), A-A copy | 86.3 (77.4) | 84.6 (74.1) | 0.18 |  |
+| swo-24000000 | tickwave-wasm, decoder only (ruzstd) | 86.4 (77.4) | 84.9 (74.7) | 0.16 |  |
+| swo-24000000 | tickwave-wasm, decoder only (ruzstd), A-A copy | 86.3 (77.4) | 84.6 (74.1) | 0.18 |  |
 | swo-24000000 | libzstd in WASM | 129.2 (113.7) | 126.1 (108.1) | 0.16 | +50 % (better) |
 | swo-24000000 | fzstd + TypeScript | 120.4 (87.2) | 118.0 (82.7) | 0.14 | +39 % (better) |
 | swo-24000000 | DecompressionStream("zstd") + TypeScript | 168.2 (142.5) | 162.1 (122.5) | 0.14 | +95 % (better) |
-| gcc-oscan1-probe-rs | chrono-wasm, decoder only (ruzstd) | 137.0 (108.6) | 132.6 (104.7) | 0.16 |  |
-| gcc-oscan1-probe-rs | chrono-wasm, decoder only (ruzstd), A-A copy | 136.5 (107.9) | 132.2 (103.4) | 0.16 |  |
+| gcc-oscan1-probe-rs | tickwave-wasm, decoder only (ruzstd) | 137.0 (108.6) | 132.6 (104.7) | 0.16 |  |
+| gcc-oscan1-probe-rs | tickwave-wasm, decoder only (ruzstd), A-A copy | 136.5 (107.9) | 132.2 (103.4) | 0.16 |  |
 | gcc-oscan1-probe-rs | libzstd in WASM | 149.6 (125.1) | 144.9 (117.9) | 0.14 | +9 % (better) |
 | gcc-oscan1-probe-rs | fzstd + TypeScript | 129.8 (89.3) | 125.7 (82.5) | 0.14 | -5 % (worse) |
 | gcc-oscan1-probe-rs | DecompressionStream("zstd") + TypeScript | 166.1 (131.7) | 159.6 (118.4) | 0.12 | +21 % (better) |
-| gcc-swd-matrix-capture100000 | chrono-wasm, decoder only (ruzstd) | 122.2 (94.3) | 119.1 (91.0) | 0.16 |  |
-| gcc-swd-matrix-capture100000 | chrono-wasm, decoder only (ruzstd), A-A copy | 121.9 (95.2) | 119.0 (92.6) | 0.16 |  |
+| gcc-swd-matrix-capture100000 | tickwave-wasm, decoder only (ruzstd) | 122.2 (94.3) | 119.1 (91.0) | 0.16 |  |
+| gcc-swd-matrix-capture100000 | tickwave-wasm, decoder only (ruzstd), A-A copy | 121.9 (95.2) | 119.0 (92.6) | 0.16 |  |
 | gcc-swd-matrix-capture100000 | libzstd in WASM | 148.8 (117.4) | 144.8 (112.4) | 0.14 | +22 % (better) |
 | gcc-swd-matrix-capture100000 | fzstd + TypeScript | 138.9 (100.5) | 135.3 (93.6) | 0.12 | +14 % (better) |
 | gcc-swd-matrix-capture100000 | DecompressionStream("zstd") + TypeScript | 168.4 (128.1) | 163.7 (117.4) | 0.14 | +38 % (better) |
-| session50 | chrono-wasm, decoder only (ruzstd) | 71.2 (58.4) | 69.9 (56.9) | 0.12 |  |
-| session50 | chrono-wasm, decoder only (ruzstd), A-A copy | 71.2 (58.1) | 69.9 (56.4) | 0.12 |  |
+| session50 | tickwave-wasm, decoder only (ruzstd) | 71.2 (58.4) | 69.9 (56.9) | 0.12 |  |
+| session50 | tickwave-wasm, decoder only (ruzstd), A-A copy | 71.2 (58.1) | 69.9 (56.4) | 0.12 |  |
 | session50 | libzstd in WASM | 315.8 (154.2) | 297.9 (148.1) | 0.10 | +343 % (better) |
 | session50 | fzstd + TypeScript | 62.9 (54.2) | 61.8 (51.5) | 0.14 | -12 % (worse) |
 | session50 | DecompressionStream("zstd") + TypeScript | 238.3 (161.8) | 226.0 (145.6) | 0.12 | +235 % (better) |
@@ -393,7 +396,7 @@ Median ms a block by step, every recording pooled:
 
 | decoder | steps |
 | --- | --- |
-| chrono-wasm, decoder only (ruzstd) | decode 5.86, copyOut 1.14 |
+| tickwave-wasm, decoder only (ruzstd) | decode 5.86, copyOut 1.14 |
 | libzstd in WASM | decode 4.34, copyOut 1.04 |
 | fzstd + TypeScript | inflate 2.74, checksum 0.10, parse 3.46 |
 | DecompressionStream("zstd") + TypeScript | inflate 1.30, parse 3.42 |
@@ -422,12 +425,12 @@ Seconds, median (p95) of the runs, every block in turn inside one worker; M edge
 
 | browser | decoder | seconds | M edges/s | vs ruzstd | machine busy |
 | --- | --- | --- | --- | --- | --- |
-| chromium 158.0.8127.18 | chrono-wasm, decoder only (ruzstd) | 4.42 (4.47) | 144 | A-A 0.3 % | 5 % |
-| chromium 158.0.8127.18 | chrono-wasm, decoder only (ruzstd), A-A copy | 4.44 (4.49) | 144 | A-A 0.3 % | 4 % |
+| chromium 158.0.8127.18 | tickwave-wasm, decoder only (ruzstd) | 4.42 (4.47) | 144 | A-A 0.3 % | 5 % |
+| chromium 158.0.8127.18 | tickwave-wasm, decoder only (ruzstd), A-A copy | 4.44 (4.49) | 144 | A-A 0.3 % | 4 % |
 | chromium 158.0.8127.18 | libzstd in WASM | 4.77 (4.83) | 134 | +8 % (worse) | 5 % |
 | chromium 158.0.8127.18 | fzstd + TypeScript | 6.75 (6.84) | 94 | +53 % (worse) | 6 % |
-| firefox 159.0 | chrono-wasm, decoder only (ruzstd) | 5.13 (5.15) | 124 | A-A 0.2 % | 4 % |
-| firefox 159.0 | chrono-wasm, decoder only (ruzstd), A-A copy | 5.12 (5.15) | 124 | A-A 0.2 % | 4 % |
+| firefox 159.0 | tickwave-wasm, decoder only (ruzstd) | 5.13 (5.15) | 124 | A-A 0.2 % | 4 % |
+| firefox 159.0 | tickwave-wasm, decoder only (ruzstd), A-A copy | 5.12 (5.15) | 124 | A-A 0.2 % | 4 % |
 | firefox 159.0 | libzstd in WASM | 4.29 (4.33) | 149 | -16 % (better) | 4 % |
 | firefox 159.0 | fzstd + TypeScript | 4.73 (4.78) | 135 | -8 % (better) | 4 % |
 | firefox 159.0 | DecompressionStream("zstd") + TypeScript | 3.96 (3.99) | 161 | -23 % (better) | 4 % |
@@ -448,11 +451,11 @@ M items a second, median (p95, slow side) over 20 runs of every block.
 
 ## Copies and the hop to the worker
 
-Per block, as the code does it (read in the wasm-bindgen glue, chrono-wasm and the TypeScript):
+Per block, as the code does it (read in the wasm-bindgen glue, tickwave-wasm and the TypeScript):
 
 | Decoder | Into WASM memory | Inside | Out of WASM memory | Hop to the page |
 | --- | --- | --- | --- | --- |
-| chrono-wasm, libzstd | the compressed frame (`&[u8]`: malloc and copy) | inflate to a 1 MiB payload; parse to `Vec<i64>` edges; `edges()` maps them to a new `Vec<f64>` | each channel's `Vec<f64>` or `Vec<f32>` copied to a new JS array (`Float64Array::from`) | the arrays transferred, no copy |
+| tickwave-wasm, libzstd | the compressed frame (`&[u8]`: malloc and copy) | inflate to a 1 MiB payload; parse to `Vec<i64>` edges; `edges()` maps them to a new `Vec<f64>` | each channel's `Vec<f64>` or `Vec<f32>` copied to a new JS array (`Float64Array::from`) | the arrays transferred, no copy |
 | fzstd + TypeScript | the 1 MiB payload, copied into hash-wasm's memory for XXH64 | n/a | n/a | the same |
 | DecompressionStream + TypeScript | none | n/a | n/a | the same |
 
@@ -462,7 +465,7 @@ in the block measure the worker already holds the file.
 
 What they cost, from the step tables: getting a block's arrays out of WASM memory (the i64-to-f64
 pass, the copy out, and freeing the block) takes a median 1.34 ms in Chromium and 1.14 ms in
-Firefox, 22 % and 16 % of chrono-wasm's time a block. The hop to the page and back takes a median
+Firefox, 22 % and 16 % of tickwave-wasm's time a block. The hop to the page and back takes a median
 0.07-0.15 ms in Chromium and 0.10-0.22 ms in Firefox.
 
 ## Correctness
@@ -474,7 +477,7 @@ against `Head::decode_overview_block`, in every decoder that can decode one. The
 reader shares no code with the Rust, so its agreement checks both.
 
 The corrupted blocks, all of the middle block of gcc-swd-reads (block 3) and session50 (block
-191), made by `chrono-bench-native corrupt`:
+191), made by `tickwave-bench-native corrupt`:
 
 | Kind | What was done |
 | --- | --- |
@@ -498,13 +501,13 @@ DecompressionStream("zstd"): no by default. Cross-origin isolated: true.
 
 | decoder | blocks hashed | differ from native | overview blocks hashed | differ from native |
 | --- | --- | --- | --- | --- |
-| chrono-wasm, default build (ruzstd) | 1505 | 0 | 610 | 0 |
-| chrono-wasm, decoder only (ruzstd) | 1505 | 0 | 610 | 0 |
+| tickwave-wasm, default build (ruzstd) | 1505 | 0 | 610 | 0 |
+| tickwave-wasm, decoder only (ruzstd) | 1505 | 0 | 610 | 0 |
 | libzstd in WASM | 1505 | 0 | no API |  |
 | fzstd + TypeScript | 1505 | 0 | 610 | 0 |
 | fzstd + TypeScript, pure-JS XXH64 | 1505 | 0 | 610 | 0 |
 
-| recording | corruption | native refusal | chrono-wasm, default build (ruzstd) | chrono-wasm, decoder only (ruzstd) | libzstd in WASM | fzstd + TypeScript | fzstd + TypeScript, pure-JS XXH64 |
+| recording | corruption | native refusal | tickwave-wasm, default build (ruzstd) | tickwave-wasm, decoder only (ruzstd) | libzstd in WASM | fzstd + TypeScript | fzstd + TypeScript, pure-JS XXH64 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | gcc-swd-reads | flip-data | zstd: checksum mismatch | refused: Error: zstd: checksum mismatch | refused: Error: zstd: checksum mismatch | refused: Error: zstd: Restored data doesn't match checksum | refused: Error: zstd content checksum a841ba4d does not match c8efab53 | refused: Error: zstd content checksum a841ba4d does not match c8efab53 |
 | gcc-swd-reads | flip-checksum | zstd: checksum mismatch | refused: Error: zstd: checksum mismatch | refused: Error: zstd: checksum mismatch | refused: Error: zstd: Restored data doesn't match checksum | refused: Error: zstd content checksum c8efab53 does not match c9efab53 | refused: Error: zstd content checksum c8efab53 does not match c9efab53 |
@@ -533,14 +536,14 @@ DecompressionStream("zstd"): no by default, yes with dom.compression_streams.zst
 
 | decoder | blocks hashed | differ from native | overview blocks hashed | differ from native |
 | --- | --- | --- | --- | --- |
-| chrono-wasm, default build (ruzstd) | 1505 | 0 | 610 | 0 |
-| chrono-wasm, decoder only (ruzstd) | 1505 | 0 | 610 | 0 |
+| tickwave-wasm, default build (ruzstd) | 1505 | 0 | 610 | 0 |
+| tickwave-wasm, decoder only (ruzstd) | 1505 | 0 | 610 | 0 |
 | libzstd in WASM | 1505 | 0 | no API |  |
 | fzstd + TypeScript | 1505 | 0 | 610 | 0 |
 | fzstd + TypeScript, pure-JS XXH64 | 1505 | 0 | 610 | 0 |
 | DecompressionStream("zstd") + TypeScript | 1505 | 0 | 610 | 0 |
 
-| recording | corruption | native refusal | chrono-wasm, default build (ruzstd) | chrono-wasm, decoder only (ruzstd) | libzstd in WASM | fzstd + TypeScript | fzstd + TypeScript, pure-JS XXH64 | DecompressionStream("zstd") + TypeScript |
+| recording | corruption | native refusal | tickwave-wasm, default build (ruzstd) | tickwave-wasm, decoder only (ruzstd) | libzstd in WASM | fzstd + TypeScript | fzstd + TypeScript, pure-JS XXH64 | DecompressionStream("zstd") + TypeScript |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | gcc-swd-reads | flip-data | zstd: checksum mismatch | refused: Error: zstd: checksum mismatch | refused: Error: zstd: checksum mismatch | refused: Error: zstd: Restored data doesn't match checksum | refused: Error: zstd content checksum a841ba4d does not match c8efab53 | refused: Error: zstd content checksum a841ba4d does not match c8efab53 | refused: TypeError: zstd decompression error: Restored data doesn't match checksum |
 | gcc-swd-reads | flip-checksum | zstd: checksum mismatch | refused: Error: zstd: checksum mismatch | refused: Error: zstd: checksum mismatch | refused: Error: zstd: Restored data doesn't match checksum | refused: Error: zstd content checksum c8efab53 does not match c9efab53 | refused: Error: zstd content checksum c8efab53 does not match c9efab53 | refused: TypeError: zstd decompression error: Restored data doesn't match checksum |
@@ -590,7 +593,7 @@ itself. The two getters read the state of the last frame decoded. So `inflate` c
 last frame's checksum, and accepts bytes after the block's frame. FORMAT.md says a block is one
 zstd frame.
 
-What that lets through, natively and in both chrono-wasm builds in both browsers:
+What that lets through, natively and in both tickwave-wasm builds in both browsers:
 
 - A block's frame followed by a skippable frame, empty or not, or by an empty zstd frame:
   accepted.
@@ -612,7 +615,7 @@ time; the checks they break did not change with it.
 | Mutant | What failed |
 | --- | --- |
 | TypeScript reader: the eighth edge of every channel one tick late | every block in both fzstd decoders differs from native (8 of 8); every WASM block still matches |
-| WASM path: the block's start level inverted | every block in chrono-wasm (both) and libzstd differs (8 of 8) |
+| WASM path: the block's start level inverted | every block in tickwave-wasm (both) and libzstd differs (8 of 8) |
 | One reference hash changed (gcc-swd-reads block 2) | block 2, and only block 2, differs in all five decoders |
 | JavaScript checksum compare disabled | fzstd accepts flip-checksum (both files) and session50's flip-data; gcc-swd-reads' flip-data is still caught, by the reader |
 | JavaScript check that a checksum is declared, removed (Firefox) | `DecompressionStream` accepts the frame without a checksum; fzstd still refuses it, because the check reads compressed bytes as the checksum |
@@ -699,7 +702,7 @@ anything but one checksummed frame a block"). `build/staged.diff` holds `git dif
 `crates/format` and `crates/wasm` (SHA-256 `6e6ac4e7…`). The tree also had another session's
 unstaged changes to `crates/format/src/annotations.rs` and its test, which `build/decoder.diff`
 (`ab0746be…`) records. Only the `annotations` feature compiles that file, so of the modules here
-only chrono-wasm's default build, in the correctness rerun, carries it. The recordings are the
+only tickwave-wasm's default build, in the correctness rerun, carries it. The recordings are the
 ones reconverted on 2026-11-08 at 23:50, checked unchanged at the start and end of every run.
 
 **Load.** Other sessions were converting on every core. No timed measure started until the
@@ -729,7 +732,7 @@ ruzstd is no longer linked in. twiggy over the modules' name sections:
 | --- | --- | --- |
 | libzstd build | 0 | 47 |
 | probe build with ruzstd (control) | 40 (56,947 bytes) | 0 |
-| chrono-wasm, decoder only | 60 (41,037 bytes) | 0 |
+| tickwave-wasm, decoder only | 60 (41,037 bytes) | 0 |
 
 The libzstd build now decodes overview blocks too, and matches native on all 610 of them.
 
@@ -737,18 +740,18 @@ Transfer size, as served (zlib level 9):
 
 | Decoder | Module | Worker | Gzipped total |
 | --- | --- | --- | --- |
-| chrono-wasm, decoder only | 261,676 (109,287 gzipped) | 13,584 (4,676) | 113,963 |
+| tickwave-wasm, decoder only | 261,676 (109,287 gzipped) | 13,584 (4,676) | 113,963 |
 | libzstd, without ruzstd | 292,779 (115,285) | 12,717 (4,520) | 119,805 |
 | libzstd with ruzstd, as measured above | 347,192 (132,400) | 10,762 (4,089) | 136,489 |
 
 The libzstd build is now 5,842 bytes more than the decoder-only build gzipped, down from 24,576.
 On Slow 4G that is 28-39 ms later to the first inset, against 131-144 ms before; its decoder is
-ready 33.6 ms after chrono-wasm's (3,344 against 3,310 ms), close to what 5,842 bytes take at
+ready 33.6 ms after tickwave-wasm's (3,344 against 3,310 ms), close to what 5,842 bytes take at
 180,000 bytes a second (32 ms). Unthrottled, the two are within the floor on 7 of 12 rows, and
 libzstd is 2-10 % sooner on four of the other five (10 % on session50 in Chromium) and 3 %
 later on gcc-oscan1-probe-rs in Chromium.
 
-In block decode, libzstd is now faster than chrono-wasm on every recording in both browsers:
+In block decode, libzstd is now faster than tickwave-wasm on every recording in both browsers:
 7-31 % on the digital ones in Chromium and 12-41 % in Firefox. Linked with ruzstd, at `48d7f58`,
 it had been 12 % slower to 5 % faster in Chromium. ruzstd leaving and the staged decoder checks
 arriving both happened between those builds, and I have not separated the two.
@@ -812,26 +815,26 @@ Block decode in the worker, Firefox: median M edges a second (session50: samples
 
 The probe builds (`bench/libzstd --features probe`) decode a block as two calls, inflate and then
 parse, and time them apart. They are the same crate, built once with libzstd and once with
-chrono-format's ruzstd `inflate`. Chromium, median ms a block, 20 runs of every block:
+tickwave-format's ruzstd `inflate`. Chromium, median ms a block, 20 runs of every block:
 
 | Recording | Decoder | Inflate | Parse | Copy out | Whole |
 | --- | --- | --- | --- | --- | --- |
-| session50 | chrono-wasm, decoder only | (5.73 with the parse) | | 0.44 | 6.21 |
+| session50 | tickwave-wasm, decoder only | (5.73 with the parse) | | 0.44 | 6.21 |
 | session50 | probe, ruzstd | 4.97 | 0.78 | 0.44 | 6.24 |
 | session50 | probe, libzstd | 0.64 | 0.78 | 0.43 | 1.89 |
-| gcc-swd-reads | chrono-wasm, decoder only | (4.79 with the parse) | | 1.51 | 6.38 |
+| gcc-swd-reads | tickwave-wasm, decoder only | (4.79 with the parse) | | 1.51 | 6.38 |
 | gcc-swd-reads | probe, ruzstd | 1.81 | 4.59 | 1.51 | 7.90 |
 | gcc-swd-reads | probe, libzstd | 0.73 | 4.60 | 1.50 | 6.89 |
 
 session50's gap is in zstd decompression. ruzstd takes 4.97 ms to inflate a block and libzstd
 0.64 ms, 7.8 times less; the parse takes 0.78 ms in both. On session50 the ruzstd probe totals
-6.24 ms against chrono-wasm's 6.21, so the probe stands for chrono-wasm there.
+6.24 ms against tickwave-wasm's 6.21, so the probe stands for tickwave-wasm there.
 
 On gcc-swd-reads, a digital recording added for contrast, libzstd also inflates faster (0.73
 against 1.81 ms), and the parse is again the same in both probes. But the ruzstd probe totals 7.90
-ms against chrono-wasm's 6.38: splitting the call costs about 1.5 ms a block on digital blocks
+ms against tickwave-wasm's 6.38: splitting the call costs about 1.5 ms a block on digital blocks
 and nothing measurable on session50's. So the probes compare with each other, but their digital
-parse time is not chrono-wasm's. Each probe call also copies the frame into WASM memory, one copy
+parse time is not tickwave-wasm's. Each probe call also copies the frame into WASM memory, one copy
 more than `decodeBlock`.
 
 ### 3. Correctness at the new base
@@ -841,12 +844,12 @@ against `Head::decode_block` and `Head::decode_overview_block` built from the st
 
 | Browser | Decoders | Blocks each | Differ | Overview blocks each | Differ |
 | --- | --- | --- | --- | --- | --- |
-| Chromium 158.0.8127.18 | 7: both chrono-wasm builds, libzstd, both probes, fzstd, fzstd with pure-JS XXH64 | 1,505 | 0 | 610 | 0 |
+| Chromium 158.0.8127.18 | 7: both tickwave-wasm builds, libzstd, both probes, fzstd, fzstd with pure-JS XXH64 | 1,505 | 0 | 610 | 0 |
 | Firefox 159.0 | 8: the same and DecompressionStream | 1,505 | 0 | 610 | 0 |
 
 The corrupted blocks are the ten kinds above plus one for each rule FORMAT.md settled (31 in all:
 16 on gcc-swd-reads, 15 on session50). Every decoder refused every one, 217 in Chromium and 248 in
-Firefox, and refused it at the stage it targets. Both chrono-wasm builds now refuse all four
+Firefox, and refused it at the stage it targets. Both tickwave-wasm builds now refuse all four
 trailing kinds ("the bytes hold more than one frame"). The new kinds, each breaking one rule and
 keeping every length:
 
@@ -890,10 +893,10 @@ that the control block refused too, and the run reported "refused at control, ex
 The two gates were broken as well. With a limit of 0, the load-average gate was still waiting
 after 25 s. With a limit of 100 and a 1 s hold, it returned at its first check, after 10 s.
 
-### Correction: what the switch costs in crates/wasm (chrono session, 2026-11-09)
+### Correction: what the switch costs in crates/wasm (tickwave session, 2026-11-09)
 
-The size comparison above sets the libzstd crate in `bench/libzstd` against chrono-wasm, and the
-two crates do not carry the same code: chrono-wasm also carries about 16 KB of core's float
+The size comparison above sets the libzstd crate in `bench/libzstd` against tickwave-wasm, and the
+two crates do not carry the same code: tickwave-wasm also carries about 16 KB of core's float
 formatting, which the libzstd crate does not. The switch itself, measured within one crate: at
 `6b82dda` plus the staged fix, `crates/wasm` built with `--no-default-features` and the same
 `wasm-opt` flags is 261,676 bytes (108,914 gzipped) with ruzstd and 313,570 bytes (123,777

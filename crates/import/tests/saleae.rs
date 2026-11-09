@@ -1,8 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use chrono_format::model::{ChannelData, Ratio, Samples};
-use chrono_import::saleae::{self, Error};
+use tickwave_format::model::{ChannelData, Ratio, Samples};
+use tickwave_import::saleae::{self, Error};
 
 const DIR: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),

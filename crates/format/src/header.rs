@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-pub const MAGIC: [u8; 8] = *b"\x89chrono\n";
+pub const MAGIC: [u8; 8] = *b"\x89TKW\r\n\x1a\n";
 pub const MAJOR: u16 = 1;
 pub const MINOR: u16 = 0;
 pub const PREAMBLE_LEN: usize = 32;

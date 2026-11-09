@@ -1,5 +1,5 @@
 [package]
-name = "chrono-cli"
+name = "tickwave-cli"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
@@ -8,8 +8,8 @@ publish.workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
-chrono-format = { version = "0.1.0", path = "../format" }
-chrono-import = { version = "0.1.0", path = "../import" }
+tickwave-format = { version = "0.1.0", path = "../format" }
+tickwave-import = { version = "0.1.0", path = "../import" }
 clap = { version = "4.6.7", features = ["derive"] }
 indicatif = "0.18.6"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -20,5 +20,5 @@ tracing-indicatif = "0.3.14"
 tracing-subscriber = "0.3.23"
 
 [[bin]]
-name = "chrono"
+name = "tickwave"
 path = "src/main.rs"

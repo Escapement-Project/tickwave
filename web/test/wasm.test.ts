@@ -1,6 +1,6 @@
 // The WASM connector in Node: the same reader and recording code the worker runs, over the real
 // decoder. Expected values come from the Saleae export (file sizes, an independent decode), from
-// the converter's own report, or from the .chronofx fixture, which my extractor wrote from the
+// the converter's own report, or from the .tickwavefx fixture, which my extractor wrote from the
 // export without the Rust core: two pipelines that must agree.
 
 import { test } from "node:test";
@@ -13,21 +13,21 @@ import { readFixture } from "../src/fixture-file.ts";
 import { formatLevels, MemorySource } from "../src/memory-source.ts";
 import { isAbort } from "../src/source.ts";
 import { formatInterval, measureReading } from "../src/readouts.ts";
-import { openChrono, wasm } from "../scripts/node-wasm.ts";
+import { openTickwave, wasm } from "../scripts/node-wasm.ts";
 
 const at = (p: string) => new URL(`../${p}`, import.meta.url);
-const ONE = readFileSync(at("fixtures/identify-swd.chrono"));
-const NINE = readFileSync(at("fixtures/identify-swd.4k.chrono"));
-const memory = () => readFixture(readFileSync(at("fixtures/identify-swd.chronofx"))).then((r) => new MemorySource(r));
+const ONE = readFileSync(at("fixtures/identify-swd.tickwave"));
+const NINE = readFileSync(at("fixtures/identify-swd.4k.tickwave"));
+const memory = () => readFixture(readFileSync(at("fixtures/identify-swd.tickwavefx"))).then((r) => new MemorySource(r));
 
 test("the head: what the recording says, from one read", async () => {
-  const bytes = new MemoryBytes(ONE, "identify-swd.chrono");
+  const bytes = new MemoryBytes(ONE, "identify-swd.tickwave");
   const r = await Opened.open(wasm(), bytes);
   assert.deepEqual(bytes.reads, [[0, 65536]]);
   const i = r.info;
   assert.deepEqual(i.timebase, { num: 1e9, den: 1 });
   assert.equal(i.length, 523583100);
-  assert.equal(i.bytes, 4828);
+  assert.equal(i.bytes, 4830);
   assert.deepEqual(
     i.channels.map((c) => [c.name, c.kind, c.end]),
     [
@@ -38,21 +38,21 @@ test("the head: what the recording says, from one read", async () => {
 });
 
 test("a small first read: the head in two reads, then the block by its range", async () => {
-  // The converter reports a 1742-byte head and one block, the rest of the 4828 bytes.
-  const bytes = new MemoryBytes(ONE, "identify-swd.chrono");
+  // The converter reports a 1744-byte head and one block, the rest of the 4830 bytes.
+  const bytes = new MemoryBytes(ONE, "identify-swd.tickwave");
   const r = await Opened.open(wasm(), bytes, 512);
   const e = await r.edges(1, 377094000, 377107000);
   assert.deepEqual(bytes.reads, [
     [0, 512],
-    [512, 1742],
-    [1742, 4828],
+    [512, 1744],
+    [1744, 4830],
   ]);
   assert.equal(e.level, 0);
   assert.deepEqual([...e.ticks], [377094556, 377095556, 377096556, 377097556, 377099556, 377100556, 377101556, 377104078, 377106074]);
 });
 
 test("nine blocks: every edge and every level agree with the extractor's fixture", async () => {
-  const r = await openChrono("fixtures/identify-swd.4k.chrono");
+  const r = await openTickwave("fixtures/identify-swd.4k.tickwave");
   const m = await memory();
   for (const ch of [0, 1]) {
     const all = await r.edges(ch, 0, r.info.length);
@@ -76,7 +76,7 @@ test("nine blocks: every edge and every level agree with the extractor's fixture
 });
 
 test("the overview: unpacked from the head, as the extractor's fixture computes it", async () => {
-  const r = await openChrono("fixtures/identify-swd.chrono");
+  const r = await openTickwave("fixtures/identify-swd.tickwave");
   const m = await memory();
   // By hand (test/columns.test.ts): SWCLK's buckets of 4096 from 376696832, changing in the 6th
   // and 7th.
@@ -100,8 +100,8 @@ test("the overview: unpacked from the head, as the extractor's fixture computes 
 test("overview blocks: a finer level read by range, as the TypeScript computation has it", async () => {
   // The JTAG identify capture without TDO: 626,263,880 ticks, so 2^12 has 152,898 buckets, too
   // many for the head, and sits in three overview blocks.
-  const file = readFileSync(at("fixtures/identify-jtag.chrono"));
-  const bytes = new MemoryBytes(file, "identify-jtag.chrono");
+  const file = readFileSync(at("fixtures/identify-jtag.tickwave"));
+  const bytes = new MemoryBytes(file, "identify-jtag.tickwave");
   const r = await Opened.open(wasm(), bytes);
   assert.deepEqual(r.header.overview, [16, 20]);
   assert.deepEqual(r.header.overview_blocks, [{ shift: 12, blocks: 3 }]);
@@ -135,7 +135,7 @@ test("overview blocks: a finer level read by range, as the TypeScript computatio
 
 /** A server over a file, honouring Range or not, and recording what it was asked. */
 function server(file: Uint8Array, opts: { ranges: boolean; encoding?: string; shift?: number }) {
-  const name = file === ONE ? "identify-swd.chrono" : "identify-swd.4k.chrono";
+  const name = file === ONE ? "identify-swd.tickwave" : "identify-swd.4k.tickwave";
   const log: string[] = [];
   const fetchFn: Fetch = async (_url, init) => {
     const range = new Headers(init.headers).get("range");
@@ -154,11 +154,11 @@ function server(file: Uint8Array, opts: { ranges: boolean; encoding?: string; sh
 test("HTTP: blocks by range; adjacent missing blocks in one request; nothing fetched twice", async () => {
   const s = server(NINE, { ranges: true });
   const r = await Opened.open(wasm(), s.bytes, 1024);
-  // The converter reports a 1995-byte head.
-  assert.deepEqual(s.log, ["bytes=0-1023", "bytes=1024-1994"]);
+  // The converter reports a 1997-byte head.
+  assert.deepEqual(s.log, ["bytes=0-1023", "bytes=1024-1996"]);
   await r.edges(0, 0, r.info.length);
   assert.equal(s.log.length, 3);
-  assert.equal(s.log[2], "bytes=1995-6632");
+  assert.equal(s.log[2], "bytes=1997-6634");
   await r.edges(1, 377094000, 377107000);
   assert.equal(s.log.length, 3);
 });
@@ -212,10 +212,11 @@ class SlowBytes implements Bytes {
 }
 
 test("an abort stops the request at once, and the read no other request waits on", async () => {
-  const head = (await openChrono("fixtures/identify-swd.4k.chrono")).header;
-  const slow = new SlowBytes(new MemoryBytes(NINE, "identify-swd.4k.chrono"));
-  // The head comes at once; every block read waits.
-  const s = await Opened.open(wasm(), { name: "slow", read: (a, b, sig) => (a === 0 ? new MemoryBytes(NINE, "x").read(0, 1995) : slow.read(a, b, sig)) });
+  const head = (await openTickwave("fixtures/identify-swd.4k.tickwave")).header;
+  const slow = new SlowBytes(new MemoryBytes(NINE, "identify-swd.4k.tickwave"));
+  // The head comes at once; every block read waits. head_len is the preamble's u32 at 20.
+  const headLen = new DataView(NINE.buffer, NINE.byteOffset).getUint32(20, true);
+  const s = await Opened.open(wasm(), { name: "slow", read: (a, b, sig) => (a === 0 ? new MemoryBytes(NINE, "x").read(0, headLen) : slow.read(a, b, sig)) });
   assert.equal(s.header.blocks, head.blocks);
   const c = new AbortController();
   const first = s.edges(0, 0, s.info.length, c.signal);
@@ -247,7 +248,7 @@ test("an abort stops the request at once, and the read no other request waits on
 });
 
 test("the block cache: an evicted block is read again", async () => {
-  const bytes = new MemoryBytes(NINE, "identify-swd.4k.chrono");
+  const bytes = new MemoryBytes(NINE, "identify-swd.4k.tickwave");
   const r = await Opened.open(wasm(), bytes, 1024);
   setCacheBytes(1);
   await r.edges(0, 0, r.info.length);
@@ -260,18 +261,18 @@ test("the block cache: an evicted block is read again", async () => {
 });
 
 test("the sidecar resolves through the Rust core, and its problems come back", async () => {
-  const r = await openChrono("fixtures/identify-swd.chrono");
+  const r = await openTickwave("fixtures/identify-swd.tickwave");
   const hand = readFileSync(at("fixtures/identify-swd.annotations.toml"), "utf8");
-  const jsonl = execFileSync(process.execPath, ["scripts/swd-annotations.ts", "fixtures/identify-swd.chrono"], { encoding: "utf8" });
-  const list = JSON.parse(r.resolveAnnotations(hand, ["identify-swd.swd.jsonl"], [jsonl], "identify-swd.chrono")) as { id: string; start: number; end: number | null }[];
+  const jsonl = execFileSync(process.execPath, ["scripts/swd-annotations.ts", "fixtures/identify-swd.tickwave"], { encoding: "utf8" });
+  const list = JSON.parse(r.resolveAnnotations(hand, ["identify-swd.swd.jsonl"], [jsonl], "identify-swd.tickwave")) as { id: string; start: number; end: number | null }[];
   // 687 generated by the decoder, 8 hand-written.
   assert.equal(list.length, 695);
   const read = list.find((a) => a.id === "dpidr-read")!;
   assert.deepEqual([read.start, read.end], [377094557, 377140560]);
   assert.ok(list.some((a) => a.id === "swd/wait/379065159"));
-  assert.throws(() => r.resolveAnnotations(hand, ["identify-swd.swd.jsonl"], [jsonl], "other.chrono"), /names "identify-swd.chrono", not "other.chrono"/);
+  assert.throws(() => r.resolveAnnotations(hand, ["identify-swd.swd.jsonl"], [jsonl], "other.tickwave"), /names "identify-swd.tickwave", not "other.tickwave"/);
   const stale = jsonl.replace(/blake3:[0-9a-f]+/, "blake3:00");
-  assert.throws(() => r.resolveAnnotations(hand, ["identify-swd.swd.jsonl"], [stale], "identify-swd.chrono"), /generated for blake3:00/);
+  assert.throws(() => r.resolveAnnotations(hand, ["identify-swd.swd.jsonl"], [stale], "identify-swd.tickwave"), /generated for blake3:00/);
 });
 
 /** A Saleae analog export's f32 volts (one chunk), read here without the Rust core. */
@@ -306,7 +307,7 @@ function analogSource(r: Opened, channels: { name: string; first: number; values
 const numbers = (a: ArrayLike<number>) => Array.from(a);
 
 test("analog: every sample is the export's value, and the channel ends with its samples", async () => {
-  const r = await openChrono("fixtures/swd50-cut.chrono");
+  const r = await openTickwave("fixtures/swd50-cut.tickwave");
   const [clk, dio, nrst] = r.info.channels;
   assert.ok(clk.kind === "analog" && dio.kind === "analog" && nrst.kind === "digital");
   // 50,000 samples at 1 GS/s from tick 0; the capture runs on to NRST's end, 11,031,886.
@@ -330,7 +331,7 @@ test("analog: every sample is the export's value, and the channel ends with its 
 });
 
 test("analog: the head's overview, as the TypeScript computation has it from the samples", async () => {
-  const r = await openChrono("fixtures/swd50-cut.chrono");
+  const r = await openTickwave("fixtures/swd50-cut.tickwave");
   assert.deepEqual(r.header.overview, [12, 16]);
   const values = await Promise.all([0, 1].map((ch) => r.samples(ch, 0, r.info.length)));
   const m = analogSource(r, [
@@ -348,10 +349,10 @@ test("analog: the head's overview, as the TypeScript computation has it from the
   }
 });
 
-const SESSION50 = new URL("../fixtures-local/session50.chrono", import.meta.url);
+const SESSION50 = new URL("../fixtures-local/session50.tickwave", import.meta.url);
 
-test("analog overview blocks: session50's 2^12 level, as the TypeScript computation has it", { skip: !existsSync(SESSION50) && "no fixtures-local/session50.chrono" }, async () => {
-  const r = await openChrono(SESSION50.pathname);
+test("analog overview blocks: session50's 2^12 level, as the TypeScript computation has it", { skip: !existsSync(SESSION50) && "no fixtures-local/session50.tickwave" }, async () => {
+  const r = await openTickwave(SESSION50.pathname);
   assert.deepEqual(r.header.overview_blocks, [{ shift: 12, blocks: 5 }]);
   // The analog samples end at tick 100,002,000, inside overview block 0, though the capture runs
   // to 1.26 s. Two windows of whole buckets: one inside the samples, one across their end.
@@ -377,7 +378,7 @@ test("analog overview blocks: session50's 2^12 level, as the TypeScript computat
 });
 
 test("duration: first edge to last, of either polarity, of the edges in [start, end)", async () => {
-  const r = await openChrono("fixtures/identify-swd.chrono");
+  const r = await openTickwave("fixtures/identify-swd.tickwave");
   const tb = r.info.timebase;
   const duration = async (ch: number, s: number, e: number) => {
     const edges = await r.edges(ch, s, e);

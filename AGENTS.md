@@ -1,13 +1,13 @@
 # AGENTS.md
 
-Agent rules for chrono, the Escapement Project's logic and MSO capture viewer for the web. chrono
-is built to sit inside a page: a custom element that takes the host page's styles, sizes with its
-layout, and answers its text. It is static (no server) and also opens local files. Digital and
-analog channels share one time axis.
+Agent rules for tickwave, the Escapement Project's logic and MSO capture viewer for the web.
+tickwave is built to sit inside a page: a custom element that takes the host page's styles, sizes
+with its layout, and answers its text. It is static (no server) and also opens local files. Digital
+and analog channels share one time axis.
 
 ## Rules
 
-**chrono owns its recording format, and other tools depend on it.** Readers for Saleae Logic 2's
+**tickwave owns its recording format, and other tools depend on it.** Readers for Saleae Logic 2's
 binary export, sigrok `.sr` and VCD convert into it, and the Escapement Project's pages publish
 recordings in it. Give the format a version and a written specification in this repository, and
 change either deliberately: a change that breaks published recordings needs a reader for the old
@@ -28,8 +28,8 @@ only if a benchmark on real recordings shows the WASM cost matters; record the n
 **Style from the host page's tokens.** The project's design system (colour roles by day and night,
 data colours, line patterns, type roles) lives in the site repository,
 `escapement-project.github.io`; its `design/README.md` explains it. Read the host page's CSS
-variables (`--ink`, `--series-verge`, ...) rather than shipping chrono's own colours. chrono's own
-site keeps copies of the site's `static/tokens.css` and `static/fonts/`, checked with
+variables (`--ink`, `--series-verge`, ...) rather than shipping tickwave's own colours. tickwave's
+own site keeps copies of the site's `static/tokens.css` and `static/fonts/`, checked with
 `uv run design/build.py --check <copies>` run from the site repository. Interaction is hue-free:
 an ink focus ring, an ink wash under the pointer.
 
@@ -44,8 +44,8 @@ until the reader opens it.
 
 ## Peers
 
-The Escapement Project session oversees the project and owns the pages that embed chrono and the
+The Escapement Project session oversees the project and owns the pages that embed tickwave and the
 converted recordings. Send it any plan that crosses into its side (the element's API, the
 converter's interface, the sidecar format its scripts will write) before building it, and ask it
 to confirm findings about the recordings before stating them. It does the same with plans that
-touch chrono.
+touch tickwave.

@@ -1,7 +1,7 @@
-// chrono's site: the face switch on every page, and the viewer on index.html. Built by
-// web/scripts/site.ts; "chrono" is the chrono.js beside this script.
+// tickwave's site: the face switch on every page, and the viewer on index.html. Built by
+// web/scripts/site.ts; "tickwave" is the tickwave.js beside this script.
 
-import { recordingInfo, registerFile, type RecordingInfo } from "chrono";
+import { recordingInfo, registerFile, type RecordingInfo } from "tickwave";
 import { formatBytes, formatInterval } from "../web/src/readouts.ts";
 
 // The face: day or night, remembered under the key the project's other sites use.
@@ -71,14 +71,14 @@ function viewer(): void {
     }
     if (token !== opened) return;
     showFacts(info, name);
-    const view = document.createElement("chrono-view");
+    const view = document.createElement("tickwave-view");
     view.setAttribute("src", src);
     if (annotations) view.setAttribute("annotations", annotations);
     view.setAttribute("open", "");
     const sidecar: string[] = [];
-    view.addEventListener("chrono-error", (e) => {
+    view.addEventListener("tickwave-error", (e) => {
       const error = (e as CustomEvent<{ error: unknown; message: string }>).detail.error;
-      if (error instanceof Error && error.name === "ChronoSidecarError") {
+      if (error instanceof Error && error.name === "TickwaveSidecarError") {
         sidecar.push(...error.message.split("\n"));
         say("The sidecar has problems, so the recording shows without its annotations:", sidecar);
       } else say(explain(error, src, name));
@@ -125,7 +125,7 @@ function viewer(): void {
     const sidecar = all.filter((f) => /\.(toml|jsonl)$/i.test(f.name));
     const recordings = all.filter((f) => !sidecar.includes(f));
     if (recordings.length !== 1) {
-      say(recordings.length === 0 ? "Choose a .chrono recording too: the sidecar's files alone have nothing to draw." : `Choose one recording at a time; these are ${recordings.length}: ${recordings.map((f) => f.name).join(", ")}.`);
+      say(recordings.length === 0 ? "Choose a .tickwave recording too: the sidecar's files alone have nothing to draw." : `Choose one recording at a time; these are ${recordings.length}: ${recordings.map((f) => f.name).join(", ")}.`);
       return;
     }
     void open(registerFile(recordings[0], sidecar), null, recordings[0].name, false);
@@ -159,13 +159,13 @@ function explain(e: unknown, src: string, name: string): string {
   const error = e instanceof Error ? e : new Error(String(e));
   const url = new URL(src, location.href);
   switch (error.name) {
-    case "ChronoNotRecording":
-      return `${name} isn't a chrono recording. The viewer reads .chrono files, which the converter makes from a capture.`;
-    case "ChronoNetworkError":
+    case "TickwaveNotRecording":
+      return `${name} isn't a tickwave recording. The viewer reads .tickwave files, which the converter makes from a capture.`;
+    case "TickwaveNetworkError":
       return url.origin !== location.origin
         ? `${url.host} didn't send the recording. Its server may not let other sites read its files: it has to answer with an Access-Control-Allow-Origin header (CORS). Or it may be out of reach.`
         : `${name} didn't arrive: the server gave no answer.`;
-    case "ChronoHttpError": {
+    case "TickwaveHttpError": {
       const status = /HTTP (\d+)/.exec(error.message)?.[1];
       return status === "404" ? `There's no file at ${url.href}: the server answered 404.` : `The server answered ${status ?? "with an error"} for ${url.href}.`;
     }
