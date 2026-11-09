@@ -20,7 +20,7 @@ tick off that grid.
 
 ## Layout
 
-All integers are little-endian.
+All numbers are little-endian, and an f32 is an IEEE 754 binary32.
 
 | Part | Size | Holds |
 | --- | --- | --- |
@@ -35,8 +35,11 @@ The head is the preamble, header, index and overview: `head_len` bytes from the 
 fetches a fixed amount first (64 KiB), reads `head_len` from the preamble, and fetches the rest of
 the head if it needs more.
 
-Every zstd frame carries a content checksum. A reader refuses a frame without one, or with one
-that does not match.
+Each block, overview block and the head's overview is one standard zstd frame with a content
+checksum, and nothing else: no skippable frame, no second frame, no byte after it, and no
+dictionary. A reader refuses a frame without a checksum, with one that does not match, or with
+anything else in its bytes. (A decoder that reads every frame it is given would check only the
+last checksum, so a valid empty frame after a corrupted block would hide the corruption.)
 
 ### Preamble
 
@@ -88,6 +91,11 @@ A channel entry has `name`, `source_name` (the source's own name for it) and `ki
 
 Sample `i` of an analog channel sits at tick `first + floor(i × period)`.
 
+Every tick in the file lies in `0..=length`, and `length` is below 2^53: a digital channel's `end`,
+every edge, every sample, every block's start. No term of `timebase` or `period` is zero, and
+`bits` lies in `1..=16`. A reader refuses a header that breaks any of these before it reads a
+block.
+
 `source` has `format` (`saleae-binary-1`, `sigrok-sr`, `vcd`), `files` (names, no directories),
 and optionally `instrument`, `software`, `begin_s` (the source's own time of tick 0, in seconds, so
 a script working from the source can map its times), `extra` (anything else the source states) and
@@ -107,7 +115,9 @@ bytes for each channel:
 | 24 + 4c | u32 | channel c: for a digital channel, its edge count in the block, with the level at the block's start in bit 31; for an analog channel, its sample count in the block |
 
 Block i covers ticks `[start_i, start_{i+1})`, and the last block runs to the end. The first block
-starts at tick 0.
+starts at tick 0, and the starts strictly increase. A digital channel's level bit is `initial` in
+block 0, and in each later block the bit before it, flipped once for every edge that block
+counted.
 
 An overview block's row is 16 bytes: its offset (u64), compressed length (u32) and decoded length
 (u32). The rows go by level, in the order of `overview_blocks`, then in time order.
@@ -126,8 +136,10 @@ in channel order:
 
 - **Digital.** The block's edges, as unsigned LEB128 intervals. The first interval is measured from
   the block's start tick, each later one from the edge before it. Only the first may be zero.
+  Every edge lies in `1..=end` of its channel (an edge at tick 0 would contradict `initial`), so
+  the first block's first interval is never zero.
 - **Analog.** The block's samples in the channel's coding: f32 values, or u16 codes in two byte
-  planes.
+  planes. Every code is below `2^bits`; a reader refuses a wider one.
 
 ### Overview
 
@@ -137,8 +149,8 @@ channel in buckets of `2^shift` ticks; a level has `(length >> shift) + 1` bucke
 The levels are shifts 12, 16, 20 and so on in steps of 4, stopping at the first with at most 1,024
 buckets. A level with at most 2^17 buckets goes in the head. A finer level with at most 2^26
 buckets goes in overview blocks, which a reader fetches like blocks, for the span it shows. A level
-with more is left out. A reader refuses a header that lists a level with more buckets than its
-place allows.
+with more is left out. The head always holds at least one level. A reader refuses a header that
+lists a level with more buckets than its place allows.
 
 The head's decoded overview holds, for each level in the header's order, then each channel:
 
@@ -150,7 +162,7 @@ The head's decoded overview holds, for each level in the header's order, then ea
 
 An overview block holds 65,536 buckets of one level, the last block of a level the rest: block k
 starts at bucket `65,536 k`. Its decoded payload is laid out as one level of the head's overview,
-for its own n buckets.
+for its own n buckets, and its row's decoded length is exactly that size.
 
 ### Content id
 

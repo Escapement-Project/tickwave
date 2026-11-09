@@ -8,7 +8,7 @@ use ruzstd::decoding::FrameDecoder;
 use crate::codec::get_uleb;
 use crate::hash::{self, ChannelHasher};
 use crate::header::{
-    AnalogCoding, BlockRow, ChannelKind, Header, LEVEL_BIT, MAGIC, MAJOR, OverviewRow,
+    AnalogCoding, BlockRow, ChannelKind, Header, JSON_SAFE, LEVEL_BIT, MAGIC, MAJOR, OverviewRow,
     PREAMBLE_LEN, Preamble,
 };
 use crate::model::{ChannelData, Ratio, Recording, Samples, sample_tick};
@@ -34,14 +34,21 @@ fn corrupt(what: impl Into<String>) -> DecodeError {
     DecodeError::Corrupt(what.into())
 }
 
-/// Decompresses one zstd frame that must come to exactly `len` bytes and carry a checksum that
-/// matches.
+/// Decompresses exactly one zstd frame, which must fill `frame`, come to exactly `len` bytes and
+/// carry a checksum that matches. A skippable frame, a frame that names a dictionary, or any byte
+/// after the frame is refused.
 pub fn inflate(frame: &[u8], len: usize) -> Result<Vec<u8>, DecodeError> {
     let mut out = Vec::with_capacity(len);
     let mut decoder = FrameDecoder::new();
     decoder
         .decode_all_to_vec(frame, &mut out)
         .map_err(|e| DecodeError::Zstd(e.to_string()))?;
+    // decode_all reads every frame in its input, and steps over skippable ones, but the checksum
+    // getters describe only the last frame: a valid frame after a corrupted one would hide it. The
+    // last frame's byte count covers the whole input only when it is the only frame.
+    if decoder.bytes_read_from_source() != frame.len() as u64 {
+        return Err(corrupt("the bytes hold more than one frame"));
+    }
     match (
         decoder.get_checksum_from_data(),
         decoder.get_calculated_checksum(),
@@ -97,10 +104,63 @@ pub struct Block {
     pub channels: Vec<BlockChannel>,
 }
 
+/// What the header promises about the capture's extent, checked before anything relies on it.
+fn check_header(h: &Header) -> Result<(), DecodeError> {
+    if !(0..JSON_SAFE as i64).contains(&h.length) {
+        return Err(corrupt("the length is negative or past 2^53"));
+    }
+    if h.timebase.contains(&0) {
+        return Err(corrupt("the timebase has a zero term"));
+    }
+    for c in &h.channels {
+        let name = &c.name;
+        match &c.data {
+            ChannelKind::Digital { end, .. } => {
+                if !(0..=h.length).contains(end) {
+                    return Err(corrupt(format!("channel {name} ends outside the capture")));
+                }
+            }
+            ChannelKind::Analog {
+                first,
+                period,
+                count,
+                coding,
+                ..
+            } => {
+                if period.contains(&0) {
+                    return Err(corrupt(format!("channel {name}'s period has a zero term")));
+                }
+                // In u128: an absurd count or period must not wrap into a tick inside the capture.
+                let last = u128::from(count.saturating_sub(1)) * u128::from(period[0])
+                    / u128::from(period[1]);
+                if *first < 0 || *first > h.length || *first as u128 + last > h.length as u128 {
+                    return Err(corrupt(format!(
+                        "channel {name}'s samples lie outside the capture"
+                    )));
+                }
+                if let AnalogCoding::Codes { bits, .. } = coding
+                    && !(1..=16).contains(bits)
+                {
+                    return Err(corrupt(format!("channel {name}'s codes are {bits} bits")));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 impl Head {
     /// Parses the head from the file's first bytes. `NeedMore` says how many bytes the head
     /// takes when `bytes` holds fewer.
     pub fn parse(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::parse_with(bytes, inflate)
+    }
+
+    /// `parse` with another zstd decoder, which must do what this module's `inflate` does.
+    pub fn parse_with(
+        bytes: &[u8],
+        inflate: impl Fn(&[u8], usize) -> Result<Vec<u8>, DecodeError>,
+    ) -> Result<Self, DecodeError> {
         if bytes.len() < PREAMBLE_LEN {
             return if MAGIC.starts_with(&bytes[..bytes.len().min(8)]) {
                 Err(DecodeError::NeedMore(PREAMBLE_LEN))
@@ -125,6 +185,7 @@ impl Head {
             return Err(corrupt("the preamble's lengths do not fit together"));
         }
         let header: Header = serde_json::from_slice(&bytes[PREAMBLE_LEN..header_end])?;
+        check_header(&header)?;
         // Bounds every level's size before anything is allocated for it, whatever the header says.
         let too_fine =
             |shift: u8, limit: u64| shift > 62 || overview::buckets(header.length, shift) > limit;
@@ -172,7 +233,10 @@ impl Head {
             .collect();
         let mut expect_offset = head_len as u64;
         for (i, row) in rows.iter().enumerate() {
-            if row.offset != expect_offset || (i > 0 && row.start <= rows[i - 1].start) {
+            if row.offset != expect_offset
+                || (i > 0 && row.start <= rows[i - 1].start)
+                || row.start > header.length
+            {
                 return Err(corrupt(format!("block {i}'s row is out of place")));
             }
             expect_offset += u64::from(row.length);
@@ -215,9 +279,25 @@ impl Head {
         for (c, kind) in header.channels.iter().enumerate() {
             let mut total = 0u64;
             let mut starts = Vec::with_capacity(rows.len());
-            for row in &rows {
+            // A digital channel's level at each block's start follows from `initial` and the edge
+            // counts before it; the decoder trusts the index's bit, so check it here.
+            let mut level = match kind.data {
+                ChannelKind::Digital { initial, .. } => Some(initial),
+                ChannelKind::Analog { .. } => None,
+            };
+            for (i, row) in rows.iter().enumerate() {
+                let word = row.channels[c];
+                if let Some(l) = &mut level {
+                    if (word & LEVEL_BIT != 0) != *l {
+                        return Err(corrupt(format!(
+                            "channel {}: block {i} starts at the wrong level",
+                            kind.name
+                        )));
+                    }
+                    *l ^= word & 1 != 0;
+                }
                 starts.push(total);
-                total += u64::from(row.channels[c] & !LEVEL_BIT);
+                total += u64::from(word & !LEVEL_BIT);
             }
             let promised = match kind.data {
                 ChannelKind::Digital { edges, .. } => edges,
@@ -268,6 +348,18 @@ impl Head {
         level: usize,
         k: usize,
         frame: &[u8],
+    ) -> Result<OverviewBlock, DecodeError> {
+        self.decode_overview_block_with(level, k, frame, inflate)
+    }
+
+    /// `decode_overview_block` with another zstd decoder, which must do what this module's
+    /// `inflate` does.
+    pub fn decode_overview_block_with(
+        &self,
+        level: usize,
+        k: usize,
+        frame: &[u8],
+        inflate: impl Fn(&[u8], usize) -> Result<Vec<u8>, DecodeError>,
     ) -> Result<OverviewBlock, DecodeError> {
         let row = self.overview_rows[level][k];
         if frame.len() != row.length as usize {
@@ -352,60 +444,15 @@ impl Head {
             out.push(match &kind.data {
                 ChannelKind::Digital {
                     end: channel_end, ..
-                } => {
-                    let mut edges = Vec::with_capacity(count);
-                    let mut at = 0;
-                    let mut tick = start;
-                    for k in 0..count {
-                        let interval = get_uleb(section, &mut at)
-                            .ok_or_else(|| bad("an interval is cut short"))?;
-                        if k > 0 && interval == 0 {
-                            return Err(bad("two edges share a tick"));
-                        }
-                        tick = i64::try_from(interval)
-                            .ok()
-                            .and_then(|iv| tick.checked_add(iv))
-                            .ok_or_else(|| bad("an interval overflows"))?;
-                        if tick >= end || tick > *channel_end || tick < 1 {
-                            return Err(bad("an edge lies outside the block"));
-                        }
-                        edges.push(tick);
-                    }
-                    if at != section.len() {
-                        return Err(bad("bytes follow the last edge"));
-                    }
-                    BlockChannel::Digital {
-                        initial: word & LEVEL_BIT != 0,
-                        edges,
-                    }
-                }
-                ChannelKind::Analog { coding, .. } => {
-                    if section.len() != count * coding.sample_len() {
-                        return Err(bad("the section does not hold its samples"));
-                    }
-                    let values = match *coding {
-                        AnalogCoding::F32 => section
-                            .as_chunks::<4>()
-                            .0
-                            .iter()
-                            .map(|&b| f32::from_le_bytes(b))
-                            .collect(),
-                        AnalogCoding::Codes { scale, offset, .. } => {
-                            let (low, high) = section.split_at(count);
-                            low.iter()
-                                .zip(high)
-                                .map(|(&lo, &hi)| {
-                                    let code = u16::from_le_bytes([lo, hi]);
-                                    (offset + f64::from(code) * scale) as f32
-                                })
-                                .collect()
-                        }
-                    };
-                    BlockChannel::Analog {
-                        first_index: self.first_sample[c][i],
-                        values,
-                    }
-                }
+                } => BlockChannel::Digital {
+                    initial: word & LEVEL_BIT != 0,
+                    edges: digital_edges(section, count, start, end, *channel_end)
+                        .map_err(|what| bad(&what))?,
+                },
+                ChannelKind::Analog { coding, .. } => BlockChannel::Analog {
+                    first_index: self.first_sample[c][i],
+                    values: analog_values(section, count, *coding).map_err(|what| bad(&what))?,
+                },
             });
         }
         Ok(Block {
@@ -414,6 +461,81 @@ impl Head {
             channels: out,
         })
     }
+}
+
+// The two section decoders are kept out of line so that each loop compiles on its own: while they
+// shared a function, a change to the analog loop moved the digital loop's speed by 5-7 %.
+
+/// A digital section's `count` edges: LEB128 intervals, the first from the block's `start`. Every
+/// edge lies in `1..=channel_end` and before the block's `end`, and no two share a tick.
+#[inline(never)]
+fn digital_edges(
+    section: &[u8],
+    count: usize,
+    start: i64,
+    end: i64,
+    channel_end: i64,
+) -> Result<Vec<i64>, String> {
+    let mut edges = Vec::with_capacity(count);
+    let mut at = 0;
+    let mut tick = start;
+    for k in 0..count {
+        let interval = get_uleb(section, &mut at).ok_or("an interval is cut short")?;
+        if k > 0 && interval == 0 {
+            return Err("two edges share a tick".into());
+        }
+        tick = i64::try_from(interval)
+            .ok()
+            .and_then(|iv| tick.checked_add(iv))
+            .ok_or("an interval overflows")?;
+        if tick >= end || tick > channel_end || tick < 1 {
+            return Err("an edge lies outside the block".into());
+        }
+        edges.push(tick);
+    }
+    if at != section.len() {
+        return Err("bytes follow the last edge".into());
+    }
+    Ok(edges)
+}
+
+/// An analog section's `count` values in `coding`.
+#[inline(never)]
+fn analog_values(section: &[u8], count: usize, coding: AnalogCoding) -> Result<Vec<f32>, String> {
+    if section.len() != count * coding.sample_len() {
+        return Err("the section does not hold its samples".into());
+    }
+    Ok(match coding {
+        AnalogCoding::F32 => section
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&b| f32::from_le_bytes(b))
+            .collect(),
+        AnalogCoding::Codes {
+            bits,
+            scale,
+            offset,
+        } => {
+            let (low, high) = section.split_at(count);
+            let code = |(&lo, &hi): (&u8, &u8)| u16::from_le_bytes([lo, hi]);
+            // One OR over every code, apart from the conversion, so both loops stay vectorised.
+            let all = low.iter().zip(high).fold(0, |a, c| a | code(c));
+            if u32::from(all) >> bits != 0 {
+                let wide = low
+                    .iter()
+                    .zip(high)
+                    .map(code)
+                    .find(|&c| u32::from(c) >> bits != 0)
+                    .unwrap_or_default();
+                return Err(format!("code {wide} is wider than {bits} bits"));
+            }
+            low.iter()
+                .zip(high)
+                .map(|c| (offset + f64::from(code(c)) * scale) as f32)
+                .collect()
+        }
+    })
 }
 
 #[derive(Debug, thiserror::Error)]
