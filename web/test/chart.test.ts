@@ -59,6 +59,7 @@ test("the data: Figure 1 parses, and every problem in a bad chart is reported", 
   bad.series[1].points[0] = { value: "76.7", partial: { failed: 1, of: 2, value: "70.0" } };
   bad.series[1].points[1] = { value: 148.1 };
   bad.x.min = "1.5";
+  bad.series[2].id = 'gcc"><img src=x>';
   bad.x.max = 62.5;
   assert.throws(
     () => parseChart(bad),
@@ -73,6 +74,7 @@ test("the data: Figure 1 parses, and every problem in a bad chart is reported", 
         "series[1].points[1].value: 148.1 is not a decimal string",
         "x.min: above the first setting",
         "x.max: 62.5 is not a decimal string",
+        `series[2].id: "gcc\\"><img src=x>" is not letters, digits, ".", "_" and "-"`,
       ]) {
         assert.ok(e.message.includes(needle), `no ${needle} in:\n${e.message}`);
       }

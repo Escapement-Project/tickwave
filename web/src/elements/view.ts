@@ -3,12 +3,13 @@
 
 import { ofKind, type Annotation } from "../annotations.ts";
 import { parseChannels, parseWindow, VIEW_ATTRIBUTES } from "../attributes.ts";
+import { reducedMotion } from "../face.ts";
 import { absolute, events as registryEvents, infoFor, peekInfo } from "../registry.ts";
 import { clockNote, countEdges, formatBrief, formatBytes, formatClockPeriod, formatClockRate, formatCount, formatInterval, formatRate, formatValue, periodStats } from "../readouts.ts";
 import { lowerBound } from "../search.ts";
 import { channelIndices, Plot } from "../render/plot.ts";
 import { isAbort, named, sampleAtOrBefore, sampleTick, type RecordingInfo } from "../source.ts";
-import { parseTime, toTicks } from "../time.ts";
+import { parseTime, toTicks, type TimeSpec } from "../time.ts";
 import { TickwaveElement, loadRecording, type Loaded } from "./base.ts";
 
 const CSS = `
@@ -95,6 +96,12 @@ export class TickwaveView extends TickwaveElement {
   #loading: Promise<Loaded | null> | null = null;
   #loadKey = "";
   #recordingKey = "";
+  /** The recording drawn, whose cursors and selection the plot holds. */
+  #shownSrc = "";
+  /** A window asked for before the head arrived, applied once it has. */
+  #pendingWindow: [number | TimeSpec, number | TimeSpec] | null = null;
+  /** Whether the view is on screen: a collapsed one fetches its head then. */
+  #inView = false;
   #size = { width: 0, height: 0 };
   #wasOpen = false;
   #windowAttr: string | null = null;
@@ -110,9 +117,8 @@ export class TickwaveView extends TickwaveElement {
   #resize: ResizeObserver;
   /** A collapsed view fetches its recording's head, and only that, once it scrolls into view. */
   #seen = new IntersectionObserver((entries) => {
-    if (!entries.some((e) => e.isIntersecting)) return;
-    const src = this.#src;
-    if (src && !this.open) infoFor(src).catch((e) => this.fail(e));
+    this.#inView = entries.some((e) => e.isIntersecting);
+    this.#fetchHead();
   });
   #onHead = (e: Event) => {
     if ((e as CustomEvent<string>).detail === this.#src?.href) this.#renderSummary();
@@ -135,12 +141,22 @@ export class TickwaveView extends TickwaveElement {
       labelPx: 12,
     });
     this.#plot.onError = (e) => this.fail(e);
+    this.#plot.onRecovered = (m) => this.forgetProblem(m);
     this.#plot.onStall = (ms) => this.waiting(ms);
     this.#plot.onDraw = () => this.#drawn();
     this.#resize = new ResizeObserver(() => this.#sized());
     const on = (sel: string, f: () => void) => this.root.querySelector(sel)!.addEventListener("click", f);
-    on(".open", () => this.setAttribute("open", ""));
-    on(".close", () => this.removeAttribute("open"));
+    // The pressed button hides: the focus goes where the reader went, not to the page's start.
+    on(".open", () => {
+      this.open = true;
+      this.update();
+      this.#plotBox.focus();
+    });
+    on(".close", () => {
+      this.open = false;
+      this.update();
+      (this.root.querySelector(".open") as HTMLElement).focus();
+    });
     on(".zoom-in", () => this.#zoomBy(1 / 1.6, null));
     on(".zoom-out", () => this.#zoomBy(1.6, null));
     on(".fit", () => this.#fit());
@@ -197,6 +213,7 @@ export class TickwaveView extends TickwaveElement {
     if (open && !this.#wasOpen) this.emit("tickwave-open", { src: this.getAttribute("src") });
     this.#wasOpen = open;
     if (!open) {
+      this.#fetchHead();
       this.#renderSummary();
       return;
     }
@@ -208,6 +225,7 @@ export class TickwaveView extends TickwaveElement {
       this.#loadKey = key;
       this.#loaded = null;
       this.#readyFired = false;
+      this.clearProblems();
       this.#loading = loadRecording(src, annotations).then(
         (l) => {
           if (this.#loadKey !== key) return null;
@@ -218,6 +236,8 @@ export class TickwaveView extends TickwaveElement {
           return l;
         },
         (e) => {
+          // Not kept: the next update, an Open or a show(), tries again.
+          if (this.#loadKey === key) this.#loadKey = "";
           this.fail(e);
           return null;
         },
@@ -225,6 +245,12 @@ export class TickwaveView extends TickwaveElement {
       return;
     }
     this.#apply();
+  }
+
+  /** A collapsed view on screen fetches its recording's head, and only that. */
+  #fetchHead(): void {
+    const src = this.#src;
+    if (src && this.#inView && !this.open) infoFor(src).catch((e) => this.fail(e));
   }
 
   #renderSummary(): void {
@@ -235,6 +261,8 @@ export class TickwaveView extends TickwaveElement {
     // Collapsed, the view shows what is here; the head arrives once the view scrolls into sight.
     const info = peekInfo(src);
     title.textContent = info?.title ?? decodeURIComponent(src.pathname.split("/").pop() ?? "");
+    // A page with several views has several Open buttons: each names its recording.
+    this.root.querySelector(".open")!.setAttribute("aria-label", `Open ${title.textContent}`);
     const parts = (info ? summaryFacts(info) : []).flatMap(([name, text], i) => [
       ...(i > 0 ? [part("fact-separator", "; ")] : []),
       part(`fact ${name}`, text),
@@ -246,6 +274,7 @@ export class TickwaveView extends TickwaveElement {
     const l = this.#loaded;
     if (!l) return;
     (this.root.querySelector(".toolbar .title") as HTMLElement).textContent = l.info.title;
+    this.root.querySelector(".close")!.setAttribute("aria-label", `Close ${l.info.title}`);
     this.#plotBox.setAttribute(
       "aria-label",
       `${l.info.title}. Arrow keys pan, plus and minus zoom, Home fits the capture; click to place cursors, drag on the time axis to select.`,
@@ -257,12 +286,22 @@ export class TickwaveView extends TickwaveElement {
     if (fresh) {
       this.#recordingKey = recordingKey;
       this.#plot.setRecording(l.source, l.info, indices);
-      this.#plot.annotations = l.annotations;
       this.#plot.view = { start: 0, end: l.info.length };
       this.#periodChannel = this.#plot.tracks.findIndex((t) => t.channel.kind === "digital");
+      if (l.src.href !== this.#shownSrc) {
+        this.#shownSrc = l.src.href;
+        this.#forget();
+      }
+    }
+    // Another sidecar for the same recording: its lane, its paint and its steps.
+    const annotated = this.#plot.annotations !== l.annotations;
+    if (annotated) {
+      this.#plot.annotations = l.annotations;
+      this.#plot.focus = null;
+      this.#stepIndex = -1;
     }
     this.#renderKinds();
-    this.#layout(fresh);
+    this.#layout(fresh || annotated);
     const w = this.getAttribute("window");
     if (w !== this.#windowAttr) {
       this.#windowAttr = w;
@@ -270,6 +309,20 @@ export class TickwaveView extends TickwaveElement {
       if (spec?.kind === "annotation") this.show(spec.id);
       else if (spec) this.setWindow(toTicks(spec.start, l.info.timebase), toTicks(spec.end, l.info.timebase));
     }
+    const pending = this.#pendingWindow;
+    if (pending) this.#showTicks(pending[0], pending[1]);
+  }
+
+  /** A new recording starts clean: the last one's cursors, selection and place among its
+   * annotations mean nothing in it. */
+  #forget(): void {
+    this.#plot.cursors = { a: null, b: null };
+    this.#plot.selection = null;
+    this.#plot.focus = null;
+    this.#nextCursor = "a";
+    this.#stepIndex = -1;
+    this.#readoutSeq++;
+    this.#setReadout([]);
   }
 
   #sized(): void {
@@ -283,9 +336,15 @@ export class TickwaveView extends TickwaveElement {
   #layout(force: boolean): void {
     if (!this.#loaded || !this.palette || this.#size.width <= 0) return;
     if (!force && this.#plot.layout) return;
-    const natural = this.#plot.layout?.height ?? 0;
-    // The plot box grows past the canvas only when the page gives the element a height.
-    const given = this.#size.height > natural + 1 ? this.#size.height : null;
+    // The plot box's height with the canvas collapsed: the page's, when it gives the element one,
+    // else nothing, as the box only wraps the canvas. Neither the box with the canvas in it nor the
+    // last layout tells the two apart: a readout appearing shrinks a given box below the canvas.
+    const canvas = this.#plot.canvas;
+    const height = canvas.style.height;
+    canvas.style.height = "0px";
+    const box = this.#plotBox.clientHeight;
+    canvas.style.height = height;
+    const given = box > 1 ? box : null;
     this.#plot.resize(this.#size.width, given);
     this.#clampView();
     this.#plot.invalidate();
@@ -309,16 +368,26 @@ export class TickwaveView extends TickwaveElement {
     this.#plot.view = { start, end };
   }
 
-  /** Shows ticks [start, end); numbers are ticks, strings times ("317.8 ms"). */
+  /** Shows ticks [start, end); numbers are ticks, strings times ("317.8 ms"). Asked before the
+   * recording's head has arrived, it shows them once it has. */
   setWindow(start: number | string, end: number | string): void {
-    const info = this.#loaded?.info;
-    if (!info) return;
-    const ticks = (v: number | string) => {
+    const time = (v: number | string) => {
       if (typeof v === "number") return v;
       const t = parseTime(v);
       if (!t) throw new RangeError(`cannot read the time ${v}`);
-      return toTicks(t, info.timebase);
+      return t;
     };
+    this.#showTicks(time(start), time(end));
+  }
+
+  #showTicks(start: number | TimeSpec, end: number | TimeSpec): void {
+    const info = this.#loaded?.info;
+    if (!info) {
+      this.#pendingWindow = [start, end];
+      return;
+    }
+    this.#pendingWindow = null;
+    const ticks = (v: number | TimeSpec) => (typeof v === "number" ? v : toTicks(v, info.timebase));
     const s = ticks(start);
     const e = ticks(end);
     this.#plot.view = { start: Math.min(s, e), end: Math.max(s, e) };
@@ -347,6 +416,15 @@ export class TickwaveView extends TickwaveElement {
     this.#renderSteps();
     this.#viewChanged();
     await this.#plot.whenSettled();
+  }
+
+  /** Opens the view at an annotation, brings it into sight and puts the focus on its plot: what a
+   * reference or a chart's point does when the reader asks for the recording. */
+  async reveal(id: string): Promise<void> {
+    const shown = this.show(id);
+    this.scrollIntoView({ block: "nearest", behavior: reducedMotion() ? "auto" : "smooth" });
+    await shown;
+    this.#plotBox.focus({ preventScroll: true });
   }
 
   #fit(): void {
@@ -452,7 +530,9 @@ export class TickwaveView extends TickwaveElement {
         if (!d.moved && Math.hypot(p.x - d.x, p.y - d.y) < DRAG_PX) return;
         d.moved = true;
         if (d.area === "axis") {
-          this.#plot.selection = { start: this.#plot.tickAt(d.x), end: this.#plot.tickAt(Math.max(this.#plot.layout!.plotLeft, Math.min(this.#plot.layout!.plotRight, p.x))) };
+          const l = this.#plot.layout!;
+          const inside = (x: number) => Math.max(l.plotLeft, Math.min(l.plotRight, x));
+          this.#plot.selection = { start: this.#plot.tickAt(inside(d.x)), end: this.#plot.tickAt(inside(p.x)) };
           this.#plot.invalidate();
         } else {
           box.classList.add("panning");
@@ -478,8 +558,9 @@ export class TickwaveView extends TickwaveElement {
         return;
       }
       const hit = this.#plot.hit(p.x, p.y);
+      const l = this.#plot.layout!;
       if (hit.area === "lane" && hit.note) void this.show(hit.note.id);
-      else if (hit.area === "row") this.#placeCursor(p.x, hit.row);
+      else if (hit.area === "row" && p.x >= l.plotLeft && p.x <= l.plotRight) this.#placeCursor(p.x, hit.row);
     };
     box.addEventListener("pointerup", end);
     box.addEventListener("pointercancel", end);
@@ -648,14 +729,21 @@ export class TickwaveView extends TickwaveElement {
           const s = await l.source.samples(t.index, from, from + 1);
           return s.values.length > 0 ? s.values[0] : null;
         };
-        const values = await Promise.all([at(a), b !== null ? at(b) : null]);
+        let values: (number | null)[];
+        try {
+          values = await Promise.all([at(a), b !== null ? at(b) : null]);
+        } catch (e) {
+          if (!isAbort(e)) this.fail(e);
+          return;
+        }
         if (seq !== this.#readoutSeq) return;
         const parts: (string | Node)[] = [c.name];
-        const show = (name: string, v: number | null) => parts.push(item(name, v === null ? "–" : formatValue(v, c.resolution, c.unit)));
-        show("A", values[0]);
+        // A recording stores NaN samples as the source had them; no figure says that better than "–".
+        const figure = (v: number | null) => (v === null || !Number.isFinite(v) ? "–" : formatValue(v, c.resolution, c.unit));
+        parts.push(item("A", figure(values[0])));
         if (b !== null) {
-          show("B", values[1]);
-          if (values[0] !== null && values[1] !== null) parts.push(item("Δ", formatValue(values[1] - values[0], c.resolution, c.unit)));
+          parts.push(item("B", figure(values[1])));
+          if (values[0] !== null && values[1] !== null) parts.push(item("Δ", figure(values[1] - values[0])));
         }
         line(...parts);
       }

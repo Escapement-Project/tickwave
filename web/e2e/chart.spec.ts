@@ -178,6 +178,43 @@ test.describe("at rest", () => {
     await expect(readout).toContainText("20 MHz");
   });
 
+  test("the legend lists every series the page shows, a hidden one included", async ({ page }) => {
+    const c1 = page.locator("#c1");
+    await c1.evaluate((c) => c.setAttribute("show", "clang stock gcc"));
+    await expect(c1.locator(".tw-legend li")).toHaveText(["Verge, Clang build", "NXP's firmware V3.174", "Verge, GCC build", "NXP's firmware reads right up to 20 MHz"]);
+  });
+
+  test("pick() moves the group, as a reader's pick does, and fires nothing", async ({ page }) => {
+    const picks = await recordPicks(page);
+    await page.locator("#c1").evaluate((c) => (c as HTMLElement & { pick(x: string): void }).pick("20"));
+    await expect(page.locator("#c2 .tw-readout b")).toHaveText("20 MHz");
+    expect(await picks()).toEqual([]);
+  });
+
+  test("a chart file that fails after another has loaded says nothing over it; the failed one is tried again", async ({ page }) => {
+    let calls = 0;
+    await page.route("**/slow.chart.json", async (route) => {
+      calls++;
+      await new Promise((r) => setTimeout(r, 600));
+      await route.fulfill({ status: 500 });
+    });
+    const c3 = page.locator("#c3");
+    await c3.evaluate((c) => {
+      c.setAttribute("src", "/fixtures/slow.chart.json");
+      c.setAttribute("src", "/fixtures/figure1.chart.json");
+    });
+    await page.waitForTimeout(900);
+    await expect(c3.locator(".tw-notice")).toBeHidden();
+    // Asked for again after it failed, it is fetched again.
+    await c3.evaluate((c) => c.setAttribute("src", "/fixtures/slow.chart.json"));
+    await expect(c3.locator(".tw-notice")).toContainText("HTTP 500");
+    await c3.evaluate((c) => {
+      c.setAttribute("src", "/fixtures/figure1.chart.json");
+      c.setAttribute("src", "/fixtures/slow.chart.json");
+    });
+    await expect.poll(() => calls).toBe(3);
+  });
+
   test("a hidden series draws while the page picks it", async ({ page }) => {
     const c1 = page.locator("#c1");
     await c1.evaluate((c) => (c as HTMLElement & { pick(x: string, s: string): void }).pick("20", "gcc"));
@@ -192,6 +229,32 @@ test.describe("at rest", () => {
     const line = page.locator('#c1 g.tw-series[data-series="clang"] path').first();
     await expect(line).toHaveAttribute("stroke", "#0f8a6c");
     await page.evaluate(() => (document.documentElement.dataset.face = "night"));
+    await expect(line).toHaveAttribute("stroke", "#1aa384");
+  });
+
+  test("a change on <html> that leaves the face alone redraws nothing; a class that switches it does", async ({ page }) => {
+    const line = page.locator('#c1 g.tw-series[data-series="clang"] path').first();
+    await page.evaluate(async () => {
+      await document.fonts.ready;
+      const w = window as unknown as { redraws: number };
+      w.redraws = 0;
+      new MutationObserver(() => w.redraws++).observe(document.querySelector("#c1 svg.tw-plot")!, { childList: true });
+    });
+    const frames = () => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+    // What the project's header does as the page scrolls and as it wraps.
+    await page.evaluate(() => {
+      document.documentElement.classList.add("scrolled");
+      document.documentElement.style.setProperty("--header", "64px");
+    });
+    await frames();
+    await frames();
+    expect(await page.evaluate(() => (window as unknown as { redraws: number }).redraws)).toBe(0);
+    // A host page whose night face is a class.
+    await page.evaluate(() => {
+      const style = document.head.appendChild(document.createElement("style"));
+      style.textContent = "html.night { --ink: #f2f2ee; --series-verge: #1aa384; }";
+      document.documentElement.classList.add("night");
+    });
     await expect(line).toHaveAttribute("stroke", "#1aa384");
   });
 
@@ -231,6 +294,29 @@ test("a chart below the fold is drawn whole, hidden by CSS alone until its sweep
   await expect(c3.locator(".tw-data")).toBeVisible();
   await expect(c3.locator('g.tw-series[data-series="clang"] circle.tw-pt')).toHaveCount(7);
   await expect(c3.locator("text.tw-end")).toHaveText(["Verge", "NXP"]);
+});
+
+test("a chart a fifth on screen waits; its sweep plays once 60 % of it shows", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.setViewportSize({ width: 900, height: 700 });
+  await page.goto(PAGE);
+  const c3 = page.locator("#c3");
+  const box = (await c3.boundingBox())!;
+  // Its top fifth inside the window's foot.
+  await page.evaluate((y) => scrollTo(0, y), box.y - 700 + box.height * 0.2);
+  await page.waitForTimeout(300);
+  await expect(c3).toHaveAttribute("data-pending", "");
+  await page.evaluate((y) => scrollTo(0, y), box.y - 700 + box.height * 0.7);
+  await expect(c3).not.toHaveAttribute("data-pending", "");
+});
+
+test("data set on the element before the module defines it still draws", async ({ page }) => {
+  await page.goto(PAGE);
+  const data = await page.evaluate(async () => (await fetch("/fixtures/figure1.chart.json")).json());
+  await page.setContent(`<link rel="stylesheet" href="/dist/site/tokens.css"><tickwave-chart id="early" sweep="off"></tickwave-chart>`);
+  await page.evaluate((data) => ((document.getElementById("early") as HTMLElement & { data: unknown }).data = data), data);
+  await page.addScriptTag({ url: "/dist/tickwave-chart.js", type: "module" });
+  await expect(page.locator('#early g.tw-series[data-series="clang"] circle.tw-pt')).toHaveCount(7);
 });
 
 test.describe("on a touch screen", () => {

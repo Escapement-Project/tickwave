@@ -3,7 +3,7 @@
 // files; the dev page registers one for its fixtures.
 
 import type { Annotation } from "./annotations.ts";
-import type { RecordingInfo, Source } from "./source.ts";
+import { named, type RecordingInfo, type Source } from "./source.ts";
 
 export interface Loader {
   /** Whether this loader reads the recording at `url`. */
@@ -35,13 +35,20 @@ export function registerLoader(loader: Loader): void {
   for (const w of waiting.splice(0)) w();
 }
 
-/** Waits for a loader that accepts `url`, if none is registered yet. */
+/** Waits for a loader that accepts `url` while the page loads, since one may register late; once
+ * it has loaded, a URL no loader takes is refused rather than left waiting. */
 async function loaderFor(url: URL, signal?: AbortSignal): Promise<Loader> {
   for (;;) {
     const l = loaders.find((l) => l.accepts(url));
     if (l) return l;
     signal?.throwIfAborted();
-    await new Promise<void>((resolve) => waiting.push(resolve));
+    if (document.readyState === "complete") {
+      throw named("TickwaveNoLoader", `${url.href}: no loader reads it; tickwave.js reads .tickwave files`);
+    }
+    await new Promise<void>((resolve) => {
+      waiting.push(resolve);
+      addEventListener("load", () => resolve(), { once: true });
+    });
   }
 }
 

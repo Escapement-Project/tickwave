@@ -21,8 +21,8 @@ import { FIRST_READ } from "./protocol.ts";
 
 /** What the opened recording needs from the wasm-bindgen module. */
 export interface WasmApi {
-  headLength(bytes: Uint8Array): number;
-  Recording: new (head: Uint8Array) => WasmRecording;
+  headLength(bytes: Uint8Array, maxDecoded?: number): number;
+  Recording: new (head: Uint8Array, maxDecoded?: number) => WasmRecording;
 }
 
 interface DecodedBlock {
@@ -59,9 +59,6 @@ export interface Header {
   annotations?: Record<string, string>;
 }
 
-/** FORMAT.md: an overview block holds this many buckets of its level; block k starts at bucket k × this. */
-const OVERVIEW_BLOCK_BUCKETS = 65536;
-
 /** One overview block's buckets, as the head's levels lay them out. */
 interface DecodedOverview {
   readonly first: number;
@@ -78,8 +75,13 @@ interface Sized {
 /** Decoded data and overview blocks of every recording the worker holds, by decoded size. */
 let cache = new LRUCache<string, Sized>({ maxSize: 192 << 20, sizeCalculation: (b) => b.size });
 
+/** Sizes the cache. Every recording's open asks for the page's size, so the same size changes
+ * nothing; a new one keeps the blocks that fit, the most recently used first. */
 export function setCacheBytes(bytes: number): void {
-  cache = new LRUCache<string, Sized>({ maxSize: bytes, sizeCalculation: (b) => b.size });
+  if (bytes === cache.maxSize) return;
+  const next = new LRUCache<string, Sized>({ maxSize: bytes, sizeCalculation: (b) => b.size });
+  for (const key of cache.rkeys()) next.set(key, cache.peek(key)!);
+  cache = next;
 }
 
 let nextId = 0;
@@ -253,11 +255,11 @@ export class Opened {
   }
 
   /** Reads the head: the first read, then the rest if `headLength` asks for more. */
-  static async open(api: WasmApi, bytes: Bytes, firstRead = FIRST_READ, signal?: AbortSignal): Promise<Opened> {
+  static async open(api: WasmApi, bytes: Bytes, firstRead = FIRST_READ, maxDecoded?: number, signal?: AbortSignal): Promise<Opened> {
     let head = await bytes.read(0, firstRead, signal);
     const headLength = (b: Uint8Array) => {
       try {
-        return api.headLength(b);
+        return api.headLength(b, maxDecoded);
       } catch (e) {
         throw named("TickwaveNotRecording", `${bytes.name}: ${e instanceof Error ? e.message : e}`);
       }
@@ -268,7 +270,7 @@ export class Opened {
       head = join(head, more);
     }
     const length = headLength(head);
-    return new Opened(new api.Recording(head.subarray(0, length)), head, bytes);
+    return new Opened(new api.Recording(head.subarray(0, length), maxDecoded), head, bytes);
   }
 
   /** An analog channel's smallest and largest value, from the coarsest overview level. */
@@ -420,8 +422,7 @@ export class Opened {
       if (!ov) return null;
       parts = [[0, ov]];
     } else {
-      const b0 = Math.floor(k0 / OVERVIEW_BLOCK_BUCKETS);
-      const b1 = Math.max(b0 + 1, Math.ceil(k1 / OVERVIEW_BLOCK_BUCKETS));
+      const [b0, b1] = this.#rec.overviewBlocksCovering(blocked, k0 * bucket, k1 * bucket);
       const blocks = await this.#levels[blocked].get(b0, b1, signal);
       parts = blocks.map((b) => [b.first, b.channels[channel]]);
     }
@@ -462,10 +463,6 @@ export class Opened {
   /** Resolves a sidecar (the hand-written file as JSON, and the files it includes) against this recording. */
   resolveAnnotations(hand: string, names: string[], texts: string[], recordingFile: string | null): string {
     return this.#rec.resolveAnnotations(hand, names, texts, recordingFile);
-  }
-
-  close(): void {
-    this.#rec.free();
   }
 }
 

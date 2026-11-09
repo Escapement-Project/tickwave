@@ -48,6 +48,8 @@ export class Track {
   readonly index: number;
   readonly channel: Channel;
   tile: Tile | null = null;
+  /** Whether the last read failed: cleared by the next that lands. */
+  failed = false;
   /** The finest tile yet that covers the whole channel. */
   #base: Tile | null = null;
   #baseAsked = false;
@@ -149,6 +151,7 @@ export class Track {
       if (this.#pending === pending) this.#pending = null;
       if (isAbort(e)) return;
       this.#retryAt = performance.now() + RETRY_MS;
+      this.failed = true;
       this.#failed(e);
     });
   }
@@ -170,9 +173,12 @@ export class Track {
           ? { kind: "digital-overview", start: 0, end, asked: Infinity, data: ov }
           : { kind: "analog-overview", start: 0, end, asked: Infinity, data: ov },
       );
+      this.failed = false;
       this.#changed();
     } catch (e) {
-      if (!isAbort(e)) this.#failed(e);
+      if (isAbort(e)) return;
+      this.failed = true;
+      this.#failed(e);
     }
   }
 
@@ -182,6 +188,7 @@ export class Track {
       if (this.#pending !== p) return;
       this.#pending = null;
       this.tile = tile;
+      this.failed = false;
       this.#offerBase(tile);
       this.#changed();
     };

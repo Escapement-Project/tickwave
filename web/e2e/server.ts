@@ -2,7 +2,8 @@
 // ignores it and always sends the whole file (8125). It logs every request, a worker's included,
 // so a test can see what was fetched: GET /__log?tag=X lists the requests whose URL holds X.
 // A request URL with `after=N` makes every Range read past the Nth for its tag wait `stall`
-// milliseconds, then fail with status `fail` or be answered.
+// milliseconds, then fail with status `fail` or be answered; with `until=M`, only the reads up to
+// the Mth.
 //
 //   node e2e/server.ts
 
@@ -45,7 +46,8 @@ function serve(port: number, acceptRanges: boolean): void {
       const tag = url.searchParams.get("tag") ?? "";
       const n = (rangeReads.get(tag) ?? 0) + 1;
       rangeReads.set(tag, n);
-      if (n > Number(after)) {
+      const until = url.searchParams.get("until");
+      if (n > Number(after) && (until === null || n <= Number(until))) {
         const fail = url.searchParams.get("fail");
         const failNow = () => {
           res.statusCode = Number(fail);

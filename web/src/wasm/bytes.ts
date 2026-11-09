@@ -55,7 +55,7 @@ export class HttpBytes implements Bytes {
       return this.#whole.subarray(from, Math.min(to, this.#whole.length));
     }
     if (res.status !== 206) throw named("TickwaveHttpError", `${this.name}: HTTP ${res.status}`);
-    // A compressed response's ranges count bytes of the compressed stream (PLAN.md §0).
+    // A compressed response's ranges count bytes of the compressed stream, not of the file.
     const encoding = res.headers.get("content-encoding");
     if (encoding && encoding !== "identity") {
       throw new Error(`${this.name}: the server compresses it (${encoding}), so its byte ranges are unreliable`);

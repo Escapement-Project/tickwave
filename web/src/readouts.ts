@@ -134,9 +134,6 @@ export function formatInterval(ticks: number, timebase: Ratio): string {
   return formatScaled(roundAt(big(ticks) * big(timebase.den), big(timebase.num), p), p, TIME_UNITS);
 }
 
-/** A time from the capture's start, which is an interval from tick 0. */
-export const formatTime = formatInterval;
-
 /**
  * An interval to three significant figures, for a summary line: 927888190 ticks at 1 GS/s is
  * 928 ms. Never finer than one tick.

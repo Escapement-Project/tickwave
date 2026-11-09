@@ -1,5 +1,6 @@
 // The readout's pieces: a point's figure as text, and a series' swatch.
 
+import { escapeHtml } from "../escape.ts";
 import type { Point, Series } from "./data.ts";
 import { grouped } from "./decimal.ts";
 import { marker, type Colours } from "./render.ts";
@@ -28,5 +29,5 @@ export function swatch(s: Series, c: Colours): string {
   const dash = c.dash(s.pattern);
   const width = s.capture ? c.captureWidth : 2;
   const opacity = s.capture ? ` opacity="${c.captureOpacity}"` : "";
-  return `<svg class="tw-swatch" width="22" height="10" aria-hidden="true"${opacity}><line x1="0" x2="22" y1="5" y2="5" stroke="${colour}" stroke-width="${width}"${dash ? ` stroke-dasharray="${dash}"` : ""}/>${marker(s.marker, 11, 5, colour, false)}</svg>`;
+  return `<svg class="tw-swatch" width="22" height="10" aria-hidden="true"${opacity}><line x1="0" x2="22" y1="5" y2="5" stroke="${colour}" stroke-width="${width}"${dash ? ` stroke-dasharray="${escapeHtml(dash)}"` : ""}/>${marker(s.marker, 11, 5, colour, false)}</svg>`;
 }

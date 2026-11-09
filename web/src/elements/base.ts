@@ -65,12 +65,20 @@ export abstract class TickwaveElement extends HTMLElement {
   }
 
   connectedCallback(): void {
-    this.#unsubscribe.push(
-      onFaceChange(() => this.refreshPalette()),
-      onFontsLoaded(() => this.fontsChanged()),
-    );
+    if (this.drawsWithPalette) {
+      this.#unsubscribe.push(
+        onFaceChange(() => this.refreshPalette()),
+        onFontsLoaded(() => this.fontsChanged()),
+      );
+    }
     this.refreshPalette();
     this.queueUpdate();
+  }
+
+  /** Whether the element draws in the page's colours. One that only holds text, as a reference
+   * does, reads none of them: a page of fifty references costs nothing on a face change. */
+  protected get drawsWithPalette(): boolean {
+    return true;
   }
 
   disconnectedCallback(): void {
@@ -101,7 +109,7 @@ export abstract class TickwaveElement extends HTMLElement {
   }
 
   protected refreshPalette(): void {
-    if (!this.isConnected) return;
+    if (!this.isConnected || !this.drawsWithPalette) return;
     this.palette = resolvePalette(this.#probe, this.series);
     this.paletteChanged();
   }
@@ -123,6 +131,18 @@ export abstract class TickwaveElement extends HTMLElement {
     console.warn(`<${this.localName}${this.id ? ` id="${this.id}"` : ""}>: ${message}`);
     this.dispatchEvent(new CustomEvent("tickwave-error", { detail: { message, error: e }, bubbles: true, composed: true }));
     this.#showNotice();
+  }
+
+  /** Forgets the problems reported so far: a notice is about the recording or sidecar it came
+   * from, and a new one starts without it. */
+  protected clearProblems(): void {
+    this.#reportedErrors.clear();
+    this.#showNotice();
+  }
+
+  /** Forgets one problem, once what it was about has gone. */
+  protected forgetProblem(message: string): void {
+    if (this.#reportedErrors.delete(message)) this.#showNotice();
   }
 
   /** Says a read has run `ms` and is still going, or with null that none is. A problem comes first. */

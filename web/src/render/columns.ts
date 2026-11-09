@@ -59,8 +59,9 @@ export function digitalFromEdges(g: Grid, edges: Edges, from: number, to: number
 }
 
 /**
- * Columns from an overview whose buckets are no wider than a column. A column any changing bucket
- * overlaps is busy: the overview cannot say where in the bucket the change was, or how many.
+ * Columns from an overview's buckets, whatever their width against a column's. A column any
+ * changing bucket overlaps is busy: the overview cannot say where in the bucket the change was, or
+ * how many.
  */
 export function digitalFromOverview(g: Grid, ov: DigitalOverview, from: number, to: number): DigitalColumns {
   const state = new Uint8Array(g.count);

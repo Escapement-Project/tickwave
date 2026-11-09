@@ -138,7 +138,8 @@ export function sampleAtOrBefore(c: AnalogChannel, tick: number): number | null 
 /**
  * An error whose `name` says what went wrong, so a page can explain it: `TickwaveNetworkError` (no
  * answer, which a refused cross-origin request looks like too), `TickwaveHttpError` (an answer that
- * was not the bytes), `TickwaveNotRecording`, `TickwaveSidecarError`.
+ * was not the bytes), `TickwaveNotRecording`, `TickwaveSidecarError`, `TickwaveNoLoader` (a URL no
+ * loader reads).
  */
 export function named(name: string, message: string): Error {
   const e = new Error(message);

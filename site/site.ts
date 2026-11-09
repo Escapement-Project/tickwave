@@ -141,6 +141,8 @@ function explain(e: unknown, src: string, name: string): string {
   switch (error.name) {
     case "TickwaveNotRecording":
       return `${name} isn't a tickwave recording. The viewer reads .tickwave files, which the converter makes from a capture.`;
+    case "TickwaveNoLoader":
+      return `${name} doesn't end in .tickwave. The viewer reads .tickwave files: give the file's own address, or download it and open it from here.`;
     case "TickwaveNetworkError":
       return url.origin !== location.origin
         ? `${url.host} didn't send the recording. Its server may not let other sites read its files: it has to answer with an Access-Control-Allow-Origin header (CORS). Or it may be out of reach.`

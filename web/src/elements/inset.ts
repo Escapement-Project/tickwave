@@ -3,6 +3,7 @@
 
 import { covers, type Annotation } from "../annotations.ts";
 import { INSET_ATTRIBUTES, parseChannels, parsePad, parseScale, parseSweep } from "../attributes.ts";
+import { escapeHtml as esc } from "../escape.ts";
 import { reducedMotion } from "../face.ts";
 import { measureReading } from "../readouts.ts";
 import { channelIndices, Plot, ROLE_WEIGHT } from "../render/plot.ts";
@@ -57,6 +58,10 @@ export class TickwaveInset extends TickwaveElement {
   #sweepWanted = true;
   #sweepFrame = 0;
   #ready = "";
+  /** The sweep's wait for the plot to settle, by load and annotation: one at a time. */
+  #awaiting = "";
+  /** The missing annotation the notice names, until another is asked for. */
+  #missing: string | null = null;
   #measureSeq = 0;
   #resize: ResizeObserver;
   #intersect: IntersectionObserver;
@@ -76,6 +81,7 @@ export class TickwaveInset extends TickwaveElement {
       labelPx: 11,
     });
     this.#plot.onError = (e) => this.fail(e);
+    this.#plot.onRecovered = (m) => this.forgetProblem(m);
     this.#plot.onStall = (ms) => this.waiting(ms);
     this.#resize = new ResizeObserver(() => this.#sized());
     this.#intersect = new IntersectionObserver((seen) => {
@@ -142,6 +148,8 @@ export class TickwaveInset extends TickwaveElement {
     if (key !== this.#loadKey) {
       this.#loadKey = key;
       this.#loaded = null;
+      this.#missing = null;
+      this.clearProblems();
       loadRecording(src, annotations).then(
         (l) => {
           if (this.#loadKey !== key) return;
@@ -150,8 +158,11 @@ export class TickwaveInset extends TickwaveElement {
           this.#show();
         },
         (e) => {
-          // A load the inset has moved on from says nothing about the one it shows now.
-          if (this.#loadKey === key) this.fail(e);
+          // A load the inset has moved on from says nothing about the one it shows now. A failed
+          // one is not kept: the next update tries again.
+          if (this.#loadKey !== key) return;
+          this.#loadKey = "";
+          this.fail(e);
         },
       );
       return;
@@ -188,7 +199,12 @@ export class TickwaveInset extends TickwaveElement {
     if (!l) return;
     const id = this.getAttribute("annotation");
     const a = id ? (l.annotations.byId.get(id) ?? null) : null;
-    if (id && !a) this.fail(new Error(`no annotation ${id}`));
+    // One inset can show annotation after annotation, a chart's popover for one: a missing one
+    // stays in the notice only while it is the one asked for.
+    const absent = id && !a ? `no annotation ${id}` : null;
+    if (this.#missing !== null && this.#missing !== absent) this.forgetProblem(this.#missing);
+    this.#missing = absent;
+    if (absent) this.fail(new Error(absent));
     if (a?.id !== this.#annotation?.id) {
       this.#sweepWanted = true;
       this.#plot.reveal = this.#plot.layout?.plotLeft ?? 0;
@@ -266,7 +282,12 @@ export class TickwaveInset extends TickwaveElement {
   #maybeSweep(): void {
     if (!this.#visible || !this.#loaded || !this.#annotation || !this.#plot.layout) return;
     const id = `${this.#loadKey}\n${this.#annotation.id}`;
+    // Resizes and scrolls ask again and again; a plot that never settles, after a failed read,
+    // would collect a waiter each time.
+    if (this.#awaiting === id) return;
+    this.#awaiting = id;
     void this.#plot.whenSettled().then(() => {
+      if (this.#awaiting === id) this.#awaiting = "";
       if (!this.#visible || this.#annotation === null || `${this.#loadKey}\n${this.#annotation.id}` !== id) return;
       if (this.#ready !== id) {
         this.#ready = id;
@@ -339,8 +360,6 @@ export class TickwaveInset extends TickwaveElement {
     }
   }
 }
-
-const esc = (s: string) => s.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
 
 /** The `measure` readout as HTML: empty when the span says nothing, null for an unknown measure. */
 export function measureText(what: string, channel: string, level: 0 | 1, ticks: Float64Array, info: RecordingInfo): string | null {

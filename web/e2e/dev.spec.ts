@@ -207,6 +207,24 @@ test("a read that fails says the data did not load, and is not asked again at on
   expect((await served(tag)).length).toBe(3);
 });
 
+test("a failed read's notice goes once the read is asked again and lands", async ({ page }, info) => {
+  const tag = tagged(info, "recover");
+  await recordReady(page);
+  // The third read, of the overview blocks, fails once; the next is answered.
+  await page.goto(`/e2e/pages/view.html?open&src=fixtures/identify-jtag.tickwave&firstRead=1024&tag=${tag}&after=2&until=3&fail=503`);
+  await waitReady(page, ["v"]);
+  const view = page.locator("#v");
+  await view.evaluate((v) => (v as unknown as { setWindow(a: number, b: number): void }).setWindow(465e6, 485e6));
+  const notice = view.locator(".notice");
+  await expect(notice).toContainText("Data did not load");
+  // After the wait before asking again, a redraw asks, and the read lands.
+  await page.waitForTimeout(3200);
+  const box = (await view.locator("canvas").boundingBox())!;
+  await page.mouse.move(box.x + 100, box.y + box.height / 2);
+  await page.mouse.move(box.x + 140, box.y + box.height / 2);
+  await expect(notice).toBeHidden({ timeout: 10_000 });
+});
+
 test("a read still going after five seconds says so, until it lands", async ({ page }, info) => {
   const tag = tagged(info, "stall");
   await recordReady(page);

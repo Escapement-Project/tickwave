@@ -40,7 +40,7 @@ async function handle(m: Request, signal: AbortSignal): Promise<unknown> {
       let r = opened.get(m.key);
       if (!r) {
         const bytes: Bytes = m.file ? new FileBytes(m.file, m.file.name) : new HttpBytes(m.url!);
-        r = loadApi().then((a) => Opened.open(a, bytes, m.firstRead ?? FIRST_READ));
+        r = loadApi().then((a) => Opened.open(a, bytes, m.firstRead ?? FIRST_READ, m.maxDecoded));
         opened.set(m.key, r);
         r.catch(() => opened.delete(m.key));
       }

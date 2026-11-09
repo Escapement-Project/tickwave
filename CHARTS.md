@@ -102,7 +102,7 @@ Figure 1 on the landing page, cut to three clocks:
 
 | Field | Means |
 |---|---|
-| `id` | names the series in attributes, events and other charts |
+| `id` | names the series in attributes, events and other charts: letters, digits, `.`, `_` and `-` |
 | `name` | in the legend and a readout below the plot |
 | `short` | the end label, a fail mark ("GCC failed") and a tooltip readout |
 | `colour` | a series token: `verge` draws in `--series-verge` |

@@ -4,6 +4,7 @@
 // part a point from what it overlaps, and a hollow point's middle, take the surface colour from CSS
 // (`tw-pt`, `tw-hollow`): without it they drop rather than keep a stale colour.
 
+import { escapeHtml as esc } from "../escape.ts";
 import type { Marker, Pattern } from "./data.ts";
 import { f1, type Layout, type Placed, type SeriesLayout } from "./layout.ts";
 
@@ -34,7 +35,6 @@ export interface State {
   readonly yUnit: string;
 }
 
-const esc = (s: string): string => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
 
 export function render(l: Layout, state: State, c: Colours): string {
   const out: string[] = [];
@@ -109,7 +109,7 @@ function seriesMarkup(s: SeriesLayout, l: Layout, state: State, c: Colours): str
   }
   for (const run of runs) {
     const dash = run.wrong ? c.dash("misread") : c.dash(series.pattern);
-    out.push(`<path d="${run.d}" fill="none" stroke="${colour}" stroke-width="${width}"${dash ? ` stroke-dasharray="${dash}"` : ""}/>`);
+    out.push(`<path d="${run.d}" fill="none" stroke="${colour}" stroke-width="${width}"${dash ? ` stroke-dasharray="${esc(dash)}"` : ""}/>`);
   }
   for (const p of s.placed) {
     if (sweep !== null && sweep < p.x) break;

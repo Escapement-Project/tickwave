@@ -4,12 +4,13 @@
 import { fromCore, type Annotation, type CoreAnnotation } from "../annotations.ts";
 import type { Loader } from "../registry.ts";
 import { aborted, type Edges, type Overview, type RecordingInfo, type Samples, type Source } from "../source.ts";
-import { FIRST_READ, type Reply, type Request } from "./protocol.ts";
+import { FIRST_READ, MAX_DECODED, type Reply, type Request } from "./protocol.ts";
 
-const settings = { firstRead: FIRST_READ, cacheBytes: 192 << 20 };
+const settings = { firstRead: FIRST_READ, maxDecodedBytes: MAX_DECODED, cacheBytes: 192 << 20 };
 
-/** Tuning for the decoder: the first read of a recording's head, and the decoded-block cache. */
-export function configure(options: { firstRead?: number; cacheBytes?: number }): void {
+/** Tuning for the decoder: the first read of a recording's head, the most it decodes from one
+ * block, and the decoded-block cache. A recording opened earlier keeps the settings it opened with. */
+export function configure(options: { firstRead?: number; maxDecodedBytes?: number; cacheBytes?: number }): void {
   Object.assign(settings, options);
 }
 
@@ -93,6 +94,7 @@ export class WasmSource implements Source {
       ...(this.#url !== null && { url: this.#url }),
       ...(this.#file !== null && { file: this.#file }),
       firstRead: settings.firstRead,
+      maxDecoded: settings.maxDecodedBytes,
       cacheBytes: settings.cacheBytes,
     });
     this.#info.catch(() => (this.#info = null));
@@ -166,8 +168,10 @@ export function registerFile(file: File, sidecar: readonly File[] = []): string 
   return url;
 }
 
+/** Reads `.tickwave` URLs, in any case, and local files. Not every URL: a page may register a loader
+ * of its own while it loads, after its elements have asked for recordings. */
 export const tickwaveLoader: Loader = {
-  accepts: (url) => url.pathname.endsWith(".tickwave") || files.has(url.href),
+  accepts: (url) => url.pathname.toLowerCase().endsWith(".tickwave") || files.has(url.href),
   source: (url) => {
     const local = files.get(url.href);
     return new WasmSource(url.href, local ?? { url: url.href });

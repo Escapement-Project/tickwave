@@ -260,6 +260,13 @@ test("the block cache: an evicted block is read again", async () => {
   await r.edges(0, 0, r.info.length);
   // Two head reads; two full reads while the cache held nothing; one after it held everything.
   assert.equal(bytes.reads.length, 2 + 2 + 1);
+  // Each recording's open asks for the page's size again: the same size keeps every block, and
+  // a smaller one that still holds them keeps them too.
+  setCacheBytes(192 << 20);
+  setCacheBytes(64 << 20);
+  await r.edges(0, 0, r.info.length);
+  assert.equal(bytes.reads.length, 2 + 2 + 1);
+  setCacheBytes(192 << 20);
 });
 
 test("the sidecar resolves through the Rust core, and its problems come back", async () => {
@@ -430,4 +437,44 @@ test("duration: first edge to last, of either polarity, of the edges in [start, 
   // One edge says nothing: SWDIO in [377104000, 377105000) holds only 377104078.
   assert.equal((await duration(1, 377104000, 377105000)).reading, null);
   assert.equal(measureReading("width", 0, [1, 2], tb), undefined);
+});
+
+test("a crafted recording is refused with an error, and the module goes on decoding", async () => {
+  const { headLength, Recording } = wasm();
+  const open = (bytes: Uint8Array) => {
+    let n = headLength(bytes.subarray(0, 32));
+    for (let m = headLength(bytes.subarray(0, Math.min(n, bytes.length))); m > n; m = headLength(bytes.subarray(0, Math.min(n, bytes.length)))) n = m;
+    const r = new Recording(bytes.subarray(0, Math.min(n, bytes.length)));
+    for (let i = 0; i < r.blockCount; i++) {
+      const [from, to] = r.blockRange(i);
+      r.decodeBlock(i, bytes.subarray(from, to));
+    }
+  };
+  const why: Record<string, RegExp> = {
+    "header-wrap": /do not fit together/,
+    levels: /not the ones the format sets/,
+    "big-decoded": /more than this reader holds/,
+    "huge-count": /too short for its edges/,
+    "sections-wrap": /sections do not fill it/,
+  };
+  for (const [name, expected] of Object.entries(why)) {
+    assert.throws(
+      () => open(readFileSync(at(`fixtures/crafted/${name}.tickwave`))),
+      (e: unknown) => !(e instanceof WebAssembly.RuntimeError) && expected.test(String((e as Error).message)),
+      name,
+    );
+    // A panic would have ended the module; a refusal leaves it decoding the next file.
+    open(ONE);
+  }
+  // Past the last block, the index throws rather than reading out of bounds.
+  const r = new Recording(ONE.subarray(0, headLength(ONE)));
+  assert.throws(() => r.blockRange(r.blockCount), /no block/);
+  assert.throws(() => r.blockStart(r.blockCount), /no block/);
+});
+
+test("the most the decoder takes from one frame is the page's to set", async () => {
+  // identify-swd's head overview decodes to more than 64 bytes.
+  await assert.rejects(Opened.open(wasm(), new MemoryBytes(ONE, "one.tickwave"), FIRST_READ, 64), /more than this reader holds \(64\)/);
+  const r = await Opened.open(wasm(), new MemoryBytes(ONE, "one.tickwave"), FIRST_READ, 1 << 20);
+  assert.ok(r.info.length > 0);
 });

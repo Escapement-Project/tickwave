@@ -3,8 +3,7 @@
 
 import { autoUpdate, computePosition, flip, inline, offset, shift } from "@floating-ui/dom";
 import { REF_ATTRIBUTES } from "../attributes.ts";
-import { reducedMotion } from "../face.ts";
-import { absolute, prefetch } from "../registry.ts";
+import { absolute, annotationsFor, bundledFor, prefetch } from "../registry.ts";
 import { TickwaveElement } from "./base.ts";
 import type { TickwaveInset } from "./inset.ts";
 import type { TickwaveView } from "./view.ts";
@@ -28,6 +27,8 @@ export class TickwaveRef extends TickwaveElement {
   #stopPosition: (() => void) | null = null;
   #intersect: IntersectionObserver;
   #prefetched = "";
+  /** The prefetched sidecar's annotations, which describe the reference. */
+  #list: readonly { id: string; label: string | null; text: string | null }[] = [];
 
   constructor() {
     super(CSS, `<slot></slot><div class="pop" part="popover" popover="manual"></div>`);
@@ -44,7 +45,8 @@ export class TickwaveRef extends TickwaveElement {
     this.addEventListener("blur", () => this.#close());
     this.addEventListener("click", () => void this.#go());
     this.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") {
+      // As a button answers: Enter, and Space, which would otherwise scroll the page.
+      if (e.key === "Enter" || (e.key === " " && this.hasAttribute("for"))) {
         e.preventDefault();
         void this.#go();
       }
@@ -89,9 +91,21 @@ export class TickwaveRef extends TickwaveElement {
     if (this.hasAttribute("for")) this.setAttribute("role", "button");
     else if (this.getAttribute("role") === "button") this.removeAttribute("role");
     if (this.#inset) this.#configure(this.#inset);
+    // Another recording or sidecar: its annotations describe the reference once fetched.
+    const key = `${this.#borrowed("src")}\n${this.#borrowed("annotations") ?? ""}`;
+    if (this.#prefetched && key !== this.#prefetched) {
+      this.#list = [];
+      this.#prefetched = "";
+      this.#prefetch();
+    }
+    this.#describe();
   }
 
   protected paletteChanged(): void {}
+
+  protected override get drawsWithPalette(): boolean {
+    return false;
+  }
 
   #prefetch(): void {
     const src = this.#borrowed("src");
@@ -100,7 +114,24 @@ export class TickwaveRef extends TickwaveElement {
     const key = `${src}\n${annotations ?? ""}`;
     if (key === this.#prefetched) return;
     this.#prefetched = key;
-    prefetch(absolute(src), annotations ? absolute(annotations) : null).catch((e) => this.fail(e));
+    const recording = absolute(src);
+    const sidecar = annotations ? absolute(annotations) : null;
+    prefetch(recording, sidecar)
+      .then(() => (sidecar ? annotationsFor(sidecar, recording) : bundledFor(recording)))
+      .then((list) => {
+        this.#list = list ?? [];
+        this.#describe();
+      })
+      .catch((e) => this.fail(e));
+  }
+
+  /** The inset is drawn, and a screen reader cannot reach into it: the annotation's label and text
+   * describe the reference itself. */
+  #describe(): void {
+    const a = this.#list.find((x) => x.id === this.getAttribute("annotation"));
+    const description = a ? [a.label, a.text].filter(Boolean).join(". ") : "";
+    if (description) this.setAttribute("aria-description", description);
+    else this.removeAttribute("aria-description");
   }
 
   #configure(inset: TickwaveInset): void {
@@ -145,9 +176,6 @@ export class TickwaveRef extends TickwaveElement {
     const a = this.getAttribute("annotation");
     if (!view || !a) return;
     this.#close();
-    const shown = view.show(a);
-    view.scrollIntoView({ block: "nearest", behavior: reducedMotion() ? "auto" : "smooth" });
-    await shown;
-    (view.shadowRoot?.querySelector(".plot") as HTMLElement | null)?.focus({ preventScroll: true });
+    await view.reveal(a);
   }
 }

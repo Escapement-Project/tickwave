@@ -1,7 +1,8 @@
-// Every attribute the elements read, parsed in one place. The element API (PLAN.md §4) is under
-// review, so a change to it should land here and in the observed lists only.
+// Every attribute the elements read, parsed in one place: a change to the element API lands here
+// and in the observed lists only.
 
 import { parseTime, type Seconds, type TimeSpec } from "./time.ts";
+import { SERIES_TOKEN } from "./tokens.ts";
 
 export const VIEW_ATTRIBUTES = ["src", "annotations", "channels", "window", "open", "series"];
 export const INSET_ATTRIBUTES = ["src", "annotations", "annotation", "channels", "pad", "scale", "sweep", "series"];
@@ -16,7 +17,7 @@ export function parseChannels(v: string | null): string[] | null {
 /** A series name: the trace and the probe role take `--series-<name>`. Null for ink. */
 export function parseSeries(v: string | null): string | null {
   const s = v?.trim() ?? "";
-  return /^[a-z][a-z0-9-]*$/.test(s) ? s : null;
+  return SERIES_TOKEN.test(s) ? s : null;
 }
 
 export type WindowSpec =

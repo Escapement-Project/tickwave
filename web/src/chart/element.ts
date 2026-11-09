@@ -2,6 +2,7 @@
 // children, not a shadow root, so reader view and feeds keep the figure.
 
 import { autoUpdate, computePosition, flip, offset, shift } from "@floating-ui/dom";
+import { escapeHtml } from "../escape.ts";
 import { onFaceChange, onFontsLoaded, reducedMotion } from "../face.ts";
 import { normalise } from "../palette.ts";
 import { parseChart, type ChartData, type Evidence, type Pattern } from "./data.ts";
@@ -139,12 +140,26 @@ export class TickwaveChart extends HTMLElement {
     this.setAttribute("aria-roledescription", "chart");
     this.#name();
     this.#build();
+    // `data` set on the element before this class defined it is an own property that hides the
+    // setter: take it through the setter.
+    if (Object.hasOwn(this, "data")) {
+      const value = (this as { data?: unknown }).data;
+      delete (this as { data?: unknown }).data;
+      this.data = value;
+    }
     const resize = new ResizeObserver(() => this.#draw());
     resize.observe(this);
-    const seen = new IntersectionObserver((entries) => {
-      this.#visible = entries.some((e) => e.isIntersecting);
-      if (this.#visible) this.#startSweep();
-    }, { threshold: 0.6 });
+    // Shown once 60 % of it is, or, for a chart taller than the window, once it fills 60 % of the
+    // window. isIntersecting alone is true at any share, the first report included.
+    const seen = new IntersectionObserver(
+      (entries) => {
+        this.#visible = entries.some(
+          (e) => e.isIntersecting && (e.intersectionRatio >= 0.6 || e.intersectionRect.height >= 0.6 * (e.rootBounds?.height ?? Infinity)),
+        );
+        if (this.#visible) this.#startSweep();
+      },
+      { threshold: [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6] },
+    );
     seen.observe(this);
     // A press in any chart of the group is a pick there, which moves this one. The path, not the
     // target: a pick redraws the plot and detaches the target before this runs.
@@ -209,12 +224,15 @@ export class TickwaveChart extends HTMLElement {
     this.#take(() => parseChart(value));
   }
 
-  /** Selects a setting, a series or both, as a reader would; `pick()` clears. Fires no event. */
+  /** Selects a setting, a series or both, as a reader would, and moves the group with it;
+   * `pick()` clears. Fires no event. */
   pick(x: string | null = null, series: string | null = null): void {
+    const before = this.#x;
     this.#x = x === null ? (this.#sticky ? this.#x : null) : this.#indexOf(x);
     this.#series = series;
     this.#limit = false;
     this.#draw();
+    if (this.#x !== before) this.#moveGroup();
   }
 
   /** Resolves once the chart has drawn, its sweep included. */
@@ -285,6 +303,8 @@ export class TickwaveChart extends HTMLElement {
       this.#base = response.url || new URL(src, document.baseURI).href;
       this.#take(() => parseChart(json));
     } catch (e) {
+      if (this.#loadedSrc !== src) return;
+      this.#loadedSrc = null;
       this.#fail(e);
     }
   }
@@ -356,11 +376,15 @@ export class TickwaveChart extends HTMLElement {
     this.#settle();
   }
 
-  #shown(): Set<string> {
+  /** The series the page shows: `show`, else every series not hidden. */
+  #listed(): Set<string> {
     const data = this.#data!;
     const show = this.getAttribute("show");
-    const ids = show === null ? data.series.filter((s) => !s.hidden).map((s) => s.id) : show.split(/\s+/).filter(Boolean);
-    const shown = new Set(ids);
+    return new Set(show === null ? data.series.filter((s) => !s.hidden).map((s) => s.id) : show.split(/\s+/).filter(Boolean));
+  }
+
+  #shown(): Set<string> {
+    const shown = this.#listed();
     // A hidden series draws while it is picked: the landing page's GCC column.
     if (this.#series) shown.add(this.#series);
     return shown;
@@ -456,10 +480,10 @@ export class TickwaveChart extends HTMLElement {
   #drawLegend(data: ChartData, c: Colours): void {
     const ul = this.#legend;
     if (!ul) return;
-    const shown = this.#shown();
+    const listed = this.#listed();
     const items = data.series
-      .filter((s) => shown.has(s.id) && !s.hidden)
-      .map((s) => `<li tabindex="0" data-series="${s.id}">${swatch(s, c)}${escapeHtml(s.name)}</li>`);
+      .filter((s) => listed.has(s.id))
+      .map((s) => `<li tabindex="0" data-series="${escapeHtml(s.id)}">${swatch(s, c)}${escapeHtml(s.name)}</li>`);
     if (data.reference) {
       items.push(`<li data-reference=""><svg class="tw-swatch" width="22" height="10" aria-hidden="true"><line x1="1" x2="21" y1="9" y2="1" stroke="currentColor" stroke-opacity=".5" stroke-dasharray="4 4"/></svg>as asked</li>`);
     }
@@ -724,14 +748,11 @@ export class TickwaveChart extends HTMLElement {
     const view = [...document.querySelectorAll("tickwave-view")].find((v) => {
       const src = v.getAttribute("src");
       return src !== null && new URL(src, document.baseURI).href === recording;
-    }) as (HTMLElement & { show(id: string): Promise<void> }) | undefined;
+    }) as (HTMLElement & { reveal(id: string): Promise<void> }) | undefined;
     if (go && !view) return;
     this.#closeEvidence();
     if (!go || !view) return;
-    const shown = view.show(evidence.annotation);
-    view.scrollIntoView({ block: "nearest", behavior: reducedMotion() ? "auto" : "smooth" });
-    await shown;
-    (view.shadowRoot?.querySelector(".plot") as HTMLElement | null)?.focus({ preventScroll: true });
+    await view.reveal(evidence.annotation);
   }
 
   /** A reader's pick: draws, tells the page, and moves the group's other charts. */
@@ -742,12 +763,16 @@ export class TickwaveChart extends HTMLElement {
     this.#series = series;
     this.#draw();
     const x = i === null ? null : this.#data!.x.values[i];
-    if (moved) {
-      for (const other of groups.get(this.getAttribute("group") ?? "") ?? []) {
-        if (other !== this) other.#follow(x);
-      }
-    }
+    if (moved) this.#moveGroup();
     this.dispatchEvent(new CustomEvent("tickwave-pick", { bubbles: true, composed: true, detail: { x, series } }));
+  }
+
+  /** The group's other charts take this one's setting. */
+  #moveGroup(): void {
+    const x = this.#x === null ? null : this.#data!.x.values[this.#x];
+    for (const other of groups.get(this.getAttribute("group") ?? "") ?? []) {
+      if (other !== this) other.#follow(x);
+    }
   }
 
   #follow(x: string | null): void {
@@ -809,6 +834,3 @@ function opacity(css: string): number {
   return css.includes("%") ? v / 100 : v;
 }
 
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>"]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[ch]!);
-}

@@ -3,8 +3,12 @@
 /** The first read of a recording's head, unless the page configures another (FORMAT.md). */
 export const FIRST_READ = 32 * 1024;
 
+/** The most the decoder takes from one block, overview block or head overview, unless the page
+ * configures another: the format sets no maximum, and a file can state up to 4 GiB. */
+export const MAX_DECODED = 64 << 20;
+
 export type Request =
-  | { id: number; op: "open"; key: string; url?: string; file?: File; firstRead?: number; cacheBytes?: number }
+  | { id: number; op: "open"; key: string; url?: string; file?: File; firstRead?: number; maxDecoded?: number; cacheBytes?: number }
   | { id: number; op: "edges" | "samples"; key: string; channel: number; start: number; end: number }
   | { id: number; op: "overview"; key: string; channel: number; start: number; end: number; maxBucket: number }
   | { id: number; op: "sidecar"; key: string; url: string; recordingFile: string | null }

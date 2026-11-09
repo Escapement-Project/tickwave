@@ -81,8 +81,10 @@ shares one source per URL.
 
 ## Reading `.tickwave` files
 
-`tickwave.js` registers a loader for `.tickwave` URLs, and for local files made into URLs with
-`registerFile(file)`. Each recording is opened once, in one worker that holds the WASM module.
+`tickwave.js` registers a loader for `.tickwave` URLs, in any case, and for local files made into
+URLs with `registerFile(file)`. A loader registered later is asked first. While the page loads, a
+URL no loader takes waits for one; after that it is refused (`TickwaveNoLoader`). Each recording is
+opened once, in one worker that holds the WASM module.
 
 - The head comes by HTTP Range: the first 32 KiB, then the rest if the head is longer. Data blocks
   and overview blocks come by Range as a view needs them. Adjacent missing blocks share one
@@ -93,7 +95,8 @@ shares one source per URL.
 - A local file reads through `File.slice`.
 - Decoded blocks sit in an LRU of 192 MiB, shared by every recording on the page.
 - An aborted request stops at once, and so does a read no other request is waiting on.
-- `configure({ firstRead, cacheBytes })` changes the first read and the cache's size.
+- `configure({ firstRead, maxDecodedBytes, cacheBytes })` changes the first read, the most the
+  decoder takes from one block, and the cache's size.
 
 An element's `annotations` attribute names a sidecar's TOML file. The worker fetches it and the
 files it includes, relative to its URL, and resolves them with the Rust core. Without the
@@ -210,6 +213,7 @@ Clicking an annotation's label shows its span.
 | Method or property | Does |
 |---|---|
 | `show(id)` | opens the view at an annotation. Resolves once it has drawn |
+| `reveal(id)` | `show(id)`, then brings the view into sight and puts the focus on its plot, as a reference or a chart's point does |
 | `setWindow(start, end)` | shows a span: ticks, or times such as `"317.8 ms"` |
 | `settled()` | resolves once the view has drawn everything it shows |
 | `tickAt(clientX)` | the tick under a point in the window, or null before the view has drawn |
@@ -325,10 +329,11 @@ a `fact-separator` ("; ") between two. On the inset: `inset`, `label`, `text`, `
 
 ### From the module
 
-`tickwave.js` also exports three functions:
+`tickwave.js` also exports these functions:
 
 | Function | Does |
 |---|---|
 | `registerFile(file, sidecar)` | makes a local `File` a `src`. The sidecar's `.toml` and `.jsonl` files can come with it |
+| `registerLoader(loader)` | reads recordings at the URLs `loader.accepts`, asked before the loaders registered earlier |
 | `recordingInfo(src)` | what a recording holds, from its head: title, length, channels, size, content id |
-| `configure({firstRead, cacheBytes})` | the size of the first read of a head, 32 KiB by default; and of the cache of decoded blocks, 192 MiB |
+| `configure({firstRead, maxDecodedBytes, cacheBytes})` | the size of the first read of a head, 32 KiB by default; the most the decoder takes from one block, overview block or head overview, 64 MiB, past which it refuses the recording; and the size of the cache of decoded blocks, 192 MiB |

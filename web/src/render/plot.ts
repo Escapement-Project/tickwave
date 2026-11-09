@@ -92,7 +92,7 @@ export class Plot {
   info: RecordingInfo | null = null;
   tracks: Track[] = [];
   annotations: Resolved | null = null;
-  palette: Palette | null = null;
+  #palette: Palette | null = null;
   layout: Layout | null = null;
   view = { start: 0, end: 1 };
   cursors: { a: number | null; b: number | null } = { a: null, b: null };
@@ -108,6 +108,10 @@ export class Plot {
   notes: NoteOut[] = [];
   onDraw: (() => void) | null = null;
   onError: ((e: unknown) => void) | null = null;
+  /** A problem `onError` reported that has gone: every track has read since. */
+  onRecovered: ((message: string) => void) | null = null;
+  /** The failed reads reported, until every track reads again. */
+  #notLoaded = new Set<string>();
   /** Called with STALL_MS once a read has run that long, and with null once no read is running. */
   onStall: ((waitedMs: number | null) => void) | null = null;
   #stallTimer: ReturnType<typeof setTimeout> | undefined;
@@ -115,8 +119,9 @@ export class Plot {
   #frame = 0;
   #dpr = 1;
   #settledWaiters: (() => void)[] = [];
+  /** Text widths by font and text. A frame measures in several fonts, so one cache holds them all;
+   * a new palette, which a face or a web font arriving brings, empties it. */
   #measureCache = new Map<string, number>();
-  #measureFont = "";
 
   constructor(canvas: HTMLCanvasElement, config: PlotConfig) {
     this.canvas = canvas;
@@ -132,14 +137,26 @@ export class Plot {
           source,
           i,
           info.channels[i],
-          () => this.invalidate(),
+          () => {
+            this.#recovered();
+            this.invalidate();
+          },
           (e) => {
             this.#watchStall();
-            this.onError?.(notLoaded(e));
+            const error = notLoaded(e);
+            this.#notLoaded.add(error.message);
+            this.onError?.(error);
           },
         ),
     );
     this.layout = null;
+  }
+
+  /** Once no track's last read failed, the failures reported are over. */
+  #recovered(): void {
+    if (this.#notLoaded.size === 0 || this.tracks.some((t) => t.failed)) return;
+    for (const message of this.#notLoaded) this.onRecovered?.(message);
+    this.#notLoaded.clear();
   }
 
   // Layout -------------------------------------------------------------------------------------
@@ -148,16 +165,24 @@ export class Plot {
     return `${weight} ${px}px ${family}`;
   }
 
+  get palette(): Palette | null {
+    return this.#palette;
+  }
+
+  set palette(p: Palette | null) {
+    this.#palette = p;
+    this.#measureCache.clear();
+  }
+
   measure(text: string, font: string): number {
-    if (font !== this.#measureFont) {
-      this.#measureCache.clear();
-      this.#measureFont = font;
-    }
-    let w = this.#measureCache.get(text);
+    const key = `${font}\n${text}`;
+    let w = this.#measureCache.get(key);
     if (w === undefined) {
+      // Eliding probes many prefixes of each label: bounded, so a long session does not grow it.
+      if (this.#measureCache.size > 8192) this.#measureCache.clear();
       this.#ctx.font = font;
       w = this.#ctx.measureText(text).width;
-      this.#measureCache.set(text, w);
+      this.#measureCache.set(key, w);
     }
     return w;
   }
@@ -177,6 +202,16 @@ export class Plot {
     return { lo: Math.floor(lo0 / step) * step, hi: Math.max(Math.ceil(hi0 / step) * step, Math.floor(lo0 / step) * step + step), place };
   }
 
+  /** The lane, the rows at their own heights and the axis: what the plot stacks, with no height given. */
+  #stack(): { laneHeight: number; top: number; natural: number[]; fixed: number } {
+    const laneHeight = this.config.lanes > 0 && this.laneNotes().length > 0 ? this.config.lanes * LANE_ROW + 4 : 0;
+    const top = 2 + laneHeight + (laneHeight > 0 ? 2 : 4);
+    const natural = this.tracks.map((t) => (t.channel.kind === "analog" ? this.config.analogHeight : this.config.rowHeight));
+    const gaps = this.tracks.filter((t, i) => i > 0 && t.channel.kind === "analog").length * 8;
+    const fixed = top + gaps + natural.reduce((a, b) => a + b, 0) + (this.config.axis ? AXIS_HEIGHT + 2 : 4);
+    return { laneHeight, top, natural, fixed };
+  }
+
   /** Lays the plot out at `width` CSS pixels; `height` above the natural one goes to the rows. */
   resize(width: number, height: number | null): Layout {
     const font = this.#font(this.config.labelPx, 500);
@@ -192,13 +227,10 @@ export class Plot {
       }
     });
     const plotLeft = Math.ceil(Math.min(Math.max(gutter + 14, 40), Math.max(40, width * 0.3)));
-    const laneHeight = this.config.lanes > 0 && this.laneNotes().length > 0 ? this.config.lanes * LANE_ROW + 4 : 0;
     const laneTop = 2;
-    let top = laneTop + laneHeight + (laneHeight > 0 ? 2 : 4);
-    const natural = this.tracks.map((t) => (t.channel.kind === "analog" ? this.config.analogHeight : this.config.rowHeight));
-    const gaps = this.tracks.filter((t, i) => i > 0 && t.channel.kind === "analog").length * 8;
-    const fixed = top + gaps + natural.reduce((a, b) => a + b, 0) + (this.config.axis ? AXIS_HEIGHT + 2 : 4);
-    let extra = height !== null ? Math.max(0, height - fixed) : 0;
+    const { laneHeight, top: rowsTop, natural, fixed } = this.#stack();
+    let top = rowsTop;
+    const extra = height !== null ? Math.max(0, height - fixed) : 0;
     const analogs = this.tracks.filter((t) => t.channel.kind === "analog").length;
     const rows: Row[] = this.tracks.map((track, i) => {
       // An analog row's scale labels sit at its top and bottom edges; keep them off the row above.
@@ -211,7 +243,6 @@ export class Plot {
       top += h;
       return row;
     });
-    if (analogs === 0) extra = 0;
     const axisTop = top + 2;
     this.layout = {
       width,
@@ -373,8 +404,7 @@ export class Plot {
     ctx.fillStyle = this.hoverRow !== null && l.rows[this.hoverRow] === r ? p.ink : p.ink2;
     ctx.font = this.#font(this.config.labelPx, 500);
     ctx.textAlign = "left";
-    const nameY = c.kind === "analog" ? r.top + r.height / 2 + 4 : r.top + r.height / 2 + 4;
-    ctx.fillText(c.name, 6, nameY, l.plotLeft - 10);
+    ctx.fillText(c.name, 6, r.top + r.height / 2 + 4, l.plotLeft - 10);
     if (r.range && c.kind === "analog") {
       ctx.font = this.#font(AXIS_PX);
       ctx.textAlign = "right";

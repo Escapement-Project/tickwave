@@ -1,5 +1,5 @@
 // Times as written in attributes and annotations: an integer tick count, or a decimal with a unit
-// (s, ms, us, ns; also µs). Converted to ticks exactly, rounding to the nearest tick.
+// (s, ms, us, ns, ps; also µs). Converted to ticks exactly, rounding to the nearest tick.
 
 import type { Ratio } from "./source.ts";
 

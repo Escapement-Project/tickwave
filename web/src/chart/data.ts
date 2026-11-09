@@ -1,6 +1,7 @@
 // A chart's data, `tickwave-chart/1` (CHARTS.md). `parseChart` checks a parsed JSON value and
 // reports every problem it finds, not only the first.
 
+import { SERIES_TOKEN } from "../tokens.ts";
 import { isDecimal, toNumber } from "./decimal.ts";
 
 export const FORMAT = "tickwave-chart/1";
@@ -83,7 +84,8 @@ export interface ChartData {
 const PATTERNS: readonly Pattern[] = ["solid", "second-build", "reference", "capture-second"];
 const MARKERS: readonly Marker[] = ["circle", "square", "diamond", "triangle-up", "triangle-down"];
 const SCALES: readonly Scale[] = ["linear", "log"];
-const TOKEN = /^[a-z][a-z0-9-]*$/;
+/** A series id: `show` and `highlight` list ids by spaces and name a point as `id@x`. */
+const ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 type Json = Record<string, unknown>;
 const isObject = (v: unknown): v is Json => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -158,11 +160,12 @@ export function parseChart(json: unknown): ChartData {
       const at = `series[${n}]`;
       if (!isObject(s)) return problem(at, "not an object");
       const id = text(s, "id", at, true) ?? `#${n}`;
+      if (s.id !== undefined && !ID.test(id)) problem(`${at}.id`, `${JSON.stringify(id)} is not letters, digits, ".", "_" and "-"`);
       if (ids.has(id)) problem(at, `id ${JSON.stringify(id)} is used twice`);
       ids.add(id);
       const name = text(s, "name", at, true) ?? id;
       const colour = text(s, "colour", at, true) ?? "";
-      if (colour && !TOKEN.test(colour)) problem(`${at}.colour`, `${JSON.stringify(colour)} is not a series token name`);
+      if (colour && !SERIES_TOKEN.test(colour)) problem(`${at}.colour`, `${JSON.stringify(colour)} is not a series token name`);
       const fails = s.fails;
       if (fails !== undefined && fails !== "mark") problem(`${at}.fails`, `${JSON.stringify(fails)} is not "mark"`);
       const points: (Point | null)[] = [];
