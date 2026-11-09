@@ -13,14 +13,38 @@ use crate::header::{ChannelKind, Header};
 pub const FORMAT: &str = "tickwave-annotations/1";
 
 /// A time as a file writes it: a tick count, or a decimal with a unit.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
-#[serde(untagged)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Time {
     Ticks(i64),
     Text(String),
 }
 
+impl<'de> Deserialize<'de> for Time {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Visit;
+        impl serde::de::Visitor<'_> for Visit {
+            type Value = Time;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str(r#"a whole tick count or a decimal with a unit, as "1.5 us""#)
+            }
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Time, E> {
+                Ok(Time::Ticks(v))
+            }
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Time, E> {
+                i64::try_from(v)
+                    .map(Time::Ticks)
+                    .map_err(|_| E::custom(format!("{v} ticks is out of range")))
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Time, E> {
+                Ok(Time::Text(v.to_owned()))
+            }
+        }
+        d.deserialize_any(Visit)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Measure {
     pub channel: String,
     /// `rate`, `period` or `duration`.
@@ -145,7 +169,14 @@ pub fn ticks(time: &Time, timebase: [u64; 2]) -> Result<i64, String> {
     let numerator = mantissa
         .checked_mul(i128::from(timebase[0]))
         .ok_or_else(too_big)?;
-    let rounded = (2 * numerator + denominator) / (2 * denominator);
+    // Halves away from zero, on the magnitude. Checked: 2 × numerator can pass i128 where the
+    // quotient would not, and a wrapped sum is a wrong tick, not an error.
+    let rounded = numerator
+        .checked_mul(2)
+        .and_then(|n| n.checked_add(denominator))
+        .zip(denominator.checked_mul(2))
+        .map(|(n, d)| n / d)
+        .ok_or_else(too_big)?;
     let value = i64::try_from(rounded).map_err(|_| too_big())?;
     Ok(if negative { -value } else { value })
 }
@@ -234,7 +265,15 @@ pub fn resolve_json(
 ) -> Result<Vec<Annotation>, Vec<String>> {
     match json(hand) {
         Ok(file) => resolve_file(file, included, header, recording_file),
-        Err(e) => Err(vec![format!("the TOML file: {e}")]),
+        // The position is in the JSON the page made from the TOML, not in any file its author has.
+        Err(e) => {
+            let text = e.to_string();
+            let at = format!(" at line {} column {}", e.line(), e.column());
+            Err(vec![format!(
+                "the TOML file: {}",
+                text.strip_suffix(&at).unwrap_or(&text)
+            )])
+        }
     }
 }
 
@@ -262,6 +301,13 @@ fn resolve_file(
             file.recording_id, header.content_id
         ));
     }
+    for name in &file.include {
+        if name.contains(['/', '\\']) || name == ".." || name == "." {
+            problems.push(format!(
+                "{name}: an included file is named on its own, as it sits beside this one"
+            ));
+        }
+    }
     let listed: BTreeSet<&str> = file.include.iter().map(String::as_str).collect();
     let given: BTreeSet<&str> = included.iter().map(|i| i.name).collect();
     for name in listed.difference(&given) {
@@ -285,14 +331,14 @@ fn resolve_file(
             .lines()
             .enumerate()
             .filter(|(_, l)| !l.trim().is_empty());
-        let Some((_, first)) = lines.next() else {
+        let Some((first_n, first)) = lines.next() else {
             problems.push(format!("{}: empty", inc.name));
             continue;
         };
         let head: GeneratorHead = match json(first) {
             Ok(head) => head,
             Err(e) => {
-                problems.push(format!("{}, line 1: {e}", inc.name));
+                problems.push(format!("{}, line {}: {e}", inc.name, first_n + 1));
                 continue;
             }
         };
@@ -407,13 +453,21 @@ fn resolve_file(
             },
         ));
     }
+    // A ref names a generated annotation (ANNOTATIONS.md): a name for a decoder's find, not a
+    // second name for a hand-written one.
     let by_id: BTreeMap<String, Annotation> = plain
         .iter()
+        .filter(|(_, _, a)| a.source.is_some())
         .map(|(_, _, a)| (a.id.clone(), a.clone()))
         .collect();
     for (position, id, target, entry, at) in refs {
         let Some(t) = by_id.get(&target) else {
-            problems.push(format!("{at}: ref {target:?} does not resolve"));
+            let hand = plain.iter().any(|(_, _, a)| a.id == target);
+            problems.push(if hand {
+                format!("{at}: ref {target:?} names a hand-written annotation, not a generated one")
+            } else {
+                format!("{at}: ref {target:?} does not resolve")
+            });
             continue;
         };
         plain.push((

@@ -130,6 +130,7 @@ fn a_bundle_moves_the_overview_blocks_with_the_rest() {
     let file = file();
     let bundled = bundle(
         &file,
+        &Head::parse_file(&file).unwrap(),
         [("rec.annotations.toml".into(), "x".repeat(1000))].into(),
     )
     .unwrap();
@@ -199,7 +200,7 @@ fn verify_refuses_overview_blocks_that_differ_from_the_content() {
 }
 
 #[test]
-fn a_header_listing_an_oversized_level_is_refused() {
+fn a_header_listing_other_overview_levels_is_refused() {
     let file = file();
     let needle = br#""overview":[16,20,24]"#;
     let at = file
@@ -207,13 +208,20 @@ fn a_header_listing_an_oversized_level_is_refused() {
         .position(|w| w == needle)
         .unwrap();
     // Same byte length, so every offset stays right: only the levels change.
+    // Too fine for the head, past what a shift can be, a level twice (each copy adds its size to
+    // what the reader allocates), and out of order.
     for listed in [
         &br#""overview":[ 0,20,24]"#[..],
         br#""overview":[99,20,24]"#,
+        br#""overview":[16,16,24]"#,
+        br#""overview":[20,16,24]"#,
     ] {
         let mut bad = file.clone();
         bad[at..at + needle.len()].copy_from_slice(listed);
         let err = Head::parse(&bad).err().expect("refused");
-        assert!(err.to_string().contains("more buckets than"), "{err}");
+        assert!(
+            err.to_string().contains("not the ones the format sets"),
+            "{err}"
+        );
     }
 }

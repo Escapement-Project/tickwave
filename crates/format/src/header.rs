@@ -142,6 +142,14 @@ pub enum AnalogCoding {
     Codes { bits: u8, scale: f64, offset: f64 },
 }
 
+/// The value a code stands for: an f64 multiply, an f64 add, then rounding to the nearest f32. A
+/// reader must compute exactly this: a fused multiply-add rounds once instead of twice and can give
+/// another f32. Every reader and writer here goes through this one.
+#[inline]
+pub fn code_value(code: u16, scale: f64, offset: f64) -> f32 {
+    (offset + f64::from(code) * scale) as f32
+}
+
 impl AnalogCoding {
     pub fn sample_len(self) -> usize {
         match self {

@@ -17,7 +17,7 @@ use crate::codec::put_uleb;
 use crate::hash::{self, ChannelHasher};
 use crate::header::{
     AnalogCoding, BlockRow, ChannelHeader, ChannelKind, Header, JSON_SAFE, LEVEL_BIT, MAJOR, MINOR,
-    OverviewLevel, OverviewRow, PREAMBLE_LEN, Preamble, SourceHeader,
+    OverviewLevel, OverviewRow, PREAMBLE_LEN, Preamble, SourceHeader, code_value,
 };
 use crate::model::{ChannelData, Edges, Ratio, Recording, Samples};
 use crate::overview::{self, AnalogBuilder, DigitalBuilder, Level};
@@ -52,8 +52,16 @@ pub enum EncodeError {
         promised: u64,
         delivered: u64,
     },
+    #[error("the length {0} is negative")]
+    Length(i64),
     #[error("{channel}: samples run past the recording's end, tick {length}")]
     SampleRange { channel: String, length: i64 },
+    #[error("{channel}: the first sample is at tick {first}, before the recording starts")]
+    StartsBeforeZero { channel: String, first: i64 },
+    #[error("{channel}: the sample period {num}/{den} is not a ratio of positive integers")]
+    Period { channel: String, num: u64, den: u64 },
+    #[error("{channel}: codes of {bits} bits; a coding holds 1 to 16")]
+    CodingBits { channel: String, bits: u8 },
     #[error("{channel}: sample {index}, {value}, is not exactly a code of {coding:?}")]
     Coding {
         channel: String,
@@ -67,6 +75,10 @@ pub enum EncodeError {
     BlockSize,
     #[error("the head is {0} bytes, more than a u32 offset reaches")]
     HeadTooLarge(usize),
+    #[error("a block of {0} bytes, more than its u32 length holds")]
+    BlockTooLarge(usize),
+    #[error("the header would not read back: {0}")]
+    Header(String),
     #[error("zstd: {0}")]
     Zstd(#[from] std::io::Error),
 }
@@ -118,8 +130,7 @@ pub fn code_of(value: f32, coding: AnalogCoding) -> Option<u16> {
         return None;
     }
     let code = code as u16;
-    let back = (offset + f64::from(code) * scale) as f32;
-    (back.to_bits() == value.to_bits()).then_some(code)
+    (code_value(code, scale, offset).to_bits() == value.to_bits()).then_some(code)
 }
 
 struct DigitalStream {
@@ -196,7 +207,10 @@ pub fn encode(recording: Recording, options: &Options) -> Result<Vec<u8>, Encode
     }
     check_safe("timebase numerator", timebase.num)?;
     check_safe("timebase denominator", timebase.den)?;
-    check_safe("length", length.max(0) as u64)?;
+    if length < 0 {
+        return Err(EncodeError::Length(length));
+    }
+    check_safe("length", length as u64)?;
     let plan = overview::plan(length);
     let finest = plan.finest();
 
@@ -240,12 +254,24 @@ pub fn encode(recording: Recording, options: &Options) -> Result<Vec<u8>, Encode
             ChannelData::Analog(a) => {
                 let period = [a.period.num, a.period.den];
                 if a.period.num == 0 || a.period.den == 0 {
-                    return Err(EncodeError::Timebase(a.period.num, a.period.den));
+                    return Err(EncodeError::Period {
+                        channel: channel.name,
+                        num: a.period.num,
+                        den: a.period.den,
+                    });
                 }
                 check_safe("analog sample count", a.count)?;
                 check_safe("analog period numerator", a.period.num)?;
                 check_safe("analog period denominator", a.period.den)?;
                 let coding = coding.unwrap_or(AnalogCoding::F32);
+                if let AnalogCoding::Codes { bits, .. } = coding
+                    && !(1..=16).contains(&bits)
+                {
+                    return Err(EncodeError::CodingBits {
+                        channel: channel.name,
+                        bits,
+                    });
+                }
                 let Samples::F32(mut samples) = a.samples;
                 let next = samples.next();
                 kinds.push(ChannelKind::Analog {
@@ -266,7 +292,13 @@ pub fn encode(recording: Recording, options: &Options) -> Result<Vec<u8>, Encode
                     hasher: ChannelHasher::analog(&channel.name, &a.unit, a.first, period, a.count),
                     overview: AnalogBuilder::new(length, finest),
                 };
-                if a.first < 0 || (a.count > 0 && stream.tick(a.count - 1) > length) {
+                if a.first < 0 {
+                    return Err(EncodeError::StartsBeforeZero {
+                        channel: channel.name,
+                        first: a.first,
+                    });
+                }
+                if a.first > length || (a.count > 0 && stream.tick(a.count - 1) > length) {
                     return Err(EncodeError::SampleRange {
                         channel: channel.name,
                         length,
@@ -302,12 +334,15 @@ pub fn encode(recording: Recording, options: &Options) -> Result<Vec<u8>, Encode
             .map(|(_, _, raw)| compress(raw, options.level))
             .collect::<Result<Vec<_>, _>>()?;
         for ((start, words, raw), frame) in pending.drain(..).zip(compressed) {
+            // A block passes its target only by items sharing its last tick, but analog samples
+            // closer than a tick can share one by the billion.
+            let too_large = |n: usize| u32::try_from(n).map_err(|_| EncodeError::BlockTooLarge(n));
             blocks.push((
                 BlockRow {
                     start,
                     offset: 0,
-                    length: frame.len() as u32,
-                    decoded_length: raw.len() as u32,
+                    length: too_large(frame.len())?,
+                    decoded_length: too_large(raw.len())?,
                     channels: words,
                 },
                 frame,
@@ -520,6 +555,8 @@ pub fn encode(recording: Recording, options: &Options) -> Result<Vec<u8>, Encode
         overview_blocks: overview_levels,
         annotations: None,
     };
+    // The reader's own rules, so the encoder never writes a header the decoder refuses.
+    crate::decode::check_header(&header).map_err(|e| EncodeError::Header(e.to_string()))?;
     let header_json = serde_json::to_vec(&header).expect("a header always serialises");
     let index_len = blocks.len() * BlockRow::size(header.channels.len())
         + overview_frames.len() * OverviewRow::SIZE;

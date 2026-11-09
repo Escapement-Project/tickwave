@@ -129,7 +129,9 @@ last one ends at `file_len`.
 
 A block is cut by time across every channel. An encoder takes items in tick order and closes a
 block once its decoded size reaches a target. It never closes one between two items at the same
-tick, so a sample and an edge at one tick always share a block.
+tick, so a sample and an edge at one tick always share a block. The format sets no maximum size. A
+reader may refuse anything that decodes to more than it is set to hold: a block, an overview block
+or the head's overview. tickwave's reader holds 64 MiB unless it is configured otherwise.
 
 A block's decoded payload holds a u32 section length for each channel, then each channel's section,
 in channel order:

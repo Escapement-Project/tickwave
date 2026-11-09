@@ -33,7 +33,7 @@ fn hand_worked() {
     // 0.1 is no f32, so this checks rounding to f32, not exact arithmetic: codes 0, 1, 3.
     let found = recover_codes([0.1f32, 0.2, 0.4]).unwrap();
     assert_eq!((found.bits, found.scale, found.offset), (2, 0.1, 0.1));
-    assert_eq!(recover_codes([7.5f32]).map(|c| c.bits), Some(0));
+    assert_eq!(recover_codes([7.5f32]).map(|c| c.bits), Some(1));
 }
 
 /// An offset of 0.0 gives +0.0 at code 0, never -0.0. The intervals allow it, so only the final
@@ -256,4 +256,15 @@ fn mso_exports() {
         }
     }
     files.finish_and_clear();
+}
+
+/// A channel holding one value, a disconnected probe's 0 V for one, takes code 0 of a 1-bit coding:
+/// the format holds codes of 1 to 16 bits.
+#[test]
+fn one_value_takes_a_one_bit_coding() {
+    for value in [0.0f32, 1.25, -3.3] {
+        let codes = recover_codes([value; 5]).unwrap();
+        assert_eq!(codes.bits, 1, "{value}");
+        assert_eq!(codes.decode(0).to_bits(), value.to_bits(), "{value}");
+    }
 }

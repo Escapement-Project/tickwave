@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use indicatif::ProgressStyle;
 use tickwave_format::annotations::{self, Included};
-use tickwave_format::decode::{Head, verify};
+use tickwave_format::decode::{Head, verify_limited};
 use tickwave_format::encode::{Options, encode};
 use tickwave_format::header::{AnalogCoding, ChannelKind, Header};
 use tickwave_format::model::{Channel, ChannelData, Recording, Samples};
@@ -32,6 +32,10 @@ use tracing_subscriber::util::SubscriberInitExt;
 struct Cli {
     #[command(subcommand)]
     command: Command,
+    /// The most to decode from one block, overview block or head overview, in MiB. A recording
+    /// that needs more is refused, as a page's reader refuses it unless configured.
+    #[arg(long, global = true, default_value_t = 64, value_name = "MIB")]
+    max_decoded_mib: u16,
 }
 
 #[derive(Subcommand)]
@@ -137,9 +141,9 @@ struct Common {
     /// The zstd level.
     #[arg(long, default_value_t = 19)]
     level: i32,
-    /// The decoded size each block aims for, in KiB.
-    #[arg(long, default_value_t = 1024)]
-    block_kib: usize,
+    /// The decoded size each block aims for, in KiB: at most 65,536, what a reader holds by default.
+    #[arg(long, default_value_t = 1024, value_parser = clap::value_parser!(u32).range(1..=65_536))]
+    block_kib: u32,
     /// An analog channel's unit, as `<name>=<unit>`, where the source does not state one.
     #[arg(long = "unit", value_parser = pair)]
     units: Vec<(String, String)>,
@@ -164,7 +168,9 @@ fn main() -> Result<()> {
         .with(tracing_subscriber::fmt::layer().with_writer(indicatif.get_stderr_writer()))
         .with(indicatif)
         .init();
-    match Cli::parse().command {
+    let cli = Cli::parse();
+    let max = usize::from(cli.max_decoded_mib) << 20;
+    match cli.command {
         Command::Convert {
             from:
                 Source::Saleae {
@@ -173,7 +179,12 @@ fn main() -> Result<()> {
                     channels,
                     common,
                 },
-        } => convert(&|| Ok(saleae::read(&dir, &channels)?), &output, &common),
+        } => convert(
+            &|| Ok(saleae::read(&dir, &channels)?),
+            &output,
+            &common,
+            max,
+        ),
         Command::Convert {
             from:
                 Source::Sigrok {
@@ -188,6 +199,7 @@ fn main() -> Result<()> {
                 &|| select(sigrok::read(&file)?.recording, &channels),
                 &output,
                 &common,
+                max,
             )
         }
         Command::Convert {
@@ -204,15 +216,16 @@ fn main() -> Result<()> {
                 &|| select(vcd::read(&file)?.recording, &channels),
                 &output,
                 &common,
+                max,
             )
         }
-        Command::Info { file, json } => info(&file, json),
-        Command::Verify { file, against } => verify_file(&file, &against),
+        Command::Info { file, json } => info(&file, json, max),
+        Command::Verify { file, against } => verify_file(&file, &against, max),
         Command::Bundle {
             recording,
             sidecar,
             output,
-        } => bundle_file(&recording, &sidecar, &output),
+        } => bundle_file(&recording, &sidecar, &output, max),
         Command::Annotations {
             command:
                 AnnotationsCommand::Check {
@@ -220,7 +233,7 @@ fn main() -> Result<()> {
                     sidecar,
                     json,
                 },
-        } => check_annotations(&recording, &sidecar, json),
+        } => check_annotations(&recording, &sidecar, json, max),
     }
 }
 
@@ -350,11 +363,7 @@ fn recover_codes(recording: Recording) -> Vec<Option<AnalogCoding>> {
                     Some(k) => info!("{name}: {}-bit codes", k.bits),
                     None => info!("{name}: no exact codes, stored as f32"),
                 }
-                codes.map(|k| AnalogCoding::Codes {
-                    bits: k.bits,
-                    scale: k.scale,
-                    offset: k.offset,
-                })
+                codes.map(|k| k.coding())
             }
         })
         .collect()
@@ -362,7 +371,12 @@ fn recover_codes(recording: Recording) -> Vec<Option<AnalogCoding>> {
 
 /// Converts what `open` reads. It opens the source three times: to find analog codes, to encode,
 /// and to check the output before writing it.
-fn convert(open: &dyn Fn() -> Result<Recording>, output: &Path, common: &Common) -> Result<()> {
+fn convert(
+    open: &dyn Fn() -> Result<Recording>,
+    output: &Path,
+    common: &Common,
+    max: usize,
+) -> Result<()> {
     let started = Instant::now();
     let open = || set_units(open()?, &common.units);
     let analog = if common.no_codes {
@@ -372,7 +386,7 @@ fn convert(open: &dyn Fn() -> Result<Recording>, output: &Path, common: &Common)
     };
     let options = Options {
         level: common.level,
-        block_bytes: common.block_kib * 1024,
+        block_bytes: common.block_kib as usize * 1024,
         title: common.title.clone(),
         meta: common.meta.iter().cloned().collect::<BTreeMap<_, _>>(),
         converter: Some(format!(
@@ -391,10 +405,11 @@ fn convert(open: &dyn Fn() -> Result<Recording>, output: &Path, common: &Common)
     {
         let span = info_span!("verify");
         let _entered = span.enter();
-        verify(&file, counted(open()?, &span)).context("the output does not match the source")?;
+        verify_limited(&file, counted(open()?, &span), max)
+            .context("the output does not match the source")?;
     }
     write_atomically(output, &file)?;
-    let head = Head::parse(&file)?;
+    let head = Head::parse_file_limited(&file, max)?;
     info!(
         "{}: {:.2} MB, {} blocks, {} in {:.1} s",
         output.display(),
@@ -420,18 +435,44 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
     fs::rename(&tmp, path).with_context(|| format!("renaming to {}", path.display()))
 }
 
-fn read_head(file: &Path) -> Result<(Vec<u8>, Head)> {
+fn read_head(file: &Path, max: usize) -> Result<(Vec<u8>, Head)> {
     let bytes = fs::read(file).with_context(|| format!("reading {}", file.display()))?;
-    let head = Head::parse(&bytes).with_context(|| format!("parsing {}", file.display()))?;
+    let head = Head::parse_file_limited(&bytes, max)
+        .with_context(|| format!("parsing {}", file.display()))?;
     Ok((bytes, head))
 }
 
-fn seconds(ticks: i64, header: &Header) -> f64 {
-    ticks as f64 * header.timebase[1] as f64 / header.timebase[0] as f64
+/// A tick as seconds, to the decimal place of one tick and no further: as many digits as the
+/// timebase carries. Ticks where the arithmetic would pass u128.
+fn seconds(ticks: i64, header: &Header) -> String {
+    let [num, den] = header.timebase.map(u128::from);
+    let ticks = ticks.max(0) as u128;
+    let mut places = 0;
+    while 10u128.pow(places) * den < num {
+        places += 1;
+    }
+    let unit = 10u128.pow(places);
+    let Some(scaled) = ticks
+        .checked_mul(den)
+        .and_then(|t| t.checked_mul(unit))
+        .and_then(|t| t.checked_mul(2))
+        .map(|t| (t + num) / (2 * num))
+    else {
+        return format!("{ticks} ticks");
+    };
+    match places {
+        0 => format!("{scaled} s"),
+        p => format!(
+            "{}.{:0width$} s",
+            scaled / unit,
+            scaled % unit,
+            width = p as usize
+        ),
+    }
 }
 
-fn info(file: &Path, json: bool) -> Result<()> {
-    let (bytes, head) = read_head(file)?;
+fn info(file: &Path, json: bool, max: usize) -> Result<()> {
+    let (bytes, head) = read_head(file, max)?;
     let h = &head.header;
     let mut lengths: Vec<u32> = head.rows.iter().map(|r| r.length).collect();
     lengths.sort_unstable();
@@ -455,7 +496,7 @@ fn info(file: &Path, json: bool) -> Result<()> {
         println!("{title}");
     }
     println!(
-        "{:.6} s at {}/{} ticks a second, {} channels, {}",
+        "{} at {}/{} ticks a second, {} channels, {}",
         seconds(h.length, h),
         h.timebase[0],
         h.timebase[1],
@@ -470,7 +511,7 @@ fn info(file: &Path, json: bool) -> Result<()> {
                 edges,
                 ..
             } => println!(
-                "  {:<12} digital, {edges} edges, starts {}, known to {:.6} s ({})",
+                "  {:<12} digital, {edges} edges, starts {}, known to {} ({})",
                 c.name,
                 u8::from(*initial),
                 seconds(*end, h),
@@ -513,8 +554,8 @@ fn info(file: &Path, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn verify_file(file: &Path, against: &Path) -> Result<()> {
-    let (bytes, head) = read_head(file)?;
+fn verify_file(file: &Path, against: &Path, max: usize) -> Result<()> {
+    let (bytes, head) = read_head(file, max)?;
     let h = &head.header;
     let wanted: Vec<(String, String)> = h
         .channels
@@ -538,7 +579,8 @@ fn verify_file(file: &Path, against: &Path) -> Result<()> {
     let source = set_units(source, &units)?;
     let span = info_span!("verify");
     let _entered = span.enter();
-    verify(&bytes, counted(source, &span)).context("the recording does not match its source")?;
+    verify_limited(&bytes, counted(source, &span), max)
+        .context("the recording does not match its source")?;
     info!("{}: matches {}", file.display(), against.display());
     Ok(())
 }
@@ -546,14 +588,13 @@ fn verify_file(file: &Path, against: &Path) -> Result<()> {
 /// A sidecar's files: the hand-written TOML file's name and text, then each file it includes.
 type SidecarFiles = Vec<(String, String)>;
 
-/// Reads a sidecar and checks it against the recording in `bytes`. Prints every problem and fails
-/// if there is any.
+/// Reads a sidecar and checks it against the recording whose header is `header`. Prints every
+/// problem and fails if there is any.
 fn load_sidecar(
-    bytes: &[u8],
+    header: &Header,
     recording: &Path,
     sidecar: &Path,
 ) -> Result<(Vec<annotations::Annotation>, SidecarFiles)> {
-    let head = Head::parse(bytes).with_context(|| format!("parsing {}", recording.display()))?;
     let hand =
         fs::read_to_string(sidecar).with_context(|| format!("reading {}", sidecar.display()))?;
     #[derive(serde::Deserialize)]
@@ -572,10 +613,16 @@ fn load_sidecar(
             .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
         hand,
     )];
+    // What cannot be read is left out, and resolve reports it with every other problem; a name
+    // with a path is never read, so a bundle carries nothing from outside the sidecar's directory.
     for name in names {
-        let text = fs::read_to_string(dir.join(&name))
-            .with_context(|| format!("reading the included {name}"))?;
-        files.push((name, text));
+        if name.contains(['/', '\\']) || name == ".." || name == "." {
+            continue;
+        }
+        match fs::read_to_string(dir.join(&name)) {
+            Ok(text) => files.push((name, text)),
+            Err(e) => eprintln!("{}: reading the included {name}: {e}", sidecar.display()),
+        }
     }
     let included: Vec<Included<'_>> = files[1..]
         .iter()
@@ -584,7 +631,7 @@ fn load_sidecar(
     let file_name = recording
         .file_name()
         .map(|n| n.to_string_lossy().into_owned());
-    match annotations::resolve(&files[0].1, &included, &head.header, file_name.as_deref()) {
+    match annotations::resolve(&files[0].1, &included, header, file_name.as_deref()) {
         Ok(resolved) => Ok((resolved, files)),
         Err(problems) => {
             for problem in &problems {
@@ -598,9 +645,9 @@ fn load_sidecar(
     }
 }
 
-fn check_annotations(recording: &Path, sidecar: &Path, json: bool) -> Result<()> {
-    let (bytes, _) = read_head(recording)?;
-    let (resolved, _) = load_sidecar(&bytes, recording, sidecar)?;
+fn check_annotations(recording: &Path, sidecar: &Path, json: bool, max: usize) -> Result<()> {
+    let (_, head) = read_head(recording, max)?;
+    let (resolved, _) = load_sidecar(&head.header, recording, sidecar)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&resolved)?);
     } else {
@@ -615,12 +662,12 @@ fn check_annotations(recording: &Path, sidecar: &Path, json: bool) -> Result<()>
     Ok(())
 }
 
-fn bundle_file(recording: &Path, sidecar: &Path, output: &Path) -> Result<()> {
-    let (bytes, _) = read_head(recording)?;
-    let (resolved, files) = load_sidecar(&bytes, recording, sidecar)?;
-    let bundled = tickwave_format::bundle::bundle(&bytes, files.into_iter().collect())?;
-    let check = Head::parse(&bundled)?;
-    if check.header.content_id != Head::parse(&bytes)?.header.content_id {
+fn bundle_file(recording: &Path, sidecar: &Path, output: &Path, max: usize) -> Result<()> {
+    let (bytes, head) = read_head(recording, max)?;
+    let (resolved, files) = load_sidecar(&head.header, recording, sidecar)?;
+    let bundled = tickwave_format::bundle::bundle(&bytes, &head, files.into_iter().collect())?;
+    let check = Head::parse_file_limited(&bundled, max)?;
+    if check.header.content_id != head.header.content_id {
         bail!("bundling changed the content id");
     }
     write_atomically(output, &bundled)?;

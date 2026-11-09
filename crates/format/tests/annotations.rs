@@ -332,3 +332,74 @@ fn values_are_a_decimal_and_a_unit_under_a_plain_name() {
     let hand = HAND.replace("rate = \"26.7 MHz\"", "rate = 26.7");
     assert_problem(&problems(&hand, GENERATED), "expected a string");
 }
+
+#[test]
+fn a_misspelt_measure_field_is_refused() {
+    let hand = HAND.replace("what = \"rate\" }", "what = \"rate\", windw = 3 }");
+    assert_problem(&problems(&hand, GENERATED), "unknown field `windw`");
+}
+
+#[test]
+fn a_ref_names_a_generated_annotation_only() {
+    let hand = HAND.replace(
+        "ref = \"wire_swd/misread/412000\"",
+        "ref = \"read-ack-check\"",
+    );
+    assert_problem(
+        &problems(&hand, GENERATED),
+        "ref \"read-ack-check\" names a hand-written annotation, not a generated one",
+    );
+}
+
+#[test]
+fn a_time_too_large_for_the_arithmetic_is_refused_not_wrapped() {
+    // 2 × the numerator passes i128 where the tick would not: a wrapped sum once read this as a
+    // tick inside the capture.
+    for start in [
+        "-9.0000000000000000000000000000 s",
+        "9.0000000000000000000000000000 s",
+    ] {
+        let hand = HAND.replace("start = \"317.858 us\"", &format!("start = \"{start}\""));
+        assert_problem(&problems(&hand, GENERATED), "out of range");
+    }
+}
+
+#[test]
+fn an_included_file_sits_beside_the_hand_written_one() {
+    for name in [
+        "../rec.wire_swd.jsonl",
+        "sub/rec.wire_swd.jsonl",
+        "..\\\\rec.wire_swd.jsonl",
+    ] {
+        let hand = HAND.replace(
+            "include = [\"rec.wire_swd.jsonl\"]",
+            &format!("include = [{name:?}]"),
+        );
+        assert_problem(&problems(&hand, GENERATED), "is named on its own");
+    }
+}
+
+#[test]
+fn messages_point_at_what_the_author_wrote() {
+    // A time of the wrong kind says what a time is.
+    let hand = HAND.replace("start = \"317.858 us\"", "start = 1.5");
+    assert_problem(
+        &problems(&hand, GENERATED),
+        "a whole tick count or a decimal with a unit",
+    );
+    // A generator file's head is reported at its own line, after any blank ones.
+    let found = problems(
+        HAND,
+        &format!("\n\n\n{}", GENERATED.replace("\"source\"", "\"sauce\"")),
+    );
+    assert_problem(&found, "rec.wire_swd.jsonl, line 4:");
+    // The page's JSON of the TOML file has no line the author could look up.
+    let found = tickwave_format::annotations::resolve_json(
+        "{\"format\": 1}",
+        &included(GENERATED),
+        &header(),
+        None,
+    )
+    .unwrap_err();
+    assert!(found.iter().all(|p| !p.contains(" at line ")), "{found:#?}");
+}

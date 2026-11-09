@@ -5,11 +5,23 @@
 use std::collections::BTreeMap;
 
 use crate::decode::{DecodeError, Head};
-use crate::header::{BlockRow, OverviewRow, PREAMBLE_LEN, Preamble};
+use crate::header::{BlockRow, MINOR, OverviewRow, PREAMBLE_LEN, Preamble};
 
-/// `file` with `annotations` (file name to text) in its header, replacing any already there.
-pub fn bundle(file: &[u8], annotations: BTreeMap<String, String>) -> Result<Vec<u8>, DecodeError> {
-    let head = Head::parse(file)?;
+/// `file` with `annotations` (file name to text) in its header, replacing any already there. `head`
+/// is `file`'s, from `Head::parse_file`, which held the whole file to its preamble.
+pub fn bundle(
+    file: &[u8],
+    head: &Head,
+    annotations: BTreeMap<String, String>,
+) -> Result<Vec<u8>, DecodeError> {
+    // The header is written again from what this version reads; a later minor version's fields
+    // would be lost while the file still claimed them.
+    if head.preamble.minor > MINOR {
+        return Err(DecodeError::Corrupt(format!(
+            "the file is format 1.{}, newer than this tool's 1.{MINOR}: bundling would drop what it adds",
+            head.preamble.minor
+        )));
+    }
     let mut header = head.header.clone();
     header.annotations = Some(annotations);
     let header_json = serde_json::to_vec(&header).expect("a header always serialises");

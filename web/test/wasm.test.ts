@@ -286,7 +286,7 @@ test("a TOML float where a time belongs is refused, as the CLI refuses it", asyn
   const resolve = (start: string) => () =>
     r.resolveAnnotations(handJson(toml.replace(site, `start = ${start}`), "hand.toml").json, ["identify-swd.swd.jsonl"], [jsonl], "identify-swd.tickwave");
   resolve("376719436")();
-  assert.throws(resolve("376719436.0"), /did not match any variant of untagged enum Time/);
+  assert.throws(resolve("376719436.0"), /a whole tick count or a decimal with a unit/);
   assert.throws(resolve("9007199254740993"), /cannot hold it exactly/);
 });
 

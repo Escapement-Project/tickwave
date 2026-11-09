@@ -1,9 +1,9 @@
 //! Inputs a reader must refuse: frames that are not exactly one checksummed zstd frame, codes wider
 //! than their coding, and headers whose extents leave the capture.
 
-use tickwave_format::decode::{Head, inflate};
+use tickwave_format::decode::{Head, MAX_DECODED, inflate, inflate_limited};
 use tickwave_format::encode::{Options, encode};
-use tickwave_format::header::AnalogCoding;
+use tickwave_format::header::{AnalogCoding, BlockRow, PREAMBLE_LEN};
 use tickwave_format::model::{
     Analog, Channel, ChannelData, Digital, Ratio, Recording, Samples, Source,
 };
@@ -255,4 +255,156 @@ fn a_block_starting_at_the_wrong_level_is_refused() {
             "{err}"
         );
     }
+}
+
+#[test]
+fn a_whole_file_shorter_or_longer_than_its_preamble_says_is_refused() {
+    let (rec, options) = analog(None, vec![1.0; 10]);
+    let file = encode(rec, &options).unwrap();
+    assert!(Head::parse_file(&file).is_ok());
+    for (what, bytes) in [
+        ("cut short", &file[..file.len() - 5]),
+        ("cut inside the head", &file[..40]),
+    ] {
+        let err = Head::parse_file(bytes).err().expect(what);
+        assert!(
+            err.to_string()
+                .contains(&format!("the file is {} bytes", bytes.len())),
+            "{what}: {err}"
+        );
+    }
+    let longer = [&file[..], &[0]].concat();
+    let err = Head::parse_file(&longer).err().expect("one byte after");
+    assert!(
+        err.to_string().contains("where its preamble needs"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_block_past_the_index_is_refused() {
+    let (rec, options) = analog(None, vec![1.0; 10]);
+    let file = encode(rec, &options).unwrap();
+    let head = Head::parse_file(&file).unwrap();
+    let n = head.rows.len();
+    let err = head.decode_block(n, &[]).err().expect("refused");
+    assert!(err.to_string().contains(&format!("no block {n}")), "{err}");
+    let levels = head.overview_rows.len();
+    let err = head
+        .decode_overview_block(levels, 0, &[])
+        .err()
+        .expect("refused");
+    assert!(err.to_string().contains("no overview block"), "{err}");
+}
+
+#[test]
+fn a_frame_said_to_decode_past_the_limit_is_refused_before_anything_is_allocated() {
+    let raw = noise(1000);
+    let good = frame(&raw);
+    assert_eq!(inflate_limited(&good, raw.len(), raw.len()).unwrap(), raw);
+    let err = inflate_limited(&good, raw.len(), raw.len() - 1).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("more than this reader holds (999)"),
+        "{err}"
+    );
+    // Above the default, whatever the frame holds: a row stating 2 GiB costs nothing to refuse.
+    let err = inflate(&good, MAX_DECODED + 1).unwrap_err();
+    assert!(
+        err.to_string().contains("more than this reader holds"),
+        "{err}"
+    );
+    // A head whose overview needs more than the reader is set to hold.
+    let (rec, options) = analog(None, vec![1.0; 10]);
+    let file = encode(rec, &options).unwrap();
+    assert!(Head::parse_file_limited(&file, MAX_DECODED).is_ok());
+    let err = Head::parse_file_limited(&file, 16).err().expect("refused");
+    assert!(
+        err.to_string().contains("more than this reader holds (16)"),
+        "{err}"
+    );
+}
+
+#[test]
+fn the_encoder_refuses_what_the_reader_would_and_says_which_channel() {
+    let refused =
+        |rec: Recording, options: &Options| encode(rec, options).expect_err("refused").to_string();
+    let (mut rec, options) = analog(None, vec![1.0; 10]);
+    rec.length = -5;
+    assert_eq!(refused(rec, &options), "the length -5 is negative");
+
+    let (mut rec, options) = analog(None, vec![1.0; 10]);
+    if let ChannelData::Analog(a) = &mut rec.channels[1].data {
+        a.first = -3;
+    }
+    assert_eq!(
+        refused(rec, &options),
+        "V: the first sample is at tick -3, before the recording starts"
+    );
+
+    let (mut rec, options) = analog(None, vec![1.0; 10]);
+    if let ChannelData::Analog(a) = &mut rec.channels[1].data {
+        a.period = Ratio { num: 0, den: 1 };
+    }
+    assert_eq!(
+        refused(rec, &options),
+        "V: the sample period 0/1 is not a ratio of positive integers"
+    );
+
+    // An empty channel still starts inside the capture.
+    let (mut rec, options) = analog(None, vec![]);
+    if let ChannelData::Analog(a) = &mut rec.channels[1].data {
+        a.first = 2_000_000_000;
+    }
+    assert!(refused(rec, &options).starts_with("V: samples run past the recording's end"));
+
+    let (rec, options) = analog(Some(0), vec![0.0; 10]);
+    assert_eq!(
+        refused(rec, &options),
+        "V: codes of 0 bits; a coding holds 1 to 16"
+    );
+}
+
+#[test]
+fn a_header_integer_past_2_pow_53_is_refused() {
+    let (mut rec, options) = analog(None, vec![1.0; 10]);
+    // 10^15 ticks a second: sixteen digits, as 2^53 + 1 has, so the patch keeps every offset.
+    rec.timebase = Ratio::integer(1_000_000_000_000_000);
+    let file = encode(rec, &options).unwrap();
+    assert!(Head::parse_file(&file).is_ok());
+    let bad = patched(
+        &file,
+        r#""timebase":[1000000000000000,1]"#,
+        r#""timebase":[9007199254740993,1]"#,
+    );
+    let err = Head::parse_file(&bad).err().expect("refused");
+    assert!(err.to_string().contains("past 2^53"), "{err}");
+}
+
+#[test]
+fn an_index_that_moves_samples_out_of_their_block_is_refused() {
+    let (rec, mut options) = analog(None, (0..10).map(|i| i as f32).collect());
+    options.block_bytes = 16;
+    let file = encode(rec, &options).unwrap();
+    let head = Head::parse_file(&file).unwrap();
+    assert!(head.rows.len() > 2, "{} blocks", head.rows.len());
+    // The analog channel's word, channel 1, in each of the first two rows: one sample moves from
+    // block 1 to block 0, so the counts still add up to the header's.
+    let index = PREAMBLE_LEN + head.preamble.header_len as usize;
+    let row = BlockRow::size(2);
+    let word = |file: &[u8], i: usize| {
+        let at = index + i * row + 24 + 4;
+        (at, u32::from_le_bytes(file[at..at + 4].try_into().unwrap()))
+    };
+    let mut bad = file.clone();
+    let (at0, w0) = word(&file, 0);
+    let (at1, w1) = word(&file, 1);
+    assert!(w1 > 0);
+    bad[at0..at0 + 4].copy_from_slice(&(w0 + 1).to_le_bytes());
+    bad[at1..at1 + 4].copy_from_slice(&(w1 - 1).to_le_bytes());
+    let err = Head::parse_file(&bad).err().expect("refused");
+    assert!(
+        err.to_string().contains("samples lie outside its ticks"),
+        "{err}"
+    );
 }

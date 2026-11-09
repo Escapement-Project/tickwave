@@ -59,7 +59,8 @@ pub struct Digital {
     /// knowing one channel before another.
     pub end: i64,
     /// Ticks at which the level flips, strictly increasing, each in `1..=end`. Two changes within
-    /// one tick cannot be represented; a reader collapses them before they get here.
+    /// one tick cannot be represented: a source reader collapses them to their net change (VCD) or
+    /// refuses the source (Saleae).
     pub edges: Edges,
 }
 

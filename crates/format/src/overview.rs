@@ -325,10 +325,10 @@ fn parse_channels(c: &mut Cursor<'_>, n: u64, analog: &[bool]) -> Option<Vec<Cha
 }
 
 /// The decoded size of `n` buckets of every channel.
-pub fn decoded_len(n: u64, analog: &[bool]) -> usize {
+pub fn decoded_len(n: u64, analog: &[bool]) -> u64 {
     analog
         .iter()
-        .map(|&a| if a { 8 * n as usize } else { 2 * bit_bytes(n) })
+        .map(|&a| if a { 8 * n } else { 2 * bit_bytes(n) as u64 })
         .sum()
 }
 

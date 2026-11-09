@@ -4,7 +4,7 @@
 use js_sys::{Float32Array, Float64Array, Uint8Array};
 #[cfg(feature = "annotations")]
 use tickwave_format::annotations::{self, Included};
-use tickwave_format::decode::{self, BlockChannel, DecodeError, Head};
+use tickwave_format::decode::{self, BlockChannel, DecodeError, Head, cut_short};
 use tickwave_format::header::PREAMBLE_LEN;
 use tickwave_format::overview::ChannelOverview;
 use wasm_bindgen::prelude::*;
@@ -12,15 +12,24 @@ use wasm_bindgen::prelude::*;
 mod inflate;
 use inflate::Inflater;
 
+fn limit(max_decoded: Option<u32>) -> usize {
+    max_decoded.map_or(decode::MAX_DECODED, |m| m as usize)
+}
+
+fn no_block(i: usize) -> JsError {
+    JsError::new(&format!("no block {i}"))
+}
+
 fn js(e: DecodeError) -> JsError {
     JsError::new(&e.to_string())
 }
 
 /// How many bytes the head needs, from the file's first bytes: 32 until the preamble is in hand.
-/// Throws when the bytes are not a tickwave recording.
+/// Throws when the bytes are not a tickwave recording. `maxDecoded` is the most it decodes from
+/// one frame, 64 MiB unless given.
 #[wasm_bindgen(js_name = headLength)]
-pub fn head_length(bytes: &[u8]) -> Result<u32, JsError> {
-    let inflater = Inflater::new();
+pub fn head_length(bytes: &[u8], max_decoded: Option<u32>) -> Result<u32, JsError> {
+    let inflater = Inflater::new(limit(max_decoded));
     match Head::parse_with(bytes, |f, len| inflater.inflate(f, len)) {
         Ok(head) => Ok(head.preamble.head_len),
         Err(DecodeError::NeedMore(n)) => Ok(n as u32),
@@ -37,11 +46,17 @@ pub struct Recording {
 
 #[wasm_bindgen]
 impl Recording {
-    /// Parses the head from bytes that hold at least `headLength` of them.
+    /// Parses the head from bytes that hold at least `headLength` of them. `maxDecoded` is the most
+    /// it decodes from one frame, its blocks' included, 64 MiB unless given.
     #[wasm_bindgen(constructor)]
-    pub fn new(head: &[u8]) -> Result<Recording, JsError> {
-        let inflater = Inflater::new();
-        let parsed = Head::parse_with(head, |f, len| inflater.inflate(f, len)).map_err(js)?;
+    pub fn new(head: &[u8], max_decoded: Option<u32>) -> Result<Recording, JsError> {
+        let inflater = Inflater::new(limit(max_decoded));
+        let parsed =
+            Head::parse_with(head, |f, len| inflater.inflate(f, len)).map_err(|e| match e {
+                // Fewer bytes than the head needs, after headLength said how many: the file is cut short.
+                DecodeError::NeedMore(n) => js(cut_short(head.len(), n as u64)),
+                e => js(e),
+            })?;
         let stored = &head[PREAMBLE_LEN..PREAMBLE_LEN + parsed.preamble.header_len as usize];
         Ok(Self {
             header: String::from_utf8_lossy(stored).into_owned(),
@@ -61,22 +76,31 @@ impl Recording {
         self.head.rows.len()
     }
 
+    // An index past the end throws rather than panics: a panic ends the module, and with it every
+    // recording on the page.
+
     #[wasm_bindgen(js_name = blockStart)]
-    pub fn block_start(&self, i: usize) -> f64 {
-        self.head.rows[i].start as f64
+    pub fn block_start(&self, i: usize) -> Result<f64, JsError> {
+        Ok(self.head.rows.get(i).ok_or_else(|| no_block(i))?.start as f64)
     }
 
     /// The block's byte range in the file, `[offset, end)`, for an HTTP Range request.
     #[wasm_bindgen(js_name = blockRange)]
-    pub fn block_range(&self, i: usize) -> Vec<f64> {
+    pub fn block_range(&self, i: usize) -> Result<Vec<f64>, JsError> {
+        if i >= self.head.rows.len() {
+            return Err(no_block(i));
+        }
         let (offset, len) = self.head.block_location(i);
-        vec![offset as f64, (offset + u64::from(len)) as f64]
+        Ok(vec![offset as f64, (offset + u64::from(len)) as f64])
     }
 
-    /// The first and one past the last block holding any tick in `[start, end)`.
+    /// The first and one past the last block holding any tick in `[start, end)`. A fractional
+    /// span is widened to whole ticks.
     #[wasm_bindgen(js_name = blocksCovering)]
     pub fn blocks_covering(&self, start: f64, end: f64) -> Vec<u32> {
-        let range = self.head.blocks_covering(start as i64, end as i64);
+        let range = self
+            .head
+            .blocks_covering(start.floor() as i64, end.ceil() as i64);
         vec![range.start as u32, range.end as u32]
     }
 
@@ -137,18 +161,38 @@ impl Recording {
     /// The first and one past the last overview block of a finer level holding any tick in
     /// `[start, end)`. `level` indexes the header's `overview_blocks`.
     #[wasm_bindgen(js_name = overviewBlocksCovering)]
-    pub fn overview_blocks_covering(&self, level: usize, start: f64, end: f64) -> Vec<u32> {
-        let range = self
-            .head
-            .overview_blocks_covering(level, start as i64, end as i64);
-        vec![range.start as u32, range.end as u32]
+    pub fn overview_blocks_covering(
+        &self,
+        level: usize,
+        start: f64,
+        end: f64,
+    ) -> Result<Vec<u32>, JsError> {
+        if level >= self.head.header.overview_blocks.len() {
+            return Err(JsError::new(&format!(
+                "no overview level {level} in blocks"
+            )));
+        }
+        let range =
+            self.head
+                .overview_blocks_covering(level, start.floor() as i64, end.ceil() as i64);
+        Ok(vec![range.start as u32, range.end as u32])
     }
 
     /// Overview block `k`'s byte range in the file, `[offset, end)`.
     #[wasm_bindgen(js_name = overviewBlockRange)]
-    pub fn overview_block_range(&self, level: usize, k: usize) -> Vec<f64> {
+    pub fn overview_block_range(&self, level: usize, k: usize) -> Result<Vec<f64>, JsError> {
+        if self
+            .head
+            .overview_rows
+            .get(level)
+            .is_none_or(|rows| k >= rows.len())
+        {
+            return Err(JsError::new(&format!(
+                "no overview block {k} of level {level}"
+            )));
+        }
         let (offset, len) = self.head.overview_block_location(level, k);
-        vec![offset as f64, (offset + u64::from(len)) as f64]
+        Ok(vec![offset as f64, (offset + u64::from(len)) as f64])
     }
 
     /// Decodes overview block `k` from exactly its bytes.
@@ -238,7 +282,8 @@ impl Block {
         }
     }
 
-    /// A digital channel's level at the block's start; undefined for an analog channel.
+    /// A digital channel's level at the block's start; `undefined` in JavaScript for an analog
+    /// channel.
     pub fn initial(&self, channel: usize) -> Option<bool> {
         match self.channels.get(channel)? {
             BlockChannel::Digital { initial, .. } => Some(*initial),
@@ -274,10 +319,4 @@ impl Block {
             BlockChannel::Digital { .. } => None,
         }
     }
-}
-
-/// The preamble's size: a reader's first fetch must cover at least this much.
-#[wasm_bindgen(js_name = preambleLength)]
-pub fn preamble_length() -> u32 {
-    PREAMBLE_LEN as u32
 }

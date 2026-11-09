@@ -9,7 +9,7 @@ use crate::codec::get_uleb;
 use crate::hash::{self, ChannelHasher};
 use crate::header::{
     AnalogCoding, BlockRow, ChannelKind, Header, JSON_SAFE, LEVEL_BIT, MAGIC, MAJOR, OverviewRow,
-    PREAMBLE_LEN, Preamble,
+    PREAMBLE_LEN, Preamble, code_value,
 };
 use crate::model::{ChannelData, Ratio, Recording, Samples, sample_tick};
 use crate::overview::{self, AnalogBuilder, DigitalBuilder, Level};
@@ -34,11 +34,44 @@ fn corrupt(what: impl Into<String>) -> DecodeError {
     DecodeError::Corrupt(what.into())
 }
 
+/// A file whose length is not the one its preamble needs.
+pub fn cut_short(len: usize, needs: u64) -> DecodeError {
+    corrupt(format!(
+        "the file is {len} bytes, where its preamble needs {needs}"
+    ))
+}
+
+/// An empty buffer with room for `len` decoded bytes, at most `max`. The length comes from the
+/// file, so a reader refuses one it is not set to hold, or cannot allocate, rather than aborting:
+/// in WASM an abort ends every recording on the page.
+pub fn buffer(len: usize, max: usize) -> Result<Vec<u8>, DecodeError> {
+    let too_big = || {
+        corrupt(format!(
+            "it decodes to {len} bytes, more than this reader holds ({max})"
+        ))
+    };
+    if len > max {
+        return Err(too_big());
+    }
+    let mut out = Vec::new();
+    out.try_reserve_exact(len).map_err(|_| too_big())?;
+    Ok(out)
+}
+
+/// The most a reader decodes from one frame unless it is set otherwise: a block, an overview block
+/// or the head's overview. The format sets no maximum, and a file can state up to 4 GiB.
+pub const MAX_DECODED: usize = 64 << 20;
+
 /// Decompresses exactly one zstd frame, which must fill `frame`, come to exactly `len` bytes and
 /// carry a checksum that matches. A skippable frame, a frame that names a dictionary, or any byte
-/// after the frame is refused.
+/// after the frame is refused, and so is a `len` past `MAX_DECODED`.
 pub fn inflate(frame: &[u8], len: usize) -> Result<Vec<u8>, DecodeError> {
-    let mut out = Vec::with_capacity(len);
+    inflate_limited(frame, len, MAX_DECODED)
+}
+
+/// `inflate`, holding at most `max` decoded bytes.
+pub fn inflate_limited(frame: &[u8], len: usize, max: usize) -> Result<Vec<u8>, DecodeError> {
+    let mut out = buffer(len, max)?;
     let mut decoder = FrameDecoder::new();
     decoder
         .decode_all_to_vec(frame, &mut out)
@@ -105,19 +138,27 @@ pub struct Block {
 }
 
 /// What the header promises about the capture's extent, checked before anything relies on it.
-fn check_header(h: &Header) -> Result<(), DecodeError> {
+pub(crate) fn check_header(h: &Header) -> Result<(), DecodeError> {
     if !(0..JSON_SAFE as i64).contains(&h.length) {
         return Err(corrupt("the length is negative or past 2^53"));
     }
     if h.timebase.contains(&0) {
         return Err(corrupt("the timebase has a zero term"));
     }
+    // The page reads the header with JSON.parse: past 2^53 it would read another number.
+    let safe = |v: u64| v < JSON_SAFE;
+    if !h.timebase.iter().all(|&t| safe(t)) {
+        return Err(corrupt("the timebase has a term past 2^53"));
+    }
     for c in &h.channels {
         let name = &c.name;
         match &c.data {
-            ChannelKind::Digital { end, .. } => {
+            ChannelKind::Digital { end, edges, .. } => {
                 if !(0..=h.length).contains(end) {
                     return Err(corrupt(format!("channel {name} ends outside the capture")));
+                }
+                if !safe(*edges) {
+                    return Err(corrupt(format!("channel {name}'s edge count is past 2^53")));
                 }
             }
             ChannelKind::Analog {
@@ -129,6 +170,11 @@ fn check_header(h: &Header) -> Result<(), DecodeError> {
             } => {
                 if period.contains(&0) {
                     return Err(corrupt(format!("channel {name}'s period has a zero term")));
+                }
+                if !period.iter().all(|&t| safe(t)) || !safe(*count) {
+                    return Err(corrupt(format!(
+                        "channel {name}'s period or count is past 2^53"
+                    )));
                 }
                 // In u128: an absurd count or period must not wrap into a tick inside the capture.
                 let last = u128::from(count.saturating_sub(1)) * u128::from(period[0])
@@ -157,6 +203,25 @@ impl Head {
     }
 
     /// `parse` with another zstd decoder, which must do what this module's `inflate` does.
+    /// Parses a whole file's head. A file shorter or longer than its preamble says is refused, so
+    /// its blocks can be cut from it as the index places them.
+    pub fn parse_file(file: &[u8]) -> Result<Self, DecodeError> {
+        Self::parse_file_limited(file, MAX_DECODED)
+    }
+
+    /// `parse_file`, holding at most `max` decoded bytes a frame.
+    pub fn parse_file_limited(file: &[u8], max: usize) -> Result<Self, DecodeError> {
+        let head =
+            Self::parse_with(file, |f, len| inflate_limited(f, len, max)).map_err(|e| match e {
+                DecodeError::NeedMore(n) => cut_short(file.len(), n as u64),
+                e => e,
+            })?;
+        if file.len() as u64 != head.preamble.file_len {
+            return Err(cut_short(file.len(), head.preamble.file_len));
+        }
+        Ok(head)
+    }
+
     pub fn parse_with(
         bytes: &[u8],
         inflate: impl Fn(&[u8], usize) -> Result<Vec<u8>, DecodeError>,
@@ -175,31 +240,35 @@ impl Head {
                 minor: preamble.minor,
             });
         }
+        // In u64: on a 32-bit usize, a corrupt length would wrap into a plausible one. Checked before
+        // asking for the head, so a reader never fetches the bytes a corrupt preamble names.
+        let header_end = PREAMBLE_LEN as u64 + u64::from(preamble.header_len);
+        let index_end = header_end + u64::from(preamble.index_len);
+        if index_end > u64::from(preamble.head_len)
+            || u64::from(preamble.head_len) > preamble.file_len
+        {
+            return Err(corrupt("the preamble's lengths do not fit together"));
+        }
         let head_len = preamble.head_len as usize;
         if bytes.len() < head_len {
             return Err(DecodeError::NeedMore(head_len));
         }
-        let header_end = PREAMBLE_LEN + preamble.header_len as usize;
-        let index_end = header_end + preamble.index_len as usize;
-        if index_end > head_len || head_len as u64 > preamble.file_len {
-            return Err(corrupt("the preamble's lengths do not fit together"));
-        }
+        // Each is at most head_len, which the bytes in hand hold.
+        let (header_end, index_end) = (header_end as usize, index_end as usize);
         let header: Header = serde_json::from_slice(&bytes[PREAMBLE_LEN..header_end])?;
         check_header(&header)?;
-        // Bounds every level's size before anything is allocated for it, whatever the header says.
-        let too_fine =
-            |shift: u8, limit: u64| shift > 62 || overview::buckets(header.length, shift) > limit;
-        if header
-            .overview
-            .iter()
-            .any(|&s| too_fine(s, overview::HEAD_BUCKETS))
-            || header
+        // The levels follow from the length alone. Holding the header to them bounds every level's
+        // size, and their count, before anything is allocated for them.
+        let plan = overview::plan(header.length);
+        if header.overview != plan.head
+            || !header
                 .overview_blocks
                 .iter()
-                .any(|l| too_fine(l.shift, overview::BLOCK_LEVEL_BUCKETS))
+                .map(|l| l.shift)
+                .eq(plan.blocks.iter().copied())
         {
             return Err(corrupt(
-                "an overview level has more buckets than the format allows",
+                "the overview levels are not the ones the format sets for this length",
             ));
         }
         for level in &header.overview_blocks {
@@ -267,11 +336,16 @@ impl Head {
             .iter()
             .map(|c| matches!(c.data, ChannelKind::Analog { .. }))
             .collect();
-        let overview_len: usize = header
+        let overview_len: u64 = header
             .overview
             .iter()
             .map(|&shift| overview::decoded_len(overview::buckets(header.length, shift), &analog))
             .sum();
+        let overview_len = usize::try_from(overview_len).map_err(|_| {
+            corrupt(format!(
+                "the overview decodes to {overview_len} bytes, more than this reader can hold"
+            ))
+        })?;
         let raw = inflate(&bytes[index_end..head_len], overview_len)?;
         let overview = overview::parse(&raw, &header.overview, header.length, &analog)
             .ok_or_else(|| corrupt("the overview does not match its levels"))?;
@@ -297,7 +371,7 @@ impl Head {
                     *l ^= word & 1 != 0;
                 }
                 starts.push(total);
-                total += u64::from(word & !LEVEL_BIT);
+                total += u64::from(item_count(word, level.is_some()));
             }
             let promised = match kind.data {
                 ChannelKind::Digital { edges, .. } => edges,
@@ -309,7 +383,26 @@ impl Head {
                     kind.name
                 )));
             }
-            if analog[c] {
+            if let ChannelKind::Analog { first, period, .. } = &kind.data {
+                // A view fetches blocks by tick, so a sample in a block that does not cover its
+                // tick would never be drawn.
+                let period = Ratio {
+                    num: period[0],
+                    den: period[1],
+                };
+                for (i, row) in rows.iter().enumerate() {
+                    let (from, to) = (starts[i], starts.get(i + 1).copied().unwrap_or(total));
+                    let end = rows.get(i + 1).map_or(i64::MAX, |r| r.start);
+                    if to > from
+                        && (sample_tick(*first, period, from) < row.start
+                            || sample_tick(*first, period, to - 1) >= end)
+                    {
+                        return Err(corrupt(format!(
+                            "channel {}: block {i}'s samples lie outside its ticks",
+                            kind.name
+                        )));
+                    }
+                }
                 first_sample[c] = starts;
             }
         }
@@ -361,7 +454,11 @@ impl Head {
         frame: &[u8],
         inflate: impl Fn(&[u8], usize) -> Result<Vec<u8>, DecodeError>,
     ) -> Result<OverviewBlock, DecodeError> {
-        let row = self.overview_rows[level][k];
+        let row = *self
+            .overview_rows
+            .get(level)
+            .and_then(|rows| rows.get(k))
+            .ok_or_else(|| corrupt(format!("no overview block {k} of level {level}")))?;
         if frame.len() != row.length as usize {
             return Err(corrupt(format!(
                 "overview block {k} is {} bytes, the index says {}",
@@ -371,7 +468,7 @@ impl Head {
         }
         let shift = self.header.overview_blocks[level].shift;
         let (first, n) = overview::block_buckets(self.header.length, shift, k as u64);
-        if row.decoded_length as usize != overview::decoded_len(n, &self.analog) {
+        if u64::from(row.decoded_length) != overview::decoded_len(n, &self.analog) {
             return Err(corrupt(format!(
                 "overview block {k}'s decoded length is wrong"
             )));
@@ -411,7 +508,10 @@ impl Head {
         frame: &[u8],
         inflate: impl Fn(&[u8], usize) -> Result<Vec<u8>, DecodeError>,
     ) -> Result<Block, DecodeError> {
-        let row = &self.rows[i];
+        let row = self
+            .rows
+            .get(i)
+            .ok_or_else(|| corrupt(format!("no block {i}")))?;
         if frame.len() != row.length as usize {
             return Err(corrupt(format!(
                 "block {i} is {} bytes, the index says {}",
@@ -430,7 +530,9 @@ impl Head {
             .iter()
             .map(|&c| u32::from_le_bytes(c) as usize)
             .collect();
-        if 4 * channels + lengths.iter().sum::<usize>() != raw.len() {
+        // In u64: on a 32-bit usize the lengths could wrap to the block's size.
+        if 4 * channels as u64 + lengths.iter().map(|&l| l as u64).sum::<u64>() != raw.len() as u64
+        {
             return Err(corrupt(format!("block {i}'s sections do not fill it")));
         }
         let mut pos = 4 * channels;
@@ -439,7 +541,7 @@ impl Head {
             let section = &raw[pos..pos + len];
             pos += len;
             let word = row.channels[c];
-            let count = (word & !LEVEL_BIT) as usize;
+            let count = item_count(word, matches!(kind.data, ChannelKind::Digital { .. })) as usize;
             let bad = |what: &str| corrupt(format!("block {i}, channel {}: {what}", kind.name));
             out.push(match &kind.data {
                 ChannelKind::Digital {
@@ -463,6 +565,12 @@ impl Head {
     }
 }
 
+/// A channel's item count from its index word: a digital word keeps the level in its top bit, and
+/// an analog word is all count.
+fn item_count(word: u32, digital: bool) -> u32 {
+    if digital { word & !LEVEL_BIT } else { word }
+}
+
 // The two section decoders are kept out of line so that each loop compiles on its own: while they
 // shared a function, a change to the analog loop moved the digital loop's speed by 5-7 %.
 
@@ -476,6 +584,9 @@ fn digital_edges(
     end: i64,
     channel_end: i64,
 ) -> Result<Vec<i64>, String> {
+    if count > section.len() {
+        return Err("the section is too short for its edges".into());
+    }
     let mut edges = Vec::with_capacity(count);
     let mut at = 0;
     let mut tick = start;
@@ -502,7 +613,7 @@ fn digital_edges(
 /// An analog section's `count` values in `coding`.
 #[inline(never)]
 fn analog_values(section: &[u8], count: usize, coding: AnalogCoding) -> Result<Vec<f32>, String> {
-    if section.len() != count * coding.sample_len() {
+    if count.checked_mul(coding.sample_len()) != Some(section.len()) {
         return Err("the section does not hold its samples".into());
     }
     Ok(match coding {
@@ -532,7 +643,7 @@ fn analog_values(section: &[u8], count: usize, coding: AnalogCoding) -> Result<V
             }
             low.iter()
                 .zip(high)
-                .map(|c| (offset + f64::from(code(c)) * scale) as f32)
+                .map(|c| code_value(code(c), scale, offset))
                 .collect()
         }
     })
@@ -553,7 +664,13 @@ fn mismatch(what: impl Into<String>) -> VerifyError {
 /// Checks that `file` holds exactly what `source` holds: the header's description of every
 /// channel, every edge tick and every sample's bits, and a content id that matches its content.
 pub fn verify(file: &[u8], source: Recording) -> Result<(), VerifyError> {
-    let head = Head::parse(file)?;
+    verify_limited(file, source, MAX_DECODED)
+}
+
+/// `verify`, holding at most `max` decoded bytes a frame.
+pub fn verify_limited(file: &[u8], source: Recording, max: usize) -> Result<(), VerifyError> {
+    let head = Head::parse_file_limited(file, max)?;
+    let inflate = |f: &[u8], len| inflate_limited(f, len, max);
     let h = &head.header;
     let Ratio { num, den } = source.timebase;
     if h.timebase != [num, den] || h.length != source.length {
@@ -562,13 +679,8 @@ pub fn verify(file: &[u8], source: Recording) -> Result<(), VerifyError> {
     if h.channels.len() != source.channels.len() {
         return Err(mismatch("the channel count differs"));
     }
+    // The levels are the plan's: Head::parse refuses any others.
     let plan = overview::plan(h.length);
-    let listed: Vec<u8> = h.overview_blocks.iter().map(|l| l.shift).collect();
-    if h.overview != plan.head || listed != plan.blocks {
-        return Err(mismatch(
-            "the overview levels are not the ones the format sets for this length",
-        ));
-    }
     let finest = plan.finest();
     enum Want {
         Digital(Box<dyn Iterator<Item = i64> + Send>, bool, DigitalBuilder),
@@ -623,7 +735,7 @@ pub fn verify(file: &[u8], source: Recording) -> Result<(), VerifyError> {
     for i in 0..head.rows.len() {
         let (offset, len) = head.block_location(i);
         let frame = &file[offset as usize..offset as usize + len as usize];
-        let block = head.decode_block(i, frame)?;
+        let block = head.decode_block_with(i, frame, inflate)?;
         for (c, got) in block.channels.into_iter().enumerate() {
             let name = &h.channels[c].name;
             match (got, &mut wants[c]) {
@@ -707,7 +819,7 @@ pub fn verify(file: &[u8], source: Recording) -> Result<(), VerifyError> {
         for k in 0..head.overview_rows[l].len() {
             let (offset, len) = head.overview_block_location(l, k);
             let frame = &file[offset as usize..offset as usize + len as usize];
-            let block = head.decode_overview_block(l, k, frame)?;
+            let block = head.decode_overview_block_with(l, k, frame, inflate)?;
             if block.level != level.slice(block.first, block.level.buckets) {
                 return Err(mismatch(format!(
                     "overview level 2^{shift}, block {k}: differs from the content"

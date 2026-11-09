@@ -837,11 +837,11 @@ pub fn parse_samplerate(text: &str) -> Result<u64, String> {
             .checked_pow(scale as u32)
             .and_then(|p| digits.checked_mul(p))
     } else {
-        let p = 10u128.pow((-scale) as u32);
-        if !digits.is_multiple_of(p) {
-            return Err("not a whole number of hertz".to_owned());
+        // Past 38 fraction digits the power passes u128, and no such rate is a whole number of hertz.
+        match 10u128.checked_pow((-scale) as u32) {
+            Some(p) if digits.is_multiple_of(p) => Some(digits / p),
+            _ => return Err("not a whole number of hertz".to_owned()),
         }
-        Some(digits / p)
     };
     match hz.map(u64::try_from) {
         Some(Ok(0)) => Err("zero".to_owned()),

@@ -295,7 +295,7 @@ fn a_bundle_keeps_the_content_and_carries_the_files() {
         ("rec.gen.jsonl".to_string(), "{}\n".to_string()),
     ]
     .into();
-    let bundled = bundle(&file, files.clone()).unwrap();
+    let bundled = bundle(&file, &Head::parse_file(&file).unwrap(), files.clone()).unwrap();
     assert!(bundled.len() > file.len());
     verify(&bundled, recording(EDGES_A.to_vec(), values())).unwrap();
     let head = Head::parse(&bundled).unwrap();
@@ -305,7 +305,12 @@ fn a_bundle_keeps_the_content_and_carries_the_files() {
         Head::parse(&file).unwrap().header.content_id
     );
     // Bundling again replaces the files rather than adding to them.
-    let again = bundle(&bundled, [("x.toml".to_string(), String::new())].into()).unwrap();
+    let again = bundle(
+        &bundled,
+        &Head::parse_file(&bundled).unwrap(),
+        [("x.toml".to_string(), String::new())].into(),
+    )
+    .unwrap();
     let head = Head::parse(&again).unwrap();
     assert_eq!(head.header.annotations.unwrap().len(), 1);
     verify(&again, recording(EDGES_A.to_vec(), values())).unwrap();
@@ -351,4 +356,18 @@ fn codes_are_stored_in_byte_planes() {
     .unwrap();
     // A u32 section length of 6, then the low bytes 02 04 06, then the high bytes 01 03 05.
     assert_eq!(raw, [6, 0, 0, 0, 0x02, 0x04, 0x06, 0x01, 0x03, 0x05]);
+}
+
+#[test]
+fn a_newer_minor_version_is_not_bundled() {
+    use tickwave_format::bundle::bundle;
+    let mut file = encode(recording(EDGES_A.to_vec(), values()), &small_blocks()).unwrap();
+    // The preamble's minor version, after the magic and the major version.
+    file[10..12].copy_from_slice(&1u16.to_le_bytes());
+    let head = Head::parse_file(&file).unwrap();
+    let err = bundle(&file, &head, Default::default()).expect_err("refused");
+    assert!(
+        err.to_string().contains("newer than this tool's 1.0"),
+        "{err}"
+    );
 }

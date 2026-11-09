@@ -30,6 +30,9 @@
 
 use std::collections::HashSet;
 
+use tickwave_format::encode::code_of;
+use tickwave_format::header::{AnalogCoding, code_value};
+
 /// The largest number of bits a code may need.
 pub const MAX_BITS: u8 = 16;
 
@@ -43,25 +46,27 @@ pub struct Codes {
 }
 
 impl Codes {
-    /// The value a code stands for. A reader must compute exactly this: an f64 multiply, an f64
-    /// add, then rounding to the nearest f32 with ties to even. A fused multiply-add rounds once
-    /// instead of twice and can give a different f32.
+    /// The value a code stands for, as every reader computes it.
     pub fn decode(&self, code: u16) -> f32 {
-        (self.offset + f64::from(code) * self.scale) as f32
+        code_value(code, self.scale, self.offset)
     }
 
-    /// The code for a value, if one decodes to exactly the value.
+    /// The code for a value, if one decodes to exactly the value: the encoder's own test.
     pub fn encode(&self, value: f32) -> Option<u16> {
-        let code = ((f64::from(value) - self.offset) / self.scale).round();
-        if !(0.0..f64::from(1u32 << self.bits)).contains(&code) {
-            return None;
+        code_of(value, self.coding())
+    }
+
+    /// The format's coding for these codes.
+    pub fn coding(&self) -> AnalogCoding {
+        AnalogCoding::Codes {
+            bits: self.bits,
+            scale: self.scale,
+            offset: self.offset,
         }
-        let code = code as u16;
-        (self.decode(code).to_bits() == value.to_bits()).then_some(code)
     }
 }
 
-/// Finds `bits <= 16`, a scale and an offset such that every value is
+/// Finds `bits` from 1 to 16, a scale and an offset such that every value is
 /// `(offset + code as f64 * scale) as f32` bit for bit, for an integer code in `0..2^bits`. `None`
 /// when no such coding is found, or there are no values.
 pub fn recover_codes(values: impl IntoIterator<Item = f32>) -> Option<Codes> {
@@ -89,8 +94,9 @@ pub fn recover_codes(values: impl IntoIterator<Item = f32>) -> Option<Codes> {
                 verified(
                     &values,
                     &[0.0],
+                    // One value takes code 0 of the narrowest coding the format holds.
                     Codes {
-                        bits: 0,
+                        bits: 1,
                         scale: 1.0,
                         offset,
                     },

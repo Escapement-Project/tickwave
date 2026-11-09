@@ -13,12 +13,18 @@ fn zstd_error(code: usize) -> DecodeError {
     DecodeError::Zstd(zstd_safe::get_error_name(code).to_owned())
 }
 
-/// One decompression context, reused for every frame.
-pub struct Inflater(RefCell<DCtx<'static>>);
+/// One decompression context, reused for every frame, and the most it decodes from one.
+pub struct Inflater {
+    context: RefCell<DCtx<'static>>,
+    max: usize,
+}
 
 impl Inflater {
-    pub fn new() -> Self {
-        Self(RefCell::new(DCtx::create()))
+    pub fn new(max: usize) -> Self {
+        Self {
+            context: RefCell::new(DCtx::create()),
+            max,
+        }
     }
 
     /// What tickwave-format's `inflate` does: exactly one frame filling `frame`, with a checksum,
@@ -42,9 +48,9 @@ impl Inflater {
                 "the bytes hold more than one frame".into(),
             ));
         }
-        let mut out = Vec::with_capacity(len);
+        let mut out = tickwave_format::decode::buffer(len, self.max)?;
         // Writes at most `len` bytes: a frame that decodes to more fails with dstSize_tooSmall.
-        self.0
+        self.context
             .borrow_mut()
             .decompress(&mut out, frame)
             .map_err(zstd_error)?;
