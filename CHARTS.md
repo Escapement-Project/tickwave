@@ -179,7 +179,8 @@ The readout gives the picked x and each shown series' figure there, with the ser
 line and marker as drawn. A figure takes its range in brackets, its partial runs, its note and its
 verdict, such as "failed in 1 of 2 runs (744.6 KiB/s in the other), reads wrong". As a tooltip,
 the readout sits beside the picked x, or to its left near the plot's right edge. It sits at the
-plot's top, or lower where that hides less of the lines.
+plot's top, or lower where that hides less of the lines. It stays inside the chart's box: a long
+line wraps, and where neither side of the picked x has room, the readout lies across it.
 
 ### Evidence
 

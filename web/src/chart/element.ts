@@ -19,6 +19,8 @@ const DEFAULT_HEIGHT = 330;
 const REACH = 12;
 /** How long a mouse must rest on a point to open it: one passing over the plot loads nothing. */
 const DWELL_MS = 150;
+/** From the picked setting to the side of the tooltip readout beside it, in CSS pixels. */
+const TIP_GAP = 14;
 const EVIDENCE_HINT = "Enter opens the recording behind the picked point.";
 
 // Low specificity (`:where`), so the page's own rules win.
@@ -34,8 +36,10 @@ const CSS = `
 :where(tickwave-chart) .tw-legend li { display: flex; align-items: center; gap: 6px; }
 :where(tickwave-chart) .tw-swatch { flex: none; vertical-align: -1px; margin-right: 6px; }
 :where(tickwave-chart) .tw-readout { font-size: 13px; line-height: 1.45; }
-:where(tickwave-chart) .tw-readout[data-tooltip] { position: absolute; z-index: 1; pointer-events: none; white-space: nowrap;
-  background: var(--raised, Canvas); border: 1px solid var(--hair, GrayText); border-radius: 6px; padding: 6px 9px; }
+:where(tickwave-chart) .tw-readout > div { padding-left: 28px; text-indent: -28px; }
+:where(tickwave-chart) .tw-readout[data-tooltip] { position: absolute; z-index: 1; pointer-events: none; box-sizing: border-box;
+  width: max-content; max-width: min(24em, 100%); background: var(--raised, Canvas); border: 1px solid var(--hair, GrayText);
+  border-radius: 6px; padding: 6px 9px; }
 :where(tickwave-chart) .tw-readout[data-tooltip]:empty { display: none; }
 :where(tickwave-chart) .tw-readout b { font-weight: 600; }
 :where(tickwave-chart) .tw-notice { margin: 4px 0 0; padding: 1px 8px; font-size: 12px; color: var(--attention-ink, CanvasText);
@@ -527,19 +531,31 @@ export class TickwaveChart extends HTMLElement {
       return;
     }
     // Beside the picked setting, to its left near the right edge; at the plot's top, or lower where
-    // that hides less of the lines.
+    // that hides less of the lines. Always inside the chart's box: where neither side has room, it
+    // lies across the setting, against the edge with more room.
     const l = this.#layout;
     const host = this.getBoundingClientRect();
     const plot = this.#svg!.getBoundingClientRect();
-    const dx = plot.left - host.left;
-    const w = box.offsetWidth;
-    const h = box.offsetHeight;
-    const left = dx + l.xs[i] + 14 + w > this.clientWidth ? l.xs[i] - 14 - w : l.xs[i] + 14;
-    const tops = [0, 1, 2, 3, 4].map((k) => l.top + (k / 4) * Math.max(0, l.bottom - h - l.top));
+    // `left` and `top` count from the host's padding edge; the layout counts from the plot's.
+    const dx = plot.left - host.left - this.clientLeft;
+    const dy = plot.top - host.top - this.clientTop;
+    const { width: w, height: h } = box.getBoundingClientRect();
+    const minX = -dx;
+    const maxX = this.clientWidth - dx - w;
+    const x = l.xs[i];
+    const left =
+      x + TIP_GAP <= maxX ? x + TIP_GAP
+      : x - TIP_GAP - w >= minX ? x - TIP_GAP - w
+      : x - minX > maxX + w - x ? minX
+      : maxX;
+    const maxY = this.clientHeight - dy - h;
+    const tops = [0, 1, 2, 3, 4]
+      .map((k) => l.top + (k / 4) * Math.max(0, l.bottom - h - l.top))
+      .map((y) => Math.max(-dy, Math.min(maxY, y)));
     const scores = tops.map((y) => hidden(l, left, y, w, h));
     const top = tops[scores.indexOf(Math.min(...scores))];
     box.style.left = `${dx + left}px`;
-    box.style.top = `${plot.top - host.top + top}px`;
+    box.style.top = `${dy + top}px`;
   }
 
   #listen(): void {

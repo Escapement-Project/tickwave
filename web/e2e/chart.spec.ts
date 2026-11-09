@@ -122,6 +122,42 @@ test.describe("at rest", () => {
     ]);
   });
 
+  test("the tooltip readout stays inside the chart at any width, wrapping a long figure", async ({ page }) => {
+    const outside = await page.locator("#c1").evaluate(async (chart) => {
+      const c = chart as HTMLElement & { pick(x?: string | null): void };
+      const figure = chart.closest("figure")!;
+      const out: string[] = [];
+      for (let width = 280; width <= 1240; width += 40) {
+        figure.style.width = `${width}px`;
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        for (const x of ["1", "5", "10", "20", "30", "50"]) {
+          c.pick(x);
+          const tip = chart.querySelector(".tw-readout")!.getBoundingClientRect();
+          const box = chart.getBoundingClientRect();
+          if (tip.left < box.left - 0.5 || tip.right > box.right + 0.5 || tip.top < box.top - 0.5 || tip.bottom > box.bottom + 0.5) {
+            out.push(`${width} px, ${x} MHz: ${Math.round(tip.left - box.left)} to ${Math.round(tip.right - box.left)} of ${Math.round(box.width)}`);
+          }
+        }
+      }
+      c.pick();
+      return out;
+    });
+    expect(outside).toEqual([]);
+    // NXP's figure at 50 MHz runs to two lines, the second under the first's text, not its swatch.
+    await page.locator("#c1").evaluate((c) => (c as HTMLElement & { pick(x: string): void }).pick("50"));
+    const nxp = page.locator("#c1 .tw-readout > div").filter({ hasText: "NXP" });
+    await expect(nxp).toContainText("NXP failed in 1 of 2 runs (744.6 KiB/s in the other), reads wrong");
+    const lines = await nxp.evaluate((row) => {
+      const range = document.createRange();
+      range.selectNodeContents(row);
+      const rects = [...range.getClientRects()].filter((r) => r.width > 0);
+      const swatch = row.querySelector(".tw-swatch")!.getBoundingClientRect();
+      return { tops: new Set(rects.map((r) => Math.round(r.top))).size, last: rects.at(-1)!.left - swatch.left };
+    });
+    expect(lines.tops).toBeGreaterThan(1);
+    expect(lines.last).toBeCloseTo(28, 0);
+  });
+
   test("a legend entry dims the other series, and the limit's entry strengthens its line", async ({ page }) => {
     const c1 = page.locator("#c1");
     await c1.locator(".tw-legend li", { hasText: "NXP's firmware V3.174" }).hover();
@@ -220,7 +256,8 @@ test.describe("at rest", () => {
     await page.addStyleTag({ content: "svg { display: block; }" });
     const c1 = page.locator("#c1");
     await c1.focus();
-    await page.keyboard.press("End");
+    // The first setting, where every row is short enough for one line.
+    await page.keyboard.press("Home");
     const rows = c1.locator(".tw-readout > div");
     await expect(rows).toHaveCount(2);
     for (const row of await rows.all()) {
