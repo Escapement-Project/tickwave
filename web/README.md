@@ -49,7 +49,7 @@ so it works under any path, such as `/tickwave/` on GitHub Pages. Its pages:
 
 `site/tokens.css`, `site/fonts/` and `site/favicon.ico` are copies of the design system's files.
 Check them from the site repository with
-`uv run design/build.py --check ../chrono/site/tokens.css ../chrono/site/fonts/* ../chrono/site/favicon.ico`.
+`uv run design/build.py --check ../tickwave/site/tokens.css ../tickwave/site/fonts/* ../tickwave/site/favicon.ico`.
 
 ## The data source
 
