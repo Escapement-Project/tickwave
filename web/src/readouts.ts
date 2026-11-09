@@ -138,21 +138,34 @@ export function formatInterval(ticks: number, timebase: Ratio): string {
 export const formatTime = formatInterval;
 
 /**
- * The mean rate over `periods` periods spanning `span` ticks, in Hz with an SI prefix.
+ * The mean rate over `periods` periods that together span `span` ticks, in Hz with an SI prefix.
  *
  * The digits: each edge is recorded at the first sample after it, so an edge's tick is late by
- * less than one tick, and a span between two edges is wrong by less than one tick. The rate
- * f = periods / span is then uncertain by about f / span (span in ticks). The last digit shown is
- * at the largest power of ten not larger than that uncertainty. A single period of 40 ns is
- * 25 MHz give or take 0.6 MHz, so it shows 25.0 MHz; the mean over 1000 such periods shows
- * 25.0000 MHz.
+ * less than one tick, and a span between two edges is wrong by less than one tick. Over `runs`
+ * separate runs of periods the total is wrong by less than `runs` ticks, so the rate
+ * f = periods / span is uncertain by about f × runs / span. The last digit shown is at the largest
+ * power of ten not larger than that uncertainty. A single period of 40 ns is 25 MHz give or take
+ * 0.6 MHz, so it shows 25.0 MHz; the mean over 1000 such periods in one run shows 25.0000 MHz.
  */
-export function formatRate(periods: number, span: number, timebase: Ratio): string | null {
-  if (periods <= 0 || span <= 0) return null;
+export function formatRate(periods: number, span: number, timebase: Ratio, runs = 1): string | null {
+  if (periods <= 0 || span <= 0 || runs <= 0) return null;
   const n = big(periods) * big(timebase.num);
   const d = big(span) * big(timebase.den);
-  const p = placeOf(n, d * big(span));
+  const p = placeOf(n * big(runs), d * big(span));
   return formatScaled(roundAt(n, d, p), p, RATE_UNITS);
+}
+
+/**
+ * The mean of `periods` periods that together span `span` ticks: span / periods ticks. By the rule
+ * above the span is wrong by less than `runs` ticks, so the mean is uncertain by runs / periods
+ * ticks, and may carry digits finer than one tick.
+ */
+export function formatMeanPeriod(periods: number, span: number, timebase: Ratio, runs = 1): string | null {
+  if (periods <= 0 || span <= 0 || runs <= 0) return null;
+  const n = big(span) * big(timebase.den);
+  const d = big(periods) * big(timebase.num);
+  const p = placeOf(big(runs) * big(timebase.den), d);
+  return formatScaled(roundAt(n, d, p), p, TIME_UNITS);
 }
 
 /**
@@ -184,7 +197,13 @@ export interface PeriodStats {
   readonly median: number;
   readonly min: number;
   readonly max: number;
-  /** Ticks from the first rising edge to the last. */
+  /**
+   * The running clock: the periods within one tick of the median. A quantised clock's median sits
+   * on one sample step, and first-to-last counts the gaps between bursts; the mean of these does
+   * neither. `used` periods, in `runs` runs of consecutive periods, summing to `span` ticks.
+   */
+  readonly used: number;
+  readonly runs: number;
   readonly span: number;
 }
 
@@ -199,14 +218,36 @@ export function periodStats(level: 0 | 1, ticks: ArrayLike<number>): PeriodStats
   if (count === 0) return null;
   const periods = new Float64Array(count);
   for (let k = 0; k < count; k++) periods[k] = ticks[first + 2 * k + 2] - ticks[first + 2 * k];
-  periods.sort();
-  return {
-    count,
-    median: periods[(count - 1) >> 1],
-    min: periods[0],
-    max: periods[count - 1],
-    span: ticks[first + 2 * count] - ticks[first],
-  };
+  const sorted = periods.slice().sort();
+  const median = sorted[(count - 1) >> 1];
+  let used = 0;
+  let runs = 0;
+  let span = 0;
+  let inRun = false;
+  for (const p of periods) {
+    if (Math.abs(p - median) <= 1) {
+      used++;
+      span += p;
+      if (!inRun) runs++;
+      inRun = true;
+    } else inRun = false;
+  }
+  return { count, median, min: sorted[0], max: sorted[count - 1], used, runs, span };
+}
+
+/** The running clock's rate, with its digits. */
+export function formatClockRate(s: PeriodStats, timebase: Ratio): string {
+  return formatRate(s.used, s.span, timebase, s.runs)!;
+}
+
+/** The running clock's period, with its digits. */
+export function formatClockPeriod(s: PeriodStats, timebase: Ratio): string {
+  return formatMeanPeriod(s.used, s.span, timebase, s.runs)!;
+}
+
+/** "mean of 29 of 31 periods", or "mean of 45 periods" when it used them all. */
+export function clockNote(s: PeriodStats): string {
+  return s.used === s.count ? `mean of ${formatCount(s.count)} periods` : `mean of ${formatCount(s.used)} of ${formatCount(s.count)} periods`;
 }
 
 /** Edges in [start, end) of an ascending tick array. */

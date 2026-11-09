@@ -13,7 +13,7 @@ export default defineConfig({
     { name: "firefox", use: { ...devices["Desktop Firefox"], deviceScaleFactor: 2 } },
   ],
   webServer: {
-    command: `node build.ts --serve ${PORT}`,
+    command: "node build.ts && node e2e/server.ts",
     url: `http://127.0.0.1:${PORT}/dev/`,
     reuseExistingServer: false,
   },

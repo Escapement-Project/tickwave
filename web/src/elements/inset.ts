@@ -4,7 +4,7 @@
 import { covers, type Annotation } from "../annotations.ts";
 import { INSET_ATTRIBUTES, parseChannels, parsePad, parseScale, parseSweep } from "../attributes.ts";
 import { reducedMotion } from "../face.ts";
-import { formatCount, formatInterval, formatRate, periodStats } from "../readouts.ts";
+import { clockNote, formatClockPeriod, formatClockRate, periodStats } from "../readouts.ts";
 import { channelIndices, Plot } from "../render/plot.ts";
 import { isAbort, type RecordingInfo } from "../source.ts";
 import { secondsValue, toTicks } from "../time.ts";
@@ -14,6 +14,8 @@ const CSS = `
 :host { max-width: 100%; }
 figure { margin: 0; }
 figcaption { margin: 0 4px 2px; font-size: 12px; font-weight: 600; line-height: 1.35; }
+.text { margin: 0 4px 4px; font-size: 12px; line-height: 1.4; color: var(--ink-2, GrayText); }
+.text[hidden] { display: none; }
 .frame { position: relative; }
 canvas { display: block; }
 .foot { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 2px 14px;
@@ -25,9 +27,10 @@ canvas { display: block; }
 .key i { display: inline-block; width: 14px; height: 2px; vertical-align: middle; margin-right: 5px; }
 `;
 
-const HTML = `<figure part="inset"><figcaption part="label"></figcaption>
+const HTML = `<figure part="inset"><figcaption part="label"></figcaption><p class="text" part="text" hidden></p>
 <div class="frame" part="frame"><canvas part="canvas" aria-hidden="true"></canvas></div>
-<div class="foot" part="foot"><span class="measure figures" part="measure"></span><span class="key" part="key"></span></div></figure>`;
+<div class="foot" part="foot"><span class="measure figures" part="measure"></span><span class="key" part="key"></span></div>
+<div class="notice" part="notice" role="status" hidden></div></figure>`;
 
 /** The landing page's sweep: steady across the trace. */
 const SWEEP_MS = 420;
@@ -187,6 +190,9 @@ export class ChronoInset extends ChronoElement {
     }
     this.#annotation = a;
     this.#caption.textContent = a ? (a.label ?? a.id) : "";
+    const text = this.root.querySelector(".text") as HTMLElement;
+    text.textContent = a?.text ?? "";
+    text.hidden = !a?.text;
     const { indices, missing } = channelIndices(l.info, parseChannels(this.getAttribute("channels")));
     for (const m of missing) this.fail(new Error(`no channel ${m}`));
     const recordingKey = `${l.src.href}\n${indices.join(" ")}`;
@@ -298,7 +304,7 @@ export class ChronoInset extends ChronoElement {
     try {
       const edges = await l.source.edges(ch, a.start, a.end);
       if (seq !== this.#measureSeq) return;
-      const text = measureText(a.measure.what, a.measure.channel, edges.level, edges.ticks, a, l.info);
+      const text = measureText(a.measure.what, a.measure.channel, edges.level, edges.ticks, l.info);
       if (text === null) this.fail(new Error(`annotation ${a.id}: cannot measure ${a.measure.what}`));
       else this.#measure.innerHTML = text;
     } catch (e) {
@@ -321,7 +327,7 @@ export class ChronoInset extends ChronoElement {
       const item = document.createElement("span");
       const swatch = document.createElement("i");
       swatch.style.background = this.palette.role(r);
-      item.append(swatch, r);
+      item.append(swatch, r === "probe" || r === "target" ? `${r} drives` : r);
       this.#key.append(item);
     }
   }
@@ -329,25 +335,15 @@ export class ChronoInset extends ChronoElement {
 
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
 
-/** The `measure` readout as HTML, or null for a measure it does not know. */
-export function measureText(
-  what: string,
-  channel: string,
-  level: 0 | 1,
-  ticks: Float64Array,
-  a: Annotation,
-  info: RecordingInfo,
-): string | null {
+/**
+ * The `measure` readout as HTML, or null for a measure it does not know. Both measures read the
+ * running clock (`periodStats`), not the median or first-to-last.
+ */
+export function measureText(what: string, channel: string, level: 0 | 1, ticks: Float64Array, info: RecordingInfo): string | null {
   const tb = info.timebase;
   const label = (value: string, note: string) => `<span class="what">${esc(channel)}</span> ${esc(value)} <span class="what">${esc(note)}</span>`;
-  if (what === "edges") return label(formatCount(ticks.length), "edges");
-  if (what === "duration") return label(formatInterval((a.end ?? a.start) - a.start, tb), "");
+  if (what !== "rate" && what !== "period") return null;
   const stats = periodStats(level, ticks);
-  if (!stats) return label("–", "no full period");
-  if (what === "rate") {
-    const n = stats.count;
-    return label(formatRate(n, stats.span, tb)!, n === 1 ? "from one period" : `mean of ${formatCount(n)} periods`);
-  }
-  if (what === "period") return label(formatInterval(stats.median, tb), `median of ${formatCount(stats.count)} periods`);
-  return null;
+  if (!stats) return label("\u2013", "no full period");
+  return label(what === "rate" ? formatClockRate(stats, tb) : formatClockPeriod(stats, tb), clockNote(stats));
 }

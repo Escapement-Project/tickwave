@@ -1,8 +1,8 @@
-import { resolveAnnotations, type Resolved } from "../annotations.ts";
+import { indexAnnotations, type Annotation, type Resolved } from "../annotations.ts";
 import { parseSeries } from "../attributes.ts";
 import { onFaceChange, onFontsLoaded } from "../face.ts";
 import { resolvePalette, type Palette } from "../palette.ts";
-import { absolute, annotationsFor, infoFor, sourceFor } from "../registry.ts";
+import { absolute, annotationsFor, bundledFor, infoFor, sourceFor } from "../registry.ts";
 import type { RecordingInfo, Source } from "../source.ts";
 
 export const SHARED_CSS = `
@@ -16,6 +16,9 @@ select { padding-right: 4px; background: var(--raised, Canvas); }
 button:hover, select:hover { background: var(--wash, color-mix(in srgb, CanvasText 12%, transparent)); }
 button:disabled { opacity: .45; cursor: default; background: transparent; }
 :focus-visible { outline: var(--focus-width, 2px) solid var(--ink, CanvasText); outline-offset: 2px; }
+.notice { margin: 4px 0 0; padding: 1px 8px; font-size: 12px; line-height: 1.4; color: var(--attention-ink, CanvasText);
+  border-left: 2px solid var(--attention-ink, CanvasText); }
+.notice[hidden] { display: none; }
 .figures { font-family: var(--font-figures, ui-monospace, monospace); font-stretch: var(--figures-stretch, normal);
   font-weight: var(--figures-weight, 500); font-variant-numeric: tabular-nums; font-size: 12px; }
 `;
@@ -27,15 +30,22 @@ export interface Loaded {
   readonly annotations: Resolved;
 }
 
-/** The recording at `src` and its annotations, shared with every element on the page. */
+/**
+ * The recording at `src` and its annotations, shared with every element on the page. Without an
+ * `annotations` URL, a bundled sidecar serves. A sidecar's problems are in `annotations.errors`;
+ * the recording still draws.
+ */
 export async function loadRecording(src: string, annotations: string | null): Promise<Loaded> {
   const url = absolute(src);
-  const [source, info, raw] = await Promise.all([
-    sourceFor(url),
-    infoFor(url),
-    annotations ? annotationsFor(absolute(annotations)) : Promise.resolve([]),
-  ]);
-  return { src: url, source, info, annotations: resolveAnnotations(raw, info.timebase) };
+  const [source, info] = await Promise.all([sourceFor(url), infoFor(url)]);
+  let list: Annotation[] = [];
+  const errors: string[] = [];
+  try {
+    list = (annotations ? await annotationsFor(absolute(annotations), url) : await bundledFor(url)) ?? [];
+  } catch (e) {
+    errors.push(e instanceof Error ? e.message : String(e));
+  }
+  return { src: url, source, info, annotations: indexAnnotations(list, errors) };
 }
 
 export abstract class ChronoElement extends HTMLElement {
@@ -101,12 +111,22 @@ export abstract class ChronoElement extends HTMLElement {
     this.paletteChanged();
   }
 
-  /** Reports a problem once as `chrono-error`; the element goes on with what it has. */
+  /**
+   * Reports a problem once: as `chrono-error`, in the console, and in a short notice in the
+   * element, so a page's author sees it. The element goes on with what it has.
+   */
   protected fail(e: unknown): void {
     const message = e instanceof Error ? e.message : String(e);
     if (this.#reportedErrors.has(message)) return;
     this.#reportedErrors.add(message);
+    console.warn(`<${this.localName}${this.id ? ` id="${this.id}"` : ""}>: ${message}`);
     this.dispatchEvent(new CustomEvent("chrono-error", { detail: { message, error: e }, bubbles: true, composed: true }));
+    const notice = this.root.querySelector(".notice") as HTMLElement | null;
+    if (!notice) return;
+    const problems = [...this.#reportedErrors].flatMap((m) => m.split("\n")).filter(Boolean);
+    notice.hidden = false;
+    notice.textContent =
+      problems.length === 1 ? problems[0] : `${problems[0]} (and ${problems.length - 1} more problems; see the console)`;
   }
 
   protected emit(name: string, detail: unknown): void {

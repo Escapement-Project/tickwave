@@ -3,8 +3,8 @@
 
 import type { Annotation } from "../annotations.ts";
 import { parseChannels, parseWindow, VIEW_ATTRIBUTES } from "../attributes.ts";
-import { absolute, events as registryEvents, peekInfo } from "../registry.ts";
-import { countEdges, formatCount, formatInterval, formatRate, periodStats } from "../readouts.ts";
+import { absolute, events as registryEvents, infoFor, peekInfo } from "../registry.ts";
+import { clockNote, countEdges, formatClockPeriod, formatClockRate, formatCount, formatInterval, formatRate, periodStats } from "../readouts.ts";
 import { lowerBound } from "../search.ts";
 import { channelIndices, Plot } from "../render/plot.ts";
 import { isAbort, type RecordingInfo } from "../source.ts";
@@ -34,6 +34,11 @@ canvas { display: block; }
 .steps { display: flex; gap: 4px; align-items: center; }
 .steps .count { min-width: 5.5em; text-align: center; color: var(--ink-2, GrayText); font-size: 13px; }
 .steps[hidden] { display: none; }
+.hint { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); pointer-events: none;
+  padding: 6px 12px; border-radius: 6px; background: var(--ink, CanvasText); color: var(--page, Canvas);
+  font-size: 13px; white-space: nowrap; opacity: 0; transition: opacity .15s; }
+.hint.shown { opacity: 1; }
+@media (prefers-reduced-motion: reduce) { .hint { transition: none; } }
 `;
 
 const HTML = `
@@ -57,9 +62,10 @@ const HTML = `
       <button type="button" class="close" part="button">Close</button>
     </div>
   </div>
-  <div class="plot" part="plot" tabindex="0" role="group" aria-roledescription="capture"><canvas aria-hidden="true"></canvas></div>
+  <div class="plot" part="plot" tabindex="0" role="group" aria-roledescription="capture"><canvas aria-hidden="true"></canvas><div class="hint" part="hint" aria-hidden="true"></div></div>
   <div class="readout" part="readout" aria-live="polite"></div>
-</div>`;
+</div>
+<div class="notice" part="notice" role="status" hidden></div>`;
 
 const DRAG_PX = 4;
 const SNAP_PX = 6;
@@ -102,6 +108,12 @@ export class ChronoView extends ChronoElement {
   #windowEventQueued = false;
   #readyFired = false;
   #resize: ResizeObserver;
+  /** A collapsed view fetches its recording's head, and only that, once it scrolls into view. */
+  #seen = new IntersectionObserver((entries) => {
+    if (!entries.some((e) => e.isIntersecting)) return;
+    const src = this.#src;
+    if (src && !this.open) infoFor(src).catch((e) => this.fail(e));
+  });
   #onHead = (e: Event) => {
     if ((e as CustomEvent<string>).detail === this.#src?.href) this.#renderSummary();
   };
@@ -143,12 +155,14 @@ export class ChronoView extends ChronoElement {
   override connectedCallback(): void {
     super.connectedCallback();
     this.#resize.observe(this.#plotBox);
+    this.#seen.observe(this);
     registryEvents.addEventListener("chrono-head", this.#onHead);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.#resize.disconnect();
+    this.#seen.disconnect();
     registryEvents.removeEventListener("chrono-head", this.#onHead);
   }
 
@@ -217,7 +231,7 @@ export class ChronoView extends ChronoElement {
     const title = this.#summary.querySelector(".title")!;
     const facts = this.#summary.querySelector(".facts")!;
     if (!src) return;
-    // Collapsed, the view fetches nothing; it shows what is already here.
+    // Collapsed, the view shows what is here; the head arrives once the view scrolls into sight.
     const info = peekInfo(src);
     title.textContent = info?.title ?? decodeURIComponent(src.pathname.split("/").pop() ?? "");
     facts.textContent = info ? summaryFacts(info) : "";
@@ -475,16 +489,22 @@ export class ChronoView extends ChronoElement {
       "wheel",
       (e) => {
         if (!this.#plot.layout) return;
-        e.preventDefault();
         const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? this.#plot.layout.width : 1;
         const dx = e.deltaX * unit;
         const dy = e.deltaY * unit;
-        if (Math.abs(dx) > Math.abs(dy) && !e.ctrlKey) {
-          this.#panBy(dx * this.#plot.perPx);
+        // Ctrl or Cmd zooms; a trackpad pinch arrives as a wheel with ctrlKey and small deltas.
+        if (e.ctrlKey || e.metaKey) {
+          e.preventDefault();
+          this.#zoomBy(Math.exp(dy * 0.004), this.#local(e).x);
           return;
         }
-        // A trackpad pinch arrives as a wheel with ctrlKey and small deltas.
-        this.#zoomBy(Math.exp(dy * (e.ctrlKey ? 0.01 : 0.0015)), this.#local(e).x);
+        if (e.shiftKey || Math.abs(dx) > Math.abs(dy)) {
+          e.preventDefault();
+          this.#panBy((Math.abs(dx) > Math.abs(dy) ? dx : dy) * this.#plot.perPx);
+          return;
+        }
+        // The plain wheel scrolls the page; say how to zoom instead.
+        this.#hint();
       },
       { passive: false },
     );
@@ -521,6 +541,18 @@ export class ChronoView extends ChronoElement {
       }
       e.preventDefault();
     });
+  }
+
+  #hintTimer = 0;
+
+  #hint(): void {
+    const hint = this.root.querySelector(".hint") as HTMLElement;
+    const nav = navigator as Navigator & { userAgentData?: { platform?: string } };
+    const mac = /mac|iphone|ipad/i.test(nav.userAgentData?.platform || navigator.platform);
+    hint.textContent = `${mac ? "Cmd" : "Ctrl"} + scroll to zoom`;
+    hint.classList.add("shown");
+    clearTimeout(this.#hintTimer);
+    this.#hintTimer = window.setTimeout(() => hint.classList.remove("shown"), 1200);
   }
 
   #hover(x: number, y: number): void {
@@ -636,15 +668,17 @@ export class ChronoView extends ChronoElement {
         const stats = r ? periodStats(r.level, r.ticks) : null;
         let periodDetail: Record<string, unknown> | null = null;
         if (stats) {
-          const rate = formatRate(stats.count, stats.span, tb)!;
+          const rate = formatClockRate(stats, tb);
+          const period = formatClockPeriod(stats, tb);
           periods.append(
             item("count", formatCount(stats.count)),
-            item("median", formatInterval(stats.median, tb)),
             item("min", formatInterval(stats.min, tb)),
+            item("median", formatInterval(stats.median, tb)),
             item("max", formatInterval(stats.max, tb)),
-            item("mean rate", rate),
+            item("clock", rate),
+            clockNote(stats),
           );
-          periodDetail = { channel: digital[chosen].channel.name, ...stats, rate };
+          periodDetail = { channel: digital[chosen].channel.name, ...stats, rate, period };
         } else periods.append("fewer than two rising edges");
         detail = { start: sel.start, end: sel.end, duration: formatInterval(sel.end - sel.start, tb), edges: edgeCounts, periods: periodDetail };
       } catch (e) {
@@ -673,7 +707,8 @@ export class ChronoView extends ChronoElement {
   #renderKinds(): void {
     const l = this.#loaded;
     if (!l) return;
-    const kinds = [...new Set(l.annotations.list.map((a) => a.kind).filter((k): k is string => k !== null))].sort();
+    // In the order the sidecar resolves to; the first is the default.
+    const kinds = [...new Set(l.annotations.list.map((a) => a.kind).filter((k): k is string => k !== null))];
     this.#steps.hidden = kinds.length === 0;
     const current = this.#kind.value;
     if (kinds.join("\n") !== [...this.#kind.options].map((o) => o.value).join("\n")) {

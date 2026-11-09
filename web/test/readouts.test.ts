@@ -5,7 +5,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  clockNote,
   countEdges,
+  formatClockPeriod,
+  formatClockRate,
   formatCount,
   formatInterval,
   formatRate,
@@ -65,24 +68,68 @@ test("periodStats: rising edge to rising edge, starting low", () => {
   // 377106074: periods 2000, 3000, 2000, 4518. Sorted 2000, 2000, 3000, 4518; the lower middle
   // is 2000 (the mean of the middle two, 2500, did not occur). Falling-to-falling would give
   // three periods with a maximum of 3522; counting edges would give 9 or 8.
+  // Within one tick of the median: the first and third, two runs of one, 4000 ticks.
   const ticks = [377094556, 377095556, 377096556, 377097556, 377099556, 377100556, 377101556, 377104078, 377106074];
-  assert.deepEqual(periodStats(0, ticks), { count: 4, median: 2000, min: 2000, max: 4518, span: 11518 });
+  assert.deepEqual(periodStats(0, ticks), { count: 4, median: 2000, min: 2000, max: 4518, used: 2, runs: 2, span: 4000 });
 });
 
 test("periodStats: starting high, the first edge falls", () => {
   // The same SWDIO from its second edge, high before it. Rising at 377096556, 377099556,
-  // 377101556, 377106074: periods 3000, 2000, 4518, span 9518. Taking the first edge as rising
-  // measures the falling edges instead: 2000, 3000, 3522.
+  // 377101556, 377106074: periods 3000, 2000, 4518; median 3000, which alone is within a tick of
+  // itself. Taking the first edge as rising measures the falling edges instead: 2000, 3000, 3522.
   const ticks = [377095556, 377096556, 377097556, 377099556, 377100556, 377101556, 377104078, 377106074];
-  assert.deepEqual(periodStats(1, ticks), { count: 3, median: 3000, min: 2000, max: 4518, span: 9518 });
+  assert.deepEqual(periodStats(1, ticks), { count: 3, median: 3000, min: 2000, max: 4518, used: 1, runs: 1, span: 3000 });
 });
 
 test("periodStats: SWCLK at 1 MHz, and fewer than two rising edges", () => {
   // SWCLK idles high; rising at 377095057, 377096057, 377097058, 377098058.
   const clk = [377094557, 377095057, 377095557, 377096057, 377096557, 377097058, 377097558, 377098058];
-  assert.deepEqual(periodStats(1, clk), { count: 3, median: 1000, min: 1000, max: 1001, span: 3001 });
+  assert.deepEqual(periodStats(1, clk), { count: 3, median: 1000, min: 1000, max: 1001, used: 3, runs: 1, span: 3001 });
   assert.equal(periodStats(1, clk.slice(0, 3)), null);
   assert.equal(periodStats(0, []), null);
+});
+
+/** Rising edges at `rises`, each high for half its period: the edges a clock row would hold. */
+function clockEdges(rises: number[]): number[] {
+  const out: number[] = [];
+  rises.forEach((r, i) => {
+    out.push(r);
+    if (i + 1 < rises.length) out.push(r + Math.floor((rises[i + 1] - r) / 2));
+  });
+  return out;
+}
+
+test("the running clock: a quantised 26.67 ns clock", () => {
+  // A 26.67 ns clock sampled at 1 ns reads as 26 ns ten times and 27 ns twenty-two times, here
+  // 27, 27, 26 over and over. The median is 27 ns (37.04 MHz). All 32 periods are within a tick
+  // of it, one run of 854 ticks: 32 / 854 ns is 37,470,726 Hz, uncertain by 1/854 of that,
+  // 43.9 kHz, so to 10 kHz: 37.47 MHz. The mean period, 854 / 32 = 26.6875 ns, is uncertain by
+  // 1/32 ns: to 0.01 ns, 26.69 ns.
+  const periods = [...Array.from({ length: 10 }, () => [27, 27, 26]).flat(), 27, 27];
+  const rises = [1000];
+  for (const p of periods) rises.push(rises[rises.length - 1] + p);
+  const s = periodStats(0, clockEdges(rises))!;
+  assert.deepEqual(s, { count: 32, median: 27, min: 26, max: 27, used: 32, runs: 1, span: 854 });
+  assert.equal(formatClockRate(s, GS), nb("37.47 MHz"));
+  assert.equal(formatClockPeriod(s, GS), nb("26.69 ns"));
+  assert.equal(clockNote(s), "mean of 32 periods");
+});
+
+test("the running clock: a span with a gap between bursts", () => {
+  // Real SWCLK: the end of the DPIDR read's burst and the start of the next transfer's. Periods
+  // 1000 four times, the 90,918-tick gap, then 1000 four times. First-to-last would be 9 periods
+  // over 98,918 ticks, 90.98 kHz. The running clock takes the eight 1000s, two runs of 8000 ticks
+  // in all: 1 MHz, uncertain by 2/8000 of it, 250 Hz, so to 100 Hz. Its period, 1000 ticks, is
+  // uncertain by 2/8 of a tick: to 0.1 ns.
+  const ticks = [
+    377135559, 377136060, 377136559, 377137060, 377137560, 377138060, 377138560, 377139060, 377139560, 377140060,
+    377230478, 377230978, 377231478, 377231978, 377232478, 377232978, 377233478, 377233978, 377234478, 377234978,
+  ];
+  const s = periodStats(1, ticks)!;
+  assert.deepEqual(s, { count: 9, median: 1000, min: 1000, max: 90918, used: 8, runs: 2, span: 8000 });
+  assert.equal(formatClockRate(s, GS), nb("1.0000 MHz"));
+  assert.equal(formatClockPeriod(s, GS), nb("1.0000 us").replace("us", "\u00b5s"));
+  assert.equal(clockNote(s), "mean of 8 of 9 periods");
 });
 
 test("formatValue: to the digit of one code step", () => {

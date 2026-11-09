@@ -1,7 +1,10 @@
-// Finds SWD line resets, the JTAG-to-SWD select sequence and every transfer in a fixture, and
-// writes them as a generator's annotation file (PLAN.md §3, JSON Lines). Run from web/:
+// Finds SWD line resets, the JTAG-to-SWD select sequence and every transfer in a recording, and
+// writes them as a generator's annotation file (ANNOTATIONS.md, JSON Lines). Run from web/:
 //
-//   node scripts/swd-annotations.ts fixtures/identify-swd.chronofx > fixtures/identify-swd.swd.jsonl
+//   node scripts/swd-annotations.ts fixtures/identify-swd.chrono --out fixtures/identify-swd.swd.jsonl
+//
+// A .chrono file is read through the WASM decoder, and the file names its recording_id. A
+// .chronofx fixture has no content id, and its file names none.
 //
 // A long capture holds hundreds of thousands of transfers, more than a sidecar is for. There,
 // --kinds wait,fault keeps only those kinds, and --until TICK keeps everything before TICK too.
@@ -10,21 +13,38 @@
 // edge, the target a little after the rising edge, so a probe-driven bit's cell runs falling to
 // falling around its rising edge, and a target-driven bit's runs from the rising edge before it.
 
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { readFixture } from "../src/fixture-file.ts";
 import type { MemoryDigital } from "../src/memory-source.ts";
 import { lowerBound } from "../src/search.ts";
+import { openChrono } from "./node-wasm.ts";
 
 const { values: opts, positionals } = parseArgs({
   allowPositionals: true,
-  options: { kinds: { type: "string" }, until: { type: "string" } },
+  options: { kinds: { type: "string" }, until: { type: "string" }, out: { type: "string" } },
 });
-const rec = await readFixture(readFileSync(positionals[0]));
+/** The named digital channels' edges, and the recording's content id where it has one. */
+async function load(path: string): Promise<{ channels: MemoryDigital[]; id: string | null }> {
+  if (!path.endsWith(".chrono")) {
+    const rec = await readFixture(readFileSync(path));
+    return { channels: rec.channels.filter((c): c is MemoryDigital => c.kind === "digital"), id: null };
+  }
+  const r = await openChrono(path);
+  const channels: MemoryDigital[] = [];
+  for (const [i, c] of r.info.channels.entries()) {
+    if (c.kind !== "digital") continue;
+    const e = await r.edges(i, 0, r.info.length);
+    channels.push({ kind: "digital", name: c.name, end: c.end, initial: e.level, ticks: e.ticks });
+  }
+  return { channels, id: r.header.content_id };
+}
+
+const rec = await load(positionals[0]);
 const channel = (name: string) => {
   const c = rec.channels.find((c) => c.name === name);
-  if (c?.kind !== "digital") throw new Error(`no digital ${name}`);
-  return c as MemoryDigital;
+  if (!c) throw new Error(`no digital ${name}`);
+  return c;
 };
 const clk = channel("SWCLK");
 const dio = channel("SWDIO");
@@ -107,5 +127,7 @@ const kinds = opts.kinds ? new Set(opts.kinds.split(",")) : null;
 const until = opts.until ? Number(opts.until) : -Infinity;
 const kept = (out as Note[]).filter((a) => kinds === null || kinds.has(a.kind) || a.start < until);
 kept.sort((a, b) => a.start - b.start);
-console.log(JSON.stringify({ format: "chrono-annotations/1", source: "swd" }));
-for (const a of kept) console.log(JSON.stringify(a));
+const lines = [JSON.stringify({ format: "chrono-annotations/1", source: "swd", ...(rec.id && { recording_id: rec.id }) })];
+for (const a of kept) lines.push(JSON.stringify(a));
+if (opts.out) writeFileSync(opts.out, lines.join("\n") + "\n");
+else console.log(lines.join("\n"));

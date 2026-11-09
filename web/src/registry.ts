@@ -1,23 +1,25 @@
 // Shared state across every element on the page: one Source and one annotation list per URL.
-// What reads a URL is up to the loaders registered here. The WASM decoder will register one for
-// .chrono files; the dev page registers one for its fixtures.
+// What reads a URL is up to the loaders registered here: chrono.js registers one for .chrono
+// files; the dev page registers one for its fixtures.
 
-import type { RawAnnotation } from "./annotations.ts";
+import type { Annotation } from "./annotations.ts";
 import type { RecordingInfo, Source } from "./source.ts";
 
 export interface Loader {
-  /** Whether this loader reads the recording or sidecar at `url`. */
+  /** Whether this loader reads the recording at `url`. */
   accepts(url: URL): boolean;
   source(url: URL): Source;
-  /** The annotations at `url`, with the sidecar's fields. */
-  annotations?(url: URL): Promise<RawAnnotation[]>;
+  /** The resolved annotations of the sidecar at `annotations`, for the recording at `recording`. */
+  annotations?(annotations: URL, recording: URL, source: Source): Promise<Annotation[]>;
+  /** The annotations bundled into the recording itself, or null when it carries none. */
+  bundled?(recording: URL, source: Source): Promise<Annotation[] | null>;
 }
 
 const loaders: Loader[] = [];
 const sources = new Map<string, Source>();
 const infos = new Map<string, Promise<RecordingInfo>>();
 const heads = new Map<string, RecordingInfo>();
-const annotationLists = new Map<string, Promise<RawAnnotation[]>>();
+const annotationLists = new Map<string, Promise<Annotation[] | null>>();
 const waiting: (() => void)[] = [];
 
 /** Fires `chrono-head` with the URL once a recording's head is here. */
@@ -33,14 +35,10 @@ export function registerLoader(loader: Loader): void {
   for (const w of waiting.splice(0)) w();
 }
 
-function loaderFor(url: URL, what: "source" | "annotations"): Loader | null {
-  return loaders.find((l) => l.accepts(url) && (what === "source" || l.annotations !== undefined)) ?? null;
-}
-
 /** Waits for a loader that accepts `url`, if none is registered yet. */
-async function waitFor(url: URL, what: "source" | "annotations", signal?: AbortSignal): Promise<Loader> {
+async function loaderFor(url: URL, signal?: AbortSignal): Promise<Loader> {
   for (;;) {
-    const l = loaderFor(url, what);
+    const l = loaders.find((l) => l.accepts(url));
     if (l) return l;
     signal?.throwIfAborted();
     await new Promise<void>((resolve) => waiting.push(resolve));
@@ -49,13 +47,11 @@ async function waitFor(url: URL, what: "source" | "annotations", signal?: AbortS
 
 export async function sourceFor(url: URL, signal?: AbortSignal): Promise<Source> {
   const key = url.href;
-  let s = sources.get(key);
-  if (!s) {
-    s = (await waitFor(url, "source", signal)).source(url);
+  if (!sources.has(key)) {
+    const s = (await loaderFor(url, signal)).source(url);
     if (!sources.has(key)) sources.set(key, s);
-    s = sources.get(key)!;
   }
-  return s;
+  return sources.get(key)!;
 }
 
 /** The recording's info, fetched once a URL. */
@@ -81,20 +77,36 @@ export function peekInfo(url: URL): RecordingInfo | null {
   return heads.get(url.href) ?? null;
 }
 
-export function annotationsFor(url: URL): Promise<RawAnnotation[]> {
-  const key = url.href;
+function cached(key: string, load: () => Promise<Annotation[] | null>): Promise<Annotation[] | null> {
   let p = annotationLists.get(key);
   if (!p) {
-    p = waitFor(url, "annotations").then((l) => l.annotations!(url));
+    p = load();
     annotationLists.set(key, p);
     p.catch(() => annotationLists.delete(key));
   }
   return p;
 }
 
+/** The sidecar at `annotations`, resolved against the recording at `recording`. */
+export function annotationsFor(annotations: URL, recording: URL): Promise<Annotation[]> {
+  return cached(`${annotations.href}\n${recording.href}`, async () => {
+    const loader = await loaderFor(recording);
+    if (!loader.annotations) throw new Error(`${recording.pathname}: no reader for its annotations`);
+    return loader.annotations(annotations, recording, await sourceFor(recording));
+  }) as Promise<Annotation[]>;
+}
+
+/** The annotations bundled into the recording, or null. */
+export function bundledFor(recording: URL): Promise<Annotation[] | null> {
+  return cached(`\n${recording.href}`, async () => {
+    const loader = await loaderFor(recording);
+    return loader.bundled ? loader.bundled(recording, await sourceFor(recording)) : null;
+  });
+}
+
 /** The head and the sidecar, ahead of a view: `<chrono-ref>` calls this when it scrolls into view. */
 export async function prefetch(src: URL, annotations: URL | null): Promise<void> {
   const s = await sourceFor(src);
   await s.prefetch();
-  await Promise.allSettled([infoFor(src), annotations ? annotationsFor(annotations) : null]);
+  await Promise.allSettled([infoFor(src), annotations ? annotationsFor(annotations, src) : bundledFor(src)]);
 }

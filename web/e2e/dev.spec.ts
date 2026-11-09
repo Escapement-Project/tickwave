@@ -92,21 +92,127 @@ test.describe("stress fixtures zoomed fully out and fully in", () => {
   }
 });
 
-test("a collapsed view fetches nothing until a reference to it scrolls into view", async ({ page }) => {
-  const fetched: string[] = [];
-  page.on("request", (r) => {
-    if (r.url().includes("/fixtures/")) fetched.push(new URL(r.url()).pathname);
-  });
-  await page.goto("/e2e/pages/collapsed.html");
+/** The requests the e2e server logged for the recording URLs holding `tag`. */
+async function served(tag: string): Promise<{ port: number; url: string; range: string | null; status: number }[]> {
+  const log = (await (await fetch(`http://127.0.0.1:8124/__log?tag=${tag}`)).json()) as { port: number; url: string; range: string | null; status: number }[];
+  return log.filter((e) => new URL(e.url, "http://x").pathname.endsWith(".chrono"));
+}
+
+const tagged = (info: { project: { name: string } }, what: string) => `${what}-${info.project.name}-${Date.now()}`;
+
+test("a collapsed view fetches its head, and only its head, once it scrolls into view", async ({ page }, info) => {
+  const tag = tagged(info, "collapsed");
+  // A small first read, so the head (1,742 bytes, the converter says) and the block are separate.
+  await page.goto(`/e2e/pages/view.html?below&firstRead=512&tag=${tag}`);
   const view = page.locator("#v");
-  await expect(view.locator(".summary .title")).toHaveText("identify-swd.chronofx");
+  await expect(view.locator(".summary .title")).toHaveText("identify-swd.chrono");
   await page.waitForTimeout(300);
-  expect(fetched).toEqual([]);
-  await page.locator("#far").scrollIntoViewIfNeeded();
-  // The head and the sidecar arrive; the summary line then says what the recording is.
-  await expect(view.locator(".summary .facts")).toHaveText("523.583100 ms · 2 channels: SWCLK, SWDIO · 3.6 KiB");
-  expect(fetched).toContain("/fixtures/identify-swd.chronofx");
-  expect(fetched).toContain("/fixtures/identify-swd.annotations.json");
+  expect(await served(tag)).toEqual([]);
+  await view.scrollIntoViewIfNeeded();
+  await expect(view.locator(".summary .facts")).toHaveText("523.583100\u00a0ms \u00b7 2 channels: SWCLK, SWDIO \u00b7 4.7\u00a0KiB");
+  await page.waitForTimeout(300);
+  expect((await served(tag)).map((e) => [e.range, e.status])).toEqual([
+    ["bytes=0-511", 206],
+    ["bytes=512-1741", 206],
+  ]);
+  // Opened at the whole capture, it draws from the head's overview: still no block.
+  await view.locator(".open").click();
+  await view.evaluate((v) => (v as unknown as { settled(): Promise<void> }).settled());
+  expect((await served(tag)).map((e) => e.range)).toEqual(["bytes=0-511", "bytes=512-1741"]);
+  // Zoomed to the first read, it needs edges, and reads the block by its range: 1,742 to 4,828.
+  await view.evaluate((v) => {
+    const view = v as unknown as { setWindow(a: number, b: number): void; settled(): Promise<void> };
+    view.setWindow(377094000, 377141000);
+    return view.settled();
+  });
+  expect((await served(tag)).map((e) => e.range)).toEqual(["bytes=0-511", "bytes=512-1741", "bytes=1742-4827"]);
+});
+
+test("a server that ignores Range: one whole-file response serves the view", async ({ page }, info) => {
+  const tag = tagged(info, "norange");
+  await recordReady(page);
+  await page.goto(`http://127.0.0.1:8125/e2e/pages/view.html?open&firstRead=512&tag=${tag}`);
+  const view = page.locator("#v");
+  await waitReady(page, ["v"]);
+  const box = (await plotOf(view).boundingBox())!;
+  const y = box.y + box.height - 10;
+  const selected = view.evaluate(
+    (v) => new Promise((resolve) => v.addEventListener("chrono-select", (e) => resolve((e as CustomEvent).detail), { once: true })),
+  );
+  await page.mouse.move(box.x + 70, y);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width - 12, y, { steps: 6 });
+  await page.mouse.up();
+  expect(((await selected) as { edges: Record<string, number> }).edges).toEqual({ SWCLK: 15286, SWDIO: 1874 });
+  expect((await served(tag)).map((e) => [e.port, e.status])).toEqual([[8125, 200]]);
+});
+
+test("a finer overview level comes from overview blocks by range, not from the data", async ({ page }, info) => {
+  const tag = tagged(info, "levels");
+  await recordReady(page);
+  // The JTAG identify capture: head bytes 0 to 1,251, its data block to 10,378, its three overview
+  // blocks of 2^12 ticks to 13,678 (the converter's report).
+  await page.goto(`/e2e/pages/view.html?open&src=fixtures/identify-jtag.chrono&firstRead=1024&tag=${tag}`);
+  await waitReady(page, ["v"]);
+  const view = page.locator("#v");
+  // At the whole capture a column is about 400,000 ticks: the head's 2^16 level draws it.
+  expect((await served(tag)).map((e) => e.range)).toEqual(["bytes=0-1023", "bytes=1024-1250"]);
+  // 20 ms over the view's columns is about 13,000 ticks a column: the 2^12 level, from blocks.
+  // 465 to 485 ms is the capture's busiest stretch.
+  await view.evaluate((v) => {
+    const view = v as unknown as { setWindow(a: number, b: number): void; settled(): Promise<void> };
+    view.setWindow(465e6, 485e6);
+    return view.settled();
+  });
+  const ranges = (await served(tag)).map((e) => e.range!);
+  expect(ranges.slice(0, 2)).toEqual(["bytes=0-1023", "bytes=1024-1250"]);
+  expect(ranges.length).toBe(3);
+  const [, from, to] = /^bytes=(\d+)-(\d+)$/.exec(ranges[2])!.map(Number);
+  expect(from).toBeGreaterThanOrEqual(10378);
+  expect(to).toBeLessThan(13678);
+  mkdirSync("screenshots", { recursive: true });
+  await view.screenshot({ path: `screenshots/${info.project.name}-overview-blocks.png` });
+});
+
+test("a local file reads through slice", async ({ page }) => {
+  await recordReady(page);
+  await page.goto("/e2e/pages/file.html");
+  await page.locator("#pick").setInputFiles("fixtures/identify-swd.4k.chrono");
+  const view = page.locator("#v");
+  await waitReady(page, ["v"]);
+  await expect(view.locator(".toolbar .title")).toHaveText("identify-swd.4k.chrono");
+  const w = await view.evaluate((v) => (v as unknown as { window: { start: number; end: number } }).window);
+  expect(w).toEqual({ start: 0, end: 523583100 });
+});
+
+test("a bundled sidecar serves when the view names none", async ({ page }) => {
+  test.skip(!existsSync("fixtures/identify-swd.bundle.chrono"), "needs target/release/chrono: scripts/generate.ts bundles with it");
+  await recordReady(page);
+  await page.goto("/e2e/pages/view.html?open&src=fixtures/identify-swd.bundle.chrono");
+  const view = page.locator("#v");
+  await waitReady(page, ["v"]);
+  await view.evaluate((v) => (v as unknown as { show(id: string): Promise<void> }).show("first-wait"));
+  // first-wait names swd/wait/379065159, a 3000-tick acknowledge: shown with a quarter either side.
+  expect(await view.evaluate((v) => (v as unknown as { window: unknown }).window)).toEqual({ start: 379064409, end: 379068909 });
+  await expect(view.locator(".steps .count")).toHaveText("1 of 16");
+  await expect(view.locator(".notice")).toBeHidden();
+});
+
+test("a sidecar's problems show in the element and the console; the trace still draws", async ({ page }) => {
+  const warnings: string[] = [];
+  page.on("console", (m) => {
+    if (m.type() === "warning") warnings.push(m.text());
+  });
+  // The sidecar names identify-swd.chrono; this file is identify-swd.4k.chrono.
+  await recordReady(page);
+  await page.goto("/e2e/pages/view.html?open&src=fixtures/identify-swd.4k.chrono&annotations=fixtures/identify-swd.annotations.toml");
+  const view = page.locator("#v");
+  await waitReady(page, ["v"]);
+  const notice = view.locator(".notice");
+  await expect(notice).toBeVisible();
+  await expect(notice).toContainText('names "identify-swd.chrono", not "identify-swd.4k.chrono"');
+  expect(warnings.some((w) => w.includes('not "identify-swd.4k.chrono"'))).toBe(true);
+  expect(await view.evaluate((v) => (v as unknown as { window: unknown }).window)).toEqual({ start: 0, end: 523583100 });
 });
 
 test.describe("the identify view", () => {
@@ -172,44 +278,64 @@ test.describe("the identify view", () => {
     await expect(readout).toBeEmpty();
   });
 
-  test("the wheel zooms about the pointer; keys pan and zoom", async ({ page }) => {
+  test("Ctrl and the wheel zoom about the pointer; Shift pans; the plain wheel scrolls the page", async ({ page }) => {
     const view = page.locator("#identify");
     const box = (await plotOf(view).boundingBox())!;
     // Pointer events carry whole pixels here; a fractional x would be a third of a pixel off, which
     // at the fit scale is a hundred thousand ticks.
     const x = Math.round(box.x + box.width * 0.7);
-    const before = await view.evaluate((v, x) => (v as unknown as { tickAt(x: number): number }).tickAt(x), x);
-    const window0 = await view.evaluate((v) => (v as unknown as { window: { start: number; end: number } }).window);
+    const at = (x: number) => view.evaluate((v, x) => (v as unknown as { tickAt(x: number): number }).tickAt(x), x);
+    const win = () => view.evaluate((v) => (v as unknown as { window: { start: number; end: number } }).window);
+    const before = await at(x);
+    const window0 = await win();
+    // Bounded, so a zoom that never happens fails here instead of at the test's timeout.
     const announced = view.evaluate(
-      (v) => new Promise((resolve) => v.addEventListener("chrono-window", (e) => resolve((e as CustomEvent).detail), { once: true })),
+      (v) =>
+        new Promise((resolve, reject) => {
+          v.addEventListener("chrono-window", (e) => resolve((e as CustomEvent).detail), { once: true });
+          setTimeout(() => reject(new Error("no chrono-window within 5 s")), 5000);
+        }),
     );
     await page.mouse.move(x, box.y + 60);
-    await page.mouse.wheel(0, -400);
-    await page.waitForTimeout(100);
-    expect(await announced).toEqual(await view.evaluate((v) => (v as unknown as { window: unknown }).window));
-    const after = await view.evaluate((v, x) => (v as unknown as { tickAt(x: number): number }).tickAt(x), x);
-    const window1 = await view.evaluate((v) => (v as unknown as { window: { start: number; end: number } }).window);
-    expect(window1.end - window1.start).toBeLessThan(window0.end - window0.start);
-    expect(Math.abs(after - before)).toBeLessThanOrEqual(1);
-    await plotOf(view).focus();
-    await page.keyboard.press("ArrowRight");
-    const window2 = await view.evaluate((v) => (v as unknown as { window: { start: number; end: number } }).window);
-    expect(window2.start).toBeGreaterThan(window1.start);
-    await page.keyboard.press("-");
-    const window3 = await view.evaluate((v) => (v as unknown as { window: { start: number; end: number } }).window);
-    expect(window3.end - window3.start).toBeGreaterThan(window2.end - window2.start);
-    // A trackpad pinch arrives as a wheel with ctrlKey; it zooms the trace, not the page.
-    await page.mouse.move(x, box.y + 60);
     await page.keyboard.down("Control");
-    await page.mouse.wheel(0, -100);
+    await page.mouse.wheel(0, -400);
     await page.keyboard.up("Control");
     await page.waitForTimeout(100);
-    const window4 = await view.evaluate((v) => (v as unknown as { window: { start: number; end: number } }).window);
-    expect(window4.end - window4.start).toBeLessThan(window3.end - window3.start);
+    expect(await announced).toEqual(await win());
+    const window1 = await win();
+    expect(window1.end - window1.start).toBeLessThan(window0.end - window0.start);
+    expect(Math.abs((await at(x)) - before)).toBeLessThanOrEqual(1);
+    // Shift and the wheel pan.
+    await page.keyboard.down("Shift");
+    await page.mouse.wheel(0, 200);
+    await page.keyboard.up("Shift");
+    await page.waitForTimeout(100);
+    const window2 = await win();
+    expect(window2.start).toBeGreaterThan(window1.start);
+    expect(window2.end - window2.start).toBeCloseTo(window1.end - window1.start, 3);
+    // The plain wheel scrolls the page, leaves the trace, and says how to zoom.
+    const scrolled = await page.evaluate(() => scrollY);
+    await page.mouse.wheel(0, 200);
+    await page.waitForTimeout(200);
+    expect(await page.evaluate(() => scrollY)).toBeGreaterThan(scrolled);
+    expect(await win()).toEqual(window2);
+    await expect(view.locator(".hint")).toHaveText(/^(Ctrl|Cmd) \+ scroll to zoom$/);
+    await expect(view.locator(".hint")).toHaveCSS("opacity", "1");
+    // The keys still pan and zoom.
+    await plotOf(view).focus();
+    await page.keyboard.press("ArrowRight");
+    const window3 = await win();
+    expect(window3.start).toBeGreaterThan(window2.start);
+    await page.keyboard.press("-");
+    const window4 = await win();
+    expect(window4.end - window4.start).toBeGreaterThan(window3.end - window3.start);
   });
 
   test("stepping through one kind reads n of N", async ({ page }) => {
     const view = page.locator("#identify");
+    // Opened at no annotation, stepping starts with the first kind in the resolved sidecar: the
+    // earliest annotation, attach, at 376719436, sorts before line-reset at the same tick.
+    await expect(view.locator(".kind")).toHaveValue("attach");
     await view.locator(".kind").selectOption("wait");
     await view.locator(".next").click();
     // The decode found 16 WAIT acknowledges.
@@ -225,6 +351,8 @@ test("the inset's measure reads the rate from the edges", async ({ page }) => {
   // 46 rising SWCLK edges, 377095057 to 377140060: 45 periods over 45003 ticks, 999,933 Hz, give
   // or take 22 Hz, shown to 10 Hz.
   await expect(page.locator("#inset-dpidr").locator(".measure")).toHaveText("SWCLK 999.93 kHz mean of 45 periods");
+  // The paint roles' key, as the landing page words it.
+  await expect(page.locator("#inset-dpidr").locator(".key > span")).toHaveText(["probe drives", "target drives"]);
 });
 
 test.describe("a reference", () => {
@@ -233,6 +361,8 @@ test.describe("a reference", () => {
     await open(page, { reduced: true });
     const ref = page.locator("chrono-ref[annotation=line-reset]");
     const figure = page.locator("figure").first();
+    // Figure 1 grows when its annotation's text arrives; measure it after that.
+    await waitReady(page, ["inset-dpidr"]);
     const before = await figure.boundingBox();
     await ref.hover();
     const pop = ref.locator(".pop");
@@ -256,6 +386,8 @@ test.describe("a reference", () => {
     await page.keyboard.press("Enter");
     const view = page.locator("#identify");
     await expect(view).toHaveAttribute("open", "");
+    // Stepping takes the kind of the annotation the view opened at.
+    await expect(view.locator(".kind")).toHaveValue("ack");
     await expect(ref.locator(".pop")).toBeHidden();
     // ack/377103058 runs to 377106058; the view shows it with room either side.
     const w = await view.evaluate((v) => (v as unknown as { window: { start: number; end: number } }).window);

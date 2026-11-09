@@ -5,7 +5,8 @@
 // A fixture URL may carry ?latency=MS to delay every answer, so the page can show the renderer
 // drawing what it has while blocks are on their way.
 
-import { registerLoader, type RawAnnotation, type Source } from "chrono";
+import { registerLoader, type Annotation, type RawAnnotation, type Source } from "chrono";
+import { resolveRaw } from "../src/annotations.ts";
 import { readFixture } from "../src/fixture-file.ts";
 import { MemorySource } from "../src/memory-source.ts";
 
@@ -49,7 +50,8 @@ function jsonLines(text: string): RawAnnotation[] {
   return lines.slice(1).map((l) => ({ ...(JSON.parse(l) as RawAnnotation), source: head.source }));
 }
 
-async function annotations(url: URL): Promise<RawAnnotation[]> {
+/** A hand-written JSON file with the TOML sidecar's shape, or one generator's JSON Lines file. */
+async function rawAnnotations(url: URL): Promise<RawAnnotation[]> {
   const text = await (await fetchOk(url)).text();
   if (url.pathname.endsWith(".jsonl")) return jsonLines(text);
   const file = JSON.parse(text) as { include?: string[]; annotation?: RawAnnotation[] };
@@ -59,8 +61,16 @@ async function annotations(url: URL): Promise<RawAnnotation[]> {
   return [...included.flat(), ...(file.annotation ?? [])];
 }
 
+/** Resolved as the Rust core resolves a sidecar: all of it, or every problem. */
+async function annotations(url: URL, _recording: URL, source: Source): Promise<Annotation[]> {
+  const [raw, info] = await Promise.all([rawAnnotations(url), source.info()]);
+  const r = resolveRaw(raw, info.timebase);
+  if (r.errors.length > 0) throw new Error(r.errors.join("\n"));
+  return [...r.list];
+}
+
 registerLoader({
-  accepts: (url) => /\.(chronofx|annotations\.json|jsonl)$/.test(url.pathname),
+  accepts: (url) => url.pathname.endsWith(".chronofx"),
   source: (url) => new FixtureSource(url),
   annotations,
 });

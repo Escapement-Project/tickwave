@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>One view, set up by the query</title>
+<!--
+  ?src=   the recording, relative to web/ (default fixtures/identify-swd.chrono)
+  ?tag=   appended to the recording's URL, so the server's log can tell this page's requests apart
+  ?annotations=  a sidecar, relative to web/
+  ?open   open the view; otherwise it stays collapsed
+  ?below  put the view and a reference to it below the fold
+  ?firstRead=N  the decoder's first read of the head, in bytes
+-->
+<script type="module">
+import { configure } from "../../dist/chrono.js";
+const q = new URLSearchParams(location.search);
+if (q.get("firstRead")) configure({ firstRead: Number(q.get("firstRead")) });
+const src = `../../${q.get("src") ?? "fixtures/identify-swd.chrono"}${q.get("tag") ? `?tag=${q.get("tag")}` : ""}`;
+const view = document.createElement("chrono-view");
+view.id = "v";
+view.setAttribute("src", src);
+if (q.get("annotations")) view.setAttribute("annotations", `../../${q.get("annotations")}`);
+if (q.has("open")) view.setAttribute("open", "");
+const ref = document.createElement("chrono-ref");
+ref.setAttribute("for", "v");
+ref.setAttribute("annotation", "dpidr-read");
+ref.textContent = "the first read";
+if (q.has("below")) document.getElementById("spacer").style.height = "3000px";
+document.getElementById("here").append(view);
+document.getElementById("far").append("See ", ref, ".");
+</script>
+</head>
+<body>
+<div id="spacer"></div>
+<div id="here"></div>
+<div style="height: 3000px"></div>
+<p id="far"></p>
+</body>
+</html>

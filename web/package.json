@@ -7,23 +7,28 @@
   "type": "module",
   "scripts": {
     "build": "node build.ts",
-    "dev": "node build.ts --serve",
+    "dev": "node scripts/generate.ts && node build.ts --serve",
     "typecheck": "tsc -p .",
     "test": "node --test \"test/**/*.test.ts\"",
-    "e2e": "playwright test",
+    "e2e": "node scripts/generate.ts && playwright test",
     "fixtures": "node scripts/fixtures.ts",
     "vendor": "node scripts/vendor.ts",
-    "check": "npm run typecheck && npm test && npm run build && npm run e2e"
+    "check": "npm run typecheck && npm test && npm run build && npm run e2e",
+    "generate": "node scripts/generate.ts"
   },
   "devDependencies": {
     "@playwright/test": "^1.65.0",
     "@types/node": "^26.6.6",
+    "@types/send": "^1.2.1",
     "csv-parse": "^7.0.3",
     "esbuild": "^0.28.2",
+    "send": "^1.2.1",
     "typescript": "^7.0.2"
   },
   "dependencies": {
-    "@floating-ui/dom": "^1.8.0"
+    "@floating-ui/dom": "^1.8.0",
+    "lru-cache": "^11.5.3",
+    "smol-toml": "^1.9.1"
   },
   "allowScripts": {
     "esbuild": false

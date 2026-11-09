@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { readFixture } from "../src/fixture-file.ts";
 import { formatLevels, MemorySource } from "../src/memory-source.ts";
-import { resolveAnnotations, type RawAnnotation } from "../src/annotations.ts";
+import { fromCore, indexAnnotations, resolveRaw, type RawAnnotation } from "../src/annotations.ts";
 
 const file = readFileSync(new URL("../fixtures/identify-swd.chronofx", import.meta.url));
 
@@ -41,11 +41,13 @@ test("a truncated fixture is refused", async () => {
 });
 
 test("overview levels follow FORMAT.md", () => {
-  // As the converter wrote them into the converted files' headers: [12, 16, 20] for identify-swd,
-  // [16, 20] for gcc-swd-reads, [16, 20, 24] for stock-reads.
+  // As the converter wrote them into the reconverted headers, the head's levels and the block
+  // levels together: identify-swd [12, 16, 20] and none in blocks; gcc-swd-reads [16, 20] and 12
+  // in blocks; stock-reads [16, 20, 24] and 12; the matrix capture [20, 24, 28] and 12 and 16.
   assert.deepEqual(formatLevels(523583100), [2 ** 12, 2 ** 16, 2 ** 20]);
-  assert.deepEqual(formatLevels(927888190), [2 ** 16, 2 ** 20]);
-  assert.deepEqual(formatLevels(4429986070), [2 ** 16, 2 ** 20, 2 ** 24]);
+  assert.deepEqual(formatLevels(927888190), [2 ** 12, 2 ** 16, 2 ** 20]);
+  assert.deepEqual(formatLevels(4429986070), [2 ** 12, 2 ** 16, 2 ** 20, 2 ** 24]);
+  assert.deepEqual(formatLevels(114006396250), [2 ** 12, 2 ** 16, 2 ** 20, 2 ** 24, 2 ** 28]);
 });
 
 test("annotations: generated ids, refs, times and errors", () => {
@@ -57,7 +59,7 @@ test("annotations: generated ids, refs, times and errors", () => {
     { id: "a/b", start: 1 },
     { id: "attach", start: 1 },
   ];
-  const r = resolveAnnotations(raw, { num: 1e9, den: 1 });
+  const r = resolveRaw(raw, { num: 1e9, den: 1 });
   const named = r.byId.get("dpidr-read")!;
   assert.equal(named.start, 377094557);
   assert.equal(named.kind, "read");
@@ -66,4 +68,18 @@ test("annotations: generated ids, refs, times and errors", () => {
   assert.equal(r.byId.get("attach")!.start, 376719436);
   assert.equal(r.byId.get("attach")!.end, 377140560);
   assert.equal(r.errors.length, 3);
+});
+
+test("a resolved list: a hand-written annotation on a generated one's span names it", () => {
+  // The Rust resolver follows a ref without saying so; its output is matched by span and channels.
+  const core = [
+    { id: "swd/read/377094557", source: "swd", start: 377094557, end: 377140560, channels: ["SWCLK", "SWDIO"], label: "DPIDR read", kind: "read", text: null, paint: null, measure: null },
+    { id: "dpidr-read", source: null, start: 377094557, end: 377140560, channels: ["SWDIO", "SWCLK"], label: "Reading DPIDR", kind: "read", text: null, paint: null, measure: null },
+    // Same span, other channels: names nothing.
+    { id: "swd/request/377094557", source: "swd", start: 377094557, end: 377102558, channels: ["SWDIO"], label: "request", kind: "request", text: null, paint: "probe", measure: null },
+    { id: "clock-only", source: null, start: 377094557, end: 377102558, channels: ["SWCLK"], label: "SWCLK", kind: null, text: null, paint: null, measure: null },
+  ].map(fromCore);
+  const r = indexAnnotations(core);
+  assert.deepEqual([...r.named], ["swd/read/377094557"]);
+  assert.equal(fromCore({ ...core[0], channels: [] } as never).channels, null);
 });
