@@ -1,5 +1,8 @@
 // The messages between the page and the decoder's worker.
 
+/** The first read of a recording's head, unless the page configures another (FORMAT.md). */
+export const FIRST_READ = 32 * 1024;
+
 export type Request =
   | { id: number; op: "open"; key: string; url?: string; file?: File; firstRead?: number; cacheBytes?: number }
   | { id: number; op: "edges" | "samples"; key: string; channel: number; start: number; end: number }

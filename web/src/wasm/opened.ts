@@ -17,15 +17,13 @@ import {
   type Samples,
 } from "../source.ts";
 import { join, type Bytes } from "./bytes.ts";
+import { FIRST_READ } from "./protocol.ts";
 
 /** What the opened recording needs from the wasm-bindgen module. */
 export interface WasmApi {
   headLength(bytes: Uint8Array): number;
   Recording: new (head: Uint8Array) => WasmRecording;
 }
-
-/** FORMAT.md: a reader fetches this much first, then the rest of the head if it needs more. */
-export const FIRST_READ = 64 * 1024;
 
 interface DecodedBlock {
   readonly start: number;

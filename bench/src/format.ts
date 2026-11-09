@@ -4,7 +4,7 @@
 // inflate (fzstd) and an asynchronous one (DecompressionStream).
 
 export const PREAMBLE_LEN = 32;
-export const FIRST_FETCH = 65536;
+export const FIRST_FETCH = 32768;
 const MAGIC = [0x89, 0x54, 0x4b, 0x57, 0x0d, 0x0a, 0x1a, 0x0a];
 const TWO32 = 4294967296;
 

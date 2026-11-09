@@ -75,7 +75,7 @@ shares one source per URL.
 `tickwave.js` registers a loader for `.tickwave` URLs, and for local files made into URLs with
 `registerFile(file)`. Each recording is opened once, in one worker that holds the WASM module.
 
-- The head comes by HTTP Range: the first 64 KiB, then the rest if the head is longer. Data blocks
+- The head comes by HTTP Range: the first 32 KiB, then the rest if the head is longer. Data blocks
   and overview blocks come by Range as a view needs them. Adjacent missing blocks share one
   request, and a block inside the first read is not fetched again.
 - A server that answers 200 instead of 206 has sent the whole file. It is kept, and every later
@@ -293,4 +293,4 @@ the reference: `popover`.
 |---|---|
 | `registerFile(file, sidecar)` | makes a local `File` a `src`. The sidecar's `.toml` and `.jsonl` files can come with it |
 | `recordingInfo(src)` | what a recording holds, from its head: title, length, channels, size, content id |
-| `configure({firstRead, cacheBytes})` | the size of the first read of a head, 64 KiB by default; and of the cache of decoded blocks, 192 MiB |
+| `configure({firstRead, cacheBytes})` | the size of the first read of a head, 32 KiB by default; and of the cache of decoded blocks, 192 MiB |

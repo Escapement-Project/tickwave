@@ -10,6 +10,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { HttpBytes, MemoryBytes, type Bytes, type Fetch } from "../src/wasm/bytes.ts";
 import { Opened, setCacheBytes } from "../src/wasm/opened.ts";
 import { handJson } from "../src/wasm/hand.ts";
+import { FIRST_READ } from "../src/wasm/protocol.ts";
 import { readFixture } from "../src/fixture-file.ts";
 import { formatLevels, MemorySource } from "../src/memory-source.ts";
 import { isAbort } from "../src/source.ts";
@@ -24,7 +25,7 @@ const memory = () => readFixture(readFileSync(at("fixtures/identify-swd.tickwave
 test("the head: what the recording says, from one read", async () => {
   const bytes = new MemoryBytes(ONE, "identify-swd.tickwave");
   const r = await Opened.open(wasm(), bytes);
-  assert.deepEqual(bytes.reads, [[0, 65536]]);
+  assert.deepEqual(bytes.reads, [[0, FIRST_READ]]);
   const i = r.info;
   assert.deepEqual(i.timebase, { num: 1e9, den: 1 });
   assert.equal(i.length, 523583100);
@@ -168,7 +169,7 @@ test("HTTP: a file the first read holds whole is not fetched again for its block
   const s = server(ONE, { ranges: true });
   const r = await Opened.open(wasm(), s.bytes);
   assert.equal((await r.edges(0, 0, r.info.length)).ticks.length, 15286);
-  assert.deepEqual(s.log, ["bytes=0-65535"]);
+  assert.deepEqual(s.log, [`bytes=0-${FIRST_READ - 1}`]);
 });
 
 test("HTTP: a server that ignores Range sends the whole file once, and it serves every read", async () => {

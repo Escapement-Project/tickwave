@@ -4,9 +4,9 @@
 import { fromCore, type Annotation, type CoreAnnotation } from "../annotations.ts";
 import type { Loader } from "../registry.ts";
 import { aborted, type Edges, type Overview, type RecordingInfo, type Samples, type Source } from "../source.ts";
-import type { Reply, Request } from "./protocol.ts";
+import { FIRST_READ, type Reply, type Request } from "./protocol.ts";
 
-const settings = { firstRead: 64 * 1024, cacheBytes: 192 << 20 };
+const settings = { firstRead: FIRST_READ, cacheBytes: 192 << 20 };
 
 /** Tuning for the decoder: the first read of a recording's head, and the decoded-block cache. */
 export function configure(options: { firstRead?: number; cacheBytes?: number }): void {

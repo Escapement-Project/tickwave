@@ -32,7 +32,7 @@ All numbers are little-endian, and an f32 is an IEEE 754 binary32.
 | overview blocks | the rest of the file | one zstd frame an overview block, for the finer overview levels |
 
 The head is the preamble, header, index and overview: `head_len` bytes from the start. A reader
-fetches a fixed amount first (64 KiB), reads `head_len` from the preamble, and fetches the rest of
+fetches a fixed amount first (32 KiB), reads `head_len` from the preamble, and fetches the rest of
 the head if it needs more.
 
 Each block, overview block and the head's overview is one standard zstd frame with a content

@@ -4,8 +4,8 @@
 import init, { headLength, Recording } from "../../../crates/wasm/pkg/tickwave_wasm.js";
 import { FileBytes, HttpBytes, type Bytes } from "./bytes.ts";
 import { handJson } from "./hand.ts";
-import { FIRST_READ, Opened, setCacheBytes, type WasmApi } from "./opened.ts";
-import type { Request, Reply } from "./protocol.ts";
+import { Opened, setCacheBytes, type WasmApi } from "./opened.ts";
+import { FIRST_READ, type Request, type Reply } from "./protocol.ts";
 
 let api: Promise<WasmApi> | null = null;
 const loadApi = () =>
