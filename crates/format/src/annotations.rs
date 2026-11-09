@@ -163,18 +163,41 @@ fn check_id(id: &str, generated: bool) -> Option<String> {
 }
 
 /// Resolves and checks a sidecar against the recording's header, and against the recording's
-/// file name when the caller knows it. Returns the annotations, or every problem found.
+/// file name when the caller knows it. `hand` is the hand-written file's TOML. Returns the
+/// annotations, or every problem found.
+#[cfg(feature = "toml")]
 pub fn resolve(
     hand: &str,
     included: &[Included<'_>],
     header: &Header,
     recording_file: Option<&str>,
 ) -> Result<Vec<Annotation>, Vec<String>> {
+    match toml::from_str(hand) {
+        Ok(file) => resolve_file(file, included, header, recording_file),
+        Err(e) => Err(vec![format!("the TOML file: {e}")]),
+    }
+}
+
+/// As `resolve`, with the hand-written file's TOML already parsed and written out as JSON.
+pub fn resolve_json(
+    hand: &str,
+    included: &[Included<'_>],
+    header: &Header,
+    recording_file: Option<&str>,
+) -> Result<Vec<Annotation>, Vec<String>> {
+    match serde_json::from_str(hand) {
+        Ok(file) => resolve_file(file, included, header, recording_file),
+        Err(e) => Err(vec![format!("the TOML file: {e}")]),
+    }
+}
+
+fn resolve_file(
+    file: HandFile,
+    included: &[Included<'_>],
+    header: &Header,
+    recording_file: Option<&str>,
+) -> Result<Vec<Annotation>, Vec<String>> {
     let mut problems = Vec::new();
-    let file: HandFile = match toml::from_str(hand) {
-        Ok(file) => file,
-        Err(e) => return Err(vec![format!("the TOML file: {e}")]),
-    };
     if file.format != FORMAT {
         problems.push(format!(
             "the TOML file's format is {:?}, not {FORMAT:?}",

@@ -94,9 +94,9 @@ impl Recording {
         })
     }
 
-    /// Resolves and checks a sidecar: the hand-written TOML text, and the generator files it
-    /// includes, by name and text. Returns the annotations as JSON. Throws with every problem
-    /// found, one a line.
+    /// Resolves and checks a sidecar: the hand-written TOML file parsed and written out as JSON,
+    /// and the generator files it includes, by name and text. Returns the annotations as JSON.
+    /// Throws with every problem found, one a line.
     #[cfg(feature = "annotations")]
     #[wasm_bindgen(js_name = resolveAnnotations)]
     pub fn resolve_annotations(
@@ -111,7 +111,7 @@ impl Recording {
             .zip(&texts)
             .map(|(name, text)| Included { name, text })
             .collect();
-        annotations::resolve(
+        annotations::resolve_json(
             hand,
             &included,
             &self.head.header,

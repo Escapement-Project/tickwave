@@ -2,8 +2,8 @@
 // requests; each answer goes back with its arrays transferred, not copied.
 
 import init, { headLength, Recording } from "../../../crates/wasm/pkg/tickwave_wasm.js";
-import { parse } from "smol-toml";
 import { FileBytes, HttpBytes, type Bytes } from "./bytes.ts";
+import { handJson } from "./hand.ts";
 import { FIRST_READ, Opened, setCacheBytes, type WasmApi } from "./opened.ts";
 import type { Request, Reply } from "./protocol.ts";
 
@@ -26,18 +26,11 @@ async function fetchText(url: string, signal: AbortSignal): Promise<string> {
   return r.text();
 }
 
-/** The sidecar's TOML and the files it includes, relative to its URL. */
+/** The sidecar's hand-written file as JSON, and the files it includes, relative to its URL. */
 async function sidecar(url: string, signal: AbortSignal): Promise<{ hand: string; names: string[]; texts: string[] }> {
-  const hand = await fetchText(url, signal);
-  let include: unknown;
-  try {
-    include = (parse(hand) as { include?: unknown }).include ?? [];
-  } catch (e) {
-    throw new Error(`${decodeURIComponent(new URL(url).pathname)}: ${e instanceof Error ? e.message : e}`);
-  }
-  const names = Array.isArray(include) ? include.filter((n): n is string => typeof n === "string") : [];
-  const texts = await Promise.all(names.map((n) => fetchText(new URL(n, url).href, signal)));
-  return { hand, names, texts };
+  const { json, include } = handJson(await fetchText(url, signal), decodeURIComponent(new URL(url).pathname));
+  const texts = await Promise.all(include.map((n) => fetchText(new URL(n, url).href, signal)));
+  return { hand: json, names: include, texts };
 }
 
 async function handle(m: Request, signal: AbortSignal): Promise<unknown> {
@@ -65,7 +58,7 @@ async function handle(m: Request, signal: AbortSignal): Promise<unknown> {
       return r.resolveAnnotations(hand, names, texts, m.recordingFile);
     }
     case "resolve":
-      return (await recording(m.key)).resolveAnnotations(m.hand, m.names, m.texts, m.recordingFile);
+      return (await recording(m.key)).resolveAnnotations(handJson(m.hand, "the TOML file").json, m.names, m.texts, m.recordingFile);
     case "bundled": {
       const r = await recording(m.key);
       const files = r.header.annotations;
@@ -74,7 +67,7 @@ async function handle(m: Request, signal: AbortSignal): Promise<unknown> {
       if (hand.length !== 1) throw new Error(`the bundled sidecar has ${hand.length} TOML files, not one`);
       const names = Object.keys(files).filter((n) => n !== hand[0]);
       // The sidecar travels inside the recording, so the file's own name proves nothing.
-      return r.resolveAnnotations(files[hand[0]], names, names.map((n) => files[n]), null);
+      return r.resolveAnnotations(handJson(files[hand[0]], hand[0]).json, names, names.map((n) => files[n]), null);
     }
   }
 }

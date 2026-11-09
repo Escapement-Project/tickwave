@@ -1,4 +1,4 @@
-use tickwave_format::annotations::{Included, resolve};
+use tickwave_format::annotations::{Included, resolve, resolve_json};
 use tickwave_format::header::{AnalogCoding, ChannelHeader, ChannelKind, Header, SourceHeader};
 
 const ID: &str = "blake3:00ff";
@@ -237,4 +237,21 @@ fn the_file_name_must_match_when_known() {
 fn unknown_fields_are_refused() {
     let hand = HAND.replace("label = \"The 12-cycle period\"", "lable = \"typo\"");
     assert_problem(&problems(&hand, GENERATED), "unknown field");
+}
+
+/// The browser parses the TOML in JavaScript and hands the resolver JSON: a sidecar resolves to
+/// the same annotations, or the same problems, either way.
+#[test]
+fn the_toml_as_json_resolves_alike() {
+    let broken = HAND
+        .replace("id = \"first-misread\"", "id = \"read-ack-check\"")
+        .replace("end = \"317.95 us\"", "end = \"2 ms\"");
+    for hand in [HAND.to_string(), broken] {
+        let value: serde_json::Value = toml::from_str(&hand).unwrap();
+        let json = serde_json::to_string(&value).unwrap();
+        let resolved = |r: fn(&str, &[Included<'_>], &Header, Option<&str>) -> _, text: &str| {
+            r(text, &included(GENERATED), &header(), Some("rec.tickwave"))
+        };
+        assert_eq!(resolved(resolve_json, &json), resolved(resolve, &hand));
+    }
 }

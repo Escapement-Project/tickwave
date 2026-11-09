@@ -461,7 +461,7 @@ export class Opened {
     return this.#rec.blockStart(i);
   }
 
-  /** Resolves a sidecar (the TOML text and the files it includes) against this recording. */
+  /** Resolves a sidecar (the hand-written file as JSON, and the files it includes) against this recording. */
   resolveAnnotations(hand: string, names: string[], texts: string[], recordingFile: string | null): string {
     return this.#rec.resolveAnnotations(hand, names, texts, recordingFile);
   }

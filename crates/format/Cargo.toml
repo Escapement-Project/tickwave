@@ -17,8 +17,11 @@ toml = { version = "1.2.1", optional = true }
 zstd = { version = "0.14.3", optional = true }
 
 [features]
-default = ["encode", "annotations"]
+default = ["encode", "annotations", "toml"]
 # The encoder needs libzstd and threads; a decoder-only build (the browser's) leaves it out.
 encode = ["dep:zstd", "dep:rayon"]
-# Sidecar parsing and checks; the TOML parser roughly doubles the browser's WASM module.
-annotations = ["dep:toml"]
+# Sidecar checks, with the hand-written file handed in as JSON.
+annotations = []
+# Sidecar checks reading the hand-written file's TOML. The browser parses TOML in JavaScript
+# instead: the parser would cost its decoder more than anything else in it.
+toml = ["annotations", "dep:toml"]
