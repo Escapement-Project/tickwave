@@ -40,6 +40,8 @@ const CSS = `
 :where(tickwave-chart) .tw-readout[data-tooltip] { position: absolute; z-index: 1; pointer-events: none; box-sizing: border-box;
   width: max-content; max-width: min(24em, 100%); background: var(--raised, Canvas); border: 1px solid var(--hair, GrayText);
   border-radius: 6px; padding: 6px 9px; }
+:where(tickwave-chart) .tw-readout[popover] { position: fixed; inset: auto; margin: 0; overflow: visible; color: inherit;
+  max-width: min(24em, calc(100vw - 16px)); }
 :where(tickwave-chart) .tw-readout[data-tooltip]:empty { display: none; }
 :where(tickwave-chart) .tw-readout b { font-weight: 600; }
 :where(tickwave-chart) .tw-notice { margin: 4px 0 0; padding: 1px 8px; font-size: 12px; color: var(--attention-ink, CanvasText);
@@ -122,6 +124,12 @@ export class TickwaveChart extends HTMLElement {
   /** The point whose evidence the popover shows, or is loading to show. */
   #pointed: Pointed | null = null;
   #stopPosition: (() => void) | null = null;
+  #placePop: (() => void) | null = null;
+  /** The readout floats off a chart too narrow for it (#floats), placed by these while it does. */
+  #floating = false;
+  #floatKey = "";
+  #stopFloat: (() => void) | null = null;
+  #placeFloat: (() => void) | null = null;
   /** The point the mouse rests on, and the timer that opens it. */
   #resting: Pointed | null = null;
   #dwell = 0;
@@ -186,11 +194,16 @@ export class TickwaveChart extends HTMLElement {
       () => document.removeEventListener("keydown", escape),
       () => removeEventListener("beforeprint", print),
       () => this.#closeEvidence(),
+      () => this.#float(false),
       onFaceChange(() => {
         this.#colours = null;
+        this.#floatKey = "";
         this.#draw();
       }),
-      onFontsLoaded(() => this.#draw()),
+      onFontsLoaded(() => {
+        this.#floatKey = "";
+        this.#draw();
+      }),
     );
     this.#join(this.getAttribute("group"));
     void this.#load();
@@ -269,6 +282,8 @@ export class TickwaveChart extends HTMLElement {
   }
 
   #build(): void {
+    if (this.#readout) this.#float(false);
+    this.#floatKey = "";
     this.#legend = this.getAttribute("legend") === "above" ? document.createElement("ul") : null;
     this.#legend?.classList.add("tw-legend");
     this.#svg = document.createElementNS(SVG, "svg");
@@ -514,31 +529,35 @@ export class TickwaveChart extends HTMLElement {
     const tooltip = this.getAttribute("readout") !== "below";
     box.toggleAttribute("data-tooltip", tooltip);
     const i = this.#x;
-    if (i === null || !this.#layout) {
-      box.textContent = this.#readoutHtml = "";
-      return;
-    }
+    const l = this.#layout;
     const shown = this.#shown();
     const unit = data.y.unit ?? "";
-    const rows = data.series
-      .filter((s) => shown.has(s.id))
-      .map((s) => `<div>${swatch(s, c)}${escapeHtml(tooltip ? s.short : s.name)} ${escapeHtml(figure(s.points[i], unit))}</div>`);
-    const head = `<b>${escapeHtml([grouped(data.x.values[i]), data.x.unit].filter(Boolean).join(" "))}</b>`;
-    const html = head + rows.join("");
+    const at = (k: number) =>
+      `<b>${escapeHtml([grouped(data.x.values[k]), data.x.unit].filter(Boolean).join(" "))}</b>` +
+      data.series
+        .filter((s) => shown.has(s.id))
+        .map((s) => `<div>${swatch(s, c)}${escapeHtml(tooltip ? s.short : s.name)} ${escapeHtml(figure(s.points[k], unit))}</div>`)
+        .join("");
+    const html = i === null || !l ? "" : at(i);
     if (html !== this.#readoutHtml) box.innerHTML = this.#readoutHtml = html;
-    if (!tooltip) {
+    if (!tooltip || i === null || !l) {
+      this.#float(false);
       box.style.left = box.style.top = "";
       return;
     }
-    // Beside the picked setting, to its left near the right edge; at the plot's top, or lower where
-    // that hides less of the lines. Always inside the chart's box: where neither side has room, it
-    // lies across the setting, against the edge with more room.
-    const l = this.#layout;
     const host = this.getBoundingClientRect();
     const plot = this.#svg!.getBoundingClientRect();
     // `left` and `top` count from the host's padding edge; the layout counts from the plot's.
     const dx = plot.left - host.left - this.clientLeft;
     const dy = plot.top - host.top - this.clientTop;
+    if (this.#floats(l, dx, data.x.values.map((_, k) => at(k)))) {
+      this.#float(true);
+      return;
+    }
+    this.#float(false);
+    // Beside the picked setting, to its left near the right edge; at the plot's top, or lower where
+    // that hides less of the lines. Always inside the chart's box: where neither side has room, it
+    // lies across the setting, against the edge with more room.
     const { width: w, height: h } = box.getBoundingClientRect();
     const minX = -dx;
     const maxX = this.clientWidth - dx - w;
@@ -556,6 +575,64 @@ export class TickwaveChart extends HTMLElement {
     const top = tops[scores.indexOf(Math.min(...scores))];
     box.style.left = `${dx + left}px`;
     box.style.top = `${dy + top}px`;
+  }
+
+  /** Whether the tooltip readout floats off the chart: it does where any setting's readout has no
+   * room beside that setting, so that it keeps one place as the reader steps through them. `all` is
+   * each setting's readout markup. */
+  #floats(l: Layout, dx: number, all: string[]): boolean {
+    const width = this.clientWidth;
+    const key = `${width} ${dx} ${all.join("\0")}`;
+    if (key === this.#floatKey) return this.#floating;
+    // Each readout as the tooltip would draw it, measured in one layout.
+    const probe = document.createElement("div");
+    probe.style.cssText = `position: absolute; visibility: hidden; left: 0; top: 0; width: ${width}px`;
+    probe.innerHTML = all.map((h) => `<div class="tw-readout" data-tooltip style="position: static">${h}</div>`).join("");
+    this.append(probe);
+    const widths = [...probe.children].map((e) => e.getBoundingClientRect().width);
+    probe.remove();
+    this.#floatKey = key;
+    return (this.#floating = widths.some((w, k) => {
+      const x = dx + l.xs[k];
+      return x + TIP_GAP + w > width && x - TIP_GAP - w < 0;
+    }));
+  }
+
+  /** Floats the readout over the page, below the chart or above it, at the picked setting; or
+   * brings it back into the chart. */
+  #float(on: boolean): void {
+    const box = this.#readout!;
+    if (!on) {
+      this.#stopFloat?.();
+      this.#stopFloat = this.#placeFloat = null;
+      if (box.hasAttribute("popover")) box.removeAttribute("popover");
+      return;
+    }
+    if (!box.hasAttribute("popover")) box.setAttribute("popover", "manual");
+    if (!box.matches(":popover-open")) box.showPopover();
+    if (this.#placeFloat) {
+      this.#placeFloat();
+      return;
+    }
+    const svg = this.#svg!;
+    const anchor = {
+      contextElement: svg,
+      getBoundingClientRect: () => {
+        const plot = svg.getBoundingClientRect();
+        const chart = this.getBoundingClientRect();
+        const x = this.#x === null || !this.#layout ? 0 : this.#layout.xs[this.#x];
+        return new DOMRect(plot.left + x - 5, chart.top, 10, chart.height);
+      },
+    };
+    const place = () =>
+      computePosition(anchor, box, { strategy: "fixed", placement: "bottom", middleware: [offset(8), flip({ padding: 8 }), shift({ padding: 8 })] }).then(({ x, y }) => {
+        box.style.left = `${x}px`;
+        box.style.top = `${y}px`;
+        // An open popover keeps clear of the readout where it now is.
+        this.#placePop?.();
+      });
+    this.#placeFloat = place;
+    this.#stopFloat = autoUpdate(anchor, box, place);
   }
 
   #listen(): void {
@@ -732,14 +809,20 @@ export class TickwaveChart extends HTMLElement {
     this.#stopPosition?.();
     const svg = this.#svg;
     // Below the chart, or above it, at the point's x as it is drawn now: never over the lines, the
-    // legend or the readout. The picked setting's rule joins the point to it.
+    // legend or the readout, a floating one included. The picked setting's rule joins the point to it.
     const anchor = {
       contextElement: svg,
       getBoundingClientRect: () => {
         const plot = svg.getBoundingClientRect();
         const chart = this.getBoundingClientRect();
         const at = this.#targets().find((p) => samePoint(p, pointed))?.at ?? pointed.at;
-        return new DOMRect(plot.left + at.x - 5, chart.top, 10, chart.height);
+        let { top, bottom } = chart;
+        if (this.#readout?.matches(":popover-open")) {
+          const readout = this.#readout.getBoundingClientRect();
+          top = Math.min(top, readout.top);
+          bottom = Math.max(bottom, readout.bottom);
+        }
+        return new DOMRect(plot.left + at.x - 5, top, 10, bottom - top);
       },
     };
     const place = () =>
@@ -747,6 +830,7 @@ export class TickwaveChart extends HTMLElement {
         pop.style.left = `${x}px`;
         pop.style.top = `${y}px`;
       });
+    this.#placePop = place;
     this.#stopPosition = autoUpdate(anchor, pop, place);
   }
 
@@ -755,7 +839,7 @@ export class TickwaveChart extends HTMLElement {
     this.#resting = null;
     this.#pointed = null;
     this.#stopPosition?.();
-    this.#stopPosition = null;
+    this.#stopPosition = this.#placePop = null;
     if (this.#pop?.matches(":popover-open")) this.#pop.hidePopover();
   }
 

@@ -122,27 +122,43 @@ test.describe("at rest", () => {
     ]);
   });
 
-  test("the tooltip readout stays inside the chart at any width, wrapping a long figure", async ({ page }) => {
-    const outside = await page.locator("#c1").evaluate(async (chart) => {
+  test("the tooltip readout sits inside the chart where every setting has room beside it, and else floats under it", async ({ page }) => {
+    const { wrong, floating } = await page.locator("#c1").evaluate(async (chart) => {
       const c = chart as HTMLElement & { pick(x?: string | null): void };
       const figure = chart.closest("figure")!;
-      const out: string[] = [];
+      const frame = () => new Promise((r) => requestAnimationFrame(r));
+      const wrong: string[] = [];
+      const floating: number[] = [];
       for (let width = 280; width <= 1240; width += 40) {
         figure.style.width = `${width}px`;
-        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        await frame();
+        await frame();
+        const floats = new Set<boolean>();
         for (const x of ["1", "5", "10", "20", "30", "50"]) {
           c.pick(x);
-          const tip = chart.querySelector(".tw-readout")!.getBoundingClientRect();
+          // A floating readout is placed a step after the pick.
+          await frame();
+          const readout = chart.querySelector(".tw-readout")!;
+          const tip = readout.getBoundingClientRect();
           const box = chart.getBoundingClientRect();
-          if (tip.left < box.left - 0.5 || tip.right > box.right + 0.5 || tip.top < box.top - 0.5 || tip.bottom > box.bottom + 0.5) {
-            out.push(`${width} px, ${x} MHz: ${Math.round(tip.left - box.left)} to ${Math.round(tip.right - box.left)} of ${Math.round(box.width)}`);
-          }
+          const floated = readout.matches(":popover-open");
+          floats.add(floated);
+          const inside = tip.left >= box.left - 0.5 && tip.right <= box.right + 0.5 && tip.top >= box.top - 0.5 && tip.bottom <= box.bottom + 0.5;
+          const clear = (tip.top >= box.bottom - 0.5 || tip.bottom <= box.top + 0.5) && tip.left >= 0 && tip.right <= innerWidth;
+          if (floated ? !clear : !inside) wrong.push(`${width} px, ${x} MHz: ${floated ? "floating over the chart" : "outside the chart"}`);
         }
+        // One place for every setting of a chart.
+        if (floats.size > 1) wrong.push(`${width} px: floats for some settings only`);
+        if (floats.has(true)) floating.push(width);
       }
       c.pick();
-      return out;
+      return { wrong, floating };
     });
-    expect(outside).toEqual([]);
+    expect(wrong).toEqual([]);
+    // NXP's 50 MHz readout is too wide to sit beside its setting on a phone-width chart.
+    expect(floating).toContain(320);
+    expect(floating).not.toContain(620);
+    await page.locator("#c1").evaluate((c) => ((c.closest("figure") as HTMLElement).style.width = ""));
     // NXP's figure at 50 MHz runs to two lines, the second under the first's text, not its swatch.
     await page.locator("#c1").evaluate((c) => (c as HTMLElement & { pick(x: string): void }).pick("50"));
     const nxp = page.locator("#c1 .tw-readout > div").filter({ hasText: "NXP" });
@@ -724,6 +740,37 @@ test.describe("a wire-clock chart", () => {
     expect(box.y).toBeGreaterThanOrEqual(chart.y + chart.height);
     expect(box.x).toBeLessThanOrEqual(p.x);
     expect(box.x + box.width).toBeGreaterThanOrEqual(p.x);
+  });
+
+  test("on a phone, the readout floats off the chart, and a point's popover keeps clear of both", async ({ page }) => {
+    await page.setViewportSize({ width: 360, height: 800 });
+    await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+    /** Which of the chart, the readout and the popover overlap, read in one step. */
+    const overlaps = () =>
+      page.evaluate(() => {
+        const [chart, readout, pop] = ["#w", "#w .tw-readout", "#w .tw-pop"].map((s) => document.querySelector(s)!.getBoundingClientRect());
+        const meet = (a: DOMRect, b: DOMRect) => a.left < b.right - 0.5 && b.left < a.right - 0.5 && a.top < b.bottom - 0.5 && b.top < a.bottom - 0.5;
+        return { readoutOverChart: meet(readout, chart), popOverChart: meet(pop, chart), popOverReadout: meet(pop, readout) };
+      });
+    const clear = { readoutOverChart: false, popOverChart: false, popOverReadout: false };
+    const readout = page.locator("#w .tw-readout");
+    const pop = page.locator("#w .tw-pop");
+    let p = await verge50(page);
+    await page.mouse.move(p.x, p.y);
+    await expect(pop.locator("tickwave-inset")).toHaveAttribute("annotation", "dpidr-read");
+    await expect(readout).toHaveAttribute("popover", "manual");
+    await expect(readout).toContainText("50 MHz");
+    await expect.poll(overlaps).toEqual(clear);
+    // With the chart at the top of the window, both fit below it: the popover goes under the readout.
+    await page.mouse.move(p.x - 60, p.y + 60);
+    await expect(pop).toBeHidden();
+    await page.evaluate(() => scrollBy(0, document.querySelector("#w")!.getBoundingClientRect().top - 10));
+    p = await verge50(page);
+    await page.mouse.move(p.x, p.y);
+    await expect(pop).toBeVisible();
+    await expect.poll(overlaps).toEqual(clear);
+    const [readoutBox, popBox] = [(await readout.boundingBox())!, (await pop.boundingBox())!];
+    expect(popBox.y).toBeGreaterThanOrEqual(readoutBox.y + readoutBox.height);
   });
 
   test("the tooltip readout keeps off the points: at 50 MHz, below Verge's line, and between the lines", async ({ page }) => {

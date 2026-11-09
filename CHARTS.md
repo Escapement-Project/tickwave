@@ -179,8 +179,11 @@ The readout gives the picked x and each shown series' figure there, with the ser
 line and marker as drawn. A figure takes its range in brackets, its partial runs, its note and its
 verdict, such as "failed in 1 of 2 runs (744.6 KiB/s in the other), reads wrong". As a tooltip,
 the readout sits beside the picked x, or to its left near the plot's right edge. It sits at the
-plot's top, or lower where that hides less of the lines. It stays inside the chart's box: a long
-line wraps, and where neither side of the picked x has room, the readout lies across it.
+plot's top, or lower where that hides less of the lines. A long line wraps.
+
+On a chart too narrow for some setting's readout to fit beside it, as on a phone, the tooltip
+floats off the chart for every setting. It sits below the chart at the picked x, or above it where
+the window has no room below. There it covers the page around the chart, and none of the chart.
 
 ### Evidence
 
@@ -188,7 +191,7 @@ A point that names a recording behaves as `<tickwave-ref>` does. An inset of its
 in a popover when a mouse rests within 12 px of the point for 150 ms, when a finger taps it, or
 when the keys reach its setting. The popover opens below the chart, or above it when there is no
 room below, across the point's x. Nothing on the page moves, and the popover covers none of the
-chart: the picked x's rule joins it to the point. Its first line names the series, and the inset
+chart, nor a floating readout: the picked x's rule joins it to the point. Its first line names the series, and the inset
 draws the probe's lines in the series' colour. A failure's mark opens its point's recording the
 same way.
 
