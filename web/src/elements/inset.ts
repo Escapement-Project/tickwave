@@ -4,7 +4,7 @@
 import { covers, type Annotation } from "../annotations.ts";
 import { INSET_ATTRIBUTES, parseChannels, parsePad, parseScale, parseSweep } from "../attributes.ts";
 import { reducedMotion } from "../face.ts";
-import { clockNote, formatClockPeriod, formatClockRate, periodStats } from "../readouts.ts";
+import { measureReading } from "../readouts.ts";
 import { channelIndices, Plot } from "../render/plot.ts";
 import { isAbort, type RecordingInfo } from "../source.ts";
 import { secondsValue, toTicks } from "../time.ts";
@@ -335,15 +335,10 @@ export class ChronoInset extends ChronoElement {
 
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
 
-/**
- * The `measure` readout as HTML, or null for a measure it does not know. Both measures read the
- * running clock (`periodStats`), not the median or first-to-last.
- */
+/** The `measure` readout as HTML: empty when the span says nothing, null for an unknown measure. */
 export function measureText(what: string, channel: string, level: 0 | 1, ticks: Float64Array, info: RecordingInfo): string | null {
-  const tb = info.timebase;
-  const label = (value: string, note: string) => `<span class="what">${esc(channel)}</span> ${esc(value)} <span class="what">${esc(note)}</span>`;
-  if (what !== "rate" && what !== "period") return null;
-  const stats = periodStats(level, ticks);
-  if (!stats) return label("\u2013", "no full period");
-  return label(what === "rate" ? formatClockRate(stats, tb) : formatClockPeriod(stats, tb), clockNote(stats));
+  const r = measureReading(what, level, ticks, info.timebase);
+  if (r === undefined) return null;
+  if (r === null) return "";
+  return `<span class="what">${esc(channel)}</span> ${esc(r.value)} <span class="what">${esc(r.note)}</span>`;
 }

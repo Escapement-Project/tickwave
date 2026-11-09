@@ -4,7 +4,7 @@
 import { ofKind, type Annotation } from "../annotations.ts";
 import { parseChannels, parseWindow, VIEW_ATTRIBUTES } from "../attributes.ts";
 import { absolute, events as registryEvents, infoFor, peekInfo } from "../registry.ts";
-import { clockNote, countEdges, formatClockPeriod, formatClockRate, formatCount, formatInterval, formatRate, formatValue, periodStats } from "../readouts.ts";
+import { clockNote, countEdges, formatBrief, formatClockPeriod, formatClockRate, formatCount, formatInterval, formatRate, formatValue, periodStats } from "../readouts.ts";
 import { lowerBound } from "../search.ts";
 import { channelIndices, Plot } from "../render/plot.ts";
 import { isAbort, sampleAtOrBefore, sampleTick, type RecordingInfo } from "../source.ts";
@@ -763,11 +763,11 @@ export class ChronoView extends ChronoElement {
   }
 }
 
-/** "523.583100 ms · 2 channels: SWCLK, SWDIO · 3.6 KiB". */
+/** "524 ms · 2 channels: SWCLK, SWDIO · 4.7 KiB". */
 export function summaryFacts(info: RecordingInfo): string {
   const names = info.channels.map((c) => c.name);
   const parts = [
-    formatInterval(info.length, info.timebase),
+    formatBrief(info.length, info.timebase),
     `${names.length} channel${names.length === 1 ? "" : "s"}: ${names.join(", ")}`,
   ];
   if (info.bytes !== undefined) parts.push(formatBytes(info.bytes));

@@ -20,7 +20,14 @@ console.log("fixtures/identify-swd.swd.jsonl");
 
 const cli = resolve(web, "../target/release/chrono");
 rmSync(resolve(web, "fixtures/identify-swd.bundle.chrono"), { force: true });
-if (existsSync(cli)) {
-  run(cli, ["bundle", "fixtures/identify-swd.chrono", "fixtures/identify-swd.annotations.toml", "-o", "fixtures/identify-swd.bundle.chrono"]);
-  console.log("fixtures/identify-swd.bundle.chrono");
-} else console.log(`no ${cli}: the bundle test will skip`);
+if (!existsSync(cli)) console.log(`no ${cli}: the bundle test will skip`);
+else {
+  // A converter older than the sidecar's fields refuses it; that skips the bundle test, loudly,
+  // rather than failing every other test.
+  try {
+    run(cli, ["bundle", "fixtures/identify-swd.chrono", "fixtures/identify-swd.annotations.toml", "-o", "fixtures/identify-swd.bundle.chrono"]);
+    console.log("fixtures/identify-swd.bundle.chrono");
+  } catch {
+    console.log(`${cli} refused the sidecar (see above): the bundle test will skip`);
+  }
+}

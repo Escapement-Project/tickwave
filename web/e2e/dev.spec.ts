@@ -2,6 +2,7 @@
 // Expected figures are hand-derived from the export (see test/), never read back from the code.
 
 import { test, expect, type Page, type Locator } from "@playwright/test";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
 
 const LOCAL = existsSync("fixtures-local/gcc-swd-reads.chronofx") && existsSync("fixtures-local/stock-reads.chronofx");
@@ -109,7 +110,7 @@ test("a collapsed view fetches its head, and only its head, once it scrolls into
   await page.waitForTimeout(300);
   expect(await served(tag)).toEqual([]);
   await view.scrollIntoViewIfNeeded();
-  await expect(view.locator(".summary .facts")).toHaveText("523.583100\u00a0ms \u00b7 2 channels: SWCLK, SWDIO \u00b7 4.7\u00a0KiB");
+  await expect(view.locator(".summary .facts")).toHaveText("524\u00a0ms \u00b7 2 channels: SWCLK, SWDIO \u00b7 4.7\u00a0KiB");
   await page.waitForTimeout(300);
   expect((await served(tag)).map((e) => [e.range, e.status])).toEqual([
     ["bytes=0-511", 206],
@@ -225,6 +226,26 @@ test("analog through the WASM path: the head's overview, the samples, and readou
   await view.screenshot({ path: `screenshots/${info.project.name}-analog-samples.png` });
   await win(0, 50000);
   await view.screenshot({ path: `screenshots/${info.project.name}-analog-50us.png` });
+});
+
+test("an inset's duration: first edge to last of the edges in [start, end)", async ({ page }) => {
+  // Expected values from the edges, read by a process of the test's own through the decoder.
+  const edges = (ch: number, s: number, e: number) =>
+    JSON.parse(execFileSync(process.execPath, ["scripts/edges.ts", "fixtures/identify-swd.chrono", String(ch), String(s), String(e)], { encoding: "utf8" })) as { ticks: number[] };
+  const ms = (ticks: number[]) => `${((ticks[ticks.length - 1] - ticks[0]) / 1000).toFixed(3)}\u00a0\u00b5s`;
+  for (const [id, s, e, want] of [
+    // The line reset: SWCLK from its first fall to the 51st rise.
+    ["line-reset", 376719436, 376774581, "54.644\u00a0\u00b5s"],
+    // The same clock, ending exactly on that 51st rise, which is left out: the last edge is the
+    // fall at 376773579.
+    ["reset-clock", 376719436, 376774080, "54.143\u00a0\u00b5s"],
+  ] as const) {
+    expect(ms(edges(0, s, e).ticks)).toBe(want);
+    await recordReady(page);
+    await page.goto(`/e2e/pages/inset.html?src=fixtures/identify-swd.chrono&annotations=fixtures/identify-swd.annotations.toml&annotation=${id}`);
+    await waitReady(page, ["i"]);
+    await expect(page.locator("#i").locator(".measure")).toHaveText(`SWCLK ${want} first edge to last`);
+  }
 });
 
 test("a local file reads through slice", async ({ page }) => {

@@ -138,6 +138,22 @@ export function formatInterval(ticks: number, timebase: Ratio): string {
 export const formatTime = formatInterval;
 
 /**
+ * An interval to three significant figures, for a summary line: 927888190 ticks at 1 GS/s is
+ * 928 ms. Never finer than one tick.
+ */
+export function formatBrief(ticks: number, timebase: Ratio): string {
+  const n = big(Math.abs(ticks)) * big(timebase.den);
+  const d = big(timebase.num);
+  const tick = tickPlace(timebase);
+  if (n === 0n) return formatScaled(0n, tick, TIME_UNITS);
+  let p = Math.max(placeOf(n, d) - 2, tick);
+  let scaled = roundAt(n, d, p);
+  // Rounding up can add a digit (999.6 ms to 1000 ms): one place coarser then.
+  if (scaled >= 1000n) scaled = roundAt(n, d, ++p);
+  return formatScaled(ticks < 0 ? -scaled : scaled, p, TIME_UNITS);
+}
+
+/**
  * The mean rate over `periods` periods that together span `span` ticks, in Hz with an SI prefix.
  *
  * The digits: each edge is recorded at the first sample after it, so an edge's tick is late by
@@ -198,9 +214,10 @@ export interface PeriodStats {
   readonly min: number;
   readonly max: number;
   /**
-   * The running clock: the periods within one tick of the median. A quantised clock's median sits
-   * on one sample step, and first-to-last counts the gaps between bursts; the mean of these does
-   * neither. `used` periods, in `runs` runs of consecutive periods, summing to `span` ticks.
+   * The running clock: the periods inside Tukey's fences (ANNOTATIONS.md, "Measures"). The fences
+   * keep a clock's jitter and quantisation, and drop pauses and stretched cycles that occur in
+   * fewer than a quarter of the periods. `used` periods, in `runs` runs of consecutive periods,
+   * summing to `span` ticks.
    */
   readonly used: number;
   readonly runs: number;
@@ -220,12 +237,17 @@ export function periodStats(level: 0 | 1, ticks: ArrayLike<number>): PeriodStats
   for (let k = 0; k < count; k++) periods[k] = ticks[first + 2 * k + 2] - ticks[first + 2 * k];
   const sorted = periods.slice().sort();
   const median = sorted[(count - 1) >> 1];
+  // Tukey's fences: Q1 = p[⌊(n − 1)/4⌋], Q3 = p[⌈3(n − 1)/4⌉], IQR at least one tick.
+  const q1 = sorted[Math.floor((count - 1) / 4)];
+  const q3 = sorted[Math.ceil((3 * (count - 1)) / 4)];
+  const iqr = Math.max(q3 - q1, 1);
+  const [lo, hi] = [q1 - 1.5 * iqr, q3 + 1.5 * iqr];
   let used = 0;
   let runs = 0;
   let span = 0;
   let inRun = false;
   for (const p of periods) {
-    if (Math.abs(p - median) <= 1) {
+    if (p >= lo && p <= hi) {
       used++;
       span += p;
       if (!inRun) runs++;
@@ -245,8 +267,9 @@ export function formatClockPeriod(s: PeriodStats, timebase: Ratio): string {
   return formatMeanPeriod(s.used, s.span, timebase, s.runs)!;
 }
 
-/** "mean of 29 of 31 periods", or "mean of 45 periods" when it used them all. */
+/** "mean of 31 of 32 periods", "mean of 7 periods" when it kept them all, "one of 7 periods", "one period". */
 export function clockNote(s: PeriodStats): string {
+  if (s.used === 1) return s.count === 1 ? "one period" : `one of ${formatCount(s.count)} periods`;
   return s.used === s.count ? `mean of ${formatCount(s.count)} periods` : `mean of ${formatCount(s.used)} of ${formatCount(s.count)} periods`;
 }
 
@@ -271,4 +294,27 @@ export function niceStep(x: number): { step: number; place: number } {
     }
     place++;
   }
+}
+
+export interface Reading {
+  readonly value: string;
+  readonly note: string;
+}
+
+/**
+ * A `measure` reading (ANNOTATIONS.md, "Measures") over a span's edges: `ticks` are the edges at
+ * ticks in [start, end), as `Source.edges` returns them, and `level` the level before the first.
+ * `rate` and `period` read the running clock; `duration` the time from the first edge to the
+ * last, of either polarity, to the tick. Null when the span has too few edges to say anything;
+ * undefined for a measure it does not know.
+ */
+export function measureReading(what: string, level: 0 | 1, ticks: ArrayLike<number>, timebase: Ratio): Reading | null | undefined {
+  if (what === "duration") {
+    if (ticks.length < 2) return null;
+    return { value: formatInterval(ticks[ticks.length - 1] - ticks[0], timebase), note: "first edge to last" };
+  }
+  if (what !== "rate" && what !== "period") return undefined;
+  const stats = periodStats(level, ticks);
+  if (!stats) return { value: "\u2013", note: "no full period" };
+  return { value: what === "rate" ? formatClockRate(stats, timebase) : formatClockPeriod(stats, timebase), note: clockNote(stats) };
 }

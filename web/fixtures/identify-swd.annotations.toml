@@ -23,6 +23,7 @@ label = "Attaching: line reset, select, line reset, then the first read"
 id = "line-reset"
 ref = "swd/reset/376719436"
 label = "Line reset: SWDIO held high for 51 clocks"
+measure = { channel = "SWCLK", what = "duration" }
 
 [[annotation]]
 id = "jtag-to-swd"
@@ -45,3 +46,13 @@ label = "request 0xA5"
 id = "dpidr-ack"
 ref = "swd/ack/377103058"
 label = "ack OK"
+
+# Ends exactly on the line reset's 51st rising edge, which the measure leaves out.
+[[annotation]]
+id = "reset-clock"
+start = 376719436
+end = 376774080
+channels = ["SWCLK"]
+kind = "clock"
+label = "The reset's clock, up to its last rising edge"
+measure = { channel = "SWCLK", what = "duration" }

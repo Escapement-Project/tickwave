@@ -133,7 +133,8 @@ Import `chrono.js` and the three elements are defined.
 
 `<chrono-view>` takes `src`, `annotations`, `channels`, `window`, `open` and `series`. Collapsed,
 it shows one line and an Open button. When it scrolls into view it fetches the recording's head,
-and only the head, to say what the recording is. Open, the view takes these controls:
+and only the head, to say what the recording is; that line gives the duration to three
+significant figures. Open, the view takes these controls:
 
 - Ctrl or Cmd with the wheel, and a trackpad pinch, zoom about the pointer; the plain wheel
   scrolls the page and shows how to zoom
@@ -152,8 +153,8 @@ bar along the time axis, above its labels.
 
 A selection reads out its length, each channel's edges, and for one channel the periods' count,
 minimum, median and maximum, and the running clock. The running clock is the mean of the periods
-within one tick of the median: a quantised clock's median sits on one sample step, and
-first-to-last counts the gaps between bursts.
+inside Tukey's fences (ANNOTATIONS.md, "Measures"): they keep a clock's jitter and quantisation,
+and drop pauses and the long periods that occur in fewer than a quarter of them.
 
 Methods are `show(id)`, `setWindow(start, end)` (ticks, or times such as `"317.8 ms"`), `settled()`
 and `tickAt(clientX)`. Events are `chrono-open`, `chrono-window`, `chrono-select`, `chrono-ready`
@@ -163,7 +164,8 @@ and `chrono-error`.
 default, or a time), `scale` (`"50 ns/px"`), `sweep` (`off`) and `series`. It shows the
 annotation's label and text, and draws the annotations inside its span as notes. It sweeps in once
 per appearance, and an inset shown again within 800 ms of hiding does not sweep. `measure` gives
-the running clock's `rate` or `period`. It fires `chrono-ready` once it has drawn.
+the running clock's `rate` or `period`, or the `duration` from the channel's first edge in the
+span to its last. It fires `chrono-ready` once it has drawn.
 
 `<chrono-ref>` takes `annotation`, and `for` or its own `src` and `annotations`. It borrows `src`,
 `annotations`, `channels` and `series` from its view.
