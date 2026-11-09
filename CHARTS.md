@@ -2,8 +2,7 @@
 
 Draft, 2026-11-09, reviewed by the Escapement Project session. It answers that session's request
 (`notes/design-2026-11-09/tickwave-charts-request.md`), which lists every chart on the landing and
-measurements pages. Everything here is built; step 2's chart itself waits on the decoders writing
-values.
+measurements pages. Steps 1 and 2 are built; step 3, the measurements page's charts, is next.
 
 ## What a chart is
 
@@ -92,7 +91,7 @@ Figure 1 on the landing page, cut to three clocks:
 | `x.name`, `x.unit`, `y.name`, `y.unit` | the axis names; a unit is written once, at the axis |
 | `x.scale`, `y.scale` | `linear` or `log` |
 | `y.max`, `y.step` | a fixed top and tick step. Without them the chart picks both from the data |
-| `reference` | `"y=x"` draws the diagonal, labelled "as asked" |
+| `reference` | `"y=x"` draws the diagonal, named "as asked" in the legend |
 
 ### A series
 
@@ -121,8 +120,9 @@ would read as a figure there, whether the run failed, partly failed or was never
 | `failed` | the run failed here: the line breaks, the readout says "failed", and a fail mark shows if the series marks its failures |
 | `partial` | `{ "failed": 1, "of": 2, "value": "1180.5" }`: some runs failed, and the others gave this figure. The point has no `value`: the line breaks, a fail mark shows if the series marks its failures, and the readout gives this figure |
 | `range` | `["1230.1", "1247.0"]`: the spread across runs, in the readout |
-| `ring` | a ring around the point; with `note`, the readout says why ("from SWDIO") |
-| `evidence` | `{ "recording": "...", "annotations": "...", "annotation": "..." }`: the recording, its sidecar, and the annotation that shows this point. URLs are relative to the chart's file, or to the page for data set through `data` |
+| `ring` | a ring around the point |
+| `note` | a few words the readout adds after the figure: "18.4 MHz, the read failed partway" |
+| `evidence` | `{ "recording": "...", "annotations": "...", "annotation": "..." }`: the recording, its sidecar, and the annotation that shows this point. URLs are relative to the chart's file, or to the page for data set through `data`. A failed or partial point's opens from its fail mark, so only in a series that marks its failures |
 
 ### A limit
 
@@ -142,7 +142,7 @@ that series' point during the entry sweep.
 | `highlight` | points to ring, as `series@x`: `"clang@50 stock@20"`. A claim in the prose sets it |
 | `readout` | `tooltip`, beside the selected x, or `below`, a row under the plot |
 | `legend` | `above` draws a legend over the plot. Without it, the page has its own key |
-| `end-labels` | name each line at its last point, with its `short` |
+| `end-labels` | name each line at its last point, with its `short`. Labels that would overlap move apart, and the plot leaves room for the widest |
 | `table` | the id of the page's table that gives the chart as text |
 | `height` | the plot's height in CSS pixels |
 | `sweep` | `off` to draw at once |
@@ -173,17 +173,23 @@ A reader picks a series from the legend or from its end label. The other series 
 page picks one with `pick`, for a table column or a key.
 
 The readout gives the picked x and each shown series' figure there, with the series' swatch: its
-line and marker as drawn. A figure takes its range in brackets, its partial runs and its verdict,
-such as "744.6 KiB/s, reads wrong". As a tooltip, the readout keeps off the lines it describes, and
-moves left near the plot's right edge.
+line and marker as drawn. A figure takes its range in brackets, its partial runs, its note and its
+verdict, such as "744.6 KiB/s, reads wrong". As a tooltip, the readout sits beside the picked x, or
+to its left near the plot's right edge. It sits at the plot's top, or lower where that hides less
+of the lines.
 
 ### Evidence
 
 A point that names a recording behaves as `<tickwave-ref>` does. A mouse resting within 12 px of
 it for 150 ms, a tap on it, or the keys reaching its setting open an inset of its annotation in a
-popover beside it, so nothing on the page moves. A mouse only passing over the plot opens nothing,
-so it loads nothing. The keys open the picked series' point at that setting, or else the first
-shown point there that names a recording. The inset draws the probe's lines in the series' colour.
+popover. The popover opens below the chart, or above it when there is no room below, across the
+point's x. Nothing on the page moves, and the popover covers none of the chart: the picked x's
+rule joins it to the point. Its first line names the series, and the inset draws the probe's
+lines in the series' colour. A failure's mark opens its point's recording the same way.
+
+A mouse only passing over the plot opens nothing, so it loads nothing. Where points lie on one
+another, the picked series' point opens, or else the first series' in the data. The keys open the
+picked series' point at that setting, or else the first there that names a recording.
 
 A click or Enter fires `tickwave-evidence`, which a page can cancel to take over. On a touch
 screen, the tap is the click. Unless the page cancels the event, the chart opens the page's

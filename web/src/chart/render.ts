@@ -115,12 +115,11 @@ function seriesMarkup(s: SeriesLayout, l: Layout, state: State, c: Colours): str
     if (sweep !== null && sweep < p.x) break;
     out.push(marker(series.marker, p.x, p.y, colour, p.point.wrong));
   }
-  if (state.endLabels && s.placed.length && (sweep === null || sweep >= l.sweepTo)) {
-    const end = s.placed[s.placed.length - 1];
+  if (state.endLabels && s.label && (sweep === null || sweep >= l.sweepTo)) {
     const chars = [...series.short];
     const shown = state.labels === null ? chars.length : Math.ceil(state.labels * chars.length);
     if (shown > 0) {
-      out.push(`<text class="tw-end" x="${f1(end.x + 14)}" y="${f1(end.y + 4)}" fill="currentColor" font-weight="600">${esc(chars.slice(0, shown).join(""))}</text>`);
+      out.push(`<text class="tw-end" x="${f1(s.label.x)}" y="${f1(s.label.y + 4)}" fill="currentColor" font-weight="600">${esc(chars.slice(0, shown).join(""))}</text>`);
     }
   }
   out.push("</g>");

@@ -4,21 +4,22 @@ import type { Point, Series } from "./data.ts";
 import { grouped } from "./decimal.ts";
 import { marker, type Colours } from "./render.ts";
 
-/** A point's figure, with the digits it came with: "1,238.6 KiB/s", "failed", "–". */
+/** A point's figure, with the digits it came with, and its note: "1,238.6 KiB/s", "failed", "–". */
 export function figure(p: Point | null, unit: string): string {
   if (!p) return "–";
   const u = unit ? ` ${unit}` : "";
   const wrong = p.wrong ? ", reads wrong" : "";
+  const note = p.note ? `, ${p.note}` : "";
   if (p.value !== null) {
     const range = p.range ? ` (${grouped(p.range[0])} to ${grouped(p.range[1])})` : "";
-    const note = p.note ? `, ${p.note}` : "";
     return `${grouped(p.value)}${u}${range}${note}${wrong}`;
   }
   if (p.partial) {
     const others = p.partial.of - p.partial.failed;
-    return `failed in ${p.partial.failed} of ${p.partial.of} runs (${grouped(p.partial.value)}${u} in the ${others > 1 ? "others" : "other"})${wrong}`;
+    return `failed in ${p.partial.failed} of ${p.partial.of} runs (${grouped(p.partial.value)}${u} in the ${others > 1 ? "others" : "other"})${note}${wrong}`;
   }
-  return p.failed ? "failed" : "–";
+  if (p.failed) return `failed${note}`;
+  return p.note ?? "–";
 }
 
 /** A series' line and marker as the chart draws them, for the legend and the readout. */

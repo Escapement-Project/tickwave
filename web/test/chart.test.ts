@@ -14,6 +14,9 @@ import { render, type Colours, type State } from "../src/chart/render.ts";
 const RAW = JSON.parse(readFileSync(new URL("../fixtures/figure1.chart.json", import.meta.url), "utf8"));
 const FIG1 = parseChart(RAW);
 const SHOWN = new Set(["clang", "stock"]);
+/** The 2026-11-04 request-clock chart, with NXP's failures marked. */
+const WIRE = parseChart(JSON.parse(readFileSync(new URL("../fixtures/wire.chart.json", import.meta.url), "utf8")));
+const WIRE_SHOWN = new Set(["gcc", "capture", "stock"]);
 
 const COLOURS: Colours = {
   series: (name) => ({ verge: "#0f8a6c", nxp: "#2a78d6" })[name] ?? "#000000",
@@ -74,7 +77,7 @@ test("the data: Figure 1 parses, and every problem in a bad chart is reported", 
 });
 
 test("the axes: settings placed on the log scale, labels thinned by distance, the fixed y ticks", () => {
-  const l = layout(FIG1, SHOWN, 620, 330, true);
+  const l = layout(FIG1, SHOWN, 620, 330, 40);
   assert.deepEqual([l.left, l.right, l.top, l.bottom], [52, 556, 28, 286]);
   [1, 2, 5, 10, 20, 30, 50].forEach((v, i) => near(l.xs[i], log50(v), `${v} MHz`));
   assert.deepEqual(l.xLabels.map((t) => t.text), ["1", "2", "5", "10", "20", "30", "50"]);
@@ -83,7 +86,7 @@ test("the axes: settings placed on the log scale, labels thinned by distance, th
   near(l.yTicks[0].y, 286, "0 at the bottom");
 
   // At 320 px the plot is 204 wide: 30 MHz would sit 21.2 px after 20 MHz, so its label goes.
-  const narrow = layout(FIG1, SHOWN, 320, 330, true);
+  const narrow = layout(FIG1, SHOWN, 320, 330, 40);
   assert.deepEqual(narrow.xLabels.map((t) => t.text), ["1", "2", "5", "10", "20", "50"]);
 
   // Each setting owns the band halfway to its neighbours.
@@ -96,9 +99,9 @@ test("the axes: settings placed on the log scale, labels thinned by distance, th
 test("without a fixed top, y takes d3's steps of 1, 2 or 5", () => {
   const data: ChartData = { ...FIG1, y: { ...FIG1.y, max: null, step: null } };
   // Clang's 2,257.8 is the top figure: 2,348.1 with 4 % room, which d3 rounds out to 2,500.
-  assert.deepEqual(layout(data, SHOWN, 620, 330, true).yTicks.map((t) => t.text), ["0", "500", "1,000", "1,500", "2,000", "2,500"]);
+  assert.deepEqual(layout(data, SHOWN, 620, 330, 40).yTicks.map((t) => t.text), ["0", "500", "1,000", "1,500", "2,000", "2,500"]);
   // NXP alone tops out at 744.6: 774.4 with room, rounded to 800, in steps of 200.
-  assert.deepEqual(layout(data, new Set(["stock"]), 620, 330, true).yTicks.map((t) => t.text), ["0", "200", "400", "600", "800"]);
+  assert.deepEqual(layout(data, new Set(["stock"]), 620, 330, 40).yTicks.map((t) => t.text), ["0", "200", "400", "600", "800"]);
 });
 
 /** Figure 1 with one series' point at a setting replaced. */
@@ -108,7 +111,7 @@ const withPoint = (id: string, i: number, point: object): ChartData => ({
 });
 
 test("a failed setting breaks the line, the segment into a point read wrong is dotted, and only marked series get fail marks", () => {
-  const l = layout(FIG1, SHOWN, 620, 330, true);
+  const l = layout(FIG1, SHOWN, 620, 330, 40);
   const stock = l.series.find((s) => s.series.id === "stock")!;
   assert.deepEqual(stock.placed.map((p) => p.index), [0, 1, 2, 3, 4, 6]);
   // NXP failed at 30 MHz: its line ends at 20, and 50 stands alone.
@@ -122,22 +125,22 @@ test("a failed setting breaks the line, the segment into a point read wrong is d
   assert.equal((at.match(/<path /g) ?? []).length, 1, "one solid path, 1 to 20 MHz");
   assert.equal((at.match(/class="tw-hollow"/g) ?? []).length, 1, "50 MHz, alone and hollow");
   // Had 30 MHz read right, the segment into 50 would be dotted.
-  const read = layout(withPoint("stock", 5, { failed: false, value: "700.0" }), SHOWN, 620, 330, true);
+  const read = layout(withPoint("stock", 5, { failed: false, value: "700.0" }), SHOWN, 620, 330, 40);
   assert.deepEqual(read.series.find((s) => s.series.id === "stock")!.segments.at(-1)!.wrong, true);
   assert.match(render(read, AT_REST, COLOURS), /<path d="M\S+ \S+L\S+ \S+" fill="none" stroke="#2a78d6" stroke-width="2" stroke-dasharray="2 4"\/>/);
   // A setting without a value inside a solid run splits its path in two, rather than joining
   // across it: failed, partly failed, or never measured.
   for (const gap of [{ failed: true, value: null }, { partial: { failed: 1, of: 2, value: "740.0" }, value: null }]) {
-    const split = layout(withPoint("clang", 3, gap), SHOWN, 620, 330, true);
+    const split = layout(withPoint("clang", 3, gap), SHOWN, 620, 330, 40);
     const clang = render(split, AT_REST, COLOURS).match(/<g class="tw-series" data-series="clang">(.*?)<\/g>/)![1];
     assert.deepEqual([...clang.matchAll(/<path d="([^"]*)"/g)].map((m) => (m[1].match(/M/g) ?? []).length), [1, 1]);
   }
   const unmeasured: ChartData = { ...FIG1, series: FIG1.series.map((s) => (s.id === "clang" ? { ...s, points: s.points.map((p, j) => (j === 3 ? null : p)) } : s)) };
-  const joins = layout(unmeasured, SHOWN, 620, 330, true).series.find((s) => s.series.id === "clang")!.segments;
+  const joins = layout(unmeasured, SHOWN, 620, 330, 40).series.find((s) => s.series.id === "clang")!.segments;
   assert.deepEqual(joins.map((s) => [s.from.index, s.to.index]), [[0, 1], [1, 2], [4, 5], [5, 6]]);
   assert.deepEqual(l.fails, []);
   const marked: ChartData = { ...FIG1, series: FIG1.series.map((s) => (s.id === "stock" ? { ...s, markFailures: true } : s)) };
-  assert.deepEqual(layout(marked, SHOWN, 620, 330, true).fails.map((f) => [f.text, Math.round(f.x)]), [["NXP failed", Math.round(log50(30))]]);
+  assert.deepEqual(layout(marked, SHOWN, 620, 330, 40).fails.map((f) => [f.text, Math.round(f.x)]), [["NXP failed", Math.round(log50(30))]]);
 
   const svg = render(l, AT_REST, COLOURS);
   assert.ok(!svg.includes("url(#"), "nothing refers to an id");
@@ -146,8 +149,39 @@ test("a failed setting breaks the line, the segment into a point read wrong is d
   assert.ok(svg.includes('stroke="#0f8a6c"'), "Verge's teal as an attribute");
 });
 
+test("end labels that would overlap stand apart, inside the plot, and the margin fits the widest", () => {
+  const l = layout(WIRE, WIRE_SHOWN, 620, 330, 100);
+  assert.equal(l.right, 620 - (14 + 100 + 4));
+  assert.equal(layout(WIRE, WIRE_SHOWN, 620, 330, 30).right, 620 - 64, "never narrower than before");
+  const label = (id: string) => l.series.find((s) => s.series.id === id)!.label!;
+  // Verge's two runs both end at 50.0 MHz: the first in the data keeps its place, the other moves a line down.
+  const end = l.series.find((s) => s.series.id === "gcc")!.placed.at(-1)!;
+  assert.deepEqual(label("gcc"), { x: end.x + 14, y: end.y });
+  assert.deepEqual(label("capture"), { x: end.x + 14, y: end.y + 14 });
+  near(label("stock").y, l.y(18.4), "NXP's, alone, at its point");
+  assert.ok(render(l, AT_REST, COLOURS).includes(`y="${Math.round((end.y + 18) * 10) / 10}" fill="currentColor" font-weight="600">Verge, capturing</text>`));
+  // At the plot's bottom, labels move up rather than out of it.
+  const flat = parseChart({
+    format: "tickwave-chart/1",
+    x: { scale: "linear", values: ["1", "2"] },
+    y: { scale: "linear", max: "10", step: "5" },
+    series: ["a", "b"].map((id) => ({ id, name: id, colour: "verge", points: [{ value: "5" }, { value: "0" }] })),
+  });
+  const low = layout(flat, new Set(["a", "b"]), 620, 330, 40);
+  assert.deepEqual(low.series.map((s) => s.label!.y), [low.bottom - 14, low.bottom]);
+});
+
+test("a failure's mark names its point, so a failure can name its recording", () => {
+  const l = layout(WIRE, WIRE_SHOWN, 620, 330, 100);
+  assert.deepEqual(
+    l.fails.map((f) => [f.text, f.index, f.point.evidence?.annotation]),
+    [["NXP failed", 1, "dpidr-request"]],
+  );
+  assert.equal(l.fails[0].x, l.xs[1]);
+});
+
 test("the limit grows from its series' point as the sweep crosses it", () => {
-  const l = layout(FIG1, SHOWN, 620, 330, true);
+  const l = layout(FIG1, SHOWN, 620, 330, 40);
   const origin = 286 - (666.7 / 2500) * 258;
   near(l.limits[0].origin!, origin, "NXP's 20 MHz point");
   near(l.limits[0].reach!, 556, "NXP's last point");
@@ -162,7 +196,7 @@ test("the limit grows from its series' point as the sweep crosses it", () => {
 });
 
 test("the sweep cuts the lines where it is, and shows whole markers only", () => {
-  const l = layout(FIG1, SHOWN, 620, 330, true);
+  const l = layout(FIG1, SHOWN, 620, 330, 40);
   const svg = render(l, { ...AT_REST, sweep: 300, labels: 0 }, COLOURS);
   const clang = svg.match(/<g class="tw-series" data-series="clang">(.*?)<\/g>/)![1];
   assert.match(clang, /L300 /, "Clang's line ends at the sweep");
@@ -181,5 +215,9 @@ test("a readout figure keeps its digits and says what is known", () => {
   assert.equal(figure(p({ value: "37.5", note: "from SWDIO" }), "MHz"), "37.5 MHz, from SWDIO");
   assert.equal(figure(p({ partial: { failed: 1, of: 2, value: "1180.5" } }), "KiB/s"), "failed in 1 of 2 runs (1,180.5 KiB/s in the other)");
   assert.equal(figure(p({ failed: true }), "KiB/s"), "failed");
+  assert.equal(figure(p({ value: "18.4", note: "the read failed partway" }), "MHz"), "18.4 MHz, the read failed partway");
+  assert.equal(figure(p({ failed: true, note: "under the leads" }), "MHz"), "failed, under the leads");
+  assert.equal(figure(p({ partial: { failed: 1, of: 3, value: "740.0" }, note: "x" }), "KiB/s"), "failed in 1 of 3 runs (740.0 KiB/s in the others), x");
+  assert.equal(figure(p({ note: "not recorded" }), "MHz"), "not recorded");
   assert.equal(figure(null, "KiB/s"), "–");
 });

@@ -1,0 +1,45 @@
+{
+  "format": "tickwave-chart/1",
+  "source": "a test fixture: the 2026-11-04 request-clock chart's figures, its evidence pointed at annotations of identify-swd.tickwave, and NXP's failures marked",
+  "x": { "name": "SWD clock asked for", "unit": "MHz", "scale": "log", "values": ["10", "20", "25", "30", "37.5", "50"] },
+  "y": { "name": "Request clock", "unit": "MHz", "scale": "log" },
+  "reference": "y=x",
+  "series": [
+    {
+      "id": "gcc", "name": "Verge, GCC build", "short": "Verge",
+      "colour": "verge", "pattern": "second-build", "marker": "square",
+      "points": [
+        { "value": "10.0", "evidence": { "recording": "identify-swd.tickwave", "annotations": "identify-swd.annotations.toml", "annotation": "attach" } },
+        null,
+        null,
+        { "value": "29.9", "evidence": { "recording": "identify-swd.tickwave", "annotations": "identify-swd.annotations.toml", "annotation": "line-reset" } },
+        { "value": "37.4" },
+        { "value": "50.0", "evidence": { "recording": "identify-swd.tickwave", "annotations": "identify-swd.annotations.toml", "annotation": "dpidr-read" } }
+      ]
+    },
+    {
+      "id": "capture", "name": "Verge, GCC build, capturing energy at 100,000 pairs/s", "short": "Verge, capturing",
+      "colour": "verge", "pattern": "second-build", "marker": "square", "capture": true,
+      "points": [
+        null,
+        null,
+        null,
+        { "value": "29.9", "evidence": { "recording": "identify-swd.tickwave", "annotations": "identify-swd.annotations.toml", "annotation": "jtag-to-swd" } },
+        { "value": "37.4" },
+        { "value": "50.0", "evidence": { "recording": "identify-swd.tickwave", "annotations": "identify-swd.annotations.toml", "annotation": "first-wait" } }
+      ]
+    },
+    {
+      "id": "stock", "name": "NXP's firmware V3.174", "short": "NXP",
+      "colour": "nxp", "pattern": "solid", "marker": "circle", "fails": "mark",
+      "points": [
+        { "value": "10.5" },
+        { "failed": true, "evidence": { "recording": "identify-swd.tickwave", "annotations": "identify-swd.annotations.toml", "annotation": "dpidr-request" } },
+        { "value": "18.4", "note": "the read failed partway" },
+        null,
+        null,
+        { "value": "18.4", "note": "the read failed partway" }
+      ]
+    }
+  ]
+}

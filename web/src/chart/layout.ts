@@ -9,11 +9,15 @@ import { grouped, toNumber } from "./decimal.ts";
 const LEFT = 52;
 const TOP = 28;
 const BOTTOM = 44;
-/** Room on the right for the end labels, or only for a marker without them. */
+/** Room on the right for the end labels, at least, or only for a marker without them. */
 const RIGHT_LABELS = 64;
 const RIGHT_BARE = 18;
+/** An end label stands this far right of its point. */
+const END_OFFSET = 14;
 /** An x label closer than this to the one before it is left out. */
 const LABEL_GAP = 22;
+/** End labels at one setting stand at least this far apart, one line of 12 px text. */
+const END_GAP = 14;
 
 export interface Placed {
   readonly index: number;
@@ -28,6 +32,14 @@ export interface SeriesLayout {
   readonly placed: readonly Placed[];
   /** Placed points at neighbouring settings; `wrong` when the point it runs into reads wrong. */
   readonly segments: readonly { readonly from: Placed; readonly to: Placed; readonly wrong: boolean }[];
+  /** Where the end label's middle goes: beside the last point, moved off any other end label. */
+  readonly label: { readonly x: number; readonly y: number } | null;
+}
+
+/** A failure's mark at the axis. It names the point, which may name a recording. */
+export interface FailMark extends Placed {
+  readonly text: string;
+  readonly series: string;
 }
 
 export interface Layout {
@@ -46,7 +58,7 @@ export interface Layout {
   /** For each setting, the span of x that picks it: halfway to each neighbour. */
   readonly bands: readonly (readonly [number, number])[];
   readonly series: readonly SeriesLayout[];
-  readonly fails: readonly { readonly x: number; readonly y: number; readonly text: string; readonly series: string }[];
+  readonly fails: readonly FailMark[];
   readonly limits: readonly { readonly x: number; readonly label: string; readonly origin: number | null; readonly reach: number | null }[];
   readonly reference: string | null;
   /** The sweep runs from just before the first setting's markers to just past the last's. */
@@ -55,9 +67,10 @@ export interface Layout {
   y(value: number): number;
 }
 
-export function layout(data: ChartData, shown: ReadonlySet<string>, width: number, height: number, endLabels: boolean): Layout {
+/** `endLabels` is the widest end label's width in CSS pixels, or null without end labels. */
+export function layout(data: ChartData, shown: ReadonlySet<string>, width: number, height: number, endLabels: number | null): Layout {
   const left = LEFT;
-  const right = width - (endLabels ? RIGHT_LABELS : RIGHT_BARE);
+  const right = width - (endLabels === null ? RIGHT_BARE : Math.max(RIGHT_LABELS, END_OFFSET + endLabels + 4));
   const top = TOP;
   const bottom = height - BOTTOM;
   const xValues = data.x.values.map(toNumber);
@@ -83,7 +96,7 @@ export function layout(data: ChartData, shown: ReadonlySet<string>, width: numbe
 
   const bands = xs.map((x, i) => [i === 0 ? left : (xs[i - 1] + x) / 2, i === xs.length - 1 ? right : (x + xs[i + 1]) / 2] as const);
 
-  const series = drawn.map((s): SeriesLayout => {
+  const series = drawn.map((s) => {
     const placed: Placed[] = [];
     s.points.forEach((point, index) => {
       if (point?.value != null) placed.push({ index, x: xs[index], y: y(toNumber(point.value)), point });
@@ -96,15 +109,16 @@ export function layout(data: ChartData, shown: ReadonlySet<string>, width: numbe
     });
     return { series: s, placed, segments };
   });
+  const labels = endLabelsAt(series, xs.length, bottom);
 
   // A failure's mark sits at the axis, a row a series, so two at one setting do not overlap.
-  const fails: Layout["fails"][number][] = [];
+  const fails: FailMark[] = [];
   drawn
     .filter((s) => s.markFailures)
     .forEach((s, row) =>
       s.points.forEach((p, i) => {
         if (p && p.value == null && (p.failed || p.partial)) {
-          fails.push({ x: xs[i], y: bottom - 10 - 16 * row, text: `${s.short} failed`, series: s.id });
+          fails.push({ index: i, x: xs[i], y: bottom - 10 - 16 * row, point: p, text: `${s.short} failed`, series: s.id });
         }
       }),
     );
@@ -133,7 +147,7 @@ export function layout(data: ChartData, shown: ReadonlySet<string>, width: numbe
     xLabels,
     yTicks: ticks.map((v) => ({ y: y(v), text: grouped(plain(v)) })),
     bands,
-    series,
+    series: series.map((s, i) => ({ ...s, label: labels[i] })),
     fails,
     limits,
     reference,
@@ -141,6 +155,26 @@ export function layout(data: ChartData, shown: ReadonlySet<string>, width: numbe
     sweepTo: xs[xs.length - 1] + 6,
     y,
   };
+}
+
+/** Each series' end label, beside its last point. Labels that end at one setting and would overlap
+ * move apart, in the order of their points, and back up from the plot's bottom. */
+function endLabelsAt(series: readonly { placed: readonly Placed[] }[], settings: number, bottom: number) {
+  const out: ({ x: number; y: number } | null)[] = series.map((s) => {
+    const end = s.placed[s.placed.length - 1];
+    return end ? { x: end.x + END_OFFSET, y: end.y } : null;
+  });
+  for (let index = 0; index < settings; index++) {
+    const at = out
+      .map((label, i) => ({ label, end: series[i].placed[series[i].placed.length - 1] }))
+      .filter((a): a is { label: { x: number; y: number }; end: Placed } => a.label !== null && a.end.index === index)
+      .map((a) => a.label)
+      .sort((a, b) => a.y - b.y);
+    for (let i = 1; i < at.length; i++) at[i].y = Math.max(at[i].y, at[i - 1].y + END_GAP);
+    const over = at.length ? at[at.length - 1].y - bottom : 0;
+    if (over > 0) for (const label of at) label.y -= over;
+  }
+  return out;
 }
 
 /** The y scale and its ticks: fixed by `y.max` and `y.step`, else d3's steps of 1, 2 or 5. */

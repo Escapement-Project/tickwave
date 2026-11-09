@@ -43,6 +43,7 @@ const CSS = `
   padding: 8px 6px 4px; color: var(--ink, CanvasText); background: var(--page, Canvas);
   border: 1px solid var(--hair, GrayText); border-radius: 10px; box-shadow: 0 2px 10px rgba(0, 0, 0, .14); overflow: visible;
   pointer-events: none; }
+:where(tickwave-chart) .tw-pop-head { display: flex; align-items: center; margin: 0 4px 4px; font-size: 13px; }
 `;
 
 /** The other elements, from the tickwave.js beside this module, the first time a point's evidence
@@ -53,7 +54,7 @@ function loadElements(): Promise<unknown> {
   return (elements ??= import(new URL("tickwave.js", import.meta.url).href));
 }
 
-/** A shown point that names a recording. */
+/** A shown point, or a failure's mark, that names a recording. */
 interface Pointed {
   readonly series: SeriesLayout;
   readonly at: Placed;
@@ -105,10 +106,13 @@ export class TickwaveChart extends HTMLElement {
    * focus's place, on every draw. */
   #legendHtml = "";
   #readoutHtml = "";
+  #popHeadHtml = "";
   #connected = false;
   /** The URL evidence is relative to: the data's file, or the page for data set directly. */
   #base = document.baseURI;
   #pop: HTMLDivElement | null = null;
+  /** The popover's first line: the series whose recording it shows. */
+  #popHead: HTMLParagraphElement | null = null;
   #inset: HTMLElement | null = null;
   /** The point whose evidence the popover shows, or is loading to show. */
   #pointed: Pointed | null = null;
@@ -233,7 +237,7 @@ export class TickwaveChart extends HTMLElement {
       caption.id ||= `tw-caption-${Math.random().toString(36).slice(2, 9)}`;
       this.setAttribute("aria-labelledby", caption.id);
     }
-    const evidence = this.#layout?.series.some((s) => s.placed.some((at) => at.point.evidence)) ?? false;
+    const evidence = this.#targets().length > 0;
     const ids = [this.getAttribute("table"), evidence ? this.#hint?.id : null].filter(Boolean).join(" ");
     if (!ids) this.removeAttribute("aria-describedby");
     else if (this.getAttribute("aria-describedby") !== ids) this.setAttribute("aria-describedby", ids);
@@ -262,6 +266,8 @@ export class TickwaveChart extends HTMLElement {
     this.#pop = document.createElement("div");
     this.#pop.className = "tw-pop";
     this.#pop.setAttribute("popover", "manual");
+    this.#popHead = this.#pop.appendChild(document.createElement("p"));
+    this.#popHead.className = "tw-pop-head";
     this.#inset = null;
     this.replaceChildren(...[this.#legend, this.#svg, this.#readout, this.#notice, this.#probe, this.#hint, this.#pop].filter((e) => e !== null));
     this.#listen();
@@ -396,8 +402,12 @@ export class TickwaveChart extends HTMLElement {
     const width = Math.max(240, Math.round(this.clientWidth));
     const height = Number(this.getAttribute("height")) || DEFAULT_HEIGHT;
     const endLabels = this.hasAttribute("end-labels");
-    const l = (this.#layout = layout(data, this.#shown(), width, height, endLabels));
     const c = this.#colour();
+    const shown = this.#shown();
+    const labelWidth = endLabels
+      ? Math.max(0, ...data.series.filter((s) => shown.has(s.id)).map((s) => textWidth(s.short, c.fontText)))
+      : null;
+    const l = (this.#layout = layout(data, shown, width, height, labelWidth));
     svg.setAttribute("width", String(width));
     svg.setAttribute("height", String(height));
     svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
@@ -412,7 +422,7 @@ export class TickwaveChart extends HTMLElement {
         rings: this.#rings(),
         sweep: sweepX,
         labels: this.#sweep !== null ? 0 : this.#labels,
-        endLabels,
+        endLabels: labelWidth !== null,
         xName: [data.x.name, data.x.unit].filter(Boolean).join(", "),
         yUnit: data.y.unit ?? "",
       },
@@ -447,6 +457,9 @@ export class TickwaveChart extends HTMLElement {
     const items = data.series
       .filter((s) => shown.has(s.id) && !s.hidden)
       .map((s) => `<li tabindex="0" data-series="${s.id}">${swatch(s, c)}${escapeHtml(s.name)}</li>`);
+    if (data.reference) {
+      items.push(`<li data-reference=""><svg class="tw-swatch" width="22" height="10" aria-hidden="true"><line x1="1" x2="21" y1="9" y2="1" stroke="currentColor" stroke-opacity=".5" stroke-dasharray="4 4"/></svg>as asked</li>`);
+    }
     data.limits.forEach((m, i) => {
       items.push(`<li tabindex="0" data-limit="${i}"><svg class="tw-swatch" width="22" height="10" aria-hidden="true"><line x1="11" x2="11" y1="0" y2="10" stroke="currentColor" stroke-width="1.5" stroke-dasharray="3 2"/></svg>${escapeHtml(m.label)}</li>`);
     });
@@ -475,14 +488,20 @@ export class TickwaveChart extends HTMLElement {
       box.style.left = box.style.top = "";
       return;
     }
-    // Beside the picked setting, off the lines; to its left near the right edge.
+    // Beside the picked setting, to its left near the right edge; at the plot's top, or lower where
+    // that hides less of the lines.
     const l = this.#layout;
     const host = this.getBoundingClientRect();
     const plot = this.#svg!.getBoundingClientRect();
-    const x = plot.left - host.left + l.xs[i];
+    const dx = plot.left - host.left;
     const w = box.offsetWidth;
-    box.style.left = `${x + 14 + w > this.clientWidth ? x - 14 - w : x + 14}px`;
-    box.style.top = `${plot.top - host.top + l.top}px`;
+    const h = box.offsetHeight;
+    const left = dx + l.xs[i] + 14 + w > this.clientWidth ? l.xs[i] - 14 - w : l.xs[i] + 14;
+    const tops = [0, 1, 2, 3, 4].map((k) => l.top + (k / 4) * Math.max(0, l.bottom - h - l.top));
+    const scores = tops.map((y) => hidden(l, left, y, w, h));
+    const top = tops[scores.indexOf(Math.min(...scores))];
+    box.style.left = `${dx + left}px`;
+    box.style.top = `${plot.top - host.top + top}px`;
   }
 
   #listen(): void {
@@ -498,25 +517,18 @@ export class TickwaveChart extends HTMLElement {
       return i < 0 ? (x < l.left ? 0 : l.xs.length - 1) : i;
     };
     const endOf = (e: Event) => (e.target as Element).closest?.(".tw-end")?.parentElement?.dataset.series ?? null;
-    /** The shown point with evidence within reach of the pointer, nearest first. */
+    /** The nearest target within reach of the pointer. Of points drawn on one another, the picked
+     * series' one, else the first in the data, as the keys choose. */
     const near = (e: PointerEvent | MouseEvent): Pointed | null => {
-      const l = this.#layout;
-      if (!l) return null;
       const r = svg.getBoundingClientRect();
       const x = e.clientX - r.left;
       const y = e.clientY - r.top;
-      let best: Pointed | null = null;
-      let reach = REACH;
-      for (const series of l.series) {
-        for (const at of series.placed) {
-          const d = Math.hypot(at.x - x, at.y - y);
-          if (at.point.evidence && d <= reach) {
-            best = { series, at, evidence: at.point.evidence };
-            reach = d;
-          }
-        }
-      }
-      return best;
+      const within = this.#targets()
+        .map((p) => ({ p, d: Math.hypot(p.at.x - x, p.at.y - y) }))
+        .filter((c) => c.d <= REACH);
+      const nearest = Math.min(...within.map((c) => c.d));
+      const ties = within.filter((c) => c.d < nearest + 1).map((c) => c.p);
+      return ties.find((p) => p.series.series.id === this.#series) ?? ties[0] ?? null;
     };
     svg.addEventListener("pointermove", (e) => {
       if (e.pointerType !== "mouse") return;
@@ -566,7 +578,7 @@ export class TickwaveChart extends HTMLElement {
     const legendItem = (e: Event) => (e.target as Element).closest?.("li") as HTMLLIElement | null;
     const enter = (e: Event) => {
       const li = legendItem(e);
-      if (!li) return;
+      if (!li || li.dataset.reference !== undefined) return;
       if (li.dataset.limit !== undefined) {
         this.#limit = true;
         this.#draw();
@@ -574,7 +586,7 @@ export class TickwaveChart extends HTMLElement {
     };
     const leave = (e: Event) => {
       const li = legendItem(e);
-      if (!li) return;
+      if (!li || li.dataset.reference !== undefined) return;
       this.#limit = false;
       if (li.dataset.series !== undefined) this.#pick(this.#x, null);
       else this.#draw();
@@ -611,10 +623,25 @@ export class TickwaveChart extends HTMLElement {
   }
 
   #evidenceAt(i: number): Pointed | null {
-    const all = (this.#layout?.series ?? []).flatMap((series) =>
-      series.placed.filter((at) => at.index === i && at.point.evidence).map((at) => ({ series, at, evidence: at.point.evidence! })),
-    );
+    const all = this.#targets().filter((p) => p.at.index === i);
     return all.find((p) => p.series.series.id === this.#series) ?? all[0] ?? null;
+  }
+
+  /** What a reader can point at to open a recording: the shown points that name one, then the
+   * failures' marks whose points name one, in drawing order. A failure without a mark has nothing to
+   * point at, so its recording stays closed to the pointer and the keys alike. */
+  #targets(): Pointed[] {
+    const l = this.#layout;
+    if (!l) return [];
+    const out: Pointed[] = [];
+    for (const series of l.series) {
+      for (const at of series.placed) if (at.point.evidence) out.push({ series, at, evidence: at.point.evidence });
+    }
+    for (const mark of l.fails) {
+      const series = l.series.find((s) => s.series.id === mark.series);
+      if (series && mark.point.evidence) out.push({ series, at: mark, evidence: mark.point.evidence });
+    }
+    return out;
   }
 
   #url(relative: string): string {
@@ -645,22 +672,24 @@ export class TickwaveChart extends HTMLElement {
     set("annotation", evidence.annotation);
     // The probe's lines take the series' hue, so the inset's key tells probe from target.
     set("series", pointed.series.series.colour || null);
+    const head = `${swatch(pointed.series.series, this.#colour())}${escapeHtml(pointed.series.series.name)}`;
+    if (this.#popHead && this.#popHeadHtml !== head) this.#popHead.innerHTML = this.#popHeadHtml = head;
     if (!pop.matches(":popover-open")) pop.showPopover();
     this.#stopPosition?.();
     const svg = this.#svg;
-    const id = pointed.series.series.id;
-    const index = pointed.at.index;
-    // The point as it is drawn now: a redraw moves it.
+    // Below the chart, or above it, at the point's x as it is drawn now: never over the lines, the
+    // legend or the readout. The picked setting's rule joins the point to it.
     const anchor = {
       contextElement: svg,
       getBoundingClientRect: () => {
-        const r = svg.getBoundingClientRect();
-        const at = this.#layout?.series.find((s) => s.series.id === id)?.placed.find((q) => q.index === index) ?? pointed.at;
-        return new DOMRect(r.left + at.x - 5, r.top + at.y - 5, 10, 10);
+        const plot = svg.getBoundingClientRect();
+        const chart = this.getBoundingClientRect();
+        const at = this.#targets().find((p) => samePoint(p, pointed))?.at ?? pointed.at;
+        return new DOMRect(plot.left + at.x - 5, chart.top, 10, chart.height);
       },
     };
     const place = () =>
-      computePosition(anchor, pop, { strategy: "fixed", placement: "bottom-start", middleware: [offset(8), flip({ padding: 8 }), shift({ padding: 8 })] }).then(({ x, y }) => {
+      computePosition(anchor, pop, { strategy: "fixed", placement: "bottom", middleware: [offset(8), flip({ padding: 8 }), shift({ padding: 8 })] }).then(({ x, y }) => {
         pop.style.left = `${x}px`;
         pop.style.top = `${y}px`;
       });
@@ -741,6 +770,29 @@ export class TickwaveChart extends HTMLElement {
     if (!set) groups.set(group, (set = new Set()));
     set.add(this);
   }
+}
+
+let measure: CanvasRenderingContext2D | null | undefined;
+/** An end label's width in CSS pixels, in the weight and size the plot draws it. */
+function textWidth(text: string, font: string): number {
+  measure ??= document.createElement("canvas").getContext("2d");
+  if (!measure) return text.length * 7;
+  measure.font = `600 12px ${font}`;
+  return Math.ceil(measure.measureText(text).width);
+}
+
+/** How much of the shown points and lines a box over the plot would hide, in plot coordinates: a
+ * point counts as much as half a segment. */
+function hidden(l: Layout, x: number, y: number, w: number, h: number): number {
+  const inside = (px: number, py: number) => px >= x && px <= x + w && py >= y && py <= y + h;
+  let n = 0;
+  for (const s of l.series) {
+    for (const p of s.placed) if (inside(p.x, p.y)) n += 4;
+    for (const { from, to } of s.segments) {
+      for (let k = 1; k < 8; k++) if (inside(from.x + (k / 8) * (to.x - from.x), from.y + (k / 8) * (to.y - from.y))) n++;
+    }
+  }
+  return n;
 }
 
 function samePoint(a: Pointed | null, b: Pointed | null): boolean {

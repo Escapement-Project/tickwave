@@ -289,10 +289,12 @@ test.describe("evidence", () => {
     await expect(inset).toHaveAttribute("annotations", SIDECAR);
     await expect(inset).toHaveAttribute("annotation", "attach");
     await expect(inset.locator("figcaption")).toHaveText("Attaching: line reset, select, line reset, then the first read");
-    // Beside the point: just below it.
+    // Below the chart, across the point's x: clear of the plot and its readout.
     const box = (await pop.boundingBox())!;
-    expect(box.y).toBeGreaterThan(first.y);
-    expect(box.y).toBeLessThan(first.y + 40);
+    const chart = (await page.locator("#c").boundingBox())!;
+    expect(box.y).toBeGreaterThanOrEqual(chart.y + chart.height);
+    expect(box.x).toBeLessThanOrEqual(first.x);
+    expect(box.x + box.width).toBeGreaterThanOrEqual(first.x);
     // The middle point names no recording, so pointing at it closes the popover.
     const middle = await point(page, 1);
     await page.mouse.move(middle.x, middle.y);
@@ -403,5 +405,145 @@ test.describe("evidence", () => {
     await page.locator("#c").focus();
     await page.keyboard.press("End");
     await expect(page.locator("#c .tw-readout")).not.toContainText("Enter");
+  });
+});
+
+test.describe("a wire-clock chart", () => {
+  // fixtures/wire.chart.json: the 2026-11-04 request clock, Verge's two runs drawn on one another
+  // from 30 MHz, NXP's failure at 20 MHz marked and naming a recording.
+  test.beforeEach(async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: "reduce", colorScheme: "light" });
+    await page.goto("/e2e/pages/wire.html");
+    await settled(page.locator("#w"));
+  });
+
+  /** The middle of the last element `selector` finds, whose parent's text is `text` if given. Found
+   * and measured in one step in the page: a pick redraws the markup, and a locator's element can be
+   * replaced between finding it and measuring it. */
+  const centre = (page: Page, selector: string, text?: string) =>
+    page.evaluate(
+      ([selector, text]) => {
+        const all = [...document.querySelectorAll(selector)].filter((e) => text === undefined || e.parentElement?.textContent === text);
+        const b = all[all.length - 1].getBoundingClientRect();
+        return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+      },
+      [selector, text] as const,
+    );
+  /** Verge's last point, where the capturing run's lies too. */
+  const verge50 = (page: Page) => centre(page, '#w g.tw-series[data-series="gcc"] rect');
+  const failMark = (page: Page) => centre(page, "#w g.tw-data > g:not(.tw-series) > path", "NXP failed");
+
+  test("the y=x line is named in the legend, and the two runs' end labels stand apart inside the chart", async ({ page }) => {
+    await expect(page.locator("#w .tw-legend li[data-reference]")).toHaveText("as asked");
+    const verge = page.locator('#w .tw-end:text-is("Verge")');
+    const capturing = page.locator('#w .tw-end:text-is("Verge, capturing")');
+    expect(Number(await capturing.getAttribute("y")) - Number(await verge.getAttribute("y"))).toBeGreaterThanOrEqual(14);
+    const label = (await capturing.boundingBox())!;
+    const svg = (await page.locator("#w svg.tw-plot").boundingBox())!;
+    expect(label.x + label.width).toBeLessThanOrEqual(svg.x + svg.width);
+  });
+
+  test("of two points drawn on one another, the first series' opens, or the picked one's; the popover names it", async ({ page }) => {
+    const pop = page.locator("#w .tw-pop");
+    const p = await verge50(page);
+    await page.mouse.move(p.x, p.y);
+    await expect(pop.locator("tickwave-inset")).toHaveAttribute("annotation", "dpidr-read");
+    await expect(pop.locator(".tw-pop-head")).toHaveText("Verge, GCC build");
+    await page.mouse.move(p.x - 60, p.y + 60);
+    await expect(pop).toBeHidden();
+    await page.locator("#w").evaluate((c) => (c as HTMLElement & { pick(x: string, s: string): void }).pick("50", "capture"));
+    await page.mouse.move(p.x, p.y);
+    await expect(pop.locator("tickwave-inset")).toHaveAttribute("annotation", "first-wait");
+    await expect(pop.locator(".tw-pop-head")).toHaveText("Verge, GCC build, capturing energy at 100,000 pairs/s");
+  });
+
+  test("a failure's mark opens the failed run's recording, from the pointer and the keys; an unmarked failure opens nothing", async ({ page }) => {
+    const pop = page.locator("#w .tw-pop");
+    const inset = pop.locator("tickwave-inset");
+    const mark = await failMark(page);
+    await page.mouse.move(mark.x, mark.y);
+    await expect(inset).toHaveAttribute("annotation", "dpidr-request");
+    await expect(pop.locator(".tw-pop-head")).toHaveText("NXP's firmware V3.174");
+    await page.mouse.move(mark.x, mark.y - 120);
+    await expect(pop).toBeHidden();
+    const chart = page.locator("#w");
+    await chart.focus();
+    await page.keyboard.press("Home");
+    await expect(inset).toHaveAttribute("annotation", "attach");
+    await page.keyboard.press("ArrowRight");
+    await expect(inset).toHaveAttribute("annotation", "dpidr-request");
+    await expect(chart.locator(".tw-readout")).toContainText("NXP failed");
+    // Without its mark, the failure has nothing to point at, and the keys open nothing there either.
+    await chart.evaluate(async (c) => {
+      const data = await (await fetch("/fixtures/wire.chart.json")).json();
+      delete data.series[2].fails;
+      for (const s of data.series) for (const p of s.points) if (p?.evidence) p.evidence = { ...p.evidence, recording: "/fixtures/identify-swd.tickwave", annotations: "/fixtures/identify-swd.annotations.toml" };
+      (c as HTMLElement & { data: unknown }).data = data;
+    });
+    await page.keyboard.press("Home");
+    await expect(inset).toHaveAttribute("annotation", "attach");
+    await page.keyboard.press("ArrowRight");
+    await expect(pop).toBeHidden();
+    await expect(chart.locator(".tw-readout")).toContainText("NXP failed");
+  });
+
+  test("the popover opens above the chart without room below it, and below it with room, across the point's x", async ({ page }) => {
+    const pop = page.locator("#w .tw-pop");
+    let p = await verge50(page);
+    await page.mouse.move(p.x, p.y);
+    await expect(pop.locator("tickwave-inset")).toHaveAttribute("annotation", "dpidr-read");
+    let chart = (await page.locator("#w").boundingBox())!;
+    let box = (await pop.boundingBox())!;
+    expect(box.y + box.height).toBeLessThanOrEqual(chart.y);
+    expect(box.x).toBeLessThanOrEqual(p.x);
+    expect(box.x + box.width).toBeGreaterThanOrEqual(p.x);
+    await page.mouse.move(p.x - 60, p.y + 60);
+    await expect(pop).toBeHidden();
+    await page.evaluate((top) => scrollBy(0, top - 10), chart.y);
+    p = await verge50(page);
+    await page.mouse.move(p.x, p.y);
+    await expect(pop).toBeVisible();
+    chart = (await page.locator("#w").boundingBox())!;
+    box = (await pop.boundingBox())!;
+    expect(box.y).toBeGreaterThanOrEqual(chart.y + chart.height);
+    expect(box.x).toBeLessThanOrEqual(p.x);
+    expect(box.x + box.width).toBeGreaterThanOrEqual(p.x);
+  });
+
+  test("the tooltip readout keeps off the points: at 50 MHz, below Verge's line, and between the lines", async ({ page }) => {
+    const chart = page.locator("#w");
+    /** Where the readout is, and how many points it hides, read in one step: a pick redraws. */
+    const readoutAt = () =>
+      chart.evaluate((chart) => {
+        const readout = chart.querySelector(".tw-readout")!.getBoundingClientRect();
+        const plot = chart.querySelector("svg.tw-plot")!.getBoundingClientRect();
+        const hidden = [...chart.querySelectorAll("g.tw-series :is(rect, circle)")].filter((m) => {
+          const b = m.getBoundingClientRect();
+          const x = b.x + b.width / 2;
+          const y = b.y + b.height / 2;
+          return x >= readout.left && x <= readout.right && y >= readout.top && y <= readout.bottom;
+        }).length;
+        return { top: readout.top - plot.top, hidden };
+      });
+    await chart.focus();
+    await page.keyboard.press("End");
+    await expect(chart.locator(".tw-readout")).toContainText("50 MHz");
+    // At the plot's top it would hide Verge's line from 37.5 MHz up.
+    let at = await readoutAt();
+    expect(at.top).toBeGreaterThan(28 + 20);
+    expect(at.hidden).toBe(0);
+    // The read-data clock's figures: at the foot it would hide NXP's 25 MHz point, so it sits between.
+    await chart.evaluate(async (c) => {
+      const data = await (await fetch("/fixtures/wire.chart.json")).json();
+      const set = (i: number, values: (string | null)[]) => values.forEach((v, j) => v !== null && (data.series[i].points[j].value = v));
+      set(0, ["10.0", null, null, "30.0", "37.5", "37.5"]);
+      set(1, [null, null, null, "30.0", "30.0", "30.0"]);
+      set(2, ["6.9", null, "10.0", null, null, "10.0"]);
+      (c as HTMLElement & { data: unknown }).data = data;
+    });
+    await page.keyboard.press("ArrowLeft");
+    await page.keyboard.press("End");
+    at = await readoutAt();
+    expect(at.hidden).toBe(0);
   });
 });

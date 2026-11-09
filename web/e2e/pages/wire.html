@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>A wire-clock chart</title>
+<link rel="stylesheet" href="/dist/site/tokens.css">
+<style>
+body { margin: 0; padding: 20px; background: var(--page); color: var(--ink); font: 400 15px/1.5 var(--font-text); }
+figure { margin: 0 0 40px; width: 620px; max-width: 100%; }
+</style>
+<script type="module" src="/dist/tickwave-chart.js"></script>
+</head>
+<body>
+<!-- Room above the chart and none below it at first, so the popover opens above; a scroll gives it room below. -->
+<div style="height: 260px"></div>
+<figure>
+<tickwave-chart id="w" src="/fixtures/wire.chart.json" legend="above" end-labels></tickwave-chart>
+<figcaption>The request clock against the SWD clock asked for, with two runs drawn on one another.</figcaption>
+</figure>
+<div style="height: 900px"></div>
+</body>
+</html>
