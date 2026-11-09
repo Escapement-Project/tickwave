@@ -31,6 +31,7 @@ pub fn head_length(bytes: &[u8]) -> Result<u32, JsError> {
 #[wasm_bindgen]
 pub struct Recording {
     head: Head,
+    header: String,
     inflater: Inflater,
 }
 
@@ -40,8 +41,11 @@ impl Recording {
     #[wasm_bindgen(constructor)]
     pub fn new(head: &[u8]) -> Result<Recording, JsError> {
         let inflater = Inflater::new();
+        let parsed = Head::parse_with(head, |f, len| inflater.inflate(f, len)).map_err(js)?;
+        let stored = &head[PREAMBLE_LEN..PREAMBLE_LEN + parsed.preamble.header_len as usize];
         Ok(Self {
-            head: Head::parse_with(head, |f, len| inflater.inflate(f, len)).map_err(js)?,
+            header: String::from_utf8_lossy(stored).into_owned(),
+            head: parsed,
             inflater,
         })
     }
@@ -49,7 +53,7 @@ impl Recording {
     /// The header, as the file stores it.
     #[wasm_bindgen(getter)]
     pub fn header(&self) -> String {
-        serde_json::to_string(&self.head.header).expect("a header always serialises")
+        self.header.clone()
     }
 
     #[wasm_bindgen(getter, js_name = blockCount)]
