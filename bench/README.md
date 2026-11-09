@@ -1,9 +1,11 @@
 # tickwave's decode benchmark
 
-Rust/WASM decoding against JavaScript decoding, on real recordings, in Chromium and Firefox. The
-numbers and what they mean are in `RESULTS.md`; this file says how to get them again.
+This harness times tickwave's Rust decoder, compiled to WebAssembly (WASM), against JavaScript
+decoders on real recordings, in Chromium and Firefox. `RESULTS.md` has the numbers and what they
+mean. This file says how to get them again.
 
-`pages-range/` is the tickwave session's Pages range check, not part of this harness.
+`pages-range/` is not part of this harness. It is a separate check that GitHub Pages serves byte
+ranges unchanged, with its own `RESULTS.md`.
 
 ## What is here
 
@@ -28,7 +30,7 @@ The decoders:
 
 | Label | Bundle | What |
 | --- | --- | --- |
-| `ruzstd-full` | `dec/ruzstd-full` | `crates/wasm`, default features (with the sidecar parser) |
+| `ruzstd-full` | `dec/ruzstd-full` | `crates/wasm`, default features (with `resolveAnnotations`, the sidecar checks) |
 | `ruzstd` | `dec/ruzstd` | `crates/wasm --no-default-features` (decoder only) |
 | `ruzstd#2` | `dec/ruzstd` | the same, run as a second decoder: the A-A pair |
 | `libzstd` | `dec/libzstd` | `bench/libzstd`: `parse_with`, `decode_block_with` and `decode_overview_block_with` with libzstd; no ruzstd |
@@ -38,21 +40,29 @@ The decoders:
 | `probe-libzstd` | `dec/probe-libzstd` | `bench/libzstd --features probe`: inflate and parse timed apart |
 | `probe-ruzstd` | `dec/probe-ruzstd` | the same with tickwave-format's ruzstd `inflate` (`--no-default-features --features probe`) |
 
+The `ruzstd` labels date from when tickwave-wasm decoded with ruzstd. Since 3d17dd1 it decodes with
+libzstd, so `ruzstd-full`, `ruzstd` and `ruzstd#2` decode with libzstd too. `probe-ruzstd` is the
+only WASM build here that still decodes with ruzstd.
+
 ## Needs
 
-- Rust with the `wasm32-unknown-unknown` target; `wasm-bindgen` at the version `wasm-bindgen` in
-  `Cargo.lock` names (0.2.130 when written); `wasm-opt` (binaryen).
-- clang with a wasm32 target, for zstd-sys to compile libzstd. cc-rs found it, and an archiver,
-  with no configuration on this machine, which has `llvm-ar`.
-- Node 24 or later (it runs the TypeScript scripts directly) and npm.
-- The converted recordings, which are not in this repository. `reference.sh` and
-  `scripts/serve.ts` read them from the folder the `CONVERTED` environment variable names.
+- Rust with the `wasm32-unknown-unknown` target; `wasm-bindgen` at the version `Cargo.lock` names
+  for `wasm-bindgen` (0.2.130 when written); `wasm-opt` (binaryen).
+- clang with a wasm32 target, for zstd-sys to compile libzstd. On the machine the results come from,
+  cc-rs found clang and an archiver (`llvm-ar`) with no configuration.
+- Node 24 or later, which runs the TypeScript scripts directly, and npm.
+- The converted recordings, which are not in this repository: the six `RESULTS.md` lists, as
+  `<name>.1024.tickwave`, and `identify-swd.tickwave`, a small recording the correctness checks also
+  cover. `reference.sh` reads them from the directory `CONVERTED` names. `scripts/serve.ts` reads
+  them from its own `CONVERTED` constant. Both default to a path on the machine the results come
+  from, so set the variable and edit the constant.
 
 ## Rerun everything
 
 From `bench/`:
 
 ```sh
+export CONVERTED=/path/to/converted   # and the same path in scripts/serve.ts
 ./build.sh          # both tickwave-wasm builds, the libzstd and probe builds, the native tool, the bundles
 ./reference.sh      # native hashes of every block and overview block, and the corrupted blocks
 node scripts/run.ts # every measure in both browsers
@@ -64,26 +74,27 @@ node scripts/report.ts > results/tables.md
 
 `build.sh` builds tickwave-wasm from `crates/wasm` with `--locked` into `bench/target/`, so it never
 touches the tickwave workspace's `target/` or `crates/wasm/pkg/`. It records the tickwave commit in
-`build/base.txt` and any uncommitted `crates/format` and `crates/wasm` changes in
-`build/decoder.diff`. The runner writes both, with the SHA-256 of every module it serves, to
-`results/raw/machine.json`. Run `build.sh` again after `crates/format` or `crates/wasm` change,
-then `reference.sh`.
+`build/base.txt`, any uncommitted `crates/format` and `crates/wasm` changes in
+`build/decoder.diff`, and the staged part of them in `build/staged.diff`. The runner writes the
+commit and the SHA-256 of both diffs to `results/raw/machine.json`, with the SHA-256 of every
+module it serves. Run `build.sh` again after `crates/format` or `crates/wasm` change, then
+`reference.sh`.
 
 `scripts/run.ts` takes `--measures` (any of `correct,inset,blocks,whole,checksum`),
 `--browsers chromium,firefox`, `--runs 20`, `--recs` (comma-separated recording names, without
 `.tickwave`) and `--decoders` (labels from the table above, in place of each measure's own list).
-Each measure writes `results/raw/<measure>.<browser>.json` as it goes. Every run
-first checks that each recording is the one `reference.sh` hashed, and checks again at the end;
-a recording that changed fails the run.
+Each measure writes `results/raw/<measure>.<browser>.json` as it goes. Every run first checks that
+each recording is the one `reference.sh` hashed, and checks again at the end. A recording that
+changed fails the run.
 
-Other work runs on this machine, so the timings wait for it at two levels. Before each timed
-measure the runner waits until the 1-minute load average has stayed below 2 for five minutes.
-Before each timed unit (a cold inset, a pass over a recording's blocks, a whole-file decode) it
-waits until three seconds in a row have the CPUs less than 10 % busy. Neither gives up; each says
-in the log every 10 minutes that it is still waiting. Each unit records the busy fraction while it
-ran, `results/raw/cpu.json` keeps every second's, and each result file has the load average at
-its start and end. `node scripts/cpu.ts` runs both gates for other commands, such as the native
-timing: `node scripts/cpu.ts && target/release/tickwave-bench-native time ...`.
+The runner expects other work on the machine, and its timings wait for it at two levels. Before
+each timed measure, the runner waits until the 1-minute load average has stayed below 2 for five
+minutes. Before each timed unit (a cold inset, a pass over a recording's blocks, a whole-file
+decode), it waits until three seconds in a row have the CPUs less than 10 % busy. Neither gives up,
+and each says in the log every 10 minutes that it is still waiting. Each unit records the busy
+fraction while it ran. `results/raw/cpu.json` keeps every second's, and each result file has the
+load average at its start and end. `node scripts/cpu.ts` runs both gates for other commands, such
+as the native timing: `node scripts/cpu.ts && target/release/tickwave-bench-native time ...`.
 
 The first-inset measure launches a fresh browser for every run. In Firefox, a new context in a
 running browser is not cold for a WASM decoder: the first module a process compiles takes about
@@ -110,6 +121,6 @@ cargo clippy -p tickwave-bench-native -p tickwave-wasm-libzstd -- -D warnings
 
 ## Firefox and `DecompressionStream("zstd")`
 
-Firefox 159 has the zstd format behind `dom.compression_streams.zstd.enabled`, off by default.
-The runner launches Firefox with it on, so the `stream` decoder can be measured; the `correct`
-measure also records what each browser offers with default settings.
+Firefox 159 has the zstd format behind `dom.compression_streams.zstd.enabled`, off by default. The
+runner launches Firefox with it on, so the `stream` decoder can be measured. The `correct` measure
+also records what each browser offers with default settings.

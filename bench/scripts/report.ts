@@ -24,9 +24,10 @@ const f = (x: number, d = 1) => (Number.isFinite(x) ? x.toFixed(d) : "–");
 const short = (rec: string) => rec.replace(/\.1024$/, "");
 
 const NAMES: Record<string, string> = {
-  "ruzstd-full": "tickwave-wasm, default build (ruzstd)",
-  ruzstd: "tickwave-wasm, decoder only (ruzstd)",
-  "ruzstd#2": "tickwave-wasm, decoder only (ruzstd), A-A copy",
+  // The keys date from when tickwave-wasm inflated with ruzstd; it has used libzstd since 3d17dd1.
+  "ruzstd-full": "tickwave-wasm, default build",
+  ruzstd: "tickwave-wasm, decoder only",
+  "ruzstd#2": "tickwave-wasm, decoder only, A-A copy",
   libzstd: "libzstd in WASM",
   fzstd: "fzstd + TypeScript",
   "fzstd-jsxxh": "fzstd + TypeScript, pure-JS XXH64",
