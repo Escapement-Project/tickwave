@@ -6,7 +6,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 bench=$PWD
 # crates/wasm/build.sh's wasm-opt flags.
-opt=(-O3 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext)
+opt=(--remove-exports --pass-arg='remove-exports@rust_zstd_wasm_shim_*'
+  -O3 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext)
 
 rm -rf build/www build/glue
 mkdir -p build/www/dec build/glue
