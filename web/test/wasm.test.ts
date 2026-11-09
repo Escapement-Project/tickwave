@@ -290,6 +290,22 @@ test("a TOML float where a time belongs is refused, as the CLI refuses it", asyn
   assert.throws(resolve("9007199254740993"), /cannot hold it exactly/);
 });
 
+test("values pass through the browser's TOML route as strings, and a number in their place is refused", async () => {
+  const r = await openTickwave("fixtures/identify-swd.tickwave");
+  const toml = readFileSync(at("fixtures/identify-swd.annotations.toml"), "utf8");
+  const jsonl = execFileSync(process.execPath, ["scripts/swd-annotations.ts", "fixtures/identify-swd.tickwave"], { encoding: "utf8" });
+  const site = 'kind = "attach"';
+  assert.equal(toml.split(site).length, 2);
+  const resolve = (values: string) => () =>
+    r.resolveAnnotations(handJson(toml.replace(site, `${site}\nvalues = ${values}`), "hand.toml").json, ["identify-swd.swd.jsonl"], [jsonl], "identify-swd.tickwave");
+  const list = JSON.parse(resolve('{ clock = "1.0 MHz", reads = "3 reads" }')()) as { id: string; values: Record<string, string> | null }[];
+  assert.deepEqual(list.find((a) => a.id === "attach")!.values, { clock: "1.0 MHz", reads: "3 reads" });
+  assert.equal(list.find((a) => a.id === "first-wait")!.values, null);
+  assert.throws(resolve('{ clock = "1.0MHz" }'), /clock = "1.0MHz" is not a decimal and a unit/);
+  assert.throws(resolve("{ clock = 1.0 }"), /expected a string/);
+  assert.throws(resolve("{ clock = 1 }"), /expected a string/);
+});
+
 /** A Saleae analog export's f32 volts (one chunk), read here without the Rust core. */
 function saleaeVolts(path: string): Float32Array {
   const b = readFileSync(path);

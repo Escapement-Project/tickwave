@@ -62,6 +62,7 @@ The first line names the generator. Each later line is one annotation. Blank lin
 | `text` | Longer text, shown in an inset's caption. |
 | `paint` | A role (`probe`, `target`): the annotation's channels draw over its span in the colour the host page gives that role. |
 | `measure` | `{channel, what}`: the inset shows a measure taken from the channel's edges inside the span (below). The channel must be digital, and the annotation a span. |
+| `values` | Figures the annotation states, by name, each a decimal and a unit (below). |
 | `ref` | Hand-written only: the full id of a generated annotation. This one takes its span and channels, and any field it leaves out. |
 
 A file may hold no other fields: a misspelt one is an error, not ignored.
@@ -82,6 +83,24 @@ at the first edge's tick and ends one tick past the last.
   the periods, such as a slow acknowledge check or a stretched cycle.
 - `duration`: the time from the channel's first edge in the span to its last, of either
   polarity. A span needs at least two edges.
+
+## Values
+
+`values` holds the figures an annotation states, for a page's charts and tables to read. A decoder
+that measures a session writes them beside its label:
+
+```toml
+[[annotation]]
+id = "session-50"
+ref = "wire_swd/session/377858886"
+values = { asked = "50 MHz", read_data = "37.5 MHz", write_data = "49.9 MHz" }
+```
+
+In a generator's file the same is `"values": {"asked": "50 MHz", ...}`. A name is lower-case
+letters, digits and `_`, starting with a letter. A value is a decimal, one space and a unit. It is
+a string, so `"81.0 KiB/s"` keeps its last digit. tickwave never converts or rounds a value. A page
+compares units as text, so micro is always `µ` (U+00B5 MICRO SIGN), as in times, and never the Greek
+letter mu (U+03BC).
 
 ## Times
 
@@ -122,7 +141,8 @@ the prose cites breaks the build instead of the page. It checks that:
 - every included file is provided, and every provided file is included;
 - ids are unique, hand-written ids hold no `/`, and every `ref` resolves;
 - every channel exists, and every time lies inside the capture with `end` not before `start`;
-- every `measure` names a digital channel, a known measure, and sits on a span.
+- every `measure` names a digital channel, a known measure, and sits on a span;
+- every value is a decimal and a unit, under a name of lower-case letters, digits and `_`.
 
 ## Bundling
 

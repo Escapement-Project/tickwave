@@ -53,7 +53,7 @@ test("overview levels follow FORMAT.md", () => {
 
 test("annotations: generated ids, refs, times and errors", () => {
   const raw: RawAnnotation[] = [
-    { id: "read/377094557", source: "swd", kind: "read", start: 377094557, end: 377140560, label: "DPIDR read" },
+    { id: "read/377094557", source: "swd", kind: "read", start: 377094557, end: 377140560, label: "DPIDR read", values: { asked: "1 MHz" } },
     { id: "dpidr-read", ref: "swd/read/377094557", label: "Reading the debug port's ID register" },
     { id: "attach", start: "376.719436 ms", end: "377.140560 ms", kind: "attach" },
     { id: "bad", ref: "swd/nothing" },
@@ -65,6 +65,8 @@ test("annotations: generated ids, refs, times and errors", () => {
   assert.equal(named.start, 377094557);
   assert.equal(named.kind, "read");
   assert.equal(named.ref, "swd/read/377094557");
+  assert.deepEqual(named.values, { asked: "1 MHz" }, "an alias takes its target's values");
+  assert.equal(r.byId.get("attach")!.values, null);
   assert.ok(r.named.has("swd/read/377094557"));
   assert.equal(r.byId.get("attach")!.start, 376719436);
   assert.equal(r.byId.get("attach")!.end, 377140560);
@@ -73,11 +75,11 @@ test("annotations: generated ids, refs, times and errors", () => {
 
 test("a resolved list: an alias names its target by ref; a matching span alone names nothing", () => {
   const core = [
-    { id: "dpidr-read", source: null, start: 377094557, end: 377140560, channels: ["SWCLK", "SWDIO"], label: "Reading DPIDR", kind: "read", text: null, paint: null, measure: null, ref: "swd/read/377094557" },
-    { id: "swd/read/377094557", source: "swd", start: 377094557, end: 377140560, channels: ["SWCLK", "SWDIO"], label: "DPIDR read", kind: "read", text: null, paint: null, measure: null },
+    { id: "dpidr-read", source: null, start: 377094557, end: 377140560, channels: ["SWCLK", "SWDIO"], label: "Reading DPIDR", kind: "read", text: null, paint: null, measure: null, values: null, ref: "swd/read/377094557" },
+    { id: "swd/read/377094557", source: "swd", start: 377094557, end: 377140560, channels: ["SWCLK", "SWDIO"], label: "DPIDR read", kind: "read", text: null, paint: null, measure: null, values: null },
     // Hand-written on exactly a generated annotation's span and channels, but no ref.
-    { id: "same-span", source: null, start: 377094557, end: 377102558, channels: ["SWDIO"], label: "here", kind: null, text: null, paint: null, measure: null },
-    { id: "swd/request/377094557", source: "swd", start: 377094557, end: 377102558, channels: ["SWDIO"], label: "request", kind: "request", text: null, paint: "probe", measure: null },
+    { id: "same-span", source: null, start: 377094557, end: 377102558, channels: ["SWDIO"], label: "here", kind: null, text: null, paint: null, measure: null, values: null },
+    { id: "swd/request/377094557", source: "swd", start: 377094557, end: 377102558, channels: ["SWDIO"], label: "request", kind: "request", text: null, paint: "probe", measure: null, values: null },
   ].map(fromCore);
   const r = indexAnnotations(core);
   assert.deepEqual([...r.named], ["swd/read/377094557"]);

@@ -62,6 +62,7 @@ end = "317.95 us"
 channels = ["SWCLK", "SWDIO"]
 label = "The 12-cycle period"
 measure = { channel = "SWCLK", what = "rate" }
+values = { rate = "26.7 MHz" }
 
 [[annotation]]
 id = "first-misread"
@@ -70,7 +71,7 @@ label = "Misreads at 25 MHz"
 "#;
 
 const GENERATED: &str = r#"{"format": "tickwave-annotations/1", "source": "wire_swd", "version": "9f3c2e1", "recording_id": "blake3:00ff"}
-{"id": "misread/412000", "kind": "misread", "start": 412000, "end": 412900, "channels": ["SWDIO"], "label": "parity wrong"}
+{"id": "misread/412000", "kind": "misread", "start": 412000, "end": 412900, "channels": ["SWDIO"], "label": "parity wrong", "values": {"read_data": "24.9 MHz", "asked": "25 MHz"}}
 
 {"id": "drive/400000", "kind": "drive", "start": 400000, "end": 400369, "channels": ["SWDIO"], "paint": "target"}
 "#;
@@ -254,4 +255,80 @@ fn the_toml_as_json_resolves_alike() {
         };
         assert_eq!(resolved(resolve_json, &json), resolved(resolve, &hand));
     }
+}
+
+/// The figures an annotation states, as a chart's data takes them.
+fn values(a: &tickwave_format::annotations::Annotation) -> Option<Vec<(&str, &str)>> {
+    a.values
+        .as_ref()
+        .map(|v| v.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect())
+}
+
+#[test]
+fn values_resolve_and_an_alias_takes_its_targets() {
+    let got = resolve(HAND, &included(GENERATED), &header(), Some("rec.tickwave")).unwrap();
+    assert_eq!(values(&got[0]), Some(vec![("rate", "26.7 MHz")]));
+    // The alias states none of its own, so it takes the generated annotation's.
+    assert_eq!(
+        values(&got[1]),
+        Some(vec![("asked", "25 MHz"), ("read_data", "24.9 MHz")])
+    );
+    assert_eq!(values(&got[1]), values(&got[2]));
+    assert_eq!(values(&got[3]), None);
+    let json = serde_json::to_value(&got).unwrap();
+    assert_eq!(json[1]["values"]["read_data"], "24.9 MHz");
+    assert!(json[3]["values"].is_null());
+}
+
+#[test]
+fn values_are_a_decimal_and_a_unit_under_a_plain_name() {
+    let with = |name: &str, value: &str| {
+        HAND.replace(
+            "values = { rate = \"26.7 MHz\" }",
+            &format!("values = {{ \"{name}\" = \"{value}\" }}"),
+        )
+    };
+    for good in ["50 MHz", "-0.5 V", "1238.6 KiB/s", "12 %", "0 runs"] {
+        let got = resolve(
+            &with("read_data2", good),
+            &included(GENERATED),
+            &header(),
+            None,
+        );
+        assert_eq!(values(&got.unwrap()[0]), Some(vec![("read_data2", good)]));
+    }
+    for bad in [
+        "50MHz",
+        "fifty MHz",
+        "50",
+        "1e3 Hz",
+        "50  MHz",
+        ".5 V",
+        "5. V",
+        "+5 V",
+        "50 MHz each",
+        "",
+    ] {
+        let found = problems(&with("rate", bad), GENERATED);
+        assert_problem(
+            &found,
+            &format!("rate = {bad:?} is not a decimal and a unit"),
+        );
+    }
+    for bad in ["Asked", "read-data", "1st", "_x", ""] {
+        let found = problems(&with(bad, "50 MHz"), GENERATED);
+        assert_problem(&found, &format!("name {bad:?} is not lower-case letters"));
+    }
+    // Micro is U+00B5, as in times; Greek mu U+03BC would compare unequal.
+    resolve(
+        &with("rate", "1.5 \u{b5}s"),
+        &included(GENERATED),
+        &header(),
+        None,
+    )
+    .unwrap();
+    let found = problems(&with("rate", "1.5 \u{3bc}s"), GENERATED);
+    assert_problem(&found, "writes micro as Greek mu (U+03BC)");
+    let hand = HAND.replace("rate = \"26.7 MHz\"", "rate = 26.7");
+    assert_problem(&problems(&hand, GENERATED), "expected a string");
 }

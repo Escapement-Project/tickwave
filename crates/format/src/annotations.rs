@@ -43,6 +43,7 @@ struct Entry {
     text: Option<String>,
     paint: Option<String>,
     measure: Option<Measure>,
+    values: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -88,6 +89,8 @@ pub struct Annotation {
     pub text: Option<String>,
     pub paint: Option<String>,
     pub measure: Option<Measure>,
+    /// Figures the annotation states, by name: each a decimal and a unit, as `"37.5 MHz"`.
+    pub values: Option<BTreeMap<String, String>>,
 }
 
 /// A generator's file, as handed to `resolve`: the name the TOML includes it by, and its text.
@@ -145,6 +148,44 @@ pub fn ticks(time: &Time, timebase: [u64; 2]) -> Result<i64, String> {
     let rounded = (2 * numerator + denominator) / (2 * denominator);
     let value = i64::try_from(rounded).map_err(|_| too_big())?;
     Ok(if negative { -value } else { value })
+}
+
+/// Why a `values` entry is refused, if it is: its name must be lower-case letters, digits and
+/// `_`, starting with a letter, and its value a decimal, one space and a unit, as `"37.5 MHz"`. A
+/// chart compares units as text, so micro is U+00B5 alone, as in times, never Greek mu U+03BC.
+fn check_value(name: &str, value: &str) -> Option<String> {
+    let mut chars = name.chars();
+    if !chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        || !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    {
+        return Some(format!(
+            "values: name {name:?} is not lower-case letters, digits and '_', starting with a letter"
+        ));
+    }
+    let decimal = |s: &str| {
+        let digits = s.strip_prefix('-').unwrap_or(s);
+        let (whole, fraction) = match digits.split_once('.') {
+            Some((w, f)) => (w, Some(f)),
+            None => (digits, None),
+        };
+        let all_digits = |t: &str| !t.is_empty() && t.chars().all(|c| c.is_ascii_digit());
+        all_digits(whole) && fraction.is_none_or(all_digits)
+    };
+    match value.split_once(' ') {
+        Some((number, unit))
+            if decimal(number) && !unit.is_empty() && !unit.chars().any(char::is_whitespace) =>
+        {
+            None
+        }
+        _ => Some(format!(
+            "values: {name} = {value:?} is not a decimal and a unit, as \"37.5 MHz\""
+        )),
+    }
+    .or_else(|| {
+        value.contains('\u{3bc}').then(|| {
+            format!("values: {name} = {value:?} writes micro as Greek mu (U+03BC); use µ (U+00B5)")
+        })
+    })
 }
 
 fn check_id(id: &str, generated: bool) -> Option<String> {
@@ -298,6 +339,11 @@ fn resolve_file(
         if let Some(problem) = check_id(&entry.id, source.is_some()) {
             problems.push(format!("{at}: {problem}"));
         }
+        for (name, value) in entry.values.iter().flatten() {
+            if let Some(problem) = check_value(name, value) {
+                problems.push(format!("{at}: {problem}"));
+            }
+        }
         if !seen.insert(id.clone()) {
             problems.push(format!("{at}: id {id:?} is used twice"));
         }
@@ -351,6 +397,7 @@ fn resolve_file(
                 text: entry.text,
                 paint: entry.paint,
                 measure: entry.measure,
+                values: entry.values,
             },
         ));
     }
@@ -378,6 +425,7 @@ fn resolve_file(
                 text: entry.text.or_else(|| t.text.clone()),
                 paint: entry.paint.or_else(|| t.paint.clone()),
                 measure: entry.measure.or_else(|| t.measure.clone()),
+                values: entry.values.or_else(|| t.values.clone()),
             },
         ));
     }

@@ -21,6 +21,7 @@ export interface RawAnnotation {
   readonly text?: string;
   readonly measure?: Measure;
   readonly paint?: string;
+  readonly values?: Readonly<Record<string, string>>;
   readonly ref?: string;
   /** The generator that wrote it. Absent on a hand-written annotation. */
   readonly source?: string;
@@ -42,6 +43,8 @@ export interface Annotation {
   readonly text: string | null;
   readonly measure: Measure | null;
   readonly paint: string | null;
+  /** Figures the annotation states, by name: each a decimal and a unit, as "37.5 MHz". */
+  readonly values: Readonly<Record<string, string>> | null;
   /** The generated annotation this hand-written one names, where the resolver says. */
   readonly ref: string | null;
 }
@@ -79,6 +82,7 @@ export interface CoreAnnotation {
   text: string | null;
   paint: string | null;
   measure: Measure | null;
+  values: Record<string, string> | null;
   ref?: string | null;
 }
 
@@ -94,6 +98,7 @@ export function fromCore(a: CoreAnnotation): Annotation {
     text: a.text,
     measure: a.measure,
     paint: a.paint,
+    values: a.values,
     ref: a.ref ?? null,
   };
 }
@@ -135,6 +140,7 @@ export function resolveRaw(raw: readonly RawAnnotation[], timebase: Ratio): Reso
       text: r.text ?? null,
       measure: r.measure ?? null,
       paint: r.paint ?? null,
+      values: r.values ?? null,
       ref: null,
     };
   };
@@ -163,6 +169,7 @@ export function resolveRaw(raw: readonly RawAnnotation[], timebase: Ratio): Reso
           text: r.text ?? target.text,
           measure: r.measure ?? target.measure,
           paint: r.paint ?? target.paint,
+          values: r.values ?? target.values,
           ref: target.id,
         };
     }
