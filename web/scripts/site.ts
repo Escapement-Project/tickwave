@@ -1,7 +1,8 @@
 // Builds tickwave's site into dist/site/, from site/ at the repository's root. Run from web/ after
 // build.ts: node scripts/site.ts
 //
-// Every URL in the site is relative: it is published under a subpath (/tickwave/).
+// Every URL in the site is relative, as it is published under a subpath (/tickwave/), except the
+// shared header's: they lead to the project's other pages, at the published site.
 
 import * as esbuild from "esbuild";
 import MarkdownIt from "markdown-it";
@@ -43,7 +44,7 @@ await esbuild.build({
 });
 
 // The design system's files, as copied into site/, and the site's own styles.
-for (const f of ["tokens.css", "favicon.ico", "site.css"]) copyFileSync(join(site, f), join(out, f));
+for (const f of ["tokens.css", "base.css", "face.js", "header.js", "favicon.ico", "site.css"]) copyFileSync(join(site, f), join(out, f));
 cpSync(join(site, "fonts"), join(out, "fonts"), { recursive: true });
 
 // The demo's and the viewer's examples: committed fixtures, and the SWD annotations made from one.
@@ -78,6 +79,31 @@ const NAV: [string, string][] = [
 ];
 
 const layout = readFileSync(join(site, "layout.html"), "utf8");
+
+/** The project's address, where the shared header's places are. */
+const PUBLISHED = "https://escapement-project.github.io";
+
+/** A copy's text, after checking it still has the shape this build fills in. */
+function shaped(name: string, markers: [string, number][]): string {
+  const text = readFileSync(join(site, name), "utf8").trim();
+  for (const [marker, count] of markers) {
+    const n = text.split(marker).length - 1;
+    if (count ? n !== count : n === 0) throw new Error(`site/${name}: expected ${count || "some"} ${marker}; the site's copy changed shape`);
+  }
+  return text;
+}
+
+// The shared header, with the project's mark, its places at the published site, and tickwave marked
+// as the place shown; the shared footer, with tickwave's licence.
+const mark = readFileSync(join(site, "dial.svg"), "utf8").trim().replace("<svg ", '<svg aria-hidden="true" fill="currentColor" ');
+const header = shaped("header.html", [["{{mark}}", 1], ["{{base}}", 0], ['data-page="tickwave"', 1]])
+  .replace("{{mark}}", () => mark)
+  .replaceAll("{{base}}", PUBLISHED)
+  .replace('data-page="tickwave"', 'data-page="tickwave" aria-current="page"');
+const footer = shaped("footer.html", [["</div></footer>", 1]]).replace(
+  "</div></footer>",
+  "<span class=\"licence\">tickwave is free software under the MIT or Apache-2.0 licence.</span></div></footer>",
+);
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
 
 function page(path: string, opts: { title: string; description: string; kind: string; content: string }): void {
@@ -93,6 +119,10 @@ function page(path: string, opts: { title: string; description: string; kind: st
         return root;
       case "nav":
         return nav;
+      case "header":
+        return header;
+      case "footer":
+        return footer;
       case "kind":
         return opts.kind;
       case "content":

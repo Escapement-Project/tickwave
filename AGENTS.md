@@ -29,7 +29,8 @@ only if a benchmark on real recordings shows the WASM cost matters; record the n
 data colours, line patterns, type roles) lives in the site repository,
 `escapement-project.github.io`; its `design/README.md` explains it. Read the host page's CSS
 variables (`--ink`, `--series-verge`, ...) rather than shipping tickwave's own colours. tickwave's
-own site keeps copies of the site's `static/tokens.css` and `static/fonts/`, checked with
+own site keeps copies of the site's `static/tokens.css` and `static/fonts/`, and of the project's
+shared header, footer and base sheet, checked with
 `uv run design/build.py --check <copies>` run from the site repository. Interaction is hue-free:
 an ink focus ring, an ink wash under the pointer.
 

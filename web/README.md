@@ -39,7 +39,8 @@ The stress cases and the screenshots need the ignored `fixtures-local/`, which
 
 tickwave's site lives in `site/` at the repository's root, and `scripts/site.ts` builds it into
 `dist/site/`. `npm run build` builds it too. The site is static, and every URL in it is relative,
-so it works under any path, such as `/tickwave/` on GitHub Pages. Its pages:
+so it works under any path, such as `/tickwave/` on GitHub Pages. The exception is the project's
+shared header: its links lead to the project's other pages at the published site. Its pages:
 
 - `index.html`, the viewer: a recording by its address (`?src=`, `?annotations=`) or from files
 - `demo.html`, a short page citing the committed fixtures as a project page would
@@ -47,9 +48,17 @@ so it works under any path, such as `/tickwave/` on GitHub Pages. Its pages:
 - `docs/format.html` and `docs/annotations.html`, rendered from `FORMAT.md` and `ANNOTATIONS.md`
 - `docs/converter.html`, rendered from `site/docs/converter.md`
 
-`site/tokens.css`, `site/fonts/` and `site/favicon.ico` are copies of the design system's files.
-Check them from the site repository with
-`uv run design/build.py --check ../tickwave/site/tokens.css ../tickwave/site/fonts/* ../tickwave/site/favicon.ico`.
+`site/tokens.css`, `site/fonts/`, `site/favicon.ico` and `site/dial.svg` are copies of the design
+system's files. `site/base.css`, `site/header.html`, `site/footer.html`, `site/face.js` and
+`site/header.js` are copies of the project's shared header, footer and base sheet. Check them all
+from the site repository with:
+
+```sh
+uv run design/build.py --check ../tickwave/site/tokens.css ../tickwave/site/fonts/* \
+    ../tickwave/site/favicon.ico ../tickwave/site/dial.svg ../tickwave/site/base.css \
+    ../tickwave/site/header.html ../tickwave/site/footer.html ../tickwave/site/face.js \
+    ../tickwave/site/header.js
+```
 
 ## The data source
 

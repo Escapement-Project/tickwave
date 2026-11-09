@@ -15,6 +15,7 @@
   --lume: #c4f03c;
   --on-lume: #11171d;
   --plate: #11171d;
+  --plate-line: #aab5be;
   --hand: #c8102e;
   --ring: #eef4f6;
   --face: #dce8ed;
@@ -34,6 +35,7 @@
   --dash-second-build: 6 3;
   --dash-misread: 2 4;
   --dash-reference: 8 3 2 3;
+  --dash-capture-second: 12 4;
   --capture-opacity: 0.6;
   --capture-width: 1.5px;
   /* Type */
@@ -56,6 +58,7 @@
   --lume: #c4f03c;
   --on-lume: #11171d;
   --plate: #11171d;
+  --plate-line: #aab5be;
   --hand: #ef3b4a;
   --ring: #1b232b;
   --face: #11171d;
@@ -83,6 +86,7 @@
     --lume: #c4f03c;
     --on-lume: #11171d;
     --plate: #11171d;
+    --plate-line: #aab5be;
     --hand: #ef3b4a;
     --ring: #1b232b;
     --face: #11171d;

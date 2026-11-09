@@ -24,6 +24,48 @@ async function viewReady(page: Page): Promise<void> {
   );
 }
 
+test.describe("the project's header", () => {
+  test("marks tickwave among the project's places and the page among tickwave's", async ({ page }) => {
+    await page.goto(`${SITE}docs/format.html`);
+    const places = page.getByRole("navigation", { name: "Escapement Project" });
+    await expect(places.getByRole("link", { name: "tickwave" })).toHaveAttribute("href", "https://escapement-project.github.io/tickwave/");
+    await expect(places.getByRole("link", { name: "tickwave" })).toHaveAttribute("aria-current", "page");
+    await expect(places.getByRole("link", { name: "Measurements" })).not.toHaveAttribute("aria-current", /./);
+    const own = page.getByRole("navigation", { name: "tickwave" });
+    await expect(own.locator("[aria-current]")).toHaveText("Format");
+    await expect(own.getByRole("link", { name: "Viewer" })).toHaveAttribute("href", "../index.html");
+    await expect(page.locator("footer")).toContainText("tickwave is free software under the MIT or Apache-2.0 licence.");
+  });
+
+  test("the switch turns the face, and the next page keeps it", async ({ page }) => {
+    await page.emulateMedia({ colorScheme: "light" });
+    await page.goto(`${SITE}demo.html`);
+    const faces = page.getByRole("switch", { name: "Night face" });
+    await expect(faces).toHaveAttribute("aria-checked", "false");
+    await faces.click();
+    await expect(faces).toHaveAttribute("aria-checked", "true");
+    expect(await page.evaluate(() => [document.documentElement.dataset.face, getComputedStyle(document.documentElement).colorScheme, localStorage.getItem("face")])).toEqual(["night", "dark", "night"]);
+    await page.getByRole("navigation", { name: "tickwave" }).getByRole("link", { name: "Viewer" }).click();
+    await expect(page).toHaveURL(/index\.html$/);
+    await expect(page.getByRole("switch", { name: "Night face" })).toHaveAttribute("aria-checked", "true");
+    expect(await page.evaluate(() => document.documentElement.dataset.face)).toBe("night");
+  });
+
+  test("on a phone, the places are behind the menu", async ({ page }) => {
+    await page.setViewportSize({ width: 360, height: 700 });
+    await page.goto(`${SITE}index.html`);
+    const menu = page.getByRole("button", { name: "Menu" });
+    const places = page.getByRole("navigation", { name: "Escapement Project" });
+    await expect(places).toBeHidden();
+    await menu.click();
+    await expect(menu).toHaveAttribute("aria-expanded", "true");
+    await expect(places.getByRole("link", { name: "Measurements" })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(places).toBeHidden();
+    await expect(menu).toBeFocused();
+  });
+});
+
 test.describe("the viewer", () => {
   test("opens a recording and its sidecar from ?src= and ?annotations=", async ({ page }) => {
     await page.goto(`${SITE}index.html?src=fixtures/identify-swd.tickwave&annotations=fixtures/identify-swd.annotations.toml`);

@@ -5,29 +5,27 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{title}}</title>
 <meta name="description" content="{{description}}">
+<script>
+// .js tells base.css the header's script will run; and a face chosen on an earlier visit, applied
+// before the first paint. The project's sites share the key.
+document.documentElement.classList.add("js"); try { const f = localStorage.getItem("face"); if (f === "day" || f === "night") document.documentElement.dataset.face = f; } catch {}
+</script>
+<link rel="preload" href="{{root}}fonts/saira-expanded.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="{{root}}fonts/hanken-grotesk.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="icon" href="{{root}}favicon.ico">
 <link rel="stylesheet" href="{{root}}tokens.css">
+<link rel="stylesheet" href="{{root}}base.css">
 <link rel="stylesheet" href="{{root}}site.css">
-<script>
-// The face the reader chose, before the page paints. The project's sites share the key.
-try { const f = localStorage.getItem("face"); if (f === "day" || f === "night") document.documentElement.dataset.face = f; } catch {}
-</script>
 <script type="module" src="{{root}}site.js"></script>
 </head>
 <body class="{{kind}}">
-<a class="skip" href="#main">Skip to the content</a>
-<header class="top">
-  <div class="bar">
-    <a class="brand" href="{{root}}index.html">tickwave</a>
-    <nav aria-label="tickwave">{{nav}}</nav>
-    <button class="face" id="face" type="button" aria-pressed="false">Night</button>
-  </div>
-</header>
-<main id="main">
+{{header}}
+<main id="main" class="wrap">
+<nav class="subnav" aria-label="tickwave">{{nav}}</nav>
 {{content}}
 </main>
-<footer class="foot">
-  <p>tickwave is part of the <a href="https://escapement-project.github.io/">Escapement Project</a>. It is free software under the MIT or Apache-2.0 licence.</p>
-</footer>
+{{footer}}
+<script src="{{root}}face.js" defer></script>
+<script src="{{root}}header.js" defer></script>
 </body>
 </html>

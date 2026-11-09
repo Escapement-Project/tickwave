@@ -1,28 +1,8 @@
-// tickwave's site: the face switch on every page, and the viewer on index.html. Built by
-// web/scripts/site.ts; "tickwave" is the tickwave.js beside this script.
+// tickwave's site: the viewer on index.html. Built by web/scripts/site.ts; "tickwave" is the
+// tickwave.js beside this script. The project's face.js and header.js run the header.
 
 import { recordingInfo, registerFile, type RecordingInfo } from "tickwave";
 import { formatBytes, formatInterval } from "../web/src/readouts.ts";
-
-// The face: day or night, remembered under the key the project's other sites use.
-const face = document.getElementById("face") as HTMLButtonElement;
-const shown = () => (getComputedStyle(document.documentElement).colorScheme === "dark" ? "night" : "day");
-const labelFace = () => {
-  const night = shown() === "night";
-  face.textContent = night ? "Day" : "Night";
-  face.setAttribute("aria-pressed", String(night));
-};
-face.addEventListener("click", () => {
-  const next = shown() === "night" ? "day" : "night";
-  document.documentElement.dataset.face = next;
-  try {
-    localStorage.setItem("face", next);
-  } catch {
-    // The choice lasts this visit only.
-  }
-  labelFace();
-});
-labelFace();
 
 if (document.body.classList.contains("viewer")) viewer();
 
