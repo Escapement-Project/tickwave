@@ -1,0 +1,34 @@
+<!-- title: chrono: open a recording -->
+<!-- description: View a logic or mixed-signal capture in your browser, from a URL or from files on this computer. -->
+<!-- kind: viewer -->
+<h1>Open a recording</h1>
+<p class="lede">chrono shows logic and mixed-signal captures. It draws digital channels from their edges and analog channels from their samples, on one time axis.</p>
+<p>It reads <code>.chrono</code> recordings. <a href="docs/converter.html">The converter</a> makes them from Saleae Logic 2, sigrok and VCD captures. Give the viewer a recording's address, or open one from this computer.</p>
+
+<div class="open">
+  <form id="by-url" class="by-url">
+    <label for="src">The recording's address</label>
+    <input id="src" name="src" type="text" inputmode="url" spellcheck="false" placeholder="https://example.org/capture.chrono" required>
+    <label for="annotations">Its sidecar's address, if it has one</label>
+    <input id="annotations" name="annotations" type="text" inputmode="url" spellcheck="false" placeholder="https://example.org/capture.annotations.toml">
+    <button class="primary" type="submit">Open</button>
+  </form>
+  <div id="drop" class="drop">
+    <p>Or open files from this computer: a <code>.chrono</code> recording, with its sidecar's <code>.toml</code> and <code>.jsonl</code> files if it has them.</p>
+    <p><label class="button">Choose files<input id="files" type="file" multiple></label></p>
+    <p class="quiet">You can drop them here too. They stay in your browser. Nothing is uploaded.</p>
+  </div>
+</div>
+<p class="quiet">To try it, open <a href="?src=fixtures/identify-swd.chrono&amp;annotations=fixtures/identify-swd.annotations.toml">a debug probe starting an SWD session</a>, or <a href="?src=fixtures/swd50-cut.chrono">an SWD bus on a mixed-signal analyser's analog inputs</a>.</p>
+
+<div id="problem" class="problem" role="alert" hidden></div>
+<section id="stage" class="stage" aria-label="The recording" hidden>
+  <dl id="facts" class="facts"></dl>
+  <div id="view"></div>
+  <p id="share" class="share"></p>
+</section>
+
+<h2>Using the view</h2>
+<p>Hold Ctrl (Cmd on a Mac) and turn the wheel to zoom about the pointer, or pinch on a trackpad. Drag, swipe sideways or hold Shift with the wheel to move along the capture. The arrow keys move it too, and plus and minus zoom.</p>
+<p>A click places cursor A, and the next click cursor B. The readout gives their times, the interval between them, and each analog channel's value at both. Drag along the time axis to select a span: the readout counts each channel's edges in it and measures one channel's clock.</p>
+<p>A recording can come with annotations: the spans and points its sidecar names. They show above the channels. The menu beside the zoom buttons steps through one kind of them, such as every WAIT a target answered.</p>

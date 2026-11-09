@@ -1,6 +1,6 @@
 // Byte ranges of a recording: over HTTP with Range requests, or from a local File.
 
-import { aborted } from "../source.ts";
+import { aborted, named } from "../source.ts";
 
 export interface Bytes {
   /** Bytes [from, to) of the file; fewer where the file ends first. */
@@ -43,12 +43,18 @@ export class HttpBytes implements Bytes {
     if (signal?.aborted) throw aborted();
     if (this.#whole) return this.#whole.subarray(from, Math.min(to, this.#whole.length));
     if (to <= this.#prefix.length) return this.#prefix.subarray(from, to);
-    const res = await this.#fetch(this.#url, { headers: { Range: `bytes=${from}-${to - 1}` }, signal });
+    let res: Response;
+    try {
+      res = await this.#fetch(this.#url, { headers: { Range: `bytes=${from}-${to - 1}` }, signal });
+    } catch (e) {
+      if (signal?.aborted) throw aborted();
+      throw named("ChronoNetworkError", `${this.name}: no answer from ${new URL(this.#url).host || "the server"} (${e instanceof Error ? e.message : e})`);
+    }
     if (res.status === 200) {
       this.#whole = new Uint8Array(await res.arrayBuffer());
       return this.#whole.subarray(from, Math.min(to, this.#whole.length));
     }
-    if (res.status !== 206) throw new Error(`${this.name}: HTTP ${res.status}`);
+    if (res.status !== 206) throw named("ChronoHttpError", `${this.name}: HTTP ${res.status}`);
     // A compressed response's ranges count bytes of the compressed stream (PLAN.md §0).
     const encoding = res.headers.get("content-encoding");
     if (encoding && encoding !== "identity") {

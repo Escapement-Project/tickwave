@@ -318,3 +318,15 @@ export function measureReading(what: string, level: 0 | 1, ticks: ArrayLike<numb
   if (!stats) return { value: "\u2013", note: "no full period" };
   return { value: what === "rate" ? formatClockRate(stats, timebase) : formatClockPeriod(stats, timebase), note: clockNote(stats) };
 }
+
+/** A download size: 4828 bytes is 4.7 KiB. */
+export function formatBytes(n: number): string {
+  const units = ["bytes", "KiB", "MiB", "GiB"];
+  let v = n;
+  let u = 0;
+  while (v >= 1024 && u < units.length - 1) {
+    v /= 1024;
+    u++;
+  }
+  return u === 0 ? `${n} bytes` : `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[u]}`;
+}

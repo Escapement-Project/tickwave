@@ -1,7 +1,11 @@
 {
   "compilerOptions": {
     "target": "es2023",
-    "lib": ["es2023", "dom", "dom.iterable"],
+    "lib": [
+      "es2023",
+      "dom",
+      "dom.iterable"
+    ],
     "module": "preserve",
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
@@ -13,8 +17,23 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
     "skipLibCheck": true,
-    "types": ["node"],
-    "paths": { "chrono": ["./src/index.ts"] }
+    "types": [
+      "node"
+    ],
+    "paths": {
+      "chrono": [
+        "./src/index.ts"
+      ]
+    }
   },
-  "include": ["src", "test", "scripts", "dev", "e2e", "build.ts", "playwright.config.ts"]
+  "include": [
+    "src",
+    "test",
+    "scripts",
+    "dev",
+    "e2e",
+    "build.ts",
+    "playwright.config.ts",
+    "../site/**/*.ts"
+  ]
 }

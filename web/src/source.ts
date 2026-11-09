@@ -49,6 +49,10 @@ export interface RecordingInfo {
   readonly channels: readonly Channel[];
   /** The recording's download size in bytes, where the source knows it. */
   readonly bytes?: number;
+  /** What a .chrono header states: its content id, where it came from, and free metadata. */
+  readonly contentId?: string;
+  readonly source?: Readonly<Record<string, unknown>>;
+  readonly meta?: Readonly<Record<string, string>>;
 }
 
 export interface Edges {
@@ -129,6 +133,17 @@ export function sampleAtOrBefore(c: AnalogChannel, tick: number): number | null 
   while (i > 0 && sampleTick(c.first, c.period, i) > tick) i--;
   while (i + 1 < c.count && sampleTick(c.first, c.period, i + 1) <= tick) i++;
   return Math.min(i, c.count - 1);
+}
+
+/**
+ * An error whose `name` says what went wrong, so a page can explain it: `ChronoNetworkError` (no
+ * answer, which a refused cross-origin request looks like too), `ChronoHttpError` (an answer that
+ * was not the bytes), `ChronoNotRecording`, `ChronoSidecarError`.
+ */
+export function named(name: string, message: string): Error {
+  const e = new Error(message);
+  e.name = name;
+  return e;
 }
 
 /** The DOMException a source rejects with when its signal aborts. */

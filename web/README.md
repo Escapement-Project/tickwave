@@ -24,6 +24,7 @@ npm run dev                               # http://127.0.0.1:8123/dev/
 | `npm run generate` | the files the tests generate rather than commit (below) |
 | `npm run typecheck` | `tsc` over the sources, tests and scripts |
 | `npm test` | the unit tests, with Node's test runner |
+| `npm run site` | chrono's site into `dist/site/`, from `site/` at the repository's root (below) |
 | `npm run e2e` | generates, then runs Playwright in Chromium and Firefox; screenshots go to `screenshots/` |
 | `npm run check` | typecheck, unit tests, build and e2e, in that order |
 
@@ -34,10 +35,21 @@ what was fetched.
 The stress cases and the screenshots need the ignored `fixtures-local/`, which
 `scripts/fixtures.ts` writes from the exports. Tests that need it skip without it.
 
-## Shipping
+## The site
 
-A page imports `chrono.js`. It loads `chrono-worker.js` and `chrono.wasm` from beside itself, the
-first time something needs a recording. The three files go together.
+chrono's site lives in `site/` at the repository's root, and `scripts/site.ts` builds it into
+`dist/site/`. `npm run build` builds it too. The site is static, and every URL in it is relative,
+so it works under any path, such as `/chrono/` on GitHub Pages. Its pages:
+
+- `index.html`, the viewer: a recording by its address (`?src=`, `?annotations=`) or from files
+- `demo.html`, a short page citing the committed fixtures as a project page would
+- `docs/elements.html`, rendered from this file's "The elements" section
+- `docs/format.html` and `docs/annotations.html`, rendered from `FORMAT.md` and `ANNOTATIONS.md`
+- `docs/converter.html`, rendered from `site/docs/converter.md`
+
+`site/tokens.css`, `site/fonts/` and `site/favicon.ico` are copies of the design system's files.
+Check them from the site repository with
+`uv run design/build.py --check ../chrono/site/tokens.css ../chrono/site/fonts/* ../chrono/site/favicon.ico`.
 
 ## The data source
 
@@ -129,56 +141,149 @@ chrono session's converted recordings, linked into `fixtures-local/` by `scripts
 
 ## The elements
 
-Import `chrono.js` and the three elements are defined.
+chrono puts a capture into a web page with three custom elements. `<chrono-view>` shows a whole
+recording. `<chrono-inset>` shows one annotated stretch of it, magnified. `<chrono-ref>` turns a
+phrase in the text into a reference: pointing at it opens an inset beside the text.
 
-`<chrono-view>` takes `src`, `annotations`, `channels`, `window`, `open` and `series`. Collapsed,
-it shows one line and an Open button. When it scrolls into view it fetches the recording's head,
-and only the head, to say what the recording is; that line gives the duration to three
-significant figures. Open, the view takes these controls:
+### Loading
 
-- Ctrl or Cmd with the wheel, and a trackpad pinch, zoom about the pointer; the plain wheel
-  scrolls the page and shows how to zoom
-- Shift with the wheel, a horizontal swipe, a drag and the arrow keys pan
-- `+` and `−` zoom, Home fits the capture, Escape clears the cursors and the selection
-- two fingers pinch
-- a click places cursor A, then B; it snaps to an edge within 6 px on the clicked row
-- a drag on the time axis selects a span
-- clicking a note shows its span
-- the kind menu and its arrows step through one kind of annotation, "n of N"; the kind is the one
-  the view was opened at, else the first annotation's
+Include one module, and the three elements are defined:
 
-Cursors read out their times, the interval between them, and each analog channel's value at
-each, the last sample at or before it, to the digit one code step carries. A selection shows as a
-bar along the time axis, above its labels.
+```html
+<script type="module" src="chrono.js"></script>
+```
 
-A selection reads out its length, each channel's edges, and for one channel the periods' count,
-minimum, median and maximum, and the running clock. The running clock is the mean of the periods
-inside Tukey's fences (ANNOTATIONS.md, "Measures"): they keep a clock's jitter and quantisation,
-and drop pauses and the long periods that occur in fewer than a quarter of them.
+`chrono.js` reads recordings through a decoder in a worker. The first time a page needs a
+recording, it loads `chrono-worker.js` and `chrono.wasm` from beside itself, so keep the three
+files together. Recordings are fetched by byte range: the head first, then only the blocks a view
+shows. A server that ignores ranges still works, as long as it sends the whole file.
 
-Methods are `show(id)`, `setWindow(start, end)` (ticks, or times such as `"317.8 ms"`), `settled()`
-and `tickAt(clientX)`. Events are `chrono-open`, `chrono-window`, `chrono-select`, `chrono-ready`
-and `chrono-error`.
+### `<chrono-view>`
 
-`<chrono-inset>` takes `src`, `annotations`, `annotation`, `channels`, `pad` (`"6%"` of the span by
-default, or a time), `scale` (`"50 ns/px"`), `sweep` (`off`) and `series`. It shows the
-annotation's label and text, and draws the annotations inside its span as notes. It sweeps in once
-per appearance, and an inset shown again within 800 ms of hiding does not sweep. `measure` gives
-the running clock's `rate` or `period`, or the `duration` from the channel's first edge in the
-span to its last. It fires `chrono-ready` once it has drawn.
+A whole recording. Closed, it shows one line: the recording's title, its length to three
+significant figures, its channels and its size, and an Open button. It fetches the recording's
+head, and nothing else, once it scrolls into view. Open, it shows the time axis, one row a
+channel, the annotations above them, and a readout under them.
 
-`<chrono-ref>` takes `annotation`, and `for` or its own `src` and `annotations`. It borrows `src`,
-`annotations`, `channels` and `series` from its view.
+| Attribute | Means |
+|---|---|
+| `src` | the recording's URL |
+| `annotations` | its sidecar's TOML file. Without it, a recording with a bundled sidecar shows that |
+| `channels` | the channels to show, by name, in order. All of them by default |
+| `window` | what an open view shows first: two times (`"317.8 ms 318.0 ms"`), or an annotation's id |
+| `open` | open the view |
+| `series` | a series name, such as `verge`: the traces take `--series-verge`. Ink by default |
 
-Colours come from the page's custom properties, with system colours where a page has none:
+Times in attributes are a decimal with a unit (`s`, `ms`, `us`, `ns`, `ps`), or a whole number of
+ticks.
 
-- `--ink`, `--ink-2`, `--hair`, `--rule`, `--page`, `--surface`, `--raised`, `--wash` and
-  `--attention-ink` (for a notice)
-- `--series-<name>` for `series`
-- `--chrono-<role>` for a `paint` role. `probe` falls back to the series colour and every other
-  role to ink. The key reads "probe drives" and "target drives", and any other role by its name.
+The reader zooms with Ctrl or Cmd and the wheel, a trackpad pinch, or two fingers. The plain wheel
+scrolls the page, and the view says how to zoom. Shift with the wheel, a sideways swipe, a drag or
+the arrow keys move along the capture. With the view focused, plus and minus zoom, Home shows the
+whole capture, and Escape clears the cursors and the selection.
 
-Fonts come from `--font-text` and `--font-figures`. Parts are `summary`, `title`, `facts`,
-`viewer`, `toolbar`, `plot`, `hint`, `readout`, `steps`, `notice`, `button` and `open-button` on the
-view; `inset`, `label`, `text`, `frame`, `canvas`, `foot`, `measure`, `key` and `notice` on the
-inset; `popover` on the reference.
+A click places cursor A, and the next click cursor B. A cursor snaps to an edge within 6 pixels on
+the row clicked. The readout gives both times, the interval between them, and each analog
+channel's value at each. That value is the last sample at or before the cursor, to the digit one
+code step carries.
+
+A drag along the time axis selects a span. The readout gives its length and each channel's edges
+in it. For one channel it gives the periods' count, minimum, median and maximum, and the running
+clock. The running clock is the mean of the periods inside Tukey's fences, as the sidecar's
+measures define it: it keeps a clock's jitter and quantisation, and drops pauses.
+
+A menu beside the zoom buttons steps through one kind of annotation, "3 of 16". It starts with the
+kind of the annotation the view opened at, else the kind of the sidecar's first annotation.
+Clicking an annotation's label shows its span.
+
+| Method or property | Does |
+|---|---|
+| `show(id)` | opens the view at an annotation. Resolves once it has drawn |
+| `setWindow(start, end)` | shows a span: ticks, or times such as `"317.8 ms"` |
+| `settled()` | resolves once the view has drawn everything it shows |
+| `tickAt(clientX)` | the tick under a point in the window, or null before the view has drawn |
+| `open` | whether the view is open; setting it opens or closes it |
+| `window` | the span shown, `{start, end}` in ticks |
+
+| Event | When, and its `detail` |
+|---|---|
+| `chrono-open` | the view opens: `{src}` |
+| `chrono-window` | the span shown changes: `{start, end}` |
+| `chrono-select` | a span is selected: its `start`, `end`, `duration`, `edges` by channel, and `periods` for the measured channel |
+| `chrono-ready` | the view has first drawn: `{height}` |
+| `chrono-error` | something failed: `{message, error}`. The view also shows it, and logs it to the console |
+
+### `<chrono-inset>`
+
+One annotation's span, magnified, with the annotation's label and text above it. The annotations
+inside the span show as notes, and an annotation's `paint` colours a line where a role drives it.
+An inset sweeps in from the left when it appears. Shown again within 800 ms of hiding, it doesn't
+sweep again. A reader who prefers reduced motion sees it drawn at once.
+
+| Attribute | Means |
+|---|---|
+| `src`, `annotations`, `channels`, `series` | as for `<chrono-view>` |
+| `annotation` | the annotation to show, by id. Set it to switch |
+| `pad` | room either side of the span: a share of it (`"10%"`, `6%` by default) or a time |
+| `scale` | a fixed time scale, such as `"50 ns/px"`, so insets side by side compare |
+| `sweep` | `off` to draw at once |
+
+An annotation's `measure` puts a reading under the trace, taken from the channel's own edges:
+
+- `rate` or `period`: the running clock over the span. The note says how many periods it used,
+  such as "mean of 31 of 32 periods".
+- `duration`: the time from the channel's first edge in the span to its last.
+
+A reading shows only the digits its ticks support. `settled()` and the `chrono-ready` event
+(`{annotation, height}`) work as on the view, so a page can lay itself out around an inset's
+final height. `sweeping` says whether the sweep is playing.
+
+### `<chrono-ref>`
+
+A phrase that cites an annotation. Pointing at it, or reaching it with Tab, opens an inset in a
+popover beside the text, so nothing on the page moves. Moving the pointer or the focus away, or Escape,
+closes the popover. A click, or Enter, opens its view at the annotation.
+
+| Attribute | Means |
+|---|---|
+| `annotation` | the annotation it cites |
+| `for` | the id of a `<chrono-view>` to share a recording with. The reference takes its `src`, `annotations`, `channels` and `series` |
+| `src`, `annotations`, `series` | the recording, sidecar and series, for a reference without a view |
+
+A reference fetches nothing until it scrolls into view. Then it fetches the recording's head and
+the sidecar, and the inset fetches the data when it opens.
+
+### Styling
+
+The elements draw in the page's own colours and fonts. They read the page's CSS custom properties
+and fall back to system colours on a page without them:
+
+| Property | Draws |
+|---|---|
+| `--ink`, `--ink-2` | text, traces, cursors; secondary text |
+| `--page`, `--surface`, `--raised` | the backgrounds under the elements and their controls |
+| `--hair`, `--rule` | dividers; control outlines |
+| `--wash` | what the pointer is on |
+| `--attention-ink` | a notice of a problem |
+| `--series-<name>` | the traces, with `series="<name>"` |
+| `--chrono-<role>` | a line where an annotation's `paint` role drives it. `probe` falls back to the series colour, any other role to ink |
+| `--font-text`, `--font-figures` | labels; the readouts' figures |
+
+The key under an inset names the roles it shows: "probe drives" and "target drives", and any
+other role by its name. The elements follow a change of face, a `data-face` on `<html>` or the
+system's preference, as it happens.
+
+Each element exposes its pieces to `::part()`. On the view: `summary`, `title`, `facts`,
+`open-button`, `viewer`, `toolbar`, `plot`, `hint`, `readout`, `steps`, `notice` and `button`. On
+the inset: `inset`, `label`, `text`, `frame`, `canvas`, `foot`, `measure`, `key` and `notice`. On
+the reference: `popover`.
+
+### From the module
+
+`chrono.js` also exports three functions:
+
+| Function | Does |
+|---|---|
+| `registerFile(file, sidecar)` | makes a local `File` a `src`. The sidecar's `.toml` and `.jsonl` files can come with it |
+| `recordingInfo(src)` | what a recording holds, from its head: title, length, channels, size, content id |
+| `configure({firstRead, cacheBytes})` | the size of the first read of a head, 64 KiB by default; and of the cache of decoded blocks, 192 MiB |

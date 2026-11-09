@@ -1,0 +1,41 @@
+<!-- title: chrono: a capture in a page -->
+<!-- description: How a project page cites a real capture with chrono: references in the text, an inset with a measurement, and the whole capture a click away. -->
+<!-- kind: demo -->
+<h1>A capture in a page</h1>
+<p class="lede">A page can cite a capture the way it cites a figure. Each underlined phrase below names a stretch of a real capture. Point at one, or reach it with Tab, to see that stretch. Click it to open the whole capture there.</p>
+
+<h2>A probe opens an SWD session</h2>
+<p>A logic analyser recorded this at a billion samples a second, so one tick is one nanosecond. The debug probe starts with a <chrono-ref for="capture" annotation="line-reset">line reset</chrono-ref>: it holds SWDIO high for 51 clocks. Then it sends the <chrono-ref for="capture" annotation="jtag-to-swd">JTAG-to-SWD select sequence</chrono-ref> and resets the line again.</p>
+<p>Its first transfer <chrono-ref for="capture" annotation="dpidr-read">reads the debug port's ID register</chrono-ref>. The probe drives the <chrono-ref for="capture" annotation="dpidr-request">request</chrono-ref>. The target drives the <chrono-ref for="capture" annotation="dpidr-ack">acknowledge</chrono-ref> and the data. Later on, the target <chrono-ref for="capture" annotation="first-wait">answers WAIT</chrono-ref> to a read it isn't ready for.</p>
+
+<figure>
+  <chrono-inset src="fixtures/identify-swd.chrono" annotations="fixtures/identify-swd.annotations.toml" annotation="dpidr-read" channels="SWCLK SWDIO"></chrono-inset>
+  <figcaption><b>Figure 1.</b> The read of the debug port's ID register, which returns 0x6BA02477. The clock rate under the trace comes from the capture's own edges. It is the mean of the clock's periods. It shows only the digits those edges support.</figcaption>
+</figure>
+
+<p>Here is the whole capture, closed. Its line says what it holds before any of its data downloads. Open it to zoom, place cursors and measure.</p>
+<chrono-view id="capture" src="fixtures/identify-swd.chrono" annotations="fixtures/identify-swd.annotations.toml"></chrono-view>
+
+<h2>The same kind of bus, on analog inputs</h2>
+<p>This capture comes from a mixed-signal analyser's two analog inputs, at a billion samples a second. The analyser read each sample as an integer code, and the recording stores those codes. One code step is about 2.5 mV, so a readout stops at the millivolt. Place two cursors on a trace to read its voltage at each.</p>
+<chrono-view id="analog" src="fixtures/swd50-cut.chrono" channels="SWCLK SWDIO" window="0 ns 10 us" open></chrono-view>
+
+<h2>How this page does it</h2>
+<p>The page includes one script. The capture and its annotations sit beside the page as files: <code>identify-swd.chrono</code>, and a sidecar of annotations that names each stretch the text cites.</p>
+<pre><code>&lt;script type="module" src="chrono.js"&gt;&lt;/script&gt;
+
+&lt;p&gt;Its first transfer &lt;chrono-ref for="capture" annotation="dpidr-read"&gt;reads
+the debug port's ID register&lt;/chrono-ref&gt;.&lt;/p&gt;
+
+&lt;chrono-inset src="identify-swd.chrono" annotations="identify-swd.annotations.toml"
+              annotation="dpidr-read"&gt;&lt;/chrono-inset&gt;
+
+&lt;chrono-view id="capture" src="identify-swd.chrono"
+             annotations="identify-swd.annotations.toml"&gt;&lt;/chrono-view&gt;</code></pre>
+<p>The sidecar is a short TOML file. This entry gives a name to a transfer that an SWD decoder found, and asks the inset to measure the clock over it:</p>
+<pre><code>[[annotation]]
+id = "dpidr-read"
+ref = "swd/read/377094557"
+label = "Reading the debug port's ID register"
+measure = { channel = "SWCLK", what = "rate" }</code></pre>
+<p>A reference loads nothing until it scrolls into view. Then it fetches the recording's head and the sidecar. The data for a stretch arrives when someone points at it. <a href="docs/elements.html">The elements</a> lists every attribute, and <a href="docs/annotations.html">the sidecar</a> its fields.</p>

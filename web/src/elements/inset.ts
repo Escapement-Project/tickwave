@@ -6,7 +6,7 @@ import { INSET_ATTRIBUTES, parseChannels, parsePad, parseScale, parseSweep } fro
 import { reducedMotion } from "../face.ts";
 import { measureReading } from "../readouts.ts";
 import { channelIndices, Plot } from "../render/plot.ts";
-import { isAbort, type RecordingInfo } from "../source.ts";
+import { isAbort, named, type RecordingInfo } from "../source.ts";
 import { secondsValue, toTicks } from "../time.ts";
 import { ChronoElement, loadRecording, type Loaded } from "./base.ts";
 
@@ -144,7 +144,7 @@ export class ChronoInset extends ChronoElement {
         (l) => {
           if (this.#loadKey !== key) return;
           this.#loaded = l;
-          for (const e of l.annotations.errors) this.fail(new Error(e));
+          for (const e of l.annotations.errors) this.fail(named("ChronoSidecarError", e));
           this.#show();
         },
         (e) => this.fail(e),

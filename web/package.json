@@ -6,7 +6,7 @@
   "license": "MIT OR Apache-2.0",
   "type": "module",
   "scripts": {
-    "build": "node build.ts",
+    "build": "node build.ts && node scripts/site.ts",
     "dev": "node scripts/generate.ts && node build.ts --serve",
     "typecheck": "tsc -p .",
     "test": "node --test \"test/**/*.test.ts\"",
@@ -14,14 +14,18 @@
     "fixtures": "node scripts/fixtures.ts",
     "vendor": "node scripts/vendor.ts",
     "check": "npm run typecheck && npm test && npm run build && npm run e2e",
-    "generate": "node scripts/generate.ts"
+    "generate": "node scripts/generate.ts",
+    "site": "node scripts/site.ts"
   },
   "devDependencies": {
     "@playwright/test": "^1.65.0",
+    "@types/markdown-it": "^14.2.0",
     "@types/node": "^26.6.6",
     "@types/send": "^1.2.1",
     "csv-parse": "^7.0.3",
     "esbuild": "^0.28.2",
+    "markdown-it": "^15.0.3",
+    "markdown-it-anchor": "^10.1.0",
     "send": "^1.2.1",
     "typescript": "^7.0.2"
   },

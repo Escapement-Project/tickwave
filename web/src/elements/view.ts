@@ -4,10 +4,10 @@
 import { ofKind, type Annotation } from "../annotations.ts";
 import { parseChannels, parseWindow, VIEW_ATTRIBUTES } from "../attributes.ts";
 import { absolute, events as registryEvents, infoFor, peekInfo } from "../registry.ts";
-import { clockNote, countEdges, formatBrief, formatClockPeriod, formatClockRate, formatCount, formatInterval, formatRate, formatValue, periodStats } from "../readouts.ts";
+import { clockNote, countEdges, formatBrief, formatBytes, formatClockPeriod, formatClockRate, formatCount, formatInterval, formatRate, formatValue, periodStats } from "../readouts.ts";
 import { lowerBound } from "../search.ts";
 import { channelIndices, Plot } from "../render/plot.ts";
-import { isAbort, sampleAtOrBefore, sampleTick, type RecordingInfo } from "../source.ts";
+import { isAbort, named, sampleAtOrBefore, sampleTick, type RecordingInfo } from "../source.ts";
 import { parseTime, toTicks } from "../time.ts";
 import { ChronoElement, loadRecording, type Loaded } from "./base.ts";
 
@@ -211,7 +211,7 @@ export class ChronoView extends ChronoElement {
         (l) => {
           if (this.#loadKey !== key) return null;
           this.#loaded = l;
-          for (const e of l.annotations.errors) this.fail(new Error(e));
+          for (const e of l.annotations.errors) this.fail(named("ChronoSidecarError", e));
           this.#windowAttr = null;
           this.#apply();
           return l;
@@ -772,15 +772,4 @@ export function summaryFacts(info: RecordingInfo): string {
   ];
   if (info.bytes !== undefined) parts.push(formatBytes(info.bytes));
   return parts.join(" · ");
-}
-
-export function formatBytes(n: number): string {
-  const units = ["bytes", "KiB", "MiB", "GiB"];
-  let v = n;
-  let u = 0;
-  while (v >= 1024 && u < units.length - 1) {
-    v /= 1024;
-    u++;
-  }
-  return u === 0 ? `${n} bytes` : `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[u]}`;
 }

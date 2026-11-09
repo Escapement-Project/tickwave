@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{title}}</title>
+<meta name="description" content="{{description}}">
+<link rel="icon" href="{{root}}favicon.ico">
+<link rel="stylesheet" href="{{root}}tokens.css">
+<link rel="stylesheet" href="{{root}}site.css">
+<script>
+// The face the reader chose, before the page paints. The project's sites share the key.
+try { const f = localStorage.getItem("face"); if (f === "day" || f === "night") document.documentElement.dataset.face = f; } catch {}
+</script>
+<script type="module" src="{{root}}site.js"></script>
+</head>
+<body class="{{kind}}">
+<a class="skip" href="#main">Skip to the content</a>
+<header class="top">
+  <div class="bar">
+    <a class="brand" href="{{root}}index.html">chrono</a>
+    <nav aria-label="chrono">{{nav}}</nav>
+    <button class="face" id="face" type="button" aria-pressed="false">Night</button>
+  </div>
+</header>
+<main id="main">
+{{content}}
+</main>
+<footer class="foot">
+  <p>chrono is part of the <a href="https://escapement-project.github.io/">Escapement Project</a>. It is free software under the MIT or Apache-2.0 licence.</p>
+</footer>
+</body>
+</html>

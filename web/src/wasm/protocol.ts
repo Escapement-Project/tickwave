@@ -5,7 +5,8 @@ export type Request =
   | { id: number; op: "edges" | "samples"; key: string; channel: number; start: number; end: number }
   | { id: number; op: "overview"; key: string; channel: number; start: number; end: number; maxBucket: number }
   | { id: number; op: "sidecar"; key: string; url: string; recordingFile: string | null }
-  | { id: number; op: "bundled"; key: string };
+  | { id: number; op: "bundled"; key: string }
+  | { id: number; op: "resolve"; key: string; hand: string; names: string[]; texts: string[]; recordingFile: string | null };
 
 export type Reply =
   | { id: number; ok: true; value: unknown }

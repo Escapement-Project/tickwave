@@ -64,6 +64,8 @@ async function handle(m: Request, signal: AbortSignal): Promise<unknown> {
       const { hand, names, texts } = await sidecar(m.url, signal);
       return r.resolveAnnotations(hand, names, texts, m.recordingFile);
     }
+    case "resolve":
+      return (await recording(m.key)).resolveAnnotations(m.hand, m.names, m.texts, m.recordingFile);
     case "bundled": {
       const r = await recording(m.key);
       const files = r.header.annotations;

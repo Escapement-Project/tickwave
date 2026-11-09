@@ -6,6 +6,7 @@ import type { Recording as WasmRecording } from "../../../crates/wasm/pkg/chrono
 import { lowerBound } from "../search.ts";
 import {
   aborted,
+  named,
   sampleTick,
   type AnalogOverview,
   type Channel,
@@ -50,6 +51,8 @@ export interface Header {
   length: number;
   channels: HeaderChannel[];
   title?: string;
+  meta?: Record<string, string>;
+  source?: Record<string, unknown>;
   content_id: string;
   blocks: number;
   overview: number[];
@@ -245,18 +248,28 @@ export class Opened {
       length: h.length,
       channels,
       bytes: fileLength,
+      contentId: h.content_id,
+      ...(h.source && { source: h.source }),
+      ...(h.meta && { meta: h.meta }),
     };
   }
 
   /** Reads the head: the first read, then the rest if `headLength` asks for more. */
   static async open(api: WasmApi, bytes: Bytes, firstRead = FIRST_READ, signal?: AbortSignal): Promise<Opened> {
     let head = await bytes.read(0, firstRead, signal);
-    for (let need = api.headLength(head); need > head.length; need = api.headLength(head)) {
+    const headLength = (b: Uint8Array) => {
+      try {
+        return api.headLength(b);
+      } catch (e) {
+        throw named("ChronoNotRecording", `${bytes.name}: ${e instanceof Error ? e.message : e}`);
+      }
+    };
+    for (let need = headLength(head); need > head.length; need = headLength(head)) {
       const more = await bytes.read(head.length, need, signal);
       if (more.length === 0) throw new Error(`${bytes.name}: the file ends inside its head`);
       head = join(head, more);
     }
-    const length = api.headLength(head);
+    const length = headLength(head);
     return new Opened(new api.Recording(head.subarray(0, length)), head, bytes);
   }
 
