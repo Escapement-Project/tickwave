@@ -281,9 +281,10 @@ other role by its name. The elements follow a change of face, a `data-face` on `
 system's preference, as it happens.
 
 Each element exposes its pieces to `::part()`. On the view: `summary`, `title`, `facts`,
-`open-button`, `viewer`, `toolbar`, `plot`, `hint`, `readout`, `steps`, `notice` and `button`. On
-the inset: `inset`, `label`, `text`, `frame`, `canvas`, `foot`, `measure`, `key` and `notice`. On
-the reference: `popover`.
+`open-button`, `viewer`, `toolbar`, `plot`, `hint`, `readout`, `steps`, `notice` and `button`.
+Inside `facts`, each fact is a `fact` and also `fact-length`, `fact-channels` or `fact-size`, with
+a `fact-separator` ("; ") between two. On the inset: `inset`, `label`, `text`, `frame`, `canvas`,
+`foot`, `measure`, `key` and `notice`. On the reference: `popover`.
 
 ### From the module
 

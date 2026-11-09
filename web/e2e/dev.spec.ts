@@ -125,7 +125,9 @@ test("a collapsed view fetches its head, and only its head, once it scrolls into
   await page.waitForTimeout(300);
   expect(await served(tag)).toEqual([]);
   await view.scrollIntoViewIfNeeded();
-  await expect(view.locator(".summary .facts")).toHaveText("524\u00a0ms \u00b7 2 channels: SWCLK, SWDIO \u00b7 4.7\u00a0KiB");
+  await expect(view.locator(".summary .facts")).toHaveText("524\u00a0ms; 2 channels: SWCLK, SWDIO; 4.7\u00a0KiB");
+  await expect(view.locator(".summary [part~=fact]")).toHaveText(["524\u00a0ms", "2 channels: SWCLK, SWDIO", "4.7\u00a0KiB"]);
+  await expect(view.locator(".summary [part~=fact-channels]")).toHaveText("2 channels: SWCLK, SWDIO");
   await page.waitForTimeout(300);
   expect((await served(tag)).map((e) => [e.range, e.status])).toEqual([
     ["bytes=0-511", 206],

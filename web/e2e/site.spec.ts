@@ -123,7 +123,7 @@ test("the demo's references, inset and views work", async ({ page }) => {
   await expect(ref.locator(".pop tickwave-inset .measure")).toHaveText("SWCLK 54.644 µs first edge to last");
   await page.mouse.move(0, 0);
   const capture = page.locator("#capture");
-  await expect(capture.locator(".summary .facts")).toHaveText("524 ms · 2 channels: SWCLK, SWDIO · 4.7 KiB");
+  await expect(capture.locator(".summary .facts")).toHaveText("524 ms; 2 channels: SWCLK, SWDIO; 4.7 KiB");
   await page.locator("tickwave-ref[annotation=dpidr-ack]").click();
   await expect(capture).toHaveAttribute("open", "");
   await expect(page.locator("#analog").locator(".toolbar .title")).toHaveText("swd50-cut.tickwave");

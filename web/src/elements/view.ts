@@ -235,7 +235,11 @@ export class TickwaveView extends TickwaveElement {
     // Collapsed, the view shows what is here; the head arrives once the view scrolls into sight.
     const info = peekInfo(src);
     title.textContent = info?.title ?? decodeURIComponent(src.pathname.split("/").pop() ?? "");
-    facts.textContent = info ? summaryFacts(info) : "";
+    const parts = (info ? summaryFacts(info) : []).flatMap(([name, text], i) => [
+      ...(i > 0 ? [part("fact-separator", "; ")] : []),
+      part(`fact ${name}`, text),
+    ]);
+    facts.replaceChildren(...parts);
   }
 
   #apply(): void {
@@ -764,13 +768,20 @@ export class TickwaveView extends TickwaveElement {
   }
 }
 
-/** "524 ms · 2 channels: SWCLK, SWDIO · 4.7 KiB". */
-export function summaryFacts(info: RecordingInfo): string {
+/** The summary's facts by part name: "524 ms", "2 channels: SWCLK, SWDIO", "4.7 KiB". */
+export function summaryFacts(info: RecordingInfo): [part: string, text: string][] {
   const names = info.channels.map((c) => c.name);
-  const parts = [
-    formatBrief(info.length, info.timebase),
-    `${names.length} channel${names.length === 1 ? "" : "s"}: ${names.join(", ")}`,
+  const facts: [string, string][] = [
+    ["fact-length", formatBrief(info.length, info.timebase)],
+    ["fact-channels", `${names.length} channel${names.length === 1 ? "" : "s"}: ${names.join(", ")}`],
   ];
-  if (info.bytes !== undefined) parts.push(formatBytes(info.bytes));
-  return parts.join(" · ");
+  if (info.bytes !== undefined) facts.push(["fact-size", formatBytes(info.bytes)]);
+  return facts;
+}
+
+function part(name: string, text: string): HTMLSpanElement {
+  const span = document.createElement("span");
+  span.setAttribute("part", name);
+  span.textContent = text;
+  return span;
 }
