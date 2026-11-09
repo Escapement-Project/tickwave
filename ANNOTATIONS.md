@@ -79,6 +79,20 @@ Page text cites ids, so they must survive a decoder's rerun. A generator derives
 recording, not from the run: its kind and start tick, as `misread/412093311`, not a counter. A
 hand-written `ref` gives a generated annotation a name that reads well in prose.
 
+## Order
+
+Annotations keep sidecar order: the hand-written file's, in its order, then each included file's,
+in the order `include` lists the files, line by line. Order carries meaning: a view steps through
+the kind of the first annotation unless it was opened at another, so an author lists first an
+annotation of the kind a page steps through.
+
+## Resolved annotations
+
+`chrono annotations check --json` prints the annotations resolved, in sidecar order, and the
+browser's decoder hands the page the same. Each has its full id, `source` (the generator's name;
+null for a hand-written one), `start` and `end` in ticks, and the fields above. An alias keeps
+`ref`, the full id of the generated annotation it names, so a page can tell the two apart.
+
 ## Checks
 
 `chrono annotations check rec.chrono rec.annotations.toml` reports every problem it finds, then exits

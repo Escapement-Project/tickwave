@@ -75,6 +75,9 @@ pub struct Annotation {
     pub id: String,
     /// The generator's name; None for a hand-written annotation.
     pub source: Option<String>,
+    /// For a hand-written alias, the full id of the generated annotation it names.
+    #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
     pub start: i64,
     /// None for a point.
     pub end: Option<i64>,
@@ -203,7 +206,10 @@ pub fn resolve(
     for (i, entry) in file.annotation.into_iter().enumerate() {
         entries.push((None, entry, format!("annotation {}", i + 1)));
     }
-    for inc in included {
+    // Sidecar order: the TOML file's annotations, then each included file's in `include` order.
+    let mut by_include: Vec<&Included<'_>> = included.iter().collect();
+    by_include.sort_by_key(|inc| file.include.iter().position(|n| n == inc.name));
+    for inc in by_include {
         let mut lines = inc
             .text
             .lines()
@@ -258,9 +264,10 @@ pub fn resolve(
         })
         .collect();
     let mut seen = BTreeSet::new();
+    // (position in sidecar order, where it came from, annotation)
     let mut plain = Vec::with_capacity(entries.len());
     let mut refs = Vec::new();
-    for (source, entry, at) in entries {
+    for (position, (source, entry, at)) in entries.into_iter().enumerate() {
         let id = match &source {
             Some(s) => format!("{s}/{}", entry.id),
             None => entry.id.clone(),
@@ -280,7 +287,7 @@ pub fn resolve(
                     "{at}: a ref takes its span from its target; drop start and end"
                 ));
             }
-            refs.push((id, target, entry, at));
+            refs.push((position, id, target, entry, at));
             continue;
         }
         let Some(start) = &entry.start else {
@@ -307,10 +314,12 @@ pub fn resolve(
             }
         };
         plain.push((
+            position,
             at,
             Annotation {
                 id,
                 source,
+                target: None,
                 start,
                 end,
                 channels: entry.channels.unwrap_or_default(),
@@ -324,18 +333,20 @@ pub fn resolve(
     }
     let by_id: BTreeMap<String, Annotation> = plain
         .iter()
-        .map(|(_, a)| (a.id.clone(), a.clone()))
+        .map(|(_, _, a)| (a.id.clone(), a.clone()))
         .collect();
-    for (id, target, entry, at) in refs {
+    for (position, id, target, entry, at) in refs {
         let Some(t) = by_id.get(&target) else {
             problems.push(format!("{at}: ref {target:?} does not resolve"));
             continue;
         };
         plain.push((
+            position,
             at,
             Annotation {
                 id,
                 source: None,
+                target: Some(target),
                 start: t.start,
                 end: t.end,
                 channels: entry.channels.unwrap_or_else(|| t.channels.clone()),
@@ -348,7 +359,7 @@ pub fn resolve(
         ));
     }
 
-    for (at, a) in &plain {
+    for (_, at, a) in &plain {
         let end = a.end.unwrap_or(a.start);
         if a.start < 0 || end > header.length {
             problems.push(format!(
@@ -385,9 +396,8 @@ pub fn resolve(
         }
     }
     if problems.is_empty() {
-        let mut out: Vec<Annotation> = plain.into_iter().map(|(_, a)| a).collect();
-        out.sort_by(|a, b| (a.start, &a.id).cmp(&(b.start, &b.id)));
-        Ok(out)
+        plain.sort_by_key(|(position, ..)| *position);
+        Ok(plain.into_iter().map(|(.., a)| a).collect())
     } else {
         Err(problems)
     }

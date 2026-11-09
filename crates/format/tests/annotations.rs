@@ -86,26 +86,66 @@ fn included(text: &str) -> Vec<Included<'_>> {
 fn resolves_hand_written_generated_and_refs() {
     let got = resolve(HAND, &included(GENERATED), &header(), Some("rec.chrono")).unwrap();
     let ids: Vec<&str> = got.iter().map(|a| a.id.as_str()).collect();
-    // Sorted by start tick: 317,858; then 400,000; then 412,000 twice, by id.
+    // Sidecar order, not time order: the generated misread at 412,000 comes before the drive at
+    // 400,000 because its file lists it first.
     assert_eq!(
         ids,
         [
             "read-ack-check",
-            "wire_swd/drive/400000",
             "first-misread",
-            "wire_swd/misread/412000"
+            "wire_swd/misread/412000",
+            "wire_swd/drive/400000"
         ]
     );
     let check = &got[0];
     assert_eq!((check.start, check.end), (317_858, Some(317_950)));
-    assert_eq!(check.source, None);
-    let alias = &got[2];
+    assert_eq!((check.source.as_deref(), check.target.as_deref()), (None, None));
+    let alias = &got[1];
     assert_eq!((alias.start, alias.end), (412_000, Some(412_900)));
+    assert_eq!(alias.target.as_deref(), Some("wire_swd/misread/412000"));
     assert_eq!(alias.channels, ["SWDIO"]);
     assert_eq!(alias.label.as_deref(), Some("Misreads at 25 MHz"));
     assert_eq!(alias.kind.as_deref(), Some("misread"));
-    assert_eq!(got[1].source.as_deref(), Some("wire_swd"));
-    assert_eq!(got[1].paint.as_deref(), Some("target"));
+    assert_eq!(got[2].target, None);
+    assert_eq!(got[3].source.as_deref(), Some("wire_swd"));
+    assert_eq!(got[3].paint.as_deref(), Some("target"));
+    let json = serde_json::to_value(&got).unwrap();
+    assert_eq!(json[1]["ref"], "wire_swd/misread/412000");
+    assert!(json[0].get("ref").is_none());
+}
+
+#[test]
+fn included_files_follow_the_include_list_not_the_callers_order() {
+    let hand = HAND
+        .replace(
+            r#"include = ["rec.wire_swd.jsonl"]"#,
+            r#"include = ["rec.b.jsonl", "rec.wire_swd.jsonl"]"#,
+        );
+    let b = r#"{"format": "chrono-annotations/1", "source": "b", "recording_id": "blake3:00ff"}
+{"id": "x/1", "start": 1}
+"#;
+    let given = [
+        Included {
+            name: "rec.wire_swd.jsonl",
+            text: GENERATED,
+        },
+        Included {
+            name: "rec.b.jsonl",
+            text: b,
+        },
+    ];
+    let got = resolve(&hand, &given, &header(), Some("rec.chrono")).unwrap();
+    let ids: Vec<&str> = got.iter().map(|a| a.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [
+            "read-ack-check",
+            "first-misread",
+            "b/x/1",
+            "wire_swd/misread/412000",
+            "wire_swd/drive/400000"
+        ]
+    );
 }
 
 /// Resolves, expecting problems, and returns them.
