@@ -23,7 +23,7 @@ import {
   type Grid,
 } from "./columns.ts";
 import { layoutNotes, type NoteIn, type NoteOut } from "./notes.ts";
-import { Track, type Tile } from "./track.ts";
+import { grain, Track, type Tile } from "./track.ts";
 
 export interface PlotConfig {
   readonly axis: boolean;
@@ -62,6 +62,8 @@ const AXIS_HEIGHT = 24;
 /** The selection's bar along the top of the axis band, clear of the labels below it. */
 const SELECTION_BAR = 4;
 const RIGHT_PAD = 10;
+/** The opacity of what a coarse layer cannot place: the trace's colour, faded. */
+const UNRESOLVED_ALPHA = 0.35;
 
 export type Hit =
   | { readonly area: "lane"; readonly note: NoteOut | null }
@@ -349,45 +351,85 @@ export class Plot {
       ctx.stroke();
     }
 
-    const tile = r.track.drawable(grid.per);
-    if (!tile) return;
     // Nothing before tick 0, at or past the channel's end, or right of the sweep.
     const x0 = Math.max(l.plotLeft, this.xAt(0));
     const x1 = Math.min(l.plotRight, this.xAt(c.end), revealX);
     if (x1 <= x0) return;
-    const from = Math.max(tile.start, 0);
-    const to = Math.min(tile.end, c.end);
     const lw = Math.max(1, Math.round(1.5 * dpr));
+    // Each layer in device pixels. Neighbours share a rounded edge, so no seam shows between them.
+    // A layer with buckets wider than a column is coarse: its busy runs and analog bands may
+    // claim activity the view does not hold, so they draw faded. Its flat buckets are exact at
+    // any scale and draw as they are.
+    const pieces = r.track.layers().flatMap(({ tile, start, end }) => {
+      const px0 = Math.round(Math.max(x0, this.xAt(start)) * dpr);
+      const px1 = Math.round(Math.min(x1, this.xAt(end)) * dpr);
+      if (px1 <= px0) return [];
+      const from = Math.max(start, 0);
+      const to = Math.min(end, c.end);
+      const shapes = c.kind === "digital" ? this.#digitalShapes(r, grid, tile, from, to, lw) : this.#analogShapes(r, c, grid, tile, from, to, lw);
+      return [{ px0, px1, shapes, coarse: grain(tile) > grid.per }];
+    });
+    if (pieces.length === 0) return;
 
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.beginPath();
-    ctx.rect(x0 * dpr, r.top * dpr, (x1 - x0) * dpr, r.height * dpr);
-    ctx.clip();
-    const shapes = c.kind === "digital" ? this.#digitalShapes(r, grid, tile, from, to, lw) : this.#analogShapes(r, c, grid, tile, from, to, lw);
-    const paint = (colour: string) => {
-      ctx.strokeStyle = colour;
-      ctx.fillStyle = colour;
-      ctx.lineWidth = lw;
-      ctx.lineJoin = "miter";
-      ctx.stroke(shapes.line);
-      ctx.fill(shapes.fill);
-    };
-    paint(p.trace);
-    // Paint roles: the annotation's channels over its span, in --chrono-<role>.
-    for (const a of this.annotations?.list ?? []) {
-      if (a.paint === null || a.end === null || !covers(a, c.name)) continue;
-      const ax0 = Math.max(x0, this.xAt(a.start));
-      const ax1 = Math.min(x1, this.xAt(a.end));
-      if (ax1 <= ax0) continue;
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(ax0 * dpr, r.top * dpr, (ax1 - ax0) * dpr, r.height * dpr);
-      ctx.clip();
-      paint(p.role(a.paint));
-      ctx.restore();
+    ctx.lineWidth = lw;
+    ctx.lineJoin = "miter";
+    // Every pixel is painted once, so a faded fill never lands on another colour's.
+    for (const s of this.#stretches(c.name, Math.round(x0 * dpr), Math.round(x1 * dpr))) {
+      for (const { px0, px1, shapes, coarse } of pieces) {
+        const a = Math.max(px0, s.px0);
+        const b = Math.min(px1, s.px1);
+        if (b <= a) continue;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(a, r.top * dpr, b - a, r.height * dpr);
+        ctx.clip();
+        ctx.strokeStyle = s.colour;
+        ctx.stroke(shapes.line);
+        ctx.fillStyle = s.colour;
+        if (coarse) ctx.globalAlpha = UNRESOLVED_ALPHA;
+        ctx.fill(shapes.fill);
+        ctx.restore();
+      }
     }
     ctx.restore();
+  }
+
+  /**
+   * The device-pixel stretches of a channel's row between px0 and px1, each in the colour that
+   * draws it: the role of the last annotation in the list that paints the channel there
+   * (`--chrono-<role>`), else the trace's.
+   */
+  #stretches(channel: string, px0: number, px1: number): { px0: number; px1: number; colour: string }[] {
+    const p = this.palette!;
+    const dpr = this.#dpr;
+    const marks: { at: number; i: number; on: boolean }[] = [];
+    const colours: string[] = [];
+    for (const a of this.annotations?.list ?? []) {
+      if (a.paint === null || a.end === null || !covers(a, channel)) continue;
+      const from = Math.max(px0, Math.round(this.xAt(a.start) * dpr));
+      const to = Math.min(px1, Math.round(this.xAt(a.end) * dpr));
+      if (to <= from) continue;
+      marks.push({ at: from, i: colours.length, on: true }, { at: to, i: colours.length, on: false });
+      colours.push(p.role(a.paint));
+    }
+    // At one x, a span ends before the next begins.
+    marks.sort((m, n) => m.at - n.at || Number(m.on) - Number(n.on));
+    const out: { px0: number; px1: number; colour: string }[] = [];
+    const active = new Set<number>();
+    const colour = () => (active.size === 0 ? p.trace : colours[Math.max(...active)]);
+    let x = px0;
+    for (const m of marks) {
+      if (m.at > x) {
+        out.push({ px0: x, px1: m.at, colour: colour() });
+        x = m.at;
+      }
+      if (m.on) active.add(m.i);
+      else active.delete(m.i);
+    }
+    if (x < px1) out.push({ px0: x, px1, colour: colour() });
+    return out;
   }
 
   #digitalShapes(r: Row, grid: Grid, tile: Tile, from: number, to: number, lw: number): { line: Path2D; fill: Path2D } {

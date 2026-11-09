@@ -88,6 +88,14 @@ test("digital from overview: busy wherever a changing bucket overlaps", async ()
   assert.deepEqual([...b.state], [BUSY]);
 });
 
+test("digital from overview: a bucket wider than a column spans its columns", async () => {
+  const ov = await identifyClock().overview(0, 376700000, 376725504, 4096);
+  assert.ok(ov && ov.kind === "digital");
+  // Four columns a bucket from bucket 4: bucket 4 holds no edge, 5 and 6 change.
+  const c = digitalFromOverview({ x0: 376713216, per: 1024, count: 12 }, ov, 376696832, 376725504);
+  assert.deepEqual([...c.state], [HIGH, HIGH, HIGH, HIGH, BUSY, BUSY, BUSY, BUSY, BUSY, BUSY, BUSY, BUSY]);
+});
+
 const CURRENT = [51480, 131360, 175990, 212221, 244081, 278385, 305817, 336396, 364408, 391567, 417043, 444567];
 
 test("analog from samples: a column's range, joined to its neighbours", () => {
@@ -127,4 +135,9 @@ test("analog overview from samples, then columns from it", async () => {
   const c = analogFromOverview({ x0: 0, per: 49152, count: 3 }, ov, 0, 120000);
   assert.deepEqual([...c.min], [51480, 212221, 391567]);
   assert.deepEqual([...c.max], [305817, 391567, 444567]);
+  // Two columns a bucket: each pair holds its bucket's range, and the first of the next pair
+  // reaches down to it.
+  const d = analogFromOverview({ x0: 0, per: 16384, count: 8 }, ov, 0, 120000);
+  assert.deepEqual([...d.min], [51480, 51480, 175990, 212221, 305817, 336396, 391567, 417043]);
+  assert.deepEqual([...d.max], [175990, 175990, 305817, 305817, 391567, 391567, 444567, 444567]);
 });

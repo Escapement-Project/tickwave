@@ -269,6 +269,9 @@ and fall back to system colours on a page without them:
 | `--chrono-<role>` | a line where an annotation's `paint` role drives it. `probe` falls back to the series colour, any other role to ink |
 | `--font-text`, `--font-figures` | labels; the readouts' figures |
 
+While a zoom's finer data loads, a row draws the coarser data it has. Where that data shows a
+change it cannot yet place, the row draws it in the trace's colour, faded.
+
 The key under an inset names the roles it shows: "probe drives" and "target drives", and any
 other role by its name. The elements follow a change of face, a `data-face` on `<html>` or the
 system's preference, as it happens.

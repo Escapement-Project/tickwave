@@ -1,5 +1,6 @@
 // One channel's data for the renderer. It keeps the last tile that arrived and fetches a new one
-// when the view outgrows it; drawing never waits on a fetch.
+// when the view outgrows it; drawing never waits on a fetch. Until the new tile arrives, the old
+// one draws at whatever scale it has, and a coarse tile of the whole channel fills what it leaves.
 
 import {
   isAbort,
@@ -19,6 +20,18 @@ export type Tile =
 
 type Mode = "edges" | "overview" | "samples";
 
+/** A tile and the ticks it draws over. */
+export interface Layer {
+  readonly tile: Tile;
+  readonly start: number;
+  readonly end: number;
+}
+
+/** Ticks a value of the tile stands for: a bucket, or 0 where it holds every edge or sample. */
+export function grain(t: Tile): number {
+  return t.kind === "edges" || t.kind === "samples" ? 0 : t.data.bucket;
+}
+
 /** An analog row reads samples until a column holds this many. */
 const SAMPLES_PER_COLUMN = 32;
 
@@ -27,6 +40,9 @@ export class Track {
   readonly index: number;
   readonly channel: Channel;
   tile: Tile | null = null;
+  /** The finest tile yet that covers the whole channel. */
+  #base: Tile | null = null;
+  #baseAsked = false;
   #pending: { mode: Mode; start: number; end: number; per: number; abort: AbortController } | null = null;
   /** A request for buckets no larger than this came back null: there is no level that fine. */
   #noOverviewAtOrBelow = 0;
@@ -66,13 +82,23 @@ export class Track {
     return tile.data.bucket <= per && per <= tile.asked * 4;
   }
 
-  /** The tile to draw with at `per` ticks a column, or nothing yet. */
-  drawable(per: number): Tile | null {
+  /**
+   * What to draw: the tile over the ticks it covers, and the base over the rest. An overview
+   * coarser than a column still draws, each bucket across the columns it spans.
+   */
+  layers(): Layer[] {
     const t = this.tile;
-    if (!t) return null;
-    // Edges and samples are exact at any scale; an overview only where a column holds its buckets.
-    if (t.kind === "edges" || t.kind === "samples") return t;
-    return t.data.bucket <= per ? t : null;
+    const b = this.#base;
+    const out: Layer[] = [];
+    if (b && b !== t) {
+      if (!t) out.push({ tile: b, start: b.start, end: b.end });
+      else {
+        if (t.start > b.start) out.push({ tile: b, start: b.start, end: t.start });
+        if (t.end < b.end) out.push({ tile: b, start: t.end, end: b.end });
+      }
+    }
+    if (t) out.push({ tile: t, start: t.start, end: t.end });
+    return out;
   }
 
   /** Whether the current tile is the one this view wants. */
@@ -82,6 +108,10 @@ export class Track {
 
   /** Starts a fetch if the current tile and any pending one do not fit the view. */
   need(start: number, end: number, per: number): void {
+    if (!this.#baseAsked) {
+      this.#baseAsked = true;
+      void this.#fetchBase();
+    }
     const mode = this.#mode(per);
     if (this.tile && this.#fits(this.tile, mode, start, end, per)) {
       this.#pending?.abort.abort();
@@ -105,12 +135,36 @@ export class Track {
     });
   }
 
+  #offerBase(tile: Tile): void {
+    if (!this.#covers(tile, 0, this.channel.end)) return;
+    if (this.#base && grain(this.#base) < grain(tile)) return;
+    this.#base = tile;
+  }
+
+  /** The coarsest overview level, which is small: the base until a finer tile covers the channel. */
+  async #fetchBase(): Promise<void> {
+    try {
+      const ov = await this.source.overview(this.index, 0, this.channel.end, Infinity);
+      if (!ov) return;
+      const end = this.channel.end;
+      this.#offerBase(
+        ov.kind === "digital"
+          ? { kind: "digital-overview", start: 0, end, asked: Infinity, data: ov }
+          : { kind: "analog-overview", start: 0, end, asked: Infinity, data: ov },
+      );
+      this.#changed();
+    } catch (e) {
+      if (!isAbort(e)) this.#failed(e);
+    }
+  }
+
   async #fetch(p: { mode: Mode; start: number; end: number; per: number; abort: AbortController }): Promise<void> {
     const { signal } = p.abort;
     const done = (tile: Tile) => {
       if (this.#pending !== p) return;
       this.#pending = null;
       this.tile = tile;
+      this.#offerBase(tile);
       this.#changed();
     };
     if (p.mode === "overview") {
