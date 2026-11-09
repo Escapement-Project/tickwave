@@ -9,6 +9,9 @@ use chrono_format::overview::ChannelOverview;
 use js_sys::{Float32Array, Float64Array, Uint8Array};
 use wasm_bindgen::prelude::*;
 
+mod inflate;
+use inflate::Inflater;
+
 fn js(e: DecodeError) -> JsError {
     JsError::new(&e.to_string())
 }
@@ -17,7 +20,8 @@ fn js(e: DecodeError) -> JsError {
 /// Throws when the bytes are not a chrono recording.
 #[wasm_bindgen(js_name = headLength)]
 pub fn head_length(bytes: &[u8]) -> Result<u32, JsError> {
-    match Head::parse(bytes) {
+    let inflater = Inflater::new();
+    match Head::parse_with(bytes, |f, len| inflater.inflate(f, len)) {
         Ok(head) => Ok(head.preamble.head_len),
         Err(DecodeError::NeedMore(n)) => Ok(n as u32),
         Err(e) => Err(js(e)),
@@ -27,6 +31,7 @@ pub fn head_length(bytes: &[u8]) -> Result<u32, JsError> {
 #[wasm_bindgen]
 pub struct Recording {
     head: Head,
+    inflater: Inflater,
 }
 
 #[wasm_bindgen]
@@ -34,8 +39,10 @@ impl Recording {
     /// Parses the head from bytes that hold at least `headLength` of them.
     #[wasm_bindgen(constructor)]
     pub fn new(head: &[u8]) -> Result<Recording, JsError> {
+        let inflater = Inflater::new();
         Ok(Self {
-            head: Head::parse(head).map_err(js)?,
+            head: Head::parse_with(head, |f, len| inflater.inflate(f, len)).map_err(js)?,
+            inflater,
         })
     }
 
@@ -72,7 +79,10 @@ impl Recording {
     /// Decodes block `i` from exactly its bytes.
     #[wasm_bindgen(js_name = decodeBlock)]
     pub fn decode_block(&self, i: usize, frame: &[u8]) -> Result<Block, JsError> {
-        let block = self.head.decode_block(i, frame).map_err(js)?;
+        let block = self
+            .head
+            .decode_block_with(i, frame, |f, len| self.inflater.inflate(f, len))
+            .map_err(js)?;
         Ok(Block {
             start: block.start,
             end: block.end,
@@ -147,7 +157,7 @@ impl Recording {
     ) -> Result<OverviewBlock, JsError> {
         Ok(OverviewBlock(
             self.head
-                .decode_overview_block(level, k, frame)
+                .decode_overview_block_with(level, k, frame, |f, len| self.inflater.inflate(f, len))
                 .map_err(js)?,
         ))
     }

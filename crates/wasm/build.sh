@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Builds the browser's decoder into crates/wasm/pkg: an ES module and its .wasm.
+# Builds the browser's decoder into crates/wasm/pkg: an ES module and its .wasm. zstd-sys compiles
+# libzstd for wasm32 with clang, so clang must have the wasm32 target.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 cargo build -p chrono-wasm --target wasm32-unknown-unknown --profile wasm
