@@ -6,7 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { HttpBytes, MemoryBytes, type Bytes, type Fetch } from "../src/wasm/bytes.ts";
 import { Opened, setCacheBytes } from "../src/wasm/opened.ts";
 import { readFixture } from "../src/fixture-file.ts";
@@ -271,4 +271,106 @@ test("the sidecar resolves through the Rust core, and its problems come back", a
   assert.throws(() => r.resolveAnnotations(hand, ["identify-swd.swd.jsonl"], [jsonl], "other.chrono"), /names "identify-swd.chrono", not "other.chrono"/);
   const stale = jsonl.replace(/blake3:[0-9a-f]+/, "blake3:00");
   assert.throws(() => r.resolveAnnotations(hand, ["identify-swd.swd.jsonl"], [stale], "identify-swd.chrono"), /generated for blake3:00/);
+});
+
+/** A Saleae analog export's f32 volts (one chunk), read here without the Rust core. */
+function saleaeVolts(path: string): Float32Array {
+  const b = readFileSync(path);
+  const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+  assert.equal(b.subarray(0, 8).toString("latin1"), "<SALEAE>");
+  assert.equal(v.getInt32(12, true), 1, "an analog export");
+  const count = Number(v.getBigInt64(56, true));
+  return new Float32Array(b.buffer.slice(b.byteOffset + 64, b.byteOffset + 64 + 4 * count));
+}
+
+/** An analog channel from samples, for the TypeScript overview. */
+function analogSource(r: Opened, channels: { name: string; first: number; values: Float32Array }[]) {
+  return new MemorySource({
+    title: "",
+    timebase: r.info.timebase,
+    length: r.info.length,
+    channels: channels.map((c) => ({
+      kind: "analog" as const,
+      name: c.name,
+      end: c.first + c.values.length,
+      unit: "V",
+      first: c.first,
+      period: { num: 1, den: 1 },
+      resolution: null,
+      values: Float64Array.from(c.values),
+    })),
+  });
+}
+
+const numbers = (a: ArrayLike<number>) => Array.from(a);
+
+test("analog: every sample is the export's value, and the channel ends with its samples", async () => {
+  const r = await openChrono("fixtures/swd50-cut.chrono");
+  const [clk, dio, nrst] = r.info.channels;
+  assert.ok(clk.kind === "analog" && dio.kind === "analog" && nrst.kind === "digital");
+  // 50,000 samples at 1 GS/s from tick 0; the capture runs on to NRST's end, 11,031,886.
+  assert.deepEqual([clk.first, clk.count, clk.end, clk.unit], [0, 50000, 50000, "V"]);
+  assert.equal(nrst.end, 11031886);
+  assert.equal(r.info.length, 11031886);
+  for (const [ch, file] of [
+    [0, "analog_0"],
+    [1, "analog_1"],
+  ] as const) {
+    const want = saleaeVolts(`../testdata/saleae/swd50-cut/${file}.bin`);
+    const got = await r.samples(ch, 0, r.info.length);
+    assert.equal(got.first, 0);
+    assert.deepEqual(numbers(got.values), numbers(want));
+  }
+  // A window: ticks [1020, 1061) are samples 1020 to 1060.
+  const w = await r.samples(0, 1020, 1061);
+  assert.equal(w.first, 1020);
+  assert.equal(w.values.length, 41);
+  assert.equal(w.values[0], 3.26922607421875);
+});
+
+test("analog: the head's overview, as the TypeScript computation has it from the samples", async () => {
+  const r = await openChrono("fixtures/swd50-cut.chrono");
+  assert.deepEqual(r.header.overview, [12, 16]);
+  const values = await Promise.all([0, 1].map((ch) => r.samples(ch, 0, r.info.length)));
+  const m = analogSource(r, [
+    { name: "SWCLK", first: 0, values: values[0].values as Float32Array },
+    { name: "SWDIO", first: 0, values: values[1].values as Float32Array },
+  ]);
+  for (const bucket of [4096, 65536]) {
+    for (const ch of [0, 1]) {
+      const got = (await r.overview(ch, 0, r.info.length, bucket))!;
+      const want = (await m.overview(ch, 0, r.info.length, bucket))!;
+      assert.equal(got.kind, "analog");
+      if (got.kind !== "analog" || want.kind !== "analog") return;
+      assert.deepEqual([got.bucket, got.start, numbers(got.min), numbers(got.max)], [want.bucket, want.start, numbers(want.min), numbers(want.max)], `${bucket}, ${ch}`);
+    }
+  }
+});
+
+const SESSION50 = new URL("../fixtures-local/session50.chrono", import.meta.url);
+
+test("analog overview blocks: session50's 2^12 level, as the TypeScript computation has it", { skip: !existsSync(SESSION50) && "no fixtures-local/session50.chrono" }, async () => {
+  const r = await openChrono(SESSION50.pathname);
+  assert.deepEqual(r.header.overview_blocks, [{ shift: 12, blocks: 5 }]);
+  // The analog samples end at tick 100,002,000, inside overview block 0, though the capture runs
+  // to 1.26 s. Two windows of whole buckets: one inside the samples, one across their end.
+  for (const [s, e] of [
+    [49 * 2 ** 20, 50 * 2 ** 20],
+    [95 * 2 ** 20, 96 * 2 ** 20],
+  ]) {
+    for (const ch of [0, 1]) {
+      const c = r.info.channels[ch];
+      assert.ok(c.kind === "analog" && c.period.num === 1 && c.period.den === 1 && c.first === 0);
+      assert.equal(c.end, 100002000);
+      const values = await r.samples(ch, s, e);
+      const m = analogSource(r, [{ name: c.name, first: values.first, values: values.values as Float32Array }]);
+      const got = (await r.overview(ch, s, e, 4096))!;
+      const want = (await m.overview(0, s, e, 4096))!;
+      assert.ok(got.kind === "analog" && want.kind === "analog");
+      assert.equal(got.bucket, 4096);
+      // Not vacuous: the buckets hold samples.
+      assert.ok(got.min.length > 0 && numbers(got.min).every(Number.isFinite), `[${s}, ${e}) has samples`);
+      assert.deepEqual([got.start, numbers(got.min), numbers(got.max)], [want.start, numbers(want.min), numbers(want.max)], `[${s}, ${e}), channel ${ch}`);
+    }
+  }
 });

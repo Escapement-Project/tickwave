@@ -174,6 +174,59 @@ test("a finer overview level comes from overview blocks by range, not from the d
   await view.screenshot({ path: `screenshots/${info.project.name}-overview-blocks.png` });
 });
 
+test("analog through the WASM path: the head's overview, the samples, and readouts to one code step", async ({ page }, info) => {
+  const tag = tagged(info, "analog");
+  await page.setViewportSize({ width: 700, height: 600 });
+  await recordReady(page);
+  // swd50-cut: 50,000 samples a channel at 1 GS/s in an 11 ms capture; its head is 1,152 bytes.
+  await page.goto(`/e2e/pages/view.html?open&src=fixtures/swd50-cut.chrono&firstRead=1024&tag=${tag}`);
+  await waitReady(page, ["v"]);
+  const view = page.locator("#v");
+  // At the whole capture a column is several thousand ticks: the head's 2^12 level draws the
+  // analog rows, and no block is read.
+  expect((await served(tag)).map((e) => e.range)).toEqual(["bytes=0-1023", "bytes=1024-1151"]);
+  const drawn = await view.evaluate((v) => {
+    const canvas = v.shadowRoot!.querySelector("canvas")!;
+    const data = canvas.getContext("2d")!.getImageData(0, 0, canvas.width, Math.round(canvas.height / 2)).data;
+    let n = 0;
+    for (let i = 3; i < data.length; i += 4) if (data[i] > 200) n++;
+    return n;
+  });
+  expect(drawn).toBeGreaterThan(200);
+  // Zoomed to 100 samples, it reads the data block by range, and draws a line through them.
+  const win = (a: number, b: number) =>
+    view.evaluate(
+      (v, [a, b]) => {
+        const view = v as unknown as { setWindow(a: number, b: number): void; settled(): Promise<void> };
+        view.setWindow(a, b);
+        return view.settled();
+      },
+      [a, b],
+    );
+  await win(1000, 1100);
+  const ranges = (await served(tag)).map((e) => e.range!);
+  expect(ranges.length).toBe(3);
+  expect(ranges[2]).toMatch(/^bytes=1152-\d+$/);
+  // Cursors at ticks 1020 and 1060, on the SWCLK row.
+  const box = (await plotOf(view).boundingBox())!;
+  const tickAt = (x: number) => view.evaluate((v, x) => (v as unknown as { tickAt(x: number): number }).tickAt(x), x);
+  const t0 = await tickAt(box.x + 100);
+  const t1 = await tickAt(box.x + 600);
+  const xOf = (t: number) => Math.round(box.x + 100 + ((t - t0) * 500) / (t1 - t0));
+  await page.mouse.click(xOf(1020), box.y + 40);
+  await page.mouse.click(xOf(1060), box.y + 40);
+  // From the export's own f32 volts, rounded to the millivolt: one code step is 2.49 mV.
+  const readout = view.locator(".readout");
+  await expect(readout.locator(".line").first().locator(":scope > span").first()).toHaveText("A 1.020\u00a0\u00b5s");
+  const values = (name: string) => readout.locator(".line", { hasText: name }).locator(":scope > span");
+  await expect(values("SWCLK")).toHaveText(["A 3.269\u00a0V", "B 3.267\u00a0V", "\u0394 \u22122\u00a0mV"]);
+  await expect(values("SWDIO")).toHaveText(["A 3.289\u00a0V", "B 3.284\u00a0V", "\u0394 \u22125\u00a0mV"]);
+  mkdirSync("screenshots", { recursive: true });
+  await view.screenshot({ path: `screenshots/${info.project.name}-analog-samples.png` });
+  await win(0, 50000);
+  await view.screenshot({ path: `screenshots/${info.project.name}-analog-50us.png` });
+});
+
 test("a local file reads through slice", async ({ page }) => {
   await recordReady(page);
   await page.goto("/e2e/pages/file.html");
@@ -258,6 +311,21 @@ test.describe("the identify view", () => {
     await page.mouse.click(box.x + 420, row);
     await page.mouse.move(box.x + 700, row);
     await settle(view);
+    // The axis labels stay readable over a selection: in the labels' band, within the selection
+    // (200 to 600) and clear of cursor B's flag (420 to about 436), almost no pixel is ink. A fill
+    // behind them would make nearly every pixel ink.
+    const inked = await view.evaluate((v) => {
+      const canvas = v.shadowRoot!.querySelector("canvas")!;
+      const dpr = canvas.width / canvas.clientWidth;
+      const hex = getComputedStyle(document.documentElement).getPropertyValue("--ink").trim();
+      const ink = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+      const y0 = Math.round((canvas.clientHeight - 18) * dpr);
+      const data = canvas.getContext("2d")!.getImageData(Math.round(445 * dpr), y0, Math.round(145 * dpr), Math.round(14 * dpr)).data;
+      let n = 0;
+      for (let i = 0; i < data.length; i += 4) if (data[i] === ink[0] && data[i + 1] === ink[1] && data[i + 2] === ink[2] && data[i + 3] > 200) n++;
+      return n / (data.length / 4);
+    });
+    expect(inked).toBeLessThan(0.05);
     mkdirSync("screenshots", { recursive: true });
     await view.screenshot({ path: `screenshots/${test.info().project.name}-identify-readouts.png` });
   });
@@ -333,10 +401,9 @@ test.describe("the identify view", () => {
 
   test("stepping through one kind reads n of N", async ({ page }) => {
     const view = page.locator("#identify");
-    // Opened at no annotation, stepping starts with the first kind in the resolved sidecar: the
-    // earliest annotation, attach, at 376719436, sorts before line-reset at the same tick.
-    await expect(view.locator(".kind")).toHaveValue("attach");
-    await view.locator(".kind").selectOption("wait");
+    // Opened at no annotation, stepping takes the first annotation's kind: the TOML lists
+    // first-wait first.
+    await expect(view.locator(".kind")).toHaveValue("wait");
     await view.locator(".next").click();
     // The decode found 16 WAIT acknowledges.
     await expect(view.locator(".steps .count")).toHaveText("1 of 16");

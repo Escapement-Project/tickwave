@@ -6,7 +6,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { readFixture } from "../src/fixture-file.ts";
 import { formatLevels, MemorySource } from "../src/memory-source.ts";
-import { fromCore, indexAnnotations, resolveRaw, type RawAnnotation } from "../src/annotations.ts";
+import { fromCore, indexAnnotations, laneAnnotations, ofKind, resolveRaw, type RawAnnotation } from "../src/annotations.ts";
+import { sampleAtOrBefore, type AnalogChannel } from "../src/source.ts";
 
 const file = readFileSync(new URL("../fixtures/identify-swd.chronofx", import.meta.url));
 
@@ -70,16 +71,46 @@ test("annotations: generated ids, refs, times and errors", () => {
   assert.equal(r.errors.length, 3);
 });
 
-test("a resolved list: a hand-written annotation on a generated one's span names it", () => {
-  // The Rust resolver follows a ref without saying so; its output is matched by span and channels.
+test("a resolved list: an alias names its target by ref; a matching span alone names nothing", () => {
   const core = [
+    { id: "dpidr-read", source: null, start: 377094557, end: 377140560, channels: ["SWCLK", "SWDIO"], label: "Reading DPIDR", kind: "read", text: null, paint: null, measure: null, ref: "swd/read/377094557" },
     { id: "swd/read/377094557", source: "swd", start: 377094557, end: 377140560, channels: ["SWCLK", "SWDIO"], label: "DPIDR read", kind: "read", text: null, paint: null, measure: null },
-    { id: "dpidr-read", source: null, start: 377094557, end: 377140560, channels: ["SWDIO", "SWCLK"], label: "Reading DPIDR", kind: "read", text: null, paint: null, measure: null },
-    // Same span, other channels: names nothing.
+    // Hand-written on exactly a generated annotation's span and channels, but no ref.
+    { id: "same-span", source: null, start: 377094557, end: 377102558, channels: ["SWDIO"], label: "here", kind: null, text: null, paint: null, measure: null },
     { id: "swd/request/377094557", source: "swd", start: 377094557, end: 377102558, channels: ["SWDIO"], label: "request", kind: "request", text: null, paint: "probe", measure: null },
-    { id: "clock-only", source: null, start: 377094557, end: 377102558, channels: ["SWCLK"], label: "SWCLK", kind: null, text: null, paint: null, measure: null },
   ].map(fromCore);
   const r = indexAnnotations(core);
   assert.deepEqual([...r.named], ["swd/read/377094557"]);
-  assert.equal(fromCore({ ...core[0], channels: [] } as never).channels, null);
+  // The list keeps sidecar order; byTime is by start, then longer first.
+  assert.deepEqual(r.list.map((a) => a.id), ["dpidr-read", "swd/read/377094557", "same-span", "swd/request/377094557"]);
+  assert.equal(r.byTime[0].end, 377140560);
+  assert.equal(fromCore({ ...core[2], channels: [] } as never).channels, null);
+});
+
+test("the lane and stepping take time order, whatever the sidecar's order", () => {
+  // Sidecar order puts the hand-written annotations first, though they come later in time.
+  const raw: RawAnnotation[] = [
+    { id: "late-wait", start: 380392379, end: 380395379, kind: "wait", label: "a later WAIT", channels: ["SWDIO"] },
+    { id: "wait/379065159", source: "swd", start: 379065159, end: 379068159, kind: "wait", label: "ack WAIT", channels: ["SWDIO"] },
+    { id: "wait/381000000", source: "swd", start: 381000000, end: 381003000, kind: "wait", label: "ack WAIT", channels: ["SWDIO"] },
+  ];
+  const r = resolveRaw(raw, { num: 1e9, den: 1 });
+  assert.deepEqual(r.list.map((a) => a.id), ["late-wait", "swd/wait/379065159", "swd/wait/381000000"]);
+  assert.deepEqual(ofKind(r, "wait").map((a) => a.id), ["swd/wait/379065159", "late-wait", "swd/wait/381000000"]);
+  assert.deepEqual(
+    laneAnnotations(r, new Set(["SWCLK", "SWDIO"]), null).map((a) => a.id),
+    ["swd/wait/379065159", "late-wait", "swd/wait/381000000"],
+  );
+});
+
+test("a cursor reads the last sample at or before it", () => {
+  // verge's energy capture: 100 kHz, sample i at tick 5000 + 10000 i, 306,178 samples.
+  const c: AnalogChannel = { kind: "analog", name: "current", end: 3061780000, unit: "A", first: 5000, period: { num: 10000, den: 1 }, count: 306178, resolution: 1e-9, min: 0, max: 1 };
+  assert.equal(sampleAtOrBefore(c, 4999), null);
+  assert.equal(sampleAtOrBefore(c, 5000), 0);
+  // Between samples 1 (15,000) and 2 (25,000): sample 1, not the nearer sample 2.
+  assert.equal(sampleAtOrBefore(c, 24999), 1);
+  assert.equal(sampleAtOrBefore(c, 25000), 2);
+  assert.equal(sampleAtOrBefore(c, 3061779999), 306177);
+  assert.equal(sampleAtOrBefore(c, 3061780000), null);
 });

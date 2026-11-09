@@ -118,6 +118,19 @@ export function sampleTick(first: number, period: Ratio, i: number): number {
   return first + Number((BigInt(i) * BigInt(period.num)) / BigInt(period.den));
 }
 
+/**
+ * The index of the last sample at or before `tick`: the value a cursor there reads. Null before
+ * the first sample or past the channel's end.
+ */
+export function sampleAtOrBefore(c: AnalogChannel, tick: number): number | null {
+  if (tick < c.first || tick >= c.end) return null;
+  let i = Math.floor(((tick - c.first) * c.period.den) / c.period.num);
+  // The division can land one off; settle it against the sample ticks themselves.
+  while (i > 0 && sampleTick(c.first, c.period, i) > tick) i--;
+  while (i + 1 < c.count && sampleTick(c.first, c.period, i + 1) <= tick) i++;
+  return Math.min(i, c.count - 1);
+}
+
 /** The DOMException a source rejects with when its signal aborts. */
 export function aborted(): DOMException {
   return new DOMException("aborted", "AbortError");

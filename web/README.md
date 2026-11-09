@@ -79,6 +79,11 @@ files it includes, relative to its URL, and resolves them with the Rust core. Wi
 attribute, a recording with a bundled sidecar uses that. A sidecar's problems go to the console and
 to a short notice in the element; the recording still draws.
 
+Resolved annotations keep sidecar order: the hand-written file's, then each included file's. The
+order says which kind a view steps through first. The lane and the stepping sort by time
+themselves. An alias carries `ref`, the generated annotation it names, which the lane then draws
+once, as the alias.
+
 ## Fixtures
 
 Committed, in `fixtures/`:
@@ -88,6 +93,7 @@ Committed, in `fixtures/`:
 | `identify-swd.chrono` | `chrono convert saleae testdata/saleae/identify-swd --channel digital_3_0=SWCLK --channel digital_3_1=SWDIO` |
 | `identify-swd.4k.chrono` | the same with `--block-kib 4`: nine blocks, for edges across block boundaries |
 | `identify-jtag.chrono` | the `identify-jtag-cjtag` export's TCK, TDI and TMS (`digital_4_0`, `_4_2`, `_4_3`): long enough that its 2^12 level sits in overview blocks |
+| `swd50-cut.chrono` | `chrono convert saleae testdata/saleae/swd50-cut --channel analog_0=SWCLK --channel analog_1=SWDIO --channel digital_4_0=NRST`: 50 µs of the MSO's analog inputs as 12-bit codes, in an 11 ms capture |
 | `identify-swd.annotations.toml` | the hand-written sidecar for `identify-swd.chrono` |
 | `identify-swd.chronofx` | the in-memory route's fixture, cut from the same export by `scripts/extract-fixtures.ts` |
 
@@ -138,7 +144,11 @@ and only the head, to say what the recording is. Open, the view takes these cont
 - a drag on the time axis selects a span
 - clicking a note shows its span
 - the kind menu and its arrows step through one kind of annotation, "n of N"; the kind is the one
-  the view was opened at, else the first in the sidecar as resolved
+  the view was opened at, else the first annotation's
+
+Cursors read out their times, the interval between them, and each analog channel's value at
+each, the last sample at or before it, to the digit one code step carries. A selection shows as a
+bar along the time axis, above its labels.
 
 A selection reads out its length, each channel's edges, and for one channel the periods' count,
 minimum, median and maximum, and the running clock. The running clock is the mean of the periods

@@ -4,6 +4,13 @@ recording_id = "blake3:930db20d55ecede1084b73ebbdc7edd306268b900746c08abd0bdfdb0
 # Written by scripts/swd-annotations.ts from the recording; not committed.
 include = ["identify-swd.swd.jsonl"]
 
+# A view steps through the kind of the first annotation unless it was opened at another.
+
+[[annotation]]
+id = "first-wait"
+ref = "swd/wait/379065159"
+label = "The target answers WAIT"
+
 [[annotation]]
 id = "attach"
 start = "376.719436 ms"
@@ -38,8 +45,3 @@ label = "request 0xA5"
 id = "dpidr-ack"
 ref = "swd/ack/377103058"
 label = "ack OK"
-
-[[annotation]]
-id = "first-wait"
-ref = "swd/wait/379065159"
-label = "The target answers WAIT"

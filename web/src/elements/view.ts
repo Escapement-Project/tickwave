@@ -1,13 +1,13 @@
 // <chrono-view>: the full capture. Collapsed to one line until `open`; open, a time axis, one row
 // a channel and an annotation lane, with zoom, pan, cursors, a selection and its readouts.
 
-import type { Annotation } from "../annotations.ts";
+import { ofKind, type Annotation } from "../annotations.ts";
 import { parseChannels, parseWindow, VIEW_ATTRIBUTES } from "../attributes.ts";
 import { absolute, events as registryEvents, infoFor, peekInfo } from "../registry.ts";
-import { clockNote, countEdges, formatClockPeriod, formatClockRate, formatCount, formatInterval, formatRate, periodStats } from "../readouts.ts";
+import { clockNote, countEdges, formatClockPeriod, formatClockRate, formatCount, formatInterval, formatRate, formatValue, periodStats } from "../readouts.ts";
 import { lowerBound } from "../search.ts";
 import { channelIndices, Plot } from "../render/plot.ts";
-import { isAbort, type RecordingInfo } from "../source.ts";
+import { isAbort, sampleAtOrBefore, sampleTick, type RecordingInfo } from "../source.ts";
 import { parseTime, toTicks } from "../time.ts";
 import { ChronoElement, loadRecording, type Loaded } from "./base.ts";
 
@@ -632,6 +632,28 @@ export class ChronoView extends ChronoElement {
         parts.push(item("Δt", formatInterval(dt, tb) + (rate ? ` (${rate})` : "")));
       }
       line(...parts);
+      // Each analog channel's value at the cursors, to the digit of one code step.
+      for (const t of this.#plot.tracks) {
+        const c = t.channel;
+        if (c.kind !== "analog") continue;
+        const at = async (tick: number) => {
+          const i = sampleAtOrBefore(c, tick);
+          if (i === null) return null;
+          const from = sampleTick(c.first, c.period, i);
+          const s = await l.source.samples(t.index, from, from + 1);
+          return s.values.length > 0 ? s.values[0] : null;
+        };
+        const values = await Promise.all([at(a), b !== null ? at(b) : null]);
+        if (seq !== this.#readoutSeq) return;
+        const parts: (string | Node)[] = [c.name];
+        const show = (name: string, v: number | null) => parts.push(item(name, v === null ? "–" : formatValue(v, c.resolution, c.unit)));
+        show("A", values[0]);
+        if (b !== null) {
+          show("B", values[1]);
+          if (values[0] !== null && values[1] !== null) parts.push(item("Δ", formatValue(values[1] - values[0], c.resolution, c.unit)));
+        }
+        line(...parts);
+      }
     }
     const sel = this.#plot.selection;
     let detail: Record<string, unknown> | null = null;
@@ -701,13 +723,13 @@ export class ChronoView extends ChronoElement {
     const l = this.#loaded;
     const kind = this.#kind.value;
     if (!l || !kind) return [];
-    return l.annotations.list.filter((a) => a.kind === kind && !l.annotations.named.has(a.id));
+    return ofKind(l.annotations, kind);
   }
 
   #renderKinds(): void {
     const l = this.#loaded;
     if (!l) return;
-    // In the order the sidecar resolves to; the first is the default.
+    // In sidecar order: the first annotation's kind is the default.
     const kinds = [...new Set(l.annotations.list.map((a) => a.kind).filter((k): k is string => k !== null))];
     this.#steps.hidden = kinds.length === 0;
     const current = this.#kind.value;

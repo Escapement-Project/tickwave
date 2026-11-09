@@ -58,7 +58,8 @@ async function rawAnnotations(url: URL): Promise<RawAnnotation[]> {
   const included = await Promise.all(
     (file.include ?? []).map(async (name) => jsonLines(await (await fetchOk(new URL(name, url))).text())),
   );
-  return [...included.flat(), ...(file.annotation ?? [])];
+  // Sidecar order: the hand-written annotations, then each included file's in `include` order.
+  return [...(file.annotation ?? []), ...included.flat()];
 }
 
 /** Resolved as the Rust core resolves a sidecar: all of it, or every problem. */

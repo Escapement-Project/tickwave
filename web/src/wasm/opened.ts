@@ -224,13 +224,15 @@ export class Opened {
     const channels: Channel[] = h.channels.map((c, i) => {
       if (c.kind === "digital") return { kind: "digital", name: c.name, end: c.end! };
       const [min, max] = this.#range(i);
+      const period = { num: c.period![0], den: c.period![1] };
       return {
         kind: "analog",
         name: c.name,
-        end: h.length,
+        // Past the last sample's period: an analog channel can stop well before the capture does.
+        end: Math.min(h.length, sampleTick(c.first!, period, c.count!)),
         unit: c.unit ?? "",
         first: c.first!,
-        period: { num: c.period![0], den: c.period![1] },
+        period,
         count: c.count!,
         resolution: c.coding?.type === "codes" ? c.coding.scale : null,
         min,
@@ -399,7 +401,7 @@ export class Opened {
     const count = Math.floor(this.header.length / bucket) + 1;
     const c = this.header.channels[channel];
     const k0 = Math.min(count, Math.max(0, Math.floor(start / bucket)));
-    const k1 = Math.min(count, Math.max(k0, Math.ceil(Math.min(end, c.end ?? this.header.length) / bucket)));
+    const k1 = Math.min(count, Math.max(k0, Math.ceil(Math.min(end, this.info.channels[channel].end) / bucket)));
     // Each source of buckets: [first bucket, arrays], arrays laid out as the head's.
     let parts: [number, Uint8Array[] | Float32Array[]][];
     if (head >= 0) {

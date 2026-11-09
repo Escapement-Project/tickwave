@@ -36,7 +36,7 @@ process.stdout.write(
 );
 
 // The converted recordings the stress sections can switch to.
-const CONVERTED = ["gcc-swd-reads", "stock-reads", "gcc-swd-matrix-capture100000"];
+const CONVERTED = ["gcc-swd-reads", "stock-reads", "gcc-swd-matrix-capture100000", "session50"];
 for (const name of CONVERTED) {
   const target = join(values.converted!, `${name}.1024.chrono`);
   const link = local(`${name}.chrono`);

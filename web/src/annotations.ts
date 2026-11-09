@@ -1,6 +1,6 @@
-// Annotations as the elements draw them: resolved, with times in ticks and full ids (ANNOTATIONS.md).
-// A `.chrono` recording's sidecar is resolved by the Rust core (`Recording.resolveAnnotations`);
-// `resolveRaw` does the same for the dev page's JSON fixtures.
+// Annotations as the elements draw them: resolved, with times in ticks and full ids, in sidecar
+// order (ANNOTATIONS.md). A `.chrono` recording's sidecar is resolved by the Rust core
+// (`Recording.resolveAnnotations`); `resolveRaw` does the same for the dev page's JSON fixtures.
 
 import type { Ratio } from "./source.ts";
 import { parseTime, toTicks } from "./time.ts";
@@ -47,37 +47,24 @@ export interface Annotation {
 }
 
 export interface Resolved {
-  /** In the order the resolver gave them. */
+  /** In sidecar order: the hand-written file's, then each included file's. The order carries meaning. */
   readonly list: readonly Annotation[];
+  /** The same, by start, then longer first. */
+  readonly byTime: readonly Annotation[];
   readonly byId: ReadonlyMap<string, Annotation>;
   /** Generated annotations a hand-written one stands in for; drawn once, as the hand-written one. */
   readonly named: ReadonlySet<string>;
   readonly errors: readonly string[];
 }
 
-const sameChannels = (a: readonly string[] | null, b: readonly string[] | null) =>
-  a === b || (a !== null && b !== null && a.length === b.length && a.every((c) => b.includes(c)));
-
-/**
- * Indexes a resolved list. The Rust resolver follows a `ref` without saying it did, so a
- * hand-written annotation with exactly a generated one's span and channels is taken to name it.
- */
+/** Indexes a resolved list. An alias's `ref` names the generated annotation it stands in for. */
 export function indexAnnotations(list: readonly Annotation[], errors: readonly string[] = []): Resolved {
   const byId = new Map<string, Annotation>();
   for (const a of list) if (!byId.has(a.id)) byId.set(a.id, a);
   const named = new Set<string>();
-  const generated = list.filter((a) => a.source !== null);
-  for (const h of list) {
-    if (h.source !== null) continue;
-    if (h.ref !== null) {
-      named.add(h.ref);
-      continue;
-    }
-    for (const g of generated) {
-      if (g.start === h.start && g.end === h.end && sameChannels(g.channels, h.channels)) named.add(g.id);
-    }
-  }
-  return { list, byId, named, errors };
+  for (const a of list) if (a.ref !== null) named.add(a.ref);
+  const byTime = [...list].sort((a, b) => a.start - b.start || (b.end ?? b.start) - (a.end ?? a.start));
+  return { list, byTime, byId, named, errors };
 }
 
 /** One annotation as the Rust resolver serialises it. */
@@ -118,14 +105,14 @@ function time(v: number | string | undefined, timebase: Ratio): number | null | 
   return spec ? toTicks(spec, timebase) : null;
 }
 
-/** Resolves raw annotations: times to ticks, generated ids to full ids, `ref` followed. */
+/**
+ * Resolves raw annotations: times to ticks, generated ids to full ids, `ref` followed. The result
+ * keeps the input's order, as the Rust resolver keeps sidecar order.
+ */
 export function resolveRaw(raw: readonly RawAnnotation[], timebase: Ratio): Resolved {
   const errors: string[] = [];
-  const byId = new Map<string, Annotation>();
-  const add = (a: Annotation) => {
-    if (byId.has(a.id)) errors.push(`annotation ${a.id} repeats`);
-    else byId.set(a.id, a);
-  };
+  const seen = new Set<string>();
+  const generated = new Map<string, Annotation>();
   const base = (r: RawAnnotation, id: string, source: string | null): Annotation | null => {
     const start = time(r.start, timebase);
     const end = time(r.end, timebase);
@@ -151,41 +138,63 @@ export function resolveRaw(raw: readonly RawAnnotation[], timebase: Ratio): Reso
       ref: null,
     };
   };
+  // Generated annotations first, so a hand-written ref can find its target wherever it sits.
   for (const r of raw) {
     if (r.source === undefined) continue;
     const a = base(r, `${r.source}/${r.id}`, r.source);
-    if (a) add(a);
+    if (a && !generated.has(a.id)) generated.set(a.id, a);
   }
+  const list: Annotation[] = [];
   for (const r of raw) {
-    if (r.source !== undefined) continue;
-    if (r.id.includes("/")) {
-      errors.push(`hand-written annotation ${r.id} has a "/" in its id`);
+    let a: Annotation | null = null;
+    if (r.source !== undefined) a = generated.get(`${r.source}/${r.id}`) ?? null;
+    else if (r.id.includes("/")) errors.push(`hand-written annotation ${r.id} has a "/" in its id`);
+    else if (r.ref === undefined) a = base(r, r.id, null);
+    else {
+      const target = generated.get(r.ref);
+      if (!target) errors.push(`annotation ${r.id} refers to ${r.ref}, which is not a generated annotation`);
+      else
+        a = {
+          ...target,
+          id: r.id,
+          source: null,
+          label: r.label ?? target.label,
+          kind: r.kind ?? target.kind,
+          text: r.text ?? target.text,
+          measure: r.measure ?? target.measure,
+          paint: r.paint ?? target.paint,
+          ref: target.id,
+        };
+    }
+    if (!a) continue;
+    if (seen.has(a.id)) {
+      errors.push(`annotation ${a.id} repeats`);
       continue;
     }
-    if (r.ref === undefined) {
-      const a = base(r, r.id, null);
-      if (a) add(a);
-      continue;
-    }
-    const target = byId.get(r.ref);
-    if (!target || target.source === null) {
-      errors.push(`annotation ${r.id} refers to ${r.ref}, which is not a generated annotation`);
-      continue;
-    }
-    add({
-      ...target,
-      id: r.id,
-      source: null,
-      label: r.label ?? target.label,
-      kind: r.kind ?? target.kind,
-      text: r.text ?? target.text,
-      measure: r.measure ?? target.measure,
-      paint: r.paint ?? target.paint,
-      ref: target.id,
-    });
+    seen.add(a.id);
+    list.push(a);
   }
-  const list = [...byId.values()].sort((a, b) => a.start - b.start || (b.end ?? b.start) - (a.end ?? a.start));
   return indexAnnotations(list, errors);
+}
+
+/**
+ * The annotations a lane draws, in time order: those with a label, or neither a label nor a paint
+ * role, on one of `channels`, other than generated ones an alias stands in for; only `only`'s
+ * when given.
+ */
+export function laneAnnotations(r: Resolved, channels: ReadonlySet<string>, only: ReadonlySet<string> | null): Annotation[] {
+  return r.byTime.filter(
+    (a) =>
+      (only === null || only.has(a.id)) &&
+      !r.named.has(a.id) &&
+      (a.label !== null || a.paint === null) &&
+      (a.channels === null || a.channels.some((c) => channels.has(c))),
+  );
+}
+
+/** The annotations of one kind, in time order, to step through. */
+export function ofKind(r: Resolved, kind: string): Annotation[] {
+  return r.byTime.filter((a) => a.kind === kind && !r.named.has(a.id));
 }
 
 /** Whether an annotation applies to a channel. */

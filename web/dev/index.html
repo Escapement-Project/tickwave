@@ -93,6 +93,10 @@ a <chrono-ref for="identify" annotation="dpidr-request">request</chrono-ref> the
 <chrono-view id="matrix" data-stress-only src="../fixtures-local/gcc-swd-matrix-capture100000.chrono" series="verge"></chrono-view>
 </section>
 
+<h2>SWD as the analog inputs saw it</h2>
+<p>The MSO's two analog inputs on SWCLK and SWDIO at 1 GS/s, stored as the 12-bit codes the instrument read. Place two cursors to read each input's voltage, to the millivolt one code step allows.</p>
+<chrono-view id="analog" open src="../fixtures/swd50-cut.chrono" channels="SWCLK SWDIO" window="0 ns 50 us"></chrono-view>
+
 <h2>An energy capture</h2>
 <p>verge's energy capture at 100 kHz: the target's supply voltage and current, DIO3, and the markers its firmware wrote.</p>
 <chrono-view id="energy" open src="../fixtures-local/markers-100000.chronofx" annotations="../fixtures-local/markers-100000.markers.jsonl"

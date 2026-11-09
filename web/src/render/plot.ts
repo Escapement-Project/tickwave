@@ -2,7 +2,7 @@
 // pixel ratio. It draws whatever data has arrived and asks for more; a fetch that completes
 // schedules another frame.
 
-import { covers, type Annotation, type Resolved } from "../annotations.ts";
+import { covers, laneAnnotations, type Annotation, type Resolved } from "../annotations.ts";
 import type { Palette } from "../palette.ts";
 import { formatAt, niceStep } from "../readouts.ts";
 import { sampleTick, type AnalogChannel, type Channel, type RecordingInfo, type Source } from "../source.ts";
@@ -59,6 +59,8 @@ export interface Layout {
 const AXIS_PX = 11;
 const LANE_ROW = 18;
 const AXIS_HEIGHT = 24;
+/** The selection's bar along the top of the axis band, clear of the labels below it. */
+const SELECTION_BAR = 4;
 const RIGHT_PAD = 10;
 
 export type Hit =
@@ -137,19 +139,11 @@ export class Plot {
     return w;
   }
 
-  /** Annotations the lane draws: those with a label, or neither a label nor a paint role. */
+  /** Annotations the lane draws. */
   laneNotes(): Annotation[] {
     const r = this.annotations;
     if (!r) return [];
-    const names = new Set(this.tracks.map((t) => t.channel.name));
-    const only = this.laneFilter;
-    return r.list.filter(
-      (a) =>
-        (only === null || only.has(a.id)) &&
-        !r.named.has(a.id) &&
-        (a.label !== null || a.paint === null) &&
-        (a.channels === null || a.channels.some((c) => names.has(c))),
-    );
+    return laneAnnotations(r, new Set(this.tracks.map((t) => t.channel.name)), this.laneFilter);
   }
 
   #analogRange(c: AnalogChannel): { lo: number; hi: number; place: number } {
@@ -579,9 +573,9 @@ export class Plot {
     const sx0 = sel ? Math.max(l.plotLeft, this.xAt(Math.min(sel.start, sel.end))) : 0;
     const sx1 = sel ? Math.min(l.plotRight, this.xAt(Math.max(sel.start, sel.end))) : 0;
     if (sel && sx1 > sx0) {
-      // The selection: an ink fill, with the labels over it in page colour.
+      // The selection: an ink bar along the axis, above the labels, which stay as they are.
       ctx.fillStyle = p.ink;
-      ctx.fillRect(sx0, l.axisTop, Math.max(1, sx1 - sx0), AXIS_HEIGHT);
+      ctx.fillRect(sx0, l.axisTop, Math.max(1, sx1 - sx0), SELECTION_BAR);
     }
     // Cursor flags sit in the axis band; a label they would cover is left out.
     const flags = this.#flags();
@@ -599,22 +593,8 @@ export class Plot {
     }
     ctx.strokeStyle = p.ink2;
     ctx.stroke();
-    // Labels in secondary ink outside the selection and page colour inside it; one that straddles
-    // an edge is drawn twice, each half clipped to its side.
-    const labels = (colour: string, x0: number, x1: number) => {
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(x0, l.axisTop, x1 - x0, AXIS_HEIGHT);
-      ctx.clip();
-      ctx.fillStyle = colour;
-      for (const t of ticks) ctx.fillText(t.label, l.plotLeft + t.x - t.width / 2, l.axisTop + 16);
-      ctx.restore();
-    };
-    if (sel && sx1 > sx0) {
-      labels(p.ink2, 0, sx0);
-      labels(p.page, sx0, sx1);
-      labels(p.ink2, sx1, l.width);
-    } else labels(p.ink2, 0, l.width);
+    ctx.fillStyle = p.ink2;
+    for (const t of ticks) ctx.fillText(t.label, l.plotLeft + t.x - t.width / 2, l.axisTop + 16);
   }
 
   /** Where the cursor flags go: an ink fill with page text, in the axis band. */
