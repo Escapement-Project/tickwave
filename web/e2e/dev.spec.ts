@@ -61,6 +61,21 @@ test.describe("screenshots", () => {
 /** The element's own plot box, for pointer coordinates. */
 const plotOf = (view: Locator) => view.locator(".plot");
 
+/**
+ * Listens for the element's next `type` event and returns a reader of its detail. The listener is
+ * attached when this resolves, so an input sent afterwards cannot fire the event unheard. A missing
+ * event fails at the reader after 5 s, not at the test's timeout.
+ */
+async function nextEvent(view: Locator, type: string): Promise<() => Promise<unknown>> {
+  await view.evaluate((v, type) => {
+    (v as unknown as { e2eNext: Promise<unknown> }).e2eNext = new Promise((resolve, reject) => {
+      v.addEventListener(type, (e) => resolve((e as CustomEvent).detail), { once: true });
+      setTimeout(() => reject(new Error(`no ${type} within 5 s`)), 5000);
+    });
+  }, type);
+  return () => view.evaluate((v) => (v as unknown as { e2eNext: Promise<unknown> }).e2eNext);
+}
+
 async function settle(view: Locator): Promise<void> {
   await view.evaluate((v) => (v as unknown as { settled(): Promise<void> }).settled());
 }
@@ -137,14 +152,12 @@ test("a server that ignores Range: one whole-file response serves the view", asy
   await waitReady(page, ["v"]);
   const box = (await plotOf(view).boundingBox())!;
   const y = box.y + box.height - 10;
-  const selected = view.evaluate(
-    (v) => new Promise((resolve) => v.addEventListener("tickwave-select", (e) => resolve((e as CustomEvent).detail), { once: true })),
-  );
+  const selected = await nextEvent(view, "tickwave-select");
   await page.mouse.move(box.x + 70, y);
   await page.mouse.down();
   await page.mouse.move(box.x + box.width - 12, y, { steps: 6 });
   await page.mouse.up();
-  expect(((await selected) as { edges: Record<string, number> }).edges).toEqual({ SWCLK: 15286, SWDIO: 1874 });
+  expect(((await selected()) as { edges: Record<string, number> }).edges).toEqual({ SWCLK: 15286, SWDIO: 1874 });
   expect((await served(tag)).map((e) => [e.port, e.status])).toEqual([[8125, 200]]);
 });
 
@@ -332,9 +345,7 @@ test.describe("the identify view", () => {
   test("a drag on the axis selects a span and counts every edge", async ({ page }) => {
     const view = page.locator("#identify");
     const box = (await plotOf(view).boundingBox())!;
-    const selected = view.evaluate(
-      (v) => new Promise((resolve) => v.addEventListener("tickwave-select", (e) => resolve((e as CustomEvent).detail), { once: true })),
-    );
+    const selected = await nextEvent(view, "tickwave-select");
     // Every edge is between 376.7 ms and 389.8 ms of 523.6 ms; drag across nearly the whole axis.
     const y = box.y + box.height - 10;
     await page.mouse.move(box.x + 70, y);
@@ -342,7 +353,7 @@ test.describe("the identify view", () => {
     await page.mouse.move(box.x + box.width / 2, y, { steps: 4 });
     await page.mouse.move(box.x + box.width - 12, y, { steps: 4 });
     await page.mouse.up();
-    const detail = (await selected) as { edges: Record<string, number>; periods: { count: number } };
+    const detail = (await selected()) as { edges: Record<string, number>; periods: { count: number } };
     // (122348 - 60) / 8 and (15052 - 60) / 8: the export's own edge counts.
     expect(detail.edges).toEqual({ SWCLK: 15286, SWDIO: 1874 });
     // 7643 rising SWCLK edges, so 7642 periods.
@@ -407,20 +418,13 @@ test.describe("the identify view", () => {
     const win = () => view.evaluate((v) => (v as unknown as { window: { start: number; end: number } }).window);
     const before = await at(x);
     const window0 = await win();
-    // Bounded, so a zoom that never happens fails here instead of at the test's timeout.
-    const announced = view.evaluate(
-      (v) =>
-        new Promise((resolve, reject) => {
-          v.addEventListener("tickwave-window", (e) => resolve((e as CustomEvent).detail), { once: true });
-          setTimeout(() => reject(new Error("no tickwave-window within 5 s")), 5000);
-        }),
-    );
+    const announced = await nextEvent(view, "tickwave-window");
     await page.mouse.move(x, box.y + 60);
     await page.keyboard.down("Control");
     await page.mouse.wheel(0, -400);
     await page.keyboard.up("Control");
     await page.waitForTimeout(100);
-    expect(await announced).toEqual(await win());
+    expect(await announced()).toEqual(await win());
     const window1 = await win();
     expect(window1.end - window1.start).toBeLessThan(window0.end - window0.start);
     expect(Math.abs((await at(x)) - before)).toBeLessThanOrEqual(1);
