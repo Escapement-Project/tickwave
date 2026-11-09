@@ -219,6 +219,12 @@ pub fn resolve(
     }
 }
 
+/// Parses JSON text as bytes, as the header is parsed: the WASM module then carries one of
+/// serde_json's readers rather than two.
+fn json<'a, T: Deserialize<'a>>(text: &'a str) -> serde_json::Result<T> {
+    serde_json::from_slice(text.as_bytes())
+}
+
 /// As `resolve`, with the hand-written file's TOML already parsed and written out as JSON.
 pub fn resolve_json(
     hand: &str,
@@ -226,7 +232,7 @@ pub fn resolve_json(
     header: &Header,
     recording_file: Option<&str>,
 ) -> Result<Vec<Annotation>, Vec<String>> {
-    match serde_json::from_str(hand) {
+    match json(hand) {
         Ok(file) => resolve_file(file, included, header, recording_file),
         Err(e) => Err(vec![format!("the TOML file: {e}")]),
     }
@@ -283,7 +289,7 @@ fn resolve_file(
             problems.push(format!("{}: empty", inc.name));
             continue;
         };
-        let head: GeneratorHead = match serde_json::from_str(first) {
+        let head: GeneratorHead = match json(first) {
             Ok(head) => head,
             Err(e) => {
                 problems.push(format!("{}, line 1: {e}", inc.name));
@@ -306,7 +312,7 @@ fn resolve_file(
             problems.push(format!("{}: source name: {problem}", inc.name));
         }
         for (n, line) in lines {
-            match serde_json::from_str::<Entry>(line) {
+            match json::<Entry>(line) {
                 Ok(entry) => entries.push((
                     Some(head.source.clone()),
                     entry,
