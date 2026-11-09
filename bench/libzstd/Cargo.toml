@@ -1,0 +1,23 @@
+[package]
+name = "chrono-wasm-libzstd"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+chrono-format = { version = "0.1.0", path = "../../crates/format", default-features = false }
+js-sys = "0.3.107"
+serde_json = "1.0.154"
+wasm-bindgen = "0.2.130"
+zstd = { version = "0.14.3", default-features = false, optional = true }
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+default = ["libzstd"]
+# libzstd does every inflate; without it, chrono-format's ruzstd `inflate` does.
+libzstd = ["dep:zstd"]
+# `inflateBlock` and `parseBlock`, to time the two halves of a block's decode apart.
+probe = []
