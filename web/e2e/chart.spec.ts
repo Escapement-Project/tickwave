@@ -46,10 +46,9 @@ test.describe("at rest", () => {
     const stock = c1.locator('g.tw-series[data-series="stock"]');
     await expect(clang.locator("circle.tw-pt")).toHaveCount(7);
     await expect(clang.locator("circle.tw-pt").first()).toHaveAttribute("fill", "#0f8a6c");
-    // NXP's 30 MHz run failed, so its line ends at 20 MHz; its 50 MHz point reads wrong and
-    // stands alone, hollow.
+    // NXP's 30 MHz run failed and one of its two 50 MHz runs did, so its line ends at 20 MHz.
     await expect(stock.locator("circle.tw-pt")).toHaveCount(5);
-    await expect(stock.locator("circle.tw-hollow")).toHaveCount(1);
+    await expect(stock.locator("circle.tw-hollow")).toHaveCount(0);
     await expect(stock.locator("path")).toHaveCount(1);
     await expect(stock.locator("path")).not.toHaveAttribute("stroke-dasharray", /./);
     // GCC is hidden until the page shows it, and NXP does not mark its failures.
@@ -58,6 +57,24 @@ test.describe("at rest", () => {
     await expect(c1.locator("text.tw-end")).toHaveText(["Verge", "NXP"]);
     await expect(c1.locator(".tw-legend li")).toHaveText(["Verge, Clang build", "NXP's firmware V3.174", "NXP's firmware reads right up to 20 MHz"]);
     expect(await c1.evaluate((c) => c.innerHTML.includes("url(#"))).toBe(false);
+    // Had both its 50 MHz runs given a figure, read wrong, the point would stand alone, hollow,
+    // its middle in the page's surface colour.
+    await c1.evaluate(async (c) => {
+      const data = await (await fetch("/fixtures/figure1.chart.json")).json();
+      data.series[1].points[6] = { value: "744.6", verdict: "wrong" };
+      (c as HTMLElement & { data: unknown }).data = data;
+    });
+    const hollow = stock.locator("circle.tw-hollow");
+    await expect(hollow).toHaveCount(1);
+    await expect(hollow).toHaveAttribute("stroke", "#2a78d6");
+    const surface = await page.evaluate(() => {
+      const probe = document.body.appendChild(document.createElement("i"));
+      probe.style.color = "var(--surface)";
+      const colour = getComputedStyle(probe).color;
+      probe.remove();
+      return colour;
+    });
+    expect(await hollow.evaluate((e) => getComputedStyle(e).fill)).toBe(surface);
   });
 
   test("the keys step through the settings, the readout keeps every digit, and the group follows", async ({ page }) => {
@@ -71,7 +88,7 @@ test.describe("at rest", () => {
     await expect(c1.locator(".tw-readout b")).toHaveText("1 MHz");
     await expect(rows).toHaveText(["Verge 81.0 KiB/s", "NXP 76.7 KiB/s"]);
     await page.keyboard.press("End");
-    await expect(rows).toHaveText(["Verge 2,257.8 KiB/s", "NXP 744.6 KiB/s, reads wrong"]);
+    await expect(rows).toHaveText(["Verge 2,257.8 KiB/s", "NXP failed in 1 of 2 runs (744.6 KiB/s in the other), reads wrong"]);
     await page.keyboard.press("ArrowLeft");
     await expect(rows).toHaveText(["Verge 1,779.8 KiB/s", "NXP failed"]);
     // The second chart reads below its plot, by full names, and shows GCC.
@@ -128,6 +145,37 @@ test.describe("at rest", () => {
     await page.keyboard.press("Tab");
     await expect(entry("reads right up to 20 MHz")).toBeFocused();
     await expect(c1.locator("line.tw-limit")).toHaveAttribute("stroke-width", "2");
+  });
+
+  test("new data keeps the reader's setting where it has one, and else takes the page's", async ({ page }) => {
+    const chart = page.locator("#c1");
+    const readout = chart.locator(".tw-readout");
+    /** Figure 1 with Verge's 5 MHz figure changed, or without 10 MHz. */
+    const slice = (without10: boolean) =>
+      chart.evaluate(async (c, without10) => {
+        const data = await (await fetch("/fixtures/figure1.chart.json")).json();
+        data.series[0].points[2].value = "400.0";
+        if (without10) {
+          data.x.values.splice(3, 1);
+          for (const s of data.series) s.points.splice(3, 1);
+        }
+        (c as HTMLElement & { data: unknown }).data = data;
+      }, without10);
+    await chart.focus();
+    await page.keyboard.press("Home");
+    await page.keyboard.press("ArrowRight");
+    await page.keyboard.press("ArrowRight");
+    await expect(readout).toContainText("5 MHz");
+    // Another slice of the same settings: the reader stays at 5 MHz and reads its new figure.
+    await slice(false);
+    await expect(readout).toContainText("5 MHz");
+    await expect(readout).toContainText("Verge 400.0 KiB/s");
+    // A slice without 10 MHz falls back to the page's selected setting.
+    await chart.evaluate((c) => c.setAttribute("selected", "20"));
+    await page.keyboard.press("ArrowLeft");
+    await expect(readout).toContainText("10 MHz");
+    await slice(true);
+    await expect(readout).toContainText("20 MHz");
   });
 
   test("a hidden series draws while the page picks it", async ({ page }) => {
@@ -233,7 +281,7 @@ test("Chromium's accessibility tree: a chart named by its caption, described by 
   const live = nodes.filter((n) => prop(n, "live") === "polite" && inside(n));
   expect(live.length).toBeGreaterThan(0);
   const text = nodes.filter((n) => n.role?.value === "StaticText" && live.some((l) => l.nodeId === n.parentId || inside(n))).map((n) => n.name?.value);
-  expect(text).toEqual(expect.arrayContaining(["50 MHz", "Verge 2,257.8 KiB/s", "NXP 744.6 KiB/s, reads wrong"]));
+  expect(text).toEqual(expect.arrayContaining(["50 MHz", "Verge 2,257.8 KiB/s", "NXP failed in 1 of 2 runs (744.6 KiB/s in the other), reads wrong"]));
 });
 
 test.describe("evidence", () => {

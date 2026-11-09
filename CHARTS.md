@@ -75,7 +75,11 @@ Figure 1 on the landing page, cut to three clocks:
     {
       "id": "stock", "name": "NXP's firmware V3.174", "short": "NXP",
       "colour": "nxp", "pattern": "solid", "marker": "circle",
-      "points": [{ "value": "666.7" }, { "failed": true }, { "value": "744.6", "verdict": "wrong" }]
+      "points": [
+        { "value": "666.7" },
+        { "failed": true },
+        { "partial": { "failed": 1, "of": 2, "value": "744.6" }, "verdict": "wrong" }
+      ]
     }
   ],
   "limits": [{ "x": "20", "series": "stock", "label": "NXP's firmware reads right up to 20 MHz" }]
@@ -88,6 +92,7 @@ Figure 1 on the landing page, cut to three clocks:
 | Field | Means |
 |---|---|
 | `x.values` | the settings, ascending. Every series has one point for each |
+| `x.min`, `x.max` | the axis' ends, where it reaches past the first and last settings: `"0.8"` and `"62.5"` keep points at 1 and 50 MHz off the plot's edges |
 | `x.name`, `x.unit`, `y.name`, `y.unit` | the axis names; a unit is written once, at the axis |
 | `x.scale`, `y.scale` | `linear` or `log` |
 | `y.max`, `y.step` | a fixed top and tick step. Without them the chart picks both from the data |
@@ -151,7 +156,7 @@ that series' point during the entry sweep.
 
 | Property or method | Does |
 |---|---|
-| `data` | the chart's data as an object. Setting it redraws: a page that slices a larger table sets each slice here |
+| `data` | the chart's data as an object. Setting it redraws: a page that slices a larger table sets each slice here. The reader's picked x stays picked where the new data has it |
 | `pick(x, series)` | selects an x, a series or both, as a reader's pick does. `pick()` clears |
 | `settled()` | resolves once the chart has drawn, its sweep included |
 
@@ -174,9 +179,9 @@ page picks one with `pick`, for a table column or a key.
 
 The readout gives the picked x and each shown series' figure there, with the series' swatch: its
 line and marker as drawn. A figure takes its range in brackets, its partial runs, its note and its
-verdict, such as "744.6 KiB/s, reads wrong". As a tooltip, the readout sits beside the picked x, or
-to its left near the plot's right edge. It sits at the plot's top, or lower where that hides less
-of the lines.
+verdict, such as "failed in 1 of 2 runs (744.6 KiB/s in the other), reads wrong". As a tooltip,
+the readout sits beside the picked x, or to its left near the plot's right edge. It sits at the
+plot's top, or lower where that hides less of the lines.
 
 ### Evidence
 

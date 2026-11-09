@@ -14,6 +14,9 @@ export interface XAxis {
   readonly unit: string | null;
   readonly scale: Scale;
   readonly values: readonly string[];
+  /** The axis' ends, where they reach past the first and last settings. */
+  readonly min: string | null;
+  readonly max: string | null;
 }
 
 export interface YAxis {
@@ -138,6 +141,11 @@ export function parseChart(json: unknown): ChartData {
       if (xScale === "log" && toNumber(d) <= 0) problem(`x.values[${i}]`, "not above 0 on a log scale");
       values.push(d);
     });
+  const xMin = xIn.min === undefined ? null : decimal(xIn.min, "x.min");
+  const xMax = xIn.max === undefined ? null : decimal(xIn.max, "x.max");
+  if (xMin !== null && values.length && toNumber(xMin) > toNumber(values[0])) problem("x.min", "above the first setting");
+  if (xMax !== null && values.length && toNumber(xMax) < toNumber(values[values.length - 1])) problem("x.max", "below the last setting");
+  if (xMin !== null && xScale === "log" && toNumber(xMin) <= 0) problem("x.min", "not above 0 on a log scale");
   const yMax = yIn.max === undefined ? null : decimal(yIn.max, "y.max");
   const yStep = yIn.step === undefined ? null : decimal(yIn.step, "y.step");
   if (yStep !== null && toNumber(yStep) <= 0) problem("y.step", "not above 0");
@@ -249,7 +257,7 @@ export function parseChart(json: unknown): ChartData {
   if (problems.length) throw fail();
   return {
     source: typeof json.source === "string" ? json.source : null,
-    x: { name: text(xIn, "name", "x"), unit: text(xIn, "unit", "x"), scale: xScale, values },
+    x: { name: text(xIn, "name", "x"), unit: text(xIn, "unit", "x"), scale: xScale, values, min: xMin, max: xMax },
     y: { name: text(yIn, "name", "y"), unit: text(yIn, "unit", "y"), scale: yScale, max: yMax, step: yStep },
     series,
     limits,

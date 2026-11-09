@@ -290,6 +290,9 @@ export class TickwaveChart extends HTMLElement {
   }
 
   #take(parse: () => ChartData): void {
+    // The reader's setting stays picked where the new data has it: a page that slices a table
+    // keeps the reader where they were.
+    const picked = this.#x === null || !this.#data ? null : this.#data.x.values[this.#x];
     try {
       this.#data = parse();
     } catch (e) {
@@ -297,7 +300,7 @@ export class TickwaveChart extends HTMLElement {
       return;
     }
     if (this.#notice) this.#notice.hidden = true;
-    this.#x = this.#indexOf(this.getAttribute("selected"));
+    this.#x = this.#indexOf(picked) ?? this.#indexOf(this.getAttribute("selected"));
     // A chart that will sweep hides its data until the sweep starts, by CSS only: a reader without
     // the page's CSS, or without scripts past this point, still sees the whole figure.
     if (!this.#swept && this.#sweepWanted()) this.dataset.pending = "";

@@ -74,10 +74,12 @@ export function layout(data: ChartData, shown: ReadonlySet<string>, width: numbe
   const top = TOP;
   const bottom = height - BOTTOM;
   const xValues = data.x.values.map(toNumber);
-  const xDomain = [xValues[0], xValues[xValues.length - 1]];
-  const xScale = (data.x.scale === "log" ? scaleLog() : scaleLinear()).domain(xDomain).range([left, right]);
-  // One setting has no extent: put it in the middle.
-  const xs = xValues.length === 1 ? [(left + right) / 2] : xValues.map((v) => xScale(v));
+  const xMin = data.x.min === null ? xValues[0] : toNumber(data.x.min);
+  const xMax = data.x.max === null ? xValues[xValues.length - 1] : toNumber(data.x.max);
+  const xScale = (data.x.scale === "log" ? scaleLog() : scaleLinear()).domain([xMin, xMax]).range([left, right]);
+  // An axis with no extent, one setting and no ends given, puts it in the middle.
+  const flat = xMin === xMax;
+  const xs = flat ? [(left + right) / 2] : xValues.map((v) => xScale(v));
 
   const drawn = data.series.filter((s) => shown.has(s.id));
   const values = drawn.flatMap((s) => s.points.flatMap((p) => (p?.value != null ? [toNumber(p.value)] : [])));
@@ -124,12 +126,13 @@ export function layout(data: ChartData, shown: ReadonlySet<string>, width: numbe
     );
 
   const limits = data.limits.map((l) => {
-    const x = data.x.values.length === 1 ? xs[0] : xScale(toNumber(l.x));
+    const x = flat ? xs[0] : xScale(toNumber(l.x));
     const of = series.find((s) => s.series.id === l.series);
     const at = of?.placed.find((p) => data.x.values[p.index] === l.x);
-    // The limit grows from its series' point as the sweep crosses from there to the series' end.
-    const end = of?.placed[of.placed.length - 1];
-    return { x, label: l.label, origin: at ? at.y : null, reach: at && end && end.x > at.x ? end.x : null };
+    // The limit grows from its series' point as the sweep crosses from there to the last setting,
+    // whether or not the series reaches it.
+    const last = xs[xs.length - 1];
+    return { x, label: l.label, origin: at ? at.y : null, reach: at && last > at.x ? last : null };
   });
 
   const reference = data.reference
