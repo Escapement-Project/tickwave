@@ -5,8 +5,10 @@ import { scaleLinear, scaleLog } from "d3-scale";
 import type { ChartData, Point, Series } from "./data.ts";
 import { grouped, toNumber } from "./decimal.ts";
 
-/** The plot's margins, as the landing page's Figure 1 has them. */
+/** The plot's margins, as the landing page's Figure 1 has them; the left one grows for wider y labels. */
 const LEFT = 52;
+/** The y labels and the unit above them end this far left of the plot. */
+export const Y_LABEL_GAP = 8;
 const TOP = 28;
 const BOTTOM = 44;
 /** Room on the right for the end labels, at least, or only for a marker without them. */
@@ -67,13 +69,28 @@ export interface Layout {
   y(value: number): number;
 }
 
-/** `endLabels` is the widest end label's width in CSS pixels, or null without end labels. */
-export function layout(data: ChartData, shown: ReadonlySet<string>, width: number, height: number, endLabels: number | null): Layout {
-  const left = LEFT;
-  const right = width - (endLabels === null ? RIGHT_BARE : Math.max(RIGHT_LABELS, END_OFFSET + endLabels + 4));
+/** `endLabels` is the widest end label's width in CSS pixels, or null without end labels. `measure`
+ * gives a y label's width in CSS pixels, as the plot draws it: an estimate without one. */
+export function layout(
+  data: ChartData,
+  shown: ReadonlySet<string>,
+  width: number,
+  height: number,
+  endLabels: number | null,
+  measure: (text: string) => number = (text) => text.length * 7,
+): Layout {
   const top = TOP;
   const bottom = height - BOTTOM;
   const xValues = data.x.values.map(toNumber);
+  const drawn = data.series.filter((s) => shown.has(s.id));
+  const values = drawn.flatMap((s) => s.points.flatMap((p) => (p?.value != null ? [toNumber(p.value)] : [])));
+  if (data.reference) values.push(...xValues);
+  const { scale: yScale, ticks } = yAxis(data, values);
+  const tickTexts = ticks.map((v) => grouped(plain(v)));
+  // Room for the widest y label and for the unit above them, "commands/s" for one.
+  const yLabels = [...tickTexts, data.y.unit ?? ""].filter(Boolean);
+  const left = Math.max(LEFT, Math.ceil(Math.max(0, ...yLabels.map(measure))) + Y_LABEL_GAP + 4);
+  const right = width - (endLabels === null ? RIGHT_BARE : Math.max(RIGHT_LABELS, END_OFFSET + endLabels + 4));
   const xMin = data.x.min === null ? xValues[0] : toNumber(data.x.min);
   const xMax = data.x.max === null ? xValues[xValues.length - 1] : toNumber(data.x.max);
   const xScale = (data.x.scale === "log" ? scaleLog() : scaleLinear()).domain([xMin, xMax]).range([left, right]);
@@ -81,10 +98,6 @@ export function layout(data: ChartData, shown: ReadonlySet<string>, width: numbe
   const flat = xMin === xMax;
   const xs = flat ? [(left + right) / 2] : xValues.map((v) => xScale(v));
 
-  const drawn = data.series.filter((s) => shown.has(s.id));
-  const values = drawn.flatMap((s) => s.points.flatMap((p) => (p?.value != null ? [toNumber(p.value)] : [])));
-  if (data.reference) values.push(...xValues);
-  const { scale: yScale, ticks } = yAxis(data, values);
   yScale.range([bottom, top]);
   const y = (v: number) => yScale(v);
 
@@ -148,7 +161,7 @@ export function layout(data: ChartData, shown: ReadonlySet<string>, width: numbe
     bottom,
     xs,
     xLabels,
-    yTicks: ticks.map((v) => ({ y: y(v), text: grouped(plain(v)) })),
+    yTicks: ticks.map((v, i) => ({ y: y(v), text: tickTexts[i] })),
     bands,
     series: series.map((s, i) => ({ ...s, label: labels[i] })),
     fails,

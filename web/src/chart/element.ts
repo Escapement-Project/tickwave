@@ -434,7 +434,7 @@ export class TickwaveChart extends HTMLElement {
     const labelWidth = endLabels
       ? Math.max(0, ...data.series.filter((s) => shown.has(s.id)).map((s) => textWidth(s.short, c.fontText)))
       : null;
-    const l = (this.#layout = layout(data, shown, width, height, labelWidth));
+    const l = (this.#layout = layout(data, shown, width, height, labelWidth, (t) => textWidth(t, c.fontText, 400)));
     svg.setAttribute("width", String(width));
     svg.setAttribute("height", String(height));
     svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
@@ -485,10 +485,10 @@ export class TickwaveChart extends HTMLElement {
       .filter((s) => listed.has(s.id))
       .map((s) => `<li tabindex="0" data-series="${escapeHtml(s.id)}">${swatch(s, c)}${escapeHtml(s.name)}</li>`);
     if (data.reference) {
-      items.push(`<li data-reference=""><svg class="tw-swatch" width="22" height="10" aria-hidden="true"><line x1="1" x2="21" y1="9" y2="1" stroke="currentColor" stroke-opacity=".5" stroke-dasharray="4 4"/></svg>as asked</li>`);
+      items.push(`<li data-reference=""><svg class="tw-swatch" style="display:inline-block" width="22" height="10" aria-hidden="true"><line x1="1" x2="21" y1="9" y2="1" stroke="currentColor" stroke-opacity=".5" stroke-dasharray="4 4"/></svg>as asked</li>`);
     }
     data.limits.forEach((m, i) => {
-      items.push(`<li tabindex="0" data-limit="${i}"><svg class="tw-swatch" width="22" height="10" aria-hidden="true"><line x1="11" x2="11" y1="0" y2="10" stroke="currentColor" stroke-width="1.5" stroke-dasharray="3 2"/></svg>${escapeHtml(m.label)}</li>`);
+      items.push(`<li tabindex="0" data-limit="${i}"><svg class="tw-swatch" style="display:inline-block" width="22" height="10" aria-hidden="true"><line x1="11" x2="11" y1="0" y2="10" stroke="currentColor" stroke-width="1.5" stroke-dasharray="3 2"/></svg>${escapeHtml(m.label)}</li>`);
     });
     const html = items.join("");
     if (html !== this.#legendHtml) ul.innerHTML = this.#legendHtml = html;
@@ -801,11 +801,11 @@ export class TickwaveChart extends HTMLElement {
 }
 
 let measure: CanvasRenderingContext2D | null | undefined;
-/** An end label's width in CSS pixels, in the weight and size the plot draws it. */
-function textWidth(text: string, font: string): number {
+/** Text's width in CSS pixels at the plot's 12 px: end labels at weight 600, axis labels at 400. */
+function textWidth(text: string, font: string, weight = 600): number {
   measure ??= document.createElement("canvas").getContext("2d");
   if (!measure) return text.length * 7;
-  measure.font = `600 12px ${font}`;
+  measure.font = `${weight} 12px ${font}`;
   return Math.ceil(measure.measureText(text).width);
 }
 

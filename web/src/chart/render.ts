@@ -6,7 +6,7 @@
 
 import { escapeHtml as esc } from "../escape.ts";
 import type { Marker, Pattern } from "./data.ts";
-import { f1, type Layout, type Placed, type SeriesLayout } from "./layout.ts";
+import { f1, Y_LABEL_GAP, type Layout, type Placed, type SeriesLayout } from "./layout.ts";
 
 export interface Colours {
   /** A series token's colour: `--series-<name>`. */
@@ -43,11 +43,11 @@ export function render(l: Layout, state: State, c: Colours): string {
 
   for (const t of l.yTicks) {
     out.push(`<line x1="${l.left}" x2="${f1(l.right)}" y1="${f1(t.y)}" y2="${f1(t.y)}" stroke="currentColor" stroke-opacity=".2"/>`);
-    out.push(text(l.left - 8, t.y + 4, "end", t.text));
+    out.push(text(l.left - Y_LABEL_GAP, t.y + 4, "end", t.text));
   }
   for (const t of l.xLabels) out.push(text(t.x, l.bottom + 18, "middle", t.text));
   if (state.xName) out.push(text(l.right, l.height - 6, "end", state.xName));
-  if (state.yUnit) out.push(text(l.left - 8, l.top - 14, "end", state.yUnit));
+  if (state.yUnit) out.push(text(l.left - Y_LABEL_GAP, l.top - 14, "end", state.yUnit));
   if (l.reference) out.push(`<path d="${l.reference}" fill="none" stroke="currentColor" stroke-opacity=".5" stroke-dasharray="4 4"/>`);
 
   l.limits.forEach((m, i) => {

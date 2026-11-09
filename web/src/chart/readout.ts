@@ -23,11 +23,13 @@ export function figure(p: Point | null, unit: string): string {
   return p.note ?? "–";
 }
 
-/** A series' line and marker as the chart draws them, for the legend and the readout. */
+/** A series' line and marker as the chart draws them, for the legend and the readout. Inline in its
+ * text whatever the page's own rules for `svg` say: a reset's `display: block` would put each on
+ * a line of its own. */
 export function swatch(s: Series, c: Colours): string {
   const colour = c.series(s.colour);
   const dash = c.dash(s.pattern);
   const width = s.capture ? c.captureWidth : 2;
   const opacity = s.capture ? ` opacity="${c.captureOpacity}"` : "";
-  return `<svg class="tw-swatch" width="22" height="10" aria-hidden="true"${opacity}><line x1="0" x2="22" y1="5" y2="5" stroke="${colour}" stroke-width="${width}"${dash ? ` stroke-dasharray="${escapeHtml(dash)}"` : ""}/>${marker(s.marker, 11, 5, colour, false)}</svg>`;
+  return `<svg class="tw-swatch" style="display:inline-block" width="22" height="10" aria-hidden="true"${opacity}><line x1="0" x2="22" y1="5" y2="5" stroke="${colour}" stroke-width="${width}"${dash ? ` stroke-dasharray="${escapeHtml(dash)}"` : ""}/>${marker(s.marker, 11, 5, colour, false)}</svg>`;
 }

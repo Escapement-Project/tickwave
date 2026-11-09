@@ -215,6 +215,22 @@ test.describe("at rest", () => {
     await expect.poll(() => calls).toBe(3);
   });
 
+  test("a page's reset that makes every svg a block leaves the swatches in their lines", async ({ page }) => {
+    // The project's shared sheet has `.chart svg { display: block }`.
+    await page.addStyleTag({ content: "svg { display: block; }" });
+    const c1 = page.locator("#c1");
+    await c1.focus();
+    await page.keyboard.press("End");
+    const rows = c1.locator(".tw-readout > div");
+    await expect(rows).toHaveCount(2);
+    for (const row of await rows.all()) {
+      const [swatch, box] = await Promise.all([row.locator(".tw-swatch").boundingBox(), row.boundingBox()]);
+      // One line: the swatch beside its text, not above it.
+      expect(box!.height).toBeLessThan(26);
+      expect(swatch!.y).toBeGreaterThanOrEqual(box!.y);
+    }
+  });
+
   test("a hidden series draws while the page picks it", async ({ page }) => {
     const c1 = page.locator("#c1");
     await c1.evaluate((c) => (c as HTMLElement & { pick(x: string, s: string): void }).pick("20", "gcc"));

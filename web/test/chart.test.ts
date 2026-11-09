@@ -254,3 +254,20 @@ test("a readout figure keeps its digits and says what is known", () => {
   assert.equal(figure(p({ note: "not recorded" }), "MHz"), "not recorded");
   assert.equal(figure(null, "KiB/s"), "–");
 });
+
+test("the left margin makes room for the widest y label and the unit above them", () => {
+  const cliff = parseChart({
+    format: "tickwave-chart/1",
+    x: { scale: "linear", values: ["1", "2"] },
+    y: { unit: "commands/s", scale: "linear", max: "60000", step: "20000" },
+    series: [{ id: "a", name: "A", colour: "verge", points: [{ value: "10000" }, { value: "50000" }] }],
+  });
+  // Seven pixels a character, the estimate without a measure: "commands/s" is 70, "60,000" 42.
+  const l = layout(cliff, new Set(["a"]), 620, 330, null);
+  assert.equal(l.left, 70 + 8 + 4);
+  const svg = render(l, { ...AT_REST, yUnit: "commands/s" }, COLOURS);
+  const x = Number(/<text x="([\d.]+)" y="[\d.]+" text-anchor="end"[^>]*>commands\/s</.exec(svg)![1]);
+  assert.ok(x - 70 >= 0, `the unit starts at ${x - 70}, left of the SVG`);
+  // Figure 1's labels fit the margin it always had.
+  assert.equal(layout(FIG1, SHOWN, 620, 330, 40).left, 52);
+});
