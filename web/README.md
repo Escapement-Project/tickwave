@@ -140,20 +140,7 @@ and data.
 
 The dev page's in-memory route, `src/memory-source.ts`, serves `.tickwavefx` fixtures with an
 artificial delay on request (`?latency=MS`), and computes the overview at the levels a real file
-has. A fixture is gzip over:
-
-| Bytes | Holds |
-|---|---|
-| 8 | `tkwavefx` |
-| 4 | the header's length, u32 little-endian |
-| header | JSON: `format` (`tickwave-fixture/1`), `title`, `timebase` `[num, den]`, `length`, `channels`, `source` |
-| payloads | each channel's, in header order, each `bytes` long |
-
-A digital channel's header entry has `name`, `end`, `initial` (the level at tick 0), `count` and
-`bytes`. Its payload is unsigned LEB128: the first edge's tick, then each interval to the next
-edge. An analog channel's entry has `name`, `end`, `unit`, `scale`, `offset`, `first`, `period`
-`[num, den]`, `count` and `bytes`. Its payload is zigzag LEB128: the first integer code, then each
-difference. A value is `code × scale + offset`.
+has. `src/fixture-file.ts` reads them, and its opening comment gives their layout.
 
 The dev page's stress sections read these by default. `dev/?stress=tickwave` switches them to the
 same captures converted to `.tickwave`, linked into `fixtures-local/` by `scripts/fixtures.ts`.

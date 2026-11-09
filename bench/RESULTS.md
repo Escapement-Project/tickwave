@@ -55,8 +55,11 @@ it as "same".
 No bar was set in advance for a JavaScript decoder: the maintainer decides from these numbers. An
 early draft of the project plan proposed one. A JavaScript decoder would earn its place if the
 first inset arrived more than 50 ms sooner with it on the throttled profile, or if it decoded
-blocks faster than WASM. That draft was not adopted. The tables still mark its bar, for reference
-only.
+blocks faster than WASM. That draft was not adopted. For reference only, fzstd would pass it on
+the first inset: on Slow 4G its first inset arrives more than 50 ms sooner on all six recordings,
+against both builds. On block decode in Firefox it would pass on four of six recordings against
+the ruzstd build the protocol run measured, but on one, gcc-swd-reads, against the libzstd build
+tickwave ships. In Chromium it would fail on all six.
 
 Chromium's figures below come from a rerun at e4ffc99, and Firefox's from the protocol run at
 48d7f58. "The runs" explains the difference.
@@ -84,16 +87,12 @@ Chromium's figures below come from a rerun at e4ffc99, and Firefox's from the pr
 
 Beside the bar:
 
-- **libzstd.** In the protocol run, libzstd in WASM decoded session50's analog codes 3.9 times as
-  fast as ruzstd in Chromium and 4.4 times as fast in Firefox. On the digital recordings it ranged
-  from 12 % slower to 5 % faster in Chromium, and was 9-50 % faster in Firefox. Its module was
-  136 KB gzipped, 24 KB more than the decoder-only build, because it carried ruzstd as well, for
-  the head. On Slow 4G that cost it 2-4 % against the decoder-only build. The follow-ups took
-  ruzstd out of it. tickwave-wasm then switched to libzstd. In the Chromium rerun, the libzstd
-  build and tickwave-wasm are within 4 % of each other in every timed measure.
-- **The default build's sidecar code.** In the protocol run it cost 540-548 ms on Slow 4G.
-  Unthrottled, it was within the floor on 11 of 12 rows across both browsers, and 3 ms (4 %) later
-  on the other, stock-reads in Chromium. In the Chromium rerun, with the TOML parser gone from the
+- **libzstd.** In the protocol run, libzstd in WASM decoded session50's analog codes 4.4 times as
+  fast as ruzstd in Firefox, and the digital recordings 9-50 % faster. Its module was 136 KB
+  gzipped, 24 KB more than the decoder-only build, because it carried ruzstd as well, for the head.
+  The follow-ups took ruzstd out of it. tickwave-wasm then switched to libzstd. In the Chromium
+  rerun, the libzstd build and tickwave-wasm are within 4 % of each other in every timed measure.
+- **The default build's sidecar code.** In the Chromium rerun, with the TOML parser gone from the
   module, it costs 233-235 ms on Slow 4G and is within the floor on all six unthrottled rows.
 - **`DecompressionStream("zstd")`** decodes fastest in Firefox on five of six recordings, but only
   behind a pref. Chromium does not have it.
@@ -110,18 +109,12 @@ Beside the bar:
 
 - **The protocol run**, at tickwave 48d7f58, in both browsers, started 2026-11-09 at 00:06 UTC.
   Its method was fixed before it ran. "How it was measured" states it. The decoders were built
-  with no uncommitted changes to `crates/format` or `crates/wasm`. tickwave-wasm inflated with
-  ruzstd. The recordings were the ones converted again, with overview blocks, on 2026-11-08 at
-  23:50.
+  with no uncommitted changes to `crates/format` or `crates/wasm`. The recordings were the ones
+  converted again, with overview blocks, on 2026-11-08 at 23:50.
 - **The follow-ups**, at 6b82dda with the decoder fix later committed as 3bf88fb. In both
   browsers they measured libzstd without ruzstd and checked correctness again. In Chromium they
   traced where libzstd's lead on session50 comes from. They are at the end of this document.
 - **A Chromium rerun** at e4ffc99, started 2026-11-09 at 11:03 UTC.
-
-After the protocol run, c8b1b17 changed how the sidecar resolves. At 6b82dda the default build is
-527,039 bytes, 3,737 more gzipped than the one measured (zlib level 9, as `scripts/bundle.ts`
-compresses), about 21 ms more on Slow 4G. The decoder-only and libzstd modules and every worker
-bundle build byte-identical at 6b82dda.
 
 By the rerun, tickwave-wasm inflated with libzstd (3d17dd1). Its modules had also shrunk. Since
 e4ffc99 the viewer parses the sidecar's TOML in JavaScript and hands `resolveAnnotations` JSON, so
@@ -184,8 +177,6 @@ then every code's high byte.
   then included a TOML parser. `build.sh` builds it as `crates/wasm/build.sh` does. The module came
   out byte-identical to the one `crates/wasm/build.sh` writes to `crates/wasm/pkg` from the same
   commit.
-- tickwave-wasm, decoder only: `--no-default-features`. It is the reference row in every
-  comparison.
 - libzstd in WASM (`bench/libzstd`): tickwave-wasm's decoder surface, with libzstd inflating blocks
   through `Head::decode_block_with`. zstd-sys compiles libzstd for `wasm32-unknown-unknown` with
   clang, against its own shim headers, which hand `malloc`, `memcpy` and `qsort` to Rust. Nothing
@@ -206,8 +197,7 @@ static server sends each gzip -9 and answers byte ranges. The server isolates th
 is not cold for a WASM decoder. With `scripts/cold-check.ts`, 8 runs each, tickwave-wasm is ready
 in a median 58.7-60.2 ms in a fresh browser, against 9.0-12.9 ms in a new context. Chromium takes
 4-5 ms either way. Most of that cost falls on the first module a Firefox process compiles, not on
-each module. A one-off probe, on a build from before overview blocks were added, showed it: the
-default build took 11-23 ms when the libzstd module had compiled first.
+each module.
 
 The worker starts fetching and compiling its decoder, and at the same time fetches the recording's
 first 64 KiB (32 KiB in the rerun). Once the decoder is ready, it fetches the rest of the head if
@@ -285,42 +275,8 @@ Every decoder also loads the page (inset.html, inset.js: 1219 bytes gzipped).
 
 ### Against the draft bar
 
-fzstd against tickwave-wasm. A gap within the A-A floor is "same". The verdicts apply the early
-draft's bar, which was not adopted.
-
-Chromium, at e4ffc99:
-
-| measure | recording | medians | A-A floor | verdict |
-| --- | --- | --- | --- | --- |
-| first inset, Slow 4G, chromium | gcc-swd-reads | fzstd 3557 ms against tickwave-wasm, decoder only (ruzstd) 4091 ms: 534 ms sooner | 1 ms | passes: more than 50 ms sooner |
-| first inset, Slow 4G, chromium | gcc-swd-reads | fzstd 3557 ms against tickwave-wasm, default build (ruzstd) 4324 ms: 767 ms sooner | 1 ms | passes: more than 50 ms sooner |
-| first inset, Slow 4G, chromium | stock-reads | fzstd 3336 ms against tickwave-wasm, decoder only (ruzstd) 3876 ms: 540 ms sooner | 1 ms | passes: more than 50 ms sooner |
-| first inset, Slow 4G, chromium | stock-reads | fzstd 3336 ms against tickwave-wasm, default build (ruzstd) 4109 ms: 772 ms sooner | 1 ms | passes: more than 50 ms sooner |
-| first inset, Slow 4G, chromium | swo-24000000 | fzstd 3865 ms against tickwave-wasm, decoder only (ruzstd) 4398 ms: 533 ms sooner | 1 ms | passes: more than 50 ms sooner |
-| first inset, Slow 4G, chromium | swo-24000000 | fzstd 3865 ms against tickwave-wasm, default build (ruzstd) 4631 ms: 766 ms sooner | 1 ms | passes: more than 50 ms sooner |
-| first inset, Slow 4G, chromium | gcc-oscan1-probe-rs | fzstd 3368 ms against tickwave-wasm, decoder only (ruzstd) 3895 ms: 527 ms sooner | 1 ms | passes: more than 50 ms sooner |
-| first inset, Slow 4G, chromium | gcc-oscan1-probe-rs | fzstd 3368 ms against tickwave-wasm, default build (ruzstd) 4129 ms: 761 ms sooner | 1 ms | passes: more than 50 ms sooner |
-| first inset, Slow 4G, chromium | gcc-swd-matrix-capture100000 | fzstd 4289 ms against tickwave-wasm, decoder only (ruzstd) 4822 ms: 534 ms sooner | 1 ms | passes: more than 50 ms sooner |
-| first inset, Slow 4G, chromium | gcc-swd-matrix-capture100000 | fzstd 4289 ms against tickwave-wasm, default build (ruzstd) 5055 ms: 766 ms sooner | 1 ms | passes: more than 50 ms sooner |
-| first inset, Slow 4G, chromium | session50 | fzstd 4642 ms against tickwave-wasm, decoder only (ruzstd) 5166 ms: 524 ms sooner | 1 ms | passes: more than 50 ms sooner |
-| first inset, Slow 4G, chromium | session50 | fzstd 4642 ms against tickwave-wasm, default build (ruzstd) 5401 ms: 759 ms sooner | 1 ms | passes: more than 50 ms sooner |
-| block decode in worker, chromium | gcc-swd-reads | fzstd 101.2 against 178.6 M/s | 1.8 % | WASM faster |
-| block decode in worker, chromium | stock-reads | fzstd 86.4 against 136.9 M/s | 1.8 % | WASM faster |
-| block decode in worker, chromium | swo-24000000 | fzstd 97.5 against 151.1 M/s | 1.8 % | WASM faster |
-| block decode in worker, chromium | gcc-oscan1-probe-rs | fzstd 115.9 against 172.6 M/s | 1.8 % | WASM faster |
-| block decode in worker, chromium | gcc-swd-matrix-capture100000 | fzstd 107.2 against 170.4 M/s | 1.8 % | WASM faster |
-| block decode in worker, chromium | session50 | fzstd 70.6 against 283.4 M/s | 1.8 % | WASM faster |
-
-Firefox, at 48d7f58:
-
-| measure | recording | medians | A-A floor | verdict |
-| --- | --- | --- | --- | --- |
-| block decode in worker, firefox | gcc-swd-reads | fzstd 168.2 against 137.9 M/s | 1.5 % | JavaScript faster |
-| block decode in worker, firefox | stock-reads | fzstd 119.3 against 107.2 M/s | 1.5 % | JavaScript faster |
-| block decode in worker, firefox | swo-24000000 | fzstd 120.4 against 86.4 M/s | 1.5 % | JavaScript faster |
-| block decode in worker, firefox | gcc-oscan1-probe-rs | fzstd 129.8 against 137.0 M/s | 1.5 % | WASM faster |
-| block decode in worker, firefox | gcc-swd-matrix-capture100000 | fzstd 138.9 against 122.2 M/s | 1.5 % | JavaScript faster |
-| block decode in worker, firefox | session50 | fzstd 62.9 against 71.2 M/s | 1.5 % | WASM faster |
+The first-inset and block-decode tables below hold every figure the draft bar compares, and "What
+the numbers say" gives its verdicts.
 
 ### First inset, chromium 158.0.8127.18, unthrottled, at e4ffc99
 
@@ -733,27 +689,8 @@ flip-data-then-empty-frame, which the block parser refuses. With the fix it refu
 The Firefox table above is from before the fix, and the Chromium table from after it. The protocol
 run's Chromium table gave the same verdicts as the Firefox one for every decoder the two share.
 
-`crates/format/src/decode.rs`, `inflate` (lines 39-60 at `48d7f58`):
-
-```rust
-    let mut decoder = FrameDecoder::new();
-    decoder
-        .decode_all_to_vec(frame, &mut out)
-        .map_err(|e| DecodeError::Zstd(e.to_string()))?;
-    match (
-        decoder.get_checksum_from_data(),
-        decoder.get_calculated_checksum(),
-    ) {
-```
-
-ruzstd 0.9.1's `decode_all` (`src/decoding/frame_decoder.rs`, lines 541-576) decodes every frame
-in its input, `while !input.is_empty()`, and steps over skippable frames. It checks no checksum
-itself. The two getters read the state of the last frame decoded. `inflate` checked only that
-frame's checksum, and accepted bytes after the block's frame. FORMAT.md says a block is one
-zstd frame.
-
-What that let through in the protocol run, natively and in both tickwave-wasm builds in both
-browsers:
+What the defect let through in the protocol run, natively and in both tickwave-wasm builds in
+both browsers:
 
 - A block's frame followed by a skippable frame, empty or not, or by an empty zstd frame: accepted.
 - session50's block 191 with one bit flipped in its frame, followed by an empty zstd frame. The
@@ -761,9 +698,7 @@ browsers:
   accepted and decoded to wrong values. Its hash differed from the reference's, and no error was
   raised.
 
-The libzstd build and the JavaScript readers refuse all of these. The proposed fix was to refuse
-any byte after the first frame: decode the frame alone, then check that it consumed the whole
-input.
+The libzstd build and the JavaScript readers refuse all of these.
 
 ## Break tests
 
@@ -803,9 +738,7 @@ The A-A pair has no break test: it is a measurement, not a check.
   Playwright's headless shell.
 - Memory: the WASM heap's growth, and the copies' peak.
 - `DecompressionStream("zstd")` as visitors would get it. No browser ships it on by default.
-- Other builds: libzstd's `thin` feature (smaller, slower), wasm-opt `-Oz`, WASM SIMD, and a libzstd
-  build without ruzstd. That last one needed a `Head::parse` that takes the inflate, and a
-  `decode_overview_block` that does too; the follow-ups added both and measured it.
+- Other builds: libzstd's `thin` feature (smaller, slower), wasm-opt `-Oz`, and WASM SIMD.
 - A pure-JavaScript XXH64 written for speed. The two published ones I found work in BigInt
   (`@intrnl/xxhash64`) or in `cuint` objects (`xxhashjs`). The checksum table has the BigInt one:
   about 20 ms a 1 MiB block, against 0.1 ms for hash-wasm's WASM one.
@@ -813,9 +746,6 @@ The A-A pair has no break test: it is a measurement, not a check.
   read, 64 KiB in the protocol run and 32 KiB in the rerun, and would refuse a shorter file. Every
   recording here is longer.
 - The renderer. The stand-in draws one polyline, and the viewer's drawing costs will differ.
-- The f32 analog coding in the browsers' timings, since session50 now holds codes. The f32 file it
-  replaced hashed equal to native in every decoder in Chromium (763 blocks) before it was
-  replaced.
 
 ## Where FORMAT.md fell short for an independent reader
 
@@ -867,30 +797,12 @@ run's tables.
 **Base.** `main` at 6b82dda, plus the decoder fix then staged in `crates/format` and since
 committed as 3bf88fb. It adds `Head::parse_with` and `Head::decode_overview_block_with`, so the
 head's overview and overview blocks can be inflated by another zstd decoder, as blocks already
-could. `build/staged.diff` held `git diff --cached` of `crates/format` and `crates/wasm` (SHA-256
-`6e6ac4e7…`). The tree also had unrelated unstaged changes to `crates/format/src/annotations.rs`
-and its test, which `build/decoder.diff` (`ab0746be…`) records. Only the `annotations` feature
-compiles that file. Of the modules here, only tickwave-wasm's default build carries it, and only in
-the correctness rerun. `build.sh` writes both diffs, and `build/` is not in the repository. The
-recordings are the ones converted again on 2026-11-08 at 23:50, checked unchanged at the start and
-end of every run.
+could. The recordings are the ones converted again on 2026-11-08 at 23:50, checked unchanged at
+the start and end of every run.
 
 **Load.** Other work was converting recordings on every core. No timed measure started until the
 1-minute load average had stayed below 2 for five minutes. Every timed unit still waited for three
-quiet seconds, now with no time limit. Load averages (1, 5 and 15 minutes) at each measure's start
-and end:
-
-| Measure | Start | End |
-| --- | --- | --- |
-| first inset, Chromium, unthrottled | 0.33 0.71 1.84 | 2.30 1.21 1.95 |
-| first inset, Chromium, Slow 4G | 0.26 0.56 1.45 | 1.56 0.81 0.73 |
-| block decode, Chromium | 0.16 0.44 0.59 | 1.20 1.07 0.88 |
-| first inset, Firefox, unthrottled | 0.36 0.54 0.69 | 2.19 1.87 1.36 |
-| block decode, Firefox | 0.22 0.81 1.03 | 1.30 1.24 1.15 |
-| inflate and parse apart, Chromium | 0.51 0.78 0.97 | 1.46 1.03 1.04 |
-
-The two ends above 2 follow runs that launch a fresh browser 378 times. The median busy fraction
-during those runs was 8 % in Chromium and 4 % in Firefox, most of it the run's own.
+quiet seconds, now with no time limit.
 
 ### 1. libzstd without ruzstd
 
@@ -1059,9 +971,6 @@ reader run through the new kinds (Chromium, fzstd), and the check restored from 
 The last three checks are backed by others, which refuse the same input for another reason. The
 stage check failed once by accident. The first edge-after-end lowered `end` so far that the control
 block was refused too, and the run reported "refused at control, expected block".
-
-The two gates were broken as well. With a limit of 0, the load-average gate was still waiting after
-25 s. With a limit of 100 and a 1 s hold, it returned at its first check, after 10 s.
 
 ### Correction: what libzstd costs inside tickwave-wasm (2026-11-09)
 

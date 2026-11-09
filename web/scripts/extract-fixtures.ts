@@ -3,7 +3,7 @@
 //   node scripts/extract-fixtures.ts [--exports DIR] [--energy CSV] [NAME...]
 //
 // identify-swd goes to fixtures/ (committed); the rest to fixtures-local/ (ignored by git).
-// The file layout is in web/README.md, "Fixture files".
+// The file layout is in src/fixture-file.ts, which reads it.
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";

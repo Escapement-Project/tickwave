@@ -1,6 +1,21 @@
-// Reads the dev fixture files that scripts/extract-fixtures.ts writes. The layout is in
-// web/README.md, "Fixture files". Not part of tickwave's format: the decoder in crates/format
-// replaces this once it exists.
+// Reads the dev page's `.tickwavefx` fixtures, which scripts/extract-fixtures.ts writes. Not
+// tickwave's recording format: the dev page's in-memory route serves them.
+//
+// A fixture is gzip over:
+//
+// | Bytes    | Holds                                                                             |
+// |----------|-----------------------------------------------------------------------------------|
+// | 8        | `tkwavefx`                                                                        |
+// | 4        | the header's length, u32 little-endian                                            |
+// | header   | JSON: `format` (`tickwave-fixture/1`), `title`, `timebase` `[num, den]`, `length`, |
+// |          | `channels`, `source`                                                              |
+// | payloads | each channel's, in header order, each `bytes` long                                |
+//
+// A digital channel's header entry has `name`, `end`, `initial` (the level at tick 0), `count` and
+// `bytes`. Its payload is unsigned LEB128: the first edge's tick, then each interval to the next
+// edge. An analog channel's entry has `name`, `end`, `unit`, `scale`, `offset`, `first`, `period`
+// `[num, den]`, `count` and `bytes`. Its payload is zigzag LEB128: the first integer code, then
+// each difference. A value is `code × scale + offset`.
 
 import type { MemoryAnalog, MemoryDigital, MemoryRecording } from "./memory-source.ts";
 

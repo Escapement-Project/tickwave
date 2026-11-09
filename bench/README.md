@@ -96,10 +96,6 @@ fraction while it ran. `results/raw/cpu.json` keeps every second's, and each res
 load average at its start and end. `node scripts/cpu.ts` runs both gates for other commands, such
 as the native timing: `node scripts/cpu.ts && target/release/tickwave-bench-native time ...`.
 
-The first-inset measure launches a fresh browser for every run. In Firefox, a new context in a
-running browser is not cold for a WASM decoder: the first module a process compiles takes about
-50 ms longer than later ones. `node scripts/cold-check.ts [decoder] [runs]` shows it.
-
 | Measure | What it does |
 | --- | --- |
 | `correct` | Every block and overview block of every recording through every decoder, hashed and compared with the native hashes; every corrupted block through every decoder |
@@ -118,9 +114,3 @@ node scripts/serve.ts 8080                        # then http://127.0.0.1:8080/i
 npx tsc -p .                                      # type-check
 cargo clippy -p tickwave-bench-native -p tickwave-wasm-libzstd -- -D warnings
 ```
-
-## Firefox and `DecompressionStream("zstd")`
-
-Firefox 159 has the zstd format behind `dom.compression_streams.zstd.enabled`, off by default. The
-runner launches Firefox with it on, so the `stream` decoder can be measured. The `correct` measure
-also records what each browser offers with default settings.

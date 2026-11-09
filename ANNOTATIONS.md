@@ -107,8 +107,7 @@ letter mu (U+03BC).
 
 A time is either a whole number of ticks from the capture's start, or a decimal with a unit: `s`,
 `ms`, `us` (or `µs`), `ns`, `ps`. A decimal converts to ticks exactly, without floating point, and
-rounds to the nearest tick, halves away from zero. A script working from the source's own times
-uses the converter's rule: `round((t − begin) × rate)`, with the source's `begin` and rate.
+rounds to the nearest tick, halves away from zero.
 
 ## Ids stay stable
 

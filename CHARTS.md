@@ -235,33 +235,5 @@ ring and an ink wash under the pointer.
 
 A chart reads only chart data. The wire-clock charts plot figures that the decoders write into
 their session annotations as `values` (ANNOTATIONS.md): `asked`, `read_data`, `write_data` and
-`request`. For example:
-
-```toml
-[[annotation]]
-id = "session-50"
-ref = "wire_swd/session/377858886"
-values = { asked = "50 MHz", read_data = "37.5 MHz", write_data = "49.9 MHz" }
-```
-
-mculink-bench's `extract.py` reads the sidecars and writes the chart's data, with each point's
-evidence. So the page keeps the choice of what a point leads to.
-
-## What stays with the page
-
-- The landing page's dial: the project's identity, with motion of its own.
-- Tables, such as Table 1. They are page HTML, so they read without scripts. A chart names its table
-  and follows it through `pick` and `tickwave-pick`.
-- The headline and its sentences.
-- The case maps and the stall marks: they have no settings axis and no evidence.
-- The key, the set picker, the wire selector and the matrix's controls. They set `show` and `data`
-  on the charts.
-
-## Where it is used
-
-1. The landing page's Figure 1: two series and a third on demand, the limit with its legend entry,
-   the tooltip readout, pointer, touch and keys, the links to Table 1 and the claim, the sweep,
-   reader view and both faces. Its points name no recording: the 4 KiB writes were not captured.
-2. The 2026-11-04 wire-clock charts, from the session annotations' values. Every point opens its
-   recording.
-3. The measurements page's line charts, with the page's key and the command matrix's slices.
+`request`. mculink-bench's `extract.py` reads the sidecars and writes the chart's data, with each
+point's evidence. So the page keeps the choice of what a point leads to.
