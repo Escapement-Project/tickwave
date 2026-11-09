@@ -5,7 +5,7 @@
 import { covers, laneAnnotations, type Annotation, type Resolved } from "../annotations.ts";
 import type { Palette } from "../palette.ts";
 import { formatAt, niceStep } from "../readouts.ts";
-import { sampleTick, type AnalogChannel, type Channel, type RecordingInfo, type Source } from "../source.ts";
+import { named, sampleTick, type AnalogChannel, type Channel, type RecordingInfo, type Source } from "../source.ts";
 import { timeAxis } from "./axis.ts";
 import {
   analogFromOverview,
@@ -64,6 +64,15 @@ const SELECTION_BAR = 4;
 const RIGHT_PAD = 10;
 /** The opacity of what a coarse layer cannot place: the trace's colour, faded. */
 const UNRESOLVED_ALPHA = 0.35;
+/** How long a read may run before the element says it is still loading. */
+const STALL_MS = 5000;
+
+/** A failed read as the reader meets it: data that did not load. The name stays, for a page to tell the cause. */
+function notLoaded(e: unknown): Error {
+  const out = named(e instanceof Error ? e.name : "Error", `Data did not load: ${e instanceof Error ? e.message : String(e)}`);
+  out.cause = e;
+  return out;
+}
 
 export type Hit =
   | { readonly area: "lane"; readonly note: NoteOut | null }
@@ -94,6 +103,10 @@ export class Plot {
   notes: NoteOut[] = [];
   onDraw: (() => void) | null = null;
   onError: ((e: unknown) => void) | null = null;
+  /** Called with STALL_MS once a read has run that long, and with null once no read is running. */
+  onStall: ((waitedMs: number | null) => void) | null = null;
+  #stallTimer: ReturnType<typeof setTimeout> | undefined;
+  #stalled = false;
   #frame = 0;
   #dpr = 1;
   #settledWaiters: (() => void)[] = [];
@@ -115,7 +128,10 @@ export class Plot {
           i,
           info.channels[i],
           () => this.invalidate(),
-          (e) => this.onError?.(e),
+          (e) => {
+            this.#watchStall();
+            this.onError?.(notLoaded(e));
+          },
         ),
     );
     this.layout = null;
@@ -313,10 +329,29 @@ export class Plot {
     this.#drawMarks();
 
     this.onDraw?.();
+    this.#watchStall();
     if (this.#settledWaiters.length > 0 && this.settled) {
       const waiters = this.#settledWaiters;
       this.#settledWaiters = [];
       for (const w of waiters) w();
+    }
+  }
+
+  #watchStall(): void {
+    clearTimeout(this.#stallTimer);
+    const since = Math.min(...this.tracks.map((t) => t.waitingSince ?? Infinity));
+    if (since === Infinity) {
+      if (this.#stalled) {
+        this.#stalled = false;
+        this.onStall?.(null);
+      }
+      return;
+    }
+    const due = since + STALL_MS - performance.now();
+    if (due > 0) this.#stallTimer = setTimeout(() => this.#watchStall(), due);
+    else if (!this.#stalled) {
+      this.#stalled = true;
+      this.onStall?.(STALL_MS);
     }
   }
 

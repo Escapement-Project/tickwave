@@ -1,6 +1,8 @@
 // The browser tests' static server: web/ on two ports, one that honours Range (8124) and one that
 // ignores it and always sends the whole file (8125). It logs every request, a worker's included,
 // so a test can see what was fetched: GET /__log?tag=X lists the requests whose URL holds X.
+// A request URL with `after=N` makes every Range read past the Nth for its tag fail with status
+// `fail`, or wait `stall` milliseconds before it is answered.
 //
 //   node e2e/server.ts
 
@@ -16,6 +18,7 @@ interface Entry {
   status: number;
 }
 const log: Entry[] = [];
+const rangeReads = new Map<string, number>();
 
 function serve(port: number, acceptRanges: boolean): void {
   createServer((req, res) => {
@@ -30,12 +33,30 @@ function serve(port: number, acceptRanges: boolean): void {
     log.push(entry);
     res.on("finish", () => (entry.status = res.statusCode));
     res.setHeader("cache-control", "no-store");
-    send(req, decodeURIComponent(url.pathname), { root, acceptRanges, etag: false, lastModified: false, cacheControl: false })
-      .on("error", (e: { status?: number }) => {
-        res.statusCode = e.status ?? 500;
-        res.end();
-      })
-      .pipe(res);
+    const answer = () =>
+      send(req, decodeURIComponent(url.pathname), { root, acceptRanges, etag: false, lastModified: false, cacheControl: false })
+        .on("error", (e: { status?: number }) => {
+          res.statusCode = e.status ?? 500;
+          res.end();
+        })
+        .pipe(res);
+    const after = url.searchParams.get("after");
+    if (after !== null && req.headers.range) {
+      const tag = url.searchParams.get("tag") ?? "";
+      const n = (rangeReads.get(tag) ?? 0) + 1;
+      rangeReads.set(tag, n);
+      if (n > Number(after)) {
+        const fail = url.searchParams.get("fail");
+        if (fail !== null) {
+          res.statusCode = Number(fail);
+          res.end();
+          return;
+        }
+        setTimeout(answer, Number(url.searchParams.get("stall") ?? 0));
+        return;
+      }
+    }
+    answer();
   }).listen(port, "127.0.0.1");
 }
 

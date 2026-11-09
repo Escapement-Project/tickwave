@@ -175,6 +175,36 @@ test("a finer overview level comes from overview blocks by range, not from the d
   await view.screenshot({ path: `screenshots/${info.project.name}-overview-blocks.png` });
 });
 
+test("a read that fails says the data did not load, and is not asked again at once", async ({ page }, info) => {
+  const tag = tagged(info, "fail");
+  await recordReady(page);
+  // The JTAG identify capture's head takes two reads; the third, of its overview blocks, fails.
+  await page.goto(`/e2e/pages/view.html?open&src=fixtures/identify-jtag.chrono&firstRead=1024&tag=${tag}&after=2&fail=503`);
+  await waitReady(page, ["v"]);
+  const view = page.locator("#v");
+  await view.evaluate((v) => (v as unknown as { setWindow(a: number, b: number): void }).setWindow(465e6, 485e6));
+  const notice = view.locator(".notice");
+  await expect(notice).toContainText("Data did not load: identify-jtag.chrono: HTTP 503");
+  // Hovering redraws, and every redraw asks for the data; the failed read waits before it is asked again.
+  const box = (await view.locator("canvas").boundingBox())!;
+  for (let i = 0; i < 10; i++) await page.mouse.move(box.x + 100 + i * 30, box.y + box.height / 2);
+  await page.waitForTimeout(200);
+  expect((await served(tag)).length).toBe(3);
+});
+
+test("a read still going after five seconds says so, until it lands", async ({ page }, info) => {
+  const tag = tagged(info, "stall");
+  await recordReady(page);
+  await page.goto(`/e2e/pages/view.html?open&src=fixtures/identify-jtag.chrono&firstRead=1024&tag=${tag}&after=2&stall=7000`);
+  await waitReady(page, ["v"]);
+  const view = page.locator("#v");
+  await view.evaluate((v) => (v as unknown as { setWindow(a: number, b: number): void }).setWindow(465e6, 485e6));
+  const notice = view.locator(".notice");
+  await expect(notice).toBeHidden();
+  await expect(notice).toHaveText("Still loading after 5 s.", { timeout: 6500 });
+  await expect(notice).toBeHidden({ timeout: 4000 });
+});
+
 test("analog through the WASM path: the head's overview, the samples, and readouts to one code step", async ({ page }, info) => {
   const tag = tagged(info, "analog");
   await page.setViewportSize({ width: 700, height: 600 });

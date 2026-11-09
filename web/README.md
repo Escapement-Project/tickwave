@@ -270,7 +270,10 @@ and fall back to system colours on a page without them:
 | `--font-text`, `--font-figures` | labels; the readouts' figures |
 
 While a zoom's finer data loads, a row draws the coarser data it has. Where that data shows a
-change it cannot yet place, the row draws it in the trace's colour, faded.
+change it cannot yet place, the row draws it in the trace's colour, faded. A read still going
+after 5 s puts "Still loading" in the element's notice until it lands. A read that fails puts
+"Data did not load" there, with the cause, and the stretch stays faded. The row asks again when
+the view next redraws, 3 s or more later.
 
 The key under an inset names the roles it shows: "probe drives" and "target drives", and any
 other role by its name. The elements follow a change of face, a `data-face` on `<html>` or the

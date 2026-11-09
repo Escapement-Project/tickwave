@@ -135,6 +135,7 @@ export class ChronoView extends ChronoElement {
       labelPx: 12,
     });
     this.#plot.onError = (e) => this.fail(e);
+    this.#plot.onStall = (ms) => this.waiting(ms);
     this.#plot.onDraw = () => this.#drawn();
     this.#resize = new ResizeObserver(() => this.#sized());
     const on = (sel: string, f: () => void) => this.root.querySelector(sel)!.addEventListener("click", f);

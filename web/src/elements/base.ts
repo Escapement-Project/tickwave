@@ -55,6 +55,7 @@ export abstract class ChronoElement extends HTMLElement {
   #unsubscribe: (() => void)[] = [];
   #queued = false;
   #reportedErrors = new Set<string>();
+  #waiting: string | null = null;
 
   constructor(css: string, html: string) {
     super();
@@ -121,12 +122,26 @@ export abstract class ChronoElement extends HTMLElement {
     this.#reportedErrors.add(message);
     console.warn(`<${this.localName}${this.id ? ` id="${this.id}"` : ""}>: ${message}`);
     this.dispatchEvent(new CustomEvent("chrono-error", { detail: { message, error: e }, bubbles: true, composed: true }));
+    this.#showNotice();
+  }
+
+  /** Says a read has run `ms` and is still going, or with null that none is. A problem comes first. */
+  protected waiting(ms: number | null): void {
+    this.#waiting = ms === null ? null : `Still loading after ${ms / 1000} s.`;
+    this.#showNotice();
+  }
+
+  #showNotice(): void {
     const notice = this.root.querySelector(".notice") as HTMLElement | null;
     if (!notice) return;
     const problems = [...this.#reportedErrors].flatMap((m) => m.split("\n")).filter(Boolean);
-    notice.hidden = false;
+    notice.hidden = problems.length === 0 && this.#waiting === null;
     notice.textContent =
-      problems.length === 1 ? problems[0] : `${problems[0]} (and ${problems.length - 1} more problems; see the console)`;
+      problems.length === 0
+        ? (this.#waiting ?? "")
+        : problems.length === 1
+          ? problems[0]
+          : `${problems[0]} (and ${problems.length - 1} more problems; see the console)`;
   }
 
   protected emit(name: string, detail: unknown): void {

@@ -35,6 +35,14 @@ export function grain(t: Tile): number {
 /** An analog row reads samples until a column holds this many. */
 const SAMPLES_PER_COLUMN = 32;
 
+/**
+ * After a failed read, the row asks again no sooner than this. Every redraw asks, and a pointer
+ * moving over the plot redraws, so without it a server that keeps failing gets a read a frame.
+ */
+const RETRY_MS = 3000;
+
+type Pending = { mode: Mode; start: number; end: number; per: number; abort: AbortController; since: number };
+
 export class Track {
   readonly source: Source;
   readonly index: number;
@@ -43,7 +51,8 @@ export class Track {
   /** The finest tile yet that covers the whole channel. */
   #base: Tile | null = null;
   #baseAsked = false;
-  #pending: { mode: Mode; start: number; end: number; per: number; abort: AbortController } | null = null;
+  #pending: Pending | null = null;
+  #retryAt = 0;
   /** A request for buckets no larger than this came back null: there is no level that fine. */
   #noOverviewAtOrBelow = 0;
   readonly #changed: () => void;
@@ -59,6 +68,11 @@ export class Track {
 
   get busy(): boolean {
     return this.#pending !== null;
+  }
+
+  /** When the read under way began, in `performance.now()` time; null when none is. */
+  get waitingSince(): number | null {
+    return this.#pending?.since ?? null;
   }
 
   #mode(per: number): Mode {
@@ -122,16 +136,20 @@ export class Track {
     // A pending overview was asked for buckets no larger than p.per, so it fits a view at least that coarse.
     if (p && p.mode === mode && this.#covers(p, start, end) && (mode !== "overview" || (p.per <= per && per <= p.per * 4))) return;
     p?.abort.abort();
+    this.#pending = null;
+    if (performance.now() < this.#retryAt) return;
     // Fetch a view's width either side, so a small pan draws from what is here.
     const width = end - start;
     const lo = Math.max(0, Math.floor(start - width));
     const hi = Math.min(this.channel.end, Math.ceil(end + width));
     const abort = new AbortController();
-    const pending = { mode, start: lo, end: hi, per, abort };
+    const pending = { mode, start: lo, end: hi, per, abort, since: performance.now() };
     this.#pending = pending;
     void this.#fetch(pending).catch((e) => {
       if (this.#pending === pending) this.#pending = null;
-      if (!isAbort(e)) this.#failed(e);
+      if (isAbort(e)) return;
+      this.#retryAt = performance.now() + RETRY_MS;
+      this.#failed(e);
     });
   }
 
@@ -158,7 +176,7 @@ export class Track {
     }
   }
 
-  async #fetch(p: { mode: Mode; start: number; end: number; per: number; abort: AbortController }): Promise<void> {
+  async #fetch(p: Pending): Promise<void> {
     const { signal } = p.abort;
     const done = (tile: Tile) => {
       if (this.#pending !== p) return;

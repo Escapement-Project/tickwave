@@ -75,6 +75,7 @@ export class ChronoInset extends ChronoElement {
       labelPx: 11,
     });
     this.#plot.onError = (e) => this.fail(e);
+    this.#plot.onStall = (ms) => this.waiting(ms);
     this.#resize = new ResizeObserver(() => this.#sized());
     this.#intersect = new IntersectionObserver((seen) => {
       this.#inViewport = seen.some((s) => s.isIntersecting);
