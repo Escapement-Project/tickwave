@@ -99,7 +99,10 @@ fn resolves_hand_written_generated_and_refs() {
     );
     let check = &got[0];
     assert_eq!((check.start, check.end), (317_858, Some(317_950)));
-    assert_eq!((check.source.as_deref(), check.target.as_deref()), (None, None));
+    assert_eq!(
+        (check.source.as_deref(), check.target.as_deref()),
+        (None, None)
+    );
     let alias = &got[1];
     assert_eq!((alias.start, alias.end), (412_000, Some(412_900)));
     assert_eq!(alias.target.as_deref(), Some("wire_swd/misread/412000"));
@@ -116,11 +119,10 @@ fn resolves_hand_written_generated_and_refs() {
 
 #[test]
 fn included_files_follow_the_include_list_not_the_callers_order() {
-    let hand = HAND
-        .replace(
-            r#"include = ["rec.wire_swd.jsonl"]"#,
-            r#"include = ["rec.b.jsonl", "rec.wire_swd.jsonl"]"#,
-        );
+    let hand = HAND.replace(
+        r#"include = ["rec.wire_swd.jsonl"]"#,
+        r#"include = ["rec.b.jsonl", "rec.wire_swd.jsonl"]"#,
+    );
     let b = r#"{"format": "chrono-annotations/1", "source": "b", "recording_id": "blake3:00ff"}
 {"id": "x/1", "start": 1}
 "#;
@@ -199,6 +201,16 @@ fn measure_wants_a_digital_span() {
     assert_problem(&problems(&hand, GENERATED), "\"V\" is analog");
     let hand = HAND.replace("end = \"317.95 us\"\n", "");
     assert_problem(&problems(&hand, GENERATED), "needs a span");
+}
+
+#[test]
+fn measure_knows_rate_period_and_duration_only() {
+    for what in ["period", "duration"] {
+        let hand = HAND.replace("what = \"rate\"", &format!("what = \"{what}\""));
+        resolve(&hand, &included(GENERATED), &header(), Some("rec.chrono")).unwrap();
+    }
+    let hand = HAND.replace("what = \"rate\"", "what = \"mean\"");
+    assert_problem(&problems(&hand, GENERATED), "\"mean\" is not one of");
 }
 
 #[test]

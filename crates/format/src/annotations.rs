@@ -23,11 +23,11 @@ pub enum Time {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Measure {
     pub channel: String,
-    /// `rate` or `period`.
+    /// `rate`, `period` or `duration`.
     pub what: String,
 }
 
-const MEASURES: [&str; 2] = ["rate", "period"];
+const MEASURES: [&str; 3] = ["rate", "period", "duration"];
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -379,7 +379,7 @@ pub fn resolve(
             match channels.get(m.channel.as_str()) {
                 None => problems.push(format!("{at}: measure: no channel {:?}", m.channel)),
                 Some(false) => problems.push(format!(
-                    "{at}: measure: {:?} is analog; rates are measured on edges",
+                    "{at}: measure: {:?} is analog; measures are taken from edges",
                     m.channel
                 )),
                 Some(true) => {}

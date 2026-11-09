@@ -61,10 +61,27 @@ The first line names the generator. Each later line is one annotation. Blank lin
 | `kind` | A free word (`transfer`, `misread`, `stall`). Styling and filtering key on it. |
 | `text` | Longer text, shown in an inset's caption. |
 | `paint` | A role (`probe`, `target`): the annotation's channels draw over its span in the colour the host page gives that role. |
-| `measure` | `{channel, what}`, `what` being `rate` or `period`: the inset shows that measure taken from the channel's edges over the span. The channel must be digital, and the annotation a span. |
+| `measure` | `{channel, what}`: the inset shows a measure taken from the channel's edges inside the span (below). The channel must be digital, and the annotation a span. |
 | `ref` | Hand-written only: the full id of a generated annotation. This one takes its span and channels, and any field it leaves out. |
 
 A file may hold no other fields: a misspelt one is an error, not ignored.
+
+## Measures
+
+`measure` takes the channel's edges at ticks in `[start, end)`: an edge at `end` is outside. It
+shows no more digits than its ticks carry. A span meant to measure from one edge to another starts
+at the first edge's tick and ends one tick past the last.
+
+- `rate` and `period`: the running clock. Its periods run from one rising edge to the next, so a
+  span needs at least two rising edges. Sort the span's n periods as p[0..n). Take
+  Q1 = p[⌊(n − 1)/4⌋], Q3 = p[⌈3(n − 1)/4⌉], and IQR = Q3 − Q1, but at least one tick. Keep the
+  periods within [Q1 − 1.5 IQR, Q3 + 1.5 IQR]: Tukey's fences. The measure is the mean of the
+  kept periods, as a rate or a period, and the inset says how many it kept ("mean of 31 of 32
+  periods"). The fences keep a clock's edge jitter and its quantisation, such as 26 and 27 ns for
+  a 26.67 ns clock. They drop pauses, and a long period that occurs in fewer than a quarter of
+  the periods, such as a slow acknowledge check or a stretched cycle.
+- `duration`: the time from the channel's first edge in the span to its last, of either
+  polarity. A span needs at least two edges.
 
 ## Times
 
