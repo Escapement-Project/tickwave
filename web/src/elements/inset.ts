@@ -5,7 +5,7 @@ import { covers, type Annotation } from "../annotations.ts";
 import { INSET_ATTRIBUTES, parseChannels, parsePad, parseScale, parseSweep } from "../attributes.ts";
 import { reducedMotion } from "../face.ts";
 import { measureReading } from "../readouts.ts";
-import { channelIndices, Plot } from "../render/plot.ts";
+import { channelIndices, Plot, ROLE_WEIGHT } from "../render/plot.ts";
 import { isAbort, named, type RecordingInfo } from "../source.ts";
 import { secondsValue, toTicks } from "../time.ts";
 import { TickwaveElement, loadRecording, type Loaded } from "./base.ts";
@@ -25,6 +25,7 @@ canvas { display: block; }
 .measure .what { font-family: var(--font-text, system-ui, sans-serif); color: var(--ink-2, GrayText); }
 .key { display: flex; gap: 12px; margin-left: auto; }
 .key i { display: inline-block; width: 14px; height: 2px; vertical-align: middle; margin-right: 5px; }
+.key i.heavy { height: 3px; }
 `;
 
 const HTML = `<figure part="inset"><figcaption part="label"></figcaption><p class="text" part="text" hidden></p>
@@ -331,6 +332,8 @@ export class TickwaveInset extends TickwaveElement {
       const item = document.createElement("span");
       const swatch = document.createElement("i");
       swatch.style.background = this.palette.role(r);
+      // As heavy as the role's lines, so the key tells the roles apart without colour too.
+      if (ROLE_WEIGHT[r]) swatch.className = "heavy";
       item.append(swatch, r === "probe" || r === "target" ? `${r} drives` : r);
       this.#key.append(item);
     }

@@ -60,7 +60,7 @@ The first line names the generator. Each later line is one annotation. Blank lin
 | `label` | Short text shown with the annotation. |
 | `kind` | A free word (`transfer`, `misread`, `stall`). Styling and filtering key on it. |
 | `text` | Longer text, shown in an inset's caption. |
-| `paint` | A role (`probe`, `target`): the annotation's channels draw over its span in the colour the host page gives that role. |
+| `paint` | A role (`probe`, `target`): the annotation's channels draw over its span in the colour the host page gives that role. The target's lines are also heavier, so the roles differ without colour. |
 | `measure` | `{channel, what}`: the inset shows a measure taken from the channel's edges inside the span (below). The channel must be digital, and the annotation a span. |
 | `values` | Figures the annotation states, by name, each a decimal and a unit (below). |
 | `ref` | Hand-written only: the full id of a generated annotation. This one takes its span and channels, and any field it leaves out. |

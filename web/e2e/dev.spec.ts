@@ -479,6 +479,43 @@ test("the inset's measure reads the rate from the edges", async ({ page }) => {
   await expect(page.locator("#inset-dpidr").locator(".key > span")).toHaveText(["probe drives", "target drives"]);
 });
 
+test("the target's drive draws heavier than the probe's, so the roles differ without colour", async ({ page }) => {
+  // A page with no colours: both roles draw in the same ink, so only the weight tells them apart.
+  await page.emulateMedia({ reducedMotion: "reduce", colorScheme: "light" });
+  await page.goto("/e2e/pages/inset.html?src=fixtures/identify-swd.tickwave&annotations=fixtures/identify-swd.annotations.toml&annotation=dpidr-read");
+  const inset = page.locator("#i");
+  await expect(inset.locator("figcaption")).toHaveText("Reading the debug port's ID register");
+  await expect(inset.locator(".key > span")).toHaveText(["probe drives", "target drives"]);
+  expect(await inset.locator(".key i").evaluateAll((is) => is.map((i) => getComputedStyle(i).height))).toEqual(["2px", "3px"]);
+  // Each column's short runs of ink are the flat stretches of line: 1.5 px is 3 device pixels at
+  // this scale, 2.5 px is 5. The probe drives the request and the target the data, so both show.
+  const measure = () => inset.locator("canvas").evaluate((canvas: HTMLCanvasElement) => {
+    const { width, height } = canvas;
+    const d = canvas.getContext("2d")!.getImageData(0, 0, width, height).data;
+    const ink = (x: number, y: number) => {
+      const i = (y * width + x) * 4;
+      return d[i] < 40 && d[i + 1] < 40 && d[i + 2] < 40 && d[i + 3] === 255;
+    };
+    const counts: Record<number, number> = {};
+    for (let x = 0; x < width; x++) {
+      let run = 0;
+      for (let y = 0; y <= height; y++) {
+        if (y < height && ink(x, y)) run++;
+        else {
+          if (run > 0 && run <= 8) counts[run] = (counts[run] ?? 0) + 1;
+          run = 0;
+        }
+      }
+    }
+    return counts;
+  });
+  // The caption shows before the traces draw, so wait for them.
+  await expect.poll(async () => {
+    const runs = await measure();
+    return [(runs[3] ?? 0) > 100, (runs[5] ?? 0) > 100];
+  }).toEqual([true, true]);
+});
+
 test.describe("a reference", () => {
   test("hover opens an inset beside the text and moves nothing; Escape closes it", async ({ page }) => {
     await page.setViewportSize({ width: 1100, height: 900 });

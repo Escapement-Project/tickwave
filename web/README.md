@@ -304,7 +304,7 @@ and fall back to system colours on a page without them:
 | `--wash` | what the pointer is on |
 | `--attention-ink` | a notice of a problem |
 | `--series-<name>` | the traces, with `series="<name>"` |
-| `--tickwave-<role>` | a line where an annotation's `paint` role drives it. `probe` falls back to the series colour, any other role to ink |
+| `--tickwave-<role>` | a line where an annotation's `paint` role drives it. `probe` falls back to the series colour, any other role to ink. The `target` role's lines are heavier as well, so a page without colours still tells the roles apart |
 | `--font-text`, `--font-figures` | labels; the readouts' figures |
 
 While a zoom's finer data loads, a row draws the coarser data it has. Where that data shows a
