@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>A chart whose points name recordings</title>
+<link rel="stylesheet" href="/dist/site/tokens.css">
+<style>
+body { margin: 0; padding: 20px; background: var(--page); color: var(--ink); font: 400 15px/1.5 var(--font-text); }
+figure { margin: 0 0 40px; width: 620px; }
+</style>
+<!-- Only the chart's module: it loads tickwave.js itself when a point's evidence first opens. -->
+<script type="module" src="/dist/tickwave-chart.js"></script>
+</head>
+<body>
+<figure>
+<tickwave-chart id="c" src="/fixtures/evidence.chart.json"></tickwave-chart>
+<figcaption>A made-up chart whose first and last points name annotations.</figcaption>
+</figure>
+<tickwave-view id="v" src="/fixtures/identify-swd.tickwave" annotations="/fixtures/identify-swd.annotations.toml"></tickwave-view>
+</body>
+</html>

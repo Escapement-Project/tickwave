@@ -1,8 +1,8 @@
 // The browser tests' static server: web/ on two ports, one that honours Range (8124) and one that
 // ignores it and always sends the whole file (8125). It logs every request, a worker's included,
 // so a test can see what was fetched: GET /__log?tag=X lists the requests whose URL holds X.
-// A request URL with `after=N` makes every Range read past the Nth for its tag fail with status
-// `fail`, or wait `stall` milliseconds before it is answered.
+// A request URL with `after=N` makes every Range read past the Nth for its tag wait `stall`
+// milliseconds, then fail with status `fail` or be answered.
 //
 //   node e2e/server.ts
 
@@ -47,12 +47,11 @@ function serve(port: number, acceptRanges: boolean): void {
       rangeReads.set(tag, n);
       if (n > Number(after)) {
         const fail = url.searchParams.get("fail");
-        if (fail !== null) {
+        const failNow = () => {
           res.statusCode = Number(fail);
           res.end();
-          return;
-        }
-        setTimeout(answer, Number(url.searchParams.get("stall") ?? 0));
+        };
+        setTimeout(fail === null ? answer : failNow, Number(url.searchParams.get("stall") ?? 0));
         return;
       }
     }

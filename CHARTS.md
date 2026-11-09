@@ -2,8 +2,8 @@
 
 Draft, 2026-11-09, reviewed by the Escapement Project session. It answers that session's request
 (`notes/design-2026-11-09/tickwave-charts-request.md`), which lists every chart on the landing and
-measurements pages. Step 1 and values on annotations are built: everything here except Evidence,
-which comes with step 2.
+measurements pages. Everything here is built; step 2's chart itself waits on the decoders writing
+values.
 
 ## What a chart is
 
@@ -26,7 +26,8 @@ measurements. A chart is not a capture: there is no time axis, no zoom and no de
 
 A page without charts never loads it. A chart never loads `tickwave.js`, the worker or the WASM
 module until a reader points at a point that names a recording. Then it imports `tickwave.js` from
-beside itself, and the inset loads the rest as it does on any page.
+beside itself, and the inset loads the rest as it does on any page. A page that has already loaded
+the elements keeps its own.
 
 ## Drawing
 
@@ -121,7 +122,7 @@ would read as a figure there, whether the run failed, partly failed or was never
 | `partial` | `{ "failed": 1, "of": 2, "value": "1180.5" }`: some runs failed, and the others gave this figure. The point has no `value`: the line breaks, a fail mark shows if the series marks its failures, and the readout gives this figure |
 | `range` | `["1230.1", "1247.0"]`: the spread across runs, in the readout |
 | `ring` | a ring around the point; with `note`, the readout says why ("from SWDIO") |
-| `evidence` | `{ "recording": "...", "annotations": "...", "annotation": "..." }`: the recording, its sidecar, and the annotation that shows this point. URLs are relative to the chart's file |
+| `evidence` | `{ "recording": "...", "annotations": "...", "annotation": "..." }`: the recording, its sidecar, and the annotation that shows this point. URLs are relative to the chart's file, or to the page for data set through `data` |
 
 ### A limit
 
@@ -157,7 +158,7 @@ that series' point during the entry sweep.
 | Event | When, and its `detail` |
 |---|---|
 | `tickwave-pick` | the reader picks an x or a series: `{x, series}`, either null when cleared |
-| `tickwave-evidence` | the reader opens a point's recording: the point's `evidence`. Cancelable (see Evidence) |
+| `tickwave-evidence` | the reader opens a point's recording: `{x, series, recording, annotations, annotation}`, the URLs absolute. Cancelable (see Evidence) |
 | `tickwave-ready` | the chart has first drawn: `{height}` |
 | `tickwave-error` | the data did not load or does not parse: `{message, error}` |
 
@@ -178,11 +179,16 @@ moves left near the plot's right edge.
 
 ### Evidence
 
-A point that names a recording behaves as `<tickwave-ref>` does. Pointing at it, or reaching it
-with the keys, opens an inset in a popover, so nothing on the page moves. A click or Enter fires
-`tickwave-evidence`, which a page can cancel to take over. Unless it does, the chart opens a
-`<tickwave-view>` of the same recording on the page, at the annotation. With no such view, the
-event is all that happens.
+A point that names a recording behaves as `<tickwave-ref>` does. A mouse resting within 12 px of
+it for 150 ms, a tap on it, or the keys reaching its setting open an inset of its annotation in a
+popover beside it, so nothing on the page moves. A mouse only passing over the plot opens nothing,
+so it loads nothing. The keys open the picked series' point at that setting, or else the first
+shown point there that names a recording. The inset draws the probe's lines in the series' colour.
+
+A click or Enter fires `tickwave-evidence`, which a page can cancel to take over. On a touch
+screen, the tap is the click. Unless the page cancels the event, the chart opens the page's
+`<tickwave-view>` of the same recording at the annotation. With no such view, the popover stays
+open, and the event is all that happens.
 
 The page decides what a point leads to, through the data it writes. A chart never guesses a
 recording from a setting.
@@ -199,7 +205,9 @@ face change, a resize or new data never replays the sweep.
 
 The plot is a focusable `role="group"` with `aria-roledescription="chart"`, as the view's plot is
 a "capture". The page's caption names it and its `table` describes it. Each x is a stop for the
-arrow keys, announced as "20 MHz". The readout is a polite live region inside the group. An image
+arrow keys, announced as "20 MHz". The readout is a polite live region inside the group. When a
+shown point names a recording, the description adds one sentence: "Enter opens the recording
+behind the picked point." An image
 role would not do: its children are presentational, so the readout might never be announced. The
 first build is checked in Firefox's and Chromium's accessibility trees. A page with no table gets
 the readout as the only text form.

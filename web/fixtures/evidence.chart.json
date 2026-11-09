@@ -1,0 +1,16 @@
+{
+  "format": "tickwave-chart/1",
+  "source": "a test fixture: made-up figures, two of them pointing at annotations of identify-swd.tickwave",
+  "x": { "name": "Step", "scale": "linear", "values": ["1", "2", "3"] },
+  "y": { "name": "Made-up figure", "unit": "kHz", "scale": "linear", "max": "300", "step": "100" },
+  "series": [
+    {
+      "id": "a", "name": "Series A", "short": "A", "colour": "verge",
+      "points": [
+        { "value": "100.0", "evidence": { "recording": "identify-swd.tickwave", "annotations": "identify-swd.annotations.toml", "annotation": "attach" } },
+        { "value": "150.0" },
+        { "value": "200.0", "evidence": { "recording": "identify-swd.tickwave", "annotations": "identify-swd.annotations.toml", "annotation": "dpidr-read" } }
+      ]
+    }
+  ]
+}

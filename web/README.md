@@ -282,7 +282,9 @@ The chart draws SVG into its own children, not a shadow root, and writes its col
 attributes. So Firefox's reader view, and a page without its CSS, still show the figure. Its
 caption names it, and the table it names describes it. A reader picks a setting by pointing at it,
 tapping it or stepping to it with the arrow keys, and picks a series from the legend or a line's
-end label.
+end label. A point can name a recording and one of its annotations. Pointing at it opens an inset
+of that annotation, and a click opens the page's view of the recording there. Only then does the
+chart load `tickwave.js`, from beside itself.
 
 `CHARTS.md`, at the repository's root, specifies the data format, `tickwave-chart/1`, and every
 attribute, property and event. Besides the properties below, the chart reads the line patterns

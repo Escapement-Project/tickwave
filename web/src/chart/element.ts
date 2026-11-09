@@ -1,11 +1,12 @@
 // <tickwave-chart>: measurements against a measured setting (CHARTS.md). It draws into its own
 // children, not a shadow root, so reader view and feeds keep the figure.
 
+import { autoUpdate, computePosition, flip, offset, shift } from "@floating-ui/dom";
 import { onFaceChange, onFontsLoaded, reducedMotion } from "../face.ts";
 import { normalise } from "../palette.ts";
-import { parseChart, type ChartData, type Pattern } from "./data.ts";
+import { parseChart, type ChartData, type Evidence, type Pattern } from "./data.ts";
 import { grouped } from "./decimal.ts";
-import { layout, type Layout } from "./layout.ts";
+import { layout, type Layout, type Placed, type SeriesLayout } from "./layout.ts";
 import { figure, swatch } from "./readout.ts";
 import { render, type Colours } from "./render.ts";
 
@@ -13,6 +14,11 @@ const SVG = "http://www.w3.org/2000/svg";
 const SWEEP_MS = 750;
 const LABELS_MS = 200;
 const DEFAULT_HEIGHT = 330;
+/** How near the pointer must be to a point, in CSS pixels, to point at it. */
+const REACH = 12;
+/** How long a mouse must rest on a point to open it: one passing over the plot loads nothing. */
+const DWELL_MS = 150;
+const EVIDENCE_HINT = "Enter opens the recording behind the picked point.";
 
 // Low specificity (`:where`), so the page's own rules win.
 const CSS = `
@@ -33,7 +39,26 @@ const CSS = `
 :where(tickwave-chart) .tw-readout b { font-weight: 600; }
 :where(tickwave-chart) .tw-notice { margin: 4px 0 0; padding: 1px 8px; font-size: 12px; color: var(--attention-ink, CanvasText);
   border-left: 2px solid var(--attention-ink, CanvasText); }
+:where(tickwave-chart) .tw-pop { position: fixed; inset: auto; margin: 0; box-sizing: border-box; width: min(440px, calc(100vw - 16px));
+  padding: 8px 6px 4px; color: var(--ink, CanvasText); background: var(--page, Canvas);
+  border: 1px solid var(--hair, GrayText); border-radius: 10px; box-shadow: 0 2px 10px rgba(0, 0, 0, .14); overflow: visible;
+  pointer-events: none; }
 `;
+
+/** The other elements, from the tickwave.js beside this module, the first time a point's evidence
+ * opens. A page that already loaded them, from wherever, keeps its own. */
+let elements: Promise<unknown> | null = null;
+function loadElements(): Promise<unknown> {
+  if (customElements.get("tickwave-inset")) return Promise.resolve();
+  return (elements ??= import(new URL("tickwave.js", import.meta.url).href));
+}
+
+/** A shown point that names a recording. */
+interface Pointed {
+  readonly series: SeriesLayout;
+  readonly at: Placed;
+  readonly evidence: Evidence;
+}
 
 let styled = false;
 function addStyle(): void {
@@ -81,10 +106,25 @@ export class TickwaveChart extends HTMLElement {
   #legendHtml = "";
   #readoutHtml = "";
   #connected = false;
+  /** The URL evidence is relative to: the data's file, or the page for data set directly. */
+  #base = document.baseURI;
+  #pop: HTMLDivElement | null = null;
+  #inset: HTMLElement | null = null;
+  /** The point whose evidence the popover shows, or is loading to show. */
+  #pointed: Pointed | null = null;
+  #stopPosition: (() => void) | null = null;
+  /** The point the mouse rests on, and the timer that opens it. */
+  #resting: Pointed | null = null;
+  #dwell = 0;
+  /** Says, once, that Enter opens a point's recording; in the description while any point names one. */
+  #hint: HTMLSpanElement | null = null;
 
   constructor() {
     super();
     this.addEventListener("keydown", (e) => this.#key(e));
+    this.addEventListener("focusout", (e) => {
+      if (!this.contains(e.relatedTarget as Node | null)) this.#closeEvidence();
+    });
   }
 
   connectedCallback(): void {
@@ -110,13 +150,19 @@ export class TickwaveChart extends HTMLElement {
       if (![...group].some((chart) => path.includes(chart))) this.#clear();
     };
     const print = () => this.#finishSweep();
+    const escape = (e: KeyboardEvent) => {
+      if (e.key === "Escape") this.#closeEvidence();
+    };
     document.addEventListener("pointerdown", outside);
+    document.addEventListener("keydown", escape);
     addEventListener("beforeprint", print);
     this.#cleanups.push(
       () => resize.disconnect(),
       () => seen.disconnect(),
       () => document.removeEventListener("pointerdown", outside),
+      () => document.removeEventListener("keydown", escape),
       () => removeEventListener("beforeprint", print),
+      () => this.#closeEvidence(),
       onFaceChange(() => {
         this.#colours = null;
         this.#draw();
@@ -155,6 +201,7 @@ export class TickwaveChart extends HTMLElement {
 
   set data(value: unknown) {
     this.#loadedSrc = null;
+    this.#base = document.baseURI;
     this.#take(() => parseChart(value));
   }
 
@@ -186,9 +233,10 @@ export class TickwaveChart extends HTMLElement {
       caption.id ||= `tw-caption-${Math.random().toString(36).slice(2, 9)}`;
       this.setAttribute("aria-labelledby", caption.id);
     }
-    const table = this.getAttribute("table");
-    if (table) this.setAttribute("aria-describedby", table);
-    else this.removeAttribute("aria-describedby");
+    const evidence = this.#layout?.series.some((s) => s.placed.some((at) => at.point.evidence)) ?? false;
+    const ids = [this.getAttribute("table"), evidence ? this.#hint?.id : null].filter(Boolean).join(" ");
+    if (!ids) this.removeAttribute("aria-describedby");
+    else if (this.getAttribute("aria-describedby") !== ids) this.setAttribute("aria-describedby", ids);
   }
 
   #build(): void {
@@ -206,7 +254,16 @@ export class TickwaveChart extends HTMLElement {
     this.#notice.hidden = true;
     this.#probe = document.createElement("span");
     this.#probe.hidden = true;
-    this.replaceChildren(...[this.#legend, this.#svg, this.#readout, this.#notice, this.#probe].filter((e) => e !== null));
+    this.#hint = document.createElement("span");
+    this.#hint.hidden = true;
+    this.#hint.id = `tw-hint-${Math.random().toString(36).slice(2, 9)}`;
+    this.#hint.textContent = EVIDENCE_HINT;
+    this.#closeEvidence();
+    this.#pop = document.createElement("div");
+    this.#pop.className = "tw-pop";
+    this.#pop.setAttribute("popover", "manual");
+    this.#inset = null;
+    this.replaceChildren(...[this.#legend, this.#svg, this.#readout, this.#notice, this.#probe, this.#hint, this.#pop].filter((e) => e !== null));
     this.#listen();
   }
 
@@ -218,7 +275,9 @@ export class TickwaveChart extends HTMLElement {
       const response = await fetch(new URL(src, document.baseURI));
       if (!response.ok) throw new Error(`${src}: HTTP ${response.status}`);
       const json: unknown = await response.json();
-      if (this.#loadedSrc === src) this.#take(() => parseChart(json));
+      if (this.#loadedSrc !== src) return;
+      this.#base = response.url || new URL(src, document.baseURI).href;
+      this.#take(() => parseChart(json));
     } catch (e) {
       this.#fail(e);
     }
@@ -360,6 +419,8 @@ export class TickwaveChart extends HTMLElement {
       c,
     );
     svg.innerHTML = `<g class="tw-data">${markup}</g>`;
+    // The description says Enter opens a point's recording while any shown point names one.
+    this.#name();
     this.#drawLegend(data, c);
     this.#drawReadout(data, c);
     if (!this.#ready) {
@@ -437,6 +498,26 @@ export class TickwaveChart extends HTMLElement {
       return i < 0 ? (x < l.left ? 0 : l.xs.length - 1) : i;
     };
     const endOf = (e: Event) => (e.target as Element).closest?.(".tw-end")?.parentElement?.dataset.series ?? null;
+    /** The shown point with evidence within reach of the pointer, nearest first. */
+    const near = (e: PointerEvent | MouseEvent): Pointed | null => {
+      const l = this.#layout;
+      if (!l) return null;
+      const r = svg.getBoundingClientRect();
+      const x = e.clientX - r.left;
+      const y = e.clientY - r.top;
+      let best: Pointed | null = null;
+      let reach = REACH;
+      for (const series of l.series) {
+        for (const at of series.placed) {
+          const d = Math.hypot(at.x - x, at.y - y);
+          if (at.point.evidence && d <= reach) {
+            best = { series, at, evidence: at.point.evidence };
+            reach = d;
+          }
+        }
+      }
+      return best;
+    };
     svg.addEventListener("pointermove", (e) => {
       if (e.pointerType !== "mouse") return;
       // An end label names its series while the pointer is on it.
@@ -450,14 +531,35 @@ export class TickwaveChart extends HTMLElement {
         this.#fromLabel = false;
       }
       this.#pick(at(e) ?? this.#x, series);
+      const pointed = near(e);
+      svg.style.cursor = pointed ? "pointer" : "";
+      if (!pointed) this.#closeEvidence();
+      else if (!samePoint(pointed, this.#pointed) && !samePoint(pointed, this.#resting)) {
+        // The popover belongs to the point under the pointer: another point's closes, and this
+        // one opens once the mouse has rested on it.
+        this.#closeEvidence();
+        this.#resting = pointed;
+        this.#dwell = window.setTimeout(() => {
+          this.#resting = null;
+          void this.#openEvidence(pointed);
+        }, DWELL_MS);
+      }
     });
     svg.addEventListener("pointerdown", (e) => {
       const i = at(e);
       if (i !== null) this.#pick(i, endOf(e) ?? this.#series);
+      const pointed = near(e);
+      if (pointed) void this.#openEvidence(pointed);
+    });
+    svg.addEventListener("click", (e) => {
+      const pointed = near(e);
+      if (pointed) void this.#goToEvidence(pointed);
     });
     svg.addEventListener("pointerleave", (e) => {
       if (e.pointerType !== "mouse") return;
       this.#fromLabel = false;
+      svg.style.cursor = "";
+      this.#closeEvidence();
       if (!this.#sticky) this.#pick(null, null);
       else if (this.#series) this.#pick(this.#x, null);
     });
@@ -493,9 +595,111 @@ export class TickwaveChart extends HTMLElement {
     else if (e.key === "Home") next = 0;
     else if (e.key === "End") next = n - 1;
     else if (e.key === "Escape" && !this.#sticky) next = null;
+    else if (e.key === "Enter" && this.#pointed) {
+      e.preventDefault();
+      void this.#goToEvidence(this.#pointed);
+      return;
+    }
     if (next === undefined) return;
     e.preventDefault();
     this.#pick(next, next === null ? null : this.#series);
+    // Reaching a setting with the keys opens its evidence: the picked series' point there, or else
+    // the first shown point there that names a recording.
+    const pointed = next === null ? null : this.#evidenceAt(next);
+    if (pointed) void this.#openEvidence(pointed);
+    else this.#closeEvidence();
+  }
+
+  #evidenceAt(i: number): Pointed | null {
+    const all = (this.#layout?.series ?? []).flatMap((series) =>
+      series.placed.filter((at) => at.index === i && at.point.evidence).map((at) => ({ series, at, evidence: at.point.evidence! })),
+    );
+    return all.find((p) => p.series.series.id === this.#series) ?? all[0] ?? null;
+  }
+
+  #url(relative: string): string {
+    return new URL(relative, this.#base).href;
+  }
+
+  /** Shows a point's recording at its annotation in a popover beside the point. */
+  async #openEvidence(pointed: Pointed): Promise<void> {
+    const same = (a: Pointed | null) => samePoint(a, pointed);
+    if (same(this.#pointed)) return;
+    this.#pointed = pointed;
+    try {
+      await loadElements();
+    } catch (e) {
+      this.#fail(e);
+      return;
+    }
+    if (!same(this.#pointed) || !this.#pop || !this.#svg) return;
+    const pop = this.#pop;
+    const inset = (this.#inset ??= pop.appendChild(document.createElement("tickwave-inset")));
+    const { evidence } = pointed;
+    const set = (name: string, value: string | null) => {
+      if (value === null) inset.removeAttribute(name);
+      else if (inset.getAttribute(name) !== value) inset.setAttribute(name, value);
+    };
+    set("src", this.#url(evidence.recording));
+    set("annotations", evidence.annotations === null ? null : this.#url(evidence.annotations));
+    set("annotation", evidence.annotation);
+    // The probe's lines take the series' hue, so the inset's key tells probe from target.
+    set("series", pointed.series.series.colour || null);
+    if (!pop.matches(":popover-open")) pop.showPopover();
+    this.#stopPosition?.();
+    const svg = this.#svg;
+    const id = pointed.series.series.id;
+    const index = pointed.at.index;
+    // The point as it is drawn now: a redraw moves it.
+    const anchor = {
+      contextElement: svg,
+      getBoundingClientRect: () => {
+        const r = svg.getBoundingClientRect();
+        const at = this.#layout?.series.find((s) => s.series.id === id)?.placed.find((q) => q.index === index) ?? pointed.at;
+        return new DOMRect(r.left + at.x - 5, r.top + at.y - 5, 10, 10);
+      },
+    };
+    const place = () =>
+      computePosition(anchor, pop, { strategy: "fixed", placement: "bottom-start", middleware: [offset(8), flip({ padding: 8 }), shift({ padding: 8 })] }).then(({ x, y }) => {
+        pop.style.left = `${x}px`;
+        pop.style.top = `${y}px`;
+      });
+    this.#stopPosition = autoUpdate(anchor, pop, place);
+  }
+
+  #closeEvidence(): void {
+    window.clearTimeout(this.#dwell);
+    this.#resting = null;
+    this.#pointed = null;
+    this.#stopPosition?.();
+    this.#stopPosition = null;
+    if (this.#pop?.matches(":popover-open")) this.#pop.hidePopover();
+  }
+
+  /** Tells the page a reader asked for a point's recording. Unless it takes over, opens the page's
+   * view of that recording at the annotation; with no such view, the popover stays. */
+  async #goToEvidence(pointed: Pointed): Promise<void> {
+    const { evidence } = pointed;
+    const recording = this.#url(evidence.recording);
+    const detail = {
+      x: this.#data!.x.values[pointed.at.index],
+      series: pointed.series.series.id,
+      recording,
+      annotations: evidence.annotations === null ? null : this.#url(evidence.annotations),
+      annotation: evidence.annotation,
+    };
+    const go = this.dispatchEvent(new CustomEvent("tickwave-evidence", { bubbles: true, composed: true, cancelable: true, detail }));
+    const view = [...document.querySelectorAll("tickwave-view")].find((v) => {
+      const src = v.getAttribute("src");
+      return src !== null && new URL(src, document.baseURI).href === recording;
+    }) as (HTMLElement & { show(id: string): Promise<void> }) | undefined;
+    if (go && !view) return;
+    this.#closeEvidence();
+    if (!go || !view) return;
+    const shown = view.show(evidence.annotation);
+    view.scrollIntoView({ block: "nearest", behavior: reducedMotion() ? "auto" : "smooth" });
+    await shown;
+    (view.shadowRoot?.querySelector(".plot") as HTMLElement | null)?.focus({ preventScroll: true });
   }
 
   /** A reader's pick: draws, tells the page, and moves the group's other charts. */
@@ -537,6 +741,10 @@ export class TickwaveChart extends HTMLElement {
     if (!set) groups.set(group, (set = new Set()));
     set.add(this);
   }
+}
+
+function samePoint(a: Pointed | null, b: Pointed | null): boolean {
+  return a !== null && b !== null && a.series.series.id === b.series.series.id && a.at.index === b.at.index;
 }
 
 /** A CSS opacity, `60%` or `0.6`, as a fraction. */
