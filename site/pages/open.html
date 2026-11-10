@@ -1,8 +1,8 @@
-<!-- description: Open a logic or mixed-signal capture in your browser, from its address or from files on this computer. -->
+<!-- description: Open a logic or mixed-signal recording in your browser, or convert a Saleae Logic 2, sigrok or VCD capture and open it. -->
 <!-- kind: viewer -->
 <h1>Open a recording</h1>
-<p class="lede">The viewer shows a <code>.tickwave</code> recording from its address, or from files on this computer.</p>
-<p><a href="convert.html">The converter</a> makes a recording from a Saleae Logic 2 binary export, a sigrok session or a VCD file. <a href="docs/viewer.html">The viewer's doc</a> says how to move, zoom and measure in it.</p>
+<p class="lede">The viewer shows a <code>.tickwave</code> recording from its address, or from files on this computer. A capture from Saleae Logic 2, sigrok or a VCD file converts here first.</p>
+<p>The converter runs in your browser, on the same code as <a href="docs/converter.html">the command-line converter</a>: the same capture and settings give the same file. <a href="docs/viewer.html">The viewer's doc</a> says how to move, zoom and measure in a recording.</p>
 
 <details id="opener" class="opener" open>
 <summary>Open another recording</summary>
@@ -15,8 +15,8 @@
     <button class="primary" type="submit">Open</button>
   </form>
   <div id="drop" class="drop">
-    <p>Or open files from this computer: a <code>.tickwave</code> recording, with its sidecar's <code>.toml</code> and <code>.jsonl</code> files if it has them.</p>
-    <p><label class="button">Choose files<input id="files" type="file" multiple></label></p>
+    <p>Or open files from this computer: a <code>.tickwave</code> recording, with its sidecar's <code>.toml</code> and <code>.jsonl</code> files if it has them. Or convert a capture: a Saleae export's folder, or a sigrok <code>.sr</code> or <code>.vcd</code> file.</p>
+    <p class="choose"><label class="button">Choose files<input id="files" type="file" multiple></label> <label class="button">Choose a folder<input id="folder" type="file" webkitdirectory></label></p>
     <p class="quiet">You can drop them here too. They stay in your browser. Nothing is uploaded.</p>
   </div>
 </div>
@@ -24,7 +24,35 @@
 </details>
 
 <div id="problem" class="problem" role="alert" hidden></div>
+
+<form id="settings" class="settings" hidden>
+  <h2 id="source"></h2>
+  <p id="source-facts" class="quiet"></p>
+  <div class="table"><table class="channels">
+    <thead><tr><th scope="col">Take</th><th scope="col">In the capture</th><th scope="col">Name</th><th scope="col">Unit</th></tr></thead>
+    <tbody id="channels"></tbody>
+  </table></div>
+  <div id="skipped" class="quiet" hidden></div>
+  <p><label for="title">Title</label><br><input id="title" name="title" type="text" spellcheck="false"></p>
+  <details>
+    <summary>Encoding</summary>
+    <p><label for="level">zstd level</label><br><input id="level" name="level" type="number" min="1" max="22" value="19" required></p>
+    <p><label for="block">Block size, in KiB</label><br><input id="block" name="block" type="number" min="1" max="65536" value="1024" required></p>
+    <p><label><input id="codes" name="codes" type="checkbox" checked> Store analog values as exact integer codes where some reproduce them</label></p>
+    <p><label for="meta">Metadata, one <code>key = value</code> a line</label><br><textarea id="meta" name="meta" rows="3" spellcheck="false" placeholder="probe = verge"></textarea></p>
+  </details>
+  <p><button class="primary" type="submit">Convert</button></p>
+</form>
+
+<section id="running" class="running" aria-live="polite" hidden>
+  <p><span id="pass"></span> <span id="count" class="quiet"></span></p>
+  <progress id="bar"></progress>
+  <p><button id="cancel" type="button" class="button">Cancel</button></p>
+</section>
+
 <section id="stage" class="stage" aria-label="The recording" hidden>
+  <p id="saving" hidden><a id="save" class="button" download></a> <span id="took" class="quiet"></span></p>
+  <p id="found" class="quiet" hidden></p>
   <div id="view"></div>
   <details class="details">
     <summary>Recording details</summary>
@@ -32,4 +60,3 @@
   </details>
   <p id="share" class="share"></p>
 </section>
-

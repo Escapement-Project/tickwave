@@ -1,4 +1,4 @@
-// The site's converter page, built into dist/site/. Each conversion's saved file must be the CLI's,
+// The converter on the site's Open page, built into dist/site/. Each conversion's saved file must be the CLI's,
 // byte for byte, from the same capture and settings; the CLI runs through cargo.
 
 import { test, expect, type Page } from "@playwright/test";
@@ -7,7 +7,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const PAGE = "/dist/site/convert.html";
+const PAGE = "/dist/site/open.html";
 const REPO = new URL("../..", import.meta.url).pathname;
 const DATA = join(REPO, "testdata");
 
@@ -22,6 +22,8 @@ async function convertAndSave(page: Page): Promise<Buffer> {
   await page.getByRole("button", { name: "Convert" }).click();
   const save = page.locator("#save");
   await expect(save).toBeVisible({ timeout: 30_000 });
+  // The next thing to do is save it.
+  await expect(save).toBeFocused();
   const [download] = await Promise.all([page.waitForEvent("download"), save.click()]);
   return readFileSync(await download.path());
 }
@@ -41,14 +43,31 @@ test("a Saleae export's folder: its channels in number order, named and converte
   await expect(page.locator("#found")).toHaveText("Exact codes: VTREF (12-bit), I (10-bit).");
   const native = cli(["saleae", join(DATA, "saleae/swd50-cut"), "--channel", "analog_0=VTREF", "--channel", "analog_1=I", "--channel", "digital_4_0=SWCLK", "--unit", "I=mA"]);
   expect(saved.equals(native), "the saved recording is the CLI's").toBe(true);
-  // The view opens on the recording made, with its facts.
+  // The view opens on the recording made, with its facts; the settings stay, to convert again.
   await expect(page.locator("#facts")).toContainText("VTREF (analog, V), I (analog, mA), SWCLK");
-  await expect(page.locator("#result tickwave-view")).toBeVisible();
+  await expect(page.locator("#stage tickwave-view")).toBeVisible();
+  await expect(page.locator("#settings")).toBeVisible();
+});
+
+test("one chooser: a capture shows the converter's settings, and a recording chosen after it opens in their place", async ({ page }) => {
+  await page.goto(PAGE);
+  await page.locator("#files").setInputFiles(join(DATA, "import/demo-logic.vcd"));
+  await expect(page.locator("#source")).toHaveText("demo-logic.vcd");
+  await page.locator("#files").setInputFiles("fixtures/identify-swd.tickwave");
+  await expect(page.locator("#stage tickwave-view")).toBeVisible();
+  await expect(page.locator("#facts")).toContainText("SWCLK, SWDIO");
+  await expect(page.locator("#settings")).toBeHidden();
+  await expect(page.locator("#saving")).toBeHidden();
+  // And a capture after a recording puts the recording away.
+  await page.getByText("Open another recording").click();
+  await page.locator("#files").setInputFiles(join(DATA, "import/demo-logic.vcd"));
+  await expect(page.locator("#settings")).toBeVisible();
+  await expect(page.locator("#stage")).toBeHidden();
 });
 
 test("a sigrok file with a channel left out, one renamed, a title, metadata and other encoding", async ({ page }) => {
   await page.goto(PAGE);
-  await page.locator("#file").setInputFiles(join(DATA, "import/demo-mixed.sr"));
+  await page.locator("#files").setInputFiles(join(DATA, "import/demo-mixed.sr"));
   await expect(page.locator("#source")).toHaveText("demo-mixed.sr");
   await page.getByLabel("Take D0").uncheck();
   await page.getByLabel("Name for A1").fill("I");
@@ -86,11 +105,11 @@ test("says what is wrong: no capture, two captures, a file that is not one, and 
   await page.goto(PAGE);
   const problem = page.locator("#problem");
 
-  await page.locator("#file").setInputFiles(notes);
-  await expect(problem).toHaveText(/^There's no capture here/);
-  await page.locator("#file").setInputFiles([join(DATA, "import/marker.sr"), join(DATA, "import/marker.vcd")]);
+  await page.locator("#files").setInputFiles(notes);
+  await expect(problem).toHaveText(/^There's nothing here to open or convert/);
+  await page.locator("#files").setInputFiles([join(DATA, "import/marker.sr"), join(DATA, "import/marker.vcd")]);
   await expect(problem).toHaveText(/^Choose one capture at a time/);
-  await page.locator("#file").setInputFiles([join(DATA, "saleae/identify-swd/digital_3_0.bin"), bad]);
+  await page.locator("#files").setInputFiles([join(DATA, "saleae/identify-swd/digital_3_0.bin"), bad]);
   await expect(problem).toBeHidden();
   await expect(page.locator("#channels tr")).toHaveCount(1);
   await expect(page.locator("#skipped")).toHaveText("Left out: analog_9.bin: analog_9.bin: not a Saleae binary export.");

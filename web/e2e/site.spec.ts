@@ -31,7 +31,7 @@ test.describe("the project's header", () => {
     // The group's rule has a heavier stretch under the page shown, or the place it sits inside.
     const segment = (name: string) => link(name).evaluate((a) => getComputedStyle(a, "::after").borderTopWidth);
     await page.goto(`${SITE}docs/format.html`);
-    await expect(places.getByRole("link")).toHaveText(["Verge", "tickwave", "Open", "Convert", "Demo", "Docs", "Source"]);
+    await expect(places.getByRole("link")).toHaveText(["Verge", "tickwave", "Open", "Demo", "Docs", "Source"]);
     await expect(link("Verge")).toHaveAttribute("href", "https://escapement-project.github.io/verge/");
     await expect(link("tickwave")).toHaveAttribute("href", "../index.html");
     // A doc sits inside tickwave and its docs.
@@ -154,11 +154,14 @@ test.describe("the viewer", () => {
     await expect(page.locator("#stage")).toBeVisible();
   });
 
-  test("says a file that is not a recording isn't one", async ({ page }) => {
+  test("says a file that is not a recording isn't one, and one that is neither recording nor capture is nothing to open", async ({ page }) => {
     await page.goto(`${SITE}open.html`);
-    await page.locator("#files").setInputFiles("../site/favicon-tickwave.ico");
-    await expect(page.locator("#problem")).toHaveText("favicon-tickwave.ico isn't a tickwave recording. The viewer reads .tickwave files, which the converter makes from a capture.");
+    await page.locator("#files").setInputFiles({ name: "notes.tickwave", mimeType: "application/octet-stream", buffer: Buffer.from("not a recording") });
+    await expect(page.locator("#problem")).toHaveText("notes.tickwave isn't a tickwave recording. The viewer reads .tickwave files, and converts a capture into one first.");
     await expect(page.locator("#stage")).toBeHidden();
+    await page.locator("#files").setInputFiles("../site/favicon-tickwave.ico");
+    await expect(page.locator("#problem")).toHaveText(/^There's nothing here to open or convert\./);
+    await expect(page.locator("#settings")).toBeHidden();
   });
 
   test("explains a server that refuses a read from another site", async ({ page }) => {
@@ -352,7 +355,6 @@ test("each page is titled by its name, tickwave's and the project's", async ({ p
   for (const [path, title] of [
     ["index.html", "tickwave – Escapement Project"],
     ["open.html", "Open – tickwave – Escapement Project"],
-    ["convert.html", "Convert – tickwave – Escapement Project"],
     ["demo.html", "Demo – tickwave – Escapement Project"],
     ["docs/index.html", "Docs – tickwave – Escapement Project"],
     ["docs/annotations.html", "Sidecar – tickwave – Escapement Project"],
@@ -473,9 +475,8 @@ test("every internal link resolves, fragments included", async ({ request, baseU
     }
   }
   expect(failures).toEqual([]);
-  // The eleven pages, each reached by a link.
+  // The ten pages, each reached by a link.
   expect([...pages.keys()].map((u) => u.slice(u.indexOf(SITE) + SITE.length)).sort()).toEqual([
-    "convert.html",
     "demo.html",
     "docs/annotations.html",
     "docs/charts.html",
@@ -506,7 +507,6 @@ test("the docs carry FORMAT.md's and ANNOTATIONS.md's headings", async ({ page }
 const PAGES = [
   ["overview", "index.html"],
   ["viewer", "open.html?src=fixtures/identify-swd.tickwave&annotations=fixtures/identify-swd.annotations.toml"],
-  ["convert", "convert.html"],
   ["demo", "demo.html"],
   ["docs", "docs/index.html"],
   ["elements", "docs/elements.html"],

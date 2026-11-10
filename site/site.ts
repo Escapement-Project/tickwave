@@ -1,4 +1,4 @@
-// tickwave's site: the viewer on index.html and the converter on convert.html. Built by
+// tickwave's site: the Open page, where a recording opens, or a capture converts and opens. Built by
 // web/scripts/site.ts; "tickwave" is the tickwave.js beside this script. The project's face.js and
 // header.js run the header.
 
@@ -45,115 +45,6 @@ function showFacts(facts: HTMLElement, info: RecordingInfo, name: string): void 
   facts.replaceChildren(...rows.flatMap(([k, v]) => [Object.assign(document.createElement("dt"), { textContent: k }), Object.assign(document.createElement("dd"), { textContent: v })]));
 }
 
-function viewer(): void {
-  const form = document.getElementById("by-url") as HTMLFormElement;
-  const srcField = form.elements.namedItem("src") as HTMLInputElement;
-  const sidecarField = form.elements.namedItem("annotations") as HTMLInputElement;
-  const files = document.getElementById("files") as HTMLInputElement;
-  const drop = document.getElementById("drop")!;
-  const stage = document.getElementById("stage")!;
-  const facts = document.getElementById("facts")!;
-  const share = document.getElementById("share")!;
-  const here = document.getElementById("view")!;
-  const opener = byId<HTMLDetailsElement>("opener");
-  const { say, clear } = problems(byId("problem"));
-  let opened = 0;
-
-  /** Opens `src`, with its sidecar at `annotations` or a local recording's own. */
-  async function open(src: string, annotations: string | null, name: string, link: boolean): Promise<void> {
-    const token = ++opened;
-    clear();
-    stage.hidden = true;
-    here.replaceChildren();
-    let info: RecordingInfo;
-    try {
-      info = await recordingInfo(src);
-    } catch (e) {
-      if (token === opened) say(explain(e, src, name));
-      return;
-    }
-    if (token !== opened) return;
-    showFacts(facts, info, name);
-    const view = document.createElement("tickwave-view");
-    view.setAttribute("src", src);
-    if (annotations) view.setAttribute("annotations", annotations);
-    view.setAttribute("open", "");
-    const sidecar: string[] = [];
-    view.addEventListener("tickwave-error", (e) => {
-      const error = (e as CustomEvent<{ error: unknown; message: string }>).detail.error;
-      if (error instanceof Error && error.name === "TickwaveSidecarError") {
-        sidecar.push(...error.message.split("\n"));
-        say("The sidecar has problems, so the recording shows without its annotations:", sidecar);
-      } else say(explain(error, src, name));
-    });
-    here.append(view);
-    stage.hidden = false;
-    // The recording, not the forms that asked for it: they fold away, and once the view has drawn
-    // it comes into sight with the focus, so its keys work at once.
-    opener.classList.add("folds");
-    opener.open = false;
-    view.addEventListener(
-      "tickwave-ready",
-      () => {
-        if (token !== opened) return;
-        view.scrollIntoView({ block: "nearest", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
-        view.focus({ preventScroll: true });
-      },
-      { once: true },
-    );
-    if (link) {
-      const q = new URLSearchParams({ src, ...(annotations && { annotations }) });
-      history.replaceState(null, "", `?${q}`);
-      share.textContent = "";
-      share.append("A link to this view: ", Object.assign(document.createElement("a"), { href: location.href, textContent: location.href }));
-    } else {
-      history.replaceState(null, "", location.pathname);
-      share.textContent = "Files from this computer can't be shared by link.";
-    }
-  }
-
-  form.addEventListener("submit", (e) => {
-    e.preventDefault();
-    const src = srcField.value.trim();
-    const annotations = sidecarField.value.trim() || null;
-    if (src) void open(src, annotations, src, true);
-  });
-
-  /** One recording, and the .toml and .jsonl files of its sidecar. */
-  function openFiles(list: FileList | File[]): void {
-    const all = [...list];
-    const sidecar = all.filter((f) => /\.(toml|jsonl)$/i.test(f.name));
-    const recordings = all.filter((f) => !sidecar.includes(f));
-    if (recordings.length !== 1) {
-      say(recordings.length === 0 ? "Choose a .tickwave recording too: the sidecar's files alone have nothing to draw." : `Choose one recording at a time; these are ${recordings.length}: ${recordings.map((f) => f.name).join(", ")}.`);
-      return;
-    }
-    void open(registerFile(recordings[0], sidecar), null, recordings[0].name, false);
-  }
-
-  files.addEventListener("change", () => {
-    if (files.files && files.files.length > 0) openFiles(files.files);
-  });
-  drop.addEventListener("dragover", (e) => {
-    e.preventDefault();
-    drop.classList.add("over");
-  });
-  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
-  drop.addEventListener("drop", (e) => {
-    e.preventDefault();
-    drop.classList.remove("over");
-    if (e.dataTransfer?.files.length) openFiles(e.dataTransfer.files);
-  });
-
-  const q = new URLSearchParams(location.search);
-  const src = q.get("src");
-  if (src) {
-    srcField.value = src;
-    sidecarField.value = q.get("annotations") ?? "";
-    void open(src, q.get("annotations"), src, true);
-  }
-}
-
 /** The files of a dropped folder, read from its entries; or the dropped files themselves. */
 async function dropped(data: DataTransfer): Promise<{ files: File[]; folder: string | null }> {
   const entries = [...data.items].map((i) => i.webkitGetAsEntry()).filter((e): e is FileSystemEntry => e !== null);
@@ -174,20 +65,36 @@ async function dropped(data: DataTransfer): Promise<{ files: File[]; folder: str
 
 const count = (n: number) => n.toLocaleString("en-GB");
 
-function converter(): void {
-  const drop = byId("drop");
+/** A recording, its sidecar's files, and a capture to convert, told apart by name. */
+const RECORDING = /\.tickwave$/i;
+const SIDECAR = /\.(toml|jsonl)$/i;
+const CAPTURE = /\.(sr|vcd|bin)$/i;
+
+/** The Open page: a recording by its address or from files, or a capture converted here and opened. */
+function openPage(): void {
+  const form = byId<HTMLFormElement>("by-url");
+  const srcField = form.elements.namedItem("src") as HTMLInputElement;
+  const sidecarField = form.elements.namedItem("annotations") as HTMLInputElement;
+  const filesInput = byId<HTMLInputElement>("files");
   const folderInput = byId<HTMLInputElement>("folder");
-  const fileInput = byId<HTMLInputElement>("file");
-  const form = byId<HTMLFormElement>("settings");
+  const drop = byId("drop");
+  const opener = byId<HTMLDetailsElement>("opener");
+  const settingsForm = byId<HTMLFormElement>("settings");
   const rows = byId("channels");
   const skippedBox = byId("skipped");
   const running = byId("running");
   const bar = byId<HTMLProgressElement>("bar");
-  const result = byId("result");
+  const stage = byId("stage");
+  const saving = byId("saving");
   const save = byId<HTMLAnchorElement>("save");
-  const view = byId("view");
+  const found = byId("found");
+  const facts = byId("facts");
+  const share = byId("share");
+  const here = byId("view");
   const { say, clear } = problems(byId("problem"));
 
+  /** Counts the recordings asked for: one asked for later makes an earlier one's answer stale. */
+  let opened = 0;
   let kind: SourceKind = "saleae";
   let files: File[] = [];
   /** The recording's name, without .tickwave: the export's folder, or the capture file's. */
@@ -200,6 +107,107 @@ function converter(): void {
     worker?.terminate();
     worker = null;
   };
+  const idle = () => {
+    running.hidden = true;
+    settingsForm.inert = false;
+  };
+  /** Puts away whatever the page was showing or doing, for what was just asked. */
+  const reset = () => {
+    opened++;
+    end();
+    idle();
+    clear();
+    settingsForm.hidden = true;
+    stage.hidden = true;
+    here.replaceChildren();
+  };
+
+  /** Opens `src`, with its sidecar at `annotations` or a local recording's own. A converted
+   * recording shows with its Save button, which takes the focus; another, its view. */
+  async function open(src: string, annotations: string | null, name: string, link: boolean, converted?: () => void): Promise<void> {
+    reset();
+    // A converted capture keeps its settings in view, to convert again with others.
+    settingsForm.hidden = !converted;
+    const token = opened;
+    let info: RecordingInfo;
+    try {
+      info = await recordingInfo(src);
+    } catch (e) {
+      if (token === opened) say(converted ? `The recording was made, but it won't open: ${e instanceof Error ? e.message : e}` : explain(e, src, name));
+      return;
+    }
+    if (token !== opened) return;
+    showFacts(facts, info, name);
+    const view = document.createElement("tickwave-view");
+    view.setAttribute("src", src);
+    if (annotations) view.setAttribute("annotations", annotations);
+    view.setAttribute("open", "");
+    const sidecar: string[] = [];
+    view.addEventListener("tickwave-error", (e) => {
+      const error = (e as CustomEvent<{ error: unknown; message: string }>).detail.error;
+      if (error instanceof Error && error.name === "TickwaveSidecarError") {
+        sidecar.push(...error.message.split("\n"));
+        say("The sidecar has problems, so the recording shows without its annotations:", sidecar);
+      } else say(explain(error, src, name));
+    });
+    here.append(view);
+    saving.hidden = found.hidden = !converted;
+    stage.hidden = false;
+    // The recording, not the forms that asked for it: they fold away.
+    opener.classList.add("folds");
+    opener.open = false;
+    if (converted) converted();
+    else
+      // Once the view has drawn it comes into sight with the focus, so its keys work at once.
+      view.addEventListener(
+        "tickwave-ready",
+        () => {
+          if (token !== opened) return;
+          view.scrollIntoView({ block: "nearest", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+          view.focus({ preventScroll: true });
+        },
+        { once: true },
+      );
+    if (link) {
+      const q = new URLSearchParams({ src, ...(annotations && { annotations }) });
+      history.replaceState(null, "", `?${q}`);
+      share.textContent = "";
+      share.append("A link to this view: ", Object.assign(document.createElement("a"), { href: location.href, textContent: location.href }));
+    } else {
+      history.replaceState(null, "", location.pathname);
+      share.textContent = "Files from this computer can't be shared by link.";
+    }
+  }
+
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const src = srcField.value.trim();
+    const annotations = sidecarField.value.trim() || null;
+    if (src) void open(src, annotations, src, true);
+  });
+
+  /** What was chosen or dropped: a recording opens, a capture converts first. */
+  function take(list: File[], folder: string | null): void {
+    if (list.some((f) => RECORDING.test(f.name)) || (list.length > 0 && list.every((f) => SIDECAR.test(f.name)))) openFiles(list);
+    else if (list.some((f) => CAPTURE.test(f.name))) choose(list, folder);
+    else {
+      reset();
+      say("There's nothing here to open or convert. Open a .tickwave recording, or convert a capture: a Saleae export's folder, or a sigrok .sr or .vcd file.");
+    }
+  }
+
+  /** One recording, and the .toml and .jsonl files of its sidecar. */
+  function openFiles(all: File[]): void {
+    const sidecar = all.filter((f) => SIDECAR.test(f.name));
+    const recordings = all.filter((f) => !sidecar.includes(f));
+    if (recordings.length !== 1) {
+      reset();
+      say(recordings.length === 0 ? "Choose a .tickwave recording too: the sidecar's files alone have nothing to draw." : `Choose one recording at a time; these are ${recordings.length}: ${recordings.map((f) => f.name).join(", ")}.`);
+      return;
+    }
+    void open(registerFile(recordings[0], sidecar), null, recordings[0].name, false);
+  }
+
   /** Starts one job in a worker of its own. */
   const job = (message: ToWorker, on: (m: FromWorker) => void) => {
     end();
@@ -217,17 +225,10 @@ function converter(): void {
     };
     w.postMessage(message);
   };
-  const idle = () => {
-    running.hidden = true;
-    form.inert = false;
-  };
 
+  /** A capture: what it holds, read in a worker, then the settings to convert it with. */
   function choose(list: File[], folder: string | null): void {
-    end();
-    clear();
-    idle();
-    form.hidden = true;
-    result.hidden = true;
+    reset();
     const sr = list.filter((f) => /\.sr$/i.test(f.name));
     const vcd = list.filter((f) => /\.vcd$/i.test(f.name));
     const bin = list.filter((f) => /\.bin$/i.test(f.name));
@@ -240,13 +241,10 @@ function converter(): void {
       kind = sr.length ? "sigrok" : "vcd";
       files = singles;
       stem = singles[0].name.replace(/\.(sr|vcd)$/i, "");
-    } else if (bin.length > 0) {
+    } else {
       kind = "saleae";
       files = bin;
       stem = folder ?? "capture";
-    } else {
-      say("There's no capture here. The converter takes a Saleae export's .bin files, a sigrok .sr file or a .vcd file.");
-      return;
     }
     job({ op: "describe", kind, files }, (m) => {
       if (m.op === "described") {
@@ -298,7 +296,7 @@ function converter(): void {
     );
     skippedBox.textContent = skipped.length ? `Left out: ${skipped.join("; ")}.` : "";
     skippedBox.hidden = skipped.length === 0;
-    form.hidden = false;
+    settingsForm.hidden = false;
   }
 
   /** The form as the converter's settings, or what is wrong with it. */
@@ -349,8 +347,7 @@ function converter(): void {
 
   function run(chosen: Settings): void {
     clear();
-    result.hidden = true;
-    form.inert = true;
+    settingsForm.inert = true;
     running.hidden = false;
     byId("pass").textContent = "Starting";
     byId("count").textContent = "";
@@ -375,7 +372,7 @@ function converter(): void {
         case "converted":
           end();
           idle();
-          void converted(new File([m.file], `${stem}.tickwave`), m.codes, m.seconds);
+          converted(new File([m.file], `${stem}.tickwave`), m.codes, m.seconds);
           break;
         case "failed":
           end();
@@ -386,34 +383,23 @@ function converter(): void {
     });
   }
 
-  async function converted(file: File, codes: [string, number | null][], seconds: number): Promise<void> {
+  function converted(file: File, codes: [string, number | null][], seconds: number): void {
     if (saved) URL.revokeObjectURL(saved);
     saved = URL.createObjectURL(file);
-    save.href = saved;
-    save.download = file.name;
-    save.textContent = `Save ${file.name}`;
-    byId("took").textContent = `${formatBytes(file.size)}, converted and checked in ${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)} s`;
     const exact = codes.filter(([, bits]) => bits !== null).map(([n, bits]) => `${n} (${bits}-bit)`);
     const f32 = codes.filter(([, bits]) => bits === null).map(([n]) => n);
-    byId("found").textContent = [exact.length ? `Exact codes: ${exact.join(", ")}.` : "", f32.length ? `Stored as f32: ${f32.join(", ")}.` : ""].filter(Boolean).join(" ");
-    view.replaceChildren();
-    result.hidden = false;
-    // The next thing to do is save it: the focus goes there, and brings it into sight.
-    save.focus();
-    const src = registerFile(file, []);
-    try {
-      showFacts(byId("facts"), await recordingInfo(src), file.name);
-    } catch (e) {
-      say(`The recording was made, but it won't open: ${e instanceof Error ? e.message : e}`);
-      return;
-    }
-    const v = document.createElement("tickwave-view");
-    v.setAttribute("src", src);
-    v.setAttribute("open", "");
-    view.append(v);
+    void open(registerFile(file, []), null, file.name, false, () => {
+      save.href = saved!;
+      save.download = file.name;
+      save.textContent = `Save ${file.name}`;
+      byId("took").textContent = `${formatBytes(file.size)}, converted and checked in ${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)} s`;
+      found.textContent = [exact.length ? `Exact codes: ${exact.join(", ")}.` : "", f32.length ? `Stored as f32: ${f32.join(", ")}.` : ""].filter(Boolean).join(" ");
+      // The next thing to do is save it: the focus goes there, and brings it into sight.
+      save.focus();
+    });
   }
 
-  form.addEventListener("submit", (e) => {
+  settingsForm.addEventListener("submit", (e) => {
     e.preventDefault();
     const chosen = settings();
     if (typeof chosen === "string") say(chosen);
@@ -423,16 +409,16 @@ function converter(): void {
     end();
     idle();
   });
+  filesInput.addEventListener("change", () => {
+    take([...(filesInput.files ?? [])], null);
+    filesInput.value = "";
+  });
   folderInput.addEventListener("change", () => {
     const list = [...(folderInput.files ?? [])];
     // Only the folder's own files: an export keeps none in folders of its own.
     const own = list.filter((f) => f.webkitRelativePath.split("/").length === 2);
-    choose(own, own[0]?.webkitRelativePath.split("/")[0] ?? null);
+    take(own, own[0]?.webkitRelativePath.split("/")[0] ?? null);
     folderInput.value = "";
-  });
-  fileInput.addEventListener("change", () => {
-    choose([...(fileInput.files ?? [])], null);
-    fileInput.value = "";
   });
   drop.addEventListener("dragover", (e) => {
     e.preventDefault();
@@ -442,8 +428,16 @@ function converter(): void {
   drop.addEventListener("drop", (e) => {
     e.preventDefault();
     drop.classList.remove("over");
-    if (e.dataTransfer) void dropped(e.dataTransfer).then(({ files, folder }) => choose(files, folder));
+    if (e.dataTransfer) void dropped(e.dataTransfer).then(({ files, folder }) => take(files, folder));
   });
+
+  const q = new URLSearchParams(location.search);
+  const src = q.get("src");
+  if (src) {
+    srcField.value = src;
+    sidecarField.value = q.get("annotations") ?? "";
+    void open(src, q.get("annotations"), src, true);
+  }
 }
 
 /** A failure, in plain words. */
@@ -452,7 +446,7 @@ function explain(e: unknown, src: string, name: string): string {
   const url = new URL(src, location.href);
   switch (error.name) {
     case "TickwaveNotRecording":
-      return `${name} isn't a tickwave recording. The viewer reads .tickwave files, which the converter makes from a capture.`;
+      return `${name} isn't a tickwave recording. The viewer reads .tickwave files, and converts a capture into one first.`;
     case "TickwaveNoLoader":
       return `${name} doesn't end in .tickwave. The viewer reads .tickwave files: give the file's own address, or download it and open it from here.`;
     case "TickwaveNetworkError":
@@ -469,5 +463,4 @@ function explain(e: unknown, src: string, name: string): string {
 }
 
 // Last, once every binding above has its value.
-if (document.body.classList.contains("viewer")) viewer();
-if (document.body.classList.contains("convert")) converter();
+if (document.body.classList.contains("viewer")) openPage();

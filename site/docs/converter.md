@@ -1,6 +1,6 @@
 # The converter
 
-`tickwave` is a command-line program. It converts captures into tickwave recordings, describes a recording, checks one against the capture it came from, and checks and bundles a recording's sidecar of annotations. [The convert page](../convert.html) runs the same conversion in a browser.
+`tickwave` is a command-line program. It converts captures into tickwave recordings, describes a recording, checks one against the capture it came from, and checks and bundles a recording's sidecar of annotations. [The Open page](../open.html) runs the same conversion in a browser.
 
 ## Building it
 
@@ -77,7 +77,9 @@ Every command that reads a recording takes `--max-decoded-mib <n>`: the most it 
 
 ## Converting in a browser
 
-[The convert page](../convert.html) converts a capture without installing anything. Choose a Saleae export's folder, or a `.sr` or `.vcd` file, or drop it on the page. The page lists the capture's channels: choose the ones to take, and name them. It takes the options a command line does: units, a title, metadata, the zstd level, the block size and `--no-codes`. Then it converts, checks the recording against the capture, offers it to save, and shows it in a view.
+[The Open page](../open.html) converts a capture without installing anything, then opens it. Choose a Saleae export's folder, or a `.sr` or `.vcd` file, or drop it on the page. The page lists the capture's channels: choose the ones to take, and name them. It takes the options a command line does: units, a title, metadata, the zstd level, the block size and `--no-codes`. Then it converts, checks the recording against the capture, offers it to save, and shows it in a view.
+
+For a Saleae export, it first checks that every edge sits on the sample grid, in order. Then it goes through the capture three times: once to look for exact integer codes in each analog channel, once to encode, and once to check the recording against the capture, edge by edge and sample by sample. A recording that fails the check is never offered to save.
 
 The page runs the converter's own code, compiled to WebAssembly, so the same capture and settings give the same file, byte for byte. It stores channels in the order it lists them, which for a Saleae export is by file name, numbers in order. A command line that names the same channels in that order makes the same file.
 

@@ -42,7 +42,7 @@
   <div class="wrap">
     <div class="head"><h2><a href="docs/converter.html">Convert</a></h2><p class="kicker">From a Saleae Logic 2 export, a sigrok session or a VCD file</p></div>
     <ol class="steps">
-      <li><h3>Get the converter</h3><div class="console"><code><span aria-hidden="true">$</span>cargo build <i>--release</i> <i>-p tickwave-cli</i></code><p>From tickwave's repository, with a current Rust toolchain. Or <a href="convert.html">convert in your browser</a>, on the same code.</p></div></li>
+      <li><h3>Get the converter</h3><div class="console"><code><span aria-hidden="true">$</span>cargo build <i>--release</i> <i>-p tickwave-cli</i></code><p>From tickwave's repository, with a current Rust toolchain. Or convert on <a href="open.html">the Open page</a>, in your browser, on the same code.</p></div></li>
       <li><h3>Convert</h3><div class="console"><code><span aria-hidden="true">$</span>tickwave convert <i>sigrok session.sr</i> <i>-o session.tickwave</i></code><p>A Saleae export and a VCD file convert the same way. It checks what it wrote against the capture, edge by edge.</p></div></li>
       <li><h3>Describe</h3><div class="console"><code><span aria-hidden="true">$</span>tickwave info <i>session.tickwave</i></code><p>The recording's length and resolution, its channels and their edges.</p></div></li>
     </ol>
