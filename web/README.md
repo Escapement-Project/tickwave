@@ -51,24 +51,28 @@ site's pages:
 - `convert.html`, the converter: a capture from files, converted in a worker by
   `tickwave-convert.wasm`, saved and shown
 - `demo.html`, a short page citing the committed fixtures as a project page would
-- `docs/index.html`, the docs: each with what it covers
+- `docs/index.html`, the docs: each with what it covers, and their search
 - `docs/elements.html`, rendered from this file's "The elements" section
 - `docs/charts.html`, `docs/format.html` and `docs/annotations.html`, rendered from `CHARTS.md`,
   `FORMAT.md` and `ANNOTATIONS.md`
 - `docs/converter.html`, rendered from `site/docs/converter.md`
 
+The docs follow the project's docs, in the markup the site's `design/README.md` gives ("A product's
+docs"), so they read and work as Verge's do. `scripts/site.ts` writes `docs/search.json`, the
+search's index, to that README's definition of a section ("The search index").
+
 `site/tokens.css`, `site/fonts/`, `site/favicon-tickwave.ico` (tickwave's mark) and `site/dial.svg`
 are copies of the design system's files. `site/base.css`, `site/header.html`, `site/footer.html`,
-`site/face.js`, `site/header.js`, `site/copy.js`, `site/doc.css` and `site/doc.js` are copies of
-the project's shared header, footer, base sheet, Copy buttons and doc frame. Check them all from
-the site repository with:
+`site/face.js`, `site/header.js`, `site/copy.js`, `site/doc.css`, `site/doc.js` and
+`site/search.js` are copies of the project's shared header, footer, base sheet, Copy buttons, and
+docs' sheet, frame and search. Check them all from the site repository with:
 
 ```sh
 uv run design/build.py --check ../tickwave/site/tokens.css ../tickwave/site/fonts/* \
     ../tickwave/site/favicon-tickwave.ico ../tickwave/site/dial.svg ../tickwave/site/base.css \
     ../tickwave/site/header.html ../tickwave/site/footer.html ../tickwave/site/face.js \
     ../tickwave/site/header.js ../tickwave/site/copy.js ../tickwave/site/doc.css \
-    ../tickwave/site/doc.js
+    ../tickwave/site/doc.js ../tickwave/site/search.js
 ```
 
 ## The data source

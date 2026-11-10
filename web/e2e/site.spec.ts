@@ -233,7 +233,12 @@ test("the demo without scripts says what needs them, and offers its recordings",
 });
 
 test("the docs sit in the project's doc frame: every doc in a rail, this one's sections, and a bar on a phone", async ({ page }) => {
+  // The frame takes the page's column, as wide as on any other page: the docs' sheet narrows only the text.
+  const column = () => page.locator("main").evaluate((m) => m.getBoundingClientRect().width);
+  await page.goto(`${SITE}index.html`);
+  const wide = await column();
   await page.goto(`${SITE}docs/format.html`);
+  expect(await column()).toBe(wide);
   const rail = page.getByRole("navigation", { name: "tickwave's docs" });
   // Every link, a subsection's included: those show while the reader is in their section.
   await expect(rail.locator("a")).toHaveText(["Elements", "Charts", "Format", "Times", "Layout", "Preamble", "Header", "Index", "Blocks", "Overview", "Content id", "Sidecar", "Converter"]);
@@ -253,14 +258,85 @@ test("the docs sit in the project's doc frame: every doc in a rail, this one's s
   await expect(rail.getByRole("link", { name: "Converter" })).toBeVisible();
 });
 
-test("the docs' index lists each doc with what it covers", async ({ page }) => {
+test("the docs' index lists each doc with what it covers, in the project's markup", async ({ page }) => {
   await page.goto(`${SITE}docs/index.html`);
-  await expect(page.locator("h1")).toHaveText("tickwave's docs");
-  const items = page.locator(".docs-list li");
+  await expect(page.locator(".docs-index .docs-head h1")).toHaveText("tickwave's docs");
+  await expect(page.locator(".docs-index .intro")).toHaveText("Each doc is written in tickwave's repository.");
+  // One list: one group with no heading.
+  await expect(page.locator(".doc-groups > div")).toHaveCount(1);
+  await expect(page.locator(".doc-groups .group")).toHaveCount(0);
+  const items = page.locator(".doc-groups li");
   await expect(items.locator("a")).toHaveText(["Elements", "Charts", "Format", "Sidecar", "Converter"]);
   await expect(items.first().locator("p")).toHaveText("tickwave's elements: attributes, methods, events, parts and custom properties.");
   await items.getByRole("link", { name: "Format" }).click();
   await expect(page).toHaveURL(/docs\/format\.html$/);
+});
+
+test("each page is titled by its name, tickwave's and the project's", async ({ page }) => {
+  for (const [path, title] of [
+    ["index.html", "tickwave – Escapement Project"],
+    ["convert.html", "Convert – tickwave – Escapement Project"],
+    ["demo.html", "Demo – tickwave – Escapement Project"],
+    ["docs/index.html", "Docs – tickwave – Escapement Project"],
+    ["docs/annotations.html", "Sidecar – tickwave – Escapement Project"],
+  ]) {
+    await page.goto(`${SITE}${path}`);
+    await expect(page).toHaveTitle(title);
+  }
+});
+
+test("a doc's headings link to themselves from h2 down, and its source line names the file it comes from", async ({ page, request }) => {
+  await page.goto(`${SITE}docs/format.html`);
+  await expect(page.locator(".doc h1 .anchor")).toHaveCount(0);
+  const times = page.locator(".doc h2#times .anchor");
+  await expect(times).toHaveAttribute("href", "#times");
+  await expect(times).toHaveAttribute("aria-label", "Link to this section");
+  await expect(times).not.toHaveAttribute("aria-hidden", /./);
+  // Every doc's source line links a file that is in the repository, at the published address.
+  const REPO = "https://github.com/Escapement-Project/tickwave/blob/HEAD/";
+  for (const path of ["elements", "charts", "format", "annotations", "converter"]) {
+    const html = await (await request.get(`${SITE}docs/${path}.html`)).text();
+    const href = /<p class="doc-source">From <a href="([^"]+)">tickwave<\/a>, where changes to this page go\.<\/p><\/article>/.exec(html)?.[1];
+    expect(href, path).toMatch(new RegExp(`^${REPO.replace(/[./]/g, "\\$&")}`));
+    const [file, section] = href!.slice(REPO.length).split("#");
+    const text = readFileSync(`../${file}`, "utf8");
+    if (section) expect(text, href).toMatch(new RegExp(`^#+ ${section.replace(/-/g, " ")}$`, "im"));
+  }
+});
+
+test("the search's index holds each doc's sections, as the project defines one", async ({ request }) => {
+  const index = (await (await request.get(`${SITE}docs/search.json`)).json()) as { docs: [string, string][]; sections: [number, string, string, string][] };
+  expect(index.docs).toEqual([["Elements", "elements.html"], ["Charts", "charts.html"], ["Format", "format.html"], ["Sidecar", "annotations.html"], ["Converter", "converter.html"]]);
+  const format = index.sections.filter(([d]) => d === 2);
+  // The text before the first heading, under the doc's name; then each h2 and h3 in page order.
+  expect(format.slice(0, 3).map(([, id, heading]) => [id, heading])).toEqual([["", "Format"], ["times", "Times"], ["layout", "Layout"]]);
+  expect(format[0][3]).toMatch(/^A tickwave recording holds digital and analog channels/);
+  // Plain text: no heading link, no source line, no doubled spaces.
+  for (const [, , heading, text] of index.sections) {
+    expect(heading).not.toMatch(/#$/);
+    expect(text).not.toContain("where changes to this page go");
+    expect(text).not.toMatch(/\s{2}/);
+  }
+});
+
+test("the docs' search finds a section from a doc and from the index, and opens it marked", async ({ page }) => {
+  await page.goto(`${SITE}docs/converter.html`);
+  const field = page.getByRole("combobox", { name: "Search tickwave's docs" });
+  await field.fill("magic");
+  const found = page.locator("#found");
+  await expect(found).toBeVisible();
+  const preamble = found
+    .locator('[role="group"]', { has: page.locator(".doc-name", { hasText: /^Format$/ }) })
+    .locator('a[role="option"]', { has: page.locator(".h", { hasText: /^Preamble$/ }) });
+  await expect(preamble).toBeVisible();
+  await preamble.click();
+  await expect(page).toHaveURL(/docs\/format\.html\?q=magic#preamble$/);
+  await expect(page.locator(".doc mark.hit").first()).toHaveText(/magic/i);
+  // On the index, the results take the list's place.
+  await page.goto(`${SITE}docs/index.html`);
+  await page.getByRole("combobox", { name: "Search tickwave's docs" }).fill("sidecar");
+  await expect(page.locator(".doc-groups")).toBeHidden();
+  await expect(page.locator("#found .doc-name").first()).toBeVisible();
 });
 
 test("a command in the docs has a Copy button, and a command's output has none", async ({ page }) => {

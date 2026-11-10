@@ -44,7 +44,7 @@ await esbuild.build({
 });
 
 // The design system's files, as copied into site/, and the site's own styles.
-for (const f of ["tokens.css", "base.css", "doc.css", "face.js", "header.js", "copy.js", "doc.js", "favicon-tickwave.ico", "site.css"]) copyFileSync(join(site, f), join(out, f));
+for (const f of ["tokens.css", "base.css", "doc.css", "face.js", "header.js", "copy.js", "doc.js", "search.js", "favicon-tickwave.ico", "site.css"]) copyFileSync(join(site, f), join(out, f));
 cpSync(join(site, "fonts"), join(out, "fonts"), { recursive: true });
 
 // The demo's and the viewer's examples: committed fixtures, and the SWD annotations made from one.
@@ -61,13 +61,21 @@ const slugify = (text: string) =>
     .replace(/[^\p{L}\p{N}\s-]/gu, "")
     .replace(/\s+/g, "-");
 
+// Every heading has an id; h2 to h4 end with the link to themselves (the site's design/README.md).
+const selfLink = anchor.permalink.linkInsideHeader({
+  symbol: "#",
+  placement: "after",
+  space: false,
+  class: "anchor",
+  renderAttrs: () => ({ "aria-label": "Link to this section" }),
+});
 const md = new MarkdownIt({ html: false, linkify: false, typographer: false }).use(anchor, {
   slugify,
-  permalink: anchor.permalink.linkInsideHeader({ symbol: "#", placement: "after", ariaHidden: true, class: "anchor" }),
+  permalink: (slug, opts, state, i) => {
+    if (["h2", "h3", "h4"].includes(state.tokens[i].tag)) selfLink(slug, opts, state, i);
+  },
 });
-// A wide table scrolls inside its own box, so the page never scrolls sideways.
-md.renderer.rules.table_open = () => '<div class="table"><table>\n';
-md.renderer.rules.table_close = () => "</table></div>\n";
+type Token = ReturnType<typeof md.parse>[number];
 
 /** tickwave's group in the header: its main page under its name, then its other pages. */
 const GROUP: { href: string; name: string; page: string }[] = [
@@ -84,19 +92,44 @@ if (from < 0) throw new Error("web/README.md has no \"The elements\" section");
 const next = readme.indexOf("\n## ", from + 1);
 const elements = readme.slice(from + 1, next < 0 ? undefined : next).replace(/^##(#*) /gm, "#$1 ");
 
-/** tickwave's docs, in the rail on each and in the docs' index, each with what it covers. */
-const DOCS: { href: string; name: string; markdown: string; description: string }[] = [
-  { href: "docs/elements.html", name: "Elements", markdown: elements, description: "tickwave's elements: attributes, methods, events, parts and custom properties." },
-  { href: "docs/charts.html", name: "Charts", markdown: readFileSync(join(repo, "CHARTS.md"), "utf8"), description: "tickwave's charts: measurements drawn against a setting, and their data." },
-  { href: "docs/format.html", name: "Format", markdown: readFileSync(join(repo, "FORMAT.md"), "utf8"), description: "The tickwave recording format." },
-  { href: "docs/annotations.html", name: "Sidecar", markdown: readFileSync(join(repo, "ANNOTATIONS.md"), "utf8"), description: "tickwave's sidecar annotations." },
+/** Where tickwave's sources are published; a doc's source line links its file there. */
+const REPOSITORY = "https://github.com/Escapement-Project/tickwave";
+
+/** tickwave's docs, in the rail on each and in the docs' index, each with what it covers and its source. */
+const DOCS: { href: string; name: string; markdown: string; description: string; source: string }[] = [
+  {
+    href: "docs/elements.html",
+    name: "Elements",
+    markdown: elements,
+    description: "tickwave's elements: attributes, methods, events, parts and custom properties.",
+    source: "web/README.md#the-elements",
+  },
+  {
+    href: "docs/charts.html",
+    name: "Charts",
+    markdown: readFileSync(join(repo, "CHARTS.md"), "utf8"),
+    description: "tickwave's charts: measurements drawn against a setting, and their data.",
+    source: "CHARTS.md",
+  },
+  { href: "docs/format.html", name: "Format", markdown: readFileSync(join(repo, "FORMAT.md"), "utf8"), description: "The tickwave recording format.", source: "FORMAT.md" },
+  {
+    href: "docs/annotations.html",
+    name: "Sidecar",
+    markdown: readFileSync(join(repo, "ANNOTATIONS.md"), "utf8"),
+    description: "tickwave's sidecar annotations.",
+    source: "ANNOTATIONS.md",
+  },
   {
     href: "docs/converter.html",
     name: "Converter",
     markdown: readFileSync(join(site, "docs/converter.md"), "utf8"),
     description: "Building tickwave's converter, and converting, describing, verifying and bundling recordings.",
+    source: "site/docs/converter.md",
   },
 ];
+
+/** A page's title: its name, tickwave's unless it is tickwave's main page, then the project's. */
+const titled = (name: string | null) => [name, "tickwave", "Escapement Project"].filter(Boolean).join(" \u2013 ");
 
 const layout = readFileSync(join(site, "layout.html"), "utf8");
 
@@ -164,7 +197,8 @@ function page(path: string, opts: { title: string; description: string; kind: st
   writeFileSync(join(out, path), html);
 }
 
-// HTML pages say their title, description and kind in comments at the top.
+// HTML pages say their description and kind in comments at the top. A page's title is its name in
+// the header's group, and tickwave's main page is tickwave's.
 for (const name of ["index.html", "convert.html", "demo.html"]) {
   const text = readFileSync(join(site, "pages", name), "utf8");
   const meta = (key: string) => {
@@ -172,7 +206,8 @@ for (const name of ["index.html", "convert.html", "demo.html"]) {
     if (!m) throw new Error(`site/pages/${name}: no ${key}`);
     return m[1];
   };
-  page(name, { title: meta("title"), description: meta("description"), kind: meta("kind"), content: text.replace(/^<!-- \w+: .*? -->\n/gm, "") });
+  const title = titled(name === GROUP[0].href ? null : GROUP.find((g) => g.href === name)!.name);
+  page(name, { title, description: meta("description"), kind: meta("kind"), content: text.replace(/^<!-- \w+: .*? -->\n/gm, "") });
 }
 
 /** A heading's text as the rail shows it: its HTML without the link to itself. */
@@ -191,40 +226,110 @@ function contents(body: string): string {
   return `<ul class="toc">${sections.map((s) => item(s, s.subs.length ? `<ul>${s.subs.map((sub) => item(sub)).join("")}</ul>` : "")).join("")}</ul>`;
 }
 
+const squash = (parts: string[]) => parts.join("").replace(/\s+/g, " ").trim();
+
 /**
- * A Markdown document as a docs page; its first heading is the page's title. The page is the
- * project's doc frame (doc.css and doc.js, the markup in the site's design/README.md): every doc of
- * tickwave's in a rail, this one's sections under it, and on a narrow screen a bar that names the
- * section the reader is in.
+ * A doc's sections for the docs' search, to the site's definition (design/README.md, "The search
+ * index"): the text after the h1 and before the first h2 or h3 with an id, then each h2 or h3 with an
+ * id and its text up to the next. A heading without an id, and h4 and deeper, stay in their section.
+ * Text is plain, a heading's too, without the heading link, its whitespace collapsed and a space
+ * between blocks. Read from the tokens the doc's article is rendered from, which hold no svg,
+ * script, style or source line.
  */
-function doc(path: string, markdown: string, description: string): void {
-  const title = /^# (.*)$/m.exec(markdown)?.[1].replace(/`/g, "") ?? path;
-  const body = md.render(markdown);
+function searchSections(tokens: Token[]): { id: string; heading: string | null; text: string }[] {
+  const sections: { id: string; heading: string | null; parts: string[] }[] = [{ id: "", heading: null, parts: [] }];
+  let into: "title" | "heading" | null = null;
+  let heading: string[] = [];
+  const put = (text: string) => (into ? heading : sections.at(-1)!.parts).push(text);
+  for (const t of tokens) {
+    const id = t.type === "heading_open" ? (t.attrGet("id")?.toString() ?? null) : null;
+    if (t.type === "heading_open" && t.tag === "h1") {
+      into = "title";
+      heading = [];
+    } else if (id && (t.tag === "h2" || t.tag === "h3")) {
+      into = "heading";
+      heading = [];
+      sections.push({ id, heading: null, parts: [] });
+    } else if (t.type === "heading_close" && into) {
+      if (into === "heading") sections.at(-1)!.heading = squash(heading);
+      into = null;
+    } else if (t.type === "inline") {
+      let link = false;
+      for (const c of t.children ?? []) {
+        if (c.type === "link_open" && c.attrGet("class") === "anchor") link = true;
+        else if (link) link = c.type !== "link_close";
+        else if (c.type === "text" || c.type === "code_inline") put(c.content);
+        else if (c.type === "softbreak" || c.type === "hardbreak" || c.type === "image") put(" ");
+      }
+    } else if (t.type === "fence" || t.type === "code_block") put(` ${t.content} `);
+    // Every other token opens or closes a block: a space keeps the words either side of it apart.
+    else put(" ");
+  }
+  return sections.map((s) => ({ id: s.id, heading: s.heading, text: squash(s.parts) })).filter((s) => s.id || s.text);
+}
+
+// The docs' search field, as the site's templates/partials/find.html has it, with tickwave's index
+// and label; and the list its results go in.
+const FIND = `<search class="find" data-index="search.json">
+<input id="find" type="search" role="combobox" aria-label="Search tickwave's docs" aria-autocomplete="list" aria-expanded="false" aria-controls="found" placeholder="Search the docs" autocomplete="off" spellcheck="false" enterkeyhint="search">
+<kbd class="key" aria-hidden="true">/</kbd>
+<button class="clear" type="button" aria-label="Clear the search" hidden></button>
+<p class="count" role="status"></p>
+</search>`;
+const FOUND = `<div class="found" id="found" role="listbox" aria-label="Sections found" hidden></div>`;
+
+/**
+ * A Markdown document as a docs page, in the project's doc frame (doc.css, doc.js and search.js, the
+ * markup in the site's design/README.md): the search and every doc of tickwave's in a rail, this
+ * one's sections under it, its source under its text, and on a narrow screen a bar that names the
+ * section the reader is in. Returns its sections for the search.
+ */
+function doc(d: (typeof DOCS)[number]): { id: string; heading: string | null; text: string }[] {
+  const title = /^# (.*)$/m.exec(d.markdown)?.[1].replace(/`/g, "") ?? d.name;
+  const env = {};
+  const tokens = md.parse(d.markdown, env);
+  const body = md.renderer.render(tokens, md.options, env);
   const docs = DOCS.map(({ href, name }) => {
-      const file = href.slice("docs/".length);
-      return href === path ? `<li><a href="${file}" aria-current="page">${name}</a>${contents(body)}</li>` : `<li><a href="${file}">${name}</a></li>`;
+    const file = href.slice("docs/".length);
+    return href === d.href ? `<li><a href="${file}" aria-current="page">${name}</a>${contents(body)}</li>` : `<li><a href="${file}">${name}</a></li>`;
   }).join("\n");
   const content = `<div class="doc-wrap">
 <button class="doc-bar" type="button" aria-expanded="false" aria-controls="doc-rail"><span class="label">Contents</span><span class="where">${esc(title)}</span></button>
-<div class="doc-rail" id="doc-rail"><div class="doc-list"><nav class="doc-nav" aria-label="tickwave's docs"><ul>
+<div class="doc-rail" id="doc-rail">
+${FIND}
+<div class="doc-list"><nav class="doc-nav" aria-label="tickwave's docs"><ul>
 ${docs}
-</ul></nav></div></div>
-<article class="doc">${body}</article>
+</ul></nav>
+${FOUND}</div></div>
+<article class="doc">${body}<p class="doc-source">From <a href="${REPOSITORY}/blob/HEAD/${d.source}">tickwave</a>, where changes to this page go.</p></article>
 </div>`;
-  page(path, { title: `tickwave: ${title}`, description, kind: "doc", content });
+  page(d.href, { title: titled(d.name), description: d.description, kind: "doc-page", content });
+  return searchSections(tokens);
 }
 
-for (const d of DOCS) doc(d.href, d.markdown, d.description);
+// Each doc, and the search's index of their sections: the format and the definition of a section
+// are the site's design/README.md's, "The search index".
+const sections = DOCS.flatMap((d, n) => doc(d).map((s) => [n, s.id, s.heading ?? d.name, s.text]));
+const docsIndex = DOCS.map((d) => [d.name, d.href.slice("docs/".length)]);
+writeFileSync(join(out, "docs/search.json"), JSON.stringify({ docs: docsIndex, sections }));
 
-// The docs' index, where the header's Docs leads: each doc with what it covers, as Verge's lists its own.
+// The docs' index, where the header's Docs leads: the search, and each doc with what it covers, in
+// one list.
 page("docs/index.html", {
-  title: "tickwave: Docs",
+  title: titled("Docs"),
   description: "tickwave's docs: its elements, charts, recording format, sidecar and converter.",
-  kind: "docs-index",
-  content: `<h1>tickwave's docs</h1>
-<ul class="docs-list">
+  kind: "docs-index-page",
+  content: `<div class="docs-index">
+<div class="docs-head">
+<h1>tickwave's docs</h1>
+${FIND}
+</div>
+<p class="intro">Each doc is written in <a href="${REPOSITORY}">tickwave's repository</a>.</p>
+${FOUND}
+<div class="doc-groups"><div><ul>
 ${DOCS.map(({ href, name, description }) => `<li><a href="${href.slice("docs/".length)}">${name}</a><p>${esc(description)}</p></li>`).join("\n")}
-</ul>`,
+</ul></div></div>
+</div>`,
 });
 
 console.log(`site: ${out}`);
