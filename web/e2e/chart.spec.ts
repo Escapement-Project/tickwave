@@ -589,7 +589,7 @@ test.describe("evidence", () => {
   });
 
   test("a mouse passing over the points loads nothing; one that rests on a point opens it", async ({ page }, info) => {
-    const tag = `pass-${info.project.name}-${Date.now()}`;
+    const tag = `pass-${info.project.name}-${info.repeatEachIndex}-${Date.now()}`;
     await setRecordings(page, `/fixtures/identify-swd.tickwave?tag=${tag}`, `/fixtures/identify-swd.tickwave?tag=${tag}`);
     // The three points lie on one line: pass along it, from before the first to past the last.
     const [first, last] = [await point(page, 0), await point(page, 2)];
@@ -608,7 +608,7 @@ test.describe("evidence", () => {
   });
 
   test("a recording the inset has moved on from cannot fail it later", async ({ page }, info) => {
-    const tag = `stale-${info.project.name}-${Date.now()}`;
+    const tag = `stale-${info.project.name}-${info.repeatEachIndex}-${Date.now()}`;
     // The first point's recording fails, but only after 1.5 s; the last point's loads at once.
     await setRecordings(page, `/fixtures/identify-swd.tickwave?tag=${tag}&after=0&stall=1500&fail=500`, `/fixtures/identify-swd.tickwave?tag=${tag}-b`);
     await page.evaluate(() => {

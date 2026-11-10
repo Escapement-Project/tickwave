@@ -69,7 +69,7 @@ test("setWindow before the head arrives shows that window once it has", async ({
 });
 
 test("a failed load is tried again, and a new recording's view drops the old notice", async ({ page }, info) => {
-  const tag = `retry-${info.project.name}-${Date.now()}`;
+  const tag = `retry-${info.project.name}-${info.repeatEachIndex}-${Date.now()}`;
   // Every read after the first waits 2 s: the retry's 404 comes back after the new recording.
   await page.goto(`${VIEW}?open&src=fixtures/missing.tickwave&tag=${tag}&after=1&stall=2000`);
   const view = page.locator("#v");
@@ -88,7 +88,7 @@ test("a failed load is tried again, and a new recording's view drops the old not
 });
 
 test("a read the old recording's rows had out, failing after a new recording, says nothing", async ({ page }, info) => {
-  const tag = `rows-${info.project.name}-${Date.now()}`;
+  const tag = `rows-${info.project.name}-${info.repeatEachIndex}-${Date.now()}`;
   // Past the head's two reads, every read waits 2 s, then fails.
   await page.goto(`${VIEW}?open&src=fixtures/swd50-cut.tickwave&tag=${tag}&firstRead=256&after=2&stall=2000&fail=500`);
   const view = page.locator("#v");

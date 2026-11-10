@@ -114,7 +114,8 @@ async function served(tag: string): Promise<{ port: number; url: string; range: 
   return log.filter((e) => new URL(e.url, "http://x").pathname.endsWith(".tickwave"));
 }
 
-const tagged = (info: { project: { name: string } }, what: string) => `${what}-${info.project.name}-${Date.now()}`;
+// Repeats of a test run side by side: each needs a tag of its own, or they share the server's read count.
+const tagged = (info: { project: { name: string }; repeatEachIndex: number }, what: string) => `${what}-${info.project.name}-${info.repeatEachIndex}-${Date.now()}`;
 
 test("a collapsed view fetches its head, and only its head, once it scrolls into view", async ({ page }, info) => {
   const tag = tagged(info, "collapsed");
