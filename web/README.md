@@ -211,6 +211,7 @@ Clicking an annotation's label shows its span.
 |---|---|
 | `show(id)` | opens the view at an annotation. Resolves once it has drawn |
 | `reveal(id)` | `show(id)`, then brings the view into sight and puts the focus on its plot, as a reference or a chart's point does |
+| `focus()` | puts the focus on the plot, or on the Open button while the view is closed |
 | `setWindow(start, end)` | shows a span: ticks, or times such as `"317.8 ms"`. Called before the head arrives, it shows the span once it has |
 | `settled()` | resolves once the view has drawn everything it shows |
 | `tickAt(clientX)` | the tick under a point in the window, or null before the view has drawn |
