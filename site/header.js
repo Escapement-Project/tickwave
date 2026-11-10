@@ -105,4 +105,169 @@
     if (back && has("header-away")) root.classList.add("header-back");
   });
   header.addEventListener("focusin", () => { if (has("header-away")) root.classList.add("header-back"); });
+
+  // The project's mark in motion: its edge is a signal through the ring. Lock (arrive) as the
+  // landing's hero comes into view: a chirp passes through the ring at one speed, its pulses
+  // widening, and slows to rest as one rising edge reaches the centre, the mark. Again on the logo,
+  // when a mouse or pen reaches it (a tap follows the link instead): from the mark the signal moves
+  // on through a new chirp and locks again, gathering speed as Lock sheds it. tickwave's ruler runs
+  // under the signal while it moves, raised ticks on its edges, and fades once it stops.
+  //
+  // Every number is a --project-mark-* property in tokens.css, built from design/tokens.toml's
+  // [motion.project-mark] and the mark's own geometry; a page whose tokens.css lacks them keeps the
+  // mark still. The mark's own ring and edge paths stay as the page drew them: the ruler goes under
+  // the ring, and the moving trace replaces the edge only while it moves, with the clips it needs,
+  // so at rest the svg is as the page made it and refers to nothing by id (reader view breaks such
+  // references). Every write is inside the svg, never on <html>, which tickwave's pages watch.
+  const ProjectMark = (() => {
+    const still = matchMedia("(prefers-reduced-motion: reduce)"), f = (v) => v.toFixed(2);
+    const NAMES = ["inner", "outer", "width", "riser", "low", "high", "low-bottom", "speed", "again", "ramp", "densest",
+      "dense", "growth", "fill", "tick", "spacing", "raised", "lower", "line", "clear", "cut", "gap-px", "tick-px",
+      "spacing-px", "raised-px", "lower-px", "fade-in", "fade-out", "lower-opacity"];
+    const tokens = () => {
+      const style = getComputedStyle(root), t = {};
+      for (const n of NAMES) t[n] = parseFloat(style.getPropertyValue(`--project-mark-${n}`));
+      return NAMES.every((n) => Number.isFinite(t[n])) ? t : null;
+    };
+    const animate = (ms, frame, done) => {
+      const t0 = performance.now(); let raf;
+      const tick = (now) => { const t = Math.min(1, (now - t0) / ms); frame(t); if (t < 1) raf = requestAnimationFrame(tick); else done?.(); };
+      raf = requestAnimationFrame(tick);
+      return () => cancelAnimationFrame(raf);
+    };
+    let uid = 0;
+
+    // The measures at the size drawn: below a pixel's worth each keeps its floor, so the 24 px logo
+    // still shows its pulses apart and its ticks.
+    function fit(t, svg) {
+      const u = (px) => px / ((svg.getBoundingClientRect().width || 64) / 64), raised = Math.max(t.raised, u(t["raised-px"]));
+      return {
+        densest: Math.max(t.densest, t.width + u(t["gap-px"])), tick: Math.max(t.tick, u(t["tick-px"])),
+        spacing: Math.max(t.spacing, u(t["spacing-px"])), raised, lower: Math.max(t.lower, u(t["lower-px"])),
+        line: Math.max(t.line, t["low-bottom"] + t.clear + raised),
+      };
+    }
+    // The chirp's runs: some of the densest half-period, then each longer by the growth until a low
+    // reaches the fill, the last run; the levels alternate back from it, then high for good.
+    function chirp(t, m) {
+      const L = Array(t.dense).fill(m.densest);
+      for (let h = m.densest; L.at(-1) < t.fill; ) L.push(h *= t.growth);
+      if (L.length % 2) L.unshift(m.densest);
+      return signal(L);
+    }
+    function signal(L) { let u = 0; const edges = L.map((l) => (u += l)); return { L, edges, end: u }; }
+    // The trace with `s` units of the signal at the riser's place.
+    function trace(t, sig, s) {
+      const n = sig.L.length, level = (i) => (i >= n || (n - 1 - i) % 2 ? t.high : t.low);
+      let u = 0, i = 0;
+      while (i < n && u + sig.L[i] <= s - t.riser) u += sig.L[i++];
+      let d = `M0,${level(i)}`;
+      for (; i < n; i++) {
+        u += sig.L[i];
+        const x = t.riser + u - s;
+        if (x >= 64) break;
+        d += `H${f(x)}V${level(i + 1)}`;
+      }
+      return d + "H64";
+    }
+    // The ruler: raised ticks on the edges, lower ones splitting each run (and 60 units beyond
+    // either end) at about the spacing, standing on the line and running on under the ring.
+    function ruler(t, m, sig, s) {
+      const near = (u) => Math.abs(u - s) < t.outer + 2;
+      const tick = (u, top) => {
+        const dx = u - s; if (Math.abs(dx) >= t.outer) return "";
+        const floor = Math.min(m.line, 32 + Math.sqrt(t.outer ** 2 - dx ** 2));
+        return floor > top + 0.3 ? `M${f(t.riser + dx)},${f(top)}V${f(floor)}` : "";
+      };
+      const pts = [sig.edges[0] - 60, ...sig.edges, sig.edges.at(-1) + 60];
+      let raised = "", lower = "";
+      for (const e of sig.edges) if (near(e)) raised += tick(e, m.line - m.raised);
+      for (let i = 0; i < pts.length - 1; i++) {
+        const a = pts[i], b = pts[i + 1], n = Math.max(1, Math.round((b - a) / m.spacing));
+        for (let j = 1; j < n; j++) { const u = a + ((b - a) * j) / n; if (near(u)) lower += tick(u, m.line - m.lower); }
+      }
+      return [raised, lower];
+    }
+
+    function mount(svg) {
+      const [ring, edge] = svg.querySelectorAll(":scope > path"), id = `project-mark-${++uid}`;
+      if (!ring || !edge) return null;
+      // The ruler under the ring, its fade an inline style on a group of its own, so no page rule
+      // overrides it.
+      ring.insertAdjacentHTML("beforebegin", `<g class="pm-ruler"><g class="pm-fade" fill="none" style="opacity: 0">`
+        + `<path style="stroke: var(--project-mark-lower-colour)"/><path style="stroke: var(--project-mark-raised-colour)"/></g></g>`);
+      const group = svg.querySelector(".pm-ruler"), fade = group.firstElementChild, [lowerPath, raisedPath] = fade.children;
+      let t = null, m = null, stop = null, fading = null;
+      // While it moves: the trace clipped to the ring's inside, the ruler to a circle inside its
+      // outside, so a tick's width never shows past the ring.
+      const live = () => {
+        let p = svg.querySelector(".pm-live path");
+        if (p) return p;
+        edge.insertAdjacentHTML("afterend", `<clipPath id="${id}-in"><circle cx="32" cy="32" r="${t.inner}"/></clipPath>`
+          + `<clipPath id="${id}-out"><circle cx="32" cy="32" r="${t.cut}"/></clipPath>`
+          + `<g class="pm-live" clip-path="url(#${id}-in)"><path fill="none" stroke="currentColor" stroke-width="${t.width}" stroke-linejoin="miter" stroke-miterlimit="4"/></g>`);
+        group.setAttribute("clip-path", `url(#${id}-out)`);
+        edge.style.display = "none";
+        return svg.querySelector(".pm-live path");
+      };
+      const rest = () => { svg.querySelector(".pm-live")?.remove(); svg.querySelector(`#${id}-in`)?.remove(); edge.style.display = ""; };
+      const unclip = () => { svg.querySelector(`#${id}-out`)?.remove(); group.removeAttribute("clip-path"); };
+      const draw = (sig, s) => {
+        live().setAttribute("d", trace(t, sig, s));
+        const [raised, lower] = ruler(t, m, sig, s);
+        raisedPath.setAttribute("d", raised); lowerPath.setAttribute("d", lower);
+      };
+      const fadeTo = (to, ms, done) => {
+        fading?.();
+        const from = Number(fade.style.opacity) || 0;
+        fading = animate(ms, (k) => { fade.style.opacity = f(from + (to - from) * (1 - (1 - k) ** 3)); }, () => { fading = null; done?.(); });
+      };
+      // Each play measures afresh, as the size or the tokens may have changed since the last.
+      const begin = () => {
+        if (still.matches || stop || !(t = tokens())) return false;
+        m = fit(t, svg);
+        fade.setAttribute("stroke-width", f(m.tick));
+        lowerPath.setAttribute("stroke-opacity", t["lower-opacity"]);
+        return true;
+      };
+      // Move `sig` from `from` to its end at `v` units a ms: from rest over the first `start` units,
+      // to rest over the last ramp, each at a constant rate, so the speed never jumps. Then the
+      // mark's own edge, and the ruler fades and goes with its clip.
+      const run = (sig, from, start, v) => {
+        const D = sig.end - from, T = Math.min(t.ramp, D), A = Math.min(start, D - T);
+        const ta = (2 * A) / v, tc = (D - A - T) / v, tt = (2 * T) / v, total = ta + tc + tt;
+        const at = (ms) => {
+          if (ms <= ta) return (v / (2 * ta)) * ms ** 2;
+          if (ms <= ta + tc) return A + v * (ms - ta);
+          const k = ms - ta - tc;
+          return D - T + v * k - (v / (2 * tt)) * k ** 2;
+        };
+        stop = animate(total, (k) => draw(sig, from + (k >= 1 ? D : at(k * total))), () => {
+          stop = null; rest();
+          fadeTo(0, t["fade-out"] * 1000, () => { raisedPath.removeAttribute("d"); lowerPath.removeAttribute("d"); unclip(); });
+        });
+      };
+      const first = (sig) => { draw(sig, t.riser); fading?.(); fade.style.opacity = "1"; };
+      return {
+        // Lock's first frame, held until it plays: the chirp's start, with the ruler.
+        ready() { if (begin()) first(chirp(t, m)); },
+        arrive() { if (!begin()) return; const sig = chirp(t, m); first(sig); run(sig, t.riser, 0, t.speed / 1000); },
+        // From the mark on: its last low, a high as long (so the first frame is the mark), one dense
+        // run so the levels carry on, then a new chirp, ending on the mark again.
+        again() {
+          if (!begin()) return;
+          const c = chirp(t, m), last = c.L.at(-1), sig = signal([last, last, m.densest, ...c.L]);
+          fadeTo(1, t["fade-in"] * 1000);
+          run(sig, last, t.ramp, t.again / 1000);
+        },
+      };
+    }
+    return { mount };
+  })();
+  window.ProjectMark = ProjectMark;
+  const brand = header.querySelector(".brand"), logo = brand?.querySelector(":scope > svg");
+  if (logo) {
+    let mark;
+    brand.addEventListener("pointerenter", (e) => { if (e.pointerType !== "touch") (mark ??= ProjectMark.mount(logo))?.again(); });
+  }
 })();

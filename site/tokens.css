@@ -43,6 +43,38 @@
   --font-text: "Hanken Grotesk", "Helvetica Neue", "Arial", sans-serif;
   --font-figures: "Martian Mono", ui-monospace, monospace; --figures-stretch: 112.5%; --figures-weight: 500;
   --font-code: "Martian Mono", ui-monospace, monospace; --code-stretch: 100%; --code-weight: 500;
+  /* The project's mark in motion: header.js plays it, from [motion.project-mark] */
+  --project-mark-inner: 23;
+  --project-mark-outer: 29;
+  --project-mark-width: 6;
+  --project-mark-riser: 32;
+  --project-mark-low: 41;
+  --project-mark-high: 23;
+  --project-mark-low-bottom: 44;
+  --project-mark-speed: 180;
+  --project-mark-again: 240;
+  --project-mark-ramp: 20;
+  --project-mark-densest: 7;
+  --project-mark-dense: 6;
+  --project-mark-growth: 1.12;
+  --project-mark-fill: 26;
+  --project-mark-tick: 1.5;
+  --project-mark-spacing: 3;
+  --project-mark-raised: 4;
+  --project-mark-lower: 2.3;
+  --project-mark-line: 50;
+  --project-mark-clear: 1.5;
+  --project-mark-cut: 28;
+  --project-mark-gap-px: 1.6;
+  --project-mark-tick-px: 1;
+  --project-mark-spacing-px: 3;
+  --project-mark-raised-px: 2.5;
+  --project-mark-lower-px: 1.4;
+  --project-mark-fade-in: 0.18;
+  --project-mark-fade-out: 0.36;
+  --project-mark-lower-opacity: 0.75;
+  --project-mark-raised-colour: var(--lume);
+  --project-mark-lower-colour: var(--plate-line);
   color-scheme: light;
 }
 /* A face on any element that carries one: the face chosen on <html>, and the faces the
