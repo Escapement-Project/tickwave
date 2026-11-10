@@ -1,10 +1,11 @@
 //! `tickwave`: convert captures into tickwave's recording format, describe a recording, and check one
 //! against its source.
 
-use std::collections::BTreeMap;
+use std::cell::RefCell;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
@@ -12,12 +13,13 @@ use clap::{Args, Parser, Subcommand};
 use indicatif::ProgressStyle;
 use tickwave_format::annotations::{self, Included};
 use tickwave_format::decode::{Head, verify_limited};
-use tickwave_format::encode::{Options, encode};
-use tickwave_format::header::{AnalogCoding, ChannelKind, Header};
-use tickwave_format::model::{Channel, ChannelData, Recording, Samples};
+use tickwave_format::header::{ChannelKind, Header};
+use tickwave_format::model::Recording;
+use tickwave_import::convert::{self, Pass, Progress, Settings, Step, counted, select, set_units};
 use tickwave_import::sigrok::Skipped;
-use tickwave_import::{codes, saleae, sigrok, vcd};
-use tracing::{Span, info, info_span, warn};
+use tickwave_import::{saleae, sigrok, vcd};
+use tracing::span::EnteredSpan;
+use tracing::{info, info_span, warn};
 use tracing_indicatif::IndicatifLayer;
 use tracing_indicatif::span_ext::IndicatifSpanExt;
 use tracing_subscriber::layer::SubscriberExt;
@@ -179,12 +181,10 @@ fn main() -> Result<()> {
                     channels,
                     common,
                 },
-        } => convert(
-            &|| Ok(saleae::read(&dir, &channels)?),
-            &output,
-            &common,
-            max,
-        ),
+        } => {
+            let export = convert::check_saleae(saleae_headers(&dir, &channels)?, &Bars::default())?;
+            convert(&|| Ok(export.recording()), &output, &common, max)
+        }
         Command::Convert {
             from:
                 Source::Sigrok {
@@ -237,53 +237,48 @@ fn main() -> Result<()> {
     }
 }
 
-/// Wraps every channel's iterator so the span's bar counts the items taken.
-fn counted(recording: Recording, span: &Span) -> Recording {
-    const STEP: u64 = 1 << 16;
-    let total: u64 = recording
-        .channels
+/// Opens the named channels' files in a Saleae export's directory and reads their headers.
+fn saleae_headers(dir: &Path, channels: &[(String, String)]) -> Result<saleae::Headers> {
+    if channels.is_empty() {
+        bail!(saleae::Error::NoChannels);
+    }
+    let files = channels
         .iter()
-        .map(|c| match &c.data {
-            ChannelData::Digital(d) => d.edges.size_hint().0 as u64,
-            ChannelData::Analog(a) => a.count,
+        .map(|(stem, _)| {
+            let path = dir.join(saleae::file_name(stem));
+            let input = tickwave_import::input::map(&path)
+                .with_context(|| format!("opening {}", path.display()))?;
+            Ok((path, input))
         })
-        .sum();
-    span.pb_set_style(
-        &ProgressStyle::with_template("{span_name} {wide_bar} {pos}/{len} {per_sec} {eta}")
-            .expect("a fixed template"),
-    );
-    span.pb_set_length(total);
-    let count = |span: Span, mut n: u64| {
-        move || {
-            n += 1;
-            if n.is_multiple_of(STEP) {
-                span.pb_inc(STEP);
-            }
-        }
-    };
-    let channels = recording
-        .channels
-        .into_iter()
-        .map(|mut c| {
-            c.data = match c.data {
-                ChannelData::Digital(mut d) => {
-                    let mut tick = count(span.clone(), 0);
-                    d.edges = Box::new(d.edges.inspect(move |_| tick()));
-                    ChannelData::Digital(d)
-                }
-                ChannelData::Analog(mut a) => {
-                    let mut tick = count(span.clone(), 0);
-                    let Samples::F32(samples) = a.samples;
-                    a.samples = Samples::F32(Box::new(samples.inspect(move |_| tick())));
-                    ChannelData::Analog(a)
-                }
-            };
-            c
-        })
-        .collect();
-    Recording {
-        channels,
-        ..recording
+        .collect::<Result<Vec<_>>>()?;
+    Ok(saleae::Headers::read(files, channels)?)
+}
+
+/// Draws each pass as a span with a bar, and logs inside it.
+#[derive(Default)]
+struct Bars {
+    entered: RefCell<Option<EnteredSpan>>,
+}
+
+impl Progress for Bars {
+    fn start(&self, pass: Pass<'_>, total: u64) -> Step {
+        let span = match pass {
+            Pass::Check => info_span!("check"),
+            Pass::Codes(channel) => info_span!("codes", channel = %channel),
+            Pass::Encode => info_span!("encode"),
+            Pass::Verify => info_span!("verify"),
+        };
+        span.pb_set_style(
+            &ProgressStyle::with_template("{span_name} {wide_bar} {pos}/{len} {per_sec} {eta}")
+                .expect("a fixed template"),
+        );
+        span.pb_set_length(total);
+        *self.entered.borrow_mut() = Some(span.clone().entered());
+        Arc::new(move |n| span.pb_inc(n))
+    }
+
+    fn end(&self, _: Pass<'_>) {
+        self.entered.borrow_mut().take();
     }
 }
 
@@ -293,121 +288,30 @@ fn report_skipped(skipped: &[Skipped]) {
     }
 }
 
-/// Keeps the channels named in `wanted`, in its order, renamed; all of them when it is empty.
-fn select(recording: Recording, wanted: &[(String, String)]) -> Result<Recording> {
-    if wanted.is_empty() {
-        return Ok(recording);
-    }
-    let mut channels: Vec<Option<Channel>> = recording.channels.into_iter().map(Some).collect();
-    let mut out = Vec::with_capacity(wanted.len());
-    for (from, to) in wanted {
-        let found = channels
-            .iter_mut()
-            .find(|c| c.as_ref().is_some_and(|c| c.name == *from))
-            .and_then(Option::take);
-        let Some(mut channel) = found else {
-            let names: Vec<_> = channels.iter().flatten().map(|c| c.name.as_str()).collect();
-            bail!("no channel {from:?}; the source has {names:?}");
-        };
-        channel.name = to.clone();
-        out.push(channel);
-    }
-    Ok(Recording {
-        channels: out,
-        ..recording
-    })
-}
-
-/// Sets analog channels' units, by channel name.
-fn set_units(mut recording: Recording, units: &[(String, String)]) -> Result<Recording> {
-    for (name, unit) in units {
-        let channel = recording
-            .channels
-            .iter_mut()
-            .find(|c| c.name == *name)
-            .with_context(|| format!("--unit: no channel {name:?}"))?;
-        let ChannelData::Analog(a) = &mut channel.data else {
-            bail!("--unit: {name} is digital");
-        };
-        a.unit = unit.clone();
-    }
-    Ok(recording)
-}
-
-/// Finds exact integer codes for each analog channel, or None where the values have none.
-fn recover_codes(recording: Recording) -> Vec<Option<AnalogCoding>> {
-    recording
-        .channels
-        .into_iter()
-        .map(|c| match c.data {
-            ChannelData::Digital(_) => None,
-            ChannelData::Analog(a) => {
-                let name = c.name.clone();
-                let span = info_span!("codes", channel = %name);
-                let _entered = span.enter();
-                let one = Recording {
-                    timebase: recording.timebase,
-                    length: recording.length,
-                    channels: vec![Channel {
-                        data: ChannelData::Analog(a),
-                        ..c
-                    }],
-                    source: Default::default(),
-                };
-                let ChannelData::Analog(a) = counted(one, &span).channels.remove(0).data else {
-                    unreachable!("the channel was built analog")
-                };
-                let Samples::F32(samples) = a.samples;
-                let codes = codes::recover_codes(samples);
-                match &codes {
-                    Some(k) => info!("{name}: {}-bit codes", k.bits),
-                    None => info!("{name}: no exact codes, stored as f32"),
-                }
-                codes.map(|k| k.coding())
-            }
-        })
-        .collect()
-}
-
-/// Converts what `open` reads. It opens the source three times: to find analog codes, to encode,
-/// and to check the output before writing it.
+/// Converts what `open` reads, checks the output against the source, and writes it.
 fn convert(
-    open: &dyn Fn() -> Result<Recording>,
+    open: &dyn Fn() -> Result<Recording, convert::Error>,
     output: &Path,
     common: &Common,
     max: usize,
 ) -> Result<()> {
     let started = Instant::now();
-    let open = || set_units(open()?, &common.units);
-    let analog = if common.no_codes {
-        Vec::new()
-    } else {
-        recover_codes(open()?)
-    };
-    let options = Options {
-        level: common.level,
-        block_bytes: common.block_kib as usize * 1024,
+    let settings = Settings {
         title: common.title.clone(),
-        meta: common.meta.iter().cloned().collect::<BTreeMap<_, _>>(),
-        converter: Some(format!(
-            "tickwave {} (zstd {}, blocks of {} KiB)",
-            env!("CARGO_PKG_VERSION"),
-            common.level,
-            common.block_kib
-        )),
-        analog,
+        meta: common.meta.iter().cloned().collect(),
+        level: common.level,
+        block_kib: common.block_kib,
+        units: common.units.clone(),
+        codes: !common.no_codes,
     };
-    let file = {
-        let span = info_span!("encode");
-        let _entered = span.enter();
-        encode(counted(open()?, &span), &options).context("encoding")?
-    };
-    {
-        let span = info_span!("verify");
-        let _entered = span.enter();
-        verify_limited(&file, counted(open()?, &span), max)
-            .context("the output does not match the source")?;
+    let converted = convert::convert(open, &settings, max, &Bars::default())?;
+    for (name, bits) in &converted.codes {
+        match bits {
+            Some(bits) => info!("{name}: {bits}-bit codes"),
+            None => info!("{name}: no exact codes, stored as f32"),
+        }
     }
+    let file = converted.file;
     write_atomically(output, &file)?;
     let head = Head::parse_file_limited(&file, max)?;
     info!(
@@ -563,7 +467,9 @@ fn verify_file(file: &Path, against: &Path, max: usize) -> Result<()> {
         .map(|c| (c.source_name.clone(), c.name.clone()))
         .collect();
     let source = match h.source.format.as_str() {
-        "saleae-binary-1" => saleae::read(against, &wanted)?,
+        "saleae-binary-1" => {
+            convert::check_saleae(saleae_headers(against, &wanted)?, &Bars::default())?.recording()
+        }
         "sigrok-sr" => select(sigrok::read(against)?.recording, &wanted)?,
         "vcd" => select(vcd::read(against)?.recording, &wanted)?,
         other => bail!("verifying against {other} sources is not supported"),
@@ -577,10 +483,10 @@ fn verify_file(file: &Path, against: &Path, max: usize) -> Result<()> {
         })
         .collect();
     let source = set_units(source, &units)?;
-    let span = info_span!("verify");
-    let _entered = span.enter();
-    verify_limited(&bytes, counted(source, &span), max)
+    let bars = Bars::default();
+    verify_limited(&bytes, counted(source, &bars, Pass::Verify), max)
         .context("the recording does not match its source")?;
+    bars.end(Pass::Verify);
     info!("{}: matches {}", file.display(), against.display());
     Ok(())
 }
