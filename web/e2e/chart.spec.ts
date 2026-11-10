@@ -305,14 +305,25 @@ test.describe("at rest", () => {
     await expect(c1.locator('g.tw-series[data-series="clang"]')).toHaveAttribute("opacity", "0.2");
   });
 
-  test("the face redraws the series in its colours", async ({ page }) => {
+  test("the series take the face's colours from the page's CSS, without a redraw", async ({ page }) => {
     const line = page.locator('#c1 g.tw-series[data-series="clang"] path').first();
     await expect(line).toHaveAttribute("stroke", "#0f8a6c");
+    await page.evaluate(async () => {
+      await document.fonts.ready;
+      const w = window as unknown as { redraws: number };
+      w.redraws = 0;
+      new MutationObserver(() => w.redraws++).observe(document.querySelector("#c1 svg.tw-plot")!, { childList: true });
+    });
     await page.evaluate(() => (document.documentElement.dataset.face = "night"));
+    await expect.poll(() => line.evaluate((p) => getComputedStyle(p).stroke)).toBe("rgb(26, 163, 132)");
+    await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+    expect(await page.evaluate(() => (window as unknown as { redraws: number }).redraws)).toBe(0);
+    // The next drawing writes the night colour into the attribute, for a reader without the page's CSS.
+    await page.locator("#c1").evaluate((c) => ((c as HTMLElement).style.width = "580px"));
     await expect(line).toHaveAttribute("stroke", "#1aa384");
   });
 
-  test("a change on <html> that leaves the face alone redraws nothing; a class that switches it does", async ({ page }) => {
+  test("a change on <html> that leaves the face alone redraws nothing, nor does a class that switches it", async ({ page }) => {
     const line = page.locator('#c1 g.tw-series[data-series="clang"] path').first();
     await page.evaluate(async () => {
       await document.fonts.ready;
@@ -335,7 +346,9 @@ test.describe("at rest", () => {
       style.textContent = "html.night { --ink: #f2f2ee; --series-verge: #1aa384; }";
       document.documentElement.classList.add("night");
     });
-    await expect(line).toHaveAttribute("stroke", "#1aa384");
+    await expect.poll(() => line.evaluate((p) => getComputedStyle(p).stroke)).toBe("rgb(26, 163, 132)");
+    await frames();
+    expect(await page.evaluate(() => (window as unknown as { redraws: number }).redraws)).toBe(0);
   });
 
   test("a chart that cannot draw says why, and tells the page", async ({ page }) => {

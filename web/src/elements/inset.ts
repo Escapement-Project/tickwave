@@ -133,6 +133,12 @@ export class TickwaveInset extends TickwaveElement {
     this.#maybeSweep();
   }
 
+  /** A canvas cannot fade: it takes the new face in the frame the face turns, not the next. */
+  protected override faceTurned(): void {
+    super.faceTurned();
+    this.#plot.drawNow();
+  }
+
   protected paletteChanged(): void {
     this.#plot.palette = this.palette;
     this.#layoutKey = "";

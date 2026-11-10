@@ -1,19 +1,27 @@
 // A chart's SVG, as markup. Data colours are presentation attributes, resolved from the page's tokens
 // when it draws; text, grid and neutral marks are currentColor; nothing refers to an id. So the
-// figure reads the same in reader view, in a feed, or without the page's CSS. Only the rings that
-// part a point from what it overlaps, and a hollow point's middle, take the surface colour from CSS
-// (`tw-pt`, `tw-hollow`): without it they drop rather than keep a stale colour.
+// figure reads the same in reader view, in a feed, or without the page's CSS. Where the page's CSS
+// applies, each data colour's style refers to its token instead, so the colours follow the page's
+// face without a redraw, and fade with it where the page fades. The rings that part a point from
+// what it overlaps, and a hollow point's middle, take the surface colour from CSS only (`tw-pt`,
+// `tw-hollow`): without it they drop rather than keep a stale colour.
 
 import { escapeHtml as esc } from "../escape.ts";
 import type { Marker, Pattern } from "./data.ts";
 import { f1, Y_LABEL_GAP, type Layout, type Placed, type SeriesLayout } from "./layout.ts";
 
+/** A data colour: its value when the chart drew, and the CSS that gives it, following the face. */
+export interface Paint {
+  readonly value: string;
+  readonly css: string;
+}
+
 export interface Colours {
   /** A series token's colour: `--series-<name>`. */
-  series(name: string): string;
+  series(name: string): Paint;
   /** A line pattern's dash array; empty for solid. */
   dash(pattern: Pattern | "misread"): string;
-  readonly fault: string;
+  readonly fault: Paint;
   readonly captureWidth: number;
   readonly captureOpacity: number;
   readonly fontText: string;
@@ -35,6 +43,11 @@ export interface State {
   readonly yUnit: string;
 }
 
+
+/** `prop` in `p`: the attribute for a reader without the page's CSS, the style for one with it. */
+export function paint(prop: "fill" | "stroke", p: Paint): string {
+  return `${prop}="${esc(p.value)}" style="${prop}:${esc(p.css)}"`;
+}
 
 export function render(l: Layout, state: State, c: Colours): string {
   const out: string[] = [];
@@ -70,8 +83,8 @@ export function render(l: Layout, state: State, c: Colours): string {
 
   for (const f of l.fails) {
     const dim = state.series !== null && state.series !== f.series ? ' opacity=".2"' : "";
-    out.push(`<g${dim}><path d="M${f1(f.x - 4)} ${f1(f.y - 4)}l8 8m0 -8l-8 8" stroke="${c.fault}" stroke-width="2" fill="none"/>`);
-    out.push(`<text x="${f1(f.x - 9)}" y="${f1(f.y + 4)}" text-anchor="end" fill="${c.fault}" font-weight="600">${esc(f.text)}</text></g>`);
+    out.push(`<g${dim}><path d="M${f1(f.x - 4)} ${f1(f.y - 4)}l8 8m0 -8l-8 8" ${paint("stroke", c.fault)} stroke-width="2" fill="none"/>`);
+    out.push(`<text x="${f1(f.x - 9)}" y="${f1(f.y + 4)}" text-anchor="end" ${paint("fill", c.fault)} font-weight="600">${esc(f.text)}</text></g>`);
   }
 
   for (const [id, i] of state.rings) {
@@ -109,7 +122,7 @@ function seriesMarkup(s: SeriesLayout, l: Layout, state: State, c: Colours): str
   }
   for (const run of runs) {
     const dash = run.wrong ? c.dash("misread") : c.dash(series.pattern);
-    out.push(`<path d="${run.d}" fill="none" stroke="${colour}" stroke-width="${width}"${dash ? ` stroke-dasharray="${esc(dash)}"` : ""}/>`);
+    out.push(`<path d="${run.d}" fill="none" ${paint("stroke", colour)} stroke-width="${width}"${dash ? ` stroke-dasharray="${esc(dash)}"` : ""}/>`);
   }
   for (const p of s.placed) {
     if (sweep !== null && sweep < p.x) break;
@@ -132,22 +145,22 @@ function cut(a: Placed, b: Placed, x: number): { x: number; y: number } {
 }
 
 /** A point's marker, 8 px across: filled with a ring in the surface colour, or hollow. */
-export function marker(shape: Marker, x: number, y: number, colour: string, hollow: boolean): string {
-  const paint = hollow
-    ? `class="tw-hollow" fill="none" stroke="${colour}" stroke-width="2"`
-    : `class="tw-pt" fill="${colour}" stroke="none" stroke-width="2"`;
+export function marker(shape: Marker, x: number, y: number, colour: Paint, hollow: boolean): string {
+  const look = hollow
+    ? `class="tw-hollow" fill="none" ${paint("stroke", colour)} stroke-width="2"`
+    : `class="tw-pt" ${paint("fill", colour)} stroke="none" stroke-width="2"`;
   const X = f1(x);
   const Y = f1(y);
   switch (shape) {
     case "circle":
-      return `<circle cx="${X}" cy="${Y}" r="4" ${paint}/>`;
+      return `<circle cx="${X}" cy="${Y}" r="4" ${look}/>`;
     case "square":
-      return `<rect x="${f1(x - 3.5)}" y="${f1(y - 3.5)}" width="7" height="7" ${paint}/>`;
+      return `<rect x="${f1(x - 3.5)}" y="${f1(y - 3.5)}" width="7" height="7" ${look}/>`;
     case "diamond":
-      return `<path d="M${X} ${f1(y - 5)}l5 5l-5 5l-5 -5z" ${paint}/>`;
+      return `<path d="M${X} ${f1(y - 5)}l5 5l-5 5l-5 -5z" ${look}/>`;
     case "triangle-up":
-      return `<path d="M${X} ${f1(y - 5)}l5 8.5h-10z" ${paint}/>`;
+      return `<path d="M${X} ${f1(y - 5)}l5 8.5h-10z" ${look}/>`;
     case "triangle-down":
-      return `<path d="M${X} ${f1(y + 5)}l5 -8.5h-10z" ${paint}/>`;
+      return `<path d="M${X} ${f1(y + 5)}l5 -8.5h-10z" ${look}/>`;
   }
 }

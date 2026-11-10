@@ -35,7 +35,9 @@ element's SVG children and drops any shadow root, clonable or not (Firefox 160).
 The SVG reads the same in reader view, in a feed, or on a page without its CSS:
 
 - Data colours come from the page's tokens when the chart draws, and go into the SVG as
-  presentation attributes. The chart redraws when the face changes.
+  presentation attributes. Each also has a style that refers to its token, so where the page's CSS
+  applies, the colours follow the face without a redraw. Where the page fades its colours as the
+  face turns, they fade with it. Reader view clears the style and keeps the attributes.
 - Text, grid, axes and neutral marks are `currentColor`.
 - Fonts are presentation attributes, since reader view's sanitizer clears `style`.
 - Nothing refers to an id (`url(#id)`), since reader view sets a `<base>`. So the entry sweep cuts
@@ -213,8 +215,8 @@ A chart sweeps in once, when 60 % of it first shows, or 60 % of the window for a
 the window. The lines draw from the first x to the last over 750 ms, easing out. A limit grows from
 its series' point as the sweep crosses it. The end labels then appear a whole character at a time
 over 200 ms. A reader who prefers reduced motion, a printed page, and a chart that already has a
-highlight get the end state at once, and a highlight set while the sweep plays ends it. A redraw for
-a face change, a resize or new data never plays the sweep again.
+highlight get the end state at once, and a highlight set while the sweep plays ends it. A face change
+does not redraw the chart, and a redraw for a resize or new data never plays the sweep again.
 
 ### Accessibility
 

@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>A page that fades its face</title>
+<!--
+  A page that fades its colours as its face turns, as the project's switch does (the site's base.css
+  and face.js): the switch puts a class on <html> with the new face, so every element's colours
+  transition, and takes it off once they have. Without motion it turns at once. A chart and an open
+  view, to see what tickwave does meanwhile; tickwave depends on neither the class nor the timing.
+-->
+<link rel="stylesheet" href="/dist/site/tokens.css">
+<style>
+body { margin: 0; padding: 20px; background: var(--page); color: var(--ink); font: 400 15px/1.5 var(--font-text); }
+@media (prefers-reduced-motion: no-preference) {
+  :root.turning, :root.turning *, :root.turning *::before, :root.turning *::after {
+    transition-property: color, background-color, border-color, outline-color, fill, stroke;
+    transition-duration: .26s; transition-timing-function: cubic-bezier(.4, 0, .2, 1);
+  }
+}
+</style>
+<script type="module" src="/dist/tickwave-chart.js"></script>
+<script type="module" src="/dist/tickwave.js"></script>
+</head>
+<body>
+<button id="faces" type="button">Night face</button>
+<figure style="width: 620px"><tickwave-chart id="c" src="/fixtures/figure1.chart.json"></tickwave-chart></figure>
+<tickwave-view id="v" src="/fixtures/identify-swd.tickwave" open style="display: block; width: 620px"></tickwave-view>
+<script>
+const root = document.documentElement;
+let done = 0;
+document.getElementById("faces").addEventListener("click", () => {
+  if (!matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    root.classList.add("turning");
+    clearTimeout(done);
+    done = setTimeout(() => root.classList.remove("turning"), 360);
+  }
+  root.dataset.face = root.dataset.face === "night" ? "day" : "night";
+});
+</script>
+</body>
+</html>

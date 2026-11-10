@@ -19,9 +19,9 @@ const WIRE = parseChart(JSON.parse(readFileSync(new URL("../fixtures/wire.chart.
 const WIRE_SHOWN = new Set(["gcc", "capture", "stock"]);
 
 const COLOURS: Colours = {
-  series: (name) => ({ verge: "#0f8a6c", nxp: "#2a78d6" })[name] ?? "#000000",
+  series: (name) => ({ value: ({ verge: "#0f8a6c", nxp: "#2a78d6" })[name] ?? "#000000", css: `var(--series-${name})` }),
   dash: (p) => ({ solid: "", "second-build": "6 3", reference: "8 3 2 3", "capture-second": "12 4", misread: "2 4" })[p],
-  fault: "#b81c20",
+  fault: { value: "#b81c20", css: "var(--fault-ink)" },
   captureWidth: 1.5,
   captureOpacity: 0.6,
   fontText: "sans-serif",
@@ -157,7 +157,7 @@ test("a failed setting breaks the line, the segment into a point read wrong is d
   // Had 30 MHz read right too, the segment into 50 would be dotted.
   const read = layout(withPoint("stock", 5, { failed: false, value: "700.0" }, wrong50), SHOWN, 620, 330, 40);
   assert.deepEqual(read.series.find((s) => s.series.id === "stock")!.segments.at(-1)!.wrong, true);
-  assert.match(render(read, AT_REST, COLOURS), /<path d="M\S+ \S+L\S+ \S+" fill="none" stroke="#2a78d6" stroke-width="2" stroke-dasharray="2 4"\/>/);
+  assert.match(render(read, AT_REST, COLOURS), /<path d="M\S+ \S+L\S+ \S+" fill="none" stroke="#2a78d6" style="stroke:var\(--series-nxp\)" stroke-width="2" stroke-dasharray="2 4"\/>/);
   // A setting without a value inside a solid run splits its path in two, rather than joining
   // across it: failed, partly failed, or never measured.
   for (const gap of [{ failed: true, value: null }, { partial: { failed: 1, of: 2, value: "740.0" }, value: null }]) {
@@ -180,6 +180,10 @@ test("a failed setting breaks the line, the segment into a point read wrong is d
   assert.equal((svg.match(/class="tw-hollow"/g) ?? []).length, 0, "no point at rest reads wrong");
   assert.equal((svg.match(/class="tw-pt"/g) ?? []).length, 7 + 5, "Clang's seven points and NXP's five read right");
   assert.ok(svg.includes('stroke="#0f8a6c"'), "Verge's teal as an attribute");
+  // Where the page's CSS applies, each data colour is its token, which follows the face.
+  assert.ok(svg.includes('stroke="#0f8a6c" style="stroke:var(--series-verge)"'), "a line's token beside its colour");
+  assert.ok(svg.includes('class="tw-pt" fill="#0f8a6c" style="fill:var(--series-verge)"'), "a point's token beside its colour");
+  assert.ok(render(layout(marked, SHOWN, 620, 330, 40), AT_REST, COLOURS).includes('stroke="#b81c20" style="stroke:var(--fault-ink)"'), "a failure's mark too");
 });
 
 test("end labels that would overlap stand apart, inside the plot, and the margin fits the widest", () => {

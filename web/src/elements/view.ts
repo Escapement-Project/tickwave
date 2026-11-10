@@ -230,6 +230,12 @@ export class TickwaveView extends TickwaveElement {
     if (this.#loaded) this.#layout(true);
   }
 
+  /** A canvas cannot fade: it takes the new face in the frame the face turns, not the next. */
+  protected override faceTurned(): void {
+    super.faceTurned();
+    this.#plot.drawNow();
+  }
+
   protected update(): void {
     const open = this.open;
     this.#summary.hidden = open;

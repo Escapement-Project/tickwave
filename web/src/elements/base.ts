@@ -6,10 +6,14 @@ import { absolute, annotationsFor, bundledFor, infoFor, sourceFor } from "../reg
 import type { RecordingInfo, Source } from "../source.ts";
 
 export const SHARED_CSS = `
+/* A transition the page gives the element carries to its parts, as a page fading its colours while
+   its face turns gives one: the parts' colours fade with the page's. A part's own transition wins. */
+:where(*), :where(*)::before, :where(*)::after { transition: inherit; }
 :host { display: block; color: var(--ink, CanvasText); font-family: var(--font-text, system-ui, sans-serif);
   font-size: 14px; line-height: 1.4; }
 :host([hidden]) { display: none; }
-.probe { display: none; }
+/* The face's colours are read here, so it never fades: a read mid-fade would give a colour half-way. */
+.probe { display: none; transition: none; }
 button, select { font: inherit; font-size: 13px; line-height: 1.2; color: var(--ink, CanvasText); background: transparent;
   border: 1px solid var(--rule, GrayText); border-radius: 6px; padding: 3px 9px; min-height: 26px; cursor: pointer; }
 select { padding-right: 4px; background: var(--raised, Canvas); }
@@ -67,7 +71,7 @@ export abstract class TickwaveElement extends HTMLElement {
   connectedCallback(): void {
     if (this.drawsWithPalette) {
       this.#unsubscribe.push(
-        onFaceChange(() => this.refreshPalette()),
+        onFaceChange(() => this.faceTurned()),
         onFontsLoaded(() => this.fontsChanged()),
       );
     }
@@ -115,6 +119,12 @@ export abstract class TickwaveElement extends HTMLElement {
   }
 
   protected abstract paletteChanged(): void;
+
+  /** The page's face has turned, half-way through its fade where it fades (face.ts): the colours
+   * are read again. */
+  protected faceTurned(): void {
+    this.refreshPalette();
+  }
 
   protected fontsChanged(): void {
     this.paletteChanged();

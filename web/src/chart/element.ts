@@ -9,7 +9,8 @@ import { parseChart, type ChartData, type Evidence, type Pattern } from "./data.
 import { grouped } from "./decimal.ts";
 import { layout, type Layout, type Placed, type SeriesLayout } from "./layout.ts";
 import { figure, swatch } from "./readout.ts";
-import { render, type Colours } from "./render.ts";
+import { render, type Colours, type Paint } from "./render.ts";
+import { SERIES_TOKEN } from "../tokens.ts";
 
 const SVG = "http://www.w3.org/2000/svg";
 const SWEEP_MS = 750;
@@ -92,6 +93,8 @@ export class TickwaveChart extends HTMLElement {
   #notice: HTMLParagraphElement | null = null;
   #probe: HTMLSpanElement | null = null;
   #colours: Colours | null = null;
+  /** The tokens the chart lays out with, as #colour last read them: dashes, widths and the font. */
+  #tokens = "";
   #x: number | null = null;
   #series: string | null = null;
   #limit = false;
@@ -196,9 +199,16 @@ export class TickwaveChart extends HTMLElement {
       () => this.#closeEvidence(),
       () => this.#float(false),
       onFaceChange(() => {
+        // The data colours follow the face in CSS, and fade with the page where it fades: a redraw
+        // would replace them mid-fade. The next drawing writes the new face's into the attributes;
+        // only a token the chart lays out with redraws it now.
+        const laidOut = this.#tokens;
         this.#colours = null;
-        this.#floatKey = "";
-        this.#draw();
+        this.#colour();
+        if (this.#tokens !== laidOut) {
+          this.#floatKey = "";
+          this.#draw();
+        }
       }),
       onFontsLoaded(() => {
         this.#floatKey = "";
@@ -421,7 +431,8 @@ export class TickwaveChart extends HTMLElement {
       return normalise(getComputedStyle(probe).color) ?? "rgb(0, 0, 0)";
     };
     const token = (name: string, fallback: string) => style.getPropertyValue(name).trim() || fallback;
-    const cache = new Map<string, string>();
+    const cache = new Map<string, Paint>();
+    const paints = (css: string) => ({ value: read(css), css });
     const dashes: Record<Pattern | "misread", string> = {
       solid: "",
       "second-build": token("--dash-second-build", "6 3"),
@@ -432,16 +443,18 @@ export class TickwaveChart extends HTMLElement {
     this.#colours = {
       series: (name) => {
         let c = cache.get(name);
-        if (c === undefined) cache.set(name, (c = read(`var(--series-${name}, var(--ink, CanvasText))`)));
+        if (c === undefined) cache.set(name, (c = paints(SERIES_TOKEN.test(name) ? `var(--series-${name}, var(--ink, CanvasText))` : "var(--ink, CanvasText)")));
         return c;
       },
       dash: (p) => dashes[p],
-      fault: read("var(--fault-ink, var(--attention-ink, CanvasText))"),
+      fault: paints("var(--fault-ink, var(--attention-ink, CanvasText))"),
       captureWidth: parseFloat(token("--capture-width", "1.5")) || 1.5,
       captureOpacity: opacity(token("--capture-opacity", "60%")),
       fontText: token("--font-text", "system-ui, sans-serif"),
     };
-    return this.#colours;
+    const c = this.#colours;
+    this.#tokens = JSON.stringify([Object.values(dashes), c.captureWidth, c.captureOpacity, c.fontText]);
+    return c;
   }
 
   #draw(): void {
