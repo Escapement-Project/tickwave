@@ -211,7 +211,8 @@ and 1/width, the width's reciprocal as a rate (one UART bit's gives the
 baud rate). The width and the period sit on their spans once the row is tall enough for them.
 Until then the label gives them too, with the pulse's level. A pulse's edges can lie far past what
 the row has read, as on a quiet line zoomed in close. Once the pointer rests, the view finds them
-through the overview and reads just those. Where one pixel holds several edges, the label asks for
+through the overview and reads just those. Moving within the pulse lets the search go on, and once
+found, the pulse reads at once anywhere in it. Where one pixel holds several edges, the label asks for
 a closer look. The label keeps to the edge of the rows away from the row it reads, so it never
 covers the wave there. In a plot too short for it, it runs past the plot's edge.
 

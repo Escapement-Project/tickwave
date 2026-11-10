@@ -106,6 +106,33 @@ test("a pulse whose edges lie past the data drawn is measured once the pointer r
   expect(await labels(page, view, await xOf(view, 100_000_500), 400)).toContain("high at least 376.719436 ms");
 });
 
+test("a pulse being measured goes on measuring as the pointer moves within it, and once measured reads at once anywhere in it", async ({ page }) => {
+  await page.goto(`${VIEW}?open`);
+  const view = page.locator("#v");
+  // 100 ns of SWDIO's 4.494 µs high pulse, as above; SWDIO is the lower row.
+  await settle(view, 376_848_000, 376_848_100);
+  const [a, b] = await Promise.all([0, 1].map(async (i) => {
+    const h = (await view.locator('[part="row-handle"]').nth(i).boundingBox())!;
+    return h.y + h.height / 2;
+  }));
+  const y = (a + b) / 2;
+  const text = async () => ((await probe(view).isVisible()) ? (await probe(view).innerText()).replace(/ /g, " ") : "");
+  // The pointer never rests: a step every 40 ms, under the 150 ms the view waits for a rest.
+  const x0 = await xOf(view, 376_848_020);
+  let seen = "";
+  for (let i = 0; i < 50 && !seen.startsWith("high 4.494 µs"); i++) {
+    await page.mouse.move(x0 + (i % 20) * 2, y);
+    await page.waitForTimeout(40);
+    seen = await text();
+  }
+  expect(seen).toMatch(/^high 4\.494 µs\nperiod /);
+  // Elsewhere in the same pulse the label reads at once, without measuring again.
+  await page.mouse.move(await xOf(view, 376_848_080), y);
+  expect(await text()).toMatch(/^high 4\.494 µs/);
+  await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+  expect(await text()).toMatch(/^high 4\.494 µs/);
+});
+
 test("zoomed out, a pixel with several edges asks for a closer look", async ({ page }) => {
   await page.goto(`${VIEW}?open`);
   const view = page.locator("#v");

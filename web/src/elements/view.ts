@@ -9,7 +9,8 @@ import { clockNote, countEdges, formatBrief, formatBytes, formatClockPeriod, for
 import { analogFromOverview, analogFromSamples, complete, completePulse, pulseFigures, pulseFromEdges, type Pulse } from "../probe.ts";
 import { lowerBound } from "../search.ts";
 import { channelIndices, Plot, type PulseMark } from "../render/plot.ts";
-import { isAbort, named, sampleAtOrBefore, sampleTick, type DigitalChannel, type RecordingInfo } from "../source.ts";
+import type { Tile } from "../render/track.ts";
+import { isAbort, named, sampleAtOrBefore, sampleTick, type DigitalChannel, type RecordingInfo, type Source } from "../source.ts";
 import { parseTime, toTicks, type TimeSpec } from "../time.ts";
 import { TickwaveElement, loadRecording, type Loaded } from "./base.ts";
 
@@ -82,6 +83,31 @@ const HTML = `
 const DRAG_PX = 4;
 /** Between the hover label and the row it reads, in CSS pixels. */
 const LABEL_GAP = 6;
+
+/** Whether a measured pulse holds `tick`. */
+function within(p: Pulse, tick: number): boolean {
+  return (p.start == null || p.start <= tick) && (p.end == null || tick < p.end);
+}
+
+/** Whether ticks `a` and `b` lie in one pulse, as far as `tile` shows: no edge between them. */
+function onePulse(tile: Tile, a: number, b: number): boolean {
+  const [lo, hi] = a < b ? [a, b] : [b, a];
+  if (lo < tile.start || hi >= tile.end) return false;
+  if (tile.kind === "edges") {
+    // An edge at tick e starts the level after it: none in (lo, hi].
+    const t = tile.data.ticks;
+    return lowerBound(t, hi + 1) === lowerBound(t, lo + 1);
+  }
+  if (tile.kind === "digital-overview") {
+    const o = tile.data;
+    const k0 = Math.floor((lo - o.start) / o.bucket);
+    const k1 = Math.floor((hi - o.start) / o.bucket);
+    if (k0 < 0 || k1 >= o.changes.length) return false;
+    for (let k = k0; k <= k1; k++) if (o.changes[k]) return false;
+    return true;
+  }
+  return false;
+}
 /** A pulse whose edges lie past the data drawn is measured once the pointer rests this long. */
 const REST_MS = 150;
 const SNAP_PX = 6;
@@ -862,6 +888,10 @@ export class TickwaveView extends TickwaveElement {
   #pointer: { x: number; y: number } | null = null;
   #probeTimer = 0;
   #probeAbort: AbortController | null = null;
+  /** The pulse being measured: it goes on while the pointer moves within it. */
+  #measuring: { source: Source; index: number; tick: number; level: 0 | 1 } | null = null;
+  /** The last pulse measured: the label gives it at once anywhere within it. */
+  #measured: { source: Source; index: number; pulse: Pulse } | null = null;
   /** What the label last measured from: a draw that changes none of it leaves the label be. */
   #probeFrom: { x: number; y: number; start: number; end: number; tile: unknown } | null = null;
 
@@ -869,10 +899,16 @@ export class TickwaveView extends TickwaveElement {
     return this.root.querySelector(".reading") as HTMLElement;
   }
 
-  #hideProbe(): void {
+  /** Stops a measurement under way. */
+  #stopMeasuring(): void {
     clearTimeout(this.#probeTimer);
     this.#probeAbort?.abort();
     this.#probeAbort = null;
+    this.#measuring = null;
+  }
+
+  #hideProbe(): void {
+    this.#stopMeasuring();
     this.#probeFrom = null;
     this.#probeBox().hidden = true;
     this.#setMark(null);
@@ -894,9 +930,17 @@ export class TickwaveView extends TickwaveElement {
    * A pulse whose edges lie past the data drawn is finished once the pointer rests.
    */
   #probe(): void {
-    clearTimeout(this.#probeTimer);
-    this.#probeAbort?.abort();
-    this.#probeAbort = null;
+    // A measurement under way goes on only while the pointer stays within its pulse.
+    let measuring = false;
+    try {
+      measuring = this.#probeAt();
+    } finally {
+      if (!measuring) this.#stopMeasuring();
+    }
+  }
+
+  /** The label at the pointer; true while it waits on a measurement of the pulse there. */
+  #probeAt(): boolean {
     const box = this.#probeBox();
     const p = this.#pointer;
     const l = this.#plot.layout;
@@ -906,7 +950,7 @@ export class TickwaveView extends TickwaveElement {
       this.#probeFrom = null;
       box.hidden = true;
       this.#setMark(null);
-      return;
+      return false;
     }
     const track = this.#plot.tracks[hit.row];
     const tile = track?.tile ?? null;
@@ -919,7 +963,7 @@ export class TickwaveView extends TickwaveElement {
     if (!tile || tick < tile.start || tick >= tile.end || tick < 0 || tick > c.end) {
       box.hidden = true;
       this.#setMark(null);
-      return;
+      return false;
     }
     let lines: string[] | null = null;
     if (c.kind === "analog") {
@@ -943,33 +987,50 @@ export class TickwaveView extends TickwaveElement {
         if (changes) lines = ["zoom in to measure"];
         else if (k0 < o.level.length) pulse = { level: o.level[k0] ? 1 : 0, start: undefined, end: undefined, next: undefined };
       }
+      const known = this.#measured;
+      if (pulse && !complete(pulse) && known?.source === loaded.source && known.index === track.index && within(known.pulse, tick)) pulse = known.pulse;
       if (pulse && complete(pulse)) {
         this.#showPulse(pulse, c, loaded.info, p, hit.row);
-        return;
+        return false;
       }
       // A row whose last read failed waits before it reads again, and so does the label: the level only.
       else if (pulse && track.failed) lines = [pulse.level ? "high" : "low"];
       else if (pulse) {
-        const asked = pulse;
-        lines = [asked.level ? "high" : "low", "measuring…"];
-        const abort = new AbortController();
-        this.#probeAbort = abort;
-        this.#probeTimer = window.setTimeout(() => {
-          completePulse(loaded.source, track.index, asked, tick, c.end, abort.signal).then(
-            (done) => {
-              if (!abort.signal.aborted) this.#showPulse(done, c, loaded.info, p, hit.row);
-            },
-            // A measurement that fails says nothing: the row's own read reports the trouble.
-            () => {
-              if (!abort.signal.aborted) box.hidden = true;
-            },
-          );
-        }, REST_MS);
+        lines = [pulse.level ? "high" : "low", "measuring…"];
+        const m = this.#measuring;
+        const same = m?.source === loaded.source && m.index === track.index && m.level === pulse.level && onePulse(tile, m.tick, tick);
+        if (!same) {
+          this.#stopMeasuring();
+          const asked = pulse;
+          const abort = new AbortController();
+          this.#probeAbort = abort;
+          this.#measuring = { source: loaded.source, index: track.index, tick, level: pulse.level };
+          this.#probeTimer = window.setTimeout(() => {
+            completePulse(loaded.source, track.index, asked, tick, c.end, abort.signal).then(
+              (done) => {
+                if (abort.signal.aborted) return;
+                this.#measuring = null;
+                this.#probeAbort = null;
+                this.#measured = { source: loaded.source, index: track.index, pulse: done };
+                // Wherever the pointer has moved to since, within the pulse or not.
+                this.#probe();
+              },
+              // A measurement that fails says nothing: the row's own read reports the trouble.
+              () => {
+                if (!abort.signal.aborted) box.hidden = true;
+              },
+            );
+          }, REST_MS);
+        }
+        this.#setMark(null);
+        this.#showProbe(lines, p, l.rows[hit.row]);
+        return true;
       }
     }
     this.#setMark(null);
     if (!lines) box.hidden = true;
     else this.#showProbe(lines, p, l.rows[hit.row]);
+    return false;
   }
 
   #setMark(m: PulseMark | null): void {
