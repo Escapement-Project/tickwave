@@ -8,14 +8,14 @@
 //! - Analog (type 1): f64 begin, f64 trigger, f64 sample rate, u64 downsample, u64 count, then
 //!   `count` f32 volts. Only a downsample of 1 is read: no export at another has been checked.
 
-use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use memmap2::Mmap;
 use tickwave_format::model::{
     Analog, Channel, ChannelData, Digital, Ratio, Recording, Samples, Source,
 };
+
+use crate::input::{self, Input, Items};
 
 const MAGIC: &[u8; 8] = b"<SALEAE>";
 const DIGITAL_HEADER: usize = 60;
@@ -39,7 +39,7 @@ pub enum Error {
     #[error("{path}: {len} bytes, but the header promises {expected}")]
     Length {
         path: PathBuf,
-        len: usize,
+        len: u64,
         expected: u128,
     },
     #[error("{path}: sample rate {rate} is not a whole number of hertz")]
@@ -49,20 +49,20 @@ pub enum Error {
     #[error("{path}: edge {index} lies {residual:.3} samples off the sample grid")]
     OffGrid {
         path: PathBuf,
-        index: usize,
+        index: u64,
         residual: f64,
     },
     #[error("{path}: edge {index} at tick {tick} does not follow tick {previous}")]
     NotIncreasing {
         path: PathBuf,
-        index: usize,
+        index: u64,
         tick: i64,
         previous: i64,
     },
     #[error("{path}: edge {index} at tick {tick} lies outside the capture, ticks 1 to {end}")]
     OutOfCapture {
         path: PathBuf,
-        index: usize,
+        index: u64,
         tick: i64,
         end: i64,
     },
@@ -76,50 +76,49 @@ pub enum Error {
     NoChannels,
 }
 
-/// A mapped file whose header has been read.
-struct Mapped {
+/// A file whose header has been read.
+struct File {
     path: PathBuf,
-    map: Arc<Mmap>,
+    input: Arc<dyn Input>,
+    size: u64,
+    /// The file's first bytes, as many as the longest header.
+    head: Vec<u8>,
 }
 
-impl Mapped {
-    fn open(path: &Path) -> Result<(Self, i32), Error> {
-        let io = |source| Error::Io {
-            path: path.to_owned(),
-            source,
-        };
-        let file = File::open(path).map_err(io)?;
-        // SAFETY: nothing may truncate or write the export while it is mapped. tickwave never
-        // writes its input, and a converter run over a finished export holds that.
-        let map = unsafe { Mmap::map(&file) }.map_err(io)?;
-        let path = path.to_owned();
-        if map.len() < 24 || &map[..8] != MAGIC {
+impl File {
+    fn open(path: PathBuf, input: Arc<dyn Input>) -> Result<(Self, i32), Error> {
+        let size = input.size();
+        let mut head = vec![0; size.min(ANALOG_HEADER as u64) as usize];
+        input.read_at(0, &mut head);
+        if head.len() < 24 || &head[..8] != MAGIC {
             return Err(Error::NotSaleae { path });
         }
-        let mapped = Self {
+        let file = Self {
             path,
-            map: Arc::new(map),
+            input,
+            size,
+            head,
         };
-        let (version, kind, chunks) = (mapped.i32_at(8), mapped.i32_at(12), mapped.i64_at(16));
+        let (version, kind, chunks) = (file.i32_at(8), file.i32_at(12), file.i64_at(16));
         if version != 1 {
-            return Err(mapped.unsupported(format!("export version {version}")));
+            return Err(file.unsupported(format!("export version {version}")));
         }
         if chunks != 1 {
-            return Err(mapped.unsupported(format!("{chunks} chunks")));
+            return Err(file.unsupported(format!("{chunks} chunks")));
         }
-        Ok((mapped, kind))
+        Ok((file, kind))
     }
 
     fn i32_at(&self, at: usize) -> i32 {
-        i32::from_le_bytes(self.map[at..at + 4].try_into().unwrap())
+        i32::from_le_bytes(self.head[at..at + 4].try_into().unwrap())
     }
 
     fn i64_at(&self, at: usize) -> i64 {
-        i64::from_le_bytes(self.map[at..at + 8].try_into().unwrap())
+        i64::from_le_bytes(self.head[at..at + 8].try_into().unwrap())
     }
 
     fn f64_at(&self, at: usize) -> f64 {
-        f64::from_le_bytes(self.map[at..at + 8].try_into().unwrap())
+        f64::from_le_bytes(self.head[at..at + 8].try_into().unwrap())
     }
 
     fn unsupported(&self, what: String) -> Error {
@@ -130,10 +129,10 @@ impl Mapped {
     }
 
     fn need(&self, header: usize) -> Result<(), Error> {
-        if self.map.len() < header {
+        if self.size < header as u64 {
             return Err(Error::Length {
                 path: self.path.clone(),
-                len: self.map.len(),
+                len: self.size,
                 expected: header as u128,
             });
         }
@@ -141,16 +140,21 @@ impl Mapped {
     }
 
     /// Checks the file holds its header and exactly `count` items of `size` bytes after it.
-    fn check_length(&self, header: usize, count: i64, size: u128) -> Result<usize, Error> {
+    fn check_length(&self, header: usize, count: i64, size: u128) -> Result<u64, Error> {
         let expected = header as u128 + size * count.max(0) as u128;
-        if count < 0 || self.map.len() as u128 != expected {
+        if count < 0 || u128::from(self.size) != expected {
             return Err(Error::Length {
                 path: self.path.clone(),
-                len: self.map.len(),
+                len: self.size,
                 expected,
             });
         }
-        Ok(count as usize)
+        Ok(count as u64)
+    }
+
+    /// The file's `N`-byte items after its header.
+    fn items<const N: usize>(&self, header: usize, count: u64) -> Items<N> {
+        Items::new(Arc::clone(&self.input), header as u64, count)
     }
 
     fn check_rate(&self, rate: f64) -> Result<(), Error> {
@@ -165,23 +169,23 @@ impl Mapped {
     }
 }
 
-/// One digital file, mapped and checked.
+/// One digital file, its header checked.
 struct DigitalFile {
-    file: Mapped,
+    file: File,
     initial: bool,
     rate: f64,
     begin: f64,
     end: f64,
-    count: usize,
+    count: u64,
 }
 
-/// One analog file, mapped and checked.
+/// One analog file, its header checked.
 struct AnalogFile {
-    file: Mapped,
+    file: File,
     begin: f64,
     trigger: f64,
     rate: f64,
-    count: usize,
+    count: u64,
 }
 
 enum Opened {
@@ -193,17 +197,12 @@ fn tick_of(t: f64, begin: f64, rate: f64) -> f64 {
     (t - begin) * rate
 }
 
-fn time_at(map: &Mmap, index: usize) -> f64 {
-    let at = DIGITAL_HEADER + 8 * index;
-    f64::from_le_bytes(map[at..at + 8].try_into().unwrap())
-}
-
-fn open(path: &Path) -> Result<Opened, Error> {
-    let (file, kind) = Mapped::open(path)?;
+fn open(path: PathBuf, input: Arc<dyn Input>) -> Result<Opened, Error> {
+    let (file, kind) = File::open(path, input)?;
     match kind {
         0 => {
             file.need(DIGITAL_HEADER)?;
-            let initial = u32::from_le_bytes(file.map[24..28].try_into().unwrap());
+            let initial = u32::from_le_bytes(file.head[24..28].try_into().unwrap());
             let (rate, begin, end) = (file.f64_at(28), file.f64_at(36), file.f64_at(44));
             let count = file.check_length(DIGITAL_HEADER, file.i64_at(52), 8)?;
             if initial > 1 {
@@ -245,13 +244,18 @@ impl DigitalFile {
         tick_of(self.end, self.begin, self.rate).round() as i64
     }
 
-    /// Checks every edge: on the grid, strictly increasing, inside the capture.
-    fn check(&self) -> Result<(), Error> {
+    /// Checks every edge: on the grid, strictly increasing, inside the capture. `step` hears of
+    /// each run of `STEP` edges checked.
+    fn check(&self, step: &mut dyn FnMut(u64)) -> Result<(), Error> {
         let path = || self.file.path.clone();
         let end = self.end_tick();
         let mut previous = 0;
-        for index in 0..self.count {
-            let exact = tick_of(time_at(&self.file.map, index), self.begin, self.rate);
+        let times = self.file.items::<8>(DIGITAL_HEADER, self.count);
+        for (index, time) in (0..).zip(times) {
+            if index % STEP == STEP - 1 {
+                step(STEP);
+            }
+            let exact = tick_of(f64::from_le_bytes(time), self.begin, self.rate);
             let tick = exact.round();
             let residual = (exact - tick).abs();
             if residual.is_nan() || residual > GRID_TOLERANCE {
@@ -283,65 +287,46 @@ impl DigitalFile {
         Ok(())
     }
 
-    fn edges(&self) -> EdgeIter {
-        EdgeIter {
-            map: Arc::clone(&self.file.map),
-            next: 0,
-            count: self.count,
-            begin: self.begin,
-            rate: self.rate,
-        }
+    fn edges(&self) -> impl Iterator<Item = i64> + Send + use<> {
+        let (begin, rate) = (self.begin, self.rate);
+        self.file
+            .items::<8>(DIGITAL_HEADER, self.count)
+            .map(move |t| tick_of(f64::from_le_bytes(t), begin, rate).round() as i64)
     }
 }
 
-struct EdgeIter {
-    map: Arc<Mmap>,
-    next: usize,
-    count: usize,
-    begin: f64,
-    rate: f64,
+/// What one file of an export holds, from its header.
+#[derive(Clone, Debug)]
+pub struct FileInfo {
+    pub analog: bool,
+    /// Edges in a digital file, samples in an analog one.
+    pub count: u64,
+    /// Samples a second.
+    pub rate: f64,
 }
 
-impl Iterator for EdgeIter {
-    type Item = i64;
-
-    fn next(&mut self) -> Option<i64> {
-        if self.next == self.count {
-            return None;
-        }
-        let t = time_at(&self.map, self.next);
-        self.next += 1;
-        Some(tick_of(t, self.begin, self.rate).round() as i64)
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let left = self.count - self.next;
-        (left, Some(left))
-    }
+/// Reads one file's header and checks it as `read` does, without reading its edges or samples.
+pub fn file_info(path: PathBuf, input: Arc<dyn Input>) -> Result<FileInfo, Error> {
+    Ok(match open(path, input)? {
+        Opened::Digital(d) => FileInfo {
+            analog: false,
+            count: d.count,
+            rate: d.rate,
+        },
+        Opened::Analog(a) => FileInfo {
+            analog: true,
+            count: a.count,
+            rate: a.rate,
+        },
+    })
 }
 
-struct SampleIter {
-    map: Arc<Mmap>,
-    next: usize,
-    count: usize,
-}
+/// Edges checked between two reports.
+const STEP: u64 = 1 << 16;
 
-impl Iterator for SampleIter {
-    type Item = f32;
-
-    fn next(&mut self) -> Option<f32> {
-        if self.next == self.count {
-            return None;
-        }
-        let at = ANALOG_HEADER + 4 * self.next;
-        self.next += 1;
-        Some(f32::from_le_bytes(self.map[at..at + 4].try_into().unwrap()))
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let left = self.count - self.next;
-        (left, Some(left))
-    }
+/// The name of a channel's file in an export, from its stem: `digital_3_0.bin`.
+pub fn file_name(stem: &str) -> String {
+    format!("{stem}.bin")
 }
 
 /// Reads the named channels of the export in `dir`. Each entry is the file's stem
@@ -356,104 +341,203 @@ pub fn read(dir: &Path, channels: &[(String, String)]) -> Result<Recording, Erro
     }
     let files = channels
         .iter()
-        .map(|(stem, _)| open(&dir.join(format!("{stem}.bin"))))
+        .map(|(stem, _)| {
+            let path = dir.join(file_name(stem));
+            match input::map(&path) {
+                Ok(input) => Ok((path, input)),
+                Err(source) => Err(Error::Io { path, source }),
+            }
+        })
         .collect::<Result<Vec<_>, _>>()?;
-    let (rate, begin, reference) = match files.iter().find_map(|f| match f {
-        Opened::Digital(d) => Some(d),
-        Opened::Analog(_) => None,
-    }) {
-        Some(d) => (d.rate, d.begin, &d.file.path),
-        None => {
-            let Opened::Analog(a) = &files[0] else {
-                unreachable!("no digital file was found")
-            };
-            (a.rate, a.begin, &a.file.path)
+    read_files(files, channels)
+}
+
+/// Reads the named channels, as `read` does, from their files already opened: `files[i]` holds
+/// `channels[i]`'s, named as `file_name` names it, with the path errors show.
+pub fn read_files(
+    files: Vec<(PathBuf, Arc<dyn Input>)>,
+    channels: &[(String, String)],
+) -> Result<Recording, Error> {
+    Ok(Headers::read(files, channels)?
+        .check(&mut |_| {})?
+        .recording())
+}
+
+/// An export's named channels, their headers read and checked against each other. Its edges are
+/// not read yet: `check` reads them all, and gives the `Export` that recordings come from.
+pub struct Headers {
+    files: Vec<Opened>,
+    channels: Vec<(String, String)>,
+    /// Each file's first tick: an analog file's first sample, 0 for a digital file.
+    firsts: Vec<i64>,
+    rate: f64,
+    begin: f64,
+    trigger: Option<f64>,
+    length: i64,
+}
+
+impl Headers {
+    /// Opens the named channels' files, already opened as for `read_files`. Tick 0 is the digital
+    /// channels' `begin`, or the first analog channel's when there are no digital ones. Analog
+    /// channels must sit on that grid, at the same sample rate.
+    pub fn read(
+        files: Vec<(PathBuf, Arc<dyn Input>)>,
+        channels: &[(String, String)],
+    ) -> Result<Self, Error> {
+        if channels.is_empty() {
+            return Err(Error::NoChannels);
         }
-    };
-    let mut length = 0;
-    let mut out = Vec::with_capacity(files.len());
-    let mut trigger = None;
-    for (opened, (stem, name)) in files.iter().zip(channels) {
-        let mismatch = |path: &PathBuf, what| Error::Mismatch {
-            path: path.clone(),
-            first: reference.clone(),
-            what,
-        };
-        let data = match opened {
-            Opened::Digital(d) => {
-                if d.rate.to_bits() != rate.to_bits() {
-                    return Err(mismatch(&d.file.path, "sample rate"));
-                }
-                if d.begin.to_bits() != begin.to_bits() {
-                    return Err(mismatch(&d.file.path, "begin time"));
-                }
-                d.check()?;
-                length = length.max(d.end_tick());
-                ChannelData::Digital(Digital {
-                    initial: d.initial,
-                    end: d.end_tick(),
-                    edges: Box::new(d.edges()),
-                })
-            }
-            Opened::Analog(a) => {
-                if a.rate.to_bits() != rate.to_bits() {
-                    return Err(mismatch(&a.file.path, "sample rate"));
-                }
-                let exact = tick_of(a.begin, begin, rate);
-                let first = exact.round();
-                let residual = (exact - first).abs();
-                if residual.is_nan() || residual > GRID_TOLERANCE {
-                    return Err(Error::AnalogOffGrid {
-                        path: a.file.path.clone(),
-                        residual,
-                    });
-                }
-                if trigger.is_some_and(|t: f64| t.to_bits() != a.trigger.to_bits()) {
-                    return Err(mismatch(&a.file.path, "trigger time"));
-                }
-                trigger = Some(a.trigger);
-                let first = first as i64;
-                length = length.max(first + a.count as i64);
-                ChannelData::Analog(Analog {
-                    unit: "V".into(),
-                    first,
-                    period: Ratio::integer(1),
-                    count: a.count as u64,
-                    samples: Samples::F32(Box::new(SampleIter {
-                        map: Arc::clone(&a.file.map),
-                        next: 0,
-                        count: a.count,
-                    })),
-                })
+        assert_eq!(files.len(), channels.len(), "one file a channel");
+        let files = files
+            .into_iter()
+            .map(|(path, input)| open(path, input))
+            .collect::<Result<Vec<_>, _>>()?;
+        let (rate, begin, reference) = match files.iter().find_map(|f| match f {
+            Opened::Digital(d) => Some(d),
+            Opened::Analog(_) => None,
+        }) {
+            Some(d) => (d.rate, d.begin, &d.file.path),
+            None => {
+                let Opened::Analog(a) = &files[0] else {
+                    unreachable!("no digital file was found")
+                };
+                (a.rate, a.begin, &a.file.path)
             }
         };
-        out.push(Channel {
-            name: name.clone(),
-            source_name: stem.clone(),
-            data,
-        });
+        let mut length = 0;
+        let mut firsts = Vec::with_capacity(files.len());
+        let mut trigger = None;
+        for opened in &files {
+            let mismatch = |path: &PathBuf, what| Error::Mismatch {
+                path: path.clone(),
+                first: reference.clone(),
+                what,
+            };
+            match opened {
+                Opened::Digital(d) => {
+                    if d.rate.to_bits() != rate.to_bits() {
+                        return Err(mismatch(&d.file.path, "sample rate"));
+                    }
+                    if d.begin.to_bits() != begin.to_bits() {
+                        return Err(mismatch(&d.file.path, "begin time"));
+                    }
+                    length = length.max(d.end_tick());
+                    firsts.push(0);
+                }
+                Opened::Analog(a) => {
+                    if a.rate.to_bits() != rate.to_bits() {
+                        return Err(mismatch(&a.file.path, "sample rate"));
+                    }
+                    let exact = tick_of(a.begin, begin, rate);
+                    let first = exact.round();
+                    let residual = (exact - first).abs();
+                    if residual.is_nan() || residual > GRID_TOLERANCE {
+                        return Err(Error::AnalogOffGrid {
+                            path: a.file.path.clone(),
+                            residual,
+                        });
+                    }
+                    if trigger.is_some_and(|t: f64| t.to_bits() != a.trigger.to_bits()) {
+                        return Err(mismatch(&a.file.path, "trigger time"));
+                    }
+                    trigger = Some(a.trigger);
+                    let first = first as i64;
+                    length = length.max(first + a.count as i64);
+                    firsts.push(first);
+                }
+            }
+        }
+        Ok(Self {
+            files,
+            channels: channels.to_vec(),
+            firsts,
+            rate,
+            begin,
+            trigger,
+            length,
+        })
     }
-    let mut source = Source {
-        format: "saleae-binary-1".into(),
-        files: files
+
+    /// The edges `check` reads, in every digital file.
+    pub fn edges(&self) -> u64 {
+        self.files
             .iter()
             .map(|f| match f {
-                Opened::Digital(d) => &d.file.path,
-                Opened::Analog(a) => &a.file.path,
+                Opened::Digital(d) => d.count,
+                Opened::Analog(_) => 0,
             })
-            .filter_map(|p| p.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
-            .collect(),
-        begin_s: Some(begin),
-        ..Source::default()
-    };
-    if let Some(t) = trigger {
-        source.extra.insert("trigger_s".into(), t.to_string());
+            .sum()
     }
-    Ok(Recording {
-        timebase: Ratio::integer(rate as u64),
-        length,
-        channels: out,
-        source,
-    })
+
+    /// Reads and checks every edge. `step` hears of each run of edges checked.
+    pub fn check(self, step: &mut dyn FnMut(u64)) -> Result<Export, Error> {
+        for f in &self.files {
+            if let Opened::Digital(d) = f {
+                d.check(step)?;
+            }
+        }
+        Ok(Export(self))
+    }
+}
+
+/// An export whose every edge has been checked, so the iterators of the recordings it gives
+/// cannot fail. It gives a fresh recording for each pass of a conversion.
+pub struct Export(Headers);
+
+impl Export {
+    pub fn recording(&self) -> Recording {
+        let h = &self.0;
+        let channels = h
+            .files
+            .iter()
+            .zip(&h.channels)
+            .zip(&h.firsts)
+            .map(|((opened, (stem, name)), &first)| Channel {
+                name: name.clone(),
+                source_name: stem.clone(),
+                data: match opened {
+                    Opened::Digital(d) => ChannelData::Digital(Digital {
+                        initial: d.initial,
+                        end: d.end_tick(),
+                        edges: Box::new(d.edges()),
+                    }),
+                    Opened::Analog(a) => ChannelData::Analog(Analog {
+                        unit: "V".into(),
+                        first,
+                        period: Ratio::integer(1),
+                        count: a.count,
+                        samples: Samples::F32(Box::new(
+                            a.file
+                                .items::<4>(ANALOG_HEADER, a.count)
+                                .map(f32::from_le_bytes),
+                        )),
+                    }),
+                },
+            })
+            .collect();
+        let mut source = Source {
+            format: "saleae-binary-1".into(),
+            files: h
+                .files
+                .iter()
+                .map(|f| match f {
+                    Opened::Digital(d) => &d.file.path,
+                    Opened::Analog(a) => &a.file.path,
+                })
+                .filter_map(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .collect(),
+            begin_s: Some(h.begin),
+            ..Source::default()
+        };
+        if let Some(t) = h.trigger {
+            source.extra.insert("trigger_s".into(), t.to_string());
+        }
+        Recording {
+            timebase: Ratio::integer(h.rate as u64),
+            length: h.length,
+            channels,
+            source,
+        }
+    }
 }
