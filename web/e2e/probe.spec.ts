@@ -1,4 +1,4 @@
-// The label beside the pointer, and the cursor readout's pulse line, on e2e/pages/view.html. Expected
+// The label at the pointer, and the cursor readout's pulse line, on e2e/pages/view.html. Expected
 // values come from the fixtures' own edges: identify-swd's SWCLK starts high and falls at
 // 376,719,436 ns, rises at 376,720,063 and falls at 376,720,710 (crates/import/tests/saleae.rs), and
 // its SWDIO rises at 376,846,682 and falls at 376,851,176.
@@ -45,7 +45,7 @@ test("a digital pulse beside the pointer: its level and width, its period, frequ
   await expect(probe(view)).toBeHidden();
 });
 
-test("in a taller row the width and the period sit on their spans, and the label beside the closing edge keeps the rest", async ({ page }) => {
+test("in a taller row the width and the period sit on their spans, and the label under the row keeps the rest", async ({ page }) => {
   await page.goto(`${VIEW}?open`);
   const view = page.locator("#v");
   await settle(view, 376_718_800, 376_721_600);
@@ -61,7 +61,37 @@ test("in a taller row the width and the period sit on their spans, and the label
     text = (await probe(view).isVisible()) ? (await probe(view).innerText()).replace(/\u00a0/g, " ") : "";
   }
   expect(text).toBe("duty 50.78 %\n784.9 kHz\n1/width 1.595 MHz");
-  expect((await probe(view).boundingBox())!.x).toBeGreaterThan(await xOf(view, 376_720_710));
+  // Clear of the row it reads, and centred under the pulse, from its start to the edge closing its period.
+  const label = (await probe(view).boundingBox())!;
+  const rowEnd = (await view.locator('[part="row-handle"]').first().boundingBox())!;
+  expect(label.y).toBeGreaterThanOrEqual(rowEnd.y + rowEnd.height / 2);
+  const middle = ((await xOf(view, 376_719_436)) + (await xOf(view, 376_720_710))) / 2;
+  expect(Math.abs(label.x + label.width / 2 - middle)).toBeLessThan(1.5);
+});
+
+test("the label keeps to the side of the plot away from the row it reads, past the plot's edge where the plot is short", async ({ page }) => {
+  await page.goto(`${VIEW}?open`);
+  const view = page.locator("#v");
+  const plot = async () => (await view.locator(".plot").boundingBox())!;
+  // SWCLK, the upper row: its low pulse from 376,719,436 to 376,720,063. The label goes under it.
+  await settle(view, 376_719_200, 376_721_000);
+  const [swclkEnd, swdioEnd] = await Promise.all([0, 1].map(async (i) => {
+    const b = (await view.locator('[part="row-handle"]').nth(i).boundingBox())!;
+    return b.y + b.height / 2;
+  }));
+  const p = await plot();
+  await page.mouse.move(await xOf(view, 376_719_700), (p.y + swclkEnd) / 2 - 4);
+  await expect(probe(view)).toContainText("low 627 ns");
+  let label = (await probe(view).boundingBox())!;
+  expect(label.y).toBeGreaterThanOrEqual(swclkEnd);
+  // The plot is shorter than the label: it runs past the plot's lower edge.
+  expect(label.y + label.height).toBeGreaterThan(p.y + p.height);
+  // SWDIO, the lower row: its high pulse from 376,846,682 to 376,851,176. The label goes above it.
+  await settle(view, 376_845_000, 376_853_000);
+  await page.mouse.move(await xOf(view, 376_848_000), (swclkEnd + swdioEnd) / 2);
+  await expect(probe(view)).toContainText("high 4.494 µs");
+  label = (await probe(view).boundingBox())!;
+  expect(label.y + label.height).toBeLessThanOrEqual(swclkEnd);
 });
 
 test("a pulse whose edges lie past the data drawn is measured once the pointer rests", async ({ page }) => {

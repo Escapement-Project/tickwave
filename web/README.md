@@ -204,15 +204,16 @@ the whole capture, or all of the channels the view shows, and Escape clears the 
 selection.
 
 A mouse over a row reads it at the pointer. An analog channel gives the value of the sample
-there in a label beside the pointer, or the smallest and largest value where one pixel covers
-several samples. On a digital channel, two spans mark the pulse there: one between its edges for
-its width, and one over its period to the next edge the same way. A label beside the pulse gives
-its duty, its frequency and 1/width, the width's reciprocal as a rate (one UART bit's gives the
+there in a label, or the smallest and largest value where one pixel covers several samples. On a
+digital channel, two spans mark the pulse there: one between its edges for its width, and one over
+its period to the next edge the same way. A label under the pulse gives its duty, its frequency
+and 1/width, the width's reciprocal as a rate (one UART bit's gives the
 baud rate). The width and the period sit on their spans once the row is tall enough for them.
 Until then the label gives them too, with the pulse's level. A pulse's edges can lie far past what
 the row has read, as on a quiet line zoomed in close. Once the pointer rests, the view finds them
 through the overview and reads just those. Where one pixel holds several edges, the label asks for
-a closer look.
+a closer look. The label keeps to the edge of the rows away from the row it reads, so it never
+covers the wave there. In a plot too short for it, it runs past the plot's edge.
 
 Each row's lower edge, in the names column, is a handle that sets the row's height. Drag it, or
 focus it and press the up and down arrows (Shift for bigger steps). Home and End give the row its

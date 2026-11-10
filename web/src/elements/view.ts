@@ -80,6 +80,8 @@ const HTML = `
 <div class="notice" part="notice" role="status" hidden></div>`;
 
 const DRAG_PX = 4;
+/** Between the hover label and the row it reads, in CSS pixels. */
+const LABEL_GAP = 6;
 /** A pulse whose edges lie past the data drawn is measured once the pointer rests this long. */
 const REST_MS = 150;
 const SNAP_PX = 6;
@@ -854,7 +856,7 @@ export class TickwaveView extends TickwaveElement {
     void this.#renderReadout(true);
   }
 
-  // The label beside the pointer ------------------------------------------------------------------
+  // The label at the pointer ----------------------------------------------------------------------
 
   /** The pointer over the plot (a mouse or pen, not a finger), in the plot's coordinates. */
   #pointer: { x: number; y: number } | null = null;
@@ -980,7 +982,7 @@ export class TickwaveView extends TickwaveElement {
 
   /**
    * A complete pulse: its spans on the trace, with the width and the period on them where the row
-   * has room, and the label beside the edge that closes the period with the figures left over.
+   * has room, and the label under the pulse with the figures left over.
    */
   #showPulse(pulse: Pulse, c: DigitalChannel, info: RecordingInfo, p: { x: number; y: number }, row: number): void {
     const f = pulseFigures(pulse, info.timebase, c.end);
@@ -998,15 +1000,12 @@ export class TickwaveView extends TickwaveElement {
       lines.push(`duty ${f.duty}`, f.frequency ?? "–");
     }
     if (f.inverseWidth) lines.push(`1/width ${f.inverseWidth}`);
-    const beside = mark && { x0: this.#plot.xAt(mark.start), x1: this.#plot.xAt(mark.next ?? mark.end) };
-    this.#showProbe(lines, p, this.#plot.layout!.rows[row], beside);
+    const span = mark && { x0: this.#plot.xAt(mark.start), x1: this.#plot.xAt(mark.next ?? mark.end) };
+    this.#showProbe(lines, p, this.#plot.layout!.rows[row], span);
   }
 
-  /**
-   * The label, level with its row: beside the edges of the pulse it measures, right of the closing
-   * one or left of the first, else beside the pointer, on its left near the plot's right edge.
-   */
-  #showProbe(lines: string[], p: { x: number; y: number }, row: { top: number; height: number }, beside: { x0: number; x1: number } | null = null): void {
+  /** The label, away from the row it reads, under the pulse it measures (`span`) or the pointer. */
+  #showProbe(lines: string[], p: { x: number; y: number }, row: { top: number; height: number }, span: { x0: number; x1: number } | null = null): void {
     const box = this.#probeBox();
     box.replaceChildren(
       ...lines.map((text, i) => Object.assign(document.createElement("div"), { textContent: text, className: i > 0 ? "more" : "" })),
@@ -1015,12 +1014,16 @@ export class TickwaveView extends TickwaveElement {
     const l = this.#plot.layout!;
     const w = box.offsetWidth;
     const h = box.offsetHeight;
-    const fits = (x: number) => x >= l.plotLeft && x + w <= l.plotRight;
-    const after = beside ? beside.x1 + 10 : NaN;
-    const before = beside ? beside.x0 - 10 - w : NaN;
-    const right = p.x + 14;
-    const x = fits(after) ? after : fits(before) ? before : right + w <= l.plotRight ? right : Math.max(l.plotLeft, p.x - 14 - w);
-    const y = Math.max(0, Math.min(this.#plotBox.clientHeight - h, row.top + row.height / 2 - h / 2));
+    // Under the pulse it measures, or the pointer, inside the plot's width.
+    const middle = span ? (span.x0 + span.x1) / 2 : p.x;
+    const x = Math.max(l.plotLeft, Math.min(l.plotRight - w, middle - w / 2));
+    // On the rows' edge away from the row read, so the label never covers the wave there: flush with
+    // that edge, or just past the row where the label is taller than the room, running past the
+    // plot's edge in a short plot.
+    const last = l.rows[l.rows.length - 1];
+    const [top, bottom] = [l.rows[0].top, last.top + last.height];
+    const below = row.top + row.height / 2 <= (top + bottom) / 2;
+    const y = below ? Math.max(row.top + row.height + LABEL_GAP, bottom - h) : Math.min(row.top - LABEL_GAP - h, top);
     box.style.left = `${x}px`;
     box.style.top = `${y}px`;
   }
@@ -1090,7 +1093,7 @@ export class TickwaveView extends TickwaveElement {
         }
         line(...parts);
       }
-      // Each digital channel's pulse at cursor A, as the label beside the pointer gives it.
+      // Each digital channel's pulse at cursor A, as the label at the pointer gives it.
       for (const t of this.#plot.tracks) {
         const c = t.channel;
         if (c.kind !== "digital" || a < 0 || a > c.end) continue;
