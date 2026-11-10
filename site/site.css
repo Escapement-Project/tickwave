@@ -8,15 +8,11 @@ code { overflow-wrap: anywhere; }
 pre { background: var(--surface); border-radius: 8px; padding: 12px 14px; overflow-x: auto; line-height: 1.5; }
 pre code { font-size: 1em; overflow-wrap: normal; }
 
-/* tickwave's own pages: a row under the project's header, the page shown in ink. */
-.subnav { display: flex; flex-wrap: wrap; gap: 4px 22px; padding: 4px 0 14px; margin: 0 0 32px; border-bottom: 1px solid var(--hair); font-size: 15px; font-weight: 500; }
-.subnav a { color: var(--ink-2); text-decoration: none; }
-.subnav a:hover { color: var(--ink); }
-.subnav a[aria-current="page"] { color: var(--ink); text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: 7px; }
-/* On a phone the project's places take a row of their own just above: room between the two. */
-@media (max-width: 520px) { .subnav { padding-top: 18px; } }
-
 main { padding-bottom: 56px; }
+/* Room under the header, as the project's pages leave; .wrap's padding would otherwise win. A doc's
+   frame keeps its own, as on the project's doc pages. */
+main.wrap { padding-top: 32px; }
+main.wrap:has(> .doc-wrap) { padding-top: 0; }
 /* tickwave's licence, a row of its own under the project's footer. */
 footer .licence { flex-basis: 100%; }
 /* Prose pages: headings in the flow of the text, where the project's sections set them apart. */
@@ -35,8 +31,11 @@ li { margin: 4px 0; }
 .table table { width: auto; }
 .table th, .table td { text-align: left; vertical-align: top; padding: 6px 10px; white-space: normal; }
 .table th { border-bottom-color: var(--rule); }
-/* The doc frame's own padding is the gap under tickwave's row of pages. */
-.subnav + .doc-wrap { padding-top: 0; }
+/* The docs' index: each doc with what it covers, as Verge's index lists its own. */
+.docs-list { list-style: none; margin: 0; padding: 0; }
+.docs-list li { margin: 0; padding: 9px 0; border-top: 1px solid var(--hair); }
+.docs-list li > a { font-weight: 600; }
+.docs-list li p { margin: 2px 0 0; font-size: 14px; color: var(--ink-2); }
 
 /* The viewer. */
 .open { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 18px; margin: 18px 0 10px; }

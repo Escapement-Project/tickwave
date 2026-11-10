@@ -43,12 +43,15 @@ that need it skip without it.
 tickwave's site lives in `site/` at the repository's root, and `scripts/site.ts` builds it into
 `dist/site/`. `npm run build` builds it too. The site is static, and every URL in it is relative,
 so it works under any path, such as `/tickwave/` on GitHub Pages. The exception is the project's
-shared header: its links lead to the project's other pages at the published site. Its pages:
+shared header, whose places lead to the project's other pages at the published site. tickwave's
+own place gives way to its group: tickwave's pages beside its name, with the page shown marked. The
+site's pages:
 
 - `index.html`, the viewer: a recording by its address (`?src=`, `?annotations=`) or from files
 - `convert.html`, the converter: a capture from files, converted in a worker by
   `tickwave-convert.wasm`, saved and shown
 - `demo.html`, a short page citing the committed fixtures as a project page would
+- `docs/index.html`, the docs: each with what it covers
 - `docs/elements.html`, rendered from this file's "The elements" section
 - `docs/charts.html`, `docs/format.html` and `docs/annotations.html`, rendered from `CHARTS.md`,
   `FORMAT.md` and `ANNOTATIONS.md`

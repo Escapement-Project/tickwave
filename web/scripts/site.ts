@@ -2,7 +2,7 @@
 // build.ts: node scripts/site.ts
 //
 // Every URL in the site is relative, as it is published under a subpath (/tickwave/), except the
-// shared header's: they lead to the project's other pages, at the published site.
+// shared header's other places: they lead to the project's other pages, at the published site.
 
 import * as esbuild from "esbuild";
 import MarkdownIt from "markdown-it";
@@ -69,15 +69,33 @@ const md = new MarkdownIt({ html: false, linkify: false, typographer: false }).u
 md.renderer.rules.table_open = () => '<div class="table"><table>\n';
 md.renderer.rules.table_close = () => "</table></div>\n";
 
-const NAV: [string, string][] = [
-  ["index.html", "Viewer"],
-  ["convert.html", "Convert"],
-  ["demo.html", "Demo"],
-  ["docs/elements.html", "Elements"],
-  ["docs/charts.html", "Charts"],
-  ["docs/format.html", "Format"],
-  ["docs/annotations.html", "Sidecar"],
-  ["docs/converter.html", "Converter"],
+/** tickwave's group in the header: its main page under its name, then its other pages. */
+const GROUP: { href: string; name: string; page: string }[] = [
+  { href: "index.html", name: "tickwave", page: "tickwave" },
+  { href: "convert.html", name: "Convert", page: "tickwave/convert" },
+  { href: "demo.html", name: "Demo", page: "tickwave/demo" },
+  { href: "docs/index.html", name: "Docs", page: "tickwave/docs" },
+];
+
+// The elements: web/README.md's own section, its headings one level up. One source, no copy.
+const readme = readFileSync(join(web, "README.md"), "utf8");
+const from = readme.indexOf("\n## The elements\n");
+if (from < 0) throw new Error("web/README.md has no \"The elements\" section");
+const next = readme.indexOf("\n## ", from + 1);
+const elements = readme.slice(from + 1, next < 0 ? undefined : next).replace(/^##(#*) /gm, "#$1 ");
+
+/** tickwave's docs, in the rail on each and in the docs' index, each with what it covers. */
+const DOCS: { href: string; name: string; markdown: string; description: string }[] = [
+  { href: "docs/elements.html", name: "Elements", markdown: elements, description: "tickwave's elements: attributes, methods, events, parts and custom properties." },
+  { href: "docs/charts.html", name: "Charts", markdown: readFileSync(join(repo, "CHARTS.md"), "utf8"), description: "tickwave's charts: measurements drawn against a setting, and their data." },
+  { href: "docs/format.html", name: "Format", markdown: readFileSync(join(repo, "FORMAT.md"), "utf8"), description: "The tickwave recording format." },
+  { href: "docs/annotations.html", name: "Sidecar", markdown: readFileSync(join(repo, "ANNOTATIONS.md"), "utf8"), description: "tickwave's sidecar annotations." },
+  {
+    href: "docs/converter.html",
+    name: "Converter",
+    markdown: readFileSync(join(site, "docs/converter.md"), "utf8"),
+    description: "Building tickwave's converter, and converting, describing, verifying and bundling recordings.",
+  },
 ];
 
 const layout = readFileSync(join(site, "layout.html"), "utf8");
@@ -95,13 +113,26 @@ function shaped(name: string, markers: [string, number][]): string {
   return text;
 }
 
-// The shared header, with the project's mark, its places at the published site, and tickwave marked
-// as the place shown; the shared footer, with tickwave's licence.
+// The shared header, with the project's mark and its places at the published site; the shared
+// footer, with tickwave's licence.
 const mark = readFileSync(join(site, "dial.svg"), "utf8").trim().replace("<svg ", '<svg aria-hidden="true" fill="currentColor" ');
-const header = shaped("header.html", [["{{mark}}", 1], ["{{base}}", 0], ['data-page="tickwave"', 1]])
-  .replace("{{mark}}", () => mark)
-  .replaceAll("{{base}}", PUBLISHED)
-  .replace('data-page="tickwave"', 'data-page="tickwave" aria-current="page"');
+const TICKWAVE = '<a href="{{base}}/tickwave/" data-page="tickwave">tickwave</a>';
+const shared = shaped("header.html", [["{{mark}}", 1], ["{{base}}", 0], [TICKWAVE, 1]]).replace("{{mark}}", () => mark);
+
+/**
+ * The header on the page at `path`: tickwave's link gives way to its group (the site's
+ * design/README.md), each entry marked where the reader is. The page's own entry is "page"; the
+ * entry it sits inside, as Docs is for a doc, and tickwave's name off its main page, are "true".
+ */
+function header(path: string, root: string): string {
+  const within = (href: string) => href.endsWith("/index.html") && path.startsWith(href.slice(0, -"index.html".length));
+  const group = GROUP.map(({ href, name, page }, i) => {
+    const at = href === path ? "page" : i === 0 || within(href) ? "true" : null;
+    return `<a href="${root}${href}" data-page="${page}"${at ? ` aria-current="${at}"` : ""}>${name}</a>`;
+  }).join("");
+  return shared.replace(TICKWAVE, () => `<span class="product">${group}</span>`).replaceAll("{{base}}", PUBLISHED);
+}
+
 const footer = shaped("footer.html", [["</div></footer>", 1]]).replace(
   "</div></footer>",
   "<span class=\"licence\">tickwave is free software under the MIT or Apache-2.0 licence.</span></div></footer>",
@@ -110,7 +141,6 @@ const esc = (s: string) => s.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
 
 function page(path: string, opts: { title: string; description: string; kind: string; content: string }): void {
   const root = path.includes("/") ? "../" : "";
-  const nav = NAV.map(([href, name]) => `<a href="${root}${href}"${href === path ? ' aria-current="page"' : ""}>${name}</a>`).join("\n");
   const html = layout.replace(/\{\{(\w+)\}\}/g, (_, key: string) => {
     switch (key) {
       case "title":
@@ -119,10 +149,8 @@ function page(path: string, opts: { title: string; description: string; kind: st
         return esc(opts.description);
       case "root":
         return root;
-      case "nav":
-        return nav;
       case "header":
-        return header;
+        return header(path, root);
       case "footer":
         return footer;
       case "kind":
@@ -172,12 +200,10 @@ function contents(body: string): string {
 function doc(path: string, markdown: string, description: string): void {
   const title = /^# (.*)$/m.exec(markdown)?.[1].replace(/`/g, "") ?? path;
   const body = md.render(markdown);
-  const docs = NAV.filter(([href]) => href.startsWith("docs/"))
-    .map(([href, name]) => {
+  const docs = DOCS.map(({ href, name }) => {
       const file = href.slice("docs/".length);
       return href === path ? `<li><a href="${file}" aria-current="page">${name}</a>${contents(body)}</li>` : `<li><a href="${file}">${name}</a></li>`;
-    })
-    .join("\n");
+  }).join("\n");
   const content = `<div class="doc-wrap">
 <button class="doc-bar" type="button" aria-expanded="false" aria-controls="doc-rail"><span class="label">Contents</span><span class="where">${esc(title)}</span></button>
 <div class="doc-rail" id="doc-rail"><div class="doc-list"><nav class="doc-nav" aria-label="tickwave's docs"><ul>
@@ -188,16 +214,17 @@ ${docs}
   page(path, { title: `tickwave: ${title}`, description, kind: "doc", content });
 }
 
-// The elements: web/README.md's own section, its headings one level up. One source, no copy.
-const readme = readFileSync(join(web, "README.md"), "utf8");
-const from = readme.indexOf("\n## The elements\n");
-if (from < 0) throw new Error("web/README.md has no \"The elements\" section");
-const next = readme.indexOf("\n## ", from + 1);
-const elements = readme.slice(from + 1, next < 0 ? undefined : next).replace(/^##(#*) /gm, "#$1 ");
-doc("docs/elements.html", elements, "tickwave's elements: attributes, methods, events, parts and custom properties.");
-doc("docs/charts.html", readFileSync(join(repo, "CHARTS.md"), "utf8"), "tickwave's charts: measurements drawn against a setting, and their data.");
-doc("docs/format.html", readFileSync(join(repo, "FORMAT.md"), "utf8"), "The tickwave recording format.");
-doc("docs/annotations.html", readFileSync(join(repo, "ANNOTATIONS.md"), "utf8"), "tickwave's sidecar annotations.");
-doc("docs/converter.html", readFileSync(join(site, "docs/converter.md"), "utf8"), "Building tickwave's converter, and converting, describing, verifying and bundling recordings.");
+for (const d of DOCS) doc(d.href, d.markdown, d.description);
+
+// The docs' index, where the header's Docs leads: each doc with what it covers, as Verge's lists its own.
+page("docs/index.html", {
+  title: "tickwave: Docs",
+  description: "tickwave's docs: its elements, charts, recording format, sidecar and converter.",
+  kind: "docs-index",
+  content: `<h1>tickwave's docs</h1>
+<ul class="docs-list">
+${DOCS.map(({ href, name, description }) => `<li><a href="${href.slice("docs/".length)}">${name}</a><p>${esc(description)}</p></li>`).join("\n")}
+</ul>`,
+});
 
 console.log(`site: ${out}`);

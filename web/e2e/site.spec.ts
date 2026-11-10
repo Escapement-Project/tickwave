@@ -25,15 +25,28 @@ async function viewReady(page: Page): Promise<void> {
 }
 
 test.describe("the project's header", () => {
-  test("marks tickwave among the project's places and the page among tickwave's", async ({ page }) => {
-    await page.goto(`${SITE}docs/format.html`);
+  test("puts tickwave's pages beside its name among the project's places, and marks where the reader is", async ({ page }) => {
     const places = page.getByRole("navigation", { name: "Escapement Project" });
-    await expect(places.getByRole("link", { name: "tickwave" })).toHaveAttribute("href", "https://escapement-project.github.io/tickwave/");
-    await expect(places.getByRole("link", { name: "tickwave" })).toHaveAttribute("aria-current", "page");
-    await expect(places.getByRole("link", { name: "Measurements" })).not.toHaveAttribute("aria-current", /./);
-    const own = page.getByRole("navigation", { name: "tickwave", exact: true });
-    await expect(own.locator("[aria-current]")).toHaveText("Format");
-    await expect(own.getByRole("link", { name: "Viewer" })).toHaveAttribute("href", "../index.html");
+    const link = (name: string) => places.getByRole("link", { name, exact: true });
+    // The group's rule has a heavier stretch under the page shown, or the place it sits inside.
+    const segment = (name: string) => link(name).evaluate((a) => getComputedStyle(a, "::after").borderTopWidth);
+    await page.goto(`${SITE}docs/format.html`);
+    await expect(places.getByRole("link")).toHaveText(["Verge", "tickwave", "Convert", "Demo", "Docs", "Source"]);
+    await expect(link("Verge")).toHaveAttribute("href", "https://escapement-project.github.io/verge/");
+    await expect(link("tickwave")).toHaveAttribute("href", "../index.html");
+    // A doc sits inside tickwave and its docs.
+    await expect(link("tickwave")).toHaveAttribute("aria-current", "true");
+    await expect(link("Docs")).toHaveAttribute("aria-current", "true");
+    await expect(places.locator("[aria-current]")).toHaveCount(2);
+    expect(await segment("Docs")).toBe("3px");
+    expect(await segment("tickwave")).not.toBe("3px");
+    // The viewer is tickwave's main page: the name is the page.
+    await page.goto(`${SITE}index.html`);
+    await expect(link("tickwave")).toHaveAttribute("aria-current", "page");
+    await expect(places.locator("[aria-current]")).toHaveCount(1);
+    expect(await segment("tickwave")).toBe("3px");
+    await page.goto(`${SITE}docs/index.html`);
+    await expect(link("Docs")).toHaveAttribute("aria-current", "page");
     await expect(page.locator("footer")).toContainText("tickwave is free software under the MIT or Apache-2.0 licence.");
   });
 
@@ -45,7 +58,7 @@ test.describe("the project's header", () => {
     await faces.click();
     await expect(faces).toHaveAttribute("aria-checked", "true");
     expect(await page.evaluate(() => [document.documentElement.dataset.face, getComputedStyle(document.documentElement).colorScheme, localStorage.getItem("face")])).toEqual(["night", "dark", "night"]);
-    await page.getByRole("navigation", { name: "tickwave", exact: true }).getByRole("link", { name: "Viewer" }).click();
+    await page.getByRole("navigation", { name: "Escapement Project" }).getByRole("link", { name: "tickwave", exact: true }).click();
     await expect(page).toHaveURL(/index\.html$/);
     await expect(page.getByRole("switch", { name: "Night face" })).toHaveAttribute("aria-checked", "true");
     expect(await page.evaluate(() => document.documentElement.dataset.face)).toBe("night");
@@ -55,7 +68,7 @@ test.describe("the project's header", () => {
     await page.setViewportSize({ width: 360, height: 700 });
     await page.goto(`${SITE}docs/format.html`);
     const places = page.getByRole("navigation", { name: "Escapement Project" });
-    await expect(places.getByRole("link", { name: "Measurements" })).toBeVisible();
+    await expect(places.getByRole("link", { name: "Docs" })).toBeVisible();
     const at = () => page.evaluate(() => ({ top: document.querySelector("header")!.getBoundingClientRect().top, bottom: document.querySelector("header")!.getBoundingClientRect().bottom, main: document.querySelector("main")!.getBoundingClientRect().top + scrollY }));
     // Each scroll its own event: two in one frame would read as one jump.
     const to = (y: number) => page.evaluate((y) => new Promise((r) => { scrollTo({ top: y, behavior: "instant" }); requestAnimationFrame(() => requestAnimationFrame(r)); }), y);
@@ -64,7 +77,7 @@ test.describe("the project's header", () => {
     await expect.poll(async () => (await at()).bottom).toBeLessThanOrEqual(0);
     await to(1000);
     await expect.poll(async () => (await at()).top).toBe(0);
-    await expect(places.getByRole("link", { name: "Measurements" })).toBeVisible();
+    await expect(places.getByRole("link", { name: "Docs" })).toBeVisible();
     expect((await at()).main).toBeCloseTo(start.main, 2);
     await to(1600);
     await expect.poll(async () => (await at()).bottom).toBeLessThanOrEqual(0);
@@ -240,6 +253,16 @@ test("the docs sit in the project's doc frame: every doc in a rail, this one's s
   await expect(rail.getByRole("link", { name: "Converter" })).toBeVisible();
 });
 
+test("the docs' index lists each doc with what it covers", async ({ page }) => {
+  await page.goto(`${SITE}docs/index.html`);
+  await expect(page.locator("h1")).toHaveText("tickwave's docs");
+  const items = page.locator(".docs-list li");
+  await expect(items.locator("a")).toHaveText(["Elements", "Charts", "Format", "Sidecar", "Converter"]);
+  await expect(items.first().locator("p")).toHaveText("tickwave's elements: attributes, methods, events, parts and custom properties.");
+  await items.getByRole("link", { name: "Format" }).click();
+  await expect(page).toHaveURL(/docs\/format\.html$/);
+});
+
 test("a command in the docs has a Copy button, and a command's output has none", async ({ page }) => {
   await page.goto(`${SITE}docs/converter.html`);
   // copy.js wraps each block it gives a button in a .codeblock.
@@ -297,9 +320,9 @@ test("every internal link resolves, fragments included", async ({ request, baseU
     }
   }
   expect(failures).toEqual([]);
-  // The eight pages, each reached by a link.
+  // The nine pages, each reached by a link.
   expect([...pages.keys()].map((u) => u.slice(u.indexOf(SITE) + SITE.length)).sort()).toEqual(
-    ["convert.html", "demo.html", "docs/annotations.html", "docs/charts.html", "docs/converter.html", "docs/elements.html", "docs/format.html", "index.html"],
+    ["convert.html", "demo.html", "docs/annotations.html", "docs/charts.html", "docs/converter.html", "docs/elements.html", "docs/format.html", "docs/index.html", "index.html"],
   );
   expect(links).toBeGreaterThan(40);
 });
@@ -321,6 +344,7 @@ const PAGES = [
   ["viewer", "index.html?src=fixtures/identify-swd.tickwave&annotations=fixtures/identify-swd.annotations.toml"],
   ["convert", "convert.html"],
   ["demo", "demo.html"],
+  ["docs", "docs/index.html"],
   ["elements", "docs/elements.html"],
   ["format", "docs/format.html"],
   ["sidecar", "docs/annotations.html"],
