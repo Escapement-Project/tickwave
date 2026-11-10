@@ -189,7 +189,7 @@ Close puts it back on Open. Each button names its recording to a screen reader.
 |---|---|
 | `src` | the recording's URL |
 | `annotations` | its sidecar's TOML file. Without it, a recording with a bundled sidecar shows that |
-| `channels` | the channels to show, by name, in order. All of them by default |
+| `channels` | the channels to show, by name, in order. All of them by default. The view then goes as far as the furthest of them ends |
 | `window` | what an open view shows first: two times (`"317.8 ms 318.0 ms"`), or an annotation's id |
 | `open` | open the view |
 | `series` | a series name, such as `verge`: the traces take `--series-verge`. Ink by default |
@@ -199,8 +199,9 @@ ticks.
 
 The reader zooms with Ctrl or Cmd and the wheel, a trackpad pinch, or two fingers. The plain wheel
 scrolls the page, and the view says how to zoom. Shift with the wheel, a sideways swipe, a drag or
-the arrow keys move along the capture. With the view focused, plus and minus zoom, Home shows the
-whole capture, and Escape clears the cursors and the selection.
+the arrow keys move along the capture. With the view focused, plus and minus zoom, Home and Fit show
+the whole capture, or all of the channels the view shows, and Escape clears the cursors and the
+selection.
 
 A mouse over a row reads it at the pointer. An analog channel gives the value of the sample
 there in a label beside the pointer, or the smallest and largest value where one pixel covers

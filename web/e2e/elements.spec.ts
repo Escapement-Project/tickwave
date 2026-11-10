@@ -68,6 +68,27 @@ test("setWindow before the head arrives shows that window once it has", async ({
   expect(window).toEqual({ start: 380_000_000, end: 381_000_000 });
 });
 
+test("a view showing some of a recording's channels goes only as far as they end", async ({ page }) => {
+  await page.goto(`${VIEW}?open&src=fixtures/swd50-cut.tickwave`);
+  const view = page.locator("#v");
+  await drawn(view);
+  const shown = () => view.evaluate((v) => (v as HTMLElement & { window: { start: number; end: number } }).window);
+  // Every channel: the recording's length, which NRST sets, running on past the analog data.
+  await expect.poll(shown).toEqual({ start: 0, end: 11_031_886 });
+  // The two analog channels alone: 50,000 samples, 1 ns apart from tick 0.
+  await view.evaluate((v) => v.setAttribute("channels", "SWCLK SWDIO"));
+  await expect.poll(shown).toEqual({ start: 0, end: 50_000 });
+  // Zooming out stops there, and Home comes back to it.
+  await view.locator(".zoom-in").click();
+  await view.locator(".zoom-out").click();
+  await view.locator(".zoom-out").click();
+  await expect.poll(shown).toEqual({ start: 0, end: 50_000 });
+  await view.locator(".zoom-in").click();
+  await view.locator(".plot").focus();
+  await page.keyboard.press("Home");
+  await expect.poll(shown).toEqual({ start: 0, end: 50_000 });
+});
+
 test("a failed load is tried again, and a new recording's view drops the old notice", async ({ page }, info) => {
   const tag = `retry-${info.project.name}-${info.repeatEachIndex}-${Date.now()}`;
   // Every read after the first waits 2 s: the retry's 404 comes back after the new recording.

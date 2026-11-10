@@ -328,7 +328,7 @@ export class TickwaveView extends TickwaveElement {
     if (fresh) {
       this.#recordingKey = recordingKey;
       this.#plot.setRecording(l.source, l.info, indices);
-      this.#plot.view = { start: 0, end: l.info.length };
+      this.#plot.view = { start: 0, end: this.#extent() };
       this.#periodChannel = this.#plot.tracks.findIndex((t) => t.channel.kind === "digital");
       if (l.src.href !== this.#shownSrc) {
         this.#shownSrc = l.src.href;
@@ -489,13 +489,28 @@ export class TickwaveView extends TickwaveElement {
     return l ? Math.max(2, (l.plotRight - l.plotLeft) / MAX_PX_PER_TICK) : 2;
   }
 
+  /**
+   * The last tick the view goes to: the furthest end of the channels it shows, or the recording's
+   * length when it shows every channel. A page that shows a few channels of a longer recording sees
+   * them fill the view at Fit, not a sliver of it.
+   */
+  #extent(): number {
+    const info = this.#loaded?.info;
+    if (!info) return 0;
+    const tracks = this.#plot.tracks;
+    if (new Set(tracks.map((t) => t.index)).size === info.channels.length) return info.length;
+    const end = Math.max(0, ...tracks.map((t) => t.channel.end));
+    return end > 0 ? end : info.length;
+  }
+
   #clampView(): void {
     const info = this.#loaded?.info;
     if (!info) return;
+    const extent = this.#extent();
     let { start, end } = this.#plot.view;
-    const span = Math.min(info.length, Math.max(this.#minSpan(), end - start));
+    const span = Math.min(extent, Math.max(this.#minSpan(), end - start));
     const mid = (start + end) / 2;
-    start = Math.min(Math.max(0, mid - span / 2), info.length - span);
+    start = Math.min(Math.max(0, mid - span / 2), extent - span);
     end = start + span;
     this.#plot.view = { start, end };
   }
@@ -565,8 +580,7 @@ export class TickwaveView extends TickwaveElement {
   }
 
   #fit(): void {
-    const info = this.#loaded?.info;
-    if (info) this.setWindow(0, info.length);
+    if (this.#loaded) this.setWindow(0, this.#extent());
   }
 
   /** Zooms by `factor` (above 1 zooms out) about x, or the middle. */
