@@ -280,8 +280,14 @@ An annotation's `measure` puts a reading under the trace, taken from the channel
   such as "mean of 31 of 32 periods".
 - `duration`: the time from the channel's first edge in the span to its last.
 
-A reading shows only the digits its ticks support. `settled()` and the `tickwave-ready` event
-(`{annotation, height}`) work as on the view, so a page can lay itself out around an inset's
+A reading shows only the digits its ticks support. The key to the roles' lines sits on a line of
+its own, under the reading.
+
+An inset takes its final height once its recording's head and sidecar are in: the reading's line
+is held from then, so the data's arrival moves nothing below it. Before then it has no label and
+no rows to size by. A page that wants nothing to move at all gives the inset its height, as
+tickwave's main page does for the figure beside its name. `settled()` and the `tickwave-ready`
+event (`{annotation, height}`) work as on the view, so a page can lay itself out around an inset's
 final height. `sweeping` says whether the sweep is playing.
 
 ### `<tickwave-ref>`

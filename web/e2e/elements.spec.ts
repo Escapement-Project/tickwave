@@ -281,6 +281,33 @@ test("a URL that is not a .tickwave file is refused once the page has loaded, no
   await expect(notice(page.locator("#v"))).toContainText("404", { timeout: 10_000 });
 });
 
+test("an inset takes its final height once its head and sidecar are in, and its data moves nothing", async ({ page }, info) => {
+  const tag = `steady-${info.project.name}-${info.repeatEachIndex}-${Date.now()}`;
+  // Every frame from the label's arrival: the inset's height, and whether its measure has come.
+  await page.addInitScript(() => {
+    const w = window as unknown as { frames: [number, string][] };
+    w.frames = [];
+    const tick = () => {
+      const el = document.getElementById("i");
+      const root = el?.shadowRoot;
+      if (root?.querySelector("figcaption")?.textContent) w.frames.push([el!.getBoundingClientRect().height, root.querySelector(".measure")!.textContent ?? ""]);
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+  // A small first read, so the data is a read of its own; the server holds it a second after the
+  // head's two.
+  await page.goto(
+    `/e2e/pages/inset.html?src=fixtures/identify-swd.tickwave&annotations=fixtures/identify-swd.annotations.toml&annotation=dpidr-read&firstRead=512&tag=${tag}&after=2&stall=1000`,
+  );
+  await expect(page.locator("#i .measure")).toHaveText("SWCLK 999.93 kHz mean of 45 periods", { timeout: 10_000 });
+  const frames = await page.evaluate(() => (window as unknown as { frames: [number, string][] }).frames);
+  // The label came well before the data: frames without the measure, then with it.
+  expect(frames.filter(([, m]) => m === "").length).toBeGreaterThan(20);
+  expect(frames.at(-1)![1]).not.toBe("");
+  expect(new Set(frames.map(([h]) => h))).toEqual(new Set([frames[0][0]]));
+});
+
 test("an inset's notes draw on with its sweep, not whole once it has passed them", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "no-preference" });
   await page.goto("/e2e/pages/inset.html?src=fixtures/identify-swd.tickwave&annotations=fixtures/identify-swd.annotations.toml&annotation=dpidr-read&sweep");

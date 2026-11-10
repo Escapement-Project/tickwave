@@ -24,14 +24,18 @@ canvas { display: block; }
 .foot:empty { display: none; }
 .measure { color: var(--ink, CanvasText); }
 .measure .what { font-family: var(--font-text, system-ui, sans-serif); color: var(--ink-2, GrayText); }
-.key { display: flex; gap: 12px; margin-left: auto; }
+/* The measure's line is held once the annotation asks for one, and the key has a line of its own:
+   the inset's height is set when its sidecar arrives, and its data moves nothing. */
+.measure:empty::before { content: "\\200b"; }
+.measure[hidden], .key:empty { display: none; }
+.key { display: flex; gap: 12px; flex-basis: 100%; justify-content: flex-end; }
 .key i { display: inline-block; width: 14px; height: 2px; vertical-align: middle; margin-right: 5px; }
 .key i.heavy { height: 3px; }
 `;
 
 const HTML = `<figure part="inset"><figcaption part="label"></figcaption><p class="text" part="text" hidden></p>
 <div class="frame" part="frame"><canvas part="canvas" aria-hidden="true"></canvas></div>
-<div class="foot" part="foot"><span class="measure figures" part="measure"></span><span class="key" part="key"></span></div>
+<div class="foot" part="foot"><span class="measure figures" part="measure" hidden></span><span class="key" part="key"></span></div>
 <div class="notice" part="notice" role="status" hidden></div></figure>`;
 
 /** The landing page's sweep: steady across the trace. */
@@ -327,6 +331,7 @@ export class TickwaveInset extends TickwaveElement {
     const l = this.#loaded;
     const a = this.#annotation;
     this.#measure.textContent = "";
+    this.#measure.hidden = !l || !a?.measure || a.end === null;
     if (!l || !a?.measure || a.end === null) return;
     const ch = l.info.channels.findIndex((c) => c.name === a.measure!.channel);
     if (ch < 0 || l.info.channels[ch].kind !== "digital") {

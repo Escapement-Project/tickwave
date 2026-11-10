@@ -55,13 +55,12 @@ button.primary:hover, .button:hover { background: var(--wash); }
 /* The overview: the inset beside the head on a surface, as the project's figures are; the elements
    by name beside their markup. */
 /* The inset is the same height at every width: the figure's caption says what the annotation's text
-   would, and the key always takes a line of its own. Its surface is that height from the first
-   paint, and it draws inside it, so nothing below it moves as it loads. */
+   would. Its surface is that height from the first paint, and it draws inside it, so nothing below
+   it moves as it loads. */
 .product-figure figure { margin-bottom: 14px; }
 .product-figure tickwave-inset { display: block; }
 .js .product-figure tickwave-inset { height: 154.8px; overflow: clip; background: var(--surface); border-radius: 14px; padding: 10px 8px 6px; }
 .product-figure tickwave-inset::part(text) { display: none; }
-.product-figure tickwave-inset::part(key) { flex-basis: 100%; justify-content: flex-end; }
 /* The reading points are four, so they take a row of four where the steps would take three. */
 @media (min-width: 861px) { #reading .steps { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 /* The elements' names in one column, as wide as the longest; on a phone, each over what it is. */
