@@ -280,3 +280,38 @@ test("a URL that is not a .tickwave file is refused once the page has loaded, no
   await page.goto(`${VIEW}?open&src=fixtures/IDENTIFY-SWD.TICKWAVE`);
   await expect(notice(page.locator("#v"))).toContainText("404", { timeout: 10_000 });
 });
+
+test("an inset's notes draw on with its sweep, not whole once it has passed them", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.goto("/e2e/pages/inset.html?src=fixtures/identify-swd.tickwave&annotations=fixtures/identify-swd.annotations.toml&annotation=dpidr-read&sweep");
+  // Each frame of the sweep, the ink in the inset's lane: its one row of notes, 18 px from 2 px down.
+  const ink = await page.locator("#i").evaluate(
+    (el) =>
+      new Promise<number[]>((done) => {
+        const canvas = el.shadowRoot!.querySelector("canvas")!;
+        const ctx = canvas.getContext("2d")!;
+        const seen: number[] = [];
+        const read = () => {
+          const dpr = canvas.width / canvas.getBoundingClientRect().width;
+          const d = ctx.getImageData(0, Math.round(2 * dpr), canvas.width, Math.round(18 * dpr)).data;
+          let n = 0;
+          for (let i = 3; i < d.length; i += 4) if (d[i] > 0) n++;
+          return n;
+        };
+        const give = setTimeout(() => done(seen), 15_000);
+        const frame = () => {
+          if ((el as unknown as { sweeping: boolean }).sweeping) seen.push(read());
+          else if (seen.length > 0) {
+            clearTimeout(give);
+            return done([...seen, read()]);
+          }
+          requestAnimationFrame(frame);
+        };
+        requestAnimationFrame(frame);
+      }),
+  );
+  // The note grows frame by frame as the sweep crosses it, rather than appearing in one.
+  const grown = new Set(ink.filter((n) => n > 0));
+  expect(ink.length).toBeGreaterThan(10);
+  expect(grown.size).toBeGreaterThanOrEqual(8);
+});

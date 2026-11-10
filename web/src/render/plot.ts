@@ -785,8 +785,15 @@ export class Plot {
     const l = this.layout!;
     const p = this.palette!;
     const ctx = this.#ctx;
+    // While a sweep plays, the notes draw on with the traces, each as far as the sweep has reached.
+    ctx.save();
+    if (revealX < Infinity) {
+      ctx.beginPath();
+      ctx.rect(0, l.laneTop, revealX, l.laneHeight);
+      ctx.clip();
+    }
     for (const n of this.notes) {
-      if (n.right > revealX) continue;
+      if (n.left > revealX) continue;
       const y = l.laneTop + 2 + n.lane * LANE_ROW;
       const emphasised = n.id === this.focus;
       if (n.id === this.hoverNote) {
@@ -816,6 +823,7 @@ export class Plot {
         ctx.fillText(n.label, n.labelX, y + LANE_ROW - 7);
       }
     }
+    ctx.restore();
   }
 
   #drawAxis(): void {

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>One inset, set up by the query</title>
-<!-- ?src= and ?annotations= relative to web/, ?annotation= the id to show. -->
+<!-- ?src= and ?annotations= relative to web/, ?annotation= the id to show, ?sweep to let it sweep in. -->
 <script type="module">
 import "../../dist/tickwave.js";
 const q = new URLSearchParams(location.search);
@@ -12,7 +12,7 @@ inset.id = "i";
 inset.setAttribute("src", `../../${q.get("src")}`);
 inset.setAttribute("annotations", `../../${q.get("annotations")}`);
 inset.setAttribute("annotation", q.get("annotation"));
-inset.setAttribute("sweep", "off");
+if (!q.has("sweep")) inset.setAttribute("sweep", "off");
 inset.style.maxWidth = "440px";
 document.body.append(inset);
 </script>
