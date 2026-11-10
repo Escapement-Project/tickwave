@@ -52,6 +52,7 @@ site's pages:
   `tickwave-convert.wasm`, saved and shown
 - `demo.html`, a short page citing the committed fixtures as a project page would
 - `docs/index.html`, the docs: each with what it covers, and their search
+- `docs/viewer.html`, rendered from `site/docs/viewer.md`: reading a recording in a view
 - `docs/elements.html`, rendered from this file's "The elements" section
 - `docs/charts.html`, `docs/format.html` and `docs/annotations.html`, rendered from `CHARTS.md`,
   `FORMAT.md` and `ANNOTATIONS.md`

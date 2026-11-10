@@ -241,7 +241,7 @@ test("the docs sit in the project's doc frame: every doc in a rail, this one's s
   expect(await column()).toBe(wide);
   const rail = page.getByRole("navigation", { name: "tickwave's docs" });
   // Every link, a subsection's included: those show while the reader is in their section.
-  await expect(rail.locator("a")).toHaveText(["Elements", "Charts", "Format", "Times", "Layout", "Preamble", "Header", "Index", "Blocks", "Overview", "Content id", "Sidecar", "Converter"]);
+  await expect(rail.locator("a")).toHaveText(["Viewer", "Elements", "Charts", "Format", "Times", "Layout", "Preamble", "Header", "Index", "Blocks", "Overview", "Content id", "Sidecar", "Converter"]);
   await expect(rail.getByRole("link", { name: "Format" })).toHaveAttribute("aria-current", "page");
   // The section the reader is in is marked as they go.
   // At the top of the window, past the reading line the rail marks by.
@@ -266,8 +266,8 @@ test("the docs' index lists each doc with what it covers, in the project's marku
   await expect(page.locator(".doc-groups > div")).toHaveCount(1);
   await expect(page.locator(".doc-groups .group")).toHaveCount(0);
   const items = page.locator(".doc-groups li");
-  await expect(items.locator("a")).toHaveText(["Elements", "Charts", "Format", "Sidecar", "Converter"]);
-  await expect(items.first().locator("p")).toHaveText("tickwave's elements: attributes, methods, events, parts and custom properties.");
+  await expect(items.locator("a")).toHaveText(["Viewer", "Elements", "Charts", "Format", "Sidecar", "Converter"]);
+  await expect(items.first().locator("p")).toHaveText("Opening a recording, moving and zooming, reading its channels, cursors and annotations.");
   await items.getByRole("link", { name: "Format" }).click();
   await expect(page).toHaveURL(/docs\/format\.html$/);
 });
@@ -294,7 +294,7 @@ test("a doc's headings link to themselves from h2 down, and its source line name
   await expect(times).not.toHaveAttribute("aria-hidden", /./);
   // Every doc's source line links a file that is in the repository, at the published address.
   const REPO = "https://github.com/Escapement-Project/tickwave/blob/HEAD/";
-  for (const path of ["elements", "charts", "format", "annotations", "converter"]) {
+  for (const path of ["viewer", "elements", "charts", "format", "annotations", "converter"]) {
     const html = await (await request.get(`${SITE}docs/${path}.html`)).text();
     const href = /<p class="doc-source">From <a href="([^"]+)">tickwave<\/a>, where changes to this page go\.<\/p><\/article>/.exec(html)?.[1];
     expect(href, path).toMatch(new RegExp(`^${REPO.replace(/[./]/g, "\\$&")}`));
@@ -306,8 +306,8 @@ test("a doc's headings link to themselves from h2 down, and its source line name
 
 test("the search's index holds each doc's sections, as the project defines one", async ({ request }) => {
   const index = (await (await request.get(`${SITE}docs/search.json`)).json()) as { docs: [string, string][]; sections: [number, string, string, string][] };
-  expect(index.docs).toEqual([["Elements", "elements.html"], ["Charts", "charts.html"], ["Format", "format.html"], ["Sidecar", "annotations.html"], ["Converter", "converter.html"]]);
-  const format = index.sections.filter(([d]) => d === 2);
+  expect(index.docs).toEqual([["Viewer", "viewer.html"], ["Elements", "elements.html"], ["Charts", "charts.html"], ["Format", "format.html"], ["Sidecar", "annotations.html"], ["Converter", "converter.html"]]);
+  const format = index.sections.filter(([d]) => d === 3);
   // The text before the first heading, under the doc's name; then each h2 and h3 in page order.
   expect(format.slice(0, 3).map(([, id, heading]) => [id, heading])).toEqual([["", "Format"], ["times", "Times"], ["layout", "Layout"]]);
   expect(format[0][3]).toMatch(/^A tickwave recording holds digital and analog channels/);
@@ -396,10 +396,19 @@ test("every internal link resolves, fragments included", async ({ request, baseU
     }
   }
   expect(failures).toEqual([]);
-  // The nine pages, each reached by a link.
-  expect([...pages.keys()].map((u) => u.slice(u.indexOf(SITE) + SITE.length)).sort()).toEqual(
-    ["convert.html", "demo.html", "docs/annotations.html", "docs/charts.html", "docs/converter.html", "docs/elements.html", "docs/format.html", "docs/index.html", "index.html"],
-  );
+  // The ten pages, each reached by a link.
+  expect([...pages.keys()].map((u) => u.slice(u.indexOf(SITE) + SITE.length)).sort()).toEqual([
+    "convert.html",
+    "demo.html",
+    "docs/annotations.html",
+    "docs/charts.html",
+    "docs/converter.html",
+    "docs/elements.html",
+    "docs/format.html",
+    "docs/index.html",
+    "docs/viewer.html",
+    "index.html",
+  ]);
   expect(links).toBeGreaterThan(40);
 });
 

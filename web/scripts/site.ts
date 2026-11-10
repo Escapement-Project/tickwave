@@ -98,6 +98,13 @@ const REPOSITORY = "https://github.com/Escapement-Project/tickwave";
 /** tickwave's docs, in the rail on each and in the docs' index, each with what it covers and its source. */
 const DOCS: { href: string; name: string; markdown: string; description: string; source: string }[] = [
   {
+    href: "docs/viewer.html",
+    name: "Viewer",
+    markdown: readFileSync(join(site, "docs/viewer.md"), "utf8"),
+    description: "Opening a recording, moving and zooming, reading its channels, cursors and annotations.",
+    source: "site/docs/viewer.md",
+  },
+  {
     href: "docs/elements.html",
     name: "Elements",
     markdown: elements,
@@ -111,12 +118,12 @@ const DOCS: { href: string; name: string; markdown: string; description: string;
     description: "tickwave's charts: measurements drawn against a setting, and their data.",
     source: "CHARTS.md",
   },
-  { href: "docs/format.html", name: "Format", markdown: readFileSync(join(repo, "FORMAT.md"), "utf8"), description: "The tickwave recording format.", source: "FORMAT.md" },
+  { href: "docs/format.html", name: "Format", markdown: readFileSync(join(repo, "FORMAT.md"), "utf8"), description: "The recording format: times in whole ticks, the header, the block index and the blocks.", source: "FORMAT.md" },
   {
     href: "docs/annotations.html",
     name: "Sidecar",
     markdown: readFileSync(join(repo, "ANNOTATIONS.md"), "utf8"),
-    description: "tickwave's sidecar annotations.",
+    description: "Annotations beside a recording: the hand-written file, a generator's, their fields and measures.",
     source: "ANNOTATIONS.md",
   },
   {
@@ -317,7 +324,7 @@ writeFileSync(join(out, "docs/search.json"), JSON.stringify({ docs: docsIndex, s
 // one list.
 page("docs/index.html", {
   title: titled("Docs"),
-  description: "tickwave's docs: its elements, charts, recording format, sidecar and converter.",
+  description: "tickwave's docs: its viewer, elements, charts, recording format, sidecar and converter.",
   kind: "docs-index-page",
   content: `<div class="docs-index">
 <div class="docs-head">
