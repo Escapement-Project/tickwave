@@ -31,7 +31,7 @@ test.describe("the project's header", () => {
     // The group's rule has a heavier stretch under the page shown, or the place it sits inside.
     const segment = (name: string) => link(name).evaluate((a) => getComputedStyle(a, "::after").borderTopWidth);
     await page.goto(`${SITE}docs/format.html`);
-    await expect(places.getByRole("link")).toHaveText(["Verge", "tickwave", "Open", "Demo", "Docs", "Source"]);
+    await expect(places.getByRole("link")).toHaveText(["Verge", "tickwave", "Open", "Docs", "Source"]);
     await expect(link("Verge")).toHaveAttribute("href", "https://escapement-project.github.io/verge/");
     await expect(link("tickwave")).toHaveAttribute("href", "../index.html");
     // A doc sits inside tickwave and its docs.
@@ -56,7 +56,7 @@ test.describe("the project's header", () => {
 
   test("the switch turns the face, and the next page keeps it", async ({ page }) => {
     await page.emulateMedia({ colorScheme: "light" });
-    await page.goto(`${SITE}demo.html`);
+    await page.goto(`${SITE}open.html`);
     const faces = page.getByRole("switch", { name: "Night face" });
     await expect(faces).toHaveAttribute("aria-checked", "false");
     await faces.click();
@@ -184,8 +184,8 @@ test("the overview: tickwave on its plate, the ways on, a capture beside them, a
   await page.goto(`${SITE}index.html`);
   await expect(page.locator(".product-id h1")).toHaveText("tickwave");
   await expect(page.locator(".product-id .plate svg")).toHaveCount(1);
-  await expect(page.locator(".product-head .ways a")).toHaveText(["Open a recording", "Try the demo", "All docs"]);
-  // Beside them, the demo's capture at one annotation, its clock read from the capture's edges.
+  await expect(page.locator(".product-head .ways a")).toHaveText(["Open a recording", "See it in a page", "All docs"]);
+  // Beside them, a capture at one annotation, its clock read from the capture's edges.
   const inset = page.locator(".product-figure tickwave-inset");
   await expect(inset.locator("figcaption")).toHaveText("Reading the debug port's ID register");
   await expect(inset.locator(".measure")).toHaveText("SWCLK 999.93 kHz mean of 45 periods");
@@ -251,10 +251,10 @@ test("without scripts, the overview's figure says it needs them, offers its file
   await context.close();
 });
 
-test("the demo's references, inset and views work", async ({ page }) => {
+test("the overview's references, inset and views work", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
-  await page.goto(`${SITE}demo.html`);
-  const inset = page.locator("figure tickwave-inset");
+  await page.goto(`${SITE}index.html`);
+  const inset = page.locator(".product-figure tickwave-inset");
   await expect(inset.locator(".measure")).toHaveText("SWCLK 999.93 kHz mean of 45 periods");
   await expect(inset.locator(".key > span")).toHaveText(["probe drives", "target drives"]);
   const ref = page.locator("tickwave-ref[annotation=line-reset]");
@@ -295,18 +295,16 @@ test("on a phone, an example opens with its view in sight and focused, the forms
   await expect(page.locator("#opener")).not.toHaveAttribute("open");
 });
 
-test("the demo without scripts says what needs them, and offers its recordings", async ({ browser, request, baseURL }) => {
+test("the overview without scripts says what needs them, and offers its recordings", async ({ browser, request, baseURL }) => {
   const context = await browser.newContext({ javaScriptEnabled: false });
   const page = await context.newPage();
-  await page.goto(new URL(`${SITE}demo.html`, baseURL).href);
-  // Playwright's text search skips <noscript>, so the notice is found by its class.
-  const notice = page.locator("noscript > p.problem");
-  await expect(notice).toBeVisible();
-  await expect(notice).toContainText("This page draws its figures and captures with JavaScript");
+  await page.goto(new URL(`${SITE}index.html`, baseURL).href);
+  // Playwright's text search skips <noscript>, so the notices are found by where they are.
+  await expect(page.locator("noscript > p")).toHaveText([/^The figure needs JavaScript\./, /^The view needs JavaScript\./, /^The capture needs JavaScript\./]);
   await expect(page.getByText("Point at one, or reach it with Tab")).toBeHidden();
   await expect(page.getByText("Here is the whole capture, closed")).toBeHidden();
   const downloads = await page.locator("a[download]").evaluateAll((as) => as.map((a) => (a as HTMLAnchorElement).href));
-  expect(downloads).toHaveLength(3);
+  expect(downloads).toHaveLength(5);
   for (const href of downloads) expect((await request.get(href)).ok(), href).toBe(true);
   await context.close();
 });
@@ -355,7 +353,6 @@ test("each page is titled by its name, tickwave's and the project's", async ({ p
   for (const [path, title] of [
     ["index.html", "tickwave – Escapement Project"],
     ["open.html", "Open – tickwave – Escapement Project"],
-    ["demo.html", "Demo – tickwave – Escapement Project"],
     ["docs/index.html", "Docs – tickwave – Escapement Project"],
     ["docs/annotations.html", "Sidecar – tickwave – Escapement Project"],
   ]) {
@@ -475,9 +472,8 @@ test("every internal link resolves, fragments included", async ({ request, baseU
     }
   }
   expect(failures).toEqual([]);
-  // The ten pages, each reached by a link.
+  // The nine pages, each reached by a link.
   expect([...pages.keys()].map((u) => u.slice(u.indexOf(SITE) + SITE.length)).sort()).toEqual([
-    "demo.html",
     "docs/annotations.html",
     "docs/charts.html",
     "docs/converter.html",
@@ -507,7 +503,6 @@ test("the docs carry FORMAT.md's and ANNOTATIONS.md's headings", async ({ page }
 const PAGES = [
   ["overview", "index.html"],
   ["viewer", "open.html?src=fixtures/identify-swd.tickwave&annotations=fixtures/identify-swd.annotations.toml"],
-  ["demo", "demo.html"],
   ["docs", "docs/index.html"],
   ["elements", "docs/elements.html"],
   ["format", "docs/format.html"],

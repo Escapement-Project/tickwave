@@ -12,7 +12,7 @@
     <div>
       <p class="lede">tickwave shows a logic or mixed-signal capture inside a web page, beside the text that cites it.</p>
       <p>It draws digital channels from their edges and analog channels from their samples, on one time axis. A phrase in the text can name a stretch of the capture: point at it to see that stretch, or click it to open the whole capture there. The Escapement Project's pages show their bench's recordings with it.</p>
-      <p class="ways"><a href="open.html">Open a recording</a><a href="demo.html">Try the demo</a><a href="docs/index.html">All docs</a></p>
+      <p class="ways"><a href="open.html">Open a recording</a><a href="#page">See it in a page</a><a href="docs/index.html">All docs</a></p>
       <p class="status">In development. tickwave publishes with the project's first release.</p>
     </div>
     <div class="product-figure">
@@ -35,6 +35,9 @@
       <li><h3>Cursors and spans</h3><p>Two clicks place cursors and give the interval between them. A drag selects a span and measures a channel's clock in it.</p></li>
       <li><h3>Annotations</h3><p>A sidecar names spans and points, shown above the channels. Step through one kind of them, such as every WAIT.</p></li>
     </ul>
+    <p class="after">Try them on this capture of an SWD bus, from a mixed-signal analyser's two analog inputs at a billion samples a second. The analyser read each sample as an integer code, and the recording stores those codes. One code step is about 2.5 mV, so a readout stops at the millivolt.</p>
+    <noscript><p class="quiet">The view needs JavaScript. Its recording is <a href="fixtures/swd50-cut.tickwave" download>swd50-cut.tickwave</a>.</p></noscript>
+    <tickwave-view id="analog" src="fixtures/swd50-cut.tickwave" channels="SWCLK SWDIO" window="0 ns 10 us" open></tickwave-view>
   </div>
 </section>
 
@@ -52,9 +55,18 @@
 
 <section id="page">
   <div class="wrap">
-    <div class="head"><h2><a href="docs/elements.html">In your page</a></h2><p class="kicker">One script, and elements that take the page's styles</p></div>
+    <div class="head"><h2><a href="docs/elements.html">In your page</a></h2><p class="kicker">A capture cited the way a page cites a figure</p></div>
+    <p class="needs-script">Each underlined phrase below names a stretch of a real capture. Point at one, or reach it with Tab, to see that stretch. Click it to open the whole capture there.</p>
+    <p>A logic analyser recorded a debug probe opening an SWD session, at a billion samples a second, so one tick is one nanosecond. The probe starts with a <tickwave-ref for="capture" annotation="line-reset">line reset</tickwave-ref>: it holds SWDIO high for 51 clocks. Then it sends the <tickwave-ref for="capture" annotation="jtag-to-swd">JTAG-to-SWD select sequence</tickwave-ref> and resets the line again.</p>
+    <p>Its first transfer <tickwave-ref for="capture" annotation="dpidr-read">reads the debug port's ID register</tickwave-ref>. The probe drives the <tickwave-ref for="capture" annotation="dpidr-request">request</tickwave-ref>. The target drives the <tickwave-ref for="capture" annotation="dpidr-ack">acknowledge</tickwave-ref> and the data. Later on, the target <tickwave-ref for="capture" annotation="first-wait">answers WAIT</tickwave-ref> to a read it isn't ready for.</p>
+    <p class="needs-script">Here is the whole capture, closed. Its line says what it holds before any of its data downloads.</p>
+    <noscript><p class="quiet">The capture needs JavaScript. Its recording is <a href="fixtures/identify-swd.tickwave" download>identify-swd.tickwave</a>, with its sidecar <a href="fixtures/identify-swd.annotations.toml" download>identify-swd.annotations.toml</a>.</p></noscript>
+    <tickwave-view id="capture" src="fixtures/identify-swd.tickwave" annotations="fixtures/identify-swd.annotations.toml"></tickwave-view>
+    <h3 class="how">How this page does it</h3>
     <div class="two">
-      <pre><code>&lt;script type="module" src="tickwave.js"&gt;
+      <div>
+        <p>The page includes one script. The capture and its sidecar of annotations sit beside it as files.</p>
+        <pre><code>&lt;script type="module" src="tickwave.js"&gt;
 &lt;/script&gt;
 
 &lt;p&gt;Its first transfer
@@ -66,6 +78,13 @@
   src="identify-swd.tickwave"
   annotations="identify-swd.annotations.toml"&gt;
 &lt;/tickwave-view&gt;</code></pre>
+        <p>The sidecar is a short TOML file. This entry names a transfer an SWD decoder found, and asks for the clock's rate over it:</p>
+        <pre><code>[[annotation]]
+id = "dpidr-read"
+ref = "swd/read/377094557"
+label = "Reading the debug port's ID register"
+measure = { channel = "SWCLK", what = "rate" }</code></pre>
+      </div>
       <dl class="specs elements">
         <div><dt><code>tickwave-view</code></dt><dd>A whole recording, closed to one line until the reader opens it.</dd></div>
         <div><dt><code>tickwave-inset</code></dt><dd>One annotation's span, magnified, with a reading under it.</dd></div>
@@ -73,7 +92,7 @@
         <div><dt><code>tickwave-chart</code></dt><dd>Measurements against a setting. A point can open the recording behind it.</dd></div>
       </dl>
     </div>
-    <p class="after">A view fetches only the part of a recording it shows, and nothing loads until the reader reaches it. <a href="demo.html">The demo</a> is a page built this way.</p>
+    <p class="after">A reference loads nothing until it scrolls into view. Then it fetches the recording's head and the sidecar, and the data for a stretch arrives when someone points at it. <a href="docs/annotations.html">The sidecar's doc</a> lists its fields.</p>
   </div>
 </section>
 

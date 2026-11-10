@@ -48,10 +48,10 @@ own place gives way to its group: tickwave's pages beside its name, with the pag
 site's pages:
 
 - `index.html`, tickwave's overview, laid out as the project's product pages are: its mark and
-  name, a live inset beside them, then a section for each part, each leading to its doc
+  name, a live inset beside them, then a section for each part, each leading to its doc. It cites
+  the committed fixtures as a project page would, with references, an inset and two views
 - `open.html`, the viewer: a recording by its address (`?src=`, `?annotations=`) or from files, or
   a capture from files, converted in a worker by `tickwave-convert.wasm`, saved and shown
-- `demo.html`, a short page citing the committed fixtures as a project page would
 - `docs/index.html`, the docs: each with what it covers, and their search
 - `docs/viewer.html`, rendered from `site/docs/viewer.md`: reading a recording in a view
 - `docs/elements.html`, rendered from this file's "The elements" section

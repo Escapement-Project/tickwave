@@ -47,7 +47,7 @@ await esbuild.build({
 for (const f of ["tokens.css", "base.css", "doc.css", "face.js", "header.js", "copy.js", "doc.js", "search.js", "mark.js", "favicon-tickwave.ico", "site.css"]) copyFileSync(join(site, f), join(out, f));
 cpSync(join(site, "fonts"), join(out, "fonts"), { recursive: true });
 
-// The demo's and the viewer's examples: committed fixtures, and the SWD annotations made from one.
+// The overview's and the viewer's examples: committed fixtures, and the SWD annotations made from one.
 for (const f of ["identify-swd.tickwave", "identify-swd.annotations.toml", "swd50-cut.tickwave"]) {
   copyFileSync(join(web, "fixtures", f), join(out, "fixtures", f));
 }
@@ -81,7 +81,6 @@ type Token = ReturnType<typeof md.parse>[number];
 const GROUP: { href: string; name: string; page: string }[] = [
   { href: "index.html", name: "tickwave", page: "tickwave" },
   { href: "open.html", name: "Open", page: "tickwave/open" },
-  { href: "demo.html", name: "Demo", page: "tickwave/demo" },
   { href: "docs/index.html", name: "Docs", page: "tickwave/docs" },
 ];
 
@@ -213,7 +212,7 @@ function page(path: string, opts: { title: string; description: string; kind: st
 
 // HTML pages say their description and kind in comments at the top. A page's title is its name in
 // the header's group, and tickwave's main page is tickwave's.
-for (const name of ["index.html", "open.html", "demo.html"]) {
+for (const name of ["index.html", "open.html"]) {
   const text = readFileSync(join(site, "pages", name), "utf8");
   const meta = (key: string) => {
     const m = new RegExp(`<!-- ${key}: (.*?) -->`).exec(text);

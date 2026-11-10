@@ -2,8 +2,8 @@
 
 The viewer shows a tickwave recording. Each channel has a row, all on one time axis. A digital
 channel is drawn from its edges, and an analog channel from its samples. The same view opens on
-[the Open page](../open.html) and wherever a page cites a recording, as [the demo](../demo.html)
-does.
+[the Open page](../open.html) and wherever a page cites a recording, as
+[tickwave's main page](../index.html#page) does.
 
 ## Opening a recording
 
