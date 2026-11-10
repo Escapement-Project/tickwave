@@ -68,3 +68,37 @@ test("another recording starts with every row at its default height", async ({ p
   await expect(handles).toHaveCount(3);
   for (const [i, h] of ["72", "72", "28"].entries()) await expect(handles.nth(i)).toHaveAttribute("aria-valuenow", h);
 });
+
+test("a row dragged taller never leaves the canvas blank when the page paints", async ({ page }) => {
+  await page.goto(`${VIEW}?open&src=fixtures/swd50-cut.tickwave`);
+  const view = page.locator("#v");
+  await ready(view);
+  await view.evaluate((v) => (v as HTMLElement & { settled(): Promise<void> }).settled());
+  // An observer made after the view's runs after its layout, the last thing before the paint.
+  await view.evaluate((v) => {
+    const canvas = v.shadowRoot!.querySelector("canvas")!;
+    const ctx = canvas.getContext("2d")!;
+    const w = window as Window & { blank?: number; seen?: number };
+    w.blank = 0;
+    w.seen = 0;
+    new ResizeObserver(() => {
+      const d = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      let ink = false;
+      for (let i = 3; i < d.length && !ink; i += 4 * 97) ink = d[i] > 0;
+      w.seen!++;
+      if (!ink) w.blank!++;
+    }).observe(canvas);
+  });
+  const box = (await view.locator('[part="row-handle"]').first().boundingBox())!;
+  const [x, y] = [box.x + box.width / 2, box.y + box.height / 2];
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  for (let k = 1; k <= 10; k++) await page.mouse.move(x, y + k * 4);
+  await page.mouse.up();
+  const { blank, seen } = await page.evaluate(() => {
+    const w = window as Window & { blank?: number; seen?: number };
+    return { blank: w.blank, seen: w.seen };
+  });
+  expect(seen).toBeGreaterThan(5);
+  expect(blank).toBe(0);
+});

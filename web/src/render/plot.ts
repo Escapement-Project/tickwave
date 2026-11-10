@@ -287,10 +287,18 @@ export class Plot {
       axisTop,
     };
     this.#dpr = Math.max(1, globalThis.devicePixelRatio || 1);
-    this.canvas.width = Math.round(width * this.#dpr);
-    this.canvas.height = Math.round(this.layout.height * this.#dpr);
+    // Setting a canvas's size clears it, even to the size it has, and the page can paint before the
+    // next frame draws: a row dragged taller would flash blank. So keep a bitmap that still fits,
+    // and draw a new one at once.
+    const w = Math.round(width * this.#dpr);
+    const h = Math.round(this.layout.height * this.#dpr);
     this.canvas.style.width = `${width}px`;
     this.canvas.style.height = `${this.layout.height}px`;
+    if (w !== this.canvas.width || h !== this.canvas.height) {
+      this.canvas.width = w;
+      this.canvas.height = h;
+      this.drawNow();
+    }
     this.invalidate();
     return this.layout;
   }
