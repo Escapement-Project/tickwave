@@ -20,7 +20,7 @@ computer.
 | `crates/wasm` | the same decoder compiled to WASM, for the browser |
 | `crates/convert-wasm` | the converter compiled to WASM, for the site's convert page |
 | `web` | the custom elements, the chart, the converter's worker, and the build of the site |
-| `site` | the site's pages: a viewer, a converter, a demo and the docs |
+| `site` | the site's pages: an overview, a viewer, a converter, a demo and the docs |
 | `bench` | the decode benchmark: the WASM decoder against JavaScript ones, on real recordings |
 
 ## Documents

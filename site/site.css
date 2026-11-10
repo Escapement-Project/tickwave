@@ -14,12 +14,13 @@ main.wrap { padding-top: 32px; padding-bottom: 56px; }
 main.wrap:has(> .doc-wrap, > .docs-index) { padding-top: 0; padding-bottom: 0; }
 /* tickwave's licence, a row of its own under the project's footer. */
 footer .licence { flex-basis: 100%; }
-/* Prose pages: headings in the flow of the text, where the project's sections set them apart. */
-main h2 { margin: 40px 0 10px; }
-h3 { font-size: 18px; font-weight: 600; margin: 28px 0 8px; }
-h4 { font-size: 16px; font-weight: 600; margin: 22px 0 6px; }
-p, ul, ol, dl { max-width: 40em; }
-li { margin: 4px 0; }
+/* Prose pages: headings in the flow of the text, where the project's sections set them apart. The
+   overview's sections are the project's, so it keeps base.css's. */
+:where(main.wrap) h2 { margin: 40px 0 10px; }
+:where(main.wrap) h3 { font-size: 18px; font-weight: 600; margin: 28px 0 8px; }
+:where(main.wrap) h4 { font-size: 16px; font-weight: 600; margin: 22px 0 6px; }
+:where(main.wrap) :is(p, ul, ol, dl) { max-width: 40em; }
+:where(main.wrap) li { margin: 4px 0; }
 .quiet { color: var(--ink-2); font-size: 15px; }
 
 /* The viewer. */
@@ -50,6 +51,27 @@ button.primary:hover, .button:hover { background: var(--wash); }
 .facts dt { color: var(--ink-2); }
 .facts dd { margin: 0; overflow-wrap: anywhere; }
 .share { color: var(--ink-2); font-size: 14px; overflow-wrap: anywhere; }
+
+/* The overview: the inset beside the head on a surface, as the project's figures are; the elements
+   by name beside their markup. */
+/* The inset is the same height at every width: the figure's caption says what the annotation's text
+   would, and the key always takes a line of its own. Its surface is that height from the first
+   paint, and it draws inside it, so nothing below it moves as it loads. */
+.product-figure figure { margin-bottom: 14px; }
+.product-figure tickwave-inset { display: block; }
+.js .product-figure tickwave-inset { height: 154.8px; overflow: clip; background: var(--surface); border-radius: 14px; padding: 10px 8px 6px; }
+.product-figure tickwave-inset::part(text) { display: none; }
+.product-figure tickwave-inset::part(key) { flex-basis: 100%; justify-content: flex-end; }
+/* The reading points are four, so they take a row of four where the steps would take three. */
+@media (min-width: 861px) { #reading .steps { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+/* The elements' names in one column, as wide as the longest; on a phone, each over what it is. */
+.elements { display: grid; grid-template-columns: max-content minmax(0, 1fr); column-gap: 18px; }
+.elements > div { grid-column: 1 / -1; grid-template-columns: subgrid; gap: 0; column-gap: inherit; }
+.elements dt code { font-size: .88em; white-space: nowrap; }
+@media (max-width: 520px) {
+  .elements { grid-template-columns: minmax(0, 1fr); }
+  .elements > div { gap: 2px; }
+}
 
 /* The demo. What only a script makes true goes unsaid without one (the head's script sets .js). */
 html:not(.js) .needs-script { display: none; }

@@ -1,0 +1,35 @@
+<!-- description: Open a logic or mixed-signal capture in your browser, from its address or from files on this computer. -->
+<!-- kind: viewer -->
+<h1>Open a recording</h1>
+<p class="lede">The viewer shows a <code>.tickwave</code> recording from its address, or from files on this computer.</p>
+<p><a href="convert.html">The converter</a> makes a recording from a Saleae Logic 2 binary export, a sigrok session or a VCD file. <a href="docs/viewer.html">The viewer's doc</a> says how to move, zoom and measure in it.</p>
+
+<details id="opener" class="opener" open>
+<summary>Open another recording</summary>
+<div class="open">
+  <form id="by-url" class="by-url">
+    <label for="src">The recording's address</label>
+    <input id="src" name="src" type="text" inputmode="url" spellcheck="false" placeholder="https://example.org/capture.tickwave" required>
+    <label for="annotations">Its sidecar's address, if it has one</label>
+    <input id="annotations" name="annotations" type="text" inputmode="url" spellcheck="false" placeholder="https://example.org/capture.annotations.toml">
+    <button class="primary" type="submit">Open</button>
+  </form>
+  <div id="drop" class="drop">
+    <p>Or open files from this computer: a <code>.tickwave</code> recording, with its sidecar's <code>.toml</code> and <code>.jsonl</code> files if it has them.</p>
+    <p><label class="button">Choose files<input id="files" type="file" multiple></label></p>
+    <p class="quiet">You can drop them here too. They stay in your browser. Nothing is uploaded.</p>
+  </div>
+</div>
+<p class="quiet">To try it, open <a href="?src=fixtures/identify-swd.tickwave&amp;annotations=fixtures/identify-swd.annotations.toml">a debug probe starting an SWD session</a>, or <a href="?src=fixtures/swd50-cut.tickwave">an SWD bus on a mixed-signal analyser's analog inputs</a>.</p>
+</details>
+
+<div id="problem" class="problem" role="alert" hidden></div>
+<section id="stage" class="stage" aria-label="The recording" hidden>
+  <div id="view"></div>
+  <details class="details">
+    <summary>Recording details</summary>
+    <dl id="facts" class="facts"></dl>
+  </details>
+  <p id="share" class="share"></p>
+</section>
+

@@ -1,36 +1,86 @@
-<!-- description: View a logic or mixed-signal capture in your browser, from a URL or from files on this computer. -->
-<!-- kind: viewer -->
-<h1>Open a recording</h1>
-<p class="lede">tickwave shows logic and mixed-signal captures. It draws digital channels from their edges and analog channels from their samples, on one time axis.</p>
-<p>The Escapement Project shows its bench's wire recordings with it: on <a href="https://escapement-project.github.io/verge/measurements/">Verge's measurements page</a>, a chart's point opens the recording behind it. It opens your own recordings too, and nothing you open is uploaded. <a href="demo.html">Try the demo</a> to see it in a page.</p>
-<p>It reads <code>.tickwave</code> recordings. <a href="convert.html">The converter</a> makes them from a Saleae Logic 2 binary export, a sigrok session or a VCD file. Give the viewer a recording's address, or open one from this computer. <a href="docs/viewer.html">The viewer's doc</a> says how to move, zoom and measure in it.</p>
-
-<details id="opener" class="opener" open>
-<summary>Open another recording</summary>
-<div class="open">
-  <form id="by-url" class="by-url">
-    <label for="src">The recording's address</label>
-    <input id="src" name="src" type="text" inputmode="url" spellcheck="false" placeholder="https://example.org/capture.tickwave" required>
-    <label for="annotations">Its sidecar's address, if it has one</label>
-    <input id="annotations" name="annotations" type="text" inputmode="url" spellcheck="false" placeholder="https://example.org/capture.annotations.toml">
-    <button class="primary" type="submit">Open</button>
-  </form>
-  <div id="drop" class="drop">
-    <p>Or open files from this computer: a <code>.tickwave</code> recording, with its sidecar's <code>.toml</code> and <code>.jsonl</code> files if it has them.</p>
-    <p><label class="button">Choose files<input id="files" type="file" multiple></label></p>
-    <p class="quiet">You can drop them here too. They stay in your browser. Nothing is uploaded.</p>
+<!-- description: Logic and mixed-signal captures in a web page: a viewer, a converter, and elements that cite a capture in a page's text. -->
+<!-- kind: overview -->
+<div class="wrap product-head">
+  <div class="product-id">
+    <div class="plate" data-mark="tickwave"><!-- mark --></div>
+    <div>
+      <h1>tickwave</h1>
+      <p class="sub">Logic and mixed-signal captures, in a web page</p>
+    </div>
+  </div>
+  <div class="two">
+    <div>
+      <p class="lede">tickwave shows a logic or mixed-signal capture inside a web page, beside the text that cites it.</p>
+      <p>It draws digital channels from their edges and analog channels from their samples, on one time axis. A phrase in the text can name a stretch of the capture: point at it to see that stretch, or click it to open the whole capture there. The Escapement Project's pages show their bench's recordings with it.</p>
+      <p class="ways"><a href="open.html">Open a recording</a><a href="demo.html">Try the demo</a><a href="docs/index.html">All docs</a></p>
+      <p class="status">In development. tickwave publishes with the project's first release.</p>
+    </div>
+    <div class="product-figure">
+      <figure>
+        <tickwave-inset src="fixtures/identify-swd.tickwave" annotations="fixtures/identify-swd.annotations.toml" annotation="dpidr-read" channels="SWCLK SWDIO"></tickwave-inset>
+        <noscript><p class="quiet">The figure needs JavaScript. Its recording is <a href="fixtures/identify-swd.tickwave" download>identify-swd.tickwave</a>, with its sidecar <a href="fixtures/identify-swd.annotations.toml" download>identify-swd.annotations.toml</a>.</p></noscript>
+        <figcaption>A debug probe's first read over SWD. The probe drives the request; the target drives the acknowledge and the data. The clock rate under the trace comes from the capture's own edges.</figcaption>
+      </figure>
+      <p><a href="open.html?src=fixtures/identify-swd.tickwave&amp;annotations=fixtures/identify-swd.annotations.toml">Open the whole capture</a></p>
+    </div>
   </div>
 </div>
-<p class="quiet">To try it, open <a href="?src=fixtures/identify-swd.tickwave&amp;annotations=fixtures/identify-swd.annotations.toml">a debug probe starting an SWD session</a>, or <a href="?src=fixtures/swd50-cut.tickwave">an SWD bus on a mixed-signal analyser's analog inputs</a>.</p>
-</details>
 
-<div id="problem" class="problem" role="alert" hidden></div>
-<section id="stage" class="stage" aria-label="The recording" hidden>
-  <div id="view"></div>
-  <details class="details">
-    <summary>Recording details</summary>
-    <dl id="facts" class="facts"></dl>
-  </details>
-  <p id="share" class="share"></p>
+<section id="reading">
+  <div class="wrap">
+    <div class="head"><h2><a href="docs/viewer.html">Reading a capture</a></h2><p class="kicker">Zoom, measure and place cursors, on one time axis</p></div>
+    <ul class="steps">
+      <li><h3>Move and zoom</h3><p>Ctrl or Cmd with the wheel, or a pinch, zooms about the pointer. A drag or a sideways swipe moves along the capture.</p></li>
+      <li><h3>Read a pulse</h3><p>Point at a digital channel for the pulse's width, period, duty and frequency, or at an analog channel for its value.</p></li>
+      <li><h3>Cursors and spans</h3><p>Two clicks place cursors and give the interval between them. A drag selects a span and measures a channel's clock in it.</p></li>
+      <li><h3>Annotations</h3><p>A sidecar names spans and points, shown above the channels. Step through one kind of them, such as every WAIT.</p></li>
+    </ul>
+  </div>
 </section>
 
+<section id="convert">
+  <div class="wrap">
+    <div class="head"><h2><a href="docs/converter.html">Convert</a></h2><p class="kicker">From a Saleae Logic 2 export, a sigrok session or a VCD file</p></div>
+    <ol class="steps">
+      <li><h3>Get the converter</h3><div class="console"><code><span aria-hidden="true">$</span>cargo build <i>--release</i> <i>-p tickwave-cli</i></code><p>From tickwave's repository, with a current Rust toolchain. Or <a href="convert.html">convert in your browser</a>, on the same code.</p></div></li>
+      <li><h3>Convert</h3><div class="console"><code><span aria-hidden="true">$</span>tickwave convert <i>sigrok session.sr</i> <i>-o session.tickwave</i></code><p>A Saleae export and a VCD file convert the same way. It checks what it wrote against the capture, edge by edge.</p></div></li>
+      <li><h3>Describe</h3><div class="console"><code><span aria-hidden="true">$</span>tickwave info <i>session.tickwave</i></code><p>The recording's length and resolution, its channels and their edges.</p></div></li>
+    </ol>
+    <p class="after">Each time is a whole number of the capture's own ticks, so a recording never shows more resolution than its source had. <a href="docs/converter.html">The converter's doc</a> has every option.</p>
+  </div>
+</section>
+
+<section id="page">
+  <div class="wrap">
+    <div class="head"><h2><a href="docs/elements.html">In your page</a></h2><p class="kicker">One script, and elements that take the page's styles</p></div>
+    <div class="two">
+      <pre><code>&lt;script type="module" src="tickwave.js"&gt;
+&lt;/script&gt;
+
+&lt;p&gt;Its first transfer
+  &lt;tickwave-ref for="capture"
+    annotation="dpidr-read"&gt;reads
+  the ID register&lt;/tickwave-ref&gt;.&lt;/p&gt;
+
+&lt;tickwave-view id="capture"
+  src="identify-swd.tickwave"
+  annotations="identify-swd.annotations.toml"&gt;
+&lt;/tickwave-view&gt;</code></pre>
+      <dl class="specs elements">
+        <div><dt><code>tickwave-view</code></dt><dd>A whole recording, closed to one line until the reader opens it.</dd></div>
+        <div><dt><code>tickwave-inset</code></dt><dd>One annotation's span, magnified, with a reading under it.</dd></div>
+        <div><dt><code>tickwave-ref</code></dt><dd>A phrase that cites an annotation. Pointing at it opens an inset.</dd></div>
+        <div><dt><code>tickwave-chart</code></dt><dd>Measurements against a setting. A point can open the recording behind it.</dd></div>
+      </dl>
+    </div>
+    <p class="after">A view fetches only the part of a recording it shows, and nothing loads until the reader reaches it. <a href="demo.html">The demo</a> is a page built this way.</p>
+  </div>
+</section>
+
+<section id="docs">
+  <div class="wrap">
+    <div class="head"><h2><a href="docs/index.html">Docs</a></h2><p class="kicker">Written beside the code, in <a href="https://github.com/Escapement-Project/tickwave">tickwave's repository</a></p></div>
+    <dl class="doc-rows"><!-- docs --></dl>
+  </div>
+</section>
+<!-- motion -->

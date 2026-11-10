@@ -2,12 +2,12 @@
 
 The viewer shows a tickwave recording. Each channel has a row, all on one time axis. A digital
 channel is drawn from its edges, and an analog channel from its samples. The same view opens on
-[tickwave's main page](../index.html) and wherever a page cites a recording, as [the demo](../demo.html)
+[the Open page](../open.html) and wherever a page cites a recording, as [the demo](../demo.html)
 does.
 
 ## Opening a recording
 
-Give the viewer a recording's address, and its sidecar's if it has one. The page's address then
+Give the Open page a recording's address, and its sidecar's if it has one. The page's address then
 names both, as `?src=` and `?annotations=`, so a link to it opens the same recording. A recording on
 another site opens only if that site lets other sites read its files: its server has to answer with
 an `Access-Control-Allow-Origin` header (CORS).

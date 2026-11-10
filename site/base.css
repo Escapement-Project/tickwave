@@ -1,6 +1,7 @@
-/* The project's shared base: the header, sections, type, figures, tables, references and the
-   footer. Every page of the project takes it unchanged, after tokens.css, and adds a sheet of its
-   own. Colours, type and line patterns come from tokens.css: this file names roles, never values. */
+/* The project's shared base: the header, sections, type, a product's main page, figures, tables,
+   references and the footer. Every page of the project takes it unchanged, after tokens.css, and
+   adds a sheet of its own. Colours, type and line patterns come from tokens.css: this file names
+   roles, never values. */
 :root { --gutter: clamp(16px, 4vw, 48px); }
 * { box-sizing: border-box; }
 html, body { margin: 0; background: var(--page); color: var(--ink); }
@@ -102,6 +103,58 @@ p { margin: 0 0 14px; max-width: 36em; }
 .specs dt { color: var(--ink-2); }
 .specs dd { margin: 0; }
 
+/* A product's main page opens with its head: the mark on a plate beside the product's name, the
+   lede with the ways in under it, and a figure in the column beside them. A plate shows a mark in
+   lume at whatever size the page gives it. */
+.plate { background: var(--plate); color: var(--lume); box-shadow: inset 0 0 0 1px var(--hair); display: grid; place-items: center; flex: none; }
+/* tickwave's mark draws the ticks between its edges' in plate-line, as its icon does (tokens.toml,
+   [icon.tickwave]). */
+.plate .line { fill: var(--plate-line); fill-opacity: .75; }
+.product-head { padding: 32px var(--gutter) 40px; }
+.product-id { display: flex; gap: 22px; align-items: center; margin-bottom: 32px; }
+.product-id .plate { width: 96px; height: 96px; border-radius: 21px; }
+.product-id .plate svg { width: 66px; height: 66px; }
+.product-id h1 { margin: 0; }
+.product-id .sub { color: var(--ink-2); margin: 2px 0 0; }
+/* The ways on from a page or a section: links in a row, weighted as a heading's. */
+.ways { display: flex; flex-wrap: wrap; gap: 12px 28px; font-weight: 600; }
+.product-head .ways { margin: 22px 0 0; }
+/* Until the first release, a line under the ways in says so. */
+.status { color: var(--ink-2); font-size: 15px; margin: 0; }
+.product-head .status { margin-top: 14px; }
+/* The figure's caption, then the way on to the whole of it. */
+.product-figure { border-left: 1px solid var(--hair); padding-left: var(--gutter); }
+.product-figure p { font-size: 15px; color: var(--ink-2); text-wrap: pretty; }
+.product-figure p:last-child { color: var(--ink); font-weight: 600; margin: 0; }
+/* A command. It breaks only between its arguments, and a wrapped line hangs past the prompt: an ink
+   $ centred in a square of lume, its width and gap the hanging indent. The
+   command is a copy target (copy.js), its Copy button in the corner. */
+.console { position: relative; background: var(--surface); border-radius: 10px; padding: 12px 16px; }
+.console code { display: block; font: 500 14px/1.5 var(--font-code); font-stretch: var(--code-stretch); padding-left: 1.9em; text-indent: -1.9em; }
+.console code > span { display: inline-block; width: 1.4em; height: 1.4em; line-height: 1.4em; margin-right: .5em; text-indent: 0; text-align: center; vertical-align: middle; border-radius: 3px; background: var(--lume); color: var(--on-lume); }
+.console code i { font-style: normal; white-space: nowrap; }
+.console p { margin: 4px 0 0; font-size: 14px; line-height: 1.45; color: var(--ink-2); max-width: none; }
+.js .console code { padding-right: 4.6em; cursor: copy; }
+/* Points in ruled columns, numbered where they are a sequence (an ol). */
+.steps { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--gutter); }
+.steps li { border-top: 1px solid var(--ink); padding-top: 12px; }
+.steps h3 { font-size: 17px; font-weight: 600; margin: 0 0 8px; }
+ol.steps { counter-reset: step; }
+ol.steps li { counter-increment: step; }
+ol.steps h3::before { content: counter(step); font: var(--figures-weight) 15px/1 var(--font-figures); margin-right: 10px; color: var(--ink-2); }
+/* After .console p, which it ties with: a console in a step takes the step's size. */
+.steps p { font-size: 15px; }
+.after { margin: 28px 0 0; font-size: 15px; color: var(--ink-2); }
+.after code { font: 500 .88em var(--font-code); font-stretch: var(--code-stretch); }
+.after a { color: var(--ink); }
+/* A product's docs on its main page: a row a group, what it is for beside it, leading to the group
+   on the docs' index. */
+.doc-rows { margin: 0; }
+.doc-rows > div { display: grid; grid-template-columns: 30% minmax(0, 1fr); padding: 14px 0; border-top: 1px solid var(--hair); }
+.doc-rows > div:last-child { border-bottom: 1px solid var(--hair); }
+.doc-rows dt a { font-weight: 600; }
+.doc-rows dd { margin: 0; color: var(--ink-2); font-size: 15px; text-wrap: pretty; }
+
 /* Figures: a chart on an unbordered surface, its numbered caption below. */
 figure { margin: 0; }
 figcaption { font-size: 14px; color: var(--ink-2); margin-top: 10px; max-width: 40em; }
@@ -160,6 +213,10 @@ footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; g
   header nav .product { column-gap: 14px; }
   .brand .name { display: none; }
   .two { grid-template-columns: minmax(0, 1fr); }
+  .product-figure { border-left: 0; padding-left: 0; border-top: 1px solid var(--hair); padding-top: 20px; }
+  .steps { grid-template-columns: minmax(0, 1fr); }
+  .doc-rows > div { grid-template-columns: minmax(0, 1fr); }
+  .doc-rows dd { margin-top: 4px; }
 }
 @media (max-width: 520px) {
   /* Two rows that scroll away with the page: the mark and the switch, the places under them. */
@@ -182,6 +239,10 @@ footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; g
   .specs dt { font-size: 14px; }
   th, td { padding: 6px 4px; font-size: 14px; }
   section { padding: 32px 0; }
+  /* A product's head closes up to the first section's line, as the sections do. */
+  .product-head { padding-bottom: 32px; }
+  .product-id .plate { width: 72px; height: 72px; border-radius: 16px; }
+  .product-id .plate svg { width: 50px; height: 50px; }
 }
 
 /* Click-to-copy (copy.js): a Copy button in the corner of a command or a doc's code block, the

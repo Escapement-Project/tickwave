@@ -31,7 +31,7 @@ test.describe("the project's header", () => {
     // The group's rule has a heavier stretch under the page shown, or the place it sits inside.
     const segment = (name: string) => link(name).evaluate((a) => getComputedStyle(a, "::after").borderTopWidth);
     await page.goto(`${SITE}docs/format.html`);
-    await expect(places.getByRole("link")).toHaveText(["Verge", "tickwave", "Convert", "Demo", "Docs", "Source"]);
+    await expect(places.getByRole("link")).toHaveText(["Verge", "tickwave", "Open", "Convert", "Demo", "Docs", "Source"]);
     await expect(link("Verge")).toHaveAttribute("href", "https://escapement-project.github.io/verge/");
     await expect(link("tickwave")).toHaveAttribute("href", "../index.html");
     // A doc sits inside tickwave and its docs.
@@ -40,11 +40,15 @@ test.describe("the project's header", () => {
     await expect(places.locator("[aria-current]")).toHaveCount(2);
     expect(await segment("Docs")).toBe("3px");
     expect(await segment("tickwave")).not.toBe("3px");
-    // The viewer is tickwave's main page: the name is the page.
+    // The overview is tickwave's main page: the name is the page.
     await page.goto(`${SITE}index.html`);
     await expect(link("tickwave")).toHaveAttribute("aria-current", "page");
     await expect(places.locator("[aria-current]")).toHaveCount(1);
     expect(await segment("tickwave")).toBe("3px");
+    await page.goto(`${SITE}open.html`);
+    await expect(link("Open")).toHaveAttribute("aria-current", "page");
+    await expect(link("tickwave")).toHaveAttribute("aria-current", "true");
+    expect(await segment("Open")).toBe("3px");
     await page.goto(`${SITE}docs/index.html`);
     await expect(link("Docs")).toHaveAttribute("aria-current", "page");
     await expect(page.locator("footer")).toContainText("tickwave is free software under the MIT or Apache-2.0 licence.");
@@ -87,7 +91,7 @@ test.describe("the project's header", () => {
 
 test.describe("the viewer", () => {
   test("opens a recording and its sidecar from ?src= and ?annotations=", async ({ page }) => {
-    await page.goto(`${SITE}index.html?src=fixtures/identify-swd.tickwave&annotations=fixtures/identify-swd.annotations.toml`);
+    await page.goto(`${SITE}open.html?src=fixtures/identify-swd.tickwave&annotations=fixtures/identify-swd.annotations.toml`);
     const f = await facts(page);
     // From the converter's report: no title, 0.523583100 s at 1 GS/s, two channels, 4830 bytes.
     expect(f).toMatchObject({
@@ -109,7 +113,7 @@ test.describe("the viewer", () => {
   });
 
   test("opens a URL from the field, and puts it in the address", async ({ page }) => {
-    await page.goto(`${SITE}index.html`);
+    await page.goto(`${SITE}open.html`);
     await page.locator("#src").fill("fixtures/swd50-cut.tickwave");
     await page.getByRole("button", { name: "Open" }).click();
     const f = await facts(page);
@@ -119,7 +123,7 @@ test.describe("the viewer", () => {
   });
 
   test("opens a local .tickwave through the file input", async ({ page }) => {
-    await page.goto(`${SITE}index.html`);
+    await page.goto(`${SITE}open.html`);
     await page.locator("#files").setInputFiles("fixtures/identify-swd.4k.tickwave");
     const f = await facts(page);
     // The same capture in nine blocks: the same content id, a file of 6635 bytes.
@@ -129,7 +133,7 @@ test.describe("the viewer", () => {
   });
 
   test("opens a local .tickwave with its sidecar's files", async ({ page }) => {
-    await page.goto(`${SITE}index.html`);
+    await page.goto(`${SITE}open.html`);
     await page.locator("#files").setInputFiles(["fixtures/identify-swd.tickwave", "fixtures/identify-swd.annotations.toml", "dist/site/fixtures/identify-swd.swd.jsonl"]);
     await facts(page);
     await viewReady(page);
@@ -141,7 +145,7 @@ test.describe("the viewer", () => {
   });
 
   test("says what is wrong with a sidecar, and still shows the recording", async ({ page }) => {
-    await page.goto(`${SITE}index.html`);
+    await page.goto(`${SITE}open.html`);
     // The sidecar names identify-swd.tickwave; this file is identify-swd.4k.tickwave.
     await page.locator("#files").setInputFiles(["fixtures/identify-swd.4k.tickwave", "fixtures/identify-swd.annotations.toml", "dist/site/fixtures/identify-swd.swd.jsonl"]);
     const problem = page.locator("#problem");
@@ -151,7 +155,7 @@ test.describe("the viewer", () => {
   });
 
   test("says a file that is not a recording isn't one", async ({ page }) => {
-    await page.goto(`${SITE}index.html`);
+    await page.goto(`${SITE}open.html`);
     await page.locator("#files").setInputFiles("../site/favicon-tickwave.ico");
     await expect(page.locator("#problem")).toHaveText("favicon-tickwave.ico isn't a tickwave recording. The viewer reads .tickwave files, which the converter makes from a capture.");
     await expect(page.locator("#stage")).toBeHidden();
@@ -160,16 +164,88 @@ test.describe("the viewer", () => {
   test("explains a server that refuses a read from another site", async ({ page }) => {
     // Port 8125 is another origin, and sends no Access-Control-Allow-Origin.
     const src = "http://127.0.0.1:8125/dist/site/fixtures/identify-swd.tickwave";
-    await page.goto(`${SITE}index.html?src=${encodeURIComponent(src)}`);
+    await page.goto(`${SITE}open.html?src=${encodeURIComponent(src)}`);
     await expect(page.locator("#problem")).toContainText("127.0.0.1:8125 didn't send the recording.");
     await expect(page.locator("#problem")).toContainText("(CORS)");
   });
 
   test("explains an address with nothing there", async ({ page }) => {
-    await page.goto(`${SITE}index.html?src=fixtures/nothing.tickwave`);
+    await page.goto(`${SITE}open.html?src=fixtures/nothing.tickwave`);
     await expect(page.locator("#problem")).toContainText("There's no file at");
     await expect(page.locator("#problem")).toContainText("the server answered 404.");
   });
+});
+
+test("the overview: tickwave on its plate, the ways on, a capture beside them, and a section a doc", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto(`${SITE}index.html`);
+  await expect(page.locator(".product-id h1")).toHaveText("tickwave");
+  await expect(page.locator(".product-id .plate svg")).toHaveCount(1);
+  await expect(page.locator(".product-head .ways a")).toHaveText(["Open a recording", "Try the demo", "All docs"]);
+  // Beside them, the demo's capture at one annotation, its clock read from the capture's edges.
+  const inset = page.locator(".product-figure tickwave-inset");
+  await expect(inset.locator("figcaption")).toHaveText("Reading the debug port's ID register");
+  await expect(inset.locator(".measure")).toHaveText("SWCLK 999.93 kHz mean of 45 periods");
+  // Each section's heading leads to its doc, and the docs' rows are the docs.
+  const heads = page.locator("section .head h2 a");
+  await expect(heads).toHaveText(["Reading a capture", "Convert", "In your page", "Docs"]);
+  expect(await heads.evaluateAll((as) => as.map((a) => a.getAttribute("href")))).toEqual(["docs/viewer.html", "docs/converter.html", "docs/elements.html", "docs/index.html"]);
+  await expect(page.locator(".doc-rows dt a")).toHaveText(["Viewer", "Elements", "Charts", "Format", "Sidecar", "Converter"]);
+  // The sections' rules run the page's width, as on the project's pages.
+  expect(await page.evaluate(() => document.querySelector("section")!.getBoundingClientRect().width)).toBe(await page.evaluate(() => document.documentElement.clientWidth));
+});
+
+test("the overview's inset keeps its height while it loads, so nothing below it moves", async ({ page }) => {
+  // The elements' script and the recording are held back, then let through one at a time.
+  const held = (pattern: string) => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    void page.route(pattern, async (route) => {
+      await gate;
+      await route.continue();
+    });
+    return release;
+  };
+  for (const width of [1280, 700, 360]) {
+    await page.unroute("**/*");
+    await page.setViewportSize({ width, height: 900 });
+    const script = held("**/tickwave.js");
+    const data = held("**/fixtures/identify-swd.tickwave");
+    // A module script holds DOMContentLoaded back, so the page is ready to measure once parsed, its
+    // sheets and fonts in.
+    await page.goto(`${SITE}index.html`, { waitUntil: "commit" });
+    await page.waitForFunction(() => document.readyState !== "loading" && [...document.querySelectorAll<HTMLLinkElement>("link[rel=stylesheet]")].every((l) => l.sheet));
+    // In Firefox, fonts.ready does not settle while the script is held.
+    await page.evaluate(() => Promise.all([...document.fonts].map((f) => f.load())));
+    const below = () => page.locator("#reading").evaluate((s) => s.getBoundingClientRect().top + scrollY);
+    const undefinedYet = await below();
+    script();
+    await page.waitForFunction(() => customElements.get("tickwave-inset") !== undefined);
+    const noData = await below();
+    data();
+    await page.locator(".product-figure tickwave-inset").evaluate((i) => (i as HTMLElement & { settled(): Promise<void> }).settled());
+    await expect(page.locator(".product-figure tickwave-inset .measure")).not.toBeEmpty();
+    expect([undefinedYet, noData], `${width} px`).toEqual([await below(), await below()]);
+    // And the inset, drawn, fills the room kept for it: nothing cut off, and no gap under it.
+    const inset = page.locator(".product-figure tickwave-inset");
+    const drawn = await inset.locator("figure").evaluate((f) => f.getBoundingClientRect().height);
+    const kept = await inset.evaluate((i) => {
+      const s = getComputedStyle(i);
+      return i.getBoundingClientRect().height - parseFloat(s.paddingTop) - parseFloat(s.paddingBottom);
+    });
+    expect(drawn, `${width} px`).toBeCloseTo(kept, 0);
+  }
+});
+
+test("without scripts, the overview's figure says it needs them, offers its files, and keeps no room", async ({ browser, baseURL }) => {
+  const context = await browser.newContext({ javaScriptEnabled: false });
+  const page = await context.newPage();
+  await page.goto(new URL(`${SITE}index.html`, baseURL).href);
+  const notice = page.locator(".product-figure noscript > p");
+  await expect(notice).toContainText("The figure needs JavaScript.");
+  await expect(notice.locator("a[download]")).toHaveCount(2);
+  expect(await page.locator(".product-figure tickwave-inset").evaluate((i) => i.getBoundingClientRect().height)).toBe(0);
+  await context.close();
 });
 
 test("the demo's references, inset and views work", async ({ page }) => {
@@ -196,7 +272,7 @@ test("the demo's references, inset and views work", async ({ page }) => {
 test("on a phone, an example opens with its view in sight and focused, the forms folded and the details closed", async ({ page }) => {
   await page.setViewportSize({ width: 360, height: 800 });
   await page.emulateMedia({ reducedMotion: "reduce" });
-  await page.goto(`${SITE}index.html?src=fixtures/identify-swd.tickwave&annotations=fixtures/identify-swd.annotations.toml`);
+  await page.goto(`${SITE}open.html?src=fixtures/identify-swd.tickwave&annotations=fixtures/identify-swd.annotations.toml`);
   const view = page.locator("#stage tickwave-view");
   await expect(view.locator(".plot")).toBeFocused();
   const box = await view.boundingBox();
@@ -235,7 +311,7 @@ test("the demo without scripts says what needs them, and offers its recordings",
 test("the docs sit in the project's doc frame: every doc in a rail, this one's sections, and a bar on a phone", async ({ page }) => {
   // The frame takes the page's column, as wide as on any other page: the docs' sheet narrows only the text.
   const column = () => page.locator("main").evaluate((m) => m.getBoundingClientRect().width);
-  await page.goto(`${SITE}index.html`);
+  await page.goto(`${SITE}open.html`);
   const wide = await column();
   await page.goto(`${SITE}docs/format.html`);
   expect(await column()).toBe(wide);
@@ -275,6 +351,7 @@ test("the docs' index lists each doc with what it covers, in the project's marku
 test("each page is titled by its name, tickwave's and the project's", async ({ page }) => {
   for (const [path, title] of [
     ["index.html", "tickwave – Escapement Project"],
+    ["open.html", "Open – tickwave – Escapement Project"],
     ["convert.html", "Convert – tickwave – Escapement Project"],
     ["demo.html", "Demo – tickwave – Escapement Project"],
     ["docs/index.html", "Docs – tickwave – Escapement Project"],
@@ -396,7 +473,7 @@ test("every internal link resolves, fragments included", async ({ request, baseU
     }
   }
   expect(failures).toEqual([]);
-  // The ten pages, each reached by a link.
+  // The eleven pages, each reached by a link.
   expect([...pages.keys()].map((u) => u.slice(u.indexOf(SITE) + SITE.length)).sort()).toEqual([
     "convert.html",
     "demo.html",
@@ -408,6 +485,7 @@ test("every internal link resolves, fragments included", async ({ request, baseU
     "docs/index.html",
     "docs/viewer.html",
     "index.html",
+    "open.html",
   ]);
   expect(links).toBeGreaterThan(40);
 });
@@ -426,7 +504,8 @@ test("the docs carry FORMAT.md's and ANNOTATIONS.md's headings", async ({ page }
 });
 
 const PAGES = [
-  ["viewer", "index.html?src=fixtures/identify-swd.tickwave&annotations=fixtures/identify-swd.annotations.toml"],
+  ["overview", "index.html"],
+  ["viewer", "open.html?src=fixtures/identify-swd.tickwave&annotations=fixtures/identify-swd.annotations.toml"],
   ["convert", "convert.html"],
   ["demo", "demo.html"],
   ["docs", "docs/index.html"],
@@ -448,6 +527,7 @@ test.describe("screenshots", () => {
           await page.goto(`${SITE}${path}`);
           await page.evaluate(() => document.fonts.ready);
           if (name === "viewer") await viewReady(page);
+          if (name === "overview") await page.locator("tickwave-inset").evaluate((i) => (i as HTMLElement & { settled(): Promise<void> }).settled());
           await page.waitForTimeout(150);
           const [scroll, client] = await page.evaluate(() => [document.documentElement.scrollWidth, document.documentElement.clientWidth]);
           expect(scroll, `${name} scrolls sideways at ${width} px`).toBeLessThanOrEqual(client);

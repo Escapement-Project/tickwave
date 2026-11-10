@@ -44,7 +44,7 @@ await esbuild.build({
 });
 
 // The design system's files, as copied into site/, and the site's own styles.
-for (const f of ["tokens.css", "base.css", "doc.css", "face.js", "header.js", "copy.js", "doc.js", "search.js", "favicon-tickwave.ico", "site.css"]) copyFileSync(join(site, f), join(out, f));
+for (const f of ["tokens.css", "base.css", "doc.css", "face.js", "header.js", "copy.js", "doc.js", "search.js", "mark.js", "favicon-tickwave.ico", "site.css"]) copyFileSync(join(site, f), join(out, f));
 cpSync(join(site, "fonts"), join(out, "fonts"), { recursive: true });
 
 // The demo's and the viewer's examples: committed fixtures, and the SWD annotations made from one.
@@ -80,6 +80,7 @@ type Token = ReturnType<typeof md.parse>[number];
 /** tickwave's group in the header: its main page under its name, then its other pages. */
 const GROUP: { href: string; name: string; page: string }[] = [
   { href: "index.html", name: "tickwave", page: "tickwave" },
+  { href: "open.html", name: "Open", page: "tickwave/open" },
   { href: "convert.html", name: "Convert", page: "tickwave/convert" },
   { href: "demo.html", name: "Demo", page: "tickwave/demo" },
   { href: "docs/index.html", name: "Docs", page: "tickwave/docs" },
@@ -156,6 +157,9 @@ function shaped(name: string, markers: [string, number][]): string {
 // The shared header, with the project's mark and its places at the published site; the shared
 // footer, with tickwave's licence.
 const mark = readFileSync(join(site, "dial.svg"), "utf8").trim().replace("<svg ", '<svg aria-hidden="true" fill="currentColor" ');
+// tickwave's mark, on the overview's plate, and its motion, which the shared mark.js plays.
+const plateMark = readFileSync(join(site, "tickwave.svg"), "utf8").trim().replace("<svg ", '<svg width="66" height="66" aria-hidden="true" fill="currentColor" ');
+const motion = `<script id="tickwave-mark" type="application/json">${readFileSync(join(site, "tickwave-mark.json"), "utf8").trim()}</script>`;
 const TICKWAVE = '<a href="{{base}}/tickwave/" data-page="tickwave">tickwave</a>';
 const shared = shaped("header.html", [["{{mark}}", 1], ["{{base}}", 0], [TICKWAVE, 1]]).replace("{{mark}}", () => mark);
 
@@ -195,6 +199,10 @@ function page(path: string, opts: { title: string; description: string; kind: st
         return footer;
       case "kind":
         return opts.kind;
+      // The overview's head and sections set their own column, as the project's pages do, so its
+      // sections' rules run the page's width.
+      case "main":
+        return opts.kind === "overview" ? "" : ' class="wrap"';
       case "content":
         return opts.content;
       default:
@@ -206,7 +214,7 @@ function page(path: string, opts: { title: string; description: string; kind: st
 
 // HTML pages say their description and kind in comments at the top. A page's title is its name in
 // the header's group, and tickwave's main page is tickwave's.
-for (const name of ["index.html", "convert.html", "demo.html"]) {
+for (const name of ["index.html", "open.html", "convert.html", "demo.html"]) {
   const text = readFileSync(join(site, "pages", name), "utf8");
   const meta = (key: string) => {
     const m = new RegExp(`<!-- ${key}: (.*?) -->`).exec(text);
@@ -214,7 +222,12 @@ for (const name of ["index.html", "convert.html", "demo.html"]) {
     return m[1];
   };
   const title = titled(name === GROUP[0].href ? null : GROUP.find((g) => g.href === name)!.name);
-  page(name, { title, description: meta("description"), kind: meta("kind"), content: text.replace(/^<!-- \w+: .*? -->\n/gm, "") });
+  const content = text
+    .replace(/^<!-- \w+: .*? -->\n/gm, "")
+    .replace("<!-- mark -->", () => plateMark)
+    .replace("<!-- motion -->", () => motion)
+    .replace("<!-- docs -->", () => DOCS.map((d) => `<div><dt><a href="${d.href}">${d.name}</a></dt><dd>${esc(d.description)}</dd></div>`).join(""));
+  page(name, { title, description: meta("description"), kind: meta("kind"), content });
 }
 
 /** A heading's text as the rail shows it: its HTML without the link to itself. */
