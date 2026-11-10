@@ -2,7 +2,8 @@
 <!-- description: How a project page cites a real capture with tickwave: references in the text, an inset with a measurement, and the whole capture a click away. -->
 <!-- kind: demo -->
 <h1>A capture in a page</h1>
-<p class="lede">A page can cite a capture the way it cites a figure. Each underlined phrase below names a stretch of a real capture. Point at one, or reach it with Tab, to see that stretch. Click it to open the whole capture there.</p>
+<p class="lede">A page can cite a capture the way it cites a figure.<span class="needs-script"> Each underlined phrase below names a stretch of a real capture. Point at one, or reach it with Tab, to see that stretch. Click it to open the whole capture there.</span></p>
+<noscript><p class="problem">This page draws its figures and captures with JavaScript, which is off here. Its text stays, and the two recordings it shows are below to download.</p></noscript>
 
 <h2>A probe opens an SWD session</h2>
 <p>A logic analyser recorded this at a billion samples a second, so one tick is one nanosecond. The debug probe starts with a <tickwave-ref for="capture" annotation="line-reset">line reset</tickwave-ref>: it holds SWDIO high for 51 clocks. Then it sends the <tickwave-ref for="capture" annotation="jtag-to-swd">JTAG-to-SWD select sequence</tickwave-ref> and resets the line again.</p>
@@ -10,14 +11,16 @@
 
 <figure>
   <tickwave-inset src="fixtures/identify-swd.tickwave" annotations="fixtures/identify-swd.annotations.toml" annotation="dpidr-read" channels="SWCLK SWDIO"></tickwave-inset>
+  <noscript><p class="quiet">The figure needs JavaScript. Its recording is <a href="fixtures/identify-swd.tickwave" download>identify-swd.tickwave</a>, with its sidecar <a href="fixtures/identify-swd.annotations.toml" download>identify-swd.annotations.toml</a>.</p></noscript>
   <figcaption><b>Figure 1.</b> The read of the debug port's ID register, which returns 0x6BA02477. The clock rate under the trace comes from the capture's own edges. It is the mean of the clock's periods, leaving out pauses. It shows only the digits those edges support.</figcaption>
 </figure>
 
-<p>Here is the whole capture, closed. Its line says what it holds before any of its data downloads. Open it to zoom, place cursors and measure.</p>
+<p class="needs-script">Here is the whole capture, closed. Its line says what it holds before any of its data downloads. Open it to zoom, place cursors and measure.</p>
 <tickwave-view id="capture" src="fixtures/identify-swd.tickwave" annotations="fixtures/identify-swd.annotations.toml"></tickwave-view>
 
 <h2>The same kind of bus, on analog inputs</h2>
-<p>This capture comes from a mixed-signal analyser's two analog inputs, at a billion samples a second. The analyser read each sample as an integer code, and the recording stores those codes. One code step is about 2.5 mV, so a readout stops at the millivolt. Place two cursors on a trace to read its voltage at each.</p>
+<p>This capture comes from a mixed-signal analyser's two analog inputs, at a billion samples a second. The analyser read each sample as an integer code, and the recording stores those codes. One code step is about 2.5 mV, so a readout stops at the millivolt.<span class="needs-script"> Place two cursors on a trace to read its voltage at each.</span></p>
+<noscript><p class="quiet">The view needs JavaScript. Its recording is <a href="fixtures/swd50-cut.tickwave" download>swd50-cut.tickwave</a>.</p></noscript>
 <tickwave-view id="analog" src="fixtures/swd50-cut.tickwave" channels="SWCLK SWDIO" window="0 ns 10 us" open></tickwave-view>
 
 <h2>How this page does it</h2>

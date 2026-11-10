@@ -3,8 +3,11 @@
 <!-- kind: viewer -->
 <h1>Open a recording</h1>
 <p class="lede">tickwave shows logic and mixed-signal captures. It draws digital channels from their edges and analog channels from their samples, on one time axis.</p>
-<p>It reads <code>.tickwave</code> recordings. <a href="docs/converter.html">The converter</a> makes them from Saleae Logic 2, sigrok and VCD captures. Give the viewer a recording's address, or open one from this computer.</p>
+<p>The Escapement Project shows its bench's wire recordings with it: on <a href="https://escapement-project.github.io/measurements/">the measurements page</a>, a chart's point opens the recording behind it. It opens your own recordings too, and nothing you open is uploaded. <a href="demo.html">Try the demo</a> to see it in a page.</p>
+<p>It reads <code>.tickwave</code> recordings. <a href="convert.html">The converter</a> makes them from a Saleae Logic 2 binary export, a sigrok session or a VCD file. Give the viewer a recording's address, or open one from this computer.</p>
 
+<details id="opener" class="opener" open>
+<summary>Open another recording</summary>
 <div class="open">
   <form id="by-url" class="by-url">
     <label for="src">The recording's address</label>
@@ -20,11 +23,15 @@
   </div>
 </div>
 <p class="quiet">To try it, open <a href="?src=fixtures/identify-swd.tickwave&amp;annotations=fixtures/identify-swd.annotations.toml">a debug probe starting an SWD session</a>, or <a href="?src=fixtures/swd50-cut.tickwave">an SWD bus on a mixed-signal analyser's analog inputs</a>.</p>
+</details>
 
 <div id="problem" class="problem" role="alert" hidden></div>
 <section id="stage" class="stage" aria-label="The recording" hidden>
-  <dl id="facts" class="facts"></dl>
   <div id="view"></div>
+  <details class="details">
+    <summary>Recording details</summary>
+    <dl id="facts" class="facts"></dl>
+  </details>
   <p id="share" class="share"></p>
 </section>
 

@@ -52,6 +52,13 @@ button.primary:hover, .button:hover { background: var(--wash); }
 .problem { border-left: 3px solid var(--attention-ink); padding: 6px 14px; margin: 18px 0; max-width: 46em; }
 .problem p { margin: 0 0 6px; }
 .problem ul { margin: 4px 0 0; padding-left: 20px; font-size: 15px; }
+/* The forms that open a recording fold away once one is shown; until then they are simply there. */
+.opener:not(.folds) > summary { display: none; }
+.opener > summary, .details > summary { cursor: pointer; font-size: 15px; color: var(--ink-2); margin: 14px 0 6px; }
+.opener > summary:hover, .details > summary:hover { color: var(--ink); }
+/* A recording's provenance, closed under its view. */
+.details { margin: 10px 0 0; }
+.details .facts { margin-top: 8px; }
 /* The opened recording is a region of the page, not one of the project's ruled sections. */
 .stage { margin-top: 22px; border-top: 0; padding: 0; }
 .facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 18px; max-width: none; font-size: 15px; margin: 0 0 16px; }
@@ -59,7 +66,8 @@ button.primary:hover, .button:hover { background: var(--wash); }
 .facts dd { margin: 0; overflow-wrap: anywhere; }
 .share { color: var(--ink-2); font-size: 14px; overflow-wrap: anywhere; }
 
-/* The demo. */
+/* The demo. What only a script makes true goes unsaid without one (the head's script sets .js). */
+html:not(.js) .needs-script { display: none; }
 .demo figure { margin: 18px 0 26px; }
 .demo tickwave-inset { max-width: 440px; }
 .demo tickwave-inset::part(inset) { background: var(--surface); border-radius: 10px; padding: 8px 6px 6px; }

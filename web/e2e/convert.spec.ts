@@ -53,7 +53,7 @@ test("a sigrok file with a channel left out, one renamed, a title, metadata and 
   await page.getByLabel("Take D0").uncheck();
   await page.getByLabel("Name for A1").fill("I");
   await page.locator("#title").fill("demo, mixed");
-  await page.locator("summary").click();
+  await page.locator("#settings summary").click();
   await page.locator("#level").fill("5");
   await page.locator("#block").fill("16");
   await page.getByLabel(/exact integer codes/).uncheck();
@@ -103,7 +103,7 @@ test("says what is wrong: no capture, two captures, a file that is not one, and 
   await expect(problem).toHaveText("Take at least one channel.");
   await page.getByLabel("Take digital_3_0").check();
   await page.getByLabel("Name for digital_3_0").fill("SWCLK");
-  await page.locator("summary").click();
+  await page.locator("#settings summary").click();
   await page.locator("#meta").fill("no equals sign");
   await page.getByRole("button", { name: "Convert" }).click();
   await expect(problem).toHaveText("Each metadata line is key = value; this one isn't: no equals sign");

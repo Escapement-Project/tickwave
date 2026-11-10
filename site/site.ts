@@ -55,6 +55,7 @@ function viewer(): void {
   const facts = document.getElementById("facts")!;
   const share = document.getElementById("share")!;
   const here = document.getElementById("view")!;
+  const opener = byId<HTMLDetailsElement>("opener");
   const { say, clear } = problems(byId("problem"));
   let opened = 0;
 
@@ -87,6 +88,19 @@ function viewer(): void {
     });
     here.append(view);
     stage.hidden = false;
+    // The recording, not the forms that asked for it: they fold away, and once the view has drawn
+    // it comes into sight with the focus, so its keys work at once.
+    opener.classList.add("folds");
+    opener.open = false;
+    view.addEventListener(
+      "tickwave-ready",
+      () => {
+        if (token !== opened) return;
+        view.scrollIntoView({ block: "nearest", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+        view.focus({ preventScroll: true });
+      },
+      { once: true },
+    );
     if (link) {
       const q = new URLSearchParams({ src, ...(annotations && { annotations }) });
       history.replaceState(null, "", `?${q}`);
@@ -384,6 +398,8 @@ function converter(): void {
     byId("found").textContent = [exact.length ? `Exact codes: ${exact.join(", ")}.` : "", f32.length ? `Stored as f32: ${f32.join(", ")}.` : ""].filter(Boolean).join(" ");
     view.replaceChildren();
     result.hidden = false;
+    // The next thing to do is save it: the focus goes there, and brings it into sight.
+    save.focus();
     const src = registerFile(file, []);
     try {
       showFacts(byId("facts"), await recordingInfo(src), file.name);

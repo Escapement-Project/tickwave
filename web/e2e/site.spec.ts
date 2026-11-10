@@ -172,9 +172,51 @@ test("the demo's references, inset and views work", async ({ page }) => {
   await page.mouse.move(0, 0);
   const capture = page.locator("#capture");
   await expect(capture.locator(".summary .facts")).toHaveText("524 ms; 2 channels: SWCLK, SWDIO; 4.7 KiB");
+  // A closed view's focus goes to its Open button.
+  await capture.evaluate((v) => v.focus());
+  await expect(capture.locator(".open")).toBeFocused();
   await page.locator("tickwave-ref[annotation=dpidr-ack]").click();
   await expect(capture).toHaveAttribute("open", "");
   await expect(page.locator("#analog").locator(".toolbar .title")).toHaveText("swd50-cut.tickwave");
+});
+
+test("on a phone, an example opens with its view in sight and focused, the forms folded and the details closed", async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 800 });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto(`${SITE}index.html?src=fixtures/identify-swd.tickwave&annotations=fixtures/identify-swd.annotations.toml`);
+  const view = page.locator("#stage tickwave-view");
+  await expect(view.locator(".plot")).toBeFocused();
+  const box = await view.boundingBox();
+  expect(box!.y).toBeGreaterThanOrEqual(0);
+  expect(box!.y + box!.height).toBeLessThanOrEqual(801);
+  await expect(page.locator("#opener")).not.toHaveAttribute("open");
+  await expect(page.getByText("Open another recording")).toBeVisible();
+  await expect(page.locator("#facts")).toBeHidden();
+  await page.getByText("Recording details").click();
+  await expect(page.locator("#facts")).toContainText("blake3:930db20d");
+  // Unfolded, the forms open another.
+  await page.getByText("Open another recording").click();
+  await page.locator("#src").fill("fixtures/swd50-cut.tickwave");
+  await page.locator("#annotations").fill("");
+  await page.getByRole("button", { name: "Open", exact: true }).click();
+  await expect(page.locator("#stage tickwave-view .plot")).toBeFocused();
+  await expect(page.locator("#opener")).not.toHaveAttribute("open");
+});
+
+test("the demo without scripts says what needs them, and offers its recordings", async ({ browser, request, baseURL }) => {
+  const context = await browser.newContext({ javaScriptEnabled: false });
+  const page = await context.newPage();
+  await page.goto(new URL(`${SITE}demo.html`, baseURL).href);
+  // Playwright's text search skips <noscript>, so the notice is found by its class.
+  const notice = page.locator("noscript > p.problem");
+  await expect(notice).toBeVisible();
+  await expect(notice).toContainText("This page draws its figures and captures with JavaScript");
+  await expect(page.getByText("Point at one, or reach it with Tab")).toBeHidden();
+  await expect(page.getByText("Here is the whole capture, closed")).toBeHidden();
+  const downloads = await page.locator("a[download]").evaluateAll((as) => as.map((a) => (a as HTMLAnchorElement).href));
+  expect(downloads).toHaveLength(3);
+  for (const href of downloads) expect((await request.get(href)).ok(), href).toBe(true);
+  await context.close();
 });
 
 test("every internal link resolves, fragments included", async ({ request, baseURL }) => {
