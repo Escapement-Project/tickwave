@@ -9,16 +9,29 @@ a { color: inherit; }
 .nb { white-space: nowrap; }
 a:focus-visible, button:focus-visible, [tabindex]:focus-visible { outline: var(--focus-width) solid var(--ink); outline-offset: 3px; }
 .wrap { max-width: 1120px; margin: 0 auto; padding: 0 var(--gutter); }
+/* Scrollbars thin and in the page's own colours, in either face: the page's on the page, a scroll
+   area's on its own background. The colour is inherited and the width is not, so each scroll area
+   names its width. */
+html { scrollbar-width: thin; scrollbar-color: var(--rule) var(--page); }
+:where(pre, table, figure, .diagram, nav) { scrollbar-width: thin; scrollbar-color: var(--rule) transparent; }
 
-/* The header stays on screen and looks the same at every scroll position: it sticks to the top,
-   and once the page has scrolled (header.js sets .scrolled) a hairline shows under it. Nothing in
-   it moves. --header is its height with the rule, for links into the page and the focus; header.js
-   keeps it at the header's measured height, and these values stand without the script. */
+/* The header looks the same at every scroll position. Above a phone's width it sticks to the top,
+   and once the page has scrolled (header.js sets .scrolled) a hairline shows under it; on a phone it
+   scrolls away with the page. Nothing in it moves. --header is its height with the rule, for links
+   into the page and the focus; header.js keeps it at the header's measured height, and these values
+   stand without the script. */
 :root { --header: 61px; }
 header { position: sticky; top: 0; z-index: 10; background: var(--page); border-bottom: 1px solid transparent; }
 .scrolled header { border-bottom-color: var(--hair); }
 html { scroll-padding-top: var(--header); }
 @media print { header { position: static; } }
+/* Where the header scrolls away (--header-returns, set below and by a page's own sheet), header.js
+   brings it back while the reader scrolls up: away, it waits fixed above the window, and the page
+   keeps its place. */
+.header-away body { padding-top: var(--header-flow); }
+.header-away header { position: fixed; top: 0; left: 0; right: 0; transform: translateY(-100%); }
+.header-away.header-back header { transform: none; }
+@media (prefers-reduced-motion: no-preference) { .header-moves header { transition: transform .2s ease-out; } }
 header .wrap { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "brand nav face"; align-items: center; gap: 12px 26px; min-height: 60px; }
 .brand { grid-area: brand; display: flex; align-items: center; gap: 10px; text-decoration: none; font: 400 14px/1 var(--font-display); letter-spacing: .04em; white-space: nowrap; }
 .brand svg { width: 28px; height: 28px; }
@@ -28,10 +41,6 @@ header nav a:hover { color: var(--ink); }
 /* Where the reader is: the page among the project's pages, or the section of this page. In ink,
    underlined. */
 header nav a[aria-current] { color: var(--ink); text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: 7px; }
-/* On phones the places are behind a menu button, which header.js opens. The page's head script sets
-   .js on <html> before the first paint; without it the button is never drawn and the places stay
-   in the header. */
-.menu-button { display: none; }
 /* A link past the header to the page's content, shown only while it has the focus. */
 .skip { position: absolute; left: -9999px; top: 0; }
 .skip:focus { left: 12px; top: 12px; z-index: 11; background: var(--raised); padding: 6px 10px; border-radius: 6px; }
@@ -129,22 +138,19 @@ footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; g
   .two { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 520px) {
-  /* With the script: one row of the mark, a menu of the places and the switch. The menu opens the
-     places in a panel under the header, over the page, so the header itself never changes. */
-  .js header .wrap { grid-template-columns: auto minmax(0, 1fr) auto auto; grid-template-areas: "brand . menu face"; column-gap: 12px; }
+  /* Two rows that scroll away with the page: the mark and the switch, the places under them. */
+  :root { --header-returns: 1; }
+  header { position: static; }
+  html { scroll-padding-top: 8px; }
+  header .wrap { grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: 34px auto; grid-template-areas: "brand face" "nav nav"; row-gap: 10px; padding-top: 12px; padding-bottom: 10px; }
+  /* The places wrap rather than widen the page on the narrowest phones. */
+  header nav { justify-self: start; flex-wrap: wrap; gap: 6px 14px; font-size: 14px; }
   .brand svg { width: 24px; height: 24px; }
-  .js header .menu-button { grid-area: menu; display: inline-flex; align-items: center; gap: 8px; font: 500 15px/1 var(--font-text); color: var(--ink); background: none; border: 1px solid var(--rule); border-radius: 6px; padding: 7px 10px; cursor: pointer; }
-  .js header .menu-button::after { content: ""; width: 6px; height: 6px; margin-bottom: 3px; border-right: 1.5px solid var(--ink-2); border-bottom: 1.5px solid var(--ink-2); transform: rotate(45deg); }
-  .js header .menu-button[aria-expanded="true"] { background: var(--wash); }
-  .js header .menu-button[aria-expanded="true"]::after { transform: rotate(-135deg); margin: 3px 0 0; }
-  .js header nav { display: none; }
-  .js header.open nav { display: grid; position: absolute; top: 100%; left: 0; right: 0; justify-self: stretch; justify-items: start; gap: 0; padding: 4px var(--gutter) 10px; background: var(--page); border-bottom: 1px solid var(--hair); box-shadow: 0 6px 10px rgba(0, 0, 0, .08); font-size: 16px; }
-  .js header.open nav a { padding: 10px 0; }
-  /* Without it, two rows: the mark and the switch, the places under them. */
-  html:not(.js) { --header: 91px; }
-  html:not(.js) header .wrap { grid-template-columns: auto auto; grid-template-rows: 34px 24px; grid-template-areas: "brand face" "nav nav"; justify-content: space-between; row-gap: 10px; padding-top: 12px; padding-bottom: 10px; }
-  html:not(.js) header nav { justify-self: start; gap: 14px; font-size: 14px; }
-  html:not(.js) .brand .name { display: inline; }
+  .brand .name { display: inline; }
+  /* Back on the way up, one row: the mark and the places. */
+  .header-away header .wrap { grid-template-columns: auto minmax(0, 1fr); grid-template-rows: auto; grid-template-areas: "brand nav"; column-gap: 12px; padding-top: 10px; padding-bottom: 10px; }
+  .header-away header nav { column-gap: 12px; }
+  .header-away header :is(.brand .name, .switch) { display: none; }
   .specs > div { grid-template-columns: 1fr; gap: 0; }
   .specs dt { font-size: 14px; }
   th, td { padding: 6px 4px; font-size: 14px; }

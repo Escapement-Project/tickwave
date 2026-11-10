@@ -6,8 +6,8 @@
 <title>{{title}}</title>
 <meta name="description" content="{{description}}">
 <script>
-// .js tells base.css the header's script will run; and a face chosen on an earlier visit, applied
-// before the first paint. The project's sites share the key.
+// .js, as on the project's other pages, for a shared rule that needs a script to run; and a face
+// chosen on an earlier visit, applied before the first paint. The project's sites share the key.
 document.documentElement.classList.add("js"); try { const f = localStorage.getItem("face"); if (f === "day" || f === "night") document.documentElement.dataset.face = f; } catch {}
 </script>
 <link rel="preload" href="{{root}}fonts/saira-expanded.woff2" as="font" type="font/woff2" crossorigin>

@@ -1,7 +1,7 @@
 // The shared header, on every page of the project (design/header.html). It looks the same at every
-// scroll position; this script adds what changes: the hairline once the page has scrolled, the
-// mark on the section the reader is in, and the menu of places on phones. Without it the header
-// still works: the places show, and the menu button is only drawn on phones.
+// scroll position; this script adds what changes: the hairline once the page has scrolled, the mark
+// on the section the reader is in, and, where the header scrolls away, its return when the reader
+// scrolls up. Without it the header still works.
 (() => {
   const header = document.querySelector("header[data-published]");
   if (!header) return;
@@ -53,27 +53,56 @@
     addEventListener("resize", mark);
   }
 
-  // The menu of places, drawn on phones only. Open, the places follow the button in the tab order;
-  // Escape closes it and gives the focus back to the button. The focus or a click going anywhere but
-  // the button and its places closes it, a page's own controls in the header included, as does
-  // following a place.
-  const button = header.querySelector(".menu-button"), places = header.querySelector("nav");
-  if (!button || !places) return;
-  const open = () => header.classList.contains("open");
-  const set = (to, refocus = false) => {
-    header.classList.toggle("open", to);
-    button.setAttribute("aria-expanded", String(to));
-    if (!to && refocus) button.focus();
+  // Where the header scrolls away with the page (the sheets set --header-returns: on a phone, and on
+  // a doc page narrower than its contents rail), it comes back as one row when the reader scrolls
+  // up, and leaves again on the way down. Once it is out of sight it waits fixed above the window,
+  // and the page keeps its place with padding the size of the header; back at the top of the page it
+  // is in the flow again. A jump, as to a link in the page, sends it away.
+  let flow = 0, last = scrollY, moves = 0;
+  const has = (name) => root.classList.contains(name);
+  const away = (to) => {
+    if (to) {
+      root.style.setProperty("--header-flow", `${flow}px`);
+      root.classList.add("header-away");
+      root.style.setProperty("--header-back", `${header.getBoundingClientRect().height}px`);
+      // Out of sight first, then moving: the header must not slide up past the reader as it goes.
+      // A return before that frame cancels it, or a later going away would slide.
+      cancelAnimationFrame(moves);
+      moves = requestAnimationFrame(() => root.classList.add("header-moves"));
+    } else {
+      cancelAnimationFrame(moves);
+      root.classList.remove("header-away", "header-back", "header-moves");
+    }
   };
-  button.addEventListener("click", () => set(!open()));
-  places.addEventListener("click", (e) => { if (e.target.closest("a")) set(false); });
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && open()) set(false, header.contains(document.activeElement)); });
-  const inMenu = (el) => el instanceof Node && (button.contains(el) || places.contains(el));
-  document.addEventListener("pointerdown", (e) => { if (open() && !inMenu(e.target)) set(false); });
-  // The focus arriving anywhere else, whether it left the menu or was never in it (a click that
-  // does not focus the button, as in Safari).
-  document.addEventListener("focusin", (e) => { if (open() && !inMenu(e.target)) set(false); });
-  header.addEventListener("focusout", (e) => { if (open() && e.relatedTarget === null && inMenu(e.target)) set(false); });
-  // Wider than a phone the places show in the row and the menu is not drawn: nothing stays open.
-  matchMedia("(max-width: 520px)").addEventListener("change", () => set(false));
+  const place = () => {
+    if (getComputedStyle(root).getPropertyValue("--header-returns").trim() !== "1") {
+      if (has("header-away")) away(false);
+      last = scrollY;
+      return;
+    }
+    // Its exact height: a whole pixel would move the page by the fraction as it goes away.
+    if (!has("header-away")) flow = header.getBoundingClientRect().height;
+    const out = scrollY > flow;
+    if (out !== has("header-away")) away(out);
+    const moved = scrollY - last;
+    if (!out || Math.abs(moved) > innerHeight) {
+      root.classList.remove("header-back");
+      last = scrollY;
+    } else if (Math.abs(moved) > 6) {
+      if (moved < 0) root.classList.add("header-back");
+      else if (!header.contains(document.activeElement)) root.classList.remove("header-back");
+      last = scrollY;
+    }
+  };
+  place();
+  addEventListener("scroll", place, { passive: true });
+  // A new width, as when a phone turns, can give the header another height in either layout: back
+  // in the flow to measure it, then away again if it was, all before the next paint.
+  addEventListener("resize", () => {
+    const back = has("header-back");
+    if (has("header-away")) away(false);
+    place();
+    if (back && has("header-away")) root.classList.add("header-back");
+  });
+  header.addEventListener("focusin", () => { if (has("header-away")) root.classList.add("header-back"); });
 })();

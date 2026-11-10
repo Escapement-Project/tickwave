@@ -13,6 +13,8 @@ pre code { font-size: 1em; overflow-wrap: normal; }
 .subnav a { color: var(--ink-2); text-decoration: none; }
 .subnav a:hover { color: var(--ink); }
 .subnav a[aria-current="page"] { color: var(--ink); text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: 7px; }
+/* On a phone the project's places take a row of their own just above: room between the two. */
+@media (max-width: 520px) { .subnav { padding-top: 18px; } }
 
 main { padding-bottom: 56px; }
 /* tickwave's licence, a row of its own under the project's footer. */

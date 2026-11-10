@@ -51,18 +51,24 @@ test.describe("the project's header", () => {
     expect(await page.evaluate(() => document.documentElement.dataset.face)).toBe("night");
   });
 
-  test("on a phone, the places are behind the menu", async ({ page }) => {
+  test("on a phone, the header scrolls away, and comes back on the way up without moving the page", async ({ page }) => {
     await page.setViewportSize({ width: 360, height: 700 });
-    await page.goto(`${SITE}index.html`);
-    const menu = page.getByRole("button", { name: "Menu" });
+    await page.goto(`${SITE}docs/format.html`);
     const places = page.getByRole("navigation", { name: "Escapement Project" });
-    await expect(places).toBeHidden();
-    await menu.click();
-    await expect(menu).toHaveAttribute("aria-expanded", "true");
     await expect(places.getByRole("link", { name: "Measurements" })).toBeVisible();
-    await page.keyboard.press("Escape");
-    await expect(places).toBeHidden();
-    await expect(menu).toBeFocused();
+    const at = () => page.evaluate(() => ({ top: document.querySelector("header")!.getBoundingClientRect().top, bottom: document.querySelector("header")!.getBoundingClientRect().bottom, main: document.querySelector("main")!.getBoundingClientRect().top + scrollY }));
+    // Each scroll its own event: two in one frame would read as one jump.
+    const to = (y: number) => page.evaluate((y) => new Promise((r) => { scrollTo({ top: y, behavior: "instant" }); requestAnimationFrame(() => requestAnimationFrame(r)); }), y);
+    const start = await at();
+    await to(1200);
+    await expect.poll(async () => (await at()).bottom).toBeLessThanOrEqual(0);
+    await to(1000);
+    await expect.poll(async () => (await at()).top).toBe(0);
+    await expect(places.getByRole("link", { name: "Measurements" })).toBeVisible();
+    expect((await at()).main).toBeCloseTo(start.main, 2);
+    await to(1600);
+    await expect.poll(async () => (await at()).bottom).toBeLessThanOrEqual(0);
+    expect((await at()).main).toBeCloseTo(start.main, 2);
   });
 });
 
