@@ -45,8 +45,37 @@
   --font-code: "Martian Mono", ui-monospace, monospace; --code-stretch: 100%; --code-weight: 500;
   color-scheme: light;
 }
-/* Night, chosen on the page or followed from the system */
-:root[data-face="night"] {
+/* A face on any element that carries one: the face chosen on <html>, and the faces the
+   switch's turn shows over the page (face.js). The wash follows the element's own ink. */
+[data-face="day"] {
+  --page: #dce8ed;
+  --surface: #eef4f6;
+  --raised: #ffffff;
+  --sunken: #cbd9e0;
+  --hair: #bccbd3;
+  --rule: #738691;
+  --ink: #11171d;
+  --ink-2: #525f6a;
+  --lume: #c4f03c;
+  --on-lume: #11171d;
+  --plate: #11171d;
+  --plate-line: #aab5be;
+  --hand: #c8102e;
+  --ring: #eef4f6;
+  --face: #dce8ed;
+  --window-edge: #11171d;
+  --fault-ink: #b81c20;
+  --fault-fill: #ef4b4b;
+  --attention-ink: #924a03;
+  --attention-fill: #f1710d;
+  --on-status: #11171d;
+  --series-verge: #0f8a6c;
+  --series-nxp: #2a78d6;
+  --series-context: #47525c;
+  --wash: color-mix(in srgb, var(--ink) 12%, transparent);
+  color-scheme: light;
+}
+[data-face="night"] {
   --page: #0e1216;
   --surface: #151b21;
   --raised: #1b232b;
@@ -71,8 +100,10 @@
   --series-verge: #1aa384;
   --series-nxp: #3987e5;
   --series-context: #aab5be;
+  --wash: color-mix(in srgb, var(--ink) 12%, transparent);
   color-scheme: dark;
 }
+/* Night followed from the system, until the page chooses */
 @media (prefers-color-scheme: dark) {
   :root:not([data-face="day"]) {
     --page: #0e1216;

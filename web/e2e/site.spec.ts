@@ -61,7 +61,8 @@ test.describe("the project's header", () => {
     await expect(faces).toHaveAttribute("aria-checked", "false");
     await faces.click();
     await expect(faces).toHaveAttribute("aria-checked", "true");
-    expect(await page.evaluate(() => [document.documentElement.dataset.face, getComputedStyle(document.documentElement).colorScheme, localStorage.getItem("face")])).toEqual(["night", "dark", "night"]);
+    // The face changes under the switch's cover, a moment after the click.
+    await expect.poll(() => page.evaluate(() => [document.documentElement.dataset.face, getComputedStyle(document.documentElement).colorScheme, localStorage.getItem("face")])).toEqual(["night", "dark", "night"]);
     await page.getByRole("navigation", { name: "Escapement Project" }).getByRole("link", { name: "tickwave", exact: true }).click();
     await expect(page).toHaveURL(/index\.html$/);
     await expect(page.getByRole("switch", { name: "Night face" })).toHaveAttribute("aria-checked", "true");

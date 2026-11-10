@@ -64,21 +64,20 @@ header nav .product > a[aria-current="page"]::after, header nav .product > a + a
 .switch .wheel { position: absolute; left: -10.5px; top: .5px; width: 40px; height: 40px; transform-origin: 20px 20px; }
 .switch[aria-checked="true"] .thumb { transform: translateX(20px); }
 .switch[aria-checked="true"] .wheel { transform: rotate(180deg); }
-.switch.ready .thumb, .switch.ready .wheel { transition: transform .26s cubic-bezier(.4, 0, .2, 1); }
+/* How long the face takes to turn: the thumb's travel, and the dip below (face.js reads it). */
+:root { --face-turn: .26s; }
+.switch.ready .thumb, .switch.ready .wheel { transition: transform var(--face-turn) cubic-bezier(.4, 0, .2, 1); }
 @media (prefers-reduced-motion: reduce) { .switch.ready .thumb, .switch.ready .wheel { transition: none; } }
-/* While the face turns (face.js sets .face-turning as the thumb travels, and a little after), the
-   page's colours change with the thumb rather than at once. Only then, so nothing fades as a page
-   loads; a part with a transition of its own more specific than this keeps it. The thumb is ink on
-   the page, and fading the two towards each other would lose it half-way, so it keeps its colours
-   until the page is half-way (35 % of the turn on this curve, as the wheel stands edge-on) and then
-   takes the new ones at once; so do drawings made by script (face.js's "facechange"). */
-@media (prefers-reduced-motion: no-preference) {
-  :root.face-turning, :root.face-turning *, :root.face-turning *::before, :root.face-turning *::after {
-    transition-property: color, background-color, border-color, outline-color, text-decoration-color, fill, stroke, box-shadow;
-    transition-duration: .26s; transition-timing-function: cubic-bezier(.4, 0, .2, 1);
-  }
-  :root.face-turning .switch.ready .thumb { transition: transform .26s cubic-bezier(.4, 0, .2, 1), background-color 0s .091s, color 0s .091s; }
-}
+/* The switch turns the face under a cover (face.js): the page dips to the new face's background,
+   changes while covered, and comes back up in the new face. The cover carries the new face
+   (tokens.css gives a face to any element with data-face) and sits in the top layer, over the
+   header and any popover, taking the pointer for the turn. A copy of the switch rides above it in
+   the old face, and takes the new one as the cover passes half-way: the thumb is ink on the page,
+   and would vanish against a page turning under it. */
+.face-cover { position: fixed; inset: 0; width: auto; height: auto; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; background: none; overflow: visible; }
+.face-cover > i { position: absolute; inset: 0; background: var(--page); opacity: 0; }
+.face-cover > .switch { position: fixed; margin: 0; }
+.face-cover > .switch.focus { outline: var(--focus-width) solid var(--ink); outline-offset: 3px; }
 
 h1 { font: 400 clamp(28px, 3.6vw, 42px)/1.25 var(--font-display); margin: 0 0 22px; letter-spacing: .01em; }
 .lede { font-size: 20px; max-width: 26em; margin: 0 0 18px; }
