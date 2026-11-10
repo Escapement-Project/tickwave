@@ -40,9 +40,28 @@ test("a digital pulse beside the pointer: its level and width, its period, frequ
   const view = page.locator("#v");
   await settle(view, 376_719_200, 376_721_000);
   const seen = await labels(page, view, await xOf(view, 376_719_700));
-  expect(seen).toContain("low 627 ns\nperiod 1.274 µs · 784.9 kHz · duty 50.78 %");
+  expect(seen).toContain("low 627 ns\nperiod 1.274 µs\nduty 50.78 %\n784.9 kHz\n1/width 1.595 MHz");
   await page.mouse.move(0, 0);
   await expect(probe(view)).toBeHidden();
+});
+
+test("in a taller row the width and the period sit on their spans, and the label beside the closing edge keeps the rest", async ({ page }) => {
+  await page.goto(`${VIEW}?open`);
+  const view = page.locator("#v");
+  await settle(view, 376_718_800, 376_721_600);
+  await view.locator('[part="row-handle"]').first().focus();
+  for (let i = 0; i < 4; i++) await page.keyboard.press("Shift+ArrowDown");
+  await settle(view);
+  // The low pulse from 376,719,436 to 376,720,063; its period closes at 376,720,710.
+  const x = await xOf(view, 376_719_700);
+  const plot = (await view.locator(".plot").boundingBox())!;
+  let text = "";
+  for (let y = plot.y + 4; y < plot.y + plot.height - 20 && !text.startsWith("duty"); y += 6) {
+    await page.mouse.move(x, y);
+    text = (await probe(view).isVisible()) ? (await probe(view).innerText()).replace(/\u00a0/g, " ") : "";
+  }
+  expect(text).toBe("duty 50.78 %\n784.9 kHz\n1/width 1.595 MHz");
+  expect((await probe(view).boundingBox())!.x).toBeGreaterThan(await xOf(view, 376_720_710));
 });
 
 test("a pulse whose edges lie past the data drawn is measured once the pointer rests", async ({ page }) => {
@@ -90,7 +109,7 @@ test("Enter places cursor A at the middle, and its readout carries each digital 
   await page.keyboard.press("Enter");
   const readout = view.locator(".readout");
   await expect(readout).toContainText("A 376.719700 ms");
-  await expect(readout.locator(".line", { hasText: "SWCLK" })).toHaveText(/^SWCLK low 627\sns period 1\.274\sµs 784\.9\skHz duty 50\.78\s%$/);
+  await expect(readout.locator(".line", { hasText: "SWCLK" })).toHaveText(/^SWCLK low 627\sns 1\/width 1\.595\sMHz period 1\.274\sµs 784\.9\skHz duty 50\.78\s%$/);
   // SWDIO is high from the start to its first fall, a pulse with no period.
   await expect(readout.locator(".line", { hasText: "SWDIO" })).toHaveText(/^SWDIO high at least 376\.845415\sms$/);
   await page.keyboard.press("Enter");

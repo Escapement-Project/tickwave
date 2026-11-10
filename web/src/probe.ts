@@ -91,6 +91,8 @@ export interface PulseFigures {
   readonly level: "high" | "low";
   /** The pulse's width; "at least ..." where it runs from the capture's start or to its end. */
   readonly width: string;
+  /** The width's reciprocal as a rate, where both edges are known: one UART bit gives the baud rate. */
+  readonly inverseWidth: string | null;
   readonly period: string | null;
   readonly frequency: string | null;
   /** The share of the period spent high. */
@@ -107,12 +109,14 @@ export function pulseFigures(p: Pulse, timebase: Ratio, known: number): PulseFig
   if (s !== null && e !== null) width = formatInterval(e - s, timebase);
   else if (s === null && e === null) width = `the whole capture, ${formatInterval(known, timebase)}`;
   else width = `at least ${formatInterval(e === null ? known - s! : e, timebase)}`;
-  if (s === null || e === null || n === null) return { level, width, period: null, frequency: null, duty: null };
+  const inverseWidth = s !== null && e !== null ? formatRate(1, e - s, timebase) : null;
+  if (s === null || e === null || n === null) return { level, width, inverseWidth, period: null, frequency: null, duty: null };
   const period = n - s;
   const high = p.level ? e - s : n - e;
   return {
     level,
     width,
+    inverseWidth,
     period: formatInterval(period, timebase),
     frequency: formatRate(1, period, timebase),
     duty: formatDuty(high, period),

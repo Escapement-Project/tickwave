@@ -8,7 +8,7 @@ import { absolute, events as registryEvents, infoFor, peekInfo } from "../regist
 import { clockNote, countEdges, formatBrief, formatBytes, formatClockPeriod, formatClockRate, formatCount, formatInterval, formatRate, formatValue, periodStats } from "../readouts.ts";
 import { analogFromOverview, analogFromSamples, complete, completePulse, pulseFigures, pulseFromEdges, type Pulse } from "../probe.ts";
 import { lowerBound } from "../search.ts";
-import { channelIndices, Plot } from "../render/plot.ts";
+import { channelIndices, Plot, type PulseMark } from "../render/plot.ts";
 import { isAbort, named, sampleAtOrBefore, sampleTick, type DigitalChannel, type RecordingInfo } from "../source.ts";
 import { parseTime, toTicks, type TimeSpec } from "../time.ts";
 import { TickwaveElement, loadRecording, type Loaded } from "./base.ts";
@@ -839,6 +839,7 @@ export class TickwaveView extends TickwaveElement {
     this.#probeAbort = null;
     this.#probeFrom = null;
     this.#probeBox().hidden = true;
+    this.#setMark(null);
   }
 
   /** Measures again when a draw has brought new data or a new view under the pointer. */
@@ -868,6 +869,7 @@ export class TickwaveView extends TickwaveElement {
     if (!p || !l || !loaded || !hit || hit.area !== "row" || this.#drag?.moved || this.#pinch || p.x < l.plotLeft || p.x >= l.plotRight) {
       this.#probeFrom = null;
       box.hidden = true;
+      this.#setMark(null);
       return;
     }
     const track = this.#plot.tracks[hit.row];
@@ -880,6 +882,7 @@ export class TickwaveView extends TickwaveElement {
     const c = track.channel;
     if (!tile || tick < tile.start || tick >= tile.end || tick < 0 || tick > c.end) {
       box.hidden = true;
+      this.#setMark(null);
       return;
     }
     let lines: string[] | null = null;
@@ -904,7 +907,10 @@ export class TickwaveView extends TickwaveElement {
         if (changes) lines = ["zoom in to measure"];
         else if (k0 < o.level.length) pulse = { level: o.level[k0] ? 1 : 0, start: undefined, end: undefined, next: undefined };
       }
-      if (pulse && complete(pulse)) lines = this.#pulseLines(pulse, c, loaded.info);
+      if (pulse && complete(pulse)) {
+        this.#showPulse(pulse, c, loaded.info, p, hit.row);
+        return;
+      }
       // A row whose last read failed waits before it reads again, and so does the label: the level only.
       else if (pulse && track.failed) lines = [pulse.level ? "high" : "low"];
       else if (pulse) {
@@ -915,7 +921,7 @@ export class TickwaveView extends TickwaveElement {
         this.#probeTimer = window.setTimeout(() => {
           completePulse(loaded.source, track.index, asked, tick, c.end, abort.signal).then(
             (done) => {
-              if (!abort.signal.aborted) this.#showProbe(this.#pulseLines(done, c, loaded.info), p, l.rows[hit.row]);
+              if (!abort.signal.aborted) this.#showPulse(done, c, loaded.info, p, hit.row);
             },
             // A measurement that fails says nothing: the row's own read reports the trouble.
             () => {
@@ -925,19 +931,48 @@ export class TickwaveView extends TickwaveElement {
         }, REST_MS);
       }
     }
+    this.#setMark(null);
     if (!lines) box.hidden = true;
     else this.#showProbe(lines, p, l.rows[hit.row]);
   }
 
-  #pulseLines(p: Pulse, c: DigitalChannel, info: RecordingInfo): string[] {
-    const f = pulseFigures(p, info.timebase, c.end);
-    const lines = [`${f.level} ${f.width}`];
-    if (f.period) lines.push(`period ${f.period} · ${f.frequency} · duty ${f.duty}`);
-    return lines;
+  #setMark(m: PulseMark | null): void {
+    const o = this.#plot.pulseMark;
+    const same = o === m || (o !== null && m !== null && (Object.keys(m) as (keyof PulseMark)[]).every((k) => o[k] === m[k]));
+    if (same) return;
+    this.#plot.pulseMark = m;
+    this.#plot.invalidate();
   }
 
-  /** The label beside the pointer, level with its row, on the pointer's left near the plot's right edge. */
-  #showProbe(lines: string[], p: { x: number; y: number }, row: { top: number; height: number }): void {
+  /**
+   * A complete pulse: its spans on the trace, with the width and the period on them where the row
+   * has room, and the label beside the edge that closes the period with the figures left over.
+   */
+  #showPulse(pulse: Pulse, c: DigitalChannel, info: RecordingInfo, p: { x: number; y: number }, row: number): void {
+    const f = pulseFigures(pulse, info.timebase, c.end);
+    const { start, end } = pulse;
+    const mark: PulseMark | null =
+      typeof start === "number" && typeof end === "number"
+        ? { row, level: pulse.level, start, end, next: pulse.next ?? null, width: f.width, period: f.period }
+        : null;
+    const on = mark ? this.#plot.markFits(mark) : { width: false, period: false };
+    this.#setMark(mark);
+    const lines: string[] = [];
+    if (!on.width) lines.push(`${f.level} ${f.width}`);
+    if (f.period) {
+      if (!on.period) lines.push(`period ${f.period}`);
+      lines.push(`duty ${f.duty}`, f.frequency ?? "–");
+    }
+    if (f.inverseWidth) lines.push(`1/width ${f.inverseWidth}`);
+    const beside = mark && { x0: this.#plot.xAt(mark.start), x1: this.#plot.xAt(mark.next ?? mark.end) };
+    this.#showProbe(lines, p, this.#plot.layout!.rows[row], beside);
+  }
+
+  /**
+   * The label, level with its row: beside the edges of the pulse it measures, right of the closing
+   * one or left of the first, else beside the pointer, on its left near the plot's right edge.
+   */
+  #showProbe(lines: string[], p: { x: number; y: number }, row: { top: number; height: number }, beside: { x0: number; x1: number } | null = null): void {
     const box = this.#probeBox();
     box.replaceChildren(
       ...lines.map((text, i) => Object.assign(document.createElement("div"), { textContent: text, className: i > 0 ? "more" : "" })),
@@ -946,8 +981,11 @@ export class TickwaveView extends TickwaveElement {
     const l = this.#plot.layout!;
     const w = box.offsetWidth;
     const h = box.offsetHeight;
+    const fits = (x: number) => x >= l.plotLeft && x + w <= l.plotRight;
+    const after = beside ? beside.x1 + 10 : NaN;
+    const before = beside ? beside.x0 - 10 - w : NaN;
     const right = p.x + 14;
-    const x = right + w <= l.plotRight ? right : Math.max(l.plotLeft, p.x - 14 - w);
+    const x = fits(after) ? after : fits(before) ? before : right + w <= l.plotRight ? right : Math.max(l.plotLeft, p.x - 14 - w);
     const y = Math.max(0, Math.min(this.#plotBox.clientHeight - h, row.top + row.height / 2 - h / 2));
     box.style.left = `${x}px`;
     box.style.top = `${y}px`;
@@ -1029,6 +1067,7 @@ export class TickwaveView extends TickwaveElement {
         if (seq !== this.#readoutSeq) return;
         const f = pulseFigures(pulse, tb, c.end);
         const parts: (string | Node)[] = [c.name, item(f.level, f.width)];
+        if (f.inverseWidth) parts.push(item("1/width", f.inverseWidth));
         if (f.period) parts.push(item("period", f.period), fig(f.frequency ?? "–"), item("duty", f.duty ?? "–"));
         line(...parts);
       }

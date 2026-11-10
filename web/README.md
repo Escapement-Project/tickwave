@@ -193,13 +193,16 @@ scrolls the page, and the view says how to zoom. Shift with the wheel, a sideway
 the arrow keys move along the capture. With the view focused, plus and minus zoom, Home shows the
 whole capture, and Escape clears the cursors and the selection.
 
-A mouse over a row reads it at the pointer, in a label beside it. An analog channel gives the
-value of the sample there, or the smallest and largest value where one pixel covers several
-samples. A digital channel gives the pulse there: its level and width, and the period to the next
-edge the same way, with its frequency and duty. A pulse's edges can lie far past what the row has
-read, as on a quiet line zoomed in close: once the pointer rests, the view finds them through the
-overview and reads just those. Where one pixel holds several edges, the label asks for a closer
-look.
+A mouse over a row reads it at the pointer. An analog channel gives the value of the sample
+there in a label beside the pointer, or the smallest and largest value where one pixel covers
+several samples. On a digital channel, two spans mark the pulse there: one between its edges for
+its width, and one over its period to the next edge the same way. A label beside the pulse gives
+its duty, its frequency and 1/width, the width's reciprocal as a rate (one UART bit's gives the
+baud rate). The width and the period sit on their spans once the row is tall enough for them.
+Until then the label gives them too, with the pulse's level. A pulse's edges can lie far past what
+the row has read, as on a quiet line zoomed in close. Once the pointer rests, the view finds them
+through the overview and reads just those. Where one pixel holds several edges, the label asks for
+a closer look.
 
 Each row's lower edge, in the names column, is a handle that sets the row's height. Drag it, or
 focus it and press the up and down arrows (Shift for bigger steps). Home and End give the row its
@@ -210,7 +213,7 @@ A click places cursor A, and the next click cursor B; with the view focused, Ent
 the middle of the view. A click's cursor snaps to an edge within 6 pixels on the row clicked. The
 readout gives both times, the interval between them, and each analog channel's value at each.
 That value is the last sample at or before the cursor, to the digit one code step carries. It also
-gives each digital channel's pulse at cursor A, as the label does.
+gives each digital channel's pulse at cursor A, with the figures the pointer gives.
 
 A drag along the time axis selects a span. The readout gives its length and each channel's edges
 in it. For one channel it gives the periods' count, minimum, median and maximum, and the running
@@ -337,8 +340,8 @@ or a style on `<html>` that changes the tokens, or the system's preference. A ch
 leaves the tokens alone, such as a header marking the page scrolled, redraws nothing.
 
 Each element exposes its pieces to `::part()`. On the view: `summary`, `title`, `facts`,
-`open-button`, `viewer`, `toolbar`, `plot`, `hint`, `row-handle`, `readout`, `steps`, `notice` and
-`button`.
+`open-button`, `viewer`, `toolbar`, `plot`, `hint`, `reading` (the label at the pointer),
+`row-handle`, `readout`, `steps`, `notice` and `button`.
 Inside `facts`, each fact is a `fact` and also `fact-length`, `fact-channels` or `fact-size`, with
 a `fact-separator` ("; ") between two. On the inset: `inset`, `label`, `text`, `frame`, `canvas`,
 `foot`, `measure`, `key` and `notice`. On the reference: `popover`.

@@ -65,11 +65,16 @@ test("the edges of a long quiet stretch are found through the overview, reading 
 test("a pulse's figures: whole-tick widths, and a rate and a duty to the digits the ticks carry", () => {
   // SWCLK's first pulses in identify-swd: low for 627 ns from 376,719,436, then high for 647.
   const f = pulseFigures({ level: 0, start: 376_719_436, end: 376_720_063, next: 376_720_710 }, NS, 523_583_070);
-  // The rate's last digit is at its uncertainty, 785 kHz / 1274 ≈ 0.6 kHz: the hundreds of Hz.
-  assert.deepEqual(f, { level: "low", width: "627\u00a0ns", period: "1.274\u00a0µs", frequency: "784.9\u00a0kHz", duty: "50.78\u00a0%" });
+  // The rate's last digit is at its uncertainty, 785 kHz / 1274 ≈ 0.6 kHz: the hundreds of Hz. The
+  // width's reciprocal, 1.5949 MHz, is uncertain by 1.595 MHz / 627 ≈ 2.5 kHz: the kHz.
+  assert.deepEqual(f, { level: "low", width: "627\u00a0ns", inverseWidth: "1.595\u00a0MHz", period: "1.274\u00a0µs", frequency: "784.9\u00a0kHz", duty: "50.78\u00a0%" });
   const open = pulseFigures({ level: 1, start: null, end: 376_719_436, next: 376_720_063 }, NS, 523_583_070);
   assert.equal(open.width, "at least 376.719436\u00a0ms");
+  assert.equal(open.inverseWidth, null);
   assert.equal(open.period, null);
+  // The last pulse: both edges known, no period after it.
+  const last = pulseFigures({ level: 1, start: 100, end: 110, next: null }, NS, 1_000);
+  assert.deepEqual([last.inverseWidth, last.period], ["100\u00a0MHz", null]);
   assert.equal(pulseFigures({ level: 1, start: null, end: null, next: null }, NS, 1_000).width, "the whole capture, 1.000\u00a0µs");
   // 3 of 10 ticks high is 30 % give or take 10: the digit is the tens.
   assert.equal(formatDuty(3, 10), "30\u00a0%");

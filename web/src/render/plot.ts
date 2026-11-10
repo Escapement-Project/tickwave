@@ -79,6 +79,31 @@ function notLoaded(e: unknown): Error {
   return out;
 }
 
+/**
+ * A digital pulse measured under the pointer, drawn inside its row: a span along the pulse's level
+ * between its edges, and one along the other level over its period. The trace's own edges end both.
+ */
+export interface PulseMark {
+  readonly row: number;
+  readonly level: 0 | 1;
+  readonly start: number;
+  readonly end: number;
+  /** The edge that closes the period; null where there is none. */
+  readonly next: number | null;
+  /** The figures for the two spans. Each sits on its span where `markFits` says it does. */
+  readonly width: string;
+  readonly period: string | null;
+}
+
+/** A span's figure: its box's height, and the room it keeps from the span's ends. */
+const FIGURE_BOX = 16;
+const FIGURE_PAD = 4;
+const ARROW = 5;
+/** A figure's box lets its span show faintly through. */
+const FIGURE_ALPHA = 0.8;
+/** Between the trace's levels, the room two figures and their spans need. */
+const FIGURES_ROOM = 30;
+
 export type Hit =
   | { readonly area: "lane"; readonly note: NoteOut | null }
   | { readonly area: "row"; readonly row: number }
@@ -99,6 +124,7 @@ export class Plot {
   selection: { start: number; end: number } | null = null;
   hoverRow: number | null = null;
   hoverNote: string | null = null;
+  pulseMark: PulseMark | null = null;
   /** Row heights the reader set, by channel index; the others take the config's. */
   heights = new Map<number, number>();
   /** The annotation the element is about, drawn emphasised. */
@@ -366,6 +392,7 @@ export class Plot {
     // Rows.
     for (const r of l.rows) this.#drawRow(r, grid, revealX);
 
+    this.#drawPulseMark();
     this.#drawLane(revealX);
     if (this.config.axis) this.#drawAxis();
     this.#drawMarks();
@@ -621,6 +648,100 @@ export class Plot {
       fill.rect(Math.round(left) + k, y1 - lw / 2, 1, y2 - y1 + lw);
     }
     return { line, fill };
+  }
+
+  // The pulse under the pointer ----------------------------------------------------------------
+
+  /**
+   * Where a mark's spans and figures go. The width's span runs between the pulse's edges just
+   * inside its level; the period's runs from its start to the closing edge just inside the other
+   * level. A figure sits on its span, over the stretch where the trace leaves room (the pulse for
+   * the width, the rest of the period for the period), when the row and that stretch are big enough.
+   */
+  #markGeometry(m: PulseMark) {
+    const l = this.layout;
+    const r = l?.rows[m.row];
+    if (!l || !r) return null;
+    const yH = r.top + 6;
+    const yL = r.top + r.height - 6;
+    const roomy = yL - yH >= FIGURES_ROOM;
+    const d = roomy ? FIGURE_BOX / 2 + 2 : 3;
+    const font = this.#font(this.config.labelPx);
+    const x = (t: number) => this.xAt(t);
+    const visible = (a: number, b: number) => ({ a: Math.max(l.plotLeft, a), b: Math.min(l.plotRight, b) });
+    const figure = (text: string | null, over: { a: number; b: number }, y: number) => {
+      if (!text || !roomy) return null;
+      const w = this.measure(text, font) + 2 * FIGURE_PAD;
+      return over.b - over.a >= w + 2 * ARROW + 4 ? { text, x: (over.a + over.b) / 2, y, w } : null;
+    };
+    const near = m.level ? yH + d : yL - d;
+    const far = m.level ? yL - d : yH + d;
+    const width = { x0: x(m.start), x1: x(m.end), y: near, figure: figure(m.width, visible(x(m.start), x(m.end)), near) };
+    const period =
+      m.next === null
+        ? null
+        : { x0: x(m.start), x1: x(m.next), y: far, figure: figure(m.period, visible(x(m.end), x(m.next)), far) };
+    return { width, period, font };
+  }
+
+  /** Which of a mark's figures sit on their spans: the others are the caller's to show. */
+  markFits(m: PulseMark): { width: boolean; period: boolean } {
+    const g = this.#markGeometry(m);
+    return { width: !!g?.width.figure, period: !!g?.period?.figure };
+  }
+
+  #drawPulseMark(): void {
+    const m = this.pulseMark;
+    const g = m && this.#markGeometry(m);
+    if (!g) return;
+    const l = this.layout!;
+    const p = this.palette!;
+    const ctx = this.#ctx;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(l.plotLeft, 0, l.plotRight - l.plotLeft, l.height);
+    ctx.clip();
+    ctx.strokeStyle = p.ink;
+    ctx.fillStyle = p.ink;
+    ctx.lineWidth = 1;
+    for (const s of [g.width, g.period]) {
+      if (!s) continue;
+      const y = Math.round(s.y) + 0.5;
+      // An end far off the plot is drawn just past its side, where the clip hides it.
+      const off = ARROW + 2;
+      const a = Math.max(l.plotLeft - off, Math.round(s.x0) + 1);
+      const b = Math.min(l.plotRight + off, Math.round(s.x1) - 1);
+      if (b <= a) continue;
+      ctx.beginPath();
+      ctx.moveTo(a, y);
+      ctx.lineTo(b, y);
+      ctx.stroke();
+      // Heads that point at the edges, where the span is wide enough to show them.
+      if (s.x1 - s.x0 >= 2 * ARROW + 6) {
+        ctx.beginPath();
+        ctx.moveTo(a, y);
+        ctx.lineTo(a + ARROW, y - 3);
+        ctx.lineTo(a + ARROW, y + 3);
+        ctx.closePath();
+        ctx.moveTo(b, y);
+        ctx.lineTo(b - ARROW, y - 3);
+        ctx.lineTo(b - ARROW, y + 3);
+        ctx.closePath();
+        ctx.fill();
+      }
+    }
+    ctx.font = g.font;
+    ctx.textAlign = "center";
+    for (const f of [g.width.figure, g.period?.figure]) {
+      if (!f) continue;
+      ctx.fillStyle = p.page;
+      ctx.globalAlpha = FIGURE_ALPHA;
+      ctx.fillRect(Math.round(f.x - f.w / 2), Math.round(f.y - FIGURE_BOX / 2), Math.round(f.w), FIGURE_BOX);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = p.ink;
+      ctx.fillText(f.text, f.x, f.y + 4);
+    }
+    ctx.restore();
   }
 
   // Annotations, axis, marks -------------------------------------------------------------------
