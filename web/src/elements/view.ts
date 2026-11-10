@@ -112,6 +112,8 @@ export class TickwaveView extends TickwaveElement {
   #loaded: Loaded | null = null;
   #loading: Promise<Loaded | null> | null = null;
   #loadKey = "";
+  /** The recording and sidecar the attributes named at the last update. */
+  #askedKey = "";
   #recordingKey = "";
   /** The recording drawn, whose cursors and selection the plot holds. */
   #shownSrc = "";
@@ -234,15 +236,22 @@ export class TickwaveView extends TickwaveElement {
     this.#viewer.hidden = !open;
     if (open && !this.#wasOpen) this.emit("tickwave-open", { src: this.getAttribute("src") });
     this.#wasOpen = open;
+    const src = this.getAttribute("src");
+    const annotations = this.getAttribute("annotations");
+    const key = src ? `${src}\n${annotations ?? ""}` : "";
+    // Another recording or sidecar starts without the last one's notice, collapsed or not. The
+    // next Open loads it afresh, so a sidecar's problems come back with it.
+    if (key !== this.#askedKey) {
+      this.#askedKey = key;
+      this.#loadKey = "";
+      this.clearProblems();
+    }
     if (!open) {
       this.#fetchHead();
       this.#renderSummary();
       return;
     }
-    const src = this.getAttribute("src");
     if (!src) return;
-    const annotations = this.getAttribute("annotations");
-    const key = `${src}\n${annotations ?? ""}`;
     if (key !== this.#loadKey) {
       this.#loadKey = key;
       this.#loaded = null;

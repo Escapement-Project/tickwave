@@ -87,6 +87,29 @@ test("a failed load is tried again, and a new recording's view drops the old not
   await expect(notice(view)).toBeHidden();
 });
 
+test("a collapsed view drops the old notice for a new recording", async ({ page }) => {
+  await page.goto(`${VIEW}?src=fixtures/missing.tickwave`);
+  const view = page.locator("#v");
+  await expect(notice(view)).toContainText("404");
+  await view.evaluate((v) => v.setAttribute("src", "../../fixtures/identify-swd.tickwave"));
+  // The new head is in: the summary gives its facts.
+  await expect(view.locator(".summary .facts")).not.toBeEmpty({ timeout: 20_000 });
+  await expect(notice(view)).toBeHidden();
+});
+
+test("a recording the page names again while the view is collapsed brings its sidecar's problem back on Open", async ({ page }) => {
+  await page.goto(`${VIEW}?open&annotations=fixtures/missing.annotations.toml`);
+  const view = page.locator("#v");
+  await drawn(view);
+  await expect(notice(view)).toContainText("404");
+  await view.locator(".close").click();
+  await view.evaluate((v) => v.setAttribute("src", "../../fixtures/identify-jtag.tickwave"));
+  await expect(notice(view)).toBeHidden();
+  await view.evaluate((v) => v.setAttribute("src", "../../fixtures/identify-swd.tickwave"));
+  await view.locator(".open").click();
+  await expect(notice(view)).toContainText("404");
+});
+
 test("Open and Close move the focus where the reader went, and each names its recording", async ({ page }) => {
   await page.goto(VIEW);
   const view = page.locator("#v");
