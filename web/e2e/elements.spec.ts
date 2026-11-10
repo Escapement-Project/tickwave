@@ -87,6 +87,30 @@ test("a failed load is tried again, and a new recording's view drops the old not
   await expect(notice(view)).toBeHidden();
 });
 
+test("a read the old recording's rows had out, failing after a new recording, says nothing", async ({ page }, info) => {
+  const tag = `rows-${info.project.name}-${Date.now()}`;
+  // Past the head's two reads, every read waits 2 s, then fails.
+  await page.goto(`${VIEW}?open&src=fixtures/swd50-cut.tickwave&tag=${tag}&firstRead=256&after=2&stall=2000&fail=500`);
+  const view = page.locator("#v");
+  await drawn(view);
+  const title = (await view.locator(".toolbar .title").textContent())!;
+  // Zoomed in, the rows read the recording's blocks.
+  await view.evaluate((v) => {
+    const w = v as HTMLElement & { window: { start: number; end: number }; setWindow(a: number, b: number): void };
+    const { start, end } = w.window;
+    const mid = (start + end) / 2;
+    w.setWindow(mid, mid + (end - start) / 2000);
+  });
+  const log = async () => (await (await fetch(`http://127.0.0.1:8124/__log?tag=${tag}`)).json()) as { status: number }[];
+  await expect.poll(async () => (await log()).some((e) => e.status === 0)).toBe(true);
+  await view.evaluate((v) => v.setAttribute("src", "../../fixtures/identify-swd.tickwave"));
+  await expect(view.locator(".toolbar .title")).not.toHaveText(title, { timeout: 20_000 });
+  await expect.poll(async () => (await log()).every((e) => e.status !== 0), { timeout: 10_000 }).toBe(true);
+  // The server has sent the late failures: the page takes them a moment later.
+  await page.waitForTimeout(300);
+  await expect(notice(view)).toBeHidden();
+});
+
 test("a collapsed view drops the old notice for a new recording", async ({ page }) => {
   await page.goto(`${VIEW}?src=fixtures/missing.tickwave`);
   const view = page.locator("#v");

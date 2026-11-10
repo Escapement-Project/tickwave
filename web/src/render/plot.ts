@@ -159,17 +159,20 @@ export class Plot {
 
   setRecording(source: Source, info: RecordingInfo, channels: readonly number[]): void {
     this.info = info;
-    this.tracks = channels.map(
+    // The rows this replaces may still be reading. What they find, or fail to, is not about these.
+    const tracks: Track[] = channels.map(
       (i) =>
         new Track(
           source,
           i,
           info.channels[i],
           () => {
+            if (this.tracks !== tracks) return;
             this.#recovered();
             this.invalidate();
           },
           (e) => {
+            if (this.tracks !== tracks) return;
             this.#watchStall();
             const error = notLoaded(e);
             this.#notLoaded.add(error.message);
@@ -177,6 +180,7 @@ export class Plot {
           },
         ),
     );
+    this.tracks = tracks;
     this.layout = null;
   }
 
