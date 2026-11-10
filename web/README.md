@@ -8,8 +8,9 @@ fixtures.
 
 ## Running it
 
-The web build copies the WASM decoder from `crates/wasm/pkg`, so build that first, from the
-repository root: `crates/wasm/build.sh`. Then, from `web/`:
+The web build copies the WASM decoder from `crates/wasm/pkg` and the converter from
+`crates/convert-wasm/pkg`, so build those first, from the repository root: `crates/wasm/build.sh`
+and `crates/convert-wasm/build.sh`. Then, from `web/`:
 
 ```sh
 npm install
@@ -21,10 +22,10 @@ npm run dev                               # http://127.0.0.1:8123/dev/
 
 | Command | Does |
 |---|---|
-| `npm run build` | `dist/`: `tickwave.js`, `tickwave-chart.js`, `tickwave-worker.js`, `tickwave.wasm`, the dev page's `dev-loader.js`, and the site |
+| `npm run build` | `dist/`: `tickwave.js`, `tickwave-chart.js`, `tickwave-worker.js`, `tickwave.wasm`, the converter's `tickwave-convert-worker.js` and `tickwave-convert.wasm`, the dev page's `dev-loader.js`, and the site |
 | `npm run generate` | the files the tests generate rather than commit (below) |
 | `npm run typecheck` | `tsc` over the sources, tests and scripts |
-| `npm test` | the unit tests, with Node's test runner |
+| `npm test` | the unit tests, with Node's test runner. The converter's compare its output with the CLI's, which they run through `cargo` |
 | `npm run site` | tickwave's site into `dist/site/`, from `site/` at the repository's root (below) |
 | `npm run e2e` | generates, then runs Playwright in Chromium and Firefox; screenshots go to `screenshots/` |
 | `npm run check` | typecheck, unit tests, build and e2e, in that order |
@@ -45,6 +46,8 @@ so it works under any path, such as `/tickwave/` on GitHub Pages. The exception 
 shared header: its links lead to the project's other pages at the published site. Its pages:
 
 - `index.html`, the viewer: a recording by its address (`?src=`, `?annotations=`) or from files
+- `convert.html`, the converter: a capture from files, converted in a worker by
+  `tickwave-convert.wasm`, saved and shown
 - `demo.html`, a short page citing the committed fixtures as a project page would
 - `docs/elements.html`, rendered from this file's "The elements" section
 - `docs/charts.html`, `docs/format.html` and `docs/annotations.html`, rendered from `CHARTS.md`,

@@ -1,6 +1,7 @@
 // Builds dist/: tickwave.js (the elements, one ES module), tickwave-chart.js (the chart element,
 // its own module), tickwave-worker.js (the decoder's worker), tickwave.wasm (the decoder, copied
-// from crates/wasm/pkg), and dev-loader.js (the dev page's fixture loader, which imports
+// from crates/wasm/pkg), tickwave-convert-worker.js and tickwave-convert.wasm (the converter, from
+// crates/convert-wasm/pkg, for the site's converter page), and dev-loader.js (the dev page's fixture loader, which imports
 // "tickwave" through the page's import map).
 //
 //   node build.ts                 build once
@@ -12,16 +13,21 @@ import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 const serve = process.argv.includes("--serve");
 const port = Number(process.argv[process.argv.indexOf("--serve") + 1]) || 8123;
 
-const wasm = new URL("../crates/wasm/pkg/tickwave_wasm_bg.wasm", import.meta.url);
-if (!existsSync(wasm)) {
-  console.error("crates/wasm/pkg has no build: run crates/wasm/build.sh first");
-  process.exit(1);
-}
 mkdirSync("dist", { recursive: true });
-copyFileSync(wasm, "dist/tickwave.wasm");
+for (const [crate, from, to] of [
+  ["wasm", "tickwave_wasm_bg.wasm", "tickwave.wasm"],
+  ["convert-wasm", "tickwave_convert_wasm_bg.wasm", "tickwave-convert.wasm"],
+]) {
+  const wasm = new URL(`../crates/${crate}/pkg/${from}`, import.meta.url);
+  if (!existsSync(wasm)) {
+    console.error(`crates/${crate}/pkg has no build: run crates/${crate}/build.sh first`);
+    process.exit(1);
+  }
+  copyFileSync(wasm, `dist/${to}`);
+}
 
 const options: esbuild.BuildOptions = {
-  entryPoints: { tickwave: "src/index.ts", "tickwave-chart": "src/chart/index.ts", "tickwave-worker": "src/wasm/worker.ts", "dev-loader": "dev/loader.ts" },
+  entryPoints: { tickwave: "src/index.ts", "tickwave-chart": "src/chart/index.ts", "tickwave-worker": "src/wasm/worker.ts", "tickwave-convert-worker": "src/convert/worker.ts", "dev-loader": "dev/loader.ts" },
   outdir: "dist",
   bundle: true,
   format: "esm",

@@ -15,11 +15,12 @@ computer.
 | Path | What |
 | --- | --- |
 | `crates/format` | the `.tickwave` recording format: encoding, decoding, the block index, and the sidecar annotations' resolver |
-| `crates/import` | readers for Saleae Logic 2's binary export, sigrok session files and VCD |
+| `crates/import` | readers for Saleae Logic 2's binary export, sigrok session files and VCD, and the conversion the CLI and the browser share |
 | `crates/cli` | `tickwave`, the command-line converter: convert, describe, verify, check and bundle |
 | `crates/wasm` | the same decoder compiled to WASM, for the browser |
-| `web` | the custom elements, the chart, and the build of the site |
-| `site` | the site's pages: a viewer, a demo and the docs |
+| `crates/convert-wasm` | the converter compiled to WASM, for the site's convert page |
+| `web` | the custom elements, the chart, the converter's worker, and the build of the site |
+| `site` | the site's pages: a viewer, a converter, a demo and the docs |
 | `bench` | the decode benchmark: the WASM decoder against JavaScript ones, on real recordings |
 
 ## Documents
@@ -40,10 +41,12 @@ cargo test --workspace
 cargo build --release -p tickwave-cli     # the converter, at target/release/tickwave
 ```
 
-The browser's decoder also needs clang with the wasm32 target, `wasm-bindgen` and `wasm-opt`:
+The browser's decoder and converter also need clang with the wasm32 target, `wasm-bindgen` and
+`wasm-opt`:
 
 ```sh
-crates/wasm/build.sh                      # into crates/wasm/pkg
+crates/wasm/build.sh                      # the decoder, into crates/wasm/pkg
+crates/convert-wasm/build.sh              # the converter, into crates/convert-wasm/pkg
 ```
 
 Then the web build and its tests, from `web/`:

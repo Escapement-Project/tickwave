@@ -764,6 +764,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tickwave-convert-wasm"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tickwave-format",
+ "tickwave-import",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "tickwave-format"
 version = "0.1.0"
 dependencies = [

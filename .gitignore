@@ -3,3 +3,4 @@
 /web/dist
 /crates/wasm/pkg
 /web/fixtures-local/
+/crates/convert-wasm/pkg

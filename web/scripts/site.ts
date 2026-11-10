@@ -21,8 +21,8 @@ rmSync(out, { recursive: true, force: true });
 mkdirSync(join(out, "docs"), { recursive: true });
 mkdirSync(join(out, "fixtures"), { recursive: true });
 
-// The elements, as build.ts made them.
-for (const f of ["tickwave.js", "tickwave-worker.js", "tickwave.wasm"]) copyFileSync(join(web, "dist", f), join(out, f));
+// The elements, and the converter page's worker and module, as build.ts made them.
+for (const f of ["tickwave.js", "tickwave-worker.js", "tickwave.wasm", "tickwave-convert-worker.js", "tickwave-convert.wasm"]) copyFileSync(join(web, "dist", f), join(out, f));
 
 // The page script, which imports the elements from the tickwave.js beside it.
 await esbuild.build({
@@ -71,6 +71,7 @@ md.renderer.rules.table_close = () => "</table></div>\n";
 
 const NAV: [string, string][] = [
   ["index.html", "Viewer"],
+  ["convert.html", "Convert"],
   ["demo.html", "Demo"],
   ["docs/elements.html", "Elements"],
   ["docs/charts.html", "Charts"],
@@ -136,7 +137,7 @@ function page(path: string, opts: { title: string; description: string; kind: st
 }
 
 // HTML pages say their title, description and kind in comments at the top.
-for (const name of ["index.html", "demo.html"]) {
+for (const name of ["index.html", "convert.html", "demo.html"]) {
   const text = readFileSync(join(site, "pages", name), "utf8");
   const meta = (key: string) => {
     const m = new RegExp(`<!-- ${key}: (.*?) -->`).exec(text);

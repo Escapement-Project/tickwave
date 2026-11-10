@@ -71,3 +71,25 @@ tickwave-view { margin: 12px 0; }
 /* A heading's link to itself shows where the reader is looking for it. */
 .doc .anchor { opacity: 0; }
 .doc :is(h1, h2, h3, h4):hover .anchor, .doc .anchor:focus-visible { opacity: 1; }
+
+/* The converter. */
+.drop .choose { display: flex; flex-wrap: wrap; gap: 10px; }
+.settings h2 { margin-top: 28px; }
+.settings input[type="text"], .settings input[type="number"], .settings textarea { font: inherit; font-size: 15px; color: var(--ink); background: var(--raised); border: 1px solid var(--rule); border-radius: 6px; padding: 4px 8px; max-width: 100%; box-sizing: border-box; }
+.settings #title, .settings textarea { width: min(100%, 32em); }
+.settings input[type="number"] { width: 7em; }
+.settings label { font-size: 15px; }
+.settings details { margin: 0 0 14px; }
+.settings summary { cursor: pointer; font-size: 15px; }
+.channels td { vertical-align: middle; }
+.channels td:nth-child(3) input { width: 14em; }
+.channels td:nth-child(4) input { width: 4.5em; }
+/* On a phone the name takes the room the row leaves, so the table fits without scrolling. */
+@media (max-width: 520px) {
+  .channels { width: 100%; }
+  .channels td:nth-child(3) { width: 100%; }
+  .channels td:nth-child(3) input { width: 100%; min-width: 5em; }
+}
+.channels td:first-child, .channels th:first-child { text-align: center; }
+.running progress { width: min(100%, 32em); height: 10px; accent-color: var(--ink); }
+.result { margin-top: 22px; }

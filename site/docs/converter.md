@@ -1,6 +1,6 @@
 # The converter
 
-`tickwave` is a command-line program. It converts captures into tickwave recordings, describes a recording, checks one against the capture it came from, and checks and bundles a recording's sidecar of annotations.
+`tickwave` is a command-line program. It converts captures into tickwave recordings, describes a recording, checks one against the capture it came from, and checks and bundles a recording's sidecar of annotations. [The convert page](../convert.html) runs the same conversion in a browser.
 
 ## Building it
 
@@ -74,6 +74,14 @@ If the source doesn't state a channel's unit, give it with `--unit <name>=<unit>
 A block is the smallest piece of data a viewer fetches. Smaller blocks mean less waiting for a narrow view of a long capture, and a larger file.
 
 Every command that reads a recording takes `--max-decoded-mib <n>`: the most it decodes from one block, 64 MiB by default. A recording that needs more is refused, as a page's viewer refuses it unless the page sets a larger limit. A block at the largest `--block-kib` stays under the default.
+
+## Converting in a browser
+
+[The convert page](../convert.html) converts a capture without installing anything. Choose a Saleae export's folder, or a `.sr` or `.vcd` file, or drop it on the page. The page lists the capture's channels: choose the ones to take, and name them. It takes the options a command line does: units, a title, metadata, the zstd level, the block size and `--no-codes`. Then it converts, checks the recording against the capture, offers it to save, and shows it in a view.
+
+The page runs the converter's own code, compiled to WebAssembly, so the same capture and settings give the same file, byte for byte. It stores channels in the order it lists them, which for a Saleae export is by file name, numbers in order. A command line that names the same channels in that order makes the same file.
+
+The capture stays in the browser. The page reads a Saleae export a slice at a time, so the export can be larger than the 4 GiB WebAssembly gives the converter. A sigrok or VCD file is read whole, and the recording is built in memory, so these have to fit. The page converts on one thread, where the command line uses every core, so a large capture takes longer.
 
 ## Describing a recording
 

@@ -223,9 +223,9 @@ test("every internal link resolves, fragments included", async ({ request, baseU
     }
   }
   expect(failures).toEqual([]);
-  // The seven pages, each reached by a link.
+  // The eight pages, each reached by a link.
   expect([...pages.keys()].map((u) => u.slice(u.indexOf(SITE) + SITE.length)).sort()).toEqual(
-    ["demo.html", "docs/annotations.html", "docs/charts.html", "docs/converter.html", "docs/elements.html", "docs/format.html", "index.html"],
+    ["convert.html", "demo.html", "docs/annotations.html", "docs/charts.html", "docs/converter.html", "docs/elements.html", "docs/format.html", "index.html"],
   );
   expect(links).toBeGreaterThan(40);
 });
@@ -245,6 +245,7 @@ test("the docs carry FORMAT.md's and ANNOTATIONS.md's headings", async ({ page }
 
 const PAGES = [
   ["viewer", "index.html?src=fixtures/identify-swd.tickwave&annotations=fixtures/identify-swd.annotations.toml"],
+  ["convert", "convert.html"],
   ["demo", "demo.html"],
   ["elements", "docs/elements.html"],
   ["format", "docs/format.html"],
