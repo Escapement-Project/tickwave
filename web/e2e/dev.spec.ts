@@ -20,7 +20,42 @@ async function recordReady(page: Page): Promise<void> {
 }
 
 async function waitReady(page: Page, ids: string[]): Promise<void> {
-  await page.waitForFunction((ids) => ids.every((id) => (window as unknown as { ready: Set<string> }).ready.has(id)), ids, { timeout: 30_000 });
+  try {
+    await page.waitForFunction((ids) => ids.every((id) => (window as unknown as { ready: Set<string> }).ready.has(id)), ids, { timeout: 30_000 });
+  } catch (e) {
+    // What the elements still waited on, so a timeout says why.
+    const state = await page.evaluate(async (ids) => {
+      const w = window as unknown as { ready: Set<string>; errors: string[] };
+      let frames = 0;
+      const count = () => {
+        frames++;
+        requestAnimationFrame(count);
+      };
+      requestAnimationFrame(count);
+      const second = new Promise((r) => setTimeout(r, 1000));
+      const waiting = await Promise.all(
+        ids
+          .filter((id) => !w.ready.has(id))
+          .map(async (id) => {
+            const el = document.getElementById(id) as (HTMLElement & { settled?(): Promise<void> }) | null;
+            const root = el?.shadowRoot;
+            const canvas = root?.querySelector("canvas");
+            const settles = el?.settled ? await Promise.race([el.settled().then(() => "yes"), new Promise((r) => setTimeout(() => r("no, in 1 s"), 1000))]) : "no settled()";
+            return {
+              id,
+              open: el?.hasAttribute("open"),
+              title: root?.querySelector(".toolbar .title")?.textContent ?? null,
+              canvas: canvas ? `${canvas.width}x${canvas.height}` : null,
+              notice: root?.querySelector(".notice")?.textContent?.trim() || null,
+              settles,
+            };
+          }),
+      );
+      await second;
+      return { ready: [...w.ready], errors: w.errors, waiting, framesIn1s: frames, visibility: document.visibilityState };
+    }, ids);
+    throw new Error(`${(e as Error).message}\n${JSON.stringify(state, null, 2)}`);
+  }
 }
 
 const errors = (page: Page) => page.evaluate(() => (window as unknown as { errors: string[] }).errors);
@@ -357,6 +392,9 @@ test.describe("the identify view", () => {
   test.beforeEach(async ({ page }) => {
     await page.setViewportSize({ width: 1100, height: 900 });
     await open(page, { reduced: true });
+    // The inset above the view grows as its data arrives, moving the view's Open button down: a click
+    // made meanwhile can start on the button and end beside it, and open nothing.
+    await waitReady(page, ["inset-dpidr"]);
     const view = page.locator("#identify");
     await view.locator(".open").click();
     await waitReady(page, ["identify"]);
