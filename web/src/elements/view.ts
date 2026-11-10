@@ -6,9 +6,10 @@ import { parseChannels, parseWindow, VIEW_ATTRIBUTES } from "../attributes.ts";
 import { reducedMotion } from "../face.ts";
 import { absolute, events as registryEvents, infoFor, peekInfo } from "../registry.ts";
 import { clockNote, countEdges, formatBrief, formatBytes, formatClockPeriod, formatClockRate, formatCount, formatInterval, formatRate, formatValue, periodStats } from "../readouts.ts";
+import { analogFromOverview, analogFromSamples, complete, completePulse, pulseFigures, pulseFromEdges, type Pulse } from "../probe.ts";
 import { lowerBound } from "../search.ts";
 import { channelIndices, Plot } from "../render/plot.ts";
-import { isAbort, named, sampleAtOrBefore, sampleTick, type RecordingInfo } from "../source.ts";
+import { isAbort, named, sampleAtOrBefore, sampleTick, type DigitalChannel, type RecordingInfo } from "../source.ts";
 import { parseTime, toTicks, type TimeSpec } from "../time.ts";
 import { TickwaveElement, loadRecording, type Loaded } from "./base.ts";
 
@@ -40,6 +41,11 @@ canvas { display: block; }
   font-size: 13px; white-space: nowrap; opacity: 0; transition: opacity .15s; }
 .hint.shown { opacity: 1; }
 @media (prefers-reduced-motion: reduce) { .hint { transition: none; } }
+.reading { position: absolute; z-index: 1; pointer-events: none; padding: 3px 7px; border-radius: 5px;
+  background: var(--raised, Canvas); border: 1px solid var(--hair, GrayText); color: var(--ink, CanvasText);
+  font-size: 12px; line-height: 1.4; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.reading[hidden] { display: none; }
+.reading .more { color: var(--ink-2, GrayText); }
 `;
 
 const HTML = `
@@ -63,12 +69,14 @@ const HTML = `
       <button type="button" class="close" part="button">Close</button>
     </div>
   </div>
-  <div class="plot" part="plot" tabindex="0" role="group" aria-roledescription="capture"><canvas aria-hidden="true"></canvas><div class="hint" part="hint" aria-hidden="true"></div></div>
+  <div class="plot" part="plot" tabindex="0" role="group" aria-roledescription="capture"><canvas aria-hidden="true"></canvas><div class="hint" part="hint" aria-hidden="true"></div><div class="reading" part="reading" aria-hidden="true" hidden></div></div>
   <div class="readout" part="readout" aria-live="polite"></div>
 </div>
 <div class="notice" part="notice" role="status" hidden></div>`;
 
 const DRAG_PX = 4;
+/** A pulse whose edges lie past the data drawn is measured once the pointer rests this long. */
+const REST_MS = 150;
 const SNAP_PX = 6;
 /** The narrowest view: this many CSS pixels a tick. */
 const MAX_PX_PER_TICK = 40;
@@ -143,7 +151,10 @@ export class TickwaveView extends TickwaveElement {
     this.#plot.onError = (e) => this.fail(e);
     this.#plot.onRecovered = (m) => this.forgetProblem(m);
     this.#plot.onStall = (ms) => this.waiting(ms);
-    this.#plot.onDraw = () => this.#drawn();
+    this.#plot.onDraw = () => {
+      this.#drawn();
+      this.#probeIfMoved();
+    };
     this.#resize = new ResizeObserver(() => this.#sized());
     const on = (sel: string, f: () => void) => this.root.querySelector(sel)!.addEventListener("click", f);
     // The pressed button hides: the focus goes where the reader went, not to the page's start.
@@ -277,7 +288,7 @@ export class TickwaveView extends TickwaveElement {
     this.root.querySelector(".close")!.setAttribute("aria-label", `Close ${l.info.title}`);
     this.#plotBox.setAttribute(
       "aria-label",
-      `${l.info.title}. Arrow keys pan, plus and minus zoom, Home fits the capture; click to place cursors, drag on the time axis to select.`,
+      `${l.info.title}. Arrow keys pan, plus and minus zoom, Home fits the capture; Enter or a click places a cursor, drag on the time axis to select.`,
     );
     const { indices, missing } = channelIndices(l.info, parseChannels(this.getAttribute("channels")));
     for (const m of missing) this.fail(new Error(`no channel ${m}`));
@@ -457,6 +468,7 @@ export class TickwaveView extends TickwaveElement {
   #viewChanged(): void {
     this.#clampView();
     this.#plot.invalidate();
+    this.#probe();
     if (this.#windowEventQueued) return;
     this.#windowEventQueued = true;
     requestAnimationFrame(() => {
@@ -515,9 +527,11 @@ export class TickwaveView extends TickwaveElement {
     });
     box.addEventListener("pointermove", (e) => {
       const p = this.#local(e);
+      if (e.pointerType === "mouse" || e.pointerType === "pen") this.#pointer = p;
       if (this.#pointers.has(e.pointerId)) this.#pointers.set(e.pointerId, p);
       const pinch = this.#pinch;
       if (pinch && this.#pointers.size === 2) {
+        this.#hideProbe();
         const [a, b] = [...this.#pointers.values()];
         const distance = Math.abs(a.x - b.x) || 1;
         const span = ((pinch.view.end - pinch.view.start) * pinch.distance) / distance;
@@ -534,6 +548,7 @@ export class TickwaveView extends TickwaveElement {
       if (d && d.id === e.pointerId) {
         if (!d.moved && Math.hypot(p.x - d.x, p.y - d.y) < DRAG_PX) return;
         d.moved = true;
+        this.#hideProbe();
         if (d.area === "axis") {
           const l = this.#plot.layout!;
           const inside = (x: number) => Math.max(l.plotLeft, Math.min(l.plotRight, x));
@@ -548,6 +563,7 @@ export class TickwaveView extends TickwaveElement {
         return;
       }
       this.#hover(p.x, p.y);
+      this.#probe();
     });
     const end = (e: PointerEvent) => {
       this.#pointers.delete(e.pointerId);
@@ -560,6 +576,7 @@ export class TickwaveView extends TickwaveElement {
       const p = this.#local(e);
       if (d.moved) {
         if (d.area === "axis") this.#selected();
+        this.#probe();
         return;
       }
       const hit = this.#plot.hit(p.x, p.y);
@@ -570,6 +587,8 @@ export class TickwaveView extends TickwaveElement {
     box.addEventListener("pointerup", end);
     box.addEventListener("pointercancel", end);
     box.addEventListener("pointerleave", () => {
+      this.#pointer = null;
+      this.#hideProbe();
       if (this.#plot.hoverRow !== null || this.#plot.hoverNote !== null) {
         this.#plot.hoverRow = null;
         this.#plot.hoverNote = null;
@@ -619,6 +638,9 @@ export class TickwaveView extends TickwaveElement {
           break;
         case "Home":
           this.#fit();
+          break;
+        case "Enter":
+          this.#placeCursorAt(Math.round((this.#plot.view.start + this.#plot.view.end) / 2));
           break;
         case "Escape":
           this.#plot.cursors = { a: null, b: null };
@@ -671,6 +693,11 @@ export class TickwaveView extends TickwaveElement {
       }
       if (best >= 0 && Math.abs(this.#plot.xAt(t[best]) - x) <= SNAP_PX) tick = t[best];
     }
+    this.#placeCursorAt(tick);
+  }
+
+  /** Places cursor A, or B after it, at `tick`. */
+  #placeCursorAt(tick: number): void {
     if (this.#nextCursor === "a") {
       this.#plot.cursors = { a: tick, b: null };
       this.#nextCursor = "b";
@@ -692,6 +719,139 @@ export class TickwaveView extends TickwaveElement {
     void this.#renderReadout(true);
   }
 
+  // The label beside the pointer ------------------------------------------------------------------
+
+  /** The pointer over the plot (a mouse or pen, not a finger), in the plot's coordinates. */
+  #pointer: { x: number; y: number } | null = null;
+  #probeTimer = 0;
+  #probeAbort: AbortController | null = null;
+  /** What the label last measured from: a draw that changes none of it leaves the label be. */
+  #probeFrom: { x: number; y: number; start: number; end: number; tile: unknown } | null = null;
+
+  #probeBox(): HTMLElement {
+    return this.root.querySelector(".reading") as HTMLElement;
+  }
+
+  #hideProbe(): void {
+    clearTimeout(this.#probeTimer);
+    this.#probeAbort?.abort();
+    this.#probeAbort = null;
+    this.#probeFrom = null;
+    this.#probeBox().hidden = true;
+  }
+
+  /** Measures again when a draw has brought new data or a new view under the pointer. */
+  #probeIfMoved(): void {
+    const p = this.#pointer;
+    const f = this.#probeFrom;
+    if (!p || !f) return;
+    const row = this.#plot.hit(p.x, p.y);
+    const tile = row.area === "row" ? this.#plot.tracks[row.row]?.tile : null;
+    if (f.x !== p.x || f.y !== p.y || f.start !== this.#plot.view.start || f.end !== this.#plot.view.end || f.tile !== tile) this.#probe();
+  }
+
+  /**
+   * The row under the pointer, measured at its pixel from the data the row has drawn: an analog
+   * value, or the range the pixel draws; a digital pulse's level, width, period, frequency and duty.
+   * A pulse whose edges lie past the data drawn is finished once the pointer rests.
+   */
+  #probe(): void {
+    clearTimeout(this.#probeTimer);
+    this.#probeAbort?.abort();
+    this.#probeAbort = null;
+    const box = this.#probeBox();
+    const p = this.#pointer;
+    const l = this.#plot.layout;
+    const loaded = this.#loaded;
+    const hit = p && l ? this.#plot.hit(p.x, p.y) : null;
+    if (!p || !l || !loaded || !hit || hit.area !== "row" || this.#drag?.moved || this.#pinch || p.x < l.plotLeft || p.x >= l.plotRight) {
+      this.#probeFrom = null;
+      box.hidden = true;
+      return;
+    }
+    const track = this.#plot.tracks[hit.row];
+    const tile = track?.tile ?? null;
+    this.#probeFrom = { x: p.x, y: p.y, start: this.#plot.view.start, end: this.#plot.view.end, tile };
+    const col = Math.floor(p.x - l.plotLeft) + l.plotLeft;
+    const t0 = this.#plot.tickAt(col);
+    const t1 = this.#plot.tickAt(col + 1);
+    const tick = Math.floor(this.#plot.tickAt(p.x));
+    const c = track.channel;
+    if (!tile || tick < tile.start || tick >= tile.end || tick < 0 || tick > c.end) {
+      box.hidden = true;
+      return;
+    }
+    let lines: string[] | null = null;
+    if (c.kind === "analog") {
+      const at = tile.kind === "samples" ? analogFromSamples(c, tile.data, t0, t1, tick) : tile.kind === "analog-overview" ? analogFromOverview(tile.data, t0, t1) : null;
+      const v = (x: number) => formatValue(x, c.resolution, c.unit);
+      if (at?.kind === "value") lines = [v(at.value)];
+      else if (at?.kind === "range") lines = [`${v(at.min)} to ${v(at.max)}`];
+    } else {
+      let pulse: Pulse | null = null;
+      if (tile.kind === "edges") {
+        const t = tile.data.ticks;
+        // Two edges in the pixel: no one pulse is under the pointer.
+        if (lowerBound(t, Math.ceil(t1)) - lowerBound(t, Math.ceil(t0)) > 1) lines = ["zoom in to measure"];
+        else pulse = pulseFromEdges(tile.data, tile.start, tile.end, c.end, tick);
+      } else if (tile.kind === "digital-overview") {
+        const o = tile.data;
+        const k0 = Math.max(0, Math.floor((t0 - o.start) / o.bucket));
+        const k1 = Math.min(o.changes.length, Math.ceil((t1 - o.start) / o.bucket));
+        let changes = false;
+        for (let k = k0; k < k1; k++) changes ||= o.changes[k] === 1;
+        if (changes) lines = ["zoom in to measure"];
+        else if (k0 < o.level.length) pulse = { level: o.level[k0] ? 1 : 0, start: undefined, end: undefined, next: undefined };
+      }
+      if (pulse && complete(pulse)) lines = this.#pulseLines(pulse, c, loaded.info);
+      // A row whose last read failed waits before it reads again, and so does the label: the level only.
+      else if (pulse && track.failed) lines = [pulse.level ? "high" : "low"];
+      else if (pulse) {
+        const asked = pulse;
+        lines = [asked.level ? "high" : "low", "measuring…"];
+        const abort = new AbortController();
+        this.#probeAbort = abort;
+        this.#probeTimer = window.setTimeout(() => {
+          completePulse(loaded.source, track.index, asked, tick, c.end, abort.signal).then(
+            (done) => {
+              if (!abort.signal.aborted) this.#showProbe(this.#pulseLines(done, c, loaded.info), p, l.rows[hit.row]);
+            },
+            // A measurement that fails says nothing: the row's own read reports the trouble.
+            () => {
+              if (!abort.signal.aborted) box.hidden = true;
+            },
+          );
+        }, REST_MS);
+      }
+    }
+    if (!lines) box.hidden = true;
+    else this.#showProbe(lines, p, l.rows[hit.row]);
+  }
+
+  #pulseLines(p: Pulse, c: DigitalChannel, info: RecordingInfo): string[] {
+    const f = pulseFigures(p, info.timebase, c.end);
+    const lines = [`${f.level} ${f.width}`];
+    if (f.period) lines.push(`period ${f.period} · ${f.frequency} · duty ${f.duty}`);
+    return lines;
+  }
+
+  /** The label beside the pointer, level with its row, on the pointer's left near the plot's right edge. */
+  #showProbe(lines: string[], p: { x: number; y: number }, row: { top: number; height: number }): void {
+    const box = this.#probeBox();
+    box.replaceChildren(
+      ...lines.map((text, i) => Object.assign(document.createElement("div"), { textContent: text, className: i > 0 ? "more" : "" })),
+    );
+    box.hidden = false;
+    const l = this.#plot.layout!;
+    const w = box.offsetWidth;
+    const h = box.offsetHeight;
+    const right = p.x + 14;
+    const x = right + w <= l.plotRight ? right : Math.max(l.plotLeft, p.x - 14 - w);
+    const y = Math.max(0, Math.min(this.#plotBox.clientHeight - h, row.top + row.height / 2 - h / 2));
+    box.style.left = `${x}px`;
+    box.style.top = `${y}px`;
+  }
+
   // Readouts --------------------------------------------------------------------------------------
 
   async #renderReadout(announce = false): Promise<void> {
@@ -703,7 +863,8 @@ export class TickwaveView extends TickwaveElement {
     const line = (...parts: (string | Node)[]) => {
       const div = document.createElement("div");
       div.className = "line";
-      div.append(...parts);
+      // A space between items, which the flex gap draws: without it, the live region reads them run together.
+      div.append(...parts.flatMap((part, i) => (i > 0 ? [" ", part] : [part])));
       lines.push(div);
       return div;
     };
@@ -750,6 +911,24 @@ export class TickwaveView extends TickwaveElement {
           parts.push(item("B", figure(values[1])));
           if (values[0] !== null && values[1] !== null) parts.push(item("Δ", figure(values[1] - values[0])));
         }
+        line(...parts);
+      }
+      // Each digital channel's pulse at cursor A, as the label beside the pointer gives it.
+      for (const t of this.#plot.tracks) {
+        const c = t.channel;
+        if (c.kind !== "digital" || a < 0 || a > c.end) continue;
+        let pulse: Pulse;
+        try {
+          const e = await l.source.edges(t.index, a, a + 1);
+          pulse = await completePulse(l.source, t.index, pulseFromEdges(e, a, a + 1, c.end, a), a, c.end);
+        } catch (e) {
+          if (!isAbort(e)) this.fail(e);
+          return;
+        }
+        if (seq !== this.#readoutSeq) return;
+        const f = pulseFigures(pulse, tb, c.end);
+        const parts: (string | Node)[] = [c.name, item(f.level, f.width)];
+        if (f.period) parts.push(item("period", f.period), fig(f.frequency ?? "–"), item("duty", f.duty ?? "–"));
         line(...parts);
       }
     }

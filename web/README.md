@@ -193,10 +193,19 @@ scrolls the page, and the view says how to zoom. Shift with the wheel, a sideway
 the arrow keys move along the capture. With the view focused, plus and minus zoom, Home shows the
 whole capture, and Escape clears the cursors and the selection.
 
-A click places cursor A, and the next click cursor B. A cursor snaps to an edge within 6 pixels on
-the row clicked. The readout gives both times, the interval between them, and each analog
-channel's value at each. That value is the last sample at or before the cursor, to the digit one
-code step carries.
+A mouse over a row reads it at the pointer, in a label beside it. An analog channel gives the
+value of the sample there, or the smallest and largest value where one pixel covers several
+samples. A digital channel gives the pulse there: its level and width, and the period to the next
+edge the same way, with its frequency and duty. A pulse's edges can lie far past what the row has
+read, as on a quiet line zoomed in close: once the pointer rests, the view finds them through the
+overview and reads just those. Where one pixel holds several edges, the label asks for a closer
+look.
+
+A click places cursor A, and the next click cursor B; with the view focused, Enter places them at
+the middle of the view. A click's cursor snaps to an edge within 6 pixels on the row clicked. The
+readout gives both times, the interval between them, and each analog channel's value at each.
+That value is the last sample at or before the cursor, to the digit one code step carries. It also
+gives each digital channel's pulse at cursor A, as the label does.
 
 A drag along the time axis selects a span. The readout gives its length and each channel's edges
 in it. For one channel it gives the periods' count, minimum, median and maximum, and the running
