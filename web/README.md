@@ -54,16 +54,18 @@ shared header: its links lead to the project's other pages at the published site
   `FORMAT.md` and `ANNOTATIONS.md`
 - `docs/converter.html`, rendered from `site/docs/converter.md`
 
-`site/tokens.css`, `site/fonts/`, `site/favicon.ico` and `site/dial.svg` are copies of the design
-system's files. `site/base.css`, `site/header.html`, `site/footer.html`, `site/face.js` and
-`site/header.js` are copies of the project's shared header, footer and base sheet. Check them all
-from the site repository with:
+`site/tokens.css`, `site/fonts/`, `site/favicon-tickwave.ico` (tickwave's mark) and `site/dial.svg`
+are copies of the design system's files. `site/base.css`, `site/header.html`, `site/footer.html`,
+`site/face.js`, `site/header.js`, `site/copy.js`, `site/doc.css` and `site/doc.js` are copies of
+the project's shared header, footer, base sheet, Copy buttons and doc frame. Check them all from
+the site repository with:
 
 ```sh
 uv run design/build.py --check ../tickwave/site/tokens.css ../tickwave/site/fonts/* \
-    ../tickwave/site/favicon.ico ../tickwave/site/dial.svg ../tickwave/site/base.css \
+    ../tickwave/site/favicon-tickwave.ico ../tickwave/site/dial.svg ../tickwave/site/base.css \
     ../tickwave/site/header.html ../tickwave/site/footer.html ../tickwave/site/face.js \
-    ../tickwave/site/header.js
+    ../tickwave/site/header.js ../tickwave/site/copy.js ../tickwave/site/doc.css \
+    ../tickwave/site/doc.js
 ```
 
 ## The data source

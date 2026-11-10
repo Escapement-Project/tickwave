@@ -139,8 +139,8 @@ test.describe("the viewer", () => {
 
   test("says a file that is not a recording isn't one", async ({ page }) => {
     await page.goto(`${SITE}index.html`);
-    await page.locator("#files").setInputFiles("../site/favicon.ico");
-    await expect(page.locator("#problem")).toHaveText("favicon.ico isn't a tickwave recording. The viewer reads .tickwave files, which the converter makes from a capture.");
+    await page.locator("#files").setInputFiles("../site/favicon-tickwave.ico");
+    await expect(page.locator("#problem")).toHaveText("favicon-tickwave.ico isn't a tickwave recording. The viewer reads .tickwave files, which the converter makes from a capture.");
     await expect(page.locator("#stage")).toBeHidden();
   });
 

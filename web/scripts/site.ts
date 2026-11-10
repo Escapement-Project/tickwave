@@ -44,7 +44,7 @@ await esbuild.build({
 });
 
 // The design system's files, as copied into site/, and the site's own styles.
-for (const f of ["tokens.css", "base.css", "doc.css", "face.js", "header.js", "copy.js", "doc.js", "favicon.ico", "site.css"]) copyFileSync(join(site, f), join(out, f));
+for (const f of ["tokens.css", "base.css", "doc.css", "face.js", "header.js", "copy.js", "doc.js", "favicon-tickwave.ico", "site.css"]) copyFileSync(join(site, f), join(out, f));
 cpSync(join(site, "fonts"), join(out, "fonts"), { recursive: true });
 
 // The demo's and the viewer's examples: committed fixtures, and the SWD annotations made from one.
