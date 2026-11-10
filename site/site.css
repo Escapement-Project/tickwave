@@ -8,11 +8,10 @@ code { overflow-wrap: anywhere; }
 pre { background: var(--surface); border-radius: 8px; padding: 12px 14px; overflow-x: auto; line-height: 1.5; }
 pre code { font-size: 1em; overflow-wrap: normal; }
 
-main { padding-bottom: 56px; }
-/* Room under the header, as the project's pages leave; .wrap's padding would otherwise win. A doc's
-   frame keeps its own, as on the project's doc pages. */
-main.wrap { padding-top: 32px; }
-main.wrap:has(> .doc-wrap) { padding-top: 0; }
+/* Room under the header and above the footer, as the project's pages leave; .wrap's padding would
+   otherwise win. A doc's frame keeps its own, as on the project's doc pages. */
+main.wrap { padding-top: 32px; padding-bottom: 56px; }
+main.wrap:has(> .doc-wrap) { padding-top: 0; padding-bottom: 0; }
 /* tickwave's licence, a row of its own under the project's footer. */
 footer .licence { flex-basis: 100%; }
 /* Prose pages: headings in the flow of the text, where the project's sections set them apart. */
