@@ -1011,6 +1011,10 @@ export class TickwaveView extends TickwaveElement {
     const seq = ++this.#readoutSeq;
     const l = this.#loaded;
     if (!l) return;
+    // A readout another has replaced says nothing of its failures: they may be the last recording's.
+    const failed = (e: unknown) => {
+      if (seq === this.#readoutSeq && !isAbort(e)) this.fail(e);
+    };
     const tb = l.info.timebase;
     const lines: HTMLElement[] = [];
     const line = (...parts: (string | Node)[]) => {
@@ -1052,7 +1056,7 @@ export class TickwaveView extends TickwaveElement {
         try {
           values = await Promise.all([at(a), b !== null ? at(b) : null]);
         } catch (e) {
-          if (!isAbort(e)) this.fail(e);
+          failed(e);
           return;
         }
         if (seq !== this.#readoutSeq) return;
@@ -1075,7 +1079,7 @@ export class TickwaveView extends TickwaveElement {
           const e = await l.source.edges(t.index, a, a + 1);
           pulse = await completePulse(l.source, t.index, pulseFromEdges(e, a, a + 1, c.end, a), a, c.end);
         } catch (e) {
-          if (!isAbort(e)) this.fail(e);
+          failed(e);
           return;
         }
         if (seq !== this.#readoutSeq) return;
@@ -1135,7 +1139,7 @@ export class TickwaveView extends TickwaveElement {
         } else periods.append("fewer than two rising edges");
         detail = { start: sel.start, end: sel.end, duration: formatInterval(sel.end - sel.start, tb), edges: edgeCounts, periods: periodDetail };
       } catch (e) {
-        if (!isAbort(e)) this.fail(e);
+        failed(e);
         return;
       }
     }
