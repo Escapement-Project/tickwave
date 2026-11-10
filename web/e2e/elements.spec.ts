@@ -70,16 +70,20 @@ test("setWindow before the head arrives shows that window once it has", async ({
 
 test("a failed load is tried again, and a new recording's view drops the old notice", async ({ page }, info) => {
   const tag = `retry-${info.project.name}-${Date.now()}`;
-  await page.goto(`${VIEW}?open&src=fixtures/missing.tickwave&tag=${tag}`);
+  // Every read after the first waits 2 s: the retry's 404 comes back after the new recording.
+  await page.goto(`${VIEW}?open&src=fixtures/missing.tickwave&tag=${tag}&after=1&stall=2000`);
   const view = page.locator("#v");
   await expect(notice(view)).toContainText("404");
-  const requests = async () => ((await (await fetch(`http://127.0.0.1:8124/__log?tag=${tag}`)).json()) as unknown[]).length;
-  const before = await requests();
+  const log = async () => (await (await fetch(`http://127.0.0.1:8124/__log?tag=${tag}`)).json()) as { status: number }[];
+  const before = (await log()).length;
   await view.locator(".close").click();
   await view.locator(".open").click();
-  await expect.poll(requests).toBeGreaterThan(before);
+  await expect.poll(async () => (await log()).length).toBeGreaterThan(before);
   await view.evaluate((v) => v.setAttribute("src", "../../fixtures/identify-swd.tickwave"));
   await drawn(view);
+  await expect.poll(async () => (await log()).every((e) => e.status !== 0), { timeout: 10_000 }).toBe(true);
+  // The server has sent the late 404: the page takes it a moment later.
+  await page.waitForTimeout(300);
   await expect(notice(view)).toBeHidden();
 });
 

@@ -258,8 +258,10 @@ export class TickwaveView extends TickwaveElement {
           return l;
         },
         (e) => {
-          // Not kept: the next update, an Open or a show(), tries again.
-          if (this.#loadKey === key) this.#loadKey = "";
+          // A load the view has moved on from says nothing about the one it shows now. A failed
+          // one is not kept: the next update, an Open or a show(), tries again.
+          if (this.#loadKey !== key) return null;
+          this.#loadKey = "";
           this.fail(e);
           return null;
         },
@@ -272,7 +274,10 @@ export class TickwaveView extends TickwaveElement {
   /** A collapsed view on screen fetches its recording's head, and only that. */
   #fetchHead(): void {
     const src = this.#src;
-    if (src && this.#inView && !this.open) infoFor(src).catch((e) => this.fail(e));
+    if (!src || !this.#inView || this.open) return;
+    infoFor(src).catch((e) => {
+      if (this.#src?.href === src.href) this.fail(e);
+    });
   }
 
   #renderSummary(): void {
