@@ -46,6 +46,11 @@ canvas { display: block; }
   font-size: 12px; line-height: 1.4; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .reading[hidden] { display: none; }
 .reading .more { color: var(--ink-2, GrayText); }
+.row-handle { position: absolute; left: 0; height: 8px; margin-top: -4px; cursor: row-resize; touch-action: none; }
+@media (pointer: coarse) { .row-handle { height: 24px; margin-top: -12px; } }
+.row-handle::after { content: ""; position: absolute; left: 4px; right: 4px; top: 50%; height: 2px; margin-top: -1px;
+  border-radius: 1px; background: var(--ink, CanvasText); opacity: 0; }
+.row-handle:hover::after, .row-handle:focus-visible::after, .row-handle.dragging::after { opacity: 1; }
 `;
 
 const HTML = `
@@ -78,6 +83,10 @@ const DRAG_PX = 4;
 /** A pulse whose edges lie past the data drawn is measured once the pointer rests this long. */
 const REST_MS = 150;
 const SNAP_PX = 6;
+/** The heights a reader can give a row, in CSS pixels. */
+const ROW_LIMITS = { digital: [24, 400], analog: [40, 600] } as const;
+/** A handle's arrow keys move it this far, or the second with Shift. */
+const ROW_STEP = [4, 16] as const;
 /** The narrowest view: this many CSS pixels a tick. */
 const MAX_PX_PER_TICK = 40;
 
@@ -123,6 +132,8 @@ export class TickwaveView extends TickwaveElement {
   #windowEventQueued = false;
   #readyFired = false;
   #resize: ResizeObserver;
+  /** One a row, on its lower edge in the names column. */
+  #handles: HTMLElement[] = [];
   /** A collapsed view fetches its recording's head, and only that, once it scrolls into view. */
   #seen = new IntersectionObserver((entries) => {
     this.#inView = entries.some((e) => e.isIntersecting);
@@ -330,6 +341,7 @@ export class TickwaveView extends TickwaveElement {
     this.#plot.cursors = { a: null, b: null };
     this.#plot.selection = null;
     this.#plot.focus = null;
+    this.#plot.heights.clear();
     this.#nextCursor = "a";
     this.#stepIndex = -1;
     this.#readoutSeq++;
@@ -357,8 +369,97 @@ export class TickwaveView extends TickwaveElement {
     canvas.style.height = height;
     const given = box > 1 ? box : null;
     this.#plot.resize(this.#size.width, given);
+    this.#placeHandles();
     this.#clampView();
     this.#plot.invalidate();
+  }
+
+  // Row heights ----------------------------------------------------------------------------------
+
+  #placeHandles(): void {
+    const l = this.#plot.layout;
+    if (!l) return;
+    while (this.#handles.length > l.rows.length) this.#handles.pop()!.remove();
+    while (this.#handles.length < l.rows.length) {
+      const h = this.#handle(this.#handles.length);
+      this.#handles.push(h);
+      this.#plotBox.append(h);
+    }
+    l.rows.forEach((r, i) => {
+      const h = this.#handles[i];
+      const [min, max] = ROW_LIMITS[r.track.channel.kind];
+      h.style.top = `${r.top + r.height}px`;
+      h.style.width = `${l.plotLeft}px`;
+      h.setAttribute("aria-label", `Height of ${r.track.channel.name}`);
+      h.setAttribute("aria-valuenow", String(Math.round(r.height)));
+      h.setAttribute("aria-valuemin", String(min));
+      h.setAttribute("aria-valuemax", String(max));
+    });
+  }
+
+  /**
+   * The handle on row `row`'s lower edge: a drag sets the row's height, as do the arrow keys; Home
+   * and End give it its least and greatest, and Enter or a double click its default.
+   */
+  #handle(row: number): HTMLElement {
+    const h = Object.assign(document.createElement("div"), { className: "row-handle", tabIndex: 0 });
+    h.setAttribute("part", "row-handle");
+    h.setAttribute("role", "separator");
+    h.setAttribute("aria-orientation", "horizontal");
+    let drag: { id: number; y: number; height: number } | null = null;
+    // The plot's own handlers pan, measure and place cursors: none of that while on a handle.
+    h.addEventListener("pointerdown", (e) => {
+      e.stopPropagation();
+      const r = this.#plot.layout?.rows[row];
+      if (e.button !== 0 || !r) return;
+      drag = { id: e.pointerId, y: e.clientY, height: r.height };
+      h.setPointerCapture(e.pointerId);
+      h.classList.add("dragging");
+      this.#hideProbe();
+    });
+    h.addEventListener("pointermove", (e) => {
+      e.stopPropagation();
+      if (drag?.id === e.pointerId) this.#setHeight(row, drag.height + e.clientY - drag.y);
+    });
+    const end = (e: PointerEvent) => {
+      e.stopPropagation();
+      if (drag?.id !== e.pointerId) return;
+      drag = null;
+      h.classList.remove("dragging");
+    };
+    h.addEventListener("pointerup", end);
+    h.addEventListener("pointercancel", end);
+    h.addEventListener("dblclick", (e) => {
+      e.stopPropagation();
+      this.#setHeight(row, null);
+    });
+    h.addEventListener("keydown", (e) => {
+      const r = this.#plot.layout?.rows[row];
+      if (!r) return;
+      const [min, max] = ROW_LIMITS[r.track.channel.kind];
+      const step = ROW_STEP[e.shiftKey ? 1 : 0];
+      let to: number | null;
+      if (e.key === "ArrowUp") to = r.height - step;
+      else if (e.key === "ArrowDown") to = r.height + step;
+      else if (e.key === "Home") to = min;
+      else if (e.key === "End") to = max;
+      else if (e.key === "Enter") to = null;
+      else return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.#setHeight(row, to);
+    });
+    return h;
+  }
+
+  /** Gives row `row` a height, within its kind's limits, or its default for null. */
+  #setHeight(row: number, height: number | null): void {
+    const t = this.#plot.tracks[row];
+    if (!t) return;
+    const [min, max] = ROW_LIMITS[t.channel.kind];
+    if (height === null) this.#plot.heights.delete(t.index);
+    else this.#plot.heights.set(t.index, Math.round(Math.max(min, Math.min(max, height))));
+    this.#layout(true);
   }
 
   // Window ---------------------------------------------------------------------------------------

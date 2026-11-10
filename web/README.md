@@ -201,6 +201,11 @@ read, as on a quiet line zoomed in close: once the pointer rests, the view finds
 overview and reads just those. Where one pixel holds several edges, the label asks for a closer
 look.
 
+Each row's lower edge, in the names column, is a handle that sets the row's height. Drag it, or
+focus it and press the up and down arrows (Shift for bigger steps). Home and End give the row its
+least and greatest height, and Enter or a double click its default. The view grows and shrinks
+with its rows. Another recording starts every row at its default height.
+
 A click places cursor A, and the next click cursor B; with the view focused, Enter places them at
 the middle of the view. A click's cursor snaps to an edge within 6 pixels on the row clicked. The
 readout gives both times, the interval between them, and each analog channel's value at each.
@@ -332,7 +337,8 @@ or a style on `<html>` that changes the tokens, or the system's preference. A ch
 leaves the tokens alone, such as a header marking the page scrolled, redraws nothing.
 
 Each element exposes its pieces to `::part()`. On the view: `summary`, `title`, `facts`,
-`open-button`, `viewer`, `toolbar`, `plot`, `hint`, `readout`, `steps`, `notice` and `button`.
+`open-button`, `viewer`, `toolbar`, `plot`, `hint`, `row-handle`, `readout`, `steps`, `notice` and
+`button`.
 Inside `facts`, each fact is a `fact` and also `fact-length`, `fact-channels` or `fact-size`, with
 a `fact-separator` ("; ") between two. On the inset: `inset`, `label`, `text`, `frame`, `canvas`,
 `foot`, `measure`, `key` and `notice`. On the reference: `popover`.
