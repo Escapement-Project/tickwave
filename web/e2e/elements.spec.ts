@@ -199,6 +199,59 @@ test("a reference answers Space as a button does, and its annotation describes i
   await expect(page.locator("#v")).toHaveAttribute("open", "");
 });
 
+/**
+ * Two references citing identify-swd's DPIDR read, its every read held back by `served` (the
+ * server's query); `moves` then names identify-jtag, which has no annotations. The log's reader is
+ * returned, to wait for the held reads to be answered.
+ */
+async function twoRefs(page: Page, tag: string, served: string): Promise<() => Promise<{ status: number }[]>> {
+  await page.goto(VIEW);
+  await page.evaluate(
+    ([tag, served]) => {
+      const w = window as Window & { errors?: string[] };
+      w.errors = [];
+      document.addEventListener("tickwave-error", (e) => w.errors!.push((e.target as Element).id));
+      for (const id of ["stays", "moves"]) {
+        const r = document.createElement("tickwave-ref");
+        r.id = id;
+        r.setAttribute("src", `../../fixtures/identify-swd.tickwave?tag=${tag}&${served}`);
+        r.setAttribute("annotations", "../../fixtures/identify-swd.annotations.toml");
+        r.setAttribute("annotation", "dpidr-read");
+        r.textContent = id;
+        document.body.prepend(r, " ");
+      }
+    },
+    [tag, served],
+  );
+  const log = async () => (await (await fetch(`http://127.0.0.1:8124/__log?tag=${tag}`)).json()) as { status: number }[];
+  await expect.poll(async () => (await log()).length).toBeGreaterThan(0);
+  await page.locator("#moves").evaluate((r) => {
+    r.setAttribute("src", "../../fixtures/identify-jtag.tickwave");
+    r.removeAttribute("annotations");
+  });
+  return log;
+}
+
+const refErrors = (page: Page) => page.evaluate(() => (window as Window & { errors?: string[] }).errors!);
+
+test("a reference that names another recording is not described by the last one's annotations when they arrive", async ({ page }, info) => {
+  const log = await twoRefs(page, `ref-${info.project.name}-${info.repeatEachIndex}-${Date.now()}`, "after=0&stall=2000");
+  // The held reads are answered: the reference that stayed is described.
+  await expect(page.locator("#stays")).toHaveAttribute("aria-description", /^Reading the debug port's ID register/, { timeout: 20_000 });
+  await expect.poll(async () => (await log()).every((e) => e.status !== 0), { timeout: 10_000 }).toBe(true);
+  await page.waitForTimeout(300);
+  await expect(page.locator("#moves")).not.toHaveAttribute("aria-description", /./);
+});
+
+test("a reference that names another recording reports nothing when the last one fails", async ({ page }, info) => {
+  const log = await twoRefs(page, `ref-${info.project.name}-${info.repeatEachIndex}-${Date.now()}`, "after=0&stall=2000&fail=500");
+  // The held reads fail: the reference that stayed says so.
+  await expect.poll(() => refErrors(page), { timeout: 20_000 }).toContain("stays");
+  await expect.poll(async () => (await log()).every((e) => e.status !== 0), { timeout: 10_000 }).toBe(true);
+  await page.waitForTimeout(300);
+  expect(await refErrors(page)).not.toContain("moves");
+});
+
 test("a URL that is not a .tickwave file is refused once the page has loaded, not left waiting", async ({ page }) => {
   await page.goto(`${VIEW}?open&src=fixtures/figure1.chart.json`);
   await expect(notice(page.locator("#v"))).toContainText("no loader reads it", { timeout: 10_000 });

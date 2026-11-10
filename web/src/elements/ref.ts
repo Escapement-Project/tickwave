@@ -116,13 +116,17 @@ export class TickwaveRef extends TickwaveElement {
     this.#prefetched = key;
     const recording = absolute(src);
     const sidecar = annotations ? absolute(annotations) : null;
+    // A recording or sidecar the reference has moved off says nothing about the one it cites now.
     prefetch(recording, sidecar)
       .then(() => (sidecar ? annotationsFor(sidecar, recording) : bundledFor(recording)))
       .then((list) => {
+        if (this.#prefetched !== key) return;
         this.#list = list ?? [];
         this.#describe();
       })
-      .catch((e) => this.fail(e));
+      .catch((e) => {
+        if (this.#prefetched === key) this.fail(e);
+      });
   }
 
   /** The inset is drawn, and a screen reader cannot reach into it: the annotation's label and text
