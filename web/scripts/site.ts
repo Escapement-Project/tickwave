@@ -94,17 +94,34 @@ const elements = readme.slice(from + 1, next < 0 ? undefined : next).replace(/^#
 /** Where tickwave's sources are published; a doc's source line links its file there. */
 const REPOSITORY = "https://github.com/Escapement-Project/tickwave";
 
-/** tickwave's docs, in the rail on each and in the docs' index, each with what it covers and its source. */
-const DOCS: { href: string; name: string; markdown: string; description: string; source: string }[] = [
+/** tickwave's docs in groups, as Verge's are: on the docs' index, in the rail and on the overview. */
+const GROUPS: { id: string; title: string; about: string }[] = [
+  { id: "using-it", title: "Using it", about: "Reading a recording in the viewer, and converting a capture into one, in the browser or on the command line." },
+  { id: "in-your-page", title: "In your page", about: "The elements that put a capture in a page's text, and the charts that draw measurements." },
+  { id: "the-files", title: "The files", about: "The recording format, and the sidecar of annotations that sits beside a recording." },
+];
+
+/** tickwave's docs, group by group, each with what it covers and its source. */
+const DOCS: { href: string; group: string; name: string; markdown: string; description: string; source: string }[] = [
   {
     href: "docs/viewer.html",
+    group: "using-it",
     name: "Viewer",
     markdown: readFileSync(join(site, "docs/viewer.md"), "utf8"),
     description: "Opening a recording, moving and zooming, reading its channels, cursors and annotations.",
     source: "site/docs/viewer.md",
   },
   {
+    href: "docs/converter.html",
+    group: "using-it",
+    name: "Converter",
+    markdown: readFileSync(join(site, "docs/converter.md"), "utf8"),
+    description: "Building tickwave's converter, and converting, describing, verifying and bundling recordings.",
+    source: "site/docs/converter.md",
+  },
+  {
     href: "docs/elements.html",
+    group: "in-your-page",
     name: "Elements",
     markdown: elements,
     description: "tickwave's elements: attributes, methods, events, parts and custom properties.",
@@ -112,25 +129,20 @@ const DOCS: { href: string; name: string; markdown: string; description: string;
   },
   {
     href: "docs/charts.html",
+    group: "in-your-page",
     name: "Charts",
     markdown: readFileSync(join(repo, "CHARTS.md"), "utf8"),
     description: "tickwave's charts: measurements drawn against a setting, and their data.",
     source: "CHARTS.md",
   },
-  { href: "docs/format.html", name: "Format", markdown: readFileSync(join(repo, "FORMAT.md"), "utf8"), description: "The recording format: times in whole ticks, the header, the block index and the blocks.", source: "FORMAT.md" },
+  { href: "docs/format.html", group: "the-files", name: "Format", markdown: readFileSync(join(repo, "FORMAT.md"), "utf8"), description: "The recording format: times in whole ticks, the header, the block index and the blocks.", source: "FORMAT.md" },
   {
     href: "docs/annotations.html",
+    group: "the-files",
     name: "Sidecar",
     markdown: readFileSync(join(repo, "ANNOTATIONS.md"), "utf8"),
     description: "Annotations beside a recording: the hand-written file, a generator's, their fields and measures.",
     source: "ANNOTATIONS.md",
-  },
-  {
-    href: "docs/converter.html",
-    name: "Converter",
-    markdown: readFileSync(join(site, "docs/converter.md"), "utf8"),
-    description: "Building tickwave's converter, and converting, describing, verifying and bundling recordings.",
-    source: "site/docs/converter.md",
   },
 ];
 
@@ -224,7 +236,7 @@ for (const name of ["index.html", "open.html"]) {
     .replace(/^<!-- \w+: .*? -->\n/gm, "")
     .replace("<!-- mark -->", () => plateMark)
     .replace("<!-- motion -->", () => motion)
-    .replace("<!-- docs -->", () => DOCS.map((d) => `<div><dt><a href="${d.href}">${d.name}</a></dt><dd>${esc(d.description)}</dd></div>`).join(""));
+    .replace("<!-- docs -->", () => GROUPS.map((g) => `<div><dt><a href="docs/index.html#${g.id}">${g.title}</a></dt><dd>${esc(g.about)}</dd></div>`).join(""));
   page(name, { title, description: meta("description"), kind: meta("kind"), content });
 }
 
@@ -307,17 +319,20 @@ function doc(d: (typeof DOCS)[number]): { id: string; heading: string | null; te
   const env = {};
   const tokens = md.parse(d.markdown, env);
   const body = md.renderer.render(tokens, md.options, env);
-  const docs = DOCS.map(({ href, name }) => {
-    const file = href.slice("docs/".length);
-    return href === d.href ? `<li><a href="${file}" aria-current="page">${name}</a>${contents(body)}</li>` : `<li><a href="${file}">${name}</a></li>`;
+  const docs = GROUPS.map((g) => {
+    const items = DOCS.filter((o) => o.group === g.id).map(({ href, name }) => {
+      const file = href.slice("docs/".length);
+      return href === d.href ? `<li><a href="${file}" aria-current="page">${name}</a>${contents(body)}</li>` : `<li><a href="${file}">${name}</a></li>`;
+    });
+    return `<details class="group"${g.id === d.group ? " open" : ""}><summary>${g.title}</summary><ul>\n${items.join("\n")}\n</ul></details>`;
   }).join("\n");
   const content = `<div class="doc-wrap">
 <button class="doc-bar" type="button" aria-expanded="false" aria-controls="doc-rail"><span class="label">Contents</span><span class="where">${esc(title)}</span></button>
 <div class="doc-rail" id="doc-rail">
 ${FIND}
-<div class="doc-list"><nav class="doc-nav" aria-label="tickwave's docs"><ul>
+<div class="doc-list"><nav class="doc-nav" aria-label="tickwave's docs">
 ${docs}
-</ul></nav>
+</nav>
 ${FOUND}</div></div>
 <article class="doc">${body}<p class="doc-source">From <a href="${REPOSITORY}/blob/HEAD/${d.source}">tickwave</a>, where changes to this page go.</p></article>
 </div>`;
@@ -335,7 +350,7 @@ writeFileSync(join(out, "docs/search.json"), JSON.stringify({ docs: docsIndex, s
 // one list.
 page("docs/index.html", {
   title: titled("Docs"),
-  description: "tickwave's docs: its viewer, elements, charts, recording format, sidecar and converter.",
+  description: "tickwave's docs: its viewer and converter, its elements and charts, the recording format and the sidecar.",
   kind: "docs-index-page",
   content: `<div class="docs-index">
 <div class="docs-head">
@@ -344,9 +359,15 @@ ${FIND}
 </div>
 <p class="intro">Each doc is written in <a href="${REPOSITORY}">tickwave's repository</a>.</p>
 ${FOUND}
-<div class="doc-groups"><div><ul>
-${DOCS.map(({ href, name, description }) => `<li><a href="${href.slice("docs/".length)}">${name}</a><p>${esc(description)}</p></li>`).join("\n")}
-</ul></div></div>
+<div class="doc-groups">
+${GROUPS.map(
+  (g) => `<div id="${g.id}"><h2 class="group">${g.title}</h2><ul>
+${DOCS.filter((d) => d.group === g.id)
+  .map(({ href, name, description }) => `<li><a href="${href.slice("docs/".length)}">${name}</a><p>${esc(description)}</p></li>`)
+  .join("\n")}
+</ul></div>`,
+).join("\n")}
+</div>
 </div>`,
 });
 

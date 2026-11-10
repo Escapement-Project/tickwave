@@ -189,11 +189,13 @@ test("the overview: tickwave on its plate, the ways on, a capture beside them, a
   const inset = page.locator(".product-figure tickwave-inset");
   await expect(inset.locator("figcaption")).toHaveText("Reading the debug port's ID register");
   await expect(inset.locator(".measure")).toHaveText("SWCLK 999.93 kHz mean of 45 periods");
-  // Each section's heading leads to its doc, and the docs' rows are the docs.
+  // Each section's heading leads to its doc, and the docs' rows are their groups on the docs' index.
   const heads = page.locator("section .head h2 a");
   await expect(heads).toHaveText(["Reading a capture", "Convert", "In your page", "Docs"]);
   expect(await heads.evaluateAll((as) => as.map((a) => a.getAttribute("href")))).toEqual(["docs/viewer.html", "docs/converter.html", "docs/elements.html", "docs/index.html"]);
-  await expect(page.locator(".doc-rows dt a")).toHaveText(["Viewer", "Elements", "Charts", "Format", "Sidecar", "Converter"]);
+  const groups = page.locator(".doc-rows dt a");
+  await expect(groups).toHaveText(["Using it", "In your page", "The files"]);
+  expect(await groups.evaluateAll((as) => as.map((a) => a.getAttribute("href")))).toEqual(["docs/index.html#using-it", "docs/index.html#in-your-page", "docs/index.html#the-files"]);
   // The sections' rules run the page's width, as on the project's pages.
   expect(await page.evaluate(() => document.querySelector("section")!.getBoundingClientRect().width)).toBe(await page.evaluate(() => document.documentElement.clientWidth));
 });
@@ -317,8 +319,11 @@ test("the docs sit in the project's doc frame: every doc in a rail, this one's s
   await page.goto(`${SITE}docs/format.html`);
   expect(await column()).toBe(wide);
   const rail = page.getByRole("navigation", { name: "tickwave's docs" });
-  // Every link, a subsection's included: those show while the reader is in their section.
-  await expect(rail.locator("a")).toHaveText(["Viewer", "Elements", "Charts", "Format", "Times", "Layout", "Preamble", "Header", "Index", "Blocks", "Overview", "Content id", "Sidecar", "Converter"]);
+  // The docs in their groups, this one's open; every link, a subsection's included: those show while
+  // the reader is in their section.
+  await expect(rail.locator("summary")).toHaveText(["Using it", "In your page", "The files"]);
+  expect(await rail.locator("details").evaluateAll((ds) => ds.map((d) => (d as HTMLDetailsElement).open))).toEqual([false, false, true]);
+  await expect(rail.locator("a")).toHaveText(["Viewer", "Converter", "Elements", "Charts", "Format", "Times", "Layout", "Preamble", "Header", "Index", "Blocks", "Overview", "Content id", "Sidecar"]);
   await expect(rail.getByRole("link", { name: "Format" })).toHaveAttribute("aria-current", "page");
   // The section the reader is in is marked as they go.
   // At the top of the window, past the reading line the rail marks by.
@@ -332,18 +337,18 @@ test("the docs sit in the project's doc frame: every doc in a rail, this one's s
   await expect(bar.locator(".where")).toHaveText("Blocks");
   await bar.click();
   await expect(bar).toHaveAttribute("aria-expanded", "true");
-  await expect(rail.getByRole("link", { name: "Converter" })).toBeVisible();
+  await expect(rail.getByRole("link", { name: "Sidecar" })).toBeVisible();
 });
 
 test("the docs' index lists each doc with what it covers, in the project's markup", async ({ page }) => {
   await page.goto(`${SITE}docs/index.html`);
   await expect(page.locator(".docs-index .docs-head h1")).toHaveText("tickwave's docs");
   await expect(page.locator(".docs-index .intro")).toHaveText("Each doc is written in tickwave's repository.");
-  // One list: one group with no heading.
-  await expect(page.locator(".doc-groups > div")).toHaveCount(1);
-  await expect(page.locator(".doc-groups .group")).toHaveCount(0);
+  // Three groups, each under its heading.
+  await expect(page.locator(".doc-groups > div h2.group")).toHaveText(["Using it", "In your page", "The files"]);
+  expect(await page.locator(".doc-groups > div").evaluateAll((ds) => ds.map((d) => d.id))).toEqual(["using-it", "in-your-page", "the-files"]);
   const items = page.locator(".doc-groups li");
-  await expect(items.locator("a")).toHaveText(["Viewer", "Elements", "Charts", "Format", "Sidecar", "Converter"]);
+  await expect(items.locator("a")).toHaveText(["Viewer", "Converter", "Elements", "Charts", "Format", "Sidecar"]);
   await expect(items.first().locator("p")).toHaveText("Opening a recording, moving and zooming, reading its channels, cursors and annotations.");
   await items.getByRole("link", { name: "Format" }).click();
   await expect(page).toHaveURL(/docs\/format\.html$/);
@@ -382,8 +387,8 @@ test("a doc's headings link to themselves from h2 down, and its source line name
 
 test("the search's index holds each doc's sections, as the project defines one", async ({ request }) => {
   const index = (await (await request.get(`${SITE}docs/search.json`)).json()) as { docs: [string, string][]; sections: [number, string, string, string][] };
-  expect(index.docs).toEqual([["Viewer", "viewer.html"], ["Elements", "elements.html"], ["Charts", "charts.html"], ["Format", "format.html"], ["Sidecar", "annotations.html"], ["Converter", "converter.html"]]);
-  const format = index.sections.filter(([d]) => d === 3);
+  expect(index.docs).toEqual([["Viewer", "viewer.html"], ["Converter", "converter.html"], ["Elements", "elements.html"], ["Charts", "charts.html"], ["Format", "format.html"], ["Sidecar", "annotations.html"]]);
+  const format = index.sections.filter(([d]) => d === 4);
   // The text before the first heading, under the doc's name; then each h2 and h3 in page order.
   expect(format.slice(0, 3).map(([, id, heading]) => [id, heading])).toEqual([["", "Format"], ["times", "Times"], ["layout", "Layout"]]);
   expect(format[0][3]).toMatch(/^A tickwave recording holds digital and analog channels/);
