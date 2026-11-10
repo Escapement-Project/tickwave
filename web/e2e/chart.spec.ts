@@ -721,25 +721,26 @@ test.describe("a wire-clock chart", () => {
 
   test("the popover opens above the chart without room below it, and below it with room, across the point's x", async ({ page }) => {
     const pop = page.locator("#w .tw-pop");
+    /** Where the popover sits against the chart and the point's x, read in one step: it is placed a
+     * frame or more after it shows, so a test polls this rather than reading it once. */
+    const placed = (x: number) =>
+      page.evaluate((x) => {
+        const c = document.querySelector("#w")!.getBoundingClientRect();
+        const b = document.querySelector("#w .tw-pop")!.getBoundingClientRect();
+        return { above: b.bottom <= c.top, below: b.top >= c.bottom, across: b.left <= x && b.right >= x };
+      }, x);
     let p = await verge50(page);
     await page.mouse.move(p.x, p.y);
     await expect(pop.locator("tickwave-inset")).toHaveAttribute("annotation", "dpidr-read");
-    let chart = (await page.locator("#w").boundingBox())!;
-    let box = (await pop.boundingBox())!;
-    expect(box.y + box.height).toBeLessThanOrEqual(chart.y);
-    expect(box.x).toBeLessThanOrEqual(p.x);
-    expect(box.x + box.width).toBeGreaterThanOrEqual(p.x);
+    await expect.poll(() => placed(p.x)).toEqual({ above: true, below: false, across: true });
     await page.mouse.move(p.x - 60, p.y + 60);
     await expect(pop).toBeHidden();
+    const chart = (await page.locator("#w").boundingBox())!;
     await page.evaluate((top) => scrollBy(0, top - 10), chart.y);
     p = await verge50(page);
     await page.mouse.move(p.x, p.y);
     await expect(pop).toBeVisible();
-    chart = (await page.locator("#w").boundingBox())!;
-    box = (await pop.boundingBox())!;
-    expect(box.y).toBeGreaterThanOrEqual(chart.y + chart.height);
-    expect(box.x).toBeLessThanOrEqual(p.x);
-    expect(box.x + box.width).toBeGreaterThanOrEqual(p.x);
+    await expect.poll(() => placed(p.x)).toEqual({ above: false, below: true, across: true });
   });
 
   test("on a phone, the readout floats off the chart, and a point's popover keeps clear of both", async ({ page }) => {
