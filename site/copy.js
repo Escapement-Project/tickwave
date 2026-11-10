@@ -44,7 +44,7 @@
   // A doc's code block scrolls sideways, so its button sits on a wrapper that does not. A block
   // marked text is a program's output, not something to type: Zola marks it data-lang, markdown-it
   // (tickwave's docs) a class.
-  for (const pre of document.querySelectorAll(".doc pre")) {
+  for (const pre of document.querySelectorAll("article.doc pre")) {
     if (pre.querySelector(':scope > code:is([data-lang="text"], .language-text)')) continue;
     const wrap = Object.assign(document.createElement("div"), { className: "codeblock" });
     pre.before(wrap);

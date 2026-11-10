@@ -181,7 +181,7 @@ footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; g
 /* The button's word is never part of a selection, and the button hides while the reader selects text
    in its box. */
 .copy { user-select: none; -webkit-user-select: none; }
-.selecting > .copy, .doc .codeblock.selecting .copy { visibility: hidden; opacity: 0; }
+.selecting > .copy, article.doc .codeblock.selecting .copy { visibility: hidden; opacity: 0; }
 .copy .tick { width: 11px; height: 11px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 12; animation: copy-tick .26s .06s ease-out backwards; }
 @keyframes copy-press { 0% { transform: scale(.9); } 55% { transform: scale(1.05); } 100% { transform: scale(1); } }
 @keyframes copy-tick { from { stroke-dashoffset: 12; } to { stroke-dashoffset: 0; } }
@@ -192,8 +192,8 @@ footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; g
 /* A doc's code block (copy.js wraps it): its button shows over the code's corner while the block is
    pointed at, while the button has the keyboard's focus, or once it has copied, so the code needs no
    room kept for it. Without hover, as on a touch screen, it stays. */
-.doc .codeblock { margin: 0 0 16px; }
-.doc .codeblock pre { margin: 0; }
-.doc .codeblock .copy { top: 8px; right: 10px; opacity: 0; transition: opacity .15s, color .18s, background-color .18s, border-color .18s; }
-.doc .codeblock:hover .copy, .doc .codeblock .copy:focus-visible, .doc .codeblock.copied .copy { opacity: 1; }
-@media (hover: none) { .doc .codeblock .copy { opacity: 1; } }
+article.doc .codeblock { margin: 0 0 16px; }
+article.doc .codeblock pre { margin: 0; }
+article.doc .codeblock .copy { top: 8px; right: 10px; opacity: 0; transition: opacity .15s, color .18s, background-color .18s, border-color .18s; }
+article.doc .codeblock:hover .copy, article.doc .codeblock .copy:focus-visible, article.doc .codeblock.copied .copy { opacity: 1; }
+@media (hover: none) { article.doc .codeblock .copy { opacity: 1; } }
