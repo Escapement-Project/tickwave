@@ -31,7 +31,7 @@ test.describe("the project's header", () => {
     await expect(places.getByRole("link", { name: "tickwave" })).toHaveAttribute("href", "https://escapement-project.github.io/tickwave/");
     await expect(places.getByRole("link", { name: "tickwave" })).toHaveAttribute("aria-current", "page");
     await expect(places.getByRole("link", { name: "Measurements" })).not.toHaveAttribute("aria-current", /./);
-    const own = page.getByRole("navigation", { name: "tickwave" });
+    const own = page.getByRole("navigation", { name: "tickwave", exact: true });
     await expect(own.locator("[aria-current]")).toHaveText("Format");
     await expect(own.getByRole("link", { name: "Viewer" })).toHaveAttribute("href", "../index.html");
     await expect(page.locator("footer")).toContainText("tickwave is free software under the MIT or Apache-2.0 licence.");
@@ -45,7 +45,7 @@ test.describe("the project's header", () => {
     await faces.click();
     await expect(faces).toHaveAttribute("aria-checked", "true");
     expect(await page.evaluate(() => [document.documentElement.dataset.face, getComputedStyle(document.documentElement).colorScheme, localStorage.getItem("face")])).toEqual(["night", "dark", "night"]);
-    await page.getByRole("navigation", { name: "tickwave" }).getByRole("link", { name: "Viewer" }).click();
+    await page.getByRole("navigation", { name: "tickwave", exact: true }).getByRole("link", { name: "Viewer" }).click();
     await expect(page).toHaveURL(/index\.html$/);
     await expect(page.getByRole("switch", { name: "Night face" })).toHaveAttribute("aria-checked", "true");
     expect(await page.evaluate(() => document.documentElement.dataset.face)).toBe("night");
@@ -217,6 +217,38 @@ test("the demo without scripts says what needs them, and offers its recordings",
   expect(downloads).toHaveLength(3);
   for (const href of downloads) expect((await request.get(href)).ok(), href).toBe(true);
   await context.close();
+});
+
+test("the docs sit in the project's doc frame: every doc in a rail, this one's sections, and a bar on a phone", async ({ page }) => {
+  await page.goto(`${SITE}docs/format.html`);
+  const rail = page.getByRole("navigation", { name: "tickwave's docs" });
+  // Every link, a subsection's included: those show while the reader is in their section.
+  await expect(rail.locator("a")).toHaveText(["Elements", "Charts", "Format", "Times", "Layout", "Preamble", "Header", "Index", "Blocks", "Overview", "Content id", "Sidecar", "Converter"]);
+  await expect(rail.getByRole("link", { name: "Format" })).toHaveAttribute("aria-current", "page");
+  // The section the reader is in is marked as they go.
+  // At the top of the window, past the reading line the rail marks by.
+  await page.evaluate(() => document.getElementById("blocks")!.scrollIntoView({ block: "start" }));
+  await expect(rail.locator('[aria-current="location"]')).toHaveText("Blocks");
+  await page.setViewportSize({ width: 360, height: 800 });
+  const bar = page.locator(".doc-bar");
+  await expect(bar).toBeVisible();
+  // The text reflows at the new width; the section goes back to the top.
+  await page.evaluate(() => document.getElementById("blocks")!.scrollIntoView({ block: "start" }));
+  await expect(bar.locator(".where")).toHaveText("Blocks");
+  await bar.click();
+  await expect(bar).toHaveAttribute("aria-expanded", "true");
+  await expect(rail.getByRole("link", { name: "Converter" })).toBeVisible();
+});
+
+test("a command in the docs has a Copy button, and a command's output has none", async ({ page }) => {
+  await page.goto(`${SITE}docs/converter.html`);
+  // copy.js wraps each block it gives a button in a .codeblock.
+  const commands = await page.locator(".doc pre:has(> code.language-sh)").count();
+  expect(commands).toBeGreaterThan(3);
+  expect(await page.locator(".doc pre:has(> code.language-text)").count()).toBeGreaterThan(2);
+  await expect(page.locator(".doc .codeblock > pre:has(> code.language-sh)")).toHaveCount(commands);
+  await expect(page.locator(".doc .codeblock > pre:has(> code.language-sh)").first().locator("xpath=..").getByRole("button", { name: /copy/i })).toHaveCount(1);
+  await expect(page.locator(".doc .codeblock > pre:has(> code.language-text)")).toHaveCount(0);
 });
 
 test("every internal link resolves, fragments included", async ({ request, baseURL }) => {

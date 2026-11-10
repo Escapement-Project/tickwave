@@ -44,7 +44,7 @@ await esbuild.build({
 });
 
 // The design system's files, as copied into site/, and the site's own styles.
-for (const f of ["tokens.css", "base.css", "face.js", "header.js", "favicon.ico", "site.css"]) copyFileSync(join(site, f), join(out, f));
+for (const f of ["tokens.css", "base.css", "doc.css", "face.js", "header.js", "copy.js", "doc.js", "favicon.ico", "site.css"]) copyFileSync(join(site, f), join(out, f));
 cpSync(join(site, "fonts"), join(out, "fonts"), { recursive: true });
 
 // The demo's and the viewer's examples: committed fixtures, and the SWD annotations made from one.
@@ -147,19 +147,44 @@ for (const name of ["index.html", "convert.html", "demo.html"]) {
   page(name, { title: meta("title"), description: meta("description"), kind: meta("kind"), content: text.replace(/^<!-- \w+: .*? -->\n/gm, "") });
 }
 
-/** A Markdown document as a docs page; its first heading is the page's title. */
+/** A heading's text as the rail shows it: its HTML without the link to itself. */
+const headingText = (inner: string) => inner.replace(/<a class="anchor"[^>]*>.*?<\/a>/g, "").trim();
+
+/** The doc's sections and their subsections, from its rendered h2 and h3, as the rail's .toc. */
+function contents(body: string): string {
+  const sections: { id: string; text: string; subs: { id: string; text: string }[] }[] = [];
+  for (const m of body.matchAll(/<h([23]) id="([^"]+)"[^>]*>([\s\S]*?)<\/h\1>/g)) {
+    const entry = { id: m[2], text: headingText(m[3]) };
+    if (m[1] === "2") sections.push({ ...entry, subs: [] });
+    else sections.at(-1)?.subs.push(entry);
+  }
+  if (sections.length === 0) return "";
+  const item = (e: { id: string; text: string }, inner = "") => `<li><a href="#${e.id}">${e.text}</a>${inner}</li>`;
+  return `<ul class="toc">${sections.map((s) => item(s, s.subs.length ? `<ul>${s.subs.map((sub) => item(sub)).join("")}</ul>` : "")).join("")}</ul>`;
+}
+
+/**
+ * A Markdown document as a docs page; its first heading is the page's title. The page is the
+ * project's doc frame (doc.css and doc.js, the markup in the site's design/README.md): every doc of
+ * tickwave's in a rail, this one's sections under it, and on a narrow screen a bar that names the
+ * section the reader is in.
+ */
 function doc(path: string, markdown: string, description: string): void {
   const title = /^# (.*)$/m.exec(markdown)?.[1].replace(/`/g, "") ?? path;
-  const toc = [...markdown.matchAll(/^## (.*)$/gm)].map((m) => m[1]);
   const body = md.render(markdown);
-  // A contents list after the first heading, for a document with several sections.
-  const contents =
-    toc.length > 2
-      ? `<nav class="toc" aria-label="Contents"><p>On this page: ${toc
-          .map((t) => `<a href="#${slugify(t.replace(/`/g, ""))}">${md.renderInline(t)}</a>`)
-          .join(" · ")}</p></nav>`
-      : "";
-  const content = `<article class="doc">${body.replace(/(<\/h1>\n)/, `$1${contents}\n`)}</article>`;
+  const docs = NAV.filter(([href]) => href.startsWith("docs/"))
+    .map(([href, name]) => {
+      const file = href.slice("docs/".length);
+      return href === path ? `<li><a href="${file}" aria-current="page">${name}</a>${contents(body)}</li>` : `<li><a href="${file}">${name}</a></li>`;
+    })
+    .join("\n");
+  const content = `<div class="doc-wrap">
+<button class="doc-bar" type="button" aria-expanded="false" aria-controls="doc-rail"><span class="label">Contents</span><span class="where">${esc(title)}</span></button>
+<div class="doc-rail" id="doc-rail"><div class="doc-list"><nav class="doc-nav" aria-label="tickwave's docs"><ul>
+${docs}
+</ul></nav></div></div>
+<article class="doc">${body}</article>
+</div>`;
   page(path, { title: `tickwave: ${title}`, description, kind: "doc", content });
 }
 
