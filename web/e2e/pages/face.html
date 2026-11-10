@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>A page whose face turns</title>
+<!--
+  The project's day and night switch (the site's base.css and face.js, as tickwave's site copies
+  them): a click covers the page in the new face's background, changes the face under the cover, and
+  lifts it. Without motion it turns at once. A chart and an open view, to see what tickwave does
+  meanwhile; tickwave depends on neither the cover nor its timing.
+-->
+<link rel="stylesheet" href="/dist/site/tokens.css">
+<link rel="stylesheet" href="/dist/site/base.css">
+<script type="module" src="/dist/tickwave-chart.js"></script>
+<script type="module" src="/dist/tickwave.js"></script>
+<script src="/dist/site/face.js" defer></script>
+</head>
+<body style="padding: 20px">
+<button class="switch" id="faces" type="button" role="switch" aria-checked="false" aria-label="Night face"><span class="track"><span class="thumb"><svg class="wheel" viewBox="0 0 40 40" aria-hidden="true"><g transform="translate(14 3) scale(.75)"><circle cx="8" cy="8" r="3.2" fill="currentColor"/><path d="M8 1.2v1.6M8 13.2v1.6M1.2 8h1.6M13.2 8h1.6M3.2 3.2l1.1 1.1M11.7 11.7l1.1 1.1M3.2 12.8l1.1-1.1M11.7 4.3l1.1-1.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></g><g transform="rotate(180 20 20) translate(14 3) scale(.75)"><path d="M10.8 1.8a6.3 6.3 0 1 0 3.4 10.6A5.2 5.2 0 0 1 10.8 1.8z" fill="currentColor"/></g></svg></span></span></button>
+<figure style="width: 620px"><tickwave-chart id="c" src="/fixtures/figure1.chart.json"></tickwave-chart></figure>
+<tickwave-view id="v" src="/fixtures/identify-swd.tickwave" open style="display: block; width: 620px"></tickwave-view>
+</body>
+</html>

@@ -36,8 +36,8 @@ The SVG reads the same in reader view, in a feed, or on a page without its CSS:
 
 - Data colours come from the page's tokens when the chart draws, and go into the SVG as
   presentation attributes. Each also has a style that refers to its token, so where the page's CSS
-  applies, the colours follow the face without a redraw. Where the page fades its colours as the
-  face turns, they fade with it. Reader view clears the style and keeps the attributes.
+  applies, the colours follow the face without a redraw. Reader view clears the style and keeps
+  the attributes.
 - Text, grid, axes and neutral marks are `currentColor`.
 - Fonts are presentation attributes, since reader view's sanitizer clears `style`.
 - Nothing refers to an id (`url(#id)`), since reader view sets a `<base>`. So the entry sweep cuts

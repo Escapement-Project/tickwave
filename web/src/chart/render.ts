@@ -2,7 +2,7 @@
 // when it draws; text, grid and neutral marks are currentColor; nothing refers to an id. So the
 // figure reads the same in reader view, in a feed, or without the page's CSS. Where the page's CSS
 // applies, each data colour's style refers to its token instead, so the colours follow the page's
-// face without a redraw, and fade with it where the page fades. The rings that part a point from
+// face without a redraw. The rings that part a point from
 // what it overlaps, and a hollow point's middle, take the surface colour from CSS only (`tw-pt`,
 // `tw-hollow`): without it they drop rather than keep a stale colour.
 

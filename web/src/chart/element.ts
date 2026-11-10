@@ -199,9 +199,9 @@ export class TickwaveChart extends HTMLElement {
       () => this.#closeEvidence(),
       () => this.#float(false),
       onFaceChange(() => {
-        // The data colours follow the face in CSS, and fade with the page where it fades: a redraw
-        // would replace them mid-fade. The next drawing writes the new face's into the attributes;
-        // only a token the chart lays out with redraws it now.
+        // The data colours follow the face in CSS, so nothing needs drawing again: the next drawing
+        // writes the new face's into the attributes. Only a token the chart lays out with redraws it
+        // now.
         const laidOut = this.#tokens;
         this.#colours = null;
         this.#colour();

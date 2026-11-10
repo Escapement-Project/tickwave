@@ -355,11 +355,9 @@ other role by its name. The elements follow a change of face as it happens: a `d
 or a style on `<html>` that changes the tokens, or the system's preference. A change there that
 leaves the tokens alone, such as a header marking the page scrolled, redraws nothing.
 
-A page may fade its colours as its face turns, as the project's switch does: a transition on
-`<html>`'s colour, and on the elements. A view's or an inset's parts take the transition the page
-gives the element, so their panels and text fade with the page. A plot is drawn on a canvas, which
-cannot fade: it turns on the first frame where `<html>`'s colour is past half-way. A chart's colours
-fade with the page.
+The elements take a new face in the frame after it changes. A view's and an inset's panels and
+text follow the page's CSS, and their canvas redraws in that frame. A chart's colours follow the
+page's CSS without a redraw.
 
 Each element exposes its pieces to `::part()`. On the view: `summary`, `title`, `facts`,
 `open-button`, `viewer`, `toolbar`, `plot`, `hint`, `reading` (the label at the pointer),
