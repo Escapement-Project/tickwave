@@ -284,7 +284,7 @@ test("analog through the WASM path: the head's overview, the samples, and readou
   const view = page.locator("#v");
   // At the whole capture a column is several thousand ticks: the head's 2^12 level draws the
   // analog rows, and no block is read.
-  expect((await served(tag)).map((e) => e.range)).toEqual(["bytes=0-1023", "bytes=1024-1153"]);
+  expect((await served(tag)).map((e) => e.range)).toEqual(["bytes=0-1023", "bytes=1024-1143"]);
   const drawn = await view.evaluate((v) => {
     const canvas = v.shadowRoot!.querySelector("canvas")!;
     const data = canvas.getContext("2d")!.getImageData(0, 0, canvas.width, Math.round(canvas.height / 2)).data;
@@ -306,7 +306,7 @@ test("analog through the WASM path: the head's overview, the samples, and readou
   await win(1000, 1100);
   const ranges = (await served(tag)).map((e) => e.range!);
   expect(ranges.length).toBe(3);
-  expect(ranges[2]).toMatch(/^bytes=1154-\d+$/);
+  expect(ranges[2]).toMatch(/^bytes=1144-\d+$/);
   // Cursors at ticks 1020 and 1060, on the SWCLK row.
   const box = (await plotOf(view).boundingBox())!;
   const tickAt = (x: number) => view.evaluate((v, x) => (v as unknown as { tickAt(x: number): number }).tickAt(x), x);

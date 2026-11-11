@@ -5,7 +5,7 @@ use escapement_tickwave_format::header::{
     BlockRow, OverviewLevel, OverviewRow, PREAMBLE_LEN, Preamble,
 };
 use escapement_tickwave_format::model::{
-    Analog, Channel, ChannelData, Digital, Ratio, Recording, Samples, Source,
+    Analog, Channel, ChannelData, Digital, Ratio, Recording, Samples, Source, SourceFormat,
 };
 
 /// At 2^12 ticks a bucket this has 2^18 + 1 buckets: too many for the head, so five overview
@@ -18,7 +18,7 @@ const SAMPLES: u64 = (LENGTH as u64 / PERIOD) + 1;
 
 fn recording(edges: Vec<i64>) -> Recording {
     Recording {
-        timebase: Ratio::integer(1_000_000_000),
+        timebase: Ratio::integer(1_000_000_000).unwrap(),
         length: LENGTH,
         channels: vec![
             Channel {
@@ -36,16 +36,13 @@ fn recording(edges: Vec<i64>) -> Recording {
                 data: ChannelData::Analog(Analog {
                     unit: "V".into(),
                     first: 0,
-                    period: Ratio::integer(PERIOD),
+                    period: Ratio::integer(PERIOD).unwrap(),
                     count: SAMPLES,
                     samples: Samples::F32(Box::new((0..SAMPLES).map(|i| i as f32))),
                 }),
             },
         ],
-        source: Source {
-            format: "test".into(),
-            ..Source::default()
-        },
+        source: Source::new(SourceFormat::Other("test".into())),
     }
 }
 

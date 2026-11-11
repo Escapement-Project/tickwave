@@ -220,7 +220,7 @@ fn recover_codes(
                         data: ChannelData::Analog(a),
                         ..c
                     }],
-                    source: Default::default(),
+                    source: recording.source.clone(),
                 };
                 let pass = Pass::Codes(&name);
                 let ChannelData::Analog(a) = counted(one, progress, pass).channels.remove(0).data

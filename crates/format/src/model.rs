@@ -7,23 +7,62 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::num::NonZeroU64;
 
-pub use crate::header::RateOrigin;
+use serde::{Deserialize, Serialize};
 
-/// An exact ratio of positive integers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub use crate::header::{RateOrigin, SourceFormat};
+
+/// An exact ratio of positive integers. It reads and writes as `[num, den]`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(from = "[NonZeroU64; 2]", into = "[NonZeroU64; 2]")]
 pub struct Ratio {
-    pub num: u64,
-    pub den: u64,
+    num: NonZeroU64,
+    den: NonZeroU64,
 }
 
 impl Ratio {
-    pub const fn new(num: u64, den: u64) -> Self {
-        Self { num, den }
+    pub const ONE: Ratio = Ratio::whole(NonZeroU64::MIN);
+
+    /// None when a term is zero.
+    pub const fn new(num: u64, den: u64) -> Option<Self> {
+        match (NonZeroU64::new(num), NonZeroU64::new(den)) {
+            (Some(num), Some(den)) => Some(Self { num, den }),
+            _ => None,
+        }
     }
 
-    pub const fn integer(n: u64) -> Self {
-        Self { num: n, den: 1 }
+    /// `n`/1; None for zero.
+    pub const fn integer(n: u64) -> Option<Self> {
+        Self::new(n, 1)
+    }
+
+    /// `n`/1.
+    pub const fn whole(n: NonZeroU64) -> Self {
+        Self {
+            num: n,
+            den: NonZeroU64::MIN,
+        }
+    }
+
+    pub const fn num(self) -> u64 {
+        self.num.get()
+    }
+
+    pub const fn den(self) -> u64 {
+        self.den.get()
+    }
+}
+
+impl From<[NonZeroU64; 2]> for Ratio {
+    fn from([num, den]: [NonZeroU64; 2]) -> Self {
+        Self { num, den }
+    }
+}
+
+impl From<Ratio> for [NonZeroU64; 2] {
+    fn from(r: Ratio) -> Self {
+        [r.num, r.den]
     }
 }
 
@@ -81,7 +120,7 @@ pub struct Analog {
 
 /// The tick of sample `index`: `first + floor(index × period)`.
 pub fn sample_tick(first: i64, period: Ratio, index: u64) -> i64 {
-    first + (u128::from(index) * u128::from(period.num) / u128::from(period.den)) as i64
+    first + (u128::from(index) * u128::from(period.num()) / u128::from(period.den())) as i64
 }
 
 pub enum Samples {
@@ -89,10 +128,9 @@ pub enum Samples {
     F32(Box<dyn Iterator<Item = f32> + Send>),
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Source {
-    /// `saleae-binary-0`, `saleae-binary-1`, `sigrok-sr`, `vcd`.
-    pub format: String,
+    pub format: SourceFormat,
     /// File names read, without directories.
     pub files: Vec<String>,
     pub instrument: Option<String>,
@@ -100,10 +138,28 @@ pub struct Source {
     /// The source's own time of tick 0 in seconds, where it has one (Saleae's `begin`). Scripts
     /// that work from the source map their times to ticks with it.
     pub begin_s: Option<f64>,
+    /// The trigger's time in the source's own seconds, as `begin_s` is.
+    pub trigger_s: Option<f64>,
     /// How the sample rate was come by, where the source doesn't record it.
     pub rate: Option<RateOrigin>,
     /// Anything else the source states about the capture.
     pub extra: BTreeMap<String, String>,
+}
+
+impl Source {
+    /// A source of `format` that states nothing else.
+    pub fn new(format: SourceFormat) -> Self {
+        Self {
+            format,
+            files: Vec::new(),
+            instrument: None,
+            software: None,
+            begin_s: None,
+            trigger_s: None,
+            rate: None,
+            extra: BTreeMap::new(),
+        }
+    }
 }
 
 impl fmt::Debug for Digital {

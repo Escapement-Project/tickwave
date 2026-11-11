@@ -5,7 +5,7 @@ use escapement_tickwave_format::decode::{Head, MAX_DECODED, inflate, inflate_lim
 use escapement_tickwave_format::encode::{Options, encode};
 use escapement_tickwave_format::header::{AnalogCoding, BlockRow, PREAMBLE_LEN};
 use escapement_tickwave_format::model::{
-    Analog, Channel, ChannelData, Digital, Ratio, Recording, Samples, Source,
+    Analog, Channel, ChannelData, Digital, Ratio, Recording, Samples, Source, SourceFormat,
 };
 use zstd::zstd_safe::CParameter;
 
@@ -118,7 +118,7 @@ fn a_frame_that_names_a_dictionary_is_refused() {
 fn analog(coding_bits: Option<u8>, values: Vec<f32>) -> (Recording, Options) {
     let count = values.len() as u64;
     let rec = Recording {
-        timebase: Ratio::integer(1_000_000_000),
+        timebase: Ratio::integer(1_000_000_000).unwrap(),
         length: 1_000_000_000,
         channels: vec![
             Channel {
@@ -136,16 +136,13 @@ fn analog(coding_bits: Option<u8>, values: Vec<f32>) -> (Recording, Options) {
                 data: ChannelData::Analog(Analog {
                     unit: "V".into(),
                     first: 0,
-                    period: Ratio::integer(100_000_000),
+                    period: Ratio::integer(100_000_000).unwrap(),
                     count,
                     samples: Samples::F32(Box::new(values.into_iter())),
                 }),
             },
         ],
-        source: Source {
-            format: "test".into(),
-            ..Source::default()
-        },
+        source: Source::new(SourceFormat::Other("test".into())),
     };
     let options = Options {
         analog: vec![
@@ -342,15 +339,6 @@ fn the_encoder_refuses_what_the_reader_would_and_says_which_channel() {
         "V: the first sample is at tick -3, before the recording starts"
     );
 
-    let (mut rec, options) = analog(None, vec![1.0; 10]);
-    if let ChannelData::Analog(a) = &mut rec.channels[1].data {
-        a.period = Ratio { num: 0, den: 1 };
-    }
-    assert_eq!(
-        refused(rec, &options),
-        "V: the sample period 0/1 is not a ratio of positive integers"
-    );
-
     // An empty channel still starts inside the capture.
     let (mut rec, options) = analog(None, vec![]);
     if let ChannelData::Analog(a) = &mut rec.channels[1].data {
@@ -366,10 +354,27 @@ fn the_encoder_refuses_what_the_reader_would_and_says_which_channel() {
 }
 
 #[test]
+fn a_zero_term_in_a_header_ratio_is_refused() {
+    let (rec, options) = analog(None, vec![1.0; 10]);
+    let file = encode(rec, &options).unwrap();
+    for (from, to) in [
+        (
+            r#""timebase":[1000000000,1]"#,
+            r#""timebase":[1000000000,0]"#,
+        ),
+        (r#""period":[100000000,1]"#, r#""period":[100000000,0]"#),
+    ] {
+        let bad = patched(&file, from, to);
+        let err = Head::parse_file(&bad).err().expect("refused");
+        assert!(err.to_string().contains("nonzero"), "{to}: {err}");
+    }
+}
+
+#[test]
 fn a_header_integer_past_2_pow_53_is_refused() {
     let (mut rec, options) = analog(None, vec![1.0; 10]);
     // 10^15 ticks a second: sixteen digits, as 2^53 + 1 has, so the patch keeps every offset.
-    rec.timebase = Ratio::integer(1_000_000_000_000_000);
+    rec.timebase = Ratio::integer(1_000_000_000_000_000).unwrap();
     let file = encode(rec, &options).unwrap();
     assert!(Head::parse_file(&file).is_ok());
     let bad = patched(

@@ -142,12 +142,9 @@ pub(crate) fn check_header(h: &Header) -> Result<(), DecodeError> {
     if !(0..JSON_SAFE as i64).contains(&h.length) {
         return Err(corrupt("the length is negative or past 2^53"));
     }
-    if h.timebase.contains(&0) {
-        return Err(corrupt("the timebase has a zero term"));
-    }
     // The page reads the header with JSON.parse: past 2^53 it would read another number.
     let safe = |v: u64| v < JSON_SAFE;
-    if !h.timebase.iter().all(|&t| safe(t)) {
+    if !safe(h.timebase.num()) || !safe(h.timebase.den()) {
         return Err(corrupt("the timebase has a term past 2^53"));
     }
     for c in &h.channels {
@@ -168,17 +165,14 @@ pub(crate) fn check_header(h: &Header) -> Result<(), DecodeError> {
                 coding,
                 ..
             } => {
-                if period.contains(&0) {
-                    return Err(corrupt(format!("channel {name}'s period has a zero term")));
-                }
-                if !period.iter().all(|&t| safe(t)) || !safe(*count) {
+                if !safe(period.num()) || !safe(period.den()) || !safe(*count) {
                     return Err(corrupt(format!(
                         "channel {name}'s period or count is past 2^53"
                     )));
                 }
                 // In u128: an absurd count or period must not wrap into a tick inside the capture.
-                let last = u128::from(count.saturating_sub(1)) * u128::from(period[0])
-                    / u128::from(period[1]);
+                let last = u128::from(count.saturating_sub(1)) * u128::from(period.num())
+                    / u128::from(period.den());
                 if *first < 0 || *first > h.length || *first as u128 + last > h.length as u128 {
                     return Err(corrupt(format!(
                         "channel {name}'s samples lie outside the capture"
@@ -386,10 +380,7 @@ impl Head {
             if let ChannelKind::Analog { first, period, .. } = &kind.data {
                 // A view fetches blocks by tick, so a sample in a block that does not cover its
                 // tick would never be drawn.
-                let period = Ratio {
-                    num: period[0],
-                    den: period[1],
-                };
+                let period = *period;
                 for (i, row) in rows.iter().enumerate() {
                     let (from, to) = (starts[i], starts.get(i + 1).copied().unwrap_or(total));
                     let end = rows.get(i + 1).map_or(i64::MAX, |r| r.start);
@@ -672,8 +663,7 @@ pub fn verify_limited(file: &[u8], source: Recording, max: usize) -> Result<(), 
     let head = Head::parse_file_limited(file, max)?;
     let inflate = |f: &[u8], len| inflate_limited(f, len, max);
     let h = &head.header;
-    let Ratio { num, den } = source.timebase;
-    if h.timebase != [num, den] || h.length != source.length {
+    if h.timebase != source.timebase || h.length != source.length {
         return Err(mismatch("the timebase or the length differs"));
     }
     if h.channels.len() != source.channels.len() {
@@ -717,10 +707,7 @@ pub fn verify_limited(file: &[u8], source: Recording, max: usize) -> Result<(), 
                 },
                 ChannelData::Analog(a),
             ) => {
-                if *unit != a.unit
-                    || *first != a.first
-                    || *period != [a.period.num, a.period.den]
-                    || *count != a.count
+                if *unit != a.unit || *first != a.first || *period != a.period || *count != a.count
                 {
                     return Err(mismatch(format!("channel {name}: the sampling differs")));
                 }

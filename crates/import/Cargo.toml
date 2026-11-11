@@ -11,6 +11,7 @@ escapement-tickwave-format = { version = "0.1.0", path = "../format" }
 flate2 = { version = "1.1.11", default-features = false, features = ["zlib-rs"] }
 memmap2 = "0.9.12"
 rust-ini = "0.21.3"
+serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.21"
 vcd = "0.7.0"
 zip = { version = "9.4.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }

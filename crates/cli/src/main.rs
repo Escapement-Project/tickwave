@@ -13,10 +13,11 @@ use clap::{Args, Parser, Subcommand};
 use escapement_tickwave_format::annotations::{self, Included};
 use escapement_tickwave_format::decode::{Head, verify_limited};
 use escapement_tickwave_format::header::{ChannelKind, Header};
-use escapement_tickwave_format::model::{RateOrigin, Recording};
+use escapement_tickwave_format::model::{RateOrigin, Recording, SourceFormat};
 use escapement_tickwave_import::convert::{
     self, Pass, Progress, Settings, Step, counted, select, set_units,
 };
+use escapement_tickwave_import::saleae::SampleRate;
 use escapement_tickwave_import::sigrok::Skipped;
 use escapement_tickwave_import::{saleae, sigrok, vcd};
 use indicatif::ProgressStyle;
@@ -109,8 +110,8 @@ enum Source {
         /// The sample rate, in hertz, with an optional k, M or G, such as 50M. A version 0
         /// export (from a Logic 8, Logic Pro 8 or Logic Pro 16) doesn't record its digital
         /// channels' rate: without this, it is inferred from the export's edges.
-        #[arg(long, value_parser = saleae::parse_rate, value_name = "HZ")]
-        rate: Option<u64>,
+        #[arg(long, value_name = "HZ")]
+        rate: Option<SampleRate>,
         #[command(flatten)]
         common: Common,
     },
@@ -202,7 +203,7 @@ fn main() -> Result<()> {
             if recording.source.rate == Some(RateOrigin::Inferred) {
                 info!(
                     "sample rate {} Hz, inferred from the edges",
-                    recording.timebase.num
+                    recording.timebase.num()
                 );
             }
             convert(&|| Ok(export.recording()), &output, &common, max)
@@ -263,7 +264,7 @@ fn main() -> Result<()> {
 fn saleae_headers(
     dir: &Path,
     channels: &[(String, String)],
-    rate: Option<u64>,
+    rate: Option<SampleRate>,
 ) -> Result<saleae::Headers> {
     Ok(saleae::Headers::read(
         saleae::export_files(dir)?,
@@ -367,7 +368,10 @@ fn read_head(file: &Path, max: usize) -> Result<(Vec<u8>, Head)> {
 /// A tick as seconds, to the decimal place of one tick and no further: as many digits as the
 /// timebase carries. Ticks where the arithmetic would pass u128.
 fn seconds(ticks: i64, header: &Header) -> String {
-    let [num, den] = header.timebase.map(u128::from);
+    let (num, den) = (
+        u128::from(header.timebase.num()),
+        u128::from(header.timebase.den()),
+    );
     let ticks = ticks.max(0) as u128;
     let mut places = 0;
     while 10u128.pow(places) * den < num {
@@ -420,8 +424,8 @@ fn info(file: &Path, json: bool, max: usize) -> Result<()> {
     println!(
         "{} at {}/{} ticks a second, {} channels, {}",
         seconds(h.length, h),
-        h.timebase[0],
-        h.timebase[1],
+        h.timebase.num(),
+        h.timebase.den(),
         h.channels.len(),
         h.content_id
     );
@@ -484,16 +488,22 @@ fn verify_file(file: &Path, against: &Path, max: usize) -> Result<()> {
         .iter()
         .map(|c| (c.source_name.clone(), c.name.clone()))
         .collect();
-    let source = match h.source.format.as_str() {
-        // A version 0 export's digital files don't record the rate the recording was made at.
-        format @ ("saleae-binary-0" | "saleae-binary-1") => {
-            let rate = (format == "saleae-binary-0").then_some(h.timebase[0]);
+    let saleae = |rate| -> Result<Recording> {
+        Ok(
             convert::check_saleae(saleae_headers(against, &wanted, rate)?, &Bars::default())?
-                .recording()
-        }
-        "sigrok-sr" => select(sigrok::read(against)?.recording, &wanted)?,
-        "vcd" => select(vcd::read(against)?.recording, &wanted)?,
-        other => bail!("verifying against {other} sources is not supported"),
+                .recording(),
+        )
+    };
+    let source = match &h.source.format {
+        SourceFormat::SaleaeBinary1 => saleae(None)?,
+        // A version 0 export's digital files don't record the rate the recording was made at.
+        SourceFormat::SaleaeBinary0 => saleae(Some(
+            SampleRate::of_timebase(h.timebase)
+                .context("the recording's timebase is not a whole number of hertz")?,
+        ))?,
+        SourceFormat::SigrokSr => select(sigrok::read(against)?.recording, &wanted)?,
+        SourceFormat::Vcd => select(vcd::read(against)?.recording, &wanted)?,
+        SourceFormat::Other(name) => bail!("verifying against {name} sources is not supported"),
     };
     let units: Vec<(String, String)> = h
         .channels

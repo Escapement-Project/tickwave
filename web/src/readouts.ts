@@ -4,6 +4,7 @@
 // to round. A number is shown by rounding it at a "place", a power of ten; the place is chosen
 // from the number's resolution, and the unit from the rounded number's magnitude.
 
+import type { MeasureKind } from "./annotations.ts";
 import type { Ratio } from "./source.ts";
 import { lowerBound } from "./search.ts";
 
@@ -302,15 +303,13 @@ export interface Reading {
  * A `measure` reading (ANNOTATIONS.md, "Measures") over a span's edges: `ticks` are the edges at
  * ticks in [start, end), as `Source.edges` returns them, and `level` the level before the first.
  * `rate` and `period` read the running clock; `duration` the time from the first edge to the
- * last, of either polarity, to the tick. Null when the span has too few edges to say anything;
- * undefined for a measure it does not know.
+ * last, of either polarity, to the tick. Null when the span has too few edges to say anything.
  */
-export function measureReading(what: string, level: 0 | 1, ticks: ArrayLike<number>, timebase: Ratio): Reading | null | undefined {
+export function measureReading(what: MeasureKind, level: 0 | 1, ticks: ArrayLike<number>, timebase: Ratio): Reading | null {
   if (what === "duration") {
     if (ticks.length < 2) return null;
     return { value: formatInterval(ticks[ticks.length - 1] - ticks[0], timebase), note: "first edge to last" };
   }
-  if (what !== "rate" && what !== "period") return undefined;
   const stats = periodStats(level, ticks);
   if (!stats) return { value: "\u2013", note: "no full period" };
   return { value: what === "rate" ? formatClockRate(stats, timebase) : formatClockPeriod(stats, timebase), note: clockNote(stats) };

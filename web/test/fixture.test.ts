@@ -116,3 +116,11 @@ test("a cursor reads the last sample at or before it", () => {
   assert.equal(sampleAtOrBefore(c, 3061779999), 306177);
   assert.equal(sampleAtOrBefore(c, 3061780000), null);
 });
+
+test("a fixture's measure of a kind the sidecar doesn't have is refused", () => {
+  // As JSON gives it: `what` is only as typed as the file.
+  const raw = JSON.parse('[{"id": "a", "start": 1, "end": 2, "measure": {"channel": "X", "what": "width"}}]') as RawAnnotation[];
+  const r = resolveRaw(raw, { num: 1e9, den: 1 });
+  assert.deepEqual(r.errors, ['annotation a measures "width", not rate, period or duration']);
+  assert.equal(r.list.length, 0);
+});

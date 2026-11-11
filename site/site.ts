@@ -39,8 +39,8 @@ function showFacts(facts: HTMLElement, info: RecordingInfo, name: string): void 
     ["Channels", info.channels.map((c) => (c.kind === "analog" ? `${c.name} (analog, ${c.unit})` : c.name)).join(", ")],
   ];
   if (info.bytes !== undefined) rows.push(["Size", formatBytes(info.bytes)]);
-  const source = info.source as { format?: string; files?: string[]; rate?: string; converter?: string } | undefined;
-  if (source?.format) rows.push(["From", [source.format, ...(source.files ?? [])].join(", ")]);
+  const source = info.source;
+  if (source) rows.push(["From", [source.format, ...source.files].join(", ")]);
   if (source?.rate === "inferred") rows.push(["Sample rate", "inferred from the edges"]);
   else if (source?.rate === "given") rows.push(["Sample rate", "given when it was converted"]);
   if (source?.converter) rows.push(["Converted by", source.converter]);

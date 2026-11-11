@@ -5,9 +5,14 @@
 import type { Ratio } from "./source.ts";
 import { parseTime, toTicks } from "./time.ts";
 
+/** What a measure reads from a channel's edges in a span (ANNOTATIONS.md, "Measures"). */
+export type MeasureKind = "rate" | "period" | "duration";
+
+const MEASURE_KINDS: readonly string[] = ["rate", "period", "duration"] satisfies MeasureKind[];
+
 export interface Measure {
   readonly channel: string;
-  readonly what: string;
+  readonly what: MeasureKind;
 }
 
 /** An annotation with the sidecar's fields, as a generator or a hand-written file states it. */
@@ -127,6 +132,11 @@ export function resolveRaw(raw: readonly RawAnnotation[], timebase: Ratio): Reso
     }
     if (end !== undefined && end < start) {
       errors.push(`annotation ${id} ends before it starts`);
+      return null;
+    }
+    // A fixture is JSON, so its measure is only as typed as the file.
+    if (r.measure && !MEASURE_KINDS.includes(r.measure.what)) {
+      errors.push(`annotation ${id} measures ${JSON.stringify(r.measure.what)}, not rate, period or duration`);
       return null;
     }
     return {

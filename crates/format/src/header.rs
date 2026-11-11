@@ -17,14 +17,16 @@
 //! ```
 
 use std::collections::BTreeMap;
+use std::fmt;
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+use crate::model::Ratio;
+
 pub const MAGIC: [u8; 8] = *b"\x89TKW\r\n\x1a\n";
 pub const MAJOR: u16 = 1;
-/// The newest minor version this crate reads and writes. Minor 1 adds `source.rate`; a file
-/// says the oldest minor version that holds its header, so one without it stays 1.0.
-pub const MINOR: u16 = 1;
+pub const MINOR: u16 = 0;
 pub const PREAMBLE_LEN: usize = 32;
 pub const ROW_FIXED: usize = 24;
 pub const LEVEL_BIT: u32 = 1 << 31;
@@ -75,8 +77,8 @@ impl Preamble {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Header {
-    /// Ticks a second, `[num, den]`.
-    pub timebase: [u64; 2],
+    /// Ticks a second.
+    pub timebase: Ratio,
     /// Ticks from tick 0 to the capture's end.
     pub length: i64,
     pub channels: Vec<ChannelHeader>,
@@ -85,8 +87,7 @@ pub struct Header {
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub meta: BTreeMap<String, String>,
-    /// `blake3:` and the hex digest of the decoded content (see `hash`).
-    pub content_id: String,
+    pub content_id: ContentId,
     pub blocks: u32,
     /// The overview levels in the head, as bucket widths of 2^shift ticks, finest first.
     pub overview: Vec<u8>,
@@ -125,8 +126,8 @@ pub enum ChannelKind {
     Analog {
         unit: String,
         first: i64,
-        /// Ticks from one sample to the next, `[num, den]`.
-        period: [u64; 2],
+        /// Ticks from one sample to the next.
+        period: Ratio,
         count: u64,
         coding: AnalogCoding,
     },
@@ -174,7 +175,7 @@ struct RawChannel {
     edges: Option<u64>,
     unit: Option<String>,
     first: Option<i64>,
-    period: Option<[u64; 2]>,
+    period: Option<Ratio>,
     count: Option<u64>,
     coding: Option<RawCoding>,
 }
@@ -242,9 +243,9 @@ impl TryFrom<RawChannel> for ChannelHeader {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SourceHeader {
-    pub format: String,
+    pub format: SourceFormat,
     pub files: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instrument: Option<String>,
@@ -252,6 +253,9 @@ pub struct SourceHeader {
     pub software: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub begin_s: Option<f64>,
+    /// The trigger's time in the source's own seconds, as `begin_s` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_s: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate: Option<RateOrigin>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -261,10 +265,118 @@ pub struct SourceHeader {
     pub converter: Option<String>,
 }
 
-impl Header {
-    /// The oldest minor version whose readers know every field this header holds.
-    pub fn minor(&self) -> u16 {
-        if self.source.rate.is_some() { 1 } else { 0 }
+impl SourceHeader {
+    /// A source of `format` that states nothing else.
+    pub fn new(format: SourceFormat) -> Self {
+        Self {
+            format,
+            files: Vec::new(),
+            instrument: None,
+            software: None,
+            begin_s: None,
+            trigger_s: None,
+            rate: None,
+            extra: BTreeMap::new(),
+            converter: None,
+        }
+    }
+}
+
+/// The kind of capture a recording was converted from. It reads and writes as its name.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
+pub enum SourceFormat {
+    /// `saleae-binary-0`: Saleae Logic 2's binary export, version 0.
+    SaleaeBinary0,
+    /// `saleae-binary-1`: the same, version 1.
+    SaleaeBinary1,
+    /// `sigrok-sr`: a sigrok session file.
+    SigrokSr,
+    /// `vcd`: a value change dump.
+    Vcd,
+    /// A name this version doesn't know, as a newer converter may write.
+    Other(String),
+}
+
+impl SourceFormat {
+    pub fn as_str(&self) -> &str {
+        match self {
+            SourceFormat::SaleaeBinary0 => "saleae-binary-0",
+            SourceFormat::SaleaeBinary1 => "saleae-binary-1",
+            SourceFormat::SigrokSr => "sigrok-sr",
+            SourceFormat::Vcd => "vcd",
+            SourceFormat::Other(name) => name,
+        }
+    }
+}
+
+impl From<String> for SourceFormat {
+    fn from(name: String) -> Self {
+        match name.as_str() {
+            "saleae-binary-0" => SourceFormat::SaleaeBinary0,
+            "saleae-binary-1" => SourceFormat::SaleaeBinary1,
+            "sigrok-sr" => SourceFormat::SigrokSr,
+            "vcd" => SourceFormat::Vcd,
+            _ => SourceFormat::Other(name),
+        }
+    }
+}
+
+impl From<SourceFormat> for String {
+    fn from(format: SourceFormat) -> Self {
+        match format {
+            SourceFormat::Other(name) => name,
+            known => known.as_str().to_owned(),
+        }
+    }
+}
+
+impl fmt::Display for SourceFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A recording's content id: `blake3:` and the hex BLAKE3 digest of its decoded content (see
+/// `hash`). It reads and writes in that form.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ContentId(blake3::Hash);
+
+impl ContentId {
+    pub fn new(digest: blake3::Hash) -> Self {
+        Self(digest)
+    }
+}
+
+impl FromStr for ContentId {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        s.strip_prefix("blake3:")
+            .and_then(|hex| blake3::Hash::from_hex(hex).ok())
+            .map(Self)
+            .ok_or_else(|| format!("{s:?} is not a content id: blake3: and 64 hex digits"))
+    }
+}
+
+impl TryFrom<String> for ContentId {
+    type Error = String;
+
+    fn try_from(s: String) -> Result<Self, String> {
+        s.parse()
+    }
+}
+
+impl From<ContentId> for String {
+    fn from(id: ContentId) -> Self {
+        id.to_string()
+    }
+}
+
+impl fmt::Display for ContentId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "blake3:{}", self.0.to_hex())
     }
 }
 
@@ -354,11 +466,57 @@ mod tests {
     }
 
     #[test]
+    fn a_ratio_reads_and_writes_as_two_positive_integers() {
+        let r = Ratio::new(3, 2).unwrap();
+        assert_eq!(serde_json::to_string(&r).unwrap(), "[3,2]");
+        assert_eq!(serde_json::from_str::<Ratio>("[3,2]").unwrap(), r);
+        for bad in ["[0,1]", "[1,0]", "[1]", "[1,2,3]"] {
+            assert!(serde_json::from_str::<Ratio>(bad).is_err(), "{bad}");
+        }
+        assert_eq!(Ratio::new(1, 0), None);
+    }
+
+    #[test]
+    fn a_source_format_reads_and_writes_as_its_name_and_keeps_one_it_does_not_know() {
+        for name in [
+            "saleae-binary-0",
+            "saleae-binary-1",
+            "sigrok-sr",
+            "vcd",
+            "logic-99",
+        ] {
+            let json = format!("\"{name}\"");
+            let format: SourceFormat = serde_json::from_str(&json).unwrap();
+            assert_eq!(serde_json::to_string(&format).unwrap(), json);
+        }
+        let read = |json| serde_json::from_str::<SourceFormat>(json).unwrap();
+        assert_eq!(read("\"vcd\""), SourceFormat::Vcd);
+        assert_eq!(read("\"logic-99\""), SourceFormat::Other("logic-99".into()));
+    }
+
+    #[test]
+    fn a_content_id_is_blake3_and_64_hex_digits() {
+        let id = format!("blake3:{}", "0f".repeat(32));
+        let parsed: ContentId = id.parse().unwrap();
+        assert_eq!(parsed.to_string(), id);
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), format!("\"{id}\""));
+        let hex = "0f".repeat(32);
+        for bad in [
+            "blake3:00ff".to_owned(),
+            hex.clone(),
+            format!("sha256:{hex}"),
+            format!("blake3:{}", "zz".repeat(32)),
+        ] {
+            assert!(bad.parse::<ContentId>().is_err(), "{bad}");
+        }
+    }
+
+    #[test]
     fn channels_parse_as_the_encoder_writes_them() {
         let analog = |coding| ChannelKind::Analog {
             unit: "V".into(),
             first: 2,
-            period: [3, 2],
+            period: Ratio::new(3, 2).unwrap(),
             count: 9,
             coding,
         };

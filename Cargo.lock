@@ -355,6 +355,7 @@ dependencies = [
  "indicatif",
  "memmap2",
  "rust-ini",
+ "serde",
  "thiserror",
  "vcd",
  "zip",

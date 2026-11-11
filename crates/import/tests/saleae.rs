@@ -1,8 +1,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use escapement_tickwave_format::model::{ChannelData, RateOrigin, Ratio, Samples};
-use escapement_tickwave_import::saleae::{self, Error};
+use escapement_tickwave_format::model::{ChannelData, RateOrigin, Ratio, Samples, SourceFormat};
+use escapement_tickwave_import::saleae::{self, Error, SampleRate};
+
+fn rate(hz: u64) -> SampleRate {
+    SampleRate::new(hz).unwrap()
+}
 
 const DIR: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -64,7 +68,7 @@ const EXPECT: [Expect; 3] = [
 #[test]
 fn reads_identify_swd_as_numpy_does() {
     let rec = saleae::read(Path::new(DIR), &names(), None).unwrap();
-    assert_eq!(rec.timebase, Ratio::integer(1_000_000_000));
+    assert_eq!(rec.timebase, Ratio::integer(1_000_000_000).unwrap());
     assert_eq!(rec.length, 523583100);
     assert_eq!(rec.source.begin_s, Some(0.07553184799994528));
     assert_eq!(rec.channels.len(), 3);
@@ -238,14 +242,11 @@ const EXPECT_ANALOG: [ExpectAnalog; 2] = [
 #[test]
 fn reads_analog_beside_digital_as_numpy_does() {
     let rec = saleae::read(Path::new(SWD50), &swd50_names(), None).unwrap();
-    assert_eq!(rec.timebase, Ratio::integer(1_000_000_000));
+    assert_eq!(rec.timebase, Ratio::integer(1_000_000_000).unwrap());
     // The digital channel runs to 11.03 ms; the analog cut stops at 50 us.
     assert_eq!(rec.length, 11031886);
     assert_eq!(rec.source.begin_s, Some(-1.9995944403895518e-06));
-    assert_eq!(
-        rec.source.extra.get("trigger_s").map(String::as_str),
-        Some("0")
-    );
+    assert_eq!(rec.source.trigger_s, Some(0.0));
     let mut channels = rec.channels.into_iter();
     let ChannelData::Digital(nrst) = channels.next().unwrap().data else {
         panic!("NRST is not digital")
@@ -259,7 +260,7 @@ fn reads_analog_beside_digital_as_numpy_does() {
         };
         assert_eq!(a.unit, "V");
         assert_eq!(a.first, 0, "{}", channel.name);
-        assert_eq!(a.period, Ratio::integer(1));
+        assert_eq!(a.period, Ratio::ONE);
         assert_eq!(a.count, 50_000);
         let Samples::F32(samples) = a.samples;
         let v: Vec<f32> = samples.collect();
@@ -418,10 +419,10 @@ fn rate_from(rec: &escapement_tickwave_format::model::Recording) -> Option<RateO
 fn v0_infers_its_rate_and_reads_as_v1_does() {
     let dir = v0_copy(DIR, "v0_infer");
     let v0 = saleae::read(&dir, &names(), None).unwrap();
-    assert_eq!(v0.source.format, "saleae-binary-0");
+    assert_eq!(v0.source.format, SourceFormat::SaleaeBinary0);
     assert_eq!(rate_from(&v0), Some(RateOrigin::Inferred));
     let v1 = saleae::read(Path::new(DIR), &names(), None).unwrap();
-    assert_eq!(v1.source.format, "saleae-binary-1");
+    assert_eq!(v1.source.format, SourceFormat::SaleaeBinary1);
     assert_eq!(rate_from(&v1), None);
     assert_eq!(v0.source.begin_s, v1.source.begin_s);
     assert_eq!(contents(v0), contents(v1));
@@ -430,7 +431,7 @@ fn v0_infers_its_rate_and_reads_as_v1_does() {
 #[test]
 fn v0_takes_a_given_rate() {
     let dir = v0_copy(DIR, "v0_given");
-    let v0 = saleae::read(&dir, &names(), Some(1_000_000_000)).unwrap();
+    let v0 = saleae::read(&dir, &names(), Some(rate(1_000_000_000))).unwrap();
     assert_eq!(rate_from(&v0), Some(RateOrigin::Given));
     let v1 = saleae::read(Path::new(DIR), &names(), None).unwrap();
     assert_eq!(contents(v0), contents(v1));
@@ -439,7 +440,7 @@ fn v0_takes_a_given_rate() {
 #[test]
 fn v0_refuses_a_given_rate_its_edges_are_off() {
     let dir = v0_copy(DIR, "v0_given_low");
-    let err = saleae::read(&dir, &names(), Some(500_000_000)).unwrap_err();
+    let err = saleae::read(&dir, &names(), Some(rate(500_000_000))).unwrap_err();
     assert!(matches!(err, Error::OffGrid { .. }), "{err}");
 }
 
@@ -449,7 +450,7 @@ fn v0_infers_from_every_digital_file_in_the_export() {
     let dir = v0_copy(DIR, "v0_pool");
     let names = vec![("digital_3_2".to_string(), "NC".to_string())];
     let rec = saleae::read(&dir, &names, None).unwrap();
-    assert_eq!(rec.timebase, Ratio::integer(1_000_000_000));
+    assert_eq!(rec.timebase, Ratio::integer(1_000_000_000).unwrap());
     assert_eq!(rate_from(&rec), Some(RateOrigin::Inferred));
 }
 
@@ -463,7 +464,7 @@ fn v0_inference_passes_over_files_that_are_no_channel() {
     )
     .unwrap();
     let rec = saleae::read(&dir, &names(), None).unwrap();
-    assert_eq!(rec.timebase, Ratio::integer(1_000_000_000));
+    assert_eq!(rec.timebase, Ratio::integer(1_000_000_000).unwrap());
 }
 
 #[test]
@@ -480,7 +481,11 @@ fn v0_infers_the_lowest_rate_its_edges_fit() {
     ] {
         write_v0_digital(&dir.join("digital_0.bin"), 0, 0.01, &at(ticks, rate));
         let rec = saleae::read(&dir, &names, None).unwrap();
-        assert_eq!(rec.timebase, Ratio::integer(want), "{ticks:?} at {rate}");
+        assert_eq!(
+            rec.timebase,
+            Ratio::integer(want).unwrap(),
+            "{ticks:?} at {rate}"
+        );
         let ChannelData::Digital(d) = rec.channels.into_iter().next().unwrap().data else {
             panic!("not digital")
         };
@@ -505,8 +510,8 @@ fn v0_refuses_to_infer_from_edges_no_divisor_of_1_ghz_fits() {
     let names = vec![("digital_0".to_string(), "A".to_string())];
     let err = saleae::read(&dir, &names, None).unwrap_err();
     assert!(matches!(err, Error::NoRate(_)), "{err}");
-    let rec = saleae::read(&dir, &names, Some(3_000_000)).unwrap();
-    assert_eq!(rec.timebase, Ratio::integer(3_000_000));
+    let rec = saleae::read(&dir, &names, Some(rate(3_000_000))).unwrap();
+    assert_eq!(rec.timebase, Ratio::integer(3_000_000).unwrap());
 }
 
 #[test]
@@ -515,8 +520,8 @@ fn v0_with_no_edges_needs_a_rate() {
     let names = vec![("digital_4_0".to_string(), "NRST".to_string())];
     let err = saleae::read(&dir, &names, None).unwrap_err();
     assert!(matches!(err, Error::NoRate(_)), "{err}");
-    let rec = saleae::read(&dir, &names, Some(1_000_000_000)).unwrap();
-    assert_eq!(rec.timebase, Ratio::integer(1_000_000_000));
+    let rec = saleae::read(&dir, &names, Some(rate(1_000_000_000))).unwrap();
+    assert_eq!(rec.timebase, Ratio::integer(1_000_000_000).unwrap());
 }
 
 #[test]
@@ -524,7 +529,7 @@ fn v0_analog_gives_the_digital_channels_their_rate() {
     let dir = v0_copy(SWD50, "v0_analog");
     let v0 = saleae::read(&dir, &swd50_names(), None).unwrap();
     assert_eq!(rate_from(&v0), None);
-    assert_eq!(v0.source.extra.get("trigger_s"), None);
+    assert_eq!(v0.source.trigger_s, None);
     let v1 = saleae::read(Path::new(SWD50), &swd50_names(), None).unwrap();
     assert_eq!(contents(v0), contents(v1));
 }
@@ -532,14 +537,11 @@ fn v0_analog_gives_the_digital_channels_their_rate() {
 #[test]
 fn refuses_a_given_rate_a_file_contradicts() {
     let dir = v0_copy(SWD50, "v0_contradicted");
-    let err = saleae::read(&dir, &swd50_names(), Some(500_000_000)).unwrap_err();
+    let err = saleae::read(&dir, &swd50_names(), Some(rate(500_000_000))).unwrap_err();
     assert!(
         matches!(
             err,
-            Error::RateDiffers {
-                given: 500_000_000,
-                ..
-            }
+            Error::RateDiffers { given, .. } if given.hz() == 500_000_000
         ),
         "{err}"
     );
@@ -595,7 +597,7 @@ fn parses_rates() {
         ("1G", 1_000_000_000),
         ("1.000M", 1_000_000),
     ] {
-        assert_eq!(saleae::parse_rate(s), Ok(hz), "{s:?}");
+        assert_eq!(s.parse::<SampleRate>().map(SampleRate::hz), Ok(hz), "{s:?}");
     }
     for s in [
         "",
@@ -609,7 +611,7 @@ fn parses_rates() {
         "9007199254740992",
         ".5M",
     ] {
-        assert!(saleae::parse_rate(s).is_err(), "{s:?}");
+        assert!(s.parse::<SampleRate>().is_err(), "{s:?}");
     }
 }
 
@@ -633,11 +635,11 @@ fn infers_50_mhz_for_the_notes_v0_exports() {
         let rec = saleae::read(&dir, &names, None).unwrap();
         assert_eq!(
             rec.timebase,
-            Ratio::integer(50_000_000),
+            Ratio::integer(50_000_000).unwrap(),
             "{}",
             dir.display()
         );
-        let err = saleae::read(&dir, &names, Some(25_000_000)).unwrap_err();
+        let err = saleae::read(&dir, &names, Some(rate(25_000_000))).unwrap_err();
         assert!(
             matches!(err, Error::OffGrid { .. }),
             "{}: {err}",

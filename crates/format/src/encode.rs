@@ -16,7 +16,7 @@ use rayon::prelude::*;
 use crate::codec::put_uleb;
 use crate::hash::{self, ChannelHasher};
 use crate::header::{
-    AnalogCoding, BlockRow, ChannelHeader, ChannelKind, Header, JSON_SAFE, LEVEL_BIT, MAJOR,
+    AnalogCoding, BlockRow, ChannelHeader, ChannelKind, Header, JSON_SAFE, LEVEL_BIT, MAJOR, MINOR,
     OverviewLevel, OverviewRow, PREAMBLE_LEN, Preamble, SourceHeader, code_value,
 };
 use crate::model::{ChannelData, Edges, Ratio, Recording, Samples};
@@ -24,8 +24,6 @@ use crate::overview::{self, AnalogBuilder, DigitalBuilder, Level};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EncodeError {
-    #[error("timebase {0}/{1} is not a ratio of positive integers")]
-    Timebase(u64, u64),
     #[error("{what} {value} does not fit the header, which holds integers below 2^53")]
     TooLarge { what: &'static str, value: u64 },
     #[error("{channel}: ends at tick {end}, outside the recording's 0 to {length}")]
@@ -58,8 +56,6 @@ pub enum EncodeError {
     SampleRange { channel: String, length: i64 },
     #[error("{channel}: the first sample is at tick {first}, before the recording starts")]
     StartsBeforeZero { channel: String, first: i64 },
-    #[error("{channel}: the sample period {num}/{den} is not a ratio of positive integers")]
-    Period { channel: String, num: u64, den: u64 },
     #[error("{channel}: codes of {bits} bits; a coding holds 1 to 16")]
     CodingBits { channel: String, bits: u8 },
     #[error("{channel}: sample {index}, {value}, is not exactly a code of {coding:?}")]
@@ -199,14 +195,11 @@ pub fn encode(recording: Recording, options: &Options) -> Result<Vec<u8>, Encode
         channels,
         source,
     } = recording;
-    if timebase.num == 0 || timebase.den == 0 {
-        return Err(EncodeError::Timebase(timebase.num, timebase.den));
-    }
     if options.block_bytes == 0 || options.block_bytes > 1 << 30 {
         return Err(EncodeError::BlockSize);
     }
-    check_safe("timebase numerator", timebase.num)?;
-    check_safe("timebase denominator", timebase.den)?;
+    check_safe("timebase numerator", timebase.num())?;
+    check_safe("timebase denominator", timebase.den())?;
     if length < 0 {
         return Err(EncodeError::Length(length));
     }
@@ -252,17 +245,10 @@ pub fn encode(recording: Recording, options: &Options) -> Result<Vec<u8>, Encode
                 }));
             }
             ChannelData::Analog(a) => {
-                let period = [a.period.num, a.period.den];
-                if a.period.num == 0 || a.period.den == 0 {
-                    return Err(EncodeError::Period {
-                        channel: channel.name,
-                        num: a.period.num,
-                        den: a.period.den,
-                    });
-                }
+                let period = a.period;
                 check_safe("analog sample count", a.count)?;
-                check_safe("analog period numerator", a.period.num)?;
-                check_safe("analog period denominator", a.period.den)?;
+                check_safe("analog period numerator", period.num())?;
+                check_safe("analog period denominator", period.den())?;
                 let coding = coding.unwrap_or(AnalogCoding::F32);
                 if let AnalogCoding::Codes { bits, .. } = coding
                     && !(1..=16).contains(&bits)
@@ -525,7 +511,6 @@ pub fn encode(recording: Recording, options: &Options) -> Result<Vec<u8>, Encode
         .map(|raw| compress(raw, options.level))
         .collect::<Result<Vec<_>, _>>()?;
 
-    let timebase = [timebase.num, timebase.den];
     let header = Header {
         timebase,
         length,
@@ -544,6 +529,7 @@ pub fn encode(recording: Recording, options: &Options) -> Result<Vec<u8>, Encode
             instrument: source.instrument,
             software: source.software,
             begin_s: source.begin_s,
+            trigger_s: source.trigger_s,
             rate: source.rate,
             extra: source.extra,
             converter: options.converter.clone(),
@@ -581,7 +567,7 @@ pub fn encode(recording: Recording, options: &Options) -> Result<Vec<u8>, Encode
     }
     let preamble = Preamble {
         major: MAJOR,
-        minor: header.minor(),
+        minor: MINOR,
         header_len: header_json.len() as u32,
         index_len: index_len as u32,
         head_len: head_len_u32,

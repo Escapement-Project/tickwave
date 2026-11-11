@@ -6,6 +6,9 @@
 //! edge ticks as i64, an analog channel's values as f32 bits. All little-endian; strings as a u64
 //! length and UTF-8 bytes.
 
+use crate::header::ContentId;
+use crate::model::Ratio;
+
 const BUFFER: usize = 1 << 16;
 
 pub struct ChannelHasher {
@@ -28,14 +31,14 @@ impl ChannelHasher {
         Self::from(hasher)
     }
 
-    pub fn analog(name: &str, unit: &str, first: i64, period: [u64; 2], count: u64) -> Self {
+    pub fn analog(name: &str, unit: &str, first: i64, period: Ratio, count: u64) -> Self {
         let mut hasher = blake3::Hasher::new();
         put_str(&mut hasher, name);
         put_str(&mut hasher, "analog");
         put_str(&mut hasher, unit);
         hasher.update(&first.to_le_bytes());
-        hasher.update(&period[0].to_le_bytes());
-        hasher.update(&period[1].to_le_bytes());
+        hasher.update(&period.num().to_le_bytes());
+        hasher.update(&period.den().to_le_bytes());
         hasher.update(&count.to_le_bytes());
         Self::from(hasher)
     }
@@ -69,13 +72,13 @@ impl ChannelHasher {
     }
 }
 
-pub fn content_id(timebase: [u64; 2], length: i64, channels: &[blake3::Hash]) -> String {
+pub fn content_id(timebase: Ratio, length: i64, channels: &[blake3::Hash]) -> ContentId {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(&timebase[0].to_le_bytes());
-    hasher.update(&timebase[1].to_le_bytes());
+    hasher.update(&timebase.num().to_le_bytes());
+    hasher.update(&timebase.den().to_le_bytes());
     hasher.update(&length.to_le_bytes());
     for digest in channels {
         hasher.update(digest.as_bytes());
     }
-    format!("blake3:{}", hasher.finalize().to_hex())
+    ContentId::new(hasher.finalize())
 }

@@ -3,7 +3,7 @@ mod common;
 use std::io::{Cursor, Write};
 
 use common::{Oracle, drain, testdata, verge_csv};
-use escapement_tickwave_format::model::Ratio;
+use escapement_tickwave_format::model::{Ratio, SourceFormat};
 use escapement_tickwave_import::sigrok::{self, Skipped};
 use zip::ZipArchive;
 use zip::write::{SimpleFileOptions, ZipWriter};
@@ -26,7 +26,7 @@ fn agrees_with_libsigrok() {
         let recording = import.recording;
         assert_eq!(
             recording.timebase,
-            Ratio::integer(oracle.samplerate),
+            Ratio::integer(oracle.samplerate).unwrap(),
             "{name}"
         );
         let analog_len = oracle.analog.iter().map(|(_, v)| v.len() as i64).max();
@@ -119,7 +119,7 @@ fn agrees_with_verge_csv() {
 fn verge_metadata() {
     let import = sigrok::read(&testdata("markers-1000.sr")).unwrap();
     let source = import.recording.source;
-    assert_eq!(source.format, "sigrok-sr");
+    assert_eq!(source.format, SourceFormat::SigrokSr);
     assert_eq!(source.files, ["markers-1000.sr"]);
     let extra: Vec<_> = source
         .extra
@@ -202,7 +202,10 @@ fn chunks_need_not_align() {
         ("analog-1-4-2", &b),
     ])
     .unwrap();
-    assert_eq!(import.recording.timebase, Ratio::integer(1_000_000));
+    assert_eq!(
+        import.recording.timebase,
+        Ratio::integer(1_000_000).unwrap()
+    );
     assert_eq!(import.recording.length, 6);
     let got = drain(import.recording);
     assert_eq!(
@@ -325,6 +328,7 @@ fn refuses_malformed_files() {
     );
     refused_meta(&META.replace("1 MHz", "1 mHz"), "refusing the ambiguity");
     refused_meta(&META.replace("samplerate=1 MHz\n", ""), "no samplerate");
+    refused_meta(&META.replace("1 MHz", "0 Hz"), "samplerate \"0 Hz\": zero");
     refused_meta(&META.replace("unitsize=1", "unitsize=0"), "unitsize 0");
     refused_meta(
         &META.replace("total probes=3", "total probes=9"),

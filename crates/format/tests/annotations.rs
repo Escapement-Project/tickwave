@@ -1,13 +1,14 @@
 use escapement_tickwave_format::annotations::{Included, resolve, resolve_json};
 use escapement_tickwave_format::header::{
-    AnalogCoding, ChannelHeader, ChannelKind, Header, SourceHeader,
+    AnalogCoding, ChannelHeader, ChannelKind, Header, SourceFormat, SourceHeader,
 };
+use escapement_tickwave_format::model::Ratio;
 
-const ID: &str = "blake3:00ff";
+const ID: &str = "blake3:00ff000000000000000000000000000000000000000000000000000000000000";
 
 fn header() -> Header {
     Header {
-        timebase: [1_000_000_000, 1],
+        timebase: Ratio::integer(1_000_000_000).unwrap(),
         length: 1_000_000,
         channels: vec![
             ChannelHeader {
@@ -34,16 +35,16 @@ fn header() -> Header {
                 data: ChannelKind::Analog {
                     unit: "V".into(),
                     first: 0,
-                    period: [1, 1],
+                    period: Ratio::ONE,
                     count: 1_000_000,
                     coding: AnalogCoding::F32,
                 },
             },
         ],
-        source: SourceHeader::default(),
+        source: SourceHeader::new(SourceFormat::Vcd),
         title: None,
         meta: Default::default(),
-        content_id: ID.into(),
+        content_id: ID.parse().unwrap(),
         blocks: 1,
         overview: vec![12],
         overview_blocks: vec![],
@@ -54,7 +55,7 @@ fn header() -> Header {
 const HAND: &str = r#"
 format = "tickwave-annotations/1"
 recording = "rec.tickwave"
-recording_id = "blake3:00ff"
+recording_id = "blake3:00ff000000000000000000000000000000000000000000000000000000000000"
 include = ["rec.wire_swd.jsonl"]
 
 [[annotation]]
@@ -72,7 +73,7 @@ ref = "wire_swd/misread/412000"
 label = "Misreads at 25 MHz"
 "#;
 
-const GENERATED: &str = r#"{"format": "tickwave-annotations/1", "source": "wire_swd", "version": "9f3c2e1", "recording_id": "blake3:00ff"}
+const GENERATED: &str = r#"{"format": "tickwave-annotations/1", "source": "wire_swd", "version": "9f3c2e1", "recording_id": "blake3:00ff000000000000000000000000000000000000000000000000000000000000"}
 {"id": "misread/412000", "kind": "misread", "start": 412000, "end": 412900, "channels": ["SWDIO"], "label": "parity wrong", "values": {"read_data": "24.9 MHz", "asked": "25 MHz"}}
 
 {"id": "drive/400000", "kind": "drive", "start": 400000, "end": 400369, "channels": ["SWDIO"], "paint": "target"}
@@ -126,7 +127,7 @@ fn included_files_follow_the_include_list_not_the_callers_order() {
         r#"include = ["rec.wire_swd.jsonl"]"#,
         r#"include = ["rec.b.jsonl", "rec.wire_swd.jsonl"]"#,
     );
-    let b = r#"{"format": "tickwave-annotations/1", "source": "b", "recording_id": "blake3:00ff"}
+    let b = r#"{"format": "tickwave-annotations/1", "source": "b", "recording_id": "blake3:00ff000000000000000000000000000000000000000000000000000000000000"}
 {"id": "x/1", "start": 1}
 "#;
     let given = [
@@ -169,14 +170,17 @@ fn assert_problem(found: &[String], needle: &str) {
 fn reports_every_problem() {
     let hand = HAND
         .replace(
-            "recording_id = \"blake3:00ff\"",
-            "recording_id = \"blake3:aaaa\"",
+            "recording_id = \"blake3:00ff000000000000000000000000000000000000000000000000000000000000\"",
+            "recording_id = \"blake3:aaaa000000000000000000000000000000000000000000000000000000000000\"",
         )
         .replace("id = \"first-misread\"", "id = \"read-ack-check\"")
         .replace("\"SWCLK\", \"SWDIO\"]", "\"SWCLK\", \"TCK\"]")
         .replace("end = \"317.95 us\"", "end = \"2 ms\"");
     let found = problems(&hand, GENERATED);
-    assert_problem(&found, "the recording is blake3:00ff");
+    assert_problem(
+        &found,
+        "the recording is blake3:00ff000000000000000000000000000000000000000000000000000000000000",
+    );
     assert_problem(&found, "is used twice");
     assert_problem(&found, "no channel \"TCK\"");
     assert_problem(&found, "fall outside the capture");
@@ -213,15 +217,21 @@ fn measure_knows_rate_period_and_duration_only() {
         resolve(&hand, &included(GENERATED), &header(), Some("rec.tickwave")).unwrap();
     }
     let hand = HAND.replace("what = \"rate\"", "what = \"mean\"");
-    assert_problem(&problems(&hand, GENERATED), "\"mean\" is not one of");
+    assert_problem(&problems(&hand, GENERATED), "unknown variant `mean`");
 }
 
 #[test]
 fn includes_must_match() {
     let found = resolve(HAND, &[], &header(), None).unwrap_err();
     assert_problem(&found, "included but not provided");
-    let generated = GENERATED.replace("blake3:00ff", "blake3:bbbb");
-    assert_problem(&problems(HAND, &generated), "generated for blake3:bbbb");
+    let generated = GENERATED.replace(
+        "blake3:00ff000000000000000000000000000000000000000000000000000000000000",
+        "blake3:bbbb000000000000000000000000000000000000000000000000000000000000",
+    );
+    assert_problem(
+        &problems(HAND, &generated),
+        "generated for blake3:bbbb000000000000000000000000000000000000000000000000000000000000",
+    );
 }
 
 #[test]
@@ -404,4 +414,13 @@ fn messages_point_at_what_the_author_wrote() {
     )
     .unwrap_err();
     assert!(found.iter().all(|p| !p.contains(" at line ")), "{found:#?}");
+}
+
+#[test]
+fn a_recording_id_that_is_no_content_id_is_refused() {
+    let hand = HAND.replace(
+        &format!("recording_id = \"{ID}\""),
+        "recording_id = \"blake3:00ff\"",
+    );
+    assert_problem(&problems(&hand, GENERATED), "is not a content id");
 }

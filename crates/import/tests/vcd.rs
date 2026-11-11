@@ -25,7 +25,7 @@ fn sigrok_cli_vcd_matches_sr() {
         assert!(import.skipped.is_empty(), "{name}: {:?}", import.skipped);
         assert_eq!(
             import.recording.timebase,
-            Ratio::integer(vcd_rate),
+            Ratio::integer(vcd_rate).unwrap(),
             "{name}"
         );
         assert_eq!(
@@ -88,12 +88,12 @@ fn digital(import: Import) -> Vec<(String, bool, i64, Vec<i64>)> {
 #[test]
 fn timescales() {
     for (timescale, ratio) in [
-        ("1 ns", Ratio::new(1_000_000_000, 1)),
-        ("10 ps", Ratio::new(100_000_000_000, 1)),
-        ("100 us", Ratio::new(10_000, 1)),
-        ("1 s", Ratio::new(1, 1)),
-        ("100 s", Ratio::new(1, 100)),
-        ("10fs", Ratio::new(100_000_000_000_000, 1)),
+        ("1 ns", Ratio::new(1_000_000_000, 1).unwrap()),
+        ("10 ps", Ratio::new(100_000_000_000, 1).unwrap()),
+        ("100 us", Ratio::new(10_000, 1).unwrap()),
+        ("1 s", Ratio::new(1, 1).unwrap()),
+        ("100 s", Ratio::new(1, 100).unwrap()),
+        ("10fs", Ratio::new(100_000_000_000_000, 1).unwrap()),
     ] {
         let import = read(&format!("{}#0 0! 1\"\n#5\n", header(timescale, TWO)));
         assert_eq!(import.recording.timebase, ratio, "{timescale}");
@@ -235,6 +235,8 @@ fn refuses_malformed_dumps() {
     assert!(error(&format!("{h}#0 r1.0 !\n")).contains("non-binary value"));
     assert!(error(&format!("{h}#0 $var wire 1 # c $end\n")).contains("after $enddefinitions"));
     assert!(error(&format!("{h}#0 q!\n")).contains("line"));
+    let zero = header("0 ns", TWO);
+    assert!(error(&format!("{zero}#0 0!\n")).contains("$timescale of 0"));
 }
 
 /// sigrok-cli's VCD of each of verge's exports, read here, against the `.sr` read by the sigrok

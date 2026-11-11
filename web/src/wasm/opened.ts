@@ -10,11 +10,13 @@ import {
   sampleTick,
   type AnalogOverview,
   type Channel,
+  type ContentId,
   type DigitalOverview,
   type Edges,
   type Ratio,
   type RecordingInfo,
   type Samples,
+  type SourceHeader,
 } from "../source.ts";
 import { join, type Bytes } from "./bytes.ts";
 import { FIRST_READ } from "./protocol.ts";
@@ -33,16 +35,28 @@ interface DecodedBlock {
   readonly size: number;
 }
 
-interface HeaderChannel {
+interface HeaderDigital {
   name: string;
-  kind: "digital" | "analog";
-  end?: number;
-  unit?: string;
-  first?: number;
-  period?: [number, number];
-  count?: number;
-  coding?: { type: "f32" } | { type: "codes"; bits: number; scale: number; offset: number };
+  source_name: string;
+  kind: "digital";
+  initial: boolean;
+  end: number;
+  edges: number;
 }
+
+interface HeaderAnalog {
+  name: string;
+  source_name: string;
+  kind: "analog";
+  unit: string;
+  first: number;
+  period: [number, number];
+  count: number;
+  coding: { type: "f32" } | { type: "codes"; bits: number; scale: number; offset: number };
+}
+
+/** A channel as the header states it (FORMAT.md, "Header"). */
+type HeaderChannel = HeaderDigital | HeaderAnalog;
 
 export interface Header {
   timebase: [number, number];
@@ -50,8 +64,8 @@ export interface Header {
   channels: HeaderChannel[];
   title?: string;
   meta?: Record<string, string>;
-  source?: Record<string, unknown>;
-  content_id: string;
+  source: SourceHeader;
+  content_id: ContentId;
   blocks: number;
   overview: number[];
   /** Finer levels, kept in overview blocks after the data blocks, finest first. */
@@ -225,19 +239,19 @@ export class Opened {
     const fileLength = Number(view.getBigUint64(24, true));
     const h = this.header;
     const channels: Channel[] = h.channels.map((c, i) => {
-      if (c.kind === "digital") return { kind: "digital", name: c.name, end: c.end! };
+      if (c.kind === "digital") return { kind: "digital", name: c.name, end: c.end };
       const [min, max] = this.#range(i);
-      const period = { num: c.period![0], den: c.period![1] };
+      const period = { num: c.period[0], den: c.period[1] };
       return {
         kind: "analog",
         name: c.name,
         // Past the last sample's period: an analog channel can stop well before the capture does.
-        end: Math.min(h.length, sampleTick(c.first!, period, c.count!)),
-        unit: c.unit ?? "",
-        first: c.first!,
+        end: Math.min(h.length, sampleTick(c.first, period, c.count)),
+        unit: c.unit,
+        first: c.first,
         period,
-        count: c.count!,
-        resolution: c.coding?.type === "codes" ? c.coding.scale : null,
+        count: c.count,
+        resolution: c.coding.type === "codes" ? c.coding.scale : null,
         min,
         max,
       };
@@ -249,7 +263,7 @@ export class Opened {
       channels,
       bytes: fileLength,
       contentId: h.content_id,
-      ...(h.source && { source: h.source }),
+      source: h.source,
       ...(h.meta && { meta: h.meta }),
     };
   }
@@ -378,13 +392,13 @@ export class Opened {
   async samples(channel: number, start: number, end: number, signal?: AbortSignal): Promise<Samples> {
     const c = this.header.channels[channel];
     if (c.kind !== "analog") throw new RangeError(`channel ${channel} is not analog`);
-    const period: Ratio = { num: c.period![0], den: c.period![1] };
-    const index = (tick: number) => sampleIndex(c.first!, period, c.count!, tick);
+    const period: Ratio = { num: c.period[0], den: c.period[1] };
+    const index = (tick: number) => sampleIndex(c.first, period, c.count, tick);
     const i0 = index(start);
     const i1 = Math.max(i0, index(end));
     const values = new Float32Array(i1 - i0);
     if (i1 > i0) {
-      const [b0, b1] = this.#covering(sampleTick(c.first!, period, i0), sampleTick(c.first!, period, i1 - 1) + 1);
+      const [b0, b1] = this.#covering(sampleTick(c.first, period, i0), sampleTick(c.first, period, i1 - 1) + 1);
       for (const b of await this.blocks(b0, b1, signal)) {
         const a = b.analog[channel]!;
         const lo = Math.max(i0, a.first);

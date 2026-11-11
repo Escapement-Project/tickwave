@@ -18,7 +18,9 @@ use std::io::{self, BufRead, BufReader};
 use std::path::Path;
 
 use ::vcd::{Command, IdCode, Parser, ScopeItem, Value, Var, VarType};
-use escapement_tickwave_format::model::{Channel, ChannelData, Digital, Ratio, Recording, Source};
+use escapement_tickwave_format::model::{
+    Channel, ChannelData, Digital, Ratio, Recording, Source, SourceFormat,
+};
 
 pub use crate::sigrok::{Import, Skipped};
 
@@ -46,13 +48,10 @@ pub fn read_from(reader: impl BufRead, file_name: &str) -> Result<Import, Error>
     let mut parser = Parser::new(reader);
     let header = parser.parse_header()?;
     let (quantity, unit) = header.timescale.ok_or(Error::NoTimescale)?;
-    if quantity == 0 {
-        return Err(Error::Invalid {
-            line: parser.line(),
-            message: "$timescale of 0".to_owned(),
-        });
-    }
-    let timebase = reduce(unit.divisor(), u64::from(quantity));
+    let timebase = reduce(unit.divisor(), u64::from(quantity)).ok_or_else(|| Error::Invalid {
+        line: parser.line(),
+        message: "$timescale of 0".to_owned(),
+    })?;
 
     let mut vars = Vec::new();
     let mut comments = Vec::new();
@@ -179,20 +178,22 @@ pub fn read_from(reader: impl BufRead, file_name: &str) -> Result<Import, Error>
             length,
             channels,
             source: Source {
-                format: "vcd".to_owned(),
                 files: vec![file_name.to_owned()],
-                instrument: None,
                 software: header.version,
-                begin_s: Some(start as f64 * timebase.den as f64 / timebase.num as f64),
-                rate: None,
+                begin_s: Some(start as f64 * timebase.den() as f64 / timebase.num() as f64),
                 extra,
+                ..Source::new(SourceFormat::Vcd)
             },
         },
         skipped,
     })
 }
 
-fn reduce(num: u64, den: u64) -> Ratio {
+/// `num`/`den` in lowest terms; None when a term is zero.
+fn reduce(num: u64, den: u64) -> Option<Ratio> {
+    if num == 0 || den == 0 {
+        return None;
+    }
     let (mut a, mut b) = (num, den);
     while b != 0 {
         (a, b) = (b, a % b);

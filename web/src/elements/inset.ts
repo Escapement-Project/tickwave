@@ -4,7 +4,7 @@
 // by keys, and open the recording at a note, over the span zoomed to: in a view on the page (`for`) or
 // on another page (`href`).
 
-import { covers, type Annotation } from "../annotations.ts";
+import { covers, type Annotation, type MeasureKind } from "../annotations.ts";
 import { INSET_ATTRIBUTES, parseChannels, parsePad, parseScale, parseSweep } from "../attributes.ts";
 import { escapeHtml as esc } from "../escape.ts";
 import { reducedMotion } from "../face.ts";
@@ -567,9 +567,7 @@ export class TickwaveInset extends TickwaveElement {
     try {
       const edges = await l.source.edges(ch, a.start, a.end);
       if (seq !== this.#measureSeq) return;
-      const text = measureText(a.measure.what, a.measure.channel, edges.level, edges.ticks, l.info);
-      if (text === null) this.fail(new Error(`annotation ${a.id}: cannot measure ${a.measure.what}`));
-      else this.#measure.innerHTML = text;
+      this.#measure.innerHTML = measureText(a.measure.what, a.measure.channel, edges.level, edges.ticks, l.info);
     } catch (e) {
       if (!isAbort(e)) this.fail(e);
     }
@@ -869,10 +867,9 @@ export class TickwaveInset extends TickwaveElement {
   }
 }
 
-/** The `measure` readout as HTML: empty when the span says nothing, null for an unknown measure. */
-export function measureText(what: string, channel: string, level: 0 | 1, ticks: Float64Array, info: RecordingInfo): string | null {
+/** The `measure` readout as HTML: empty when the span says nothing. */
+export function measureText(what: MeasureKind, channel: string, level: 0 | 1, ticks: Float64Array, info: RecordingInfo): string {
   const r = measureReading(what, level, ticks, info.timebase);
-  if (r === undefined) return null;
   if (r === null) return "";
   return `<span class="what">${esc(channel)}</span> ${esc(r.value)} <span class="what">${esc(r.note)}</span>`;
 }

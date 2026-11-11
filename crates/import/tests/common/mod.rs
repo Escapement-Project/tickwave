@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use escapement_tickwave_format::model::{ChannelData, Recording, Samples};
+use escapement_tickwave_format::model::{ChannelData, Ratio, Recording, Samples};
 
 pub fn testdata(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -74,7 +74,7 @@ pub fn drain(recording: Recording) -> Drained {
                 let Samples::F32(values) = a.samples;
                 let values: Vec<u32> = values.map(f32::to_bits).collect();
                 assert_eq!(values.len() as u64, a.count, "{}: count", channel.name);
-                assert_eq!((a.first, a.period.num, a.period.den), (0, 1, 1));
+                assert_eq!((a.first, a.period), (0, Ratio::ONE));
                 drained.analog.push((channel.name, values));
             }
         }

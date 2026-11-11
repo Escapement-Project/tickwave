@@ -8,7 +8,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::header::{ChannelKind, Header};
+use crate::header::{ChannelKind, ContentId, Header};
+use crate::model::Ratio;
 
 pub const FORMAT: &str = "tickwave-annotations/1";
 
@@ -47,11 +48,17 @@ impl<'de> Deserialize<'de> for Time {
 #[serde(deny_unknown_fields)]
 pub struct Measure {
     pub channel: String,
-    /// `rate`, `period` or `duration`.
-    pub what: String,
+    pub what: MeasureKind,
 }
 
-const MEASURES: [&str; 3] = ["rate", "period", "duration"];
+/// What a measure reads from a channel's edges in a span (ANNOTATIONS.md, "Measures").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MeasureKind {
+    Rate,
+    Period,
+    Duration,
+}
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -75,7 +82,7 @@ struct Entry {
 struct HandFile {
     format: String,
     recording: Option<String>,
-    recording_id: String,
+    recording_id: ContentId,
     #[serde(default)]
     include: Vec<String>,
     #[serde(default)]
@@ -90,7 +97,7 @@ struct GeneratorHead {
     // Accepted for provenance; nothing reads it.
     #[allow(dead_code)]
     version: Option<String>,
-    recording_id: String,
+    recording_id: ContentId,
 }
 
 /// One annotation, resolved: times in ticks, a `ref` followed.
@@ -126,7 +133,7 @@ pub struct Included<'a> {
 /// Converts a time to ticks, rounding to the nearest tick (halves away from zero). A text time is
 /// a decimal and a unit (`s`, `ms`, `us`, `µs`, `ns`, `ps`), with or without a space between.
 /// The arithmetic is exact: `0.1 ms` at 1 GS/s is 100,000 ticks, not 99,999.
-pub fn ticks(time: &Time, timebase: [u64; 2]) -> Result<i64, String> {
+pub fn ticks(time: &Time, timebase: Ratio) -> Result<i64, String> {
     let text = match time {
         Time::Ticks(t) => return Ok(*t),
         Time::Text(s) => s.trim(),
@@ -164,10 +171,10 @@ pub fn ticks(time: &Time, timebase: [u64; 2]) -> Result<i64, String> {
     let scale_exp = fraction.len() as u32 + unit_exp;
     let denominator = 10i128
         .checked_pow(scale_exp)
-        .and_then(|p| p.checked_mul(i128::from(timebase[1])))
+        .and_then(|p| p.checked_mul(i128::from(timebase.den())))
         .ok_or_else(too_big)?;
     let numerator = mantissa
-        .checked_mul(i128::from(timebase[0]))
+        .checked_mul(i128::from(timebase.num()))
         .ok_or_else(too_big)?;
     // Halves away from zero, on the magnitude. Checked: 2 × numerator can pass i128 where the
     // quotient would not, and a wrapped sum is a wrong tick, not an error.
@@ -515,12 +522,6 @@ fn resolve_file(
                 )),
                 Some(true) => {}
             }
-            if !MEASURES.contains(&m.what.as_str()) {
-                problems.push(format!(
-                    "{at}: measure: {:?} is not one of {MEASURES:?}",
-                    m.what
-                ));
-            }
             if a.end.is_none() {
                 problems.push(format!("{at}: measure needs a span, not a point"));
             }
@@ -538,7 +539,7 @@ fn resolve_file(
 mod tests {
     use super::*;
 
-    const GS: [u64; 2] = [1_000_000_000, 1];
+    const GS: Ratio = Ratio::whole(std::num::NonZeroU64::new(1_000_000_000).unwrap());
 
     fn text(s: &str) -> Time {
         Time::Text(s.into())
@@ -558,10 +559,19 @@ mod tests {
         assert_eq!(ticks(&text("0.49 ns"), GS), Ok(0));
         assert_eq!(ticks(&text("-0.5 ns"), GS), Ok(-1));
         // At 100 kHz a tick is 10 us: 15 us is 1.5 ticks, so 2; 14 us is 1.4, so 1.
-        assert_eq!(ticks(&text("15 us"), [100_000, 1]), Ok(2));
-        assert_eq!(ticks(&text("14 us"), [100_000, 1]), Ok(1));
+        assert_eq!(
+            ticks(&text("15 us"), Ratio::new(100_000, 1).unwrap()),
+            Ok(2)
+        );
+        assert_eq!(
+            ticks(&text("14 us"), Ratio::new(100_000, 1).unwrap()),
+            Ok(1)
+        );
         // A ratio timebase: 3 ticks a microsecond as 3,000,000/1 and as 6,000,000/2 agree.
-        assert_eq!(ticks(&text("7 us"), [6_000_000, 2]), Ok(21));
+        assert_eq!(
+            ticks(&text("7 us"), Ratio::new(6_000_000, 2).unwrap()),
+            Ok(21)
+        );
         assert_eq!(ticks(&Time::Ticks(42), GS), Ok(42));
     }
 

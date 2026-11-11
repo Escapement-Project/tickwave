@@ -18,7 +18,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use escapement_tickwave_format::model::{
-    Analog, Channel, ChannelData, Digital, Ratio, Recording, Samples, Source,
+    Analog, Channel, ChannelData, Digital, Ratio, Recording, Samples, Source, SourceFormat,
 };
 use flate2::read::DeflateDecoder;
 use ini::{Ini, ParseOption};
@@ -104,6 +104,7 @@ pub fn read_bytes(bytes: impl Into<Arc<[u8]>>, file_name: &str) -> Result<Import
     let rate = meta
         .samplerate
         .ok_or_else(|| invalid("metadata has no samplerate"))?;
+    let timebase = Ratio::integer(rate).ok_or_else(|| invalid("a samplerate of 0 Hz"))?;
     let logic_stream = match &meta.logic {
         Some(logic) => {
             let indices = stream_members(&members, &logic.capturefile)?;
@@ -222,7 +223,7 @@ pub fn read_bytes(bytes: impl Into<Arc<[u8]>>, file_name: &str) -> Result<Import
                 // srzip records no unit, and libsigrok labels every analog channel volts.
                 unit: String::new(),
                 first: 0,
-                period: Ratio::integer(1),
+                period: Ratio::ONE,
                 count,
                 samples: Samples::F32(Box::new(Values {
                     reader: StreamReader::new(&data, &Arc::new(stream)),
@@ -237,17 +238,13 @@ pub fn read_bytes(bytes: impl Into<Arc<[u8]>>, file_name: &str) -> Result<Import
 
     Ok(Import {
         recording: Recording {
-            timebase: Ratio::integer(rate),
+            timebase,
             length,
             channels,
             source: Source {
-                format: "sigrok-sr".to_owned(),
                 files: vec![file_name.to_owned()],
-                instrument: None,
-                software: None,
-                begin_s: None,
-                rate: None,
                 extra,
+                ..Source::new(SourceFormat::SigrokSr)
             },
         },
         skipped,

@@ -40,6 +40,33 @@ export interface AnalogChannel {
 
 export type Channel = DigitalChannel | AnalogChannel;
 
+/** A recording's content id: "blake3:" and the 64 hex digits of its content's digest. */
+export type ContentId = `blake3:${string}`;
+
+/** The kind of capture a recording was converted from. A newer converter may write another name. */
+export type SourceFormat = "saleae-binary-0" | "saleae-binary-1" | "sigrok-sr" | "vcd" | (string & {});
+
+/** How the converter came by the sample rate, where the source doesn't record it. */
+export type RateOrigin = "inferred" | "given";
+
+/** Where a recording came from, as its header states it (FORMAT.md, "Header"). */
+export interface SourceHeader {
+  readonly format: SourceFormat;
+  /** File names, without directories. */
+  readonly files: readonly string[];
+  readonly instrument?: string;
+  readonly software?: string;
+  /** The source's own time of tick 0, in seconds. */
+  readonly begin_s?: number;
+  /** The trigger's time, in the same seconds. */
+  readonly trigger_s?: number;
+  readonly rate?: RateOrigin;
+  /** Anything else the source states. */
+  readonly extra?: Readonly<Record<string, string>>;
+  /** The converter's name, version and arguments. */
+  readonly converter?: string;
+}
+
 export interface RecordingInfo {
   readonly title: string;
   /** Ticks a second. */
@@ -50,8 +77,8 @@ export interface RecordingInfo {
   /** The recording's download size in bytes, where the source knows it. */
   readonly bytes?: number;
   /** What a .tickwave header states: its content id, where it came from, and free metadata. */
-  readonly contentId?: string;
-  readonly source?: Readonly<Record<string, unknown>>;
+  readonly contentId?: ContentId;
+  readonly source?: SourceHeader;
   readonly meta?: Readonly<Record<string, string>>;
 }
 

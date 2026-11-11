@@ -9,6 +9,7 @@ use escapement_tickwave_format::decode::MAX_DECODED;
 use escapement_tickwave_format::model::{ChannelData, Recording};
 use escapement_tickwave_import::convert::{self, Pass, Progress, Settings, Step, select};
 use escapement_tickwave_import::input::{Input, read_all};
+use escapement_tickwave_import::saleae::SampleRate;
 use escapement_tickwave_import::{saleae, sigrok, vcd};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
@@ -251,10 +252,10 @@ struct Request {
     #[serde(default)]
     units: Vec<(String, String)>,
     codes: bool,
-    /// A Saleae export's sample rate as typed, such as `50M`: none, or blank, to take the rate
-    /// its files record or infer it.
+    /// A Saleae export's sample rate as typed, such as `50M`: none to take the rate its files
+    /// record, or to infer it.
     #[serde(default)]
-    rate: Option<String>,
+    rate: Option<SampleRate>,
 }
 
 struct Report;
@@ -310,20 +311,12 @@ pub fn convert(request: &str) -> Result<Converted, JsError> {
     };
     let converted = match r.kind {
         Kind::Saleae => {
-            let rate = r
-                .rate
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(saleae::parse_rate)
-                .transpose()
-                .map_err(|e| JsError::new(&e))?;
             let files = r
                 .files
                 .iter()
                 .map(|f| (PathBuf::from(&f.name), f.input()))
                 .collect();
-            let headers = saleae::Headers::read(files, &r.channels, rate).map_err(js)?;
+            let headers = saleae::Headers::read(files, &r.channels, r.rate).map_err(js)?;
             let export = convert::check_saleae(headers, &Report).map_err(js)?;
             convert::convert(&|| Ok(export.recording()), &settings, MAX_DECODED, &Report)
         }

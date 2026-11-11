@@ -1,4 +1,4 @@
-# The tickwave recording format, version 1.1
+# The tickwave recording format, version 1.0
 
 A tickwave recording holds digital and analog channels of one capture on one time axis, exactly as
 the instrument recorded them. A reader fetches the head first and then only the blocks a view
@@ -47,15 +47,14 @@ last checksum, so a valid empty frame after a corrupted block would hide the cor
 | --- | --- | --- |
 | 0 | 8 bytes | magic: `89 54 4b 57 0d 0a 1a 0a` (`\x89TKW\r\n\x1a\n`) |
 | 8 | u16 | major version, 1 |
-| 10 | u16 | minor version: 1 where the header has `source.rate`, otherwise 0 |
+| 10 | u16 | minor version, 0 |
 | 12 | u32 | `header_len` |
 | 16 | u32 | `index_len` |
 | 20 | u32 | `head_len` |
 | 24 | u64 | `file_len`, the whole file; a shorter file is truncated |
 
 A minor version adds header fields that older readers ignore. A major version changes the layout;
-a reader refuses a major version it does not know. Minor version 1 adds `source.rate`. A file
-states the oldest minor version that holds its header, so a file without that field is 1.0.
+a reader refuses a major version it does not know.
 
 ### Header
 
@@ -69,7 +68,7 @@ UTF-8 JSON. Every integer in it is below 2^53, so a JavaScript reader parses it 
 | `source` | object | where the recording came from |
 | `title` | string, optional | |
 | `meta` | object of strings, optional | free keys, such as `probe` or `firmware` |
-| `content_id` | string | `blake3:` and a hex digest of the content (below) |
+| `content_id` | string | `blake3:` and the 64 hex digits of the content's digest (below) |
 | `blocks` | integer | the number of blocks |
 | `overview` | array of integers | the overview levels in the head, as shifts, finest first |
 | `overview_blocks` | array, optional | the overview levels in overview blocks, finest first: `{"shift": s, "blocks": n}` each; absent when there are none |
@@ -98,9 +97,10 @@ every edge, every sample, every block's start. So do the terms of `timebase` and
 every `edges` and `count`. No term of `timebase` or `period` is zero, and `bits` lies in `1..=16`.
 A reader refuses a header that breaks any of these before it reads a block.
 
-`source` has `format` (`saleae-binary-0`, `saleae-binary-1`, `sigrok-sr`, `vcd`), `files` (names,
-no directories), and optionally `instrument`, `software`, `begin_s` (the source's own time of tick
-0, in seconds, so a script working from the source can map its times), `rate`, `extra` (anything
+`source` has `format` (`saleae-binary-0`, `saleae-binary-1`, `sigrok-sr`, `vcd`; a reader keeps
+a name it doesn't know), `files` (names, no directories), and optionally `instrument`, `software`,
+`begin_s` (the source's own time of tick 0, in seconds, so a script working from the source can
+map its times), `trigger_s` (the trigger's time in the same seconds), `rate`, `extra` (anything
 else the source states) and `converter`. `rate` is there when the source doesn't record its sample
 rate: `inferred` when the converter took the lowest rate on whose grid every edge sits, `given`
 when the rate was given to it.

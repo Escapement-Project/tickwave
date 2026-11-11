@@ -280,7 +280,7 @@ test("the sidecar resolves through the Rust core, and its problems come back", a
   assert.deepEqual([read.start, read.end], [377094557, 377140560]);
   assert.ok(list.some((a) => a.id === "swd/wait/379065159"));
   assert.throws(() => r.resolveAnnotations(hand, ["identify-swd.swd.jsonl"], [jsonl], "other.tickwave"), /names "identify-swd.tickwave", not "other.tickwave"/);
-  const stale = jsonl.replace(/blake3:[0-9a-f]+/, "blake3:00");
+  const stale = jsonl.replace(/blake3:[0-9a-f]+/, `blake3:${"00".repeat(32)}`);
   assert.throws(() => r.resolveAnnotations(hand, ["identify-swd.swd.jsonl"], [stale], "identify-swd.tickwave"), /generated for blake3:00/);
 });
 
@@ -436,7 +436,6 @@ test("duration: first edge to last, of either polarity, of the edges in [start, 
   assert.equal(cut.reading!.value, "45.003 µs");
   // One edge says nothing: SWDIO in [377104000, 377105000) holds only 377104078.
   assert.equal((await duration(1, 377104000, 377105000)).reading, null);
-  assert.equal(measureReading("width", 0, [1, 2], tb), undefined);
 });
 
 test("a crafted recording is refused with an error, and the module goes on decoding", async () => {

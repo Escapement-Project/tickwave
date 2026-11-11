@@ -2,7 +2,7 @@ use escapement_tickwave_format::decode::{BlockChannel, DecodeError, Head, Verify
 use escapement_tickwave_format::encode::{EncodeError, Options, encode};
 use escapement_tickwave_format::header::{AnalogCoding, PREAMBLE_LEN};
 use escapement_tickwave_format::model::{
-    Analog, Channel, ChannelData, Digital, Ratio, Recording, Samples, Source,
+    Analog, Channel, ChannelData, Digital, Ratio, Recording, Samples, Source, SourceFormat,
 };
 
 const EDGES_A: [i64; 9] = [1, 2, 3, 100, 101, 200, 5000, 9999, 10000];
@@ -20,7 +20,7 @@ fn value(i: u64) -> f32 {
 fn recording(edges_a: Vec<i64>, values: Vec<f32>) -> Recording {
     let count = values.len() as u64;
     Recording {
-        timebase: Ratio::integer(1_000_000_000),
+        timebase: Ratio::integer(1_000_000_000).unwrap(),
         length: LENGTH,
         channels: vec![
             Channel {
@@ -47,16 +47,13 @@ fn recording(edges_a: Vec<i64>, values: Vec<f32>) -> Recording {
                 data: ChannelData::Analog(Analog {
                     unit: "V".into(),
                     first: 0,
-                    period: Ratio::integer(10),
+                    period: Ratio::integer(10).unwrap(),
                     count,
                     samples: Samples::F32(Box::new(values.into_iter())),
                 }),
             },
         ],
-        source: Source {
-            format: "test".into(),
-            ..Source::default()
-        },
+        source: Source::new(SourceFormat::Other("test".into())),
     }
 }
 
@@ -325,7 +322,7 @@ fn codes_are_stored_in_byte_planes() {
         offset: 0.0,
     };
     let rec = Recording {
-        timebase: Ratio::integer(1_000_000_000),
+        timebase: Ratio::integer(1_000_000_000).unwrap(),
         length: 3,
         channels: vec![Channel {
             name: "V".into(),
@@ -333,14 +330,14 @@ fn codes_are_stored_in_byte_planes() {
             data: ChannelData::Analog(Analog {
                 unit: "V".into(),
                 first: 0,
-                period: Ratio::integer(1),
+                period: Ratio::integer(1).unwrap(),
                 count: 3,
                 samples: Samples::F32(Box::new(
                     [0x0102 as f32, 0x0304 as f32, 0x0506 as f32].into_iter(),
                 )),
             }),
         }],
-        source: Source::default(),
+        source: Source::new(SourceFormat::Other("test".into())),
     };
     let options = Options {
         analog: vec![Some(coding)],
@@ -375,28 +372,25 @@ fn a_newer_minor_version_is_not_bundled() {
 }
 
 #[test]
-fn a_header_with_the_rates_origin_says_format_1_1_and_one_without_stays_1_0() {
+fn the_rates_origin_and_the_trigger_survive_encoding_and_bundling() {
     use escapement_tickwave_format::bundle::bundle;
     use escapement_tickwave_format::model::RateOrigin;
     use std::collections::BTreeMap;
-    let plain = encode(recording(EDGES_A.to_vec(), values()), &Options::default()).unwrap();
-    let head = Head::parse(&plain).unwrap();
-    assert_eq!(head.preamble.minor, 0);
-    assert_eq!(head.header.source.rate, None);
-    let mut inferred = recording(EDGES_A.to_vec(), values());
-    inferred.source.rate = Some(RateOrigin::Inferred);
-    let file = encode(inferred, &Options::default()).unwrap();
+    let mut rec = recording(EDGES_A.to_vec(), values());
+    rec.source.rate = Some(RateOrigin::Inferred);
+    rec.source.trigger_s = Some(-2.5e-6);
+    let file = encode(rec, &Options::default()).unwrap();
     let head = Head::parse(&file).unwrap();
-    assert_eq!(head.preamble.minor, 1);
-    assert_eq!(head.header.source.rate, Some(RateOrigin::Inferred));
+    assert_eq!(head.preamble.minor, 0);
+    let json = std::str::from_utf8(&file[PREAMBLE_LEN..][..head.preamble.header_len as usize])
+        .unwrap()
+        .to_owned();
     assert!(
-        std::str::from_utf8(&file[PREAMBLE_LEN..][..head.preamble.header_len as usize])
-            .unwrap()
-            .contains(r#""rate":"inferred""#)
+        json.contains(r#""trigger_s":-2.5e-6,"rate":"inferred""#),
+        "{json}"
     );
-    // Bundling keeps both the field and the version that holds it.
     let bundled = bundle(&file, &head, BTreeMap::new()).unwrap();
     let again = Head::parse(&bundled).unwrap();
-    assert_eq!(again.preamble.minor, 1);
     assert_eq!(again.header.source.rate, Some(RateOrigin::Inferred));
+    assert_eq!(again.header.source.trigger_s, Some(-2.5e-6));
 }
