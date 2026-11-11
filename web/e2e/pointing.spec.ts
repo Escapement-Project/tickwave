@@ -326,7 +326,7 @@ test("with an inset focused, up and down zoom and left and right move along it; 
   expect(await reading(inset)).toEqual(REQUEST);
 });
 
-test("on a touch screen, two fingers zoom an inset, and lifting them opens nothing", async ({ browser, browserName }) => {
+test("on a touch screen, two fingers zoom an inset, the finger left down moves nothing, and lifting them opens nothing", async ({ browser, browserName }) => {
   test.skip(browserName !== "chromium", "two touch points at once need Chromium's DevTools protocol");
   const context = await browser.newContext({ hasTouch: true });
   const page = await context.newPage();
@@ -341,11 +341,22 @@ test("on a touch screen, two fingers zoom an inset, and lifting them opens nothi
       type,
       touchPoints: d === null ? [] : [{ x: x - d, y, id: 0 }, { x: x + d, y, id: 1 }],
     });
+  // Zoomed in a little first, so that the first finger down begins a drag.
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("ArrowUp");
   await fingers("touchStart", 20);
   for (let d = 30; d <= 100; d += 10) await fingers("touchMove", d);
-  await fingers("touchEnd", null);
+  // One finger lifts, and the other moves on: it points, and moves nothing. A touchEnd that lists a
+  // point lifts that one alone, after the moves Chromium holds for the next frame.
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [{ x: x + 100, y, id: 1 }] });
+  const frame = () => page.evaluate(() => new Promise((r) => requestAnimationFrame(r)));
+  await frame();
   const zoomed = await win(inset);
   expect(span(zoomed)).toBeLessThan(span(whole) / 4);
+  for (let dx = 10; dx <= 60; dx += 10) await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: x - 100 + dx, y, id: 0 }] });
+  await fingers("touchEnd", null);
+  await frame();
+  expect(await win(inset)).toEqual(zoomed);
   await page.waitForTimeout(300);
   await expect(page.locator("#v")).not.toHaveAttribute("open", "");
   await context.close();
@@ -374,4 +385,183 @@ test("with the focus on a reference, up and down zoom its popover's inset, and t
   await ref.focus();
   await expect.poll(() => pop.evaluate((p) => p.matches(":popover-open"))).toBe(true);
   await expect.poll(() => win(inset)).toEqual(whole);
+});
+
+/** The span a view shows, in ticks, once it has one. */
+const viewWindow = (view: Locator) => view.evaluate((v) => (v as HTMLElement & { window: { start: number; end: number } }).window);
+
+test("zoomed in, a drag moves an inset along its span and opens nothing; a click then opens the view over the span shown", async ({ page }) => {
+  const inset = await drawn(page, "&for");
+  const p = await at(inset, 0.6, 40);
+  await page.mouse.move(p.x, p.y);
+  await ctrlWheel(page, -400);
+  const zoomed = await win(inset);
+  const before = await reading(inset);
+  expect(before).not.toBeNull();
+  await page.mouse.down();
+  await page.mouse.move(p.x - 80, p.y, { steps: 8 });
+  // The pulse taken hold of stays under the pointer.
+  expect(await reading(inset)).toEqual(before);
+  await page.mouse.up();
+  const moved = await win(inset);
+  expect(moved.start).toBeGreaterThan(zoomed.start);
+  expect(span(moved)).toBeCloseTo(span(zoomed), 3);
+  // Off the trace, across the label above it and the line of text under it, and let go there: the
+  // drag goes on outside the trace, selects no text, and ends with the button.
+  const b = (await inset.locator("canvas").boundingBox())!;
+  await page.mouse.down();
+  await page.mouse.move(p.x - 100, b.y - 30, { steps: 8 });
+  await page.mouse.move(p.x + 150, b.y + b.height + 12, { steps: 8 });
+  await page.mouse.up();
+  const out = await win(inset);
+  expect(out.start).toBeLessThan(moved.start);
+  await page.mouse.move(p.x - 40, p.y, { steps: 4 });
+  expect(await win(inset)).toEqual(out);
+  await page.waitForTimeout(300);
+  await expect(page.locator("#v")).not.toHaveAttribute("open", "");
+  expect(await page.evaluate(() => getSelection()?.toString() ?? "")).toBe("");
+  await page.mouse.down();
+  await page.mouse.up();
+  const view = page.locator("#v");
+  await expect(view).toHaveAttribute("open", "");
+  await expect.poll(async () => (await viewWindow(view)).start, { timeout: 20_000 }).toBeCloseTo(out.start, 3);
+  expect((await viewWindow(view)).end).toBeCloseTo(out.end, 3);
+});
+
+test("zoomed in, an inset's link takes the span it shows to the Open page, which opens over it", async ({ page }) => {
+  // The page's own window gives way to the annotation's span.
+  const inset = await drawn(page, `&href=${encodeURIComponent("/dist/site/open.html?window=1 2")}`);
+  const hit = inset.locator(".hit");
+  const params = async () => new URL((await hit.getAttribute("href"))!, page.url()).searchParams;
+  expect((await params()).has("window")).toBe(false);
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("ArrowUp");
+  await page.keyboard.press("ArrowUp");
+  const shown = (z: { start: number; end: number }) => `${Math.floor(z.start)} ${Math.ceil(z.end)}`;
+  expect((await params()).get("window")).toBe(shown(await win(inset)));
+  // Shown again later, the inset shows its whole span, and its link names none.
+  await inset.evaluate((e) => ((e as HTMLElement).style.display = "none"));
+  await page.waitForTimeout(900);
+  await inset.evaluate((e) => ((e as HTMLElement).style.display = ""));
+  await expect.poll(async () => (await params()).has("window")).toBe(false);
+  await hit.focus();
+  await page.keyboard.press("ArrowUp");
+  await page.keyboard.press("ArrowUp");
+  expect((await params()).get("window")).toBe(shown(await win(inset)));
+  // A drag on the link moves the span, the pulse taken hold of staying under the pointer, and the
+  // address goes with it: the link's own drag does not take over.
+  const p = await at(inset, 0.6, 40);
+  await page.mouse.move(p.x, p.y);
+  const before = await win(inset);
+  const held = await reading(inset);
+  expect(held).not.toBeNull();
+  await page.mouse.down();
+  await page.mouse.move(p.x - 60, p.y, { steps: 6 });
+  expect(await reading(inset)).toEqual(held);
+  await page.mouse.up();
+  const z = await win(inset);
+  expect(z.start).toBeGreaterThan(before.start);
+  expect((await params()).get("window")).toBe(shown(z));
+  expect(page.url()).toContain("inset.html");
+  await hit.focus();
+  await page.keyboard.press("Enter");
+  await page.waitForURL(/open\.html/);
+  const view = page.locator("#view tickwave-view");
+  const [s, e] = shown(z).split(" ").map(Number);
+  await expect.poll(async () => (await viewWindow(view)).start, { timeout: 20_000 }).toBe(s);
+  expect((await viewWindow(view)).end).toBe(e);
+  // The page's own link keeps the span; a space written as %20 reads the same as +.
+  const url = new URL(page.url());
+  expect(url.searchParams.get("window")).toBe(shown(z));
+  expect(url.searchParams.get("annotation")).toBe("dpidr-read");
+  await page.goto(page.url().replace(/window=(\d+)\+(\d+)/, "window=$1%20$2"));
+  await expect.poll(async () => (await viewWindow(page.locator("#view tickwave-view"))).start, { timeout: 20_000 }).toBe(s);
+  // Without an annotation, the page opens over the span all the same.
+  await page.goto(page.url().replace(/&annotation=[^&]*/, ""));
+  await expect.poll(async () => (await viewWindow(page.locator("#view tickwave-view"))).start, { timeout: 20_000 }).toBe(s);
+  expect((await viewWindow(page.locator("#view tickwave-view"))).end).toBe(e);
+  expect(new URL(page.url()).searchParams.get("window")).toBe(shown(z));
+});
+
+test("not zoomed in, a press that moves is a click: the inset moves nowhere and opens the view", async ({ page }) => {
+  const inset = await drawn(page, "&for");
+  const whole = await win(inset);
+  const p = await at(inset, 0.6, 40);
+  await page.mouse.move(p.x, p.y);
+  await page.mouse.down();
+  await page.mouse.move(p.x - 80, p.y, { steps: 8 });
+  expect(await win(inset)).toEqual(whole);
+  await page.mouse.up();
+  await expect(page.locator("#v")).toHaveAttribute("open", "");
+});
+
+test("on a touch screen, one finger moves a zoomed-in inset along its span, and lifting it opens nothing", async ({ browser, browserName }) => {
+  test.skip(browserName !== "chromium", "a touch that moves needs Chromium's DevTools protocol");
+  const context = await browser.newContext({ hasTouch: true });
+  const page = await context.newPage();
+  const inset = await drawn(page, "&for");
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("ArrowUp");
+  await page.keyboard.press("ArrowUp");
+  const zoomed = await win(inset);
+  const p = await at(inset, 0.6, 40);
+  const cdp = await context.newCDPSession(page);
+  const finger = (type: "touchStart" | "touchMove" | "touchEnd", dx: number | null) =>
+    cdp.send("Input.dispatchTouchEvent", { type, touchPoints: dx === null ? [] : [{ x: p.x + dx, y: p.y, id: 0 }] });
+  await finger("touchStart", 0);
+  for (let dx = -10; dx >= -80; dx -= 10) await finger("touchMove", dx);
+  await finger("touchEnd", null);
+  const moved = await win(inset);
+  expect(moved.start).toBeGreaterThan(zoomed.start);
+  expect(span(moved)).toBeCloseTo(span(zoomed), 3);
+  await page.waitForTimeout(300);
+  await expect(page.locator("#v")).not.toHaveAttribute("open", "");
+  await context.close();
+});
+
+test("a reference opens its view over the span its popover is zoomed to; a drag there moves it and opens nothing; once the popover has closed, Enter opens at the annotation", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto("/e2e/pages/view.html?annotations=fixtures/identify-swd.annotations.toml");
+  const ref = page.locator("tickwave-ref");
+  const inset = ref.locator("tickwave-inset");
+  const pop = ref.locator(".pop");
+  const view = page.locator("#v");
+  await ref.scrollIntoViewIfNeeded();
+  const rb = (await ref.evaluate((e) => e.getClientRects()[0].toJSON())) as { x: number; y: number; height: number };
+  await page.mouse.move(rb.x + 4, rb.y + rb.height / 2);
+  await expect(inset.locator(".measure")).toHaveText(/kHz/, { timeout: 20_000 });
+  await inset.evaluate((e) => (e as HTMLElement & { settled(): Promise<void> }).settled());
+  const b = (await inset.locator("canvas").boundingBox())!;
+  const p = { x: b.x + b.width * 0.6, y: b.y + 40 };
+  await page.mouse.move(p.x, p.y, { steps: 10 });
+  await ctrlWheel(page, -400);
+  const zoomed = await win(inset);
+  await page.mouse.down();
+  await page.mouse.move(p.x - 60, p.y, { steps: 6 });
+  await page.mouse.up();
+  const moved = await win(inset);
+  expect(moved.start).toBeGreaterThan(zoomed.start);
+  await page.waitForTimeout(300);
+  expect(await pop.evaluate((x) => x.matches(":popover-open"))).toBe(true);
+  await expect(view).not.toHaveAttribute("open", "");
+  await page.mouse.down();
+  await page.mouse.up();
+  await expect.poll(async () => (await viewWindow(view)).start, { timeout: 20_000 }).toBeCloseTo(moved.start, 3);
+  expect((await viewWindow(view)).end).toBeCloseTo(moved.end, 3);
+
+  // Zoomed by the keys, then closed with Escape: Enter opens at the annotation's own span.
+  await page.goto("/e2e/pages/view.html?annotations=fixtures/identify-swd.annotations.toml");
+  await ref.scrollIntoViewIfNeeded();
+  await ref.focus();
+  await expect(inset.locator(".measure")).toHaveText(/kHz/, { timeout: 20_000 });
+  await page.keyboard.press("ArrowUp");
+  await page.keyboard.press("ArrowUp");
+  expect(await inset.evaluate((e) => (e as HTMLElement & { zoomed: object | null }).zoomed)).not.toBeNull();
+  await page.keyboard.press("Escape");
+  await expect.poll(() => pop.evaluate((x) => x.matches(":popover-open"))).toBe(false);
+  await page.keyboard.press("Enter");
+  const a = (await inset.evaluate((e) => (e as HTMLElement & { annotation: { start: number; end: number } }).annotation))!;
+  const pad = (a.end - a.start) * 0.25;
+  await expect.poll(async () => (await viewWindow(view)).start, { timeout: 20_000 }).toBeCloseTo(a.start - pad, 3);
+  expect((await viewWindow(view)).end).toBeCloseTo(a.end + pad, 3);
 });

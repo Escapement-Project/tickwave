@@ -12,7 +12,7 @@ import { lowerBound } from "../search.ts";
 import { channelIndices, Plot } from "../render/plot.ts";
 import { isAbort, named, sampleAtOrBefore, sampleTick, type RecordingInfo } from "../source.ts";
 import { parseTime, toTicks, type TimeSpec } from "../time.ts";
-import { TickwaveElement, loadRecording, zoomKey, type Loaded } from "./base.ts";
+import { DRAG_PX, TickwaveElement, loadRecording, zoomKey, type Loaded } from "./base.ts";
 
 const CSS = `
 .box { background: var(--surface, Canvas); border: 1px solid var(--hair, GrayText); border-radius: 10px; }
@@ -80,7 +80,6 @@ const HTML = `
 </div>
 <div class="notice" part="notice" role="status" hidden></div>`;
 
-const DRAG_PX = 4;
 /** Between the hover label and the row it reads, in CSS pixels. */
 const LABEL_GAP = 6;
 
@@ -542,8 +541,9 @@ export class TickwaveView extends TickwaveElement {
     this.#viewChanged();
   }
 
-  /** Opens the view at an annotation. Resolves once it is drawn. */
-  async show(id: string): Promise<void> {
+  /** Opens the view at an annotation, over `span` in ticks if one is given. Resolves once it is
+   * drawn. */
+  async show(id: string, span?: { start: number; end: number } | null): Promise<void> {
     if (!this.open) this.open = true;
     this.update();
     const loaded = this.#loaded ?? (await this.#loading);
@@ -554,9 +554,12 @@ export class TickwaveView extends TickwaveElement {
       return;
     }
     this.#plot.focus = a.id;
-    const span = a.end === null ? 0 : a.end - a.start;
-    const pad = span > 0 ? span * 0.25 : Math.max(this.#plot.minSpan * 10, loaded.info.length / 2000);
-    this.#plot.view = { start: a.start - pad, end: (a.end ?? a.start) + pad };
+    if (span) this.#plot.view = { start: span.start, end: span.end };
+    else {
+      const length = a.end === null ? 0 : a.end - a.start;
+      const pad = length > 0 ? length * 0.25 : Math.max(this.#plot.minSpan * 10, loaded.info.length / 2000);
+      this.#plot.view = { start: a.start - pad, end: (a.end ?? a.start) + pad };
+    }
     if (a.kind !== null && this.#kind.value !== a.kind) {
       this.#kind.value = a.kind;
     }
@@ -571,10 +574,11 @@ export class TickwaveView extends TickwaveElement {
     (this.open ? this.#plotBox : (this.root.querySelector(".open") as HTMLElement)).focus(options);
   }
 
-  /** Opens the view at an annotation, brings it into sight and puts the focus on its plot: what a
-   * reference, an inset or a chart's point does when the reader asks for the recording. */
-  async reveal(id: string): Promise<void> {
-    const shown = this.show(id);
+  /** Opens the view at an annotation, over `span` if one is given, brings it into sight and puts the
+   * focus on its plot: what a reference, an inset or a chart's point does when the reader asks for
+   * the recording. */
+  async reveal(id: string, span?: { start: number; end: number } | null): Promise<void> {
+    const shown = this.show(id, span);
     this.scrollIntoView({ block: "nearest", behavior: reducedMotion() ? "auto" : "smooth" });
     await shown;
     this.#plotBox.focus({ preventScroll: true });

@@ -242,8 +242,8 @@ Clicking an annotation's label shows its span.
 
 | Method or property | Does |
 |---|---|
-| `show(id)` | opens the view at an annotation. Resolves once it has drawn |
-| `reveal(id)` | `show(id)`, then brings the view into sight and puts the focus on its plot, as a reference or a chart's point does |
+| `show(id, span?)` | opens the view at an annotation, over `span` (`{start, end}` in ticks) if one is given. Resolves once it has drawn |
+| `reveal(id, span?)` | `show(id, span)`, then brings the view into sight and puts the focus on its plot, as a reference, an inset or a chart's point does |
 | `focus()` | puts the focus on the plot, or on the Open button while the view is closed |
 | `setWindow(start, end)` | shows a span: ticks, or times such as `"317.8 ms"`. Called before the head arrives, it shows the span once it has |
 | `settled()` | resolves once the view has drawn everything it shows |
@@ -292,8 +292,9 @@ and width, where it starts in the span, then its period, frequency and duty, as 
 fit on the line. On an analog channel it reads the value. Moving away puts the measure back.
 
 A reader can zoom in within the inset's span, as close as the view goes. Ctrl or Cmd with the
-wheel, a trackpad pinch, or two fingers zoom it. Zoomed in, Shift with the wheel or a sideways swipe
-moves along the span. The inset zooms out as far as its span and moves no further than its ends.
+wheel, a trackpad pinch, or two fingers zoom it. Zoomed in, a drag with the mouse or a finger moves
+along the span, as do Shift with the wheel and a sideways swipe. A drag opens nothing. The inset
+zooms out as far as its span and moves no further than its ends.
 Where one pixel holds several edges, the line says how to zoom in. Shown again after 800 ms, or at
 another annotation, the inset shows its whole span.
 
@@ -304,18 +305,20 @@ the note stepped to. Escape lights none. On a touch screen, a tap lights a note 
 
 With `for` or `href`, the inset opens the recording at a note. A click on a note, Enter on the
 note the keys lit, or a second tap on a lit note opens it there. A click elsewhere on the plot
-opens it at the inset's own annotation. `for` opens a view on the page, and wins where it names
-one. Otherwise `href` makes the inset a link to that page: tickwave's Open page, or any page that
-reads the same parameters. The inset sets `src`, `annotations` and `annotation` in the page's
-query and keeps its other parameters. A recording on the same site goes in by its path, and
+opens it at the inset's own annotation. Zoomed in, the recording opens over the span the inset
+shows. `for` opens a view on the page, and wins where it names one. Otherwise `href` makes the
+inset a link to that page: tickwave's Open page, or any page that reads the same parameters. The
+inset sets `src`, `annotations` and `annotation` in the page's query, and `window` while zoomed in:
+the span shown, in whole ticks. It keeps the page's other parameters. While the whole span shows,
+it drops any `window` the address had. A recording on the same site goes in by its path, and
 another site's whole. As a link, the inset opens a new tab on a middle click or a Ctrl or Cmd
 click, and shows its address on hover.
 
 An inset the pointer passes through, as in a chart's popover, where `pointer-events` is `none`,
 does none of this. Inside a popover the inset is no Tab stop, and the element that opened it keeps
 the focus. A reference passes its arrow keys to `arrowKey(event)`, which answers them as the
-inset's own and says whether it did. It reads the lit note from `lit`, and lights none with
-`clear()`.
+inset's own and says whether it did. It reads the lit note from `lit` and the zoomed span from
+`zoomed` only while its popover is open, and lights none with `clear()` as the popover closes.
 
 An inset takes its final height once its recording's head and sidecar are in. The line under the
 trace is held from then, where the annotation asks for a measure or a reader can point at the
@@ -323,8 +326,9 @@ inset, so neither the data's arrival nor the pointer moves anything below it. Be
 no label and no rows to size by. A page that wants nothing to move at all gives the inset its height, as
 tickwave's main page does for the figure beside its name. `settled()` and the `tickwave-ready`
 event (`{annotation, height}`) work as on the view, so a page can lay itself out around an inset's
-final height. `sweeping` says whether the sweep is playing, and `window` gives the span shown,
-`{start, end}` in ticks.
+final height. `sweeping` says whether the sweep is playing. `window` gives the span shown,
+`{start, end}` in ticks, and `zoomed` the span the reader has zoomed to, or null while the whole
+span shows, as it does again when the inset is shown after 800 ms hidden.
 
 ### `<tickwave-ref>`
 
@@ -333,8 +337,10 @@ popover beside the text, so nothing on the page moves. The pointer can move into
 read the inset, and has 300 ms to cross between the text and the popover. Moving the pointer or
 the focus away, or Escape, closes the popover. With the focus on the reference, the arrow keys
 work the inset as they do an inset with the focus. A click, Enter or Space opens its view at the
-note the pointer or the keys lit, or else at the annotation. A screen reader cannot reach into the
-drawn inset, so the annotation's label and text describe the reference itself.
+note the pointer or the keys lit, or else at the annotation, and over the span the reader zoomed the
+popover to. With the popover closed, as after Escape, the view opens at the annotation's own span.
+A screen reader cannot reach into the drawn inset, so the annotation's label and text describe the
+reference itself.
 
 | Attribute | Means |
 |---|---|

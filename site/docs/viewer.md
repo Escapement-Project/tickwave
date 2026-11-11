@@ -9,7 +9,9 @@ channel is drawn from its edges, and an analog channel from its samples. The sam
 
 Give the Open page a recording's address, and its sidecar's if it has one. The page's address then
 names both, as `?src=` and `?annotations=`, so a link to it opens the same recording. With
-`?annotation=` as well, it opens at that annotation. A recording on
+`?annotation=` as well, it opens at that annotation. `?window=` gives a span to show, as two tick
+counts, such as `?window=377113809+377124212`. A zoomed-in figure links to the span it shows this
+way. A recording on
 another site opens only if that site lets other sites read its files: its server has to answer with
 an `Access-Control-Allow-Origin` header (CORS).
 

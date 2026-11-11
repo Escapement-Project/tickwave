@@ -23,6 +23,9 @@ button:disabled { opacity: .45; cursor: default; background: transparent; }
   font-weight: var(--figures-weight, 500); font-variant-numeric: tabular-nums; font-size: 12px; }
 `;
 
+/** A press that moves this far, in CSS pixels, is a drag rather than a click. */
+export const DRAG_PX = 4;
+
 /** The key that turns the wheel into a zoom: Cmd on Apple's systems, Ctrl elsewhere. */
 export function zoomKey(): "Cmd" | "Ctrl" {
   const nav = navigator as Navigator & { userAgentData?: { platform?: string } };

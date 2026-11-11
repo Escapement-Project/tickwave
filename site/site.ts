@@ -3,7 +3,9 @@
 // header.js run the header.
 
 import { recordingInfo, registerFile, type RecordingInfo, type TickwaveView } from "tickwave";
+import { parseWindow } from "../web/src/attributes.ts";
 import { formatBytes, formatInterval } from "../web/src/readouts.ts";
+import { toTicks } from "../web/src/time.ts";
 import { DEFAULTS, type ChannelInfo, type Described, type FromWorker, type Pass, type Settings, type SourceKind, type ToWorker } from "../web/src/convert/protocol.ts";
 
 const byId = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -123,9 +125,17 @@ function openPage(): void {
   };
 
   /** Opens `src`, with its sidecar at `annotations` or a local recording's own, at annotation `at`
-   * if one is given. A converted recording shows with its Save button, which takes the focus;
-   * another, its view. */
-  async function open(src: string, annotations: string | null, name: string, link: boolean, converted?: () => void, at: string | null = null): Promise<void> {
+   * if one is given, over `span` ("1000 2000" in ticks, or times) if that is. A converted recording
+   * shows with its Save button, which takes the focus; another, its view. */
+  async function open(
+    src: string,
+    annotations: string | null,
+    name: string,
+    link: boolean,
+    converted?: () => void,
+    at: string | null = null,
+    span: string | null = null,
+  ): Promise<void> {
     reset();
     // A converted capture keeps its settings in view, to convert again with others.
     settingsForm.hidden = !converted;
@@ -152,7 +162,10 @@ function openPage(): void {
       } else say(explain(error, src, name));
     });
     here.append(view);
-    if (at) void (view as TickwaveView).show(at);
+    const spec = parseWindow(span);
+    const ticks = spec?.kind === "span" ? { start: toTicks(spec.start, info.timebase), end: toTicks(spec.end, info.timebase) } : null;
+    if (at) void (view as TickwaveView).show(at, ticks);
+    else if (span) view.setAttribute("window", span);
     saving.hidden = found.hidden = !converted;
     stage.hidden = false;
     // The recording, not the forms that asked for it: they fold away.
@@ -171,7 +184,7 @@ function openPage(): void {
         { once: true },
       );
     if (link) {
-      const q = new URLSearchParams({ src, ...(annotations && { annotations }), ...(at && { annotation: at }) });
+      const q = new URLSearchParams({ src, ...(annotations && { annotations }), ...(at && { annotation: at }), ...(span && { window: span }) });
       history.replaceState(null, "", `?${q}`);
       share.textContent = "";
       share.append("A link to this view: ", Object.assign(document.createElement("a"), { href: location.href, textContent: location.href }));
@@ -438,7 +451,7 @@ function openPage(): void {
   if (src) {
     srcField.value = src;
     sidecarField.value = q.get("annotations") ?? "";
-    void open(src, q.get("annotations"), src, true, undefined, q.get("annotation"));
+    void open(src, q.get("annotations"), src, true, undefined, q.get("annotation"), q.get("window"));
   }
 }
 

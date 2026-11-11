@@ -1,7 +1,8 @@
 // <tickwave-inset>: one annotation's span, magnified, with its label, the annotations inside it as
 // notes, and an optional `measure` readout. It sweeps in left to right once per appearance. A reader
-// can point at a note or a pulse to read it, zoom in within the span, step through the notes by keys,
-// and open the recording at a note: in a view on the page (`for`) or on another page (`href`).
+// can point at a note or a pulse to read it, zoom in and move within the span, step through the notes
+// by keys, and open the recording at a note, over the span zoomed to: in a view on the page (`for`) or
+// on another page (`href`).
 
 import { covers, type Annotation } from "../annotations.ts";
 import { INSET_ATTRIBUTES, parseChannels, parsePad, parseScale, parseSweep } from "../attributes.ts";
@@ -12,7 +13,7 @@ import { formatInterval, measureReading } from "../readouts.ts";
 import { channelIndices, Plot, ROLE_WEIGHT } from "../render/plot.ts";
 import { isAbort, named, type RecordingInfo } from "../source.ts";
 import { secondsValue, toTicks } from "../time.ts";
-import { TickwaveElement, loadRecording, zoomKey, type Loaded } from "./base.ts";
+import { DRAG_PX, TickwaveElement, loadRecording, zoomKey, type Loaded } from "./base.ts";
 import type { TickwaveView } from "./view.ts";
 
 const CSS = `
@@ -30,6 +31,7 @@ canvas { display: block; }
 .hit:focus { outline: none; }
 .hit:focus-visible { outline: var(--focus-width, 2px) solid var(--ink, CanvasText); outline-offset: 2px; }
 .hit.opens { cursor: pointer; }
+.hit.panning { cursor: grabbing; }
 .foot { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 2px 14px;
   margin: 2px 4px 0; font-size: 12px; color: var(--ink-2, GrayText); }
 .foot:empty { display: none; }
@@ -97,6 +99,11 @@ export class TickwaveInset extends TickwaveElement {
   readonly #fingers = new Map<number, number>();
   /** A pinch under way: the fingers' spread and middle as it began, and the span then. */
   #pinch: { distance: number; mid: number; view: { start: number; end: number } } | null = null;
+  /** A press on the zoomed-in plot, which moves the span once it has moved DRAG_PX, and the span as
+   * it began. */
+  #drag: { id: number; x: number; y: number; view: { start: number; end: number }; moved: boolean } | null = null;
+  /** The last press ended a drag: its click opens nothing. */
+  #dragged = false;
   #loaded: Loaded | null = null;
   #loadKey = "";
   #annotation: Annotation | null = null;
@@ -141,20 +148,32 @@ export class TickwaveInset extends TickwaveElement {
     this.#prober = new Prober(this.#plot, () => this.#loaded, (r) => this.#probed(r));
     this.#plot.onDraw = () => this.#prober.probeIfMoved();
     const hit = this.#hit;
+    // A link's own drag would carry its address away instead.
+    hit.draggable = false;
     hit.addEventListener("pointerdown", (e) => {
       this.#touch = e.pointerType === "touch";
+      this.#dragged = false;
       if (this.#touch && this.#fingerDown(e)) return;
       this.#litAtTouch = this.#lit;
       this.#point(e);
+      if (e.button === 0 && this.#zoomed) {
+        const p = this.#local(e);
+        this.#drag = { id: e.pointerId, x: p.x, y: p.y, view: { ...this.#plot.view }, moved: false };
+      }
     });
     hit.addEventListener("pointermove", (e) => {
       if (this.#fingers.has(e.pointerId)) this.#fingers.set(e.pointerId, this.#local(e).x);
       if (this.#pinch) this.#pinchMoved();
-      else this.#point(e);
+      else if (!this.#dragMoved(e)) this.#point(e);
     });
     const lifted = (e: PointerEvent) => {
       this.#fingers.delete(e.pointerId);
       if (this.#fingers.size < 2) this.#pinch = null;
+      const d = this.#drag;
+      if (d?.id !== e.pointerId) return;
+      this.#drag = null;
+      this.#dragged = d.moved && e.type === "pointerup";
+      hit.classList.remove("panning");
     };
     hit.addEventListener("pointerup", lifted);
     hit.addEventListener("pointercancel", lifted);
@@ -286,6 +305,12 @@ export class TickwaveInset extends TickwaveElement {
     return this.#plot.layout && this.#annotation ? { ...this.#plot.view } : null;
   }
 
+  /** The span the reader has zoomed to, `{start, end}` in ticks, or null while the whole span shows.
+   * The inset opens its recording there. */
+  get zoomed(): { start: number; end: number } | null {
+    return this.#zoomed && { ...this.#zoomed };
+  }
+
   /** The annotation shown, once the recording is here. */
   get annotation(): Annotation | null {
     return this.#annotation;
@@ -350,6 +375,7 @@ export class TickwaveInset extends TickwaveElement {
     }
     if (this.#sweepWanted && this.#plot.reveal !== null) this.#plot.reveal = this.#plot.layout!.plotLeft;
     this.#plot.invalidate();
+    this.#renderHit();
     this.#maybeSweep();
   }
 
@@ -402,6 +428,7 @@ export class TickwaveInset extends TickwaveElement {
     if (!w) return;
     this.#zoomed = this.#inSpan(v);
     this.#plot.view = this.#zoomed ?? w;
+    this.#renderHit();
     // The notes take their places in the new span before the pointer finds one.
     this.#plot.drawNow();
     if (this.#pointer) this.#pointAt(this.#pointer);
@@ -440,6 +467,26 @@ export class TickwaveInset extends TickwaveElement {
     }
   }
 
+  /** Moves the span with a drag under way; true if `e` belongs to one past DRAG_PX. The tick under
+   * the pointer as the drag began stays under it. */
+  #dragMoved(e: PointerEvent): boolean {
+    const d = this.#drag;
+    const l = this.#plot.layout;
+    if (!d || d.id !== e.pointerId || !l) return false;
+    const p = this.#local(e);
+    if (!d.moved && Math.hypot(p.x - d.x, p.y - d.y) < DRAG_PX) return false;
+    if (!d.moved) {
+      d.moved = true;
+      this.#hit.setPointerCapture(e.pointerId);
+      this.#hit.classList.add("panning");
+    }
+    const shift = ((p.x - d.x) * (d.view.end - d.view.start)) / (l.plotRight - l.plotLeft);
+    this.#pointerType = e.pointerType;
+    this.#pointer = p;
+    this.#zoomTo({ start: d.view.start - shift, end: d.view.end - shift });
+    return true;
+  }
+
   /** Takes a finger down; true if it begins a pinch, or comes after one, rather than pointing. */
   #fingerDown(e: PointerEvent): boolean {
     if (this.#fingers.size >= 2) return true;
@@ -447,6 +494,8 @@ export class TickwaveInset extends TickwaveElement {
     if (this.#fingers.size < 2) return false;
     const [a, b] = [...this.#fingers.values()];
     this.#pinch = { distance: Math.abs(a - b) || 1, mid: (a + b) / 2, view: { ...this.#plot.view } };
+    this.#drag = null;
+    this.#hit.classList.remove("panning");
     this.clear();
     return true;
   }
@@ -541,9 +590,9 @@ export class TickwaveInset extends TickwaveElement {
   }
 
   /**
-   * `href` with the recording, its sidecar and the annotation `id` as its parameters, the others it
-   * has kept. A recording on the same site goes in by its path, relative where it lies under that
-   * page's folder; another site's whole.
+   * `href` with the recording, its sidecar, the annotation `id` and, zoomed in, the `window` as its
+   * parameters, the others it has kept. A recording on the same site goes in by its path, relative
+   * where it lies under that page's folder; another site's whole.
    */
   #address(id: string): string | null {
     const href = this.getAttribute("href");
@@ -561,6 +610,10 @@ export class TickwaveInset extends TickwaveElement {
     if (annotations) to.searchParams.set("annotations", from(annotations));
     else to.searchParams.delete("annotations");
     to.searchParams.set("annotation", id);
+    // Whole ticks that take in the zoomed span; the window reads no ticks before the first.
+    const z = this.#zoomed;
+    if (z) to.searchParams.set("window", `${Math.max(0, Math.floor(z.start))} ${Math.ceil(z.end)}`);
+    else to.searchParams.delete("window");
     return to.href;
   }
 
@@ -755,18 +808,24 @@ export class TickwaveInset extends TickwaveElement {
     this.#said.textContent = "";
   }
 
-  /** Opens `for`'s view at the lit note or the inset's annotation; true if it did. */
+  /** Opens `for`'s view at the lit note or the inset's annotation, over the zoomed span if there is
+   * one; true if it did. */
   #openView(): boolean {
     const view = this.#view;
     const id = this.#lit ?? this.#annotation?.id;
     if (!view || !id) return false;
-    void view.reveal(id);
+    void view.reveal(id, this.zoomed);
     return true;
   }
 
   #clicked(e: MouseEvent): void {
     const touch = this.#touch;
     this.#touch = false;
+    if (this.#dragged) {
+      this.#dragged = false;
+      e.preventDefault();
+      return;
+    }
     // A tap lights a note or reads a pulse; a tap on the note already lit opens at it.
     if (touch && (this.#lit === null || this.#lit !== this.#litAtTouch)) {
       e.preventDefault();
