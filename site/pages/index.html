@@ -17,9 +17,9 @@
     </div>
     <div class="product-figure">
       <figure>
-        <tickwave-inset src="fixtures/identify-swd.tickwave" annotations="fixtures/identify-swd.annotations.toml" annotation="dpidr-read" channels="SWCLK SWDIO"></tickwave-inset>
+        <tickwave-inset src="fixtures/identify-swd.tickwave" annotations="fixtures/identify-swd.annotations.toml" annotation="dpidr-read" channels="SWCLK SWDIO" href="open.html"></tickwave-inset>
         <noscript><p class="quiet">The figure needs JavaScript. Its recording is <a href="fixtures/identify-swd.tickwave" download>identify-swd.tickwave</a>, with its sidecar <a href="fixtures/identify-swd.annotations.toml" download>identify-swd.annotations.toml</a>.</p></noscript>
-        <figcaption>A debug probe's first read over SWD. The probe drives the request; the target drives the acknowledge and the data. The clock rate under the trace comes from the capture's own edges.</figcaption>
+        <figcaption>A debug probe's first read over SWD. The probe drives the request; the target drives the acknowledge and the data. The clock rate under the trace comes from the capture's own edges.<span class="needs-script"> Point at a part to read it, and click it to open the capture there.</span></figcaption>
       </figure>
       <p><a href="open.html?src=fixtures/identify-swd.tickwave&amp;annotations=fixtures/identify-swd.annotations.toml">Open the whole capture</a></p>
     </div>
@@ -87,7 +87,7 @@ measure = { channel = "SWCLK", what = "rate" }</code></pre>
       </div>
       <dl class="specs elements">
         <div><dt><code>tickwave-view</code></dt><dd>A whole recording, closed to one line until the reader opens it.</dd></div>
-        <div><dt><code>tickwave-inset</code></dt><dd>One annotation's span, magnified, with a reading under it.</dd></div>
+        <div><dt><code>tickwave-inset</code></dt><dd>One annotation's span, magnified, with a reading under it. Point at a part to read it.</dd></div>
         <div><dt><code>tickwave-ref</code></dt><dd>A phrase that cites an annotation. Pointing at it opens an inset.</dd></div>
         <div><dt><code>tickwave-chart</code></dt><dd>Measurements against a setting. A point can open the recording behind it.</dd></div>
       </dl>
