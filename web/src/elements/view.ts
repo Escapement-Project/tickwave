@@ -5,11 +5,12 @@ import { ofKind, type Annotation } from "../annotations.ts";
 import { parseChannels, parseWindow, VIEW_ATTRIBUTES } from "../attributes.ts";
 import { reducedMotion } from "../face.ts";
 import { absolute, events as registryEvents, infoFor, peekInfo } from "../registry.ts";
-import { clockNote, countEdges, formatBrief, formatBytes, formatClockPeriod, formatClockRate, formatCount, formatInterval, formatRate, formatValue, periodStats } from "../readouts.ts";
+import { clockNote, countEdges, formatAt, formatBrief, formatBytes, formatClockPeriod, formatClockRate, formatCount, formatInterval, formatRate, formatValue, periodStats } from "../readouts.ts";
 import { completePulse, pulseFigures, pulseFromEdges, type Pulse } from "../probe.ts";
 import { Prober, type Probed } from "../prober.ts";
 import { lowerBound } from "../search.ts";
 import { channelIndices, Plot } from "../render/plot.ts";
+import { clampRange, fitRange, moveRange, scaleLimits, zoomRange, type ScaleLimits, type ValueRange } from "../render/scale.ts";
 import { isAbort, named, sampleAtOrBefore, sampleTick, type RecordingInfo } from "../source.ts";
 import { parseTime, toTicks, type TimeSpec } from "../time.ts";
 import { DRAG_PX, TickwaveElement, loadRecording, zoomKey, type Loaded } from "./base.ts";
@@ -49,6 +50,9 @@ canvas { display: block; }
   background: var(--raised, Canvas); border: 1px solid var(--hair, GrayText); color: var(--ink, CanvasText);
   font-size: 12px; line-height: 1.4; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .reading .more { color: var(--ink-2, GrayText); }
+.scale { position: absolute; left: 0; cursor: grab; touch-action: none; }
+.scale.dragging { cursor: grabbing; }
+.scale:focus-visible { outline-offset: -2px; border-radius: 4px; }
 .row-handle { position: absolute; left: 0; height: 8px; margin-top: -4px; cursor: row-resize; touch-action: none; }
 @media (pointer: coarse) { .row-handle { height: 24px; margin-top: -12px; } }
 .row-handle::after { content: ""; position: absolute; left: 4px; right: 4px; top: 50%; height: 2px; margin-top: -1px;
@@ -96,6 +100,8 @@ interface Drag {
   readonly area: "row" | "axis" | "lane" | "none";
   readonly row: number;
   readonly view: { start: number; end: number };
+  /** The values of a zoomed-in analog row under a mouse or pen, which the drag moves too. */
+  readonly values: ValueRange | null;
   moved: boolean;
 }
 
@@ -136,6 +142,8 @@ export class TickwaveView extends TickwaveElement {
   #resize: ResizeObserver;
   /** One a row, on its lower edge in the names column. */
   #handles: HTMLElement[] = [];
+  /** One an analog row, over its scale; null for a digital row. */
+  #scales: (HTMLElement | null)[] = [];
   /** A collapsed view fetches its recording's head, and only that, once it scrolls into view. */
   #seen = new IntersectionObserver((entries) => {
     this.#inView = entries.some((e) => e.isIntersecting);
@@ -362,6 +370,7 @@ export class TickwaveView extends TickwaveElement {
     this.#plot.selection = null;
     this.#plot.focus = null;
     this.#plot.heights.clear();
+    this.#plot.ranges.clear();
     this.#nextCursor = "a";
     this.#stepIndex = -1;
     this.#readoutSeq++;
@@ -390,6 +399,7 @@ export class TickwaveView extends TickwaveElement {
     const given = box > 1 ? box : null;
     this.#plot.resize(this.#size.width, given);
     this.#placeHandles();
+    this.#placeScales();
     this.#clampView();
     this.#plot.invalidate();
   }
@@ -480,6 +490,171 @@ export class TickwaveView extends TickwaveElement {
     if (height === null) this.#plot.heights.delete(t.index);
     else this.#plot.heights.set(t.index, Math.round(Math.max(min, Math.min(max, height))));
     this.#layout(true);
+  }
+
+  // Analog scales -------------------------------------------------------------------------------
+
+  #placeScales(): void {
+    const l = this.#plot.layout;
+    if (!l) return;
+    l.rows.forEach((r, i) => {
+      let s = this.#scales[i] ?? null;
+      const c = r.track.channel;
+      if (c.kind !== "analog" || !r.range) {
+        s?.remove();
+        this.#scales[i] = null;
+        return;
+      }
+      if (!s) {
+        s = this.#scale(i);
+        this.#scales[i] = s;
+        // Under the row handles, which come later.
+        this.#plotBox.insertBefore(s, this.#plotBox.querySelector(".hint"));
+      }
+      s.style.top = `${r.top}px`;
+      s.style.height = `${r.height}px`;
+      s.style.width = `${l.plotLeft}px`;
+      const m = r.range.marks;
+      s.setAttribute(
+        "aria-label",
+        `Scale of ${c.name}, ${formatAt(m.bottom, m.place, c.unit)} to ${formatAt(m.top, m.place, c.unit)}. Up and down move it, plus and minus zoom it, Enter fits it to what the view shows, Home shows the whole range.`,
+      );
+    });
+    for (const s of this.#scales.splice(l.rows.length)) s?.remove();
+  }
+
+  /**
+   * The scale over analog row `row`'s labels. Ctrl or Cmd with the wheel zooms its values about the
+   * pointer, a drag moves them, two fingers zoom them, and a double click fits them to what the view
+   * shows. Up and down move them, plus and minus zoom, Enter fits and Home shows the whole range.
+   */
+  #scale(row: number): HTMLElement {
+    const s = Object.assign(document.createElement("div"), { className: "scale", tabIndex: 0 });
+    s.setAttribute("role", "group");
+    s.setAttribute("aria-roledescription", "scale");
+    const rowOf = () => this.#plot.layout?.rows[row];
+    const pointers = new Map<number, number>();
+    let drag: { y: number; range: ValueRange } | null = null;
+    let pinch: { distance: number; anchor: number; range: ValueRange } | null = null;
+    // The plot's own handlers pan, measure and place cursors: none of that while on a scale.
+    s.addEventListener("pointerdown", (e) => {
+      e.stopPropagation();
+      const r = rowOf();
+      if (e.button !== 0 || !r?.range) return;
+      s.setPointerCapture(e.pointerId);
+      pointers.set(e.pointerId, e.clientY);
+      this.#prober.hide();
+      if (pointers.size === 2) {
+        const [a, b] = [...pointers.values()];
+        const top = this.#plotBox.getBoundingClientRect().top;
+        pinch = { distance: Math.abs(a - b) || 1, anchor: this.#plot.valueAt(r, (a + b) / 2 - top), range: r.range };
+        drag = null;
+      } else if (pointers.size === 1) {
+        drag = { y: e.clientY, range: r.range };
+        s.classList.add("dragging");
+      }
+    });
+    s.addEventListener("pointermove", (e) => {
+      // A pointer passing over lights the row, through the plot's handlers.
+      if (!pointers.has(e.pointerId)) return;
+      e.stopPropagation();
+      pointers.set(e.pointerId, e.clientY);
+      const r = rowOf();
+      const lim = this.#limits(row);
+      if (!r?.range || !lim) return;
+      const px = r.height - 12;
+      if (pinch && pointers.size === 2) {
+        const [a, b] = [...pointers.values()];
+        const span = Math.min(lim.maxSpan, Math.max(lim.minSpan, ((pinch.range.hi - pinch.range.lo) * pinch.distance) / (Math.abs(a - b) || 1)));
+        const mid = (a + b) / 2 - this.#plotBox.getBoundingClientRect().top;
+        const f = (r.top + r.height - 6 - mid) / px;
+        this.#setRange(row, { lo: pinch.anchor - f * span, hi: pinch.anchor - f * span + span });
+      } else if (drag) {
+        const by = ((e.clientY - drag.y) * (drag.range.hi - drag.range.lo)) / px;
+        this.#setRange(row, { lo: drag.range.lo + by, hi: drag.range.hi + by });
+      }
+    });
+    const end = (e: PointerEvent) => {
+      if (!pointers.delete(e.pointerId)) return;
+      e.stopPropagation();
+      // The finger left down after two moves nothing.
+      if (pinch) drag = null;
+      if (pointers.size < 2) pinch = null;
+      if (pointers.size === 0) s.classList.remove("dragging");
+    };
+    s.addEventListener("pointerup", end);
+    s.addEventListener("pointercancel", end);
+    s.addEventListener("dblclick", (e) => {
+      e.stopPropagation();
+      this.#fitScale(row);
+    });
+    s.addEventListener(
+      "wheel",
+      (e) => {
+        // Without Ctrl or Cmd, the plot's handler moves along the capture or says how to zoom.
+        if (!(e.ctrlKey || e.metaKey)) return;
+        const r = rowOf();
+        const lim = this.#limits(row);
+        if (!r?.range || !lim) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? r.height : 1;
+        const at = this.#plot.valueAt(r, this.#local(e).y);
+        this.#setRange(row, zoomRange(r.range, at, Math.exp(e.deltaY * unit * 0.004), lim));
+      },
+      { passive: false },
+    );
+    s.addEventListener("keydown", (e) => {
+      const r = rowOf();
+      const lim = this.#limits(row);
+      if (!r?.range || !lim) return;
+      const span = r.range.hi - r.range.lo;
+      const mid = (r.range.lo + r.range.hi) / 2;
+      // Up moves the trace up, as a drag up does: the values shown move down.
+      if (e.key === "ArrowUp") this.#setRange(row, moveRange(r.range, -span * (e.shiftKey ? 0.5 : 0.125), lim));
+      else if (e.key === "ArrowDown") this.#setRange(row, moveRange(r.range, span * (e.shiftKey ? 0.5 : 0.125), lim));
+      else if (e.key === "+" || e.key === "=") this.#setRange(row, zoomRange(r.range, mid, 1 / 1.6, lim));
+      else if (e.key === "-" || e.key === "_" || e.key === "−") this.#setRange(row, zoomRange(r.range, mid, 1.6, lim));
+      else if (e.key === "Enter") this.#fitScale(row);
+      else if (e.key === "Home") this.#setRange(row, null);
+      else return;
+      e.preventDefault();
+      e.stopPropagation();
+    });
+    return s;
+  }
+
+  /** Analog row `row`'s values, where they are zoomed in from its whole range; else null. */
+  #zoomedIn(row: number): ValueRange | null {
+    const range = this.#plot.layout?.rows[row]?.range;
+    const lim = this.#limits(row);
+    if (!range || !lim) return null;
+    return range.hi - range.lo < (lim.whole.hi - lim.whole.lo) * (1 - 1e-9) ? { lo: range.lo, hi: range.hi } : null;
+  }
+
+  #limits(row: number): ScaleLimits | null {
+    const c = this.#plot.tracks[row]?.channel;
+    return c?.kind === "analog" ? scaleLimits(this.#plot.wholeRange(c), c.resolution) : null;
+  }
+
+  /** Gives analog row `row` a range of values, within its limits, or its whole range for null. */
+  #setRange(row: number, range: ValueRange | null): void {
+    const t = this.#plot.tracks[row];
+    const lim = this.#limits(row);
+    if (!t || !lim) return;
+    if (range === null) this.#plot.ranges.delete(t.index);
+    else this.#plot.ranges.set(t.index, clampRange(range, lim));
+    // A new range can widen its labels, and with them the names column.
+    this.#layout(true);
+  }
+
+  /** Fits analog row `row`'s range to the least and greatest values it drew last. */
+  #fitScale(row: number): void {
+    const t = this.#plot.tracks[row];
+    const lim = this.#limits(row);
+    const shown = t ? this.#plot.shownRange(t.index) : null;
+    const to = lim && shown ? fitRange(shown.lo, shown.hi, lim) : null;
+    if (to) this.#setRange(row, to);
   }
 
   // Window ---------------------------------------------------------------------------------------
@@ -579,8 +754,14 @@ export class TickwaveView extends TickwaveElement {
     this.#plotBox.focus({ preventScroll: true });
   }
 
+  /** The whole capture, and each analog row's whole range. */
   #fit(): void {
-    if (this.#loaded) this.setWindow(0, this.#extent());
+    if (!this.#loaded) return;
+    if (this.#plot.ranges.size > 0) {
+      this.#plot.ranges.clear();
+      this.#layout(true);
+    }
+    this.setWindow(0, this.#extent());
   }
 
   /** Zooms by `factor` (above 1 zooms out) about x, or the middle. */
@@ -650,6 +831,8 @@ export class TickwaveView extends TickwaveElement {
         return;
       }
       const hit = this.#plot.hit(p.x, p.y);
+      // A finger moving up or down scrolls the page, as the plot's touch-action leaves it to.
+      const values = hit.area === "row" && e.pointerType !== "touch" ? this.#zoomedIn(hit.row) : null;
       this.#drag = {
         id: e.pointerId,
         x: p.x,
@@ -657,6 +840,7 @@ export class TickwaveView extends TickwaveElement {
         area: hit.area,
         row: hit.area === "row" ? hit.row : -1,
         view: { ...this.#plot.view },
+        values,
         moved: false,
       };
     });
@@ -693,6 +877,11 @@ export class TickwaveView extends TickwaveElement {
           box.classList.add("panning");
           const per = (d.view.end - d.view.start) / (this.#plot.layout!.plotRight - this.#plot.layout!.plotLeft);
           this.#plot.view = { start: d.view.start - (p.x - d.x) * per, end: d.view.end - (p.x - d.x) * per };
+          const r = this.#plot.layout!.rows[d.row];
+          if (d.values && r) {
+            const by = ((p.y - d.y) * (d.values.hi - d.values.lo)) / (r.height - 12);
+            this.#setRange(d.row, { lo: d.values.lo + by, hi: d.values.hi + by });
+          }
           this.#viewChanged();
         }
         return;
@@ -749,7 +938,7 @@ export class TickwaveView extends TickwaveElement {
           return;
         }
         // The plain wheel scrolls the page; say how to zoom instead.
-        this.#hint();
+        this.#hint(e.target instanceof Element && e.target.classList.contains("scale") ? "the scale" : null);
       },
       { passive: false },
     );
@@ -795,9 +984,10 @@ export class TickwaveView extends TickwaveElement {
 
   #hintTimer = 0;
 
-  #hint(): void {
+  /** Says how to zoom: the capture, or `what`. */
+  #hint(what: string | null = null): void {
     const hint = this.root.querySelector(".hint") as HTMLElement;
-    hint.textContent = `${zoomKey()} + scroll to zoom`;
+    hint.textContent = `${zoomKey()} + scroll to zoom${what ? ` ${what}` : ""}`;
     hint.classList.add("shown");
     clearTimeout(this.#hintTimer);
     this.#hintTimer = window.setTimeout(() => hint.classList.remove("shown"), 1200);

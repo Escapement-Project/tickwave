@@ -206,7 +206,13 @@ The reader zooms with Ctrl or Cmd and the wheel, a trackpad pinch, or two finger
 scrolls the page, and the view says how to zoom. Shift with the wheel, a sideways swipe, a drag or
 the left and right arrow keys move along the capture. With the view focused, the up and down arrows
 or plus and minus zoom in and out. Home and Fit show the whole capture, or all of the channels the
-view shows, and Escape clears the cursors and the selection.
+view shows, with each analog channel's whole range, and Escape clears the cursors and the selection.
+
+Over an analog row's scale, Ctrl or Cmd with the wheel, or two fingers, zoom its values about the
+pointer instead, a drag moves them, and a double click fits them to the values in view. A scale takes
+the focus: up and down move it, plus and minus zoom it, Enter fits it and Home shows its whole range.
+Once a row's values are zoomed in, a drag over its traces with a mouse or a pen moves them too, as
+well as along the capture.
 
 A mouse over a row reads it at the pointer. An analog channel gives the value of the sample
 there in a label, or the smallest and largest value where one pixel covers several samples. On a

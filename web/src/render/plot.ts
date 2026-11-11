@@ -5,6 +5,7 @@
 import { covers, laneAnnotations, type Annotation, type Resolved } from "../annotations.ts";
 import type { Palette } from "../palette.ts";
 import { formatAt, niceStep } from "../readouts.ts";
+import { rangeMarks, type ValueRange } from "./scale.ts";
 import { named, sampleTick, type AnalogChannel, type Channel, type RecordingInfo, type Source } from "../source.ts";
 import { timeAxis } from "./axis.ts";
 import {
@@ -41,8 +42,13 @@ export interface Row {
   readonly track: Track;
   readonly top: number;
   readonly height: number;
-  /** For an analog row, the values at its bottom and top, and the place they are labelled at. */
-  readonly range?: { readonly lo: number; readonly hi: number; readonly place: number };
+  /** For an analog row, the values at its bottom and top, and the two values its scale labels. */
+  readonly range?: RowRange;
+}
+
+export interface RowRange extends ValueRange {
+  /** The labelled values, each a multiple of 10^place. */
+  readonly marks: { readonly top: number; readonly bottom: number; readonly place: number };
 }
 
 export interface Layout {
@@ -130,6 +136,10 @@ export class Plot {
   pulseMark: PulseMark | null = null;
   /** Row heights the reader set, by channel index; the others take the config's. */
   heights = new Map<number, number>();
+  /** Value ranges the reader set for analog rows, by channel index; the others show the whole. */
+  ranges = new Map<number, ValueRange>();
+  /** The values each analog row drew last, by channel index. */
+  readonly #shown = new Map<number, ValueRange>();
   /** The annotation the element is about, drawn emphasised. */
   focus: string | null = null;
   /** When set, the lane draws only these annotations. */
@@ -229,12 +239,43 @@ export class Plot {
     return laneAnnotations(r, new Set(this.tracks.map((t) => t.channel.name)), this.laneFilter);
   }
 
-  #analogRange(c: AnalogChannel): { lo: number; hi: number; place: number } {
+  /** An analog channel's whole range: its least and greatest values, out to round steps. */
+  wholeRange(c: AnalogChannel): { lo: number; hi: number; place: number } {
     const lo0 = Number.isFinite(c.min) ? c.min : 0;
     const hi0 = Number.isFinite(c.max) ? Math.max(c.max, lo0) : lo0;
     const spread = hi0 > lo0 ? hi0 - lo0 : Math.max(c.resolution ?? 0, Math.abs(hi0) * 1e-3, 1e-12);
     const { step, place } = niceStep(spread / 4);
     return { lo: Math.floor(lo0 / step) * step, hi: Math.max(Math.ceil(hi0 / step) * step, Math.floor(lo0 / step) * step + step), place };
+  }
+
+  #rowRange(t: Track): RowRange | undefined {
+    const c = t.channel;
+    if (c.kind !== "analog") return undefined;
+    const set = this.ranges.get(t.index);
+    if (set) return { lo: set.lo, hi: set.hi, marks: rangeMarks(set) };
+    const whole = this.wholeRange(c);
+    return { lo: whole.lo, hi: whole.hi, marks: { top: whole.hi, bottom: whole.lo, place: whole.place } };
+  }
+
+  /** The least and greatest values row `index`'s channel drew last, or null if it drew none. */
+  shownRange(index: number): ValueRange | null {
+    return this.#shown.get(index) ?? null;
+  }
+
+  /** Where value `v` sits in row `r`, in CSS pixels: its range spans the row less 6 px each end. */
+  valueY(r: Row, v: number): number {
+    const range = r.range!;
+    const top = r.top + 6;
+    const bottom = r.top + r.height - 6;
+    return bottom - ((v - range.lo) / (range.hi - range.lo)) * (bottom - top);
+  }
+
+  /** The value at `y` in row `r`, the inverse of valueY. */
+  valueAt(r: Row, y: number): number {
+    const range = r.range!;
+    const top = r.top + 6;
+    const bottom = r.top + r.height - 6;
+    return range.lo + ((bottom - y) / (bottom - top)) * (range.hi - range.lo);
   }
 
   defaultHeight(t: Track): number {
@@ -255,14 +296,14 @@ export class Plot {
   resize(width: number, height: number | null): Layout {
     const font = this.#font(this.config.labelPx, 500);
     let gutter = 0;
-    const ranges = this.tracks.map((t) => (t.channel.kind === "analog" ? this.#analogRange(t.channel) : undefined));
+    const ranges = this.tracks.map((t) => this.#rowRange(t));
     this.tracks.forEach((t, i) => {
       gutter = Math.max(gutter, this.measure(t.channel.name, font));
-      const r = ranges[i];
+      const m = ranges[i]?.marks;
       const c = t.channel;
-      if (r && c.kind === "analog") {
+      if (m && c.kind === "analog") {
         const axisFont = this.#font(AXIS_PX);
-        gutter = Math.max(gutter, this.measure(formatAt(r.hi, r.place, c.unit), axisFont), this.measure(formatAt(r.lo, r.place, c.unit), axisFont));
+        gutter = Math.max(gutter, this.measure(formatAt(m.top, m.place, c.unit), axisFont), this.measure(formatAt(m.bottom, m.place, c.unit), axisFont));
       }
     });
     const plotLeft = Math.ceil(Math.min(Math.max(gutter + 14, 40), Math.max(40, width * 0.3)));
@@ -470,19 +511,24 @@ export class Plot {
     ctx.textAlign = "left";
     ctx.fillText(c.name, 6, r.top + r.height / 2 + 4, l.plotLeft - 10);
     if (r.range && c.kind === "analog") {
+      // Each label sits on its rule, the top one under it and the bottom one over it.
+      const m = r.range.marks;
+      const top = this.valueY(r, m.top);
+      const bottom = this.valueY(r, m.bottom);
       ctx.font = this.#font(AXIS_PX);
       ctx.textAlign = "right";
       ctx.fillStyle = p.ink2;
-      ctx.fillText(formatAt(r.range.hi, r.range.place, c.unit), l.plotLeft - 6, r.top + 13);
-      ctx.fillText(formatAt(r.range.lo, r.range.place, c.unit), l.plotLeft - 6, r.top + r.height - 4);
+      ctx.fillText(formatAt(m.top, m.place, c.unit), l.plotLeft - 6, top + 7);
+      ctx.fillText(formatAt(m.bottom, m.place, c.unit), l.plotLeft - 6, bottom + 2);
       ctx.strokeStyle = p.hair;
       ctx.lineWidth = 1;
       ctx.beginPath();
-      for (const y of [r.top + 6.5, r.top + r.height - 6.5]) {
-        ctx.moveTo(l.plotLeft, Math.round(y) + 0.5);
-        ctx.lineTo(l.plotRight, Math.round(y) + 0.5);
+      for (const y of [Math.round(top + 0.5) + 0.5, Math.round(bottom - 0.5) + 0.5]) {
+        ctx.moveTo(l.plotLeft, y);
+        ctx.lineTo(l.plotRight, y);
       }
       ctx.stroke();
+      this.#shown.delete(r.track.index);
     }
 
     // Nothing before tick 0, at or past the channel's end, or right of the sweep.
@@ -495,6 +541,7 @@ export class Plot {
     // wider than a column is coarse: its busy runs and analog bands may claim activity the view
     // does not hold, so they draw faded. Its flat buckets are exact at any scale and draw as they are.
     type Piece = { px0: number; px1: number; shapes: { line: Path2D; fill: Path2D }; coarse: boolean };
+    const shown = { lo: Infinity, hi: -Infinity };
     const byWidth = new Map<number, Piece[]>();
     const piecesAt = (lw: number): Piece[] => {
       let pieces = byWidth.get(lw);
@@ -505,13 +552,14 @@ export class Plot {
         if (px1 <= px0) return [];
         const from = Math.max(start, 0);
         const to = Math.min(end, c.end);
-        const shapes = c.kind === "digital" ? this.#digitalShapes(r, grid, tile, from, to, lw) : this.#analogShapes(r, c, grid, tile, from, to, lw);
+        const shapes = c.kind === "digital" ? this.#digitalShapes(r, grid, tile, from, to, lw) : this.#analogShapes(r, c, grid, tile, from, to, lw, shown);
         return [{ px0, px1, shapes, coarse: grain(tile) > grid.per }];
       });
       byWidth.set(lw, pieces);
       return pieces;
     };
     if (piecesAt(width(TRACE_WEIGHT)).length === 0) return;
+    if (shown.lo <= shown.hi) this.#shown.set(r.track.index, { lo: shown.lo, hi: shown.hi });
 
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -636,6 +684,7 @@ export class Plot {
     from: number,
     to: number,
     lw: number,
+    shown: { lo: number; hi: number },
   ): { line: Path2D; fill: Path2D } {
     const l = this.layout!;
     const dpr = this.#dpr;
@@ -657,6 +706,10 @@ export class Plot {
         const t = sampleTick(c.first, c.period, s.first + k);
         if (t < from || t >= to || Number.isNaN(s.values[k])) continue;
         const x = left + (t - grid.x0) / grid.per;
+        if (t >= this.view.start && t <= this.view.end) {
+          shown.lo = Math.min(shown.lo, s.values[k]);
+          shown.hi = Math.max(shown.hi, s.values[k]);
+        }
         const yy = y(s.values[k]);
         if (started) line.lineTo(x, yy);
         else line.moveTo(x, yy);
@@ -674,6 +727,8 @@ export class Plot {
     else return { line, fill };
     for (let k = 0; k < grid.count; k++) {
       if (cols.min[k] > cols.max[k]) continue;
+      shown.lo = Math.min(shown.lo, cols.min[k]);
+      shown.hi = Math.max(shown.hi, cols.max[k]);
       const y1 = y(cols.max[k]);
       const y2 = y(cols.min[k]);
       fill.rect(Math.round(left) + k, y1 - lw / 2, 1, y2 - y1 + lw);

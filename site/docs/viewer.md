@@ -28,8 +28,8 @@ touch screen. The plain wheel scrolls the page. Drag, swipe sideways or hold Shi
 move along the capture.
 
 With the view focused, the left and right arrow keys move it. The up and down arrows, or plus and
-minus, zoom in and out. Home and the Fit button show the whole capture. Escape clears the cursors
-and the selection.
+minus, zoom in and out. Home and the Fit button show the whole capture, and every analog channel's
+whole range. Escape clears the cursors and the selection.
 
 ## Reading a channel
 
@@ -53,6 +53,20 @@ pulse reads at once anywhere along it.
 Drag a row's lower edge in the names column to make the row taller or shorter. With that edge
 focused, the up and down arrows do it too, with Shift for bigger steps. Home and End give the row
 its least and greatest height, and Enter or a double click its default.
+
+## An analog channel's scale
+
+An analog row's scale, the values at its left, zooms and moves on its own. Hold Ctrl (Cmd on a Mac)
+and turn the wheel over the scale to zoom its values about the pointer, or pinch it with two fingers
+on a touch screen. Drag the scale up or down to move its values. A double click fits it to the values
+in view. It zooms in no further than four steps of the instrument's resolution.
+
+Once the values are zoomed in, a drag over the row's traces with a mouse or a pen moves them up and
+down as well as along the capture. On a touch screen, a finger moving up or down there scrolls the
+page, so move the values with a finger on the scale.
+
+With the scale focused, the up and down arrows move it, with Shift for bigger steps, and plus and
+minus zoom it. Enter fits it to the values in view, and Home shows its whole range.
 
 ## Cursors and spans
 
