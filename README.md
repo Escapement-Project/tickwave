@@ -1,9 +1,9 @@
 # tickwave
 
-tickwave shows logic and mixed-signal captures in a web page. It draws digital channels from their
-edges and analog channels from their samples, on one time axis. A page cites a stretch of a capture
-the way it cites a figure: a phrase in the text opens an inset of that stretch, and the whole
-capture is a click away.
+tickwave is a web viewer for mixed-signal captures. It draws digital channels from their edges and
+analog channels from their samples, on one time axis. A page cites a stretch of a capture the way it
+cites a figure: a phrase in the text opens an inset of that stretch, and the whole capture is a
+click away.
 
 It is built to sit inside a page. Its custom elements take the page's colours and fonts, size with
 its layout, and fetch only the part of a recording a view shows. Nothing runs on a server: any
