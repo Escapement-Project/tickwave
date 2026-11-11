@@ -5,7 +5,7 @@
 import { lowerBound } from "./search.ts";
 import {
   aborted,
-  sampleTick,
+  sampleIndexAtOrAfter,
   type Channel,
   type Edges,
   type Overview,
@@ -146,8 +146,8 @@ export class MemorySource implements Source {
   samples(channel: number, start: number, end: number, signal?: AbortSignal): Promise<Samples> {
     return this.#answer(signal, () => {
       const c = this.#analog(channel);
-      const lo = sampleIndexAtOrAfter(c, start);
-      const hi = Math.max(lo, sampleIndexAtOrAfter(c, end));
+      const lo = sampleIndexAtOrAfter(c.first, c.period, c.values.length, start);
+      const hi = Math.max(lo, sampleIndexAtOrAfter(c.first, c.period, c.values.length, end));
       return { first: lo, values: c.values.subarray(lo, hi) };
     });
   }
@@ -180,9 +180,10 @@ export class MemorySource implements Source {
       }
       const min = new Float64Array(n).fill(Infinity);
       const max = new Float64Array(n).fill(-Infinity);
-      let i = sampleIndexAtOrAfter(c, s0);
+      const index = (tick: number) => sampleIndexAtOrAfter(c.first, c.period, c.values.length, tick);
+      let i = index(s0);
       for (let k = 0; k < n; k++) {
-        const next = sampleIndexAtOrAfter(c, s0 + (k + 1) * bucket);
+        const next = index(s0 + (k + 1) * bucket);
         for (; i < next; i++) {
           const v = c.values[i];
           if (v < min[k]) min[k] = v;
@@ -194,16 +195,3 @@ export class MemorySource implements Source {
   }
 }
 
-/** The index of the first sample whose tick is at or after `tick`, clamped to [0, count]. */
-export function sampleIndexAtOrAfter(
-  c: { readonly first: number; readonly period: Ratio; readonly values: { readonly length: number } },
-  tick: number,
-): number {
-  const { num, den } = c.period;
-  let i = Math.ceil(((tick - c.first) * den) / num);
-  // The estimate can land one off either way; settle it against the sample ticks themselves.
-  i = Math.min(Math.max(i, 0), c.values.length);
-  while (i > 0 && sampleTick(c.first, c.period, i - 1) >= tick) i--;
-  while (i < c.values.length && sampleTick(c.first, c.period, i) < tick) i++;
-  return i;
-}

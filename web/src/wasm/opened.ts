@@ -7,6 +7,7 @@ import { lowerBound } from "../search.ts";
 import {
   aborted,
   named,
+  sampleIndexAtOrAfter,
   sampleTick,
   type AnalogOverview,
   type Channel,
@@ -393,7 +394,7 @@ export class Opened {
     const c = this.header.channels[channel];
     if (c.kind !== "analog") throw new RangeError(`channel ${channel} is not analog`);
     const period: Ratio = { num: c.period[0], den: c.period[1] };
-    const index = (tick: number) => sampleIndex(c.first, period, c.count, tick);
+    const index = (tick: number) => sampleIndexAtOrAfter(c.first, period, c.count, tick);
     const i0 = index(start);
     const i1 = Math.max(i0, index(end));
     const values = new Float32Array(i1 - i0);
@@ -478,13 +479,4 @@ export class Opened {
   resolveAnnotations(hand: string, names: string[], texts: string[], recordingFile: string | null): string {
     return this.#rec.resolveAnnotations(hand, names, texts, recordingFile);
   }
-}
-
-/** The first sample at or after `tick`, clamped to [0, count]. */
-function sampleIndex(first: number, period: Ratio, count: number, tick: number): number {
-  let i = Math.ceil(((tick - first) * period.den) / period.num);
-  i = Math.min(Math.max(i, 0), count);
-  while (i > 0 && sampleTick(first, period, i - 1) >= tick) i--;
-  while (i < count && sampleTick(first, period, i) < tick) i++;
-  return i;
 }

@@ -16,6 +16,7 @@ import {
   digitalFromOverview,
   FALL,
   HIGH,
+  lineSamples,
   LOW,
   NONE,
   RISE,
@@ -702,9 +703,12 @@ export class Plot {
       const s = tile.data;
       let started = false;
       const dots = period / grid.per >= 8 * dpr;
-      for (let k = 0; k < s.values.length; k++) {
+      // A held tile can be far wider than the view. The pad, ten line widths, is twice the reach
+      // of a miter join at the default limit, and more than a dot's radius.
+      const [k0, k1] = lineSamples(grid, s, c.first, c.period, from, to, 10 * lw * grid.per);
+      for (let k = k0; k < k1; k++) {
+        if (Number.isNaN(s.values[k])) continue;
         const t = sampleTick(c.first, c.period, s.first + k);
-        if (t < from || t >= to || Number.isNaN(s.values[k])) continue;
         const x = left + (t - grid.x0) / grid.per;
         if (t >= this.view.start && t <= this.view.end) {
           shown.lo = Math.min(shown.lo, s.values[k]);

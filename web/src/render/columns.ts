@@ -2,7 +2,7 @@
 // Pure functions, so the drawing rules can be tested without a canvas.
 
 import { lowerBound } from "../search.ts";
-import { sampleTick, type AnalogOverview, type DigitalOverview, type Edges, type Ratio, type Samples } from "../source.ts";
+import { sampleIndexAtOrAfter, type AnalogOverview, type DigitalOverview, type Edges, type Ratio, type Samples } from "../source.ts";
 
 export const NONE = 0;
 export const LOW = 1;
@@ -104,6 +104,51 @@ function connect({ min, max }: AnalogColumns): void {
   }
 }
 
+/** Samples a run holds. */
+const RUN = 64;
+
+/**
+ * The smallest and largest value of each whole run of RUN samples in a tile, from its first. A
+ * run's min is NaN until the run is built. No built run's min is NaN: NaN samples are left out.
+ */
+interface Runs {
+  readonly min: Float64Array;
+  readonly max: Float64Array;
+}
+
+// Kept while the tile lives, so a redraw reads a column's whole runs rather than every sample in
+// them. A draw builds only the runs it reads, so a tile's first draw pays for the view alone.
+const tileRuns = new WeakMap<Samples, Runs>();
+
+/** The tile's runs, with runs [r0, r1) built. */
+function runsOf(s: Samples, r0: number, r1: number): Runs {
+  let runs = tileRuns.get(s);
+  if (!runs) {
+    const n = Math.floor(s.values.length / RUN);
+    runs = { min: new Float64Array(n).fill(NaN), max: new Float64Array(n) };
+    tileRuns.set(s, runs);
+  }
+  const { min, max } = runs;
+  const v = s.values;
+  for (let r = r0; r < r1; r++) {
+    if (!Number.isNaN(min[r])) continue;
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (let i = r * RUN; i < (r + 1) * RUN; i++) {
+      if (v[i] < lo) lo = v[i];
+      if (v[i] > hi) hi = v[i];
+    }
+    min[r] = lo;
+    max[r] = hi;
+  }
+  return runs;
+}
+
+/** The tile's own index of its first sample at or after `tick`. */
+function tileIndex(s: Samples, first: number, period: Ratio, tick: number): number {
+  return Math.max(0, sampleIndexAtOrAfter(first, period, s.first + s.values.length, tick) - s.first);
+}
+
 /** Each column's range from the samples in it. For several samples a column. */
 export function analogFromSamples(
   g: Grid,
@@ -115,18 +160,58 @@ export function analogFromSamples(
 ): AnalogColumns {
   const cols = emptyColumns(g.count);
   const { min, max } = cols;
-  for (let k = 0; k < s.values.length; k++) {
-    const t = sampleTick(first, period, s.first + k);
-    if (t < from || t >= to) continue;
-    const c = Math.floor((t - g.x0) / g.per);
-    if (c < 0 || c >= g.count) continue;
-    const v = s.values[k];
+  const v = s.values;
+  const [c0, c1] = columnRange(g, from, to);
+  const at = (tick: number) => tileIndex(s, first, period, tick);
+  let i = at(Math.max(from, g.x0 + c0 * g.per));
+  const runs = runsOf(s, Math.ceil(i / RUN), Math.floor(at(Math.min(to, g.x0 + c1 * g.per)) / RUN));
+  for (let c = c0; c < c1; c++) {
+    const j = Math.max(i, at(Math.min(to, g.x0 + (c + 1) * g.per)));
     // NaN samples are left out, as the overview leaves them out.
-    if (v < min[c]) min[c] = v;
-    if (v > max[c]) max[c] = v;
+    let lo = Infinity;
+    let hi = -Infinity;
+    let k = i;
+    const r0 = Math.ceil(i / RUN);
+    const r1 = Math.floor(j / RUN);
+    if (r0 < r1) {
+      for (; k < r0 * RUN; k++) {
+        if (v[k] < lo) lo = v[k];
+        if (v[k] > hi) hi = v[k];
+      }
+      for (let r = r0; r < r1; r++) {
+        if (runs.min[r] < lo) lo = runs.min[r];
+        if (runs.max[r] > hi) hi = runs.max[r];
+      }
+      k = r1 * RUN;
+    }
+    for (; k < j; k++) {
+      if (v[k] < lo) lo = v[k];
+      if (v[k] > hi) hi = v[k];
+    }
+    min[c] = lo;
+    max[c] = hi;
+    i = j;
   }
   connect(cols);
   return cols;
+}
+
+/**
+ * The samples a line through a tile's samples draws over a grid, `[k0, k1)` in the tile's own
+ * indices: those in [from, to) that lie within `pad` ticks of the grid, and out to one that is not
+ * NaN past each side, so the line leaves the grid on both.
+ */
+export function lineSamples(g: Grid, s: Samples, first: number, period: Ratio, from: number, to: number, pad: number): [number, number] {
+  const v = s.values;
+  const at = (tick: number) => tileIndex(s, first, period, tick);
+  const lo = at(from);
+  const hi = at(to);
+  if (hi <= lo) return [lo, lo];
+  let k0 = Math.min(Math.max(lo, at(g.x0 - pad) - 1), hi - 1);
+  while (k0 > lo && Number.isNaN(v[k0])) k0--;
+  let k1 = Math.max(Math.min(hi, at(g.x0 + g.count * g.per + pad) + 1), lo + 1);
+  while (k1 < hi && Number.isNaN(v[k1 - 1])) k1++;
+  return [k0, k1];
 }
 
 /** Each column's range from the overview buckets that overlap it. */

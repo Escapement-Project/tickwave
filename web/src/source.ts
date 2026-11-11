@@ -154,6 +154,16 @@ export function sampleTick(first: number, period: Ratio, i: number): number {
   return first + Number((BigInt(i) * BigInt(period.num)) / BigInt(period.den));
 }
 
+/** The index of the first sample whose tick is at or after `tick`, clamped to `0..=count`. */
+export function sampleIndexAtOrAfter(first: number, period: Ratio, count: number, tick: number): number {
+  let i = Math.ceil(((tick - first) * period.den) / period.num);
+  // The estimate can land one off either way; settle it against the sample ticks themselves.
+  i = Math.min(Math.max(i, 0), count);
+  while (i > 0 && sampleTick(first, period, i - 1) >= tick) i--;
+  while (i < count && sampleTick(first, period, i) < tick) i++;
+  return i;
+}
+
 /**
  * The index of the last sample at or before `tick`: the value a cursor there reads. Null before
  * the first sample or past the channel's end.

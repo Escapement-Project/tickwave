@@ -12,11 +12,14 @@ import {
   digitalFromOverview,
   FALL,
   HIGH,
+  lineSamples,
   LOW,
   NONE,
   RISE,
+  type Grid,
 } from "../src/render/columns.ts";
 import { MemorySource } from "../src/memory-source.ts";
+import { sampleTick, type Ratio, type Samples } from "../src/source.ts";
 
 const SWDIO = new Float64Array([377094556, 377095556, 377096556, 377097556, 377099556, 377100556, 377101556, 377104078, 377106074]);
 
@@ -140,4 +143,119 @@ test("analog overview from samples, then columns from it", async () => {
   const d = analogFromOverview({ x0: 0, per: 16384, count: 8 }, ov, 0, 120000);
   assert.deepEqual([...d.min], [51480, 51480, 175990, 212221, 305817, 336396, 391567, 417043]);
   assert.deepEqual([...d.max], [175990, 175990, 305817, 305817, 391567, 391567, 444567, 444567]);
+});
+
+// Every sample walked, as the rule reads: column c takes the samples whose ticks lie in
+// [x0 + c * per, x0 + (c + 1) * per) and in [from, to), and then meets its neighbours.
+function walked(g: Grid, s: Samples, first: number, period: Ratio, from: number, to: number) {
+  const min = new Float64Array(g.count).fill(Infinity);
+  const max = new Float64Array(g.count).fill(-Infinity);
+  for (let k = 0; k < s.values.length; k++) {
+    const t = sampleTick(first, period, s.first + k);
+    if (t < from || t >= to) continue;
+    for (let c = 0; c < g.count; c++) {
+      if (t < g.x0 + c * g.per || t >= g.x0 + (c + 1) * g.per) continue;
+      if (s.values[k] < min[c]) min[c] = s.values[k];
+      if (s.values[k] > max[c]) max[c] = s.values[k];
+    }
+  }
+  for (let c = 1; c < g.count; c++) {
+    if (min[c] > max[c] || min[c - 1] > max[c - 1]) continue;
+    if (max[c - 1] < min[c]) min[c] = max[c - 1];
+    else if (min[c - 1] > max[c]) max[c] = min[c - 1];
+  }
+  return { min: [...min], max: [...max] };
+}
+
+// Uniform in [0, 1) from a fixed seed, so a failure repeats.
+function seeded(seed: number): () => number {
+  return () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 2 ** 32;
+  };
+}
+
+test("analog from samples: each column holds exactly the samples whose ticks lie in it", () => {
+  const random = seeded(0x7ac4);
+  const int = (n: number) => Math.floor(random() * n);
+  const periods: Ratio[] = [{ num: 1, den: 1 }, { num: 3, den: 2 }, { num: 1, den: 3 }, { num: 7, den: 1 }];
+  for (let tile = 0; tile < 60; tile++) {
+    const period = periods[tile % periods.length];
+    const first = int(50);
+    const values = new Float64Array(int(1500)).map(() => (random() < 0.03 ? NaN : Math.round(random() * 1000)));
+    // A stretch of NaN longer than a run.
+    if (tile % 5 === 0) values.fill(NaN, int(values.length), int(values.length) + 150);
+    const s: Samples = { first: int(300), values };
+    const tick = (i: number) => sampleTick(first, period, s.first + i);
+    const span = tick(values.length) - tick(0) + 1;
+    // Many grids over one tile: each reads the runs the ones before it built, and builds the rest.
+    for (let grid = 0; grid < 25; grid++) {
+      const per = 0.3 + random() * span / 4;
+      const g: Grid = { x0: tick(0) - span / 4 + random() * span, per, count: 1 + int(40) };
+      const from = tick(0) - 20 + int(span);
+      const to = from + int(span);
+      const got = analogFromSamples(g, s, first, period, from, to);
+      assert.deepEqual({ min: [...got.min], max: [...got.max] }, walked(g, s, first, period, from, to), `tile ${tile}, grid ${grid}`);
+    }
+  }
+});
+
+test("line samples: those near the grid, out to one drawn sample past each side", () => {
+  // Samples at ticks 0, 10, 20, ...; the grid covers [35, 65).
+  const g = { x0: 35, per: 1, count: 30 };
+  const period = { num: 10, den: 1 };
+  const values = new Float64Array(12).fill(1);
+  const s = { first: 0, values };
+  // 30 is the last sample before the grid, 70 the first past it.
+  assert.deepEqual(lineSamples(g, s, 0, period, 0, 1000, 0), [3, 8]);
+  // A pad of 10 ticks reaches 25 and 75 (exclusive), so out to 20 and 80.
+  assert.deepEqual(lineSamples(g, s, 0, period, 0, 1000, 10), [2, 9]);
+  // NaN at 30 and 70: out to 20 and 80, the nearest the line can draw from.
+  values[3] = NaN;
+  values[7] = NaN;
+  assert.deepEqual(lineSamples(g, s, 0, period, 0, 1000, 0), [2, 9]);
+  // Nothing outside [from, to), NaN or not.
+  assert.deepEqual(lineSamples(g, s, 0, period, 30, 70, 0), [3, 7]);
+  // The tile's own indices, for a tile that starts at sample 2 (tick 20).
+  assert.deepEqual(lineSamples(g, { first: 2, values: values.subarray(2) }, 0, period, 0, 1000, 0), [0, 7]);
+});
+
+test("line samples: every sample that can reach the grid, and one drawn sample past each side", () => {
+  const random = seeded(0x51e7);
+  const int = (n: number) => Math.floor(random() * n);
+  const periods: Ratio[] = [{ num: 1, den: 1 }, { num: 3, den: 2 }, { num: 1, den: 3 }, { num: 7, den: 1 }];
+  for (let tile = 0; tile < 60; tile++) {
+    const period = periods[tile % periods.length];
+    const first = int(50);
+    const values = new Float64Array(int(400)).map(() => (random() < 0.2 ? NaN : random()));
+    const s: Samples = { first: int(300), values };
+    const tick = (i: number) => sampleTick(first, period, s.first + i);
+    const span = tick(values.length) - tick(0) + 1;
+    for (let grid = 0; grid < 25; grid++) {
+      const g: Grid = { x0: tick(0) - span / 4 + random() * span, per: 0.05 + random() * 2, count: 1 + int(40) };
+      const pad = random() < 0.3 ? 0 : random() * 30;
+      const from = tick(0) - 20 + int(span);
+      const to = from + int(span);
+      const [k0, k1] = lineSamples(g, s, first, period, from, to, pad);
+      // As the rule reads it: the drawn samples in [from, to) with ticks in the padded grid, the
+      // last drawn one before it and the first at or past its end.
+      const want: number[] = [];
+      let before = -1;
+      let after = -1;
+      for (let k = 0; k < values.length; k++) {
+        const t = tick(k);
+        if (Number.isNaN(values[k]) || t < from || t >= to) continue;
+        if (t < g.x0 - pad) before = k;
+        else if (t < g.x0 + g.count * g.per + pad) want.push(k);
+        else if (after < 0) after = k;
+      }
+      if (before >= 0) want.unshift(before);
+      if (after >= 0) want.push(after);
+      const got: number[] = [];
+      for (let k = k0; k < k1; k++) if (!Number.isNaN(values[k])) got.push(k);
+      assert.deepEqual(got, want, `tile ${tile}, grid ${grid}`);
+    }
+  }
 });
