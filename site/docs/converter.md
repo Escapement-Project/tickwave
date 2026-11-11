@@ -20,6 +20,8 @@ The program is then `target/release/tickwave`. `tickwave help`, and `--help` aft
 - `sigrok`: a sigrok session file (`.sr`), as PulseView, sigrok-cli and verge write them.
 - `vcd`: a value change dump (`.vcd`). It takes one-bit signals and lists the rest as skipped.
 
+The converter doesn't read Logic 2's own `.sal` files, because Saleae doesn't document that format and may change it. Export the capture from Logic 2 first: click Options at the bottom right, then Export Raw Data, and choose the binary format.
+
 Before it writes a recording, the converter decodes what it made and compares it with the capture, edge by edge and sample by sample. It writes nothing if they differ.
 
 Every time in a recording is a whole number of ticks from the capture's start, and one tick is the source's resolution. A Saleae export's times become ticks by `round((t − begin) × rate)`. The converter refuses an export with an edge more than 0.01 of a tick off that grid, rather than move it.
