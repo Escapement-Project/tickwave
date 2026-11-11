@@ -28,7 +28,7 @@ const EVIDENCE_HINT = "Enter opens the recording behind the picked point.";
 const CSS = `
 :where(tickwave-chart) { display: block; position: relative; }
 :where(tickwave-chart):focus-visible { outline: var(--focus-width, 2px) solid var(--ink, CanvasText); outline-offset: 4px; }
-:where(tickwave-chart[data-pending]) .tw-data { visibility: hidden; }
+:where(tickwave-chart[data-pending]) :is(.tw-data, .tw-hit) { visibility: hidden; }
 :where(tickwave-chart) .tw-pt { stroke: var(--surface, Canvas); }
 :where(tickwave-chart) .tw-hollow { fill: var(--surface, Canvas); }
 :where(tickwave-chart) .tw-plot { display: block; overflow: visible; }
@@ -88,6 +88,11 @@ export class TickwaveChart extends HTMLElement {
   #data: ChartData | null = null;
   #layout: Layout | null = null;
   #svg: SVGSVGElement | null = null;
+  /** The plot's drawing, redrawn whole. */
+  #plot: SVGGElement | null = null;
+  /** Takes the plot's pointer events. It outlives every redraw: a press whose element a redraw
+   * removed before the release would end in no click. */
+  #hit: SVGRectElement | null = null;
   #legend: HTMLUListElement | null = null;
   #readout: HTMLDivElement | null = null;
   #notice: HTMLParagraphElement | null = null;
@@ -299,6 +304,12 @@ export class TickwaveChart extends HTMLElement {
     this.#svg = document.createElementNS(SVG, "svg");
     this.#svg.classList.add("tw-plot");
     this.#svg.setAttribute("font-size", "12");
+    this.#plot = document.createElementNS(SVG, "g");
+    this.#plot.classList.add("tw-data");
+    this.#hit = document.createElementNS(SVG, "rect");
+    this.#hit.classList.add("tw-hit");
+    this.#hit.setAttribute("fill", "transparent");
+    this.#svg.append(this.#plot, this.#hit);
     this.#legendHtml = this.#readoutHtml = "";
     this.#readout = document.createElement("div");
     this.#readout.className = "tw-readout";
@@ -490,7 +501,12 @@ export class TickwaveChart extends HTMLElement {
       },
       c,
     );
-    svg.innerHTML = `<g class="tw-data">${markup}</g>`;
+    this.#plot!.innerHTML = markup;
+    const hit = this.#hit!;
+    hit.setAttribute("x", String(l.left));
+    hit.setAttribute("y", String(l.top));
+    hit.setAttribute("width", (l.right - l.left).toFixed(1));
+    hit.setAttribute("height", (l.bottom - l.top).toFixed(1));
     // The description says Enter opens a point's recording while any shown point names one.
     this.#name();
     this.#drawLegend(data, c);

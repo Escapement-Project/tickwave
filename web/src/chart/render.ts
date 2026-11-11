@@ -95,7 +95,6 @@ export function render(l: Layout, state: State, c: Colours): string {
     const x = l.xs[state.x];
     out.push(`<line x1="${f1(x)}" x2="${f1(x)}" y1="${l.top}" y2="${f1(l.bottom)}" stroke="currentColor" stroke-opacity=".35"/>`);
   }
-  out.push(`<rect class="tw-hit" x="${l.left}" y="${l.top}" width="${f1(l.right - l.left)}" height="${f1(l.bottom - l.top)}" fill="transparent"/>`);
   return out.join("");
 }
 

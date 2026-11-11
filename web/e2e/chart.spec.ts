@@ -566,6 +566,18 @@ test.describe("evidence", () => {
     }).toBe(true);
   });
 
+  test("a click still fires tickwave-evidence when the chart redraws while the button is down", async ({ page }) => {
+    const last = await point(page, 2);
+    await page.mouse.move(last.x, last.y);
+    await expect(page.locator("#c .tw-pop tickwave-inset")).toHaveAttribute("annotation", "dpidr-read");
+    await page.mouse.down();
+    // A font that finishes loading redraws the plot: the inset's own fonts can, while a reader's
+    // press is held.
+    await page.evaluate(() => document.fonts.dispatchEvent(new Event("loadingdone")));
+    await page.mouse.up();
+    expect(await evidence(page)).toHaveLength(1);
+  });
+
   test("a page that cancels the event takes over; with no view of the recording, the popover stays", async ({ page }) => {
     await page.evaluate(() => document.addEventListener("tickwave-evidence", (e) => e.preventDefault(), { once: true }));
     const last = await point(page, 2);
