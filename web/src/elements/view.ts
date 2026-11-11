@@ -22,7 +22,7 @@ const CSS = `
 .summary { flex: none; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 2px 12px;
   padding: 8px 10px 8px 14px; }
 .summary .title { font-weight: 600; overflow-wrap: anywhere; }
-.summary .facts { grid-row: 2; grid-column: 1; color: var(--ink-2, GrayText); font-size: 13px; }
+.summary .facts { grid-row: 2; grid-column: 1; color: var(--ink-2, GrayText); font-size: 13px; min-height: 1lh; }
 .summary .toggle { grid-row: 1 / 3; grid-column: 2; }
 .viewer { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; box-sizing: border-box; padding: 6px 0 8px;
   border-top: 0; border-radius: 0 0 10px 10px; }

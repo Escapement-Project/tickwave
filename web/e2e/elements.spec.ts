@@ -300,6 +300,30 @@ test("a URL that is not a .tickwave file is refused once the page has loaded, no
   await expect(notice(page.locator("#v"))).toContainText("404", { timeout: 10_000 });
 });
 
+test("a collapsed view keeps its height when its head arrives", async ({ page }, info) => {
+  const tag = `summary-${info.project.name}-${info.repeatEachIndex}-${Date.now()}`;
+  // Every frame from the view's first: its height, and whether the head has filled the facts.
+  await page.addInitScript(() => {
+    const w = window as unknown as { frames: [number, string][] };
+    w.frames = [];
+    const tick = () => {
+      const el = document.getElementById("v");
+      const facts = el?.shadowRoot?.querySelector(".facts");
+      if (facts) w.frames.push([el!.getBoundingClientRect().height, facts.textContent ?? ""]);
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+  // The server holds every read a second, the head's too.
+  await page.goto(`${VIEW}?tag=${tag}&after=0&stall=1000`);
+  await expect(page.locator("#v .facts")).toHaveText("524 ms; 2 channels: SWCLK, SWDIO; 4.7 KiB", { timeout: 10_000 });
+  const frames = await page.evaluate(() => (window as unknown as { frames: [number, string][] }).frames);
+  // Frames before the head and after it, at one height.
+  expect(frames.filter(([, f]) => f === "").length).toBeGreaterThan(20);
+  expect(frames.at(-1)![1]).not.toBe("");
+  expect(new Set(frames.map(([h]) => h))).toEqual(new Set([frames[0][0]]));
+});
+
 test("an inset takes its final height once its head and sidecar are in, and its data moves nothing", async ({ page }, info) => {
   const tag = `steady-${info.project.name}-${info.repeatEachIndex}-${Date.now()}`;
   // Every frame from the label's arrival: the inset's height, and whether its measure has come.
