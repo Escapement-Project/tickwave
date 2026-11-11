@@ -21,8 +21,9 @@ div.docs-index { padding-top: 32px; padding-bottom: 64px; }
 div.docs-index .intro { color: var(--ink-2); margin-bottom: 40px; }
 div.docs-index .doc-groups > div { scroll-margin-top: calc(var(--header) + 16px); }
 
-/* A doc: the text in a reading column beside the contents. */
-article.doc { min-width: 0; max-width: 46em; }
+/* A doc: the text in a reading column beside the contents. A word wider than the column, such as
+   names joined by slashes, breaks rather than push the page sideways. */
+article.doc { min-width: 0; max-width: 46em; overflow-wrap: break-word; }
 article.doc h2 { font: var(--display-weight) 22px/1.3 var(--font-display); font-stretch: var(--display-stretch); margin: 44px 0 12px; padding-top: 20px; border-top: 1px solid var(--hair); }
 article.doc h3 { font-size: 18px; font-weight: 600; margin: 30px 0 8px; }
 article.doc h4 { font-size: 16px; font-weight: 600; margin: 24px 0 6px; }
@@ -33,7 +34,11 @@ article.doc :is(h2, h3, h4):hover .anchor, article.doc .anchor:focus-visible { o
 article.doc code { font: 500 .88em var(--font-code); font-stretch: var(--code-stretch); }
 article.doc pre { background: var(--surface); border-radius: 8px; padding: 12px 14px; overflow-x: auto; line-height: 1.5; font-size: 14px; }
 article.doc pre code { font-size: 1em; }
+/* Inline code breaks between its words: each build puts every word short enough for a phone's
+   column in a .word (design/README.md says how short), kept on one line. A longer word, a path,
+   breaks anywhere. */
 article.doc :not(pre) > code { overflow-wrap: anywhere; }
+article.doc :not(pre) > code .word { white-space: nowrap; }
 /* A table keeps its columns and scrolls inside the column rather than the page sideways. */
 article.doc table { display: block; width: max-content; max-width: 100%; overflow-x: auto; margin: 0 0 18px; }
 /* A doc's figure keeps its text legible: drawn for the reading column, it shrinks to four fifths at

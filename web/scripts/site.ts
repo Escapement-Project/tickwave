@@ -77,6 +77,15 @@ const md = new MarkdownIt({ html: false, linkify: false, typographer: false }).u
 });
 type Token = ReturnType<typeof md.parse>[number];
 
+/** The longest word of inline code kept on one line (the site's design/README.md, "A doc page"). */
+const WHOLE = 22;
+// Inline code keeps each word, a run between spaces, whole where doc.css's .word holds it; a longer
+// word, a path, still breaks anywhere, so it fits a phone.
+md.renderer.rules.code_inline = (tokens, i, _options, _env, self) => {
+  const word = (w: string) => (w && [...w].length <= WHOLE ? `<span class="word">${md.utils.escapeHtml(w)}</span>` : md.utils.escapeHtml(w));
+  return `<code${self.renderAttrs(tokens[i])}>${tokens[i].content.split(" ").map(word).join(" ")}</code>`;
+};
+
 /** tickwave's group in the header: its main page under its name, then its other pages. */
 const GROUP: { href: string; name: string; page: string }[] = [
   { href: "index.html", name: "tickwave", page: "tickwave" },
