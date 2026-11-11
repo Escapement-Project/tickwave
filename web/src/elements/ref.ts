@@ -1,6 +1,6 @@
 // <tickwave-ref>: text that cites an annotation. Hover or focus opens a <tickwave-inset> in a popover
-// beside the text, so nothing on the page moves; a click or Enter opens the `for` view there, or at
-// the inset's note the pointer or the arrow keys have lit.
+// beside the text, so nothing on the page moves. The arrow keys zoom and move it, and step through its
+// notes; a click or Enter opens the `for` view there, or at the note the pointer or the keys have lit.
 
 import { autoUpdate, computePosition, flip, inline, offset, shift } from "@floating-ui/dom";
 import { REF_ATTRIBUTES } from "../attributes.ts";
@@ -64,9 +64,8 @@ export class TickwaveRef extends TickwaveElement {
       if (e.key === "Enter" || (e.key === " " && this.hasAttribute("for"))) {
         e.preventDefault();
         void this.#go();
-      } else if ((e.key === "ArrowRight" || e.key === "ArrowLeft") && this.#inset && this.#pop.matches(":popover-open")) {
+      } else if (this.#inset && this.#pop.matches(":popover-open") && this.#inset.arrowKey(e)) {
         e.preventDefault();
-        this.#inset.step(e.key === "ArrowRight" ? 1 : -1);
       }
     });
   }

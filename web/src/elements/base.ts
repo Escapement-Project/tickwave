@@ -23,6 +23,12 @@ button:disabled { opacity: .45; cursor: default; background: transparent; }
   font-weight: var(--figures-weight, 500); font-variant-numeric: tabular-nums; font-size: 12px; }
 `;
 
+/** The key that turns the wheel into a zoom: Cmd on Apple's systems, Ctrl elsewhere. */
+export function zoomKey(): "Cmd" | "Ctrl" {
+  const nav = navigator as Navigator & { userAgentData?: { platform?: string } };
+  return /mac|iphone|ipad/i.test(nav.userAgentData?.platform || navigator.platform) ? "Cmd" : "Ctrl";
+}
+
 export interface Loaded {
   readonly src: URL;
   readonly source: Source;

@@ -13,6 +13,9 @@ import type { RecordingInfo, Source } from "./source.ts";
 /** A pulse whose edges lie past the data drawn is measured once the pointer rests this long. */
 const REST_MS = 150;
 
+/** The reading where one pixel holds several edges. */
+export const ZOOM_IN = "zoom in to measure";
+
 export type Probed =
   /** An analog value or range, a level while its pulse is measured, or a request to zoom in. */
   | { readonly kind: "text"; readonly row: number; readonly lines: readonly string[] }
@@ -166,7 +169,7 @@ export class Prober {
       const t = tile.data.ticks;
       // Two edges in the pixel: no one pulse is under the pointer.
       if (lowerBound(t, Math.ceil(t1)) - lowerBound(t, Math.ceil(t0)) > 1) {
-        text(["zoom in to measure"]);
+        text([ZOOM_IN]);
         return false;
       }
       pulse = pulseFromEdges(tile.data, tile.start, tile.end, c.end, tick);
@@ -177,7 +180,7 @@ export class Prober {
       let changes = false;
       for (let k = k0; k < k1; k++) changes ||= o.changes[k] === 1;
       if (changes) {
-        text(["zoom in to measure"]);
+        text([ZOOM_IN]);
         return false;
       }
       if (k0 < o.level.length) pulse = { level: o.level[k0] ? 1 : 0, start: undefined, end: undefined, next: undefined };

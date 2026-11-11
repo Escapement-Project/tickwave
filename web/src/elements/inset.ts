@@ -1,18 +1,18 @@
 // <tickwave-inset>: one annotation's span, magnified, with its label, the annotations inside it as
 // notes, and an optional `measure` readout. It sweeps in left to right once per appearance. A reader
-// can point at a note or a pulse to read it, step through the notes by keys, and open the recording
-// at a note: in a view on the page (`for`) or on another page (`href`).
+// can point at a note or a pulse to read it, zoom in within the span, step through the notes by keys,
+// and open the recording at a note: in a view on the page (`for`) or on another page (`href`).
 
 import { covers, type Annotation } from "../annotations.ts";
 import { INSET_ATTRIBUTES, parseChannels, parsePad, parseScale, parseSweep } from "../attributes.ts";
 import { escapeHtml as esc } from "../escape.ts";
 import { reducedMotion } from "../face.ts";
-import { Prober, type Probed } from "../prober.ts";
+import { Prober, ZOOM_IN, type Probed } from "../prober.ts";
 import { formatInterval, measureReading } from "../readouts.ts";
 import { channelIndices, Plot, ROLE_WEIGHT } from "../render/plot.ts";
 import { isAbort, named, type RecordingInfo } from "../source.ts";
 import { secondsValue, toTicks } from "../time.ts";
-import { TickwaveElement, loadRecording, type Loaded } from "./base.ts";
+import { TickwaveElement, loadRecording, zoomKey, type Loaded } from "./base.ts";
 import type { TickwaveView } from "./view.ts";
 
 const CSS = `
@@ -24,7 +24,8 @@ figcaption { margin: 0 4px 2px; font-size: 12px; font-weight: 600; line-height: 
 .frame { position: relative; }
 canvas { display: block; }
 /* Over the plot: what the pointer and the keys reach. A link where the inset opens another page. */
-.hit { position: absolute; inset: 0; display: block; border-radius: 4px; -webkit-tap-highlight-color: transparent; }
+/* Two fingers zoom the trace, not the page. */
+.hit { position: absolute; inset: 0; display: block; border-radius: 4px; touch-action: pan-y; -webkit-tap-highlight-color: transparent; }
 .hit[hidden] { display: none; }
 .hit:focus { outline: none; }
 .hit:focus-visible { outline: var(--focus-width, 2px) solid var(--ink, CanvasText); outline-offset: 2px; }
@@ -86,6 +87,16 @@ export class TickwaveInset extends TickwaveElement {
   /** The note lit as the current touch began, and whether one is under way: a tap on it opens. */
   #litAtTouch: string | null = null;
   #touch = false;
+  /** Where the pointer last read, in the plot's coordinates: it reads again as the span moves. */
+  #pointer: { x: number; y: number } | null = null;
+  /** The last pointer's kind: the line says how to zoom with it. */
+  #pointerType = "mouse";
+  /** The span the reader has zoomed to, inside the inset's own; null shows all of it. */
+  #zoomed: { start: number; end: number } | null = null;
+  /** The fingers on the plot, at their x; two pinch. */
+  readonly #fingers = new Map<number, number>();
+  /** A pinch under way: the fingers' spread and middle as it began, and the span then. */
+  #pinch: { distance: number; mid: number; view: { start: number; end: number } } | null = null;
   #loaded: Loaded | null = null;
   #loadKey = "";
   #annotation: Annotation | null = null;
@@ -132,16 +143,28 @@ export class TickwaveInset extends TickwaveElement {
     const hit = this.#hit;
     hit.addEventListener("pointerdown", (e) => {
       this.#touch = e.pointerType === "touch";
+      if (this.#touch && this.#fingerDown(e)) return;
       this.#litAtTouch = this.#lit;
       this.#point(e);
     });
-    hit.addEventListener("pointermove", (e) => this.#point(e));
+    hit.addEventListener("pointermove", (e) => {
+      if (this.#fingers.has(e.pointerId)) this.#fingers.set(e.pointerId, this.#local(e).x);
+      if (this.#pinch) this.#pinchMoved();
+      else this.#point(e);
+    });
+    const lifted = (e: PointerEvent) => {
+      this.#fingers.delete(e.pointerId);
+      if (this.#fingers.size < 2) this.#pinch = null;
+    };
+    hit.addEventListener("pointerup", lifted);
+    hit.addEventListener("pointercancel", lifted);
     // A finger's pointer leaves as it lifts: what it lit stays until the next tap.
     hit.addEventListener("pointerleave", (e) => {
       if (e.pointerType !== "touch") this.clear();
     });
     hit.addEventListener("click", (e) => this.#clicked(e));
     hit.addEventListener("keydown", (e) => this.#keyed(e));
+    hit.addEventListener("wheel", (e) => this.#wheeled(e), { passive: false });
     this.#resize = new ResizeObserver(() => this.#sized());
     this.#intersect = new IntersectionObserver((seen) => {
       this.#inViewport = seen.some((s) => s.isIntersecting);
@@ -177,15 +200,19 @@ export class TickwaveInset extends TickwaveElement {
       this.#becameHidden();
       return;
     }
+    let fresh = false;
     if (!this.#visible) {
       this.#visible = true;
       // A tap can close and reopen an inset as the finger lifts; that is not a new appearance.
       this.#sweepWanted = performance.now() - this.#hiddenAt >= REAPPEAR_MS;
       if (this.#sweepWanted) this.#plot.reveal = this.#plot.layout?.plotLeft ?? 0;
       else this.#plot.reveal = null;
+      // A new appearance shows the whole span.
+      fresh = this.#sweepWanted && this.#zoomed !== null;
+      if (fresh) this.#zoomed = null;
     }
     const width = this.#frame.clientWidth;
-    if (width > 0 && width !== this.#width) {
+    if (width > 0 && (width !== this.#width || fresh)) {
       this.#width = width;
       this.#layout();
     }
@@ -254,6 +281,11 @@ export class TickwaveInset extends TickwaveElement {
     this.#plot.drawNow();
   };
 
+  /** The span shown, `{start, end}` in ticks, or null before the inset has laid out. */
+  get window(): { start: number; end: number } | null {
+    return this.#plot.layout && this.#annotation ? { ...this.#plot.view } : null;
+  }
+
   /** The annotation shown, once the recording is here. */
   get annotation(): Annotation | null {
     return this.#annotation;
@@ -273,6 +305,7 @@ export class TickwaveInset extends TickwaveElement {
     if (a?.id !== this.#annotation?.id) {
       this.#sweepWanted = true;
       this.#plot.reveal = this.#plot.layout?.plotLeft ?? 0;
+      this.#zoomed = null;
     }
     this.#annotation = a;
     this.#caption.textContent = a ? (a.label ?? a.id) : "";
@@ -284,6 +317,7 @@ export class TickwaveInset extends TickwaveElement {
     const recordingKey = `${l.src.href}\n${indices.join(" ")}`;
     if (recordingKey !== this.#recordingKey) {
       this.#recordingKey = recordingKey;
+      this.#zoomed = null;
       this.#plot.setRecording(l.source, l.info, indices);
       this.#layoutKey = "";
     }
@@ -310,7 +344,10 @@ export class TickwaveInset extends TickwaveElement {
       this.#plot.resize(this.#width, null);
     }
     const w = this.#window(l.info);
-    if (w) this.#plot.view = w;
+    if (w) {
+      this.#zoomed = this.#zoomed && this.#inSpan(this.#zoomed);
+      this.#plot.view = this.#zoomed ?? w;
+    }
     if (this.#sweepWanted && this.#plot.reveal !== null) this.#plot.reveal = this.#plot.layout!.plotLeft;
     this.#plot.invalidate();
     this.#maybeSweep();
@@ -345,6 +382,86 @@ export class TickwaveInset extends TickwaveElement {
       return { start, end: start + (layout.plotRight - layout.plotLeft) * perPx };
     }
     return { start, end: Math.max(start + 1, (a.end ?? a.start) + padTicks) };
+  }
+
+  // Zoom ------------------------------------------------------------------------------------------
+
+  /** `v` moved and widened to lie within the inset's own span; null where it takes in all of it. */
+  #inSpan(v: { start: number; end: number }): { start: number; end: number } | null {
+    const w = this.#loaded ? this.#window(this.#loaded.info) : null;
+    if (!w) return null;
+    const span = Math.max(this.#plot.minSpan, v.end - v.start);
+    if (span >= w.end - w.start) return null;
+    const start = Math.min(Math.max(w.start, (v.start + v.end) / 2 - span / 2), w.end - span);
+    return { start, end: start + span };
+  }
+
+  /** Shows `v`, within the inset's span, and reads again at the pointer. */
+  #zoomTo(v: { start: number; end: number }): void {
+    const w = this.#loaded ? this.#window(this.#loaded.info) : null;
+    if (!w) return;
+    this.#zoomed = this.#inSpan(v);
+    this.#plot.view = this.#zoomed ?? w;
+    // The notes take their places in the new span before the pointer finds one.
+    this.#plot.drawNow();
+    if (this.#pointer) this.#pointAt(this.#pointer);
+  }
+
+  /** Zooms by `factor` (above 1 zooms out), keeping tick `at` where it is. */
+  #zoomBy(factor: number, at: number): void {
+    const { start, end } = this.#plot.view;
+    const span = Math.max(this.#plot.minSpan, (end - start) * factor);
+    const f = (at - start) / (end - start);
+    this.#zoomTo({ start: at - f * span, end: at - f * span + span });
+  }
+
+  #panBy(ticks: number): void {
+    const { start, end } = this.#plot.view;
+    this.#zoomTo({ start: start + ticks, end: end + ticks });
+  }
+
+  /** Ctrl or Cmd with the wheel, and a trackpad's pinch, zoom about the pointer. Zoomed in, a
+   * sideways swipe or Shift with the wheel moves along the span. Otherwise the page scrolls. */
+  #wheeled(e: WheelEvent): void {
+    const l = this.#plot.layout;
+    if (!l || !this.#loaded) return;
+    const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? l.width : 1;
+    const dx = e.deltaX * unit;
+    const dy = e.deltaY * unit;
+    const p = this.#local(e);
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      this.#pointer = p;
+      this.#zoomBy(Math.exp(dy * 0.004), this.#plot.tickAt(p.x));
+    } else if (this.#zoomed && (e.shiftKey || Math.abs(dx) > Math.abs(dy))) {
+      e.preventDefault();
+      this.#pointer = p;
+      this.#panBy((Math.abs(dx) > Math.abs(dy) ? dx : dy) * this.#plot.perPx);
+    }
+  }
+
+  /** Takes a finger down; true if it begins a pinch, or comes after one, rather than pointing. */
+  #fingerDown(e: PointerEvent): boolean {
+    if (this.#fingers.size >= 2) return true;
+    this.#fingers.set(e.pointerId, this.#local(e).x);
+    if (this.#fingers.size < 2) return false;
+    const [a, b] = [...this.#fingers.values()];
+    this.#pinch = { distance: Math.abs(a - b) || 1, mid: (a + b) / 2, view: { ...this.#plot.view } };
+    this.clear();
+    return true;
+  }
+
+  /** Two fingers zoom by their spread, and the tick under their middle stays under it. */
+  #pinchMoved(): void {
+    const p = this.#pinch;
+    const l = this.#plot.layout;
+    if (!p || !l || this.#fingers.size !== 2) return;
+    const [a, b] = [...this.#fingers.values()];
+    const span = ((p.view.end - p.view.start) * p.distance) / (Math.abs(a - b) || 1);
+    const width = l.plotRight - l.plotLeft;
+    const anchor = p.view.start + ((p.mid - l.plotLeft) / width) * (p.view.end - p.view.start);
+    const start = anchor - (((a + b) / 2 - l.plotLeft) / width) * span;
+    this.#zoomTo({ start, end: start + span });
   }
 
   #maybeSweep(): void {
@@ -469,16 +586,29 @@ export class TickwaveInset extends TickwaveElement {
     if (address || popped) hit.removeAttribute("role");
     else hit.setAttribute("role", view ? "button" : "group");
     hit.setAttribute("aria-label", a ? (a.label ?? a.id) : "");
-    if (this.#plot.laneNotes().length > 0) hit.setAttribute("aria-description", "The left and right arrow keys step through its parts.");
-    else hit.removeAttribute("aria-description");
+    const notes = this.#plot.laneNotes().length > 0;
+    hit.setAttribute(
+      "aria-description",
+      `The up and down arrow keys zoom, and left and right move along it${notes ? "; Shift with left and right steps through its parts" : ""}.`,
+    );
   }
 
-  /** What lies under the pointer: a note lights, a row reads the pulse or the value there. */
+  /** A pointer's place in the plot's coordinates. */
+  #local(e: PointerEvent | WheelEvent): { x: number; y: number } {
+    const box = this.#plot.canvas.getBoundingClientRect();
+    return { x: e.clientX - box.left, y: e.clientY - box.top };
+  }
+
   #point(e: PointerEvent): void {
+    this.#pointerType = e.pointerType;
+    this.#pointAt(this.#local(e));
+  }
+
+  /** What lies at `p`: a note lights, a row reads the pulse or the value there. */
+  #pointAt(p: { x: number; y: number }): void {
     const l = this.#plot.layout;
     if (!l || !this.#loaded) return;
-    const box = this.#plot.canvas.getBoundingClientRect();
-    const p = { x: e.clientX - box.left, y: e.clientY - box.top };
+    this.#pointer = p;
     const hit = this.#plot.hit(p.x, p.y);
     const row = hit.area === "row" ? hit.row : null;
     if (row !== this.#plot.hoverRow) {
@@ -527,7 +657,9 @@ export class TickwaveInset extends TickwaveElement {
     }
     const name: Item = [["what", track.channel.name]];
     if (r.kind === "text") {
-      this.#read([name, ...r.lines.map((t): Item => [[t === "high" || t === "low" ? "level" : "", t]])]);
+      const items = [name, ...r.lines.map((t): Item => [[t === "high" || t === "low" ? "level" : "", t]])];
+      if (r.lines.includes(ZOOM_IN)) items.push([["what", this.#pointerType === "touch" ? "pinch" : `${zoomKey()} + scroll`]]);
+      this.#read(items);
       return;
     }
     const f = r.figures;
@@ -568,21 +700,51 @@ export class TickwaveInset extends TickwaveElement {
     while (r.childElementCount > 1 && this.#line.scrollWidth > this.#line.clientWidth) r.lastElementChild!.remove();
   }
 
+  /**
+   * Answers an arrow key as the inset's own: up and down zoom in and out, left and right move along
+   * the span, and Shift with left or right steps through the notes. True if it answered.
+   */
+  arrowKey(e: KeyboardEvent): boolean {
+    if (e.altKey || e.ctrlKey || e.metaKey) return false;
+    const { start, end } = this.#plot.view;
+    if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+      const dir = e.key === "ArrowRight" ? 1 : -1;
+      if (e.shiftKey) this.#step(dir);
+      else this.#panBy(dir * (end - start) * 0.125);
+    } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+      // About the lit note, which stays where it is, or else the middle.
+      const a = this.#lit ? this.#loaded?.annotations.byId.get(this.#lit) : undefined;
+      const at = a ? (a.start + (a.end ?? a.start)) / 2 : (start + end) / 2;
+      this.#zoomBy(e.key === "ArrowUp" ? 1 / 1.6 : 1.6, at);
+    } else return false;
+    return true;
+  }
+
   /** Lights the next note in time (`dir` 1) or the one before, and has it said. */
-  step(dir: 1 | -1): void {
+  #step(dir: 1 | -1): void {
     const l = this.#loaded;
     if (!l) return;
     const notes = [...this.#plot.laneNotes()].sort((x, y) => x.start - y.start || (x.end ?? x.start) - (y.end ?? y.start));
     if (notes.length === 0) return;
     const at = notes.findIndex((a) => a.id === this.#lit);
-    const next = at < 0 ? (dir > 0 ? 0 : notes.length - 1) : Math.max(0, Math.min(notes.length - 1, at + dir));
+    const n = notes[at < 0 ? (dir > 0 ? 0 : notes.length - 1) : Math.max(0, Math.min(notes.length - 1, at + dir))];
+    this.#pointer = null;
     this.#prober.pointer = null;
     this.#prober.hide();
-    this.#light(notes[next].id, true);
+    // Zoomed in, the span moves to the note: at its width, or wider to take the note in whole.
+    const v = this.#plot.view;
+    const end = n.end ?? n.start;
+    if (this.#zoomed && (n.start < v.start || end > v.end)) {
+      const span = Math.max(v.end - v.start, (end - n.start) * 1.25);
+      const mid = (n.start + end) / 2;
+      this.#zoomTo({ start: mid - span / 2, end: mid + span / 2 });
+    }
+    this.#light(n.id, true);
   }
 
   /** Lights nothing and reads nothing. */
   clear(): void {
+    this.#pointer = null;
     this.#prober.pointer = null;
     this.#prober.hide();
     if (this.#plot.hoverRow !== null) {
@@ -615,10 +777,8 @@ export class TickwaveInset extends TickwaveElement {
   }
 
   #keyed(e: KeyboardEvent): void {
-    if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
-      e.preventDefault();
-      this.step(e.key === "ArrowRight" ? 1 : -1);
-    } else if (e.key === "Escape" && this.#lit !== null) {
+    if (this.arrowKey(e)) e.preventDefault();
+    else if (e.key === "Escape" && this.#lit !== null) {
       e.preventDefault();
       e.stopPropagation();
       this.clear();

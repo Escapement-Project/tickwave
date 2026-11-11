@@ -12,7 +12,7 @@ import { lowerBound } from "../search.ts";
 import { channelIndices, Plot } from "../render/plot.ts";
 import { isAbort, named, sampleAtOrBefore, sampleTick, type RecordingInfo } from "../source.ts";
 import { parseTime, toTicks, type TimeSpec } from "../time.ts";
-import { TickwaveElement, loadRecording, type Loaded } from "./base.ts";
+import { TickwaveElement, loadRecording, zoomKey, type Loaded } from "./base.ts";
 
 const CSS = `
 .box { background: var(--surface, Canvas); border: 1px solid var(--hair, GrayText); border-radius: 10px; }
@@ -89,8 +89,6 @@ const SNAP_PX = 6;
 const ROW_LIMITS = { digital: [24, 400], analog: [40, 600] } as const;
 /** A handle's arrow keys move it this far, or the second with Shift. */
 const ROW_STEP = [4, 16] as const;
-/** The narrowest view: this many CSS pixels a tick. */
-const MAX_PX_PER_TICK = 40;
 
 interface Drag {
   readonly id: number;
@@ -492,11 +490,6 @@ export class TickwaveView extends TickwaveElement {
 
   // Window ---------------------------------------------------------------------------------------
 
-  #minSpan(): number {
-    const l = this.#plot.layout;
-    return l ? Math.max(2, (l.plotRight - l.plotLeft) / MAX_PX_PER_TICK) : 2;
-  }
-
   /**
    * The last tick the view goes to: the furthest end of the channels it shows, or the recording's
    * length when it shows every channel. A page that shows a few channels of a longer recording sees
@@ -516,7 +509,7 @@ export class TickwaveView extends TickwaveElement {
     if (!info) return;
     const extent = this.#extent();
     let { start, end } = this.#plot.view;
-    const span = Math.min(extent, Math.max(this.#minSpan(), end - start));
+    const span = Math.min(extent, Math.max(this.#plot.minSpan, end - start));
     const mid = (start + end) / 2;
     start = Math.min(Math.max(0, mid - span / 2), extent - span);
     end = start + span;
@@ -562,7 +555,7 @@ export class TickwaveView extends TickwaveElement {
     }
     this.#plot.focus = a.id;
     const span = a.end === null ? 0 : a.end - a.start;
-    const pad = span > 0 ? span * 0.25 : Math.max(this.#minSpan() * 10, loaded.info.length / 2000);
+    const pad = span > 0 ? span * 0.25 : Math.max(this.#plot.minSpan * 10, loaded.info.length / 2000);
     this.#plot.view = { start: a.start - pad, end: (a.end ?? a.start) + pad };
     if (a.kind !== null && this.#kind.value !== a.kind) {
       this.#kind.value = a.kind;
@@ -596,7 +589,7 @@ export class TickwaveView extends TickwaveElement {
     if (!this.#plot.layout) return;
     const { start, end } = this.#plot.view;
     const at = x === null ? (start + end) / 2 : this.#plot.tickAt(x);
-    const span = Math.max(this.#minSpan(), (end - start) * factor);
+    const span = Math.max(this.#plot.minSpan, (end - start) * factor);
     const f = (at - start) / (end - start);
     this.#plot.view = { start: at - f * span, end: at - f * span + span };
     this.#viewChanged();
@@ -805,9 +798,7 @@ export class TickwaveView extends TickwaveElement {
 
   #hint(): void {
     const hint = this.root.querySelector(".hint") as HTMLElement;
-    const nav = navigator as Navigator & { userAgentData?: { platform?: string } };
-    const mac = /mac|iphone|ipad/i.test(nav.userAgentData?.platform || navigator.platform);
-    hint.textContent = `${mac ? "Cmd" : "Ctrl"} + scroll to zoom`;
+    hint.textContent = `${zoomKey()} + scroll to zoom`;
     hint.classList.add("shown");
     clearTimeout(this.#hintTimer);
     this.#hintTimer = window.setTimeout(() => hint.classList.remove("shown"), 1200);

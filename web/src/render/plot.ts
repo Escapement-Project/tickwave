@@ -95,6 +95,9 @@ export interface PulseMark {
   readonly period: string | null;
 }
 
+/** The closest zoom: this many CSS pixels a tick. */
+const MAX_PX_PER_TICK = 40;
+
 /** A span's figure: its box's height, and the room it keeps from the span's ends. */
 const FIGURE_BOX = 16;
 const FIGURE_PAD = 4;
@@ -308,6 +311,12 @@ export class Plot {
   }
 
   // Coordinates --------------------------------------------------------------------------------
+
+  /** The narrowest span a reader can zoom to, in ticks: MAX_PX_PER_TICK pixels a tick. */
+  get minSpan(): number {
+    const l = this.layout;
+    return l ? Math.max(2, (l.plotRight - l.plotLeft) / MAX_PX_PER_TICK) : 2;
+  }
 
   /** Ticks a CSS pixel in the plot. */
   get perPx(): number {

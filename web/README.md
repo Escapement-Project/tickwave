@@ -291,9 +291,16 @@ too narrow to label. Pointing at a trace reads the pulse there, as the view's la
 and width, where it starts in the span, then its period, frequency and duty, as many of them as
 fit on the line. On an analog channel it reads the value. Moving away puts the measure back.
 
-The inset is one Tab stop, named by its label. The left and right arrow keys step through its
-notes, and a screen reader says each. Escape lights none. On a touch screen, a tap lights a note
-or reads a pulse.
+A reader can zoom in within the inset's span, as close as the view goes. Ctrl or Cmd with the
+wheel, a trackpad pinch, or two fingers zoom it. Zoomed in, Shift with the wheel or a sideways swipe
+moves along the span. The inset zooms out as far as its span and moves no further than its ends.
+Where one pixel holds several edges, the line says how to zoom in. Shown again after 800 ms, or at
+another annotation, the inset shows its whole span.
+
+The inset is one Tab stop, named by its label. The up and down arrow keys zoom in and out, about
+the lit note or else the middle. The left and right arrows move along the span. Shift with left or
+right steps through the notes, and a screen reader says each. Zoomed in, the span moves to take in
+the note stepped to. Escape lights none. On a touch screen, a tap lights a note or reads a pulse.
 
 With `for` or `href`, the inset opens the recording at a note. A click on a note, Enter on the
 note the keys lit, or a second tap on a lit note opens it there. A click elsewhere on the plot
@@ -306,8 +313,9 @@ click, and shows its address on hover.
 
 An inset the pointer passes through, as in a chart's popover, where `pointer-events` is `none`,
 does none of this. Inside a popover the inset is no Tab stop, and the element that opened it keeps
-the focus. A reference steps through its inset's notes with `step(1)` and `step(-1)`, reads the
-lit one from `lit`, and lights none with `clear()`.
+the focus. A reference passes its arrow keys to `arrowKey(event)`, which answers them as the
+inset's own and says whether it did. It reads the lit note from `lit`, and lights none with
+`clear()`.
 
 An inset takes its final height once its recording's head and sidecar are in. The line under the
 trace is held from then, where the annotation asks for a measure or a reader can point at the
@@ -315,15 +323,16 @@ inset, so neither the data's arrival nor the pointer moves anything below it. Be
 no label and no rows to size by. A page that wants nothing to move at all gives the inset its height, as
 tickwave's main page does for the figure beside its name. `settled()` and the `tickwave-ready`
 event (`{annotation, height}`) work as on the view, so a page can lay itself out around an inset's
-final height. `sweeping` says whether the sweep is playing.
+final height. `sweeping` says whether the sweep is playing, and `window` gives the span shown,
+`{start, end}` in ticks.
 
 ### `<tickwave-ref>`
 
 A phrase that cites an annotation. Pointing at it, or reaching it with Tab, opens an inset in a
 popover beside the text, so nothing on the page moves. The pointer can move into the popover to
 read the inset, and has 300 ms to cross between the text and the popover. Moving the pointer or
-the focus away, or Escape, closes the popover. With the focus on the reference, the left and
-right arrow keys step through the inset's notes. A click, Enter or Space opens its view at the
+the focus away, or Escape, closes the popover. With the focus on the reference, the arrow keys
+work the inset as they do an inset with the focus. A click, Enter or Space opens its view at the
 note the pointer or the keys lit, or else at the annotation. A screen reader cannot reach into the
 drawn inset, so the annotation's label and text describe the reference itself.
 
