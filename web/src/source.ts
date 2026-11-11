@@ -120,6 +120,34 @@ export interface Samples {
   /** The index of `values[0]`. */
   readonly first: number;
   readonly values: Float64Array | Float32Array;
+  /**
+   * Optional: each whole run of 64 samples' smallest and largest value, NaN left out. Run r covers
+   * `values[64 r]` to `values[64 r + 63]`. A source that leaves it out costs the renderer the
+   * time to build what each draw reads.
+   */
+  readonly runs?: SampleRuns;
+}
+
+export interface SampleRuns {
+  readonly min: Float64Array | Float32Array;
+  readonly max: Float64Array | Float32Array;
+}
+
+/** Samples a run of `Samples.runs` covers. */
+export const SAMPLES_PER_RUN = 64;
+
+/** Sets runs [r0, r1) of `min` and `max` from `values`. */
+export function fillRuns(values: Samples["values"], min: SampleRuns["min"], max: SampleRuns["max"], r0: number, r1: number): void {
+  for (let r = r0; r < r1; r++) {
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (let i = r * SAMPLES_PER_RUN; i < (r + 1) * SAMPLES_PER_RUN; i++) {
+      if (values[i] < lo) lo = values[i];
+      if (values[i] > hi) hi = values[i];
+    }
+    min[r] = lo;
+    max[r] = hi;
+  }
 }
 
 export interface Source {

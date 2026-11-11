@@ -368,6 +368,28 @@ test("analog: every sample is the export's value, and the channel ends with its 
   assert.equal(w.values[0], 3.26922607421875);
 });
 
+test("analog: samples come with each whole run's smallest and largest value, from the first", async () => {
+  const r = await openTickwave("fixtures/swd50-cut.tickwave");
+  // The whole channel, and a window that starts off a run's boundary and ends inside a run.
+  for (const [ch, s, e] of [
+    [0, 0, 50000],
+    [1, 1020, 4013],
+  ]) {
+    const got = await r.samples(ch, s, e);
+    const n = Math.floor(got.values.length / 64);
+    assert.ok(got.runs && n > 10);
+    const want = { min: [] as number[], max: [] as number[] };
+    for (let k = 0; k < n; k++) {
+      const run = numbers(got.values.subarray(64 * k, 64 * k + 64));
+      want.min.push(Math.min(...run));
+      want.max.push(Math.max(...run));
+    }
+    assert.deepEqual({ min: numbers(got.runs.min), max: numbers(got.runs.max) }, want, `[${s}, ${e}), channel ${ch}`);
+    // Not vacuous: the runs differ.
+    assert.ok(new Set(want.min).size > 1 && new Set(want.max).size > 1);
+  }
+});
+
 test("analog: the head's overview, as the TypeScript computation has it from the samples", async () => {
   const r = await openTickwave("fixtures/swd50-cut.tickwave");
   assert.deepEqual(r.header.overview, [12, 16]);

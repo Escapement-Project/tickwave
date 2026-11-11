@@ -72,11 +72,13 @@ async function handle(m: Request, signal: AbortSignal): Promise<unknown> {
   }
 }
 
-/** The buffers in an answer, to transfer rather than copy. */
+/** The buffers in an answer, to transfer rather than copy: its arrays, and those of a record in it, such as a sample tile's runs. */
 function buffers(v: unknown): Transferable[] {
   if (!v || typeof v !== "object") return [];
   if (ArrayBuffer.isView(v)) return [v.buffer as ArrayBuffer];
-  return Object.values(v).flatMap((x) => (ArrayBuffer.isView(x) ? [x.buffer as ArrayBuffer] : []));
+  const views = (o: object) => Object.values(o).filter((x) => ArrayBuffer.isView(x));
+  const nested = Object.values(v).flatMap((x) => (x && typeof x === "object" && !ArrayBuffer.isView(x) && !Array.isArray(x) ? views(x) : []));
+  return [...new Set([...views(v), ...nested].map((x) => x.buffer as ArrayBuffer))];
 }
 
 self.onmessage = async (e: MessageEvent<Request | { op: "abort"; id: number }>) => {

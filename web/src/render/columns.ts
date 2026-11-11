@@ -2,7 +2,17 @@
 // Pure functions, so the drawing rules can be tested without a canvas.
 
 import { lowerBound } from "../search.ts";
-import { sampleIndexAtOrAfter, type AnalogOverview, type DigitalOverview, type Edges, type Ratio, type Samples } from "../source.ts";
+import {
+  fillRuns,
+  sampleIndexAtOrAfter,
+  SAMPLES_PER_RUN,
+  type AnalogOverview,
+  type DigitalOverview,
+  type Edges,
+  type Ratio,
+  type SampleRuns,
+  type Samples,
+} from "../source.ts";
 
 export const NONE = 0;
 export const LOW = 1;
@@ -104,42 +114,33 @@ function connect({ min, max }: AnalogColumns): void {
   }
 }
 
-/** Samples a run holds. */
-const RUN = 64;
+const RUN = SAMPLES_PER_RUN;
 
-/**
- * The smallest and largest value of each whole run of RUN samples in a tile, from its first. A
- * run's min is NaN until the run is built. No built run's min is NaN: NaN samples are left out.
- */
-interface Runs {
-  readonly min: Float64Array;
-  readonly max: Float64Array;
-}
-
-// Kept while the tile lives, so a redraw reads a column's whole runs rather than every sample in
-// them. A draw builds only the runs it reads, so a tile's first draw pays for the view alone.
-const tileRuns = new WeakMap<Samples, Runs>();
+// The runs of a tile whose source sent none, kept while the tile lives, so a redraw reads a
+// column's whole runs rather than every sample in them. A draw builds only the runs it reads, so
+// a tile's first draw pays for the view alone. A run's min is NaN until the run is built; no built
+// run's is, since NaN samples are left out.
+const tileRuns = new WeakMap<Samples, SampleRuns>();
 
 /** The tile's runs, with runs [r0, r1) built. */
-function runsOf(s: Samples, r0: number, r1: number): Runs {
+function runsOf(s: Samples, r0: number, r1: number): SampleRuns {
+  if (s.runs) return s.runs;
   let runs = tileRuns.get(s);
   if (!runs) {
     const n = Math.floor(s.values.length / RUN);
     runs = { min: new Float64Array(n).fill(NaN), max: new Float64Array(n) };
     tileRuns.set(s, runs);
   }
-  const { min, max } = runs;
-  const v = s.values;
-  for (let r = r0; r < r1; r++) {
-    if (!Number.isNaN(min[r])) continue;
-    let lo = Infinity;
-    let hi = -Infinity;
-    for (let i = r * RUN; i < (r + 1) * RUN; i++) {
-      if (v[i] < lo) lo = v[i];
-      if (v[i] > hi) hi = v[i];
+  let r = r0;
+  while (r < r1) {
+    if (!Number.isNaN(runs.min[r])) {
+      r++;
+      continue;
     }
-    min[r] = lo;
-    max[r] = hi;
+    let end = r + 1;
+    while (end < r1 && Number.isNaN(runs.min[end])) end++;
+    fillRuns(s.values, runs.min, runs.max, r, end);
+    r = end;
   }
   return runs;
 }

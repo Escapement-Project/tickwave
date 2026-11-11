@@ -19,7 +19,7 @@ import {
   type Grid,
 } from "../src/render/columns.ts";
 import { MemorySource } from "../src/memory-source.ts";
-import { sampleTick, type Ratio, type Samples } from "../src/source.ts";
+import { fillRuns, sampleTick, SAMPLES_PER_RUN, type Ratio, type Samples } from "../src/source.ts";
 
 const SWDIO = new Float64Array([377094556, 377095556, 377096556, 377097556, 377099556, 377100556, 377101556, 377104078, 377106074]);
 
@@ -188,6 +188,11 @@ test("analog from samples: each column holds exactly the samples whose ticks lie
     // A stretch of NaN longer than a run.
     if (tile % 5 === 0) values.fill(NaN, int(values.length), int(values.length) + 150);
     const s: Samples = { first: int(300), values };
+    // The same tile as a source that sends its runs sends it.
+    const n = Math.floor(values.length / SAMPLES_PER_RUN);
+    const runs = { min: new Float32Array(n), max: new Float32Array(n) };
+    fillRuns(values, runs.min, runs.max, 0, n);
+    const sent: Samples = { ...s, runs };
     const tick = (i: number) => sampleTick(first, period, s.first + i);
     const span = tick(values.length) - tick(0) + 1;
     // Many grids over one tile: each reads the runs the ones before it built, and builds the rest.
@@ -196,10 +201,36 @@ test("analog from samples: each column holds exactly the samples whose ticks lie
       const g: Grid = { x0: tick(0) - span / 4 + random() * span, per, count: 1 + int(40) };
       const from = tick(0) - 20 + int(span);
       const to = from + int(span);
-      const got = analogFromSamples(g, s, first, period, from, to);
-      assert.deepEqual({ min: [...got.min], max: [...got.max] }, walked(g, s, first, period, from, to), `tile ${tile}, grid ${grid}`);
+      const want = walked(g, s, first, period, from, to);
+      for (const [how, tileOf] of [["built", s], ["sent", sent]] as const) {
+        const got = analogFromSamples(g, tileOf, first, period, from, to);
+        assert.deepEqual({ min: [...got.min], max: [...got.max] }, want, `tile ${tile}, grid ${grid}, runs ${how}`);
+      }
     }
   }
+});
+
+test("analog from samples: a column reads the runs its tile came with", () => {
+  // One column over samples 0 to 199: three whole runs, and samples 192 to 199 one by one. The
+  // runs say what no sample does, so the column shows they were read.
+  const values = new Float64Array(200).fill(5);
+  const runs = { min: new Float64Array([4, 3, 2]), max: new Float64Array([6, 7, 8]) };
+  const c = analogFromSamples({ x0: 0, per: 200, count: 1 }, { first: 0, values, runs }, 0, { num: 1, den: 1 }, 0, 200);
+  assert.deepEqual([c.min[0], c.max[0]], [2, 8]);
+});
+
+test("analog from samples: a draw builds the runs either side of one an earlier draw built", () => {
+  // Ten runs, each sample its run's number, but run 4 holds the smallest and largest values.
+  const values = new Float64Array(640).map((_, i) => Math.floor(i / 64));
+  values[4 * 64 + 10] = -1;
+  values[4 * 64 + 20] = 99;
+  const s = { first: 0, values };
+  const period = { num: 1, den: 1 };
+  // One column over run 3 alone builds it and nothing else.
+  const a = analogFromSamples({ x0: 192, per: 64, count: 1 }, s, 0, period, 0, 640);
+  assert.deepEqual([a.min[0], a.max[0]], [3, 3]);
+  const b = analogFromSamples({ x0: 0, per: 640, count: 1 }, s, 0, period, 0, 640);
+  assert.deepEqual([b.min[0], b.max[0]], [-1, 99]);
 });
 
 test("line samples: those near the grid, out to one drawn sample past each side", () => {

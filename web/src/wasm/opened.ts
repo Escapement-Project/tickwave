@@ -6,8 +6,10 @@ import type { Recording as WasmRecording } from "../../../crates/wasm/pkg/escape
 import { lowerBound } from "../search.ts";
 import {
   aborted,
+  fillRuns,
   named,
   sampleIndexAtOrAfter,
+  SAMPLES_PER_RUN,
   sampleTick,
   type AnalogOverview,
   type Channel,
@@ -407,7 +409,11 @@ export class Opened {
         if (hi > lo) values.set(a.values.subarray(lo - a.first, hi - a.first), lo - i0);
       }
     }
-    return { first: i0, values };
+    // Built here, off the page's thread, so a draw never builds them.
+    const n = Math.floor(values.length / SAMPLES_PER_RUN);
+    const runs = { min: new Float32Array(n), max: new Float32Array(n) };
+    fillRuns(values, runs.min, runs.max, 0, n);
+    return { first: i0, values, runs };
   }
 
   /**
