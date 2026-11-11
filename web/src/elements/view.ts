@@ -1,4 +1,4 @@
-// <tickwave-view>: the full capture. Collapsed to one line until `open`; open, a time axis, one row
+// <tickwave-view>: the full capture. Collapsed to its title and facts until `open`; open, a time axis, one row
 // a channel and an annotation lane, with zoom, pan, cursors, a selection and its readouts.
 
 import { ofKind, type Annotation } from "../annotations.ts";
@@ -15,14 +15,18 @@ import { parseTime, toTicks, type TimeSpec } from "../time.ts";
 import { DRAG_PX, TickwaveElement, loadRecording, zoomKey, type Loaded } from "./base.ts";
 
 const CSS = `
+:host { display: flex; flex-direction: column; }
 .box { background: var(--surface, Canvas); border: 1px solid var(--hair, GrayText); border-radius: 10px; }
-.summary { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; padding: 8px 10px 8px 14px; }
-.summary .title { font-weight: 600; }
-.summary .facts { color: var(--ink-2, GrayText); font-size: 13px; flex: 1 1 12em; }
-.viewer { display: flex; flex-direction: column; height: 100%; box-sizing: border-box; padding: 6px 0 8px; }
-.viewer[hidden], .summary[hidden] { display: none; }
-.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 0 10px 6px 14px; }
-.toolbar .title { font-weight: 600; margin-right: auto; }
+:host([open]) .summary { border-radius: 10px 10px 0 0; }
+.summary { flex: none; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 2px 12px;
+  padding: 8px 10px 8px 14px; }
+.summary .title { font-weight: 600; overflow-wrap: anywhere; }
+.summary .facts { grid-row: 2; grid-column: 1; color: var(--ink-2, GrayText); font-size: 13px; }
+.summary .toggle { grid-row: 1 / 3; grid-column: 2; }
+.viewer { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; box-sizing: border-box; padding: 6px 0 8px;
+  border-top: 0; border-radius: 0 0 10px 10px; }
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px;
+  padding: 0 10px 6px 14px; }
 .toolbar .group { display: flex; gap: 4px; align-items: center; }
 .plot { position: relative; flex: 1 1 auto; min-height: 0; touch-action: pan-y; cursor: crosshair; }
 .plot:focus-visible { outline-offset: -2px; border-radius: 4px; }
@@ -36,7 +40,6 @@ canvas { display: block; }
 .readout select { min-height: 22px; padding: 1px 4px; font-size: 12px; }
 .steps { display: flex; gap: 4px; align-items: center; }
 .steps .count { min-width: 5.5em; text-align: center; color: var(--ink-2, GrayText); font-size: 13px; }
-.steps[hidden] { display: none; }
 .hint { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); pointer-events: none;
   padding: 6px 12px; border-radius: 6px; background: var(--ink, CanvasText); color: var(--page, Canvas);
   font-size: 13px; white-space: nowrap; opacity: 0; transition: opacity .15s; }
@@ -45,7 +48,6 @@ canvas { display: block; }
 .reading { position: absolute; z-index: 1; pointer-events: none; padding: 3px 7px; border-radius: 5px;
   background: var(--raised, Canvas); border: 1px solid var(--hair, GrayText); color: var(--ink, CanvasText);
   font-size: 12px; line-height: 1.4; white-space: nowrap; font-variant-numeric: tabular-nums; }
-.reading[hidden] { display: none; }
 .reading .more { color: var(--ink-2, GrayText); }
 .row-handle { position: absolute; left: 0; height: 8px; margin-top: -4px; cursor: row-resize; touch-action: none; }
 @media (pointer: coarse) { .row-handle { height: 24px; margin-top: -12px; } }
@@ -57,22 +59,20 @@ canvas { display: block; }
 const HTML = `
 <div class="summary box" part="summary">
   <span class="title" part="title"></span><span class="facts" part="facts"></span>
-  <button type="button" class="open" part="button open-button">Open</button>
+  <button type="button" class="toggle" part="button open-button">Open</button>
 </div>
 <div class="viewer box" part="viewer" hidden>
   <div class="toolbar" part="toolbar">
-    <span class="title" part="title"></span>
+    <div class="group">
+      <button type="button" class="zoom-out" part="button" aria-label="Zoom out">−</button>
+      <button type="button" class="zoom-in" part="button" aria-label="Zoom in">+</button>
+      <button type="button" class="fit" part="button">Fit</button>
+    </div>
     <div class="steps" part="steps" hidden>
       <select class="kind" aria-label="Annotation kind"></select>
       <button type="button" class="prev" part="button" aria-label="Previous">‹</button>
       <span class="count figures" aria-live="polite"></span>
       <button type="button" class="next" part="button" aria-label="Next">›</button>
-    </div>
-    <div class="group">
-      <button type="button" class="zoom-out" part="button" aria-label="Zoom out">−</button>
-      <button type="button" class="zoom-in" part="button" aria-label="Zoom in">+</button>
-      <button type="button" class="fit" part="button">Fit</button>
-      <button type="button" class="close" part="button">Close</button>
     </div>
   </div>
   <div class="plot" part="plot" tabindex="0" role="group" aria-roledescription="capture"><canvas aria-hidden="true"></canvas><div class="hint" part="hint" aria-hidden="true"></div><div class="reading" part="reading" aria-hidden="true" hidden></div></div>
@@ -103,6 +103,7 @@ export class TickwaveView extends TickwaveElement {
   static observedAttributes = VIEW_ATTRIBUTES;
   readonly #plot: Plot;
   readonly #summary: HTMLElement;
+  readonly #toggle: HTMLButtonElement;
   readonly #viewer: HTMLElement;
   readonly #plotBox: HTMLElement;
   readonly #readout: HTMLElement;
@@ -147,6 +148,7 @@ export class TickwaveView extends TickwaveElement {
   constructor() {
     super(CSS, HTML);
     this.#summary = this.root.querySelector(".summary")!;
+    this.#toggle = this.root.querySelector(".toggle")!;
     this.#viewer = this.root.querySelector(".viewer")!;
     this.#plotBox = this.root.querySelector(".plot")!;
     this.#readout = this.root.querySelector(".readout")!;
@@ -175,16 +177,9 @@ export class TickwaveView extends TickwaveElement {
     };
     this.#resize = new ResizeObserver(() => this.#sized());
     const on = (sel: string, f: () => void) => this.root.querySelector(sel)!.addEventListener("click", f);
-    // The pressed button hides: the focus goes where the reader went, not to the page's start.
-    on(".open", () => {
-      this.open = true;
+    on(".toggle", () => {
+      this.open = !this.open;
       this.update();
-      this.#plotBox.focus();
-    });
-    on(".close", () => {
-      this.open = false;
-      this.update();
-      (this.root.querySelector(".open") as HTMLElement).focus();
     });
     on(".zoom-in", () => this.#zoomBy(1 / 1.6, null));
     on(".zoom-out", () => this.#zoomBy(1.6, null));
@@ -243,8 +238,8 @@ export class TickwaveView extends TickwaveElement {
 
   protected update(): void {
     const open = this.open;
-    this.#summary.hidden = open;
     this.#viewer.hidden = !open;
+    this.#renderSummary();
     if (open && !this.#wasOpen) this.emit("tickwave-open", { src: this.getAttribute("src") });
     this.#wasOpen = open;
     const src = this.getAttribute("src");
@@ -259,7 +254,6 @@ export class TickwaveView extends TickwaveElement {
     }
     if (!open) {
       this.#fetchHead();
-      this.#renderSummary();
       return;
     }
     if (!src) return;
@@ -304,12 +298,14 @@ export class TickwaveView extends TickwaveElement {
     const src = this.#src;
     const title = this.#summary.querySelector(".title")!;
     const facts = this.#summary.querySelector(".facts")!;
+    const action = this.open ? "Close" : "Open";
+    this.#toggle.textContent = action;
     if (!src) return;
     // Collapsed, the view shows what is here; the head arrives once the view scrolls into sight.
     const info = peekInfo(src);
     title.textContent = info?.title ?? decodeURIComponent(src.pathname.split("/").pop() ?? "");
-    // A page with several views has several Open buttons: each names its recording.
-    this.root.querySelector(".open")!.setAttribute("aria-label", `Open ${title.textContent}`);
+    // A page with several views has several of these buttons: each names its recording.
+    this.#toggle.setAttribute("aria-label", `${action} ${title.textContent}`);
     const parts = (info ? summaryFacts(info) : []).flatMap(([name, text], i) => [
       ...(i > 0 ? [part("fact-separator", "; ")] : []),
       part(`fact ${name}`, text),
@@ -320,8 +316,7 @@ export class TickwaveView extends TickwaveElement {
   #apply(): void {
     const l = this.#loaded;
     if (!l) return;
-    (this.root.querySelector(".toolbar .title") as HTMLElement).textContent = l.info.title;
-    this.root.querySelector(".close")!.setAttribute("aria-label", `Close ${l.info.title}`);
+    this.#renderSummary();
     this.#plotBox.setAttribute(
       "aria-label",
       `${l.info.title}. Left and right arrows pan, up and down zoom, Home fits the capture; Enter or a click places a cursor, drag on the time axis to select.`,
@@ -571,7 +566,7 @@ export class TickwaveView extends TickwaveElement {
 
   /** The focus goes to the plot, where the keys work, or to the Open button while the view is closed. */
   override focus(options?: FocusOptions): void {
-    (this.open ? this.#plotBox : (this.root.querySelector(".open") as HTMLElement)).focus(options);
+    (this.open ? this.#plotBox : this.#toggle).focus(options);
   }
 
   /** Opens the view at an annotation, over `span` if one is given, brings it into sight and puts the

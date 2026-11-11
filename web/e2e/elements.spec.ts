@@ -40,7 +40,7 @@ test("a new recording starts without the last one's cursors or readout", async (
   await clickRow(page, view, 300);
   await expect(readout(view)).toContainText("A ");
   await view.evaluate((v) => v.setAttribute("src", "../../fixtures/identify-jtag.tickwave"));
-  await expect(view.locator(".toolbar .title")).not.toHaveText(/swd/i, { timeout: 20_000 });
+  await expect(view.locator(".summary .title")).not.toHaveText(/swd/i, { timeout: 20_000 });
   await expect(readout(view)).toBeEmpty();
 });
 
@@ -97,8 +97,8 @@ test("a failed load is tried again, and a new recording's view drops the old not
   await expect(notice(view)).toContainText("404");
   const log = async () => (await (await fetch(`http://127.0.0.1:8124/__log?tag=${tag}`)).json()) as { status: number }[];
   const before = (await log()).length;
-  await view.locator(".close").click();
-  await view.locator(".open").click();
+  await view.locator(".toggle").click();
+  await view.locator(".toggle").click();
   await expect.poll(async () => (await log()).length).toBeGreaterThan(before);
   await view.evaluate((v) => v.setAttribute("src", "../../fixtures/identify-swd.tickwave"));
   await drawn(view);
@@ -114,7 +114,7 @@ test("a read the old recording's rows had out, failing after a new recording, sa
   await page.goto(`${VIEW}?open&src=fixtures/swd50-cut.tickwave&tag=${tag}&firstRead=256&after=2&stall=2000&fail=500`);
   const view = page.locator("#v");
   await drawn(view);
-  const title = (await view.locator(".toolbar .title").textContent())!;
+  const title = (await view.locator(".summary .title").textContent())!;
   // Zoomed in, the rows read the recording's blocks.
   await view.evaluate((v) => {
     const w = v as HTMLElement & { window: { start: number; end: number }; setWindow(a: number, b: number): void };
@@ -125,7 +125,7 @@ test("a read the old recording's rows had out, failing after a new recording, sa
   const log = async () => (await (await fetch(`http://127.0.0.1:8124/__log?tag=${tag}`)).json()) as { status: number }[];
   await expect.poll(async () => (await log()).some((e) => e.status === 0)).toBe(true);
   await view.evaluate((v) => v.setAttribute("src", "../../fixtures/identify-swd.tickwave"));
-  await expect(view.locator(".toolbar .title")).not.toHaveText(title, { timeout: 20_000 });
+  await expect(view.locator(".summary .title")).not.toHaveText(title, { timeout: 20_000 });
   await expect.poll(async () => (await log()).every((e) => e.status !== 0), { timeout: 10_000 }).toBe(true);
   // The server has sent the late failures: the page takes them a moment later.
   await page.waitForTimeout(300);
@@ -138,14 +138,14 @@ test("a read the old recording's readout had out, failing after a new recording,
   await page.goto(`${VIEW}?open&src=fixtures/swd50-cut.tickwave&tag=${tag}&firstRead=256&after=2&stall=2000&fail=500`);
   const view = page.locator("#v");
   await drawn(view);
-  const title = (await view.locator(".toolbar .title").textContent())!;
+  const title = (await view.locator(".summary .title").textContent())!;
   const log = async () => (await (await fetch(`http://127.0.0.1:8124/__log?tag=${tag}`)).json()) as { status: number }[];
   const before = (await log()).length;
   // Cursor A's readout reads each channel's value there.
   await clickRow(page, view, 300);
   await expect.poll(async () => (await log()).length).toBeGreaterThan(before);
   await view.evaluate((v) => v.setAttribute("src", "../../fixtures/identify-swd.tickwave"));
-  await expect(view.locator(".toolbar .title")).not.toHaveText(title, { timeout: 20_000 });
+  await expect(view.locator(".summary .title")).not.toHaveText(title, { timeout: 20_000 });
   await expect.poll(async () => (await log()).every((e) => e.status !== 0), { timeout: 10_000 }).toBe(true);
   // The server has sent the late failures: the page takes them a moment later.
   await page.waitForTimeout(300);
@@ -167,28 +167,47 @@ test("a recording the page names again while the view is collapsed brings its si
   const view = page.locator("#v");
   await drawn(view);
   await expect(notice(view)).toContainText("404");
-  await view.locator(".close").click();
+  await view.locator(".toggle").click();
   await view.evaluate((v) => v.setAttribute("src", "../../fixtures/identify-jtag.tickwave"));
   await expect(notice(view)).toBeHidden();
   await view.evaluate((v) => v.setAttribute("src", "../../fixtures/identify-swd.tickwave"));
-  await view.locator(".open").click();
+  await view.locator(".toggle").click();
   await expect(notice(view)).toContainText("404");
 });
 
-test("Open and Close move the focus where the reader went, and each names its recording", async ({ page }) => {
+test("the line's button opens and closes the view, keeps the focus, and names its recording", async ({ page }) => {
   await page.goto(VIEW);
   const view = page.locator("#v");
-  const openButton = view.locator(".open");
-  await expect(openButton).toHaveAttribute("aria-label", /^Open .+/);
-  await openButton.focus();
+  const toggle = view.locator(".toggle");
+  await expect(toggle).toHaveText("Open");
+  await expect(toggle).toHaveAttribute("aria-label", /^Open .+/);
+  await toggle.focus();
   await page.keyboard.press("Enter");
   await drawn(view);
-  expect(await view.evaluate((v) => v.shadowRoot!.activeElement?.className)).toBe("plot");
-  const close = view.locator(".close");
-  await expect(close).toHaveAttribute("aria-label", /^Close .+/);
-  await close.focus();
+  await expect(toggle).toHaveText("Close");
+  await expect(toggle).toHaveAttribute("aria-label", /^Close .+/);
+  await expect(view.locator('[part~="title"]')).toHaveCount(1);
+  expect(await view.evaluate((v) => v.shadowRoot!.activeElement?.className)).toBe("toggle");
   await page.keyboard.press("Enter");
-  expect(await view.evaluate((v) => v.shadowRoot!.activeElement?.className)).toBe("open");
+  await expect(view.locator('[part="viewer"]')).toBeHidden();
+  await expect(toggle).toHaveText("Open");
+  expect(await view.evaluate((v) => v.shadowRoot!.activeElement?.className)).toBe("toggle");
+});
+
+test("a page's ::part() rules that give a part its display don't show the parts the view hides", async ({ page }) => {
+  await page.goto(VIEW);
+  await page.addStyleTag({
+    content: `tickwave-view::part(viewer) { display: flex; }
+      tickwave-view::part(steps) { display: flex !important; }`,
+  });
+  const view = page.locator("#v");
+  await expect(view.locator('[part="summary"]')).toBeVisible();
+  await expect(view.locator('[part="viewer"]')).toBeHidden();
+  await view.locator(".toggle").click();
+  await drawn(view);
+  await expect(view.locator('[part="viewer"]')).toBeVisible();
+  // This page's view names no sidecar, so it has no annotations to step through.
+  await expect(view.locator('[part="steps"]')).toBeHidden();
 });
 
 test("with the page giving the view its height, a readout appearing keeps the plot that tall", async ({ page }) => {

@@ -59,7 +59,7 @@
     <p class="needs-script">Each underlined phrase below names a stretch of a real capture. Point at one, or reach it with Tab, to see that stretch. Click it to open the whole capture there.</p>
     <p>A logic analyser recorded a debug probe opening an SWD session, at a billion samples a second, so one tick is one nanosecond. The probe starts with a <tickwave-ref for="capture" annotation="line-reset">line reset</tickwave-ref>: it holds SWDIO high for 51 clocks. Then it sends the <tickwave-ref for="capture" annotation="jtag-to-swd">JTAG-to-SWD select sequence</tickwave-ref> and resets the line again.</p>
     <p>Its first transfer <tickwave-ref for="capture" annotation="dpidr-read">reads the debug port's ID register</tickwave-ref>. The probe drives the <tickwave-ref for="capture" annotation="dpidr-request">request</tickwave-ref>. The target drives the <tickwave-ref for="capture" annotation="dpidr-ack">acknowledge</tickwave-ref> and the data. Later on, the target <tickwave-ref for="capture" annotation="first-wait">answers WAIT</tickwave-ref> to a read it isn't ready for.</p>
-    <p class="needs-script">Here is the whole capture, closed. Its line says what it holds before any of its data downloads.</p>
+    <p class="needs-script">Here is the whole capture, closed. It says what it holds before any of its data downloads.</p>
     <noscript><p class="quiet">The capture needs JavaScript. Its recording is <a href="fixtures/identify-swd.tickwave" download>identify-swd.tickwave</a>, with its sidecar <a href="fixtures/identify-swd.annotations.toml" download>identify-swd.annotations.toml</a>.</p></noscript>
     <tickwave-view id="capture" src="fixtures/identify-swd.tickwave" annotations="fixtures/identify-swd.annotations.toml"></tickwave-view>
     <h3 class="how">How this page does it</h3>
@@ -86,7 +86,7 @@ label = "Reading the debug port's ID register"
 measure = { channel = "SWCLK", what = "rate" }</code></pre>
       </div>
       <dl class="specs elements">
-        <div><dt><code>tickwave-view</code></dt><dd>A whole recording, closed to one line until the reader opens it.</dd></div>
+        <div><dt><code>tickwave-view</code></dt><dd>A whole recording, shown as its title and a summary until the reader opens it.</dd></div>
         <div><dt><code>tickwave-inset</code></dt><dd>One annotation's span, magnified, with a reading under it. Point at a part to read it.</dd></div>
         <div><dt><code>tickwave-ref</code></dt><dd>A phrase that cites an annotation. Pointing at it opens an inset.</dd></div>
         <div><dt><code>tickwave-chart</code></dt><dd>Measurements against a setting. A point can open the recording behind it.</dd></div>

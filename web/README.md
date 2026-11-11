@@ -183,11 +183,12 @@ shows. A server that ignores ranges still works, as long as it sends the whole f
 
 ### `<tickwave-view>`
 
-A whole recording. Closed, it shows one line: the recording's title, its length to three
-significant figures, its channels and its size, and an Open button. It fetches the recording's
-head, and nothing else, once it scrolls into view. Open, it shows the time axis, one row a
-channel, the annotations above them, and a readout under them. Open puts the focus on the plot, and
-Close puts it back on Open. Each button names its recording to a screen reader.
+A whole recording. Closed, it shows the recording's title and, under it, the recording's length to
+three significant figures, its channels and its size, with an Open button beside them. It fetches
+the recording's head, and nothing else, once it scrolls into view. Open, all of that stays, and
+the button reads Close. Below it come the time axis, one row a channel, the annotations above the
+rows, and a readout under the rows. The button keeps the focus, and names its recording to a screen
+reader.
 
 | Attribute | Means |
 |---|---|
@@ -410,12 +411,13 @@ text follow the page's CSS, and their canvas redraws in that frame. A chart's co
 page's CSS without a redraw.
 
 Each element exposes its pieces to `::part()`. On the view: `summary`, `title`, `facts`,
-`open-button`, `viewer`, `toolbar`, `plot`, `hint`, `reading` (the label at the pointer),
-`row-handle`, `readout`, `steps`, `notice` and `button`.
+`open-button` (Open, or Close while the view is open), `viewer`, `toolbar`, `plot`, `hint`,
+`reading` (the label at the pointer), `row-handle`, `readout`, `steps`, `notice` and `button`.
 Inside `facts`, each fact is a `fact` and also `fact-length`, `fact-channels` or `fact-size`, with
 a `fact-separator` ("; ") between two. On the inset: `inset`, `label`, `text`, `frame`, `canvas`,
 `plot` (over the canvas, what the pointer and the keys reach), `foot`, `measure`, `reading` (what
 the pointer or the keys lit), `key` and `notice`. On the reference: `popover`.
+A part an element hides stays hidden, whatever `display` a page's rule gives it.
 
 ### From the module
 

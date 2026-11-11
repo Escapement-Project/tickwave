@@ -21,13 +21,11 @@ const CSS = `
 figure { margin: 0; }
 figcaption { margin: 0 4px 2px; font-size: 12px; font-weight: 600; line-height: 1.35; }
 .text { margin: 0 4px 4px; font-size: 12px; line-height: 1.4; color: var(--ink-2, GrayText); }
-.text[hidden] { display: none; }
 .frame { position: relative; }
 canvas { display: block; }
 /* Over the plot: what the pointer and the keys reach. A link where the inset opens another page. */
 /* Two fingers zoom the trace, not the page. */
 .hit { position: absolute; inset: 0; display: block; border-radius: 4px; touch-action: pan-y; -webkit-tap-highlight-color: transparent; }
-.hit[hidden] { display: none; }
 .hit:focus { outline: none; }
 .hit:focus-visible { outline: var(--focus-width, 2px) solid var(--ink, CanvasText); outline-offset: 2px; }
 .hit.opens { cursor: pointer; }
@@ -41,7 +39,7 @@ canvas { display: block; }
    the pointer moves anything. */
 .line { flex: 1 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; }
 .line::before { content: "\\200b"; }
-.line[hidden], .measure[hidden], .key:empty, .line.reads .measure, .line:not(.reads) .reading { display: none; }
+.key:empty, .line.reads .measure, .line:not(.reads) .reading { display: none; }
 .measure, .reading { color: var(--ink, CanvasText); }
 .measure .what, .reading .what { font-family: var(--font-text, system-ui, sans-serif); color: var(--ink-2, GrayText); }
 .reading > span + span { margin-left: 10px; }

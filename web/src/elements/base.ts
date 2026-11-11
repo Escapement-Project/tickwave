@@ -9,6 +9,8 @@ export const SHARED_CSS = `
 :host { display: block; color: var(--ink, CanvasText); font-family: var(--font-text, system-ui, sans-serif);
   font-size: 14px; line-height: 1.4; }
 :host([hidden]) { display: none; }
+/* Important, because a page's ::part() rule giving a part its display otherwise beats this one. */
+[hidden] { display: none !important; }
 .probe { display: none; }
 button, select { font: inherit; font-size: 13px; line-height: 1.2; color: var(--ink, CanvasText); background: transparent;
   border: 1px solid var(--rule, GrayText); border-radius: 6px; padding: 3px 9px; min-height: 26px; cursor: pointer; }
@@ -18,7 +20,6 @@ button:disabled { opacity: .45; cursor: default; background: transparent; }
 :focus-visible { outline: var(--focus-width, 2px) solid var(--ink, CanvasText); outline-offset: 2px; }
 .notice { margin: 4px 0 0; padding: 1px 8px; font-size: 12px; line-height: 1.4; color: var(--attention-ink, CanvasText);
   border-left: 2px solid var(--attention-ink, CanvasText); }
-.notice[hidden] { display: none; }
 .figures { font-family: var(--font-figures, ui-monospace, monospace); font-stretch: var(--figures-stretch, normal);
   font-weight: var(--figures-weight, 500); font-variant-numeric: tabular-nums; font-size: 12px; }
 `;

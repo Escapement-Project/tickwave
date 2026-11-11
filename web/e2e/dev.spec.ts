@@ -44,7 +44,7 @@ async function waitReady(page: Page, ids: string[]): Promise<void> {
             return {
               id,
               open: el?.hasAttribute("open"),
-              title: root?.querySelector(".toolbar .title")?.textContent ?? null,
+              title: root?.querySelector(".summary .title")?.textContent ?? null,
               canvas: canvas ? `${canvas.width}x${canvas.height}` : null,
               notice: root?.querySelector(".notice")?.textContent?.trim() || null,
               settles,
@@ -170,7 +170,7 @@ test("a collapsed view fetches its head, and only its head, once it scrolls into
     ["bytes=512-1743", 206],
   ]);
   // Opened at the whole capture, it draws from the head's overview: still no block.
-  await view.locator(".open").click();
+  await view.locator(".toggle").click();
   await view.evaluate((v) => (v as unknown as { settled(): Promise<void> }).settled());
   expect((await served(tag)).map((e) => e.range)).toEqual(["bytes=0-511", "bytes=512-1743"]);
   // Zoomed to the first read, it needs edges, and reads the block by its range: 1,744 to 4,830.
@@ -353,7 +353,7 @@ test("a local file reads through slice", async ({ page }) => {
   await page.locator("#pick").setInputFiles("fixtures/identify-swd.4k.tickwave");
   const view = page.locator("#v");
   await waitReady(page, ["v"]);
-  await expect(view.locator(".toolbar .title")).toHaveText("identify-swd.4k.tickwave");
+  await expect(view.locator(".summary .title")).toHaveText("identify-swd.4k.tickwave");
   const w = await view.evaluate((v) => (v as unknown as { window: { start: number; end: number } }).window);
   expect(w).toEqual({ start: 0, end: 523583100 });
 });
@@ -396,7 +396,7 @@ test.describe("the identify view", () => {
     // made meanwhile can start on the button and end beside it, and open nothing.
     await waitReady(page, ["inset-dpidr"]);
     const view = page.locator("#identify");
-    await view.locator(".open").click();
+    await view.locator(".toggle").click();
     await waitReady(page, ["identify"]);
     await view.scrollIntoViewIfNeeded();
   });
