@@ -1,1 +1,1 @@
-{"zoom":0.6,"hold":0.6,"end":1.8,"ease":3,"edge":38,"scale":3,"thirds":[1.6,2.4],"wave":{"width":5.5,"run":[2.0,62.0],"hi":7.25,"lo":31.25,"edges":[14.0,26.0,38.0,50.0],"low_first":true},"ticks":{"first":2.0,"step":6.0,"width":2.5,"major":[44.0,12.0],"minor":[49.0,7.0]}}
+{"wait":0.1,"zoom":0.46,"hold":0.6,"end":1.62,"ease":3,"edge":38,"scale":3,"thirds":[1.6,2.4],"wave":{"width":5.5,"run":[2.0,62.0],"hi":7.25,"lo":31.25,"edges":[14.0,26.0,38.0,50.0],"low_first":true},"ticks":{"first":2.0,"step":6.0,"width":2.5,"major":[44.0,12.0],"minor":[49.0,7.0]}}
