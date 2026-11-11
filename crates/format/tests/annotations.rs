@@ -1,5 +1,7 @@
-use tickwave_format::annotations::{Included, resolve, resolve_json};
-use tickwave_format::header::{AnalogCoding, ChannelHeader, ChannelKind, Header, SourceHeader};
+use escapement_tickwave_format::annotations::{Included, resolve, resolve_json};
+use escapement_tickwave_format::header::{
+    AnalogCoding, ChannelHeader, ChannelKind, Header, SourceHeader,
+};
 
 const ID: &str = "blake3:00ff";
 
@@ -258,7 +260,7 @@ fn the_toml_as_json_resolves_alike() {
 }
 
 /// The figures an annotation states, as a chart's data takes them.
-fn values(a: &tickwave_format::annotations::Annotation) -> Option<Vec<(&str, &str)>> {
+fn values(a: &escapement_tickwave_format::annotations::Annotation) -> Option<Vec<(&str, &str)>> {
     a.values
         .as_ref()
         .map(|v| v.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect())
@@ -394,7 +396,7 @@ fn messages_point_at_what_the_author_wrote() {
     );
     assert_problem(&found, "rec.wire_swd.jsonl, line 4:");
     // The page's JSON of the TOML file has no line the author could look up.
-    let found = tickwave_format::annotations::resolve_json(
+    let found = escapement_tickwave_format::annotations::resolve_json(
         "{\"format\": 1}",
         &included(GENERATED),
         &header(),

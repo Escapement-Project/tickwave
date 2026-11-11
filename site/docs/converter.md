@@ -7,7 +7,7 @@
 You need a current Rust toolchain and a checkout of tickwave's repository. From the repository's root:
 
 ```sh
-cargo build --release -p tickwave-cli
+cargo build --release -p escapement-tickwave-cli
 ```
 
 The program is then `target/release/tickwave`. `tickwave help`, and `--help` after any command, list its options.

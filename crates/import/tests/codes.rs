@@ -5,10 +5,10 @@ use std::io::{BufReader, Read};
 use std::path::Path;
 
 use common::{testdata, verge_csv};
+use escapement_tickwave_format::model::{ChannelData, Samples};
+use escapement_tickwave_import::codes::{Codes, recover_codes};
+use escapement_tickwave_import::sigrok;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use tickwave_format::model::{ChannelData, Samples};
-use tickwave_import::codes::{Codes, recover_codes};
-use tickwave_import::sigrok;
 
 #[test]
 fn hand_worked() {

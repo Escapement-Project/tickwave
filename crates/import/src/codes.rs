@@ -30,8 +30,8 @@
 
 use std::collections::HashSet;
 
-use tickwave_format::encode::code_of;
-use tickwave_format::header::{AnalogCoding, code_value};
+use escapement_tickwave_format::encode::code_of;
+use escapement_tickwave_format::header::{AnalogCoding, code_value};
 
 /// The largest number of bits a code may need.
 pub const MAX_BITS: u8 = 16;

@@ -18,7 +18,7 @@ use std::io::{self, BufRead, BufReader};
 use std::path::Path;
 
 use ::vcd::{Command, IdCode, Parser, ScopeItem, Value, Var, VarType};
-use tickwave_format::model::{Channel, ChannelData, Digital, Ratio, Recording, Source};
+use escapement_tickwave_format::model::{Channel, ChannelData, Digital, Ratio, Recording, Source};
 
 pub use crate::sigrok::{Import, Skipped};
 

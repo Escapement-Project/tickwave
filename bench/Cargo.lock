@@ -253,6 +253,45 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
+name = "escapement-tickwave-bench-native"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "escapement-tickwave-format",
+ "indicatif",
+ "serde",
+ "serde_json",
+ "sha2",
+ "zstd",
+]
+
+[[package]]
+name = "escapement-tickwave-format"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "rayon",
+ "ruzstd",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "toml",
+ "zstd",
+]
+
+[[package]]
+name = "escapement-tickwave-wasm-libzstd"
+version = "0.1.0"
+dependencies = [
+ "escapement-tickwave-format",
+ "js-sys",
+ "serde_json",
+ "wasm-bindgen",
+ "zstd",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -575,45 +614,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "tickwave-bench-native"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "indicatif",
- "serde",
- "serde_json",
- "sha2",
- "tickwave-format",
- "zstd",
-]
-
-[[package]]
-name = "tickwave-format"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "rayon",
- "ruzstd",
- "serde",
- "serde_json",
- "thiserror",
- "toml",
- "zstd",
-]
-
-[[package]]
-name = "tickwave-wasm-libzstd"
-version = "0.1.0"
-dependencies = [
- "js-sys",
- "serde_json",
- "tickwave-format",
- "wasm-bindgen",
- "zstd",
 ]
 
 [[package]]

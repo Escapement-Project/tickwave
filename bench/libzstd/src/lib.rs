@@ -1,18 +1,19 @@
-//! tickwave-wasm's decoder surface with libzstd, compiled to wasm32, doing every inflate: the head's
-//! overview (`Head::parse_with`), blocks (`decode_block_with`) and overview blocks
-//! (`decode_overview_block_with`). Everything else is crates/wasm/src/lib.rs's, so the two builds
-//! differ only in the zstd decoder, and ruzstd is not linked in.
+//! escapement-tickwave-wasm's decoder surface with libzstd, compiled to wasm32, doing every
+//! inflate: the head's overview (`Head::parse_with`), blocks (`decode_block_with`) and overview
+//! blocks (`decode_overview_block_with`). Everything else is crates/wasm/src/lib.rs's, so the two
+//! builds differ only in the zstd decoder, and ruzstd is not linked in.
 //!
-//! Without the default `libzstd` feature the same surface inflates with tickwave-format's ruzstd
-//! `inflate`. With `probe`, `inflateBlock` and `parseBlock` time the two halves of a block's decode
-//! apart; the benchmark builds both decoders that way to attribute their difference.
+//! Without the default `libzstd` feature the same surface inflates with
+//! escapement-tickwave-format's ruzstd `inflate`. With `probe`, `inflateBlock` and `parseBlock`
+//! time the two halves of a block's decode apart; the benchmark builds both decoders that way to
+//! attribute their difference.
 
 #[cfg(feature = "probe")]
 use std::cell::RefCell;
 
+use escapement_tickwave_format::decode::{self, BlockChannel, DecodeError, Head};
+use escapement_tickwave_format::overview::ChannelOverview;
 use js_sys::{Float32Array, Float64Array, Uint8Array};
-use tickwave_format::decode::{self, BlockChannel, DecodeError, Head};
-use tickwave_format::overview::ChannelOverview;
 use wasm_bindgen::prelude::*;
 
 fn js(e: DecodeError) -> JsError {
@@ -23,7 +24,7 @@ fn js(e: DecodeError) -> JsError {
 mod inflater {
     use std::cell::RefCell;
 
-    use tickwave_format::decode::DecodeError;
+    use escapement_tickwave_format::decode::DecodeError;
     use zstd::zstd_safe::{self, DCtx};
 
     fn zstd_error(code: usize) -> DecodeError {
@@ -78,7 +79,7 @@ mod inflater {
 
 #[cfg(not(feature = "libzstd"))]
 mod inflater {
-    use tickwave_format::decode::{self, DecodeError};
+    use escapement_tickwave_format::decode::{self, DecodeError};
 
     pub struct Inflater;
 

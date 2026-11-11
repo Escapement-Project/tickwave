@@ -10,14 +10,16 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
+use escapement_tickwave_format::annotations::{self, Included};
+use escapement_tickwave_format::decode::{Head, verify_limited};
+use escapement_tickwave_format::header::{ChannelKind, Header};
+use escapement_tickwave_format::model::Recording;
+use escapement_tickwave_import::convert::{
+    self, Pass, Progress, Settings, Step, counted, select, set_units,
+};
+use escapement_tickwave_import::sigrok::Skipped;
+use escapement_tickwave_import::{saleae, sigrok, vcd};
 use indicatif::ProgressStyle;
-use tickwave_format::annotations::{self, Included};
-use tickwave_format::decode::{Head, verify_limited};
-use tickwave_format::header::{ChannelKind, Header};
-use tickwave_format::model::Recording;
-use tickwave_import::convert::{self, Pass, Progress, Settings, Step, counted, select, set_units};
-use tickwave_import::sigrok::Skipped;
-use tickwave_import::{saleae, sigrok, vcd};
 use tracing::span::EnteredSpan;
 use tracing::{info, info_span, warn};
 use tracing_indicatif::IndicatifLayer;
@@ -246,7 +248,7 @@ fn saleae_headers(dir: &Path, channels: &[(String, String)]) -> Result<saleae::H
         .iter()
         .map(|(stem, _)| {
             let path = dir.join(saleae::file_name(stem));
-            let input = tickwave_import::input::map(&path)
+            let input = escapement_tickwave_import::input::map(&path)
                 .with_context(|| format!("opening {}", path.display()))?;
             Ok((path, input))
         })
@@ -571,7 +573,8 @@ fn check_annotations(recording: &Path, sidecar: &Path, json: bool, max: usize) -
 fn bundle_file(recording: &Path, sidecar: &Path, output: &Path, max: usize) -> Result<()> {
     let (bytes, head) = read_head(recording, max)?;
     let (resolved, files) = load_sidecar(&head.header, recording, sidecar)?;
-    let bundled = tickwave_format::bundle::bundle(&bytes, &head, files.into_iter().collect())?;
+    let bundled =
+        escapement_tickwave_format::bundle::bundle(&bytes, &head, files.into_iter().collect())?;
     let check = Head::parse_file_limited(&bundled, max)?;
     if check.header.content_id != head.header.content_id {
         bail!("bundling changed the content id");

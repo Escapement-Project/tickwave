@@ -304,6 +304,74 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
+name = "escapement-tickwave-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "escapement-tickwave-format",
+ "escapement-tickwave-import",
+ "indicatif",
+ "serde",
+ "serde_json",
+ "toml",
+ "tracing",
+ "tracing-indicatif",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "escapement-tickwave-convert-wasm"
+version = "0.1.0"
+dependencies = [
+ "escapement-tickwave-format",
+ "escapement-tickwave-import",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "escapement-tickwave-format"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "rayon",
+ "ruzstd",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "toml",
+ "zstd",
+]
+
+[[package]]
+name = "escapement-tickwave-import"
+version = "0.1.0"
+dependencies = [
+ "csv",
+ "escapement-tickwave-format",
+ "flate2",
+ "indicatif",
+ "memmap2",
+ "rust-ini",
+ "thiserror",
+ "vcd",
+ "zip",
+]
+
+[[package]]
+name = "escapement-tickwave-wasm"
+version = "0.1.0"
+dependencies = [
+ "escapement-tickwave-format",
+ "js-sys",
+ "serde_json",
+ "wasm-bindgen",
+ "zstd",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -744,74 +812,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ad99c4c6d32803332c548b1af0540b357b3f5fc0be8f6c6bfe8b2e6ae784070"
 dependencies = [
  "cfg-if",
-]
-
-[[package]]
-name = "tickwave-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "indicatif",
- "serde",
- "serde_json",
- "tickwave-format",
- "tickwave-import",
- "toml",
- "tracing",
- "tracing-indicatif",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "tickwave-convert-wasm"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "tickwave-format",
- "tickwave-import",
- "wasm-bindgen",
-]
-
-[[package]]
-name = "tickwave-format"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "rayon",
- "ruzstd",
- "serde",
- "serde_json",
- "thiserror",
- "toml",
- "zstd",
-]
-
-[[package]]
-name = "tickwave-import"
-version = "0.1.0"
-dependencies = [
- "csv",
- "flate2",
- "indicatif",
- "memmap2",
- "rust-ini",
- "thiserror",
- "tickwave-format",
- "vcd",
- "zip",
-]
-
-[[package]]
-name = "tickwave-wasm"
-version = "0.1.0"
-dependencies = [
- "js-sys",
- "serde_json",
- "tickwave-format",
- "wasm-bindgen",
- "zstd",
 ]
 
 [[package]]

@@ -5,10 +5,10 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use tickwave_format::decode::{VerifyError, verify_limited};
-use tickwave_format::encode::{EncodeError, Options, encode};
-use tickwave_format::header::AnalogCoding;
-use tickwave_format::model::{Channel, ChannelData, Recording, Samples};
+use escapement_tickwave_format::decode::{VerifyError, verify_limited};
+use escapement_tickwave_format::encode::{EncodeError, Options, encode};
+use escapement_tickwave_format::header::AnalogCoding;
+use escapement_tickwave_format::model::{Channel, ChannelData, Recording, Samples};
 
 use crate::{codes, saleae, sigrok, vcd};
 

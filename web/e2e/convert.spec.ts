@@ -12,8 +12,8 @@ const REPO = new URL("../..", import.meta.url).pathname;
 const DATA = join(REPO, "testdata");
 
 function cli(args: string[]): Buffer {
-  const out = join(mkdtempSync(join(tmpdir(), "tickwave-cli-")), "out.tickwave");
-  execFileSync("cargo", ["run", "-q", "--release", "-p", "tickwave-cli", "--", "convert", ...args, "-o", out], { cwd: REPO, stdio: ["ignore", "ignore", "pipe"] });
+  const out = join(mkdtempSync(join(tmpdir(), "escapement-tickwave-cli-")), "out.tickwave");
+  execFileSync("cargo", ["run", "-q", "--release", "-p", "escapement-tickwave-cli", "--", "convert", ...args, "-o", out], { cwd: REPO, stdio: ["ignore", "ignore", "pipe"] });
   return readFileSync(out);
 }
 

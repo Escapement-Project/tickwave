@@ -3,7 +3,7 @@
 
 import { closeSync, fstatSync, openSync, readFileSync, readSync } from "node:fs";
 import { basename } from "node:path";
-import { initSync, convert, describe } from "../../crates/convert-wasm/pkg/tickwave_convert_wasm.js";
+import { initSync, convert, describe } from "../../crates/convert-wasm/pkg/escapement_tickwave_convert_wasm.js";
 import { DEFAULTS, request, type Described, type Pass, type Settings, type SourceKind } from "../src/convert/protocol.ts";
 
 let memory: WebAssembly.Memory | null = null;
@@ -18,7 +18,7 @@ export interface Hooks {
 
 /** Opens `paths` for the module's reads while `run` runs. */
 function withFiles<T>(paths: string[], hooks: Hooks, run: (files: { id: number; name: string; size: number }[]) => T): T {
-  memory ??= (initSync({ module: readFileSync(new URL("../../crates/convert-wasm/pkg/tickwave_convert_wasm_bg.wasm", import.meta.url)) }) as unknown as { memory: WebAssembly.Memory }).memory;
+  memory ??= (initSync({ module: readFileSync(new URL("../../crates/convert-wasm/pkg/escapement_tickwave_convert_wasm_bg.wasm", import.meta.url)) }) as unknown as { memory: WebAssembly.Memory }).memory;
   const fds = paths.map((p) => openSync(p, "r"));
   let panic: string | null = null;
   (globalThis as Record<string, unknown>).tickwaveConvert = {

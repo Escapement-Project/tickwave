@@ -124,7 +124,8 @@ export function serve(dec: Decoder): void {
       // Says where the decoder refused: opening the head, the control block, or the block itself.
       case "corrupt": {
         let o: Opened;
-        // headLength parses the whole head in tickwave-wasm, so a head refusal can come from either.
+        // headLength parses the whole head in escapement-tickwave-wasm, so a head refusal can come
+        // from either.
         try {
           o = await dec.open(await fetchHead(dec, m.url, init()), false);
         } catch (e) {

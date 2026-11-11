@@ -15,8 +15,8 @@ const port = Number(process.argv[process.argv.indexOf("--serve") + 1]) || 8123;
 
 mkdirSync("dist", { recursive: true });
 for (const [crate, from, to] of [
-  ["wasm", "tickwave_wasm_bg.wasm", "tickwave.wasm"],
-  ["convert-wasm", "tickwave_convert_wasm_bg.wasm", "tickwave-convert.wasm"],
+  ["wasm", "escapement_tickwave_wasm_bg.wasm", "tickwave.wasm"],
+  ["convert-wasm", "escapement_tickwave_convert_wasm_bg.wasm", "tickwave-convert.wasm"],
 ]) {
   const wasm = new URL(`../crates/${crate}/pkg/${from}`, import.meta.url);
   if (!existsSync(wasm)) {

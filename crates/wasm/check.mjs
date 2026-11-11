@@ -5,9 +5,9 @@
 // samples.
 //   node crates/wasm/check.mjs FILE.tickwave
 import { readFileSync } from "node:fs";
-import { initSync, headLength, Recording } from "./pkg/tickwave_wasm.js";
+import { initSync, headLength, Recording } from "./pkg/escapement_tickwave_wasm.js";
 
-initSync({ module: readFileSync(new URL("./pkg/tickwave_wasm_bg.wasm", import.meta.url)) });
+initSync({ module: readFileSync(new URL("./pkg/escapement_tickwave_wasm_bg.wasm", import.meta.url)) });
 const file = readFileSync(process.argv[2]);
 const head = file.subarray(0, headLength(file.subarray(0, 65536)));
 const rec = new Recording(head);

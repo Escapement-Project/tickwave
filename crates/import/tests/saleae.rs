@@ -1,8 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use tickwave_format::model::{ChannelData, Ratio, Samples};
-use tickwave_import::saleae::{self, Error};
+use escapement_tickwave_format::model::{ChannelData, Ratio, Samples};
+use escapement_tickwave_import::saleae::{self, Error};
 
 const DIR: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),

@@ -3,8 +3,8 @@ mod common;
 use std::io::{Cursor, Write};
 
 use common::{Oracle, drain, testdata, verge_csv};
-use tickwave_format::model::Ratio;
-use tickwave_import::sigrok::{self, Skipped};
+use escapement_tickwave_format::model::Ratio;
+use escapement_tickwave_import::sigrok::{self, Skipped};
 use zip::ZipArchive;
 use zip::write::{SimpleFileOptions, ZipWriter};
 

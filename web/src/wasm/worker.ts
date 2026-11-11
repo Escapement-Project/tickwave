@@ -1,7 +1,7 @@
 // The worker that holds the WASM decoder and every recording the page has opened. The page posts
 // requests; each answer goes back with its arrays transferred, not copied.
 
-import init, { headLength, Recording } from "../../../crates/wasm/pkg/tickwave_wasm.js";
+import init, { headLength, Recording } from "../../../crates/wasm/pkg/escapement_tickwave_wasm.js";
 import { FileBytes, HttpBytes, type Bytes } from "./bytes.ts";
 import { handJson } from "./hand.ts";
 import { Opened, setCacheBytes, type WasmApi } from "./opened.ts";

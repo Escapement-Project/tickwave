@@ -38,7 +38,7 @@ The Rust crates need a current Rust toolchain:
 
 ```sh
 cargo test --workspace
-cargo build --release -p tickwave-cli     # the converter, at target/release/tickwave
+cargo build --release -p escapement-tickwave-cli     # the converter, at target/release/tickwave
 ```
 
 The browser's decoder and converter also need clang with the wasm32 target, `wasm-bindgen` and

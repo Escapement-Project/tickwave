@@ -2,7 +2,7 @@
 // It does one job, describing or converting, and the page then ends it: a read that fails throws
 // through the module, which is not fit to run again after that.
 
-import init, { convert, describe } from "../../../crates/convert-wasm/pkg/tickwave_convert_wasm.js";
+import init, { convert, describe } from "../../../crates/convert-wasm/pkg/escapement_tickwave_convert_wasm.js";
 import { request, type FromWorker, type Pass, type ToWorker } from "./protocol.ts";
 
 // A worker's own globals, which the page's DOM types leave out.

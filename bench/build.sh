@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Builds what the benchmark runs: both tickwave-wasm builds (from crates/wasm, into bench's own
-# target directories, so the tickwave workspace's target/ and crates/wasm/pkg stay untouched), the
-# libzstd build, the native reference tool, and the bundled workers and pages in build/www.
+# Builds what the benchmark runs: both escapement-tickwave-wasm builds (from crates/wasm, into
+# bench's own target directories, so the tickwave workspace's target/ and crates/wasm/pkg stay
+# untouched), the libzstd build, the native reference tool, and the bundled workers and pages in
+# build/www.
 set -euo pipefail
 cd "$(dirname "$0")"
 bench=$PWD
@@ -26,27 +27,27 @@ wasm() { # name, built .wasm, glue base name
 for v in full decoder; do
   features=()
   [ "$v" = decoder ] && features=(--no-default-features)
-  (cd .. && cargo build --locked -p tickwave-wasm --target wasm32-unknown-unknown --profile wasm \
-    "${features[@]}" --target-dir "$bench/target/tickwave-wasm-$v")
+  (cd .. && cargo build --locked -p escapement-tickwave-wasm --target wasm32-unknown-unknown --profile wasm \
+    "${features[@]}" --target-dir "$bench/target/escapement-tickwave-wasm-$v")
 done
-wasm ruzstd-full target/tickwave-wasm-full/wasm32-unknown-unknown/wasm/tickwave_wasm.wasm tickwave_wasm
-wasm ruzstd target/tickwave-wasm-decoder/wasm32-unknown-unknown/wasm/tickwave_wasm.wasm tickwave_wasm
+wasm ruzstd-full target/escapement-tickwave-wasm-full/wasm32-unknown-unknown/wasm/escapement_tickwave_wasm.wasm escapement_tickwave_wasm
+wasm ruzstd target/escapement-tickwave-wasm-decoder/wasm32-unknown-unknown/wasm/escapement_tickwave_wasm.wasm escapement_tickwave_wasm
 
 # zstd-sys compiles libzstd for this target with clang (cc-rs picks it), against its own
 # wasm-shim headers.
-cargo build --locked -p tickwave-wasm-libzstd --target wasm32-unknown-unknown --profile wasm
-wasm libzstd target/wasm32-unknown-unknown/wasm/tickwave_wasm_libzstd.wasm tickwave_wasm_libzstd
+cargo build --locked -p escapement-tickwave-wasm-libzstd --target wasm32-unknown-unknown --profile wasm
+wasm libzstd target/wasm32-unknown-unknown/wasm/escapement_tickwave_wasm_libzstd.wasm escapement_tickwave_wasm_libzstd
 
 # The probe builds: inflate and parse timed apart, with libzstd and with ruzstd.
 for v in libzstd ruzstd; do
   features=(--features probe)
   [ "$v" = ruzstd ] && features=(--no-default-features --features probe)
-  cargo build --locked -p tickwave-wasm-libzstd --target wasm32-unknown-unknown --profile wasm \
+  cargo build --locked -p escapement-tickwave-wasm-libzstd --target wasm32-unknown-unknown --profile wasm \
     "${features[@]}" --target-dir "target/probe-$v"
-  wasm "probe-$v" "target/probe-$v/wasm32-unknown-unknown/wasm/tickwave_wasm_libzstd.wasm" tickwave_wasm_libzstd
+  wasm "probe-$v" "target/probe-$v/wasm32-unknown-unknown/wasm/escapement_tickwave_wasm_libzstd.wasm" escapement_tickwave_wasm_libzstd
 done
 
-cargo build --locked --release -p tickwave-bench-native
+cargo build --locked --release -p escapement-tickwave-bench-native
 
 npm ci --silent
 node scripts/bundle.ts

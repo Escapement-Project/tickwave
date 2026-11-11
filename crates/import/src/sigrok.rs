@@ -17,11 +17,11 @@ use std::io::{self, Cursor, Read};
 use std::path::Path;
 use std::sync::Arc;
 
-use flate2::read::DeflateDecoder;
-use ini::{Ini, ParseOption};
-use tickwave_format::model::{
+use escapement_tickwave_format::model::{
     Analog, Channel, ChannelData, Digital, Ratio, Recording, Samples, Source,
 };
+use flate2::read::DeflateDecoder;
+use ini::{Ini, ParseOption};
 use zip::{CompressionMethod, ZipArchive};
 
 /// A recording read from a source, and what the reader left out of it.

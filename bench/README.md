@@ -18,7 +18,7 @@ ranges unchanged, with its own `RESULTS.md`.
 | `src/page-inset.ts`, `src/draw.ts` | The cold first-inset page and its stand-in drawing |
 | `src/page-bench.ts` | The block-decode page the runner drives |
 | `src/canonical.ts` | The bytes each decoded block is hashed over (SHA-256) |
-| `libzstd/` | tickwave-wasm's decoder surface with libzstd (zstd-sys) for every inflate; its `probe` feature times inflate and parse apart |
+| `libzstd/` | escapement-tickwave-wasm's decoder surface with libzstd (zstd-sys) for every inflate; its `probe` feature times inflate and parse apart |
 | `native/` | The native baseline: hashes, corrupted blocks, native timings |
 | `scripts/run.ts` | Runs the measures through Playwright and writes `results/raw/` |
 | `scripts/report.ts` | Turns `results/raw/` (and `results/native/`) into the tables |
@@ -38,11 +38,12 @@ The decoders:
 | `fzstd-jsxxh` | `dec/fzstd-jsxxh` | the same with a pure-JavaScript XXH64 (`@intrnl/xxhash64`) |
 | `stream` | `dec/stream` | `DecompressionStream("zstd")` and `src/format.ts` |
 | `probe-libzstd` | `dec/probe-libzstd` | `bench/libzstd --features probe`: inflate and parse timed apart |
-| `probe-ruzstd` | `dec/probe-ruzstd` | the same with tickwave-format's ruzstd `inflate` (`--no-default-features --features probe`) |
+| `probe-ruzstd` | `dec/probe-ruzstd` | the same with escapement-tickwave-format's ruzstd `inflate` (`--no-default-features --features probe`) |
 
-The `ruzstd` labels date from when tickwave-wasm decoded with ruzstd. Since 3d17dd1 it decodes with
-libzstd, so `ruzstd-full`, `ruzstd` and `ruzstd#2` decode with libzstd too. `probe-ruzstd` is the
-only WASM build here that still decodes with ruzstd.
+The `ruzstd` labels date from when escapement-tickwave-wasm decoded with ruzstd. Since 3d17dd1 it
+decodes with libzstd, so `ruzstd-full`, `ruzstd` and `ruzstd#2` decode with libzstd too.
+`probe-ruzstd` is the only WASM build here that still decodes with ruzstd. The report and
+`RESULTS.md` call the crate tickwave-wasm, its name when they were measured.
 
 ## Needs
 
@@ -63,22 +64,21 @@ From `bench/`:
 
 ```sh
 export CONVERTED=/path/to/converted   # and the same path in scripts/serve.ts
-./build.sh          # both tickwave-wasm builds, the libzstd and probe builds, the native tool, the bundles
+./build.sh          # both escapement-tickwave-wasm builds, the libzstd and probe builds, the native tool, the bundles
 ./reference.sh      # native hashes of every block and overview block, and the corrupted blocks
 node scripts/run.ts # every measure in both browsers
-node scripts/cpu.ts && target/release/tickwave-bench-native time --runs 20 --out results/native \
+node scripts/cpu.ts && target/release/escapement-tickwave-bench-native time --runs 20 --out results/native \
   $(printf "$CONVERTED/%s.1024.tickwave " gcc-swd-reads stock-reads \
     swo-24000000 gcc-oscan1-probe-rs gcc-swd-matrix-capture100000 session50)
 node scripts/report.ts > results/tables.md
 ```
 
-`build.sh` builds tickwave-wasm from `crates/wasm` with `--locked` into `bench/target/`, so it never
-touches the tickwave workspace's `target/` or `crates/wasm/pkg/`. It records the tickwave commit in
-`build/base.txt`, any uncommitted `crates/format` and `crates/wasm` changes in
+`build.sh` builds escapement-tickwave-wasm from `crates/wasm` with `--locked` into `bench/target/`,
+so it never touches the tickwave workspace's `target/` or `crates/wasm/pkg/`. It records the
+tickwave commit in `build/base.txt`, any uncommitted `crates/format` and `crates/wasm` changes in
 `build/decoder.diff`, and the staged part of them in `build/staged.diff`. The runner writes the
-commit and the SHA-256 of both diffs to `results/raw/machine.json`, with the SHA-256 of every
-module it serves. Run `build.sh` again after `crates/format` or `crates/wasm` change, then
-`reference.sh`.
+commit and the SHA-256 of both diffs to `results/raw/machine.json`, with the SHA-256 of every module
+it serves. Run `build.sh` again after `crates/format` or `crates/wasm` change, then `reference.sh`.
 
 `scripts/run.ts` takes `--measures` (any of `correct,inset,blocks,whole,checksum`),
 `--browsers chromium,firefox`, `--runs 20`, `--recs` (comma-separated recording names, without
@@ -94,7 +94,8 @@ decode), it waits until three seconds in a row have the CPUs less than 10 % busy
 and each says in the log every 10 minutes that it is still waiting. Each unit records the busy
 fraction while it ran. `results/raw/cpu.json` keeps every second's, and each result file has the
 load average at its start and end. `node scripts/cpu.ts` runs both gates for other commands, such
-as the native timing: `node scripts/cpu.ts && target/release/tickwave-bench-native time ...`.
+as the native timing:
+`node scripts/cpu.ts && target/release/escapement-tickwave-bench-native time ...`.
 
 | Measure | What it does |
 | --- | --- |
@@ -109,8 +110,8 @@ Quicker checks:
 ```sh
 node scripts/smoke.ts [recording.tickwave]          # one cold inset per decoder, both browsers
 node scripts/ts-sums.ts FILE.tickwave               # the TypeScript reader's per-channel sums...
-node ../crates/wasm/check.mjs FILE.tickwave         # ...against tickwave-wasm's
+node ../crates/wasm/check.mjs FILE.tickwave         # ...against escapement-tickwave-wasm's
 node scripts/serve.ts 8080                        # then http://127.0.0.1:8080/inset.html?dec=fzstd&rec=/rec/gcc-swd-reads.1024.tickwave
 npx tsc -p .                                      # type-check
-cargo clippy -p tickwave-bench-native -p tickwave-wasm-libzstd -- -D warnings
+cargo clippy -p escapement-tickwave-bench-native -p escapement-tickwave-wasm-libzstd -- -D warnings
 ```

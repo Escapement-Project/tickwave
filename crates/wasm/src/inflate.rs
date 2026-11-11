@@ -1,12 +1,13 @@
-//! The browser's zstd decoder: libzstd, compiled to wasm32 with clang, in place of tickwave-format's
-//! ruzstd `inflate`. It decodes a digital block about a quarter faster and an analog block about
-//! four times as fast (bench/RESULTS.md). ruzstd stays out of the module only while nothing here
-//! calls tickwave-format's `inflate`, `Head::parse`, `decode_block` or `decode_overview_block`;
-//! everything goes through their `_with` forms and `Inflater::inflate`.
+//! The browser's zstd decoder: libzstd, compiled to wasm32 with clang, in place of
+//! escapement-tickwave-format's ruzstd `inflate`. It decodes a digital block about a quarter faster
+//! and an analog block about four times as fast (bench/RESULTS.md). ruzstd stays out of the module
+//! only while nothing here calls escapement-tickwave-format's `inflate`, `Head::parse`,
+//! `decode_block` or `decode_overview_block`; everything goes through their `_with` forms and
+//! `Inflater::inflate`.
 
 use std::cell::RefCell;
 
-use tickwave_format::decode::DecodeError;
+use escapement_tickwave_format::decode::DecodeError;
 use zstd::zstd_safe::{self, DCtx};
 
 fn zstd_error(code: usize) -> DecodeError {
@@ -27,10 +28,10 @@ impl Inflater {
         }
     }
 
-    /// What tickwave-format's `inflate` does: exactly one frame filling `frame`, with a checksum,
-    /// naming no dictionary, decoding to exactly `len` bytes. libzstd checks a checksum the frame
-    /// declares, but accepts a frame that declares none, and decodes every frame in its input, so
-    /// those two are checked here first.
+    /// What escapement-tickwave-format's `inflate` does: exactly one frame filling `frame`, with a
+    /// checksum, naming no dictionary, decoding to exactly `len` bytes. libzstd checks a checksum
+    /// the frame declares, but accepts a frame that declares none, and decodes every frame in its
+    /// input, so those two are checked here first.
     pub fn inflate(&self, frame: &[u8], len: usize) -> Result<Vec<u8>, DecodeError> {
         if frame.len() < 5 || frame[..4] != [0x28, 0xb5, 0x2f, 0xfd] {
             return Err(DecodeError::Zstd("not a zstd frame".into()));
@@ -48,7 +49,7 @@ impl Inflater {
                 "the bytes hold more than one frame".into(),
             ));
         }
-        let mut out = tickwave_format::decode::buffer(len, self.max)?;
+        let mut out = escapement_tickwave_format::decode::buffer(len, self.max)?;
         // Writes at most `len` bytes: a frame that decodes to more fails with dstSize_tooSmall.
         self.context
             .borrow_mut()

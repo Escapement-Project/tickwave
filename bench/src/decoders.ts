@@ -27,7 +27,7 @@ export interface Decoder {
   open(head: Uint8Array, timePhases: boolean): Promise<Opened>;
 }
 
-// The wasm-bindgen glue's surface, the same for tickwave-wasm and the libzstd build.
+// The wasm-bindgen glue's surface, the same for escapement-tickwave-wasm and the libzstd build.
 interface WasmBlock {
   start: number;
   end: number;

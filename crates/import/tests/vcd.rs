@@ -1,9 +1,9 @@
 mod common;
 
 use common::{Oracle, drain, testdata};
-use tickwave_format::model::Ratio;
-use tickwave_import::sigrok;
-use tickwave_import::vcd::{self, Import, Skipped};
+use escapement_tickwave_format::model::Ratio;
+use escapement_tickwave_import::sigrok;
+use escapement_tickwave_import::vcd::{self, Import, Skipped};
 
 /// sigrok-cli's VCD of each fixture, read by this reader, against the `.sr` read by the sigrok
 /// reader and against sigrok-cli's own reading. sigrok-cli writes a time of

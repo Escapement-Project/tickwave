@@ -5,12 +5,12 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use escapement_tickwave_format::decode::MAX_DECODED;
+use escapement_tickwave_format::model::{ChannelData, Recording};
+use escapement_tickwave_import::convert::{self, Pass, Progress, Settings, Step, select};
+use escapement_tickwave_import::input::{Input, read_all};
+use escapement_tickwave_import::{saleae, sigrok, vcd};
 use serde::{Deserialize, Serialize};
-use tickwave_format::decode::MAX_DECODED;
-use tickwave_format::model::{ChannelData, Recording};
-use tickwave_import::convert::{self, Pass, Progress, Settings, Step, select};
-use tickwave_import::input::{Input, read_all};
-use tickwave_import::{saleae, sigrok, vcd};
 use wasm_bindgen::prelude::*;
 
 // The worker defines these on `globalThis.tickwaveConvert` before it calls in. Free functions,

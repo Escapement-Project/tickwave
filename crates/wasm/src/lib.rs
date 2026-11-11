@@ -1,12 +1,12 @@
 //! tickwave's decoder for the browser. JavaScript fetches the bytes (the head, then the blocks a view
 //! covers) and hands them in; this decodes them.
 
-use js_sys::{Float32Array, Float64Array, Uint8Array};
 #[cfg(feature = "annotations")]
-use tickwave_format::annotations::{self, Included};
-use tickwave_format::decode::{self, BlockChannel, DecodeError, Head, cut_short};
-use tickwave_format::header::PREAMBLE_LEN;
-use tickwave_format::overview::ChannelOverview;
+use escapement_tickwave_format::annotations::{self, Included};
+use escapement_tickwave_format::decode::{self, BlockChannel, DecodeError, Head, cut_short};
+use escapement_tickwave_format::header::PREAMBLE_LEN;
+use escapement_tickwave_format::overview::ChannelOverview;
+use js_sys::{Float32Array, Float64Array, Uint8Array};
 use wasm_bindgen::prelude::*;
 
 mod inflate;

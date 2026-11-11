@@ -1,12 +1,12 @@
 [package]
-name = "tickwave-wasm-libzstd"
+name = "escapement-tickwave-wasm-libzstd"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [dependencies]
-tickwave-format = { version = "0.1.0", path = "../../crates/format", default-features = false }
+escapement-tickwave-format = { version = "0.1.0", path = "../../crates/format", default-features = false }
 js-sys = "0.3.107"
 serde_json = "1.0.154"
 wasm-bindgen = "0.2.130"
@@ -17,7 +17,7 @@ crate-type = ["cdylib"]
 
 [features]
 default = ["libzstd"]
-# libzstd does every inflate; without it, tickwave-format's ruzstd `inflate` does.
+# libzstd does every inflate; without it, escapement-tickwave-format's ruzstd `inflate` does.
 libzstd = ["dep:zstd"]
 # `inflateBlock` and `parseBlock`, to time the two halves of a block's decode apart.
 probe = []

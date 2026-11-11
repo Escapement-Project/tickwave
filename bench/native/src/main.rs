@@ -7,12 +7,12 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Parser, Subcommand};
+use escapement_tickwave_format::decode::{Block, BlockChannel, Head, OverviewBlock};
+use escapement_tickwave_format::header::{PREAMBLE_LEN, Preamble};
+use escapement_tickwave_format::overview::ChannelOverview;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use tickwave_format::decode::{Block, BlockChannel, Head, OverviewBlock};
-use tickwave_format::header::{PREAMBLE_LEN, Preamble};
-use tickwave_format::overview::ChannelOverview;
 
 #[derive(Parser)]
 struct Cli {
@@ -270,7 +270,7 @@ fn zero_interval(head: &Head, payload: &mut [u8]) -> Result<String> {
         let section = at..at + len;
         if matches!(
             head.header.channels[c].data,
-            tickwave_format::header::ChannelKind::Digital { .. }
+            escapement_tickwave_format::header::ChannelKind::Digital { .. }
         ) && *len > 2
         {
             // Walk to the second interval; replace the first single-byte one after it.
@@ -553,7 +553,7 @@ fn settled_rules(
     head: &Head,
     i: usize,
 ) -> Result<Vec<Corruption>> {
-    use tickwave_format::header::{BlockRow, ChannelKind};
+    use escapement_tickwave_format::header::{BlockRow, ChannelKind};
     let mut list: Vec<Pending> = Vec::new();
     let nch = head.header.channels.len();
     let index_at = PREAMBLE_LEN + head.preamble.header_len as usize;

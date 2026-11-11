@@ -1,7 +1,7 @@
-use tickwave_format::decode::{BlockChannel, DecodeError, Head, VerifyError, verify};
-use tickwave_format::encode::{EncodeError, Options, encode};
-use tickwave_format::header::{AnalogCoding, PREAMBLE_LEN};
-use tickwave_format::model::{
+use escapement_tickwave_format::decode::{BlockChannel, DecodeError, Head, VerifyError, verify};
+use escapement_tickwave_format::encode::{EncodeError, Options, encode};
+use escapement_tickwave_format::header::{AnalogCoding, PREAMBLE_LEN};
+use escapement_tickwave_format::model::{
     Analog, Channel, ChannelData, Digital, Ratio, Recording, Samples, Source,
 };
 
@@ -285,7 +285,7 @@ fn the_content_id_ignores_how_the_file_is_cut() {
 
 #[test]
 fn a_bundle_keeps_the_content_and_carries_the_files() {
-    use tickwave_format::bundle::bundle;
+    use escapement_tickwave_format::bundle::bundle;
     let file = encode(recording(EDGES_A.to_vec(), values()), &small_blocks()).unwrap();
     let files: std::collections::BTreeMap<String, String> = [
         (
@@ -318,7 +318,7 @@ fn a_bundle_keeps_the_content_and_carries_the_files() {
 
 #[test]
 fn codes_are_stored_in_byte_planes() {
-    use tickwave_format::decode::inflate;
+    use escapement_tickwave_format::decode::inflate;
     let coding = AnalogCoding::Codes {
         bits: 16,
         scale: 1.0,
@@ -360,7 +360,7 @@ fn codes_are_stored_in_byte_planes() {
 
 #[test]
 fn a_newer_minor_version_is_not_bundled() {
-    use tickwave_format::bundle::bundle;
+    use escapement_tickwave_format::bundle::bundle;
     let mut file = encode(recording(EDGES_A.to_vec(), values()), &small_blocks()).unwrap();
     // The preamble's minor version, after the magic and the major version.
     file[10..12].copy_from_slice(&1u16.to_le_bytes());

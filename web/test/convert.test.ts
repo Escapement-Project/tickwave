@@ -16,7 +16,7 @@ const DATA = join(REPO, "testdata");
 const OUT = mkdtempSync(join(tmpdir(), "tickwave-convert-"));
 
 function cli(args: string[]): void {
-  execFileSync("cargo", ["run", "-q", "--release", "-p", "tickwave-cli", "--", ...args], { cwd: REPO, stdio: ["ignore", "ignore", "pipe"] });
+  execFileSync("cargo", ["run", "-q", "--release", "-p", "escapement-tickwave-cli", "--", ...args], { cwd: REPO, stdio: ["ignore", "ignore", "pipe"] });
 }
 
 interface Case {

@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use tickwave_format::model::{ChannelData, Recording, Samples};
+use escapement_tickwave_format::model::{ChannelData, Recording, Samples};
 
 pub fn testdata(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

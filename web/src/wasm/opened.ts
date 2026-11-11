@@ -2,7 +2,7 @@
 // decoded on demand, kept in an LRU. Runs in the worker; the unit tests run it in Node.
 
 import { LRUCache } from "lru-cache";
-import type { Recording as WasmRecording } from "../../../crates/wasm/pkg/tickwave_wasm.js";
+import type { Recording as WasmRecording } from "../../../crates/wasm/pkg/escapement_tickwave_wasm.js";
 import { lowerBound } from "../search.ts";
 import {
   aborted,
