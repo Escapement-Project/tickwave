@@ -425,6 +425,12 @@ a `fact-separator` ("; ") between two. On the inset: `inset`, `label`, `text`, `
 the pointer or the keys lit), `key` and `notice`. On the reference: `popover`.
 A part an element hides stays hidden, whatever `display` a page's rule gives it.
 
+Nothing moves under the reader. A readout's figures are tabular, and an inset's reading sets a
+pulse's level as wide as "high" either way, so what follows it holds still as the pointer crosses
+edges. The label at a view's pointer keeps off the row it reads. An inset takes its final height
+once its head and sidecar are in, so the data arriving moves nothing below it. A view's Open button
+reads Close while the view is open, so the button the reader pressed is the one that undoes it.
+
 ### From the module
 
 `tickwave.js` also exports these functions:
