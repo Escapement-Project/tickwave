@@ -511,6 +511,13 @@ test.describe("the identify view", () => {
     await page.keyboard.press("-");
     const window4 = await win();
     expect(window4.end - window4.start).toBeGreaterThan(window3.end - window3.start);
+    // As do up and down.
+    await page.keyboard.press("ArrowUp");
+    const window5 = await win();
+    expect(window5.end - window5.start).toBeLessThan(window4.end - window4.start);
+    await page.keyboard.press("ArrowDown");
+    const window6 = await win();
+    expect(window6.end - window6.start).toBeGreaterThan(window5.end - window5.start);
   });
 
   test("stepping through one kind reads n of N", async ({ page }) => {

@@ -25,8 +25,9 @@ Hold Ctrl (Cmd on a Mac) and turn the wheel to zoom about the pointer, or pinch 
 touch screen. The plain wheel scrolls the page. Drag, swipe sideways or hold Shift with the wheel to
 move along the capture.
 
-With the view focused, the arrow keys move it, and plus and minus zoom. Home and the Fit button
-show the whole capture. Escape clears the cursors and the selection.
+With the view focused, the left and right arrow keys move it. The up and down arrows, or plus and
+minus, zoom in and out. Home and the Fit button show the whole capture. Escape clears the cursors
+and the selection.
 
 ## Reading a channel
 

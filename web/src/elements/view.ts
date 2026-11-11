@@ -327,7 +327,7 @@ export class TickwaveView extends TickwaveElement {
     this.root.querySelector(".close")!.setAttribute("aria-label", `Close ${l.info.title}`);
     this.#plotBox.setAttribute(
       "aria-label",
-      `${l.info.title}. Arrow keys pan, plus and minus zoom, Home fits the capture; Enter or a click places a cursor, drag on the time axis to select.`,
+      `${l.info.title}. Left and right arrows pan, up and down zoom, Home fits the capture; Enter or a click places a cursor, drag on the time axis to select.`,
     );
     const { indices, missing } = channelIndices(l.info, parseChannels(this.getAttribute("channels")));
     for (const m of missing) this.fail(new Error(`no channel ${m}`));
@@ -770,10 +770,12 @@ export class TickwaveView extends TickwaveElement {
         case "ArrowRight":
           this.#panBy(span * (e.shiftKey ? 0.5 : 0.125));
           break;
+        case "ArrowUp":
         case "+":
         case "=":
           this.#zoomBy(1 / 1.6, null);
           break;
+        case "ArrowDown":
         case "-":
         case "_":
         case "−":

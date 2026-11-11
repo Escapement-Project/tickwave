@@ -203,9 +203,9 @@ ticks.
 
 The reader zooms with Ctrl or Cmd and the wheel, a trackpad pinch, or two fingers. The plain wheel
 scrolls the page, and the view says how to zoom. Shift with the wheel, a sideways swipe, a drag or
-the arrow keys move along the capture. With the view focused, plus and minus zoom, Home and Fit show
-the whole capture, or all of the channels the view shows, and Escape clears the cursors and the
-selection.
+the left and right arrow keys move along the capture. With the view focused, the up and down arrows
+or plus and minus zoom in and out. Home and Fit show the whole capture, or all of the channels the
+view shows, and Escape clears the cursors and the selection.
 
 A mouse over a row reads it at the pointer. An analog channel gives the value of the sample
 there in a label, or the smallest and largest value where one pixel covers several samples. On a
