@@ -107,8 +107,8 @@
   header.addEventListener("focusin", () => { if (has("header-away")) root.classList.add("header-back"); });
 
   // The project's mark in motion: its edge is a signal through the ring. Lock (arrive) as the
-  // landing's hero comes into view: a chirp passes through the ring at one speed, its pulses
-  // widening, and slows to rest as one rising edge reaches the centre, the mark. Again on the logo,
+  // landing's hero comes into view: from the low run alone, a chirp passes through the ring at one
+  // speed, its pulses widening, and slows to rest as one rising edge reaches the centre, the mark. Again on the logo,
   // when a mouse or pen reaches it (a tap follows the link instead): from the mark the signal moves
   // on through a new chirp and locks again, gathering speed as Lock sheds it. tickwave's ruler runs
   // under the signal while it moves, raised ticks on its edges, and fades once it stops.
@@ -122,7 +122,7 @@
   const ProjectMark = (() => {
     const still = matchMedia("(prefers-reduced-motion: reduce)"), f = (v) => v.toFixed(2);
     const NAMES = ["inner", "outer", "width", "riser", "low", "high", "low-bottom", "speed", "again", "ramp", "densest",
-      "dense", "growth", "fill", "tick", "spacing", "raised", "lower", "line", "clear", "cut", "gap-px", "tick-px",
+      "dense", "growth", "fill", "lead", "tick", "spacing", "raised", "lower", "line", "clear", "cut", "gap-px", "tick-px",
       "spacing-px", "raised-px", "lower-px", "fade-in", "fade-out", "lower-opacity"];
     const tokens = () => {
       const style = getComputedStyle(root), t = {};
@@ -156,6 +156,9 @@
       return signal(L);
     }
     function signal(L) { let u = 0; const edges = L.map((l) => (u += l)); return { L, edges, end: u }; }
+    // Lock's signal: the low run alone for the lead, then the chirp. The levels count back from the
+    // end, so the run in front is low and the chirp's levels stay as they were.
+    function lock(t, m) { return signal([t.lead, ...chirp(t, m).L]); }
     // The trace with `s` units of the signal at the riser's place.
     function trace(t, sig, s) {
       const n = sig.L.length, level = (i) => (i >= n || (n - 1 - i) % 2 ? t.high : t.low);
@@ -249,9 +252,9 @@
       };
       const first = (sig) => { draw(sig, t.riser); fading?.(); fade.style.opacity = "1"; };
       return {
-        // Lock's first frame, held until it plays: the chirp's start, with the ruler.
-        ready() { if (begin()) first(chirp(t, m)); },
-        arrive() { if (!begin()) return; const sig = chirp(t, m); first(sig); run(sig, t.riser, 0, t.speed / 1000); },
+        // Lock's first frame, held until it plays: the low run alone, with the ruler.
+        ready() { if (begin()) first(lock(t, m)); },
+        arrive() { if (!begin()) return; const sig = lock(t, m); first(sig); run(sig, t.riser, 0, t.speed / 1000); },
         // From the mark on: its last low, a high as long (so the first frame is the mark), one dense
         // run so the levels carry on, then a new chirp, ending on the mark again.
         again() {
