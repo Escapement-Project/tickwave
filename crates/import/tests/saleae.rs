@@ -647,3 +647,27 @@ fn infers_50_mhz_for_the_notes_v0_exports() {
         );
     }
 }
+
+#[test]
+fn an_edge_at_the_end_time_lies_outside_the_capture() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("edge_at_end");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let names = vec![("digital_0".to_string(), "A".to_string())];
+    write_v0_digital(&dir.join("digital_0.bin"), 0, 1e-6, &[1e-8, 999e-9]);
+    let rec = saleae::read(&dir, &names, Some(rate(1_000_000_000))).unwrap();
+    assert_eq!(rec.length, 1000);
+    write_v0_digital(&dir.join("digital_0.bin"), 0, 1e-6, &[1e-8, 1e-6]);
+    let err = saleae::read(&dir, &names, Some(rate(1_000_000_000))).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::OutOfCapture {
+                tick: 1000,
+                end: 1000,
+                ..
+            }
+        ),
+        "{err}"
+    );
+}

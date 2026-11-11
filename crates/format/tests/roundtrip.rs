@@ -6,7 +6,8 @@ use escapement_tickwave_format::model::{
 };
 
 const EDGES_A: [i64; 9] = [1, 2, 3, 100, 101, 200, 5000, 9999, 10000];
-const LENGTH: i64 = 10_000;
+/// Ticks 0..=10,000: A's last edge and V's last sample sit on the final tick.
+const LENGTH: i64 = 10_001;
 
 /// Sample i of V sits at tick 10 i, so samples share ticks 100 and 200 with A's edges.
 fn value(i: u64) -> f32 {
@@ -37,7 +38,7 @@ fn recording(edges_a: Vec<i64>, values: Vec<f32>) -> Recording {
                 source_name: "b".into(),
                 data: ChannelData::Digital(Digital {
                     initial: false,
-                    end: 9000,
+                    end: 9001,
                     edges: Box::new(std::iter::empty()),
                 }),
             },

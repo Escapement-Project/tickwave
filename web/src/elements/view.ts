@@ -11,7 +11,7 @@ import { Prober, type Probed } from "../prober.ts";
 import { lowerBound } from "../search.ts";
 import { channelIndices, Plot } from "../render/plot.ts";
 import { clampRange, fitRange, moveRange, scaleLimits, zoomRange, type ScaleLimits, type ValueRange } from "../render/scale.ts";
-import { isAbort, named, sampleAtOrBefore, sampleTick, type RecordingInfo } from "../source.ts";
+import { inChannel, isAbort, named, sampleAtOrBefore, sampleTick, type RecordingInfo } from "../source.ts";
 import { parseTime, toTicks, type TimeSpec } from "../time.ts";
 import { DRAG_PX, TickwaveElement, loadRecording, zoomKey, type Loaded } from "./base.ts";
 
@@ -1172,7 +1172,7 @@ export class TickwaveView extends TickwaveElement {
       // Each digital channel's pulse at cursor A, as the label at the pointer gives it.
       for (const t of this.#plot.tracks) {
         const c = t.channel;
-        if (c.kind !== "digital" || a < 0 || a > c.end) continue;
+        if (c.kind !== "digital" || !inChannel(c, a)) continue;
         let pulse: Pulse;
         try {
           const e = await l.source.edges(t.index, a, a + 1);

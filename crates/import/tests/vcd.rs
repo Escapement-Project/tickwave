@@ -289,3 +289,16 @@ fn verge_exports_through_sigrok_cli_vcd() {
     }
     bar.finish_and_clear();
 }
+
+#[test]
+fn a_change_at_the_last_timestamp_is_inside_the_capture() {
+    let import = read(&format!("{}#0 0! 1\"\n#3 1!\n", header("1 ns", TWO)));
+    assert_eq!(import.recording.length, 4);
+    assert_eq!(
+        digital(import),
+        [
+            ("top.a".to_owned(), false, 4, vec![3]),
+            ("top.b".to_owned(), true, 4, vec![]),
+        ]
+    );
+}

@@ -55,12 +55,12 @@ export interface MemorySourceOptions {
  * The levels a reader of a real file has, from FORMAT.md: shifts 12, 16, 20, ... in steps of 4,
  * stopping at the first with at most 1,024 buckets; those with at most 2^17 buckets in the head,
  * finer ones up to 2^26 buckets in overview blocks, any with more left out. A level has
- * (length >> shift) + 1 buckets.
+ * ceil(length / 2^shift) buckets.
  */
 export function formatLevels(length: number): number[] {
   const levels: number[] = [];
   for (let shift = 12; shift < 63; shift += 4) {
-    const buckets = Math.floor(length / 2 ** shift) + 1;
+    const buckets = Math.ceil(length / 2 ** shift);
     if (buckets <= 2 ** 26) levels.push(2 ** shift);
     if (buckets <= 1024) break;
   }

@@ -84,6 +84,7 @@ pub fn read_from(reader: impl BufRead, file_name: &str) -> Result<Import, Error>
         touched: Vec::new(),
         start: None,
         now: None,
+        written: None,
     };
     while let Some(command) = parser.next().transpose()? {
         let line = parser.line();
@@ -127,7 +128,10 @@ pub fn read_from(reader: impl BufRead, file_name: &str) -> Result<Import, Error>
     state.commit();
 
     let start = state.start.unwrap_or(0);
-    let length = state.now.unwrap_or(start) - start;
+    // A last timestamp with no change marks where the dump ends, as sigrok-cli writes one. One with
+    // changes is inside the capture, which then runs a tick past it.
+    let now = state.now.unwrap_or(start);
+    let length = now - start + u64::from(state.written == Some(now));
     let length = i64::try_from(length).map_err(|_| Error::Invalid {
         line: parser.line(),
         message: format!("{length} ticks is too long"),
@@ -295,6 +299,8 @@ struct State {
     touched: Vec<usize>,
     start: Option<u64>,
     now: Option<u64>,
+    /// The last time any value was set, changed or not.
+    written: Option<u64>,
 }
 
 impl State {
@@ -332,6 +338,9 @@ impl State {
         let (Some(now), Some(start)) = (self.now, self.start) else {
             return;
         };
+        if !self.touched.is_empty() {
+            self.written = Some(now);
+        }
         for slot in self.touched.drain(..) {
             let signal = &mut self.signals[slot];
             signal.touched = false;

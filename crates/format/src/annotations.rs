@@ -499,9 +499,10 @@ fn resolve_file(
 
     for (_, at, a) in &plain {
         let end = a.end.unwrap_or(a.start);
-        if a.start < 0 || end > header.length {
+        // A span's end is exclusive, so it may sit at the length; a point may not.
+        if a.start < 0 || a.start >= header.length || end > header.length {
             problems.push(format!(
-                "{at}: ticks {} to {end} fall outside the capture, 0 to {}",
+                "{at}: ticks {} to {end} fall outside the capture, 0..{}",
                 a.start, header.length
             ));
         }

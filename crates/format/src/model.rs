@@ -71,7 +71,7 @@ pub struct Recording {
     /// Ticks a second. One tick is the source's time resolution: every time in the recording is a
     /// whole number of ticks.
     pub timebase: Ratio,
-    /// Ticks from the capture's start, tick 0, to its end.
+    /// How many ticks the capture covers: ticks `0..length`, at least one.
     pub length: i64,
     pub channels: Vec<Channel>,
     pub source: Source,
@@ -96,10 +96,11 @@ pub enum ChannelData {
 pub struct Digital {
     /// The level at tick 0.
     pub initial: bool,
-    /// The tick up to which the level is known, at most the recording's length. A source can stop
-    /// knowing one channel before another.
+    /// The level is known at ticks `0..end`, and `end` is at most the recording's length. A source
+    /// can stop knowing one channel before another. At 0 the level is never known, and `initial`
+    /// is false.
     pub end: i64,
-    /// Ticks at which the level flips, strictly increasing, each in `1..=end`. Two changes within
+    /// Ticks at which the level flips, strictly increasing, each in `1..end`. Two changes within
     /// one tick cannot be represented: a source reader collapses them to their net change (VCD) or
     /// refuses the source (Saleae).
     pub edges: Edges,

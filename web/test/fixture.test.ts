@@ -49,6 +49,10 @@ test("overview levels follow FORMAT.md", () => {
   assert.deepEqual(formatLevels(927888190), [2 ** 12, 2 ** 16, 2 ** 20]);
   assert.deepEqual(formatLevels(4429986070), [2 ** 12, 2 ** 16, 2 ** 20, 2 ** 24]);
   assert.deepEqual(formatLevels(114006396250), [2 ** 12, 2 ** 16, 2 ** 20, 2 ** 24, 2 ** 28]);
+  // 2^22 ticks fill exactly 1,024 buckets of 2^12, so no coarser level is needed; one tick more
+  // takes a 1,025th.
+  assert.deepEqual(formatLevels(2 ** 22), [2 ** 12]);
+  assert.deepEqual(formatLevels(2 ** 22 + 1), [2 ** 12, 2 ** 16]);
 });
 
 test("annotations: generated ids, refs, times and errors", () => {

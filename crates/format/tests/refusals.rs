@@ -119,14 +119,15 @@ fn analog(coding_bits: Option<u8>, values: Vec<f32>) -> (Recording, Options) {
     let count = values.len() as u64;
     let rec = Recording {
         timebase: Ratio::integer(1_000_000_000).unwrap(),
-        length: 1_000_000_000,
+        // Ticks 0..=10^9: the last edge and the eleventh sample sit on the final tick.
+        length: 1_000_000_001,
         channels: vec![
             Channel {
                 name: "C".into(),
                 source_name: "c".into(),
                 data: ChannelData::Digital(Digital {
                     initial: false,
-                    end: 1_000_000_000,
+                    end: 1_000_000_001,
                     edges: Box::new([5, 1_000_000_000].into_iter()),
                 }),
             },
@@ -199,8 +200,8 @@ fn a_header_reaching_past_the_capture_is_refused() {
     Head::parse(&file).unwrap();
     for (from, to, why) in [
         (
-            r#""end":1000000000"#,
-            r#""end":9000000000"#,
+            r#""end":1000000001"#,
+            r#""end":9000000001"#,
             "ends outside the capture",
         ),
         (
@@ -328,7 +329,14 @@ fn the_encoder_refuses_what_the_reader_would_and_says_which_channel() {
         |rec: Recording, options: &Options| encode(rec, options).expect_err("refused").to_string();
     let (mut rec, options) = analog(None, vec![1.0; 10]);
     rec.length = -5;
-    assert_eq!(refused(rec, &options), "the length -5 is negative");
+    assert_eq!(refused(rec, &options), "the length -5 covers no tick");
+    let (mut rec, options) = analog(None, vec![]);
+    rec.length = 0;
+    rec.channels.truncate(1);
+    if let ChannelData::Digital(d) = &mut rec.channels[0].data {
+        (d.end, d.edges) = (0, Box::new(std::iter::empty()));
+    }
+    assert_eq!(refused(rec, &options), "the length 0 covers no tick");
 
     let (mut rec, options) = analog(None, vec![1.0; 10]);
     if let ChannelData::Analog(a) = &mut rec.channels[1].data {
@@ -344,7 +352,7 @@ fn the_encoder_refuses_what_the_reader_would_and_says_which_channel() {
     if let ChannelData::Analog(a) = &mut rec.channels[1].data {
         a.first = 2_000_000_000;
     }
-    assert!(refused(rec, &options).starts_with("V: samples run past the recording's end"));
+    assert!(refused(rec, &options).starts_with("V: samples run past the recording's ticks"));
 
     let (rec, options) = analog(Some(0), vec![0.0; 10]);
     assert_eq!(
@@ -410,6 +418,98 @@ fn an_index_that_moves_samples_out_of_their_block_is_refused() {
     let err = Head::parse_file(&bad).err().expect("refused");
     assert!(
         err.to_string().contains("samples lie outside its ticks"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_channel_never_known_has_a_low_initial_level() {
+    let never = |initial: bool| {
+        let (mut rec, options) = analog(None, vec![0.0; 11]);
+        rec.channels.push(Channel {
+            name: "N".into(),
+            source_name: "n".into(),
+            data: ChannelData::Digital(Digital {
+                initial,
+                end: 0,
+                edges: Box::new(std::iter::empty()),
+            }),
+        });
+        (rec, options)
+    };
+    let (rec, options) = never(true);
+    assert_eq!(
+        encode(rec, &options).expect_err("refused").to_string(),
+        "N: never known, so its initial level is false"
+    );
+    let (rec, options) = never(false);
+    let file = encode(rec, &options).unwrap();
+    Head::parse_file(&file).unwrap();
+    let bad = patched(
+        &file,
+        r#""initial":false,"end":0,"#,
+        r#""initial":true ,"end":0,"#,
+    );
+    let err = Head::parse_file(&bad).err().expect("refused");
+    assert!(
+        err.to_string()
+            .contains("never known but has a high initial level"),
+        "{err}"
+    );
+}
+
+/// The analog recording's file with its length or channel C's end one tick shorter, so that
+/// what sat on the final tick sits at the bound, outside it.
+#[test]
+fn an_item_at_the_length_or_the_end_is_refused() {
+    let shortened = |channels: usize, block_bytes: usize, from: &str, to: &str| {
+        let (mut rec, options) = analog(None, vec![0.0; 11]);
+        rec.channels.truncate(channels);
+        let file = encode(
+            rec,
+            &Options {
+                block_bytes,
+                ..options
+            },
+        )
+        .unwrap();
+        Head::parse_file(&file).unwrap();
+        let mut bad = patched(&file, r#""end":1000000001"#, r#""end":1000000000"#);
+        if from != to {
+            bad = patched(&bad, from, to);
+        }
+        bad
+    };
+    let (length, shorter) = (r#""length":1000000001"#, r#""length":1000000000"#);
+
+    // V's eleventh sample, at 10^9.
+    let err = Head::parse_file(&shortened(2, 1 << 20, length, shorter))
+        .err()
+        .expect("refused");
+    assert!(
+        err.to_string().contains("samples lie outside the capture"),
+        "{err}"
+    );
+
+    // C's second edge, at 10^9, starts a block of its own.
+    let err = Head::parse_file(&shortened(1, 1, length, shorter))
+        .err()
+        .expect("refused");
+    assert!(
+        err.to_string().contains("block 1's row is out of place"),
+        "{err}"
+    );
+
+    // The same edge at C's end, in a capture that still covers it.
+    let file = shortened(1, 1 << 20, length, length);
+    let head = Head::parse_file(&file).unwrap();
+    let (offset, len) = head.block_location(0);
+    let err = head
+        .decode_block(0, &file[offset as usize..][..len as usize])
+        .err()
+        .expect("refused");
+    assert!(
+        err.to_string().contains("an edge lies outside the block"),
         "{err}"
     );
 }

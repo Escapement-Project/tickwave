@@ -424,3 +424,11 @@ fn a_recording_id_that_is_no_content_id_is_refused() {
     );
     assert_problem(&problems(&hand, GENERATED), "is not a content id");
 }
+
+#[test]
+fn a_span_may_end_at_the_length_and_a_point_may_not_sit_there() {
+    let last = format!("{GENERATED}{{\"id\": \"edge/1\", \"start\": 999999, \"end\": 1000000}}\n");
+    resolve(HAND, &included(&last), &header(), Some("rec.tickwave")).unwrap();
+    let past = format!("{GENERATED}{{\"id\": \"edge/2\", \"start\": 1000000}}\n");
+    assert_problem(&problems(HAND, &past), "fall outside the capture");
+}

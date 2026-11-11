@@ -63,7 +63,7 @@ UTF-8 JSON. Every integer in it is below 2^53, so a JavaScript reader parses it 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `timebase` | `[num, den]` | ticks a second |
-| `length` | integer | ticks from tick 0 to the capture's end |
+| `length` | integer | how many ticks the capture covers: ticks `0..length` |
 | `channels` | array | one entry a channel, in block order |
 | `source` | object | where the recording came from |
 | `title` | string, optional | |
@@ -76,8 +76,10 @@ UTF-8 JSON. Every integer in it is below 2^53, so a JavaScript reader parses it 
 
 A channel entry has `name`, `source_name` (the source's own name for it) and `kind`:
 
-- `"digital"`: `initial` (the level at tick 0, a boolean), `end` (the tick up to which the level is
-  known; a source can stop knowing one channel before another), `edges` (the count).
+- `"digital"`: `initial` (the level at tick 0, a boolean), `end` (the level is known at ticks
+  `0..end`; a source can stop knowing one channel before another), and `edges` (the count). An
+  `end` of 0 says the level is never known. Such a channel has no edges, and its `initial` is
+  false.
 - `"analog"`: `unit` (empty when the source states none), `first` (the first sample's tick),
   `period` (ticks from one sample to the next, `[num, den]`), `count`, and `coding`:
   - `{"type": "f32"}`: the source's f32 values.
@@ -92,10 +94,11 @@ A channel entry has `name`, `source_name` (the source's own name for it) and `ki
 
 Sample `i` of an analog channel sits at tick `first + floor(i × period)`.
 
-Every tick in the file lies in `0..=length`, and `length` is below 2^53: a digital channel's `end`,
-every edge, every sample, every block's start. So do the terms of `timebase` and `period`, and
-every `edges` and `count`. No term of `timebase` or `period` is zero, and `bits` lies in `1..=16`.
-A reader refuses a header that breaks any of these before it reads a block.
+Every tick in the file lies in `0..length`: every edge, every sample and every block's start. A
+digital channel's `end` lies in `0..=length`. `length` is at least 1. It is below 2^53, and so are
+the terms of `timebase` and `period`, and every `edges` and `count`. No term of `timebase` or
+`period` is zero, and `bits` lies in `1..=16`. A reader refuses a header that breaks any of these
+before it reads a block.
 
 `source` has `format` (`saleae-binary-0`, `saleae-binary-1`, `sigrok-sr`, `vcd`; a reader keeps
 a name it doesn't know), `files` (names, no directories), and optionally `instrument`, `software`,
@@ -118,7 +121,7 @@ bytes for each channel:
 | 20 | u32 | its decoded length |
 | 24 + 4c | u32 | channel c: for a digital channel, its edge count in the block, with the level at the block's start in bit 31; for an analog channel, its sample count in the block |
 
-Block i covers ticks `[start_i, start_{i+1})`, and the last block runs to the end. The first block
+Block i covers ticks `[start_i, start_{i+1})`, and the last block runs to `length`. The first block
 starts at tick 0, and the starts strictly increase. A digital channel's level bit is `initial` in
 block 0, and in each later block the bit before it, flipped once for every edge that block
 counted.
@@ -143,7 +146,7 @@ in channel order:
 
 - **Digital.** The block's edges, as unsigned LEB128 intervals. The first interval is measured from
   the block's start tick, each later one from the edge before it. Only the first may be zero.
-  Every edge lies in `1..=end` of its channel (an edge at tick 0 would contradict `initial`), so
+  Every edge lies in `1..end` of its channel (an edge at tick 0 would contradict `initial`), so
   the first block's first interval is never zero.
 - **Analog.** The block's samples in the channel's coding: f32 values, or u16 codes in two byte
   planes. Every code is below `2^bits`; a reader refuses a wider one.
@@ -151,7 +154,7 @@ in channel order:
 ### Overview
 
 The overview lets a reader draw a view without decoding blocks. Each level summarises every
-channel in buckets of `2^shift` ticks; a level has `(length >> shift) + 1` buckets.
+channel in buckets of `2^shift` ticks; a level has `ceil(length / 2^shift)` buckets.
 
 The levels are shifts 12, 16, 20 and so on in steps of 4, stopping at the first with at most 1,024
 buckets. A level with at most 2^17 buckets goes in the head. A finer level with at most 2^26

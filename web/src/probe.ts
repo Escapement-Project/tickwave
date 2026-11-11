@@ -25,7 +25,7 @@ export interface Pulse {
 
 /**
  * The pulse at `tick` from edges read over [from, to), which hold `tick`. An edge at a tick is where
- * the new level starts. `known` is the channel's end: an edge can lie at it, none after it.
+ * the new level starts. `known` is the channel's end: every edge lies before it.
  */
 export function pulseFromEdges(e: Edges, from: number, to: number, known: number, tick: number): Pulse {
   const t = e.ticks;
@@ -33,7 +33,7 @@ export function pulseFromEdges(e: Edges, from: number, to: number, known: number
   const i = lowerBound(t, tick + 1);
   const level = ((e.level ^ (i & 1)) & 1) as 0 | 1;
   const start: EdgeAt = i > 0 ? t[i - 1] : from <= 1 ? null : undefined;
-  const after = (k: number): EdgeAt => (k < t.length ? t[k] : to > known ? null : undefined);
+  const after = (k: number): EdgeAt => (k < t.length ? t[k] : to >= known ? null : undefined);
   const end = after(i);
   return { level, start, end, next: end === null ? null : after(i + 1) };
 }
@@ -80,9 +80,9 @@ export async function findEdge(source: Source, channel: number, lo: number, hi: 
 /** Fills in the edges `p` lacks, searching the source. `known` is the channel's end, as above. */
 export async function completePulse(source: Source, channel: number, p: Pulse, tick: number, known: number, signal?: AbortSignal): Promise<Pulse> {
   const start = p.start !== undefined ? p.start : await findEdge(source, channel, 1, tick + 1, -1, signal);
-  const end = p.end !== undefined ? p.end : await findEdge(source, channel, tick + 1, known + 1, 1, signal);
+  const end = p.end !== undefined ? p.end : await findEdge(source, channel, tick + 1, known, 1, signal);
   let next = p.next;
-  if (next === undefined) next = end === null ? null : await findEdge(source, channel, end + 1, known + 1, 1, signal);
+  if (next === undefined) next = end === null ? null : await findEdge(source, channel, end + 1, known, 1, signal);
   return { level: p.level, start, end, next };
 }
 

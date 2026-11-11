@@ -15,8 +15,9 @@ pub const HEAD_BUCKETS: u64 = 1 << 17;
 /// No coarser level is needed once one has this few buckets.
 pub const WHOLE_VIEW: u64 = 1024;
 
+/// Enough buckets to cover ticks `0..length`: `ceil(length / 2^shift)`, and at least one.
 pub fn buckets(length: i64, shift: u8) -> u64 {
-    (length.max(0) as u64 >> shift) + 1
+    ((length.max(1) - 1) as u64 >> shift) + 1
 }
 
 /// Buckets in one overview block, for a level kept outside the head.
@@ -171,7 +172,7 @@ impl DigitalBuilder {
         }
     }
 
-    /// `tick` lies in `0..=length` and follows the previous edge.
+    /// `tick` lies in `0..length` and follows the previous edge.
     pub fn edge(&mut self, tick: i64) {
         let b = tick as u64 >> self.shift;
         // Buckets up to b start before this edge, at the level before it.
@@ -365,8 +366,8 @@ mod tests {
 
     #[test]
     fn digital_buckets_by_hand() {
-        // Buckets of 16 ticks over 0..=63: edges at 3 (in bucket 0), 40 and 41 (bucket 2).
-        let mut b = DigitalBuilder::new(63, 4, true);
+        // Buckets of 16 ticks over 0..64: edges at 3 (in bucket 0), 40 and 41 (bucket 2).
+        let mut b = DigitalBuilder::new(64, 4, true);
         for t in [3, 40, 41] {
             b.edge(t);
         }
@@ -383,7 +384,7 @@ mod tests {
     #[test]
     fn coarsening_matches_building_coarse() {
         let edges = [5i64, 70, 71, 300, 1000, 1001, 1002, 4095];
-        let length = 4095;
+        let length = 4096;
         let mut fine = DigitalBuilder::new(length, 4, false);
         let mut coarse = DigitalBuilder::new(length, 8, false);
         for &t in &edges {
@@ -409,6 +410,9 @@ mod tests {
             (&[20, 24, 28][..], &[12, 16][..])
         );
         assert_eq!(p.finest(), 12);
+        // 2^22 ticks fill exactly 1,024 buckets of 2^12, which is coarse enough.
+        assert_eq!(plan(1 << 22).head, [12]);
+        assert_eq!(plan((1 << 22) + 1).head, [12, 16]);
         // 1 ms at 1 GS/s: one level in the head covers it all.
         assert_eq!(
             plan(1_000_000),
@@ -417,9 +421,11 @@ mod tests {
                 blocks: vec![]
             }
         );
-        // 2^30 ticks: 2^12 has 262,145 buckets, so five blocks, the last holding one bucket.
-        assert_eq!(block_count(1 << 30, 12), 5);
-        assert_eq!(block_buckets(1 << 30, 12, 4), (4 * 65536, 1));
+        // 2^30 ticks fill four blocks of 2^12 buckets exactly; one tick more takes a fifth, which
+        // holds one bucket.
+        assert_eq!(block_count(1 << 30, 12), 4);
+        assert_eq!(block_count((1 << 30) + 1, 12), 5);
+        assert_eq!(block_buckets((1 << 30) + 1, 12, 4), (4 * 65536, 1));
         // 3,600 s at 1 ps a tick: 2^12 and 2^16 would pass 2^26 buckets, so they are left out.
         let p = plan(3_600_000_000_000_000);
         assert!(

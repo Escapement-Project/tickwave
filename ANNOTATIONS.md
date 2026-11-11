@@ -141,7 +141,8 @@ the prose cites breaks the build instead of the page. It checks that:
 - every included file is named without a directory, is provided, and every provided file is
   included;
 - ids are unique, hand-written ids hold no `/`, and every `ref` names a generated annotation;
-- every channel exists, and every time lies inside the capture with `end` not before `start`;
+- every channel exists, a point and a span's `start` lie in `0..length`, and a span's `end` is
+  not before its `start` and not past `length`;
 - every `measure` names a digital channel, a known measure, and sits on a span;
 - every value is a decimal and a unit, under a name of lower-case letters, digits and `_`.
 

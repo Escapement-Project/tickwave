@@ -26,7 +26,7 @@ use crate::overview::{self, AnalogBuilder, DigitalBuilder, Level};
 pub enum EncodeError {
     #[error("{what} {value} does not fit the header, which holds integers below 2^53")]
     TooLarge { what: &'static str, value: u64 },
-    #[error("{channel}: ends at tick {end}, outside the recording's 0 to {length}")]
+    #[error("{channel}: its end, {end}, lies outside the recording's 0 to {length}")]
     End {
         channel: String,
         end: i64,
@@ -38,7 +38,7 @@ pub enum EncodeError {
         tick: i64,
         previous: i64,
     },
-    #[error("{channel}: edge at tick {tick} lies outside the channel's ticks 1 to {end}")]
+    #[error("{channel}: edge at tick {tick} lies outside the channel's known ticks, 1..{end}")]
     EdgeRange {
         channel: String,
         tick: i64,
@@ -50,9 +50,11 @@ pub enum EncodeError {
         promised: u64,
         delivered: u64,
     },
-    #[error("the length {0} is negative")]
+    #[error("the length {0} covers no tick")]
     Length(i64),
-    #[error("{channel}: samples run past the recording's end, tick {length}")]
+    #[error("{channel}: never known, so its initial level is false")]
+    UnknownInitial { channel: String },
+    #[error("{channel}: samples run past the recording's ticks, 0..{length}")]
     SampleRange { channel: String, length: i64 },
     #[error("{channel}: the first sample is at tick {first}, before the recording starts")]
     StartsBeforeZero { channel: String, first: i64 },
@@ -200,7 +202,7 @@ pub fn encode(recording: Recording, options: &Options) -> Result<Vec<u8>, Encode
     }
     check_safe("timebase numerator", timebase.num())?;
     check_safe("timebase denominator", timebase.den())?;
-    if length < 0 {
+    if length < 1 {
         return Err(EncodeError::Length(length));
     }
     check_safe("length", length as u64)?;
@@ -224,6 +226,11 @@ pub fn encode(recording: Recording, options: &Options) -> Result<Vec<u8>, Encode
                         channel: channel.name,
                         end: d.end,
                         length,
+                    });
+                }
+                if d.end == 0 && d.initial {
+                    return Err(EncodeError::UnknownInitial {
+                        channel: channel.name,
                     });
                 }
                 let mut edges = d.edges;
@@ -284,7 +291,7 @@ pub fn encode(recording: Recording, options: &Options) -> Result<Vec<u8>, Encode
                         first: a.first,
                     });
                 }
-                if a.first > length || (a.count > 0 && stream.tick(a.count - 1) > length) {
+                if a.first >= length || (a.count > 0 && stream.tick(a.count - 1) >= length) {
                     return Err(EncodeError::SampleRange {
                         channel: channel.name,
                         length,
@@ -388,7 +395,7 @@ pub fn encode(recording: Recording, options: &Options) -> Result<Vec<u8>, Encode
         let before = section.len();
         match &mut streams[i] {
             Stream::Digital(d) => {
-                if tick < 1 || tick > d.end {
+                if tick < 1 || tick >= d.end {
                     return Err(EncodeError::EdgeRange {
                         channel: name.clone(),
                         tick,

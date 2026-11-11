@@ -10,11 +10,12 @@ use escapement_tickwave_format::model::{
 
 /// At 2^12 ticks a bucket this has 2^18 + 1 buckets: too many for the head, so five overview
 /// blocks of 2^16, the last holding only the bucket that starts at the final tick.
-const LENGTH: i64 = 1 << 30;
-const EDGES: [i64; 4] = [5000, 5001, 300_000_000, LENGTH];
+const LAST: i64 = 1 << 30;
+const LENGTH: i64 = LAST + 1;
+const EDGES: [i64; 4] = [5000, 5001, 300_000_000, LAST];
 /// One sample every 2^20 ticks: in every 256th bucket at 2^12.
 const PERIOD: u64 = 1 << 20;
-const SAMPLES: u64 = (LENGTH as u64 / PERIOD) + 1;
+const SAMPLES: u64 = (LAST as u64 / PERIOD) + 1;
 
 fn recording(edges: Vec<i64>) -> Recording {
     Recording {
@@ -121,7 +122,7 @@ fn a_long_recording_keeps_its_finest_level_in_blocks() {
         head.overview_blocks_covering(0, 4096 * 65536 - 1, 4096 * 65536 + 1),
         0..2
     );
-    assert_eq!(head.overview_blocks_covering(0, LENGTH, LENGTH + 1), 4..5);
+    assert_eq!(head.overview_blocks_covering(0, LAST, LENGTH), 4..5);
     assert_eq!(head.overview_blocks_covering(0, i64::MIN, i64::MAX), 0..5);
     assert_eq!(head.overview_blocks_covering(0, 10, 10), 0..1);
 }

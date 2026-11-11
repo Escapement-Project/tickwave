@@ -239,7 +239,9 @@ pub fn read_bytes(bytes: impl Into<Arc<[u8]>>, file_name: &str) -> Result<Import
     Ok(Import {
         recording: Recording {
             timebase,
-            length,
+            // n samples cover ticks 0..n. A capture with none still covers tick 0, where nothing
+            // is known.
+            length: length.max(1),
             channels,
             source: Source {
                 files: vec![file_name.to_owned()],

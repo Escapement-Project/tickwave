@@ -425,7 +425,7 @@ export class Opened {
     });
     if (shift < 0) return null;
     const bucket = 2 ** shift;
-    const count = Math.floor(this.header.length / bucket) + 1;
+    const count = Math.ceil(this.header.length / bucket);
     const c = this.header.channels[channel];
     const k0 = Math.min(count, Math.max(0, Math.floor(start / bucket)));
     const k1 = Math.min(count, Math.max(k0, Math.ceil(Math.min(end, this.info.channels[channel].end) / bucket)));

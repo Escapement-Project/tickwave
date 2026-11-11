@@ -139,8 +139,8 @@ pub struct Block {
 
 /// What the header promises about the capture's extent, checked before anything relies on it.
 pub(crate) fn check_header(h: &Header) -> Result<(), DecodeError> {
-    if !(0..JSON_SAFE as i64).contains(&h.length) {
-        return Err(corrupt("the length is negative or past 2^53"));
+    if !(1..JSON_SAFE as i64).contains(&h.length) {
+        return Err(corrupt("the length covers no tick or is past 2^53"));
     }
     // The page reads the header with JSON.parse: past 2^53 it would read another number.
     let safe = |v: u64| v < JSON_SAFE;
@@ -150,9 +150,18 @@ pub(crate) fn check_header(h: &Header) -> Result<(), DecodeError> {
     for c in &h.channels {
         let name = &c.name;
         match &c.data {
-            ChannelKind::Digital { end, edges, .. } => {
+            ChannelKind::Digital {
+                initial,
+                end,
+                edges,
+            } => {
                 if !(0..=h.length).contains(end) {
                     return Err(corrupt(format!("channel {name} ends outside the capture")));
+                }
+                if *end == 0 && *initial {
+                    return Err(corrupt(format!(
+                        "channel {name} is never known but has a high initial level"
+                    )));
                 }
                 if !safe(*edges) {
                     return Err(corrupt(format!("channel {name}'s edge count is past 2^53")));
@@ -173,7 +182,7 @@ pub(crate) fn check_header(h: &Header) -> Result<(), DecodeError> {
                 // In u128: an absurd count or period must not wrap into a tick inside the capture.
                 let last = u128::from(count.saturating_sub(1)) * u128::from(period.num())
                     / u128::from(period.den());
-                if *first < 0 || *first > h.length || *first as u128 + last > h.length as u128 {
+                if *first < 0 || *first >= h.length || *first as u128 + last >= h.length as u128 {
                     return Err(corrupt(format!(
                         "channel {name}'s samples lie outside the capture"
                     )));
@@ -298,7 +307,7 @@ impl Head {
         for (i, row) in rows.iter().enumerate() {
             if row.offset != expect_offset
                 || (i > 0 && row.start <= rows[i - 1].start)
-                || row.start > header.length
+                || row.start >= header.length
             {
                 return Err(corrupt(format!("block {i}'s row is out of place")));
             }
@@ -417,11 +426,10 @@ impl Head {
     /// The overview blocks of `header.overview_blocks[level]` holding any tick in `[start, end)`.
     pub fn overview_blocks_covering(&self, level: usize, start: i64, end: i64) -> Range<usize> {
         let shift = self.header.overview_blocks[level].shift;
-        let length = self.header.length.max(0);
-        // Every tick in 0..=length falls in a block, so clamping keeps the range inside the level.
-        let block = |tick: i64| {
-            ((tick.clamp(0, length) as u64 >> shift) / overview::BLOCK_BUCKETS) as usize
-        };
+        let last = self.header.length.max(1) - 1;
+        // Every tick in 0..length falls in a block, so clamping keeps the range inside the level.
+        let block =
+            |tick: i64| ((tick.clamp(0, last) as u64 >> shift) / overview::BLOCK_BUCKETS) as usize;
         let first = block(start);
         first..block(end.max(start.saturating_add(1)) - 1) + 1
     }
@@ -566,7 +574,7 @@ fn item_count(word: u32, digital: bool) -> u32 {
 // shared a function, a change to the analog loop moved the digital loop's speed by 5-7 %.
 
 /// A digital section's `count` edges: LEB128 intervals, the first from the block's `start`. Every
-/// edge lies in `1..=channel_end` and before the block's `end`, and no two share a tick.
+/// edge lies in `1..channel_end` and before the block's `end`, and no two share a tick.
 #[inline(never)]
 fn digital_edges(
     section: &[u8],
@@ -590,7 +598,7 @@ fn digital_edges(
             .ok()
             .and_then(|iv| tick.checked_add(iv))
             .ok_or("an interval overflows")?;
-        if tick >= end || tick > channel_end || tick < 1 {
+        if tick >= end || tick >= channel_end || tick < 1 {
             return Err("an edge lies outside the block".into());
         }
         edges.push(tick);

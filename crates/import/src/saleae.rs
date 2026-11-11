@@ -87,7 +87,7 @@ pub enum Error {
         tick: i64,
         previous: i64,
     },
-    #[error("{path}: edge {index} at tick {tick} lies outside the capture, ticks 1 to {end}")]
+    #[error("{path}: edge {index} at tick {tick} lies outside the capture, ticks 1..{end}")]
     OutOfCapture {
         path: PathBuf,
         index: u64,
@@ -469,7 +469,8 @@ fn analog(
 }
 
 impl DigitalFile {
-    fn end_tick(&self, rate: SampleRate) -> i64 {
+    /// The tick of the file's end time, where the level stops being known.
+    fn end(&self, rate: SampleRate) -> i64 {
         tick_of(self.end, self.begin, rate).round() as i64
     }
 
@@ -483,7 +484,7 @@ impl DigitalFile {
     /// each run of `STEP` edges checked.
     fn check(&self, rate: SampleRate, step: &mut dyn FnMut(u64)) -> Result<(), Error> {
         let path = || self.file.path.clone();
-        let end = self.end_tick(rate);
+        let end = self.end(rate);
         let mut previous = 0;
         for (index, time) in (0..).zip(self.times()) {
             if index % STEP == STEP - 1 {
@@ -500,7 +501,7 @@ impl DigitalFile {
                 });
             }
             let tick = tick as i64;
-            if tick < 1 || tick > end {
+            if tick < 1 || tick >= end {
                 return Err(Error::OutOfCapture {
                     path: path(),
                     index,
@@ -844,7 +845,7 @@ impl Headers {
         for opened in &self.files {
             match opened {
                 Opened::Digital(d) => {
-                    length = length.max(d.end_tick(rate));
+                    length = length.max(d.end(rate));
                     firsts.push(0);
                 }
                 Opened::Analog(a) => {
@@ -885,7 +886,7 @@ impl Headers {
             rate,
             firsts,
             trigger,
-            length,
+            length: length.max(1),
         })
     }
 }
@@ -916,7 +917,7 @@ impl Export {
                 data: match opened {
                     Opened::Digital(d) => ChannelData::Digital(Digital {
                         initial: d.initial,
-                        end: d.end_tick(rate),
+                        end: d.end(rate),
                         edges: Box::new(d.edges(rate)),
                     }),
                     Opened::Analog(a) => ChannelData::Analog(Analog {

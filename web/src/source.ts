@@ -40,6 +40,11 @@ export interface AnalogChannel {
 
 export type Channel = DigitalChannel | AnalogChannel;
 
+/** Whether `tick` lies in the channel's data: ticks `0..end`. */
+export function inChannel(c: Channel, tick: number): boolean {
+  return tick >= 0 && tick < c.end;
+}
+
 /** A recording's content id: "blake3:" and the 64 hex digits of its content's digest. */
 export type ContentId = `blake3:${string}`;
 

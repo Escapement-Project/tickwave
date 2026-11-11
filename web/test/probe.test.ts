@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { MemorySource, type MemoryRecording } from "../src/memory-source.ts";
 import { analogFromOverview, analogFromSamples, completePulse, findEdge, formatDuty, pulseFigures, pulseFromEdges } from "../src/probe.ts";
-import type { AnalogChannel, Source } from "../src/source.ts";
+import { inChannel, type AnalogChannel, type Source } from "../src/source.ts";
 
 const NS = { num: 1_000_000_000, den: 1 };
 
@@ -50,6 +50,20 @@ test("a pulse from the edges in hand: its level and edges, and what lies past th
   const mid = await src.edges(0, 10_000_000, 10_000_100);
   // The clock's 80 edges leave the quiet stretch low.
   assert.deepEqual(pulseFromEdges(mid, 10_000_000, 10_000_100, 60_000_000, 10_000_050), { level: 0, start: undefined, end: undefined, next: undefined });
+});
+
+test("a channel's data runs to one tick before its end, and no edge lies past a span that reaches it", async () => {
+  const src = new MemorySource(recording());
+  const clk = (await src.info()).channels[0];
+  assert.equal(inChannel(clk, 59_999_999), true);
+  assert.equal(inChannel(clk, 60_000_000), false);
+  assert.equal(inChannel(clk, -1), false);
+  // A span read up to the end holds every edge there is: the pulse runs to the end of what is known.
+  const tail = await src.edges(0, 59_999_990, 60_000_000);
+  assert.deepEqual(pulseFromEdges(tail, 59_999_990, 60_000_000, 60_000_000, 59_999_995), { level: 1, start: undefined, end: null, next: null });
+  // One tick short of the end, an edge could still sit on the last tick.
+  const short = await src.edges(0, 59_999_990, 59_999_999);
+  assert.deepEqual(pulseFromEdges(short, 59_999_990, 59_999_999, 60_000_000, 59_999_995), { level: 1, start: undefined, end: undefined, next: undefined });
 });
 
 test("the edges of a long quiet stretch are found through the overview, reading few edges", async () => {
