@@ -534,6 +534,10 @@ test.describe("evidence", () => {
     await expect(inset).toHaveAttribute("annotations", SIDECAR);
     await expect(inset).toHaveAttribute("annotation", "attach");
     await expect(inset.locator("figcaption")).toHaveText("Attaching: line reset, select, line reset, then the first read");
+    // The pointer passes through the popover, so its inset reads nothing: it holds no line for a
+    // reading, as its annotation asks for no measure, and has nothing to point at.
+    await expect(inset.locator(".line")).toBeHidden();
+    await expect(inset.locator(".hit")).toBeHidden();
     // Below the chart, across the point's x: clear of the plot and its readout.
     const box = (await pop.boundingBox())!;
     const chart = (await page.locator("#c").boundingBox())!;

@@ -5,6 +5,8 @@
 <title>One inset, set up by the query</title>
 <!--
   ?src= and ?annotations= relative to web/, ?annotation= the id to show, ?sweep to let it sweep in.
+  ?channels=, ?href= as the inset's attributes
+  ?for  a view of the same recording after the inset, #v, which the inset opens
   ?firstRead=N  the decoder's first read of the head, in bytes
   ?tag=, ?after=N&stall=MS and the rest passed on to the server with the recording's URL, as on view.html
 -->
@@ -19,8 +21,17 @@ inset.setAttribute("src", `../../${q.get("src")}${served.size > 0 ? `?${served}`
 inset.setAttribute("annotations", `../../${q.get("annotations")}`);
 inset.setAttribute("annotation", q.get("annotation"));
 if (!q.has("sweep")) inset.setAttribute("sweep", "off");
+for (const name of ["channels", "href"]) if (q.has(name)) inset.setAttribute(name, q.get(name));
 inset.style.maxWidth = "440px";
 document.body.append(inset);
+if (q.has("for")) {
+  const view = document.createElement("tickwave-view");
+  view.id = "v";
+  view.setAttribute("src", inset.getAttribute("src"));
+  view.setAttribute("annotations", inset.getAttribute("annotations"));
+  inset.setAttribute("for", "v");
+  document.body.append(view);
+}
 </script>
 </head>
 <body></body>

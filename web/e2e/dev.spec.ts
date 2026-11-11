@@ -642,7 +642,9 @@ test.describe("a reference", () => {
     await ref.hover();
     await page.waitForTimeout(600);
     expect(await swept()).toBe(false);
+    // Hidden longer than that, counted from its closing, which waits out the pointer's grace.
     await page.mouse.move(0, 0);
+    await expect(ref.locator(".pop")).toBeHidden();
     await page.waitForTimeout(900);
     await watch();
     await ref.hover();

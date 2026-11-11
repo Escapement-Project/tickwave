@@ -398,6 +398,16 @@ export class Plot {
       ctx.fillStyle = p.wash;
       ctx.fillRect(0, r.top, l.width, r.height);
     }
+    // Where every note's bounds are drawn, as in the inset, the note under the pointer washes its
+    // span across the rows.
+    const lit = this.config.noteRules && this.hoverNote !== null ? lane.find((a) => a.id === this.hoverNote) : undefined;
+    if (lit && lit.end !== null && l.rows.length > 0) {
+      const x0 = Math.max(l.plotLeft, this.xAt(lit.start));
+      const x1 = Math.min(l.plotRight, this.xAt(lit.end));
+      const last = l.rows[l.rows.length - 1];
+      ctx.fillStyle = p.wash;
+      if (x1 > x0) ctx.fillRect(x0, l.rows[0].top, x1 - x0, last.top + last.height - l.rows[0].top);
+    }
 
     this.#drawRules(lane, revealX);
 

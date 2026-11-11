@@ -273,6 +273,8 @@ sweep again. A reader who prefers reduced motion sees it drawn at once.
 | `pad` | room either side of the span: a share of it (`"10%"`, `6%` by default) or a time |
 | `scale` | a fixed time scale, such as `"50 ns/px"`, so insets side by side compare |
 | `sweep` | `off` to draw at once |
+| `for` | the id of a `<tickwave-view>` to open at a note |
+| `href` | a page to open the recording on at a note, such as tickwave's Open page |
 
 An annotation's `measure` puts a reading under the trace, taken from the channel's own edges:
 
@@ -283,9 +285,34 @@ An annotation's `measure` puts a reading under the trace, taken from the channel
 A reading shows only the digits its ticks support. The key to the roles' lines sits on a line of
 its own, under the reading.
 
-An inset takes its final height once its recording's head and sidecar are in: the reading's line
-is held from then, so the data's arrival moves nothing below it. Before then it has no label and
-no rows to size by. A page that wants nothing to move at all gives the inset its height, as
+A reader can point at the inset. Pointing at a note lights its span, and the line under the trace
+gives the note's label, its length and who drives it, in place of the measure. That names a note
+too narrow to label. Pointing at a trace reads the pulse there, as the view's label does: its level
+and width, where it starts in the span, then its period, frequency and duty, as many of them as
+fit on the line. On an analog channel it reads the value. Moving away puts the measure back.
+
+The inset is one Tab stop, named by its label. The left and right arrow keys step through its
+notes, and a screen reader says each. Escape lights none. On a touch screen, a tap lights a note
+or reads a pulse.
+
+With `for` or `href`, the inset opens the recording at a note. A click on a note, Enter on the
+note the keys lit, or a second tap on a lit note opens it there. A click elsewhere on the plot
+opens it at the inset's own annotation. `for` opens a view on the page, and wins where it names
+one. Otherwise `href` makes the inset a link to that page: tickwave's Open page, or any page that
+reads the same parameters. The inset sets `src`, `annotations` and `annotation` in the page's
+query and keeps its other parameters. A recording on the same site goes in by its path, and
+another site's whole. As a link, the inset opens a new tab on a middle click or a Ctrl or Cmd
+click, and shows its address on hover.
+
+An inset the pointer passes through, as in a chart's popover, where `pointer-events` is `none`,
+does none of this. Inside a popover the inset is no Tab stop, and the element that opened it keeps
+the focus. A reference steps through its inset's notes with `step(1)` and `step(-1)`, reads the
+lit one from `lit`, and lights none with `clear()`.
+
+An inset takes its final height once its recording's head and sidecar are in. The line under the
+trace is held from then, where the annotation asks for a measure or a reader can point at the
+inset, so neither the data's arrival nor the pointer moves anything below it. Before then it has
+no label and no rows to size by. A page that wants nothing to move at all gives the inset its height, as
 tickwave's main page does for the figure beside its name. `settled()` and the `tickwave-ready`
 event (`{annotation, height}`) work as on the view, so a page can lay itself out around an inset's
 final height. `sweeping` says whether the sweep is playing.
@@ -293,10 +320,12 @@ final height. `sweeping` says whether the sweep is playing.
 ### `<tickwave-ref>`
 
 A phrase that cites an annotation. Pointing at it, or reaching it with Tab, opens an inset in a
-popover beside the text, so nothing on the page moves. Moving the pointer or the focus away, or
-Escape, closes the popover. A click, Enter or Space opens its view at the annotation. A screen
-reader cannot reach into the drawn inset, so the annotation's label and text describe the
-reference itself.
+popover beside the text, so nothing on the page moves. The pointer can move into the popover to
+read the inset, and has 300 ms to cross between the text and the popover. Moving the pointer or
+the focus away, or Escape, closes the popover. With the focus on the reference, the left and
+right arrow keys step through the inset's notes. A click, Enter or Space opens its view at the
+note the pointer or the keys lit, or else at the annotation. A screen reader cannot reach into the
+drawn inset, so the annotation's label and text describe the reference itself.
 
 | Attribute | Means |
 |---|---|
@@ -370,7 +399,8 @@ Each element exposes its pieces to `::part()`. On the view: `summary`, `title`, 
 `row-handle`, `readout`, `steps`, `notice` and `button`.
 Inside `facts`, each fact is a `fact` and also `fact-length`, `fact-channels` or `fact-size`, with
 a `fact-separator` ("; ") between two. On the inset: `inset`, `label`, `text`, `frame`, `canvas`,
-`foot`, `measure`, `key` and `notice`. On the reference: `popover`.
+`plot` (over the canvas, what the pointer and the keys reach), `foot`, `measure`, `reading` (what
+the pointer or the keys lit), `key` and `notice`. On the reference: `popover`.
 
 ### From the module
 

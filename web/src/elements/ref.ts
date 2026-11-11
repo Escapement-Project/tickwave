@@ -1,5 +1,6 @@
 // <tickwave-ref>: text that cites an annotation. Hover or focus opens a <tickwave-inset> in a popover
-// beside the text, so nothing on the page moves; a click or Enter opens the `for` view there.
+// beside the text, so nothing on the page moves; a click or Enter opens the `for` view there, or at
+// the inset's note the pointer or the arrow keys have lit.
 
 import { autoUpdate, computePosition, flip, inline, offset, shift } from "@floating-ui/dom";
 import { REF_ATTRIBUTES } from "../attributes.ts";
@@ -18,7 +19,11 @@ const CSS = `
   padding: 8px 6px 4px; color: var(--ink, CanvasText); background: var(--page, Canvas);
   border: 1px solid var(--hair, GrayText); border-radius: 10px; box-shadow: 0 2px 10px rgba(0, 0, 0, .14);
   text-decoration: none; cursor: default; overflow: visible; }
+:host([for]) .pop { cursor: pointer; }
 `;
+
+/** A mouse that leaves the text or the popover has this long to reach the other. */
+const GRACE_MS = 300;
 
 export class TickwaveRef extends TickwaveElement {
   static observedAttributes = REF_ATTRIBUTES;
@@ -27,6 +32,7 @@ export class TickwaveRef extends TickwaveElement {
   #stopPosition: (() => void) | null = null;
   #intersect: IntersectionObserver;
   #prefetched = "";
+  #closing = 0;
   /** The prefetched sidecar's annotations, which describe the reference. */
   #list: readonly { id: string; label: string | null; text: string | null }[] = [];
 
@@ -36,19 +42,31 @@ export class TickwaveRef extends TickwaveElement {
     this.#intersect = new IntersectionObserver((seen) => {
       if (seen.some((s) => s.isIntersecting)) this.#prefetch();
     });
-    this.addEventListener("pointerenter", () => this.#open());
+    // The popover is inside the reference, so the pointer moving into it enters the reference again.
+    this.addEventListener("pointerenter", () => {
+      clearTimeout(this.#closing);
+      this.#open();
+    });
     // A finger's pointer leaves as it lifts, so only a mouse's leaving closes.
     this.addEventListener("pointerleave", (e) => {
-      if (e.pointerType === "mouse") this.#close();
+      if (e.pointerType !== "mouse") return;
+      clearTimeout(this.#closing);
+      this.#closing = window.setTimeout(() => this.#close(), GRACE_MS);
     });
     this.addEventListener("focus", () => this.#open());
     this.addEventListener("blur", () => this.#close());
-    this.addEventListener("click", () => void this.#go());
+    // A tap in the popover that only lit a note has been answered there.
+    this.addEventListener("click", (e) => {
+      if (!e.defaultPrevented) void this.#go();
+    });
     this.addEventListener("keydown", (e) => {
       // As a button answers: Enter, and Space, which would otherwise scroll the page.
       if (e.key === "Enter" || (e.key === " " && this.hasAttribute("for"))) {
         e.preventDefault();
         void this.#go();
+      } else if ((e.key === "ArrowRight" || e.key === "ArrowLeft") && this.#inset && this.#pop.matches(":popover-open")) {
+        e.preventDefault();
+        this.#inset.step(e.key === "ArrowRight" ? 1 : -1);
       }
     });
   }
@@ -169,15 +187,17 @@ export class TickwaveRef extends TickwaveElement {
   }
 
   #close(): void {
+    clearTimeout(this.#closing);
+    this.#inset?.clear();
     this.#stopPosition?.();
     this.#stopPosition = null;
     if (this.#pop.matches(":popover-open")) this.#pop.hidePopover();
   }
 
-  /** Opens the `for` view at the annotation. */
+  /** Opens the `for` view at the inset's lit note, else at the annotation. */
   async #go(): Promise<void> {
     const view = this.#view;
-    const a = this.getAttribute("annotation");
+    const a = (this.#pop.matches(":popover-open") ? this.#inset?.lit : null) ?? this.getAttribute("annotation");
     if (!view || !a) return;
     this.#close();
     await view.reveal(a);

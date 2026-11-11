@@ -573,13 +573,13 @@ export class TickwaveView extends TickwaveElement {
     await this.#plot.whenSettled();
   }
 
-  /** Opens the view at an annotation, brings it into sight and puts the focus on its plot: what a
-   * reference or a chart's point does when the reader asks for the recording. */
   /** The focus goes to the plot, where the keys work, or to the Open button while the view is closed. */
   override focus(options?: FocusOptions): void {
     (this.open ? this.#plotBox : (this.root.querySelector(".open") as HTMLElement)).focus(options);
   }
 
+  /** Opens the view at an annotation, brings it into sight and puts the focus on its plot: what a
+   * reference, an inset or a chart's point does when the reader asks for the recording. */
   async reveal(id: string): Promise<void> {
     const shown = this.show(id);
     this.scrollIntoView({ block: "nearest", behavior: reducedMotion() ? "auto" : "smooth" });
