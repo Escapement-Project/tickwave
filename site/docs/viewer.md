@@ -8,7 +8,8 @@ channel is drawn from its edges, and an analog channel from its samples. The sam
 ## Opening a recording
 
 Give the Open page a recording's address, and its sidecar's if it has one. The page's address then
-names both, as `?src=` and `?annotations=`, so a link to it opens the same recording. A recording on
+names both, as `?src=` and `?annotations=`, so a link to it opens the same recording. With
+`?annotation=` as well, it opens at that annotation. A recording on
 another site opens only if that site lets other sites read its files: its server has to answer with
 an `Access-Control-Allow-Origin` header (CORS).
 

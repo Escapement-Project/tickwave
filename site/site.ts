@@ -2,7 +2,7 @@
 // web/scripts/site.ts; "tickwave" is the tickwave.js beside this script. The project's face.js and
 // header.js run the header.
 
-import { recordingInfo, registerFile, type RecordingInfo } from "tickwave";
+import { recordingInfo, registerFile, type RecordingInfo, type TickwaveView } from "tickwave";
 import { formatBytes, formatInterval } from "../web/src/readouts.ts";
 import { DEFAULTS, type ChannelInfo, type Described, type FromWorker, type Pass, type Settings, type SourceKind, type ToWorker } from "../web/src/convert/protocol.ts";
 
@@ -122,9 +122,10 @@ function openPage(): void {
     here.replaceChildren();
   };
 
-  /** Opens `src`, with its sidecar at `annotations` or a local recording's own. A converted
-   * recording shows with its Save button, which takes the focus; another, its view. */
-  async function open(src: string, annotations: string | null, name: string, link: boolean, converted?: () => void): Promise<void> {
+  /** Opens `src`, with its sidecar at `annotations` or a local recording's own, at annotation `at`
+   * if one is given. A converted recording shows with its Save button, which takes the focus;
+   * another, its view. */
+  async function open(src: string, annotations: string | null, name: string, link: boolean, converted?: () => void, at: string | null = null): Promise<void> {
     reset();
     // A converted capture keeps its settings in view, to convert again with others.
     settingsForm.hidden = !converted;
@@ -151,6 +152,7 @@ function openPage(): void {
       } else say(explain(error, src, name));
     });
     here.append(view);
+    if (at) void (view as TickwaveView).show(at);
     saving.hidden = found.hidden = !converted;
     stage.hidden = false;
     // The recording, not the forms that asked for it: they fold away.
@@ -169,7 +171,7 @@ function openPage(): void {
         { once: true },
       );
     if (link) {
-      const q = new URLSearchParams({ src, ...(annotations && { annotations }) });
+      const q = new URLSearchParams({ src, ...(annotations && { annotations }), ...(at && { annotation: at }) });
       history.replaceState(null, "", `?${q}`);
       share.textContent = "";
       share.append("A link to this view: ", Object.assign(document.createElement("a"), { href: location.href, textContent: location.href }));
@@ -436,7 +438,7 @@ function openPage(): void {
   if (src) {
     srcField.value = src;
     sidecarField.value = q.get("annotations") ?? "";
-    void open(src, q.get("annotations"), src, true);
+    void open(src, q.get("annotations"), src, true, undefined, q.get("annotation"));
   }
 }
 
