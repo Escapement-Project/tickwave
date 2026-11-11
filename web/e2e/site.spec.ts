@@ -324,7 +324,7 @@ test("the docs sit in the project's doc frame: every doc in a rail, this one's s
   // the reader is in their section.
   await expect(rail.locator("summary")).toHaveText(["Using it", "In your page", "The files"]);
   expect(await rail.locator("details").evaluateAll((ds) => ds.map((d) => (d as HTMLDetailsElement).open))).toEqual([false, false, true]);
-  await expect(rail.locator("a")).toHaveText(["Viewer", "Converter", "Elements", "Charts", "Format", "Times", "Layout", "Preamble", "Header", "Index", "Blocks", "Overview", "Content id", "Sidecar"]);
+  await expect(rail.locator("a")).toHaveText(["Viewer", "Converter", "Elements", "Charts", "Format", "Times", "Layout", "Preamble", "Header", "Gaps", "Index", "Blocks", "Overview", "Content id", "Sidecar"]);
   await expect(rail.getByRole("link", { name: "Format" })).toHaveAttribute("aria-current", "page");
   // The section the reader is in is marked as they go.
   // At the top of the window, past the reading line the rail marks by.

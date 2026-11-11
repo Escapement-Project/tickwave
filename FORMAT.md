@@ -77,11 +77,12 @@ UTF-8 JSON. Every integer in it is below 2^53, so a JavaScript reader parses it 
 A channel entry has `name`, `source_name` (the source's own name for it) and `kind`:
 
 - `"digital"`: `initial` (the level at tick 0, a boolean), `end` (the level is known at ticks
-  `0..end`; a source can stop knowing one channel before another), and `edges` (the count). An
-  `end` of 0 says the level is never known. Such a channel has no edges, and its `initial` is
-  false.
+  `0..end`; a source can stop knowing one channel before another), `edges` (the count), and `gaps`
+  where the level was not known for a while (see Gaps, below). An `end` of 0 says the level is
+  never known. Such a channel has no edges and no gaps, and its `initial` is false.
 - `"analog"`: `unit` (empty when the source states none), `first` (the first sample's tick),
-  `period` (ticks from one sample to the next, `[num, den]`), `count`, and `coding`:
+  `period` (ticks from one sample to the next, `[num, den]`), `count`, `breaks` where the samples
+  stopped for a while (see Gaps), and `coding`:
   - `{"type": "f32"}`: the source's f32 values.
   - `{"type": "codes", "bits": b, "scale": s, "offset": o}`: u16 codes, stored in two byte
     planes: every code's low byte, then every code's high byte. Split this way, the captures we
@@ -92,13 +93,14 @@ A channel entry has `name`, `source_name` (the source's own name for it) and `ki
     `Math.fround(o + code * s)`. A converter picks this coding only after checking that every
     sample reproduces its source value bit for bit.
 
-Sample `i` of an analog channel sits at tick `first + floor(i × period)`.
+An analog channel's samples come in runs, `period` apart. A channel without `breaks` has one run,
+and its sample `i` sits at tick `first + floor(i × period)`.
 
-Every tick in the file lies in `0..length`: every edge, every sample and every block's start. A
-digital channel's `end` lies in `0..=length`. `length` is at least 1. It is below 2^53, and so are
-the terms of `timebase` and `period`, and every `edges` and `count`. No term of `timebase` or
-`period` is zero, and `bits` lies in `1..=16`. A reader refuses a header that breaks any of these
-before it reads a block.
+Every tick in the file lies in `0..length`: every edge, every sample, every block's start, and
+every tick a gap or a break names. A digital channel's `end` lies in `0..=length`. `length` is at
+least 1. It is below 2^53, and so are the terms of `timebase` and `period`, and every `edges`,
+`count` and break index. No term of `timebase` or `period` is zero, and `bits` lies in `1..=16`.
+A reader refuses a header that breaks any of these before it reads a block.
 
 `source` has `format` (`saleae-binary-0`, `saleae-binary-1`, `sigrok-sr`, `vcd`; a reader keeps
 a name it doesn't know), `files` (names, no directories), and optionally `instrument`, `software`,
@@ -107,6 +109,24 @@ map its times), `trigger_s` (the trigger's time in the same seconds), `rate`, `e
 else the source states) and `converter`. `rate` is there when the source doesn't record its sample
 rate: `inferred` when the converter took the lowest rate on whose grid every edge sits, `given`
 when the rate was given to it.
+
+### Gaps
+
+A live recorder can lose data or pause. Its channels then have gaps: spans where nothing is
+known. The header says where they are. A sidecar annotation can say why one happened.
+
+A digital channel's `gaps` is an array of `[from, to, level]`. The level is not known at ticks
+`from..to`. From `to` on it is `level`, a boolean, until the next edge. No edge lies in
+`from..=to`. The gaps go in time order: `0 ≤ from < to < end`, and each gap's `from` lies past
+the `to` before it.
+
+An analog channel's `breaks` is an array of `[index, tick]`: sample `index` starts a new run, at
+`tick`. The first run starts at `[0, first]`. Sample `i` of the run that starts at `[index, tick]`
+sits at `tick + floor((i − index) × period)`. Each `index` lies in `1..count` and is larger than
+the one before it. Each `tick` is at least the tick of the sample before it. A reader draws no line
+across a break.
+
+A channel with no gap or break leaves the field out.
 
 ### Index
 
@@ -123,8 +143,9 @@ bytes for each channel:
 
 Block i covers ticks `[start_i, start_{i+1})`, and the last block runs to `length`. The first block
 starts at tick 0, and the starts strictly increase. A digital channel's level bit is `initial` in
-block 0, and in each later block the bit before it, flipped once for every edge that block
-counted.
+block 0. In each later block it is the bit before it, taken through the earlier block's edges and
+gap ends in tick order: an edge flips it, and a gap's `to` sets it to the gap's `level`. Inside a
+gap, the bit carries the level from before the gap.
 
 An overview block's row is 16 bytes: its offset (u64), compressed length (u32) and decoded length
 (u32). The rows go by level, in the order of `overview_blocks`, then in time order.
@@ -166,7 +187,9 @@ The head's decoded overview holds, for each level in the header's order, then ea
 
 - **Digital.** The level bits, then the change bits, each `ceil(n / 8)` bytes. Bucket i is bit
   `i % 8` of byte `i / 8`. The level bit is the level entering the bucket, before any edge at its
-  first tick; the change bit says whether an edge falls in the bucket.
+  first tick; the change bit says whether an edge falls in the bucket. The bits follow the index's
+  rule for gaps: inside a gap the level bit carries the level from before it, and a gap's `to`
+  sets the change bit of its bucket.
 - **Analog.** n minimum values, then n maximum values, as f32. A bucket with no sample holds +∞ and
   −∞. NaN samples are left out.
 
@@ -187,3 +210,8 @@ their UTF-8 bytes:
   tick as i64;
 - analog: the name, `"analog"`, the unit, `first` as i64, `period` as two u64, `count` as u64,
   then every value's f32 bits as u32.
+
+A digital channel with gaps writes `"digital+gaps"` in place of `"digital"`. After `end` it writes
+the number of gaps as u64, then each gap's `from` and `to` as i64 and its `level` as one byte. An
+analog channel with breaks writes `"analog+breaks"` in place of `"analog"`. After `count` it
+writes the number of breaks as u64, then each break's `index` as u64 and `tick` as i64.

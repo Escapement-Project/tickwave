@@ -26,6 +26,7 @@ computer.
 ## Documents
 
 - `FORMAT.md`: the recording format, version 1.
+- `JOURNAL.md`: the journal a live recorder writes, which converts to a recording.
 - `ANNOTATIONS.md`: the sidecar annotations that sit beside a recording.
 - `CHARTS.md`: `<tickwave-chart>` and its data.
 - `web/README.md`: the elements, how they read recordings, and how to run the web build and tests.
