@@ -16,7 +16,7 @@ use rayon::prelude::*;
 use crate::codec::put_uleb;
 use crate::hash::{self, ChannelHasher};
 use crate::header::{
-    AnalogCoding, BlockRow, ChannelHeader, ChannelKind, Header, JSON_SAFE, LEVEL_BIT, MAJOR, MINOR,
+    AnalogCoding, BlockRow, ChannelHeader, ChannelKind, Header, JSON_SAFE, LEVEL_BIT, MAJOR,
     OverviewLevel, OverviewRow, PREAMBLE_LEN, Preamble, SourceHeader, code_value,
 };
 use crate::model::{ChannelData, Edges, Ratio, Recording, Samples};
@@ -544,6 +544,7 @@ pub fn encode(recording: Recording, options: &Options) -> Result<Vec<u8>, Encode
             instrument: source.instrument,
             software: source.software,
             begin_s: source.begin_s,
+            rate: source.rate,
             extra: source.extra,
             converter: options.converter.clone(),
         },
@@ -580,7 +581,7 @@ pub fn encode(recording: Recording, options: &Options) -> Result<Vec<u8>, Encode
     }
     let preamble = Preamble {
         major: MAJOR,
-        minor: MINOR,
+        minor: header.minor(),
         header_len: header_json.len() as u32,
         index_len: index_len as u32,
         head_len: head_len_u32,

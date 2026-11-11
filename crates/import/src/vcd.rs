@@ -184,6 +184,7 @@ pub fn read_from(reader: impl BufRead, file_name: &str) -> Result<Import, Error>
                 instrument: None,
                 software: header.version,
                 begin_s: Some(start as f64 * timebase.den as f64 / timebase.num as f64),
+                rate: None,
                 extra,
             },
         },

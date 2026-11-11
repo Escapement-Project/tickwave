@@ -361,13 +361,42 @@ fn codes_are_stored_in_byte_planes() {
 #[test]
 fn a_newer_minor_version_is_not_bundled() {
     use escapement_tickwave_format::bundle::bundle;
+    use escapement_tickwave_format::header::MINOR;
     let mut file = encode(recording(EDGES_A.to_vec(), values()), &small_blocks()).unwrap();
     // The preamble's minor version, after the magic and the major version.
-    file[10..12].copy_from_slice(&1u16.to_le_bytes());
+    file[10..12].copy_from_slice(&(MINOR + 1).to_le_bytes());
     let head = Head::parse_file(&file).unwrap();
     let err = bundle(&file, &head, Default::default()).expect_err("refused");
     assert!(
-        err.to_string().contains("newer than this tool's 1.0"),
+        err.to_string()
+            .contains(&format!("newer than this tool's 1.{MINOR}")),
         "{err}"
     );
+}
+
+#[test]
+fn a_header_with_the_rates_origin_says_format_1_1_and_one_without_stays_1_0() {
+    use escapement_tickwave_format::bundle::bundle;
+    use escapement_tickwave_format::model::RateOrigin;
+    use std::collections::BTreeMap;
+    let plain = encode(recording(EDGES_A.to_vec(), values()), &Options::default()).unwrap();
+    let head = Head::parse(&plain).unwrap();
+    assert_eq!(head.preamble.minor, 0);
+    assert_eq!(head.header.source.rate, None);
+    let mut inferred = recording(EDGES_A.to_vec(), values());
+    inferred.source.rate = Some(RateOrigin::Inferred);
+    let file = encode(inferred, &Options::default()).unwrap();
+    let head = Head::parse(&file).unwrap();
+    assert_eq!(head.preamble.minor, 1);
+    assert_eq!(head.header.source.rate, Some(RateOrigin::Inferred));
+    assert!(
+        std::str::from_utf8(&file[PREAMBLE_LEN..][..head.preamble.header_len as usize])
+            .unwrap()
+            .contains(r#""rate":"inferred""#)
+    );
+    // Bundling keeps both the field and the version that holds it.
+    let bundled = bundle(&file, &head, BTreeMap::new()).unwrap();
+    let again = Head::parse(&bundled).unwrap();
+    assert_eq!(again.preamble.minor, 1);
+    assert_eq!(again.header.source.rate, Some(RateOrigin::Inferred));
 }

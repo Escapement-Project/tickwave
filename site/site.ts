@@ -39,8 +39,10 @@ function showFacts(facts: HTMLElement, info: RecordingInfo, name: string): void 
     ["Channels", info.channels.map((c) => (c.kind === "analog" ? `${c.name} (analog, ${c.unit})` : c.name)).join(", ")],
   ];
   if (info.bytes !== undefined) rows.push(["Size", formatBytes(info.bytes)]);
-  const source = info.source as { format?: string; files?: string[]; converter?: string } | undefined;
+  const source = info.source as { format?: string; files?: string[]; rate?: string; converter?: string } | undefined;
   if (source?.format) rows.push(["From", [source.format, ...(source.files ?? [])].join(", ")]);
+  if (source?.rate === "inferred") rows.push(["Sample rate", "inferred from the edges"]);
+  else if (source?.rate === "given") rows.push(["Sample rate", "given when it was converted"]);
   if (source?.converter) rows.push(["Converted by", source.converter]);
   for (const [k, v] of Object.entries(info.meta ?? {})) rows.push([k, v]);
   if (info.contentId) rows.push(["Content id", info.contentId]);
@@ -84,6 +86,8 @@ function openPage(): void {
   const settingsForm = byId<HTMLFormElement>("settings");
   const rows = byId("channels");
   const skippedBox = byId("skipped");
+  const rateRow = byId("rate-row");
+  const rateField = byId<HTMLInputElement>("rate");
   const running = byId("running");
   const bar = byId<HTMLProgressElement>("bar");
   const stage = byId("stage");
@@ -311,6 +315,8 @@ function openPage(): void {
     );
     skippedBox.textContent = skipped.length ? `Left out: ${skipped.join("; ")}.` : "";
     skippedBox.hidden = skipped.length === 0;
+    rateRow.hidden = !described.rateMissing;
+    rateField.value = "";
     settingsForm.hidden = false;
   }
 
@@ -349,6 +355,7 @@ function openPage(): void {
       blockKib: byId<HTMLInputElement>("block").valueAsNumber,
       units,
       codes: byId<HTMLInputElement>("codes").checked,
+      rate: rateRow.hidden ? null : rateField.value.trim() || null,
     };
   }
 

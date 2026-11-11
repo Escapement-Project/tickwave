@@ -7,9 +7,10 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { copyFileSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { convertFiles, describeFiles } from "../scripts/node-convert.ts";
 import type { Settings, SourceKind } from "../src/convert/protocol.ts";
+import { v0Copy } from "./saleae-v0.ts";
 
 const REPO = new URL("../..", import.meta.url).pathname;
 const DATA = join(REPO, "testdata");
@@ -19,10 +20,13 @@ function cli(args: string[]): void {
   execFileSync("cargo", ["run", "-q", "--release", "-p", "escapement-tickwave-cli", "--", ...args], { cwd: REPO, stdio: ["ignore", "ignore", "pipe"] });
 }
 
+const IDENTIFY_V0 = v0Copy(join(DATA, "saleae/identify-swd"), join(OUT, "identify-swd-v0"));
+const SWD50_V0 = v0Copy(join(DATA, "saleae/swd50-cut"), join(OUT, "swd50-cut-v0"));
+
 interface Case {
   name: string;
   kind: SourceKind;
-  /** A Saleae export's directory, or the one file. */
+  /** A Saleae export's directory, or the one file, from testdata/ or absolute. */
   source: string;
   settings: Partial<Settings>;
   args: string[];
@@ -50,6 +54,27 @@ const CASES: Case[] = [
     settings: { channels: [["analog_0", "VTREF"]], codes: false, level: 3, blockKib: 64 },
     args: ["--channel", "analog_0=VTREF", "--no-codes", "--level", "3", "--block-kib", "64"],
   },
+  {
+    name: "identify-swd as version 0, its rate inferred",
+    kind: "saleae",
+    source: IDENTIFY_V0,
+    settings: { channels: [["digital_3_0", "SWCLK"], ["digital_3_1", "SWDIO"]] },
+    args: ["--channel", "digital_3_0=SWCLK", "--channel", "digital_3_1=SWDIO"],
+  },
+  {
+    name: "identify-swd as version 0, its rate given",
+    kind: "saleae",
+    source: IDENTIFY_V0,
+    settings: { channels: [["digital_3_2", "NC"]], rate: " 1G " },
+    args: ["--channel", "digital_3_2=NC", "--rate", "1G"],
+  },
+  {
+    name: "swd50-cut as version 0, its rate from the analog files",
+    kind: "saleae",
+    source: SWD50_V0,
+    settings: { channels: [["digital_4_0", "SWCLK"], ["analog_0", "VTREF"]] },
+    args: ["--channel", "digital_4_0=SWCLK", "--channel", "analog_0=VTREF"],
+  },
   ...["demo-analog", "demo-logic", "demo-mixed", "demo-disabled", "marker", "markers-1000"].map(
     (f): Case => ({ name: `${f}.sr`, kind: "sigrok", source: `import/${f}.sr`, settings: {}, args: [] }),
   ),
@@ -59,7 +84,7 @@ const CASES: Case[] = [
 
 for (const c of CASES) {
   test(`the browser's converter writes the CLI's bytes: ${c.name}`, () => {
-    const source = join(DATA, c.source);
+    const source = resolve(DATA, c.source);
     const paths = c.kind === "saleae" ? readdirSync(source).map((f) => join(source, f)) : [source];
     const native = join(OUT, `${c.name}.cli.tickwave`);
     cli(["convert", c.kind, source, "-o", native, ...c.args]);
@@ -111,6 +136,28 @@ test("a Saleae export's channels, in number order, and a file that is not one, s
 test("a source's problem comes back as its message, and a channel not there names those that are", () => {
   const dir = join(DATA, "saleae/identify-swd");
   const paths = readdirSync(dir).map((f) => join(dir, f));
-  assert.throws(() => convertFiles("saleae", paths, { channels: [["digital_9_0", "X"]] }), /no digital_9_0\.bin among the files/);
+  assert.throws(() => convertFiles("saleae", paths, { channels: [["digital_9_0", "X"]] }), /no digital_9_0\.bin in the export/);
   assert.throws(() => convertFiles("vcd", [join(DATA, "import/marker.vcd")], { channels: [["nope", "X"]] }), /no channel "nope"; the source has/);
+});
+
+test("a version 0 export says it records no rate; one that records it doesn't", () => {
+  const files = (dir: string) => readdirSync(dir).map((f) => join(dir, f));
+  assert.equal(describeFiles("saleae", files(IDENTIFY_V0)).rateMissing, true);
+  assert.equal(describeFiles("saleae", files(join(DATA, "saleae/identify-swd"))).rateMissing, false);
+  assert.equal(describeFiles("vcd", [join(DATA, "import/marker.vcd")]).rateMissing, false);
+});
+
+test("a version 0 export with no edges asks for its rate, and a rate that isn't one is refused", () => {
+  const paths = readdirSync(SWD50_V0).map((f) => join(SWD50_V0, f));
+  assert.throws(() => convertFiles("saleae", paths, { channels: [["digital_4_0", "NRST"]] }), /no edges to infer it from: give the rate the capture ran at$/);
+  assert.throws(() => convertFiles("saleae", paths, { channels: [["digital_4_0", "NRST"]], rate: "50x" }), /expected a rate in hertz/);
+  const { file } = convertFiles("saleae", paths, { channels: [["digital_4_0", "NRST"]], rate: "1G" });
+  assert.ok(file.length > 0);
+});
+
+test("the CLI verifies a version 0 recording at the rate it was made at, not one inferred again", () => {
+  // 2 GHz fits every edge of an export inference puts at 1 GHz, so only the recording knows it.
+  const out = join(OUT, "identify-swd-v0.2g.tickwave");
+  cli(["convert", "saleae", IDENTIFY_V0, "--channel", "digital_3_0=SWCLK", "--rate", "2G", "-o", out]);
+  cli(["verify", out, "--against", IDENTIFY_V0]);
 });

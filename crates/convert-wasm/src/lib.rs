@@ -76,6 +76,9 @@ enum Kind {
 struct Described {
     channels: Vec<ChannelInfo>,
     skipped: Vec<SkippedInfo>,
+    /// A digital file records no sample rate: a Saleae export of version 0.
+    #[serde(rename = "rateMissing")]
+    rate_missing: bool,
 }
 
 #[derive(Serialize)]
@@ -158,17 +161,21 @@ pub fn describe(request: &str) -> Result<String, JsError> {
         Kind::Saleae => {
             let mut channels = Vec::new();
             let mut skipped = Vec::new();
+            let mut rate_missing = false;
             for f in &files {
                 let Some(stem) = f.name.strip_suffix(".bin") else {
                     continue;
                 };
                 match saleae::file_info(PathBuf::from(&f.name), f.input()) {
-                    Ok(info) => channels.push(ChannelInfo {
-                        name: stem.to_owned(),
-                        analog: info.analog,
-                        count: Some(info.count as f64),
-                        unit: info.analog.then(|| "V".to_owned()),
-                    }),
+                    Ok(info) => {
+                        rate_missing |= info.rate.is_none();
+                        channels.push(ChannelInfo {
+                            name: stem.to_owned(),
+                            analog: info.analog,
+                            count: Some(info.count as f64),
+                            unit: info.analog.then(|| "V".to_owned()),
+                        })
+                    }
                     Err(e) => skipped.push(SkippedInfo {
                         name: f.name.clone(),
                         reason: e.to_string(),
@@ -176,7 +183,11 @@ pub fn describe(request: &str) -> Result<String, JsError> {
                 }
             }
             channels.sort_by_cached_key(|c| natural(&c.name));
-            Described { channels, skipped }
+            Described {
+                channels,
+                skipped,
+                rate_missing,
+            }
         }
         Kind::Sigrok => {
             let f = single(&files)?;
@@ -184,6 +195,7 @@ pub fn describe(request: &str) -> Result<String, JsError> {
             Described {
                 channels: channels_of(&import.recording),
                 skipped: skipped_of(import.skipped),
+                rate_missing: false,
             }
         }
         Kind::Vcd => {
@@ -193,6 +205,7 @@ pub fn describe(request: &str) -> Result<String, JsError> {
             Described {
                 channels: channels_of(&import.recording),
                 skipped: skipped_of(import.skipped),
+                rate_missing: false,
             }
         }
     };
@@ -238,6 +251,10 @@ struct Request {
     #[serde(default)]
     units: Vec<(String, String)>,
     codes: bool,
+    /// A Saleae export's sample rate as typed, such as `50M`: none, or blank, to take the rate
+    /// its files record or infer it.
+    #[serde(default)]
+    rate: Option<String>,
 }
 
 struct Report;
@@ -293,19 +310,20 @@ pub fn convert(request: &str) -> Result<Converted, JsError> {
     };
     let converted = match r.kind {
         Kind::Saleae => {
-            let files =
-                r.channels
-                    .iter()
-                    .map(|(stem, _)| {
-                        let name = saleae::file_name(stem);
-                        let f =
-                            r.files.iter().find(|f| f.name == name).ok_or_else(|| {
-                                JsError::new(&format!("no {name} among the files"))
-                            })?;
-                        Ok((PathBuf::from(name), f.input()))
-                    })
-                    .collect::<Result<Vec<_>, JsError>>()?;
-            let headers = saleae::Headers::read(files, &r.channels).map_err(js)?;
+            let rate = r
+                .rate
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(saleae::parse_rate)
+                .transpose()
+                .map_err(|e| JsError::new(&e))?;
+            let files = r
+                .files
+                .iter()
+                .map(|f| (PathBuf::from(&f.name), f.input()))
+                .collect();
+            let headers = saleae::Headers::read(files, &r.channels, rate).map_err(js)?;
             let export = convert::check_saleae(headers, &Report).map_err(js)?;
             convert::convert(&|| Ok(export.recording()), &settings, MAX_DECODED, &Report)
         }

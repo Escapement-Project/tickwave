@@ -16,7 +16,7 @@ The program is then `target/release/tickwave`. `tickwave help`, and `--help` aft
 
 `tickwave convert` reads three kinds of capture:
 
-- `saleae`: Saleae Logic 2's binary export, a directory with one file a channel.
+- `saleae`: Saleae Logic 2's binary export, version 0 or 1, a directory with one file a channel.
 - `sigrok`: a sigrok session file (`.sr`), as PulseView, sigrok-cli and verge write them.
 - `vcd`: a value change dump (`.vcd`). It takes one-bit signals and lists the rest as skipped.
 
@@ -40,6 +40,10 @@ It reports the file it wrote, its size, its blocks and its content id:
 ```text
 identify-swd.tickwave: 0.00 MB, 1 blocks, blake3:930db20d55ecede1084b73ebbdc7edd306268b900746c08abd0bdfdb0f121623 in 0.0 s
 ```
+
+Logic 8, Logic Pro 8 and Logic Pro 16 write version 0 of the export, and its digital files don't record the sample rate. If you name an analog channel, the converter takes the rate its file records. Otherwise it infers the rate from the edges of every digital file in the export, named or not. It takes the lowest rate that divides 1 GHz and puts every edge on its grid, each on a tick of its own. With many edges, that is the capture's rate. With only a few, it can come out lower, and the recording then claims coarser timing than the capture had, never finer. An export with no edges has no rate to infer.
+
+Give the rate with `--rate`, in hertz with an optional k, M or G, such as `--rate 50M`. The converter refuses a rate that puts an edge off its grid. It can't catch a rate higher than the capture's, though: the recording would then claim finer timing than the capture had. The recording says whether its rate was inferred or given.
 
 ### From a sigrok session
 
@@ -79,7 +83,7 @@ Every command that reads a recording takes `--max-decoded-mib <n>`: the most it 
 
 ## Converting in a browser
 
-[The Open page](../open.html) converts a capture without installing anything, then opens it. Choose a Saleae export's folder, or a `.sr` or `.vcd` file, or drop it on the page. The page lists the capture's channels: choose the ones to take, and name them. It takes the options a command line does: units, a title, metadata, the zstd level, the block size and `--no-codes`. Then it converts, checks the recording against the capture, offers it to save, and shows it in a view.
+[The Open page](../open.html) converts a capture without installing anything, then opens it. Choose a Saleae export's folder, or a `.sr` or `.vcd` file, or drop it on the page. The page lists the capture's channels: choose the ones to take, and name them. It takes the options a command line does: units, a title, metadata, the zstd level, the block size, `--no-codes`, and for a version 0 Saleae export, `--rate`. Leave the rate empty to infer it, as the command line does without `--rate`. Then it converts, checks the recording against the capture, offers it to save, and shows it in a view.
 
 For a Saleae export, it first checks that every edge sits on the sample grid, in order. Then it goes through the capture three times: once to look for exact integer codes in each analog channel, once to encode, and once to check the recording against the capture, edge by edge and sample by sample. A recording that fails the check is never offered to save.
 
@@ -115,7 +119,7 @@ It decodes the recording and compares it with the capture again, edge by edge an
 identify-swd.tickwave: matches identify-swd/
 ```
 
-For a Saleae export, `--against` takes its directory.
+For a Saleae export, `--against` takes its directory. A recording from a version 0 export is checked at the rate it was made at.
 
 ## Checking a sidecar
 

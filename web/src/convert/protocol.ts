@@ -25,9 +25,12 @@ export interface Settings {
   units: [string, string][];
   /** Store analog values as exact integer codes where some reproduce them. */
   codes: boolean;
+  /** A Saleae export's sample rate as typed, such as 50M; null to take the rate its files record,
+   * or to infer it from the edges where they record none. */
+  rate: string | null;
 }
 
-export const DEFAULTS: Settings = { channels: [], title: null, meta: [], level: 19, blockKib: 1024, units: [], codes: true };
+export const DEFAULTS: Settings = { channels: [], title: null, meta: [], level: 19, blockKib: 1024, units: [], codes: true, rate: null };
 
 export interface ChannelInfo {
   /** The source's own name: a Saleae file's stem, a sigrok probe, a VCD scope path. */
@@ -41,6 +44,8 @@ export interface ChannelInfo {
 export interface Described {
   channels: ChannelInfo[];
   skipped: { name: string; reason: string }[];
+  /** A digital file records no sample rate: a Saleae export of version 0. */
+  rateMissing: boolean;
 }
 
 export type Pass = "check" | "codes" | "encode" | "verify";

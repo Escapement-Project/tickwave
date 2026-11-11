@@ -8,6 +8,8 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+pub use crate::header::RateOrigin;
+
 /// An exact ratio of positive integers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Ratio {
@@ -89,7 +91,7 @@ pub enum Samples {
 
 #[derive(Clone, Debug, Default)]
 pub struct Source {
-    /// `saleae-binary-1`, `sigrok-sr`, `vcd`.
+    /// `saleae-binary-0`, `saleae-binary-1`, `sigrok-sr`, `vcd`.
     pub format: String,
     /// File names read, without directories.
     pub files: Vec<String>,
@@ -98,6 +100,8 @@ pub struct Source {
     /// The source's own time of tick 0 in seconds, where it has one (Saleae's `begin`). Scripts
     /// that work from the source map their times to ticks with it.
     pub begin_s: Option<f64>,
+    /// How the sample rate was come by, where the source doesn't record it.
+    pub rate: Option<RateOrigin>,
     /// Anything else the source states about the capture.
     pub extra: BTreeMap<String, String>,
 }

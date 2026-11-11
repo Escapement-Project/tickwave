@@ -246,6 +246,7 @@ pub fn read_bytes(bytes: impl Into<Arc<[u8]>>, file_name: &str) -> Result<Import
                 instrument: None,
                 software: None,
                 begin_s: None,
+                rate: None,
                 extra,
             },
         },

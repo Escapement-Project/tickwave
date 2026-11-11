@@ -33,6 +33,10 @@
     <tbody id="channels"></tbody>
   </table></div>
   <div id="skipped" class="quiet" hidden></div>
+  <div id="rate-row" hidden>
+    <p><label for="rate">Sample rate</label><br><input id="rate" name="rate" type="text" spellcheck="false" size="12" placeholder="from the edges" aria-describedby="rate-note"></p>
+    <p id="rate-note" class="quiet">This export doesn't record its digital channels' sample rate. Leave it empty to infer it from the edges, or give the rate the capture ran at, such as 50M.</p>
+  </div>
   <p><label for="title">Title</label><br><input id="title" name="title" type="text" spellcheck="false"></p>
   <details>
     <summary>Encoding</summary>

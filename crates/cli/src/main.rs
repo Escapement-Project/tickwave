@@ -13,7 +13,7 @@ use clap::{Args, Parser, Subcommand};
 use escapement_tickwave_format::annotations::{self, Included};
 use escapement_tickwave_format::decode::{Head, verify_limited};
 use escapement_tickwave_format::header::{ChannelKind, Header};
-use escapement_tickwave_format::model::Recording;
+use escapement_tickwave_format::model::{RateOrigin, Recording};
 use escapement_tickwave_import::convert::{
     self, Pass, Progress, Settings, Step, counted, select, set_units,
 };
@@ -106,6 +106,11 @@ enum Source {
         /// named are left out.
         #[arg(long = "channel", value_parser = pair, required = true)]
         channels: Vec<(String, String)>,
+        /// The sample rate, in hertz, with an optional k, M or G, such as 50M. A version 0
+        /// export (from a Logic 8, Logic Pro 8 or Logic Pro 16) doesn't record its digital
+        /// channels' rate: without this, it is inferred from the export's edges.
+        #[arg(long, value_parser = saleae::parse_rate, value_name = "HZ")]
+        rate: Option<u64>,
         #[command(flatten)]
         common: Common,
     },
@@ -181,10 +186,25 @@ fn main() -> Result<()> {
                     dir,
                     output,
                     channels,
+                    rate,
                     common,
                 },
         } => {
-            let export = convert::check_saleae(saleae_headers(&dir, &channels)?, &Bars::default())?;
+            let export =
+                convert::check_saleae(saleae_headers(&dir, &channels, rate)?, &Bars::default())
+                    .map_err(|e| match e {
+                        convert::Error::Saleae(saleae::Error::NoRate(_)) => {
+                            anyhow::anyhow!("{e}, with --rate")
+                        }
+                        e => e.into(),
+                    })?;
+            let recording = export.recording();
+            if recording.source.rate == Some(RateOrigin::Inferred) {
+                info!(
+                    "sample rate {} Hz, inferred from the edges",
+                    recording.timebase.num
+                );
+            }
             convert(&|| Ok(export.recording()), &output, &common, max)
         }
         Command::Convert {
@@ -239,21 +259,17 @@ fn main() -> Result<()> {
     }
 }
 
-/// Opens the named channels' files in a Saleae export's directory and reads their headers.
-fn saleae_headers(dir: &Path, channels: &[(String, String)]) -> Result<saleae::Headers> {
-    if channels.is_empty() {
-        bail!(saleae::Error::NoChannels);
-    }
-    let files = channels
-        .iter()
-        .map(|(stem, _)| {
-            let path = dir.join(saleae::file_name(stem));
-            let input = escapement_tickwave_import::input::map(&path)
-                .with_context(|| format!("opening {}", path.display()))?;
-            Ok((path, input))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(saleae::Headers::read(files, channels)?)
+/// Reads the headers of the named channels' files in a Saleae export's directory.
+fn saleae_headers(
+    dir: &Path,
+    channels: &[(String, String)],
+    rate: Option<u64>,
+) -> Result<saleae::Headers> {
+    Ok(saleae::Headers::read(
+        saleae::export_files(dir)?,
+        channels,
+        rate,
+    )?)
 }
 
 /// Draws each pass as a span with a bar, and logs inside it.
@@ -469,8 +485,11 @@ fn verify_file(file: &Path, against: &Path, max: usize) -> Result<()> {
         .map(|c| (c.source_name.clone(), c.name.clone()))
         .collect();
     let source = match h.source.format.as_str() {
-        "saleae-binary-1" => {
-            convert::check_saleae(saleae_headers(against, &wanted)?, &Bars::default())?.recording()
+        // A version 0 export's digital files don't record the rate the recording was made at.
+        format @ ("saleae-binary-0" | "saleae-binary-1") => {
+            let rate = (format == "saleae-binary-0").then_some(h.timebase[0]);
+            convert::check_saleae(saleae_headers(against, &wanted, rate)?, &Bars::default())?
+                .recording()
         }
         "sigrok-sr" => select(sigrok::read(against)?.recording, &wanted)?,
         "vcd" => select(vcd::read(against)?.recording, &wanted)?,

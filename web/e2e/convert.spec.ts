@@ -6,6 +6,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { v0Copy } from "../test/saleae-v0.ts";
 
 const PAGE = "/dist/site/open.html";
 const REPO = new URL("../..", import.meta.url).pathname;
@@ -47,6 +48,32 @@ test("a Saleae export's folder: its channels in number order, named and converte
   await expect(page.locator("#facts")).toContainText("VTREF (analog, V), I (analog, mA), SWCLK");
   await expect(page.locator("#stage tickwave-view")).toBeVisible();
   await expect(page.locator("#settings")).toBeVisible();
+});
+
+test("a version 0 Saleae export: the page asks for the rate it doesn't record, infers it when left empty, and takes one given", async ({ page }) => {
+  const v0 = v0Copy(join(DATA, "saleae/identify-swd"), join(mkdtempSync(join(tmpdir(), "tickwave-v0-")), "identify-swd-v0"));
+  await page.goto(PAGE);
+  await page.locator("#folder").setInputFiles(v0);
+  await expect(page.locator("#source")).toHaveText("identify-swd-v0");
+  const rate = page.getByLabel("Sample rate");
+  await expect(rate).toBeVisible();
+  await expect(rate).toHaveValue("");
+  await expect(rate).toHaveAccessibleDescription(/doesn't record its digital channels' sample rate/);
+  const channels = ["--channel", "digital_3_0=digital_3_0", "--channel", "digital_3_1=digital_3_1", "--channel", "digital_3_2=digital_3_2"];
+  const inferred = await convertAndSave(page);
+  expect(inferred.equals(cli(["saleae", v0, ...channels])), "the inferred rate's recording is the CLI's").toBe(true);
+  await expect(page.locator("#facts")).toContainText("Sample rateinferred from the edges");
+  await rate.fill("500M");
+  await page.getByRole("button", { name: "Convert" }).click();
+  await expect(page.locator("#problem")).toContainText("off the sample grid");
+  await rate.fill("1G");
+  const given = await convertAndSave(page);
+  expect(given.equals(cli(["saleae", v0, ...channels, "--rate", "1G"])), "the given rate's recording is the CLI's").toBe(true);
+  await expect(page.locator("#facts")).toContainText("Sample rategiven when it was converted");
+  // An export that records its rate asks for none.
+  await page.locator("#folder").setInputFiles(join(DATA, "saleae/swd50-cut"));
+  await expect(page.locator("#source")).toHaveText("swd50-cut");
+  await expect(rate).toBeHidden();
 });
 
 test("one chooser: a capture shows the converter's settings, and a recording chosen after it opens in their place", async ({ page }) => {

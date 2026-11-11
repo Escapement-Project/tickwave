@@ -22,7 +22,9 @@ use serde::{Deserialize, Serialize};
 
 pub const MAGIC: [u8; 8] = *b"\x89TKW\r\n\x1a\n";
 pub const MAJOR: u16 = 1;
-pub const MINOR: u16 = 0;
+/// The newest minor version this crate reads and writes. Minor 1 adds `source.rate`; a file
+/// says the oldest minor version that holds its header, so one without it stays 1.0.
+pub const MINOR: u16 = 1;
 pub const PREAMBLE_LEN: usize = 32;
 pub const ROW_FIXED: usize = 24;
 pub const LEVEL_BIT: u32 = 1 << 31;
@@ -250,11 +252,30 @@ pub struct SourceHeader {
     pub software: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub begin_s: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate: Option<RateOrigin>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, String>,
     /// The converter's name, version and arguments.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub converter: Option<String>,
+}
+
+impl Header {
+    /// The oldest minor version whose readers know every field this header holds.
+    pub fn minor(&self) -> u16 {
+        if self.source.rate.is_some() { 1 } else { 0 }
+    }
+}
+
+/// How the converter came by the sample rate, where the source doesn't record it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RateOrigin {
+    /// The lowest rate on whose grid all the source's edges sit.
+    Inferred,
+    /// Given to the converter.
+    Given,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
