@@ -2,14 +2,14 @@
 // its own module), tickwave-worker.js (the decoder's worker), tickwave.wasm (the decoder, copied
 // from crates/wasm/pkg), tickwave-convert-worker.js and tickwave-convert.wasm (the converter, from
 // crates/convert-wasm/pkg, for the site's converter page), dev-loader.js (the dev page's fixture loader, which imports
-// "tickwave" through the page's import map), and tickwave.css (an undefined view's summary).
+// "tickwave" through the page's import map), and tickwave.css (an undefined view's or chart's room).
 //
 //   node build.ts                 build once
 //   node build.ts --serve [PORT]  rebuild on change and serve web/ (the dev page is /dev/)
 
 import * as esbuild from "esbuild";
 import { copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { undefinedSheet } from "./src/elements/summary-style.ts";
+import { tickwaveCss } from "./src/tickwave-css.ts";
 
 const serve = process.argv.includes("--serve");
 const port = Number(process.argv[process.argv.indexOf("--serve") + 1]) || 8123;
@@ -26,7 +26,7 @@ for (const [crate, from, to] of [
   }
   copyFileSync(wasm, `dist/${to}`);
 }
-writeFileSync("dist/tickwave.css", undefinedSheet());
+writeFileSync("dist/tickwave.css", tickwaveCss());
 
 const options: esbuild.BuildOptions = {
   entryPoints: { tickwave: "src/index.ts", "tickwave-chart": "src/chart/index.ts", "tickwave-worker": "src/wasm/worker.ts", "tickwave-convert-worker": "src/convert/worker.ts", "dev-loader": "dev/loader.ts" },

@@ -16,7 +16,7 @@ measurements. A chart is not a capture: it has no time axis, no zoom and no deco
 ## Loading
 
 `tickwave-chart.js` is its own module. It is published beside `tickwave.js` in each version's
-directory (`/tickwave/v<semver>/`), so one version covers all four files:
+directory (`/tickwave/v<semver>/`), so one version covers every file:
 
 ```html
 <script type="module" src="tickwave-chart.js"></script>
@@ -26,6 +26,22 @@ A page without charts never loads it. A chart loads nothing else until a reader 
 that names a recording. Then it imports `tickwave.js` from beside itself, and the inset loads the
 worker and the WASM module as it does on any page. A page that has already loaded the elements
 keeps its own.
+
+A chart in the page's markup takes no room until the module defines it, and its data comes after
+that. To keep the page still through both, link `tickwave.css`, published beside the modules, and
+state the chart's room in CSS:
+
+```html
+<link rel="stylesheet" href="tickwave.css">
+<style>
+#throughput { --tickwave-chart-height: 250px; --tickwave-chart-readout-lines: 3; }
+</style>
+<tickwave-chart id="throughput" src="throughput.chart.json" readout="below"></tickwave-chart>
+```
+
+`tickwave.css` reserves the plot's height and, for a readout below, its lines, until the chart is
+defined. The chart then holds the same room until its data arrives. A legend above the plot comes
+with the data, since its rows depend on the series and the width.
 
 ## Drawing
 
@@ -149,7 +165,7 @@ that series' point during the entry sweep.
 | `legend` | `above` draws a legend over the plot. Without it, the page has its own key |
 | `end-labels` | names each line at its last point, with its `short`. Labels that would overlap move apart, and the plot leaves room for the widest |
 | `table` | the id of the page's table that gives the chart as text |
-| `height` | the plot's height in CSS pixels |
+| `height` | the plot's height in CSS pixels. `--tickwave-chart-height` wins over it |
 | `sweep` | `off` draws at once |
 
 ### Properties, methods and events
@@ -159,11 +175,13 @@ that series' point during the entry sweep.
 | `data` | the chart's data as an object. Setting it redraws: a page that slices a larger table sets each slice here. The reader's picked x stays picked where the new data has it. Reading it gives the parsed data, not the object set, so a page that skips unchanged data keeps track of what it set |
 | `pick(x, series)` | selects an x, a series or both, as a reader's pick does, and moves the group with it. It fires no event. `pick()` clears |
 | `settled()` | resolves once the chart has drawn, its sweep included |
+| `reserved` | the room the chart took at its first layout with data, `{height, lines, matches}`: the plot's height in CSS pixels, the readout's lines (null for a tooltip), and whether the page's properties reserved it. Null before |
 
 | Event | When, and its `detail` |
 |---|---|
 | `tickwave-pick` | the reader picks an x or a series: `{x, series}`, either null when cleared |
 | `tickwave-evidence` | the reader opens a point's recording: `{x, series, recording, annotations, annotation}`, the URLs absolute. Cancelable (see Evidence) |
+| `tickwave-reserved` | the chart has laid out its first data and compared its room with the page's properties: the `reserved` value |
 | `tickwave-ready` | the chart has first drawn: `{height}` |
 | `tickwave-error` | the data did not load or does not parse: `{message, error}` |
 
@@ -182,6 +200,10 @@ line and marker as drawn. A figure takes its range in brackets, its partial runs
 verdict, such as "failed in 1 of 2 runs (744.6 KiB/s in the other), reads wrong". As a tooltip,
 the readout sits beside the picked x, or to its left near the plot's right edge. It sits at the
 plot's top, or lower where that hides less of the lines. A long line wraps.
+
+A readout below the plot holds a line for the x and one for each shown series, whether or not an x
+is picked, so a pick moves nothing under it. Before the data, it holds the lines
+`--tickwave-chart-readout-lines` states, or else those for the series `show` names.
 
 On a chart too narrow for some setting's readout to fit beside it, as on a phone, the tooltip
 floats off the chart for every setting. It sits below the chart at the picked x, or above it where
@@ -236,6 +258,19 @@ The chart reads the tokens the other elements read (`--ink`, `--ink-2`, `--surfa
 `--wash`, `--series-*`, `--font-text`, `--font-figures`), and the line patterns `--dash-*`,
 `--capture-width` and `--capture-opacity`. Interaction is hue-free, as on the view: an ink focus
 ring and an ink wash under the pointer.
+
+Two properties set the chart's room, and `tickwave.css` reads them too:
+
+| Property | Sets |
+|---|---|
+| `--tickwave-chart-height` | the plot's height, any length. Without it, the `height` attribute's, else 330 px |
+| `--tickwave-chart-readout-lines` | the lines a readout below holds before the data: one for the x, and one a series |
+
+At its first layout with data, the chart warns in the console where the room it took is not the
+room the page reserved: where the `height` attribute and `--tickwave-chart-height` differ, or the
+readout holds other lines than `--tickwave-chart-readout-lines` states. Later data, and the series
+a reader shows, change the readout without a warning. A page script that sets new data can set the
+property beside it.
 
 ## Where a chart's figures come from
 

@@ -458,6 +458,105 @@ test("a chart's plot takes its height before its data arrives, and keeps it", as
   }
 });
 
+const RESERVE = "/e2e/pages/chart-reserve.html";
+type Chart = HTMLElement & { reserved: unknown; settled(): Promise<void>; pick(x: string): void };
+
+test("a chart in the page's markup keeps one height through its definition, its data and a pick", async ({ page }) => {
+  const warnings: string[] = [];
+  page.on("console", (m) => {
+    if (m.type() === "warning") warnings.push(m.text());
+  });
+  // Every frame from the first: the chart's height, whether it is defined, and whether its data has come.
+  await page.addInitScript(() => {
+    const w = window as unknown as { frames: [number, boolean, boolean][] };
+    w.frames = [];
+    const tick = () => {
+      const c = document.getElementById("r") as (HTMLElement & { data?: unknown }) | null;
+      if (c) w.frames.push([c.getBoundingClientRect().height, c.matches(":defined"), !!c.data]);
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+  await page.route("**/figure1.chart.json", (r) => setTimeout(() => r.continue(), 1000));
+  await page.goto(`${RESERVE}?plot=15.625rem&lines=3`);
+  await expect.poll(() => page.evaluate(() => (window as unknown as { frames: unknown[] }).frames.length)).toBeGreaterThan(20);
+  await page.evaluate(() => (window as unknown as { define: () => Promise<unknown> }).define());
+  const chart = page.locator("#r");
+  await chart.evaluate((c) => (c as Chart).settled());
+  // The readout fills its reserved lines.
+  await chart.evaluate((c) => (c as Chart).pick("20"));
+  await expect(chart.locator(".tw-readout > div")).toHaveCount(2);
+  await page.waitForTimeout(100);
+  const frames = await page.evaluate(() => (window as unknown as { frames: [number, boolean, boolean][] }).frames);
+  expect(frames.filter(([, defined]) => !defined).length).toBeGreaterThan(20);
+  expect(frames.filter(([, defined, data]) => defined && !data).length).toBeGreaterThan(20);
+  expect(frames.filter(([, , data]) => data).length).toBeGreaterThan(5);
+  expect(new Set(frames.map(([h]) => h))).toEqual(new Set([frames[0][0]]));
+  // 15.625rem is 250 px; three readout lines of 13 px at 1.45.
+  expect(frames[0][0]).toBeCloseTo(250 + 3 * 13 * 1.45, 1);
+  expect(await chart.evaluate((c) => (c as Chart).reserved)).toEqual({ height: 250, lines: 3, matches: true });
+  expect(warnings).toEqual([]);
+});
+
+test("a chart warns where the room the page reserved is not the room it took, at its first layout only", async ({ page }) => {
+  const warnings: string[] = [];
+  page.on("console", (m) => {
+    if (m.type() === "warning") warnings.push(m.text());
+  });
+  await page.goto(`${RESERVE}?plot=250px&height=300&lines=4`);
+  await page.evaluate(() => {
+    const w = window as unknown as { reserved: unknown[] };
+    w.reserved = [];
+    document.getElementById("r")!.addEventListener("tickwave-reserved", (e) => w.reserved.push((e as CustomEvent).detail));
+    return (window as unknown as { define: () => Promise<unknown> }).define();
+  });
+  const chart = page.locator("#r");
+  await chart.evaluate((c) => (c as Chart).settled());
+  expect(await page.evaluate(() => (window as unknown as { reserved: unknown[] }).reserved)).toEqual([{ height: 250, lines: 3, matches: false }]);
+  expect(await chart.locator("svg.tw-plot").evaluate((s) => s.getBoundingClientRect().height)).toBe(250);
+  expect(warnings).toEqual([
+    'tickwave-chart#r: height="300" and --tickwave-chart-height (250px) differ; the plot is drawn 250 px high, from the property',
+    "tickwave-chart#r: --tickwave-chart-readout-lines reserves 4 readout lines, and the readout holds 3",
+  ]);
+  // The page shows another series set: the readout follows it, and nothing is said.
+  await chart.evaluate((c) => c.setAttribute("show", "clang"));
+  await expect.poll(() => chart.locator(".tw-readout").evaluate((r) => Math.round(r.getBoundingClientRect().height))).toBe(Math.round(2 * 13 * 1.45));
+  expect(warnings.length).toBe(2);
+  expect(await page.evaluate(() => (window as unknown as { reserved: unknown[] }).reserved).then((r) => r.length)).toBe(1);
+});
+
+test("a chart with a legend keeps its height through its definition; the legend comes with the data", async ({ page }) => {
+  await page.addInitScript(() => {
+    const w = window as unknown as { frames: [number, boolean][] };
+    w.frames = [];
+    const tick = () => {
+      const c = document.getElementById("r") as (HTMLElement & { data?: unknown }) | null;
+      if (c) w.frames.push([c.getBoundingClientRect().height, !!c.data]);
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+  await page.route("**/figure1.chart.json", () => {});
+  await page.goto(`${RESERVE}?plot=250px&lines=3&legend`);
+  await expect.poll(() => page.evaluate(() => (window as unknown as { frames: unknown[] }).frames.length)).toBeGreaterThan(20);
+  await page.evaluate(() => (window as unknown as { define: () => Promise<unknown> }).define());
+  await expect(page.locator("#r ul.tw-legend")).toBeAttached();
+  const start = await page.evaluate(() => (window as unknown as { frames: unknown[] }).frames.length);
+  await expect.poll(() => page.evaluate(() => (window as unknown as { frames: unknown[] }).frames.length)).toBeGreaterThan(start + 20);
+  const frames = await page.evaluate(() => (window as unknown as { frames: [number, boolean][] }).frames);
+  expect(new Set(frames.map(([h]) => h))).toEqual(new Set([frames[0][0]]));
+});
+
+test("before its data, a readout below holds the lines the page states, else those show names", async ({ page }) => {
+  await page.route("**/figure1.chart.json", () => {});
+  for (const [query, lines] of [["show=clang%20stock%20gcc", 4], ["lines=2&show=clang%20stock%20gcc", 2]] as const) {
+    await page.goto(`${RESERVE}?${query}`);
+    await page.evaluate(() => (window as unknown as { define: () => Promise<unknown> }).define());
+    const readout = page.locator("#r .tw-readout");
+    await expect.poll(() => readout.evaluate((r) => r.getBoundingClientRect().height)).toBeCloseTo(lines * 13 * 1.45, 1);
+  }
+});
+
 test.describe("on a touch screen", () => {
   test.use({ hasTouch: true });
 

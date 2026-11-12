@@ -405,7 +405,8 @@ of that annotation, and a click opens the page's view of the recording there. On
 chart load `tickwave.js`, from beside itself.
 
 `CHARTS.md`, at the repository's root, specifies the data format, `tickwave-chart/1`, and every
-attribute, property and event. Besides the properties below, the chart reads the line patterns
+attribute, property and event. `tickwave.css` reserves a chart's room before the module defines it,
+from `--tickwave-chart-height` and `--tickwave-chart-readout-lines`, as it lays out a closed view. Besides the properties below, the chart reads the line patterns
 (`--dash-second-build`, `--dash-reference`, `--dash-capture-second`, `--dash-misread`),
 `--capture-width`, `--capture-opacity` and `--fault-ink`.
 

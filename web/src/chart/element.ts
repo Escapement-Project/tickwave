@@ -10,12 +10,12 @@ import { grouped } from "./decimal.ts";
 import { layout, type Layout, type Placed, type SeriesLayout } from "./layout.ts";
 import { figure, swatch } from "./readout.ts";
 import { render, type Colours, type Paint } from "./render.ts";
+import { DEFAULT_HEIGHT, HEIGHT_PROPERTY, LINES_PROPERTY, READOUT_TEXT } from "./reserve.ts";
 import { SERIES_TOKEN } from "../tokens.ts";
 
 const SVG = "http://www.w3.org/2000/svg";
 const SWEEP_MS = 750;
 const LABELS_MS = 200;
-const DEFAULT_HEIGHT = 330;
 /** How near the pointer must be to a point, in CSS pixels, to point at it. */
 const REACH = 12;
 /** How long a mouse must rest on a point to open it: one passing over the plot loads nothing. */
@@ -34,9 +34,10 @@ const CSS = `
 :where(tickwave-chart) .tw-plot { display: block; overflow: visible; }
 :where(tickwave-chart) .tw-legend { list-style: none; display: flex; flex-wrap: wrap; gap: 4px 18px; margin: 0 0 6px;
   padding: 0; font-size: 13px; }
+:where(tickwave-chart) .tw-legend:empty { margin: 0; }
 :where(tickwave-chart) .tw-legend li { display: flex; align-items: center; gap: 6px; }
 :where(tickwave-chart) .tw-swatch { flex: none; vertical-align: -1px; margin-right: 6px; }
-:where(tickwave-chart) .tw-readout { font-size: 13px; line-height: 1.45; }
+:where(tickwave-chart) .tw-readout { ${READOUT_TEXT} }
 :where(tickwave-chart) .tw-readout > div { padding-left: 28px; text-indent: -28px; }
 :where(tickwave-chart) .tw-readout[data-tooltip] { position: absolute; z-index: 1; pointer-events: none; box-sizing: border-box;
   width: max-content; max-width: min(24em, 100%); background: var(--raised, Canvas); border: 1px solid var(--hair, GrayText);
@@ -79,6 +80,17 @@ function addStyle(): void {
   document.head.prepend(style);
 }
 
+/** What `reserved` and the `tickwave-reserved` event give. */
+export interface Reserved {
+  /** The plot's height, in CSS pixels. */
+  readonly height: number;
+  /** The lines the readout below holds; null for a tooltip readout. */
+  readonly lines: number | null;
+  /** Whether the page's properties reserved that room: the plot's height, where the height
+   * attribute states one too, and the readout's lines, where the page states them. */
+  readonly matches: boolean;
+}
+
 /** Charts that share a selected setting, by `group`. */
 const groups = new Map<string, Set<TickwaveChart>>();
 
@@ -112,6 +124,7 @@ export class TickwaveChart extends HTMLElement {
   #settle: () => void = () => {};
   readonly #settled = new Promise<void>((resolve) => (this.#settle = resolve));
   #ready = false;
+  #reserved: Reserved | null = null;
   /** At least 60 % of the chart is in view: the sweep starts once it also has data. */
   #visible = false;
   /** The series picked by pointing at its end label, which leaving the label unpicks. */
@@ -246,19 +259,88 @@ export class TickwaveChart extends HTMLElement {
       // A claim pointed at while the sweep plays: its rings would land on points not drawn yet.
       this.#finishSweep();
     } else {
-      if (name === "height" && !this.#data) this.#sizePlot();
+      if ((name === "height" || name === "readout" || name === "show") && !this.#data) this.#sizePlot();
       this.#draw();
     }
   }
 
+  /** The plot's height: the property's, else the attribute's, else the default. */
   #plotHeight(): number {
-    return Number(this.getAttribute("height")) || DEFAULT_HEIGHT;
+    const attribute = Number(this.getAttribute("height")) || DEFAULT_HEIGHT;
+    const svg = this.#svg;
+    if (!svg) return attribute;
+    // Through the svg's own height, so the property can be any length.
+    svg.style.height = `var(${HEIGHT_PROPERTY}, ${attribute}px)`;
+    return parseFloat(getComputedStyle(svg).height) || attribute;
+  }
+
+  /**
+   * The lines a readout below the plot holds, picked or not: the setting's, and each shown series'.
+   * Before the data, those the page states, else those `show` names. Null for a tooltip readout.
+   */
+  #readoutLines(): number | null {
+    if (this.getAttribute("readout") !== "below") return null;
+    if (this.#data) return 1 + this.#shown().size;
+    const stated = this.#statedLines();
+    if (stated !== null) return stated;
+    const show = this.getAttribute("show")?.trim();
+    return show ? 1 + show.split(/\s+/).length : 0;
+  }
+
+  #statedLines(): number | null {
+    const raw = getComputedStyle(this).getPropertyValue(LINES_PROPERTY).trim();
+    const n = Number(raw);
+    return raw !== "" && Number.isInteger(n) && n >= 0 ? n : null;
+  }
+
+  #reserveReadout(): void {
+    const box = this.#readout;
+    if (!box) return;
+    const lines = this.#readoutLines();
+    if (!lines) {
+      box.style.minHeight = "";
+      return;
+    }
+    // In pixels: Chromium resolves an inline `lh` against another line height once it changes.
+    const style = getComputedStyle(box);
+    const line = parseFloat(style.lineHeight) || 1.45 * parseFloat(style.fontSize);
+    box.style.minHeight = `${lines * line}px`;
   }
 
   /** Before the data, the plot at the height it will draw at, rather than an empty svg's 150 px. */
   #sizePlot(): void {
-    this.#svg?.setAttribute("width", "100%");
-    this.#svg?.setAttribute("height", String(this.#plotHeight()));
+    if (!this.#svg) return;
+    this.#svg.setAttribute("width", "100%");
+    this.#svg.setAttribute("height", String(this.#plotHeight()));
+    this.#reserveReadout();
+  }
+
+  /**
+   * At the first layout with data, whether the room the page reserved through tickwave.css's
+   * properties is the room the chart took. Later data, and the series a reader shows, change the
+   * readout at the reader's own doing, and are not compared.
+   */
+  #compareReserved(height: number): void {
+    const name = `tickwave-chart${this.id ? `#${this.id}` : ""}`;
+    const problems: string[] = [];
+    const property = getComputedStyle(this).getPropertyValue(HEIGHT_PROPERTY).trim();
+    const attribute = this.getAttribute("height");
+    if (property !== "" && attribute !== null && Number(attribute) !== height) {
+      problems.push(`${name}: height="${attribute}" and ${HEIGHT_PROPERTY} (${property}) differ; the plot is drawn ${height} px high, from the property`);
+    }
+    const lines = this.#readoutLines();
+    const stated = this.#statedLines();
+    if (lines !== null && stated !== null && stated !== lines) {
+      problems.push(`${name}: ${LINES_PROPERTY} reserves ${stated} readout lines, and the readout holds ${lines}`);
+    }
+    for (const p of problems) console.warn(p);
+    this.#reserved = { height, lines, matches: problems.length === 0 };
+    this.dispatchEvent(new CustomEvent("tickwave-reserved", { bubbles: true, composed: true, detail: this.#reserved }));
+  }
+
+  /** The room the chart took at its first layout with data, and whether the page reserved it. Null before. */
+  get reserved(): Reserved | null {
+    return this.#reserved;
   }
 
   /** The chart's data. Setting it redraws without replaying the sweep. */
@@ -316,7 +398,6 @@ export class TickwaveChart extends HTMLElement {
     this.#legend?.classList.add("tw-legend");
     this.#svg = document.createElementNS(SVG, "svg");
     this.#svg.classList.add("tw-plot");
-    this.#sizePlot();
     this.#svg.setAttribute("font-size", "12");
     this.#plot = document.createElementNS(SVG, "g");
     this.#plot.classList.add("tw-data");
@@ -345,6 +426,7 @@ export class TickwaveChart extends HTMLElement {
     this.#popHead.className = "tw-pop-head";
     this.#inset = null;
     this.replaceChildren(...[this.#legend, this.#svg, this.#readout, this.#notice, this.#probe, this.#hint, this.#pop].filter((e) => e !== null));
+    this.#sizePlot();
     this.#listen();
   }
 
@@ -527,6 +609,7 @@ export class TickwaveChart extends HTMLElement {
     this.#drawReadout(data, c);
     if (!this.#ready) {
       this.#ready = true;
+      this.#compareReserved(height);
       if (!this.#sweepWanted()) this.#finishSweep();
       this.dispatchEvent(new CustomEvent("tickwave-ready", { bubbles: true, composed: true, detail: { height: this.offsetHeight } }));
     }
@@ -569,6 +652,7 @@ export class TickwaveChart extends HTMLElement {
 
   #drawReadout(data: ChartData, c: Colours): void {
     const box = this.#readout!;
+    this.#reserveReadout();
     const tooltip = this.getAttribute("readout") !== "below";
     box.toggleAttribute("data-tooltip", tooltip);
     const i = this.#x;

@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>A chart that reserves its room</title>
+<!--
+  A chart with a readout below, laid out by tickwave.css until define() loads tickwave-chart.js.
+  ?plot=   --tickwave-chart-height, a length
+  ?lines=  --tickwave-chart-readout-lines
+  ?height= the height attribute
+  ?show=   the show attribute (default "clang gcc")
+  ?legend  a legend above the plot
+-->
+<link rel="stylesheet" href="/dist/site/tokens.css">
+<link rel="stylesheet" href="/dist/tickwave.css">
+<style>
+body { margin: 0; padding: 20px; background: var(--page); color: var(--ink); font: 400 15px/1.5 var(--font-text); }
+figure { margin: 0; width: 620px; }
+</style>
+</head>
+<body>
+<figure>
+<script>
+const q = new URLSearchParams(location.search);
+const chart = document.createElement("tickwave-chart");
+chart.id = "r";
+chart.setAttribute("src", "/fixtures/figure1.chart.json");
+chart.setAttribute("readout", "below");
+chart.setAttribute("sweep", "off");
+if (q.has("plot")) chart.style.setProperty("--tickwave-chart-height", q.get("plot"));
+if (q.has("lines")) chart.style.setProperty("--tickwave-chart-readout-lines", q.get("lines"));
+if (q.has("height")) chart.setAttribute("height", q.get("height"));
+chart.setAttribute("show", q.get("show") ?? "clang gcc");
+if (q.has("legend")) chart.setAttribute("legend", "above");
+// Whole, in one step, so no frame shows it before its attributes and properties.
+document.currentScript.before(chart);
+window.define = () => import("/dist/tickwave-chart.js");
+</script>
+<figcaption>Figure 1. What follows the chart.</figcaption>
+</figure>
+</body>
+</html>

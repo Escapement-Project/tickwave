@@ -5,8 +5,8 @@
 <title>A view whose page writes its summary</title>
 <!--
   A view with the page's title and facts in it, laid out by tickwave.css until define() loads
-  tickwave.js. Before the test calls define(), the element is undefined. The script after the view
-  runs as the page parses, so the first frame has the spans, as a page's own markup would.
+  tickwave.js. Before the test calls define(), the element is undefined. The script puts the view in
+  whole as the page parses, so its first frame has the spans, as a page's own markup would.
   ?title=, ?facts=   the slotted text; ?facts= alone leaves the title unslotted
   ?src=              the recording, relative to web/ (default fixtures/identify-swd.tickwave)
   ?style=verge|bench the summary's metrics as the Escapement Project's two pages set them
@@ -30,11 +30,11 @@ body { margin: 16px; font: 17px/1.6 system-ui, sans-serif; }
 </style>
 </head>
 <body>
-<tickwave-view id="v"></tickwave-view>
 <script>
 const q = new URLSearchParams(location.search);
 const served = new URLSearchParams([...q].filter(([k]) => ["tag", "after", "stall"].includes(k)));
-const view = document.getElementById("v");
+const view = document.createElement("tickwave-view");
+view.id = "v";
 view.setAttribute("src", `../../${q.get("src") ?? "fixtures/identify-swd.tickwave"}${served.size > 0 ? `?${served}` : ""}`);
 for (const slot of ["title", "facts"]) {
   if (!q.has(slot)) continue;
@@ -45,6 +45,8 @@ for (const slot of ["title", "facts"]) {
 }
 if (q.has("hidden")) view.hidden = true;
 document.body.className = q.get("style") ?? "";
+// Whole, in one step, so no frame shows it before its spans and the page's style.
+document.currentScript.before(view);
 window.define = () => import("../../dist/tickwave.js");
 </script>
 <p id="after">What follows the view.</p>

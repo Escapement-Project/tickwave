@@ -51,13 +51,9 @@ export const SUMMARY_CSS = `
 
 const UNDEFINED = ":where(tickwave-view:not(:defined):not([hidden]))";
 
-/** tickwave.css: an undefined view's summary, from the spans a page slots into it. */
-export function undefinedSheet(): string {
-  return `/* tickwave.css: a <tickwave-view>'s summary before tickwave.js defines the element, laid out as the
-   element lays it out, so the view keeps its height when it is defined. It reads the spans a page
-   writes into the view, <span slot="title"> and <span slot="facts">, and leaves the button's cell
-   empty. Every rule is in :where(), so any rule of the page's wins. */
-${UNDEFINED} { ${HOST_TEXT}
+/** tickwave.css's rules for an undefined view: its summary, from the spans a page slots into it. */
+export function viewSheet(): string {
+  return `${UNDEFINED} { ${HOST_TEXT}
   ${BOX} }
 ${UNDEFINED} > :where([slot="title"]) { ${TITLE} }
 ${UNDEFINED} > :where([slot="facts"]) { ${FACTS} }

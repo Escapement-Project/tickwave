@@ -4,6 +4,7 @@
 import { TickwaveChart } from "./element.ts";
 
 export { TickwaveChart };
+export type { Reserved } from "./element.ts";
 export { parseChart, type ChartData } from "./data.ts";
 
 if (!customElements.get("tickwave-chart")) customElements.define("tickwave-chart", TickwaveChart);
