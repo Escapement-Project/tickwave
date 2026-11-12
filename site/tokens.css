@@ -246,16 +246,3 @@
     --code-parameter: #eba0ac;
   }
 }
-@media (prefers-contrast: more) and (prefers-color-scheme: dark) {
-  :root:not([data-face="day"]) {
-    --code-keyword: #cba6f7;
-    --code-type: #f9e2af;
-    --code-function: #89b4fa;
-    --code-number: #fab387;
-    --code-builtin: #f38ba8;
-    --code-operator: #94e2d5;
-    --code-escape: #f5c2e7;
-    --code-string: #a6e3a1;
-    --code-parameter: #eba0ac;
-  }
-}
