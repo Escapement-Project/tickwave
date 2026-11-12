@@ -1,6 +1,6 @@
 # The converter
 
-`tickwave` is a command-line program. It converts captures into tickwave recordings, describes a recording, checks one against the capture it came from, checks and bundles a recording's sidecar of annotations, and finishes a recording that was cut off before its end. [The Open page](../open.html) runs the same conversion in a browser.
+`tickwave` is a command-line program. It converts captures into tickwave recordings, describes a recording, opens one in your browser, checks one against the capture it came from, checks and bundles a recording's sidecar of annotations, and finishes a recording that was cut off before its end. [The Open page](../open.html) runs the same conversion in a browser.
 
 ## Building it
 
@@ -11,6 +11,14 @@ cargo build --release -p escapement-tickwave-cli
 ```
 
 The program is then `target/release/tickwave`. `tickwave help`, and `--help` after any command, list its options.
+
+To open recordings in your browser, the program carries the viewer. Build the web pages first, as the repository's README says, then:
+
+```sh
+cargo build --release -p escapement-tickwave-cli --features viewer
+```
+
+Without the viewer, `tickwave open` and `--open` refuse, and say how to build it.
 
 ## Converting a capture
 
@@ -76,6 +84,7 @@ If the source doesn't state a channel's unit, give it with `--unit <name>=<unit>
 | `--meta <key>=<value>` | free metadata, such as `--meta probe=verge`, as often as you like |
 | `--level <n>` | the zstd compression level, 19 by default |
 | `--block-kib <n>` | how much decoded data each block aims to hold, 1024 KiB by default and at most 65,536 |
+| `--open` | open the recording in your browser once it's written and checked, as [`tickwave open`](#opening-a-recording) does |
 
 A block is the smallest piece of data a viewer fetches. Smaller blocks mean less waiting for a narrow view of a long capture, and a larger file.
 
@@ -106,6 +115,30 @@ identify-swd
 ```
 
 Times are in seconds to one tick, here a nanosecond: never more digits than the recording carries. `--json` prints the header and the block statistics as JSON, for a script.
+
+## Opening a recording
+
+```sh
+tickwave open identify-swd.tickwave
+```
+
+```text
+identify-swd.tickwave: with its sidecar identify-swd.annotations.toml, 695 annotations
+http://127.0.0.1:38343/open.html?src=bc6452795da2010a0ba21af9322bc366/identify-swd.tickwave&annotations=bc6452795da2010a0ba21af9322bc366/identify-swd.annotations.toml&local
+serving the viewer until Ctrl-C
+```
+
+This shows the recording in your browser, on [the Open page](../open.html), with its sidecar's annotations. A page can't read a file from your disk, so `tickwave open` serves the recording and the viewer itself. It serves them to your own computer only, at 127.0.0.1, and from your disk it serves only the recording, its sidecar and the files the sidecar includes. The viewer reads the recording as you move through it, so it keeps serving until you stop it with Ctrl-C.
+
+It takes the sidecar beside the recording by its name: `identify-swd.annotations.toml` for `identify-swd.tickwave`. `--annotations <file>` names another. It checks the sidecar first and lists any problems, and the viewer then shows the recording without its annotations. A recording cut off before its end is refused, and `tickwave repair` finishes it.
+
+It prints the viewer's address and starts your browser on it. `--no-browser` only prints the address, for a browser you start yourself. `--port <n>` serves on that port, where otherwise the system chooses one.
+
+A conversion opens its recording the same way with `--open`, once the recording is written and checked. `--port` and `--no-browser` go with it:
+
+```sh
+tickwave convert sigrok capture.sr -o capture.tickwave --open
+```
 
 ## Checking a recording against its capture
 

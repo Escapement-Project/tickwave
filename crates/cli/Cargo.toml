@@ -18,7 +18,22 @@ toml = "1.2.1"
 tracing = "0.1.44"
 tracing-indicatif = "0.3.14"
 tracing-subscriber = "0.3.23"
+axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
+tokio = { version = "1.54.1", features = ["rt", "net"] }
+tower-http = { version = "0.7.1", features = ["fs"] }
+webbrowser = "1.2.7"
+getrandom = "0.4.3"
+percent-encoding = "2.3.2"
+rust-embed = { version = "8.14.0", features = ["mime-guess", "debug-embed"], optional = true }
 
 [[bin]]
 name = "tickwave"
 path = "src/main.rs"
+
+[features]
+# The viewer's site, web/dist/site, built into the binary for `tickwave open`. Build web/ first.
+viewer = ["dep:rust-embed"]
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tower = { version = "0.5.3", features = ["util"] }

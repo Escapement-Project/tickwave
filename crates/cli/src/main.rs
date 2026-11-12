@@ -1,5 +1,7 @@
 //! `tickwave`: convert captures into tickwave's recording format, describe a recording, check one
-//! against its source, and repair one cut off before its end.
+//! against its source, repair one cut off before its end, and open one in the browser.
+
+mod open;
 
 use std::cell::RefCell;
 use std::fs;
@@ -28,6 +30,7 @@ use tracing::span::EnteredSpan;
 use tracing::{info, info_span, warn};
 use tracing_indicatif::IndicatifLayer;
 use tracing_indicatif::span_ext::IndicatifSpanExt;
+use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
@@ -35,7 +38,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 #[command(
     name = "tickwave",
     version,
-    about = "Convert, describe, verify and repair tickwave recordings"
+    about = "Convert, describe, verify, repair and open tickwave recordings"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -94,6 +97,69 @@ enum Command {
         #[arg(long, default_value_t = 19)]
         level: i32,
     },
+    /// Open a recording in the browser, with its sidecar's annotations. The viewer and the files
+    /// are served on 127.0.0.1 until Ctrl-C, since the viewer reads the recording as it moves.
+    Open {
+        recording: PathBuf,
+        /// The sidecar's hand-written TOML file. Without it, `<name>.annotations.toml` beside the
+        /// recording is taken if there is one.
+        #[arg(long)]
+        annotations: Option<PathBuf>,
+        #[command(flatten)]
+        serve: Serve,
+    },
+}
+
+#[derive(Args)]
+struct Serve {
+    /// The port to serve on. 0 lets the system choose one.
+    #[arg(long, default_value_t = 0)]
+    port: u16,
+    /// Print the viewer's address without starting a browser.
+    #[arg(long)]
+    no_browser: bool,
+}
+
+#[derive(Args)]
+struct AndOpen {
+    /// Open the recording in the browser once it is written and checked, as `tickwave open`
+    /// does, and serve it until Ctrl-C.
+    #[arg(long)]
+    open: bool,
+    /// With --open: the port to serve on. Without it, the system chooses one.
+    #[arg(long, requires = "open")]
+    port: Option<u16>,
+    /// With --open: print the viewer's address without starting a browser.
+    #[arg(long, requires = "open")]
+    no_browser: bool,
+}
+
+impl AndOpen {
+    /// The viewer, if the recording is to be opened: had before a conversion starts, so a build
+    /// without one is refused before the work rather than after it.
+    fn viewer(&self) -> Result<Option<Box<dyn open::Site>>> {
+        self.open.then(open::viewer).transpose()
+    }
+
+    /// Opens `recording` with `viewer`, if there is one.
+    fn serve(
+        &self,
+        viewer: Option<Box<dyn open::Site>>,
+        recording: &Path,
+        max: usize,
+    ) -> Result<()> {
+        match viewer {
+            Some(site) => open_file(
+                site,
+                recording,
+                None,
+                self.port.unwrap_or(0),
+                !self.no_browser,
+                max,
+            ),
+            None => Ok(()),
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -128,6 +194,8 @@ enum Source {
         rate: Option<SampleRate>,
         #[command(flatten)]
         common: Common,
+        #[command(flatten)]
+        and_open: AndOpen,
     },
     /// A sigrok session file (`.sr`), as PulseView, sigrok-cli and verge write them.
     Sigrok {
@@ -140,6 +208,8 @@ enum Source {
         channels: Vec<(String, String)>,
         #[command(flatten)]
         common: Common,
+        #[command(flatten)]
+        and_open: AndOpen,
     },
     /// A value change dump (`.vcd`). One-bit signals only; the rest are listed as skipped.
     Vcd {
@@ -152,6 +222,8 @@ enum Source {
         channels: Vec<(String, String)>,
         #[command(flatten)]
         common: Common,
+        #[command(flatten)]
+        and_open: AndOpen,
     },
 }
 
@@ -189,6 +261,7 @@ fn pair(s: &str) -> Result<(String, String), String> {
 fn main() -> Result<()> {
     let indicatif = IndicatifLayer::new();
     tracing_subscriber::registry()
+        .with(LevelFilter::INFO)
         .with(tracing_subscriber::fmt::layer().with_writer(indicatif.get_stderr_writer()))
         .with(indicatif)
         .init();
@@ -203,8 +276,10 @@ fn main() -> Result<()> {
                     channels,
                     rate,
                     common,
+                    and_open,
                 },
         } => {
+            let viewer = and_open.viewer()?;
             let export =
                 convert::check_saleae(saleae_headers(&dir, &channels, rate)?, &Bars::default())
                     .map_err(|e| match e {
@@ -220,7 +295,8 @@ fn main() -> Result<()> {
                     recording.timebase.num()
                 );
             }
-            convert(&|| Ok(export.recording()), &output, &common, max)
+            convert(&|| Ok(export.recording()), &output, &common, max)?;
+            and_open.serve(viewer, &output, max)
         }
         Command::Convert {
             from:
@@ -229,15 +305,18 @@ fn main() -> Result<()> {
                     output,
                     channels,
                     common,
+                    and_open,
                 },
         } => {
+            let viewer = and_open.viewer()?;
             report_skipped(&sigrok::read(&file)?.skipped);
             convert(
                 &|| select(sigrok::read(&file)?.recording, &channels),
                 &output,
                 &common,
                 max,
-            )
+            )?;
+            and_open.serve(viewer, &output, max)
         }
         Command::Convert {
             from:
@@ -246,15 +325,18 @@ fn main() -> Result<()> {
                     output,
                     channels,
                     common,
+                    and_open,
                 },
         } => {
+            let viewer = and_open.viewer()?;
             report_skipped(&vcd::read(&file)?.skipped);
             convert(
                 &|| select(vcd::read(&file)?.recording, &channels),
                 &output,
                 &common,
                 max,
-            )
+            )?;
+            and_open.serve(viewer, &output, max)
         }
         Command::Info { file, json } => info(&file, json, max),
         Command::Verify { file, against } => verify_file(&file, &against, max),
@@ -276,6 +358,18 @@ fn main() -> Result<()> {
             output,
             level,
         } => repair_file(&file, &output, level),
+        Command::Open {
+            recording,
+            annotations,
+            serve,
+        } => open_file(
+            open::viewer()?,
+            &recording,
+            annotations.as_deref(),
+            serve.port,
+            !serve.no_browser,
+            max,
+        ),
     }
 }
 
@@ -604,6 +698,13 @@ fn load_sidecar(
     recording: &Path,
     sidecar: &Path,
 ) -> Result<(Vec<annotations::Annotation>, SidecarFiles)> {
+    let files = read_sidecar(sidecar)?;
+    let resolved = resolve_sidecar(header, recording, sidecar, &files)?;
+    Ok((resolved, files))
+}
+
+/// A sidecar's hand-written file and the included files that can be read.
+fn read_sidecar(sidecar: &Path) -> Result<SidecarFiles> {
     let hand =
         fs::read_to_string(sidecar).with_context(|| format!("reading {}", sidecar.display()))?;
     #[derive(serde::Deserialize)]
@@ -633,6 +734,17 @@ fn load_sidecar(
             Err(e) => eprintln!("{}: reading the included {name}: {e}", sidecar.display()),
         }
     }
+    Ok(files)
+}
+
+/// Checks a sidecar's `files` against the recording whose header is `header`. Prints every
+/// problem and fails if there is any.
+fn resolve_sidecar(
+    header: &Header,
+    recording: &Path,
+    sidecar: &Path,
+    files: &SidecarFiles,
+) -> Result<Vec<annotations::Annotation>> {
     let included: Vec<Included<'_>> = files[1..]
         .iter()
         .map(|(name, text)| Included { name, text })
@@ -641,7 +753,7 @@ fn load_sidecar(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned());
     match annotations::resolve(&files[0].1, &included, header, file_name.as_deref()) {
-        Ok(resolved) => Ok((resolved, files)),
+        Ok(resolved) => Ok(resolved),
         Err(problems) => {
             for problem in &problems {
                 eprintln!("{}: {problem}", sidecar.display());
@@ -728,4 +840,73 @@ fn repair_file(file: &Path, output: &Path, level: i32) -> Result<()> {
         repaired.header.content_id
     );
     Ok(())
+}
+
+/// A file's name, as the viewer is given it.
+fn file_name(path: &Path) -> Result<String> {
+    Ok(path
+        .file_name()
+        .with_context(|| format!("{} names no file", path.display()))?
+        .to_string_lossy()
+        .into_owned())
+}
+
+/// Serves `recording` and its sidecar with `site` until the process is stopped: the sidecar given,
+/// or the one beside the recording by its name.
+fn open_file(
+    site: Box<dyn open::Site>,
+    recording: &Path,
+    sidecar: Option<&Path>,
+    port: u16,
+    browser: bool,
+    max: usize,
+) -> Result<()> {
+    let (_, _, head) = read_footer(recording, max)?;
+    let sidecar = match sidecar {
+        Some(sidecar) => Some(sidecar.to_owned()),
+        None => {
+            let mut name = recording.file_stem().unwrap_or_default().to_owned();
+            name.push(".annotations.toml");
+            let beside = recording.with_file_name(name);
+            beside.is_file().then_some(beside)
+        }
+    };
+    let mut files = open::Files {
+        recording: open::Named {
+            name: file_name(recording)?,
+            path: recording.to_owned(),
+        },
+        sidecar: None,
+    };
+    if let Some(sidecar) = sidecar {
+        let read = read_sidecar(&sidecar)?;
+        match resolve_sidecar(&head.header, recording, &sidecar, &read) {
+            Ok(resolved) => info!(
+                "{}: with its sidecar {}, {} annotations",
+                recording.display(),
+                sidecar.display(),
+                resolved.len()
+            ),
+            Err(e) => warn!(
+                "{}: {e}, so the viewer shows the recording without its annotations",
+                sidecar.display()
+            ),
+        }
+        let dir = sidecar.parent().unwrap_or(Path::new(""));
+        let included = read[1..]
+            .iter()
+            .map(|(name, _)| open::Named {
+                name: name.clone(),
+                path: dir.join(name),
+            })
+            .collect();
+        files.sidecar = Some((
+            open::Named {
+                name: file_name(&sidecar)?,
+                path: sidecar,
+            },
+            included,
+        ));
+    }
+    open::serve(site, files, port, browser)
 }

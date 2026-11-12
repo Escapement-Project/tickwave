@@ -58,6 +58,13 @@ npx playwright install chromium firefox   # once, for the browser tests
 npm run check                             # typecheck, unit tests, build and browser tests
 ```
 
+The converter carries the viewer for `tickwave open` when it's built after the web build, with the
+`viewer` feature:
+
+```sh
+cargo build --release -p escapement-tickwave-cli --features viewer
+```
+
 ## Licence
 
 MIT or Apache-2.0, at your choice: `LICENSE-MIT` and `LICENSE-APACHE`.
