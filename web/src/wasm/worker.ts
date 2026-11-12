@@ -59,6 +59,12 @@ async function handle(m: Request, signal: AbortSignal): Promise<unknown> {
     }
     case "resolve":
       return (await recording(m.key)).resolveAnnotations(handJson(m.hand, "the TOML file").json, m.names, m.texts, m.recordingFile);
+    case "sidecarText": {
+      const r = await recording(m.key);
+      const { json, include } = handJson(m.hand, "the TOML file");
+      const texts = m.base ? await Promise.all(include.map((n) => fetchText(new URL(n, m.base!).href, signal))) : [];
+      return r.resolveAnnotations(json, m.base ? include : [], texts, m.recordingFile);
+    }
     case "bundled": {
       const r = await recording(m.key);
       const files = r.header.annotations;

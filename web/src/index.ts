@@ -8,7 +8,7 @@ import { registerLoader } from "./registry.ts";
 import { tickwaveLoader } from "./wasm/client.ts";
 
 export { registerLoader, type Loader } from "./registry.ts";
-export { recordingInfo } from "./recording-info.ts";
+export { recordingInfo, resolveSidecar } from "./recording-info.ts";
 export { configure, registerFile } from "./wasm/client.ts";
 export type { Annotation, RawAnnotation, Measure } from "./annotations.ts";
 export type * from "./source.ts";

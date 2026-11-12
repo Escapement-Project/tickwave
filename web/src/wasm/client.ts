@@ -133,6 +133,19 @@ export class WasmSource implements Source {
     return (JSON.parse(json) as CoreAnnotation[]).map(fromCore);
   }
 
+  /** The sidecar whose hand-written file is `text`. Its includes are beside `base`, or among the
+   * local files that came with the recording when there is no `base`. */
+  async sidecarText(text: string, base: URL | null): Promise<Annotation[]> {
+    await this.#open();
+    let json: string;
+    if (base === null && this.#sidecar.length > 0) {
+      const rest = this.#sidecar.filter((f) => !f.name.endsWith(".toml"));
+      const texts = await Promise.all(rest.map((f) => f.text()));
+      json = await call<string>({ op: "resolve", key: this.#key, hand: text, names: rest.map((f) => f.name), texts, recordingFile: this.fileName });
+    } else json = await call<string>({ op: "sidecarText", key: this.#key, hand: text, base: base?.href ?? null, recordingFile: this.fileName });
+    return (JSON.parse(json) as CoreAnnotation[]).map(fromCore);
+  }
+
   /** A local file's sidecar files when it came with them, else the recording's bundled sidecar. */
   async bundled(): Promise<Annotation[] | null> {
     await this.#open();
@@ -177,5 +190,6 @@ export const tickwaveLoader: Loader = {
     return new WasmSource(url.href, local ?? { url: url.href });
   },
   annotations: (annotations, _recording, source) => (source as WasmSource).sidecar(annotations),
+  annotationsText: (text, base, _recording, source) => (source as WasmSource).sidecarText(text, base),
   bundled: (_recording, source) => (source as WasmSource).bundled(),
 };

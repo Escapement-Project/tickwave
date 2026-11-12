@@ -13,6 +13,9 @@ export interface Loader {
   annotations?(annotations: URL, recording: URL, source: Source): Promise<Annotation[]>;
   /** The annotations bundled into the recording itself, or null when it carries none. */
   bundled?(recording: URL, source: Source): Promise<Annotation[] | null>;
+  /** The resolved annotations of a sidecar whose hand-written file is `text`, with its includes
+   * beside `base` (or the recording's local files when `base` is null). */
+  annotationsText?(text: string, base: URL | null, recording: URL, source: Source): Promise<Annotation[]>;
 }
 
 const loaders: Loader[] = [];
@@ -101,6 +104,14 @@ export function annotationsFor(annotations: URL, recording: URL): Promise<Annota
     if (!loader.annotations) throw new Error(`${recording.pathname}: no reader for its annotations`);
     return loader.annotations(annotations, recording, await sourceFor(recording));
   }) as Promise<Annotation[]>;
+}
+
+/** The sidecar whose hand-written file is `text`, resolved against the recording at `recording`.
+ * Not cached: an editor hands in a new text with each change. */
+export async function annotationsFromText(text: string, base: URL | null, recording: URL): Promise<Annotation[]> {
+  const loader = await loaderFor(recording);
+  if (!loader.annotationsText) throw new Error(`${recording.pathname}: no reader for its annotations as text`);
+  return loader.annotationsText(text, base, recording, await sourceFor(recording));
 }
 
 /** The annotations bundled into the recording, or null. */

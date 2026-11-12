@@ -289,6 +289,9 @@ Clicking an annotation's label shows its span.
 | `tickAt(clientX)` | the tick under a point in the window, or null before the view has drawn |
 | `open` | whether the view is open; setting it opens or closes it |
 | `window` | the span shown, `{start, end}` in ticks |
+| `cursors` | cursors A and B, `{a, b}` in ticks; null where one is not placed |
+| `selection` | the selected span, `{start, end}` in ticks, or null |
+| `annotationsText` | the sidecar's hand-written file as text, in place of the file at `annotations`, whose includes it still reads. The view redraws the annotations and keeps its place, cursors and selection. While it is set, the annotation lane shows even with nothing in it, so the first annotation added moves nothing. Null goes back to the file |
 | `summary` | the recording's own `title` and `facts`, the facts as one line, and `matches`: whether the text the page slotted matches them. Null until the footer is in |
 
 | Event | When, and its `detail` |
@@ -296,6 +299,8 @@ Clicking an annotation's label shows its span.
 | `tickwave-open` | the view opens: `{src}` |
 | `tickwave-window` | the span shown changes: `{start, end}` |
 | `tickwave-select` | a span is selected: its `start`, `end`, `duration`, `edges` by channel, and `periods` for the measured channel |
+| `tickwave-cursor` | a cursor is placed or cleared: `{a, b}` in ticks, and `{aTime, bTime}`, each a time at the recording's resolution as text; null where a cursor is not placed |
+| `tickwave-annotation` | an annotation's label is clicked: `{id}` |
 | `tickwave-ready` | the view has first drawn: `{height}` |
 | `tickwave-summary` | the view has the footer and has compared the page's title and facts with it: the `summary`. Again if the page slots other text |
 | `tickwave-error` | something failed: `{message, error}`. The view also shows it, and logs it to the console |
@@ -498,4 +503,5 @@ view's Open button reads Close while the view is open, and is as wide either way
 | `registerFile(file, sidecar)` | makes a local `File` a `src`. The sidecar's `.toml` and `.jsonl` files can come with it |
 | `registerLoader(loader)` | reads recordings at the URLs `loader.accepts`, asked before the loaders registered earlier |
 | `recordingInfo(src)` | what a recording holds, from its footer: title, length, channels, size, content id |
+| `resolveSidecar(src, text, annotations)` | the annotations of a sidecar whose hand-written file is `text`, checked against the recording as `tickwave annotations check` checks them. Its includes are read beside `annotations`, the sidecar's address, or from the files registered with the recording when that is null. Rejects with every problem, one a line |
 | `configure({firstRead, maxDecodedBytes, cacheBytes})` | the size of the first read, from a recording's end, 32 KiB by default; the most the decoder takes from one block, overview block or footer overview, 64 MiB, past which it refuses the recording; and the size of the cache of decoded blocks, 192 MiB |

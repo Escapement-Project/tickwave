@@ -13,7 +13,7 @@ import { channelIndices, Plot } from "../render/plot.ts";
 import { clampRange, fitRange, moveRange, scaleLimits, zoomRange, type ScaleLimits, type ValueRange } from "../render/scale.ts";
 import { inChannel, isAbort, named, sampleAtOrBefore, sampleTick } from "../source.ts";
 import { parseTime, toTicks, type TimeSpec } from "../time.ts";
-import { DRAG_PX, TickwaveElement, loadRecording, zoomKey, type Loaded } from "./base.ts";
+import { DRAG_PX, TickwaveElement, loadAnnotations, loadRecording, zoomKey, type Loaded } from "./base.ts";
 import { SUMMARY_CSS } from "./summary-style.ts";
 import { shownExtent, summaryFacts } from "../summary.ts";
 
@@ -137,6 +137,12 @@ export class TickwaveView extends TickwaveElement {
   #windowEventQueued = false;
   #readyFired = false;
   #summary: Summary | null = null;
+  /** The hand-written sidecar as text, from a page editing it; null to read the sidecar's file. */
+  #annotationsText: string | null = null;
+  /** Counts the texts handed in: one handed in later makes an earlier one's annotations stale. */
+  #textSeq = 0;
+  /** The sidecar's problems last reported, forgotten when another sidecar replaces it. */
+  #sidecarProblems: string[] = [];
   /** The mismatches between the page's summary and the recording's, warned of once each. */
   #warned = new Set<string>();
   #resize: ResizeObserver;
@@ -243,6 +249,53 @@ export class TickwaveView extends TickwaveElement {
     return { ...this.#plot.view };
   }
 
+  /** Cursors A and B in ticks; null where one is not placed. */
+  get cursors(): { a: number | null; b: number | null } {
+    return { ...this.#plot.cursors };
+  }
+
+  /** The selected span in ticks, or null. */
+  get selection(): { start: number; end: number } | null {
+    const s = this.#plot.selection;
+    return s ? { start: Math.round(Math.min(s.start, s.end)), end: Math.round(Math.max(s.start, s.end)) } : null;
+  }
+
+  /**
+   * The sidecar's hand-written file as text, in place of the file at `annotations`, whose
+   * includes it still reads. Set by a page that edits the annotations: the view redraws them and
+   * keeps its place, cursors and selection, and keeps the annotation lane while it is set. Null
+   * goes back to the file.
+   */
+  get annotationsText(): string | null {
+    return this.#annotationsText;
+  }
+
+  set annotationsText(text: string | null) {
+    if (text === this.#annotationsText) return;
+    this.#annotationsText = text;
+    this.#plot.keepLane = text !== null;
+    void this.#reannotate();
+  }
+
+  /** The annotations again, from the text or the file, over the recording already shown. */
+  async #reannotate(): Promise<void> {
+    const l = this.#loaded;
+    // A load under way reads the text once it has the recording.
+    if (!l) return;
+    const seq = ++this.#textSeq;
+    const annotations = await loadAnnotations(l.src, this.getAttribute("annotations"), this.#annotationsText);
+    if (seq !== this.#textSeq || this.#loaded !== l) return;
+    this.#loaded = { ...l, annotations };
+    this.#reportSidecar(annotations.errors);
+    this.#apply();
+  }
+
+  #reportSidecar(errors: readonly string[]): void {
+    for (const m of this.#sidecarProblems) this.forgetProblem(m);
+    this.#sidecarProblems = [...errors];
+    for (const e of errors) this.fail(named("TickwaveSidecarError", e));
+  }
+
   protected paletteChanged(): void {
     this.#plot.palette = this.palette;
     if (this.#loaded) this.#layout(true);
@@ -280,13 +333,15 @@ export class TickwaveView extends TickwaveElement {
       this.#loaded = null;
       this.#readyFired = false;
       this.clearProblems();
-      this.#loading = loadRecording(src, annotations).then(
+      const text = this.#annotationsText;
+      this.#loading = loadRecording(src, annotations, text).then(
         (l) => {
           if (this.#loadKey !== key) return null;
           this.#loaded = l;
-          for (const e of l.annotations.errors) this.fail(named("TickwaveSidecarError", e));
+          this.#reportSidecar(l.annotations.errors);
           this.#windowAttr = null;
           this.#apply();
+          if (this.#annotationsText !== text) void this.#reannotate();
           return l;
         },
         (e) => {
@@ -412,7 +467,7 @@ export class TickwaveView extends TickwaveElement {
   /** A new recording starts clean: the last one's cursors, selection and place among its
    * annotations mean nothing in it. */
   #forget(): void {
-    this.#plot.cursors = { a: null, b: null };
+    this.#setCursors(null, null);
     this.#plot.selection = null;
     this.#plot.focus = null;
     this.#plot.heights.clear();
@@ -948,7 +1003,10 @@ export class TickwaveView extends TickwaveElement {
       }
       const hit = this.#plot.hit(p.x, p.y);
       const l = this.#plot.layout!;
-      if (hit.area === "lane" && hit.note) void this.show(hit.note.id);
+      if (hit.area === "lane" && hit.note) {
+        void this.show(hit.note.id);
+        this.emit("tickwave-annotation", { id: hit.note.id });
+      }
       else if (hit.area === "row" && p.x >= l.plotLeft && p.x <= l.plotRight) this.#placeCursor(p.x, hit.row);
     };
     box.addEventListener("pointerup", end);
@@ -1012,7 +1070,7 @@ export class TickwaveView extends TickwaveElement {
           this.#placeCursorAt(Math.round((this.#plot.view.start + this.#plot.view.end) / 2));
           break;
         case "Escape":
-          this.#plot.cursors = { a: null, b: null };
+          this.#setCursors(null, null);
           this.#plot.selection = null;
           this.#nextCursor = "a";
           this.#plot.invalidate();
@@ -1067,14 +1125,25 @@ export class TickwaveView extends TickwaveElement {
   /** Places cursor A, or B after it, at `tick`. */
   #placeCursorAt(tick: number): void {
     if (this.#nextCursor === "a") {
-      this.#plot.cursors = { a: tick, b: null };
+      this.#setCursors(tick, null);
       this.#nextCursor = "b";
     } else {
-      this.#plot.cursors = { a: this.#plot.cursors.a, b: tick };
+      this.#setCursors(this.#plot.cursors.a, tick);
       this.#nextCursor = "a";
     }
     this.#plot.invalidate();
     void this.#renderReadout();
+  }
+
+  /** Moves the cursors, and tells the page with `tickwave-cursor` when they change: each cursor's
+   * tick, and its time at the recording's resolution; null where one is not placed. */
+  #setCursors(a: number | null, b: number | null): void {
+    const was = this.#plot.cursors;
+    this.#plot.cursors = { a, b };
+    if (was.a === a && was.b === b) return;
+    const tb = this.#loaded?.info.timebase;
+    const time = (t: number | null) => (t === null || !tb ? null : formatInterval(t, tb));
+    this.emit("tickwave-cursor", { a, b, aTime: time(a), bTime: time(b) });
   }
 
   #selected(): void {

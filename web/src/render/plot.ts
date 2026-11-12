@@ -127,6 +127,8 @@ export class Plot {
   info: RecordingInfo | null = null;
   tracks: Track[] = [];
   annotations: Resolved | null = null;
+  /** The annotation lane shows even with nothing in it, as while a page edits the annotations. */
+  keepLane = false;
   #palette: Palette | null = null;
   layout: Layout | null = null;
   view = { start: 0, end: 1 };
@@ -285,7 +287,7 @@ export class Plot {
 
   /** The lane, the rows at their own heights and the axis: what the plot stacks, with no height given. */
   #stack(): { laneHeight: number; top: number; natural: number[]; fixed: number } {
-    const laneHeight = this.config.lanes > 0 && this.laneNotes().length > 0 ? this.config.lanes * LANE_ROW + 4 : 0;
+    const laneHeight = this.config.lanes > 0 && (this.keepLane || this.laneNotes().length > 0) ? this.config.lanes * LANE_ROW + 4 : 0;
     const top = 2 + laneHeight + (laneHeight > 0 ? 2 : 4);
     const natural = this.tracks.map((t) => this.heights.get(t.index) ?? this.defaultHeight(t));
     const gaps = this.tracks.filter((t, i) => i > 0 && t.channel.kind === "analog").length * 8;

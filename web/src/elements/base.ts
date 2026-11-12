@@ -2,7 +2,7 @@ import { indexAnnotations, type Annotation, type Resolved } from "../annotations
 import { parseSeries } from "../attributes.ts";
 import { onFaceChange, onFontsLoaded } from "../face.ts";
 import { resolvePalette, type Palette } from "../palette.ts";
-import { absolute, annotationsFor, bundledFor, infoFor, sourceFor } from "../registry.ts";
+import { absolute, annotationsFor, annotationsFromText, bundledFor, infoFor, sourceFor } from "../registry.ts";
 import type { RecordingInfo, Source } from "../source.ts";
 import { HOST_TEXT } from "./summary-style.ts";
 
@@ -45,17 +45,24 @@ export interface Loaded {
  * `annotations` URL, a bundled sidecar serves. A sidecar's problems are in `annotations.errors`;
  * the recording still draws.
  */
-export async function loadRecording(src: string, annotations: string | null): Promise<Loaded> {
+export async function loadRecording(src: string, annotations: string | null, text: string | null = null): Promise<Loaded> {
   const url = absolute(src);
   const [source, info] = await Promise.all([sourceFor(url), infoFor(url)]);
+  return { src: url, source, info, annotations: await loadAnnotations(url, annotations, text) };
+}
+
+/** The recording's sidecar: the hand-written file's `text` when given, with its includes beside
+ * `annotations`; else the file at `annotations`; else the bundled one. Problems are in `errors`. */
+export async function loadAnnotations(recording: URL, annotations: string | null, text: string | null): Promise<Resolved> {
   let list: Annotation[] = [];
   const errors: string[] = [];
   try {
-    list = (annotations ? await annotationsFor(absolute(annotations), url) : await bundledFor(url)) ?? [];
+    const at = annotations ? absolute(annotations) : null;
+    list = (text !== null ? await annotationsFromText(text, at, recording) : at ? await annotationsFor(at, recording) : await bundledFor(recording)) ?? [];
   } catch (e) {
     errors.push(e instanceof Error ? e.message : String(e));
   }
-  return { src: url, source, info, annotations: indexAnnotations(list, errors) };
+  return indexAnnotations(list, errors);
 }
 
 export abstract class TickwaveElement extends HTMLElement {
