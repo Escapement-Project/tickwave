@@ -9,6 +9,7 @@
   whole as the page parses, so its first frame has the spans, as a page's own markup would.
   ?title=, ?facts=   the slotted text; ?facts= alone leaves the title unslotted
   ?src=              the recording, relative to web/ (default fixtures/identify-swd.tickwave)
+  ?channels=         the channels attribute
   ?style=verge|bench the summary's metrics as the Escapement Project's two pages set them
   ?hidden            the view is hidden
   ?tag=, ?after=, ?stall=  passed on to the server with the recording's URL
@@ -44,6 +45,7 @@ for (const slot of ["title", "facts"]) {
   view.append(span);
 }
 if (q.has("hidden")) view.hidden = true;
+if (q.has("channels")) view.setAttribute("channels", q.get("channels"));
 document.body.className = q.get("style") ?? "";
 // Whole, in one step, so no frame shows it before its spans and the page's style.
 document.currentScript.before(view);

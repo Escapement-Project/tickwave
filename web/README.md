@@ -200,7 +200,9 @@ page's wins. So leave the view's `display` alone: the sheet sets its own.
 ### `<tickwave-view>`
 
 A whole recording. Closed, it shows the recording's title and, under it, the recording's length to
-three significant figures, its channels and its size, with an Open button beside them. It fetches
+three significant figures, its channels and its size, with an Open button beside them. A view of
+some of the channels names those out of the recording's, "2 of 3 channels: TCKC, TMSC", and gives
+the length they span. It fetches
 the recording's head, and nothing else, once it scrolls into view. Open, all of that stays, and
 the button reads Close. Below it come the time axis, one row a channel, the annotations above the
 rows, and a readout under the rows. The button keeps the focus, and names its recording to a screen

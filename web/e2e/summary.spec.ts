@@ -135,6 +135,17 @@ test("a page's title names the view's button, and a wrong one is warned of", asy
   expect(warnings).toEqual([`tickwave-view#v src="../../fixtures/identify-swd.tickwave": the page's title "Reads" differs from the recording's, "identify-swd.tickwave"`]);
 });
 
+test("a view of some of the channels names them, out of the recording's", async ({ page }) => {
+  await page.goto(`${PAGE}?${new URLSearchParams({ channels: "SWDIO", facts: "524 ms; 1 of 2 channels: SWDIO; 4.7 KiB" })}`);
+  await page.evaluate(() => (window as unknown as { define: () => Promise<unknown> }).define());
+  await page.waitForFunction(() => !!(document.getElementById("v") as HTMLElement & { summary?: unknown }).summary);
+  expect(await page.evaluate(() => (document.getElementById("v") as HTMLElement & { summary: unknown }).summary)).toEqual({
+    title: "identify-swd.tickwave",
+    facts: "524\u00a0ms; 1 of 2 channels: SWDIO; 4.7\u00a0KiB",
+    matches: true,
+  });
+});
+
 test("an undefined view that is hidden takes no room", async ({ page }) => {
   await page.goto(`${PAGE}?${new URLSearchParams({ title: TITLE, facts: FACTS, hidden: "" })}`);
   expect(await page.locator("#v").evaluate((v) => [v.matches(":defined"), v.getBoundingClientRect().height])).toEqual([false, 0]);

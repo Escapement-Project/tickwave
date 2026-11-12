@@ -5,16 +5,17 @@ import { ofKind, type Annotation } from "../annotations.ts";
 import { parseChannels, parseWindow, VIEW_ATTRIBUTES } from "../attributes.ts";
 import { reducedMotion } from "../face.ts";
 import { absolute, events as registryEvents, infoFor, peekInfo } from "../registry.ts";
-import { clockNote, countEdges, formatAt, formatBrief, formatBytes, formatClockPeriod, formatClockRate, formatCount, formatInterval, formatRate, formatValue, periodStats } from "../readouts.ts";
+import { clockNote, countEdges, formatAt, formatClockPeriod, formatClockRate, formatCount, formatInterval, formatRate, formatValue, periodStats } from "../readouts.ts";
 import { completePulse, pulseFigures, pulseFromEdges, type Pulse } from "../probe.ts";
 import { Prober, type Probed } from "../prober.ts";
 import { lowerBound } from "../search.ts";
 import { channelIndices, Plot } from "../render/plot.ts";
 import { clampRange, fitRange, moveRange, scaleLimits, zoomRange, type ScaleLimits, type ValueRange } from "../render/scale.ts";
-import { inChannel, isAbort, named, sampleAtOrBefore, sampleTick, type RecordingInfo } from "../source.ts";
+import { inChannel, isAbort, named, sampleAtOrBefore, sampleTick } from "../source.ts";
 import { parseTime, toTicks, type TimeSpec } from "../time.ts";
 import { DRAG_PX, TickwaveElement, loadRecording, zoomKey, type Loaded } from "./base.ts";
 import { SUMMARY_CSS } from "./summary-style.ts";
+import { shownExtent, summaryFacts } from "../summary.ts";
 
 const CSS = `
 :host { display: flex; flex-direction: column; }
@@ -326,7 +327,7 @@ export class TickwaveView extends TickwaveElement {
     // Collapsed, the view shows what is here; the head arrives once the view scrolls into sight.
     const info = peekInfo(src);
     const title = info?.title ?? decodeURIComponent(src.pathname.split("/").pop() ?? "");
-    const facts = info ? summaryFacts(info) : [];
+    const facts = info ? summaryFacts(info, channelIndices(info, parseChannels(this.getAttribute("channels"))).indices) : [];
     const factsText = facts.map(([, text]) => text).join("; ");
     // Only when they change: new fallback text in a slot with nothing assigned is a slotchange,
     // which renders the summary again.
@@ -712,10 +713,7 @@ export class TickwaveView extends TickwaveElement {
   #extent(): number {
     const info = this.#loaded?.info;
     if (!info) return 0;
-    const tracks = this.#plot.tracks;
-    if (new Set(tracks.map((t) => t.index)).size === info.channels.length) return info.length;
-    const end = Math.max(0, ...tracks.map((t) => t.channel.end));
-    return end > 0 ? end : info.length;
+    return shownExtent(info, this.#plot.tracks.map((t) => t.index));
   }
 
   #clampView(): void {
@@ -1359,17 +1357,6 @@ function slotted(slot: HTMLSlotElement): string | null {
 
 function collapse(s: string): string {
   return s.replace(/\s+/g, " ").trim();
-}
-
-/** The summary's facts by part name: "524 ms", "2 channels: SWCLK, SWDIO", "4.7 KiB". */
-export function summaryFacts(info: RecordingInfo): [part: string, text: string][] {
-  const names = info.channels.map((c) => c.name);
-  const facts: [string, string][] = [
-    ["fact-length", formatBrief(info.length, info.timebase)],
-    ["fact-channels", `${names.length} channel${names.length === 1 ? "" : "s"}: ${names.join(", ")}`],
-  ];
-  if (info.bytes !== undefined) facts.push(["fact-size", formatBytes(info.bytes)]);
-  return facts;
 }
 
 function part(name: string, text: string): HTMLSpanElement {
