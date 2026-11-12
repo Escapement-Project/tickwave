@@ -294,7 +294,26 @@ fn keep(s: &str) -> Result<Keep, String> {
     Ok((name.to_owned(), end(from)?, end(to)?))
 }
 
-fn main() -> Result<()> {
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        // A reader that stops early, as `head` does, closes the pipe: it has what it wanted.
+        Err(e)
+            if e.chain().any(|c| {
+                c.downcast_ref::<std::io::Error>()
+                    .is_some_and(|e| e.kind() == std::io::ErrorKind::BrokenPipe)
+            }) =>
+        {
+            std::process::ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("Error: {e:?}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<()> {
     let indicatif = IndicatifLayer::new();
     tracing_subscriber::registry()
         .with(LevelFilter::INFO)
@@ -612,28 +631,30 @@ fn info(file: &Path, json: bool, max: usize) -> Result<()> {
     let overview_rows = head.overview_rows.iter().flatten();
     let overview_count = overview_rows.clone().count();
     let overview_total: u64 = overview_rows.map(|r| u64::from(r.length)).sum();
+    let mut out = std::io::stdout().lock();
     if json {
-        let out = serde_json::json!({
+        let report = serde_json::json!({
             "header": h,
             "file_bytes": len,
             "footer_bytes": head.trailer.footer_len,
             "block_bytes": { "total": blocks_total, "min": lengths.first(), "median": median, "max": lengths.last() },
             "overview_block_bytes": { "count": overview_count, "total": overview_total },
         });
-        println!("{}", serde_json::to_string_pretty(&out)?);
+        writeln!(out, "{}", serde_json::to_string_pretty(&report)?)?;
         return Ok(());
     }
     if let Some(title) = &h.title {
-        println!("{title}");
+        writeln!(out, "{title}")?;
     }
-    println!(
+    writeln!(
+        out,
         "{} at {}/{} ticks a second, {} channels, {}",
         seconds(h.length, h),
         h.timebase.num(),
         h.timebase.den(),
         h.channels.len(),
         h.content_id
-    );
+    )?;
     for c in &h.channels {
         match &c.data {
             ChannelKind::Digital {
@@ -641,25 +662,28 @@ fn info(file: &Path, json: bool, max: usize) -> Result<()> {
                 end,
                 edges,
                 ..
-            } => println!(
+            } => writeln!(
+                out,
                 "  {:<12} digital, {edges} edges, starts {}, known to {} ({})",
                 c.name,
                 u8::from(*initial),
                 seconds(*end, h),
                 c.source_name
-            ),
+            )?,
             ChannelKind::Analog {
                 unit,
                 count,
                 coding,
                 ..
-            } => println!(
+            } => writeln!(
+                out,
                 "  {:<12} analog, {count} samples in {unit}, {coding:?} ({})",
                 c.name, c.source_name
-            ),
+            )?,
         }
     }
-    println!(
+    writeln!(
+        out,
         "{:.3} MB: footer {} bytes ({} overview levels), {} blocks of {}-{} bytes, median {median}",
         len as f64 / 1e6,
         head.trailer.footer_len,
@@ -667,20 +691,21 @@ fn info(file: &Path, json: bool, max: usize) -> Result<()> {
         lengths.len(),
         lengths.first().unwrap_or(&0),
         lengths.last().unwrap_or(&0),
-    );
+    )?;
     if overview_count > 0 {
         let shifts: Vec<String> = h
             .overview_blocks
             .iter()
             .map(|l| format!("2^{}", l.shift))
             .collect();
-        println!(
+        writeln!(
+            out,
             "  overview levels {} in {overview_count} blocks, {overview_total} bytes",
             shifts.join(", ")
-        );
+        )?;
     }
     for (k, v) in &h.meta {
-        println!("  {k} = {v}");
+        writeln!(out, "  {k} = {v}")?;
     }
     Ok(())
 }
@@ -843,7 +868,11 @@ fn check_annotations(recording: &Path, sidecar: &Path, json: bool, max: usize) -
     let (_, _, head) = read_footer(recording, max)?;
     let (resolved, _) = load_sidecar(&head.header, recording, sidecar)?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&resolved)?);
+        writeln!(
+            std::io::stdout(),
+            "{}",
+            serde_json::to_string_pretty(&resolved)?
+        )?;
     } else {
         let generated = resolved.iter().filter(|a| a.source.is_some()).count();
         info!(
