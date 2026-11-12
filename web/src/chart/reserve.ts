@@ -13,7 +13,7 @@ const READOUT_LEADING = 1.45;
 export const READOUT_TEXT = `font-size: ${READOUT_SIZE}px; line-height: ${READOUT_LEADING};`;
 /** A readout line in CSS pixels, as the chart reserves it: a multiple of `1lh` would differ by a
  * rounding, since Chromium rounds the line height before multiplying. */
-const READOUT_LINE = Math.round(READOUT_SIZE * READOUT_LEADING * 1e4) / 1e4;
+export const READOUT_LINE = Math.round(READOUT_SIZE * READOUT_LEADING * 1e4) / 1e4;
 
 const UNDEFINED = ":where(tickwave-chart:not(:defined):not([hidden]))";
 

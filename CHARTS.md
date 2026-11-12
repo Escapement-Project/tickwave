@@ -120,7 +120,7 @@ The landing page's Figure 1, cut to three clocks:
 |---|---|
 | `id` | names the series in attributes, events and other charts: letters, digits, `.`, `_` and `-` |
 | `name` | in the legend and in a readout below the plot |
-| `short` | in the end label, a fail mark ("GCC failed") and a tooltip readout |
+| `short` | in the end label, a fail mark ("GCC failed"), a tooltip readout, and a readout below where `name` does not fit |
 | `colour` | a series token: `verge` draws in `--series-verge` |
 | `pattern` | `solid`, `second-build`, `reference` or `capture-second`: the design system's line patterns |
 | `marker` | `circle`, `square`, `diamond`, `triangle-up` or `triangle-down` |
@@ -203,7 +203,10 @@ plot's top, or lower where that hides less of the lines. A long line wraps.
 
 A readout below the plot holds a line for the x and one for each shown series, whether or not an x
 is picked, so a pick moves nothing under it. Before the data, it holds the lines
-`--tickwave-chart-readout-lines` states, or else those for the series `show` names.
+`--tickwave-chart-readout-lines` states, or else those for the series `show` names. Each line stays
+one line. A series whose name does not fit beside its figures, at the chart's width, takes its
+`short` for every x, and a name that still does not fit ends in an ellipsis. A figure is never cut.
+The full name stays in the line's text for a screen reader, and shows when the pointer rests on it.
 
 On a chart too narrow for some setting's readout to fit beside it, as on a phone, the tooltip
 floats off the chart for every setting. It sits below the chart at the picked x, or above it where
@@ -268,7 +271,8 @@ Two properties set the chart's room, and `tickwave.css` reads them too:
 
 At its first layout with data, the chart warns in the console where the room it took is not the
 room the page reserved: where the `height` attribute and `--tickwave-chart-height` differ, or the
-readout holds other lines than `--tickwave-chart-readout-lines` states. Later data, and the series
+readout holds other lines than `--tickwave-chart-readout-lines` states, or its tallest x takes more
+height than those lines, as a page's rule for the readout can make it. Later data, and the series
 a reader shows, change the readout without a warning. A page script that sets new data can set the
 property beside it.
 

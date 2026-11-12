@@ -5,12 +5,12 @@ import { autoUpdate, computePosition, flip, offset, shift } from "@floating-ui/d
 import { escapeHtml } from "../escape.ts";
 import { onFaceChange, onFontsLoaded, reducedMotion } from "../face.ts";
 import { normalise } from "../palette.ts";
-import { parseChart, type ChartData, type Evidence, type Pattern } from "./data.ts";
+import { parseChart, type ChartData, type Evidence, type Pattern, type Series } from "./data.ts";
 import { grouped } from "./decimal.ts";
 import { layout, type Layout, type Placed, type SeriesLayout } from "./layout.ts";
 import { figure, swatch } from "./readout.ts";
 import { render, type Colours, type Paint } from "./render.ts";
-import { DEFAULT_HEIGHT, HEIGHT_PROPERTY, LINES_PROPERTY, READOUT_TEXT } from "./reserve.ts";
+import { DEFAULT_HEIGHT, HEIGHT_PROPERTY, LINES_PROPERTY, READOUT_LINE, READOUT_TEXT } from "./reserve.ts";
 import { SERIES_TOKEN } from "../tokens.ts";
 
 const SVG = "http://www.w3.org/2000/svg";
@@ -46,6 +46,13 @@ const CSS = `
   max-width: min(24em, calc(100vw - 16px)); }
 :where(tickwave-chart) .tw-readout[data-tooltip]:empty { display: none; }
 :where(tickwave-chart) .tw-readout b { font-weight: 600; }
+/* Below the plot, a line a series, which never wraps: the name gives way, the figure never does. */
+:where(tickwave-chart) .tw-readout:not([data-tooltip]) { white-space: nowrap; }
+:where(tickwave-chart) .tw-readout:not([data-tooltip]) > div { display: flex; padding-left: 0; text-indent: 0; overflow: hidden; }
+:where(tickwave-chart) .tw-readout:not([data-tooltip]) .tw-swatch { flex: none; align-self: center; }
+:where(tickwave-chart) .tw-readout .tw-name { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+:where(tickwave-chart) .tw-readout .tw-figure { flex: none; white-space: pre; }
+:where(tickwave-chart) .tw-readout .tw-full { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 :where(tickwave-chart) .tw-notice { margin: 4px 0 0; padding: 1px 8px; font-size: 12px; color: var(--attention-ink, CanvasText);
   border-left: 2px solid var(--attention-ink, CanvasText); }
 :where(tickwave-chart) .tw-pop { position: fixed; inset: auto; margin: 0; box-sizing: border-box; width: min(440px, calc(100vw - 16px));
@@ -149,6 +156,12 @@ export class TickwaveChart extends HTMLElement {
   /** The readout floats off a chart too narrow for it (#floats), placed by these while it does. */
   #floating = false;
   #floatKey = "";
+  /** For a readout below: the series whose names do not fit beside their figures at this width,
+   * which take their short names, and the tallest setting's readout, both measured once a key. */
+  #fitKey = "";
+  #fitData: ChartData | null = null;
+  #short = new Set<string>();
+  #tallest = 0;
   #stopFloat: (() => void) | null = null;
   #placeFloat: (() => void) | null = null;
   /** The point the mouse rests on, and the timer that opens it. */
@@ -224,12 +237,12 @@ export class TickwaveChart extends HTMLElement {
         this.#colours = null;
         this.#colour();
         if (this.#tokens !== laidOut) {
-          this.#floatKey = "";
+          this.#floatKey = this.#fitKey = "";
           this.#draw();
         }
       }),
       onFontsLoaded(() => {
-        this.#floatKey = "";
+        this.#floatKey = this.#fitKey = "";
         this.#draw();
       }),
     );
@@ -304,7 +317,8 @@ export class TickwaveChart extends HTMLElement {
     // In pixels: Chromium resolves an inline `lh` against another line height once it changes.
     const style = getComputedStyle(box);
     const line = parseFloat(style.lineHeight) || 1.45 * parseFloat(style.fontSize);
-    box.style.minHeight = `${lines * line}px`;
+    // With the data, at least the tallest setting's readout, should a page's rules make it taller.
+    box.style.minHeight = `${Math.max(lines * line, this.#data ? this.#tallest : 0)}px`;
   }
 
   /** Before the data, the plot at the height it will draw at, rather than an empty svg's 150 px. */
@@ -332,6 +346,8 @@ export class TickwaveChart extends HTMLElement {
     const stated = this.#statedLines();
     if (lines !== null && stated !== null && stated !== lines) {
       problems.push(`${name}: ${LINES_PROPERTY} reserves ${stated} readout lines, and the readout holds ${lines}`);
+    } else if (lines !== null && stated !== null && this.#tallest > stated * READOUT_LINE + 0.5) {
+      problems.push(`${name}: the readout's tallest setting is ${+this.#tallest.toFixed(2)} px high, more than the ${stated} lines ${LINES_PROPERTY} reserves, ${+(stated * READOUT_LINE).toFixed(2)} px`);
     }
     for (const p of problems) console.warn(p);
     this.#reserved = { height, lines, matches: problems.length === 0 };
@@ -393,7 +409,7 @@ export class TickwaveChart extends HTMLElement {
 
   #build(): void {
     if (this.#readout) this.#float(false);
-    this.#floatKey = "";
+    this.#floatKey = this.#fitKey = "";
     this.#legend = this.getAttribute("legend") === "above" ? document.createElement("ul") : null;
     this.#legend?.classList.add("tw-legend");
     this.#svg = document.createElementNS(SVG, "svg");
@@ -652,19 +668,26 @@ export class TickwaveChart extends HTMLElement {
 
   #drawReadout(data: ChartData, c: Colours): void {
     const box = this.#readout!;
-    this.#reserveReadout();
     const tooltip = this.getAttribute("readout") !== "below";
     box.toggleAttribute("data-tooltip", tooltip);
     const i = this.#x;
     const l = this.#layout;
     const shown = this.#shown();
     const unit = data.y.unit ?? "";
+    const series = data.series.filter((s) => shown.has(s.id));
+    const head = (k: number) => `<b>${escapeHtml([grouped(data.x.values[k]), data.x.unit].filter(Boolean).join(" "))}</b>`;
+    const line = (s: Series, k: number, short: boolean) => {
+      const name = short
+        ? `<span class="tw-name" title="${escapeHtml(s.name)}"><span aria-hidden="true">${escapeHtml(s.short)}</span><span class="tw-full">${escapeHtml(s.name)}</span></span>`
+        : `<span class="tw-name" title="${escapeHtml(s.name)}">${escapeHtml(s.name)}</span>`;
+      return `<div>${swatch(s, c)}${name}<span class="tw-figure"> ${escapeHtml(figure(s.points[k], unit))}</span></div>`;
+    };
     const at = (k: number) =>
-      `<b>${escapeHtml([grouped(data.x.values[k]), data.x.unit].filter(Boolean).join(" "))}</b>` +
-      data.series
-        .filter((s) => shown.has(s.id))
-        .map((s) => `<div>${swatch(s, c)}${escapeHtml(tooltip ? s.short : s.name)} ${escapeHtml(figure(s.points[k], unit))}</div>`)
-        .join("");
+      tooltip
+        ? head(k) + series.map((s) => `<div>${swatch(s, c)}${escapeHtml(s.short)} ${escapeHtml(figure(s.points[k], unit))}</div>`).join("")
+        : head(k) + series.map((s) => line(s, k, this.#short.has(s.id))).join("");
+    if (!tooltip) this.#fitNames(data, series, head, line);
+    this.#reserveReadout();
     const html = i === null || !l ? "" : at(i);
     if (html !== this.#readoutHtml) box.innerHTML = this.#readoutHtml = html;
     if (!tooltip || i === null || !l) {
@@ -702,6 +725,34 @@ export class TickwaveChart extends HTMLElement {
     const top = tops[scores.indexOf(Math.min(...scores))];
     box.style.left = `${dx + left}px`;
     box.style.top = `${dy + top}px`;
+  }
+
+  /**
+   * For a readout below: which series' names fit beside every figure they give at this width, and
+   * how tall the tallest setting's readout is. A series whose name does not fit takes its short name
+   * for every setting, so the line holds still as the reader steps through them.
+   */
+  #fitNames(data: ChartData, series: Series[], head: (k: number) => string, line: (s: Series, k: number, short: boolean) => string): void {
+    const box = this.#readout!;
+    const width = box.clientWidth;
+    const key = `${width} ${series.map((s) => s.id).join(" ")}`;
+    if (key === this.#fitKey && this.#fitData === data) return;
+    const settings = data.x.values.map((_, k) => k);
+    // Every line with its full name, in one layout, then every setting's readout as it will draw.
+    const probe = document.createElement("div");
+    probe.style.cssText = `position: absolute; visibility: hidden; left: 0; top: 0; width: ${width}px`;
+    probe.innerHTML = series.map((s) => `<div class="tw-readout">${settings.map((k) => line(s, k, false)).join("")}</div>`).join("");
+    this.append(probe);
+    this.#short = new Set(
+      series
+        .filter((_, j) => [...probe.children[j].querySelectorAll<HTMLElement>(".tw-name")].some((n) => n.scrollWidth > n.clientWidth + 0.5))
+        .map((s) => s.id),
+    );
+    probe.innerHTML = settings.map((k) => `<div class="tw-readout">${head(k)}${series.map((s) => line(s, k, this.#short.has(s.id))).join("")}</div>`).join("");
+    this.#tallest = Math.max(0, ...[...probe.children].map((e) => e.getBoundingClientRect().height));
+    probe.remove();
+    this.#fitKey = key;
+    this.#fitData = data;
   }
 
   /** Whether the tooltip readout floats off the chart: it does where any setting's readout has no

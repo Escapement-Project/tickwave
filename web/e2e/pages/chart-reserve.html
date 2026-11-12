@@ -10,6 +10,9 @@
   ?height= the height attribute
   ?show=   the show attribute (default "clang gcc")
   ?legend  a legend above the plot
+  ?src=    the chart's data (default /fixtures/figure1.chart.json)
+  ?width=  the figure's width (default 620px)
+  ?linePad=  a page rule padding each readout line above and below by this much
 -->
 <link rel="stylesheet" href="/dist/site/tokens.css">
 <link rel="stylesheet" href="/dist/tickwave.css">
@@ -24,7 +27,7 @@ figure { margin: 0; width: 620px; }
 const q = new URLSearchParams(location.search);
 const chart = document.createElement("tickwave-chart");
 chart.id = "r";
-chart.setAttribute("src", "/fixtures/figure1.chart.json");
+chart.setAttribute("src", q.get("src") ?? "/fixtures/figure1.chart.json");
 chart.setAttribute("readout", "below");
 chart.setAttribute("sweep", "off");
 if (q.has("plot")) chart.style.setProperty("--tickwave-chart-height", q.get("plot"));
@@ -32,6 +35,8 @@ if (q.has("lines")) chart.style.setProperty("--tickwave-chart-readout-lines", q.
 if (q.has("height")) chart.setAttribute("height", q.get("height"));
 chart.setAttribute("show", q.get("show") ?? "clang gcc");
 if (q.has("legend")) chart.setAttribute("legend", "above");
+if (q.has("width")) document.currentScript.parentElement.style.width = q.get("width");
+if (q.has("linePad")) document.head.append(Object.assign(document.createElement("style"), { textContent: `#r .tw-readout > div { padding: ${q.get("linePad")} 0; }` }));
 // Whole, in one step, so no frame shows it before its attributes and properties.
 document.currentScript.before(chart);
 window.define = () => import("/dist/tickwave-chart.js");

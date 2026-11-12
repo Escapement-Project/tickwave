@@ -547,6 +547,66 @@ test("a chart with a legend keeps its height through its definition; the legend 
   expect(new Set(frames.map(([h]) => h))).toEqual(new Set([frames[0][0]]));
 });
 
+/** The chart's height at each of its settings, picked in turn. */
+async function heightsByPick(page: Page): Promise<number[]> {
+  const chart = page.locator("#r");
+  const xs = await chart.evaluate((c) => (c as HTMLElement & { data: { x: { values: string[] } } }).data.x.values);
+  const heights: number[] = [];
+  for (const x of xs) {
+    await chart.evaluate((c, x) => (c as Chart).pick(x), x);
+    heights.push(await chart.evaluate((c) => c.getBoundingClientRect().height));
+  }
+  return heights;
+}
+
+test("a readout below keeps a line a series at any width: a name too long beside its figures takes its short name", async ({ page }) => {
+  const warnings: string[] = [];
+  page.on("console", (m) => {
+    if (m.type() === "warning") warnings.push(m.text());
+  });
+  const wire = { plot: "250px", lines: "4", show: "gcc capture stock", src: "/fixtures/wire.chart.json" };
+  // A phone's chart: two names do not fit beside their widest figures, "–" and "18.4 MHz, the read failed partway".
+  await page.goto(`${RESERVE}?${new URLSearchParams({ ...wire, width: "334px" })}`);
+  await page.evaluate(() => (window as unknown as { define: () => Promise<unknown> }).define());
+  const chart = page.locator("#r");
+  await chart.evaluate((c) => (c as Chart).settled());
+  const heights = await heightsByPick(page);
+  expect(new Set(heights).size).toBe(1);
+  expect(heights[0]).toBeCloseTo(250 + 4 * 13 * 1.45, 1);
+  expect(await chart.evaluate((c) => (c as Chart).reserved)).toEqual({ height: 250, lines: 4, matches: true });
+  const names = chart.locator(".tw-readout .tw-name");
+  // What a reader sees, and what a screen reader reads.
+  await expect(names.locator("> :not(.tw-full)")).toHaveText(["Verge, capturing", "NXP"]);
+  await expect(names.locator(".tw-full")).toHaveText(["Verge, GCC build, capturing energy at 100,000 pairs/s", "NXP's firmware V3.174"]);
+  await expect(names.first()).toHaveText("Verge, GCC build");
+  // Wide, every name is whole.
+  await page.goto(`${RESERVE}?${new URLSearchParams({ ...wire, width: "620px" })}`);
+  await page.evaluate(() => (window as unknown as { define: () => Promise<unknown> }).define());
+  await chart.evaluate((c) => (c as Chart).settled());
+  await chart.evaluate((c) => (c as Chart).pick("50"));
+  await expect(names).toHaveText(["Verge, GCC build", "Verge, GCC build, capturing energy at 100,000 pairs/s", "NXP's firmware V3.174"]);
+  await expect(chart.locator(".tw-full")).toHaveCount(0);
+  expect(warnings).toEqual([]);
+});
+
+test("a readout taller than the lines the page reserved is warned of, and the chart holds its tallest", async ({ page }) => {
+  const warnings: string[] = [];
+  page.on("console", (m) => {
+    if (m.type() === "warning") warnings.push(m.text());
+  });
+  // The page's own rule pads each series' line by 2 px above and below: the readout is 87.4 px, not 75.4.
+  await page.goto(`${RESERVE}?${new URLSearchParams({ plot: "250px", lines: "4", show: "gcc capture stock", src: "/fixtures/wire.chart.json", linePad: "2px" })}`);
+  await page.evaluate(() => (window as unknown as { define: () => Promise<unknown> }).define());
+  const chart = page.locator("#r");
+  await chart.evaluate((c) => (c as Chart).settled());
+  expect(await chart.evaluate((c) => (c as Chart).reserved)).toEqual({ height: 250, lines: 4, matches: false });
+  expect(warnings).toHaveLength(1);
+  expect(warnings[0]).toMatch(/^tickwave-chart#r: the readout's tallest setting is 87\.\d+ px high, more than the 4 lines --tickwave-chart-readout-lines reserves, 75\.4 px$/);
+  // Before a pick, the empty readout holds what a pick fills.
+  const rest = await chart.evaluate((c) => c.getBoundingClientRect().height);
+  expect(new Set([rest, ...(await heightsByPick(page))]).size).toBe(1);
+});
+
 test("before its data, a readout below holds the lines the page states, else those show names", async ({ page }) => {
   await page.route("**/figure1.chart.json", () => {});
   for (const [query, lines] of [["show=clang%20stock%20gcc", 4], ["lines=2&show=clang%20stock%20gcc", 2]] as const) {
