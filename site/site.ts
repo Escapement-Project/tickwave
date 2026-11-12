@@ -98,6 +98,8 @@ function openPage(): void {
   const share = byId("share");
   const here = byId("view");
   const { say, clear } = problems(byId("problem"));
+  /** Served by `tickwave open`, which names the recording by an address that lasts as long as it runs. */
+  const local = new URLSearchParams(location.search).has("local");
 
   /** Counts the recordings asked for: one asked for later makes an earlier one's answer stale. */
   let opened = 0;
@@ -189,7 +191,7 @@ function openPage(): void {
       );
     if (link) {
       const q = new URLSearchParams({ src, ...(annotations && { annotations }), ...(at && { annotation: at }), ...(span && { window: span }) });
-      history.replaceState(null, "", `?${q}`);
+      history.replaceState(null, "", `?${q}${local ? "&local" : ""}`);
       share.textContent = "";
       share.append("A link to this view: ", Object.assign(document.createElement("a"), { href: location.href, textContent: location.href }));
     } else {
@@ -458,7 +460,9 @@ function openPage(): void {
   if (src) {
     srcField.value = src;
     sidecarField.value = q.get("annotations") ?? "";
-    void open(src, q.get("annotations"), src, true, undefined, q.get("annotation"), q.get("window"));
+    // A local recording goes by its file's name, not by the address it is served at.
+    const name = local ? decodeURIComponent(new URL(src, location.href).pathname.split("/").pop() ?? src) : src;
+    void open(src, q.get("annotations"), name, true, undefined, q.get("annotation"), q.get("window"));
   }
 }
 

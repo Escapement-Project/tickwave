@@ -42,6 +42,7 @@ button.primary:hover, .button:hover { background: var(--wash); }
 .opener:not(.folds) > summary { display: none; }
 .opener > summary, .details > summary { cursor: pointer; font-size: 15px; color: var(--ink-2); margin: 14px 0 6px; }
 .opener > summary:hover, .details > summary:hover { color: var(--ink); }
+.local .opener, .local .share { display: none; }
 /* A recording's provenance, closed under its view. */
 .details { margin: 10px 0 0; }
 .details .facts { margin-top: 8px; }

@@ -113,6 +113,33 @@ test.describe("the viewer", () => {
     await expect(page.locator("#problem")).toBeHidden();
   });
 
+  test("served by tickwave open (?local), shows the recording without the forms or a link to share, from the first paint", async ({ page }) => {
+    // The forms' display when the parser first adds them: hidden before anything is drawn.
+    await page.addInitScript(() => {
+      const w = window as unknown as { openerAtParse?: string };
+      new MutationObserver((_, observer) => {
+        const opener = document.getElementById("opener");
+        if (!opener) return;
+        w.openerAtParse = getComputedStyle(opener).display;
+        observer.disconnect();
+      }).observe(document, { childList: true, subtree: true });
+    });
+    await page.goto(`${SITE}open.html?src=fixtures/identify-swd.tickwave&annotations=fixtures/identify-swd.annotations.toml&local`);
+    expect((await facts(page)).Recording).toBe("identify-swd.tickwave");
+    await viewReady(page);
+    await expect(page.locator("tickwave-view .steps .count")).toHaveText("– of 16");
+    expect(await page.evaluate(() => (window as unknown as { openerAtParse?: string }).openerAtParse)).toBe("none");
+    await expect(page.locator("#opener")).toBeHidden();
+    await expect(page.locator("#share")).toBeHidden();
+    // The address the page rewrites keeps it served that way on a reload.
+    expect(new URL(page.url()).searchParams.has("local")).toBe(true);
+  });
+
+  test("served by tickwave open, names a recording by its file in what it says, not by the address it is served at", async ({ page }) => {
+    await page.goto(`${SITE}open.html?src=fixtures/identify-swd.annotations.toml&local`);
+    await expect(page.locator("#problem")).toHaveText("identify-swd.annotations.toml doesn't end in .tickwave. The viewer reads .tickwave files: give the file's own address, or download it and open it from here.");
+  });
+
   test("opens a URL from the field, and puts it in the address", async ({ page }) => {
     await page.goto(`${SITE}open.html`);
     await page.locator("#src").fill("fixtures/swd50-cut.tickwave");
