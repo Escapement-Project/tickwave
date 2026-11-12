@@ -140,7 +140,8 @@ test("a recording with no sidecar starts one, and its annotation lane is there b
   await page.locator("#note-label").fill("Reset released");
   await page.locator("#note-apply").click();
   await expect(page.locator("#notes li")).toHaveCount(1);
-  expect((await plot.boundingBox())!.height).toBe(withLane);
+  // Firefox's box can be off by 2^-15 px from one measure to the next; a lane is whole pixels.
+  expect((await plot.boundingBox())!.height).toBeCloseTo(withLane, 2);
 
   const contentId = await page.locator("#facts dd").last().textContent();
   expect(await download(page)).toEqual({
