@@ -64,12 +64,13 @@ pub fn verify_limited(
         source: _,
     } = source;
     let mut names = Vec::with_capacity(channels.len());
+    let mut shapings = Vec::with_capacity(channels.len());
     let mut wants: Vec<Want> = Vec::with_capacity(channels.len());
     for channel in channels {
         names.push((channel.name.clone(), channel.source_name.clone()));
         wants.push(match channel.data {
             ChannelData::Digital(d) => Want::Digital {
-                hasher: ChannelHasher::digital(&channel.name, d.initial),
+                hasher: ChannelHasher::digital(&channel.name, d.initial, &channel.shaping),
                 edges: d.edges,
                 initial: d.initial,
                 end: d.end,
@@ -80,7 +81,12 @@ pub fn verify_limited(
             ChannelData::Analog(a) => {
                 let Samples::F32(samples) = a.samples;
                 Want::Analog {
-                    hasher: ChannelHasher::analog(&channel.name, &a.unit, a.period),
+                    hasher: ChannelHasher::analog(
+                        &channel.name,
+                        &a.unit,
+                        a.period,
+                        &channel.shaping,
+                    ),
                     samples,
                     unit: a.unit,
                     first: a.first,
@@ -90,6 +96,7 @@ pub fn verify_limited(
                 }
             }
         });
+        shapings.push(channel.shaping);
     }
     let mut reader = Reader::new(max);
     let mut builder: Option<Builder> = None;
@@ -122,11 +129,16 @@ pub fn verify_limited(
                     return Err(mismatch("the channel count differs"));
                 }
                 analog = Vec::with_capacity(wants.len());
-                for ((declared, want), (name, source_name)) in
-                    d.channels.iter().zip(&wants).zip(&names)
+                for (((declared, want), (name, source_name)), shaping) in
+                    d.channels.iter().zip(&wants).zip(&names).zip(&shapings)
                 {
                     if declared.name != *name || declared.source_name != *source_name {
                         return Err(mismatch(format!("channel {name}: the names differ")));
+                    }
+                    if declared.shaping != *shaping {
+                        return Err(mismatch(format!(
+                            "channel {name}: the offset or the kept span differs"
+                        )));
                     }
                     match (&declared.data, want) {
                         (DeclaredKind::Digital { initial }, Want::Digital { initial: i, .. })

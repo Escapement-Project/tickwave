@@ -20,6 +20,7 @@ fn header() -> Header {
                     edges: 10,
                     gaps: Vec::new(),
                 },
+                shaping: Default::default(),
             },
             ChannelHeader {
                 name: "SWDIO".into(),
@@ -30,6 +31,7 @@ fn header() -> Header {
                     edges: 10,
                     gaps: Vec::new(),
                 },
+                shaping: Default::default(),
             },
             ChannelHeader {
                 name: "V".into(),
@@ -42,6 +44,7 @@ fn header() -> Header {
                     breaks: Vec::new(),
                     coding: AnalogCoding::F32,
                 },
+                shaping: Default::default(),
             },
         ],
         source: SourceHeader::new(SourceFormat::Vcd),

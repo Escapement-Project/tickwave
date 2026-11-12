@@ -73,6 +73,7 @@ fn header() -> Header {
             edges: 10,
             gaps: Vec::new(),
         },
+        shaping: Default::default(),
     };
     Header {
         timebase: Ratio::integer(1_000_000_000).unwrap(),

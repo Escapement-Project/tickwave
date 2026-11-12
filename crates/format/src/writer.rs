@@ -376,7 +376,7 @@ impl Writer {
                         edges: 0,
                         gaps: Vec::new(),
                         pending: VecDeque::new(),
-                        hasher: ChannelHasher::digital(&channel.name, *initial),
+                        hasher: ChannelHasher::digital(&channel.name, *initial, &channel.shaping),
                     }));
                     planes.push(false);
                 }
@@ -404,7 +404,12 @@ impl Writer {
                         breaks: Vec::new(),
                         count: 0,
                         last_tick: None,
-                        hasher: ChannelHasher::analog(&channel.name, unit, *period),
+                        hasher: ChannelHasher::analog(
+                            &channel.name,
+                            unit,
+                            *period,
+                            &channel.shaping,
+                        ),
                     }));
                     planes.push(matches!(coding, AnalogCoding::Codes { .. }));
                 }
@@ -1029,6 +1034,7 @@ impl Writer {
                 name: declared.name.clone(),
                 source_name: declared.source_name.clone(),
                 data,
+                shaping: declared.shaping.clone(),
             });
         }
         let mut overview_rows = std::mem::take(&mut self.overview_rows);

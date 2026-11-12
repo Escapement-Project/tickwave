@@ -26,6 +26,14 @@ pub enum RepairError {
     NoBlock,
     #[error("an overview block in the file differs from the one its content gives")]
     Overview,
+    /// A converter moved or cut channel `0`. The declaration fixed each kept span before the
+    /// length was known, and the content id pins it, so a file cut off before them has no footer
+    /// that would hold. Its source makes it again.
+    #[error(
+        "channel {0} was moved or trimmed when the recording was converted, so it isn't \
+         repaired: convert it again from its source"
+    )]
+    Shaped(String),
     #[error(transparent)]
     Write(#[from] WriteError),
 }
@@ -100,12 +108,12 @@ impl Repairer {
                     .iter()
                     .map(|c| match &c.data {
                         DeclaredKind::Digital { initial } => Channel::Digital {
-                            hasher: ChannelHasher::digital(&c.name, *initial),
+                            hasher: ChannelHasher::digital(&c.name, *initial, &c.shaping),
                             edges: 0,
                             gaps: Vec::new(),
                         },
                         DeclaredKind::Analog { unit, period, .. } => Channel::Analog {
-                            hasher: ChannelHasher::analog(&c.name, unit, *period),
+                            hasher: ChannelHasher::analog(&c.name, unit, *period, &c.shaping),
                             count: 0,
                             runs: Vec::new(),
                         },
@@ -193,6 +201,9 @@ impl Repairer {
             return Err(RepairError::Finished);
         };
         let declaration = self.declaration.take().ok_or(RepairError::NoDeclaration)?;
+        if let Some(c) = declaration.channels.iter().find(|c| !c.shaping.is_whole()) {
+            return Err(RepairError::Shaped(c.name.clone()));
+        }
         let builder = self.builder.take().ok_or(RepairError::NoDeclaration)?;
         if self.rows.is_empty() {
             return Err(RepairError::NoBlock);
@@ -294,6 +305,7 @@ impl Repairer {
                 name: declared.name.clone(),
                 source_name: declared.source_name.clone(),
                 data,
+                shaping: declared.shaping.clone(),
             });
         }
         let header = finished_header(

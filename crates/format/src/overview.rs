@@ -734,6 +734,7 @@ mod tests {
             name: "D".into(),
             source_name: "d".into(),
             data: DeclaredKind::Digital { initial },
+            shaping: Default::default(),
         }
     }
 
@@ -746,6 +747,7 @@ mod tests {
                 period: Ratio::ONE,
                 coding: AnalogCoding::F32,
             },
+            shaping: Default::default(),
         }
     }
 

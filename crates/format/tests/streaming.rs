@@ -30,6 +30,7 @@ fn declaration() -> Declaration {
                 name: "A".into(),
                 source_name: "dio0".into(),
                 data: DeclaredKind::Digital { initial: false },
+                shaping: Default::default(),
             },
             DeclaredChannel {
                 name: "V".into(),
@@ -39,6 +40,7 @@ fn declaration() -> Declaration {
                     period: Ratio::integer(10).unwrap(),
                     coding: AnalogCoding::F32,
                 },
+                shaping: Default::default(),
             },
         ],
         source: SourceHeader::new(SourceFormat::Other("test".into())),
@@ -430,6 +432,7 @@ fn runs_place_the_samples_and_come_back_as_breaks() {
                         level: true,
                     }],
                 }),
+                shaping: Default::default(),
             },
             Channel {
                 name: "V".into(),
@@ -445,6 +448,7 @@ fn runs_place_the_samples_and_come_back_as_breaks() {
                     }],
                     samples: Samples::F32(Box::new(values.clone().into_iter())),
                 }),
+                shaping: Default::default(),
             },
         ],
         source: Source::new(SourceFormat::Other("test".into())),

@@ -33,6 +33,7 @@ fn recording(edges: Vec<i64>) -> Recording {
                     edges: Box::new(edges.into_iter()),
                     gaps: Vec::new(),
                 }),
+                shaping: Default::default(),
             },
             Channel {
                 name: "V".into(),
@@ -45,6 +46,7 @@ fn recording(edges: Vec<i64>) -> Recording {
                     breaks: Vec::new(),
                     samples: Samples::F32(Box::new((0..SAMPLES).map(|i| i as f32))),
                 }),
+                shaping: Default::default(),
             },
         ],
         source: Source::new(SourceFormat::Other("test".into())),

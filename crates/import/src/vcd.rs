@@ -152,6 +152,7 @@ pub fn read_from(reader: impl BufRead, file_name: &str) -> Result<Import, Error>
                         edges: Box::new(edges.into_iter()),
                         gaps: Vec::new(),
                     }),
+                    shaping: Default::default(),
                 });
             }
             (Some(unknown), _) => skipped.push(Skipped {

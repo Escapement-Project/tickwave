@@ -932,6 +932,7 @@ impl Export {
                         )),
                     }),
                 },
+                shaping: Default::default(),
             })
             .collect();
         let format = match h.version {

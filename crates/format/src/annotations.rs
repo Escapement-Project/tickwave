@@ -138,6 +138,39 @@ pub fn ticks(time: &Time, timebase: Ratio) -> Result<i64, String> {
         Time::Ticks(t) => return Ok(*t),
         Time::Text(s) => s.trim(),
     };
+    exact_ticks(text, timebase)?
+        .rounded()
+        .ok_or_else(|| format!("{text:?}: out of range"))
+}
+
+/// A text time in ticks, exactly: `numerator / denominator`, negated when `negative`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExactTicks {
+    pub negative: bool,
+    pub numerator: i128,
+    /// Positive.
+    pub denominator: i128,
+}
+
+impl ExactTicks {
+    /// The nearest tick, halves away from zero; None where it would pass i64.
+    pub fn rounded(&self) -> Option<i64> {
+        // Halves away from zero, on the magnitude. Checked: 2 × numerator can pass i128 where the
+        // quotient would not, and a wrapped sum is a wrong tick, not an error.
+        let rounded = self
+            .numerator
+            .checked_mul(2)
+            .and_then(|n| n.checked_add(self.denominator))
+            .zip(self.denominator.checked_mul(2))
+            .map(|(n, d)| n / d)?;
+        let value = i64::try_from(rounded).ok()?;
+        Some(if self.negative { -value } else { value })
+    }
+}
+
+/// A text time, a decimal and a unit, in ticks, exactly; `ticks` rounds it.
+pub fn exact_ticks(text: &str, timebase: Ratio) -> Result<ExactTicks, String> {
+    let text = text.trim();
     let split = text
         .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == '+'))
         .ok_or_else(|| format!("{text:?}: no unit"))?;
@@ -176,16 +209,11 @@ pub fn ticks(time: &Time, timebase: Ratio) -> Result<i64, String> {
     let numerator = mantissa
         .checked_mul(i128::from(timebase.num()))
         .ok_or_else(too_big)?;
-    // Halves away from zero, on the magnitude. Checked: 2 × numerator can pass i128 where the
-    // quotient would not, and a wrapped sum is a wrong tick, not an error.
-    let rounded = numerator
-        .checked_mul(2)
-        .and_then(|n| n.checked_add(denominator))
-        .zip(denominator.checked_mul(2))
-        .map(|(n, d)| n / d)
-        .ok_or_else(too_big)?;
-    let value = i64::try_from(rounded).map_err(|_| too_big())?;
-    Ok(if negative { -value } else { value })
+    Ok(ExactTicks {
+        negative,
+        numerator,
+        denominator,
+    })
 }
 
 /// Why a `values` entry is refused, if it is: its name must be lower-case letters, digits and

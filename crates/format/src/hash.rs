@@ -4,9 +4,10 @@
 //! BLAKE3 over: the timebase (two u64), the length (i64), then each channel's own BLAKE3 digest.
 //! A channel's digest covers what its declaration fixes, then its items, then what only the end
 //! settles, so a writer computes it as the items arrive. All little-endian; strings as a u64
-//! length and UTF-8 bytes.
+//! length and UTF-8 bytes. A moved or trimmed channel adds what it states between its declaration
+//! and its items.
 
-use crate::header::ContentId;
+use crate::header::{ContentId, Shaping};
 use crate::model::{Break, Gap, Ratio};
 
 const BUFFER: usize = 1 << 16;
@@ -21,22 +22,42 @@ fn put_str(hasher: &mut blake3::Hasher, s: &str) {
     hasher.update(s.as_bytes());
 }
 
+/// A byte of flags, 1 for an offset and 2 for a kept span, then each one stated. Nothing for a
+/// channel stating neither, so its digest is the one its data alone gives.
+fn put_shaping(hasher: &mut blake3::Hasher, shaping: &Shaping) {
+    let flags = u8::from(shaping.offset.is_some()) | u8::from(shaping.kept.is_some()) << 1;
+    if flags == 0 {
+        return;
+    }
+    hasher.update(&[flags]);
+    if let Some(offset) = &shaping.offset {
+        hasher.update(&offset.ticks.to_le_bytes());
+        put_str(hasher, &offset.kind);
+    }
+    if let Some(kept) = shaping.kept {
+        hasher.update(&kept.from.to_le_bytes());
+        hasher.update(&kept.to.to_le_bytes());
+    }
+}
+
 impl ChannelHasher {
-    pub fn digital(name: &str, initial: bool) -> Self {
+    pub fn digital(name: &str, initial: bool, shaping: &Shaping) -> Self {
         let mut hasher = blake3::Hasher::new();
         put_str(&mut hasher, name);
         put_str(&mut hasher, "digital");
         hasher.update(&[u8::from(initial)]);
+        put_shaping(&mut hasher, shaping);
         Self::from(hasher)
     }
 
-    pub fn analog(name: &str, unit: &str, period: Ratio) -> Self {
+    pub fn analog(name: &str, unit: &str, period: Ratio, shaping: &Shaping) -> Self {
         let mut hasher = blake3::Hasher::new();
         put_str(&mut hasher, name);
         put_str(&mut hasher, "analog");
         put_str(&mut hasher, unit);
         hasher.update(&period.num().to_le_bytes());
         hasher.update(&period.den().to_le_bytes());
+        put_shaping(&mut hasher, shaping);
         Self::from(hasher)
     }
 

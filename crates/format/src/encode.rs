@@ -167,6 +167,7 @@ pub fn encode_to(
             name: channel.name,
             source_name: channel.source_name,
             data,
+            shaping: channel.shaping,
         });
     }
     let declaration = Declaration {

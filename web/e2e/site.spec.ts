@@ -366,6 +366,7 @@ test("the docs sit in the project's doc frame: every doc in a rail, this one's s
     "Trailer",
     "Declaration",
     "Header",
+    "Moved and trimmed channels",
     "Gaps",
     "Blocks",
     "Gap and run records",

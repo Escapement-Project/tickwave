@@ -7,8 +7,8 @@ use ruzstd::decoding::FrameDecoder;
 
 use crate::codec::get_uleb;
 use crate::header::{
-    AnalogCoding, BlockRow, ChannelKind, Header, JSON_SAFE, LEVEL_BIT, MAGIC, MAJOR, OverviewRow,
-    PREAMBLE_LEN, TRAILER_LEN, Trailer, code_value,
+    AnalogCoding, BlockRow, ChannelHeader, ChannelKind, Header, JSON_SAFE, Kept, LEVEL_BIT, MAGIC,
+    MAJOR, OverviewRow, PREAMBLE_LEN, TRAILER_LEN, Trailer, code_value,
 };
 use crate::model::{Break, Gap, run_sample_tick};
 use crate::overview::{self, Level};
@@ -228,6 +228,92 @@ pub(crate) fn check_header(h: &Header) -> Result<(), DecodeError> {
                 {
                     return Err(corrupt(format!("channel {name}'s codes are {bits} bits")));
                 }
+            }
+        }
+        check_shaping(c, h.length)?;
+    }
+    // Once anything is moved or cut, every channel states its kept span, and the recording
+    // starts where the earliest one does.
+    if h.channels.iter().any(|c| c.shaping.kept.is_some()) {
+        if let Some(c) = h.channels.iter().find(|c| c.shaping.kept.is_none()) {
+            return Err(corrupt(format!(
+                "channel {} states no kept span, but other channels do: a recording states one \
+                 on every channel or on none",
+                c.name
+            )));
+        }
+        if !h
+            .channels
+            .iter()
+            .any(|c| c.shaping.kept.is_some_and(|k| k.from == 0))
+        {
+            return Err(corrupt(
+                "no channel is kept from tick 0, where the recording starts",
+            ));
+        }
+    } else if let Some(c) = h.channels.iter().find(|c| c.shaping.offset.is_some()) {
+        return Err(corrupt(format!(
+            "channel {} is moved, but no channel states a kept span: a recording with a channel \
+             moved states one on every channel",
+            c.name
+        )));
+    }
+    Ok(())
+}
+
+/// A moved or trimmed channel's statements, against its data: FORMAT.md's moved and trimmed
+/// channels. `check_header` has checked the data itself.
+fn check_shaping(c: &ChannelHeader, length: i64) -> Result<(), DecodeError> {
+    let name = &c.name;
+    if let Some(offset) = &c.shaping.offset
+        && offset.ticks.unsigned_abs() >= JSON_SAFE
+    {
+        return Err(corrupt(format!("channel {name}'s offset is past 2^53")));
+    }
+    let Some(Kept { from, to }) = c.shaping.kept else {
+        return Ok(());
+    };
+    if from < 0 || to > length || from >= to {
+        return Err(corrupt(format!(
+            "channel {name} is kept from {from} to {to}, which is empty or leaves the capture's 0 to {length}"
+        )));
+    }
+    match &c.data {
+        ChannelKind::Digital { end, gaps, .. } => {
+            // A channel never known has no gap: its gap from tick 0 reached its end, which became 0.
+            let covered = *end == 0 || gaps.first().is_some_and(|g| g.from == 0 && g.to >= from);
+            if from > 0 && !covered {
+                return Err(corrupt(format!(
+                    "channel {name} is kept from {from}, but no gap from tick 0 covers the ticks before"
+                )));
+            }
+            if *end > to {
+                return Err(corrupt(format!(
+                    "channel {name} is known to {end}, past where it is kept to, {to}"
+                )));
+            }
+        }
+        ChannelKind::Analog {
+            first,
+            period,
+            count,
+            breaks,
+            ..
+        } => {
+            if *count == 0 {
+                return Ok(());
+            }
+            let run = breaks.last().copied().unwrap_or(Break {
+                index: 0,
+                tick: *first,
+            });
+            let last = run_last(run.tick, *period, count - run.index);
+            if *first < from || last >= to as u128 {
+                // As an i64: formatting a u128 costs the browser's decoder more than this check.
+                let last = i64::try_from(last).unwrap_or(i64::MAX);
+                return Err(corrupt(format!(
+                    "channel {name} is kept from {from} to {to}, but its samples run from {first} to {last}"
+                )));
             }
         }
     }
@@ -846,6 +932,7 @@ mod tests {
                     breaks,
                     coding: AnalogCoding::F32,
                 },
+                shaping: Default::default(),
             }],
             source: SourceHeader::new(SourceFormat::Vcd),
             title: None,

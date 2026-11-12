@@ -34,6 +34,7 @@ fn recording(edges_a: Vec<i64>, values: Vec<f32>) -> Recording {
                     edges: Box::new(edges_a.into_iter()),
                     gaps: Vec::new(),
                 }),
+                shaping: Default::default(),
             },
             Channel {
                 name: "B".into(),
@@ -44,6 +45,7 @@ fn recording(edges_a: Vec<i64>, values: Vec<f32>) -> Recording {
                     edges: Box::new(std::iter::empty()),
                     gaps: Vec::new(),
                 }),
+                shaping: Default::default(),
             },
             Channel {
                 name: "V".into(),
@@ -56,6 +58,7 @@ fn recording(edges_a: Vec<i64>, values: Vec<f32>) -> Recording {
                     breaks: Vec::new(),
                     samples: Samples::F32(Box::new(values.into_iter())),
                 }),
+                shaping: Default::default(),
             },
         ],
         source: Source::new(SourceFormat::Other("test".into())),
@@ -409,6 +412,7 @@ fn codes_are_stored_in_byte_planes() {
                     [0x0102 as f32, 0x0304 as f32, 0x0506 as f32].into_iter(),
                 )),
             }),
+            shaping: Default::default(),
         }],
         source: Source::new(SourceFormat::Other("test".into())),
     };

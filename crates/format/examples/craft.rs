@@ -23,6 +23,7 @@ fn base() -> Vec<u8> {
         name: name.into(),
         source_name: name.to_lowercase(),
         data: DeclaredKind::Digital { initial: false },
+        shaping: Default::default(),
     };
     let declaration = Declaration {
         timebase: Ratio::integer(1_000_000_000).unwrap(),

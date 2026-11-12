@@ -136,6 +136,7 @@ fn analog(coding_bits: Option<u8>, values: Vec<f32>) -> (Recording, Options) {
                     edges: Box::new([5, 1_000_000_000].into_iter()),
                     gaps: Vec::new(),
                 }),
+                shaping: Default::default(),
             },
             Channel {
                 name: "V".into(),
@@ -148,6 +149,7 @@ fn analog(coding_bits: Option<u8>, values: Vec<f32>) -> (Recording, Options) {
                     breaks: Vec::new(),
                     samples: Samples::F32(Box::new(values.into_iter())),
                 }),
+                shaping: Default::default(),
             },
         ],
         source: Source::new(SourceFormat::Other("test".into())),
@@ -461,6 +463,7 @@ fn a_channel_never_known_has_a_low_initial_level() {
                 edges: Box::new(std::iter::empty()),
                 gaps: Vec::new(),
             }),
+            shaping: Default::default(),
         });
         (rec, options)
     };

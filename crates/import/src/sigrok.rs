@@ -201,6 +201,7 @@ pub fn read_bytes(bytes: impl Into<Arc<[u8]>>, file_name: &str) -> Result<Import
                         len: 0,
                     }),
                 }),
+                shaping: Default::default(),
             });
         }
     }
@@ -235,6 +236,7 @@ pub fn read_bytes(bytes: impl Into<Arc<[u8]>>, file_name: &str) -> Result<Import
                     len: 0,
                 })),
             }),
+            shaping: Default::default(),
         });
     }
 

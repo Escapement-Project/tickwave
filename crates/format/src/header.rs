@@ -119,6 +119,61 @@ pub struct DeclaredChannel {
     pub source_name: String,
     #[serde(flatten)]
     pub data: DeclaredKind,
+    #[serde(flatten)]
+    pub shaping: Shaping,
+}
+
+/// What a converter did to a channel that the instrument did not: FORMAT.md's moved and trimmed
+/// channels. A channel as the source recorded it states neither, and its entry has no key for
+/// them.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct Shaping {
+    #[serde(flatten)]
+    pub offset: Option<Offset>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kept: Option<Kept>,
+}
+
+impl Shaping {
+    /// Whether the channel states neither: it is as the source recorded it.
+    pub fn is_whole(&self) -> bool {
+        self.offset.is_none() && self.kept.is_none()
+    }
+}
+
+/// The ticks a channel was moved by, positive later, and why: `offset` and `offset_kind`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Offset {
+    #[serde(rename = "offset")]
+    pub ticks: i64,
+    #[serde(rename = "offset_kind")]
+    pub kind: String,
+}
+
+impl Offset {
+    /// A known delay in the channel's path.
+    pub const DELAY: &str = "delay";
+}
+
+/// The ticks `from..to` where a channel holds what the source recorded, after its move. It reads
+/// and writes as `[from, to]`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "(i64, i64)", into = "(i64, i64)")]
+pub struct Kept {
+    pub from: i64,
+    pub to: i64,
+}
+
+impl From<(i64, i64)> for Kept {
+    fn from((from, to): (i64, i64)) -> Self {
+        Self { from, to }
+    }
+}
+
+impl From<Kept> for (i64, i64) {
+    fn from(k: Kept) -> Self {
+        (k.from, k.to)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -174,6 +229,8 @@ pub struct ChannelHeader {
     pub source_name: String,
     #[serde(flatten)]
     pub data: ChannelKind,
+    #[serde(flatten)]
+    pub shaping: Shaping,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -246,6 +303,36 @@ struct RawChannel {
     count: Option<u64>,
     breaks: Option<Vec<Break>>,
     coding: Option<RawCoding>,
+    offset: Option<i64>,
+    offset_kind: Option<String>,
+    kept: Option<Kept>,
+}
+
+impl RawChannel {
+    /// The channel's move and cut. An offset comes with its kind, which the content id pins with
+    /// it, so a reader refuses either without the other.
+    fn shaping(&mut self) -> Result<Shaping, String> {
+        let offset = match (self.offset.take(), self.offset_kind.take()) {
+            (Some(ticks), Some(kind)) => Some(Offset { ticks, kind }),
+            (None, None) => None,
+            (Some(_), None) => {
+                return Err(format!(
+                    "channel {} states an offset without an offset_kind",
+                    self.name
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(format!(
+                    "channel {} states an offset_kind without an offset",
+                    self.name
+                ));
+            }
+        };
+        Ok(Shaping {
+            offset,
+            kept: self.kept,
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -291,7 +378,8 @@ impl RawCoding {
 impl TryFrom<RawChannel> for ChannelHeader {
     type Error = String;
 
-    fn try_from(raw: RawChannel) -> Result<Self, String> {
+    fn try_from(mut raw: RawChannel) -> Result<Self, String> {
+        let shaping = raw.shaping()?;
         let data = match raw.kind {
             RawKind::Digital => ChannelKind::Digital {
                 initial: need(raw.initial, "initial")?,
@@ -312,6 +400,7 @@ impl TryFrom<RawChannel> for ChannelHeader {
             name: raw.name,
             source_name: raw.source_name,
             data,
+            shaping,
         })
     }
 }
@@ -319,7 +408,8 @@ impl TryFrom<RawChannel> for ChannelHeader {
 impl TryFrom<RawChannel> for DeclaredChannel {
     type Error = String;
 
-    fn try_from(raw: RawChannel) -> Result<Self, String> {
+    fn try_from(mut raw: RawChannel) -> Result<Self, String> {
+        let shaping = raw.shaping()?;
         let data = match raw.kind {
             RawKind::Digital => DeclaredKind::Digital {
                 initial: need(raw.initial, "initial")?,
@@ -334,6 +424,7 @@ impl TryFrom<RawChannel> for DeclaredChannel {
             name: raw.name,
             source_name: raw.source_name,
             data,
+            shaping,
         })
     }
 }
@@ -357,6 +448,7 @@ impl ChannelHeader {
                     coding: *coding,
                 },
             },
+            shaping: self.shaping.clone(),
         }
     }
 }
@@ -664,14 +756,93 @@ mod tests {
                 offset: -1.5,
             }),
         ] {
-            let channel = ChannelHeader {
-                name: "a".into(),
-                source_name: "b".into(),
-                data,
-            };
-            let json = serde_json::to_string(&channel).unwrap();
-            assert_eq!(parse(&json).unwrap(), channel, "{json}");
+            for shaping in shapings() {
+                let channel = ChannelHeader {
+                    name: "a".into(),
+                    source_name: "b".into(),
+                    data: data.clone(),
+                    shaping,
+                };
+                let json = serde_json::to_string(&channel).unwrap();
+                assert_eq!(parse(&json).unwrap(), channel, "{json}");
+                let declared = channel.declared();
+                let json = serde_json::to_string(&declared).unwrap();
+                assert_eq!(
+                    serde_json::from_str::<DeclaredChannel>(&json).unwrap(),
+                    declared,
+                    "{json}"
+                );
+            }
         }
+    }
+
+    /// None, each field alone, and both.
+    fn shapings() -> [Shaping; 4] {
+        let offset = Some(Offset {
+            ticks: -40,
+            kind: Offset::DELAY.into(),
+        });
+        let kept = Some(Kept { from: 3, to: 7 });
+        [
+            Shaping::default(),
+            Shaping {
+                offset: offset.clone(),
+                kept: None,
+            },
+            Shaping { offset: None, kept },
+            Shaping { offset, kept },
+        ]
+    }
+
+    #[test]
+    fn a_whole_channel_has_no_key_for_a_move_or_a_cut_and_a_shaped_one_has_each() {
+        let channel = |shaping| ChannelHeader {
+            name: "a".into(),
+            source_name: "b".into(),
+            data: ChannelKind::Digital {
+                initial: true,
+                end: 7,
+                edges: 3,
+                gaps: Vec::new(),
+            },
+            shaping,
+        };
+        let [whole, .., both] = shapings();
+        assert_eq!(
+            serde_json::to_string(&channel(whole)).unwrap(),
+            r#"{"name":"a","source_name":"b","kind":"digital","initial":true,"end":7,"edges":3}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&channel(both).declared()).unwrap(),
+            r#"{"name":"a","source_name":"b","kind":"digital","initial":true,"offset":-40,"offset_kind":"delay","kept":[3,7]}"#
+        );
+    }
+
+    #[test]
+    fn an_offset_and_its_kind_come_together() {
+        let named =
+            r#""name":"SWCLK","source_name":"b","kind":"digital","initial":true,"end":7,"edges":3"#;
+        for (fields, problem) in [
+            (
+                r#""offset":4"#,
+                "channel SWCLK states an offset without an offset_kind",
+            ),
+            (
+                r#""offset_kind":"delay""#,
+                "channel SWCLK states an offset_kind without an offset",
+            ),
+        ] {
+            let json = format!("{{{named},{fields}}}");
+            let err = parse(&json).unwrap_err().to_string();
+            assert!(err.contains(problem), "{json}: {err}");
+            let err = serde_json::from_str::<DeclaredChannel>(&json)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(problem), "{json}: {err}");
+        }
+        // A kind this version doesn't know is kept.
+        let json = format!(r#"{{{named},"offset":4,"offset_kind":"align"}}"#);
+        assert_eq!(parse(&json).unwrap().shaping.offset.unwrap().kind, "align");
     }
 
     #[test]

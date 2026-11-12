@@ -11,7 +11,7 @@ use std::num::NonZeroU64;
 
 use serde::{Deserialize, Serialize};
 
-pub use crate::header::{RateOrigin, SourceFormat};
+pub use crate::header::{Kept, Offset, RateOrigin, Shaping, SourceFormat};
 
 /// An exact ratio of positive integers. It reads and writes as `[num, den]`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -128,6 +128,8 @@ pub struct Channel {
     /// full scope path.
     pub source_name: String,
     pub data: ChannelData,
+    /// How the converter moved and cut the channel; nothing for a channel as the source has it.
+    pub shaping: Shaping,
 }
 
 #[derive(Debug)]

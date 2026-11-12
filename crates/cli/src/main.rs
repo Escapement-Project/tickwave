@@ -1011,6 +1011,7 @@ mod tests {
                 edges: 10,
                 gaps: Vec::new(),
             },
+            shaping: Default::default(),
         };
         Header {
             timebase: escapement_tickwave_format::model::Ratio::integer(1_000_000_000).unwrap(),
