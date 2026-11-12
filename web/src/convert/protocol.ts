@@ -28,9 +28,15 @@ export interface Settings {
   /** A Saleae export's sample rate as typed, such as 50M; null to take the rate its files record,
    * or to infer it from the edges where they record none. */
   rate: string | null;
+  /** `[name, time]`: a channel moved by a time, later when positive. By the channel's name in the
+   * recording; times as a sidecar writes them, in the source's time. */
+  offsets: [string, string][];
+  /** `[name, from, to]`: the part of a channel kept, in its own time before its move; null for an
+   * open end. */
+  keeps: [string, string | null, string | null][];
 }
 
-export const DEFAULTS: Settings = { channels: [], title: null, meta: [], level: 19, blockKib: 1024, units: [], codes: true, rate: null };
+export const DEFAULTS: Settings = { channels: [], title: null, meta: [], level: 19, blockKib: 1024, units: [], codes: true, rate: null, offsets: [], keeps: [] };
 
 export interface ChannelInfo {
   /** The source's own name: a Saleae file's stem, a sigrok probe, a VCD scope path. */

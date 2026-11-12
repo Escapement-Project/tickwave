@@ -4,11 +4,19 @@
 
 import { formatInterval, formatRate } from "./readouts.ts";
 import { lowerBound } from "./search.ts";
-import { sampleAtOrBefore, sampleTick, type AnalogChannel, type AnalogOverview, type Edges, type Ratio, type Samples, type Source } from "./source.ts";
+import { channelStart, sampleAtOrBefore, sampleTick, type AnalogChannel, type AnalogOverview, type Channel, type Edges, type Ratio, type Samples, type Source } from "./source.ts";
+
+/** The ticks where a channel's level is known, `start..end`: every edge lies after `start`. */
+export interface Known {
+  readonly start: number;
+  readonly end: number;
+}
+
+export const knownSpan = (c: Channel): Known => ({ start: channelStart(c), end: c.end });
 
 /**
- * An edge's place: a tick, `null` where there is none (the pulse runs from the capture's start or
- * to the channel's end), or `undefined` where the data in hand does not reach it.
+ * An edge's place: a tick, `null` where there is none (the pulse runs from where the channel's level
+ * is first known, or to its end), or `undefined` where the data in hand does not reach it.
  */
 export type EdgeAt = number | null | undefined;
 
@@ -25,15 +33,15 @@ export interface Pulse {
 
 /**
  * The pulse at `tick` from edges read over [from, to), which hold `tick`. An edge at a tick is where
- * the new level starts. `known` is the channel's end: every edge lies before it.
+ * the new level starts.
  */
-export function pulseFromEdges(e: Edges, from: number, to: number, known: number, tick: number): Pulse {
+export function pulseFromEdges(e: Edges, from: number, to: number, known: Known, tick: number): Pulse {
   const t = e.ticks;
   // The edges at or before the tick.
   const i = lowerBound(t, tick + 1);
   const level = ((e.level ^ (i & 1)) & 1) as 0 | 1;
-  const start: EdgeAt = i > 0 ? t[i - 1] : from <= 1 ? null : undefined;
-  const after = (k: number): EdgeAt => (k < t.length ? t[k] : to >= known ? null : undefined);
+  const start: EdgeAt = i > 0 ? t[i - 1] : from <= known.start + 1 ? null : undefined;
+  const after = (k: number): EdgeAt => (k < t.length ? t[k] : to >= known.end ? null : undefined);
   const end = after(i);
   return { level, start, end, next: end === null ? null : after(i + 1) };
 }
@@ -77,15 +85,15 @@ export async function findEdge(source: Source, channel: number, lo: number, hi: 
   return null;
 }
 
-/** Fills in the edges `p` lacks, searching the source. `known` is the channel's end, as above. */
-export async function completePulse(source: Source, channel: number, p: Pulse, tick: number, known: number, signal?: AbortSignal): Promise<Pulse> {
-  const start = p.start !== undefined ? p.start : await findEdge(source, channel, 1, tick + 1, -1, signal);
-  const end = p.end !== undefined ? p.end : await findEdge(source, channel, tick + 1, known, 1, signal);
+/** Fills in the edges `p` lacks, searching the source. */
+export async function completePulse(source: Source, channel: number, p: Pulse, tick: number, known: Known, signal?: AbortSignal): Promise<Pulse> {
+  const start = p.start !== undefined ? p.start : await findEdge(source, channel, known.start + 1, tick + 1, -1, signal);
+  const end = p.end !== undefined ? p.end : await findEdge(source, channel, tick + 1, known.end, 1, signal);
   let next = p.next;
   if (next === undefined && end !== null) {
     // A pulse the source stamped with one time: the period's last edge shares the tick of `end`.
     const atEnd = (await source.edges(channel, end, end + 1, signal)).ticks.length;
-    next = atEnd > 1 ? end : await findEdge(source, channel, end + 1, known, 1, signal);
+    next = atEnd > 1 ? end : await findEdge(source, channel, end + 1, known.end, 1, signal);
   } else if (next === undefined) next = null;
   return { level: p.level, start, end, next };
 }
@@ -104,15 +112,16 @@ export interface PulseFigures {
 }
 
 /** A complete pulse's figures. Widths are whole ticks; a rate and a duty carry the digits the ticks support. */
-export function pulseFigures(p: Pulse, timebase: Ratio, known: number): PulseFigures {
+export function pulseFigures(p: Pulse, timebase: Ratio, known: Known): PulseFigures {
   const level = p.level ? "high" : "low";
   const s = p.start ?? null;
   const e = p.end ?? null;
   const n = p.next ?? null;
   let width: string;
   if (s !== null && e !== null) width = formatInterval(e - s, timebase);
-  else if (s === null && e === null) width = `the whole capture, ${formatInterval(known, timebase)}`;
-  else width = `at least ${formatInterval(e === null ? known - s! : e, timebase)}`;
+  // A channel known from the capture's start spans it; one moved or trimmed spans what it records.
+  else if (s === null && e === null) width = `${known.start === 0 ? "the whole capture" : "all it records"}, ${formatInterval(known.end - known.start, timebase)}`;
+  else width = `at least ${formatInterval(e === null ? known.end - s! : e - known.start, timebase)}`;
   const inverseWidth = s !== null && e !== null ? formatRate(1, e - s, timebase) : null;
   if (s === null || e === null || n === null) return { level, width, inverseWidth, period: null, frequency: null, duty: null };
   const period = n - s;

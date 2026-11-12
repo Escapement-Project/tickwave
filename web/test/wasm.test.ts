@@ -515,3 +515,18 @@ test("the most the decoder takes from one frame is the page's to set", async () 
   const r = await Opened.open(wasm(), new MemoryBytes(ONE, "one.tickwave"), FIRST_READ, 1 << 20);
   assert.ok(r.info.length > 0);
 });
+
+test("a channel known only from a gap's end starts there, at the gap's level; a gap anywhere else is refused", async () => {
+  // Written by crates/format/examples/gaps.rs: A is not known until 300 µs, high there, and runs a
+  // 10 µs clock from 400 µs; B is known throughout.
+  const r = await openTickwave("fixtures/leading-gap.tickwave");
+  const [a, b] = r.info.channels;
+  assert.deepEqual([a, b], [
+    { kind: "digital", name: "A", sourceName: "a", end: 1_000_000, start: 300_000 },
+    { kind: "digital", name: "B", sourceName: "b", end: 1_000_000 },
+  ]);
+  const e = await r.edges(0, 300_000, 410_000);
+  assert.equal(e.level, 1);
+  assert.deepEqual([...e.ticks], [400_000, 405_000]);
+  await assert.rejects(openTickwave("fixtures/middle-gap.tickwave"), /channel A has gaps, which this viewer does not draw yet/);
+});

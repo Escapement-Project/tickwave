@@ -172,3 +172,16 @@ test("Enter places cursor A at the middle, and its readout carries each digital 
   await page.keyboard.press("Enter");
   await expect(readout).toContainText("B 376.719700 ms");
 });
+
+test("a channel known only from part way through reads from there: nothing before, and its first pulse from where it is known", async ({ page }) => {
+  // crates/format/examples/gaps.rs: A, the upper row, is not known until 300 µs, high there, and
+  // falls at 400 µs; B, the lower row, is high from 100 to 200 µs.
+  await page.goto(`${VIEW}?open&src=fixtures/leading-gap.tickwave`);
+  const view = page.locator("#v");
+  await settle(view, 0, 1_000_000);
+  const before = await labels(page, view, await xOf(view, 150_000));
+  expect(before).toHaveLength(1);
+  expect(before[0]).toMatch(/^high 100\.000\sµs/);
+  const after = await labels(page, view, await xOf(view, 350_000));
+  expect(after[0]).toMatch(/^high at least 100\.000\sµs/);
+});

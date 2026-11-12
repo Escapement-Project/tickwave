@@ -3,7 +3,7 @@
 // trace. A pulse whose edges lie past the data drawn is finished once the pointer rests within it.
 // The view's label and the inset's reading line both show what it reads.
 
-import { analogFromOverview, analogFromSamples, complete, completePulse, pulseFigures, pulseFromEdges, type Pulse, type PulseFigures } from "./probe.ts";
+import { analogFromOverview, analogFromSamples, complete, completePulse, knownSpan, pulseFigures, pulseFromEdges, type Pulse, type PulseFigures } from "./probe.ts";
 import { formatValue } from "./readouts.ts";
 import type { Plot, PulseMark } from "./render/plot.ts";
 import type { Tile } from "./render/track.ts";
@@ -172,7 +172,7 @@ export class Prober {
         text([ZOOM_IN]);
         return false;
       }
-      pulse = pulseFromEdges(tile.data, tile.start, tile.end, c.end, tick);
+      pulse = pulseFromEdges(tile.data, tile.start, tile.end, knownSpan(c), tick);
     } else if (tile.kind === "digital-overview") {
       const o = tile.data;
       const k0 = Math.max(0, Math.floor((t0 - o.start) / o.bucket));
@@ -192,7 +192,7 @@ export class Prober {
     const known = this.#measured;
     if (!complete(pulse) && known?.source === loaded.source && known.index === track.index && within(known.pulse, tick)) pulse = known.pulse;
     if (complete(pulse)) {
-      const figures = pulseFigures(pulse, loaded.info.timebase, c.end);
+      const figures = pulseFigures(pulse, loaded.info.timebase, knownSpan(c));
       const { start, end } = pulse;
       const mark: PulseMark | null =
         typeof start === "number" && typeof end === "number"
@@ -215,7 +215,7 @@ export class Prober {
       this.#abort = abort;
       this.#measuring = { source: loaded.source, index: track.index, tick, level: pulse.level };
       this.#timer = window.setTimeout(() => {
-        completePulse(loaded.source, track.index, asked, tick, c.end, abort.signal).then(
+        completePulse(loaded.source, track.index, asked, tick, knownSpan(c), abort.signal).then(
           (done) => {
             if (abort.signal.aborted) return;
             this.#measuring = null;

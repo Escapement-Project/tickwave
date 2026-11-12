@@ -3,6 +3,7 @@
 // one draws at whatever scale it has, and a coarse tile of the whole channel fills what it leaves.
 
 import {
+  channelStart,
   isAbort,
   type AnalogOverview,
   type Channel,
@@ -43,10 +44,24 @@ const RETRY_MS = 3000;
 
 type Pending = { mode: Mode; start: number; end: number; per: number; abort: AbortController; since: number };
 
+/** `t` moved by `by` ticks. Samples go by index, so theirs move with the channel's first sample. */
+function moved(t: Tile, by: number): Tile {
+  switch (t.kind) {
+    case "edges":
+      return { ...t, start: t.start + by, end: t.end + by, data: { level: t.data.level, ticks: t.data.ticks.map((x) => x + by) } };
+    case "samples":
+      return { ...t, start: t.start + by, end: t.end + by };
+    case "digital-overview":
+      return { ...t, start: t.start + by, end: t.end + by, data: { ...t.data, start: t.data.start + by } };
+    case "analog-overview":
+      return { ...t, start: t.start + by, end: t.end + by, data: { ...t.data, start: t.data.start + by } };
+  }
+}
+
 export class Track {
   readonly source: Source;
   readonly index: number;
-  readonly channel: Channel;
+  channel: Channel;
   tile: Tile | null = null;
   /** Whether the last read failed: cleared by the next that lands. */
   failed = false;
@@ -68,6 +83,16 @@ export class Track {
     this.#failed = failed;
   }
 
+  /** The channel moved by `by` ticks, now `channel`: the tiles in hand move with it, so the row
+   * draws on while a read lands where the channel now is. One under way would land where it was. */
+  moveBy(channel: Channel, by: number): void {
+    this.channel = channel;
+    if (this.tile) this.tile = moved(this.tile, by);
+    if (this.#base) this.#base = moved(this.#base, by);
+    this.#pending?.abort.abort();
+    this.#pending = null;
+  }
+
   get busy(): boolean {
     return this.#pending !== null;
   }
@@ -86,7 +111,7 @@ export class Track {
   }
 
   #covers(r: { readonly start: number; readonly end: number }, start: number, end: number): boolean {
-    return r.start <= Math.max(0, start) && r.end >= Math.min(this.channel.end, end);
+    return r.start <= Math.max(channelStart(this.channel), start) && r.end >= Math.min(this.channel.end, end);
   }
 
   /** Whether `tile` is what the view [start, end) at `per` ticks a column wants. */
@@ -142,7 +167,7 @@ export class Track {
     if (performance.now() < this.#retryAt) return;
     // Fetch a view's width either side, so a small pan draws from what is here.
     const width = end - start;
-    const lo = Math.max(0, Math.floor(start - width));
+    const lo = Math.max(channelStart(this.channel), Math.floor(start - width));
     const hi = Math.min(this.channel.end, Math.ceil(end + width));
     const abort = new AbortController();
     const pending = { mode, start: lo, end: hi, per, abort, since: performance.now() };
@@ -157,7 +182,7 @@ export class Track {
   }
 
   #offerBase(tile: Tile): void {
-    if (!this.#covers(tile, 0, this.channel.end)) return;
+    if (!this.#covers(tile, channelStart(this.channel), this.channel.end)) return;
     if (this.#base && grain(this.#base) < grain(tile)) return;
     this.#base = tile;
   }
@@ -165,13 +190,14 @@ export class Track {
   /** The coarsest overview level, which is small: the base until a finer tile covers the channel. */
   async #fetchBase(): Promise<void> {
     try {
-      const ov = await this.source.overview(this.index, 0, this.channel.end, Infinity);
-      if (!ov) return;
+      const start = channelStart(this.channel);
       const end = this.channel.end;
+      const ov = await this.source.overview(this.index, start, end, Infinity);
+      if (!ov) return;
       this.#offerBase(
         ov.kind === "digital"
-          ? { kind: "digital-overview", start: 0, end, asked: Infinity, data: ov }
-          : { kind: "analog-overview", start: 0, end, asked: Infinity, data: ov },
+          ? { kind: "digital-overview", start, end, asked: Infinity, data: ov }
+          : { kind: "analog-overview", start, end, asked: Infinity, data: ov },
       );
       this.failed = false;
       this.#changed();

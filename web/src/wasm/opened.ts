@@ -38,7 +38,13 @@ interface DecodedBlock {
   readonly size: number;
 }
 
-interface HeaderDigital {
+interface HeaderShaped {
+  offset?: number;
+  offset_kind?: string;
+  kept?: [number, number];
+}
+
+interface HeaderDigital extends HeaderShaped {
   name: string;
   source_name: string;
   kind: "digital";
@@ -48,7 +54,7 @@ interface HeaderDigital {
   gaps?: [number, number, boolean][];
 }
 
-interface HeaderAnalog {
+interface HeaderAnalog extends HeaderShaped {
   name: string;
   source_name: string;
   kind: "analog";
@@ -241,20 +247,29 @@ export class Opened {
         ),
     );
     const h = this.header;
-    // Gaps and breaks are in the format, but the views draw neither yet: a gap would draw as a
-    // known level, and samples after a break at the wrong ticks.
+    // Gaps and breaks are in the format, but the views draw neither yet, past a gap at the capture's
+    // start, as a channel moved or trimmed when it was converted has: its level is known from the
+    // gap's end. Another gap would draw as a known level, and samples after a break at the wrong ticks.
+    const leading = (c: (typeof h.channels)[number]) => c.kind === "digital" && c.gaps?.length === 1 && c.gaps[0][0] === 0;
     for (const c of h.channels) {
-      if ((c.kind === "digital" && c.gaps?.length) || (c.kind === "analog" && c.breaks?.length)) {
+      if ((c.kind === "digital" && c.gaps?.length && !leading(c)) || (c.kind === "analog" && c.breaks?.length)) {
         throw named("TickwaveUnsupported", `${bytes.name}: channel ${c.name} has ${c.kind === "digital" ? "gaps" : "breaks"}, which this viewer does not draw yet`);
       }
     }
+    /** What a channel moved or trimmed states, for the details a page lists. */
+    const shaped = (c: HeaderShaped) => ({
+      ...(c.offset !== undefined && { offset: { ticks: c.offset, kind: c.offset_kind ?? "" } }),
+      ...(c.kept && { kept: { from: c.kept[0], to: c.kept[1] } }),
+    });
     const channels: Channel[] = h.channels.map((c, i) => {
-      if (c.kind === "digital") return { kind: "digital", name: c.name, end: c.end };
+      if (c.kind === "digital") return { ...shaped(c), kind: "digital", name: c.name, sourceName: c.source_name, end: c.end, ...(leading(c) && { start: c.gaps![0][1] }) };
       const [min, max] = this.#range(i);
       const period = { num: c.period[0], den: c.period[1] };
       return {
+        ...shaped(c),
         kind: "analog",
         name: c.name,
+        sourceName: c.source_name,
         // Past the last sample's period: an analog channel can stop well before the capture does.
         end: Math.min(h.length, sampleTick(c.first, period, c.count)),
         unit: c.unit,
@@ -380,13 +395,21 @@ export class Opened {
   async edges(channel: number, start: number, end: number, signal?: AbortSignal): Promise<Edges> {
     const [b0, b1] = this.#covering(start, end);
     const list = await this.blocks(b0, b1, signal);
+    const c = this.header.channels[channel];
+    // The one gap a view draws: from the capture's start. No edge lies in it.
+    const gap = c.kind === "digital" && c.gaps?.length === 1 && c.gaps[0][0] === 0 ? c.gaps[0] : null;
     const parts: Float64Array[] = [];
     let level: 0 | 1 = 0;
     list.forEach((b, k) => {
       const d = b.digital[channel];
       if (!d) throw new RangeError(`channel ${channel} is not digital`);
       const lo = lowerBound(d.edges, start);
-      if (k === 0) level = (d.initial ^ (lo & 1)) as 0 | 1;
+      if (k === 0) {
+        level = (d.initial ^ (lo & 1)) as 0 | 1;
+        // A block's level bit carries the level from before a gap, so the gap's end in the block,
+        // at or before `start`, sets the level the edges after it flip.
+        if (gap && b.start < gap[1] && gap[1] <= start) level = ((gap[2] ? 1 : 0) ^ ((lo - lowerBound(d.edges, gap[1])) & 1)) as 0 | 1;
+      }
       parts.push(d.edges.subarray(lo, lowerBound(d.edges, end, lo)));
     });
     const ticks = new Float64Array(parts.reduce((n, p) => n + p.length, 0));

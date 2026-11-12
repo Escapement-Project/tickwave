@@ -40,16 +40,16 @@ test("a pulse from the edges in hand: its level and edges, and what lies past th
   const src = new MemorySource(recording());
   const e = await src.edges(0, 100, 300);
   // Tick 112 is in the low between the edges at 110 and 125; its period runs to the next fall, at 135.
-  assert.deepEqual(pulseFromEdges(e, 100, 300, 60_000_000, 112), { level: 0, start: 110, end: 125, next: 135 });
+  assert.deepEqual(pulseFromEdges(e, 100, 300, { start: 0, end: 60_000_000 }, 112), { level: 0, start: 110, end: 125, next: 135 });
   // An edge at the tick starts the pulse there.
-  assert.deepEqual(pulseFromEdges(e, 100, 300, 60_000_000, 125), { level: 1, start: 125, end: 135, next: 150 });
+  assert.deepEqual(pulseFromEdges(e, 100, 300, { start: 0, end: 60_000_000 }, 125), { level: 1, start: 125, end: 135, next: 150 });
   // Before the first edge, from the capture's start: no edge there to find.
   const head = await src.edges(0, 0, 105);
-  assert.deepEqual(pulseFromEdges(head, 0, 105, 60_000_000, 50), { level: 0, start: null, end: 100, next: undefined });
+  assert.deepEqual(pulseFromEdges(head, 0, 105, { start: 0, end: 60_000_000 }, 50), { level: 0, start: null, end: 100, next: undefined });
   // Edges past the span read are not known yet.
   const mid = await src.edges(0, 10_000_000, 10_000_100);
   // The clock's 80 edges leave the quiet stretch low.
-  assert.deepEqual(pulseFromEdges(mid, 10_000_000, 10_000_100, 60_000_000, 10_000_050), { level: 0, start: undefined, end: undefined, next: undefined });
+  assert.deepEqual(pulseFromEdges(mid, 10_000_000, 10_000_100, { start: 0, end: 60_000_000 }, 10_000_050), { level: 0, start: undefined, end: undefined, next: undefined });
 });
 
 test("a channel's data runs to one tick before its end, and no edge lies past a span that reaches it", async () => {
@@ -60,10 +60,10 @@ test("a channel's data runs to one tick before its end, and no edge lies past a 
   assert.equal(inChannel(clk, -1), false);
   // A span read up to the end holds every edge there is: the pulse runs to the end of what is known.
   const tail = await src.edges(0, 59_999_990, 60_000_000);
-  assert.deepEqual(pulseFromEdges(tail, 59_999_990, 60_000_000, 60_000_000, 59_999_995), { level: 1, start: undefined, end: null, next: null });
+  assert.deepEqual(pulseFromEdges(tail, 59_999_990, 60_000_000, { start: 0, end: 60_000_000 }, 59_999_995), { level: 1, start: undefined, end: null, next: null });
   // One tick short of the end, an edge could still sit on the last tick.
   const short = await src.edges(0, 59_999_990, 59_999_999);
-  assert.deepEqual(pulseFromEdges(short, 59_999_990, 59_999_999, 60_000_000, 59_999_995), { level: 1, start: undefined, end: undefined, next: undefined });
+  assert.deepEqual(pulseFromEdges(short, 59_999_990, 59_999_999, { start: 0, end: 60_000_000 }, 59_999_995), { level: 1, start: undefined, end: undefined, next: undefined });
 });
 
 test("the edges of a long quiet stretch are found through the overview, reading few edges", async () => {
@@ -72,7 +72,7 @@ test("the edges of a long quiet stretch are found through the overview, reading 
   assert.equal(await findEdge(source, 0, 1, 10_000_001, -1, undefined), 1_085);
   assert.equal(await findEdge(source, 0, 50_001_275, 60_000_001, 1, undefined), null);
   assert.ok(read() < 200, `read ${read()} edge ticks`);
-  const p = await completePulse(source, 0, { level: 0, start: undefined, end: undefined, next: undefined }, 10_000_050, 60_000_000);
+  const p = await completePulse(source, 0, { level: 0, start: undefined, end: undefined, next: undefined }, 10_000_050, { start: 0, end: 60_000_000 });
   assert.deepEqual(p, { level: 0, start: 1_085, end: 50_000_000, next: 50_000_627 });
 });
 
@@ -81,28 +81,32 @@ test("a pulse the source stamped with one time: the pulse before it ends there, 
   const ticks = new Float64Array([10, 20, 20, 30, 50_000_000, 50_000_000, 50_000_500]);
   const source = new MemorySource({ title: "pair", timebase: NS, length: 60_000_000, channels: [{ kind: "digital", name: "D", end: 60_000_000, initial: 0, ticks }] });
   const e = await source.edges(0, 0, 100);
-  assert.deepEqual(pulseFromEdges(e, 0, 100, 60_000_000, 19), { level: 1, start: 10, end: 20, next: 20 });
-  assert.deepEqual(pulseFromEdges(e, 0, 100, 60_000_000, 20), { level: 1, start: 20, end: 30, next: undefined });
-  assert.equal(pulseFigures({ level: 1, start: 10, end: 20, next: 20 }, NS, 60_000_000).duty, "100\u00a0%");
+  assert.deepEqual(pulseFromEdges(e, 0, 100, { start: 0, end: 60_000_000 }, 19), { level: 1, start: 10, end: 20, next: 20 });
+  assert.deepEqual(pulseFromEdges(e, 0, 100, { start: 0, end: 60_000_000 }, 20), { level: 1, start: 20, end: 30, next: undefined });
+  assert.equal(pulseFigures({ level: 1, start: 10, end: 20, next: 20 }, NS, { start: 0, end: 60_000_000 }).duty, "100\u00a0%");
   // Found by search: the period ends at the pair's second edge, not at the edge after it.
-  const p = await completePulse(source, 0, { level: 0, start: undefined, end: undefined, next: undefined }, 10_000_000, 60_000_000);
+  const p = await completePulse(source, 0, { level: 0, start: undefined, end: undefined, next: undefined }, 10_000_000, { start: 0, end: 60_000_000 });
   assert.deepEqual(p, { level: 0, start: 30, end: 50_000_000, next: 50_000_000 });
 });
 
 test("a pulse's figures: whole-tick widths, and a rate and a duty to the digits the ticks carry", () => {
   // SWCLK's first pulses in identify-swd: low for 627 ns from 376,719,436, then high for 647.
-  const f = pulseFigures({ level: 0, start: 376_719_436, end: 376_720_063, next: 376_720_710 }, NS, 523_583_070);
+  const f = pulseFigures({ level: 0, start: 376_719_436, end: 376_720_063, next: 376_720_710 }, NS, { start: 0, end: 523_583_070 });
   // The rate's last digit is at its uncertainty, 785 kHz / 1274 ≈ 0.6 kHz: the hundreds of Hz. The
   // width's reciprocal, 1.5949 MHz, is uncertain by 1.595 MHz / 627 ≈ 2.5 kHz: the kHz.
   assert.deepEqual(f, { level: "low", width: "627\u00a0ns", inverseWidth: "1.595\u00a0MHz", period: "1.274\u00a0µs", frequency: "784.9\u00a0kHz", duty: "50.78\u00a0%" });
-  const open = pulseFigures({ level: 1, start: null, end: 376_719_436, next: 376_720_063 }, NS, 523_583_070);
+  const open = pulseFigures({ level: 1, start: null, end: 376_719_436, next: 376_720_063 }, NS, { start: 0, end: 523_583_070 });
   assert.equal(open.width, "at least 376.719436\u00a0ms");
   assert.equal(open.inverseWidth, null);
   assert.equal(open.period, null);
   // The last pulse: both edges known, no period after it.
-  const last = pulseFigures({ level: 1, start: 100, end: 110, next: null }, NS, 1_000);
+  const last = pulseFigures({ level: 1, start: 100, end: 110, next: null }, NS, { start: 0, end: 1_000 });
   assert.deepEqual([last.inverseWidth, last.period], ["100\u00a0MHz", null]);
-  assert.equal(pulseFigures({ level: 1, start: null, end: null, next: null }, NS, 1_000).width, "the whole capture, 1.000\u00a0µs");
+  assert.equal(pulseFigures({ level: 1, start: null, end: null, next: null }, NS, { start: 0, end: 1_000 }).width, "the whole capture, 1.000\u00a0µs");
+  // A channel known from 300 ns, as a moved or trimmed one is: widths count from there.
+  const late = { start: 300, end: 1_000 };
+  assert.equal(pulseFigures({ level: 1, start: null, end: 400, next: 405 }, NS, late).width, "at least 100\u00a0ns");
+  assert.equal(pulseFigures({ level: 1, start: null, end: null, next: null }, NS, late).width, "all it records, 700\u00a0ns");
   // 3 of 10 ticks high is 30 % give or take 10: the digit is the tens.
   assert.equal(formatDuty(3, 10), "30\u00a0%");
   assert.equal(formatDuty(1, 3), "30\u00a0%");

@@ -23,6 +23,7 @@ view.id = "v";
 view.setAttribute("src", src);
 if (q.get("annotations")) view.setAttribute("annotations", `../../${q.get("annotations")}`);
 if (q.has("open")) view.setAttribute("open", "");
+if (q.has("shaping")) view.setAttribute("shaping", "");
 const ref = document.createElement("tickwave-ref");
 ref.setAttribute("for", "v");
 ref.setAttribute("annotation", "dpidr-read");

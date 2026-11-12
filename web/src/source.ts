@@ -13,6 +13,11 @@ export interface Ratio {
 export interface DigitalChannel {
   readonly kind: "digital";
   readonly name: string;
+  /** The source's own name for the channel, as the header's `source_name` gives it. */
+  readonly sourceName?: string;
+  /** The first tick whose level is known, where the channel's data starts after the capture's
+   * does. Absent: 0. Nothing is drawn before it. */
+  readonly start?: number;
   /** The first tick past the channel's data. Nothing is drawn at or after it. */
   readonly end: number;
 }
@@ -20,6 +25,8 @@ export interface DigitalChannel {
 export interface AnalogChannel {
   readonly kind: "analog";
   readonly name: string;
+  /** The source's own name for the channel, as the header's `source_name` gives it. */
+  readonly sourceName?: string;
   readonly end: number;
   /** The unit of a value, such as "V" or "A". */
   readonly unit: string;
@@ -38,11 +45,26 @@ export interface AnalogChannel {
   readonly max: number;
 }
 
-export type Channel = DigitalChannel | AnalogChannel;
+/** What a channel moved or trimmed when it was converted states (FORMAT.md, "Moved and trimmed
+ * channels"). */
+export interface Shaped {
+  /** Ticks it was moved by, later when positive, and why: `"delay"` is a known delay in its path. */
+  readonly offset?: { readonly ticks: number; readonly kind: string };
+  /** The ticks `from..to` where it holds what the source recorded; outside them it was cut. */
+  readonly kept?: { readonly from: number; readonly to: number };
+}
 
-/** Whether `tick` lies in the channel's data: ticks `0..end`. */
+export type Channel = (DigitalChannel | AnalogChannel) & Shaped;
+
+/** The first tick the channel can hold data at: a digital channel's `start` (0 when absent), an
+ * analog channel's first sample. */
+export function channelStart(c: Channel): number {
+  return c.kind === "digital" ? (c.start ?? 0) : c.first;
+}
+
+/** Whether `tick` lies in the channel's data: ticks `channelStart(c)..end`. */
 export function inChannel(c: Channel, tick: number): boolean {
-  return tick >= 0 && tick < c.end;
+  return tick >= channelStart(c) && tick < c.end;
 }
 
 /** A recording's content id: "blake3:" and the 64 hex digits of its content's digest. */

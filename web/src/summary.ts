@@ -2,7 +2,15 @@
 // channels the view shows. No DOM, so the wording can be tested without a page.
 
 import { formatBrief, formatBytes } from "./readouts.ts";
-import type { RecordingInfo } from "./source.ts";
+import { channelStart, type RecordingInfo } from "./source.ts";
+
+/**
+ * The first tick a view of `shown` channels spans: the capture's start, or earlier where a channel's
+ * data starts before it, as a channel moved earlier in the convert flow's preview does.
+ */
+export function shownStart(info: RecordingInfo, shown: readonly number[]): number {
+  return Math.min(0, ...shown.map((i) => channelStart(info.channels[i])));
+}
 
 /**
  * The ticks a view of `shown` channels spans: the recording's length with all of them, else as far

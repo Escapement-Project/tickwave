@@ -230,6 +230,7 @@ a view whose footer never came.
 | `window` | what an open view shows first: two times (`"317.8 ms 318.0 ms"`), or an annotation's id |
 | `open` | open the view |
 | `series` | a series name, such as `verge`: the traces take `--series-verge`. Ink by default |
+| `shaping` | shape the recording, as the Open page's converter does: a grip at each row's name moves its channel in time (sideways) or among the rows (up or down), and bars at its data's ends trim it. A move up or down rewrites `channels`. Without it, there are no grips or bars, and no room kept for them |
 
 Times in attributes are a decimal with a unit (`s`, `ms`, `us`, `ns`, `ps`), or a whole number of
 ticks.
@@ -291,6 +292,8 @@ Clicking an annotation's label shows its span.
 | `window` | the span shown, `{start, end}` in ticks |
 | `cursors` | cursors A and B, `{a, b}` in ticks; null where one is not placed |
 | `selection` | the selected span, `{start, end}` in ticks, or null |
+| `shaping` | the attribute, as a boolean |
+| `shape` | each channel's shape, by the source's name for it (the header's `source_name`), which a rename leaves alone: `offset`, the ticks it is moved by, and `keep`, the part of its own data kept (`{from, to}` in its ticks before the move), or null for all of it. Setting it moves and trims the channels it names. Nothing changes the recording |
 | `annotationsText` | the sidecar's hand-written file as text, in place of the file at `annotations`, whose includes it still reads. The view redraws the annotations and keeps its place, cursors and selection. While it is set, the annotation lane shows even with nothing in it, so the first annotation added moves nothing. Null goes back to the file |
 | `summary` | the recording's own `title` and `facts`, the facts as one line, and `matches`: whether the text the page slotted matches them. Null until the footer is in |
 
@@ -301,6 +304,7 @@ Clicking an annotation's label shows its span.
 | `tickwave-select` | a span is selected: its `start`, `end`, `duration`, `edges` by channel, and `periods` for the measured channel |
 | `tickwave-cursor` | a cursor is placed or cleared: `{a, b}` in ticks, and `{aTime, bTime}`, each a time at the recording's resolution as text; null where a cursor is not placed |
 | `tickwave-annotation` | an annotation's label is clicked: `{id}` |
+| `tickwave-shape` | the reader moves, trims or reorders a channel: `{shape, channels, change, channel}`: the whole `shape`, the rows' names in order, what changed (`"move"`, `"trim"` or `"order"`), and the channel's source name |
 | `tickwave-ready` | the view has first drawn: `{height}` |
 | `tickwave-summary` | the view has the footer and has compared the page's title and facts with it: the `summary`. Again if the page slots other text |
 | `tickwave-error` | something failed: `{message, error}`. The view also shows it, and logs it to the console |

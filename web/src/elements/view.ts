@@ -6,16 +6,20 @@ import { parseChannels, parseWindow, VIEW_ATTRIBUTES } from "../attributes.ts";
 import { reducedMotion } from "../face.ts";
 import { absolute, events as registryEvents, infoFor, peekInfo } from "../registry.ts";
 import { clockNote, countEdges, formatAt, formatClockPeriod, formatClockRate, formatCount, formatInterval, formatRate, formatValue, periodStats } from "../readouts.ts";
-import { completePulse, pulseFigures, pulseFromEdges, type Pulse } from "../probe.ts";
+import { completePulse, knownSpan, pulseFigures, pulseFromEdges, type Pulse } from "../probe.ts";
 import { Prober, type Probed } from "../prober.ts";
 import { lowerBound } from "../search.ts";
 import { channelIndices, Plot } from "../render/plot.ts";
 import { clampRange, fitRange, moveRange, scaleLimits, zoomRange, type ScaleLimits, type ValueRange } from "../render/scale.ts";
-import { inChannel, isAbort, named, sampleAtOrBefore, sampleTick } from "../source.ts";
+import { channelStart, inChannel, isAbort, named, sampleAtOrBefore, sampleTick, type Channel } from "../source.ts";
 import { parseTime, toTicks, type TimeSpec } from "../time.ts";
 import { DRAG_PX, TickwaveElement, loadAnnotations, loadRecording, zoomKey, type Loaded } from "./base.ts";
+import { ShapedSource } from "../shaped-source.ts";
 import { SUMMARY_CSS } from "./summary-style.ts";
-import { shownExtent, summaryFacts } from "../summary.ts";
+import { shownExtent, shownStart, summaryFacts } from "../summary.ts";
+
+/** The width of a row's move grip, at the names column's left, while the view shapes. */
+const GRIP_PX = 14;
 
 const CSS = `
 :host { display: flex; flex-direction: column; }
@@ -54,6 +58,19 @@ canvas { display: block; }
 .row-handle::after { content: ""; position: absolute; left: 4px; right: 4px; top: 50%; height: 2px; margin-top: -1px;
   border-radius: 1px; background: var(--ink, CanvasText); opacity: 0; }
 .row-handle:hover::after, .row-handle:focus-visible::after, .row-handle.dragging::after { opacity: 1; }
+.grip { position: absolute; left: 0; width: ${GRIP_PX}px; cursor: grab; touch-action: none; border-radius: 4px; }
+/* Three dots a row, in the middle of it, so each row's grip stands apart from the next. */
+.grip::after { content: ""; position: absolute; left: 0; right: 0; top: 50%; height: 16px; margin-top: -8px;
+  background: radial-gradient(circle, var(--ink-2, GrayText) 1.2px, transparent 1.5px) center / 6px 6px repeat-y; }
+.grip:hover, .grip.dragging { background-color: var(--wash, color-mix(in srgb, CanvasText 12%, transparent)); }
+.grip.dragging { cursor: grabbing; }
+.grip:focus-visible { outline-offset: -2px; }
+.trim { position: absolute; width: 8px; margin-left: -4px; cursor: ew-resize; touch-action: none; }
+@media (pointer: coarse) { .trim { width: 24px; margin-left: -12px; } }
+.trim::after { content: ""; position: absolute; left: 50%; top: 2px; bottom: 2px; width: 2px; margin-left: -1px;
+  border-radius: 1px; background: var(--ink, CanvasText); opacity: .55; }
+.trim:hover::after, .trim:focus-visible::after, .trim.dragging::after { opacity: 1; }
+.trim:focus-visible { outline: none; }
 `;
 
 const HTML = `
@@ -101,6 +118,15 @@ interface Drag {
   moved: boolean;
 }
 
+/** The key a channel's shape goes by: the source's name for it, which a rename leaves alone. */
+const shapeKey = (c: Channel): string => c.sourceName ?? c.name;
+
+/** A channel's shape in the convert flow: the ticks it is moved by, and the part of its own data kept. */
+export interface ChannelShape {
+  readonly offset: number;
+  readonly keep: { readonly from: number; readonly to: number } | null;
+}
+
 export class TickwaveView extends TickwaveElement {
   static observedAttributes = VIEW_ATTRIBUTES;
   readonly #plot: Plot;
@@ -143,6 +169,20 @@ export class TickwaveView extends TickwaveElement {
   #textSeq = 0;
   /** The sidecar's problems last reported, forgotten when another sidecar replaces it. */
   #sidecarProblems: string[] = [];
+  /** The recording as loaded. `#loaded` is it moved by its offsets while the view shapes it. */
+  #asLoaded: Loaded | null = null;
+  #shaping = false;
+  #shaped: ShapedSource | null = null;
+  /** Each channel's kept span, by channel index, in its own ticks; absent: all of it. */
+  #keep = new Map<number, { from: number; to: number }>();
+  /** A shape asked for before the recording arrived, applied once it has. */
+  #pendingShape: Record<string, ChannelShape> | null = null;
+  /** By channel index, so a channel's grip follows its row when the rows change order. */
+  #grips = new Map<number, HTMLElement>();
+  /** Two a channel: where its kept span starts and ends. */
+  #trims = new Map<number, [HTMLElement, HTMLElement]>();
+  /** The rows last drawn, by channel index: a change of order alone keeps the view's place. */
+  #rowSet = "";
   /** The mismatches between the page's summary and the recording's, warned of once each. */
   #warned = new Set<string>();
   #resize: ResizeObserver;
@@ -189,6 +229,7 @@ export class TickwaveView extends TickwaveElement {
     );
     this.#plot.onDraw = () => {
       this.#drawn();
+      this.#placeTrims();
       this.#prober.probeIfMoved();
     };
     this.#resize = new ResizeObserver(() => this.#sized());
@@ -277,6 +318,48 @@ export class TickwaveView extends TickwaveElement {
     void this.#reannotate();
   }
 
+  /**
+   * Whether the view shapes its recording, as the convert flow does before the recording is written
+   * again: each row gets a grip in the names column that moves the channel in time (sideways) or
+   * among the rows (up or down), and handles at its data's ends that trim it. Nothing changes the
+   * recording; `shape` says what the reader did.
+   */
+  get shaping(): boolean {
+    return this.hasAttribute("shaping");
+  }
+
+  set shaping(v: boolean) {
+    this.toggleAttribute("shaping", v);
+  }
+
+  /**
+   * Each channel's shape, by the source's name for it (`source_name`; its name where a recording
+   * states none), which a rename leaves alone: `offset`, the ticks it is moved by, and `keep`, the
+   * part of its own data kept (`{from, to}` in the recording's ticks, before the move), or null for
+   * all of it. Setting it moves and trims the channels it names. The rows' order is `channels`, by
+   * name, which a move up or down rewrites.
+   */
+  get shape(): Record<string, ChannelShape> {
+    const l = this.#asLoaded;
+    if (!l) return {};
+    return Object.fromEntries(l.info.channels.map((c, i) => [shapeKey(c), { offset: this.#shaped?.offsets[i] ?? 0, keep: this.#keep.get(i) ?? null }]));
+  }
+
+  set shape(v: Record<string, ChannelShape>) {
+    const l = this.#asLoaded;
+    if (!l || !this.#shaped) {
+      this.#pendingShape = { ...this.#pendingShape, ...v };
+      return;
+    }
+    for (const [name, s] of Object.entries(v)) {
+      const i = l.info.channels.findIndex((c) => shapeKey(c) === name);
+      if (i < 0) throw new RangeError(`no channel ${name}`);
+      this.#moveChannel(i, s.offset);
+      this.#setKeep(i, s.keep);
+    }
+    this.#placeShaping();
+  }
+
   /** The annotations again, from the text or the file, over the recording already shown. */
   async #reannotate(): Promise<void> {
     const l = this.#loaded;
@@ -286,6 +369,7 @@ export class TickwaveView extends TickwaveElement {
     const annotations = await loadAnnotations(l.src, this.getAttribute("annotations"), this.#annotationsText);
     if (seq !== this.#textSeq || this.#loaded !== l) return;
     this.#loaded = { ...l, annotations };
+    if (this.#asLoaded) this.#asLoaded = { ...this.#asLoaded, annotations };
     this.#reportSidecar(annotations.errors);
     this.#apply();
   }
@@ -308,6 +392,7 @@ export class TickwaveView extends TickwaveElement {
   }
 
   protected update(): void {
+    if (this.shaping !== this.#shaping) this.#setShaping(this.shaping);
     const open = this.open;
     this.#viewer.hidden = !open;
     this.#renderSummary();
@@ -337,12 +422,12 @@ export class TickwaveView extends TickwaveElement {
       this.#loading = loadRecording(src, annotations, text).then(
         (l) => {
           if (this.#loadKey !== key) return null;
-          this.#loaded = l;
+          this.#loaded = this.#wrap(l);
           this.#reportSidecar(l.annotations.errors);
           this.#windowAttr = null;
           this.#apply();
           if (this.#annotationsText !== text) void this.#reannotate();
-          return l;
+          return this.#loaded;
         },
         (e) => {
           // A load the view has moved on from says nothing about the one it shows now. A failed
@@ -436,8 +521,11 @@ export class TickwaveView extends TickwaveElement {
     const fresh = recordingKey !== this.#recordingKey;
     if (fresh) {
       this.#recordingKey = recordingKey;
+      const rows = `${l.src.href}\n${[...indices].sort((a, b) => a - b).join(" ")}`;
       this.#plot.setRecording(l.source, l.info, indices);
-      this.#plot.view = { start: 0, end: this.#extent() };
+      // The same rows in another order, as a move up or down makes: the view keeps its place.
+      if (rows !== this.#rowSet) this.#plot.view = { start: this.#start(), end: this.#extent() };
+      this.#rowSet = rows;
       this.#periodChannel = this.#plot.tracks.findIndex((t) => t.channel.kind === "digital");
       if (l.src.href !== this.#shownSrc) {
         this.#shownSrc = l.src.href;
@@ -501,8 +589,322 @@ export class TickwaveView extends TickwaveElement {
     this.#plot.resize(this.#size.width, given);
     this.#placeHandles();
     this.#placeScales();
+    this.#placeShaping();
     this.#clampView();
     this.#plot.invalidate();
+  }
+
+  // Shaping -------------------------------------------------------------------------------------
+
+  /** `l`, moved by its offsets while the view shapes it. Another recording starts unmoved. */
+  #wrap(l: Loaded): Loaded {
+    if (this.#asLoaded?.source !== l.source) {
+      this.#shaped = null;
+      this.#keep.clear();
+      this.#plot.kept.clear();
+    }
+    this.#asLoaded = l;
+    if (!this.#shaping) return l;
+    this.#shaped ??= new ShapedSource(l.source, l.info);
+    return { ...l, source: this.#shaped, info: this.#shaped.shapedInfo };
+  }
+
+  #setShaping(on: boolean): void {
+    this.#shaping = on;
+    this.#plot.grip = on ? GRIP_PX : 0;
+    const l = this.#asLoaded;
+    if (l) {
+      this.#loaded = this.#wrap(l);
+      this.#plot.setRecording(this.#loaded.source, this.#loaded.info, this.#plot.tracks.map((t) => t.index));
+      for (const i of l.info.channels.keys()) this.#showKeep(i);
+      if (on && this.#pendingShape) {
+        const shape = this.#pendingShape;
+        this.#pendingShape = null;
+        this.shape = shape;
+      }
+    }
+    this.#layout(true);
+    this.#placeShaping();
+  }
+
+  /** Moves channel `i` to `to` ticks from where the recording has it. */
+  #moveChannel(i: number, to: number): void {
+    const s = this.#shaped;
+    const l = this.#loaded;
+    if (!s || !l || !Number.isFinite(to)) return;
+    const by = Math.round(to) - s.offsets[i];
+    if (by === 0) return;
+    s.setOffset(i, s.offsets[i] + by);
+    this.#loaded = { ...l, info: s.shapedInfo };
+    this.#plot.moveChannel(s.shapedInfo, i, by);
+    this.#showKeep(i);
+  }
+
+  /** Keeps `keep` of channel `i`'s own data, within it and at least a tick long; null keeps all. */
+  #setKeep(i: number, keep: { from: number; to: number } | null): void {
+    const c = this.#asLoaded?.info.channels[i];
+    if (!c) return;
+    const lo = channelStart(c);
+    let kept = keep;
+    if (kept) {
+      const from = Math.min(Math.max(Math.round(kept.from), lo), c.end - 1);
+      const to = Math.max(Math.min(Math.round(kept.to), c.end), from + 1);
+      kept = from <= lo && to >= c.end ? null : { from, to };
+    }
+    if (kept) this.#keep.set(i, kept);
+    else this.#keep.delete(i);
+    this.#showKeep(i);
+  }
+
+  /** Channel `i`'s kept span where the plot draws it: moved with the channel. */
+  #showKeep(i: number): void {
+    const k = this.#shaping ? this.#keep.get(i) : undefined;
+    const d = this.#shaped?.offsets[i] ?? 0;
+    if (k) this.#plot.kept.set(i, { from: k.from + d, to: k.to + d });
+    else this.#plot.kept.delete(i);
+    this.#plot.invalidate();
+  }
+
+  /** Puts channel `channel`'s row at `to` among the rows, by rewriting `channels`. */
+  #reorder(channel: number, to: number): void {
+    const l = this.#loaded;
+    if (!l) return;
+    const order = this.#plot.tracks.map((t) => t.index).filter((i) => i !== channel);
+    order.splice(Math.max(0, Math.min(order.length, to)), 0, channel);
+    this.setAttribute("channels", order.map((i) => l.info.channels[i].name).join(" "));
+  }
+
+  /** Says the reader moved, trimmed or reordered channel `i`: the whole shape, and what changed. */
+  #shapeChanged(change: "move" | "trim" | "order", i: number): void {
+    const l = this.#asLoaded;
+    if (!l) return;
+    // A move up or down has rewritten `channels`, which the rows take up at the next update.
+    const order = parseChannels(this.getAttribute("channels")) ?? this.#plot.tracks.map((t) => l.info.channels[t.index].name);
+    this.emit("tickwave-shape", { shape: this.shape, channels: order, change, channel: shapeKey(l.info.channels[i]) });
+  }
+
+  /**
+   * Channel `i`'s offset `to`, or the one that puts the edge of it shown nearest another row's shown
+   * edge on that edge, where the two are within a few pixels. Rows read at a scale with no edges in
+   * hand have none to snap to.
+   */
+  #snapMove(i: number, to: number): number {
+    const s = this.#shaped;
+    const moved = this.#plot.tracks.find((t) => t.index === i);
+    if (!s || moved?.tile?.kind !== "edges") return to;
+    const by = to - s.offsets[i];
+    const { start, end } = this.#plot.view;
+    const limit = SNAP_PX * this.#plot.perPx;
+    let best: number | null = null;
+    for (const t of this.#plot.tracks) {
+      if (t.index === i || t.tile?.kind !== "edges") continue;
+      const theirs = t.tile.data.ticks;
+      for (const e of moved.tile.data.ticks) {
+        const at = e + by;
+        if (at < start || at > end) continue;
+        const k = lowerBound(theirs, at);
+        for (const j of [k - 1, k]) {
+          if (j < 0 || j >= theirs.length) continue;
+          const d = theirs[j] - at;
+          if (Math.abs(d) <= limit && (best === null || Math.abs(d) < Math.abs(best))) best = d;
+        }
+      }
+    }
+    return best === null ? to : to + best;
+  }
+
+  /** How far a key moves a grip or a trim: about a pixel, or ten with Shift. */
+  #keyStep(shift: boolean): number {
+    return Math.max(1, Math.round(this.#plot.perPx)) * (shift ? 10 : 1);
+  }
+
+  #placeShaping(): void {
+    const l = this.#plot.layout;
+    const rows = this.#shaping && l ? l.rows : [];
+    const shown = new Set(rows.map((r) => r.track.index));
+    for (const [i, g] of this.#grips) {
+      if (shown.has(i)) continue;
+      g.remove();
+      this.#grips.delete(i);
+    }
+    for (const [i, pair] of this.#trims) {
+      if (shown.has(i)) continue;
+      for (const h of pair) h.remove();
+      this.#trims.delete(i);
+    }
+    for (const r of rows) {
+      const i = r.track.index;
+      let g = this.#grips.get(i);
+      if (!g) {
+        g = this.#grip(i);
+        this.#grips.set(i, g);
+        this.#plotBox.append(g);
+      }
+      if (!this.#trims.has(i)) {
+        const pair: [HTMLElement, HTMLElement] = [this.#trim(i, "start"), this.#trim(i, "end")];
+        this.#trims.set(i, pair);
+        this.#plotBox.append(...pair);
+      }
+      g.style.top = `${r.top}px`;
+      g.style.height = `${r.height}px`;
+      const d = this.#shaped?.offsets[i] ?? 0;
+      const tb = this.#loaded!.info.timebase;
+      const where = d === 0 ? "where it was recorded" : `${formatInterval(Math.abs(d), tb)} ${d > 0 ? "later" : "earlier"} than recorded`;
+      g.setAttribute("aria-label", `Move ${r.track.channel.name}, now ${where}. Left and right move it in time, with Shift further; up and down move its row.`);
+    }
+    // The keys go from grip to grip, and handle to handle, in the rows' order.
+    const order = rows.flatMap((r) => [this.#grips.get(r.track.index)!, ...this.#trims.get(r.track.index)!]);
+    const placed = [...this.#plotBox.querySelectorAll(".grip, .trim")];
+    if (order.some((el, k) => placed[k] !== el)) {
+      const focused = this.root.activeElement as HTMLElement | null;
+      this.#plotBox.append(...order);
+      focused?.focus({ preventScroll: true });
+    }
+    this.#placeTrims();
+  }
+
+  /** The trim handles at each row's kept ends, where the view shows them. */
+  #placeTrims(): void {
+    const l = this.#plot.layout;
+    const own = this.#asLoaded?.info;
+    if (!this.#shaping || !l || !own) return;
+    for (const r of l.rows) {
+      const i = r.track.index;
+      const pair = this.#trims.get(i);
+      if (!pair) continue;
+      const d = this.#shaped?.offsets[i] ?? 0;
+      const k = this.#keep.get(i);
+      const c = own.channels[i];
+      const ends = [(k?.from ?? channelStart(c)) + d, (k?.to ?? c.end) + d];
+      pair.forEach((h, j) => {
+        const x = this.#plot.xAt(ends[j]);
+        h.hidden = x < l.plotLeft - 1 || x > l.plotRight + 1;
+        h.style.left = `${x}px`;
+        h.style.top = `${r.top}px`;
+        h.style.height = `${r.height}px`;
+        h.setAttribute("aria-valuetext", formatInterval(ends[j], own.timebase));
+      });
+    }
+  }
+
+  /** Channel `i`'s grip: a drag sideways moves the channel in time, up or down moves its row. */
+  #grip(i: number): HTMLElement {
+    const g = Object.assign(document.createElement("div"), { className: "grip", tabIndex: 0 });
+    g.setAttribute("part", "grip");
+    g.setAttribute("role", "group");
+    g.setAttribute("aria-roledescription", "move grip");
+    let drag: { id: number; x: number; offset: number } | null = null;
+    g.addEventListener("pointerdown", (e) => {
+      e.stopPropagation();
+      if (e.button !== 0 || !this.#shaped) return;
+      drag = { id: e.pointerId, x: e.clientX, offset: this.#shaped.offsets[i] };
+      g.setPointerCapture(e.pointerId);
+      g.classList.add("dragging");
+      this.#prober.hide();
+    });
+    g.addEventListener("pointermove", (e) => {
+      e.stopPropagation();
+      if (drag?.id !== e.pointerId) return;
+      const offset = this.#shaped?.offsets[i];
+      const to = Math.round(drag.offset + (e.clientX - drag.x) * this.#plot.perPx);
+      // Alt moves it freely; else an edge of it lands on another row's edge within a few pixels.
+      this.#moveChannel(i, e.altKey ? to : this.#snapMove(i, to));
+      if (this.#shaped?.offsets[i] !== offset) this.#shapeChanged("move", i);
+      // Up or down over another row: this one takes its place.
+      const y = this.#local(e).y;
+      const rows = this.#plot.layout?.rows ?? [];
+      const over = rows.findIndex((r) => y >= r.top && y < r.top + r.height);
+      if (over >= 0 && rows[over].track.index !== i) {
+        this.#reorder(i, over);
+        this.#shapeChanged("order", i);
+      }
+      this.#placeShaping();
+    });
+    const end = (e: PointerEvent) => {
+      e.stopPropagation();
+      if (drag?.id !== e.pointerId) return;
+      drag = null;
+      g.classList.remove("dragging");
+    };
+    g.addEventListener("pointerup", end);
+    g.addEventListener("pointercancel", end);
+    g.addEventListener("keydown", (e) => {
+      const s = this.#shaped;
+      if (!s) return;
+      const at = this.#plot.tracks.findIndex((t) => t.index === i);
+      let change: "move" | "order";
+      if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+        this.#moveChannel(i, s.offsets[i] + (e.key === "ArrowLeft" ? -1 : 1) * this.#keyStep(e.shiftKey));
+        change = "move";
+      } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+        this.#reorder(i, at + (e.key === "ArrowUp" ? -1 : 1));
+        change = "order";
+      } else return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.#placeShaping();
+      this.#shapeChanged(change, i);
+    });
+    return g;
+  }
+
+  /** Where channel `i`'s kept span starts or ends: a drag trims it, snapping to its own edges. */
+  #trim(i: number, side: "start" | "end"): HTMLElement {
+    const h = Object.assign(document.createElement("div"), { className: "trim", tabIndex: 0 });
+    h.setAttribute("part", "trim");
+    h.setAttribute("role", "slider");
+    h.setAttribute("aria-orientation", "horizontal");
+    const name = () => this.#asLoaded?.info.channels[i].name ?? "";
+    h.setAttribute("aria-label", `${side === "start" ? "Start" : "End"} of what is kept of ${name()}`);
+    /** Sets this end at `tick`, in the channel's own ticks. */
+    const set = (tick: number) => {
+      const c = this.#asLoaded?.info.channels[i];
+      if (!c) return;
+      const k = this.#keep.get(i) ?? { from: channelStart(c), to: c.end };
+      this.#setKeep(i, side === "start" ? { from: tick, to: k.to } : { from: k.from, to: tick });
+      this.#placeTrims();
+      this.#shapeChanged("trim", i);
+    };
+    const ownEnd = () => {
+      const c = this.#asLoaded!.info.channels[i];
+      const k = this.#keep.get(i);
+      return side === "start" ? (k?.from ?? channelStart(c)) : (k?.to ?? c.end);
+    };
+    let drag: number | null = null;
+    h.addEventListener("pointerdown", (e) => {
+      e.stopPropagation();
+      if (e.button !== 0) return;
+      drag = e.pointerId;
+      h.setPointerCapture(e.pointerId);
+      h.classList.add("dragging");
+      this.#prober.hide();
+    });
+    h.addEventListener("pointermove", (e) => {
+      e.stopPropagation();
+      if (drag !== e.pointerId) return;
+      const row = this.#plot.tracks.findIndex((t) => t.index === i);
+      set(this.#snapped(this.#local(e).x, row) - (this.#shaped?.offsets[i] ?? 0));
+    });
+    const end = (e: PointerEvent) => {
+      e.stopPropagation();
+      if (drag !== e.pointerId) return;
+      drag = null;
+      h.classList.remove("dragging");
+    };
+    h.addEventListener("pointerup", end);
+    h.addEventListener("pointercancel", end);
+    h.addEventListener("keydown", (e) => {
+      const c = this.#asLoaded?.info.channels[i];
+      if (!c) return;
+      if (e.key === "ArrowLeft") set(ownEnd() - this.#keyStep(e.shiftKey));
+      else if (e.key === "ArrowRight") set(ownEnd() + this.#keyStep(e.shiftKey));
+      else if (e.key === "Home" && side === "start") set(channelStart(c));
+      else if (e.key === "End" && side === "end") set(c.end);
+      else return;
+      e.preventDefault();
+      e.stopPropagation();
+    });
+    return h;
   }
 
   // Row heights ----------------------------------------------------------------------------------
@@ -771,14 +1173,22 @@ export class TickwaveView extends TickwaveElement {
     return shownExtent(info, this.#plot.tracks.map((t) => t.index));
   }
 
+  /** Where the view's span starts: 0, or before it where a channel's data does. */
+  #start(): number {
+    const info = this.#loaded?.info;
+    if (!info) return 0;
+    return shownStart(info, this.#plot.tracks.map((t) => t.index));
+  }
+
   #clampView(): void {
     const info = this.#loaded?.info;
     if (!info) return;
     const extent = this.#extent();
+    const lo = this.#start();
     let { start, end } = this.#plot.view;
-    const span = Math.min(extent, Math.max(this.#plot.minSpan, end - start));
+    const span = Math.min(extent - lo, Math.max(this.#plot.minSpan, end - start));
     const mid = (start + end) / 2;
-    start = Math.min(Math.max(0, mid - span / 2), extent - span);
+    start = Math.min(Math.max(lo, mid - span / 2), extent - span);
     end = start + span;
     this.#plot.view = { start, end };
   }
@@ -859,7 +1269,7 @@ export class TickwaveView extends TickwaveElement {
       this.#plot.ranges.clear();
       this.#layout(true);
     }
-    this.setWindow(0, this.#extent());
+    this.setWindow(this.#start(), this.#extent());
   }
 
   /** Zooms by `factor` (above 1 zooms out) about x, or the middle. */
@@ -1108,6 +1518,11 @@ export class TickwaveView extends TickwaveElement {
 
   /** A cursor snaps to the nearest edge of the clicked row within a few pixels, else to a tick. */
   #placeCursor(x: number, row: number): void {
+    this.#placeCursorAt(this.#snapped(x, row));
+  }
+
+  /** The tick at `x`, or the nearest edge of row `row` within a few pixels of it. */
+  #snapped(x: number, row: number): number {
     let tick = Math.round(this.#plot.tickAt(x));
     const tile = this.#plot.tracks[row]?.tile;
     if (tile?.kind === "edges") {
@@ -1119,7 +1534,7 @@ export class TickwaveView extends TickwaveElement {
       }
       if (best >= 0 && Math.abs(this.#plot.xAt(t[best]) - x) <= SNAP_PX) tick = t[best];
     }
-    this.#placeCursorAt(tick);
+    return tick;
   }
 
   /** Places cursor A, or B after it, at `tick`. */
@@ -1288,13 +1703,13 @@ export class TickwaveView extends TickwaveElement {
         let pulse: Pulse;
         try {
           const e = await l.source.edges(t.index, a, a + 1);
-          pulse = await completePulse(l.source, t.index, pulseFromEdges(e, a, a + 1, c.end, a), a, c.end);
+          pulse = await completePulse(l.source, t.index, pulseFromEdges(e, a, a + 1, knownSpan(c), a), a, knownSpan(c));
         } catch (e) {
           failed(e);
           return;
         }
         if (seq !== this.#readoutSeq) return;
-        const f = pulseFigures(pulse, tb, c.end);
+        const f = pulseFigures(pulse, tb, knownSpan(c));
         const parts: (string | Node)[] = [c.name, item(f.level, f.width)];
         if (f.inverseWidth) parts.push(item("1/width", f.inverseWidth));
         if (f.period) parts.push(item("period", f.period), fig(f.frequency ?? "–"), item("duty", f.duty ?? "–"));

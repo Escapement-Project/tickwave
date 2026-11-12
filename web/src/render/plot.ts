@@ -6,7 +6,7 @@ import { covers, laneAnnotations, type Annotation, type Resolved } from "../anno
 import type { Palette } from "../palette.ts";
 import { formatAt, niceStep } from "../readouts.ts";
 import { rangeMarks, type ValueRange } from "./scale.ts";
-import { named, sampleTick, type AnalogChannel, type Channel, type RecordingInfo, type Source } from "../source.ts";
+import { channelStart, named, sampleTick, type AnalogChannel, type Channel, type RecordingInfo, type Source } from "../source.ts";
 import { timeAxis } from "./axis.ts";
 import {
   analogFromOverview,
@@ -129,6 +129,11 @@ export class Plot {
   annotations: Resolved | null = null;
   /** The annotation lane shows even with nothing in it, as while a page edits the annotations. */
   keepLane = false;
+  /** CSS pixels kept at the names column's left for the view's move grips, while it shapes. */
+  grip = 0;
+  /** Rows' kept spans, by channel index, in the plot's ticks: the trace outside one fades, as the
+   * part a trim leaves out. */
+  kept = new Map<number, { from: number; to: number }>();
   #palette: Palette | null = null;
   layout: Layout | null = null;
   view = { start: 0, end: 1 };
@@ -309,7 +314,7 @@ export class Plot {
         gutter = Math.max(gutter, this.measure(formatAt(m.top, m.place, c.unit), axisFont), this.measure(formatAt(m.bottom, m.place, c.unit), axisFont));
       }
     });
-    const plotLeft = Math.ceil(Math.min(Math.max(gutter + 14, 40), Math.max(40, width * 0.3)));
+    const plotLeft = Math.ceil(Math.min(Math.max(gutter + 14, 40), Math.max(40, width * 0.3))) + this.grip;
     const laneTop = 2;
     const { laneHeight, top: rowsTop, natural, fixed } = this.#stack();
     let top = rowsTop;
@@ -512,7 +517,7 @@ export class Plot {
     ctx.fillStyle = this.hoverRow !== null && l.rows[this.hoverRow] === r ? p.ink : p.ink2;
     ctx.font = this.#font(this.config.labelPx, 500);
     ctx.textAlign = "left";
-    ctx.fillText(c.name, 6, r.top + r.height / 2 + 4, l.plotLeft - 10);
+    ctx.fillText(c.name, 6 + this.grip, r.top + r.height / 2 + 4, l.plotLeft - 10 - this.grip);
     if (r.range && c.kind === "analog") {
       // Each label sits on its rule, the top one under it and the bottom one over it.
       const m = r.range.marks;
@@ -534,8 +539,8 @@ export class Plot {
       this.#shown.delete(r.track.index);
     }
 
-    // Nothing before tick 0, at or past the channel's end, or right of the sweep.
-    const x0 = Math.max(l.plotLeft, this.xAt(0));
+    // Nothing before the channel's data, at or past its end, or right of the sweep.
+    const x0 = Math.max(l.plotLeft, this.xAt(channelStart(c)));
     const x1 = Math.min(l.plotRight, this.xAt(c.end), revealX);
     if (x1 <= x0) return;
     const width = (weight: number) => Math.max(1, Math.round(weight * dpr));
@@ -553,7 +558,7 @@ export class Plot {
         const px0 = Math.round(Math.max(x0, this.xAt(start)) * dpr);
         const px1 = Math.round(Math.min(x1, this.xAt(end)) * dpr);
         if (px1 <= px0) return [];
-        const from = Math.max(start, 0);
+        const from = Math.max(start, channelStart(c));
         const to = Math.min(end, c.end);
         const shapes = c.kind === "digital" ? this.#digitalShapes(r, grid, tile, from, to, lw) : this.#analogShapes(r, c, grid, tile, from, to, lw, shown);
         return [{ px0, px1, shapes, coarse: grain(tile) > grid.per }];
@@ -588,6 +593,28 @@ export class Plot {
       }
     }
     ctx.restore();
+
+    // What a trim leaves out, faded under the page's colour: still there to trim back to.
+    const kept = this.kept.get(r.track.index);
+    if (kept) {
+      ctx.save();
+      ctx.globalAlpha = 0.7;
+      ctx.fillStyle = p.page;
+      for (const [a, b] of [
+        [x0, Math.min(x1, this.xAt(kept.from))],
+        [Math.max(x0, this.xAt(kept.to)), x1],
+      ]) {
+        if (b > a) ctx.fillRect(a, r.top, b - a, r.height);
+      }
+      ctx.restore();
+    }
+  }
+
+  /** Channel `index` moved by `by` ticks, as `info` now has it: its row's tiles move with it. */
+  moveChannel(info: RecordingInfo, index: number, by: number): void {
+    this.info = info;
+    for (const t of this.tracks) if (t.index === index) t.moveBy(info.channels[index], by);
+    this.invalidate();
   }
 
   /**
