@@ -22,7 +22,7 @@ mkdirSync(join(out, "docs"), { recursive: true });
 mkdirSync(join(out, "fixtures"), { recursive: true });
 
 // The elements, and the converter page's worker and module, as build.ts made them.
-for (const f of ["tickwave.js", "tickwave-worker.js", "tickwave.wasm", "tickwave-convert-worker.js", "tickwave-convert.wasm"]) copyFileSync(join(web, "dist", f), join(out, f));
+for (const f of ["tickwave.js", "tickwave.css", "tickwave-worker.js", "tickwave.wasm", "tickwave-convert-worker.js", "tickwave-convert.wasm"]) copyFileSync(join(web, "dist", f), join(out, f));
 
 // The page script, which imports the elements from the tickwave.js beside it.
 await esbuild.build({

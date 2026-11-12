@@ -14,17 +14,12 @@ import { clampRange, fitRange, moveRange, scaleLimits, zoomRange, type ScaleLimi
 import { inChannel, isAbort, named, sampleAtOrBefore, sampleTick, type RecordingInfo } from "../source.ts";
 import { parseTime, toTicks, type TimeSpec } from "../time.ts";
 import { DRAG_PX, TickwaveElement, loadRecording, zoomKey, type Loaded } from "./base.ts";
+import { SUMMARY_CSS } from "./summary-style.ts";
 
 const CSS = `
 :host { display: flex; flex-direction: column; }
 .box { background: var(--surface, Canvas); border: 1px solid var(--hair, GrayText); border-radius: 10px; }
-:host([open]) .summary { border-radius: 10px 10px 0 0; }
-.summary { flex: none; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 2px 12px;
-  padding: 8px 10px 8px 14px; }
-.summary .title { font-weight: 600; overflow-wrap: anywhere; }
-.summary .facts { grid-row: 2; grid-column: 1; color: var(--ink-2, GrayText); font-size: 13px; min-height: 1lh; }
-.summary .toggle { grid-row: 1 / 3; grid-column: 2; }
-.viewer { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; box-sizing: border-box; padding: 6px 0 8px;
+${SUMMARY_CSS}.viewer { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; box-sizing: border-box; padding: 6px 0 8px;
   border-top: 0; border-radius: 0 0 10px 10px; }
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px;
   padding: 0 10px 6px 14px; }
@@ -61,8 +56,8 @@ canvas { display: block; }
 `;
 
 const HTML = `
-<div class="summary box" part="summary">
-  <span class="title" part="title"></span><span class="facts" part="facts"></span>
+<div class="summary" part="summary">
+  <span class="title" part="title"><slot name="title"></slot></span><span class="facts" part="facts"><slot name="facts"></slot></span>
   <button type="button" class="toggle" part="button open-button">Open</button>
 </div>
 <div class="viewer box" part="viewer" hidden>
@@ -108,7 +103,8 @@ interface Drag {
 export class TickwaveView extends TickwaveElement {
   static observedAttributes = VIEW_ATTRIBUTES;
   readonly #plot: Plot;
-  readonly #summary: HTMLElement;
+  readonly #titleSlot: HTMLSlotElement;
+  readonly #factsSlot: HTMLSlotElement;
   readonly #toggle: HTMLButtonElement;
   readonly #viewer: HTMLElement;
   readonly #plotBox: HTMLElement;
@@ -139,6 +135,9 @@ export class TickwaveView extends TickwaveElement {
   #stepIndex = -1;
   #windowEventQueued = false;
   #readyFired = false;
+  #summary: Summary | null = null;
+  /** The mismatches between the page's summary and the recording's, warned of once each. */
+  #warned = new Set<string>();
   #resize: ResizeObserver;
   /** One a row, on its lower edge in the names column. */
   #handles: HTMLElement[] = [];
@@ -155,7 +154,9 @@ export class TickwaveView extends TickwaveElement {
 
   constructor() {
     super(CSS, HTML);
-    this.#summary = this.root.querySelector(".summary")!;
+    this.#titleSlot = this.root.querySelector("slot[name=title]")!;
+    this.#factsSlot = this.root.querySelector("slot[name=facts]")!;
+    for (const slot of [this.#titleSlot, this.#factsSlot]) slot.addEventListener("slotchange", () => this.#renderSummary());
     this.#toggle = this.root.querySelector(".toggle")!;
     this.#viewer = this.root.querySelector(".viewer")!;
     this.#plotBox = this.root.querySelector(".plot")!;
@@ -226,6 +227,14 @@ export class TickwaveView extends TickwaveElement {
 
   set open(v: boolean) {
     this.toggleAttribute("open", v);
+  }
+
+  /**
+   * The recording's own title and facts, and whether the page's slotted text matches them. Null
+   * until the view has the head and has compared.
+   */
+  get summary(): Summary | null {
+    return this.#summary;
   }
 
   /** The visible span in ticks. */
@@ -302,23 +311,59 @@ export class TickwaveView extends TickwaveElement {
     });
   }
 
+  /**
+   * The view's own title and facts, under whatever text the page slotted over them. Once the head is
+   * in, a page's text that says otherwise is warned of in the console, since the page shows it.
+   */
   #renderSummary(): void {
     const src = this.#src;
-    const title = this.#summary.querySelector(".title")!;
-    const facts = this.#summary.querySelector(".facts")!;
     const action = this.open ? "Close" : "Open";
     this.#toggle.textContent = action;
-    if (!src) return;
+    if (!src) {
+      this.#setSummary(null);
+      return;
+    }
     // Collapsed, the view shows what is here; the head arrives once the view scrolls into sight.
     const info = peekInfo(src);
-    title.textContent = info?.title ?? decodeURIComponent(src.pathname.split("/").pop() ?? "");
+    const title = info?.title ?? decodeURIComponent(src.pathname.split("/").pop() ?? "");
+    const facts = info ? summaryFacts(info) : [];
+    const factsText = facts.map(([, text]) => text).join("; ");
+    // Only when they change: new fallback text in a slot with nothing assigned is a slotchange,
+    // which renders the summary again.
+    if (this.#titleSlot.textContent !== title) this.#titleSlot.textContent = title;
+    if (this.#factsSlot.textContent !== factsText) {
+      this.#factsSlot.replaceChildren(
+        ...facts.flatMap(([name, text], i) => [...(i > 0 ? [part("fact-separator", "; ")] : []), part(`fact ${name}`, text)]),
+      );
+    }
+    const pageTitle = slotted(this.#titleSlot);
     // A page with several views has several of these buttons: each names its recording.
-    this.#toggle.setAttribute("aria-label", `${action} ${title.textContent}`);
-    const parts = (info ? summaryFacts(info) : []).flatMap(([name, text], i) => [
-      ...(i > 0 ? [part("fact-separator", "; ")] : []),
-      part(`fact ${name}`, text),
-    ]);
-    facts.replaceChildren(...parts);
+    this.#toggle.setAttribute("aria-label", `${action} ${pageTitle ?? title}`);
+    if (!info) {
+      this.#setSummary(null);
+      return;
+    }
+    let matches = true;
+    for (const [what, page, own] of [
+      ["title", pageTitle, title],
+      ["facts", slotted(this.#factsSlot), factsText],
+    ] as const) {
+      if (page === null || page === collapse(own)) continue;
+      matches = false;
+      const warning = `tickwave-view${this.id ? `#${this.id}` : ""} src="${this.getAttribute("src")}": the page's ${what} "${page}" ${what === "title" ? "differs" : "differ"} from the recording's, "${own}"`;
+      if (!this.#warned.has(warning)) {
+        this.#warned.add(warning);
+        console.warn(warning);
+      }
+    }
+    this.#setSummary({ title, facts: factsText, matches });
+  }
+
+  #setSummary(s: Summary | null): void {
+    const was = this.#summary;
+    if (s === was || (s && was && s.title === was.title && s.facts === was.facts && s.matches === was.matches)) return;
+    this.#summary = s;
+    if (s) this.emit("tickwave-summary", s);
   }
 
   #apply(): void {
@@ -1295,6 +1340,25 @@ export class TickwaveView extends TickwaveElement {
     i = Math.max(0, Math.min(list.length - 1, i));
     void this.show(list[i].id);
   }
+}
+
+/** What `summary` and the `tickwave-summary` event give. */
+export interface Summary {
+  /** The recording's own title, and its facts as one line: "524 ms; 2 channels: SWCLK, SWDIO; 4.7 KiB". */
+  readonly title: string;
+  readonly facts: string;
+  /** Whether the text the page slotted, where it slotted any, matches them. */
+  readonly matches: boolean;
+}
+
+/** A slot's assigned text with its whitespace collapsed, or null where the page slotted nothing. */
+function slotted(slot: HTMLSlotElement): string | null {
+  const nodes = slot.assignedNodes({ flatten: true });
+  return nodes.length === 0 ? null : collapse(nodes.map((n) => n.textContent ?? "").join(""));
+}
+
+function collapse(s: string): string {
+  return s.replace(/\s+/g, " ").trim();
 }
 
 /** The summary's facts by part name: "524 ms", "2 channels: SWCLK, SWDIO", "4.7 KiB". */

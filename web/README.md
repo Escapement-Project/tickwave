@@ -181,6 +181,22 @@ recording, it loads `tickwave-worker.js` and `tickwave.wasm` from beside itself,
 files together. Recordings are fetched by byte range: the head first, then only the blocks a view
 shows. A server that ignores ranges still works, as long as it sends the whole file.
 
+A page that shows a closed view can write the view's title and facts into it. The view then lays
+out before `tickwave.js` has loaded, and keeps its height once it has:
+
+```html
+<link rel="stylesheet" href="tickwave.css">
+<tickwave-view src="reads.tickwave">
+  <span slot="title">SWD reads</span>
+  <span slot="facts">524 ms; 2 channels: SWCLK, SWDIO; 4.7 KiB</span>
+</tickwave-view>
+```
+
+`tickwave.css` lays out a view that is not defined yet the way the view lays out its summary, from
+the two spans, with an empty cell where the button goes. Without scripts, that is what the reader
+sees. Put nothing else inside the view. The sheet's rules carry no specificity, so any rule of the
+page's wins. So leave the view's `display` alone: the sheet sets its own.
+
 ### `<tickwave-view>`
 
 A whole recording. Closed, it shows the recording's title and, under it, the recording's length to
@@ -189,6 +205,12 @@ the recording's head, and nothing else, once it scrolls into view. Open, all of 
 the button reads Close. Below it come the time axis, one row a channel, the annotations above the
 rows, and a readout under the rows. The button keeps the focus, and names its recording to a screen
 reader.
+
+A page can write the title and the facts itself, as spans with `slot="title"` and `slot="facts"`
+(see Loading). The view shows the page's text in place of its own. Once the head is in, it compares
+the two, taking any run of spaces as one, and warns in the console of each that differs. `summary`
+and the `tickwave-summary` event say that it has compared, so a page's check can tell a match from
+a view whose head never came.
 
 | Attribute | Means |
 |---|---|
@@ -257,6 +279,7 @@ Clicking an annotation's label shows its span.
 | `tickAt(clientX)` | the tick under a point in the window, or null before the view has drawn |
 | `open` | whether the view is open; setting it opens or closes it |
 | `window` | the span shown, `{start, end}` in ticks |
+| `summary` | the recording's own `title` and `facts`, the facts as one line, and `matches`: whether the text the page slotted matches them. Null until the head is in |
 
 | Event | When, and its `detail` |
 |---|---|
@@ -264,6 +287,7 @@ Clicking an annotation's label shows its span.
 | `tickwave-window` | the span shown changes: `{start, end}` |
 | `tickwave-select` | a span is selected: its `start`, `end`, `duration`, `edges` by channel, and `periods` for the measured channel |
 | `tickwave-ready` | the view has first drawn: `{height}` |
+| `tickwave-summary` | the view has the head and has compared the page's title and facts with it: the `summary`. Again if the page slots other text |
 | `tickwave-error` | something failed: `{message, error}`. The view also shows it, and logs it to the console |
 
 ### `<tickwave-inset>`
@@ -423,14 +447,36 @@ Inside `facts`, each fact is a `fact` and also `fact-length`, `fact-channels` or
 a `fact-separator` ("; ") between two. On the inset: `inset`, `label`, `text`, `frame`, `canvas`,
 `plot` (over the canvas, what the pointer and the keys reach), `foot`, `measure`, `reading` (what
 the pointer or the keys lit), `key` and `notice`. On the reference: `popover`.
-A part an element hides stays hidden, whatever `display` a page's rule gives it.
+A part an element hides stays hidden, whatever `display` a page's rule gives it. A page's slotted
+spans sit inside `title` and `facts`, and take the page's own rules.
+
+A page sets the view's summary through these properties, set on the view or above it. `tickwave.css`
+reads them too, which `::part()` cannot reach, so a view styled this way keeps its height when it
+is defined:
+
+| Property | Sets | Without it |
+|---|---|---|
+| `--tickwave-summary-padding` | the summary's padding | `8px 10px 8px 14px` |
+| `--tickwave-summary-gap` | the gap between its rows, and between the text and the button | `2px 12px` |
+| `--tickwave-summary-border-width` | its border's widths | `1px` |
+| `--tickwave-summary-border-color` | its border's colour | `var(--hair)` |
+| `--tickwave-summary-background` | its background | `var(--surface)` |
+| `--tickwave-summary-radius` | its corners' radius | `10px` |
+| `--tickwave-title-size` | the title's font size | the view's |
+| `--tickwave-facts-size` | the facts' font size | `13px` |
+| `--tickwave-open-button-size` | the Open button's font size | `13px` |
+| `--tickwave-open-button-padding` | its padding | `3px 9px` |
+| `--tickwave-open-button-height` | its least height | `26px` |
+
+The title and the facts take the view's `font-size` and `line-height`. The title is weight 600 and
+breaks anywhere it must; a page that changes that, or the facts' colour, styles its own spans.
 
 Nothing moves under the reader. A readout's figures are tabular, and an inset's reading sets a
 pulse's level as wide as "high" either way, so what follows it holds still as the pointer crosses
 edges. The label at a view's pointer keeps off the row it reads. An inset takes its final height
 once its head and sidecar are in, so the data arriving moves nothing below it. A control stays
 where the reader pressed it. One that opens or switches something undoes it when pressed again: a
-view's Open button reads Close while the view is open.
+view's Open button reads Close while the view is open, and is as wide either way.
 
 ### From the module
 

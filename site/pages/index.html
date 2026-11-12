@@ -61,13 +61,14 @@
     <p>Its first transfer <tickwave-ref for="capture" annotation="dpidr-read">reads the debug port's ID register</tickwave-ref>. The probe drives the <tickwave-ref for="capture" annotation="dpidr-request">request</tickwave-ref>. The target drives the <tickwave-ref for="capture" annotation="dpidr-ack">acknowledge</tickwave-ref> and the data. Later on, the target <tickwave-ref for="capture" annotation="first-wait">answers WAIT</tickwave-ref> to a read it isn't ready for.</p>
     <p class="needs-script">Here is the whole capture, closed. It says what it holds before any of its data downloads.</p>
     <noscript><p class="quiet">The capture needs JavaScript. Its recording is <a href="fixtures/identify-swd.tickwave" download>identify-swd.tickwave</a>, with its sidecar <a href="fixtures/identify-swd.annotations.toml" download>identify-swd.annotations.toml</a>.</p></noscript>
-    <tickwave-view id="capture" src="fixtures/identify-swd.tickwave" annotations="fixtures/identify-swd.annotations.toml"></tickwave-view>
+    <tickwave-view id="capture" src="fixtures/identify-swd.tickwave" annotations="fixtures/identify-swd.annotations.toml"><span slot="title">identify-swd.tickwave</span><span slot="facts">524 ms; 2 channels: SWCLK, SWDIO; 4.7 KiB</span></tickwave-view>
     <h3 class="how">How this page does it</h3>
     <div class="two">
       <div>
-        <p>The page includes one script. The capture and its sidecar of annotations sit beside it as files.</p>
+        <p>The page includes one script, and a stylesheet that lays out the closed capture before the script has loaded. The capture and its sidecar of annotations sit beside them as files.</p>
         <pre><code>&lt;script type="module" src="tickwave.js"&gt;
 &lt;/script&gt;
+&lt;link rel="stylesheet" href="tickwave.css"&gt;
 
 &lt;p&gt;Its first transfer
   &lt;tickwave-ref for="capture"
@@ -77,6 +78,9 @@
 &lt;tickwave-view id="capture"
   src="identify-swd.tickwave"
   annotations="identify-swd.annotations.toml"&gt;
+  &lt;span slot="title"&gt;identify-swd.tickwave&lt;/span&gt;
+  &lt;span slot="facts"&gt;524 ms; 2 channels:
+    SWCLK, SWDIO; 4.7 KiB&lt;/span&gt;
 &lt;/tickwave-view&gt;</code></pre>
         <p>The sidecar is a short TOML file. This entry names a transfer an SWD decoder found, and asks for the clock's rate over it:</p>
         <pre><code>[[annotation]]

@@ -3,7 +3,8 @@
 // so a test can see what was fetched: GET /__log?tag=X lists the requests whose URL holds X.
 // A request URL with `after=N` makes every Range read past the Nth for its tag wait `stall`
 // milliseconds, then fail with status `fail` or be answered; with `until=M`, only the reads up to
-// the Mth.
+// the Mth. /named/<path>/<name> serves web/<path> under another name: a recording without a title
+// of its own takes its file's name as one.
 //
 //   node e2e/server.ts
 
@@ -34,8 +35,10 @@ function serve(port: number, acceptRanges: boolean): void {
     log.push(entry);
     res.on("finish", () => (entry.status = res.statusCode));
     res.setHeader("cache-control", "no-store");
+    const named = /^\/named(\/.+)\/[^/]+$/.exec(url.pathname);
+    const path = decodeURIComponent(named ? named[1] : url.pathname);
     const answer = () =>
-      send(req, decodeURIComponent(url.pathname), { root, acceptRanges, etag: false, lastModified: false, cacheControl: false })
+      send(req, path, { root, acceptRanges, etag: false, lastModified: false, cacheControl: false })
         .on("error", (e: { status?: number }) => {
           res.statusCode = e.status ?? 500;
           res.end();

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>A view whose page writes its summary</title>
+<!--
+  A view with the page's title and facts in it, laid out by tickwave.css until define() loads
+  tickwave.js. Before the test calls define(), the element is undefined. The script after the view
+  runs as the page parses, so the first frame has the spans, as a page's own markup would.
+  ?title=, ?facts=   the slotted text; ?facts= alone leaves the title unslotted
+  ?src=              the recording, relative to web/ (default fixtures/identify-swd.tickwave)
+  ?style=verge|bench the summary's metrics as the Escapement Project's two pages set them
+  ?hidden            the view is hidden
+  ?tag=, ?after=, ?stall=  passed on to the server with the recording's URL
+-->
+<link rel="stylesheet" href="../../dist/tickwave.css">
+<style>
+body { margin: 16px; font: 17px/1.6 system-ui, sans-serif; }
+/* Both pages style their own spans for what does not change a box's metrics, and the box through
+   the properties. */
+.verge tickwave-view, .bench tickwave-view { margin: 0; font-size: 15px; --tickwave-summary-gap: 2px 24px;
+  --tickwave-summary-background: none; --tickwave-summary-radius: 0; --tickwave-open-button-size: 14px;
+  --tickwave-open-button-padding: 5px 14px; --tickwave-open-button-height: 32px; }
+.verge tickwave-view { --tickwave-summary-padding: 8px 0 0; --tickwave-summary-border-width: 0;
+  --tickwave-title-size: 15px; --tickwave-facts-size: 14px; }
+.bench tickwave-view { --tickwave-summary-padding: 14px 0; --tickwave-summary-border-width: 1px 0;
+  --tickwave-summary-border-color: #8888; --tickwave-title-size: 17px; --tickwave-facts-size: 15px; }
+.verge [slot=title], .bench [slot=title] { font-weight: 600; overflow-wrap: anywhere; }
+.verge [slot=facts], .bench [slot=facts] { color: #666; }
+</style>
+</head>
+<body>
+<tickwave-view id="v"></tickwave-view>
+<script>
+const q = new URLSearchParams(location.search);
+const served = new URLSearchParams([...q].filter(([k]) => ["tag", "after", "stall"].includes(k)));
+const view = document.getElementById("v");
+view.setAttribute("src", `../../${q.get("src") ?? "fixtures/identify-swd.tickwave"}${served.size > 0 ? `?${served}` : ""}`);
+for (const slot of ["title", "facts"]) {
+  if (!q.has(slot)) continue;
+  const span = document.createElement("span");
+  span.slot = slot;
+  span.textContent = q.get(slot);
+  view.append(span);
+}
+if (q.has("hidden")) view.hidden = true;
+document.body.className = q.get("style") ?? "";
+window.define = () => import("../../dist/tickwave.js");
+</script>
+<p id="after">What follows the view.</p>
+</body>
+</html>

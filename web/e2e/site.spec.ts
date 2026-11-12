@@ -267,6 +267,8 @@ test("the overview's references, inset and views work", async ({ page }) => {
   await page.mouse.move(0, 0);
   const capture = page.locator("#capture");
   await expect(capture.locator(".summary .facts")).toHaveText("524 ms; 2 channels: SWCLK, SWDIO; 4.7 KiB");
+  // The page writes the capture's title and facts into it: they are still the recording's.
+  expect(await capture.evaluate((v) => (v as HTMLElement & { summary: { matches: boolean } | null }).summary?.matches)).toBe(true);
   // A closed view's focus goes to its Open button.
   await capture.evaluate((v) => v.focus());
   await expect(capture.locator(".toggle")).toBeFocused();
@@ -532,7 +534,17 @@ test.describe("screenshots", () => {
           await page.waitForTimeout(150);
           const [scroll, client] = await page.evaluate(() => [document.documentElement.scrollWidth, document.documentElement.clientWidth]);
           expect(scroll, `${name} scrolls sideways at ${width} px`).toBeLessThanOrEqual(client);
-          await page.screenshot({ path: `screenshots/site-${info.project.name}-${name}-${face}-${width}.png`, fullPage: true });
+          // Firefox takes no screenshot taller than 32,767 device pixels: a longer page goes in parts.
+          const [height, dpr] = await page.evaluate(() => [document.documentElement.scrollHeight, devicePixelRatio]);
+          const part = Math.floor(32_767 / dpr);
+          const file = `screenshots/site-${info.project.name}-${name}-${face}-${width}`;
+          if (height <= part) await page.screenshot({ path: `${file}.png`, fullPage: true });
+          else {
+            for (let k = 0; k * part < height; k++) {
+              const clip = { x: 0, y: k * part, width, height: Math.min(part, height - k * part) };
+              await page.screenshot({ path: `${file}-${k + 1}.png`, fullPage: true, clip });
+            }
+          }
         }
       });
     }

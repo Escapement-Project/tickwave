@@ -4,10 +4,10 @@ import { onFaceChange, onFontsLoaded } from "../face.ts";
 import { resolvePalette, type Palette } from "../palette.ts";
 import { absolute, annotationsFor, bundledFor, infoFor, sourceFor } from "../registry.ts";
 import type { RecordingInfo, Source } from "../source.ts";
+import { HOST_TEXT } from "./summary-style.ts";
 
 export const SHARED_CSS = `
-:host { display: block; color: var(--ink, CanvasText); font-family: var(--font-text, system-ui, sans-serif);
-  font-size: 14px; line-height: 1.4; }
+:host { display: block; ${HOST_TEXT} }
 :host([hidden]) { display: none; }
 /* Important, because a page's ::part() rule giving a part its display otherwise beats this one. */
 [hidden] { display: none !important; }
