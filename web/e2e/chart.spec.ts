@@ -430,6 +430,34 @@ test("data set on the element before the module defines it still draws", async (
   await expect(page.locator('#early g.tw-series[data-series="clang"] circle.tw-pt')).toHaveCount(7);
 });
 
+test("a chart's plot takes its height before its data arrives, and keeps it", async ({ page }) => {
+  // Every frame from the first: each chart's plot height, and whether its data has come.
+  await page.addInitScript(() => {
+    const w = window as unknown as { frames: [string, number, boolean][] };
+    w.frames = [];
+    const tick = () => {
+      for (const chart of document.querySelectorAll<HTMLElement & { data?: unknown }>("tickwave-chart")) {
+        const svg = chart.querySelector("svg.tw-plot");
+        if (svg) w.frames.push([chart.id, svg.getBoundingClientRect().height, !!chart.data]);
+      }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+  // The data comes a second late.
+  await page.route("**/figure1.chart.json", (r) => setTimeout(() => r.continue(), 1000));
+  await page.goto(`${PAGE}?height`);
+  await page.locator("#c1").evaluate((c) => (c as HTMLElement & { settled(): Promise<void> }).settled());
+  const frames = await page.evaluate(() => (window as unknown as { frames: [string, number, boolean][] }).frames);
+  // c1 has no height attribute and draws at 330; c2 asks for 250 from the query.
+  for (const [id, height] of [["c1", 330], ["c2", 250]] as const) {
+    const mine = frames.filter(([c]) => c === id);
+    expect(mine.filter(([, , data]) => !data).length, id).toBeGreaterThan(20);
+    expect(mine.filter(([, , data]) => data).length, id).toBeGreaterThan(0);
+    expect(new Set(mine.map(([, h]) => h)), id).toEqual(new Set([height]));
+  }
+});
+
 test.describe("on a touch screen", () => {
   test.use({ hasTouch: true });
 

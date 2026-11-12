@@ -245,7 +245,20 @@ export class TickwaveChart extends HTMLElement {
     } else if (name === "highlight" && value !== null && (this.#sweep !== null || this.#labels !== null)) {
       // A claim pointed at while the sweep plays: its rings would land on points not drawn yet.
       this.#finishSweep();
-    } else this.#draw();
+    } else {
+      if (name === "height" && !this.#data) this.#sizePlot();
+      this.#draw();
+    }
+  }
+
+  #plotHeight(): number {
+    return Number(this.getAttribute("height")) || DEFAULT_HEIGHT;
+  }
+
+  /** Before the data, the plot at the height it will draw at, rather than an empty svg's 150 px. */
+  #sizePlot(): void {
+    this.#svg?.setAttribute("width", "100%");
+    this.#svg?.setAttribute("height", String(this.#plotHeight()));
   }
 
   /** The chart's data. Setting it redraws without replaying the sweep. */
@@ -303,6 +316,7 @@ export class TickwaveChart extends HTMLElement {
     this.#legend?.classList.add("tw-legend");
     this.#svg = document.createElementNS(SVG, "svg");
     this.#svg.classList.add("tw-plot");
+    this.#sizePlot();
     this.#svg.setAttribute("font-size", "12");
     this.#plot = document.createElementNS(SVG, "g");
     this.#plot.classList.add("tw-data");
@@ -473,7 +487,7 @@ export class TickwaveChart extends HTMLElement {
     const svg = this.#svg;
     if (!data || !svg || !this.isConnected) return;
     const width = Math.max(240, Math.round(this.clientWidth));
-    const height = Number(this.getAttribute("height")) || DEFAULT_HEIGHT;
+    const height = this.#plotHeight();
     const endLabels = this.hasAttribute("end-labels");
     const c = this.#colour();
     const shown = this.#shown();

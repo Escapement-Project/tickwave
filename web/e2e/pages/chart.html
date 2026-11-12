@@ -26,6 +26,10 @@ figure { margin: 0 0 40px; width: 620px; }
 <tickwave-chart id="c2" src="/fixtures/figure1.chart.json" group="g" readout="below" show="clang gcc"></tickwave-chart>
 <figcaption>Figure 2. The two builds.</figcaption>
 </figure>
+<script>
+// ?height: Figure 2 asks for a 250 px plot, before the module defines the chart.
+if (new URLSearchParams(location.search).has("height")) document.getElementById("c2").setAttribute("height", "250");
+</script>
 <div class="spacer"></div>
 <figure>
 <tickwave-chart id="c3" src="/fixtures/figure1.chart.json" end-labels></tickwave-chart>
