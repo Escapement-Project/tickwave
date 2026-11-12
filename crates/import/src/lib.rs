@@ -5,3 +5,4 @@ pub mod saleae;
 pub mod shape;
 pub mod sigrok;
 pub mod vcd;
+pub mod zipped;

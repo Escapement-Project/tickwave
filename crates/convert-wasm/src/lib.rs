@@ -32,6 +32,10 @@ extern "C" {
     /// A panic's message, before the module traps.
     #[wasm_bindgen(js_namespace = tickwaveConvert)]
     fn panicked(message: &str);
+    /// The next bytes of the zipped file being unzipped. `chunk` is a view of the module's memory,
+    /// valid only during the call.
+    #[wasm_bindgen(js_namespace = tickwaveConvert)]
+    fn unzipped(chunk: &[u8]);
 }
 
 /// A file the worker holds, by its index there.
@@ -301,6 +305,57 @@ impl Converted {
     pub fn codes(&self) -> String {
         self.codes.clone()
     }
+}
+
+#[derive(Deserialize)]
+struct UnzipRequest {
+    file: FileRef,
+    /// The ends of the names the page opens, such as `.tickwave`, in lower case.
+    ends: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct UnzippedFile {
+    name: String,
+    size: f64,
+    /// A stored file's offset in the zip; null for a deflated one, whose bytes came through
+    /// `tickwaveConvert.unzipped`.
+    start: Option<f64>,
+}
+
+/// The files in a zip that the page opens, out of their folders, as JSON: `[{name, size, start}]`.
+/// `request` is `{file: {id, name, size}, ends}`. Each deflated file is unzipped in turn, its bytes
+/// handed to `tickwaveConvert.unzipped` before the next one starts; a stored file is left in the
+/// zip for the page to slice.
+#[wasm_bindgen]
+pub fn unzip(request: &str) -> Result<String, JsError> {
+    use escapement_tickwave_import::zipped::{Data, Limits, Zipped};
+    hook();
+    let UnzipRequest { file, ends } = serde_json::from_str(request).map_err(js)?;
+    let wanted = |name: &str| {
+        let name = name.to_ascii_lowercase();
+        ends.iter().any(|end| name.ends_with(end.as_str()))
+    };
+    let mut zipped = Zipped::open(file.input(), &wanted, Limits::default()).map_err(js)?;
+    let entries = zipped.entries().to_vec();
+    let mut out = Vec::with_capacity(entries.len());
+    for e in &entries {
+        let start = match e.data {
+            Data::Stored { start } => Some(start as f64),
+            Data::Deflated => {
+                zipped
+                    .inflate(e, &mut |chunk| unzipped(chunk))
+                    .map_err(js)?;
+                None
+            }
+        };
+        out.push(UnzippedFile {
+            name: e.name.clone(),
+            size: e.size as f64,
+            start,
+        });
+    }
+    serde_json::to_string(&out).map_err(js)
 }
 
 /// Applies one edit to a sidecar's hand-written TOML `text` and returns the new text. `op` is
