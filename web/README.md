@@ -93,7 +93,7 @@ into `info().channels`, and ticks are integers below 2^53 counted from the captu
   null when there is none. The renderer then reads edges or samples.
 - `samples(channel, start, end)`: an analog channel's values. Sample i sits at
   `first + floor(i × period)`.
-- `prefetch()`: the head, ahead of a view.
+- `prefetch()`: the footer, ahead of a view.
 
 A loader reads the recordings at the URLs it accepts (`registerLoader`). Every element on the page
 shares one source per URL.
@@ -105,9 +105,11 @@ URLs with `registerFile(file)`. A loader registered later is asked first. While 
 URL no loader takes waits for one; after that it is refused (`TickwaveNoLoader`). Each recording is
 opened once, in one worker that holds the WASM module.
 
-- The head comes by HTTP Range: the first 32 KiB, then the rest if the head is longer. Data blocks
-  and overview blocks come by Range as a view needs them. Adjacent missing blocks share one
-  request, and a block inside the first read is not fetched again.
+- The footer, which holds the header and the index, comes first, by HTTP Range: the file's last
+  32 KiB (`bytes=-32768`), then the rest of the footer if it is longer. Data blocks and overview
+  blocks come by Range as a view needs them. Adjacent missing blocks share one request, and a block
+  inside the first read is not fetched again.
+- A recording with gaps or breaks is refused (`TickwaveUnsupported`): the views draw neither yet.
 - A server that answers 200 instead of 206 has sent the whole file. It is kept, and every later
   read is served from it.
 - A 206 with a `Content-Encoding` is refused: its ranges count bytes of the compressed stream.
@@ -178,7 +180,7 @@ Include one module, and the three elements are defined:
 
 `tickwave.js` reads recordings through a decoder in a worker. The first time a page needs a
 recording, it loads `tickwave-worker.js` and `tickwave.wasm` from beside itself, so keep the three
-files together. Recordings are fetched by byte range: the head first, then only the blocks a view
+files together. Recordings are fetched by byte range: the footer first, then only the blocks a view
 shows. A server that ignores ranges still works, as long as it sends the whole file.
 
 A page that shows a closed view can write the view's title and facts into it. The view then lays
@@ -203,16 +205,16 @@ A whole recording. Closed, it shows the recording's title and, under it, the rec
 three significant figures, its channels and its size, with an Open button beside them. A view of
 some of the channels names those out of the recording's, "2 of 3 channels: TCKC, TMSC", and gives
 the length they span. It fetches
-the recording's head, and nothing else, once it scrolls into view. Open, all of that stays, and
+the recording's footer, and nothing else, once it scrolls into view. Open, all of that stays, and
 the button reads Close. Below it come the time axis, one row a channel, the annotations above the
 rows, and a readout under the rows. The button keeps the focus, and names its recording to a screen
 reader.
 
 A page can write the title and the facts itself, as spans with `slot="title"` and `slot="facts"`
-(see Loading). The view shows the page's text in place of its own. Once the head is in, it compares
+(see Loading). The view shows the page's text in place of its own. Once the footer is in, it compares
 the two, taking any run of spaces as one, and warns in the console of each that differs. `summary`
 and the `tickwave-summary` event say that it has compared, so a page's check can tell a match from
-a view whose head never came.
+a view whose footer never came.
 
 | Attribute | Means |
 |---|---|
@@ -276,12 +278,12 @@ Clicking an annotation's label shows its span.
 | `show(id, span?)` | opens the view at an annotation, over `span` (`{start, end}` in ticks) if one is given. Resolves once it has drawn |
 | `reveal(id, span?)` | `show(id, span)`, then brings the view into sight and puts the focus on its plot, as a reference, an inset or a chart's point does |
 | `focus()` | puts the focus on the plot, or on the Open button while the view is closed |
-| `setWindow(start, end)` | shows a span: ticks, or times such as `"317.8 ms"`. Called before the head arrives, it shows the span once it has |
+| `setWindow(start, end)` | shows a span: ticks, or times such as `"317.8 ms"`. Called before the footer arrives, it shows the span once it has |
 | `settled()` | resolves once the view has drawn everything it shows |
 | `tickAt(clientX)` | the tick under a point in the window, or null before the view has drawn |
 | `open` | whether the view is open; setting it opens or closes it |
 | `window` | the span shown, `{start, end}` in ticks |
-| `summary` | the recording's own `title` and `facts`, the facts as one line, and `matches`: whether the text the page slotted matches them. Null until the head is in |
+| `summary` | the recording's own `title` and `facts`, the facts as one line, and `matches`: whether the text the page slotted matches them. Null until the footer is in |
 
 | Event | When, and its `detail` |
 |---|---|
@@ -289,7 +291,7 @@ Clicking an annotation's label shows its span.
 | `tickwave-window` | the span shown changes: `{start, end}` |
 | `tickwave-select` | a span is selected: its `start`, `end`, `duration`, `edges` by channel, and `periods` for the measured channel |
 | `tickwave-ready` | the view has first drawn: `{height}` |
-| `tickwave-summary` | the view has the head and has compared the page's title and facts with it: the `summary`. Again if the page slots other text |
+| `tickwave-summary` | the view has the footer and has compared the page's title and facts with it: the `summary`. Again if the page slots other text |
 | `tickwave-error` | something failed: `{message, error}`. The view also shows it, and logs it to the console |
 
 ### `<tickwave-inset>`
@@ -353,7 +355,7 @@ the focus. A reference passes its arrow keys to `arrowKey(event)`, which answers
 inset's own and says whether it did. It reads the lit note from `lit` and the zoomed span from
 `zoomed` only while its popover is open, and lights none with `clear()` as the popover closes.
 
-An inset takes its final height once its recording's head and sidecar are in. The line under the
+An inset takes its final height once its recording's footer and sidecar are in. The line under the
 trace is held from then, where the annotation asks for a measure or a reader can point at the
 inset, so neither the data's arrival nor the pointer moves anything below it. Before then it has
 no label and no rows to size by. A page that wants nothing to move at all gives the inset its height, as
@@ -381,7 +383,7 @@ reference itself.
 | `for` | the id of a `<tickwave-view>` to share a recording with. The reference takes its `src`, `annotations`, `channels` and `series` |
 | `src`, `annotations`, `series` | the recording, sidecar and series, for a reference without a view |
 
-A reference fetches nothing until it scrolls into view. Then it fetches the recording's head and
+A reference fetches nothing until it scrolls into view. Then it fetches the recording's footer and
 the sidecar, and the inset fetches the data when it opens.
 
 ### `<tickwave-chart>`
@@ -477,7 +479,7 @@ breaks anywhere it must; a page that changes that, or the facts' colour, styles 
 Nothing moves under the reader. A readout's figures are tabular, and an inset's reading sets a
 pulse's level as wide as "high" either way, so what follows it holds still as the pointer crosses
 edges. The label at a view's pointer keeps off the row it reads. An inset takes its final height
-once its head and sidecar are in, so the data arriving moves nothing below it. A control stays
+once its footer and sidecar are in, so the data arriving moves nothing below it. A control stays
 where the reader pressed it. One that opens or switches something undoes it when pressed again: a
 view's Open button reads Close while the view is open, and is as wide either way.
 
@@ -489,5 +491,5 @@ view's Open button reads Close while the view is open, and is as wide either way
 |---|---|
 | `registerFile(file, sidecar)` | makes a local `File` a `src`. The sidecar's `.toml` and `.jsonl` files can come with it |
 | `registerLoader(loader)` | reads recordings at the URLs `loader.accepts`, asked before the loaders registered earlier |
-| `recordingInfo(src)` | what a recording holds, from its head: title, length, channels, size, content id |
-| `configure({firstRead, maxDecodedBytes, cacheBytes})` | the size of the first read of a head, 32 KiB by default; the most the decoder takes from one block, overview block or head overview, 64 MiB, past which it refuses the recording; and the size of the cache of decoded blocks, 192 MiB |
+| `recordingInfo(src)` | what a recording holds, from its footer: title, length, channels, size, content id |
+| `configure({firstRead, maxDecodedBytes, cacheBytes})` | the size of the first read, from a recording's end, 32 KiB by default; the most the decoder takes from one block, overview block or footer overview, 64 MiB, past which it refuses the recording; and the size of the cache of decoded blocks, 192 MiB |

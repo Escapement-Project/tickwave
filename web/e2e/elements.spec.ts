@@ -1,5 +1,5 @@
 // The elements as a page changes them under the reader: a new recording or sidecar, a call made
-// before the head has arrived, a load that fails, and the focus as views open and close. On
+// before the footer has arrived, a load that fails, and the focus as views open and close. On
 // e2e/pages/view.html, one view of identify-swd.tickwave and a reference to it.
 
 import { test, expect, type Locator, type Page } from "@playwright/test";
@@ -53,7 +53,7 @@ test("a click on a channel's name places no cursor", async ({ page }) => {
   await expect(readout(view)).toBeEmpty();
 });
 
-test("setWindow before the head arrives shows that window once it has", async ({ page }) => {
+test("setWindow before the footer arrives shows that window once it has", async ({ page }) => {
   await page.goto(`${VIEW}?open`);
   const window = await page.evaluate(async () => {
     const v = document.createElement("tickwave-view") as HTMLElement & { setWindow(a: string, b: string): void; window: { start: number; end: number } };
@@ -110,7 +110,7 @@ test("a failed load is tried again, and a new recording's view drops the old not
 
 test("a read the old recording's rows had out, failing after a new recording, says nothing", async ({ page }, info) => {
   const tag = `rows-${info.project.name}-${info.repeatEachIndex}-${Date.now()}`;
-  // Past the head's two reads, every read waits 2 s, then fails.
+  // Past the footer's two reads, every read waits 2 s, then fails.
   await page.goto(`${VIEW}?open&src=fixtures/swd50-cut.tickwave&tag=${tag}&firstRead=256&after=2&stall=2000&fail=500`);
   const view = page.locator("#v");
   await drawn(view);
@@ -134,7 +134,7 @@ test("a read the old recording's rows had out, failing after a new recording, sa
 
 test("a read the old recording's readout had out, failing after a new recording, says nothing", async ({ page }, info) => {
   const tag = `readout-${info.project.name}-${info.repeatEachIndex}-${Date.now()}`;
-  // Past the head's two reads, every read waits 2 s, then fails. Fitted, the rows read nothing more.
+  // Past the footer's two reads, every read waits 2 s, then fails. Fitted, the rows read nothing more.
   await page.goto(`${VIEW}?open&src=fixtures/swd50-cut.tickwave&tag=${tag}&firstRead=256&after=2&stall=2000&fail=500`);
   const view = page.locator("#v");
   await drawn(view);
@@ -157,7 +157,7 @@ test("a collapsed view drops the old notice for a new recording", async ({ page 
   const view = page.locator("#v");
   await expect(notice(view)).toContainText("404");
   await view.evaluate((v) => v.setAttribute("src", "../../fixtures/identify-swd.tickwave"));
-  // The new head is in: the summary gives its facts.
+  // The new footer is in: the summary gives its facts.
   await expect(view.locator(".summary .facts")).not.toBeEmpty({ timeout: 20_000 });
   await expect(notice(view)).toBeHidden();
 });
@@ -300,9 +300,9 @@ test("a URL that is not a .tickwave file is refused once the page has loaded, no
   await expect(notice(page.locator("#v"))).toContainText("404", { timeout: 10_000 });
 });
 
-test("a collapsed view keeps its height when its head arrives", async ({ page }, info) => {
+test("a collapsed view keeps its height when its footer arrives", async ({ page }, info) => {
   const tag = `summary-${info.project.name}-${info.repeatEachIndex}-${Date.now()}`;
-  // Every frame from the view's first: its height, and whether the head has filled the facts.
+  // Every frame from the view's first: its height, and whether the footer has filled the facts.
   await page.addInitScript(() => {
     const w = window as unknown as { frames: [number, string][] };
     w.frames = [];
@@ -314,17 +314,17 @@ test("a collapsed view keeps its height when its head arrives", async ({ page },
     };
     requestAnimationFrame(tick);
   });
-  // The server holds every read a second, the head's too.
+  // The server holds every read a second, the footer's too.
   await page.goto(`${VIEW}?tag=${tag}&after=0&stall=1000`);
-  await expect(page.locator("#v .facts")).toHaveText("524 ms; 2 channels: SWCLK, SWDIO; 4.7 KiB", { timeout: 10_000 });
+  await expect(page.locator("#v .facts")).toHaveText("524 ms; 2 channels: SWCLK, SWDIO; 5.2 KiB", { timeout: 10_000 });
   const frames = await page.evaluate(() => (window as unknown as { frames: [number, string][] }).frames);
-  // Frames before the head and after it, at one height.
+  // Frames before the footer and after it, at one height.
   expect(frames.filter(([, f]) => f === "").length).toBeGreaterThan(20);
   expect(frames.at(-1)![1]).not.toBe("");
   expect(new Set(frames.map(([h]) => h))).toEqual(new Set([frames[0][0]]));
 });
 
-test("an inset takes its final height once its head and sidecar are in, and its data moves nothing", async ({ page }, info) => {
+test("an inset takes its final height once its footer and sidecar are in, and its data moves nothing", async ({ page }, info) => {
   const tag = `steady-${info.project.name}-${info.repeatEachIndex}-${Date.now()}`;
   // Every frame from the label's arrival: the inset's height, and whether its measure has come.
   await page.addInitScript(() => {
@@ -339,7 +339,7 @@ test("an inset takes its final height once its head and sidecar are in, and its 
     requestAnimationFrame(tick);
   });
   // A small first read, so the data is a read of its own; the server holds it a second after the
-  // head's two.
+  // footer's two.
   await page.goto(
     `/e2e/pages/inset.html?src=fixtures/identify-swd.tickwave&annotations=fixtures/identify-swd.annotations.toml&annotation=dpidr-read&firstRead=512&tag=${tag}&after=2&stall=1000`,
   );

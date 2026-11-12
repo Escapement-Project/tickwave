@@ -22,14 +22,25 @@ const ONE = readFileSync(at("fixtures/identify-swd.tickwave"));
 const NINE = readFileSync(at("fixtures/identify-swd.4k.tickwave"));
 const memory = () => readFixture(readFileSync(at("fixtures/identify-swd.tickwavefx"))).then((r) => new MemorySource(r));
 
-test("the head: what the recording says, from one read", async () => {
+/** Where a file's footer starts, as its trailer says, and where each block's frame lies. */
+function layout(file: Uint8Array) {
+  const view = new DataView(file.buffer, file.byteOffset, file.byteLength);
+  const footer = Number(view.getBigUint64(file.length - 24, true));
+  const r = new (wasm().Recording)(file, file.length);
+  const blocks = Array.from({ length: r.blockCount }, (_, i) => r.blockRange(i) as unknown as [number, number]);
+  return { footer, blocks: blocks.map(([a, b]) => [Number(a), Number(b)] as [number, number]) };
+}
+
+test("the footer: what the recording says, from one read at the end", async () => {
   const bytes = new MemoryBytes(ONE, "identify-swd.tickwave");
   const r = await Opened.open(wasm(), bytes);
-  assert.deepEqual(bytes.reads, [[0, FIRST_READ]]);
+  // The file is shorter than the first read: it comes whole.
+  assert.ok(ONE.length < FIRST_READ);
+  assert.deepEqual(bytes.reads, [[0, ONE.length]]);
   const i = r.info;
   assert.deepEqual(i.timebase, { num: 1e9, den: 1 });
   assert.equal(i.length, 523583100);
-  assert.equal(i.bytes, 4830);
+  assert.equal(i.bytes, ONE.length);
   assert.deepEqual(
     i.channels.map((c) => [c.name, c.kind, c.end]),
     [
@@ -39,16 +50,13 @@ test("the head: what the recording says, from one read", async () => {
   );
 });
 
-test("a small first read: the head in two reads, then the block by its range", async () => {
-  // The converter reports a 1744-byte head and one block, the rest of the 4830 bytes.
+test("a small first read: the footer in two reads from the end, then the block by its range", async () => {
   const bytes = new MemoryBytes(ONE, "identify-swd.tickwave");
+  const { footer, blocks } = layout(ONE);
+  assert.ok(footer < ONE.length - 512, "a footer longer than the first read");
   const r = await Opened.open(wasm(), bytes, 512);
   const e = await r.edges(1, 377094000, 377107000);
-  assert.deepEqual(bytes.reads, [
-    [0, 512],
-    [512, 1744],
-    [1744, 4830],
-  ]);
+  assert.deepEqual(bytes.reads, [[ONE.length - 512, ONE.length], [footer, ONE.length - 512], blocks[0]]);
   assert.equal(e.level, 0);
   assert.deepEqual([...e.ticks], [377094556, 377095556, 377096556, 377097556, 377099556, 377100556, 377101556, 377104078, 377106074]);
 });
@@ -77,7 +85,7 @@ test("nine blocks: every edge and every level agree with the extractor's fixture
   }
 });
 
-test("the overview: unpacked from the head, as the extractor's fixture computes it", async () => {
+test("the overview: unpacked from the footer, as the extractor's fixture computes it", async () => {
   const r = await openTickwave("fixtures/identify-swd.tickwave");
   const m = await memory();
   // By hand (test/columns.test.ts): SWCLK's buckets of 4096 from 376696832, changing in the 6th
@@ -88,7 +96,7 @@ test("the overview: unpacked from the head, as the extractor's fixture computes 
   assert.equal(ov.start, 376696832);
   assert.deepEqual([...ov.level], [1, 1, 1, 1, 1, 1, 1]);
   assert.deepEqual([...ov.changes], [0, 0, 0, 0, 0, 1, 1]);
-  // Every level the head holds, over the whole capture, against the TypeScript computation.
+  // Every level the footer holds, over the whole capture, against the TypeScript computation.
   assert.deepEqual(r.header.overview.map((s) => 2 ** s), formatLevels(r.info.length));
   assert.equal(r.header.overview_blocks, undefined);
   for (const bucket of formatLevels(r.info.length)) {
@@ -101,7 +109,7 @@ test("the overview: unpacked from the head, as the extractor's fixture computes 
 
 test("overview blocks: a finer level read by range, as the TypeScript computation has it", async () => {
   // The JTAG identify capture without TDO: 626,263,880 ticks, so 2^12 has 152,898 buckets, too
-  // many for the head, and sits in three overview blocks.
+  // many for the footer, and sits in three overview blocks.
   const file = readFileSync(at("fixtures/identify-jtag.tickwave"));
   const bytes = new MemoryBytes(file, "identify-jtag.tickwave");
   const r = await Opened.open(wasm(), bytes);
@@ -143,9 +151,12 @@ function server(file: Uint8Array, opts: { ranges: boolean; encoding?: string; sh
     const range = new Headers(init.headers).get("range");
     log.push(range ?? "whole");
     const m = /^bytes=(\d+)-(\d+)$/.exec(range ?? "");
-    if (!opts.ranges || !m) return new Response(file.slice(), { status: 200 });
-    const from = Number(m[1]) + (opts.shift ?? 0);
-    const to = Math.min(Number(m[2]) + 1, file.length);
+    const end = /^bytes=-(\d+)$/.exec(range ?? "");
+    if (!opts.ranges || !(m || end)) return new Response(file.slice(), { status: 200 });
+    // A suffix longer than the file: 416 and its size, as GitHub Pages answers it.
+    if (end && Number(end[1]) > file.length) return new Response(null, { status: 416, headers: { "content-range": `bytes */${file.length}` } });
+    const from = m ? Number(m[1]) + (opts.shift ?? 0) : file.length - Number(end![1]);
+    const to = m ? Math.min(Number(m[2]) + 1, file.length) : file.length;
     const headers: Record<string, string> = { "content-range": `bytes ${from}-${to - 1}/${file.length}` };
     if (opts.encoding) headers["content-encoding"] = opts.encoding;
     return new Response(file.slice(from, to), { status: 206, headers });
@@ -153,23 +164,24 @@ function server(file: Uint8Array, opts: { ranges: boolean; encoding?: string; sh
   return { log, bytes: new HttpBytes(`https://example.org/r/${name}`, fetchFn) };
 }
 
-test("HTTP: blocks by range; adjacent missing blocks in one request; nothing fetched twice", async () => {
+test("HTTP: the end first, blocks by range, adjacent missing blocks in one request, nothing fetched twice", async () => {
   const s = server(NINE, { ranges: true });
+  const { footer, blocks } = layout(NINE);
   const r = await Opened.open(wasm(), s.bytes, 1024);
-  // The converter reports a 1997-byte head.
-  assert.deepEqual(s.log, ["bytes=0-1023", "bytes=1024-1996"]);
+  assert.deepEqual(s.log, ["bytes=-1024", `bytes=${footer}-${NINE.length - 1024 - 1}`]);
   await r.edges(0, 0, r.info.length);
   assert.equal(s.log.length, 3);
-  assert.equal(s.log[2], "bytes=1997-6634");
+  assert.equal(s.log[2], `bytes=${blocks[0][0]}-${blocks[blocks.length - 1][1] - 1}`);
   await r.edges(1, 377094000, 377107000);
   assert.equal(s.log.length, 3);
 });
 
-test("HTTP: a file the first read holds whole is not fetched again for its block", async () => {
+test("HTTP: a file shorter than the first read is read whole once, and not again for its block", async () => {
   const s = server(ONE, { ranges: true });
   const r = await Opened.open(wasm(), s.bytes);
   assert.equal((await r.edges(0, 0, r.info.length)).ticks.length, 15286);
-  assert.deepEqual(s.log, [`bytes=0-${FIRST_READ - 1}`]);
+  // The suffix is longer than the file: 416, then the whole file by its size.
+  assert.deepEqual(s.log, [`bytes=-${FIRST_READ}`, `bytes=0-${ONE.length - 1}`]);
 });
 
 test("HTTP: a server that ignores Range sends the whole file once, and it serves every read", async () => {
@@ -177,12 +189,14 @@ test("HTTP: a server that ignores Range sends the whole file once, and it serves
   const r = await Opened.open(wasm(), s.bytes, 1024);
   const all = await r.edges(0, 0, r.info.length);
   assert.equal(all.ticks.length, 15286);
-  assert.deepEqual(s.log, ["bytes=0-1023"]);
+  assert.deepEqual(s.log, ["bytes=-1024"]);
 });
 
 test("HTTP: a compressed range, or the wrong range, is refused", async () => {
   await assert.rejects(Opened.open(wasm(), server(NINE, { ranges: true, encoding: "gzip" }).bytes, 1024), /compresses it \(gzip\)/);
-  await assert.rejects(Opened.open(wasm(), server(NINE, { ranges: true, shift: 7 }).bytes, 1024), /asked for bytes from 0, got 7/);
+  const shifted = server(NINE, { ranges: true, shift: 7 });
+  const { footer } = layout(NINE);
+  await assert.rejects(Opened.open(wasm(), shifted.bytes, 1024), new RegExp(`asked for bytes from ${footer}, got ${footer + 7}`));
 });
 
 /** Bytes whose reads wait until released, and honour their signal meanwhile. */
@@ -197,6 +211,10 @@ class SlowBytes implements Bytes {
   }
   release() {
     for (const r of this.#release.splice(0)) r();
+  }
+  /** The end comes at once: only the block reads wait. */
+  tail(n: number) {
+    return this.#inner.tail(n);
   }
   async read(from: number, to: number, signal?: AbortSignal): Promise<Uint8Array> {
     this.reads++;
@@ -216,9 +234,8 @@ class SlowBytes implements Bytes {
 test("an abort stops the request at once, and the read no other request waits on", async () => {
   const head = (await openTickwave("fixtures/identify-swd.4k.tickwave")).header;
   const slow = new SlowBytes(new MemoryBytes(NINE, "identify-swd.4k.tickwave"));
-  // The head comes at once; every block read waits. head_len is the preamble's u32 at 20.
-  const headLen = new DataView(NINE.buffer, NINE.byteOffset).getUint32(20, true);
-  const s = await Opened.open(wasm(), { name: "slow", read: (a, b, sig) => (a === 0 ? new MemoryBytes(NINE, "x").read(0, headLen) : slow.read(a, b, sig)) });
+  // The footer comes at once, with the whole file in the first read; every block read waits.
+  const s = await Opened.open(wasm(), slow);
   assert.equal(s.header.blocks, head.blocks);
   const c = new AbortController();
   const first = s.edges(0, 0, s.info.length, c.signal);
@@ -258,7 +275,7 @@ test("the block cache: an evicted block is read again", async () => {
   setCacheBytes(192 << 20);
   await r.edges(0, 0, r.info.length);
   await r.edges(0, 0, r.info.length);
-  // Two head reads; two full reads while the cache held nothing; one after it held everything.
+  // Two footer reads; two full reads while the cache held nothing; one after it held everything.
   assert.equal(bytes.reads.length, 2 + 2 + 1);
   // Each recording's open asks for the page's size again: the same size keeps every block, and
   // a smaller one that still holds them keeps them too.
@@ -390,7 +407,7 @@ test("analog: samples come with each whole run's smallest and largest value, fro
   }
 });
 
-test("analog: the head's overview, as the TypeScript computation has it from the samples", async () => {
+test("analog: the footer's overview, as the TypeScript computation has it from the samples", async () => {
   const r = await openTickwave("fixtures/swd50-cut.tickwave");
   assert.deepEqual(r.header.overview, [12, 16]);
   const values = await Promise.all([0, 1].map((ch) => r.samples(ch, 0, r.info.length)));
@@ -461,18 +478,17 @@ test("duration: first edge to last, of either polarity, of the edges in [start, 
 });
 
 test("a crafted recording is refused with an error, and the module goes on decoding", async () => {
-  const { headLength, Recording } = wasm();
+  const { footerStart, Recording } = wasm();
   const open = (bytes: Uint8Array) => {
-    let n = headLength(bytes.subarray(0, 32));
-    for (let m = headLength(bytes.subarray(0, Math.min(n, bytes.length))); m > n; m = headLength(bytes.subarray(0, Math.min(n, bytes.length)))) n = m;
-    const r = new Recording(bytes.subarray(0, Math.min(n, bytes.length)));
+    assert.equal(footerStart(bytes, bytes.length), 0);
+    const r = new Recording(bytes, bytes.length);
     for (let i = 0; i < r.blockCount; i++) {
       const [from, to] = r.blockRange(i);
       r.decodeBlock(i, bytes.subarray(from, to));
     }
   };
   const why: Record<string, RegExp> = {
-    "header-wrap": /do not fit together/,
+    "header-wrap": /footer's lengths do not fit it/,
     levels: /not the ones the format sets/,
     "big-decoded": /more than this reader holds/,
     "huge-count": /too short for its edges/,
@@ -488,13 +504,13 @@ test("a crafted recording is refused with an error, and the module goes on decod
     open(ONE);
   }
   // Past the last block, the index throws rather than reading out of bounds.
-  const r = new Recording(ONE.subarray(0, headLength(ONE)));
+  const r = new Recording(ONE, ONE.length);
   assert.throws(() => r.blockRange(r.blockCount), /no block/);
   assert.throws(() => r.blockStart(r.blockCount), /no block/);
 });
 
 test("the most the decoder takes from one frame is the page's to set", async () => {
-  // identify-swd's head overview decodes to more than 64 bytes.
+  // identify-swd's footer overview decodes to more than 64 bytes.
   await assert.rejects(Opened.open(wasm(), new MemoryBytes(ONE, "one.tickwave"), FIRST_READ, 64), /more than this reader holds \(64\)/);
   const r = await Opened.open(wasm(), new MemoryBytes(ONE, "one.tickwave"), FIRST_READ, 1 << 20);
   assert.ok(r.info.length > 0);

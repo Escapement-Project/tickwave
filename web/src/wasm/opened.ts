@@ -1,4 +1,4 @@
-// A recording opened through the WASM decoder: its head parsed, its blocks fetched by range and
+// A recording opened through the WASM decoder: its footer parsed, its blocks fetched by range and
 // decoded on demand, kept in an LRU. Runs in the worker; the unit tests run it in Node.
 
 import { LRUCache } from "lru-cache";
@@ -26,8 +26,8 @@ import { FIRST_READ } from "./protocol.ts";
 
 /** What the opened recording needs from the wasm-bindgen module. */
 export interface WasmApi {
-  headLength(bytes: Uint8Array, maxDecoded?: number): number;
-  Recording: new (head: Uint8Array, maxDecoded?: number) => WasmRecording;
+  footerStart(tail: Uint8Array, fileLen: number, maxDecoded?: number): number;
+  Recording: new (tail: Uint8Array, fileLen: number, maxDecoded?: number) => WasmRecording;
 }
 
 interface DecodedBlock {
@@ -45,6 +45,7 @@ interface HeaderDigital {
   initial: boolean;
   end: number;
   edges: number;
+  gaps?: [number, number, boolean][];
 }
 
 interface HeaderAnalog {
@@ -55,6 +56,7 @@ interface HeaderAnalog {
   first: number;
   period: [number, number];
   count: number;
+  breaks?: [number, number][];
   coding: { type: "f32" } | { type: "codes"; bits: number; scale: number; offset: number };
 }
 
@@ -76,7 +78,7 @@ export interface Header {
   annotations?: Record<string, string>;
 }
 
-/** One overview block's buckets, as the head's levels lay them out. */
+/** One overview block's buckets, as the footer's levels lay them out. */
 interface DecodedOverview {
   readonly first: number;
   readonly buckets: number;
@@ -225,7 +227,7 @@ export class Opened {
   readonly #levels: Shelf<DecodedOverview>[];
   readonly #overviews = new Map<string, Uint8Array[] | Float32Array[] | null>();
 
-  private constructor(rec: WasmRecording, head: Uint8Array, bytes: Bytes) {
+  private constructor(rec: WasmRecording, fileLength: number, bytes: Bytes) {
     this.#rec = rec;
     this.header = JSON.parse(rec.header) as Header;
     this.#data = new Shelf(`${this.#id} d`, bytes, (i) => this.#pair(rec.blockRange(i)), (i, f) => this.#decode(i, f));
@@ -238,9 +240,14 @@ export class Opened {
           (k, f) => this.#decodeOverview(level, k, f),
         ),
     );
-    const view = new DataView(head.buffer, head.byteOffset, head.byteLength);
-    const fileLength = Number(view.getBigUint64(24, true));
     const h = this.header;
+    // Gaps and breaks are in the format, but the views draw neither yet: a gap would draw as a
+    // known level, and samples after a break at the wrong ticks.
+    for (const c of h.channels) {
+      if ((c.kind === "digital" && c.gaps?.length) || (c.kind === "analog" && c.breaks?.length)) {
+        throw named("TickwaveUnsupported", `${bytes.name}: channel ${c.name} has ${c.kind === "digital" ? "gaps" : "breaks"}, which this viewer does not draw yet`);
+      }
+    }
     const channels: Channel[] = h.channels.map((c, i) => {
       if (c.kind === "digital") return { kind: "digital", name: c.name, end: c.end };
       const [min, max] = this.#range(i);
@@ -271,23 +278,22 @@ export class Opened {
     };
   }
 
-  /** Reads the head: the first read, then the rest if `headLength` asks for more. */
+  /** Reads the footer: the file's last bytes, then the rest of it if `footerStart` asks. */
   static async open(api: WasmApi, bytes: Bytes, firstRead = FIRST_READ, maxDecoded?: number, signal?: AbortSignal): Promise<Opened> {
-    let head = await bytes.read(0, firstRead, signal);
-    const headLength = (b: Uint8Array) => {
+    let { bytes: tail, size } = await bytes.tail(firstRead, signal);
+    const footerStart = (t: Uint8Array) => {
       try {
-        return api.headLength(b, maxDecoded);
+        return api.footerStart(t, size, maxDecoded);
       } catch (e) {
         throw named("TickwaveNotRecording", `${bytes.name}: ${e instanceof Error ? e.message : e}`);
       }
     };
-    for (let need = headLength(head); need > head.length; need = headLength(head)) {
-      const more = await bytes.read(head.length, need, signal);
-      if (more.length === 0) throw new Error(`${bytes.name}: the file ends inside its head`);
-      head = join(head, more);
+    for (let from = size - tail.length, need = footerStart(tail); need < from; from = size - tail.length, need = footerStart(tail)) {
+      const more = await bytes.read(need, from, signal);
+      if (more.length !== from - need) throw new Error(`${bytes.name}: the file changed while it was read`);
+      tail = join(more, tail);
     }
-    const length = headLength(head);
-    return new Opened(new api.Recording(head.subarray(0, length), maxDecoded), head, bytes);
+    return new Opened(new api.Recording(tail, size, maxDecoded), size, bytes);
   }
 
   /** An analog channel's smallest and largest value, from the coarsest overview level. */

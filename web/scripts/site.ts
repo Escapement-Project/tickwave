@@ -144,7 +144,7 @@ const DOCS: { href: string; group: string; name: string; markdown: string; descr
     description: "tickwave's charts: measurements drawn against a setting, and their data.",
     source: "CHARTS.md",
   },
-  { href: "docs/format.html", group: "the-files", name: "Format", markdown: readFileSync(join(repo, "FORMAT.md"), "utf8"), description: "The recording format: times in whole ticks, the header, the block index and the blocks.", source: "FORMAT.md" },
+  { href: "docs/format.html", group: "the-files", name: "Format", markdown: readFileSync(join(repo, "FORMAT.md"), "utf8"), description: "The recording format: times in whole ticks, the records a writer streams out, and the footer a reader reads first.", source: "FORMAT.md" },
   {
     href: "docs/annotations.html",
     group: "the-files",

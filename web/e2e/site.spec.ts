@@ -5,7 +5,7 @@ import { test, expect, type Page } from "@playwright/test";
 import { mkdirSync, readFileSync } from "node:fs";
 
 const SITE = "/dist/site/";
-const IDENTIFY_ID = "blake3:930db20d55ecede1084b73ebbdc7edd306268b900746c08abd0bdfdb0f121623";
+const IDENTIFY_ID = "blake3:ccc8b7d8c3e4cb30da7fc6088e54ebeba2858ad402eb3fb5a9aeb50be989accf";
 
 /** The facts list beside the view, as [term, value] pairs. */
 async function facts(page: Page): Promise<Record<string, string>> {
@@ -94,13 +94,13 @@ test.describe("the viewer", () => {
   test("opens a recording and its sidecar from ?src= and ?annotations=", async ({ page }) => {
     await page.goto(`${SITE}open.html?src=fixtures/identify-swd.tickwave&annotations=fixtures/identify-swd.annotations.toml`);
     const f = await facts(page);
-    // From the converter's report: no title, 0.523583100 s at 1 GS/s, two channels, 4830 bytes.
+    // From the converter's report: no title, 0.523583100 s at 1 GS/s, two channels, 5316 bytes.
     expect(f).toMatchObject({
       Recording: "identify-swd.tickwave",
       Length: "523.583100 ms",
       "One tick": "1 ns",
       Channels: "SWCLK, SWDIO",
-      Size: "4.7 KiB",
+      Size: "5.2 KiB",
       "Content id": IDENTIFY_ID,
     });
     await viewReady(page);
@@ -127,8 +127,8 @@ test.describe("the viewer", () => {
     await page.goto(`${SITE}open.html`);
     await page.locator("#files").setInputFiles("fixtures/identify-swd.4k.tickwave");
     const f = await facts(page);
-    // The same capture in nine blocks: the same content id, a file of 6635 bytes.
-    expect(f).toMatchObject({ Recording: "identify-swd.4k.tickwave", Size: "6.5 KiB", "Content id": IDENTIFY_ID });
+    // The same capture in nine blocks: the same content id, a file of 7446 bytes.
+    expect(f).toMatchObject({ Recording: "identify-swd.4k.tickwave", Size: "7.3 KiB", "Content id": IDENTIFY_ID });
     await viewReady(page);
     await expect(page.locator("#share")).toHaveText("Files from this computer can't be shared by link.");
   });
@@ -266,7 +266,7 @@ test("the overview's references, inset and views work", async ({ page }) => {
   await expect(ref.locator(".pop tickwave-inset .measure")).toHaveText("SWCLK 54.644 µs first edge to last");
   await page.mouse.move(0, 0);
   const capture = page.locator("#capture");
-  await expect(capture.locator(".summary .facts")).toHaveText("524 ms; 2 channels: SWCLK, SWDIO; 4.7 KiB");
+  await expect(capture.locator(".summary .facts")).toHaveText("524 ms; 2 channels: SWCLK, SWDIO; 5.2 KiB");
   // The page writes the capture's title and facts into it: they are still the recording's.
   expect(await capture.evaluate((v) => (v as HTMLElement & { summary: { matches: boolean } | null }).summary?.matches)).toBe(true);
   // A closed view's focus goes to its Open button.
@@ -290,7 +290,7 @@ test("on a phone, an example opens with its view in sight and focused, the forms
   await expect(page.getByText("Open another recording")).toBeVisible();
   await expect(page.locator("#facts")).toBeHidden();
   await page.getByText("Recording details").click();
-  await expect(page.locator("#facts")).toContainText("blake3:930db20d");
+  await expect(page.locator("#facts")).toContainText("blake3:ccc8b7d8");
   // Unfolded, the forms open another.
   await page.getByText("Open another recording").click();
   await page.locator("#src").fill("fixtures/swd50-cut.tickwave");
@@ -326,7 +326,34 @@ test("the docs sit in the project's doc frame: every doc in a rail, this one's s
   // the reader is in their section.
   await expect(rail.locator("summary")).toHaveText(["Using it", "In your page", "The files"]);
   expect(await rail.locator("details").evaluateAll((ds) => ds.map((d) => (d as HTMLDetailsElement).open))).toEqual([false, false, true]);
-  await expect(rail.locator("a")).toHaveText(["Viewer", "Converter", "Elements", "Charts", "Format", "Times", "Layout", "Preamble", "Header", "Gaps", "Index", "Blocks", "Overview", "Content id", "Sidecar"]);
+  await expect(rail.locator("a")).toHaveText([
+    "Viewer",
+    "Converter",
+    "Elements",
+    "Charts",
+    "Format",
+    "Times",
+    "Layout",
+    "Preamble",
+    "Records",
+    "Trailer",
+    "Declaration",
+    "Header",
+    "Gaps",
+    "Blocks",
+    "Gap and run records",
+    "Overview",
+    "Annotations",
+    "Footer",
+    "Index",
+    "Content id",
+    "Writing",
+    "Reading",
+    "With random access",
+    "In order",
+    "Repairing a cut-off file",
+    "Sidecar",
+  ]);
   await expect(rail.getByRole("link", { name: "Format" })).toHaveAttribute("aria-current", "page");
   // The section the reader is in is marked as they go.
   // At the top of the window, past the reading line the rail marks by.

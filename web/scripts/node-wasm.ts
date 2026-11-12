@@ -2,7 +2,7 @@
 
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
-import { initSync, headLength, Recording } from "../../crates/wasm/pkg/escapement_tickwave_wasm.js";
+import { initSync, footerStart, Recording } from "../../crates/wasm/pkg/escapement_tickwave_wasm.js";
 import { MemoryBytes, type Bytes } from "../src/wasm/bytes.ts";
 import { Opened, type WasmApi } from "../src/wasm/opened.ts";
 
@@ -11,7 +11,7 @@ let api: WasmApi | null = null;
 export function wasm(): WasmApi {
   if (!api) {
     initSync({ module: readFileSync(new URL("../../crates/wasm/pkg/escapement_tickwave_wasm_bg.wasm", import.meta.url)) });
-    api = { headLength, Recording };
+    api = { footerStart, Recording };
   }
   return api;
 }

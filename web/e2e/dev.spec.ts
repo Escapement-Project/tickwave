@@ -152,34 +152,54 @@ async function served(tag: string): Promise<{ port: number; url: string; range: 
 // Repeats of a test run side by side: each needs a tag of its own, or they share the server's read count.
 const tagged = (info: { project: { name: string }; repeatEachIndex: number }, what: string) => `${what}-${info.project.name}-${info.repeatEachIndex}-${Date.now()}`;
 
-test("a collapsed view fetches its head, and only its head, once it scrolls into view", async ({ page }, info) => {
+test("a collapsed view fetches its footer, and only its footer, once it scrolls into view", async ({ page }, info) => {
   const tag = tagged(info, "collapsed");
-  // A small first read, so the head (1,744 bytes, the converter says) and the block are separate.
+  // A small first read, so the footer (from byte 3,539 of 5,316) and the block (445 to 3,531) are
+  // separate.
   await page.goto(`/e2e/pages/view.html?below&firstRead=512&tag=${tag}`);
   const view = page.locator("#v");
   await expect(view.locator(".summary .title")).toHaveText("identify-swd.tickwave");
   await page.waitForTimeout(300);
   expect(await served(tag)).toEqual([]);
   await view.scrollIntoViewIfNeeded();
-  await expect(view.locator(".summary .facts")).toHaveText("524\u00a0ms; 2 channels: SWCLK, SWDIO; 4.7\u00a0KiB");
-  await expect(view.locator(".summary [part~=fact]")).toHaveText(["524\u00a0ms", "2 channels: SWCLK, SWDIO", "4.7\u00a0KiB"]);
+  await expect(view.locator(".summary .facts")).toHaveText("524\u00a0ms; 2 channels: SWCLK, SWDIO; 5.2\u00a0KiB");
+  await expect(view.locator(".summary [part~=fact]")).toHaveText(["524\u00a0ms", "2 channels: SWCLK, SWDIO", "5.2\u00a0KiB"]);
   await expect(view.locator(".summary [part~=fact-channels]")).toHaveText("2 channels: SWCLK, SWDIO");
   await page.waitForTimeout(300);
   expect((await served(tag)).map((e) => [e.range, e.status])).toEqual([
-    ["bytes=0-511", 206],
-    ["bytes=512-1743", 206],
+    ["bytes=-512", 206],
+    ["bytes=3539-4803", 206],
   ]);
-  // Opened at the whole capture, it draws from the head's overview: still no block.
+  // Opened at the whole capture, it draws from the footer's overview: still no block.
   await view.locator(".toggle").click();
   await view.evaluate((v) => (v as unknown as { settled(): Promise<void> }).settled());
-  expect((await served(tag)).map((e) => e.range)).toEqual(["bytes=0-511", "bytes=512-1743"]);
-  // Zoomed to the first read, it needs edges, and reads the block by its range: 1,744 to 4,830.
+  expect((await served(tag)).map((e) => e.range)).toEqual(["bytes=-512", "bytes=3539-4803"]);
+  // Zoomed to the first read, it needs edges, and reads the block by its range: 445 to 3,531.
   await view.evaluate((v) => {
     const view = v as unknown as { setWindow(a: number, b: number): void; settled(): Promise<void> };
     view.setWindow(377094000, 377141000);
     return view.settled();
   });
-  expect((await served(tag)).map((e) => e.range)).toEqual(["bytes=0-511", "bytes=512-1743", "bytes=1744-4829"]);
+  expect((await served(tag)).map((e) => e.range)).toEqual(["bytes=-512", "bytes=3539-4803", "bytes=445-3530"]);
+});
+
+test("a recording shorter than the first read comes whole from its end, and serves its block", async ({ page }, info) => {
+  const tag = tagged(info, "short");
+  // identify-swd is 5,316 bytes: the first read, the last 32 KiB, asks for more than the file holds.
+  // The server answers 416 with the size, as GitHub Pages does, and the file comes whole.
+  await recordReady(page);
+  await page.goto(`/e2e/pages/view.html?open&tag=${tag}`);
+  await waitReady(page, ["v"]);
+  const view = page.locator("#v");
+  await view.evaluate((v) => {
+    const view = v as unknown as { setWindow(a: number, b: number): void; settled(): Promise<void> };
+    view.setWindow(377094000, 377141000);
+    return view.settled();
+  });
+  expect((await served(tag)).map((e) => [e.range, e.status])).toEqual([
+    ["bytes=-32768", 416],
+    ["bytes=0-5315", 206],
+  ]);
 });
 
 test("a server that ignores Range: one whole-file response serves the view", async ({ page }, info) => {
@@ -202,13 +222,13 @@ test("a server that ignores Range: one whole-file response serves the view", asy
 test("a finer overview level comes from overview blocks by range, not from the data", async ({ page }, info) => {
   const tag = tagged(info, "levels");
   await recordReady(page);
-  // The JTAG identify capture: head bytes 0 to 1,253, its data block to 10,380, its three overview
-  // blocks of 2^12 ticks to 13,680 (the converter's report).
+  // The JTAG identify capture: its data block to byte 9,665, its three overview blocks of 2^12 ticks
+  // after it, its footer from 13,039 to the end, 14,325.
   await page.goto(`/e2e/pages/view.html?open&src=fixtures/identify-jtag.tickwave&firstRead=1024&tag=${tag}`);
   await waitReady(page, ["v"]);
   const view = page.locator("#v");
-  // At the whole capture a column is about 400,000 ticks: the head's 2^16 level draws it.
-  expect((await served(tag)).map((e) => e.range)).toEqual(["bytes=0-1023", "bytes=1024-1252"]);
+  // At the whole capture a column is about 400,000 ticks: the footer's 2^16 level draws it.
+  expect((await served(tag)).map((e) => e.range)).toEqual(["bytes=-1024", "bytes=13039-13300"]);
   // 20 ms over the view's columns is about 13,000 ticks a column: the 2^12 level, from blocks.
   // 465 to 485 ms is the capture's busiest stretch.
   await view.evaluate((v) => {
@@ -217,11 +237,11 @@ test("a finer overview level comes from overview blocks by range, not from the d
     return view.settled();
   });
   const ranges = (await served(tag)).map((e) => e.range!);
-  expect(ranges.slice(0, 2)).toEqual(["bytes=0-1023", "bytes=1024-1252"]);
+  expect(ranges.slice(0, 2)).toEqual(["bytes=-1024", "bytes=13039-13300"]);
   expect(ranges.length).toBe(3);
   const [, from, to] = /^bytes=(\d+)-(\d+)$/.exec(ranges[2])!.map(Number);
-  expect(from).toBeGreaterThanOrEqual(10380);
-  expect(to).toBeLessThan(13680);
+  expect(from).toBeGreaterThanOrEqual(9665);
+  expect(to).toBeLessThan(13039);
   mkdirSync("screenshots", { recursive: true });
   await view.screenshot({ path: `screenshots/${info.project.name}-overview-blocks.png` });
 });
@@ -229,7 +249,7 @@ test("a finer overview level comes from overview blocks by range, not from the d
 test("a read that fails says the data did not load, and is not asked again at once", async ({ page }, info) => {
   const tag = tagged(info, "fail");
   await recordReady(page);
-  // The JTAG identify capture's head takes two reads; the third, of its overview blocks, fails.
+  // The JTAG identify capture's footer takes two reads; the third, of its overview blocks, fails.
   await page.goto(`/e2e/pages/view.html?open&src=fixtures/identify-jtag.tickwave&firstRead=1024&tag=${tag}&after=2&fail=503`);
   await waitReady(page, ["v"]);
   const view = page.locator("#v");
@@ -274,17 +294,18 @@ test("a read still going after five seconds says so, until it lands", async ({ p
   await expect(notice).toBeHidden({ timeout: 4000 });
 });
 
-test("analog through the WASM path: the head's overview, the samples, and readouts to one code step", async ({ page }, info) => {
+test("analog through the WASM path: the footer's overview, the samples, and readouts to one code step", async ({ page }, info) => {
   const tag = tagged(info, "analog");
   await page.setViewportSize({ width: 700, height: 600 });
   await recordReady(page);
-  // swd50-cut: 50,000 samples a channel at 1 GS/s in an 11 ms capture; its head is 1,154 bytes.
+  // swd50-cut: 50,000 samples a channel at 1 GS/s in an 11 ms capture; its footer starts at byte
+  // 61,254 of 62,431.
   await page.goto(`/e2e/pages/view.html?open&src=fixtures/swd50-cut.tickwave&firstRead=1024&tag=${tag}`);
   await waitReady(page, ["v"]);
   const view = page.locator("#v");
-  // At the whole capture a column is several thousand ticks: the head's 2^12 level draws the
+  // At the whole capture a column is several thousand ticks: the footer's 2^12 level draws the
   // analog rows, and no block is read.
-  expect((await served(tag)).map((e) => e.range)).toEqual(["bytes=0-1023", "bytes=1024-1143"]);
+  expect((await served(tag)).map((e) => e.range)).toEqual(["bytes=-1024", "bytes=61254-61406"]);
   const drawn = await view.evaluate((v) => {
     const canvas = v.shadowRoot!.querySelector("canvas")!;
     const data = canvas.getContext("2d")!.getImageData(0, 0, canvas.width, Math.round(canvas.height / 2)).data;
@@ -306,7 +327,7 @@ test("analog through the WASM path: the head's overview, the samples, and readou
   await win(1000, 1100);
   const ranges = (await served(tag)).map((e) => e.range!);
   expect(ranges.length).toBe(3);
-  expect(ranges[2]).toMatch(/^bytes=1144-\d+$/);
+  expect(ranges[2]).toBe("bytes=797-61245");
   // Cursors at ticks 1020 and 1060, on the SWCLK row.
   const box = (await plotOf(view).boundingBox())!;
   const tickAt = (x: number) => view.evaluate((v, x) => (v as unknown as { tickAt(x: number): number }).tickAt(x), x);

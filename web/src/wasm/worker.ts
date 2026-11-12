@@ -1,7 +1,7 @@
 // The worker that holds the WASM decoder and every recording the page has opened. The page posts
 // requests; each answer goes back with its arrays transferred, not copied.
 
-import init, { headLength, Recording } from "../../../crates/wasm/pkg/escapement_tickwave_wasm.js";
+import init, { footerStart, Recording } from "../../../crates/wasm/pkg/escapement_tickwave_wasm.js";
 import { FileBytes, HttpBytes, type Bytes } from "./bytes.ts";
 import { handJson } from "./hand.ts";
 import { Opened, setCacheBytes, type WasmApi } from "./opened.ts";
@@ -9,7 +9,7 @@ import { FIRST_READ, type Request, type Reply } from "./protocol.ts";
 
 let api: Promise<WasmApi> | null = null;
 const loadApi = () =>
-  (api ??= init({ module_or_path: new URL("./tickwave.wasm", import.meta.url) }).then(() => ({ headLength, Recording })));
+  (api ??= init({ module_or_path: new URL("./tickwave.wasm", import.meta.url) }).then(() => ({ footerStart, Recording })));
 
 const opened = new Map<string, Promise<Opened>>();
 const running = new Map<number, AbortController>();
