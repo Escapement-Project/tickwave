@@ -6,6 +6,8 @@ pub mod annotations;
 pub mod bundle;
 pub mod codec;
 pub mod decode;
+#[cfg(feature = "edit")]
+pub mod edit;
 #[cfg(feature = "encode")]
 pub mod encode;
 pub mod hash;

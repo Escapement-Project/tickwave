@@ -14,6 +14,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 thiserror = "2.0.21"
 toml = { version = "1.2.1", optional = true }
+toml_edit = { version = "0.25.19", optional = true }
 zstd = { version = "0.14.3", optional = true }
 
 [features]
@@ -25,3 +26,9 @@ annotations = []
 # Sidecar checks reading the hand-written file's TOML. The browser parses TOML in JavaScript
 # instead: the parser would cost its decoder more than anything else in it.
 toml = ["annotations", "dep:toml"]
+# Edits of the hand-written file that keep its comments and layout, for the annotation editor.
+edit = ["annotations", "dep:toml_edit"]
+
+[[test]]
+name = "edit"
+required-features = ["edit"]

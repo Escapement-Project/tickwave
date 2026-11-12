@@ -1,6 +1,7 @@
 //! tickwave's converter for the browser: the CLI's conversion, run in a worker over files the
 //! reader picked. JavaScript keeps the files and reads them for it through `tickwaveConvert.read`,
-//! a slice at a time, so a Saleae export larger than WASM's memory still converts.
+//! a slice at a time, so a Saleae export larger than WASM's memory still converts. It also edits a
+//! sidecar's hand-written file for the annotation editor.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -292,6 +293,16 @@ impl Converted {
     pub fn codes(&self) -> String {
         self.codes.clone()
     }
+}
+
+/// Applies one edit to a sidecar's hand-written TOML `text` and returns the new text. `op` is
+/// JSON: `{op: "start", recording, recording_id}` on empty text, `{op: "insert" | "replace",
+/// index, fields}`, `{op: "remove", index}` or `{op: "move", from, to}`. Throws with a message
+/// when the edit can't be made. Needs nothing from `tickwaveConvert`, so a page can call it from
+/// a worker that never converts.
+#[wasm_bindgen(js_name = editAnnotations)]
+pub fn edit_annotations(text: &str, op: &str) -> Result<String, JsError> {
+    escapement_tickwave_format::edit::edit_json(text, op).map_err(js)
 }
 
 /// Converts a source as `tickwave convert` does, with the same defaults and checks, so the same
