@@ -3,6 +3,13 @@
 @font-face { font-family: "Saira"; src: url("fonts/saira-expanded.woff2") format("woff2"); font-weight: 500 600; font-stretch: 125%; font-display: swap; }
 @font-face { font-family: "Hanken Grotesk"; src: url("fonts/hanken-grotesk.woff2") format("woff2"); font-weight: 400 600; font-display: swap; }
 @font-face { font-family: "Martian Mono"; src: url("fonts/martian-mono.woff2") format("woff2"); font-weight: 500; font-stretch: 100% 112.5%; font-display: swap; }
+@font-face { font-family: "Hanken Grotesk fallback"; src: local("Arial"), local("ArialMT"), local("Liberation Sans"), local("LiberationSans"), local("Arimo"); font-weight: 100 449; size-adjust: 99.88%; ascent-override: 100.12%; descent-override: 30.34%; line-gap-override: 0%; }
+@font-face { font-family: "Hanken Grotesk fallback"; src: local("Arial"), local("ArialMT"), local("Liberation Sans"), local("LiberationSans"), local("Arimo"); font-weight: 450 549; size-adjust: 100.41%; ascent-override: 99.6%; descent-override: 30.18%; line-gap-override: 0%; }
+@font-face { font-family: "Hanken Grotesk fallback"; src: local("Arial Bold"), local("Arial-BoldMT"), local("Liberation Sans Bold"), local("LiberationSans-Bold"), local("Arimo Bold"), local("Arimo-Bold"); font-weight: 550 1000; size-adjust: 94.47%; ascent-override: 105.85%; descent-override: 32.07%; line-gap-override: 0%; }
+@font-face { font-family: "Saira fallback"; src: local("Arial"), local("ArialMT"), local("Liberation Sans"), local("LiberationSans"), local("Arimo"); font-weight: 100 549; size-adjust: 118.14%; ascent-override: 96.07%; descent-override: 37.16%; line-gap-override: 0%; }
+@font-face { font-family: "Saira fallback"; src: local("Arial Bold"), local("Arial-BoldMT"), local("Liberation Sans Bold"), local("LiberationSans-Bold"), local("Arimo Bold"), local("Arimo-Bold"); font-weight: 550 1000; size-adjust: 111.59%; ascent-override: 101.71%; descent-override: 39.34%; line-gap-override: 0%; }
+@font-face { font-family: "Martian Mono fallback"; src: local("Courier New"), local("CourierNewPSMT"), local("Liberation Mono"), local("LiberationMono"), local("Cousine"); font-weight: 100 1000; font-stretch: 100%; size-adjust: 116.65%; ascent-override: 85.73%; descent-override: 17.15%; line-gap-override: 0%; }
+@font-face { font-family: "Martian Mono fallback"; src: local("Courier New"), local("CourierNewPSMT"), local("Liberation Mono"), local("LiberationMono"), local("Cousine"); font-weight: 100 1000; font-stretch: 112.5%; size-adjust: 124.98%; ascent-override: 80.01%; descent-override: 16%; line-gap-override: 0%; }
 :root {
   --page: #dce8ed;
   --surface: #eef4f6;
@@ -39,10 +46,10 @@
   --capture-opacity: 0.6;
   --capture-width: 1.5px;
   /* Type */
-  --font-display: "Saira", "Hanken Grotesk", sans-serif; --display-stretch: 125%; --display-weight: 500;
-  --font-text: "Hanken Grotesk", "Helvetica Neue", "Arial", sans-serif;
-  --font-figures: "Martian Mono", ui-monospace, monospace; --figures-stretch: 112.5%; --figures-weight: 500;
-  --font-code: "Martian Mono", ui-monospace, monospace; --code-stretch: 100%; --code-weight: 500;
+  --font-display: "Saira", "Saira fallback", "Hanken Grotesk", "Hanken Grotesk fallback", sans-serif; --display-stretch: 125%; --display-weight: 500;
+  --font-text: "Hanken Grotesk", "Hanken Grotesk fallback", "Helvetica Neue", "Arial", sans-serif;
+  --font-figures: "Martian Mono", "Martian Mono fallback", ui-monospace, monospace; --figures-stretch: 112.5%; --figures-weight: 500;
+  --font-code: "Martian Mono", "Martian Mono fallback", ui-monospace, monospace; --code-stretch: 100%; --code-weight: 500;
   /* The project's mark in motion: header.js plays it, from [motion.project-mark] */
   --project-mark-inner: 23;
   --project-mark-outer: 29;
