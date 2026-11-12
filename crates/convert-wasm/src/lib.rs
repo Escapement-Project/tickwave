@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use escapement_tickwave_format::decode::MAX_DECODED;
 use escapement_tickwave_format::model::{ChannelData, Recording};
-use escapement_tickwave_import::convert::{self, Pass, Progress, Settings, Step, select};
+use escapement_tickwave_import::convert::{self, Keep, Pass, Progress, Settings, Step, select};
 use escapement_tickwave_import::input::{Input, read_all};
 use escapement_tickwave_import::saleae::SampleRate;
 use escapement_tickwave_import::{saleae, sigrok, vcd};
@@ -257,6 +257,14 @@ struct Request {
     /// record, or to infer it.
     #[serde(default)]
     rate: Option<SampleRate>,
+    /// `[name, time]`: channels to move, by the names stored, each by a time in the source's
+    /// time. Positive moves the channel later.
+    #[serde(default)]
+    offsets: Vec<(String, String)>,
+    /// `[name, from, to]`: channels to keep only part of, each end a time in the channel's own
+    /// source time, before its offset, or null for an open end.
+    #[serde(default)]
+    keeps: Vec<Keep>,
 }
 
 struct Report;
@@ -307,7 +315,7 @@ pub fn edit_annotations(text: &str, op: &str) -> Result<String, JsError> {
 
 /// Converts a source as `tickwave convert` does, with the same defaults and checks, so the same
 /// source and settings give the same bytes. `request` is `{kind, files, channels, title, meta,
-/// level, blockKib, units, codes}`, as JSON.
+/// level, blockKib, units, codes, offsets, keeps}`, as JSON.
 #[wasm_bindgen]
 pub fn convert(request: &str) -> Result<Converted, JsError> {
     hook();
@@ -319,6 +327,8 @@ pub fn convert(request: &str) -> Result<Converted, JsError> {
         block_kib: r.block_kib,
         units: r.units,
         codes: r.codes,
+        offsets: r.offsets,
+        keeps: r.keeps,
     };
     let mut out = std::io::Cursor::new(Vec::new());
     let converted = match r.kind {

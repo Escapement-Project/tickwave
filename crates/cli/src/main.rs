@@ -16,13 +16,14 @@ use escapement_tickwave_format::annotations::{self, Included};
 use escapement_tickwave_format::decode::{DecodeError, FIRST_READ, Footer, inflate_limited};
 use escapement_tickwave_format::header::{ChannelKind, Header};
 use escapement_tickwave_format::model::{RateOrigin, Recording, SourceFormat};
-use escapement_tickwave_format::repair::Repairer;
+use escapement_tickwave_format::repair::{RepairError, Repairer};
 use escapement_tickwave_format::verify::verify_limited;
 use escapement_tickwave_format::writer::generator_file;
 use escapement_tickwave_import::convert::{
-    self, Pass, Progress, Settings, Step, counted, select, set_units,
+    self, Keep, Pass, Progress, Settings, Step, counted, select, set_units,
 };
 use escapement_tickwave_import::saleae::SampleRate;
+use escapement_tickwave_import::shape::check_time;
 use escapement_tickwave_import::sigrok::Skipped;
 use escapement_tickwave_import::{saleae, sigrok, vcd};
 use indicatif::ProgressStyle;
@@ -247,6 +248,17 @@ struct Common {
     /// Store analog values as f32 even where exact integer codes reproduce them.
     #[arg(long)]
     no_codes: bool,
+    /// Move a channel along the time axis, as `<name>=<time>`, such as `SWCLK=-40ns`. A positive
+    /// time moves it later. The name is the one stored, after --channel. The time is the source's:
+    /// a whole number of its ticks, or a decimal with a unit (s, ms, us, ns, ps), within 0.01 of a
+    /// tick.
+    #[arg(long = "offset", value_name = "NAME=TIME", value_parser = offset)]
+    offsets: Vec<(String, String)>,
+    /// Keep only part of a channel, as `<name>=<from>..<to>`, such as `SWCLK=1.2ms..2ms`; either
+    /// end may be left open, as in `SWCLK=1.2ms..`. The times are the channel's own in the
+    /// source, before any --offset moves it, and round to the nearest tick.
+    #[arg(long = "keep", value_name = "NAME=FROM..TO", value_parser = keep)]
+    keeps: Vec<Keep>,
 }
 
 fn pair(s: &str) -> Result<(String, String), String> {
@@ -257,6 +269,29 @@ fn pair(s: &str) -> Result<(String, String), String> {
         return Err(format!("expected <key>=<value>, got {s:?}"));
     }
     Ok((k.to_owned(), v.to_owned()))
+}
+
+fn offset(s: &str) -> Result<(String, String), String> {
+    let (name, time) = pair(s).map_err(|_| format!("expected <name>=<time>, got {s:?}"))?;
+    check_time(&time)?;
+    Ok((name, time))
+}
+
+fn keep(s: &str) -> Result<Keep, String> {
+    let wrong = || format!("expected <name>=<from>..<to>, got {s:?}");
+    let (name, span) = s
+        .split_once('=')
+        .filter(|(name, _)| !name.is_empty())
+        .ok_or_else(wrong)?;
+    let (from, to) = span.split_once("..").ok_or_else(wrong)?;
+    let end = |time: &str| -> Result<Option<String>, String> {
+        if time.trim().is_empty() {
+            return Ok(None);
+        }
+        check_time(time)?;
+        Ok(Some(time.to_owned()))
+    };
+    Ok((name.to_owned(), end(from)?, end(to)?))
 }
 
 fn main() -> Result<()> {
@@ -421,6 +456,21 @@ fn report_skipped(skipped: &[Skipped]) {
     }
 }
 
+impl Common {
+    fn settings(&self) -> Settings {
+        Settings {
+            title: self.title.clone(),
+            meta: self.meta.iter().cloned().collect(),
+            level: self.level,
+            block_kib: self.block_kib,
+            units: self.units.clone(),
+            codes: !self.no_codes,
+            offsets: self.offsets.clone(),
+            keeps: self.keeps.clone(),
+        }
+    }
+}
+
 /// Converts what `open` reads, checks the output against the source, and writes it.
 fn convert(
     open: &dyn Fn() -> Result<Recording, convert::Error>,
@@ -429,14 +479,7 @@ fn convert(
     max: usize,
 ) -> Result<()> {
     let started = Instant::now();
-    let settings = Settings {
-        title: common.title.clone(),
-        meta: common.meta.iter().cloned().collect(),
-        level: common.level,
-        block_kib: common.block_kib,
-        units: common.units.clone(),
-        codes: !common.no_codes,
-    };
+    let settings = common.settings();
     let converted = write_atomically(output, |file| {
         Ok(convert::convert(
             open,
@@ -645,6 +688,16 @@ fn info(file: &Path, json: bool, max: usize) -> Result<()> {
 fn verify_file(file: &Path, against: &Path, max: usize) -> Result<()> {
     let (mut opened, _, head) = read_footer(file, max)?;
     let h = &head.header;
+    // Where the recording starts in the source is not in the file, so the moves and cuts cannot
+    // be made again.
+    if let Some(c) = h.channels.iter().find(|c| !c.shaping.is_whole()) {
+        bail!(
+            "{}: channel {} was moved or cut when it was converted; verify checks a recording \
+             converted whole",
+            file.display(),
+            c.name
+        );
+    }
     let wanted: Vec<(String, String)> = h
         .channels
         .iter()
@@ -834,9 +887,15 @@ fn repair_file(file: &Path, output: &Path, level: i32) -> Result<()> {
         }
         repairer.feed(&chunk[..n])?;
     }
-    let repaired = repairer
-        .finish()
-        .with_context(|| format!("repairing {}", file.display()))?;
+    let repaired = match repairer.finish() {
+        Ok(repaired) => repaired,
+        Err(RepairError::Shaped(_)) => bail!(
+            "{} was moved or trimmed when it was converted, so it isn't repaired: convert it again \
+             from its source",
+            file.display()
+        ),
+        Err(e) => return Err(e).with_context(|| format!("repairing {}", file.display())),
+    };
     write_atomically(output, |out| {
         copy_then(&mut opened, repaired.keep, &repaired.tail, out)
     })?;
@@ -1073,6 +1132,189 @@ mod tests {
         // Something else by that name: nothing to show, and nowhere to save.
         fs::create_dir(dir.path().join("rec.annotations.toml")).unwrap();
         assert!(sidecar_for(&header(), &recording, None).unwrap().is_none());
+    }
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from([&["tickwave", "convert"], args].concat())
+    }
+
+    fn common(args: &[&str]) -> Common {
+        match parse(args)
+            .unwrap_or_else(|e| panic!("{args:?}: {e}"))
+            .command
+        {
+            Command::Convert {
+                from:
+                    Source::Saleae { common, .. }
+                    | Source::Sigrok { common, .. }
+                    | Source::Vcd { common, .. },
+            } => common,
+            _ => unreachable!("a convert command"),
+        }
+    }
+
+    const SHAPING: [&str; 10] = [
+        "--offset",
+        "CLK=-40ns",
+        "--offset",
+        "D=12",
+        "--keep",
+        "CLK=1.2ms..",
+        "--keep",
+        "D=..2ms",
+        "--keep",
+        "E=1 us..3us",
+    ];
+
+    #[test]
+    fn every_convert_source_takes_offsets_and_keeps_into_its_settings() {
+        for source in [
+            &["saleae", "dir", "-o", "x.tickwave", "--channel", "a=CLK"][..],
+            &["sigrok", "x.sr", "-o", "x.tickwave"],
+            &["vcd", "x.vcd", "-o", "x.tickwave", "--open"],
+        ] {
+            let settings = common(&[source, &SHAPING].concat()).settings();
+            let owned = |s: &str| s.to_owned();
+            assert_eq!(
+                settings.offsets,
+                [("CLK", "-40ns"), ("D", "12")].map(|(n, t)| (owned(n), owned(t)))
+            );
+            assert_eq!(
+                settings.keeps,
+                [
+                    (owned("CLK"), Some(owned("1.2ms")), None),
+                    (owned("D"), None, Some(owned("2ms"))),
+                    (owned("E"), Some(owned("1 us")), Some(owned("3us"))),
+                ]
+            );
+        }
+        let settings = common(&["vcd", "x.vcd", "-o", "x.tickwave"]).settings();
+        assert!(settings.offsets.is_empty() && settings.keeps.is_empty());
+    }
+
+    #[test]
+    fn an_offset_or_a_keep_that_does_not_read_is_refused() {
+        for (flag, why) in [
+            ("--offset=CLK", "expected <name>=<time>"),
+            ("--offset==40ns", "expected <name>=<time>"),
+            ("--offset=CLK=", "expected <name>=<time>"),
+            (
+                "--offset=CLK=40 parsecs",
+                r#""40 parsecs": unknown unit "parsecs""#,
+            ),
+            ("--offset=CLK=1.5", r#""1.5": no unit"#),
+            ("--keep=CLK=1ms", "expected <name>=<from>..<to>"),
+            ("--keep==1ms..", "expected <name>=<from>..<to>"),
+            ("--keep=CLK", "expected <name>=<from>..<to>"),
+            (
+                "--keep=CLK=1ms..2 fortnights",
+                r#"unknown unit "fortnights""#,
+            ),
+        ] {
+            let err = parse(&["vcd", "x.vcd", "-o", "x.tickwave", flag])
+                .err()
+                .unwrap_or_else(|| panic!("{flag} parsed"))
+                .to_string();
+            assert!(err.contains(why), "{flag}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_conversion_moves_and_cuts_what_its_flags_say_and_refuses_what_it_cannot() {
+        let dir = tempfile::tempdir().unwrap();
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/import/demo-logic.sr");
+        let output = dir.path().join("out.tickwave");
+        let open = || Ok(sigrok::read(&source)?.recording);
+        let run = |flags: &[&str]| {
+            let common = common(&[&["sigrok", "x.sr", "-o", "x.tickwave"], flags].concat());
+            convert(&open, &output, &common, 64 << 20)
+        };
+        let err = run(&["--offset", "D0=5", "--offset", "D0=6"]).expect_err("refused");
+        assert_eq!(err.to_string(), r#""D0" is given an offset twice"#);
+        assert!(!output.exists());
+
+        run(&["--offset", "D0=-5", "--keep", "D1=10..100"]).unwrap();
+        let (_, _, head) = read_footer(&output, 64 << 20).unwrap();
+        let shaping: Vec<_> = head.header.channels[..2]
+            .iter()
+            .map(|c| (c.shaping.offset.as_ref().map(|o| o.ticks), c.shaping.kept))
+            .collect();
+        use escapement_tickwave_format::header::Kept;
+        // D0, moved 5 earlier, starts the recording and is kept whole: its 5,000 samples.
+        assert_eq!(
+            shaping,
+            [
+                (Some(-5), Some(Kept { from: 0, to: 5000 })),
+                (None, Some(Kept { from: 15, to: 105 }))
+            ]
+        );
+        let err = verify_file(&output, &source, 64 << 20).expect_err("refused");
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "{}: channel D0 was moved or cut when it was converted; verify checks a recording \
+                 converted whole",
+                output.display()
+            )
+        );
+    }
+
+    #[test]
+    fn a_moved_or_trimmed_recording_cut_off_is_refused_and_a_whole_one_repairs() {
+        let dir = tempfile::tempdir().unwrap();
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/import/demo-mixed.sr");
+        let open = || Ok(sigrok::read(&source)?.recording);
+        let converted = |name: &str, flags: &[&str]| {
+            let path = dir.path().join(name);
+            // Small blocks, so a file cut off part way still holds whole ones.
+            let common = common(
+                &[
+                    &["sigrok", "x.sr", "-o", "x.tickwave", "--block-kib", "1"],
+                    flags,
+                ]
+                .concat(),
+            );
+            convert(&open, &path, &common, 64 << 20).unwrap();
+            fs::read(path).unwrap()
+        };
+        let shaped = converted(
+            "shaped.tickwave",
+            &["--offset", "D0=-5", "--keep", "A0=100.."],
+        );
+        let whole = converted("whole.tickwave", &[]);
+        for percent in [40, 70, 99] {
+            let cut = |file: &[u8], name: &str| {
+                let path = dir.path().join(format!("{name}-{percent}.tickwave"));
+                fs::write(&path, &file[..file.len() * percent / 100]).unwrap();
+                path
+            };
+            let input = cut(&shaped, "shaped");
+            let output = dir
+                .path()
+                .join(format!("shaped-{percent}-repaired.tickwave"));
+            let err = repair_file(&input, &output, 3).expect_err("refused");
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "{} was moved or trimmed when it was converted, so it isn't repaired: convert \
+                     it again from its source",
+                    input.display()
+                )
+            );
+            let mut partial = output.clone().into_os_string();
+            partial.push(".partial");
+            assert!(!output.exists() && !Path::new(&partial).exists());
+
+            let input = cut(&whole, "whole");
+            let output = dir
+                .path()
+                .join(format!("whole-{percent}-repaired.tickwave"));
+            repair_file(&input, &output, 3).unwrap();
+            let (_, _, head) = read_footer(&output, 64 << 20).unwrap();
+            assert!(head.header.channels.iter().all(|c| c.shaping.is_whole()));
+        }
     }
 
     #[test]

@@ -11,7 +11,10 @@ use escapement_tickwave_format::header::{AnalogCoding, Header};
 use escapement_tickwave_format::model::{Channel, ChannelData, Recording, Samples};
 use escapement_tickwave_format::verify::{VerifyError, verify_limited};
 
+use crate::shape::{self, Plan};
 use crate::{codes, saleae, sigrok, vcd};
+
+pub use crate::shape::Keep;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -31,6 +34,8 @@ pub enum Error {
     Encode(#[from] EncodeError),
     #[error("the output does not match the source: {0}")]
     Verify(#[from] VerifyError),
+    #[error(transparent)]
+    Shape(#[from] shape::Error),
 }
 
 /// What a conversion is asked for, beyond the source and its channels.
@@ -47,6 +52,11 @@ pub struct Settings {
     pub units: Vec<(String, String)>,
     /// Store analog values as exact integer codes where some reproduce them.
     pub codes: bool,
+    /// Channels to move, by name, each by a time in the source's time (ANNOTATIONS.md, "Times"):
+    /// a whole tick count, or a decimal with a unit. Positive moves the channel later.
+    pub offsets: Vec<(String, String)>,
+    /// Channels to keep only part of, by name.
+    pub keeps: Vec<Keep>,
 }
 
 impl Default for Settings {
@@ -58,6 +68,8 @@ impl Default for Settings {
             block_kib: 1024,
             units: Vec::new(),
             codes: true,
+            offsets: Vec::new(),
+            keeps: Vec::new(),
         }
     }
 }
@@ -148,7 +160,11 @@ pub fn counted(recording: Recording, progress: &dyn Progress, pass: Pass<'_>) ->
         .channels
         .iter()
         .map(|c| match &c.data {
-            ChannelData::Digital(d) => d.edges.size_hint().0 as u64,
+            // A cut channel's edges are not known before they are read: at most the source's.
+            ChannelData::Digital(d) => {
+                let (least, most) = d.edges.size_hint();
+                most.unwrap_or(least) as u64
+            }
             ChannelData::Analog(a) => a.count,
         })
         .sum();
@@ -240,8 +256,9 @@ fn recover_codes(
 }
 
 /// Converts what `open` reads into `out`, from its start, and checks what it wrote against the
-/// source by reading it back. `open` is called once for each pass: to find analog codes, to
-/// encode, and to check. `max` is the most the check decodes from one frame.
+/// source, moved and cut as `settings` asks, by reading it back. `open` is called once for each
+/// pass: to find analog codes, to encode, and to check. `max` is the most the check decodes from
+/// one frame.
 pub fn convert<F: Read + Write + Seek>(
     open: &dyn Fn() -> Result<Recording, Error>,
     settings: &Settings,
@@ -250,6 +267,16 @@ pub fn convert<F: Read + Write + Seek>(
     out: &mut F,
 ) -> Result<Converted, Error> {
     let open = || set_units(open()?, &settings.units);
+    // The first pass's recording resolves the moves and cuts, before any pass reads an item.
+    let mut first = Some(open()?);
+    let plan = Plan::new(first.as_ref().unwrap(), &settings.offsets, &settings.keeps)?;
+    let mut open = || -> Result<Recording, Error> {
+        let recording = match first.take() {
+            Some(r) => r,
+            None => open()?,
+        };
+        Ok(plan.apply(recording))
+    };
     let (analog, codes) = if settings.codes {
         recover_codes(open()?, progress)
     } else {
