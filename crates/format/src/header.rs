@@ -1,19 +1,12 @@
-//! The head of a file: preamble, JSON header, binary index. The overview follows them inside the
-//! head (see `overview`).
+//! What a file says about itself: the preamble, the trailer, the declaration that opens the
+//! records, the header the footer holds, and the index's rows.
 //!
 //! Layout, little-endian:
 //!
 //! ```text
-//! preamble  32 bytes   magic, u16 major, u16 minor, u32 header length, u32 index length,
-//!                      u32 head length, u64 file length
-//! header    JSON       Header
-//! index     binary     one row a block: i64 start tick, u64 offset, u32 length, u32 decoded
-//!                      length, then a u32 a channel (digital: edge count, level at the block's
-//!                      start in bit 31; analog: sample count); then one row an overview block:
-//!                      u64 offset, u32 length, u32 decoded length
-//! overview  zstd       the rest of the head
-//! blocks    zstd       one frame a block
-//! overview  zstd       one frame an overview block, for levels too fine for the head
+//! preamble  12 bytes   magic, u16 major, u16 minor
+//! records   ...        u8 kind, u32 payload length, payload, 8-byte check (see `record`)
+//! trailer   24 bytes   u64 footer offset, u32 footer length, u16 major, u16 minor, end magic
 //! ```
 
 use std::collections::BTreeMap;
@@ -22,12 +15,14 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::Ratio;
+use crate::model::{Break, Gap, Ratio};
 
 pub const MAGIC: [u8; 8] = *b"\x89TKW\r\n\x1a\n";
+pub const TRAILER_MAGIC: [u8; 8] = *b"\x89TKWEND\n";
 pub const MAJOR: u16 = 1;
 pub const MINOR: u16 = 0;
-pub const PREAMBLE_LEN: usize = 32;
+pub const PREAMBLE_LEN: usize = 12;
+pub const TRAILER_LEN: usize = 24;
 pub const ROW_FIXED: usize = 24;
 pub const LEVEL_BIT: u32 = 1 << 31;
 
@@ -38,22 +33,19 @@ pub const JSON_SAFE: u64 = 1 << 53;
 pub struct Preamble {
     pub major: u16,
     pub minor: u16,
-    pub header_len: u32,
-    pub index_len: u32,
-    pub head_len: u32,
-    pub file_len: u64,
 }
 
 impl Preamble {
+    pub const CURRENT: Preamble = Preamble {
+        major: MAJOR,
+        minor: MINOR,
+    };
+
     pub fn to_bytes(self) -> [u8; PREAMBLE_LEN] {
         let mut out = [0; PREAMBLE_LEN];
         out[..8].copy_from_slice(&MAGIC);
         out[8..10].copy_from_slice(&self.major.to_le_bytes());
         out[10..12].copy_from_slice(&self.minor.to_le_bytes());
-        out[12..16].copy_from_slice(&self.header_len.to_le_bytes());
-        out[16..20].copy_from_slice(&self.index_len.to_le_bytes());
-        out[20..24].copy_from_slice(&self.head_len.to_le_bytes());
-        out[24..32].copy_from_slice(&self.file_len.to_le_bytes());
         out
     }
 
@@ -62,17 +54,84 @@ impl Preamble {
         if bytes.len() < PREAMBLE_LEN || bytes[..8] != MAGIC {
             return None;
         }
-        let u16_at = |at: usize| u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap());
-        let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
         Some(Self {
-            major: u16_at(8),
-            minor: u16_at(10),
-            header_len: u32_at(12),
-            index_len: u32_at(16),
-            head_len: u32_at(20),
-            file_len: u64::from_le_bytes(bytes[24..32].try_into().unwrap()),
+            major: u16::from_le_bytes([bytes[8], bytes[9]]),
+            minor: u16::from_le_bytes([bytes[10], bytes[11]]),
         })
     }
+}
+
+/// The file's last bytes: where the footer record is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Trailer {
+    /// Where the footer record starts.
+    pub footer_offset: u64,
+    /// The footer record's length, its framing included. It ends where the trailer starts.
+    pub footer_len: u32,
+    pub major: u16,
+    pub minor: u16,
+}
+
+impl Trailer {
+    pub fn to_bytes(self) -> [u8; TRAILER_LEN] {
+        let mut out = [0; TRAILER_LEN];
+        out[..8].copy_from_slice(&self.footer_offset.to_le_bytes());
+        out[8..12].copy_from_slice(&self.footer_len.to_le_bytes());
+        out[12..14].copy_from_slice(&self.major.to_le_bytes());
+        out[14..16].copy_from_slice(&self.minor.to_le_bytes());
+        out[16..].copy_from_slice(&TRAILER_MAGIC);
+        out
+    }
+
+    /// None unless `bytes` is exactly a trailer, its magic last.
+    pub fn parse(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != TRAILER_LEN || bytes[16..] != TRAILER_MAGIC {
+            return None;
+        }
+        Some(Self {
+            footer_offset: u64::from_le_bytes(bytes[..8].try_into().unwrap()),
+            footer_len: u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+            major: u16::from_le_bytes([bytes[12], bytes[13]]),
+            minor: u16::from_le_bytes([bytes[14], bytes[15]]),
+        })
+    }
+}
+
+/// The first record: what a writer knows about a recording before any data. The footer's header
+/// holds the same values.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Declaration {
+    pub timebase: Ratio,
+    pub channels: Vec<DeclaredChannel>,
+    pub source: SourceHeader,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub meta: BTreeMap<String, String>,
+    /// The finest overview level's shift: the writer picks it before it knows the length.
+    pub overview_shift: u8,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "RawChannel")]
+pub struct DeclaredChannel {
+    pub name: String,
+    pub source_name: String,
+    #[serde(flatten)]
+    pub data: DeclaredKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum DeclaredKind {
+    Digital {
+        initial: bool,
+    },
+    Analog {
+        unit: String,
+        period: Ratio,
+        coding: AnalogCoding,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -89,9 +148,11 @@ pub struct Header {
     pub meta: BTreeMap<String, String>,
     pub content_id: ContentId,
     pub blocks: u32,
-    /// The overview levels in the head, as bucket widths of 2^shift ticks, finest first.
+    /// The finest overview level's shift, as the declaration gave it.
+    pub overview_shift: u8,
+    /// The overview levels in the footer, as bucket widths of 2^shift ticks, finest first.
     pub overview: Vec<u8>,
-    /// The finer overview levels kept in overview blocks after the data blocks, finest first.
+    /// The finer overview levels kept in overview blocks, finest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub overview_blocks: Vec<OverviewLevel>,
     /// The sidecar's files by name, the hand-written TOML file and what it includes; in a
@@ -122,6 +183,8 @@ pub enum ChannelKind {
         initial: bool,
         end: i64,
         edges: u64,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        gaps: Vec<Gap>,
     },
     Analog {
         unit: String,
@@ -129,6 +192,8 @@ pub enum ChannelKind {
         /// Ticks from one sample to the next.
         period: Ratio,
         count: u64,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        breaks: Vec<Break>,
         coding: AnalogCoding,
     },
 }
@@ -162,7 +227,8 @@ impl AnalogCoding {
     }
 }
 
-/// A channel as the JSON holds it, every kind's fields inline and optional. Deriving
+/// A channel as the JSON holds it, in the header or the declaration, every kind's fields inline
+/// and optional. Deriving
 /// `Deserialize` for the flattened, internally tagged form instead makes serde buffer each channel
 /// before parsing it, which costs the browser's decoder a large share of its size.
 #[derive(Deserialize)]
@@ -173,10 +239,12 @@ struct RawChannel {
     initial: Option<bool>,
     end: Option<i64>,
     edges: Option<u64>,
+    gaps: Option<Vec<Gap>>,
     unit: Option<String>,
     first: Option<i64>,
     period: Option<Ratio>,
     count: Option<u64>,
+    breaks: Option<Vec<Break>>,
     coding: Option<RawCoding>,
 }
 
@@ -207,6 +275,19 @@ fn need<T>(value: Option<T>, field: &str) -> Result<T, String> {
     value.ok_or_else(|| format!("missing field `{field}`"))
 }
 
+impl RawCoding {
+    fn coding(self) -> Result<AnalogCoding, String> {
+        Ok(match self.kind {
+            RawCodingKind::F32 => AnalogCoding::F32,
+            RawCodingKind::Codes => AnalogCoding::Codes {
+                bits: need(self.bits, "bits")?,
+                scale: need(self.scale, "scale")?,
+                offset: need(self.offset, "offset")?,
+            },
+        })
+    }
+}
+
 impl TryFrom<RawChannel> for ChannelHeader {
     type Error = String;
 
@@ -216,30 +297,67 @@ impl TryFrom<RawChannel> for ChannelHeader {
                 initial: need(raw.initial, "initial")?,
                 end: need(raw.end, "end")?,
                 edges: need(raw.edges, "edges")?,
+                gaps: raw.gaps.unwrap_or_default(),
             },
-            RawKind::Analog => {
-                let coding = need(raw.coding, "coding")?;
-                ChannelKind::Analog {
-                    unit: need(raw.unit, "unit")?,
-                    first: need(raw.first, "first")?,
-                    period: need(raw.period, "period")?,
-                    count: need(raw.count, "count")?,
-                    coding: match coding.kind {
-                        RawCodingKind::F32 => AnalogCoding::F32,
-                        RawCodingKind::Codes => AnalogCoding::Codes {
-                            bits: need(coding.bits, "bits")?,
-                            scale: need(coding.scale, "scale")?,
-                            offset: need(coding.offset, "offset")?,
-                        },
-                    },
-                }
-            }
+            RawKind::Analog => ChannelKind::Analog {
+                unit: need(raw.unit, "unit")?,
+                first: need(raw.first, "first")?,
+                period: need(raw.period, "period")?,
+                count: need(raw.count, "count")?,
+                breaks: raw.breaks.unwrap_or_default(),
+                coding: need(raw.coding, "coding")?.coding()?,
+            },
         };
         Ok(Self {
             name: raw.name,
             source_name: raw.source_name,
             data,
         })
+    }
+}
+
+impl TryFrom<RawChannel> for DeclaredChannel {
+    type Error = String;
+
+    fn try_from(raw: RawChannel) -> Result<Self, String> {
+        let data = match raw.kind {
+            RawKind::Digital => DeclaredKind::Digital {
+                initial: need(raw.initial, "initial")?,
+            },
+            RawKind::Analog => DeclaredKind::Analog {
+                unit: need(raw.unit, "unit")?,
+                period: need(raw.period, "period")?,
+                coding: need(raw.coding, "coding")?.coding()?,
+            },
+        };
+        Ok(Self {
+            name: raw.name,
+            source_name: raw.source_name,
+            data,
+        })
+    }
+}
+
+impl ChannelHeader {
+    /// What the declaration said of this channel.
+    pub fn declared(&self) -> DeclaredChannel {
+        DeclaredChannel {
+            name: self.name.clone(),
+            source_name: self.source_name.clone(),
+            data: match &self.data {
+                ChannelKind::Digital { initial, .. } => DeclaredKind::Digital { initial: *initial },
+                ChannelKind::Analog {
+                    unit,
+                    period,
+                    coding,
+                    ..
+                } => DeclaredKind::Analog {
+                    unit: unit.clone(),
+                    period: *period,
+                    coding: *coding,
+                },
+            },
+        }
     }
 }
 
@@ -393,6 +511,7 @@ pub enum RateOrigin {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlockRow {
     pub start: i64,
+    /// Where the block's zstd frame starts in the file, inside its record.
     pub offset: u64,
     pub length: u32,
     pub decoded_length: u32,
@@ -518,6 +637,7 @@ mod tests {
             first: 2,
             period: Ratio::new(3, 2).unwrap(),
             count: 9,
+            breaks: vec![Break { index: 4, tick: 20 }],
             coding,
         };
         for data in [
@@ -525,6 +645,17 @@ mod tests {
                 initial: true,
                 end: 7,
                 edges: 3,
+                gaps: Vec::new(),
+            },
+            ChannelKind::Digital {
+                initial: false,
+                end: 9,
+                edges: 1,
+                gaps: vec![Gap {
+                    from: 0,
+                    to: 4,
+                    level: true,
+                }],
             },
             analog(AnalogCoding::F32),
             analog(AnalogCoding::Codes {

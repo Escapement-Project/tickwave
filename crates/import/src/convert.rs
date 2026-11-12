@@ -3,12 +3,13 @@
 //! source.
 
 use std::collections::BTreeMap;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
-use escapement_tickwave_format::decode::{VerifyError, verify_limited};
-use escapement_tickwave_format::encode::{EncodeError, Options, encode};
-use escapement_tickwave_format::header::AnalogCoding;
+use escapement_tickwave_format::encode::{EncodeError, Options, encode_to};
+use escapement_tickwave_format::header::{AnalogCoding, Header};
 use escapement_tickwave_format::model::{Channel, ChannelData, Recording, Samples};
+use escapement_tickwave_format::verify::{VerifyError, verify_limited};
 
 use crate::{codes, saleae, sigrok, vcd};
 
@@ -89,8 +90,8 @@ pub trait Progress {
 pub type Found = Vec<(String, Option<u8>)>;
 
 pub struct Converted {
-    /// The recording, checked against the source.
-    pub file: Vec<u8>,
+    /// The recording's header, its file checked against the source.
+    pub header: Header,
     pub codes: Found,
 }
 
@@ -238,14 +239,15 @@ fn recover_codes(
     (codings, found)
 }
 
-/// Converts what `open` reads, and checks the output against the source. `open` is called once
-/// for each pass: to find analog codes, to encode, and to check. `max` is the most the check
-/// decodes from one frame.
-pub fn convert(
+/// Converts what `open` reads into `out`, from its start, and checks what it wrote against the
+/// source by reading it back. `open` is called once for each pass: to find analog codes, to
+/// encode, and to check. `max` is the most the check decodes from one frame.
+pub fn convert<F: Read + Write + Seek>(
     open: &dyn Fn() -> Result<Recording, Error>,
     settings: &Settings,
     max: usize,
     progress: &dyn Progress,
+    out: &mut F,
 ) -> Result<Converted, Error> {
     let open = || set_units(open()?, &settings.units);
     let (analog, codes) = if settings.codes {
@@ -265,10 +267,21 @@ pub fn convert(
             settings.block_kib
         )),
         analog,
+        ..Options::default()
     };
-    let file = encode(counted(open()?, progress, Pass::Encode), &options)?;
+    out.seek(SeekFrom::Start(0)).map_err(EncodeError::Io)?;
+    encode_to(
+        counted(open()?, progress, Pass::Encode),
+        &options,
+        std::io::BufWriter::with_capacity(1 << 20, &mut *out),
+    )?;
     progress.end(Pass::Encode);
-    verify_limited(&file, counted(open()?, progress, Pass::Verify), max)?;
+    out.seek(SeekFrom::Start(0)).map_err(EncodeError::Io)?;
+    let header = verify_limited(
+        std::io::BufReader::with_capacity(1 << 20, &mut *out),
+        counted(open()?, progress, Pass::Verify),
+        max,
+    )?;
     progress.end(Pass::Verify);
-    Ok(Converted { file, codes })
+    Ok(Converted { header, codes })
 }

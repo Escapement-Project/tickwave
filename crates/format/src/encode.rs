@@ -1,84 +1,29 @@
-//! The encoder: a `model::Recording` in, a whole file out.
-//!
-//! Blocks are cut by time across all channels. Items are taken in tick order; once a block's
-//! decoded payload reaches the target size, the block ends before the next item whose tick is
-//! later than the last one taken, so items sharing a tick stay together. Block i covers ticks
-//! `[start_i, start_{i+1})`; the last block runs to the recording's end.
-//!
-//! A block's decoded payload: for each channel, a u32 section length, then the sections in channel
-//! order. A digital section is the block's edges as LEB128 intervals, the first measured from the
-//! block's start tick. An analog section is the block's samples in the channel's coding.
+//! The encoder: a `model::Recording` in, a file out through any `Write`. It merges the channels'
+//! items into tick order and hands them to a `Writer`, so a capture larger than memory streams
+//! through.
 
 use std::collections::BTreeMap;
+use std::io::Write;
 
-use rayon::prelude::*;
-
-use crate::codec::put_uleb;
-use crate::hash::{self, ChannelHasher};
-use crate::header::{
-    AnalogCoding, BlockRow, ChannelHeader, ChannelKind, Header, JSON_SAFE, LEVEL_BIT, MAJOR, MINOR,
-    OverviewLevel, OverviewRow, PREAMBLE_LEN, Preamble, SourceHeader, code_value,
-};
-use crate::model::{ChannelData, Edges, Ratio, Recording, Samples};
-use crate::overview::{self, AnalogBuilder, DigitalBuilder, Level};
+use crate::header::{AnalogCoding, Declaration, DeclaredChannel, DeclaredKind, SourceHeader};
+use crate::model::{Break, ChannelData, Edges, Gap, Recording, Samples, run_sample_tick};
+use crate::overview;
+pub use crate::writer::{Finished, WriteError, WriteOptions, Writer, code_of, generator_file};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EncodeError {
-    #[error("{what} {value} does not fit the header, which holds integers below 2^53")]
-    TooLarge { what: &'static str, value: u64 },
-    #[error("{channel}: its end, {end}, lies outside the recording's 0 to {length}")]
-    End {
-        channel: String,
-        end: i64,
-        length: i64,
-    },
-    #[error("{channel}: edge at tick {tick} comes before tick {previous}")]
-    Order {
-        channel: String,
-        tick: i64,
-        previous: i64,
-    },
-    #[error("{channel}: edge at tick {tick} lies outside the channel's known ticks, 1..{end}")]
-    EdgeRange {
-        channel: String,
-        tick: i64,
-        end: i64,
-    },
+    #[error(transparent)]
+    Write(#[from] WriteError),
     #[error("{channel}: {promised} samples promised, {delivered} delivered")]
     Count {
         channel: String,
         promised: u64,
         delivered: u64,
     },
-    #[error("the length {0} covers no tick")]
-    Length(i64),
-    #[error("{channel}: never known, so its initial level is false")]
-    UnknownInitial { channel: String },
-    #[error("{channel}: samples run past the recording's ticks, 0..{length}")]
-    SampleRange { channel: String, length: i64 },
-    #[error("{channel}: the first sample is at tick {first}, before the recording starts")]
-    StartsBeforeZero { channel: String, first: i64 },
-    #[error("{channel}: codes of {bits} bits; a coding holds 1 to 16")]
-    CodingBits { channel: String, bits: u8 },
-    #[error("{channel}: sample {index}, {value}, is not exactly a code of {coding:?}")]
-    Coding {
-        channel: String,
-        index: u64,
-        value: f32,
-        coding: AnalogCoding,
-    },
     #[error("{channel}: an analog coding was given for a digital channel")]
     CodingOnDigital { channel: String },
-    #[error("the block size target must lie between 1 and 2^30 bytes")]
-    BlockSize,
-    #[error("the head is {0} bytes, more than a u32 offset reaches")]
-    HeadTooLarge(usize),
-    #[error("a block of {0} bytes, more than its u32 length holds")]
-    BlockTooLarge(usize),
-    #[error("the header would not read back: {0}")]
-    Header(String),
-    #[error("zstd: {0}")]
-    Zstd(#[from] std::io::Error),
+    #[error("writing: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 pub struct Options {
@@ -86,11 +31,15 @@ pub struct Options {
     pub level: i32,
     /// The decoded size a block aims for.
     pub block_bytes: usize,
+    /// How many blocks compress together; None for four a thread.
+    pub batch: Option<usize>,
     pub title: Option<String>,
     pub meta: BTreeMap<String, String>,
     pub converter: Option<String>,
     /// A coding for each analog channel, by channel index; absent or None stores f32.
     pub analog: Vec<Option<AnalogCoding>>,
+    /// The finest overview level's shift; None for the converter's, from the length.
+    pub overview_shift: Option<u8>,
 }
 
 impl Default for Options {
@@ -98,438 +47,131 @@ impl Default for Options {
         Self {
             level: 19,
             block_bytes: 1 << 20,
+            batch: None,
             title: None,
             meta: BTreeMap::new(),
             converter: None,
             analog: Vec::new(),
+            overview_shift: None,
         }
     }
-}
-
-/// One zstd frame with a content checksum, which the decoder requires.
-fn compress(raw: &[u8], level: i32) -> std::io::Result<Vec<u8>> {
-    let mut compressor = zstd::bulk::Compressor::new(level)?;
-    compressor.set_parameter(zstd::stream::raw::CParameter::ChecksumFlag(true))?;
-    compressor.compress(raw)
-}
-
-/// The code for `value` under `coding`, if one reproduces it exactly.
-pub fn code_of(value: f32, coding: AnalogCoding) -> Option<u16> {
-    let AnalogCoding::Codes {
-        bits,
-        scale,
-        offset,
-    } = coding
-    else {
-        return None;
-    };
-    let code = ((f64::from(value) - offset) / scale).round();
-    if !(0.0..f64::from(1u32 << bits)).contains(&code) {
-        return None;
-    }
-    let code = code as u16;
-    (code_value(code, scale, offset).to_bits() == value.to_bits()).then_some(code)
-}
-
-struct DigitalStream {
-    edges: Edges,
-    next: Option<i64>,
-    previous: i64,
-    end: i64,
-    level: bool,
-    count: u64,
-    hasher: ChannelHasher,
-    overview: DigitalBuilder,
-}
-
-struct AnalogStream {
-    samples: Box<dyn Iterator<Item = f32> + Send>,
-    next: Option<f32>,
-    index: u64,
-    count: u64,
-    first: i64,
-    period: Ratio,
-    coding: AnalogCoding,
-    hasher: ChannelHasher,
-    overview: AnalogBuilder,
 }
 
 enum Stream {
-    Digital(DigitalStream),
-    Analog(AnalogStream),
-}
-
-impl AnalogStream {
-    fn tick(&self, index: u64) -> i64 {
-        crate::model::sample_tick(self.first, self.period, index)
-    }
+    Digital {
+        edges: Edges,
+        next: Option<i64>,
+        gaps: std::vec::IntoIter<Gap>,
+        next_gap: Option<Gap>,
+    },
+    Analog {
+        samples: Box<dyn Iterator<Item = f32> + Send>,
+        next: Option<f32>,
+        index: u64,
+        count: u64,
+        first: i64,
+        period: crate::model::Ratio,
+        breaks: Vec<Break>,
+    },
 }
 
 impl Stream {
+    /// The next item's tick: a gap's at its `from`, so it goes in before the edges after it.
     fn next_tick(&self) -> Option<i64> {
         match self {
-            Stream::Digital(d) => d.next,
-            Stream::Analog(a) => a.next.map(|_| a.tick(a.index)),
+            Stream::Digital { next, next_gap, .. } => match (next, next_gap) {
+                (Some(t), Some(g)) => Some((*t).min(g.from)),
+                (t, g) => t.or(g.map(|g| g.from)),
+            },
+            Stream::Analog {
+                next,
+                index,
+                first,
+                period,
+                breaks,
+                ..
+            } => next.map(|_| run_sample_tick(*first, *period, breaks, *index)),
         }
     }
 }
 
-struct Open {
-    start: i64,
-    sections: Vec<Vec<u8>>,
-    words: Vec<u32>,
-    size: usize,
-    last: i64,
-}
-
-fn check_safe(what: &'static str, value: u64) -> Result<(), EncodeError> {
-    if value < JSON_SAFE {
-        Ok(())
-    } else {
-        Err(EncodeError::TooLarge { what, value })
+fn drain(writer: &mut Writer, out: &mut impl Write) -> std::io::Result<()> {
+    if !writer.output().is_empty() {
+        out.write_all(writer.output())?;
+        let n = writer.output().len();
+        writer.consume(n);
     }
+    Ok(())
 }
 
-pub fn encode(recording: Recording, options: &Options) -> Result<Vec<u8>, EncodeError> {
+/// Encodes `recording` into `out`, and returns what the writer finished with: its header and
+/// generated annotations (a recording from a capture has none).
+pub fn encode_to(
+    recording: Recording,
+    options: &Options,
+    mut out: impl Write,
+) -> Result<Finished, EncodeError> {
     let Recording {
         timebase,
         length,
         channels,
         source,
     } = recording;
-    if options.block_bytes == 0 || options.block_bytes > 1 << 30 {
-        return Err(EncodeError::BlockSize);
-    }
-    check_safe("timebase numerator", timebase.num())?;
-    check_safe("timebase denominator", timebase.den())?;
-    if length < 1 {
-        return Err(EncodeError::Length(length));
-    }
-    check_safe("length", length as u64)?;
-    let plan = overview::plan(length);
-    let finest = plan.finest();
-
-    let mut names = Vec::with_capacity(channels.len());
-    let mut kinds = Vec::with_capacity(channels.len());
+    let mut declared = Vec::with_capacity(channels.len());
     let mut streams = Vec::with_capacity(channels.len());
+    let mut names = Vec::with_capacity(channels.len());
+    let mut ends = Vec::new();
     for (i, channel) in channels.into_iter().enumerate() {
         let coding = options.analog.get(i).copied().flatten();
-        match channel.data {
+        let data = match channel.data {
             ChannelData::Digital(d) => {
                 if coding.is_some() {
                     return Err(EncodeError::CodingOnDigital {
                         channel: channel.name,
                     });
                 }
-                if d.end < 0 || d.end > length {
-                    return Err(EncodeError::End {
-                        channel: channel.name,
-                        end: d.end,
-                        length,
-                    });
-                }
-                if d.end == 0 && d.initial {
-                    return Err(EncodeError::UnknownInitial {
-                        channel: channel.name,
-                    });
-                }
                 let mut edges = d.edges;
                 let next = edges.next();
-                kinds.push(ChannelKind::Digital {
-                    initial: d.initial,
-                    end: d.end,
-                    edges: 0,
-                });
-                streams.push(Stream::Digital(DigitalStream {
+                let mut gaps = d.gaps.into_iter();
+                let next_gap = gaps.next();
+                streams.push(Stream::Digital {
                     edges,
                     next,
-                    previous: 0,
-                    end: d.end,
-                    level: d.initial,
-                    count: 0,
-                    hasher: ChannelHasher::digital(&channel.name, d.initial, d.end),
-                    overview: DigitalBuilder::new(length, finest, d.initial),
-                }));
+                    gaps,
+                    next_gap,
+                });
+                ends.push(d.end);
+                DeclaredKind::Digital { initial: d.initial }
             }
             ChannelData::Analog(a) => {
-                let period = a.period;
-                check_safe("analog sample count", a.count)?;
-                check_safe("analog period numerator", period.num())?;
-                check_safe("analog period denominator", period.den())?;
-                let coding = coding.unwrap_or(AnalogCoding::F32);
-                if let AnalogCoding::Codes { bits, .. } = coding
-                    && !(1..=16).contains(&bits)
-                {
-                    return Err(EncodeError::CodingBits {
-                        channel: channel.name,
-                        bits,
-                    });
-                }
                 let Samples::F32(mut samples) = a.samples;
                 let next = samples.next();
-                kinds.push(ChannelKind::Analog {
-                    unit: a.unit.clone(),
-                    first: a.first,
-                    period,
-                    count: a.count,
-                    coding,
-                });
-                let stream = AnalogStream {
+                streams.push(Stream::Analog {
                     samples,
                     next,
                     index: 0,
                     count: a.count,
                     first: a.first,
                     period: a.period,
-                    coding,
-                    hasher: ChannelHasher::analog(&channel.name, &a.unit, a.first, period, a.count),
-                    overview: AnalogBuilder::new(length, finest),
-                };
-                if a.first < 0 {
-                    return Err(EncodeError::StartsBeforeZero {
-                        channel: channel.name,
-                        first: a.first,
-                    });
+                    breaks: a.breaks,
+                });
+                DeclaredKind::Analog {
+                    unit: a.unit,
+                    period: a.period,
+                    coding: coding.unwrap_or(AnalogCoding::F32),
                 }
-                if a.first >= length || (a.count > 0 && stream.tick(a.count - 1) >= length) {
-                    return Err(EncodeError::SampleRange {
-                        channel: channel.name,
-                        length,
-                    });
-                }
-                streams.push(Stream::Analog(stream));
             }
-        }
-        names.push((channel.name, channel.source_name));
-    }
-
-    let new_block = |start: i64, streams: &[Stream]| Open {
-        start,
-        sections: vec![Vec::new(); streams.len()],
-        words: streams
-            .iter()
-            .map(|s| match s {
-                Stream::Digital(d) if d.level => LEVEL_BIT,
-                _ => 0,
-            })
-            .collect(),
-        size: 0,
-        last: start,
-    };
-    let mut pending: Vec<(i64, Vec<u32>, Vec<u8>)> = Vec::new();
-    let mut blocks: Vec<(BlockRow, Vec<u8>)> = Vec::new();
-    let batch = 4 * rayon::current_num_threads().max(1);
-    let flush = |pending: &mut Vec<(i64, Vec<u32>, Vec<u8>)>,
-                 blocks: &mut Vec<(BlockRow, Vec<u8>)>|
-     -> Result<(), EncodeError> {
-        let compressed = pending
-            .par_iter()
-            .map(|(_, _, raw)| compress(raw, options.level))
-            .collect::<Result<Vec<_>, _>>()?;
-        for ((start, words, raw), frame) in pending.drain(..).zip(compressed) {
-            // A block passes its target only by items sharing its last tick, but analog samples
-            // closer than a tick can share one by the billion.
-            let too_large = |n: usize| u32::try_from(n).map_err(|_| EncodeError::BlockTooLarge(n));
-            blocks.push((
-                BlockRow {
-                    start,
-                    offset: 0,
-                    length: too_large(frame.len())?,
-                    decoded_length: too_large(raw.len())?,
-                    channels: words,
-                },
-                frame,
-            ));
-        }
-        Ok(())
-    };
-    let planes: Vec<bool> = kinds
-        .iter()
-        .map(|k| {
-            matches!(
-                k,
-                ChannelKind::Analog {
-                    coding: AnalogCoding::Codes { .. },
-                    ..
-                }
-            )
-        })
-        .collect();
-    let close = |open: Open, pending: &mut Vec<(i64, Vec<u32>, Vec<u8>)>| {
-        let mut raw = Vec::with_capacity(open.size + 4 * open.sections.len());
-        for section in &open.sections {
-            raw.extend_from_slice(&(section.len() as u32).to_le_bytes());
-        }
-        for (section, planes) in open.sections.iter().zip(&planes) {
-            if *planes {
-                // Codes were appended little-endian; store every low byte, then every high byte.
-                raw.extend(section.iter().step_by(2));
-                raw.extend(section.iter().skip(1).step_by(2));
-            } else {
-                raw.extend_from_slice(section);
-            }
-        }
-        pending.push((open.start, open.words, raw));
-    };
-
-    let mut open = new_block(0, &streams);
-    loop {
-        let next = streams
-            .iter()
-            .enumerate()
-            .filter_map(|(i, s)| s.next_tick().map(|t| (t, i)))
-            .min();
-        let Some((tick, i)) = next else {
-            close(open, &mut pending);
-            break;
         };
-        if open.size >= options.block_bytes && tick > open.last {
-            let next_open = new_block(tick, &streams);
-            close(std::mem::replace(&mut open, next_open), &mut pending);
-            if pending.len() >= batch {
-                flush(&mut pending, &mut blocks)?;
-            }
-        }
-        let name = &names[i].0;
-        let section = &mut open.sections[i];
-        let before = section.len();
-        match &mut streams[i] {
-            Stream::Digital(d) => {
-                if tick < 1 || tick >= d.end {
-                    return Err(EncodeError::EdgeRange {
-                        channel: name.clone(),
-                        tick,
-                        end: d.end,
-                    });
-                }
-                if tick < d.previous {
-                    return Err(EncodeError::Order {
-                        channel: name.clone(),
-                        tick,
-                        previous: d.previous,
-                    });
-                }
-                let from = if open.words[i] & !LEVEL_BIT == 0 {
-                    open.start
-                } else {
-                    d.previous
-                };
-                put_uleb(section, (tick - from) as u64);
-                open.words[i] += 1;
-                d.previous = tick;
-                d.count += 1;
-                d.level = !d.level;
-                d.hasher.edge(tick);
-                d.overview.edge(tick);
-                d.next = d.edges.next();
-            }
-            Stream::Analog(a) => {
-                let value = a.next.take().unwrap();
-                if a.index >= a.count {
-                    return Err(EncodeError::Count {
-                        channel: name.clone(),
-                        promised: a.count,
-                        delivered: a.index + 1 + a.samples.by_ref().count() as u64,
-                    });
-                }
-                match a.coding {
-                    AnalogCoding::F32 => section.extend_from_slice(&value.to_le_bytes()),
-                    coding @ AnalogCoding::Codes { .. } => {
-                        let code = code_of(value, coding).ok_or_else(|| EncodeError::Coding {
-                            channel: name.clone(),
-                            index: a.index,
-                            value,
-                            coding,
-                        })?;
-                        section.extend_from_slice(&code.to_le_bytes());
-                    }
-                }
-                open.words[i] += 1;
-                a.hasher.sample(value);
-                a.overview.sample(tick, value);
-                a.index += 1;
-                a.next = a.samples.next();
-            }
-        }
-        open.size += section.len() - before;
-        open.last = tick;
-    }
-    flush(&mut pending, &mut blocks)?;
-
-    let mut digests = Vec::with_capacity(streams.len());
-    let mut finest_channels = Vec::with_capacity(streams.len());
-    for ((stream, kind), (name, _)) in streams.into_iter().zip(&mut kinds).zip(&names) {
-        match stream {
-            Stream::Digital(d) => {
-                if let ChannelKind::Digital { edges, .. } = kind {
-                    *edges = d.count;
-                }
-                check_safe("edge count", d.count)?;
-                digests.push(d.hasher.finish());
-                finest_channels.push(d.overview.finish());
-            }
-            Stream::Analog(a) => {
-                if a.index != a.count {
-                    return Err(EncodeError::Count {
-                        channel: name.clone(),
-                        promised: a.count,
-                        delivered: a.index,
-                    });
-                }
-                digests.push(a.hasher.finish());
-                finest_channels.push(a.overview.finish());
-            }
-        }
-    }
-    let finest_level = Level {
-        shift: finest,
-        buckets: overview::buckets(length, finest),
-        channels: finest_channels,
-    };
-    let level_at = |shift: u8| {
-        if shift == finest {
-            finest_level.clone()
-        } else {
-            overview::coarsen(&finest_level, shift, length)
-        }
-    };
-    let head_levels: Vec<Level> = plan.head.iter().map(|&s| level_at(s)).collect();
-    let mut overview_raw = Vec::new();
-    overview::write(&head_levels, &mut overview_raw);
-    let overview_frame = compress(&overview_raw, options.level)?;
-    let mut overview_raws = Vec::new();
-    let mut overview_levels = Vec::new();
-    for &shift in &plan.blocks {
-        let level = level_at(shift);
-        let count = overview::block_count(length, shift);
-        for k in 0..count {
-            let (first, n) = overview::block_buckets(length, shift, k);
-            let mut raw = Vec::new();
-            overview::write(&[level.slice(first, n)], &mut raw);
-            overview_raws.push(raw);
-        }
-        overview_levels.push(OverviewLevel {
-            shift,
-            blocks: count as u32,
+        names.push(channel.name.clone());
+        declared.push(DeclaredChannel {
+            name: channel.name,
+            source_name: channel.source_name,
+            data,
         });
     }
-    let overview_frames = overview_raws
-        .par_iter()
-        .map(|raw| compress(raw, options.level))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let header = Header {
+    let declaration = Declaration {
         timebase,
-        length,
-        channels: names
-            .into_iter()
-            .zip(kinds)
-            .map(|((name, source_name), data)| ChannelHeader {
-                name,
-                source_name,
-                data,
-            })
-            .collect(),
+        channels: declared,
         source: SourceHeader {
             format: source.format,
             files: source.files,
@@ -543,54 +185,101 @@ pub fn encode(recording: Recording, options: &Options) -> Result<Vec<u8>, Encode
         },
         title: options.title.clone(),
         meta: options.meta.clone(),
-        content_id: hash::content_id(timebase, length, &digests),
-        blocks: blocks.len() as u32,
-        overview: plan.head.clone(),
-        overview_blocks: overview_levels,
-        annotations: None,
+        overview_shift: options
+            .overview_shift
+            .unwrap_or_else(|| overview::converter_finest(length)),
     };
-    // The reader's own rules, so the encoder never writes a header the decoder refuses.
-    crate::decode::check_header(&header).map_err(|e| EncodeError::Header(e.to_string()))?;
-    let header_json = serde_json::to_vec(&header).expect("a header always serialises");
-    let index_len = blocks.len() * BlockRow::size(header.channels.len())
-        + overview_frames.len() * OverviewRow::SIZE;
-    let head_len = PREAMBLE_LEN + header_json.len() + index_len + overview_frame.len();
-    let head_len_u32 = u32::try_from(head_len).map_err(|_| EncodeError::HeadTooLarge(head_len))?;
-    let mut offset = head_len as u64;
-    let mut index = Vec::with_capacity(index_len);
-    for (row, frame) in &mut blocks {
-        row.offset = offset;
-        offset += frame.len() as u64;
-        row.write(&mut index);
-    }
-    for (frame, raw) in overview_frames.iter().zip(&overview_raws) {
-        OverviewRow {
-            offset,
-            length: frame.len() as u32,
-            decoded_length: raw.len() as u32,
+    let batch = options
+        .batch
+        .unwrap_or_else(|| 4 * rayon::current_num_threads().max(1));
+    let mut writer = Writer::new(
+        declaration,
+        WriteOptions {
+            level: options.level,
+            block_bytes: options.block_bytes,
+            batch,
+        },
+    )?;
+    drain(&mut writer, &mut out)?;
+    loop {
+        let next = streams
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| s.next_tick().map(|t| (t, i)))
+            .min();
+        let Some((tick, c)) = next else {
+            break;
+        };
+        match &mut streams[c] {
+            Stream::Digital {
+                edges,
+                next,
+                gaps,
+                next_gap,
+            } => {
+                if let Some(g) = *next_gap
+                    && g.from == tick
+                    && next.is_none_or(|t| t > g.from)
+                {
+                    writer.gap(c, g)?;
+                    *next_gap = gaps.next();
+                } else {
+                    writer.edge(c, tick)?;
+                    *next = edges.next();
+                }
+            }
+            Stream::Analog {
+                samples,
+                next,
+                index,
+                count,
+                first,
+                breaks,
+                ..
+            } => {
+                let value = next.take().unwrap();
+                if *index >= *count {
+                    return Err(EncodeError::Count {
+                        channel: names[c].clone(),
+                        promised: *count,
+                        delivered: *index + 1 + samples.by_ref().count() as u64,
+                    });
+                }
+                if *index == 0 {
+                    writer.run(c, *first)?;
+                } else if let Ok(b) = breaks.binary_search_by_key(index, |b| b.index) {
+                    writer.run(c, breaks[b].tick)?;
+                }
+                writer.sample(c, value)?;
+                *index += 1;
+                *next = samples.next();
+            }
         }
-        .write(&mut index);
-        offset += frame.len() as u64;
+        if writer.output().len() >= 1 << 20 {
+            drain(&mut writer, &mut out)?;
+        }
     }
-    let preamble = Preamble {
-        major: MAJOR,
-        minor: MINOR,
-        header_len: header_json.len() as u32,
-        index_len: index_len as u32,
-        head_len: head_len_u32,
-        file_len: offset,
-    };
-    let mut out = Vec::with_capacity(offset as usize);
-    out.extend_from_slice(&preamble.to_bytes());
-    out.extend_from_slice(&header_json);
-    out.extend_from_slice(&index);
-    out.extend_from_slice(&overview_frame);
-    for (_, frame) in &blocks {
-        out.extend_from_slice(frame);
+    for (stream, name) in streams.iter().zip(&names) {
+        if let Stream::Analog { index, count, .. } = stream
+            && index != count
+        {
+            return Err(EncodeError::Count {
+                channel: name.clone(),
+                promised: *count,
+                delivered: *index,
+            });
+        }
     }
-    for frame in &overview_frames {
-        out.extend_from_slice(frame);
-    }
-    debug_assert_eq!(out.len() as u64, offset);
+    drain(&mut writer, &mut out)?;
+    let finished = writer.finish(length, &ends, BTreeMap::new())?;
+    out.write_all(&finished.tail)?;
+    out.flush()?;
+    Ok(finished)
+}
+
+/// Encodes `recording` into memory.
+pub fn encode(recording: Recording, options: &Options) -> Result<Vec<u8>, EncodeError> {
+    let mut out = Vec::new();
+    encode_to(recording, options, &mut out)?;
     Ok(out)
 }

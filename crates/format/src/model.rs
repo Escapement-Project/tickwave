@@ -66,6 +66,49 @@ impl From<Ratio> for [NonZeroU64; 2] {
     }
 }
 
+/// A span of a digital channel where the level is not known: ticks `from..to`. From `to` on the
+/// level is `level`. It reads and writes as `[from, to, level]`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "(i64, i64, bool)", into = "(i64, i64, bool)")]
+pub struct Gap {
+    pub from: i64,
+    pub to: i64,
+    pub level: bool,
+}
+
+impl From<(i64, i64, bool)> for Gap {
+    fn from((from, to, level): (i64, i64, bool)) -> Self {
+        Self { from, to, level }
+    }
+}
+
+impl From<Gap> for (i64, i64, bool) {
+    fn from(g: Gap) -> Self {
+        (g.from, g.to, g.level)
+    }
+}
+
+/// Where an analog channel's samples start again after a stop: sample `index` sits at `tick`, and
+/// the samples after it follow at the channel's period. It reads and writes as `[index, tick]`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "(u64, i64)", into = "(u64, i64)")]
+pub struct Break {
+    pub index: u64,
+    pub tick: i64,
+}
+
+impl From<(u64, i64)> for Break {
+    fn from((index, tick): (u64, i64)) -> Self {
+        Self { index, tick }
+    }
+}
+
+impl From<Break> for (u64, i64) {
+    fn from(b: Break) -> Self {
+        (b.index, b.tick)
+    }
+}
+
 #[derive(Debug)]
 pub struct Recording {
     /// Ticks a second. One tick is the source's time resolution: every time in the recording is a
@@ -104,6 +147,9 @@ pub struct Digital {
     /// the source stamped with one time. The VCD reader collapses changes at one time to their net
     /// change, and the Saleae reader refuses edges out of order.
     pub edges: Edges,
+    /// Spans where the level is not known, in order. No edge lies in a gap's `from..=to`, and a
+    /// gap from tick 0 needs `initial` false.
+    pub gaps: Vec<Gap>,
 }
 
 pub type Edges = Box<dyn Iterator<Item = i64> + Send>;
@@ -116,12 +162,26 @@ pub struct Analog {
     /// Ticks from one sample to the next.
     pub period: Ratio,
     pub count: u64,
+    /// Where the samples start again after a stop, in order, each index in `1..count`.
+    pub breaks: Vec<Break>,
     pub samples: Samples,
 }
 
 /// The tick of sample `index`: `first + floor(index × period)`.
 pub fn sample_tick(first: i64, period: Ratio, index: u64) -> i64 {
     first + (u128::from(index) * u128::from(period.num()) / u128::from(period.den())) as i64
+}
+
+/// The tick of sample `index` of a channel with `breaks`: the run it falls in starts at its
+/// break's tick, or at `first` before the first break.
+pub fn run_sample_tick(first: i64, period: Ratio, breaks: &[Break], index: u64) -> i64 {
+    match breaks.partition_point(|b| b.index <= index) {
+        0 => sample_tick(first, period, index),
+        n => {
+            let b = breaks[n - 1];
+            sample_tick(b.tick, period, index - b.index)
+        }
+    }
 }
 
 pub enum Samples {
@@ -169,6 +229,7 @@ impl fmt::Debug for Digital {
             .field("initial", &self.initial)
             .field("end", &self.end)
             .field("edges", &self.edges.size_hint())
+            .field("gaps", &self.gaps)
             .finish()
     }
 }
@@ -180,6 +241,7 @@ impl fmt::Debug for Analog {
             .field("first", &self.first)
             .field("period", &self.period)
             .field("count", &self.count)
+            .field("breaks", &self.breaks)
             .finish_non_exhaustive()
     }
 }

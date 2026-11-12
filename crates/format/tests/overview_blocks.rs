@@ -1,14 +1,16 @@
 use escapement_tickwave_format::bundle::bundle;
-use escapement_tickwave_format::decode::{Head, verify};
+use escapement_tickwave_format::decode::Footer;
 use escapement_tickwave_format::encode::{Options, encode};
-use escapement_tickwave_format::header::{
-    BlockRow, OverviewLevel, OverviewRow, PREAMBLE_LEN, Preamble,
-};
+use escapement_tickwave_format::header::OverviewLevel;
+use escapement_tickwave_format::record::{self, Kind};
+use escapement_tickwave_format::verify::verify;
+
+mod common;
 use escapement_tickwave_format::model::{
     Analog, Channel, ChannelData, Digital, Ratio, Recording, Samples, Source, SourceFormat,
 };
 
-/// At 2^12 ticks a bucket this has 2^18 + 1 buckets: too many for the head, so five overview
+/// At 2^12 ticks a bucket this has 2^18 + 1 buckets: too many for the footer, so five overview
 /// blocks of 2^16, the last holding only the bucket that starts at the final tick.
 const LAST: i64 = 1 << 30;
 const LENGTH: i64 = LAST + 1;
@@ -29,6 +31,7 @@ fn recording(edges: Vec<i64>) -> Recording {
                     initial: false,
                     end: LENGTH,
                     edges: Box::new(edges.into_iter()),
+                    gaps: Vec::new(),
                 }),
             },
             Channel {
@@ -39,6 +42,7 @@ fn recording(edges: Vec<i64>) -> Recording {
                     first: 0,
                     period: Ratio::integer(PERIOD).unwrap(),
                     count: SAMPLES,
+                    breaks: Vec::new(),
                     samples: Samples::F32(Box::new((0..SAMPLES).map(|i| i as f32))),
                 }),
             },
@@ -58,8 +62,8 @@ fn bit(bytes: &[u8], i: u64) -> bool {
 #[test]
 fn a_long_recording_keeps_its_finest_level_in_blocks() {
     let file = file();
-    verify(&file, recording(EDGES.to_vec())).unwrap();
-    let head = Head::parse(&file).unwrap();
+    verify(&file[..], recording(EDGES.to_vec())).unwrap();
+    let head = Footer::parse_file(&file).unwrap();
     assert_eq!(head.header.overview, [16, 20, 24]);
     assert_eq!(
         head.header.overview_blocks,
@@ -128,64 +132,98 @@ fn a_long_recording_keeps_its_finest_level_in_blocks() {
 }
 
 #[test]
-fn a_bundle_moves_the_overview_blocks_with_the_rest() {
+fn a_bundle_leaves_the_overview_blocks_where_they_are() {
     let file = file();
     let bundled = bundle(
         &file,
-        &Head::parse_file(&file).unwrap(),
+        &Footer::parse_file(&file).unwrap(),
         [("rec.annotations.toml".into(), "x".repeat(1000))].into(),
     )
     .unwrap();
-    verify(&bundled, recording(EDGES.to_vec())).unwrap();
-    let (a, b) = (Head::parse(&file).unwrap(), Head::parse(&bundled).unwrap());
-    let shift = b.preamble.head_len - a.preamble.head_len;
-    assert!(shift >= 1000);
-    for k in 0..5 {
-        let (offset, len) = a.overview_block_location(0, k);
-        assert_eq!(
-            b.overview_block_location(0, k),
-            (offset + u64::from(shift), len)
-        );
-    }
+    verify(&bundled[..], recording(EDGES.to_vec())).unwrap();
+    let (a, b) = (
+        Footer::parse_file(&file).unwrap(),
+        Footer::parse_file(&bundled).unwrap(),
+    );
+    assert!(bundled.len() >= file.len() + 1000);
+    assert_eq!(a.overview_rows, b.overview_rows);
+    assert_eq!(a.rows, b.rows);
+    assert_eq!(
+        bundled[..a.trailer.footer_offset as usize],
+        file[..a.trailer.footer_offset as usize]
+    );
 }
 
-/// `base` with `donor`'s overview blocks in place of its own. Both must have the same levels.
-fn splice_overview_blocks(base: &[u8], donor: &[u8]) -> Vec<u8> {
-    let head = Head::parse(base).unwrap();
-    let donor_head = Head::parse(donor).unwrap();
-    let rows_at = PREAMBLE_LEN
-        + head.preamble.header_len as usize
-        + head.rows.len() * BlockRow::size(head.header.channels.len());
-    let mut offset = head.overview_rows[0][0].offset;
-    let mut out = base[..offset as usize].to_vec();
-    for (i, row) in donor_head.overview_rows.iter().flatten().enumerate() {
-        let mut bytes = Vec::new();
-        OverviewRow { offset, ..*row }.write(&mut bytes);
-        out[rows_at + i * OverviewRow::SIZE..][..OverviewRow::SIZE].copy_from_slice(&bytes);
-        out.extend_from_slice(&donor[row.offset as usize..][..row.length as usize]);
-        offset += u64::from(row.length);
-    }
-    let preamble = Preamble {
-        file_len: out.len() as u64,
-        ..head.preamble
+/// `base` with overview block `k` of its finest level taken from `donor`, whose levels must be the
+/// same. The records after it move, and the footer is written again for where they now sit.
+fn splice_overview_block(base: &[u8], donor: &[u8], k: usize) -> Vec<u8> {
+    let head = Footer::parse_file(base).unwrap();
+    let donor_head = Footer::parse_file(donor).unwrap();
+    let (doffset, dlen) = donor_head.overview_block_location(0, k);
+    let frame = &donor[doffset as usize..][..dlen as usize];
+    let (offset, len) = head.overview_block_location(0, k);
+    let start = offset - (record::PAYLOAD_AT + record::OVERVIEW_HEAD_LEN) as u64;
+    let end = offset + u64::from(len) + 8;
+    let shift = head.header.overview_blocks[0].shift;
+    let mut spliced = Vec::new();
+    record::write(
+        &mut spliced,
+        Kind::OverviewBlock,
+        &[&record::overview_head(shift, k as u64), frame],
+    );
+    let delta = spliced.len() as i64 - (end - start) as i64;
+    let moved = |o: u64| {
+        if o > start {
+            o.checked_add_signed(delta).unwrap()
+        } else {
+            o
+        }
     };
-    out[..PREAMBLE_LEN].copy_from_slice(&preamble.to_bytes());
+    let mut out = base[..start as usize].to_vec();
+    out.extend_from_slice(&spliced);
+    out.extend_from_slice(&base[end as usize..head.trailer.footer_offset as usize]);
+    let rows: Vec<_> = head
+        .rows
+        .iter()
+        .map(|r| escapement_tickwave_format::header::BlockRow {
+            offset: moved(r.offset),
+            ..r.clone()
+        })
+        .collect();
+    let mut overview_rows = Vec::new();
+    for (l, level) in head.overview_rows.iter().enumerate() {
+        for (j, row) in level.iter().enumerate() {
+            let mut row = *row;
+            if l == 0 && j == k {
+                row.length = dlen;
+            } else {
+                row.offset = moved(row.offset);
+            }
+            overview_rows.push(row);
+        }
+    }
+    let footer =
+        record::footer_bytes(&head.header, &rows, &overview_rows, &head.overview_frame).unwrap();
+    let at = out.len() as u64;
+    let mut tail = Vec::new();
+    record::write_footer(&mut tail, at, &footer);
+    out.extend_from_slice(&tail);
     out
 }
 
 #[test]
 fn verify_refuses_overview_blocks_that_differ_from_the_content() {
     let file = file();
-    // Unchanged blocks spliced back in: the splice itself must not break anything.
-    let same = splice_overview_blocks(&file, &file);
+    // An unchanged block spliced back in: the splice itself must not break anything.
+    let same = splice_overview_block(&file, &file, 2);
     assert_eq!(same, file);
     // Two more edges inside one bucket of block 2: only the finest level's block 2 differs, and
-    // the head's coarser levels and the data blocks stay this file's own.
+    // the footer's coarser levels and the data blocks stay this file's own.
     let mut edges = EDGES.to_vec();
     edges.splice(3..3, [600_000_000, 600_000_001]);
     let donor = encode(recording(edges), &Options::default()).unwrap();
-    let mixed = splice_overview_blocks(&file, &donor);
-    let head = Head::parse(&mixed).unwrap();
+    let mixed = splice_overview_block(&file, &donor, 2);
+    let head = Footer::parse_file(&mixed).unwrap();
     let (offset, len) = head.overview_block_location(0, 2);
     let block = head
         .decode_overview_block(0, 2, &mixed[offset as usize..][..len as usize])
@@ -197,30 +235,24 @@ fn verify_refuses_overview_blocks_that_differ_from_the_content() {
         },
         (600_000_000 >> 12) - block.first
     ));
-    let err = verify(&mixed, recording(EDGES.to_vec())).unwrap_err();
+    let err = verify(&mixed[..], recording(EDGES.to_vec())).unwrap_err();
     assert!(err.to_string().contains("2^12, block 2"), "{err}");
 }
 
 #[test]
 fn a_header_listing_other_overview_levels_is_refused() {
     let file = file();
-    let needle = br#""overview":[16,20,24]"#;
-    let at = file
-        .windows(needle.len())
-        .position(|w| w == needle)
-        .unwrap();
-    // Same byte length, so every offset stays right: only the levels change.
-    // Too fine for the head, past what a shift can be, a level twice (each copy adds its size to
-    // what the reader allocates), and out of order.
+    // Same byte length, so every offset stays right: only the levels change. Too fine for the
+    // footer, past what a shift can be, a level twice (each copy adds its size to what the reader
+    // allocates), and out of order.
     for listed in [
-        &br#""overview":[ 0,20,24]"#[..],
-        br#""overview":[99,20,24]"#,
-        br#""overview":[16,16,24]"#,
-        br#""overview":[20,16,24]"#,
+        r#""overview":[ 0,20,24]"#,
+        r#""overview":[99,20,24]"#,
+        r#""overview":[16,16,24]"#,
+        r#""overview":[20,16,24]"#,
     ] {
-        let mut bad = file.clone();
-        bad[at..at + needle.len()].copy_from_slice(listed);
-        let err = Head::parse(&bad).err().expect("refused");
+        let bad = common::patched(&file, r#""overview":[16,20,24]"#, listed);
+        let err = Footer::parse_file(&bad).expect_err("refused");
         assert!(
             err.to_string().contains("not the ones the format sets"),
             "{err}"

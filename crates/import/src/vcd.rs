@@ -150,6 +150,7 @@ pub fn read_from(reader: impl BufRead, file_name: &str) -> Result<Import, Error>
                         initial,
                         end: length,
                         edges: Box::new(edges.into_iter()),
+                        gaps: Vec::new(),
                     }),
                 });
             }

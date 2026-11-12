@@ -919,12 +919,14 @@ impl Export {
                         initial: d.initial,
                         end: d.end(rate),
                         edges: Box::new(d.edges(rate)),
+                        gaps: Vec::new(),
                     }),
                     Opened::Analog(a) => ChannelData::Analog(Analog {
                         unit: "V".into(),
                         first,
                         period: Ratio::ONE,
                         count: a.count,
+                        breaks: Vec::new(),
                         samples: Samples::F32(Box::new(
                             a.file.items::<4>(a.header, a.count).map(f32::from_le_bytes),
                         )),

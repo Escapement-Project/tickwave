@@ -187,6 +187,7 @@ pub fn read_bytes(bytes: impl Into<Arc<[u8]>>, file_name: &str) -> Result<Import
                 data: ChannelData::Digital(Digital {
                     initial,
                     end,
+                    gaps: Vec::new(),
                     edges: Box::new(BitEdges {
                         reader: StreamReader::new(&data, &stream),
                         unit,
@@ -225,6 +226,7 @@ pub fn read_bytes(bytes: impl Into<Arc<[u8]>>, file_name: &str) -> Result<Import
                 first: 0,
                 period: Ratio::ONE,
                 count,
+                breaks: Vec::new(),
                 samples: Samples::F32(Box::new(Values {
                     reader: StreamReader::new(&data, &Arc::new(stream)),
                     remaining: count,

@@ -309,6 +309,7 @@ pub fn convert(request: &str) -> Result<Converted, JsError> {
         units: r.units,
         codes: r.codes,
     };
+    let mut out = std::io::Cursor::new(Vec::new());
     let converted = match r.kind {
         Kind::Saleae => {
             let files = r
@@ -318,7 +319,13 @@ pub fn convert(request: &str) -> Result<Converted, JsError> {
                 .collect();
             let headers = saleae::Headers::read(files, &r.channels, r.rate).map_err(js)?;
             let export = convert::check_saleae(headers, &Report).map_err(js)?;
-            convert::convert(&|| Ok(export.recording()), &settings, MAX_DECODED, &Report)
+            convert::convert(
+                &|| Ok(export.recording()),
+                &settings,
+                MAX_DECODED,
+                &Report,
+                &mut out,
+            )
         }
         Kind::Sigrok => {
             let f = single(&r.files)?;
@@ -329,18 +336,18 @@ pub fn convert(request: &str) -> Result<Converted, JsError> {
                     &r.channels,
                 )
             };
-            convert::convert(&open, &settings, MAX_DECODED, &Report)
+            convert::convert(&open, &settings, MAX_DECODED, &Report, &mut out)
         }
         Kind::Vcd => {
             let f = single(&r.files)?;
             let bytes = read_all(&*f.input());
             let open = || select(vcd::read_from(&bytes[..], &f.name)?.recording, &r.channels);
-            convert::convert(&open, &settings, MAX_DECODED, &Report)
+            convert::convert(&open, &settings, MAX_DECODED, &Report, &mut out)
         }
     }
     .map_err(js)?;
     Ok(Converted {
         codes: serde_json::to_string(&converted.codes).map_err(js)?,
-        file: converted.file,
+        file: out.into_inner(),
     })
 }

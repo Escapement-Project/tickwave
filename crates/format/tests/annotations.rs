@@ -18,6 +18,7 @@ fn header() -> Header {
                     initial: true,
                     end: 1_000_000,
                     edges: 10,
+                    gaps: Vec::new(),
                 },
             },
             ChannelHeader {
@@ -27,6 +28,7 @@ fn header() -> Header {
                     initial: true,
                     end: 1_000_000,
                     edges: 10,
+                    gaps: Vec::new(),
                 },
             },
             ChannelHeader {
@@ -37,6 +39,7 @@ fn header() -> Header {
                     first: 0,
                     period: Ratio::ONE,
                     count: 1_000_000,
+                    breaks: Vec::new(),
                     coding: AnalogCoding::F32,
                 },
             },
@@ -46,6 +49,7 @@ fn header() -> Header {
         meta: Default::default(),
         content_id: ID.parse().unwrap(),
         blocks: 1,
+        overview_shift: 12,
         overview: vec![12],
         overview_blocks: vec![],
         annotations: None,

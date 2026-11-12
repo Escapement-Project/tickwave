@@ -2,12 +2,12 @@
 //! re-cutting blocks or bundling annotations leaves it unchanged; a sidecar pins it.
 //!
 //! BLAKE3 over: the timebase (two u64), the length (i64), then each channel's own BLAKE3 digest.
-//! A channel's digest covers its name, its kind's fields and then every item: a digital channel's
-//! edge ticks as i64, an analog channel's values as f32 bits. All little-endian; strings as a u64
+//! A channel's digest covers what its declaration fixes, then its items, then what only the end
+//! settles, so a writer computes it as the items arrive. All little-endian; strings as a u64
 //! length and UTF-8 bytes.
 
 use crate::header::ContentId;
-use crate::model::Ratio;
+use crate::model::{Break, Gap, Ratio};
 
 const BUFFER: usize = 1 << 16;
 
@@ -22,24 +22,21 @@ fn put_str(hasher: &mut blake3::Hasher, s: &str) {
 }
 
 impl ChannelHasher {
-    pub fn digital(name: &str, initial: bool, end: i64) -> Self {
+    pub fn digital(name: &str, initial: bool) -> Self {
         let mut hasher = blake3::Hasher::new();
         put_str(&mut hasher, name);
         put_str(&mut hasher, "digital");
         hasher.update(&[u8::from(initial)]);
-        hasher.update(&end.to_le_bytes());
         Self::from(hasher)
     }
 
-    pub fn analog(name: &str, unit: &str, first: i64, period: Ratio, count: u64) -> Self {
+    pub fn analog(name: &str, unit: &str, period: Ratio) -> Self {
         let mut hasher = blake3::Hasher::new();
         put_str(&mut hasher, name);
         put_str(&mut hasher, "analog");
         put_str(&mut hasher, unit);
-        hasher.update(&first.to_le_bytes());
         hasher.update(&period.num().to_le_bytes());
         hasher.update(&period.den().to_le_bytes());
-        hasher.update(&count.to_le_bytes());
         Self::from(hasher)
     }
 
@@ -66,9 +63,34 @@ impl ChannelHasher {
         self.put(&value.to_bits().to_le_bytes());
     }
 
-    pub fn finish(mut self) -> blake3::Hash {
+    fn items_done(&mut self) -> &mut blake3::Hasher {
         self.hasher.update(&self.buffer);
-        self.hasher.finalize()
+        self.buffer.clear();
+        &mut self.hasher
+    }
+
+    pub fn finish_digital(mut self, end: i64, gaps: &[Gap]) -> blake3::Hash {
+        let h = self.items_done();
+        h.update(&end.to_le_bytes());
+        h.update(&(gaps.len() as u64).to_le_bytes());
+        for g in gaps {
+            h.update(&g.from.to_le_bytes());
+            h.update(&g.to.to_le_bytes());
+            h.update(&[u8::from(g.level)]);
+        }
+        h.finalize()
+    }
+
+    pub fn finish_analog(mut self, first: i64, count: u64, breaks: &[Break]) -> blake3::Hash {
+        let h = self.items_done();
+        h.update(&first.to_le_bytes());
+        h.update(&count.to_le_bytes());
+        h.update(&(breaks.len() as u64).to_le_bytes());
+        for b in breaks {
+            h.update(&b.index.to_le_bytes());
+            h.update(&b.tick.to_le_bytes());
+        }
+        h.finalize()
     }
 }
 

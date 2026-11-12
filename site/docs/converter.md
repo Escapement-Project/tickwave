@@ -1,6 +1,6 @@
 # The converter
 
-`tickwave` is a command-line program. It converts captures into tickwave recordings, describes a recording, checks one against the capture it came from, and checks and bundles a recording's sidecar of annotations. [The Open page](../open.html) runs the same conversion in a browser.
+`tickwave` is a command-line program. It converts captures into tickwave recordings, describes a recording, checks one against the capture it came from, checks and bundles a recording's sidecar of annotations, and finishes a recording that was cut off before its end. [The Open page](../open.html) runs the same conversion in a browser.
 
 ## Building it
 
@@ -22,7 +22,7 @@ The program is then `target/release/tickwave`. `tickwave help`, and `--help` aft
 
 The converter doesn't read Logic 2's own `.sal` files, because Saleae doesn't document that format and may change it. Export the capture from Logic 2 first: click Options at the bottom right, then Export Raw Data, and choose the binary format.
 
-Before it writes a recording, the converter decodes what it made and compares it with the capture, edge by edge and sample by sample. It writes nothing if they differ.
+The converter writes the recording beside its destination first. Then it decodes what it wrote and compares it with the capture, edge by edge and sample by sample. Only a recording that matches takes its place, and if they differ, nothing is left behind.
 
 Every time in a recording is a whole number of ticks from the capture's start, and one tick is the source's resolution. A Saleae export's times become ticks by `round((t − begin) × rate)`. The converter refuses an export with an edge more than 0.01 of a tick off that grid, rather than move it.
 
@@ -38,7 +38,7 @@ tickwave convert saleae identify-swd/ --channel digital_3_0=SWCLK --channel digi
 It reports the file it wrote, its size, its blocks and its content id:
 
 ```text
-identify-swd.tickwave: 0.00 MB, 1 blocks, blake3:930db20d55ecede1084b73ebbdc7edd306268b900746c08abd0bdfdb0f121623 in 0.0 s
+identify-swd.tickwave: 0.01 MB, 1 blocks, blake3:ccc8b7d8c3e4cb30da7fc6088e54ebeba2858ad402eb3fb5a9aeb50be989accf in 0.0 s
 ```
 
 Logic 8, Logic Pro 8 and Logic Pro 16 write version 0 of the export, and its digital files don't record the sample rate. If you name an analog channel, the converter takes the rate its file records. Otherwise it infers the rate from the edges of every digital file in the export, named or not. It takes the lowest rate that divides 1 GHz and puts every edge on its grid, each on a tick of its own. With many edges, that is the capture's rate. With only a few, it can come out lower, and the recording then claims coarser timing than the capture had, never finer. An export with no edges has no rate to infer.
@@ -99,10 +99,10 @@ tickwave info identify-swd.tickwave
 
 ```text
 identify-swd
-0.523583100 s at 1000000000/1 ticks a second, 2 channels, blake3:930db20d55ecede1084b73ebbdc7edd306268b900746c08abd0bdfdb0f121623
+0.523583100 s at 1000000000/1 ticks a second, 2 channels, blake3:ccc8b7d8c3e4cb30da7fc6088e54ebeba2858ad402eb3fb5a9aeb50be989accf
   SWCLK        digital, 15286 edges, starts 1, known to 0.523583070 s (digital_3_0)
   SWDIO        digital, 1874 edges, starts 1, known to 0.523583100 s (digital_3_1)
-0.005 MB: head 1767 bytes (3 overview levels), 1 blocks of 3086-3086 bytes, median 3086
+0.005 MB: footer 1776 bytes (3 overview levels), 1 blocks of 3086-3086 bytes, median 3086
 ```
 
 Times are in seconds to one tick, here a nanosecond: never more digits than the recording carries. `--json` prints the header and the block statistics as JSON, for a script.
@@ -149,3 +149,17 @@ tickwave bundle identify-swd.tickwave identify-swd.annotations.toml -o identify-
 ```
 
 This writes a copy of the recording with the sidecar's files inside, so one file carries both. It checks the sidecar first. The copy's content id is the recording's: a bundle holds the same capture. A view of a bundled recording shows its annotations when the page names no sidecar.
+
+## Repairing a recording
+
+A recorder writes a recording as it captures, and the file ends with an index of what it holds. A crash, a power cut or a full disk can stop the file before its index, and a viewer then can't open it. `tickwave repair` finishes such a file:
+
+```sh
+tickwave repair identify-swd.cut.tickwave -o identify-swd.tickwave
+```
+
+```text
+identify-swd.tickwave: 2891 of 3000 bytes kept, 4 blocks to 0.384873226 s, blake3:ce7b9c6e2418c6a46f417d7ad2297120d46cfa0be2f19a77801662300709fe4a
+```
+
+It keeps every whole block, writes the index after the last one, and writes the copy to `-o`. The capture ends where the last whole block ends: what came after it was lost with the rest of the file. If the recorder generated annotations, each generator's file goes beside the copy, as `<name>.<generator>.jsonl`. A finished recording is refused, since there is nothing to repair.

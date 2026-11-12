@@ -1,9 +1,9 @@
-//! `tickwave`: convert captures into tickwave's recording format, describe a recording, and check one
-//! against its source.
+//! `tickwave`: convert captures into tickwave's recording format, describe a recording, check one
+//! against its source, and repair one cut off before its end.
 
 use std::cell::RefCell;
 use std::fs;
-use std::io::Write;
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -11,9 +11,12 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use escapement_tickwave_format::annotations::{self, Included};
-use escapement_tickwave_format::decode::{Head, verify_limited};
+use escapement_tickwave_format::decode::{DecodeError, FIRST_READ, Footer, inflate_limited};
 use escapement_tickwave_format::header::{ChannelKind, Header};
 use escapement_tickwave_format::model::{RateOrigin, Recording, SourceFormat};
+use escapement_tickwave_format::repair::Repairer;
+use escapement_tickwave_format::verify::verify_limited;
+use escapement_tickwave_format::writer::generator_file;
 use escapement_tickwave_import::convert::{
     self, Pass, Progress, Settings, Step, counted, select, set_units,
 };
@@ -32,12 +35,12 @@ use tracing_subscriber::util::SubscriberInitExt;
 #[command(
     name = "tickwave",
     version,
-    about = "Convert, describe and verify tickwave recordings"
+    about = "Convert, describe, verify and repair tickwave recordings"
 )]
 struct Cli {
     #[command(subcommand)]
     command: Command,
-    /// The most to decode from one block, overview block or head overview, in MiB. A recording
+    /// The most to decode from one block, overview block or footer overview, in MiB. A recording
     /// that needs more is refused, as a page's reader refuses it unless configured.
     #[arg(long, global = true, default_value_t = 64, value_name = "MIB")]
     max_decoded_mib: u16,
@@ -79,6 +82,17 @@ enum Command {
     Annotations {
         #[command(subcommand)]
         command: AnnotationsCommand,
+    },
+    /// Finish a recording cut off before its footer, by a crash, a power cut or a full disk: a
+    /// copy with every whole record and a footer for them. Each annotation generator's file goes
+    /// beside the copy, as `<name>.<source>.jsonl`.
+    Repair {
+        file: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+        /// The zstd level for the overview repair writes.
+        #[arg(long, default_value_t = 19)]
+        level: i32,
     },
 }
 
@@ -257,6 +271,11 @@ fn main() -> Result<()> {
                     json,
                 },
         } => check_annotations(&recording, &sidecar, json, max),
+        Command::Repair {
+            file,
+            output,
+            level,
+        } => repair_file(&file, &output, level),
     }
 }
 
@@ -323,46 +342,94 @@ fn convert(
         units: common.units.clone(),
         codes: !common.no_codes,
     };
-    let converted = convert::convert(open, &settings, max, &Bars::default())?;
+    let converted = write_atomically(output, |file| {
+        Ok(convert::convert(
+            open,
+            &settings,
+            max,
+            &Bars::default(),
+            file,
+        )?)
+    })?;
     for (name, bits) in &converted.codes {
         match bits {
             Some(bits) => info!("{name}: {bits}-bit codes"),
             None => info!("{name}: no exact codes, stored as f32"),
         }
     }
-    let file = converted.file;
-    write_atomically(output, &file)?;
-    let head = Head::parse_file_limited(&file, max)?;
+    let len = fs::metadata(output)?.len();
     info!(
         "{}: {:.2} MB, {} blocks, {} in {:.1} s",
         output.display(),
-        file.len() as f64 / 1e6,
-        head.rows.len(),
-        head.header.content_id,
+        len as f64 / 1e6,
+        converted.header.blocks,
+        converted.header.content_id,
         started.elapsed().as_secs_f64()
     );
     Ok(())
 }
 
-/// Writes beside the destination, then renames, so a failed run never leaves half a file.
-fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
+/// Writes through `write` beside the destination, then syncs and renames, so a failed run never
+/// leaves half a file.
+fn write_atomically<T>(path: &Path, write: impl FnOnce(&mut fs::File) -> Result<T>) -> Result<T> {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".partial");
     let tmp = PathBuf::from(tmp);
-    let mut file = fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
-    let written = file.write_all(bytes).and_then(|()| file.sync_all());
-    if let Err(e) = written {
-        let _ = fs::remove_file(&tmp);
-        return Err(e).with_context(|| format!("writing {}", tmp.display()));
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&tmp)
+        .with_context(|| format!("creating {}", tmp.display()))?;
+    let written = write(&mut file).and_then(|t| {
+        file.sync_all()
+            .with_context(|| format!("writing {}", tmp.display()))?;
+        Ok(t)
+    });
+    match written {
+        Ok(t) => {
+            fs::rename(&tmp, path).with_context(|| format!("renaming to {}", path.display()))?;
+            Ok(t)
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            Err(e)
+        }
     }
-    fs::rename(&tmp, path).with_context(|| format!("renaming to {}", path.display()))
 }
 
-fn read_head(file: &Path, max: usize) -> Result<(Vec<u8>, Head)> {
-    let bytes = fs::read(file).with_context(|| format!("reading {}", file.display()))?;
-    let head = Head::parse_file_limited(&bytes, max)
-        .with_context(|| format!("parsing {}", file.display()))?;
-    Ok((bytes, head))
+/// The recording at `path`, open, its length, and its footer, read from its end.
+fn read_footer(path: &Path, max: usize) -> Result<(fs::File, u64, Footer)> {
+    let mut file = fs::File::open(path).with_context(|| format!("reading {}", path.display()))?;
+    let len = file.metadata()?.len();
+    let mut from = len.saturating_sub(FIRST_READ as u64);
+    loop {
+        file.seek(SeekFrom::Start(from))?;
+        let mut tail = Vec::new();
+        file.read_to_end(&mut tail)?;
+        match Footer::parse_with(&tail, len, |f, n| inflate_limited(f, n, max)) {
+            Ok(footer) => return Ok((file, len, footer)),
+            Err(DecodeError::NeedFrom(at)) if at < from => from = at,
+            Err(DecodeError::Unfinished) => bail!(
+                "{}: {}; `tickwave repair` finishes a recording cut off before its end",
+                path.display(),
+                DecodeError::Unfinished
+            ),
+            Err(e) => return Err(e).with_context(|| format!("parsing {}", path.display())),
+        }
+    }
+}
+
+/// Copies the first `keep` bytes of `from` into `to`, then `tail`.
+fn copy_then(from: &mut fs::File, keep: u64, tail: &[u8], to: &mut fs::File) -> Result<()> {
+    from.seek(SeekFrom::Start(0))?;
+    let copied = std::io::copy(&mut from.take(keep), to)?;
+    if copied != keep {
+        bail!("the file changed while it was read");
+    }
+    to.write_all(tail)?;
+    Ok(())
 }
 
 /// A tick as seconds, to the decimal place of one tick and no further: as many digits as the
@@ -398,7 +465,7 @@ fn seconds(ticks: i64, header: &Header) -> String {
 }
 
 fn info(file: &Path, json: bool, max: usize) -> Result<()> {
-    let (bytes, head) = read_head(file, max)?;
+    let (_, len, head) = read_footer(file, max)?;
     let h = &head.header;
     let mut lengths: Vec<u32> = head.rows.iter().map(|r| r.length).collect();
     lengths.sort_unstable();
@@ -410,8 +477,8 @@ fn info(file: &Path, json: bool, max: usize) -> Result<()> {
     if json {
         let out = serde_json::json!({
             "header": h,
-            "file_bytes": bytes.len(),
-            "head_bytes": head.preamble.head_len,
+            "file_bytes": len,
+            "footer_bytes": head.trailer.footer_len,
             "block_bytes": { "total": blocks_total, "min": lengths.first(), "median": median, "max": lengths.last() },
             "overview_block_bytes": { "count": overview_count, "total": overview_total },
         });
@@ -455,9 +522,9 @@ fn info(file: &Path, json: bool, max: usize) -> Result<()> {
         }
     }
     println!(
-        "{:.3} MB: head {} bytes ({} overview levels), {} blocks of {}-{} bytes, median {median}",
-        bytes.len() as f64 / 1e6,
-        head.preamble.head_len,
+        "{:.3} MB: footer {} bytes ({} overview levels), {} blocks of {}-{} bytes, median {median}",
+        len as f64 / 1e6,
+        head.trailer.footer_len,
         h.overview.len(),
         lengths.len(),
         lengths.first().unwrap_or(&0),
@@ -481,7 +548,7 @@ fn info(file: &Path, json: bool, max: usize) -> Result<()> {
 }
 
 fn verify_file(file: &Path, against: &Path, max: usize) -> Result<()> {
-    let (bytes, head) = read_head(file, max)?;
+    let (mut opened, _, head) = read_footer(file, max)?;
     let h = &head.header;
     let wanted: Vec<(String, String)> = h
         .channels
@@ -515,8 +582,13 @@ fn verify_file(file: &Path, against: &Path, max: usize) -> Result<()> {
         .collect();
     let source = set_units(source, &units)?;
     let bars = Bars::default();
-    verify_limited(&bytes, counted(source, &bars, Pass::Verify), max)
-        .context("the recording does not match its source")?;
+    opened.seek(SeekFrom::Start(0))?;
+    verify_limited(
+        BufReader::with_capacity(1 << 20, opened),
+        counted(source, &bars, Pass::Verify),
+        max,
+    )
+    .context("the recording does not match its source")?;
     bars.end(Pass::Verify);
     info!("{}: matches {}", file.display(), against.display());
     Ok(())
@@ -583,7 +655,7 @@ fn load_sidecar(
 }
 
 fn check_annotations(recording: &Path, sidecar: &Path, json: bool, max: usize) -> Result<()> {
-    let (_, head) = read_head(recording, max)?;
+    let (_, _, head) = read_footer(recording, max)?;
     let (resolved, _) = load_sidecar(&head.header, recording, sidecar)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&resolved)?);
@@ -600,20 +672,60 @@ fn check_annotations(recording: &Path, sidecar: &Path, json: bool, max: usize) -
 }
 
 fn bundle_file(recording: &Path, sidecar: &Path, output: &Path, max: usize) -> Result<()> {
-    let (bytes, head) = read_head(recording, max)?;
+    let (mut file, _, head) = read_footer(recording, max)?;
     let (resolved, files) = load_sidecar(&head.header, recording, sidecar)?;
-    let bundled =
-        escapement_tickwave_format::bundle::bundle(&bytes, &head, files.into_iter().collect())?;
-    let check = Head::parse_file_limited(&bundled, max)?;
+    let (keep, tail) =
+        escapement_tickwave_format::bundle::bundled_tail(&head, files.into_iter().collect())?;
+    write_atomically(output, |out| copy_then(&mut file, keep, &tail, out))?;
+    let (_, _, check) = read_footer(output, max)?;
     if check.header.content_id != head.header.content_id {
         bail!("bundling changed the content id");
     }
-    write_atomically(output, &bundled)?;
     info!(
         "{}: {} with {} annotations",
         output.display(),
         recording.display(),
         resolved.len()
+    );
+    Ok(())
+}
+
+fn repair_file(file: &Path, output: &Path, level: i32) -> Result<()> {
+    let mut opened = fs::File::open(file).with_context(|| format!("reading {}", file.display()))?;
+    let len = opened.metadata()?.len();
+    let mut repairer = Repairer::new(level);
+    let mut chunk = vec![0; 1 << 20];
+    loop {
+        let n = opened.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        repairer.feed(&chunk[..n])?;
+    }
+    let repaired = repairer
+        .finish()
+        .with_context(|| format!("repairing {}", file.display()))?;
+    write_atomically(output, |out| {
+        copy_then(&mut opened, repaired.keep, &repaired.tail, out)
+    })?;
+    let stem = output
+        .file_stem()
+        .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+    let dir = output.parent().unwrap_or(Path::new(""));
+    for (source, lines) in &repaired.generated {
+        let path = dir.join(format!("{stem}.{source}.jsonl"));
+        let text = generator_file(source, None, repaired.header.content_id, lines);
+        write_atomically(&path, |f| Ok(f.write_all(text.as_bytes())?))?;
+        info!("{}: {} annotations", path.display(), lines.len());
+    }
+    info!(
+        "{}: {} of {} bytes kept, {} blocks to {}, {}",
+        output.display(),
+        repaired.keep,
+        len,
+        repaired.header.blocks,
+        seconds(repaired.header.length, &repaired.header),
+        repaired.header.content_id
     );
     Ok(())
 }

@@ -1,9 +1,10 @@
-use escapement_tickwave_format::decode::{BlockChannel, DecodeError, Head, VerifyError, verify};
-use escapement_tickwave_format::encode::{EncodeError, Options, encode};
-use escapement_tickwave_format::header::{AnalogCoding, PREAMBLE_LEN};
+use escapement_tickwave_format::decode::{BlockChannel, DecodeError, Footer};
+use escapement_tickwave_format::encode::{EncodeError, Options, WriteError, encode};
+use escapement_tickwave_format::header::AnalogCoding;
 use escapement_tickwave_format::model::{
     Analog, Channel, ChannelData, Digital, Ratio, Recording, Samples, Source, SourceFormat,
 };
+use escapement_tickwave_format::verify::{VerifyError, verify};
 
 const EDGES_A: [i64; 9] = [1, 2, 3, 100, 101, 200, 5000, 9999, 10000];
 /// Ticks 0..=10,000: A's last edge and V's last sample sit on the final tick.
@@ -31,6 +32,7 @@ fn recording(edges_a: Vec<i64>, values: Vec<f32>) -> Recording {
                     initial: true,
                     end: LENGTH,
                     edges: Box::new(edges_a.into_iter()),
+                    gaps: Vec::new(),
                 }),
             },
             Channel {
@@ -40,6 +42,7 @@ fn recording(edges_a: Vec<i64>, values: Vec<f32>) -> Recording {
                     initial: false,
                     end: 9001,
                     edges: Box::new(std::iter::empty()),
+                    gaps: Vec::new(),
                 }),
             },
             Channel {
@@ -50,6 +53,7 @@ fn recording(edges_a: Vec<i64>, values: Vec<f32>) -> Recording {
                     first: 0,
                     period: Ratio::integer(10).unwrap(),
                     count,
+                    breaks: Vec::new(),
                     samples: Samples::F32(Box::new(values.into_iter())),
                 }),
             },
@@ -72,8 +76,8 @@ fn small_blocks() -> Options {
 #[test]
 fn round_trips_through_many_blocks() {
     let file = encode(recording(EDGES_A.to_vec(), values()), &small_blocks()).unwrap();
-    verify(&file, recording(EDGES_A.to_vec(), values())).unwrap();
-    let head = Head::parse(&file).unwrap();
+    verify(&file[..], recording(EDGES_A.to_vec(), values())).unwrap();
+    let head = Footer::parse_file(&file).unwrap();
     assert!(head.rows.len() > 20, "{} blocks", head.rows.len());
     let mut edges: Vec<i64> = Vec::new();
     let mut levels = Vec::new();
@@ -121,7 +125,7 @@ fn round_trips_through_many_blocks() {
 #[test]
 fn same_tick_items_share_a_block() {
     let file = encode(recording(EDGES_A.to_vec(), values()), &small_blocks()).unwrap();
-    let head = Head::parse(&file).unwrap();
+    let head = Footer::parse_file(&file).unwrap();
     // A's edge at tick 100 and V's sample 10 (tick 100) are in one block.
     let blocks = head.blocks_covering(100, 101);
     assert_eq!(blocks.len(), 1);
@@ -147,7 +151,7 @@ fn same_tick_items_share_a_block() {
 #[test]
 fn the_overview_matches_the_edges() {
     let file = encode(recording(EDGES_A.to_vec(), values()), &Options::default()).unwrap();
-    let head = Head::parse(&file).unwrap();
+    let head = Footer::parse_file(&file).unwrap();
     // 10,000 ticks fit one level of 2^12-tick buckets: 0..4095, 4096..8191, 8192..10000.
     assert_eq!(head.header.overview, [12]);
     let a = &head.overview[0].channels[0];
@@ -173,7 +177,7 @@ fn codes_round_trip_exactly() {
         ..small_blocks()
     };
     let file = encode(recording(EDGES_A.to_vec(), exact.clone()), &options).unwrap();
-    verify(&file, recording(EDGES_A.to_vec(), exact)).unwrap();
+    verify(&file[..], recording(EDGES_A.to_vec(), exact)).unwrap();
 }
 
 #[test]
@@ -191,7 +195,10 @@ fn refuses_a_value_codes_cannot_hold() {
     };
     let err = encode(recording(EDGES_A.to_vec(), v), &options).unwrap_err();
     assert!(
-        matches!(err, EncodeError::Coding { index: 500, .. }),
+        matches!(
+            err,
+            EncodeError::Write(WriteError::Coding { index: 500, .. })
+        ),
         "{err}"
     );
 }
@@ -199,9 +206,15 @@ fn refuses_a_value_codes_cannot_hold() {
 #[test]
 fn refuses_edges_out_of_order() {
     let err = encode(recording(vec![5, 3], values()), &Options::default()).unwrap_err();
-    assert!(matches!(err, EncodeError::Order { tick: 3, .. }), "{err}");
+    assert!(
+        matches!(err, EncodeError::Write(WriteError::Order { tick: 3, .. })),
+        "{err}"
+    );
     let err = encode(recording(vec![5, 5, 4], values()), &Options::default()).unwrap_err();
-    assert!(matches!(err, EncodeError::Order { tick: 4, .. }), "{err}");
+    assert!(
+        matches!(err, EncodeError::Write(WriteError::Order { tick: 4, .. })),
+        "{err}"
+    );
 }
 
 /// Pulses the source stamped with one time: pairs at the first tick, at a sample's tick, at a block's
@@ -213,8 +226,8 @@ const EDGES_SHARED: [i64; 17] = [
 #[test]
 fn round_trips_edges_that_share_a_tick() {
     let file = encode(recording(EDGES_SHARED.to_vec(), values()), &small_blocks()).unwrap();
-    verify(&file, recording(EDGES_SHARED.to_vec(), values())).unwrap();
-    let head = Head::parse(&file).unwrap();
+    verify(&file[..], recording(EDGES_SHARED.to_vec(), values())).unwrap();
+    let head = Footer::parse_file(&file).unwrap();
     let mut edges: Vec<i64> = Vec::new();
     let mut pair_starts_a_block = false;
     for i in 0..head.rows.len() {
@@ -238,7 +251,22 @@ fn round_trips_edges_that_share_a_tick() {
 #[test]
 fn refuses_an_edge_past_the_channel_end() {
     let err = encode(recording(vec![10_001], values()), &Options::default()).unwrap_err();
-    assert!(matches!(err, EncodeError::EdgeRange { .. }), "{err}");
+    assert!(
+        matches!(err, EncodeError::Write(WriteError::Length { .. })),
+        "{err}"
+    );
+    let mut rec = recording(EDGES_A.to_vec(), values());
+    if let ChannelData::Digital(d) = &mut rec.channels[1].data {
+        d.edges = Box::new([9001].into_iter());
+    }
+    let err = encode(rec, &Options::default()).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            EncodeError::Write(WriteError::EdgePastEnd { tick: 9001, .. })
+        ),
+        "{err}"
+    );
 }
 
 #[test]
@@ -261,39 +289,51 @@ fn verify_catches_a_missing_edge_and_a_changed_sample() {
     let file = encode(recording(EDGES_A.to_vec(), values()), &small_blocks()).unwrap();
     let mut fewer = EDGES_A.to_vec();
     fewer.remove(4);
-    let err = verify(&file, recording(fewer, values())).unwrap_err();
+    let err = verify(&file[..], recording(fewer, values())).unwrap_err();
     assert!(matches!(err, VerifyError::Mismatch(_)), "{err}");
     let mut changed = values();
     changed[8] = 0.0; // was -0.0: equal as floats, different bits
-    let err = verify(&file, recording(EDGES_A.to_vec(), changed)).unwrap_err();
+    let err = verify(&file[..], recording(EDGES_A.to_vec(), changed)).unwrap_err();
     assert!(matches!(err, VerifyError::Mismatch(_)), "{err}");
 }
 
 #[test]
 fn a_flipped_byte_in_a_block_fails_to_decode() {
     let mut file = encode(recording(EDGES_A.to_vec(), values()), &small_blocks()).unwrap();
-    let head = Head::parse(&file).unwrap();
+    let head = Footer::parse_file(&file).unwrap();
     let (offset, len) = head.block_location(3);
     file[(offset + u64::from(len) / 2) as usize] ^= 0x10;
-    let err = verify(&file, recording(EDGES_A.to_vec(), values())).unwrap_err();
+    let err = verify(&file[..], recording(EDGES_A.to_vec(), values())).unwrap_err();
     assert!(matches!(err, VerifyError::Decode(_)), "{err}");
 }
 
 #[test]
-fn a_short_head_asks_for_more() {
+fn a_short_tail_asks_for_the_footer() {
     let file = encode(recording(EDGES_A.to_vec(), values()), &Options::default()).unwrap();
+    let len = file.len() as u64;
     assert!(matches!(
-        Head::parse(&file[..10]),
-        Err(DecodeError::NeedMore(PREAMBLE_LEN))
+        Footer::parse(&file[file.len() - 10..], len),
+        Err(DecodeError::NeedFrom(n)) if n == len - 24
     ));
-    let head_len = Head::parse(&file).unwrap().preamble.head_len as usize;
+    let footer_at = Footer::parse_file(&file).unwrap().trailer.footer_offset;
     assert!(matches!(
-        Head::parse(&file[..head_len - 1]),
-        Err(DecodeError::NeedMore(n)) if n == head_len
+        Footer::parse(&file[footer_at as usize + 1..], len),
+        Err(DecodeError::NeedFrom(n)) if n == footer_at
+    ));
+    let footer = Footer::parse(&file[footer_at as usize..], len).unwrap();
+    assert_eq!(footer.rows, Footer::parse_file(&file).unwrap().rows);
+    let not = b"not a recording at all, not even close to one";
+    assert!(matches!(
+        Footer::parse(not, not.len() as u64),
+        Err(DecodeError::Unfinished)
     ));
     assert!(matches!(
-        Head::parse(b"not a recording at all, no"),
+        Footer::parse_file(not),
         Err(DecodeError::NotTickwave)
+    ));
+    assert!(matches!(
+        Footer::parse_file(&file[..file.len() - 1]),
+        Err(DecodeError::Unfinished)
     ));
 }
 
@@ -301,13 +341,13 @@ fn a_short_head_asks_for_more() {
 fn the_content_id_ignores_how_the_file_is_cut() {
     let small = encode(recording(EDGES_A.to_vec(), values()), &small_blocks()).unwrap();
     let large = encode(recording(EDGES_A.to_vec(), values()), &Options::default()).unwrap();
-    let small = Head::parse(&small).unwrap();
-    let large = Head::parse(&large).unwrap();
+    let small = Footer::parse_file(&small).unwrap();
+    let large = Footer::parse_file(&large).unwrap();
     assert_ne!(small.rows.len(), large.rows.len());
     assert_eq!(small.header.content_id, large.header.content_id);
     let other = encode(recording(vec![1, 2], values()), &Options::default()).unwrap();
     assert_ne!(
-        Head::parse(&other).unwrap().header.content_id,
+        Footer::parse_file(&other).unwrap().header.content_id,
         large.header.content_id
     );
 }
@@ -324,25 +364,25 @@ fn a_bundle_keeps_the_content_and_carries_the_files() {
         ("rec.gen.jsonl".to_string(), "{}\n".to_string()),
     ]
     .into();
-    let bundled = bundle(&file, &Head::parse_file(&file).unwrap(), files.clone()).unwrap();
+    let bundled = bundle(&file, &Footer::parse_file(&file).unwrap(), files.clone()).unwrap();
     assert!(bundled.len() > file.len());
-    verify(&bundled, recording(EDGES_A.to_vec(), values())).unwrap();
-    let head = Head::parse(&bundled).unwrap();
+    verify(&bundled[..], recording(EDGES_A.to_vec(), values())).unwrap();
+    let head = Footer::parse_file(&bundled).unwrap();
     assert_eq!(head.header.annotations.as_ref(), Some(&files));
     assert_eq!(
         head.header.content_id,
-        Head::parse(&file).unwrap().header.content_id
+        Footer::parse_file(&file).unwrap().header.content_id
     );
     // Bundling again replaces the files rather than adding to them.
     let again = bundle(
         &bundled,
-        &Head::parse_file(&bundled).unwrap(),
+        &Footer::parse_file(&bundled).unwrap(),
         [("x.toml".to_string(), String::new())].into(),
     )
     .unwrap();
-    let head = Head::parse(&again).unwrap();
+    let head = Footer::parse_file(&again).unwrap();
     assert_eq!(head.header.annotations.unwrap().len(), 1);
-    verify(&again, recording(EDGES_A.to_vec(), values())).unwrap();
+    verify(&again[..], recording(EDGES_A.to_vec(), values())).unwrap();
 }
 
 #[test]
@@ -364,6 +404,7 @@ fn codes_are_stored_in_byte_planes() {
                 first: 0,
                 period: Ratio::integer(1).unwrap(),
                 count: 3,
+                breaks: Vec::new(),
                 samples: Samples::F32(Box::new(
                     [0x0102 as f32, 0x0304 as f32, 0x0506 as f32].into_iter(),
                 )),
@@ -376,7 +417,7 @@ fn codes_are_stored_in_byte_planes() {
         ..Options::default()
     };
     let file = encode(rec, &options).unwrap();
-    let head = Head::parse(&file).unwrap();
+    let head = Footer::parse_file(&file).unwrap();
     let (offset, len) = head.block_location(0);
     let raw = inflate(
         &file[offset as usize..][..len as usize],
@@ -392,9 +433,10 @@ fn a_newer_minor_version_is_not_bundled() {
     use escapement_tickwave_format::bundle::bundle;
     use escapement_tickwave_format::header::MINOR;
     let mut file = encode(recording(EDGES_A.to_vec(), values()), &small_blocks()).unwrap();
-    // The preamble's minor version, after the magic and the major version.
-    file[10..12].copy_from_slice(&(MINOR + 1).to_le_bytes());
-    let head = Head::parse_file(&file).unwrap();
+    // The trailer's minor version, after the footer's offset and length and the major version.
+    let at = file.len() - 24 + 14;
+    file[at..at + 2].copy_from_slice(&(MINOR + 1).to_le_bytes());
+    let head = Footer::parse_file(&file).unwrap();
     let err = bundle(&file, &head, Default::default()).expect_err("refused");
     assert!(
         err.to_string()
@@ -412,17 +454,15 @@ fn the_rates_origin_and_the_trigger_survive_encoding_and_bundling() {
     rec.source.rate = Some(RateOrigin::Inferred);
     rec.source.trigger_s = Some(-2.5e-6);
     let file = encode(rec, &Options::default()).unwrap();
-    let head = Head::parse(&file).unwrap();
-    assert_eq!(head.preamble.minor, 0);
-    let json = std::str::from_utf8(&file[PREAMBLE_LEN..][..head.preamble.header_len as usize])
-        .unwrap()
-        .to_owned();
+    let head = Footer::parse_file(&file).unwrap();
+    assert_eq!(head.trailer.minor, 0);
+    let json = serde_json::to_string(&head.header).unwrap();
     assert!(
         json.contains(r#""trigger_s":-2.5e-6,"rate":"inferred""#),
         "{json}"
     );
     let bundled = bundle(&file, &head, BTreeMap::new()).unwrap();
-    let again = Head::parse(&bundled).unwrap();
+    let again = Footer::parse_file(&bundled).unwrap();
     assert_eq!(again.header.source.rate, Some(RateOrigin::Inferred));
     assert_eq!(again.header.source.trigger_s, Some(-2.5e-6));
 }
