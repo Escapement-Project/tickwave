@@ -32,7 +32,7 @@ pub enum EncodeError {
         end: i64,
         length: i64,
     },
-    #[error("{channel}: edge at tick {tick} does not follow tick {previous}")]
+    #[error("{channel}: edge at tick {tick} comes before tick {previous}")]
     Order {
         channel: String,
         tick: i64,
@@ -402,7 +402,7 @@ pub fn encode(recording: Recording, options: &Options) -> Result<Vec<u8>, Encode
                         end: d.end,
                     });
                 }
-                if tick <= d.previous {
+                if tick < d.previous {
                     return Err(EncodeError::Order {
                         channel: name.clone(),
                         tick,

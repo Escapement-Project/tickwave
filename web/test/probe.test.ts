@@ -76,6 +76,19 @@ test("the edges of a long quiet stretch are found through the overview, reading 
   assert.deepEqual(p, { level: 0, start: 1_085, end: 50_000_000, next: 50_000_627 });
 });
 
+test("a pulse the source stamped with one time: the pulse before it ends there, and so does its period", async () => {
+  // High from 10, a low pulse at 20 too short to time, high to 30; then quiet until a pair at 50,000,000.
+  const ticks = new Float64Array([10, 20, 20, 30, 50_000_000, 50_000_000, 50_000_500]);
+  const source = new MemorySource({ title: "pair", timebase: NS, length: 60_000_000, channels: [{ kind: "digital", name: "D", end: 60_000_000, initial: 0, ticks }] });
+  const e = await source.edges(0, 0, 100);
+  assert.deepEqual(pulseFromEdges(e, 0, 100, 60_000_000, 19), { level: 1, start: 10, end: 20, next: 20 });
+  assert.deepEqual(pulseFromEdges(e, 0, 100, 60_000_000, 20), { level: 1, start: 20, end: 30, next: undefined });
+  assert.equal(pulseFigures({ level: 1, start: 10, end: 20, next: 20 }, NS, 60_000_000).duty, "100\u00a0%");
+  // Found by search: the period ends at the pair's second edge, not at the edge after it.
+  const p = await completePulse(source, 0, { level: 0, start: undefined, end: undefined, next: undefined }, 10_000_000, 60_000_000);
+  assert.deepEqual(p, { level: 0, start: 30, end: 50_000_000, next: 50_000_000 });
+});
+
 test("a pulse's figures: whole-tick widths, and a rate and a duty to the digits the ticks carry", () => {
   // SWCLK's first pulses in identify-swd: low for 627 ns from 376,719,436, then high for 647.
   const f = pulseFigures({ level: 0, start: 376_719_436, end: 376_720_063, next: 376_720_710 }, NS, 523_583_070);

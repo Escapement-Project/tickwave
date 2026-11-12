@@ -21,7 +21,7 @@ export interface MemoryDigital {
   readonly end: number;
   /** The level at tick 0, before any edge. */
   readonly initial: 0 | 1;
-  /** Ascending, no two equal. Handed out by reference: never written after construction. */
+  /** In order; two can share a tick. Handed out by reference: never written after construction. */
   readonly ticks: Float64Array;
 }
 

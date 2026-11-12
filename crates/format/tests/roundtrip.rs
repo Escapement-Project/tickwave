@@ -200,8 +200,39 @@ fn refuses_a_value_codes_cannot_hold() {
 fn refuses_edges_out_of_order() {
     let err = encode(recording(vec![5, 3], values()), &Options::default()).unwrap_err();
     assert!(matches!(err, EncodeError::Order { tick: 3, .. }), "{err}");
-    let err = encode(recording(vec![5, 5], values()), &Options::default()).unwrap_err();
-    assert!(matches!(err, EncodeError::Order { tick: 5, .. }), "{err}");
+    let err = encode(recording(vec![5, 5, 4], values()), &Options::default()).unwrap_err();
+    assert!(matches!(err, EncodeError::Order { tick: 4, .. }), "{err}");
+}
+
+/// Pulses the source stamped with one time: pairs at the first tick, at a sample's tick, at a block's
+/// start (300, where small blocks cut), on the last tick, and three edges at one tick.
+const EDGES_SHARED: [i64; 17] = [
+    1, 1, 2, 3, 3, 3, 100, 100, 101, 200, 300, 300, 5000, 5000, 9999, 10000, 10000,
+];
+
+#[test]
+fn round_trips_edges_that_share_a_tick() {
+    let file = encode(recording(EDGES_SHARED.to_vec(), values()), &small_blocks()).unwrap();
+    verify(&file, recording(EDGES_SHARED.to_vec(), values())).unwrap();
+    let head = Head::parse(&file).unwrap();
+    let mut edges: Vec<i64> = Vec::new();
+    let mut pair_starts_a_block = false;
+    for i in 0..head.rows.len() {
+        let (offset, len) = head.block_location(i);
+        let block = head
+            .decode_block(i, &file[offset as usize..][..len as usize])
+            .unwrap();
+        let BlockChannel::Digital { initial, edges: e } = &block.channels[0] else {
+            panic!()
+        };
+        let before = EDGES_SHARED.iter().filter(|&&t| t < block.start).count();
+        assert_eq!(*initial, before % 2 == 0, "block at {}", block.start);
+        pair_starts_a_block |= e.len() >= 2 && e[0] == block.start && e[1] == block.start;
+        edges.extend(e);
+    }
+    assert_eq!(edges, EDGES_SHARED);
+    // The case only a block's first interval could hold before: zero, then zero again.
+    assert!(pair_starts_a_block);
 }
 
 #[test]

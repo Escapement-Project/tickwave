@@ -100,9 +100,9 @@ pub struct Digital {
     /// can stop knowing one channel before another. At 0 the level is never known, and `initial`
     /// is false.
     pub end: i64,
-    /// Ticks at which the level flips, strictly increasing, each in `1..end`. Two changes within
-    /// one tick cannot be represented: a source reader collapses them to their net change (VCD) or
-    /// refuses the source (Saleae).
+    /// Ticks at which the level flips, in order, each in `1..end`. Two can share a tick: a pulse
+    /// the source stamped with one time. The VCD reader collapses changes at one time to their net
+    /// change, and the Saleae reader refuses edges out of order.
     pub edges: Edges,
 }
 

@@ -574,7 +574,7 @@ fn item_count(word: u32, digital: bool) -> u32 {
 // shared a function, a change to the analog loop moved the digital loop's speed by 5-7 %.
 
 /// A digital section's `count` edges: LEB128 intervals, the first from the block's `start`. Every
-/// edge lies in `1..channel_end` and before the block's `end`, and no two share a tick.
+/// edge lies in `1..channel_end` and before the block's `end`.
 #[inline(never)]
 fn digital_edges(
     section: &[u8],
@@ -589,11 +589,8 @@ fn digital_edges(
     let mut edges = Vec::with_capacity(count);
     let mut at = 0;
     let mut tick = start;
-    for k in 0..count {
+    for _ in 0..count {
         let interval = get_uleb(section, &mut at).ok_or("an interval is cut short")?;
-        if k > 0 && interval == 0 {
-            return Err("two edges share a tick".into());
-        }
         tick = i64::try_from(interval)
             .ok()
             .and_then(|iv| tick.checked_add(iv))

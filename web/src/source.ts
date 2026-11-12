@@ -90,7 +90,7 @@ export interface RecordingInfo {
 export interface Edges {
   /** The level at `start`. */
   readonly level: 0 | 1;
-  /** Every edge in [start, end), ascending. */
+  /** Every edge in [start, end), in order. Two can share a tick: a pulse the source stamped with one time. */
   readonly ticks: Float64Array;
 }
 

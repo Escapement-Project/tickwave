@@ -166,7 +166,9 @@ A block's decoded payload holds a u32 section length for each channel, then each
 in channel order:
 
 - **Digital.** The block's edges, as unsigned LEB128 intervals. The first interval is measured from
-  the block's start tick, each later one from the edge before it. Only the first may be zero.
+  the block's start tick, each later one from the edge before it. Any of them may be zero: two
+  edges at one tick are a pulse the source stamped with a single time, and the level flips twice
+  there.
   Every edge lies in `1..end` of its channel (an edge at tick 0 would contradict `initial`), so
   the first block's first interval is never zero.
 - **Analog.** The block's samples in the channel's coding: f32 values, or u16 codes in two byte

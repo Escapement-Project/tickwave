@@ -82,7 +82,11 @@ export async function completePulse(source: Source, channel: number, p: Pulse, t
   const start = p.start !== undefined ? p.start : await findEdge(source, channel, 1, tick + 1, -1, signal);
   const end = p.end !== undefined ? p.end : await findEdge(source, channel, tick + 1, known, 1, signal);
   let next = p.next;
-  if (next === undefined) next = end === null ? null : await findEdge(source, channel, end + 1, known, 1, signal);
+  if (next === undefined && end !== null) {
+    // A pulse the source stamped with one time: the period's last edge shares the tick of `end`.
+    const atEnd = (await source.edges(channel, end, end + 1, signal)).ticks.length;
+    next = atEnd > 1 ? end : await findEdge(source, channel, end + 1, known, 1, signal);
+  } else if (next === undefined) next = null;
   return { level: p.level, start, end, next };
 }
 

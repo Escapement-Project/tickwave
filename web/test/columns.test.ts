@@ -50,6 +50,15 @@ test("digital from edges: nothing at or past the channel's end", () => {
   assert.deepEqual([...d.state], [BUSY, BUSY, RISE, BUSY, HIGH, FALL, LOW]);
 });
 
+test("digital from edges: two edges at one tick are busy, at any zoom", () => {
+  const pulse = { level: 0 as const, ticks: new Float64Array([10, 20, 20, 30]) };
+  const c = digitalFromEdges({ x0: 0, per: 5, count: 8 }, pulse, 0, 40);
+  assert.deepEqual([...c.state], [LOW, LOW, RISE, HIGH, BUSY, HIGH, FALL, LOW]);
+  // A column a quarter of a tick wide: the pair's column alone.
+  const d = digitalFromEdges({ x0: 19.5, per: 0.25, count: 4 }, pulse, 0, 40);
+  assert.deepEqual([...d.state], [HIGH, HIGH, BUSY, HIGH]);
+});
+
 const identifyClock = () =>
   new MemorySource(
     {
