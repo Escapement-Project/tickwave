@@ -366,6 +366,9 @@ test("the docs sit in the project's doc frame: every doc in a rail, this one's s
     "Trailer",
     "Declaration",
     "Header",
+    "Sources",
+    "Codings",
+    "Derived channels",
     "Moved and trimmed channels",
     "Gaps",
     "Blocks",
@@ -380,6 +383,7 @@ test("the docs sit in the project's doc frame: every doc in a rail, this one's s
     "With random access",
     "In order",
     "Repairing a cut-off file",
+    "Re-cutting",
     "Sidecar",
   ]);
   await expect(rail.getByRole("link", { name: "Format" })).toHaveAttribute("aria-current", "page");

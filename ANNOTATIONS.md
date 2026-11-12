@@ -66,7 +66,7 @@ The first line names the generator. Each later line is one annotation. Blank lin
 | `text` | Longer text, shown in an inset's caption. |
 | `paint` | A role (`probe`, `target`): the annotation's channels draw over its span in the colour the host page gives that role. The target's lines are also heavier, so the roles differ without colour. |
 | `measure` | `{channel, what}`: the inset shows a measure taken from the channel's edges inside the span (below). The channel must be digital, and the annotation a span. |
-| `values` | Figures the annotation states, by name, each a decimal and a unit (below). |
+| `values` | Figures the annotation states, by name, each a decimal and its unit (below). |
 | `ref` | Hand-written only: the full id of a generated annotation. This one takes its span and channels, and any field it leaves out. |
 
 A file may hold no other fields, `measure`'s included: a misspelt one is an error, not ignored.
@@ -101,8 +101,8 @@ values = { asked = "50 MHz", read_data = "37.5 MHz", write_data = "49.9 MHz" }
 ```
 
 In a generator's file the same is `"values": {"asked": "50 MHz", ...}`. A name is lower-case
-letters, digits and `_`, starting with a letter. A value is a decimal, one space and a unit. It is
-a string, so `"81.0 KiB/s"` keeps its last digit. tickwave never converts or rounds a value. A page
+letters, digits and `_`, starting with a letter. A value is a decimal, then one space and a unit
+where it has one: a count, such as a marker's number, has none. It is a string, so `"81.0 KiB/s"` keeps its last digit. tickwave never converts or rounds a value. A page
 compares units as text, so micro is always `µ` (U+00B5 MICRO SIGN), as in times, and never the Greek
 letter mu (U+03BC).
 
@@ -147,7 +147,8 @@ the prose cites breaks the build instead of the page. It checks that:
 - every channel exists, a point and a span's `start` lie in `0..length`, and a span's `end` is
   not before its `start` and not past `length`;
 - every `measure` names a digital channel, a known measure, and sits on a span;
-- every value is a decimal and a unit, under a name of lower-case letters, digits and `_`.
+- every value is a decimal, with one space and a unit where it has one, under a name of lower-case
+  letters, digits and `_`.
 
 ## Bundling
 

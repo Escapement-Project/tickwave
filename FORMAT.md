@@ -1,7 +1,7 @@
 # The tickwave recording format, version 1.0
 
-A tickwave recording holds digital and analog channels of one capture on one time axis, exactly as
-the instrument recorded them. A writer only ever appends to it, so a recorder can stream the file
+A tickwave recording holds digital and analog channels on one time axis, exactly as the instruments
+recorded them: one capture's, or several captures merged. A writer only ever appends to it, so a recorder can stream the file
 out while it captures. The file ends with an index. A reader with random access reads the end
 first and then only the blocks a view covers, so a page can show a few microseconds of a
 two-minute capture without downloading it. A reader that takes the file in order needs no index.
@@ -13,17 +13,25 @@ may not read.
 
 ## Times
 
-Every time is a whole number of ticks from the recording's start, tick 0. One tick is the source's
+Every time is a whole number of ticks from the recording's start, tick 0. A source's tick is its
 resolution: 1 ns for a 1 GS/s logic analyser, one sample period for a sigrok capture, the timescale
-for VCD, one count of a probe's stamping clock. The header states the tick rate as an exact ratio.
-Nothing in the file is finer than a tick, so no reading shows more resolution than the source had.
+for VCD, one count of a probe's stamping clock. Each source states its tick rate as an exact ratio,
+and so does the recording. A recording of one source ticks at the source's rate. A recording of
+several ticks at the least common multiple of their rates, so each source's tick is a whole number
+of the recording's ticks, its factor `f`. Nothing in the file is finer than a tick of its source,
+so no reading shows more resolution than the source had.
 
-A converter maps a source time `t` to `round((t − begin) × rate)`, where `begin` is the source's
-own start and `rate` its sample rate. It refuses a source whose events sit more than 0.01 of a
-tick off that grid. A recording converted whole starts where the source does. A converter can also
-move a channel and keep only part of it (see Moved and trimmed channels). The recording then
-starts `base` ticks into that grid, as the end of that section says, and a channel moved by
-`offset` ticks has its source time `t` at `round((t − begin) × rate) + offset − base`.
+A source's time `t`, in its own seconds, is at source tick `k = round((t − begin_s) × rate)`, where
+`begin_s` is the source's own time at its tick 0 and `rate` its tick rate. A converter refuses a
+source whose events sit more than 0.01 of a tick off that grid. Channel c of source s holds source
+tick `k` at the recording's tick
+
+    T = f_s × k + origin_s + offset_c
+
+`origin_s` is the source's entry's `origin`, and `offset_c` the channel's `offset`, 0 where it
+states none. Every term is an integer in the header, so a script maps a source's times to ticks
+exactly, and a check against the source does too. A recording converted whole has a factor of 1, an
+origin of 0 and no offset: it starts where the source does.
 
 ## Layout
 
@@ -90,18 +98,18 @@ major version it does not know.
 
 ## Declaration
 
-UTF-8 JSON: the header's `timebase`, `channels`, `source`, `title`, `meta` and `overview_shift`,
-as far as a writer knows them before any data.
+UTF-8 JSON: the header's `timebase`, `channels`, `derived`, `sources`, `title`, `meta` and
+`overview_shift`, as far as a writer knows them before any data.
 
-A channel entry has the header's `name`, `source_name` and `kind`, and `offset`, `offset_kind` and
-`kept` where it states them. A digital channel has `initial`, and an analog channel `unit`, `period`
-and `coding`. What only the end settles is left out: a
+A channel entry has the header's `name`, `source_name`, `source` and `kind`, and `offset`,
+`offset_kind`, `kept` and `significant` where it states them. A digital channel has `initial`, and
+an analog channel `unit`, `period` and `coding`. What only the end settles is left out: a
 digital channel's `end`, `edges` and `gaps`, and an analog channel's `first`, `count` and
 `breaks`. A writer that does not know a level at tick 0 declares it false and starts the channel
 with a gap from tick 0.
 
-The footer's header holds the same values. It may add keys to `source.extra`, for what the source
-states only at its end, such as a probe's totals.
+The footer's header holds the same values. It may add keys to a source's `extra`, for what the
+source states only at its end, such as a probe's totals.
 
 ## Header
 
@@ -113,7 +121,8 @@ parses it exactly.
 | `timebase` | `[num, den]` | ticks a second |
 | `length` | integer | how many ticks the capture covers: ticks `0..length` |
 | `channels` | array | one entry a channel, in block order |
-| `source` | object | where the recording came from |
+| `derived` | array, optional | channels computed from others, not stored in blocks (see Derived channels) |
+| `sources` | array | where the channels came from, one entry a source (see Sources) |
 | `title` | string, optional | |
 | `meta` | object of strings, optional | free keys, such as `probe` or `firmware` |
 | `content_id` | string | `blake3:` and the 64 hex digits of the content's digest (below) |
@@ -123,25 +132,18 @@ parses it exactly.
 | `overview_blocks` | array, optional | the overview levels in overview blocks, finest first: `{"shift": s, "blocks": n}` each; absent when there are none |
 | `annotations` | object of strings, optional | a bundled sidecar: each file's name and text |
 
-A channel entry has `name`, `source_name` (the source's own name for it) and `kind`, and
-`offset`, `offset_kind` and `kept` where it states them (see Moved and trimmed channels):
+A channel entry has `name`, `source_name` (the source's own name for it), `source` (its source's
+index in `sources`) and `kind`, and `offset`, `offset_kind` and `kept` where it states them (see
+Moved and trimmed channels). An analog channel can state `significant`: its readings carry at most
+that many significant figures, as an instrument whose step changes with its range does.
 
-- `"digital"`: `initial` (the level at tick 0, a boolean), `end` (the level is known at ticks
-  `0..end`; a source can stop knowing one channel before another), `edges` (the count), and `gaps`
-  where the level was not known for a while (see Gaps, below). An `end` of 0 says the level is
+- `"digital"`: `initial` (the level at tick 0 before any edge there, a boolean), `end` (the level
+  is known at ticks `0..end`; a source can stop knowing one channel before another), `edges` (the
+  count), and `gaps` where the level was not known for a while (see Gaps, below). An `end` of 0 says the level is
   never known. Such a channel has no edges and no gaps, and its `initial` is false.
 - `"analog"`: `unit` (empty when the source states none), `first` (the first sample's tick, 0
   when there is no sample), `period` (ticks from one sample to the next, `[num, den]`), `count`,
-  `breaks` where the samples stopped for a while (see Gaps), and `coding`:
-  - `{"type": "f32"}`: the source's f32 values.
-  - `{"type": "codes", "bits": b, "scale": s, "offset": o}`: u16 codes, stored in two byte
-    planes: every code's low byte, then every code's high byte. Split this way, the captures we
-    tried came out 12 % smaller after zstd than with each code's two bytes together. A sample's
-    value is
-    `code × s` in f64, then `o +` that in f64, then rounded to f32: two separately rounded f64
-    operations, never a fused multiply-add, which can round to a different f32. In JavaScript,
-    `Math.fround(o + code * s)`. A converter picks this coding only after checking that every
-    sample reproduces its source value bit for bit.
+  `breaks` where the samples stopped for a while (see Gaps), and `coding` (see Codings).
 
 An analog channel's samples come in runs, `period` apart. A channel without `breaks` has one run,
 and its sample `i` sits at tick `first + floor(i × period)`.
@@ -150,17 +152,82 @@ Every tick the header and the index name lies in `0..length`: every block's star
 sample, and every tick a gap or a break names. So does every edge and sample in a block. A digital
 channel's `end`, and both ends of a `kept`, lie in `0..=length`. An analog channel has no `end`: its
 samples may stop before the length. `length` is at least 1. It is below 2^53, and so are the terms
-of `timebase` and `period`, and every `edges`, `count` and break index. No term of `timebase` or
-`period` is zero, and `bits` lies in `1..=16`. A reader refuses a header that breaks any of these
-before it reads a block.
+of every `timebase` and `period`, and every `edges`, `count`, break index and lost count. Every
+`origin` and `align` lies between −2^53 and 2^53. No term of a `timebase` or a `period` is zero. A
+reader refuses a header that breaks any of these before it reads a block.
 
-`source` has `format` (`saleae-binary-0`, `saleae-binary-1`, `sigrok-sr`, `vcd`; a reader keeps a
-name it doesn't know), `files` (names, no directories), and optionally `instrument`, `software`,
-`begin_s` (the source's own time of tick 0, in seconds, for a channel not moved, so a script working
-from the source can map its times), `trigger_s` (the trigger's time in the same seconds), `rate`,
-`extra` (anything else the source states) and `converter`. `rate` is there when the source doesn't
-record its sample rate: `inferred` when the converter took the lowest rate on whose grid every edge
-sits, `given` when the rate was given to it.
+### Sources
+
+`sources` lists where the channels came from. A recording converted from one capture has one
+entry; a merged one has an entry for each source of each recording merged into it. Every entry is
+some channel's source. A merged recording takes each entry from the recording merged into it, with
+`timebase` kept and `origin` and `align` restated in its own ticks, so a check against that
+recording maps each tick through both headers.
+
+An entry has:
+
+- `format`: `saleae-binary-0`, `saleae-binary-1`, `sigrok-sr` or `vcd` for a capture tickwave
+  converts, or the name a recorder gives its own stream. A reader keeps a name it doesn't know.
+- `files`: names, no directories. A recorder's own stream reads no file, and lists none.
+- `timebase`: the source's tick rate, `[num, den]`. The recording's `timebase` is a whole multiple
+  of it, `f` times; a reader refuses one that isn't.
+- `origin`: an integer, the recording's tick where the source's tick 0 lies before any channel's
+  `offset` (see Times). Every move, cut and alignment of the source's channels folds into it.
+- Optionally `align`: ticks of the recording that whoever merged it moved this source by against
+  the others, positive later, to line up instruments that saw the same event. Like `offset`, it is
+  a claim, not something an instrument recorded. Instruments' clocks drift: at 20 ppm apart, an
+  alignment by hand stays within one tick of a 96 MHz clock for about ±0.5 ms around the point
+  where it was made, and within 10 µs for about ±0.5 s.
+- Optionally `instrument`, `software`, `begin_s` (the source's own time at its tick 0, in seconds),
+  `trigger_s` (the trigger's time in the same seconds), `rate`, `extra` (anything else the source
+  states) and `converter`. `rate` is there when the source doesn't record its sample rate:
+  `inferred` when the converter took the lowest rate on whose grid every edge sits, `given` when
+  the rate was given to it.
+
+A reading of one channel keeps to its source's tick, and a reading between two sources' channels,
+an alignment's included, to the coarser of the two. A reading tied to no channel keeps to the finest
+source's tick.
+
+### Codings
+
+An analog channel's `coding` says how its samples are stored:
+
+- `{"type": "f32"}` and `{"type": "f64"}`: the source's floats.
+- `{"type": "int", "bits": b, "signed": s}`, with `b` in `1..=64` and `s` a boolean: integer
+  samples, each a value exactly. A signed sample lies in `−2^(b−1)..2^(b−1)`, an unsigned one in
+  `0..2^b`, and a reader refuses one outside. It can also state `"scale": [num, den]` and
+  `"offset": [num, den]`, each an exact ratio with a positive denominator, a nonzero `scale` and
+  terms whose magnitude is below 2^53. A sample's value is then `offset + code × scale` exactly:
+  an ADC's counts, stored as the instrument gave them, with the factor that makes them volts or
+  amps. One code step, `scale`, is the finest a reading of it shows.
+- `{"type": "codes", "bits": b, "scale": s, "offset": o}`, with `b` in `1..=16`: a smaller store for
+  an f32 source. A sample's value is `code × s` in f64, then `o +` that in f64, then rounded to f32:
+  two separately rounded f64 operations, never a fused multiply-add, which can round to a different
+  f32. In JavaScript, `Math.fround(o + code * s)`. A converter picks this coding only after
+  checking that every sample reproduces its source value bit for bit.
+
+A reading of an f32 or f64 channel shows four significant figures unless the channel states
+`significant`. A reading of an `int` channel keeps to one code step and to `significant` where
+stated, whichever is coarser.
+
+### Derived channels
+
+A derived channel is computed from two analog channels, so a reader draws it without the recording
+storing its samples. `derived` holds one entry each: `{"name": n, "unit": u, "product": [a, b]}`,
+where `a` and `b` name analog channels, as power is current times voltage. Its name is unlike every
+channel's. Its operands come from one source, and share `first`, `period`, `count` and `breaks`, so
+its sample i sits where theirs does:
+
+- When both are `int` channels without an `offset`, and their `bits` sum to at most 64, sample i
+  is the integer product of their codes, signed if either is, with `scale` the product of their
+  scales (1 for one that states none).
+- Otherwise it is `f64(a_i) × f64(b_i)`, rounded once.
+
+A derived entry can state `significant`, as an analog channel can. A reading of an integer
+product follows the rule for an `int` channel, and one of an f64 product the rule for a float.
+
+Blocks and the index hold nothing for a derived channel. The overview holds its buckets after the
+channels', so a reader draws it zoomed out and measures it without decoding blocks.
 
 ### Moved and trimmed channels
 
@@ -170,16 +237,17 @@ recorded, so the recording states them: a moved channel its `offset`, and, once 
 moved or cut, every channel the span that holds its source data, `kept`. A recording with neither
 is as the source recorded it.
 
-- `offset`: the ticks the channel was moved by, an integer; positive is later. The source's time
-  of the channel's tick `T` is `begin_s + (T − offset) / rate`. A converter refuses an offset more
-  than 0.01 of a tick off the grid.
+- `offset`: the ticks the channel was moved by, an integer; positive is later (see Times for how
+  its ticks map to the source's). A converter refuses an offset more than 0.01 of a tick off the
+  grid.
 - `offset_kind`: why it was moved, stated with every `offset`. `"delay"` is a known delay in the
   channel's path, such as a probe's lead or an instrument's input. A reader keeps a kind it doesn't
   know, and refuses an `offset` without one, or one without an `offset`.
 - `kept`: `[from, to]`, the ticks `from..to` where the channel holds what the source recorded, after
   the move; `to` is not included. Outside them the channel holds nothing from the source: it was
   cut, or its move took it outside the source's span. Neither is a loss by the instrument. Every
-  channel states `kept` when any channel is moved or cut, and none does otherwise. A reader refuses
+  channel states `kept` when any channel is moved or cut, or the recording has several sources, and
+  none does otherwise. A reader refuses
   a recording where only some channels state it, or where all do and none starts at 0. A digital
   channel whose `from` is above 0 has its first gap from tick 0 to `from` or later, and its `end` is
   at most `to`: a cut next to a gap the instrument left joins it, and the instrument can stop before
@@ -195,9 +263,10 @@ in lowest terms keeps its samples' ticks only if its first kept sample is a mult
 samples into the run that holds it, counted from the index that starts the run. A converter moves
 a cut forward to the next such sample, at most `q − 1` samples on.
 
-When no channel is moved or cut, the recording starts where the source does. Otherwise it starts at
-the earliest of the channels' starts, each after its move: a channel starts where its kept span
-starts after a cut from its front, or where the source starts if nothing was cut from its front.
+When no channel is moved or cut and there is one source, the recording starts where the source
+does. Otherwise it starts at the earliest of the channels' starts, each after its move and its
+source's alignment: a channel starts where its kept span starts after a cut from its front, or
+where its source starts if nothing was cut from its front.
 
 ### Gaps
 
@@ -210,11 +279,20 @@ A digital channel's `gaps` is an array of `[from, to, level]`. The level is not 
 the `to` before it. A channel with a gap from tick 0 has an `initial` of false, since its level at
 tick 0 is not known.
 
-An analog channel's `breaks` is an array of `[index, tick]`: sample `index` starts a new run, at
-`tick`. The first run starts at `[0, first]`. Sample `i` of the run that starts at `[index, tick]`
-sits at `tick + floor((i − index) × period)`. Each `index` lies in `1..count` and is larger than
-the one before it. Each `tick` is at least the tick of the sample before it. A reader draws no line
-across a break.
+An analog channel's `breaks` is an array of `[index, tick, lost]`: sample `index` starts a new
+run, at `tick`, and the instrument lost `lost` samples before it, 0 when it only paused. The first
+run starts at `[0, first]`. Sample `i` of the run that starts at `[index, tick]` sits at
+`tick + floor((i − index) × period)`. Each `index` lies in `1..count` and is larger than the one
+before it. Each `tick` is at least the tick of the sample before it. A reader draws no line across
+a break. The lost samples' time runs from one period after the sample before the break, for `lost`
+periods, and ends at `tick` if that comes sooner; the rest of the break is a pause. A reader shows
+the two apart. Samples lost before the first or after the last have no place on the time axis; a
+source's `extra` can count them.
+
+Each sample covers the time from its tick to the next sample's, at most one period, and never past
+the length. A reader
+that measures a span weighs each sample by the part of that time inside the span, and counts a
+sample whose time reaches into the span even when its tick lies before it.
 
 A channel with no gap or break leaves the field out.
 
@@ -261,10 +339,13 @@ in channel order:
   the block's start tick, each later one from the edge before it. Any of them may be zero: two
   edges at one tick are a pulse the source stamped with a single time, and the level flips twice
   there.
-  Every edge lies in `1..end` of its channel (an edge at tick 0 would contradict `initial`), so
-  the first block's first interval is never zero.
-- **Analog.** The block's samples in the channel's coding: f32 values, or u16 codes in two byte
-  planes. Every code is below `2^bits`; a reader refuses a wider one.
+  Every edge lies in `0..end` of its channel. An edge at tick 0 flips the level from `initial`, as
+  any edge does, so a pulse at the capture's first instant keeps both its edges.
+- **Analog.** The block's samples in the channel's coding. f32 and f64 values are stored whole.
+  Codes, of an `int` or a `codes` channel, are stored in byte planes: every code's lowest byte, then
+  every code's next byte, and so on for `ceil(bits / 8)` bytes, a signed code in two's complement.
+  Split this way, the captures we tried came out 12 % smaller after zstd than with each code's
+  bytes together. A reader refuses a code outside its coding's range.
 
 ## Gap and run records
 
@@ -288,9 +369,11 @@ A run record:
 | 0 | u32 | channel |
 | 4 | u64 | `index` |
 | 12 | i64 | `tick` |
+| 20 | u64 | `lost` |
 
-Sample `index` of an analog channel starts a run at `tick`. The run at index 0 gives the
-channel's `first`, and each later run is a break. It comes before the block that holds sample
+Sample `index` of an analog channel starts a run at `tick`, after `lost` samples the instrument lost.
+The run at index 0 gives the channel's `first`, and each later run is a break; the first run's
+`lost` is 0. It comes before the block that holds sample
 `index`.
 
 A gap whose `to` is not below its channel's `end` is left out of the header, and the channel's
@@ -313,15 +396,33 @@ many items. A level as fine as the data makes the overview as large as the block
 sparse recording cost room for no data. tickwave's converter takes the first of 12, 16, 20 and so
 on with at most 2^26 buckets.
 
-The footer's decoded overview holds, for each level in the header's order, then each channel:
+The footer's decoded overview holds, for each level in the header's order, each channel in order,
+then each derived channel:
 
 - **Digital.** The level bits, then the change bits, each `ceil(n / 8)` bytes. Bucket i is bit
   `i % 8` of byte `i / 8`. The level bit is the level entering the bucket, before any edge at its
   first tick; the change bit says whether an edge falls in the bucket. The bits follow the block
   words' rule for gaps: inside a gap the level bit carries the level from before it, and a gap's
   `to` sets the change bit of its bucket.
-- **Analog.** n minimum values, then n maximum values, as f32. A bucket with no sample holds +∞ and
-  −∞. NaN samples are left out.
+- **Analog.** n minimum values, then n maximum values, then n sums of its samples: an `int`
+  channel's codes, and every other channel's values. A sample counts in the bucket that holds its
+  tick.
+
+  | Coding | Minimum and maximum | Sum |
+  | --- | --- | --- |
+  | `f32` | f32 | f64 |
+  | `codes` | f32, of the values | f64, of the values |
+  | `f64` | f64 | f64 |
+  | `int`, unsigned | u64 | i128 |
+  | `int`, signed | i64 | i128 |
+
+  A bucket with no sample holds a minimum above its maximum: +∞ and −∞, or the type's largest and
+  smallest. NaN samples are left out. A bucket of the finest level sums its samples in index order,
+  and a bucket of a coarser level sums the 16 buckets of the level below it that it covers, in
+  order, so every writer gives the same bytes. An integer sum is exact. A bucket's sample count
+  follows from `first`, `period` and `breaks`, so the overview doesn't store it.
+- **Derived.** As an analog channel: an integer product as signed or unsigned `int` codes, and an
+  f64 product as `f64`.
 
 An overview block record's payload:
 
@@ -343,7 +444,9 @@ generator, as a generator file's first line does, and `a` is one line of that fi
 Annotation records let a live recorder keep what it generates as safely as its data. The footer
 does not index them, so a reader with random access never sees them. When a file is finished or
 repaired, each source's annotations become its generator file, `rec.<source>.jsonl`, beside the
-recording. An annotation that starts at or past the length is dropped, and a span that ends past it
+recording. A writer can instead bundle them into the footer's `annotations` when it finishes, with a
+hand-written file that holds no annotation of its own and includes them, so a live recording stays
+one file. An annotation that starts at or past the length is dropped, and a span that ends past it
 ends at the length.
 
 ## Footer
@@ -386,18 +489,26 @@ digest, in channel order. A channel's digest covers what the declaration fixes, 
 items in order, then what only the end settles, so a writer computes it as the items arrive.
 Strings are written as a u64 byte length and their UTF-8 bytes.
 
-Between what the declaration fixes and the items, a channel that states `offset` or `kept` adds a
-byte of flags: 1 if it states `offset`, 2 if it states `kept`. Then `offset` as i64 and
-`offset_kind` as a string, where it states them, and `kept`'s `from` and `to` as i64, where it
-states it. A channel stating neither adds nothing, so a recording converted whole has the id its
-data alone gives.
+Between what the declaration fixes and the items, a channel that states `offset` or `kept`, or
+belongs to a recording of several sources, adds a byte of flags: 1 if it states `offset`, 2 if it
+states `kept`, 4 if the recording has several sources. Then `offset` as i64 and `offset_kind` as a
+string, where it states them; `kept`'s `from` and `to` as i64, where it states it; and with several
+sources, its source's factor `f` as u64 and `align` as i64, 0 where the source states none. A
+channel with no flag adds nothing, so a recording converted whole has the id its data alone gives.
 
 - Digital: the name, `"digital"`, the initial level as one byte, then every edge tick as i64, then
   `end` as i64, the number of gaps as u64, and each gap's `from` and `to` as i64 and its `level` as
   one byte.
-- Analog: the name, `"analog"`, the unit, `period` as two u64, then every value's f32 bits as u32,
-  then `first` as i64, `count` as u64, the number of breaks as u64, and each break's `index` as u64
-  and `tick` as i64.
+- Analog: the name, `"analog"`, the unit, `period` as two u64, then the samples, then `first` as
+  i64, `count` as u64, the number of breaks as u64, and each break's `index` as u64, `tick` as i64
+  and `lost` as u64. The samples of an `f32` or a `codes` channel are every value's f32 bits as u32,
+  so the two codings of one capture's values give one id. An `f64` channel adds `"f64"` before the
+  flags and hashes every value's bits as u64. An `int` channel adds `"int"`, `bits` as one byte,
+  `signed` as one byte, and `scale` and `offset` as an i64 and a u64 each (1/1 and 0/1 where it
+  states none), and hashes every code as i64 or u64.
+
+Derived channels, `significant`, and a source's fields other than its factor and `align` are not
+part of the content: they describe it, or follow from it.
 
 ## Writing
 
@@ -443,17 +554,28 @@ level once the length needs one.
 A cut-off file is repaired by appending a footer and a trailer after its last good record:
 
 1. Take the records up to the first bad one, and cut the file there. Refuse a file with no
-   declaration or no block.
-2. The length is the last block's end, and every digital channel's `end` is the length, before
-   the gap rule above.
+   declaration, or with neither a block nor an annotation record.
+2. Every digital channel's `end` is the last block's end, or 0 with no block, before the gap rule
+   above. The length is the later of that end and one past the last annotation record's start, so
+   what a recorder marked after its last data survives, and a recording of marks alone too. When it
+   is later, an empty block runs from the last block's end, or from tick 0, to it.
 3. Count each channel's edges and samples from the blocks' words.
 4. Compute the overview and the content id from every block's items, decoding each block once.
    Keep the overview blocks already written, and write the rest.
-5. Write the footer and the trailer, and each annotation source's generator file.
+5. Write the footer and the trailer, and each annotation source's generator file, or bundle them
+   as the writer would have.
 
 A repaired file holds what a writer that had finished at the same block would have written, and so
 has the same content id.
 
-A file with a channel moved or cut is not repaired. Its declaration states each channel's kept span
-before any data, to the end of the whole capture, so a footer at an earlier block would contradict
-it. Such a file is made again from its source instead.
+A file whose channels state `kept`, because a channel is moved or cut or the recording merges
+several sources, is not repaired. Its declaration states each channel's kept span before any data,
+to the end of the whole capture, so a footer at an earlier block would contradict it. Such a file
+is made again from its sources instead.
+
+## Re-cutting
+
+A file whose blocks a recorder closed early, at flushes, can be written again with blocks of the
+usual size, and a repaired file too. A re-cutter reads the records in order and writes the same
+declaration, then every item, gap, run and annotation in the same order, and finishes with the same
+length, ends, extras and bundled annotations. It computes the overview again. The new file has the same content id.
