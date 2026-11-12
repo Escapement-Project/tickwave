@@ -63,6 +63,12 @@ The docs follow the project's docs, in the markup the site's `design/README.md` 
 docs"), so they read and work as Verge's do. `scripts/site.ts` writes `docs/search.json`, the
 search's index, to that README's definition of a section ("The search index").
 
+`scripts/highlight.ts` colours the docs' code blocks as the site is built, with Shiki. Catppuccin's
+rules decide which parts of the code share a colour, and each colour is one of the project's code
+roles in `tokens.css`, such as `--code-string`, with comments and punctuation in `--ink-2`. So the
+code follows the page's day or night face. A block marked `text` is output and stays plain. A
+block in a language the script doesn't list stops the build until it is added or marked `text`.
+
 `site/tokens.css`, `site/fonts/`, `site/favicon-tickwave.ico`, `site/dial.svg`, `site/tickwave.svg`
 (tickwave's mark, on the overview's plate) and `site/tickwave-mark.json` (its motion) are copies of
 the design system's files. `site/base.css`, `site/header.html`, `site/footer.html`, `site/face.js`,

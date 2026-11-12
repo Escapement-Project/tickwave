@@ -488,6 +488,32 @@ test("a command in the docs has a Copy button, and a command's output has none",
   await expect(page.locator(".doc .codeblock > pre:has(> code.language-text)")).toHaveCount(0);
 });
 
+test("a doc's code takes the project's colours, follows the face, and its output stays plain", async ({ page }) => {
+  await page.goto(`${SITE}docs/annotations.html`);
+  const block = page.locator(".doc pre:has(> code.language-toml)").first();
+  const comment = block.locator("span", { hasText: "# optional" });
+  const string = block.locator("span", { hasText: '"rec.tickwave"' }).first();
+  await expect(string).toHaveAttribute("style", "color:var(--code-string)");
+  /** The comment's colour, and the secondary ink's on the page as it is. */
+  const colours = () =>
+    comment.evaluate((c) => {
+      const probe = document.body.appendChild(Object.assign(document.createElement("span"), { style: "color: var(--ink-2)" }));
+      const ink2 = getComputedStyle(probe).color;
+      probe.remove();
+      return { comment: getComputedStyle(c).color, ink2 };
+    });
+  const day = await colours();
+  expect(day.comment).toBe(day.ink2);
+  await page.evaluate(() => (document.documentElement.dataset.face = "night"));
+  const night = await colours();
+  expect(night.comment).toBe(night.ink2);
+  expect(night.comment).not.toBe(day.comment);
+  // The copy a reader takes is the code as written.
+  expect(await block.locator("code").textContent()).toContain('recording = "rec.tickwave"');
+  await page.goto(`${SITE}docs/converter.html`);
+  await expect(page.locator(".doc pre > code.language-text span")).toHaveCount(0);
+});
+
 test("every internal link resolves, fragments included", async ({ request, baseURL }) => {
   const start = new URL(`${SITE}index.html`, baseURL).href;
   const seen = new Set<string>([start]);

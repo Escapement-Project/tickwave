@@ -11,6 +11,7 @@ import { execFileSync } from "node:child_process";
 import { copyFileSync, cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { codeHighlighter } from "./highlight.ts";
 
 const web = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repo = resolve(web, "..");
@@ -69,7 +70,7 @@ const selfLink = anchor.permalink.linkInsideHeader({
   class: "anchor",
   renderAttrs: () => ({ "aria-label": "Link to this section" }),
 });
-const md = new MarkdownIt({ html: false, linkify: false, typographer: false }).use(anchor, {
+const md = new MarkdownIt({ html: false, linkify: false, typographer: false, highlight: await codeHighlighter() }).use(anchor, {
   slugify,
   permalink: (slug, opts, state, i) => {
     if (["h2", "h3", "h4"].includes(state.tokens[i].tag)) selfLink(slug, opts, state, i);
