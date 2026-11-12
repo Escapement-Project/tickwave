@@ -35,6 +35,15 @@
   --series-verge: #0f8a6c;
   --series-nxp: #2a78d6;
   --series-context: #47525c;
+  --code-keyword: #8839ef;
+  --code-type: #df8e1d;
+  --code-function: #1e66f5;
+  --code-number: #fe640b;
+  --code-builtin: #d20f39;
+  --code-operator: #179299;
+  --code-escape: #ea76cb;
+  --code-string: #40a02b;
+  --code-parameter: #e64553;
   /* Interaction: a focus ring, and a wash of ink over what the pointer is on */
   --focus-width: 2px;
   --wash: color-mix(in srgb, var(--ink) 12%, transparent);
@@ -112,6 +121,15 @@
   --series-verge: #0f8a6c;
   --series-nxp: #2a78d6;
   --series-context: #47525c;
+  --code-keyword: #8839ef;
+  --code-type: #df8e1d;
+  --code-function: #1e66f5;
+  --code-number: #fe640b;
+  --code-builtin: #d20f39;
+  --code-operator: #179299;
+  --code-escape: #ea76cb;
+  --code-string: #40a02b;
+  --code-parameter: #e64553;
   --wash: color-mix(in srgb, var(--ink) 12%, transparent);
   color-scheme: light;
 }
@@ -140,6 +158,15 @@
   --series-verge: #1aa384;
   --series-nxp: #3987e5;
   --series-context: #aab5be;
+  --code-keyword: #cba6f7;
+  --code-type: #f9e2af;
+  --code-function: #89b4fa;
+  --code-number: #fab387;
+  --code-builtin: #f38ba8;
+  --code-operator: #94e2d5;
+  --code-escape: #f5c2e7;
+  --code-string: #a6e3a1;
+  --code-parameter: #eba0ac;
   --wash: color-mix(in srgb, var(--ink) 12%, transparent);
   color-scheme: dark;
 }
@@ -170,6 +197,65 @@
     --series-verge: #1aa384;
     --series-nxp: #3987e5;
     --series-context: #aab5be;
+    --code-keyword: #cba6f7;
+    --code-type: #f9e2af;
+    --code-function: #89b4fa;
+    --code-number: #fab387;
+    --code-builtin: #f38ba8;
+    --code-operator: #94e2d5;
+    --code-escape: #f5c2e7;
+    --code-string: #a6e3a1;
+    --code-parameter: #eba0ac;
     color-scheme: dark;
+  }
+}
+/* Code colours at 4.5:1 when the reader's system asks for more contrast, in the same order
+   as the faces above, so each selector still picks its face */
+@media (prefers-contrast: more) {
+  :root {
+    --code-keyword: #7a22dd;
+    --code-type: #855103;
+    --code-function: #024edc;
+    --code-number: #a13c03;
+    --code-builtin: #ba0530;
+    --code-operator: #03686e;
+    --code-escape: #9c2d83;
+    --code-string: #1b6c02;
+    --code-parameter: #950324;
+  }
+  [data-face="day"] {
+    --code-keyword: #7a22dd;
+    --code-type: #855103;
+    --code-function: #024edc;
+    --code-number: #a13c03;
+    --code-builtin: #ba0530;
+    --code-operator: #03686e;
+    --code-escape: #9c2d83;
+    --code-string: #1b6c02;
+    --code-parameter: #950324;
+  }
+  [data-face="night"] {
+    --code-keyword: #cba6f7;
+    --code-type: #f9e2af;
+    --code-function: #89b4fa;
+    --code-number: #fab387;
+    --code-builtin: #f38ba8;
+    --code-operator: #94e2d5;
+    --code-escape: #f5c2e7;
+    --code-string: #a6e3a1;
+    --code-parameter: #eba0ac;
+  }
+}
+@media (prefers-contrast: more) and (prefers-color-scheme: dark) {
+  :root:not([data-face="day"]) {
+    --code-keyword: #cba6f7;
+    --code-type: #f9e2af;
+    --code-function: #89b4fa;
+    --code-number: #fab387;
+    --code-builtin: #f38ba8;
+    --code-operator: #94e2d5;
+    --code-escape: #f5c2e7;
+    --code-string: #a6e3a1;
+    --code-parameter: #eba0ac;
   }
 }

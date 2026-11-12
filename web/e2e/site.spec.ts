@@ -495,24 +495,76 @@ test("a doc's code takes the project's colours, follows the face, and its output
   const comment = block.locator("span", { hasText: "# optional" });
   const string = block.locator("span", { hasText: '"rec.tickwave"' }).first();
   await expect(string).toHaveAttribute("style", "color:var(--code-string)");
-  /** The comment's colour, and the secondary ink's on the page as it is. */
-  const colours = () =>
-    comment.evaluate((c) => {
-      const probe = document.body.appendChild(Object.assign(document.createElement("span"), { style: "color: var(--ink-2)" }));
-      const ink2 = getComputedStyle(probe).color;
-      probe.remove();
-      return { comment: getComputedStyle(c).color, ink2 };
-    });
+  /** The comment's and the string's colours, and the page's inks as it is. */
+  const colours = async () => ({
+    string: await string.evaluate((s) => getComputedStyle(s).color),
+    ...(await comment.evaluate((c) => {
+      const ink = (role: string) => {
+        const probe = document.body.appendChild(Object.assign(document.createElement("span"), { style: `color: var(${role})` }));
+        const colour = getComputedStyle(probe).color;
+        probe.remove();
+        return colour;
+      };
+      return { comment: getComputedStyle(c).color, ink: ink("--ink"), ink2: ink("--ink-2") };
+    })),
+  });
   const day = await colours();
   expect(day.comment).toBe(day.ink2);
+  expect(day.string).not.toBe(day.ink);
   await page.evaluate(() => (document.documentElement.dataset.face = "night"));
   const night = await colours();
   expect(night.comment).toBe(night.ink2);
   expect(night.comment).not.toBe(day.comment);
+  expect(night.string).not.toBe(night.ink);
+  expect(night.string).not.toBe(day.string);
   // The copy a reader takes is the code as written.
   expect(await block.locator("code").textContent()).toContain('recording = "rec.tickwave"');
   await page.goto(`${SITE}docs/converter.html`);
   await expect(page.locator(".doc pre > code.language-text span")).toHaveCount(0);
+});
+
+test("when the reader asks for more contrast, every code colour keeps 4.5:1 on the code's background, in either face", async ({ browser, baseURL }) => {
+  const luminance = (rgb: string) => {
+    const [r, g, b] = rgb.match(/\d+(\.\d+)?/g)!.slice(0, 3).map((v) => {
+      const c = Number(v) / 255;
+      return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const ratio = (a: string, b: string) => {
+    const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+    return (hi + 0.05) / (lo + 0.05);
+  };
+  // The system's face, then a chosen one against it. A context per case: Firefox restyles late
+  // after the media is changed on a page already open.
+  const cases = [
+    { colorScheme: "light", face: null },
+    { colorScheme: "dark", face: null },
+    { colorScheme: "dark", face: "day" },
+    { colorScheme: "light", face: "night" },
+  ] as const;
+  for (const { colorScheme, face } of cases) {
+    const context = await browser.newContext({ contrast: "more", colorScheme });
+    const page = await context.newPage();
+    await page.goto(new URL(`${SITE}docs/annotations.html`, baseURL).href);
+    if (face) await page.evaluate((f) => (document.documentElement.dataset.face = f), face);
+    const got = await page.locator(".doc pre").first().evaluate((pre) => {
+      const roles = ["keyword", "type", "function", "number", "builtin", "operator", "escape", "string", "parameter"];
+      const colours = roles.map((role) => {
+        const probe = pre.appendChild(Object.assign(document.createElement("span"), { style: `color: var(--code-${role})` }));
+        const colour = getComputedStyle(probe).color;
+        probe.remove();
+        return [role, colour] as const;
+      });
+      return { background: getComputedStyle(pre).backgroundColor, ink: getComputedStyle(pre).color, colours };
+    });
+    for (const [role, colour] of got.colours) {
+      const where = `${role} on ${colorScheme} system, face ${face ?? "unset"}`;
+      expect(colour, where).not.toBe(got.ink);
+      expect(ratio(colour, got.background), where).toBeGreaterThanOrEqual(4.5);
+    }
+    await context.close();
+  }
 });
 
 test("every internal link resolves, fragments included", async ({ request, baseURL }) => {
