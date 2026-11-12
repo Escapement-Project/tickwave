@@ -1,12 +1,26 @@
 // The view's shaping, as the convert flow uses it: a channel moved by its grip or its keys, trimmed by
-// the handles at its data's ends, and rows reordered. A shape goes by the capture's name for a
-// channel: identify-swd's SWCLK came from digital_3_0, its SWDIO from digital_3_1.
+// the handles at its data's ends, and rows reordered; and the Open page's table that follows it. A
+// shape goes by the capture's name for a channel: identify-swd's SWCLK came from digital_3_0, its
+// SWDIO from digital_3_1.
 // identify-swd's SWDIO rises at 376,846,682 ns and falls at 376,851,176 (e2e/probe.spec.ts); its
 // SWCLK falls at 376,719,436, rises at 376,720,063 and falls at 376,720,710.
 
 import { test, expect, type Locator, type Page } from "@playwright/test";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const VIEW = "/e2e/pages/view.html?open&shaping";
+const REPO = new URL("../..", import.meta.url).pathname;
+const DATA = join(REPO, "testdata");
+
+function cli(args: string[]): Buffer {
+  const out = join(mkdtempSync(join(tmpdir(), "escapement-tickwave-cli-")), "out.tickwave");
+  execFileSync("cargo", ["run", "-q", "--release", "-p", "escapement-tickwave-cli", "--", "convert", ...args, "-o", out], { cwd: REPO, stdio: ["ignore", "ignore", "pipe"] });
+  return readFileSync(out);
+}
+
 type Shape = Record<string, { offset: number; keep: { from: number; to: number } | null }>;
 const shape = (view: Locator) => view.evaluate((v) => (v as unknown as { shape: Shape }).shape);
 const setShape = (view: Locator, s: Shape) => view.evaluate((v, s) => ((v as unknown as { shape: Shape }).shape = s), s);
@@ -177,4 +191,48 @@ test("without shaping, the view has no grips or trim handles and keeps no room f
   const box = (await view.locator(".plot").boundingBox())!;
   await page.mouse.move(await xOf(view, 376_848_682), box.y + box.height * 0.55);
   await expect(view.locator('[part="reading"]')).toContainText(/^high 4\.494\s?µs/);
+});
+
+test("the Open page's table follows the view's moves, trims and order, the view its fields, and Save writes them as the CLI does", async ({ page }) => {
+  await page.goto("/dist/site/open.html");
+  await page.locator("#folder").setInputFiles(join(DATA, "saleae/identify-swd"));
+  await expect(page.locator("#save")).toBeVisible({ timeout: 30_000 });
+  const view = page.locator("tickwave-view");
+  await expect(view).toHaveAttribute("shaping", "");
+  await view.evaluate((v) => new Promise<void>((r) => (v.shadowRoot!.querySelector("canvas")!.width > 0 ? r() : v.addEventListener("tickwave-ready", () => r(), { once: true }))));
+  // A time typed in the table moves the channel in the view.
+  const moved = page.getByLabel("Move digital_3_1 by");
+  await moved.fill("-40 ns");
+  await moved.press("Tab");
+  expect((await shape(view)).digital_3_1.offset).toBe(-40);
+  // A grip's keys move it, and the table shows where to.
+  await view.locator(".grip").nth(1).focus();
+  await page.keyboard.press("ArrowUp");
+  await expect(page.locator("#channels tr").first()).toHaveAttribute("data-source", "digital_3_1");
+  // Every channel to the selection, each in its own time.
+  await show(view, 376_700_000, 376_760_000);
+  const box = (await view.locator(".plot").boundingBox())!;
+  await page.mouse.move(box.x + box.width * 0.3, box.y + box.height - 10);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width * 0.6, box.y + box.height - 10, { steps: 6 });
+  await page.mouse.up();
+  const sel = (await view.evaluate((v) => (v as unknown as { selection: { start: number; end: number } }).selection))!;
+  await page.getByRole("button", { name: "Trim every channel to the selection" }).click();
+  const s = await shape(view);
+  expect(s.digital_3_0.keep).toEqual({ from: sel.start, to: sel.end });
+  expect(s.digital_3_1.keep).toEqual({ from: sel.start + 40, to: sel.end + 40 });
+  await expect(page.getByLabel("Keep digital_3_1 from")).toHaveValue(`${((sel.start + 40) / 1e6).toFixed(6)} ms`);
+  // Save converts with the moves, the trims and the order, as the CLI does with the same times.
+  const order = ["digital_3_1", "digital_3_0", "digital_3_2"];
+  const flags = order.flatMap((c) => ["--channel", `${c}=${c}`]);
+  flags.push("--offset", `digital_3_1=${await moved.inputValue()}`);
+  for (const c of order) flags.push("--keep", `${c}=${await page.getByLabel(`Keep ${c} from`).inputValue()}..${await page.getByLabel(`Keep ${c} to`).inputValue()}`);
+  const [download] = await Promise.all([page.waitForEvent("download", { timeout: 30_000 }), page.locator("#save").click()]);
+  const saved = readFileSync((await download.path())!);
+  expect(saved.equals(cli(["saleae", join(DATA, "saleae/identify-swd"), ...flags])), `the saved recording is the CLI's with ${flags.join(" ")}`).toBe(true);
+  // The recording saved opens: moved and trimmed as stated, and no longer shaped.
+  await expect(view).not.toHaveAttribute("shaping");
+  // Its ticks start at the cut: every channel was cut to the same span, after SWDIO's move.
+  await expect(page.locator("#facts")).toContainText(/digital_3_1 \(moved 40\sns earlier for a known delay, source data from 0\sns to [\d.]+\sµs\), digital_3_0 \(source data from 0\sns to /);
+  await expect(page.getByRole("button", { name: "Shape again" })).toBeVisible();
 });

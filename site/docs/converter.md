@@ -75,6 +75,14 @@ Where a capture's analog values are the instrument's integer codes, the converte
 
 If the source doesn't state a channel's unit, give it with `--unit <name>=<unit>`, such as `--unit A0=V`.
 
+### Moving and trimming channels
+
+`--offset <name>=<time>` moves a channel along the time axis, later when the time is positive: `--offset SWDIO=-40ns` moves SWDIO 40 ns earlier. It corrects a known delay in a channel's path, such as a longer probe lead. The time has to be a whole number of ticks.
+
+`--keep <name>=<from>..<to>` keeps only that part of a channel, in the capture's time before any move: `--keep SWCLK=1.2ms..9.8ms`. Leave out either end to keep from the channel's start or to its end.
+
+`<name>` is the name the channel takes in the recording, and a time is ticks or a decimal with a unit, as a sidecar writes it. The recording says how far each channel was moved and, for every channel, where it holds the capture's data, so neither a move nor a cut is taken for what the instrument recorded. A recording with a channel moved or trimmed starts where its earliest kept data does. An analog channel's cut moves forward to the next sample that keeps every sample on its tick.
+
 ### Options every conversion takes
 
 | Option | Does |
@@ -82,6 +90,8 @@ If the source doesn't state a channel's unit, give it with `--unit <name>=<unit>
 | `-o`, `--output <file>` | where to write the recording |
 | `--title <text>` | the recording's title, which a view shows; without one, a view shows the file's name |
 | `--meta <key>=<value>` | free metadata, such as `--meta probe=verge`, as often as you like |
+| `--offset <name>=<time>` | move a channel, later when the time is positive (above) |
+| `--keep <name>=<from>..<to>` | keep only that part of a channel (above) |
 | `--level <n>` | the zstd compression level, 19 by default |
 | `--block-kib <n>` | how much decoded data each block aims to hold, 1024 KiB by default and at most 65,536 |
 | `--open` | open the recording in your browser once it's written and checked, as [`tickwave open`](#opening-a-recording) does |
@@ -92,11 +102,17 @@ Every command that reads a recording takes `--max-decoded-mib <n>`: the most it 
 
 ## Converting in a browser
 
-[The Open page](../open.html) converts a capture without installing anything, then opens it. Choose a Saleae export's folder, or a `.sr` or `.vcd` file, or drop it on the page. The page lists the capture's channels: choose the ones to take, and name them. It takes the options a command line does: units, a title, metadata, the zstd level, the block size, `--no-codes`, and for a version 0 Saleae export, `--rate`. Leave the rate empty to infer it, as the command line does without `--rate`. Then it converts, checks the recording against the capture, offers it to save, and shows it in a view.
+[The Open page](../open.html) converts a capture without installing anything. Choose a Saleae export's folder, or a `.sr` or `.vcd` file, or drop it on the page. It converts at once, every channel under the capture's own name, checks the recording against the capture, and shows it in a view.
+
+Under the view, the page lists the capture's channels, with the options a command line takes: the channels to take and their names, units, a title, metadata, the zstd level, the block size, `--no-codes`, and for a version 0 Saleae export, `--rate`. Leave the rate empty to infer it, as the command line does without `--rate`.
+
+In the view, a grip at the left of each row's name moves its channel. Drag it sideways to move the channel in time, as `--offset` does, or up or down to change its row. Zoomed in far enough to show edges, a channel dragged to within a few pixels of another row's edge puts its own nearest edge on it; hold Alt to move it freely. The bars at the ends of a channel's data trim it, as `--keep` does, and the part left out fades. Trim every channel to the selection keeps the part of each channel you selected. With a grip or a bar focused, the arrow keys move it. The list shows each channel's move and trim, and takes them typed too, as times such as `-40 ns`. A move takes the channel's trim with it, so moving and trimming can come in either order. The view always shows all of the capture, so a trim can be undone.
+
+Save keeps the recording. With nothing changed, that is the capture as converted. Otherwise Save converts the capture again with the list's settings, and checks it, first. The recording saved then opens, and its annotations can be edited. Shape again goes back to the capture, with the settings as they were.
 
 For a Saleae export, it first checks that every edge sits on the sample grid, in order. Then it goes through the capture three times: once to look for exact integer codes in each analog channel, once to encode, and once to check the recording against the capture, edge by edge and sample by sample. A recording that fails the check is never offered to save.
 
-The page runs the converter's own code, compiled to WebAssembly, so the same capture and settings give the same file, byte for byte. It stores channels in the order it lists them, which for a Saleae export is by file name, numbers in order. A command line that names the same channels in that order makes the same file.
+The page runs the converter's own code, compiled to WebAssembly, so the same capture and settings give the same file, byte for byte. It stores channels in the order it lists them, which for a Saleae export is by file name, numbers in order, until you move one. A command line that names the same channels in that order, with the same moves and trims, makes the same file.
 
 The capture stays in the browser. The page reads a Saleae export a slice at a time, so the export can be larger than the 4 GiB WebAssembly gives the converter. A sigrok or VCD file is read whole, and the recording is built in memory, so these have to fit. The page converts on one thread, where the command line uses every core, so a large capture takes longer.
 
@@ -156,6 +172,8 @@ identify-swd.tickwave: matches identify-swd/
 
 For a Saleae export, `--against` takes its directory. A recording from a version 0 export is checked at the rate it was made at.
 
+A recording with a channel moved or trimmed is refused here. `convert` checks it against the capture, moved and cut as its options said, before it writes it, and so does the Open page.
+
 ## Checking a sidecar
 
 A recording's annotations live beside it, in a sidecar: one hand-written TOML file, and the JSON Lines files of any programs that generated annotations. [The sidecar](annotations.html) describes them. `tickwave annotations check` checks a sidecar against its recording: its ids, its refs, its included files, its channels, its times and the recording id it names.
@@ -197,4 +215,4 @@ tickwave repair identify-swd.cut.tickwave -o identify-swd.tickwave
 identify-swd.tickwave: 2891 of 3000 bytes kept, 4 blocks to 0.384873226 s, blake3:ce7b9c6e2418c6a46f417d7ad2297120d46cfa0be2f19a77801662300709fe4a
 ```
 
-It keeps every whole block, writes the index after the last one, and writes the copy to `-o`. The capture ends where the last whole block ends: what came after it was lost with the rest of the file. If the recorder generated annotations, each generator's file goes beside the copy, as `<name>.<generator>.jsonl`. A finished recording is refused, since there is nothing to repair.
+It keeps every whole block, writes the index after the last one, and writes the copy to `-o`. The capture ends where the last whole block ends: what came after it was lost with the rest of the file. If the recorder generated annotations, each generator's file goes beside the copy, as `<name>.<generator>.jsonl`. A finished recording is refused, since there is nothing to repair. So is one with a channel moved or trimmed: convert it again from its capture.

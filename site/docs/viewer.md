@@ -17,6 +17,8 @@ an `Access-Control-Allow-Origin` header (CORS).
 
 Or open files from this computer: a `.tickwave` recording, with its sidecar's `.toml` and `.jsonl`
 files if it has them. They stay in your browser, and nothing is uploaded. A link can't share them.
+A capture converts on the Open page first, where its channels can be moved and trimmed:
+[the converter's doc](converter.html#converting-in-a-browser) says how.
 
 Under the view, the recording's details give its title, length and channels, the time one tick
 stands for, its size, what it was converted from, and its content id.

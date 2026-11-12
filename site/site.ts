@@ -2,11 +2,12 @@
 // web/scripts/site.ts; "tickwave" is the tickwave.js beside this script. The project's face.js and
 // header.js run the header.
 
-import { recordingInfo, registerFile, type RecordingInfo, type TickwaveView } from "tickwave";
+import { recordingInfo, registerFile, type Channel, type ChannelShape, type RecordingInfo, type TickwaveView } from "tickwave";
 import { parseWindow } from "../web/src/attributes.ts";
 import { formatBytes, formatInterval } from "../web/src/readouts.ts";
-import { toTicks } from "../web/src/time.ts";
+import { parseTime, toTicks } from "../web/src/time.ts";
 import { attachEditor, type Editor } from "./editor.ts";
+import { timeText } from "./editor-fields.ts";
 import { DEFAULTS, type ChannelInfo, type Described, type FromWorker, type Pass, type Settings, type SourceKind, type ToWorker } from "../web/src/convert/protocol.ts";
 
 const byId = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -31,13 +32,26 @@ function problems(box: HTMLElement): { say: (lead: string, items?: string[]) => 
   };
 }
 
+/** A channel as the details list it: its name, an analog one's unit, and how it was moved, and
+ * where it holds the source's data, where it states them. */
+function channelFacts(c: Channel, tb: { num: number; den: number }): string {
+  const notes = c.kind === "analog" ? ["analog", c.unit] : [];
+  if (c.offset) {
+    const why = c.offset.kind === "delay" ? "for a known delay" : `(${c.offset.kind})`;
+    notes.push(`moved ${formatInterval(Math.abs(c.offset.ticks), tb)} ${c.offset.ticks > 0 ? "later" : "earlier"} ${why}`);
+  }
+  // A recording with a channel moved or cut states each channel's span of source data.
+  if (c.kept) notes.push(`source data from ${formatInterval(c.kept.from, tb)} to ${formatInterval(c.kept.to, tb)}`);
+  return notes.length > 0 ? `${c.name} (${notes.join(", ")})` : c.name;
+}
+
 /** A recording's facts as a definition list. */
 function showFacts(facts: HTMLElement, info: RecordingInfo, name: string): void {
   const rows: [string, string][] = [
     ["Recording", info.title || name],
     ["Length", formatInterval(info.length, info.timebase)],
     ["One tick", formatInterval(1, info.timebase)],
-    ["Channels", info.channels.map((c) => (c.kind === "analog" ? `${c.name} (analog, ${c.unit})` : c.name)).join(", ")],
+    ["Channels", info.channels.map((c) => channelFacts(c, info.timebase)).join(", ")],
   ];
   if (info.bytes !== undefined) rows.push(["Size", formatBytes(info.bytes)]);
   const source = info.source;
@@ -93,7 +107,8 @@ function openPage(): void {
   const bar = byId<HTMLProgressElement>("bar");
   const stage = byId("stage");
   const saving = byId("saving");
-  const save = byId<HTMLAnchorElement>("save");
+  const save = byId<HTMLButtonElement>("save");
+  const reshape = byId<HTMLButtonElement>("reshape");
   const found = byId("found");
   const facts = byId("facts");
   const share = byId("share");
@@ -112,8 +127,17 @@ function openPage(): void {
   /** The recording's name, without .tickwave: the export's folder, or the capture file's. */
   let stem = "capture";
   let channels: ChannelInfo[] = [];
+  /** Each source channel's name in the recording shown, as the last conversion named it. */
+  let shownNames = new Map<string, string>();
+  let recordingTimebase: { num: number; den: number } | null = null;
+  /** The view of the recording converted here, which the table's moves and trims shape. */
+  let shapedView: TickwaveView | null = null;
   let worker: Worker | null = null;
-  let saved: string | null = null;
+  /** The capture converted whole, every channel under its own name: what the view shapes, and
+   * what Save keeps when nothing is changed. */
+  let capture: { file: File; codes: [string, number | null][]; seconds: number; settings: Settings } | null = null;
+  /** The recording Save keeps once the page shows what was saved. */
+  let result: File | null = null;
 
   const end = () => {
     worker?.terminate();
@@ -128,6 +152,7 @@ function openPage(): void {
     opened++;
     editor?.close();
     editor = null;
+    shapedView = null;
     end();
     idle();
     clear();
@@ -144,7 +169,7 @@ function openPage(): void {
     annotations: string | null,
     name: string,
     link: boolean,
-    converted?: () => void,
+    converted?: (view: TickwaveView) => void,
     at: string | null = null,
     span: string | null = null,
     hand: File | null = null,
@@ -186,7 +211,7 @@ function openPage(): void {
     // The recording, not the forms that asked for it: they fold away.
     opener.classList.add("folds");
     opener.open = false;
-    if (converted) converted();
+    if (converted) converted(view as TickwaveView);
     else
       // Once the view has drawn it comes into sight with the focus, so its keys work at once.
       view.addEventListener(
@@ -265,6 +290,7 @@ function openPage(): void {
   /** A capture: what it holds, read in a worker, then the settings to convert it with. */
   function choose(list: File[], folder: string | null): void {
     reset();
+    capture = null;
     const sr = list.filter((f) => /\.sr$/i.test(f.name));
     const vcd = list.filter((f) => /\.vcd$/i.test(f.name));
     const bin = list.filter((f) => /\.bin$/i.test(f.name));
@@ -285,7 +311,9 @@ function openPage(): void {
     job({ op: "describe", kind, files }, (m) => {
       if (m.op === "described") {
         end();
-        show(m.described);
+        // Every channel at once, as the capture names them: the view shows the result, and the
+        // table under it shapes the next conversion.
+        if (show(m.described)) run(settings() as Settings);
       } else if (m.op === "failed") {
         end();
         say(`${kind === "saleae" ? "The export" : files[0].name} couldn't be read: ${m.message}`);
@@ -293,7 +321,8 @@ function openPage(): void {
     });
   }
 
-  function show(described: Described): void {
+  /** The capture's channels in the table. False when it has none to take. */
+  function show(described: Described): boolean {
     channels = described.channels;
     const what = kind === "saleae" ? "a Saleae Logic 2 binary export" : kind === "sigrok" ? "a sigrok session" : "a value change dump";
     byId("source").textContent = kind === "saleae" ? stem : files[0].name;
@@ -301,32 +330,33 @@ function openPage(): void {
     const skipped = described.skipped.map((s) => `${s.name}: ${s.reason}`);
     if (channels.length === 0) {
       say(`${byId("source").textContent} has no channels tickwave can take.`, skipped);
-      return;
+      return false;
     }
+    const field = (cls: string, label: string, value = "", size?: number) => {
+      const f = Object.assign(document.createElement("input"), { type: "text", value, spellcheck: false, className: cls });
+      if (size) f.size = size;
+      f.setAttribute("aria-label", label);
+      return f;
+    };
+    const cell = (...els: (Node | string)[]) => {
+      const td = document.createElement("td");
+      td.append(...els);
+      return td;
+    };
     rows.replaceChildren(
       ...channels.map((c) => {
         const tr = document.createElement("tr");
-        const take = Object.assign(document.createElement("input"), { type: "checkbox", checked: true });
+        tr.dataset.source = c.name;
+        const take = Object.assign(document.createElement("input"), { type: "checkbox", checked: true, className: "take" });
         take.setAttribute("aria-label", `Take ${c.name}`);
-        const name = Object.assign(document.createElement("input"), { type: "text", value: c.name, spellcheck: false });
-        name.setAttribute("aria-label", `Name for ${c.name}`);
-        const where = document.createElement("td");
-        where.append(c.name, " ", Object.assign(document.createElement("span"), {
+        take.addEventListener("change", showTaken);
+        const where = cell(c.name, " ", Object.assign(document.createElement("span"), {
           className: "quiet",
           textContent: c.analog ? `analog${c.count === null ? "" : `, ${count(c.count)} samples`}` : `digital${c.count === null ? "" : `, ${count(c.count)} edges`}`,
         }));
-        const unit = document.createElement("td");
-        if (c.analog) {
-          const field = Object.assign(document.createElement("input"), { type: "text", value: c.unit ?? "", spellcheck: false, size: 4 });
-          field.setAttribute("aria-label", `Unit for ${c.name}`);
-          unit.append(field);
-        }
-        const cells = [take, name].map((el) => {
-          const td = document.createElement("td");
-          td.append(el);
-          return td;
-        });
-        tr.append(cells[0], where, cells[1], unit);
+        const shape = [field("offset", `Move ${c.name} by`, "", 9), field("from", `Keep ${c.name} from`, "", 11), field("to", `Keep ${c.name} to`, "", 11)];
+        for (const f of shape) f.addEventListener("change", () => shapeRow(tr));
+        tr.append(cell(take), where, cell(field("name", `Name for ${c.name}`, c.name)), cell(...(c.analog ? [field("unit", `Unit for ${c.name}`, c.unit ?? "", 4)] : [])), ...shape.map((f) => cell(f)));
         return tr;
       }),
     );
@@ -334,21 +364,86 @@ function openPage(): void {
     skippedBox.hidden = skipped.length === 0;
     rateRow.hidden = !described.rateMissing;
     rateField.value = "";
-    settingsForm.hidden = false;
+    return true;
+  }
+
+  const input = (tr: Element, cls: string) => tr.querySelector<HTMLInputElement>(`input.${cls}`);
+  const rowsOf = () => [...rows.children] as HTMLTableRowElement[];
+
+  /** A time from the table in ticks: ticks as written, or a time such as -40 ns. Null when empty,
+   * NaN when it reads as neither. */
+  function ticksOf(text: string, tb: { num: number; den: number }): number | null {
+    const t = text.trim();
+    if (t === "") return null;
+    if (/^-?\d+$/.test(t)) return Number(t);
+    const p = parseTime(t);
+    return p ? toTicks(p, tb) : NaN;
+  }
+  const timeOf = (ticks: number, tb: { num: number; den: number }) => `${ticks < 0 ? "-" : ""}${timeText(Math.abs(ticks), tb)}`;
+
+  /** The view shows the taken channels, in the table's order. */
+  function showTaken(): void {
+    const v = shapedView;
+    if (!v) return;
+    const names = rowsOf()
+      .filter((tr) => input(tr, "take")!.checked)
+      .map((tr) => shownNames.get(tr.dataset.source!))
+      .filter((n): n is string => n !== undefined);
+    if (names.length > 0) v.setAttribute("channels", names.join(" "));
+  }
+
+  /** A row's move and trim, from its fields, on the view. */
+  function shapeRow(tr: HTMLTableRowElement): void {
+    const v = shapedView;
+    // A shape goes by the capture's name for the channel, as the row does.
+    const source = tr.dataset.source!;
+    const tb = v ? recordingTimebase : null;
+    if (!v || !shownNames.has(source) || !tb) return;
+    const [offset, from, to] = ["offset", "from", "to"].map((cls) => ticksOf(input(tr, cls)!.value, tb));
+    const bad = [offset, from, to].some((t) => Number.isNaN(t));
+    for (const cls of ["offset", "from", "to"]) input(tr, cls)!.toggleAttribute("aria-invalid", bad && Number.isNaN(ticksOf(input(tr, cls)!.value, tb)));
+    if (bad) {
+      say(`${tr.dataset.source}: a time is ticks, or a decimal with a unit, such as -40 ns or 1.2 ms.`);
+      return;
+    }
+    clear();
+    v.shape = { [source]: { offset: offset ?? 0, keep: from === null && to === null ? null : { from: from ?? -Infinity, to: to ?? Infinity } } };
+    fillShape(v.shape);
+  }
+
+  /** The table's fields from the view's shapes, and its rows in the view's order. */
+  function fillShape(shape: Record<string, ChannelShape>, order?: readonly string[]): void {
+    const tb = recordingTimebase;
+    if (!tb) return;
+    const source = new Map([...shownNames].map(([s, n]) => [n, s]));
+    for (const tr of rowsOf()) {
+      const s = shape[tr.dataset.source!];
+      if (!s) continue;
+      input(tr, "offset")!.value = s.offset === 0 ? "" : timeOf(s.offset, tb);
+      input(tr, "from")!.value = s.keep ? timeOf(s.keep.from, tb) : "";
+      input(tr, "to")!.value = s.keep ? timeOf(s.keep.to, tb) : "";
+    }
+    if (order) {
+      const byName = new Map(rowsOf().map((tr) => [tr.dataset.source!, tr]));
+      const ordered = order.map((n) => byName.get(source.get(n) ?? "")).filter((tr): tr is HTMLTableRowElement => tr !== undefined);
+      rows.append(...ordered, ...rowsOf().filter((tr) => !ordered.includes(tr)));
+    }
   }
 
   /** The form as the converter's settings, or what is wrong with it. */
   function settings(): Settings | string {
     const taken: [string, string][] = [];
     const units: [string, string][] = [];
-    [...rows.children].forEach((tr, i) => {
-      const [take, name, unit] = [...tr.querySelectorAll("input")] as HTMLInputElement[];
-      if (!take.checked) return;
-      const to = name.value.trim();
-      taken.push([channels[i].name, to]);
+    // In the table's order, which follows the rows' order in the view.
+    for (const tr of rowsOf()) {
+      if (!input(tr, "take")!.checked) continue;
+      const c = channels.find((c) => c.name === tr.dataset.source)!;
+      const to = input(tr, "name")!.value.trim();
+      taken.push([c.name, to]);
+      const unit = input(tr, "unit");
       const u = unit?.value.trim() ?? "";
-      if (unit && u && u !== (channels[i].unit ?? "")) units.push([to, u]);
-    });
+      if (unit && u && u !== (c.unit ?? "")) units.push([to, u]);
+    }
     if (taken.length === 0) return "Take at least one channel.";
     const blank = taken.find(([, to]) => to === "");
     if (blank) return `Give ${blank[0]} a name.`;
@@ -411,7 +506,7 @@ function openPage(): void {
         case "converted":
           end();
           idle();
-          converted(new File([m.file], `${stem}.tickwave`), m.codes, m.seconds);
+          converted(new File([m.file], `${stem}.tickwave`), m.codes, m.seconds, chosen);
           break;
         case "failed":
           end();
@@ -422,27 +517,128 @@ function openPage(): void {
     });
   }
 
-  function converted(file: File, codes: [string, number | null][], seconds: number): void {
-    if (saved) URL.revokeObjectURL(saved);
-    saved = URL.createObjectURL(file);
+  /** A conversion done: the capture's first is shaped next; a later one, made by Save, is saved. */
+  function converted(file: File, codes: [string, number | null][], seconds: number, chosen: Settings): void {
+    if (!capture) {
+      capture = { file, codes, seconds, settings: chosen };
+      for (const tr of rowsOf()) for (const cls of ["offset", "from", "to"]) input(tr, cls)!.value = "";
+      shapeCapture();
+    } else {
+      download(file);
+      showSaved(file, codes, seconds);
+    }
+  }
+
+  /** What the conversion found, beside Save. */
+  function conversionFacts(file: File, codes: [string, number | null][], seconds: number): void {
     const exact = codes.filter(([, bits]) => bits !== null).map(([n, bits]) => `${n} (${bits}-bit)`);
     const f32 = codes.filter(([, bits]) => bits === null).map(([n]) => n);
-    void open(registerFile(file, []), null, file.name, false, () => {
-      save.href = saved!;
-      save.download = file.name;
-      save.textContent = `Save ${file.name}`;
-      byId("took").textContent = `${formatBytes(file.size)}, converted and checked in ${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)} s`;
-      found.textContent = [exact.length ? `Exact codes: ${exact.join(", ")}.` : "", f32.length ? `Stored as f32: ${f32.join(", ")}.` : ""].filter(Boolean).join(" ");
+    byId("took").textContent = `${formatBytes(file.size)}, converted and checked in ${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)} s`;
+    found.textContent = [exact.length ? `Exact codes: ${exact.join(", ")}.` : "", f32.length ? `Stored as f32: ${f32.join(", ")}.` : ""].filter(Boolean).join(" ");
+  }
+
+  /** The capture in the view, shaped by the table: moved, trimmed and reordered as it says. */
+  function shapeCapture(): void {
+    const c = capture!;
+    result = null;
+    void open(registerFile(c.file, []), null, c.file.name, false, (view) => {
+      shownNames = new Map(c.settings.channels);
+      shapedView = view;
+      view.shaping = true;
+      void recordingInfo(view.getAttribute("src")!).then((info) => {
+        recordingTimebase = info.timebase;
+        // The table's moves and trims, and its order, from a shaping before.
+        for (const tr of rowsOf()) shapeRow(tr);
+        showTaken();
+      });
+      view.addEventListener("tickwave-shape", (e) => {
+        const d = (e as CustomEvent<{ shape: Record<string, ChannelShape>; channels: string[] }>).detail;
+        fillShape(d.shape, d.channels);
+      });
+      // Annotations belong to the recording saved, not to the capture being shaped.
+      byId("edit").parentElement!.hidden = true;
+      reshape.hidden = true;
+      save.textContent = `Save ${c.file.name}`;
+      conversionFacts(c.file, c.codes, c.seconds);
       // The next thing to do is save it: the focus goes there, and brings it into sight.
       save.focus();
     });
   }
 
+  /** The recording saved, as a recording opened: annotations can be edited on it. */
+  function showSaved(file: File, codes: [string, number | null][], seconds: number): void {
+    result = file;
+    void open(registerFile(file, []), null, file.name, false, () => {
+      settingsForm.hidden = true;
+      reshape.hidden = false;
+      save.textContent = `Save ${file.name}`;
+      conversionFacts(file, codes, seconds);
+      reshape.focus();
+    });
+  }
+
+  /** Offers `file` to save. */
+  function download(file: File): void {
+    const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(file), download: file.name });
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 0);
+  }
+
+  /** The table's settings with the view's moves and trims, as the converter's times, by name. */
+  function shapedSettings(): Settings | string {
+    const chosen = settings();
+    if (typeof chosen === "string") return chosen;
+    const tb = recordingTimebase;
+    const shape = shapedView?.shape ?? {};
+    const named = new Map(chosen.channels);
+    const offsets: [string, string][] = [];
+    const keeps: [string, string | null, string | null][] = [];
+    for (const [source, s] of Object.entries(shape)) {
+      const name = named.get(source);
+      if (!name || !tb) continue;
+      if (s.offset !== 0) offsets.push([name, timeOf(s.offset, tb)]);
+      if (s.keep) keeps.push([name, timeOf(s.keep.from, tb), timeOf(s.keep.to, tb)]);
+    }
+    return { ...chosen, offsets, keeps };
+  }
+
+  /** Save: what the page shows when it is the recording to keep, else a conversion with the
+   * table's settings first. */
+  save.addEventListener("click", () => {
+    if (result) {
+      download(result);
+      return;
+    }
+    const c = capture;
+    if (!c) return;
+    const chosen = shapedSettings();
+    if (typeof chosen === "string") {
+      say(chosen);
+      return;
+    }
+    if (JSON.stringify(chosen) === JSON.stringify({ ...c.settings, offsets: [], keeps: [] })) {
+      download(c.file);
+      showSaved(c.file, c.codes, c.seconds);
+    } else run(chosen);
+  });
+  reshape.addEventListener("click", () => shapeCapture());
+
   settingsForm.addEventListener("submit", (e) => {
     e.preventDefault();
-    const chosen = settings();
-    if (typeof chosen === "string") say(chosen);
-    else run(chosen);
+    save.click();
+  });
+  byId("trim-all").addEventListener("click", () => {
+    const v = shapedView;
+    const sel = v?.selection;
+    if (!v || !sel) {
+      say("Select a span first: drag along the view's time axis.");
+      return;
+    }
+    clear();
+    const next: Record<string, ChannelShape> = {};
+    for (const [name, s] of Object.entries(v.shape)) next[name] = { offset: s.offset, keep: { from: sel.start - s.offset, to: sel.end - s.offset } };
+    v.shape = next;
+    fillShape(v.shape);
   });
   byId("cancel").addEventListener("click", () => {
     end();
