@@ -1,9 +1,9 @@
 // The converter's worker: the WASM converter, reading the files the page posts a slice at a time.
-// It does one job, describing or converting, and the page then ends it: a read that fails throws
-// through the module, which is not fit to run again after that. A worker the page keeps for
-// editing a sidecar's hand-written file takes only edits, which read no files.
+// It does one job, describing, converting or unzipping, and the page then ends it: a read that
+// fails throws through the module, which is not fit to run again after that. A worker the page
+// keeps for editing a sidecar's hand-written file takes only edits, which read no files.
 
-import init, { convert, describe, editAnnotations } from "../../../crates/convert-wasm/pkg/escapement_tickwave_convert_wasm.js";
+import init, { convert, describe, editAnnotations, unzip } from "../../../crates/convert-wasm/pkg/escapement_tickwave_convert_wasm.js";
 import { handJson } from "../wasm/hand.ts";
 import { request, type FromWorker, type HandAnnotation, type Pass, type ToWorker } from "./protocol.ts";
 
@@ -18,6 +18,8 @@ const post = (m: FromWorker, transfer: Transferable[] = []) => scope.postMessage
 
 let files: File[] = [];
 let panic: string | null = null;
+/** The bytes of the zip's deflated files as they unzip, one file after another. */
+let chunks: Uint8Array<ArrayBuffer>[] = [];
 const reader = new FileReaderSync();
 
 (globalThis as Record<string, unknown>).tickwaveConvert = {
@@ -41,6 +43,9 @@ const reader = new FileReaderSync();
   panicked(message: string): void {
     panic = message;
   },
+  unzipped(chunk: Uint8Array): void {
+    chunks.push(chunk.slice());
+  },
 };
 
 scope.onmessage = async (e) => {
@@ -51,6 +56,10 @@ scope.onmessage = async (e) => {
       const text = m.edit ? editAnnotations(m.text, JSON.stringify(m.edit)) : m.text;
       const hand = (JSON.parse(handJson(text, "the TOML file").json) as { annotation?: HandAnnotation[] }).annotation ?? [];
       post({ op: "edited", text, hand });
+      return;
+    }
+    if (m.op === "unzip") {
+      post({ op: "unzipped", files: unzipped(m.file, m.ends) });
       return;
     }
     files = m.files;
@@ -70,3 +79,23 @@ scope.onmessage = async (e) => {
     post({ op: "failed", message: panic ?? (err instanceof Error ? err.message : String(err)) });
   }
 };
+
+/** The files in `zip` the page opens: a stored one sliced from the zip, a deflated one from its
+ * chunks, which come in the files' order. */
+function unzipped(zip: File, ends: string[]): File[] {
+  files = [zip];
+  chunks = [];
+  const listed = JSON.parse(unzip(JSON.stringify({ file: { id: 0, name: zip.name, size: zip.size }, ends }))) as { name: string; size: number; start: number | null }[];
+  let next = 0;
+  return listed.map((f) => {
+    if (f.start !== null) return new File([zip.slice(f.start, f.start + f.size)], f.name);
+    const parts: Uint8Array<ArrayBuffer>[] = [];
+    let got = 0;
+    while (got < f.size && next < chunks.length) {
+      parts.push(chunks[next]);
+      got += chunks[next++].length;
+    }
+    if (got !== f.size) throw new Error(`${f.name} unzipped to ${got} bytes, not the ${f.size} the zip states`);
+    return new File(parts, f.name);
+  });
+}

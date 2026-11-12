@@ -20,8 +20,31 @@ files if it has them. They stay in your browser, and nothing is uploaded. A link
 A capture converts on the Open page first, where its channels can be moved and trimmed:
 [the converter's doc](converter.html#converting-in-a-browser) says how.
 
+A `.zip` of these files opens as the files would. The folders inside it don't matter, but two files
+with one name do: the page refuses those, since either could be the one meant. With several
+recordings in it, the page lists them to open one at a time, each with the sidecar named after it.
+The page reads files a zip stores as they are or deflated, as common zip tools write them.
+
 Under the view, the recording's details give its title, length and channels, the time one tick
 stands for, its size, what it was converted from, and its content id.
+
+## Sharing a capture on GitHub
+
+A capture attached to a GitHub issue or discussion opens in any browser, a phone's included, with
+nothing to install. GitHub takes attachments of up to 25 MB, in a list of formats that leaves out
+`.tickwave`. So zip the recording first, with its sidecar's files if it has them. A capture to
+convert can go in the zip instead: a Saleae export's folder, or a `.sr` or `.vcd` file.
+
+GitHub doesn't let other sites read its attachments, so the Open page can't fetch one. Give the
+attachment's address to the page as a recording's address, and the page shows two steps instead:
+download the zip, then choose it. The page's address is then the link to post beside the
+attachment. It is [the Open page](../open.html) with `?src=` and the attachment's address, such as
+`open.html?src=https://github.com/user-attachments/files/123/capture.zip`.
+
+A reader who follows the link downloads the zip and chooses it on the page; on a phone, from its
+downloads. If the browser unzips the download itself, choose the `.tickwave` file inside. The page
+takes only GitHub's own attachment addresses this way. An attachment in a private repository needs
+a GitHub sign-in to download, so share captures in a public one.
 
 ## Moving and zooming
 

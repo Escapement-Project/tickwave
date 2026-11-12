@@ -102,7 +102,7 @@ Every command that reads a recording takes `--max-decoded-mib <n>`: the most it 
 
 ## Converting in a browser
 
-[The Open page](../open.html) converts a capture without installing anything. Choose a Saleae export's folder, or a `.sr` or `.vcd` file, or drop it on the page. It converts at once, every channel under the capture's own name, checks the recording against the capture, and shows it in a view.
+[The Open page](../open.html) converts a capture without installing anything. Choose a Saleae export's folder, or a `.sr` or `.vcd` file, or a `.zip` holding one, or drop it on the page. It converts at once, every channel under the capture's own name, checks the recording against the capture, and shows it in a view.
 
 Under the view, the page lists the capture's channels, with the options a command line takes: the channels to take and their names, units, a title, metadata, the zstd level, the block size, `--no-codes`, and for a version 0 Saleae export, `--rate`. Leave the rate empty to infer it, as the command line does without `--rate`.
 

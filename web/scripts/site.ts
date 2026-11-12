@@ -118,7 +118,7 @@ const DOCS: { href: string; group: string; name: string; markdown: string; descr
     group: "using-it",
     name: "Viewer",
     markdown: readFileSync(join(site, "docs/viewer.md"), "utf8"),
-    description: "Opening a recording, moving and zooming, reading its channels, cursors and annotations.",
+    description: "Opening and sharing a recording, moving and zooming, reading its channels, cursors and annotations.",
     source: "site/docs/viewer.md",
   },
   {

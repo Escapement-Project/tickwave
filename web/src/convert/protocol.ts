@@ -86,11 +86,14 @@ export type ToWorker =
   | { op: "describe"; kind: SourceKind; files: File[] }
   | { op: "convert"; kind: SourceKind; files: File[]; settings: Settings }
   /** `edit` applied to `text`, or `text` only read when it is null. */
-  | { op: "edit"; text: string; edit: Edit | null };
+  | { op: "edit"; text: string; edit: Edit | null }
+  /** The files in a zip whose names end in one of `ends` (lower case), out of their folders. */
+  | { op: "unzip"; file: File; ends: string[] };
 
 export type FromWorker =
   | { op: "described"; described: Described }
   | { op: "edited"; text: string; hand: HandAnnotation[] }
+  | { op: "unzipped"; files: File[] }
   | { op: "start"; pass: Pass; channel: string; total: number }
   | { op: "step"; n: number }
   | { op: "converted"; file: ArrayBuffer; codes: [string, number | null][]; seconds: number }

@@ -6,6 +6,7 @@ import { recordingInfo, registerFile, type Channel, type ChannelShape, type Reco
 import { parseWindow } from "../web/src/attributes.ts";
 import { formatBytes, formatInterval } from "../web/src/readouts.ts";
 import { parseTime, toTicks } from "../web/src/time.ts";
+import { githubAttachment } from "./attachment.ts";
 import { attachEditor, type Editor } from "./editor.ts";
 import { timeText } from "./editor-fields.ts";
 import { DEFAULTS, type ChannelInfo, type Described, type FromWorker, type Pass, type Settings, type SourceKind, type ToWorker } from "../web/src/convert/protocol.ts";
@@ -88,6 +89,9 @@ const count = (n: number) => n.toLocaleString("en-GB");
 const RECORDING = /\.tickwave$/i;
 const SIDECAR = /\.(toml|jsonl)$/i;
 const CAPTURE = /\.(sr|vcd|bin)$/i;
+const ZIP = /\.zip$/i;
+/** The ends of the names the page opens: a zip's files are taken by them. */
+const OPENED = [".tickwave", ".toml", ".jsonl", ".sr", ".vcd", ".bin"];
 
 /** The Open page: a recording by its address or from files, or a capture converted here and opened. */
 function openPage(): void {
@@ -113,6 +117,11 @@ function openPage(): void {
   const facts = byId("facts");
   const share = byId("share");
   const here = byId("view");
+  const attached = byId("attached");
+  const attachedLink = byId<HTMLAnchorElement>("attached-link");
+  const attachedFile = byId<HTMLInputElement>("attached-file");
+  const pick = byId("pick");
+  const pickList = byId("pick-list");
   const { say, clear } = problems(byId("problem"));
   /** Served by `tickwave open`, which names the recording by an address that lasts as long as it runs. */
   const local = new URLSearchParams(location.search).has("local");
@@ -174,6 +183,11 @@ function openPage(): void {
     span: string | null = null,
     hand: File | null = null,
   ): Promise<void> {
+    const attachment = link ? githubAttachment(src) : null;
+    if (attachment !== null) {
+      showAttached(src, attachment);
+      return;
+    }
     reset();
     // A converted capture keeps its settings in view, to convert again with others.
     settingsForm.hidden = !converted;
@@ -208,6 +222,7 @@ function openPage(): void {
     else if (span) view.setAttribute("window", span);
     saving.hidden = found.hidden = !converted;
     stage.hidden = false;
+    attached.hidden = true;
     // The recording, not the forms that asked for it: they fold away.
     opener.classList.add("folds");
     opener.open = false;
@@ -242,12 +257,59 @@ function openPage(): void {
     if (!leaveEdits()) return;
     const src = srcField.value.trim();
     const annotations = sidecarField.value.trim() || null;
+    pick.hidden = true;
     if (src) void open(src, annotations, src, true);
   });
 
-  /** What was chosen or dropped: a recording opens, a capture converts first. */
+  /** A GitHub attachment's two steps, download and choose, since the page can't read it. The
+   * address bar then holds the link that shows them. */
+  function showAttached(src: string, name: string): void {
+    reset();
+    pick.hidden = true;
+    byId("attached-name").textContent = name;
+    attachedLink.href = src;
+    attached.hidden = false;
+    opener.classList.add("folds");
+    opener.open = false;
+    history.replaceState(null, "", `?${new URLSearchParams({ src })}`);
+    byId("attached-share").replaceChildren("A link that opens these steps: ", Object.assign(document.createElement("a"), { href: location.href, textContent: location.href }));
+    attachedLink.focus();
+  }
+
+  /** What was chosen or dropped: a recording opens, a capture converts first, and a zip opens as
+   * its files would. */
   function take(list: File[], folder: string | null): void {
     if (!leaveEdits()) return;
+    pick.hidden = true;
+    const zips = list.filter((f) => ZIP.test(f.name));
+    if (zips.length > 0) unpack(zips, list.filter((f) => !zips.includes(f)), folder);
+    else takeFiles(list, folder);
+  }
+
+  /** The zips' files, out of their folders, unzipped one zip at a time, then taken with `rest`. A
+   * Saleae export's files take the zip's name if no folder gives one. */
+  function unpack(zips: File[], rest: File[], folder: string | null): void {
+    reset();
+    const [zip, ...more] = zips;
+    job({ op: "unzip", file: zip, ends: OPENED }, (m) => {
+      if (m.op === "failed") {
+        end();
+        say(`${zip.name} couldn't be unzipped: ${m.message}.`);
+      } else if (m.op === "unzipped") {
+        end();
+        if (m.files.length === 0) {
+          say(`${zip.name} holds nothing to open or convert: no .tickwave recording, and no capture (a Saleae export's .bin files, or a sigrok .sr or .vcd file).`);
+          return;
+        }
+        const files = [...rest, ...m.files];
+        const name = folder ?? zip.name.replace(ZIP, "");
+        if (more.length > 0) unpack(more, files, name);
+        else takeFiles(files, name);
+      }
+    });
+  }
+
+  function takeFiles(list: File[], folder: string | null): void {
     if (list.some((f) => RECORDING.test(f.name)) || (list.length > 0 && list.every((f) => SIDECAR.test(f.name)))) openFiles(list);
     else if (list.some((f) => CAPTURE.test(f.name))) choose(list, folder);
     else {
@@ -256,17 +318,59 @@ function openPage(): void {
     }
   }
 
-  /** One recording, and the .toml and .jsonl files of its sidecar. */
+  /** A recording and the .toml and .jsonl files of its sidecar; or, when there are several
+   * recordings, a list of them to open one at a time. */
   function openFiles(all: File[]): void {
     const sidecar = all.filter((f) => SIDECAR.test(f.name));
     const recordings = all.filter((f) => !sidecar.includes(f));
-    if (recordings.length !== 1) {
+    if (recordings.length === 0) {
       reset();
-      say(recordings.length === 0 ? "Choose a .tickwave recording too: the sidecar's files alone have nothing to draw." : `Choose one recording at a time; these are ${recordings.length}: ${recordings.map((f) => f.name).join(", ")}.`);
+      say("Choose a .tickwave recording too: the sidecar's files alone have nothing to draw.");
       return;
     }
-    const hand = sidecar.filter((f) => /\.toml$/i.test(f.name));
-    void open(registerFile(recordings[0], sidecar), null, recordings[0].name, false, undefined, null, null, hand.length === 1 ? hand[0] : null);
+    const tomls = sidecar.filter((f) => /\.toml$/i.test(f.name));
+    const jsonl = sidecar.filter((f) => !tomls.includes(f));
+    /** The recording's own sidecar, named after it; or the only one, beside the only recording. */
+    const handOf = (r: File) =>
+      tomls.find((t) => t.name.toLowerCase() === r.name.replace(RECORDING, ".annotations.toml").toLowerCase()) ?? (recordings.length === 1 && tomls.length === 1 ? tomls[0] : null);
+    const openOne = (r: File) => {
+      const hand = handOf(r);
+      void open(registerFile(r, hand ? [hand, ...jsonl] : []), null, r.name, false, undefined, null, null, hand);
+    };
+    if (recordings.length === 1) {
+      openOne(recordings[0]);
+      return;
+    }
+    reset();
+    recordings.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+    /** The choice shown, which stays chosen if the reader keeps unsaved annotations. */
+    let shown: HTMLInputElement | null = null;
+    byId("pick-title").textContent = `There are ${recordings.length} recordings here. Choose one to open:`;
+    pickList.replaceChildren(
+      ...recordings.map((r) => {
+        const input = Object.assign(document.createElement("input"), { type: "radio", name: "pick" });
+        input.addEventListener("change", () => {
+          if (!input.checked) return;
+          if (!leaveEdits()) {
+            if (shown) shown.checked = true;
+            return;
+          }
+          shown = input;
+          openOne(r);
+        });
+        const label = document.createElement("label");
+        label.append(input, ` ${r.name}`);
+        if (handOf(r)) label.append(Object.assign(document.createElement("span"), { className: "quiet", textContent: ", with its annotations" }));
+        return label;
+      }),
+    );
+    // The list is what the page shows now: what was above it goes, so nothing moves it once a
+    // recording opens below.
+    attached.hidden = true;
+    opener.classList.add("folds");
+    opener.open = false;
+    pick.hidden = false;
+    pickList.querySelector("input")?.focus();
   }
 
   /** Starts one job in a worker of its own. */
@@ -655,16 +759,22 @@ function openPage(): void {
     take(own, own[0]?.webkitRelativePath.split("/")[0] ?? null);
     folderInput.value = "";
   });
-  drop.addEventListener("dragover", (e) => {
-    e.preventDefault();
-    drop.classList.add("over");
+  attachedFile.addEventListener("change", () => {
+    take([...(attachedFile.files ?? [])], null);
+    attachedFile.value = "";
   });
-  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
-  drop.addEventListener("drop", (e) => {
-    e.preventDefault();
-    drop.classList.remove("over");
-    if (e.dataTransfer) void dropped(e.dataTransfer).then(({ files, folder }) => take(files, folder));
-  });
+  for (const zone of [drop, attached]) {
+    zone.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      zone.classList.add("over");
+    });
+    zone.addEventListener("dragleave", () => zone.classList.remove("over"));
+    zone.addEventListener("drop", (e) => {
+      e.preventDefault();
+      zone.classList.remove("over");
+      if (e.dataTransfer) void dropped(e.dataTransfer).then(({ files, folder }) => take(files, folder));
+    });
+  }
 
   const q = new URLSearchParams(location.search);
   const src = q.get("src");

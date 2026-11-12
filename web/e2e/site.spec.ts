@@ -407,7 +407,7 @@ test("the docs' index lists each doc with what it covers, in the project's marku
   expect(await page.locator(".doc-groups > div").evaluateAll((ds) => ds.map((d) => d.id))).toEqual(["using-it", "in-your-page", "the-files"]);
   const items = page.locator(".doc-groups li");
   await expect(items.locator("a")).toHaveText(["Viewer", "Converter", "Elements", "Charts", "Format", "Sidecar"]);
-  await expect(items.first().locator("p")).toHaveText("Opening a recording, moving and zooming, reading its channels, cursors and annotations.");
+  await expect(items.first().locator("p")).toHaveText("Opening and sharing a recording, moving and zooming, reading its channels, cursors and annotations.");
   await items.getByRole("link", { name: "Format" }).click();
   await expect(page).toHaveURL(/docs\/format\.html$/);
 });

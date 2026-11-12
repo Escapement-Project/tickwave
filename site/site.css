@@ -34,7 +34,18 @@ button.primary:hover, .button:hover { background: var(--wash); }
 .button:focus-within { outline: var(--focus-width) solid var(--ink); outline-offset: 3px; }
 .button input { position: absolute; width: 1px; height: 1px; opacity: 0; }
 .drop p { margin: 0 0 10px; }
-.drop.over { outline: 2px dashed var(--ink); outline-offset: -6px; background: var(--wash); }
+.drop.over, .attached.over { outline: 2px dashed var(--ink); outline-offset: -6px; background: var(--wash); }
+/* A GitHub attachment's two steps, on a surface as the forms are. */
+.attached { background: var(--surface); border-radius: 10px; padding: 16px; margin: 18px 0; max-width: 46em; }
+.attached h2 { margin: 0 0 10px; overflow-wrap: anywhere; }
+.attached p { margin: 0 0 10px; }
+.attached ol { margin: 0 0 10px; padding-left: 22px; }
+.attached li { margin: 10px 0; }
+/* The recordings a zip or a folder holds, to open one at a time. */
+.pick { border: 0; padding: 0; margin: 18px 0; min-width: 0; }
+.pick legend { padding: 0; margin-bottom: 6px; }
+.pick label { display: block; margin: 4px 0; overflow-wrap: anywhere; }
+.pick input { accent-color: var(--ink); }
 .problem { border-left: 3px solid var(--attention-ink); padding: 6px 14px; margin: 18px 0; max-width: 46em; }
 .problem p { margin: 0 0 6px; }
 .problem ul { margin: 4px 0 0; padding-left: 20px; font-size: 15px; }

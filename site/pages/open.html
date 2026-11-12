@@ -20,13 +20,29 @@ if (new URLSearchParams(location.search).has("local")) document.documentElement.
     <button class="primary" type="submit">Open</button>
   </form>
   <div id="drop" class="drop">
-    <p>Or open files from this computer: a <code>.tickwave</code> recording, with its sidecar's <code>.toml</code> and <code>.jsonl</code> files if it has them. Or convert a capture: a Saleae export's folder, or a sigrok <code>.sr</code> or <code>.vcd</code> file.</p>
+    <p>Or open files from this computer: a <code>.tickwave</code> recording, with its sidecar's <code>.toml</code> and <code>.jsonl</code> files if it has them. Or convert a capture: a Saleae export's folder, or a sigrok <code>.sr</code> or <code>.vcd</code> file. A <code>.zip</code> of any of these opens too.</p>
     <p class="choose"><label class="button">Choose files<input id="files" type="file" multiple></label> <label class="button">Choose a folder<input id="folder" type="file" webkitdirectory></label></p>
     <p class="quiet">You can drop them here too. They stay in your browser. Nothing is uploaded.</p>
   </div>
 </div>
 <p class="quiet">To try it, open <a href="?src=fixtures/identify-swd.tickwave&amp;annotations=fixtures/identify-swd.annotations.toml">a debug probe starting an SWD session</a>, or <a href="?src=fixtures/swd50-cut.tickwave">an SWD bus on a mixed-signal analyser's analog inputs</a>.</p>
 </details>
+
+<section id="attached" class="attached" aria-labelledby="attached-title" hidden>
+  <h2 id="attached-title">Open <span id="attached-name"></span></h2>
+  <p>It's attached on GitHub, and GitHub doesn't let other sites read attachments. So it opens in two steps:</p>
+  <ol>
+    <li><a id="attached-link" class="button">Download it from GitHub</a></li>
+    <li><label class="button">Choose the file you downloaded<input id="attached-file" type="file" multiple></label></li>
+  </ol>
+  <p class="quiet">It opens in your browser, and nothing is uploaded. If your browser unzipped it, choose the <code>.tickwave</code> file inside.</p>
+  <p id="attached-share" class="share"></p>
+</section>
+
+<fieldset id="pick" class="pick" hidden>
+  <legend id="pick-title"></legend>
+  <div id="pick-list"></div>
+</fieldset>
 
 <div id="problem" class="problem" role="alert" hidden></div>
 
