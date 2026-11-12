@@ -62,7 +62,32 @@ if (new URLSearchParams(location.search).has("local")) document.documentElement.
 <section id="stage" class="stage" aria-label="The recording" hidden>
   <p id="saving" hidden><a id="save" class="button" download></a> <span id="took" class="quiet"></span></p>
   <p id="found" class="quiet" hidden></p>
+  <p class="editing"><button id="edit" type="button" class="button" aria-controls="editor" aria-expanded="false"><span class="swap"><span>Edit annotations</span><span class="off">Stop editing</span></span></button> <span id="edit-state" class="quiet" aria-live="polite"></span></p>
   <div id="view"></div>
+  <section id="editor" class="editor" aria-labelledby="editor-title" hidden>
+    <h2 id="editor-title">Annotations</h2>
+    <p class="editor-save"><button id="sidecar-save" type="button" class="button"></button> <span id="sidecar-name" class="quiet"></span></p>
+    <p><button id="note-new" type="button" class="button">New annotation</button> <span class="quiet">over the selection, or at cursor A</span></p>
+    <div id="editor-problem" class="problem" role="alert" hidden></div>
+    <form id="note" class="note">
+      <h3 id="note-title"></h3>
+      <div class="fields">
+        <p><label for="note-label">Label</label><input id="note-label" type="text" spellcheck="true"></p>
+        <p><label for="note-id">Id</label><input id="note-id" type="text" spellcheck="false" autocomplete="off" aria-describedby="note-id-note"><span id="note-id-note" class="quiet">What a page cites it by: no spaces or <code>/</code>.</span></p>
+        <p><label for="note-kind">Kind</label><input id="note-kind" type="text" spellcheck="false" list="note-kinds" autocomplete="off"><datalist id="note-kinds"></datalist></p>
+        <p class="span-fields"><span><label for="note-start">Start</label><input id="note-start" type="text" spellcheck="false" autocomplete="off"></span> <span><label for="note-end">End</label><input id="note-end" type="text" spellcheck="false" autocomplete="off" placeholder="none: a point"></span> <button id="note-take" type="button" class="button">Take the selection</button></p>
+        <fieldset id="note-channels-box"><legend>Channels</legend><span id="note-channels" class="channel-ticks"></span><span class="quiet">None ticked: every channel.</span></fieldset>
+        <p><label for="note-text">Text</label><textarea id="note-text" rows="3" spellcheck="true"></textarea></p>
+        <p class="pair"><span><label for="note-paint">Paint</label><select id="note-paint"><option value="">none</option><option value="probe">probe</option><option value="target">target</option></select></span>
+          <span><label for="note-what">Measure</label><select id="note-what"><option value="">none</option><option value="rate">rate</option><option value="period">period</option><option value="duration">duration</option></select></span>
+          <span><label for="note-measure">of</label><select id="note-measure"></select></span></p>
+      </div>
+      <p class="note-actions"><button id="note-apply" type="submit" class="button primary"><span class="swap"><span>Add</span><span class="off">Apply</span></span></button> <button id="note-delete" type="button" class="button">Delete</button> <button id="note-name" type="button" class="button">Name it</button></p>
+      <p id="note-about" class="quiet about"><span data-about="none">Choose one below, or make a new one over the selection or at cursor A.</span><span data-about="generated" class="off">A decoder wrote this one, and rewrites its file on each run, so it isn't changed here. Name it to give it a name of your own for a page to cite, with a label and text of your own.</span><span data-about="alias" class="off">It takes the span and channels of the annotation it names, and any field left empty.</span><span data-about="own" class="off"></span></p>
+      <div id="note-problem" class="problem" role="alert" hidden></div>
+    </form>
+    <ol id="notes" class="notes" aria-label="The sidecar's annotations, in its order"></ol>
+  </section>
   <details class="details">
     <summary>Recording details</summary>
     <dl id="facts" class="facts"></dl>

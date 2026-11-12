@@ -11,8 +11,11 @@ Status: draft, with the recording format.
 A recording `rec.tickwave` has one hand-written TOML file, `rec.annotations.toml`. A program that
 generates annotations, such as a protocol decoder, writes its own JSON Lines file, which the TOML
 file includes: `rec.wire_swd.jsonl`. An included file sits beside the hand-written one and is named
-on its own, without a directory. A generator rewrites its file whole on each run. Nothing
-machine-edits the hand-written file, so a rerun cannot touch a hand edit.
+on its own, without a directory. A generator rewrites its file whole on each run. It may start
+the hand-written file when there is none, and never writes it after that. From then on only
+tickwave's editor edits it, and it keeps the file's comments, order and layout, so a rerun cannot
+touch a hand edit. A script that re-pins a sidecar to a reconverted recording may rewrite
+`recording_id`, and nothing else.
 
 A generator runs after the recording is converted. It reads the recording's id from
 `tickwave info --json` (`header.content_id`).

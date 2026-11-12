@@ -103,3 +103,45 @@ tickwave-view { margin: 12px 0; }
 .channels td:first-child, .channels th:first-child { text-align: center; }
 .running progress { width: min(100%, 32em); height: 10px; accent-color: var(--ink); }
 .result { margin-top: 22px; }
+
+/* The annotation editor. A button whose word changes is as wide as its widest word. */
+.swap { display: inline-grid; }
+.swap > span { grid-area: 1 / 1; }
+.swap > .off, .about > .off { visibility: hidden; }
+/* The form's note is as tall as its longest, so the list under it stays put. */
+.about { display: grid; }
+.about > span { grid-area: 1 / 1; }
+.editing { margin: 14px 0 0; }
+.editor { margin: 18px 0 0; }
+.editor h2 { margin-top: 0; }
+.editor h3 { margin-top: 0; }
+.editor-save { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; }
+.note { background: var(--surface); border-radius: 10px; padding: 14px 16px; margin: 12px 0 16px; max-width: 46em; }
+.note .fields { display: grid; gap: 10px; }
+.note .fields p, .note fieldset { margin: 0; }
+.note label, .note legend { display: block; font-size: 14px; color: var(--ink-2); margin-bottom: 3px; }
+.note input[type="text"], .note textarea, .note select { font: inherit; font-size: 15px; color: var(--ink); background: var(--raised); border: 1px solid var(--rule); border-radius: 6px; padding: 4px 8px; max-width: 100%; box-sizing: border-box; }
+.note #note-label, .note textarea { width: min(100%, 36em); }
+.note #note-id, .note #note-kind { width: min(100%, 20em); }
+.note #note-id-note { display: block; font-size: 14px; margin-top: 3px; }
+.note .span-fields, .note .pair { display: flex; flex-wrap: wrap; align-items: end; gap: 8px 14px; }
+.note .span-fields input { width: 11em; font-family: var(--font-figures); font-variant-numeric: tabular-nums; }
+.note fieldset { border: 0; padding: 0; }
+.note .channel-ticks { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-bottom: 4px; }
+.note .channel-ticks label { display: inline-flex; gap: 6px; align-items: baseline; color: var(--ink); font-size: 15px; margin: 0; }
+.note fieldset > .quiet { font-size: 14px; }
+.note .problem { margin: 12px 0 0; }
+.note-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 0; }
+/* A decoder can write hundreds: the list scrolls in a box of its own, and the details under it stay near. */
+.notes { list-style: none; padding: 2px; margin: 0; max-width: 46em; display: grid; gap: 2px; max-height: min(60vh, 32em); overflow-y: auto; }
+.notes li { display: flex; align-items: center; gap: 6px; }
+.notes .pick { flex: 1 1 auto; min-width: 0; text-align: left; font: inherit; font-size: 15px; color: var(--ink); background: transparent; border: 0; border-radius: 6px; padding: 4px 8px; cursor: pointer; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px; }
+.notes .pick:hover, .notes .pick[aria-current="true"] { background: var(--wash); }
+.notes .pick .what { overflow-wrap: anywhere; }
+.notes .pick .when { font-family: var(--font-figures); font-variant-numeric: tabular-nums; color: var(--ink-2); font-size: 14px; }
+.notes .pick .from { grid-column: 1 / -1; color: var(--ink-2); font-size: 14px; }
+.notes .move { font: inherit; font-size: 14px; color: var(--ink); background: transparent; border: 1px solid var(--rule); border-radius: 6px; width: 2em; padding: 2px 0; cursor: pointer; }
+.notes .move:hover { background: var(--wash); }
+.notes .move:disabled { visibility: hidden; }
+.button:disabled, .button:disabled:hover { opacity: .45; cursor: default; background: transparent; }
+#note-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

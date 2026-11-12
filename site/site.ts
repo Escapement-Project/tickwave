@@ -6,6 +6,7 @@ import { recordingInfo, registerFile, type RecordingInfo, type TickwaveView } fr
 import { parseWindow } from "../web/src/attributes.ts";
 import { formatBytes, formatInterval } from "../web/src/readouts.ts";
 import { toTicks } from "../web/src/time.ts";
+import { attachEditor, type Editor } from "./editor.ts";
 import { DEFAULTS, type ChannelInfo, type Described, type FromWorker, type Pass, type Settings, type SourceKind, type ToWorker } from "../web/src/convert/protocol.ts";
 
 const byId = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -100,6 +101,9 @@ function openPage(): void {
   const { say, clear } = problems(byId("problem"));
   /** Served by `tickwave open`, which names the recording by an address that lasts as long as it runs. */
   const local = new URLSearchParams(location.search).has("local");
+  /** Where `tickwave open` takes the sidecar's hand-written file back. */
+  const saveTo = local ? new URLSearchParams(location.search).get("save") : null;
+  let editor: Editor | null = null;
 
   /** Counts the recordings asked for: one asked for later makes an earlier one's answer stale. */
   let opened = 0;
@@ -122,6 +126,8 @@ function openPage(): void {
   /** Puts away whatever the page was showing or doing, for what was just asked. */
   const reset = () => {
     opened++;
+    editor?.close();
+    editor = null;
     end();
     idle();
     clear();
@@ -141,6 +147,7 @@ function openPage(): void {
     converted?: () => void,
     at: string | null = null,
     span: string | null = null,
+    hand: File | null = null,
   ): Promise<void> {
     reset();
     // A converted capture keeps its settings in view, to convert again with others.
@@ -168,6 +175,8 @@ function openPage(): void {
       } else say(explain(error, src, name));
     });
     here.append(view);
+    const recording = link ? decodeURIComponent(new URL(src, location.href).pathname.split("/").pop() || "recording.tickwave") : name;
+    editor = attachEditor(view as TickwaveView, info, { src, recording, annotations, file: hand, save: saveTo });
     const spec = parseWindow(span);
     const ticks = spec?.kind === "span" ? { start: toTicks(spec.start, info.timebase), end: toTicks(spec.end, info.timebase) } : null;
     if (at) void (view as TickwaveView).show(at, ticks);
@@ -190,7 +199,7 @@ function openPage(): void {
         { once: true },
       );
     if (link) {
-      const q = new URLSearchParams({ src, ...(annotations && { annotations }), ...(at && { annotation: at }), ...(span && { window: span }) });
+      const q = new URLSearchParams({ src, ...(annotations && { annotations }), ...(at && { annotation: at }), ...(span && { window: span }), ...(saveTo && { save: saveTo }) });
       history.replaceState(null, "", `?${q}${local ? "&local" : ""}`);
       share.textContent = "";
       share.append("A link to this view: ", Object.assign(document.createElement("a"), { href: location.href, textContent: location.href }));
@@ -200,8 +209,12 @@ function openPage(): void {
     }
   }
 
+  /** Whether to go on when another recording would put away unsaved annotations. */
+  const leaveEdits = () => !editor?.unsaved || confirm("The annotations have changes that aren't saved. Open another recording and lose them?");
+
   form.addEventListener("submit", (e) => {
     e.preventDefault();
+    if (!leaveEdits()) return;
     const src = srcField.value.trim();
     const annotations = sidecarField.value.trim() || null;
     if (src) void open(src, annotations, src, true);
@@ -209,6 +222,7 @@ function openPage(): void {
 
   /** What was chosen or dropped: a recording opens, a capture converts first. */
   function take(list: File[], folder: string | null): void {
+    if (!leaveEdits()) return;
     if (list.some((f) => RECORDING.test(f.name)) || (list.length > 0 && list.every((f) => SIDECAR.test(f.name)))) openFiles(list);
     else if (list.some((f) => CAPTURE.test(f.name))) choose(list, folder);
     else {
@@ -226,7 +240,8 @@ function openPage(): void {
       say(recordings.length === 0 ? "Choose a .tickwave recording too: the sidecar's files alone have nothing to draw." : `Choose one recording at a time; these are ${recordings.length}: ${recordings.map((f) => f.name).join(", ")}.`);
       return;
     }
-    void open(registerFile(recordings[0], sidecar), null, recordings[0].name, false);
+    const hand = sidecar.filter((f) => /\.toml$/i.test(f.name));
+    void open(registerFile(recordings[0], sidecar), null, recordings[0].name, false, undefined, null, null, hand.length === 1 ? hand[0] : null);
   }
 
   /** Starts one job in a worker of its own. */

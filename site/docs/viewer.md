@@ -89,3 +89,27 @@ channels. Click an annotation's label to show its span.
 The menu beside the zoom buttons steps through one kind of annotation, such as every WAIT a target
 answered. It starts at the kind of the annotation the view opened at, or else the kind of the
 sidecar's first one.
+
+## Editing annotations
+
+On the Open page, Edit annotations opens the sidecar's hand-written file for editing. A recording
+without a sidecar starts one.
+
+To add an annotation, drag along the time axis to select a span, or click to place cursor A, and
+press New annotation. It covers the selection, or it is a point at cursor A. Give it a label, and
+its id follows the label until you type one of your own. A page cites it by its id.
+
+Choose an annotation from the list under the form, or click its label in the view, to change it or
+delete it. The arrows beside it move it up or down the list. Order matters: the view steps through
+the kind of the first annotation.
+
+A decoder writes its own annotations, and rewrites them each time it runs, so they can be read here
+but not changed. Name it adds a hand-written annotation that refers to one, for a page to cite by a
+name of your own. It takes the decoder's span and channels, and any field you leave empty.
+
+A change that would break one of the sidecar's checks is refused, and the form says why. The editor
+changes only what you change: the file keeps its comments, its order and its layout.
+
+On this site, Download the sidecar saves the file to your downloads. When
+[`tickwave open`](converter.html#opening-a-recording) shows the recording, Save the sidecar writes
+it back beside the recording instead.

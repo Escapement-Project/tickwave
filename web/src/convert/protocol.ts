@@ -50,12 +50,41 @@ export interface Described {
 
 export type Pass = "check" | "codes" | "encode" | "verify";
 
+/** An annotation's fields in the hand-written file, as the editor writes them (ANNOTATIONS.md). A
+ * time is text, such as "317.85882 ms", or ticks. */
+export interface Fields {
+  id: string;
+  start?: string | number;
+  end?: string | number;
+  channels?: string[];
+  label?: string;
+  kind?: string;
+  text?: string;
+  paint?: string;
+  measure?: { channel: string; what: string };
+  ref?: string;
+}
+
+/** One change to the hand-written file. `index` is the annotation's place among its tables. */
+export type Edit =
+  | { op: "start"; recording: string; recording_id: string }
+  | { op: "insert"; index: number; fields: Fields }
+  | { op: "replace"; index: number; fields: Fields }
+  | { op: "remove"; index: number }
+  | { op: "move"; from: number; to: number };
+
+/** An annotation as the hand-written file holds it, any key it has included. */
+export type HandAnnotation = Fields & Record<string, unknown>;
+
 export type ToWorker =
   | { op: "describe"; kind: SourceKind; files: File[] }
-  | { op: "convert"; kind: SourceKind; files: File[]; settings: Settings };
+  | { op: "convert"; kind: SourceKind; files: File[]; settings: Settings }
+  /** `edit` applied to `text`, or `text` only read when it is null. */
+  | { op: "edit"; text: string; edit: Edit | null };
 
 export type FromWorker =
   | { op: "described"; described: Described }
+  | { op: "edited"; text: string; hand: HandAnnotation[] }
   | { op: "start"; pass: Pass; channel: string; total: number }
   | { op: "step"; n: number }
   | { op: "converted"; file: ArrayBuffer; codes: [string, number | null][]; seconds: number }

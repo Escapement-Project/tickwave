@@ -1,9 +1,11 @@
 // The converter's worker: the WASM converter, reading the files the page posts a slice at a time.
 // It does one job, describing or converting, and the page then ends it: a read that fails throws
-// through the module, which is not fit to run again after that.
+// through the module, which is not fit to run again after that. A worker the page keeps for
+// editing a sidecar's hand-written file takes only edits, which read no files.
 
-import init, { convert, describe } from "../../../crates/convert-wasm/pkg/escapement_tickwave_convert_wasm.js";
-import { request, type FromWorker, type Pass, type ToWorker } from "./protocol.ts";
+import init, { convert, describe, editAnnotations } from "../../../crates/convert-wasm/pkg/escapement_tickwave_convert_wasm.js";
+import { handJson } from "../wasm/hand.ts";
+import { request, type FromWorker, type HandAnnotation, type Pass, type ToWorker } from "./protocol.ts";
 
 // A worker's own globals, which the page's DOM types leave out.
 declare const FileReaderSync: { new (): { readAsArrayBuffer(blob: Blob): ArrayBuffer } };
@@ -45,6 +47,12 @@ scope.onmessage = async (e) => {
   const m = e.data;
   try {
     await init({ module_or_path: new URL("./tickwave-convert.wasm", import.meta.url) });
+    if (m.op === "edit") {
+      const text = m.edit ? editAnnotations(m.text, JSON.stringify(m.edit)) : m.text;
+      const hand = (JSON.parse(handJson(text, "the TOML file").json) as { annotation?: HandAnnotation[] }).annotation ?? [];
+      post({ op: "edited", text, hand });
+      return;
+    }
     files = m.files;
     const refs = files.map((f, id) => ({ id, name: f.name, size: f.size }));
     if (m.op === "describe") {
