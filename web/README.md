@@ -428,8 +428,9 @@ A part an element hides stays hidden, whatever `display` a page's rule gives it.
 Nothing moves under the reader. A readout's figures are tabular, and an inset's reading sets a
 pulse's level as wide as "high" either way, so what follows it holds still as the pointer crosses
 edges. The label at a view's pointer keeps off the row it reads. An inset takes its final height
-once its head and sidecar are in, so the data arriving moves nothing below it. A view's Open button
-reads Close while the view is open, so the button the reader pressed is the one that undoes it.
+once its head and sidecar are in, so the data arriving moves nothing below it. A control stays
+where the reader pressed it. One that opens or switches something undoes it when pressed again: a
+view's Open button reads Close while the view is open.
 
 ### From the module
 

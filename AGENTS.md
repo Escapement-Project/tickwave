@@ -37,8 +37,8 @@ an ink focus ring, an ink wash under the pointer.
 **Nothing moves under the reader.** A readout's words and figures hold their places as values
 change: figures are tabular, and a word that changes is set as wide as its widest form ("low" as
 wide as "high"). A label keeps off what it reads. An inset or chart keeps its height once laid out.
-A control stays where the reader pressed it, and pressing it again undoes what it did (Open becomes
-Close). The user corrected each of these once; apply the rule unasked.
+A control stays where the reader pressed it. One that opens or switches something undoes it when
+pressed again: Open becomes Close. The user corrected each of these once; apply the rule unasked.
 
 **Annotations live beside the recording**, in a text sidecar named after it. Ids stay stable when
 a decoder reruns, and generated annotations are told apart from hand-written ones.

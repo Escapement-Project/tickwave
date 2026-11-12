@@ -57,7 +57,8 @@ A minor version adds kinds only from 128 up.
 ### Head
 
 The first record, and only the first. Its payload is UTF-8 JSON: the recording header's fields
-that are known before the capture starts, and two of the recorder's settings.
+that are known before the capture starts, and two settings the recorder chooses, or lets its
+user set.
 
 | Field | Meaning |
 | --- | --- |
@@ -131,7 +132,8 @@ nothing follows it. That block's end is the recording's length.
 
 The recorder:
 
-- Writes the preamble and the head before anything else.
+- Writes the preamble and the head before anything else. It may hold items until it knows what
+  the head needs, such as an analog channel's `first`.
 - Takes items in tick order across its channels. It closes a block once the block's decoded size
   reaches `block_bytes`, or once the block has been open for `time_limit_ms`. It never closes one
   between two items at the same tick.
@@ -153,7 +155,8 @@ The converter:
    channel's count.
 4. Copies each block closed on its size as it is. Each run of blocks closed on the time limit,
    with the block closed at the end if it follows one, is decoded and cut again at `block_bytes`,
-   the way an encoder cuts. The run's first block starts where the run starts.
+   the way an encoder cuts. The run's first block starts where the run starts. The converter
+   compresses the new blocks at its own zstd level: the journal does not record one.
 5. Computes the overview and the content id from every block's items. It decodes each block once.
 6. Writes the recording. Each annotation source gets its generator file, `rec.<source>.jsonl`.
    When the recording has no hand-written sidecar yet, the converter writes one that includes
