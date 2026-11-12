@@ -98,7 +98,8 @@ enum Command {
         level: i32,
     },
     /// Open a recording in the browser, with its sidecar's annotations. The viewer and the files
-    /// are served on 127.0.0.1 until Ctrl-C, since the viewer reads the recording as it moves.
+    /// are served on 127.0.0.1 until Ctrl-C, since the viewer reads the recording as it moves. The
+    /// page can save the sidecar's annotations in place.
     Open {
         recording: PathBuf,
         /// The sidecar's hand-written TOML file. Without it, `<name>.annotations.toml` beside the
@@ -707,15 +708,24 @@ fn load_sidecar(
 fn read_sidecar(sidecar: &Path) -> Result<SidecarFiles> {
     let hand =
         fs::read_to_string(sidecar).with_context(|| format!("reading {}", sidecar.display()))?;
+    Ok(with_includes(sidecar, hand))
+}
+
+/// The files a hand-written file's text includes, or None when its TOML doesn't parse.
+fn include_names(hand: &str) -> Option<Vec<String>> {
     #[derive(serde::Deserialize)]
     struct Includes {
         #[serde(default)]
         include: Vec<String>,
     }
-    // A TOML error here is reported by resolve below, with the rest.
-    let names = toml::from_str::<Includes>(&hand)
-        .map(|i| i.include)
-        .unwrap_or_default();
+    toml::from_str::<Includes>(hand).ok().map(|i| i.include)
+}
+
+/// `hand` as the text of the sidecar at `sidecar`, with the included files that can be read from
+/// beside it.
+fn with_includes(sidecar: &Path, hand: String) -> SidecarFiles {
+    // A TOML error here is reported by resolve, with the rest.
+    let names = include_names(&hand).unwrap_or_default();
     let dir = sidecar.parent().unwrap_or(Path::new("."));
     let mut files = vec![(
         sidecar
@@ -734,7 +744,24 @@ fn read_sidecar(sidecar: &Path) -> Result<SidecarFiles> {
             Err(e) => eprintln!("{}: reading the included {name}: {e}", sidecar.display()),
         }
     }
-    Ok(files)
+    files
+}
+
+/// Checks a sidecar's `files` against the recording whose header is `header`: the annotations,
+/// or every problem.
+fn resolve_files(
+    header: &Header,
+    recording: &Path,
+    files: &SidecarFiles,
+) -> Result<Vec<annotations::Annotation>, Vec<String>> {
+    let included: Vec<Included<'_>> = files[1..]
+        .iter()
+        .map(|(name, text)| Included { name, text })
+        .collect();
+    let file_name = recording
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned());
+    annotations::resolve(&files[0].1, &included, header, file_name.as_deref())
 }
 
 /// Checks a sidecar's `files` against the recording whose header is `header`. Prints every
@@ -745,14 +772,7 @@ fn resolve_sidecar(
     sidecar: &Path,
     files: &SidecarFiles,
 ) -> Result<Vec<annotations::Annotation>> {
-    let included: Vec<Included<'_>> = files[1..]
-        .iter()
-        .map(|(name, text)| Included { name, text })
-        .collect();
-    let file_name = recording
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned());
-    match annotations::resolve(&files[0].1, &included, header, file_name.as_deref()) {
+    match resolve_files(header, recording, files) {
         Ok(resolved) => Ok(resolved),
         Err(problems) => {
             for problem in &problems {
@@ -862,51 +882,206 @@ fn open_file(
     max: usize,
 ) -> Result<()> {
     let (_, _, head) = read_footer(recording, max)?;
-    let sidecar = match sidecar {
-        Some(sidecar) => Some(sidecar.to_owned()),
-        None => {
-            let mut name = recording.file_stem().unwrap_or_default().to_owned();
-            name.push(".annotations.toml");
-            let beside = recording.with_file_name(name);
-            beside.is_file().then_some(beside)
-        }
-    };
-    let mut files = open::Files {
+    let files = open::Files {
         recording: open::Named {
             name: file_name(recording)?,
             path: recording.to_owned(),
         },
-        sidecar: None,
+        sidecar: sidecar_for(&head.header, recording, sidecar)?,
     };
-    if let Some(sidecar) = sidecar {
-        let read = read_sidecar(&sidecar)?;
-        match resolve_sidecar(&head.header, recording, &sidecar, &read) {
-            Ok(resolved) => info!(
+    open::serve(site, files, port, browser)
+}
+
+/// The sidecar `open` serves with `recording`: the one `given`, or `<stem>.annotations.toml`
+/// beside the recording. The page may save it when it checks, or when there is none beside the
+/// recording, which the page then starts.
+fn sidecar_for(
+    header: &Header,
+    recording: &Path,
+    given: Option<&Path>,
+) -> Result<Option<open::Sidecar>> {
+    let (path, exists) = match given {
+        Some(given) => (given.to_owned(), true),
+        None => {
+            let mut name = recording.file_stem().unwrap_or_default().to_owned();
+            name.push(".annotations.toml");
+            let beside = recording.with_file_name(name);
+            match fs::metadata(&beside) {
+                Ok(m) if m.is_file() => (beside, true),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (beside, false),
+                _ => return Ok(None),
+            }
+        }
+    };
+    let hand = open::Named {
+        name: file_name(&path)?,
+        path: path.clone(),
+    };
+    if !exists {
+        info!(
+            "{}: no sidecar, so the page starts {} when it saves annotations",
+            recording.display(),
+            path.display()
+        );
+        let check = save_check(header.clone(), recording.to_owned(), path, Vec::new());
+        return Ok(Some(open::Sidecar {
+            hand,
+            included: Vec::new(),
+            exists,
+            check: Some(check),
+        }));
+    }
+    let read = read_sidecar(&path)?;
+    let checks = match resolve_sidecar(header, recording, &path, &read) {
+        Ok(resolved) => {
+            info!(
                 "{}: with its sidecar {}, {} annotations",
                 recording.display(),
-                sidecar.display(),
+                path.display(),
                 resolved.len()
-            ),
-            Err(e) => warn!(
-                "{}: {e}, so the viewer shows the recording without its annotations",
-                sidecar.display()
-            ),
+            );
+            true
         }
-        let dir = sidecar.parent().unwrap_or(Path::new(""));
-        let included = read[1..]
-            .iter()
-            .map(|(name, _)| open::Named {
-                name: name.clone(),
-                path: dir.join(name),
-            })
-            .collect();
-        files.sidecar = Some((
-            open::Named {
-                name: file_name(&sidecar)?,
-                path: sidecar,
+        Err(e) => {
+            warn!(
+                "{}: {e}, so the viewer shows the recording without its annotations and the \
+                 page can't save over them",
+                path.display()
+            );
+            false
+        }
+    };
+    let dir = path.parent().unwrap_or(Path::new(""));
+    let included: Vec<open::Named> = read[1..]
+        .iter()
+        .map(|(name, _)| open::Named {
+            name: name.clone(),
+            path: dir.join(name),
+        })
+        .collect();
+    let served = included.iter().map(|n| n.name.clone()).collect();
+    Ok(Some(open::Sidecar {
+        hand,
+        included,
+        exists,
+        check: checks.then(|| save_check(header.clone(), recording.to_owned(), path, served)),
+    }))
+}
+
+/// Checks a text the page saves as the sidecar at `sidecar` as `annotations check` does, with its
+/// includes read from disk. It must include the files in `served`, which the page reads from this
+/// server, and no others.
+fn save_check(
+    header: Header,
+    recording: PathBuf,
+    sidecar: PathBuf,
+    mut served: Vec<String>,
+) -> open::Check {
+    served.sort();
+    served.dedup();
+    Box::new(move |text| {
+        if let Some(mut names) = include_names(text) {
+            names.sort();
+            names.dedup();
+            if names != served {
+                return Err(vec![format!(
+                    "the sidecar includes {names:?}, but tickwave open serves {served:?}: \
+                     restart it to serve other files"
+                )]);
+            }
+        }
+        let files = with_includes(&sidecar, text.to_owned());
+        resolve_files(&header, &recording, &files).map(drop)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use escapement_tickwave_format::header::{ChannelHeader, SourceHeader};
+
+    /// A recording's header at 1 GS/s, 1 ms long, with digital SWCLK and SWDIO.
+    pub(crate) fn header() -> Header {
+        let digital = |name: &str| ChannelHeader {
+            name: name.into(),
+            source_name: name.into(),
+            data: ChannelKind::Digital {
+                initial: true,
+                end: 1_000_000,
+                edges: 10,
+                gaps: Vec::new(),
             },
-            included,
-        ));
+        };
+        Header {
+            timebase: escapement_tickwave_format::model::Ratio::integer(1_000_000_000).unwrap(),
+            length: 1_000_000,
+            channels: vec![digital("SWCLK"), digital("SWDIO")],
+            source: SourceHeader::new(SourceFormat::Vcd),
+            title: None,
+            meta: Default::default(),
+            content_id: "blake3:00ff000000000000000000000000000000000000000000000000000000000000"
+                .parse()
+                .unwrap(),
+            blocks: 1,
+            overview_shift: 12,
+            overview: vec![12],
+            overview_blocks: vec![],
+            annotations: None,
+        }
     }
-    open::serve(site, files, port, browser)
+
+    const HAND: &str = "format = \"tickwave-annotations/1\"\nrecording_id = \
+                        \"blake3:00ff000000000000000000000000000000000000000000000000000000000000\"\n";
+
+    #[test]
+    fn the_page_may_save_a_sidecar_that_checks() {
+        let dir = tempfile::tempdir().unwrap();
+        let recording = dir.path().join("rec.tickwave");
+        fs::write(dir.path().join("rec.annotations.toml"), HAND).unwrap();
+        let sidecar = sidecar_for(&header(), &recording, None).unwrap().unwrap();
+        assert!(sidecar.exists);
+        assert_eq!(sidecar.hand.name, "rec.annotations.toml");
+        let check = sidecar.check.expect("a sidecar that checks may be saved");
+        assert_eq!(check(HAND), Ok(()));
+    }
+
+    #[test]
+    fn the_page_may_not_save_over_a_sidecar_with_problems() {
+        let dir = tempfile::tempdir().unwrap();
+        let recording = dir.path().join("rec.tickwave");
+        let given = dir.path().join("other.toml");
+        fs::write(&given, HAND.replace("00ff", "11ff")).unwrap();
+        let sidecar = sidecar_for(&header(), &recording, Some(&given))
+            .unwrap()
+            .unwrap();
+        assert!(sidecar.exists);
+        assert_eq!(sidecar.hand.name, "other.toml");
+        assert!(sidecar.check.is_none());
+    }
+
+    #[test]
+    fn the_page_starts_a_sidecar_beside_the_recording_when_there_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let recording = dir.path().join("rec.tickwave");
+        let sidecar = sidecar_for(&header(), &recording, None).unwrap().unwrap();
+        assert!(!sidecar.exists);
+        assert_eq!(sidecar.hand.path, dir.path().join("rec.annotations.toml"));
+        assert!(sidecar.included.is_empty());
+        let check = sidecar.check.expect("the page may start one");
+        assert_eq!(check(HAND), Ok(()));
+        // Something else by that name: nothing to show, and nowhere to save.
+        fs::create_dir(dir.path().join("rec.annotations.toml")).unwrap();
+        assert!(sidecar_for(&header(), &recording, None).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_sidecar_named_that_is_not_there_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let recording = dir.path().join("rec.tickwave");
+        let given = dir.path().join("missing.toml");
+        let e = sidecar_for(&header(), &recording, Some(&given))
+            .err()
+            .expect("refused");
+        assert!(e.to_string().starts_with("reading "), "{e}");
+    }
 }

@@ -443,10 +443,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "blake3",
  "clap",
  "escapement-tickwave-format",
  "escapement-tickwave-import",
  "getrandom 0.4.3",
+ "http-body-util",
  "indicatif",
  "percent-encoding",
  "rust-embed",

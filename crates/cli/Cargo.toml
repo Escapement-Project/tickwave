@@ -25,6 +25,8 @@ webbrowser = "1.2.7"
 getrandom = "0.4.3"
 percent-encoding = "2.3.2"
 rust-embed = { version = "8.14.0", features = ["mime-guess", "debug-embed"], optional = true }
+blake3 = "1.8.7"
+http-body-util = "0.1.5"
 
 [[bin]]
 name = "tickwave"

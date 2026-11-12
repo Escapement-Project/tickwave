@@ -124,7 +124,7 @@ tickwave open identify-swd.tickwave
 
 ```text
 identify-swd.tickwave: with its sidecar identify-swd.annotations.toml, 695 annotations
-http://127.0.0.1:38343/open.html?src=bc6452795da2010a0ba21af9322bc366/identify-swd.tickwave&annotations=bc6452795da2010a0ba21af9322bc366/identify-swd.annotations.toml&local
+http://127.0.0.1:38343/open.html?src=bc6452795da2010a0ba21af9322bc366/identify-swd.tickwave&annotations=bc6452795da2010a0ba21af9322bc366/identify-swd.annotations.toml&save=bc6452795da2010a0ba21af9322bc366/identify-swd.annotations.toml&local
 serving the viewer until Ctrl-C
 ```
 
@@ -133,6 +133,8 @@ This shows the recording in your browser, on [the Open page](../open.html), with
 It takes the sidecar beside the recording by its name: `identify-swd.annotations.toml` for `identify-swd.tickwave`. `--annotations <file>` names another. It checks the sidecar first and lists any problems, and the viewer then shows the recording without its annotations. A recording cut off before its end is refused, and `tickwave repair` finishes it.
 
 It prints the viewer's address and starts your browser on it. `--no-browser` only prints the address, for a browser you start yourself. `--port <n>` serves on that port, where otherwise the system chooses one.
+
+The page can [edit the sidecar's annotations](viewer.html#editing-annotations) and save the file back beside the recording. A recording with no sidecar gets one on the first save: `identify-swd.annotations.toml` for `identify-swd.tickwave`. The page won't save over a sidecar that changed on disk after the page read it, or over one with problems.
 
 A conversion opens its recording the same way with `--open`, once the recording is written and checked. `--port` and `--no-browser` go with it:
 
