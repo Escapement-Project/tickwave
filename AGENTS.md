@@ -27,6 +27,12 @@ what is left fits well inside a frame at 6x CPU throttle. Latency from input or 
 the screen is measured, stated and kept down: it feels worse than it measures. A change to drawing
 or querying comes with its frame-time and latency figures.
 
+**Reading never panics.** Any bytes handed to a reader, whether a recording cut off, corrupted or
+crafted, come back as an error the caller can act on: no panic, no abort, and no allocation the
+file alone can make unbounded. In the browser a panic ends every recording on the page. Every
+length and count read from a file is held against what the bytes can hold, and the readers are
+fuzzed.
+
 **One core, two consumers.** A Rust crate owns encoding, decoding and the block index. The browser
 uses it compiled to WASM, the converter CLI natively. A second implementation of the decoder comes
 only if a benchmark on real recordings shows the WASM cost matters; record the numbers.
