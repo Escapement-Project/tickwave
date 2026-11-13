@@ -1,11 +1,35 @@
 // The view's point measurements: a pulse around a tick, the edges past what is loaded, the figures
-// with their digits, and an analog channel at a pixel. Expected values are worked by hand.
+// with their digits, and an analog channel at a pixel. Expected values are worked by hand. The
+// pure cases are in testdata/view/probe.json, which the Rust view core's tests read too, with the
+// pulses below written out over the edges these tests read; the cases that read a MemorySource
+// are here.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { MemorySource, type MemoryRecording } from "../src/memory-source.ts";
-import { analogFromOverview, analogFromSamples, completePulse, findEdge, formatDuty, pulseFigures, pulseFromEdges } from "../src/probe.ts";
+import { analogFromOverview, analogFromSamples, completePulse, findEdge, formatDuty, pulseFigures, pulseFromEdges, type EdgeAt } from "../src/probe.ts";
 import { inChannel, type AnalogChannel, type Source } from "../src/source.ts";
+import { ratio, runTable } from "./tables.ts";
+
+/** An edge as the table writes it: undefined, where the edges in hand don't reach it, is "unread". */
+const edge = (e: EdgeAt) => (e === undefined ? "unread" : e);
+
+runTable("probe", {
+  pulse_from_edges: (a) => {
+    const p = pulseFromEdges({ level: a.edges.level, ticks: Float64Array.from(a.edges.ticks) }, a.from, a.to, a.known, a.tick);
+    return { level: p.level, start: edge(p.start), end: edge(p.end), next: edge(p.next) };
+  },
+  pulse_figures: (a) => {
+    const f = pulseFigures(a.pulse, ratio(a.timebase), a.known, a.step);
+    return { level: f.level, width: f.width, inverse_width: f.inverseWidth, period: f.period, frequency: f.frequency, duty: f.duty };
+  },
+  format_duty: (a) => formatDuty(a.high, a.period, a.step),
+  analog_from_samples: (a) => {
+    const c: AnalogChannel = { kind: "analog", name: "V", end: a.end, unit: "V", first: a.runs.first, period: ratio(a.runs.period), count: a.runs.count, resolution: null, min: 0, max: 1, ...(a.runs.breaks && { breaks: a.runs.breaks }) };
+    return analogFromSamples(c, { first: a.samples.first, values: Float64Array.from(a.samples.values) }, a.t0, a.t1, a.tick);
+  },
+  analog_from_overview: (a) => analogFromOverview({ kind: "analog", bucket: a.overview.bucket, start: a.overview.start, min: Float64Array.from(a.overview.min), max: Float64Array.from(a.overview.max) }, a.t0, a.t1),
+});
 
 const NS = { num: 1_000_000_000, den: 1 };
 
@@ -83,44 +107,8 @@ test("a pulse the source stamped with one time: the pulse before it ends there, 
   const e = await source.edges(0, 0, 100);
   assert.deepEqual(pulseFromEdges(e, 0, 100, { start: 0, end: 60_000_000 }, 19), { level: 1, start: 10, end: 20, next: 20 });
   assert.deepEqual(pulseFromEdges(e, 0, 100, { start: 0, end: 60_000_000 }, 20), { level: 1, start: 20, end: 30, next: undefined });
-  assert.equal(pulseFigures({ level: 1, start: 10, end: 20, next: 20 }, NS, { start: 0, end: 60_000_000 }).duty, "100\u00a0%");
+  // That pulse's duty is probe.json's.
   // Found by search: the period ends at the pair's second edge, not at the edge after it.
   const p = await completePulse(source, 0, { level: 0, start: undefined, end: undefined, next: undefined }, 10_000_000, { start: 0, end: 60_000_000 });
   assert.deepEqual(p, { level: 0, start: 30, end: 50_000_000, next: 50_000_000 });
-});
-
-test("a pulse's figures: whole-tick widths, and a rate and a duty to the digits the ticks carry", () => {
-  // SWCLK's first pulses in identify-swd: low for 627 ns from 376,719,436, then high for 647.
-  const f = pulseFigures({ level: 0, start: 376_719_436, end: 376_720_063, next: 376_720_710 }, NS, { start: 0, end: 523_583_070 });
-  // The rate's last digit is at its uncertainty, 785 kHz / 1274 ≈ 0.6 kHz: the hundreds of Hz. The
-  // width's reciprocal, 1.5949 MHz, is uncertain by 1.595 MHz / 627 ≈ 2.5 kHz: the kHz.
-  assert.deepEqual(f, { level: "low", width: "627\u00a0ns", inverseWidth: "1.595\u00a0MHz", period: "1.274\u00a0µs", frequency: "784.9\u00a0kHz", duty: "50.78\u00a0%" });
-  const open = pulseFigures({ level: 1, start: null, end: 376_719_436, next: 376_720_063 }, NS, { start: 0, end: 523_583_070 });
-  assert.equal(open.width, "at least 376.719436\u00a0ms");
-  assert.equal(open.inverseWidth, null);
-  assert.equal(open.period, null);
-  // The last pulse: both edges known, no period after it.
-  const last = pulseFigures({ level: 1, start: 100, end: 110, next: null }, NS, { start: 0, end: 1_000 });
-  assert.deepEqual([last.inverseWidth, last.period], ["100\u00a0MHz", null]);
-  assert.equal(pulseFigures({ level: 1, start: null, end: null, next: null }, NS, { start: 0, end: 1_000 }).width, "the whole capture, 1.000\u00a0µs");
-  // A channel known from 300 ns, as a moved or trimmed one is: widths count from there.
-  const late = { start: 300, end: 1_000 };
-  assert.equal(pulseFigures({ level: 1, start: null, end: 400, next: 405 }, NS, late).width, "at least 100\u00a0ns");
-  assert.equal(pulseFigures({ level: 1, start: null, end: null, next: null }, NS, late).width, "all it records, 700\u00a0ns");
-  // 3 of 10 ticks high is 30 % give or take 10: the digit is the tens.
-  assert.equal(formatDuty(3, 10), "30\u00a0%");
-  assert.equal(formatDuty(1, 3), "30\u00a0%");
-  assert.equal(formatDuty(500, 1_000), "50.0\u00a0%");
-});
-
-test("an analog channel at a pixel: one sample's value, or the range the pixel draws", () => {
-  const c: AnalogChannel = { kind: "analog", name: "V", end: 100, unit: "V", first: 0, period: { num: 1, den: 1 }, count: 100, resolution: 0.001, min: 0, max: 1 };
-  const s = { first: 0, values: Float64Array.from({ length: 100 }, (_, i) => i / 100) };
-  // A pixel narrower than a sample reads the sample at or before the tick.
-  assert.deepEqual(analogFromSamples(c, s, 10.2, 10.7, 10.5), { kind: "value", value: 0.1 });
-  // A pixel over several samples reads their range.
-  assert.deepEqual(analogFromSamples(c, s, 10, 14, 12), { kind: "range", min: 0.1, max: 0.13 });
-  const o = { kind: "analog" as const, bucket: 4, start: 0, min: new Float64Array([0, 0.5, Infinity]), max: new Float64Array([0.2, 0.9, -Infinity]) };
-  assert.deepEqual(analogFromOverview(o, 2, 6), { kind: "range", min: 0, max: 0.9 });
-  assert.deepEqual(analogFromOverview(o, 8, 12), { kind: "none" });
 });

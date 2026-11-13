@@ -1,28 +1,21 @@
+// Times to ticks from testdata/view/time.json, which the Rust view core's tests read too; the
+// attributes, which only the web reads, below.
+
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseTime, toTicks } from "../src/time.ts";
 import { parsePad, parseScale, parseWindow, parseChannels, parseSweep } from "../src/attributes.ts";
+import { ratio, runTable } from "./tables.ts";
 
 const GS = { num: 1_000_000_000, den: 1 };
-const ticks = (s: string, tb = GS) => {
-  const t = parseTime(s);
-  assert.ok(t, `${s} parses`);
-  return toTicks(t, tb);
-};
 
-test("times to ticks, exactly", () => {
-  // PLAN.md §3's example.
-  assert.equal(ticks("317.85882 ms"), 317_858_820);
-  assert.equal(ticks("1234"), 1234);
-  assert.equal(ticks("100 us", { num: 3_000_000, den: 1 }), 300);
-  assert.equal(ticks("2 µs"), 2000);
-  // 124.5 ticks rounds half away from zero to 125. In floating point 0.0001245 * 1e6 is
-  // 124.49999999999999, which rounds to 124.
-  assert.equal(ticks("0.0001245 ms"), 125);
-  // Half away from zero below zero too; Math.round(-2.5) is -2.
-  assert.equal(ticks("-2.5 ns"), -3);
-  assert.equal(parseTime("12 parsecs"), null);
-  assert.equal(parseTime("ms"), null);
+runTable("time", {
+  to_ticks: (a) => {
+    const t = parseTime(a.text);
+    assert.ok(t, `${a.text} parses`);
+    return toTicks(t, ratio(a.timebase));
+  },
+  parse_time: (a) => parseTime(a.text),
 });
 
 test("attributes", () => {

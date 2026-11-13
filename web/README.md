@@ -25,7 +25,7 @@ npm run dev                               # http://127.0.0.1:8123/dev/
 | `npm run build` | `dist/`: `tickwave.js`, `tickwave-chart.js`, `tickwave-worker.js`, `tickwave.wasm`, the converter's `tickwave-convert-worker.js` and `tickwave-convert.wasm`, the dev page's `dev-loader.js`, and the site |
 | `npm run generate` | the files the tests generate rather than commit (below) |
 | `npm run typecheck` | `tsc` over the sources, tests and scripts |
-| `npm test` | the unit tests, with Node's test runner. The converter's compare its output with the CLI's, which they run through `cargo` |
+| `npm test` | the unit tests, with Node's test runner. The converter's compare its output with the CLI's, which they run through `cargo`. Those of the readouts, times, value scale, time axis, columns and probes read their fixed cases from `testdata/view/`, which `crates/view`'s tests read too |
 | `npm run site` | tickwave's site into `dist/site/`, from `site/` at the repository's root (below) |
 | `npm run e2e` | generates, then runs Playwright in Chromium and Firefox; screenshots go to `screenshots/` |
 | `npm run check` | typecheck, unit tests, build and e2e, in that order |

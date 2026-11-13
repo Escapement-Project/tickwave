@@ -4,9 +4,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { layoutNotes, elide } from "../src/render/notes.ts";
 import { timeAxis } from "../src/render/axis.ts";
+import { ratio, runTable } from "./tables.ts";
 
 const measure = (s: string) => s.length * 6;
-const GS = { num: 1e9, den: 1 };
 
 test("notes: touching brackets share a lane; labels fit the room between them", () => {
   // The DPIDR read's request [0, 80), ack [90, 120), data [120, 450) at 1 px a tick.
@@ -72,23 +72,7 @@ test("elide: at least six characters, or nothing", () => {
   assert.equal(elide("ack", 18, measure), "ack");
 });
 
-test("axis: one unit for every label, and only labels that fit inside", () => {
-  // 1 ms over 1000 px at 1 GS/s. 50 us steps are 50 px, too close for "0.05 ms" (7 characters,
-  // 42 px, and a 16 px gap); 100 us steps are 100 px. Labels at 0 and 1 ms would hang outside.
-  const a = timeAxis(0, 1_000_000, 1000, GS, measure);
-  assert.deepEqual(
-    a.ticks.map((t) => t.label),
-    ["0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9"].map((v) => `${v} ms`),
-  );
-  assert.equal(a.ticks[0].x, 100);
-});
-
-test("axis: never a step finer than one tick", () => {
-  // Ten 10 us ticks over 2000 px. 5 us steps would be 100 px apart, room for the widest label
-  // ("100 us", 36 px and the gap); only the one-tick floor rules them out.
-  const a = timeAxis(0, 10, 2000, { num: 100_000, den: 1 }, measure);
-  assert.deepEqual(
-    a.ticks.map((t) => t.label),
-    ["10", "20", "30", "40", "50", "60", "70", "80", "90"].map((v) => `${v} µs`),
-  );
+// The time axis, from testdata/view/axis.json, which the Rust view core's tests read too.
+runTable("axis", {
+  time_axis: (a) => timeAxis(a.start, a.end, a.width, ratio(a.timebase), (s) => s.length * a.measure_per_char, a.gap),
 });
