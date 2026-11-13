@@ -2,7 +2,7 @@ use escapement_tickwave_format::decode::{BlockChannel, DecodeError, Footer};
 use escapement_tickwave_format::encode::{EncodeError, Options, WriteError, encode};
 use escapement_tickwave_format::header::AnalogCoding;
 use escapement_tickwave_format::model::{
-    Analog, Channel, ChannelData, Digital, Ratio, Recording, Samples, Source, SourceFormat,
+    Analog, Channel, ChannelData, Digital, Ratio, Recording, Sample, Samples, Source, SourceFormat,
 };
 use escapement_tickwave_format::verify::{VerifyError, verify};
 
@@ -28,6 +28,7 @@ fn recording(edges_a: Vec<i64>, values: Vec<f32>) -> Recording {
             Channel {
                 name: "A".into(),
                 source_name: "a".into(),
+                source: 0,
                 data: ChannelData::Digital(Digital {
                     initial: true,
                     end: LENGTH,
@@ -39,6 +40,7 @@ fn recording(edges_a: Vec<i64>, values: Vec<f32>) -> Recording {
             Channel {
                 name: "B".into(),
                 source_name: "b".into(),
+                source: 0,
                 data: ChannelData::Digital(Digital {
                     initial: false,
                     end: 9001,
@@ -50,7 +52,9 @@ fn recording(edges_a: Vec<i64>, values: Vec<f32>) -> Recording {
             Channel {
                 name: "V".into(),
                 source_name: "v".into(),
+                source: 0,
                 data: ChannelData::Analog(Analog {
+                    significant: None,
                     unit: "V".into(),
                     first: 0,
                     period: Ratio::integer(10).unwrap(),
@@ -61,7 +65,11 @@ fn recording(edges_a: Vec<i64>, values: Vec<f32>) -> Recording {
                 shaping: Default::default(),
             },
         ],
-        source: Source::new(SourceFormat::Other("test".into())),
+        derived: Vec::new(),
+        sources: vec![Source::new(
+            SourceFormat::Other("test".into()),
+            Ratio::integer(1_000_000_000).unwrap(),
+        )],
     }
 }
 
@@ -107,6 +115,9 @@ fn round_trips_through_many_blocks() {
                     for (k, x) in v.iter().enumerate() {
                         let tick = 10 * (first_index + k as u64) as i64;
                         assert!(tick >= block.start && tick < block.end);
+                        let Sample::F32(x) = x else {
+                            panic!("V stores f32 values");
+                        };
                         assert_eq!(x.to_bits(), value(first_index + k as u64).to_bits());
                     }
                     samples += v.len() as u64;
@@ -402,7 +413,9 @@ fn codes_are_stored_in_byte_planes() {
         channels: vec![Channel {
             name: "V".into(),
             source_name: "v".into(),
+            source: 0,
             data: ChannelData::Analog(Analog {
+                significant: None,
                 unit: "V".into(),
                 first: 0,
                 period: Ratio::integer(1).unwrap(),
@@ -414,7 +427,11 @@ fn codes_are_stored_in_byte_planes() {
             }),
             shaping: Default::default(),
         }],
-        source: Source::new(SourceFormat::Other("test".into())),
+        derived: Vec::new(),
+        sources: vec![Source::new(
+            SourceFormat::Other("test".into()),
+            Ratio::integer(1_000_000_000).unwrap(),
+        )],
     };
     let options = Options {
         analog: vec![Some(coding)],
@@ -455,8 +472,8 @@ fn the_rates_origin_and_the_trigger_survive_encoding_and_bundling() {
     use escapement_tickwave_format::model::RateOrigin;
     use std::collections::BTreeMap;
     let mut rec = recording(EDGES_A.to_vec(), values());
-    rec.source.rate = Some(RateOrigin::Inferred);
-    rec.source.trigger_s = Some(-2.5e-6);
+    rec.sources[0].rate = Some(RateOrigin::Inferred);
+    rec.sources[0].trigger_s = Some(-2.5e-6);
     let file = encode(rec, &Options::default()).unwrap();
     let head = Footer::parse_file(&file).unwrap();
     assert_eq!(head.trailer.minor, 0);
@@ -467,6 +484,6 @@ fn the_rates_origin_and_the_trigger_survive_encoding_and_bundling() {
     );
     let bundled = bundle(&file, &head, BTreeMap::new()).unwrap();
     let again = Footer::parse_file(&bundled).unwrap();
-    assert_eq!(again.header.source.rate, Some(RateOrigin::Inferred));
-    assert_eq!(again.header.source.trigger_s, Some(-2.5e-6));
+    assert_eq!(again.header.sources[0].rate, Some(RateOrigin::Inferred));
+    assert_eq!(again.header.sources[0].trigger_s, Some(-2.5e-6));
 }

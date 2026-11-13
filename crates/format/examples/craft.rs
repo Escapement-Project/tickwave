@@ -13,7 +13,7 @@ use escapement_tickwave_format::header::{
 };
 use escapement_tickwave_format::model::Ratio;
 use escapement_tickwave_format::record::{self, BlockHead, Kind};
-use escapement_tickwave_format::writer::{WriteOptions, Writer};
+use escapement_tickwave_format::writer::{Finish, WriteOptions, Writer};
 
 const LENGTH: i64 = 1_000_000;
 
@@ -22,13 +22,19 @@ fn base() -> Vec<u8> {
     let channel = |name: &str| DeclaredChannel {
         name: name.into(),
         source_name: name.to_lowercase(),
+        source: 0,
         data: DeclaredKind::Digital { initial: false },
         shaping: Default::default(),
     };
+    let timebase = Ratio::integer(1_000_000_000).unwrap();
     let declaration = Declaration {
-        timebase: Ratio::integer(1_000_000_000).unwrap(),
+        timebase,
         channels: vec![channel("A"), channel("B")],
-        source: SourceHeader::new(SourceFormat::Other("crafted".into())),
+        derived: Vec::new(),
+        sources: vec![SourceHeader::new(
+            SourceFormat::Other("crafted".into()),
+            timebase,
+        )],
         title: None,
         meta: BTreeMap::new(),
         overview_shift: 12,
@@ -39,7 +45,7 @@ fn base() -> Vec<u8> {
     }
     let mut out = w.take_output();
     out.extend(
-        w.finish(LENGTH, &[LENGTH, LENGTH], BTreeMap::new())
+        w.finish(LENGTH, &[LENGTH, LENGTH], Finish::default())
             .unwrap()
             .tail,
     );

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use escapement_tickwave_format::encode::{EncodeError, Options, encode_to};
 use escapement_tickwave_format::header::{AnalogCoding, Header};
-use escapement_tickwave_format::model::{Channel, ChannelData, Recording, Samples};
+use escapement_tickwave_format::model::{Channel, ChannelData, Recording, Samples, Wrap};
 use escapement_tickwave_format::verify::{VerifyError, verify_limited};
 
 use crate::shape::{self, Plan};
@@ -178,6 +178,23 @@ pub fn counted(recording: Recording, progress: &dyn Progress, pass: Pass<'_>) ->
             }
         }
     };
+    /// Counts each sample as it is taken.
+    struct Count(Step);
+    impl Wrap for Count {
+        fn wrap<T: Send + 'static>(
+            self,
+            samples: Box<dyn Iterator<Item = T> + Send>,
+        ) -> Box<dyn Iterator<Item = T> + Send> {
+            let mut n = 0u64;
+            let step = self.0;
+            Box::new(samples.inspect(move |_| {
+                n += 1;
+                if n.is_multiple_of(STEP) {
+                    step(STEP);
+                }
+            }))
+        }
+    }
     let channels = recording
         .channels
         .into_iter()
@@ -189,9 +206,7 @@ pub fn counted(recording: Recording, progress: &dyn Progress, pass: Pass<'_>) ->
                     ChannelData::Digital(d)
                 }
                 ChannelData::Analog(mut a) => {
-                    let mut tick = tick(Arc::clone(&step));
-                    let Samples::F32(samples) = a.samples;
-                    a.samples = Samples::F32(Box::new(samples.inspect(move |_| tick())));
+                    a.samples = a.samples.map(Count(Arc::clone(&step)));
                     ChannelData::Analog(a)
                 }
             };
@@ -230,6 +245,11 @@ fn recover_codes(
             ChannelData::Digital(_) => None,
             ChannelData::Analog(a) => {
                 let name = c.name.clone();
+                // Codes store f32 values only.
+                if !matches!(a.samples, Samples::F32(_)) {
+                    found.push((name, None));
+                    return None;
+                }
                 let one = Recording {
                     timebase: recording.timebase,
                     length: recording.length,
@@ -237,14 +257,17 @@ fn recover_codes(
                         data: ChannelData::Analog(a),
                         ..c
                     }],
-                    source: recording.source.clone(),
+                    derived: Vec::new(),
+                    sources: recording.sources.clone(),
                 };
                 let pass = Pass::Codes(&name);
                 let ChannelData::Analog(a) = counted(one, progress, pass).channels.remove(0).data
                 else {
                     unreachable!("the channel was built analog")
                 };
-                let Samples::F32(samples) = a.samples;
+                let Samples::F32(samples) = a.samples else {
+                    unreachable!("only f32 samples look for codes")
+                };
                 let codes = codes::recover_codes(samples);
                 progress.end(pass);
                 found.push((name.clone(), codes.as_ref().map(|k| k.bits)));

@@ -1,12 +1,12 @@
 # The tickwave recording format, version 1.0
 
 A tickwave recording holds digital and analog channels on one time axis, exactly as the instruments
-recorded them: one capture's, or several captures merged. A writer only ever appends to it, so a recorder can stream the file
-out while it captures. The file ends with an index. A reader with random access reads the end
-first and then only the blocks a view covers, so a page can show a few microseconds of a
-two-minute capture without downloading it. A reader that takes the file in order needs no index.
-A file cut off at any byte, by a crash, a power cut or a full disk, still reads up to its last whole
-record, and so does a file a recorder is still writing.
+recorded them: one capture's, or several captures merged. A writer only ever appends to it, so a
+recorder can stream the file out while it captures. The file ends with an index. A reader with
+random access reads the end first and then only the blocks a view covers, so a page can show a few
+microseconds of a two-minute capture without downloading it. A reader that takes the file in order
+needs no index. A file cut off at any byte, by a crash, a power cut or a full disk, still reads up
+to its last whole record, and so does a file a recorder is still writing.
 
 Status: draft. Version 1 is frozen when the first recording is published; files made before then
 may not read.
@@ -134,13 +134,15 @@ parses it exactly.
 
 A channel entry has `name`, `source_name` (the source's own name for it), `source` (its source's
 index in `sources`) and `kind`, and `offset`, `offset_kind` and `kept` where it states them (see
-Moved and trimmed channels). An analog channel can state `significant`: its readings carry at most
-that many significant figures, as an instrument whose step changes with its range does.
+Moved and trimmed channels). An analog channel can state `significant`, an integer of at least 1:
+its readings carry at most that many significant figures, as an instrument whose step changes with
+its range does.
 
 - `"digital"`: `initial` (the level at tick 0 before any edge there, a boolean), `end` (the level
   is known at ticks `0..end`; a source can stop knowing one channel before another), `edges` (the
-  count), and `gaps` where the level was not known for a while (see Gaps, below). An `end` of 0 says the level is
-  never known. Such a channel has no edges and no gaps, and its `initial` is false.
+  count), and `gaps` where the level was not known for a while (see Gaps, below). An `end` of 0
+  says the level is never known. Such a channel has no edges and no gaps, and its `initial` is
+  false.
 - `"analog"`: `unit` (empty when the source states none), `first` (the first sample's tick, 0
   when there is no sample), `period` (ticks from one sample to the next, `[num, den]`), `count`,
   `breaks` where the samples stopped for a while (see Gaps), and `coding` (see Codings).
@@ -153,8 +155,9 @@ sample, and every tick a gap or a break names. So does every edge and sample in 
 channel's `end`, and both ends of a `kept`, lie in `0..=length`. An analog channel has no `end`: its
 samples may stop before the length. `length` is at least 1. It is below 2^53, and so are the terms
 of every `timebase` and `period`, and every `edges`, `count`, break index and lost count. Every
-`origin` and `align` lies between −2^53 and 2^53. No term of a `timebase` or a `period` is zero. A
-reader refuses a header that breaks any of these before it reads a block.
+`origin` and `align` has a magnitude below 2^53, and so does each source's factor. No term of a
+`timebase` or a `period` is zero. A reader refuses a header that breaks any of these before it reads
+a block.
 
 ### Sources
 
@@ -199,7 +202,12 @@ An analog channel's `coding` says how its samples are stored:
   `"offset": [num, den]`, each an exact ratio with a positive denominator, a nonzero `scale` and
   terms whose magnitude is below 2^53. A sample's value is then `offset + code × scale` exactly:
   an ADC's counts, stored as the instrument gave them, with the factor that makes them volts or
-  amps. One code step, `scale`, is the finest a reading of it shows.
+  amps. One code step, `scale`, is the finest a reading of it shows. A reader that needs the value
+  as an f64 takes the code as an f64, multiplies by the scale's numerator, divides by its
+  denominator, and adds the offset's numerator divided by its denominator: each step in f64,
+  rounded once, so every reader gets the same float. Without an offset, and with `code × num` below
+  2^53, that float is the one nearest the value. In JavaScript, `(code * num) / den + onum / oden`.
+  A coding without an `offset` adds nothing.
 - `{"type": "codes", "bits": b, "scale": s, "offset": o}`, with `b` in `1..=16`: a smaller store for
   an f32 source. A sample's value is `code × s` in f64, then `o +` that in f64, then rounded to f32:
   two separately rounded f64 operations, never a fused multiply-add, which can round to a different
@@ -214,14 +222,17 @@ stated, whichever is coarser.
 
 A derived channel is computed from two analog channels, so a reader draws it without the recording
 storing its samples. `derived` holds one entry each: `{"name": n, "unit": u, "product": [a, b]}`,
-where `a` and `b` name analog channels, as power is current times voltage. Its name is unlike every
-channel's. Its operands come from one source, and share `first`, `period`, `count` and `breaks`, so
-its sample i sits where theirs does:
+where `a` and `b` name analog channels, as power is current times voltage. No two channels or
+derived channels share a name, and a reader refuses a header where any do. Its operands come from
+one source, and share `first`, `period`, `count` and `breaks`, so its sample i sits where theirs
+does:
 
-- When both are `int` channels without an `offset`, and their `bits` sum to at most 64, sample i
-  is the integer product of their codes, signed if either is, with `scale` the product of their
-  scales (1 for one that states none).
-- Otherwise it is `f64(a_i) × f64(b_i)`, rounded once.
+- When both are `int` channels without an `offset`, their `bits` sum to at most 64, and their
+  scales' numerators multiply to below 2^53 and so do their denominators (a scale a channel doesn't
+  state is 1), sample i is the integer product of their codes, signed if either is, with `scale`
+  the product of their scales, exactly. Its value as an f64 follows the rule for an `int` channel.
+- Otherwise it is `f64(a_i) × f64(b_i)`, rounded once, where an `int` operand's f64 follows that
+  rule.
 
 A derived entry can state `significant`, as an analog channel can. A reading of an integer
 product follows the rule for an `int` channel, and one of an f64 product the rule for a float.
@@ -371,10 +382,9 @@ A run record:
 | 12 | i64 | `tick` |
 | 20 | u64 | `lost` |
 
-Sample `index` of an analog channel starts a run at `tick`, after `lost` samples the instrument lost.
-The run at index 0 gives the channel's `first`, and each later run is a break; the first run's
-`lost` is 0. It comes before the block that holds sample
-`index`.
+Sample `index` of an analog channel starts a run at `tick`, after `lost` samples the instrument
+lost. The run at index 0 gives the channel's `first`, and each later run is a break; the first
+run's `lost` is 0. It comes before the block that holds sample `index`.
 
 A gap whose `to` is not below its channel's `end` is left out of the header, and the channel's
 `end` becomes the gap's `from`. A gap from tick 0 then leaves an `end` of 0: the level is never
@@ -417,10 +427,12 @@ then each derived channel:
   | `int`, signed | i64 | i128 |
 
   A bucket with no sample holds a minimum above its maximum: +∞ and −∞, or the type's largest and
-  smallest. NaN samples are left out. A bucket of the finest level sums its samples in index order,
-  and a bucket of a coarser level sums the 16 buckets of the level below it that it covers, in
-  order, so every writer gives the same bytes. An integer sum is exact. A bucket's sample count
-  follows from `first`, `period` and `breaks`, so the overview doesn't store it.
+  smallest. NaN samples are left out. Where −0 and +0 tie for a minimum or a maximum, the first in
+  index order counts. A sum starts at +0, so an empty bucket's is 0. A bucket of the finest level
+  sums its samples in index order, and a bucket of a coarser level sums the 16 buckets of the level
+  below it that it covers, in order, so every writer gives the same bytes. An integer sum is exact.
+  A bucket's sample count follows from `first`, `period` and `breaks`, so the overview doesn't store
+  it.
 - **Derived.** As an analog channel: an integer product as signed or unsigned `int` codes, and an
   f64 product as `f64`.
 
@@ -503,9 +515,9 @@ channel with no flag adds nothing, so a recording converted whole has the id its
   i64, `count` as u64, the number of breaks as u64, and each break's `index` as u64, `tick` as i64
   and `lost` as u64. The samples of an `f32` or a `codes` channel are every value's f32 bits as u32,
   so the two codings of one capture's values give one id. An `f64` channel adds `"f64"` before the
-  flags and hashes every value's bits as u64. An `int` channel adds `"int"`, `bits` as one byte,
-  `signed` as one byte, and `scale` and `offset` as an i64 and a u64 each (1/1 and 0/1 where it
-  states none), and hashes every code as i64 or u64.
+  flags and hashes every value's bits as u64. An `int` channel adds, in the same place, `"int"`,
+  `bits` as one byte, `signed` as one byte, and `scale` and `offset` as an i64 and a u64 each (1/1
+  and 0/1 where it states none), and hashes every code as i64 or u64.
 
 Derived channels, `significant`, and a source's fields other than its factor and `align` are not
 part of the content: they describe it, or follow from it.
@@ -556,17 +568,19 @@ A cut-off file is repaired by appending a footer and a trailer after its last go
 1. Take the records up to the first bad one, and cut the file there. Refuse a file with no
    declaration, or with neither a block nor an annotation record.
 2. Every digital channel's `end` is the last block's end, or 0 with no block, before the gap rule
-   above. The length is the later of that end and one past the last annotation record's start, so
-   what a recorder marked after its last data survives, and a recording of marks alone too. When it
-   is later, an empty block runs from the last block's end, or from tick 0, to it.
+   above. The length is the later of that end and one past the latest start among the annotation
+   records, so what a recorder marked after its last data survives, and a recording of marks alone
+   too. When the length is later, an empty block runs from the last block's end, or from tick 0, to
+   it. A file with no block whose declaration states a digital channel's `initial` as true is
+   refused: no block carries that level.
 3. Count each channel's edges and samples from the blocks' words.
 4. Compute the overview and the content id from every block's items, decoding each block once.
    Keep the overview blocks already written, and write the rest.
 5. Write the footer and the trailer, and each annotation source's generator file, or bundle them
    as the writer would have.
 
-A repaired file holds what a writer that had finished at the same block would have written, and so
-has the same content id.
+A repaired file holds what a writer that had finished at the same block, with the same length,
+would have written, and so has its content id.
 
 A file whose channels state `kept`, because a channel is moved or cut or the recording merges
 several sources, is not repaired. Its declaration states each channel's kept span before any data,
@@ -578,4 +592,5 @@ is made again from its sources instead.
 A file whose blocks a recorder closed early, at flushes, can be written again with blocks of the
 usual size, and a repaired file too. A re-cutter reads the records in order and writes the same
 declaration, then every item, gap, run and annotation in the same order, and finishes with the same
-length, ends, extras and bundled annotations. It computes the overview again. The new file has the same content id.
+length, ends, extras and bundled annotations. It computes the overview again. The new file has the
+same content id.

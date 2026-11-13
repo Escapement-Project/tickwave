@@ -101,7 +101,9 @@ fn analog(path: &Path, channel: &str) -> Vec<f32> {
     let recording = sigrok::read(path).unwrap().recording;
     for c in recording.channels {
         if let (true, ChannelData::Analog(a)) = (c.name == channel, c.data) {
-            let Samples::F32(values) = a.samples;
+            let Samples::F32(values) = a.samples else {
+                panic!("f32 samples")
+            };
             return values.collect();
         }
     }

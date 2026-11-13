@@ -11,7 +11,9 @@ use std::num::NonZeroU64;
 
 use serde::{Deserialize, Serialize};
 
-pub use crate::header::{Kept, Offset, RateOrigin, Shaping, SourceFormat};
+pub use crate::header::{
+    Derived, Exact, IntCoding, Kept, Offset, RateOrigin, Shaping, SourceFormat,
+};
 
 /// An exact ratio of positive integers. It reads and writes as `[num, den]`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -89,23 +91,25 @@ impl From<Gap> for (i64, i64, bool) {
 }
 
 /// Where an analog channel's samples start again after a stop: sample `index` sits at `tick`, and
-/// the samples after it follow at the channel's period. It reads and writes as `[index, tick]`.
+/// the samples after it follow at the channel's period. The instrument lost `lost` samples
+/// before it, 0 when it only paused. It reads and writes as `[index, tick, lost]`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(from = "(u64, i64)", into = "(u64, i64)")]
+#[serde(from = "(u64, i64, u64)", into = "(u64, i64, u64)")]
 pub struct Break {
     pub index: u64,
     pub tick: i64,
+    pub lost: u64,
 }
 
-impl From<(u64, i64)> for Break {
-    fn from((index, tick): (u64, i64)) -> Self {
-        Self { index, tick }
+impl From<(u64, i64, u64)> for Break {
+    fn from((index, tick, lost): (u64, i64, u64)) -> Self {
+        Self { index, tick, lost }
     }
 }
 
-impl From<Break> for (u64, i64) {
+impl From<Break> for (u64, i64, u64) {
     fn from(b: Break) -> Self {
-        (b.index, b.tick)
+        (b.index, b.tick, b.lost)
     }
 }
 
@@ -117,7 +121,10 @@ pub struct Recording {
     /// How many ticks the capture covers: ticks `0..length`, at least one.
     pub length: i64,
     pub channels: Vec<Channel>,
-    pub source: Source,
+    /// Channels computed from the others, which a file does not store.
+    pub derived: Vec<Derived>,
+    /// Where the channels came from; each channel names one by its index.
+    pub sources: Vec<Source>,
 }
 
 #[derive(Debug)]
@@ -127,6 +134,8 @@ pub struct Channel {
     /// The source's own name for the channel: `digital_3_0`, a sigrok probe name, a VCD signal's
     /// full scope path.
     pub source_name: String,
+    /// Its source's index in `sources`.
+    pub source: u32,
     pub data: ChannelData,
     /// How the converter moved and cut the channel; nothing for a channel as the source has it.
     pub shaping: Shaping,
@@ -139,13 +148,13 @@ pub enum ChannelData {
 }
 
 pub struct Digital {
-    /// The level at tick 0.
+    /// The level at tick 0, before any edge there.
     pub initial: bool,
     /// The level is known at ticks `0..end`, and `end` is at most the recording's length. A source
     /// can stop knowing one channel before another. At 0 the level is never known, and `initial`
     /// is false.
     pub end: i64,
-    /// Ticks at which the level flips, in order, each in `1..end`. Two can share a tick: a pulse
+    /// Ticks at which the level flips, in order, each in `0..end`. Two can share a tick: a pulse
     /// the source stamped with one time. The VCD reader collapses changes at one time to their net
     /// change, and the Saleae reader refuses edges out of order.
     pub edges: Edges,
@@ -166,6 +175,8 @@ pub struct Analog {
     pub count: u64,
     /// Where the samples start again after a stop, in order, each index in `1..count`.
     pub breaks: Vec<Break>,
+    /// At most this many significant figures in a reading, where the source says so.
+    pub significant: Option<u8>,
     pub samples: Samples,
 }
 
@@ -186,20 +197,116 @@ pub fn run_sample_tick(first: i64, period: Ratio, breaks: &[Break], index: u64) 
     }
 }
 
+/// An analog channel's samples, in the type the source stored them.
 pub enum Samples {
     /// The values exactly as the source stored them.
     F32(Box<dyn Iterator<Item = f32> + Send>),
+    F64(Box<dyn Iterator<Item = f64> + Send>),
+    /// Unsigned codes of an `int` coding, whose `signed` is false.
+    U64(IntCoding, Box<dyn Iterator<Item = u64> + Send>),
+    /// Signed codes of an `int` coding, whose `signed` is true.
+    I64(IntCoding, Box<dyn Iterator<Item = i64> + Send>),
 }
 
-#[derive(Clone, Debug)]
+impl Samples {
+    /// Each sample as a `Sample`.
+    pub fn into_samples(self) -> Box<dyn Iterator<Item = Sample> + Send> {
+        match self {
+            Self::F32(s) => Box::new(s.map(Sample::F32)),
+            Self::F64(s) => Box::new(s.map(Sample::F64)),
+            Self::U64(_, s) => Box::new(s.map(Sample::U64)),
+            Self::I64(_, s) => Box::new(s.map(Sample::I64)),
+        }
+    }
+
+    /// The `int` coding the codes are in; None for floats.
+    pub fn int_coding(&self) -> Option<IntCoding> {
+        match self {
+            Self::U64(c, _) | Self::I64(c, _) => Some(*c),
+            Self::F32(_) | Self::F64(_) => None,
+        }
+    }
+
+    /// The samples with `f` around each iterator, as a pass counts or cuts them.
+    pub fn map<F: Wrap>(self, f: F) -> Self {
+        match self {
+            Self::F32(s) => Self::F32(f.wrap(s)),
+            Self::F64(s) => Self::F64(f.wrap(s)),
+            Self::U64(c, s) => Self::U64(c, f.wrap(s)),
+            Self::I64(c, s) => Self::I64(c, f.wrap(s)),
+        }
+    }
+}
+
+/// Wraps a samples iterator whatever its item type, for `Samples::map`.
+pub trait Wrap {
+    fn wrap<T: Send + 'static>(
+        self,
+        samples: Box<dyn Iterator<Item = T> + Send>,
+    ) -> Box<dyn Iterator<Item = T> + Send>;
+}
+
+/// One analog sample in the type its channel stores: an f32 for an `f32` or `codes` channel, an
+/// f64 for an `f64` one, and a code for an `int` one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Sample {
+    F32(f32),
+    F64(f64),
+    U64(u64),
+    I64(i64),
+}
+
+impl From<f32> for Sample {
+    fn from(v: f32) -> Self {
+        Self::F32(v)
+    }
+}
+
+impl From<f64> for Sample {
+    fn from(v: f64) -> Self {
+        Self::F64(v)
+    }
+}
+
+impl From<u64> for Sample {
+    fn from(v: u64) -> Self {
+        Self::U64(v)
+    }
+}
+
+impl From<i64> for Sample {
+    fn from(v: i64) -> Self {
+        Self::I64(v)
+    }
+}
+
+impl Sample {
+    /// The type's name, for a message.
+    pub fn type_name(self) -> &'static str {
+        match self {
+            Self::F32(_) => "f32",
+            Self::F64(_) => "f64",
+            Self::U64(_) => "u64",
+            Self::I64(_) => "i64",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Source {
     pub format: SourceFormat,
     /// File names read, without directories.
     pub files: Vec<String>,
+    /// The source's tick rate. The recording's timebase is a whole multiple of it.
+    pub timebase: Ratio,
+    /// The recording's tick where the source's tick 0 lies, before any channel's offset.
+    pub origin: i64,
+    /// Ticks of the recording the source was moved by to line it up with others.
+    pub align: Option<i64>,
     pub instrument: Option<String>,
     pub software: Option<String>,
-    /// The source's own time of tick 0 in seconds, where it has one (Saleae's `begin`). Scripts
-    /// that work from the source map their times to ticks with it.
+    /// The source's own time at its tick 0 in seconds, where it has one (Saleae's `begin`).
+    /// Scripts that work from the source map their times to ticks with it.
     pub begin_s: Option<f64>,
     /// The trigger's time in the source's own seconds, as `begin_s` is.
     pub trigger_s: Option<f64>,
@@ -210,11 +317,15 @@ pub struct Source {
 }
 
 impl Source {
-    /// A source of `format` that states nothing else.
-    pub fn new(format: SourceFormat) -> Self {
+    /// A source of `format` ticking at `timebase`, its tick 0 at the recording's, that states
+    /// nothing else.
+    pub fn new(format: SourceFormat, timebase: Ratio) -> Self {
         Self {
             format,
             files: Vec::new(),
+            timebase,
+            origin: 0,
+            align: None,
             instrument: None,
             software: None,
             begin_s: None,
@@ -244,6 +355,7 @@ impl fmt::Debug for Analog {
             .field("period", &self.period)
             .field("count", &self.count)
             .field("breaks", &self.breaks)
+            .field("significant", &self.significant)
             .finish_non_exhaustive()
     }
 }

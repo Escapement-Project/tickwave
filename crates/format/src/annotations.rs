@@ -120,7 +120,8 @@ pub struct Annotation {
     pub text: Option<String>,
     pub paint: Option<String>,
     pub measure: Option<Measure>,
-    /// Figures the annotation states, by name: each a decimal and a unit, as `"37.5 MHz"`.
+    /// Figures the annotation states, by name: each a decimal and its unit, as `"37.5 MHz"`, or
+    /// a decimal alone for a count, as `"17"`.
     pub values: Option<BTreeMap<String, String>>,
 }
 
@@ -217,8 +218,9 @@ pub fn exact_ticks(text: &str, timebase: Ratio) -> Result<ExactTicks, String> {
 }
 
 /// Why a `values` entry is refused, if it is: its name must be lower-case letters, digits and
-/// `_`, starting with a letter, and its value a decimal, one space and a unit, as `"37.5 MHz"`. A
-/// chart compares units as text, so micro is U+00B5 alone, as in times, never Greek mu U+03BC.
+/// `_`, starting with a letter, and its value a decimal, then one space and a unit where it has
+/// one, as `"37.5 MHz"`, or `"17"` for a count. A chart compares units as text, so micro is
+/// U+00B5 alone, as in times, never Greek mu U+03BC.
 fn check_value(name: &str, value: &str) -> Option<String> {
     let mut chars = name.chars();
     if !chars.next().is_some_and(|c| c.is_ascii_lowercase())
@@ -237,20 +239,20 @@ fn check_value(name: &str, value: &str) -> Option<String> {
         let all_digits = |t: &str| !t.is_empty() && t.chars().all(|c| c.is_ascii_digit());
         all_digits(whole) && fraction.is_none_or(all_digits)
     };
-    match value.split_once(' ') {
-        Some((number, unit))
-            if decimal(number) && !unit.is_empty() && !unit.chars().any(char::is_whitespace) =>
-        {
-            None
+    let fits = match value.split_once(' ') {
+        Some((number, unit)) => {
+            decimal(number) && !unit.is_empty() && !unit.chars().any(char::is_whitespace)
         }
-        _ => Some(format!(
-            "values: {name} = {value:?} is not a decimal and a unit, as \"37.5 MHz\""
-        )),
+        None => decimal(value),
+    };
+    if !fits {
+        return Some(format!(
+            "values: {name} = {value:?} is not a decimal with one space and a unit where it has \
+             one, as \"37.5 MHz\" or \"17\""
+        ));
     }
-    .or_else(|| {
-        value.contains('\u{3bc}').then(|| {
-            format!("values: {name} = {value:?} writes micro as Greek mu (U+03BC); use µ (U+00B5)")
-        })
+    value.contains('\u{3bc}').then(|| {
+        format!("values: {name} = {value:?} writes micro as Greek mu (U+03BC); use µ (U+00B5)")
     })
 }
 

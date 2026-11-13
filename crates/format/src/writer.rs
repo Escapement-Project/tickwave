@@ -2,22 +2,28 @@
 //!
 //! A caller declares the recording, then hands in its items in tick order across the channels,
 //! and drains the bytes as they come: `output` and `consume`, or `take_output`. Blocks close on
-//! their size, or at `flush`, which a live recorder calls on its own clock. `finish` closes the
-//! last block and writes the footer and the trailer.
+//! their size, or at `flush`, which a live recorder calls on its own clock. `snapshot` gives a
+//! view in the same process what is written so far. `finish` closes the last block and writes the
+//! footer and the trailer, bundling the annotations if asked.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::Arc;
 
 use rayon::prelude::*;
 
 use crate::codec::put_uleb;
+use crate::decode::check_declaration;
 use crate::hash::{self, ChannelHasher};
 use crate::header::{
     AnalogCoding, BlockRow, ChannelHeader, ChannelKind, ContentId, Declaration, DeclaredKind,
     Header, JSON_SAFE, LEVEL_BIT, OverviewLevel, OverviewRow, Preamble, code_value,
 };
-use crate::model::{Break, Gap, Ratio, sample_tick};
-use crate::overview::{self, Builder, Settled};
+use crate::model::{Break, Gap, Ratio, Sample, sample_tick};
+use crate::overview::{self, Builder, Settled, Unpaired};
 use crate::record::{self, BlockHead, Kind};
+use crate::samples;
+use crate::shared::Chunks;
+use crate::snapshot::{Snapshot, Written};
 
 #[derive(Debug, thiserror::Error)]
 pub enum WriteError {
@@ -27,10 +33,8 @@ pub enum WriteError {
     BlockSize,
     #[error("a batch holds at least one block")]
     Batch,
-    #[error("the finest overview level's shift is {0}; it is at most 62")]
-    OverviewShift(u8),
-    #[error("{channel}: codes of {bits} bits; a coding holds 1 to 16")]
-    CodingBits { channel: String, bits: u8 },
+    #[error("the declaration: {0}")]
+    Declaration(String),
     #[error("no channel {0}")]
     NoChannel(usize),
     #[error("{channel} is {kind}")]
@@ -41,8 +45,6 @@ pub enum WriteError {
         tick: i64,
         previous: i64,
     },
-    #[error("{channel}: an edge at tick {tick} lies before tick 1")]
-    EdgeAtZero { channel: String, tick: i64 },
     #[error("{channel}: an edge at tick {tick} lies inside the gap to {to}")]
     EdgeInGap { channel: String, tick: i64, to: i64 },
     #[error("{channel}: a gap from {from} to {to} is empty or runs backwards")]
@@ -77,6 +79,16 @@ pub enum WriteError {
     },
     #[error("{channel}: a sample before the channel's first run")]
     NoRun { channel: String },
+    #[error("{channel}: the first run loses {lost} samples; nothing comes before it to lose")]
+    FirstRunLost { channel: String, lost: u64 },
+    #[error("{channel}: sample {index}: {why}")]
+    Sample {
+        channel: String,
+        index: u64,
+        why: String,
+    },
+    #[error(transparent)]
+    Derived(#[from] Unpaired),
     #[error("{channel}: sample {index}, {value}, is not exactly a code of {coding:?}")]
     Coding {
         channel: String,
@@ -108,8 +120,10 @@ pub enum WriteError {
     GapPastEnd { channel: String, to: i64, end: i64 },
     #[error("{channel}: never known, so its initial level is false")]
     UnknownInitial { channel: String },
-    #[error("source.extra already holds {0}")]
-    Extra(String),
+    #[error("source {index}'s extra already holds {key}")]
+    Extra { index: usize, key: String },
+    #[error("extra keys for {given} sources, but the recording has {sources}")]
+    Extras { given: usize, sources: usize },
     #[error("an annotation is not a JSON object with a tick `start`: {0}")]
     Annotation(String),
     #[error("the footer is {0} bytes, more than its u32 length holds")]
@@ -172,7 +186,7 @@ struct DigitalState {
     /// The last edge's tick, or 0 before the first.
     last_edge: i64,
     edges: u64,
-    gaps: Vec<Gap>,
+    gaps: Chunks<Gap>,
     /// Gaps whose `to` no block has passed yet.
     pending: VecDeque<Gap>,
     hasher: ChannelHasher,
@@ -181,12 +195,10 @@ struct DigitalState {
 struct AnalogState {
     period: Ratio,
     coding: AnalogCoding,
-    /// The run under way: its first sample's index and tick.
-    run: Option<(u64, i64)>,
-    /// A run the next sample starts.
-    next_run: Option<i64>,
-    first: Option<i64>,
-    breaks: Vec<Break>,
+    /// Every run so far, the first at index 0.
+    runs: Chunks<Break>,
+    /// A run the next sample starts: its tick and the samples lost before it.
+    next_run: Option<(i64, u64)>,
     count: u64,
     last_tick: Option<i64>,
     hasher: ChannelHasher,
@@ -221,10 +233,38 @@ impl Open {
     }
 }
 
+/// A block's decoded payload from its channels' sections as the writer builds them: the section
+/// table, then each section, codes split into byte planes.
+pub(crate) fn assemble(sections: &[Vec<u8>], codings: &[Option<AnalogCoding>]) -> Vec<u8> {
+    let size: usize = sections.iter().map(Vec::len).sum();
+    let mut raw = Vec::with_capacity(size + 4 * sections.len());
+    for section in sections {
+        raw.extend_from_slice(&(section.len() as u32).to_le_bytes());
+    }
+    for (section, coding) in sections.iter().zip(codings) {
+        match coding {
+            Some(coding) if coding.planes() => {
+                samples::to_planes(section, coding.sample_len(), &mut raw)
+            }
+            _ => raw.extend_from_slice(section),
+        }
+    }
+    raw
+}
+
 /// What waits to be written, in file order.
-enum Queued {
-    Block { head: BlockHead, raw: Vec<u8> },
-    Overview { shift: u8, k: u64, raw: Vec<u8> },
+pub(crate) enum Queued {
+    Block {
+        head: BlockHead,
+        raw: Vec<u8>,
+        /// Each channel's count of items before the block.
+        firsts: Vec<u64>,
+    },
+    Overview {
+        shift: u8,
+        k: u64,
+        raw: Vec<u8>,
+    },
     Record(Vec<u8>),
 }
 
@@ -244,8 +284,33 @@ impl Finished {
     }
 }
 
+/// What a writer's `finish` is told besides the length and the digital channels' ends.
+#[derive(Clone, Debug, Default)]
+pub struct Finish {
+    /// What each source states only at its end, such as a probe's totals, added to its `extra`,
+    /// by source index. It may list fewer sources than the recording has.
+    pub extra: Vec<BTreeMap<String, String>>,
+    /// Bundle annotations into the footer's header, so the recording is one file.
+    pub bundle: Option<Bundle>,
+    /// Take a gap that reaches a digital channel's end as ending what is known at its `from`,
+    /// even where the gap ends inside the recording, as repair does for a file cut off. Otherwise
+    /// such a gap is refused, as most likely a caller's mistake.
+    pub drop_gaps_past_end: bool,
+}
+
+/// What a finished file bundles into its header's `annotations`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Bundle {
+    /// The writer's own annotations: each source's generator file `<stem>.<source>.jsonl`, and
+    /// a hand-written `<stem>.annotations.toml` that holds no annotation and includes them, where
+    /// `<stem>` names the recording `<stem>.tickwave`.
+    Generated { stem: String },
+    /// These files exactly: a re-cutter carries a file's bundle over.
+    Files(BTreeMap<String, String>),
+}
+
 /// The footer's header for what a writer declared and what the end settled: the declaration's
-/// values, `extra` added to `source.extra`, the channels' totals, and the levels `plan` sets.
+/// values, `extra` added to each source's, the channels' totals, and the levels `plan` sets.
 pub(crate) fn finished_header(
     declaration: &Declaration,
     length: i64,
@@ -253,15 +318,18 @@ pub(crate) fn finished_header(
     digests: &[blake3::Hash],
     blocks: u32,
     plan: &overview::Plan,
-    extra: BTreeMap<String, String>,
+    extra: Vec<BTreeMap<String, String>>,
 ) -> Header {
-    let mut source = declaration.source.clone();
-    source.extra.extend(extra);
+    let mut sources = declaration.sources.clone();
+    for (source, extra) in sources.iter_mut().zip(extra) {
+        source.extra.extend(extra);
+    }
     Header {
         timebase: declaration.timebase,
         length,
         channels,
-        source,
+        derived: declaration.derived.clone(),
+        sources,
         title: declaration.title.clone(),
         meta: declaration.meta.clone(),
         content_id: hash::content_id(declaration.timebase, length, digests),
@@ -278,6 +346,34 @@ pub(crate) fn finished_header(
             .collect(),
         annotations: None,
     }
+}
+
+/// The files a bundle of `generated` holds for a recording `<stem>.tickwave` with `id`: each
+/// source's generator file, and a hand-written file that includes them and holds no annotation
+/// of its own.
+pub(crate) fn bundled_files(
+    stem: &str,
+    id: ContentId,
+    generated: &BTreeMap<String, Vec<String>>,
+) -> BTreeMap<String, String> {
+    // A JSON string is a TOML basic string: serde_json escapes nothing TOML lacks.
+    let quoted = |s: &str| serde_json::to_string(s).expect("a string serialises");
+    let mut files = BTreeMap::new();
+    let mut include = Vec::new();
+    for (source, lines) in generated {
+        let name = format!("{stem}.{source}.jsonl");
+        files.insert(name.clone(), generator_file(source, None, id, lines));
+        include.push(quoted(&name));
+    }
+    files.insert(
+        format!("{stem}.annotations.toml"),
+        format!(
+            "format = \"tickwave-annotations/1\"\nrecording_id = {}\ninclude = [{}]\n",
+            quoted(&id.to_string()),
+            include.join(", ")
+        ),
+    );
+    files
 }
 
 /// A generator file: its first line, then `lines` (ANNOTATIONS.md).
@@ -321,11 +417,25 @@ pub(crate) fn clip_annotation(
     Some(serde_json::to_string(&a).expect("a map serialises"))
 }
 
+/// Each source's annotations clipped to `length`, as its generator file's lines.
+pub(crate) fn generated<'a>(
+    annotations: impl IntoIterator<Item = &'a record::Annotation>,
+    length: i64,
+) -> BTreeMap<String, Vec<String>> {
+    let mut generated: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for a in annotations {
+        if let Some(line) = clip_annotation(a.annotation.clone(), length) {
+            generated.entry(a.source.clone()).or_default().push(line);
+        }
+    }
+    generated
+}
+
 pub struct Writer {
-    declaration: Declaration,
+    declaration: Arc<Declaration>,
     options: WriteOptions,
     states: Vec<State>,
-    planes: Vec<bool>,
+    codings: Vec<Option<AnalogCoding>>,
     out: Vec<u8>,
     /// Bytes handed out before `out`.
     taken: u64,
@@ -334,12 +444,14 @@ pub struct Writer {
     last_tick: i64,
     /// Where the last closed block ended; 0 before the first.
     closed: i64,
-    rows: Vec<BlockRow>,
+    /// Each channel's count of items in the blocks closed so far.
+    counts: Vec<u64>,
+    written: Chunks<Written>,
     overview_rows: Vec<(u8, u64, OverviewRow)>,
     queue: Vec<Queued>,
     queued_blocks: usize,
     overview: Builder,
-    annotations: Vec<record::Annotation>,
+    annotations: Chunks<record::Annotation>,
 }
 
 fn check_safe(what: &'static str, value: u64) -> Result<(), WriteError> {
@@ -351,7 +463,8 @@ fn check_safe(what: &'static str, value: u64) -> Result<(), WriteError> {
 }
 
 impl Writer {
-    /// Writes the preamble and the declaration to the output.
+    /// Writes the preamble and the declaration to the output. The declaration is held to the
+    /// rules a reader holds it to.
     pub fn new(declaration: Declaration, options: WriteOptions) -> Result<Self, WriteError> {
         if options.block_bytes == 0 || options.block_bytes > 1 << 30 {
             return Err(WriteError::BlockSize);
@@ -359,14 +472,11 @@ impl Writer {
         if options.batch == 0 {
             return Err(WriteError::Batch);
         }
-        if declaration.overview_shift > overview::MAX_SHIFT {
-            return Err(WriteError::OverviewShift(declaration.overview_shift));
-        }
-        check_safe("timebase numerator", declaration.timebase.num())?;
-        check_safe("timebase denominator", declaration.timebase.den())?;
+        check_declaration(&declaration).map_err(|e| WriteError::Declaration(e.to_string()))?;
         let mut states = Vec::with_capacity(declaration.channels.len());
-        let mut planes = Vec::with_capacity(declaration.channels.len());
-        for channel in &declaration.channels {
+        let mut codings = Vec::with_capacity(declaration.channels.len());
+        for (c, channel) in declaration.channels.iter().enumerate() {
+            let hasher = ChannelHasher::declared(&declaration, c);
             match &channel.data {
                 DeclaredKind::Digital { initial } => {
                     states.push(State::Digital(DigitalState {
@@ -374,44 +484,23 @@ impl Writer {
                         level: *initial,
                         last_edge: 0,
                         edges: 0,
-                        gaps: Vec::new(),
+                        gaps: Chunks::new(),
                         pending: VecDeque::new(),
-                        hasher: ChannelHasher::digital(&channel.name, *initial, &channel.shaping),
+                        hasher,
                     }));
-                    planes.push(false);
+                    codings.push(None);
                 }
-                DeclaredKind::Analog {
-                    unit,
-                    period,
-                    coding,
-                } => {
-                    check_safe("analog period numerator", period.num())?;
-                    check_safe("analog period denominator", period.den())?;
-                    if let AnalogCoding::Codes { bits, .. } = coding
-                        && !(1..=16).contains(bits)
-                    {
-                        return Err(WriteError::CodingBits {
-                            channel: channel.name.clone(),
-                            bits: *bits,
-                        });
-                    }
+                DeclaredKind::Analog { period, coding, .. } => {
                     states.push(State::Analog(AnalogState {
                         period: *period,
                         coding: *coding,
-                        run: None,
+                        runs: Chunks::new(),
                         next_run: None,
-                        first: None,
-                        breaks: Vec::new(),
                         count: 0,
                         last_tick: None,
-                        hasher: ChannelHasher::analog(
-                            &channel.name,
-                            unit,
-                            *period,
-                            &channel.shaping,
-                        ),
+                        hasher,
                     }));
-                    planes.push(matches!(coding, AnalogCoding::Codes { .. }));
+                    codings.push(Some(*coding));
                 }
             }
         }
@@ -420,21 +509,26 @@ impl Writer {
         out.extend_from_slice(&Preamble::CURRENT.to_bytes());
         record::write(&mut out, Kind::Declaration, &[&json]);
         let mut writer = Self {
-            overview: Builder::new(declaration.overview_shift, &declaration.channels),
-            declaration,
+            overview: Builder::new(
+                declaration.overview_shift,
+                &declaration.channels,
+                &declaration.derived,
+            ),
+            counts: vec![0; states.len()],
+            declaration: Arc::new(declaration),
             options,
             states,
-            planes,
+            codings,
             out,
             taken: 0,
             open: Open::empty(0),
             last_tick: 0,
             closed: 0,
-            rows: Vec::new(),
+            written: Chunks::new(),
             overview_rows: Vec::new(),
             queue: Vec::new(),
             queued_blocks: 0,
-            annotations: Vec::new(),
+            annotations: Chunks::new(),
         };
         writer.open = writer.new_block(0);
         Ok(writer)
@@ -525,7 +619,8 @@ impl Writer {
         Ok(())
     }
 
-    /// An edge of digital channel `c` at `tick`.
+    /// An edge of digital channel `c` at `tick`. An edge at tick 0 flips the level from the
+    /// declared `initial`, as any edge does.
     pub fn edge(&mut self, c: usize, tick: i64) -> Result<(), WriteError> {
         self.check_channel(c)?;
         self.check_order(c, tick)?;
@@ -535,12 +630,6 @@ impl Writer {
                 kind: "analog",
             });
         };
-        if tick < 1 {
-            return Err(WriteError::EdgeAtZero {
-                channel: self.name(c),
-                tick,
-            });
-        }
         if tick < d.last_edge {
             return Err(WriteError::Order {
                 channel: self.name(c),
@@ -642,9 +731,10 @@ impl Writer {
         Ok(())
     }
 
-    /// Analog channel `c`'s next sample starts a run at `tick`. A run no sample has followed yet
-    /// is replaced.
-    pub fn run(&mut self, c: usize, tick: i64) -> Result<(), WriteError> {
+    /// Analog channel `c`'s next sample starts a run at `tick`, after `lost` samples the
+    /// instrument lost: 0 when it only paused, and 0 for the first run. A run no sample has
+    /// followed yet is replaced.
+    pub fn run(&mut self, c: usize, tick: i64, lost: u64) -> Result<(), WriteError> {
         self.check_channel(c)?;
         let name = self.name(c);
         let State::Analog(a) = &mut self.states[c] else {
@@ -667,12 +757,23 @@ impl Writer {
                 previous,
             });
         }
-        a.next_run = Some(tick);
+        if a.count == 0 && lost > 0 {
+            return Err(WriteError::FirstRunLost {
+                channel: name,
+                lost,
+            });
+        }
+        check_safe("lost count", lost)?;
+        a.next_run = Some((tick, lost));
         Ok(())
     }
 
-    /// The next sample of analog channel `c`. Its tick follows from its run and the period.
-    pub fn sample(&mut self, c: usize, value: f32) -> Result<(), WriteError> {
+    /// The next sample of analog channel `c`, in the type its coding stores: an f32 for an `f32`
+    /// channel, or for a `codes` one if a code reproduces it exactly; an f64 for an `f64` one; a
+    /// u64 or an i64 code for an `int` one, in its range. Its tick follows from its run and the
+    /// period.
+    pub fn sample(&mut self, c: usize, value: impl Into<Sample>) -> Result<(), WriteError> {
+        let sample = value.into();
         self.check_channel(c)?;
         let name = self.name(c);
         let State::Analog(a) = &self.states[c] else {
@@ -682,16 +783,22 @@ impl Writer {
             });
         };
         let index = a.count;
-        let (run, starts) = match (a.next_run, a.run) {
-            (Some(tick), _) => ((index, tick), true),
-            (None, Some(run)) => (run, false),
+        let (run, starts) = match (a.next_run, a.runs.last()) {
+            (Some((tick, lost)), _) => (Break { index, tick, lost }, true),
+            (None, Some(run)) => (*run, false),
             (None, None) => return Err(WriteError::NoRun { channel: name }),
         };
-        let tick = sample_tick(run.1, a.period, index - run.0);
+        let tick = sample_tick(run.tick, a.period, index - run.index);
         self.check_order(c, tick)?;
-        let code = match a.coding {
-            AnalogCoding::F32 => None,
-            coding @ AnalogCoding::Codes { .. } => {
+        if let Some(why) = samples::misfit(sample, a.coding) {
+            return Err(WriteError::Sample {
+                channel: name,
+                index,
+                why,
+            });
+        }
+        let code = match (a.coding, sample) {
+            (coding @ AnalogCoding::Codes { .. }, Sample::F32(value)) => {
                 Some(code_of(value, coding).ok_or(WriteError::Coding {
                     channel: name,
                     index,
@@ -699,41 +806,33 @@ impl Writer {
                     coding,
                 })?)
             }
+            _ => None,
         };
+        self.overview.pairs_with(c, tick)?;
         self.word_room(c, false)?;
         self.before_item(tick)?;
         if starts {
             let mut bytes = Vec::new();
-            record::write(
-                &mut bytes,
-                Kind::Run,
-                &[&record::run_bytes(c as u32, index, run.1)],
-            );
+            record::write(&mut bytes, Kind::Run, &[&record::run_bytes(c as u32, run)]);
             self.put_record(bytes);
         }
         let State::Analog(a) = &mut self.states[c] else {
             unreachable!()
         };
         if starts {
-            if index == 0 {
-                a.first = Some(run.1);
-            } else {
-                a.breaks.push(Break { index, tick: run.1 });
-            }
-            a.run = Some(run);
+            a.runs.push(run);
             a.next_run = None;
         }
         let section = &mut self.open.sections[c];
-        match code {
-            None => section.extend_from_slice(&value.to_le_bytes()),
-            Some(code) => section.extend_from_slice(&code.to_le_bytes()),
-        }
-        self.open.size += if code.is_some() { 2 } else { 4 };
+        samples::put(section, sample, a.coding, code);
+        self.open.size += a.coding.sample_len();
         self.open.words[c] += 1;
         a.count += 1;
         a.last_tick = Some(tick);
-        a.hasher.sample(value);
-        self.overview.sample(c, tick, value);
+        a.hasher.sample(sample);
+        self.overview
+            .sample(c, tick, sample)
+            .expect("pairs_with checked the derived channels");
         self.item_in(tick);
         Ok(())
     }
@@ -784,21 +883,21 @@ impl Writer {
     /// Closes the open block at `end` and opens the next there.
     fn close(&mut self, end: i64) -> Result<(), WriteError> {
         let open = std::mem::replace(&mut self.open, Open::empty(end));
-        let mut raw = Vec::with_capacity(open.size + 4 * open.sections.len());
-        for section in &open.sections {
-            raw.extend_from_slice(&(section.len() as u32).to_le_bytes());
-        }
-        for (section, planes) in open.sections.iter().zip(&self.planes) {
-            if *planes {
-                // Codes were appended little-endian; store every low byte, then every high byte.
-                raw.extend(section.iter().step_by(2));
-                raw.extend(section.iter().skip(1).step_by(2));
-            } else {
-                raw.extend_from_slice(section);
-            }
-        }
+        let raw = assemble(&open.sections, &self.codings);
         let decoded_length =
             u32::try_from(raw.len()).map_err(|_| WriteError::BlockTooLarge(raw.len()))?;
+        let firsts = self.counts.clone();
+        for (count, (&word, coding)) in self
+            .counts
+            .iter_mut()
+            .zip(open.words.iter().zip(&self.codings))
+        {
+            *count += u64::from(if coding.is_some() {
+                word
+            } else {
+                word & !LEVEL_BIT
+            });
+        }
         self.queue.push(Queued::Block {
             head: BlockHead {
                 start: open.start,
@@ -807,6 +906,7 @@ impl Writer {
                 words: open.words,
             },
             raw,
+            firsts,
         });
         self.queued_blocks += 1;
         self.closed = end;
@@ -819,7 +919,9 @@ impl Writer {
             }
         }
         self.open = self.new_block(end);
-        self.overview.settle(end);
+        // A derived channel's operand sample still waiting for its partner never gets one: the
+        // partner would come at a tick before the next block.
+        self.overview.settle(end)?;
         for Settled { shift, k, level } in self.overview.take_settled() {
             let mut raw = Vec::new();
             overview::write(&[level], &mut raw);
@@ -857,17 +959,21 @@ impl Writer {
         for (q, frame) in std::mem::take(&mut self.queue).into_iter().zip(frames) {
             let at = self.position();
             match (q, frame) {
-                (Queued::Block { head, raw }, Some(frame)) => {
+                (Queued::Block { head, raw, firsts }, Some(frame)) => {
                     let length = u32::try_from(frame.len())
                         .map_err(|_| WriteError::BlockTooLarge(frame.len()))?;
                     let head_bytes = head.to_bytes();
                     record::write(&mut self.out, Kind::Block, &[&head_bytes, &frame]);
-                    self.rows.push(BlockRow {
-                        start: head.start,
-                        offset: at + (record::PAYLOAD_AT + BlockHead::len(channels)) as u64,
-                        length,
-                        decoded_length: raw.len() as u32,
-                        channels: head.words,
+                    self.written.push(Written {
+                        row: BlockRow {
+                            start: head.start,
+                            offset: at + (record::PAYLOAD_AT + BlockHead::len(channels)) as u64,
+                            length,
+                            decoded_length: raw.len() as u32,
+                            channels: head.words,
+                        },
+                        end: head.end,
+                        firsts,
                     });
                 }
                 (Queued::Overview { shift, k, raw }, Some(frame)) => {
@@ -896,14 +1002,82 @@ impl Writer {
         Ok(())
     }
 
+    /// What the writer holds so far, for a view of the recording while it is written: the
+    /// blocks written, the gaps, runs and annotations, the overview's held levels, and the
+    /// blocks not yet written, the open one last. Taking one shares what the writer holds rather
+    /// than copying it, apart from the blocks not yet written.
+    ///
+    /// The blocks it lists may sit in bytes still in `output`: publish a snapshot to a view only
+    /// once those bytes are in the file the view reads.
+    pub fn snapshot(&self) -> Snapshot {
+        let queued = self
+            .queue
+            .iter()
+            .filter_map(|q| match q {
+                Queued::Block { head, raw, firsts } => {
+                    Some((head.clone(), raw.clone(), firsts.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        let mut gaps = Vec::with_capacity(self.states.len());
+        let mut runs = Vec::with_capacity(self.states.len());
+        for state in &self.states {
+            match state {
+                State::Digital(d) => {
+                    gaps.push(d.gaps.clone());
+                    runs.push(Chunks::new());
+                }
+                State::Analog(a) => {
+                    gaps.push(Chunks::new());
+                    runs.push(a.runs.clone());
+                }
+            }
+        }
+        let mut firsts = self.counts.clone();
+        for q in &self.queue {
+            if let Queued::Block { head, .. } = q {
+                for (count, (&word, coding)) in
+                    firsts.iter_mut().zip(head.words.iter().zip(&self.codings))
+                {
+                    *count += u64::from(if coding.is_some() {
+                        word
+                    } else {
+                        word & !LEVEL_BIT
+                    });
+                }
+            }
+        }
+        Snapshot::new(
+            Arc::clone(&self.declaration),
+            self.written.clone(),
+            queued,
+            (
+                BlockHead {
+                    start: self.open.start,
+                    end: i64::MAX,
+                    decoded_length: 0,
+                    words: self.open.words.clone(),
+                },
+                assemble(&self.open.sections, &self.codings),
+                firsts,
+            ),
+            gaps,
+            runs,
+            self.annotations.clone(),
+            self.overview.held(),
+            self.position(),
+        )
+    }
+
     /// The recording ends at `length`. `ends` gives each digital channel's `end`, in channel
-    /// order. `extra` adds what the source states only at its end to `source.extra`. Closes the
-    /// last block, then writes the footer and the trailer.
+    /// order. Closes the last block, then writes the footer and the trailer, with `finish`'s
+    /// extras and bundle.
     pub fn finish(
         mut self,
         length: i64,
         ends: &[i64],
-        extra: BTreeMap<String, String>,
+        finish: Finish,
     ) -> Result<Finished, WriteError> {
         let last = if self.open.items {
             self.open.last
@@ -928,10 +1102,24 @@ impl Writer {
                 expected: digital,
             });
         }
-        for key in extra.keys() {
-            if self.declaration.source.extra.contains_key(key) {
-                return Err(WriteError::Extra(key.clone()));
+        if finish.extra.len() > self.declaration.sources.len() {
+            return Err(WriteError::Extras {
+                given: finish.extra.len(),
+                sources: self.declaration.sources.len(),
+            });
+        }
+        for (s, extra) in finish.extra.iter().enumerate() {
+            for key in extra.keys() {
+                if self.declaration.sources[s].extra.contains_key(key) {
+                    return Err(WriteError::Extra {
+                        index: s,
+                        key: key.clone(),
+                    });
+                }
             }
+        }
+        if let Some(e) = self.overview.unpaired() {
+            return Err(e.into());
         }
         // Check every channel's end before anything is closed, so a refusal leaves no half-written
         // footer.
@@ -954,8 +1142,8 @@ impl Writer {
             // A gap that reaches the end: the level is not known from its `from` on.
             let mut kept = d.gaps.len();
             if let Some(i) = d.gaps.iter().position(|g| g.to >= end) {
-                let g = d.gaps[i];
-                if g.to < length {
+                let g = *d.gaps.get(i).unwrap();
+                if g.to < length && !finish.drop_gaps_past_end {
                     return Err(WriteError::GapPastEnd {
                         channel: name,
                         to: g.to,
@@ -983,11 +1171,11 @@ impl Writer {
                 check_safe("analog sample count", a.count)?;
             }
         }
-        if length > self.open.start || self.rows.is_empty() && self.queue.is_empty() {
+        if length > self.open.start || self.written.is_empty() && self.queue.is_empty() {
             self.close(length)?;
         }
         let (done, settled) =
-            std::mem::replace(&mut self.overview, Builder::new(0, &[])).finish(length);
+            std::mem::replace(&mut self.overview, Builder::new(0, &[], &[])).finish(length)?;
         for Settled { shift, k, level } in settled {
             let mut raw = Vec::new();
             overview::write(&[level], &mut raw);
@@ -1005,7 +1193,7 @@ impl Writer {
             let data = match state {
                 State::Digital(d) => {
                     let (end, kept) = settled.unwrap();
-                    let gaps = d.gaps[..kept].to_vec();
+                    let gaps: Vec<Gap> = d.gaps.iter().take(kept).copied().collect();
                     digests.push(d.hasher.finish_digital(end, &gaps));
                     ChannelKind::Digital {
                         initial: d.initial,
@@ -1015,9 +1203,13 @@ impl Writer {
                     }
                 }
                 State::Analog(a) => {
-                    let first = a.first.unwrap_or(0);
-                    digests.push(a.hasher.finish_analog(first, a.count, &a.breaks));
-                    let DeclaredKind::Analog { unit, .. } = &declared.data else {
+                    let first = a.runs.get(0).map_or(0, |r| r.tick);
+                    let breaks: Vec<Break> = a.runs.iter().skip(1).copied().collect();
+                    digests.push(a.hasher.finish_analog(first, a.count, &breaks));
+                    let DeclaredKind::Analog {
+                        unit, significant, ..
+                    } = &declared.data
+                    else {
                         unreachable!("states follow the declaration")
                     };
                     ChannelKind::Analog {
@@ -1025,45 +1217,50 @@ impl Writer {
                         first,
                         period: a.period,
                         count: a.count,
-                        breaks: a.breaks,
+                        breaks,
                         coding: a.coding,
+                        significant: *significant,
                     }
                 }
             };
             channels.push(ChannelHeader {
                 name: declared.name.clone(),
                 source_name: declared.source_name.clone(),
+                source: declared.source,
                 data,
                 shaping: declared.shaping.clone(),
             });
         }
         let mut overview_rows = std::mem::take(&mut self.overview_rows);
         overview_rows.sort_by_key(|&(shift, k, _)| (shift, k));
-        let header = finished_header(
+        let rows: Vec<BlockRow> = self.written.iter().map(|w| w.row.clone()).collect();
+        let mut header = finished_header(
             &self.declaration,
             length,
             channels,
             &digests,
-            self.rows.len() as u32,
+            rows.len() as u32,
             &done.plan,
-            extra,
+            finish.extra,
         );
+        let generated = generated(self.annotations.iter(), length);
+        header.annotations = match finish.bundle {
+            None => None,
+            Some(Bundle::Generated { stem }) => {
+                Some(bundled_files(&stem, header.content_id, &generated))
+            }
+            Some(Bundle::Files(files)) => Some(files),
+        };
         // The reader's own rules, so the writer never writes a header the reader refuses.
         crate::decode::check_header(&header).map_err(|e| WriteError::Header(e.to_string()))?;
         let mut overview_raw = Vec::new();
         overview::write(&done.head, &mut overview_raw);
         let overview_frame = compress(&overview_raw, self.options.level)?;
-        let rows: Vec<OverviewRow> = overview_rows.into_iter().map(|(_, _, r)| r).collect();
-        let footer = record::footer_bytes(&header, &self.rows, &rows, &overview_frame)
+        let overview_rows: Vec<OverviewRow> =
+            overview_rows.into_iter().map(|(_, _, r)| r).collect();
+        let footer = record::footer_bytes(&header, &rows, &overview_rows, &overview_frame)
             .map_err(WriteError::FooterTooLarge)?;
         record::write_footer(&mut self.out, self.taken, &footer);
-
-        let mut generated: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for a in self.annotations.drain(..) {
-            if let Some(line) = clip_annotation(a.annotation, length) {
-                generated.entry(a.source).or_default().push(line);
-            }
-        }
         Ok(Finished {
             header,
             tail: std::mem::take(&mut self.out),

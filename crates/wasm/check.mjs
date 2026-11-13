@@ -2,28 +2,36 @@
 // sum and XOR, for comparison against values computed independently from the source. Where the
 // recording has overview blocks, it also checks the finest level against the blocks: a digital
 // channel's change bits against its edges, an analog channel's minimums and maximums against its
-// samples.
+// samples' values.
 //   node crates/wasm/check.mjs FILE.tickwave
 import { readFileSync } from "node:fs";
-import { initSync, headLength, Recording } from "./pkg/escapement_tickwave_wasm.js";
+import { initSync, footerStart, Recording } from "./pkg/escapement_tickwave_wasm.js";
 
 initSync({ module: readFileSync(new URL("./pkg/escapement_tickwave_wasm_bg.wasm", import.meta.url)) });
 const file = readFileSync(process.argv[2]);
-const head = file.subarray(0, headLength(file.subarray(0, 65536)));
-const rec = new Recording(head);
+const from = footerStart(file.subarray(Math.max(0, file.length - 32768)), file.length);
+const rec = new Recording(file.subarray(from), file.length);
 const header = JSON.parse(rec.header);
 const finest = header.overview_blocks?.[0];
 const sums = header.channels.map(() => ({ count: 0, sum: 0n, xor: 0n, buckets: new Set() }));
 const buckets = finest ? Math.floor(header.length / 2 ** finest.shift) + 1 : 0;
+// An f32 or codes channel's values come as f32; f64 and int channels' as f64.
+const wide = (c) => c.coding.type === "f64" || c.coding.type === "int";
 const extremes = header.channels.map((c) => {
   if (!finest || c.kind !== "analog") return null;
   const [num, den] = c.period;
+  const runs = [[0, c.first], ...(c.breaks ?? []).map(([index, tick]) => [index, tick])];
   if (c.count * num >= 2 ** 53) throw new Error(`${c.name}: sample ticks pass 2^53`);
+  const Floats = wide(c) ? Float64Array : Float32Array;
   return {
-    num,
-    den,
-    min: new Float32Array(buckets).fill(Infinity),
-    max: new Float32Array(buckets).fill(-Infinity),
+    // Sample i of the run that starts at [index, tick] sits at tick + floor((i - index) x period).
+    tick: (i) => {
+      let r = runs.length - 1;
+      while (runs[r][0] > i) r--;
+      return runs[r][1] + Math.floor(((i - runs[r][0]) * num) / den);
+    },
+    min: new Floats(buckets).fill(Infinity),
+    max: new Floats(buckets).fill(-Infinity),
   };
 });
 for (let i = 0; i < rec.blockCount; i++) {
@@ -33,10 +41,9 @@ for (let i = 0; i < rec.blockCount; i++) {
     const e = extremes[k];
     if (e) {
       const first = block.firstIndex(k);
-      block.values(k).forEach((v, j) => {
+      (wide(c) ? block.values64(k) : block.values(k)).forEach((v, j) => {
         if (Number.isNaN(v)) return;
-        const tick = c.first + Math.floor(((first + j) * e.num) / e.den);
-        const b = Math.floor(tick / 2 ** finest.shift);
+        const b = Math.floor(e.tick(first + j) / 2 ** finest.shift);
         if (v < e.min[b]) e.min[b] = v;
         if (v > e.max[b]) e.max[b] = v;
       });
@@ -60,7 +67,7 @@ if (finest) {
     header.channels.forEach((c, k) => {
       const e = extremes[k];
       if (e) {
-        const [min, max] = block.analog(k);
+        const [min, max] = wide(c) ? block.analog64(k) : block.analog(k);
         for (let i = 0; i < min.length; i++) {
           const b = block.first + i;
           if (min[i] !== e.min[b] || max[i] !== e.max[b]) {

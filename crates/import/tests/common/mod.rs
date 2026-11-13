@@ -71,7 +71,9 @@ pub fn drain(recording: Recording) -> Drained {
                     .push((channel.name, d.initial, d.end, d.edges.collect()))
             }
             ChannelData::Analog(a) => {
-                let Samples::F32(values) = a.samples;
+                let Samples::F32(values) = a.samples else {
+                    panic!("f32 samples")
+                };
                 let values: Vec<u32> = values.map(f32::to_bits).collect();
                 assert_eq!(values.len() as u64, a.count, "{}: count", channel.name);
                 assert_eq!((a.first, a.period), (0, Ratio::ONE));

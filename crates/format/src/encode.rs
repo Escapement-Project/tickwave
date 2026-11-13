@@ -6,9 +6,12 @@ use std::collections::BTreeMap;
 use std::io::Write;
 
 use crate::header::{AnalogCoding, Declaration, DeclaredChannel, DeclaredKind, SourceHeader};
-use crate::model::{Break, ChannelData, Edges, Gap, Recording, Samples, run_sample_tick};
+use crate::model::{Break, ChannelData, Edges, Gap, Recording, Sample, Samples, run_sample_tick};
 use crate::overview;
-pub use crate::writer::{Finished, WriteError, WriteOptions, Writer, code_of, generator_file};
+use crate::samples::coding_name;
+pub use crate::writer::{
+    Bundle, Finish, Finished, WriteError, WriteOptions, Writer, code_of, generator_file,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EncodeError {
@@ -22,6 +25,12 @@ pub enum EncodeError {
     },
     #[error("{channel}: an analog coding was given for a digital channel")]
     CodingOnDigital { channel: String },
+    #[error("{channel}: its samples are {samples}, which a {coding} coding does not store")]
+    CodingMismatch {
+        channel: String,
+        samples: String,
+        coding: String,
+    },
     #[error("writing: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -35,8 +44,10 @@ pub struct Options {
     pub batch: Option<usize>,
     pub title: Option<String>,
     pub meta: BTreeMap<String, String>,
+    /// Set as every source's `converter`.
     pub converter: Option<String>,
-    /// A coding for each analog channel, by channel index; absent or None stores f32.
+    /// A coding for each analog channel, by channel index. Absent or None stores the samples as
+    /// their type has them; f32 samples can also go in `codes`.
     pub analog: Vec<Option<AnalogCoding>>,
     /// The finest overview level's shift; None for the converter's, from the length.
     pub overview_shift: Option<u8>,
@@ -65,8 +76,8 @@ enum Stream {
         next_gap: Option<Gap>,
     },
     Analog {
-        samples: Box<dyn Iterator<Item = f32> + Send>,
-        next: Option<f32>,
+        samples: Box<dyn Iterator<Item = Sample> + Send>,
+        next: Option<Sample>,
         index: u64,
         count: u64,
         first: i64,
@@ -115,7 +126,8 @@ pub fn encode_to(
         timebase,
         length,
         channels,
-        source,
+        derived,
+        sources,
     } = recording;
     let mut declared = Vec::with_capacity(channels.len());
     let mut streams = Vec::with_capacity(channels.len());
@@ -144,7 +156,24 @@ pub fn encode_to(
                 DeclaredKind::Digital { initial: d.initial }
             }
             ChannelData::Analog(a) => {
-                let Samples::F32(mut samples) = a.samples;
+                let natural = match &a.samples {
+                    Samples::F32(_) => AnalogCoding::F32,
+                    Samples::F64(_) => AnalogCoding::F64,
+                    Samples::U64(int, _) | Samples::I64(int, _) => AnalogCoding::Int(*int),
+                };
+                let coding = match (coding, natural) {
+                    (None, natural) => natural,
+                    (Some(c @ AnalogCoding::Codes { .. }), AnalogCoding::F32) => c,
+                    (Some(c), natural) if c == natural => c,
+                    (Some(c), natural) => {
+                        return Err(EncodeError::CodingMismatch {
+                            channel: channel.name,
+                            samples: coding_name(natural),
+                            coding: coding_name(c),
+                        });
+                    }
+                };
+                let mut samples = a.samples.into_samples();
                 let next = samples.next();
                 streams.push(Stream::Analog {
                     samples,
@@ -158,7 +187,8 @@ pub fn encode_to(
                 DeclaredKind::Analog {
                     unit: a.unit,
                     period: a.period,
-                    coding: coding.unwrap_or(AnalogCoding::F32),
+                    coding,
+                    significant: a.significant,
                 }
             }
         };
@@ -166,6 +196,7 @@ pub fn encode_to(
         declared.push(DeclaredChannel {
             name: channel.name,
             source_name: channel.source_name,
+            source: channel.source,
             data,
             shaping: channel.shaping,
         });
@@ -173,17 +204,24 @@ pub fn encode_to(
     let declaration = Declaration {
         timebase,
         channels: declared,
-        source: SourceHeader {
-            format: source.format,
-            files: source.files,
-            instrument: source.instrument,
-            software: source.software,
-            begin_s: source.begin_s,
-            trigger_s: source.trigger_s,
-            rate: source.rate,
-            extra: source.extra,
-            converter: options.converter.clone(),
-        },
+        derived,
+        sources: sources
+            .into_iter()
+            .map(|source| SourceHeader {
+                format: source.format,
+                files: source.files,
+                timebase: source.timebase,
+                origin: source.origin,
+                align: source.align,
+                instrument: source.instrument,
+                software: source.software,
+                begin_s: source.begin_s,
+                trigger_s: source.trigger_s,
+                rate: source.rate,
+                extra: source.extra,
+                converter: options.converter.clone(),
+            })
+            .collect(),
         title: options.title.clone(),
         meta: options.meta.clone(),
         overview_shift: options
@@ -247,9 +285,9 @@ pub fn encode_to(
                     });
                 }
                 if *index == 0 {
-                    writer.run(c, *first)?;
+                    writer.run(c, *first, 0)?;
                 } else if let Ok(b) = breaks.binary_search_by_key(index, |b| b.index) {
-                    writer.run(c, breaks[b].tick)?;
+                    writer.run(c, breaks[b].tick, breaks[b].lost)?;
                 }
                 writer.sample(c, value)?;
                 *index += 1;
@@ -272,7 +310,7 @@ pub fn encode_to(
         }
     }
     drain(&mut writer, &mut out)?;
-    let finished = writer.finish(length, &ends, BTreeMap::new())?;
+    let finished = writer.finish(length, &ends, Finish::default())?;
     out.write_all(&finished.tail)?;
     out.flush()?;
     Ok(finished)

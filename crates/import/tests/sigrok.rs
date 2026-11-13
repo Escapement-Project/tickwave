@@ -118,7 +118,7 @@ fn agrees_with_verge_csv() {
 #[test]
 fn verge_metadata() {
     let import = sigrok::read(&testdata("markers-1000.sr")).unwrap();
-    let source = import.recording.source;
+    let source = import.recording.sources.into_iter().next().unwrap();
     assert_eq!(source.format, SourceFormat::SigrokSr);
     assert_eq!(source.files, ["markers-1000.sr"]);
     let extra: Vec<_> = source

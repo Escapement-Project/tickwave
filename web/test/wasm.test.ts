@@ -325,7 +325,7 @@ test("values pass through the browser's TOML route as strings, and a number in t
   const list = JSON.parse(resolve('{ clock = "1.0 MHz", reads = "3 reads" }')()) as { id: string; values: Record<string, string> | null }[];
   assert.deepEqual(list.find((a) => a.id === "attach")!.values, { clock: "1.0 MHz", reads: "3 reads" });
   assert.equal(list.find((a) => a.id === "first-wait")!.values, null);
-  assert.throws(resolve('{ clock = "1.0MHz" }'), /clock = "1.0MHz" is not a decimal and a unit/);
+  assert.throws(resolve('{ clock = "1.0MHz" }'), /clock = "1.0MHz" is not a decimal with one space and a unit where it has one/);
   assert.throws(resolve("{ clock = 1.0 }"), /expected a string/);
   assert.throws(resolve("{ clock = 1 }"), /expected a string/);
 });

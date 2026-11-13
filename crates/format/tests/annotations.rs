@@ -14,6 +14,7 @@ fn header() -> Header {
             ChannelHeader {
                 name: "SWCLK".into(),
                 source_name: "digital_3_0".into(),
+                source: 0,
                 data: ChannelKind::Digital {
                     initial: true,
                     end: 1_000_000,
@@ -25,6 +26,7 @@ fn header() -> Header {
             ChannelHeader {
                 name: "SWDIO".into(),
                 source_name: "digital_3_1".into(),
+                source: 0,
                 data: ChannelKind::Digital {
                     initial: true,
                     end: 1_000_000,
@@ -36,7 +38,9 @@ fn header() -> Header {
             ChannelHeader {
                 name: "V".into(),
                 source_name: "analog_0".into(),
+                source: 0,
                 data: ChannelKind::Analog {
+                    significant: None,
                     unit: "V".into(),
                     first: 0,
                     period: Ratio::ONE,
@@ -47,7 +51,11 @@ fn header() -> Header {
                 shaping: Default::default(),
             },
         ],
-        source: SourceHeader::new(SourceFormat::Vcd),
+        derived: Vec::new(),
+        sources: vec![SourceHeader::new(
+            SourceFormat::Vcd,
+            Ratio::integer(1_000_000_000).unwrap(),
+        )],
         title: None,
         meta: Default::default(),
         content_id: ID.parse().unwrap(),
@@ -300,14 +308,24 @@ fn values_resolve_and_an_alias_takes_its_targets() {
 }
 
 #[test]
-fn values_are_a_decimal_and_a_unit_under_a_plain_name() {
+fn values_are_a_decimal_and_its_unit_under_a_plain_name() {
     let with = |name: &str, value: &str| {
         HAND.replace(
             "values = { rate = \"26.7 MHz\" }",
             &format!("values = {{ \"{name}\" = \"{value}\" }}"),
         )
     };
-    for good in ["50 MHz", "-0.5 V", "1238.6 KiB/s", "12 %", "0 runs"] {
+    // A count has no unit: a marker's number.
+    for good in [
+        "50 MHz",
+        "-0.5 V",
+        "1238.6 KiB/s",
+        "12 %",
+        "0 runs",
+        "17",
+        "-3",
+        "0.25",
+    ] {
         let got = resolve(
             &with("read_data2", good),
             &included(GENERATED),
@@ -319,7 +337,9 @@ fn values_are_a_decimal_and_a_unit_under_a_plain_name() {
     for bad in [
         "50MHz",
         "fifty MHz",
-        "50",
+        "50 ",
+        " 50",
+        "1e3",
         "1e3 Hz",
         "50  MHz",
         ".5 V",
@@ -331,7 +351,7 @@ fn values_are_a_decimal_and_a_unit_under_a_plain_name() {
         let found = problems(&with("rate", bad), GENERATED);
         assert_problem(
             &found,
-            &format!("rate = {bad:?} is not a decimal and a unit"),
+            &format!("rate = {bad:?} is not a decimal with one space and a unit where it has one"),
         );
     }
     for bad in ["Asked", "read-data", "1st", "_x", ""] {

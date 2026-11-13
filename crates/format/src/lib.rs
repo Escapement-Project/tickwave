@@ -17,7 +17,14 @@ pub mod overview;
 pub mod reader;
 pub mod record;
 #[cfg(feature = "encode")]
+pub mod recut;
+#[cfg(feature = "encode")]
 pub mod repair;
+pub mod samples;
+#[cfg(feature = "encode")]
+pub mod shared;
+#[cfg(feature = "encode")]
+pub mod snapshot;
 pub mod verify;
 #[cfg(feature = "encode")]
 pub mod writer;

@@ -67,6 +67,7 @@ fn header() -> Header {
     let digital = |name: &str| ChannelHeader {
         name: name.into(),
         source_name: name.into(),
+        source: 0,
         data: ChannelKind::Digital {
             initial: true,
             end: 1_000_000,
@@ -79,7 +80,11 @@ fn header() -> Header {
         timebase: Ratio::integer(1_000_000_000).unwrap(),
         length: 1_000_000,
         channels: vec![digital("SWCLK"), digital("SWDIO")],
-        source: SourceHeader::new(SourceFormat::Vcd),
+        derived: Vec::new(),
+        sources: vec![SourceHeader::new(
+            SourceFormat::Vcd,
+            Ratio::integer(1_000_000_000).unwrap(),
+        )],
         title: None,
         meta: Default::default(),
         content_id: ID.parse().unwrap(),

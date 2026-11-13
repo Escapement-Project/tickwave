@@ -146,6 +146,7 @@ Committed, in `fixtures/`:
 | `identify-swd.4k.tickwave` | the same with `--block-kib 4`: nine blocks, for edges across block boundaries |
 | `identify-jtag.tickwave` | the `identify-jtag-cjtag` export's TCK, TDI and TMS (`digital_4_0`, `_4_2`, `_4_3`): long enough that its 2^12 level sits in overview blocks |
 | `swd50-cut.tickwave` | `tickwave convert saleae testdata/saleae/swd50-cut --channel analog_0=SWCLK --channel analog_1=SWDIO --channel digital_4_0=NRST`: 50 µs of a mixed-signal oscilloscope's analog inputs as 12-bit codes, in an 11 ms capture |
+| `energy.tickwave` | `cargo run -p escapement-tickwave-format --example energy -- web/fixtures`, from the repository: a synthetic recording laid out as verge's energy captures are, with nothing from a capture. V and I as 32-bit integer codes in mV and nA every 960 ticks at 96 MHz, with a loss and a pause; P derived from them; `range`, `under_range` and DIO0, which has a pulse at tick 0 and a gap; markers bundled into the footer; six short blocks, as a recorder flushing every 5 ms leaves them |
 | `identify-swd.annotations.toml` | the hand-written sidecar for `identify-swd.tickwave` |
 | `identify-swd.tickwavefx` | the in-memory route's fixture, cut from the same export by `scripts/extract-fixtures.ts` |
 | `figure1.chart.json`, `evidence.chart.json`, `wire.chart.json` | chart data: the landing page's Figure 1, a chart whose points name annotations, and the 2026-11-04 request-clock chart |

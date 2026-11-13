@@ -146,6 +146,7 @@ pub fn read_from(reader: impl BufRead, file_name: &str) -> Result<Import, Error>
                 channels.push(Channel {
                     name: name.clone(),
                     source_name: name,
+                    source: 0,
                     data: ChannelData::Digital(Digital {
                         initial,
                         end: length,
@@ -183,13 +184,14 @@ pub fn read_from(reader: impl BufRead, file_name: &str) -> Result<Import, Error>
             timebase,
             length,
             channels,
-            source: Source {
+            derived: Vec::new(),
+            sources: vec![Source {
                 files: vec![file_name.to_owned()],
                 software: header.version,
                 begin_s: Some(start as f64 * timebase.den() as f64 / timebase.num() as f64),
                 extra,
-                ..Source::new(SourceFormat::Vcd)
-            },
+                ..Source::new(SourceFormat::Vcd, timebase)
+            }],
         },
         skipped,
     })

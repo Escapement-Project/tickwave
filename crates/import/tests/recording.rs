@@ -52,19 +52,27 @@ fn every_fixture_reads_back_as_its_file_holds_it() {
         let (header, recording) = read(Arc::new(file.clone())).unwrap();
         assert_eq!(header, Footer::parse_file(&file).unwrap().header, "{name}");
         // What the converter states of itself is its own, not the source's.
-        let s = &recording.source;
-        let source = SourceHeader {
-            format: s.format.clone(),
-            files: s.files.clone(),
-            instrument: s.instrument.clone(),
-            software: s.software.clone(),
-            begin_s: s.begin_s,
-            trigger_s: s.trigger_s,
-            rate: s.rate,
-            extra: s.extra.clone(),
-            converter: header.source.converter.clone(),
-        };
-        assert_eq!(source, header.source, "{name}");
+        let sources: Vec<SourceHeader> = recording
+            .sources
+            .iter()
+            .zip(&header.sources)
+            .map(|(s, h)| SourceHeader {
+                format: s.format.clone(),
+                files: s.files.clone(),
+                timebase: s.timebase,
+                origin: s.origin,
+                align: s.align,
+                instrument: s.instrument.clone(),
+                software: s.software.clone(),
+                begin_s: s.begin_s,
+                trigger_s: s.trigger_s,
+                rate: s.rate,
+                extra: s.extra.clone(),
+                converter: h.converter.clone(),
+            })
+            .collect();
+        assert_eq!(sources, header.sources, "{name}");
+        assert_eq!(recording.derived, header.derived, "{name}");
         let checked = verify(&file[..], recording).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(checked.content_id, header.content_id, "{name}");
     }
@@ -106,6 +114,7 @@ fn with_gaps() -> Recording {
             Channel {
                 name: "G".into(),
                 source_name: "g".into(),
+                source: 0,
                 data: ChannelData::Digital(Digital {
                     initial: true,
                     end: 100,
@@ -128,18 +137,28 @@ fn with_gaps() -> Recording {
             Channel {
                 name: "W".into(),
                 source_name: "w".into(),
+                source: 0,
                 data: ChannelData::Analog(Analog {
+                    significant: None,
                     unit: "V".into(),
                     first: 0,
                     period: Ratio::new(3, 2).unwrap(),
                     count: 10,
-                    breaks: vec![Break { index: 5, tick: 30 }],
+                    breaks: vec![Break {
+                        index: 5,
+                        tick: 30,
+                        lost: 0,
+                    }],
                     samples: Samples::F32(Box::new((0..10).map(|i| i as f32 * 0.1))),
                 }),
                 shaping: Shaping::default(),
             },
         ],
-        source: Source::new(SourceFormat::Other("test".into())),
+        derived: Vec::new(),
+        sources: vec![Source::new(
+            SourceFormat::Other("test".into()),
+            Ratio::integer(1_000_000_000).unwrap(),
+        )],
     }
 }
 
@@ -205,6 +224,7 @@ fn a_footer_longer_than_the_first_read_is_read_whole() {
             channels: vec![Channel {
                 name: "D".into(),
                 source_name: "d".into(),
+                source: 0,
                 data: ChannelData::Digital(Digital {
                     initial: false,
                     end: 6_000_001,
@@ -213,7 +233,11 @@ fn a_footer_longer_than_the_first_read_is_read_whole() {
                 }),
                 shaping: Shaping::default(),
             }],
-            source: Source::new(SourceFormat::Other("test".into())),
+            derived: Vec::new(),
+            sources: vec![Source::new(
+                SourceFormat::Other("test".into()),
+                Ratio::integer(1_000_000_000).unwrap(),
+            )],
         })
     };
     let settings = Settings {

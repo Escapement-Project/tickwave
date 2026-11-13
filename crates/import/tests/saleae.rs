@@ -70,7 +70,7 @@ fn reads_identify_swd_as_numpy_does() {
     let rec = saleae::read(Path::new(DIR), &names(), None).unwrap();
     assert_eq!(rec.timebase, Ratio::integer(1_000_000_000).unwrap());
     assert_eq!(rec.length, 523583100);
-    assert_eq!(rec.source.begin_s, Some(0.07553184799994528));
+    assert_eq!(rec.sources[0].begin_s, Some(0.07553184799994528));
     assert_eq!(rec.channels.len(), 3);
     for (channel, want) in rec.channels.into_iter().zip(&EXPECT) {
         let ChannelData::Digital(d) = channel.data else {
@@ -245,8 +245,8 @@ fn reads_analog_beside_digital_as_numpy_does() {
     assert_eq!(rec.timebase, Ratio::integer(1_000_000_000).unwrap());
     // The digital channel runs to 11.03 ms; the analog cut stops at 50 us.
     assert_eq!(rec.length, 11031886);
-    assert_eq!(rec.source.begin_s, Some(-1.9995944403895518e-06));
-    assert_eq!(rec.source.trigger_s, Some(0.0));
+    assert_eq!(rec.sources[0].begin_s, Some(-1.9995944403895518e-06));
+    assert_eq!(rec.sources[0].trigger_s, Some(0.0));
     let mut channels = rec.channels.into_iter();
     let ChannelData::Digital(nrst) = channels.next().unwrap().data else {
         panic!("NRST is not digital")
@@ -262,7 +262,9 @@ fn reads_analog_beside_digital_as_numpy_does() {
         assert_eq!(a.first, 0, "{}", channel.name);
         assert_eq!(a.period, Ratio::ONE);
         assert_eq!(a.count, 50_000);
-        let Samples::F32(samples) = a.samples;
+        let Samples::F32(samples) = a.samples else {
+            panic!("f32 samples")
+        };
         let v: Vec<f32> = samples.collect();
         assert_eq!(v.len(), 50_000);
         assert_eq!(f64::from(v[0]), want.first, "{}", channel.name);
@@ -278,7 +280,7 @@ fn analog_alone_starts_at_its_own_begin() {
     let names = vec![("analog_1".to_string(), "SWDIO".to_string())];
     let rec = saleae::read(Path::new(SWD50), &names, None).unwrap();
     assert_eq!(rec.length, 50_000);
-    assert_eq!(rec.source.begin_s, Some(-1.999594440162178e-06));
+    assert_eq!(rec.sources[0].begin_s, Some(-1.999594440162178e-06));
 }
 
 #[test]
@@ -329,7 +331,9 @@ fn reads_session50() {
         match channel.data {
             ChannelData::Digital(d) => assert_eq!(d.edges.count(), 0),
             ChannelData::Analog(a) => {
-                let Samples::F32(samples) = a.samples;
+                let Samples::F32(samples) = a.samples else {
+                    panic!("f32 samples")
+                };
                 assert_eq!(a.first, 0);
                 assert_eq!(samples.filter(|v| v.is_finite()).count(), 100_002_000);
             }
@@ -403,7 +407,9 @@ fn contents(rec: escapement_tickwave_format::model::Recording) -> (Ratio, i64, V
         .map(|c| match c.data {
             ChannelData::Digital(d) => Read::Digital(d.initial, d.end, d.edges.collect()),
             ChannelData::Analog(a) => {
-                let Samples::F32(s) = a.samples;
+                let Samples::F32(s) = a.samples else {
+                    panic!("f32 samples")
+                };
                 Read::Analog(a.first, a.count, s.map(f32::to_bits).collect())
             }
         })
@@ -412,19 +418,19 @@ fn contents(rec: escapement_tickwave_format::model::Recording) -> (Ratio, i64, V
 }
 
 fn rate_from(rec: &escapement_tickwave_format::model::Recording) -> Option<RateOrigin> {
-    rec.source.rate
+    rec.sources[0].rate
 }
 
 #[test]
 fn v0_infers_its_rate_and_reads_as_v1_does() {
     let dir = v0_copy(DIR, "v0_infer");
     let v0 = saleae::read(&dir, &names(), None).unwrap();
-    assert_eq!(v0.source.format, SourceFormat::SaleaeBinary0);
+    assert_eq!(v0.sources[0].format, SourceFormat::SaleaeBinary0);
     assert_eq!(rate_from(&v0), Some(RateOrigin::Inferred));
     let v1 = saleae::read(Path::new(DIR), &names(), None).unwrap();
-    assert_eq!(v1.source.format, SourceFormat::SaleaeBinary1);
+    assert_eq!(v1.sources[0].format, SourceFormat::SaleaeBinary1);
     assert_eq!(rate_from(&v1), None);
-    assert_eq!(v0.source.begin_s, v1.source.begin_s);
+    assert_eq!(v0.sources[0].begin_s, v1.sources[0].begin_s);
     assert_eq!(contents(v0), contents(v1));
 }
 
@@ -529,7 +535,7 @@ fn v0_analog_gives_the_digital_channels_their_rate() {
     let dir = v0_copy(SWD50, "v0_analog");
     let v0 = saleae::read(&dir, &swd50_names(), None).unwrap();
     assert_eq!(rate_from(&v0), None);
-    assert_eq!(v0.source.trigger_s, None);
+    assert_eq!(v0.sources[0].trigger_s, None);
     let v1 = saleae::read(Path::new(SWD50), &swd50_names(), None).unwrap();
     assert_eq!(contents(v0), contents(v1));
 }

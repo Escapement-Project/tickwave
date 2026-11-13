@@ -130,6 +130,7 @@ fn analog(coding_bits: Option<u8>, values: Vec<f32>) -> (Recording, Options) {
             Channel {
                 name: "C".into(),
                 source_name: "c".into(),
+                source: 0,
                 data: ChannelData::Digital(Digital {
                     initial: false,
                     end: 1_000_000_001,
@@ -141,7 +142,9 @@ fn analog(coding_bits: Option<u8>, values: Vec<f32>) -> (Recording, Options) {
             Channel {
                 name: "V".into(),
                 source_name: "v".into(),
+                source: 0,
                 data: ChannelData::Analog(Analog {
+                    significant: None,
                     unit: "V".into(),
                     first: 0,
                     period: Ratio::integer(100_000_000).unwrap(),
@@ -152,7 +155,11 @@ fn analog(coding_bits: Option<u8>, values: Vec<f32>) -> (Recording, Options) {
                 shaping: Default::default(),
             },
         ],
-        source: Source::new(SourceFormat::Other("test".into())),
+        derived: Vec::new(),
+        sources: vec![Source::new(
+            SourceFormat::Other("test".into()),
+            Ratio::integer(1_000_000_000).unwrap(),
+        )],
     };
     let options = Options {
         analog: vec![
@@ -383,7 +390,7 @@ fn the_encoder_refuses_what_the_reader_would_and_says_which_channel() {
     let (rec, options) = analog(Some(0), vec![0.0; 10]);
     assert_eq!(
         refused(rec, &options),
-        "V: codes of 0 bits; a coding holds 1 to 16"
+        "the declaration: channel V's codes are 0 bits; a codes coding holds 1 to 16"
     );
 }
 
@@ -457,6 +464,7 @@ fn a_channel_never_known_has_a_low_initial_level() {
         rec.channels.push(Channel {
             name: "N".into(),
             source_name: "n".into(),
+            source: 0,
             data: ChannelData::Digital(Digital {
                 initial,
                 end: 0,

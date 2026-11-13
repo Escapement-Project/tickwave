@@ -41,6 +41,7 @@ fn recording(shaped: bool) -> Recording {
             Channel {
                 name: "C".into(),
                 source_name: "c".into(),
+                source: 0,
                 data: ChannelData::Digital(Digital {
                     initial: false,
                     end: 3000,
@@ -59,6 +60,7 @@ fn recording(shaped: bool) -> Recording {
             Channel {
                 name: "D".into(),
                 source_name: "d".into(),
+                source: 0,
                 data: ChannelData::Digital(Digital {
                     initial: true,
                     end: LENGTH,
@@ -73,7 +75,9 @@ fn recording(shaped: bool) -> Recording {
             Channel {
                 name: "V".into(),
                 source_name: "v".into(),
+                source: 0,
                 data: ChannelData::Analog(Analog {
+                    significant: None,
                     unit: "V".into(),
                     first: 201,
                     period: Ratio::integer(100).unwrap(),
@@ -87,7 +91,11 @@ fn recording(shaped: bool) -> Recording {
                 }),
             },
         ],
-        source: Source::new(SourceFormat::Other("test".into())),
+        derived: Vec::new(),
+        sources: vec![Source::new(
+            SourceFormat::Other("test".into()),
+            Ratio::integer(1_000_000).unwrap(),
+        )],
     }
 }
 
@@ -497,8 +505,8 @@ fn a_moved_or_trimmed_recording_cut_off_is_not_repaired() {
         assert!(matches!(&err, RepairError::Shaped(c) if c == "C"), "{err}");
         assert_eq!(
             err.to_string(),
-            "channel C was moved or trimmed when the recording was converted, so it isn't \
-             repaired: convert it again from its source"
+            "channel C states the span it keeps, as a moved, trimmed or merged recording does, \
+             so it isn't repaired: make it again from its sources"
         );
 
         let cut = &whole[..at(&whole)];

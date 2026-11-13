@@ -4,7 +4,9 @@
 #[cfg(feature = "annotations")]
 use escapement_tickwave_format::annotations::{self, Included};
 use escapement_tickwave_format::decode::{self, BlockChannel, DecodeError, Footer};
-use escapement_tickwave_format::overview::ChannelOverview;
+use escapement_tickwave_format::header::AnalogCoding;
+use escapement_tickwave_format::overview::{AnalogOverview, ChannelOverview, Level};
+use escapement_tickwave_format::samples::{Product, Values};
 use js_sys::{Float32Array, Float64Array, Uint8Array};
 use wasm_bindgen::prelude::*;
 
@@ -113,10 +115,24 @@ impl Recording {
             .footer
             .decode_block_with(i, frame, |f, len| self.inflater.inflate(f, len))
             .map_err(js)?;
+        // A derived channel's samples come from its operands' here, by the format's own rule.
+        let derived = (0..self.footer.products.len())
+            .map(|d| self.footer.derived(&block, d))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(js)?;
         Ok(Block {
             start: block.start,
             end: block.end,
+            codings: self
+                .footer
+                .header
+                .channels
+                .iter()
+                .map(|c| c.coding())
+                .collect(),
+            products: self.footer.products.iter().map(|&(_, _, p)| p).collect(),
             channels: block.channels,
+            derived,
         })
     }
 
@@ -154,10 +170,47 @@ impl Recording {
         digital(self.footer.overview.get(level)?.channels.get(channel)?)
     }
 
-    /// The overview's minimums and maximums for an analog channel.
+    /// The overview's minimums and maximums for an `f32` or `codes` channel.
     #[wasm_bindgen(js_name = overviewAnalog)]
     pub fn overview_analog(&self, level: usize, channel: usize) -> Option<Vec<Float32Array>> {
         analog(self.footer.overview.get(level)?.channels.get(channel)?)
+    }
+
+    /// The overview's minimums and maximums for an `f64` or `int` channel, as values: an `int`
+    /// channel's codes through its scale and offset in f64. A bucket with no sample holds
+    /// infinity and minus infinity.
+    #[wasm_bindgen(js_name = overviewAnalog64)]
+    pub fn overview_analog64(&self, level: usize, channel: usize) -> Option<Vec<Float64Array>> {
+        analog64(
+            self.footer.overview.get(level)?,
+            channel,
+            self.footer.header.channels.get(channel)?.coding()?,
+        )
+    }
+
+    /// Each bucket's sum of an analog channel's stored numbers: an `int` channel's codes, every
+    /// other channel's values.
+    #[wasm_bindgen(js_name = overviewSums)]
+    pub fn overview_sums(&self, level: usize, channel: usize) -> Option<Float64Array> {
+        if channel >= self.footer.header.channels.len() {
+            return None;
+        }
+        sums(self.footer.overview.get(level)?.channels.get(channel)?)
+    }
+
+    /// A derived channel's minimums, maximums and sums, as values.
+    #[wasm_bindgen(js_name = overviewDerived)]
+    pub fn overview_derived(&self, level: usize, derived: usize) -> Option<Vec<Float64Array>> {
+        let (_, _, product) = *self.footer.products.get(derived)?;
+        let channels = self.footer.header.channels.len();
+        derived_overview(
+            self.footer
+                .overview
+                .get(level)?
+                .channels
+                .get(channels + derived)?,
+            product,
+        )
     }
 
     /// The first and one past the last overview block of a finer level holding any tick in
@@ -205,11 +258,20 @@ impl Recording {
         k: usize,
         frame: &[u8],
     ) -> Result<OverviewBlock, JsError> {
-        Ok(OverviewBlock(
-            self.footer
+        Ok(OverviewBlock {
+            block: self
+                .footer
                 .decode_overview_block_with(level, k, frame, |f, len| self.inflater.inflate(f, len))
                 .map_err(js)?,
-        ))
+            codings: self
+                .footer
+                .header
+                .channels
+                .iter()
+                .map(|c| c.coding())
+                .collect(),
+            products: self.footer.products.iter().map(|&(_, _, p)| p).collect(),
+        })
     }
 }
 
@@ -224,39 +286,135 @@ fn digital(channel: &ChannelOverview) -> Option<Vec<Uint8Array>> {
 }
 
 fn analog(channel: &ChannelOverview) -> Option<Vec<Float32Array>> {
-    match channel {
-        ChannelOverview::Analog { min, max } => Some(vec![
-            Float32Array::from(&min[..]),
-            Float32Array::from(&max[..]),
+    match channel.analog()? {
+        AnalogOverview::F32(c) => Some(vec![
+            Float32Array::from(&c.min[..]),
+            Float32Array::from(&c.max[..]),
         ]),
-        ChannelOverview::Digital { .. } => None,
+        _ => None,
     }
+}
+
+/// Lower and upper values for buckets whose stored minimum and maximum give `lo` and `hi`: a
+/// negative scale turns them round, and an empty bucket holds infinity and minus infinity.
+fn ordered(lo: f64, hi: f64, empty: bool) -> (f64, f64) {
+    if empty {
+        (f64::INFINITY, f64::NEG_INFINITY)
+    } else if lo > hi {
+        (hi, lo)
+    } else {
+        (lo, hi)
+    }
+}
+
+fn analog64(level: &Level, channel: usize, coding: AnalogCoding) -> Option<Vec<Float64Array>> {
+    let (min, max): (Vec<f64>, Vec<f64>) = match (level.channels.get(channel)?.analog()?, coding) {
+        (AnalogOverview::F64(c), _) => (c.min.clone(), c.max.clone()),
+        (AnalogOverview::U64(c), AnalogCoding::Int(int)) => c
+            .min
+            .iter()
+            .zip(&c.max)
+            .map(|(&lo, &hi)| ordered(int.value(lo.into()), int.value(hi.into()), lo > hi))
+            .unzip(),
+        (AnalogOverview::I64(c), AnalogCoding::Int(int)) => c
+            .min
+            .iter()
+            .zip(&c.max)
+            .map(|(&lo, &hi)| ordered(int.value(lo.into()), int.value(hi.into()), lo > hi))
+            .unzip(),
+        _ => return None,
+    };
+    Some(vec![
+        Float64Array::from(&min[..]),
+        Float64Array::from(&max[..]),
+    ])
+}
+
+fn sums(channel: &ChannelOverview) -> Option<Float64Array> {
+    let (_, _, sum) = channel.analog()?.as_f64();
+    Some(Float64Array::from(&sum[..]))
+}
+
+/// A derived channel's buckets as values: an integer product's minimum, maximum and sum each
+/// through its scale by the rule for an `int` value.
+fn derived_overview(channel: &ChannelOverview, product: Product) -> Option<Vec<Float64Array>> {
+    let (min, max, sum) = match channel.analog()? {
+        AnalogOverview::F64(c) => (c.min.clone(), c.max.clone(), c.sum.clone()),
+        a => {
+            let (lo, hi, sum) = a.as_f64();
+            let empty: Vec<bool> = match a {
+                AnalogOverview::U64(c) => c.min.iter().zip(&c.max).map(|(l, h)| l > h).collect(),
+                AnalogOverview::I64(c) => c.min.iter().zip(&c.max).map(|(l, h)| l > h).collect(),
+                _ => return None,
+            };
+            let (min, max) = lo
+                .iter()
+                .zip(&hi)
+                .zip(empty)
+                .map(|((&l, &h), e)| ordered(product.scaled(l), product.scaled(h), e))
+                .unzip();
+            (min, max, sum.iter().map(|&s| product.scaled(s)).collect())
+        }
+    };
+    Some(vec![
+        Float64Array::from(&min[..]),
+        Float64Array::from(&max[..]),
+        Float64Array::from(&sum[..]),
+    ])
 }
 
 /// Buckets `first..first + buckets` of a finer overview level, laid out as the footer's levels.
 #[wasm_bindgen]
-pub struct OverviewBlock(decode::OverviewBlock);
+pub struct OverviewBlock {
+    block: decode::OverviewBlock,
+    codings: Vec<Option<AnalogCoding>>,
+    products: Vec<Product>,
+}
 
 #[wasm_bindgen]
 impl OverviewBlock {
     #[wasm_bindgen(getter)]
     pub fn first(&self) -> f64 {
-        self.0.first as f64
+        self.block.first as f64
     }
 
     #[wasm_bindgen(getter)]
     pub fn buckets(&self) -> f64 {
-        self.0.level.buckets as f64
+        self.block.level.buckets as f64
     }
 
     /// As `Recording.overviewDigital`; bucket `first + i` is bit i.
     pub fn digital(&self, channel: usize) -> Option<Vec<Uint8Array>> {
-        digital(self.0.level.channels.get(channel)?)
+        digital(self.block.level.channels.get(channel)?)
     }
 
     /// As `Recording.overviewAnalog`; bucket `first + i` is element i.
     pub fn analog(&self, channel: usize) -> Option<Vec<Float32Array>> {
-        analog(self.0.level.channels.get(channel)?)
+        analog(self.block.level.channels.get(channel)?)
+    }
+
+    /// As `Recording.overviewAnalog64`.
+    pub fn analog64(&self, channel: usize) -> Option<Vec<Float64Array>> {
+        analog64(&self.block.level, channel, (*self.codings.get(channel)?)?)
+    }
+
+    /// As `Recording.overviewSums`.
+    pub fn sums(&self, channel: usize) -> Option<Float64Array> {
+        if channel >= self.codings.len() {
+            return None;
+        }
+        sums(self.block.level.channels.get(channel)?)
+    }
+
+    /// As `Recording.overviewDerived`.
+    pub fn derived(&self, derived: usize) -> Option<Vec<Float64Array>> {
+        derived_overview(
+            self.block
+                .level
+                .channels
+                .get(self.codings.len() + derived)?,
+            *self.products.get(derived)?,
+        )
     }
 }
 
@@ -264,7 +422,10 @@ impl OverviewBlock {
 pub struct Block {
     start: i64,
     end: i64,
+    codings: Vec<Option<AnalogCoding>>,
+    products: Vec<Product>,
     channels: Vec<BlockChannel>,
+    derived: Vec<Values>,
 }
 
 #[wasm_bindgen]
@@ -301,12 +462,40 @@ impl Block {
         }
     }
 
-    /// An analog channel's values in the block.
+    /// An `f32` or `codes` channel's values in the block.
     pub fn values(&self, channel: usize) -> Option<Float32Array> {
-        match self.channels.get(channel)? {
-            BlockChannel::Analog { values, .. } => Some(Float32Array::from(&values[..])),
-            BlockChannel::Digital { .. } => None,
-        }
+        Some(Float32Array::from(
+            self.channels.get(channel)?.values()?.as_f32()?,
+        ))
+    }
+
+    /// An `f64` or `int` channel's values in the block: an `int` channel's codes through its
+    /// scale and offset in f64.
+    pub fn values64(&self, channel: usize) -> Option<Float64Array> {
+        let coding = (*self.codings.get(channel)?)?;
+        let values: Vec<f64> = match (self.channels.get(channel)?.values()?, coding) {
+            (Values::F64(v), _) => v.clone(),
+            (Values::U64(v), AnalogCoding::Int(int)) => {
+                v.iter().map(|&c| int.value(c.into())).collect()
+            }
+            (Values::I64(v), AnalogCoding::Int(int)) => {
+                v.iter().map(|&c| int.value(c.into())).collect()
+            }
+            _ => return None,
+        };
+        Some(Float64Array::from(&values[..]))
+    }
+
+    /// A derived channel's values in the block, from its operands' samples there.
+    pub fn derived(&self, derived: usize) -> Option<Float64Array> {
+        let product = self.products.get(derived)?;
+        let values: Vec<f64> = self
+            .derived
+            .get(derived)?
+            .iter()
+            .map(|s| product.value(s))
+            .collect();
+        Some(Float64Array::from(&values[..]))
     }
 
     /// An analog channel's index of the block's first sample.

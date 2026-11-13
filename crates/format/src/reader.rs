@@ -5,8 +5,8 @@
 use std::collections::VecDeque;
 
 use crate::decode::{
-    BlockChannel, DecodeError, Footer, MAX_DECODED, Section, corrupt, decode_sections, edge_in_gap,
-    inflate_limited, level_after,
+    BlockChannel, DecodeError, Footer, MAX_DECODED, Section, check_declaration, corrupt,
+    decode_sections, edge_in_gap, inflate_limited, level_after,
 };
 use crate::header::{
     BlockRow, ChannelKind, Declaration, DeclaredKind, MAJOR, PREAMBLE_LEN, Preamble, TRAILER_LEN,
@@ -33,11 +33,11 @@ pub enum Event {
         channel: usize,
         gap: Gap,
     },
-    /// Sample `index` of analog channel `channel` starts a run at `tick`.
+    /// Sample `run.index` of analog channel `channel` starts a run at `run.tick`, after
+    /// `run.lost` samples the instrument lost.
     Run {
         channel: usize,
-        index: u64,
-        tick: i64,
+        run: Break,
     },
     /// An overview block's frame, not decoded: its size follows from the length, which the
     /// footer gives.
@@ -82,7 +82,9 @@ enum Channel {
     Digital {
         /// The level at the next block's start, as far as the blocks read so far say.
         level: bool,
+        /// The last edge's tick, or 0 before the first.
         last_edge: i64,
+        edges: u64,
         gaps: Vec<Gap>,
         /// Gaps whose `to` no block has passed yet.
         pending: VecDeque<Gap>,
@@ -304,6 +306,7 @@ impl Reader {
         Ok(Some(match kind {
             Kind::Declaration => {
                 let d: Declaration = serde_json::from_slice(payload)?;
+                check_declaration(&d)?;
                 self.channels = d
                     .channels
                     .iter()
@@ -311,6 +314,7 @@ impl Reader {
                         DeclaredKind::Digital { initial } => Channel::Digital {
                             level: *initial,
                             last_edge: 0,
+                            edges: 0,
                             gaps: Vec::new(),
                             pending: VecDeque::new(),
                         },
@@ -332,6 +336,7 @@ impl Reader {
                 let start = self.next_start;
                 let Channel::Digital {
                     last_edge,
+                    edges,
                     gaps,
                     pending,
                     ..
@@ -340,7 +345,7 @@ impl Reader {
                     return Err(corrupt("a gap on an analog channel"));
                 };
                 let after = gaps.last().map_or(*last_edge, |g| g.to.max(*last_edge));
-                let first = gaps.is_empty() && *last_edge == 0;
+                let first = gaps.is_empty() && *edges == 0;
                 if gap.to <= gap.from
                     || gap.from < 0
                     || (!first && gap.from <= after)
@@ -356,7 +361,7 @@ impl Reader {
                 Event::Gap { channel: c, gap }
             }
             Kind::Run => {
-                let (c, index, tick) =
+                let (c, run) =
                     record::parse_run(payload).ok_or_else(|| corrupt("a run record's size"))?;
                 let c = channel(c)?;
                 let Channel::Analog {
@@ -366,18 +371,14 @@ impl Reader {
                     return Err(corrupt("a run on a digital channel"));
                 };
                 let in_order = match runs.last() {
-                    None => index == 0,
-                    Some(r) => index > r.index && tick >= r.tick,
+                    None => run.index == 0 && run.lost == 0,
+                    Some(r) => run.index > r.index && run.tick >= r.tick,
                 };
-                if !in_order || index < *next_index || tick < 0 {
+                if !in_order || run.index < *next_index || run.tick < 0 {
                     return Err(corrupt(format!("channel {c}: a run is out of place")));
                 }
-                runs.push(Break { index, tick });
-                Event::Run {
-                    channel: c,
-                    index,
-                    tick,
-                }
+                runs.push(run);
+                Event::Run { channel: c, run }
             }
             Kind::Block => Event::Block(self.block(payload, record_at)?),
             Kind::OverviewBlock => {
@@ -422,13 +423,16 @@ impl Reader {
             .declaration
             .as_ref()
             .expect("records follow the declaration");
-        let mut source = h.source.clone();
-        source.extra.retain(|k, _| d.source.extra.contains_key(k));
+        let mut sources = h.sources.clone();
+        for (s, declared) in sources.iter_mut().zip(&d.sources) {
+            s.extra.retain(|k, _| declared.extra.contains_key(k));
+        }
         let declared = h.timebase == d.timebase
             && h.title == d.title
             && h.meta == d.meta
             && h.overview_shift == d.overview_shift
-            && source == d.source
+            && sources == d.sources
+            && h.derived == d.derived
             && h.channels.len() == d.channels.len()
             && h.channels
                 .iter()
@@ -520,6 +524,7 @@ impl Reader {
                     Channel::Digital {
                         level,
                         last_edge,
+                        edges: seen,
                         gaps,
                         pending,
                     },
@@ -548,6 +553,7 @@ impl Reader {
                     if let Some(&t) = edges.last() {
                         *last_edge = t;
                     }
+                    *seen += edges.len() as u64;
                 }
                 (
                     Channel::Analog {

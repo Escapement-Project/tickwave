@@ -914,6 +914,7 @@ impl Export {
             .map(|((opened, (stem, name)), &first)| Channel {
                 name: name.clone(),
                 source_name: stem.clone(),
+                source: 0,
                 data: match opened {
                     Opened::Digital(d) => ChannelData::Digital(Digital {
                         initial: d.initial,
@@ -927,6 +928,7 @@ impl Export {
                         period: Ratio::ONE,
                         count: a.count,
                         breaks: Vec::new(),
+                        significant: None,
                         samples: Samples::F32(Box::new(
                             a.file.items::<4>(a.header, a.count).map(f32::from_le_bytes),
                         )),
@@ -953,13 +955,14 @@ impl Export {
                 RateFrom::Given => Some(RateOrigin::Given),
                 RateFrom::Inferred => Some(RateOrigin::Inferred),
             },
-            ..Source::new(format)
+            ..Source::new(format, Ratio::from(rate))
         };
         Recording {
             timebase: Ratio::from(rate),
             length: self.length,
             channels,
-            source,
+            derived: Vec::new(),
+            sources: vec![source],
         }
     }
 }

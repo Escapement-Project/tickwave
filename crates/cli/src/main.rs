@@ -1,5 +1,6 @@
 //! `tickwave`: convert captures into tickwave's recording format, describe a recording, check one
-//! against its source, repair one cut off before its end, and open one in the browser.
+//! against its source, repair one cut off before its end, re-cut one into full-size blocks, and
+//! open one in the browser.
 
 mod open;
 
@@ -14,16 +15,18 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use escapement_tickwave_format::annotations::{self, Included};
 use escapement_tickwave_format::decode::{DecodeError, FIRST_READ, Footer, inflate_limited};
-use escapement_tickwave_format::header::{ChannelKind, Header};
+use escapement_tickwave_format::header::{AnalogCoding, ChannelKind, Header};
 use escapement_tickwave_format::model::{RateOrigin, Recording, SourceFormat};
+use escapement_tickwave_format::recut::{RecutError, Recutter};
 use escapement_tickwave_format::repair::{RepairError, Repairer};
+use escapement_tickwave_format::samples::coding_name;
 use escapement_tickwave_format::verify::verify_limited;
-use escapement_tickwave_format::writer::generator_file;
+use escapement_tickwave_format::writer::{WriteOptions, generator_file};
 use escapement_tickwave_import::convert::{
     self, Keep, Pass, Progress, Settings, Step, counted, select, set_units,
 };
 use escapement_tickwave_import::saleae::SampleRate;
-use escapement_tickwave_import::shape::check_time;
+use escapement_tickwave_import::shape::{Plan, check_time};
 use escapement_tickwave_import::sigrok::Skipped;
 use escapement_tickwave_import::{saleae, sigrok, vcd};
 use indicatif::ProgressStyle;
@@ -39,7 +42,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 #[command(
     name = "tickwave",
     version,
-    about = "Convert, describe, verify, repair and open tickwave recordings"
+    about = "Convert, describe, verify, repair, re-cut and open tickwave recordings"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -66,7 +69,7 @@ enum Command {
         json: bool,
     },
     /// Check a recording against the source it was converted from, edge by edge and sample by
-    /// sample.
+    /// sample. A moved or trimmed channel is checked through its offset and kept span.
     Verify {
         file: PathBuf,
         /// The source: for a Saleae export, its directory.
@@ -95,6 +98,22 @@ enum Command {
         #[arg(short, long)]
         output: PathBuf,
         /// The zstd level for the overview repair writes.
+        #[arg(long, default_value_t = 19)]
+        level: i32,
+    },
+    /// Write a recording again with blocks of the usual size, as one a recorder flushed often
+    /// needs. The copy holds the same content, with the same id, and is checked before it is
+    /// written. A recording cut off before its end is finished as `repair` would finish it, and
+    /// each annotation generator's file goes beside the copy.
+    Recut {
+        input: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+        /// The decoded size each block aims for, in KiB: at most 65,536, what a reader holds by
+        /// default.
+        #[arg(long, default_value_t = 1024, value_parser = clap::value_parser!(u32).range(1..=65_536))]
+        block_kib: u32,
+        /// The zstd level.
         #[arg(long, default_value_t = 19)]
         level: i32,
     },
@@ -344,7 +363,7 @@ fn run() -> Result<()> {
                         e => e.into(),
                     })?;
             let recording = export.recording();
-            if recording.source.rate == Some(RateOrigin::Inferred) {
+            if recording.sources[0].rate == Some(RateOrigin::Inferred) {
                 info!(
                     "sample rate {} Hz, inferred from the edges",
                     recording.timebase.num()
@@ -413,6 +432,12 @@ fn run() -> Result<()> {
             output,
             level,
         } => repair_file(&file, &output, level),
+        Command::Recut {
+            input,
+            output,
+            block_kib,
+            level,
+        } => recut_file(&input, &output, block_kib, level),
         Command::Open {
             recording,
             annotations,
@@ -655,7 +680,31 @@ fn info(file: &Path, json: bool, max: usize) -> Result<()> {
         h.channels.len(),
         h.content_id
     )?;
+    for (i, s) in h.sources.iter().enumerate() {
+        let align = s
+            .align
+            .map_or(String::new(), |a| format!(", aligned by {a}"));
+        let files = if s.files.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", s.files.join(", "))
+        };
+        writeln!(
+            out,
+            "  source {i}: {} at {}/{} ticks a second, its tick 0 at {}{align}{files}",
+            s.format,
+            s.timebase.num(),
+            s.timebase.den(),
+            s.origin
+        )?;
+    }
+    let several = h.sources.len() > 1;
     for c in &h.channels {
+        let from = if several {
+            format!(", source {}", c.source)
+        } else {
+            String::new()
+        };
         match &c.data {
             ChannelKind::Digital {
                 initial,
@@ -664,7 +713,7 @@ fn info(file: &Path, json: bool, max: usize) -> Result<()> {
                 ..
             } => writeln!(
                 out,
-                "  {:<12} digital, {edges} edges, starts {}, known to {} ({})",
+                "  {:<12} digital, {edges} edges, starts {}, known to {} ({}{from})",
                 c.name,
                 u8::from(*initial),
                 seconds(*end, h),
@@ -674,13 +723,31 @@ fn info(file: &Path, json: bool, max: usize) -> Result<()> {
                 unit,
                 count,
                 coding,
+                breaks,
                 ..
-            } => writeln!(
-                out,
-                "  {:<12} analog, {count} samples in {unit}, {coding:?} ({})",
-                c.name, c.source_name
-            )?,
+            } => {
+                let lost: u64 = breaks.iter().map(|b| b.lost).sum();
+                let breaks = match (breaks.len(), lost) {
+                    (0, _) => String::new(),
+                    (n, 0) => format!(", {n} breaks"),
+                    (n, lost) => format!(", {n} breaks, {lost} samples lost"),
+                };
+                writeln!(
+                    out,
+                    "  {:<12} analog, {count} samples in {unit}{breaks}, {} ({}{from})",
+                    c.name,
+                    describe_coding(*coding),
+                    c.source_name
+                )?
+            }
         }
+    }
+    for d in &h.derived {
+        writeln!(
+            out,
+            "  {:<12} derived, {} × {} in {}",
+            d.name, d.product[0], d.product[1], d.unit
+        )?;
     }
     writeln!(
         out,
@@ -710,17 +777,32 @@ fn info(file: &Path, json: bool, max: usize) -> Result<()> {
     Ok(())
 }
 
+/// A coding as `info` shows it.
+fn describe_coding(coding: AnalogCoding) -> String {
+    match coding {
+        AnalogCoding::Int(int) => {
+            let ratio =
+                |r: escapement_tickwave_format::header::Exact| format!("{}/{}", r.num(), r.den());
+            let scale = int
+                .scale
+                .map_or(String::new(), |s| format!(", scale {}", ratio(s)));
+            let offset = int
+                .offset
+                .map_or(String::new(), |o| format!(", offset {}", ratio(o)));
+            format!("{}{scale}{offset}", coding_name(coding))
+        }
+        other => coding_name(other),
+    }
+}
+
 fn verify_file(file: &Path, against: &Path, max: usize) -> Result<()> {
     let (mut opened, _, head) = read_footer(file, max)?;
     let h = &head.header;
-    // Where the recording starts in the source is not in the file, so the moves and cuts cannot
-    // be made again.
-    if let Some(c) = h.channels.iter().find(|c| !c.shaping.is_whole()) {
+    if h.sources.len() > 1 {
         bail!(
-            "{}: channel {} was moved or cut when it was converted; verify checks a recording \
-             converted whole",
+            "{}: the recording merges {} sources; verify checks a recording against one",
             file.display(),
-            c.name
+            h.sources.len()
         );
     }
     let wanted: Vec<(String, String)> = h
@@ -734,7 +816,7 @@ fn verify_file(file: &Path, against: &Path, max: usize) -> Result<()> {
                 .recording(),
         )
     };
-    let source = match &h.source.format {
+    let source = match &h.sources[0].format {
         SourceFormat::SaleaeBinary1 => saleae(None)?,
         // A version 0 export's digital files don't record the rate the recording was made at.
         SourceFormat::SaleaeBinary0 => saleae(Some(
@@ -754,6 +836,9 @@ fn verify_file(file: &Path, against: &Path, max: usize) -> Result<()> {
         })
         .collect();
     let source = set_units(source, &units)?;
+    let plan = Plan::of_header(&source, h)
+        .context("the recording's moves and cuts do not fit its source")?;
+    let source = plan.apply(source);
     let bars = Bars::default();
     opened.seek(SeekFrom::Start(0))?;
     verify_limited(
@@ -919,8 +1004,8 @@ fn repair_file(file: &Path, output: &Path, level: i32) -> Result<()> {
     let repaired = match repairer.finish() {
         Ok(repaired) => repaired,
         Err(RepairError::Shaped(_)) => bail!(
-            "{} was moved or trimmed when it was converted, so it isn't repaired: convert it again \
-             from its source",
+            "{} states the spans its channels keep, as a moved, trimmed or merged recording does, \
+             so it isn't repaired: make it again from its sources",
             file.display()
         ),
         Err(e) => return Err(e).with_context(|| format!("repairing {}", file.display())),
@@ -928,16 +1013,7 @@ fn repair_file(file: &Path, output: &Path, level: i32) -> Result<()> {
     write_atomically(output, |out| {
         copy_then(&mut opened, repaired.keep, &repaired.tail, out)
     })?;
-    let stem = output
-        .file_stem()
-        .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
-    let dir = output.parent().unwrap_or(Path::new(""));
-    for (source, lines) in &repaired.generated {
-        let path = dir.join(format!("{stem}.{source}.jsonl"));
-        let text = generator_file(source, None, repaired.header.content_id, lines);
-        write_atomically(&path, |f| Ok(f.write_all(text.as_bytes())?))?;
-        info!("{}: {} annotations", path.display(), lines.len());
-    }
+    write_generated(output, &repaired.header, &repaired.generated)?;
     info!(
         "{}: {} of {} bytes kept, {} blocks to {}, {}",
         output.display(),
@@ -946,6 +1022,82 @@ fn repair_file(file: &Path, output: &Path, level: i32) -> Result<()> {
         repaired.header.blocks,
         seconds(repaired.header.length, &repaired.header),
         repaired.header.content_id
+    );
+    Ok(())
+}
+
+/// Each annotation generator's file beside `output`, as `<stem>.<source>.jsonl`.
+fn write_generated(
+    output: &Path,
+    header: &Header,
+    generated: &std::collections::BTreeMap<String, Vec<String>>,
+) -> Result<()> {
+    let stem = output
+        .file_stem()
+        .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+    let dir = output.parent().unwrap_or(Path::new(""));
+    for (source, lines) in generated {
+        let path = dir.join(format!("{stem}.{source}.jsonl"));
+        let text = generator_file(source, None, header.content_id, lines);
+        write_atomically(&path, |f| Ok(f.write_all(text.as_bytes())?))?;
+        info!("{}: {} annotations", path.display(), lines.len());
+    }
+    Ok(())
+}
+
+fn recut_file(input: &Path, output: &Path, block_kib: u32, level: i32) -> Result<()> {
+    let mut opened =
+        fs::File::open(input).with_context(|| format!("reading {}", input.display()))?;
+    let len = opened.metadata()?.len();
+    let started = Instant::now();
+    let mut recutter = Recutter::new(WriteOptions {
+        level,
+        block_bytes: block_kib as usize * 1024,
+        batch: 4 * std::thread::available_parallelism().map_or(1, |n| n.get()),
+    });
+    let finished = write_atomically(output, |out| {
+        let mut chunk = vec![0; 1 << 20];
+        loop {
+            let n = opened.read(&mut chunk)?;
+            if n == 0 {
+                break;
+            }
+            recutter
+                .feed(&chunk[..n])
+                .with_context(|| format!("reading {}", input.display()))?;
+            out.write_all(recutter.output())?;
+            let written = recutter.output().len();
+            recutter.consume(written);
+        }
+        out.write_all(recutter.output())?;
+        let finished = match recutter.finish() {
+            Ok(finished) => finished,
+            Err(RecutError::Shaped(_)) => bail!(
+                "{} is cut off, and it states the spans its channels keep, as a moved, trimmed or \
+                 merged recording does, so it isn't finished: make it again from its sources",
+                input.display()
+            ),
+            Err(e) => return Err(e).with_context(|| format!("re-cutting {}", input.display())),
+        };
+        out.write_all(&finished.tail)?;
+        Ok(finished)
+    })?;
+    let (_, _, check) = read_footer(output, usize::MAX)?;
+    if check.header.content_id != finished.header.content_id {
+        let _ = fs::remove_file(output);
+        bail!("the copy does not read back with its content id");
+    }
+    if finished.header.annotations.is_none() {
+        write_generated(output, &finished.header, &finished.generated)?;
+    }
+    info!(
+        "{}: {:.2} MB from {:.2} MB, {} blocks, {} in {:.1} s",
+        output.display(),
+        fs::metadata(output)?.len() as f64 / 1e6,
+        len as f64 / 1e6,
+        finished.header.blocks,
+        finished.header.content_id,
+        started.elapsed().as_secs_f64()
     );
     Ok(())
 }
@@ -1093,6 +1245,7 @@ mod tests {
         let digital = |name: &str| ChannelHeader {
             name: name.into(),
             source_name: name.into(),
+            source: 0,
             data: ChannelKind::Digital {
                 initial: true,
                 end: 1_000_000,
@@ -1105,7 +1258,11 @@ mod tests {
             timebase: escapement_tickwave_format::model::Ratio::integer(1_000_000_000).unwrap(),
             length: 1_000_000,
             channels: vec![digital("SWCLK"), digital("SWDIO")],
-            source: SourceHeader::new(SourceFormat::Vcd),
+            derived: Vec::new(),
+            sources: vec![SourceHeader::new(
+                SourceFormat::Vcd,
+                escapement_tickwave_format::model::Ratio::integer(1_000_000_000).unwrap(),
+            )],
             title: None,
             meta: Default::default(),
             content_id: "blake3:00ff000000000000000000000000000000000000000000000000000000000000"
@@ -1263,30 +1420,97 @@ mod tests {
         assert_eq!(err.to_string(), r#""D0" is given an offset twice"#);
         assert!(!output.exists());
 
-        run(&["--offset", "D0=-5", "--keep", "D1=10..100"]).unwrap();
+        run(&[
+            "--offset",
+            "D0=-5",
+            "--offset",
+            "D2=3",
+            "--keep",
+            "D1=10..100",
+        ])
+        .unwrap();
         let (_, _, head) = read_footer(&output, 64 << 20).unwrap();
-        let shaping: Vec<_> = head.header.channels[..2]
+        let shaping: Vec<_> = head.header.channels[..3]
             .iter()
             .map(|c| (c.shaping.offset.as_ref().map(|o| o.ticks), c.shaping.kept))
             .collect();
         use escapement_tickwave_format::header::Kept;
-        // D0, moved 5 earlier, starts the recording and is kept whole: its 5,000 samples.
+        // D0, moved 5 earlier, starts the recording and is kept whole: its 5,000 samples. The
+        // source's tick 0 is then the recording's tick 5.
         assert_eq!(
             shaping,
             [
                 (Some(-5), Some(Kept { from: 0, to: 5000 })),
-                (None, Some(Kept { from: 15, to: 105 }))
+                (None, Some(Kept { from: 15, to: 105 })),
+                (Some(3), Some(Kept { from: 8, to: 5008 })),
             ]
         );
-        let err = verify_file(&output, &source, 64 << 20).expect_err("refused");
+        assert_eq!(head.header.sources[0].origin, 5);
+        // Checked through the origin, the offsets and the kept spans.
+        verify_file(&output, &source, 64 << 20).unwrap();
+
+        // The same file stating D2 moved one tick further, in its declaration and its footer.
+        let doctored = dir.path().join("doctored.tickwave");
+        fs::write(
+            &doctored,
+            rewritten(
+                &fs::read(&output).unwrap(),
+                r#""offset":3,"#,
+                r#""offset":4,"#,
+            ),
+        )
+        .unwrap();
+        read_footer(&doctored, 64 << 20).unwrap();
+        let err = verify_file(&doctored, &source, 64 << 20).expect_err("refused");
         assert_eq!(
-            err.to_string(),
-            format!(
-                "{}: channel D0 was moved or cut when it was converted; verify checks a recording \
-                 converted whole",
-                output.display()
-            )
+            format!("{err:#}"),
+            "the recording does not match its source: channel D2: the offset or the kept span \
+             differs"
         );
+        // Or its source's tick 0 one tick later than the moves and cuts put it.
+        fs::write(
+            &doctored,
+            rewritten(
+                &fs::read(&output).unwrap(),
+                r#""origin":5"#,
+                r#""origin":6"#,
+            ),
+        )
+        .unwrap();
+        let err = verify_file(&doctored, &source, 64 << 20).expect_err("refused");
+        assert_eq!(
+            format!("{err:#}"),
+            "the recording's moves and cuts do not fit its source: the recording's channels \
+             start -5 ticks into the source, but its source states an origin of 6, not 5"
+        );
+    }
+
+    /// `file` with `from` replaced by `to`, of the same length, in every record that holds it, and
+    /// each such record's check made again.
+    fn rewritten(file: &[u8], from: &str, to: &str) -> Vec<u8> {
+        use escapement_tickwave_format::record::{self, Kind, Next};
+        assert_eq!(from.len(), to.len());
+        let mut out = file[..12].to_vec();
+        let mut pos = 12;
+        let mut changed = 0;
+        while let Next::Record { kind, payload, len } = record::next(&file[pos..], usize::MAX) {
+            match payload
+                .windows(from.len())
+                .position(|w| w == from.as_bytes())
+            {
+                Some(at) => {
+                    let mut payload = payload.to_vec();
+                    payload[at..at + to.len()].copy_from_slice(to.as_bytes());
+                    record::write(&mut out, Kind::from_byte(kind).unwrap(), &[&payload]);
+                    changed += 1;
+                }
+                None => out.extend_from_slice(&file[pos..pos + len]),
+            }
+            pos += len;
+        }
+        assert_eq!(changed, 2, "the declaration and the footer");
+        out.extend_from_slice(&file[pos..]);
+        out
     }
 
     #[test]
@@ -1327,8 +1551,8 @@ mod tests {
             assert_eq!(
                 err.to_string(),
                 format!(
-                    "{} was moved or trimmed when it was converted, so it isn't repaired: convert \
-                     it again from its source",
+                    "{} states the spans its channels keep, as a moved, trimmed or merged \
+                     recording does, so it isn't repaired: make it again from its sources",
                     input.display()
                 )
             );

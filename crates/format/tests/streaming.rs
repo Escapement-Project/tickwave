@@ -16,7 +16,9 @@ use escapement_tickwave_format::reader::{Ending, Reader};
 use escapement_tickwave_format::record::{self, Kind};
 use escapement_tickwave_format::repair::repair;
 use escapement_tickwave_format::verify::verify;
-use escapement_tickwave_format::writer::{WriteError, WriteOptions, Writer, generator_file};
+use escapement_tickwave_format::writer::{
+    Finish, WriteError, WriteOptions, Writer, generator_file,
+};
 
 mod common;
 
@@ -29,13 +31,16 @@ fn declaration() -> Declaration {
             DeclaredChannel {
                 name: "A".into(),
                 source_name: "dio0".into(),
+                source: 0,
                 data: DeclaredKind::Digital { initial: false },
                 shaping: Default::default(),
             },
             DeclaredChannel {
                 name: "V".into(),
                 source_name: "v".into(),
+                source: 0,
                 data: DeclaredKind::Analog {
+                    significant: None,
                     unit: "V".into(),
                     period: Ratio::integer(10).unwrap(),
                     coding: AnalogCoding::F32,
@@ -43,7 +48,11 @@ fn declaration() -> Declaration {
                 shaping: Default::default(),
             },
         ],
-        source: SourceHeader::new(SourceFormat::Other("test".into())),
+        derived: Vec::new(),
+        sources: vec![SourceHeader::new(
+            SourceFormat::Other("test".into()),
+            Ratio::integer(96_000_000).unwrap(),
+        )],
         title: None,
         meta: BTreeMap::new(),
         overview_shift: 4,
@@ -71,7 +80,7 @@ enum Op {
 fn apply(w: &mut Writer, op: &Op) -> Result<(), WriteError> {
     match op {
         Op::Edge(t) => w.edge(0, *t),
-        Op::Run(t) => w.run(1, *t),
+        Op::Run(t) => w.run(1, *t, 0),
         Op::Sample(v) => w.sample(1, *v),
         Op::Gap(g) => w.gap(0, *g),
         Op::Flush(t) => w.flush(*t),
@@ -158,7 +167,7 @@ fn written(
         }
         at.push(out.len() as u64);
     }
-    let finished = w.finish(LENGTH, &[LENGTH], BTreeMap::new()).unwrap();
+    let finished = w.finish(LENGTH, &[LENGTH], Finish::default()).unwrap();
     out.extend_from_slice(&finished.tail);
     (out, at, finished)
 }
@@ -333,7 +342,7 @@ fn repair_writes_what_finishing_at_the_same_block_would() {
             apply(&mut w, op).unwrap();
         }
         let mut finished = w.take_output();
-        let f = w.finish(end, &[end], BTreeMap::new()).unwrap();
+        let f = w.finish(end, &[end], Finish::default()).unwrap();
         finished.extend_from_slice(&f.tail);
         assert_eq!(fixed, finished, "repaired after the flush at {end}");
         assert_eq!(r.header, f.header);
@@ -357,7 +366,12 @@ fn repair_writes_what_finishing_at_the_same_block_would() {
 
 #[test]
 fn a_file_cut_in_its_footer_or_trailer_is_repaired_to_the_file_it_was() {
-    let (file, _, _) = written(&session(), usize::MAX);
+    // Without the mark past the length: repair would take the length one past it.
+    let ops: Vec<Op> = session()
+        .into_iter()
+        .filter(|op| !matches!(op, Op::Note(500, _)))
+        .collect();
+    let (file, _, _) = written(&ops, usize::MAX);
     let footer_at = Footer::parse_file(&file).unwrap().trailer.footer_offset as usize;
     for cut in footer_at..file.len() {
         let r = repair(&file[..cut], 3).unwrap_or_else(|e| panic!("cut at {cut}: {e}"));
@@ -404,6 +418,7 @@ fn runs_place_the_samples_and_come_back_as_breaks() {
             0,
             34,
             &[Break {
+                lost: 0,
                 index: 20,
                 tick: 260
             }][..]
@@ -422,6 +437,7 @@ fn runs_place_the_samples_and_come_back_as_breaks() {
             Channel {
                 name: "A".into(),
                 source_name: "dio0".into(),
+                source: 0,
                 data: ChannelData::Digital(Digital {
                     initial: false,
                     end: LENGTH,
@@ -437,12 +453,15 @@ fn runs_place_the_samples_and_come_back_as_breaks() {
             Channel {
                 name: "V".into(),
                 source_name: "v".into(),
+                source: 0,
                 data: ChannelData::Analog(Analog {
+                    significant: None,
                     unit: "V".into(),
                     first: 0,
                     period: Ratio::integer(10).unwrap(),
                     count: 34,
                     breaks: vec![Break {
+                        lost: 0,
                         index: 20,
                         tick: 260,
                     }],
@@ -451,7 +470,11 @@ fn runs_place_the_samples_and_come_back_as_breaks() {
                 shaping: Default::default(),
             },
         ],
-        source: Source::new(SourceFormat::Other("test".into())),
+        derived: Vec::new(),
+        sources: vec![Source::new(
+            SourceFormat::Other("test".into()),
+            Ratio::integer(96_000_000).unwrap(),
+        )],
     };
     let options = Options {
         overview_shift: Some(4),
@@ -499,10 +522,20 @@ fn finish_takes_what_the_source_states_at_its_end() {
     }
     let mut out = w.take_output();
     let extra: BTreeMap<String, String> = [("pairs_lost".to_string(), "0".to_string())].into();
-    let f = w.finish(LENGTH, &[LENGTH], extra.clone()).unwrap();
+    let f = w
+        .finish(
+            LENGTH,
+            &[LENGTH],
+            Finish {
+                extra: vec![extra.clone()],
+                bundle: None,
+                drop_gaps_past_end: false,
+            },
+        )
+        .unwrap();
     out.extend_from_slice(&f.tail);
     let footer = Footer::parse_file(&out).unwrap();
-    assert_eq!(footer.header.source.extra, extra);
+    assert_eq!(footer.header.sources[0].extra, extra);
     // The in-order reader accepts a footer that adds to source.extra, but nothing else.
     let (_, ending) = events(&out, 100);
     assert_eq!(ending, Ending::Complete);
@@ -526,7 +559,7 @@ fn a_finish_that_contradicts_the_items_is_refused() {
     };
     // An end before a gap's end, which the last block has passed.
     assert!(matches!(
-        gapped().finish(100, &[50], BTreeMap::new()),
+        gapped().finish(100, &[50], Finish::default()),
         Err(WriteError::GapPastEnd {
             to: 60,
             end: 50,
@@ -534,14 +567,14 @@ fn a_finish_that_contradicts_the_items_is_refused() {
         })
     ));
     assert!(matches!(
-        gapped().finish(100, &[], BTreeMap::new()),
+        gapped().finish(100, &[], Finish::default()),
         Err(WriteError::Ends {
             given: 0,
             expected: 1
         })
     ));
     // A recording that ends inside the gap: the channel's level is known up to the gap's start.
-    let f = gapped().finish(50, &[50], BTreeMap::new()).unwrap();
+    let f = gapped().finish(50, &[50], Finish::default()).unwrap();
     assert!(matches!(
         &f.header.channels[0].data,
         ChannelKind::Digital { end: 40, gaps, .. } if gaps.is_empty()
@@ -579,7 +612,7 @@ fn gap_at_the_boundary(level: bool) -> (Vec<u8>, Vec<u64>) {
     // A quiet time-limit flush: an empty block still says the level held.
     w.flush(300).unwrap();
     step(&mut w, &mut out);
-    let f = w.finish(400, &[400], BTreeMap::new()).unwrap();
+    let f = w.finish(400, &[400], Finish::default()).unwrap();
     out.extend(f.tail);
     (out, at)
 }
@@ -624,7 +657,7 @@ fn a_gap_ending_where_a_block_starts_takes_effect_in_that_block() {
     )
     .unwrap();
     w.flush(100).unwrap();
-    let f = w.finish(100, &[100], BTreeMap::new()).unwrap();
+    let f = w.finish(100, &[100], Finish::default()).unwrap();
     assert_eq!(f.header, r.header);
 }
 

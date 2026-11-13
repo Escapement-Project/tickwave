@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::header::{BlockRow, Header, OverviewRow, Preamble, Trailer};
-use crate::model::Gap;
+use crate::model::{Break, Gap};
 
 /// A record's bytes besides its payload: the kind, the length and the check.
 pub const FRAMING: usize = 1 + 4 + CHECK_LEN;
@@ -186,25 +186,31 @@ pub fn parse_gap(payload: &[u8]) -> Option<(u32, Gap)> {
     ))
 }
 
-pub const RUN_LEN: usize = 20;
+pub const RUN_LEN: usize = 28;
 
-pub fn run_bytes(channel: u32, index: u64, tick: i64) -> [u8; RUN_LEN] {
+/// A run record's payload: sample `run.index` of `channel` starts a run at `run.tick`, after
+/// `run.lost` samples the instrument lost.
+pub fn run_bytes(channel: u32, run: Break) -> [u8; RUN_LEN] {
     let mut out = [0; RUN_LEN];
     out[..4].copy_from_slice(&channel.to_le_bytes());
-    out[4..12].copy_from_slice(&index.to_le_bytes());
-    out[12..20].copy_from_slice(&tick.to_le_bytes());
+    out[4..12].copy_from_slice(&run.index.to_le_bytes());
+    out[12..20].copy_from_slice(&run.tick.to_le_bytes());
+    out[20..28].copy_from_slice(&run.lost.to_le_bytes());
     out
 }
 
-/// None unless the payload is exactly a run: channel, index, tick.
-pub fn parse_run(payload: &[u8]) -> Option<(u32, u64, i64)> {
+/// None unless the payload is exactly a run: channel, index, tick, lost.
+pub fn parse_run(payload: &[u8]) -> Option<(u32, Break)> {
     if payload.len() != RUN_LEN {
         return None;
     }
     Some((
         u32::from_le_bytes(payload[..4].try_into().unwrap()),
-        u64::from_le_bytes(payload[4..12].try_into().unwrap()),
-        i64::from_le_bytes(payload[12..20].try_into().unwrap()),
+        Break {
+            index: u64::from_le_bytes(payload[4..12].try_into().unwrap()),
+            tick: i64::from_le_bytes(payload[12..20].try_into().unwrap()),
+            lost: u64::from_le_bytes(payload[20..28].try_into().unwrap()),
+        },
     ))
 }
 

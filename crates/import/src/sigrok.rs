@@ -184,6 +184,7 @@ pub fn read_bytes(bytes: impl Into<Arc<[u8]>>, file_name: &str) -> Result<Import
             channels.push(Channel {
                 name: name.clone(),
                 source_name: name.clone(),
+                source: 0,
                 data: ChannelData::Digital(Digital {
                     initial,
                     end,
@@ -221,6 +222,7 @@ pub fn read_bytes(bytes: impl Into<Arc<[u8]>>, file_name: &str) -> Result<Import
         channels.push(Channel {
             name: name.clone(),
             source_name: name.clone(),
+            source: 0,
             data: ChannelData::Analog(Analog {
                 // srzip records no unit, and libsigrok labels every analog channel volts.
                 unit: String::new(),
@@ -228,6 +230,7 @@ pub fn read_bytes(bytes: impl Into<Arc<[u8]>>, file_name: &str) -> Result<Import
                 period: Ratio::ONE,
                 count,
                 breaks: Vec::new(),
+                significant: None,
                 samples: Samples::F32(Box::new(Values {
                     reader: StreamReader::new(&data, &Arc::new(stream)),
                     remaining: count,
@@ -247,11 +250,12 @@ pub fn read_bytes(bytes: impl Into<Arc<[u8]>>, file_name: &str) -> Result<Import
             // is known.
             length: length.max(1),
             channels,
-            source: Source {
+            derived: Vec::new(),
+            sources: vec![Source {
                 files: vec![file_name.to_owned()],
                 extra,
-                ..Source::new(SourceFormat::SigrokSr)
-            },
+                ..Source::new(SourceFormat::SigrokSr, timebase)
+            }],
         },
         skipped,
     })

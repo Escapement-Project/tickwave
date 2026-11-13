@@ -6,10 +6,10 @@
 use std::fmt;
 
 use escapement_tickwave_format::annotations::{self, ExactTicks};
-use escapement_tickwave_format::header::JSON_SAFE;
+use escapement_tickwave_format::header::{Header, JSON_SAFE};
 use escapement_tickwave_format::model::{
-    Analog, Break, Channel, ChannelData, Digital, Gap, Kept, Offset, Ratio, Recording, Samples,
-    Shaping, run_sample_tick,
+    Analog, Break, Channel, ChannelData, Digital, Gap, Kept, Offset, Ratio, Recording, Shaping,
+    Wrap, run_sample_tick,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -47,6 +47,14 @@ pub enum Error {
          its run, and none in that span is"
     )]
     NoGridSample { name: String, span: Span, q: u64 },
+    #[error(
+        "the recording's channels start {base} ticks into the source, but its source states an \
+         origin of {origin}, not {}",
+        -base
+    )]
+    Origin { origin: i64, base: i64 },
+    #[error("the recording has {0} sources; a plan shapes a recording of one")]
+    Sources(usize),
 }
 
 /// A kept span as given, in ticks, for a message: an end not given is open.
@@ -269,6 +277,42 @@ impl Plan {
         })
     }
 
+    /// The plan that made the recording `header` describes from `source`, read back from its
+    /// channels' `offset` and `kept` and its source's `origin` (FORMAT.md, "Times"): what
+    /// `tickwave verify` checks a shaped recording through. `source`'s channels carry the
+    /// recording's names.
+    pub fn of_header(source: &Recording, header: &Header) -> Result<Self, Error> {
+        let [only] = header.sources.as_slice() else {
+            return Err(Error::Sources(header.sources.len()));
+        };
+        let origin = only.origin;
+        let mut offsets = Vec::new();
+        let mut keeps = Vec::new();
+        for c in &header.channels {
+            let offset = c.shaping.offset.as_ref().map_or(0, |o| o.ticks);
+            if offset != 0 {
+                offsets.push((c.name.clone(), offset.to_string()));
+            }
+            if let Some(kept) = c.shaping.kept {
+                // T = k + origin + offset: the span in the source's own ticks.
+                let source_tick = |t: i64| (t - origin - offset).to_string();
+                keeps.push((
+                    c.name.clone(),
+                    Some(source_tick(kept.from)),
+                    Some(source_tick(kept.to)),
+                ));
+            }
+        }
+        let plan = Self::new(source, &offsets, &keeps)?;
+        if plan.base != -origin {
+            return Err(Error::Origin {
+                origin,
+                base: plan.base,
+            });
+        }
+        Ok(plan)
+    }
+
     /// The tick of the source's grid where the recording starts: 0 unless a channel moved or was
     /// cut.
     pub fn base(&self) -> i64 {
@@ -298,12 +342,13 @@ impl Plan {
             timebase,
             length,
             channels,
-            mut source,
+            derived,
+            mut sources,
         } = recording;
-        if self.base != 0
-            && let Some(begin) = &mut source.begin_s
-        {
-            *begin += self.base as f64 * timebase.den() as f64 / timebase.num() as f64;
+        // The recording starts `base` ticks into the source's grid: the source's tick 0 lies
+        // `base` before it. Its own time at its tick 0, `begin_s`, stays.
+        for source in &mut sources {
+            source.origin -= self.base;
         }
         let channels = channels
             .into_iter()
@@ -314,7 +359,8 @@ impl Plan {
             timebase,
             length: self.length,
             channels,
-            source,
+            derived,
+            sources,
         }
     }
 }
@@ -440,26 +486,36 @@ fn analog(a: Analog, skip: u64, keep: u64, shift: i64) -> Analog {
         .map(|b| Break {
             index: b.index - skip,
             tick: b.tick + shift,
+            lost: b.lost,
         })
         .collect();
-    let Samples::F32(mut samples) = a.samples;
-    // Counted in u64: a usize is 32 bits in the browser.
-    let (mut to_skip, mut to_keep) = (skip, keep);
-    let samples = std::iter::from_fn(move || {
-        while to_skip > 0 {
-            to_skip -= 1;
-            samples.next()?;
+    /// Skips `0` samples, then keeps `1`.
+    struct Cut(u64, u64);
+    impl Wrap for Cut {
+        fn wrap<T: Send + 'static>(
+            self,
+            mut samples: Box<dyn Iterator<Item = T> + Send>,
+        ) -> Box<dyn Iterator<Item = T> + Send> {
+            // Counted in u64: a usize is 32 bits in the browser.
+            let Cut(mut to_skip, mut to_keep) = self;
+            Box::new(std::iter::from_fn(move || {
+                while to_skip > 0 {
+                    to_skip -= 1;
+                    samples.next()?;
+                }
+                to_keep = to_keep.checked_sub(1)?;
+                samples.next()
+            }))
         }
-        to_keep = to_keep.checked_sub(1)?;
-        samples.next()
-    });
+    }
     Analog {
         unit: a.unit,
         first,
         period: a.period,
         count: keep,
         breaks,
-        samples: Samples::F32(Box::new(samples)),
+        significant: a.significant,
+        samples: a.samples.map(Cut(skip, keep)),
     }
 }
 

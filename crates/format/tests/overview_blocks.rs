@@ -2,6 +2,7 @@ use escapement_tickwave_format::bundle::bundle;
 use escapement_tickwave_format::decode::Footer;
 use escapement_tickwave_format::encode::{Options, encode};
 use escapement_tickwave_format::header::OverviewLevel;
+use escapement_tickwave_format::overview::AnalogOverview;
 use escapement_tickwave_format::record::{self, Kind};
 use escapement_tickwave_format::verify::verify;
 
@@ -27,6 +28,7 @@ fn recording(edges: Vec<i64>) -> Recording {
             Channel {
                 name: "C".into(),
                 source_name: "c".into(),
+                source: 0,
                 data: ChannelData::Digital(Digital {
                     initial: false,
                     end: LENGTH,
@@ -38,7 +40,9 @@ fn recording(edges: Vec<i64>) -> Recording {
             Channel {
                 name: "V".into(),
                 source_name: "v".into(),
+                source: 0,
                 data: ChannelData::Analog(Analog {
+                    significant: None,
                     unit: "V".into(),
                     first: 0,
                     period: Ratio::integer(PERIOD).unwrap(),
@@ -49,7 +53,11 @@ fn recording(edges: Vec<i64>) -> Recording {
                 shaping: Default::default(),
             },
         ],
-        source: Source::new(SourceFormat::Other("test".into())),
+        derived: Vec::new(),
+        sources: vec![Source::new(
+            SourceFormat::Other("test".into()),
+            Ratio::integer(1_000_000_000).unwrap(),
+        )],
     }
 }
 
@@ -107,21 +115,21 @@ fn a_long_recording_keeps_its_finest_level_in_blocks() {
     assert_eq!(digital(4, 0), (true, true));
 
     let block = decode(0);
-    let escapement_tickwave_format::overview::ChannelOverview::Analog { min, max } =
-        &block.level.channels[1]
-    else {
-        panic!("V is analog");
+    let Some(AnalogOverview::F32(v)) = block.level.channels[1].analog() else {
+        panic!("V is f32");
     };
-    assert_eq!((min[0], max[0]), (0.0, 0.0));
-    assert_eq!((min[1], max[1]), (f32::INFINITY, f32::NEG_INFINITY));
-    assert_eq!((min[256], max[256]), (1.0, 1.0));
+    let (min, max, sum) = (&v.min, &v.max, &v.sum);
+    assert_eq!((min[0], max[0], sum[0]), (0.0, 0.0, 0.0));
+    assert_eq!(
+        (min[1], max[1], sum[1]),
+        (f32::INFINITY, f32::NEG_INFINITY, 0.0)
+    );
+    assert_eq!((min[256], max[256], sum[256]), (1.0, 1.0, 1.0));
     let last = decode(4);
-    let escapement_tickwave_format::overview::ChannelOverview::Analog { min, .. } =
-        &last.level.channels[1]
-    else {
-        panic!("V is analog");
+    let Some(AnalogOverview::F32(v)) = last.level.channels[1].analog() else {
+        panic!("V is f32");
     };
-    assert_eq!(min[0], (SAMPLES - 1) as f32);
+    assert_eq!(v.min[0], (SAMPLES - 1) as f32);
 
     assert_eq!(head.overview_blocks_covering(0, 0, 1), 0..1);
     assert_eq!(

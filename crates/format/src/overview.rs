@@ -1,16 +1,22 @@
 //! The overview: each channel summarised in buckets of 2^shift ticks, so a wide view draws without
 //! fetching blocks. A digital bucket holds the level at its start and whether the level changes
-//! inside it. An analog bucket holds the least and greatest value in it.
+//! inside it. An analog bucket holds the least and greatest of its samples and their sum, in the
+//! types FORMAT.md's table gives; a derived channel's buckets follow the channels'.
 //!
-//! Decoded layout, for each level in the header's order and each channel within it:
+//! Decoded layout, for each level in the header's order, each channel in order, then each derived
+//! channel:
 //! - digital: the level bits, then the change bits, each `ceil(n / 8)` bytes, bucket i in bit
 //!   `i % 8` of byte `i / 8`;
-//! - analog: n minimums, then n maximums, as f32. A bucket with no sample holds +inf and -inf.
+//! - analog: n minimums, then n maximums, then n sums. A bucket with no sample holds a minimum
+//!   above its maximum, and a sum of 0.
 
 use std::collections::VecDeque;
+use std::fmt;
+use std::sync::Arc;
 
-use crate::header::{DeclaredChannel, DeclaredKind};
-use crate::model::Gap;
+use crate::header::{DeclaredChannel, DeclaredKind, Derived, Stored};
+use crate::model::{Gap, Sample};
+use crate::samples::Product;
 
 /// The step between levels, as a shift.
 pub const STEP: u8 = 4;
@@ -33,6 +39,9 @@ pub const BLOCK_BUCKETS: u64 = 1 << 16;
 pub const CONVERTER_BUCKETS: u64 = 1 << 26;
 /// The finest shift tickwave's converter declares.
 pub const CONVERTER_FINEST: u8 = 12;
+/// The buckets a writer seals into one shared piece of a level it holds, so a snapshot shares
+/// them rather than copying. Divides `BLOCK_BUCKETS` and is a multiple of 8.
+pub const CHUNK: u64 = 1024;
 
 /// The finest level a converter declares for a recording of `length`: the first of 12, 16, 20
 /// and so on with at most 2^26 buckets.
@@ -86,27 +95,385 @@ pub fn block_buckets(length: i64, shift: u8, k: u64) -> (u64, u64) {
     (first, BLOCK_BUCKETS.min(buckets(length, shift) - first))
 }
 
+/// What one channel's buckets hold: a digital channel's bits, or an analog one's numbers in the
+/// type it is summarised in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Column {
+    Digital,
+    Analog(Stored),
+}
+
+/// A number an analog bucket holds, and the sum it adds up to.
+pub trait Num: Copy + fmt::Debug + Send + Sync + 'static {
+    type Sum: Copy + fmt::Debug + Send + Sync + 'static;
+    /// An empty bucket's minimum: the type's largest.
+    const GREATEST: Self;
+    /// An empty bucket's maximum: the type's smallest.
+    const LEAST: Self;
+    const NO_SUM: Self::Sum;
+    const SIZE: usize;
+    const SUM_SIZE: usize;
+    fn lesser(self, other: Self) -> Self;
+    fn greater(self, other: Self) -> Self;
+    fn add(sum: Self::Sum, v: Self) -> Self::Sum;
+    fn add_sum(a: Self::Sum, b: Self::Sum) -> Self::Sum;
+    fn is_nan(self) -> bool;
+    /// The same bits: a float compares by its bits, so a NaN sum equals itself.
+    fn same(a: Self, b: Self) -> bool;
+    fn same_sum(a: Self::Sum, b: Self::Sum) -> bool;
+    fn put(self, out: &mut Vec<u8>);
+    fn put_sum(sum: Self::Sum, out: &mut Vec<u8>);
+    fn read(bytes: &[u8]) -> Self;
+    fn read_sum(bytes: &[u8]) -> Self::Sum;
+}
+
+macro_rules! float {
+    ($t:ty, $size:literal) => {
+        impl Num for $t {
+            type Sum = f64;
+            const GREATEST: Self = <$t>::INFINITY;
+            const LEAST: Self = <$t>::NEG_INFINITY;
+            const NO_SUM: f64 = 0.0;
+            const SIZE: usize = $size;
+            const SUM_SIZE: usize = 8;
+            // `min` and `max` leave a tie between -0 and +0 to the platform; the format gives it
+            // to the earlier, `self`. Neither side is ever NaN: `take` leaves NaN out.
+            fn lesser(self, other: Self) -> Self {
+                if other < self { other } else { self }
+            }
+            fn greater(self, other: Self) -> Self {
+                if other > self { other } else { self }
+            }
+            fn add(sum: f64, v: Self) -> f64 {
+                sum + f64::from(v)
+            }
+            fn add_sum(a: f64, b: f64) -> f64 {
+                a + b
+            }
+            fn is_nan(self) -> bool {
+                self.is_nan()
+            }
+            fn same(a: Self, b: Self) -> bool {
+                a.to_bits() == b.to_bits()
+            }
+            fn same_sum(a: f64, b: f64) -> bool {
+                a.to_bits() == b.to_bits()
+            }
+            fn put(self, out: &mut Vec<u8>) {
+                out.extend_from_slice(&self.to_le_bytes());
+            }
+            fn put_sum(sum: f64, out: &mut Vec<u8>) {
+                out.extend_from_slice(&sum.to_le_bytes());
+            }
+            fn read(bytes: &[u8]) -> Self {
+                <$t>::from_le_bytes(bytes.try_into().unwrap())
+            }
+            fn read_sum(bytes: &[u8]) -> f64 {
+                f64::from_le_bytes(bytes.try_into().unwrap())
+            }
+        }
+    };
+}
+
+macro_rules! integer {
+    ($t:ty) => {
+        impl Num for $t {
+            type Sum = i128;
+            const GREATEST: Self = <$t>::MAX;
+            const LEAST: Self = <$t>::MIN;
+            const NO_SUM: i128 = 0;
+            const SIZE: usize = 8;
+            const SUM_SIZE: usize = 16;
+            fn lesser(self, other: Self) -> Self {
+                Ord::min(self, other)
+            }
+            fn greater(self, other: Self) -> Self {
+                Ord::max(self, other)
+            }
+            fn add(sum: i128, v: Self) -> i128 {
+                sum + i128::from(v)
+            }
+            fn add_sum(a: i128, b: i128) -> i128 {
+                a + b
+            }
+            fn is_nan(self) -> bool {
+                false
+            }
+            fn same(a: Self, b: Self) -> bool {
+                a == b
+            }
+            fn same_sum(a: i128, b: i128) -> bool {
+                a == b
+            }
+            fn put(self, out: &mut Vec<u8>) {
+                out.extend_from_slice(&self.to_le_bytes());
+            }
+            fn put_sum(sum: i128, out: &mut Vec<u8>) {
+                out.extend_from_slice(&sum.to_le_bytes());
+            }
+            fn read(bytes: &[u8]) -> Self {
+                <$t>::from_le_bytes(bytes.try_into().unwrap())
+            }
+            fn read_sum(bytes: &[u8]) -> i128 {
+                i128::from_le_bytes(bytes.try_into().unwrap())
+            }
+        }
+    };
+}
+
+float!(f32, 4);
+float!(f64, 8);
+integer!(u64);
+integer!(i64);
+
+/// One bucket of an analog channel.
+#[derive(Clone, Copy, Debug)]
+pub struct Bucket<T: Num> {
+    pub min: T,
+    pub max: T,
+    pub sum: T::Sum,
+}
+
+impl<T: Num> Bucket<T> {
+    pub const EMPTY: Self = Self {
+        min: T::GREATEST,
+        max: T::LEAST,
+        sum: T::NO_SUM,
+    };
+
+    /// A sample counts in the bucket; a NaN leaves it as it was.
+    fn take(&mut self, v: T) {
+        if v.is_nan() {
+            return;
+        }
+        self.min = self.min.lesser(v);
+        self.max = self.max.greater(v);
+        self.sum = T::add(self.sum, v);
+    }
+
+    /// A later child's bucket folded in.
+    fn fold(&mut self, next: &Self) {
+        self.min = self.min.lesser(next.min);
+        self.max = self.max.greater(next.max);
+        self.sum = T::add_sum(self.sum, next.sum);
+    }
+}
+
+impl<T: Num> PartialEq for Bucket<T> {
+    fn eq(&self, other: &Self) -> bool {
+        T::same(self.min, other.min)
+            && T::same(self.max, other.max)
+            && T::same_sum(self.sum, other.sum)
+    }
+}
+
+/// An analog channel's buckets: n minimums, n maximums and n sums.
+#[derive(Clone, Debug)]
+pub struct Columns<T: Num> {
+    pub min: Vec<T>,
+    pub max: Vec<T>,
+    pub sum: Vec<T::Sum>,
+}
+
+impl<T: Num> Columns<T> {
+    fn new() -> Self {
+        Self {
+            min: Vec::new(),
+            max: Vec::new(),
+            sum: Vec::new(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.min.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.min.is_empty()
+    }
+
+    pub fn bucket(&self, i: usize) -> Bucket<T> {
+        Bucket {
+            min: self.min[i],
+            max: self.max[i],
+            sum: self.sum[i],
+        }
+    }
+
+    fn push(&mut self, b: Bucket<T>) {
+        self.min.push(b.min);
+        self.max.push(b.max);
+        self.sum.push(b.sum);
+    }
+
+    fn slice(&self, from: usize, n: usize) -> Self {
+        Self {
+            min: self.min[from..][..n].to_vec(),
+            max: self.max[from..][..n].to_vec(),
+            sum: self.sum[from..][..n].to_vec(),
+        }
+    }
+
+    fn append(&mut self, other: &Self) {
+        self.min.extend_from_slice(&other.min);
+        self.max.extend_from_slice(&other.max);
+        self.sum.extend_from_slice(&other.sum);
+    }
+
+    fn write(&self, out: &mut Vec<u8>) {
+        for &v in self.min.iter().chain(&self.max) {
+            v.put(out);
+        }
+        for &s in &self.sum {
+            T::put_sum(s, out);
+        }
+    }
+
+    fn parse(c: &mut Cursor<'_>, n: usize) -> Option<Self> {
+        let nums = |b: &[u8]| b.chunks_exact(T::SIZE).map(T::read).collect();
+        Some(Self {
+            min: nums(c.take(n * T::SIZE)?),
+            max: nums(c.take(n * T::SIZE)?),
+            sum: c
+                .take(n * T::SUM_SIZE)?
+                .chunks_exact(T::SUM_SIZE)
+                .map(T::read_sum)
+                .collect(),
+        })
+    }
+
+    /// Buckets of a coarser level, each folding the children `children(b)` in order.
+    fn coarsen(&self, n: u64, children: impl Fn(u64) -> std::ops::Range<u64>) -> Self {
+        let mut out = Self::new();
+        for b in 0..n {
+            let mut acc = Bucket::EMPTY;
+            for i in children(b) {
+                acc.fold(&self.bucket(i as usize));
+            }
+            out.push(acc);
+        }
+        out
+    }
+}
+
+impl<T: Num> PartialEq for Columns<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len() && (0..self.len()).all(|i| self.bucket(i) == other.bucket(i))
+    }
+}
+
+/// An analog or derived channel's buckets in the type it is summarised in.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AnalogOverview {
+    F32(Columns<f32>),
+    F64(Columns<f64>),
+    U64(Columns<u64>),
+    I64(Columns<i64>),
+}
+
+macro_rules! each {
+    ($e:expr, $c:ident => $body:expr) => {
+        match $e {
+            AnalogOverview::F32($c) => $body,
+            AnalogOverview::F64($c) => $body,
+            AnalogOverview::U64($c) => $body,
+            AnalogOverview::I64($c) => $body,
+        }
+    };
+}
+
+macro_rules! map_each {
+    ($e:expr, $c:ident => $body:expr) => {
+        match $e {
+            AnalogOverview::F32($c) => AnalogOverview::F32($body),
+            AnalogOverview::F64($c) => AnalogOverview::F64($body),
+            AnalogOverview::U64($c) => AnalogOverview::U64($body),
+            AnalogOverview::I64($c) => AnalogOverview::I64($body),
+        }
+    };
+}
+
+impl AnalogOverview {
+    fn new(stored: Stored) -> Self {
+        match stored {
+            Stored::F32 => Self::F32(Columns::new()),
+            Stored::F64 => Self::F64(Columns::new()),
+            Stored::U64 => Self::U64(Columns::new()),
+            Stored::I64 => Self::I64(Columns::new()),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        each!(self, c => c.len())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Each bucket's minimum and maximum in f64, and its sum in f64: the stored numbers, not
+    /// an `int` channel's values.
+    pub fn as_f64(&self) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        match self {
+            Self::F32(c) => (
+                c.min.iter().map(|&v| f64::from(v)).collect(),
+                c.max.iter().map(|&v| f64::from(v)).collect(),
+                c.sum.clone(),
+            ),
+            Self::F64(c) => (c.min.clone(), c.max.clone(), c.sum.clone()),
+            Self::U64(c) => (
+                c.min.iter().map(|&v| v as f64).collect(),
+                c.max.iter().map(|&v| v as f64).collect(),
+                c.sum.iter().map(|&v| v as f64).collect(),
+            ),
+            Self::I64(c) => (
+                c.min.iter().map(|&v| v as f64).collect(),
+                c.max.iter().map(|&v| v as f64).collect(),
+                c.sum.iter().map(|&v| v as f64).collect(),
+            ),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum ChannelOverview {
     Digital { level: Vec<u8>, change: Vec<u8> },
-    Analog { min: Vec<f32>, max: Vec<f32> },
+    Analog(AnalogOverview),
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Level {
     pub shift: u8,
     pub buckets: u64,
+    /// Each channel, then each derived channel.
     pub channels: Vec<ChannelOverview>,
 }
 
 impl Level {
+    /// A level of no buckets yet, for `columns`.
+    pub fn empty(shift: u8, columns: &[Column]) -> Level {
+        Level {
+            shift,
+            buckets: 0,
+            channels: columns
+                .iter()
+                .map(|c| match c {
+                    Column::Digital => ChannelOverview::Digital {
+                        level: Vec::new(),
+                        change: Vec::new(),
+                    },
+                    Column::Analog(stored) => ChannelOverview::Analog(AnalogOverview::new(*stored)),
+                })
+                .collect(),
+        }
+    }
+
     /// Buckets `first..first + n` as a level of their own. `first` is a multiple of 8, and the
     /// slice either ends on a multiple of 8 or at the level's end, so the bit arrays cut on byte
     /// boundaries.
     pub fn slice(&self, first: u64, n: u64) -> Level {
         assert!(first.is_multiple_of(8) && (n.is_multiple_of(8) || first + n == self.buckets));
         let bits = |b: &Vec<u8>| b[(first / 8) as usize..][..bit_bytes(n)].to_vec();
-        let floats = |v: &Vec<f32>| v[first as usize..][..n as usize].to_vec();
         Level {
             shift: self.shift,
             buckets: n,
@@ -118,13 +485,76 @@ impl Level {
                         level: bits(level),
                         change: bits(change),
                     },
-                    ChannelOverview::Analog { min, max } => ChannelOverview::Analog {
-                        min: floats(min),
-                        max: floats(max),
-                    },
+                    ChannelOverview::Analog(a) => ChannelOverview::Analog(
+                        map_each!(a, c => c.slice(first as usize, n as usize)),
+                    ),
                 })
                 .collect(),
         }
+    }
+
+    /// `other`'s buckets after this level's, whose count is a multiple of 8.
+    fn append(&mut self, other: &Level) {
+        debug_assert!(self.buckets.is_multiple_of(8));
+        for (mine, theirs) in self.channels.iter_mut().zip(&other.channels) {
+            match (mine, theirs) {
+                (
+                    ChannelOverview::Digital { level, change },
+                    ChannelOverview::Digital {
+                        level: l,
+                        change: c,
+                    },
+                ) => {
+                    level.extend_from_slice(l);
+                    change.extend_from_slice(c);
+                }
+                (ChannelOverview::Analog(a), ChannelOverview::Analog(b)) => match (a, b) {
+                    (AnalogOverview::F32(a), AnalogOverview::F32(b)) => a.append(b),
+                    (AnalogOverview::F64(a), AnalogOverview::F64(b)) => a.append(b),
+                    (AnalogOverview::U64(a), AnalogOverview::U64(b)) => a.append(b),
+                    (AnalogOverview::I64(a), AnalogOverview::I64(b)) => a.append(b),
+                    _ => unreachable!("a channel keeps its type"),
+                },
+                _ => unreachable!("a channel keeps its kind"),
+            }
+        }
+        self.buckets += other.buckets;
+    }
+
+    /// Bucket `self.buckets` takes `values`, one a column.
+    fn push(&mut self, values: &[Value]) {
+        let i = self.buckets;
+        for (column, value) in self.channels.iter_mut().zip(values) {
+            match (column, value) {
+                (
+                    ChannelOverview::Digital { level, change },
+                    Value::Digital {
+                        level: l,
+                        change: c,
+                    },
+                ) => {
+                    if i.is_multiple_of(8) {
+                        level.push(0);
+                        change.push(0);
+                    }
+                    if *l {
+                        set(level, i);
+                    }
+                    if *c {
+                        set(change, i);
+                    }
+                }
+                (ChannelOverview::Analog(a), Value::Analog(v)) => match (a, v) {
+                    (AnalogOverview::F32(c), AnalogValue::F32(b)) => c.push(*b),
+                    (AnalogOverview::F64(c), AnalogValue::F64(b)) => c.push(*b),
+                    (AnalogOverview::U64(c), AnalogValue::U64(b)) => c.push(*b),
+                    (AnalogOverview::I64(c), AnalogValue::I64(b)) => c.push(*b),
+                    _ => unreachable!("a channel keeps its type"),
+                },
+                _ => unreachable!("a channel keeps its kind"),
+            }
+        }
+        self.buckets += 1;
     }
 }
 
@@ -145,7 +575,14 @@ impl ChannelOverview {
     pub fn digital(&self, i: u64) -> Option<(bool, bool)> {
         match self {
             Self::Digital { level, change } => Some((bit(level, i), bit(change, i))),
-            Self::Analog { .. } => None,
+            Self::Analog(_) => None,
+        }
+    }
+
+    pub fn analog(&self) -> Option<&AnalogOverview> {
+        match self {
+            Self::Analog(a) => Some(a),
+            Self::Digital { .. } => None,
         }
     }
 }
@@ -176,20 +613,8 @@ pub fn coarsen(fine: &Level, shift: u8, length: i64) -> Level {
                     change: out_change,
                 }
             }
-            ChannelOverview::Analog { min, max } => {
-                let range = |b: u64| children(b).start as usize..children(b).end as usize;
-                ChannelOverview::Analog {
-                    min: (0..n)
-                        .map(|b| min[range(b)].iter().fold(f32::INFINITY, |a, &v| a.min(v)))
-                        .collect(),
-                    max: (0..n)
-                        .map(|b| {
-                            max[range(b)]
-                                .iter()
-                                .fold(f32::NEG_INFINITY, |a, &v| a.max(v))
-                        })
-                        .collect(),
-                }
+            ChannelOverview::Analog(a) => {
+                ChannelOverview::Analog(map_each!(a, c => c.coarsen(n, children)))
             }
         })
         .collect();
@@ -208,11 +633,7 @@ pub fn write(levels: &[Level], out: &mut Vec<u8>) {
                     out.extend_from_slice(level);
                     out.extend_from_slice(change);
                 }
-                ChannelOverview::Analog { min, max } => {
-                    for v in min.iter().chain(max) {
-                        out.extend_from_slice(&v.to_le_bytes());
-                    }
-                }
+                ChannelOverview::Analog(a) => each!(a, c => c.write(out)),
             }
         }
     }
@@ -225,46 +646,48 @@ struct Cursor<'a> {
 
 impl<'a> Cursor<'a> {
     fn take(&mut self, n: usize) -> Option<&'a [u8]> {
-        let slice = self.bytes.get(self.pos..self.pos + n)?;
+        let slice = self.bytes.get(self.pos..self.pos.checked_add(n)?)?;
         self.pos += n;
         Some(slice)
     }
 }
 
-fn parse_channels(c: &mut Cursor<'_>, n: u64, analog: &[bool]) -> Option<Vec<ChannelOverview>> {
-    let floats = |b: &[u8]| {
-        b.as_chunks::<4>()
-            .0
-            .iter()
-            .map(|&c| f32::from_le_bytes(c))
-            .collect()
-    };
-    let mut channels = Vec::with_capacity(analog.len());
-    for &is_analog in analog {
-        channels.push(if is_analog {
-            let min = floats(c.take(4 * n as usize)?);
-            let max = floats(c.take(4 * n as usize)?);
-            ChannelOverview::Analog { min, max }
-        } else {
-            let level = c.take(bit_bytes(n))?.to_vec();
-            let change = c.take(bit_bytes(n))?.to_vec();
-            ChannelOverview::Digital { level, change }
+fn parse_channels(c: &mut Cursor<'_>, n: u64, columns: &[Column]) -> Option<Vec<ChannelOverview>> {
+    let n = usize::try_from(n).ok()?;
+    let mut channels = Vec::with_capacity(columns.len());
+    for column in columns {
+        channels.push(match column {
+            Column::Analog(stored) => ChannelOverview::Analog(match stored {
+                Stored::F32 => AnalogOverview::F32(Columns::parse(c, n)?),
+                Stored::F64 => AnalogOverview::F64(Columns::parse(c, n)?),
+                Stored::U64 => AnalogOverview::U64(Columns::parse(c, n)?),
+                Stored::I64 => AnalogOverview::I64(Columns::parse(c, n)?),
+            }),
+            Column::Digital => {
+                let level = c.take(bit_bytes(n as u64))?.to_vec();
+                let change = c.take(bit_bytes(n as u64))?.to_vec();
+                ChannelOverview::Digital { level, change }
+            }
         });
     }
     Some(channels)
 }
 
-/// The decoded size of `n` buckets of every channel.
-pub fn decoded_len(n: u64, analog: &[bool]) -> u64 {
-    analog
+/// The decoded size of `n` buckets of every column.
+pub fn decoded_len(n: u64, columns: &[Column]) -> u64 {
+    columns
         .iter()
-        .map(|&a| if a { 8 * n } else { 2 * bit_bytes(n) as u64 })
+        .map(|c| match c {
+            Column::Digital => 2 * bit_bytes(n) as u64,
+            Column::Analog(Stored::F32) => n * (2 * 4 + 8),
+            Column::Analog(Stored::F64) => n * (2 * 8 + 8),
+            Column::Analog(Stored::U64 | Stored::I64) => n * (2 * 8 + 16),
+        })
         .sum()
 }
 
-/// Parses the footer's decoded overview. `analog[c]` says whether channel c is analog. None if
-/// `bytes` is not exactly the size the levels need.
-pub fn parse(bytes: &[u8], shifts: &[u8], length: i64, analog: &[bool]) -> Option<Vec<Level>> {
+/// Parses the footer's decoded overview. None if `bytes` is not exactly the size the levels need.
+pub fn parse(bytes: &[u8], shifts: &[u8], length: i64, columns: &[Column]) -> Option<Vec<Level>> {
     let mut cursor = Cursor { bytes, pos: 0 };
     let mut levels = Vec::with_capacity(shifts.len());
     for &shift in shifts {
@@ -272,16 +695,16 @@ pub fn parse(bytes: &[u8], shifts: &[u8], length: i64, analog: &[bool]) -> Optio
         levels.push(Level {
             shift,
             buckets: n,
-            channels: parse_channels(&mut cursor, n, analog)?,
+            channels: parse_channels(&mut cursor, n, columns)?,
         });
     }
     (cursor.pos == bytes.len()).then_some(levels)
 }
 
 /// Parses one decoded overview block of `n` buckets.
-pub fn parse_block(bytes: &[u8], shift: u8, n: u64, analog: &[bool]) -> Option<Level> {
+pub fn parse_block(bytes: &[u8], shift: u8, n: u64, columns: &[Column]) -> Option<Level> {
     let mut cursor = Cursor { bytes, pos: 0 };
-    let channels = parse_channels(&mut cursor, n, analog)?;
+    let channels = parse_channels(&mut cursor, n, columns)?;
     (cursor.pos == bytes.len()).then_some(Level {
         shift,
         buckets: n,
@@ -289,34 +712,59 @@ pub fn parse_block(bytes: &[u8], shift: u8, n: u64, analog: &[bool]) -> Option<L
     })
 }
 
-/// One bucket of one channel.
+/// One bucket of an analog column.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Value {
-    Digital { level: bool, change: bool },
-    Analog { min: f32, max: f32 },
+pub enum AnalogValue {
+    F32(Bucket<f32>),
+    F64(Bucket<f64>),
+    U64(Bucket<u64>),
+    I64(Bucket<i64>),
 }
 
-impl Value {
-    fn empty_analog() -> Self {
-        Value::Analog {
-            min: f32::INFINITY,
-            max: f32::NEG_INFINITY,
+impl AnalogValue {
+    fn empty(stored: Stored) -> Self {
+        match stored {
+            Stored::F32 => Self::F32(Bucket::EMPTY),
+            Stored::F64 => Self::F64(Bucket::EMPTY),
+            Stored::U64 => Self::U64(Bucket::EMPTY),
+            Stored::I64 => Self::I64(Bucket::EMPTY),
         }
     }
 
-    /// A coarser bucket's value, taking `next`, a later child, into account.
-    fn fold(self, next: Value) -> Value {
+    fn take(&mut self, sample: Sample) {
+        match (self, sample) {
+            (Self::F32(b), Sample::F32(v)) => b.take(v),
+            (Self::F64(b), Sample::F64(v)) => b.take(v),
+            (Self::U64(b), Sample::U64(v)) => b.take(v),
+            (Self::I64(b), Sample::I64(v)) => b.take(v),
+            (b, s) => unreachable!("a {} sample in a {b:?} bucket", s.type_name()),
+        }
+    }
+
+    fn fold(&mut self, next: &Self) {
         match (self, next) {
-            (Value::Digital { level, change }, Value::Digital { change: c, .. }) => {
-                Value::Digital {
-                    level,
-                    change: change || c,
-                }
-            }
-            (Value::Analog { min, max }, Value::Analog { min: lo, max: hi }) => Value::Analog {
-                min: min.min(lo),
-                max: max.max(hi),
-            },
+            (Self::F32(a), Self::F32(b)) => a.fold(b),
+            (Self::F64(a), Self::F64(b)) => a.fold(b),
+            (Self::U64(a), Self::U64(b)) => a.fold(b),
+            (Self::I64(a), Self::I64(b)) => a.fold(b),
+            _ => unreachable!("a channel keeps its type"),
+        }
+    }
+}
+
+/// One bucket of one column.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Value {
+    Digital { level: bool, change: bool },
+    Analog(AnalogValue),
+}
+
+impl Value {
+    /// A coarser bucket's value, taking `next`, a later child, into account.
+    fn fold(&mut self, next: &Value) {
+        match (self, next) {
+            (Value::Digital { change, .. }, Value::Digital { change: c, .. }) => *change |= *c,
+            (Value::Analog(a), Value::Analog(b)) => a.fold(b),
             _ => unreachable!("a channel keeps its kind"),
         }
     }
@@ -341,102 +789,124 @@ enum Intake {
         events: VecDeque<DigitalEvent>,
     },
     Analog {
-        events: VecDeque<(u64, f32, f32)>,
+        stored: Stored,
+        events: VecDeque<(u64, AnalogValue)>,
     },
 }
 
-/// A level's settled buckets not yet handed on, from bucket `first`.
+impl Intake {
+    fn sample(&mut self, bucket: u64, sample: Sample) {
+        let Intake::Analog { stored, events } = self else {
+            unreachable!("a sample on an analog channel")
+        };
+        match events.back_mut() {
+            Some((b, v)) if *b == bucket => v.take(sample),
+            _ => {
+                let mut v = AnalogValue::empty(*stored);
+                v.take(sample);
+                events.push_back((bucket, v));
+            }
+        }
+    }
+}
+
+/// A derived channel's operands' samples waiting for their partner: sample i of one is paired
+/// with sample i of the other.
+struct Pair {
+    name: String,
+    operands: [(usize, String); 2],
+    product: Product,
+    /// Samples of one operand the other has not reached, with their ticks; never both at once.
+    waiting: [VecDeque<(i64, Sample)>; 2],
+}
+
+/// Why a derived channel's operands' samples do not pair.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("derived channel {0}: {1}")]
+pub struct Unpaired(pub String, pub String);
+
+/// A level's settled buckets not yet handed on, from bucket `first`: whole chunks of `CHUNK`
+/// buckets, shared, then the rest.
 struct Store {
+    shift: u8,
+    columns: Vec<Column>,
     first: u64,
-    n: u64,
-    columns: Vec<ChannelOverview>,
+    sealed: Vec<Arc<Level>>,
+    open: Level,
 }
 
 impl Store {
-    fn new(analog: &[bool], first: u64) -> Self {
+    fn new(shift: u8, columns: &[Column], first: u64) -> Self {
         Self {
+            shift,
+            columns: columns.to_vec(),
             first,
-            n: 0,
-            columns: analog
-                .iter()
-                .map(|&a| {
-                    if a {
-                        ChannelOverview::Analog {
-                            min: Vec::new(),
-                            max: Vec::new(),
-                        }
-                    } else {
-                        ChannelOverview::Digital {
-                            level: Vec::new(),
-                            change: Vec::new(),
-                        }
-                    }
-                })
-                .collect(),
+            sealed: Vec::new(),
+            open: Level::empty(shift, columns),
         }
+    }
+
+    fn n(&self) -> u64 {
+        self.sealed.len() as u64 * CHUNK + self.open.buckets
     }
 
     fn push(&mut self, values: &[Value]) {
-        let i = self.n;
-        for (column, value) in self.columns.iter_mut().zip(values) {
-            match (column, *value) {
-                (
-                    ChannelOverview::Digital { level, change },
-                    Value::Digital {
-                        level: l,
-                        change: c,
-                    },
-                ) => {
-                    if i.is_multiple_of(8) {
-                        level.push(0);
-                        change.push(0);
-                    }
-                    if l {
-                        set(level, i);
-                    }
-                    if c {
-                        set(change, i);
-                    }
-                }
-                (ChannelOverview::Analog { min, max }, Value::Analog { min: lo, max: hi }) => {
-                    min.push(lo);
-                    max.push(hi);
-                }
-                _ => unreachable!("a channel keeps its kind"),
-            }
+        self.open.push(values);
+        if self.open.buckets == CHUNK {
+            let full = std::mem::replace(&mut self.open, Level::empty(self.shift, &self.columns));
+            self.sealed.push(Arc::new(full));
         }
-        self.n += 1;
     }
 
-    /// The first `n` buckets as a level of their own; `n` is a multiple of 8 or all of them.
-    fn split_front(&mut self, shift: u8, n: u64) -> Level {
-        let bytes = bit_bytes(n);
-        let channels = self
-            .columns
-            .iter_mut()
-            .map(|c| match c {
-                ChannelOverview::Digital { level, change } => ChannelOverview::Digital {
-                    level: level.drain(..bytes).collect(),
-                    change: change.drain(..bytes).collect(),
-                },
-                ChannelOverview::Analog { min, max } => ChannelOverview::Analog {
-                    min: min.drain(..n as usize).collect(),
-                    max: max.drain(..n as usize).collect(),
-                },
-            })
-            .collect();
-        self.first += n;
-        self.n -= n;
-        Level {
-            shift,
-            buckets: n,
-            channels,
+    /// The first `n` buckets as a level of their own: a whole number of chunks, or all of them.
+    fn split_front(&mut self, n: u64) -> Level {
+        let mut out = Level::empty(self.shift, &self.columns);
+        if n == self.n() {
+            for chunk in self.sealed.drain(..) {
+                out.append(&chunk);
+            }
+            let open = std::mem::replace(&mut self.open, Level::empty(self.shift, &self.columns));
+            out.append(&open);
+        } else {
+            assert!(n.is_multiple_of(CHUNK), "a level is cut on chunks");
+            for chunk in self.sealed.drain(..(n / CHUNK) as usize) {
+                out.append(&chunk);
+            }
         }
+        self.first += n;
+        out
+    }
+
+    /// What the store holds, shared.
+    fn held(&self) -> HeldLevel {
+        let mut chunks = self.sealed.clone();
+        if self.open.buckets > 0 {
+            chunks.push(Arc::new(self.open.clone()));
+        }
+        HeldLevel {
+            shift: self.shift,
+            first: self.first,
+            chunks,
+        }
+    }
+}
+
+/// A level's buckets a writer holds, from bucket `first`, in chunks of up to `CHUNK` buckets
+/// each, every one but the last full.
+#[derive(Clone, Debug)]
+pub struct HeldLevel {
+    pub shift: u8,
+    pub first: u64,
+    pub chunks: Vec<Arc<Level>>,
+}
+
+impl HeldLevel {
+    pub fn buckets(&self) -> u64 {
+        self.chunks.iter().map(|c| c.buckets).sum()
     }
 }
 
 struct LevelBuild {
-    shift: u8,
     /// Set once the level has more than 2^17 buckets: it goes in overview blocks.
     promoted: bool,
     store: Store,
@@ -459,13 +929,50 @@ pub struct Finished {
     pub plan: Plan,
 }
 
+/// Each channel's column, then each derived channel's, as a declaration has them.
+pub fn columns(channels: &[DeclaredChannel], derived: &[Derived]) -> Vec<Column> {
+    let mut out: Vec<Column> = channels
+        .iter()
+        .map(|c| match &c.data {
+            DeclaredKind::Digital { .. } => Column::Digital,
+            DeclaredKind::Analog { coding, .. } => Column::Analog(coding.stored()),
+        })
+        .collect();
+    out.extend(
+        products(channels, derived)
+            .iter()
+            .map(|(_, _, p)| Column::Analog(p.stored())),
+    );
+    out
+}
+
+/// Each derived channel's operands, by channel index, and its rule, from a declaration the
+/// reader or the writer has checked.
+pub fn products(channels: &[DeclaredChannel], derived: &[Derived]) -> Vec<(usize, usize, Product)> {
+    let find = |name: &str| {
+        channels
+            .iter()
+            .position(|c| c.name == name)
+            .expect("a checked declaration's derived channels name its channels")
+    };
+    derived
+        .iter()
+        .map(|d| {
+            let (a, b) = (find(&d.product[0]), find(&d.product[1]));
+            let coding = |c: usize| channels[c].coding().expect("analog operands");
+            (a, b, Product::of(coding(a), coding(b)))
+        })
+        .collect()
+}
+
 /// Builds the overview as a recording's items arrive. Each channel's items and gap ends arrive in
 /// tick order, and `settle` says when every item before a tick is in, so the buckets before it
 /// cannot change. It holds the levels that may still go in the footer, and hands on overview
-/// blocks as they settle.
+/// blocks as they settle. A derived channel's samples come from its operands'.
 pub struct Builder {
     finest: u8,
     intake: Vec<Intake>,
+    pairs: Vec<Pair>,
     /// Finest buckets before this have settled.
     base: u64,
     levels: Vec<LevelBuild>,
@@ -473,38 +980,54 @@ pub struct Builder {
 }
 
 impl Builder {
-    /// The overview of `channels`, as their declaration has them, from level `finest`.
-    pub fn new(finest: u8, channels: &[DeclaredChannel]) -> Self {
+    /// The overview of `channels` and `derived`, as a checked declaration has them, from level
+    /// `finest`.
+    pub fn new(finest: u8, channels: &[DeclaredChannel], derived: &[Derived]) -> Self {
+        let columns = columns(channels, derived);
         let intake = channels
             .iter()
-            .map(|c| match c.data {
-                DeclaredKind::Analog { .. } => Intake::Analog {
+            .map(|c| match &c.data {
+                DeclaredKind::Analog { coding, .. } => Intake::Analog {
+                    stored: coding.stored(),
                     events: VecDeque::new(),
                 },
                 DeclaredKind::Digital { initial } => Intake::Digital {
-                    level: initial,
-                    entering: initial,
+                    level: *initial,
+                    entering: *initial,
                     pending: VecDeque::new(),
                     events: VecDeque::new(),
                 },
             })
+            .chain(columns[channels.len()..].iter().map(|c| match c {
+                Column::Analog(stored) => Intake::Analog {
+                    stored: *stored,
+                    events: VecDeque::new(),
+                },
+                Column::Digital => unreachable!("a derived channel is analog"),
+            }))
             .collect();
-        let analog: Vec<bool> = channels
-            .iter()
-            .map(|c| matches!(c.data, DeclaredKind::Analog { .. }))
+        let pairs = products(channels, derived)
+            .into_iter()
+            .zip(derived)
+            .map(|((a, b, product), d)| Pair {
+                name: d.name.clone(),
+                operands: [(a, d.product[0].clone()), (b, d.product[1].clone())],
+                product,
+                waiting: [VecDeque::new(), VecDeque::new()],
+            })
             .collect();
         let levels = (finest..=MAX_SHIFT)
             .step_by(STEP as usize)
             .map(|shift| LevelBuild {
-                shift,
                 promoted: false,
-                store: Store::new(&analog, 0),
+                store: Store::new(shift, &columns, 0),
                 open: None,
             })
             .collect();
         Self {
             finest,
             intake,
+            pairs,
             base: 0,
             levels,
             settled: Vec::new(),
@@ -562,40 +1085,107 @@ impl Builder {
         }
     }
 
-    /// A sample of analog channel `c`. A NaN leaves its bucket as it was.
-    pub fn sample(&mut self, c: usize, tick: i64, value: f32) {
+    /// A sample of analog channel `c`, in the type its coding stores, and the derived samples it
+    /// completes. A NaN leaves its bucket as it was. Err when the derived channel's other operand
+    /// has its sample of the same index at another tick.
+    pub fn sample(&mut self, c: usize, tick: i64, sample: Sample) -> Result<(), Unpaired> {
         let bucket = tick as u64 >> self.finest;
         debug_assert!(bucket >= self.base, "a sample in a settled bucket");
-        let Intake::Analog { events } = &mut self.intake[c] else {
-            unreachable!("a sample on an analog channel")
-        };
-        match events.back_mut() {
-            Some((b, min, max)) if *b == bucket => {
-                *min = min.min(value);
-                *max = max.max(value);
-            }
-            _ => events.push_back((
-                bucket,
-                f32::INFINITY.min(value),
-                f32::NEG_INFINITY.max(value),
-            )),
+        self.intake[c].sample(bucket, sample);
+        let first_derived = self.intake.len() - self.pairs.len();
+        for (d, pair) in self.pairs.iter_mut().enumerate() {
+            let product = match [pair.operands[0].0 == c, pair.operands[1].0 == c] {
+                [true, true] => pair.product.sample(sample, sample),
+                [false, false] => continue,
+                [mine_a, _] => {
+                    let (mine, other) = if mine_a { (0, 1) } else { (1, 0) };
+                    let Some((t, partner)) = pair.waiting[other].pop_front() else {
+                        pair.waiting[mine].push_back((tick, sample));
+                        continue;
+                    };
+                    if t != tick {
+                        return Err(Unpaired(
+                            pair.name.clone(),
+                            format!(
+                                "{} has a sample at tick {t} where {} has one at {tick}",
+                                pair.operands[other].1, pair.operands[mine].1
+                            ),
+                        ));
+                    }
+                    if mine_a {
+                        pair.product.sample(sample, partner)
+                    } else {
+                        pair.product.sample(partner, sample)
+                    }
+                }
+            };
+            self.intake[first_derived + d].sample(bucket, product);
         }
+        Ok(())
+    }
+
+    /// Whether a sample of channel `c` at `tick` pairs with what its derived channels' other
+    /// operands have waiting: `sample` would refuse it otherwise.
+    pub fn pairs_with(&self, c: usize, tick: i64) -> Result<(), Unpaired> {
+        for pair in &self.pairs {
+            for mine in 0..2 {
+                let other = 1 - mine;
+                if pair.operands[mine].0 != c || pair.operands[other].0 == c {
+                    continue;
+                }
+                if let Some(&(t, _)) = pair.waiting[other].front()
+                    && t != tick
+                {
+                    return Err(Unpaired(
+                        pair.name.clone(),
+                        format!(
+                            "{} has a sample at tick {t} where {} has one at {tick}",
+                            pair.operands[other].1, pair.operands[mine].1
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A derived channel's operand sample still waiting for the other operand's.
+    pub fn unpaired(&self) -> Option<Unpaired> {
+        self.pairs.iter().find_map(|pair| {
+            pair.waiting.iter().enumerate().find_map(|(side, waiting)| {
+                waiting.front().map(|&(t, _)| {
+                    Unpaired(
+                        pair.name.clone(),
+                        format!(
+                            "{} has a sample at tick {t} that {} lacks",
+                            pair.operands[side].1,
+                            pair.operands[1 - side].1
+                        ),
+                    )
+                })
+            })
+        })
     }
 
     /// Every item and gap end before `tick` is in. Settles the finest buckets wholly before it,
-    /// and the coarser buckets they complete.
-    pub fn settle(&mut self, tick: i64) {
+    /// and the coarser buckets they complete. Err when a derived channel's operand has a sample
+    /// the other lacks.
+    pub fn settle(&mut self, tick: i64) -> Result<(), Unpaired> {
+        if let Some(e) = self.unpaired() {
+            return Err(e);
+        }
         for c in 0..self.intake.len() {
             self.reach(c, tick);
         }
         self.settle_to(tick as u64 >> self.finest);
         for li in 0..self.levels.len() {
-            let shift = self.levels[li].shift;
+            let shift = self.levels[li].store.shift;
             if !self.levels[li].promoted && 17 + u32::from(shift) < 63 && tick > 1 << (17 + shift) {
                 self.levels[li].promoted = true;
             }
             self.cut_blocks(li);
         }
+        Ok(())
     }
 
     /// Settles finest buckets `base..upto`.
@@ -622,12 +1212,12 @@ impl Builder {
                             change: false,
                         },
                     },
-                    Intake::Analog { events } => match events.front() {
-                        Some(&(eb, min, max)) if eb == b => {
+                    Intake::Analog { stored, events } => match events.front() {
+                        Some(&(eb, v)) if eb == b => {
                             events.pop_front();
-                            Value::Analog { min, max }
+                            Value::Analog(v)
                         }
-                        _ => Value::empty_analog(),
+                        _ => Value::Analog(AnalogValue::empty(*stored)),
                     },
                 });
             }
@@ -639,7 +1229,7 @@ impl Builder {
     /// Bucket `b` of level `li` has settled: store it, and fold it into the next level.
     fn push(&mut self, li: usize, b: u64, values: &[Value]) {
         self.levels[li].store.push(values);
-        if self.levels[li].promoted && self.levels[li].store.n >= BLOCK_BUCKETS {
+        if self.levels[li].promoted && self.levels[li].store.n() >= BLOCK_BUCKETS {
             self.cut_blocks(li);
         }
         let Some(next) = self.levels.get_mut(li + 1) else {
@@ -649,7 +1239,7 @@ impl Builder {
         let done = match &mut next.open {
             Some((p, acc)) if *p == parent => {
                 for (a, v) in acc.iter_mut().zip(values) {
-                    *a = a.fold(*v);
+                    a.fold(v);
                 }
                 None
             }
@@ -667,11 +1257,11 @@ impl Builder {
         if !level.promoted {
             return;
         }
-        while level.store.n >= BLOCK_BUCKETS {
+        while level.store.n() >= BLOCK_BUCKETS {
             let k = level.store.first / BLOCK_BUCKETS;
-            let block = level.store.split_front(level.shift, BLOCK_BUCKETS);
+            let block = level.store.split_front(BLOCK_BUCKETS);
             self.settled.push(Settled {
-                shift: level.shift,
+                shift: level.store.shift,
                 k,
                 level: block,
             });
@@ -683,10 +1273,16 @@ impl Builder {
         std::mem::take(&mut self.settled)
     }
 
+    /// The settled buckets each level holds, finest first, shared: a level that may still go in
+    /// the footer from bucket 0, one in overview blocks from its first block not yet handed on.
+    pub fn held(&self) -> Vec<HeldLevel> {
+        self.levels.iter().map(|l| l.store.held()).collect()
+    }
+
     /// The recording ends at `length`; every item is in. Gap ends at or past it are dropped. The
     /// overview blocks this settles are left for `take_settled`.
-    pub fn finish(mut self, length: i64) -> (Finished, Vec<Settled>) {
-        self.settle(length);
+    pub fn finish(mut self, length: i64) -> Result<(Finished, Vec<Settled>), Unpaired> {
+        self.settle(length)?;
         self.settle_to(buckets(length, self.finest));
         // The last bucket of each coarser level has only the children there are.
         for li in 1..self.levels.len() {
@@ -697,15 +1293,15 @@ impl Builder {
         let plan = plan(length, self.finest);
         let mut head = Vec::with_capacity(plan.head.len());
         for li in 0..self.levels.len() {
-            let shift = self.levels[li].shift;
+            let shift = self.levels[li].store.shift;
             if plan.blocks.contains(&shift) {
                 self.levels[li].promoted = true;
                 self.cut_blocks(li);
                 let level = &mut self.levels[li];
-                if level.store.n > 0 {
+                if level.store.n() > 0 {
                     let k = level.store.first / BLOCK_BUCKETS;
-                    let n = level.store.n;
-                    let block = level.store.split_front(shift, n);
+                    let n = level.store.n();
+                    let block = level.store.split_front(n);
                     self.settled.push(Settled {
                         shift,
                         k,
@@ -715,40 +1311,47 @@ impl Builder {
             } else if plan.head.contains(&shift) {
                 let level = &mut self.levels[li];
                 debug_assert_eq!(level.store.first, 0, "a footer level was never cut");
-                let n = level.store.n;
-                head.push(level.store.split_front(shift, n));
+                let n = level.store.n();
+                head.push(level.store.split_front(n));
             }
         }
-        (Finished { head, plan }, self.settled)
+        Ok((Finished { head, plan }, self.settled))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::header::AnalogCoding;
+    use crate::header::{AnalogCoding, Exact, IntCoding};
     use crate::model::Ratio;
 
     fn dig(initial: bool) -> DeclaredChannel {
         DeclaredChannel {
             name: "D".into(),
             source_name: "d".into(),
+            source: 0,
             data: DeclaredKind::Digital { initial },
             shaping: Default::default(),
         }
     }
 
-    fn ana() -> DeclaredChannel {
+    fn coded(name: &str, coding: AnalogCoding) -> DeclaredChannel {
         DeclaredChannel {
-            name: "A".into(),
-            source_name: "a".into(),
+            name: name.into(),
+            source_name: name.to_lowercase(),
+            source: 0,
             data: DeclaredKind::Analog {
                 unit: "V".into(),
                 period: Ratio::ONE,
-                coding: AnalogCoding::F32,
+                coding,
+                significant: None,
             },
             shaping: Default::default(),
         }
+    }
+
+    fn ana() -> DeclaredChannel {
+        coded("A", AnalogCoding::F32)
     }
 
     fn digital(level: &Level, c: usize) -> Vec<(bool, bool)> {
@@ -760,11 +1363,11 @@ mod tests {
     #[test]
     fn digital_buckets_by_hand() {
         // Buckets of 16 ticks over 0..64: edges at 3 (in bucket 0), 40 and 41 (bucket 2).
-        let mut b = Builder::new(4, &[dig(true)]);
+        let mut b = Builder::new(4, &[dig(true)], &[]);
         for t in [3, 40, 41] {
             b.edge(0, t);
         }
-        let (done, settled) = b.finish(64);
+        let (done, settled) = b.finish(64).unwrap();
         assert!(settled.is_empty());
         // Bucket 0 starts high and changes; 1 starts low, quiet; 2 starts low and changes
         // (low, high, low); 3 starts low, quiet.
@@ -778,9 +1381,9 @@ mod tests {
     fn a_gap_end_sets_its_bucket_and_the_level_from_there() {
         // Buckets of 16 ticks over 0..80. An edge at 5, a gap from 6 to 40 ending high, a settle
         // inside the gap, then an edge at 70.
-        let mut b = Builder::new(4, &[dig(false)]);
+        let mut b = Builder::new(4, &[dig(false)], &[]);
         b.edge(0, 5);
-        b.settle(20);
+        b.settle(20).unwrap();
         b.gap(
             0,
             Gap {
@@ -790,7 +1393,7 @@ mod tests {
             },
         );
         b.edge(0, 70);
-        let (done, _) = b.finish(80);
+        let (done, _) = b.finish(80).unwrap();
         // 0: low, changes at 5. 1: high, carried through the gap. 2: high entering, the gap
         // ends low at 40. 3: low. 4: low, changes at 70.
         assert_eq!(
@@ -809,12 +1412,12 @@ mod tests {
     fn coarse_levels_fold_the_fine_ones() {
         let edges = [5i64, 70, 71, 300, 1000, 1001, 1002, 4095];
         let length = 1 << 16;
-        let mut b = Builder::new(4, &[dig(false), ana()]);
+        let mut b = Builder::new(4, &[dig(false), ana()], &[]);
         for (i, &t) in edges.iter().enumerate() {
             b.edge(0, t);
-            b.sample(1, t, i as f32);
+            b.sample(1, t, Sample::F32(i as f32)).unwrap();
         }
-        let (done, _) = b.finish(length);
+        let (done, _) = b.finish(length).unwrap();
         assert_eq!(done.plan.head, [4, 8]);
         for (fine, coarse) in done.head.iter().zip(&done.head[1..]) {
             assert_eq!(coarsen(fine, coarse.shift, length), *coarse);
@@ -826,17 +1429,17 @@ mod tests {
         // Shift 0: one bucket a tick. 2^17 + 3 ticks need 2^17 + 3 buckets, so shift 0 goes in
         // blocks: two whole ones once the items pass tick 2^17, then the last three buckets.
         let length = (1 << 17) + 3;
-        let mut b = Builder::new(0, &[dig(false)]);
+        let mut b = Builder::new(0, &[dig(false)], &[]);
         b.edge(0, 9);
-        b.settle(1 << 17);
+        b.settle(1 << 17).unwrap();
         assert!(
             b.take_settled().is_empty(),
             "2^17 buckets may still fit the footer"
         );
-        b.settle((1 << 17) + 1);
+        b.settle((1 << 17) + 1).unwrap();
         let first: Vec<_> = b.take_settled().iter().map(|s| (s.shift, s.k)).collect();
         assert_eq!(first, [(0, 0), (0, 1)]);
-        let (done, last) = b.finish(length);
+        let (done, last) = b.finish(length).unwrap();
         let last: Vec<_> = last
             .iter()
             .map(|s| (s.shift, s.k, s.level.buckets))
@@ -879,20 +1482,277 @@ mod tests {
 
     #[test]
     fn round_trips() {
-        let mut b = Builder::new(4, &[dig(true), ana()]);
+        let mut b = Builder::new(4, &[dig(true), ana()], &[]);
         b.edge(0, 17);
-        b.sample(1, 3, 1.5);
-        b.sample(1, 900, -2.0);
-        let (done, _) = b.finish(1000);
+        b.sample(1, 3, Sample::F32(1.5)).unwrap();
+        b.sample(1, 900, Sample::F32(-2.0)).unwrap();
+        let (done, _) = b.finish(1000).unwrap();
         let mut bytes = Vec::new();
         write(&done.head, &mut bytes);
+        let columns = [Column::Digital, Column::Analog(Stored::F32)];
         assert_eq!(
-            parse(&bytes, &done.plan.head, 1000, &[false, true]).as_ref(),
+            parse(&bytes, &done.plan.head, 1000, &columns).as_ref(),
             Some(&done.head)
         );
+        assert_eq!(parse(&bytes[1..], &done.plan.head, 1000, &columns), None);
+    }
+
+    fn columns<T: Num>(level: &Level, c: usize) -> &Columns<T>
+    where
+        AnalogOverview: AsColumns<T>,
+    {
+        level.channels[c].analog().unwrap().columns()
+    }
+
+    trait AsColumns<T: Num> {
+        fn columns(&self) -> &Columns<T>;
+    }
+
+    macro_rules! as_columns {
+        ($t:ty, $v:ident) => {
+            impl AsColumns<$t> for AnalogOverview {
+                fn columns(&self) -> &Columns<$t> {
+                    match self {
+                        AnalogOverview::$v(c) => c,
+                        other => panic!("not {}: {other:?}", stringify!($v)),
+                    }
+                }
+            }
+        };
+    }
+    as_columns!(f32, F32);
+    as_columns!(f64, F64);
+    as_columns!(u64, U64);
+    as_columns!(i64, I64);
+
+    /// Each bucket as (min, max, sum).
+    fn buckets_of<T: Num>(c: &Columns<T>) -> Vec<(T, T, T::Sum)> {
+        (0..c.len())
+            .map(|i| (c.min[i], c.max[i], c.sum[i]))
+            .collect()
+    }
+
+    #[test]
+    fn analog_buckets_hold_min_max_and_sum_and_an_empty_one_holds_min_above_max() {
+        // Buckets of 16 ticks over 0..64, one channel of each stored type. Samples at 1, 2 and 3
+        // (bucket 0), none in bucket 1, 40 and 47 (bucket 2), NaN alone at 50 (bucket 3).
+        let int = |signed| AnalogCoding::Int(IntCoding::new(64, signed));
+        let channels = [
+            coded("F", AnalogCoding::F32),
+            coded("D", AnalogCoding::F64),
+            coded("U", int(false)),
+            coded("S", int(true)),
+        ];
+        let mut b = Builder::new(4, &channels, &[]);
+        let f = [
+            (1, 1.5f32),
+            (2, -2.0),
+            (3, 4.25),
+            (40, 0.5),
+            (47, 0.25),
+            (50, f32::NAN),
+        ];
+        let u = [(1, u64::MAX), (2, 0), (3, 7), (40, 1), (47, 2)];
+        let s = [(1, i64::MIN), (2, i64::MAX), (3, -1), (40, -5), (47, 5)];
+        for &(t, v) in &f {
+            b.sample(0, t, Sample::F32(v)).unwrap();
+            b.sample(1, t, Sample::F64(f64::from(v))).unwrap();
+        }
+        for &(t, v) in &u {
+            b.sample(2, t, Sample::U64(v)).unwrap();
+        }
+        for &(t, v) in &s {
+            b.sample(3, t, Sample::I64(v)).unwrap();
+        }
+        let (done, _) = b.finish(64).unwrap();
+        let level = &done.head[0];
+        // By hand: 1.5 - 2 + 4.25 = 3.75; 0.5 + 0.25 = 0.75. An empty bucket and a bucket of NaN
+        // alone hold +inf and -inf, and a sum of 0.
+        let (inf, ninf) = (f32::INFINITY, f32::NEG_INFINITY);
         assert_eq!(
-            parse(&bytes[1..], &done.plan.head, 1000, &[false, true]),
-            None
+            buckets_of(columns::<f32>(level, 0)),
+            [
+                (-2.0, 4.25, 3.75),
+                (inf, ninf, 0.0),
+                (0.25, 0.5, 0.75),
+                (inf, ninf, 0.0)
+            ]
+        );
+        assert_eq!(
+            buckets_of(columns::<f64>(level, 1)),
+            [
+                (-2.0, 4.25, 3.75),
+                (f64::INFINITY, f64::NEG_INFINITY, 0.0),
+                (0.25, 0.5, 0.75),
+                (f64::INFINITY, f64::NEG_INFINITY, 0.0)
+            ]
+        );
+        // u64::MAX + 0 + 7, exactly, past what a u64 holds.
+        assert_eq!(
+            buckets_of(columns::<u64>(level, 2)),
+            [
+                (0, u64::MAX, i128::from(u64::MAX) + 7),
+                (u64::MAX, 0, 0),
+                (1, 2, 3),
+                (u64::MAX, 0, 0)
+            ]
+        );
+        // i64::MIN + i64::MAX - 1 = -2.
+        assert_eq!(
+            buckets_of(columns::<i64>(level, 3)),
+            [
+                (i64::MIN, i64::MAX, -2),
+                (i64::MAX, i64::MIN, 0),
+                (-5, 5, 0),
+                (i64::MAX, i64::MIN, 0)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_float_sum_adds_in_index_order_and_a_coarse_one_its_children_in_order() {
+        // 1e16, then 1, then -1e16 in f64: in index order (1e16 + 1) rounds to 1e16, so the sum is
+        // 0. Any other order that adds 1 last gives 1.
+        let mut b = Builder::new(0, &[coded("D", AnalogCoding::F64)], &[]);
+        b.sample(0, 0, Sample::F64(1e16)).unwrap();
+        b.sample(0, 0, Sample::F64(1.0)).unwrap();
+        b.sample(0, 0, Sample::F64(-1e16)).unwrap();
+        let (done, _) = b.finish(1).unwrap();
+        assert_eq!(columns::<f64>(&done.head[0], 0).sum, [0.0]);
+
+        // Coarse: buckets of 1 tick, and of 16. Children 0, 1, 2 hold 1e16, 1 and -1e16: the
+        // coarse bucket adds them in that order, (1e16 + 1) - 1e16 = 0, not the samples' exact 1.
+        let mut b = Builder::new(0, &[coded("D", AnalogCoding::F64)], &[]);
+        for (t, v) in [(0, 1e16), (1, 1.0), (2, -1e16)] {
+            b.sample(0, t, Sample::F64(v)).unwrap();
+        }
+        // 20,000 ticks: 1,250 buckets of 16 is past 1,024, so a level of 256 follows.
+        let length = 20_000;
+        let (done, settled) = b.finish(length).unwrap();
+        assert!(settled.is_empty());
+        assert_eq!(done.plan.head, [0, 4, 8]);
+        assert_eq!(columns::<f64>(&done.head[1], 0).sum[0], 0.0);
+        assert_eq!(columns::<f64>(&done.head[2], 0).sum[0], 0.0);
+        // The same as folding the finer level, which `coarsen` does on its own.
+        assert_eq!(coarsen(&done.head[0], 4, length), done.head[1]);
+    }
+
+    #[test]
+    fn a_tie_between_minus_and_plus_zero_goes_to_the_first_and_a_sum_starts_at_plus_zero() {
+        // Buckets of 1 tick and of 16. f32 +0 then -0 at tick 0; -0 then +0 at tick 1; -0 alone
+        // at tick 2; f64 the same.
+        let mut b = Builder::new(
+            0,
+            &[coded("F", AnalogCoding::F32), coded("D", AnalogCoding::F64)],
+            &[],
+        );
+        for (t, v) in [(0, 0.0f32), (0, -0.0), (1, -0.0), (1, 0.0), (2, -0.0)] {
+            b.sample(0, t, Sample::F32(v)).unwrap();
+            b.sample(1, t, Sample::F64(f64::from(v))).unwrap();
+        }
+        let (done, _) = b.finish(20_000).unwrap();
+        let sign = |v: f64| if v.is_sign_negative() { '-' } else { '+' };
+        let f = columns::<f32>(&done.head[0], 0);
+        let d = columns::<f64>(&done.head[0], 1);
+        for (min, max, sum) in [
+            (
+                f.min[..3]
+                    .iter()
+                    .map(|&v| sign(f64::from(v)))
+                    .collect::<String>(),
+                f.max[..3]
+                    .iter()
+                    .map(|&v| sign(f64::from(v)))
+                    .collect::<String>(),
+                f.sum[..3].iter().map(|&v| sign(v)).collect::<String>(),
+            ),
+            (
+                d.min[..3].iter().map(|&v| sign(v)).collect::<String>(),
+                d.max[..3].iter().map(|&v| sign(v)).collect::<String>(),
+                d.sum[..3].iter().map(|&v| sign(v)).collect::<String>(),
+            ),
+        ] {
+            // The first of each tie, and a sum from +0 never -0: +0 + -0 is +0.
+            assert_eq!(
+                (min.as_str(), max.as_str(), sum.as_str()),
+                ("+--", "+--", "+++")
+            );
+        }
+        // A coarse bucket folds its children in order: bucket 0's +0, then bucket 1's -0.
+        let coarse = columns::<f32>(&done.head[1], 0);
+        assert!(coarse.min[0].is_sign_positive() && coarse.max[0].is_sign_positive());
+        // An empty bucket's sum is +0.
+        assert!(f.sum[5] == 0.0 && f.sum[5].is_sign_positive());
+    }
+
+    #[test]
+    fn an_int_channels_sums_are_exact_at_full_scale() {
+        // verge's case: u32 codes at full scale, 100,000 samples to a bucket of 2^17 ticks (one
+        // a tick for 100,000 ticks). By hand: 100,000 x (2^32 - 1) = 429,496,729,500,000.
+        let coding = AnalogCoding::Int(IntCoding {
+            bits: 32,
+            signed: false,
+            scale: Exact::new(1, 1_000_000_000),
+            offset: None,
+        });
+        let mut b = Builder::new(17, &[coded("I", coding)], &[]);
+        for t in 0..100_000 {
+            b.sample(0, t, Sample::U64(u64::from(u32::MAX))).unwrap();
+        }
+        let (done, _) = b.finish(1 << 18).unwrap();
+        let c = columns::<u64>(&done.head[0], 0);
+        assert_eq!(c.sum, [429_496_729_500_000, 0]);
+        assert_eq!(
+            (c.min[0], c.max[0]),
+            (u64::from(u32::MAX), u64::from(u32::MAX))
+        );
+    }
+
+    #[test]
+    fn derived_buckets_follow_the_channels_and_pair_their_operands() {
+        // V int 32 u [1,1000], I int 32 u [1,1e9]: P = I x V, an integer product. Samples at 0
+        // and 1 in one 16-tick bucket: I 3 and 5, V 7 and 11, so P 21 and 55, sum 76.
+        let v = AnalogCoding::Int(IntCoding {
+            bits: 32,
+            signed: false,
+            scale: Exact::new(1, 1000),
+            offset: None,
+        });
+        let i = AnalogCoding::Int(IntCoding {
+            scale: Exact::new(1, 1_000_000_000),
+            ..IntCoding::new(32, false)
+        });
+        let p = Derived {
+            name: "P".into(),
+            unit: "W".into(),
+            product: ["I".into(), "V".into()],
+            significant: None,
+        };
+        let channels = [coded("V", v), coded("I", i)];
+        let mut b = Builder::new(4, &channels, std::slice::from_ref(&p));
+        // V's samples first, then I's, as a block hands them out.
+        b.sample(0, 0, Sample::U64(7)).unwrap();
+        b.sample(0, 1, Sample::U64(11)).unwrap();
+        b.sample(1, 0, Sample::U64(3)).unwrap();
+        b.sample(1, 1, Sample::U64(5)).unwrap();
+        let (done, _) = b.finish(16).unwrap();
+        assert_eq!(done.head[0].channels.len(), 3);
+        assert_eq!(buckets_of(columns::<u64>(&done.head[0], 2)), [(21, 55, 76)]);
+
+        // An operand sample whose partner sits at another tick, or never comes, is refused.
+        let mut b = Builder::new(4, &channels, std::slice::from_ref(&p));
+        b.sample(0, 0, Sample::U64(7)).unwrap();
+        let err = b.sample(1, 1, Sample::U64(3)).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "derived channel P: V has a sample at tick 0 where I has one at 1"
+        );
+        let mut b = Builder::new(4, &channels, std::slice::from_ref(&p));
+        b.sample(0, 0, Sample::U64(7)).unwrap();
+        let err = b.settle(5).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "derived channel P: V has a sample at tick 0 that I lacks"
         );
     }
 }

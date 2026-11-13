@@ -33,7 +33,7 @@ fn sigrok_cli_vcd_matches_sr() {
             to_vcd(oracle.logic_samples),
             "{name}"
         );
-        assert_eq!(import.recording.source.begin_s, Some(0.0));
+        assert_eq!(import.recording.sources[0].begin_s, Some(0.0));
         let from_vcd = drain(import.recording).digital;
         let from_sr = drain(
             sigrok::read(&testdata(&format!("{name}.sr")))
@@ -168,9 +168,9 @@ fn late_values_and_offsets() {
     let text = format!("{}#100 1! 1\"\n#110 0!\n#130\n", header("10 ns", TWO));
     let import = read(&text);
     assert_eq!(import.recording.length, 30);
-    let begin = import.recording.source.begin_s.unwrap();
+    let begin = import.recording.sources[0].begin_s.unwrap();
     assert!((begin - 1e-6).abs() < 1e-20, "{begin}");
-    assert_eq!(import.recording.source.extra["start time"], "100");
+    assert_eq!(import.recording.sources[0].extra["start time"], "100");
     assert_eq!(digital(import)[0], ("top.a".to_owned(), true, 30, vec![10]));
 
     let text = format!("{}#0 1!\n", header("1 ns", TWO));

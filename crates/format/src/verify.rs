@@ -6,10 +6,23 @@ use std::io::Read;
 
 use crate::decode::{BlockChannel, DecodeError, MAX_DECODED, inflate_limited};
 use crate::hash::{self, ChannelHasher};
-use crate::header::{ChannelKind, DeclaredKind, Header};
-use crate::model::{Break, ChannelData, Edges, Gap, Ratio, Recording, Samples, run_sample_tick};
+use crate::header::{AnalogCoding, ChannelKind, DeclaredKind, Header};
+use crate::model::{
+    Break, ChannelData, Edges, Gap, Ratio, Recording, Sample, Samples, run_sample_tick,
+};
 use crate::overview::{self, Builder, Level, Settled};
 use crate::reader::{Ending, Event, Reader};
+
+/// Whether two samples are the same stored number: floats by their bits.
+fn same(a: Sample, b: Sample) -> bool {
+    match (a, b) {
+        (Sample::F32(x), Sample::F32(y)) => x.to_bits() == y.to_bits(),
+        (Sample::F64(x), Sample::F64(y)) => x.to_bits() == y.to_bits(),
+        (Sample::U64(x), Sample::U64(y)) => x == y,
+        (Sample::I64(x), Sample::I64(y)) => x == y,
+        _ => false,
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum VerifyError {
@@ -33,16 +46,19 @@ enum Want {
         gaps: Vec<Gap>,
         next_gap: usize,
         count: u64,
-        hasher: ChannelHasher,
+        hasher: Option<ChannelHasher>,
     },
     Analog {
-        samples: Box<dyn Iterator<Item = f32> + Send>,
+        samples: Box<dyn Iterator<Item = Sample> + Send>,
         unit: String,
         first: i64,
         period: Ratio,
+        /// The coding the samples' type has: f32 samples may also be stored as codes.
+        natural: AnalogCoding,
+        significant: Option<u8>,
         count: u64,
         breaks: Vec<Break>,
-        hasher: ChannelHasher,
+        hasher: Option<ChannelHasher>,
     },
 }
 
@@ -61,16 +77,19 @@ pub fn verify_limited(
         timebase,
         length,
         channels,
-        source: _,
+        derived,
+        sources,
     } = source;
     let mut names = Vec::with_capacity(channels.len());
     let mut shapings = Vec::with_capacity(channels.len());
+    let mut source_of = Vec::with_capacity(channels.len());
     let mut wants: Vec<Want> = Vec::with_capacity(channels.len());
     for channel in channels {
         names.push((channel.name.clone(), channel.source_name.clone()));
+        source_of.push(channel.source);
         wants.push(match channel.data {
             ChannelData::Digital(d) => Want::Digital {
-                hasher: ChannelHasher::digital(&channel.name, d.initial, &channel.shaping),
+                hasher: None,
                 edges: d.edges,
                 initial: d.initial,
                 end: d.end,
@@ -78,23 +97,21 @@ pub fn verify_limited(
                 next_gap: 0,
                 count: 0,
             },
-            ChannelData::Analog(a) => {
-                let Samples::F32(samples) = a.samples;
-                Want::Analog {
-                    hasher: ChannelHasher::analog(
-                        &channel.name,
-                        &a.unit,
-                        a.period,
-                        &channel.shaping,
-                    ),
-                    samples,
-                    unit: a.unit,
-                    first: a.first,
-                    period: a.period,
-                    count: a.count,
-                    breaks: a.breaks,
-                }
-            }
+            ChannelData::Analog(a) => Want::Analog {
+                hasher: None,
+                natural: match &a.samples {
+                    Samples::F32(_) => AnalogCoding::F32,
+                    Samples::F64(_) => AnalogCoding::F64,
+                    Samples::U64(int, _) | Samples::I64(int, _) => AnalogCoding::Int(*int),
+                },
+                samples: a.samples.into_samples(),
+                unit: a.unit,
+                first: a.first,
+                period: a.period,
+                significant: a.significant,
+                count: a.count,
+                breaks: a.breaks,
+            },
         });
         shapings.push(channel.shaping);
     }
@@ -102,7 +119,7 @@ pub fn verify_limited(
     let mut builder: Option<Builder> = None;
     let mut expected: VecDeque<Settled> = VecDeque::new();
     let mut head: Option<Vec<Level>> = None;
-    let mut analog = Vec::new();
+    let mut columns = Vec::new();
     let mut header = None;
     let mut chunk = vec![0; 1 << 20];
     let mut eof = false;
@@ -128,38 +145,90 @@ pub fn verify_limited(
                 if d.channels.len() != wants.len() {
                     return Err(mismatch("the channel count differs"));
                 }
-                analog = Vec::with_capacity(wants.len());
-                for (((declared, want), (name, source_name)), shaping) in
-                    d.channels.iter().zip(&wants).zip(&names).zip(&shapings)
+                if d.derived != derived {
+                    return Err(mismatch("the derived channels differ"));
+                }
+                if d.sources.len() != sources.len() {
+                    return Err(mismatch("the number of sources differs"));
+                }
+                for (i, (file, source)) in d.sources.iter().zip(&sources).enumerate() {
+                    let mapping =
+                        |format, timebase, origin, align| (format, timebase, origin, align);
+                    if mapping(&file.format, file.timebase, file.origin, file.align)
+                        != mapping(&source.format, source.timebase, source.origin, source.align)
+                    {
+                        return Err(mismatch(format!(
+                            "source {i}: the format, timebase, origin or align differs"
+                        )));
+                    }
+                }
+                for (c, ((((declared, want), (name, source_name)), shaping), source)) in d
+                    .channels
+                    .iter()
+                    .zip(&mut wants)
+                    .zip(&names)
+                    .zip(&shapings)
+                    .zip(&source_of)
+                    .enumerate()
                 {
                     if declared.name != *name || declared.source_name != *source_name {
                         return Err(mismatch(format!("channel {name}: the names differ")));
+                    }
+                    if declared.source != *source {
+                        return Err(mismatch(format!("channel {name}: the source differs")));
                     }
                     if declared.shaping != *shaping {
                         return Err(mismatch(format!(
                             "channel {name}: the offset or the kept span differs"
                         )));
                     }
-                    match (&declared.data, want) {
-                        (DeclaredKind::Digital { initial }, Want::Digital { initial: i, .. })
-                            if initial == i =>
-                        {
-                            analog.push(false);
+                    let fits = match (&declared.data, &mut *want) {
+                        (
+                            DeclaredKind::Digital { initial },
+                            Want::Digital {
+                                initial: i, hasher, ..
+                            },
+                        ) if initial == i => {
+                            *hasher = Some(ChannelHasher::declared(&d, c));
+                            true
                         }
                         (
-                            DeclaredKind::Analog { unit, period, .. },
-                            Want::Analog {
-                                unit: u, period: p, ..
+                            DeclaredKind::Analog {
+                                unit,
+                                period,
+                                coding,
+                                significant,
                             },
-                        ) if unit == u && period == p => analog.push(true),
-                        _ => {
-                            return Err(mismatch(format!(
-                                "channel {name}: the kind, initial level or sampling differs"
-                            )));
+                            Want::Analog {
+                                unit: u,
+                                period: p,
+                                natural,
+                                significant: s,
+                                hasher,
+                                ..
+                            },
+                        ) if unit == u
+                            && period == p
+                            && significant == s
+                            && (coding == natural
+                                || matches!(
+                                    (coding, &*natural),
+                                    (AnalogCoding::Codes { .. }, AnalogCoding::F32)
+                                )) =>
+                        {
+                            *hasher = Some(ChannelHasher::declared(&d, c));
+                            true
                         }
+                        _ => false,
+                    };
+                    if !fits {
+                        return Err(mismatch(format!(
+                            "channel {name}: the kind, initial level, sampling or coding differs"
+                        )));
                     }
                 }
-                builder = Some(Builder::new(d.overview_shift, &d.channels));
+                builder = Some(Builder::new(d.overview_shift, &d.channels, &d.derived));
+                columns = overview::columns(&d.channels, &d.derived);
             }
             Event::Gap { channel: c, gap } => {
                 let Want::Digital { gaps, next_gap, .. } = &mut wants[c] else {
@@ -171,18 +240,14 @@ pub fn verify_limited(
                 *next_gap += 1;
                 builder.as_mut().unwrap().gap(c, gap);
             }
-            Event::Run {
-                channel: c,
-                index,
-                tick,
-            } => {
+            Event::Run { channel: c, run } => {
                 let Want::Analog { first, breaks, .. } = &wants[c] else {
                     unreachable!("the reader checks a run's channel")
                 };
-                let fits = if index == 0 {
-                    tick == *first
+                let fits = if run.index == 0 {
+                    run.tick == *first && run.lost == 0
                 } else {
-                    breaks.contains(&Break { index, tick })
+                    breaks.contains(&run)
                 };
                 if !fits {
                     return Err(mismatch(format!("channel {}: a run differs", names[c].0)));
@@ -202,6 +267,7 @@ pub fn verify_limited(
                                 ..
                             },
                         ) => {
+                            let hasher = hasher.as_mut().expect("the declaration came first");
                             for tick in edges {
                                 if want.next() != Some(tick) {
                                     return Err(mismatch(format!(
@@ -227,23 +293,30 @@ pub fn verify_limited(
                                 ..
                             },
                         ) => {
-                            for (index, value) in (first_index..).zip(values) {
-                                if samples.next().map(f32::to_bits) != Some(value.to_bits()) {
+                            let hasher = hasher.as_mut().expect("the declaration came first");
+                            for (index, value) in (first_index..).zip(values.iter()) {
+                                if !samples.next().is_some_and(|s| same(s, value)) {
                                     return Err(mismatch(format!(
                                         "channel {name}: sample {index} differs"
                                     )));
                                 }
                                 hasher.sample(value);
-                                b.sample(c, run_sample_tick(*first, *period, breaks, index), value);
+                                b.sample(c, run_sample_tick(*first, *period, breaks, index), value)
+                                    .map_err(|e| mismatch(e.to_string()))?;
                             }
                         }
                         _ => unreachable!("blocks follow the declaration"),
                     }
                 }
-                b.settle(block.head.end);
+                b.settle(block.head.end)
+                    .map_err(|e| mismatch(e.to_string()))?;
                 expected.extend(b.take_settled());
                 if block.head.end == length {
-                    let (done, last) = builder.take().unwrap().finish(length);
+                    let (done, last) = builder
+                        .take()
+                        .unwrap()
+                        .finish(length)
+                        .map_err(|e| mismatch(e.to_string()))?;
                     expected.extend(last);
                     head = Some(done.head);
                 }
@@ -260,8 +333,9 @@ pub fn verify_limited(
                     )));
                 }
                 let n = want.level.buckets;
-                let raw = inflate_limited(&frame, overview::decoded_len(n, &analog) as usize, max)?;
-                let got = overview::parse_block(&raw, shift, n, &analog)
+                let raw =
+                    inflate_limited(&frame, overview::decoded_len(n, &columns) as usize, max)?;
+                let got = overview::parse_block(&raw, shift, n, &columns)
                     .ok_or_else(|| mismatch(format!("overview block {k} does not parse")))?;
                 if got != want.level {
                     return Err(mismatch(format!(
@@ -316,7 +390,12 @@ pub fn verify_limited(
                         "channel {name}: the end, count or gaps differ"
                     )));
                 }
-                (edges.next().is_some(), hasher.finish_digital(end, &gaps))
+                (
+                    edges.next().is_some(),
+                    hasher
+                        .expect("the declaration came first")
+                        .finish_digital(end, &gaps),
+                )
             }
             (
                 Want::Analog {
@@ -342,7 +421,9 @@ pub fn verify_limited(
                 }
                 (
                     samples.next().is_some(),
-                    hasher.finish_analog(first, count, &breaks),
+                    hasher
+                        .expect("the declaration came first")
+                        .finish_analog(first, count, &breaks),
                 )
             }
             _ => return Err(mismatch(format!("channel {name}: the kind differs"))),

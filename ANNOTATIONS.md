@@ -102,9 +102,9 @@ values = { asked = "50 MHz", read_data = "37.5 MHz", write_data = "49.9 MHz" }
 
 In a generator's file the same is `"values": {"asked": "50 MHz", ...}`. A name is lower-case
 letters, digits and `_`, starting with a letter. A value is a decimal, then one space and a unit
-where it has one: a count, such as a marker's number, has none. It is a string, so `"81.0 KiB/s"` keeps its last digit. tickwave never converts or rounds a value. A page
-compares units as text, so micro is always `µ` (U+00B5 MICRO SIGN), as in times, and never the Greek
-letter mu (U+03BC).
+where it has one: a count, such as a marker's number, has none. It is a string, so `"81.0 KiB/s"`
+keeps its last digit. tickwave never converts or rounds a value. A page compares units as text, so
+micro is always `µ` (U+00B5 MICRO SIGN), as in times, and never the Greek letter mu (U+03BC).
 
 ## Times
 

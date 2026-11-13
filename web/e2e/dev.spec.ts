@@ -162,25 +162,25 @@ test("a collapsed view fetches its footer, and only its footer, once it scrolls 
   await page.waitForTimeout(300);
   expect(await served(tag)).toEqual([]);
   await view.scrollIntoViewIfNeeded();
-  await expect(view.locator(".summary .facts")).toHaveText("524\u00a0ms; 2 channels: SWCLK, SWDIO; 5.2\u00a0KiB");
-  await expect(view.locator(".summary [part~=fact]")).toHaveText(["524\u00a0ms", "2 channels: SWCLK, SWDIO", "5.2\u00a0KiB"]);
+  await expect(view.locator(".summary .facts")).toHaveText("524\u00a0ms; 2 channels: SWCLK, SWDIO; 5.3\u00a0KiB");
+  await expect(view.locator(".summary [part~=fact]")).toHaveText(["524\u00a0ms", "2 channels: SWCLK, SWDIO", "5.3\u00a0KiB"]);
   await expect(view.locator(".summary [part~=fact-channels]")).toHaveText("2 channels: SWCLK, SWDIO");
   await page.waitForTimeout(300);
   expect((await served(tag)).map((e) => [e.range, e.status])).toEqual([
     ["bytes=-512", 206],
-    ["bytes=3539-4803", 206],
+    ["bytes=3601-4927", 206],
   ]);
   // Opened at the whole capture, it draws from the footer's overview: still no block.
   await view.locator(".toggle").click();
   await view.evaluate((v) => (v as unknown as { settled(): Promise<void> }).settled());
-  expect((await served(tag)).map((e) => e.range)).toEqual(["bytes=-512", "bytes=3539-4803"]);
-  // Zoomed to the first read, it needs edges, and reads the block by its range: 445 to 3,531.
+  expect((await served(tag)).map((e) => e.range)).toEqual(["bytes=-512", "bytes=3601-4927"]);
+  // Zoomed to the first read, it needs edges, and reads the block by its range: 507 to 3,593.
   await view.evaluate((v) => {
     const view = v as unknown as { setWindow(a: number, b: number): void; settled(): Promise<void> };
     view.setWindow(377094000, 377141000);
     return view.settled();
   });
-  expect((await served(tag)).map((e) => e.range)).toEqual(["bytes=-512", "bytes=3539-4803", "bytes=445-3530"]);
+  expect((await served(tag)).map((e) => e.range)).toEqual(["bytes=-512", "bytes=3601-4927", "bytes=507-3592"]);
 });
 
 test("a recording shorter than the first read comes whole from its end, and serves its block", async ({ page }, info) => {
@@ -198,7 +198,7 @@ test("a recording shorter than the first read comes whole from its end, and serv
   });
   expect((await served(tag)).map((e) => [e.range, e.status])).toEqual([
     ["bytes=-32768", 416],
-    ["bytes=0-5315", 206],
+    ["bytes=0-5439", 206],
   ]);
 });
 
@@ -228,7 +228,7 @@ test("a finer overview level comes from overview blocks by range, not from the d
   await waitReady(page, ["v"]);
   const view = page.locator("#v");
   // At the whole capture a column is about 400,000 ticks: the footer's 2^16 level draws it.
-  expect((await served(tag)).map((e) => e.range)).toEqual(["bytes=-1024", "bytes=13039-13300"]);
+  expect((await served(tag)).map((e) => e.range)).toEqual(["bytes=-1024", "bytes=13112-13446"]);
   // 20 ms over the view's columns is about 13,000 ticks a column: the 2^12 level, from blocks.
   // 465 to 485 ms is the capture's busiest stretch.
   await view.evaluate((v) => {
@@ -237,11 +237,11 @@ test("a finer overview level comes from overview blocks by range, not from the d
     return view.settled();
   });
   const ranges = (await served(tag)).map((e) => e.range!);
-  expect(ranges.slice(0, 2)).toEqual(["bytes=-1024", "bytes=13039-13300"]);
+  expect(ranges.slice(0, 2)).toEqual(["bytes=-1024", "bytes=13112-13446"]);
   expect(ranges.length).toBe(3);
   const [, from, to] = /^bytes=(\d+)-(\d+)$/.exec(ranges[2])!.map(Number);
-  expect(from).toBeGreaterThanOrEqual(9665);
-  expect(to).toBeLessThan(13039);
+  expect(from).toBeGreaterThanOrEqual(9738);
+  expect(to).toBeLessThan(13112);
   mkdirSync("screenshots", { recursive: true });
   await view.screenshot({ path: `screenshots/${info.project.name}-overview-blocks.png` });
 });
@@ -305,7 +305,7 @@ test("analog through the WASM path: the footer's overview, the samples, and read
   const view = page.locator("#v");
   // At the whole capture a column is several thousand ticks: the footer's 2^12 level draws the
   // analog rows, and no block is read.
-  expect((await served(tag)).map((e) => e.range)).toEqual(["bytes=-1024", "bytes=61254-61406"]);
+  expect((await served(tag)).map((e) => e.range)).toEqual(["bytes=-1024", "bytes=61343-61755"]);
   const drawn = await view.evaluate((v) => {
     const canvas = v.shadowRoot!.querySelector("canvas")!;
     const data = canvas.getContext("2d")!.getImageData(0, 0, canvas.width, Math.round(canvas.height / 2)).data;
@@ -327,7 +327,7 @@ test("analog through the WASM path: the footer's overview, the samples, and read
   await win(1000, 1100);
   const ranges = (await served(tag)).map((e) => e.range!);
   expect(ranges.length).toBe(3);
-  expect(ranges[2]).toBe("bytes=797-61245");
+  expect(ranges[2]).toBe("bytes=886-61334");
   // Cursors at ticks 1020 and 1060, on the SWCLK row.
   const box = (await plotOf(view).boundingBox())!;
   const tickAt = (x: number) => view.evaluate((v, x) => (v as unknown as { tickAt(x: number): number }).tickAt(x), x);

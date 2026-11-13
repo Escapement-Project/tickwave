@@ -1,0 +1,570 @@
+//! Analog samples as blocks store them, and derived channels' products: the rules every writer
+//! and reader here share, so a value, a code's bytes and a product come out the same everywhere.
+
+use crate::header::{AnalogCoding, Stored, code_value};
+use crate::model::Sample;
+
+/// A block's samples of one analog channel, in the type it stores: f32 values for an `f32` or a
+/// `codes` channel, f64 values, or an `int` channel's codes.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Values {
+    F32(Vec<f32>),
+    F64(Vec<f64>),
+    U64(Vec<u64>),
+    I64(Vec<i64>),
+}
+
+impl Values {
+    pub fn len(&self) -> usize {
+        match self {
+            Self::F32(v) => v.len(),
+            Self::F64(v) => v.len(),
+            Self::U64(v) => v.len(),
+            Self::I64(v) => v.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn get(&self, i: usize) -> Option<Sample> {
+        Some(match self {
+            Self::F32(v) => Sample::F32(*v.get(i)?),
+            Self::F64(v) => Sample::F64(*v.get(i)?),
+            Self::U64(v) => Sample::U64(*v.get(i)?),
+            Self::I64(v) => Sample::I64(*v.get(i)?),
+        })
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = Sample> + '_ {
+        (0..self.len()).map(|i| self.get(i).expect("inside"))
+    }
+
+    /// The f32 values of an `f32` or `codes` channel; None for any other.
+    pub fn as_f32(&self) -> Option<&[f32]> {
+        match self {
+            Self::F32(v) => Some(v),
+            _ => None,
+        }
+    }
+}
+
+/// A sample's value in f64 under `coding`: the f32 or f64 itself, or an `int` code through
+/// `IntCoding::value`.
+pub fn value_f64(sample: Sample, coding: AnalogCoding) -> f64 {
+    match (sample, coding) {
+        (Sample::F32(v), _) => f64::from(v),
+        (Sample::F64(v), _) => v,
+        (Sample::U64(c), AnalogCoding::Int(int)) => int.value(i128::from(c)),
+        (Sample::I64(c), AnalogCoding::Int(int)) => int.value(i128::from(c)),
+        (Sample::U64(c), _) => c as f64,
+        (Sample::I64(c), _) => c as f64,
+    }
+}
+
+/// Why a sample doesn't fit its channel's coding.
+pub fn misfit(sample: Sample, coding: AnalogCoding) -> Option<String> {
+    match (sample, coding) {
+        (Sample::F32(_), AnalogCoding::F32 | AnalogCoding::Codes { .. })
+        | (Sample::F64(_), AnalogCoding::F64) => None,
+        (Sample::U64(c), AnalogCoding::Int(int)) if !int.signed => {
+            (!int.holds(i128::from(c))).then(|| format!("code {c} is wider than {} bits", int.bits))
+        }
+        (Sample::I64(c), AnalogCoding::Int(int)) if int.signed => (!int.holds(i128::from(c)))
+            .then(|| format!("code {c} lies outside {} signed bits", int.bits)),
+        (s, coding) => Some(format!(
+            "a{} {} sample for a channel stored as {}",
+            if matches!(s, Sample::I64(_)) { "n" } else { "" },
+            s.type_name(),
+            coding_name(coding)
+        )),
+    }
+}
+
+/// A coding's name, for a message.
+pub fn coding_name(coding: AnalogCoding) -> String {
+    match coding {
+        AnalogCoding::F32 => "f32".into(),
+        AnalogCoding::F64 => "f64".into(),
+        AnalogCoding::Int(int) => format!(
+            "{} {}-bit int",
+            if int.signed { "signed" } else { "unsigned" },
+            int.bits
+        ),
+        AnalogCoding::Codes { bits, .. } => format!("{bits}-bit codes"),
+    }
+}
+
+/// Appends a sample's bytes to a section being built: an f32 or f64 whole, a code as its
+/// `ceil(bits / 8)` low bytes, little-endian, in two's complement. `to_planes` then splits
+/// the codes into byte planes. `code` is the `codes` channel's code for an f32 sample.
+pub fn put(section: &mut Vec<u8>, sample: Sample, coding: AnalogCoding, code: Option<u16>) {
+    match (sample, coding) {
+        (Sample::F32(_), AnalogCoding::Codes { .. }) => {
+            let code = code.expect("a codes channel's sample comes with its code");
+            section.extend_from_slice(&code.to_le_bytes()[..coding.sample_len()]);
+        }
+        (Sample::F32(v), _) => section.extend_from_slice(&v.to_le_bytes()),
+        (Sample::F64(v), _) => section.extend_from_slice(&v.to_le_bytes()),
+        (Sample::U64(c), _) => section.extend_from_slice(&c.to_le_bytes()[..coding.sample_len()]),
+        (Sample::I64(c), _) => section.extend_from_slice(&c.to_le_bytes()[..coding.sample_len()]),
+    }
+}
+
+/// A section of codes, each `width` bytes together, as byte planes: every code's lowest byte,
+/// then every code's next, and so on.
+pub fn to_planes(section: &[u8], width: usize, out: &mut Vec<u8>) {
+    for plane in 0..width {
+        out.extend(section.iter().skip(plane).step_by(width));
+    }
+}
+
+/// The codes in `count` codes' byte planes of `width` bytes each, as u64s, each code's bytes in
+/// place and the bytes above them zero.
+fn from_planes(section: &[u8], count: usize, width: usize) -> Vec<u64> {
+    let mut codes = vec![0u64; count];
+    for (plane, bytes) in section.chunks_exact(count.max(1)).take(width).enumerate() {
+        for (code, &b) in codes.iter_mut().zip(bytes) {
+            *code |= u64::from(b) << (8 * plane);
+        }
+    }
+    codes
+}
+
+/// An analog section's `count` samples in `coding`. A code outside its coding's range is
+/// refused.
+pub fn decode(section: &[u8], count: usize, coding: AnalogCoding) -> Result<Values, String> {
+    if count.checked_mul(coding.sample_len()) != Some(section.len()) {
+        return Err("the section does not hold its samples".into());
+    }
+    Ok(match coding {
+        AnalogCoding::F32 => Values::F32(
+            section
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|&b| f32::from_le_bytes(b))
+                .collect(),
+        ),
+        AnalogCoding::F64 => Values::F64(
+            section
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|&b| f64::from_le_bytes(b))
+                .collect(),
+        ),
+        AnalogCoding::Codes {
+            bits,
+            scale,
+            offset,
+        } => {
+            let codes = from_planes(section, count, coding.sample_len());
+            // One OR over every code, apart from the conversion, so both loops stay vectorised.
+            let all = codes.iter().fold(0, |a, &c| a | c);
+            if all >> bits != 0 {
+                let wide = codes.iter().find(|&&c| c >> bits != 0).unwrap_or(&0);
+                return Err(format!("code {wide} is wider than {bits} bits"));
+            }
+            Values::F32(
+                codes
+                    .iter()
+                    .map(|&c| code_value(c as u16, scale, offset))
+                    .collect(),
+            )
+        }
+        AnalogCoding::Int(int) => {
+            let width = int.planes();
+            let codes = from_planes(section, count, width);
+            if int.signed {
+                // Sign-extended from the top stored bit, then held to the coding's bits.
+                let spare = 64 - 8 * width as u32;
+                let codes: Vec<i64> = codes
+                    .into_iter()
+                    .map(|c| ((c << spare) as i64) >> spare)
+                    .collect();
+                if let Some(c) = codes.iter().find(|&&c| !int.holds(i128::from(c))) {
+                    return Err(format!("code {c} lies outside {} signed bits", int.bits));
+                }
+                Values::I64(codes)
+            } else {
+                if let Some(c) = codes.iter().find(|&&c| !int.holds(i128::from(c))) {
+                    return Err(format!("code {c} is wider than {} bits", int.bits));
+                }
+                Values::U64(codes)
+            }
+        }
+    })
+}
+
+/// How a derived channel's samples follow from its operands' (FORMAT.md, "Derived channels").
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Product {
+    /// The integer product of two `int` channels' codes, neither with an offset, their bits
+    /// summing to at most 64, and their scales' numerators' product and denominators' product
+    /// each of a magnitude below 2^53: signed if either is. Its scale is the numerators' product
+    /// over the denominators', each exact in f64.
+    Int { signed: bool, num: f64, den: f64 },
+    /// `f64(a) × f64(b)`, rounded once.
+    F64 { a: AnalogCoding, b: AnalogCoding },
+}
+
+impl Product {
+    /// The rule for operands coded `a` and `b`.
+    pub fn of(a: AnalogCoding, b: AnalogCoding) -> Self {
+        match (a, b) {
+            (AnalogCoding::Int(x), AnalogCoding::Int(y))
+                if x.offset.is_none() && y.offset.is_none() && x.bits + y.bits <= 64 =>
+            {
+                let (sx, sy) = (x.scale(), y.scale());
+                let num = i128::from(sx.num()) * i128::from(sy.num());
+                let den = i128::from(sx.den()) * i128::from(sy.den());
+                let exact = |v: i128| v.unsigned_abs() < 1 << 53;
+                if !exact(num) || !exact(den) {
+                    return Self::F64 { a, b };
+                }
+                Self::Int {
+                    signed: x.signed || y.signed,
+                    num: num as f64,
+                    den: den as f64,
+                }
+            }
+            _ => Self::F64 { a, b },
+        }
+    }
+
+    pub fn stored(&self) -> Stored {
+        match self {
+            Self::Int { signed: false, .. } => Stored::U64,
+            Self::Int { signed: true, .. } => Stored::I64,
+            Self::F64 { .. } => Stored::F64,
+        }
+    }
+
+    /// Sample i of the derived channel from its operands' sample i.
+    pub fn sample(&self, a: Sample, b: Sample) -> Sample {
+        match (self, a, b) {
+            (Self::Int { signed: false, .. }, Sample::U64(x), Sample::U64(y)) => Sample::U64(x * y),
+            (Self::Int { signed: true, .. }, x, y) => {
+                let int = |s| match s {
+                    Sample::U64(c) => i128::from(c),
+                    Sample::I64(c) => i128::from(c),
+                    _ => unreachable!("an integer product's operands are int channels"),
+                };
+                // The bits sum to at most 64, so the product fits an i64.
+                Sample::I64((int(x) * int(y)) as i64)
+            }
+            (Self::F64 { a: ca, b: cb }, x, y) => {
+                Sample::F64(value_f64(x, *ca) * value_f64(y, *cb))
+            }
+            _ => unreachable!("an integer product's operands are int channels"),
+        }
+    }
+
+    /// A derived sample's value in f64: an integer product's code by the rule for an `int`
+    /// channel, `fl(fl(code × num) / den)`; an f64 product as it is.
+    pub fn value(&self, sample: Sample) -> f64 {
+        match (self, sample) {
+            (Self::Int { .. }, Sample::U64(c)) => self.scaled(c as f64),
+            (Self::Int { .. }, Sample::I64(c)) => self.scaled(c as f64),
+            (_, s) => value_f64(s, AnalogCoding::F64),
+        }
+    }
+
+    /// `x` through an integer product's scale, as `value` takes a code: times the numerator, then
+    /// over the denominator, each in f64. An f64 product's `x` as it is.
+    pub fn scaled(&self, x: f64) -> f64 {
+        match self {
+            Self::Int { num, den, .. } => (x * num) / den,
+            Self::F64 { .. } => x,
+        }
+    }
+}
+
+/// A derived channel's samples in a block, from its operands' values there, which share their
+/// first index and their count.
+pub fn product_values(product: Product, a: &Values, b: &Values) -> Result<Values, String> {
+    if a.len() != b.len() {
+        return Err(format!(
+            "its operands hold {} and {} samples in the block",
+            a.len(),
+            b.len()
+        ));
+    }
+    let samples = a.iter().zip(b.iter()).map(|(x, y)| product.sample(x, y));
+    Ok(match product.stored() {
+        Stored::U64 => Values::U64(
+            samples
+                .map(|s| match s {
+                    Sample::U64(c) => c,
+                    _ => unreachable!("an unsigned product"),
+                })
+                .collect(),
+        ),
+        Stored::I64 => Values::I64(
+            samples
+                .map(|s| match s {
+                    Sample::I64(c) => c,
+                    _ => unreachable!("a signed product"),
+                })
+                .collect(),
+        ),
+        _ => Values::F64(
+            samples
+                .map(|s| match s {
+                    Sample::F64(v) => v,
+                    _ => unreachable!("an f64 product"),
+                })
+                .collect(),
+        ),
+    })
+}
+
+#[cfg(all(test, feature = "encode"))]
+mod tests {
+    use super::*;
+    use crate::header::{Exact, IntCoding};
+
+    fn int(bits: u8, signed: bool) -> AnalogCoding {
+        AnalogCoding::Int(IntCoding::new(bits, signed))
+    }
+
+    /// The bytes the writer stores for `samples`: each one's bytes, codes then split into
+    /// planes.
+    fn stored(samples: &[Sample], coding: AnalogCoding) -> Vec<u8> {
+        let mut section = Vec::new();
+        for &s in samples {
+            assert_eq!(misfit(s, coding), None, "{s:?}");
+            put(&mut section, s, coding, None);
+        }
+        crate::writer::assemble(&[section], &[Some(coding)])[4..].to_vec()
+    }
+
+    #[test]
+    fn codes_are_stored_in_byte_planes_lowest_first() {
+        // Worked by hand. 12 bits: two planes, every code's low byte, then every high byte.
+        let codes = [0x0abc, 0x0123, 0x0fff].map(Sample::U64);
+        let bytes = [0xbc, 0x23, 0xff, 0x0a, 0x01, 0x0f];
+        assert_eq!(stored(&codes, int(12, false)), bytes);
+        assert_eq!(
+            decode(&bytes, 3, int(12, false)).unwrap(),
+            Values::U64(vec![0x0abc, 0x0123, 0x0fff])
+        );
+        // 29 bits: four planes.
+        let codes = [0x1abc_def0, 1, 0x1fff_ffff].map(Sample::U64);
+        let bytes = [
+            0xf0, 0x01, 0xff, 0xde, 0x00, 0xff, 0xbc, 0x00, 0xff, 0x1a, 0x00, 0x1f,
+        ];
+        assert_eq!(stored(&codes, int(29, false)), bytes);
+        assert_eq!(
+            decode(&bytes, 3, int(29, false)).unwrap(),
+            Values::U64(vec![0x1abc_def0, 1, 0x1fff_ffff])
+        );
+        // A signed 12-bit code in two's complement over its two bytes: -1 is ffff, -2048 f800.
+        let codes = [-1, -2048, 2047].map(Sample::I64);
+        let bytes = [0xff, 0x00, 0xff, 0xff, 0xf8, 0x07];
+        assert_eq!(stored(&codes, int(12, true)), bytes);
+        assert_eq!(
+            decode(&bytes, 3, int(12, true)).unwrap(),
+            Values::I64(vec![-1, -2048, 2047])
+        );
+        // A codes coding of 8 bits or fewer takes one plane.
+        let coding = AnalogCoding::Codes {
+            bits: 8,
+            scale: 0.5,
+            offset: 1.0,
+        };
+        let mut section = Vec::new();
+        for code in [3u16, 200] {
+            put(
+                &mut section,
+                Sample::F32(code_value(code, 0.5, 1.0)),
+                coding,
+                Some(code),
+            );
+        }
+        assert_eq!(section, [3, 200]);
+        assert_eq!(
+            decode(&section, 2, coding).unwrap(),
+            Values::F32(vec![2.5, 101.0])
+        );
+    }
+
+    #[test]
+    fn a_code_outside_its_coding_is_refused() {
+        for (bytes, coding, why) in [
+            (
+                vec![0x00, 0x10],
+                int(12, false),
+                "code 4096 is wider than 12 bits",
+            ),
+            (
+                vec![0x00, 0x08],
+                int(12, true),
+                "code 2048 lies outside 12 signed bits",
+            ),
+            (
+                vec![0xff, 0xf7],
+                int(12, true),
+                "code -2049 lies outside 12 signed bits",
+            ),
+            (vec![0x02], int(1, false), "code 2 is wider than 1 bits"),
+            (
+                vec![0x01],
+                int(1, true),
+                "code 1 lies outside 1 signed bits",
+            ),
+        ] {
+            assert_eq!(decode(&bytes, 1, coding), Err(why.to_owned()), "{bytes:?}");
+        }
+        assert_eq!(
+            misfit(Sample::U64(1 << 12), int(12, false)).as_deref(),
+            Some("code 4096 is wider than 12 bits")
+        );
+        assert_eq!(
+            misfit(Sample::U64(1), int(12, true)).as_deref(),
+            Some("a u64 sample for a channel stored as signed 12-bit int")
+        );
+        assert_eq!(
+            misfit(Sample::F32(1.0), AnalogCoding::F64).as_deref(),
+            Some("a f32 sample for a channel stored as f64")
+        );
+    }
+
+    #[test]
+    fn the_extremes_round_trip() {
+        for (samples, coding) in [
+            (vec![Sample::U64(u64::MAX), Sample::U64(0)], int(64, false)),
+            (
+                vec![Sample::I64(i64::MIN), Sample::I64(i64::MAX)],
+                int(64, true),
+            ),
+            (vec![Sample::U64(0), Sample::U64(1)], int(1, false)),
+            (vec![Sample::I64(-1), Sample::I64(0)], int(1, true)),
+            (
+                vec![
+                    Sample::F64(f64::NAN),
+                    Sample::F64(f64::INFINITY),
+                    Sample::F64(-0.0),
+                ],
+                AnalogCoding::F64,
+            ),
+        ] {
+            let bytes = stored(&samples, coding);
+            let got: Vec<Sample> = decode(&bytes, samples.len(), coding)
+                .unwrap()
+                .iter()
+                .collect();
+            let bits = |s: &Sample| match *s {
+                Sample::F64(v) => v.to_bits(),
+                Sample::U64(c) => c,
+                Sample::I64(c) => c as u64,
+                Sample::F32(v) => u64::from(v.to_bits()),
+            };
+            assert_eq!(
+                got.iter().map(bits).collect::<Vec<_>>(),
+                samples.iter().map(bits).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn products_follow_the_format_rule() {
+        let v = AnalogCoding::Int(IntCoding {
+            scale: Exact::new(1, 1000),
+            ..IntCoding::new(32, false)
+        });
+        let i = AnalogCoding::Int(IntCoding {
+            scale: Exact::new(1, 1_000_000_000),
+            ..IntCoding::new(32, false)
+        });
+        // 32 + 32 bits, no offset: the integer product, scale 1/10^12.
+        let p = Product::of(i, v);
+        assert_eq!(
+            p,
+            Product::Int {
+                signed: false,
+                num: 1.0,
+                den: 1e12
+            }
+        );
+        // Scales 3/7 and -5/2 make -15/14.
+        let a = AnalogCoding::Int(IntCoding {
+            scale: Exact::new(3, 7),
+            ..IntCoding::new(16, false)
+        });
+        let b = AnalogCoding::Int(IntCoding {
+            scale: Exact::new(-5, 2),
+            ..IntCoding::new(16, true)
+        });
+        assert_eq!(
+            Product::of(a, b),
+            Product::Int {
+                signed: true,
+                num: -15.0,
+                den: 14.0
+            }
+        );
+        let max = u64::from(u32::MAX);
+        assert_eq!(
+            p.sample(Sample::U64(max), Sample::U64(max)),
+            Sample::U64(max * max)
+        );
+        // Signed if either is: -3 x 5.
+        let s = Product::of(int(8, true), int(8, false));
+        assert_eq!(s.sample(Sample::I64(-3), Sample::U64(5)), Sample::I64(-15));
+        // Two scales of 1/10^9: their denominators multiply to 10^18, past 2^53, so f64 even at
+        // 32 + 32 bits. 10^9 at either is then 1 as a value, and their product 1.
+        let nano = AnalogCoding::Int(IntCoding {
+            scale: Exact::new(1, 1_000_000_000),
+            ..IntCoding::new(32, false)
+        });
+        let n = Product::of(nano, nano);
+        assert!(matches!(n, Product::F64 { .. }), "{n:?}");
+        assert_eq!(
+            n.sample(Sample::U64(1_000_000_000), Sample::U64(1_000_000_000)),
+            Sample::F64(1.0)
+        );
+        // Numerators past 2^53 in magnitude, the same: 2^30 x -2^30 = -2^60.
+        let big = |num| {
+            AnalogCoding::Int(IntCoding {
+                scale: Exact::new(num, 1),
+                ..IntCoding::new(16, true)
+            })
+        };
+        assert!(matches!(
+            Product::of(big(1 << 30), big(-(1 << 30))),
+            Product::F64 { .. }
+        ));
+        // At 2^26 x 2^26 = 2^52 it is still exact: an integer product.
+        assert!(matches!(
+            Product::of(big(1 << 26), big(1 << 26)),
+            Product::Int { .. }
+        ));
+        // 33 + 32 bits: past 64, so f64, rounded once: 2^32 x 3.
+        let wide = Product::of(int(33, false), int(32, false));
+        assert!(matches!(wide, Product::F64 { .. }));
+        assert_eq!(
+            wide.sample(Sample::U64(1 << 32), Sample::U64(3)),
+            Sample::F64(12_884_901_888.0)
+        );
+        // An offset turns it to f64: (1/2 + 3 x 1/4) x 2 = 2.5.
+        let offset = AnalogCoding::Int(IntCoding {
+            bits: 8,
+            signed: false,
+            scale: Exact::new(1, 4),
+            offset: Exact::new(1, 2),
+        });
+        let f = Product::of(offset, int(8, false));
+        assert_eq!(f.sample(Sample::U64(3), Sample::U64(2)), Sample::F64(2.5));
+        // An f32 times an f64: one rounding of the exact product. 0.1f32 is
+        // 0.100000001490116119384765625; times 3 in f64 it rounds once.
+        let g = Product::of(AnalogCoding::F32, AnalogCoding::F64);
+        assert_eq!(
+            g.sample(Sample::F32(0.1), Sample::F64(3.0)),
+            Sample::F64(f64::from(0.1f32) * 3.0)
+        );
+        assert_ne!(f64::from(0.1f32) * 3.0, f64::from(0.1f32 * 3.0));
+    }
+}

@@ -37,6 +37,7 @@ fn source() -> Recording {
     let digital = |name: &str, initial, edges: Vec<i64>| Channel {
         name: name.into(),
         source_name: name.to_lowercase(),
+        source: 0,
         data: ChannelData::Digital(Digital {
             initial,
             end: LENGTH,
@@ -54,7 +55,9 @@ fn source() -> Recording {
             Channel {
                 name: "V".into(),
                 source_name: "v".into(),
+                source: 0,
                 data: ChannelData::Analog(Analog {
+                    significant: None,
                     unit: "V".into(),
                     first: 0,
                     period: Ratio::new(3, 2).unwrap(),
@@ -65,10 +68,14 @@ fn source() -> Recording {
                 shaping: Shaping::default(),
             },
         ],
-        source: Source {
+        derived: Vec::new(),
+        sources: vec![Source {
             begin_s: Some(2.0),
-            ..Source::new(SourceFormat::Other("test".into()))
-        },
+            ..Source::new(
+                SourceFormat::Other("test".into()),
+                Ratio::integer(1_000_000_000).unwrap(),
+            )
+        }],
     }
 }
 
@@ -88,7 +95,7 @@ fn settings(offsets: &[(&str, &str)], keeps: &[KeepRow]) -> Settings {
 
 /// What a conversion wrote, read back: each digital channel's edges, each analog channel's
 /// samples as (tick, value). `base` is the plan's for the same source and settings, which the
-/// positions, the length and `begin_s` each check apart from it.
+/// positions, the length and the source's `origin` each check apart from it.
 struct Out {
     header: Header,
     base: i64,
@@ -151,8 +158,8 @@ fn try_run(
                     values,
                 } => samples[c].extend(
                     (first_index..)
-                        .zip(values)
-                        .map(|(index, v)| (head.sample_tick(c, index).unwrap(), v)),
+                        .zip(values.as_f32().expect("f32 values"))
+                        .map(|(index, &v)| (head.sample_tick(c, index).unwrap(), v)),
                 ),
             }
         }
@@ -186,7 +193,11 @@ fn an_offset_later_moves_one_channel_and_the_recording_keeps_its_start() {
     let out = run(&|| Ok(source()), &settings(&[("B", "7")], &[]));
     assert_eq!(out.base, 0);
     assert_eq!(out.header.length, 107);
-    assert_eq!(out.header.source.begin_s, Some(2.0));
+    // The source's tick 0 is the recording's, and its own time there stays.
+    assert_eq!(
+        (out.header.sources[0].origin, out.header.sources[0].begin_s),
+        (0, Some(2.0))
+    );
     // B, moved: unknown until its start, at 7.
     assert_eq!(
         out.digital(1),
@@ -212,7 +223,11 @@ fn an_offset_earlier_than_the_sources_start_starts_the_recording_there() {
     // Tick 0 is A's start, 15 ticks before the source's.
     assert_eq!(out.base, -15);
     assert_eq!(out.header.length, 115);
-    assert_eq!(out.header.source.begin_s, Some(2.0 - 15e-9));
+    // The source's tick 0 lies 15 ticks into the recording; its own time there stays.
+    assert_eq!(
+        (out.header.sources[0].origin, out.header.sources[0].begin_s),
+        (15, Some(2.0))
+    );
     assert_eq!(out.digital(0), (false, 100, &[][..], &[10, 20, 30, 40][..]));
     assert_eq!(
         *out.shaping(0),
@@ -245,7 +260,11 @@ fn every_channel_cut_from_one_tick_starts_the_recording_at_the_cut() {
     );
     assert_eq!(out.base, 20);
     assert_eq!(out.header.length, 80);
-    assert_eq!(out.header.source.begin_s, Some(2.0 + 20e-9));
+    // The source's tick 0 lies 20 ticks before the recording's.
+    assert_eq!(
+        (out.header.sources[0].origin, out.header.sources[0].begin_s),
+        (-20, Some(2.0))
+    );
     // A's edge at 20 is the cut's: A is low from tick 0.
     assert_eq!(out.digital(0), (false, 80, &[][..], &[10, 20][..]));
     assert_eq!(out.digital(1), (false, 80, &[][..], &[30][..]));
@@ -395,6 +414,7 @@ fn with_gaps() -> Recording {
             Channel {
                 name: "G".into(),
                 source_name: "g".into(),
+                source: 0,
                 data: ChannelData::Digital(Digital {
                     initial: true,
                     end: LENGTH,
@@ -406,18 +426,28 @@ fn with_gaps() -> Recording {
             Channel {
                 name: "W".into(),
                 source_name: "w".into(),
+                source: 0,
                 data: ChannelData::Analog(Analog {
+                    significant: None,
                     unit: "V".into(),
                     first: 0,
                     period: Ratio::new(3, 2).unwrap(),
                     count: 10,
-                    breaks: vec![escapement_tickwave_format::model::Break { index: 5, tick: 30 }],
+                    breaks: vec![escapement_tickwave_format::model::Break {
+                        index: 5,
+                        tick: 30,
+                        lost: 0,
+                    }],
                     samples: Samples::F32(Box::new((0..10).map(|i| i as f32))),
                 }),
                 shaping: Shaping::default(),
             },
         ],
-        source: Source::new(SourceFormat::Other("test".into())),
+        derived: Vec::new(),
+        sources: vec![Source::new(
+            SourceFormat::Other("test".into()),
+            Ratio::integer(1_000_000_000).unwrap(),
+        )],
     }
 }
 

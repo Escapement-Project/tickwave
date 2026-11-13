@@ -5,10 +5,11 @@
 use std::sync::Arc;
 
 use escapement_tickwave_format::decode::{BlockChannel, DecodeError, Footer};
-use escapement_tickwave_format::header::{ChannelKind, Header};
+use escapement_tickwave_format::header::{AnalogCoding, ChannelKind, Header};
 use escapement_tickwave_format::model::{
     Analog, Channel, ChannelData, Digital, Recording, Samples, Source,
 };
+use escapement_tickwave_format::samples::Values;
 
 use crate::input::Input;
 
@@ -42,6 +43,7 @@ pub fn read(input: Arc<dyn Input>) -> Result<(Header, Recording), Error> {
         .map(|(c, ch)| Channel {
             name: ch.name.clone(),
             source_name: ch.source_name.clone(),
+            source: ch.source,
             shaping: ch.shaping.clone(),
             data: match &ch.data {
                 ChannelKind::Digital {
@@ -63,41 +65,82 @@ pub fn read(input: Arc<dyn Input>) -> Result<(Header, Recording), Error> {
                     period,
                     count,
                     breaks,
-                    ..
+                    coding,
+                    significant,
                 } => ChannelData::Analog(Analog {
                     unit: unit.clone(),
                     first: *first,
                     period: *period,
                     count: *count,
                     breaks: breaks.clone(),
-                    samples: Samples::F32(Box::new(blocks.clone().items(c, |data| match data {
-                        BlockChannel::Analog { values, .. } => values,
-                        BlockChannel::Digital { .. } => {
-                            unreachable!("a block decodes each channel as the header has it")
-                        }
-                    }))),
+                    significant: *significant,
+                    samples: samples(&blocks, c, *coding),
                 }),
             },
         })
         .collect();
-    let s = &header.source;
-    let source = Source {
-        format: s.format.clone(),
-        files: s.files.clone(),
-        instrument: s.instrument.clone(),
-        software: s.software.clone(),
-        begin_s: s.begin_s,
-        trigger_s: s.trigger_s,
-        rate: s.rate,
-        extra: s.extra.clone(),
-    };
+    let sources = header
+        .sources
+        .iter()
+        .map(|s| Source {
+            format: s.format.clone(),
+            files: s.files.clone(),
+            timebase: s.timebase,
+            origin: s.origin,
+            align: s.align,
+            instrument: s.instrument.clone(),
+            software: s.software.clone(),
+            begin_s: s.begin_s,
+            trigger_s: s.trigger_s,
+            rate: s.rate,
+            extra: s.extra.clone(),
+        })
+        .collect();
     let recording = Recording {
         timebase: header.timebase,
         length: header.length,
         channels,
-        source,
+        derived: header.derived.clone(),
+        sources,
     };
     Ok((header, recording))
+}
+
+/// Analog channel `c`'s samples, block after block, in the type its coding stores.
+fn samples(blocks: &Arc<Blocks>, c: usize, coding: AnalogCoding) -> Samples {
+    const KIND: &str = "a block decodes each channel as the header has it";
+    fn values(data: BlockChannel) -> Values {
+        match data {
+            BlockChannel::Analog { values, .. } => values,
+            BlockChannel::Digital { .. } => unreachable!("{KIND}"),
+        }
+    }
+    match coding {
+        AnalogCoding::F32 | AnalogCoding::Codes { .. } => {
+            Samples::F32(Box::new(blocks.clone().items(c, |d| match values(d) {
+                Values::F32(v) => v,
+                _ => unreachable!("{KIND}"),
+            })))
+        }
+        AnalogCoding::F64 => Samples::F64(Box::new(blocks.clone().items(c, |d| match values(d) {
+            Values::F64(v) => v,
+            _ => unreachable!("{KIND}"),
+        }))),
+        AnalogCoding::Int(int) if int.signed => Samples::I64(
+            int,
+            Box::new(blocks.clone().items(c, |d| match values(d) {
+                Values::I64(v) => v,
+                _ => unreachable!("{KIND}"),
+            })),
+        ),
+        AnalogCoding::Int(int) => Samples::U64(
+            int,
+            Box::new(blocks.clone().items(c, |d| match values(d) {
+                Values::U64(v) => v,
+                _ => unreachable!("{KIND}"),
+            })),
+        ),
+    }
 }
 
 fn tail(input: &dyn Input, from: u64) -> Vec<u8> {

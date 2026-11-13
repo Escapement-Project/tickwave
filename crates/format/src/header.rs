@@ -103,7 +103,9 @@ impl Trailer {
 pub struct Declaration {
     pub timebase: Ratio,
     pub channels: Vec<DeclaredChannel>,
-    pub source: SourceHeader,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub derived: Vec<Derived>,
+    pub sources: Vec<SourceHeader>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -117,10 +119,24 @@ pub struct Declaration {
 pub struct DeclaredChannel {
     pub name: String,
     pub source_name: String,
+    /// Its source's index in `sources`.
+    pub source: u32,
     #[serde(flatten)]
     pub data: DeclaredKind,
     #[serde(flatten)]
     pub shaping: Shaping,
+}
+
+/// A channel computed from two analog channels, which blocks do not store: FORMAT.md's derived
+/// channels.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Derived {
+    pub name: String,
+    pub unit: String,
+    /// The two analog channels it is the product of, by name.
+    pub product: [String; 2],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub significant: Option<u8>,
 }
 
 /// What a converter did to a channel that the instrument did not: FORMAT.md's moved and trimmed
@@ -180,12 +196,16 @@ impl From<Kept> for (i64, i64) {
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum DeclaredKind {
     Digital {
+        /// The level at tick 0 before any edge there.
         initial: bool,
     },
     Analog {
         unit: String,
         period: Ratio,
         coding: AnalogCoding,
+        /// At most this many significant figures in a reading.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        significant: Option<u8>,
     },
 }
 
@@ -196,7 +216,9 @@ pub struct Header {
     /// Ticks from tick 0 to the capture's end.
     pub length: i64,
     pub channels: Vec<ChannelHeader>,
-    pub source: SourceHeader,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub derived: Vec<Derived>,
+    pub sources: Vec<SourceHeader>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -227,6 +249,8 @@ pub struct OverviewLevel {
 pub struct ChannelHeader {
     pub name: String,
     pub source_name: String,
+    /// Its source's index in `sources`.
+    pub source: u32,
     #[serde(flatten)]
     pub data: ChannelKind,
     #[serde(flatten)]
@@ -237,6 +261,7 @@ pub struct ChannelHeader {
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum ChannelKind {
     Digital {
+        /// The level at tick 0 before any edge there.
         initial: bool,
         end: i64,
         edges: u64,
@@ -252,7 +277,123 @@ pub enum ChannelKind {
         #[serde(skip_serializing_if = "Vec::is_empty")]
         breaks: Vec<Break>,
         coding: AnalogCoding,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        significant: Option<u8>,
     },
+}
+
+/// An exact ratio of signed integers with a positive denominator: an `int` coding's scale and
+/// offset. It reads and writes as `[num, den]`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "[i64; 2]", into = "[i64; 2]")]
+pub struct Exact {
+    num: i64,
+    den: i64,
+}
+
+impl Exact {
+    pub const ONE: Exact = Exact { num: 1, den: 1 };
+    pub const ZERO: Exact = Exact { num: 0, den: 1 };
+
+    /// None unless `den` is positive.
+    pub const fn new(num: i64, den: i64) -> Option<Self> {
+        if den > 0 {
+            Some(Self { num, den })
+        } else {
+            None
+        }
+    }
+
+    pub const fn num(self) -> i64 {
+        self.num
+    }
+
+    /// Positive.
+    pub const fn den(self) -> i64 {
+        self.den
+    }
+
+    /// `x × num / den` in f64, each step rounded once: multiplied by the numerator, then divided
+    /// by the denominator.
+    pub fn times(self, x: f64) -> f64 {
+        (x * self.num as f64) / self.den as f64
+    }
+}
+
+impl TryFrom<[i64; 2]> for Exact {
+    type Error = String;
+
+    fn try_from([num, den]: [i64; 2]) -> Result<Self, String> {
+        Self::new(num, den)
+            .ok_or_else(|| format!("[{num}, {den}]: the denominator is not positive"))
+    }
+}
+
+impl From<Exact> for [i64; 2] {
+    fn from(e: Exact) -> Self {
+        [e.num, e.den]
+    }
+}
+
+/// An `int` coding: integer samples, each a value exactly, `offset + code × scale`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct IntCoding {
+    /// 1 to 64.
+    pub bits: u8,
+    pub signed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scale: Option<Exact>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset: Option<Exact>,
+}
+
+impl IntCoding {
+    /// `bits` wide, with no scale or offset.
+    pub const fn new(bits: u8, signed: bool) -> Self {
+        Self {
+            bits,
+            signed,
+            scale: None,
+            offset: None,
+        }
+    }
+
+    pub fn scale(&self) -> Exact {
+        self.scale.unwrap_or(Exact::ONE)
+    }
+
+    pub fn offset(&self) -> Exact {
+        self.offset.unwrap_or(Exact::ZERO)
+    }
+
+    /// Whether `code` lies in the coding's range: `0..2^bits`, or `−2^(bits−1)..2^(bits−1)`.
+    pub fn holds(&self, code: i128) -> bool {
+        let bits = u32::from(self.bits);
+        if self.signed {
+            let half = 1i128 << (bits - 1);
+            (-half..half).contains(&code)
+        } else {
+            (0..1i128 << bits).contains(&code)
+        }
+    }
+
+    /// The bytes each code is stored in.
+    pub fn planes(&self) -> usize {
+        usize::from(self.bits).div_ceil(8)
+    }
+
+    /// A code's value in f64 (FORMAT.md, "Codings"): the code as an f64, times the scale's
+    /// numerator, over its denominator, plus the offset's numerator over its denominator where
+    /// there is one, each step rounded once. For an ADC's counts this is the f64 nearest the
+    /// value: 3300 at a scale of 1/1000 is 3.3. The browser draws with these, and the f64 product
+    /// of a derived channel multiplies them.
+    pub fn value(&self, code: i128) -> f64 {
+        let scaled = self.scale().times(code as f64);
+        match self.offset {
+            Some(o) => scaled + o.num as f64 / o.den as f64,
+            None => scaled,
+        }
+    }
 }
 
 /// How a block stores an analog channel's samples.
@@ -261,9 +402,13 @@ pub enum ChannelKind {
 pub enum AnalogCoding {
     /// The source's f32 values, little-endian.
     F32,
-    /// u16 codes in two byte planes: every code's low byte, then every high byte. A value is
-    /// `(offset + code × scale) as f32`, which reproduces the source's value exactly. The
-    /// converter only picks this after checking every sample.
+    /// The source's f64 values, little-endian.
+    F64,
+    /// Integer codes in byte planes, each a value exactly.
+    Int(IntCoding),
+    /// Codes in byte planes, each one an f32 value: `(offset + code × scale) as f32`, which
+    /// reproduces the source's value exactly. The converter only picks this after checking every
+    /// sample.
     Codes { bits: u8, scale: f64, offset: f64 },
 }
 
@@ -275,11 +420,38 @@ pub fn code_value(code: u16, scale: f64, offset: f64) -> f32 {
     (offset + f64::from(code) * scale) as f32
 }
 
+/// The number type an analog channel's samples are stored and summarised in: an `f32` or `codes`
+/// channel's f32 values, an `f64` channel's values, an `int` channel's codes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stored {
+    F32,
+    F64,
+    U64,
+    I64,
+}
+
 impl AnalogCoding {
+    /// The bytes one sample takes in a block.
     pub fn sample_len(self) -> usize {
         match self {
             Self::F32 => 4,
-            Self::Codes { .. } => 2,
+            Self::F64 => 8,
+            Self::Int(int) => int.planes(),
+            Self::Codes { bits, .. } => usize::from(bits).div_ceil(8),
+        }
+    }
+
+    /// Whether the samples are stored as codes in byte planes.
+    pub fn planes(self) -> bool {
+        matches!(self, Self::Int(_) | Self::Codes { .. })
+    }
+
+    pub fn stored(self) -> Stored {
+        match self {
+            Self::F32 | Self::Codes { .. } => Stored::F32,
+            Self::F64 => Stored::F64,
+            Self::Int(IntCoding { signed: false, .. }) => Stored::U64,
+            Self::Int(IntCoding { signed: true, .. }) => Stored::I64,
         }
     }
 }
@@ -292,6 +464,7 @@ impl AnalogCoding {
 struct RawChannel {
     name: String,
     source_name: String,
+    source: u32,
     kind: RawKind,
     initial: Option<bool>,
     end: Option<i64>,
@@ -303,6 +476,7 @@ struct RawChannel {
     count: Option<u64>,
     breaks: Option<Vec<Break>>,
     coding: Option<RawCoding>,
+    significant: Option<u8>,
     offset: Option<i64>,
     offset_kind: Option<String>,
     kept: Option<Kept>,
@@ -347,15 +521,77 @@ struct RawCoding {
     #[serde(rename = "type")]
     kind: RawCodingKind,
     bits: Option<u8>,
-    scale: Option<f64>,
-    offset: Option<f64>,
+    signed: Option<bool>,
+    scale: Option<RawNumber>,
+    offset: Option<RawNumber>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum RawCodingKind {
     F32,
+    F64,
+    Int,
     Codes,
+}
+
+/// A coding's `scale` or `offset`: a number for `codes`, `[num, den]` for `int`. Read by hand:
+/// an untagged enum would make serde buffer it, as `RawChannel` explains.
+enum RawNumber {
+    Float(f64),
+    Ratio(i64, i64),
+}
+
+impl<'de> Deserialize<'de> for RawNumber {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Visit;
+        impl<'de> serde::de::Visitor<'de> for Visit {
+            type Value = RawNumber;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a number, or [num, den]")
+            }
+            fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<RawNumber, E> {
+                Ok(RawNumber::Float(v))
+            }
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<RawNumber, E> {
+                Ok(RawNumber::Float(v as f64))
+            }
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<RawNumber, E> {
+                Ok(RawNumber::Float(v as f64))
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut s: A,
+            ) -> Result<RawNumber, A::Error> {
+                let short = || serde::de::Error::custom("a ratio is [num, den]");
+                let num = s.next_element()?.ok_or_else(short)?;
+                let den = s.next_element()?.ok_or_else(short)?;
+                if s.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                    return Err(short());
+                }
+                Ok(RawNumber::Ratio(num, den))
+            }
+        }
+        d.deserialize_any(Visit)
+    }
+}
+
+impl RawNumber {
+    fn float(self, field: &str) -> Result<f64, String> {
+        match self {
+            Self::Float(v) => Ok(v),
+            Self::Ratio(..) => Err(format!("a codes coding's `{field}` is a number")),
+        }
+    }
+
+    fn exact(self, field: &str) -> Result<Exact, String> {
+        match self {
+            Self::Ratio(num, den) => {
+                Exact::try_from([num, den]).map_err(|e| format!("an int coding's `{field}` {e}"))
+            }
+            Self::Float(_) => Err(format!("an int coding's `{field}` is [num, den]")),
+        }
+    }
 }
 
 fn need<T>(value: Option<T>, field: &str) -> Result<T, String> {
@@ -366,10 +602,17 @@ impl RawCoding {
     fn coding(self) -> Result<AnalogCoding, String> {
         Ok(match self.kind {
             RawCodingKind::F32 => AnalogCoding::F32,
+            RawCodingKind::F64 => AnalogCoding::F64,
+            RawCodingKind::Int => AnalogCoding::Int(IntCoding {
+                bits: need(self.bits, "bits")?,
+                signed: need(self.signed, "signed")?,
+                scale: self.scale.map(|s| s.exact("scale")).transpose()?,
+                offset: self.offset.map(|o| o.exact("offset")).transpose()?,
+            }),
             RawCodingKind::Codes => AnalogCoding::Codes {
                 bits: need(self.bits, "bits")?,
-                scale: need(self.scale, "scale")?,
-                offset: need(self.offset, "offset")?,
+                scale: need(self.scale, "scale")?.float("scale")?,
+                offset: need(self.offset, "offset")?.float("offset")?,
             },
         })
     }
@@ -394,11 +637,13 @@ impl TryFrom<RawChannel> for ChannelHeader {
                 count: need(raw.count, "count")?,
                 breaks: raw.breaks.unwrap_or_default(),
                 coding: need(raw.coding, "coding")?.coding()?,
+                significant: raw.significant,
             },
         };
         Ok(Self {
             name: raw.name,
             source_name: raw.source_name,
+            source: raw.source,
             data,
             shaping,
         })
@@ -418,11 +663,13 @@ impl TryFrom<RawChannel> for DeclaredChannel {
                 unit: need(raw.unit, "unit")?,
                 period: need(raw.period, "period")?,
                 coding: need(raw.coding, "coding")?.coding()?,
+                significant: raw.significant,
             },
         };
         Ok(Self {
             name: raw.name,
             source_name: raw.source_name,
+            source: raw.source,
             data,
             shaping,
         })
@@ -435,28 +682,73 @@ impl ChannelHeader {
         DeclaredChannel {
             name: self.name.clone(),
             source_name: self.source_name.clone(),
+            source: self.source,
             data: match &self.data {
                 ChannelKind::Digital { initial, .. } => DeclaredKind::Digital { initial: *initial },
                 ChannelKind::Analog {
                     unit,
                     period,
                     coding,
+                    significant,
                     ..
                 } => DeclaredKind::Analog {
                     unit: unit.clone(),
                     period: *period,
                     coding: *coding,
+                    significant: *significant,
                 },
             },
             shaping: self.shaping.clone(),
         }
     }
+
+    /// The analog channel's coding; None for a digital one.
+    pub fn coding(&self) -> Option<AnalogCoding> {
+        match &self.data {
+            ChannelKind::Analog { coding, .. } => Some(*coding),
+            ChannelKind::Digital { .. } => None,
+        }
+    }
 }
 
+impl DeclaredChannel {
+    /// The analog channel's coding; None for a digital one.
+    pub fn coding(&self) -> Option<AnalogCoding> {
+        match &self.data {
+            DeclaredKind::Analog { coding, .. } => Some(*coding),
+            DeclaredKind::Digital { .. } => None,
+        }
+    }
+}
+
+impl Header {
+    /// What the declaration said: the header's values without what only the end settles. A
+    /// source's `extra` keeps the keys the end added, which the declaration may not have.
+    pub fn declaration(&self) -> Declaration {
+        Declaration {
+            timebase: self.timebase,
+            channels: self.channels.iter().map(ChannelHeader::declared).collect(),
+            derived: self.derived.clone(),
+            sources: self.sources.clone(),
+            title: self.title.clone(),
+            meta: self.meta.clone(),
+            overview_shift: self.overview_shift,
+        }
+    }
+}
+
+/// Where a recording's channels came from: FORMAT.md's sources.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SourceHeader {
     pub format: SourceFormat,
     pub files: Vec<String>,
+    /// The source's tick rate: the recording's timebase is a whole multiple of it.
+    pub timebase: Ratio,
+    /// The recording's tick where the source's tick 0 lies, before any channel's offset.
+    pub origin: i64,
+    /// Ticks of the recording the source was moved by against the others, positive later.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub align: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instrument: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -476,11 +768,15 @@ pub struct SourceHeader {
 }
 
 impl SourceHeader {
-    /// A source of `format` that states nothing else.
-    pub fn new(format: SourceFormat) -> Self {
+    /// A source of `format` ticking at `timebase`, its tick 0 at the recording's, that states
+    /// nothing else.
+    pub fn new(format: SourceFormat, timebase: Ratio) -> Self {
         Self {
             format,
             files: Vec::new(),
+            timebase,
+            origin: 0,
+            align: None,
             instrument: None,
             software: None,
             begin_s: None,
@@ -490,6 +786,14 @@ impl SourceHeader {
             converter: None,
         }
     }
+}
+
+/// How many of the recording's ticks one of a source's ticks is: `recording / source`, None
+/// unless it is a whole number. A checked header's factors lie below 2^53.
+pub fn factor(recording: Ratio, source: Ratio) -> Option<u128> {
+    let num = u128::from(recording.num()) * u128::from(source.den());
+    let den = u128::from(recording.den()) * u128::from(source.num());
+    num.is_multiple_of(den).then(|| num / den)
 }
 
 /// The kind of capture a recording was converted from. It reads and writes as its name.
@@ -729,8 +1033,13 @@ mod tests {
             first: 2,
             period: Ratio::new(3, 2).unwrap(),
             count: 9,
-            breaks: vec![Break { index: 4, tick: 20 }],
+            breaks: vec![Break {
+                index: 4,
+                tick: 20,
+                lost: 3,
+            }],
             coding,
+            significant: Some(4),
         };
         for data in [
             ChannelKind::Digital {
@@ -750,16 +1059,25 @@ mod tests {
                 }],
             },
             analog(AnalogCoding::F32),
+            analog(AnalogCoding::F64),
             analog(AnalogCoding::Codes {
                 bits: 12,
                 scale: 0.001,
                 offset: -1.5,
             }),
+            analog(AnalogCoding::Int(IntCoding::new(64, true))),
+            analog(AnalogCoding::Int(IntCoding {
+                bits: 29,
+                signed: false,
+                scale: Exact::new(-11, 13650),
+                offset: Exact::new(1, 3),
+            })),
         ] {
             for shaping in shapings() {
                 let channel = ChannelHeader {
                     name: "a".into(),
                     source_name: "b".into(),
+                    source: 2,
                     data: data.clone(),
                     shaping,
                 };
@@ -799,6 +1117,7 @@ mod tests {
         let channel = |shaping| ChannelHeader {
             name: "a".into(),
             source_name: "b".into(),
+            source: 0,
             data: ChannelKind::Digital {
                 initial: true,
                 end: 7,
@@ -810,18 +1129,17 @@ mod tests {
         let [whole, .., both] = shapings();
         assert_eq!(
             serde_json::to_string(&channel(whole)).unwrap(),
-            r#"{"name":"a","source_name":"b","kind":"digital","initial":true,"end":7,"edges":3}"#
+            r#"{"name":"a","source_name":"b","source":0,"kind":"digital","initial":true,"end":7,"edges":3}"#
         );
         assert_eq!(
             serde_json::to_string(&channel(both).declared()).unwrap(),
-            r#"{"name":"a","source_name":"b","kind":"digital","initial":true,"offset":-40,"offset_kind":"delay","kept":[3,7]}"#
+            r#"{"name":"a","source_name":"b","source":0,"kind":"digital","initial":true,"offset":-40,"offset_kind":"delay","kept":[3,7]}"#
         );
     }
 
     #[test]
     fn an_offset_and_its_kind_come_together() {
-        let named =
-            r#""name":"SWCLK","source_name":"b","kind":"digital","initial":true,"end":7,"edges":3"#;
+        let named = r#""name":"SWCLK","source_name":"b","source":0,"kind":"digital","initial":true,"end":7,"edges":3"#;
         for (fields, problem) in [
             (
                 r#""offset":4"#,
@@ -847,7 +1165,7 @@ mod tests {
 
     #[test]
     fn a_channel_missing_a_field_of_its_kind_is_refused() {
-        let named = r#""name":"a","source_name":"b""#;
+        let named = r#""name":"a","source_name":"b","source":0"#;
         let analog = r#""kind":"analog","unit":"V","first":0,"period":[1,1],"count":1"#;
         for (json, problem) in [
             (
@@ -864,6 +1182,33 @@ mod tests {
             (
                 format!(r#"{{{named},"kind":"logic"}}"#),
                 "unknown variant `logic`",
+            ),
+            (
+                format!(r#"{{{named},{analog},"coding":{{"type":"int","bits":12}}}}"#),
+                "missing field `signed`",
+            ),
+            (
+                format!(
+                    r#"{{{named},{analog},"coding":{{"type":"int","bits":12,"signed":false,"scale":0.5}}}}"#
+                ),
+                "an int coding's `scale` is [num, den]",
+            ),
+            (
+                format!(
+                    r#"{{{named},{analog},"coding":{{"type":"int","bits":12,"signed":false,"scale":[1,0]}}}}"#
+                ),
+                "the denominator is not positive",
+            ),
+            (
+                format!(
+                    r#"{{{named},{analog},"coding":{{"type":"codes","bits":12,"scale":[1,2],"offset":0}}}}"#
+                ),
+                "a codes coding's `scale` is a number",
+            ),
+            (
+                r#"{"name":"a","source_name":"b","kind":"digital","initial":true,"end":7,"edges":3}"#
+                    .to_owned(),
+                "missing field `source`",
             ),
         ] {
             let err = parse(&json).unwrap_err().to_string();
