@@ -367,12 +367,13 @@ impl Repairer {
                     DeclaredKind::Digital { initial },
                 ) => {
                     // Known to the last block's end; a gap that reaches it ends what is known at
-                    // its `from`.
+                    // its `from`, unless that lies past the end too: a recorder can learn of a
+                    // loss before it writes the block the loss starts in.
                     let kept = gaps
                         .iter()
                         .position(|g| g.to >= last_end)
                         .unwrap_or(gaps.len());
-                    let end = gaps.get(kept).map_or(last_end, |g| g.from);
+                    let end = gaps.get(kept).map_or(last_end, |g| g.from.min(last_end));
                     let gaps = gaps[..kept].to_vec();
                     digests.push(hasher.finish_digital(end, &gaps));
                     ChannelKind::Digital {

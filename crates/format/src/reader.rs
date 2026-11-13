@@ -462,9 +462,16 @@ impl Reader {
         }
         for ((state, c), i) in self.channels.iter().zip(&h.channels).zip(0..) {
             let fits = match (state, &c.data) {
-                (Channel::Digital { gaps, .. }, ChannelKind::Digital { gaps: kept, .. }) => {
+                // A gap left out of the header reaches its channel's end, which is then at its
+                // `from` or sooner; a repaired file's can end inside the length its marks gave.
+                (
+                    Channel::Digital { gaps, .. },
+                    ChannelKind::Digital {
+                        gaps: kept, end, ..
+                    },
+                ) => {
                     gaps.starts_with(kept)
-                        && gaps[kept.len()..].first().is_none_or(|g| g.to >= h.length)
+                        && gaps[kept.len()..].first().is_none_or(|g| g.from >= *end)
                 }
                 (
                     Channel::Analog { runs, .. },

@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use escapement_tickwave_format::decode::{BlockChannel, Footer};
 use escapement_tickwave_format::header::{
-    AnalogCoding, ChannelKind, Declaration, DeclaredChannel, DeclaredKind, Derived, Exact,
+    AnalogCoding, ChannelKind, Declaration, DeclaredChannel, DeclaredKind, Derived, Exact, Header,
     IntCoding, Kept, SourceFormat, SourceHeader,
 };
 use escapement_tickwave_format::model::{
@@ -14,7 +14,8 @@ use escapement_tickwave_format::model::{
 };
 use escapement_tickwave_format::overview::{AnalogOverview, Columns, Num};
 use escapement_tickwave_format::reader::{Event, Reader};
-use escapement_tickwave_format::repair::repair;
+use escapement_tickwave_format::recut::{RecutError, Recutter};
+use escapement_tickwave_format::repair::{Repairer, repair};
 use escapement_tickwave_format::samples::Values;
 use escapement_tickwave_format::verify::verify;
 use escapement_tickwave_format::writer::{Bundle, Finish, WriteError, WriteOptions, Writer};
@@ -934,6 +935,93 @@ fn repair_keeps_marks_past_the_last_block_and_a_file_of_marks_alone() {
         err.to_string(),
         "the file holds neither a whole block nor an annotation record"
     );
+}
+
+/// Re-cuts `file` whole, with `bundle` for a cut-off one: the file it writes, and its header.
+fn recut(file: &[u8], bundle: Option<Bundle>) -> Result<(Vec<u8>, Header), RecutError> {
+    let mut r = Recutter::new(options());
+    if let Some(b) = bundle {
+        r.bundle(b);
+    }
+    r.feed(file)?;
+    let mut out = r.take_output();
+    let finished = r.finish()?;
+    out.extend(finished.tail);
+    Ok((out, finished.header))
+}
+
+#[test]
+fn a_gap_recorded_past_the_last_block_leaves_nothing_known_beyond_it_and_repair_recuts() {
+    let mark = |start: i64| {
+        let serde_json::Value::Object(m) =
+            serde_json::json!({"id": format!("m/{start}"), "start": start})
+        else {
+            unreachable!()
+        };
+        m
+    };
+    let d = declaration(
+        vec![
+            digital("E", false),
+            analog("V", int(16, false, None, None), 10),
+        ],
+        vec![],
+        4,
+    );
+    // A recorder that holds its last sample back: the block closes at 190, below it. Five
+    // samples lost after 190 put a gap on E from place 20, past the block's end, to the next
+    // run at 300. A mark at 350, then cut off before the block that holds the gap's `to`.
+    let mut w = Writer::new(d, options()).unwrap();
+    w.run(1, 0, 0).unwrap();
+    for i in 0..19u64 {
+        if i == 4 {
+            w.edge(0, 33).unwrap();
+        }
+        w.sample(1, i).unwrap();
+    }
+    w.flush(190).unwrap();
+    w.sample(1, 19u64).unwrap();
+    w.gap(
+        0,
+        Gap {
+            from: 200,
+            to: 300,
+            level: true,
+        },
+    )
+    .unwrap();
+    w.run(1, 300, 5).unwrap();
+    w.sample(1, 20u64).unwrap();
+    w.annotation("verge", mark(350)).unwrap();
+    let cut = w.take_output();
+
+    // E is known to the last block's end, not to the gap's `from` past it, and the gap is left
+    // out of the header.
+    let fixed = repair(&cut, 3).unwrap();
+    assert_eq!(fixed.header.length, 351);
+    let ChannelKind::Digital { end, ref gaps, .. } = fixed.header.channels[0].data else {
+        panic!()
+    };
+    assert_eq!((end, gaps.len()), (190, 0));
+    // The repaired file reads through, and re-cuts to the same content: the gap record it keeps
+    // reaches its channel's end inside the length the mark gave.
+    let file = [&cut[..fixed.keep as usize], &fixed.tail].concat();
+    let (_, again) = recut(&file, None).unwrap();
+    assert_eq!(again.content_id, fixed.header.content_id);
+    // A re-cut of the cut-off file finishes as repair does.
+    let (_, direct) = recut(&cut, None).unwrap();
+    assert_eq!(direct.content_id, fixed.header.content_id);
+    assert_eq!(direct.channels, fixed.header.channels);
+    // And bundles what repair bundles, in one pass.
+    let stem = || Bundle::Generated { stem: "rec".into() };
+    let mut r = Repairer::new(3);
+    r.bundle(stem());
+    r.feed(&cut).unwrap();
+    let bundled = r.finish().unwrap();
+    let (_, direct) = recut(&cut, Some(stem())).unwrap();
+    assert!(direct.annotations.is_some());
+    assert_eq!(direct.annotations, bundled.header.annotations);
+    assert_eq!(direct.content_id, bundled.header.content_id);
 }
 
 #[test]

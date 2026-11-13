@@ -393,8 +393,8 @@ lost. The run at index 0 gives the channel's `first`, and each later run is a br
 run's `lost` is 0. It comes before the block that holds sample `index`.
 
 A gap whose `to` is not below its channel's `end` is left out of the header, and the channel's
-`end` becomes the gap's `from`. A gap from tick 0 then leaves an `end` of 0: the level is never
-known. A run whose `index` is not below its channel's `count` is left out too.
+`end` becomes the gap's `from` if that comes sooner. A gap from tick 0 then leaves an `end` of 0:
+the level is never known. A run whose `index` is not below its channel's `count` is left out too.
 
 ## Overview
 
@@ -599,4 +599,5 @@ A file whose blocks a recorder closed early, at flushes, can be written again wi
 usual size, and a repaired file too. A re-cutter reads the records in order and writes the same
 declaration, then every item, gap, run and annotation in the same order, and finishes with the same
 length, ends, extras and bundled annotations. It computes the overview again. The new file has the
-same content id.
+same content id. A cut-off file re-cuts as repair would finish it, its annotations bundled or
+handed back as generator files.

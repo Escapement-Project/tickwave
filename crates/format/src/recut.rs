@@ -53,6 +53,7 @@ pub struct Recutter {
     annotations: bool,
     blocks: bool,
     latest_annotation: Option<i64>,
+    bundle: Option<Bundle>,
 }
 
 impl Recutter {
@@ -68,7 +69,14 @@ impl Recutter {
             annotations: false,
             blocks: false,
             latest_annotation: None,
+            bundle: None,
         }
+    }
+
+    /// Bundles a cut-off input's annotations into the footer, as the writer would have, as
+    /// `Repairer::bundle` does. A finished input keeps the bundle its footer holds.
+    pub fn bundle(&mut self, bundle: Bundle) {
+        self.bundle = Some(bundle);
     }
 
     /// The output's bytes written and not yet taken.
@@ -240,7 +248,9 @@ impl Recutter {
                 let finish = Finish {
                     extra,
                     bundle: h.annotations.clone().map(Bundle::Files),
-                    drop_gaps_past_end: false,
+                    // A repaired input leaves out a gap that reaches its channel's end inside
+                    // the length; the content id checks the ends that come of it.
+                    drop_gaps_past_end: true,
                 };
                 let finished = writer.finish(h.length, &ends, finish)?;
                 if finished.header.content_id != h.content_id {
@@ -283,6 +293,7 @@ impl Recutter {
                 // Repair's gap rule: a gap that reaches the last block's end ends what is known at
                 // its `from`, even one that ends inside the length the marks gave.
                 let finish = Finish {
+                    bundle: self.bundle,
                     drop_gaps_past_end: true,
                     ..Finish::default()
                 };
