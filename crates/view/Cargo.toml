@@ -1,0 +1,20 @@
+[package]
+name = "escapement-tickwave-view"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+escapement-tickwave-format = { version = "0.1.0", path = "../format", default-features = false, features = ["toml"] }
+num-bigint = "0.5.1"
+num-traits = "0.2.19"
+
+[dev-dependencies]
+serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
+
+[features]
+default = ["live"]
+# A view of a recording a writer in the same process is still writing, through its `Snapshot`.
+live = ["escapement-tickwave-format/encode"]

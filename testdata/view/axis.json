@@ -1,0 +1,18 @@
+{
+  "about": "The time axis, with text measured at `measure_per_char` px a character.",
+  "source": "web/src/render/axis.ts",
+  "tests": [
+    {
+      "name": "axis: one unit for every label, and only labels that fit inside",
+      "rows": [
+        {"fn":"time_axis","args":{"start":0,"end":1000000,"width":1000,"timebase":[1000000000,1],"measure_per_char":6},"expect":{"ticks":[{"label":"0.1\u00a0ms","x":100},{"label":"0.2\u00a0ms"},{"label":"0.3\u00a0ms"},{"label":"0.4\u00a0ms"},{"label":"0.5\u00a0ms"},{"label":"0.6\u00a0ms"},{"label":"0.7\u00a0ms"},{"label":"0.8\u00a0ms"},{"label":"0.9\u00a0ms"}]},"note":"1 ms over 1000 px at 1 GS/s. 50 us steps are 50 px, too close for \"0.05 ms\" (7 characters, 42 px, and a 16 px gap); 100 us steps are 100 px. Labels at 0 and 1 ms would hang outside."}
+      ]
+    },
+    {
+      "name": "axis: never a step finer than one tick",
+      "rows": [
+        {"fn":"time_axis","args":{"start":0,"end":10,"width":2000,"timebase":[100000,1],"measure_per_char":6},"expect":{"ticks":[{"label":"10\u00a0µs"},{"label":"20\u00a0µs"},{"label":"30\u00a0µs"},{"label":"40\u00a0µs"},{"label":"50\u00a0µs"},{"label":"60\u00a0µs"},{"label":"70\u00a0µs"},{"label":"80\u00a0µs"},{"label":"90\u00a0µs"}]},"note":"Ten 10 us ticks over 2000 px. 5 us steps would be 100 px apart, room for the widest label (\"100 us\", 36 px and the gap); only the one-tick floor rules them out."}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,59 @@
+{
+  "about": "An analog row's value range as the reader zooms and moves it. Expected values are worked by hand; `limits` are what scale_limits gives for its `whole` and `resolution`.",
+  "source": "web/src/render/scale.ts",
+  "tests": [
+    {
+      "name": "scaleLimits: in to four code steps where the source has them, else a ten-thousandth; out to four times the whole",
+      "rows": [
+        {"fn":"scale_limits","args":{"whole":{"lo":-2,"hi":6},"resolution":0.0025},"expect":{"whole":{"lo":-2,"hi":6},"min_span":0.01,"max_span":32}},
+        {"fn":"scale_limits","args":{"whole":{"lo":-2,"hi":6},"resolution":null},"expect":{"min_span":0.0008},"close":1e-9},
+        {"fn":"scale_limits","args":{"whole":{"lo":-2,"hi":6},"resolution":null},"expect":{"max_span":32}}
+      ]
+    },
+    {
+      "name": "zoomRange keeps the value under the pointer where it was",
+      "rows": [
+        {"fn":"zoom_range","args":{"range":{"lo":-2,"hi":6},"at":4,"factor":0.5,"limits":{"whole":{"lo":-2,"hi":6},"resolution":null}},"expect":{"lo":1,"hi":5},"close":1e-9,"note":"4 sits three quarters of the way up -2 to 6; halved, the range is 4 wide with 4 still there."},
+        {"fn":"zoom_range","args":{"range":{"lo":-2,"hi":6},"at":4,"factor":1e-9,"limits":{"whole":{"lo":-2,"hi":6},"resolution":null}},"view":"span_and_place","expect":{"span":0.0008,"place":0.75},"close":1e-9,"note":"In past the limit, the span stops at it, and 4 keeps its place. `span_and_place` checks hi - lo and (at - lo) / (hi - lo)."}
+      ]
+    },
+    {
+      "name": "zoomRange out stops at four times the whole, with its middle inside the whole",
+      "rows": [
+        {"fn":"zoom_range","args":{"range":{"lo":-2,"hi":6},"at":6,"factor":100,"limits":{"whole":{"lo":-2,"hi":6},"resolution":null}},"expect":{"lo":-18,"hi":14},"close":1e-9,"note":"About 6, the top: 32 wide would put the middle at -10; it moves up to -2, the whole's bottom."}
+      ]
+    },
+    {
+      "name": "moveRange moves the values, as far as putting the middle at the whole's edge",
+      "rows": [
+        {"fn":"move_range","args":{"range":{"lo":1,"hi":3},"by":0.5,"limits":{"whole":{"lo":-2,"hi":6},"resolution":null}},"expect":{"lo":1.5,"hi":3.5},"close":1e-9},
+        {"fn":"move_range","args":{"range":{"lo":1,"hi":3},"by":100,"limits":{"whole":{"lo":-2,"hi":6},"resolution":null}},"expect":{"lo":5,"hi":7},"close":1e-9},
+        {"fn":"move_range","args":{"range":{"lo":1,"hi":3},"by":-100,"limits":{"whole":{"lo":-2,"hi":6},"resolution":null}},"expect":{"lo":-3,"hi":-1},"close":1e-9}
+      ]
+    },
+    {
+      "name": "clampRange holds a span within the limits about its middle",
+      "rows": [
+        {"fn":"clamp_range","args":{"range":{"lo":2,"hi":2.001},"limits":{"whole":{"lo":-2,"hi":6},"resolution":0.0025}},"expect":{"lo":1.9955,"hi":2.0055},"close":1e-9},
+        {"fn":"clamp_range","args":{"range":{"lo":-40,"hi":40},"limits":{"whole":{"lo":-2,"hi":6},"resolution":0.0025}},"expect":{"lo":-16,"hi":16},"close":1e-9}
+      ]
+    },
+    {
+      "name": "fitRange holds what was drawn, at least the least span, and nothing when nothing was",
+      "rows": [
+        {"fn":"fit_range","args":{"min":1.2,"max":3.4,"limits":{"whole":{"lo":-2,"hi":6},"resolution":0.0025}},"expect":{"lo":1.2,"hi":3.4},"close":1e-9},
+        {"fn":"fit_range","args":{"min":2,"max":2,"limits":{"whole":{"lo":-2,"hi":6},"resolution":0.0025}},"expect":{"lo":1.995,"hi":2.005},"close":1e-9},
+        {"fn":"fit_range","args":{"min":"Infinity","max":"-Infinity","limits":{"whole":{"lo":-2,"hi":6},"resolution":0.0025}},"expect":null},
+        {"fn":"fit_range","args":{"min":"NaN","max":1,"limits":{"whole":{"lo":-2,"hi":6},"resolution":0.0025}},"expect":null}
+      ]
+    },
+    {
+      "name": "rangeMarks labels round values inside the range, each within a quarter of it from its edge",
+      "rows": [
+        {"fn":"range_marks","args":{"range":{"lo":3.01,"hi":3.59}},"expect":{"top":3.5,"bottom":3.1},"close":1e-9,"note":"0.58 wide: steps of 0.1, so 3.5 at the top and 3.1 at the bottom, to one decimal place."},
+        {"fn":"range_marks","args":{"range":{"lo":3.01,"hi":3.59}},"expect":{"place":-1}},
+        {"fn":"range_marks","args":{"range":{"lo":3,"hi":3.6}},"expect":{"top":3.6,"bottom":3},"close":1e-9,"note":"A range on its steps labels its edges, though 3.6 / 0.2 is not quite 18 in binary."}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,81 @@
+{
+  "about": "What each pixel column of a row shows, on real data: identify-swd's SWDIO and SWCLK and the first twelve current samples of verge's energy capture (nA, 100 kHz). Expected states are worked by hand. The two overviews are the ones columns.test.ts's MemorySource cases build and check.",
+  "source": "web/src/render/columns.ts",
+  "tests": [
+    {
+      "name": "digital from edges: one edge a column rises or falls where it is",
+      "rows": [
+        {"fn":"digital_from_edges","args":{"grid":{"x0":377094000,"per":1000,"count":13},"edges":{"level":0,"ticks":[377094556,377095556,377096556,377097556,377099556,377100556,377101556,377104078,377106074]},"from":377094000,"to":377107000},"expect":{"state":["RISE","FALL","RISE","FALL","LOW","RISE","FALL","RISE","HIGH","HIGH","FALL","LOW","RISE"],"at":{"0":0.556,"10":0.078,"12":0.074}}}
+      ]
+    },
+    {
+      "name": "digital from edges: two or more edges a column are busy",
+      "rows": [
+        {"fn":"digital_from_edges","args":{"grid":{"x0":377094000,"per":2000,"count":7},"edges":{"level":0,"ticks":[377094556,377095556,377096556,377097556,377099556,377100556,377101556,377104078,377106074]},"from":377094000,"to":377108000},"expect":{"state":["BUSY","BUSY","RISE","BUSY","HIGH","FALL","RISE"],"at":{"2":0.778}}}
+      ]
+    },
+    {
+      "name": "digital from edges: nothing at or past the channel's end",
+      "rows": [
+        {"fn":"digital_from_edges","args":{"grid":{"x0":377094000,"per":2000,"count":7},"edges":{"level":0,"ticks":[377094556,377095556,377096556,377097556,377099556,377100556,377101556,377104078,377106074]},"from":377094000,"to":377105000},"expect":{"state":["BUSY","BUSY","RISE","BUSY","HIGH","FALL","NONE"]},"note":"The channel ends at 377105000; the edge at 377106074 is in the array but past the end."},
+        {"fn":"digital_from_edges","args":{"grid":{"x0":377094000,"per":2000,"count":7},"edges":{"level":0,"ticks":[377094556,377095556,377096556,377097556,377099556,377100556,377101556,377104078,377106074]},"from":377094000,"to":377106050},"expect":{"state":["BUSY","BUSY","RISE","BUSY","HIGH","FALL","LOW"]},"note":"Ending at 377106050, inside the last column: the column is low up to the end, and the edge at 377106074, past it in the same column, is not drawn."}
+      ]
+    },
+    {
+      "name": "digital from edges: two edges at one tick are busy, at any zoom",
+      "rows": [
+        {"fn":"digital_from_edges","args":{"grid":{"x0":0,"per":5,"count":8},"edges":{"level":0,"ticks":[10,20,20,30]},"from":0,"to":40},"expect":{"state":["LOW","LOW","RISE","HIGH","BUSY","HIGH","FALL","LOW"]}},
+        {"fn":"digital_from_edges","args":{"grid":{"x0":19.5,"per":0.25,"count":4},"edges":{"level":0,"ticks":[10,20,20,30]},"from":0,"to":40},"expect":{"state":["HIGH","HIGH","BUSY","HIGH"]},"note":"A column a quarter of a tick wide: the pair's column alone."}
+      ]
+    },
+    {
+      "name": "digital from overview: busy wherever a changing bucket overlaps",
+      "rows": [
+        {"fn":"digital_from_overview","args":{"grid":{"x0":376701000,"per":3000,"count":7},"overview":{"bucket":4096,"start":376696832,"level":[1,1,1,1,1,1,1],"changes":[0,0,0,0,0,1,1]},"from":376696832,"to":376725504},"expect":{"state":["HIGH","HIGH","HIGH","HIGH","HIGH","BUSY","BUSY"]},"note":"SWCLK's first edges in buckets of 4096 from 376696832: the first edge, 376719436, is in bucket 5 with three more; bucket 6 holds the last two. SWCLK idles high."},
+        {"fn":"digital_from_overview","args":{"grid":{"x0":376718000,"per":3000,"count":1},"overview":{"bucket":4096,"start":376696832,"level":[1,1,1,1,1,1,1],"changes":[0,0,0,0,0,1,1]},"from":376696832,"to":376725504},"expect":{"state":["BUSY"]},"note":"[376718000, 376721000) holds no bucket's start, only the tail of bucket 5, which changes."}
+      ]
+    },
+    {
+      "name": "digital from overview: a bucket wider than a column spans its columns",
+      "rows": [
+        {"fn":"digital_from_overview","args":{"grid":{"x0":376713216,"per":1024,"count":12},"overview":{"bucket":4096,"start":376696832,"level":[1,1,1,1,1,1,1],"changes":[0,0,0,0,0,1,1]},"from":376696832,"to":376725504},"expect":{"state":["HIGH","HIGH","HIGH","HIGH","BUSY","BUSY","BUSY","BUSY","BUSY","BUSY","BUSY","BUSY"]},"note":"Four columns a bucket from bucket 4: bucket 4 holds no edge, 5 and 6 change."}
+      ]
+    },
+    {
+      "name": "analog from samples: a column's range, joined to its neighbours",
+      "rows": [
+        {"fn":"analog_from_samples","args":{"grid":{"x0":0,"per":30000,"count":4},"samples":{"first":0,"values":[51480,131360,175990,212221,244081,278385,305817,336396,364408,391567,417043,444567]},"runs":{"first":5000,"period":[10000,1],"count":"Infinity"},"from":0,"to":120000},"expect":{"min":[51480,175990,278385,364408],"max":[175990,278385,364408,444567]},"note":"Three samples a column (ticks 5000 + 10000 i). Ranges [51480, 175990], [212221, 278385], [305817, 364408], [391567, 444567]; each later one reaches down to the one before it."}
+      ]
+    },
+    {
+      "name": "analog columns from an overview's buckets",
+      "rows": [
+        {"fn":"analog_from_overview","args":{"grid":{"x0":0,"per":49152,"count":3},"overview":{"bucket":32768,"start":0,"min":[51480,212221,336396,417043],"max":[175990,305817,391567,444567]},"from":0,"to":120000},"expect":{"min":[51480,212221,391567],"max":[305817,391567,444567]},"note":"Buckets of 32768: samples 0-2, 3-6, 7-9, 10-11. A column and a half of buckets: column 0 overlaps buckets 0-1, column 1 buckets 1-2, column 2 bucket 3. Columns 0 and 1 overlap already; column 2 reaches down to 391567."},
+        {"fn":"analog_from_overview","args":{"grid":{"x0":0,"per":16384,"count":8},"overview":{"bucket":32768,"start":0,"min":[51480,212221,336396,417043],"max":[175990,305817,391567,444567]},"from":0,"to":120000},"expect":{"min":[51480,51480,175990,212221,305817,336396,391567,417043],"max":[175990,175990,305817,305817,391567,391567,444567,444567]},"note":"Two columns a bucket: each pair holds its bucket's range, and the first of the next pair reaches down to it."}
+      ]
+    },
+    {
+      "name": "analog from samples: a column reads the runs its tile came with",
+      "rows": [
+        {"fn":"analog_from_samples","args":{"grid":{"x0":0,"per":200,"count":1},"samples":{"first":0,"values":[5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5],"runs":{"min":[4,3,2],"max":[6,7,8]}},"runs":{"first":0,"period":[1,1],"count":"Infinity"},"from":0,"to":200},"expect":{"min":[2],"max":[8]},"note":"One column over samples 0 to 199: three whole runs, and samples 192 to 199 one by one. The runs say what no sample does, so the column shows they were read."}
+      ]
+    },
+    {
+      "name": "analog from samples: a draw builds the runs either side of one an earlier draw built",
+      "rows": [
+        {"fn":"analog_from_samples","args":{"grid":{"x0":192,"per":64,"count":1},"samples":{"first":0,"values":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,4,4,4,4,4,4,4,4,4,4,-1,4,4,4,4,4,4,4,4,4,99,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9]},"runs":{"first":0,"period":[1,1],"count":"Infinity"},"from":0,"to":640},"expect":{"min":[3],"max":[3]},"note":"Ten runs, each sample its run's number, but run 4 holds the smallest and largest values. One column over run 3 alone builds it and nothing else. The two rows share one tile, as the test's two draws do."},
+        {"fn":"analog_from_samples","args":{"grid":{"x0":0,"per":640,"count":1},"samples":{"first":0,"values":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,4,4,4,4,4,4,4,4,4,4,-1,4,4,4,4,4,4,4,4,4,99,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9]},"runs":{"first":0,"period":[1,1],"count":"Infinity"},"from":0,"to":640},"expect":{"min":[-1],"max":[99]}}
+      ]
+    },
+    {
+      "name": "line samples: those near the grid, out to one drawn sample past each side",
+      "rows": [
+        {"fn":"line_samples","args":{"grid":{"x0":35,"per":1,"count":30},"samples":{"first":0,"values":[1,1,1,1,1,1,1,1,1,1,1,1]},"runs":{"first":0,"period":[10,1],"count":"Infinity"},"from":0,"to":1000,"pad":0},"expect":[3,8],"note":"Samples at ticks 0, 10, 20, ...; the grid covers [35, 65). 30 is the last sample before the grid, 70 the first past it."},
+        {"fn":"line_samples","args":{"grid":{"x0":35,"per":1,"count":30},"samples":{"first":0,"values":[1,1,1,1,1,1,1,1,1,1,1,1]},"runs":{"first":0,"period":[10,1],"count":"Infinity"},"from":0,"to":1000,"pad":10},"expect":[2,9],"note":"A pad of 10 ticks reaches 25 and 75 (exclusive), so out to 20 and 80."},
+        {"fn":"line_samples","args":{"grid":{"x0":35,"per":1,"count":30},"samples":{"first":0,"values":[1,1,1,"NaN",1,1,1,"NaN",1,1,1,1]},"runs":{"first":0,"period":[10,1],"count":"Infinity"},"from":0,"to":1000,"pad":0},"expect":[2,9],"note":"NaN at 30 and 70: out to 20 and 80, the nearest the line can draw from."},
+        {"fn":"line_samples","args":{"grid":{"x0":35,"per":1,"count":30},"samples":{"first":0,"values":[1,1,1,"NaN",1,1,1,"NaN",1,1,1,1]},"runs":{"first":0,"period":[10,1],"count":"Infinity"},"from":30,"to":70,"pad":0},"expect":[3,7],"note":"Nothing outside [from, to), NaN or not."},
+        {"fn":"line_samples","args":{"grid":{"x0":35,"per":1,"count":30},"samples":{"first":2,"values":[1,"NaN",1,1,1,"NaN",1,1,1,1]},"runs":{"first":0,"period":[10,1],"count":"Infinity"},"from":0,"to":1000,"pad":0},"expect":[0,7],"note":"The tile's own indices, for a tile that starts at sample 2 (tick 20)."}
+      ]
+    }
+  ]
+}

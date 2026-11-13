@@ -1,0 +1,19 @@
+{
+  "about": "Times as written in attributes and annotations, to ticks exactly.",
+  "source": "web/src/time.ts",
+  "tests": [
+    {
+      "name": "times to ticks, exactly",
+      "rows": [
+        {"fn":"to_ticks","args":{"text":"317.85882 ms","timebase":[1000000000,1]},"expect":317858820,"note":"PLAN.md §3's example."},
+        {"fn":"to_ticks","args":{"text":"1234","timebase":[1000000000,1]},"expect":1234},
+        {"fn":"to_ticks","args":{"text":"100 us","timebase":[3000000,1]},"expect":300},
+        {"fn":"to_ticks","args":{"text":"2 µs","timebase":[1000000000,1]},"expect":2000},
+        {"fn":"to_ticks","args":{"text":"0.0001245 ms","timebase":[1000000000,1]},"expect":125,"note":"124.5 ticks rounds half away from zero to 125. In floating point 0.0001245 * 1e6 is 124.49999999999999, which rounds to 124."},
+        {"fn":"to_ticks","args":{"text":"-2.5 ns","timebase":[1000000000,1]},"expect":-3,"note":"Half away from zero below zero too; Math.round(-2.5) is -2."},
+        {"fn":"parse_time","args":{"text":"12 parsecs"},"expect":null},
+        {"fn":"parse_time","args":{"text":"ms"},"expect":null}
+      ]
+    }
+  ]
+}

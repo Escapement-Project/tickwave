@@ -1,0 +1,43 @@
+{
+  "about": "The view's point measurements: a pulse around a tick, its figures with their digits, and an analog channel at a pixel. Expected values are worked by hand. A pulse edge is a tick, null where there is none (the pulse runs from where the level is first known, or to its end), or \"unread\" where the edges in hand don't reach it.",
+  "source": "web/src/probe.ts",
+  "tests": [
+    {
+      "name": "pulse from the edges probe.test.ts's async cases read",
+      "rows": [
+        {"fn":"pulse_from_edges","args":{"edges":{"level":0,"ticks":[100,110,125,135,150,160,175,185,200,210,225,235,250,260,275,285]},"from":100,"to":300,"known":{"start":0,"end":60000000},"tick":112},"expect":{"level":0,"start":110,"end":125,"next":135},"note":"A clock, then a long quiet stretch, then three edges: 10 ns high, 15 low, from tick 100; its edges in [100, 300) as MemorySource reads them. Tick 112 is in the low between the edges at 110 and 125; its period runs to the next fall, at 135."},
+        {"fn":"pulse_from_edges","args":{"edges":{"level":0,"ticks":[100,110,125,135,150,160,175,185,200,210,225,235,250,260,275,285]},"from":100,"to":300,"known":{"start":0,"end":60000000},"tick":125},"expect":{"level":1,"start":125,"end":135,"next":150},"note":"An edge at the tick starts the pulse there."},
+        {"fn":"pulse_from_edges","args":{"edges":{"level":0,"ticks":[100]},"from":0,"to":105,"known":{"start":0,"end":60000000},"tick":50},"expect":{"level":0,"start":null,"end":100,"next":"unread"},"note":"Before the first edge, from the capture's start: no edge there to find."},
+        {"fn":"pulse_from_edges","args":{"edges":{"level":0,"ticks":[]},"from":10000000,"to":10000100,"known":{"start":0,"end":60000000},"tick":10000050},"expect":{"level":0,"start":"unread","end":"unread","next":"unread"},"note":"Edges past the span read are not known yet. The clock's 80 edges leave the quiet stretch low."},
+        {"fn":"pulse_from_edges","args":{"edges":{"level":1,"ticks":[]},"from":59999990,"to":60000000,"known":{"start":0,"end":60000000},"tick":59999995},"expect":{"level":1,"start":"unread","end":null,"next":null},"note":"A span read up to the end holds every edge there is: the pulse runs to the end of what is known."},
+        {"fn":"pulse_from_edges","args":{"edges":{"level":1,"ticks":[]},"from":59999990,"to":59999999,"known":{"start":0,"end":60000000},"tick":59999995},"expect":{"level":1,"start":"unread","end":"unread","next":"unread"},"note":"One tick short of the end, an edge could still sit on the last tick."},
+        {"fn":"pulse_from_edges","args":{"edges":{"level":0,"ticks":[10,20,20,30]},"from":0,"to":100,"known":{"start":0,"end":60000000},"tick":19},"expect":{"level":1,"start":10,"end":20,"next":20},"note":"High from 10, a low pulse at 20 too short to time, high to 30."},
+        {"fn":"pulse_from_edges","args":{"edges":{"level":0,"ticks":[10,20,20,30]},"from":0,"to":100,"known":{"start":0,"end":60000000},"tick":20},"expect":{"level":1,"start":20,"end":30,"next":"unread"}}
+      ]
+    },
+    {
+      "name": "a pulse's figures: whole-tick widths, and a rate and a duty to the digits the ticks carry",
+      "rows": [
+        {"fn":"pulse_figures","args":{"pulse":{"level":0,"start":376719436,"end":376720063,"next":376720710},"timebase":[1000000000,1],"known":{"start":0,"end":523583070}},"expect":{"level":"low","width":"627\u00a0ns","inverse_width":"1.595\u00a0MHz","period":"1.274\u00a0µs","frequency":"784.9\u00a0kHz","duty":"50.78\u00a0%"},"note":"SWCLK's first pulses in identify-swd: low for 627 ns from 376,719,436, then high for 647. The rate's last digit is at its uncertainty, 785 kHz / 1274 ≈ 0.6 kHz: the hundreds of Hz. The width's reciprocal, 1.5949 MHz, is uncertain by 1.595 MHz / 627 ≈ 2.5 kHz: the kHz."},
+        {"fn":"pulse_figures","args":{"pulse":{"level":1,"start":null,"end":376719436,"next":376720063},"timebase":[1000000000,1],"known":{"start":0,"end":523583070}},"expect":{"width":"at least 376.719436\u00a0ms","inverse_width":null,"period":null}},
+        {"fn":"pulse_figures","args":{"pulse":{"level":1,"start":100,"end":110,"next":null},"timebase":[1000000000,1],"known":{"start":0,"end":1000}},"expect":{"inverse_width":"100\u00a0MHz","period":null},"note":"The last pulse: both edges known, no period after it."},
+        {"fn":"pulse_figures","args":{"pulse":{"level":1,"start":null,"end":null,"next":null},"timebase":[1000000000,1],"known":{"start":0,"end":1000}},"expect":{"width":"the whole capture, 1.000\u00a0µs"}},
+        {"fn":"pulse_figures","args":{"pulse":{"level":1,"start":null,"end":400,"next":405},"timebase":[1000000000,1],"known":{"start":300,"end":1000}},"expect":{"width":"at least 100\u00a0ns"},"note":"A channel known from 300 ns, as a moved or trimmed one is: widths count from there."},
+        {"fn":"pulse_figures","args":{"pulse":{"level":1,"start":null,"end":null,"next":null},"timebase":[1000000000,1],"known":{"start":300,"end":1000}},"expect":{"width":"all it records, 700\u00a0ns"}},
+        {"fn":"pulse_figures","args":{"pulse":{"level":1,"start":10,"end":20,"next":20},"timebase":[1000000000,1],"known":{"start":0,"end":60000000}},"expect":{"duty":"100\u00a0%"},"note":"From the test of a pulse the source stamped with one time: the pulse before it ends there, and so does its period."},
+        {"fn":"format_duty","args":{"high":3,"period":10},"expect":"30\u00a0%","note":"3 of 10 ticks high is 30 % give or take 10: the digit is the tens."},
+        {"fn":"format_duty","args":{"high":1,"period":3},"expect":"30\u00a0%"},
+        {"fn":"format_duty","args":{"high":500,"period":1000},"expect":"50.0\u00a0%"}
+      ]
+    },
+    {
+      "name": "an analog channel at a pixel: one sample's value, or the range the pixel draws",
+      "rows": [
+        {"fn":"analog_from_samples","args":{"runs":{"first":0,"period":[1,1],"count":100},"end":100,"samples":{"first":0,"values":[0,0.01,0.02,0.03,0.04,0.05,0.06,0.07,0.08,0.09,0.1,0.11,0.12,0.13,0.14,0.15,0.16,0.17,0.18,0.19,0.2,0.21,0.22,0.23,0.24,0.25,0.26,0.27,0.28,0.29,0.3,0.31,0.32,0.33,0.34,0.35,0.36,0.37,0.38,0.39,0.4,0.41,0.42,0.43,0.44,0.45,0.46,0.47,0.48,0.49,0.5,0.51,0.52,0.53,0.54,0.55,0.56,0.57,0.58,0.59,0.6,0.61,0.62,0.63,0.64,0.65,0.66,0.67,0.68,0.69,0.7,0.71,0.72,0.73,0.74,0.75,0.76,0.77,0.78,0.79,0.8,0.81,0.82,0.83,0.84,0.85,0.86,0.87,0.88,0.89,0.9,0.91,0.92,0.93,0.94,0.95,0.96,0.97,0.98,0.99]},"t0":10.2,"t1":10.7,"tick":10.5},"expect":{"kind":"value","value":0.1},"note":"Samples i / 100 at ticks 0 to 99. A pixel narrower than a sample reads the sample at or before the tick."},
+        {"fn":"analog_from_samples","args":{"runs":{"first":0,"period":[1,1],"count":100},"end":100,"samples":{"first":0,"values":[0,0.01,0.02,0.03,0.04,0.05,0.06,0.07,0.08,0.09,0.1,0.11,0.12,0.13,0.14,0.15,0.16,0.17,0.18,0.19,0.2,0.21,0.22,0.23,0.24,0.25,0.26,0.27,0.28,0.29,0.3,0.31,0.32,0.33,0.34,0.35,0.36,0.37,0.38,0.39,0.4,0.41,0.42,0.43,0.44,0.45,0.46,0.47,0.48,0.49,0.5,0.51,0.52,0.53,0.54,0.55,0.56,0.57,0.58,0.59,0.6,0.61,0.62,0.63,0.64,0.65,0.66,0.67,0.68,0.69,0.7,0.71,0.72,0.73,0.74,0.75,0.76,0.77,0.78,0.79,0.8,0.81,0.82,0.83,0.84,0.85,0.86,0.87,0.88,0.89,0.9,0.91,0.92,0.93,0.94,0.95,0.96,0.97,0.98,0.99]},"t0":10,"t1":14,"tick":12},"expect":{"kind":"range","min":0.1,"max":0.13},"note":"A pixel over several samples reads their range."},
+        {"fn":"analog_from_overview","args":{"overview":{"bucket":4,"start":0,"min":[0,0.5,"Infinity"],"max":[0.2,0.9,"-Infinity"]},"t0":2,"t1":6},"expect":{"kind":"range","min":0,"max":0.9}},
+        {"fn":"analog_from_overview","args":{"overview":{"bucket":4,"start":0,"min":[0,0.5,"Infinity"],"max":[0.2,0.9,"-Infinity"]},"t0":8,"t1":12},"expect":{"kind":"none"}}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,160 @@
+{
+  "about": "Readouts with the digits their source supports. Expected values are worked by hand from the timebase and the ticks; the period rows' edges are identify-swd's SWDIO and SWCLK around the first DPIDR read.",
+  "source": "web/src/readouts.ts",
+  "tests": [
+    {
+      "name": "tickPlace: the largest power of ten not above one tick",
+      "rows": [
+        {"fn":"tick_place","args":{"timebase":[1000000000,1]},"expect":-9,"note":"1 ns"},
+        {"fn":"tick_place","args":{"timebase":[100000,1]},"expect":-5,"note":"10 us"},
+        {"fn":"tick_place","args":{"timebase":[200000,1]},"expect":-6,"note":"5 us: 1 us is the largest power below"},
+        {"fn":"tick_place","args":{"timebase":[3000000,1]},"expect":-7,"note":"333.3 ns: 100 ns"},
+        {"fn":"tick_place","args":{"timebase":[1,3]},"expect":0,"note":"3 s ticks: 1 s"}
+      ]
+    },
+    {
+      "name": "formatInterval: digits down to the tick and no further",
+      "rows": [
+        {"fn":"format_interval","args":{"ticks":1234567,"timebase":[1000000000,1]},"expect":"1.234567\u00a0ms","note":"The brief's own example: at 1 ns, 1.234567 ms, never 1.2345670 ms."},
+        {"fn":"format_interval","args":{"ticks":1234570,"timebase":[1000000000,1]},"expect":"1.234570\u00a0ms","note":"A trailing zero at the ns digit is a measured digit and stays."},
+        {"fn":"format_interval","args":{"ticks":50,"timebase":[1000000000,1]},"expect":"50\u00a0ns"},
+        {"fn":"format_interval","args":{"ticks":999,"timebase":[1000000000,1]},"expect":"999\u00a0ns"},
+        {"fn":"format_interval","args":{"ticks":1000,"timebase":[1000000000,1]},"expect":"1.000\u00a0µs"},
+        {"fn":"format_interval","args":{"ticks":0,"timebase":[1000000000,1]},"expect":"0\u00a0ns"},
+        {"fn":"format_interval","args":{"ticks":-1500,"timebase":[1000000000,1]},"expect":"\u22121.500\u00a0µs"},
+        {"fn":"format_interval","args":{"ticks":1000000000,"timebase":[1000000000,1]},"expect":"1.000000000\u00a0s"},
+        {"fn":"format_interval","args":{"ticks":123,"timebase":[100000,1]},"expect":"1.23\u00a0ms","note":"123 ticks of 10 us is 1.23 ms."},
+        {"fn":"format_interval","args":{"ticks":247,"timebase":[200000,1]},"expect":"1.235\u00a0ms","note":"247 ticks of 5 us is 1.235 ms, exact at the us digit."},
+        {"fn":"format_interval","args":{"ticks":4,"timebase":[3000000,1]},"expect":"1.3\u00a0µs","note":"4 ticks at 3 MS/s is 1.333... us; the tick is 333 ns, so the last digit is 100 ns. One digit more (1.33 us) or fewer (1 us) is the off-by-one this row catches."}
+      ]
+    },
+    {
+      "name": "formatRate: digits from a span uncertain by about one tick",
+      "rows": [
+        {"fn":"format_rate","args":{"periods":1,"span":40,"timebase":[1000000000,1]},"expect":"25.0\u00a0MHz","note":"One 40 ns period: 25 MHz, uncertain by 25 MHz / 40 = 625 kHz, so the last digit is 100 kHz. Rounding the place up instead of down would print 25 MHz."},
+        {"fn":"format_rate","args":{"periods":1000,"span":40000,"timebase":[1000000000,1]},"expect":"25.0000\u00a0MHz","note":"1000 periods over 40000 ticks: 25 MHz, uncertain by 625 Hz: last digit 100 Hz."},
+        {"fn":"format_rate","args":{"periods":1,"span":1000,"timebase":[1000000000,1]},"expect":"1.000\u00a0MHz","note":"One 1 us period: 1 MHz, uncertain by exactly 1 kHz, a power of ten: last digit 1 kHz. A \"smaller than\" rule instead of \"not larger than\" would print 1.0000 MHz."},
+        {"fn":"format_rate","args":{"periods":45,"span":45016,"timebase":[1000000000,1]},"expect":"999.64\u00a0kHz","note":"45 periods over 45016 ticks: 999,644.57 Hz, uncertain by 22.2 Hz: to 10 Hz, 999,640 Hz."},
+        {"fn":"format_rate","args":{"periods":0,"span":100,"timebase":[1000000000,1]},"expect":null},
+        {"fn":"format_rate","args":{"periods":3,"span":0,"timebase":[1000000000,1]},"expect":null}
+      ]
+    },
+    {
+      "name": "periodStats: rising edge to rising edge, starting low",
+      "rows": [
+        {"fn":"period_stats","args":{"level":0,"ticks":[377094556,377095556,377096556,377097556,377099556,377100556,377101556,377104078,377106074]},"expect":{"count":4,"median":2000,"min":2000,"max":4518,"used":4,"runs":1,"span":11518},"note":"SWDIO, low before the first edge. Rising at 377094556, 377096556, 377099556, 377101556, 377106074: periods 2000, 3000, 2000, 4518. Sorted 2000, 2000, 3000, 4518; the lower middle is 2000 (the mean of the middle two, 2500, did not occur). Falling-to-falling would give three periods with a maximum of 3522; counting edges would give 9 or 8. Tukey's fences: Q1 = p[0] = 2000, Q3 = p[3] = 4518, IQR 2518; all four inside, one run of 11518 ticks."}
+      ]
+    },
+    {
+      "name": "periodStats: starting high, the first edge falls",
+      "rows": [
+        {"fn":"period_stats","args":{"level":1,"ticks":[377095556,377096556,377097556,377099556,377100556,377101556,377104078,377106074]},"expect":{"count":3,"median":3000,"min":2000,"max":4518,"used":3,"runs":1,"span":9518},"note":"The same SWDIO from its second edge, high before it. Rising at 377096556, 377099556, 377101556, 377106074: periods 3000, 2000, 4518, all inside the fences (Q1 2000, Q3 4518). Taking the first edge as rising measures the falling edges instead: 2000, 3000, 3522."}
+      ]
+    },
+    {
+      "name": "periodStats: SWCLK at 1 MHz, and fewer than two rising edges",
+      "rows": [
+        {"fn":"period_stats","args":{"level":1,"ticks":[377094557,377095057,377095557,377096057,377096557,377097058,377097558,377098058]},"expect":{"count":3,"median":1000,"min":1000,"max":1001,"used":3,"runs":1,"span":3001},"note":"SWCLK idles high; rising at 377095057, 377096057, 377097058, 377098058."},
+        {"fn":"period_stats","args":{"level":1,"ticks":[377094557,377095057,377095557]},"expect":null},
+        {"fn":"period_stats","args":{"level":0,"ticks":[]},"expect":null}
+      ]
+    },
+    {
+      "name": "Tukey's fences: the Escapement session's 50 MHz request keeps all seven periods",
+      "rows": [
+        {"fn":"period_stats","args":{"level":0,"ticks":[1000,1009,1019,1030,1041,1049,1058,1069,1080,1090,1100,1109,1119,1130,1141]},"expect":{"used":7,"runs":1,"span":141},"then":[{"fn":"format_clock_rate","args":{"timebase":[1000000000,1]},"expect":"49.6\u00a0MHz"}],"note":"Periods 19, 22, 17, 22, 20, 19, 22 ns (wire_swd/request/380567191 in gcc-swd-reads), each high for half its period, from tick 1000. Sorted 17 19 19 20 22 22 22: Q1 = p[1] = 19, Q3 = p[5] = 22, IQR 3, fences [14.5, 26.5]. All seven, one run of 141 ticks: 7 / 141 ns = 49.645 MHz, uncertain by 1/141 of it, 352 kHz: 49.6 MHz. The one-tick window keeps 20, 19, 19 in two runs, 58 ticks, and reads 52 MHz."}
+      ]
+    },
+    {
+      "name": "Tukey's fences: one 80 ns period among 27 ns ones is dropped",
+      "rows": [
+        {"fn":"period_stats","args":{"level":0,"ticks":[1000,1013,1027,1040,1054,1067,1081,1094,1108,1121,1135,1175,1215,1228,1242,1255,1269,1282,1296,1309,1323,1336,1350]},"expect":{"used":10,"runs":2,"span":270},"then":[{"fn":"format_clock_rate","args":{"timebase":[1000000000,1]},"expect":"37.0\u00a0MHz"}],"note":"27 ×5, 80, 27 ×5. Sorted, Q1 = p[2] = 27, Q3 = p[8] = 27, IQR 1 (the floor): fences [25.5, 28.5]. Ten kept, in two runs of 135: 10 / 270 ns = 37.04 MHz, uncertain by 2/270 of it, 274 kHz: 37.0 MHz."}
+      ]
+    },
+    {
+      "name": "Tukey's fences: the IQR is at least one tick, so a tick of jitter stays",
+      "rows": [
+        {"fn":"period_stats","args":{"level":0,"ticks":[1000,1013,1027,1040,1054,1067,1081,1094,1108,1121,1135,1149,1163,1176,1190,1203,1217,1230,1244,1257,1271,1284,1298]},"expect":{"used":11,"runs":1,"span":298},"then":[{"fn":"format_clock_rate","args":{"timebase":[1000000000,1]},"expect":"36.9\u00a0MHz"}],"note":"27 ×5, 28, 27 ×5: Q1 = Q3 = 27. With IQR 0 the fences would be [27, 27] and drop the 28; at one tick they are [25.5, 28.5]. All 11 kept, 298 ticks: 36.91 MHz, uncertain by 1/298, 124 kHz: 36.9 MHz."}
+      ]
+    },
+    {
+      "name": "Tukey's fences: Q3 is p[⌈3(n \u2212 1)/4⌉], not the floor",
+      "rows": [
+        {"fn":"period_stats","args":{"level":0,"ticks":[1000,1010,1020,1035,1050,1060,1070,1080,1090,1115,1140,1150,1160]},"expect":{"used":5,"runs":2,"span":110},"note":"Six periods, sorted 20 20 20 20 30 50: Q1 = p[1] = 20, Q3 = p[⌈3.75⌉] = p[4] = 30, IQR 10, fences [5, 45]: the 30 stays, the 50 goes. Q3 = p[3] = 20 would give IQR 1 and drop the 30."}
+      ]
+    },
+    {
+      "name": "Tukey's fences: 93 and 100 ns alternating are both kept",
+      "rows": [
+        {"fn":"period_stats","args":{"level":0,"ticks":[1000,1046,1093,1143,1193,1239,1286,1336,1386,1432,1479,1529,1579,1625,1672,1722,1772]},"expect":{"used":8,"runs":1,"span":772},"then":[{"fn":"format_clock_rate","args":{"timebase":[1000000000,1]},"expect":"10.36\u00a0MHz"}],"note":"Sorted 93 ×4, 100 ×4: Q1 = p[1] = 93, Q3 = p[6] = 100, IQR 7, fences [82.5, 110.5]. All eight, one run of 772 ticks: 8 / 772 ns = 10.3627 MHz, uncertain by 1/772, 13.4 kHz: 10.36 MHz. The one-tick window around the median (93) keeps only the 93s."}
+      ]
+    },
+    {
+      "name": "Tukey's fences: a 33 and a 34 ns stretch among 27 ns periods are both dropped",
+      "rows": [
+        {"fn":"period_stats","args":{"level":0,"ticks":[1000,1013,1027,1040,1054,1067,1081,1097,1114,1127,1141,1154,1168,1181,1195,1212,1229,1242,1256,1269,1283,1296,1310,1323,1337]},"expect":{"used":10,"runs":3,"span":270},"then":[{"fn":"format_clock_rate","args":{"timebase":[1000000000,1]},"expect":"37.0\u00a0MHz"}],"note":"27 27 27 33 27 27 27 34 27 27 27 27. Sorted, Q1 = p[2] = 27, Q3 = p[9] = 27, IQR 1, fences [25.5, 28.5]: both stretches out. A window of 25 % around the median, [20.25, 33.75], would keep the 33 and drop the 34. Ten kept in three runs, 270 ticks: 37.04 MHz, uncertain by 3/270 of it, 412 kHz: 37.0 MHz."}
+      ]
+    },
+    {
+      "name": "the running clock: a quantised 26.67 ns clock",
+      "rows": [
+        {"fn":"period_stats","args":{"level":0,"ticks":[1000,1013,1027,1040,1054,1067,1080,1093,1107,1120,1134,1147,1160,1173,1187,1200,1214,1227,1240,1253,1267,1280,1294,1307,1320,1333,1347,1360,1374,1387,1400,1413,1427,1440,1454,1467,1480,1493,1507,1520,1534,1547,1560,1573,1587,1600,1614,1627,1640,1653,1667,1680,1694,1707,1720,1733,1747,1760,1774,1787,1800,1813,1827,1840,1854]},"expect":{"count":32,"median":27,"min":26,"max":27,"used":32,"runs":1,"span":854},"then":[{"fn":"format_clock_rate","args":{"timebase":[1000000000,1]},"expect":"37.47\u00a0MHz"},{"fn":"format_clock_period","args":{"timebase":[1000000000,1]},"expect":"26.69\u00a0ns"},{"fn":"clock_note","args":{},"expect":"mean of 32 periods"}],"note":"A 26.67 ns clock sampled at 1 ns reads as 26 ns ten times and 27 ns twenty-two times, here 27, 27, 26 over and over. The median is 27 ns (37.04 MHz). Sorted, Q1 = p[7] = 26 and Q3 = p[24] = 27, IQR 1, fences [24.5, 28.5]: all 32 periods inside, one run of 854 ticks: 32 / 854 ns is 37,470,726 Hz, uncertain by 1/854 of that, 43.9 kHz, so to 10 kHz: 37.47 MHz. The mean period, 854 / 32 = 26.6875 ns, is uncertain by 1/32 ns: to 0.01 ns, 26.69 ns."}
+      ]
+    },
+    {
+      "name": "the running clock: a span with a gap between bursts",
+      "rows": [
+        {"fn":"period_stats","args":{"level":1,"ticks":[377135559,377136060,377136559,377137060,377137560,377138060,377138560,377139060,377139560,377140060,377230478,377230978,377231478,377231978,377232478,377232978,377233478,377233978,377234478,377234978]},"expect":{"count":9,"median":1000,"min":1000,"max":90918,"used":8,"runs":2,"span":8000},"then":[{"fn":"format_clock_rate","args":{"timebase":[1000000000,1]},"expect":"1.0000\u00a0MHz"},{"fn":"format_clock_period","args":{"timebase":[1000000000,1]},"expect":"1.0000\u00a0µs"},{"fn":"clock_note","args":{},"expect":"mean of 8 of 9 periods"}],"note":"Real SWCLK: the end of the DPIDR read's burst and the start of the next transfer's. Periods 1000 four times, the 90,918-tick gap, then 1000 four times. First-to-last would be 9 periods over 98,918 ticks, 90.98 kHz. Q1 = Q3 = 1000, IQR 1, fences [998.5, 1001.5]: the running clock takes the eight 1000s, two runs of 8000 ticks in all: 1 MHz, uncertain by 2/8000 of it, 250 Hz, so to 100 Hz. Its period, 1000 ticks, is uncertain by 2/8 of a tick: to 0.1 ns."}
+      ]
+    },
+    {
+      "name": "formatValue: to the digit of one code step",
+      "rows": [
+        {"fn":"format_value","args":{"value":3.305,"resolution":0.001,"unit":"V"},"expect":"3.305\u00a0V","note":"verge's energy capture: integer mV, read as V; the value is 3305 * 0.001 in f64."},
+        {"fn":"format_value","args":{"value":0.032898465,"resolution":1e-9,"unit":"A"},"expect":"32.898465\u00a0mA","note":"integer nA, read as A: 32898465 nA is 32.898465 mA; the value is 32898465 * 1e-9 in f64."},
+        {"fn":"format_value","args":{"value":0.00012345,"resolution":null,"unit":"A"},"expect":"123.5\u00a0µA","note":"An f32 source states no resolution: four significant digits. 0.00012345 A rounds half away from zero to 123.5 uA."}
+      ]
+    },
+    {
+      "name": "formatValue: to `significant` figures where the channel states them, if coarser than a step",
+      "rows": [
+        {"fn":"format_value","args":{"value":0.350123456,"resolution":1e-9,"unit":"A","significant":4},"expect":"350.1\u00a0mA","note":"verge's current: a step of 1 nA, but the reading carries four figures, so 350,123,456 nA reads to 0.1 mA."},
+        {"fn":"format_value","args":{"value":0.0000012340000000000002,"resolution":1e-9,"unit":"A","significant":4},"expect":"1.234\u00a0µA","note":"1,234 nA: four figures end at 1 nA, the step."},
+        {"fn":"format_value","args":{"value":1.2000000000000002e-8,"resolution":1e-9,"unit":"A","significant":4},"expect":"12\u00a0nA","note":"12 nA: four figures would go past the step, so the step wins."},
+        {"fn":"format_value","args":{"value":0,"resolution":1e-9,"unit":"A","significant":4},"expect":"0\u00a0nA","note":"Zero has no figures to count: it keeps to the step. The test compared this with the next row's call; both are written out here."},
+        {"fn":"format_value","args":{"value":0,"resolution":1e-9,"unit":"A"},"expect":"0\u00a0nA"},
+        {"fn":"format_value","args":{"value":0.00012345,"resolution":null,"unit":"A","significant":6},"expect":"123.450\u00a0µA","note":"A float channel stating six figures: 123.45 uA to 1 nA."}
+      ]
+    },
+    {
+      "name": "countEdges and formatCount",
+      "rows": [
+        {"fn":"count_edges","args":{"ticks":[10,20,30,40],"start":20,"end":40},"expect":2},
+        {"fn":"count_edges","args":{"ticks":[10,20,30,40],"start":0,"end":10},"expect":0},
+        {"fn":"format_count","args":{"n":15286},"expect":"15,286"}
+      ]
+    },
+    {
+      "name": "formatBrief: three significant figures for a summary line, never finer than a tick",
+      "rows": [
+        {"fn":"format_brief","args":{"ticks":927888190,"timebase":[1000000000,1]},"expect":"928\u00a0ms"},
+        {"fn":"format_brief","args":{"ticks":523583100,"timebase":[1000000000,1]},"expect":"524\u00a0ms"},
+        {"fn":"format_brief","args":{"ticks":114006396250,"timebase":[1000000000,1]},"expect":"114\u00a0s"},
+        {"fn":"format_brief","args":{"ticks":4429986070,"timebase":[1000000000,1]},"expect":"4.43\u00a0s"},
+        {"fn":"format_brief","args":{"ticks":11031886,"timebase":[1000000000,1]},"expect":"11.0\u00a0ms"},
+        {"fn":"format_brief","args":{"ticks":999600000,"timebase":[1000000000,1]},"expect":"1.00\u00a0s","note":"999.6 ms rounds up into the next unit, still three figures: 1.00 s, not 1000 ms."},
+        {"fn":"format_brief","args":{"ticks":15,"timebase":[1000000000,1]},"expect":"15\u00a0ns","note":"15 ticks of 1 ns: 15 ns, not 15.0 ns."},
+        {"fn":"format_brief","args":{"ticks":3,"timebase":[100000,1]},"expect":"30\u00a0µs","note":"3 ticks of 10 us: 30 us."}
+      ]
+    },
+    {
+      "name": "the running clock's count: one period, one of several, a mean of the rest",
+      "rows": [
+        {"fn":"measure_reading","args":{"what":"period","level":0,"ticks":[1000,1039,1079],"timebase":[1000000000,1]},"expect":{"value":"79\u00a0ns","note":"one period"},"note":"A single 79 ns period: \"79 ns, one period\", not \"mean of 1 periods\"."},
+        {"fn":"clock_note","args":{"stats":{"count":7,"median":27,"min":27,"max":27,"used":1,"runs":1,"span":27}},"expect":"one of 7 periods"},
+        {"fn":"clock_note","args":{"stats":{"count":7,"median":27,"min":27,"max":27,"used":7,"runs":1,"span":27}},"expect":"mean of 7 periods"},
+        {"fn":"clock_note","args":{"stats":{"count":32,"median":27,"min":27,"max":27,"used":31,"runs":1,"span":27}},"expect":"mean of 31 of 32 periods"}
+      ]
+    }
+  ]
+}

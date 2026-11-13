@@ -19,6 +19,7 @@ computer.
 | `crates/cli` | `tickwave`, the command-line converter: convert, describe, verify, check and bundle |
 | `crates/wasm` | the same decoder compiled to WASM, for the browser |
 | `crates/convert-wasm` | the converter compiled to WASM, for the site's Open page |
+| `crates/view` | the viewer's logic apart from the drawing, ported from the web's: readouts, times, the value scale, the time axis, pixel columns and point probes |
 | `web` | the custom elements, the chart, the converter's worker, and the build of the site |
 | `site` | the site's pages: an overview, a viewer that also converts, and the docs |
 | `bench` | the decode benchmark: the WASM decoder against JavaScript ones, on real recordings |
@@ -30,6 +31,7 @@ computer.
 - `ANNOTATIONS.md`: the sidecar annotations that sit beside a recording.
 - `CHARTS.md`: `<tickwave-chart>` and its data.
 - `web/README.md`: the elements, how they read recordings, and how to run the web build and tests.
+- `testdata/view/README.md`: the cases the web's view modules and `crates/view` share.
 - `site/docs/converter.md`: building and using the converter.
 - `bench/README.md` and `bench/RESULTS.md`: how the benchmark runs, and what it found.
 
@@ -41,6 +43,7 @@ The Rust crates need a current Rust toolchain:
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+cargo build -p escapement-tickwave-view --target wasm32-unknown-unknown --no-default-features
 cargo build --release -p escapement-tickwave-cli     # the converter, at target/release/tickwave
 ```
 
