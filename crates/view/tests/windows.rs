@@ -311,3 +311,105 @@ fn a_run_that_shares_a_column_with_the_one_before_joins_from_its_own_values() {
     assert_eq!((c.min[5], c.max[5]), (10.0, 100.0));
     assert!(c.joined[5]);
 }
+
+#[test]
+fn a_gap_from_tick_0_sets_the_level_from_its_end() {
+    use escapement_tickwave_view::columns::State;
+    // crates/format/examples/gaps.rs, as web/test/wasm.test.ts reads it: A is declared low and
+    // not known until 300 µs, high there, and runs a 10 µs clock from 400 µs.
+    let rec = open(&fixture("leading-gap.tickwave"));
+    let cancel = AtomicBool::new(false);
+    assert_eq!(
+        rec.edges(0, 300_000, 410_000, &cancel).unwrap(),
+        (true, vec![400_000, 405_000])
+    );
+    assert_eq!(
+        rec.edges(0, 300_000, 300_001, &cancel).unwrap(),
+        (true, vec![])
+    );
+    // Drawn from the edges: high from the gap's end to the clock's first fall.
+    let q = Query {
+        window: 300_000..400_000,
+        columns: 100,
+        channels: vec![0],
+        ..Query::default()
+    };
+    let a = rec.query(&q, &cancel).unwrap();
+    let Drawn::Digital { columns, .. } = &a.channels[0] else {
+        panic!("A is digital")
+    };
+    // `around` from 200,000 in columns of 1,000 ticks: 300,000 to 400,000 is columns 100 to 199.
+    assert!(
+        (100..200).all(|k| columns.state[k] == State::High),
+        "{:?}",
+        &columns.state[100..200]
+    );
+}
+
+#[test]
+fn a_live_recordings_gap_from_tick_0_sets_the_level_from_its_end() {
+    use escapement_tickwave_format::header::{
+        Declaration, DeclaredChannel, DeclaredKind, SourceFormat, SourceHeader,
+    };
+    use escapement_tickwave_format::writer::{WriteOptions, Writer};
+    use escapement_tickwave_view::{Cache, Recording};
+    use std::sync::Arc;
+    let timebase = Ratio::integer(1000).unwrap();
+    let d = Declaration {
+        timebase,
+        channels: vec![DeclaredChannel {
+            name: "A".into(),
+            source_name: "a".into(),
+            source: 0,
+            data: DeclaredKind::Digital { initial: false },
+            shaping: Default::default(),
+        }],
+        derived: Vec::new(),
+        sources: vec![SourceHeader::new(
+            SourceFormat::Other("crafted".into()),
+            timebase,
+        )],
+        title: None,
+        meta: Default::default(),
+        overview_shift: 4,
+    };
+    // Declared low, not known until 300 and high there, then edges at 400 and 405; a flush first
+    // so the recording is made before the gap and takes it in an update.
+    struct Growing(std::sync::Mutex<Vec<u8>>);
+    impl escapement_tickwave_view::Bytes for Growing {
+        fn size(&self) -> std::io::Result<u64> {
+            Ok(self.0.lock().unwrap().len() as u64)
+        }
+        fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+            let file = self.0.lock().unwrap();
+            buf.copy_from_slice(&file[offset as usize..][..buf.len()]);
+            Ok(())
+        }
+    }
+    let mut w = Writer::new(d, WriteOptions::default()).unwrap();
+    let file = Arc::new(Growing(std::sync::Mutex::new(w.take_output())));
+    let mut rec = Recording::live(w.snapshot(), file.clone(), Cache::new(1 << 20)).unwrap();
+    w.gap(
+        0,
+        Gap {
+            from: 0,
+            to: 300,
+            level: true,
+        },
+    )
+    .unwrap();
+    w.edge(0, 400).unwrap();
+    w.edge(0, 405).unwrap();
+    w.flush(410).unwrap();
+    let snapshot = w.snapshot();
+    file.0.lock().unwrap().extend(w.take_output());
+    let fresh = Recording::live(snapshot.clone(), file.clone(), Cache::new(1 << 20)).unwrap();
+    rec.update(snapshot).unwrap();
+    let cancel = AtomicBool::new(false);
+    for r in [&rec, &fresh] {
+        assert_eq!(
+            r.edges(0, 300, 410, &cancel).unwrap(),
+            (true, vec![400, 405])
+        );
+    }
+}

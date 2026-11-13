@@ -115,7 +115,13 @@ impl Recording {
         to: i64,
         cancel: &AtomicBool,
     ) -> Result<(bool, Vec<i64>), Error> {
-        let Place::Digital { gaps, initial, .. } = self.place(channel)? else {
+        let Place::Digital {
+            gaps,
+            leading,
+            initial,
+            ..
+        } = self.place(channel)?
+        else {
             return Err(Error::NoChannel(channel));
         };
         let from = from.clamp(0, self.length.max(1) - 1);
@@ -133,14 +139,13 @@ impl Recording {
                 level = *initial ^ (lo % 2 == 1);
                 // A block's level bit carries the level from before a gap until the gap's end, which
                 // sets it: the last gap ending in the block, at or before `from`. A gap ending at
-                // the block's start is in the block.
+                // the block's start is in the block. The gap from tick 0 comes before the others.
                 let start = block.block.start;
-                let ended = gaps.partition_point(|g| g.to <= from);
-                if let Some(g) = ended
-                    .checked_sub(1)
-                    .map(|i| &gaps[i])
-                    .filter(|g| start <= g.to)
-                {
+                let last_ended = match gaps.partition_point(|g| g.to <= from) {
+                    0 => leading.as_ref().filter(|g| g.to <= from),
+                    n => Some(&gaps[n - 1]),
+                };
+                if let Some(g) = last_ended.filter(|g| start <= g.to) {
                     let after = edges.partition_point(|&t| t < g.to);
                     level = g.level ^ ((lo - after) % 2 == 1);
                 }

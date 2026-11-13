@@ -124,6 +124,8 @@ pub(crate) enum Place {
         /// Where the level is first known: past a gap from tick 0.
         start: i64,
         end: i64,
+        /// The gap from tick 0, if there is one: its level is the level at `start`.
+        leading: Option<Gap>,
         /// The gaps after `start`.
         gaps: Vec<Gap>,
         /// Every gap the header states, one from tick 0 included.
@@ -311,12 +313,13 @@ fn analog_info(
 
 fn digital_place(initial: bool, end: i64, gaps: &[Gap]) -> Place {
     // A gap from tick 0 says where the channel's data starts; the others are gaps in it.
-    let leading = gaps.first().is_some_and(|g| g.from == 0);
+    let leading = gaps.first().filter(|g| g.from == 0).copied();
     Place::Digital {
         initial,
-        start: if leading { gaps[0].to } else { 0 },
+        start: leading.map_or(0, |g| g.to),
         end,
-        gaps: gaps[usize::from(leading)..].to_vec(),
+        leading,
+        gaps: gaps[usize::from(leading.is_some())..].to_vec(),
         gap_count: gaps.len(),
     }
 }
@@ -755,6 +758,7 @@ impl Recording {
                 (
                     Place::Digital {
                         start,
+                        leading,
                         gaps,
                         gap_count,
                         ..
@@ -766,6 +770,7 @@ impl Recording {
                         // A gap from tick 0 says where the data starts; the others are gaps in it.
                         if *gap_count == 0 && g.from == 0 {
                             *start = g.to;
+                            *leading = Some(*g);
                         } else {
                             gaps.push(*g);
                         }
