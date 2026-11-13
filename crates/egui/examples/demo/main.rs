@@ -8,7 +8,8 @@
 //! finishes after S seconds and the demo reopens the recording finished. The colours are the
 //! project's design tokens, from `site/tokens.css`. `--trace FILE` writes every span as a Chrome
 //! trace, for Perfetto or chrome://tracing, and `--quit-after S` closes the window after S
-//! seconds.
+//! seconds. For measuring, `--window FROM..TO` opens at a window, in seconds, and `--repaint`
+//! draws every frame though nothing changes.
 
 mod live;
 mod tokens;
@@ -42,6 +43,19 @@ struct Args {
     /// Write every span, at debug level, as a Chrome trace to this file.
     #[arg(long)]
     trace: Option<PathBuf>,
+    /// Open at this window, `FROM..TO` in seconds, rather than following.
+    #[arg(long, value_parser = seconds)]
+    window: Option<(f64, f64)>,
+    /// Draw every frame, though nothing changes, to measure a frame's cost.
+    #[arg(long)]
+    repaint: bool,
+}
+
+/// `FROM..TO`, in seconds.
+fn seconds(s: &str) -> Result<(f64, f64), String> {
+    let (a, b) = s.split_once("..").ok_or("FROM..TO")?;
+    let n = |x: &str| x.trim().parse::<f64>().map_err(|e| format!("{x}: {e}"));
+    Ok((n(a)?, n(b)?))
 }
 
 /// The window a live recording follows, in seconds, as verge's bench opens.
@@ -63,6 +77,7 @@ struct Demo {
     /// The fixed range Fit Y replaced, for Fit Y pressed again.
     unfit: Option<Y>,
     quit_after: Option<f64>,
+    repaint: bool,
     live: Option<live::Live>,
 }
 
@@ -111,10 +126,18 @@ impl Demo {
         });
         let trace = trace.ok_or("the recording has no analog channel to draw")?;
         info!(trace, ?flag, ?lanes, "drawing");
+        let window = match args.window {
+            Some((a, b)) => {
+                let timebase = viewer.recording(|r| r.timebase());
+                let tick = |s: f64| (s * timebase.num() as f64 / timebase.den() as f64) as i64;
+                Window::At(tick(a)..tick(b))
+            }
+            None => follow.clone(),
+        };
         Ok(Self {
             viewer,
             state: ViewState {
-                window: follow.clone(),
+                window,
                 ..ViewState::default()
             },
             faces,
@@ -125,6 +148,7 @@ impl Demo {
             follow,
             unfit: None,
             quit_after: args.quit_after,
+            repaint: args.repaint,
             live,
         })
     }
@@ -172,6 +196,9 @@ impl Demo {
 
 impl eframe::App for Demo {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if self.repaint {
+            ui.ctx().request_repaint();
+        }
         if let Some(after) = self.quit_after {
             let now = ui.input(|i| i.time);
             if now >= after {
