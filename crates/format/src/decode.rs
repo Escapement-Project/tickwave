@@ -74,10 +74,10 @@ pub fn inflate(frame: &[u8], len: usize) -> Result<Vec<u8>, DecodeError> {
 /// `inflate`, holding at most `max` decoded bytes.
 pub fn inflate_limited(frame: &[u8], len: usize, max: usize) -> Result<Vec<u8>, DecodeError> {
     let mut out = buffer(len, max)?;
-    #[cfg(all(feature = "zstd", not(target_family = "wasm")))]
-    inflate_native(frame, &mut out)?;
-    #[cfg(not(all(feature = "zstd", not(target_family = "wasm"))))]
-    inflate_portable(frame, &mut out)?;
+    #[cfg(feature = "zstd")]
+    inflate_libzstd(frame, &mut out)?;
+    #[cfg(not(feature = "zstd"))]
+    inflate_ruzstd(frame, &mut out)?;
     if out.len() != len {
         return Err(corrupt(format!(
             "a frame decoded to {} bytes, not {len}",
@@ -87,15 +87,15 @@ pub fn inflate_limited(frame: &[u8], len: usize, max: usize) -> Result<Vec<u8>, 
     Ok(out)
 }
 
-/// One frame with a checksum, decoded into `out` by ruzstd, the decoder the browser's build has.
+/// One frame with a checksum, decoded into `out` by ruzstd, for a build without libzstd.
 #[cfg_attr(
-    all(feature = "zstd", not(target_family = "wasm"), not(test)),
+    all(feature = "zstd", not(test)),
     expect(
         dead_code,
-        reason = "the web's decoder; a native build's tests check it against libzstd"
+        reason = "the decoder without libzstd; with it, the tests check the two against each other"
     )
 )]
-fn inflate_portable(frame: &[u8], out: &mut Vec<u8>) -> Result<(), DecodeError> {
+fn inflate_ruzstd(frame: &[u8], out: &mut Vec<u8>) -> Result<(), DecodeError> {
     let mut decoder = FrameDecoder::new();
     decoder
         .decode_all_to_vec(frame, out)
@@ -116,19 +116,26 @@ fn inflate_portable(frame: &[u8], out: &mut Vec<u8>) -> Result<(), DecodeError> 
     }
 }
 
-/// `inflate_portable` through libzstd, which a native build with the encoder links anyway: on a
-/// recorder's blocks it decodes about 14 times as fast as ruzstd. It holds a frame to the same
-/// rules: a zstd frame, the only one, with a checksum, which libzstd checks.
-#[cfg(all(feature = "zstd", not(target_family = "wasm")))]
-fn inflate_native(frame: &[u8], out: &mut Vec<u8>) -> Result<(), DecodeError> {
+/// `inflate_ruzstd` through libzstd, which a build with the encoder links anyway. On a recorder's
+/// blocks it decodes about 14 times as fast as ruzstd natively, and 3.7 times in WASM. It holds a
+/// frame to the same rules: a zstd frame, the only one, naming no dictionary, with a checksum,
+/// which libzstd checks.
+#[cfg(feature = "zstd")]
+fn inflate_libzstd(frame: &[u8], out: &mut Vec<u8>) -> Result<(), DecodeError> {
     use zstd::zstd_safe;
     // RFC 8878: the magic number, then the frame header descriptor, whose bit 2 says the frame
-    // ends in a checksum.
+    // ends in a checksum and whose bits 0-1 give the size of a dictionary id.
     if frame.get(..4) != Some(&0xFD2F_B528u32.to_le_bytes()[..]) {
         return Err(corrupt("the bytes are not one zstd frame"));
     }
-    if frame.get(4).is_none_or(|d| d & 0b100 == 0) {
+    let Some(&descriptor) = frame.get(4) else {
         return Err(corrupt("a frame carries no checksum"));
+    };
+    if descriptor & 0b100 == 0 {
+        return Err(corrupt("a frame carries no checksum"));
+    }
+    if descriptor & 0b11 != 0 {
+        return Err(corrupt("a frame names a dictionary"));
     }
     match zstd_safe::find_frame_compressed_size(frame) {
         Ok(n) if n == frame.len() => {}
@@ -1243,16 +1250,30 @@ mod tests {
     }
 }
 
-/// The two decoders take and refuse the same bytes: the browser's ruzstd, and libzstd natively.
-#[cfg(all(test, feature = "zstd", not(target_family = "wasm")))]
+/// The two decoders take and refuse the same bytes: ruzstd, for a build without libzstd, and
+/// libzstd.
+#[cfg(all(test, feature = "zstd"))]
 mod decoders {
-    use super::{inflate_native, inflate_portable};
+    use super::{inflate_libzstd, inflate_ruzstd};
     use zstd::zstd_safe::CParameter;
 
     fn frame(raw: &[u8], checksum: bool) -> Vec<u8> {
         let mut c = zstd::bulk::Compressor::new(3).unwrap();
         c.set_parameter(CParameter::ChecksumFlag(checksum)).unwrap();
         c.compress(raw).unwrap()
+    }
+
+    /// A frame with a checksum, compressed against a dictionary, so it names one.
+    fn with_dictionary() -> Vec<u8> {
+        let samples: Vec<Vec<u8>> = (0..200)
+            .map(|i| format!("{{\"edge\": {i}, \"level\": {}}}", i % 2).into_bytes())
+            .collect();
+        let dict = zstd::dict::from_samples(&samples, 1024).unwrap();
+        let mut c = zstd::bulk::Compressor::with_dictionary(3, &dict).unwrap();
+        c.set_parameter(CParameter::ChecksumFlag(true)).unwrap();
+        let framed = c.compress(&samples.concat()).unwrap();
+        assert_ne!(framed[4] & 0b11, 0, "the frame names no dictionary");
+        framed
     }
 
     fn skippable(content: &[u8]) -> Vec<u8> {
@@ -1275,7 +1296,7 @@ mod decoders {
             })
             .collect();
         let good = frame(&raw, true);
-        for decode in [inflate_portable, inflate_native] {
+        for decode in [inflate_ruzstd, inflate_libzstd] {
             let mut out = Vec::with_capacity(raw.len());
             decode(&good, &mut out).unwrap();
             assert_eq!(out, raw);
@@ -1304,11 +1325,12 @@ mod decoders {
             // libzstd reads a skippable frame as holding nothing, and its length's bit 2 looks
             // like a checksum flag to a reader that skips the magic number.
             ("a skippable frame alone", skippable(b"abcd")),
+            ("a frame that names a dictionary", with_dictionary()),
         ];
         for (why, bytes) in cases {
             for (name, decode) in [
-                ("ruzstd", inflate_portable as fn(&[u8], &mut Vec<u8>) -> _),
-                ("libzstd", inflate_native),
+                ("ruzstd", inflate_ruzstd as fn(&[u8], &mut Vec<u8>) -> _),
+                ("libzstd", inflate_libzstd),
             ] {
                 let mut out = Vec::with_capacity(raw.len());
                 assert!(decode(&bytes, &mut out).is_err(), "{name} took {why}");

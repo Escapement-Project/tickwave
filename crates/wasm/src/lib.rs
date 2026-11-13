@@ -10,9 +10,6 @@ use escapement_tickwave_format::samples::{Product, Values};
 use js_sys::{Float32Array, Float64Array, Uint8Array};
 use wasm_bindgen::prelude::*;
 
-mod inflate;
-use inflate::Inflater;
-
 fn limit(max_decoded: Option<u32>) -> usize {
     max_decoded.map_or(decode::MAX_DECODED, |m| m as usize)
 }
@@ -31,8 +28,10 @@ fn js(e: DecodeError) -> JsError {
 /// it decodes from one frame, 64 MiB unless given.
 #[wasm_bindgen(js_name = footerStart)]
 pub fn footer_start(tail: &[u8], file_len: f64, max_decoded: Option<u32>) -> Result<f64, JsError> {
-    let inflater = Inflater::new(limit(max_decoded));
-    match Footer::parse_with(tail, file_len as u64, |f, len| inflater.inflate(f, len)) {
+    let max = limit(max_decoded);
+    match Footer::parse_with(tail, file_len as u64, |f, len| {
+        decode::inflate_limited(f, len, max)
+    }) {
         Ok(_) => Ok(file_len - tail.len() as f64),
         Err(DecodeError::NeedFrom(at)) => Ok(at as f64),
         Err(e) => Err(js(e)),
@@ -43,7 +42,8 @@ pub fn footer_start(tail: &[u8], file_len: f64, max_decoded: Option<u32>) -> Res
 pub struct Recording {
     footer: Footer,
     header: String,
-    inflater: Inflater,
+    /// The most it decodes from one frame.
+    max: usize,
 }
 
 #[wasm_bindgen]
@@ -53,9 +53,11 @@ impl Recording {
     /// unless given.
     #[wasm_bindgen(constructor)]
     pub fn new(tail: &[u8], file_len: f64, max_decoded: Option<u32>) -> Result<Recording, JsError> {
-        let inflater = Inflater::new(limit(max_decoded));
-        let footer = Footer::parse_with(tail, file_len as u64, |f, len| inflater.inflate(f, len))
-            .map_err(js)?;
+        let max = limit(max_decoded);
+        let footer = Footer::parse_with(tail, file_len as u64, |f, len| {
+            decode::inflate_limited(f, len, max)
+        })
+        .map_err(js)?;
         // The header's JSON as the file stores it: after the footer record's framing and the
         // footer's two lengths.
         let at =
@@ -65,7 +67,7 @@ impl Recording {
         Ok(Self {
             header: String::from_utf8_lossy(stored).into_owned(),
             footer,
-            inflater,
+            max,
         })
     }
 
@@ -113,7 +115,7 @@ impl Recording {
     pub fn decode_block(&self, i: usize, frame: &[u8]) -> Result<Block, JsError> {
         let block = self
             .footer
-            .decode_block_with(i, frame, |f, len| self.inflater.inflate(f, len))
+            .decode_block_with(i, frame, |f, len| decode::inflate_limited(f, len, self.max))
             .map_err(js)?;
         // A derived channel's samples come from its operands' here, by the format's own rule.
         let derived = (0..self.footer.products.len())
@@ -261,7 +263,9 @@ impl Recording {
         Ok(OverviewBlock {
             block: self
                 .footer
-                .decode_overview_block_with(level, k, frame, |f, len| self.inflater.inflate(f, len))
+                .decode_overview_block_with(level, k, frame, |f, len| {
+                    decode::inflate_limited(f, len, self.max)
+                })
                 .map_err(js)?,
             codings: self
                 .footer

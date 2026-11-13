@@ -540,7 +540,6 @@ dependencies = [
  "js-sys",
  "serde_json",
  "wasm-bindgen",
- "zstd",
 ]
 
 [[package]]

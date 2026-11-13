@@ -117,7 +117,8 @@ fn a_frame_that_names_a_dictionary_is_refused() {
         .decompress(&with_dict, raw.len())
         .unwrap();
     assert_eq!(back, raw);
-    refused(&with_dict, raw.len(), "a dictionary");
+    let e = inflate(&with_dict, raw.len()).unwrap_err().to_string();
+    assert!(e.contains("names a dictionary"), "{e}");
 }
 
 fn analog(coding_bits: Option<u8>, values: Vec<f32>) -> (Recording, Options) {
