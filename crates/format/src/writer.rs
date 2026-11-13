@@ -1047,20 +1047,8 @@ impl Writer {
                 }
             }
         }
-        let mut firsts = self.counts.clone();
-        for q in &self.queue {
-            if let Queued::Block { head, .. } = q {
-                for (count, (&word, coding)) in
-                    firsts.iter_mut().zip(head.words.iter().zip(&self.codings))
-                {
-                    *count += u64::from(if coding.is_some() {
-                        word
-                    } else {
-                        word & !LEVEL_BIT
-                    });
-                }
-            }
-        }
+        // `close` counts a block's items as it queues it, so the queued blocks are in already.
+        let firsts = self.counts.clone();
         Snapshot::new(
             Arc::clone(&self.declaration),
             self.written.clone(),

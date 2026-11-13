@@ -393,6 +393,20 @@ fn a_snapshot_with_the_bytes_written_so_far_gives_every_item_pushed() {
             for pair in blocks.windows(2) {
                 assert_eq!(pair[0].end, pair[1].start, "after op {n}");
             }
+            // Each block's first sample is the count of samples in the blocks before it, queued
+            // ones and the open one too.
+            let mut before = 0;
+            for b in &blocks {
+                let BlockChannel::Analog {
+                    first_index,
+                    values,
+                } = &b.channels[0]
+                else {
+                    panic!("V is analog")
+                };
+                assert_eq!(*first_index, before, "{block_bytes} {batch}, after op {n}");
+                before += codes(values).len() as u64;
+            }
             let (mut edges, mut v, mut i, mut p) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
             for b in &blocks {
                 if let BlockChannel::Digital { edges: e, .. } = &b.channels[2] {
