@@ -12,7 +12,7 @@ use crate::columns::{
 };
 use crate::markers::{Marker, MarkerCursor, Page};
 use crate::recording::{Error, Place, Recording};
-use crate::runs::lost_spans;
+use crate::runs::lost_spans_in;
 use crate::spans::known_spans;
 use crate::statistics::Statistics;
 
@@ -248,16 +248,16 @@ impl Recording {
         let level = self.level_for(g.per);
         match place {
             Place::Digital { gaps, .. } => {
-                let mut cols = DigitalColumns {
-                    state: vec![State::None; g.count],
-                    at: vec![0.0; g.count],
-                };
+                let mut cols = DigitalColumns::empty(g.count);
+                let mut piece = DigitalColumns::empty(g.count);
                 for span in &spans {
-                    self.digital_span(c, g, span.clone(), level, &mut cols, cancel)?;
+                    self.digital_span(c, g, span.clone(), level, &mut cols, &mut piece, cancel)?;
                 }
-                let gaps = gaps
+                // The gaps `range` reaches: they lie in order and apart.
+                let first = gaps.partition_point(|x| x.to <= range.start);
+                let gaps = gaps[first..]
                     .iter()
-                    .filter(|x| x.from < range.end && x.to > range.start)
+                    .take_while(|x| x.from < range.end)
                     .map(|x| x.from..x.to)
                     .collect();
                 Ok(Drawn::Digital {
@@ -273,24 +273,28 @@ impl Recording {
                     joined: vec![false; g.count],
                     pale: vec![false; g.count],
                 };
+                let mut part = columns::AnalogColumns::empty(g.count);
                 for span in &spans {
-                    let mut part = columns::AnalogColumns::empty(g.count);
+                    // The columns the span reaches: its trace joins nothing outside them.
+                    let ks = columns_over(g, span.start, span.end);
+                    part.min[ks.clone()].fill(f64::INFINITY);
+                    part.max[ks.clone()].fill(f64::NEG_INFINITY);
                     self.analog_span(c, g, span.clone(), level, &mut part, cancel)?;
-                    columns::connect(&mut part);
+                    columns::connect_over(&mut part, ks.clone());
                     let full = |k: usize| part.min[k] <= part.max[k];
-                    for k in 0..g.count {
+                    for k in ks.clone() {
                         if full(k) {
                             cols.min[k] = cols.min[k].min(part.min[k]);
                             cols.max[k] = cols.max[k].max(part.max[k]);
-                            if k > 0 && full(k - 1) {
+                            if k > ks.start && full(k - 1) {
                                 cols.joined[k] = true;
                             }
                         }
                     }
                 }
-                let lost: Vec<Range<i64>> = lost_spans(&runs)
+                let lost: Vec<Range<i64>> = lost_spans_in(&runs, range.clone())
                     .into_iter()
-                    .filter(|l| l.to > l.from && l.from < range.end && l.to > range.start)
+                    .filter(|l| l.to > l.from)
                     .map(|l| l.from..l.to)
                     .collect();
                 for l in &lost {
@@ -384,7 +388,12 @@ impl Recording {
     }
 
     /// Sets digital channel `c`'s columns over [from, to), as `analog_span` does: each piece's
-    /// columns combined with what the pieces before it left.
+    /// columns combined with what the pieces before it left. `piece` is room for one piece's
+    /// columns, as wide as `cols`.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a recording's span, its grid and two buffers"
+    )]
     fn digital_span(
         &self,
         c: usize,
@@ -392,12 +401,14 @@ impl Recording {
         span: Range<i64>,
         level: Option<usize>,
         cols: &mut DigitalColumns,
+        piece: &mut DigitalColumns,
         cancel: &AtomicBool,
     ) -> Result<(), Error> {
         let mut at = span.start;
         let mut level = level;
-        let put = |piece: DigitalColumns, cols: &mut DigitalColumns| {
-            for k in 0..g.count {
+        // Only the columns the piece reaches: the others hold another piece's, or nothing.
+        let put = |reached: Range<usize>, piece: &DigitalColumns, cols: &mut DigitalColumns| {
+            for k in reached {
                 let (s, a) = merge((cols.state[k], cols.at[k]), (piece.state[k], piece.at[k]));
                 cols.state[k] = s;
                 cols.at[k] = a;
@@ -419,10 +430,10 @@ impl Recording {
                             level: &levels,
                             changes: &changes,
                         };
-                        put(
-                            columns::digital_from_overview(g, &ov, at as f64, to as f64),
-                            cols,
+                        let reached = columns::digital_from_overview_into(
+                            g, &ov, at as f64, to as f64, piece,
                         );
+                        put(reached, piece, cols);
                         at = to;
                     }
                     level = l.checked_sub(1);
@@ -433,10 +444,14 @@ impl Recording {
                         level: initial,
                         ticks: &ticks,
                     };
-                    put(
-                        columns::digital_from_edges(g, &edges, at as f64, span.end as f64),
-                        cols,
+                    let reached = columns::digital_from_edges_into(
+                        g,
+                        &edges,
+                        at as f64,
+                        span.end as f64,
+                        piece,
                     );
+                    put(reached, piece, cols);
                     at = span.end;
                 }
             }
@@ -487,7 +502,7 @@ impl Recording {
                     .end,
                     value: values[k],
                     flagged: flagged[k],
-                    joined: i > lo && !runs.breaks.iter().any(|b| b.index == i),
+                    joined: i > lo && runs.breaks.binary_search_by_key(&i, |b| b.index).is_err(),
                 })
                 .collect(),
         ))
@@ -534,7 +549,13 @@ impl Recording {
                     (None, None) => break,
                 }
             }
-            let known = t >= *start && t < *end && !gaps.iter().any(|x| x.from <= t && t < x.to);
+            // Gaps lie in order and apart: the one that could hold `t` is the last starting at
+            // or before it.
+            let holding = gaps
+                .partition_point(|x| x.from <= t)
+                .checked_sub(1)
+                .is_some_and(|i| t < gaps[i].to);
+            let known = t >= *start && t < *end && !holding;
             out.push(known && l);
         }
         Ok(out)

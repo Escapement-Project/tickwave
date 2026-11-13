@@ -48,11 +48,13 @@ pub fn sample_index_at_or_after(first: i64, period: Ratio, count: u64, tick: f64
 pub fn index_at_or_after(runs: &Runs, tick: f64) -> u64 {
     let b = runs.breaks;
     // The run whose start is the last at or before `tick`; its samples end where the next run's
-    // start.
-    let mut k = b.len();
-    while k > 0 && b[k - 1].tick as f64 > tick {
-        k -= 1;
-    }
+    // start. Break ticks never fall, so those at or before `tick` come first. A NaN tick is past
+    // every break, as the web's walk back from the last leaves it.
+    let k = if tick.is_nan() {
+        b.len()
+    } else {
+        b.partition_point(|x| x.tick as f64 <= tick)
+    };
     let from = if k == 0 { 0 } else { b[k - 1].index };
     let to = if k < b.len() { b[k].index } else { runs.count };
     let start = if k == 0 { runs.first } else { b[k - 1].tick };
@@ -106,14 +108,30 @@ pub struct LostSpan {
 /// `index + lost` on the grid of the run before the break, ending at the break's tick if that
 /// comes sooner. A pause has none.
 pub fn lost_spans(runs: &Runs) -> Vec<LostSpan> {
-    (0..runs.breaks.len())
-        .filter_map(|k| {
-            let span = lost_span(runs.first, runs.period, runs.breaks, k)?;
-            Some(LostSpan {
+    lost_spans_in(runs, i64::MIN..i64::MAX)
+}
+
+/// `lost_spans` that reach into `range`. A break's lost samples end by its tick and start after
+/// the run before it starts, so only the breaks from the first past `range.start` to the first
+/// whose run starts at `range.end` are read.
+pub fn lost_spans_in(runs: &Runs, range: std::ops::Range<i64>) -> Vec<LostSpan> {
+    let first = runs.breaks.partition_point(|b| b.tick <= range.start);
+    let mut out = Vec::new();
+    for k in first..runs.breaks.len() {
+        let run_start = k.checked_sub(1).map_or(runs.first, |p| runs.breaks[p].tick);
+        if run_start >= range.end {
+            break;
+        }
+        let Some(span) = lost_span(runs.first, runs.period, runs.breaks, k) else {
+            continue;
+        };
+        if span.end > range.start && span.start < range.end {
+            out.push(LostSpan {
                 from: span.start,
                 to: span.end,
                 lost: runs.breaks[k].lost,
-            })
-        })
-        .collect()
+            });
+        }
+    }
+    out
 }

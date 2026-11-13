@@ -2,6 +2,8 @@
 //! A port of web/src/render/columns.ts: the same f64 arithmetic, so a column takes the same
 //! samples and edges as the web's does.
 
+use std::ops::Range;
+
 use crate::js;
 use crate::runs::{Runs, index_at_or_after};
 
@@ -25,6 +27,15 @@ pub struct DigitalColumns {
     pub state: Vec<State>,
     /// For `Rise` and `Fall`, where in the column the edge sits, from 0 to 1.
     pub at: Vec<f64>,
+}
+
+impl DigitalColumns {
+    pub(crate) fn empty(count: usize) -> Self {
+        Self {
+            state: vec![State::None; count],
+            at: vec![0.0; count],
+        }
+    }
 }
 
 /// The ticks a column grid covers; columns outside what is drawn get `State::None`.
@@ -125,8 +136,21 @@ fn lower_bound(a: &[i64], x: f64, lo: usize) -> usize {
 /// Columns from exact edges fetched over [from, to). A column with no edge is flat, one with one
 /// edge rises or falls where the edge is, one with more is busy.
 pub fn digital_from_edges(g: &Grid, edges: &Edges, from: f64, to: f64) -> DigitalColumns {
-    let mut state = vec![State::None; g.count];
-    let mut at = vec![0.0; g.count];
+    let mut cols = DigitalColumns::empty(g.count);
+    digital_from_edges_into(g, edges, from, to, &mut cols);
+    cols
+}
+
+/// `digital_from_edges` into `cols`, sized to `g`: it sets the columns [from, to) reaches, and
+/// returns them, leaving the rest as they were.
+pub(crate) fn digital_from_edges_into(
+    g: &Grid,
+    edges: &Edges,
+    from: f64,
+    to: f64,
+    cols: &mut DigitalColumns,
+) -> Range<usize> {
+    let DigitalColumns { state, at } = cols;
     let t = edges.ticks;
     let (c0, c1) = column_range(g, from, to);
     let col_start = |c: usize| js::max(from, g.x0 + c as f64 * g.per);
@@ -136,6 +160,7 @@ pub fn digital_from_edges(g: &Grid, edges: &Edges, from: f64, to: f64) -> Digita
         let end = js::min(to, g.x0 + (c + 1) as f64 * g.per);
         let j = lower_bound(t, end, i);
         let n = j - i;
+        at[c] = 0.0;
         state[c] = match n {
             0 if level => State::High,
             0 => State::Low,
@@ -148,21 +173,33 @@ pub fn digital_from_edges(g: &Grid, edges: &Edges, from: f64, to: f64) -> Digita
         level ^= n % 2 == 1;
         i = j;
     }
-    DigitalColumns { state, at }
+    c0..c1
 }
 
 /// Columns from an overview's buckets, whatever their width against a column's. A column any
 /// changing bucket overlaps is busy: the overview cannot say where in the bucket the change was,
 /// or how many.
 pub fn digital_from_overview(g: &Grid, ov: &DigitalOverview, from: f64, to: f64) -> DigitalColumns {
-    let mut state = vec![State::None; g.count];
-    let at = vec![0.0; g.count];
+    let mut cols = DigitalColumns::empty(g.count);
+    digital_from_overview_into(g, ov, from, to, &mut cols);
+    cols
+}
+
+/// `digital_from_overview` into `cols`, as `digital_from_edges_into`.
+pub(crate) fn digital_from_overview_into(
+    g: &Grid,
+    ov: &DigitalOverview,
+    from: f64,
+    to: f64,
+    cols: &mut DigitalColumns,
+) -> Range<usize> {
     let n = ov.level.len();
     let (start, bucket) = (ov.start as f64, ov.bucket as f64);
     let lo = js::max(from, start);
     let hi = js::min(to, start + n as f64 * bucket);
     let (c0, c1) = column_range(g, lo, hi);
-    for (c, state) in state.iter_mut().enumerate().take(c1).skip(c0) {
+    cols.at[c0..c1].fill(0.0);
+    for (c, state) in cols.state.iter_mut().enumerate().take(c1).skip(c0) {
         let s = js::max(lo, g.x0 + c as f64 * g.per);
         let e = js::min(hi, g.x0 + (c + 1) as f64 * g.per);
         let k0 = js::max(0.0, ((s - start) / bucket).floor()) as usize;
@@ -177,7 +214,7 @@ pub fn digital_from_overview(g: &Grid, ov: &DigitalOverview, from: f64, to: f64)
             State::Low
         };
     }
-    DigitalColumns { state, at }
+    c0..c1
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -199,8 +236,14 @@ impl AnalogColumns {
 
 /// Joins neighbouring columns: the trace passes through the gap between their ranges.
 pub fn connect(cols: &mut AnalogColumns) {
+    let n = cols.min.len();
+    connect_over(cols, 0..n);
+}
+
+/// `connect` over the columns `range` alone.
+pub(crate) fn connect_over(cols: &mut AnalogColumns, range: Range<usize>) {
     let AnalogColumns { min, max } = cols;
-    for c in 1..min.len() {
+    for c in range.start + 1..range.end {
         if min[c] > max[c] || min[c - 1] > max[c - 1] {
             continue;
         }

@@ -10,8 +10,17 @@ scale, time axis and point probes.
 
 `Recording::open` reads a finished file through its footer, from any `Bytes`: a file, or bytes in
 memory. `Recording::live` reads a file a writer in the same process is still writing, through the
-writer's `Snapshot`. A file cut off by a crash is `Error::Unfinished`; the format crate's Recutter
+writer's `Snapshot`, and `Recording::update` takes each newer snapshot, reading only what the
+writer added since. A file cut off by a crash is `Error::Unfinished`; the format crate's Recutter
 repairs it. Decoded blocks and overview blocks go in a `Cache`, which a recording's snapshots share.
+
+A query's work follows what its window holds, not how long the recording is: a channel's runs,
+gaps and lost spans are found by binary search, and each run's columns are worked out over the
+columns it reaches.
+
+For a reader that wants the samples themselves, as an export does, `Recording::each_sample` gives
+each sample's value and its integer code over a range of indices, `index_at` the index at a tick,
+`edges` a digital channel's edges, and `runs` and `known` where a channel's data lies.
 
 `Recording::query` answers a `Query`: a window in ticks, its columns, the channels drawn, the
 statistics and the markers. The columns cover the window and one width either side, so a pan has

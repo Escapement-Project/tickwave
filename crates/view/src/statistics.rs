@@ -110,14 +110,20 @@ fn ratio(n: &BigInt, d: &BigInt) -> f64 {
     n.to_f64().unwrap_or(f64::NAN) / d.to_f64().unwrap_or(f64::NAN)
 }
 
+/// Σ value × ticks so far: of the codes, exactly, for an `int` channel or an integer product, or
+/// of the values in f64.
+enum Weighted {
+    Codes(i128),
+    Float(f64),
+}
+
 /// What an interval's samples add up to so far.
 struct Tally {
     samples: u64,
     measured: i64,
     min: f64,
     max: f64,
-    codes: Option<i128>,
-    float: f64,
+    sum: Weighted,
 }
 
 impl Tally {
@@ -126,24 +132,50 @@ impl Tally {
         self.max = self.max.max(v);
     }
 
-    /// One sample over `ticks` of the interval.
+    fn measure(&mut self, samples: u64, ticks: i64) -> Result<(), Error> {
+        self.samples += samples;
+        self.measured = self.measured.checked_add(ticks).ok_or(Error::Overflow)?;
+        Ok(())
+    }
+
+    fn add_codes(&mut self, codes: i128, ticks: i64) -> Result<(), Error> {
+        let Weighted::Codes(sum) = &mut self.sum else {
+            unreachable!("only an exact channel's codes are summed");
+        };
+        *sum = codes
+            .checked_mul(i128::from(ticks))
+            .and_then(|x| sum.checked_add(x))
+            .ok_or(Error::Overflow)?;
+        Ok(())
+    }
+
+    /// One sample over `ticks` of the interval; its code where the channel is exact.
     fn sample(&mut self, v: f64, code: Option<i128>, ticks: i64) -> Result<(), Error> {
         if ticks <= 0 || v.is_nan() {
             return Ok(());
         }
-        self.samples += 1;
-        self.measured = self.measured.checked_add(ticks).ok_or(Error::Overflow)?;
+        self.measure(1, ticks)?;
         self.value(v);
-        match (&mut self.codes, code) {
-            (Some(sum), Some(code)) => {
-                *sum = code
-                    .checked_mul(i128::from(ticks))
-                    .and_then(|x| sum.checked_add(x))
-                    .ok_or(Error::Overflow)?;
+        match (&mut self.sum, code) {
+            (Weighted::Codes(_), Some(code)) => self.add_codes(code, ticks),
+            (Weighted::Codes(_), None) => unreachable!("an exact channel's samples have codes"),
+            (Weighted::Float(sum), _) => {
+                *sum += v * ticks as f64;
+                Ok(())
             }
-            _ => self.float += v * ticks as f64,
         }
-        Ok(())
+    }
+
+    /// `n` samples a bucket holds, a full period `p` each, with its extremes and its codes' sum.
+    fn bucket(&mut self, n: u64, p: i64, min: f64, max: f64, codes: i128) -> Result<(), Error> {
+        let ticks = i64::try_from(n)
+            .ok()
+            .and_then(|n| n.checked_mul(p))
+            .ok_or(Error::Overflow)?;
+        self.measure(n, ticks)?;
+        self.value(min);
+        self.value(max);
+        self.add_codes(codes, p)
     }
 }
 
@@ -188,8 +220,10 @@ impl Recording {
             measured: 0,
             min: f64::INFINITY,
             max: f64::NEG_INFINITY,
-            codes: exact.map(|_| 0),
-            float: 0.0,
+            sum: match exact {
+                Some(_) => Weighted::Codes(0),
+                None => Weighted::Float(0.0),
+            },
         };
         let (a, b) = (interval.start.max(0), interval.end.min(self.length));
         if b > a && *count > 0 {
@@ -210,32 +244,20 @@ impl Recording {
             } else {
                 Vec::new()
             };
-            // Every sample outside the buckets taken, one by one.
+            // Every sample outside the buckets taken, one by one: before the first, between
+            // each two, and after the last.
+            let one_by_one = |from: u64, to: u64, t: &mut Tally| {
+                self.each_sample(c, from, to, cancel, |i, v, code| {
+                    let s = support(i);
+                    t.sample(v, code, s.end.min(b) - s.start.max(a))
+                })
+            };
             let mut from = lo;
-            for r in whole.iter().chain(std::iter::once(&(i64::MAX..i64::MAX))) {
-                let to = if r.start == i64::MAX {
-                    hi
-                } else {
-                    self.index_at(c, r.start)?.min(hi)
-                };
-                if to > from {
-                    let mut failed = None;
-                    self.each_sample(c, from, to, cancel, |i, v, code| {
-                        let s = support(i);
-                        if failed.is_none()
-                            && let Err(e) = t.sample(v, code, s.end.min(b) - s.start.max(a))
-                        {
-                            failed = Some(e);
-                        }
-                    })?;
-                    if let Some(e) = failed {
-                        return Err(e);
-                    }
-                }
-                if r.start != i64::MAX {
-                    from = self.index_at(c, r.end)?.max(from);
-                }
+            for r in &whole {
+                one_by_one(from, self.index_at(c, r.start)?.min(hi), &mut t)?;
+                from = self.index_at(c, r.end)?.max(from);
             }
+            one_by_one(from, hi, &mut t)?;
         }
         let some = |x: f64| (t.samples > 0).then_some(x);
         Ok(ChannelStatistics {
@@ -243,13 +265,14 @@ impl Recording {
             measured: t.measured,
             min: some(t.min),
             max: some(t.max),
-            sum: match exact {
-                Some((scale, offset)) => Sum::Exact {
-                    codes_ticks: t.codes.expect("exact"),
+            sum: match (t.sum, exact) {
+                (Weighted::Codes(codes_ticks), Some((scale, offset))) => Sum::Exact {
+                    codes_ticks,
                     scale,
                     offset,
                 },
-                None => Sum::Float(t.float),
+                (Weighted::Float(s), _) => Sum::Float(s),
+                (Weighted::Codes(_), None) => unreachable!("codes are summed for an exact channel"),
             },
         })
     }
@@ -277,23 +300,35 @@ impl Recording {
         if self.levels.is_empty() || region_end <= a {
             return Ok(Vec::new());
         }
-        let mut short: Vec<i64> = runs
-            .breaks
+        // Each run's last sample whose time the next run or the length cuts short of a full
+        // period, from the run holding `a` on. They come in order of their ticks.
+        let from = runs.breaks.partition_point(|x| x.tick <= a);
+        let mut short = Vec::new();
+        for i in runs.breaks[from..]
             .iter()
             .map(|x| x.index - 1)
-            .chain(std::iter::once(count - 1))
-            .filter_map(|i| {
-                let s =
-                    sample_support(runs.first, runs.period, runs.breaks, *count, self.length, i)?;
-                (s.end - s.start != p).then_some(s.start)
-            })
-            .collect();
-        short.sort_unstable();
+            .chain([count - 1])
+        {
+            let s = sample_support(runs.first, runs.period, runs.breaks, *count, self.length, i)
+                .expect("a run's last sample");
+            if s.start >= region_end {
+                break;
+            }
+            if s.end - s.start != p {
+                short.push(s.start);
+            }
+        }
         let clean = |r: &Range<i64>| {
             let k = short.partition_point(|&x| x < r.start);
             short.get(k).is_none_or(|&x| x >= r.end)
         };
-        let mut left: Vec<Range<i64>> = std::iter::once(a..region_end).collect();
+        // The tick ranges still to cover, coarsest level first: the region, then what each level
+        // leaves of it.
+        #[expect(
+            clippy::single_range_in_vec_init,
+            reason = "a list of ranges that starts as one, not the range's ticks"
+        )]
+        let mut left = vec![a..region_end];
         let mut taken = Vec::new();
         for l in (0..self.levels.len()).rev() {
             let shift = self.levels[l].shift;
@@ -322,21 +357,9 @@ impl Recording {
                     for (o, kk) in (k..end).enumerate() {
                         let (s, e) = (kk * size, (kk + 1) * size);
                         let n = self.index_at(c, e)? - self.index_at(c, s)?;
-                        if n == 0 {
-                            continue;
+                        if n > 0 {
+                            t.bucket(n, p, buckets.min[o], buckets.max[o], sums[o])?;
                         }
-                        t.samples += n;
-                        t.measured = (n as i64)
-                            .checked_mul(p)
-                            .and_then(|x| t.measured.checked_add(x))
-                            .ok_or(Error::Overflow)?;
-                        t.value(buckets.min[o]);
-                        t.value(buckets.max[o]);
-                        let codes = t.codes.as_mut().expect("exact");
-                        *codes = sums[o]
-                            .checked_mul(i128::from(p))
-                            .and_then(|x| codes.checked_add(x))
-                            .ok_or(Error::Overflow)?;
                     }
                     if k * size > at {
                         next.push(at..k * size);

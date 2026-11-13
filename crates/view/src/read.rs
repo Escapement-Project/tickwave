@@ -108,7 +108,7 @@ impl Recording {
 
     /// Digital channel `channel`'s level at `from` and its edges in [from, to), within the
     /// recording. Past a gap's end the level is the gap's.
-    pub(crate) fn edges(
+    pub fn edges(
         &self,
         channel: usize,
         from: i64,
@@ -135,7 +135,12 @@ impl Recording {
                 // sets it: the last gap ending in the block, at or before `from`. A gap ending at
                 // the block's start is in the block.
                 let start = block.block.start;
-                if let Some(g) = gaps.iter().rev().find(|g| start <= g.to && g.to <= from) {
+                let ended = gaps.partition_point(|g| g.to <= from);
+                if let Some(g) = ended
+                    .checked_sub(1)
+                    .map(|i| &gaps[i])
+                    .filter(|g| start <= g.to)
+                {
                     let after = edges.partition_point(|&t| t < g.to);
                     level = g.level ^ ((lo - after) % 2 == 1);
                 }
@@ -157,19 +162,21 @@ impl Recording {
         let mut out = vec![f64::NAN; i1.saturating_sub(i0) as usize];
         self.each_sample(channel, i0, i1, cancel, |i, value, _| {
             out[(i - i0) as usize] = value;
+            Ok(())
         })?;
         Ok(out)
     }
 
     /// Calls `f` with each of samples `i0..i1` of analog or derived channel `channel`: its index,
-    /// its value, and its code where the channel stores integer codes.
-    pub(crate) fn each_sample(
+    /// its value, and its code where the channel stores integer codes. Stops at `f`'s first
+    /// error. Blocks come through the cache, and cancel is checked between them.
+    pub fn each_sample(
         &self,
         channel: usize,
         i0: u64,
         i1: u64,
         cancel: &AtomicBool,
-        mut f: impl FnMut(u64, f64, Option<i128>),
+        mut f: impl FnMut(u64, f64, Option<i128>) -> Result<(), Error>,
     ) -> Result<(), Error> {
         let place = self.place(channel)?;
         let (Some(runs), Place::Analog { rule, count, .. }) = (place.runs(), place) else {
@@ -206,16 +213,16 @@ impl Recording {
             match values {
                 Values::F32(v) => (lo..)
                     .zip(&v[a..z])
-                    .for_each(|(i, &x)| f(i, rule.value(Sample::F32(x)), None)),
+                    .try_for_each(|(i, &x)| f(i, rule.value(Sample::F32(x)), None))?,
                 Values::F64(v) => (lo..)
                     .zip(&v[a..z])
-                    .for_each(|(i, &x)| f(i, rule.value(Sample::F64(x)), None)),
-                Values::U64(v) => (lo..).zip(&v[a..z]).for_each(|(i, &x)| {
-                    f(i, rule.value(Sample::U64(x)), Some(i128::from(x)));
-                }),
-                Values::I64(v) => (lo..).zip(&v[a..z]).for_each(|(i, &x)| {
-                    f(i, rule.value(Sample::I64(x)), Some(i128::from(x)));
-                }),
+                    .try_for_each(|(i, &x)| f(i, rule.value(Sample::F64(x)), None))?,
+                Values::U64(v) => (lo..).zip(&v[a..z]).try_for_each(|(i, &x)| {
+                    f(i, rule.value(Sample::U64(x)), Some(i128::from(x)))
+                })?,
+                Values::I64(v) => (lo..).zip(&v[a..z]).try_for_each(|(i, &x)| {
+                    f(i, rule.value(Sample::I64(x)), Some(i128::from(x)))
+                })?,
             }
         }
         Ok(())
@@ -388,7 +395,7 @@ impl Recording {
     }
 
     /// The index of the first sample at or after `tick` of analog or derived channel `channel`.
-    pub(crate) fn index_at(&self, channel: usize, tick: i64) -> Result<u64, Error> {
+    pub fn index_at(&self, channel: usize, tick: i64) -> Result<u64, Error> {
         let runs = self
             .place(channel)?
             .runs()

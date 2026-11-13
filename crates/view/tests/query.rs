@@ -798,3 +798,39 @@ fn a_loss_with_no_time_left_before_its_run_shades_nothing() {
     // These two and the fourth run's 50.
     assert_eq!(rec.lost(0), 52);
 }
+
+#[test]
+fn columns_hold_what_the_rule_gives_at_every_zoom_across_runs() {
+    let file = fixture("energy.tickwave");
+    let rec = open(&file);
+    let cancel = AtomicBool::new(false);
+    let length = 2_880_000;
+    // Wide columns hold the loss and the pause inside one, with a run on either side; narrow
+    // ones put a run's edge on or between columns.
+    for width in [length, length / 3, 400_000, 120_000] {
+        for start in (-width..length).step_by((width / 5).max(1) as usize) {
+            for cols in [3, 7, 40] {
+                let a = rec
+                    .query(&query(start..start + width, cols, vec![1]), &cancel)
+                    .unwrap();
+                let Drawn::Analog { columns, .. } = &a.channels[0] else {
+                    panic!()
+                };
+                // The view's level: the footer's only one, 2^12 ticks, once a column is as wide.
+                let level = (a.grid.per >= 4096.0).then_some(0);
+                let (min, max) = oracle_columns(&file, 1, &a.grid, a.around.clone(), level);
+                for k in 0..a.grid.count {
+                    let near = |x: f64, y: f64| x == y || ((x - y) / y).abs() < 1e-15;
+                    assert!(
+                        near(columns.min[k], min[k]) && near(columns.max[k], max[k]),
+                        "{start}+{width} at {cols} columns, column {k}: {} {} against {} {}",
+                        columns.min[k],
+                        columns.max[k],
+                        min[k],
+                        max[k]
+                    );
+                }
+            }
+        }
+    }
+}

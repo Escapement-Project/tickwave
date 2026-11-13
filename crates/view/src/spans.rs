@@ -55,8 +55,13 @@ pub fn known_spans(c: &ChannelPlace, start: i64, end: i64) -> Vec<Range<i64>> {
                 return spans;
             }
             let b = runs.breaks;
-            for k in 0..=b.len() {
+            // Run k starts at break k − 1's tick: the runs before the one holding `start` end
+            // before it, and those from `stop` on start after the window.
+            for k in b.partition_point(|x| x.tick <= start)..=b.len() {
                 let from = if k == 0 { runs.first } else { b[k - 1].tick };
+                if from >= stop {
+                    break;
+                }
                 let to = match b.get(k) {
                     Some(next) => next.tick.min(place_after(runs, next.index - 1)),
                     None => *end,
@@ -65,8 +70,13 @@ pub fn known_spans(c: &ChannelPlace, start: i64, end: i64) -> Vec<Range<i64>> {
             }
         }
         ChannelPlace::Digital { gaps, .. } => {
-            let mut at = i64::MIN;
-            for g in *gaps {
+            // The gaps that end before `start` bound no span that reaches it.
+            let k = gaps.partition_point(|g| g.to < start);
+            let mut at = k.checked_sub(1).map_or(i64::MIN, |p| gaps[p].to);
+            for g in &gaps[k..] {
+                if at >= stop {
+                    break;
+                }
                 keep(at, g.from);
                 at = g.to;
             }

@@ -381,3 +381,108 @@ fn a_long_live_recording_reads_the_levels_the_file_finished_there_keeps() {
     );
     same_columns(&x.channels[1], &y.channels[1], &x.grid, Some(settled), "I");
 }
+
+/// A file a writer still appends to, as a recorder's is on disk: reads see what it holds now.
+struct Growing(std::sync::Mutex<Vec<u8>>);
+
+impl escapement_tickwave_view::Bytes for Growing {
+    fn size(&self) -> std::io::Result<u64> {
+        Ok(self.0.lock().unwrap().len() as u64)
+    }
+
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        let file = self.0.lock().unwrap();
+        let at = offset as usize;
+        buf.copy_from_slice(&file[at..at + buf.len()]);
+        Ok(())
+    }
+}
+
+#[test]
+fn one_recording_updated_with_each_snapshot_reads_as_one_made_from_it() {
+    let (d, mut ops) = session();
+    // A mark that comes after a later one, and one past the data, which widens the extent.
+    ops.extend([Op::Mark(30), Op::Mark(5_000)]);
+    let cancel = AtomicBool::new(false);
+    for (block_bytes, batch) in [(64, 1), (64, 3), (1 << 20, 1)] {
+        let options = WriteOptions {
+            level: 3,
+            block_bytes,
+            batch,
+        };
+        let mut w = Writer::new(d.clone(), options).unwrap();
+        let file = Arc::new(Growing(std::sync::Mutex::new(w.take_output())));
+        let mut updated: Option<Recording> = None;
+        for (n, op) in ops.iter().enumerate() {
+            let at = format!("{block_bytes} {batch}, after op {n} ({op:?})");
+            apply(&mut w, op);
+            let snapshot = w.snapshot();
+            file.0.lock().unwrap().extend(w.take_output());
+            let fresh =
+                Recording::live(snapshot.clone(), file.clone(), Cache::new(1 << 20)).unwrap();
+            match &mut updated {
+                None => {
+                    updated =
+                        Some(Recording::live(snapshot, file.clone(), Cache::new(1 << 20)).unwrap())
+                }
+                Some(u) => u.update(snapshot).unwrap(),
+            }
+            let u = updated.as_ref().unwrap();
+            assert_eq!(
+                (u.length(), u.extent(), u.channels()),
+                (fresh.length(), fresh.extent(), fresh.channels()),
+                "{at}"
+            );
+            for c in 0..u.channels().len() {
+                assert_eq!(
+                    (u.lost(c), u.gaps(c)),
+                    (fresh.lost(c), fresh.gaps(c)),
+                    "{at}"
+                );
+            }
+            assert_eq!(
+                u.markers(i64::MIN..i64::MAX, None, usize::MAX),
+                fresh.markers(i64::MIN..i64::MAX, None, usize::MAX),
+                "{at}"
+            );
+            // Both go through one update, so the marks also against the ops: in order of their
+            // ticks, then of their arrival, and inside the extent.
+            let mut marks: Vec<(i64, usize)> = ops[..=n]
+                .iter()
+                .filter_map(|op| match op {
+                    Op::Mark(t) => Some(*t),
+                    _ => None,
+                })
+                .enumerate()
+                .map(|(arrival, t)| (t, arrival))
+                .collect();
+            marks.sort_unstable();
+            let got: Vec<(i64, usize)> = u
+                .markers(i64::MIN..i64::MAX, None, usize::MAX)
+                .entries
+                .iter()
+                .map(|m| (m.cursor.tick, m.cursor.arrival))
+                .collect();
+            assert_eq!(got, marks, "{at}");
+            if let (Some(extent), Some(&(last, _))) = (u.extent(), marks.iter().max()) {
+                assert!(
+                    extent.end > last && extent.start <= marks[0].0,
+                    "{at}: {extent:?}"
+                );
+            }
+            let length = u.length();
+            if length == 0 {
+                continue;
+            }
+            for window in [0..length, length / 3..length, -5..length + 5] {
+                let mut q = query(window.clone(), 16);
+                q.statistics = vec![window.clone()];
+                assert_eq!(
+                    u.query(&q, &cancel).unwrap(),
+                    fresh.query(&q, &cancel).unwrap(),
+                    "{at}, {window:?}"
+                );
+            }
+        }
+    }
+}

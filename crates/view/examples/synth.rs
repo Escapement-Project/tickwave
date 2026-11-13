@@ -14,6 +14,11 @@
 //! With `--live-calls N`, in the last second, before its flush, it times `Writer::snapshot` and
 //! `Recording::live` over the file written so far, N times each: the open block then holds that
 //! second's pairs.
+//!
+//! With `--follow`, it keeps one live recording of the file, as a viewer does, and after every
+//! second's flush times `Writer::snapshot` and `Recording::update` with it. It reports both over
+//! the first and the last tenth of the seconds: an update that reads only what came since costs
+//! the same at either end.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -50,6 +55,9 @@ struct Args {
     /// Time `Writer::snapshot` and `Recording::live` this many times at the end.
     #[arg(long)]
     live_calls: Option<usize>,
+    /// Keep a live recording updated after every second's flush, and time each update.
+    #[arg(long)]
+    follow: bool,
 }
 
 /// The digital channels' edges in second `s`, in order: (tick, channel).
@@ -204,6 +212,8 @@ fn main() {
     )
     .unwrap();
     let mut file = File::create(&args.out).unwrap();
+    let mut followed: Option<Recording> = None;
+    let mut follows: Vec<(Duration, Duration)> = Vec::new();
     file.write_all(&w.take_output()).unwrap();
     w.run(0, 0, 0).unwrap();
     w.run(1, 0, 0).unwrap();
@@ -258,7 +268,43 @@ fn main() {
         }
         w.flush(((s + 1) * CLOCK_HZ) as i64).unwrap();
         file.write_all(&w.take_output()).unwrap();
+        if args.follow {
+            file.flush().unwrap();
+            let t = Instant::now();
+            let snapshot = w.snapshot();
+            let took = t.elapsed();
+            let t = Instant::now();
+            match &mut followed {
+                None => {
+                    let bytes: Arc<dyn escapement_tickwave_view::Bytes> =
+                        Arc::new(File::open(&args.out).unwrap());
+                    followed =
+                        Some(Recording::live(snapshot, bytes, Cache::new(256 << 20)).unwrap());
+                }
+                Some(rec) => rec.update(snapshot).unwrap(),
+            }
+            follows.push((took, t.elapsed()));
+        }
         span.pb_inc(1);
+    }
+    if args.follow {
+        let tenth = (follows.len() / 10).max(1);
+        for (when, part) in [
+            ("first tenth", &follows[..tenth]),
+            ("last tenth", &follows[follows.len() - tenth..]),
+        ] {
+            let (sm, sp) = spread(part.iter().map(|t| t.0).collect());
+            let (um, up) = spread(part.iter().map(|t| t.1).collect());
+            info!(
+                when,
+                seconds = part.len(),
+                snapshot_median_us = sm,
+                snapshot_p95_us = sp,
+                update_median_us = um,
+                update_p95_us = up,
+                "following the recording, a snapshot and an update after each second's flush"
+            );
+        }
     }
     drop(entered);
     let length = (args.seconds * CLOCK_HZ) as i64;

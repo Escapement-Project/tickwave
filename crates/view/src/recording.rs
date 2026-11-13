@@ -23,6 +23,14 @@ use crate::runs::{Runs, place_after};
 use crate::spans::ChannelPlace;
 #[cfg(feature = "live")]
 use escapement_tickwave_format::decode::OverviewBlock;
+#[cfg(feature = "live")]
+use escapement_tickwave_format::decode::{Block, BlockChannel};
+#[cfg(feature = "live")]
+use escapement_tickwave_format::header::DeclaredKind;
+#[cfg(feature = "live")]
+use escapement_tickwave_format::model::run_sample_tick;
+#[cfg(feature = "live")]
+use escapement_tickwave_format::snapshot::Snapshot;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -42,6 +50,9 @@ pub enum Error {
     NoChannel(usize),
     #[error("the annotations: {0}")]
     Annotations(String),
+    /// `update` on a finished recording, which takes no snapshot.
+    #[error("the recording is finished: it takes no snapshot")]
+    NotLive,
 }
 
 /// What a channel holds.
@@ -123,6 +134,8 @@ pub(crate) enum Place {
         period: Ratio,
         count: u64,
         breaks: Vec<Break>,
+        /// The samples the breaks say were lost, summed.
+        lost: u64,
         /// Where the last sample's time ends, or `first` with none.
         end: i64,
         rule: Rule,
@@ -228,11 +241,22 @@ pub(crate) enum Store {
 
 #[cfg(feature = "live")]
 pub(crate) struct Live {
-    pub snapshot: escapement_tickwave_format::snapshot::Snapshot,
+    pub snapshot: Snapshot,
     /// The queued blocks, then the open one.
     pub unwritten: Vec<Arc<Decoded>>,
     /// Each block level's queued overview blocks.
     pub queued_overview: Vec<Vec<Arc<OverviewBlock>>>,
+    seen: Seen,
+}
+
+/// How much of the writer's append-only lists the tables hold: the written blocks, and each
+/// channel's gaps or runs, and the annotation records.
+#[cfg(feature = "live")]
+struct Seen {
+    rows: usize,
+    gaps: Vec<usize>,
+    runs: Vec<usize>,
+    annotations: usize,
 }
 
 /// A recording a view reads.
@@ -249,6 +273,8 @@ pub struct Recording {
     /// Finest first.
     pub(crate) levels: Vec<LevelAt>,
     pub(crate) markers: Vec<Marker>,
+    /// From the first marker's start to the latest any reaches: what markers add to the extent.
+    marker_span: Option<Range<i64>>,
     pub(crate) sources: Vec<SourceHeader>,
     pub(crate) products: Vec<(usize, usize, Product)>,
     extent: Option<Range<i64>>,
@@ -313,11 +339,13 @@ fn analog_place(
         0 => first,
         n => length.min(place_after(&runs, n - 1)),
     };
+    let lost = breaks.iter().map(|b| b.lost).sum();
     Place::Analog {
         first,
         period,
         count,
         breaks,
+        lost,
         end,
         rule,
     }
@@ -335,6 +363,7 @@ fn add_derived(
             period,
             count,
             breaks,
+            lost,
             end,
             ..
         } = &built.places[a]
@@ -346,6 +375,7 @@ fn add_derived(
             period: *period,
             count: *count,
             breaks: breaks.clone(),
+            lost: *lost,
             end: *end,
             rule: Rule::Product(product),
         });
@@ -411,6 +441,28 @@ fn header_channels(h: &Header, products: &[(usize, usize, Product)]) -> Built {
     }
     add_derived(&mut built, &h.derived, products);
     built
+}
+
+/// The ticks `a` marks: its span, or one tick for a point.
+fn marked(a: &Annotation) -> Range<i64> {
+    a.start..a.end.unwrap_or(a.start).max(a.start + 1)
+}
+
+fn widen(extent: &mut Option<Range<i64>>, r: Range<i64>) {
+    if r.end > r.start {
+        *extent = Some(match extent.take() {
+            None => r,
+            Some(e) => e.start.min(r.start)..e.end.max(r.end),
+        });
+    }
+}
+
+fn span_of(markers: &[Marker]) -> Option<Range<i64>> {
+    let mut span = None;
+    for m in markers {
+        widen(&mut span, marked(&m.annotation));
+    }
+    span
 }
 
 /// Markers from a sidecar, in the order it gives them, which is their arrival.
@@ -516,6 +568,7 @@ impl Recording {
             places,
             blocks,
             levels,
+            marker_span: span_of(&markers),
             markers,
             extent: None,
             store: Store::Finished(Box::new(footer)),
@@ -540,101 +593,27 @@ impl Recording {
             annotations::resolve(hand, included, &footer.header, None)
                 .map_err(|problems| Error::Annotations(problems.join("; ")))?,
         );
+        self.marker_span = span_of(&self.markers);
         self.extent = self.find_extent();
         Ok(self)
     }
 
     /// A file a writer in this process writes. `snapshot` is `Writer::snapshot()` taken after the
-    /// bytes it covers are in the file (writer.rs:1009-1010). Keep the same cache across a
-    /// recording's snapshots: written blocks don't change. The recording ends where what the
-    /// writer holds does, and so do its digital channels.
+    /// bytes it covers are in the file (writer.rs:1009-1010); give it each newer one through
+    /// `update`. Keep the same cache across a recording's snapshots: written blocks don't change.
+    /// The recording ends where what the writer holds does, and so do its digital channels.
     #[cfg(feature = "live")]
     #[tracing::instrument(level = "debug", name = "live", skip_all)]
-    pub fn live(
-        snapshot: escapement_tickwave_format::snapshot::Snapshot,
-        bytes: Arc<dyn Bytes>,
-        cache: Cache,
-    ) -> Result<Self, Error> {
-        let d = snapshot.declaration().clone();
+    pub fn live(snapshot: Snapshot, bytes: Arc<dyn Bytes>, cache: Cache) -> Result<Self, Error> {
+        let d = snapshot.declaration();
         let products = format_overview::products(&d.channels, &d.derived);
-        let derived_of = |block: &escapement_tickwave_format::decode::Block| {
-            (0..d.derived.len())
-                .map(|i| snapshot.derived(block, i))
-                .collect::<Result<Vec<_>, _>>()
-        };
-        let mut unwritten = Vec::new();
-        for block in snapshot.queued_blocks()? {
-            let derived = derived_of(&block)?;
-            unwritten.push(Arc::new(Decoded { block, derived }));
-        }
-        let mut open = snapshot.open_block()?;
-        // Each analog channel's open samples follow those of every block before the open one.
-        let mut before: Vec<u64> = vec![0; d.channels.len()];
-        for row in snapshot.rows() {
-            for (b, &word) in before.iter_mut().zip(&row.channels) {
-                *b += u64::from(word);
-            }
-        }
-        for u in &unwritten {
-            for (b, ch) in before.iter_mut().zip(&u.block.channels) {
-                if let Some(v) = ch.values() {
-                    *b += v.len() as u64;
-                }
-            }
-        }
-        for (ch, &b) in open.channels.iter_mut().zip(&before) {
-            if let escapement_tickwave_format::decode::BlockChannel::Analog {
-                first_index, ..
-            } = ch
-            {
-                *first_index = b;
-            }
-        }
-        let open_derived = derived_of(&open)?;
-        let open_start = open.start;
-        // Each channel's runs and count, and the latest item's tick.
-        let mut last = open_start - 1;
-        let mut runs: Vec<(Vec<Break>, u64)> = Vec::new();
-        for (c, ch) in open.channels.iter().enumerate() {
-            match ch {
-                escapement_tickwave_format::decode::BlockChannel::Digital { edges, .. } => {
-                    last = last.max(edges.last().copied().unwrap_or(i64::MIN));
-                    runs.push((Vec::new(), 0));
-                }
-                escapement_tickwave_format::decode::BlockChannel::Analog {
-                    first_index,
-                    values,
-                } => {
-                    let all: Vec<Break> = snapshot.runs(c).copied().collect();
-                    let count = first_index + values.len() as u64;
-                    if count > 0 && !values.is_empty() {
-                        let first = all.first().map_or(0, |r| r.tick);
-                        let tick = escapement_tickwave_format::model::run_sample_tick(
-                            first,
-                            match &d.channels[c].data {
-                                escapement_tickwave_format::header::DeclaredKind::Analog {
-                                    period,
-                                    ..
-                                } => *period,
-                                _ => unreachable!("an analog block channel is an analog channel"),
-                            },
-                            &all[1.min(all.len())..],
-                            count - 1,
-                        );
-                        last = last.max(tick);
-                    }
-                    runs.push((all, count));
-                }
-            }
-        }
-        let length = open_start.max(last + 1).max(0);
         let mut built = Built {
             channels: Vec::new(),
             places: Vec::new(),
         };
-        for (c, ch) in d.channels.iter().enumerate() {
+        for ch in &d.channels {
             match &ch.data {
-                escapement_tickwave_format::header::DeclaredKind::Digital { initial } => {
+                DeclaredKind::Digital { initial } => {
                     built.channels.push(ChannelInfo {
                         name: ch.name.clone(),
                         kind: ChannelKind::Digital,
@@ -642,10 +621,9 @@ impl Recording {
                         resolution: None,
                         significant: None,
                     });
-                    let gaps: Vec<Gap> = snapshot.gaps(c).copied().collect();
-                    built.places.push(digital_place(*initial, length, &gaps));
+                    built.places.push(digital_place(*initial, 0, &[]));
                 }
-                escapement_tickwave_format::header::DeclaredKind::Analog {
+                DeclaredKind::Analog {
                     unit,
                     period,
                     coding,
@@ -654,60 +632,113 @@ impl Recording {
                     built
                         .channels
                         .push(analog_info(&ch.name, unit, *coding, *significant));
-                    let (all, count) = &runs[c];
                     built.places.push(analog_place(
-                        all.first().map_or(0, |r| r.tick),
+                        0,
                         *period,
-                        *count,
-                        all.iter().skip(1).copied().collect(),
-                        length,
+                        0,
+                        Vec::new(),
+                        0,
                         Rule::Coding(*coding),
                     ));
                 }
             }
         }
         add_derived(&mut built, &d.derived, &products);
+        let n = d.channels.len();
+        let mut rec = Self {
+            timebase: d.timebase,
+            length: 0,
+            sources: d.sources.clone(),
+            products,
+            bytes,
+            cache,
+            channels: built.channels,
+            places: built.places,
+            blocks: Vec::new(),
+            levels: Vec::new(),
+            markers: Vec::new(),
+            marker_span: None,
+            extent: None,
+            store: Store::Live(Box::new(Live {
+                snapshot,
+                unwritten: Vec::new(),
+                queued_overview: Vec::new(),
+                seen: Seen {
+                    rows: 0,
+                    gaps: vec![0; n],
+                    runs: vec![0; n],
+                    annotations: 0,
+                },
+            })),
+        };
+        rec.advance()?;
+        Ok(rec)
+    }
 
-        let mut blocks: Vec<BlockAt> = (0..snapshot.block_count())
-            .map(|i| {
-                let row = snapshot.row(i).expect("a written block");
-                BlockAt {
-                    start: row.start,
-                    end: snapshot.block_end(i).expect("a written block"),
-                    from: BlockFrom::Frame {
-                        index: i,
-                        offset: row.offset,
-                        length: row.length,
-                    },
-                }
-            })
-            .collect();
-        for (j, u) in unwritten.iter().enumerate() {
-            blocks.push(BlockAt {
-                start: u.block.start,
-                end: u.block.end,
-                from: BlockFrom::Unwritten(j),
-            });
+    /// Takes a newer snapshot of the writer this recording was made live from. Its work is what
+    /// the writer added since the last one: the blocks written, gaps, runs and annotations since,
+    /// and the blocks not yet written, decoded again. On an error the recording keeps the last
+    /// snapshot.
+    #[cfg(feature = "live")]
+    #[tracing::instrument(level = "debug", name = "update", skip_all)]
+    pub fn update(&mut self, snapshot: Snapshot) -> Result<(), Error> {
+        let Store::Live(live) = &mut self.store else {
+            return Err(Error::NotLive);
+        };
+        let previous = std::mem::replace(&mut live.snapshot, snapshot);
+        let advanced = self.advance();
+        if advanced.is_err()
+            && let Store::Live(live) = &mut self.store
+        {
+            live.snapshot = previous;
         }
-        if length > open_start {
-            blocks.push(BlockAt {
-                start: open_start,
-                end: length,
-                from: BlockFrom::Unwritten(unwritten.len()),
-            });
-        }
-        unwritten.push(Arc::new(Decoded {
-            block: escapement_tickwave_format::decode::Block {
-                end: length.max(open_start),
-                ..open
-            },
-            derived: open_derived,
-        }));
+        advanced
+    }
 
+    /// Brings the tables up to the live snapshot, reading only past what `seen` counts.
+    #[cfg(feature = "live")]
+    fn advance(&mut self) -> Result<(), Error> {
+        let Self {
+            store,
+            places,
+            blocks,
+            levels,
+            markers,
+            marker_span,
+            products,
+            length,
+            ..
+        } = self;
+        let Store::Live(live) = store else {
+            unreachable!("advance is for a live recording");
+        };
+        let Live {
+            snapshot,
+            unwritten,
+            queued_overview,
+            seen,
+        } = &mut **live;
+        let d = snapshot.declaration();
+        let stored = d.channels.len();
+
+        // What can fail goes first, so an error leaves the tables as they were: the blocks and
+        // overview blocks not yet written, decoded again each time, few as they are.
+        let derived_of = |block: &Block| {
+            (0..d.derived.len())
+                .map(|i| snapshot.derived(block, i))
+                .collect::<Result<Vec<_>, _>>()
+        };
+        let mut fresh = Vec::new();
+        for block in snapshot.queued_blocks()? {
+            let derived = derived_of(&block)?;
+            fresh.push(Arc::new(Decoded { block, derived }));
+        }
+        let open = snapshot.open_block()?;
+        let open_derived = derived_of(&open)?;
         let block_levels = snapshot.overview_blocks();
-        let mut queued_overview = Vec::with_capacity(block_levels.len());
+        let mut fresh_overview = Vec::with_capacity(block_levels.len());
         for level in 0..block_levels.len() {
-            queued_overview.push(
+            fresh_overview.push(
                 snapshot
                     .queued_overview_blocks(level)?
                     .into_iter()
@@ -715,10 +746,159 @@ impl Recording {
                     .collect::<Vec<_>>(),
             );
         }
+
+        // The gaps and runs since the last snapshot, each channel's count, and the latest tick.
+        let open_start = open.start;
+        let mut last = open_start - 1;
+        for (c, (place, ch)) in places.iter_mut().zip(&open.channels).enumerate() {
+            match (place, ch) {
+                (
+                    Place::Digital {
+                        start,
+                        gaps,
+                        gap_count,
+                        ..
+                    },
+                    BlockChannel::Digital { edges, .. },
+                ) => {
+                    last = last.max(edges.last().copied().unwrap_or(i64::MIN));
+                    for g in snapshot.gaps_from(c, seen.gaps[c]) {
+                        // A gap from tick 0 says where the data starts; the others are gaps in it.
+                        if *gap_count == 0 && g.from == 0 {
+                            *start = g.to;
+                        } else {
+                            gaps.push(*g);
+                        }
+                        *gap_count += 1;
+                    }
+                    seen.gaps[c] = *gap_count;
+                }
+                (
+                    Place::Analog {
+                        first,
+                        period,
+                        count,
+                        breaks,
+                        lost,
+                        ..
+                    },
+                    BlockChannel::Analog {
+                        first_index,
+                        values,
+                    },
+                ) => {
+                    for r in snapshot.runs_from(c, seen.runs[c]) {
+                        if seen.runs[c] == 0 {
+                            *first = r.tick;
+                        } else {
+                            breaks.push(*r);
+                            *lost += r.lost;
+                        }
+                        seen.runs[c] += 1;
+                    }
+                    *count = first_index + values.len() as u64;
+                    if !values.is_empty() {
+                        last = last.max(run_sample_tick(*first, *period, breaks, *count - 1));
+                    }
+                }
+                _ => unreachable!("a block's channels follow the declaration"),
+            }
+        }
+        *length = open_start.max(last + 1).max(0);
+        for place in &mut places[..stored] {
+            match place {
+                Place::Digital { end, .. } => *end = *length,
+                Place::Analog {
+                    first,
+                    period,
+                    count,
+                    breaks,
+                    end,
+                    ..
+                } => {
+                    let runs = Runs {
+                        first: *first,
+                        period: *period,
+                        count: *count,
+                        breaks,
+                    };
+                    *end = match *count {
+                        0 => *first,
+                        n => (*length).min(place_after(&runs, n - 1)),
+                    };
+                }
+            }
+        }
+        // A derived channel's samples sit where its first operand's do.
+        for (k, &(a, _, _)) in products.iter().enumerate() {
+            let (operands, derived) = places.split_at_mut(stored);
+            let (
+                Place::Analog {
+                    first,
+                    count,
+                    breaks,
+                    lost,
+                    end,
+                    ..
+                },
+                Place::Analog {
+                    first: d_first,
+                    count: d_count,
+                    breaks: d_breaks,
+                    lost: d_lost,
+                    end: d_end,
+                    ..
+                },
+            ) = (&operands[a], &mut derived[k])
+            else {
+                unreachable!("a checked declaration's operands are analog");
+            };
+            (*d_first, *d_count, *d_lost, *d_end) = (*first, *count, *lost, *end);
+            d_breaks.extend_from_slice(&breaks[d_breaks.len()..]);
+        }
+
+        // The written blocks since the last snapshot, then those not yet written, again.
+        blocks.truncate(seen.rows);
+        for i in seen.rows..snapshot.block_count() {
+            let row = snapshot.row(i).expect("a written block");
+            blocks.push(BlockAt {
+                start: row.start,
+                end: snapshot.block_end(i).expect("a written block"),
+                from: BlockFrom::Frame {
+                    index: i,
+                    offset: row.offset,
+                    length: row.length,
+                },
+            });
+        }
+        seen.rows = snapshot.block_count();
+        for (j, u) in fresh.iter().enumerate() {
+            blocks.push(BlockAt {
+                start: u.block.start,
+                end: u.block.end,
+                from: BlockFrom::Unwritten(j),
+            });
+        }
+        if *length > open_start {
+            blocks.push(BlockAt {
+                start: open_start,
+                end: *length,
+                from: BlockFrom::Unwritten(fresh.len()),
+            });
+        }
+        fresh.push(Arc::new(Decoded {
+            block: Block {
+                end: (*length).max(open_start),
+                ..open
+            },
+            derived: open_derived,
+        }));
+        *unwritten = fresh;
+
         // The levels a file finished at this length would keep, so a live view chooses as that
-        // file's would.
-        let plan = format_overview::plan(length.max(1), d.overview_shift);
-        let mut levels = Vec::new();
+        // file's would. A few a recording, built again.
+        let plan = format_overview::plan((*length).max(1), d.overview_shift);
+        levels.clear();
         for (i, held) in snapshot.overview().iter().enumerate() {
             let covered = held.first + held.buckets();
             let planned = plan.head.contains(&held.shift) || plan.blocks.contains(&held.shift);
@@ -730,7 +910,7 @@ impl Recording {
                 parts.push(Part::LiveBlocks {
                     level,
                     written: block_levels[level].blocks as usize,
-                    queued: queued_overview[level].len(),
+                    queued: fresh_overview[level].len(),
                 });
             }
             parts.push(Part::Held(i));
@@ -740,36 +920,26 @@ impl Recording {
                 covered,
             });
         }
-        // Each record's annotation, as a line of its generator's file.
-        let markers = markers_of(
-            snapshot
-                .annotations()
-                .enumerate()
-                .map(|(arrival, r)| crate::markers::generated(&r.source, &r.annotation, arrival))
-                .collect(),
-        );
-        let Built { channels, places } = built;
-        let mut rec = Self {
-            timebase: d.timebase,
-            length,
-            sources: d.sources.clone(),
-            products,
-            bytes,
-            cache,
-            channels,
-            places,
-            blocks,
-            levels,
-            markers,
-            extent: None,
-            store: Store::Live(Box::new(Live {
-                snapshot,
-                unwritten,
-                queued_overview,
-            })),
-        };
-        rec.extent = rec.find_extent();
-        Ok(rec)
+        *queued_overview = fresh_overview;
+
+        // The annotation records since the last snapshot, each a line of its generator's file.
+        // A recorder's come in order of their ticks, so each goes in at the end, as a rule.
+        for r in snapshot.annotations_from(seen.annotations) {
+            let annotation = crate::markers::generated(&r.source, &r.annotation, seen.annotations);
+            let marker = Marker {
+                cursor: MarkerCursor {
+                    tick: annotation.start,
+                    arrival: seen.annotations,
+                },
+                annotation,
+            };
+            seen.annotations += 1;
+            widen(marker_span, marked(&marker.annotation));
+            let at = markers.partition_point(|m| m.cursor <= marker.cursor);
+            markers.insert(at, marker);
+        }
+        self.extent = self.find_extent();
+        Ok(())
     }
 
     /// Ticks a second.
@@ -802,7 +972,7 @@ impl Recording {
     /// `lost` summed; 0 for a digital channel or one past the last.
     pub fn lost(&self, channel: usize) -> u64 {
         match self.places.get(channel) {
-            Some(Place::Analog { breaks, .. }) => breaks.iter().map(|b| b.lost).sum(),
+            Some(Place::Analog { lost, .. }) => *lost,
             _ => 0,
         }
     }
@@ -828,14 +998,6 @@ impl Recording {
 
     fn find_extent(&self) -> Option<Range<i64>> {
         let mut extent: Option<Range<i64>> = None;
-        fn widen(extent: &mut Option<Range<i64>>, r: Range<i64>) {
-            if r.end > r.start {
-                *extent = Some(match extent.take() {
-                    None => r,
-                    Some(e) => e.start.min(r.start)..e.end.max(r.end),
-                });
-            }
-        }
         let stored = self.places.len() - self.products.len();
         for place in &self.places[..stored] {
             if let Place::Analog {
@@ -859,17 +1021,116 @@ impl Recording {
                 }
             }
         }
-        for m in &self.markers {
-            let a = &m.annotation;
-            widen(
-                &mut extent,
-                a.start..a.end.unwrap_or(a.start).max(a.start + 1),
-            );
+        if let Some(span) = &self.marker_span {
+            widen(&mut extent, span.clone());
         }
         extent
     }
 
+    /// Analog or derived channel `channel`'s runs: its first sample's tick, period, count and
+    /// breaks, as the recording holds them now.
+    pub fn runs(&self, channel: usize) -> Result<Runs<'_>, Error> {
+        self.place(channel)?.runs().ok_or(Error::NoChannel(channel))
+    }
+
+    /// Where channel `channel`'s data lies: a digital channel's known span and gaps, an analog
+    /// one's runs and the end of its last sample's time.
+    pub fn known(&self, channel: usize) -> Result<ChannelPlace<'_>, Error> {
+        Ok(self.place(channel)?.known())
+    }
+
     pub(crate) fn place(&self, channel: usize) -> Result<&Place, Error> {
         self.places.get(channel).ok_or(Error::NoChannel(channel))
+    }
+}
+
+#[cfg(all(test, feature = "live"))]
+mod tests {
+    use std::sync::Arc;
+
+    use escapement_tickwave_format::header::{
+        Declaration, DeclaredChannel, DeclaredKind, SourceFormat, SourceHeader,
+    };
+    use escapement_tickwave_format::model::{Gap, Ratio};
+    use escapement_tickwave_format::writer::{WriteOptions, Writer};
+
+    use super::{Recording, Store};
+    use crate::Cache;
+
+    /// An update reads past what the recording holds, not the whole writer's lists again.
+    #[test]
+    fn an_update_takes_only_what_came_since() {
+        let timebase = Ratio::integer(1000).unwrap();
+        let d = Declaration {
+            timebase,
+            channels: vec![DeclaredChannel {
+                name: "D".into(),
+                source_name: "d".into(),
+                source: 0,
+                data: DeclaredKind::Digital { initial: false },
+                shaping: Default::default(),
+            }],
+            derived: Vec::new(),
+            sources: vec![SourceHeader::new(
+                SourceFormat::Other("crafted".into()),
+                timebase,
+            )],
+            title: None,
+            meta: Default::default(),
+            overview_shift: 4,
+        };
+        let mut w = Writer::new(d, WriteOptions::default()).unwrap();
+        let mut file = w.take_output();
+        let mut rec: Option<Recording> = None;
+        for k in 0..50i64 {
+            w.edge(0, 10 * k).unwrap();
+            if k % 10 == 9 {
+                w.gap(
+                    0,
+                    Gap {
+                        from: 10 * k + 1,
+                        to: 10 * k + 5,
+                        level: k % 2 == 0,
+                    },
+                )
+                .unwrap();
+            }
+            w.flush(10 * k + 6).unwrap();
+            let snapshot = w.snapshot();
+            file.extend(w.take_output());
+            match &mut rec {
+                None => {
+                    rec = Some(
+                        Recording::live(snapshot, Arc::new(file.clone()), Cache::new(1 << 20))
+                            .unwrap(),
+                    )
+                }
+                Some(r) => {
+                    r.bytes = Arc::new(file.clone());
+                    r.update(snapshot).unwrap();
+                }
+            }
+            let r = rec.as_ref().unwrap();
+            let Store::Live(live) = &r.store else {
+                unreachable!()
+            };
+            assert_eq!(
+                live.seen.rows,
+                live.snapshot.block_count(),
+                "after edge {k}"
+            );
+            assert_eq!(
+                live.seen.gaps[0],
+                live.snapshot.gaps(0).count(),
+                "after edge {k}"
+            );
+            // The written blocks, then the open one where it holds anything: an empty one has no
+            // ticks.
+            assert_eq!(
+                r.blocks.len(),
+                live.snapshot.block_count(),
+                "after edge {k}"
+            );
+        }
     }
 }
