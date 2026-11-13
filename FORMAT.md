@@ -164,7 +164,7 @@ a block.
 `sources` lists where the channels came from. A recording converted from one capture has one
 entry; a merged one has an entry for each source of each recording merged into it. Every entry is
 some channel's source. A merged recording takes each entry from the recording merged into it, with
-`timebase` kept and `origin` and `align` restated in its own ticks, so a check against that
+`origin` and `align` restated in its own ticks and every other field kept, so a check against that
 recording maps each tick through both headers.
 
 An entry has:
@@ -249,8 +249,8 @@ moved or cut, every channel the span that holds its source data, `kept`. A recor
 is as the source recorded it.
 
 - `offset`: the ticks the channel was moved by, an integer; positive is later (see Times for how
-  its ticks map to the source's). A converter refuses an offset more than 0.01 of a tick off the
-  grid.
+  its ticks map to the source's). A converter refuses an offset more than 0.01 of the recording's
+  tick off its grid.
 - `offset_kind`: why it was moved, stated with every `offset`. `"delay"` is a known delay in the
   channel's path, such as a probe's lead or an instrument's input. A reader keeps a kind it doesn't
   know, and refuses an `offset` without one, or one without an `offset`.

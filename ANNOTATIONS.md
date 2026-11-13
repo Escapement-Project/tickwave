@@ -155,3 +155,27 @@ the prose cites breaks the build instead of the page. It checks that:
 `tickwave bundle rec.tickwave rec.annotations.toml -o shared.tickwave` checks the sidecar, then
 writes a copy of the recording with the sidecar's files in its header (`annotations`, each file's
 name and text), for a single-file share. The content id stays the same.
+
+## Merging
+
+`tickwave merge` carries each input's generated annotations into the merged recording: the
+generator files its header bundles, or, where it bundles none, those its sidecar beside it
+includes. They are bundled again under the merged recording's id. Each time moves with its input's
+ticks (FORMAT.md, "Times") and is written in ticks of the merged recording. Inputs go in the order
+given. A generator whose name an earlier input's generator took is renamed `<stem>-<name>`, where
+`<stem>` is the input's file name without its extension, with any whitespace written as `_`. A
+second clash takes `<stem>-2-<name>`, and so on. The full ids of its annotations change with it,
+and so does the `source` its file's first line names, so a tool that looks for its own generator's
+file by name finds only the first input's.
+
+An annotation whose times move outside the merged recording is left out: a span that ends at or
+before its start, or anything that starts at or past its end. A span that reaches over either end
+is cut there. A line that doesn't read is left out too. The merge counts each of these.
+
+Channel names in `channels` and `measure` follow the names the merge gives. A channel the merge
+leaves out is dropped from `channels`, and an annotation left with none is left out. A `measure`
+on a channel left out is dropped. An annotation without `channels`, which meant every channel of
+its recording, names that input's channels.
+
+A hand-written file's annotations are not carried, since their times are the input's. The merge
+says how many it left out.
