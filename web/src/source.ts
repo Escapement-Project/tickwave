@@ -153,11 +153,24 @@ export function rebased(c: Channel, start: number, e: Edges, from: number): { st
   return { start: gap.to, edges: { level: gap.level, ticks: e.ticks.subarray(lo) } };
 }
 
+/** How many of `runs` have `key` at or before `x`: they come in order, so these are the first.
+ * A NaN `x` reads as past every run, as a walk back from the last leaves it. */
+function runsUpTo(runs: readonly Break[], key: (b: Break) => number, x: number): number {
+  if (Number.isNaN(x)) return runs.length;
+  let lo = 0;
+  let hi = runs.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (key(runs[mid]) <= x) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
 /** The tick of sample `i` of an analog channel, its breaks included. */
 export function channelSampleTick(c: Pick<AnalogChannel, "first" | "period" | "breaks">, i: number): number {
   const runs = c.breaks ?? [];
-  let k = runs.length;
-  while (k > 0 && runs[k - 1].index > i) k--;
+  const k = runsUpTo(runs, (b) => b.index, i);
   return k === 0 ? sampleTick(c.first, c.period, i) : sampleTick(runs[k - 1].tick, c.period, i - runs[k - 1].index);
 }
 
@@ -165,8 +178,7 @@ export function channelSampleTick(c: Pick<AnalogChannel, "first" | "period" | "b
  * length comes sooner (FORMAT.md, "Gaps"). */
 export function placeAfter(c: Pick<AnalogChannel, "first" | "period" | "breaks">, i: number): number {
   const runs = c.breaks ?? [];
-  let k = runs.length;
-  while (k > 0 && runs[k - 1].index > i) k--;
+  const k = runsUpTo(runs, (b) => b.index, i);
   return k === 0 ? sampleTick(c.first, c.period, i + 1) : sampleTick(runs[k - 1].tick, c.period, i + 1 - runs[k - 1].index);
 }
 
@@ -174,8 +186,7 @@ export function placeAfter(c: Pick<AnalogChannel, "first" | "period" | "breaks">
 export function channelIndexAtOrAfter(c: Pick<AnalogChannel, "first" | "period" | "count" | "breaks">, tick: number): number {
   const runs = c.breaks ?? [];
   // The run whose start is the last at or before `tick`; its samples end where the next run's start.
-  let k = runs.length;
-  while (k > 0 && runs[k - 1].tick > tick) k--;
+  const k = runsUpTo(runs, (b) => b.tick, tick);
   const from = k === 0 ? 0 : runs[k - 1].index;
   const to = k < runs.length ? runs[k].index : c.count;
   const start = k === 0 ? c.first : runs[k - 1].tick;
