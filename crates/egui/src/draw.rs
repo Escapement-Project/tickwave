@@ -6,7 +6,8 @@ use egui::epaint::{CircleShape, PathShape, Tessellator};
 use egui::{Align2, Color32, Mesh, Pos2, Rect, Shape, Stroke, Ui, pos2};
 use escapement_tickwave_view::axis::time_axis;
 use escapement_tickwave_view::columns::{DigitalColumns, Grid, State};
-use escapement_tickwave_view::readouts::format_at;
+use escapement_tickwave_view::format::model::Ratio;
+use escapement_tickwave_view::readouts::format_marks;
 use escapement_tickwave_view::scale::{ValueRange, range_marks};
 use escapement_tickwave_view::{AnalogColumns, Drawn, Marker, Point, StripAnswer};
 
@@ -475,14 +476,25 @@ fn axes(ui: &Ui, f: &Frame, field: Rect) -> Vec<(String, Pos2, Align2, egui::Fon
         hi: f.y.1,
     }) {
         let right = l.gutter.right() - 6.0;
-        for (value, align, nudge) in [
-            (m.top, Align2::RIGHT_TOP, 1.0),
-            (m.bottom, Align2::RIGHT_BOTTOM, -1.0),
+        let texts = format_marks(m.top, m.bottom, m.place, unit);
+        for (value, text, align, nudge) in [
+            (m.top, texts.as_ref().map(|t| &t.0), Align2::RIGHT_TOP, 1.0),
+            (
+                m.bottom,
+                texts.as_ref().map(|t| &t.1),
+                Align2::RIGHT_BOTTOM,
+                -1.0,
+            ),
         ] {
             let y = f.y_at(value);
             painter.line_segment([pos2(l.plot.left(), y), pos2(l.plot.right(), y)], hair);
-            if let Some(text) = format_at(value, m.place, unit) {
-                labels.push((text, pos2(right, y + nudge), align, p.figures.clone()));
+            if let Some(text) = text {
+                labels.push((
+                    text.clone(),
+                    pos2(right, y + nudge),
+                    align,
+                    p.figures.clone(),
+                ));
             }
         }
     }
@@ -755,6 +767,37 @@ pub(crate) fn strip(
             Rect::from_min_max(pos2(a, rect.top()), pos2(b, rect.bottom())),
             0.0,
             p.wash,
+        );
+    }
+}
+
+/// The strip's time axis along `rect`: ticks at its top and their labels under them, over the
+/// extent the strip spans.
+pub(crate) fn strip_axis(ui: &Ui, rect: Rect, extent: &Range<i64>, timebase: Ratio, p: &Palette) {
+    let painter = ui.painter().with_clip_rect(rect);
+    let axis = time_axis(
+        extent.start as f64,
+        extent.end as f64,
+        f64::from(rect.width()),
+        timebase,
+        |s| {
+            painter
+                .layout_no_wrap(s.to_owned(), p.figures.clone(), p.ink_2)
+                .size()
+                .x
+        },
+        AXIS_GAP,
+    );
+    let tick = Stroke::new(1.0, p.ink_2);
+    for t in &axis.ticks {
+        let x = rect.left() + t.x as f32;
+        painter.line_segment([pos2(x, rect.top()), pos2(x, rect.top() + 3.0)], tick);
+        painter.text(
+            pos2(x, rect.top() + 3.0),
+            Align2::CENTER_TOP,
+            &t.label,
+            p.figures.clone(),
+            p.ink_2,
         );
     }
 }

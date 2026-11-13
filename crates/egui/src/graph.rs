@@ -2,7 +2,6 @@
 //! and the gestures that move them.
 
 use std::ops::Range;
-use std::time::Duration;
 
 use egui::{
     AsIdSalt, CursorIcon, IdSalt, PointerButton, Rect, Response, Sense, Ui, Vec2, Widget, pos2,
@@ -25,9 +24,6 @@ const DETENT: f32 = 12.0;
 /// The closest zoom: this many points a tick.
 const MAX_POINTS_PER_TICK: f64 = 40.0;
 const MAX_TICKS: f64 = (1u64 << 62) as f64;
-/// How often a graph following a live recording asks again, in seconds of egui's time.
-const REFRESH: f64 = 0.25;
-const REPAINT: Duration = Duration::from_millis(50);
 pub(crate) const LANE_HEIGHT: f32 = 24.0;
 pub(crate) const AXIS_HEIGHT: f32 = 24.0;
 const LABEL_ROWS: usize = 3;
@@ -61,6 +57,7 @@ pub struct Graph<'a> {
     include_zero: bool,
     extras: Extras,
     height: Option<f32>,
+    now: Option<i64>,
     id_salt: IdSalt,
 }
 
@@ -82,6 +79,7 @@ impl<'a> Graph<'a> {
             include_zero: false,
             extras: Extras::default(),
             height: None,
+            now: None,
             id_salt: IdSalt::new("tickwave graph"),
         }
     }
@@ -113,6 +111,14 @@ impl<'a> Graph<'a> {
     /// default.
     pub fn height(mut self, height: f32) -> Self {
         self.height = Some(height);
+        self
+    }
+
+    /// The host's now, in ticks, while the recording is being written: a followed window ends
+    /// there where it is past the data. None once the recording is finished, and for a finished
+    /// file.
+    pub fn now(mut self, now: Option<i64>) -> Self {
+        self.now = now;
         self
     }
 
@@ -185,8 +191,8 @@ struct Memory {
     pan: f64,
     /// Where a selection drag started.
     anchor: Option<i64>,
-    /// egui's time when the graph last asked.
-    asked_at: f64,
+    /// The viewer's snapshots when the graph last asked.
+    asked_snapshots: u64,
     shown: Option<Shown>,
 }
 
@@ -502,8 +508,11 @@ impl Graph<'_> {
     fn request(&self, columns: u32) -> Request {
         let mut channels = vec![self.trace];
         channels.extend_from_slice(self.lanes);
+        let following = matches!(self.state.window, Window::Follow { .. });
         Request {
             window: self.state.window.clone(),
+            // A window of its own doesn't move with now, so a moving now asks nothing.
+            now: self.now.filter(|_| following),
             columns,
             channels,
             flags: self.flag.map(|f| (self.trace, f)).into_iter().collect(),
@@ -517,23 +526,43 @@ impl Graph<'_> {
         }
     }
 
-    /// Asks for `wanted` when it differs from what was asked. A change of the channels drawn asks
-    /// at once; a moved window or selection waits for the query under way, so a pan draws its
-    /// answers as they come rather than cancelling each one.
-    fn ask(&self, wanted: Request, now: f64, facts: &Facts, memory: &mut Memory) {
+    /// Asks for `wanted` when it differs from what was asked, now aside. A followed window also
+    /// asks when the recording has taken a snapshot since, or when the window on screen has left
+    /// what the held answer covers; a moving now alone asks nothing, since the held answer covers
+    /// a width either side and is drawn moved with it. The request carries the latest now, so the
+    /// query ends its window there. A change of the channels drawn asks at once; anything else
+    /// waits for the query under way, so a pan or a followed recording draws its answers as they
+    /// come rather than cancelling each one.
+    fn ask(
+        &self,
+        wanted: Request,
+        window: &Range<i64>,
+        held: Option<&Held>,
+        facts: &Facts,
+        memory: &mut Memory,
+    ) {
         let sent = self.viewer.sent();
         let structural = sent.as_ref().is_none_or(|s| {
             s.channels != wanted.channels
                 || s.flags != wanted.flags
                 || s.strip.map(|s| s.0) != wanted.strip.map(|s| s.0)
         });
-        let changed = sent.as_deref() != Some(&wanted);
-        let refresh = facts.live
-            && matches!(wanted.window, Window::Follow { .. })
-            && now - memory.asked_at >= REFRESH;
-        if structural || (!self.viewer.busy() && (changed || refresh)) {
+        let changed = sent.as_deref().is_none_or(|s| {
+            *s != Request {
+                now: s.now,
+                ..wanted.clone()
+            }
+        });
+        let following = matches!(wanted.window, Window::Follow { .. });
+        let snapshots = self.viewer.snapshots();
+        let grown = facts.live && following && snapshots != memory.asked_snapshots;
+        let left = following
+            && held.is_some_and(|h| {
+                window.start < h.answer.around.start || window.end > h.answer.around.end
+            });
+        if structural || (!self.viewer.busy() && (changed || grown || left)) {
             self.viewer.request(wanted);
-            memory.asked_at = now;
+            memory.asked_snapshots = snapshots;
         }
     }
 }
@@ -554,7 +583,10 @@ impl Widget for Graph<'_> {
         let extent = held.as_ref().and_then(|h| h.answer.extent.clone());
         let trace = held.as_ref().and_then(|h| Trace::of(h, self.trace));
 
-        let view = View::new(self.state.window.resolve(extent.as_ref()), layout.plot);
+        let view = View::new(
+            self.state.window.resolve(extent.as_ref(), self.now),
+            layout.plot,
+        );
         let (y, fit) = self.y(
             trace.as_ref(),
             &view,
@@ -574,7 +606,10 @@ impl Widget for Graph<'_> {
             &mut memory,
         );
 
-        let view = View::new(self.state.window.resolve(extent.as_ref()), layout.plot);
+        let view = View::new(
+            self.state.window.resolve(extent.as_ref(), self.now),
+            layout.plot,
+        );
         let (y, _) = self.y(
             trace.as_ref(),
             &view,
@@ -588,7 +623,7 @@ impl Widget for Graph<'_> {
                 .round()
                 .max(1.0) as u32;
             let wanted = self.request(columns);
-            self.ask(wanted, ui.input(|i| i.time), &facts, &mut memory);
+            self.ask(wanted, &view.window, held.as_ref(), &facts, &mut memory);
         }
         draw::graph(
             ui,
@@ -613,8 +648,9 @@ impl Widget for Graph<'_> {
             layout,
         });
         ui.data_mut(|d| d.insert_temp(id, memory));
-        if facts.live {
-            ui.request_repaint_after(REPAINT);
+        // Following a recording as it is written, the window moves every frame.
+        if facts.live && matches!(self.state.window, Window::Follow { .. }) {
+            ui.request_repaint();
         }
         if (self.state.window.clone(), self.state.selection.clone()) != before {
             response.mark_changed();

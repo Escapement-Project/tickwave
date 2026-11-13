@@ -16,6 +16,7 @@ use crate::viewer::Request;
 fn request(window: Range<i64>, selection: Option<Range<i64>>) -> Request {
     Request {
         window: Window::At(window),
+        now: None,
         columns: 64,
         channels: vec![I],
         flags: Vec::new(),
@@ -186,7 +187,7 @@ fn a_live_recording_is_followed_and_a_reopen_keeps_the_view() {
 }
 
 #[test]
-fn a_live_graph_asks_for_frames_and_a_finished_one_does_not() {
+fn only_a_graph_following_a_live_recording_asks_for_every_frame() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("live.tickwave");
     let cap = Capture::new(1000, 2000, noisy);
@@ -196,31 +197,30 @@ fn a_live_graph_asks_for_frames_and_a_finished_one_does_not() {
     let mut file = head;
     file.extend(w.take_output());
     std::fs::write(&path, &file).unwrap();
-    // A window of its own, so no answer lands after the first to ask for a frame.
-    let window = 0..SECOND;
-    let mut h = harness(ViewState {
-        window: Window::At(window.clone()),
+    let following = ViewState {
+        window: Window::Follow { span: SECOND },
         ..ViewState::default()
-    });
+    };
+    let mut h = harness(following.clone());
     h.state_mut().viewer = Some(Viewer::live(&h.ctx, &path, w.snapshot()).unwrap());
-    answered(&mut h, window.clone());
+    answered(&mut h, SECOND..2 * SECOND);
     for _ in 0..5 {
         h.step();
     }
-    assert!(
-        repaint(&h) <= Duration::from_millis(50),
-        "{:?}",
-        repaint(&h)
-    );
+    assert_eq!(repaint(&h), Duration::ZERO);
+    // A window of its own on the same recording: no frame of its own once its answer landed.
+    h.state_mut().state.window = Window::At(0..SECOND);
+    answered(&mut h, 0..SECOND);
+    for _ in 0..5 {
+        h.step();
+    }
+    assert!(repaint(&h) > Duration::from_secs(1), "{:?}", repaint(&h));
 
     let finished = dir.path().join("finished.tickwave");
     std::fs::write(&finished, cap.write()).unwrap();
-    let mut h = harness(ViewState {
-        window: Window::At(window.clone()),
-        ..ViewState::default()
-    });
+    let mut h = harness(following);
     h.state_mut().viewer = Some(Viewer::open(&h.ctx, &finished).unwrap());
-    answered(&mut h, window);
+    answered(&mut h, SECOND..2 * SECOND);
     for _ in 0..5 {
         h.step();
     }

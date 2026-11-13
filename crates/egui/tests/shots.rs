@@ -84,7 +84,7 @@ fn settle(h: &mut Harness<'_, Host>) {
         h.step();
         let host = h.state();
         if let Some(a) = host.viewer.as_ref().unwrap().answer() {
-            let window = host.state.window.resolve(a.extent.as_ref());
+            let window = host.state.window.resolve(a.extent.as_ref(), None);
             if a.window == window {
                 h.step();
                 return;

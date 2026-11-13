@@ -5,8 +5,8 @@ use std::ops::Range;
 /// The time on screen, in ticks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Window {
-    /// The last `span` ticks of the recording, moving with its end: from `span` before the end
-    /// of the extent, or from its start where the extent is shorter.
+    /// The last `span` ticks, moving with the recording's end, or with the host's now where that
+    /// is later: from `span` before that end, or from the extent's start where it is shorter.
     Follow {
         span: i64,
     },
@@ -48,15 +48,20 @@ impl Default for ViewState {
 }
 
 impl Window {
-    /// The ticks on screen given the recording's extent, at least one wide. Before any data a
-    /// followed window starts at tick 0.
-    pub fn resolve(&self, extent: Option<&Range<i64>>) -> Range<i64> {
+    /// The ticks on screen given the recording's extent and the host's now, at least one wide. A
+    /// followed window ends at the later of the extent's end and now, and starts no earlier than
+    /// the extent; before any data and with no now, it starts at tick 0.
+    pub fn resolve(&self, extent: Option<&Range<i64>>, now: Option<i64>) -> Range<i64> {
         match self {
             Self::At(r) => r.start..r.end.max(r.start.saturating_add(1)),
-            Self::Follow { span } => match extent {
-                Some(e) => e.end.saturating_sub(*span).max(e.start)..e.end.max(e.start + 1),
-                None => 0..(*span).max(1),
-            },
+            Self::Follow { span } => {
+                let (start, end) = match (extent, now) {
+                    (Some(e), now) => (e.start, now.map_or(e.end, |n| n.max(e.end))),
+                    (None, Some(n)) => (0, n),
+                    (None, None) => return 0..(*span).max(1),
+                };
+                end.saturating_sub(*span).max(start)..end.max(start + 1)
+            }
         }
     }
 }

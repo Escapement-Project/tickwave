@@ -1,13 +1,14 @@
 //! A synthetic recorder for the demo's `--live`: a capture laid out as verge's energy captures
 //! are (crates/view/examples/synth.rs), written in real time to a temporary file on a thread of
-//! its own, each snapshot handed to the viewer.
+//! its own, as verge-probe's Recorder writes one: a batch of pairs every 10 ms, as the
+//! instrument's messages arrive, and a snapshot for the viewer at most once a 16 ms frame.
 
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -21,9 +22,13 @@ use escapement_tickwave_format::writer::{Bundle, Finish, WriteOptions, Writer};
 use tracing::{error, info, warn};
 
 const CLOCK_HZ: u64 = 96_000_000;
-/// How often the recorder hands the viewer a snapshot, as verge's Recorder does at most.
-const PUBLISH: Duration = Duration::from_millis(200);
-const BATCHES_A_SECOND: u64 = 5;
+/// How often a batch of pairs arrives, as the instrument's messages do.
+const BATCH: Duration = Duration::from_millis(10);
+const BATCHES_A_SECOND: u64 = 100;
+/// The least time between two snapshots: one a 60 Hz frame.
+const FRAME: Duration = Duration::from_millis(16);
+/// How far the host's now runs ahead of the data, at most.
+const AHEAD: Duration = Duration::from_millis(50);
 
 /// The digital channels' edges in second `s`, in order: (tick, channel). synth.rs's.
 fn edges(s: u64) -> Vec<(i64, usize)> {
@@ -127,6 +132,11 @@ struct Synth {
 }
 
 impl Synth {
+    /// Where the data ends: the end of the last pair's time.
+    fn end(&self) -> i64 {
+        (self.pairs * self.period) as i64
+    }
+
     /// The edges left in the second under way, after its last pair.
     fn rest(&mut self) -> Result<(), String> {
         while let Some((t, c)) = self.due.pop() {
@@ -145,6 +155,7 @@ impl Synth {
             if k == 0 {
                 if s > 0 {
                     self.rest()?;
+                    let _span = tracing::debug_span!("flush").entered();
                     self.writer
                         .flush((s * CLOCK_HZ) as i64)
                         .map_err(|x| e(&x))?;
@@ -193,12 +204,27 @@ impl Synth {
     }
 }
 
+/// The newest snapshot's data end, in ticks, and when the viewer took it; None once the
+/// recording is finished.
+type Published = Arc<Mutex<Option<(i64, Instant)>>>;
+
 /// A live recording under way, and the thread that writes it.
 pub struct Live {
     /// Holds the file until the demo ends.
     _dir: tempfile::TempDir,
     stop: Arc<AtomicBool>,
+    published: Published,
     thread: Option<JoinHandle<()>>,
+}
+
+impl Live {
+    /// The host's now as verge-gui works it out: the newest snapshot's data end, and the time
+    /// since it was handed over, at most `AHEAD` past the data. None once finished.
+    pub fn now(&self) -> Option<i64> {
+        let (end, at) = (*self.published.lock().unwrap_or_else(|e| e.into_inner()))?;
+        let since = at.elapsed().min(AHEAD);
+        Some(end + (since.as_secs_f64() * CLOCK_HZ as f64) as i64)
+    }
 }
 
 impl Drop for Live {
@@ -217,9 +243,9 @@ pub fn start(
     rate: u64,
     seconds: Option<u64>,
 ) -> Result<(Arc<Viewer>, Live), String> {
-    if rate == 0 || !CLOCK_HZ.is_multiple_of(rate * BATCHES_A_SECOND) {
+    if rate == 0 || !CLOCK_HZ.is_multiple_of(rate) {
         return Err(format!(
-            "{rate} pairs a second: 96 MHz must be a multiple of five times the rate"
+            "{rate} pairs a second: 96 MHz must be a multiple of the rate"
         ));
     }
     let period = CLOCK_HZ / rate;
@@ -248,17 +274,21 @@ pub fn start(
         noise: 0x2545_f491_4f6c_dd1d,
         due: Vec::new(),
     };
-    let batch = rate / BATCHES_A_SECOND;
-    synth.write(batch)?;
+    synth.write(due(1, rate))?;
     let viewer =
         Arc::new(Viewer::live(ctx, &path, synth.writer.snapshot()).map_err(|e| e.to_string())?);
+    let published = Arc::new(Mutex::new(Some((synth.end(), Instant::now()))));
     info!(rate, path = %path.display(), "recording live");
     let stop = Arc::new(AtomicBool::new(false));
     let thread = {
-        let (viewer, stop) = (Arc::clone(&viewer), Arc::clone(&stop));
+        let (viewer, stop, published) = (
+            Arc::clone(&viewer),
+            Arc::clone(&stop),
+            Arc::clone(&published),
+        );
         std::thread::Builder::new()
             .name("synthetic recorder".into())
-            .spawn(move || record(synth, &viewer, &stop, seconds))
+            .spawn(move || record(synth, &viewer, &stop, &published, seconds))
             .map_err(|e| e.to_string())?
     };
     Ok((
@@ -266,21 +296,39 @@ pub fn start(
         Live {
             _dir: dir,
             stop,
+            published,
             thread: Some(thread),
         },
     ))
 }
 
-/// Writes a batch every `PUBLISH`, in step with the clock, handing each snapshot to the viewer.
-fn record(mut synth: Synth, viewer: &Viewer, stop: &AtomicBool, seconds: Option<u64>) {
+/// The pairs written by the end of batch `n`: a rate that 100 doesn't divide puts one more in
+/// some batches than in others, and below 100 pairs a second some batches hold none.
+fn due(n: u64, rate: u64) -> u64 {
+    (u128::from(n) * u128::from(rate) / u128::from(BATCHES_A_SECOND)) as u64
+}
+
+/// Writes a batch every `BATCH`, in step with the clock, and hands the viewer a snapshot at most
+/// once a `FRAME`, after the bytes it covers are in the file.
+fn record(
+    mut synth: Synth,
+    viewer: &Viewer,
+    stop: &AtomicBool,
+    published: &Mutex<Option<(i64, Instant)>>,
+    seconds: Option<u64>,
+) {
+    let publish = |end: Option<i64>| {
+        *published.lock().unwrap_or_else(|e| e.into_inner()) = end.map(|e| (e, Instant::now()));
+    };
     let started = Instant::now();
-    let batch = synth.rate / BATCHES_A_SECOND;
     let end = seconds.map(|s| s * synth.rate);
     let mut behind = false;
+    let mut last = Instant::now();
     let mut n = 1;
     while !stop.load(Ordering::Relaxed) {
-        let due = started + PUBLISH * n;
-        match due.checked_duration_since(Instant::now()) {
+        n += 1;
+        let at = started + BATCH * (n - 1) as u32;
+        match at.checked_duration_since(Instant::now()) {
             Some(wait) => std::thread::sleep(wait),
             None if !behind => {
                 behind = true;
@@ -288,19 +336,28 @@ fn record(mut synth: Synth, viewer: &Viewer, stop: &AtomicBool, seconds: Option<
             }
             None => {}
         }
-        n += 1;
-        let to = (synth.pairs + batch).min(end.unwrap_or(u64::MAX));
-        if let Err(e) = synth.write(to) {
+        let to = due(n, synth.rate).min(end.unwrap_or(u64::MAX));
+        let written = {
+            let _span = tracing::debug_span!("batch").entered();
+            synth.write(to)
+        };
+        if let Err(e) = written {
             error!("the recorder stopped: {e}");
             return;
         }
-        viewer.update(synth.writer.snapshot());
-        if Some(synth.pairs) == end {
+        let last_batch = Some(synth.pairs) == end;
+        if last.elapsed() >= FRAME || last_batch {
+            last = Instant::now();
+            let _span = tracing::debug_span!("publish").entered();
+            viewer.update(synth.writer.snapshot());
+            publish(Some(synth.end()));
+        }
+        if last_batch {
             if let Err(e) = synth.rest() {
                 error!("the recorder stopped: {e}");
                 return;
             }
-            let length = (synth.pairs * synth.period) as i64;
+            let length = synth.end();
             let finish = Finish {
                 bundle: Some(Bundle::Generated {
                     stem: "live".into(),
@@ -319,6 +376,7 @@ fn record(mut synth: Synth, viewer: &Viewer, stop: &AtomicBool, seconds: Option<
                 Ok(()) => info!(seconds = ?seconds, "finished, and reopened"),
                 Err(e) => error!("finishing: {e}"),
             }
+            publish(None);
             return;
         }
     }

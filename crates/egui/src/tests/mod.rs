@@ -2,6 +2,7 @@
 //! captures are, a host that keeps a `ViewState`, and readers of what a frame painted.
 
 mod graph;
+mod live;
 mod strip;
 mod viewer;
 
@@ -308,13 +309,13 @@ impl Drop for Opens {
 }
 
 struct Gated {
-    bytes: Arc<[u8]>,
+    bytes: Arc<dyn Bytes>,
     gate: Arc<Gate>,
 }
 
 impl Bytes for Gated {
     fn size(&self) -> io::Result<u64> {
-        Ok(self.bytes.len() as u64)
+        self.bytes.size()
     }
 
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
@@ -336,7 +337,7 @@ impl Bytes for Gated {
 /// A viewer of `file` whose reads go through `gate`, keeping no decoded data when `keep` is
 /// false, so every query reads.
 pub fn gated(ctx: &egui::Context, file: Vec<u8>, gate: &Arc<Gate>, keep: bool) -> Viewer {
-    let bytes: Arc<[u8]> = file.into();
+    let bytes: Arc<dyn Bytes> = Arc::new(Arc::<[u8]>::from(file));
     let gate = Arc::clone(gate);
     Viewer::with_opener(
         ctx,
@@ -347,6 +348,29 @@ pub fn gated(ctx: &egui::Context, file: Vec<u8>, gate: &Arc<Gate>, keep: bool) -
             }) as Arc<dyn Bytes>)
         }),
         if keep { 64 << 20 } else { 0 },
+    )
+    .unwrap()
+}
+
+/// A live viewer of the file at `path`, its reads through `gate`, keeping no decoded data.
+pub fn gated_live(
+    ctx: &egui::Context,
+    path: &std::path::Path,
+    snapshot: escapement_tickwave_format::snapshot::Snapshot,
+    gate: &Arc<Gate>,
+) -> Viewer {
+    let path = path.to_owned();
+    let gate = Arc::clone(gate);
+    Viewer::live_with_opener(
+        ctx,
+        Box::new(move || {
+            Ok(Arc::new(Gated {
+                bytes: Arc::new(std::fs::File::open(&path)?),
+                gate: Arc::clone(&gate),
+            }) as Arc<dyn Bytes>)
+        }),
+        snapshot,
+        0,
     )
     .unwrap()
 }
@@ -392,6 +416,8 @@ pub struct Host {
     pub strip: bool,
     pub strip_id: Option<egui::Id>,
     pub strip_changed: bool,
+    /// The host's now, given to the graph and the strip.
+    pub now: Option<i64>,
 }
 
 pub fn harness(state: ViewState) -> Harness<'static, Host> {
@@ -414,6 +440,7 @@ pub fn harness_at(state: ViewState, pixels_per_point: f32) -> Harness<'static, H
         strip: false,
         strip_id: None,
         strip_changed: false,
+        now: None,
     };
     Harness::builder()
         .with_size(egui::vec2(1080.0, 700.0))
@@ -429,6 +456,7 @@ pub fn harness_at(state: ViewState, pixels_per_point: f32) -> Harness<'static, H
                     .lanes(&host.lanes)
                     .include_zero(host.include_zero)
                     .extras(host.extras)
+                    .now(host.now)
                     .id_salt(SALT);
                 if host.strip {
                     graph = graph.height(ui.available_height() - STRIP - 8.0);
@@ -440,6 +468,7 @@ pub fn harness_at(state: ViewState, pixels_per_point: f32) -> Harness<'static, H
                     let response = ui.add(
                         Strip::new(viewer, &mut host.state, &host.palette)
                             .include_zero(host.include_zero)
+                            .now(host.now)
                             .height(STRIP)
                             .id_salt(STRIP_SALT),
                     );

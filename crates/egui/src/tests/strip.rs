@@ -18,7 +18,13 @@ fn with_strip(file: Vec<u8>, state: ViewState) -> (Harness<'static, Host>, Arc<G
     (h, gate)
 }
 
+/// The strip's band the trace draws in, above its time axis.
 fn strip(h: &Harness<'_, Host>) -> Rect {
+    shown_strip(h).1
+}
+
+/// The whole strip, and its trace's band.
+fn shown_strip(h: &Harness<'_, Host>) -> (Rect, Rect) {
     crate::strip::shown(&h.ctx, h.state().strip_id.expect("a strip")).expect("a strip laid out")
 }
 
@@ -179,7 +185,7 @@ fn a_strip_before_any_answer_draws_its_ground_and_moves_nothing() {
         h.step();
     }
     assert!(viewer(&h).answer().is_none());
-    let rect = strip(&h);
+    let (rect, _) = shown_strip(&h);
     assert_eq!(rect.height(), STRIP);
     let p = palette();
     assert_eq!(rects_of(&h, rect, p.surface), vec![rect]);

@@ -63,7 +63,7 @@ struct Demo {
     /// The fixed range Fit Y replaced, for Fit Y pressed again.
     unfit: Option<Y>,
     quit_after: Option<f64>,
-    _live: Option<live::Live>,
+    live: Option<live::Live>,
 }
 
 impl Demo {
@@ -125,8 +125,13 @@ impl Demo {
             follow,
             unfit: None,
             quit_after: args.quit_after,
-            _live: live,
+            live,
         })
+    }
+
+    /// The host's now while the recording is being written.
+    fn now(&self) -> Option<i64> {
+        self.live.as_ref().and_then(live::Live::now)
     }
 
     fn controls(&mut self, ui: &mut egui::Ui) {
@@ -152,7 +157,7 @@ impl Demo {
                     self.follow.clone()
                 } else {
                     let extent = self.viewer.answer().and_then(|a| a.extent.clone());
-                    Window::At(self.state.window.resolve(extent.as_ref()))
+                    Window::At(self.state.window.resolve(extent.as_ref(), self.now()))
                 };
             }
             if let Some(failure) = self.viewer.failure() {
@@ -176,19 +181,22 @@ impl eframe::App for Demo {
                 ui.ctx().request_repaint_after_secs((after - now) as f32);
             }
         }
-        let face = &self.faces[usize::from(self.night)].clone();
         egui::Panel::top("controls").show(ui, |ui| self.controls(ui));
+        let now = self.now();
+        let face = &self.faces[usize::from(self.night)];
         egui::CentralPanel::default().show(ui, |ui| {
             let graph = Graph::new(&self.viewer, &mut self.state, &face.palette, self.trace)
                 .flag(self.flag)
                 .lanes(&self.lanes)
                 .include_zero(true)
+                .now(now)
                 .height(ui.available_height() - STRIP - SPACE);
             ui.add(graph);
             ui.add_space(SPACE);
             ui.add(
                 Strip::new(&self.viewer, &mut self.state, &face.palette)
                     .include_zero(true)
+                    .now(now)
                     .height(STRIP),
             );
         });

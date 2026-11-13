@@ -23,10 +23,11 @@ use crate::state::Window;
 const CACHE_BYTES: usize = 256 << 20;
 
 /// What a graph asks: a query whose window is resolved against the extent when it runs, so a
-/// followed window ends where the recording does then.
+/// followed window ends where the recording does then, or at the host's now where that is later.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Request {
     pub window: Window,
+    pub now: Option<i64>,
     pub columns: u32,
     pub channels: Vec<usize>,
     pub flags: Vec<(usize, usize)>,
@@ -37,7 +38,7 @@ pub(crate) struct Request {
 
 impl Request {
     fn query(&self, extent: Option<&Range<i64>>) -> Query {
-        let window = self.window.resolve(extent);
+        let window = self.window.resolve(extent, self.now);
         Query {
             statistics: std::iter::once(window.clone())
                 .chain(self.selection.clone())
@@ -100,6 +101,8 @@ struct Slot {
     snapshot: Option<Snapshot>,
     replace: Option<Recording>,
     facts: Facts,
+    /// Snapshots taken, so a graph following the recording can tell when to ask again.
+    snapshots: u64,
     /// Queries run to the end or cancelled, for the tests.
     #[cfg(test)]
     runs: u64,
@@ -189,6 +192,7 @@ impl Viewer {
                 snapshot: None,
                 replace: None,
                 facts: Facts::of(&recording, live),
+                snapshots: 0,
                 #[cfg(test)]
                 runs: 0,
                 stopped: false,
@@ -283,6 +287,11 @@ impl Viewer {
         generation
     }
 
+    /// Snapshots taken so far.
+    pub(crate) fn snapshots(&self) -> u64 {
+        self.shared.slot().snapshots
+    }
+
     /// A query is waiting or running.
     pub(crate) fn busy(&self) -> bool {
         let slot = self.shared.slot();
@@ -309,6 +318,17 @@ impl Viewer {
         cache_bytes: usize,
     ) -> Result<Self, Error> {
         Self::opened(ctx, open, cache_bytes)
+    }
+
+    #[cfg(all(test, feature = "live"))]
+    pub(crate) fn live_with_opener(
+        ctx: &egui::Context,
+        open: Opener,
+        snapshot: Snapshot,
+        cache_bytes: usize,
+    ) -> Result<Self, Error> {
+        let recording = Recording::live(snapshot, open()?, Cache::new(cache_bytes))?;
+        Ok(Self::start(ctx, open, cache_bytes, recording, true))
     }
 
     #[cfg(test)]
@@ -376,6 +396,7 @@ fn answer(shared: &Shared) {
                     match updated {
                         Ok(facts) => {
                             slot.facts = facts;
+                            slot.snapshots += 1;
                             slot.update_failure = None;
                         }
                         Err(e) => slot.update_failure = Some(e.to_string()),
