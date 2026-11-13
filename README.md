@@ -20,6 +20,7 @@ computer.
 | `crates/wasm` | the same decoder compiled to WASM, for the browser |
 | `crates/convert-wasm` | the converter compiled to WASM, for the site's Open page |
 | `crates/view` | the viewer's logic apart from the drawing: a recording opened finished or read while it is written, a view's columns, samples, statistics and markers, and the web's readouts, times, value scale, time axis and point probes |
+| `crates/egui` | the native renderer: a recording drawn with egui through `crates/view`, as a graph of a trace and digital lanes with a strip of the whole recording under it, for verge's desktop app |
 | `web` | the custom elements, the chart, the converter's worker, and the build of the site |
 | `site` | the site's pages: an overview, a viewer that also converts, and the docs |
 | `bench` | the decode benchmark: the WASM decoder against JavaScript ones, on real recordings |
@@ -46,6 +47,13 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo build -p escapement-tickwave-view --target wasm32-unknown-unknown --no-default-features
 cargo build --release -p escapement-tickwave-cli     # the converter, at target/release/tickwave
+```
+
+The native renderer's demo opens a recording, or records a synthetic one live:
+
+```sh
+cargo run --release -p escapement-tickwave-egui --example demo -- web/fixtures/energy.tickwave
+cargo run --release -p escapement-tickwave-egui --example demo -- --live 100000
 ```
 
 The browser's decoder and converter also need `wasm-bindgen` and `wasm-opt`:

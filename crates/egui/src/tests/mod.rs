@@ -2,6 +2,7 @@
 //! captures are, a host that keeps a `ViewState`, and readers of what a frame painted.
 
 mod graph;
+mod strip;
 mod viewer;
 
 use std::collections::BTreeMap;
@@ -23,7 +24,7 @@ use escapement_tickwave_format::writer::{Bundle, Finish, WriteOptions, Writer};
 use escapement_tickwave_view::{Answer, Bytes};
 
 use crate::graph::{Shown, shown};
-use crate::{Extras, Graph, Palette, ViewState, Viewer};
+use crate::{Extras, Graph, Palette, Strip, ViewState, Viewer};
 
 /// Ticks a second: a microsecond each.
 pub const SECOND: i64 = 1_000_000;
@@ -370,6 +371,9 @@ pub fn palette() -> Palette {
 }
 
 const SALT: &str = "test graph";
+const STRIP_SALT: &str = "test strip";
+/// The strip's height in the tests.
+pub const STRIP: f32 = 64.0;
 
 /// What a host keeps for its graph.
 pub struct Host {
@@ -384,6 +388,10 @@ pub struct Host {
     pub id: Option<egui::Id>,
     /// Some frame's response said the window or the selection moved.
     pub changed: bool,
+    /// A strip under the graph, and what its response said.
+    pub strip: bool,
+    pub strip_id: Option<egui::Id>,
+    pub strip_changed: bool,
 }
 
 pub fn harness(state: ViewState) -> Harness<'static, Host> {
@@ -403,6 +411,9 @@ pub fn harness_at(state: ViewState, pixels_per_point: f32) -> Harness<'static, H
         extras: Extras::default(),
         id: None,
         changed: false,
+        strip: false,
+        strip_id: None,
+        strip_changed: false,
     };
     Harness::builder()
         .with_size(egui::vec2(1080.0, 700.0))
@@ -413,15 +424,27 @@ pub fn harness_at(state: ViewState, pixels_per_point: f32) -> Harness<'static, H
             |ui, host: &mut Host| {
                 let Some(viewer) = &host.viewer else { return };
                 host.id = Some(ui.make_persistent_id(IdSalt::new(SALT)));
-                let response = ui.add(
-                    Graph::new(viewer, &mut host.state, &host.palette, host.trace)
-                        .flag(host.flag)
-                        .lanes(&host.lanes)
-                        .include_zero(host.include_zero)
-                        .extras(host.extras)
-                        .id_salt(SALT),
-                );
+                let mut graph = Graph::new(viewer, &mut host.state, &host.palette, host.trace)
+                    .flag(host.flag)
+                    .lanes(&host.lanes)
+                    .include_zero(host.include_zero)
+                    .extras(host.extras)
+                    .id_salt(SALT);
+                if host.strip {
+                    graph = graph.height(ui.available_height() - STRIP - 8.0);
+                }
+                let response = ui.add(graph);
                 host.changed |= response.changed();
+                if host.strip {
+                    host.strip_id = Some(ui.make_persistent_id(IdSalt::new(STRIP_SALT)));
+                    let response = ui.add(
+                        Strip::new(viewer, &mut host.state, &host.palette)
+                            .include_zero(host.include_zero)
+                            .height(STRIP)
+                            .id_salt(STRIP_SALT),
+                    );
+                    host.strip_changed |= response.changed();
+                }
             },
             host,
         )

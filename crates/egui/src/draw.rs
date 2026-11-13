@@ -8,9 +8,9 @@ use escapement_tickwave_view::axis::time_axis;
 use escapement_tickwave_view::columns::{DigitalColumns, Grid, State};
 use escapement_tickwave_view::readouts::format_at;
 use escapement_tickwave_view::scale::{ValueRange, range_marks};
-use escapement_tickwave_view::{AnalogColumns, Drawn, Marker, Point};
+use escapement_tickwave_view::{AnalogColumns, Drawn, Marker, Point, StripAnswer};
 
-use crate::graph::{LABEL_TOP, Layout, View};
+use crate::graph::{LABEL_TOP, Layout, View, fitted};
 use crate::palette::Palette;
 use crate::viewer::{Facts, Held};
 
@@ -232,12 +232,105 @@ impl Frame<'_> {
         Rect::from_min_max(l.plot.left_top(), pos2(l.plot.right(), bottom))
     }
 
-    /// From `from` to `to` across the plot, at least `px` wide; None where it lies outside.
     fn across(&self, from: f64, to: f64, px: f32) -> Option<(f32, f32)> {
-        let plot = self.layout.plot;
-        let a = self.view.x(from).max(plot.left());
-        let b = self.view.x(to).min(plot.right());
-        (b >= a && a < plot.right()).then_some((a, b.max(a + px)))
+        across(self.view, self.layout.plot, from, to, px)
+    }
+}
+
+/// From tick `from` to tick `to` across `rect` as `view` maps them, at least `px` wide; None
+/// where it lies outside.
+fn across(view: &View, rect: Rect, from: f64, to: f64, px: f32) -> Option<(f32, f32)> {
+    let a = view.x(from).max(rect.left());
+    let b = view.x(to).min(rect.right());
+    (b >= a && a < rect.right()).then_some((a, b.max(a + px)))
+}
+
+/// Shades each of `lost` over `rect`, at least `px` wide so none vanishes at any zoom; spans
+/// less than `px` apart share one band.
+fn shade_lost(
+    painter: &egui::Painter,
+    view: &View,
+    rect: Rect,
+    lost: impl IntoIterator<Item = Range<i64>>,
+    px: f32,
+    p: &Palette,
+) {
+    let mut bands: Vec<(f32, f32)> = Vec::new();
+    for r in lost {
+        if let Some((a, b)) = across(view, rect, r.start as f64, r.end as f64, px) {
+            match bands.last_mut() {
+                Some(last) if a - last.1 < px => last.1 = last.1.max(b),
+                _ => bands.push((a, b)),
+            }
+        }
+    }
+    for (a, b) in bands {
+        painter.rect_filled(
+            Rect::from_min_max(pos2(a, rect.top()), pos2(b, rect.bottom())),
+            0.0,
+            p.attention_fill.gamma_multiply(p.shade),
+        );
+    }
+}
+
+/// A trace's colour: pale where it touches a loss or is flagged.
+fn colour(p: &Palette, pale: bool) -> Color32 {
+    if pale {
+        p.trace.gamma_multiply(p.pale)
+    } else {
+        p.trace
+    }
+}
+
+fn stroke(c: Color32) -> Stroke {
+    Stroke::new(TRACE_WIDTH, c)
+}
+
+/// Each piece's band from its least to its greatest value, filled, with lines along both
+/// edges that step from one piece to the next where they join.
+fn bands(
+    pieces: &[Piece],
+    view: &View,
+    y_at: impl Fn(f64) -> f32,
+    p: &Palette,
+    fills: &mut Mesh,
+    lines: &mut Lines,
+) {
+    let (mut top, mut bottom) = (Vec::new(), Vec::new());
+    let mut drawing: Option<(Color32, f32, f32)> = None;
+    for piece in pieces {
+        let (x0, x1) = (view.x(piece.from), view.x(piece.to));
+        let (yt, yb) = (y_at(piece.max), y_at(piece.min));
+        let c = colour(p, piece.pale);
+        fills.add_colored_rect(
+            Rect::from_min_max(pos2(x0, yt), pos2(x1, yb)),
+            c.gamma_multiply(p.fill),
+        );
+        match drawing {
+            Some((same, _, _)) if piece.joined && same == c => {
+                step(&mut top, pos2(x0, yt));
+                step(&mut top, pos2(x1, yt));
+                step(&mut bottom, pos2(x0, yb));
+                step(&mut bottom, pos2(x1, yb));
+            }
+            _ => {
+                if let Some((was, pt, pb)) = drawing {
+                    lines.add(&mut top, stroke(was));
+                    lines.add(&mut bottom, stroke(was));
+                    if piece.joined {
+                        top.push(pos2(x0, pt));
+                        bottom.push(pos2(x0, pb));
+                    }
+                }
+                top.extend([pos2(x0, yt), pos2(x1, yt)]);
+                bottom.extend([pos2(x0, yb), pos2(x1, yb)]);
+            }
+        }
+        drawing = Some((c, yt, yb));
+    }
+    if let Some((c, _, _)) = drawing {
+        lines.add(&mut top, stroke(c));
+        lines.add(&mut bottom, stroke(c));
     }
 }
 
@@ -419,67 +512,15 @@ fn trace(f: &Frame, px: f32, plot: &egui::Painter) -> (Mesh, Lines, Vec<CircleSh
         return (fills, lines, circles);
     };
     let w = &f.view.window;
-    let mut bands: Vec<(f32, f32)> = Vec::new();
-    for r in t.lost(w) {
-        if let Some((a, b)) = f.across(r.start as f64, r.end as f64, px) {
-            match bands.last_mut() {
-                Some(last) if a - last.1 < px => last.1 = last.1.max(b),
-                _ => bands.push((a, b)),
-            }
-        }
-    }
-    let plot_rect = f.layout.plot;
-    for (a, b) in bands {
-        plot.rect_filled(
-            Rect::from_min_max(pos2(a, plot_rect.top()), pos2(b, plot_rect.bottom())),
-            0.0,
-            p.attention_fill.gamma_multiply(p.shade),
-        );
-    }
-    let colour = |pale: bool| {
-        if pale {
-            p.trace.gamma_multiply(p.pale)
-        } else {
-            p.trace
-        }
-    };
-    let stroke = |c: Color32| Stroke::new(TRACE_WIDTH, c);
-    let (mut top, mut bottom) = (Vec::new(), Vec::new());
-    let mut drawing: Option<(Color32, f32, f32)> = None;
-    for piece in t.pieces(w) {
-        let (x0, x1) = (f.view.x(piece.from), f.view.x(piece.to));
-        let (yt, yb) = (f.y_at(piece.max), f.y_at(piece.min));
-        let c = colour(piece.pale);
-        fills.add_colored_rect(
-            Rect::from_min_max(pos2(x0, yt), pos2(x1, yb)),
-            c.gamma_multiply(p.fill),
-        );
-        match drawing {
-            Some((same, _, _)) if piece.joined && same == c => {
-                step(&mut top, pos2(x0, yt));
-                step(&mut top, pos2(x1, yt));
-                step(&mut bottom, pos2(x0, yb));
-                step(&mut bottom, pos2(x1, yb));
-            }
-            _ => {
-                if let Some((was, pt, pb)) = drawing {
-                    lines.add(&mut top, stroke(was));
-                    lines.add(&mut bottom, stroke(was));
-                    if piece.joined {
-                        top.push(pos2(x0, pt));
-                        bottom.push(pos2(x0, pb));
-                    }
-                }
-                top.extend([pos2(x0, yt), pos2(x1, yt)]);
-                bottom.extend([pos2(x0, yb), pos2(x1, yb)]);
-            }
-        }
-        drawing = Some((c, yt, yb));
-    }
-    if let Some((c, _, _)) = drawing {
-        lines.add(&mut top, stroke(c));
-        lines.add(&mut bottom, stroke(c));
-    }
+    shade_lost(plot, f.view, f.layout.plot, t.lost(w), px, p);
+    bands(
+        &t.pieces(w),
+        f.view,
+        |v| f.y_at(v),
+        p,
+        &mut fills,
+        &mut lines,
+    );
     if let Some(points) = t.samples {
         let mut line = Vec::new();
         let mut drawing: Option<(Color32, i64, f32)> = None;
@@ -490,7 +531,7 @@ fn trace(f: &Frame, px: f32, plot: &egui::Painter) -> (Mesh, Lines, Vec<CircleSh
                 }
                 continue;
             }
-            let c = colour(s.flagged);
+            let c = colour(p, s.flagged);
             let (x0, x1, y) = (
                 f.view.x(s.tick as f64),
                 f.view.x(s.end as f64),
@@ -526,7 +567,7 @@ fn trace(f: &Frame, px: f32, plot: &egui::Painter) -> (Mesh, Lines, Vec<CircleSh
                 circles.push(CircleShape::filled(
                     pos2(f.view.x(s.tick as f64), f.y_at(s.value)),
                     DOT_RADIUS,
-                    colour(s.flagged),
+                    colour(p, s.flagged),
                 ));
             }
         }
@@ -661,5 +702,59 @@ fn markers(f: &Frame, plot: &egui::Painter) {
         let pos = pos2(rect.left() + 6.0, rect.bottom() - 6.0 - galley.size().y);
         plot.rect_filled(Rect::from_min_size(pos, galley.size()), 0.0, p.surface);
         plot.galley(pos, galley, p.ink_2);
+    }
+}
+
+/// The strip: the trace's columns over the extent, stretched across `rect`, with its lost spans
+/// shaded under them and the window washed over them.
+pub(crate) fn strip(
+    ui: &Ui,
+    rect: Rect,
+    answer: &StripAnswer,
+    window: &Range<i64>,
+    include_zero: bool,
+    p: &Palette,
+) {
+    let px = 1.0 / ui.ctx().pixels_per_point();
+    let painter = ui.painter().with_clip_rect(rect);
+    let view = View::new(answer.extent.clone(), rect);
+    if let Drawn::Analog { columns, lost, .. } = &answer.channel {
+        let c = Columns {
+            grid: &answer.grid,
+            columns,
+            lost,
+        };
+        let mut pieces = Vec::new();
+        part(
+            &c,
+            answer.extent.start,
+            answer.extent.end,
+            false,
+            &mut pieces,
+        );
+        shade_lost(&painter, &view, rect, lost.iter().cloned(), px, p);
+        let raw = pieces
+            .iter()
+            .map(|piece| (piece.min, piece.max))
+            .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)));
+        if let Some(raw) = raw {
+            let (lo, hi) = fitted(raw, include_zero, 0, 0.0, rect.height());
+            let y_at = |v: f64| rect.bottom() - ((v - lo) / (hi - lo)) as f32 * rect.height();
+            let (mut fills, mut lines) = (Mesh::default(), Lines::default());
+            bands(&pieces, &view, y_at, p, &mut fills, &mut lines);
+            let mesh = {
+                let _span = tracing::debug_span!("tessellate").entered();
+                tessellate(ui, rect, lines, Vec::new())
+            };
+            painter.add(Shape::mesh(fills));
+            painter.add(Shape::mesh(mesh));
+        }
+    }
+    if let Some((a, b)) = across(&view, rect, window.start as f64, window.end as f64, px) {
+        painter.rect_filled(
+            Rect::from_min_max(pos2(a, rect.top()), pos2(b, rect.bottom())),
+            0.0,
+            p.wash,
+        );
     }
 }

@@ -5,6 +5,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
+use escapement_tickwave_format::recut::Recutter;
+use escapement_tickwave_format::writer::WriteOptions;
 use escapement_tickwave_view::{Error, MarkerQuery};
 
 use super::*;
@@ -246,4 +248,73 @@ fn a_snapshot_given_a_finished_recording_is_its_failure() {
         v.failure().as_deref(),
         Some("the recording is finished: it takes no snapshot")
     );
+}
+
+#[test]
+fn a_reopen_after_compaction_reads_the_file_renamed_over_the_live_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("live.tickwave");
+    let cap = Capture::new(1000, 10_000, noisy);
+    let (mut w, head) = cap.writer();
+    let mut file = std::fs::File::create(&path).unwrap();
+    file.write_all(&head).unwrap();
+    let mut write = |w: &mut escapement_tickwave_format::writer::Writer, pairs: Range<u64>| {
+        let end = cap.tick(pairs.end);
+        cap.items(w, pairs);
+        w.flush(end).unwrap();
+        file.write_all(&w.take_output()).unwrap();
+        file.flush().unwrap();
+        w.snapshot()
+    };
+    let snapshot = write(&mut w, 0..4000);
+    let state = ViewState {
+        window: Window::Follow { span: SECOND },
+        ..ViewState::default()
+    };
+    let mut h = harness(state.clone());
+    h.state_mut().viewer = Some(Viewer::live(&h.ctx, &path, snapshot).unwrap());
+    answered(&mut h, 3 * SECOND..4 * SECOND);
+
+    // Before the writer finishes, a reopen finds no footer and the live recording stays.
+    assert!(matches!(viewer(&h).reopen(), Err(Error::Unfinished)));
+    let snapshot = write(&mut w, 4000..cap.count);
+    viewer(&h).update(snapshot);
+    let live = answered(&mut h, 9 * SECOND..10 * SECOND);
+    assert!(viewer(&h).facts().live);
+
+    // The writer finishes in place; a compacted copy is written beside it and renamed over it.
+    file.write_all(&cap.finish(w)).unwrap();
+    file.flush().unwrap();
+    let finished = std::fs::read(&path).unwrap();
+    let mut recut = Recutter::new(WriteOptions {
+        level: 1,
+        block_bytes: 1 << 20,
+        batch: 1,
+    });
+    recut.feed(&finished).unwrap();
+    let mut compacted = recut.take_output();
+    compacted.extend(recut.finish().unwrap().tail);
+    let beside = dir.path().join("live.tickwave.compacting");
+    std::fs::write(&beside, &compacted).unwrap();
+    std::fs::rename(&beside, &path).unwrap();
+    // The file the writer wrote, now unlinked, empties: nothing can be read from it any more,
+    // so an answer that lands is the compacted file's.
+    file.set_len(0).unwrap();
+
+    viewer(&h).reopen().unwrap();
+    for _ in 0..400 {
+        h.step();
+        if !Arc::ptr_eq(&viewer(&h).answer().unwrap(), &live) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let a = viewer(&h).answer().unwrap();
+    assert!(!Arc::ptr_eq(&a, &live), "no answer from the compacted file");
+    assert_eq!(a.window, 9 * SECOND..10 * SECOND);
+    assert_eq!(a.extent, Some(0..10 * SECOND));
+    assert!(!viewer(&h).facts().live);
+    assert_eq!(h.state().state, state);
+    h.step();
+    assert_eq!(viewer(&h).failure(), None);
 }

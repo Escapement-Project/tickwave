@@ -147,7 +147,7 @@ pub(crate) struct View {
 }
 
 impl View {
-    fn new(window: Range<i64>, plot: Rect) -> Self {
+    pub(crate) fn new(window: Range<i64>, plot: Rect) -> Self {
         let width = plot.width().max(1.0);
         Self {
             per: (window.end - window.start) as f64 / f64::from(width),
