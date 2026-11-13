@@ -2,7 +2,7 @@
 //! index helpers, which the columns and the probe read. A tick here is an f64, as the web's is,
 //! since a pixel's edge falls between ticks.
 
-use escapement_tickwave_format::model::{Break, Ratio, run_sample_tick, sample_tick};
+use escapement_tickwave_format::model::{Break, Ratio, lost_span, run_sample_tick, sample_tick};
 
 /// An analog channel's samples' places: its first tick, period, count and breaks.
 #[derive(Clone, Copy, Debug)]
@@ -80,4 +80,40 @@ pub fn sample_at_or_before(runs: &Runs, end: i64, tick: f64) -> Option<u64> {
         i += 1;
     }
     Some(i.min(runs.count - 1))
+}
+
+/// The place after sample `i` on its run's grid: where its time ends, unless the next run or the
+/// length comes sooner (FORMAT.md, "Gaps").
+pub fn place_after(runs: &Runs, i: u64) -> i64 {
+    match runs.breaks.partition_point(|b| b.index <= i) {
+        0 => sample_tick(runs.first, runs.period, i + 1),
+        k => {
+            let b = runs.breaks[k - 1];
+            sample_tick(b.tick, runs.period, i + 1 - b.index)
+        }
+    }
+}
+
+/// Where a break's lost samples would have sat, and how many there were.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LostSpan {
+    pub from: i64,
+    pub to: i64,
+    pub lost: u64,
+}
+
+/// The span each break's lost samples cover (FORMAT.md, "Gaps"): from place `index` to place
+/// `index + lost` on the grid of the run before the break, ending at the break's tick if that
+/// comes sooner. A pause has none.
+pub fn lost_spans(runs: &Runs) -> Vec<LostSpan> {
+    (0..runs.breaks.len())
+        .filter_map(|k| {
+            let span = lost_span(runs.first, runs.period, runs.breaks, k)?;
+            Some(LostSpan {
+                from: span.start,
+                to: span.end,
+                lost: runs.breaks[k].lost,
+            })
+        })
+        .collect()
 }

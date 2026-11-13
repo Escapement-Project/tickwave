@@ -189,7 +189,7 @@ pub struct AnalogColumns {
 }
 
 impl AnalogColumns {
-    fn empty(count: usize) -> Self {
+    pub(crate) fn empty(count: usize) -> Self {
         Self {
             min: vec![f64::INFINITY; count],
             max: vec![f64::NEG_INFINITY; count],
@@ -239,6 +239,20 @@ pub fn analog_from_samples<T: Copy + Into<f64>>(
     to: f64,
 ) -> AnalogColumns {
     let mut cols = AnalogColumns::empty(g.count);
+    widen_from_samples(g, s, channel, from, to, &mut cols);
+    connect(&mut cols);
+    cols
+}
+
+/// `analog_from_samples`'s ranges, widening `cols`' rather than replacing them, and not joined.
+pub(crate) fn widen_from_samples<T: Copy + Into<f64>>(
+    g: &Grid,
+    s: &Samples<T>,
+    channel: &Runs,
+    from: f64,
+    to: f64,
+    cols: &mut AnalogColumns,
+) {
     let v = s.values;
     let (c0, c1) = column_range(g, from, to);
     let at = |tick: f64| tile_index(s, channel, tick);
@@ -269,12 +283,9 @@ pub fn analog_from_samples<T: Copy + Into<f64>>(
         for &x in &v[k..j] {
             widen(&mut lo, &mut hi, x.into(), x.into());
         }
-        cols.min[c] = lo;
-        cols.max[c] = hi;
+        widen(&mut cols.min[c], &mut cols.max[c], lo, hi);
         i = j;
     }
-    connect(&mut cols);
-    cols
 }
 
 /// The samples a line through a tile's samples draws over a grid, `k0..k1` in the tile's own
@@ -316,6 +327,19 @@ pub fn analog_from_overview<T: Copy + Into<f64>>(
     to: f64,
 ) -> AnalogColumns {
     let mut cols = AnalogColumns::empty(g.count);
+    widen_from_overview(g, ov, from, to, &mut cols);
+    connect(&mut cols);
+    cols
+}
+
+/// `analog_from_overview`'s ranges, widening `cols`' rather than replacing them, and not joined.
+pub(crate) fn widen_from_overview<T: Copy + Into<f64>>(
+    g: &Grid,
+    ov: &AnalogOverview<T>,
+    from: f64,
+    to: f64,
+    cols: &mut AnalogColumns,
+) {
     let n = ov.min.len();
     let (start, bucket) = (ov.start as f64, ov.bucket as f64);
     let lo = js::max(from, start);
@@ -332,6 +356,4 @@ pub fn analog_from_overview<T: Copy + Into<f64>>(
             widen(&mut cols.min[c], &mut cols.max[c], ov.min[k].into(), b);
         }
     }
-    connect(&mut cols);
-    cols
 }

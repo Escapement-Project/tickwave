@@ -19,7 +19,7 @@ computer.
 | `crates/cli` | `tickwave`, the command-line converter: convert, describe, verify, check and bundle |
 | `crates/wasm` | the same decoder compiled to WASM, for the browser |
 | `crates/convert-wasm` | the converter compiled to WASM, for the site's Open page |
-| `crates/view` | the viewer's logic apart from the drawing, ported from the web's: readouts, times, the value scale, the time axis, pixel columns and point probes |
+| `crates/view` | the viewer's logic apart from the drawing: a recording opened finished or read while it is written, a view's columns, samples, statistics and markers, and the web's readouts, times, value scale, time axis and point probes |
 | `web` | the custom elements, the chart, the converter's worker, and the build of the site |
 | `site` | the site's pages: an overview, a viewer that also converts, and the docs |
 | `bench` | the decode benchmark: the WASM decoder against JavaScript ones, on real recordings |

@@ -1,9 +1,29 @@
 # escapement-tickwave-view
 
-The viewer's logic apart from the drawing, for a native renderer and later the web: readouts with
-exact digits, times, the value scale, the time axis, pixel columns and point probes. Each module
-takes the same inputs and gives the same outputs as the web viewer's TypeScript module it ports,
-and both are tested against the cases in `testdata/view/`.
+The viewer's logic apart from the drawing, for a native renderer and later the web. It opens a
+recording, finished or still being written, and answers what a view asks of it: each channel's
+pixel columns, single samples once there are few enough, the overview strip, statistics over an
+interval, and the markers. It also has the web viewer's readouts with exact digits, times, value
+scale, time axis and point probes.
+
+## A recording and a query
+
+`Recording::open` reads a finished file through its footer, from any `Bytes`: a file, or bytes in
+memory. `Recording::live` reads a file a writer in the same process is still writing, through the
+writer's `Snapshot`. A file cut off by a crash is `Error::Unfinished`; the format crate's Recutter
+repairs it. Decoded blocks and overview blocks go in a `Cache`, which a recording's snapshots share.
+
+`Recording::query` answers a `Query`: a window in ticks, its columns, the channels drawn, the
+statistics and the markers. The columns cover the window and one width either side, so a pan has
+columns to draw while its own answer is on the way. A column takes the coarsest overview level no
+wider than it, or the samples and edges themselves below the finest. An analog trace draws no line
+across a break, and a column that touches a span the instrument lost is pale.
+
+`Recording::statistics` counts each sample whose time covers part of the interval, one that starts
+before it included, and weights its value by the ticks it covers there, exactly for integer codes.
+For a period of whole ticks it takes whole overview buckets where it can.
+
+## Modules
 
 | Module | Ports | Holds |
 | --- | --- | --- |
@@ -12,9 +32,16 @@ and both are tested against the cases in `testdata/view/`.
 | `scale` | `web/src/render/scale.ts` | an analog row's value range: its limits, zoom, move, fit and labels |
 | `axis` | `web/src/render/axis.ts` | the time axis's labelled ticks |
 | `columns` | `web/src/render/columns.ts` | what each pixel column of a row shows, from edges, samples or overview buckets |
-| `probe` | `web/src/probe.ts` | the pulse around a tick, its figures, and an analog channel at a pixel |
-| `runs` | `web/src/source.ts` | which sample sits at or around a tick |
+| `probe` | `web/src/probe.ts` | the pulse around a tick, its figures, an analog channel at a pixel, and the searches for a pulse's edges |
+| `runs` | `web/src/source.ts` | which sample sits at or around a tick, where a sample's time ends, and a break's lost samples |
+| `spans` | `web/src/source.ts` | where a channel's data lies, between its gaps or across its runs |
+
+Each port takes the same inputs and gives the same outputs as its TypeScript module, and both are
+tested against the cases in `testdata/view/`.
 
 It builds for `wasm32-unknown-unknown` with its `live` feature off. `live`, on by default, turns
 on the format crate's encoder, which holds the `Snapshot` of a recording a writer in the same
 process is still writing.
+
+`examples/synth.rs` writes a recording laid out as verge's energy captures are, and
+`examples/timing.rs` times opening one and a view's queries of it.

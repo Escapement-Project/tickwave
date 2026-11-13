@@ -1,12 +1,15 @@
 //! What the view measures at one point: a digital channel's pulse around a tick, with its width,
-//! period, frequency and duty, and an analog channel's value or range at a pixel. web/src/probe.ts's
-//! pure functions; finding the edges past what is in hand needs the data layer.
+//! period, frequency and duty, and an analog channel's value or range at a pixel. A port of
+//! web/src/probe.ts; `find_edge` and `complete_pulse` search a `Recording`.
+
+use std::sync::atomic::AtomicBool;
 
 use escapement_tickwave_format::model::Ratio;
 
 use crate::columns::{AnalogOverview, Edges, Samples};
 use crate::js;
 use crate::readouts::{format_interval, format_rate};
+use crate::recording::{Error, Recording};
 use crate::runs::{Runs, sample_at_or_before};
 
 /// The ticks where a channel's level is known, `start..end`: every edge lies after `start`.
@@ -252,4 +255,119 @@ pub fn analog_from_overview<T: Copy + Into<f64>>(
         }
     }
     reading(min, max)
+}
+
+/// Below this many ticks, a search reads the span's edges rather than narrowing further.
+const DIRECT: i64 = 1 << 16;
+/// A search narrows by about this many buckets a step.
+const FAN: i64 = 64;
+
+/// Digital channel `channel`'s first edge in [lo, hi) (`forward`) or its last, or None where
+/// there is none. It reads the overview's change bits to narrow the span, a level at a time, and
+/// the edges of one small span at the end, so finding the edges of a long quiet stretch decodes
+/// little.
+pub fn find_edge(
+    rec: &Recording,
+    channel: usize,
+    lo: i64,
+    hi: i64,
+    forward: bool,
+    cancel: &AtomicBool,
+) -> Result<Option<i64>, Error> {
+    if hi <= lo {
+        return Ok(None);
+    }
+    let direct = || -> Result<Option<i64>, Error> {
+        let (_, t) = rec.edges(channel, lo, hi, cancel)?;
+        Ok(if forward { t.first() } else { t.last() }
+            .copied()
+            .filter(|x| (lo..hi).contains(x)))
+    };
+    if hi - lo <= DIRECT {
+        return direct();
+    }
+    let Some(level) = rec.level_for(((hi - lo + FAN - 1) / FAN) as f64) else {
+        return direct();
+    };
+    let shift = rec.levels[level].shift;
+    let bucket = 1i64 << shift;
+    if bucket >= hi - lo {
+        return direct();
+    }
+    let covered = rec.levels[level].end();
+    let (k0, k1) = (lo >> shift, ((hi.min(covered) - 1) >> shift) + 1);
+    // Past the buckets a live recording has settled, its edges are searched directly.
+    let mut spans: Vec<(i64, i64)> = Vec::new();
+    if k1 > k0 {
+        let (_, changes) = rec.digital_buckets(channel, level, k0 as u64, k1 as u64, cancel)?;
+        for (j, &changed) in changes.iter().enumerate() {
+            if changed {
+                let k = k0 + j as i64;
+                spans.push((lo.max(k * bucket), hi.min((k + 1) * bucket)));
+            }
+        }
+    }
+    if hi > covered {
+        spans.push((lo.max(covered), hi));
+    }
+    if !forward {
+        spans.reverse();
+    }
+    for (s, e) in spans {
+        if e <= s {
+            continue;
+        }
+        // A bucket at the span's end can hold its edge outside the span: then the next one has it.
+        if let Some(found) = find_edge(rec, channel, s, e, forward, cancel)? {
+            return Ok(Some(found));
+        }
+    }
+    Ok(None)
+}
+
+/// `p` with the edges it lacks found by searching `channel`.
+pub fn complete_pulse(
+    rec: &Recording,
+    channel: usize,
+    p: &Pulse,
+    tick: i64,
+    known: Known,
+    cancel: &AtomicBool,
+) -> Result<Pulse, Error> {
+    let found = |x: Option<i64>| x.map_or(EdgeAt::Open, EdgeAt::Tick);
+    let start = match p.start {
+        EdgeAt::Unread => found(find_edge(
+            rec,
+            channel,
+            known.start + 1,
+            tick + 1,
+            false,
+            cancel,
+        )?),
+        other => other,
+    };
+    let end = match p.end {
+        EdgeAt::Unread => found(find_edge(rec, channel, tick + 1, known.end, true, cancel)?),
+        other => other,
+    };
+    let next = match (p.next, end) {
+        (EdgeAt::Unread, EdgeAt::Tick(e)) => {
+            // A pulse the source stamped with one time: the period's last edge shares the tick
+            // of `end`.
+            let (_, at_end) = rec.edges(channel, e, e + 1, cancel)?;
+            if at_end.len() > 1 {
+                EdgeAt::Tick(e)
+            } else {
+                found(find_edge(rec, channel, e + 1, known.end, true, cancel)?)
+            }
+        }
+        (EdgeAt::Unread, _) => EdgeAt::Open,
+        (other, _) => other,
+    };
+    Ok(Pulse {
+        level: p.level,
+        start,
+        end,
+        next,
+    })
 }
