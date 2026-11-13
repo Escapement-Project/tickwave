@@ -427,3 +427,110 @@ pub fn convert(request: &str) -> Result<Converted, JsError> {
         file: out.into_inner(),
     })
 }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MergeInput {
+    file: FileRef,
+    /// The file's name without its extension: it names a clashing channel or generator apart.
+    stem: String,
+    /// A time at the merged rate, positive later.
+    #[serde(default)]
+    align: Option<String>,
+    /// `[name, new name or null]`, in the order to store them; none takes every channel.
+    #[serde(default)]
+    channels: Vec<(String, Option<String>)>,
+    /// The sidecar beside the file, name to text, for a recording that bundles none.
+    #[serde(default)]
+    annotations: Option<std::collections::BTreeMap<String, String>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MergeRequest {
+    inputs: Vec<MergeInput>,
+    #[serde(default)]
+    offsets: Vec<(String, String)>,
+    #[serde(default)]
+    keeps: Vec<Keep>,
+    #[serde(default)]
+    units: Vec<(String, String)>,
+    title: Option<String>,
+    #[serde(default)]
+    meta: Vec<(String, String)>,
+    level: i32,
+    block_kib: u32,
+    /// The merged file's name without its extension, which names the generator files it bundles.
+    #[serde(default)]
+    stem: Option<String>,
+}
+
+/// The merged recording, and what the merge did that its settings didn't say.
+#[wasm_bindgen]
+pub struct MergedFile {
+    file: Vec<u8>,
+    report: String,
+}
+
+#[wasm_bindgen]
+impl MergedFile {
+    /// The recording's bytes, copied out of the module.
+    #[wasm_bindgen(getter)]
+    pub fn file(&self) -> Vec<u8> {
+        self.file.clone()
+    }
+
+    /// The merge's report, as a JSON array of strings: derived channels and annotations left out,
+    /// and generators renamed.
+    #[wasm_bindgen(getter)]
+    pub fn report(&self) -> String {
+        self.report.clone()
+    }
+}
+
+/// Merges .tickwave recordings as `tickwave merge` does, with the same defaults and checks.
+/// `request` is `{inputs: [{file, stem, align, channels, annotations}], offsets, keeps, units,
+/// title, meta, level, blockKib, stem}`, as JSON.
+#[wasm_bindgen]
+pub fn merge(request: &str) -> Result<MergedFile, JsError> {
+    use escapement_tickwave_import::merge::{self, Input, InputSettings, Settings};
+    hook();
+    let r: MergeRequest = serde_json::from_str(request).map_err(js)?;
+    let settings = Settings {
+        inputs: r
+            .inputs
+            .iter()
+            .map(|i| InputSettings {
+                align: i.align.clone().filter(|a| !a.is_empty()),
+                channels: i.channels.clone(),
+            })
+            .collect(),
+        offsets: r.offsets,
+        keeps: r.keeps,
+        units: r.units,
+        title: r.title.filter(|t| !t.is_empty()),
+        meta: r.meta.into_iter().collect(),
+        level: r.level,
+        block_kib: r.block_kib,
+        stem: r.stem.unwrap_or_else(|| "merged".into()),
+    };
+    let open = || -> Result<Vec<Input>, merge::Error> {
+        r.inputs
+            .iter()
+            .map(|i| {
+                let mut input = Input::read(i.file.input(), i.stem.clone())?;
+                if input.bundled.is_none() {
+                    input.bundled = i.annotations.clone();
+                }
+                Ok(input)
+            })
+            .collect()
+    };
+    let mut out = std::io::Cursor::new(Vec::new());
+    let merged = merge::merge(&open, &settings, MAX_DECODED, &Report, &mut out).map_err(js)?;
+    let report: Vec<String> = merged.notes.iter().map(|n| n.to_string()).collect();
+    Ok(MergedFile {
+        report: serde_json::to_string(&report).map_err(js)?,
+        file: out.into_inner(),
+    })
+}

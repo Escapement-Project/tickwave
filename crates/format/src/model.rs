@@ -314,6 +314,9 @@ pub struct Source {
     pub rate: Option<RateOrigin>,
     /// Anything else the source states about the capture.
     pub extra: BTreeMap<String, String>,
+    /// What converted it, where a recording read back says: an encoder states its own only for a
+    /// source that has none.
+    pub converter: Option<String>,
 }
 
 impl Source {
@@ -332,6 +335,7 @@ impl Source {
             trigger_s: None,
             rate: None,
             extra: BTreeMap::new(),
+            converter: None,
         }
     }
 }

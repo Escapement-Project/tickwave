@@ -271,6 +271,27 @@ fn check_id(id: &str, generated: bool) -> Option<String> {
     None
 }
 
+/// The generator a sidecar file is from, when its first line is a generator's head: a file a
+/// merge carries, where a hand-written file's annotations stay behind.
+pub fn generator_source(text: &str) -> Option<String> {
+    let first = text.lines().find(|l| !l.trim().is_empty())?;
+    let head: GeneratorHead = json(first).ok()?;
+    (head.format == FORMAT).then_some(head.source)
+}
+
+/// How many annotations a hand-written file holds; None when its TOML doesn't read.
+#[cfg(feature = "toml")]
+pub fn hand_written_count(hand: &str) -> Option<usize> {
+    #[derive(Deserialize)]
+    struct Annotations {
+        #[serde(default)]
+        annotation: Vec<toml::Value>,
+    }
+    toml::from_str::<Annotations>(hand)
+        .ok()
+        .map(|a| a.annotation.len())
+}
+
 /// Resolves and checks a sidecar against the recording's header, and against the recording's
 /// file name when the caller knows it. `hand` is the hand-written file's TOML. Returns the
 /// annotations, or every problem found.

@@ -1,6 +1,7 @@
 pub mod codes;
 pub mod convert;
 pub mod input;
+pub mod merge;
 pub mod recording;
 pub mod saleae;
 pub mod shape;

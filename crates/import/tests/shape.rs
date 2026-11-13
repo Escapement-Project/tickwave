@@ -296,6 +296,25 @@ fn a_cut_at_an_edge_folds_the_edge_into_the_gaps_level() {
 }
 
 #[test]
+fn a_cut_at_the_end_alone_keeps_the_edges_at_tick_0_as_the_source_has_them() {
+    // P pulses at tick 0, a rise and a fall there, then rises at 40. Kept to 50, its front is the
+    // source's, and so are the edges at 0.
+    let pulsed = || {
+        let mut r = source();
+        r.channels[0].data = ChannelData::Digital(Digital {
+            initial: false,
+            end: LENGTH,
+            edges: Box::new([0, 0, 40].into_iter()),
+            gaps: Vec::new(),
+        });
+        Ok(r)
+    };
+    let out = run(&pulsed, &settings(&[], &[("A", None, Some("50"))]));
+    assert_eq!(out.digital(0), (false, 50, &[][..], &[0, 0, 40][..]));
+    assert_eq!(out.kepts(), [kept(0, 50), kept(0, 100), kept(0, 100)]);
+}
+
+#[test]
 fn a_cut_at_either_end_or_both_keeps_what_lies_between() {
     // Inside the pulse at 10 to 20, to inside the one at 30 to 40: A is known to the cut.
     let out = run(

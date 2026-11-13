@@ -15,7 +15,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use escapement_tickwave_format::annotations::{self, Included};
 use escapement_tickwave_format::decode::{DecodeError, FIRST_READ, Footer, inflate_limited};
-use escapement_tickwave_format::header::{AnalogCoding, ChannelKind, Header};
+use escapement_tickwave_format::header::{AnalogCoding, ChannelKind, Header, MAGIC};
 use escapement_tickwave_format::model::{RateOrigin, Recording, SourceFormat};
 use escapement_tickwave_format::recut::{RecutError, Recutter};
 use escapement_tickwave_format::repair::{RepairError, Repairer};
@@ -25,6 +25,8 @@ use escapement_tickwave_format::writer::{WriteOptions, generator_file};
 use escapement_tickwave_import::convert::{
     self, Keep, Pass, Progress, Settings, Step, counted, select, set_units,
 };
+use escapement_tickwave_import::input::map;
+use escapement_tickwave_import::merge;
 use escapement_tickwave_import::saleae::SampleRate;
 use escapement_tickwave_import::shape::{Plan, check_time};
 use escapement_tickwave_import::sigrok::Skipped;
@@ -69,12 +71,57 @@ enum Command {
         json: bool,
     },
     /// Check a recording against the source it was converted from, edge by edge and sample by
-    /// sample. A moved or trimmed channel is checked through its offset and kept span.
+    /// sample. A moved or trimmed channel is checked through its offset and kept span, and a
+    /// merged recording through each source's origin and alignment.
     Verify {
         file: PathBuf,
-        /// The source: for a Saleae export, its directory.
+        /// The source: a capture (for a Saleae export, its directory) or a .tickwave recording.
+        /// A merged recording takes one for each recording merged into it, in the merge's order.
+        #[arg(long, required = true)]
+        against: Vec<PathBuf>,
+    },
+    /// Merge recordings onto one time axis, at the least common multiple of their tick rates. A
+    /// capture is converted first. The output is checked against the inputs before it is written.
+    Merge {
+        /// Two or more .tickwave recordings, in order.
+        #[arg(required = true, num_args = 2..)]
+        inputs: Vec<PathBuf>,
+        #[arg(short, long)]
+        output: PathBuf,
+        /// A channel to take, as `<input>:<name>` or `<input>:<name>=<new name>`, inputs counted
+        /// from 1. An input with none named gives every channel under its own name; a name
+        /// another input took is then `<file stem>/<name>`.
+        #[arg(long = "channel", value_name = "N:NAME[=NEW]", value_parser = taken)]
+        channels: Vec<(usize, String, Option<String>)>,
+        /// Move an input's channels together, as `<input>=<time>`, at the merged rate: a whole
+        /// number of merged ticks, or a decimal with a unit, within 0.01 of a merged tick.
+        /// Positive moves it later.
+        #[arg(long = "align", value_name = "N=TIME", value_parser = align)]
+        aligns: Vec<(usize, String)>,
+        /// Move an output channel, as `<name>=<time>`, at the merged rate. Positive is later.
+        #[arg(long = "offset", value_name = "NAME=TIME", value_parser = offset)]
+        offsets: Vec<(String, String)>,
+        /// Keep only part of an output channel, as `<name>=<from>..<to>`, in its input's own
+        /// time, before any alignment or --offset moves it.
+        #[arg(long = "keep", value_name = "NAME=FROM..TO", value_parser = keep)]
+        keeps: Vec<Keep>,
+        /// An analog output channel's unit, as `<name>=<unit>`.
+        #[arg(long = "unit", value_parser = pair)]
+        units: Vec<(String, String)>,
         #[arg(long)]
-        against: PathBuf,
+        title: Option<String>,
+        /// Free metadata, as `<key>=<value>`.
+        #[arg(long = "meta", value_parser = pair)]
+        meta: Vec<(String, String)>,
+        /// The zstd level.
+        #[arg(long, default_value_t = 19)]
+        level: i32,
+        /// The decoded size each block aims for, in KiB: at most 65,536, what a reader holds by
+        /// default.
+        #[arg(long, default_value_t = 1024, value_parser = clap::value_parser!(u32).range(1..=65_536))]
+        block_kib: u32,
+        #[command(flatten)]
+        and_open: AndOpen,
     },
     /// Write a copy of a recording with its sidecar's files inside, for a single-file share. The
     /// sidecar is checked first.
@@ -290,6 +337,30 @@ fn pair(s: &str) -> Result<(String, String), String> {
     Ok((k.to_owned(), v.to_owned()))
 }
 
+/// `<input>:<name>` or `<input>:<name>=<new>`, the input counted from 1.
+fn taken(s: &str) -> Result<(usize, String, Option<String>), String> {
+    let wrong = || format!("expected <input>:<name> or <input>:<name>=<new name>, got {s:?}");
+    let (input, rest) = s.split_once(':').ok_or_else(wrong)?;
+    let input: usize = input.parse().ok().filter(|&n| n >= 1).ok_or_else(wrong)?;
+    let (name, new) = match rest.split_once('=') {
+        Some((name, new)) => (name, Some(new)),
+        None => (rest, None),
+    };
+    if name.is_empty() || new.is_some_and(str::is_empty) {
+        return Err(wrong());
+    }
+    Ok((input, name.to_owned(), new.map(str::to_owned)))
+}
+
+/// `<input>=<time>`, the input counted from 1.
+fn align(s: &str) -> Result<(usize, String), String> {
+    let wrong = || format!("expected <input>=<time>, got {s:?}");
+    let (input, time) = s.split_once('=').ok_or_else(wrong)?;
+    let input: usize = input.parse().ok().filter(|&n| n >= 1).ok_or_else(wrong)?;
+    check_time(time)?;
+    Ok((input, time.to_owned()))
+}
+
 fn offset(s: &str) -> Result<(String, String), String> {
     let (name, time) = pair(s).map_err(|_| format!("expected <name>=<time>, got {s:?}"))?;
     check_time(&time)?;
@@ -340,8 +411,12 @@ fn run() -> Result<()> {
         .with(indicatif)
         .init();
     let cli = Cli::parse();
-    let max = usize::from(cli.max_decoded_mib) << 20;
-    match cli.command {
+    execute(cli.command, usize::from(cli.max_decoded_mib) << 20)
+}
+
+/// Runs `command`, decoding at most `max` bytes from one frame.
+fn execute(command: Command, max: usize) -> Result<()> {
+    match command {
         Command::Convert {
             from:
                 Source::Saleae {
@@ -414,6 +489,53 @@ fn run() -> Result<()> {
         }
         Command::Info { file, json } => info(&file, json, max),
         Command::Verify { file, against } => verify_file(&file, &against, max),
+        Command::Merge {
+            inputs,
+            output,
+            channels,
+            aligns,
+            offsets,
+            keeps,
+            units,
+            title,
+            meta,
+            level,
+            block_kib,
+            and_open,
+        } => {
+            let viewer = and_open.viewer()?;
+            let mut settings = merge::Settings {
+                inputs: vec![merge::InputSettings::default(); inputs.len()],
+                offsets,
+                keeps,
+                units,
+                title,
+                meta: meta.into_iter().collect(),
+                level,
+                block_kib,
+                stem: stem_of(&output),
+            };
+            for (n, name, new) in channels {
+                settings
+                    .inputs
+                    .get_mut(n - 1)
+                    .with_context(|| {
+                        format!("--channel {n}:{name}: there are {} inputs", inputs.len())
+                    })?
+                    .channels
+                    .push((name, new));
+            }
+            for (n, time) in aligns {
+                let input = settings.inputs.get_mut(n - 1).with_context(|| {
+                    format!("--align {n}={time}: there are {} inputs", inputs.len())
+                })?;
+                if input.align.replace(time).is_some() {
+                    bail!("input {n} is given an alignment twice");
+                }
+            }
+            merge_files(&inputs, &output, &settings, max)?;
+            and_open.serve(viewer, &output, max)
+        }
         Command::Bundle {
             recording,
             sidecar,
@@ -689,9 +811,15 @@ fn info(file: &Path, json: bool, max: usize) -> Result<()> {
         } else {
             format!(": {}", s.files.join(", "))
         };
+        // A merged recording's source ticks slower than the recording, by its factor.
+        let factor = escapement_tickwave_format::header::factor(h.timebase, s.timebase)
+            .filter(|&f| f != 1)
+            .map_or(String::new(), |f| {
+                format!(" ({f} of the recording's ticks each)")
+            });
         writeln!(
             out,
-            "  source {i}: {} at {}/{} ticks a second, its tick 0 at {}{align}{files}",
+            "  source {i}: {} at {}/{} ticks a second{factor}, its tick 0 at {}{align}{files}",
             s.format,
             s.timebase.num(),
             s.timebase.den(),
@@ -795,50 +923,90 @@ fn describe_coding(coding: AnalogCoding) -> String {
     }
 }
 
-fn verify_file(file: &Path, against: &Path, max: usize) -> Result<()> {
-    let (mut opened, _, head) = read_footer(file, max)?;
-    let h = &head.header;
-    if h.sources.len() > 1 {
-        bail!(
-            "{}: the recording merges {} sources; verify checks a recording against one",
-            file.display(),
-            h.sources.len()
-        );
-    }
+/// Whether `path` is a tickwave recording: a file that starts with the magic.
+fn is_recording(path: &Path) -> bool {
+    let mut magic = [0; 8];
+    fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut magic))
+        .is_ok_and(|()| magic == MAGIC)
+}
+
+/// The capture at `against` imported as the source `source` of the recording `h` says it was: its
+/// channels of that source by their source names, under the recording's names and units.
+fn capture(h: &Header, source: usize, against: &Path) -> Result<Recording> {
     let wanted: Vec<(String, String)> = h
         .channels
         .iter()
+        .filter(|c| c.source as usize == source)
         .map(|c| (c.source_name.clone(), c.name.clone()))
         .collect();
+    let stated = &h.sources[source];
     let saleae = |rate| -> Result<Recording> {
         Ok(
             convert::check_saleae(saleae_headers(against, &wanted, rate)?, &Bars::default())?
                 .recording(),
         )
     };
-    let source = match &h.sources[0].format {
+    let recording = match &stated.format {
         SourceFormat::SaleaeBinary1 => saleae(None)?,
         // A version 0 export's digital files don't record the rate the recording was made at.
         SourceFormat::SaleaeBinary0 => saleae(Some(
-            SampleRate::of_timebase(h.timebase)
-                .context("the recording's timebase is not a whole number of hertz")?,
+            SampleRate::of_timebase(stated.timebase)
+                .context("the source's timebase is not a whole number of hertz")?,
         ))?,
         SourceFormat::SigrokSr => select(sigrok::read(against)?.recording, &wanted)?,
         SourceFormat::Vcd => select(vcd::read(against)?.recording, &wanted)?,
-        SourceFormat::Other(name) => bail!("verifying against {name} sources is not supported"),
+        SourceFormat::Other(name) => bail!(
+            "{}: verifying against {name} sources is not supported; give its .tickwave",
+            against.display()
+        ),
     };
     let units: Vec<(String, String)> = h
         .channels
         .iter()
+        .filter(|c| c.source as usize == source)
         .filter_map(|c| match &c.data {
             ChannelKind::Analog { unit, .. } => Some((c.name.clone(), unit.clone())),
             ChannelKind::Digital { .. } => None,
         })
         .collect();
-    let source = set_units(source, &units)?;
-    let plan = Plan::of_header(&source, h)
-        .context("the recording's moves and cuts do not fit its source")?;
-    let source = plan.apply(source);
+    Ok(set_units(recording, &units)?)
+}
+
+fn verify_file(file: &Path, against: &[PathBuf], max: usize) -> Result<()> {
+    let (mut opened, _, head) = read_footer(file, max)?;
+    let h = &head.header;
+    let one_capture = h.sources.len() == 1 && against.len() == 1 && !is_recording(&against[0]);
+    let source = if one_capture {
+        // A conversion: its moves and cuts from the header, its origin among them.
+        let source = capture(h, 0, &against[0])?;
+        let plan = Plan::of_header(&source, h)
+            .context("the recording's moves and cuts do not fit its source")?;
+        plan.apply(source)
+    } else {
+        let mut recordings = Vec::with_capacity(against.len());
+        let mut at = 0;
+        for path in against {
+            let recording = if is_recording(path) {
+                let input = map(path).with_context(|| format!("reading {}", path.display()))?;
+                escapement_tickwave_import::recording::read(input)
+                    .with_context(|| format!("reading {}", path.display()))?
+                    .1
+            } else {
+                if at >= h.sources.len() {
+                    bail!(
+                        "{}: the recording has {} sources, and the recordings before cover them",
+                        path.display(),
+                        h.sources.len()
+                    );
+                }
+                capture(h, at, path)?
+            };
+            at += recording.sources.len();
+            recordings.push(recording);
+        }
+        merge::expected(h, recordings).context("the recording does not follow from its inputs")?
+    };
     let bars = Bars::default();
     opened.seek(SeekFrom::Start(0))?;
     verify_limited(
@@ -848,7 +1016,73 @@ fn verify_file(file: &Path, against: &Path, max: usize) -> Result<()> {
     )
     .context("the recording does not match its source")?;
     bars.end(Pass::Verify);
-    info!("{}: matches {}", file.display(), against.display());
+    let names: Vec<String> = against.iter().map(|p| p.display().to_string()).collect();
+    info!("{}: matches {}", file.display(), names.join(", "));
+    Ok(())
+}
+
+/// A path's file name without its extension.
+fn stem_of(path: &Path) -> String {
+    path.file_stem()
+        .map_or_else(String::new, |s| s.to_string_lossy().into_owned())
+}
+
+/// The input at `path` for a merge: its bundled sidecar, or else the one beside it, as `tickwave
+/// open` finds one.
+fn merge_input(path: &Path) -> Result<merge::Input> {
+    let bytes = map(path).with_context(|| format!("reading {}", path.display()))?;
+    let mut input = merge::Input::read(bytes, stem_of(path))
+        .with_context(|| format!("reading {}", path.display()))?;
+    if input.bundled.is_none() {
+        let mut name = path.file_stem().unwrap_or_default().to_owned();
+        name.push(".annotations.toml");
+        let beside = path.with_file_name(name);
+        if beside.is_file() {
+            input.bundled = Some(read_sidecar(&beside)?.into_iter().collect());
+        }
+    }
+    Ok(input)
+}
+
+fn merge_files(
+    inputs: &[PathBuf],
+    output: &Path,
+    settings: &merge::Settings,
+    max: usize,
+) -> Result<()> {
+    let started = Instant::now();
+    let open = || -> Result<Vec<merge::Input>, merge::Error> {
+        inputs
+            .iter()
+            .map(|p| {
+                merge_input(p).map_err(|e| {
+                    merge::Error::Io(
+                        p.display().to_string(),
+                        std::io::Error::other(format!("{e:#}")),
+                    )
+                })
+            })
+            .collect()
+    };
+    let merged = write_atomically(output, |file| {
+        Ok(merge::merge(&open, settings, max, &Bars::default(), file)?)
+    })?;
+    for note in &merged.notes {
+        if note.warns() {
+            warn!("{note}");
+        } else {
+            info!("{note}");
+        }
+    }
+    let len = fs::metadata(output)?.len();
+    info!(
+        "{}: {:.2} MB, {} blocks, {} in {:.1} s",
+        output.display(),
+        len as f64 / 1e6,
+        merged.header.blocks,
+        merged.header.content_id,
+        started.elapsed().as_secs_f64()
+    );
     Ok(())
 }
 
@@ -1447,7 +1681,7 @@ mod tests {
         );
         assert_eq!(head.header.sources[0].origin, 5);
         // Checked through the origin, the offsets and the kept spans.
-        verify_file(&output, &source, 64 << 20).unwrap();
+        verify_file(&output, std::slice::from_ref(&source), 64 << 20).unwrap();
 
         // The same file stating D2 moved one tick further, in its declaration and its footer.
         let doctored = dir.path().join("doctored.tickwave");
@@ -1461,7 +1695,8 @@ mod tests {
         )
         .unwrap();
         read_footer(&doctored, 64 << 20).unwrap();
-        let err = verify_file(&doctored, &source, 64 << 20).expect_err("refused");
+        let err =
+            verify_file(&doctored, std::slice::from_ref(&source), 64 << 20).expect_err("refused");
         assert_eq!(
             format!("{err:#}"),
             "the recording does not match its source: channel D2: the offset or the kept span \
@@ -1477,12 +1712,291 @@ mod tests {
             ),
         )
         .unwrap();
-        let err = verify_file(&doctored, &source, 64 << 20).expect_err("refused");
+        let err =
+            verify_file(&doctored, std::slice::from_ref(&source), 64 << 20).expect_err("refused");
         assert_eq!(
             format!("{err:#}"),
             "the recording's moves and cuts do not fit its source: the recording's channels \
              start -5 ticks into the source, but its source states an origin of 6, not 5"
         );
+    }
+
+    /// Runs `tickwave` as a user would, with `args`.
+    fn cli(args: &[&std::ffi::OsStr]) -> Result<()> {
+        let cli = Cli::try_parse_from(
+            std::iter::once(std::ffi::OsStr::new("tickwave")).chain(args.iter().copied()),
+        )?;
+        execute(cli.command, 64 << 20)
+    }
+
+    #[test]
+    fn a_merge_of_conversions_verifies_against_their_captures_and_their_recordings() {
+        let dir = tempfile::tempdir().unwrap();
+        let testdata = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/import");
+        let (logic, mixed) = (
+            testdata.join("demo-logic.sr"),
+            testdata.join("demo-mixed.vcd"),
+        );
+        let (a, b, m) = (
+            dir.path().join("a.tickwave"),
+            dir.path().join("b.tickwave"),
+            dir.path().join("m.tickwave"),
+        );
+        // A conversion moved and cut, and one whole.
+        let open_logic = || Ok(sigrok::read(&logic)?.recording);
+        let common_a = common(&[
+            "sigrok",
+            "x.sr",
+            "-o",
+            "x",
+            "--offset",
+            "D0=-5",
+            "--keep",
+            "D1=10..100",
+        ]);
+        convert(&open_logic, &a, &common_a, 64 << 20).unwrap();
+        let open_mixed = || Ok(vcd::read(&mixed)?.recording);
+        convert(
+            &open_mixed,
+            &b,
+            &common(&["vcd", "x.vcd", "-o", "x"]),
+            64 << 20,
+        )
+        .unwrap();
+        let os = |s: &Path| s.as_os_str().to_owned();
+        let arg = |s: &str| std::ffi::OsString::from(s);
+        cli(&[
+            &arg("merge"),
+            &os(&a),
+            &os(&b),
+            &arg("-o"),
+            &os(&m),
+            &arg("--align"),
+            &arg("2=100"),
+        ])
+        .unwrap();
+        let (_, _, head) = read_footer(&m, 64 << 20).unwrap();
+        let h = &head.header;
+        // 2.5 MHz and 10 MHz: a factor of 4 and of 1. The conversion's source tick 0, 5 of its
+        // ticks in, is 20 merged ticks in; the VCD's, aligned by 100, at 100.
+        assert_eq!(
+            h.timebase,
+            escapement_tickwave_format::model::Ratio::integer(10_000_000).unwrap()
+        );
+        assert_eq!(
+            h.sources
+                .iter()
+                .map(|s| (s.origin, s.align))
+                .collect::<Vec<_>>(),
+            [(20, None), (100, Some(100))]
+        );
+        let verify = |against: &[&Path]| {
+            let mut args = vec![arg("verify"), os(&m)];
+            for path in against {
+                args.push(arg("--against"));
+                args.push(os(path));
+            }
+            let args: Vec<&std::ffi::OsStr> = args.iter().map(|a| a.as_os_str()).collect();
+            cli(&args)
+        };
+        // Against the captures themselves: the conversion's offset and cut fold into the merge's.
+        verify(&[&logic, &mixed]).unwrap();
+        verify(&[&a, &b]).unwrap();
+        verify(&[&a, &mixed]).unwrap();
+        // Swapped: the order check names both.
+        let err = format!("{:#}", verify(&[&b, &a]).unwrap_err());
+        assert!(
+            err.ends_with(
+                "input 1's source 0 is vcd [demo-mixed.vcd], its tick 0 at 0 s, but the merged \
+                 recording's source 0 is sigrok-sr [demo-logic.sr]: the recordings are given in \
+                 another order than the merge's, or another recording"
+            ),
+            "{err}"
+        );
+        // Tampered, in its declaration and its footer: an origin, an align, a kept span.
+        let bytes = fs::read(&m).unwrap();
+        let tampered = dir.path().join("t.tickwave");
+        for (from, to, why) in [
+            // At a factor of 1 the spans still sit on the VCD's ticks: its edges move instead.
+            (
+                r#""origin":100,"align":100"#,
+                r#""origin":101,"align":100"#,
+                "channel libsigrok.D0: edge at tick 417 differs",
+            ),
+            (
+                r#""origin":100,"align":100"#,
+                r#""origin":100,"align":101"#,
+                "the content id does not match the content",
+            ),
+            // A kept span the reader takes and the inputs rebuild: the id pins it.
+            (
+                r#""kept":[60,420]"#,
+                r#""kept":[60,424]"#,
+                "the content id does not match the content",
+            ),
+        ] {
+            fs::write(&tampered, rewritten(&bytes, from, to)).unwrap();
+            let args = [
+                arg("verify"),
+                os(&tampered),
+                arg("--against"),
+                os(&a),
+                arg("--against"),
+                os(&b),
+            ];
+            let args: Vec<&std::ffi::OsStr> = args.iter().map(|a| a.as_os_str()).collect();
+            let err = format!("{:#}", cli(&args).unwrap_err());
+            assert!(err.contains(why), "{to}: {err}");
+        }
+        // More recordings than the merged one has sources.
+        let err = format!("{:#}", verify(&[&logic, &mixed, &mixed]).unwrap_err());
+        assert!(
+            err.ends_with("the recording has 2 sources, and the recordings before cover them"),
+            "{err}"
+        );
+        // A recording of one source checks against a .tickwave too, as a merge of one.
+        let args = [arg("verify"), os(&a), arg("--against"), os(&a)];
+        let args: Vec<&std::ffi::OsStr> = args.iter().map(|a| a.as_os_str()).collect();
+        cli(&args).unwrap();
+        // Inputs count from 1: input 1's D1, renamed, and nothing else of it.
+        let m2 = dir.path().join("m2.tickwave");
+        cli(&[
+            &arg("merge"),
+            &os(&a),
+            &os(&b),
+            &arg("-o"),
+            &os(&m2),
+            &arg("--channel"),
+            &arg("1:D1=clock"),
+        ])
+        .unwrap();
+        let (_, _, head) = read_footer(&m2, 64 << 20).unwrap();
+        assert_eq!(head.header.channels[0].name, "clock");
+        assert_eq!(
+            head.header
+                .channels
+                .iter()
+                .filter(|c| c.source == 0)
+                .count(),
+            1
+        );
+        let err = cli(&[
+            &arg("merge"),
+            &os(&a),
+            &os(&b),
+            &arg("-o"),
+            &os(&m2),
+            &arg("--align"),
+            &arg("2=1"),
+            &arg("--align"),
+            &arg("2=2"),
+        ])
+        .unwrap_err();
+        assert_eq!(err.to_string(), "input 2 is given an alignment twice");
+        for (flag, value) in [("--channel", "0:D1"), ("--align", "0=1")] {
+            let parsed = Cli::try_parse_from([
+                "tickwave",
+                "merge",
+                "a.tickwave",
+                "b.tickwave",
+                "-o",
+                "m.tickwave",
+                flag,
+                value,
+            ]);
+            assert!(parsed.is_err(), "{flag} {value}");
+        }
+        // A merge takes two inputs at least.
+        let one = Cli::try_parse_from(["tickwave", "merge", "a.tickwave", "-o", "m.tickwave"]);
+        assert!(one.is_err());
+    }
+
+    #[test]
+    fn a_merge_carries_the_sidecar_beside_an_input_and_info_shows_each_factor() {
+        let dir = tempfile::tempdir().unwrap();
+        let testdata = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/import");
+        let (a, b, m) = (
+            dir.path().join("a.tickwave"),
+            dir.path().join("b b.tickwave"),
+            dir.path().join("m.tickwave"),
+        );
+        let logic = testdata.join("demo-logic.sr");
+        let open_logic = || Ok(sigrok::read(&logic)?.recording);
+        convert(
+            &open_logic,
+            &a,
+            &common(&["sigrok", "x.sr", "-o", "x"]),
+            64 << 20,
+        )
+        .unwrap();
+        let mixed = testdata.join("demo-mixed.vcd");
+        let open_mixed = || Ok(vcd::read(&mixed)?.recording);
+        convert(
+            &open_mixed,
+            &b,
+            &common(&["vcd", "x.vcd", "-o", "x"]),
+            64 << 20,
+        )
+        .unwrap();
+        let (_, _, head) = read_footer(&b, 64 << 20).unwrap();
+        let id = head.header.content_id;
+        // B's sidecar beside it: a generator's file, and a hand-written annotation of its own.
+        fs::write(
+            dir.path().join("b b.annotations.toml"),
+            format!(
+                "format = \"tickwave-annotations/1\"\nrecording_id = \"{id}\"\n\
+                 include = [\"b b.dec.jsonl\"]\n\n[[annotation]]\nid = \"mine\"\nstart = 3\n"
+            ),
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("b b.dec.jsonl"),
+            generator_file(
+                "dec",
+                None,
+                id,
+                &[r#"{"id":"x/7","start":7,"channels":["libsigrok.D0"]}"#.to_owned()],
+            ),
+        )
+        .unwrap();
+        let args = [
+            std::ffi::OsString::from("merge"),
+            a.into_os_string(),
+            b.into_os_string(),
+            "-o".into(),
+            m.clone().into_os_string(),
+        ];
+        let args: Vec<&std::ffi::OsStr> = args.iter().map(|a| a.as_os_str()).collect();
+        cli(&args).unwrap();
+        let (_, _, head) = read_footer(&m, 64 << 20).unwrap();
+        let h = &head.header;
+        let files = h.annotations.as_ref().expect("bundled");
+        let jsonl = &files["m.dec.jsonl"];
+        // At 10 MHz the VCD's tick is the recording's: 7 stays 7.
+        assert!(
+            jsonl.contains(r#""channels":["libsigrok.D0"],"id":"x/7","start":7"#),
+            "{jsonl}"
+        );
+        // `annotations check` passes on the merged bundle.
+        let included: Vec<Included<'_>> = files
+            .iter()
+            .filter(|(n, _)| n.ends_with(".jsonl"))
+            .map(|(name, text)| Included { name, text })
+            .collect();
+        annotations::resolve(
+            &files["m.annotations.toml"],
+            &included,
+            h,
+            Some("m.tickwave"),
+        )
+        .unwrap();
+        // info states each source's factor.
+        let mut out = Vec::new();
+        for (i, s) in h.sources.iter().enumerate() {
+            let f = escapement_tickwave_format::header::factor(h.timebase, s.timebase).unwrap();
+            out.push((i, f));
+        }
+        assert_eq!(out, [(0, 4), (1, 1)]);
     }
 
     /// `file` with `from` replaced by `to`, of the same length, in every record that holds it, and

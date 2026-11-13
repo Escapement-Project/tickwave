@@ -85,7 +85,7 @@ pub fn check_time(text: &str) -> Result<(), String> {
     exact(text, Ratio::ONE).map(drop)
 }
 
-fn exact(text: &str, timebase: Ratio) -> Result<ExactTicks, String> {
+pub(crate) fn exact(text: &str, timebase: Ratio) -> Result<ExactTicks, String> {
     let text = text.trim();
     match text.parse::<i64>() {
         Ok(ticks) => Ok(ExactTicks {
@@ -97,7 +97,7 @@ fn exact(text: &str, timebase: Ratio) -> Result<ExactTicks, String> {
     }
 }
 
-fn rounded(text: &str, exact: &ExactTicks) -> Result<i64, String> {
+pub(crate) fn rounded(text: &str, exact: &ExactTicks) -> Result<i64, String> {
     exact
         .rounded()
         .ok_or_else(|| format!("{:?}: out of range", text.trim()))
@@ -105,7 +105,7 @@ fn rounded(text: &str, exact: &ExactTicks) -> Result<i64, String> {
 
 /// Whether `exact` lies more than 0.01 of a tick from `tick`, its nearest: in whole numbers,
 /// 100 × |numerator − |tick| × denominator| against the denominator.
-fn off_grid(exact: &ExactTicks, tick: i64) -> bool {
+pub(crate) fn off_grid(exact: &ExactTicks, tick: i64) -> bool {
     i128::from(tick.unsigned_abs())
         .checked_mul(exact.denominator)
         .and_then(|at| exact.numerator.checked_sub(at))
@@ -383,14 +383,15 @@ impl ChannelPlan {
                 to: to + shift,
             }),
         };
+        let map = Map { factor: 1, shift };
         let data = if shift == 0 && !cut {
             channel.data
         } else {
             match channel.data {
-                ChannelData::Digital(d) => ChannelData::Digital(digital(d, from, to, shift)),
+                ChannelData::Digital(d) => ChannelData::Digital(digital(d, from, to, map)),
                 ChannelData::Analog(a) => {
                     let (skip, keep) = self.samples.expect("an analog channel's plan");
-                    ChannelData::Analog(analog(a, skip, keep, shift))
+                    ChannelData::Analog(analog(a, skip, keep, map))
                 }
             }
         };
@@ -402,8 +403,27 @@ impl ChannelPlan {
     }
 }
 
-/// A digital channel kept at ticks `from..to` of its own and moved by `shift`.
-fn digital(d: Digital, from: i64, to: i64, shift: i64) -> Digital {
+/// Where a channel's ticks go: tick `t` of its own is tick `factor × t + shift`. A conversion's
+/// factor is 1; a merge's is the input's factor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Map {
+    pub(crate) factor: u64,
+    pub(crate) shift: i64,
+}
+
+impl Map {
+    /// Exact where the result fits an i64, as every tick inside a kept span a merge has checked
+    /// does; `factor × t` alone need not.
+    pub(crate) fn tick(self, t: i64) -> i64 {
+        (i128::from(self.factor) * i128::from(t) + i128::from(self.shift)) as i64
+    }
+}
+
+/// A digital channel kept at ticks `from..to` of its own and mapped by `map`. Where it starts
+/// above tick 0, or is cut from its front, the level at `from` takes in the edges at `from`, and
+/// a gap from tick 0 says nothing is known before: no edge can lie at a gap's end. Otherwise its
+/// level at tick 0 and the edges there stay.
+pub(crate) fn digital(d: Digital, from: i64, to: i64, map: Map) -> Digital {
     let Digital {
         initial,
         end,
@@ -411,48 +431,51 @@ fn digital(d: Digital, from: i64, to: i64, shift: i64) -> Digital {
         gaps,
     } = d;
     let mut edges = edges.peekable();
-    // The level at `from`, after every edge and gap end at or before it. No edge lies in a gap's
-    // `from..=to`, so the edges before a gap all come before its `from`.
+    let start = map.tick(from);
     let mut level = initial;
     let mut next = 0;
-    for g in gaps.iter().take_while(|g| g.to <= from) {
-        while edges.next_if(|&t| t < g.from).is_some() {
+    let mut lead = None;
+    if from > 0 || start > 0 {
+        // The level at `from`, after every edge and gap end at or before it. No edge lies in a
+        // gap's `from..=to`, so the edges before a gap all come before its `from`.
+        for g in gaps.iter().take_while(|g| g.to <= from) {
+            while edges.next_if(|&t| t < g.from).is_some() {
+                level = !level;
+            }
+            level = g.level;
+            next += 1;
+        }
+        while edges.next_if(|&t| t <= from).is_some() {
             level = !level;
         }
-        level = g.level;
-        next += 1;
-    }
-    while edges.next_if(|&t| t <= from).is_some() {
-        level = !level;
-    }
-    // A gap the cut lies in joins the one from tick 0; so does the span before the channel's
-    // start, which nothing records.
-    let start = from + shift;
-    let lead = match gaps.get(next).filter(|g| g.from <= from) {
-        Some(g) => {
-            next += 1;
-            Some(Gap {
+        // A gap the cut lies in joins the one from tick 0; so does the span before the channel's
+        // start, which nothing records.
+        lead = match gaps.get(next).filter(|g| g.from <= from) {
+            Some(g) => {
+                next += 1;
+                Some(Gap {
+                    from: 0,
+                    to: map.tick(g.to.min(to)),
+                    level: g.level,
+                })
+            }
+            None => (start > 0).then_some(Gap {
                 from: 0,
-                to: g.to + shift,
-                level: g.level,
-            })
-        }
-        None => (start > 0).then_some(Gap {
-            from: 0,
-            to: start,
-            level,
-        }),
-    };
+                to: start,
+                level,
+            }),
+        };
+    }
     let rest = gaps[next..]
         .iter()
         .take_while(|g| g.from < to)
         .map(|g| Gap {
-            from: g.from + shift,
-            to: g.to.min(to) + shift,
+            from: map.tick(g.from),
+            to: map.tick(g.to.min(to)),
             level: g.level,
         });
     // A gap that reaches the end ends what is known at its `from`, as a writer has it.
-    let mut known = (end.min(to) + shift).max(0);
+    let mut known = map.tick(end.min(to)).max(0);
     let mut kept = Vec::new();
     for g in lead.into_iter().chain(rest) {
         if g.to >= known {
@@ -465,19 +488,21 @@ fn digital(d: Digital, from: i64, to: i64, shift: i64) -> Digital {
     Digital {
         initial: level && !unknown_at_start,
         end: known,
-        edges: Box::new(edges.take_while(move |&t| t < to).map(move |t| t + shift)),
+        edges: Box::new(edges.take_while(move |&t| t < to).map(move |t| map.tick(t))),
         gaps: kept,
     }
 }
 
-/// An analog channel with its first `skip` samples left out, the next `keep` kept, and moved by
-/// `shift`.
-fn analog(a: Analog, skip: u64, keep: u64, shift: i64) -> Analog {
+/// An analog channel with its first `skip` samples left out, the next `keep` kept, and mapped by
+/// `map`: its period times the factor, its first sample's and its breaks' ticks mapped. Sample i
+/// sits on the mapped period's grid, which can be finer than the input's floored ticks times the
+/// factor.
+pub(crate) fn analog(a: Analog, skip: u64, keep: u64, map: Map) -> Analog {
     let end = skip + keep;
     let first = if keep == 0 {
         0
     } else {
-        run_sample_tick(a.first, a.period, &a.breaks, skip) + shift
+        map.tick(run_sample_tick(a.first, a.period, &a.breaks, skip))
     };
     let breaks = a
         .breaks
@@ -485,7 +510,7 @@ fn analog(a: Analog, skip: u64, keep: u64, shift: i64) -> Analog {
         .filter(|b| b.index > skip && b.index < end)
         .map(|b| Break {
             index: b.index - skip,
-            tick: b.tick + shift,
+            tick: map.tick(b.tick),
             lost: b.lost,
         })
         .collect();
@@ -511,7 +536,7 @@ fn analog(a: Analog, skip: u64, keep: u64, shift: i64) -> Analog {
     Analog {
         unit: a.unit,
         first,
-        period: a.period,
+        period: scaled_period(a.period, map.factor).expect("a merge checks its periods"),
         count: keep,
         breaks,
         significant: a.significant,
@@ -519,8 +544,24 @@ fn analog(a: Analog, skip: u64, keep: u64, shift: i64) -> Analog {
     }
 }
 
+/// A period `p/q` times `factor`, in lowest terms; None past 2^53.
+pub(crate) fn scaled_period(period: Ratio, factor: u64) -> Option<Ratio> {
+    let num = u128::from(period.num()) * u128::from(factor);
+    let den = u128::from(period.den());
+    let (mut a, mut b) = (num, den);
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    let (num, den) = (num / a, den / a);
+    let safe = |v: u128| v < u128::from(JSON_SAFE);
+    if !safe(num) || !safe(den) {
+        return None;
+    }
+    Ratio::new(num as u64, den as u64)
+}
+
 /// `q` of a period `p/q` in lowest terms: a run's samples sit on its grid every `q` samples.
-fn grid(period: Ratio) -> u64 {
+pub(crate) fn grid(period: Ratio) -> u64 {
     let (mut a, mut b) = (period.num(), period.den());
     while b != 0 {
         (a, b) = (b, a % b);
@@ -529,17 +570,17 @@ fn grid(period: Ratio) -> u64 {
 }
 
 /// Where an analog channel kept at ticks `from..to` keeps its samples.
-struct AnalogCut {
-    skip: u64,
-    keep: u64,
+pub(crate) struct AnalogCut {
+    pub(crate) skip: u64,
+    pub(crate) keep: u64,
     /// The cut's start: `from`, or the first sample kept where the grid moved it there.
-    from: Option<i64>,
+    pub(crate) from: Option<i64>,
 }
 
 impl AnalogCut {
     /// None when the grid moves the first sample kept past every sample before `to`, which the
     /// span would then claim without holding.
-    fn new(a: &Analog, from: Option<i64>, to: i64) -> Option<Self> {
+    pub(crate) fn new(a: &Analog, from: Option<i64>, to: i64) -> Option<Self> {
         let runs = runs(a);
         let end = first_at(&runs, a.period, to).1;
         let Some(cut) = from else {

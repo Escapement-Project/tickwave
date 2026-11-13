@@ -94,6 +94,7 @@ pub fn read(input: Arc<dyn Input>) -> Result<(Header, Recording), Error> {
             trigger_s: s.trigger_s,
             rate: s.rate,
             extra: s.extra.clone(),
+            converter: s.converter.clone(),
         })
         .collect();
     let recording = Recording {

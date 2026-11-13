@@ -502,6 +502,7 @@ dependencies = [
  "memmap2",
  "rust-ini",
  "serde",
+ "serde_json",
  "thiserror",
  "vcd",
  "zip",

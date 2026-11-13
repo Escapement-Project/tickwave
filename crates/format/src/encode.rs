@@ -44,13 +44,17 @@ pub struct Options {
     pub batch: Option<usize>,
     pub title: Option<String>,
     pub meta: BTreeMap<String, String>,
-    /// Set as every source's `converter`.
+    /// The `converter` of every source that doesn't state one.
     pub converter: Option<String>,
     /// A coding for each analog channel, by channel index. Absent or None stores the samples as
     /// their type has them; f32 samples can also go in `codes`.
     pub analog: Vec<Option<AnalogCoding>>,
     /// The finest overview level's shift; None for the converter's, from the length.
     pub overview_shift: Option<u8>,
+    /// Generated annotations to write, each with its generator's name; their times are ticks.
+    pub annotations: Vec<(String, serde_json::Map<String, serde_json::Value>)>,
+    /// Bundle the annotations into the footer rather than handing them back.
+    pub bundle: Option<Bundle>,
 }
 
 impl Default for Options {
@@ -64,6 +68,8 @@ impl Default for Options {
             converter: None,
             analog: Vec::new(),
             overview_shift: None,
+            annotations: Vec::new(),
+            bundle: None,
         }
     }
 }
@@ -219,7 +225,7 @@ pub fn encode_to(
                 trigger_s: source.trigger_s,
                 rate: source.rate,
                 extra: source.extra,
-                converter: options.converter.clone(),
+                converter: source.converter.or_else(|| options.converter.clone()),
             })
             .collect(),
         title: options.title.clone(),
@@ -239,6 +245,9 @@ pub fn encode_to(
             batch,
         },
     )?;
+    for (source, annotation) in &options.annotations {
+        writer.annotation(source, annotation.clone())?;
+    }
     drain(&mut writer, &mut out)?;
     loop {
         let next = streams
@@ -310,7 +319,14 @@ pub fn encode_to(
         }
     }
     drain(&mut writer, &mut out)?;
-    let finished = writer.finish(length, &ends, Finish::default())?;
+    let finished = writer.finish(
+        length,
+        &ends,
+        Finish {
+            bundle: options.bundle.clone(),
+            ..Finish::default()
+        },
+    )?;
     out.write_all(&finished.tail)?;
     out.flush()?;
     Ok(finished)
