@@ -481,8 +481,9 @@ export class Opened {
     const [b0, b1] = this.#covering(start, end);
     const list = await this.blocks(b0, b1, signal);
     const c = this.header.channels[channel];
-    // No edge lies in a gap, and a block's level bit carries the level from before one: the last
-    // gap ending in the first block, at or before `start`, sets the level the edges after it flip.
+    // No edge lies in a gap, and a block's level bit carries the level from before one until its
+    // `to`: the last gap ending in the first block or at its start, at or before `start`, sets the
+    // level the edges after it flip.
     const gaps = c.kind === "digital" ? (c.gaps ?? []) : [];
     const parts: Float64Array[] = [];
     let level: 0 | 1 = 0;
@@ -493,7 +494,7 @@ export class Opened {
       if (k === 0) {
         level = (d.initial ^ (lo & 1)) as 0 | 1;
         let gap: [number, number, boolean] | null = null;
-        for (const g of gaps) if (b.start < g[1] && g[1] <= start) gap = g;
+        for (const g of gaps) if (b.start <= g[1] && g[1] <= start) gap = g;
         if (gap) level = ((gap[2] ? 1 : 0) ^ ((lo - lowerBound(d.edges, gap[1])) & 1)) as 0 | 1;
       }
       parts.push(d.edges.subarray(lo, lowerBound(d.edges, end, lo)));
