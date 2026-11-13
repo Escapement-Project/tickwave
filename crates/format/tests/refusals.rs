@@ -78,7 +78,19 @@ fn only_one_checksummed_frame_and_nothing_after_it() {
         raw.len(),
         "a skippable frame after",
     );
+    refused(
+        &[skippable(b"x"), good.clone()].concat(),
+        raw.len(),
+        "a skippable frame before",
+    );
     refused(&skippable(&raw), raw.len(), "a skippable frame alone");
+    // libzstd reads a skippable frame as holding nothing, and this one's length has bit 2 set, as
+    // a checksum flag would be to a reader that skips the magic number.
+    refused(
+        &skippable(b"abcd"),
+        0,
+        "a skippable frame alone, said to hold nothing",
+    );
     refused(
         &[good.clone(), vec![0]].concat(),
         raw.len(),

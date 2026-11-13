@@ -3,8 +3,6 @@
 
 use std::ops::Range;
 
-use ruzstd::decoding::FrameDecoder;
-
 use crate::codec::get_uleb;
 use crate::header::{
     AnalogCoding, BlockRow, ChannelHeader, ChannelKind, Declaration, DeclaredChannel, DeclaredKind,
@@ -71,60 +69,13 @@ pub fn inflate(frame: &[u8], len: usize) -> Result<Vec<u8>, DecodeError> {
     inflate_limited(frame, len, MAX_DECODED)
 }
 
-/// `inflate`, holding at most `max` decoded bytes.
+/// `inflate`, holding at most `max` decoded bytes. libzstd checks the frame's checksum.
 pub fn inflate_limited(frame: &[u8], len: usize, max: usize) -> Result<Vec<u8>, DecodeError> {
-    let mut out = buffer(len, max)?;
-    #[cfg(feature = "zstd")]
-    inflate_libzstd(frame, &mut out)?;
-    #[cfg(not(feature = "zstd"))]
-    inflate_ruzstd(frame, &mut out)?;
-    if out.len() != len {
-        return Err(corrupt(format!(
-            "a frame decoded to {} bytes, not {len}",
-            out.len()
-        )));
-    }
-    Ok(out)
-}
-
-/// One frame with a checksum, decoded into `out` by ruzstd, for a build without libzstd.
-#[cfg_attr(
-    all(feature = "zstd", not(test)),
-    expect(
-        dead_code,
-        reason = "the decoder without libzstd; with it, the tests check the two against each other"
-    )
-)]
-fn inflate_ruzstd(frame: &[u8], out: &mut Vec<u8>) -> Result<(), DecodeError> {
-    let mut decoder = FrameDecoder::new();
-    decoder
-        .decode_all_to_vec(frame, out)
-        .map_err(|e| DecodeError::Zstd(e.to_string()))?;
-    // decode_all reads every frame in its input, and steps over skippable ones, but the checksum
-    // getters describe only the last frame: a valid frame after a corrupted one would hide it. The
-    // last frame's byte count covers the whole input only when it is the only frame.
-    if decoder.bytes_read_from_source() != frame.len() as u64 {
-        return Err(corrupt("the bytes hold more than one frame"));
-    }
-    match (
-        decoder.get_checksum_from_data(),
-        decoder.get_calculated_checksum(),
-    ) {
-        (Some(stored), Some(computed)) if stored == computed => Ok(()),
-        (Some(_), Some(_)) => Err(DecodeError::Zstd("checksum mismatch".into())),
-        _ => Err(corrupt("a frame carries no checksum")),
-    }
-}
-
-/// `inflate_ruzstd` through libzstd, which a build with the encoder links anyway. On a recorder's
-/// blocks it decodes about 14 times as fast as ruzstd natively, and 3.7 times in WASM. It holds a
-/// frame to the same rules: a zstd frame, the only one, naming no dictionary, with a checksum,
-/// which libzstd checks.
-#[cfg(feature = "zstd")]
-fn inflate_libzstd(frame: &[u8], out: &mut Vec<u8>) -> Result<(), DecodeError> {
     use zstd::zstd_safe;
+    let mut out = buffer(len, max)?;
     // RFC 8878: the magic number, then the frame header descriptor, whose bit 2 says the frame
-    // ends in a checksum and whose bits 0-1 give the size of a dictionary id.
+    // ends in a checksum and whose bits 0-1 give the size of a dictionary id. libzstd would read
+    // a skippable frame as one holding nothing, and frames without a checksum.
     if frame.get(..4) != Some(&0xFD2F_B528u32.to_le_bytes()[..]) {
         return Err(corrupt("the bytes are not one zstd frame"));
     }
@@ -143,9 +94,15 @@ fn inflate_libzstd(frame: &[u8], out: &mut Vec<u8>) -> Result<(), DecodeError> {
         Err(code) => return Err(DecodeError::Zstd(zstd_safe::get_error_name(code).into())),
     }
     zstd::bulk::Decompressor::new()
-        .and_then(|mut d| d.decompress_to_buffer(frame, out))
+        .and_then(|mut d| d.decompress_to_buffer(frame, &mut out))
         .map_err(|e| DecodeError::Zstd(e.to_string()))?;
-    Ok(())
+    if out.len() != len {
+        return Err(corrupt(format!(
+            "a frame decoded to {} bytes, not {len}",
+            out.len()
+        )));
+    }
+    Ok(out)
 }
 
 /// One overview block, decoded: buckets `first..first + level.buckets` of its level.
@@ -1246,95 +1203,6 @@ mod tests {
             ),
         ] {
             assert!(check_header(&header(breaks)).is_err(), "{why}");
-        }
-    }
-}
-
-/// The two decoders take and refuse the same bytes: ruzstd, for a build without libzstd, and
-/// libzstd.
-#[cfg(all(test, feature = "zstd"))]
-mod decoders {
-    use super::{inflate_libzstd, inflate_ruzstd};
-    use zstd::zstd_safe::CParameter;
-
-    fn frame(raw: &[u8], checksum: bool) -> Vec<u8> {
-        let mut c = zstd::bulk::Compressor::new(3).unwrap();
-        c.set_parameter(CParameter::ChecksumFlag(checksum)).unwrap();
-        c.compress(raw).unwrap()
-    }
-
-    /// A frame with a checksum, compressed against a dictionary, so it names one.
-    fn with_dictionary() -> Vec<u8> {
-        let samples: Vec<Vec<u8>> = (0..200)
-            .map(|i| format!("{{\"edge\": {i}, \"level\": {}}}", i % 2).into_bytes())
-            .collect();
-        let dict = zstd::dict::from_samples(&samples, 1024).unwrap();
-        let mut c = zstd::bulk::Compressor::with_dictionary(3, &dict).unwrap();
-        c.set_parameter(CParameter::ChecksumFlag(true)).unwrap();
-        let framed = c.compress(&samples.concat()).unwrap();
-        assert_ne!(framed[4] & 0b11, 0, "the frame names no dictionary");
-        framed
-    }
-
-    fn skippable(content: &[u8]) -> Vec<u8> {
-        let mut out = 0x184D_2A50u32.to_le_bytes().to_vec();
-        out.extend_from_slice(&(content.len() as u32).to_le_bytes());
-        out.extend_from_slice(content);
-        out
-    }
-
-    #[test]
-    fn libzstd_and_ruzstd_take_and_refuse_the_same_frames() {
-        // Bytes zstd can't shrink, so a flipped byte lands in the content, not a header.
-        let mut x = 0x2545_f491_4f6c_dd1du64;
-        let raw: Vec<u8> = (0..1000)
-            .map(|_| {
-                x ^= x << 13;
-                x ^= x >> 7;
-                x ^= x << 17;
-                x as u8
-            })
-            .collect();
-        let good = frame(&raw, true);
-        for decode in [inflate_ruzstd, inflate_libzstd] {
-            let mut out = Vec::with_capacity(raw.len());
-            decode(&good, &mut out).unwrap();
-            assert_eq!(out, raw);
-        }
-        let mut flipped = good.clone();
-        flipped[good.len() / 2] ^= 0x10;
-        let empty = frame(&[], true);
-        let cases = [
-            ("a flipped byte", flipped.clone()),
-            (
-                "a flipped byte, then an empty frame",
-                [flipped, empty.clone()].concat(),
-            ),
-            ("an empty frame after", [good.clone(), empty].concat()),
-            (
-                "a skippable frame after",
-                [good.clone(), skippable(b"x")].concat(),
-            ),
-            (
-                "a skippable frame before",
-                [skippable(b"x"), good.clone()].concat(),
-            ),
-            ("one byte after", [good.clone(), vec![0]].concat()),
-            ("the checksum cut short", good[..good.len() - 1].to_vec()),
-            ("no checksum", frame(&raw, false)),
-            // libzstd reads a skippable frame as holding nothing, and its length's bit 2 looks
-            // like a checksum flag to a reader that skips the magic number.
-            ("a skippable frame alone", skippable(b"abcd")),
-            ("a frame that names a dictionary", with_dictionary()),
-        ];
-        for (why, bytes) in cases {
-            for (name, decode) in [
-                ("ruzstd", inflate_ruzstd as fn(&[u8], &mut Vec<u8>) -> _),
-                ("libzstd", inflate_libzstd),
-            ] {
-                let mut out = Vec::with_capacity(raw.len());
-                assert!(decode(&bytes, &mut out).is_err(), "{name} took {why}");
-            }
         }
     }
 }

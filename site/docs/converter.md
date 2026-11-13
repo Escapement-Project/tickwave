@@ -4,7 +4,7 @@
 
 ## Building it
 
-You need a current Rust toolchain and a checkout of tickwave's repository. From the repository's root:
+You need a current Rust toolchain, a C compiler and a checkout of tickwave's repository. From the repository's root:
 
 ```sh
 cargo build --release -p escapement-tickwave-cli

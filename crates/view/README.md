@@ -48,9 +48,9 @@ For a period of whole ticks it takes whole overview buckets where it can.
 Each port takes the same inputs and gives the same outputs as its TypeScript module, and both are
 tested against the cases in `testdata/view/`.
 
-It builds for `wasm32-unknown-unknown` with its `live` feature off. `live`, on by default, turns
-on the format crate's encoder, which holds the `Snapshot` of a recording a writer in the same
-process is still writing.
+It builds for `wasm32-unknown-unknown` with its `live` feature off, given clang with the wasm32
+target to compile libzstd. `live`, on by default, turns on the format crate's encoder, which holds
+the `Snapshot` of a recording a writer in the same process is still writing.
 
 Opening a recording, each query, each channel drawn, the strip, statistics and every block
 decoded are `tracing` spans at debug level, so a host's subscriber shows where a view's time goes.

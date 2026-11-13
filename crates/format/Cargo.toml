@@ -9,7 +9,6 @@ publish.workspace = true
 [dependencies]
 blake3 = "1.8.7"
 rayon = { version = "1.12.0", optional = true }
-ruzstd = "0.9.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 thiserror = "2.0.21"
@@ -17,15 +16,12 @@ toml = { version = "1.2.1", optional = true }
 toml_edit = { version = "0.25.19", optional = true }
 # Without its default features: a reader takes only current zstd frames, so the legacy formats'
 # decoders would be dead code, 70 KB of it in a WASM build.
-zstd = { version = "0.14.3", optional = true, default-features = false }
+zstd = { version = "0.14.3", default-features = false }
 
 [features]
 default = ["encode", "annotations", "toml"]
-# The encoder needs libzstd and threads; a decoder-only build (the browser's) leaves it out.
-encode = ["zstd", "dep:rayon"]
-# libzstd: the encoder's compressor, and the decoder, which is much faster than ruzstd. A build
-# without it decodes with ruzstd.
-zstd = ["dep:zstd"]
+# The encoder needs threads; a decoder-only build (the browser's) leaves it out.
+encode = ["dep:rayon"]
 # Sidecar checks, with the hand-written file handed in as JSON.
 annotations = []
 # Sidecar checks reading the hand-written file's TOML. The browser parses TOML in JavaScript

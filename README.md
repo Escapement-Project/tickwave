@@ -37,7 +37,8 @@ computer.
 
 ## Building and testing
 
-The Rust crates need a current Rust toolchain:
+The Rust crates need a current Rust toolchain and a C compiler, for libzstd. The wasm32 build takes
+clang with the wasm32 target:
 
 ```sh
 cargo fmt --check
@@ -47,8 +48,7 @@ cargo build -p escapement-tickwave-view --target wasm32-unknown-unknown --no-def
 cargo build --release -p escapement-tickwave-cli     # the converter, at target/release/tickwave
 ```
 
-The browser's decoder and converter also need clang with the wasm32 target, `wasm-bindgen` and
-`wasm-opt`:
+The browser's decoder and converter also need `wasm-bindgen` and `wasm-opt`:
 
 ```sh
 crates/wasm/build.sh                      # the decoder, into crates/wasm/pkg
