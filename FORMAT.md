@@ -296,17 +296,20 @@ tick 0 is not known.
 An analog channel's `breaks` is an array of `[index, tick, lost]`: sample `index` starts a new
 run, at `tick`, and the instrument lost `lost` samples before it, 0 when it only paused. The first
 run starts at `[0, first]`. Sample `i` of the run that starts at `[index, tick]` sits at
-`tick + floor((i − index) × period)`. Each `index` lies in `1..count` and is larger than the one
-before it. Each `tick` is at least the tick of the sample before it. A reader draws no line across
-a break. The lost samples' time runs from one period after the sample before the break, for `lost`
-periods, and ends at `tick` if that comes sooner; the rest of the break is a pause. A reader shows
-the two apart. Samples lost before the first or after the last have no place on the time axis; a
-source's `extra` can count them.
+`tick + floor((i − index) × period)`, its place on the run's grid. The grid goes on past the run's
+last sample. Each `index` lies in `1..count` and is larger than the one before it. Each `tick` is
+at least the tick of the sample before it. A reader draws no line across a break. The lost samples
+sit where the run before the break would have put them: their time runs from place `index` on that
+run's grid to place `index + lost`, and ends at `tick` if that comes sooner. The rest of the break
+is a pause. A reader shows the two apart. Samples lost before the first or after the last have no
+place on the time axis; a source's `extra` can count them.
 
-Each sample covers the time from its tick to the next sample's, at most one period, and never past
-the length. A reader
-that measures a span weighs each sample by the part of that time inside the span, and counts a
-sample whose time reaches into the span even when its tick lies before it.
+Each sample covers the time from its place to the next place on its run's grid, so inside a run it
+reaches the next sample's tick. A run's last sample ends at the next run's tick if that comes
+sooner, and no sample's time runs past the length. So every sample's time, and every lost span, is
+a whole number of ticks. A reader that measures a span weighs each sample by the part of that time
+inside the span, and counts a sample whose time reaches into the span even when its tick lies
+before it.
 
 A channel with no gap or break leaves the field out.
 
