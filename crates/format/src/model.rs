@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::num::NonZeroU64;
+use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
 
@@ -195,6 +196,62 @@ pub fn run_sample_tick(first: i64, period: Ratio, breaks: &[Break], index: u64) 
             sample_tick(b.tick, period, index - b.index)
         }
     }
+}
+
+/// Place `index` on the grid of the run that starts at sample `start`, at `tick`, or `cap` if
+/// that comes sooner. The grid goes on past the run's last sample.
+fn place_until(tick: i64, start: u64, period: Ratio, index: u64, cap: i64) -> i64 {
+    let steps = u128::from(index - start) * u128::from(period.num()) / u128::from(period.den());
+    let steps = i128::try_from(steps).unwrap_or(i128::MAX);
+    i128::from(tick).saturating_add(steps).min(i128::from(cap)) as i64
+}
+
+/// The run that holds sample `index`: its first sample's index and its tick.
+fn run_of(first: i64, breaks: &[Break], index: u64) -> (u64, i64) {
+    match breaks.partition_point(|b| b.index <= index) {
+        0 => (0, first),
+        n => (breaks[n - 1].index, breaks[n - 1].tick),
+    }
+}
+
+/// The ticks sample `index` of a channel of `count` samples covers (FORMAT.md, "Gaps"): from its
+/// place on its run's grid to the next place, which inside a run is the next sample's tick. A
+/// run's last sample ends sooner at the next run's tick, and no support runs past `length`. None
+/// for an index past the last sample.
+pub fn sample_support(
+    first: i64,
+    period: Ratio,
+    breaks: &[Break],
+    count: u64,
+    length: i64,
+    index: u64,
+) -> Option<Range<i64>> {
+    if index >= count {
+        return None;
+    }
+    let (start, tick) = run_of(first, breaks, index);
+    let next_run = breaks
+        .get(breaks.partition_point(|b| b.index <= index))
+        .filter(|b| b.index == index + 1);
+    let cap = next_run.map_or(length, |b| b.tick.min(length));
+    let from = place_until(tick, start, period, index, length);
+    Some(from..place_until(tick, start, period, index + 1, cap))
+}
+
+/// The ticks the samples lost before `breaks[k]` would have covered (FORMAT.md, "Gaps"): from
+/// place `index` to place `index + lost` on the grid of the run before the break, ending at the
+/// break's tick if that comes sooner. None for a pause, which loses nothing, and for no break `k`.
+pub fn lost_span(first: i64, period: Ratio, breaks: &[Break], k: usize) -> Option<Range<i64>> {
+    let b = *breaks.get(k)?;
+    if b.lost == 0 {
+        return None;
+    }
+    let (start, tick) = match k {
+        0 => (0, first),
+        _ => (breaks[k - 1].index, breaks[k - 1].tick),
+    };
+    let place = |index| place_until(tick, start, period, index, b.tick);
+    Some(place(b.index)..place(b.index.saturating_add(b.lost)))
 }
 
 /// An analog channel's samples, in the type the source stored them.

@@ -263,7 +263,8 @@ pub(crate) enum Queued {
     Overview {
         shift: u8,
         k: u64,
-        raw: Vec<u8>,
+        /// Shared with the snapshots taken before it is written.
+        raw: Arc<Vec<u8>>,
     },
     Record(Vec<u8>),
 }
@@ -925,7 +926,11 @@ impl Writer {
         for Settled { shift, k, level } in self.overview.take_settled() {
             let mut raw = Vec::new();
             overview::write(&[level], &mut raw);
-            self.queue.push(Queued::Overview { shift, k, raw });
+            self.queue.push(Queued::Overview {
+                shift,
+                k,
+                raw: Arc::new(raw),
+            });
         }
         if self.queued_blocks >= self.options.batch {
             self.drain_queue()?;
@@ -949,9 +954,8 @@ impl Writer {
             .queue
             .par_iter()
             .map(|q| match q {
-                Queued::Block { raw, .. } | Queued::Overview { raw, .. } => {
-                    compress(raw, level).map(Some)
-                }
+                Queued::Block { raw, .. } => compress(raw, level).map(Some),
+                Queued::Overview { raw, .. } => compress(raw, level).map(Some),
                 Queued::Record(_) => Ok(None),
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1003,9 +1007,10 @@ impl Writer {
     }
 
     /// What the writer holds so far, for a view of the recording while it is written: the
-    /// blocks written, the gaps, runs and annotations, the overview's held levels, and the
-    /// blocks not yet written, the open one last. Taking one shares what the writer holds rather
-    /// than copying it, apart from the blocks not yet written.
+    /// blocks and overview blocks written, the gaps, runs and annotations, the overview's held
+    /// levels, and the blocks and overview blocks not yet written, the open block last. Taking
+    /// one shares what the writer holds rather than copying it, apart from the blocks not yet
+    /// written.
     ///
     /// The blocks it lists may sit in bytes still in `output`: publish a snapshot to a view only
     /// once those bytes are in the file the view reads.
@@ -1017,6 +1022,14 @@ impl Writer {
                 Queued::Block { head, raw, firsts } => {
                     Some((head.clone(), raw.clone(), firsts.clone()))
                 }
+                _ => None,
+            })
+            .collect();
+        let queued_overview = self
+            .queue
+            .iter()
+            .filter_map(|q| match q {
+                Queued::Overview { shift, k, raw } => Some((*shift, *k, Arc::clone(raw))),
                 _ => None,
             })
             .collect();
@@ -1066,6 +1079,8 @@ impl Writer {
             runs,
             self.annotations.clone(),
             self.overview.held(),
+            &self.overview_rows,
+            queued_overview,
             self.position(),
         )
     }
@@ -1179,7 +1194,11 @@ impl Writer {
         for Settled { shift, k, level } in settled {
             let mut raw = Vec::new();
             overview::write(&[level], &mut raw);
-            self.queue.push(Queued::Overview { shift, k, raw });
+            self.queue.push(Queued::Overview {
+                shift,
+                k,
+                raw: Arc::new(raw),
+            });
         }
         self.drain_queue()?;
 

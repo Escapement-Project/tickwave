@@ -4,15 +4,17 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use escapement_tickwave_format::decode::{Block, BlockChannel, Footer};
+use escapement_tickwave_format::decode::{Block, BlockChannel, Footer, OverviewBlock};
 use escapement_tickwave_format::header::{
     AnalogCoding, Declaration, DeclaredChannel, DeclaredKind, Derived, Exact, IntCoding,
     SourceFormat, SourceHeader,
 };
 use escapement_tickwave_format::model::{Break, Gap, Ratio, Sample};
+use escapement_tickwave_format::overview::{AnalogOverview, BLOCK_BUCKETS, HEAD_BUCKETS, Level};
 use escapement_tickwave_format::recut::{RecutError, Recutter};
 use escapement_tickwave_format::repair::repair;
 use escapement_tickwave_format::samples::Values;
+use escapement_tickwave_format::snapshot::Snapshot;
 use escapement_tickwave_format::writer::{Finish, Finished, WriteOptions, Writer};
 
 mod common;
@@ -454,6 +456,175 @@ fn a_snapshot_with_the_bytes_written_so_far_gives_every_item_pushed() {
         assert_eq!(
             footer.overview[0].slice(0, settled),
             held.chunks[0].slice(0, settled)
+        );
+    }
+}
+
+#[test]
+fn a_snapshot_goes_to_another_thread() {
+    fn shared<T: Send + Sync>() {}
+    shared::<Snapshot>();
+}
+
+/// Bucket `i` of each of `level`'s channels, to compare one bucket at a time.
+fn bucket(level: &Level, i: u64) -> Vec<String> {
+    level
+        .channels
+        .iter()
+        .map(|c| match c.analog() {
+            None => format!("{:?}", c.digital(i).unwrap()),
+            Some(AnalogOverview::F32(a)) => format!("{:?}", a.bucket(i as usize)),
+            Some(AnalogOverview::F64(a)) => format!("{:?}", a.bucket(i as usize)),
+            Some(AnalogOverview::U64(a)) => format!("{:?}", a.bucket(i as usize)),
+            Some(AnalogOverview::I64(a)) => format!("{:?}", a.bucket(i as usize)),
+        })
+        .collect()
+}
+
+/// `piece`'s buckets are the finished level's from bucket `first` on. Its blocks hold the
+/// finished level, 65,536 buckets each.
+fn same_as_finished(piece: &Level, first: u64, finished: &[OverviewBlock]) {
+    let block = &finished[(first / BLOCK_BUCKETS) as usize];
+    let at = first - block.first;
+    let whole = piece.buckets / 8 * 8;
+    assert_eq!(
+        piece.slice(0, whole),
+        block.level.slice(at, whole),
+        "buckets {first} to {}",
+        first + whole
+    );
+    for i in whole..piece.buckets {
+        assert_eq!(
+            bucket(piece, i),
+            bucket(&block.level, at + i),
+            "bucket {}",
+            first + i
+        );
+    }
+}
+
+/// The session's channels at a pair every 100 ticks for 6,000,000 ticks: past 2^21, where the
+/// finest level, 2^4, has more than 2^17 buckets and goes in overview blocks, and into its sixth.
+#[test]
+fn a_snapshot_past_the_heads_bucket_count_reads_every_finest_bucket_the_finished_file_has() {
+    let (mut d, _) = session();
+    for c in &mut d.channels {
+        if let DeclaredKind::Analog { period, .. } = &mut c.data {
+            *period = Ratio::integer(100).unwrap();
+        }
+    }
+    const PAIRS: u64 = 60_000;
+    // Blocks close on their size, a few hundred pairs each, and at a flush every 2,000 pairs. In
+    // batches of 3, an overview block that settles with the first or second of a batch waits
+    // with it, unwritten, until the third or the flush.
+    for batch in [1, 3] {
+        let mut w = Writer::new(
+            d.clone(),
+            WriteOptions {
+                level: 3,
+                block_bytes: 4096,
+                batch,
+            },
+        )
+        .unwrap();
+        let mut file = w.take_output();
+        w.run(0, 0, 0).unwrap();
+        w.run(1, 0, 0).unwrap();
+        let mut kept: Vec<Snapshot> = Vec::new();
+        // Each different count of written and queued blocks, while some are queued.
+        let mut queued_seen = Vec::new();
+        for i in 0..PAIRS {
+            let t = i as i64 * 100;
+            if i > 0 && i % 2000 == 0 {
+                w.flush(t).unwrap();
+            }
+            w.sample(0, 3300 + i % 7).unwrap();
+            w.sample(1, 1_000_000 + (i * 7919) % 100_000).unwrap();
+            if i % 37 == 0 {
+                w.edge(2, t + 50).unwrap();
+            }
+            // A queued overview block waits a block at least, a few hundred pairs.
+            if i % 50 != 49 {
+                continue;
+            }
+            let s = w.snapshot();
+            file.extend(w.take_output());
+            let written = s
+                .overview_blocks()
+                .first()
+                .map_or(0, |l| u64::from(l.blocks));
+            let queued = (s.overview()[0].first > written * BLOCK_BUCKETS)
+                .then_some((written, s.overview()[0].first));
+            if queued.is_some_and(|q| !queued_seen.contains(&q)) || i % 6000 == 5999 {
+                queued_seen.extend(queued);
+                kept.push(s);
+            }
+        }
+        if batch > 1 {
+            assert!(
+                queued_seen.iter().any(|&(written, _)| written > 0),
+                "a snapshot held a queued overview block after a written one: {queued_seen:?}"
+            );
+        }
+        let f = w.finish(PAIRS as i64 * 100, &[PAIRS as i64 * 100], Finish::default());
+        file.extend(f.unwrap().tail);
+        let footer = Footer::parse_file(&file).unwrap();
+        assert_eq!(footer.header.overview_blocks[0].shift, 4);
+        let finished: Vec<OverviewBlock> = (0..footer.header.overview_blocks[0].blocks as usize)
+            .map(|k| {
+                let (offset, len) = footer.overview_block_location(0, k);
+                let frame = &file[offset as usize..][..len as usize];
+                footer.decode_overview_block(0, k, frame).unwrap()
+            })
+            .collect();
+        let mut past_head = 0;
+        let mut decoded = 0;
+        for s in &kept {
+            let held = &s.overview()[0];
+            assert_eq!(held.shift, 4);
+            let mut blocks = 0;
+            if let Some(l) = s.overview_blocks().first() {
+                assert_eq!(l.shift, 4);
+                // A written block's frame is the finished file's: decode each once.
+                for (k, want) in finished.iter().enumerate().take(l.blocks as usize) {
+                    let at = s.overview_block_location(0, k);
+                    assert_eq!(at, footer.overview_block_location(0, k), "block {k}");
+                    if k >= decoded {
+                        let frame = &file[at.0 as usize..][..at.1 as usize];
+                        let block = s.decode_overview_block(0, k, frame).unwrap();
+                        assert_eq!(block.first, k as u64 * BLOCK_BUCKETS);
+                        assert_eq!(block.level, want.level, "block {k}, batch {batch}");
+                        decoded = k + 1;
+                    }
+                }
+                let queued = s.queued_overview_blocks(0).unwrap();
+                for (j, block) in queued.iter().enumerate() {
+                    let k = l.blocks as usize + j;
+                    assert_eq!(block.first, k as u64 * BLOCK_BUCKETS);
+                    assert_eq!(block.level, finished[k].level, "queued {k}, batch {batch}");
+                }
+                blocks = l.blocks as u64 + queued.len() as u64;
+            }
+            // The held buckets follow the blocks, and run to the last settled bucket: the
+            // last before the open block's start.
+            assert_eq!(held.first, blocks * BLOCK_BUCKETS);
+            let mut first = held.first;
+            for chunk in &held.chunks {
+                same_as_finished(chunk, first, &finished);
+                first += chunk.buckets;
+            }
+            assert_eq!(
+                first,
+                s.open_block().unwrap().start as u64 >> 4,
+                "batch {batch}"
+            );
+            if first > HEAD_BUCKETS {
+                past_head += 1;
+            }
+        }
+        assert!(
+            past_head >= 5,
+            "batch {batch}: {past_head} snapshots past 2^17 buckets"
         );
     }
 }
