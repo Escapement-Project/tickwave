@@ -18,9 +18,16 @@ const TAIL: u64 = 32 << 10;
 
 const CHECKED: &str = "every block decoded when the recording was opened";
 
+// The decode error is in the message, not the source too: a chained report would say it twice.
 #[derive(Debug, thiserror::Error)]
 #[error("the recording can't be read: {0}")]
-pub struct Error(#[from] DecodeError);
+pub struct Error(DecodeError);
+
+impl From<DecodeError> for Error {
+    fn from(e: DecodeError) -> Self {
+        Self(e)
+    }
+}
 
 /// The recording `input` holds, with the footer's header, which says what the model doesn't: its
 /// title, meta, bundled annotations and content id.
@@ -95,6 +102,8 @@ pub fn read(input: Arc<dyn Input>) -> Result<(Header, Recording), Error> {
             rate: s.rate,
             extra: s.extra.clone(),
             converter: s.converter.clone(),
+            title: s.title.clone(),
+            meta: s.meta.clone(),
         })
         .collect();
     let recording = Recording {

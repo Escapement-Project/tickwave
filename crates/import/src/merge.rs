@@ -210,7 +210,15 @@ impl Input {
         input: Arc<dyn crate::input::Input>,
         stem: impl Into<String>,
     ) -> Result<Self, Error> {
-        let (header, recording) = crate::recording::read(input)?;
+        let (header, mut recording) = crate::recording::read(input)?;
+        // Its title and meta go with its sources, which the merged recording's own don't keep. A
+        // source that came from a merge already has its own recording's.
+        for s in &mut recording.sources {
+            if s.title.is_none() && s.meta.is_empty() {
+                s.title.clone_from(&header.title);
+                s.meta.clone_from(&header.meta);
+            }
+        }
         Ok(Self {
             recording,
             stem: stem.into(),
@@ -293,6 +301,12 @@ pub enum Note {
         stem: String,
         file: String,
     },
+    /// Generated annotations carried into the merged recording's bundle.
+    AnnotationsCarried {
+        input: usize,
+        stem: String,
+        count: usize,
+    },
     /// Generated annotations left out: on no channel the merge takes, before the merged
     /// recording's start or past its end, or not reading.
     AnnotationsLeftOut {
@@ -306,7 +320,10 @@ pub enum Note {
 impl Note {
     /// Whether it loses something a reader may miss.
     pub fn warns(&self) -> bool {
-        !matches!(self, Note::GeneratorRenamed { .. })
+        !matches!(
+            self,
+            Note::GeneratorRenamed { .. } | Note::AnnotationsCarried { .. }
+        )
     }
 }
 
@@ -335,6 +352,11 @@ impl std::fmt::Display for Note {
             Note::Unread { input, stem, file } => write!(
                 f,
                 "input {input} ({stem}): its sidecar's {file} does not read, and is left out"
+            ),
+            Note::AnnotationsCarried { input, stem, count } => write!(
+                f,
+                "input {input} ({stem}): {count} generated annotation{} carried",
+                if *count == 1 { "" } else { "s" }
             ),
             Note::AnnotationsLeftOut {
                 input,
@@ -1052,14 +1074,12 @@ fn time_ticks(value: &serde_json::Value, timebase: Ratio) -> Option<i64> {
     annotations::ticks(&time, timebase).ok()
 }
 
+/// Generated annotations, each with its generator's name.
+type Annotations = Vec<(String, serde_json::Map<String, serde_json::Value>)>;
+
 /// Each input's generated annotations, carried: times mapped, generators renamed apart, channels
 /// renamed and dropped. Hand-written annotations are counted, not carried.
-#[allow(clippy::type_complexity)]
-fn carried(
-    inputs: &[Input],
-    layout: &Layout,
-    notes: &mut Vec<Note>,
-) -> Vec<(String, serde_json::Map<String, serde_json::Value>)> {
+fn carried(inputs: &[Input], layout: &Layout, notes: &mut Vec<Note>) -> Annotations {
     let mut out = Vec::new();
     let mut generators: BTreeSet<String> = BTreeSet::new();
     for (j, input) in inputs.iter().enumerate() {
@@ -1087,6 +1107,7 @@ fn carried(
             .collect();
         let tb = input.recording.timebase;
         let (mut no_channel, mut before, mut after, mut unread) = (0, 0, 0, 0);
+        let carried_before = out.len();
         for (file, text) in files {
             let Some(source) = annotations::generator_source(text) else {
                 match annotations::hand_written_count(text) {
@@ -1191,6 +1212,13 @@ fn carried(
                 }
                 out.push((name.clone(), a));
             }
+        }
+        if out.len() > carried_before {
+            notes.push(Note::AnnotationsCarried {
+                input: number,
+                stem: input.stem.clone(),
+                count: out.len() - carried_before,
+            });
         }
         for (count, why) in [
             (no_channel, "none of their channels is taken"),

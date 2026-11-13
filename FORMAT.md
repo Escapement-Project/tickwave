@@ -181,6 +181,9 @@ An entry has:
   a claim, not something an instrument recorded. Instruments' clocks drift: at 20 ppm apart, an
   alignment by hand stays within one tick of a 96 MHz clock for about ±0.5 ms around the point
   where it was made, and within 10 µs for about ±0.5 s.
+- Optionally `title` and `meta`: the title and metadata of the recording a merge took the source
+  from, since the merged recording's own `title` and `meta` are the merge's. A source that came
+  from a merge already keeps those of its own recording.
 - Optionally `instrument`, `software`, `begin_s` (the source's own time at its tick 0, in seconds),
   `trigger_s` (the trigger's time in the same seconds), `rate`, `extra` (anything else the source
   states) and `converter`. `rate` is there when the source doesn't record its sample rate:

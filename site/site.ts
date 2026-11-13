@@ -58,7 +58,9 @@ function showFacts(facts: HTMLElement, info: RecordingInfo, name: string): void 
   ];
   if (info.bytes !== undefined) rows.push(["Size", formatBytes(info.bytes)]);
   for (const source of info.sources ?? []) {
-    rows.push(["From", [source.format, ...source.files].join(", ")]);
+    rows.push(["From", [source.title, source.format, ...source.files].filter(Boolean).join(", ")]);
+    // A merged recording's source keeps the metadata of the recording it came from.
+    for (const [k, v] of Object.entries(source.meta ?? {})) rows.push([k, v]);
     if (source.rate === "inferred") rows.push(["Sample rate", "inferred from the edges"]);
     else if (source.rate === "given") rows.push(["Sample rate", "given when it was converted"]);
     if (source.converter) rows.push(["Converted by", source.converter]);

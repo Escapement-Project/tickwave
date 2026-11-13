@@ -81,7 +81,8 @@ enum Command {
         against: Vec<PathBuf>,
     },
     /// Merge recordings onto one time axis, at the least common multiple of their tick rates. A
-    /// capture is converted first. The output is checked against the inputs before it is written.
+    /// capture goes through `tickwave convert` first. The output is checked against the inputs
+    /// before it is written.
     Merge {
         /// Two or more .tickwave recordings, in order.
         #[arg(required = true, num_args = 2..)]
@@ -825,6 +826,13 @@ fn info(file: &Path, json: bool, max: usize) -> Result<()> {
             s.timebase.den(),
             s.origin
         )?;
+        // A merged recording's source keeps the title and meta of the recording it came from.
+        if let Some(title) = &s.title {
+            writeln!(out, "    from {title}")?;
+        }
+        for (k, v) in &s.meta {
+            writeln!(out, "    {k} = {v}")?;
+        }
     }
     let several = h.sources.len() > 1;
     for c in &h.channels {
@@ -860,9 +868,14 @@ fn info(file: &Path, json: bool, max: usize) -> Result<()> {
                     (n, 0) => format!(", {n} breaks"),
                     (n, lost) => format!(", {n} breaks, {lost} samples lost"),
                 };
+                let unit = if unit.is_empty() {
+                    String::new()
+                } else {
+                    format!(" in {unit}")
+                };
                 writeln!(
                     out,
-                    "  {:<12} analog, {count} samples in {unit}{breaks}, {} ({}{from})",
+                    "  {:<12} analog, {count} samples{unit}{breaks}, {} ({}{from})",
                     c.name,
                     describe_coding(*coding),
                     c.source_name
@@ -901,6 +914,10 @@ fn info(file: &Path, json: bool, max: usize) -> Result<()> {
     }
     for (k, v) in &h.meta {
         writeln!(out, "  {k} = {v}")?;
+    }
+    for (name, text) in h.annotations.iter().flatten() {
+        let lines = text.lines().filter(|l| !l.trim().is_empty()).count();
+        writeln!(out, "  bundled {name}, {lines} lines")?;
     }
     Ok(())
 }
@@ -1029,10 +1046,12 @@ fn stem_of(path: &Path) -> String {
 
 /// The input at `path` for a merge: its bundled sidecar, or else the one beside it, as `tickwave
 /// open` finds one.
+/// An input's recording and its sidecar; the caller says which file a failure is about.
 fn merge_input(path: &Path) -> Result<merge::Input> {
-    let bytes = map(path).with_context(|| format!("reading {}", path.display()))?;
-    let mut input = merge::Input::read(bytes, stem_of(path))
-        .with_context(|| format!("reading {}", path.display()))?;
+    if !is_recording(path) {
+        bail!("it isn't a tickwave recording: convert a capture with `tickwave convert` first");
+    }
+    let mut input = merge::Input::read(map(path)?, stem_of(path))?;
     if input.bundled.is_none() {
         let mut name = path.file_stem().unwrap_or_default().to_owned();
         name.push(".annotations.toml");

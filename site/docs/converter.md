@@ -138,7 +138,7 @@ The recordings share no clock: none of the captures tickwave reads records the t
 | `--keep <name>=<from>..<to>` | keep only that part of a channel, in its own recording's time before any move |
 | `--unit <name>=<unit>` | an analog channel's unit |
 
-`<name>` is the name the channel takes in the merged recording. `-o`, `--title`, `--meta`, `--level`, `--block-kib` and `--open` work as they do for a conversion.
+`<name>` is the name the channel takes in the merged recording. `-o`, `--title`, `--meta`, `--level`, `--block-kib` and `--open` work as they do for a conversion. Each recording's own title and metadata stay with its sources, where `tickwave info` and the Open page's details list them.
 
 A recording's generated annotations come with it, from its decoders' files, bundled or in a sidecar beside it. Their times move with the recording, and [ANNOTATIONS.md](https://github.com/Escapement-Project/tickwave/blob/main/ANNOTATIONS.md#merging) says how their names follow the merge's. Annotations written by hand don't come, since their times are the recording's own, and `merge` says how many it left out. A derived channel, such as power from a current and a voltage, comes while both its channels do, moved and trimmed alike.
 

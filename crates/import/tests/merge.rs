@@ -1237,8 +1237,10 @@ fn generated_annotations_come_over_mapped_and_hand_written_ones_are_counted() {
     assert_eq!(
         notes,
         [
+            "input 1 (analyser): 1 generated annotation carried",
             "input 2 (my probe): 2 hand-written annotations left out, since their times are the input's",
             "input 2: generator dec renamed my_probe-dec, since an earlier input's has its name",
+            "input 2 (my probe): 4 generated annotations carried",
             "input 2 (my probe): 1 generated annotation left out: none of their channels is taken",
         ]
     );
@@ -1344,9 +1346,12 @@ fn annotations_follow_renamed_channels_and_what_stays_behind_is_noted() {
     assert_eq!(
         notes,
         [
+            "input 1 (analyser): 1 generated annotation carried",
             "input 2: generator dec renamed probe-dec, since an earlier input's has its name",
+            "input 2 (probe): 1 generated annotation carried",
             "input 2 (probe): 2 generated annotations left out: they do not read",
             "input 3: generator dec renamed probe-2-dec, since an earlier input's has its name",
+            "input 3 (probe): 1 generated annotation carried",
             "input 3 (probe): 2 generated annotations left out: they do not read",
         ]
     );
@@ -1402,6 +1407,7 @@ fn annotations_follow_renamed_channels_and_what_stays_behind_is_noted() {
     assert_eq!(
         notes,
         [
+            "input 2 (probe): 2 generated annotations carried",
             "input 2 (probe): 2 generated annotations left out: they lie past the merged recording's end"
         ]
     );
@@ -1451,7 +1457,10 @@ fn annotations_follow_renamed_channels_and_what_stays_behind_is_noted() {
     let notes: Vec<String> = merged.notes.iter().map(|n| n.to_string()).collect();
     assert_eq!(
         notes,
-        ["input 1 (analyser): its sidecar's in.other.jsonl does not read, and is left out"]
+        [
+            "input 1 (analyser): its sidecar's in.other.jsonl does not read, and is left out",
+            "input 1 (analyser): 2 generated annotations carried",
+        ]
     );
 }
 
@@ -1841,6 +1850,7 @@ fn generated_annotations_before_the_merged_start_are_left_out_or_start_there() {
             .map(|n| n.to_string())
             .collect::<Vec<_>>(),
         [
+            "input 1 (analyser): 1 generated annotation carried",
             "input 1 (analyser): 2 generated annotations left out: they lie before the merged recording's start"
         ]
     );
@@ -1976,5 +1986,78 @@ fn expected_refuses_a_header_its_inputs_do_not_give() {
             .unwrap()
             .to_string(),
         "derived channel P: its operands I and V are moved or cut apart"
+    );
+}
+
+#[test]
+fn each_inputs_title_and_meta_go_with_its_sources_and_a_merged_inputs_keep_their_own() {
+    let titled = |recording: Recording, title: &str, meta: &[(&str, &str)]| {
+        encode(
+            recording,
+            &Options {
+                level: 3,
+                title: Some(title.into()),
+                meta: meta.iter().map(|&(k, v)| (k.into(), v.into())).collect(),
+                ..Options::default()
+            },
+        )
+        .unwrap()
+    };
+    let a = titled(analyser(), "wire", &[("leads", "long"), ("probe", "verge")]);
+    let b = titled(probe(), "energy", &[]);
+    let (m, _) = run(
+        &[(a, "analyser", None), (b, "probe", None)],
+        &settings(Vec::new()),
+    )
+    .unwrap();
+    let h = Footer::parse_file(&m).unwrap().header;
+    // The merged recording's own title and meta are the merge's: none asked for.
+    assert_eq!((h.title.as_deref(), h.meta.len()), (None, 0));
+    let of = |h: &Header| {
+        h.sources
+            .iter()
+            .map(|s| {
+                let meta: Vec<String> = s.meta.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                (s.title.clone(), meta)
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        of(&h),
+        [
+            (
+                Some("wire".into()),
+                vec!["leads=long".into(), "probe=verge".into()]
+            ),
+            (Some("energy".into()), vec![]),
+        ]
+    );
+    // Merged again under a title of its own, beside a third: its sources keep theirs.
+    let tb = Ratio::integer(1_000).unwrap();
+    let c = Recording {
+        timebase: tb,
+        length: 10,
+        channels: vec![digital("X", false, vec![1], 10)],
+        derived: Vec::new(),
+        sources: vec![source("third", tb)],
+    };
+    let m = {
+        let mut head = Footer::parse_file(&m).unwrap();
+        head.header.title = Some("both".into());
+        escapement_tickwave_format::bundle::bundle(&m, &head, Default::default()).unwrap()
+    };
+    let (again, _) = run(
+        &[(m, "both", None), (titled(c, "third", &[]), "third", None)],
+        &settings(Vec::new()),
+    )
+    .unwrap();
+    let h = Footer::parse_file(&again).unwrap().header;
+    assert_eq!(
+        of(&h).into_iter().map(|(t, _)| t).collect::<Vec<_>>(),
+        [
+            Some("wire".into()),
+            Some("energy".into()),
+            Some("third".into())
+        ]
     );
 }

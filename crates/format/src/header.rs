@@ -765,6 +765,12 @@ pub struct SourceHeader {
     /// The converter's name, version and arguments.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub converter: Option<String>,
+    /// The title of the recording a merge took the source from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// The metadata of the recording a merge took the source from.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub meta: BTreeMap<String, String>,
 }
 
 impl SourceHeader {
@@ -784,6 +790,8 @@ impl SourceHeader {
             rate: None,
             extra: BTreeMap::new(),
             converter: None,
+            title: None,
+            meta: BTreeMap::new(),
         }
     }
 }

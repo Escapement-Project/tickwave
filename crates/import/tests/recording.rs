@@ -69,6 +69,8 @@ fn every_fixture_reads_back_as_its_file_holds_it() {
                 rate: s.rate,
                 extra: s.extra.clone(),
                 converter: h.converter.clone(),
+                title: s.title.clone(),
+                meta: s.meta.clone(),
             })
             .collect();
         assert_eq!(sources, header.sources, "{name}");

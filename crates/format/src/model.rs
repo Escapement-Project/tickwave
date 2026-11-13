@@ -317,6 +317,10 @@ pub struct Source {
     /// What converted it, where a recording read back says: an encoder states its own only for a
     /// source that has none.
     pub converter: Option<String>,
+    /// The title of the recording a merge took the source from.
+    pub title: Option<String>,
+    /// The metadata of the recording a merge took the source from.
+    pub meta: BTreeMap<String, String>,
 }
 
 impl Source {
@@ -336,6 +340,8 @@ impl Source {
             rate: None,
             extra: BTreeMap::new(),
             converter: None,
+            title: None,
+            meta: BTreeMap::new(),
         }
     }
 }

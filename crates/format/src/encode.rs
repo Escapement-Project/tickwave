@@ -226,6 +226,8 @@ pub fn encode_to(
                 rate: source.rate,
                 extra: source.extra,
                 converter: source.converter.or_else(|| options.converter.clone()),
+                title: source.title,
+                meta: source.meta,
             })
             .collect(),
         title: options.title.clone(),

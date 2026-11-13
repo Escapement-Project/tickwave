@@ -36,8 +36,16 @@ fn two_fixtures_merge_verify_and_describe_their_sources() {
         "3".as_ref(),
     ]);
     assert!(ok, "{err}");
-    // The energy capture's markers come over in the merged bundle, under their own generator.
-    assert!(err.contains("merged.tickwave"), "{err}");
+    // identify-swd's decoder's annotations come from its sidecar, the energy capture's markers
+    // from its bundle, and the merge says how many of each.
+    assert!(
+        err.contains("input 1 (identify-swd): 687 generated annotations carried"),
+        "{err}"
+    );
+    assert!(
+        err.contains("input 2 (energy): 5 generated annotations carried"),
+        "{err}"
+    );
     let (ok, _, err) = tickwave(&[
         "verify".as_ref(),
         merged.as_ref(),
@@ -72,6 +80,30 @@ fn two_fixtures_merge_verify_and_describe_their_sources() {
         ),
         "{out}"
     );
+    // The energy capture's title goes with its source, and its files with the bundle.
+    assert!(
+        out.contains("\n    from A synthetic energy capture\n"),
+        "{out}"
+    );
+    assert!(
+        out.contains("  bundled merged.verge.jsonl, 6 lines"),
+        "{out}"
+    );
+    // A capture is converted first.
+    let sr = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/import/demo-logic.sr");
+    let (ok, _, err) = tickwave(&[
+        "merge".as_ref(),
+        sr.as_ref(),
+        energy.as_ref(),
+        "-o".as_ref(),
+        merged.as_ref(),
+    ]);
+    assert!(!ok);
+    assert!(
+        err.contains("demo-logic.sr: it isn't a tickwave recording: convert a capture with"),
+        "{err}"
+    );
+    assert_eq!(err.matches("demo-logic.sr").count(), 1, "{err}");
     let (ok, _, err) = tickwave(&[
         "merge".as_ref(),
         swd.as_ref(),

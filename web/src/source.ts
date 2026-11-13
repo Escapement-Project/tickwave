@@ -231,6 +231,10 @@ export interface SourceHeader {
   readonly extra?: Readonly<Record<string, string>>;
   /** The converter's name, version and arguments. */
   readonly converter?: string;
+  /** The title of the recording a merge took the source from. */
+  readonly title?: string;
+  /** The metadata of the recording a merge took the source from. */
+  readonly meta?: Readonly<Record<string, string>>;
 }
 
 export interface RecordingInfo {
