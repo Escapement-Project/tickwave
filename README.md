@@ -38,6 +38,8 @@ computer.
 The Rust crates need a current Rust toolchain:
 
 ```sh
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo build --release -p escapement-tickwave-cli     # the converter, at target/release/tickwave
 ```
