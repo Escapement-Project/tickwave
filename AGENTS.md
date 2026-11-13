@@ -21,6 +21,12 @@ and a readout never shows more digits than it carries.
 a reader fetches first, so a view fetches only the blocks it covers. Nothing loads until the page
 shows a reference to a recording or the reader opens it.
 
+**Plotting costs as little as it can.** Captures get very large, and the viewer runs inside other
+pages on less powerful machines. A view's work stays off the page's main thread where it can, and
+what is left fits well inside a frame at 6x CPU throttle. Latency from input or from new data to
+the screen is measured, stated and kept down: it feels worse than it measures. A change to drawing
+or querying comes with its frame-time and latency figures.
+
 **One core, two consumers.** A Rust crate owns encoding, decoding and the block index. The browser
 uses it compiled to WASM, the converter CLI natively. A second implementation of the decoder comes
 only if a benchmark on real recordings shows the WASM cost matters; record the numbers.
