@@ -7,7 +7,19 @@ use std::process::{Command, Stdio};
 fn a_reader_that_stops_early_ends_the_output_quietly() {
     let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../web/fixtures");
     let recording = fixtures.join("identify-swd.tickwave");
-    let sidecar = fixtures.join("identify-swd.annotations.toml");
+    // The committed sidecar includes a generated file a fresh clone lacks: one with nothing to
+    // include serves, since any output meets the closed pipe.
+    let sidecar = std::env::temp_dir().join(format!(
+        "tickwave-pipe-{}.annotations.toml",
+        std::process::id()
+    ));
+    std::fs::write(
+        &sidecar,
+        "format = \"tickwave-annotations/1\"\n\
+         recording_id = \"blake3:ccc8b7d8c3e4cb30da7fc6088e54ebeba2858ad402eb3fb5a9aeb50be989accf\"\n\n\
+         [[annotation]]\nid = \"start\"\nkind = \"note\"\nstart = \"100 ms\"\nlabel = \"A note\"\n",
+    )
+    .unwrap();
     let runs: [&[&std::ffi::OsStr]; 3] = [
         &["info".as_ref(), recording.as_ref()],
         &["info".as_ref(), recording.as_ref(), "--json".as_ref()],
@@ -33,4 +45,5 @@ fn a_reader_that_stops_early_ends_the_output_quietly() {
         assert!(out.status.success(), "{args:?}: {:?}, {stderr}", out.status);
         assert_eq!(stderr, "", "{args:?}");
     }
+    std::fs::remove_file(&sidecar).unwrap();
 }
