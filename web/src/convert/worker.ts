@@ -3,12 +3,12 @@
 // fails throws through the module, which is not fit to run again after that. A worker the page
 // keeps for editing a sidecar's hand-written file takes only edits, which read no files.
 
-import init, { convert, describe, editAnnotations, unzip } from "../../../crates/convert-wasm/pkg/escapement_tickwave_convert_wasm.js";
+import init, { convert, describe, editAnnotations, merge, unzip } from "../../../crates/convert-wasm/pkg/escapement_tickwave_convert_wasm.js";
 import { handJson } from "../wasm/hand.ts";
 import { request, type FromWorker, type HandAnnotation, type Pass, type ToWorker } from "./protocol.ts";
 
 // A worker's own globals, which the page's DOM types leave out.
-declare const FileReaderSync: { new (): { readAsArrayBuffer(blob: Blob): ArrayBuffer } };
+declare const FileReaderSync: { new (): { readAsArrayBuffer(blob: Blob): ArrayBuffer; readAsText(blob: Blob): string } };
 const scope = self as unknown as {
   postMessage(m: FromWorker, transfer: Transferable[]): void;
   onmessage: ((e: MessageEvent<ToWorker>) => void) | null;
@@ -60,6 +60,24 @@ scope.onmessage = async (e) => {
     }
     if (m.op === "unzip") {
       post({ op: "unzipped", files: unzipped(m.file, m.ends) });
+      return;
+    }
+    if (m.op === "merge") {
+      files = m.inputs.map((i) => i.file);
+      const inputs = m.inputs.map((i, id) => ({
+        file: { id, name: i.file.name, size: i.file.size },
+        stem: i.stem,
+        align: i.align,
+        channels: i.channels,
+        ...(i.sidecar.length > 0 && { annotations: Object.fromEntries(i.sidecar.map((f) => [f.name, reader.readAsText(f)])) }),
+      }));
+      const started = performance.now();
+      const out = merge(JSON.stringify({ inputs, ...m.settings }));
+      const file = out.file;
+      const report = JSON.parse(out.report) as string[];
+      out.free();
+      const buffer = file.buffer as ArrayBuffer;
+      post({ op: "merged", file: buffer, report, seconds: (performance.now() - started) / 1000 }, [buffer]);
       return;
     }
     files = m.files;

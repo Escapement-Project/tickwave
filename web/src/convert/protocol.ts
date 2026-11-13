@@ -38,6 +38,39 @@ export interface Settings {
 
 export const DEFAULTS: Settings = { channels: [], title: null, meta: [], level: 19, blockKib: 1024, units: [], codes: true, rate: null, offsets: [], keeps: [] };
 
+/** A recording a merge takes, and what to take of it. */
+export interface MergeInput {
+  file: File;
+  /** Its file's name without the extension, which prefixes a default name an earlier input took. */
+  stem: string;
+  /** The time it is moved by on the merged axis, later when positive; null for none. */
+  align: string | null;
+  /** `[name, new name]`, by the recording's own names, in the order to store them; none takes
+   * every channel under its own name. */
+  channels: [string, string][];
+  /** Its sidecar's files, read where the recording bundles none: the hand-written .toml and the
+   * files it includes. */
+  sidecar: File[];
+}
+
+/** What `tickwave merge` takes beyond its inputs. */
+export interface MergeSettings {
+  /** The merged recording's file name without `.tickwave`, which names the generator files it
+   * bundles. */
+  stem: string;
+  title: string | null;
+  meta: [string, string][];
+  level: number;
+  blockKib: number;
+  /** Analog channels' units, by the merged recording's names. */
+  units: [string, string][];
+  /** `[name, time]`: a channel moved by a time on the merged axis, later when positive. */
+  offsets: [string, string][];
+  /** `[name, from, to]`: the part of a channel kept, in its own input's time before any move; null
+   * for an open end. */
+  keeps: [string, string | null, string | null][];
+}
+
 export interface ChannelInfo {
   /** The source's own name: a Saleae file's stem, a sigrok probe, a VCD scope path. */
   name: string;
@@ -85,6 +118,7 @@ export type HandAnnotation = Fields & Record<string, unknown>;
 export type ToWorker =
   | { op: "describe"; kind: SourceKind; files: File[] }
   | { op: "convert"; kind: SourceKind; files: File[]; settings: Settings }
+  | { op: "merge"; inputs: MergeInput[]; settings: MergeSettings }
   /** `edit` applied to `text`, or `text` only read when it is null. */
   | { op: "edit"; text: string; edit: Edit | null }
   /** The files in a zip whose names end in one of `ends` (lower case), out of their folders. */
@@ -97,6 +131,8 @@ export type FromWorker =
   | { op: "start"; pass: Pass; channel: string; total: number }
   | { op: "step"; n: number }
   | { op: "converted"; file: ArrayBuffer; codes: [string, number | null][]; seconds: number }
+  /** `report`: what the merge left out or renamed, a sentence each. */
+  | { op: "merged"; file: ArrayBuffer; report: string[]; seconds: number }
   | { op: "failed"; message: string };
 
 /** The module's request for `kind` over `files`, as JSON. */

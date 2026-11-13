@@ -18,7 +18,10 @@ an `Access-Control-Allow-Origin` header (CORS).
 Or open files from this computer: a `.tickwave` recording, with its sidecar's `.toml` and `.jsonl`
 files if it has them. They stay in your browser, and nothing is uploaded. A link can't share them.
 A capture converts on the Open page first, where its channels can be moved and trimmed:
-[the converter's doc](converter.html#converting-in-a-browser) says how.
+[the converter's doc](converter.html#converting-in-a-browser) says how. There, another capture or
+recording can join the one shown, to merge them on one time axis, each recording lined up with the
+others by hand. A reading in a merged recording keeps to the tick of the recording its channel came
+from, and a span between two recordings' channels to the coarser of their ticks.
 
 A `.zip` of these files opens as the files would. The folders inside it don't matter, but two files
 with one name do: the page refuses those, since either could be the one meant. With several

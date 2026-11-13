@@ -2,7 +2,7 @@
 // web/scripts/site.ts; "tickwave" is the tickwave.js beside this script. The project's face.js and
 // header.js run the header.
 
-import { recordingInfo, registerFile, type Channel, type ChannelShape, type RecordingInfo, type TickwaveView } from "tickwave";
+import { previewMerge, recordingInfo, registerFile, type Channel, type ChannelShape, type MergedSource, type RecordingInfo, type TickwaveView } from "tickwave";
 import { parseWindow } from "../web/src/attributes.ts";
 import { formatBytes, formatInterval } from "../web/src/readouts.ts";
 import { readingStep } from "../web/src/source.ts";
@@ -10,7 +10,7 @@ import { parseTime, toTicks } from "../web/src/time.ts";
 import { githubAttachment } from "./attachment.ts";
 import { attachEditor, type Editor } from "./editor.ts";
 import { timeText } from "./editor-fields.ts";
-import { DEFAULTS, type ChannelInfo, type Described, type FromWorker, type Pass, type Settings, type SourceKind, type ToWorker } from "../web/src/convert/protocol.ts";
+import { DEFAULTS, type ChannelInfo, type Described, type FromWorker, type MergeInput, type MergeSettings, type Pass, type Settings, type SourceKind, type ToWorker } from "../web/src/convert/protocol.ts";
 
 const byId = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -96,6 +96,14 @@ const ZIP = /\.zip$/i;
 /** The ends of the names the page opens: a zip's files are taken by them. */
 const OPENED = [".tickwave", ".toml", ".jsonl", ".sr", ".vcd", ".bin"];
 
+/** A capture's conversion: the recording, the codes found, how long it took, and the settings. */
+interface Conversion {
+  file: File;
+  codes: [string, number | null][];
+  seconds: number;
+  settings: Settings;
+}
+
 /** The Open page: a recording by its address or from files, or a capture converted here and opened. */
 function openPage(): void {
   const form = byId<HTMLFormElement>("by-url");
@@ -125,6 +133,9 @@ function openPage(): void {
   const attachedFile = byId<HTMLInputElement>("attached-file");
   const pick = byId("pick");
   const pickList = byId("pick-list");
+  const adding = byId("adding");
+  const addFiles = byId<HTMLInputElement>("add-files");
+  const addFolder = byId<HTMLInputElement>("add-folder");
   const { say, clear } = problems(byId("problem"));
   /** Served by `tickwave open`, which names the recording by an address that lasts as long as it runs. */
   const local = new URLSearchParams(location.search).has("local");
@@ -139,7 +150,7 @@ function openPage(): void {
   /** The recording's name, without .tickwave: the export's folder, or the capture file's. */
   let stem = "capture";
   let channels: ChannelInfo[] = [];
-  /** Each source channel's name in the recording shown, as the last conversion named it. */
+  /** Each source channel's name in the recording onStage, as the last conversion named it. */
   let shownNames = new Map<string, string>();
   let recordingTimebase: { num: number; den: number } | null = null;
   /** The view of the recording converted here, which the table's moves and trims shape. */
@@ -147,9 +158,38 @@ function openPage(): void {
   let worker: Worker | null = null;
   /** The capture converted whole, every channel under its own name: what the view shapes, and
    * what Save keeps when nothing is changed. */
-  let capture: { file: File; codes: [string, number | null][]; seconds: number; settings: Settings } | null = null;
+  let capture: Conversion | null = null;
   /** The recording Save keeps once the page shows what was saved. */
   let result: File | null = null;
+  /** The capture's channels, as the converter last described them. */
+  let lastDescribed: Described | null = null;
+
+  /** Where a capture a merge takes came from: what shapes it alone again, once it is the only one left. */
+  interface FromCapture {
+    kind: SourceKind;
+    files: File[];
+    described: Described;
+    converted: Conversion;
+  }
+  /** A recording a merge takes: a capture's first conversion, or a recording from this computer. */
+  interface Input {
+    /** As the page names it: an export's folder, or the file's name. Unique among the inputs. */
+    name: string;
+    /** The file's name without its extension, which prefixes a channel name an earlier input took. */
+    stem: string;
+    file: File;
+    /** Its sidecar's files, where they came with it. */
+    sidecar: File[];
+    src: string;
+    info: RecordingInfo;
+    from: FromCapture | null;
+  }
+  /** The recording the stage shows, where it is one from this computer that another can join. */
+  let onStage: { name: string; file: File; sidecar: File[]; from: FromCapture | null } | null = null;
+  /** The recordings being merged, two or more; empty otherwise. */
+  let inputs: Input[] = [];
+  /** Their preview, which the view shapes. */
+  let merged: MergedSource | null = null;
 
   const end = () => {
     worker?.terminate();
@@ -170,6 +210,7 @@ function openPage(): void {
     clear();
     settingsForm.hidden = true;
     stage.hidden = true;
+    adding.hidden = true;
     here.replaceChildren();
   };
 
@@ -225,6 +266,8 @@ function openPage(): void {
     else if (span) view.setAttribute("window", span);
     saving.hidden = found.hidden = !converted;
     stage.hidden = false;
+    // A recording from this computer can take another to merge with; one by its address can't.
+    adding.hidden = link;
     attached.hidden = true;
     // The recording, not the forms that asked for it: they fold away.
     opener.classList.add("folds");
@@ -261,6 +304,9 @@ function openPage(): void {
     const src = srcField.value.trim();
     const annotations = sidecarField.value.trim() || null;
     pick.hidden = true;
+    inputs = [];
+    merged = null;
+    onStage = null;
     if (src) void open(src, annotations, src, true);
   });
 
@@ -284,15 +330,17 @@ function openPage(): void {
   function take(list: File[], folder: string | null): void {
     if (!leaveEdits()) return;
     pick.hidden = true;
+    inputs = [];
+    merged = null;
     const zips = list.filter((f) => ZIP.test(f.name));
     if (zips.length > 0) unpack(zips, list.filter((f) => !zips.includes(f)), folder);
     else takeFiles(list, folder);
   }
 
-  /** The zips' files, out of their folders, unzipped one zip at a time, then taken with `rest`. A
-   * Saleae export's files take the zip's name if no folder gives one. */
-  function unpack(zips: File[], rest: File[], folder: string | null): void {
-    reset();
+  /** The zips' files, out of their folders, unzipped one zip at a time, then taken with `rest`, by
+   * `then`. A Saleae export's files take the zip's name if no folder gives one. */
+  function unpack(zips: File[], rest: File[], folder: string | null, then: (files: File[], folder: string | null) => void = takeFiles): void {
+    if (then === takeFiles) reset();
     const [zip, ...more] = zips;
     job({ op: "unzip", file: zip, ends: OPENED }, (m) => {
       if (m.op === "failed") {
@@ -306,8 +354,8 @@ function openPage(): void {
         }
         const files = [...rest, ...m.files];
         const name = folder ?? zip.name.replace(ZIP, "");
-        if (more.length > 0) unpack(more, files, name);
-        else takeFiles(files, name);
+        if (more.length > 0) unpack(more, files, name, then);
+        else then(files, name);
       }
     });
   }
@@ -338,7 +386,9 @@ function openPage(): void {
       tomls.find((t) => t.name.toLowerCase() === r.name.replace(RECORDING, ".annotations.toml").toLowerCase()) ?? (recordings.length === 1 && tomls.length === 1 ? tomls[0] : null);
     const openOne = (r: File) => {
       const hand = handOf(r);
-      void open(registerFile(r, hand ? [hand, ...jsonl] : []), null, r.name, false, undefined, null, null, hand);
+      const sidecar = hand ? [hand, ...jsonl] : [];
+      onStage = { name: r.name, file: r, sidecar, from: null };
+      void open(registerFile(r, sidecar), null, r.name, false, undefined, null, null, hand);
     };
     if (recordings.length === 1) {
       openOne(recordings[0]);
@@ -420,6 +470,7 @@ function openPage(): void {
         end();
         // Every channel at once, as the capture names them: the view shows the result, and the
         // table under it shapes the next conversion.
+        lastDescribed = m.described;
         if (show(m.described)) run(settings() as Settings);
       } else if (m.op === "failed") {
         end();
@@ -439,33 +490,10 @@ function openPage(): void {
       say(`${byId("source").textContent} has no channels tickwave can take.`, skipped);
       return false;
     }
-    const field = (cls: string, label: string, value = "", size?: number) => {
-      const f = Object.assign(document.createElement("input"), { type: "text", value, spellcheck: false, className: cls });
-      if (size) f.size = size;
-      f.setAttribute("aria-label", label);
-      return f;
-    };
-    const cell = (...els: (Node | string)[]) => {
-      const td = document.createElement("td");
-      td.append(...els);
-      return td;
-    };
     rows.replaceChildren(
-      ...channels.map((c) => {
-        const tr = document.createElement("tr");
-        tr.dataset.source = c.name;
-        const take = Object.assign(document.createElement("input"), { type: "checkbox", checked: true, className: "take" });
-        take.setAttribute("aria-label", `Take ${c.name}`);
-        take.addEventListener("change", showTaken);
-        const where = cell(c.name, " ", Object.assign(document.createElement("span"), {
-          className: "quiet",
-          textContent: c.analog ? `analog${c.count === null ? "" : `, ${count(c.count)} samples`}` : `digital${c.count === null ? "" : `, ${count(c.count)} edges`}`,
-        }));
-        const shape = [field("offset", `Move ${c.name} by`, "", 9), field("from", `Keep ${c.name} from`, "", 11), field("to", `Keep ${c.name} to`, "", 11)];
-        for (const f of shape) f.addEventListener("change", () => shapeRow(tr));
-        tr.append(cell(take), where, cell(field("name", `Name for ${c.name}`, c.name)), cell(...(c.analog ? [field("unit", `Unit for ${c.name}`, c.unit ?? "", 4)] : [])), ...shape.map((f) => cell(f)));
-        return tr;
-      }),
+      ...channels.map((c) =>
+        channelRow(c.name, c.name, c.analog, c.unit, c.analog ? `analog${c.count === null ? "" : `, ${count(c.count)} samples`}` : `digital${c.count === null ? "" : `, ${count(c.count)} edges`}`),
+      ),
     );
     skippedBox.textContent = skipped.length ? `Left out: ${skipped.join("; ")}.` : "";
     skippedBox.hidden = skipped.length === 0;
@@ -474,8 +502,36 @@ function openPage(): void {
     return true;
   }
 
+  const field = (cls: string, label: string, value = "", size?: number) => {
+    const f = Object.assign(document.createElement("input"), { type: "text", value, spellcheck: false, className: cls });
+    if (size) f.size = size;
+    f.setAttribute("aria-label", label);
+    return f;
+  };
+  const cell = (...els: (Node | string)[]) => {
+    const td = document.createElement("td");
+    td.append(...els);
+    return td;
+  };
+
+  /** A channel's row, `key` the view's name for it and `own` its source's: whether to take it, its
+   * name and unit, and its move and kept span. */
+  function channelRow(key: string, own: string, analog: boolean, unit: string | null, about: string): HTMLTableRowElement {
+    const tr = document.createElement("tr");
+    tr.dataset.source = key;
+    const take = Object.assign(document.createElement("input"), { type: "checkbox", checked: true, className: "take" });
+    take.setAttribute("aria-label", `Take ${key}`);
+    take.addEventListener("change", showTaken);
+    const where = cell(own, " ", Object.assign(document.createElement("span"), { className: "quiet", textContent: about }));
+    const shape = [field("offset", `Move ${key} by`, "", 9), field("from", `Keep ${key} from`, "", 11), field("to", `Keep ${key} to`, "", 11)];
+    for (const f of shape) f.addEventListener("change", () => shapeRow(tr));
+    tr.append(cell(take), where, cell(field("name", `Name for ${key}`, key)), cell(...(analog ? [field("unit", `Unit for ${key}`, unit ?? "", 4)] : [])), ...shape.map((f) => cell(f)));
+    return tr;
+  }
+
   const input = (tr: Element, cls: string) => tr.querySelector<HTMLInputElement>(`input.${cls}`);
-  const rowsOf = () => [...rows.children] as HTMLTableRowElement[];
+  /** The table's channel rows, without a merge's head rows. */
+  const rowsOf = () => [...rows.querySelectorAll<HTMLTableRowElement>("tr[data-source]")];
 
   /** A time from the table in ticks: ticks as written, or a time such as -40 ns. Null when empty,
    * NaN when it reads as neither. */
@@ -496,6 +552,11 @@ function openPage(): void {
       .filter((tr) => input(tr, "take")!.checked)
       .map((tr) => shownNames.get(tr.dataset.source!))
       .filter((n): n is string => n !== undefined);
+    // A derived channel shows while both its operands are taken, after its first.
+    for (const c of merged?.mergedInfo.channels ?? []) {
+      if (c.kind !== "analog" || !c.product || !c.product.every((n) => names.includes(n))) continue;
+      names.splice(names.indexOf(c.product[0]) + 1, 0, c.name);
+    }
     if (names.length > 0) v.setAttribute("channels", names.join(" "));
   }
 
@@ -533,8 +594,25 @@ function openPage(): void {
     if (order) {
       const byName = new Map(rowsOf().map((tr) => [tr.dataset.source!, tr]));
       const ordered = order.map((n) => byName.get(source.get(n) ?? "")).filter((tr): tr is HTMLTableRowElement => tr !== undefined);
-      rows.append(...ordered, ...rowsOf().filter((tr) => !ordered.includes(tr)));
+      const all = [...ordered, ...rowsOf().filter((tr) => !ordered.includes(tr))];
+      // A merge's rows stay under their recording's head.
+      const heads = [...rows.querySelectorAll<HTMLTableRowElement>("tr.input")];
+      if (heads.length === 0) rows.append(...all);
+      else for (const h of heads) rows.append(h, ...all.filter((tr) => tr.dataset.input === h.dataset.input));
     }
+  }
+
+  /** The metadata field's lines, or what is wrong with one. */
+  function metaOf(): [string, string][] | string {
+    const meta: [string, string][] = [];
+    for (const line of byId<HTMLTextAreaElement>("meta").value.split("\n")) {
+      if (!line.trim()) continue;
+      const at = line.indexOf("=");
+      const [k, v] = at < 0 ? ["", ""] : [line.slice(0, at).trim(), line.slice(at + 1).trim()];
+      if (!k || !v) return `Each metadata line is key = value; this one isn't: ${line.trim()}`;
+      meta.push([k, v]);
+    }
+    return meta;
   }
 
   /** The form as the converter's settings, or what is wrong with it. */
@@ -557,14 +635,8 @@ function openPage(): void {
     const names = taken.map(([, to]) => to);
     const twice = names.find((n, i) => names.indexOf(n) !== i);
     if (twice) return `Two channels are named ${twice}: each needs its own name.`;
-    const meta: [string, string][] = [];
-    for (const line of byId<HTMLTextAreaElement>("meta").value.split("\n")) {
-      if (!line.trim()) continue;
-      const at = line.indexOf("=");
-      const [k, v] = at < 0 ? ["", ""] : [line.slice(0, at).trim(), line.slice(at + 1).trim()];
-      if (!k || !v) return `Each metadata line is key = value; this one isn't: ${line.trim()}`;
-      meta.push([k, v]);
-    }
+    const meta = metaOf();
+    if (typeof meta === "string") return meta;
     return {
       ...DEFAULTS,
       channels: taken,
@@ -578,15 +650,22 @@ function openPage(): void {
     };
   }
 
-  const label = (pass: Pass, channel: string) =>
+  const label = (pass: Pass, channel: string, merging: boolean) =>
     ({
       check: "Checking the export's edges",
       codes: `Looking for exact codes in ${channel}`,
-      encode: "Encoding",
-      verify: "Checking the recording against the capture",
+      encode: merging ? "Merging" : "Encoding",
+      verify: merging ? "Checking the merged recording against its recordings" : "Checking the recording against the capture",
     })[pass];
 
   function run(chosen: Settings): void {
+    work({ op: "convert", kind, files, settings: chosen }, (m) => {
+      if (m.op === "converted") converted(new File([m.file], `${stem}.tickwave`), m.codes, m.seconds, chosen);
+    });
+  }
+
+  /** Runs a conversion or a merge with its progress onStage, and hands `done` what it made. */
+  function work(message: ToWorker, done: (m: Extract<FromWorker, { op: "converted" | "merged" }>) => void): void {
     clear();
     settingsForm.inert = true;
     running.hidden = false;
@@ -594,31 +673,32 @@ function openPage(): void {
     byId("count").textContent = "";
     bar.removeAttribute("value");
     let total = 0;
-    let done = 0;
-    job({ op: "convert", kind, files, settings: chosen }, (m) => {
+    let taken = 0;
+    job(message, (m) => {
       switch (m.op) {
         case "start":
-          byId("pass").textContent = label(m.pass, m.channel);
+          byId("pass").textContent = label(m.pass, m.channel, message.op === "merge");
           total = m.total;
-          done = 0;
+          taken = 0;
           bar.max = Math.max(total, 1);
           bar.value = 0;
           byId("count").textContent = "";
           break;
         case "step":
-          done += m.n;
-          bar.value = done;
-          byId("count").textContent = `${count(done)} of ${count(total)}`;
+          taken += m.n;
+          bar.value = taken;
+          byId("count").textContent = `${count(taken)} of ${count(total)}`;
           break;
         case "converted":
+        case "merged":
           end();
           idle();
-          converted(new File([m.file], `${stem}.tickwave`), m.codes, m.seconds, chosen);
+          done(m);
           break;
         case "failed":
           end();
           idle();
-          say(`The conversion failed: ${m.message}`);
+          say(`${message.op === "merge" ? "The merge" : "The conversion"} failed: ${m.message}`);
           break;
       }
     });
@@ -637,17 +717,19 @@ function openPage(): void {
   }
 
   /** What the conversion found, beside Save. */
-  function conversionFacts(file: File, codes: [string, number | null][], seconds: number): void {
+  function conversionFacts(file: File, codes: [string, number | null][], seconds: number, report: string[] | null = null): void {
     const exact = codes.filter(([, bits]) => bits !== null).map(([n, bits]) => `${n} (${bits}-bit)`);
     const f32 = codes.filter(([, bits]) => bits === null).map(([n]) => n);
-    byId("took").textContent = `${formatBytes(file.size)}, converted and checked in ${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)} s`;
-    found.textContent = [exact.length ? `Exact codes: ${exact.join(", ")}.` : "", f32.length ? `Stored as f32: ${f32.join(", ")}.` : ""].filter(Boolean).join(" ");
+    byId("took").textContent = `${formatBytes(file.size)}, ${report ? "merged" : "converted"} and checked in ${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)} s`;
+    found.textContent = report ? report.join(" ") : [exact.length ? `Exact codes: ${exact.join(", ")}.` : "", f32.length ? `Stored as f32: ${f32.join(", ")}.` : ""].filter(Boolean).join(" ");
   }
 
   /** The capture in the view, shaped by the table: moved, trimmed and reordered as it says. */
   function shapeCapture(): void {
     const c = capture!;
     result = null;
+    merging(false);
+    onStage = { name: kind === "saleae" ? stem : files[0].name, file: c.file, sidecar: [], from: { kind, files, described: lastDescribed!, converted: c } };
     void open(registerFile(c.file, []), null, c.file.name, false, (view) => {
       shownNames = new Map(c.settings.channels);
       shapedView = view;
@@ -672,14 +754,16 @@ function openPage(): void {
     });
   }
 
-  /** The recording saved, as a recording opened: annotations can be edited on it. */
-  function showSaved(file: File, codes: [string, number | null][], seconds: number): void {
+  /** The recording saved, as a recording opened: annotations can be edited on it. A merge's
+   * `report` says what it left out or renamed. */
+  function showSaved(file: File, codes: [string, number | null][], seconds: number, report: string[] | null = null): void {
     result = file;
+    onStage = { name: file.name, file, sidecar: [], from: null };
     void open(registerFile(file, []), null, file.name, false, () => {
       settingsForm.hidden = true;
       reshape.hidden = false;
       save.textContent = `Save ${file.name}`;
-      conversionFacts(file, codes, seconds);
+      conversionFacts(file, codes, seconds, report);
       reshape.focus();
     });
   }
@@ -709,11 +793,345 @@ function openPage(): void {
     return { ...chosen, offsets, keeps };
   }
 
-  /** Save: what the page shows when it is the recording to keep, else a conversion with the
-   * table's settings first. */
+
+  // Merging -------------------------------------------------------------------------------------
+
+  /** The table and the form for one capture, or for a merge. */
+  function merging(on: boolean): void {
+    byId("merge-note").hidden = !on;
+    byId("shape-note").hidden = on;
+    byId("codes-row").hidden = on;
+    byId("from-col").textContent = on ? "In its recording" : "In the capture";
+    if (on) {
+      rateRow.hidden = true;
+      skippedBox.hidden = true;
+    }
+  }
+
+  /** What the table's rows say, by the channel each shapes, and each recording's alignment. Times
+   * go as times with a unit: a tick count means another time on another time axis. */
+  function tableFields(): { rows: Map<string, Record<string, string | boolean>>; aligns: Map<string, string> } {
+    const tb = recordingTimebase;
+    const time = (el: HTMLInputElement) => {
+      const t = tb ? ticksOf(el.value, tb) : null;
+      return t === null || Number.isNaN(t) || !tb ? el.value : timeOf(t, tb);
+    };
+    const saved = new Map<string, Record<string, string | boolean>>();
+    for (const tr of rowsOf()) {
+      const f: Record<string, string | boolean> = { take: input(tr, "take")!.checked };
+      for (const cls of ["name", "unit", "offset", "from", "to"]) {
+        const el = input(tr, cls);
+        if (el) f[cls] = cls === "name" || cls === "unit" ? el.value : time(el);
+      }
+      saved.set(tr.dataset.source!, f);
+    }
+    const aligns = new Map([...rows.querySelectorAll<HTMLTableRowElement>("tr.input")].map((h) => [h.dataset.name!, time(input(h, "align")!)]));
+    return { rows: saved, aligns };
+  }
+
+  function restoreFields(saved: ReturnType<typeof tableFields>): void {
+    for (const tr of rowsOf()) {
+      const f = saved.rows.get(tr.dataset.source!);
+      if (!f) continue;
+      input(tr, "take")!.checked = f.take as boolean;
+      for (const cls of ["name", "unit", "offset", "from", "to"]) {
+        const el = input(tr, cls);
+        if (el && typeof f[cls] === "string") el.value = f[cls];
+      }
+    }
+    for (const h of rows.querySelectorAll<HTMLTableRowElement>("tr.input")) input(h, "align")!.value = saved.aligns.get(h.dataset.name!) ?? "";
+  }
+
+  /** `file` as a recording a merge takes, named `name`, or `name (2)` where another has that name. */
+  async function inputOf(name: string, file: File, sidecar: File[], from: FromCapture | null): Promise<Input> {
+    const src = registerFile(file, sidecar);
+    const info = await recordingInfo(src);
+    let unique = name;
+    for (let n = 2; inputs.some((i) => i.name === unique); n++) unique = `${name} (${n})`;
+    return { name: unique, stem: file.name.replace(RECORDING, ""), file, sidecar, src, info, from };
+  }
+
+  /** Files added to merge with what the stage shows: a recording joins as it is, with its
+   * sidecar's files, and a capture converts whole first. */
+  async function add(list: File[], folder: string | null): Promise<void> {
+    if (!leaveEdits()) return;
+    clear();
+    const zips = list.filter((f) => ZIP.test(f.name));
+    if (zips.length > 0) {
+      unpack(zips, list.filter((f) => !zips.includes(f)), folder, (files, name) => void add(files, name));
+      return;
+    }
+    const saved = tableFields();
+    const before = inputs;
+    const giveUp = (lead: string) => {
+      inputs = before;
+      say(lead);
+    };
+    try {
+      if (inputs.length === 0) {
+        if (!onStage) return;
+        inputs = [await inputOf(onStage.name, onStage.file, onStage.sidecar, onStage.from)];
+      }
+      const sidecar = list.filter((f) => SIDECAR.test(f.name));
+      const tomls = sidecar.filter((f) => /\.toml$/i.test(f.name));
+      const jsonl = sidecar.filter((f) => !tomls.includes(f));
+      const recordings = list.filter((f) => RECORDING.test(f.name));
+      for (const r of recordings) {
+        const hand = tomls.find((t) => t.name.toLowerCase() === r.name.replace(RECORDING, ".annotations.toml").toLowerCase()) ?? (recordings.length === 1 && tomls.length === 1 ? tomls[0] : null);
+        inputs = [...inputs, await inputOf(r.name, r, hand ? [hand, ...jsonl] : [], null)];
+      }
+      const captures = list.filter((f) => CAPTURE.test(f.name));
+      if (captures.length > 0) convertToAdd(captures, folder, saved, before);
+      else if (recordings.length > 0) await showMerge(saved, before);
+      else giveUp("There's nothing here to add. Add a .tickwave recording, or a capture: a Saleae export's folder, or a sigrok .sr or .vcd file.");
+    } catch (e) {
+      giveUp(`That can't be added: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
+  /** A capture to add, converted whole, every channel under its own name, as the first capture is. */
+  function convertToAdd(captures: File[], folder: string | null, saved: ReturnType<typeof tableFields>, before: Input[]): void {
+    const sr = captures.filter((f) => /\.sr$/i.test(f.name));
+    const vcd = captures.filter((f) => /\.vcd$/i.test(f.name));
+    const bin = captures.filter((f) => /\.bin$/i.test(f.name));
+    const singles = [...sr, ...vcd];
+    const giveUp = (lead: string) => {
+      end();
+      inputs = before;
+      say(lead);
+    };
+    if (singles.length > 1 || (singles.length === 1 && bin.length > 0)) {
+      giveUp("Add one capture at a time: a Saleae export's folder, or one .sr or .vcd file.");
+      return;
+    }
+    const k: SourceKind = singles.length === 0 ? "saleae" : sr.length > 0 ? "sigrok" : "vcd";
+    const fs = singles.length === 0 ? bin : singles;
+    const name = singles.length === 0 ? (folder ?? "capture") : singles[0].name;
+    const own = singles.length === 0 ? name : name.replace(/\.(sr|vcd)$/i, "");
+    job({ op: "describe", kind: k, files: fs }, (m) => {
+      if (m.op === "failed") giveUp(`${name} couldn't be read: ${m.message}`);
+      if (m.op !== "described") return;
+      end();
+      const described = m.described;
+      if (described.channels.length === 0) {
+        giveUp(`${name} has no channels tickwave can take.`);
+        return;
+      }
+      const chosen: Settings = { ...DEFAULTS, channels: described.channels.map((c) => [c.name, c.name]) };
+      work({ op: "convert", kind: k, files: fs, settings: chosen }, (done) => {
+        if (done.op !== "converted") return;
+        const file = new File([done.file], `${own}.tickwave`);
+        const converted = { file, codes: done.codes, seconds: done.seconds, settings: chosen };
+        inputOf(name, file, [], { kind: k, files: fs, described, converted }).then(
+          (i) => {
+            inputs = [...inputs, i];
+            return showMerge(saved, before);
+          },
+          (e) => giveUp(`${name} was converted, but it won't open: ${e instanceof Error ? e.message : e}`),
+        );
+      });
+    });
+  }
+
+  /** The merged recording's name, without .tickwave. */
+  const mergedName = () => inputs.map((i) => i.stem).join("+");
+
+  /** The recordings being merged, on one time axis in the view, which shapes them, and the table
+   * that follows it. Where they can't share an axis, the page goes back to `before`. */
+  async function showMerge(saved = tableFields(), before: Input[] = inputs): Promise<void> {
+    let preview: { src: string; merged: MergedSource };
+    try {
+      preview = await previewMerge(inputs.map((i) => ({ src: i.src, stem: i.stem })));
+    } catch (e) {
+      inputs = before;
+      say(`These recordings can't be merged: ${e instanceof Error ? e.message : e}`);
+      return;
+    }
+    const m = preview.merged;
+    const info = m.mergedInfo;
+    merged = m;
+    result = null;
+    onStage = null;
+    mergeTable(info, m);
+    restoreFields(saved);
+    void open(preview.src, null, inputs.map((i) => i.name).join(" + "), false, (view) => {
+      shapedView = view;
+      shownNames = new Map(info.channels.map((c) => [c.name, c.name]));
+      recordingTimebase = info.timebase;
+      view.groups = inputs.map((input, k) => ({ name: input.name, channels: info.channels.filter((_, i) => m.origin(i).input === k).map((c) => c.name) }));
+      view.shaping = true;
+      for (const tr of rowsOf()) shapeRow(tr);
+      for (const h of rows.querySelectorAll<HTMLTableRowElement>("tr.input")) alignRow(h);
+      showTaken();
+      view.addEventListener("tickwave-shape", (e) => {
+        const d = (e as CustomEvent<{ shape: Record<string, ChannelShape>; aligns: Record<string, number>; channels: string[] }>).detail;
+        fillShape(d.shape, d.channels);
+        fillAligns(d.aligns);
+      });
+      byId("edit").parentElement!.hidden = true;
+      reshape.hidden = true;
+      save.textContent = `Save ${mergedName()}.tickwave`;
+      byId("took").textContent = "";
+      found.textContent = "";
+      save.focus();
+    });
+  }
+
+  /** The table for a merge: each recording's head, then its channels' rows. A derived channel
+   * comes with its operands, and has no row. */
+  function mergeTable(info: RecordingInfo, m: MergedSource): void {
+    merging(true);
+    byId("source").textContent = `Merging ${inputs.length} recordings`;
+    const ticks = inputs.map((i) => `${i.name}, ${formatInterval(readingStep(i.info), i.info.timebase, readingStep(i.info))}`);
+    byId("source-facts").textContent = `On one time axis, each at its own tick: ${ticks.join("; ")}.`;
+    rows.replaceChildren(
+      ...inputs.flatMap((recording, k) => {
+        const head = document.createElement("tr");
+        head.className = "input";
+        head.dataset.input = String(k);
+        head.dataset.name = recording.name;
+        const th = Object.assign(document.createElement("th"), { colSpan: 7, scope: "colgroup" });
+        const align = field("align", `Align ${recording.name} by`, "", 11);
+        align.addEventListener("change", () => alignRow(head));
+        const label = document.createElement("label");
+        label.append("Aligned by ", align);
+        const remove = Object.assign(document.createElement("button"), { type: "button", className: "button", textContent: "Remove" });
+        remove.setAttribute("aria-label", `Remove ${recording.name}`);
+        remove.addEventListener("click", () => removeInput(k));
+        th.append(recording.name, label, remove);
+        head.append(th);
+        const own = info.channels.flatMap((c, i) => {
+          const o = m.origin(i);
+          return o.input === k && !(c.kind === "analog" && c.product) ? [{ c, mine: recording.info.channels[o.channel] }] : [];
+        });
+        return [
+          head,
+          ...own.map(({ c, mine }) => {
+            const tr = channelRow(c.name, mine.name, c.kind === "analog", c.kind === "analog" ? c.unit : null, c.kind === "analog" ? `analog${c.unit ? `, ${c.unit}` : ""}` : "digital");
+            tr.dataset.input = String(k);
+            tr.dataset.own = mine.name;
+            return tr;
+          }),
+        ];
+      }),
+    );
+  }
+
+  /** A recording's alignment, from its head's field, on the view. */
+  function alignRow(head: HTMLTableRowElement): void {
+    const v = shapedView;
+    const tb = recordingTimebase;
+    const f = input(head, "align")!;
+    if (!v || !tb) return;
+    const ticks = ticksOf(f.value, tb);
+    f.toggleAttribute("aria-invalid", Number.isNaN(ticks));
+    if (Number.isNaN(ticks)) {
+      say(`${head.dataset.name}: a time is ticks, or a decimal with a unit, such as -40 ns or 1.2 ms.`);
+      return;
+    }
+    clear();
+    v.aligns = { [head.dataset.name!]: ticks ?? 0 };
+  }
+
+  /** The heads' fields from the view's alignments. */
+  function fillAligns(aligns: Record<string, number>): void {
+    const tb = recordingTimebase;
+    if (!tb) return;
+    for (const h of rows.querySelectorAll<HTMLTableRowElement>("tr.input")) {
+      const a = aligns[h.dataset.name!] ?? 0;
+      input(h, "align")!.value = a === 0 ? "" : timeOf(a, tb);
+    }
+  }
+
+  /** Takes recording `k` out of the merge. With one left, the page shapes or shows it alone. */
+  function removeInput(k: number): void {
+    const saved = tableFields();
+    inputs = inputs.filter((_, i) => i !== k);
+    if (inputs.length >= 2) {
+      void showMerge(saved);
+      return;
+    }
+    const [last] = inputs;
+    inputs = [];
+    merged = null;
+    if (last.from) {
+      ({ kind, files, described: lastDescribed, converted: capture } = last.from);
+      stem = last.stem;
+      show(last.from.described);
+      restoreFields(saved);
+      shapeCapture();
+    } else {
+      rows.replaceChildren();
+      merging(false);
+      onStage = { name: last.name, file: last.file, sidecar: last.sidecar, from: null };
+      void open(last.src, null, last.name, false, undefined, null, null, last.sidecar.find((f) => /\.toml$/i.test(f.name)) ?? null);
+    }
+  }
+
+  /** The table and the view as the merge's settings, or what is wrong with them. */
+  function mergeSettings(): { inputs: MergeInput[]; settings: MergeSettings } | string {
+    const v = shapedView;
+    const tb = recordingTimebase;
+    const m = merged;
+    if (!v || !tb || !m) return "The merge isn't ready yet.";
+    const shape = v.shape;
+    const aligns = v.aligns;
+    const info = m.mergedInfo;
+    const out: MergeInput[] = inputs.map((i) => ({ file: i.file, stem: i.stem, align: aligns[i.name] ? timeOf(aligns[i.name], tb) : null, channels: [], sidecar: i.sidecar }));
+    const names: string[] = [];
+    const units: [string, string][] = [];
+    const offsets: [string, string][] = [];
+    const keeps: [string, string | null, string | null][] = [];
+    for (const tr of rowsOf()) {
+      if (!input(tr, "take")!.checked) continue;
+      const k = Number(tr.dataset.input);
+      const key = tr.dataset.source!;
+      const to = input(tr, "name")!.value.trim();
+      if (!to) return `Give ${key} a name.`;
+      out[k].channels.push([tr.dataset.own!, to]);
+      names.push(to);
+      const c = info.channels.find((c) => c.name === key);
+      const u = input(tr, "unit")?.value.trim() ?? "";
+      if (c?.kind === "analog" && u && u !== c.unit) units.push([to, u]);
+      const s = shape[key];
+      if (s && s.offset !== 0) offsets.push([to, timeOf(s.offset, tb)]);
+      // A kept span in the view's ticks is a whole number of the recording's own.
+      if (s?.keep) {
+        const f = m.factors[k];
+        const own = inputs[k].info.timebase;
+        keeps.push([to, timeOf(Math.round(s.keep.from / f), own), timeOf(Math.round(s.keep.to / f), own)]);
+      }
+    }
+    const empty = out.findIndex((i) => i.channels.length === 0);
+    if (empty >= 0) return `Take at least one channel of ${inputs[empty].name}, or remove it.`;
+    const twice = names.find((n, i) => names.indexOf(n) !== i);
+    if (twice) return `Two channels are named ${twice}: each needs its own name.`;
+    const meta = metaOf();
+    if (typeof meta === "string") return meta;
+    const title = byId<HTMLInputElement>("title").value.trim() || null;
+    return { inputs: out, settings: { stem: mergedName(), title, meta, level: byId<HTMLInputElement>("level").valueAsNumber, blockKib: byId<HTMLInputElement>("block").valueAsNumber, units, offsets, keeps } };
+  }
+
+  function runMerge(chosen: { inputs: MergeInput[]; settings: MergeSettings }): void {
+    work({ op: "merge", ...chosen }, (done) => {
+      if (done.op !== "merged") return;
+      const file = new File([done.file], `${mergedName()}.tickwave`);
+      download(file);
+      showSaved(file, [], done.seconds, done.report);
+    });
+  }
+
+  /** Save: what the page shows when it is the recording to keep, else a conversion or a merge with
+   * the table's settings first. */
   save.addEventListener("click", () => {
     if (result) {
       download(result);
+      return;
+    }
+    if (inputs.length >= 2) {
+      const chosen = mergeSettings();
+      if (typeof chosen === "string") say(chosen);
+      else runMerge(chosen);
       return;
     }
     const c = capture;
@@ -728,7 +1146,7 @@ function openPage(): void {
       showSaved(c.file, c.codes, c.seconds);
     } else run(chosen);
   });
-  reshape.addEventListener("click", () => shapeCapture());
+  reshape.addEventListener("click", () => (inputs.length >= 2 ? void showMerge() : shapeCapture()));
 
   settingsForm.addEventListener("submit", (e) => {
     e.preventDefault();
@@ -761,6 +1179,29 @@ function openPage(): void {
     const own = list.filter((f) => f.webkitRelativePath.split("/").length === 2);
     take(own, own[0]?.webkitRelativePath.split("/")[0] ?? null);
     folderInput.value = "";
+  });
+  addFiles.addEventListener("change", () => {
+    void add([...(addFiles.files ?? [])], null);
+    addFiles.value = "";
+  });
+  addFolder.addEventListener("change", () => {
+    const list = [...(addFolder.files ?? [])];
+    const own = list.filter((f) => f.webkitRelativePath.split("/").length === 2);
+    void add(own, own[0]?.webkitRelativePath.split("/")[0] ?? null);
+    addFolder.value = "";
+  });
+  // A capture or recording dropped on the stage joins what it shows.
+  stage.addEventListener("dragover", (e) => {
+    if (adding.hidden) return;
+    e.preventDefault();
+    stage.classList.add("over");
+  });
+  stage.addEventListener("dragleave", () => stage.classList.remove("over"));
+  stage.addEventListener("drop", (e) => {
+    stage.classList.remove("over");
+    if (adding.hidden) return;
+    e.preventDefault();
+    if (e.dataTransfer) void dropped(e.dataTransfer).then(({ files, folder }) => add(files, folder));
   });
   attachedFile.addEventListener("change", () => {
     take([...(attachedFile.files ?? [])], null);

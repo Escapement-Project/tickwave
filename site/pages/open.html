@@ -58,13 +58,15 @@ if (new URLSearchParams(location.search).has("local")) document.documentElement.
   <p id="found" class="quiet" hidden></p>
   <p class="editing"><button id="edit" type="button" class="button" aria-controls="editor" aria-expanded="false"><span class="swap"><span>Edit annotations</span><span class="off">Stop editing</span></span></button> <span id="edit-state" class="quiet" aria-live="polite"></span></p>
   <div id="view"></div>
+  <p id="adding" class="adding" hidden><label class="button">Add a capture or recording<input id="add-files" type="file" multiple></label> <label class="button">Add an export's folder<input id="add-folder" type="file" webkitdirectory></label> <span class="quiet">to merge with this one, on one time axis. You can drop them on the recording too.</span></p>
   <form id="settings" class="settings" hidden>
     <h2 id="source"></h2>
     <p id="source-facts" class="quiet"></p>
     <div class="table"><table class="channels">
-      <thead><tr><th scope="col">Take</th><th scope="col">In the capture</th><th scope="col">Name</th><th scope="col">Unit</th><th scope="col">Moved by</th><th scope="col">Keep from</th><th scope="col">Keep to</th></tr></thead>
+      <thead><tr><th scope="col">Take</th><th id="from-col" scope="col">In the capture</th><th scope="col">Name</th><th scope="col">Unit</th><th scope="col">Moved by</th><th scope="col">Keep from</th><th scope="col">Keep to</th></tr></thead>
       <tbody id="channels"></tbody>
     </table></div>
+    <p id="merge-note" class="quiet" hidden>Each recording heads its own rows. Drag its grip, by its name, sideways to move the whole recording in time and line it up with the others: an edge of it lands on another's edge when they come within a few pixels, and anywhere with Alt held. Its Aligned by field takes the time too. A channel's own grip moves only that channel, and keeps it among its recording's rows. Times here are each recording's own, such as <code>-40 ns</code>. A recording's generated annotations come with it; annotations written by hand don't, as their times are the recording's own.</p>
     <p id="shape-note" class="quiet">Drag a row's grip in the view sideways to move the channel in time, or up and down to change its place; drag the bars at its data's ends to trim it. Times here are the capture's, such as <code>-40 ns</code> or <code>1.2 ms</code>.</p>
     <p><button id="trim-all" type="button" class="button">Trim every channel to the selection</button></p>
     <div id="skipped" class="quiet" hidden></div>
@@ -77,7 +79,7 @@ if (new URLSearchParams(location.search).has("local")) document.documentElement.
       <summary>Encoding</summary>
       <p><label for="level">zstd level</label><br><input id="level" name="level" type="number" min="1" max="22" value="19" required></p>
       <p><label for="block">Block size, in KiB</label><br><input id="block" name="block" type="number" min="1" max="65536" value="1024" required></p>
-      <p><label><input id="codes" name="codes" type="checkbox" checked> Store analog values as exact integer codes where some reproduce them</label></p>
+      <p id="codes-row"><label><input id="codes" name="codes" type="checkbox" checked> Store analog values as exact integer codes where some reproduce them</label></p>
       <p><label for="meta">Metadata, one <code>key = value</code> a line</label><br><textarea id="meta" name="meta" rows="3" spellcheck="false" placeholder="probe = verge"></textarea></p>
     </details>
   </form>

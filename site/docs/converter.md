@@ -114,7 +114,35 @@ For a Saleae export, it first checks that every edge sits on the sample grid, in
 
 The page runs the converter's own code, compiled to WebAssembly, so the same capture and settings give the same file, byte for byte. It stores channels in the order it lists them, which for a Saleae export is by file name, numbers in order, until you move one. A command line that names the same channels in that order, with the same moves and trims, makes the same file.
 
+Under the view, Add a capture or recording takes another to merge with the one shown, as [`tickwave merge`](#merging-recordings) does. Drop it on the view, or choose it: a `.tickwave` recording with its sidecar's files, a capture, which converts whole first, or a `.zip` of either. The view then shows them all on one time axis, each recording's rows under its name. Drag the grip by a recording's name sideways to move the whole recording in time, as `--align` does, and line it up with the others. An edge of it lands on another recording's edge within a few pixels; hold Alt to move it freely. The list gives each recording a head with its alignment, which takes a time typed too, and Remove. A channel's own grip and bars work as for one capture. Save merges the recordings with the list's settings, checks the result, and opens it.
+
 The capture stays in the browser. The page reads a Saleae export a slice at a time, so the export can be larger than the 4 GiB WebAssembly gives the converter. A sigrok or VCD file is read whole, and the recording is built in memory, so these have to fit. The page converts on one thread, where the command line uses every core, so a large capture takes longer.
+
+## Merging recordings
+
+```sh
+tickwave merge analyser.tickwave probe.tickwave -o both.tickwave
+```
+
+This puts several recordings on one time axis, such as a logic analyser's beside a probe's own stream from the same target. A capture goes through `tickwave convert` first. Every channel of every recording goes in, in order, under its own name. A channel whose name an earlier recording took is named after its file as well: `probe/CLK`.
+
+The merged recording ticks at the least common multiple of the recordings' tick rates, so each recording's tick is a whole number of the merged recording's. Nothing is resampled: every edge and sample keeps its time. 500 MHz and 96 MHz merge at 12 GHz, a tick of 83 ps. A reading still keeps to the tick of the recording it reads, so it never shows more digits than that recording carries.
+
+The recordings share no clock: none of the captures tickwave reads records the time of day it started. So each recording starts at the merged recording's start. `--align <n>=<time>` moves recording `n`, counting from 1, later when the time is positive, to line it up with the others, on an edge both instruments saw, say. The time is at the merged rate. The merged recording states an alignment as a claim, as it does a move. Instruments' clocks drift apart: at 20 ppm, an alignment by hand stays within one tick of a 96 MHz clock for about half a millisecond either side of where it was made, and within 10 µs for about half a second.
+
+| Option | Does |
+|---|---|
+| `--channel <n>:<name>[=<new>]` | take channel `<name>` of recording `n`, named `<new>` if given. A recording with no `--channel` gives every channel |
+| `--align <n>=<time>` | move recording `n`, later when the time is positive |
+| `--offset <name>=<time>` | move a channel, later when the time is positive, at the merged rate |
+| `--keep <name>=<from>..<to>` | keep only that part of a channel, in its own recording's time before any move |
+| `--unit <name>=<unit>` | an analog channel's unit |
+
+`<name>` is the name the channel takes in the merged recording. `-o`, `--title`, `--meta`, `--level`, `--block-kib` and `--open` work as they do for a conversion.
+
+A recording's generated annotations come with it, from its decoders' files, bundled or in a sidecar beside it. Their times move with the recording, and [ANNOTATIONS.md](https://github.com/Escapement-Project/tickwave/blob/main/ANNOTATIONS.md#merging) says how their names follow the merge's. Annotations written by hand don't come, since their times are the recording's own, and `merge` says how many it left out. A derived channel, such as power from a current and a voltage, comes while both its channels do, moved and trimmed alike.
+
+Before it writes the merged recording, `merge` checks it against the recordings it merged. The check goes by what the merged recording states, not by the options it was given, as `tickwave verify` does.
 
 ## Describing a recording
 
@@ -172,7 +200,15 @@ identify-swd.tickwave: matches identify-swd/
 
 For a Saleae export, `--against` takes its directory. A recording from a version 0 export is checked at the rate it was made at.
 
-A recording with a channel moved or trimmed is refused here. `convert` checks it against the capture, moved and cut as its options said, before it writes it, and so does the Open page.
+A recording with a channel moved or trimmed is checked through its moves and cuts, as the recording states them.
+
+A merged recording takes `--against` once for each recording merged into it, in the merge's order. Each is the recording's capture, or the `.tickwave` recording itself where there is no capture to import, such as a probe's own stream:
+
+```sh
+tickwave verify both.tickwave --against analyser/ --against probe.tickwave
+```
+
+It first checks that each one's sources are the ones the merged recording names in that place, and says so if two are swapped.
 
 ## Checking a sidecar
 
