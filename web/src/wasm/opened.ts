@@ -10,6 +10,7 @@ import {
   channelSampleTick,
   fillRuns,
   named,
+  placeAfter,
   SAMPLES_PER_RUN,
   type AnalogOverview,
   type Break,
@@ -311,8 +312,8 @@ export class Opened {
         name: c.name,
         sourceName: c.source_name,
         source: c.source,
-        // Past the last sample's period: an analog channel can stop well before the capture does.
-        end: Math.min(h.length, c.count === 0 ? c.first : channelSampleTick(runs, c.count - 1) + Math.ceil(period.num / period.den)),
+        // Where the last sample's time ends: an analog channel can stop well before the capture does.
+        end: Math.min(h.length, c.count === 0 ? c.first : placeAfter(runs, c.count - 1)),
         ...(breaks.length > 0 && { breaks }),
         unit: c.unit,
         first: c.first,

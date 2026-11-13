@@ -111,8 +111,8 @@ export function gapAt(c: DigitalChannel, tick: number): Gap | null {
 
 /**
  * The ticks `[from, to)` of a channel's data, clipped to `[start, end)`: a digital channel's split
- * around its gaps, an analog channel's into its runs, each from its first sample to a period past
- * its last, or to the next run's start if that comes sooner.
+ * around its gaps, an analog channel's into its runs, each from its first sample to the place after
+ * its last on its grid, or to the next run's start if that comes sooner.
  */
 export function knownSpans(c: Channel, start: number, end: number): [number, number][] {
   const spans: [number, number][] = [];
@@ -123,11 +123,10 @@ export function knownSpans(c: Channel, start: number, end: number): [number, num
   };
   if (c.kind === "analog") {
     const runs = c.breaks ?? [];
-    const period = Math.ceil(c.period.num / c.period.den);
     for (let k = 0; k <= runs.length; k++) {
       const from = k === 0 ? c.first : runs[k - 1].tick;
       const last = (k < runs.length ? runs[k].index : c.count) - 1;
-      const to = k < runs.length ? Math.min(runs[k].tick, channelSampleTick(c, last) + period) : c.end;
+      const to = k < runs.length ? Math.min(runs[k].tick, placeAfter(c, last)) : c.end;
       keep(from, to);
     }
     return spans;
@@ -162,6 +161,15 @@ export function channelSampleTick(c: Pick<AnalogChannel, "first" | "period" | "b
   return k === 0 ? sampleTick(c.first, c.period, i) : sampleTick(runs[k - 1].tick, c.period, i - runs[k - 1].index);
 }
 
+/** The place after sample `i` on its run's grid: where its time ends, unless the next run or the
+ * length comes sooner (FORMAT.md, "Gaps"). */
+export function placeAfter(c: Pick<AnalogChannel, "first" | "period" | "breaks">, i: number): number {
+  const runs = c.breaks ?? [];
+  let k = runs.length;
+  while (k > 0 && runs[k - 1].index > i) k--;
+  return k === 0 ? sampleTick(c.first, c.period, i + 1) : sampleTick(runs[k - 1].tick, c.period, i + 1 - runs[k - 1].index);
+}
+
 /** The index of the first sample at or after `tick`, breaks included, clamped to `0..=count`. */
 export function channelIndexAtOrAfter(c: Pick<AnalogChannel, "first" | "period" | "count" | "breaks">, tick: number): number {
   const runs = c.breaks ?? [];
@@ -174,16 +182,17 @@ export function channelIndexAtOrAfter(c: Pick<AnalogChannel, "first" | "period" 
   return from + sampleIndexAtOrAfter(start, c.period, to - from, tick);
 }
 
-/** The span each lost sample's time covers, as FORMAT.md words it: from one period after the
- * sample before the break, for `lost` periods, ending at the break's tick if that comes sooner. */
+/** The span each break's lost samples cover, as FORMAT.md words it: from place `index` to place
+ * `index + lost` on the grid of the run before the break, ending at the break's tick if that comes
+ * sooner. Whole ticks. */
 export function lostSpans(c: AnalogChannel): { from: number; to: number; lost: number }[] {
-  const period = c.period.num / c.period.den;
-  return (c.breaks ?? [])
-    .filter((b) => b.lost > 0)
-    .map((b) => {
-      const from = channelSampleTick(c, b.index - 1) + period;
-      return { from, to: Math.min(b.tick, from + b.lost * period), lost: b.lost };
-    });
+  const runs = c.breaks ?? [];
+  return runs.flatMap((b, k) => {
+    if (b.lost === 0) return [];
+    const [index, tick] = k === 0 ? [0, c.first] : [runs[k - 1].index, runs[k - 1].tick];
+    const place = (i: number) => Math.min(b.tick, sampleTick(tick, c.period, i - index));
+    return [{ from: place(b.index), to: place(b.index + b.lost), lost: b.lost }];
+  });
 }
 
 /**
