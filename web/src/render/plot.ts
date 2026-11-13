@@ -4,7 +4,7 @@
 
 import { covers, laneAnnotations, type Annotation, type Resolved } from "../annotations.ts";
 import type { Palette } from "../palette.ts";
-import { formatAt, niceStep } from "../readouts.ts";
+import { formatMarks, niceStep } from "../readouts.ts";
 import { rangeMarks, type ValueRange } from "./scale.ts";
 import { channelSampleTick, channelStart, knownSpans, lostSpans, named, rebased, type AnalogChannel, type Channel, type RecordingInfo, type Source } from "../source.ts";
 import { timeAxis } from "./axis.ts";
@@ -338,7 +338,8 @@ export class Plot {
       const c = t.channel;
       if (m && c.kind === "analog") {
         const axisFont = this.#font(AXIS_PX);
-        gutter = Math.max(gutter, this.measure(formatAt(m.top, m.place, c.unit), axisFont), this.measure(formatAt(m.bottom, m.place, c.unit), axisFont));
+        const [top, bottom] = formatMarks(m.top, m.bottom, m.place, c.unit);
+        gutter = Math.max(gutter, this.measure(top, axisFont), this.measure(bottom, axisFont));
       }
     });
     const plotLeft = Math.ceil(Math.min(Math.max(gutter + 14, 40), Math.max(40, width * 0.3))) + this.grip;
@@ -584,8 +585,9 @@ export class Plot {
       ctx.font = this.#font(AXIS_PX);
       ctx.textAlign = "right";
       ctx.fillStyle = p.ink2;
-      ctx.fillText(formatAt(m.top, m.place, c.unit), l.plotLeft - 6, top + 7);
-      ctx.fillText(formatAt(m.bottom, m.place, c.unit), l.plotLeft - 6, bottom + 2);
+      const [topLabel, bottomLabel] = formatMarks(m.top, m.bottom, m.place, c.unit);
+      ctx.fillText(topLabel, l.plotLeft - 6, top + 7);
+      ctx.fillText(bottomLabel, l.plotLeft - 6, bottom + 2);
       ctx.strokeStyle = p.hair;
       ctx.lineWidth = 1;
       ctx.beginPath();

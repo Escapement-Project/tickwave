@@ -289,6 +289,21 @@ export function formatAt(value: number, place: number, unit: string): string {
   return formatScaled(roundAt(n, d, place), place, prefixedUnits(unit));
 }
 
+/**
+ * A value range's two marks, each a multiple of 10^place (an axis's labels), in the one unit the
+ * larger magnitude picks, so both read alike: 0 to 2.0 mA is "2.0 mA" and "0.0 mA".
+ */
+export function formatMarks(top: number, bottom: number, place: number, unit: string): [string, string] {
+  const units = prefixedUnits(unit);
+  const [tn, td] = rational(top);
+  const [bn, bd] = rational(bottom);
+  const t = roundAt(tn, td, place);
+  const b = roundAt(bn, bd, place);
+  const abs = (x: bigint) => (x < 0n ? -x : x);
+  const u = unitFor(abs(t) >= abs(b) ? t : b, place, units);
+  return [formatScaled(t, place, units, u), formatScaled(b, place, units, u)];
+}
+
 /** 1, 2 or 5 times a power of ten, the smallest not below x > 0, and that power's exponent. */
 export function niceStep(x: number): { step: number; place: number } {
   let place = Math.floor(Math.log10(x));

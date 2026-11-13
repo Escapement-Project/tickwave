@@ -452,6 +452,25 @@ pub fn format_at(value: f64, place: i32, unit: &str) -> Option<String> {
     ))
 }
 
+/// A value range's two marks, each a multiple of 10^place (an axis's labels), in the one unit the
+/// larger magnitude picks, so both read alike: 0 to 2.0 mA is "2.0 mA" and "0.0 mA". None for a
+/// mark that isn't finite.
+pub fn format_marks(top: f64, bottom: f64, place: i32, unit: &str) -> Option<(String, String)> {
+    let scaled = |v: f64| rational(v).map(|(n, d)| round_at(&n, &d, place));
+    let (t, b) = (scaled(top)?, scaled(bottom)?);
+    let units = prefixed_units(unit);
+    let larger = if t.magnitude() >= b.magnitude() {
+        &t
+    } else {
+        &b
+    };
+    let u = unit_for(larger, place, &units);
+    Some((
+        format_scaled(&t, place, &units, Some(u)),
+        format_scaled(&b, place, &units, Some(u)),
+    ))
+}
+
 /// 1, 2 or 5 times a power of ten, and that power's exponent.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NiceStep {

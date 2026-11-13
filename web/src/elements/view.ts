@@ -5,7 +5,7 @@ import { ofKind, type Annotation } from "../annotations.ts";
 import { parseChannels, parseWindow, VIEW_ATTRIBUTES } from "../attributes.ts";
 import { reducedMotion } from "../face.ts";
 import { absolute, events as registryEvents, infoFor, peekInfo } from "../registry.ts";
-import { clockNote, countEdges, formatAt, formatClockPeriod, formatClockRate, formatCount, formatInterval, formatRate, formatValue, periodStats } from "../readouts.ts";
+import { clockNote, countEdges, formatClockPeriod, formatClockRate, formatCount, formatInterval, formatMarks, formatRate, formatValue, periodStats } from "../readouts.ts";
 import { completePulse, knownSpan, pulseFigures, pulseFromEdges, type Pulse } from "../probe.ts";
 import { Prober, type Probed } from "../prober.ts";
 import { lowerBound } from "../search.ts";
@@ -1236,9 +1236,10 @@ export class TickwaveView extends TickwaveElement {
       s.style.height = `${r.height}px`;
       s.style.width = `${l.plotLeft}px`;
       const m = r.range.marks;
+      const [topLabel, bottomLabel] = formatMarks(m.top, m.bottom, m.place, c.unit);
       s.setAttribute(
         "aria-label",
-        `Scale of ${c.name}, ${formatAt(m.bottom, m.place, c.unit)} to ${formatAt(m.top, m.place, c.unit)}. Up and down move it, plus and minus zoom it, Enter fits it to what the view shows, Home shows the whole range.`,
+        `Scale of ${c.name}, ${bottomLabel} to ${topLabel}. Up and down move it, plus and minus zoom it, Enter fits it to what the view shows, Home shows the whole range.`,
       );
     });
     for (const s of this.#scales.splice(l.rows.length)) s?.remove();

@@ -127,6 +127,16 @@
       ]
     },
     {
+      "name": "formatMarks: a range's two marks in the one unit the larger magnitude picks",
+      "rows": [
+        {"fn":"format_marks","args":{"top":0.002,"bottom":0,"place":-4,"unit":"A"},"expect":["2.0 mA","0.0 mA"],"note":"Zero against mA: alone, zero at place -4 takes the first unit at or finer than the place, and reads 0 uA."},
+        {"fn":"format_marks","args":{"top":0.002,"bottom":-0.0004,"place":-4,"unit":"A"},"expect":["2.0 mA","−0.4 mA"],"note":"A negative bottom: alone, -0.4 mA reads -400 uA."},
+        {"fn":"format_marks","args":{"top":0.0005,"bottom":-0.0015,"place":-4,"unit":"A"},"expect":["0.5 mA","−1.5 mA"],"note":"The larger magnitude below zero picks the unit."},
+        {"fn":"format_marks","args":{"top":0.0035,"bottom":0.0012,"place":-4,"unit":"A"},"expect":["3.5 mA","1.2 mA"],"note":"Both under the same prefix: as each reads alone."},
+        {"fn":"format_marks","args":{"top":1.2,"bottom":0.8,"place":-1,"unit":"V"},"expect":["1.2 V","0.8 V"],"note":"Across a prefix boundary: alone, 0.8 V reads 800 mV."}
+      ]
+    },
+    {
       "name": "countEdges and formatCount",
       "rows": [
         {"fn":"count_edges","args":{"ticks":[10,20,30,40],"start":20,"end":40},"expect":2},

@@ -11,6 +11,7 @@ import {
   formatClockRate,
   formatCount,
   formatInterval,
+  formatMarks,
   formatRate,
   formatValue,
   measureReading,
@@ -35,5 +36,6 @@ runTable("readouts", {
   format_value: (a) => formatValue(a.value, a.resolution, a.unit, a.significant),
   count_edges: (a) => countEdges(a.ticks, a.start, a.end),
   format_count: (a) => formatCount(a.n),
+  format_marks: (a) => formatMarks(a.top, a.bottom, a.place, a.unit),
   measure_reading: (a) => measureReading(a.what, a.level, a.ticks, ratio(a.timebase)),
 });

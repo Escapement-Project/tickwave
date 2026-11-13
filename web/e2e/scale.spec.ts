@@ -127,6 +127,8 @@ test("with a scale focused, up and down move its values, plus and minus zoom the
   await page.keyboard.press("+");
   const [bottom, top] = await labels(swclk);
   expect(top - bottom).toBeLessThan(8);
+  // Both marks in the top's unit: alone, the bottom would read −500 mV.
+  await expect(swclk).toHaveAttribute("aria-label", /^Scale of SWCLK, −0\.5\u00a0V to 4\.5\u00a0V\. /);
   expect(await win(view)).toEqual(window);
   // Up moves the trace up: the values in the row move down.
   await page.keyboard.press("ArrowUp");

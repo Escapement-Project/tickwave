@@ -255,6 +255,13 @@ fn readouts() {
             int(&a["end"])
         )),
         "format_count" => json!(readouts::format_count(int(&a["n"]))),
+        "format_marks" => readouts::format_marks(
+            f(&a["top"]),
+            f(&a["bottom"]),
+            int(&a["place"]) as i32,
+            a["unit"].as_str().unwrap(),
+        )
+        .map_or(Value::Null, |(top, bottom)| json!([top, bottom])),
         "measure_reading" => {
             let what = match a["what"].as_str().unwrap() {
                 "rate" => Measure::Rate,
