@@ -295,33 +295,45 @@ pub fn product_values(product: Product, a: &Values, b: &Values) -> Result<Values
             b.len()
         ));
     }
-    let samples = a.iter().zip(b.iter()).map(|(x, y)| product.sample(x, y));
-    Ok(match product.stored() {
-        Stored::U64 => Values::U64(
-            samples
-                .map(|s| match s {
-                    Sample::U64(c) => c,
-                    _ => unreachable!("an unsigned product"),
-                })
-                .collect(),
-        ),
-        Stored::I64 => Values::I64(
-            samples
-                .map(|s| match s {
-                    Sample::I64(c) => c,
-                    _ => unreachable!("a signed product"),
-                })
-                .collect(),
-        ),
-        _ => Values::F64(
-            samples
-                .map(|s| match s {
-                    Sample::F64(v) => v,
-                    _ => unreachable!("an f64 product"),
-                })
-                .collect(),
-        ),
+    // Each loop below is `Product::sample` over one pair of stored types, chosen once a block.
+    // The bits sum to at most 64, so a signed product fits an i64.
+    fn signed<A: Copy + Into<i128>, B: Copy + Into<i128>>(a: &[A], b: &[B]) -> Vec<i64> {
+        a.iter()
+            .zip(b)
+            .map(|(&x, &y)| (x.into() * y.into()) as i64)
+            .collect()
+    }
+    Ok(match (product, a, b) {
+        (Product::Int { signed: false, .. }, Values::U64(x), Values::U64(y)) => {
+            Values::U64(x.iter().zip(y).map(|(&x, &y)| x * y).collect())
+        }
+        (Product::Int { signed: true, .. }, a, b) => Values::I64(match (a, b) {
+            (Values::U64(x), Values::U64(y)) => signed(x, y),
+            (Values::U64(x), Values::I64(y)) => signed(x, y),
+            (Values::I64(x), Values::U64(y)) => signed(x, y),
+            (Values::I64(x), Values::I64(y)) => signed(x, y),
+            _ => unreachable!("an integer product's operands are int channels"),
+        }),
+        (Product::F64 { a: ca, b: cb }, a, b) => {
+            let mut out = Vec::with_capacity(a.len());
+            each_f64(a, ca, |x| out.push(x));
+            let mut slots = out.iter_mut();
+            each_f64(b, cb, |y| *slots.next().expect("as many as a's") *= y);
+            Values::F64(out)
+        }
+        _ => unreachable!("an integer product's operands are int channels"),
     })
+}
+
+/// Calls `f` with each of `values`' samples as `value_f64` gives it under `coding`, the match on
+/// the samples' type made once rather than for each sample.
+fn each_f64(values: &Values, coding: AnalogCoding, mut f: impl FnMut(f64)) {
+    match values {
+        Values::F32(v) => v.iter().for_each(|&x| f(f64::from(x))),
+        Values::F64(v) => v.iter().for_each(|&x| f(x)),
+        Values::U64(v) => v.iter().for_each(|&c| f(value_f64(Sample::U64(c), coding))),
+        Values::I64(v) => v.iter().for_each(|&c| f(value_f64(Sample::I64(c), coding))),
+    }
 }
 
 #[cfg(all(test, feature = "encode"))]
@@ -569,5 +581,42 @@ mod tests {
             Sample::F64(f64::from(0.1f32) * 3.0)
         );
         assert_ne!(f64::from(0.1f32) * 3.0, f64::from(0.1f32 * 3.0));
+    }
+
+    #[test]
+    fn a_blocks_products_are_each_samples_product() {
+        let unsigned = Values::U64(vec![0, 1, 255, 7, u64::from(u32::MAX)]);
+        let signed = Values::I64(vec![-128, -1, 0, 127, 5]);
+        let offset = AnalogCoding::Int(IntCoding {
+            bits: 8,
+            signed: false,
+            scale: Exact::new(1, 4),
+            offset: Exact::new(1, 2),
+        });
+        let cases = [
+            (int(32, false), int(32, false), &unsigned, &unsigned),
+            (int(8, true), int(8, false), &signed, &unsigned),
+            (int(8, false), int(8, true), &unsigned, &signed),
+            (int(8, true), int(8, true), &signed, &signed),
+            (int(33, false), int(32, false), &unsigned, &unsigned),
+            (offset, int(8, true), &unsigned, &signed),
+            (int(8, true), offset, &signed, &unsigned),
+            (
+                AnalogCoding::F32,
+                AnalogCoding::F64,
+                &Values::F32(vec![0.1, -2.5, 3.0, 0.0, 1e30]),
+                &Values::F64(vec![3.0, 0.1, -1e300, 7.0, 1e30]),
+            ),
+        ];
+        for (ca, cb, a, b) in cases {
+            let p = Product::of(ca, cb);
+            let each: Vec<Sample> = a
+                .iter()
+                .zip(b.iter())
+                .map(|(x, y)| p.sample(x, y))
+                .collect();
+            let block = product_values(p, a, b).unwrap();
+            assert_eq!(block.iter().collect::<Vec<_>>(), each, "{p:?}");
+        }
     }
 }
