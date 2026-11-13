@@ -8,7 +8,7 @@ import { formatValue } from "./readouts.ts";
 import type { Plot, PulseMark } from "./render/plot.ts";
 import type { Tile } from "./render/track.ts";
 import { lowerBound } from "./search.ts";
-import { inChannel, type RecordingInfo, type Source } from "./source.ts";
+import { inChannel, readingStep, rebased, type RecordingInfo, type Source } from "./source.ts";
 
 /** A pulse whose edges lie past the data drawn is measured once the pointer rests this long. */
 const REST_MS = 150;
@@ -158,7 +158,7 @@ export class Prober {
     const text = (lines: string[]) => this.#set({ kind: "text", row, lines });
     if (c.kind === "analog") {
       const at = tile.kind === "samples" ? analogFromSamples(c, tile.data, t0, t1, tick) : tile.kind === "analog-overview" ? analogFromOverview(tile.data, t0, t1) : null;
-      const v = (x: number) => formatValue(x, c.resolution, c.unit);
+      const v = (x: number) => formatValue(x, c.resolution, c.unit, c.significant);
       if (at?.kind === "value") text([v(at.value)]);
       else if (at?.kind === "range") text([`${v(at.min)} to ${v(at.max)}`]);
       else this.#set(null);
@@ -172,7 +172,8 @@ export class Prober {
         text([ZOOM_IN]);
         return false;
       }
-      pulse = pulseFromEdges(tile.data, tile.start, tile.end, knownSpan(c), tick);
+      const from = rebased(c, tile.start, tile.data, tick);
+      pulse = pulseFromEdges(from.edges, from.start, tile.end, knownSpan(c, tick), tick);
     } else if (tile.kind === "digital-overview") {
       const o = tile.data;
       const k0 = Math.max(0, Math.floor((t0 - o.start) / o.bucket));
@@ -192,7 +193,7 @@ export class Prober {
     const known = this.#measured;
     if (!complete(pulse) && known?.source === loaded.source && known.index === track.index && within(known.pulse, tick)) pulse = known.pulse;
     if (complete(pulse)) {
-      const figures = pulseFigures(pulse, loaded.info.timebase, knownSpan(c));
+      const figures = pulseFigures(pulse, loaded.info.timebase, knownSpan(c, tick), readingStep(loaded.info, [track.index]));
       const { start, end } = pulse;
       const mark: PulseMark | null =
         typeof start === "number" && typeof end === "number"
@@ -215,7 +216,7 @@ export class Prober {
       this.#abort = abort;
       this.#measuring = { source: loaded.source, index: track.index, tick, level: pulse.level };
       this.#timer = window.setTimeout(() => {
-        completePulse(loaded.source, track.index, asked, tick, knownSpan(c), abort.signal).then(
+        completePulse(loaded.source, track.index, asked, tick, knownSpan(c, tick), abort.signal).then(
           (done) => {
             if (abort.signal.aborted) return;
             this.#measuring = null;

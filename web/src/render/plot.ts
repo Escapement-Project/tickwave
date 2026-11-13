@@ -6,7 +6,7 @@ import { covers, laneAnnotations, type Annotation, type Resolved } from "../anno
 import type { Palette } from "../palette.ts";
 import { formatAt, niceStep } from "../readouts.ts";
 import { rangeMarks, type ValueRange } from "./scale.ts";
-import { channelStart, named, sampleTick, type AnalogChannel, type Channel, type RecordingInfo, type Source } from "../source.ts";
+import { channelSampleTick, channelStart, knownSpans, lostSpans, named, rebased, type AnalogChannel, type Channel, type RecordingInfo, type Source } from "../source.ts";
 import { timeAxis } from "./axis.ts";
 import {
   analogFromOverview,
@@ -554,15 +554,22 @@ export class Plot {
     const piecesAt = (lw: number): Piece[] => {
       let pieces = byWidth.get(lw);
       if (pieces) return pieces;
-      pieces = r.track.layers().flatMap(({ tile, start, end }) => {
-        const px0 = Math.round(Math.max(x0, this.xAt(start)) * dpr);
-        const px1 = Math.round(Math.min(x1, this.xAt(end)) * dpr);
-        if (px1 <= px0) return [];
-        const from = Math.max(start, channelStart(c));
-        const to = Math.min(end, c.end);
-        const shapes = c.kind === "digital" ? this.#digitalShapes(r, grid, tile, from, to, lw) : this.#analogShapes(r, c, grid, tile, from, to, lw, shown);
-        return [{ px0, px1, shapes, coarse: grain(tile) > grid.per }];
-      });
+      // One piece a span of the channel's data, so nothing joins across a gap or a break.
+      pieces = r.track.layers().flatMap(({ tile, start, end }) =>
+        knownSpans(c, start, end).flatMap(([from, to]) => {
+          const px0 = Math.round(Math.max(x0, this.xAt(from)) * dpr);
+          const px1 = Math.round(Math.min(x1, this.xAt(to)) * dpr);
+          if (px1 <= px0) return [];
+          let shapes;
+          if (c.kind === "analog") shapes = this.#analogShapes(r, c, grid, tile, from, to, lw, shown);
+          else if (tile.kind === "edges") {
+            // Past a gap in the tile the level is the gap's, not the one its edges carry to there.
+            const at = rebased(c, tile.start, tile.data, from);
+            shapes = this.#digitalShapes(r, grid, { ...tile, start: at.start, data: at.edges }, from, to, lw);
+          } else shapes = this.#digitalShapes(r, grid, tile, from, to, lw);
+          return [{ px0, px1, shapes, coarse: grain(tile) > grid.per }];
+        }),
+      );
       byWidth.set(lw, pieces);
       return pieces;
     };
@@ -593,6 +600,20 @@ export class Plot {
       }
     }
     ctx.restore();
+
+    // Where the instrument lost data: a digital channel's gaps, an analog channel's lost samples. A
+    // pause only breaks the trace.
+    const lost = c.kind === "digital" ? (c.gaps ?? []) : lostSpans(c);
+    if (lost.length > 0) {
+      ctx.save();
+      ctx.fillStyle = p.wash;
+      for (const g of lost) {
+        const a = Math.max(x0, this.xAt(g.from));
+        const b = Math.min(x1, this.xAt(g.to));
+        if (b > a) ctx.fillRect(a, r.top, Math.max(1, b - a), r.height);
+      }
+      ctx.restore();
+    }
 
     // What a trim leaves out, faded under the page's colour: still there to trim back to.
     const kept = this.kept.get(r.track.index);
@@ -734,10 +755,10 @@ export class Plot {
       const dots = period / grid.per >= 8 * dpr;
       // A held tile can be far wider than the view. The pad, ten line widths, is twice the reach
       // of a miter join at the default limit, and more than a dot's radius.
-      const [k0, k1] = lineSamples(grid, s, c.first, c.period, from, to, 10 * lw * grid.per);
+      const [k0, k1] = lineSamples(grid, s, c, from, to, 10 * lw * grid.per);
       for (let k = k0; k < k1; k++) {
         if (Number.isNaN(s.values[k])) continue;
-        const t = sampleTick(c.first, c.period, s.first + k);
+        const t = channelSampleTick(c, s.first + k);
         const x = left + (t - grid.x0) / grid.per;
         if (t >= this.view.start && t <= this.view.end) {
           shown.lo = Math.min(shown.lo, s.values[k]);
@@ -755,7 +776,7 @@ export class Plot {
       return { line, fill };
     }
     let cols: AnalogColumns;
-    if (tile.kind === "samples") cols = analogFromSamples(grid, tile.data, c.first, c.period, from, to);
+    if (tile.kind === "samples") cols = analogFromSamples(grid, tile.data, c, from, to);
     else if (tile.kind === "analog-overview") cols = analogFromOverview(grid, tile.data, from, to);
     else return { line, fill };
     for (let k = 0; k < grid.count; k++) {

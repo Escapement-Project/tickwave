@@ -20,6 +20,25 @@ export interface DigitalChannel {
   readonly start?: number;
   /** The first tick past the channel's data. Nothing is drawn at or after it. */
   readonly end: number;
+  /** Spans after `start` where the level was not known, in order (FORMAT.md, "Gaps"). */
+  readonly gaps?: readonly Gap[];
+}
+
+/** Ticks `from..to` where a digital channel's level was not known; from `to` on it is `level`. */
+export interface Gap {
+  readonly from: number;
+  readonly to: number;
+  readonly level: 0 | 1;
+}
+
+/**
+ * Sample `index` starts a new run at `tick`, after `lost` samples the instrument lost: 0 when it
+ * paused (FORMAT.md, "Gaps").
+ */
+export interface Break {
+  readonly index: number;
+  readonly tick: number;
+  readonly lost: number;
 }
 
 export interface AnalogChannel {
@@ -30,16 +49,22 @@ export interface AnalogChannel {
   readonly end: number;
   /** The unit of a value, such as "V" or "A". */
   readonly unit: string;
-  /** The tick of sample 0. Sample i sits at first + floor(i * period). */
+  /** The tick of sample 0. Sample i sits at first + floor(i * period), or after a break, at the
+   * break's tick plus floor((i - index) * period). */
   readonly first: number;
   /** Ticks between samples. */
   readonly period: Ratio;
   readonly count: number;
+  /** Where the samples start again after a stop, in order. */
+  readonly breaks?: readonly Break[];
   /**
    * The value one code step stands for, where the source recorded integer codes; readouts stop at
    * that digit. Null for a source that stored floating-point values.
    */
   readonly resolution: number | null;
+  /** At most this many significant figures in a reading, where the channel states it: an instrument
+   * whose step changes with its range. */
+  readonly significant?: number;
   /** The smallest and largest value in the recording. */
   readonly min: number;
   readonly max: number;
@@ -54,7 +79,12 @@ export interface Shaped {
   readonly kept?: { readonly from: number; readonly to: number };
 }
 
-export type Channel = (DigitalChannel | AnalogChannel) & Shaped;
+/** Which of the recording's sources a channel came from: its index in `RecordingInfo.sources`. */
+export interface Sourced {
+  readonly source?: number;
+}
+
+export type Channel = (DigitalChannel | AnalogChannel) & Shaped & Sourced;
 
 /** The first tick the channel can hold data at: a digital channel's `start` (0 when absent), an
  * analog channel's first sample. */
@@ -62,9 +92,109 @@ export function channelStart(c: Channel): number {
   return c.kind === "digital" ? (c.start ?? 0) : c.first;
 }
 
-/** Whether `tick` lies in the channel's data: ticks `channelStart(c)..end`. */
+/** Whether `tick` lies in the channel's data: ticks `channelStart(c)..end`, outside its gaps. */
 export function inChannel(c: Channel, tick: number): boolean {
-  return tick >= channelStart(c) && tick < c.end;
+  return tick >= channelStart(c) && tick < c.end && (c.kind !== "digital" || gapAt(c, tick) === null);
+}
+
+/** The gap holding `tick`, or null. */
+export function gapAt(c: DigitalChannel, tick: number): Gap | null {
+  for (const g of c.gaps ?? []) {
+    if (tick < g.from) break;
+    if (tick < g.to) return g;
+  }
+  return null;
+}
+
+/**
+ * The ticks `[from, to)` of a channel's data, clipped to `[start, end)`: a digital channel's split
+ * around its gaps, an analog channel's into its runs, each from its first sample to a period past
+ * its last, or to the next run's start if that comes sooner.
+ */
+export function knownSpans(c: Channel, start: number, end: number): [number, number][] {
+  const spans: [number, number][] = [];
+  const stop = Math.min(end, c.end);
+  const keep = (a: number, b: number) => {
+    const [s, e] = [Math.max(a, start, channelStart(c)), Math.min(b, stop)];
+    if (e > s) spans.push([s, e]);
+  };
+  if (c.kind === "analog") {
+    const runs = c.breaks ?? [];
+    const period = Math.ceil(c.period.num / c.period.den);
+    for (let k = 0; k <= runs.length; k++) {
+      const from = k === 0 ? c.first : runs[k - 1].tick;
+      const last = (k < runs.length ? runs[k].index : c.count) - 1;
+      const to = k < runs.length ? Math.min(runs[k].tick, channelSampleTick(c, last) + period) : c.end;
+      keep(from, to);
+    }
+    return spans;
+  }
+  let at = -Infinity;
+  for (const g of c.gaps ?? []) {
+    keep(at, g.from);
+    at = g.to;
+  }
+  keep(at, Infinity);
+  return spans;
+}
+
+/**
+ * Edges read from `start`, as they stand past the last gap that ends after `start` and at or before
+ * `from`: no edge lies in a gap, and its end sets the level. Unchanged where no gap ends there.
+ */
+export function rebased(c: Channel, start: number, e: Edges, from: number): { start: number; edges: Edges } {
+  let gap: Gap | null = null;
+  for (const g of c.kind === "digital" ? (c.gaps ?? []) : []) if (g.to > start && g.to <= from) gap = g;
+  if (!gap) return { start, edges: e };
+  let lo = 0;
+  while (lo < e.ticks.length && e.ticks[lo] < gap.to) lo++;
+  return { start: gap.to, edges: { level: gap.level, ticks: e.ticks.subarray(lo) } };
+}
+
+/** The tick of sample `i` of an analog channel, its breaks included. */
+export function channelSampleTick(c: Pick<AnalogChannel, "first" | "period" | "breaks">, i: number): number {
+  const runs = c.breaks ?? [];
+  let k = runs.length;
+  while (k > 0 && runs[k - 1].index > i) k--;
+  return k === 0 ? sampleTick(c.first, c.period, i) : sampleTick(runs[k - 1].tick, c.period, i - runs[k - 1].index);
+}
+
+/** The index of the first sample at or after `tick`, breaks included, clamped to `0..=count`. */
+export function channelIndexAtOrAfter(c: Pick<AnalogChannel, "first" | "period" | "count" | "breaks">, tick: number): number {
+  const runs = c.breaks ?? [];
+  // The run whose start is the last at or before `tick`; its samples end where the next run's start.
+  let k = runs.length;
+  while (k > 0 && runs[k - 1].tick > tick) k--;
+  const from = k === 0 ? 0 : runs[k - 1].index;
+  const to = k < runs.length ? runs[k].index : c.count;
+  const start = k === 0 ? c.first : runs[k - 1].tick;
+  return from + sampleIndexAtOrAfter(start, c.period, to - from, tick);
+}
+
+/** The span each lost sample's time covers, as FORMAT.md words it: from one period after the
+ * sample before the break, for `lost` periods, ending at the break's tick if that comes sooner. */
+export function lostSpans(c: AnalogChannel): { from: number; to: number; lost: number }[] {
+  const period = c.period.num / c.period.den;
+  return (c.breaks ?? [])
+    .filter((b) => b.lost > 0)
+    .map((b) => {
+      const from = channelSampleTick(c, b.index - 1) + period;
+      return { from, to: Math.min(b.tick, from + b.lost * period), lost: b.lost };
+    });
+}
+
+/**
+ * The recording's ticks one tick of a reading's source spans (FORMAT.md, "Sources"): a reading of
+ * channels keeps to the coarsest of their sources' ticks, and one tied to no channel to the finest
+ * source's. 1 for a recording of one source, or one that lists none.
+ */
+export function readingStep(info: RecordingInfo, channels: readonly number[] = []): number {
+  const sources = info.sources;
+  if (!sources || sources.length < 2) return 1;
+  // The recording's rate over the source's: a whole number by the format's rule.
+  const factor = (s: number) => Math.round((info.timebase.num * sources[s].timebase[1]) / (info.timebase.den * sources[s].timebase[0]));
+  const of = channels.map((c) => info.channels[c].source).filter((s): s is number => s !== undefined);
+  return of.length > 0 ? Math.max(...of.map(factor)) : Math.min(...sources.map((_, s) => factor(s)));
 }
 
 /** A recording's content id: "blake3:" and the 64 hex digits of its content's digest. */
@@ -79,11 +209,17 @@ export type RateOrigin = "inferred" | "given";
 /** Where a recording came from, as its header states it (FORMAT.md, "Header"). */
 export interface SourceHeader {
   readonly format: SourceFormat;
-  /** File names, without directories. */
+  /** File names, without directories; none for a recorder's own stream. */
   readonly files: readonly string[];
+  /** The source's ticks a second, `[num, den]`: the recording's timebase is a whole multiple. */
+  readonly timebase: readonly [number, number];
+  /** The recording's tick where the source's tick 0 lies, before a channel's offset. */
+  readonly origin: number;
+  /** Ticks it was moved by against the other sources to line instruments up: a claim. */
+  readonly align?: number;
   readonly instrument?: string;
   readonly software?: string;
-  /** The source's own time of tick 0, in seconds. */
+  /** The source's own time at its tick 0, in seconds. */
   readonly begin_s?: number;
   /** The trigger's time, in the same seconds. */
   readonly trigger_s?: number;
@@ -103,9 +239,10 @@ export interface RecordingInfo {
   readonly channels: readonly Channel[];
   /** The recording's download size in bytes, where the source knows it. */
   readonly bytes?: number;
-  /** What a .tickwave header states: its content id, where it came from, and free metadata. */
+  /** What a .tickwave header states: its content id, where its channels came from, and free
+   * metadata. */
   readonly contentId?: ContentId;
-  readonly source?: SourceHeader;
+  readonly sources?: readonly SourceHeader[];
   readonly meta?: Readonly<Record<string, string>>;
 }
 
@@ -220,6 +357,10 @@ export function sampleIndexAtOrAfter(first: number, period: Ratio, count: number
  */
 export function sampleAtOrBefore(c: AnalogChannel, tick: number): number | null {
   if (tick < c.first || tick >= c.end) return null;
+  if (c.breaks?.length) {
+    const i = channelIndexAtOrAfter(c, tick + 1) - 1;
+    return i < 0 ? null : Math.min(i, c.count - 1);
+  }
   let i = Math.floor(((tick - c.first) * c.period.den) / c.period.num);
   // The division can land one off; settle it against the sample ticks themselves.
   while (i > 0 && sampleTick(c.first, c.period, i) > tick) i--;

@@ -11,7 +11,7 @@ import { Prober, type Probed } from "../prober.ts";
 import { lowerBound } from "../search.ts";
 import { channelIndices, Plot } from "../render/plot.ts";
 import { clampRange, fitRange, moveRange, scaleLimits, zoomRange, type ScaleLimits, type ValueRange } from "../render/scale.ts";
-import { channelStart, inChannel, isAbort, named, sampleAtOrBefore, sampleTick, type Channel } from "../source.ts";
+import { channelStart, inChannel, isAbort, named, readingStep, sampleAtOrBefore, sampleTick, type Channel } from "../source.ts";
 import { parseTime, toTicks, type TimeSpec } from "../time.ts";
 import { DRAG_PX, TickwaveElement, loadAnnotations, loadRecording, zoomKey, type Loaded } from "./base.ts";
 import { ShapedSource } from "../shaped-source.ts";
@@ -749,7 +749,7 @@ export class TickwaveView extends TickwaveElement {
       g.style.height = `${r.height}px`;
       const d = this.#shaped?.offsets[i] ?? 0;
       const tb = this.#loaded!.info.timebase;
-      const where = d === 0 ? "where it was recorded" : `${formatInterval(Math.abs(d), tb)} ${d > 0 ? "later" : "earlier"} than recorded`;
+      const where = d === 0 ? "where it was recorded" : `${formatInterval(Math.abs(d), tb, readingStep(this.#loaded!.info, [i]))} ${d > 0 ? "later" : "earlier"} than recorded`;
       g.setAttribute("aria-label", `Move ${r.track.channel.name}, now ${where}. Left and right move it in time, with Shift further; up and down move its row.`);
     }
     // The keys go from grip to grip, and handle to handle, in the rows' order.
@@ -782,7 +782,7 @@ export class TickwaveView extends TickwaveElement {
         h.style.left = `${x}px`;
         h.style.top = `${r.top}px`;
         h.style.height = `${r.height}px`;
-        h.setAttribute("aria-valuetext", formatInterval(ends[j], own.timebase));
+        h.setAttribute("aria-valuetext", formatInterval(ends[j], own.timebase, readingStep(own, [i])));
       });
     }
   }
@@ -1556,8 +1556,9 @@ export class TickwaveView extends TickwaveElement {
     const was = this.#plot.cursors;
     this.#plot.cursors = { a, b };
     if (was.a === a && was.b === b) return;
-    const tb = this.#loaded?.info.timebase;
-    const time = (t: number | null) => (t === null || !tb ? null : formatInterval(t, tb));
+    const info = this.#loaded?.info;
+    // A cursor is tied to no channel: it reads at the finest source's tick.
+    const time = (t: number | null) => (t === null || !info ? null : formatInterval(t, info.timebase, readingStep(info)));
     this.emit("tickwave-cursor", { a, b, aTime: time(a), bTime: time(b) });
   }
 
@@ -1642,6 +1643,8 @@ export class TickwaveView extends TickwaveElement {
       if (seq === this.#readoutSeq && !isAbort(e)) this.fail(e);
     };
     const tb = l.info.timebase;
+    // Cursors and the selection are tied to no channel: the finest source's tick.
+    const free = readingStep(l.info);
     const lines: HTMLElement[] = [];
     const line = (...parts: (string | Node)[]) => {
       const div = document.createElement("div");
@@ -1659,12 +1662,12 @@ export class TickwaveView extends TickwaveElement {
     };
     const { a, b } = this.#plot.cursors;
     if (a !== null) {
-      const parts = [item("A", formatInterval(a, tb))];
+      const parts = [item("A", formatInterval(a, tb, free))];
       if (b !== null) {
-        parts.push(item("B", formatInterval(b, tb)));
+        parts.push(item("B", formatInterval(b, tb, free)));
         const dt = b - a;
-        const rate = formatRate(1, Math.abs(dt), tb);
-        parts.push(item("Δt", formatInterval(dt, tb) + (rate ? ` (${rate})` : "")));
+        const rate = formatRate(1, Math.abs(dt), tb, 1, free);
+        parts.push(item("Δt", formatInterval(dt, tb, free) + (rate ? ` (${rate})` : "")));
       }
       line(...parts);
       // Each analog channel's value at the cursors, to the digit of one code step.
@@ -1688,7 +1691,7 @@ export class TickwaveView extends TickwaveElement {
         if (seq !== this.#readoutSeq) return;
         const parts: (string | Node)[] = [c.name];
         // A recording stores NaN samples as the source had them; no figure says that better than "–".
-        const figure = (v: number | null) => (v === null || !Number.isFinite(v) ? "–" : formatValue(v, c.resolution, c.unit));
+        const figure = (v: number | null) => (v === null || !Number.isFinite(v) ? "–" : formatValue(v, c.resolution, c.unit, c.significant));
         parts.push(item("A", figure(values[0])));
         if (b !== null) {
           parts.push(item("B", figure(values[1])));
@@ -1703,13 +1706,13 @@ export class TickwaveView extends TickwaveElement {
         let pulse: Pulse;
         try {
           const e = await l.source.edges(t.index, a, a + 1);
-          pulse = await completePulse(l.source, t.index, pulseFromEdges(e, a, a + 1, knownSpan(c), a), a, knownSpan(c));
+          pulse = await completePulse(l.source, t.index, pulseFromEdges(e, a, a + 1, knownSpan(c, a), a), a, knownSpan(c, a));
         } catch (e) {
           failed(e);
           return;
         }
         if (seq !== this.#readoutSeq) return;
-        const f = pulseFigures(pulse, tb, knownSpan(c));
+        const f = pulseFigures(pulse, tb, knownSpan(c, a), readingStep(l.info, [t.index]));
         const parts: (string | Node)[] = [c.name, item(f.level, f.width)];
         if (f.inverseWidth) parts.push(item("1/width", f.inverseWidth));
         if (f.period) parts.push(item("period", f.period), fig(f.frequency ?? "–"), item("duty", f.duty ?? "–"));
@@ -1719,7 +1722,7 @@ export class TickwaveView extends TickwaveElement {
     const sel = this.#plot.selection;
     let detail: Record<string, unknown> | null = null;
     if (sel) {
-      line(item("Selection", `${formatInterval(sel.start, tb)} to ${formatInterval(sel.end, tb)}`), item("Δt", formatInterval(sel.end - sel.start, tb)));
+      line(item("Selection", `${formatInterval(sel.start, tb, free)} to ${formatInterval(sel.end, tb, free)}`), item("Δt", formatInterval(sel.end - sel.start, tb, free)));
       const counts = line();
       const periods = line();
       const digital = this.#plot.tracks.filter((t) => t.channel.kind === "digital");
@@ -1751,19 +1754,20 @@ export class TickwaveView extends TickwaveElement {
         const stats = r ? periodStats(r.level, r.ticks) : null;
         let periodDetail: Record<string, unknown> | null = null;
         if (stats) {
-          const rate = formatClockRate(stats, tb);
-          const period = formatClockPeriod(stats, tb);
+          const step = readingStep(l.info, [digital[chosen].index]);
+          const rate = formatClockRate(stats, tb, step);
+          const period = formatClockPeriod(stats, tb, step);
           periods.append(
             item("count", formatCount(stats.count)),
-            item("min", formatInterval(stats.min, tb)),
-            item("median", formatInterval(stats.median, tb)),
-            item("max", formatInterval(stats.max, tb)),
+            item("min", formatInterval(stats.min, tb, step)),
+            item("median", formatInterval(stats.median, tb, step)),
+            item("max", formatInterval(stats.max, tb, step)),
             item("clock", rate),
             clockNote(stats),
           );
           periodDetail = { channel: digital[chosen].channel.name, ...stats, rate, period };
         } else periods.append("fewer than two rising edges");
-        detail = { start: sel.start, end: sel.end, duration: formatInterval(sel.end - sel.start, tb), edges: edgeCounts, periods: periodDetail };
+        detail = { start: sel.start, end: sel.end, duration: formatInterval(sel.end - sel.start, tb, free), edges: edgeCounts, periods: periodDetail };
       } catch (e) {
         failed(e);
         return;

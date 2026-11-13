@@ -207,6 +207,20 @@ test("formatValue: to the digit of one code step", () => {
   assert.equal(formatValue(0.00012345, null, "A"), nb("123.5 uA").replace("uA", "µA"));
 });
 
+test("formatValue: to `significant` figures where the channel states them, if coarser than a step", () => {
+  // verge's current: a step of 1 nA, but the reading carries four figures, so 350,123,456 nA reads
+  // to 0.1 mA.
+  assert.equal(formatValue(350123456 * 1e-9, 1e-9, "A", 4), nb("350.1 mA"));
+  // 1,234 nA: four figures end at 1 nA, the step.
+  assert.equal(formatValue(1234 * 1e-9, 1e-9, "A", 4), nb("1.234 uA").replace("uA", "µA"));
+  // 12 nA: four figures would go past the step, so the step wins.
+  assert.equal(formatValue(12 * 1e-9, 1e-9, "A", 4), nb("12 nA"));
+  // Zero has no figures to count: it keeps to the step.
+  assert.equal(formatValue(0, 1e-9, "A", 4), formatValue(0, 1e-9, "A"));
+  // A float channel stating six figures: 123.45 uA to 1 nA.
+  assert.equal(formatValue(0.00012345, null, "A", 6), nb("123.450 uA").replace("uA", "µA"));
+});
+
 test("countEdges and formatCount", () => {
   const t = [10, 20, 30, 40];
   assert.equal(countEdges(t, 20, 40), 2);

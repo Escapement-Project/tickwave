@@ -125,13 +125,17 @@ export function formatScaled(scaled: bigint, p: number, units: readonly Unit[], 
  * is a whole number of ticks, so its last digit sits here. At 1 GS/s that is 1 ns; at 200 kS/s
  * (5 us) it is 1 us, and every interval is then exact at that place.
  */
-export function tickPlace(timebase: Ratio): number {
-  return placeOf(big(timebase.den), big(timebase.num));
+export function tickPlace(timebase: Ratio, step = 1): number {
+  return placeOf(big(timebase.den) * big(step), big(timebase.num));
 }
 
-/** An interval of a whole number of ticks: 1234567 ticks at 1 GS/s is 1.234567 ms. */
-export function formatInterval(ticks: number, timebase: Ratio): string {
-  const p = tickPlace(timebase);
+/**
+ * An interval of a whole number of ticks: 1234567 ticks at 1 GS/s is 1.234567 ms. `step` is the
+ * ticks one tick of the reading's source spans (`readingStep`), where a merged recording ticks
+ * finer than its sources: the last digit sits at the source's tick.
+ */
+export function formatInterval(ticks: number, timebase: Ratio, step = 1): string {
+  const p = tickPlace(timebase, step);
   return formatScaled(roundAt(big(ticks) * big(timebase.den), big(timebase.num), p), p, TIME_UNITS);
 }
 
@@ -139,10 +143,10 @@ export function formatInterval(ticks: number, timebase: Ratio): string {
  * An interval to three significant figures, for a summary line: 927888190 ticks at 1 GS/s is
  * 928 ms. Never finer than one tick.
  */
-export function formatBrief(ticks: number, timebase: Ratio): string {
+export function formatBrief(ticks: number, timebase: Ratio, step = 1): string {
   const n = big(Math.abs(ticks)) * big(timebase.den);
   const d = big(timebase.num);
-  const tick = tickPlace(timebase);
+  const tick = tickPlace(timebase, step);
   if (n === 0n) return formatScaled(0n, tick, TIME_UNITS);
   let p = Math.max(placeOf(n, d) - 2, tick);
   let scaled = roundAt(n, d, p);
@@ -161,11 +165,12 @@ export function formatBrief(ticks: number, timebase: Ratio): string {
  * power of ten not larger than that uncertainty. A single period of 40 ns is 25 MHz give or take
  * 0.6 MHz, so it shows 25.0 MHz; the mean over 1000 such periods in one run shows 25.0000 MHz.
  */
-export function formatRate(periods: number, span: number, timebase: Ratio, runs = 1): string | null {
+export function formatRate(periods: number, span: number, timebase: Ratio, runs = 1, step = 1): string | null {
   if (periods <= 0 || span <= 0 || runs <= 0) return null;
   const n = big(periods) * big(timebase.num);
   const d = big(span) * big(timebase.den);
-  const p = placeOf(n * big(runs), d * big(span));
+  // Each run's span is wrong by less than one tick of the source: `step` of these ticks.
+  const p = placeOf(n * big(runs) * big(step), d * big(span));
   return formatScaled(roundAt(n, d, p), p, RATE_UNITS);
 }
 
@@ -174,27 +179,29 @@ export function formatRate(periods: number, span: number, timebase: Ratio, runs 
  * above the span is wrong by less than `runs` ticks, so the mean is uncertain by runs / periods
  * ticks, and may carry digits finer than one tick.
  */
-export function formatMeanPeriod(periods: number, span: number, timebase: Ratio, runs = 1): string | null {
+export function formatMeanPeriod(periods: number, span: number, timebase: Ratio, runs = 1, step = 1): string | null {
   if (periods <= 0 || span <= 0 || runs <= 0) return null;
   const n = big(span) * big(timebase.den);
   const d = big(periods) * big(timebase.num);
-  const p = placeOf(big(runs) * big(timebase.den), d);
+  const p = placeOf(big(runs) * big(step) * big(timebase.den), d);
   return formatScaled(roundAt(n, d, p), p, TIME_UNITS);
 }
 
 /**
- * A value of an analog channel, to the digit of one code step (`resolution`). A source that stored
- * floating-point values states no resolution, and gets four significant digits.
+ * A value of an analog channel, to the digit of one code step (`resolution`), and to `significant`
+ * figures where the channel states them, whichever is coarser. A source that stored floating-point
+ * values states no resolution, and gets four significant figures unless it states otherwise.
  */
-export function formatValue(value: number, resolution: number | null, unit: string): string {
+export function formatValue(value: number, resolution: number | null, unit: string, significant?: number): string {
   const [n, d] = rational(value);
-  let p: number;
+  const figures = significant ?? (resolution !== null && resolution > 0 ? undefined : 4);
+  let p = -Infinity;
   if (resolution !== null && resolution > 0) {
     const [rn, rd] = rational(resolution);
     p = placeOf(rn, rd);
-  } else {
-    p = n === 0n ? 0 : placeOf(n < 0n ? -n : n, d) - 3;
   }
+  // Zero has no leading digit to count figures from: it keeps to the code step where there is one.
+  if (figures !== undefined && (n !== 0n || p === -Infinity)) p = Math.max(p, n === 0n ? 0 : placeOf(n < 0n ? -n : n, d) - (figures - 1));
   return formatScaled(roundAt(n, d, p), p, prefixedUnits(unit));
 }
 
@@ -256,13 +263,13 @@ export function periodStats(level: 0 | 1, ticks: ArrayLike<number>): PeriodStats
 }
 
 /** The running clock's rate, with its digits. */
-export function formatClockRate(s: PeriodStats, timebase: Ratio): string {
-  return formatRate(s.used, s.span, timebase, s.runs)!;
+export function formatClockRate(s: PeriodStats, timebase: Ratio, step = 1): string {
+  return formatRate(s.used, s.span, timebase, s.runs, step)!;
 }
 
 /** The running clock's period, with its digits. */
-export function formatClockPeriod(s: PeriodStats, timebase: Ratio): string {
-  return formatMeanPeriod(s.used, s.span, timebase, s.runs)!;
+export function formatClockPeriod(s: PeriodStats, timebase: Ratio, step = 1): string {
+  return formatMeanPeriod(s.used, s.span, timebase, s.runs, step)!;
 }
 
 /** "mean of 31 of 32 periods", "mean of 7 periods" when it kept them all, "one of 7 periods", "one period". */

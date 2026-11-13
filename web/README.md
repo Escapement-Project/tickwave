@@ -115,7 +115,9 @@ opened once, in one worker that holds the WASM module.
   32 KiB (`bytes=-32768`), then the rest of the footer if it is longer. Data blocks and overview
   blocks come by Range as a view needs them. Adjacent missing blocks share one request, and a block
   inside the first read is not fetched again.
-- A recording with gaps or breaks is refused (`TickwaveUnsupported`): the views draw neither yet.
+- Where a digital channel's level was not known (a gap), or an analog channel's instrument lost
+  samples, the row is shaded and the trace breaks. A pause only breaks it. A derived channel, such
+  as power from current and voltage, reads as an analog channel after the stored ones.
 - A server that answers 200 instead of 206 has sent the whole file. It is kept, and every later
   read is served from it.
 - A 206 with a `Content-Encoding` is refused: its ranges count bytes of the compressed stream.

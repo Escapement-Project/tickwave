@@ -6,17 +6,18 @@ import type { Recording as WasmRecording } from "../../../crates/wasm/pkg/escape
 import { lowerBound } from "../search.ts";
 import {
   aborted,
+  channelIndexAtOrAfter,
+  channelSampleTick,
   fillRuns,
   named,
-  sampleIndexAtOrAfter,
   SAMPLES_PER_RUN,
-  sampleTick,
   type AnalogOverview,
+  type Break,
   type Channel,
   type ContentId,
   type DigitalOverview,
   type Edges,
-  type Ratio,
+  type Gap,
   type RecordingInfo,
   type Samples,
   type SourceHeader,
@@ -34,7 +35,7 @@ interface DecodedBlock {
   readonly start: number;
   readonly end: number;
   readonly digital: ({ readonly initial: 0 | 1; readonly edges: Float64Array } | null)[];
-  readonly analog: ({ readonly first: number; readonly values: Float32Array } | null)[];
+  readonly analog: ({ readonly first: number; readonly values: Float32Array | Float64Array } | null)[];
   readonly size: number;
 }
 
@@ -47,6 +48,7 @@ interface HeaderShaped {
 interface HeaderDigital extends HeaderShaped {
   name: string;
   source_name: string;
+  source: number;
   kind: "digital";
   initial: boolean;
   end: number;
@@ -54,16 +56,46 @@ interface HeaderDigital extends HeaderShaped {
   gaps?: [number, number, boolean][];
 }
 
+/** How an analog channel's samples are stored (FORMAT.md, "Codings"). */
+type Coding =
+  | { type: "f32" }
+  | { type: "f64" }
+  | { type: "int"; bits: number; signed: boolean; scale?: [number, number]; offset?: [number, number] }
+  | { type: "codes"; bits: number; scale: number; offset: number };
+
 interface HeaderAnalog extends HeaderShaped {
   name: string;
   source_name: string;
+  source: number;
   kind: "analog";
   unit: string;
   first: number;
   period: [number, number];
   count: number;
-  breaks?: [number, number][];
-  coding: { type: "f32" } | { type: "codes"; bits: number; scale: number; offset: number };
+  /** [index, tick, samples lost before it]. */
+  breaks?: [number, number, number][];
+  coding: Coding;
+  significant?: number;
+}
+
+/** A channel computed from two analog channels (FORMAT.md, "Derived channels"). */
+interface HeaderDerived {
+  name: string;
+  unit: string;
+  product: [string, string];
+  significant?: number;
+}
+
+/** Whether a channel's values come through the decoder as f64: an f64 or integer coding. */
+function wide(c: HeaderAnalog): boolean {
+  return c.coding.type === "f64" || c.coding.type === "int";
+}
+
+/** The value one code step stands for, or null for a float channel. */
+function resolution(coding: Coding): number | null {
+  if (coding.type === "codes") return coding.scale;
+  if (coding.type === "int") return coding.scale ? coding.scale[0] / coding.scale[1] : 1;
+  return null;
 }
 
 /** A channel as the header states it (FORMAT.md, "Header"). */
@@ -73,9 +105,10 @@ export interface Header {
   timebase: [number, number];
   length: number;
   channels: HeaderChannel[];
+  derived?: HeaderDerived[];
   title?: string;
   meta?: Record<string, string>;
-  source: SourceHeader;
+  sources: SourceHeader[];
   content_id: ContentId;
   blocks: number;
   overview: number[];
@@ -89,7 +122,7 @@ interface DecodedOverview {
   readonly first: number;
   readonly buckets: number;
   /** Per channel: [level bits, change bits] for digital, [min, max] for analog. */
-  readonly channels: (Uint8Array[] | Float32Array[])[];
+  readonly channels: (Uint8Array[] | Float32Array[] | Float64Array[])[];
   readonly size: number;
 }
 
@@ -231,7 +264,7 @@ export class Opened {
   readonly #id = nextId++;
   readonly #data: Shelf<DecodedBlock>;
   readonly #levels: Shelf<DecodedOverview>[];
-  readonly #overviews = new Map<string, Uint8Array[] | Float32Array[] | null>();
+  readonly #overviews = new Map<string, Uint8Array[] | Float32Array[] | Float64Array[] | null>();
 
   private constructor(rec: WasmRecording, fileLength: number, bytes: Bytes) {
     this.#rec = rec;
@@ -247,40 +280,72 @@ export class Opened {
         ),
     );
     const h = this.header;
-    // Gaps and breaks are in the format, but the views draw neither yet, past a gap at the capture's
-    // start, as a channel moved or trimmed when it was converted has: its level is known from the
-    // gap's end. Another gap would draw as a known level, and samples after a break at the wrong ticks.
-    const leading = (c: (typeof h.channels)[number]) => c.kind === "digital" && c.gaps?.length === 1 && c.gaps[0][0] === 0;
-    for (const c of h.channels) {
-      if ((c.kind === "digital" && c.gaps?.length && !leading(c)) || (c.kind === "analog" && c.breaks?.length)) {
-        throw named("TickwaveUnsupported", `${bytes.name}: channel ${c.name} has ${c.kind === "digital" ? "gaps" : "breaks"}, which this viewer does not draw yet`);
-      }
-    }
+    // A gap from tick 0 says where the channel's data starts; the others are gaps in it.
+    const leading = (c: (typeof h.channels)[number]) => c.kind === "digital" && c.gaps?.[0]?.[0] === 0;
     /** What a channel moved or trimmed states, for the details a page lists. */
     const shaped = (c: HeaderShaped) => ({
       ...(c.offset !== undefined && { offset: { ticks: c.offset, kind: c.offset_kind ?? "" } }),
       ...(c.kept && { kept: { from: c.kept[0], to: c.kept[1] } }),
     });
     const channels: Channel[] = h.channels.map((c, i) => {
-      if (c.kind === "digital") return { ...shaped(c), kind: "digital", name: c.name, sourceName: c.source_name, end: c.end, ...(leading(c) && { start: c.gaps![0][1] }) };
+      if (c.kind === "digital") {
+        const gaps: Gap[] = (c.gaps ?? []).slice(leading(c) ? 1 : 0).map(([from, to, level]) => ({ from, to, level: level ? 1 : 0 }));
+        return {
+          ...shaped(c),
+          kind: "digital",
+          name: c.name,
+          sourceName: c.source_name,
+          source: c.source,
+          end: c.end,
+          ...(leading(c) && { start: c.gaps![0][1] }),
+          ...(gaps.length > 0 && { gaps }),
+        };
+      }
       const [min, max] = this.#range(i);
       const period = { num: c.period[0], den: c.period[1] };
+      const breaks: Break[] = (c.breaks ?? []).map(([index, tick, lost]) => ({ index, tick, lost }));
+      const runs = { first: c.first, period, breaks };
       return {
         ...shaped(c),
         kind: "analog",
         name: c.name,
         sourceName: c.source_name,
+        source: c.source,
         // Past the last sample's period: an analog channel can stop well before the capture does.
-        end: Math.min(h.length, sampleTick(c.first, period, c.count)),
+        end: Math.min(h.length, c.count === 0 ? c.first : channelSampleTick(runs, c.count - 1) + Math.ceil(period.num / period.den)),
+        ...(breaks.length > 0 && { breaks }),
         unit: c.unit,
         first: c.first,
         period,
         count: c.count,
-        resolution: c.coding.type === "codes" ? c.coding.scale : null,
+        resolution: resolution(c.coding),
+        ...(c.significant !== undefined && { significant: c.significant }),
         min,
         max,
       };
     });
+    // A derived channel reads as an analog one after the stored channels, placed as its first
+    // operand's samples are (they share first, period, count and breaks).
+    for (const [d, dc] of (h.derived ?? []).entries()) {
+      const [a, b] = dc.product.map((name) => channels.findIndex((c) => c.name === name));
+      const ca = channels[a];
+      const cb = channels[b];
+      if (ca?.kind !== "analog" || cb?.kind !== "analog") throw named("TickwaveNotRecording", `${bytes.name}: ${dc.name} is the product of channels it doesn't hold`);
+      const [min, max] = this.#range(h.channels.length + d);
+      const [sa, sb] = [a, b].map((i) => (h.channels[i] as HeaderAnalog).coding);
+      // An integer product's step is the product of the two exact scales, divided once.
+      const step = sa.type === "int" && sb.type === "int" ? ((sa.scale?.[0] ?? 1) * (sb.scale?.[0] ?? 1)) / ((sa.scale?.[1] ?? 1) * (sb.scale?.[1] ?? 1)) : null;
+      channels.push({
+        ...ca,
+        name: dc.name,
+        sourceName: dc.name,
+        unit: dc.unit,
+        resolution: step,
+        ...(dc.significant !== undefined ? { significant: dc.significant } : { significant: undefined }),
+        min,
+        max,
+      });
+    }
     this.info = {
       title: h.title ?? bytes.name,
       timebase: { num: h.timebase[0], den: h.timebase[1] },
@@ -288,7 +353,7 @@ export class Opened {
       channels,
       bytes: fileLength,
       contentId: h.content_id,
-      source: h.source,
+      sources: h.sources,
       ...(h.meta && { meta: h.meta }),
     };
   }
@@ -314,7 +379,7 @@ export class Opened {
   /** An analog channel's smallest and largest value, from the coarsest overview level. */
   #range(channel: number): [number, number] {
     const levels = this.header.overview.length;
-    const ov = levels > 0 ? (this.#overview(levels - 1, channel) as Float32Array[] | null) : null;
+    const ov = levels > 0 ? (this.#overview(levels - 1, channel) as Float32Array[] | Float64Array[] | null) : null;
     let min = Infinity;
     let max = -Infinity;
     if (ov) {
@@ -324,11 +389,18 @@ export class Opened {
     return [min, max];
   }
 
-  #overview(level: number, channel: number): Uint8Array[] | Float32Array[] | null {
+  #overview(level: number, channel: number): Uint8Array[] | Float32Array[] | Float64Array[] | null {
     const key = `${level} ${channel}`;
     if (!this.#overviews.has(key)) {
-      const kind = this.header.channels[channel].kind;
-      const ov = kind === "digital" ? this.#rec.overviewDigital(level, channel) : this.#rec.overviewAnalog(level, channel);
+      const c = this.header.channels[channel];
+      const C = this.header.channels.length;
+      const ov = !c
+        ? this.#rec.overviewDerived(level, channel - C)?.slice(0, 2)
+        : c.kind === "digital"
+          ? this.#rec.overviewDigital(level, channel)
+          : wide(c)
+            ? this.#rec.overviewAnalog64(level, channel)
+            : this.#rec.overviewAnalog(level, channel);
       this.#overviews.set(key, ov ?? null);
     }
     return this.#overviews.get(key)!;
@@ -356,11 +428,17 @@ export class Opened {
           digital.push({ initial: b.initial(k) ? 1 : 0, edges });
           analog.push(null);
         } else {
-          const values = b.values(k)!;
+          const values = wide(c) ? b.values64(k)! : b.values(k)!;
           size += values.byteLength;
           digital.push(null);
           analog.push({ first: b.firstIndex(k)!, values });
         }
+      });
+      (this.header.derived ?? []).forEach((_, d) => {
+        const values = b.derived(d)!;
+        size += values.byteLength;
+        digital.push(null);
+        analog.push({ first: b.firstIndex(this.header.channels.findIndex((c) => c.name === this.header.derived![d].product[0]))!, values });
       });
       return { start: b.start, end: b.end, digital, analog, size };
     } finally {
@@ -377,9 +455,14 @@ export class Opened {
     try {
       let size = 64;
       const channels = this.header.channels.map((c, i) => {
-        const arrays = (c.kind === "digital" ? b.digital(i) : b.analog(i))!;
+        const arrays = (c.kind === "digital" ? b.digital(i) : wide(c) ? b.analog64(i) : b.analog(i))!;
         for (const a of arrays) size += a.byteLength;
         return arrays;
+      });
+      (this.header.derived ?? []).forEach((_, d) => {
+        const arrays = b.derived(d)!.slice(0, 2);
+        for (const a of arrays) size += a.byteLength;
+        channels.push(arrays);
       });
       return { first: b.first, buckets: b.buckets, channels, size };
     } finally {
@@ -396,8 +479,9 @@ export class Opened {
     const [b0, b1] = this.#covering(start, end);
     const list = await this.blocks(b0, b1, signal);
     const c = this.header.channels[channel];
-    // The one gap a view draws: from the capture's start. No edge lies in it.
-    const gap = c.kind === "digital" && c.gaps?.length === 1 && c.gaps[0][0] === 0 ? c.gaps[0] : null;
+    // No edge lies in a gap, and a block's level bit carries the level from before one: the last
+    // gap ending in the first block, at or before `start`, sets the level the edges after it flip.
+    const gaps = c.kind === "digital" ? (c.gaps ?? []) : [];
     const parts: Float64Array[] = [];
     let level: 0 | 1 = 0;
     list.forEach((b, k) => {
@@ -406,9 +490,9 @@ export class Opened {
       const lo = lowerBound(d.edges, start);
       if (k === 0) {
         level = (d.initial ^ (lo & 1)) as 0 | 1;
-        // A block's level bit carries the level from before a gap, so the gap's end in the block,
-        // at or before `start`, sets the level the edges after it flip.
-        if (gap && b.start < gap[1] && gap[1] <= start) level = ((gap[2] ? 1 : 0) ^ ((lo - lowerBound(d.edges, gap[1])) & 1)) as 0 | 1;
+        let gap: [number, number, boolean] | null = null;
+        for (const g of gaps) if (b.start < g[1] && g[1] <= start) gap = g;
+        if (gap) level = ((gap[2] ? 1 : 0) ^ ((lo - lowerBound(d.edges, gap[1])) & 1)) as 0 | 1;
       }
       parts.push(d.edges.subarray(lo, lowerBound(d.edges, end, lo)));
     });
@@ -422,15 +506,16 @@ export class Opened {
   }
 
   async samples(channel: number, start: number, end: number, signal?: AbortSignal): Promise<Samples> {
-    const c = this.header.channels[channel];
-    if (c.kind !== "analog") throw new RangeError(`channel ${channel} is not analog`);
-    const period: Ratio = { num: c.period[0], den: c.period[1] };
-    const index = (tick: number) => sampleIndexAtOrAfter(c.first, period, c.count, tick);
-    const i0 = index(start);
-    const i1 = Math.max(i0, index(end));
-    const values = new Float32Array(i1 - i0);
+    const c = this.header.channels[channel] as HeaderChannel | undefined;
+    const info = this.info.channels[channel];
+    if ((c && c.kind !== "analog") || info.kind !== "analog") throw new RangeError(`channel ${channel} is not analog`);
+    const i0 = channelIndexAtOrAfter(info, start);
+    const i1 = Math.max(i0, channelIndexAtOrAfter(info, end));
+    // A derived channel's values are f64.
+    const Values = !c || wide(c) ? Float64Array : Float32Array;
+    const values = new Values(i1 - i0);
     if (i1 > i0) {
-      const [b0, b1] = this.#covering(sampleTick(c.first, period, i0), sampleTick(c.first, period, i1 - 1) + 1);
+      const [b0, b1] = this.#covering(channelSampleTick(info, i0), channelSampleTick(info, i1 - 1) + 1);
       for (const b of await this.blocks(b0, b1, signal)) {
         const a = b.analog[channel]!;
         const lo = Math.max(i0, a.first);
@@ -440,7 +525,7 @@ export class Opened {
     }
     // Built here, off the page's thread, so a draw never builds them.
     const n = Math.floor(values.length / SAMPLES_PER_RUN);
-    const runs = { min: new Float32Array(n), max: new Float32Array(n) };
+    const runs = { min: new Values(n), max: new Values(n) };
     fillRuns(values, runs.min, runs.max, 0, n);
     return { first: i0, values, runs };
   }
@@ -462,11 +547,11 @@ export class Opened {
     if (shift < 0) return null;
     const bucket = 2 ** shift;
     const count = Math.ceil(this.header.length / bucket);
-    const c = this.header.channels[channel];
+    const c = this.header.channels[channel] as HeaderChannel | undefined;
     const k0 = Math.min(count, Math.max(0, Math.floor(start / bucket)));
     const k1 = Math.min(count, Math.max(k0, Math.ceil(Math.min(end, this.info.channels[channel].end) / bucket)));
     // Each source of buckets: [first bucket, arrays], arrays laid out as the head's.
-    let parts: [number, Uint8Array[] | Float32Array[]][];
+    let parts: [number, Uint8Array[] | Float32Array[] | Float64Array[]][];
     if (head >= 0) {
       const ov = this.#overview(head, channel);
       if (!ov) return null;
@@ -477,7 +562,7 @@ export class Opened {
       parts = blocks.map((b) => [b.first, b.channels[channel]]);
     }
     const n = k1 - k0;
-    if (c.kind === "digital") {
+    if (c?.kind === "digital") {
       const level = new Uint8Array(n);
       const changes = new Uint8Array(n);
       for (const [first, arrays] of parts) {
@@ -492,10 +577,11 @@ export class Opened {
       }
       return { kind: "digital", bucket, start: k0 * bucket, level, changes };
     }
-    const min = new Float32Array(n).fill(Infinity);
-    const max = new Float32Array(n).fill(-Infinity);
+    const Values = !c || wide(c) ? Float64Array : Float32Array;
+    const min = new Values(n).fill(Infinity);
+    const max = new Values(n).fill(-Infinity);
     for (const [first, arrays] of parts) {
-      const [lo, hi] = arrays as Float32Array[];
+      const [lo, hi] = arrays as Float32Array[] | Float64Array[];
       const from = Math.max(k0, first);
       const to = Math.min(k1, first + lo.length);
       if (to > from) {

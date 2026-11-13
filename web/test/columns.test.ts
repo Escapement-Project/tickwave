@@ -116,8 +116,7 @@ test("analog from samples: a column's range, joined to its neighbours", () => {
   const c = analogFromSamples(
     { x0: 0, per: 30000, count: 4 },
     { first: 0, values: new Float64Array(CURRENT) },
-    5000,
-    { num: 10000, den: 1 },
+    { first: 5000, period: { num: 10000, den: 1 }, count: Infinity },
     0,
     120000,
   );
@@ -212,7 +211,7 @@ test("analog from samples: each column holds exactly the samples whose ticks lie
       const to = from + int(span);
       const want = walked(g, s, first, period, from, to);
       for (const [how, tileOf] of [["built", s], ["sent", sent]] as const) {
-        const got = analogFromSamples(g, tileOf, first, period, from, to);
+        const got = analogFromSamples(g, tileOf, { first, period, count: Infinity }, from, to);
         assert.deepEqual({ min: [...got.min], max: [...got.max] }, want, `tile ${tile}, grid ${grid}, runs ${how}`);
       }
     }
@@ -224,7 +223,7 @@ test("analog from samples: a column reads the runs its tile came with", () => {
   // runs say what no sample does, so the column shows they were read.
   const values = new Float64Array(200).fill(5);
   const runs = { min: new Float64Array([4, 3, 2]), max: new Float64Array([6, 7, 8]) };
-  const c = analogFromSamples({ x0: 0, per: 200, count: 1 }, { first: 0, values, runs }, 0, { num: 1, den: 1 }, 0, 200);
+  const c = analogFromSamples({ x0: 0, per: 200, count: 1 }, { first: 0, values, runs }, { first: 0, period: { num: 1, den: 1 }, count: Infinity }, 0, 200);
   assert.deepEqual([c.min[0], c.max[0]], [2, 8]);
 });
 
@@ -236,9 +235,9 @@ test("analog from samples: a draw builds the runs either side of one an earlier 
   const s = { first: 0, values };
   const period = { num: 1, den: 1 };
   // One column over run 3 alone builds it and nothing else.
-  const a = analogFromSamples({ x0: 192, per: 64, count: 1 }, s, 0, period, 0, 640);
+  const a = analogFromSamples({ x0: 192, per: 64, count: 1 }, s, { first: 0, period, count: Infinity }, 0, 640);
   assert.deepEqual([a.min[0], a.max[0]], [3, 3]);
-  const b = analogFromSamples({ x0: 0, per: 640, count: 1 }, s, 0, period, 0, 640);
+  const b = analogFromSamples({ x0: 0, per: 640, count: 1 }, s, { first: 0, period, count: Infinity }, 0, 640);
   assert.deepEqual([b.min[0], b.max[0]], [-1, 99]);
 });
 
@@ -249,17 +248,17 @@ test("line samples: those near the grid, out to one drawn sample past each side"
   const values = new Float64Array(12).fill(1);
   const s = { first: 0, values };
   // 30 is the last sample before the grid, 70 the first past it.
-  assert.deepEqual(lineSamples(g, s, 0, period, 0, 1000, 0), [3, 8]);
+  assert.deepEqual(lineSamples(g, s, { first: 0, period, count: Infinity }, 0, 1000, 0), [3, 8]);
   // A pad of 10 ticks reaches 25 and 75 (exclusive), so out to 20 and 80.
-  assert.deepEqual(lineSamples(g, s, 0, period, 0, 1000, 10), [2, 9]);
+  assert.deepEqual(lineSamples(g, s, { first: 0, period, count: Infinity }, 0, 1000, 10), [2, 9]);
   // NaN at 30 and 70: out to 20 and 80, the nearest the line can draw from.
   values[3] = NaN;
   values[7] = NaN;
-  assert.deepEqual(lineSamples(g, s, 0, period, 0, 1000, 0), [2, 9]);
+  assert.deepEqual(lineSamples(g, s, { first: 0, period, count: Infinity }, 0, 1000, 0), [2, 9]);
   // Nothing outside [from, to), NaN or not.
-  assert.deepEqual(lineSamples(g, s, 0, period, 30, 70, 0), [3, 7]);
+  assert.deepEqual(lineSamples(g, s, { first: 0, period, count: Infinity }, 30, 70, 0), [3, 7]);
   // The tile's own indices, for a tile that starts at sample 2 (tick 20).
-  assert.deepEqual(lineSamples(g, { first: 2, values: values.subarray(2) }, 0, period, 0, 1000, 0), [0, 7]);
+  assert.deepEqual(lineSamples(g, { first: 2, values: values.subarray(2) }, { first: 0, period, count: Infinity }, 0, 1000, 0), [0, 7]);
 });
 
 test("line samples: every sample that can reach the grid, and one drawn sample past each side", () => {
@@ -278,7 +277,7 @@ test("line samples: every sample that can reach the grid, and one drawn sample p
       const pad = random() < 0.3 ? 0 : random() * 30;
       const from = tick(0) - 20 + int(span);
       const to = from + int(span);
-      const [k0, k1] = lineSamples(g, s, first, period, from, to, pad);
+      const [k0, k1] = lineSamples(g, s, { first, period, count: Infinity }, from, to, pad);
       // As the rule reads it: the drawn samples in [from, to) with ticks in the padded grid, the
       // last drawn one before it and the first at or past its end.
       const want: number[] = [];

@@ -5,6 +5,7 @@
 import { recordingInfo, registerFile, type Channel, type ChannelShape, type RecordingInfo, type TickwaveView } from "tickwave";
 import { parseWindow } from "../web/src/attributes.ts";
 import { formatBytes, formatInterval } from "../web/src/readouts.ts";
+import { readingStep } from "../web/src/source.ts";
 import { parseTime, toTicks } from "../web/src/time.ts";
 import { githubAttachment } from "./attachment.ts";
 import { attachEditor, type Editor } from "./editor.ts";
@@ -35,14 +36,14 @@ function problems(box: HTMLElement): { say: (lead: string, items?: string[]) => 
 
 /** A channel as the details list it: its name, an analog one's unit, and how it was moved, and
  * where it holds the source's data, where it states them. */
-function channelFacts(c: Channel, tb: { num: number; den: number }): string {
+function channelFacts(c: Channel, tb: { num: number; den: number }, step: number): string {
   const notes = c.kind === "analog" ? ["analog", c.unit] : [];
   if (c.offset) {
     const why = c.offset.kind === "delay" ? "for a known delay" : `(${c.offset.kind})`;
-    notes.push(`moved ${formatInterval(Math.abs(c.offset.ticks), tb)} ${c.offset.ticks > 0 ? "later" : "earlier"} ${why}`);
+    notes.push(`moved ${formatInterval(Math.abs(c.offset.ticks), tb, step)} ${c.offset.ticks > 0 ? "later" : "earlier"} ${why}`);
   }
   // A recording with a channel moved or cut states each channel's span of source data.
-  if (c.kept) notes.push(`source data from ${formatInterval(c.kept.from, tb)} to ${formatInterval(c.kept.to, tb)}`);
+  if (c.kept) notes.push(`source data from ${formatInterval(c.kept.from, tb, step)} to ${formatInterval(c.kept.to, tb, step)}`);
   return notes.length > 0 ? `${c.name} (${notes.join(", ")})` : c.name;
 }
 
@@ -50,16 +51,18 @@ function channelFacts(c: Channel, tb: { num: number; den: number }): string {
 function showFacts(facts: HTMLElement, info: RecordingInfo, name: string): void {
   const rows: [string, string][] = [
     ["Recording", info.title || name],
-    ["Length", formatInterval(info.length, info.timebase)],
-    ["One tick", formatInterval(1, info.timebase)],
-    ["Channels", info.channels.map((c) => channelFacts(c, info.timebase)).join(", ")],
+    ["Length", formatInterval(info.length, info.timebase, readingStep(info))],
+    // A merged recording's sources tick at their own rates: the finest one's tick.
+    ["One tick", formatInterval(readingStep(info), info.timebase, readingStep(info))],
+    ["Channels", info.channels.map((c, i) => channelFacts(c, info.timebase, readingStep(info, [i]))).join(", ")],
   ];
   if (info.bytes !== undefined) rows.push(["Size", formatBytes(info.bytes)]);
-  const source = info.source;
-  if (source) rows.push(["From", [source.format, ...source.files].join(", ")]);
-  if (source?.rate === "inferred") rows.push(["Sample rate", "inferred from the edges"]);
-  else if (source?.rate === "given") rows.push(["Sample rate", "given when it was converted"]);
-  if (source?.converter) rows.push(["Converted by", source.converter]);
+  for (const source of info.sources ?? []) {
+    rows.push(["From", [source.format, ...source.files].join(", ")]);
+    if (source.rate === "inferred") rows.push(["Sample rate", "inferred from the edges"]);
+    else if (source.rate === "given") rows.push(["Sample rate", "given when it was converted"]);
+    if (source.converter) rows.push(["Converted by", source.converter]);
+  }
   for (const [k, v] of Object.entries(info.meta ?? {})) rows.push([k, v]);
   if (info.contentId) rows.push(["Content id", info.contentId]);
   facts.replaceChildren(...rows.flatMap(([k, v]) => [Object.assign(document.createElement("dt"), { textContent: k }), Object.assign(document.createElement("dd"), { textContent: v })]));

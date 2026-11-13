@@ -2,7 +2,7 @@
 // channels the view shows. No DOM, so the wording can be tested without a page.
 
 import { formatBrief, formatBytes } from "./readouts.ts";
-import { channelStart, type RecordingInfo } from "./source.ts";
+import { channelStart, readingStep, type RecordingInfo } from "./source.ts";
 
 /**
  * The first tick a view of `shown` channels spans: the capture's start, or earlier where a channel's
@@ -34,7 +34,7 @@ export function summaryFacts(info: RecordingInfo, shown?: readonly number[]): [p
   const n = info.channels.length;
   const count = indices.length === n ? `${n} channel${n === 1 ? "" : "s"}` : `${indices.length} of ${n} channels`;
   const facts: [string, string][] = [
-    ["fact-length", formatBrief(shownExtent(info, indices), info.timebase)],
+    ["fact-length", formatBrief(shownExtent(info, indices), info.timebase, readingStep(info))],
     ["fact-channels", `${count}: ${names.join(", ")}`],
   ];
   if (info.bytes !== undefined) facts.push(["fact-size", formatBytes(info.bytes)]);

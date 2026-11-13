@@ -11,7 +11,7 @@ import { reducedMotion } from "../face.ts";
 import { Prober, ZOOM_IN, type Probed } from "../prober.ts";
 import { formatInterval, measureReading } from "../readouts.ts";
 import { channelIndices, Plot, ROLE_WEIGHT } from "../render/plot.ts";
-import { isAbort, named, type RecordingInfo } from "../source.ts";
+import { isAbort, named, readingStep, type RecordingInfo } from "../source.ts";
 import { secondsValue, toTicks } from "../time.ts";
 import { DRAG_PX, TickwaveElement, loadRecording, zoomKey, type Loaded } from "./base.ts";
 import type { TickwaveView } from "./view.ts";
@@ -690,7 +690,7 @@ export class TickwaveInset extends TickwaveElement {
       return;
     }
     const items: Item[] = [[["", a.label ?? a.id]]];
-    if (a.end !== null) items.push([["figures", formatInterval(a.end - a.start, this.#loaded.info.timebase)]]);
+    if (a.end !== null) items.push([["figures", formatInterval(a.end - a.start, this.#loaded.info.timebase, readingStep(this.#loaded.info))]]);
     if (a.paint) items.push([["what", a.paint === "probe" || a.paint === "target" ? `${a.paint} drives` : a.paint]]);
     this.#read(items);
     if (said) this.#said.textContent = items.map((i) => i.map(([, t]) => t).join("")).join(", ");
@@ -717,7 +717,7 @@ export class TickwaveInset extends TickwaveElement {
     const start = r.pulse.start;
     if (a && typeof start === "number") {
       const d = start - a.start;
-      items.push([["", "starts "], ["figures", formatInterval(Math.abs(d), l.info.timebase)], ["", d < 0 ? " before" : " in"]]);
+      items.push([["", "starts "], ["figures", formatInterval(Math.abs(d), l.info.timebase, readingStep(l.info))], ["", d < 0 ? " before" : " in"]]);
     }
     if (f.period) items.push([["", "period "], ["figures", f.period]]);
     if (f.frequency) items.push([["figures", f.frequency]]);

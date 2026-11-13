@@ -3,13 +3,13 @@
 
 import { lowerBound } from "../search.ts";
 import {
+  channelIndexAtOrAfter,
   fillRuns,
-  sampleIndexAtOrAfter,
   SAMPLES_PER_RUN,
+  type AnalogChannel,
   type AnalogOverview,
   type DigitalOverview,
   type Edges,
-  type Ratio,
   type SampleRuns,
   type Samples,
 } from "../source.ts";
@@ -145,17 +145,19 @@ function runsOf(s: Samples, r0: number, r1: number): SampleRuns {
   return runs;
 }
 
+/** Where an analog channel's samples sit: its first, period, count and breaks. */
+export type Runs = Pick<AnalogChannel, "first" | "period" | "count" | "breaks">;
+
 /** The tile's own index of its first sample at or after `tick`. */
-function tileIndex(s: Samples, first: number, period: Ratio, tick: number): number {
-  return Math.max(0, sampleIndexAtOrAfter(first, period, s.first + s.values.length, tick) - s.first);
+function tileIndex(s: Samples, runs: Runs, tick: number): number {
+  return Math.max(0, Math.min(channelIndexAtOrAfter(runs, tick), s.first + s.values.length) - s.first);
 }
 
 /** Each column's range from the samples in it. For several samples a column. */
 export function analogFromSamples(
   g: Grid,
   s: Samples,
-  first: number,
-  period: Ratio,
+  channel: Runs,
   from: number,
   to: number,
 ): AnalogColumns {
@@ -163,7 +165,7 @@ export function analogFromSamples(
   const { min, max } = cols;
   const v = s.values;
   const [c0, c1] = columnRange(g, from, to);
-  const at = (tick: number) => tileIndex(s, first, period, tick);
+  const at = (tick: number) => tileIndex(s, channel, tick);
   let i = at(Math.max(from, g.x0 + c0 * g.per));
   const runs = runsOf(s, Math.ceil(i / RUN), Math.floor(at(Math.min(to, g.x0 + c1 * g.per)) / RUN));
   for (let c = c0; c < c1; c++) {
@@ -202,9 +204,9 @@ export function analogFromSamples(
  * indices: those in [from, to) that lie within `pad` ticks of the grid, and out to one that is not
  * NaN past each side, so the line leaves the grid on both.
  */
-export function lineSamples(g: Grid, s: Samples, first: number, period: Ratio, from: number, to: number, pad: number): [number, number] {
+export function lineSamples(g: Grid, s: Samples, channel: Runs, from: number, to: number, pad: number): [number, number] {
   const v = s.values;
-  const at = (tick: number) => tileIndex(s, first, period, tick);
+  const at = (tick: number) => tileIndex(s, channel, tick);
   const lo = at(from);
   const hi = at(to);
   if (hi <= lo) return [lo, lo];

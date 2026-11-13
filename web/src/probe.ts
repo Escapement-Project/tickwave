@@ -4,7 +4,7 @@
 
 import { formatInterval, formatRate } from "./readouts.ts";
 import { lowerBound } from "./search.ts";
-import { channelStart, sampleAtOrBefore, sampleTick, type AnalogChannel, type AnalogOverview, type Channel, type Edges, type Ratio, type Samples, type Source } from "./source.ts";
+import { channelSampleTick, channelStart, knownSpans, sampleAtOrBefore, type AnalogChannel, type AnalogOverview, type Channel, type Edges, type Ratio, type Samples, type Source } from "./source.ts";
 
 /** The ticks where a channel's level is known, `start..end`: every edge lies after `start`. */
 export interface Known {
@@ -12,7 +12,12 @@ export interface Known {
   readonly end: number;
 }
 
-export const knownSpan = (c: Channel): Known => ({ start: channelStart(c), end: c.end });
+/** The span of the channel's data around `tick`, between the gaps either side; the whole of it
+ * without a tick. */
+export function knownSpan(c: Channel, tick?: number): Known {
+  if (tick !== undefined) for (const [start, end] of knownSpans(c, -Infinity, Infinity)) if (tick >= start && tick < end) return { start, end };
+  return { start: channelStart(c), end: c.end };
+}
 
 /**
  * An edge's place: a tick, `null` where there is none (the pulse runs from where the channel's level
@@ -111,18 +116,21 @@ export interface PulseFigures {
   readonly duty: string | null;
 }
 
-/** A complete pulse's figures. Widths are whole ticks; a rate and a duty carry the digits the ticks support. */
-export function pulseFigures(p: Pulse, timebase: Ratio, known: Known): PulseFigures {
+/**
+ * A complete pulse's figures. Widths are whole ticks; a rate and a duty carry the digits the ticks
+ * support. `step` is the ticks one tick of the channel's source spans (`readingStep`).
+ */
+export function pulseFigures(p: Pulse, timebase: Ratio, known: Known, step = 1): PulseFigures {
   const level = p.level ? "high" : "low";
   const s = p.start ?? null;
   const e = p.end ?? null;
   const n = p.next ?? null;
   let width: string;
-  if (s !== null && e !== null) width = formatInterval(e - s, timebase);
+  if (s !== null && e !== null) width = formatInterval(e - s, timebase, step);
   // A channel known from the capture's start spans it; one moved or trimmed spans what it records.
-  else if (s === null && e === null) width = `${known.start === 0 ? "the whole capture" : "all it records"}, ${formatInterval(known.end - known.start, timebase)}`;
-  else width = `at least ${formatInterval(e === null ? known.end - s! : e - known.start, timebase)}`;
-  const inverseWidth = s !== null && e !== null ? formatRate(1, e - s, timebase) : null;
+  else if (s === null && e === null) width = `${known.start === 0 ? "the whole capture" : "all it records"}, ${formatInterval(known.end - known.start, timebase, step)}`;
+  else width = `at least ${formatInterval(e === null ? known.end - s! : e - known.start, timebase, step)}`;
+  const inverseWidth = s !== null && e !== null ? formatRate(1, e - s, timebase, 1, step) : null;
   if (s === null || e === null || n === null) return { level, width, inverseWidth, period: null, frequency: null, duty: null };
   const period = n - s;
   const high = p.level ? e - s : n - e;
@@ -130,19 +138,19 @@ export function pulseFigures(p: Pulse, timebase: Ratio, known: Known): PulseFigu
     level,
     width,
     inverseWidth,
-    period: formatInterval(period, timebase),
-    frequency: formatRate(1, period, timebase),
-    duty: formatDuty(high, period),
+    period: formatInterval(period, timebase, step),
+    frequency: formatRate(1, period, timebase, 1, step),
+    duty: formatDuty(high, period, step),
   };
 }
 
 /**
- * `high` of `period` ticks, as a percentage. Each span is off by less than a tick, so the share is
- * uncertain by about 100 / period percent; the last digit shown is at the largest power of ten not
+ * `high` of `period` ticks, as a percentage. Each span is off by less than a tick of the source,
+ * `step` ticks, so the share is uncertain by about 100 step / period percent; the last digit shown is at the largest power of ten not
  * larger than that, as a rate's is.
  */
-export function formatDuty(high: number, period: number): string {
-  const place = Math.floor(Math.log10(100 / period));
+export function formatDuty(high: number, period: number, step = 1): string {
+  const place = Math.floor(Math.log10((100 * step) / period));
   const share = (100 * high) / period;
   // A no-break space before the unit, as every readout writes it.
   if (place < 0) return `${share.toFixed(-place)}\u00a0%`;
@@ -165,9 +173,9 @@ export function analogFromSamples(c: AnalogChannel, s: Samples, t0: number, t1: 
   const at = sampleAtOrBefore(c, Math.floor(tick));
   if (at === null || first === null) return { kind: "none" };
   let last = first;
-  while (last + 1 < c.count && sampleTick(c.first, c.period, last + 1) < t1) last++;
+  while (last + 1 < c.count && channelSampleTick(c, last + 1) < t1) last++;
   const value = (i: number) => (i >= s.first && i < s.first + s.values.length ? s.values[i - s.first] : NaN);
-  if (last <= first || sampleTick(c.first, c.period, first + 1) >= t1) {
+  if (last <= first || channelSampleTick(c, first + 1) >= t1) {
     const v = value(at);
     return Number.isFinite(v) ? { kind: "value", value: v } : { kind: "none" };
   }

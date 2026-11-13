@@ -516,17 +516,28 @@ test("the most the decoder takes from one frame is the page's to set", async () 
   assert.ok(r.info.length > 0);
 });
 
-test("a channel known only from a gap's end starts there, at the gap's level; a gap anywhere else is refused", async () => {
+test("a channel known only from a gap's end starts there, at the gap's level, and so does the rest after any gap", async () => {
   // Written by crates/format/examples/gaps.rs: A is not known until 300 µs, high there, and runs a
   // 10 µs clock from 400 µs; B is known throughout.
   const r = await openTickwave("fixtures/leading-gap.tickwave");
   const [a, b] = r.info.channels;
   assert.deepEqual([a, b], [
-    { kind: "digital", name: "A", sourceName: "a", end: 1_000_000, start: 300_000 },
-    { kind: "digital", name: "B", sourceName: "b", end: 1_000_000 },
+    { kind: "digital", name: "A", sourceName: "a", source: 0, end: 1_000_000, start: 300_000 },
+    { kind: "digital", name: "B", sourceName: "b", source: 0, end: 1_000_000 },
   ]);
   const e = await r.edges(0, 300_000, 410_000);
   assert.equal(e.level, 1);
   assert.deepEqual([...e.ticks], [400_000, 405_000]);
-  await assert.rejects(openTickwave("fixtures/middle-gap.tickwave"), /channel A has gaps, which this viewer does not draw yet/);
+  // A is not known from 600 to 700 µs, high after it; its clock's edges fall every 5 µs, none in
+  // the gap, so the next is a fall at 705 µs.
+  const m = await openTickwave("fixtures/middle-gap.tickwave");
+  const ma = m.info.channels[0];
+  assert.deepEqual(ma.kind === "digital" && ma.gaps, [{ from: 600_000, to: 700_000, level: 1 }]);
+  for (const from of [700_000, 702_000]) {
+    const after = await m.edges(0, from, 720_000);
+    assert.deepEqual([after.level, [...after.ticks]], [1, [705_000, 710_000, 715_000]], `from ${from}`);
+  }
+  // Before the gap the clock runs as before: 40 edges from 400 µs leave it low at 600 µs.
+  const before = await m.edges(0, 590_000, 600_000);
+  assert.deepEqual([before.level, [...before.ticks]], [0, [590_000, 595_000]]);
 });
