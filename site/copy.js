@@ -28,15 +28,51 @@
       getSelection().addRange(range);
       said = "Selected";
     }
-    // The button answers the click: a press and settle, an ink fill, a tick drawn in front of the
-    // word (site.css). Taking the class off and putting it back replays it for a second click.
+    // The button answers the click: a press and settle, an ink fill, its word fading to the word
+    // for what happened, a copy with a tick drawn in front of it (base.css). Taking the class off and putting it back replays it
+    // for a second click.
     box.classList.remove("copied");
     void box.offsetWidth;
     box.classList.add("copied");
-    if (button) button.innerHTML = `<svg class="tick" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.2 6.4 4.9 9.1 9.8 3.2"/></svg>${said}`;
+    if (button) say(button, said);
     status.textContent = `${said}: ${text}`;
     clearTimeout(box.copyTimer);
-    box.copyTimer = setTimeout(() => { box.classList.remove("copied"); if (button) button.textContent = "Copy"; }, 1600);
+    box.copyTimer = setTimeout(() => { box.classList.remove("copied"); if (button) say(button, "Copy"); }, 1600);
+  }
+
+  const tick = '<svg class="tick" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.2 6.4 4.9 9.1 9.8 3.2"/></svg>';
+  // Only a copy that happened gets the tick: where the clipboard refused, the command is selected
+  // for the reader to copy.
+  const words = { Copy: "", Copied: tick, Selected: "" };
+  const makeButton = () => {
+    const b = Object.assign(document.createElement("button"), { type: "button", className: "copy" });
+    b.innerHTML = Object.entries(words).map(([w, mark]) => `<span class="say" data-say="${w}">${mark}${w}</span>`).join("");
+    say(b, "Copy");
+    return b;
+  };
+  // Shows one word; the others are hidden from a screen reader as well as faded out. The button
+  // goes from its width to the new word's: a width set from the old one, then the new, which the
+  // transition runs between (base.css), and none once there, so a late font sizes it again.
+  function say(b, word) {
+    const from = b.offsetWidth;
+    for (const s of b.children) {
+      const on = s.dataset.say === word;
+      s.classList.toggle("on", on);
+      if (on) s.removeAttribute("aria-hidden");
+      else s.setAttribute("aria-hidden", "true");
+    }
+    if (!b.isConnected) return;
+    b.style.width = "";
+    const to = b.offsetWidth;
+    if (from === to || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    b.style.width = `${from}px`;
+    void b.offsetWidth;
+    b.style.width = `${to}px`;
+    b.addEventListener("transitionend", function settle(e) {
+      if (e.propertyName !== "width") return;
+      b.style.width = "";
+      b.removeEventListener("transitionend", settle);
+    });
   }
   window.copyCommand = copy;
 
@@ -58,9 +94,9 @@
     for (const box of boxes) box.classList.toggle("selecting", !!range && range.intersectsNode(box));
   });
   for (const box of boxes) {
-    const button = Object.assign(document.createElement("button"), { type: "button", className: "copy", textContent: "Copy" });
-    box.append(button);
-    button.addEventListener("click", () => copy(box));
+    const b = makeButton();
+    box.append(b);
+    b.addEventListener("click", () => copy(box));
     box.querySelector("code")?.addEventListener("click", () => { if (!getSelection().toString()) copy(box); });
   }
 })();
