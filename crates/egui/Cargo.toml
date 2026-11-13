@@ -1,0 +1,24 @@
+[package]
+name = "escapement-tickwave-egui"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+egui = { version = "0.37.0", default-features = false }
+escapement-tickwave-view = { version = "0.1.0", path = "../view", default-features = false }
+tracing = "0.1.44"
+
+[dev-dependencies]
+egui = { version = "0.37.0", features = ["default_fonts"] }
+egui_kittest = { version = "0.37.0", features = ["wgpu", "snapshot"] }
+escapement-tickwave-format = { path = "../format" }
+serde_json = "1.0.154"
+tempfile = "3.27.0"
+
+[features]
+default = ["live"]
+# A view of a recording a writer in this process is still writing, through its `Snapshot`.
+live = ["escapement-tickwave-view/live"]
