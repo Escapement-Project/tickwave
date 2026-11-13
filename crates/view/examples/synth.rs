@@ -9,7 +9,7 @@
 //! - A marker every minute, bundled into the footer at finish.
 //! - A flush every second, as verge's Recorder closes a block at least that often; zstd level 16.
 //! - The finest overview level by the Recorder's rule, round(log2(1024 × ticks a pair)), at most
-//!   24.
+//!   24, or `--shift`'s.
 //!
 //! With `--live-calls N`, in the last second, before its flush, it times `Writer::snapshot` and
 //! `Recording::live` over the file written so far, N times each: the open block then holds that
@@ -58,6 +58,9 @@ struct Args {
     /// Keep a live recording updated after every second's flush, and time each update.
     #[arg(long)]
     follow: bool,
+    /// The finest overview level's shift, in place of the Recorder's rule.
+    #[arg(long)]
+    shift: Option<u8>,
 }
 
 /// The digital channels' edges in second `s`, in order: (tick, channel).
@@ -141,7 +144,9 @@ fn main() {
         "96 MHz is a multiple of the rate"
     );
     let period = CLOCK_HZ / args.rate;
-    let shift = ((1024.0 * period as f64).log2().round() as u8).min(24);
+    let shift = args
+        .shift
+        .unwrap_or_else(|| ((1024.0 * period as f64).log2().round() as u8).min(24));
     let timebase = Ratio::integer(CLOCK_HZ).unwrap();
     let int = |den| {
         AnalogCoding::Int(IntCoding {
