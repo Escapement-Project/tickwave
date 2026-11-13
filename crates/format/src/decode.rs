@@ -74,9 +74,31 @@ pub fn inflate(frame: &[u8], len: usize) -> Result<Vec<u8>, DecodeError> {
 /// `inflate`, holding at most `max` decoded bytes.
 pub fn inflate_limited(frame: &[u8], len: usize, max: usize) -> Result<Vec<u8>, DecodeError> {
     let mut out = buffer(len, max)?;
+    #[cfg(all(feature = "zstd", not(target_family = "wasm")))]
+    inflate_native(frame, &mut out)?;
+    #[cfg(not(all(feature = "zstd", not(target_family = "wasm"))))]
+    inflate_portable(frame, &mut out)?;
+    if out.len() != len {
+        return Err(corrupt(format!(
+            "a frame decoded to {} bytes, not {len}",
+            out.len()
+        )));
+    }
+    Ok(out)
+}
+
+/// One frame with a checksum, decoded into `out` by ruzstd, the decoder the browser's build has.
+#[cfg_attr(
+    all(feature = "zstd", not(target_family = "wasm"), not(test)),
+    expect(
+        dead_code,
+        reason = "the web's decoder; a native build's tests check it against libzstd"
+    )
+)]
+fn inflate_portable(frame: &[u8], out: &mut Vec<u8>) -> Result<(), DecodeError> {
     let mut decoder = FrameDecoder::new();
     decoder
-        .decode_all_to_vec(frame, &mut out)
+        .decode_all_to_vec(frame, out)
         .map_err(|e| DecodeError::Zstd(e.to_string()))?;
     // decode_all reads every frame in its input, and steps over skippable ones, but the checksum
     // getters describe only the last frame: a valid frame after a corrupted one would hide it. The
@@ -88,17 +110,35 @@ pub fn inflate_limited(frame: &[u8], len: usize, max: usize) -> Result<Vec<u8>, 
         decoder.get_checksum_from_data(),
         decoder.get_calculated_checksum(),
     ) {
-        (Some(stored), Some(computed)) if stored == computed => {}
-        (Some(_), Some(_)) => return Err(DecodeError::Zstd("checksum mismatch".into())),
-        _ => return Err(corrupt("a frame carries no checksum")),
+        (Some(stored), Some(computed)) if stored == computed => Ok(()),
+        (Some(_), Some(_)) => Err(DecodeError::Zstd("checksum mismatch".into())),
+        _ => Err(corrupt("a frame carries no checksum")),
     }
-    if out.len() != len {
-        return Err(corrupt(format!(
-            "a frame decoded to {} bytes, not {len}",
-            out.len()
-        )));
+}
+
+/// `inflate_portable` through libzstd, which a native build with the encoder links anyway: on a
+/// recorder's blocks it decodes about 14 times as fast as ruzstd. It holds a frame to the same
+/// rules: a zstd frame, the only one, with a checksum, which libzstd checks.
+#[cfg(all(feature = "zstd", not(target_family = "wasm")))]
+fn inflate_native(frame: &[u8], out: &mut Vec<u8>) -> Result<(), DecodeError> {
+    use zstd::zstd_safe;
+    // RFC 8878: the magic number, then the frame header descriptor, whose bit 2 says the frame
+    // ends in a checksum.
+    if frame.get(..4) != Some(&0xFD2F_B528u32.to_le_bytes()[..]) {
+        return Err(corrupt("the bytes are not one zstd frame"));
     }
-    Ok(out)
+    if frame.get(4).is_none_or(|d| d & 0b100 == 0) {
+        return Err(corrupt("a frame carries no checksum"));
+    }
+    match zstd_safe::find_frame_compressed_size(frame) {
+        Ok(n) if n == frame.len() => {}
+        Ok(_) => return Err(corrupt("the bytes hold more than one frame")),
+        Err(code) => return Err(DecodeError::Zstd(zstd_safe::get_error_name(code).into())),
+    }
+    zstd::bulk::Decompressor::new()
+        .and_then(|mut d| d.decompress_to_buffer(frame, out))
+        .map_err(|e| DecodeError::Zstd(e.to_string()))?;
+    Ok(())
 }
 
 /// One overview block, decoded: buckets `first..first + level.buckets` of its level.
@@ -1195,6 +1235,80 @@ mod tests {
             ),
         ] {
             assert!(check_header(&header(breaks)).is_err(), "{why}");
+        }
+    }
+}
+
+/// The two decoders take and refuse the same bytes: the browser's ruzstd, and libzstd natively.
+#[cfg(all(test, feature = "zstd", not(target_family = "wasm")))]
+mod decoders {
+    use super::{inflate_native, inflate_portable};
+    use zstd::zstd_safe::CParameter;
+
+    fn frame(raw: &[u8], checksum: bool) -> Vec<u8> {
+        let mut c = zstd::bulk::Compressor::new(3).unwrap();
+        c.set_parameter(CParameter::ChecksumFlag(checksum)).unwrap();
+        c.compress(raw).unwrap()
+    }
+
+    fn skippable(content: &[u8]) -> Vec<u8> {
+        let mut out = 0x184D_2A50u32.to_le_bytes().to_vec();
+        out.extend_from_slice(&(content.len() as u32).to_le_bytes());
+        out.extend_from_slice(content);
+        out
+    }
+
+    #[test]
+    fn libzstd_and_ruzstd_take_and_refuse_the_same_frames() {
+        // Bytes zstd can't shrink, so a flipped byte lands in the content, not a header.
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        let raw: Vec<u8> = (0..1000)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x as u8
+            })
+            .collect();
+        let good = frame(&raw, true);
+        for decode in [inflate_portable, inflate_native] {
+            let mut out = Vec::with_capacity(raw.len());
+            decode(&good, &mut out).unwrap();
+            assert_eq!(out, raw);
+        }
+        let mut flipped = good.clone();
+        flipped[good.len() / 2] ^= 0x10;
+        let empty = frame(&[], true);
+        let cases = [
+            ("a flipped byte", flipped.clone()),
+            (
+                "a flipped byte, then an empty frame",
+                [flipped, empty.clone()].concat(),
+            ),
+            ("an empty frame after", [good.clone(), empty].concat()),
+            (
+                "a skippable frame after",
+                [good.clone(), skippable(b"x")].concat(),
+            ),
+            (
+                "a skippable frame before",
+                [skippable(b"x"), good.clone()].concat(),
+            ),
+            ("one byte after", [good.clone(), vec![0]].concat()),
+            ("the checksum cut short", good[..good.len() - 1].to_vec()),
+            ("no checksum", frame(&raw, false)),
+            // libzstd reads a skippable frame as holding nothing, and its length's bit 2 looks
+            // like a checksum flag to a reader that skips the magic number.
+            ("a skippable frame alone", skippable(b"abcd")),
+        ];
+        for (why, bytes) in cases {
+            for (name, decode) in [
+                ("ruzstd", inflate_portable as fn(&[u8], &mut Vec<u8>) -> _),
+                ("libzstd", inflate_native),
+            ] {
+                let mut out = Vec::with_capacity(raw.len());
+                assert!(decode(&bytes, &mut out).is_err(), "{name} took {why}");
+            }
         }
     }
 }
