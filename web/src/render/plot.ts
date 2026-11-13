@@ -52,6 +52,15 @@ export interface RowRange extends ValueRange {
   readonly marks: { readonly top: number; readonly bottom: number; readonly place: number };
 }
 
+/** A band above the first row of a group of channels, such as one input of a merge, with its name. */
+export interface Head {
+  readonly group: string;
+  /** The channel index of the row it heads. */
+  readonly index: number;
+  readonly top: number;
+  readonly height: number;
+}
+
 export interface Layout {
   readonly width: number;
   readonly height: number;
@@ -60,12 +69,15 @@ export interface Layout {
   readonly laneTop: number;
   readonly laneHeight: number;
   readonly rows: readonly Row[];
+  readonly heads: readonly Head[];
   readonly axisTop: number;
 }
 
 const AXIS_PX = 11;
 const LANE_ROW = 18;
 const AXIS_HEIGHT = 24;
+/** A group's head band: its name at the labels' size, with room above and below. */
+const HEAD_PX = 22;
 /** The selection's bar along the top of the axis band, clear of the labels below it. */
 const SELECTION_BAR = 4;
 const RIGHT_PAD = 10;
@@ -134,6 +146,9 @@ export class Plot {
   /** Rows' kept spans, by channel index, in the plot's ticks: the trace outside one fades, as the
    * part a trim leaves out. */
   kept = new Map<number, { from: number; to: number }>();
+  /** Each channel's group, by channel index: a row whose group differs from the row above's gets a
+   * head band with the group's name. Empty: no heads. */
+  groups = new Map<number, string>();
   #palette: Palette | null = null;
   layout: Layout | null = null;
   view = { start: 0, end: 1 };
@@ -290,12 +305,24 @@ export class Plot {
     return t.channel.kind === "analog" ? this.config.analogHeight : this.config.rowHeight;
   }
 
+  /** Whether the row at position `i` starts a group, and so has a head band above it. */
+  #headed(i: number): boolean {
+    const g = this.groups.get(this.tracks[i].index);
+    return g !== undefined && (i === 0 || this.groups.get(this.tracks[i - 1].index) !== g);
+  }
+
+  /** The space above the row at position `i`: a head band, or an analog row's room for its top label. */
+  #above(i: number): number {
+    if (this.#headed(i)) return HEAD_PX;
+    return i > 0 && this.tracks[i].channel.kind === "analog" ? 8 : 0;
+  }
+
   /** The lane, the rows at their own heights and the axis: what the plot stacks, with no height given. */
   #stack(): { laneHeight: number; top: number; natural: number[]; fixed: number } {
     const laneHeight = this.config.lanes > 0 && (this.keepLane || this.laneNotes().length > 0) ? this.config.lanes * LANE_ROW + 4 : 0;
     const top = 2 + laneHeight + (laneHeight > 0 ? 2 : 4);
     const natural = this.tracks.map((t) => this.heights.get(t.index) ?? this.defaultHeight(t));
-    const gaps = this.tracks.filter((t, i) => i > 0 && t.channel.kind === "analog").length * 8;
+    const gaps = this.tracks.reduce((sum, _, i) => sum + this.#above(i), 0);
     const fixed = top + gaps + natural.reduce((a, b) => a + b, 0) + (this.config.axis ? AXIS_HEIGHT + 2 : 4);
     return { laneHeight, top, natural, fixed };
   }
@@ -320,9 +347,13 @@ export class Plot {
     let top = rowsTop;
     const extra = height !== null ? Math.max(0, height - fixed) : 0;
     const analogs = this.tracks.filter((t) => t.channel.kind === "analog").length;
+    const heads: Head[] = [];
     const rows: Row[] = this.tracks.map((track, i) => {
       // An analog row's scale labels sit at its top and bottom edges; keep them off the row above.
-      if (track.channel.kind === "analog" && i > 0) top += 8;
+      // A head band does that too.
+      const above = this.#above(i);
+      if (this.#headed(i)) heads.push({ group: this.groups.get(track.index)!, index: track.index, top, height: above });
+      top += above;
       let h = natural[i];
       if (extra > 0) {
         h += analogs > 0 ? (track.channel.kind === "analog" ? extra / analogs : 0) : Math.min(this.config.rowHeight, extra / this.tracks.length);
@@ -340,6 +371,7 @@ export class Plot {
       laneTop,
       laneHeight,
       rows,
+      heads,
       axisTop,
     };
     this.#dpr = Math.max(1, globalThis.devicePixelRatio || 1);
@@ -469,7 +501,8 @@ export class Plot {
 
     this.#drawRules(lane, revealX);
 
-    // Rows.
+    // Rows, each group's under its head.
+    this.#drawHeads();
     for (const r of l.rows) this.#drawRow(r, grid, revealX);
 
     this.#drawPulseMark();
@@ -505,6 +538,31 @@ export class Plot {
   }
 
   // Rows ---------------------------------------------------------------------------------------
+
+  /** Each group's name in its band, over a rule that runs across the plot under it. The name may
+   * run past the names column: nothing is drawn beside it. */
+  #drawHeads(): void {
+    const l = this.layout!;
+    const p = this.palette!;
+    const ctx = this.#ctx;
+    const font = this.#font(this.config.labelPx, 600);
+    ctx.font = font;
+    ctx.textAlign = "left";
+    for (const h of l.heads) {
+      const base = h.top + h.height - 7;
+      ctx.fillStyle = p.ink;
+      ctx.fillText(h.group, 6 + this.grip, base, l.plotRight - 6 - this.grip);
+      const end = 6 + this.grip + this.measure(h.group, font) + 8;
+      if (end >= l.plotRight) continue;
+      ctx.strokeStyle = p.hair;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      const y = Math.round(base - 4) + 0.5;
+      ctx.moveTo(Math.max(end, l.plotLeft), y);
+      ctx.lineTo(l.plotRight, y);
+      ctx.stroke();
+    }
+  }
 
   #drawRow(r: Row, grid: Grid, revealX: number): void {
     const l = this.layout!;

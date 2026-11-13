@@ -1,7 +1,7 @@
 // The view's shaping, as the convert flow uses it: a channel moved by its grip or its keys, trimmed by
 // the handles at its data's ends, and rows reordered; and the Open page's table that follows it. A
-// shape goes by the capture's name for a channel: identify-swd's SWCLK came from digital_3_0, its
-// SWDIO from digital_3_1.
+// shape goes by the channel's name; the Open page shapes a capture converted under its own names,
+// so there SWDIO is digital_3_1, as the capture names it.
 // identify-swd's SWDIO rises at 376,846,682 ns and falls at 376,851,176 (e2e/probe.spec.ts); its
 // SWCLK falls at 376,719,436, rises at 376,720,063 and falls at 376,720,710.
 
@@ -77,19 +77,19 @@ test("a grip moves its channel in time by the drag, in whole ticks, and its keys
   await page.keyboard.down("Alt");
   await drag(page, grip, 100);
   await page.keyboard.up("Alt");
-  const moved = (await shape(view)).digital_3_1.offset;
+  const moved = (await shape(view)).SWDIO.offset;
   expect(Number.isInteger(moved)).toBe(true);
   expect(Math.abs(moved - perPx)).toBeLessThanOrEqual(Math.ceil(perPx / 100) + 1);
   const first = (await event) as { shape: Shape; change: string; channel: string };
-  expect([first.change, first.channel, first.shape.digital_3_1.keep]).toEqual(["move", "digital_3_1", null]);
+  expect([first.change, first.channel, first.shape.SWDIO.keep]).toEqual(["move", "SWDIO", null]);
   await grip.focus();
   await page.keyboard.press("ArrowLeft");
-  expect((await shape(view)).digital_3_1.offset).toBe(moved - Math.max(1, Math.round(perPx / 100)));
+  expect((await shape(view)).SWDIO.offset).toBe(moved - Math.max(1, Math.round(perPx / 100)));
   await page.keyboard.press("Shift+ArrowRight");
-  expect((await shape(view)).digital_3_1.offset).toBe(moved + 9 * Math.max(1, Math.round(perPx / 100)));
+  expect((await shape(view)).SWDIO.offset).toBe(moved + 9 * Math.max(1, Math.round(perPx / 100)));
   await expect(grip).toHaveAttribute("aria-label", /^Move SWDIO, now .* later than recorded\./);
   // The other channel stays where it was.
-  expect((await shape(view)).digital_3_0.offset).toBe(0);
+  expect((await shape(view)).SWCLK.offset).toBe(0);
 });
 
 test("a grip dragged near another row's edge snaps an edge of its channel onto it, and Alt moves it freely", async ({ page }) => {
@@ -99,27 +99,27 @@ test("a grip dragged near another row's edge snaps an edge of its channel onto i
   await show(view, 376_844_500, 376_848_500);
   const grip = view.locator(".grip").nth(1);
   await drag(page, grip, 2);
-  const snapped = (await shape(view)).digital_3_1.offset;
+  const snapped = (await shape(view)).SWDIO.offset;
   expect([376_845_415 + snapped, 376_846_682 + snapped].some((t) => [376_845_430, 376_846_704].includes(t))).toBe(true);
-  await setShape(view, { digital_3_1: { offset: 0, keep: null } });
+  await setShape(view, { SWDIO: { offset: 0, keep: null } });
   await page.keyboard.down("Alt");
   await drag(page, grip, 2);
   await page.keyboard.up("Alt");
-  const free = (await shape(view)).digital_3_1.offset;
+  const free = (await shape(view)).SWDIO.offset;
   expect([15, 22]).not.toContain(free);
   expect(free).toBeGreaterThan(0);
 });
 
 test("a moved channel reads where it is drawn, and a channel moved before the capture's start widens the view", async ({ page }) => {
   const view = await ready(page);
-  await setShape(view, { digital_3_1: { offset: 10_000, keep: null } });
+  await setShape(view, { SWDIO: { offset: 10_000, keep: null } });
   await show(view, 376_840_000, 376_870_000);
   // SWDIO falls at 376,845,415 and rises at 376,846,682 as recorded; moved, its 1.267 µs low pulse is
   // at 376,855,415, where it was high, and its 4.494 µs high pulse follows.
   expect(await readingAt(page, view, 1, 376_856_000)).toMatch(/^low 1\.267 µs/);
   expect(await readingAt(page, view, 1, 376_858_682)).toMatch(/^high 4\.494 µs/);
   // Moved 400 ms earlier, SWCLK's data starts before tick 0, and Fit shows it.
-  await setShape(view, { digital_3_0: { offset: -400_000_000, keep: null } });
+  await setShape(view, { SWCLK: { offset: -400_000_000, keep: null } });
   await view.locator(".fit").click();
   expect((await view.evaluate((v) => (v as unknown as { window: { start: number } }).window)).start).toBe(-400_000_000);
 });
@@ -127,7 +127,7 @@ test("a moved channel reads where it is drawn, and a channel moved before the ca
 test("the trim handles keep part of a channel, snapping to its edges, and Home and End keep all of it again", async ({ page }) => {
   const view = await ready(page);
   await show(view, 376_715_000, 376_725_000);
-  await setShape(view, { digital_3_0: { offset: 0, keep: { from: 376_716_000, to: 376_724_000 } } });
+  await setShape(view, { SWCLK: { offset: 0, keep: { from: 376_716_000, to: 376_724_000 } } });
   const [start, end] = [view.locator(".trim").nth(0), view.locator(".trim").nth(1)];
   await expect(start).toBeVisible();
   await expect(start).toHaveAttribute("aria-valuetext", "376.716000 ms");
@@ -137,12 +137,12 @@ test("the trim handles keep part of a channel, snapping to its edges, and Home a
   await page.mouse.down();
   await page.mouse.move((await xOf(view, 376_719_436)) + 2, b.y + b.height / 2, { steps: 8 });
   await page.mouse.up();
-  expect((await shape(view)).digital_3_0.keep).toEqual({ from: 376_719_436, to: 376_724_000 });
+  expect((await shape(view)).SWCLK.keep).toEqual({ from: 376_719_436, to: 376_724_000 });
   await start.focus();
   await page.keyboard.press("Home");
   await end.focus();
   await page.keyboard.press("End");
-  expect((await shape(view)).digital_3_0.keep).toBeNull();
+  expect((await shape(view)).SWCLK.keep).toBeNull();
 });
 
 test("a grip dragged over the row above trades places with it, and the view keeps its place", async ({ page }) => {
@@ -180,7 +180,7 @@ test("without shaping, the view has no grips or trim handles and keeps no room f
   const never = await names(plain);
   const view = await ready(page);
   expect(await names(view)).not.toBe(never);
-  await setShape(view, { digital_3_1: { offset: 10_000, keep: null } });
+  await setShape(view, { SWDIO: { offset: 10_000, keep: null } });
   await view.evaluate((v) => ((v as unknown as { shaping: boolean }).shaping = false));
   await expect(view.locator(".grip")).toHaveCount(0);
   await expect(view.locator(".trim")).toHaveCount(0);

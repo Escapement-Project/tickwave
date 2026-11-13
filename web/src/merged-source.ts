@@ -1,7 +1,8 @@
 // Several recordings on one time axis: the merge's preview, drawn from each input as converted.
 // The axis ticks at the least common multiple of the inputs' tick rates, so every input tick is a
-// whole number of merged ticks, its factor; each input then moves by its alignment. Nothing is
-// resampled: every edge and sample keeps its tick, times the factor, plus the alignment.
+// whole number of merged ticks, its factor. Every input starts at tick 0; a view shaping the
+// preview moves each one by its alignment. Nothing is resampled: every edge and sample keeps its
+// tick, times the factor.
 
 import { channelStart, type Channel, type Edges, type Overview, type Ratio, type RecordingInfo, type Samples, type Source } from "./source.ts";
 
@@ -69,8 +70,7 @@ export class MergedSource implements Source {
   readonly #names: readonly string[];
   readonly #factors: readonly number[];
   readonly #timebase: Ratio;
-  #aligns: number[];
-  #info: RecordingInfo;
+  readonly #info: RecordingInfo;
 
   constructor(inputs: readonly MergeInput[]) {
     if (inputs.length === 0) throw new RangeError("a merge needs an input");
@@ -79,25 +79,12 @@ export class MergedSource implements Source {
     this.#names = uniqueNames(inputs);
     this.#timebase = mergedTimebase(inputs.map((i) => i.info.timebase));
     this.#factors = inputs.map((i) => factorOf(this.#timebase, i.info.timebase));
-    this.#aligns = inputs.map(() => 0);
     this.#info = this.#merged();
   }
 
   /** Merged ticks one tick of each input spans. */
   get factors(): readonly number[] {
     return this.#factors;
-  }
-
-  /** Each input's alignment, in merged ticks, later when positive. */
-  get aligns(): readonly number[] {
-    return this.#aligns;
-  }
-
-  /** Moves input `input` to `ticks` merged ticks from where it starts with the others. */
-  setAlign(input: number, ticks: number): void {
-    if (!Number.isSafeInteger(ticks)) throw new RangeError(`an alignment is a whole number of ticks, not ${ticks}`);
-    this.#aligns = this.#aligns.map((a, i) => (i === input ? ticks : a));
-    this.#info = this.#merged();
   }
 
   /** The input and channel index merged channel `channel` comes from. */
@@ -116,17 +103,19 @@ export class MergedSource implements Source {
     const sources = this.#inputs.flatMap((input, i) => {
       first.push(first.length === 0 ? 0 : first[i - 1] + (this.#inputs[i - 1].info.sources?.length ?? 1));
       const f = this.#factors[i];
-      const a = this.#aligns[i];
-      return (input.info.sources ?? []).map((s) => ({ ...s, origin: s.origin * f + a, ...((s.align ?? 0) * f + a !== 0 && { align: (s.align ?? 0) * f + a }) }));
+      return (input.info.sources ?? []).map((s) => ({ ...s, origin: s.origin * f, ...(s.align && { align: s.align * f }) }));
     });
+    // Each input's names, as the merge gives them, for its derived channels' operands.
+    const renamed = this.#inputs.map(() => new Map<string, string>());
+    this.#origins.forEach(({ input, channel }, i) => renamed[input].set(this.#inputs[input].info.channels[channel].name, this.#names[i]));
     const channels = this.#origins.map(({ input, channel }, i): Channel => {
       const c = this.#inputs[input].info.channels[channel];
       const f = this.#factors[input];
-      const a = this.#aligns[input];
       const name = this.#names[i];
       const source = first[input] + (c.source ?? 0);
-      if (c.kind === "digital") return { ...c, name, source, start: channelStart(c) * f + a, end: c.end * f + a };
-      return { ...c, name, source, first: c.first * f + a, period: { num: c.period.num * f, den: c.period.den }, end: c.end * f + a };
+      if (c.kind === "digital") return { ...c, name, source, start: channelStart(c) * f, end: c.end * f };
+      const product = c.product?.map((n) => renamed[input].get(n) ?? n) as [string, string] | undefined;
+      return { ...c, name, source, first: c.first * f, period: { num: c.period.num * f, den: c.period.den }, end: c.end * f, ...(product && { product }) };
     });
     return {
       title: this.#inputs.map((i) => i.info.title).join(" + "),
@@ -146,18 +135,17 @@ export class MergedSource implements Source {
   }
 
   /** `[start, end)` on the input's own ticks, covering every input tick the merged span touches. */
-  #span(channel: number, start: number, end: number): { input: MergeInput; c: number; s: number; e: number; f: number; a: number } {
+  #span(channel: number, start: number, end: number): { input: MergeInput; c: number; s: number; e: number; f: number } {
     const { input, channel: c } = this.#origins[channel];
     const f = this.#factors[input];
-    const a = this.#aligns[input];
-    const s = Math.max(0, Math.floor((start - a) / f));
-    return { input: this.#inputs[input], c, s, e: Math.max(s, Math.ceil((end - a) / f)), f, a };
+    const s = Math.max(0, Math.floor(start / f));
+    return { input: this.#inputs[input], c, s, e: Math.max(s, Math.ceil(end / f)), f };
   }
 
   async edges(channel: number, start: number, end: number, signal?: AbortSignal): Promise<Edges> {
-    const { input, c, s, e, f, a } = this.#span(channel, start, end);
+    const { input, c, s, e, f } = this.#span(channel, start, end);
     const got = await input.source.edges(c, s, e, signal);
-    const ticks = got.ticks.map((t) => t * f + a);
+    const ticks = got.ticks.map((t) => t * f);
     // An input tick before `start` can scale to one inside the merged span's first tick, and the
     // level at `start` then counts the edges before it.
     let lo = 0;
@@ -168,9 +156,9 @@ export class MergedSource implements Source {
   }
 
   async overview(channel: number, start: number, end: number, maxBucket: number, signal?: AbortSignal): Promise<Overview | null> {
-    const { input, c, s, e, f, a } = this.#span(channel, start, end);
+    const { input, c, s, e, f } = this.#span(channel, start, end);
     const got = await input.source.overview(c, s, e, Math.floor(maxBucket / f), signal);
-    return got && { ...got, bucket: got.bucket * f, start: got.start * f + a };
+    return got && { ...got, bucket: got.bucket * f, start: got.start * f };
   }
 
   samples(channel: number, start: number, end: number, signal?: AbortSignal): Promise<Samples> {

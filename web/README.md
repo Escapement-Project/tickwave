@@ -234,7 +234,7 @@ a view whose footer never came.
 | `window` | what an open view shows first: two times (`"317.8 ms 318.0 ms"`), or an annotation's id |
 | `open` | open the view |
 | `series` | a series name, such as `verge`: the traces take `--series-verge`. Ink by default |
-| `shaping` | shape the recording, as the Open page's converter does: a grip at each row's name moves its channel in time (sideways) or among the rows (up or down), and bars at its data's ends trim it. A move up or down rewrites `channels`. Without it, there are no grips or bars, and no room kept for them |
+| `shaping` | shape the recording, as the Open page's converter does: a grip at each row's name moves its channel in time (sideways) or among the rows (up or down), and bars at its data's ends trim it. A move up or down rewrites `channels`. A group's head has a grip that moves the whole group in time (see `groups`). A derived channel has no grip or bars: it moves and trims with its first operand. Without it, there are no grips or bars, and no room kept for them |
 
 Times in attributes are a decimal with a unit (`s`, `ms`, `us`, `ns`, `ps`), or a whole number of
 ticks.
@@ -297,7 +297,9 @@ Clicking an annotation's label shows its span.
 | `cursors` | cursors A and B, `{a, b}` in ticks; null where one is not placed |
 | `selection` | the selected span, `{start, end}` in ticks, or null |
 | `shaping` | the attribute, as a boolean |
-| `shape` | each channel's shape, by the source's name for it (the header's `source_name`), which a rename leaves alone: `offset`, the ticks it is moved by, and `keep`, the part of its own data kept (`{from, to}` in its ticks before the move), or null for all of it. Setting it moves and trims the channels it names. Nothing changes the recording |
+| `shape` | each channel's shape, by its name: `offset`, the ticks it is moved by, and `keep`, the part of its own data kept (`{from, to}` in its ticks before the move), or null for all of it. A group's alignment is not in the offset. Setting it moves and trims the channels it names. Nothing changes the recording |
+| `groups` | channels that belong together, such as the recordings of a merge: `[{name, channels}]`, the channels by name. Each group's rows sit under a head row with its name. While the view shapes, a channel's grip moves its row only among its own group's rows |
+| `aligns` | each group's alignment, by its name: the ticks all its channels are moved by, later when positive, on top of each channel's own offset. Setting it moves the groups it names |
 | `annotationsText` | the sidecar's hand-written file as text, in place of the file at `annotations`, whose includes it still reads. The view redraws the annotations and keeps its place, cursors and selection. While it is set, the annotation lane shows even with nothing in it, so the first annotation added moves nothing. Null goes back to the file |
 | `summary` | the recording's own `title` and `facts`, the facts as one line, and `matches`: whether the text the page slotted matches them. Null until the footer is in |
 
@@ -308,7 +310,7 @@ Clicking an annotation's label shows its span.
 | `tickwave-select` | a span is selected: its `start`, `end`, `duration`, `edges` by channel, and `periods` for the measured channel |
 | `tickwave-cursor` | a cursor is placed or cleared: `{a, b}` in ticks, and `{aTime, bTime}`, each a time at the recording's resolution as text; null where a cursor is not placed |
 | `tickwave-annotation` | an annotation's label is clicked: `{id}` |
-| `tickwave-shape` | the reader moves, trims or reorders a channel: `{shape, channels, change, channel}`: the whole `shape`, the rows' names in order, what changed (`"move"`, `"trim"` or `"order"`), and the channel's source name |
+| `tickwave-shape` | the reader moves, trims or reorders a channel, or moves a group: `{shape, aligns, channels, change, channel}`: the whole `shape` and `aligns`, the rows' names in order, what changed (`"move"`, `"trim"`, `"order"` or `"align"`), and the channel's name, or `group` and its name for `"align"` |
 | `tickwave-ready` | the view has first drawn: `{height}` |
 | `tickwave-summary` | the view has the footer and has compared the page's title and facts with it: the `summary`. Again if the page slots other text |
 | `tickwave-error` | something failed: `{message, error}`. The view also shows it, and logs it to the console |
@@ -511,5 +513,6 @@ view's Open button reads Close while the view is open, and is as wide either way
 | `registerFile(file, sidecar)` | makes a local `File` a `src`. The sidecar's `.toml` and `.jsonl` files can come with it |
 | `registerLoader(loader)` | reads recordings at the URLs `loader.accepts`, asked before the loaders registered earlier |
 | `recordingInfo(src)` | what a recording holds, from its footer: title, length, channels, size, content id |
+| `previewMerge(inputs)` | several recordings on one time axis, as `tickwave merge` would put them: `inputs` is `[{src, stem}]`, each with its file's name without the extension. Resolves to `{src, merged}`: a `src` a view draws, and the preview, whose `mergedInfo` gives each channel's name (a later recording's clashing name takes its stem, as `stem/name`), `origin(channel)` the recording it comes from, and `factors` the merged ticks in one of each recording's. Every recording starts at tick 0; a view moves them with `aligns`. Rejects where the recordings' tick rates have no common rate below 2^53 ticks a second |
 | `resolveSidecar(src, text, annotations)` | the annotations of a sidecar whose hand-written file is `text`, checked against the recording as `tickwave annotations check` checks them. Its includes are read beside `annotations`, the sidecar's address, or from the files registered with the recording when that is null. Rejects with every problem, one a line |
 | `configure({firstRead, maxDecodedBytes, cacheBytes})` | the size of the first read, from a recording's end, 32 KiB by default; the most the decoder takes from one block, overview block or footer overview, 64 MiB, past which it refuses the recording; and the size of the cache of decoded blocks, 192 MiB |

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>A merge's preview, shaping</title>
+<!--
+  The energy fixture (96 MHz) and middle-gap (1 GHz) on one axis at 12 GHz, each a group.
+  ?plain  show the groups without shaping
+-->
+<script type="module">
+import { previewMerge } from "../../dist/tickwave.js";
+const q = new URLSearchParams(location.search);
+const { src, merged } = await previewMerge([
+  { src: "../../fixtures/energy.tickwave", stem: "energy" },
+  { src: "../../fixtures/middle-gap.tickwave", stem: "middle-gap" },
+]);
+const info = merged.mergedInfo;
+const view = document.createElement("tickwave-view");
+view.id = "v";
+view.setAttribute("src", src);
+view.setAttribute("open", "");
+if (!q.has("plain")) view.setAttribute("shaping", "");
+view.groups = ["energy", "middle-gap"].map((name, input) => ({
+  name,
+  channels: info.channels.filter((_, i) => merged.origin(i).input === input).map((c) => c.name),
+}));
+document.getElementById("here").append(view);
+</script>
+</head>
+<body>
+<div id="here"></div>
+</body>
+</html>

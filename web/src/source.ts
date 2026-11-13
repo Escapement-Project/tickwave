@@ -68,6 +68,9 @@ export interface AnalogChannel {
   /** The smallest and largest value in the recording. */
   readonly min: number;
   readonly max: number;
+  /** A derived channel: the product of these two channels' values, by name. The file stores none
+   * of its samples, and it sits where they do. */
+  readonly product?: readonly [string, string];
 }
 
 /** What a channel moved or trimmed when it was converted states (FORMAT.md, "Moved and trimmed

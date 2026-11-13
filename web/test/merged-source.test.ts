@@ -66,41 +66,37 @@ test("each input's ticks scale by its factor, and a later input's clashing name 
   assert.deepEqual(i.kind === "analog" && i.period, { num: 375, den: 2 });
 });
 
-test("an alignment moves every channel of its input, and the level at a span's start counts its edges", async () => {
+test("the level at a span's start counts the edges of the input tick it starts inside", async () => {
   const s = new MergedSource([await input(analyser, "analyser"), await input(probe, "probe")]);
-  s.setAlign(1, 1_000);
   const info = s.mergedInfo;
   assert.deepEqual(
     info.channels.map((c) => (c.kind === "digital" ? [c.start ?? 0, c.end] : [c.first, c.end])),
     [
       [0, 24_000],
-      [1_000, 38_500],
-      [1_000, 38_500],
+      [0, 37_500],
+      [0, 37_500],
     ],
   );
-  // The probe's CLK starts high, falls at 1,000 + 1,250 and rises at 1,000 + 2,500: low at 3,000.
-  const e = await s.edges(1, 3_000, 5_000);
-  assert.deepEqual([e.level, [...e.ticks]], [0, [3_500, 4_750]]);
-  // From 3,501, inside the input tick whose rise lands at 3,500: the rise is behind, so high.
-  const after = await s.edges(1, 3_501, 5_000);
-  assert.deepEqual([after.level, [...after.ticks]], [1, [4_750]]);
-  // The analyser's channel stays.
-  assert.deepEqual([...(await s.edges(0, 0, 24_000)).ticks], [2_400, 4_800]);
-  // Its overview's buckets: 16 input ticks are 2,000 merged ones, from the alignment.
-  const ov = await s.overview(1, 1_000, 38_500, 2_000);
-  assert.deepEqual([ov?.bucket, ov?.start], [2_000, 1_000]);
-  assert.throws(() => s.setAlign(0, 0.5), /whole number of ticks/);
+  // The probe's CLK starts high, falls at 1,250 and rises at 2,500: low just before 2,500.
+  const e = await s.edges(1, 2_500, 5_000);
+  assert.deepEqual([e.level, [...e.ticks]], [0, [2_500, 3_750]]);
+  // From 2,501, inside the input tick whose rise lands at 2,500: the rise is behind, so high.
+  const after = await s.edges(1, 2_501, 5_000);
+  assert.deepEqual([after.level, [...after.ticks]], [1, [3_750]]);
+  // Its overview's buckets: 16 input ticks are 2,000 merged ones.
+  const ov = await s.overview(1, 0, 37_500, 2_000);
+  assert.deepEqual([ov?.bucket, ov?.start], [2_000, 0]);
 });
 
 test("sources join the list, restated in merged ticks", async () => {
-  const header = (rate: number): SourceHeader => ({ format: "vcd", files: [], timebase: [rate, 1], origin: 0 });
-  const s = new MergedSource([await input(analyser, "analyser", [header(500e6)]), await input(probe, "probe", [header(96e6)])]);
-  s.setAlign(1, -250);
+  const header = (rate: number, origin = 0, align?: number): SourceHeader => ({ format: "vcd", files: [], timebase: [rate, 1], origin, ...(align !== undefined && { align }) });
+  // The probe's input is itself merged at its own rate: its source sits 3 of its ticks in, moved 2.
+  const s = new MergedSource([await input(analyser, "analyser", [header(500e6)]), await input(probe, "probe", [header(96e6, 3, 2)])]);
   assert.deepEqual(
     s.mergedInfo.sources?.map((x) => [x.timebase, x.origin, x.align]),
     [
       [[500e6, 1], 0, undefined],
-      [[96e6, 1], -250, -250],
+      [[96e6, 1], 375, 250],
     ],
   );
 });

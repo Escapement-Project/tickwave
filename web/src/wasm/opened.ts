@@ -340,6 +340,7 @@ export class Opened {
         name: dc.name,
         sourceName: dc.name,
         unit: dc.unit,
+        product: [dc.product[0], dc.product[1]],
         resolution: step,
         ...(dc.significant !== undefined ? { significant: dc.significant } : { significant: undefined }),
         min,

@@ -11,7 +11,7 @@ import { Prober, type Probed } from "../prober.ts";
 import { lowerBound } from "../search.ts";
 import { channelIndices, Plot } from "../render/plot.ts";
 import { clampRange, fitRange, moveRange, scaleLimits, zoomRange, type ScaleLimits, type ValueRange } from "../render/scale.ts";
-import { channelStart, inChannel, isAbort, named, readingStep, sampleAtOrBefore, sampleTick, type Channel } from "../source.ts";
+import { channelStart, inChannel, isAbort, named, readingStep, sampleAtOrBefore, sampleTick } from "../source.ts";
 import { parseTime, toTicks, type TimeSpec } from "../time.ts";
 import { DRAG_PX, TickwaveElement, loadAnnotations, loadRecording, zoomKey, type Loaded } from "./base.ts";
 import { ShapedSource } from "../shaped-source.ts";
@@ -118,13 +118,17 @@ interface Drag {
   moved: boolean;
 }
 
-/** The key a channel's shape goes by: the source's name for it, which a rename leaves alone. */
-const shapeKey = (c: Channel): string => c.sourceName ?? c.name;
-
 /** A channel's shape in the convert flow: the ticks it is moved by, and the part of its own data kept. */
 export interface ChannelShape {
   readonly offset: number;
   readonly keep: { readonly from: number; readonly to: number } | null;
+}
+
+/** Channels that move together, under a head row with the group's name: one input of a merge. */
+export interface ChannelGroup {
+  readonly name: string;
+  /** By channel name. */
+  readonly channels: readonly string[];
 }
 
 export class TickwaveView extends TickwaveElement {
@@ -177,6 +181,16 @@ export class TickwaveView extends TickwaveElement {
   #keep = new Map<number, { from: number; to: number }>();
   /** A shape asked for before the recording arrived, applied once it has. */
   #pendingShape: Record<string, ChannelShape> | null = null;
+  #groups: readonly ChannelGroup[] = [];
+  /** Each grouped channel's group, by channel index. */
+  #groupOf = new Map<number, string>();
+  /** Each group's alignment in ticks, positive later; absent: 0. Every channel of the group moves
+   * by it, on top of its own offset. */
+  #aligns = new Map<string, number>();
+  /** Alignments asked for before the recording arrived, applied once it has. */
+  #pendingAligns: Record<string, number> | null = null;
+  /** One a group while the view shapes: a drag sideways moves the whole group. */
+  #heads = new Map<string, HTMLElement>();
   /** By channel index, so a channel's grip follows its row when the rows change order. */
   #grips = new Map<number, HTMLElement>();
   /** Two a channel: where its kept span starts and ends. */
@@ -333,16 +347,15 @@ export class TickwaveView extends TickwaveElement {
   }
 
   /**
-   * Each channel's shape, by the source's name for it (`source_name`; its name where a recording
-   * states none), which a rename leaves alone: `offset`, the ticks it is moved by, and `keep`, the
-   * part of its own data kept (`{from, to}` in the recording's ticks, before the move), or null for
-   * all of it. Setting it moves and trims the channels it names. The rows' order is `channels`, by
-   * name, which a move up or down rewrites.
+   * Each channel's shape, by its name: `offset`, the ticks it is moved by, and `keep`, the part of
+   * its own data kept (`{from, to}` in the recording's ticks, before the move), or null for all of
+   * it. A group's alignment is not in the offset: see `aligns`. Setting it moves and trims the
+   * channels it names. The rows' order is `channels`, by name, which a move up or down rewrites.
    */
   get shape(): Record<string, ChannelShape> {
     const l = this.#asLoaded;
     if (!l) return {};
-    return Object.fromEntries(l.info.channels.map((c, i) => [shapeKey(c), { offset: this.#shaped?.offsets[i] ?? 0, keep: this.#keep.get(i) ?? null }]));
+    return Object.fromEntries(l.info.channels.map((c, i) => [c.name, { offset: this.#own(i), keep: this.#keep.get(i) ?? null }]));
   }
 
   set shape(v: Record<string, ChannelShape>) {
@@ -352,12 +365,62 @@ export class TickwaveView extends TickwaveElement {
       return;
     }
     for (const [name, s] of Object.entries(v)) {
-      const i = l.info.channels.findIndex((c) => shapeKey(c) === name);
+      const i = l.info.channels.findIndex((c) => c.name === name);
       if (i < 0) throw new RangeError(`no channel ${name}`);
       this.#moveChannel(i, s.offset);
       this.#setKeep(i, s.keep);
     }
     this.#placeShaping();
+  }
+
+  /**
+   * Channels that belong together, such as each input of a merge, each under a head row with its
+   * name. A channel in no group has no head. While the view shapes, a head's grip moves its whole
+   * group in time (`aligns`), and a channel's grip moves its row only among its group's rows.
+   */
+  get groups(): readonly ChannelGroup[] {
+    return this.#groups;
+  }
+
+  set groups(v: readonly ChannelGroup[]) {
+    this.#groups = v.map((g) => ({ name: g.name, channels: [...g.channels] }));
+    this.#regroup();
+    this.#layout(true);
+  }
+
+  /** Each group's alignment, by its name: the ticks every channel in it is moved by, positive later,
+   * on top of each channel's own offset. Setting it moves the groups it names. */
+  get aligns(): Record<string, number> {
+    return Object.fromEntries(this.#groups.map((g) => [g.name, this.#aligns.get(g.name) ?? 0]));
+  }
+
+  set aligns(v: Record<string, number>) {
+    if (!this.#asLoaded || !this.#shaped) {
+      this.#pendingAligns = { ...this.#pendingAligns, ...v };
+      return;
+    }
+    for (const [name, ticks] of Object.entries(v)) {
+      if (!this.#groups.some((g) => g.name === name)) throw new RangeError(`no group ${name}`);
+      this.#moveGroup(name, ticks);
+    }
+    this.#placeShaping();
+  }
+
+  /** Each channel's group from `groups`, by channel index, for the recording shown. */
+  #regroup(): void {
+    const l = this.#asLoaded;
+    this.#groupOf.clear();
+    if (l) {
+      for (const g of this.#groups) {
+        for (const name of g.channels) {
+          const i = l.info.channels.findIndex((c) => c.name === name);
+          if (i < 0) this.fail(new Error(`group ${g.name}: no channel ${name}`));
+          else this.#groupOf.set(i, g.name);
+        }
+      }
+    }
+    this.#plot.groups = new Map(this.#groupOf);
+    for (const name of this.#aligns.keys()) if (!this.#groups.some((g) => g.name === name)) this.#aligns.delete(name);
   }
 
   /** The annotations again, from the text or the file, over the recording already shown. */
@@ -426,6 +489,7 @@ export class TickwaveView extends TickwaveElement {
           this.#reportSidecar(l.annotations.errors);
           this.#windowAttr = null;
           this.#apply();
+          if (this.#shaping) this.#applyPending();
           if (this.#annotationsText !== text) void this.#reannotate();
           return this.#loaded;
         },
@@ -598,12 +662,15 @@ export class TickwaveView extends TickwaveElement {
 
   /** `l`, moved by its offsets while the view shapes it. Another recording starts unmoved. */
   #wrap(l: Loaded): Loaded {
-    if (this.#asLoaded?.source !== l.source) {
+    const fresh = this.#asLoaded?.source !== l.source;
+    if (fresh) {
       this.#shaped = null;
       this.#keep.clear();
+      this.#aligns.clear();
       this.#plot.kept.clear();
     }
     this.#asLoaded = l;
+    if (fresh) this.#regroup();
     if (!this.#shaping) return l;
     this.#shaped ??= new ShapedSource(l.source, l.info);
     return { ...l, source: this.#shaped, info: this.#shaped.shapedInfo };
@@ -617,33 +684,83 @@ export class TickwaveView extends TickwaveElement {
       this.#loaded = this.#wrap(l);
       this.#plot.setRecording(this.#loaded.source, this.#loaded.info, this.#plot.tracks.map((t) => t.index));
       for (const i of l.info.channels.keys()) this.#showKeep(i);
-      if (on && this.#pendingShape) {
-        const shape = this.#pendingShape;
-        this.#pendingShape = null;
-        this.shape = shape;
-      }
+      if (on) this.#applyPending();
     }
     this.#layout(true);
     this.#placeShaping();
   }
 
-  /** Moves channel `i` to `to` ticks from where the recording has it. */
-  #moveChannel(i: number, to: number): void {
+  /** Channel `i`'s group's alignment. */
+  #alignOf(i: number): number {
+    const g = this.#groupOf.get(i);
+    return g === undefined ? 0 : (this.#aligns.get(g) ?? 0);
+  }
+
+  /** Channel `i`'s own offset, without its group's alignment. */
+  #own(i: number): number {
+    return (this.#shaped?.offsets[i] ?? 0) - this.#alignOf(i);
+  }
+
+  /** Whether channel `i` is derived from others: it has no grip or trim handles, and moves and
+   * trims with its first operand, whose samples it sits on. */
+  #derived(i: number): boolean {
+    const c = this.#asLoaded?.info.channels[i];
+    return c?.kind === "analog" && c.product !== undefined;
+  }
+
+  /** The derived channels whose first operand is channel `i`. */
+  #followers(i: number): number[] {
+    const channels = this.#asLoaded?.info.channels ?? [];
+    const name = channels[i]?.name;
+    return channels.flatMap((c, j) => (c.kind === "analog" && c.product?.[0] === name ? [j] : []));
+  }
+
+  /** Alignments and shapes asked for before the recording was here to shape. */
+  #applyPending(): void {
+    const aligns = this.#pendingAligns;
+    const shape = this.#pendingShape;
+    this.#pendingAligns = null;
+    this.#pendingShape = null;
+    try {
+      if (aligns) this.aligns = aligns;
+      if (shape) this.shape = shape;
+    } catch (e) {
+      this.fail(e);
+    }
+  }
+
+  /** Moves channel `i`, and the channels derived from it, by `by` ticks more, wherever they are. */
+  #shift(i: number, by: number): void {
     const s = this.#shaped;
     const l = this.#loaded;
-    if (!s || !l || !Number.isFinite(to)) return;
-    const by = Math.round(to) - s.offsets[i];
+    if (!s || !l || by === 0) return;
+    for (const j of [i, ...this.#followers(i)]) {
+      s.setOffset(j, s.offsets[j] + by);
+      this.#loaded = { ...this.#loaded!, info: s.shapedInfo };
+      this.#plot.moveChannel(s.shapedInfo, j, by);
+      this.#showKeep(j);
+    }
+  }
+
+  /** Moves channel `i` to `to` ticks of its own from where the recording has it. */
+  #moveChannel(i: number, to: number): void {
+    if (!this.#shaped || !Number.isFinite(to) || this.#derived(i)) return;
+    this.#shift(i, Math.round(to) - this.#own(i));
+  }
+
+  /** Aligns group `name` at `to` ticks from where the recording has it: every channel in it moves. */
+  #moveGroup(name: string, to: number): void {
+    if (!this.#shaped || !Number.isFinite(to)) return;
+    const by = Math.round(to) - (this.#aligns.get(name) ?? 0);
     if (by === 0) return;
-    s.setOffset(i, s.offsets[i] + by);
-    this.#loaded = { ...l, info: s.shapedInfo };
-    this.#plot.moveChannel(s.shapedInfo, i, by);
-    this.#showKeep(i);
+    this.#aligns.set(name, Math.round(to));
+    for (const [i, g] of this.#groupOf) if (g === name && !this.#derived(i)) this.#shift(i, by);
   }
 
   /** Keeps `keep` of channel `i`'s own data, within it and at least a tick long; null keeps all. */
   #setKeep(i: number, keep: { from: number; to: number } | null): void {
     const c = this.#asLoaded?.info.channels[i];
-    if (!c) return;
+    if (!c || this.#derived(i)) return;
     const lo = channelStart(c);
     let kept = keep;
     if (kept) {
@@ -651,9 +768,11 @@ export class TickwaveView extends TickwaveElement {
       const to = Math.max(Math.min(Math.round(kept.to), c.end), from + 1);
       kept = from <= lo && to >= c.end ? null : { from, to };
     }
-    if (kept) this.#keep.set(i, kept);
-    else this.#keep.delete(i);
-    this.#showKeep(i);
+    for (const j of [i, ...this.#followers(i)]) {
+      if (kept) this.#keep.set(j, kept);
+      else this.#keep.delete(j);
+      this.#showKeep(j);
+    }
   }
 
   /** Channel `i`'s kept span where the plot draws it: moved with the channel. */
@@ -665,22 +784,34 @@ export class TickwaveView extends TickwaveElement {
     this.#plot.invalidate();
   }
 
-  /** Puts channel `channel`'s row at `to` among the rows, by rewriting `channels`. */
+  /** Puts channel `channel`'s row at `to` among the rows, by rewriting `channels`; a grouped channel
+   * stays among its group's rows. */
   #reorder(channel: number, to: number): void {
     const l = this.#loaded;
     if (!l) return;
     const order = this.#plot.tracks.map((t) => t.index).filter((i) => i !== channel);
-    order.splice(Math.max(0, Math.min(order.length, to)), 0, channel);
+    const g = this.#groupOf.get(channel);
+    let [lo, hi] = [0, order.length];
+    if (g !== undefined) {
+      const at = this.#plot.tracks.findIndex((t) => t.index === channel);
+      const mates = order.flatMap((i, k) => (this.#groupOf.get(i) === g ? [k] : []));
+      [lo, hi] = mates.length > 0 ? [mates[0], mates[mates.length - 1] + 1] : [at, at];
+    }
+    order.splice(Math.max(lo, Math.min(hi, to)), 0, channel);
     this.setAttribute("channels", order.map((i) => l.info.channels[i].name).join(" "));
   }
 
-  /** Says the reader moved, trimmed or reordered channel `i`: the whole shape, and what changed. */
-  #shapeChanged(change: "move" | "trim" | "order", i: number): void {
+  /** Says the reader moved, trimmed or reordered channel `i`, or aligned group `group`: the whole
+   * shape, the alignments, and what changed. */
+  #shapeChanged(change: "move" | "trim" | "order", i: number): void;
+  #shapeChanged(change: "align", group: string): void;
+  #shapeChanged(change: "move" | "trim" | "order" | "align", which: number | string): void {
     const l = this.#asLoaded;
     if (!l) return;
     // A move up or down has rewritten `channels`, which the rows take up at the next update.
     const order = parseChannels(this.getAttribute("channels")) ?? this.#plot.tracks.map((t) => l.info.channels[t.index].name);
-    this.emit("tickwave-shape", { shape: this.shape, channels: order, change, channel: shapeKey(l.info.channels[i]) });
+    const what = typeof which === "string" ? { group: which } : { channel: l.info.channels[which].name };
+    this.emit("tickwave-shape", { shape: this.shape, aligns: this.aligns, channels: order, change, ...what });
   }
 
   /**
@@ -689,28 +820,40 @@ export class TickwaveView extends TickwaveElement {
    * hand have none to snap to.
    */
   #snapMove(i: number, to: number): number {
-    const s = this.#shaped;
-    const moved = this.#plot.tracks.find((t) => t.index === i);
-    if (!s || moved?.tile?.kind !== "edges") return to;
-    const by = to - s.offsets[i];
+    return to + (this.#snap(new Set([i]), to - this.#own(i)) ?? 0);
+  }
+
+  /** Group `name`'s alignment `to`, or the one that puts an edge of it shown nearest another
+   * group's shown edge, or an ungrouped row's, on that edge. */
+  #snapGroup(name: string, to: number): number {
+    const mine = new Set([...this.#groupOf].flatMap(([i, g]) => (g === name ? [i] : [])));
+    return to + (this.#snap(mine, to - (this.#aligns.get(name) ?? 0)) ?? 0);
+  }
+
+  /** The least further move that lands an edge shown of the rows `moving`, moved `by` ticks more
+   * than now, on an edge shown of another row within a few pixels; null where none is that near. */
+  #snap(moving: ReadonlySet<number>, by: number): number | null {
     const { start, end } = this.#plot.view;
     const limit = SNAP_PX * this.#plot.perPx;
     let best: number | null = null;
-    for (const t of this.#plot.tracks) {
-      if (t.index === i || t.tile?.kind !== "edges") continue;
-      const theirs = t.tile.data.ticks;
-      for (const e of moved.tile.data.ticks) {
-        const at = e + by;
-        if (at < start || at > end) continue;
-        const k = lowerBound(theirs, at);
-        for (const j of [k - 1, k]) {
-          if (j < 0 || j >= theirs.length) continue;
-          const d = theirs[j] - at;
-          if (Math.abs(d) <= limit && (best === null || Math.abs(d) < Math.abs(best))) best = d;
+    for (const m of this.#plot.tracks) {
+      if (!moving.has(m.index) || m.tile?.kind !== "edges") continue;
+      for (const t of this.#plot.tracks) {
+        if (moving.has(t.index) || t.tile?.kind !== "edges") continue;
+        const theirs = t.tile.data.ticks;
+        for (const e of m.tile.data.ticks) {
+          const at = e + by;
+          if (at < start || at > end) continue;
+          const k = lowerBound(theirs, at);
+          for (const j of [k - 1, k]) {
+            if (j < 0 || j >= theirs.length) continue;
+            const d = theirs[j] - at;
+            if (Math.abs(d) <= limit && (best === null || Math.abs(d) < Math.abs(best))) best = d;
+          }
         }
       }
     }
-    return best === null ? to : to + best;
+    return best;
   }
 
   /** How far a key moves a grip or a trim: about a pixel, or ten with Shift. */
@@ -721,7 +864,7 @@ export class TickwaveView extends TickwaveElement {
   #placeShaping(): void {
     const l = this.#plot.layout;
     const rows = this.#shaping && l ? l.rows : [];
-    const shown = new Set(rows.map((r) => r.track.index));
+    const shown = new Set(rows.map((r) => r.track.index).filter((i) => !this.#derived(i)));
     for (const [i, g] of this.#grips) {
       if (shown.has(i)) continue;
       g.remove();
@@ -734,6 +877,7 @@ export class TickwaveView extends TickwaveElement {
     }
     for (const r of rows) {
       const i = r.track.index;
+      if (this.#derived(i)) continue;
       let g = this.#grips.get(i);
       if (!g) {
         g = this.#grip(i);
@@ -747,13 +891,40 @@ export class TickwaveView extends TickwaveElement {
       }
       g.style.top = `${r.top}px`;
       g.style.height = `${r.height}px`;
-      const d = this.#shaped?.offsets[i] ?? 0;
+      const d = this.#own(i);
       const tb = this.#loaded!.info.timebase;
       const where = d === 0 ? "where it was recorded" : `${formatInterval(Math.abs(d), tb, readingStep(this.#loaded!.info, [i]))} ${d > 0 ? "later" : "earlier"} than recorded`;
       g.setAttribute("aria-label", `Move ${r.track.channel.name}, now ${where}. Left and right move it in time, with Shift further; up and down move its row.`);
     }
-    // The keys go from grip to grip, and handle to handle, in the rows' order.
-    const order = rows.flatMap((r) => [this.#grips.get(r.track.index)!, ...this.#trims.get(r.track.index)!]);
+    // A group's grip on its head band, the first where the group heads more than one.
+    const heads = this.#shaping && l ? l.heads.filter((h, k) => l.heads.findIndex((o) => o.group === h.group) === k) : [];
+    for (const [name, g] of this.#heads) {
+      if (heads.some((h) => h.group === name)) continue;
+      g.remove();
+      this.#heads.delete(name);
+    }
+    for (const h of heads) {
+      let g = this.#heads.get(h.group);
+      if (!g) {
+        g = this.#headGrip(h.group);
+        this.#heads.set(h.group, g);
+        this.#plotBox.append(g);
+      }
+      g.style.top = `${h.top}px`;
+      g.style.height = `${h.height}px`;
+      const d = this.#aligns.get(h.group) ?? 0;
+      const info = this.#loaded!.info;
+      const mine = [...this.#groupOf].flatMap(([i, n]) => (n === h.group ? [i] : []));
+      const where = d === 0 ? "where it was recorded" : `${formatInterval(Math.abs(d), info.timebase, readingStep(info, mine))} ${d > 0 ? "later" : "earlier"} than recorded`;
+      g.setAttribute("aria-label", `Move ${h.group}, now ${where}. Left and right move all its channels in time, with Shift further.`);
+    }
+    // The keys go from grip to grip, and handle to handle, in the rows' order, a group's own grip
+    // before its rows'.
+    const order = rows.flatMap((r) => {
+      const head = heads.find((h) => h.index === r.track.index);
+      const own = this.#grips.get(r.track.index);
+      return [...(head ? [this.#heads.get(head.group)!] : []), ...(own ? [own, ...this.#trims.get(r.track.index)!] : [])];
+    });
     const placed = [...this.#plotBox.querySelectorAll(".grip, .trim")];
     if (order.some((el, k) => placed[k] !== el)) {
       const focused = this.root.activeElement as HTMLElement | null;
@@ -797,7 +968,7 @@ export class TickwaveView extends TickwaveElement {
     g.addEventListener("pointerdown", (e) => {
       e.stopPropagation();
       if (e.button !== 0 || !this.#shaped) return;
-      drag = { id: e.pointerId, x: e.clientX, offset: this.#shaped.offsets[i] };
+      drag = { id: e.pointerId, x: e.clientX, offset: this.#own(i) };
       g.setPointerCapture(e.pointerId);
       g.classList.add("dragging");
       this.#prober.hide();
@@ -834,7 +1005,7 @@ export class TickwaveView extends TickwaveElement {
       const at = this.#plot.tracks.findIndex((t) => t.index === i);
       let change: "move" | "order";
       if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
-        this.#moveChannel(i, s.offsets[i] + (e.key === "ArrowLeft" ? -1 : 1) * this.#keyStep(e.shiftKey));
+        this.#moveChannel(i, this.#own(i) + (e.key === "ArrowLeft" ? -1 : 1) * this.#keyStep(e.shiftKey));
         change = "move";
       } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
         this.#reorder(i, at + (e.key === "ArrowUp" ? -1 : 1));
@@ -844,6 +1015,53 @@ export class TickwaveView extends TickwaveElement {
       e.stopPropagation();
       this.#placeShaping();
       this.#shapeChanged(change, i);
+    });
+    return g;
+  }
+
+  /** Group `name`'s grip, on its head band: a drag sideways moves every channel in the group in
+   * time, snapping an edge of it onto another group's. */
+  #headGrip(name: string): HTMLElement {
+    const g = Object.assign(document.createElement("div"), { className: "grip head", tabIndex: 0 });
+    g.setAttribute("part", "grip head-grip");
+    g.setAttribute("role", "group");
+    g.setAttribute("aria-roledescription", "move grip");
+    let drag: { id: number; x: number; align: number } | null = null;
+    g.addEventListener("pointerdown", (e) => {
+      e.stopPropagation();
+      if (e.button !== 0 || !this.#shaped) return;
+      drag = { id: e.pointerId, x: e.clientX, align: this.#aligns.get(name) ?? 0 };
+      g.setPointerCapture(e.pointerId);
+      g.classList.add("dragging");
+      this.#prober.hide();
+    });
+    g.addEventListener("pointermove", (e) => {
+      e.stopPropagation();
+      if (drag?.id !== e.pointerId) return;
+      const was = this.#aligns.get(name) ?? 0;
+      const to = Math.round(drag.align + (e.clientX - drag.x) * this.#plot.perPx);
+      // Alt moves it freely; else an edge of it lands on another group's edge within a few pixels.
+      this.#moveGroup(name, e.altKey ? to : this.#snapGroup(name, to));
+      if ((this.#aligns.get(name) ?? 0) !== was) {
+        this.#placeShaping();
+        this.#shapeChanged("align", name);
+      }
+    });
+    const end = (e: PointerEvent) => {
+      e.stopPropagation();
+      if (drag?.id !== e.pointerId) return;
+      drag = null;
+      g.classList.remove("dragging");
+    };
+    g.addEventListener("pointerup", end);
+    g.addEventListener("pointercancel", end);
+    g.addEventListener("keydown", (e) => {
+      if (!this.#shaped || (e.key !== "ArrowLeft" && e.key !== "ArrowRight")) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.#moveGroup(name, (this.#aligns.get(name) ?? 0) + (e.key === "ArrowLeft" ? -1 : 1) * this.#keyStep(e.shiftKey));
+      this.#placeShaping();
+      this.#shapeChanged("align", name);
     });
     return g;
   }
