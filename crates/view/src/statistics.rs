@@ -9,12 +9,13 @@ use std::ops::Range;
 use std::sync::atomic::AtomicBool;
 
 use escapement_tickwave_format::header::Exact;
-use escapement_tickwave_format::model::{Ratio, sample_support};
+use escapement_tickwave_format::model::{Break, Ratio, sample_support};
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 
 use crate::read::check;
 use crate::recording::{Error, Place, Recording};
+use crate::runs::Runs;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Statistics {
@@ -108,6 +109,100 @@ impl ChannelStatistics {
 /// `n / d` in f64: each converted, then divided.
 fn ratio(n: &BigInt, d: &BigInt) -> f64 {
     n.to_f64().unwrap_or(f64::NAN) / d.to_f64().unwrap_or(f64::NAN)
+}
+
+/// Each sample's time, as `model::sample_support` gives it, for samples taken in index order:
+/// the run a sample falls in is found once a run, and a sample's place is the one worked out for
+/// the end of the sample before it.
+struct Supports<'a> {
+    first: i64,
+    /// The period's terms.
+    num: u128,
+    den: u128,
+    breaks: &'a [Break],
+    length: i64,
+    /// The run of the last sample asked for.
+    run: Run,
+    /// The sample after the last one asked for, and its place on the run's grid, uncapped.
+    ahead: Option<(u64, i128)>,
+}
+
+/// A run's samples `start..end`, from `tick`, and where its last sample's time ends when a run
+/// follows it: the next run's tick or the length, whichever comes first.
+#[derive(Clone, Copy)]
+struct Run {
+    start: u64,
+    end: u64,
+    tick: i64,
+    cut: Option<i64>,
+}
+
+impl<'a> Supports<'a> {
+    fn new(runs: &Runs<'a>, length: i64) -> Self {
+        Self {
+            first: runs.first,
+            num: u128::from(runs.period.num()),
+            den: u128::from(runs.period.den()),
+            breaks: runs.breaks,
+            length,
+            run: Run {
+                start: 0,
+                end: 0,
+                tick: 0,
+                cut: None,
+            },
+            ahead: None,
+        }
+    }
+
+    fn run_of(&self, i: u64) -> Run {
+        let k = self.breaks.partition_point(|b| b.index <= i);
+        let (start, tick) = match k.checked_sub(1).and_then(|p| self.breaks.get(p)) {
+            None => (0, self.first),
+            Some(b) => (b.index, b.tick),
+        };
+        let next = self.breaks.get(k);
+        Run {
+            start,
+            end: next.map_or(u64::MAX, |b| b.index),
+            tick,
+            cut: next.map(|b| b.tick.min(self.length)),
+        }
+    }
+
+    /// Place `steps` samples into run `r`, uncapped.
+    fn place(&self, r: &Run, steps: u64) -> i128 {
+        let n = u128::from(steps) * self.num;
+        let ticks = match self.den {
+            1 => n,
+            d => n / d,
+        };
+        i128::from(r.tick).saturating_add(i128::try_from(ticks).unwrap_or(i128::MAX))
+    }
+
+    /// The time of sample `i`, one the channel has.
+    fn of(&mut self, i: u64) -> Range<i64> {
+        if !(self.run.start..self.run.end).contains(&i) {
+            self.run = self.run_of(i);
+            self.ahead = None;
+        }
+        let r = self.run;
+        // Breaks come in index order, a file's checked and a writer's as it makes them, which puts
+        // the run's start at or before `i`.
+        let steps = i.saturating_sub(r.start);
+        let from = match self.ahead {
+            Some((j, p)) if j == i => p,
+            _ => self.place(&r, steps),
+        };
+        let to = self.place(&r, steps + 1);
+        self.ahead = Some((i + 1, to));
+        let cap = match r.cut {
+            Some(cut) if i + 1 == r.end => cut,
+            _ => self.length,
+        };
+        let length = i128::from(self.length);
+        from.min(length) as i64..to.min(i128::from(cap)) as i64
+    }
 }
 
 /// Σ value × ticks so far: of the codes, exactly, for an `int` channel or an integer product, or
@@ -227,13 +322,10 @@ impl Recording {
         };
         let (a, b) = (interval.start.max(0), interval.end.min(self.length));
         if b > a && *count > 0 {
-            let support = |i: u64| {
-                sample_support(runs.first, runs.period, runs.breaks, *count, self.length, i)
-                    .expect("a sample")
-            };
+            let mut supports = Supports::new(&runs, self.length);
             // The first sample whose time reaches past `a`, and the first at or past `b`.
             let j = self.index_at(c, a)?;
-            let lo = if j > 0 && support(j - 1).end > a {
+            let lo = if j > 0 && supports.of(j - 1).end > a {
                 j - 1
             } else {
                 j
@@ -246,9 +338,9 @@ impl Recording {
             };
             // Every sample outside the buckets taken, one by one: before the first, between
             // each two, and after the last.
-            let one_by_one = |from: u64, to: u64, t: &mut Tally| {
+            let mut one_by_one = |from: u64, to: u64, t: &mut Tally| {
                 self.each_sample(c, from, to, cancel, |i, v, code| {
-                    let s = support(i);
+                    let s = supports.of(i);
                     t.sample(v, code, s.end.min(b) - s.start.max(a))
                 })
             };
@@ -376,5 +468,100 @@ impl Recording {
         }
         taken.sort_by_key(|r| r.start);
         Ok(taken)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ops::Range;
+
+    use escapement_tickwave_format::model::{Break, Ratio, sample_support};
+
+    use super::Supports;
+    use crate::runs::Runs;
+
+    fn brk(index: u64, tick: i64) -> Break {
+        Break {
+            index,
+            tick,
+            lost: 0,
+        }
+    }
+
+    /// Every 2 ticks from 0, samples 0 to 4; the next run starts at tick 9, inside sample 4's
+    /// period; samples 5 to 7 from there; the length cuts sample 7 at 14. Worked by hand.
+    #[test]
+    fn a_runs_last_sample_ends_at_the_next_run_and_the_last_at_the_length() {
+        let breaks = [brk(5, 9)];
+        let runs = Runs {
+            first: 0,
+            period: Ratio::integer(2).unwrap(),
+            count: 8,
+            breaks: &breaks,
+        };
+        let mut s = Supports::new(&runs, 14);
+        let got: Vec<Range<i64>> = (0..8).map(|i| s.of(i)).collect();
+        assert_eq!(got, [0..2, 2..4, 4..6, 6..8, 8..9, 9..11, 11..13, 13..14]);
+    }
+
+    /// Against `sample_support` for every sample of each channel: in order from each sample, in
+    /// steps of three, and backwards.
+    #[test]
+    fn each_samples_time_is_sample_supports() {
+        let cases = [
+            // A whole-tick period, the length inside the last sample's.
+            (0, Ratio::integer(960).unwrap(), 1000, vec![], 959_500),
+            // tests/runs.rs's channel: two lost at a break.
+            (
+                0,
+                Ratio::new(3, 2).unwrap(),
+                10,
+                vec![Break {
+                    index: 5,
+                    tick: 30,
+                    lost: 2,
+                }],
+                40,
+            ),
+            // A run cut short by the next, a run of one sample cut short by the next, and a last
+            // sample of no time at the length.
+            (
+                5,
+                Ratio::new(7, 3).unwrap(),
+                15,
+                vec![brk(4, 13), brk(9, 40), brk(10, 41)],
+                50,
+            ),
+            // A break on the grid's next place.
+            (0, Ratio::integer(2).unwrap(), 6, vec![brk(3, 6)], 12),
+            // Places past an i64, held to the length.
+            (
+                i64::MAX - 10,
+                Ratio::integer(4).unwrap(),
+                5,
+                vec![],
+                i64::MAX,
+            ),
+        ];
+        for (first, period, count, breaks, length) in cases {
+            let runs = Runs {
+                first,
+                period,
+                count,
+                breaks: &breaks,
+            };
+            let want = |i| sample_support(first, period, &breaks, count, length, i).unwrap();
+            let at = format!("{first} every {period:?}, {breaks:?}");
+            for from in 0..count {
+                let mut s = Supports::new(&runs, length);
+                for i in from..count {
+                    assert_eq!(s.of(i), want(i), "{at}: sample {i} from {from}");
+                }
+            }
+            let mut s = Supports::new(&runs, length);
+            for i in (0..count).step_by(3).chain((0..count).rev()) {
+                assert_eq!(s.of(i), want(i), "{at}: sample {i}, stepping");
+            }
+        }
     }
 }

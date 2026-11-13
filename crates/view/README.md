@@ -30,7 +30,9 @@ across a break, and a column that touches a span the instrument lost is pale.
 
 `Recording::statistics` counts each sample whose time covers part of the interval, one that starts
 before it included, and weights its value by the ticks it covers there, exactly for integer codes.
-For a period of whole ticks it takes whole overview buckets where it can.
+For a period of whole ticks it takes whole overview buckets where it can. While a recording is
+being written, its overview reaches no further than the end of the last block the writer closed,
+so the samples after that are counted one by one.
 
 ## Modules
 
