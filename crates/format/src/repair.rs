@@ -9,7 +9,8 @@ use crate::decode::{
 };
 use crate::hash::ChannelHasher;
 use crate::header::{
-    BlockRow, ChannelHeader, ChannelKind, Declaration, DeclaredKind, Header, LEVEL_BIT, OverviewRow,
+    BlockRow, ChannelHeader, ChannelKind, Declaration, DeclaredKind, Header, LEVEL_BIT,
+    OverviewRow, Words,
 };
 use crate::model::{Break, Gap};
 use crate::overview::{self, Builder, Settled};
@@ -104,6 +105,7 @@ pub struct Repairer {
     builder: Option<Builder>,
     channels: Vec<Channel>,
     rows: Vec<BlockRow>,
+    words: Words,
     settled: Vec<Settled>,
     /// The overview blocks the file holds: their frames' offsets and bytes.
     present: HashMap<(u8, u64), (u64, Vec<u8>)>,
@@ -125,6 +127,7 @@ impl Repairer {
             builder: None,
             channels: Vec::new(),
             rows: Vec::new(),
+            words: Words::default(),
             settled: Vec::new(),
             present: HashMap::new(),
             annotations: Vec::new(),
@@ -176,6 +179,7 @@ impl Repairer {
                         },
                     })
                     .collect();
+                self.words = Words::new(d.channels.len());
                 self.declaration = Some(*d);
             }
             Event::Gap { channel, gap } => {
@@ -244,8 +248,8 @@ impl Repairer {
                     offset: block.frame_offset,
                     length: block.frame_len,
                     decoded_length: block.head.decoded_length,
-                    channels: block.head.words,
                 });
+                self.words.push(&block.head.words);
             }
             Event::OverviewBlock {
                 shift,
@@ -311,8 +315,8 @@ impl Repairer {
                 offset: keep + (record::PAYLOAD_AT + BlockHead::len(head.words.len())) as u64,
                 length: frame.len() as u32,
                 decoded_length: raw.len() as u32,
-                channels: head.words,
             });
+            self.words.push(&head.words);
         }
         let (done, last) = builder
             .finish(length)
@@ -442,7 +446,7 @@ impl Repairer {
         overview::write(&done.head, &mut overview_raw);
         let overview_frame = compress(&overview_raw, self.level).map_err(WriteError::from)?;
         let rows: Vec<OverviewRow> = overview_rows.into_iter().map(|(_, _, r)| r).collect();
-        let footer = record::footer_bytes(&header, &self.rows, &rows, &overview_frame)
+        let footer = record::footer_bytes(&header, &self.rows, &self.words, &rows, &overview_frame)
             .map_err(WriteError::FooterTooLarge)?;
         let at = keep + tail.len() as u64;
         let mut end = Vec::new();

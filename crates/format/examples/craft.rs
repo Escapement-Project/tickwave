@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use escapement_tickwave_format::decode::Footer;
 use escapement_tickwave_format::header::{
     BlockRow, Declaration, DeclaredChannel, DeclaredKind, Header, LEVEL_BIT, OverviewRow,
-    SourceFormat, SourceHeader,
+    SourceFormat, SourceHeader, Words,
 };
 use escapement_tickwave_format::model::Ratio;
 use escapement_tickwave_format::record::{self, BlockHead, Kind};
@@ -65,15 +65,24 @@ fn with_footer(file: &[u8], footer: &Footer, payload: &[u8]) -> Vec<u8> {
 /// `file` with its footer written again after `edit` changes what it says.
 fn refooted(
     file: &[u8],
-    edit: impl FnOnce(&mut Header, &mut Vec<BlockRow>, &mut Vec<OverviewRow>),
+    edit: impl FnOnce(&mut Header, &mut Vec<BlockRow>, &mut Words),
 ) -> Vec<u8> {
     let footer = Footer::parse_file(file).unwrap();
-    let (mut header, mut rows) = (footer.header.clone(), footer.rows.clone());
-    let mut overview_rows: Vec<OverviewRow> =
-        footer.overview_rows.iter().flatten().copied().collect();
-    edit(&mut header, &mut rows, &mut overview_rows);
-    let payload =
-        record::footer_bytes(&header, &rows, &overview_rows, &footer.overview_frame).unwrap();
+    let (mut header, mut rows, mut words) = (
+        footer.header.clone(),
+        footer.rows.clone(),
+        footer.words.clone(),
+    );
+    let overview_rows: Vec<OverviewRow> = footer.overview_rows.iter().flatten().copied().collect();
+    edit(&mut header, &mut rows, &mut words);
+    let payload = record::footer_bytes(
+        &header,
+        &rows,
+        &words,
+        &overview_rows,
+        &footer.overview_frame,
+    )
+    .unwrap();
     with_footer(file, &footer, &payload)
 }
 
@@ -101,6 +110,7 @@ fn main() {
     let mut payload = record::footer_bytes(
         &footer.header,
         &footer.rows,
+        &footer.words,
         &footer
             .overview_rows
             .iter()
@@ -128,8 +138,9 @@ fn main() {
     // 2^28 + 1 edges in a block whose section holds three.
     write(
         "huge-count",
-        refooted(&file, |h, rows, _| {
-            rows[0].channels[0] = ((1 << 28) + 1) | (rows[0].channels[0] & LEVEL_BIT);
+        refooted(&file, |h, _, words| {
+            let word = &mut words.of_mut(0)[0];
+            *word = ((1 << 28) + 1) | (*word & LEVEL_BIT);
             if let escapement_tickwave_format::header::ChannelKind::Digital { edges, .. } =
                 &mut h.channels[0].data
             {
@@ -182,9 +193,11 @@ fn main() {
         offset: (record_at + record::PAYLOAD_AT + head_len) as u64,
         length: crafted.len() as u32,
         decoded_length: raw.len() as u32,
-        channels: vec![row.channels[0] & LEVEL_BIT, 0],
     }];
-    let payload = record::footer_bytes(&header, &rows, &[], &footer.overview_frame).unwrap();
+    let mut words = Words::new(2);
+    words.push(&[footer.words.of(0)[0] & LEVEL_BIT, 0]);
+    let payload =
+        record::footer_bytes(&header, &rows, &words, &[], &footer.overview_frame).unwrap();
     let at = out.len() as u64;
     let mut tail = Vec::new();
     record::write_footer(&mut tail, at, &payload);

@@ -915,16 +915,15 @@ pub enum RateOrigin {
     Given,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A block's row in the index: where it starts, and where its frame is. Its channels' words are
+/// in `Words`, apart, so an index of many blocks holds them in one allocation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BlockRow {
     pub start: i64,
     /// Where the block's zstd frame starts in the file, inside its record.
     pub offset: u64,
     pub length: u32,
     pub decoded_length: u32,
-    /// A word a channel: digital, the edge count with the level at the block's start in
-    /// `LEVEL_BIT`; analog, the sample count.
-    pub channels: Vec<u32>,
 }
 
 impl BlockRow {
@@ -932,26 +931,75 @@ impl BlockRow {
         ROW_FIXED + 4 * channels
     }
 
-    pub fn write(&self, out: &mut Vec<u8>) {
+    /// The row as the index holds it, with the block's `words`.
+    pub fn write(&self, words: &[u32], out: &mut Vec<u8>) {
         out.extend_from_slice(&self.start.to_le_bytes());
         out.extend_from_slice(&self.offset.to_le_bytes());
         out.extend_from_slice(&self.length.to_le_bytes());
         out.extend_from_slice(&self.decoded_length.to_le_bytes());
-        for word in &self.channels {
+        for word in words {
             out.extend_from_slice(&word.to_le_bytes());
         }
     }
 
-    /// `bytes` is exactly one row.
-    pub fn parse(bytes: &[u8], channels: usize) -> Self {
+    /// `bytes` is exactly one row; its words go on the end of `words`.
+    pub fn parse(bytes: &[u8], words: &mut Words) -> Self {
         let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        let (channel_words, _) = bytes[ROW_FIXED..].as_chunks::<4>();
+        words
+            .words
+            .extend(channel_words.iter().map(|w| u32::from_le_bytes(*w)));
         Self {
             start: i64::from_le_bytes(bytes[0..8].try_into().unwrap()),
             offset: u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
             length: u32_at(16),
             decoded_length: u32_at(20),
-            channels: (0..channels).map(|c| u32_at(ROW_FIXED + 4 * c)).collect(),
         }
+    }
+}
+
+/// Every block's channel words, in block order: a word a channel, digital the edge count with
+/// the level at the block's start in `LEVEL_BIT`, analog the sample count.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Words {
+    channels: usize,
+    words: Vec<u32>,
+}
+
+impl Words {
+    pub fn new(channels: usize) -> Self {
+        Self {
+            channels,
+            words: Vec::new(),
+        }
+    }
+
+    pub fn with_capacity(channels: usize, blocks: usize) -> Self {
+        Self {
+            channels,
+            words: Vec::with_capacity(channels * blocks),
+        }
+    }
+
+    /// Block `block`'s words.
+    #[inline]
+    pub fn of(&self, block: usize) -> &[u32] {
+        &self.words[block * self.channels..][..self.channels]
+    }
+
+    pub fn of_mut(&mut self, block: usize) -> &mut [u32] {
+        &mut self.words[block * self.channels..][..self.channels]
+    }
+
+    /// The next block's words: one a channel.
+    pub fn push(&mut self, words: &[u32]) {
+        assert_eq!(words.len(), self.channels, "one word a channel");
+        self.words.extend_from_slice(words);
+    }
+
+    /// The blocks it holds the words of.
+    pub fn blocks(&self) -> usize {
+        self.words.len().checked_div(self.channels).unwrap_or(0)
     }
 }
 

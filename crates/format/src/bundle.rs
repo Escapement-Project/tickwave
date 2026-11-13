@@ -26,6 +26,7 @@ pub fn bundled_tail(
     let bytes = record::footer_bytes(
         &header,
         &footer.rows,
+        &footer.words,
         &overview_rows,
         &footer.overview_frame,
     )

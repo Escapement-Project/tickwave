@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::header::{BlockRow, Header, OverviewRow, Preamble, Trailer};
+use crate::header::{BlockRow, Header, OverviewRow, Preamble, Trailer, Words};
 use crate::model::{Break, Gap};
 
 /// A record's bytes besides its payload: the kind, the length and the check.
@@ -251,6 +251,7 @@ pub const FOOTER_HEAD_LEN: usize = 8;
 pub fn footer_bytes(
     header: &Header,
     rows: &[BlockRow],
+    words: &Words,
     overview_rows: &[OverviewRow],
     overview_frame: &[u8],
 ) -> Result<Vec<u8>, usize> {
@@ -265,8 +266,8 @@ pub fn footer_bytes(
     out.extend_from_slice(&(json.len() as u32).to_le_bytes());
     out.extend_from_slice(&(index_len as u32).to_le_bytes());
     out.extend_from_slice(&json);
-    for row in rows {
-        row.write(&mut out);
+    for (i, row) in rows.iter().enumerate() {
+        row.write(words.of(i), &mut out);
     }
     for row in overview_rows {
         row.write(&mut out);

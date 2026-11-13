@@ -65,6 +65,25 @@ impl<T: Clone> Chunks<T> {
             .chain(self.tail.iter())
     }
 
+    /// The elements from `start` on. It steps over whole chunks to get there, so a reader that
+    /// takes only what was added since it last looked does work for what's new alone.
+    pub fn iter_from(&self, start: usize) -> impl Iterator<Item = &T> + '_ {
+        let chunk = (start / CHUNK).min(self.sealed.len());
+        let within = if chunk < self.sealed.len() {
+            start % CHUNK
+        } else {
+            0
+        };
+        let tail = start
+            .saturating_sub(self.sealed.len() * CHUNK)
+            .min(self.tail.len());
+        self.sealed[chunk..]
+            .iter()
+            .flat_map(|c| c.iter())
+            .skip(within)
+            .chain(self.tail[tail..].iter())
+    }
+
     pub fn to_vec(&self) -> Vec<T> {
         self.iter().cloned().collect()
     }
@@ -92,6 +111,12 @@ mod tests {
             (Some(&1023), Some(&1024), Some(&3999))
         );
         assert_eq!(list.get(4000), None);
+        for start in [0, 1, 1023, 1024, 1025, 3071, 3072, 3999, 4000, 5000] {
+            assert!(
+                list.iter_from(start).copied().eq(start.min(4000)..4000),
+                "from {start}"
+            );
+        }
         assert_eq!(list.last(), Some(&3999));
         // The sealed chunks are the same allocations in both.
         assert!(Arc::ptr_eq(&seen.sealed[0], &list.sealed[0]));

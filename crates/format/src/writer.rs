@@ -16,7 +16,7 @@ use crate::decode::check_declaration;
 use crate::hash::{self, ChannelHasher};
 use crate::header::{
     AnalogCoding, BlockRow, ChannelHeader, ChannelKind, ContentId, Declaration, DeclaredKind,
-    Header, JSON_SAFE, LEVEL_BIT, OverviewLevel, OverviewRow, Preamble, code_value,
+    Header, JSON_SAFE, LEVEL_BIT, OverviewLevel, OverviewRow, Preamble, Words, code_value,
 };
 use crate::model::{Break, Gap, Ratio, Sample, sample_tick};
 use crate::overview::{self, Builder, Settled, Unpaired};
@@ -776,10 +776,10 @@ impl Writer {
     pub fn sample(&mut self, c: usize, value: impl Into<Sample>) -> Result<(), WriteError> {
         let sample = value.into();
         self.check_channel(c)?;
-        let name = self.name(c);
+        // The channel's name only for an error: a sample is the writer's commonest call.
         let State::Analog(a) = &self.states[c] else {
             return Err(WriteError::Kind {
-                channel: name,
+                channel: self.name(c),
                 kind: "digital",
             });
         };
@@ -787,21 +787,25 @@ impl Writer {
         let (run, starts) = match (a.next_run, a.runs.last()) {
             (Some((tick, lost)), _) => (Break { index, tick, lost }, true),
             (None, Some(run)) => (*run, false),
-            (None, None) => return Err(WriteError::NoRun { channel: name }),
+            (None, None) => {
+                return Err(WriteError::NoRun {
+                    channel: self.name(c),
+                });
+            }
         };
         let tick = sample_tick(run.tick, a.period, index - run.index);
         self.check_order(c, tick)?;
         if let Some(why) = samples::misfit(sample, a.coding) {
             return Err(WriteError::Sample {
-                channel: name,
+                channel: self.name(c),
                 index,
                 why,
             });
         }
         let code = match (a.coding, sample) {
             (coding @ AnalogCoding::Codes { .. }, Sample::F32(value)) => {
-                Some(code_of(value, coding).ok_or(WriteError::Coding {
-                    channel: name,
+                Some(code_of(value, coding).ok_or_else(|| WriteError::Coding {
+                    channel: self.name(c),
                     index,
                     value,
                     coding,
@@ -974,8 +978,8 @@ impl Writer {
                             offset: at + (record::PAYLOAD_AT + BlockHead::len(channels)) as u64,
                             length,
                             decoded_length: raw.len() as u32,
-                            channels: head.words,
                         },
+                        words: head.words,
                         end: head.end,
                         firsts,
                     });
@@ -1240,7 +1244,11 @@ impl Writer {
         }
         let mut overview_rows = std::mem::take(&mut self.overview_rows);
         overview_rows.sort_by_key(|&(shift, k, _)| (shift, k));
-        let rows: Vec<BlockRow> = self.written.iter().map(|w| w.row.clone()).collect();
+        let rows: Vec<BlockRow> = self.written.iter().map(|w| w.row).collect();
+        let mut words = Words::with_capacity(self.declaration.channels.len(), rows.len());
+        for w in self.written.iter() {
+            words.push(&w.words);
+        }
         let mut header = finished_header(
             &self.declaration,
             length,
@@ -1265,7 +1273,7 @@ impl Writer {
         let overview_frame = compress(&overview_raw, self.options.level)?;
         let overview_rows: Vec<OverviewRow> =
             overview_rows.into_iter().map(|(_, _, r)| r).collect();
-        let footer = record::footer_bytes(&header, &rows, &overview_rows, &overview_frame)
+        let footer = record::footer_bytes(&header, &rows, &words, &overview_rows, &overview_frame)
             .map_err(WriteError::FooterTooLarge)?;
         record::write_footer(&mut self.out, self.taken, &footer);
         Ok(Finished {

@@ -20,6 +20,8 @@ use crate::shared::Chunks;
 #[derive(Clone, Debug)]
 pub struct Written {
     pub row: BlockRow,
+    /// A word a channel, as `Words` holds them.
+    pub words: Vec<u32>,
     pub end: i64,
     pub firsts: Vec<u64>,
 }
@@ -148,16 +150,38 @@ impl Snapshot {
     /// Digital channel `c`'s gaps so far, every one the writer was given; a gap that reaches the
     /// end is only left out once the recording finishes.
     pub fn gaps(&self, c: usize) -> impl Iterator<Item = &Gap> + '_ {
-        self.gaps.get(c).into_iter().flat_map(|g| g.iter())
+        self.gaps_from(c, 0)
+    }
+
+    /// Digital channel `c`'s gaps from gap `from` on: what came since a reader last looked,
+    /// without walking what it has.
+    pub fn gaps_from(&self, c: usize, from: usize) -> impl Iterator<Item = &Gap> + '_ {
+        self.gaps
+            .get(c)
+            .into_iter()
+            .flat_map(move |g| g.iter_from(from))
     }
 
     /// Analog channel `c`'s runs so far: the first at index 0, then each break.
     pub fn runs(&self, c: usize) -> impl Iterator<Item = &Break> + '_ {
-        self.runs.get(c).into_iter().flat_map(|r| r.iter())
+        self.runs_from(c, 0)
+    }
+
+    /// Analog channel `c`'s runs from run `from` on, as `gaps_from`.
+    pub fn runs_from(&self, c: usize, from: usize) -> impl Iterator<Item = &Break> + '_ {
+        self.runs
+            .get(c)
+            .into_iter()
+            .flat_map(move |r| r.iter_from(from))
     }
 
     pub fn annotations(&self) -> impl Iterator<Item = &record::Annotation> + '_ {
-        self.annotations.iter()
+        self.annotations_from(0)
+    }
+
+    /// The annotation records from record `from` on, as `gaps_from`.
+    pub fn annotations_from(&self, from: usize) -> impl Iterator<Item = &record::Annotation> + '_ {
+        self.annotations.iter_from(from)
     }
 
     /// The overview's settled buckets the writer holds, level by level, finest first. A level
@@ -295,7 +319,7 @@ impl Snapshot {
         let channels = decode_sections(
             &raw,
             &self.sections(&w.firsts),
-            &w.row.channels,
+            &w.words,
             w.row.start,
             w.end,
         )

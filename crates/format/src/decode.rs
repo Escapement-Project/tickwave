@@ -9,7 +9,7 @@ use crate::codec::get_uleb;
 use crate::header::{
     AnalogCoding, BlockRow, ChannelHeader, ChannelKind, Declaration, DeclaredChannel, DeclaredKind,
     Header, JSON_SAFE, Kept, LEVEL_BIT, MAGIC, MAJOR, OverviewRow, PREAMBLE_LEN, TRAILER_LEN,
-    Trailer, factor,
+    Trailer, Words, factor,
 };
 use crate::model::{Break, Gap, run_sample_tick};
 use crate::overview::{self, Column, Level};
@@ -674,6 +674,8 @@ pub struct Footer {
     pub trailer: Trailer,
     pub header: Header,
     pub rows: Vec<BlockRow>,
+    /// Each block's channel words, beside its row.
+    pub words: Words,
     pub overview: Vec<Level>,
     /// For each level in `header.overview_blocks`, its overview blocks' places in the file.
     pub overview_rows: Vec<Vec<OverviewRow>>,
@@ -809,9 +811,10 @@ impl Footer {
             return Err(corrupt("the index does not hold one row a block"));
         }
         let data_len = header.blocks as usize * row_size;
+        let mut words = Words::with_capacity(channels, header.blocks as usize);
         let rows: Vec<BlockRow> = payload[header_end..header_end + data_len]
             .chunks_exact(row_size)
-            .map(|row| BlockRow::parse(row, channels))
+            .map(|row| BlockRow::parse(row, &mut words))
             .collect();
         let inside = |offset: u64, len: u32| {
             offset >= PREAMBLE_LEN as u64
@@ -874,7 +877,7 @@ impl Footer {
                 ChannelKind::Analog { .. } => None,
             };
             for (i, row) in rows.iter().enumerate() {
-                let word = row.channels[c];
+                let word = words.of(i)[c];
                 if let (Some(l), ChannelKind::Digital { gaps, .. }) = (&mut level, &kind.data) {
                     let bit = word & LEVEL_BIT != 0;
                     let known =
@@ -923,6 +926,7 @@ impl Footer {
             trailer,
             header,
             rows,
+            words,
             overview,
             overview_rows,
             overview_frame,
@@ -1076,7 +1080,7 @@ impl Footer {
                 },
             })
             .collect();
-        let channels = decode_sections(&raw, &sections, &row.channels, start, end)
+        let channels = decode_sections(&raw, &sections, self.words.of(i), start, end)
             .map_err(|what| corrupt(format!("block {i}: {what}")))?;
         for (c, (got, kind)) in channels.iter().zip(&self.header.channels).enumerate() {
             if let (BlockChannel::Digital { initial, edges }, ChannelKind::Digital { gaps, .. }) =
@@ -1087,9 +1091,9 @@ impl Footer {
                 if let Some(t) = edge_in_gap(edges, gaps) {
                     return Err(bad(format!("an edge at tick {t} lies inside a gap")));
                 }
-                if let Some(next) = self.rows.get(i + 1) {
+                if i + 1 < self.rows.len() {
                     let after = level_after(*initial, edges, gaps_ending_in(gaps, start, end));
-                    if after != (next.channels[c] & LEVEL_BIT != 0) {
+                    if after != (self.words.of(i + 1)[c] & LEVEL_BIT != 0) {
                         return Err(bad("the next block starts at the wrong level".into()));
                     }
                 }

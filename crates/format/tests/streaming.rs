@@ -218,7 +218,7 @@ fn a_gap_learned_after_a_flush_inside_it_keeps_the_level_from_before() {
             panic!()
         };
         starts.push((block.start, initial));
-        assert_eq!(initial, footer.rows[i].channels[0] & LEVEL_BIT != 0);
+        assert_eq!(initial, footer.words.of(i)[0] & LEVEL_BIT != 0);
     }
     // High after the edge at 47, through the gap; the block holding 120 starts high too, since
     // the gap's end is inside it. From 120 the level is the gap's, high: the edges at 145 and 146
@@ -624,7 +624,8 @@ fn a_gap_ending_where_a_block_starts_takes_effect_in_that_block() {
     let starts: Vec<(i64, bool)> = footer
         .rows
         .iter()
-        .map(|r| (r.start, r.channels[0] & LEVEL_BIT != 0))
+        .enumerate()
+        .map(|(i, r)| (r.start, footer.words.of(i)[0] & LEVEL_BIT != 0))
         .collect();
     // The block from 100 starts at the level from before the gap, high: the gap's end is in it.
     // Its three edges after the gap's low take A high, so the block from 200 starts high, and the

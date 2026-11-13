@@ -10,7 +10,7 @@ use crate::decode::{
 };
 use crate::header::{
     BlockRow, ChannelKind, Declaration, DeclaredKind, MAJOR, PREAMBLE_LEN, Preamble, TRAILER_LEN,
-    Trailer,
+    Trailer, Words,
 };
 use crate::model::{Break, Gap, run_sample_tick};
 use crate::record::{self, BlockHead, Kind, Next};
@@ -109,8 +109,9 @@ pub struct Reader {
     channels: Vec<Channel>,
     /// The next block's start.
     next_start: i64,
-    /// The blocks read, as the footer's index must have them.
+    /// The blocks read, as the footer's index must have them, and their words.
     rows: Vec<BlockRow>,
+    words: Words,
     /// The overview blocks read: shift, `k`, frame offset and length.
     overview_seen: Vec<(u8, u64, u64, u32)>,
     /// Bytes fed past the trailer.
@@ -137,6 +138,7 @@ impl Reader {
             channels: Vec::new(),
             next_start: 0,
             rows: Vec::new(),
+            words: Words::default(),
             overview_seen: Vec::new(),
             after_end: false,
         }
@@ -326,6 +328,7 @@ impl Reader {
                         },
                     })
                     .collect();
+                self.words = Words::new(d.channels.len());
                 self.declaration = Some(d.clone());
                 Event::Declaration(Box::new(d))
             }
@@ -441,7 +444,7 @@ impl Reader {
         if !declared {
             return Err(corrupt("the footer's header differs from the declaration"));
         }
-        if footer.rows != self.rows || self.next_start != h.length {
+        if footer.rows != self.rows || footer.words != self.words || self.next_start != h.length {
             return Err(corrupt("the footer's index differs from the blocks"));
         }
         let mut seen = std::mem::take(&mut self.overview_seen);
@@ -594,8 +597,8 @@ impl Reader {
             offset: frame_offset,
             length: frame.len() as u32,
             decoded_length: head.decoded_length,
-            channels: head.words.clone(),
         });
+        self.words.push(&head.words);
         Ok(ReadBlock {
             frame_offset,
             frame_len: frame.len() as u32,

@@ -197,7 +197,7 @@ fn splice_overview_block(base: &[u8], donor: &[u8], k: usize) -> Vec<u8> {
         .iter()
         .map(|r| escapement_tickwave_format::header::BlockRow {
             offset: moved(r.offset),
-            ..r.clone()
+            ..*r
         })
         .collect();
     let mut overview_rows = Vec::new();
@@ -212,8 +212,14 @@ fn splice_overview_block(base: &[u8], donor: &[u8], k: usize) -> Vec<u8> {
             overview_rows.push(row);
         }
     }
-    let footer =
-        record::footer_bytes(&head.header, &rows, &overview_rows, &head.overview_frame).unwrap();
+    let footer = record::footer_bytes(
+        &head.header,
+        &rows,
+        &head.words,
+        &overview_rows,
+        &head.overview_frame,
+    )
+    .unwrap();
     let at = out.len() as u64;
     let mut tail = Vec::new();
     record::write_footer(&mut tail, at, &footer);
