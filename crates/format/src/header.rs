@@ -315,6 +315,7 @@ impl Exact {
 
     /// `x × num / den` in f64, each step rounded once: multiplied by the numerator, then divided
     /// by the denominator.
+    #[inline]
     pub fn times(self, x: f64) -> f64 {
         (x * self.num as f64) / self.den as f64
     }
@@ -358,6 +359,7 @@ impl IntCoding {
         }
     }
 
+    #[inline]
     pub fn scale(&self) -> Exact {
         self.scale.unwrap_or(Exact::ONE)
     }
@@ -387,6 +389,7 @@ impl IntCoding {
     /// there is one, each step rounded once. For an ADC's counts this is the f64 nearest the
     /// value: 3300 at a scale of 1/1000 is 3.3. The browser draws with these, and the f64 product
     /// of a derived channel multiplies them.
+    #[inline]
     pub fn value(&self, code: i128) -> f64 {
         let scaled = self.scale().times(code as f64);
         match self.offset {

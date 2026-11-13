@@ -6,7 +6,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use escapement_tickwave_format::decode::{BlockChannel, OverviewBlock};
+use escapement_tickwave_format::model::Sample;
 use escapement_tickwave_format::overview::{AnalogOverview, BLOCK_BUCKETS, ChannelOverview, Level};
+use escapement_tickwave_format::samples::Values;
 
 use crate::bytes::read;
 use crate::cache::{Decoded, Entry, Key};
@@ -72,6 +74,8 @@ impl Recording {
                 length,
             } => {
                 let entry = self.cache.get_or_make(Key::Block(offset), || {
+                    let _span =
+                        tracing::debug_span!("decode block", block = index, length).entered();
                     let frame = read(&*self.bytes, offset, length as usize)?;
                     let (block, derived) = match &self.store {
                         Store::Finished(footer) => {
@@ -197,9 +201,21 @@ impl Recording {
             };
             let lo = i0.max(first);
             let hi = i1.min(first + values.len() as u64);
-            for i in lo..hi {
-                let s = values.get((i - first) as usize).expect("inside the block");
-                f(i, rule.value(s), code(s));
+            let (a, z) = ((lo - first) as usize, (hi - first) as usize);
+            // One match a block on how it stores its samples, rather than one a sample.
+            match values {
+                Values::F32(v) => (lo..)
+                    .zip(&v[a..z])
+                    .for_each(|(i, &x)| f(i, rule.value(Sample::F32(x)), None)),
+                Values::F64(v) => (lo..)
+                    .zip(&v[a..z])
+                    .for_each(|(i, &x)| f(i, rule.value(Sample::F64(x)), None)),
+                Values::U64(v) => (lo..).zip(&v[a..z]).for_each(|(i, &x)| {
+                    f(i, rule.value(Sample::U64(x)), Some(i128::from(x)));
+                }),
+                Values::I64(v) => (lo..).zip(&v[a..z]).for_each(|(i, &x)| {
+                    f(i, rule.value(Sample::I64(x)), Some(i128::from(x)));
+                }),
             }
         }
         Ok(())
@@ -293,6 +309,7 @@ impl Recording {
     ) -> Result<Arc<OverviewBlock>, Error> {
         check(cancel)?;
         let entry = self.cache.get_or_make(Key::Overview(offset), || {
+            let _span = tracing::debug_span!("decode overview block", offset, length).entered();
             let frame = read(&*self.bytes, offset, length as usize)?;
             let block = decode(&frame)?;
             let size = format_size(&block.level);
@@ -377,16 +394,6 @@ impl Recording {
             .runs()
             .ok_or(Error::NoChannel(channel))?;
         Ok(index_at_or_after(&runs, tick as f64))
-    }
-}
-
-/// A sample's integer code, where it is one.
-fn code(s: escapement_tickwave_format::model::Sample) -> Option<i128> {
-    use escapement_tickwave_format::model::Sample;
-    match s {
-        Sample::U64(c) => Some(i128::from(c)),
-        Sample::I64(c) => Some(i128::from(c)),
-        Sample::F32(_) | Sample::F64(_) => None,
     }
 }
 

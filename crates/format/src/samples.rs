@@ -52,6 +52,7 @@ impl Values {
 
 /// A sample's value in f64 under `coding`: the f32 or f64 itself, or an `int` code through
 /// `IntCoding::value`.
+#[inline]
 pub fn value_f64(sample: Sample, coding: AnalogCoding) -> f64 {
     match (sample, coding) {
         (Sample::F32(v), _) => f64::from(v),
@@ -264,6 +265,7 @@ impl Product {
 
     /// A derived sample's value in f64: an integer product's code by the rule for an `int`
     /// channel, `fl(fl(code × num) / den)`; an f64 product as it is.
+    #[inline]
     pub fn value(&self, sample: Sample) -> f64 {
         match (self, sample) {
             (Self::Int { .. }, Sample::U64(c)) => self.scaled(c as f64),
@@ -274,6 +276,7 @@ impl Product {
 
     /// `x` through an integer product's scale, as `value` takes a code: times the numerator, then
     /// over the denominator, each in f64. An f64 product's `x` as it is.
+    #[inline]
     pub fn scaled(&self, x: f64) -> f64 {
         match self {
             Self::Int { num, den, .. } => (x * num) / den,

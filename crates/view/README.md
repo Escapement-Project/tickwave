@@ -43,5 +43,9 @@ It builds for `wasm32-unknown-unknown` with its `live` feature off. `live`, on b
 on the format crate's encoder, which holds the `Snapshot` of a recording a writer in the same
 process is still writing.
 
+Opening a recording, each query, each channel drawn, the strip, statistics and every block
+decoded are `tracing` spans at debug level, so a host's subscriber shows where a view's time goes.
+
 `examples/synth.rs` writes a recording laid out as verge's energy captures are, and
-`examples/timing.rs` times opening one and a view's queries of it.
+`examples/timing.rs` times opening one and a view's queries of it. With `--trace FILE` it writes
+every span as a Chrome trace, and `--view` and `--how` run one case alone for a profiler.

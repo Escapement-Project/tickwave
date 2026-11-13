@@ -85,6 +85,7 @@ pub(crate) enum Rule {
 }
 
 impl Rule {
+    #[inline]
     pub fn value(self, s: Sample) -> f64 {
         match self {
             Self::Coding(c) => samples::value_f64(s, c),
@@ -444,6 +445,7 @@ impl Recording {
     /// A finished file. `Error::Unfinished` for a file with no trailer (cut off by a crash), so
     /// the host can offer the Recutter's repair; `open` never repairs in memory. The file's
     /// bundled annotations are its markers.
+    #[tracing::instrument(level = "debug", name = "open", skip_all)]
     pub fn open(bytes: Arc<dyn Bytes>, cache: Cache) -> Result<Self, Error> {
         let size = bytes.size()?;
         if size < PREAMBLE_LEN as u64 || read(&*bytes, 0, MAGIC.len())? != MAGIC {
@@ -547,6 +549,7 @@ impl Recording {
     /// recording's snapshots: written blocks don't change. The recording ends where what the
     /// writer holds does, and so do its digital channels.
     #[cfg(feature = "live")]
+    #[tracing::instrument(level = "debug", name = "live", skip_all)]
     pub fn live(
         snapshot: escapement_tickwave_format::snapshot::Snapshot,
         bytes: Arc<dyn Bytes>,

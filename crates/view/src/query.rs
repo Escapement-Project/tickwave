@@ -172,6 +172,7 @@ fn merge(a: (State, f64), b: (State, f64)) -> (State, f64) {
 impl Recording {
     /// The view `q` asks for. Cancel is checked between blocks; a cancelled query returns
     /// `Error::Cancelled`.
+    #[tracing::instrument(level = "debug", name = "query", skip_all, fields(columns = q.columns, ticks = q.window.end - q.window.start))]
     pub fn query(&self, q: &Query, cancel: &AtomicBool) -> Result<Answer, Error> {
         let width = (q.window.end - q.window.start).max(1);
         let window = q.window.start..q.window.start + width;
@@ -189,6 +190,7 @@ impl Recording {
         }
         let strip = match (q.strip, self.extent()) {
             (Some((c, n)), Some(extent)) => {
+                let _span = tracing::debug_span!("strip").entered();
                 let n = n.max(1) as usize;
                 let grid = Grid {
                     x0: extent.start as f64,
@@ -231,6 +233,7 @@ impl Recording {
 
     /// Channel `c` over `range` on `g`. With a `window`, an analog channel's single samples
     /// where there are few enough, and its fit over the window.
+    #[tracing::instrument(level = "debug", name = "channel", skip_all, fields(channel = c))]
     fn drawn(
         &self,
         c: usize,

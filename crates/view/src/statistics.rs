@@ -150,6 +150,7 @@ impl Tally {
 impl Recording {
     /// Each analog and derived channel's statistics over `interval`. Cancel is checked between
     /// blocks.
+    #[tracing::instrument(level = "debug", name = "statistics", skip_all)]
     pub fn statistics(
         &self,
         interval: Range<i64>,
