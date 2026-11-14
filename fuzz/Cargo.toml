@@ -1,0 +1,172 @@
+[package]
+name = "escapement-tickwave-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# Its own workspace: the fuzz targets build with cargo-fuzz's flags on nightly, apart from the
+# crates they fuzz.
+[workspace]
+members = ["."]
+
+[features]
+default = ["fuzz"]
+# libFuzzer and its `main`; `seeds` builds without it.
+fuzz = ["dep:libfuzzer-sys"]
+
+[dependencies]
+arbitrary = { version = "1.5.0", features = ["derive"] }
+blake3 = "1.8.7"
+escapement-tickwave-format = { version = "0.1.0", path = "../crates/format", features = ["edit"] }
+escapement-tickwave-import = { version = "0.1.0", path = "../crates/import" }
+escapement-tickwave-view = { version = "0.1.0", path = "../crates/view" }
+libfuzzer-sys = { version = "0.4.13", optional = true }
+serde_json = "1.0.154"
+zip = { version = "9.5.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zstd = { version = "0.14.4", default-features = false }
+
+[[bin]]
+name = "show"
+path = "src/bin/show.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "seeds"
+path = "src/bin/seeds.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "footer"
+path = "fuzz_targets/footer.rs"
+test = false
+doc = false
+bench = false
+required-features = ["fuzz"]
+
+[[bin]]
+name = "block"
+path = "fuzz_targets/block.rs"
+test = false
+doc = false
+bench = false
+required-features = ["fuzz"]
+
+[[bin]]
+name = "reader"
+path = "fuzz_targets/reader.rs"
+test = false
+doc = false
+bench = false
+required-features = ["fuzz"]
+
+[[bin]]
+name = "recut"
+path = "fuzz_targets/recut.rs"
+test = false
+doc = false
+bench = false
+required-features = ["fuzz"]
+
+[[bin]]
+name = "repair"
+path = "fuzz_targets/repair.rs"
+test = false
+doc = false
+bench = false
+required-features = ["fuzz"]
+
+[[bin]]
+name = "verify"
+path = "fuzz_targets/verify.rs"
+test = false
+doc = false
+bench = false
+required-features = ["fuzz"]
+
+[[bin]]
+name = "view"
+path = "fuzz_targets/view.rs"
+test = false
+doc = false
+bench = false
+required-features = ["fuzz"]
+
+[[bin]]
+name = "annotations"
+path = "fuzz_targets/annotations.rs"
+test = false
+doc = false
+bench = false
+required-features = ["fuzz"]
+
+[[bin]]
+name = "edit"
+path = "fuzz_targets/edit.rs"
+test = false
+doc = false
+bench = false
+required-features = ["fuzz"]
+
+[[bin]]
+name = "zip"
+path = "fuzz_targets/zip.rs"
+test = false
+doc = false
+bench = false
+required-features = ["fuzz"]
+
+[[bin]]
+name = "saleae"
+path = "fuzz_targets/saleae.rs"
+test = false
+doc = false
+bench = false
+required-features = ["fuzz"]
+
+[[bin]]
+name = "sigrok"
+path = "fuzz_targets/sigrok.rs"
+test = false
+doc = false
+bench = false
+required-features = ["fuzz"]
+
+[[bin]]
+name = "vcd"
+path = "fuzz_targets/vcd.rs"
+test = false
+doc = false
+bench = false
+required-features = ["fuzz"]
+
+[[bin]]
+name = "convert"
+path = "fuzz_targets/convert.rs"
+test = false
+doc = false
+bench = false
+required-features = ["fuzz"]
+
+[[bin]]
+name = "against"
+path = "fuzz_targets/against.rs"
+test = false
+doc = false
+bench = false
+required-features = ["fuzz"]
+
+[[bin]]
+name = "writer"
+path = "fuzz_targets/writer.rs"
+test = false
+doc = false
+bench = false
+required-features = ["fuzz"]

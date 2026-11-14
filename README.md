@@ -24,6 +24,7 @@ computer.
 | `web` | the custom elements, the chart, the converter's worker, and the build of the site |
 | `site` | the site's pages: an overview, a viewer that also converts, and the docs |
 | `bench` | the decode benchmark: the WASM decoder against JavaScript ones, on real recordings |
+| `fuzz` | a fuzz target for each reader and for the writer, in a workspace of its own |
 
 ## Documents
 
@@ -69,6 +70,20 @@ Then the web build and its tests, from `web/`:
 npm install
 npx playwright install chromium firefox   # once, for the browser tests
 npm run check                             # typecheck, unit tests, build and browser tests
+```
+
+The fuzz targets build with cargo-fuzz on nightly, from `fuzz/`. `seeds` writes each target's seed
+corpus from the fixtures and testdata. A reader target takes a structured input that it builds
+into a file with its checks right, so mutations get past the checksums:
+
+```sh
+cargo install cargo-fuzz
+cd fuzz
+cargo run --no-default-features --bin seeds -- .. seeds
+mkdir -p corpus/reader                                   # libFuzzer adds what it finds here
+cargo +nightly fuzz run reader corpus/reader seeds/reader -- \
+    -rss_limit_mb=2048 -malloc_limit_mb=1024 -timeout=10
+cargo run --no-default-features --bin show -- <input>   # the file an input builds, as read
 ```
 
 The converter carries the viewer for `tickwave open` when it's built after the web build, with the
