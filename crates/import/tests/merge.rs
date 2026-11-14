@@ -2283,3 +2283,107 @@ fn two_marks_give_an_inputs_move_and_its_stretch() {
         "input 2's stretch: \"0/5\": a stretch is a ratio a/b, or a change such as +20ppm"
     );
 }
+
+/// A header `verify --against` checks that names one input channel twice, or calls a cut digital
+/// one analog: each is refused, rather than taken a second time, or cut without the count the
+/// header states for a digital channel.
+#[test]
+fn expected_refuses_a_header_naming_an_input_channel_twice_or_as_another_kind() {
+    let inputs = [
+        (file(analyser()), "analyser", None),
+        (file(probe()), "probe", None),
+    ];
+    let (out, _) = run(&inputs, &settings(vec![])).unwrap();
+    let h = Footer::parse_file(&out).unwrap().header;
+    let recordings = || -> Vec<Recording> {
+        inputs
+            .iter()
+            .map(|(b, ..)| read(Arc::new(b.clone())).unwrap().1)
+            .collect()
+    };
+    let mut twice = h.clone();
+    let mut again = twice.channels[0].clone();
+    again.name = "CLK again".into();
+    twice.channels.push(again);
+    assert_eq!(
+        expected(&twice, recordings()).err().map(|e| e.to_string()),
+        Some(
+            "input 1 (analyser [digital_0.bin], its tick 0 at 0.5 s): channel \"CLK\" is taken \
+             twice"
+                .into()
+        )
+    );
+    let mut analog = h.clone();
+    let c = &mut analog.channels[0];
+    let Some(Kept { from, to }) = c.shaping.kept else {
+        panic!("a merged channel states its kept span")
+    };
+    c.shaping.kept = Some(Kept { from: from + 1, to });
+    c.data = ChannelKind::Analog {
+        unit: "V".into(),
+        first: from + 1,
+        period: Ratio::ONE,
+        count: 0,
+        breaks: Vec::new(),
+        coding: escapement_tickwave_format::header::AnalogCoding::F32,
+        significant: None,
+    };
+    let name = c.name.clone();
+    assert_eq!(
+        expected(&analog, recordings()).err().map(|e| e.to_string()),
+        Some(format!("a unit for {name}: it is digital"))
+    );
+}
+
+/// Recordings with no channel and no source: a merge has no rate to tick at and no channel to
+/// start at, and refuses them, as `verify --against` does a header of them.
+#[test]
+fn recordings_with_no_source_are_refused_rather_than_merged() {
+    let empty = || Recording {
+        timebase: Ratio::ONE,
+        length: 1,
+        channels: Vec::new(),
+        derived: Vec::new(),
+        sources: Vec::new(),
+    };
+    let inputs = [(file(empty()), "a", None), (file(empty()), "b", None)];
+    let refused = |n| Some(format!("none of the {n} recordings holds a channel"));
+    let err = run(&inputs, &settings(vec![])).err().map(|e| e.to_string());
+    assert_eq!(err, refused(2));
+    let h = Footer::parse_file(&file(empty())).unwrap().header;
+    let three = (0..3)
+        .map(|_| read(Arc::new(file(empty()))).unwrap().1)
+        .collect();
+    let err = expected(&h, three).err().map(|e| e.to_string());
+    assert_eq!(err, refused(3));
+}
+
+/// A bundled line that reads but breaks a rule ANNOTATIONS.md gives a generator's line, a field
+/// it doesn't have: the writer would refuse it, so the merge leaves it out and says so.
+#[test]
+fn a_bundled_line_breaking_a_rule_is_left_out_of_a_merge() {
+    use serde_json::json;
+    let a = bundle_of(
+        analyser(),
+        &[json!({"id": "a/100", "start": 100})],
+        &[r#"{"id": "odd", "start": 10, "colour": "red"}"#],
+        None,
+    );
+    let (out, merged) = run(
+        &[(a, "analyser", None), (file(probe()), "probe", None)],
+        &settings(vec![]),
+    )
+    .unwrap();
+    let h = Footer::parse_file(&out).unwrap().header;
+    let ids: Vec<String> = resolved_in(&h).into_iter().map(|r| r.0).collect();
+    assert_eq!(ids, ["dec/a/100"]);
+    let notes: Vec<String> = merged.notes.iter().map(|n| n.to_string()).collect();
+    assert!(
+        notes.contains(
+            &"input 1 (analyser): 1 generated annotation left out: they break a rule \
+              ANNOTATIONS.md gives a generator's line"
+                .to_owned()
+        ),
+        "{notes:?}"
+    );
+}

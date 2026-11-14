@@ -2429,6 +2429,47 @@ mod tests {
         }
     }
 
+    /// A cut-off file whose annotation record names the generator `x/../../escaped`, beside a
+    /// folder `rec.x`: its file, `rec.x/../../escaped.jsonl`, would lie outside the output's
+    /// folder. Repair refuses it and writes nothing; a plain name repairs.
+    #[test]
+    fn a_generator_name_from_the_file_names_nothing_outside_the_output_s_folder() {
+        use escapement_tickwave_format::decode::Footer;
+        use escapement_tickwave_format::record::{self, Kind};
+        let dir = tempfile::tempdir().unwrap();
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/import/demo-mixed.sr");
+        let open = || Ok(sigrok::read(&source)?.recording);
+        let whole = dir.path().join("whole.tickwave");
+        let common = common(&["sigrok", "x.sr", "-o", "x.tickwave"]);
+        convert(&open, &whole, &common, 64 << 20).unwrap();
+        let mut file = fs::read(&whole).unwrap();
+        let footer = Footer::parse_file(&file).unwrap();
+        file.truncate(footer.trailer.footer_offset as usize);
+        let out = dir.path().join("a").join("b");
+        fs::create_dir_all(out.join("rec.x")).unwrap();
+        let escaped = dir.path().join("a").join("escaped.jsonl");
+        let output = out.join("rec.tickwave");
+        for source in ["x", "x/../../escaped"] {
+            let mut cut = file.clone();
+            let a = serde_json::json!({"source": source, "annotation": {"id": "m", "start": 1}});
+            record::write(&mut cut, Kind::Annotation, &[a.to_string().as_bytes()]);
+            let input = dir.path().join("cut.tickwave");
+            fs::write(&input, &cut).unwrap();
+            let got = repair_file(&input, &output, 3);
+            assert!(!escaped.exists(), "{source}: wrote {}", escaped.display());
+            if source == "x" {
+                got.unwrap();
+                assert!(out.join("rec.x.jsonl").exists());
+                fs::remove_file(&output).unwrap();
+            } else {
+                let err = format!("{:#}", got.expect_err("refused"));
+                assert!(err.contains("generator name"), "{err}");
+                assert!(!output.exists());
+            }
+        }
+    }
+
     #[test]
     fn a_sidecar_named_that_is_not_there_is_an_error() {
         let dir = tempfile::tempdir().unwrap();

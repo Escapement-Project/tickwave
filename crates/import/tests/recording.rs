@@ -258,3 +258,36 @@ fn a_footer_longer_than_the_first_read_is_read_whole() {
     assert_eq!(header, footer.header);
     verify(&file[..], recording).unwrap();
 }
+
+/// A footer row whose frame runs past the file: `recording::block` reads a frame of the row's
+/// length, so the footer is refused before any block is read, rather than read into a buffer of
+/// up to 4 GiB.
+#[test]
+fn a_row_whose_frame_runs_past_the_file_is_refused_before_it_is_read() {
+    use escapement_tickwave_format::record;
+    let mut file = std::fs::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../web/fixtures/identify-swd.tickwave"),
+    )
+    .unwrap();
+    let mut footer = Footer::parse_file(&file).unwrap();
+    footer.rows[0].length = u32::MAX;
+    let rows: Vec<_> = footer.overview_rows.iter().flatten().copied().collect();
+    let bytes = record::footer_bytes(
+        &footer.header,
+        &footer.rows,
+        &footer.words,
+        &rows,
+        &footer.overview_frame,
+    )
+    .unwrap();
+    let keep = footer.trailer.footer_offset;
+    file.truncate(keep as usize);
+    let mut tail = Vec::new();
+    record::write_footer(&mut tail, keep, &bytes);
+    file.extend(tail);
+    let err = read(Arc::new(file)).expect_err("refused");
+    assert!(
+        err.to_string().contains("block 0's row is out of place"),
+        "{err}"
+    );
+}

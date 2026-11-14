@@ -511,3 +511,115 @@ fn verge_exports() {
     }
     bar.finish_and_clear();
 }
+
+/// A unitsize past what the logic stream holds: no sample fits, and the stream is refused as it is
+/// read. Nothing is sized from the metadata's number.
+#[test]
+fn a_unitsize_past_the_logic_stream_is_refused() {
+    let meta = META.replace("unitsize=1", "unitsize=1000000000");
+    refused_meta(
+        &meta,
+        "4 bytes is not a whole number of 1000000000-byte samples",
+    );
+}
+
+/// `zip` with member `name`'s uncompressed size stated as `size` in its local header and in the
+/// central directory.
+fn stating(mut zip: Vec<u8>, name: &str, size: u32) -> Vec<u8> {
+    let u16_at = |z: &[u8], at: usize| u16::from_le_bytes([z[at], z[at + 1]]) as usize;
+    let u32_at = |z: &[u8], at: usize| u32::from_le_bytes(z[at..at + 4].try_into().unwrap());
+    let end = (0..zip.len() - 21)
+        .rev()
+        .find(|&i| zip[i..i + 4] == [0x50, 0x4b, 0x05, 0x06])
+        .unwrap();
+    let mut at = u32_at(&zip, end + 16) as usize;
+    for _ in 0..u16_at(&zip, end + 10) {
+        let n = u16_at(&zip, at + 28);
+        if &zip[at + 46..at + 46 + n] == name.as_bytes() {
+            let local = u32_at(&zip, at + 42) as usize;
+            zip[at + 24..at + 28].copy_from_slice(&size.to_le_bytes());
+            zip[local + 22..local + 26].copy_from_slice(&size.to_le_bytes());
+        }
+        at += 46 + n + u16_at(&zip, at + 30) + u16_at(&zip, at + 32);
+    }
+    zip
+}
+
+/// A unitsize of 1,000,000,000 and a 1-byte logic member whose headers state 1,000,000,000
+/// bytes: a size the file states at no cost, so nothing is sized from it, and the member is
+/// refused once it is read. Taking the stated size as the stream's, the scan took state for
+/// every bit of a sample up front, about 67 GB.
+#[test]
+fn a_unitsize_a_member_only_states_is_refused_as_it_is_read() {
+    let meta = META.replace("unitsize=1", "unitsize=1000000000");
+    let zip = archive(&[
+        ("version", b"2"),
+        ("metadata", meta.as_bytes()),
+        ("logic-1-1", &[1]),
+        ("analog-1-4-1", &floats(&[1.0])),
+    ]);
+    let err = sigrok::read_bytes(stating(zip, "logic-1-1", 1_000_000_000), "test.sr")
+        .err()
+        .expect("refused")
+        .to_string();
+    assert!(
+        err.contains("member `logic-1-1`") && err.contains("1000000000"),
+        "{err}"
+    );
+}
+
+/// One sample of a million bytes: each channel's reader reads the stream a chunk at a time and
+/// keeps the byte its bit is in, however wide the sample.
+#[test]
+fn a_wide_sample_is_read_a_chunk_at_a_time() {
+    let meta = META.replace("unitsize=1", "unitsize=1000000");
+    let mut sample = vec![0u8; 1_000_000];
+    sample[0] = 0b101;
+    let floats = floats(&[1.0]);
+    let import = read(&[
+        ("version", b"2"),
+        ("metadata", meta.as_bytes()),
+        ("logic-1-1", &sample),
+        ("analog-1-4-1", &floats),
+    ])
+    .unwrap();
+    assert_eq!(import.recording.length, 1);
+    drain(import.recording);
+}
+
+/// A run of more than eight bits no probe names is one note, for disabled probes and for bits
+/// past the probes alike: each costs the metadata no line, so a note a bit would let a number
+/// make the list as long as it liked.
+#[test]
+fn a_long_run_of_unnamed_bits_is_one_note() {
+    let meta = META
+        .replace("total probes=3", "total probes=40")
+        .replace("probe3=C\n", "")
+        .replace("unitsize=1", "unitsize=8")
+        .replace("analog4=V", "analog41=V");
+    let mut logic = vec![0u8; 16];
+    logic[2] = 0b1000; // bit 19, probe 20, set in the first sample only
+    logic[8 + 6] = 0b100; // bit 50, past the 40 probes, set in the second
+    let import = read(&[
+        ("version", b"2"),
+        ("metadata", meta.as_bytes()),
+        ("logic-1", &logic),
+        ("analog-1-41", &floats(&[1.0])),
+    ])
+    .unwrap();
+    assert_eq!(
+        import.skipped,
+        [
+            Skipped {
+                name: "probe2 to probe40".to_owned(),
+                reason: "no probe2 to probe40 keys, so libsigrok treats them as disabled; some \
+                         are set and some clear"
+                    .to_owned()
+            },
+            Skipped {
+                name: "bits 40 to 63".to_owned(),
+                reason: "beyond the 40 probes the metadata declares, but some are set".to_owned()
+            }
+        ]
+    );
+}

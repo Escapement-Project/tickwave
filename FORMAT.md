@@ -482,9 +482,11 @@ items of the densest channel in a bucket: the whole number nearest `log2(1,024 �
 `(1,024 × t)²` lies between `2^(2s − 1)` and `2^(2s + 1)`; no ratio falls on either bound. An analog
 channel's `t` is its `period` times its source's `m`. A digital channel's is the axis ticks from its
 start to its `end`, over its edge count. A channel with no item does not count, and with no item at
-all the shift is 62. A recorder that has no data yet takes the interval it expects between items,
-such as its sample period. Since `t` is in axis ticks, the same data at a finer timebase gets a
-larger shift and about as many buckets.
+all the shift is 62. Converting or merging a recording whose length it knows, tickwave takes a
+coarser shift where this one's overview blocks would pass what it keeps ("Writing"). A recorder
+that has no data yet takes the interval it expects between items, such as its sample period. Since
+`t` is in axis ticks, the same data at a finer timebase gets a larger shift and about as many
+buckets.
 
 The footer's decoded overview holds, for each level in the header's order, each channel in order,
 then each derived channel:
@@ -532,7 +534,12 @@ decoded payload is laid out as one level of the footer's overview, for its own n
 
 An annotation record's payload is UTF-8 JSON: `{"source": s, "annotation": a}`. `s` names the
 generator, as a generator file's first line does, and `a` is one line of that file
-([ANNOTATIONS.md](ANNOTATIONS.md)). Its times are axis ticks.
+([ANNOTATIONS.md](ANNOTATIONS.md)). Its times are axis ticks. A reader refuses a record whose `s`
+is not a name ANNOTATIONS.md allows a generator, since the source's file is named after it.
+tickwave's writer refuses, at the call, an annotation its generator's file could not hold: one
+whose fields, ticks or channels break ANNOTATIONS.md's rules for a line, or whose id its
+generator has given already. Its length aside, which the writer learns only when it finishes, each
+annotation it takes resolves.
 
 Annotation records let a live recorder keep what it generates as safely as its data. The footer
 does not index them, so a reader with random access never sees them. When a file is finished or
@@ -629,6 +636,14 @@ an item maps to included, rather than write a file no reader opens.
 tickwave's writer compresses overview blocks at zstd level 3, whatever level it compresses blocks
 and the footer at. A level that moves into overview blocks writes every settled one at once, and a
 slower level would hold a recorder up there.
+
+tickwave writes, repairs and checks at most 1,048,576 overview blocks for one recording, whose rows
+take 16 MiB of the footer. With a finest level of 2^10-tick buckets at 1 GHz, the bound falls at
+68.7 minutes, and each shift coarser doubles it. Converting or merging, tickwave knows the length
+before it writes: it takes the densest channel's finest level, or the least coarser one that keeps
+the bound. Its writer, which a live recorder drives without knowing where the recording ends,
+refuses the block or flush whose end passes the bound for its declared level. Repair and verify
+refuse such a file.
 
 A live recorder syncs the file to disk after each block, so how long it keeps a block open bounds
 what a crash loses.

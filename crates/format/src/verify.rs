@@ -2,10 +2,13 @@
 //! and sample, every gap and run, the overview and the content id. A channel stores its source's
 //! ticks, so the two compare directly.
 
-use std::collections::VecDeque;
+use std::collections::HashMap;
 use std::io::Read;
+use std::sync::Arc;
 
-use crate::decode::{BlockChannel, DecodeError, MAX_DECODED, inflate_limited};
+use crate::decode::{
+    BlockChannel, DecodeError, MAX_DECODED, corrupt, inflate_limited, overview_room,
+};
 use crate::hash::{self, ChannelHasher};
 use crate::header::{AnalogCoding, ChannelKind, DeclaredKind, Header};
 use crate::model::{
@@ -68,6 +71,33 @@ pub fn verify(file: impl Read, source: Recording) -> Result<Header, VerifyError>
     verify_limited(file, source, MAX_DECODED)
 }
 
+/// An overview block the content settles, as verify waits for the file's: its buckets, and the
+/// hash of its decoded bytes, which the file's must match.
+struct Expected {
+    buckets: u64,
+    raw: blake3::Hash,
+}
+
+impl Expected {
+    /// `last` is the level hashed before: a span with no item settles block after block of one.
+    fn of(s: Settled, last: &mut Option<(Arc<Level>, blake3::Hash)>) -> Self {
+        let raw = match last {
+            Some((level, raw)) if Arc::ptr_eq(level, &s.level) => *raw,
+            _ => {
+                let mut raw = Vec::new();
+                overview::write_level(&s.level, &mut raw);
+                let raw = blake3::hash(&raw);
+                *last = Some((Arc::clone(&s.level), raw));
+                raw
+            }
+        };
+        Self {
+            buckets: s.level.buckets,
+            raw,
+        }
+    }
+}
+
 /// `verify`, holding at most `max` decoded bytes a frame.
 pub fn verify_limited(
     mut file: impl Read,
@@ -118,7 +148,9 @@ pub fn verify_limited(
     }
     let mut reader = Reader::new(max);
     let mut builder: Option<Builder> = None;
-    let mut expected: VecDeque<Settled> = VecDeque::new();
+    let mut expected: HashMap<(u8, u64), Expected> = HashMap::new();
+    let mut last_level = None;
+    let mut last_frame: Option<(Vec<u8>, blake3::Hash)> = None;
     let mut head: Option<Vec<Level>> = None;
     let mut columns = Vec::new();
     let mut header = None;
@@ -256,7 +288,13 @@ pub fn verify_limited(
                     .ok_or_else(|| {
                         mismatch(format!("channel {}: a gap has no place", names[c].0))
                     })?;
-                builder.as_mut().unwrap().gap(c, gap, to);
+                let Some(b) = builder.as_mut() else {
+                    return Err(mismatch(format!(
+                        "channel {}: a gap after the block that ends the recording",
+                        names[c].0
+                    )));
+                };
+                b.gap(c, gap, to);
             }
             Event::Run { channel: c, run } => {
                 let Want::Analog { first, breaks, .. } = &wants[c] else {
@@ -272,7 +310,20 @@ pub fn verify_limited(
                 }
             }
             Event::Block(block) => {
-                let b = builder.as_mut().unwrap();
+                // The block that ends at the length finishes the overview; none comes after it.
+                // A block past the length, where none ends at it, is left to the length's check.
+                let Some(b) = builder.as_mut() else {
+                    return Err(mismatch(format!(
+                        "a block ends at tick {}, past the length, {length}",
+                        block.head.end
+                    )));
+                };
+                overview_room(block.head.end, b.finest()).map_err(|e| {
+                    corrupt(format!(
+                        "a block ends at tick {}, where {e}",
+                        block.head.end
+                    ))
+                })?;
                 for (c, got) in block.channels.iter().enumerate() {
                     let name = &names[c].0;
                     let source = got.source_ticks().unwrap_or_default();
@@ -337,39 +388,54 @@ pub fn verify_limited(
                         _ => unreachable!("blocks follow the declaration"),
                     }
                 }
-                b.settle(block.head.end)
-                    .map_err(|e| mismatch(e.to_string()))?;
-                expected.extend(b.take_settled());
+                loop {
+                    let reached = b
+                        .settle_step(block.head.end)
+                        .map_err(|e| mismatch(e.to_string()))?;
+                    for s in b.take_settled() {
+                        expected.insert((s.shift, s.k), Expected::of(s, &mut last_level));
+                    }
+                    if reached {
+                        break;
+                    }
+                }
                 if block.head.end == length {
                     let (done, last) = builder
                         .take()
                         .unwrap()
                         .finish(length)
                         .map_err(|e| mismatch(e.to_string()))?;
-                    expected.extend(last);
+                    for s in last {
+                        expected.insert((s.shift, s.k), Expected::of(s, &mut last_level));
+                    }
                     head = Some(done.head);
                 }
             }
             Event::OverviewBlock {
                 shift, k, frame, ..
             } => {
-                let want = expected
-                    .pop_front()
-                    .ok_or_else(|| mismatch("an overview block the content does not settle"))?;
-                if (want.shift, want.k) != (shift, k) {
-                    return Err(mismatch(format!(
-                        "overview block {k} of level 2^{shift} is out of place"
-                    )));
-                }
-                let n = want.level.buckets;
-                let raw =
-                    inflate_limited(&frame, overview::decoded_len(n, &columns) as usize, max)?;
-                let got = overview::parse_block(&raw, shift, n, &columns)
-                    .ok_or_else(|| mismatch(format!("overview block {k} does not parse")))?;
-                if got != *want.level {
-                    return Err(mismatch(format!(
-                        "overview level 2^{shift}, block {k}: differs from the content"
-                    )));
+                // Matched by place, not order: a writer settles a long span in steps, and the
+                // levels' blocks interleave as the steps fall.
+                let want = expected.remove(&(shift, k)).ok_or_else(|| {
+                    mismatch(format!(
+                        "overview block {k} of level 2^{shift} is out of place: the content \
+                         settles no such block before it, or the file holds it twice"
+                    ))
+                })?;
+                // A span with no item settles block after block of one level, which a writer
+                // writes as one frame repeated: that frame is checked once.
+                let repeat = last_frame
+                    .as_ref()
+                    .is_some_and(|(f, raw)| *f == frame && *raw == want.raw);
+                if !repeat {
+                    let len = overview::decoded_len(want.buckets, &columns) as usize;
+                    let raw = inflate_limited(&frame, len, max)?;
+                    if blake3::hash(&raw) != want.raw {
+                        return Err(mismatch(format!(
+                            "overview level 2^{shift}, block {k}: differs from the content"
+                        )));
+                    }
+                    last_frame = Some((frame, want.raw));
                 }
             }
             Event::Annotation(_) | Event::Skipped { .. } => {}

@@ -17,7 +17,7 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::path::Path;
 
-use ::vcd::{Command, IdCode, Parser, ScopeItem, Value, Var, VarType};
+use ::vcd::{Command, IdCode, Parser, TimescaleUnit, Value, VarType};
 use escapement_tickwave_format::model::{
     Channel, ChannelData, Digital, Ratio, Recording, Source, SourceFormat,
 };
@@ -46,16 +46,19 @@ pub fn read(path: &Path) -> Result<Import, Error> {
 /// Reads VCD text. `file_name` goes into the recording's source.
 pub fn read_from(reader: impl BufRead, file_name: &str) -> Result<Import, Error> {
     let mut parser = Parser::new(reader);
-    let header = parser.parse_header()?;
+    let header = read_header(&mut parser)?;
     let (quantity, unit) = header.timescale.ok_or(Error::NoTimescale)?;
     let timebase = reduce(unit.divisor(), u64::from(quantity)).ok_or_else(|| Error::Invalid {
         line: parser.line(),
         message: "$timescale of 0".to_owned(),
     })?;
-
-    let mut vars = Vec::new();
-    let mut comments = Vec::new();
-    collect(&header.items, &mut Vec::new(), &mut vars, &mut comments);
+    let Header {
+        vars,
+        comments,
+        date,
+        version,
+        ..
+    } = header;
 
     let mut skipped = Vec::new();
     let mut signals: Vec<Signal> = Vec::new();
@@ -131,11 +134,13 @@ pub fn read_from(reader: impl BufRead, file_name: &str) -> Result<Import, Error>
     // A last timestamp with no change marks where the dump ends, as sigrok-cli writes one. One with
     // changes is inside the capture, which then runs a tick past it.
     let now = state.now.unwrap_or(start);
-    let length = now - start + u64::from(state.written == Some(now));
-    let length = i64::try_from(length).map_err(|_| Error::Invalid {
-        line: parser.line(),
-        message: format!("{length} ticks is too long"),
-    })?;
+    let length = (now - start)
+        .checked_add(u64::from(state.written == Some(now)))
+        .and_then(|l| i64::try_from(l).ok())
+        .ok_or_else(|| Error::Invalid {
+            line: parser.line(),
+            message: format!("{} ticks and one past them is too long", now - start),
+        })?;
 
     let mut channels = Vec::new();
     for (name, slot) in digital {
@@ -169,7 +174,7 @@ pub fn read_from(reader: impl BufRead, file_name: &str) -> Result<Import, Error>
     }
 
     let mut extra = BTreeMap::new();
-    if let Some(date) = header.date {
+    if let Some(date) = date {
         extra.insert("date".to_owned(), date);
     }
     if !comments.is_empty() {
@@ -188,7 +193,7 @@ pub fn read_from(reader: impl BufRead, file_name: &str) -> Result<Import, Error>
             derived: Vec::new(),
             sources: vec![Source {
                 files: vec![file_name.to_owned()],
-                software: header.version,
+                software: version,
                 begin_s: Some(start as f64 * timebase.den() as f64 / timebase.num() as f64),
                 extra,
                 ..Source::new(SourceFormat::Vcd, timebase)
@@ -234,33 +239,93 @@ fn unread(var: &Var) -> Option<String> {
     }
 }
 
-/// Flattens the scope tree into (full name, variable), in declaration order.
-fn collect(
-    items: &[ScopeItem],
-    path: &mut Vec<String>,
-    vars: &mut Vec<(String, Var)>,
-    comments: &mut Vec<String>,
-) {
-    for item in items {
-        match item {
-            ScopeItem::Scope(scope) => {
-                path.push(scope.identifier.clone());
-                collect(&scope.items, path, vars, comments);
-                path.pop();
+/// A `$var` as the reader takes it.
+struct Var {
+    var_type: VarType,
+    size: u32,
+    code: IdCode,
+}
+
+/// What the header declares: its variables by full name, in declaration order, and its comments
+/// in every scope.
+struct Header {
+    timescale: Option<(u32, TimescaleUnit)>,
+    date: Option<String>,
+    version: Option<String>,
+    vars: Vec<(String, Var)>,
+    comments: Vec<String>,
+}
+
+/// The header, read command by command, as `Parser::parse_header` reads it but with no tree of
+/// scopes: that one recurses for each scope inside another, so a deep enough nesting overflows
+/// the stack, and dropping the tree it made does too.
+fn read_header(parser: &mut Parser<impl BufRead>) -> Result<Header, Error> {
+    let mut header = Header {
+        timescale: None,
+        date: None,
+        version: None,
+        vars: Vec::new(),
+        comments: Vec::new(),
+    };
+    // The scope path, joined with `.`, and where each scope's own name starts in it.
+    let mut path = String::new();
+    let mut starts = Vec::new();
+    loop {
+        let command = parser.next().transpose()?;
+        let line = parser.line();
+        let refused = |message: &str| Error::Invalid {
+            line,
+            message: message.to_owned(),
+        };
+        let in_scope = !starts.is_empty();
+        match command {
+            Some(Command::Enddefinitions) if !in_scope => return Ok(header),
+            Some(Command::Comment(c)) => header.comments.push(c),
+            Some(Command::Date(d)) if !in_scope => header.date = Some(d),
+            Some(Command::Version(v)) if !in_scope => header.version = Some(v),
+            Some(Command::Timescale(q, u)) if !in_scope => header.timescale = Some((q, u)),
+            Some(Command::ScopeDef(_, id)) => {
+                starts.push(path.len());
+                if in_scope {
+                    path.push('.');
+                }
+                path.push_str(&id);
             }
-            ScopeItem::Var(var) => {
-                let mut name = path.join(".");
+            Some(Command::Upscope) => {
+                let Some(at) = starts.pop() else {
+                    return Err(refused("$upscope with no $scope open"));
+                };
+                path.truncate(at);
+            }
+            Some(Command::VarDef(var_type, size, code, reference, index)) => {
+                let mut name = path.clone();
                 if !name.is_empty() {
                     name.push('.');
                 }
-                name.push_str(&var.reference);
-                if let Some(index) = var.index {
+                name.push_str(&reference);
+                if let Some(index) = index {
                     name.push_str(&index.to_string());
                 }
-                vars.push((name, var.clone()));
+                header.vars.push((
+                    name,
+                    Var {
+                        var_type,
+                        size,
+                        code,
+                    },
+                ));
             }
-            ScopeItem::Comment(comment) => comments.push(comment.clone()),
-            _ => {}
+            Some(other) => {
+                let place = if in_scope { " in a $scope" } else { "" };
+                return Err(refused(&format!("{other:?}{place} before $enddefinitions")));
+            }
+            None => {
+                return Err(refused(if in_scope {
+                    "the file ends with a $scope open"
+                } else {
+                    "the file ends before $enddefinitions"
+                }));
+            }
         }
     }
 }

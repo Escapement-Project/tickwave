@@ -437,7 +437,14 @@ impl Reader {
                     frame: frame.to_vec(),
                 }
             }
-            Kind::Annotation => Event::Annotation(serde_json::from_slice(payload)?),
+            Kind::Annotation => {
+                let a: record::Annotation = serde_json::from_slice(payload)?;
+                // Repair and recut write each source's annotations to a file named after it.
+                if let Some(problem) = record::check_source(&a.source) {
+                    return Err(corrupt(format!("an annotation record: {problem}")));
+                }
+                Event::Annotation(a)
+            }
             Kind::Footer => {
                 // The footer parses as a random-access reader parses it: from its own bytes and
                 // a trailer made for them, which the real one is checked against next.

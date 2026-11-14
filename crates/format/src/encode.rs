@@ -5,9 +5,11 @@
 use std::collections::BTreeMap;
 use std::io::Write;
 
+use crate::decode::overview_room;
 use crate::header::{AnalogCoding, Declaration, DeclaredChannel, DeclaredKind, SourceHeader};
 use crate::mapping::{self, Mapping, Spacing};
 use crate::model::{Break, ChannelData, Edges, Gap, Recording, Sample, Samples, run_sample_tick};
+use crate::overview;
 use crate::samples::coding_name;
 pub use crate::writer::{
     Bundle, Finish, Finished, WriteError, WriteOptions, Writer, code_of, generator_file,
@@ -258,9 +260,12 @@ pub fn encode_to(
     let maps: Vec<Mapping> = (0..declaration.channels.len())
         .map(|c| declaration.mapping(c).unwrap_or(Mapping::IDENTITY))
         .collect();
-    declaration.overview_shift = options
-        .overview_shift
-        .unwrap_or_else(|| mapping::finest_shift(densest(&declaration, &maps, &items)));
+    declaration.overview_shift = options.overview_shift.unwrap_or_else(|| {
+        finest_kept(
+            length,
+            mapping::finest_shift(densest(&declaration, &maps, &items)),
+        )
+    });
     let batch = options
         .batch
         .unwrap_or_else(|| 4 * rayon::current_num_threads().max(1));
@@ -394,9 +399,40 @@ fn densest(declaration: &Declaration, maps: &[Mapping], items: &[(u64, i64)]) ->
     Spacing::closest(spacings)
 }
 
+/// The finest overview level for a recording of `length`: the densest channel's, `dense`, or the
+/// least coarser one whose overview blocks tickwave keeps (`decode::MAX_OVERVIEW_BLOCKS`). The
+/// length is known here; a live writer, which learns it as it goes, refuses past the bound
+/// instead.
+fn finest_kept(length: i64, dense: u8) -> u8 {
+    (dense..overview::MAX_SHIFT)
+        .find(|&shift| overview_room(length, shift).is_ok())
+        .unwrap_or(overview::MAX_SHIFT)
+}
+
 /// Encodes `recording` into memory.
 pub fn encode(recording: Recording, options: &Options) -> Result<Vec<u8>, EncodeError> {
     let mut out = Vec::new();
     encode_to(recording, options, &mut out)?;
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Where a recording's overview passes 2^20 blocks, counted by hand from FORMAT.md's levels:
+    /// at 2^10-tick buckets, 4,123,223,130,112 ticks is 4,026,585,088 buckets, 983,053 blocks,
+    /// and the levels at 2^14, 2^18 and 2^22 add 61,441, 3,841 and 241: 1,048,576. A tick more
+    /// starts block 983,054. Ten hours at 1 GHz needs 1,072,883 blocks at 2^13 alone, and
+    /// 572,197 in all at 2^14. The longest axis, 2^63 ticks, needs 2^20 at 2^31 before its
+    /// coarser levels, and 559,232 in all at 2^32.
+    #[test]
+    fn a_recording_past_the_overview_bound_takes_the_least_coarser_finest_level() {
+        const KEPT: i64 = 4_123_223_130_112;
+        assert_eq!(finest_kept(KEPT, 10), 10);
+        assert_eq!(finest_kept(KEPT + 1, 10), 11);
+        assert_eq!(finest_kept(KEPT + 1, 12), 12);
+        assert_eq!(finest_kept(36_000_000_000_000, 10), 14);
+        assert_eq!(finest_kept(i64::MAX, 0), 32);
+    }
 }

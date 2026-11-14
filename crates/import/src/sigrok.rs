@@ -55,8 +55,14 @@ fn invalid(message: impl Into<String>) -> Error {
 
 const VALIDATED: &str = "member checked when the file was opened";
 
-/// Samples decoded at a time by a channel's iterator.
+/// Samples decoded at a time by an analog channel's iterator.
 const BLOCK: usize = 1 << 16;
+
+/// Logic stream bytes a digital channel's iterator reads at a time.
+const CHUNK: usize = 1 << 12;
+
+/// The most a `version` or `metadata` member decompresses to.
+const SMALL: u64 = 1 << 20;
 
 /// Reads a session file.
 pub fn read(path: &Path) -> Result<Import, Error> {
@@ -108,7 +114,7 @@ pub fn read_bytes(bytes: impl Into<Arc<[u8]>>, file_name: &str) -> Result<Import
     let logic_stream = match &meta.logic {
         Some(logic) => {
             let indices = stream_members(&members, &logic.capturefile)?;
-            let mut scan = LogicScan::new(logic.unitsize);
+            let mut scan = LogicScan::new(logic);
             let stream = check_stream(&mut archive, &indices, logic.unitsize, |bytes| {
                 scan.feed(bytes)
             })?;
@@ -147,64 +153,52 @@ pub fn read_bytes(bytes: impl Into<Arc<[u8]>>, file_name: &str) -> Result<Import
         let end = ticks(samples)?;
         length = length.max(end);
         let stream = Arc::new(stream);
-        for bit in 0..unit * 8 {
-            let byte = bit / 8;
-            let mask = 1u8 << (bit % 8);
-            let toggles = scan.or[byte] & mask != scan.and[byte] & mask;
-            let set = scan.or[byte] & mask != 0;
-            let probe = bit as u32 + 1;
-            if bit >= logic.total as usize {
-                if toggles || set {
-                    skipped.push(Skipped {
-                        name: format!("bit {bit}"),
-                        reason: format!(
-                            "beyond the {} probes the metadata declares, but {}",
-                            logic.total,
-                            if toggles { "it toggles" } else { "it is set" }
-                        ),
+        for part in scan.parts {
+            match part {
+                Part::Named {
+                    bit,
+                    first,
+                    changes,
+                    ..
+                } => {
+                    let name = &logic.names[&(bit as u32 + 1)];
+                    channels.push(Channel {
+                        name: name.clone(),
+                        source_name: name.clone(),
+                        source: 0,
+                        data: ChannelData::Digital(Digital {
+                            initial: first,
+                            end,
+                            gaps: Vec::new(),
+                            count: changes,
+                            edges: Box::new(BitEdges {
+                                reader: StreamReader::new(&data, &stream),
+                                unit: unit as u64,
+                                mask: 1 << (bit % 8),
+                                level: first,
+                                tick: 0,
+                                remaining: samples,
+                                left: stream.bytes,
+                                buf: vec![0; (CHUNK as u64).min(stream.bytes) as usize],
+                                at: 0,
+                                len: 0,
+                                next: (bit / 8) as u64,
+                            }),
+                        }),
+                        shaping: Default::default(),
                     });
                 }
-                continue;
+                Part::Unnamed {
+                    from,
+                    to,
+                    set,
+                    clear,
+                } => {
+                    if let Some(s) = unnamed(from, to, set, clear, logic.total as usize) {
+                        skipped.push(s);
+                    }
+                }
             }
-            let Some(name) = logic.names.get(&probe) else {
-                skipped.push(Skipped {
-                    name: format!("probe{probe}"),
-                    reason: format!(
-                        "no probe{probe} key, so libsigrok treats it as disabled; its bit {}",
-                        if toggles {
-                            "toggles".to_owned()
-                        } else {
-                            format!("is always {}", u8::from(set))
-                        }
-                    ),
-                });
-                continue;
-            };
-            let initial = scan.first.get(byte).is_some_and(|b| b & mask != 0);
-            channels.push(Channel {
-                name: name.clone(),
-                source_name: name.clone(),
-                source: 0,
-                data: ChannelData::Digital(Digital {
-                    initial,
-                    end,
-                    gaps: Vec::new(),
-                    count: scan.changes[bit],
-                    edges: Box::new(BitEdges {
-                        reader: StreamReader::new(&data, &stream),
-                        unit,
-                        byte,
-                        mask,
-                        level: initial,
-                        tick: 0,
-                        remaining: samples,
-                        buf: vec![0; BLOCK * unit],
-                        pos: 0,
-                        len: 0,
-                    }),
-                }),
-                shaping: Default::default(),
-            });
         }
     }
     for (channel, stream) in meta.analog.iter().zip(analog) {
@@ -262,6 +256,52 @@ pub fn read_bytes(bytes: impl Into<Arc<[u8]>>, file_name: &str) -> Result<Import
     })
 }
 
+/// What a span of bits no probe names reports: a disabled probe always, a bit past the probes
+/// only where it is set.
+fn unnamed(from: usize, to: usize, set: bool, clear: bool, total: usize) -> Option<Skipped> {
+    let bits = if set && clear {
+        "toggles"
+    } else if set {
+        "is always 1"
+    } else {
+        "is always 0"
+    };
+    match (from < total, to - from) {
+        (true, 1) => Some(Skipped {
+            name: format!("probe{}", from + 1),
+            reason: format!(
+                "no probe{} key, so libsigrok treats it as disabled; its bit {bits}",
+                from + 1
+            ),
+        }),
+        (true, _) => {
+            let some = if set && clear {
+                "some are set and some clear".to_owned()
+            } else {
+                format!("they are always {}", u8::from(set))
+            };
+            Some(Skipped {
+                name: format!("probe{} to probe{to}", from + 1),
+                reason: format!(
+                    "no probe{} to probe{to} keys, so libsigrok treats them as disabled; {some}",
+                    from + 1
+                ),
+            })
+        }
+        (false, 1) => set.then(|| Skipped {
+            name: format!("bit {from}"),
+            reason: format!(
+                "beyond the {total} probes the metadata declares, but it {}",
+                if clear { "toggles" } else { "is set" }
+            ),
+        }),
+        (false, _) => set.then(|| Skipped {
+            name: format!("bits {from} to {}", to - 1),
+            reason: format!("beyond the {total} probes the metadata declares, but some are set"),
+        }),
+    }
+}
+
 fn ticks(samples: u64) -> Result<i64, Error> {
     i64::try_from(samples).map_err(|_| invalid(format!("{samples} samples is too many")))
 }
@@ -274,13 +314,20 @@ fn small_member(
     let index = *members
         .get(name)
         .ok_or_else(|| invalid(format!("no `{name}` member: not a sigrok session file")))?;
-    let mut file = archive.by_index(index)?;
+    let file = archive.by_index(index)?;
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
+    // Deflate can make a few bytes many: what it holds is read only as far as the bound.
+    file.take(SMALL + 1)
+        .read_to_end(&mut bytes)
         .map_err(|source| Error::Member {
             member: name.to_owned(),
             source,
         })?;
+    if bytes.len() as u64 > SMALL {
+        return Err(invalid(format!(
+            "member `{name}` is more than {SMALL} bytes"
+        )));
+    }
     Ok(bytes)
 }
 
@@ -403,58 +450,139 @@ fn check_stream(
     Ok(stream)
 }
 
-/// Which bits of the logic stream are ever set and ever clear, and its first sample.
+/// A sample's bits, in order, as the logic scan keeps them: a probe the metadata names, or a span
+/// it names none in. Every named probe costs a metadata line, and the run of bits between two is
+/// a part a bit when it is `SPLIT` bits or fewer and one part when longer, so nothing here is
+/// sized by `unitsize`.
+enum Part {
+    Named {
+        bit: usize,
+        /// Its level in the first sample, and in the last read.
+        first: bool,
+        level: bool,
+        changes: u64,
+    },
+    /// Bits `from..to`: whether any is ever set, and ever clear.
+    Unnamed {
+        from: usize,
+        to: usize,
+        set: bool,
+        clear: bool,
+    },
+}
+
+impl Part {
+    fn end(&self) -> usize {
+        match *self {
+            Part::Named { bit, .. } => bit + 1,
+            Part::Unnamed { to, .. } => to,
+        }
+    }
+}
+
+/// A run of unnamed bits up to this long is reported a bit at a time, as libsigrok's disabled
+/// probes are; a longer one as one span.
+const SPLIT: usize = 8;
+
+/// The logic stream read once through: each named probe's first level and changes, and which
+/// unnamed bits are ever set or clear.
 struct LogicScan {
     unit: usize,
+    /// The byte of its sample the next byte of the stream is.
     pos: usize,
-    or: Vec<u8>,
-    and: Vec<u8>,
-    first: Vec<u8>,
-    /// The sample being read, and the one before it.
-    sample: Vec<u8>,
-    previous: Option<Vec<u8>>,
-    /// Each bit's changes from one sample to the next: its edges.
-    changes: Vec<u64>,
+    /// Whether a whole sample has been read.
+    past_first: bool,
+    parts: Vec<Part>,
+    /// The part the bit at `pos * 8` lies in.
+    cursor: usize,
 }
 
 impl LogicScan {
-    fn new(unit: usize) -> Self {
+    fn new(logic: &Logic) -> Self {
+        let mut parts = Vec::new();
+        let span = |parts: &mut Vec<Part>, from: usize, to: usize| {
+            let unnamed = |from, to| Part::Unnamed {
+                from,
+                to,
+                set: false,
+                clear: false,
+            };
+            if to - from <= SPLIT {
+                parts.extend((from..to).map(|b| unnamed(b, b + 1)));
+            } else {
+                parts.push(unnamed(from, to));
+            }
+        };
+        let total = logic.total as usize;
+        let mut at = 0;
+        for &probe in logic.names.keys() {
+            let bit = probe as usize - 1;
+            span(&mut parts, at, bit);
+            parts.push(Part::Named {
+                bit,
+                first: false,
+                level: false,
+                changes: 0,
+            });
+            at = bit + 1;
+        }
+        span(&mut parts, at, total);
+        span(&mut parts, total, logic.unitsize * 8);
         Self {
-            unit,
+            unit: logic.unitsize,
             pos: 0,
-            or: vec![0; unit],
-            and: vec![0xff; unit],
-            first: Vec::with_capacity(unit),
-            sample: vec![0; unit],
-            previous: None,
-            changes: vec![0; unit * 8],
+            past_first: false,
+            parts,
+            cursor: 0,
         }
     }
 
     fn feed(&mut self, bytes: &[u8]) {
         for &b in bytes {
-            if self.first.len() < self.unit {
-                self.first.push(b);
+            let lo = self.pos * 8;
+            while self.parts[self.cursor].end() <= lo {
+                self.cursor += 1;
             }
-            self.or[self.pos] |= b;
-            self.and[self.pos] &= b;
-            self.sample[self.pos] = b;
+            let mut i = self.cursor;
+            loop {
+                match &mut self.parts[i] {
+                    Part::Named {
+                        bit,
+                        first,
+                        level,
+                        changes,
+                    } => {
+                        let now = b >> (*bit - lo) & 1 == 1;
+                        if !self.past_first {
+                            *first = now;
+                        } else if now != *level {
+                            *changes += 1;
+                        }
+                        *level = now;
+                    }
+                    Part::Unnamed {
+                        from,
+                        to,
+                        set,
+                        clear,
+                    } => {
+                        let (a, z) = ((*from).max(lo) - lo, (*to).min(lo + 8) - lo);
+                        let mask = (0xffu16 << a & 0xffu16 >> (8 - z)) as u8;
+                        *set |= b & mask != 0;
+                        *clear |= b & mask != mask;
+                    }
+                }
+                if self.parts[i].end() >= lo + 8 {
+                    break;
+                }
+                i += 1;
+            }
+            self.cursor = i;
             self.pos += 1;
             if self.pos == self.unit {
                 self.pos = 0;
-                match &mut self.previous {
-                    Some(previous) => {
-                        for (byte, (p, s)) in previous.iter_mut().zip(&self.sample).enumerate() {
-                            let mut changed = *p ^ *s;
-                            while changed != 0 {
-                                self.changes[byte * 8 + changed.trailing_zeros() as usize] += 1;
-                                changed &= changed - 1;
-                            }
-                            *p = *s;
-                        }
-                    }
-                    None => self.previous = Some(self.sample.clone()),
-                }
+                self.cursor = 0;
+                self.past_first = true;
             }
         }
     }
@@ -523,47 +651,50 @@ impl Read for StreamReader {
     }
 }
 
+/// One bit of every logic sample, read from the stream a chunk at a time: the byte holding it is
+/// all a sample needs, however wide the sample.
 struct BitEdges {
     reader: StreamReader,
-    unit: usize,
-    byte: usize,
+    unit: u64,
     mask: u8,
     level: bool,
-    /// The tick of the sample at `pos`.
+    /// The tick of the next sample.
     tick: i64,
-    /// Samples not yet decompressed.
+    /// Samples not yet looked at.
     remaining: u64,
+    /// Stream bytes not yet read.
+    left: u64,
     buf: Vec<u8>,
-    pos: usize,
+    /// The stream offset of `buf[0]`, and the bytes it holds.
+    at: u64,
     len: usize,
+    /// The stream offset of the next sample's byte.
+    next: u64,
 }
 
 impl Iterator for BitEdges {
     type Item = i64;
 
     fn next(&mut self) -> Option<i64> {
-        loop {
-            while self.pos < self.len {
-                let level = self.buf[self.pos * self.unit + self.byte] & self.mask != 0;
-                let tick = self.tick;
-                self.pos += 1;
-                self.tick += 1;
-                if level != self.level {
-                    self.level = level;
-                    return Some(tick);
-                }
+        while self.remaining > 0 {
+            while self.next >= self.at + self.len as u64 {
+                self.at += self.len as u64;
+                let n = (self.buf.len() as u64).min(self.left) as usize;
+                self.reader.read_exact(&mut self.buf[..n]).expect(VALIDATED);
+                self.left -= n as u64;
+                self.len = n;
             }
-            if self.remaining == 0 {
-                return None;
+            let level = self.buf[(self.next - self.at) as usize] & self.mask != 0;
+            let tick = self.tick;
+            self.next += self.unit;
+            self.tick += 1;
+            self.remaining -= 1;
+            if level != self.level {
+                self.level = level;
+                return Some(tick);
             }
-            let n = self.remaining.min(BLOCK as u64) as usize;
-            self.reader
-                .read_exact(&mut self.buf[..n * self.unit])
-                .expect(VALIDATED);
-            self.remaining -= n as u64;
-            self.pos = 0;
-            self.len = n;
         }
+        None
     }
 }
 

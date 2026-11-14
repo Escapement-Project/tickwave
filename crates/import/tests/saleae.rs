@@ -293,6 +293,20 @@ fn refuses_analog_off_the_digital_grid() {
     assert!(matches!(err, Error::AnalogOffGrid { .. }), "{err}");
 }
 
+/// An analog file that begins so far from the digital ones that its first sample's tick passes
+/// what an i64 holds: refused, not added past i64::MAX.
+#[test]
+fn refuses_analog_beginning_past_what_a_tick_holds() {
+    let dir = broken_from(SWD50, "analog_far", "analog_0.bin", |b| {
+        b[24..32].copy_from_slice(&1e15f64.to_le_bytes());
+    });
+    let err = saleae::read(&dir, &swd50_names(), None).unwrap_err();
+    assert!(
+        matches!(&err, Error::Unsupported { what, .. } if what.starts_with("an analog file beginning")),
+        "{err}"
+    );
+}
+
 #[test]
 fn refuses_a_downsampled_analog_file() {
     let dir = broken_from(SWD50, "downsample", "analog_1.bin", |b| {

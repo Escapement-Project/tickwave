@@ -52,7 +52,9 @@ The first line names the generator. Each later line is one annotation. Blank lin
 {"id": "misread/412093311", "kind": "misread", "start": 412093311, "end": 412094105, "channels": ["SWDIO"], "label": "parity wrong"}
 ```
 
-`version` is optional: the generator's own commit or hash, for provenance.
+`source` is the generator's name. It is not empty and holds no whitespace, `/` or `\`: tickwave
+names the generator's file after it, `rec.<source>.jsonl`, beside the recording. `version` is
+optional: the generator's own commit or hash, for provenance.
 
 ## Fields
 
@@ -143,6 +145,7 @@ the prose cites breaks the build instead of the page. It checks that:
 - `recording`, if given, names the recording's file;
 - every included file is named without a directory, is provided, and every provided file is
   included;
+- each generator's name is one the rule above allows;
 - ids are unique, hand-written ids hold no `/`, and every `ref` names a generated annotation;
 - every channel exists, a point and a span's `start` lie in `0..length`, and a span's `end` is
   not before its `start` and not past `length`;
@@ -172,7 +175,8 @@ by name finds only the first input's.
 
 An annotation whose times move outside the merged recording is left out: a span that ends at or
 before its start, or anything that starts at or past its end. A span that reaches over either end
-is cut there. A line that doesn't read is left out too. The merge counts each of these.
+is cut there. A line that doesn't read is left out too, and so is one that breaks a rule above for a
+generator's line. The merge counts each of these.
 
 Channel names in `channels` and `measure` follow the names the merge gives. A channel the merge
 leaves out is dropped from `channels`, and an annotation left with none is left out. A `measure`

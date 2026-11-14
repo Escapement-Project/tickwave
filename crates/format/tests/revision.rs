@@ -1086,7 +1086,9 @@ fn a_writer_bundles_its_annotations_with_a_sidecar_that_checks() {
     // Bundling leaves the content as it is.
     let mut plain = Writer::new(verge(), options()).unwrap();
     for start in [100, 200] {
-        let serde_json::Value::Object(m) = serde_json::json!({"id": "x", "start": start}) else {
+        let serde_json::Value::Object(m) =
+            serde_json::json!({"id": format!("x/{start}"), "start": start})
+        else {
             unreachable!()
         };
         plain.annotation("verge", m).unwrap();

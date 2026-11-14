@@ -846,3 +846,149 @@ fn columns_hold_what_the_rule_gives_at_every_zoom_across_runs() {
         }
     }
 }
+
+/// A footer whose analog channel claims 4,000,000,000 samples in a block that holds one, at
+/// 2^20 a tick so they fit in its ticks: the file opens, and a query narrower than a bucket reads
+/// samples. Their values grow with what the block gives, which it refuses, rather than taking
+/// the claimed count up front.
+#[test]
+fn a_sample_count_the_blocks_do_not_back_is_not_allocated_before_they_decode() {
+    use escapement_tickwave_format::header::AnalogCoding;
+    let timebase = Ratio::integer(1000).unwrap();
+    let d = Declaration {
+        timebase,
+        channels: vec![DeclaredChannel {
+            name: "V".into(),
+            source_name: "v".into(),
+            source: 0,
+            data: DeclaredKind::Analog {
+                unit: "V".into(),
+                period: Ratio::new(1, 1 << 20).unwrap(),
+                coding: AnalogCoding::F32,
+                significant: None,
+            },
+            shaping: Default::default(),
+        }],
+        derived: Vec::new(),
+        sources: vec![SourceHeader::new(SourceFormat::Other("t".into()), timebase)],
+        title: None,
+        meta: BTreeMap::new(),
+        overview_shift: 12,
+    };
+    let mut w = Writer::new(d, WriteOptions::default()).unwrap();
+    w.run(0, 0, 0).unwrap();
+    w.sample(0, 1.5f32).unwrap();
+    let mut file = w.take_output();
+    file.extend(w.finish(8192, &[], Finish::default()).unwrap().tail);
+    let mut footer = Footer::parse_file(&file).unwrap();
+    const CLAIMED: u32 = 4_000_000_000;
+    let HeaderKind::Analog { count, .. } = &mut footer.header.channels[0].data else {
+        panic!()
+    };
+    *count = u64::from(CLAIMED);
+    footer.words.of_mut(0)[0] = CLAIMED;
+    let rows: Vec<_> = footer.overview_rows.iter().flatten().copied().collect();
+    let bytes = escapement_tickwave_format::record::footer_bytes(
+        &footer.header,
+        &footer.rows,
+        &footer.words,
+        &rows,
+        &footer.overview_frame,
+    )
+    .unwrap();
+    let keep = footer.trailer.footer_offset;
+    file.truncate(keep as usize);
+    let mut tail = Vec::new();
+    escapement_tickwave_format::record::write_footer(&mut tail, keep, &bytes);
+    file.extend(tail);
+    let rec = open(&file);
+    let err = rec
+        .query(&query(0..4096, 1000, vec![0]), &AtomicBool::new(false))
+        .unwrap_err();
+    assert!(matches!(err, Error::Decode(_)), "{err}");
+}
+
+/// Markers as verge's recorder writes them: ids `marker/<tick>`, and `marker/<tick>.<n>` for the
+/// n-th further one on a tick, kind `marker` or `marker-after-loss`, a label with control
+/// characters, backslashes and bytes that aren't UTF-8 escaped as `\xNN`, a `number` value, and
+/// no end or channels. The writer takes each, its finish at the last marker's tick and one, and
+/// the bundle opens in the view with every marker.
+#[test]
+fn a_verge_recorder_s_markers_write_bundle_and_open() {
+    let timebase = Ratio::integer(96_000_000).unwrap();
+    let d = Declaration {
+        timebase,
+        channels: vec![
+            DeclaredChannel {
+                name: "V".into(),
+                source_name: "v".into(),
+                source: 0,
+                data: DeclaredKind::Analog {
+                    unit: "V".into(),
+                    period: Ratio::integer(960).unwrap(),
+                    coding: escapement_tickwave_format::header::AnalogCoding::F32,
+                    significant: None,
+                },
+                shaping: Default::default(),
+            },
+            DeclaredChannel {
+                name: "DIO0".into(),
+                source_name: "dio0".into(),
+                source: 0,
+                data: DeclaredKind::Digital { initial: false },
+                shaping: Default::default(),
+            },
+        ],
+        derived: Vec::new(),
+        sources: vec![SourceHeader::new(
+            SourceFormat::Other("verge-energy".into()),
+            timebase,
+        )],
+        title: None,
+        meta: BTreeMap::new(),
+        overview_shift: 20,
+    };
+    let mut w = Writer::new(d, WriteOptions::default()).unwrap();
+    w.run(0, 0, 0).unwrap();
+    for i in 0..6 {
+        w.sample(0, i as f32).unwrap();
+    }
+    w.edge(1, 5_000).unwrap();
+    for i in 6..100 {
+        w.sample(0, i as f32).unwrap();
+    }
+    let ticks = [960, 9_600, 9_600, 9_600, 48_000, 95_040];
+    let mut seen: BTreeMap<i64, u32> = BTreeMap::new();
+    for (n, &tick) in ticks.iter().enumerate() {
+        let again = seen.entry(tick).or_default();
+        let id = match *again {
+            0 => format!("marker/{tick}"),
+            k => format!("marker/{tick}.{k}"),
+        };
+        *again += 1;
+        let kind = if n == 4 {
+            "marker-after-loss"
+        } else {
+            "marker"
+        };
+        let serde_json::Value::Object(m) = serde_json::json!({
+            "id": id,
+            "kind": kind,
+            "start": tick,
+            "label": "step \\x07 \\\\ \\xff",
+            "values": {"number": n.to_string()},
+        }) else {
+            unreachable!()
+        };
+        w.annotation("verge", m).unwrap();
+    }
+    let mut file = w.take_output();
+    let finish = Finish {
+        bundle: Some(escapement_tickwave_format::writer::Bundle::Generated { stem: "rec".into() }),
+        ..Finish::default()
+    };
+    let length = ticks.iter().max().unwrap() + 1;
+    file.extend(w.finish(length, &[length], finish).unwrap().tail);
+    let rec = open(&file);
+    assert_eq!(rec.marker_count(), ticks.len());
+}

@@ -135,15 +135,30 @@ pub enum WriteError {
     Extra { index: usize, key: String },
     #[error("extra keys for {given} sources, but the recording has {sources}")]
     Extras { given: usize, sources: usize },
-    #[error("an annotation is not a JSON object with a tick `start`: {0}")]
+    /// A caller's annotation that would not resolve in a sidecar: which, and the rule it breaks.
+    #[error("{0}")]
     Annotation(String),
     #[error("the footer is {0} bytes, more than its u32 length holds")]
     FooterTooLarge(usize),
+    #[error(
+        "tick {end} needs {blocks} overview blocks at 2^{shift}-tick buckets, more than tickwave \
+         keeps ({max}); a coarser overview_shift reaches further"
+    )]
+    Overview {
+        end: i64,
+        blocks: u64,
+        shift: u8,
+        max: u64,
+    },
     #[error("the header would not read back: {0}")]
     Header(String),
     #[error("zstd: {0}")]
     Zstd(#[from] std::io::Error),
 }
+
+/// The most overview blocks the writer keeps queued before it writes what waits, the blocks of a
+/// batch not yet full included.
+const QUEUED_OVERVIEW: usize = 64;
 
 /// The zstd level overview blocks are compressed at, whatever `WriteOptions::level`: a level
 /// that moves into overview blocks writes every settled one at once.
@@ -491,6 +506,25 @@ pub(crate) fn bundled_files(
     files
 }
 
+/// Overview rows a level at a time, finest first. Each level's blocks are written in order from
+/// block 0, and the levels interleave as a long span settles in steps: a sort would take the
+/// steps' runs one by one.
+pub(crate) fn by_level(rows: Vec<(u8, u64, OverviewRow)>) -> Vec<(u8, u64, OverviewRow)> {
+    let mut levels = [false; 64];
+    for &(shift, ..) in &rows {
+        levels[usize::from(shift)] = true;
+    }
+    let out: Vec<_> = (0..64u8)
+        .filter(|&shift| levels[usize::from(shift)])
+        .flat_map(|shift| rows.iter().filter(move |r| r.0 == shift).copied())
+        .collect();
+    debug_assert!(
+        out.windows(2).all(|w| w[0].0 != w[1].0 || w[0].1 < w[1].1),
+        "each level's overview blocks in order"
+    );
+    out
+}
+
 /// A generator file: its first line, then `lines` (ANNOTATIONS.md).
 pub fn generator_file(
     source: &str,
@@ -565,8 +599,10 @@ pub struct Writer {
     overview_rows: Vec<(u8, u64, OverviewRow)>,
     queue: Vec<Queued>,
     queued_blocks: usize,
+    queued_overview: usize,
     overview: Builder,
     annotations: Chunks<record::Annotation>,
+    lines: crate::annotations::Lines,
     /// The last overview block's level and its decoded bytes: a span with no item settles block
     /// after block of one shared level, which is written out once.
     last_level: Option<(Arc<overview::Level>, Arc<Vec<u8>>)>,
@@ -635,6 +671,10 @@ impl Writer {
         let mut out = Vec::new();
         out.extend_from_slice(&Preamble::CURRENT.to_bytes());
         record::write(&mut out, Kind::Declaration, &[&json]);
+        let lines = crate::annotations::Lines::new(declaration.channels.iter().map(|c| {
+            let digital = matches!(c.data, DeclaredKind::Digital { .. });
+            (c.name.clone(), digital)
+        }));
         let mut writer = Self {
             overview: Builder::new(
                 declaration.overview_shift,
@@ -655,7 +695,9 @@ impl Writer {
             overview_rows: Vec::new(),
             queue: Vec::new(),
             queued_blocks: 0,
+            queued_overview: 0,
             annotations: Chunks::new(),
+            lines,
             last_level: None,
             last_frame: None,
         };
@@ -1015,11 +1057,10 @@ impl Writer {
         source: &str,
         annotation: serde_json::Map<String, serde_json::Value>,
     ) -> Result<(), WriteError> {
-        if annotation.get("start").and_then(|s| s.as_i64()).is_none() {
-            return Err(WriteError::Annotation(
-                serde_json::to_string(&annotation).expect("a map serialises"),
-            ));
-        }
+        // As `resolve` reads a generator's line, so a bundle of them resolves.
+        self.lines
+            .take(source, &annotation)
+            .map_err(WriteError::Annotation)?;
         let a = record::Annotation {
             source: source.to_owned(),
             annotation,
@@ -1055,6 +1096,14 @@ impl Writer {
 
     /// Closes the open block at `end` and opens the next there.
     fn close(&mut self, end: i64) -> Result<(), WriteError> {
+        crate::decode::overview_room(end, self.declaration.overview_shift).map_err(|past| {
+            WriteError::Overview {
+                end,
+                blocks: past.blocks,
+                shift: past.finest,
+                max: crate::decode::MAX_OVERVIEW_BLOCKS,
+            }
+        })?;
         let open = std::mem::replace(&mut self.open, Open::empty(end));
         let raw = assemble(&open.sections(), &self.codings);
         let decoded_length =
@@ -1095,9 +1144,19 @@ impl Writer {
         self.open = self.new_block(end);
         // A derived channel's operand sample still waiting for its partner never gets one: the
         // partner would come at a tick before the next block.
-        self.overview.settle(end)?;
-        for settled in self.overview.take_settled() {
-            self.queue_overview(settled);
+        // A long span settles overview blocks by the thousand, which hold their buckets until
+        // written, and a snapshot decodes each one still queued.
+        loop {
+            let reached = self.overview.settle_step(end)?;
+            for settled in self.overview.take_settled() {
+                self.queue_overview(settled);
+                if self.queued_overview >= QUEUED_OVERVIEW {
+                    self.drain_queue()?;
+                }
+            }
+            if reached {
+                break;
+            }
         }
         if self.queued_blocks >= self.options.batch {
             self.drain_queue()?;
@@ -1128,6 +1187,7 @@ impl Writer {
             }
         };
         self.queue.push(Queued::Overview { shift, k, raw });
+        self.queued_overview += 1;
     }
 
     /// Compresses what waits, together, and writes it in order. An overview block whose bytes are
@@ -1147,17 +1207,33 @@ impl Writer {
                 _ => false,
             })
             .collect();
-        let frames = self
+        let frame = |(q, &repeat): (&Queued, &bool)| match q {
+            Queued::Block { raw, .. } => compress(raw, level).map(Some),
+            Queued::Overview { .. } if repeat => Ok(None),
+            Queued::Overview { raw, .. } => compress(raw, OVERVIEW_BLOCK_LEVEL).map(Some),
+            Queued::Record(_) => Ok(None),
+        };
+        // A quiet span queues a few overview blocks to compress and many repeats: too little to
+        // be worth the threads, which a span with an item in every block is.
+        let to_compress = self
             .queue
-            .par_iter()
+            .iter()
             .zip(&repeats)
-            .map(|(q, &repeat)| match q {
-                Queued::Block { raw, .. } => compress(raw, level).map(Some),
-                Queued::Overview { .. } if repeat => Ok(None),
-                Queued::Overview { raw, .. } => compress(raw, OVERVIEW_BLOCK_LEVEL).map(Some),
-                Queued::Record(_) => Ok(None),
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+            .filter(|&(q, &repeat)| !repeat && !matches!(q, Queued::Record(_)))
+            .count();
+        let frames = if self.queued_blocks > 0 || to_compress >= 8 {
+            self.queue
+                .par_iter()
+                .zip(&repeats)
+                .map(frame)
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            self.queue
+                .iter()
+                .zip(&repeats)
+                .map(frame)
+                .collect::<Result<Vec<_>, _>>()?
+        };
         let channels = self.states.len();
         for (q, frame) in std::mem::take(&mut self.queue).into_iter().zip(frames) {
             let at = self.position();
@@ -1210,6 +1286,7 @@ impl Writer {
             }
         }
         self.queued_blocks = 0;
+        self.queued_overview = 0;
         Ok(())
     }
 
@@ -1453,8 +1530,7 @@ impl Writer {
                 shaping: declared.shaping.clone(),
             });
         }
-        let mut overview_rows = std::mem::take(&mut self.overview_rows);
-        overview_rows.sort_by_key(|&(shift, k, _)| (shift, k));
+        let overview_rows = by_level(std::mem::take(&mut self.overview_rows));
         let rows: Vec<BlockRow> = self.written.iter().map(|w| w.row).collect();
         let mut words = Words::with_capacity(self.declaration.channels.len(), rows.len());
         for w in self.written.iter() {

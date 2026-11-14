@@ -747,3 +747,156 @@ fn a_gap_after_the_block_holding_its_end_is_refused_in_order() {
     };
     assert!(err.to_string().contains("out of place"), "{err}");
 }
+
+/// A recording cut off after its first level has gone into overview blocks: edges every 1,000
+/// ticks to past 2^21, where the level of 16-tick buckets has more than 2^17, flushed as it goes.
+fn cut_with_overview_blocks() -> (Vec<u8>, Vec<std::ops::Range<usize>>) {
+    let mut w = Writer::new(declaration(), options()).unwrap();
+    for k in 1..2_200 {
+        w.edge(0, 1_000 * k).unwrap();
+        if k % 500 == 0 {
+            w.flush(1_000 * k + 1).unwrap();
+        }
+    }
+    w.flush(2_200_000).unwrap();
+    let file = w.take_output();
+    let mut overview = Vec::new();
+    let mut at = escapement_tickwave_format::header::PREAMBLE_LEN;
+    while let record::Next::Record { kind, len, .. } = record::next(&file[at..], usize::MAX) {
+        if kind == Kind::OverviewBlock as u8 {
+            overview.push(at..at + len);
+        }
+        at += len;
+    }
+    (file, overview)
+}
+
+#[test]
+fn a_cut_off_file_holding_an_overview_block_its_content_does_not_give_is_not_repaired() {
+    use escapement_tickwave_format::repair::RepairError;
+    let (file, overview) = cut_with_overview_blocks();
+    assert!(overview.len() > 1, "{} overview blocks", overview.len());
+    repair(&file, 3).expect("the file as written repairs");
+    // A block past the level's last.
+    let mut stray = file.clone();
+    let mut payload = record::overview_head(4, 9_999).to_vec();
+    payload.extend_from_slice(&file[overview[0].start + 5 + record::OVERVIEW_HEAD_LEN..][..1]);
+    record::write(&mut stray, Kind::OverviewBlock, &[&payload]);
+    // A block written twice.
+    let twice = [&file[..], &file[overview[0].clone()]].concat();
+    for (what, bytes) in [("a stray block", stray), ("a block twice", twice)] {
+        assert!(
+            matches!(repair(&bytes, 3), Err(RepairError::Overview)),
+            "{what}: {:?}",
+            repair(&bytes, 3).map(|r| r.keep)
+        );
+    }
+}
+
+/// A file whose records go on past the block that ends at its source's length: a gap, then a
+/// block. Verify finishes the overview at that block, so what follows is refused rather than
+/// taken into an overview no longer there.
+#[test]
+fn verify_refuses_a_gap_or_a_block_past_the_source_s_length() {
+    let source = |gaps: Vec<Gap>| Recording {
+        timebase: Ratio::integer(96_000_000).unwrap(),
+        length: 10,
+        channels: vec![
+            Channel {
+                name: "A".into(),
+                source_name: "dio0".into(),
+                source: 0,
+                data: ChannelData::Digital(Digital {
+                    initial: false,
+                    end: 10,
+                    count: 0,
+                    edges: Box::new(std::iter::empty()),
+                    gaps,
+                }),
+                shaping: Default::default(),
+            },
+            Channel {
+                name: "V".into(),
+                source_name: "v".into(),
+                source: 0,
+                data: ChannelData::Analog(Analog {
+                    unit: "V".into(),
+                    first: 0,
+                    period: Ratio::integer(10).unwrap(),
+                    count: 0,
+                    breaks: Vec::new(),
+                    significant: None,
+                    samples: Samples::F32(Box::new(std::iter::empty())),
+                }),
+                shaping: Default::default(),
+            },
+        ],
+        derived: Vec::new(),
+        sources: vec![Source::new(
+            SourceFormat::Other("test".into()),
+            Ratio::integer(96_000_000).unwrap(),
+        )],
+    };
+    let gap = Gap {
+        from: 12,
+        to: 15,
+        level: false,
+    };
+    for with_gap in [false, true] {
+        let mut w = Writer::new(declaration(), options()).unwrap();
+        w.flush(10).unwrap();
+        if with_gap {
+            w.gap(0, gap).unwrap();
+        }
+        let mut file = w.take_output();
+        file.extend(w.finish(20, &[20], Finish::default()).unwrap().tail);
+        let gaps = if with_gap { vec![gap] } else { Vec::new() };
+        let err = verify(&file[..], source(gaps)).unwrap_err().to_string();
+        let want = if with_gap {
+            "channel A: a gap after the block that ends the recording"
+        } else {
+            "a block ends at tick 20, past the length, 10"
+        };
+        assert_eq!(err, want);
+    }
+}
+
+/// A generator's name names its file, `<stem>.<source>.jsonl` beside the recording, which repair
+/// and recut write. The writer refuses a name that is empty or holds whitespace, a '/' or a '\',
+/// and the in-order reader refuses an annotation record that carries one, so repair never names
+/// a file outside the recording's folder.
+#[test]
+fn an_annotation_source_that_can_t_name_a_file_on_its_own_is_refused() {
+    let mark = || {
+        let mut m = serde_json::Map::new();
+        m.insert("id".into(), "m".into());
+        m.insert("start".into(), 1.into());
+        m
+    };
+    for source in ["verge", "", "a b", "x/../../escaped", "x\\..\\escaped"] {
+        let named = source == "verge";
+        let mut w = Writer::new(declaration(), options()).unwrap();
+        let wrote = w.annotation(source, mark());
+        w.edge(0, 1).unwrap();
+        w.flush(2).unwrap();
+        let mut file = w.take_output();
+        let a = serde_json::json!({"source": source, "annotation": {"id": "n", "start": 1}})
+            .to_string();
+        record::write(&mut file, Kind::Annotation, &[a.as_bytes()]);
+        let repaired = repair(&file, 3);
+        if named {
+            wrote.unwrap();
+            assert_eq!(repaired.unwrap().generated["verge"].len(), 2);
+            continue;
+        }
+        match wrote {
+            Err(WriteError::Annotation(e)) if e.contains("generator name") => {}
+            other => panic!("{source:?}: written: {other:?}"),
+        }
+        let err = repaired.map(|r| r.keep).unwrap_err().to_string();
+        assert!(
+            err.starts_with("an annotation record: ") && err.contains("generator name"),
+            "{source:?}: {err}"
+        );
+    }
+}

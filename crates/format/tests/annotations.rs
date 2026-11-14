@@ -459,3 +459,19 @@ fn a_span_may_end_at_the_length_and_a_point_may_not_sit_there() {
     let past = format!("{GENERATED}{{\"id\": \"edge/2\", \"start\": 1000000}}\n");
     assert_problem(&problems(HAND, &past), "fall outside the capture");
 }
+
+/// A generator file's head names the generator, and its file is named after it: a name holding
+/// a path separator, of either kind, is refused.
+#[test]
+fn a_generator_name_holding_a_path_separator_is_refused() {
+    for name in ["wire/swd", "wire\\swd"] {
+        let text = GENERATED.replace("\"wire_swd\"", &serde_json::to_string(name).unwrap());
+        let problems =
+            resolve(HAND, &included(&text), &header(), Some("rec.tickwave")).unwrap_err();
+        let want = format!(
+            "rec.wire_swd.jsonl: generator name {name:?} holds a '/' or '\\', and its file is named \
+             on its own"
+        );
+        assert!(problems.contains(&want), "{problems:?}");
+    }
+}

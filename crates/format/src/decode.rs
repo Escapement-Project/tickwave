@@ -63,6 +63,57 @@ pub fn buffer(len: usize, max: usize) -> Result<Vec<u8>, DecodeError> {
 /// or the footer's overview. The format sets no maximum, and a file can state up to 4 GiB.
 pub const MAX_DECODED: usize = 64 << 20;
 
+/// The most overview blocks tickwave writes, repairs or checks for one recording: their rows
+/// take 16 MiB of the footer's index, a quarter of what an in-order reader holds of one record
+/// (`MAX_DECODED`). Settling them costs a span about a third of a second natively; the format
+/// would allow four times as many, at four times the cost.
+pub(crate) const MAX_OVERVIEW_BLOCKS: u64 = (MAX_DECODED / OverviewRow::SIZE / 4) as u64;
+
+/// A recording reaching axis tick `end`, its finest overview level `finest`, whose overview
+/// blocks pass `MAX_OVERVIEW_BLOCKS`.
+#[derive(Debug)]
+pub(crate) struct OverviewPast {
+    pub end: i64,
+    pub finest: u8,
+    pub blocks: u64,
+}
+
+impl std::fmt::Display for OverviewPast {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            end,
+            finest,
+            blocks,
+        } = self;
+        write!(
+            f,
+            "its finest overview level, of 2^{finest}-tick buckets, needs {blocks} overview blocks \
+             to reach tick {end}, more than tickwave keeps ({MAX_OVERVIEW_BLOCKS})"
+        )
+    }
+}
+
+/// Whether tickwave keeps the overview of a recording reaching axis tick `end`, its finest
+/// overview level `finest`: the overview blocks the format sets for it are no more than
+/// `MAX_OVERVIEW_BLOCKS`. Settling the overview costs time and memory for each of those blocks,
+/// so whatever settles it, for a span a file or a caller states, is held to this first.
+pub(crate) fn overview_room(end: i64, finest: u8) -> Result<(), OverviewPast> {
+    let plan = overview::plan(end, finest);
+    let blocks: u64 = plan
+        .blocks
+        .iter()
+        .map(|&shift| overview::block_count(end, shift))
+        .sum();
+    if blocks > MAX_OVERVIEW_BLOCKS {
+        return Err(OverviewPast {
+            end,
+            finest,
+            blocks,
+        });
+    }
+    Ok(())
+}
+
 /// Decompresses exactly one zstd frame, which must fill `frame`, come to exactly `len` bytes and
 /// carry a checksum that matches. A skippable frame, a frame that names a dictionary, or any byte
 /// after the frame is refused, and so is a `len` past `MAX_DECODED`.
@@ -250,6 +301,16 @@ pub(crate) fn check_declaration(d: &Declaration) -> Result<(), DecodeError> {
                 "source {s}'s origin or align is past 2^53"
             )));
         }
+        // JSON holds no NaN or infinity: a writer would write it as null.
+        if [source.begin_s, source.trigger_s]
+            .iter()
+            .flatten()
+            .any(|t| !t.is_finite())
+        {
+            return Err(corrupt(format!(
+                "source {s}'s begin_s or trigger_s is not a finite number"
+            )));
+        }
         if !d.channels.iter().any(|c| c.source as usize == s) {
             return Err(corrupt(format!("source {s} is no channel's source")));
         }
@@ -304,10 +365,19 @@ pub(crate) fn check_declaration(d: &Declaration) -> Result<(), DecodeError> {
         }
         match coding {
             AnalogCoding::F32 | AnalogCoding::F64 => {}
-            AnalogCoding::Codes { bits, .. } => {
+            AnalogCoding::Codes {
+                bits,
+                scale,
+                offset,
+            } => {
                 if !(1..=16).contains(bits) {
                     return Err(corrupt(format!(
                         "channel {name}'s codes are {bits} bits; a codes coding holds 1 to 16"
+                    )));
+                }
+                if !scale.is_finite() || !offset.is_finite() {
+                    return Err(corrupt(format!(
+                        "channel {name}'s codes scale or offset is not a finite number"
                     )));
                 }
             }

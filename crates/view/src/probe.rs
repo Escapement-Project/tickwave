@@ -275,29 +275,24 @@ pub fn find_edge(
     forward: bool,
     cancel: &AtomicBool,
 ) -> Result<Option<i64>, Error> {
+    // Every edge lies in the recording's ticks.
+    let (lo, hi) = (lo.max(0), hi.min(rec.length));
     if hi <= lo {
         return Ok(None);
     }
-    let direct = || -> Result<Option<i64>, Error> {
-        let (_, t) = rec.edges(channel, lo, hi, cancel)?;
-        Ok(if forward { t.first() } else { t.last() }
-            .copied()
-            .filter(|x| (lo..hi).contains(x)))
-    };
     if hi - lo <= DIRECT {
-        return direct();
+        return edge_in(rec, channel, lo, hi, forward, cancel);
     }
     let Some(level) = rec.level_for(((hi - lo + FAN - 1) / FAN) as f64) else {
-        return direct();
+        return edge_in(rec, channel, lo, hi, forward, cancel);
     };
     let shift = rec.levels[level].shift;
     let bucket = 1i64 << shift;
     if bucket >= hi - lo {
-        return direct();
+        return edge_in(rec, channel, lo, hi, forward, cancel);
     }
     let covered = rec.levels[level].end();
     let (k0, k1) = (lo >> shift, ((hi.min(covered) - 1) >> shift) + 1);
-    // Past the buckets a live recording has settled, its edges are searched directly.
     let mut spans: Vec<(i64, i64)> = Vec::new();
     if k1 > k0 {
         let (_, changes) = rec.digital_buckets(channel, level, k0 as u64, k1 as u64, cancel)?;
@@ -308,10 +303,15 @@ pub fn find_edge(
             }
         }
     }
-    if hi > covered {
-        spans.push((lo.max(covered), hi));
-    }
+    // Past the buckets a live recording has settled no level holds the span: its edges are
+    // searched directly.
+    let past = (hi > covered).then_some((lo.max(covered), hi));
     if !forward {
+        if let Some((s, e)) = past
+            && let Some(found) = edge_in(rec, channel, s, e, forward, cancel)?
+        {
+            return Ok(Some(found));
+        }
         spans.reverse();
     }
     for (s, e) in spans {
@@ -323,7 +323,25 @@ pub fn find_edge(
             return Ok(Some(found));
         }
     }
-    Ok(None)
+    match past {
+        Some((s, e)) if forward => edge_in(rec, channel, s, e, forward, cancel),
+        _ => Ok(None),
+    }
+}
+
+/// `find_edge` read from the edges of [lo, hi) themselves.
+fn edge_in(
+    rec: &Recording,
+    channel: usize,
+    lo: i64,
+    hi: i64,
+    forward: bool,
+    cancel: &AtomicBool,
+) -> Result<Option<i64>, Error> {
+    let (_, t) = rec.edges(channel, lo, hi, cancel)?;
+    Ok(if forward { t.first() } else { t.last() }
+        .copied()
+        .filter(|x| (lo..hi).contains(x)))
 }
 
 /// `p` with the edges it lacks found by searching `channel`.

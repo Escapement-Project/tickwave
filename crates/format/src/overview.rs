@@ -34,9 +34,13 @@ pub fn buckets(length: i64, shift: u8) -> u64 {
 
 /// Buckets in one overview block, for a level kept outside the footer.
 pub const BLOCK_BUCKETS: u64 = 1 << 12;
+/// The overview blocks of the finest level one step of a settle reaches (`Builder::settle_step`).
+pub(crate) const STEP_BLOCKS: u64 = 64;
 /// The buckets a writer seals into one shared piece of a level it holds, so a snapshot shares
 /// them rather than copying. Divides `BLOCK_BUCKETS` and is a multiple of 8.
 pub const CHUNK: u64 = 1024;
+// A block of one chunk repeated is uniform only where a block holds more than one chunk.
+const _: () = assert!(BLOCK_BUCKETS / CHUNK >= 2);
 
 /// Which levels a recording keeps, as shifts, finest first.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -840,12 +844,14 @@ struct Store {
     shift: u8,
     columns: Vec<Column>,
     first: u64,
-    sealed: Vec<Arc<Level>>,
+    /// Taken from the front a block at a time, so a long span's chunks leave in linear time.
+    sealed: VecDeque<Arc<Level>>,
     open: Level,
     /// The last chunk of buckets all alike, and their values: a span with no item fills its
     /// chunks with this one.
     uniform: Option<(Vec<Value>, Arc<Level>)>,
-    /// The last overview block made of that chunk alone, which the next such block shares.
+    /// The last overview block made of one uniform chunk alone, and that chunk: the next block
+    /// of the same chunk shares it.
     uniform_block: Option<(Arc<Level>, Arc<Level>)>,
 }
 
@@ -855,7 +861,7 @@ impl Store {
             shift,
             columns: columns.to_vec(),
             first,
-            sealed: Vec::new(),
+            sealed: VecDeque::new(),
             open: Level::empty(shift, columns),
             uniform: None,
             uniform_block: None,
@@ -882,7 +888,7 @@ impl Store {
                 }
             };
             while n >= CHUNK {
-                self.sealed.push(Arc::clone(&chunk));
+                self.sealed.push_back(Arc::clone(&chunk));
                 n -= CHUNK;
             }
         }
@@ -892,15 +898,22 @@ impl Store {
     }
 
     /// The first overview block's worth of buckets, `BLOCK_BUCKETS`, shared with the last block
-    /// like it where every chunk of both is the uniform one.
+    /// like it where every chunk of both is one uniform chunk. A level's first blocks are cut
+    /// once the span that puts it in blocks has settled, so that chunk need not be the latest:
+    /// such a span holding a few items settles a run of uniform chunks between each two, and
+    /// each run's blocks share one level.
     fn split_block(&mut self) -> Arc<Level> {
         let per_block = (BLOCK_BUCKETS / CHUNK) as usize;
-        let uniform = self.uniform.as_ref().map(|(_, chunk)| Arc::clone(chunk));
-        let alike = uniform.as_ref().filter(|u| {
-            self.sealed.len() >= per_block
-                && self.sealed[..per_block].iter().all(|c| Arc::ptr_eq(c, u))
-        });
-        if let (Some(u), Some((chunk, block))) = (alike, &self.uniform_block)
+        // Only `push_n` seals a chunk more than once, so a block of one chunk repeated is uniform.
+        let alike = self
+            .sealed
+            .front()
+            .filter(|u| {
+                self.sealed.len() >= per_block
+                    && self.sealed.range(1..per_block).all(|c| Arc::ptr_eq(c, u))
+            })
+            .cloned();
+        if let (Some(u), Some((chunk, block))) = (&alike, &self.uniform_block)
             && Arc::ptr_eq(chunk, u)
         {
             let block = Arc::clone(block);
@@ -908,7 +921,6 @@ impl Store {
             self.first += BLOCK_BUCKETS;
             return block;
         }
-        let alike = alike.cloned();
         let block = Arc::new(self.split_front(BLOCK_BUCKETS));
         if let Some(u) = alike {
             self.uniform_block = Some((u, Arc::clone(&block)));
@@ -924,7 +936,7 @@ impl Store {
         self.open.push(values);
         if self.open.buckets == CHUNK {
             let full = std::mem::replace(&mut self.open, Level::empty(self.shift, &self.columns));
-            self.sealed.push(Arc::new(full));
+            self.sealed.push_back(Arc::new(full));
         }
     }
 
@@ -949,7 +961,7 @@ impl Store {
 
     /// What the store holds, shared.
     fn held(&self) -> HeldLevel {
-        let mut chunks = self.sealed.clone();
+        let mut chunks: Vec<Arc<Level>> = self.sealed.iter().cloned().collect();
         if self.open.buckets > 0 {
             chunks.push(Arc::new(self.open.clone()));
         }
@@ -1263,6 +1275,42 @@ impl Builder {
         Ok(())
     }
 
+    /// `settle(tick)` a step at a time: at most `STEP_BLOCKS` overview blocks of the finest
+    /// level's buckets, or to the next event if that is further, and whether it reached `tick`.
+    /// Overview blocks that differ hold their own buckets, so a caller takes each step's settled
+    /// blocks before the next: a long span with an item in every block would otherwise make all
+    /// of them at once. Up to the next event every bucket is alike and the blocks share one
+    /// level, so a step runs there at once.
+    pub(crate) fn settle_step(&mut self, tick: i64) -> Result<bool, Unpaired> {
+        const STEP: u64 = STEP_BLOCKS * BLOCK_BUCKETS;
+        let upto = tick.max(0) as u64 >> self.finest;
+        let to = self.base.saturating_add(STEP).max(self.next_event_bucket());
+        if upto <= to {
+            self.settle(tick)?;
+            return Ok(true);
+        }
+        // Below `upto`, whose ticks are an i64's.
+        self.settle((to << self.finest) as i64)?;
+        Ok(false)
+    }
+
+    /// The first finest bucket that may hold an event: one taken, or a gap end not yet reached.
+    fn next_event_bucket(&self) -> u64 {
+        self.intake
+            .iter()
+            .flat_map(|intake| {
+                let gap_end = match intake {
+                    Intake::Digital { pending, .. } => pending
+                        .front()
+                        .map(|&(_, to)| to.max(0) as u64 >> self.finest),
+                    Intake::Analog { .. } => None,
+                };
+                intake.next_bucket().into_iter().chain(gap_end)
+            })
+            .min()
+            .unwrap_or(u64::MAX)
+    }
+
     /// Settles finest buckets `base..upto`. A run of buckets with no event goes in at once.
     fn settle_to(&mut self, upto: u64) {
         let mut values = Vec::with_capacity(self.intake.len());
@@ -1454,6 +1502,50 @@ mod tests {
     use super::*;
     use crate::header::{AnalogCoding, Exact, IntCoding};
     use crate::model::Ratio;
+
+    /// A settle step runs to the next event at once, however far, and from there through an
+    /// event in every block 64 blocks at a time: edges, or the ends of gaps not yet reached.
+    #[test]
+    fn a_settle_step_runs_to_the_next_event_then_64_blocks_at_a_time() {
+        const FAR: i64 = 1000 * BLOCK_BUCKETS as i64;
+        for gaps in [false, true] {
+            let mut b = Builder::new(0, &[dig(false)], &[]);
+            for j in 0..200 {
+                let t = FAR + j * BLOCK_BUCKETS as i64 + 7;
+                if gaps {
+                    let gap = Gap {
+                        from: t - 2,
+                        to: t,
+                        level: j % 2 == 0,
+                    };
+                    b.gap(0, gap, t);
+                } else {
+                    b.edge(0, t, t);
+                }
+            }
+            let end = FAR + 300 * BLOCK_BUCKETS as i64;
+            let mut steps = Vec::new();
+            loop {
+                let reached = b.settle_step(end).unwrap();
+                let finest: Vec<Settled> = b
+                    .take_settled()
+                    .into_iter()
+                    .filter(|s| s.shift == 0)
+                    .collect();
+                steps.push(finest);
+                if reached {
+                    break;
+                }
+            }
+            let counts: Vec<usize> = steps.iter().map(Vec::len).collect();
+            assert_eq!(counts, [1000, 64, 64, 64, 64, 44], "gaps: {gaps}");
+            assert!(
+                steps[0]
+                    .iter()
+                    .all(|s| Arc::ptr_eq(&s.level, &steps[0][0].level))
+            );
+        }
+    }
 
     fn dig(initial: bool) -> DeclaredChannel {
         DeclaredChannel {

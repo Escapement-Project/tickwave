@@ -15,6 +15,9 @@ use crate::cache::{Decoded, Entry, Key};
 use crate::recording::{BlockFrom, Error, Part, Place, Recording, Rule, Store};
 use crate::runs::index_at_or_after;
 
+/// The most samples `values` takes room for before any block decodes: 128 MB of them.
+const SAMPLES_UP_FRONT: u64 = 1 << 24;
+
 pub(crate) fn check(cancel: &AtomicBool) -> Result<(), Error> {
     if cancel.load(Ordering::Relaxed) {
         Err(Error::Cancelled)
@@ -157,7 +160,8 @@ impl Recording {
         Ok((level, out))
     }
 
-    /// Analog or derived channel `channel`'s sample values, samples `i0..i1`.
+    /// Analog or derived channel `channel`'s sample values, samples `i0..i1`, as far as the
+    /// blocks that hold them decode.
     pub(crate) fn values(
         &self,
         channel: usize,
@@ -165,9 +169,23 @@ impl Recording {
         i1: u64,
         cancel: &AtomicBool,
     ) -> Result<Vec<f64>, Error> {
-        let mut out = vec![f64::NAN; i1.saturating_sub(i0) as usize];
+        let n = i1.saturating_sub(i0);
+        // The count is the header's, which a block that does not decode can't back: up front it
+        // costs at most 128 MB before the blocks refuse it, and past that the values grow with
+        // what the blocks give. A view's samples are fewer than that by far.
+        if n <= SAMPLES_UP_FRONT {
+            let mut out = vec![f64::NAN; n as usize];
+            self.each_sample(channel, i0, i1, cancel, |i, value, _| {
+                out[(i - i0) as usize] = value;
+                Ok(())
+            })?;
+            return Ok(out);
+        }
+        let mut out = Vec::new();
         self.each_sample(channel, i0, i1, cancel, |i, value, _| {
-            out[(i - i0) as usize] = value;
+            // Samples come in index order; one the blocks skip stays NaN, as up front.
+            out.resize((i - i0) as usize, f64::NAN);
+            out.push(value);
             Ok(())
         })?;
         Ok(out)
@@ -383,6 +401,9 @@ impl Recording {
         k1: u64,
         cancel: &AtomicBool,
     ) -> Result<(Vec<bool>, Vec<bool>), Error> {
+        let Place::Digital { .. } = self.place(channel)? else {
+            return Err(Error::NoChannel(channel));
+        };
         let n = k1.saturating_sub(k0) as usize;
         let (mut levels, mut changes) = (vec![false; n], vec![false; n]);
         for (first, piece) in self.pieces(level, k0, k1, cancel)? {

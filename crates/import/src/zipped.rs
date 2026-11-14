@@ -80,6 +80,10 @@ impl Read for At {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let left = self.input.size().saturating_sub(self.at);
         let n = buf.len().min(usize::try_from(left).unwrap_or(usize::MAX));
+        // The zip crate may seek past the end; an input reads only within its size.
+        if n == 0 {
+            return Ok(0);
+        }
         self.input.read_at(self.at, &mut buf[..n]);
         self.at += n as u64;
         Ok(n)

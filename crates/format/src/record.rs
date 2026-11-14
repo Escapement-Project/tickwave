@@ -243,6 +243,23 @@ pub struct Annotation {
     pub annotation: serde_json::Map<String, serde_json::Value>,
 }
 
+/// Why `source` can't name a generator, if it can't. Its file is `<stem>.<source>.jsonl`,
+/// beside the recording, so the name holds no path separator.
+pub(crate) fn check_source(source: &str) -> Option<String> {
+    if source.is_empty() {
+        return Some("an empty generator name".into());
+    }
+    if source.chars().any(char::is_whitespace) {
+        return Some(format!("generator name {source:?} holds whitespace"));
+    }
+    if source.contains(['/', '\\']) {
+        return Some(format!(
+            "generator name {source:?} holds a '/' or '\\', and its file is named on its own"
+        ));
+    }
+    None
+}
+
 /// The footer record's payload before the header: its length, then the index's.
 pub const FOOTER_HEAD_LEN: usize = 8;
 

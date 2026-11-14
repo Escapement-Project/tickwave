@@ -126,3 +126,70 @@ fn a_pulse_the_source_stamped_with_one_time_ends_its_period_there() {
         (EdgeAt::Tick(50_000_500), EdgeAt::Open, EdgeAt::Open)
     );
 }
+
+/// A search whose span runs past the buckets the overview has: a live recording's tail, which no
+/// block or overview block holds yet, and a finished one's past its end. The part past them is
+/// searched in the edges, not through the overview again, which found nothing new there and
+/// recursed until the stack ran out.
+#[test]
+fn a_search_past_the_buckets_the_overview_has_reads_the_edges_there() {
+    let rec = open(&digital(&clock(), 1 << 20));
+    let cancel = AtomicBool::new(false);
+    let find = |lo, hi, forward| find_edge(&rec, 0, lo, hi, forward, &cancel).unwrap();
+    assert_eq!(find(50_001_275, LENGTH + 10_000_000, true), None);
+    assert_eq!(find(0, LENGTH + 10_000_000, false), Some(50_001_274));
+    assert_eq!(find(i64::MIN, i64::MAX, true), Some(100));
+
+    let timebase = Ratio::integer(1_000_000_000).unwrap();
+    let d = Declaration {
+        timebase,
+        channels: vec![DeclaredChannel {
+            name: "CLK".into(),
+            source_name: "clk".into(),
+            source: 0,
+            data: DeclaredKind::Digital { initial: false },
+            shaping: Default::default(),
+        }],
+        derived: Vec::new(),
+        sources: vec![SourceHeader::new(
+            SourceFormat::Other("test".into()),
+            timebase,
+        )],
+        title: None,
+        meta: BTreeMap::new(),
+        overview_shift: 0,
+    };
+    let mut w = Writer::new(d, WriteOptions::default()).unwrap();
+    w.edge(0, 10).unwrap();
+    w.flush(20).unwrap();
+    // Past the flush, in the open block: the overview's buckets end at 20.
+    w.edge(0, 100_000).unwrap();
+    w.edge(0, 200_000).unwrap();
+    let snapshot = w.snapshot();
+    let file = w.take_output();
+    let rec = escapement_tickwave_view::Recording::live(
+        snapshot,
+        std::sync::Arc::new(file),
+        escapement_tickwave_view::Cache::new(1 << 20),
+    )
+    .unwrap();
+    assert_eq!(rec.length(), 200_001);
+    let find = |lo, hi, forward| find_edge(&rec, 0, lo, hi, forward, &cancel).unwrap();
+    assert_eq!(find(11, 200_001, true), Some(100_000));
+    assert_eq!(find(0, 199_999, false), Some(100_000));
+}
+
+/// A search on a channel past the last, wide enough to go through the overview: no such channel,
+/// as a narrow one reading the edges says.
+#[test]
+fn a_search_of_no_digital_channel_says_so() {
+    let rec = open(&digital(&clock(), 1 << 20));
+    let cancel = AtomicBool::new(false);
+    for (lo, hi) in [(0, 10), (0, LENGTH)] {
+        let err = find_edge(&rec, 1, lo, hi, true, &cancel).unwrap_err();
+        assert!(
+            matches!(err, escapement_tickwave_view::Error::NoChannel(1)),
+            "{lo}..{hi}: {err}"
+        );
+    }
+}

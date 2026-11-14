@@ -302,3 +302,33 @@ fn a_change_at_the_last_timestamp_is_inside_the_capture() {
         ]
     );
 }
+
+/// A header of scopes nested 100,000 deep: read without recursing for each, which overflowed the
+/// stack, and the variable named by its whole path.
+#[test]
+fn a_deeply_nested_header_is_read_without_overflowing_the_stack() {
+    const DEPTH: usize = 100_000;
+    let mut text = String::from("$timescale 1 ns $end\n");
+    text.push_str(&"$scope module s $end\n".repeat(DEPTH));
+    text.push_str("$var wire 1 ! a $end\n");
+    text.push_str(&"$upscope $end\n".repeat(DEPTH));
+    text.push_str("$enddefinitions $end\n#0 0!\n#2 1!\n");
+    let channels = digital(read(&text));
+    assert_eq!(channels.len(), 1);
+    let (name, _, _, edges) = &channels[0];
+    assert_eq!(name.len(), 2 * DEPTH + 1);
+    assert!(name.ends_with("s.a"), "{}", &name[name.len() - 8..]);
+    assert_eq!(edges, &[2]);
+}
+
+/// A change at the last timestamp a u64 holds: one past it is the length, which a u64 no longer
+/// holds, and the dump is refused, not added past it.
+#[test]
+fn a_change_at_the_last_u64_timestamp_is_refused() {
+    let h = header("1 ns", TWO);
+    let err = error(&format!("{h}#0 0! 0\"\n#18446744073709551615 1!\n"));
+    assert!(
+        err.contains("18446744073709551615 ticks and one past them is too long"),
+        "{err}"
+    );
+}

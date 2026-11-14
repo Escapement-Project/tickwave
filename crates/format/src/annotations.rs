@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::header::{ChannelKind, ContentId, Header};
 use crate::model::Ratio;
+use crate::record::check_source;
 
 pub const FORMAT: &str = "tickwave-annotations/1";
 
@@ -256,6 +257,133 @@ fn check_value(name: &str, value: &str) -> Option<String> {
     })
 }
 
+/// The problems with one annotation's id and values.
+fn field_problems(entry: &Entry, generated: bool) -> Vec<String> {
+    let mut problems: Vec<String> = check_id(&entry.id, generated).into_iter().collect();
+    for (name, value) in entry.values.iter().flatten() {
+        problems.extend(check_value(name, value));
+    }
+    problems
+}
+
+const GENERATED_REF: &str = "only hand-written annotations take a ref";
+
+/// The problems with where an annotation lies: its ticks against the recording's length, where
+/// that is known, and its channels and measure against the recording's. `digital` says whether a
+/// channel of that name is digital, None where there is none.
+fn place_problems(
+    start: i64,
+    end: Option<i64>,
+    channels: &[String],
+    measure: Option<&Measure>,
+    length: Option<i64>,
+    digital: impl Fn(&str) -> Option<bool>,
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    let last = end.unwrap_or(start);
+    // A span's end is exclusive, so it may sit at the length; a point may not.
+    match length {
+        Some(length) if start < 0 || start >= length || last > length => problems.push(format!(
+            "ticks {start} to {last} fall outside the capture, 0..{length}"
+        )),
+        None if start < 0 => problems.push(format!("tick {start} lies before the capture")),
+        _ => {}
+    }
+    if last < start {
+        problems.push("ends before it starts".to_owned());
+    }
+    for c in channels {
+        if digital(c).is_none() {
+            problems.push(format!("no channel {c:?}"));
+        }
+    }
+    if let Some(m) = measure {
+        match digital(&m.channel) {
+            None => problems.push(format!("measure: no channel {:?}", m.channel)),
+            Some(false) => problems.push(format!(
+                "measure: {:?} is analog; measures are taken from edges",
+                m.channel
+            )),
+            Some(true) => {}
+        }
+        if end.is_none() {
+            problems.push("measure needs a span, not a point".to_owned());
+        }
+    }
+    problems
+}
+
+/// Generators' lines, held to what `resolve` asks of each before the recording's length is known,
+/// as a writer takes them: the line's fields and their types, times in whole ticks, a place on
+/// the recording's channels, and an id its generator gives no other. The writer's finish drops a
+/// line that starts at or past the length and ends a span there, which keeps the rest.
+pub struct Lines {
+    /// Each channel's name, and whether it is digital.
+    channels: BTreeMap<String, bool>,
+    ids: BTreeSet<(String, String)>,
+}
+
+impl Lines {
+    pub fn new(channels: impl IntoIterator<Item = (String, bool)>) -> Self {
+        Self {
+            channels: channels.into_iter().collect(),
+            ids: BTreeSet::new(),
+        }
+    }
+
+    /// Takes generator `source`'s `line`, or says why it can't stand: `annotation "<id>": ...`,
+    /// or `annotation with no id: ...`.
+    pub fn take(
+        &mut self,
+        source: &str,
+        line: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), String> {
+        let who = match line.get("id").and_then(|id| id.as_str()) {
+            Some(id) => format!("annotation {id:?}"),
+            None => "annotation with no id".to_owned(),
+        };
+        let refused = |problem: &str| Err(format!("{who}: {problem}"));
+        if let Some(problem) = check_source(source) {
+            return refused(&problem);
+        }
+        let entry: Entry = match serde_json::from_value(serde_json::Value::Object(line.clone())) {
+            Ok(entry) => entry,
+            Err(e) => return refused(&e.to_string()),
+        };
+        let tick = |key: &'static str| line.get(key).map(|t| t.as_i64().ok_or(key));
+        let (start, end) = match (tick("start"), tick("end").transpose()) {
+            (Some(Ok(start)), Ok(end)) => (start, end),
+            (None, _) => return refused("no start"),
+            (Some(Err(key)), _) | (_, Err(key)) => {
+                return refused(&format!(
+                    "{key} is not a whole tick count: a writer's times are axis ticks"
+                ));
+            }
+        };
+        let mut problems = field_problems(&entry, true);
+        if entry.target.is_some() {
+            problems.push(GENERATED_REF.to_owned());
+        }
+        problems.extend(place_problems(
+            start,
+            end,
+            entry.channels.as_deref().unwrap_or_default(),
+            entry.measure.as_ref(),
+            None,
+            |c| self.channels.get(c).copied(),
+        ));
+        if !problems.is_empty() {
+            return refused(&problems.join("; "));
+        }
+        if !self.ids.insert((source.to_owned(), entry.id)) {
+            return refused(&format!(
+                "generator {source:?} has an annotation of this id already"
+            ));
+        }
+        Ok(())
+    }
+}
+
 fn check_id(id: &str, generated: bool) -> Option<String> {
     if id.is_empty() {
         return Some("an empty id".into());
@@ -412,8 +540,8 @@ fn resolve_file(
                 inc.name, head.recording_id, header.content_id
             ));
         }
-        if let Some(problem) = check_id(&head.source, false) {
-            problems.push(format!("{}: source name: {problem}", inc.name));
+        if let Some(problem) = check_source(&head.source) {
+            problems.push(format!("{}: {problem}", inc.name));
         }
         for (n, line) in lines {
             match json::<Entry>(line) {
@@ -446,20 +574,15 @@ fn resolve_file(
             Some(s) => format!("{s}/{}", entry.id),
             None => entry.id.clone(),
         };
-        if let Some(problem) = check_id(&entry.id, source.is_some()) {
+        for problem in field_problems(&entry, source.is_some()) {
             problems.push(format!("{at}: {problem}"));
-        }
-        for (name, value) in entry.values.iter().flatten() {
-            if let Some(problem) = check_value(name, value) {
-                problems.push(format!("{at}: {problem}"));
-            }
         }
         if !seen.insert(id.clone()) {
             problems.push(format!("{at}: id {id:?} is used twice"));
         }
         if let Some(target) = entry.target.clone() {
             if source.is_some() {
-                problems.push(format!("{at}: only hand-written annotations take a ref"));
+                problems.push(format!("{at}: {GENERATED_REF}"));
             }
             if entry.start.is_some() || entry.end.is_some() {
                 problems.push(format!(
@@ -549,35 +672,15 @@ fn resolve_file(
     }
 
     for (_, at, a) in &plain {
-        let end = a.end.unwrap_or(a.start);
-        // A span's end is exclusive, so it may sit at the length; a point may not.
-        if a.start < 0 || a.start >= header.length || end > header.length {
-            problems.push(format!(
-                "{at}: ticks {} to {end} fall outside the capture, 0..{}",
-                a.start, header.length
-            ));
-        }
-        if end < a.start {
-            problems.push(format!("{at}: ends before it starts"));
-        }
-        for c in &a.channels {
-            if !channels.contains_key(c.as_str()) {
-                problems.push(format!("{at}: no channel {c:?}"));
-            }
-        }
-        if let Some(m) = &a.measure {
-            match channels.get(m.channel.as_str()) {
-                None => problems.push(format!("{at}: measure: no channel {:?}", m.channel)),
-                Some(false) => problems.push(format!(
-                    "{at}: measure: {:?} is analog; measures are taken from edges",
-                    m.channel
-                )),
-                Some(true) => {}
-            }
-            if a.end.is_none() {
-                problems.push(format!("{at}: measure needs a span, not a point"));
-            }
-        }
+        let place = place_problems(
+            a.start,
+            a.end,
+            &a.channels,
+            a.measure.as_ref(),
+            Some(header.length),
+            |c| channels.get(c).copied(),
+        );
+        problems.extend(place.into_iter().map(|p| format!("{at}: {p}")));
     }
     if problems.is_empty() {
         plain.sort_by_key(|(position, ..)| *position);

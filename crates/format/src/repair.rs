@@ -2,10 +2,11 @@
 //! full disk. The records up to the first that is not whole stay as they are.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use crate::decode::{
     BlockChannel, DecodeError, MAX_DECODED, check_header, corrupt, gaps_ending_in, inflate_limited,
-    level_after,
+    level_after, overview_room,
 };
 use crate::hash::ChannelHasher;
 use crate::header::{
@@ -102,6 +103,46 @@ enum Channel {
     },
 }
 
+/// An overview block the content settles, as repair keeps it until it finishes: its decoded
+/// bytes' length and hash, which the file's must match where the file holds it, and its frame
+/// for where it doesn't. Kept so, a block costs its frame, not its buckets.
+#[derive(Clone)]
+struct Made {
+    shift: u8,
+    k: u64,
+    len: usize,
+    raw: blake3::Hash,
+    frame: Arc<[u8]>,
+}
+
+impl Made {
+    /// `last` is the block made before: a span with no item settles block after block of one
+    /// level, whose bytes and frame are made once, as the writer makes them.
+    fn of(s: Settled, last: &mut Option<(Arc<overview::Level>, Made)>) -> Result<Self, WriteError> {
+        if let Some((level, made)) = last
+            && Arc::ptr_eq(level, &s.level)
+        {
+            return Ok(Made {
+                shift: s.shift,
+                k: s.k,
+                ..made.clone()
+            });
+        }
+        let mut raw = Vec::new();
+        overview::write_level(&s.level, &mut raw);
+        let made = Made {
+            shift: s.shift,
+            k: s.k,
+            len: raw.len(),
+            raw: blake3::hash(&raw),
+            // Copied out of the compressor's buffer, which has room for the bytes uncompressed.
+            frame: Arc::from(compress(&raw, OVERVIEW_BLOCK_LEVEL)?),
+        };
+        *last = Some((s.level, made.clone()));
+        Ok(made)
+    }
+}
+
 /// Reads a cut-off file in order, its bytes fed as they come, and works out its footer.
 pub struct Repairer {
     reader: Reader,
@@ -111,9 +152,12 @@ pub struct Repairer {
     channels: Vec<Channel>,
     rows: Vec<BlockRow>,
     words: Words,
-    settled: Vec<Settled>,
+    made: Vec<Made>,
+    last_made: Option<(Arc<overview::Level>, Made)>,
     /// The overview blocks the file holds: their frames' offsets and bytes.
     present: HashMap<(u8, u64), (u64, Vec<u8>)>,
+    /// The overview block records read, a repeated one counted again.
+    overview_records: usize,
     annotations: Vec<record::Annotation>,
     /// The latest start among the annotation records.
     latest_annotation: Option<i64>,
@@ -133,8 +177,10 @@ impl Repairer {
             channels: Vec::new(),
             rows: Vec::new(),
             words: Words::default(),
-            settled: Vec::new(),
+            made: Vec::new(),
+            last_made: None,
             present: HashMap::new(),
+            overview_records: 0,
             annotations: Vec::new(),
             latest_annotation: None,
             bundle: None,
@@ -216,6 +262,14 @@ impl Repairer {
             }
             Event::Block(block) => {
                 let builder = self.builder.as_mut().unwrap();
+                if let Err(e) = overview_room(block.head.end, builder.finest()) {
+                    self.error.get_or_insert(format!(
+                        "block {} ends at tick {}, where {e}",
+                        self.rows.len(),
+                        block.head.end
+                    ));
+                    return;
+                }
                 for (c, got) in block.channels.iter().enumerate() {
                     let source = got.source_ticks().unwrap_or_default();
                     match (got, &mut self.channels[c]) {
@@ -265,10 +319,27 @@ impl Repairer {
                         _ => unreachable!("blocks follow the declaration"),
                     }
                 }
-                if let Err(e) = builder.settle(block.head.end) {
-                    self.error.get_or_insert(e.to_string());
+                'settle: loop {
+                    let reached = match builder.settle_step(block.head.end) {
+                        Ok(reached) => reached,
+                        Err(e) => {
+                            self.error.get_or_insert(e.to_string());
+                            break;
+                        }
+                    };
+                    for s in builder.take_settled() {
+                        match Made::of(s, &mut self.last_made) {
+                            Ok(made) => self.made.push(made),
+                            Err(e) => {
+                                self.error.get_or_insert(e.to_string());
+                                break 'settle;
+                            }
+                        }
+                    }
+                    if reached {
+                        break;
+                    }
                 }
-                self.settled.extend(builder.take_settled());
                 self.rows.push(BlockRow {
                     start: block.head.start,
                     offset: block.frame_offset,
@@ -284,6 +355,7 @@ impl Repairer {
                 frame,
             } => {
                 self.present.insert((shift, k), (frame_offset, frame));
+                self.overview_records += 1;
             }
             Event::Annotation(a) => {
                 self.latest_annotation = latest_start(self.latest_annotation, &a);
@@ -302,7 +374,7 @@ impl Repairer {
         if let Some(c) = declaration.channels.iter().find(|c| !c.shaping.is_whole()) {
             return Err(RepairError::Shaped(c.name.clone()));
         }
-        let builder = self.builder.take().ok_or(RepairError::NoDeclaration)?;
+        let mut builder = self.builder.take().ok_or(RepairError::NoDeclaration)?;
         if self.rows.is_empty() && self.annotations.is_empty() {
             return Err(RepairError::NoBlock);
         }
@@ -316,6 +388,9 @@ impl Repairer {
         if length < 1 {
             return Err(RepairError::NoBlock);
         }
+        // The marks can put the length past the last block, as far as a tick goes.
+        overview_room(length, builder.finest())
+            .map_err(|e| corrupt(format!("the length the marks give, {length}: {e}")))?;
         let mut tail = Vec::new();
         // Marks past the last block: an empty block runs to them.
         if length > last_end {
@@ -344,28 +419,56 @@ impl Repairer {
             });
             self.words.push(&head.words);
         }
+        // To the length in steps, as at each block.
+        loop {
+            let reached = builder
+                .settle_step(length)
+                .map_err(|e| RepairError::Decode(corrupt(e.to_string())))?;
+            for s in builder.take_settled() {
+                self.made.push(Made::of(s, &mut self.last_made)?);
+            }
+            if reached {
+                break;
+            }
+        }
         let (done, last) = builder
             .finish(length)
             .map_err(|e| RepairError::Decode(corrupt(e.to_string())))?;
         let mut overview_rows = Vec::new();
-        for Settled { shift, k, level } in std::mem::take(&mut self.settled).into_iter().chain(last)
+        let mut kept = 0;
+        let mut checked: Option<(&Vec<u8>, blake3::Hash)> = None;
+        let mut last_made = self.last_made.take();
+        let last = last
+            .into_iter()
+            .map(|s| Made::of(s, &mut last_made))
+            .collect::<Result<Vec<_>, _>>()?;
+        for Made {
+            shift,
+            k,
+            len,
+            raw,
+            frame,
+        } in std::mem::take(&mut self.made).into_iter().chain(last)
         {
-            let mut raw = Vec::new();
-            overview::write_level(&level, &mut raw);
             let row = match self.present.get(&(shift, k)) {
-                Some((offset, frame)) => {
-                    let got = inflate_limited(frame, raw.len(), MAX_DECODED)?;
-                    if got != raw {
-                        return Err(RepairError::Overview);
+                Some((offset, got)) => {
+                    // A span with no item repeats one level, and a writer one frame for it:
+                    // that frame is checked once.
+                    let repeat = checked.is_some_and(|(f, r)| f == got && r == raw);
+                    if !repeat {
+                        if blake3::hash(&inflate_limited(got, len, MAX_DECODED)?) != raw {
+                            return Err(RepairError::Overview);
+                        }
+                        checked = Some((got, raw));
                     }
+                    kept += 1;
                     OverviewRow {
                         offset: *offset,
-                        length: frame.len() as u32,
-                        decoded_length: raw.len() as u32,
+                        length: got.len() as u32,
+                        decoded_length: len as u32,
                     }
                 }
                 None => {
-                    let frame = compress(&raw, OVERVIEW_BLOCK_LEVEL).map_err(WriteError::from)?;
                     let at = keep + tail.len() as u64;
                     record::write(
                         &mut tail,
@@ -375,13 +478,18 @@ impl Repairer {
                     OverviewRow {
                         offset: at + (record::PAYLOAD_AT + record::OVERVIEW_HEAD_LEN) as u64,
                         length: frame.len() as u32,
-                        decoded_length: raw.len() as u32,
+                        decoded_length: len as u32,
                     }
                 }
             };
             overview_rows.push((shift, k, row));
         }
-        overview_rows.sort_by_key(|&(shift, k, _)| (shift, k));
+        // A record the content settles no block for, or a second one for a block, would stay in the
+        // file beside a footer that doesn't list it.
+        if kept != self.overview_records {
+            return Err(RepairError::Overview);
+        }
+        let overview_rows = crate::writer::by_level(overview_rows);
 
         let mut digests = Vec::with_capacity(self.channels.len());
         let mut channels = Vec::with_capacity(self.channels.len());

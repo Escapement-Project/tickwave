@@ -871,8 +871,15 @@ impl Headers {
                             None => trigger = Some((t, &a.file.path)),
                         }
                     }
+                    // The cast saturates for a begin far from the digital channels', where the
+                    // samples' end would pass what a tick holds.
                     let first = first as i64;
-                    length = length.max(first + a.count as i64);
+                    let end = first.checked_add(a.count as i64).ok_or_else(|| {
+                        a.file.unsupported(format!(
+                            "an analog file beginning {exact:e} samples from the export's start"
+                        ))
+                    })?;
+                    length = length.max(end);
                     firsts.push(first);
                 }
             }

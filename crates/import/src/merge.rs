@@ -26,6 +26,8 @@ use crate::shape::{self, AnalogCut, Keep, Span, exact, grid, off_grid, rounded};
 pub enum Error {
     #[error("a merge takes at least two recordings; {0} given")]
     TooFew(usize),
+    #[error("none of the {0} recordings holds a channel")]
+    NoSource(usize),
     #[error("settings for input {given}, but {inputs} inputs")]
     Settings { given: usize, inputs: usize },
     #[error(transparent)]
@@ -414,8 +416,9 @@ fn ratio_of(num: u128, den: u128) -> Option<Ratio> {
         .flatten()
 }
 
-/// The least common multiple of `rates`: their reduced numerators' lcm over their reduced
-/// denominators' gcd, the slowest rate at which each one's tick is a whole number of ticks.
+/// The least common multiple of `rates`, one rate at least: their reduced numerators' lcm over
+/// their reduced denominators' gcd, the slowest rate at which each one's tick is a whole number
+/// of ticks.
 pub fn merged_timebase(rates: &[Ratio]) -> Result<Ratio, Error> {
     let too_big = || Error::Timebase {
         rates: rates
@@ -436,7 +439,7 @@ pub fn merged_timebase(rates: &[Ratio]) -> Result<Ratio, Error> {
     Ok(Ratio::new(num as u64, den as u64).expect("positive terms"))
 }
 
-/// The fastest of `rates`.
+/// The fastest of `rates`, one rate at least.
 pub fn fastest_rate(rates: &[Ratio]) -> Ratio {
     let faster = |a: Ratio, b: Ratio| {
         u128::from(a.num()) * u128::from(b.den()) > u128::from(b.num()) * u128::from(a.den())
@@ -726,6 +729,10 @@ fn plan(inputs: &[Input], settings: &Settings) -> Result<(Layout, Vec<Note>), Er
         .iter()
         .flat_map(|i| i.recording.sources.iter().map(|s| s.timebase))
         .collect();
+    // Recordings that hold no channel hold no source: nothing to tick at.
+    if rates.is_empty() {
+        return Err(Error::NoSource(inputs.len()));
+    }
     let fastest = fastest_rate(&rates);
     // Only a tick, a ratio or the length past 2^53 moves the merge to the fastest rate; any other
     // refusal stands.
@@ -1511,6 +1518,11 @@ type Annotations = Vec<(String, serde_json::Map<String, serde_json::Value>)>;
 fn carried(inputs: &[Input], layout: &Layout, notes: &mut Vec<Note>) -> Annotations {
     let mut out = Vec::new();
     let mut generators: BTreeSet<String> = BTreeSet::new();
+    // The writer refuses a line that would not resolve: such a line is left out here instead.
+    let mut lines = annotations::Lines::new(layout.channels.iter().map(|c| {
+        let data = &inputs[c.input].recording.channels[c.channel].data;
+        (c.name.clone(), matches!(data, ChannelData::Digital(_)))
+    }));
     for (j, input) in inputs.iter().enumerate() {
         let number = j + 1;
         let Some(files) = &input.bundled else {
@@ -1535,7 +1547,7 @@ fn carried(inputs: &[Input], layout: &Layout, notes: &mut Vec<Note>) -> Annotati
             .map(|c| c.name.clone().into())
             .collect();
         let tb = input.recording.timebase;
-        let (mut no_channel, mut before, mut after, mut unread) = (0, 0, 0, 0);
+        let (mut no_channel, mut before, mut after, mut unread, mut broken) = (0, 0, 0, 0, 0);
         let carried_before = out.len();
         for (file, text) in files {
             let Some(source) = annotations::generator_source(text) else {
@@ -1636,6 +1648,10 @@ fn carried(inputs: &[Input], layout: &Layout, notes: &mut Vec<Note>) -> Annotati
                         }
                     }
                 }
+                if lines.take(&name, &a).is_err() {
+                    broken += 1;
+                    continue;
+                }
                 out.push((name.clone(), a));
             }
         }
@@ -1651,6 +1667,10 @@ fn carried(inputs: &[Input], layout: &Layout, notes: &mut Vec<Note>) -> Annotati
             (before, "they lie before the merged recording's start"),
             (after, "they lie past the merged recording's end"),
             (unread, "they do not read"),
+            (
+                broken,
+                "they break a rule ANNOTATIONS.md gives a generator's line",
+            ),
         ] {
             if count > 0 {
                 notes.push(Note::AnnotationsLeftOut {
@@ -1783,6 +1803,9 @@ pub fn expected(header: &Header, against: Vec<Recording>) -> Result<Recording, E
         .iter()
         .flat_map(|r| r.sources.iter().map(|s| s.timebase))
         .collect();
+    if rates.is_empty() {
+        return Err(Error::NoSource(against.len()));
+    }
     let timebase = header.timebase;
     let fastest = fastest_rate(&rates);
     let lcm = merged_timebase(&rates).ok();
@@ -1833,6 +1856,11 @@ pub fn expected(header: &Header, against: Vec<Recording>) -> Result<Recording, E
     }
     let mut channels = Vec::with_capacity(header.channels.len());
     let mut length = 1i128;
+    // Each input channel goes into the merged recording once: `apply` takes it.
+    let mut taken: Vec<Vec<bool>> = against
+        .iter()
+        .map(|r| vec![false; r.channels.len()])
+        .collect();
     for c in &header.channels {
         let j = offsets
             .iter()
@@ -1857,6 +1885,13 @@ pub fn expected(header: &Header, against: Vec<Recording>) -> Result<Recording, E
                 input: j + 1,
                 index: s,
                 source_name: c.source_name.clone(),
+            });
+        }
+        if std::mem::replace(&mut taken[j][ic], true) {
+            return Err(Error::TakenTwice {
+                input: j + 1,
+                stem: describe(&r.sources[s]),
+                name: input_channel.name.clone(),
             });
         }
         let kept = c.shaping.kept.ok_or_else(|| Error::NoKept {
@@ -1891,6 +1926,11 @@ pub fn expected(header: &Header, against: Vec<Recording>) -> Result<Recording, E
             ChannelKind::Analog { unit, .. } => (Some(unit.clone()), None),
             ChannelKind::Digital { edges, .. } => (None, Some(*edges)),
         };
+        // A digital input channel takes its count from the header, which states none for one it
+        // calls analog.
+        if unit.is_some() && matches!(input_channel.data, ChannelData::Digital(_)) {
+            return Err(Error::UnitOnDigital(c.name.clone()));
+        }
         // The channel's end on the merged axis, by the header's own mapping.
         let end = header
             .mapping(channels.len())

@@ -577,3 +577,198 @@ fn an_item_at_the_length_or_the_end_is_refused() {
         "{err}"
     );
 }
+
+/// A declaration's floats go into its JSON, which holds no NaN or infinity: serde_json writes one
+/// as null. A codes coding's scale or offset written so would not read back, nor a source's
+/// begin or trigger time as given, so the writer refuses them.
+#[test]
+fn a_float_the_declaration_s_json_cannot_hold_is_refused() {
+    use escapement_tickwave_format::header::{
+        Declaration, DeclaredChannel, DeclaredKind, SourceHeader,
+    };
+    use escapement_tickwave_format::writer::{WriteError, WriteOptions, Writer};
+    let declaration = |coding, begin_s| Declaration {
+        timebase: Ratio::ONE,
+        channels: vec![DeclaredChannel {
+            name: "V".into(),
+            source_name: "v".into(),
+            source: 0,
+            data: DeclaredKind::Analog {
+                unit: "V".into(),
+                period: Ratio::ONE,
+                coding,
+                significant: None,
+            },
+            shaping: Default::default(),
+        }],
+        derived: Vec::new(),
+        sources: vec![SourceHeader {
+            begin_s,
+            ..SourceHeader::new(SourceFormat::Other("t".into()), Ratio::ONE)
+        }],
+        title: None,
+        meta: Default::default(),
+        overview_shift: 10,
+    };
+    let codes = |scale, offset| AnalogCoding::Codes {
+        bits: 8,
+        scale,
+        offset,
+    };
+    assert!(
+        Writer::new(
+            declaration(codes(0.5, 1.0), Some(2.5)),
+            WriteOptions::default()
+        )
+        .is_ok()
+    );
+    for (what, d) in [
+        ("a NaN scale", declaration(codes(f64::NAN, 1.0), None)),
+        (
+            "an infinite offset",
+            declaration(codes(0.5, f64::INFINITY), None),
+        ),
+        (
+            "a NaN begin",
+            declaration(AnalogCoding::F32, Some(f64::NAN)),
+        ),
+    ] {
+        match Writer::new(d, WriteOptions::default()) {
+            Err(WriteError::Declaration(e)) if e.contains("not a finite number") => {}
+            Err(e) => panic!("{what}: {e}"),
+            Ok(_) => panic!("{what}: written"),
+        }
+    }
+}
+
+/// The writer holds an annotation to what `resolve` asks of a generator's line, so its bundle
+/// resolves: each rule broken once, refused at the call with the annotation and the rule named.
+/// A refused one takes nothing in: its id stays free, and the bundle of the rest resolves.
+#[test]
+fn an_annotation_its_bundle_would_not_resolve_is_refused_at_the_call() {
+    use escapement_tickwave_format::annotations::resolve;
+    use escapement_tickwave_format::header::{
+        Declaration, DeclaredChannel, DeclaredKind, SourceHeader,
+    };
+    use escapement_tickwave_format::writer::{Bundle, Finish, WriteError, WriteOptions, Writer};
+    let channel = |name: &str, data| DeclaredChannel {
+        name: name.into(),
+        source_name: name.to_lowercase(),
+        source: 0,
+        data,
+        shaping: Default::default(),
+    };
+    let d = Declaration {
+        timebase: Ratio::ONE,
+        channels: vec![
+            channel("D", DeclaredKind::Digital { initial: false }),
+            channel(
+                "V",
+                DeclaredKind::Analog {
+                    unit: "V".into(),
+                    period: Ratio::ONE,
+                    coding: AnalogCoding::F32,
+                    significant: None,
+                },
+            ),
+        ],
+        derived: Vec::new(),
+        sources: vec![SourceHeader::new(
+            SourceFormat::Other("t".into()),
+            Ratio::ONE,
+        )],
+        title: None,
+        meta: Default::default(),
+        overview_shift: 10,
+    };
+    let mut w = Writer::new(d, WriteOptions::default()).unwrap();
+    let mut take = |source: &str, line: serde_json::Value| -> Result<(), String> {
+        let serde_json::Value::Object(m) = line else {
+            unreachable!()
+        };
+        w.annotation(source, m).map_err(|e| match e {
+            WriteError::Annotation(why) => why,
+            other => panic!("{other}"),
+        })
+    };
+    use serde_json::json;
+    let cases = [
+        (
+            json!({"id": "m/1", "start": 1, "colour": "red"}),
+            "annotation \"m/1\": unknown field `colour`",
+        ),
+        (
+            json!({"start": 1}),
+            "annotation with no id: missing field `id`",
+        ),
+        (
+            json!({"id": "m/2", "start": "1 us"}),
+            "annotation \"m/2\": start is not a whole tick count: a writer's times are axis ticks",
+        ),
+        (
+            json!({"id": "m/3", "start": 5, "end": 4}),
+            "annotation \"m/3\": ends before it starts",
+        ),
+        (
+            json!({"id": "m/4", "start": -1}),
+            "annotation \"m/4\": tick -1 lies before the capture",
+        ),
+        (
+            json!({"id": "m/5", "start": 1, "channels": ["X"]}),
+            "annotation \"m/5\": no channel \"X\"",
+        ),
+        (
+            json!({"id": "m/6", "start": 1, "end": 2, "measure": {"channel": "V", "what": "rate"}}),
+            "annotation \"m/6\": measure: \"V\" is analog; measures are taken from edges",
+        ),
+        (
+            json!({"id": "m/7", "start": 1, "measure": {"channel": "D", "what": "rate"}}),
+            "annotation \"m/7\": measure needs a span, not a point",
+        ),
+        (
+            json!({"id": "m/8", "start": 1, "ref": "x/1"}),
+            "annotation \"m/8\": only hand-written annotations take a ref",
+        ),
+        (
+            json!({"id": "m/9", "start": 1, "values": {"n": "one"}}),
+            "annotation \"m/9\": values: n = \"one\" is not a decimal",
+        ),
+        (
+            json!({"id": "a b", "start": 1}),
+            "annotation \"a b\": id \"a b\" holds whitespace",
+        ),
+    ];
+    for (line, want) in cases {
+        let why = take("verge", line.clone()).expect_err(&line.to_string());
+        assert!(why.starts_with(want), "{line}: {why}");
+    }
+    take(
+        "verge",
+        json!({"id": "m/1", "start": 1, "label": "a \\x07 b"}),
+    )
+    .unwrap();
+    assert_eq!(
+        take("verge", json!({"id": "m/1", "start": 2})),
+        Err("annotation \"m/1\": generator \"verge\" has an annotation of this id already".into())
+    );
+    take(
+        "other",
+        json!({"id": "m/1", "start": 3, "end": 9, "channels": ["D"]}),
+    )
+    .unwrap();
+    let finish = Finish {
+        bundle: Some(Bundle::Generated { stem: "rec".into() }),
+        ..Finish::default()
+    };
+    let header = w.finish(5, &[5], finish).unwrap().header;
+    let files = header.annotations.clone().unwrap();
+    let included: Vec<_> = files
+        .iter()
+        .filter(|(name, _)| name.ends_with(".jsonl"))
+        .map(|(name, text)| escapement_tickwave_format::annotations::Included { name, text })
+        .collect();
+    let resolved = resolve(&files["rec.annotations.toml"], &included, &header, None).unwrap();
+    let spans: Vec<_> = resolved.iter().map(|a| (a.id.as_str(), a.end)).collect();
+    // The span past the length ends there.
+    assert_eq!(spans, [("other/m/1", Some(5)), ("verge/m/1", None)]);
+}

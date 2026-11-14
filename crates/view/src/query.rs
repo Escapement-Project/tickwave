@@ -718,7 +718,7 @@ impl Recording {
                 .map(|(k, i)| Point {
                     tick: ticks[k],
                     end: runs.support(i, self.length).expect("a sample").end,
-                    value: values[k],
+                    value: values.get(k).copied().unwrap_or(f64::NAN),
                     flagged: flagged[k],
                     joined: i > lo && runs.breaks.binary_search_by_key(&i, |b| b.index).is_err(),
                 })
