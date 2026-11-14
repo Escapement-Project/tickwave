@@ -146,7 +146,7 @@ Committed, in `fixtures/`:
 |---|---|
 | `identify-swd.tickwave` | `tickwave convert saleae testdata/saleae/identify-swd --channel digital_3_0=SWCLK --channel digital_3_1=SWDIO` |
 | `identify-swd.4k.tickwave` | the same with `--block-kib 4`: nine blocks, for edges across block boundaries |
-| `identify-jtag.tickwave` | the `identify-jtag-cjtag` export's TCK, TDI and TMS (`digital_4_0`, `_4_2`, `_4_3`): long enough that its 2^12 level sits in overview blocks |
+| `identify-jtag.tickwave` | the `identify-jtag-cjtag` export's TCK, TDI and TMS (`digital_4_0`, `_4_2`, `_4_3`), converted, then written again with its finest overview level at 2^12 by `cargo run -p escapement-tickwave-import --example reshift -- <converted> fixtures/identify-jtag.tickwave 12`. The converter would set 2^24 for so sparse a capture; at 2^12, its 152,898 buckets sit in 38 overview blocks, and the footer holds 2^16 and 2^20 |
 | `swd50-cut.tickwave` | `tickwave convert saleae testdata/saleae/swd50-cut --channel analog_0=SWCLK --channel analog_1=SWDIO --channel digital_4_0=NRST`: 50 µs of a mixed-signal oscilloscope's analog inputs as 12-bit codes, in an 11 ms capture |
 | `energy.tickwave` | `cargo run -p escapement-tickwave-format --example energy -- web/fixtures`, from the repository: a synthetic recording laid out as verge's energy captures are, with nothing from a capture. V and I as 32-bit integer codes in mV and nA every 960 ticks at 96 MHz, with a loss and a pause; P derived from them; `range`, `under_range` and DIO0, which has a pulse at tick 0 and a gap; markers bundled into the footer; six short blocks, as a recorder flushing every 5 ms leaves them |
 | `identify-swd.annotations.toml` | the hand-written sidecar for `identify-swd.tickwave` |
@@ -167,8 +167,8 @@ and data.
 ### `.tickwavefx` files
 
 The dev page's in-memory route, `src/memory-source.ts`, serves `.tickwavefx` fixtures with an
-artificial delay on request (`?latency=MS`), and computes the overview at the levels a real file
-has. `src/fixture-file.ts` reads them, and its opening comment gives their layout.
+artificial delay on request (`?latency=MS`), and computes the overview at the levels FORMAT.md
+gives a file whose finest level is 2^12. `src/fixture-file.ts` reads them, and its opening comment gives their layout.
 
 The dev page's stress sections read these by default. `dev/?stress=tickwave` switches them to the
 same captures converted to `.tickwave`, linked into `fixtures-local/` by `scripts/fixtures.ts`.
@@ -513,6 +513,6 @@ view's Open button reads Close while the view is open, and is as wide either way
 | `registerFile(file, sidecar)` | makes a local `File` a `src`. The sidecar's `.toml` and `.jsonl` files can come with it |
 | `registerLoader(loader)` | reads recordings at the URLs `loader.accepts`, asked before the loaders registered earlier |
 | `recordingInfo(src)` | what a recording holds, from its footer: title, length, channels, size, content id |
-| `previewMerge(inputs)` | several recordings on one time axis, as `tickwave merge` would put them: `inputs` is `[{src, stem}]`, each with its file's name without the extension. Resolves to `{src, merged}`: a `src` a view draws, and the preview, whose `mergedInfo` gives each channel's name (a later recording's clashing name takes its stem, as `stem/name`), `origin(channel)` the recording it comes from, and `factors` the merged ticks in one of each recording's. Every recording starts at tick 0; a view moves them with `aligns`. Rejects where the recordings' tick rates have no common rate below 2^53 ticks a second |
+| `previewMerge(inputs)` | several recordings on one time axis, as `tickwave merge` would put them: `inputs` is `[{src, stem}]`, each with its file's name without the extension. Resolves to `{src, merged}`: a `src` a view draws, and the preview, whose `mergedInfo` gives each channel's name (a later recording's clashing name takes its stem, as `stem/name`), `origin(channel)` the recording it comes from, and `ratios` the merged ticks in one of each recording's, as `{num, den}`. The preview ticks at the least common multiple of the recordings' rates, or at the fastest of them where the multiple has a term past 2^53, as `tickwave merge` does. Every recording starts at tick 0; a view moves them with `aligns` |
 | `resolveSidecar(src, text, annotations)` | the annotations of a sidecar whose hand-written file is `text`, checked against the recording as `tickwave annotations check` checks them. Its includes are read beside `annotations`, the sidecar's address, or from the files registered with the recording when that is null. Rejects with every problem, one a line |
 | `configure({firstRead, maxDecodedBytes, cacheBytes})` | the size of the first read, from a recording's end, 32 KiB by default; the most the decoder takes from one block, overview block or footer overview, 64 MiB, past which it refuses the recording; and the size of the cache of decoded blocks, 192 MiB |

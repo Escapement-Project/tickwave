@@ -52,17 +52,16 @@ export interface MemorySourceOptions {
 }
 
 /**
- * The levels a reader of a real file has, from FORMAT.md: shifts 12, 16, 20, ... in steps of 4,
- * stopping at the first with at most 1,024 buckets; those with at most 2^17 buckets in the head,
- * finer ones up to 2^26 buckets in overview blocks, any with more left out. A level has
- * ceil(length / 2^shift) buckets.
+ * The levels a file of `length` ticks has, from FORMAT.md ("Overview"): its finest shift, then
+ * steps of 4, stopping at the first with at most 1,024 buckets or at shift 62. Those with at most
+ * 2^17 buckets are in the footer, finer ones in overview blocks. A level has
+ * ceil(length / 2^shift) buckets. A memory source takes them from a finest shift of 12.
  */
-export function formatLevels(length: number): number[] {
+export function formatLevels(length: number, finest = 12): number[] {
   const levels: number[] = [];
-  for (let shift = 12; shift < 63; shift += 4) {
-    const buckets = Math.ceil(length / 2 ** shift);
-    if (buckets <= 2 ** 26) levels.push(2 ** shift);
-    if (buckets <= 1024) break;
+  for (let shift = finest; ; shift += 4) {
+    levels.push(2 ** shift);
+    if (Math.ceil(length / 2 ** shift) <= 1024 || shift + 4 > 62) break;
   }
   return levels;
 }

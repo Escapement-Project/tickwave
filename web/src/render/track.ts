@@ -3,6 +3,7 @@
 // one draws at whatever scale it has, and a coarse tile of the whole channel fills what it leaves.
 
 import {
+  axisPeriod,
   channelStart,
   isAbort,
   type AnalogOverview,
@@ -105,7 +106,7 @@ export class Track {
   #mode(per: number): Mode {
     const c = this.channel;
     if (c.kind === "digital") return per > this.#noOverviewAtOrBelow ? "overview" : "edges";
-    const period = c.period.num / c.period.den;
+    const period = axisPeriod(c);
     if (per < SAMPLES_PER_COLUMN * period) return "samples";
     return per > this.#noOverviewAtOrBelow ? "overview" : "samples";
   }

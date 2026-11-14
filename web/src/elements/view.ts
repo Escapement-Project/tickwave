@@ -11,7 +11,7 @@ import { Prober, type Probed } from "../prober.ts";
 import { lowerBound } from "../search.ts";
 import { channelIndices, Plot } from "../render/plot.ts";
 import { clampRange, fitRange, moveRange, scaleLimits, zoomRange, type ScaleLimits, type ValueRange } from "../render/scale.ts";
-import { channelStart, inChannel, isAbort, named, readingStep, sampleAtOrBefore, sampleTick } from "../source.ts";
+import { channelSampleTick, channelStart, inChannel, isAbort, named, readingStep, sampleAtOrBefore } from "../source.ts";
 import { parseTime, toTicks, type TimeSpec } from "../time.ts";
 import { DRAG_PX, TickwaveElement, loadAnnotations, loadRecording, zoomKey, type Loaded } from "./base.ts";
 import { ShapedSource } from "../shaped-source.ts";
@@ -1896,7 +1896,7 @@ export class TickwaveView extends TickwaveElement {
         const at = async (tick: number) => {
           const i = sampleAtOrBefore(c, tick);
           if (i === null) return null;
-          const from = sampleTick(c.first, c.period, i);
+          const from = channelSampleTick(c, i);
           const s = await l.source.samples(t.index, from, from + 1);
           return s.values.length > 0 ? s.values[0] : null;
         };

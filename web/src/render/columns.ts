@@ -145,8 +145,9 @@ function runsOf(s: Samples, r0: number, r1: number): SampleRuns {
   return runs;
 }
 
-/** Where an analog channel's samples sit: its first, period, count and breaks. */
-export type Runs = Pick<AnalogChannel, "first" | "period" | "count" | "breaks">;
+/** Where an analog channel's samples sit: its first, period, count and breaks, and the mapping
+ * that puts them on the axis. */
+export type Runs = Pick<AnalogChannel, "first" | "period" | "count" | "breaks" | "map">;
 
 /** The tile's own index of its first sample at or after `tick`. */
 function tileIndex(s: Samples, runs: Runs, tick: number): number {

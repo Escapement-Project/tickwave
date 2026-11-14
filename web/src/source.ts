@@ -2,12 +2,62 @@
 // the network, and the renderer draws what it has and redraws when more arrives.
 //
 // Channels are named by their index in `RecordingInfo.channels`. Ticks are integers below 2^53,
-// counted from the capture's start; ranges are half-open, [start, end).
+// counted from the capture's start; ranges are half-open, [start, end). Every tick a method takes
+// or gives is on the recording's axis. An analog channel states its samples' places in its
+// source's own ticks, which its `map` places on the axis (FORMAT.md, "Times").
 
 /** A positive rational number, num / den. */
 export interface Ratio {
   readonly num: number;
   readonly den: number;
+}
+
+/**
+ * Where a channel's source ticks lie on the recording's axis (FORMAT.md, "Times"): source tick `k`
+ * at `origin + floor((k + offset) × m)`, `m` how many axis ticks one source tick lasts.
+ */
+export interface Mapping {
+  readonly origin: number;
+  readonly offset: number;
+  readonly m: Ratio;
+}
+
+/** Source tick `k` at axis tick `k`. */
+export const IDENTITY: Mapping = { origin: 0, offset: 0, m: { num: 1, den: 1 } };
+
+/** `floor(x × a / b)`, exact for every term below 2^53; a and b positive. */
+export function mulDivFloor(x: number, a: number, b: number): number {
+  // A quotient of two integers below 2^53 floors exactly: its rounding error is below 1/b, the
+  // least distance to the next integer.
+  const product = x * a;
+  if (Number.isSafeInteger(product)) return Math.floor(product / b);
+  // x = q b + r with 0 ≤ r < b, so x × a / b = a q + a r / b, and a r < a b. Exact in plain
+  // numbers wherever a × b, and the result, stay below 2^53, as every real m's terms do.
+  if (a * b <= Number.MAX_SAFE_INTEGER && Number.isSafeInteger(x) && Math.abs(x) + b <= Number.MAX_SAFE_INTEGER) {
+    const q = Math.floor(x / b);
+    const high = a * q;
+    const result = high + Math.floor((a * (x - q * b)) / b);
+    if (Number.isSafeInteger(high) && Number.isSafeInteger(result)) return result;
+  }
+  const [n, d] = [BigInt(x) * BigInt(a), BigInt(b)];
+  const q = n / d;
+  return Number(n % d !== 0n && n < 0n ? q - 1n : q);
+}
+
+/** The axis tick source tick `k` maps to. */
+export function axisTick(map: Mapping, k: number): number {
+  return map.origin + mulDivFloor(k + map.offset, map.m.num, map.m.den);
+}
+
+/** The least source tick that maps to axis tick `t` or later. */
+export function firstAt(map: Mapping, t: number): number {
+  // ceil((t − origin) × den / num) − offset.
+  return -mulDivFloor(-(t - map.origin), map.m.den, map.m.num) - map.offset;
+}
+
+/** Whether `map` puts every source tick at its own axis tick. */
+function identity(map: Mapping): boolean {
+  return map.origin === 0 && map.offset === 0 && map.m.num === map.m.den;
 }
 
 export interface DigitalChannel {
@@ -22,6 +72,9 @@ export interface DigitalChannel {
   readonly end: number;
   /** Spans after `start` where the level was not known, in order (FORMAT.md, "Gaps"). */
   readonly gaps?: readonly Gap[];
+  /** Where its source's ticks lie on the axis, which places its stated `kept` span; absent, at
+   * their own ticks. Its other ticks are on the axis already. */
+  readonly map?: Mapping;
 }
 
 /** Ticks `from..to` where a digital channel's level was not known; from `to` on it is `level`. */
@@ -46,17 +99,20 @@ export interface AnalogChannel {
   readonly name: string;
   /** The source's own name for the channel, as the header's `source_name` gives it. */
   readonly sourceName?: string;
+  /** On the axis: where the last sample's time ends. */
   readonly end: number;
   /** The unit of a value, such as "V" or "A". */
   readonly unit: string;
-  /** The tick of sample 0. Sample i sits at first + floor(i * period), or after a break, at the
-   * break's tick plus floor((i - index) * period). */
+  /** The source tick of sample 0. Sample i sits at first + floor(i * period), or after a break, at
+   * the break's tick plus floor((i - index) * period), in the source's ticks. */
   readonly first: number;
-  /** Ticks between samples. */
+  /** Source ticks between samples. */
   readonly period: Ratio;
   readonly count: number;
-  /** Where the samples start again after a stop, in order. */
+  /** Where the samples start again after a stop, in order, in the source's ticks. */
   readonly breaks?: readonly Break[];
+  /** Where the source's ticks lie on the axis; absent, at their own ticks. */
+  readonly map?: Mapping;
   /**
    * The value one code step stands for, where the source recorded integer codes; readouts stop at
    * that digit. Null for a source that stored floating-point values.
@@ -74,11 +130,13 @@ export interface AnalogChannel {
 }
 
 /** What a channel moved or trimmed when it was converted states (FORMAT.md, "Moved and trimmed
- * channels"). */
+ * channels"), in its source's ticks. */
 export interface Shaped {
-  /** Ticks it was moved by, later when positive, and why: `"delay"` is a known delay in its path. */
+  /** Source ticks it was moved by, later when positive, and why: `"delay"` is a known delay in
+   * its path. */
   readonly offset?: { readonly ticks: number; readonly kind: string };
-  /** The ticks `from..to` where it holds what the source recorded; outside them it was cut. */
+  /** The source ticks `from..to` where it holds what the source recorded; outside them it was
+   * cut. */
   readonly kept?: { readonly from: number; readonly to: number };
 }
 
@@ -89,10 +147,22 @@ export interface Sourced {
 
 export type Channel = (DigitalChannel | AnalogChannel) & Shaped & Sourced;
 
+/** An analog channel's mapping to the axis. */
+export function mapOf(c: Pick<AnalogChannel, "map">): Mapping {
+  return c.map ?? IDENTITY;
+}
+
+/** Axis ticks between an analog channel's samples, as a float: for a choice of drawing, not a
+ * place. */
+export function axisPeriod(c: Pick<AnalogChannel, "period" | "map">): number {
+  const m = mapOf(c).m;
+  return (c.period.num * m.num) / (c.period.den * m.den);
+}
+
 /** The first tick the channel can hold data at: a digital channel's `start` (0 when absent), an
  * analog channel's first sample. */
 export function channelStart(c: Channel): number {
-  return c.kind === "digital" ? (c.start ?? 0) : c.first;
+  return c.kind === "digital" ? (c.start ?? 0) : axisTick(mapOf(c), c.first);
 }
 
 /** Whether `tick` lies in the channel's data: ticks `channelStart(c)..end`, outside its gaps. */
@@ -123,10 +193,11 @@ export function knownSpans(c: Channel, start: number, end: number): [number, num
   };
   if (c.kind === "analog") {
     const runs = c.breaks ?? [];
+    const map = mapOf(c);
     for (let k = 0; k <= runs.length; k++) {
-      const from = k === 0 ? c.first : runs[k - 1].tick;
+      const from = axisTick(map, k === 0 ? c.first : runs[k - 1].tick);
       const last = (k < runs.length ? runs[k].index : c.count) - 1;
-      const to = k < runs.length ? Math.min(runs[k].tick, placeAfter(c, last)) : c.end;
+      const to = k < runs.length ? Math.min(axisTick(map, runs[k].tick), placeAfter(c, last)) : c.end;
       keep(from, to);
     }
     return spans;
@@ -167,23 +238,53 @@ function runsUpTo(runs: readonly Break[], key: (b: Break) => number, x: number):
   return lo;
 }
 
-/** The tick of sample `i` of an analog channel, its breaks included. */
-export function channelSampleTick(c: Pick<AnalogChannel, "first" | "period" | "breaks">, i: number): number {
+type Runs = Pick<AnalogChannel, "first" | "period" | "breaks" | "map">;
+
+/** The source tick of sample `i` of an analog channel, its breaks included. */
+function sourceSampleTick(c: Runs, i: number): number {
   const runs = c.breaks ?? [];
   const k = runsUpTo(runs, (b) => b.index, i);
   return k === 0 ? sampleTick(c.first, c.period, i) : sampleTick(runs[k - 1].tick, c.period, i - runs[k - 1].index);
 }
 
-/** The place after sample `i` on its run's grid: where its time ends, unless the next run or the
- * length comes sooner (FORMAT.md, "Gaps"). */
-export function placeAfter(c: Pick<AnalogChannel, "first" | "period" | "breaks">, i: number): number {
-  const runs = c.breaks ?? [];
-  const k = runsUpTo(runs, (b) => b.index, i);
-  return k === 0 ? sampleTick(c.first, c.period, i + 1) : sampleTick(runs[k - 1].tick, c.period, i + 1 - runs[k - 1].index);
+/** The axis tick of sample `i` of an analog channel, its breaks included. */
+export function channelSampleTick(c: Runs, i: number): number {
+  return axisTick(mapOf(c), sourceSampleTick(c, i));
 }
 
-/** The index of the first sample at or after `tick`, breaks included, clamped to `0..=count`. */
-export function channelIndexAtOrAfter(c: Pick<AnalogChannel, "first" | "period" | "count" | "breaks">, tick: number): number {
+/** The axis tick of the place after sample `i` on its run's grid: where its time ends, unless the
+ * next run or the length comes sooner (FORMAT.md, "Gaps"). */
+export function placeAfter(c: Runs, i: number): number {
+  const runs = c.breaks ?? [];
+  const k = runsUpTo(runs, (b) => b.index, i);
+  const place = k === 0 ? sampleTick(c.first, c.period, i + 1) : sampleTick(runs[k - 1].tick, c.period, i + 1 - runs[k - 1].index);
+  return axisTick(mapOf(c), place);
+}
+
+/** The least source tick whose axis tick is at or after axis tick `tick`; for the identity the
+ * tick itself, a fraction included. */
+function sourceAtOrAfter(c: Pick<AnalogChannel, "map">, tick: number): number {
+  const map = mapOf(c);
+  if (identity(map) || !Number.isFinite(tick)) return tick;
+  return firstAt(map, Math.ceil(tick));
+}
+
+/** The greatest source tick whose axis tick is at or before axis tick `tick`; for the identity
+ * the tick itself. */
+function sourceAtOrBefore(c: Pick<AnalogChannel, "map">, tick: number): number {
+  const map = mapOf(c);
+  if (identity(map) || !Number.isFinite(tick)) return tick;
+  return firstAt(map, Math.floor(tick) + 1) - 1;
+}
+
+/** The index of the first sample at or after axis tick `tick`, breaks included, clamped to
+ * `0..=count`. */
+export function channelIndexAtOrAfter(c: Pick<AnalogChannel, "first" | "period" | "count" | "breaks" | "map">, tick: number): number {
+  return indexAtOrAfterSource(c, sourceAtOrAfter(c, tick));
+}
+
+/** `channelIndexAtOrAfter` for a source tick. */
+function indexAtOrAfterSource(c: Pick<AnalogChannel, "first" | "period" | "count" | "breaks">, tick: number): number {
   const runs = c.breaks ?? [];
   // The run whose start is the last at or before `tick`; its samples end where the next run's start.
   const k = runsUpTo(runs, (b) => b.tick, tick);
@@ -198,26 +299,54 @@ export function channelIndexAtOrAfter(c: Pick<AnalogChannel, "first" | "period" 
  * sooner. Whole ticks. */
 export function lostSpans(c: AnalogChannel): { from: number; to: number; lost: number }[] {
   const runs = c.breaks ?? [];
+  const map = mapOf(c);
   return runs.flatMap((b, k) => {
     if (b.lost === 0) return [];
     const [index, tick] = k === 0 ? [0, c.first] : [runs[k - 1].index, runs[k - 1].tick];
-    const place = (i: number) => Math.min(b.tick, sampleTick(tick, c.period, i - index));
+    const place = (i: number) => axisTick(map, Math.min(b.tick, sampleTick(tick, c.period, i - index)));
     return [{ from: place(b.index), to: place(b.index + b.lost), lost: b.lost }];
   });
 }
 
+/** `a / b` in lowest terms, exactly: each term below 2^53 once reduced. */
+function ratioOf(a: bigint, b: bigint): Ratio {
+  let [x, y] = [a, b];
+  while (y !== 0n) [x, y] = [y, x % y];
+  return { num: Number(a / x), den: Number(b / x) };
+}
+
+/** A source's `m` on a recording at `timebase`: how many of its ticks one of the source's lasts,
+ * `stretch × R / rate` (FORMAT.md, "Times"). */
+export function mOf(timebase: Ratio, source: Pick<SourceHeader, "timebase" | "stretch">): Ratio {
+  const [sn, sd] = source.stretch ?? [1, 1];
+  return ratioOf(
+    BigInt(sn) * BigInt(timebase.num) * BigInt(source.timebase[1]),
+    BigInt(sd) * BigInt(timebase.den) * BigInt(source.timebase[0]),
+  );
+}
+
+/** Source `s`'s `m` in `info`. */
+export function sourceM(info: RecordingInfo, s: number): Ratio {
+  return mOf(info.timebase, info.sources![s]);
+}
+
+/** Whether `a` is larger than `b`. */
+function larger(a: Ratio, b: Ratio): boolean {
+  return BigInt(a.num) * BigInt(b.den) > BigInt(b.num) * BigInt(a.den);
+}
+
 /**
- * The recording's ticks one tick of a reading's source spans (FORMAT.md, "Sources"): a reading of
- * channels keeps to the coarsest of their sources' ticks, and one tied to no channel to the finest
- * source's. 1 for a recording of one source, or one that lists none.
+ * The recording's ticks one tick of a reading's source spans, its `m` (FORMAT.md, "Times"): a
+ * reading of channels keeps to the coarsest of their sources' ticks, and one tied to no channel to
+ * the finest source's. 1 for a recording of one source with no stretch, or one that lists none.
  */
-export function readingStep(info: RecordingInfo, channels: readonly number[] = []): number {
+export function readingStep(info: RecordingInfo, channels: readonly number[] = []): Ratio {
   const sources = info.sources;
-  if (!sources || sources.length < 2) return 1;
-  // The recording's rate over the source's: a whole number by the format's rule.
-  const factor = (s: number) => Math.round((info.timebase.num * sources[s].timebase[1]) / (info.timebase.den * sources[s].timebase[0]));
+  if (!sources || sources.length === 0) return { num: 1, den: 1 };
   const of = channels.map((c) => info.channels[c].source).filter((s): s is number => s !== undefined);
-  return of.length > 0 ? Math.max(...of.map(factor)) : Math.min(...sources.map((_, s) => factor(s)));
+  const ms = (of.length > 0 ? of : sources.map((_, s) => s)).map((s) => sourceM(info, s));
+  const pick = of.length > 0 ? (a: Ratio, b: Ratio) => (larger(b, a) ? b : a) : (a: Ratio, b: Ratio) => (larger(a, b) ? b : a);
+  return ms.reduce(pick);
 }
 
 /** A recording's content id: "blake3:" and the 64 hex digits of its content's digest. */
@@ -234,12 +363,16 @@ export interface SourceHeader {
   readonly format: SourceFormat;
   /** File names, without directories; none for a recorder's own stream. */
   readonly files: readonly string[];
-  /** The source's ticks a second, `[num, den]`: the recording's timebase is a whole multiple. */
+  /** The source's ticks a second, `[num, den]`. */
   readonly timebase: readonly [number, number];
   /** The recording's tick where the source's tick 0 lies, before a channel's offset. */
   readonly origin: number;
-  /** Ticks it was moved by against the other sources to line instruments up: a claim. */
+  /** The recording's ticks it was moved by against the other sources to line instruments up: a
+   * claim. */
   readonly align?: number;
+  /** `[num, den]`: how much a merge lengthened the source's ticks against its timebase, to line
+   * up a clock that ran at another rate than it states: a claim. Absent: 1. */
+  readonly stretch?: readonly [number, number];
   readonly instrument?: string;
   readonly software?: string;
   /** The source's own time at its tick 0, in seconds. */
@@ -379,13 +512,14 @@ export function sampleIndexAtOrAfter(first: number, period: Ratio, count: number
 }
 
 /**
- * The index of the last sample at or before `tick`: the value a cursor there reads. Null before
- * the first sample or past the channel's end.
+ * The index of the last sample at or before axis tick `tick`: the value a cursor there reads. Null
+ * before the first sample or past the channel's end.
  */
 export function sampleAtOrBefore(c: AnalogChannel, tick: number): number | null {
-  if (tick < c.first || tick >= c.end) return null;
+  if (tick < channelStart(c) || tick >= c.end) return null;
+  tick = sourceAtOrBefore(c, tick);
   if (c.breaks?.length) {
-    const i = channelIndexAtOrAfter(c, tick + 1) - 1;
+    const i = indexAtOrAfterSource(c, tick + 1) - 1;
     return i < 0 ? null : Math.min(i, c.count - 1);
   }
   let i = Math.floor(((tick - c.first) * c.period.den) / c.period.num);

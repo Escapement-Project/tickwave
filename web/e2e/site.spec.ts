@@ -94,13 +94,13 @@ test.describe("the viewer", () => {
   test("opens a recording and its sidecar from ?src= and ?annotations=", async ({ page }) => {
     await page.goto(`${SITE}open.html?src=fixtures/identify-swd.tickwave&annotations=fixtures/identify-swd.annotations.toml`);
     const f = await facts(page);
-    // From the converter's report: no title, 0.523583100 s at 1 GS/s, two channels, 5440 bytes.
+    // From the converter's report: no title, 0.523583100 s at 1 GS/s, two channels, 4349 bytes.
     expect(f).toMatchObject({
       Recording: "identify-swd.tickwave",
       Length: "523.583100 ms",
       "One tick": "1 ns",
       Channels: "SWCLK, SWDIO",
-      Size: "5.3 KiB",
+      Size: "4.2 KiB",
       "Content id": IDENTIFY_ID,
     });
     await viewReady(page);
@@ -154,8 +154,8 @@ test.describe("the viewer", () => {
     await page.goto(`${SITE}open.html`);
     await page.locator("#files").setInputFiles("fixtures/identify-swd.4k.tickwave");
     const f = await facts(page);
-    // The same capture in nine blocks: the same content id, a file of 7570 bytes.
-    expect(f).toMatchObject({ Recording: "identify-swd.4k.tickwave", Size: "7.4 KiB", "Content id": IDENTIFY_ID });
+    // The same capture in nine blocks: the same content id, a file of 6544 bytes.
+    expect(f).toMatchObject({ Recording: "identify-swd.4k.tickwave", Size: "6.4 KiB", "Content id": IDENTIFY_ID });
     await viewReady(page);
     await expect(page.locator("#share")).toHaveText("Files from this computer can't be shared by link.");
   });
@@ -293,7 +293,7 @@ test("the overview's references, inset and views work", async ({ page }) => {
   await expect(ref.locator(".pop tickwave-inset .measure")).toHaveText("SWCLK 54.644 µs first edge to last");
   await page.mouse.move(0, 0);
   const capture = page.locator("#capture");
-  await expect(capture.locator(".summary .facts")).toHaveText("524 ms; 2 channels: SWCLK, SWDIO; 5.3 KiB");
+  await expect(capture.locator(".summary .facts")).toHaveText("524 ms; 2 channels: SWCLK, SWDIO; 4.2 KiB");
   // The page writes the capture's title and facts into it: they are still the recording's.
   expect(await capture.evaluate((v) => (v as HTMLElement & { summary: { matches: boolean } | null }).summary?.matches)).toBe(true);
   // A closed view's focus goes to its Open button.

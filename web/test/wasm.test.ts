@@ -16,7 +16,7 @@ import { FIRST_READ } from "../src/wasm/protocol.ts";
 import { readFixture } from "../src/fixture-file.ts";
 import { formatLevels, MemorySource } from "../src/memory-source.ts";
 import { isAbort } from "../src/source.ts";
-import { formatInterval, measureReading } from "../src/readouts.ts";
+import { formatInterval, measureReading, ONE as STEP_ONE } from "../src/readouts.ts";
 import { openTickwave, wasm } from "../scripts/node-wasm.ts";
 
 const at = (p: string) => new URL(`../${p}`, import.meta.url);
@@ -89,34 +89,39 @@ test("nine blocks: every edge and every level agree with the extractor's fixture
 
 test("the overview: unpacked from the footer, as the extractor's fixture computes it", async () => {
   const r = await openTickwave("fixtures/identify-swd.tickwave");
-  const m = await memory();
-  // By hand (test/columns.test.ts): SWCLK's buckets of 4096 from 376696832, changing in the 6th
-  // and 7th.
-  const ov = (await r.overview(0, 376700000, 376725504, 4096))!;
+  // The converter's finest level puts about 1,024 of SWCLK's edges in a bucket: 15,286 edges over
+  // 523,583,070 ticks, 34,253 ticks apart, so round(log2(1,024 × 34,253)) = 25. Its 16 buckets of
+  // 2^25 ticks, by hand: high throughout, the even count of edges all in bucket 11, from
+  // 369,098,752.
+  assert.equal(r.header.overview_shift, 25);
+  const ov = (await r.overview(0, 0, r.info.length, 2 ** 25))!;
   assert.equal(ov.kind, "digital");
   if (ov.kind !== "digital") return;
-  assert.equal(ov.start, 376696832);
-  assert.deepEqual([...ov.level], [1, 1, 1, 1, 1, 1, 1]);
-  assert.deepEqual([...ov.changes], [0, 0, 0, 0, 0, 1, 1]);
+  assert.equal(ov.start, 0);
+  assert.deepEqual([...ov.level], Array(16).fill(1));
+  assert.deepEqual([...ov.changes], [...Array(11).fill(0), 1, 0, 0, 0, 0]);
   // Every level the footer holds, over the whole capture, against the TypeScript computation.
-  assert.deepEqual(r.header.overview.map((s) => 2 ** s), formatLevels(r.info.length));
+  const levels = formatLevels(r.info.length, r.header.overview_shift);
+  const m = new MemorySource(await readFixture(readFileSync(at("fixtures/identify-swd.tickwavefx"))), { levels });
+  assert.deepEqual(r.header.overview.map((s) => 2 ** s), levels);
   assert.equal(r.header.overview_blocks, undefined);
-  for (const bucket of formatLevels(r.info.length)) {
+  for (const bucket of levels) {
     for (const ch of [0, 1]) {
       assert.deepEqual(await r.overview(ch, 0, r.info.length, bucket), await m.overview(ch, 0, r.info.length, bucket), `${bucket}, ${ch}`);
     }
   }
-  assert.equal(await r.overview(0, 0, r.info.length, 4095), null);
+  assert.equal(await r.overview(0, 0, r.info.length, 2 ** 25 - 1), null);
 });
 
 test("overview blocks: a finer level read by range, as the TypeScript computation has it", async () => {
   // The JTAG identify capture without TDO: 626,263,880 ticks, so 2^12 has 152,898 buckets, too
-  // many for the footer, and sits in three overview blocks.
+  // many for the footer. Its file declares 2^12 as its finest level (web/README.md, "Fixtures"),
+  // so that level sits in 38 overview blocks of 4,096 buckets.
   const file = readFileSync(at("fixtures/identify-jtag.tickwave"));
   const bytes = new MemoryBytes(file, "identify-jtag.tickwave");
   const r = await Opened.open(wasm(), bytes);
   assert.deepEqual(r.header.overview, [16, 20]);
-  assert.deepEqual(r.header.overview_blocks, [{ shift: 12, blocks: 3 }]);
+  assert.deepEqual(r.header.overview_blocks, [{ shift: 12, blocks: 38 }]);
   // The edges, counted against the export's file sizes: (377124 - 60) / 8, (3980 - 60) / 8 and
   // (59308 - 60) / 8.
   const edges = await Promise.all([0, 1, 2].map((ch) => r.edges(ch, 0, r.info.length)));
@@ -128,8 +133,8 @@ test("overview blocks: a finer level read by range, as the TypeScript computatio
     channels: r.info.channels.map((c, i) => ({ kind: "digital", name: c.name, end: c.end, initial: edges[i].level, ticks: edges[i].ticks })),
   });
   const reads = bytes.reads.length;
-  // A window across the boundary between the first and second overview blocks (bucket 65,536,
-  // tick 268,435,456), and the whole capture.
+  // A window across the boundary between the 16th and 17th overview blocks (bucket 65,536, tick
+  // 268,435,456), and the whole capture.
   for (const [s, e] of [
     [260e6, 280e6],
     [0, r.info.length],
@@ -140,9 +145,9 @@ test("overview blocks: a finer level read by range, as the TypeScript computatio
       assert.deepEqual(got, await m.overview(ch, s, e, 4096), `[${s}, ${e}), ${ch}`);
     }
   }
-  // The window needs overview blocks 0 and 1, one request; the whole capture adds block 2, a
-  // second. None is read twice.
-  assert.equal(bytes.reads.length, reads + 2);
+  // Each overview block spans 4,096 × 4,096 ticks. The window needs blocks 15 and 16, one request;
+  // the whole capture adds blocks 0 to 14 and 17 to 37, a request each side. None is read twice.
+  assert.equal(bytes.reads.length, reads + 3);
 });
 
 /** A server over a file, honouring Range or not, and recording what it was asked. */
@@ -167,10 +172,11 @@ function server(file: Uint8Array, opts: { ranges: boolean; encoding?: string; sh
 }
 
 test("HTTP: the end first, blocks by range, adjacent missing blocks in one request, nothing fetched twice", async () => {
+  // A first read shorter than the footer's 968 bytes, so the footer takes a second.
   const s = server(NINE, { ranges: true });
   const { footer, blocks } = layout(NINE);
-  const r = await Opened.open(wasm(), s.bytes, 1024);
-  assert.deepEqual(s.log, ["bytes=-1024", `bytes=${footer}-${NINE.length - 1024 - 1}`]);
+  const r = await Opened.open(wasm(), s.bytes, 512);
+  assert.deepEqual(s.log, ["bytes=-512", `bytes=${footer}-${NINE.length - 512 - 1}`]);
   await r.edges(0, 0, r.info.length);
   assert.equal(s.log.length, 3);
   assert.equal(s.log[2], `bytes=${blocks[0][0]}-${blocks[blocks.length - 1][1] - 1}`);
@@ -195,10 +201,10 @@ test("HTTP: a server that ignores Range sends the whole file once, and it serves
 });
 
 test("HTTP: a compressed range, or the wrong range, is refused", async () => {
-  await assert.rejects(Opened.open(wasm(), server(NINE, { ranges: true, encoding: "gzip" }).bytes, 1024), /compresses it \(gzip\)/);
+  await assert.rejects(Opened.open(wasm(), server(NINE, { ranges: true, encoding: "gzip" }).bytes, 512), /compresses it \(gzip\)/);
   const shifted = server(NINE, { ranges: true, shift: 7 });
   const { footer } = layout(NINE);
-  await assert.rejects(Opened.open(wasm(), shifted.bytes, 1024), new RegExp(`asked for bytes from ${footer}, got ${footer + 7}`));
+  await assert.rejects(Opened.open(wasm(), shifted.bytes, 512), new RegExp(`asked for bytes from ${footer}, got ${footer + 7}`));
 });
 
 /** Bytes whose reads wait until released, and honour their signal meanwhile. */
@@ -270,7 +276,8 @@ test("an abort stops the request at once, and the read no other request waits on
 
 test("the block cache: an evicted block is read again", async () => {
   const bytes = new MemoryBytes(NINE, "identify-swd.4k.tickwave");
-  const r = await Opened.open(wasm(), bytes, 1024);
+  // A first read shorter than the footer, which then takes two reads.
+  const r = await Opened.open(wasm(), bytes, 512);
   setCacheBytes(1);
   await r.edges(0, 0, r.info.length);
   await r.edges(0, 0, r.info.length);
@@ -344,7 +351,9 @@ function saleaeVolts(path: string): Float32Array {
 
 /** An analog channel from samples, for the TypeScript overview. */
 function analogSource(r: Opened, channels: { name: string; first: number; values: Float32Array }[]) {
-  return new MemorySource({
+  const levels = formatLevels(r.info.length, r.header.overview_shift);
+  return new MemorySource(
+    {
     title: "",
     timebase: r.info.timebase,
     length: r.info.length,
@@ -358,7 +367,9 @@ function analogSource(r: Opened, channels: { name: string; first: number; values
       resolution: null,
       values: Float64Array.from(c.values),
     })),
-  });
+    },
+    { levels },
+  );
 }
 
 const numbers = (a: ArrayLike<number>) => Array.from(a);
@@ -411,13 +422,14 @@ test("analog: samples come with each whole run's smallest and largest value, fro
 
 test("analog: the footer's overview, as the TypeScript computation has it from the samples", async () => {
   const r = await openTickwave("fixtures/swd50-cut.tickwave");
-  assert.deepEqual(r.header.overview, [12, 16]);
+  // Samples a tick apart: round(log2(1,024)) = 10.
+  assert.deepEqual(r.header.overview, [10, 14]);
   const values = await Promise.all([0, 1].map((ch) => r.samples(ch, 0, r.info.length)));
   const m = analogSource(r, [
     { name: "SWCLK", first: 0, values: values[0].values as Float32Array },
     { name: "SWDIO", first: 0, values: values[1].values as Float32Array },
   ]);
-  for (const bucket of [4096, 65536]) {
+  for (const bucket of [1024, 16384]) {
     for (const ch of [0, 1]) {
       const got = (await r.overview(ch, 0, r.info.length, bucket))!;
       const want = (await m.overview(ch, 0, r.info.length, bucket))!;
@@ -430,10 +442,11 @@ test("analog: the footer's overview, as the TypeScript computation has it from t
 
 const SESSION50 = new URL("../fixtures-local/session50.tickwave", import.meta.url);
 
-test("analog overview blocks: session50's 2^12 level, as the TypeScript computation has it", { skip: !existsSync(SESSION50) && "no fixtures-local/session50.tickwave" }, async () => {
+test("analog overview blocks: session50's 2^10 level, as the TypeScript computation has it", { skip: !existsSync(SESSION50) && "no fixtures-local/session50.tickwave" }, async () => {
   const r = await openTickwave(SESSION50.pathname);
-  assert.deepEqual(r.header.overview_blocks, [{ shift: 12, blocks: 5 }]);
-  // The analog samples end at tick 100,002,000, inside overview block 0, though the capture runs
+  // Samples a tick apart: a finest level of 2^10, its 1,232,766 buckets in 301 overview blocks.
+  assert.deepEqual(r.header.overview_blocks, [{ shift: 10, blocks: 301 }]);
+  // The analog samples end at tick 100,002,000, inside overview block 23, though the capture runs
   // to 1.26 s. Two windows of whole buckets: one inside the samples, one across their end.
   for (const [s, e] of [
     [49 * 2 ** 20, 50 * 2 ** 20],
@@ -445,10 +458,10 @@ test("analog overview blocks: session50's 2^12 level, as the TypeScript computat
       assert.equal(c.end, 100002000);
       const values = await r.samples(ch, s, e);
       const m = analogSource(r, [{ name: c.name, first: values.first, values: values.values as Float32Array }]);
-      const got = (await r.overview(ch, s, e, 4096))!;
-      const want = (await m.overview(0, s, e, 4096))!;
+      const got = (await r.overview(ch, s, e, 1024))!;
+      const want = (await m.overview(0, s, e, 1024))!;
       assert.ok(got.kind === "analog" && want.kind === "analog");
-      assert.equal(got.bucket, 4096);
+      assert.equal(got.bucket, 1024);
       // Not vacuous: the buckets hold samples.
       assert.ok(got.min.length > 0 && numbers(got.min).every(Number.isFinite), `[${s}, ${e}) has samples`);
       assert.deepEqual([got.start, numbers(got.min), numbers(got.max)], [want.start, numbers(want.min), numbers(want.max)], `[${s}, ${e}), channel ${ch}`);
@@ -461,7 +474,7 @@ test("duration: first edge to last, of either polarity, of the edges in [start, 
   const tb = r.info.timebase;
   const duration = async (ch: number, s: number, e: number) => {
     const edges = await r.edges(ch, s, e);
-    return { edges, reading: measureReading("duration", edges.level, edges.ticks, tb) };
+    return { edges, reading: measureReading("duration", edges.level, edges.ticks, tb, STEP_ONE) };
   };
   // The DPIDR read on SWCLK: its first edge falls at 377094557, its span's start; its last rises
   // at 377140060 (the independent decode). 45,503 ticks.
@@ -512,9 +525,11 @@ test("a crafted recording is refused with an error, and the module goes on decod
 });
 
 test("the most the decoder takes from one frame is the page's to set", async () => {
-  // identify-swd's footer overview decodes to more than 64 bytes.
-  await assert.rejects(Opened.open(wasm(), new MemoryBytes(ONE, "one.tickwave"), FIRST_READ, 64), /more than this reader holds \(64\)/);
-  const r = await Opened.open(wasm(), new MemoryBytes(ONE, "one.tickwave"), FIRST_READ, 1 << 20);
+  // identify-jtag's footer overview, its 2^16 and 2^20 levels of three channels, decodes to more
+  // than 64 bytes.
+  const jtag = readFileSync(at("fixtures/identify-jtag.tickwave"));
+  await assert.rejects(Opened.open(wasm(), new MemoryBytes(jtag, "jtag.tickwave"), FIRST_READ, 64), /more than this reader holds \(64\)/);
+  const r = await Opened.open(wasm(), new MemoryBytes(jtag, "jtag.tickwave"), FIRST_READ, 1 << 20);
   assert.ok(r.info.length > 0);
 });
 

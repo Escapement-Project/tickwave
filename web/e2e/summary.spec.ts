@@ -6,8 +6,8 @@ import { expect, test, type Page } from "@playwright/test";
 
 const PAGE = "/e2e/pages/summary.html";
 /** As a page writes them; the view's own have no-break spaces between figure and unit. */
-const FACTS = "524 ms; 2 channels: SWCLK, SWDIO; 5.3 KiB";
-const OWN_FACTS = "524\u00a0ms; 2 channels: SWCLK, SWDIO; 5.3\u00a0KiB";
+const FACTS = "524 ms; 2 channels: SWCLK, SWDIO; 4.2 KiB";
+const OWN_FACTS = "524\u00a0ms; 2 channels: SWCLK, SWDIO; 4.2\u00a0KiB";
 /** A recording without a title of its own takes its file's name, so this is identify-swd's title. */
 const TITLE = "SWD reads through the probe at its fastest clock, against the stock firmware.tickwave";
 const SRC = `named/fixtures/identify-swd.tickwave/${encodeURIComponent(TITLE)}`;
@@ -136,12 +136,12 @@ test("a page's title names the view's button, and a wrong one is warned of", asy
 });
 
 test("a view of some of the channels names them, out of the recording's", async ({ page }) => {
-  await page.goto(`${PAGE}?${new URLSearchParams({ channels: "SWDIO", facts: "524 ms; 1 of 2 channels: SWDIO; 5.3 KiB" })}`);
+  await page.goto(`${PAGE}?${new URLSearchParams({ channels: "SWDIO", facts: "524 ms; 1 of 2 channels: SWDIO; 4.2 KiB" })}`);
   await page.evaluate(() => (window as unknown as { define: () => Promise<unknown> }).define());
   await page.waitForFunction(() => !!(document.getElementById("v") as HTMLElement & { summary?: unknown }).summary);
   expect(await page.evaluate(() => (document.getElementById("v") as HTMLElement & { summary: unknown }).summary)).toEqual({
     title: "identify-swd.tickwave",
-    facts: "524\u00a0ms; 1 of 2 channels: SWDIO; 5.3\u00a0KiB",
+    facts: "524\u00a0ms; 1 of 2 channels: SWDIO; 4.2\u00a0KiB",
     matches: true,
   });
 });

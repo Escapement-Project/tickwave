@@ -51,13 +51,19 @@ test("a recording added merges with the one shown, each under its head, lined up
   expect((await view.evaluate((v) => (v as unknown as Grouped).aligns))["energy.tickwave"]).toBe(12_000_000);
   await page.getByLabel("Take under_range").uncheck();
   await expect(view).toHaveAttribute("channels", "SWCLK SWDIO V I P range DIO0");
+  // A channel's move goes to the merge in its own instrument's ticks: 1 µs is 12,000 merged ticks,
+  // and 96 of the energy fixture's 96 MHz ones.
+  const move = page.getByLabel("Move DIO0 by");
+  await move.fill("-1 µs");
+  await move.press("Tab");
+  expect((await view.evaluate((v) => (v as unknown as { shape: Record<string, { offset: number }> }).shape)).DIO0.offset).toBe(-12_000);
   const [download] = await Promise.all([page.waitForEvent("download", { timeout: 60_000 }), page.locator("#save").click()]);
   expect(download.suggestedFilename()).toBe("identify-swd+energy.tickwave");
   const saved = readFileSync((await download.path())!);
   // The CLI with the same settings, to a file of the same name, which names its bundled files.
   const dir = mkdtempSync(join(tmpdir(), "escapement-tickwave-merge-"));
   const out = join(dir, "identify-swd+energy.tickwave");
-  const flags = [...["SWCLK", "SWDIO"].flatMap((c) => ["--channel", `1:${c}=${c}`]), ...["V", "I", "range", "DIO0"].flatMap((c) => ["--channel", `2:${c}=${c}`]), "--align", "2=1ms"];
+  const flags = [...["SWCLK", "SWDIO"].flatMap((c) => ["--channel", `1:${c}=${c}`]), ...["V", "I", "range", "DIO0"].flatMap((c) => ["--channel", `2:${c}=${c}`]), "--align", "2=1ms", "--offset", "DIO0=-1us"];
   tickwave(["merge", join(FIXTURES, "identify-swd.tickwave"), join(FIXTURES, "energy.tickwave"), ...flags, "-o", out]);
   expect(saved.equals(readFileSync(out)), `the saved recording is tickwave merge's with ${flags.join(" ")}`).toBe(true);
   const copy = join(dir, "saved.tickwave");

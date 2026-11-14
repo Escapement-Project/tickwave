@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { MemorySource } from "../src/memory-source.ts";
 import { ShapedSource } from "../src/shaped-source.ts";
-import type { RecordingInfo } from "../src/source.ts";
+import { channelStart, type RecordingInfo } from "../src/source.ts";
 
 const rec = {
   title: "",
@@ -39,7 +39,9 @@ test("a channel moved later: its edges and its data's start move with it, and th
 test("a channel moved earlier reaches before the capture's start, and its overview's buckets move with it", async () => {
   const { s, info } = await moved([0, -25]);
   const v = info.channels[1];
-  assert.equal(v.kind === "analog" && v.first, -25);
+  // Its samples keep their own ticks; the source's tick 0 moves to -25.
+  assert.equal(v.kind === "analog" && v.first, 0);
+  assert.equal(channelStart(v), -25);
   assert.equal(v.end, 975);
   // Samples 0 and 1 sit at -25 and -15: a read from -30 to -10 takes both, by index.
   const got = await s.samples(1, -30, -10);

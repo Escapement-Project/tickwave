@@ -2,7 +2,7 @@
 // period, frequency and duty, and an analog channel's value or range at a pixel. The view shows it
 // beside the pointer and in cursor A's readout line.
 
-import { formatInterval, formatRate } from "./readouts.ts";
+import { formatInterval, formatRate, ONE } from "./readouts.ts";
 import { lowerBound } from "./search.ts";
 import { channelSampleTick, channelStart, knownSpans, sampleAtOrBefore, type AnalogChannel, type AnalogOverview, type Channel, type Edges, type Ratio, type Samples, type Source } from "./source.ts";
 
@@ -120,7 +120,7 @@ export interface PulseFigures {
  * A complete pulse's figures. Widths are whole ticks; a rate and a duty carry the digits the ticks
  * support. `step` is the ticks one tick of the channel's source spans (`readingStep`).
  */
-export function pulseFigures(p: Pulse, timebase: Ratio, known: Known, step = 1): PulseFigures {
+export function pulseFigures(p: Pulse, timebase: Ratio, known: Known, step: Ratio = ONE): PulseFigures {
   const level = p.level ? "high" : "low";
   const s = p.start ?? null;
   const e = p.end ?? null;
@@ -149,8 +149,10 @@ export function pulseFigures(p: Pulse, timebase: Ratio, known: Known, step = 1):
  * `step` ticks, so the share is uncertain by about 100 step / period percent; the last digit shown is at the largest power of ten not
  * larger than that, as a rate's is.
  */
-export function formatDuty(high: number, period: number, step = 1): string {
-  const place = Math.floor(Math.log10((100 * step) / period));
+export function formatDuty(high: number, period: number, step: Ratio = ONE): string {
+  // As the view core works it: the step as one float, then the share.
+  const ticks = step.num / step.den;
+  const place = Math.floor(Math.log10((100 * ticks) / period));
   const share = (100 * high) / period;
   // A no-break space before the unit, as every readout writes it.
   if (place < 0) return `${share.toFixed(-place)}\u00a0%`;
@@ -169,7 +171,7 @@ export type AnalogAt =
  * in it, as the trace draws them.
  */
 export function analogFromSamples(c: AnalogChannel, s: Samples, t0: number, t1: number, tick: number): AnalogAt {
-  const first = sampleAtOrBefore(c, Math.max(c.first, Math.ceil(t0)));
+  const first = sampleAtOrBefore(c, Math.max(channelStart(c), Math.ceil(t0)));
   const at = sampleAtOrBefore(c, Math.floor(tick));
   if (at === null || first === null) return { kind: "none" };
   let last = first;

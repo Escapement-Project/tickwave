@@ -6,7 +6,7 @@ import { covers, laneAnnotations, type Annotation, type Resolved } from "../anno
 import type { Palette } from "../palette.ts";
 import { formatMarks, niceStep } from "../readouts.ts";
 import { rangeMarks, type ValueRange } from "./scale.ts";
-import { channelSampleTick, channelStart, knownSpans, lostSpans, named, rebased, type AnalogChannel, type Channel, type RecordingInfo, type Source } from "../source.ts";
+import { axisPeriod, channelSampleTick, channelStart, knownSpans, lostSpans, named, rebased, type AnalogChannel, type Channel, type RecordingInfo, type Source } from "../source.ts";
 import { timeAxis } from "./axis.ts";
 import {
   analogFromOverview,
@@ -806,7 +806,7 @@ export class Plot {
     const left = l.plotLeft * dpr;
     const line = new Path2D();
     const fill = new Path2D();
-    const period = c.period.num / c.period.den;
+    const period = axisPeriod(c);
     if (tile.kind === "samples" && grid.per < period) {
       // Fewer samples than columns: a line through the samples, with a dot on each once they
       // stand apart.

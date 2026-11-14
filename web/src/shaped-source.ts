@@ -3,7 +3,7 @@
 // capture's own, so a channel moved before the capture's start reaches below tick 0, and nothing
 // else moves with it. Nothing is resampled: every edge and sample keeps its tick, plus the offset.
 
-import type { Channel, Edges, Overview, RecordingInfo, Samples, Source } from "./source.ts";
+import { mapOf, type Channel, type Edges, type Overview, type RecordingInfo, type Samples, type Source } from "./source.ts";
 
 export class ShapedSource implements Source {
   readonly #inner: Source;
@@ -80,7 +80,12 @@ export function shaped(info: RecordingInfo, offsets: readonly number[]): Recordi
   const channels = info.channels.map((c, i): Channel => {
     const d = offsets[i] ?? 0;
     if (d === 0) return c;
-    return c.kind === "digital" ? { ...c, start: (c.start ?? 0) + d, end: c.end + d } : { ...c, first: c.first + d, end: c.end + d };
+    // Its source's ticks stay its own: the source's tick 0 moves. A digital channel's other ticks
+    // are on the axis already; its map only places a stated kept span, where it has one.
+    const map = mapOf(c);
+    const moved = { ...map, origin: map.origin + d };
+    if (c.kind === "digital") return { ...c, start: (c.start ?? 0) + d, end: c.end + d, ...(c.map && { map: moved }) };
+    return { ...c, map: moved, end: c.end + d };
   });
   return { ...info, channels, length: Math.max(info.length, ...channels.map((c) => c.end)) };
 }

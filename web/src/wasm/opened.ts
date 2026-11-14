@@ -6,6 +6,7 @@ import type { Recording as WasmRecording } from "../../../crates/wasm/pkg/escape
 import { lowerBound } from "../search.ts";
 import {
   aborted,
+  axisTick,
   channelIndexAtOrAfter,
   channelSampleTick,
   fillRuns,
@@ -19,6 +20,8 @@ import {
   type DigitalOverview,
   type Edges,
   type Gap,
+  type Mapping,
+  mOf,
   type RecordingInfo,
   type Samples,
   type SourceHeader,
@@ -112,6 +115,8 @@ export interface Header {
   sources: SourceHeader[];
   content_id: ContentId;
   blocks: number;
+  /** The finest overview level's shift (FORMAT.md, "Overview"). */
+  overview_shift: number;
   overview: number[];
   /** Finer levels, kept in overview blocks after the data blocks, finest first. */
   overview_blocks?: { shift: number; blocks: number }[];
@@ -281,31 +286,46 @@ export class Opened {
         ),
     );
     const h = this.header;
-    // A gap from tick 0 says where the channel's data starts; the others are gaps in it.
-    const leading = (c: (typeof h.channels)[number]) => c.kind === "digital" && c.gaps?.[0]?.[0] === 0;
+    const timebase = { num: h.timebase[0], den: h.timebase[1] };
+    /** Where a channel's source ticks lie on the axis: its source's origin and `m`, its offset. */
+    const mapping = (c: HeaderShaped & { source: number }): Mapping => ({
+      origin: h.sources[c.source].origin,
+      offset: c.offset ?? 0,
+      m: mOf(timebase, h.sources[c.source]),
+    });
+    const plain = (map: Mapping) => map.origin === 0 && map.offset === 0 && map.m.num === map.m.den;
     /** What a channel moved or trimmed states, for the details a page lists. */
     const shaped = (c: HeaderShaped) => ({
       ...(c.offset !== undefined && { offset: { ticks: c.offset, kind: c.offset_kind ?? "" } }),
       ...(c.kept && { kept: { from: c.kept[0], to: c.kept[1] } }),
     });
     const channels: Channel[] = h.channels.map((c, i) => {
+      const map = mapping(c);
       if (c.kind === "digital") {
-        const gaps: Gap[] = (c.gaps ?? []).slice(leading(c) ? 1 : 0).map(([from, to, level]) => ({ from, to, level: level ? 1 : 0 }));
+        // The channel's start in its source's ticks (FORMAT.md, "Header"); a gap from there says
+        // where its level is first known, and the others are gaps in it. Each on the axis.
+        const first = c.kept?.[0] ?? -h.sources[c.source].origin;
+        const leading = c.gaps?.[0]?.[0] === first;
+        const gaps: Gap[] = (c.gaps ?? [])
+          .slice(leading ? 1 : 0)
+          .map(([from, to, level]) => ({ from: axisTick(map, from), to: axisTick(map, to), level: level ? 1 : 0 }));
+        const start = axisTick(map, leading ? c.gaps![0][1] : first);
         return {
           ...shaped(c),
           kind: "digital",
           name: c.name,
           sourceName: c.source_name,
           source: c.source,
-          end: c.end,
-          ...(leading(c) && { start: c.gaps![0][1] }),
+          end: axisTick(map, c.end),
+          ...(start !== 0 && { start }),
           ...(gaps.length > 0 && { gaps }),
+          ...(!plain(map) && { map }),
         };
       }
       const [min, max] = this.#range(i);
       const period = { num: c.period[0], den: c.period[1] };
       const breaks: Break[] = (c.breaks ?? []).map(([index, tick, lost]) => ({ index, tick, lost }));
-      const runs = { first: c.first, period, breaks };
+      const runs = { first: c.first, period, breaks, map };
       return {
         ...shaped(c),
         kind: "analog",
@@ -313,8 +333,9 @@ export class Opened {
         sourceName: c.source_name,
         source: c.source,
         // Where the last sample's time ends: an analog channel can stop well before the capture does.
-        end: Math.min(h.length, c.count === 0 ? c.first : placeAfter(runs, c.count - 1)),
+        end: Math.min(h.length, c.count === 0 ? axisTick(map, c.first) : placeAfter(runs, c.count - 1)),
         ...(breaks.length > 0 && { breaks }),
+        ...(!plain(map) && { map }),
         unit: c.unit,
         first: c.first,
         period,
@@ -350,7 +371,7 @@ export class Opened {
     }
     this.info = {
       title: h.title ?? bytes.name,
-      timebase: { num: h.timebase[0], den: h.timebase[1] },
+      timebase,
       length: h.length,
       channels,
       bytes: fileLength,

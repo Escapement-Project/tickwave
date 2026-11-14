@@ -4,8 +4,8 @@
 
 import { previewMerge, recordingInfo, registerFile, type Channel, type ChannelShape, type MergedSource, type RecordingInfo, type TickwaveView } from "tickwave";
 import { parseWindow } from "../web/src/attributes.ts";
-import { formatBytes, formatInterval } from "../web/src/readouts.ts";
-import { readingStep } from "../web/src/source.ts";
+import { formatBytes, formatInterval, formatSourceInterval } from "../web/src/readouts.ts";
+import { axisTick, IDENTITY, readingStep, type Ratio } from "../web/src/source.ts";
 import { parseTime, toTicks } from "../web/src/time.ts";
 import { githubAttachment } from "./attachment.ts";
 import { attachEditor, type Editor } from "./editor.ts";
@@ -35,15 +35,17 @@ function problems(box: HTMLElement): { say: (lead: string, items?: string[]) => 
 }
 
 /** A channel as the details list it: its name, an analog one's unit, and how it was moved, and
- * where it holds the source's data, where it states them. */
-function channelFacts(c: Channel, tb: { num: number; den: number }, step: number): string {
+ * where it holds the source's data, where it states them. Its header states both in its source's
+ * ticks, `m` of the recording's each: the move as a time, the span where it lies in the view. */
+function channelFacts(c: Channel, tb: Ratio, m: Ratio): string {
   const notes = c.kind === "analog" ? ["analog", c.unit] : [];
   if (c.offset) {
     const why = c.offset.kind === "delay" ? "for a known delay" : `(${c.offset.kind})`;
-    notes.push(`moved ${formatInterval(Math.abs(c.offset.ticks), tb, step)} ${c.offset.ticks > 0 ? "later" : "earlier"} ${why}`);
+    notes.push(`moved ${formatSourceInterval(Math.abs(c.offset.ticks), tb, m)} ${c.offset.ticks > 0 ? "later" : "earlier"} ${why}`);
   }
   // A recording with a channel moved or cut states each channel's span of source data.
-  if (c.kept) notes.push(`source data from ${formatInterval(c.kept.from, tb, step)} to ${formatInterval(c.kept.to, tb, step)}`);
+  const at = (k: number) => formatInterval(axisTick(c.map ?? IDENTITY, k), tb, m);
+  if (c.kept) notes.push(`source data from ${at(c.kept.from)} to ${at(c.kept.to)}`);
   return notes.length > 0 ? `${c.name} (${notes.join(", ")})` : c.name;
 }
 
@@ -53,7 +55,7 @@ function showFacts(facts: HTMLElement, info: RecordingInfo, name: string): void 
     ["Recording", info.title || name],
     ["Length", formatInterval(info.length, info.timebase, readingStep(info))],
     // A merged recording's sources tick at their own rates: the finest one's tick.
-    ["One tick", formatInterval(readingStep(info), info.timebase, readingStep(info))],
+    ["One tick", formatSourceInterval(1, info.timebase, readingStep(info))],
     ["Channels", info.channels.map((c, i) => channelFacts(c, info.timebase, readingStep(info, [i]))).join(", ")],
   ];
   if (info.bytes !== undefined) rows.push(["Size", formatBytes(info.bytes)]);
@@ -984,7 +986,7 @@ function openPage(): void {
   function mergeTable(info: RecordingInfo, m: MergedSource): void {
     merging(true);
     byId("source").textContent = `Merging ${inputs.length} recordings`;
-    const ticks = inputs.map((i) => `${i.name}, ${formatInterval(readingStep(i.info), i.info.timebase, readingStep(i.info))}`);
+    const ticks = inputs.map((i) => `${i.name}, ${formatSourceInterval(1, i.info.timebase, readingStep(i.info))}`);
     byId("source-facts").textContent = `On one time axis, each at its own tick: ${ticks.join("; ")}.`;
     rows.replaceChildren(
       ...inputs.flatMap((recording, k) => {
@@ -1096,12 +1098,19 @@ function openPage(): void {
       const u = input(tr, "unit")?.value.trim() ?? "";
       if (c?.kind === "analog" && u && u !== c.unit) units.push([to, u]);
       const s = shape[key];
-      if (s && s.offset !== 0) offsets.push([to, timeOf(s.offset, tb)]);
-      // A kept span in the view's ticks is a whole number of the recording's own.
+      // A move is in the channel's source's own ticks, on its grid: the nearest one.
+      const channelIndex = info.channels.findIndex((c) => c.name === key);
+      const own = channelIndex >= 0 ? info.sources?.[info.channels[channelIndex].source ?? 0] : undefined;
+      if (s && s.offset !== 0 && own) {
+        const step = readingStep(info, [channelIndex]);
+        offsets.push([to, timeOf(Math.round((s.offset * step.den) / step.num), { num: own.timebase[0], den: own.timebase[1] })]);
+      } else if (s && s.offset !== 0) offsets.push([to, timeOf(s.offset, tb)]);
+      // A kept span is in the input's own ticks: the nearest.
       if (s?.keep) {
-        const f = m.factors[k];
+        const q = m.ratios[k];
         const own = inputs[k].info.timebase;
-        keeps.push([to, timeOf(Math.round(s.keep.from / f), own), timeOf(Math.round(s.keep.to / f), own)]);
+        const back = (t: number) => Math.round((t * q.den) / q.num);
+        keeps.push([to, timeOf(back(s.keep.from), own), timeOf(back(s.keep.to), own)]);
       }
     }
     const empty = out.findIndex((i) => i.channels.length === 0);

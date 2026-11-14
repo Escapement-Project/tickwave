@@ -867,7 +867,9 @@ export class TickwaveInset extends TickwaveElement {
 
 /** The `measure` readout as HTML: empty when the span says nothing. */
 export function measureText(what: MeasureKind, channel: string, level: 0 | 1, ticks: Float64Array, info: RecordingInfo): string {
-  const r = measureReading(what, level, ticks, info.timebase);
+  // To the digit of the channel's own source's tick.
+  const step = readingStep(info, [info.channels.findIndex((c) => c.name === channel)].filter((i) => i >= 0));
+  const r = measureReading(what, level, ticks, info.timebase, step);
   if (r === null) return "";
   return `<span class="what">${esc(channel)}</span> ${esc(r.value)} <span class="what">${esc(r.note)}</span>`;
 }

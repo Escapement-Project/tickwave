@@ -316,7 +316,7 @@ test("a collapsed view keeps its height when its footer arrives", async ({ page 
   });
   // The server holds every read a second, the footer's too.
   await page.goto(`${VIEW}?tag=${tag}&after=0&stall=1000`);
-  await expect(page.locator("#v .facts")).toHaveText("524 ms; 2 channels: SWCLK, SWDIO; 5.3 KiB", { timeout: 10_000 });
+  await expect(page.locator("#v .facts")).toHaveText("524 ms; 2 channels: SWCLK, SWDIO; 4.2 KiB", { timeout: 10_000 });
   const frames = await page.evaluate(() => (window as unknown as { frames: [number, string][] }).frames);
   // Frames before the footer and after it, at one height.
   expect(frames.filter(([, f]) => f === "").length).toBeGreaterThan(20);

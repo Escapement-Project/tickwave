@@ -42,9 +42,9 @@ test("a truncated fixture is refused", async () => {
 });
 
 test("overview levels follow FORMAT.md", () => {
-  // As the converter wrote them into the reconverted headers, the head's levels and the block
-  // levels together: identify-swd [12, 16, 20] and none in blocks; gcc-swd-reads [16, 20] and 12
-  // in blocks; stock-reads [16, 20, 24] and 12; the matrix capture [20, 24, 28] and 12 and 16.
+  // From a finest shift of 12 in steps of 4, to the first level of at most 1,024 buckets: the
+  // footer's levels and the block levels together. identify-swd's 523,583,100 ticks are 499 buckets
+  // of 2^20.
   assert.deepEqual(formatLevels(523583100), [2 ** 12, 2 ** 16, 2 ** 20]);
   assert.deepEqual(formatLevels(927888190), [2 ** 12, 2 ** 16, 2 ** 20]);
   assert.deepEqual(formatLevels(4429986070), [2 ** 12, 2 ** 16, 2 ** 20, 2 ** 24]);
@@ -53,6 +53,10 @@ test("overview levels follow FORMAT.md", () => {
   // takes a 1,025th.
   assert.deepEqual(formatLevels(2 ** 22), [2 ** 12]);
   assert.deepEqual(formatLevels(2 ** 22 + 1), [2 ** 12, 2 ** 16]);
+  // From another finest shift, as a file's density gives it: 2^52 ticks are 2^22 buckets of 2^30,
+  // and 1,024 of 2^42.
+  assert.deepEqual(formatLevels(523583100, 25), [2 ** 25]);
+  assert.deepEqual(formatLevels(2 ** 52, 30), [2 ** 30, 2 ** 34, 2 ** 38, 2 ** 42]);
 });
 
 test("annotations: generated ids, refs, times and errors", () => {

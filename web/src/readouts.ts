@@ -120,13 +120,18 @@ export function formatScaled(scaled: bigint, p: number, units: readonly Unit[], 
   return digitsAt(scaled, p, unit ?? unitFor(scaled, p, units));
 }
 
+/** One tick of the recording's: a reading of one source's own rate. */
+export const ONE: Ratio = { num: 1, den: 1 };
+
 /**
  * The place of one tick: the largest power of ten not larger than a tick's length. An interval
  * is a whole number of ticks, so its last digit sits here. At 1 GS/s that is 1 ns; at 200 kS/s
- * (5 us) it is 1 us, and every interval is then exact at that place.
+ * (5 us) it is 1 us, and every interval is then exact at that place. `step` is the ticks one tick
+ * of the reading's source spans, its `m` (FORMAT.md, "Times"): a ratio where a source's tick is
+ * not a whole number of the recording's.
  */
-export function tickPlace(timebase: Ratio, step = 1): number {
-  return placeOf(big(timebase.den) * big(step), big(timebase.num));
+export function tickPlace(timebase: Ratio, step: Ratio = ONE): number {
+  return placeOf(big(timebase.den) * big(step.num), big(timebase.num) * big(step.den));
 }
 
 /**
@@ -134,16 +139,25 @@ export function tickPlace(timebase: Ratio, step = 1): number {
  * ticks one tick of the reading's source spans (`readingStep`), where a merged recording ticks
  * finer than its sources: the last digit sits at the source's tick.
  */
-export function formatInterval(ticks: number, timebase: Ratio, step = 1): string {
+export function formatInterval(ticks: number, timebase: Ratio, step: Ratio = ONE): string {
   const p = tickPlace(timebase, step);
   return formatScaled(roundAt(big(ticks) * big(timebase.den), big(timebase.num), p), p, TIME_UNITS);
+}
+
+/**
+ * An interval of `ticks` of a source's own ticks, each `m` of the recording's, to the digit of
+ * the source's tick: a channel's move or kept span, which its header states in its source's ticks.
+ */
+export function formatSourceInterval(ticks: number, timebase: Ratio, m: Ratio): string {
+  const p = tickPlace(timebase, m);
+  return formatScaled(roundAt(big(ticks) * big(m.num) * big(timebase.den), big(m.den) * big(timebase.num), p), p, TIME_UNITS);
 }
 
 /**
  * An interval to three significant figures, for a summary line: 927888190 ticks at 1 GS/s is
  * 928 ms. Never finer than one tick.
  */
-export function formatBrief(ticks: number, timebase: Ratio, step = 1): string {
+export function formatBrief(ticks: number, timebase: Ratio, step: Ratio = ONE): string {
   const n = big(Math.abs(ticks)) * big(timebase.den);
   const d = big(timebase.num);
   const tick = tickPlace(timebase, step);
@@ -165,12 +179,12 @@ export function formatBrief(ticks: number, timebase: Ratio, step = 1): string {
  * power of ten not larger than that uncertainty. A single period of 40 ns is 25 MHz give or take
  * 0.6 MHz, so it shows 25.0 MHz; the mean over 1000 such periods in one run shows 25.0000 MHz.
  */
-export function formatRate(periods: number, span: number, timebase: Ratio, runs = 1, step = 1): string | null {
+export function formatRate(periods: number, span: number, timebase: Ratio, runs = 1, step: Ratio = ONE): string | null {
   if (periods <= 0 || span <= 0 || runs <= 0) return null;
   const n = big(periods) * big(timebase.num);
   const d = big(span) * big(timebase.den);
   // Each run's span is wrong by less than one tick of the source: `step` of these ticks.
-  const p = placeOf(n * big(runs) * big(step), d * big(span));
+  const p = placeOf(n * big(runs) * big(step.num), d * big(span) * big(step.den));
   return formatScaled(roundAt(n, d, p), p, RATE_UNITS);
 }
 
@@ -179,11 +193,11 @@ export function formatRate(periods: number, span: number, timebase: Ratio, runs 
  * above the span is wrong by less than `runs` ticks, so the mean is uncertain by runs / periods
  * ticks, and may carry digits finer than one tick.
  */
-export function formatMeanPeriod(periods: number, span: number, timebase: Ratio, runs = 1, step = 1): string | null {
+export function formatMeanPeriod(periods: number, span: number, timebase: Ratio, runs = 1, step: Ratio = ONE): string | null {
   if (periods <= 0 || span <= 0 || runs <= 0) return null;
   const n = big(span) * big(timebase.den);
   const d = big(periods) * big(timebase.num);
-  const p = placeOf(big(runs) * big(step) * big(timebase.den), d);
+  const p = placeOf(big(runs) * big(step.num) * big(timebase.den), d * big(step.den));
   return formatScaled(roundAt(n, d, p), p, TIME_UNITS);
 }
 
@@ -263,12 +277,12 @@ export function periodStats(level: 0 | 1, ticks: ArrayLike<number>): PeriodStats
 }
 
 /** The running clock's rate, with its digits. */
-export function formatClockRate(s: PeriodStats, timebase: Ratio, step = 1): string {
+export function formatClockRate(s: PeriodStats, timebase: Ratio, step: Ratio = ONE): string {
   return formatRate(s.used, s.span, timebase, s.runs, step)!;
 }
 
 /** The running clock's period, with its digits. */
-export function formatClockPeriod(s: PeriodStats, timebase: Ratio, step = 1): string {
+export function formatClockPeriod(s: PeriodStats, timebase: Ratio, step: Ratio = ONE): string {
   return formatMeanPeriod(s.used, s.span, timebase, s.runs, step)!;
 }
 
@@ -325,16 +339,17 @@ export interface Reading {
  * A `measure` reading (ANNOTATIONS.md, "Measures") over a span's edges: `ticks` are the edges at
  * ticks in [start, end), as `Source.edges` returns them, and `level` the level before the first.
  * `rate` and `period` read the running clock; `duration` the time from the first edge to the
- * last, of either polarity, to the tick. Null when the span has too few edges to say anything.
+ * last, of either polarity, to the tick of the channel's source: `step` is that tick in axis
+ * ticks, its `m` (`readingStep`). Null when the span has too few edges to say anything.
  */
-export function measureReading(what: MeasureKind, level: 0 | 1, ticks: ArrayLike<number>, timebase: Ratio): Reading | null {
+export function measureReading(what: MeasureKind, level: 0 | 1, ticks: ArrayLike<number>, timebase: Ratio, step: Ratio): Reading | null {
   if (what === "duration") {
     if (ticks.length < 2) return null;
-    return { value: formatInterval(ticks[ticks.length - 1] - ticks[0], timebase), note: "first edge to last" };
+    return { value: formatInterval(ticks[ticks.length - 1] - ticks[0], timebase, step), note: "first edge to last" };
   }
   const stats = periodStats(level, ticks);
   if (!stats) return { value: "\u2013", note: "no full period" };
-  return { value: what === "rate" ? formatClockRate(stats, timebase) : formatClockPeriod(stats, timebase), note: clockNote(stats) };
+  return { value: what === "rate" ? formatClockRate(stats, timebase, step) : formatClockPeriod(stats, timebase, step), note: clockNote(stats) };
 }
 
 /** A download size: 4828 bytes is 4.7 KiB. */
