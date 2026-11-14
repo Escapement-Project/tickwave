@@ -11,7 +11,7 @@ use escapement_tickwave_format::header::{
 };
 use escapement_tickwave_format::model::{Gap, Ratio};
 use escapement_tickwave_format::writer::{Bundle, Finish, WriteOptions, Writer};
-use escapement_tickwave_view::{Cache, Drawn, Query, Recording};
+use escapement_tickwave_view::{Answer, Cache, Drawn, Query, Recording};
 
 /// What a recorder pushes, in order.
 #[derive(Clone, Debug)]
@@ -477,11 +477,13 @@ fn one_recording_updated_with_each_snapshot_reads_as_one_made_from_it() {
             for window in [0..length, length / 3..length, -5..length + 5] {
                 let mut q = query(window.clone(), 16);
                 q.statistics = vec![window.clone()];
-                assert_eq!(
-                    u.query(&q, &cancel).unwrap(),
-                    fresh.query(&q, &cancel).unwrap(),
-                    "{at}, {window:?}"
-                );
+                // Each names the recording it is from.
+                let want = fresh.query(&q, &cancel).unwrap();
+                let got = Answer {
+                    revision: want.revision,
+                    ..u.query(&q, &cancel).unwrap()
+                };
+                assert_eq!(got, want, "{at}, {window:?}");
             }
         }
     }

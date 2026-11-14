@@ -16,7 +16,8 @@ use escapement_tickwave_view::columns::{self, AnalogOverview, Grid, Samples, Sta
 use escapement_tickwave_view::runs::Runs;
 use escapement_tickwave_view::spans::{ChannelPlace, known_spans};
 use escapement_tickwave_view::{
-    Cache, ChannelKind, Drawn, Error, MarkerCursor, MarkerQuery, Query, Recording, Resolution,
+    Answer, Cache, ChannelKind, Drawn, Error, MarkerCursor, MarkerQuery, Query, Recording,
+    Resolution,
 };
 
 mod common;
@@ -538,7 +539,16 @@ fn a_file_reads_as_its_bytes_do_and_a_small_cache_holds_little() {
     )
     .unwrap();
     let a = from_file.query(&q, &cancel).unwrap();
-    assert_eq!(a, from_arc.query(&q, &cancel).unwrap());
+    let b = from_arc.query(&q, &cancel).unwrap();
+    // Each names the recording it is from.
+    assert_ne!(a.revision, b.revision);
+    assert_eq!(
+        a,
+        Answer {
+            revision: a.revision,
+            ..b
+        }
+    );
     std::fs::remove_file(&path).unwrap();
     let cache = Cache::new(1000);
     let small = Recording::open(Arc::new(file.clone()), cache.clone()).unwrap();

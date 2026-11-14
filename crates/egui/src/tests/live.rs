@@ -83,7 +83,7 @@ fn a_followed_live_window_ends_at_now_once_now_is_past_the_data() {
     h.state_mut().strip = true;
     h.state_mut().viewer = Some(Viewer::live(&h.ctx, &live.path, snapshot).unwrap());
     // No now: the window follows the extent.
-    let a = answered(&mut h, 3 * SECOND..4 * SECOND);
+    let a = followed(&mut h, 4 * SECOND);
     assert_eq!(a.extent, Some(0..4 * SECOND));
     // Following a recording as it is written, it asks for every frame, with no answer landing.
     for _ in 0..5 {
@@ -106,7 +106,7 @@ fn a_followed_live_window_ends_at_now_once_now_is_past_the_data() {
     assert!((wash[0].right() - band.right()).abs() < 0.5, "{wash:?}");
     // Now behind the data: the window ends at the data's end.
     h.state_mut().now = Some(3 * SECOND + 500 * MS);
-    answered(&mut h, 3 * SECOND..4 * SECOND);
+    followed(&mut h, 4 * SECOND);
     assert_eq!(drawn(&h).window, 3 * SECOND..4 * SECOND);
     // A window of its own doesn't move with now, and asks nothing as now moves.
     h.state_mut().state.window = Window::At(SECOND..2 * SECOND);
@@ -134,7 +134,7 @@ fn nothing_is_drawn_between_the_data_end_and_now() {
     h.state_mut().viewer = Some(Viewer::live(&h.ctx, &live.path, snapshot).unwrap());
     let now = 4 * SECOND + 500 * MS;
     h.state_mut().now = Some(now);
-    answered(&mut h, now - SECOND..now);
+    followed(&mut h, now);
     let s = drawn(&h);
     let plot = s.layout.plot;
     let end = plot.left() + 0.5 * plot.width();
@@ -189,8 +189,9 @@ fn a_held_answer_scrolls_with_now_while_a_query_is_held_back() {
     h.state_mut().viewer = Some(gated_live(&h.ctx, &live.path, snapshot, &gate));
     let _opens = Opens(Arc::clone(&gate));
     h.state_mut().now = Some(4 * SECOND);
-    let a = answered(&mut h, 3 * SECOND..4 * SECOND);
-    // A snapshot asks, and its query is held back at its first read.
+    let a = followed(&mut h, 4 * SECOND);
+    // A snapshot: the viewer answers again, held back at its first read, and the graph asks
+    // nothing.
     gate.close();
     let issued = viewer(&h).issued();
     viewer(&h).update(live.write(5000));
@@ -201,7 +202,8 @@ fn a_held_answer_scrolls_with_now_while_a_query_is_held_back() {
         std::thread::sleep(Duration::from_millis(1));
     }
     h.step();
-    assert_eq!(viewer(&h).issued(), issued + 1);
+    assert!(viewer(&h).busy());
+    assert_eq!(viewer(&h).issued(), issued);
     let per = SECOND as f64 / f64::from(plot(&h).width());
     let mut before = trace_end(&h);
     for k in 1..=5 {
@@ -222,10 +224,10 @@ fn a_held_answer_scrolls_with_now_while_a_query_is_held_back() {
         );
         before = end;
     }
-    // Nothing more asked while it was held.
-    assert_eq!(viewer(&h).issued(), issued + 1);
+    // Nothing asked while it was held.
+    assert_eq!(viewer(&h).issued(), issued);
     gate.open();
-    answered(&mut h, 4 * SECOND..5 * SECOND);
+    followed(&mut h, 5 * SECOND);
 }
 
 #[test]
@@ -235,9 +237,9 @@ fn a_moving_now_asks_only_once_the_window_leaves_what_the_held_answer_covers() {
     let mut h = harness(follow(SECOND));
     h.state_mut().viewer = Some(Viewer::live(&h.ctx, &live.path, snapshot).unwrap());
     h.state_mut().now = Some(4 * SECOND);
-    let a = answered(&mut h, 3 * SECOND..4 * SECOND);
-    // The answer covers 2 s to 5 s: now moving 30 frames inside it, with no snapshot, asks
-    // nothing, and the window still ends at now.
+    let a = followed(&mut h, 4 * SECOND);
+    // The answer covers 2 s to 5 s at least: now moving 30 frames inside it, with no snapshot,
+    // asks nothing, and the window still ends at now.
     let issued = viewer(&h).issued();
     for k in 1..=30 {
         let now = 4 * SECOND + k * 16 * MS;
@@ -248,11 +250,11 @@ fn a_moving_now_asks_only_once_the_window_leaves_what_the_held_answer_covers() {
     }
     assert_eq!(viewer(&h).issued(), issued);
     assert!(Arc::ptr_eq(&viewer(&h).answer().unwrap(), &a));
-    // A snapshot asks once.
+    // A snapshot: the viewer answers again from it, and the graph asks nothing.
     viewer(&h).update(live.write(4500));
     for _ in 0..400 {
         h.step();
-        if viewer(&h).issued() > issued {
+        if !Arc::ptr_eq(&viewer(&h).answer().unwrap(), &a) {
             break;
         }
         std::thread::sleep(Duration::from_millis(1));
@@ -261,64 +263,135 @@ fn a_moving_now_asks_only_once_the_window_leaves_what_the_held_answer_covers() {
         h.step();
         std::thread::sleep(Duration::from_millis(1));
     }
-    assert_eq!(viewer(&h).issued(), issued + 1);
+    assert_eq!(viewer(&h).answer().unwrap().extent, Some(0..4500 * MS));
+    assert_eq!(viewer(&h).issued(), issued);
     // Now carried past what the latest answer covers, with no snapshot: asked once, at that now.
     let around = viewer(&h).answer().unwrap().around.clone();
     let now = around.end + 200 * MS;
     h.state_mut().now = Some(now);
-    let landed = answered(&mut h, now - SECOND..now);
+    let landed = followed(&mut h, now);
     for _ in 0..20 {
         h.step();
         std::thread::sleep(Duration::from_millis(1));
     }
-    assert_eq!(viewer(&h).issued(), issued + 2);
+    assert_eq!(viewer(&h).issued(), issued + 1);
     assert!(landed.around.contains(&now));
 }
 
 #[test]
-fn a_live_follow_asks_again_once_an_answer_lands_and_never_on_a_timer() {
+fn the_viewer_answers_each_snapshot_again_itself_and_never_on_a_timer() {
     let mut live = Live::new(Capture::new(1000, 10_000, noisy));
     let snapshot = live.write(4000);
     let gate = Arc::new(Gate::default());
     let mut h = harness(follow(SECOND));
     h.state_mut().viewer = Some(gated_live(&h.ctx, &live.path, snapshot, &gate));
     let _opens = Opens(Arc::clone(&gate));
-    answered(&mut h, 3 * SECOND..4 * SECOND);
+    followed(&mut h, 4 * SECOND);
     let issued = viewer(&h).issued();
-    // Half a second of frames with no new snapshot and no now: nothing asked.
+    let runs = viewer(&h).runs();
+    // Half a second of frames with no new snapshot and no now: nothing asked or run.
     for _ in 0..30 {
         h.step();
     }
-    assert_eq!(viewer(&h).issued(), issued);
-    // A snapshot taken: asked at once, and the query held back at its first read.
+    assert_eq!((viewer(&h).issued(), viewer(&h).runs()), (issued, runs));
+    // A snapshot taken: the viewer answers again at once, with no frame between, held back at
+    // its first read.
     gate.close();
     viewer(&h).update(live.write(5000));
     let snapshots = |h: &Harness<'_, Host>| viewer(h).snapshots();
     for _ in 0..400 {
-        if snapshots(&h) == 1 {
+        if snapshots(&h) == 1 && viewer(&h).started() {
             break;
         }
         std::thread::sleep(Duration::from_millis(1));
     }
     assert_eq!(snapshots(&h), 1);
+    assert!(viewer(&h).started());
     h.step();
-    assert_eq!(viewer(&h).issued(), issued + 1);
-    assert!(viewer(&h).busy());
-    // Another snapshot, and now moving every frame, while that one is in flight: nothing more
-    // asked.
+    assert_eq!(viewer(&h).issued(), issued);
+    // Another snapshot, and now moving every frame, while that one is in flight: nothing asked.
     viewer(&h).update(live.write(6000));
     for k in 1..=10 {
         h.state_mut().now = Some(5 * SECOND + k * 16 * MS);
         h.step();
         std::thread::sleep(Duration::from_millis(2));
     }
-    assert_eq!(viewer(&h).issued(), issued + 1);
-    // It lands, the newer snapshot is taken, and the graph asks again, once.
+    assert_eq!(viewer(&h).issued(), issued);
+    // It lands, the newer snapshot is taken, and the viewer answers that again too.
     h.state_mut().now = None;
     gate.open();
-    let a = answered(&mut h, 5 * SECOND..6 * SECOND);
+    let a = followed(&mut h, 6 * SECOND);
     assert_eq!(a.extent, Some(0..6 * SECOND));
-    assert_eq!(viewer(&h).issued(), issued + 2);
+    assert_eq!(viewer(&h).issued(), issued);
+    assert_eq!(viewer(&h).runs(), runs + 2);
+}
+
+#[test]
+fn a_snapshot_extends_the_answer_held_and_a_newer_request_wins_over_it() {
+    let mut live = Live::new(Capture::new(1000, 10_000, noisy));
+    let snapshot = live.write(4000);
+    let gate = Arc::new(Gate::default());
+    let mut h = harness(follow(SECOND));
+    h.state_mut().viewer = Some(gated_live(&h.ctx, &live.path, snapshot, &gate));
+    let _opens = Opens(Arc::clone(&gate));
+    let mut before = followed(&mut h, 4 * SECOND);
+    // 10 ms of pairs at a time. Each answer whose `around` starts where the one before it did
+    // is that one extended; `around` moves on a window's columns at a time, at most once here.
+    let mut kept = 0;
+    for k in 1..=5u64 {
+        let extends = viewer(&h).extends();
+        viewer(&h).update(live.write(4000 + 10 * k));
+        let a = followed(&mut h, (4000 + 10 * k) as i64 * MS);
+        assert_eq!(a.extent, Some(0..(4000 + 10 * k) as i64 * MS));
+        let same = a.around.start == before.around.start;
+        assert_eq!(
+            viewer(&h).extends(),
+            extends + u64::from(same),
+            "snapshot {k}"
+        );
+        kept += u32::from(same);
+        before = a;
+    }
+    assert!(kept >= 4, "{kept}");
+    // Another, held back at its first read. A change of the lanes drawn asks at once, while it
+    // waits: that request's answer is the one held, whether the extend was cancelled or ran on
+    // to the end.
+    gate.close();
+    viewer(&h).update(live.write(4060));
+    for _ in 0..400 {
+        if viewer(&h).started() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(viewer(&h).started());
+    let issued = viewer(&h).issued();
+    h.state_mut().lanes = vec![DIO3];
+    h.step();
+    assert_eq!(viewer(&h).issued(), issued + 1);
+    gate.open();
+    for _ in 0..400 {
+        h.step();
+        if viewer(&h)
+            .held()
+            .is_some_and(|h| h.request.channels == [I, DIO3])
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    for _ in 0..20 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let held = viewer(&h).held().unwrap();
+    assert_eq!(
+        (held.request.channels.clone(), held.generation),
+        (vec![I, DIO3], issued + 1)
+    );
+    // Every answer held answered the newest request when it landed.
+    let landed = viewer(&h).landed();
+    assert!(landed.iter().all(|(g, newest)| g == newest), "{landed:?}");
 }
 
 #[test]

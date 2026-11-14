@@ -154,6 +154,7 @@ fn main() {
                     limit: 100,
                     ..MarkerQuery::default()
                 },
+                aligned: false,
             }
         };
         for (which, view, per) in [

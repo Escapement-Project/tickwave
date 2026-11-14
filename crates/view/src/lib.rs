@@ -28,5 +28,5 @@ pub use markers::{Marker, MarkerCursor, Page};
 pub use query::{
     AnalogColumns, Answer, Drawn, MarkerAnswer, MarkerQuery, Point, Query, StripAnswer,
 };
-pub use recording::{ChannelInfo, ChannelKind, Error, Recording, Resolution};
+pub use recording::{ChannelInfo, ChannelKind, Error, Recording, Resolution, Revision};
 pub use statistics::{ChannelStatistics, Statistics, Sum};

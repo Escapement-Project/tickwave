@@ -37,7 +37,13 @@ pub(crate) struct Request {
 }
 
 impl Request {
-    fn query(&self, extent: Option<&Range<i64>>) -> Query {
+    fn follows(&self) -> bool {
+        matches!(self.window, Window::Follow { .. })
+    }
+
+    /// The query, its window resolved against `extent`. A recording being written, followed,
+    /// has its columns at fixed ticks, so the next snapshot's answer extends this one's.
+    fn query(&self, extent: Option<&Range<i64>>, live: bool) -> Query {
         let window = self.window.resolve(extent, self.now);
         Query {
             statistics: std::iter::once(window.clone())
@@ -49,14 +55,19 @@ impl Request {
             flags: self.flags.clone(),
             strip: self.strip,
             markers: self.markers.clone(),
+            aligned: live && self.follows(),
         }
     }
 }
 
-/// The latest answer, and the request it answers.
+/// The latest answer, the request it answers, and the query it was made for.
 #[derive(Clone, Debug)]
 pub(crate) struct Held {
     pub request: Arc<Request>,
+    /// The request's generation, which an extend after a snapshot keeps to.
+    #[cfg(feature = "live")]
+    pub generation: u64,
+    pub query: Arc<Query>,
     pub answer: Arc<Answer>,
 }
 
@@ -85,6 +96,8 @@ struct Job {
     generation: u64,
     request: Arc<Request>,
     cancel: Arc<AtomicBool>,
+    /// The answer held for the same request, which the job extends where it can.
+    held: Option<Held>,
 }
 
 struct Slot {
@@ -101,12 +114,62 @@ struct Slot {
     snapshot: Option<Snapshot>,
     replace: Option<Recording>,
     facts: Facts,
-    /// Snapshots taken, so a graph following the recording can tell when to ask again.
+    /// Snapshots taken, for the tests.
+    #[cfg(test)]
     snapshots: u64,
     /// Queries run to the end or cancelled, for the tests.
     #[cfg(test)]
     runs: u64,
+    /// Each answer held: its request's generation, and the newest then. For the tests.
+    #[cfg(test)]
+    landed: Vec<(u64, u64)>,
+    /// Answers extended from the one held, for the tests.
+    #[cfg(test)]
+    extends: u64,
     stopped: bool,
+}
+
+type Answered = std::thread::Result<Result<(Answer, Query), Error>>;
+
+impl Slot {
+    /// After a snapshot, the newest request again, where it follows the recording: from the
+    /// answer to it where that is the one held.
+    #[cfg(feature = "live")]
+    fn again(&self) -> Option<Job> {
+        let request = self.sent.as_ref().filter(|r| r.follows())?;
+        Some(Job {
+            generation: self.issued,
+            request: Arc::clone(request),
+            cancel: Arc::new(AtomicBool::new(false)),
+            held: self.held.clone().filter(|h| h.generation == self.issued),
+        })
+    }
+
+    /// Holds what `job` answered, unless it was cancelled or a newer request was issued while it
+    /// ran: an answer to an older request, an extend's included, is never held. Whether there
+    /// is anything new to draw.
+    fn land(&mut self, job: Job, answered: Answered) -> bool {
+        if job.cancel.load(Ordering::Relaxed) || job.generation != self.issued {
+            return false;
+        }
+        match answered {
+            Ok(Ok((answer, query))) => {
+                #[cfg(test)]
+                self.landed.push((job.generation, self.issued));
+                self.held = Some(Held {
+                    request: job.request,
+                    #[cfg(feature = "live")]
+                    generation: job.generation,
+                    query: Arc::new(query),
+                    answer: Arc::new(answer),
+                });
+                self.query_failure = None;
+            }
+            Ok(Err(e)) => self.query_failure = Some(e.to_string()),
+            Err(_) => self.query_failure = Some("the query stopped on a fault".into()),
+        }
+        true
+    }
 }
 
 type Opener = Box<dyn Fn() -> io::Result<Arc<dyn Bytes>> + Send + Sync>;
@@ -192,9 +255,14 @@ impl Viewer {
                 snapshot: None,
                 replace: None,
                 facts: Facts::of(&recording, live),
+                #[cfg(test)]
                 snapshots: 0,
                 #[cfg(test)]
                 runs: 0,
+                #[cfg(test)]
+                landed: Vec::new(),
+                #[cfg(test)]
+                extends: 0,
                 stopped: false,
             }),
             recording: RwLock::new(recording),
@@ -280,6 +348,7 @@ impl Viewer {
             generation: slot.issued,
             request,
             cancel: Arc::new(AtomicBool::new(false)),
+            held: None,
         });
         let generation = slot.issued;
         drop(slot);
@@ -288,8 +357,21 @@ impl Viewer {
     }
 
     /// Snapshots taken so far.
+    #[cfg(test)]
     pub(crate) fn snapshots(&self) -> u64 {
         self.shared.slot().snapshots
+    }
+
+    /// Each answer held: its request's generation, and the newest then.
+    #[cfg(test)]
+    pub(crate) fn landed(&self) -> Vec<(u64, u64)> {
+        self.shared.slot().landed.clone()
+    }
+
+    /// Answers the query thread extended.
+    #[cfg(test)]
+    pub(crate) fn extends(&self) -> u64 {
+        self.shared.slot().extends
     }
 
     /// A query is waiting or running.
@@ -364,10 +446,12 @@ impl Drop for Viewer {
     }
 }
 
-/// The query thread: a new recording or snapshot first, then the newest request.
+/// The query thread: a new recording or snapshot first, then the newest request. After a
+/// snapshot it answers a request that follows the recording again at once, with no frame's
+/// asking, extending the answer held for it.
 fn answer(shared: &Shared) {
     loop {
-        let job = {
+        let (job, live) = {
             let mut slot = shared.slot();
             loop {
                 if slot.stopped {
@@ -396,8 +480,18 @@ fn answer(shared: &Shared) {
                     match updated {
                         Ok(facts) => {
                             slot.facts = facts;
-                            slot.snapshots += 1;
+                            #[cfg(test)]
+                            {
+                                slot.snapshots += 1;
+                            }
                             slot.update_failure = None;
+                            // A request waiting runs next, of the new snapshot.
+                            if slot.pending.is_none()
+                                && let Some(job) = slot.again()
+                            {
+                                slot.running = Some(Arc::clone(&job.cancel));
+                                break (job, true);
+                            }
                         }
                         Err(e) => slot.update_failure = Some(e.to_string()),
                     }
@@ -405,7 +499,7 @@ fn answer(shared: &Shared) {
                 }
                 if let Some(job) = slot.pending.take() {
                     slot.running = Some(Arc::clone(&job.cancel));
-                    break job;
+                    break (job, slot.facts.live);
                 }
                 slot = shared.wake.wait(slot).unwrap_or_else(|e| e.into_inner());
             }
@@ -413,30 +507,124 @@ fn answer(shared: &Shared) {
         let answered = {
             let _span = tracing::debug_span!("query job", generation = job.generation).entered();
             let recording = shared.read();
-            let query = job.request.query(recording.extent().as_ref());
-            catch_unwind(AssertUnwindSafe(|| recording.query(&query, &job.cancel)))
+            let query = job.request.query(recording.extent().as_ref(), live);
+            catch_unwind(AssertUnwindSafe(|| {
+                let extended = match &job.held {
+                    Some(h) => recording.extend(&h.answer, &h.query, &query, &job.cancel)?,
+                    None => None,
+                };
+                let from_held = extended.is_some();
+                match extended {
+                    Some(answer) => Ok(answer),
+                    None => recording.query(&query, &job.cancel),
+                }
+                .map(|answer| (answer, query, from_held))
+            }))
         };
         let mut slot = shared.slot();
         slot.running = None;
         #[cfg(test)]
         {
             slot.runs += 1;
+            slot.extends += u64::from(matches!(answered, Ok(Ok((_, _, true)))));
         }
-        if job.cancel.load(Ordering::Relaxed) || job.generation != slot.issued {
-            continue;
+        let answered = answered.map(|a| a.map(|(answer, query, _)| (answer, query)));
+        if slot.land(job, answered) {
+            drop(slot);
+            shared.ctx.request_repaint();
         }
-        match answered {
-            Ok(Ok(answer)) => {
-                slot.held = Some(Held {
-                    request: job.request,
-                    answer: Arc::new(answer),
-                });
-                slot.query_failure = None;
-            }
-            Ok(Err(e)) => slot.query_failure = Some(e.to_string()),
-            Err(_) => slot.query_failure = Some("the query stopped on a fault".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    use escapement_tickwave_view::format::model::Ratio;
+    use escapement_tickwave_view::{Cache, MarkerQuery, Recording};
+
+    use super::{Facts, Held, Job, Request, Slot};
+    use crate::Window;
+
+    fn slot(issued: u64, held: Option<Held>) -> Slot {
+        Slot {
+            issued,
+            pending: None,
+            running: None,
+            sent: None,
+            held,
+            query_failure: None,
+            update_failure: None,
+            #[cfg(feature = "live")]
+            snapshot: None,
+            replace: None,
+            facts: Facts {
+                timebase: Ratio::ONE,
+                channels: Arc::new([]),
+                marker_count: 0,
+                live: true,
+            },
+            snapshots: 0,
+            runs: 0,
+            landed: Vec::new(),
+            extends: 0,
+            stopped: false,
         }
-        drop(slot);
-        shared.ctx.request_repaint();
+    }
+
+    /// An extend of the answer held for generation 1 that finishes, not cancelled, once
+    /// generation 2 has been asked: what it answers is not held, and the next answer for 2 is.
+    #[test]
+    fn an_extend_never_overwrites_the_answer_to_a_newer_request() {
+        let rec = Recording::open(
+            Arc::new(crate::tests::fixture().write()),
+            Cache::new(1 << 20),
+        )
+        .unwrap();
+        let request = |window| Request {
+            window,
+            now: None,
+            columns: 16,
+            channels: vec![crate::tests::I],
+            flags: Vec::new(),
+            strip: None,
+            selection: None,
+            markers: MarkerQuery::default(),
+        };
+        let answer = |r: &Request| {
+            let q = r.query(rec.extent().as_ref(), true);
+            let a = rec.query(&q, &AtomicBool::new(false)).unwrap();
+            (a, q)
+        };
+        let follow = Arc::new(request(Window::Follow { span: 1_000_000 }));
+        let (a, q) = answer(&follow);
+        let held = Held {
+            request: Arc::clone(&follow),
+            generation: 1,
+            query: Arc::new(q.clone()),
+            answer: Arc::new(a.clone()),
+        };
+        let mut s = slot(2, Some(held.clone()));
+        let extend = Job {
+            generation: 1,
+            request: Arc::clone(&follow),
+            cancel: Arc::new(AtomicBool::new(false)),
+            held: Some(held),
+        };
+        assert!(!s.land(extend, Ok(Ok((a, q)))));
+        assert_eq!(s.held.as_ref().map(|h| h.generation), Some(1));
+        assert!(s.landed.is_empty());
+        let pan = Arc::new(request(Window::At(0..1_000_000)));
+        let (b, r) = answer(&pan);
+        let job = Job {
+            generation: 2,
+            request: Arc::clone(&pan),
+            cancel: Arc::new(AtomicBool::new(false)),
+            held: None,
+        };
+        assert!(s.land(job, Ok(Ok((b, r)))));
+        assert_eq!(s.held.as_ref().map(|h| h.generation), Some(2));
+        assert_eq!(s.landed, [(2, 2)]);
     }
 }

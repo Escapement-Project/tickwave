@@ -145,13 +145,13 @@ fn a_live_recording_is_followed_and_a_reopen_keeps_the_view() {
     };
     let mut h = harness(state.clone());
     h.state_mut().viewer = Some(Viewer::live(&h.ctx, &path, snapshot).unwrap());
-    let a = answered(&mut h, SECOND..2 * SECOND);
+    let a = followed(&mut h, 2 * SECOND);
     assert_eq!(a.extent, Some(0..2 * SECOND));
 
     // A newer snapshot: within a quarter of a second of egui's time the window ends with it.
     let snapshot = write(&mut w, 2000..5000);
     viewer(&h).update(snapshot);
-    let a = answered(&mut h, 4 * SECOND..5 * SECOND);
+    let a = followed(&mut h, 5 * SECOND);
     assert_eq!(a.extent, Some(0..5 * SECOND));
     assert_eq!(h.state().state, state);
 
@@ -161,7 +161,7 @@ fn a_live_recording_is_followed_and_a_reopen_keeps_the_view() {
 
     let snapshot = write(&mut w, 5000..cap.count);
     viewer(&h).update(snapshot);
-    let live = answered(&mut h, 9 * SECOND..10 * SECOND);
+    let live = followed(&mut h, 10 * SECOND);
     file.write_all(&cap.finish(w)).unwrap();
     file.flush().unwrap();
     viewer(&h).reopen().unwrap();
@@ -203,7 +203,7 @@ fn only_a_graph_following_a_live_recording_asks_for_every_frame() {
     };
     let mut h = harness(following.clone());
     h.state_mut().viewer = Some(Viewer::live(&h.ctx, &path, w.snapshot()).unwrap());
-    answered(&mut h, SECOND..2 * SECOND);
+    followed(&mut h, 2 * SECOND);
     for _ in 0..5 {
         h.step();
     }
@@ -273,13 +273,13 @@ fn a_reopen_after_compaction_reads_the_file_renamed_over_the_live_one() {
     };
     let mut h = harness(state.clone());
     h.state_mut().viewer = Some(Viewer::live(&h.ctx, &path, snapshot).unwrap());
-    answered(&mut h, 3 * SECOND..4 * SECOND);
+    followed(&mut h, 4 * SECOND);
 
     // Before the writer finishes, a reopen finds no footer and the live recording stays.
     assert!(matches!(viewer(&h).reopen(), Err(Error::Unfinished)));
     let snapshot = write(&mut w, 4000..cap.count);
     viewer(&h).update(snapshot);
-    let live = answered(&mut h, 9 * SECOND..10 * SECOND);
+    let live = followed(&mut h, 10 * SECOND);
     assert!(viewer(&h).facts().live);
 
     // The writer finishes in place; a compacted copy is written beside it and renamed over it.

@@ -13,11 +13,14 @@ opens the file at the path again, finished; the view stays as it was.
 
 Queries run on a thread of their own. A newer query replaces one that hasn't started and cancels
 one that has, so only the newest answer is kept, and its arrival asks egui for a frame. A graph
-following a recording as it is written draws every frame. It asks again as soon as its last
-answer has landed and either a newer snapshot has come or the window has moved past what that
-answer covers; there is no timer. An answer covers its window and a width either side, so a
-moving now alone asks nothing: the graph draws the answer it holds, moved to the window on
-screen, and the trace scrolls every frame.
+following a recording as it is written draws every frame. After each snapshot the viewer answers
+the followed request again itself, at once: it keeps the columns of the answer it holds before
+the first tick the snapshot changed, and reads only from there. The graph asks again only when
+what it asks changes, or when the window has moved past what the answer covers; there is no
+timer. An answer covers its window and at least a width either side, so a moving now alone asks
+nothing: the graph draws the answer it holds, moved to the window on screen, and the trace
+scrolls every frame. A followed window's columns sit at fixed ticks, so its answer's window ends
+a whole column on, and now scrolls the picture between columns.
 `Viewer::answer` gives the latest answer, with the window's and the selection's statistics for a
 host's panel. `Viewer::failure` says why the last query or snapshot failed. `Viewer::recording`
 reads the recording itself, for what it says of the whole capture: samples lost, gaps, sources
@@ -75,7 +78,8 @@ verge fills it from its design tokens. The demo reads the project's tokens from
 
 A frame's work is in `tracing` spans at debug level: `graph`, and in it `layout`,
 `build query`, `axes`, `trace`, `lane`, `markers` and `tessellate`, and `strip`. The query
-thread's are `query job` and `snapshot`, around the view core's own.
+thread's are `query job` and `snapshot`, around the view core's own: `query`, and `extend` where
+a snapshot's answer extends the one held, followed by `query` where it can't.
 
 ## The demo
 

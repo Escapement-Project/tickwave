@@ -31,6 +31,17 @@ columns to draw while its own answer is on the way. A column takes the coarsest 
 wider than it, or the samples and edges themselves below the finest. An analog trace draws no line
 across a break, and a column that touches a span the instrument lost is pale.
 
+A window that follows a recording as it is written asks for `Query::aligned` columns: each a
+whole number of ticks, ⌈width / columns⌉, from tick 0, so every window as wide shares them. The
+window's end moves on to the end of its column, and `around` starts on a multiple of a window's
+columns, two windows back, so it moves a window at a time. `Recording::extend` answers such a
+query from the answer to the one before it: it keeps the columns before the first tick the
+snapshots since then changed, works out the rest, and gives exactly what `query` would. It
+declines where it can't, and the caller queries whole: the query asks anything else, the window
+moved back or by more than its width, `around`'s start moved on, or the answer is another
+recording's or older than the 64 snapshots whose changes a recording keeps. Every answer names
+the recording and snapshot it was made from.
+
 `Recording::statistics` counts each sample whose time covers part of the interval, one that starts
 before it included, and weights its value by the ticks it covers there, exactly for integer codes.
 Where every sample lasts the same whole number of the recording's ticks, it takes whole overview

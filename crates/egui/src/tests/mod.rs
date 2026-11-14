@@ -509,6 +509,37 @@ pub fn wait(h: &mut Harness<'_, Host>) -> Arc<Answer> {
     panic!("no answer");
 }
 
+/// Whether `a` answers a window a second wide that follows a recording being written to `end`:
+/// its columns whole ticks, and its window ending at the first of their ends at or after `end`.
+pub fn follows_to(a: &Answer, end: i64) -> bool {
+    let (x0, per) = (a.grid.x0, a.grid.per);
+    let ends = a.window.end as f64 - x0;
+    per.fract() == 0.0
+        && x0.fract() == 0.0
+        && ends % per == 0.0
+        && a.window.end - a.window.start == SECOND
+        && (end..end + per as i64).contains(&a.window.end)
+}
+
+/// Steps until the answer held follows the recording to `end`, as `follows_to` has it, then
+/// draws it.
+pub fn followed(h: &mut Harness<'_, Host>, end: i64) -> Arc<Answer> {
+    for _ in 0..400 {
+        h.step();
+        if let Some(a) = viewer(h).answer()
+            && follows_to(&a, end)
+        {
+            h.step();
+            return a;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    panic!(
+        "no answer following to {end}: {:?}",
+        viewer(h).answer().map(|a| (a.window.clone(), a.grid))
+    );
+}
+
 /// Steps until the answer held is for `window`, then draws it.
 pub fn answered(h: &mut Harness<'_, Host>, window: Range<i64>) -> Arc<Answer> {
     for _ in 0..400 {

@@ -191,8 +191,6 @@ struct Memory {
     pan: f64,
     /// Where a selection drag started.
     anchor: Option<i64>,
-    /// The viewer's snapshots when the graph last asked.
-    asked_snapshots: u64,
     shown: Option<Shown>,
 }
 
@@ -527,20 +525,13 @@ impl Graph<'_> {
     }
 
     /// Asks for `wanted` when it differs from what was asked, now aside. A followed window also
-    /// asks when the recording has taken a snapshot since, or when the window on screen has left
-    /// what the held answer covers; a moving now alone asks nothing, since the held answer covers
-    /// a width either side and is drawn moved with it. The request carries the latest now, so the
-    /// query ends its window there. A change of the channels drawn asks at once; anything else
-    /// waits for the query under way, so a pan or a followed recording draws its answers as they
-    /// come rather than cancelling each one.
-    fn ask(
-        &self,
-        wanted: Request,
-        window: &Range<i64>,
-        held: Option<&Held>,
-        facts: &Facts,
-        memory: &mut Memory,
-    ) {
+    /// asks when the window on screen has left what the held answer covers; a moving now alone
+    /// asks nothing, since the held answer covers a width either side and is drawn moved with
+    /// it, and the viewer answers a followed request again after each snapshot itself. The
+    /// request carries the latest now, so the query ends its window there. A change of the
+    /// channels drawn asks at once; anything else waits for the query under way, so a pan draws
+    /// its answers as they come rather than cancelling each one.
+    fn ask(&self, wanted: Request, window: &Range<i64>, held: Option<&Held>) {
         let sent = self.viewer.sent();
         let structural = sent.as_ref().is_none_or(|s| {
             s.channels != wanted.channels
@@ -554,15 +545,12 @@ impl Graph<'_> {
             }
         });
         let following = matches!(wanted.window, Window::Follow { .. });
-        let snapshots = self.viewer.snapshots();
-        let grown = facts.live && following && snapshots != memory.asked_snapshots;
         let left = following
             && held.is_some_and(|h| {
                 window.start < h.answer.around.start || window.end > h.answer.around.end
             });
-        if structural || (!self.viewer.busy() && (changed || grown || left)) {
+        if structural || (!self.viewer.busy() && (changed || left)) {
             self.viewer.request(wanted);
-            memory.asked_snapshots = snapshots;
         }
     }
 }
@@ -623,7 +611,7 @@ impl Widget for Graph<'_> {
                 .round()
                 .max(1.0) as u32;
             let wanted = self.request(columns);
-            self.ask(wanted, &view.window, held.as_ref(), &facts, &mut memory);
+            self.ask(wanted, &view.window, held.as_ref());
         }
         draw::graph(
             ui,

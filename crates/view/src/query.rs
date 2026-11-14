@@ -9,7 +9,7 @@ use crate::columns::{
     self, AnalogOverview, DigitalColumns, DigitalOverview, Edges, Grid, Samples, State,
 };
 use crate::markers::{Marker, MarkerCursor, Page};
-use crate::recording::{Error, Place, Recording};
+use crate::recording::{Error, Place, Recording, Revision};
 use crate::runs::lost_spans_in;
 use crate::spans::known_spans;
 use crate::statistics::Statistics;
@@ -31,6 +31,13 @@ pub struct Query {
     /// Intervals to measure: the window's, the selection's.
     pub statistics: Vec<Range<i64>>,
     pub markers: MarkerQuery,
+    /// Columns at fixed ticks, for a window that follows a recording as it is written: each
+    /// ⌈width / columns⌉ ticks from tick 0, the window's end moved on to the first column end at
+    /// or after it, and `around` from two windows of columns before the last multiple of
+    /// `columns` columns at or before that end, to a window after it. A later window as wide
+    /// keeps the columns, which `Recording::extend` reuses. Without it, `around` is the window
+    /// and a width either side, in `3 × columns` columns.
+    pub aligned: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -111,10 +118,10 @@ pub struct StripAnswer {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Answer {
     pub window: Range<i64>,
-    /// The window and one width either side: what the columns cover, so a pan has columns to
-    /// draw while its own answer is on the way.
+    /// The window and at least a width either side: what the columns cover, so a pan has
+    /// columns to draw while its own answer is on the way.
     pub around: Range<i64>,
-    /// Over `around`, three times the query's columns.
+    /// Over `around`: three times the query's columns, or up to four for `Query::aligned`.
     pub grid: Grid,
     /// In the query's order.
     pub channels: Vec<Drawn>,
@@ -122,6 +129,94 @@ pub struct Answer {
     pub statistics: Vec<Statistics>,
     pub markers: MarkerAnswer,
     pub extent: Option<Range<i64>>,
+    pub revision: Revision,
+}
+
+/// A query's window, `around`, and the grid over it.
+struct Layout {
+    window: Range<i64>,
+    around: Range<i64>,
+    grid: Grid,
+    aligned: bool,
+}
+
+/// Ticks this far from 0 and the sums of a few of them are whole in an f64, so an aligned grid's
+/// column edges come out in f64 as they do in integers.
+const EXACT: i128 = 1 << 52;
+
+fn layout(q: &Query) -> Layout {
+    let width = q.window.end.saturating_sub(q.window.start).max(1);
+    let columns = q.columns.max(1) as usize;
+    let end = q.window.start.saturating_add(width);
+    if q.aligned
+        && let Some(l) = aligned(end, width, columns)
+    {
+        return l;
+    }
+    let window = q.window.start..end;
+    let around = window.start.saturating_sub(width)..window.end.saturating_add(width);
+    Layout {
+        grid: Grid {
+            x0: around.start as f64,
+            per: width as f64 / columns as f64,
+            count: 3 * columns,
+        },
+        window,
+        around,
+        aligned: false,
+    }
+}
+
+/// `Query::aligned`'s layout for a window `width` ticks wide ending at `end`, worked in
+/// integers; None where it reaches past `EXACT`.
+fn aligned(end: i64, width: i64, columns: usize) -> Option<Layout> {
+    let (w, c) = (i128::from(width), columns as i128);
+    let per = (w + c - 1) / c;
+    // The column the window ends at, ⌈end / per⌉, and the first of `around`'s.
+    let last = -(-i128::from(end)).div_euclid(per);
+    let first = (last.div_euclid(c) - 2) * c;
+    let (from, to) = (first * per, (last + c) * per);
+    if from < -EXACT || to > EXACT {
+        return None;
+    }
+    let end = last * per;
+    Some(Layout {
+        window: (end - w) as i64..end as i64,
+        around: from as i64..to as i64,
+        grid: Grid {
+            x0: from as f64,
+            per: per as f64,
+            count: (last + c - first) as usize,
+        },
+        aligned: true,
+    })
+}
+
+/// What an extend keeps of one channel: the held answer's columns before `from`, on the same
+/// grid.
+#[derive(Clone, Copy)]
+struct Keep<'a> {
+    held: &'a Drawn,
+    from: usize,
+}
+
+impl Drawn {
+    /// Whether each of its column lists holds `count` columns.
+    fn holds(&self, count: usize) -> bool {
+        match self {
+            Self::Analog { columns: c, .. } => {
+                [c.min.len(), c.max.len(), c.joined.len(), c.pale.len()]
+                    .iter()
+                    .all(|&n| n == count)
+            }
+            Self::Digital { columns: c, .. } => c.state.len() == count && c.at.len() == count,
+        }
+    }
+}
+
+/// Where column `k` of an aligned grid starts.
+fn start_of(g: &Grid, k: usize) -> i64 {
+    (g.x0 + k as f64 * g.per) as i64
 }
 
 /// The columns of `g` that any tick of [from, to) falls in.
@@ -172,19 +267,87 @@ impl Recording {
     /// `Error::Cancelled`.
     #[tracing::instrument(level = "debug", name = "query", skip_all, fields(columns = q.columns, ticks = q.window.end - q.window.start))]
     pub fn query(&self, q: &Query, cancel: &AtomicBool) -> Result<Answer, Error> {
-        let width = (q.window.end - q.window.start).max(1);
-        let window = q.window.start..q.window.start + width;
-        let around = window.start - width..window.end + width;
-        let columns = q.columns.max(1) as usize;
-        let grid = Grid {
-            x0: around.start as f64,
-            per: width as f64 / columns as f64,
-            count: 3 * columns,
+        self.answer(q, layout(q), &[], cancel)
+    }
+
+    /// What `query` answers, worked out from `held`, this recording's answer to `asked`: the
+    /// columns before the first tick any snapshot since changed are kept, and the rest is worked
+    /// out as `query` would, statistics whole. Both queries are aligned, and `query` asks what
+    /// `asked` did, its window moved later by at most its width; their statistics may differ.
+    /// None where it can't, for a whole query instead: `query` asks anything else, `held` is
+    /// another recording's or older than the changes it keeps, or `around`'s start moved, since
+    /// a column's range is joined to the one before it back to there.
+    #[tracing::instrument(level = "debug", name = "extend", skip_all, fields(columns = query.columns, ticks = query.window.end - query.window.start))]
+    pub fn extend(
+        &self,
+        held: &Answer,
+        asked: &Query,
+        query: &Query,
+        cancel: &AtomicBool,
+    ) -> Result<Option<Answer>, Error> {
+        let same = Query {
+            window: query.window.clone(),
+            statistics: query.statistics.clone(),
+            ..asked.clone()
+        } == *query;
+        let (before, now) = (layout(asked), layout(query));
+        let width = before.window.end - before.window.start;
+        let moved = now.window.start - before.window.start;
+        if !same
+            || !before.aligned
+            || !now.aligned
+            || (held.window.clone(), held.around.clone(), held.grid)
+                != (before.window.clone(), before.around.clone(), before.grid)
+            || now.window.end - now.window.start != width
+            || !(0..=width).contains(&moved)
+            || now.around.start != before.around.start
+            || held.channels.len() != query.channels.len()
+        {
+            return Ok(None);
+        }
+        let Some(changed) = self.changed_since(held.revision) else {
+            return Ok(None);
         };
+        let mut keep = Vec::with_capacity(query.channels.len());
+        for (&c, drawn) in query.channels.iter().zip(&held.channels) {
+            let kind = matches!(
+                (self.place(c)?, drawn),
+                (Place::Digital { .. }, Drawn::Digital { .. })
+                    | (Place::Analog { .. }, Drawn::Analog { .. })
+            );
+            if !kind || !drawn.holds(before.grid.count) {
+                return Ok(None);
+            }
+            // The column holding the first tick that changed is worked out again, and those after.
+            let first = i128::from(changed.from(c, now.grid.per)) - i128::from(now.around.start);
+            let column = first.div_euclid(now.grid.per as i128);
+            keep.push(Keep {
+                held: drawn,
+                from: column.clamp(0, before.grid.count.min(now.grid.count) as i128) as usize,
+            });
+        }
+        self.answer(query, now, &keep, cancel).map(Some)
+    }
+
+    /// The answer to `q` over `layout`, each channel's columns from `keep`'s where it has one.
+    fn answer(
+        &self,
+        q: &Query,
+        layout: Layout,
+        keep: &[Keep<'_>],
+        cancel: &AtomicBool,
+    ) -> Result<Answer, Error> {
+        let Layout {
+            window,
+            around,
+            grid,
+            ..
+        } = layout;
         let mut channels = Vec::with_capacity(q.channels.len());
-        for &c in &q.channels {
+        for (i, &c) in q.channels.iter().enumerate() {
             let flag = q.flags.iter().find(|f| f.0 == c).map(|f| f.1);
-            channels.push(self.drawn(c, &grid, &around, Some(&window), flag, cancel)?);
+            let keep = keep.get(i).copied();
+            channels.push(self.drawn(c, &grid, &around, Some(&window), flag, keep, cancel)?);
         }
         let strip = match (q.strip, self.extent()) {
             (Some((c, n)), Some(extent)) => {
@@ -195,7 +358,7 @@ impl Recording {
                     per: (extent.end - extent.start) as f64 / n as f64,
                     count: n,
                 };
-                let channel = self.drawn(c, &grid, &extent, None, None, cancel)?;
+                let channel = self.drawn(c, &grid, &extent, None, None, None, cancel)?;
                 Some(StripAnswer {
                     extent,
                     grid,
@@ -226,11 +389,18 @@ impl Recording {
             statistics,
             markers,
             extent: self.extent(),
+            revision: self.revision,
         })
     }
 
     /// Channel `c` over `range` on `g`. With a `window`, an analog channel's single samples
-    /// where there are few enough, and its fit over the window.
+    /// where there are few enough, and its fit over the window. With `keep`, on an aligned grid,
+    /// the columns before its `from` are the held ones, and only data from there on is read for
+    /// the columns.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a channel, its grid and range, what it draws with, and what it keeps"
+    )]
     #[tracing::instrument(level = "debug", name = "channel", skip_all, fields(channel = c))]
     fn drawn(
         &self,
@@ -239,6 +409,7 @@ impl Recording {
         range: &Range<i64>,
         window: Option<&Range<i64>>,
         flag: Option<usize>,
+        keep: Option<Keep<'_>>,
         cancel: &AtomicBool,
     ) -> Result<Drawn, Error> {
         let place = self.place(c)?;
@@ -248,8 +419,26 @@ impl Recording {
             Place::Digital { gaps, .. } => {
                 let mut cols = DigitalColumns::empty(g.count);
                 let mut piece = DigitalColumns::empty(g.count);
+                // A column's state is its own ticks' alone.
+                let from = match keep {
+                    Some(Keep {
+                        held: Drawn::Digital { columns: h, .. },
+                        from,
+                    }) => {
+                        cols.state[..from].copy_from_slice(&h.state[..from]);
+                        cols.at[..from].copy_from_slice(&h.at[..from]);
+                        from
+                    }
+                    _ => 0,
+                };
                 for span in &spans {
-                    self.digital_span(c, g, span.clone(), level, &mut cols, &mut piece, cancel)?;
+                    let span = match from {
+                        0 => span.clone(),
+                        k => span.start.max(start_of(g, k))..span.end,
+                    };
+                    if span.end > span.start {
+                        self.digital_span(c, g, span, level, &mut cols, &mut piece, cancel)?;
+                    }
                 }
                 // The gaps `range` reaches: they lie in order and apart.
                 let first = gaps.partition_point(|x| x.to <= range.start);
@@ -272,15 +461,53 @@ impl Recording {
                     pale: vec![false; g.count],
                 };
                 let mut part = columns::AnalogColumns::empty(g.count);
-                for span in &spans {
-                    // The columns the span reaches: its trace joins nothing outside them.
-                    let ks = columns_over(g, span.start, span.end);
-                    part.min[ks.clone()].fill(f64::INFINITY);
-                    part.max[ks.clone()].fill(f64::NEG_INFINITY);
-                    self.analog_span(c, g, span.clone(), level, &mut part, cancel)?;
-                    columns::connect_over(&mut part, ks.clone());
+                // The columns each span reaches: its trace joins nothing outside them.
+                let reach: Vec<Range<usize>> = spans
+                    .iter()
+                    .map(|s| columns_over(g, s.start, s.end))
+                    .collect();
+                // A span crossing into `from` joins its range there to its own in the column
+                // before, which the held one is where no other span reaches that column: back
+                // off while the crossing span starts in it.
+                let mut from = match keep {
+                    Some(Keep {
+                        held: Drawn::Analog { .. },
+                        from,
+                    }) => from,
+                    _ => 0,
+                };
+                while let Some(ks) = reach.iter().find(|ks| ks.start < from && ks.end > from)
+                    && ks.start + 1 == from
+                {
+                    from -= 1;
+                }
+                if let Some(Keep {
+                    held: Drawn::Analog { columns: h, .. },
+                    ..
+                }) = keep
+                {
+                    cols.min[..from].copy_from_slice(&h.min[..from]);
+                    cols.max[..from].copy_from_slice(&h.max[..from]);
+                    cols.joined[..from].copy_from_slice(&h.joined[..from]);
+                }
+                for (span, ks) in spans.iter().zip(&reach) {
+                    if ks.end <= from {
+                        continue;
+                    }
+                    let crossing = ks.start < from;
+                    let (span, ks_new, joins) = if crossing {
+                        part.min[from - 1] = cols.min[from - 1];
+                        part.max[from - 1] = cols.max[from - 1];
+                        (start_of(g, from)..span.end, from..ks.end, from - 1..ks.end)
+                    } else {
+                        (span.clone(), ks.clone(), ks.clone())
+                    };
+                    part.min[ks_new.clone()].fill(f64::INFINITY);
+                    part.max[ks_new.clone()].fill(f64::NEG_INFINITY);
+                    self.analog_span(c, g, span, level, &mut part, cancel)?;
+                    columns::connect_over(&mut part, joins);
                     let full = |k: usize| part.min[k] <= part.max[k];
-                    for k in ks.clone() {
+                    for k in ks_new {
                         if full(k) {
                             cols.min[k] = cols.min[k].min(part.min[k]);
                             cols.max[k] = cols.max[k].max(part.max[k]);
@@ -290,6 +517,8 @@ impl Recording {
                         }
                     }
                 }
+                // Shaded whole, kept columns too: a break's lost span can reach back before the
+                // first tick a snapshot records as changed, to its run's last sample.
                 let lost: Vec<Range<i64>> = lost_spans_in(&runs, range.clone())
                     .into_iter()
                     .filter(|l| l.to > l.from)

@@ -2,8 +2,11 @@
 //! is still writing, through the writer's snapshot.
 
 use std::collections::BTreeMap;
+#[cfg(feature = "live")]
+use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use escapement_tickwave_format::annotations::{self, Annotation, Included};
 use escapement_tickwave_format::decode::{DecodeError, FIRST_READ, Footer};
@@ -257,6 +260,64 @@ pub(crate) struct Live {
     /// Each block level's queued overview blocks.
     pub queued_overview: Vec<Vec<Arc<OverviewBlock>>>,
     seen: Seen,
+    /// What the latest snapshots changed, oldest first, at most `CHANGES` of them.
+    changes: VecDeque<Change>,
+}
+
+/// The snapshots whose changes a live recording keeps: an answer older than these is not
+/// extended.
+#[cfg(feature = "live")]
+const CHANGES: usize = 64;
+
+/// Which recording an answer was made from, and how many of its writer's snapshots it had taken
+/// then: what `Recording::extend` reads to know what changed since.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Revision {
+    recording: u64,
+    snapshots: u64,
+}
+
+/// Each recording's own number, so an answer is never extended by another's changes.
+static RECORDINGS: AtomicU64 = AtomicU64::new(0);
+
+impl Revision {
+    fn new() -> Self {
+        Self {
+            recording: RECORDINGS.fetch_add(1, Ordering::Relaxed),
+            snapshots: 0,
+        }
+    }
+}
+
+/// What snapshot `snapshots` changed: by channel index, the first axis tick whose data can
+/// differ; and each overview level whose settled buckets moved, by shift, the first tick read
+/// from a different level.
+#[cfg(feature = "live")]
+struct Change {
+    snapshots: u64,
+    channels: Vec<i64>,
+    levels: Vec<(u8, i64)>,
+}
+
+/// What the snapshots since an answer changed, together.
+pub(crate) struct Changed {
+    channels: Vec<i64>,
+    levels: Vec<(u8, i64)>,
+}
+
+impl Changed {
+    /// The first axis tick where channel `c`'s columns of `per` ticks can differ: its data's,
+    /// or that of a level whose buckets fit in a column.
+    pub fn from(&self, c: usize, per: f64) -> i64 {
+        let fits = |shift: u8| {
+            1u64.checked_shl(u32::from(shift))
+                .map_or(f64::MAX, |b| b as f64)
+                <= per
+        };
+        let levels = self.levels.iter().filter(|l| fits(l.0)).map(|l| l.1);
+        let data = self.channels.get(c).copied().unwrap_or(i64::MIN);
+        levels.fold(data, i64::min)
+    }
 }
 
 /// How much of the writer's append-only lists the tables hold: the written blocks, and each
@@ -288,6 +349,7 @@ pub struct Recording {
     pub(crate) sources: Vec<SourceHeader>,
     pub(crate) products: Vec<(usize, usize, Product)>,
     extent: Option<Range<i64>>,
+    pub(crate) revision: Revision,
 }
 
 /// Each channel's info and place, then each derived channel's, from what a header or a
@@ -613,6 +675,7 @@ impl Recording {
             markers,
             extent: None,
             store: Store::Finished(Box::new(footer)),
+            revision: Revision::new(),
         };
         rec.extent = rec.find_extent();
         Ok(rec)
@@ -716,7 +779,9 @@ impl Recording {
                     runs: vec![0; n],
                     annotations: 0,
                 },
+                changes: VecDeque::new(),
             })),
+            revision: Revision::new(),
         };
         rec.advance()?;
         Ok(rec)
@@ -754,6 +819,7 @@ impl Recording {
             marker_span,
             products,
             length,
+            revision,
             ..
         } = self;
         let Store::Live(live) = store else {
@@ -764,6 +830,7 @@ impl Recording {
             unwritten,
             queued_overview,
             seen,
+            changes,
         } = &mut **live;
         let d = snapshot.declaration();
         let stored = d.channels.len();
@@ -795,8 +862,12 @@ impl Recording {
         }
 
         // The gaps and runs since the last snapshot, each channel's count, and the latest tick.
+        // Every item a writer takes is at or after its latest one, which ended the old length,
+        // so a channel's data changes from there, and from each new gap's start.
         let open_start = open.start;
         let mut last = open_start - 1;
+        let settled = (*length).saturating_sub(1);
+        let mut changed = vec![settled; places.len()];
         for (c, (place, ch)) in places.iter_mut().zip(&open.channels).enumerate() {
             match (place, ch) {
                 (
@@ -816,6 +887,7 @@ impl Recording {
                         // A gap from the channel's start says where its level is first known;
                         // the others are gaps in it.
                         let on_axis = gap_on_axis(map, g);
+                        changed[c] = changed[c].min(on_axis.from);
                         if *gap_count == 0 && g.from == *source_start {
                             *start = on_axis.to;
                             *leading = Some(on_axis);
@@ -887,7 +959,8 @@ impl Recording {
             }
         }
         // A derived channel's samples sit where its first operand's do.
-        for (k, &(a, _, _)) in products.iter().enumerate() {
+        for (k, &(a, b, _)) in products.iter().enumerate() {
+            changed[stored + k] = changed[a].min(changed[b]);
             let (operands, derived) = places.split_at_mut(stored);
             let (
                 Place::Analog {
@@ -955,6 +1028,7 @@ impl Recording {
         // The levels a file finished at this length would keep, so a live view chooses as that
         // file's would. A few a recording, built again.
         let plan = format_overview::plan((*length).max(1), d.overview_shift);
+        let before: Vec<(u8, i64)> = levels.iter().map(|l| (l.shift, l.end())).collect();
         levels.clear();
         for (i, held) in snapshot.overview().iter().enumerate() {
             let covered = held.first + held.buckets();
@@ -978,6 +1052,28 @@ impl Recording {
             });
         }
         *queued_overview = fresh_overview;
+        // A tick is read from the coarsest level a column fits whose buckets reach it, so where
+        // a level's settled buckets end moves the source of the ticks between its old end and
+        // its new one. A level not kept ends at 0.
+        let end_of =
+            |ls: &[(u8, i64)], shift: u8| ls.iter().find(|l| l.0 == shift).map_or(0, |l| l.1);
+        let after: Vec<(u8, i64)> = levels.iter().map(|l| (l.shift, l.end())).collect();
+        let mut moved = Vec::new();
+        for &(shift, _) in before.iter().chain(&after) {
+            let (old, new) = (end_of(&before, shift), end_of(&after, shift));
+            if old != new && !moved.iter().any(|m: &(u8, i64)| m.0 == shift) {
+                moved.push((shift, old.min(new)));
+            }
+        }
+        revision.snapshots += 1;
+        if changes.len() == CHANGES {
+            changes.pop_front();
+        }
+        changes.push_back(Change {
+            snapshots: revision.snapshots,
+            channels: changed,
+            levels: moved,
+        });
 
         // The annotation records since the last snapshot, each a line of its generator's file.
         // A recorder's come in order of their ticks, so each goes in at the end, as a rule.
@@ -1101,6 +1197,48 @@ impl Recording {
 
     pub(crate) fn place(&self, channel: usize) -> Result<&Place, Error> {
         self.places.get(channel).ok_or(Error::NoChannel(channel))
+    }
+
+    /// What changed since revision `r` of this recording; None for another recording's, a later
+    /// one, or one older than the changes kept.
+    pub(crate) fn changed_since(&self, r: Revision) -> Option<Changed> {
+        let now = self.revision;
+        if r.recording != now.recording || r.snapshots > now.snapshots {
+            return None;
+        }
+        let changed = Changed {
+            channels: vec![i64::MAX; self.places.len()],
+            levels: Vec::new(),
+        };
+        if r.snapshots == now.snapshots {
+            return Some(changed);
+        }
+        match &self.store {
+            Store::Finished(_) => None,
+            #[cfg(feature = "live")]
+            Store::Live(live) => {
+                if live
+                    .changes
+                    .front()
+                    .is_none_or(|c| c.snapshots > r.snapshots + 1)
+                {
+                    return None;
+                }
+                let mut changed = changed;
+                for c in live.changes.iter().filter(|c| c.snapshots > r.snapshots) {
+                    for (x, &y) in changed.channels.iter_mut().zip(&c.channels) {
+                        *x = (*x).min(y);
+                    }
+                    for &(shift, at) in &c.levels {
+                        match changed.levels.iter_mut().find(|l| l.0 == shift) {
+                            Some(l) => l.1 = l.1.min(at),
+                            None => changed.levels.push((shift, at)),
+                        }
+                    }
+                }
+                Some(changed)
+            }
+        }
     }
 }
 
