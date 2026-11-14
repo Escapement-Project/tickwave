@@ -156,15 +156,15 @@ the prose cites breaks the build instead of the page. It checks that:
 ## Bundling
 
 `tickwave bundle rec.tickwave rec.annotations.toml -o shared.tickwave` checks the sidecar, then
-writes a copy of the recording with the sidecar's files in its header (`annotations`, each file's
-name and text), for a single-file share. The content id stays the same.
+writes a copy of the recording with the sidecar's files in its annotation bundle (each file's name
+and text; FORMAT.md, "Annotations"), for a single-file share. The content id stays the same.
 
 ## Merging
 
 `tickwave merge` carries each input's generated annotations into the merged recording: the generator
-files its header bundles, or, where it bundles none, those its sidecar beside it includes. They are
-bundled again under the merged recording's id. Each time moves with its input as its input's sources
-do (FORMAT.md, "Sources"): a time `x` of the input's lies at the input's move plus
+files its annotation bundle holds, or, where it has none, those its sidecar beside it includes.
+They are bundled again under the merged recording's id. Each time moves with its input as its
+input's sources do (FORMAT.md, "Sources"): a time `x` of the input's lies at the input's move plus
 `floor(x × s × R / R_input)` on the merged recording's axis, `s` the input's stretch and
 `R / R_input` the merged rate over the input's, and is written in its ticks. Inputs go in the order
 given. A generator whose name an earlier input's generator took is renamed `<stem>-<name>`, where

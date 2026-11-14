@@ -2,12 +2,14 @@
 
 A tickwave recording holds digital and analog channels on one time axis, exactly as the instruments
 recorded them: one capture's, or several captures merged, each channel in the ticks of the
-instrument that recorded it. A writer only ever appends to it, so a recorder can stream the file
-out while it captures. The file ends with an index. A reader with random access reads the end first
-and then only the blocks a view covers, so a page can show a few microseconds of a two-minute
-capture without downloading it. A reader that takes the file in order needs no index. A file cut
-off at any byte, by a crash, a power cut or a full disk, still reads up to its last whole record,
-and so does a file a recorder is still writing.
+instrument that recorded it. Each channel is a stream of its own on that axis: its blocks, its
+overview and its index cost what its own data costs. A writer only ever appends to the file, so a
+recorder can stream it out while it captures. The file ends with a small footer. A reader with
+random access reads the end first and then only the channels and spans a view shows, so a page can
+show a few microseconds of one channel of a long capture without downloading the rest. A reader
+that takes the file in order needs no footer. A file cut off at any byte, by a crash, a power cut
+or a full disk, still reads up to its last whole record, and so does a file a recorder is still
+writing.
 
 Status: draft. Version 1 is frozen when the first recording is published; files made before then
 may not read.
@@ -73,7 +75,7 @@ All numbers are little-endian, and an f32 is an IEEE 754 binary32.
 | Part | Size | Holds |
 | --- | --- | --- |
 | preamble | 12 bytes | magic and version |
-| records | up to the trailer | the declaration, then blocks, gaps, runs, overview blocks and annotations as they come, then the footer |
+| records | up to the trailer | the declaration, then blocks, known-through records, gaps, runs, overview blocks, pages and annotations as they come, then the annotation bundle and the footer |
 | trailer | 24 bytes | where the footer is |
 
 A finished file ends with the footer record and the trailer. A file without them was cut off or is
@@ -102,18 +104,23 @@ major version changes the layout; a reader refuses a major version it does not k
 | Kind | Record | Holds |
 | --- | --- | --- |
 | 1 | declaration | what the recording is, before any data |
-| 2 | block | every channel's items over one span of the axis |
+| 2 | block | one channel's items over one span of the axis |
 | 3 | gap | a digital channel's gap |
 | 4 | run | where an analog channel's run starts |
-| 5 | overview block | part of one overview level |
+| 5 | overview block | part of one level of one channel's overview |
 | 6 | annotation | one generated annotation |
-| 7 | footer | the header, the index and the overview |
+| 7 | footer | the header, the top index and every channel's strip |
+| 8 | known through | a tick up to which every channel is known |
+| 10 | index page | one channel's block rows or overview rows, or a directory of pages |
+| 11 | list page | one channel's gaps or breaks |
+| 12 | annotation bundle | the sidecar's files, bundled at the finish |
 
 The declaration is the first record, and only the first. The footer is the last, and the trailer
 follows it. The rules below say where the others go.
 
 Kind 0 is never a record, so a tail of zeros, which a power cut can leave, stops a reader. A reader
-refuses a record of a kind it does not know from 1 to 127, and skips one from 128 to 255.
+refuses a record of a kind it does not know from 1 to 127, kind 9 included, and skips one from 128
+to 255.
 
 ### Trailer
 
@@ -135,11 +142,12 @@ UTF-8 JSON: the header's `timebase`, `channels`, `derived`, `sources`, `title`, 
 `overview_shift`, as far as a writer knows them before any data.
 
 A channel entry has the header's `name`, `source_name`, `source` and `kind`, and `offset`,
-`offset_kind`, `kept` and `significant` where it states them. A digital channel has `initial`, and
-an analog channel `unit`, `period` and `coding`. What only the end settles is left out: a
-digital channel's `end`, `edges` and `gaps`, and an analog channel's `first`, `count` and
-`breaks`. A writer that does not know a level at the channel's start (see Header) declares it false
-and starts the channel with a gap from its start.
+`offset_kind`, `kept`, `significant` and `overview_shift` where it states them. A digital channel
+has `initial`, and an analog channel `unit`, `period` and `coding`. What only the end settles is
+left out: a digital channel's `end`, `edges` and gaps, an analog channel's `first`, `count`, breaks
+and losses, and every channel's `blocks` and `overview_blocks`. A writer that does not know a
+level at the channel's start (see Header) declares it false and starts the channel with a gap from
+its start.
 
 The footer's header holds the same values. It may add keys to a source's `extra`, for what the
 source states only at its end, such as a probe's totals.
@@ -153,47 +161,48 @@ parses it exactly.
 | --- | --- | --- |
 | `timebase` | `[num, den]` | the axis's ticks a second (see Times) |
 | `length` | integer | how many axis ticks the capture covers: ticks `0..length` |
-| `channels` | array | one entry a channel, in block order |
+| `channels` | array | one entry a channel, in channel order |
 | `derived` | array, optional | channels computed from others, not stored in blocks (see Derived channels) |
 | `sources` | array | where the channels came from, one entry a source (see Sources) |
 | `title` | string, optional | |
 | `meta` | object of strings, optional | free keys, such as `probe` or `firmware` |
 | `content_id` | string | `blake3:` and the 64 hex digits of the content's digest (below) |
-| `blocks` | integer | the number of blocks |
-| `overview_shift` | integer | the finest overview level's shift (see Overview) |
-| `overview` | array of integers | the overview levels in the footer, as shifts, finest first |
-| `overview_blocks` | array, optional | the overview levels in overview blocks, finest first: `{"shift": s, "blocks": n}` each; absent when there are none |
-| `annotations` | object of strings, optional | a bundled sidecar: each file's name and text |
+| `overview_shift` | integer | the finest overview level's shift of a channel that states none (see Overview) |
 
 A channel entry has `name`, `source_name` (the source's own name for it), `source` (its source's
 index in `sources`) and `kind`, and `offset`, `offset_kind` and `kept` where it states them (see
-Moved and trimmed channels). An analog channel can state `significant`, an integer of at least 1:
-its readings carry at most that many significant figures, as an instrument whose step changes with
-its range does.
+Moved and trimmed channels). It can state `overview_shift`, its finest overview level's shift. It
+has `blocks`, the number of its blocks, and `overview_blocks` where any of its overview levels go
+in overview blocks: one `{"shift": s, "blocks": b, "rows": r}` a level, finest first, with `b` the
+level's overview blocks and `r` its index rows (see Overview and Index). An analog channel can
+state `significant`, an integer of at least 1: its readings carry at most that many significant
+figures, as an instrument whose step changes with its range does.
 
 - `"digital"`: `initial` (the level at the channel's start before any edge there, a boolean), `end`
   (a source tick: the level is known from the channel's start to `end`; a source can stop knowing
-  one channel before another), `edges` (the count), and `gaps` where the level was not known for a
-  while (see Gaps, below). A channel's start is its kept span's `from` (see Moved and trimmed
+  one channel before another), `edges` (the count), and its gaps where the level was not known for
+  a while (see Gaps, below). A channel's start is its kept span's `from` (see Moved and trimmed
   channels). In a recording that states no kept span it is the source tick at the axis's tick 0,
   `−origin`. An `end` at the channel's start says the level is never known. Such a channel has no
   edges and no gaps, and its `initial` is false.
 - `"analog"`: `unit` (empty when the source states none), `first` (the first sample's source tick,
   0 when there is no sample), `period` (source ticks from one sample to the next, `[num, den]`),
-  `count`, `breaks` where the samples stopped for a while (see Gaps), and `coding` (see Codings).
+  `count`, its breaks where the samples stopped for a while and its losses at either end (see
+  Gaps), and `coding` (see Codings).
 
-An analog channel's samples come in runs, `period` apart. A channel without `breaks` has one run,
-and its sample `i` sits at source tick `first + floor(i × period)`, its place, and on the axis at
-the tick its place maps to.
+An analog channel's samples come in runs, `period` apart. A channel without breaks has one run, and
+its sample `i` sits at source tick `first + floor(i × period)`, its place, and on the axis at the
+tick its place maps to.
 
 Every axis tick the header and the index name lies in `0..length`: every block's start. Every source
 tick a channel names lies in `0..2^53` and maps into `0..length` (see Times): every edge and every
-sample's place, every tick a gap or a break names, and a kept span's `from`. A digital channel's
-`end`, and a kept span's `to`, map into `0..=length`. An analog channel has no `end`: its samples
-may stop before the length. In a recording that states no kept span, the source's `origin` is at
-most 0, so each channel's start maps to tick 0. `length` is at least 1. It is below 2^53, and so
-are the terms of every `timebase`, `period` and `stretch`, the terms of each source's `m` in lowest
-terms, and every `edges`, `count`, break index and lost count. Every `origin`, `align` and `offset`
+sample's place, every tick a gap or a break names, the start of a loss before the first sample, and
+a kept span's `from`. A digital channel's `end`, a kept span's `to`, and the end of a loss after the
+last sample map into `0..=length`. An analog channel has no `end`: its samples may stop before the
+length. In a recording that states no kept span, the source's `origin` is at most 0, so each
+channel's start maps to tick 0. `length` is at least 1. It is below 2^53, and so are the terms of
+every `timebase`, `period` and `stretch`, the terms of each source's `m` in lowest terms, and every
+`edges`, `count`, `blocks`, `rows`, break index and lost count. Every `origin`, `align` and `offset`
 has a magnitude below 2^53. No term of a `timebase`, a `period` or a `stretch` is zero. A reader
 refuses a header that breaks any of these before it reads a block.
 
@@ -280,8 +289,9 @@ A derived channel is computed from two analog channels, so a reader draws it wit
 storing its samples. `derived` holds one entry each: `{"name": n, "unit": u, "product": [a, b]}`,
 where `a` and `b` name analog channels, as power is current times voltage. No two channels or
 derived channels share a name, and a reader refuses a header where any do. Its operands come from
-one source, and share `first`, `period`, `count`, `breaks` and their move, the channel's `offset`
-(0 where a channel states none), so its sample i sits where theirs does:
+one source, and share `first`, `period`, `count`, `breaks`, their losses at either end and their
+move, the channel's `offset` (0 where a channel states none), so its sample i sits where theirs
+does:
 
 - When both are `int` channels whose codings state no `offset`, their `bits` sum to at most 64,
   and their scales' numerators multiply to below 2^53 and so do their denominators (a scale a
@@ -294,8 +304,10 @@ one source, and share `first`, `period`, `count`, `breaks` and their move, the c
 A derived entry can state `significant`, as an analog channel can. A reading of an integer
 product follows the rule for an `int` channel, and one of an f64 product the rule for a float.
 
-Blocks and the index hold nothing for a derived channel. The overview holds its buckets after the
-channels', so a reader draws it zoomed out and measures it without decoding blocks.
+Blocks hold nothing for a derived channel. It has an overview of its own, so a reader draws it
+zoomed out and measures it without decoding blocks, and its entry has `overview_blocks` as a
+channel's does. Derived channels are numbered after the channels: derived channel `d` is overview
+channel `C + d`, where `C` is the number of channels.
 
 ### Moved and trimmed channels
 
@@ -342,22 +354,34 @@ alignment and stretch: a channel starts at the tick its kept span's `from` maps 
 A live recorder can lose data or pause. Its channels then have gaps: spans where nothing is
 known. The header says where they are. A sidecar annotation can say why one happened.
 
-A digital channel's `gaps` is an array of `[from, to, level]`, in its source's ticks. The level is
-not known at source ticks `from..to`. From `to` on it is `level`, a boolean, until the next edge.
-No edge lies in `from..=to`. The gaps go in time order: `start ≤ from < to < end`, where `start` is
+A digital channel's gaps are a list of `[from, to, level]`, in its source's ticks. The level is not
+known at source ticks `from..to`. From `to` on it is `level`, a boolean, until the next edge. No
+edge lies in `from..=to`. The gaps go in time order: `start ≤ from < to < end`, where `start` is
 the channel's start (see Header), and each gap's `from` lies past the `to` before it. A channel
 with a gap from its start has an `initial` of false, since its level there is not known.
 
-An analog channel's `breaks` is an array of `[index, tick, lost]`: sample `index` starts a new
-run, at source tick `tick`, and the instrument lost `lost` samples before it, 0 when it only paused.
-The first run starts at `[0, first]`. Sample `i` of the run that starts at `[index, tick]` sits at
+An analog channel's breaks are a list of `[index, tick, lost]`: sample `index` starts a new run, at
+source tick `tick`, and the instrument lost `lost` samples before it, 0 when it only paused. The
+first run starts at `[0, first]`. Sample `i` of the run that starts at `[index, tick]` sits at
 source tick `tick + floor((i − index) × period)`, its place on the run's grid. The grid goes on past
-the run's last sample. Each `index` lies in `1..count` and is larger than the one before it. Each
-`tick` is at least the place of the sample before it. A reader draws no line across a break. The
-lost samples sit where the run before the break would have put them: their time runs from place
-`index` on that run's grid to place `index + lost`, and ends at `tick` if that comes sooner. The
-rest of the break is a pause. A reader shows the two apart. Samples lost before the first or after
-the last have no place on the time axis; a source's `extra` can count them.
+the run's last sample, and before the first run's first sample. Each `index` lies in `1..count` and
+is larger than the one before it. Each `tick` is at least the place of the sample before it. A
+reader draws no line across a break. The lost samples sit where the run before the break would
+have put them: their time runs from place `index` on that run's grid to place `index + lost`, and
+ends at `tick` if that comes sooner. The rest of the break is a pause. A reader shows the two apart.
+
+An analog channel can also state samples the instrument lost before its first sample and after its
+last, each at least 1, and absent when none:
+
+- `lost_before`: they sit at places `−lost_before` to −1 on the first run's grid, so their time runs
+  from the place of `−lost_before` to `first`. A reader refuses a loss whose start lies below source
+  tick 0 or maps before axis tick 0.
+- `lost_after`: they sit at places `count` to `count + lost_after − 1` on the last run's grid, so
+  their time runs from the place of `count` to the place of `count + lost_after`. A reader refuses a
+  loss whose end maps past the length, and a writer refuses a length that doesn't cover it.
+
+A reader pales those spans as it pales lost samples inside, and statistics count them as not
+measured.
 
 Each sample covers the source ticks from its place to the next place on its run's grid, so inside
 a run it reaches the next sample's place. A run's last sample ends at the next run's tick if that
@@ -367,66 +391,81 @@ and stops at the length. A reader that measures a span of the axis weighs each s
 ticks of its time inside the span, and counts a sample whose time reaches into the span even when
 its place lies before it.
 
-A channel with no gap or break leaves the field out.
+A list of at most 64 entries is in the header: a digital channel's `gaps` and an analog channel's
+`breaks`, each an array of the entries above. A longer list is in list pages (see Index), and the
+header states its length instead, as `gap_count` or `break_count`. A channel with no gap or break
+states neither.
 
 ## Blocks
 
-A block is cut by time across every channel: it holds exactly the edges and samples whose axis
-ticks lie in its span. A writer takes items in axis order and closes a block once its decoded size
-reaches a target. It never closes one between two items at the same axis tick, so a sample and an
-edge at one tick always share a block, whatever their sources. A writer may also close a block
-before it reaches the target, at an axis tick before which it has every item of every channel. A
-live recorder does this so a crash loses little, and such a block can hold no item at all. The
-format sets no maximum size. A reader may refuse anything that decodes to more than it is set to
-hold: a block, an overview block or the footer's overview. tickwave's reader holds 64 MiB unless it
-is configured otherwise.
+A channel's items are cut by time into blocks of its own: a block holds exactly the channel's edges
+or samples whose axis ticks lie in its span. A channel's blocks tile the axis in order: the first
+starts at tick 0, each later one at the end of the one before, every one ends after it starts, and
+the last ends at the length. Each channel's blocks are cut apart from every other channel's, so a
+slow channel's block can span hours while a fast one's spans milliseconds.
+
+A writer closes a channel's block once its decoded size reaches a target. It never closes one
+between two of the channel's items at the same axis tick. A writer may also close a block before
+it reaches the target, at an axis tick before which it has every item of the channel. A live
+recorder does this so a crash loses little, and such a block can hold no item at all. The format
+sets no maximum size. A reader may refuse anything that decodes to more than it is set to hold: a
+block, an overview block, a strip or the annotation bundle. tickwave's reader holds 64 MiB unless
+it is configured otherwise.
 
 A block record's payload:
 
 | Offset | Type | Field |
 | --- | --- | --- |
-| 0 | i64 | start, an axis tick |
-| 8 | i64 | end, the next block's start |
-| 16 | u32 | decoded length |
-| 20 + 4c | u32 | channel c's word, as the index has it |
-| 20 + 4C | the rest | the block: one zstd frame |
+| 0 | u32 | channel |
+| 4 | i64 | start, an axis tick |
+| 12 | i64 | end, the channel's next block's start |
+| 20 | u32 | the channel's word, as the index has it |
+| 24 | u32 | decoded length |
+| 28 | the rest | the block: one zstd frame |
 
-`C` is the number of channels. The first block starts at tick 0, each later one at the end of the
-block before, and every block ends after it starts. The last block ends at the length.
-
-Channel c's word: for a digital channel, its edge count in the block, with the level at the
-block's start in bit 31; for an analog channel, its sample count in the block. A digital channel's
-level bit is `initial` in block 0. In each later block it is the bit before it, taken through the
-earlier block's edges and gap ends in the order of their source ticks: an edge flips it, and a
-gap's `to` sets it to the gap's `level`. A gap ends in the block that holds the axis tick its `to`
+The word: for a digital channel, its edge count in the block, with the level at the block's start
+in bit 31; for an analog channel, its sample count in the block. A digital channel's level bit is
+`initial` in its block 0. In each later block it is the bit before it, taken through the earlier
+block's edges and gap ends in the order of their source ticks: an edge flips it, and a gap's `to`
+sets it to the gap's `level`. A gap ends in the channel's block that holds the axis tick its `to`
 maps to. Inside a gap, the bit carries the level from before the gap, and before the channel's
 start it carries `initial`.
 
-Each block, overview block and the footer's overview is one standard zstd frame with a content
+Each block, overview block, strip and annotation bundle is one standard zstd frame with a content
 checksum, and nothing else: no skippable frame, no second frame, no byte after it, and no
 dictionary. A reader refuses a frame without a checksum, with one that does not match, or with
 anything else in its bytes. (A decoder that reads every frame it is given would check only the
 last checksum, so a valid empty frame after a corrupted block would hide the corruption.)
 
-A block's decoded payload holds a u32 section length for each channel, then each channel's section,
-in channel order:
+A block's decoded payload is its channel's section:
 
-- **Digital.** Nothing when the block holds no edge of the channel. Otherwise unsigned LEB128
-  numbers: `step`, at least 1; the first edge's source tick; then each later edge's interval, its
-  source ticks from the edge before it, divided by `step`. A writer takes `step` as the greatest
-  common divisor of the block's intervals that are not zero, and 1 when there is none. A source
-  declared at a multiple of its rate stamps only multiples of some tick count, so `step` takes that
-  factor out, and its blocks come out about the size they have at its own rate. An interval may be
-  zero: two edges at one tick are a pulse the source stamped with a single time, and the level
-  flips twice there. Every edge lies in `start..end` of its channel, and the axis tick it maps to
-  lies in the block's span. An edge at the channel's start flips the level from `initial`, as any
-  edge does, so a pulse at the capture's first instant keeps both its edges. A reader refuses a
-  `step` of 0, an edge that lies outside those bounds, and bytes left after the last edge.
+- **Digital.** Nothing when the block holds no edge. Otherwise unsigned LEB128 numbers: `step`, at
+  least 1; the first edge's source tick; then each later edge's interval, its source ticks from the
+  edge before it, divided by `step`. A writer takes `step` as the greatest common divisor of the
+  block's intervals that are not zero, and 1 when there is none. A source declared at a multiple of
+  its rate stamps only multiples of some tick count, so `step` takes that factor out, and its
+  blocks come out about the size they have at its own rate. An interval may be zero: two edges at
+  one tick are a pulse the source stamped with a single time, and the level flips twice there.
+  Every edge lies in `start..end` of its channel, and the axis tick it maps to lies in the block's
+  span. An edge at the channel's start flips the level from `initial`, as any edge does, so a pulse
+  at the capture's first instant keeps both its edges. A reader refuses a `step` of 0, an edge that
+  lies outside those bounds, and bytes left after the last edge.
 - **Analog.** The block's samples in the channel's coding. f32 and f64 values are stored whole.
   Codes, of an `int` or a `codes` channel, are stored in byte planes: every code's lowest byte, then
   every code's next byte, and so on for `ceil(bits / 8)` bytes, a signed code in two's complement.
   Split this way, the captures we tried came out 12 % smaller after zstd than with each code's
   bytes together. A reader refuses a code outside its coding's range.
+
+## Known-through records
+
+A known-through record's payload is one i64, `tick`: every channel is known up to axis tick `tick`.
+Every item of every channel before it is in a block record before this record. So a channel whose
+last block ends before `tick` holds nothing from that end to `tick`, and is known there. Each
+known-through record's tick is later than the one before it, and no later than the length. A reader
+refuses a block record after it that holds an item before its tick.
+
+A live recorder writes one at each flush, after that flush's block records (see Writing), so a
+channel with nothing new needs no record of its own, and repair cuts every channel to the same tick.
 
 ## Gap and run records
 
@@ -439,10 +478,10 @@ A gap record:
 | 12 | i64 | `to`, a source tick |
 | 20 | u8 | `level`, 0 or 1 |
 
-A digital channel's gap, as Gaps defines one. It comes before the block that holds the axis tick
-`to` maps to. The blocks before that one may already be written when the writer learns of the gap.
-They stay as they are, because a block's level bit carries the level from before a gap until the
-gap's `to`.
+A digital channel's gap, as Gaps defines one. It comes before the channel's block that holds the
+axis tick `to` maps to. The channel's blocks before that one may already be written when the writer
+learns of the gap. They stay as they are, because a block's level bit carries the level from before
+a gap until the gap's `to`.
 
 A run record:
 
@@ -454,8 +493,9 @@ A run record:
 | 20 | u64 | `lost` |
 
 Sample `index` of an analog channel starts a run at `tick`, after `lost` samples the instrument
-lost. The run at index 0 gives the channel's `first`, and each later run is a break; the first
-run's `lost` is 0. It comes before the block that holds sample `index`.
+lost. The run at index 0 gives the channel's `first`, and its `lost` is the channel's
+`lost_before` (see Gaps); each later run is a break. It comes before the channel's block that holds
+sample `index`.
 
 A gap whose `to` is not below its channel's `end` is left out of the header, and the channel's
 `end` becomes the gap's `from` if that comes sooner. A gap from the channel's start then leaves its
@@ -464,32 +504,31 @@ A gap whose `to` is not below its channel's `end` is left out of the header, and
 
 ## Overview
 
-The overview lets a reader draw a view without decoding blocks. Each level summarises every
-channel in buckets of `2^shift` axis ticks; a level has `ceil(length / 2^shift)` buckets. An item
-counts in the bucket that holds the axis tick it maps to.
+The overview lets a reader draw a view without decoding blocks. Each channel and each derived
+channel has an overview of its own: levels of buckets of `2^shift` axis ticks, each summarising
+that channel alone. A level has `ceil(length / 2^shift)` buckets. An item counts in the bucket that
+holds the axis tick it maps to.
 
-The finest level's shift is `overview_shift`, at most 62. The levels go from it in steps of 4,
-stopping at the first with at most 1,024 buckets or at shift 62. A level with at most 2^17 buckets
-goes in the footer. A level with more goes in overview blocks, which a reader fetches like blocks,
-for the span it shows. The footer always holds at least one level. The levels follow from `length`
-and `overview_shift`, and a reader refuses a header that lists any others.
+A channel's finest level's shift is its `overview_shift`, or the recording's where it states none,
+at most 62. A derived channel's is the coarser of its operands'. A channel's levels go from it in
+steps of 4, stopping at the first with at most 1,024 buckets or at shift 62. That last level is the
+channel's strip, in the footer (see Footer). Every other level goes in overview blocks, which a
+reader fetches like blocks, for the span it shows. The levels follow from `length` and the shift,
+and a reader refuses a header that lists any others in `overview_blocks`.
 
-A writer declares the finest level before it knows the length, so it picks one whose buckets hold
-many items. A level as fine as the data makes the overview as large as the blocks, and buckets of a
-sparse recording cost room for no data. tickwave's writers pick the shift that puts about 1,024
-items of the densest channel in a bucket: the whole number nearest `log2(1,024 × t)`, held to
-`0..=62`, where `t` is the densest channel's axis ticks an item. That is the `s` for which
-`(1,024 × t)²` lies between `2^(2s − 1)` and `2^(2s + 1)`; no ratio falls on either bound. An analog
-channel's `t` is its `period` times its source's `m`. A digital channel's is the axis ticks from its
-start to its `end`, over its edge count. A channel with no item does not count, and with no item at
-all the shift is 62. Converting or merging a recording whose length it knows, tickwave takes a
-coarser shift where this one's overview blocks would pass what it keeps ("Writing"). A recorder
-that has no data yet takes the interval it expects between items, such as its sample period. Since
-`t` is in axis ticks, the same data at a finer timebase gets a larger shift and about as many
-buckets.
+A writer declares each channel's finest level before it knows the length. tickwave's writers pick
+the shift that puts about 64 of the channel's items in a bucket: the whole number nearest
+`log2(64 × t)`, held to `0..=62`, where `t` is the channel's axis ticks an item. That is the `s` for
+which `(64 × t)²` lies between `2^(2s − 1)` and `2^(2s + 1)`; no ratio falls on either bound. An
+analog channel's `t` is its `period` times its source's `m`. A digital channel's is the axis ticks
+from its start to its `end`, over its edge count. A channel with no item takes 62. A recorder that
+has no data yet takes the interval it expects between the channel's items, such as its sample
+period, and a channel whose rate it can't know ahead, such as a digital pin, takes the recording's
+shift. Since `t` is in axis ticks, the same data at a finer timebase gets a larger shift and about
+as many buckets. A view whose column is narrower than a channel's finest bucket reads the channel's
+items, about 64 a bucket.
 
-The footer's decoded overview holds, for each level in the header's order, each channel in order,
-then each derived channel:
+A channel's level decodes to, for its `n` buckets:
 
 - **Digital.** The level bits, then the change bits, each `ceil(n / 8)` bytes. Bucket i is bit
   `i % 8` of byte `i / 8`. The level bit is the level entering the bucket, before any edge at its
@@ -506,29 +545,37 @@ then each derived channel:
   | `f32` | f32 | f64 |
   | `codes` | f32, of the values | f64, of the values |
   | `f64` | f64 | f64 |
-  | `int`, unsigned | u64 | i128 |
-  | `int`, signed | i64 | i128 |
+  | `int`, unsigned | unsigned, `w` bytes | i128 |
+  | `int`, signed | two's complement, `w` bytes | i128 |
 
-  A bucket with no sample holds a minimum above its maximum: +∞ and −∞, or the type's largest and
-  smallest. NaN samples are left out. Where −0 and +0 tie for a minimum or a maximum, the first in
-  index order counts. A sum starts at +0, so an empty bucket's is 0. A bucket of the finest level
-  sums its samples in index order, and a bucket of a coarser level sums the 16 buckets of the level
-  below it that it covers, in order, so every writer gives the same bytes. An integer sum is exact.
-  A bucket's sample count follows from `first`, `period`, `breaks` and the mapping, so the overview
-  doesn't store it.
-- **Derived.** As an analog channel: an integer product as signed or unsigned `int` codes, and an
-  f64 product as `f64`.
+  `w` is the smallest of 1, 2, 4 and 8 bytes that holds the coding's `bits`.
 
-An overview block record's payload:
+  A bucket with no sample holds a minimum above its maximum: +∞ and −∞, or the largest and the
+  smallest number its `w` bytes hold. NaN samples are left out. Where −0 and +0 tie for a minimum or
+  a maximum, the first in index order counts. A sum starts at +0, so an empty bucket's is 0. A
+  bucket of the finest level sums its samples in index order, and a bucket of a coarser level sums
+  the 16 buckets of the level below it that it covers, in order, so every writer gives the same
+  bytes. An integer sum is exact. A bucket's sample count follows from `first`, `period`, `breaks`
+  and the mapping, so the overview doesn't store it.
+- **Derived.** As an analog channel: an integer product as signed or unsigned `int` codes whose
+  `bits` are its operands' summed, and an f64 product as `f64`.
+
+A level in overview blocks is cut into blocks of 4,096 buckets, the last block the rest. An overview
+block record's payload:
 
 | Offset | Type | Field |
 | --- | --- | --- |
-| 0 | u8 | the level's shift |
-| 1 | u64 | `k`: the block starts at bucket `4,096 k` |
-| 9 | the rest | one zstd frame |
+| 0 | u32 | channel, a derived channel numbered after the channels |
+| 4 | u8 | the level's shift |
+| 5 | u64 | `k`: its first block starts at bucket `4,096 k` |
+| 13 | u32 | `n`, at least 1 |
+| 17 | the rest | one zstd frame |
 
-An overview block holds 4,096 buckets of one level, the last block of a level the rest. Its
-decoded payload is laid out as one level of the footer's overview, for its own n buckets.
+The frame decodes to one block's buckets, laid out as the channel's level for those buckets, and
+blocks `k..k + n` of the level are each those bytes. So a run of alike blocks, from a span with
+nothing in it or a signal that repeats, costs one record and one row. A level's last block, which
+may hold fewer buckets, is always a record of its own with `n` = 1, so a run's blocks are all
+whole. tickwave's writer writes each run of alike blocks as one record, up to `n` = 2^32 − 1.
 
 ## Annotations
 
@@ -540,15 +587,98 @@ tickwave's writer refuses, at the call, an annotation its generator's file could
 whose fields, ticks or channels break ANNOTATIONS.md's rules for a line, or whose id its
 generator has given already. Its length aside, which the writer learns only when it finishes, each
 annotation it takes resolves. Repair and recut leave out a record whose line breaks those rules,
-as another writer may have written it, and name each one they leave out.
+as another writer may have written it, and name each one they leave out. Annotations keep no
+order with the channels' items.
 
 Annotation records let a live recorder keep what it generates as safely as its data. The footer
 does not index them, so a reader with random access never sees them. When a file is finished or
 repaired, each source's annotations become its generator file, `rec.<source>.jsonl`, beside the
-recording. A writer can instead bundle them into the footer's `annotations` when it finishes, with a
-hand-written file that holds no annotation of its own and includes them, so a live recording stays
-one file. An annotation that starts at or past the length is dropped, and a span that ends past it
-ends at the length.
+recording. A writer can instead bundle them into the file when it finishes, with a hand-written
+file that holds no annotation of its own and includes them, so a live recording stays one file. An
+annotation that starts at or past the length is dropped, and a span that ends past it ends at the
+length.
+
+An annotation bundle record's payload is a u32, the decoded length, then one zstd frame of UTF-8
+JSON: an object of strings, each file's name and text. The footer's top index places it. A file
+holds at most one, written just before the footer.
+
+## Index
+
+Each channel's blocks, each level of a channel's overview in overview blocks, and each gap or break
+list longer than 64 entries is a table: its entries in order. A table's entries go in pages of
+4,096, the last page the rest, and the footer's top index lists the pages. Past 16 pages, directory
+pages list the pages, 4,096 entries a directory page, and the top index lists the directory pages;
+past 16 of those, another directory level goes above, and so on. So the top index holds at most 16
+entries a table however long the recording, and a reader holds one page a level at a time.
+
+| Table | Its entries | Their count |
+| --- | --- | --- |
+| a channel's blocks | block rows | the channel's `blocks` |
+| one level of a channel's overview in overview blocks | overview rows | the level's `rows` |
+| a digital channel's gaps, past 64 | gaps | `gap_count` |
+| an analog channel's breaks, past 64 | breaks | `break_count` |
+
+A block row, 28 bytes:
+
+| Offset | Type | Field |
+| --- | --- | --- |
+| 0 | i64 | the block's start tick |
+| 8 | u64 | the offset of its zstd frame in the file |
+| 16 | u32 | the frame's length |
+| 20 | u32 | its decoded length |
+| 24 | u32 | the channel's word, as its block record has it |
+
+Block i of a channel covers ticks `[start_i, start_{i+1})`, and its last block runs to `length`. The
+first starts at tick 0, and the starts strictly increase. A reader refuses an index that places an
+edge or a sample outside its block.
+
+An overview row, 20 bytes: its frame's offset (u64), the frame's length (u32), its decoded length
+(u32) and `n` (u32), as its overview block record has them. A level's rows go in order of `k`, each
+starting where the one before ends, and their `n` sum to the level's `blocks`. A reader refuses a
+zero `n`, rows whose `n` sum to another count, and a last row of more than one block.
+
+A gap is 17 bytes, `from` (i64), `to` (i64) and `level` (u8); a break is 24 bytes, `index` (u64),
+`tick` (i64) and `lost` (u64), as Gaps defines them.
+
+A page record's payload, for an index page (kind 10) and a list page (kind 11) alike:
+
+| Offset | Type | Field |
+| --- | --- | --- |
+| 0 | u32 | channel, a derived channel numbered after the channels |
+| 4 | u8 | table: 0 blocks, 1 an overview level, 2 gaps, 3 breaks |
+| 5 | u8 | the overview level's shift, 0 for any other table |
+| 6 | u8 | depth: 0 for a page of the table's entries, `d` for a directory of pages of depth `d − 1` |
+| 7 | u64 | its first entry's place among the entries at its depth, counted from 0 |
+| 15 | u32 | the number of its entries, 1 to 4,096 |
+| 19 | the rest | its entries |
+
+A list page holds gaps or breaks at depth 0; an index page holds block or overview rows at depth 0,
+or directory entries at any depth from 1. A directory entry, 28 bytes:
+
+| Offset | Type | Field |
+| --- | --- | --- |
+| 0 | i64 | `first`, of the first entry under it |
+| 8 | u64 | `number`, of the first entry under it |
+| 16 | u64 | the page record's offset in the file |
+| 24 | u32 | the page record's length, its framing included |
+
+`first` and `number` say where the page it points at starts: for blocks, the first block's start
+tick and its first item's index in the channel; for an overview level, the first row's `k` and its
+place among the rows; for gaps, the first gap's `from` and its place in the list; for breaks, the
+first break's `tick` and its `index`. The top index's entries are directory entries too.
+
+A table's shape follows from its count `R`. Its depth-0 pages are `ceil(R / 4,096)`. Where the pages
+at a depth number at most 16, the top index lists them, and that depth is the table's. Otherwise
+directory pages one depth up list them, 4,096 entries a page in order, the last the rest. Counts
+are below 2^53, so a table has at most four directory levels: pages alone list 2^16 entries, one
+directory level 2^28, two 2^40, three 2^52. A reader refuses a page whose channel, table, shift or depth differ
+from the entry that points at it, whose first place or count differ from what the shape gives, or
+whose entries are out of order; a directory entry whose `first` or `number` differ from its page's;
+and a top index whose depth or entry count for a table differ from what the table's count gives.
+
+A writer writes a table's page once it holds 4,096 entries, after the records its entries place,
+and a directory page once it holds 4,096 entries likewise. It writes every table's last pages at
+the finish.
 
 ## Footer
 
@@ -557,33 +687,44 @@ ends at the length.
 | 0 | u32 | `header_len` |
 | 4 | u32 | `index_len` |
 | 8 | `header_len` bytes | the header |
-| 8 + `header_len` | `index_len` bytes | the index |
-| 8 + `header_len` + `index_len` | the rest | the overview: one zstd frame |
+| 8 + `header_len` | `index_len` bytes | the top index |
+| 8 + `header_len` + `index_len` | the rest | the strips: one zstd frame a channel |
 
-### Index
-
-One row a block, in time order, then one row an overview block. A block's row is 24 bytes, then 4
-bytes for each channel:
+The top index:
 
 | Offset | Type | Field |
 | --- | --- | --- |
-| 0 | i64 | the block's start tick |
-| 8 | u64 | the offset of its zstd frame in the file |
-| 16 | u32 | the frame's length |
-| 20 | u32 | its decoded length |
-| 24 + 4c | u32 | channel c's word, as its block record has it |
+| 0 | u64 | the annotation bundle record's offset in the file, 0 without one |
+| 8 | u32 | its length, its framing included, 0 without one |
+| 12 | the rest | an entry for each channel, in channel order, then each derived channel |
 
-Block i covers ticks `[start_i, start_{i+1})`, and the last block runs to `length`. The first block
-starts at tick 0, and the starts strictly increase. A reader refuses an index that places an edge
-or a sample outside its block.
+A channel's entry:
 
-An overview block's row is 16 bytes: its frame's offset (u64), the frame's length (u32) and its
-decoded length (u32). The rows go by level, in the order of `overview_blocks`, then in time order.
+| Type | Field |
+| --- | --- |
+| u32 | its strip frame's length |
+| u32 | the strip's decoded length |
+| each of its tables in turn | u8 depth, u8 `e` (1 to 16), then `e` directory entries |
+
+A channel's tables go in this order: its blocks; each level of its overview in overview blocks,
+finest first; and its gaps or breaks where the header states `gap_count` or `break_count`. A
+derived channel has only its overview levels. A reader refuses a top index that is not exactly
+`index_len` bytes.
+
+The strips follow the top index, back to back in the order of its entries. A channel's strip is
+its coarsest overview level, all its buckets, laid out as the channel's level for them (see
+Overview). A reader refuses a strip whose decoded length is not that level's size, or whose frames
+don't end where the footer does. It decompresses only the strips of the channels it shows.
+
+So the footer holds nothing that grows with the recording's length but the number of overview
+levels, which grows by one each time the length grows sixteenfold: the header without its long
+lists, at most 16 top-index entries a table, and a strip of at most 1,024 buckets a channel. A first
+draw reads the trailer and the footer and decompresses the strips it shows.
 
 ## Content id
 
 The content id identifies what a recording holds, not how a file stores it. Re-cutting blocks,
-recompressing or bundling annotations leaves it unchanged. A sidecar pins it.
+recompressing, re-indexing or bundling annotations leaves it unchanged. A sidecar pins it.
 
 It is BLAKE3 over the timebase (two u64), the length (i64), and then each channel's own BLAKE3
 digest, in channel order. A channel's digest covers what the declaration fixes, then the channel's
@@ -605,49 +746,80 @@ data alone gives.
   `level` as one byte.
 - Analog: the name, `"analog"`, the unit, `period` as two u64, then the samples, then `first` as
   i64, `count` as u64, the number of breaks as u64, and each break's `index` as u64, `tick` as i64
-  and `lost` as u64. The samples of an `f32` or a `codes` channel are every value's f32 bits as u32,
-  so the two codings of one capture's values give one id. An `f64` channel adds `"f64"` before the
-  flags and hashes every value's bits as u64. An `int` channel adds, in the same place, `"int"`,
-  `bits` as one byte, `signed` as one byte, and `scale` and `offset` as an i64 and a u64 each (1/1
-  and 0/1 where it states none), and hashes every code as i64 or u64.
+  and `lost` as u64. Where the channel states `lost_before` or `lost_after`, both follow as u64, 0
+  for one it doesn't state. The samples of an `f32` or a `codes` channel are every value's f32 bits
+  as u32, so the two codings of one capture's values give one id. An `f64` channel adds `"f64"`
+  before the flags and hashes every value's bits as u64. An `int` channel adds, in the same place,
+  `"int"`, `bits` as one byte, `signed` as one byte, and `scale` and `offset` as an i64 and a u64
+  each (1/1 and 0/1 where it states none), and hashes every code as i64 or u64.
 
-Derived channels, `significant`, and a source's fields other than the four flag 4 adds are not part
-of the content: they describe it, or follow from it. A source's `timebase` follows from its `m`, its
-`stretch` and the recording's `timebase`.
+Derived channels, `significant`, `overview_shift`, and a source's fields other than the four flag 4
+adds are not part of the content: they describe it, or follow from it. A source's `timebase`
+follows from its `m`, its `stretch` and the recording's `timebase`.
 
 ## Writing
 
 A writer:
 
 - Writes the preamble and the declaration before anything else.
-- Takes items in axis order across its channels, each channel's in the order of its source ticks,
-  and writes each block as it closes.
-- Writes a gap or a run before the block that needs it.
+- Takes each channel's items in the order of its source ticks. The channels keep no order among
+  themselves.
+- Puts each item in its channel's open block, which starts where the channel's last block ended,
+  at tick 0 for its first. No item of a channel lies before the start of its open block.
+- Closes a channel's block at an axis tick before which it has every item of the channel, and
+  writes it.
+- Writes a gap or a run before the channel's block that needs it.
 - Writes annotation records as it generates them.
-- Writes overview blocks as their buckets settle. Overview block k of a level settles once a block
-  ends at or past axis tick `4,096 (k + 1) × 2^shift`. A level goes in overview blocks once a block
-  ends past tick `2^(17 + shift)`, since the level then has more than 2^17 buckets: the writer
-  writes its settled overview blocks then, and each later one as it settles. Until then it holds
-  the level, which may still end up in the footer.
-- At the end, writes each overview level's last block, then the footer and the trailer.
+- Writes a known-through record at a tick before which every item of every channel is in a block
+  record before it.
+- Writes overview blocks as their buckets settle. Block k of a channel's level settles once the
+  channel is known past axis tick `4,096 (k + 1) × 2^shift`: one of its blocks ends there or past
+  it, or a known-through record's tick does. A run of alike blocks is written when it ends: when a
+  block with other bytes settles, or at the finish.
+- Writes each table's pages as they fill (see Index).
+- At the end, closes every channel's last block at the length, writes each overview level's last
+  block and its open run, every table's last pages and the annotation bundle if any, then the footer
+  and the trailer.
 
 A writer refuses, as an error, any tick, count or length that a reader would refuse, the axis tick
 an item maps to included, rather than write a file no reader opens.
 
-tickwave's writer compresses overview blocks at zstd level 3, whatever level it compresses blocks
-and the footer at. A level that moves into overview blocks writes every settled one at once, and a
-slower level would hold a recorder up there.
+### tickwave's writer
 
-tickwave writes, repairs and checks at most 1,048,576 overview blocks for one recording, whose rows
-take 16 MiB of the footer. With a finest level of 2^10-tick buckets at 1 GHz, the bound falls at
-68.7 minutes, and each shift coarser doubles it. Converting or merging, tickwave knows the length
-before it writes: it takes the densest channel's finest level, or the least coarser one that keeps
-the bound. Its writer, which a live recorder drives without knowing where the recording ends,
-refuses the block or flush whose end passes the bound for its declared level. Repair and verify
-refuse such a file.
+**Order and promise.** It takes each channel's items in that channel's order, and refuses an item
+before the start of its channel's open block. A promise, `promise(before)`, says every item of
+every channel before axis tick `before` is in. A channel's open block that has reached the target
+size closes at the latest promise: its items before that tick go in the closed block, and those at
+or after it stay in the open one. So a producer can write a channel ahead of what it has promised,
+as a probe's samples come ahead of the pin edges that lie among them. Promises and flushes go
+forward: each is at or after the one before, so every block a writer closes before a flush ends at
+or before the flush's tick. The encoder, which takes items in axis order across channels, promises
+with each item, so its blocks close as they reach the target.
 
-A live recorder syncs the file to disk after each block, so how long it keeps a block open bounds
-what a crash loses.
+**Flush.** `flush(before)` promises `before`, closes at `before` every channel's open block that
+holds an item before it, and then writes one known-through record at `before`, after every block
+record that flush closed. Items at or after `before` stay in the open blocks. A channel with
+nothing before `before` in its open block writes no record; the known-through record says it is
+known to `before`. A live recorder flushes at least every second and syncs the file to disk after
+each, so how often it flushes, and the compression still pending, bound what a crash loses.
+
+**Compression.** It compresses blocks at the level it is given, and overview blocks at zstd level 3,
+whatever that level is. Strips and the annotation bundle are compressed at the finish. By default
+the compression of every other frame is spread over the calls after its record is made, on the
+caller's thread: while any frame is pending, every call, `take_output` included, compresses the
+next 32 KiB of the pending frames' decoded bytes, so no call does much work however large a block
+is. Each 32 KiB ends a zstd block inside the frame, so the frame's bytes depend on the data, the
+level and the slice, never on how the calls fall. Its records leave in file order: a record waits
+behind the frames before it, so a flush's known-through record leaves only after the bytes of that
+flush's blocks. A closed block reaches the output within `ceil(Q / 32 KiB)` calls of its close,
+where `Q` is the decoded bytes still to compress up to and including its own. A ready-made option
+compresses on other threads instead, channels in parallel, and gives the same bytes. `finish`
+compresses whatever is still pending.
+
+**Memory.** It holds each channel's open block, each table's open pages at each depth (at most
+4,096 entries each) and the top index's entries, each overview level's open block and open run, and
+the frames waiting for compression. None of that grows with the recording's length, so a month-long
+recording holds kilobytes of index, not every block's row.
 
 ## Reading
 
@@ -655,54 +827,74 @@ what a crash loses.
 
 A reader reads the file's last 32 KiB first: over HTTP with `Range: bytes=-32768`, which a server
 answers with the whole file when it is shorter. It reads the trailer, and fetches the rest of the
-footer if the footer starts before those bytes. Then it fetches the blocks and overview blocks a
-view covers, as the index places them.
+footer if the footer starts before those bytes. It parses the footer once, and decompresses the
+strips of the channels it shows: that is a first draw. For a span of a channel it then picks a
+level by the width of a column: the coarsest of the channel's levels whose bucket is no wider than a
+column, or the channel's items where even its finest is wider. It fetches that table's pages
+through the top index, directory pages first where the table has them, then the overview blocks or
+blocks the span covers, as the rows place them, and those either side of the span, so a pan seldom
+waits. It decodes each block once for a view, whatever channels the view takes from it.
 
 ### In order
 
-A reader takes the records from the start. Each block record carries its span and its words, so
-the reader decodes blocks without the footer. It stops at the first record that runs past the end
-of the file or whose check does not match, and keeps every record before it. After the footer
-record come exactly the trailer's 24 bytes.
+A reader takes the records from the start. Each block record carries its channel, its span and its
+word, so the reader decodes a channel's blocks without the footer, and each known-through record
+extends every channel to its tick. It may skip pages and the annotation bundle, whose contents
+follow from the records it reads. It stops at the first record that runs past the end of the file
+or whose check does not match, and keeps every record before it. After the footer record come
+exactly the trailer's 24 bytes.
 
 A viewer reading a file that is still being written meets a last record cut off where the writer
-has got to. It reads that record again once the file grows. The declaration fixes the overview's
-levels, so the viewer extends each level bucket by bucket as blocks arrive, and adds a coarser
-level once the length needs one.
+has got to. It reads that record again once the file grows. The declaration fixes each channel's
+finest level, so the viewer extends each channel's levels bucket by bucket as its blocks and the
+known-through records arrive, and adds a coarser level once the length needs one.
 
 ## Repairing a cut-off file
 
-A cut-off file is repaired by appending a footer and a trailer after its last good record:
+A cut-off file is repaired by appending what a finished file has after its last good record:
 
-1. Take the records up to the first bad one, and cut the file there. Refuse a file with no
-   declaration, or with neither a block nor an annotation record.
-2. Every digital channel's `end` is the source tick at the last block's end, or its start with no
-   block, before the gap rule above. A file that can be repaired states no kept span, so its one
-   source maps by `T = k + origin`, and that tick is the block's end minus `origin`. The length is
-   the later of the last block's end (0 with no block) and one past the latest start among the
-   annotation records, so what a recorder marked after its last data survives, and a recording of
-   marks alone too. When the length is later, an empty block runs from the last block's end, or
-   from tick 0, to it. A file with no block whose declaration states a digital channel's `initial`
-   as true is refused: no block carries that level.
-3. Count each channel's edges and samples from the blocks' words.
-4. Compute the overview and the content id from every block's items, decoding each block once.
-   Keep the overview blocks already written, and write the rest.
-5. Write the footer and the trailer, and each annotation source's generator file, or bundle them
-   as the writer would have.
+1. Take the records up to the first bad one. Refuse a file with no declaration, or with neither a
+   block nor an annotation record.
+2. Where they hold a known-through record, cut the file just after the latest one: every channel is
+   then known to its tick, and none holds more. Keep the annotation records that came after it, to
+   write again after the cut. Where they hold none, cut the file at the first bad record, and each
+   channel keeps its blocks to its last whole one.
+3. The length is the later of that known-through tick (or, with none, the latest end of any kept
+   block, 0 with no block) and one past the latest start among the annotation records, so what a
+   recorder marked after its last data survives, and a recording of marks alone too. Each channel
+   whose last kept block ends before the length gets an empty block from there, or from tick 0, to
+   the length. A file with no block whose declaration states a digital channel's `initial` as true
+   is refused: no block carries that level.
+4. Every digital channel's `end` is the source tick at the latest known-through tick, or, with
+   none, at its own last kept block's end, or its start with no block, before the gap rule above. A
+   file that can be repaired states no kept span, so its one source maps by `T = k + origin`, and
+   that tick is the axis tick minus `origin`. No analog channel states a loss after its last
+   sample.
+5. Count each channel's edges and samples from its blocks' words, and take its gaps and runs from
+   their records.
+6. Compute each channel's overview and the content id from the kept blocks' items, decoding each
+   block once. Keep the overview blocks and pages already written that the kept blocks give, and
+   write the rest, the open runs included. Refuse a file whose overview blocks or pages differ from
+   the ones its content gives.
+7. Write the annotation records kept in step 2, every table's last pages, the annotation bundle if
+   the writer would have bundled, the footer and the trailer, and otherwise each annotation
+   source's generator file.
 
-A repaired file holds what a writer that had finished at the same block, with the same length,
-would have written, and so has its content id.
+A repaired file holds what a writer that had finished right after the records repair keeps, with
+the same length, would have written, and so has its content id.
 
 A file whose channels state `kept`, because a channel is moved or cut, the recording merges several
 sources, or its source states a stretch other than 1, is not repaired. Its declaration states each
 channel's kept span before any data, to the end of the whole capture, so a footer at an earlier
-block would contradict it. Such a file is made again from its sources instead.
+tick would contradict it. Such a file is made again from its sources instead.
 
 ## Re-cutting
 
 A file whose blocks a recorder closed early, at flushes, can be written again with blocks of the
 usual size, and a repaired file too. A re-cutter reads the records in order and writes the same
-declaration, then every item, gap, run and annotation in the same order, and finishes with the same
-length, ends, extras and bundled annotations. It computes the overview again. The new file has the
-same content id. A cut-off file re-cuts as repair would finish it, its annotations bundled or
-handed back as generator files.
+declaration, then every channel's items, gaps and runs, and every annotation, in the same order,
+and finishes with the same length, ends, losses, extras and bundled annotations. It may give the
+channels other overview shifts than the input declares, such as the ones the rule gives each
+channel's own items; a finished input's header says enough to work them out. It computes the
+overview again. The new file has the same content id. A cut-off file re-cuts as repair would
+finish it, its annotations bundled or handed back as generator files.
