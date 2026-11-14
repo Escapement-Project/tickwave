@@ -6,7 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HttpBytes, MemoryBytes, type Bytes, type Fetch } from "../src/wasm/bytes.ts";
@@ -559,11 +559,12 @@ test("a channel known only from a gap's end starts there, at the gap's level, an
   assert.deepEqual([before.level, [...before.ticks]], [0, [590_000, 595_000]]);
 });
 
-test("a gap that ends where a block starts sets the level there, read from inside that block", async () => {
+test("a gap that ends where a block starts sets the level there, read from inside that block", async (t) => {
   // crates/format/examples/block_gap.rs: D rises at 10, is not known from 50 to 100 and low after,
   // the second block starts at 100, and D rises at 150. The block's level bit carries the level
   // from before the gap, high, so the reader takes the gap's.
   const dir = mkdtempSync(join(tmpdir(), "escapement-tickwave-block-gap-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
   execFileSync("cargo", ["run", "-q", "-p", "escapement-tickwave-format", "--example", "block_gap", "--", dir], { cwd: new URL("../..", import.meta.url).pathname, stdio: ["ignore", "ignore", "inherit"] });
   const r = await openTickwave(join(dir, "block-gap.tickwave"));
   for (const [from, to] of [[100, 200], [120, 170], [0, 200]]) {

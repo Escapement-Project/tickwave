@@ -7,7 +7,7 @@
 
 import { test, expect, type Locator, type Page } from "@playwright/test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -16,9 +16,14 @@ const REPO = new URL("../..", import.meta.url).pathname;
 const DATA = join(REPO, "testdata");
 
 function cli(args: string[]): Buffer {
-  const out = join(mkdtempSync(join(tmpdir(), "escapement-tickwave-cli-")), "out.tickwave");
-  execFileSync("cargo", ["run", "-q", "--release", "-p", "escapement-tickwave-cli", "--", "convert", ...args, "-o", out], { cwd: REPO, stdio: ["ignore", "ignore", "pipe"] });
-  return readFileSync(out);
+  const dir = mkdtempSync(join(tmpdir(), "escapement-tickwave-cli-"));
+  try {
+    const out = join(dir, "out.tickwave");
+    execFileSync("cargo", ["run", "-q", "--release", "-p", "escapement-tickwave-cli", "--", "convert", ...args, "-o", out], { cwd: REPO, stdio: ["ignore", "ignore", "pipe"] });
+    return readFileSync(out);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 type Shape = Record<string, { offset: number; keep: { from: number; to: number } | null }>;

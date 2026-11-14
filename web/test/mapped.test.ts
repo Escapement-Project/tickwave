@@ -3,10 +3,10 @@
 // axis (FORMAT.md, "Times"), worked here with BigInt from the header's own numbers. The merge runs
 // through the CLI, the reading through the WASM decoder.
 
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openTickwave } from "../scripts/node-wasm.ts";
@@ -15,6 +15,7 @@ import { formatInterval } from "../src/readouts.ts";
 
 const REPO = new URL("../..", import.meta.url).pathname;
 const OUT = mkdtempSync(join(tmpdir(), "tickwave-mapped-"));
+after(() => rmSync(OUT, { recursive: true, force: true }));
 const MERGED = join(OUT, "merged.tickwave");
 execFileSync(
   "cargo",

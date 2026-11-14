@@ -2,10 +2,10 @@
 // capture it must write the CLI's bytes exactly, with the same settings. The CLI runs through cargo
 // (crates/convert-wasm/build.sh builds the module first).
 
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { copyFileSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { convertFiles, describeFiles } from "../scripts/node-convert.ts";
@@ -15,6 +15,7 @@ import { v0Copy } from "./saleae-v0.ts";
 const REPO = new URL("../..", import.meta.url).pathname;
 const DATA = join(REPO, "testdata");
 const OUT = mkdtempSync(join(tmpdir(), "tickwave-convert-"));
+after(() => rmSync(OUT, { recursive: true, force: true }));
 
 function cli(args: string[]): void {
   execFileSync("cargo", ["run", "-q", "--release", "-p", "escapement-tickwave-cli", "--", ...args], { cwd: REPO, stdio: ["ignore", "ignore", "pipe"] });
@@ -114,8 +115,9 @@ test("a Saleae export's passes: its edges checked once, then codes, encoding and
   assert.deepEqual(steps, [], "fewer than 65,536 items a pass report no step");
 });
 
-test("a Saleae export's channels, in number order, and a file that is not one, skipped", () => {
+test("a Saleae export's channels, in number order, and a file that is not one, skipped", (t) => {
   const dir = mkdtempSync(join(tmpdir(), "tickwave-describe-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
   for (const f of readdirSync(join(DATA, "saleae/swd50-cut"))) copyFileSync(join(DATA, "saleae/swd50-cut", f), join(dir, f));
   copyFileSync(join(DATA, "saleae/swd50-cut/analog_0.bin"), join(dir, "analog_10.bin"));
   writeFileSync(join(dir, "analog_2.bin"), "not an export");

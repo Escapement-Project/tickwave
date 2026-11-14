@@ -4,7 +4,7 @@
 
 import { test, expect, type Page } from "@playwright/test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { v0Copy } from "../test/saleae-v0.ts";
@@ -14,9 +14,26 @@ const REPO = new URL("../..", import.meta.url).pathname;
 const DATA = join(REPO, "testdata");
 
 function cli(args: string[]): Buffer {
-  const out = join(mkdtempSync(join(tmpdir(), "escapement-tickwave-cli-")), "out.tickwave");
-  execFileSync("cargo", ["run", "-q", "--release", "-p", "escapement-tickwave-cli", "--", "convert", ...args, "-o", out], { cwd: REPO, stdio: ["ignore", "ignore", "pipe"] });
-  return readFileSync(out);
+  const dir = mkdtempSync(join(tmpdir(), "escapement-tickwave-cli-"));
+  try {
+    const out = join(dir, "out.tickwave");
+    execFileSync("cargo", ["run", "-q", "--release", "-p", "escapement-tickwave-cli", "--", "convert", ...args, "-o", out], { cwd: REPO, stdio: ["ignore", "ignore", "pipe"] });
+    return readFileSync(out);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** Folders a test made, removed after it. */
+const made: string[] = [];
+test.afterEach(() => {
+  for (const dir of made.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
+function scratch(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  made.push(dir);
+  return dir;
 }
 
 /** Waits for a capture's first conversion, which shows it with Save focused. */
@@ -72,7 +89,7 @@ test("a Saleae export's folder: its channels in number order, named and converte
 });
 
 test("a version 0 Saleae export: the page asks for the rate it doesn't record, infers it when left empty, and takes one given", async ({ page }) => {
-  const v0 = v0Copy(join(DATA, "saleae/identify-swd"), join(mkdtempSync(join(tmpdir(), "tickwave-v0-")), "identify-swd-v0"));
+  const v0 = v0Copy(join(DATA, "saleae/identify-swd"), join(scratch("tickwave-v0-"), "identify-swd-v0"));
   await page.goto(PAGE);
   await page.locator("#folder").setInputFiles(v0);
   // The first conversion infers the rate; the table then asks for one.
@@ -154,7 +171,7 @@ test("a dropped VCD file converts with every one-bit signal", async ({ page }) =
 });
 
 test("says what is wrong: no capture, two captures, a file that is not one, and the form's own mistakes", async ({ page }) => {
-  const dir = mkdtempSync(join(tmpdir(), "tickwave-convert-"));
+  const dir = scratch("tickwave-convert-");
   const notes = join(dir, "notes.txt");
   writeFileSync(notes, "nothing to convert");
   const bad = join(dir, "analog_9.bin");

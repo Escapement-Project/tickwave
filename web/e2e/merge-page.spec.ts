@@ -6,7 +6,7 @@
 
 import { test, expect, type Locator, type Page } from "@playwright/test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -16,6 +16,18 @@ const DATA = join(REPO, "testdata");
 
 function tickwave(args: string[]): string {
   return execFileSync("cargo", ["run", "-q", "--release", "-p", "escapement-tickwave-cli", "--", ...args], { cwd: REPO, stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" });
+}
+
+/** Folders a test made, removed after it. */
+const made: string[] = [];
+test.afterEach(() => {
+  for (const dir of made.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
+function scratch(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  made.push(dir);
+  return dir;
 }
 
 type Grouped = { groups: { name: string; channels: string[] }[]; aligns: Record<string, number> };
@@ -61,7 +73,7 @@ test("a recording added merges with the one shown, each under its head, lined up
   expect(download.suggestedFilename()).toBe("identify-swd+energy.tickwave");
   const saved = readFileSync((await download.path())!);
   // The CLI with the same settings, to a file of the same name, which names its bundled files.
-  const dir = mkdtempSync(join(tmpdir(), "escapement-tickwave-merge-"));
+  const dir = scratch("escapement-tickwave-merge-");
   const out = join(dir, "identify-swd+energy.tickwave");
   const flags = [...["SWCLK", "SWDIO"].flatMap((c) => ["--channel", `1:${c}=${c}`]), ...["V", "I", "range", "DIO0"].flatMap((c) => ["--channel", `2:${c}=${c}`]), "--align", "2=1ms", "--offset", "DIO0=-1us"];
   tickwave(["merge", join(FIXTURES, "identify-swd.tickwave"), join(FIXTURES, "energy.tickwave"), ...flags, "-o", out]);
