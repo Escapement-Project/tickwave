@@ -2,6 +2,7 @@
 //! seeded sweeps, with the same generator and oracle, so a failure names the same tile and grid
 //! in both; and scale.test.ts's range-marks sweep.
 
+use escapement_tickwave_format::mapping::Mapping;
 use escapement_tickwave_format::model::{Ratio, sample_tick};
 use escapement_tickwave_view::columns::{
     Grid, SAMPLES_PER_RUN, SampleRuns, Samples, analog_from_samples, fill_runs, line_samples,
@@ -160,6 +161,7 @@ fn analog_from_samples_each_column_holds_exactly_the_samples_whose_ticks_lie_in_
             period,
             count: u64::MAX,
             breaks: &[],
+            map: Mapping::IDENTITY,
         };
         for grid in 0..25 {
             let per = 0.3 + random.next() * span as f64 / 4.0;
@@ -216,6 +218,7 @@ fn line_samples_every_sample_that_can_reach_the_grid_and_one_drawn_sample_past_e
             period,
             count: u64::MAX,
             breaks: &[],
+            map: Mapping::IDENTITY,
         };
         for grid in 0..25 {
             let x0 = tick(tile_first) as f64 - span as f64 / 4.0 + random.next() * span as f64;

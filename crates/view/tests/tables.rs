@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 
+use escapement_tickwave_format::mapping::Mapping;
 use escapement_tickwave_format::model::{Break, Ratio};
 use escapement_tickwave_view::columns::{
     self, AnalogOverview, DigitalOverview, Edges, Grid, SampleRuns, Samples, State,
@@ -69,8 +70,9 @@ fn opt<T>(v: &Value, read: impl Fn(&Value) -> T) -> Option<T> {
     (!v.is_null()).then(|| read(v))
 }
 
-fn step(args: &Value) -> u64 {
-    opt(&args["step"], uint).unwrap_or(1)
+/// The ticks one tick of a reading's source spans, `[num, den]`; 1 where a row gives none.
+fn step(args: &Value) -> Ratio {
+    opt(&args["step"], ratio).unwrap_or(Ratio::ONE)
 }
 
 fn ticks(v: &Value) -> Vec<i64> {
@@ -274,6 +276,7 @@ fn readouts() {
                 bit(&a["level"]),
                 &ticks(&a["ticks"]),
                 ratio(&a["timebase"]),
+                step(a),
             )
             .map_or(Value::Null, |r| json!({"value": r.value, "note": r.note}))
         }
@@ -432,6 +435,7 @@ fn with_samples<R>(a: &Value, then: impl FnOnce(&Samples<f64>, &Runs) -> R) -> R
         period: ratio(&a["runs"]["period"]),
         count: count(&a["runs"]["count"]),
         breaks: &b,
+        map: Mapping::IDENTITY,
     };
     then(&samples, &runs)
 }

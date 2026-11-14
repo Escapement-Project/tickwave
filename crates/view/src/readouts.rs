@@ -183,16 +183,20 @@ fn big(x: impl Into<BigInt>) -> BigInt {
 
 /// The place of one tick: the largest power of ten not larger than a tick's length. An interval
 /// is a whole number of ticks, so its last digit sits here. At 1 GS/s that is 1 ns; at 200 kS/s
-/// (5 us) it is 1 us, and every interval is then exact at that place. `step`, at least 1, is the
-/// ticks one tick of the reading's source spans.
-pub fn tick_place(timebase: Ratio, step: u64) -> i32 {
-    place_of(&(big(timebase.den()) * big(step)), &big(timebase.num()))
+/// (5 us) it is 1 us, and every interval is then exact at that place. `step` is the ticks one
+/// tick of the reading's source spans, its `m` (FORMAT.md, "Times"): 1 for a recording of one
+/// source, a ratio where a source's tick is not a whole number of the recording's.
+pub fn tick_place(timebase: Ratio, step: Ratio) -> i32 {
+    place_of(
+        &(big(timebase.den()) * big(step.num())),
+        &(big(timebase.num()) * big(step.den())),
+    )
 }
 
 /// An interval of a whole number of ticks: 1234567 ticks at 1 GS/s is 1.234567 ms. `step` is
 /// the ticks one tick of the reading's source spans, where a merged recording ticks finer than
 /// its sources: the last digit sits at the source's tick.
-pub fn format_interval(ticks: i64, timebase: Ratio, step: u64) -> String {
+pub fn format_interval(ticks: i64, timebase: Ratio, step: Ratio) -> String {
     let p = tick_place(timebase, step);
     let scaled = round_at(&(big(ticks) * big(timebase.den())), &big(timebase.num()), p);
     format_scaled(&scaled, p, TIME_UNITS, None)
@@ -200,7 +204,7 @@ pub fn format_interval(ticks: i64, timebase: Ratio, step: u64) -> String {
 
 /// An interval to three significant figures, for a summary line: 927888190 ticks at 1 GS/s is
 /// 928 ms. Never finer than one tick.
-pub fn format_brief(ticks: i64, timebase: Ratio, step: u64) -> String {
+pub fn format_brief(ticks: i64, timebase: Ratio, step: Ratio) -> String {
     let n = big(ticks.unsigned_abs()) * big(timebase.den());
     let d = big(timebase.num());
     let tick = tick_place(timebase, step);
@@ -231,7 +235,7 @@ pub fn format_rate(
     span: i64,
     timebase: Ratio,
     runs: u64,
-    step: u64,
+    step: Ratio,
 ) -> Option<String> {
     if periods == 0 || span <= 0 || runs == 0 {
         return None;
@@ -239,7 +243,10 @@ pub fn format_rate(
     let n = big(periods) * big(timebase.num());
     let d = big(span) * big(timebase.den());
     // Each run's span is wrong by less than one tick of the source: `step` of these ticks.
-    let p = place_of(&(&n * big(runs) * big(step)), &(&d * big(span)));
+    let p = place_of(
+        &(&n * big(runs) * big(step.num())),
+        &(&d * big(span) * big(step.den())),
+    );
     Some(format_scaled(&round_at(&n, &d, p), p, RATE_UNITS, None))
 }
 
@@ -251,14 +258,17 @@ pub fn format_mean_period(
     span: i64,
     timebase: Ratio,
     runs: u64,
-    step: u64,
+    step: Ratio,
 ) -> Option<String> {
     if periods == 0 || span <= 0 || runs == 0 {
         return None;
     }
     let n = big(span) * big(timebase.den());
     let d = big(periods) * big(timebase.num());
-    let p = place_of(&(big(runs) * big(step) * big(timebase.den())), &d);
+    let p = place_of(
+        &(big(runs) * big(step.num()) * big(timebase.den())),
+        &(&d * big(step.den())),
+    );
     Some(format_scaled(&round_at(&n, &d, p), p, TIME_UNITS, None))
 }
 
@@ -407,12 +417,12 @@ pub fn period_stats(level: bool, ticks: &[i64]) -> Option<PeriodStats> {
 }
 
 /// The running clock's rate, with its digits. None where the periods it keeps span no time.
-pub fn format_clock_rate(s: &PeriodStats, timebase: Ratio, step: u64) -> Option<String> {
+pub fn format_clock_rate(s: &PeriodStats, timebase: Ratio, step: Ratio) -> Option<String> {
     format_rate(s.used, s.span, timebase, s.runs, step)
 }
 
 /// The running clock's period, with its digits. None where the periods it keeps span no time.
-pub fn format_clock_period(s: &PeriodStats, timebase: Ratio, step: u64) -> Option<String> {
+pub fn format_clock_period(s: &PeriodStats, timebase: Ratio, step: Ratio) -> Option<String> {
     format_mean_period(s.used, s.span, timebase, s.runs, step)
 }
 
@@ -512,20 +522,22 @@ pub struct Reading {
 
 /// A `measure` reading over a span's edges: `ticks` are the edges at ticks in [start, end), and
 /// `level` the level before the first. `Rate` and `Period` read the running clock; `Duration`
-/// the time from the first edge to the last, of either polarity, to the tick. None when the
-/// span has too few edges to say anything.
+/// the time from the first edge to the last, of either polarity, to the tick of the channel's
+/// source: `step` is that tick in axis ticks, its `m`. None when the span has too few edges to say
+/// anything.
 pub fn measure_reading(
     what: Measure,
     level: bool,
     ticks: &[i64],
     timebase: Ratio,
+    step: Ratio,
 ) -> Option<Reading> {
     if what == Measure::Duration {
         if ticks.len() < 2 {
             return None;
         }
         return Some(Reading {
-            value: format_interval(ticks[ticks.len() - 1] - ticks[0], timebase, 1),
+            value: format_interval(ticks[ticks.len() - 1] - ticks[0], timebase, step),
             note: "first edge to last".into(),
         });
     }
@@ -536,8 +548,8 @@ pub fn measure_reading(
         });
     };
     let value = match what {
-        Measure::Rate => format_clock_rate(&stats, timebase, 1),
-        _ => format_clock_period(&stats, timebase, 1),
+        Measure::Rate => format_clock_rate(&stats, timebase, step),
+        _ => format_clock_period(&stats, timebase, step),
     };
     Some(Reading {
         value: value.unwrap_or_else(|| "\u{2013}".into()),

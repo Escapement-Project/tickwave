@@ -189,6 +189,7 @@ pub fn read_bytes(bytes: impl Into<Arc<[u8]>>, file_name: &str) -> Result<Import
                     initial,
                     end,
                     gaps: Vec::new(),
+                    count: scan.changes[bit],
                     edges: Box::new(BitEdges {
                         reader: StreamReader::new(&data, &stream),
                         unit,
@@ -409,6 +410,11 @@ struct LogicScan {
     or: Vec<u8>,
     and: Vec<u8>,
     first: Vec<u8>,
+    /// The sample being read, and the one before it.
+    sample: Vec<u8>,
+    previous: Option<Vec<u8>>,
+    /// Each bit's changes from one sample to the next: its edges.
+    changes: Vec<u64>,
 }
 
 impl LogicScan {
@@ -419,6 +425,9 @@ impl LogicScan {
             or: vec![0; unit],
             and: vec![0xff; unit],
             first: Vec::with_capacity(unit),
+            sample: vec![0; unit],
+            previous: None,
+            changes: vec![0; unit * 8],
         }
     }
 
@@ -429,9 +438,23 @@ impl LogicScan {
             }
             self.or[self.pos] |= b;
             self.and[self.pos] &= b;
+            self.sample[self.pos] = b;
             self.pos += 1;
             if self.pos == self.unit {
                 self.pos = 0;
+                match &mut self.previous {
+                    Some(previous) => {
+                        for (byte, (p, s)) in previous.iter_mut().zip(&self.sample).enumerate() {
+                            let mut changed = *p ^ *s;
+                            while changed != 0 {
+                                self.changes[byte * 8 + changed.trailing_zeros() as usize] += 1;
+                                changed &= changed - 1;
+                            }
+                            *p = *s;
+                        }
+                    }
+                    None => self.previous = Some(self.sample.clone()),
+                }
             }
         }
     }

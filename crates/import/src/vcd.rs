@@ -150,6 +150,7 @@ pub fn read_from(reader: impl BufRead, file_name: &str) -> Result<Import, Error>
                     data: ChannelData::Digital(Digital {
                         initial,
                         end: length,
+                        count: edges.len() as u64,
                         edges: Box::new(edges.into_iter()),
                         gaps: Vec::new(),
                     }),

@@ -289,7 +289,7 @@ fn a_late_gap_or_an_edge_in_a_gap_is_refused() {
     let mut w = Writer::new(d, options()).unwrap();
     assert!(matches!(
         w.gap(0, gap(0, 9)),
-        Err(WriteError::GapFromZero { .. })
+        Err(WriteError::GapFromStart { .. })
     ));
 }
 
@@ -442,6 +442,7 @@ fn runs_place_the_samples_and_come_back_as_breaks() {
                     initial: false,
                     end: LENGTH,
                     edges: Box::new([47, 145, 146, 301].into_iter()),
+                    count: 4,
                     gaps: vec![Gap {
                         from: 48,
                         to: 120,

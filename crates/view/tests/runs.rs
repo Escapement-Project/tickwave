@@ -1,6 +1,7 @@
 //! Which sample sits at or around a tick, across a break. The channel and its expected values are
 //! web/test/gaps.test.ts's, worked by hand there; the end of the channel's data is added here.
 
+use escapement_tickwave_format::mapping::Mapping;
 use escapement_tickwave_format::model::{Break, Ratio};
 use escapement_tickwave_view::runs::{Runs, index_at_or_after, sample_at_or_before};
 
@@ -16,6 +17,7 @@ const W: Runs = Runs {
     period: Ratio::new(3, 2).unwrap(),
     count: 10,
     breaks: &BREAKS,
+    map: Mapping::IDENTITY,
 };
 
 #[test]
@@ -44,6 +46,7 @@ fn a_cursor_reads_nothing_before_the_first_sample_or_from_the_end_of_the_data() 
         period: Ratio::new(1, 1).unwrap(),
         count: 100,
         breaks: &[],
+        map: Mapping::IDENTITY,
     };
     assert_eq!(sample_at_or_before(&plain, 100, 99.0), Some(99));
     assert_eq!(sample_at_or_before(&plain, 100, 100.0), None);

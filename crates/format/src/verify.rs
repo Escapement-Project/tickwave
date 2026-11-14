@@ -1,5 +1,6 @@
 //! Checks a file against the source it was converted from, reading the file in order: every edge
-//! and sample, every gap and run, the overview and the content id.
+//! and sample, every gap and run, the overview and the content id. A channel stores its source's
+//! ticks, so the two compare directly.
 
 use std::collections::VecDeque;
 use std::io::Read;
@@ -152,13 +153,24 @@ pub fn verify_limited(
                     return Err(mismatch("the number of sources differs"));
                 }
                 for (i, (file, source)) in d.sources.iter().zip(&sources).enumerate() {
-                    let mapping =
-                        |format, timebase, origin, align| (format, timebase, origin, align);
-                    if mapping(&file.format, file.timebase, file.origin, file.align)
-                        != mapping(&source.format, source.timebase, source.origin, source.align)
-                    {
+                    let mapping = |format, timebase, origin, align, stretch| {
+                        (format, timebase, origin, align, stretch)
+                    };
+                    if mapping(
+                        &file.format,
+                        file.timebase,
+                        file.origin,
+                        file.align,
+                        file.stretch,
+                    ) != mapping(
+                        &source.format,
+                        source.timebase,
+                        source.origin,
+                        source.align,
+                        source.stretch,
+                    ) {
                         return Err(mismatch(format!(
-                            "source {i}: the format, timebase, origin or align differs"
+                            "source {i}: the format, timebase, origin, align or stretch differs"
                         )));
                     }
                 }
@@ -189,8 +201,8 @@ pub fn verify_limited(
                                 initial: i, hasher, ..
                             },
                         ) if initial == i => {
-                            *hasher = Some(ChannelHasher::declared(&d, c));
-                            true
+                            *hasher = ChannelHasher::declared(&d, c);
+                            hasher.is_some()
                         }
                         (
                             DeclaredKind::Analog {
@@ -216,8 +228,8 @@ pub fn verify_limited(
                                     (AnalogCoding::Codes { .. }, AnalogCoding::F32)
                                 )) =>
                         {
-                            *hasher = Some(ChannelHasher::declared(&d, c));
-                            true
+                            *hasher = ChannelHasher::declared(&d, c);
+                            hasher.is_some()
                         }
                         _ => false,
                     };
@@ -238,7 +250,13 @@ pub fn verify_limited(
                     return Err(mismatch(format!("channel {}: a gap differs", names[c].0)));
                 }
                 *next_gap += 1;
-                builder.as_mut().unwrap().gap(c, gap);
+                let to = reader
+                    .mapping(c)
+                    .and_then(|map| map.axis(gap.to))
+                    .ok_or_else(|| {
+                        mismatch(format!("channel {}: a gap has no place", names[c].0))
+                    })?;
+                builder.as_mut().unwrap().gap(c, gap, to);
             }
             Event::Run { channel: c, run } => {
                 let Want::Analog { first, breaks, .. } = &wants[c] else {
@@ -255,8 +273,9 @@ pub fn verify_limited(
             }
             Event::Block(block) => {
                 let b = builder.as_mut().unwrap();
-                for (c, got) in block.channels.into_iter().enumerate() {
+                for (c, got) in block.channels.iter().enumerate() {
                     let name = &names[c].0;
+                    let source = got.source_ticks().unwrap_or_default();
                     match (got, &mut wants[c]) {
                         (
                             BlockChannel::Digital { edges, .. },
@@ -268,14 +287,14 @@ pub fn verify_limited(
                             },
                         ) => {
                             let hasher = hasher.as_mut().expect("the declaration came first");
-                            for tick in edges {
-                                if want.next() != Some(tick) {
+                            for (&k, &tick) in source.iter().zip(edges) {
+                                if want.next() != Some(k) {
                                     return Err(mismatch(format!(
-                                        "channel {name}: edge at tick {tick} differs"
+                                        "channel {name}: edge at source tick {k} differs"
                                     )));
                                 }
-                                hasher.edge(tick);
-                                b.edge(c, tick);
+                                hasher.edge(k);
+                                b.edge(c, k, tick);
                                 *count += 1;
                             }
                         }
@@ -294,14 +313,24 @@ pub fn verify_limited(
                             },
                         ) => {
                             let hasher = hasher.as_mut().expect("the declaration came first");
-                            for (index, value) in (first_index..).zip(values.iter()) {
+                            let map = reader.mapping(c);
+                            for (index, value) in (*first_index..).zip(values.iter()) {
                                 if !samples.next().is_some_and(|s| same(s, value)) {
                                     return Err(mismatch(format!(
                                         "channel {name}: sample {index} differs"
                                     )));
                                 }
                                 hasher.sample(value);
-                                b.sample(c, run_sample_tick(*first, *period, breaks, index), value)
+                                let tick = map
+                                    .and_then(|map| {
+                                        map.axis(run_sample_tick(*first, *period, breaks, index))
+                                    })
+                                    .ok_or_else(|| {
+                                        mismatch(format!(
+                                            "channel {name}: sample {index} has no place"
+                                        ))
+                                    })?;
+                                b.sample(c, tick, value)
                                     .map_err(|e| mismatch(e.to_string()))?;
                             }
                         }
@@ -337,7 +366,7 @@ pub fn verify_limited(
                     inflate_limited(&frame, overview::decoded_len(n, &columns) as usize, max)?;
                 let got = overview::parse_block(&raw, shift, n, &columns)
                     .ok_or_else(|| mismatch(format!("overview block {k} does not parse")))?;
-                if got != want.level {
+                if got != *want.level {
                     return Err(mismatch(format!(
                         "overview level 2^{shift}, block {k}: differs from the content"
                     )));

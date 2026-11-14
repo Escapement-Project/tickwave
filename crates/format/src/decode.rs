@@ -7,9 +7,10 @@ use crate::codec::get_uleb;
 use crate::header::{
     AnalogCoding, BlockRow, ChannelHeader, ChannelKind, Declaration, DeclaredChannel, DeclaredKind,
     Header, JSON_SAFE, Kept, LEVEL_BIT, MAGIC, MAJOR, OverviewRow, PREAMBLE_LEN, TRAILER_LEN,
-    Trailer, Words, factor,
+    Trailer, Words,
 };
-use crate::model::{Break, Gap, run_sample_tick};
+use crate::mapping::Mapping;
+use crate::model::{Break, Gap, Ratio, run_sample_tick};
 use crate::overview::{self, Column, Level};
 use crate::record::{self, Kind};
 use crate::samples::{self, Product, Values};
@@ -117,7 +118,11 @@ pub enum BlockChannel {
     Digital {
         /// The level at the block's start.
         initial: bool,
+        /// The edges' axis ticks, in order.
         edges: Vec<i64>,
+        /// The edges' source ticks, as the file stores them; None where the channel's mapping
+        /// is the identity, so they are `edges`.
+        source: Option<Vec<i64>>,
     },
     Analog {
         /// The channel's index of the block's first sample.
@@ -132,6 +137,14 @@ impl BlockChannel {
         match self {
             Self::Analog { values, .. } => Some(values),
             Self::Digital { .. } => None,
+        }
+    }
+
+    /// A digital channel's edges in its source's ticks; None for an analog one.
+    pub fn source_ticks(&self) -> Option<&[i64]> {
+        match self {
+            Self::Digital { edges, source, .. } => Some(source.as_deref().unwrap_or(edges)),
+            Self::Analog { .. } => None,
         }
     }
 }
@@ -173,11 +186,33 @@ pub struct Block {
     pub channels: Vec<BlockChannel>,
 }
 
-/// The tick of the last of a run's `n` samples, the first at `tick`, in u128 so that an absurd
-/// count or period cannot wrap into a tick inside the capture.
-fn run_last(tick: i64, period: crate::model::Ratio, n: u64) -> u128 {
+/// The place of the last of a run's `n` samples, the first at `tick`, in source ticks, in u128 so
+/// that an absurd count or period cannot wrap into a tick inside the capture. `tick` is not
+/// negative.
+fn run_last(tick: i64, period: Ratio, n: u64) -> u128 {
     tick as u128
         + u128::from(n.saturating_sub(1)) * u128::from(period.num()) / u128::from(period.den())
+}
+
+/// A source tick a channel names: in `0..2^53` (FORMAT.md, "Times").
+fn source_tick(k: i64) -> bool {
+    (0..JSON_SAFE as i64).contains(&k)
+}
+
+/// Whether source tick `k` lies in `0..2^53` and maps into `0..length`.
+fn maps_inside(map: &Mapping, k: i64, length: i64) -> bool {
+    source_tick(k) && map.axis(k).is_some_and(|t| (0..length).contains(&t))
+}
+
+/// Whether source tick `k` lies in `0..2^53` and maps into `0..=length`: a channel's end, or a
+/// kept span's.
+fn maps_up_to(map: &Mapping, k: i64, length: i64) -> bool {
+    source_tick(k) && map.axis(k).is_some_and(|t| (0..=length).contains(&t))
+}
+
+/// Two rates of the same value, however they are written.
+fn same_rate(a: Ratio, b: Ratio) -> bool {
+    u128::from(a.num()) * u128::from(b.den()) == u128::from(b.num()) * u128::from(a.den())
 }
 
 /// What a declaration states, which the footer's header repeats: FORMAT.md's rules on its sources,
@@ -186,32 +221,28 @@ pub(crate) fn check_declaration(d: &Declaration) -> Result<(), DecodeError> {
     // The page reads the header with JSON.parse: past 2^53 it would read another number.
     let safe = |v: u64| v < JSON_SAFE;
     let within = |v: i64| v.unsigned_abs() < JSON_SAFE;
-    if !safe(d.timebase.num()) || !safe(d.timebase.den()) {
+    let terms = |r: Ratio| safe(r.num()) && safe(r.den());
+    if !terms(d.timebase) {
         return Err(corrupt("the timebase has a term past 2^53"));
     }
     if d.overview_shift > overview::MAX_SHIFT {
         return Err(corrupt("the finest overview level's shift is past 62"));
     }
     for (s, source) in d.sources.iter().enumerate() {
-        let tb = source.timebase;
-        if !safe(tb.num()) || !safe(tb.den()) {
+        if !terms(source.timebase) {
             return Err(corrupt(format!(
                 "source {s}'s timebase has a term past 2^53"
             )));
         }
-        let Some(f) = factor(d.timebase, tb) else {
+        if source.stretch.is_some_and(|r| !terms(r)) {
             return Err(corrupt(format!(
-                "source {s} ticks {}/{} times a second, and the recording's {}/{} is not a whole \
-                 multiple of that",
-                tb.num(),
-                tb.den(),
-                d.timebase.num(),
-                d.timebase.den()
+                "source {s}'s stretch has a term past 2^53"
             )));
-        };
-        if f >= u128::from(JSON_SAFE) {
+        }
+        if d.m(s).is_none() {
             return Err(corrupt(format!(
-                "source {s}'s factor, the recording's ticks in one of its own, is past 2^53"
+                "source {s}'s m, the axis ticks in one of its ticks, has a term past 2^53 in \
+                 lowest terms"
             )));
         }
         if !within(source.origin) || source.align.is_some_and(|a| !within(a)) {
@@ -222,6 +253,18 @@ pub(crate) fn check_declaration(d: &Declaration) -> Result<(), DecodeError> {
         if !d.channels.iter().any(|c| c.source as usize == s) {
             return Err(corrupt(format!("source {s} is no channel's source")));
         }
+    }
+    if let [only] = d.sources.as_slice()
+        && !same_rate(d.timebase, only.timebase)
+    {
+        return Err(corrupt(format!(
+            "the recording has one source, ticking {}/{} times a second, and ticks {}/{} itself: \
+             a recording of one source ticks at its rate",
+            only.timebase.num(),
+            only.timebase.den(),
+            d.timebase.num(),
+            d.timebase.den()
+        )));
     }
     for (i, c) in d.channels.iter().enumerate() {
         let name = &c.name;
@@ -256,7 +299,7 @@ pub(crate) fn check_declaration(d: &Declaration) -> Result<(), DecodeError> {
                 "channel {name} states 0 significant figures; it states at least 1"
             )));
         }
-        if !safe(period.num()) || !safe(period.den()) {
+        if !terms(*period) {
             return Err(corrupt(format!("channel {name}'s period is past 2^53")));
         }
         match coding {
@@ -317,25 +360,36 @@ pub(crate) fn check_declaration(d: &Declaration) -> Result<(), DecodeError> {
         }
         let (a, b) = (operands[0], operands[1]);
         let period = |c: &DeclaredChannel| match &c.data {
-            DeclaredKind::Analog { period, .. } => *period,
-            DeclaredKind::Digital { .. } => unreachable!("an analog operand"),
+            DeclaredKind::Analog { period, .. } => Some(*period),
+            DeclaredKind::Digital { .. } => None,
         };
-        if a.source != b.source || period(a) != period(b) {
+        let moved = |c: &DeclaredChannel| c.shaping.offset.as_ref().map_or(0, |o| o.ticks);
+        if a.source != b.source || period(a) != period(b) || moved(a) != moved(b) {
             return Err(corrupt(format!(
-                "derived channel {name}: {} and {} come from different sources or have \
-                 different periods",
+                "derived channel {name}: {} and {} come from different sources, or have \
+                 different periods or moves",
                 a.name, b.name
             )));
         }
     }
-    // Once anything is moved or cut, or there are several sources, every channel states its kept
-    // span, and the recording starts where the earliest one does.
-    if d.channels.iter().any(|c| c.shaping.kept.is_some()) || d.sources.len() > 1 {
+    // Once anything is moved or cut, or there are several sources, or a source is stretched,
+    // every channel states its kept span, and the recording starts where the earliest one does.
+    let stretched = d
+        .sources
+        .iter()
+        .any(|s| s.stretch.is_some_and(|r| r.num() != r.den()));
+    if d.channels.iter().any(|c| c.shaping.kept.is_some()) || d.sources.len() > 1 || stretched {
         if let Some(c) = d.channels.iter().find(|c| c.shaping.kept.is_none()) {
             return Err(corrupt(if d.sources.len() > 1 {
                 format!(
                     "channel {} states no kept span, but the recording has several sources: \
                      a recording of several sources states one on every channel",
+                    c.name
+                )
+            } else if stretched {
+                format!(
+                    "channel {} states no kept span, but its source is stretched: a recording \
+                     with a stretched source states one on every channel",
                     c.name
                 )
             } else {
@@ -346,21 +400,33 @@ pub(crate) fn check_declaration(d: &Declaration) -> Result<(), DecodeError> {
                 )
             }));
         }
-        if !d
-            .channels
-            .iter()
-            .any(|c| c.shaping.kept.is_some_and(|k| k.from == 0))
-        {
+        let starts_at_zero =
+            (0..d.channels.len()).any(|c| match (d.mapping(c), d.channels[c].shaping.kept) {
+                (Some(map), Some(kept)) => map.axis(kept.from) == Some(0),
+                _ => false,
+            });
+        if !starts_at_zero {
             return Err(corrupt(
-                "no channel is kept from tick 0, where the recording starts",
+                "no channel's kept span starts at the axis's tick 0, where the recording starts",
             ));
         }
-    } else if let Some(c) = d.channels.iter().find(|c| c.shaping.offset.is_some()) {
-        return Err(corrupt(format!(
-            "channel {} is moved, but no channel states a kept span: a recording with a channel \
-             moved states one on every channel",
-            c.name
-        )));
+    } else {
+        if let Some(c) = d.channels.iter().find(|c| c.shaping.offset.is_some()) {
+            return Err(corrupt(format!(
+                "channel {} is moved, but no channel states a kept span: a recording with a \
+                 channel moved states one on every channel",
+                c.name
+            )));
+        }
+        if let [only] = d.sources.as_slice()
+            && only.origin > 0
+        {
+            return Err(corrupt(format!(
+                "the recording states no kept span, so it starts where its source's data does, \
+                 but its source's origin is {}, after the axis's tick 0",
+                only.origin
+            )));
+        }
     }
     Ok(())
 }
@@ -371,20 +437,37 @@ pub(crate) fn check_header(h: &Header) -> Result<(), DecodeError> {
         return Err(corrupt("the length covers no tick or is past 2^53"));
     }
     check_declaration(&h.declaration())?;
+    let length = h.length;
     let safe = |v: u64| v < JSON_SAFE;
-    for c in &h.channels {
-        let name = &c.name;
-        match &c.data {
+    for (c, ch) in h.channels.iter().enumerate() {
+        let name = &ch.name;
+        let unmapped = || corrupt(format!("channel {name} has no mapping to the axis"));
+        let map = h.mapping(c).ok_or_else(unmapped)?;
+        if let Some(Kept { from, to }) = ch.shaping.kept
+            && (from >= to || !maps_inside(&map, from, length) || !maps_up_to(&map, to, length))
+        {
+            return Err(corrupt(format!(
+                "channel {name} is kept from source tick {from} to {to}, which is empty or maps \
+                 outside the axis's 0 to {length}"
+            )));
+        }
+        match &ch.data {
             ChannelKind::Digital {
                 initial,
                 end,
                 edges,
                 gaps,
             } => {
-                if !(0..=h.length).contains(end) {
+                let start = h.start(c).ok_or_else(unmapped)?;
+                if !source_tick(start) {
+                    return Err(corrupt(format!(
+                        "channel {name} starts at source tick {start}, outside 0 to 2^53"
+                    )));
+                }
+                if *end < start || !maps_up_to(&map, *end, length) {
                     return Err(corrupt(format!("channel {name} ends outside the capture")));
                 }
-                if *end == 0 && *initial {
+                if *end == start && *initial {
                     return Err(corrupt(format!(
                         "channel {name} is never known but has a high initial level"
                     )));
@@ -392,17 +475,22 @@ pub(crate) fn check_header(h: &Header) -> Result<(), DecodeError> {
                 if !safe(*edges) {
                     return Err(corrupt(format!("channel {name}'s edge count is past 2^53")));
                 }
-                let mut after = -1;
+                let mut after = start - 1;
                 for g in gaps {
-                    if g.from <= after || g.to <= g.from || g.to >= *end {
+                    if g.from <= after
+                        || g.to <= g.from
+                        || g.to >= *end
+                        || !maps_inside(&map, g.from, length)
+                        || !maps_inside(&map, g.to, length)
+                    {
                         return Err(corrupt(format!(
                             "channel {name}: a gap from {} to {} is out of place",
                             g.from, g.to
                         )));
                     }
-                    if g.from == 0 && *initial {
+                    if g.from == start && *initial {
                         return Err(corrupt(format!(
-                            "channel {name} has a gap from tick 0 but a high initial level"
+                            "channel {name} has a gap from its start but a high initial level"
                         )));
                     }
                     after = g.to;
@@ -420,39 +508,49 @@ pub(crate) fn check_header(h: &Header) -> Result<(), DecodeError> {
                 }
                 let outside =
                     || corrupt(format!("channel {name}'s samples lie outside the capture"));
-                if *first < 0 || *first >= h.length {
-                    return Err(outside());
-                }
-                // Each run's last sample: before the next run's tick, and inside the capture.
-                let mut run = Break {
-                    index: 0,
-                    tick: *first,
-                    lost: 0,
-                };
-                for b in breaks {
-                    if b.index <= run.index || b.index >= *count || b.tick < 0 || b.tick >= h.length
-                    {
+                if *count == 0 {
+                    // With no sample, `first` places nothing.
+                    if !breaks.is_empty() {
                         return Err(corrupt(format!("channel {name}: a break is out of place")));
                     }
-                    if !safe(b.lost) {
-                        return Err(corrupt(format!(
-                            "channel {name}: a break's lost count is past 2^53"
-                        )));
-                    }
-                    let last = run_last(run.tick, *period, b.index - run.index);
-                    if last >= h.length as u128 || last > b.tick as u128 {
+                } else {
+                    if !maps_inside(&map, *first, length) {
                         return Err(outside());
                     }
-                    run = *b;
-                }
-                if *count > run.index
-                    && run_last(run.tick, *period, count - run.index) >= h.length as u128
-                {
-                    return Err(outside());
+                    // Each run's last sample: at or before the next run's tick, and inside the
+                    // capture.
+                    let mut run = Break {
+                        index: 0,
+                        tick: *first,
+                        lost: 0,
+                    };
+                    for b in breaks {
+                        if b.index <= run.index
+                            || b.index >= *count
+                            || !maps_inside(&map, b.tick, length)
+                        {
+                            return Err(corrupt(format!(
+                                "channel {name}: a break is out of place"
+                            )));
+                        }
+                        if !safe(b.lost) {
+                            return Err(corrupt(format!(
+                                "channel {name}: a break's lost count is past 2^53"
+                            )));
+                        }
+                        if run_last(run.tick, *period, b.index - run.index) > b.tick as u128 {
+                            return Err(outside());
+                        }
+                        run = *b;
+                    }
+                    let last = run_last(run.tick, *period, count - run.index);
+                    if last >= u128::from(JSON_SAFE) || !maps_inside(&map, last as i64, length) {
+                        return Err(outside());
+                    }
                 }
             }
         }
-        check_shaping(c, h.length)?;
+        check_shaping(ch)?;
     }
     // A derived channel's sample i sits where its operands' do.
     for d in &h.derived {
@@ -469,7 +567,6 @@ pub(crate) fn check_header(h: &Header) -> Result<(), DecodeError> {
                     } => Some((*first, *count, breaks)),
                     ChannelKind::Digital { .. } => None,
                 })
-                .expect("check_declaration found the operands")
         };
         if extent(&d.product[0]) != extent(&d.product[1]) {
             return Err(corrupt(format!(
@@ -482,26 +579,15 @@ pub(crate) fn check_header(h: &Header) -> Result<(), DecodeError> {
 }
 
 /// A moved or trimmed channel's statements, against its data: FORMAT.md's moved and trimmed
-/// channels. `check_header` has checked the data itself.
-fn check_shaping(c: &ChannelHeader, length: i64) -> Result<(), DecodeError> {
+/// channels. `check_header` has checked the data itself, and the kept span's own bounds.
+fn check_shaping(c: &ChannelHeader) -> Result<(), DecodeError> {
     let name = &c.name;
     let Some(Kept { from, to }) = c.shaping.kept else {
         return Ok(());
     };
-    if from < 0 || to > length || from >= to {
-        return Err(corrupt(format!(
-            "channel {name} is kept from {from} to {to}, which is empty or leaves the capture's 0 to {length}"
-        )));
-    }
     match &c.data {
-        ChannelKind::Digital { end, gaps, .. } => {
-            // A channel never known has no gap: its gap from tick 0 reached its end, which became 0.
-            let covered = *end == 0 || gaps.first().is_some_and(|g| g.from == 0 && g.to >= from);
-            if from > 0 && !covered {
-                return Err(corrupt(format!(
-                    "channel {name} is kept from {from}, but no gap from tick 0 covers the ticks before"
-                )));
-            }
+        ChannelKind::Digital { end, .. } => {
+            // The channel starts at `from`, and `check_header` held its edges and gaps to that.
             if *end > to {
                 return Err(corrupt(format!(
                     "channel {name} is known to {end}, past where it is kept to, {to}"
@@ -544,8 +630,9 @@ pub(crate) fn item_count(word: u32, digital: bool) -> u32 {
 
 /// How to read one channel's section of a block.
 pub(crate) enum Section {
-    /// Every edge lies before `end`, the channel's end, or `i64::MAX` while it is not known.
-    Digital { end: i64 },
+    /// Every edge lies in `start..end` of the channel's source ticks, `end` `i64::MAX` while it
+    /// is not known, and `map` places it on the axis.
+    Digital { start: i64, end: i64, map: Mapping },
     Analog {
         coding: AnalogCoding,
         first_index: u64,
@@ -579,16 +666,24 @@ pub(crate) fn decode_sections(
         let section = &raw[pos..pos + len];
         pos += len;
         out.push(match kind {
-            Section::Digital { end: channel_end } => BlockChannel::Digital {
-                initial: word & LEVEL_BIT != 0,
-                edges: digital_edges(
+            Section::Digital {
+                start: from,
+                end: to,
+                map,
+            } => {
+                let (edges, source) = digital_edges(
                     section,
                     item_count(word, true) as usize,
-                    start,
-                    end,
-                    *channel_end,
-                )?,
-            },
+                    map,
+                    *from..*to,
+                    start..end,
+                )?;
+                BlockChannel::Digital {
+                    initial: word & LEVEL_BIT != 0,
+                    edges,
+                    source,
+                }
+            }
             Section::Analog {
                 coding,
                 first_index,
@@ -624,11 +719,20 @@ pub(crate) fn edge_in_gap(edges: &[i64], gaps: &[Gap]) -> Option<i64> {
     })
 }
 
-/// The gaps of `gaps` whose `to` lies in `start..end`.
-pub(crate) fn gaps_ending_in(gaps: &[Gap], start: i64, end: i64) -> &[Gap] {
-    let a = gaps.partition_point(|g| g.to < start);
-    let b = gaps.partition_point(|g| g.to < end);
+/// The gaps of `gaps` whose `to` lies in `start..end` of the axis, where `ends` holds each gap's
+/// `to` mapped to the axis.
+pub(crate) fn gaps_ending_in<'a>(gaps: &'a [Gap], ends: &[i64], start: i64, end: i64) -> &'a [Gap] {
+    let a = ends.partition_point(|&t| t < start).min(gaps.len());
+    let b = ends.partition_point(|&t| t < end).min(gaps.len()).max(a);
     &gaps[a..b]
+}
+
+/// Each gap's `to` mapped to the axis; `i64::MAX` for one that maps nowhere, which a checked
+/// header has none of.
+pub(crate) fn gap_ends(gaps: &[Gap], map: &Mapping) -> Vec<i64> {
+    gaps.iter()
+        .map(|g| map.axis(g.to).unwrap_or(i64::MAX))
+        .collect()
 }
 
 /// A finished file's footer: the header, the index and the overview. Parsed from the file's last
@@ -650,6 +754,12 @@ pub struct Footer {
     /// For each analog channel, the index of its first sample in each block.
     first_sample: Vec<Vec<u64>>,
     columns: Vec<Column>,
+    /// Each channel's mapping to the axis.
+    maps: Vec<Mapping>,
+    /// Each channel's start, in its source's ticks.
+    channel_starts: Vec<i64>,
+    /// Each digital channel's gaps' ends on the axis; empty for an analog channel.
+    gap_ends: Vec<Vec<i64>>,
 }
 
 impl Footer {
@@ -828,6 +938,20 @@ impl Footer {
         let overview = overview::parse(&raw, &header.overview, header.length, &columns)
             .ok_or_else(|| corrupt("the overview does not match its levels"))?;
         let end_of = |i: usize| rows.get(i + 1).map_or(header.length, |r| r.start);
+        let unmapped = || corrupt("a channel has no mapping to the axis");
+        let maps = header.mappings().ok_or_else(unmapped)?;
+        let channel_starts = (0..channels)
+            .map(|c| header.start(c).ok_or_else(unmapped))
+            .collect::<Result<Vec<i64>, _>>()?;
+        let gap_ends: Vec<Vec<i64>> = header
+            .channels
+            .iter()
+            .zip(&maps)
+            .map(|(c, map)| match &c.data {
+                ChannelKind::Digital { gaps, .. } => gap_ends(gaps, map),
+                ChannelKind::Analog { .. } => Vec::new(),
+            })
+            .collect();
         let mut first_sample = vec![Vec::new(); channels];
         for (c, kind) in header.channels.iter().enumerate() {
             let name = &kind.name;
@@ -844,8 +968,9 @@ impl Footer {
                 let word = words.of(i)[c];
                 if let (Some(l), ChannelKind::Digital { gaps, .. }) = (&mut level, &kind.data) {
                     let bit = word & LEVEL_BIT != 0;
-                    let known =
-                        i == 0 || gaps_ending_in(gaps, rows[i - 1].start, row.start).is_empty();
+                    let known = i == 0
+                        || gaps_ending_in(gaps, &gap_ends[c], rows[i - 1].start, row.start)
+                            .is_empty();
                     if known && bit != *l {
                         return Err(corrupt(format!(
                             "channel {name}: block {i} starts at the wrong level"
@@ -874,10 +999,14 @@ impl Footer {
             {
                 // A view fetches blocks by tick, so a sample in a block that does not cover its
                 // tick would never be drawn.
+                let map = maps[c];
                 for (i, row) in rows.iter().enumerate() {
                     let (from, to) = (starts[i], starts.get(i + 1).copied().unwrap_or(total));
-                    let tick = |index| run_sample_tick(*first, *period, breaks, index);
-                    if to > from && (tick(from) < row.start || tick(to - 1) >= end_of(i)) {
+                    let tick = |index| map.axis(run_sample_tick(*first, *period, breaks, index));
+                    if to > from
+                        && (tick(from).is_none_or(|t| t < row.start)
+                            || tick(to - 1).is_none_or(|t| t >= end_of(i)))
+                    {
                         return Err(corrupt(format!(
                             "channel {name}: block {i}'s samples lie outside its ticks"
                         )));
@@ -897,6 +1026,9 @@ impl Footer {
             products,
             first_sample,
             columns,
+            maps,
+            channel_starts,
+            gap_ends,
         })
     }
 
@@ -914,7 +1046,17 @@ impl Footer {
         })
     }
 
-    /// The tick of sample `index` of analog channel `c`.
+    /// Channel `c`'s mapping from its source's ticks to the axis.
+    pub fn mapping(&self, c: usize) -> Option<Mapping> {
+        self.maps.get(c).copied()
+    }
+
+    /// The axis tick of sample `index` of analog channel `c`.
+    pub fn sample_axis_tick(&self, c: usize, index: u64) -> Option<i64> {
+        self.mapping(c)?.axis(self.sample_tick(c, index)?)
+    }
+
+    /// The source tick of sample `index` of analog channel `c`: its place.
     pub fn sample_tick(&self, c: usize, index: u64) -> Option<i64> {
         match &self.header.channels.get(c)?.data {
             ChannelKind::Analog {
@@ -1037,7 +1179,11 @@ impl Footer {
             .iter()
             .enumerate()
             .map(|(c, kind)| match &kind.data {
-                ChannelKind::Digital { end, .. } => Section::Digital { end: *end },
+                ChannelKind::Digital { end, .. } => Section::Digital {
+                    start: self.channel_starts[c],
+                    end: *end,
+                    map: self.maps[c],
+                },
                 ChannelKind::Analog { coding, .. } => Section::Analog {
                     coding: *coding,
                     first_index: self.first_sample[c][i],
@@ -1047,16 +1193,18 @@ impl Footer {
         let channels = decode_sections(&raw, &sections, self.words.of(i), start, end)
             .map_err(|what| corrupt(format!("block {i}: {what}")))?;
         for (c, (got, kind)) in channels.iter().zip(&self.header.channels).enumerate() {
-            if let (BlockChannel::Digital { initial, edges }, ChannelKind::Digital { gaps, .. }) =
+            if let (BlockChannel::Digital { initial, .. }, ChannelKind::Digital { gaps, .. }) =
                 (got, &kind.data)
             {
                 let bad =
                     |what: String| corrupt(format!("block {i}, channel {}: {what}", kind.name));
+                let edges = got.source_ticks().unwrap_or_default();
                 if let Some(t) = edge_in_gap(edges, gaps) {
-                    return Err(bad(format!("an edge at tick {t} lies inside a gap")));
+                    return Err(bad(format!("an edge at source tick {t} lies inside a gap")));
                 }
                 if i + 1 < self.rows.len() {
-                    let after = level_after(*initial, edges, gaps_ending_in(gaps, start, end));
+                    let ending = gaps_ending_in(gaps, &self.gap_ends[c], start, end);
+                    let after = level_after(*initial, edges, ending);
                     if after != (self.words.of(i + 1)[c] & LEVEL_BIT != 0) {
                         return Err(bad("the next block starts at the wrong level".into()));
                     }
@@ -1074,37 +1222,85 @@ impl Footer {
 // The two section decoders are kept out of line so that each loop compiles on its own: while they
 // shared a function, a change to the analog loop moved the digital loop's speed by 5-7 %.
 
-/// A digital section's `count` edges: LEB128 intervals, the first from the block's `start`. Every
-/// edge lies in `0..channel_end` and before the block's `end`.
+/// A digital section's `count` edges (FORMAT.md, "Blocks"): nothing for none; otherwise ULEB128
+/// `step`, the first edge's source tick, then each later interval over `step`. Every edge lies in
+/// `channel` of its source's ticks, and `map` puts it in `block` of the axis. The axis ticks, and
+/// the source ticks unless `map` is the identity.
 #[inline(never)]
 fn digital_edges(
     section: &[u8],
     count: usize,
-    start: i64,
-    end: i64,
-    channel_end: i64,
-) -> Result<Vec<i64>, String> {
-    if count > section.len() {
+    map: &Mapping,
+    channel: Range<i64>,
+    block: Range<i64>,
+) -> Result<(Vec<i64>, Option<Vec<i64>>), String> {
+    if count == 0 {
+        if !section.is_empty() {
+            return Err("bytes in the section of a channel with no edge in the block".into());
+        }
+        return Ok((Vec::new(), None));
+    }
+    // Every number takes a byte at least: the step, then one an edge.
+    if count >= section.len() {
         return Err("the section is too short for its edges".into());
     }
-    let mut edges = Vec::with_capacity(count);
     let mut at = 0;
-    let mut tick = start;
-    for _ in 0..count {
-        let interval = get_uleb(section, &mut at).ok_or("an interval is cut short")?;
-        tick = i64::try_from(interval)
-            .ok()
-            .and_then(|iv| tick.checked_add(iv))
-            .ok_or("an interval overflows")?;
-        if tick >= end || tick >= channel_end {
-            return Err("an edge lies outside the block".into());
+    let step = get_uleb(section, &mut at).ok_or("the section's step is cut short")?;
+    if step == 0 {
+        return Err("the section's step is 0".into());
+    }
+    let first = get_uleb(section, &mut at).ok_or("the first edge is cut short")?;
+    let limit = JSON_SAFE;
+    if first >= limit {
+        return Err("an edge lies past source tick 2^53".into());
+    }
+    let mut ticks = Vec::with_capacity(count);
+    let mut k = first;
+    ticks.push(k as i64);
+    let lo = first as i64;
+    let past = || "an edge lies past source tick 2^53";
+    if step == 1 {
+        // Most sections: no multiply on the per-edge path.
+        for _ in 1..count {
+            let interval = get_uleb(section, &mut at).ok_or("an interval is cut short")?;
+            k = k
+                .checked_add(interval)
+                .filter(|&k| k < limit)
+                .ok_or_else(past)?;
+            ticks.push(k as i64);
         }
-        edges.push(tick);
+    } else {
+        for _ in 1..count {
+            let interval = get_uleb(section, &mut at).ok_or("an interval is cut short")?;
+            k = interval
+                .checked_mul(step)
+                .and_then(|d| k.checked_add(d))
+                .filter(|&k| k < limit)
+                .ok_or_else(past)?;
+            ticks.push(k as i64);
+        }
     }
     if at != section.len() {
         return Err("bytes follow the last edge".into());
     }
-    Ok(edges)
+    let hi = k as i64;
+    if lo < channel.start || hi >= channel.end {
+        return Err("an edge lies outside its channel's start and end".into());
+    }
+    if map.is_identity() {
+        if lo < block.start || hi >= block.end {
+            return Err("an edge lies outside the block".into());
+        }
+        return Ok((ticks, None));
+    }
+    let mut edges = Vec::with_capacity(count);
+    for &k in &ticks {
+        match map.axis(k) {
+            Some(t) if block.contains(&t) => edges.push(t),
+            _ => return Err("an edge lies outside the block".into()),
+        }
+    }
+    Ok((edges, Some(ticks)))
 }
 
 /// An analog section's `count` samples in `coding`.
@@ -1204,5 +1400,70 @@ mod tests {
         ] {
             assert!(check_header(&header(breaks)).is_err(), "{why}");
         }
+    }
+
+    fn uleb(values: &[u64]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for &v in values {
+            crate::codec::put_uleb(&mut out, v);
+        }
+        out
+    }
+
+    /// A digital section's numbers, as `digital_edges` reads them: the step, the first edge's
+    /// source tick, then each later interval over the step.
+    #[test]
+    fn a_digital_section_reads_its_step_and_refuses_what_breaks_it() {
+        let map = Mapping::new(1000, -3, Ratio::new(500_617, 4_000).unwrap());
+        let read = |values: &[u64], count: usize, block: Range<i64>| {
+            digital_edges(&uleb(values), count, &map, 0..20_000, block)
+        };
+        // Step 8: ticks 16, 16, 40, 64; on the axis 1000 + floor((k - 3) × 125.15425).
+        let (axis, source) = read(&[8, 16, 0, 3, 3], 4, 0..10_000).unwrap();
+        assert_eq!(source, Some(vec![16, 16, 40, 64]));
+        assert_eq!(axis, [2627, 2627, 5630, 8634]);
+        // The identity keeps one list: the edges are the source ticks.
+        let (axis, source) =
+            digital_edges(&uleb(&[8, 16, 0, 3]), 3, &Mapping::IDENTITY, 0..100, 0..100).unwrap();
+        assert_eq!((axis, source), (vec![16, 16, 40], None));
+        // No edge: no byte.
+        assert_eq!(read(&[], 0, 0..10).unwrap(), (Vec::new(), None));
+        for (values, count, block, why) in [
+            (&[0u64, 16][..], 1, 0..10_000, "the section's step is 0"),
+            (&[1, 16, 1], 1, 0..10_000, "bytes follow the last edge"),
+            (&[1, 16], 2, 0..10_000, "the section is too short"),
+            (&[1], 1, 0..10_000, "the section is too short"),
+            // The first edge maps to 2627, before a block from 2628.
+            (
+                &[8, 16, 0],
+                2,
+                2628..10_000,
+                "an edge lies outside the block",
+            ),
+            // The last maps to 8634, at the end of a block to 8634.
+            (
+                &[8, 16, 0, 3, 3],
+                4,
+                0..8634,
+                "an edge lies outside the block",
+            ),
+            (&[1, 1 << 53], 1, 0..10_000, "past source tick 2^53"),
+            (&[u64::MAX, 1, 1, 1], 3, 0..10_000, "past source tick 2^53"),
+            (
+                &[1, 20_000],
+                1,
+                0..i64::MAX,
+                "outside its channel's start and end",
+            ),
+        ] {
+            let err = read(values, count, block).expect_err(why);
+            assert!(err.contains(why), "{values:?}: {err}");
+        }
+        // Bytes in the section of a channel with no edge in the block.
+        let err = read(&[1], 0, 0..10).expect_err("refused");
+        assert!(err.contains("no edge in the block"), "{err}");
+        // An edge before the channel's start.
+        let err = digital_edges(&uleb(&[1, 4]), 1, &map, 5..100, 0..10_000).expect_err("refused");
+        assert!(err.contains("outside its channel's start and end"), "{err}");
     }
 }

@@ -9,9 +9,10 @@ use crate::decode::{
     decode_sections, edge_in_gap, inflate_limited, level_after,
 };
 use crate::header::{
-    BlockRow, ChannelKind, Declaration, DeclaredKind, MAJOR, PREAMBLE_LEN, Preamble, TRAILER_LEN,
-    Trailer, Words,
+    BlockRow, ChannelKind, Declaration, DeclaredKind, JSON_SAFE, MAJOR, PREAMBLE_LEN, Preamble,
+    TRAILER_LEN, Trailer, Words,
 };
+use crate::mapping::Mapping;
 use crate::model::{Break, Gap, run_sample_tick};
 use crate::record::{self, BlockHead, Kind, Next};
 
@@ -82,19 +83,30 @@ enum Channel {
     Digital {
         /// The level at the next block's start, as far as the blocks read so far say.
         level: bool,
-        /// The last edge's tick, or 0 before the first.
+        /// The last edge's source tick, or the channel's start before the first.
         last_edge: i64,
         edges: u64,
         gaps: Vec<Gap>,
-        /// Gaps whose `to` no block has passed yet.
-        pending: VecDeque<Gap>,
+        /// Gaps whose `to` no block has passed yet, each with its `to` on the axis.
+        pending: VecDeque<(Gap, i64)>,
+        map: Mapping,
+        /// The channel's start, in its source's ticks.
+        start: i64,
     },
     Analog {
         next_index: u64,
         runs: Vec<Break>,
         coding: crate::header::AnalogCoding,
         period: crate::model::Ratio,
+        map: Mapping,
     },
+}
+
+/// A source tick's place on the axis, where both lie in `0..2^53`.
+fn on_axis(map: &Mapping, k: i64) -> Option<i64> {
+    let safe = 0..JSON_SAFE as i64;
+    map.axis(k)
+        .filter(|t| safe.contains(t) && safe.contains(&k))
 }
 
 pub struct Reader {
@@ -172,7 +184,19 @@ impl Reader {
         self.declaration.as_ref()
     }
 
-    /// The tick of sample `index` of analog channel `c`, from the runs read so far.
+    /// Channel `c`'s mapping from its source's ticks to the axis, once the declaration is read.
+    pub fn mapping(&self, c: usize) -> Option<Mapping> {
+        match self.channels.get(c)? {
+            Channel::Digital { map, .. } | Channel::Analog { map, .. } => Some(*map),
+        }
+    }
+
+    /// The axis tick of sample `index` of analog channel `c`, from the runs read so far.
+    pub fn sample_axis_tick(&self, c: usize, index: u64) -> Option<i64> {
+        on_axis(&self.mapping(c)?, self.sample_tick(c, index)?)
+    }
+
+    /// The source tick of sample `index` of analog channel `c`, from the runs read so far.
     pub fn sample_tick(&self, c: usize, index: u64) -> Option<i64> {
         match self.channels.get(c)? {
             Channel::Analog { runs, period, .. } => {
@@ -309,25 +333,33 @@ impl Reader {
             Kind::Declaration => {
                 let d: Declaration = serde_json::from_slice(payload)?;
                 check_declaration(&d)?;
-                self.channels = d
-                    .channels
-                    .iter()
-                    .map(|c| match &c.data {
-                        DeclaredKind::Digital { initial } => Channel::Digital {
-                            level: *initial,
-                            last_edge: 0,
-                            edges: 0,
-                            gaps: Vec::new(),
-                            pending: VecDeque::new(),
-                        },
+                let unmapped = || corrupt("a channel has no mapping to the axis");
+                let maps = d.mappings().ok_or_else(unmapped)?;
+                let mut channels = Vec::with_capacity(d.channels.len());
+                for (c, (channel, map)) in d.channels.iter().zip(maps).enumerate() {
+                    channels.push(match &channel.data {
+                        DeclaredKind::Digital { initial } => {
+                            let start = d.start(c).ok_or_else(unmapped)?;
+                            Channel::Digital {
+                                level: *initial,
+                                last_edge: start,
+                                edges: 0,
+                                gaps: Vec::new(),
+                                pending: VecDeque::new(),
+                                map,
+                                start,
+                            }
+                        }
                         DeclaredKind::Analog { coding, period, .. } => Channel::Analog {
                             next_index: 0,
                             runs: Vec::new(),
                             coding: *coding,
                             period: *period,
+                            map,
                         },
-                    })
-                    .collect();
+                    });
+                }
+                self.channels = channels;
                 self.words = Words::new(d.channels.len());
                 self.declaration = Some(d.clone());
                 Event::Declaration(Box::new(d))
@@ -342,6 +374,8 @@ impl Reader {
                     edges,
                     gaps,
                     pending,
+                    map,
+                    start: channel_start,
                     ..
                 } = &mut self.channels[c]
                 else {
@@ -349,10 +383,12 @@ impl Reader {
                 };
                 let after = gaps.last().map_or(*last_edge, |g| g.to.max(*last_edge));
                 let first = gaps.is_empty() && *edges == 0;
+                let to = on_axis(map, gap.to);
                 if gap.to <= gap.from
-                    || gap.from < 0
+                    || gap.from < *channel_start
                     || (!first && gap.from <= after)
-                    || gap.to < start
+                    || on_axis(map, gap.from).is_none()
+                    || to.is_none_or(|t| t < start)
                 {
                     return Err(corrupt(format!(
                         "channel {c}: a gap from {} to {} is out of place",
@@ -360,7 +396,7 @@ impl Reader {
                     )));
                 }
                 gaps.push(gap);
-                pending.push_back(gap);
+                pending.push_back((gap, to.unwrap_or(i64::MAX)));
                 Event::Gap { channel: c, gap }
             }
             Kind::Run => {
@@ -368,7 +404,10 @@ impl Reader {
                     record::parse_run(payload).ok_or_else(|| corrupt("a run record's size"))?;
                 let c = channel(c)?;
                 let Channel::Analog {
-                    next_index, runs, ..
+                    next_index,
+                    runs,
+                    map,
+                    ..
                 } = &mut self.channels[c]
                 else {
                     return Err(corrupt("a run on a digital channel"));
@@ -377,7 +416,7 @@ impl Reader {
                     None => run.index == 0 && run.lost == 0,
                     Some(r) => run.index > r.index && run.tick >= r.tick,
                 };
-                if !in_order || run.index < *next_index || run.tick < 0 {
+                if !in_order || run.index < *next_index || on_axis(map, run.tick).is_none() {
                     return Err(corrupt(format!("channel {c}: a run is out of place")));
                 }
                 runs.push(run);
@@ -516,7 +555,11 @@ impl Reader {
             .channels
             .iter()
             .map(|c| match c {
-                Channel::Digital { .. } => Section::Digital { end: i64::MAX },
+                Channel::Digital { start, map, .. } => Section::Digital {
+                    start: *start,
+                    end: i64::MAX,
+                    map: *map,
+                },
                 Channel::Analog {
                     next_index, coding, ..
                 } => Section::Analog {
@@ -537,12 +580,15 @@ impl Reader {
                         edges: seen,
                         gaps,
                         pending,
+                        ..
                     },
-                    BlockChannel::Digital { initial, edges },
+                    BlockChannel::Digital { initial, .. },
                 ) => {
+                    let edges = got.source_ticks().unwrap_or_default();
                     // Gap ends before this block's start have taken effect.
-                    while pending.front().is_some_and(|g| g.to < head.start) {
-                        *level = pending.pop_front().unwrap().level;
+                    while let Some(&(g, _)) = pending.front().filter(|&&(_, t)| t < head.start) {
+                        *level = g.level;
+                        pending.pop_front();
                     }
                     if *initial != *level {
                         return Err(bad("the block starts at the wrong level"));
@@ -555,8 +601,8 @@ impl Reader {
                     }
                     let ending: Vec<Gap> = pending
                         .iter()
-                        .take_while(|g| g.to < head.end)
-                        .copied()
+                        .take_while(|&&(_, t)| t < head.end)
+                        .map(|&(g, _)| g)
                         .collect();
                     *level = level_after(*initial, edges, &ending);
                     pending.drain(..ending.len());
@@ -570,6 +616,7 @@ impl Reader {
                         next_index,
                         runs,
                         period,
+                        map,
                         ..
                     },
                     BlockChannel::Analog { values, .. },
@@ -580,8 +627,12 @@ impl Reader {
                         let Some(first) = runs.first().filter(|r| r.index == 0) else {
                             return Err(bad("a sample before the channel's first run"));
                         };
-                        let tick = |index| run_sample_tick(first.tick, *period, &runs[1..], index);
-                        if tick(from) < head.start || tick(to) >= head.end {
+                        let tick = |index| {
+                            on_axis(map, run_sample_tick(first.tick, *period, &runs[1..], index))
+                        };
+                        if tick(from).is_none_or(|t| t < head.start)
+                            || tick(to).is_none_or(|t| t >= head.end)
+                        {
                             return Err(bad("the samples lie outside the block's ticks"));
                         }
                     }

@@ -131,7 +131,8 @@ impl Recording {
         let mut out = Vec::new();
         for (k, i) in range.enumerate() {
             let block = self.block(i, cancel)?;
-            let BlockChannel::Digital { initial, edges } = &block.block.channels[channel] else {
+            let BlockChannel::Digital { initial, edges, .. } = &block.block.channels[channel]
+            else {
                 return Err(Error::NoChannel(channel));
             };
             let lo = edges.partition_point(|&t| t < from);

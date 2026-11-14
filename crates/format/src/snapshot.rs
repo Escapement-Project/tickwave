@@ -9,6 +9,7 @@ use crate::decode::{
     derived_values, inflate_limited,
 };
 use crate::header::{BlockRow, Declaration, DeclaredKind, OverviewLevel, OverviewRow};
+use crate::mapping::Mapping;
 use crate::model::{Break, Gap};
 use crate::overview::{self, BLOCK_BUCKETS, Column, HeldLevel};
 use crate::record::{self, BlockHead};
@@ -30,7 +31,8 @@ pub struct Written {
 /// before it. The open block's head ends at `i64::MAX`.
 type Unwritten = (BlockHead, Vec<u8>, Vec<u64>);
 
-/// A level the writer keeps in overview blocks: block `k` of it starts at bucket `65,536 k`.
+/// A level the writer keeps in overview blocks: block `k` of it starts at bucket
+/// `BLOCK_BUCKETS × k`.
 /// Blocks `0..rows.len()` are in the file, and the `queued` ones, settled but not yet written,
 /// follow them.
 #[derive(Clone, Debug)]
@@ -54,6 +56,8 @@ pub struct Snapshot {
     position: u64,
     products: Vec<(usize, usize, Product)>,
     columns: Vec<Column>,
+    /// Each channel's mapping to the axis, and its start in its source's ticks.
+    places: Vec<(Mapping, i64)>,
 }
 
 impl Snapshot {
@@ -70,6 +74,7 @@ impl Snapshot {
         overview_rows: &[(u8, u64, OverviewRow)],
         queued_overview: Vec<(u8, u64, Arc<Vec<u8>>)>,
         position: u64,
+        places: Vec<(Mapping, i64)>,
     ) -> Self {
         let products = overview::products(&declaration.channels, &declaration.derived);
         let columns = overview::columns(&declaration.channels, &declaration.derived);
@@ -112,6 +117,7 @@ impl Snapshot {
             position,
             products,
             columns,
+            places,
         }
     }
 
@@ -191,9 +197,9 @@ impl Snapshot {
     }
 
     /// The levels the writer keeps in overview blocks, finest first: each one's shift, and how
-    /// many of its blocks are in the file. Block `k` of a level starts at bucket `65,536 k` and
-    /// holds 65,536 buckets. The blocks settled but not yet written follow, in
-    /// `queued_overview_blocks`.
+    /// many of its blocks are in the file. Block `k` of a level starts at bucket
+    /// `BLOCK_BUCKETS × k` and holds `BLOCK_BUCKETS` buckets. The blocks settled but not yet
+    /// written follow, in `queued_overview_blocks`.
     pub fn overview_blocks(&self) -> Vec<OverviewLevel> {
         self.block_levels
             .iter()
@@ -271,13 +277,23 @@ impl Snapshot {
         })
     }
 
+    /// Channel `c`'s mapping from its source's ticks to the axis.
+    pub fn mapping(&self, c: usize) -> Option<Mapping> {
+        self.places.get(c).map(|&(map, _)| map)
+    }
+
     fn sections(&self, firsts: &[u64]) -> Vec<Section> {
         self.declaration
             .channels
             .iter()
             .zip(firsts)
-            .map(|(c, &first)| match &c.data {
-                DeclaredKind::Digital { .. } => Section::Digital { end: i64::MAX },
+            .zip(&self.places)
+            .map(|((c, &first), &(map, start))| match &c.data {
+                DeclaredKind::Digital { .. } => Section::Digital {
+                    start,
+                    end: i64::MAX,
+                    map,
+                },
                 DeclaredKind::Analog { coding, .. } => Section::Analog {
                     coding: *coding,
                     first_index: first,

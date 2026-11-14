@@ -15,6 +15,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+use crate::mapping::Mapping;
 use crate::model::{Break, Gap, Ratio};
 
 pub const MAGIC: [u8; 8] = *b"\x89TKW\r\n\x1a\n";
@@ -171,7 +172,8 @@ impl Offset {
     pub const DELAY: &str = "delay";
 }
 
-/// The ticks `from..to` where a channel holds what the source recorded, after its move. It reads
+/// The source ticks `from..to` where a channel holds what the source recorded, before its move:
+/// the ticks its items are stored in. It reads
 /// and writes as `[from, to]`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "(i64, i64)", into = "(i64, i64)")]
@@ -196,7 +198,7 @@ impl From<Kept> for (i64, i64) {
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum DeclaredKind {
     Digital {
-        /// The level at tick 0 before any edge there.
+        /// The level at the channel's start before any edge there.
         initial: bool,
     },
     Analog {
@@ -213,7 +215,7 @@ pub enum DeclaredKind {
 pub struct Header {
     /// Ticks a second.
     pub timebase: Ratio,
-    /// Ticks from tick 0 to the capture's end.
+    /// Axis ticks from tick 0 to the capture's end.
     pub length: i64,
     pub channels: Vec<ChannelHeader>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -261,8 +263,9 @@ pub struct ChannelHeader {
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum ChannelKind {
     Digital {
-        /// The level at tick 0 before any edge there.
+        /// The level at the channel's start before any edge there.
         initial: bool,
+        /// A source tick: the level is known from the channel's start to here.
         end: i64,
         edges: u64,
         #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -724,7 +727,100 @@ impl DeclaredChannel {
     }
 }
 
+/// Source `s`'s `m` on an axis of `timebase`: how many axis ticks one of its ticks lasts, in
+/// lowest terms. None for no such source, or terms past 2^53.
+fn source_m(timebase: Ratio, sources: &[SourceHeader], s: usize) -> Option<Ratio> {
+    let source = sources.get(s)?;
+    crate::mapping::axis_ratio(
+        source.stretch.unwrap_or(Ratio::ONE),
+        timebase,
+        source.timebase,
+    )
+}
+
+fn channel_mapping(
+    timebase: Ratio,
+    sources: &[SourceHeader],
+    source: u32,
+    shaping: &Shaping,
+) -> Option<Mapping> {
+    let s = source as usize;
+    Some(Mapping::new(
+        sources.get(s)?.origin,
+        shaping.offset.as_ref().map_or(0, |o| o.ticks),
+        source_m(timebase, sources, s)?,
+    ))
+}
+
+/// FORMAT.md, "Header": a channel's kept span's `from`, or the source tick at the axis's tick 0,
+/// `-origin`, where it states none.
+fn channel_start(sources: &[SourceHeader], source: u32, shaping: &Shaping) -> Option<i64> {
+    match shaping.kept {
+        Some(kept) => Some(kept.from),
+        None => sources.get(source as usize)?.origin.checked_neg(),
+    }
+}
+
+impl Declaration {
+    /// Source `s`'s `m`: how many axis ticks one of its ticks lasts, in lowest terms. None for
+    /// no such source, or terms past 2^53.
+    pub fn m(&self, s: usize) -> Option<Ratio> {
+        source_m(self.timebase, &self.sources, s)
+    }
+
+    /// Channel `c`'s mapping from its source's ticks to the axis. None for no such channel, or
+    /// a source whose `m` has terms past 2^53; a checked declaration has neither.
+    pub fn mapping(&self, c: usize) -> Option<Mapping> {
+        let channel = self.channels.get(c)?;
+        channel_mapping(
+            self.timebase,
+            &self.sources,
+            channel.source,
+            &channel.shaping,
+        )
+    }
+
+    /// Every channel's mapping, in channel order; None as `mapping` gives it.
+    pub fn mappings(&self) -> Option<Vec<Mapping>> {
+        (0..self.channels.len()).map(|c| self.mapping(c)).collect()
+    }
+
+    /// Channel `c`'s start, in its source's ticks (FORMAT.md, "Header"): its kept span's `from`,
+    /// or the source tick at the axis's tick 0, `-origin`, where it states none.
+    pub fn start(&self, c: usize) -> Option<i64> {
+        let channel = self.channels.get(c)?;
+        channel_start(&self.sources, channel.source, &channel.shaping)
+    }
+}
+
 impl Header {
+    /// Source `s`'s `m`, as `Declaration::m`.
+    pub fn m(&self, s: usize) -> Option<Ratio> {
+        source_m(self.timebase, &self.sources, s)
+    }
+
+    /// Channel `c`'s mapping, as `Declaration::mapping`.
+    pub fn mapping(&self, c: usize) -> Option<Mapping> {
+        let channel = self.channels.get(c)?;
+        channel_mapping(
+            self.timebase,
+            &self.sources,
+            channel.source,
+            &channel.shaping,
+        )
+    }
+
+    /// Every channel's mapping, as `Declaration::mappings`.
+    pub fn mappings(&self) -> Option<Vec<Mapping>> {
+        (0..self.channels.len()).map(|c| self.mapping(c)).collect()
+    }
+
+    /// Channel `c`'s start, as `Declaration::start`.
+    pub fn start(&self, c: usize) -> Option<i64> {
+        let channel = self.channels.get(c)?;
+        channel_start(&self.sources, channel.source, &channel.shaping)
+    }
+
     /// What the declaration said: the header's values without what only the end settles. A
     /// source's `extra` keeps the keys the end added, which the declaration may not have.
     pub fn declaration(&self) -> Declaration {
@@ -745,13 +841,17 @@ impl Header {
 pub struct SourceHeader {
     pub format: SourceFormat,
     pub files: Vec<String>,
-    /// The source's tick rate: the recording's timebase is a whole multiple of it.
+    /// The source's tick rate, any exact ratio. One of its ticks lasts `m` axis ticks.
     pub timebase: Ratio,
-    /// The recording's tick where the source's tick 0 lies, before any channel's offset.
+    /// The axis tick where the source's tick 0 lies, before any channel's offset.
     pub origin: i64,
-    /// Ticks of the recording the source was moved by against the others, positive later.
+    /// Axis ticks the source was moved by against the others, positive later.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub align: Option<i64>,
+    /// How much the source's ticks were lengthened against its timebase, to line its clock up
+    /// with the others': a claim, as `align` is. None is 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stretch: Option<Ratio>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instrument: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -777,7 +877,7 @@ pub struct SourceHeader {
 }
 
 impl SourceHeader {
-    /// A source of `format` ticking at `timebase`, its tick 0 at the recording's, that states
+    /// A source of `format` ticking at `timebase`, its tick 0 at the axis's, that states
     /// nothing else.
     pub fn new(format: SourceFormat, timebase: Ratio) -> Self {
         Self {
@@ -786,6 +886,7 @@ impl SourceHeader {
             timebase,
             origin: 0,
             align: None,
+            stretch: None,
             instrument: None,
             software: None,
             begin_s: None,
@@ -797,14 +898,6 @@ impl SourceHeader {
             meta: BTreeMap::new(),
         }
     }
-}
-
-/// How many of the recording's ticks one of a source's ticks is: `recording / source`, None
-/// unless it is a whole number. A checked header's factors lie below 2^53.
-pub fn factor(recording: Ratio, source: Ratio) -> Option<u128> {
-    let num = u128::from(recording.num()) * u128::from(source.den());
-    let den = u128::from(recording.den()) * u128::from(source.num());
-    num.is_multiple_of(den).then(|| num / den)
 }
 
 /// The kind of capture a recording was converted from. It reads and writes as its name.

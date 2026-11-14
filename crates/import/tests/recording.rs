@@ -62,6 +62,7 @@ fn every_fixture_reads_back_as_its_file_holds_it() {
                 timebase: s.timebase,
                 origin: s.origin,
                 align: s.align,
+                stretch: s.stretch,
                 instrument: s.instrument.clone(),
                 software: s.software.clone(),
                 begin_s: s.begin_s,
@@ -121,6 +122,7 @@ fn with_gaps() -> Recording {
                     initial: true,
                     end: 100,
                     edges: Box::new([10, 20, 50, 80].into_iter()),
+                    count: 4,
                     gaps: vec![
                         Gap {
                             from: 30,
@@ -231,6 +233,7 @@ fn a_footer_longer_than_the_first_read_is_read_whole() {
                     initial: false,
                     end: 6_000_001,
                     edges: Box::new((1..=2_000_000).map(|i| i * 3)),
+                    count: 2_000_000,
                     gaps: Vec::new(),
                 }),
                 shaping: Shaping::default(),

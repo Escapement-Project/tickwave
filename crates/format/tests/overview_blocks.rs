@@ -11,8 +11,9 @@ use escapement_tickwave_format::model::{
     Analog, Channel, ChannelData, Digital, Ratio, Recording, Samples, Source, SourceFormat,
 };
 
-/// At 2^12 ticks a bucket this has 2^18 + 1 buckets: too many for the footer, so five overview
-/// blocks of 2^16, the last holding only the bucket that starts at the final tick.
+/// At 2^12 ticks a bucket this has 2^18 + 1 buckets: too many for the footer, so 65 overview
+/// blocks of 4,096, the last holding only the bucket that starts at the final tick. The finest
+/// shift is given: the density rule would pick a coarser one for these few items.
 const LAST: i64 = 1 << 30;
 const LENGTH: i64 = LAST + 1;
 const EDGES: [i64; 4] = [5000, 5001, 300_000_000, LAST];
@@ -32,6 +33,7 @@ fn recording(edges: Vec<i64>) -> Recording {
                 data: ChannelData::Digital(Digital {
                     initial: false,
                     end: LENGTH,
+                    count: edges.len() as u64,
                     edges: Box::new(edges.into_iter()),
                     gaps: Vec::new(),
                 }),
@@ -61,8 +63,15 @@ fn recording(edges: Vec<i64>) -> Recording {
     }
 }
 
+fn options() -> Options {
+    Options {
+        overview_shift: Some(12),
+        ..Options::default()
+    }
+}
+
 fn file() -> Vec<u8> {
-    encode(recording(EDGES.to_vec()), &Options::default()).unwrap()
+    encode(recording(EDGES.to_vec()), &options()).unwrap()
 }
 
 fn bit(bytes: &[u8], i: u64) -> bool {
@@ -79,7 +88,7 @@ fn a_long_recording_keeps_its_finest_level_in_blocks() {
         head.header.overview_blocks,
         [OverviewLevel {
             shift: 12,
-            blocks: 5
+            blocks: 65
         }]
     );
     let decode = |k: usize| {
@@ -87,19 +96,12 @@ fn a_long_recording_keeps_its_finest_level_in_blocks() {
         head.decode_overview_block(0, k, &file[offset as usize..][..len as usize])
             .unwrap()
     };
-    let firsts: Vec<_> = (0..5)
+    let firsts: Vec<_> = (0..65)
         .map(|k| (decode(k).first, decode(k).level.buckets))
         .collect();
-    assert_eq!(
-        firsts,
-        [
-            (0, 65536),
-            (65536, 65536),
-            (131072, 65536),
-            (196608, 65536),
-            (262144, 1)
-        ]
-    );
+    let mut want: Vec<_> = (0..64).map(|k| (k * 4096, 4096)).collect();
+    want.push((262144, 1));
+    assert_eq!(firsts, want);
 
     // Expected bits from the edges themselves, not from the builder that wrote them.
     let digital = |k: usize, i: u64| decode(k).level.channels[0].digital(i).unwrap();
@@ -107,12 +109,12 @@ fn a_long_recording_keeps_its_finest_level_in_blocks() {
     assert_eq!(digital(0, 0), (false, false));
     assert_eq!(digital(0, 1), (false, true));
     assert_eq!(digital(0, 2), (false, false));
-    // 300,000,000 is in bucket 73,242 (block 1, bucket 7,706), which starts low.
-    assert_eq!(digital(1, 73_242 - 65_536), (false, true));
-    assert_eq!(digital(1, 73_243 - 65_536), (true, false));
+    // 300,000,000 is in bucket 73,242 (block 17, bucket 3,610), which starts low.
+    assert_eq!(digital(17, 73_242 - 17 * 4096), (false, true));
+    assert_eq!(digital(17, 73_243 - 17 * 4096), (true, false));
     // The last edge is at the final tick, the first tick of the last bucket: the bucket starts
     // at the level before it, high, and changes.
-    assert_eq!(digital(4, 0), (true, true));
+    assert_eq!(digital(64, 0), (true, true));
 
     let block = decode(0);
     let Some(AnalogOverview::F32(v)) = block.level.channels[1].analog() else {
@@ -125,19 +127,20 @@ fn a_long_recording_keeps_its_finest_level_in_blocks() {
         (f32::INFINITY, f32::NEG_INFINITY, 0.0)
     );
     assert_eq!((min[256], max[256], sum[256]), (1.0, 1.0, 1.0));
-    let last = decode(4);
+    let last = decode(64);
     let Some(AnalogOverview::F32(v)) = last.level.channels[1].analog() else {
         panic!("V is f32");
     };
     assert_eq!(v.min[0], (SAMPLES - 1) as f32);
 
     assert_eq!(head.overview_blocks_covering(0, 0, 1), 0..1);
+    // A block covers 4,096 buckets of 4,096 ticks: 2^24 ticks.
     assert_eq!(
-        head.overview_blocks_covering(0, 4096 * 65536 - 1, 4096 * 65536 + 1),
+        head.overview_blocks_covering(0, (1 << 24) - 1, (1 << 24) + 1),
         0..2
     );
-    assert_eq!(head.overview_blocks_covering(0, LAST, LENGTH), 4..5);
-    assert_eq!(head.overview_blocks_covering(0, i64::MIN, i64::MAX), 0..5);
+    assert_eq!(head.overview_blocks_covering(0, LAST, LENGTH), 64..65);
+    assert_eq!(head.overview_blocks_covering(0, i64::MIN, i64::MAX), 0..65);
     assert_eq!(head.overview_blocks_covering(0, 10, 10), 0..1);
 }
 
@@ -231,18 +234,19 @@ fn splice_overview_block(base: &[u8], donor: &[u8], k: usize) -> Vec<u8> {
 fn verify_refuses_overview_blocks_that_differ_from_the_content() {
     let file = file();
     // An unchanged block spliced back in: the splice itself must not break anything.
-    let same = splice_overview_block(&file, &file, 2);
+    let same = splice_overview_block(&file, &file, 35);
     assert_eq!(same, file);
-    // Two more edges inside one bucket of block 2: only the finest level's block 2 differs, and
-    // the footer's coarser levels and the data blocks stay this file's own.
+    // Two more edges inside one bucket of block 35, 600,000,000 >> 12 = 146,484: only the finest
+    // level's block 35 differs, and the footer's coarser levels and the data blocks stay this
+    // file's own.
     let mut edges = EDGES.to_vec();
     edges.splice(3..3, [600_000_000, 600_000_001]);
-    let donor = encode(recording(edges), &Options::default()).unwrap();
-    let mixed = splice_overview_block(&file, &donor, 2);
+    let donor = encode(recording(edges), &options()).unwrap();
+    let mixed = splice_overview_block(&file, &donor, 35);
     let head = Footer::parse_file(&mixed).unwrap();
-    let (offset, len) = head.overview_block_location(0, 2);
+    let (offset, len) = head.overview_block_location(0, 35);
     let block = head
-        .decode_overview_block(0, 2, &mixed[offset as usize..][..len as usize])
+        .decode_overview_block(0, 35, &mixed[offset as usize..][..len as usize])
         .unwrap();
     assert!(bit(
         match &block.level.channels[0] {
@@ -252,7 +256,7 @@ fn verify_refuses_overview_blocks_that_differ_from_the_content() {
         (600_000_000 >> 12) - block.first
     ));
     let err = verify(&mixed[..], recording(EDGES.to_vec())).unwrap_err();
-    assert!(err.to_string().contains("2^12, block 2"), "{err}");
+    assert!(err.to_string().contains("2^12, block 35"), "{err}");
 }
 
 #[test]

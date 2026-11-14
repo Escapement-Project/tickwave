@@ -292,7 +292,11 @@ pub fn convert<F: Read + Write + Seek>(
     let open = || set_units(open()?, &settings.units);
     // The first pass's recording resolves the moves and cuts, before any pass reads an item.
     let mut first = Some(open()?);
-    let plan = Plan::new(first.as_ref().unwrap(), &settings.offsets, &settings.keeps)?;
+    let mut plan = Plan::new(first.as_ref().unwrap(), &settings.offsets, &settings.keeps)?;
+    // A cut digital channel's edges kept are counted before any pass writes its declaration.
+    if plan.cuts_edges() {
+        plan.count(open()?);
+    }
     let mut open = || -> Result<Recording, Error> {
         let recording = match first.take() {
             Some(r) => r,

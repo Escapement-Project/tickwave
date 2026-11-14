@@ -6,6 +6,7 @@ use std::sync::atomic::AtomicBool;
 
 use escapement_tickwave_format::decode::Footer;
 use escapement_tickwave_format::header::ChannelKind as HeaderKind;
+use escapement_tickwave_format::mapping::Mapping;
 use escapement_tickwave_format::model::{Break, Gap, Ratio, lost_span};
 use escapement_tickwave_view::runs::{Runs, lost_spans_in, place_after};
 use escapement_tickwave_view::spans::{ChannelPlace, known_spans};
@@ -45,6 +46,7 @@ fn runs() -> Runs<'static> {
         period: Ratio::new(3, 2).unwrap(),
         count: 17,
         breaks: &BREAKS,
+        map: Mapping::IDENTITY,
     }
 }
 
@@ -177,6 +179,7 @@ fn an_answer_joins_nothing_across_a_runs_edge_and_gives_the_gaps_it_reaches() {
         period: *period,
         count: *count,
         breaks,
+        map: f.header.mapping(0).unwrap(),
     };
     let place = ChannelPlace::Analog {
         runs,

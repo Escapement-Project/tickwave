@@ -77,7 +77,7 @@ If the source doesn't state a channel's unit, give it with `--unit <name>=<unit>
 
 ### Moving and trimming channels
 
-`--offset <name>=<time>` moves a channel along the time axis, later when the time is positive: `--offset SWDIO=-40ns` moves SWDIO 40 ns earlier. It corrects a known delay in a channel's path, such as a longer probe lead. The time has to be a whole number of ticks.
+`--offset <name>=<time>` moves a channel along the time axis, later when the time is positive: `--offset SWDIO=-40ns` moves SWDIO 40 ns earlier. It corrects a known delay in a channel's path, such as a longer probe lead. The time has to be a whole number of the capture's ticks.
 
 `--keep <name>=<from>..<to>` keeps only that part of a channel, in the capture's time before any move: `--keep SWCLK=1.2ms..9.8ms`. Leave out either end to keep from the channel's start or to its end.
 
@@ -126,21 +126,31 @@ tickwave merge analyser.tickwave probe.tickwave -o both.tickwave
 
 This puts several recordings on one time axis, such as a logic analyser's beside a probe's own stream from the same target. A capture goes through `tickwave convert` first. Every channel of every recording goes in, in order, under its own name. A channel whose name an earlier recording took is named after its file as well: `probe/CLK`.
 
-The merged recording ticks at the least common multiple of the recordings' tick rates, so each recording's tick is a whole number of the merged recording's. Nothing is resampled: every edge and sample keeps its time. 500 MHz and 96 MHz merge at 12 GHz, a tick of 83 ps. A reading still keeps to the tick of the recording it reads, so it never shows more digits than that recording carries.
+The merged recording ticks at the least common multiple of the recordings' tick rates: 500 MHz and 96 MHz merge at 12 GHz, a tick of 83 ps. Where that rate would need a number past 2^53, it ticks at the fastest recording's rate instead. Each channel keeps its own instrument's ticks, and the merged recording states where each instrument's ticks lie on its time axis. Nothing is resampled: every edge and sample keeps its time. A reading still keeps to the tick of the recording it reads, so it never shows more digits than that recording carries.
 
-The recordings share no clock: none of the captures tickwave reads records the time of day it started. So each recording starts at the merged recording's start. `--align <n>=<time>` moves recording `n`, counting from 1, later when the time is positive, to line it up with the others, on an edge both instruments saw, say. The time is at the merged rate. The merged recording states an alignment as a claim, as it does a move. Instruments' clocks drift apart: at 20 ppm, an alignment by hand stays within one tick of a 96 MHz clock for about half a millisecond either side of where it was made, and within 10 µs for about half a second.
+The recordings share no clock: none of the captures tickwave reads records the time of day it started. So each recording starts at the merged recording's start. `--align <n>=<time>` moves recording `n`, counting from 1, later when the time is positive, to line it up with the others, on an edge both instruments saw, say. The time is a decimal with a unit, or a whole number of the merged recording's ticks. Those ticks are at the merged rate the merge picks, so a time with a unit says the same thing whichever rate that is. The merged recording states an alignment as a claim, as it does a move.
+
+Instruments' clocks drift apart. At 20 ppm, an alignment by one edge stays within one tick of a 96 MHz clock for about half a millisecond either side of the edge, and within 10 µs for about half a second. `--stretch <n>=<ratio>` lengthens recording `n`'s ticks to make up for it, as a ratio such as `1001/1000` or a change such as `+20ppm`. A stretch above 1 says the recording's clock ran slow. The merged recording states the stretch on the recording's sources, as a claim. What a stretch leaves is the clocks' wander.
+
+Two marks give both at once: `--align <n>=<x>@<y>,<x>@<y>`. Each mark is an event both instruments saw, `x` its time in recording `n`'s own time and `y` its time on the merged recording's axis, both with a unit. For a recording left unaligned, the axis time is that recording's own time. The first mark gives the alignment, and the time between the two gives the stretch. `--align 2=1s@1.0016s,9s@9.0024s` puts the probe's own 1 s at 1.0016 s and its 9 s at 9.0024 s: a stretch of 1.0001, and its tick 0 1.5 ms in. The stretch is out by each mark's error over the time between them, so take the marks far apart.
+
+A mark has to be an event the instruments can't confuse with another. A periodic signal, such as a 100 Hz marker, lines up equally well at every whole number of its periods: an alignment on one of its edges can be off by a period, and nothing in the recording says so. Align on an aperiodic mark, such as a burst, a reset or a single pulse, and use the periodic signal to measure the drift.
 
 | Option | Does |
 |---|---|
 | `--channel <n>:<name>[=<new>]` | take channel `<name>` of recording `n`, named `<new>` if given. A recording with no `--channel` gives every channel |
 | `--align <n>=<time>` | move recording `n`, later when the time is positive |
-| `--offset <name>=<time>` | move a channel, later when the time is positive, at the merged rate |
+| `--align <n>=<x>@<y>,<x>@<y>` | place recording `n` by two marks, which give its alignment and its stretch |
+| `--stretch <n>=<ratio>` | lengthen recording `n`'s ticks by a ratio `a/b` or a change such as `+20ppm` |
+| `--offset <name>=<time>` | move a channel, later when the time is positive, by a whole number of its own instrument's ticks |
 | `--keep <name>=<from>..<to>` | keep only that part of a channel, in its own recording's time before any move |
 | `--unit <name>=<unit>` | an analog channel's unit |
 
 `<name>` is the name the channel takes in the merged recording. `-o`, `--title`, `--meta`, `--level`, `--block-kib` and `--open` work as they do for a conversion. Each recording's own title and metadata stay with its sources, where `tickwave info` and the Open page's details list them.
 
 A recording's generated annotations come with it, from its decoders' files, bundled or in a sidecar beside it. Their times move with the recording, and [ANNOTATIONS.md](https://github.com/Escapement-Project/tickwave/blob/main/ANNOTATIONS.md#merging) says how their names follow the merge's. Annotations written by hand don't come, since their times are the recording's own, and `merge` says how many it left out. A derived channel, such as power from a current and a voltage, comes while both its channels do, moved and trimmed alike.
+
+A channel's move is in its own instrument's ticks, since that is where its edges and samples sit: a whole number of them, or a time with a unit within a hundredth of one.
 
 Before it writes the merged recording, `merge` checks it against the recordings it merged. The check goes by what the merged recording states, not by the options it was given, as `tickwave verify` does.
 
@@ -151,14 +161,32 @@ tickwave info identify-swd.tickwave
 ```
 
 ```text
-identify-swd
 0.523583100 s at 1000000000/1 ticks a second, 2 channels, blake3:ccc8b7d8c3e4cb30da7fc6088e54ebeba2858ad402eb3fb5a9aeb50be989accf
+  source 0: saleae-binary-1 at 1000000000/1 ticks a second, its tick 0 at 0: digital_3_0.bin, digital_3_1.bin
   SWCLK        digital, 15286 edges, starts 1, known to 0.523583070 s (digital_3_0)
   SWDIO        digital, 1874 edges, starts 1, known to 0.523583100 s (digital_3_1)
-0.005 MB: footer 1776 bytes (3 overview levels), 1 blocks of 3086-3086 bytes, median 3086
+0.004 MB: footer 715 bytes (1 overview levels), 1 blocks of 3095-3095 bytes, median 3095
 ```
 
-Times are in seconds to one tick, here a nanosecond: never more digits than the recording carries. `--json` prints the header and the block statistics as JSON, for a script.
+Times are in seconds to one tick, here a nanosecond: never more digits than the recording carries. `--json` prints the header and the block statistics as JSON, for a script. `info` reads only the recording's footer, at its end, however large the recording.
+
+For a merged recording, `info` lists each instrument's source, with how many of the merged recording's ticks one of its ticks lasts and any stretch. Where two instruments may have recorded the same periodic signal, such as a marker line, it says that `--drift` measures the drift between their clocks. `tickwave info --drift` decodes the whole recording for it. Here an analyser at 1 GHz and a probe at 100 MHz both recorded a 10 ms marker, and the probe's clock ran 1,000 ppm fast, so it measured each period as 10.01 ms:
+
+```sh
+tickwave info --drift both.tickwave
+```
+
+```text
+9.029020000 s at 1000000000/1 ticks a second, 2 channels, blake3:635af47f259cfd10d5f9e750e2f82d98a894be04206c7031692a5836b72b1137
+  source 0: vcd at 1000000000/1 ticks a second, its tick 0 at 0: analyser.vcd
+  source 1: vcd at 100000000/1 ticks a second (10 of the recording's ticks each), its tick 0 at 0: probe.vcd
+  analyser.MARK digital, 1800 edges, starts 0, known to 9.020000000 s (analyser.MARK, source 0)
+  probe.MARK   digital, 1800 edges, starts 0, known to 9.029020000 s (probe.MARK, source 1)
+0.002 MB: footer 929 bytes (1 overview levels), 1 blocks of 113-113 bytes, median 113
+drift: analyser.MARK (source 0) against probe.MARK (source 1): +1000.0 ± 0.0 ppm, the stretch source 0 would take to tick as source 1 does; periods 10.000000 ms and 10.010000 ms over 900 and 900 rises, 0.6 µs and 1.7 µs rms off a straight line
+```
+
+It fits each such channel's rising edges to a line. A missed pulse counts as a period with no rise in it, not as one period twice as long. It compares two channels from different instruments whose periods agree within 1 %, and reads only channels of at most 2^20 edges. Their periods' ratio is the drift, as the stretch that would make the first instrument tick as the second does. A recording already stretched shows what the stretch leaves. The rms is each channel's wander about its line.
 
 ## Opening a recording
 
@@ -208,7 +236,7 @@ A merged recording takes `--against` once for each recording merged into it, in 
 tickwave verify both.tickwave --against analyser/ --against probe.tickwave
 ```
 
-It first checks that each one's sources are the ones the merged recording names in that place, and says so if two are swapped.
+It first checks that each one's sources are the ones the merged recording names in that place, and says so if two are swapped. Once the recording matches, it reports the drift between its instruments, as `info --drift` does.
 
 ## Checking a sidecar
 

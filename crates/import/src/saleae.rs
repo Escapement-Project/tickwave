@@ -920,6 +920,7 @@ impl Export {
                         initial: d.initial,
                         end: d.end(rate),
                         edges: Box::new(d.edges(rate)),
+                        count: d.count,
                         gaps: Vec::new(),
                     }),
                     Opened::Analog(a) => ChannelData::Analog(Analog {

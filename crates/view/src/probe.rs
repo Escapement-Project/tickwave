@@ -104,9 +104,9 @@ pub struct PulseFigures {
 }
 
 /// A pulse's figures, an unread edge read as open. Widths are whole ticks; a rate and a duty
-/// carry the digits the ticks support. `step`, at least 1, is the ticks one tick of the
-/// channel's source spans.
-pub fn pulse_figures(p: &Pulse, timebase: Ratio, known: Known, step: u64) -> PulseFigures {
+/// carry the digits the ticks support. `step` is the ticks one tick of the channel's source
+/// spans, its `m`.
+pub fn pulse_figures(p: &Pulse, timebase: Ratio, known: Known, step: Ratio) -> PulseFigures {
     let level = if p.level { "high" } else { "low" };
     let (s, e, n) = (p.start.tick(), p.end.tick(), p.next.tick());
     let interval = |ticks| format_interval(ticks, timebase, step);
@@ -155,8 +155,9 @@ pub fn pulse_figures(p: &Pulse, timebase: Ratio, known: Known, step: u64) -> Pul
 /// `high` of `period` ticks, as a percentage. Each span is off by less than a tick of the
 /// source, `step` ticks, so the share is uncertain by about 100 step / period percent; the last
 /// digit shown is at the largest power of ten not larger than that, as a rate's is.
-pub fn format_duty(high: i64, period: i64, step: u64) -> String {
-    let place = ((100.0 * step as f64) / period as f64).log10().floor();
+pub fn format_duty(high: i64, period: i64, step: Ratio) -> String {
+    let step = step.num() as f64 / step.den() as f64;
+    let place = ((100.0 * step) / period as f64).log10().floor();
     let share = (100.0 * high as f64) / period as f64;
     // A no-break space before the unit, as every readout writes it.
     if place < 0.0 {
@@ -196,7 +197,7 @@ pub fn analog_from_samples<T: Copy + Into<f64>>(
     t1: f64,
     tick: f64,
 ) -> AnalogAt {
-    let first = sample_at_or_before(c, end, js::max(c.first as f64, t0.ceil()));
+    let first = sample_at_or_before(c, end, js::max(c.start() as f64, t0.ceil()));
     let at = sample_at_or_before(c, end, tick.floor());
     let (Some(first), Some(at)) = (first, at) else {
         return AnalogAt::None;

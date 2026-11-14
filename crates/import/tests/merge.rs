@@ -1,5 +1,7 @@
-//! Merging recordings, each expected value worked by hand from FORMAT.md's mapping: input j's tick
-//! `t` of channel c at merged tick `F_j t + A_j − base + offset_m(c)`.
+//! Merging recordings, each expected value worked by hand from FORMAT.md's mapping: every channel
+//! keeps its source's ticks, and source tick `k` of channel c of input j lies at merged tick
+//! `origin_s + floor((k + offset_c) × m_s)`, the origin `A_j − base + floor(origin × s_j R / R_j)`
+//! and `m_s` the source's ticks in merged ticks. Edges and samples are read on the merged axis.
 
 use std::collections::BTreeMap;
 use std::io::Cursor;
@@ -44,6 +46,7 @@ fn digital(name: &str, initial: bool, edges: Vec<i64>, end: i64) -> Channel {
         data: ChannelData::Digital(Digital {
             initial,
             end,
+            count: edges.len() as u64,
             edges: Box::new(edges.into_iter()),
             gaps: Vec::new(),
         }),
@@ -144,11 +147,11 @@ fn settings(inputs: Vec<InputSettings>) -> Settings {
 fn aligned(ticks: &str) -> InputSettings {
     InputSettings {
         align: Some(ticks.into()),
-        channels: Vec::new(),
+        ..InputSettings::default()
     }
 }
 
-/// Each channel's edges, and each analog channel's samples as (tick, value).
+/// Each channel's edges, and each analog channel's samples as (tick, value), on the merged axis.
 fn items(file: &[u8]) -> (Header, Items) {
     let head = Footer::parse_file(file).unwrap();
     let n = head.header.channels.len();
@@ -164,12 +167,11 @@ fn items(file: &[u8]) -> (Header, Items) {
                 BlockChannel::Analog {
                     first_index,
                     values,
-                } => samples[c].extend(
-                    values
-                        .iter()
-                        .enumerate()
-                        .map(|(k, v)| (head.sample_tick(c, first_index + k as u64).unwrap(), v)),
-                ),
+                } => {
+                    samples[c].extend(values.iter().enumerate().map(|(k, v)| {
+                        (head.sample_axis_tick(c, first_index + k as u64).unwrap(), v)
+                    }))
+                }
             }
         }
     }
@@ -253,22 +255,31 @@ fn two_rates_merge_at_their_least_common_multiple() {
         .collect();
     // The probe's CLK takes its stem: the analyser's has the name.
     assert_eq!(names, [("CLK", 0), ("probe/CLK", 1), ("I", 1)]);
-    // Factors 24 and 125: the analyser's 1,000 ticks are 24,000, the probe's 300 are 37,500.
+    // m of 24 and 125: the analyser's 1,000 ticks are 24,000 merged ones, the probe's 300 are
+    // 37,500. Every channel keeps its own source's ticks and is kept whole in them.
+    assert_eq!(
+        (h.m(0), h.m(1)),
+        (
+            Some(Ratio::integer(24).unwrap()),
+            Some(Ratio::integer(125).unwrap())
+        )
+    );
     assert_eq!(h.length, 37_500);
-    assert_eq!(kepts(&h), [(0, 24_000), (0, 37_500), (0, 37_500)]);
+    assert_eq!(kepts(&h), [(0, 1_000), (0, 300), (0, 300)]);
     assert_eq!(edges[0], [2_400, 4_800]);
     assert_eq!(edges[1], [1_250, 2_500, 3_750]);
-    assert_eq!(digital_of(&h, 0), (false, 24_000, vec![]));
-    assert_eq!(digital_of(&h, 1), (true, 37_500, vec![]));
-    // The current's period, 3/2 times 125, is 375/2: sample 1 at 187, finer than 125 times its
-    // floored tick 1; sample 199 at floor(199 x 187.5) = 37,312.
+    assert_eq!(digital_of(&h, 0), (false, 1_000, vec![]));
+    assert_eq!(digital_of(&h, 1), (true, 300, vec![]));
+    // The current keeps its period of 3/2 source ticks. Sample i lies at source tick
+    // floor(1.5 i), so on the axis at 125 times that: sample 1 at 125, not at 187.5's floor;
+    // sample 199 at 125 x 298 = 37,250.
     let ChannelKind::Analog { period, first, .. } = &h.channels[2].data else {
         panic!()
     };
-    assert_eq!((*period, *first), (Ratio::new(375, 2).unwrap(), 0));
-    assert_eq!(samples[2][1], (187, Sample::F32(1.0)));
+    assert_eq!((*period, *first), (Ratio::new(3, 2).unwrap(), 0));
+    assert_eq!(samples[2][1], (125, Sample::F32(1.0)));
     assert_eq!(samples[2][2], (375, Sample::F32(2.0)));
-    assert_eq!(samples[2][199], (37_312, Sample::F32(199.0)));
+    assert_eq!(samples[2][199], (37_250, Sample::F32(199.0)));
     // Each source is kept whole, its origin and align restated.
     assert_eq!(origins(&h), [(0, None), (0, None)]);
     let a = &h.sources[0];
@@ -313,8 +324,8 @@ fn an_alignment_moves_its_inputs_channels_and_the_start_follows_the_earliest() {
         (file(analyser()), "analyser", None),
         (file(probe()), "probe", None),
     ];
-    // Later: the probe 1,000 merged ticks on. Its channels start there, unknown before, its CLK
-    // high in the lead gap as it was at its tick 0.
+    // Later: the probe 1,000 merged ticks on. Its source's origin says so; its channels keep
+    // their ticks and spans, and the axis before its start is outside its data.
     let (out, _) = run(
         &inputs,
         &settings(vec![InputSettings::default(), aligned("1000")]),
@@ -322,13 +333,13 @@ fn an_alignment_moves_its_inputs_channels_and_the_start_follows_the_earliest() {
     .unwrap();
     let (h, (edges, samples)) = items(&out);
     assert_eq!(h.length, 38_500);
-    assert_eq!(kepts(&h), [(0, 24_000), (1_000, 38_500), (1_000, 38_500)]);
+    assert_eq!(kepts(&h), [(0, 1_000), (0, 300), (0, 300)]);
     assert_eq!(edges[1], [2_250, 3_500, 4_750]);
-    assert_eq!(digital_of(&h, 1), (false, 38_500, vec![(0, 1_000, true)]));
+    assert_eq!(digital_of(&h, 1), (true, 300, vec![]));
     assert_eq!(samples[2][0].0, 1_000);
     assert_eq!(origins(&h), [(0, None), (1_000, Some(1_000))]);
     // Earlier: the probe 500 merged ticks before the analyser. The recording starts with it, so
-    // the analyser's tick 0 lies 500 in, behind a lead gap at its level, low.
+    // the analyser's tick 0 lies 500 in.
     let (out, _) = run(
         &inputs,
         &settings(vec![InputSettings::default(), aligned("-500")]),
@@ -336,9 +347,9 @@ fn an_alignment_moves_its_inputs_channels_and_the_start_follows_the_earliest() {
     .unwrap();
     let (h, (edges, samples)) = items(&out);
     assert_eq!(h.length, 37_500);
-    assert_eq!(kepts(&h), [(500, 24_500), (0, 37_500), (0, 37_500)]);
+    assert_eq!(kepts(&h), [(0, 1_000), (0, 300), (0, 300)]);
     assert_eq!(edges[0], [2_900, 5_300]);
-    assert_eq!(digital_of(&h, 0), (false, 24_500, vec![(0, 500, false)]));
+    assert_eq!(digital_of(&h, 0), (false, 1_000, vec![]));
     assert_eq!(edges[1], [1_250, 2_500, 3_750]);
     assert_eq!(samples[2][0].0, 0);
     assert_eq!(origins(&h), [(500, None), (0, Some(-500))]);
@@ -349,25 +360,35 @@ fn an_alignment_moves_its_inputs_channels_and_the_start_follows_the_earliest() {
     )
     .unwrap();
     assert_eq!(origins(&items(&out).0), [(0, None), (12, Some(12))]);
-    // A merge offset 1,200 earlier on I alone: I starts the recording, and every other channel
-    // and both sources lie 1,200 in.
+    // A merge offset of 10 of its own source's ticks earlier on I alone, 1,250 merged ticks: I
+    // starts the recording, and both sources' tick 0 lie 1,250 in.
     let s = Settings {
-        offsets: vec![("I".into(), "-1200".into())],
+        offsets: vec![("I".into(), "-10".into())],
         ..settings(vec![])
     };
     let (out, _) = run(&inputs, &s).unwrap();
     let (h, (edges, samples)) = items(&out);
-    assert_eq!(kepts(&h), [(1_200, 25_200), (1_200, 38_700), (0, 37_500)]);
-    assert_eq!(edges[0], [3_600, 6_000]);
+    assert_eq!(kepts(&h), [(0, 1_000), (0, 300), (0, 300)]);
+    assert_eq!(edges[0], [3_650, 6_050]);
     assert_eq!(samples[2][0].0, 0);
-    assert_eq!(h.channels[2].shaping.offset.as_ref().unwrap().ticks, -1_200);
-    assert_eq!(origins(&h), [(1_200, None), (1_200, None)]);
-    assert_eq!(h.length, 38_700);
+    assert_eq!(h.channels[2].shaping.offset.as_ref().unwrap().ticks, -10);
+    assert_eq!(origins(&h), [(1_250, None), (1_250, None)]);
+    assert_eq!(h.length, 38_750);
+    // The offset is on the source's grid: 1,200 merged ticks are 9.6 of the probe's.
+    let s = Settings {
+        offsets: vec![("I".into(), "-100 ns".into())],
+        ..settings(vec![])
+    };
+    let err = run(&inputs, &s).err().unwrap().to_string();
+    assert_eq!(
+        err,
+        r#"I: "-100 ns" is -9.600 source ticks, more than 0.01 of a source tick off the grid"#
+    );
 }
 
 /// A conversion at 500 MHz of D (edges 100, 300, 500, 700) and E (150, 450) over 1,000 ticks,
-/// with D moved 10 earlier and E kept from 200 to 800: D starts the recording, so the source's
-/// tick 0 lies 10 in, and E is kept from 210 to 810, high in its lead gap after its edge at 150.
+/// with D moved 10 earlier and E kept from 200 to 800 of the capture's ticks: D starts the
+/// recording, so the source's tick 0 lies 10 in, and E is high from 200, after its edge at 150.
 fn shaped() -> Vec<u8> {
     use escapement_tickwave_import::convert::{self, Settings as ConvertSettings};
     let timebase = Ratio::integer(500_000_000).unwrap();
@@ -407,13 +428,13 @@ fn offsets_and_keeps_compose_with_an_input_moved_and_cut() {
     assert_eq!(h.sources[0].origin, 10);
     assert_eq!(
         kepts(&h),
-        [(0, 1_000), (210, 810)],
+        [(0, 1_000), (200, 800)],
         "the input as worked out"
     );
-    // At 12 GHz, a factor of 24. D moved 48 more merged ticks; E kept from 300 to 700 of its own
-    // ticks, inside its own 210..810.
+    // At 12 GHz, an m of 24. D moved 2 more of its source's ticks; E kept from 300 to 700 of its
+    // input's ticks, inside its own 210..810 there: source ticks 290 to 690.
     let merge_settings = Settings {
-        offsets: vec![("D".into(), "48".into())],
+        offsets: vec![("D".into(), "2".into())],
         keeps: vec![("E".into(), Some("300".into()), Some("700".into()))],
         ..settings(vec![])
     };
@@ -423,23 +444,24 @@ fn offsets_and_keeps_compose_with_an_input_moved_and_cut() {
     )
     .unwrap();
     let (h, (edges, _)) = items(&out);
-    // D's offset: 24 x -10 + 48 = -192, its kind kept. The probe starts at 0, so the base is 0.
+    // D's offset: -10 + 2 = -8 source ticks, its kind kept. The probe starts at 0, so the base
+    // is 0.
     let d = &h.channels[0];
     assert_eq!(
         d.shaping.offset,
         Some(Offset {
-            ticks: -192,
+            ticks: -8,
             kind: Offset::DELAY.into()
         })
     );
-    // D: kept 24 x 0..1,000 + 48; its edges 24 t + 48; unknown before 48, low.
-    assert_eq!(kepts(&h)[..2], [(48, 24_048), (7_200, 16_800)]);
+    // D: kept whole; its edges at 240 + 24 (t - 8).
+    assert_eq!(kepts(&h)[..2], [(0, 1_000), (290, 690)]);
     assert_eq!(edges[0], [2_448, 7_248, 12_048, 16_848]);
-    assert_eq!(digital_of(&h, 0), (false, 24_048, vec![(0, 48, false)]));
-    // E: from 300 of its own ticks, high there since its edge at 150, which the conversion took
-    // into its lead gap's level; its edge at 460 (450 + 10) is 11,040; known to 700, so 16,800.
+    assert_eq!(digital_of(&h, 0), (false, 1_000, vec![]));
+    // E: from its source tick 290, high there since its edge at 150; its edge at 450 lies at
+    // 240 + 24 x 450 = 11,040.
     assert_eq!(edges[1], [11_040]);
-    assert_eq!(digital_of(&h, 1), (false, 16_800, vec![(0, 7_200, true)]));
+    assert_eq!(digital_of(&h, 1), (true, 690, vec![]));
     assert!(h.channels[1].shaping.offset.is_none());
     // The source's origin, 24 x 10, after no alignment and a base of 0.
     assert_eq!(origins(&h), [(240, None), (0, None)]);
@@ -447,10 +469,10 @@ fn offsets_and_keeps_compose_with_an_input_moved_and_cut() {
 }
 
 /// A merged input: the analyser and the probe, the probe 1,000 ticks later at 12 GHz and its CLK
-/// 5 more.
+/// one more of its own ticks, 125 merged ones.
 fn merged_input() -> Vec<u8> {
     let s = Settings {
-        offsets: vec![("probe/CLK".into(), "5".into())],
+        offsets: vec![("probe/CLK".into(), "1".into())],
         ..settings(vec![InputSettings::default(), aligned("1000")])
     };
     run(
@@ -468,9 +490,9 @@ fn merged_input() -> Vec<u8> {
 fn a_merged_input_joins_its_sources_and_its_offsets_and_aligns_scale_and_add() {
     let m = merged_input();
     let h = Footer::parse_file(&m).unwrap().header;
-    assert_eq!(kepts(&h), [(0, 24_000), (1_005, 38_505), (1_000, 38_500)]);
-    // C at 36 GHz: the multiple is 36 GHz, so M's factor is 3. M aligned 900 later, its probe/CLK
-    // moved 24 more.
+    assert_eq!(kepts(&h), [(0, 1_000), (0, 300), (0, 300)]);
+    // C at 36 GHz: the multiple is 36 GHz, so M's ticks are 3 merged ones. M aligned 900 later,
+    // its probe/CLK moved 2 more of its source's ticks.
     let tb = Ratio::integer(36_000_000_000).unwrap();
     let c = Recording {
         timebase: tb,
@@ -480,7 +502,7 @@ fn a_merged_input_joins_its_sources_and_its_offsets_and_aligns_scale_and_add() {
         sources: vec![source("third", tb)],
     };
     let s = Settings {
-        offsets: vec![("probe/CLK".into(), "24".into())],
+        offsets: vec![("probe/CLK".into(), "2".into())],
         ..settings(vec![aligned("900")])
     };
     let (out, _) = run(&[(m, "m", None), (file(c), "third", None)], &s).unwrap();
@@ -497,25 +519,15 @@ fn a_merged_input_joins_its_sources_and_its_offsets_and_aligns_scale_and_add() {
         h.channels.iter().map(|c| c.source).collect::<Vec<_>>(),
         [0, 1, 1, 2]
     );
-    // probe/CLK's offset: 3 x 5 + 24 = 39; its span 3 x 1,005..38,505 + 924.
-    assert_eq!(h.channels[1].shaping.offset.as_ref().unwrap().ticks, 39);
-    assert_eq!(
-        kepts(&h),
-        [
-            (900, 72_900),
-            (3_939, 116_439),
-            (3_900, 116_400),
-            (0, 3_000)
-        ]
-    );
-    // M's edges at 2,255, 3,505 and 4,755: 3 t + 924.
-    assert_eq!(edges[1], [7_689, 11_439, 15_189]);
-    assert_eq!(h.length, 116_439);
-    // Each source's factor follows from the timebases: 36 GHz over 500 MHz is 72.
-    assert_eq!(
-        escapement_tickwave_format::header::factor(h.timebase, h.sources[0].timebase),
-        Some(72)
-    );
+    // probe/CLK's offset: 1 + 2 = 3 of its source's ticks; the spans stay its own.
+    assert_eq!(h.channels[1].shaping.offset.as_ref().unwrap().ticks, 3);
+    assert_eq!(kepts(&h), [(0, 1_000), (0, 300), (0, 300), (0, 3_000)]);
+    // The probe's m is 36 GHz over 96 MHz, 375: its CLK's edges at 3,900 + 375 (t + 3).
+    assert_eq!(h.m(1), Some(Ratio::integer(375).unwrap()));
+    assert_eq!(edges[1], [8_775, 12_525, 16_275]);
+    assert_eq!(h.length, 117_525);
+    // Each source's m follows from the timebases: 36 GHz over 500 MHz is 72.
+    assert_eq!(h.m(0), Some(Ratio::integer(72).unwrap()));
 }
 
 /// A verge-like input: V and I as integer codes, and P their product.
@@ -607,6 +619,7 @@ fn names_clash_apart_and_derived_channels_follow_their_operands() {
         InputSettings::default(),
         InputSettings {
             align: None,
+            stretch: None,
             channels: vec![
                 ("V".into(), Some("I".into())),
                 ("I".into(), Some("J".into())),
@@ -628,6 +641,7 @@ fn names_clash_apart_and_derived_channels_follow_their_operands() {
         InputSettings::default(),
         InputSettings {
             align: None,
+            stretch: None,
             channels: vec![("V".into(), Some("V2".into()))],
         },
     ]);
@@ -688,6 +702,7 @@ fn every_refusal_says_plainly_what_it_refuses() {
     );
     let take = |channels: Vec<(&str, Option<&str>)>| InputSettings {
         align: None,
+        stretch: None,
         channels: channels
             .into_iter()
             .map(|(n, m)| (n.to_owned(), m.map(str::to_owned)))
@@ -738,13 +753,13 @@ fn every_refusal_says_plainly_what_it_refuses() {
         ),
         "a unit for CLK: it is digital"
     );
-    // 1 ps at 12 GHz is 0.012 of a tick.
+    // An offset is in the channel's source's ticks: 1 ns at 96 MHz is 0.096 of one.
     assert_eq!(
         refused(
             &[a(), p()],
-            &with(&|s| s.offsets = vec![("I".into(), "1 ps".into())])
+            &with(&|s| s.offsets = vec![("I".into(), "1 ns".into())])
         ),
-        "I: \"1 ps\" is 0.012 merged ticks, more than 0.01 of a merged tick off the grid"
+        "I: \"1 ns\" is 0.096 source ticks, more than 0.01 of a source tick off the grid"
     );
     assert_eq!(
         refused(
@@ -798,83 +813,68 @@ fn every_refusal_says_plainly_what_it_refuses() {
             None,
         )
     };
+    // Rates whose multiple is past 2^53 merge at the fastest of them, the slower's ticks a ratio
+    // of its.
+    let (out, _) = run(
+        &[rate((1 << 52) - 1), rate((1 << 52) + 1)],
+        &settings(vec![]),
+    )
+    .unwrap();
+    let h = Footer::parse_file(&out).unwrap().header;
+    assert_eq!(h.timebase, Ratio::integer((1 << 52) + 1).unwrap());
     assert_eq!(
-        refused(
-            &[rate((1 << 52) + 1), rate((1 << 52) - 1)],
-            &settings(vec![])
-        ),
-        "the inputs tick 4503599627370497/1, 4503599627370495/1: their least common multiple is past 2^53"
+        (h.m(0), h.m(1)),
+        (Ratio::new((1 << 52) + 1, (1 << 52) - 1), Some(Ratio::ONE))
     );
-    // A break at the tick of the sample before it, which twice the rate puts after it: samples at
-    // 0 and 1 (1.5 floored), the run after starting at 1. At a factor of 2 the period is 3, so
-    // sample 1 sits at 3, past the break at 2.
-    let broken_data = || {
-        ChannelData::Analog(Analog {
-            unit: String::new(),
-            first: 0,
-            period: Ratio::new(3, 2).unwrap(),
-            count: 3,
-            breaks: vec![Break {
-                index: 2,
-                tick: 1,
-                lost: 0,
-            }],
-            significant: None,
-            samples: Samples::F32(Box::new([0.0, 1.0, 2.0].into_iter())),
-        })
-    };
-    let broken_channel = || Channel {
-        name: "W".into(),
-        source_name: "w".into(),
-        source: 0,
-        data: broken_data(),
-        shaping: Shaping::default(),
-    };
-    let broken_recording = || {
+    // A break at the tick of the sample before it: samples at source ticks 0 and 1 (1.5
+    // floored), the run after starting at 1. Each channel keeps its source's ticks, so a merge at
+    // twice the rate keeps the break on its sample before, at merged tick 2. At a period of 1 the
+    // same.
+    for period in [Ratio::new(3, 2).unwrap(), Ratio::ONE] {
         let tb = Ratio::integer(1_000).unwrap();
-        Recording {
+        let broken = Recording {
             timebase: tb,
             length: 10,
-            channels: vec![broken_channel()],
+            channels: vec![Channel {
+                name: "W".into(),
+                source_name: "w".into(),
+                source: 0,
+                data: ChannelData::Analog(Analog {
+                    unit: String::new(),
+                    first: 0,
+                    period,
+                    count: 3,
+                    breaks: vec![Break {
+                        index: 2,
+                        tick: 1,
+                        lost: 0,
+                    }],
+                    significant: None,
+                    samples: Samples::F32(Box::new([0.0, 1.0, 2.0].into_iter())),
+                }),
+                shaping: Shaping::default(),
+            }],
             derived: Vec::new(),
             sources: vec![source("w", tb)],
-        }
-    };
-    let broken = broken_recording();
-    assert_eq!(
-        refused(&[(file(broken), "w", None), rate(2_000)], &settings(vec![])),
-        "W: its run before sample 2 ends at merged tick 3, after the run that starts there at 2: the merged rate puts the input's sample before the break later than the break"
-    );
-    // At a period of 1 the same break stays on the sample before it, at merged tick 2, which
-    // FORMAT allows: a break's tick is at least its sample before's.
-    let level = Recording {
-        channels: vec![Channel {
-            data: ChannelData::Analog(Analog {
-                period: Ratio::ONE,
-                samples: Samples::F32(Box::new([0.0, 1.0, 2.0].into_iter())),
-                ..match broken_data() {
-                    ChannelData::Analog(a) => a,
-                    ChannelData::Digital(_) => unreachable!(),
-                }
-            }),
-            ..broken_channel()
-        }],
-        ..broken_recording()
-    };
-    let (out, _) = run(&[(file(level), "w", None), rate(2_000)], &settings(vec![])).unwrap();
-    let (h, (_, samples)) = items(&out);
-    let ChannelKind::Analog { breaks, .. } = &h.channels[0].data else {
-        panic!()
-    };
-    assert_eq!(
-        breaks.iter().map(|b| (b.index, b.tick)).collect::<Vec<_>>(),
-        [(2, 2)]
-    );
-    assert_eq!(
-        samples[0].iter().map(|(t, _)| *t).collect::<Vec<_>>(),
-        [0, 2, 2]
-    );
-    // A 1 Hz input beside a 2^20 Hz one has a factor of 2^20: a period of 2^40 ticks becomes 2^60.
+        };
+        let (out, _) = run(&[(file(broken), "w", None), rate(2_000)], &settings(vec![])).unwrap();
+        let (h, (_, samples)) = items(&out);
+        let ChannelKind::Analog { breaks, .. } = &h.channels[0].data else {
+            panic!()
+        };
+        assert_eq!(
+            breaks.iter().map(|b| (b.index, b.tick)).collect::<Vec<_>>(),
+            [(2, 1)],
+            "{period:?}"
+        );
+        assert_eq!(
+            samples[0].iter().map(|(t, _)| *t).collect::<Vec<_>>(),
+            [0, 2, 2],
+            "{period:?}"
+        );
+    }
+    // A 1 Hz input beside a 2^20 Hz one: each of its ticks is 2^20 merged ones, and its period
+    // of 2^40 stays in its own ticks, 2^60 merged ticks apart.
     let slow = |period: u64| {
         let tb = Ratio::ONE;
         file(Recording {
@@ -899,12 +899,18 @@ fn every_refusal_says_plainly_what_it_refuses() {
             sources: vec![source("slow", tb)],
         })
     };
+    let (out, _) = run(
+        &[(slow(1 << 40), "slow", None), rate(1 << 20)],
+        &settings(vec![]),
+    )
+    .unwrap();
+    let h = Footer::parse_file(&out).unwrap().header;
+    let ChannelKind::Analog { period, .. } = &h.channels[0].data else {
+        panic!()
+    };
     assert_eq!(
-        refused(
-            &[(slow(1 << 40), "slow", None), rate(1 << 20)],
-            &settings(vec![])
-        ),
-        "S: its period times 1048576 is past 2^53"
+        (*period, h.m(0)),
+        (Ratio::integer(1 << 40).unwrap(), Ratio::integer(1 << 20))
     );
     // A rate of 2^30 Hz beside one of 1/2^30 Hz: their multiple is 2^30 Hz, within 2^53, but each
     // of the slow input's ticks is 2^60 merged ticks.
@@ -918,21 +924,23 @@ fn every_refusal_says_plainly_what_it_refuses() {
     });
     assert_eq!(
         refused(&[rate(1 << 30), (crawl, "crawl", None)], &settings(vec![])),
-        "input 2 ticks 1/1073741824: each of its ticks is 1152921504606846976 merged ticks, past 2^53"
+        "input 2: a tick of it, or of a source of it, would be a ratio of merged ticks with a term past 2^53"
     );
-    // A merge offset that puts I's end past 2^53.
+    // A merge offset that puts I's end past 2^53, at 12 GHz and then at the fastest rate, 500
+    // MHz, where the probe's tick is 125/24 merged ones: floor(9,007,199,254,740,300 x 125 / 24).
     assert_eq!(
         refused(
             &[a(), p()],
             &with(&|s| s.offsets = vec![("I".into(), "9007199254740000".into())])
         ),
-        "the merged recording would run to tick 9007199254777500, past 2^53"
+        "the merged recording would run to tick 46912496118439062, past 2^53"
     );
 }
 
 /// A 1 kHz recording of one digital channel S over 10 ticks, with nothing in it but what its
-/// header states: S's offset of `ticks` of `kind`, and its source's origin and align.
-fn declared(kind: &str, ticks: i64, origin: i64, align: Option<i64>) -> Vec<u8> {
+/// header states: S's offset of `ticks` of `kind`, and its source's align. The source's origin is
+/// `-ticks`, so that S starts the recording.
+fn declared(kind: &str, ticks: i64, align: Option<i64>) -> Vec<u8> {
     use escapement_tickwave_format::header::{
         Declaration, DeclaredChannel, DeclaredKind, SourceHeader,
     };
@@ -955,7 +963,7 @@ fn declared(kind: &str, ticks: i64, origin: i64, align: Option<i64>) -> Vec<u8> 
         }],
         derived: Vec::new(),
         sources: vec![SourceHeader {
-            origin,
+            origin: -ticks,
             align,
             ..SourceHeader::new(SourceFormat::Other("s".into()), tb)
         }],
@@ -971,7 +979,7 @@ fn declared(kind: &str, ticks: i64, origin: i64, align: Option<i64>) -> Vec<u8> 
 
 #[test]
 fn an_offset_of_another_kind_than_delay_takes_no_merge_offset() {
-    let skewed = |kind: &str| declared(kind, 2, 0, None);
+    let skewed = |kind: &str| declared(kind, 2, None);
     let s = Settings {
         offsets: vec![("S".into(), "1".into())],
         ..settings(vec![])
@@ -986,7 +994,7 @@ fn an_offset_of_another_kind_than_delay_takes_no_merge_offset() {
         err.to_string(),
         "S: its input states a \"skew\" offset, which the merge's own offset can't add to"
     );
-    // A kind it doesn't move keeps, scaled: 500 kHz over 1 kHz... the factor here is 500,000.
+    // A kind it doesn't move keeps, in its source's ticks as it was.
     let (out, _) = run(
         &[(skewed("skew"), "s", None), (file(analyser()), "a", None)],
         &settings(vec![]),
@@ -996,7 +1004,7 @@ fn an_offset_of_another_kind_than_delay_takes_no_merge_offset() {
     assert_eq!(
         h.channels[0].shaping.offset,
         Some(Offset {
-            ticks: 1_000_000,
+            ticks: 2,
             kind: "skew".into()
         })
     );
@@ -1007,28 +1015,31 @@ fn ticks_past_2_53_on_the_way_to_the_merged_recording_are_refused() {
     let refused =
         |files: &[File<'_>], s: &Settings| run(files, s).err().expect("refused").to_string();
     let a = || (file(analyser()), "analyser", None);
-    // Beside the analyser, S's factor is 500,000: its input offset of 2^50 ticks, and its
-    // source's origin or align of 2^50, are each past 2^53 merged ticks.
+    // Beside the analyser, each of S's ticks is 500,000 merged ones: its source's origin of
+    // -2^50, or an align of 2^50, is past 2^53 merged ticks. S's offset of 2^50 stays in its
+    // source's ticks.
     assert_eq!(
         refused(
-            &[(declared("delay", 1 << 50, 0, None), "s", None), a()],
+            &[(declared("delay", 1 << 50, None), "s", None), a()],
             &settings(vec![])
         ),
-        "S's offset: 562949953421312000000 ticks is past 2^53"
+        "input 1's source 0's origin: -562949953421312000000 ticks is past 2^53"
     );
     assert_eq!(
         refused(
-            &[(declared("delay", 2, 1 << 50, None), "s", None), a()],
-            &settings(vec![])
-        ),
-        "input 1's source 0's origin: 562949953421312000000 ticks is past 2^53"
-    );
-    assert_eq!(
-        refused(
-            &[(declared("delay", 2, 0, Some(1 << 50)), "s", None), a()],
+            &[(declared("delay", 2, Some(1 << 50)), "s", None), a()],
             &settings(vec![])
         ),
         "input 1's source 0's align: 562949953421312000000 ticks is past 2^53"
+    );
+    // Its input offset and the merge's add to 2^53 source ticks.
+    let s = Settings {
+        offsets: vec![("S".into(), "4503599627370496".into())],
+        ..settings(vec![])
+    };
+    assert_eq!(
+        refused(&[(declared("delay", 1 << 52, None), "s", None), a()], &s),
+        "S's offset: 9007199254740992 ticks is past 2^53"
     );
     // The analyser's CLK moved almost 2^53 earlier and the probe aligned almost 2^53 later: CLK
     // starts the recording, so the probe lies twice that in.
@@ -1040,9 +1051,10 @@ fn ticks_past_2_53_on_the_way_to_the_merged_recording_are_refused() {
         refused(&[a(), (file(probe()), "probe", None)], &s),
         "input 2's move: 18014398509480000 ticks is past 2^53"
     );
-    // The check: a header merged from S with an offset of 2 and origin and align 0, given an S
-    // whose offset, origin or align is 2^50, recovers -500,000 x 2^50 or so.
-    let small = declared("delay", 2, 0, None);
+    // The check: a header merged from S with an offset of 2, origin -2 and no align, given an S
+    // whose origin is -2^50 or align 2^50, recovers 500,000 x 2^50 or so. The header states
+    // the offset itself.
+    let small = declared("delay", 2, None);
     let (out, _) = run(&[(small, "s", None), a()], &settings(vec![])).unwrap();
     let h = Footer::parse_file(&out).unwrap().header;
     let against = |s: Vec<u8>| -> Vec<Recording> {
@@ -1053,16 +1065,12 @@ fn ticks_past_2_53_on_the_way_to_the_merged_recording_are_refused() {
     };
     let check = |s: Vec<u8>| expected(&h, against(s)).err().unwrap().to_string();
     assert_eq!(
-        check(declared("delay", 2, 1 << 50, None)),
-        "input 1's move: -562949953421312000000 ticks is past 2^53"
+        check(declared("delay", 1 << 50, None)),
+        "input 1's move: 562949953421311000000 ticks is past 2^53"
     );
     assert_eq!(
-        check(declared("delay", 2, 0, Some(1 << 50))),
+        check(declared("delay", 2, Some(1 << 50))),
         "input 1's align: -562949953421312000000 ticks is past 2^53"
-    );
-    assert_eq!(
-        check(declared("delay", 1 << 50, 0, None)),
-        "S's offset: -562949953421311000000 ticks is past 2^53"
     );
     // And a recording ticking 1/2^47 Hz given where a merge at 2^13 Hz had one at 1 Hz: the lcm
     // still holds, but each of its ticks would be 2^60 merged ticks.
@@ -1088,7 +1096,7 @@ fn ticks_past_2_53_on_the_way_to_the_merged_recording_are_refused() {
         .collect();
     assert_eq!(
         expected(&h, against).err().unwrap().to_string(),
-        "input 2 ticks 1/140737488355328: each of its ticks is 1152921504606846976 merged ticks, past 2^53"
+        "input 2: a tick of it, or of a source of it, would be a ratio of merged ticks with a term past 2^53"
     );
 }
 
@@ -1162,6 +1170,7 @@ fn generated_annotations_come_over_mapped_and_hand_written_ones_are_counted() {
             InputSettings::default(),
             InputSettings {
                 align: Some("1000".into()),
+                stretch: None,
                 channels: vec![("I".into(), None)],
             },
         ])
@@ -1558,43 +1567,41 @@ fn expected_refuses_inputs_that_do_not_fit_the_header() {
         edit(&mut h);
         expected(&h, recordings()).err().map(|e| e.to_string())
     };
-    // The probe's origin a tick later: its channels' kept spans no longer sit on its ticks.
-    assert_eq!(
-        changed(&|h| h.sources[1].origin = 1_001),
-        Some("channel probe/CLK: its kept span 1000 to 38500 is not a whole number of its input's ticks".into())
-    );
-    // Its align a tick less rebuilds, but not to what the file states.
-    let mut realigned = h.clone();
-    realigned.sources[1].align = Some(999);
-    let rebuilt = expected(&realigned, recordings()).unwrap();
-    assert_eq!(
-        verify(&out[..], rebuilt).unwrap_err().to_string(),
-        "source 1: the format, timebase, origin or align differs"
-    );
-    assert_eq!(
-        changed(&|h| h.channels[1].shaping.kept = Some(Kept { from: 1_001, to: 38_501 })),
-        Some("channel probe/CLK: its kept span 1001 to 38501 is not a whole number of its input's ticks".into())
-    );
-    assert_eq!(
-        changed(&|h| h.channels[1].shaping.kept = Some(Kept { from: 1_000, to: 38_501 })),
-        Some("channel probe/CLK: its kept span 1000 to 38501 is not a whole number of its input's ticks".into())
-    );
+    // The probe's origin a tick later, or its align a tick less: each rebuilds, since any merged
+    // tick is a place for a source's tick 0, but not to what the file states.
+    for edit in [
+        &(|h: &mut Header| h.sources[1].origin = 1_001) as &dyn Fn(&mut Header),
+        &|h: &mut Header| h.sources[1].align = Some(999),
+    ] {
+        let mut edited = h.clone();
+        edit(&mut edited);
+        let rebuilt = expected(&edited, recordings()).unwrap();
+        assert_eq!(
+            verify(&out[..], rebuilt).unwrap_err().to_string(),
+            "source 1: the format, timebase, origin, align or stretch differs"
+        );
+    }
     assert_eq!(
         changed(&|h| h.channels[1].source_name = "nothing".into()),
         Some("channel probe/CLK: input 2 has no channel \"nothing\" of its source 0".into())
     );
     assert_eq!(
         changed(&|h| h.timebase = Ratio::integer(24_000_000_000).unwrap()),
-        Some("the merged recording ticks 24000000000/1, not 12000000000/1, the least common multiple of the recordings given".into())
+        Some("the merged recording ticks 24000000000/1, neither 12000000000/1, the least common multiple of the recordings' rates, nor 500000000/1, the fastest of them".into())
     );
-    // A kept span moved by whole input ticks rebuilds, but not to what the file holds.
+    // The fastest rate is a merge's other axis: the check takes it, and rebuilds a recording
+    // the file does not hold.
+    let mut fastest = h.clone();
+    fastest.timebase = Ratio::integer(500_000_000).unwrap();
+    assert!(verify(&out[..], expected(&fastest, recordings()).unwrap()).is_err());
+    // A kept span moved by a source tick rebuilds, but not to what the file holds.
     let mut moved = h.clone();
-    moved.channels[1].shaping.kept = Some(Kept {
-        from: 1_125,
-        to: 38_500,
-    });
+    moved.channels[1].shaping.kept = Some(Kept { from: 1, to: 300 });
     let rebuilt = expected(&moved, recordings()).unwrap();
-    assert!(verify(&out[..], rebuilt).is_err());
+    assert_eq!(
+        verify(&out[..], rebuilt).unwrap_err().to_string(),
+        "channel probe/CLK: the offset or the kept span differs"
+    );
 }
 
 #[test]
@@ -1605,10 +1612,10 @@ fn a_merged_file_with_an_edge_moved_does_not_verify() {
     ];
     let (out, _) = run(&inputs, &settings(vec![])).unwrap();
     let (header, mut recording) = read(Arc::new(out.clone())).unwrap();
-    // The same header's statements, CLK's second edge one tick later.
+    // The same header's statements, CLK's second edge one of its source's ticks later.
     if let ChannelData::Digital(d) = &mut recording.channels[0].data {
         let edges = std::mem::replace(&mut d.edges, Box::new(std::iter::empty()));
-        d.edges = Box::new(edges.map(|t| if t == 4_800 { 4_801 } else { t }));
+        d.edges = Box::new(edges.map(|t| if t == 200 { 201 } else { t }));
     }
     let tampered = encode(
         recording,
@@ -1625,7 +1632,10 @@ fn a_merged_file_with_an_edge_moved_does_not_verify() {
         .collect();
     let h = Footer::parse_file(&tampered).unwrap().header;
     let err = verify(&tampered[..], expected(&h, against).unwrap()).unwrap_err();
-    assert_eq!(err.to_string(), "channel CLK: edge at tick 4801 differs");
+    assert_eq!(
+        err.to_string(),
+        "channel CLK: edge at source tick 201 differs"
+    );
 }
 
 #[test]
@@ -1636,14 +1646,13 @@ fn a_keep_is_in_its_inputs_time_inside_its_own_span_and_on_its_samples_grid() {
             (file(probe()), "probe", None),
         ]
     };
-    // 0.2 us at the analyser's 500 MHz is 100 of its ticks: 2,400 merged ticks, not 0.2 us at
-    // 12 GHz.
+    // 0.2 us at the analyser's 500 MHz is 100 of its ticks, not 0.2 us at 12 GHz.
     let s = Settings {
         keeps: vec![("CLK".into(), Some("0.2us".into()), None)],
         ..settings(vec![])
     };
     let (out, _) = run(&inputs(), &s).unwrap();
-    assert_eq!(kepts(&items(&out).0)[0], (2_400, 24_000));
+    assert_eq!(kepts(&items(&out).0)[0], (100, 1_000));
     // A keep reaching past the channel's end keeps to its end: the analyser's 1,000 ticks.
     let s = Settings {
         keeps: vec![("CLK".into(), Some("500".into()), Some("5000".into()))],
@@ -1651,8 +1660,8 @@ fn a_keep_is_in_its_inputs_time_inside_its_own_span_and_on_its_samples_grid() {
     };
     let (out, _) = run(&inputs(), &s).unwrap();
     let h = items(&out).0;
-    assert_eq!(kepts(&h)[0], (12_000, 24_000));
-    assert_eq!(digital_of(&h, 0).1, 24_000);
+    assert_eq!(kepts(&h)[0], (500, 1_000));
+    assert_eq!(digital_of(&h, 0).1, 1_000);
     // I kept from tick 1: sample 1 sits there, off its period's grid of 2, so the cut moves to
     // sample 2 at tick 3, 375 merged ticks.
     let s = Settings {
@@ -1661,10 +1670,10 @@ fn a_keep_is_in_its_inputs_time_inside_its_own_span_and_on_its_samples_grid() {
     };
     let (out, _) = run(&inputs(), &s).unwrap();
     let (h, (_, samples)) = items(&out);
-    assert_eq!(kepts(&h)[2], (375, 37_500));
+    assert_eq!(kepts(&h)[2], (3, 300));
     assert_eq!(samples[2][0], (375, Sample::F32(2.0)));
     // A keep reaching before an input channel's own span keeps only its span: E is its
-    // input's from 210.
+    // input's from 210, its source's from 200.
     let s = Settings {
         keeps: vec![("E".into(), Some("100".into()), None)],
         ..settings(vec![])
@@ -1674,11 +1683,11 @@ fn a_keep_is_in_its_inputs_time_inside_its_own_span_and_on_its_samples_grid() {
         &s,
     )
     .unwrap();
-    assert_eq!(kepts(&items(&out).0)[1], (24 * 210, 24 * 810));
+    assert_eq!(kepts(&items(&out).0)[1], (200, 800));
 }
 
 #[test]
-fn an_input_neither_moved_nor_cut_keeps_its_edges_at_tick_0_and_one_moved_later_takes_them_in() {
+fn an_input_keeps_its_edges_at_its_tick_0_moved_or_not() {
     let pulse = || {
         let tb = Ratio::integer(96_000_000).unwrap();
         Recording {
@@ -1696,18 +1705,20 @@ fn an_input_neither_moved_nor_cut_keeps_its_edges_at_tick_0_and_one_moved_later_
     let (out, _) = run(&inputs, &settings(vec![])).unwrap();
     let (h, (edges, _)) = items(&out);
     assert_eq!(edges[0], [0, 0, 5_000]);
-    assert_eq!(digital_of(&h, 0), (false, 12_500, vec![]));
-    // Aligned 10 later: the lead gap's end can hold no edge, so the pulse is its level, low.
+    assert_eq!(digital_of(&h, 0), (false, 100, vec![]));
+    // Aligned 10 later: the axis before the source's tick 0 is outside its data, so the pulse
+    // at that tick stays, 10 in.
     let (out, _) = run(&inputs, &settings(vec![aligned("10")])).unwrap();
     let (h, (edges, _)) = items(&out);
-    assert_eq!(edges[0], [5_010]);
-    assert_eq!(digital_of(&h, 0), (false, 12_510, vec![(0, 10, false)]));
+    assert_eq!(edges[0], [10, 10, 5_010]);
+    assert_eq!(digital_of(&h, 0), (false, 100, vec![]));
+    assert_eq!(origins(&h), [(10, Some(10)), (0, None)]);
 }
 
 #[test]
-fn gaps_and_breaks_map_with_their_inputs_factor() {
+fn gaps_and_breaks_keep_their_source_ticks_and_map_with_their_source() {
     use escapement_tickwave_format::model::Gap;
-    // At 500 MHz beside the probe, a factor of 24. G rises at 100, is unknown from 200 to 400 and
+    // At 500 MHz beside the probe, an m of 24. G rises at 100, is unknown from 200 to 400 and
     // high after, and falls at 600. The probe's I pauses: sample 100 starts a run at tick 150, two
     // after sample 99 at 148.
     let tb = Ratio::integer(500_000_000).unwrap();
@@ -1719,6 +1730,7 @@ fn gaps_and_breaks_map_with_their_inputs_factor() {
                 initial: false,
                 end: 1_000,
                 edges: Box::new([100, 600].into_iter()),
+                count: 2,
                 gaps: vec![Gap {
                     from: 200,
                     to: 400,
@@ -1742,11 +1754,9 @@ fn gaps_and_breaks_map_with_their_inputs_factor() {
     let (out, _) = run(&inputs, &settings(vec![])).unwrap();
     let (h, (edges, samples)) = items(&out);
     assert_eq!(edges[0], [2_400, 14_400]);
-    assert_eq!(
-        digital_of(&h, 0),
-        (false, 24_000, vec![(4_800, 9_600, true)])
-    );
-    // The break at 125 x 150; sample 101 a period of 375/2 after it, floored.
+    assert_eq!(digital_of(&h, 0), (false, 1_000, vec![(200, 400, true)]));
+    // The break stays at source tick 150, 125 x 150 on the axis; sample 101 at source tick
+    // 150 + floor(1.5), 125 x 151.
     let ChannelKind::Analog { breaks, .. } = &h.channels[2].data else {
         panic!()
     };
@@ -1755,25 +1765,27 @@ fn gaps_and_breaks_map_with_their_inputs_factor() {
             .iter()
             .map(|b| (b.index, b.tick, b.lost))
             .collect::<Vec<_>>(),
-        [(100, 18_750, 3)]
+        [(100, 150, 3)]
     );
     assert_eq!(samples[2][100].0, 18_750);
-    assert_eq!(samples[2][101].0, 18_937);
-    // G kept from 300, inside its gap: the gap joins the lead one from 0, and ends at 24 x 400.
+    assert_eq!(samples[2][101].0, 18_875);
+    // G kept from 300, inside its gap: the gap starts at the channel's start, so its initial is
+    // false, and ends at 400.
     let s = Settings {
         keeps: vec![("G".into(), Some("300".into()), None)],
         ..settings(vec![])
     };
     let (out, _) = run(&inputs, &s).unwrap();
     let (h, (edges, _)) = items(&out);
-    assert_eq!(kepts(&h)[0], (7_200, 24_000));
+    assert_eq!(kepts(&h)[0], (300, 1_000));
     assert_eq!(edges[0], [14_400]);
-    assert_eq!(digital_of(&h, 0), (false, 24_000, vec![(0, 9_600, true)]));
+    assert_eq!(digital_of(&h, 0), (false, 1_000, vec![(300, 400, true)]));
 }
 
 #[test]
-fn a_period_times_its_factor_is_in_lowest_terms() {
-    // The probe beside a 192 MHz input: a factor of 2, so 3/2 becomes 3.
+fn a_period_stays_in_its_sources_ticks() {
+    // The probe beside a 192 MHz input: each of its ticks is 2 merged ones, and its period
+    // stays 3/2 of them.
     let tb = Ratio::integer(192_000_000).unwrap();
     let fast = Recording {
         timebase: tb,
@@ -1790,7 +1802,7 @@ fn a_period_times_its_factor_is_in_lowest_terms() {
     let ChannelKind::Analog { period, .. } = &items(&out).0.channels[1].data else {
         panic!()
     };
-    assert_eq!((period.num(), period.den()), (3, 1));
+    assert_eq!((period.num(), period.den()), (3, 2));
 }
 
 #[test]
@@ -2059,5 +2071,209 @@ fn each_inputs_title_and_meta_go_with_its_sources_and_a_merged_inputs_keep_their
             Some("energy".into()),
             Some("third".into())
         ]
+    );
+}
+
+fn stretched(stretch: &str) -> InputSettings {
+    InputSettings {
+        stretch: Some(stretch.into()),
+        ..InputSettings::default()
+    }
+}
+
+#[test]
+fn a_stretch_scales_an_inputs_ticks_and_its_sources_state_it() {
+    let inputs = [
+        (file(analyser()), "analyser", None),
+        (file(probe()), "probe", None),
+    ];
+    // 1,000 ppm slow: each of the probe's ticks is 125 x 1.001 = 1001/8 merged ticks, and its
+    // CLK's edges at 10, 20 and 30 lie at their places floored: 1,251.25, 2,502.5, 3,753.75.
+    let (out, _) = run(
+        &inputs,
+        &settings(vec![InputSettings::default(), stretched("+1000ppm")]),
+    )
+    .unwrap();
+    let (h, (edges, samples)) = items(&out);
+    assert_eq!(h.sources[1].stretch, Ratio::new(1001, 1000));
+    assert_eq!(h.sources[0].stretch, None);
+    assert_eq!((h.m(0), h.m(1)), (Ratio::integer(24), Ratio::new(1001, 8)));
+    assert_eq!(edges[0], [2_400, 4_800]);
+    assert_eq!(edges[1], [1_251, 2_502, 3_753]);
+    // I's sample 199 at source tick 298: 37,287.25.
+    assert_eq!(samples[2][199].0, 37_287);
+    // The probe's end, 300, at 37,537.5.
+    assert_eq!(h.length, 37_537);
+    let against = inputs
+        .iter()
+        .map(|(b, ..)| read(Arc::new(b.clone())).unwrap().1)
+        .collect();
+    let rebuilt = expected(&h, against).unwrap();
+    assert_eq!(verify(&out[..], rebuilt).unwrap().content_id, h.content_id);
+    // The same stretch as a ratio is the same recording; 1,000 ppm fast is another.
+    let (again, _) = run(
+        &inputs,
+        &settings(vec![InputSettings::default(), stretched("1001/1000")]),
+    )
+    .unwrap();
+    assert_eq!(again, out);
+    let (fast, _) = run(
+        &inputs,
+        &settings(vec![InputSettings::default(), stretched("-1000ppm")]),
+    )
+    .unwrap();
+    let (h_fast, (edges, _)) = items(&fast);
+    assert_eq!(h_fast.m(1), Ratio::new(999, 8));
+    assert_eq!(edges[1], [1_248, 2_497, 3_746]);
+    // A stretched merge stretched again: each source's stretch is the product of both.
+    let third = || {
+        let tb = Ratio::integer(12_000_000_000).unwrap();
+        file(Recording {
+            timebase: tb,
+            length: 100,
+            channels: vec![digital("X", false, vec![10], 100)],
+            derived: Vec::new(),
+            sources: vec![source("third", tb)],
+        })
+    };
+    let (twice, _) = run(
+        &[(out, "m", None), (third(), "third", None)],
+        &settings(vec![stretched("+1000ppm")]),
+    )
+    .unwrap();
+    let h = Footer::parse_file(&twice).unwrap().header;
+    assert_eq!(
+        h.sources.iter().map(|s| s.stretch).collect::<Vec<_>>(),
+        [
+            Ratio::new(1001, 1000),
+            Ratio::new(1_002_001, 1_000_000),
+            None
+        ]
+    );
+    // A merged input's origins and aligns restate as floor(x x s): the probe's 1,000 at
+    // 1,000.999.
+    let (m, _) = run(
+        &[(merged_input(), "m", None), (third(), "third", None)],
+        &settings(vec![stretched("+999ppm")]),
+    )
+    .unwrap();
+    assert_eq!(
+        origins(&Footer::parse_file(&m).unwrap().header),
+        [(0, None), (1_000, Some(1_000)), (0, None)]
+    );
+}
+
+#[test]
+fn two_marks_give_an_inputs_move_and_its_stretch() {
+    let inputs = [
+        (file(analyser()), "analyser", None),
+        (file(probe()), "probe", None),
+    ];
+    // The probe's time 0 at 0.25 us and its 1 ms at 1.00125 ms: a stretch of 1.001, and its tick
+    // 0 at 0.25 us, 3,000 merged ticks.
+    let (out, _) = run(
+        &inputs,
+        &settings(vec![
+            InputSettings::default(),
+            aligned("0@0.25us,1ms@1.00125ms"),
+        ]),
+    )
+    .unwrap();
+    let (h, (edges, _)) = items(&out);
+    assert_eq!(h.sources[1].stretch, Ratio::new(1001, 1000));
+    assert_eq!(origins(&h), [(0, None), (3_000, Some(3_000))]);
+    assert_eq!(edges[1], [4_251, 5_502, 6_753]);
+    // The same line through two other marks: its 1 ms at 1.00125 ms and its 2 ms at 2.00225 ms.
+    // Its tick 0 is the first mark's merged time less its own, stretched.
+    let (again, _) = run(
+        &inputs,
+        &settings(vec![
+            InputSettings::default(),
+            aligned("1ms@1.00125ms,2ms@2.00225ms"),
+        ]),
+    )
+    .unwrap();
+    assert_eq!(origins(&items(&again).0), [(0, None), (3_000, Some(3_000))]);
+    assert!(again == out);
+    // Marks whose ratio has terms past 2^53 take the nearest ratio whose terms keep every m below
+    // it.
+    let (near, _) = run(
+        &inputs,
+        &settings(vec![
+            InputSettings::default(),
+            aligned("0@0,0.12345678901234567s@0.12358024691358024s"),
+        ]),
+    )
+    .unwrap();
+    let h = Footer::parse_file(&near).unwrap().header;
+    let s = h.sources[1].stretch.unwrap();
+    let wanted = 12_358_024_691_358_024f64 / 12_345_678_901_234_567f64;
+    let got = s.num() as f64 / s.den() as f64;
+    assert!(
+        (got / wanted - 1.0).abs() < 1e-12,
+        "{s:?}: {got} for {wanted}"
+    );
+    assert!(s.num() < 1 << 53 && h.m(1).is_some(), "{s:?}");
+    // Marks to the picosecond nine seconds apart, whose cross products pass 128 bits unreduced.
+    let (fine, _) = run(
+        &inputs,
+        &settings(vec![
+            InputSettings::default(),
+            aligned("1234567891ps@750000123ns,9123456789123ps@9873134567ns"),
+        ]),
+    )
+    .unwrap();
+    let h = Footer::parse_file(&fine).unwrap().header;
+    let s = h.sources[1].stretch.unwrap();
+    let wanted = (9_873_134_567e-9 - 750_000_123e-9) / (9_123_456_789_123e-12 - 1_234_567_891e-12);
+    let got = s.num() as f64 / s.den() as f64;
+    assert!(
+        (got / wanted - 1.0).abs() < 1e-12,
+        "{s:?}: {got} for {wanted}"
+    );
+    // Its tick 0 at (0.750000123 − 0.001234567891 s) × 12 GHz, to the nearest merged tick.
+    let at = (750_000_123e-9 - 1_234_567_891e-12 * got) * 12e9;
+    assert!(
+        (h.sources[1].origin as f64 - at).abs() <= 1.0,
+        "{} for {at}",
+        h.sources[1].origin
+    );
+    // What the marks can't give.
+    let refused = |input: InputSettings| {
+        run(&inputs, &settings(vec![InputSettings::default(), input]))
+            .err()
+            .expect("refused")
+            .to_string()
+    };
+    assert_eq!(
+        refused(InputSettings {
+            stretch: Some("2/1".into()),
+            ..aligned("0@0,1ms@2ms")
+        }),
+        "input 2 is given a stretch and two marks, which give one each"
+    );
+    assert_eq!(
+        refused(aligned("0@1ms,1ms@0")),
+        "input 2's alignment: the marks must lie apart, and in the same order, in both times"
+    );
+    assert_eq!(
+        refused(aligned("0@1ms,0@2ms")),
+        "input 2's alignment: the marks must lie apart, and in the same order, in both times"
+    );
+    assert_eq!(
+        refused(aligned("0,1ms@2ms")),
+        "input 2's alignment: \"0\": a mark is the input's time and the merged time, as 1.5ms@2.25ms"
+    );
+    assert_eq!(
+        refused(stretched("fast")),
+        "input 2's stretch: \"fast\": a stretch is a ratio a/b, or a change such as +20ppm"
+    );
+    assert_eq!(
+        refused(stretched("-1000000ppm")),
+        "input 2's stretch: \"-1000000ppm\": a stretch is a ratio a/b, or a change such as +20ppm"
+    );
+    assert_eq!(
+        refused(stretched("0/5")),
+        "input 2's stretch: \"0/5\": a stretch is a ratio a/b, or a change such as +20ppm"
     );
 }

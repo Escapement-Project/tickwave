@@ -1,24 +1,26 @@
 //! Merging recordings onto one time axis (plan/merge-2026-11-12.md; FORMAT.md "Times",
 //! "Sources", "Moved and trimmed channels"). The merged recording ticks at the least common
-//! multiple of its inputs' rates. Input j's tick `t` of channel c lies at merged tick
-//! `F_j t + shift_c`, `shift_c = A_j − base + offset_m(c)`: its factor, its alignment, the
-//! merged recording's start and the merge's own offset for the channel. The header states all of
-//! it, so `expected` rebuilds the merge from the header and its inputs alone.
+//! multiple of its sources' rates, or at the fastest of them where the multiple puts a term past
+//! 2^53. Every channel keeps its source's ticks; a merge restates each source's placement. Input
+//! j's axis tick `x` lies at merged tick `A_j − base + floor(x × s_j × R / R_j)`: its alignment,
+//! the merged recording's start, and its stretch. The header states all of it, so `expected`
+//! rebuilds the merge from the header and its inputs alone.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
-use escapement_tickwave_format::annotations::{self, Time};
+use escapement_tickwave_format::annotations::{self, ExactTicks, Time};
 use escapement_tickwave_format::encode::{Bundle, EncodeError, Options, encode_to};
-use escapement_tickwave_format::header::{AnalogCoding, Derived, Header, JSON_SAFE, factor};
+use escapement_tickwave_format::header::{AnalogCoding, ChannelKind, Derived, Header, JSON_SAFE};
+use escapement_tickwave_format::mapping::{Mapping, axis_ratio};
 use escapement_tickwave_format::model::{
-    Analog, Channel, ChannelData, Kept, Offset, Ratio, Recording, Shaping, Source,
+    Channel, ChannelData, Kept, Offset, Ratio, Recording, Shaping, Source,
 };
 use escapement_tickwave_format::verify::{VerifyError, verify_limited};
 
 use crate::convert::{Pass, Progress, counted};
-use crate::shape::{self, AnalogCut, Keep, Map, Span, exact, grid, off_grid, rounded};
+use crate::shape::{self, AnalogCut, Keep, Span, exact, grid, off_grid, rounded};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -32,12 +34,17 @@ pub enum Error {
     Io(String, std::io::Error),
     #[error("the inputs tick {rates}: their least common multiple is past 2^53")]
     Timebase { rates: String },
-    #[error("input {input} ticks {rate}: each of its ticks is {factor} merged ticks, past 2^53")]
-    Factor {
+    #[error(
+        "input {input}{stretch}: a tick of it, or of a source of it, would be a ratio of merged \
+         ticks with a term past 2^53"
+    )]
+    Stretch {
         input: usize,
-        rate: String,
-        factor: u128,
+        /// The stretch, as ", stretched a/b", where there is one.
+        stretch: String,
     },
+    #[error("input {input} is given a stretch and two marks, which give one each")]
+    TwoStretches { input: usize },
     #[error("input {input} ({stem}) has no channel {name:?}; it has {has:?}")]
     NoChannel {
         input: usize,
@@ -80,12 +87,14 @@ pub enum Error {
     #[error("{name}: {problem}")]
     Time { name: String, problem: String },
     #[error(
-        "{name}: {time:?} is {ticks:.3} merged ticks, more than 0.01 of a merged tick off the grid"
+        "{name}: {time:?} is {ticks:.3} {grid} ticks, more than 0.01 of a {grid} tick off the grid"
     )]
     OffGrid {
         name: String,
         time: String,
         ticks: f64,
+        /// Whose ticks: "merged" or "source".
+        grid: &'static str,
     },
     #[error("{name}: {ticks} ticks is past 2^53")]
     Range { name: String, ticks: i128 },
@@ -109,19 +118,6 @@ pub enum Error {
         "{name}: its input states a {kind:?} offset, which the merge's own offset can't add to"
     )]
     OffsetKind { name: String, kind: String },
-    #[error(
-        "{name}: its run before sample {index} ends at merged tick {last}, after the run that \
-         starts there at {tick}: the merged rate puts the input's sample before the break later \
-         than the break"
-    )]
-    BreakBeforeSample {
-        name: String,
-        index: u64,
-        last: i64,
-        tick: i64,
-    },
-    #[error("{name}: its period times {factor} is past 2^53")]
-    Period { name: String, factor: u64 },
     #[error("the merged recording would run to tick {0}, past 2^53")]
     Length(i128),
     #[error("the recordings given hold {given} sources, and the merged recording {stated}")]
@@ -139,10 +135,14 @@ pub enum Error {
         stated: String,
     },
     #[error(
-        "the merged recording ticks {stated}, not {lcm}, the least common multiple of the \
-         recordings given"
+        "the merged recording ticks {stated}, neither {lcm}, the least common multiple of the \
+         recordings' rates, nor {fastest}, the fastest of them"
     )]
-    NotLcm { stated: String, lcm: String },
+    NotLcm {
+        stated: String,
+        lcm: String,
+        fastest: String,
+    },
     #[error(
         "input {input}: its sources' origins or aligns state different moves, {0:?} and {1:?}",
         .moves.0, .moves.1
@@ -168,10 +168,6 @@ pub enum Error {
         index: usize,
         source_name: String,
     },
-    #[error(
-        "channel {name}: its kept span {from} to {to} is not a whole number of its input's ticks"
-    )]
-    NotWhole { name: String, from: i64, to: i64 },
     #[error("channel {name} states no kept span, which a merged recording states on every channel")]
     NoKept { name: String },
     #[error(
@@ -230,9 +226,13 @@ impl Input {
 
 #[derive(Clone, Debug, Default)]
 pub struct InputSettings {
-    /// A time at the merged rate, positive later: a whole number of merged ticks, or a decimal
-    /// with a unit, within 0.01 of a merged tick.
+    /// A move: a time at the merged rate, positive later, a whole number of merged ticks or a
+    /// decimal with a unit, within 0.01 of a merged tick. Or two marks, `x@y,x@y`: each an event's
+    /// time in the input's own time and the merged time it takes, which give a move and a
+    /// stretch.
     pub align: Option<String>,
+    /// A stretch of the input's ticks: a ratio `a/b`, or a change such as `+20ppm`.
+    pub stretch: Option<String>,
     /// The channels to take, by the input's names, in order, each renamed where a name is given.
     /// None given takes every channel under its own name.
     pub channels: Vec<(String, Option<String>)>,
@@ -242,7 +242,8 @@ pub struct InputSettings {
 pub struct Settings {
     /// By input, in order; an input past the end takes the defaults.
     pub inputs: Vec<InputSettings>,
-    /// Output channels to move, by name, each by a time at the merged rate.
+    /// Output channels to move, by name, each by a time in its source's own time, on its source's
+    /// grid.
     pub offsets: Vec<(String, String)>,
     /// Output channels to keep part of, by name, each end in the channel's own input time.
     pub keeps: Vec<Keep>,
@@ -394,8 +395,27 @@ fn rate(r: Ratio) -> String {
     format!("{}/{}", r.num(), r.den())
 }
 
+/// A stretch as a refusal names it: nothing for none.
+fn stretched(s: Ratio) -> String {
+    if s.num() == s.den() {
+        String::new()
+    } else {
+        format!(", stretched {}", rate(s))
+    }
+}
+
+/// A ratio of two u128 terms in lowest terms, as a `Ratio` where both fit below 2^53.
+fn ratio_of(num: u128, den: u128) -> Option<Ratio> {
+    let g = gcd(num, den).max(1);
+    let (num, den) = (num / g, den / g);
+    let safe = |v: u128| v < u128::from(JSON_SAFE);
+    (safe(num) && safe(den))
+        .then(|| Ratio::new(num as u64, den as u64))
+        .flatten()
+}
+
 /// The least common multiple of `rates`: their reduced numerators' lcm over their reduced
-/// denominators' gcd.
+/// denominators' gcd, the slowest rate at which each one's tick is a whole number of ticks.
 pub fn merged_timebase(rates: &[Ratio]) -> Result<Ratio, Error> {
     let too_big = || Error::Timebase {
         rates: rates
@@ -416,8 +436,20 @@ pub fn merged_timebase(rates: &[Ratio]) -> Result<Ratio, Error> {
     Ok(Ratio::new(num as u64, den as u64).expect("positive terms"))
 }
 
-/// A time at `timebase` in whole ticks, within 0.01 of one.
-fn on_grid(name: &str, text: &str, timebase: Ratio) -> Result<i64, Error> {
+/// The fastest of `rates`.
+pub fn fastest_rate(rates: &[Ratio]) -> Ratio {
+    let faster = |a: Ratio, b: Ratio| {
+        u128::from(a.num()) * u128::from(b.den()) > u128::from(b.num()) * u128::from(a.den())
+    };
+    rates
+        .iter()
+        .copied()
+        .reduce(|a, b| if faster(b, a) { b } else { a })
+        .expect("at least one rate")
+}
+
+/// A time at `timebase` in whole ticks, within 0.01 of one; `grid` names whose ticks they are.
+fn on_grid(name: &str, text: &str, timebase: Ratio, grid: &'static str) -> Result<i64, Error> {
     let time = |problem| Error::Time {
         name: name.to_owned(),
         problem,
@@ -430,6 +462,7 @@ fn on_grid(name: &str, text: &str, timebase: Ratio) -> Result<i64, Error> {
             name: name.to_owned(),
             time: text.to_owned(),
             ticks: if e.negative { -t } else { t },
+            grid,
         });
     }
     if ticks.unsigned_abs() >= JSON_SAFE {
@@ -441,28 +474,166 @@ fn on_grid(name: &str, text: &str, timebase: Ratio) -> Result<i64, Error> {
     Ok(ticks)
 }
 
-/// Where input j's ticks go: tick `t` at `factor × t + moved`, `moved = align − base`.
+/// A stretch as `--stretch` takes it: a ratio `a/b`, or a change in parts per million, signed:
+/// `+20ppm` is 1,000,020 / 1,000,000. Above 1 lengthens the input's ticks.
+pub fn parse_stretch(text: &str) -> Result<Ratio, String> {
+    let text = text.trim();
+    let bad = || format!("{text:?}: a stretch is a ratio a/b, or a change such as +20ppm");
+    if let Some((a, b)) = text.split_once('/') {
+        let (a, b) = (a.trim().parse::<u64>(), b.trim().parse::<u64>());
+        let (Ok(a), Ok(b)) = (a, b) else {
+            return Err(bad());
+        };
+        return ratio_of(u128::from(a), u128::from(b))
+            .filter(|_| a > 0 && b > 0)
+            .ok_or_else(bad);
+    }
+    let number = text.strip_suffix("ppm").ok_or_else(bad)?.trim();
+    let (negative, digits) = match number.as_bytes().first() {
+        Some(b'-') => (true, &number[1..]),
+        Some(b'+') => (false, &number[1..]),
+        _ => (false, number),
+    };
+    let (whole, fraction) = digits.split_once('.').unwrap_or((digits, ""));
+    if whole.is_empty() && fraction.is_empty()
+        || !whole
+            .bytes()
+            .chain(fraction.bytes())
+            .all(|b| b.is_ascii_digit())
+        || fraction.len() > 12
+    {
+        return Err(bad());
+    }
+    let scale = 10u128.pow(fraction.len() as u32);
+    let ppm = format!("{whole}{fraction}")
+        .parse::<u128>()
+        .map_err(|_| bad())?;
+    let one = 1_000_000 * scale;
+    let num = if negative {
+        one.checked_sub(ppm).filter(|&n| n > 0).ok_or_else(bad)?
+    } else {
+        one.checked_add(ppm).ok_or_else(bad)?
+    };
+    ratio_of(num, one).ok_or_else(bad)
+}
+
+/// An input's alignment as `--align` gives it: a move at the merged rate, or two marks, each a
+/// time in the input's own time and the time it takes on the merged axis, which give a move and a
+/// stretch.
+enum Alignment {
+    Move(String),
+    /// Each mark's input time and merged time, in exact seconds.
+    Marks([(ExactTicks, ExactTicks); 2]),
+}
+
+/// An exact time in seconds as a signed ratio of its numerator and its positive denominator.
+fn signed(t: &ExactTicks) -> (i128, i128) {
+    (
+        if t.negative {
+            -t.numerator
+        } else {
+            t.numerator
+        },
+        t.denominator,
+    )
+}
+
+impl Alignment {
+    fn parse(name: &str, text: &str) -> Result<Self, Error> {
+        let time = |problem| Error::Time {
+            name: name.to_owned(),
+            problem,
+        };
+        let Some((a, b)) = text.split_once(',') else {
+            return Ok(Self::Move(text.to_owned()));
+        };
+        let mark = |m: &str| -> Result<(ExactTicks, ExactTicks), Error> {
+            let (x, y) = m.split_once('@').ok_or_else(|| {
+                time(format!(
+                    "{m:?}: a mark is the input's time and the merged time, as 1.5ms@2.25ms"
+                ))
+            })?;
+            let seconds = |t: &str| exact(t, Ratio::ONE).map_err(time);
+            Ok((seconds(x)?, seconds(y)?))
+        };
+        Ok(Self::Marks([mark(a)?, mark(b)?]))
+    }
+}
+
+/// The ratio nearest `p / q` whose terms are both at most `max`, by its continued fraction.
+fn approximate(p: u128, q: u128, max: u128) -> (u128, u128) {
+    let (mut h0, mut h1, mut k0, mut k1) = (0u128, 1u128, 1u128, 0u128);
+    let (mut a, mut b) = (p, q);
+    while b != 0 {
+        let t = a / b;
+        let (h2, k2) = (
+            t.saturating_mul(h1).saturating_add(h0),
+            t.saturating_mul(k1).saturating_add(k0),
+        );
+        if h2 > max || k2 > max {
+            // The best of the last convergent and the largest semiconvergent within the bound.
+            let room = |h: u128, k: u128| {
+                let by_h = (max - h0).checked_div(h).unwrap_or(u128::MAX);
+                let by_k = (max - k0).checked_div(k).unwrap_or(u128::MAX);
+                by_h.min(by_k)
+            };
+            let n = room(h1, k1).min(t);
+            let (hs, ks) = (n * h1 + h0, n * k1 + k0);
+            // |p/q − h/k| compared without division: |p k − q h| / (q k).
+            let off = |h: u128, k: u128| {
+                let (pk, qh) = (p as f64 * k as f64, q as f64 * h as f64);
+                (pk - qh).abs() / (q as f64 * k as f64)
+            };
+            return if n > 0 && off(hs, ks) < off(h1, k1) {
+                (hs, ks)
+            } else {
+                (h1, k1.max(1))
+            };
+        }
+        (h0, h1, k0, k1) = (h1, h2, k1, k2);
+        (a, b) = (b, a - t * b);
+    }
+    (h1, k1.max(1))
+}
+
+/// Where input j's axis lies on the merged axis: its tick `x` at merged tick
+/// `moved + floor(x × q)`, `q = stretch × R / R_j`, with `moved = align − base`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct InputMap {
-    factor: u64,
+    q: Ratio,
+    stretch: Ratio,
     align: i64,
     moved: i64,
 }
 
-/// One merged channel: where its data comes from, how it is cut and moved, and what the header
-/// states of it.
+impl InputMap {
+    /// Input tick `x` on the merged axis, in i128: a time far outside is left out, not wrapped.
+    fn tick(&self, x: i64) -> i128 {
+        i128::from(self.moved) + scaled(x, self.q)
+    }
+}
+
+/// `floor(x × q)`.
+fn scaled(x: i64, q: Ratio) -> i128 {
+    (i128::from(x) * i128::from(q.num())).div_euclid(i128::from(q.den()))
+}
+
+/// One merged channel: where its data comes from, how it is cut and moved, in its source's ticks,
+/// and what the header states of it.
 #[derive(Clone, Debug)]
 struct ChannelMap {
     input: usize,
     channel: usize,
     name: String,
     source: u32,
-    /// The input-tick cut `from..to`.
+    /// The source-tick cut `from..to`, and whether it cuts the channel's own span.
     from: i64,
     to: i64,
+    cut: bool,
     /// An analog channel's samples skipped, then kept.
     samples: Option<(u64, u64)>,
-    shift: i64,
+    /// A cut digital channel's edges kept, once counted.
+    edges: Option<u64>,
     shaping: Shaping,
     unit: Option<String>,
 }
@@ -473,11 +644,6 @@ struct Layout {
     inputs: Vec<InputMap>,
     channels: Vec<ChannelMap>,
     derived: Vec<Derived>,
-}
-
-/// An input channel's own span: its `kept`, or the whole of its input.
-fn own_span(c: &Channel, length: i64) -> (i64, i64) {
-    c.shaping.kept.map_or((0, length), |k| (k.from, k.to))
 }
 
 /// `ticks` as an i64 within 2^53 either side of 0, as FORMAT.md holds every tick.
@@ -492,79 +658,37 @@ fn within(name: impl FnOnce() -> String, ticks: i128) -> Result<i64, Error> {
     }
 }
 
-/// What the header states of channel `name` moved by `shift`, cut at `from..to` of its input's
-/// ticks, with its input's offset scaled by `factor` and the merge's own `offset_m` added. Every
-/// tick the channel's data maps to lies in its kept span, so the span's bounds bound them.
-fn statements(
-    name: &str,
-    input_channel: &Channel,
-    factor: u64,
-    shift: i64,
-    from: i64,
-    to: i64,
-    offset_m: i64,
-) -> Result<Shaping, Error> {
-    let input_offset = input_channel.shaping.offset.as_ref();
-    let ticks = within(
-        || format!("{name}'s offset"),
-        i128::from(factor) * i128::from(input_offset.map_or(0, |o| o.ticks)) + i128::from(offset_m),
+/// An input channel's mapping on its input's axis, from its input's model.
+fn input_mapping(r: &Recording, c: &Channel) -> Option<Mapping> {
+    let source = r.sources.get(c.source as usize)?;
+    let m = axis_ratio(
+        source.stretch.unwrap_or(Ratio::ONE),
+        r.timebase,
+        source.timebase,
     )?;
-    let at = |t: i64| i128::from(factor) * i128::from(t) + i128::from(shift);
-    let end = at(to);
-    if end >= i128::from(JSON_SAFE) {
-        return Err(Error::Length(end));
-    }
-    Ok(Shaping {
-        offset: (ticks != 0).then(|| Offset {
-            ticks,
-            kind: input_offset.map_or_else(|| Offset::DELAY.to_owned(), |o| o.kind.clone()),
-        }),
-        kept: Some(Kept {
-            from: at(from) as i64,
-            to: end as i64,
-        }),
-    })
+    Some(Mapping::new(
+        source.origin,
+        c.shaping.offset.as_ref().map_or(0, |o| o.ticks),
+        m,
+    ))
 }
 
-/// Checks a merged analog channel against the reader's rules the merged rate can break: its
-/// period within 2^53, and each run's last sample at or before the next run's tick.
-fn check_analog(
-    name: &str,
-    a: &Analog,
-    factor: u64,
-    shift: i64,
-    (skip, keep): (u64, u64),
-) -> Result<(), Error> {
-    let period = shape::scaled_period(a.period, factor).ok_or_else(|| Error::Period {
-        name: name.to_owned(),
-        factor,
-    })?;
-    let map = Map { factor, shift };
-    let tick_in =
-        |i| escapement_tickwave_format::model::run_sample_tick(a.first, a.period, &a.breaks, i);
-    let end = skip + keep;
-    // The runs kept, from the cut: (first index, merged tick).
-    let mut runs = vec![(skip, map.tick(tick_in(skip)))];
-    runs.extend(
-        a.breaks
-            .iter()
-            .filter(|b| b.index > skip && b.index < end)
-            .map(|b| (b.index, map.tick(b.tick))),
-    );
-    for pair in runs.windows(2) {
-        let ((start, tick), (next, next_tick)) = (pair[0], pair[1]);
-        let n = next - start;
-        let last = escapement_tickwave_format::model::sample_tick(tick, period, n - 1);
-        if last > next_tick {
-            return Err(Error::BreakBeforeSample {
-                name: name.to_owned(),
-                index: next - skip,
-                last,
-                tick: next_tick,
-            });
-        }
-    }
-    Ok(())
+/// An input channel's own span, in its source's ticks: its `kept`, or, where it states none, from
+/// the source tick at its input's start to the one at its input's end.
+fn own_span(r: &Recording, c: &Channel, map: &Mapping) -> (i64, i64) {
+    c.shaping.kept.map_or_else(
+        || (map.first_at(0), map.first_at(r.length)),
+        |k| (k.from, k.to),
+    )
+}
+
+/// `stretch × more`, in lowest terms, where both terms stay below 2^53.
+fn compose(stretch: Option<Ratio>, more: Ratio) -> Option<Ratio> {
+    let s = stretch.unwrap_or(Ratio::ONE);
+    ratio_of(
+        u128::from(s.num()) * u128::from(more.num()),
+        u128::from(s.den()) * u128::from(more.den()),
+    )
 }
 
 /// `name` made unique against `taken`: `<stem>/<name>`, then `<stem>-2/<name>`, and so on, as
@@ -603,6 +727,23 @@ fn unique_generator(name: &str, stem: &str, taken: &BTreeSet<String>) -> String 
     out
 }
 
+/// What a merge takes of its inputs, before it places them on an axis: the channels, renamed,
+/// the derived channels, and each setting resolved to its channel.
+struct Chosen {
+    /// Each output channel: input, input channel, name.
+    channels: Vec<(usize, usize, String)>,
+    /// Each derived channel carried: its input, the output's, and the input's own.
+    derived: Vec<(usize, Derived, Derived)>,
+    /// Each output channel's own move, in its source's ticks.
+    offsets: Vec<Option<i64>>,
+    /// Each output channel's kept span, in its input's ticks.
+    keeps: Vec<Option<Span>>,
+    units: Vec<Option<String>>,
+    /// Each input's stretch as given, and its alignment.
+    stretches: Vec<Option<Ratio>>,
+    aligns: Vec<Option<Alignment>>,
+}
+
 /// The merge's plan from its settings: the layout, and what it notes.
 fn plan(inputs: &[Input], settings: &Settings) -> Result<(Layout, Vec<Note>), Error> {
     if inputs.len() < 2 {
@@ -614,14 +755,39 @@ fn plan(inputs: &[Input], settings: &Settings) -> Result<(Layout, Vec<Note>), Er
             inputs: inputs.len(),
         });
     }
+    let (chosen, mut notes) = choose(inputs, settings)?;
+    // FORMAT.md, "Times": the least common multiple of the sources' rates, where every term it
+    // puts on the axis stays below 2^53; otherwise the fastest of them.
+    let rates: Vec<Ratio> = inputs
+        .iter()
+        .flat_map(|i| i.recording.sources.iter().map(|s| s.timebase))
+        .collect();
+    let fastest = fastest_rate(&rates);
+    // Only a tick, a ratio or the length past 2^53 moves the merge to the fastest rate; any other
+    // refusal stands.
+    let past_2_53 = |e: &Error| {
+        matches!(
+            e,
+            Error::Stretch { .. } | Error::Length(_) | Error::Range { .. }
+        )
+    };
+    let layout = match merged_timebase(&rates) {
+        Ok(lcm) => match place(inputs, &chosen, lcm) {
+            Err(e) if past_2_53(&e) && reduced(lcm) != reduced(fastest) => {
+                place(inputs, &chosen, fastest)
+            }
+            placed => placed,
+        },
+        Err(_) => place(inputs, &chosen, fastest),
+    }?;
+    notes.extend(derived_notes(inputs, &chosen, &layout));
+    Ok((layout, notes))
+}
+
+/// The channels a merge takes and the settings resolved to them.
+fn choose(inputs: &[Input], settings: &Settings) -> Result<(Chosen, Vec<Note>), Error> {
     let defaults = InputSettings::default();
     let input_settings = |j: usize| settings.inputs.get(j).unwrap_or(&defaults);
-    let timebase = merged_timebase(
-        &inputs
-            .iter()
-            .map(|i| i.recording.timebase)
-            .collect::<Vec<_>>(),
-    )?;
     let mut notes = Vec::new();
 
     // Each output channel: (input, input channel, name), named in order, an input's derived
@@ -629,25 +795,33 @@ fn plan(inputs: &[Input], settings: &Settings) -> Result<(Layout, Vec<Note>), Er
     let mut taken: BTreeSet<String> = BTreeSet::new();
     let mut chosen: Vec<(usize, usize, String)> = Vec::new();
     let mut derived = Vec::new();
-    let mut factors = Vec::with_capacity(inputs.len());
+    let mut stretches = Vec::with_capacity(inputs.len());
     let mut aligns = Vec::with_capacity(inputs.len());
     for (j, input) in inputs.iter().enumerate() {
         let number = j + 1;
         let r = &input.recording;
-        let f = factor(timebase, r.timebase).expect("the lcm is a multiple of every rate");
-        if f >= u128::from(JSON_SAFE) {
-            return Err(Error::Factor {
-                input: number,
-                rate: rate(r.timebase),
-                factor: f,
-            });
-        }
-        factors.push(f as u64);
         let s = input_settings(j);
-        aligns.push(match &s.align {
-            Some(t) => on_grid(&format!("input {number}'s alignment"), t, timebase)?,
-            None => 0,
-        });
+        let name = format!("input {number}'s alignment");
+        let align = s
+            .align
+            .as_deref()
+            .map(|a| Alignment::parse(&name, a))
+            .transpose()?;
+        let stretch = s
+            .stretch
+            .as_deref()
+            .map(|t| {
+                parse_stretch(t).map_err(|problem| Error::Time {
+                    name: format!("input {number}'s stretch"),
+                    problem,
+                })
+            })
+            .transpose()?;
+        if stretch.is_some() && matches!(align, Some(Alignment::Marks(_))) {
+            return Err(Error::TwoStretches { input: number });
+        }
+        stretches.push(stretch);
+        aligns.push(align);
         let wanted: Vec<(usize, Option<&str>)> = if s.channels.is_empty() {
             (0..r.channels.len()).map(|c| (c, None)).collect()
         } else {
@@ -753,6 +927,7 @@ fn plan(inputs: &[Input], settings: &Settings) -> Result<(Layout, Vec<Note>), Er
                 has: has(),
             })
     };
+    // A channel's own move is in its source's ticks: on its source's grid.
     let mut offsets = vec![None; chosen.len()];
     for (name, time) in &settings.offsets {
         let c = find("an offset", name)?;
@@ -762,7 +937,10 @@ fn plan(inputs: &[Input], settings: &Settings) -> Result<(Layout, Vec<Note>), Er
                 name: name.clone(),
             });
         }
-        offsets[c] = Some(on_grid(name, time, timebase)?);
+        let (j, ic, _) = &chosen[c];
+        let r = &inputs[*j].recording;
+        let source_rate = r.sources[r.channels[*ic].source as usize].timebase;
+        offsets[c] = Some(on_grid(name, time, source_rate, "source")?);
     }
     let mut keeps = vec![None; chosen.len()];
     for (name, from, to) in &settings.keeps {
@@ -800,20 +978,215 @@ fn plan(inputs: &[Input], settings: &Settings) -> Result<(Layout, Vec<Note>), Er
         }
         units[c] = Some(unit.clone());
     }
+    Ok((
+        Chosen {
+            channels: chosen,
+            derived,
+            offsets,
+            keeps,
+            units,
+            stretches,
+            aligns,
+        },
+        notes,
+    ))
+}
 
-    // Each channel's cut, in its input's ticks, and where it starts on the merged axis.
+/// An input's stretch on an axis at `timebase`, and its alignment there in merged ticks: as
+/// given, or from its two marks.
+fn input_placement(
+    number: usize,
+    input: &Recording,
+    stretch: Option<Ratio>,
+    align: Option<&Alignment>,
+    timebase: Ratio,
+) -> Result<(Ratio, i64), Error> {
+    let name = format!("input {number}'s alignment");
+    let fits = |s: Ratio| {
+        axis_ratio(s, timebase, input.timebase).is_some()
+            && input.sources.iter().all(|source| {
+                compose(source.stretch, s)
+                    .and_then(|st| axis_ratio(st, timebase, source.timebase))
+                    .is_some()
+            })
+    };
+    let unplaceable = |s: Ratio| Error::Stretch {
+        input: number,
+        stretch: stretched(s),
+    };
+    match align {
+        None => {
+            let s = stretch.unwrap_or(Ratio::ONE);
+            if !fits(s) {
+                return Err(unplaceable(s));
+            }
+            Ok((s, 0))
+        }
+        Some(Alignment::Move(text)) => {
+            let s = stretch.unwrap_or(Ratio::ONE);
+            if !fits(s) {
+                return Err(unplaceable(s));
+            }
+            Ok((s, on_grid(&name, text, timebase, "merged")?))
+        }
+        Some(Alignment::Marks([(x1, y1), (x2, y2)])) => {
+            let too_far = || Error::Time {
+                name: name.clone(),
+                problem: "the marks lie too far apart, or too close, to give a stretch".into(),
+            };
+            let [x1, y1, x2, y2] = [x1, y1, x2, y2].map(Q::of);
+            // s = (y2 − y1) / (x2 − x1), in exact seconds.
+            let (dx, dy) = (
+                x2.sub(x1).ok_or_else(too_far)?,
+                y2.sub(y1).ok_or_else(too_far)?,
+            );
+            if dx.n == 0 || dy.n == 0 || (dx.n > 0) != (dy.n > 0) {
+                return Err(Error::Time {
+                    name,
+                    problem: "the marks must lie apart, and in the same order, in both times"
+                        .into(),
+                });
+            }
+            let exact = dy.div(dx).ok_or_else(too_far)?;
+            let (p, q) = (exact.n.unsigned_abs(), exact.d.unsigned_abs());
+            // The nearest stretch with terms small enough for every m it makes.
+            let mut max = u128::from(JSON_SAFE) - 1;
+            let s = loop {
+                let (n, d) = approximate(p, q, max);
+                if let Some(s) = ratio_of(n, d).filter(|&s| fits(s)) {
+                    break s;
+                }
+                max >>= 4;
+                if max < 1_000_000 {
+                    return Err(too_far());
+                }
+            };
+            // The input's tick 0 lies where its first mark's time, stretched, meets the merged
+            // time: (y1 − x1 × s) × R merged ticks, to the nearest.
+            let (r, s_q) = (Q::ratio(timebase), Q::ratio(s));
+            let at = y1
+                .mul(r)
+                .zip(x1.mul(r).and_then(|x| x.mul(s_q)))
+                .and_then(|(y, x)| y.sub(x))
+                .ok_or_else(too_far)?;
+            let ticks = ExactTicks {
+                negative: at.n < 0,
+                numerator: at.n.abs(),
+                denominator: at.d,
+            }
+            .rounded()
+            .ok_or_else(too_far)?;
+            Ok((s, within(|| name.clone(), i128::from(ticks))?))
+        }
+    }
+}
+
+/// An exact fraction in lowest terms, its denominator positive, for the arithmetic two marks take:
+/// each step reduced, so times to the picosecond and a stretch near 2^53 stay inside 128 bits.
+#[derive(Clone, Copy, Debug)]
+struct Q {
+    n: i128,
+    d: i128,
+}
+
+impl Q {
+    fn new(n: i128, d: i128) -> Option<Self> {
+        if d == 0 {
+            return None;
+        }
+        let g = gcd(n.unsigned_abs(), d.unsigned_abs()).max(1) as i128;
+        let sign = if d < 0 { -1 } else { 1 };
+        Some(Self {
+            n: sign * (n / g),
+            d: sign * (d / g),
+        })
+    }
+
+    /// An exact time in seconds.
+    fn of(t: &ExactTicks) -> Self {
+        let (n, d) = signed(t);
+        Self::new(n, d).unwrap_or(Self { n: 0, d: 1 })
+    }
+
+    fn ratio(r: Ratio) -> Self {
+        Self {
+            n: i128::from(r.num()),
+            d: i128::from(r.den()),
+        }
+        .reduce()
+    }
+
+    fn reduce(self) -> Self {
+        Self::new(self.n, self.d).unwrap_or(self)
+    }
+
+    fn mul(self, o: Self) -> Option<Self> {
+        // Cancelled crosswise first, so neither product holds a factor the result drops.
+        let g1 = gcd(self.n.unsigned_abs(), o.d.unsigned_abs()).max(1) as i128;
+        let g2 = gcd(o.n.unsigned_abs(), self.d.unsigned_abs()).max(1) as i128;
+        Self::new(
+            (self.n / g1).checked_mul(o.n / g2)?,
+            (self.d / g2).checked_mul(o.d / g1)?,
+        )
+    }
+
+    fn div(self, o: Self) -> Option<Self> {
+        self.mul(Self::new(o.d, o.n)?)
+    }
+
+    fn sub(self, o: Self) -> Option<Self> {
+        let g = gcd(self.d.unsigned_abs(), o.d.unsigned_abs()).max(1) as i128;
+        let (a, b) = (self.d / g, o.d / g);
+        Self::new(
+            self.n.checked_mul(b)?.checked_sub(o.n.checked_mul(a)?)?,
+            self.d.checked_mul(b)?,
+        )
+    }
+}
+
+/// The merge laid out on an axis at `timebase`: every input placed, every channel cut, the
+/// recording's start and length.
+fn place(inputs: &[Input], chosen: &Chosen, timebase: Ratio) -> Result<Layout, Error> {
+    let mut placements = Vec::with_capacity(inputs.len());
+    for (j, input) in inputs.iter().enumerate() {
+        let (stretch, align) = input_placement(
+            j + 1,
+            &input.recording,
+            chosen.stretches[j],
+            chosen.aligns[j].as_ref(),
+            timebase,
+        )?;
+        let q = axis_ratio(stretch, timebase, input.recording.timebase).ok_or(Error::Stretch {
+            input: j + 1,
+            stretch: stretched(stretch),
+        })?;
+        placements.push((stretch, q, align));
+    }
+    let source_offsets = source_offsets(inputs.iter().map(|i| &i.recording));
+
+    // Each channel's cut in its source's ticks, and where its kept span would start were the
+    // merged recording to start at merged tick 0.
     struct Cut {
         from: i64,
         to: i64,
+        cut: bool,
         samples: Option<(u64, u64)>,
-        offset_m: i64,
+        offset: i64,
+        m: Ratio,
+        start: i128,
     }
-    let mut cuts = Vec::with_capacity(chosen.len());
-    for (c, (j, ic, name)) in chosen.iter().enumerate() {
+    let mut cuts = Vec::with_capacity(chosen.channels.len());
+    for (c, (j, ic, name)) in chosen.channels.iter().enumerate() {
         let r = &inputs[*j].recording;
         let channel = &r.channels[*ic];
-        let (own_from, own_to) = own_span(channel, r.length);
-        let span = keeps[c].unwrap_or(Span {
+        let source = &r.sources[channel.source as usize];
+        let (stretch, q, align) = placements[*j];
+        let map = input_mapping(r, channel).ok_or_else(|| Error::Stretch {
+            input: j + 1,
+            stretch: stretched(stretch),
+        })?;
+        let (own_from, own_to) = own_span(r, channel, &map);
+        let span = chosen.keeps[c].unwrap_or(Span {
             from: None,
             to: None,
         });
@@ -828,8 +1201,11 @@ fn plan(inputs: &[Input], settings: &Settings) -> Result<(Layout, Vec<Note>), Er
                 span,
             });
         }
-        let from = span.from.map_or(own_from, |f| f.max(own_from));
-        let to = span.to.map_or(own_to, |t| t.min(own_to));
+        // A keep is in the input's ticks: its ends are the first source ticks at or past them.
+        let from = span
+            .from
+            .map_or(own_from, |f| map.first_at(f).max(own_from));
+        let to = span.to.map_or(own_to, |t| map.first_at(t).min(own_to));
         if from >= to {
             return Err(Error::Outside {
                 name: name.clone(),
@@ -838,7 +1214,7 @@ fn plan(inputs: &[Input], settings: &Settings) -> Result<(Layout, Vec<Note>), Er
                 to: own_to,
             });
         }
-        let offset_m = offsets[c].unwrap_or(0);
+        let offset_m = chosen.offsets[c].unwrap_or(0);
         if offset_m != 0
             && let Some(o) = &channel.shaping.offset
             && o.kind != Offset::DELAY
@@ -848,46 +1224,57 @@ fn plan(inputs: &[Input], settings: &Settings) -> Result<(Layout, Vec<Note>), Er
                 kind: o.kind.clone(),
             });
         }
+        let offset = within(
+            || format!("{name}'s offset"),
+            i128::from(map.offset()) + i128::from(offset_m),
+        )?;
         let (from, samples) = match &channel.data {
             ChannelData::Digital(_) => (from, None),
             ChannelData::Analog(a) => {
-                let cut = AnalogCut::new(a, (from > 0).then_some(from), to).ok_or_else(|| {
-                    Error::NoGridSample {
-                        name: name.clone(),
-                        span,
-                        q: grid(a.period),
-                    }
-                })?;
+                let cut =
+                    AnalogCut::new(a, (from > own_from).then_some(from), to).ok_or_else(|| {
+                        Error::NoGridSample {
+                            name: name.clone(),
+                            span,
+                            q: grid(a.period),
+                        }
+                    })?;
                 (cut.from.unwrap_or(from), Some((cut.skip, cut.keep)))
             }
         };
+        let m = compose(source.stretch, stretch)
+            .and_then(|st| axis_ratio(st, timebase, source.timebase))
+            .ok_or_else(|| Error::Stretch {
+                input: j + 1,
+                stretch: stretched(stretch),
+            })?;
+        let at = |k: i64| i128::from(align) + scaled(source.origin, q) + scaled(k + offset, m);
         cuts.push(Cut {
             from,
             to,
+            cut: from > own_from || to < own_to,
             samples,
-            offset_m,
+            offset,
+            m,
+            start: at(from),
         });
     }
     // The recording starts at the earliest channel's start, after its move and its alignment.
-    let base = chosen
+    let base = cuts
         .iter()
-        .zip(&cuts)
-        .map(|((j, _, _), cut)| {
-            i128::from(factors[*j]) * i128::from(cut.from)
-                + i128::from(aligns[*j])
-                + i128::from(cut.offset_m)
-        })
+        .map(|c| c.start)
         .min()
         .expect("at least one channel");
-    let mut input_maps = Vec::with_capacity(inputs.len());
-    for (j, (&factor, &align)) in factors.iter().zip(&aligns).enumerate() {
+    let mut inputs_mapped = Vec::with_capacity(inputs.len());
+    for (j, &(stretch, q, align)) in placements.iter().enumerate() {
         let number = j + 1;
         let moved = within(
             || format!("input {number}'s move"),
             i128::from(align) - base,
         )?;
         let map = InputMap {
-            factor,
+            q,
+            stretch,
             align,
             moved,
         };
@@ -896,74 +1283,98 @@ fn plan(inputs: &[Input], settings: &Settings) -> Result<(Layout, Vec<Note>), Er
             within(|| format!("input {number}'s source {s}'s origin"), origin)?;
             within(|| format!("input {number}'s source {s}'s align"), align)?;
         }
-        input_maps.push(map);
+        inputs_mapped.push(map);
     }
-    let source_offsets = source_offsets(inputs.iter().map(|i| &i.recording));
-    let mut channels = Vec::with_capacity(chosen.len());
-    for (c, ((j, ic, name), cut)) in chosen.into_iter().zip(cuts).enumerate() {
-        let map = input_maps[j];
-        let input_channel = &inputs[j].recording.channels[ic];
-        channels.push(finish_channel(
-            ChannelMap {
-                input: j,
-                channel: ic,
-                name,
-                source: source_offsets[j] + input_channel.source,
-                from: cut.from,
-                to: cut.to,
-                samples: cut.samples,
-                shift: map.moved + cut.offset_m,
-                shaping: Shaping::default(),
-                unit: units[c].clone(),
+    let mut channels = Vec::with_capacity(chosen.channels.len());
+    let mut length = 1i128;
+    for (c, ((j, ic, name), cut)) in chosen.channels.iter().zip(cuts).enumerate() {
+        let input_channel = &inputs[*j].recording.channels[*ic];
+        let end = cut.start - base - scaled(cut.from + cut.offset, cut.m)
+            + scaled(cut.to + cut.offset, cut.m);
+        length = length.max(end);
+        let kind = input_channel
+            .shaping
+            .offset
+            .as_ref()
+            .map_or_else(|| Offset::DELAY.to_owned(), |o| o.kind.clone());
+        channels.push(ChannelMap {
+            input: *j,
+            channel: *ic,
+            name: name.clone(),
+            source: source_offsets[*j] + input_channel.source,
+            from: cut.from,
+            to: cut.to,
+            cut: cut.cut,
+            samples: cut.samples,
+            edges: None,
+            shaping: Shaping {
+                offset: (cut.offset != 0).then_some(Offset {
+                    ticks: cut.offset,
+                    kind,
+                }),
+                kept: Some(Kept {
+                    from: cut.from,
+                    to: cut.to,
+                }),
             },
-            input_channel,
-            map.factor,
-            cut.offset_m,
-        )?);
+            unit: chosen.units[c].clone(),
+        });
+    }
+    if length >= i128::from(JSON_SAFE) {
+        return Err(Error::Length(length));
     }
     // A derived channel's operands must still share their samples: cut and moved alike.
-    let mut kept_derived = Vec::new();
-    for (j, d, input_derived) in derived {
-        let operand = |name: &str| {
-            channels
-                .iter()
-                .find(|c| c.name == name)
-                .expect("a taken operand")
+    let mut derived = Vec::new();
+    for (_, d, _) in &chosen.derived {
+        let layout_of = |name: &str| {
+            channels.iter().find(|c| c.name == name).map(|c| {
+                (
+                    c.from,
+                    c.to,
+                    c.samples,
+                    c.shaping.offset.as_ref().map(|o| o.ticks),
+                )
+            })
         };
-        let (a, b) = (operand(&d.product[0]), operand(&d.product[1]));
-        if (a.from, a.to, a.samples, a.shift) == (b.from, b.to, b.samples, b.shift) {
-            kept_derived.push(d);
-        } else {
-            notes.push(Note::DerivedLeftOut {
-                input: j + 1,
-                stem: inputs[j].stem.clone(),
-                name: input_derived.name,
-                why: format!(
-                    "its operands {} and {} are moved or cut apart",
-                    input_derived.product[0], input_derived.product[1]
-                ),
-            });
+        if layout_of(&d.product[0]) == layout_of(&d.product[1]) {
+            derived.push(d.clone());
         }
     }
-    let length = layout_length(&channels);
-    Ok((
-        Layout {
-            timebase,
-            length,
-            inputs: input_maps,
-            channels,
-            derived: kept_derived,
-        },
-        notes,
-    ))
+    Ok(Layout {
+        timebase,
+        length: length as i64,
+        inputs: inputs_mapped,
+        channels,
+        derived,
+    })
 }
 
-/// A source's origin and align once its input is mapped by `map`.
+/// The derived channels `choose` carried that `place` left out, as notes: their operands are
+/// moved or cut apart.
+fn derived_notes(inputs: &[Input], chosen: &Chosen, layout: &Layout) -> Vec<Note> {
+    chosen
+        .derived
+        .iter()
+        .filter(|(_, d, _)| !layout.derived.iter().any(|e| e.name == d.name))
+        .map(|(j, _, input_derived)| Note::DerivedLeftOut {
+            input: j + 1,
+            stem: inputs[*j].stem.clone(),
+            name: input_derived.name.clone(),
+            why: format!(
+                "its operands {} and {} are moved or cut apart",
+                input_derived.product[0], input_derived.product[1]
+            ),
+        })
+        .collect()
+}
+
+/// A source's origin and align once its input is placed by `map` (FORMAT.md, "Sources"): a value
+/// `x` on the input's axis becomes `floor(x × q)`, the origin then moved by the input's alignment
+/// and the merged recording's start, the align by the alignment.
 fn source_ticks(s: &Source, map: InputMap) -> (i128, i128) {
-    let f = i128::from(map.factor);
     (
-        f * i128::from(s.origin) + i128::from(map.moved),
-        f * i128::from(s.align.unwrap_or(0)) + i128::from(map.align),
+        i128::from(map.moved) + scaled(s.origin, map.q),
+        i128::from(map.align) + scaled(s.align.unwrap_or(0), map.q),
     )
 }
 
@@ -979,48 +1390,38 @@ fn source_offsets<'a>(inputs: impl Iterator<Item = &'a Recording>) -> Vec<u32> {
         .collect()
 }
 
-/// A channel's statements, checked against what the merged rate can break.
-fn finish_channel(
-    mut c: ChannelMap,
-    input_channel: &Channel,
-    factor: u64,
-    offset_m: i64,
-) -> Result<ChannelMap, Error> {
-    c.shaping = statements(
-        &c.name,
-        input_channel,
-        factor,
-        c.shift,
-        c.from,
-        c.to,
-        offset_m,
-    )?;
-    if let (ChannelData::Analog(a), Some(samples)) = (&input_channel.data, c.samples) {
-        check_analog(&c.name, a, factor, c.shift, samples)?;
+/// Reads `inputs`, the recordings the layout was made from, for each cut digital channel's edges
+/// in its kept span: the count the encoder holds the channel to.
+fn count_cut_edges(layout: &mut Layout, inputs: Vec<Input>) {
+    let mut channels: Vec<Vec<Option<Channel>>> = inputs
+        .into_iter()
+        .map(|i| i.recording.channels.into_iter().map(Some).collect())
+        .collect();
+    for c in layout.channels.iter_mut().filter(|c| c.cut) {
+        if let Some(Channel {
+            data: ChannelData::Digital(d),
+            ..
+        }) = channels[c.input][c.channel].take()
+        {
+            let span = c.from..c.to;
+            c.edges = Some(d.edges.filter(|t| span.contains(t)).count() as u64);
+        }
     }
-    Ok(c)
 }
 
-/// The merged recording's length: the latest kept span's end, which `statements` holds within
-/// 2^53.
-fn layout_length(channels: &[ChannelMap]) -> i64 {
-    channels
-        .iter()
-        .filter_map(|c| c.shaping.kept.map(|k| k.to))
-        .max()
-        .unwrap_or(1)
-}
-
-/// The merged recording `layout` describes, from its inputs.
+/// The merged recording `layout` describes, from its inputs: each channel keeps its source's
+/// ticks, cut where its span cuts it.
 fn apply(layout: &Layout, inputs: Vec<Recording>) -> Recording {
     let mut sources = Vec::new();
     let mut channels_in: Vec<Vec<Option<Channel>>> = Vec::with_capacity(inputs.len());
     for (r, &map) in inputs.into_iter().zip(&layout.inputs) {
         sources.extend(r.sources.into_iter().map(|s| {
             let (origin, align) = source_ticks(&s, map);
+            let stretch = compose(s.stretch, map.stretch).filter(|st| st.num() != st.den());
             Source {
                 origin: origin as i64,
                 align: Some(align as i64).filter(|&a| a != 0),
+                stretch,
                 ..s
             }
         }));
@@ -1033,22 +1434,26 @@ fn apply(layout: &Layout, inputs: Vec<Recording>) -> Recording {
             let channel = channels_in[c.input][c.channel]
                 .take()
                 .expect("each input channel is taken once");
-            let map = Map {
-                factor: layout.inputs[c.input].factor,
-                shift: c.shift,
-            };
             let data = match channel.data {
-                ChannelData::Digital(d) => {
-                    ChannelData::Digital(shape::digital(d, c.from, c.to, map))
+                ChannelData::Digital(d) if c.cut => {
+                    let count = c
+                        .edges
+                        .expect("a merge counts what it cuts before it applies");
+                    ChannelData::Digital(shape::digital(d, c.from, c.to, count))
                 }
                 ChannelData::Analog(a) => {
                     let (skip, keep) = c.samples.expect("an analog channel's cut");
-                    let mut a = shape::analog(a, skip, keep, map);
+                    let mut a = if c.cut {
+                        shape::analog(a, skip, keep)
+                    } else {
+                        a
+                    };
                     if let Some(unit) = &c.unit {
                         a.unit = unit.clone();
                     }
                     ChannelData::Analog(a)
                 }
+                data => data,
             };
             Channel {
                 name: c.name.clone(),
@@ -1142,10 +1547,7 @@ fn carried(inputs: &[Input], layout: &Layout, notes: &mut Vec<Note>) -> Annotati
                 // In i128: a time far past the merged recording's end is left out below, not
                 // wrapped round into it.
                 let mapped = |key: &str, a: &serde_json::Map<String, serde_json::Value>| {
-                    a.get(key).map(|v| {
-                        time_ticks(v, tb)
-                            .map(|t| i128::from(map.factor) * i128::from(t) + i128::from(map.moved))
-                    })
+                    a.get(key).map(|v| time_ticks(v, tb).map(|t| map.tick(t)))
                 };
                 let (Some(Some(mut start)), end) = (mapped("start", &a), mapped("end", &a)) else {
                     unread += 1;
@@ -1249,8 +1651,12 @@ pub fn merge<F: Read + Write + Seek>(
     out: &mut F,
 ) -> Result<Merged, Error> {
     let inputs = open()?;
-    let (layout, mut notes) = plan(&inputs, settings)?;
+    let (mut layout, mut notes) = plan(&inputs, settings)?;
     let annotations = carried(&inputs, &layout, &mut notes);
+    // A cut digital channel's edges kept are counted before the declaration is written.
+    if layout.channels.iter().any(|c| c.cut && c.samples.is_none()) {
+        count_cut_edges(&mut layout, open()?);
+    }
     let analog = layout
         .channels
         .iter()
@@ -1310,9 +1716,11 @@ fn describe(s: &Source) -> String {
 }
 
 /// The recording `header` describes, rebuilt from the recordings it merged from the header's
-/// statements alone: each source's origin gives its input's move, its align the alignment, and
-/// each channel's offset and kept span its own. Each of `against` covers as many of the header's
-/// sources as it has, in order. A unit is a claim, as a name is: it comes from the header.
+/// statements alone: each source's stretch over its input's gives the merge's stretch of that
+/// input, its origin the input's move, its align the alignment, each by the rule FORMAT.md's
+/// "Sources" gives, and each channel's offset and kept span its own. Each of `against` covers as
+/// many of the header's sources as it has, in order. A unit is a claim, as a name is: it comes
+/// from the header, and so does each digital channel's count, which the check holds the edges to.
 pub fn expected(header: &Header, against: Vec<Recording>) -> Result<Recording, Error> {
     let given: usize = against.iter().map(|r| r.sources.len()).sum();
     if given != header.sources.len() {
@@ -1345,51 +1753,62 @@ pub fn expected(header: &Header, against: Vec<Recording>) -> Result<Recording, E
             }
         }
     }
-    let lcm = merged_timebase(&against.iter().map(|r| r.timebase).collect::<Vec<_>>())?;
-    if reduced(lcm) != reduced(header.timebase) {
+    // The axis a merge of these recordings ticks at: the sources' least common multiple, or the
+    // fastest of them where the multiple puts a term past 2^53.
+    let rates: Vec<Ratio> = against
+        .iter()
+        .flat_map(|r| r.sources.iter().map(|s| s.timebase))
+        .collect();
+    let timebase = header.timebase;
+    let fastest = fastest_rate(&rates);
+    let lcm = merged_timebase(&rates).ok();
+    if lcm.is_none_or(|l| reduced(l) != reduced(timebase)) && reduced(fastest) != reduced(timebase)
+    {
         return Err(Error::NotLcm {
-            stated: rate(header.timebase),
-            lcm: rate(lcm),
+            stated: rate(timebase),
+            lcm: lcm.map_or_else(|| "past 2^53".to_owned(), rate),
+            fastest: rate(fastest),
         });
     }
-    let timebase = header.timebase;
     let mut inputs = Vec::with_capacity(against.len());
     for (j, (r, &at)) in against.iter().zip(&offsets).enumerate() {
         let number = j + 1;
-        let f = factor(timebase, r.timebase).expect("the lcm is a multiple of every rate");
-        if f >= u128::from(JSON_SAFE) {
-            return Err(Error::Factor {
-                input: number,
-                rate: rate(r.timebase),
-                factor: f,
-            });
-        }
-        let mut moves = r.sources.iter().enumerate().map(|(s, source)| {
+        let mut placements = r.sources.iter().enumerate().map(|(s, source)| {
             let stated = &header.sources[at as usize + s];
-            let f = f as i128;
-            let moved = i128::from(stated.origin) - f * i128::from(source.origin);
+            // stated = source × stretch: the merge's stretch of the input.
+            let (sn, sd) = reduced(stated.stretch.unwrap_or(Ratio::ONE));
+            let (on, od) = reduced(source.stretch.unwrap_or(Ratio::ONE));
+            let stretch = ratio_of(sn * od, sd * on)?;
+            let q = axis_ratio(stretch, timebase, r.timebase)?;
+            let moved = i128::from(stated.origin) - scaled(source.origin, q);
             let align =
-                i128::from(stated.align.unwrap_or(0)) - f * i128::from(source.align.unwrap_or(0));
-            (moved, align)
+                i128::from(stated.align.unwrap_or(0)) - scaled(source.align.unwrap_or(0), q);
+            Some((stretch, q, moved, align))
         });
-        let first = moves.next().expect("a recording has a source");
-        if let Some(other) = moves.find(|&m| m != first) {
-            return Err(Error::Disagree {
-                input: number,
-                moves: (first, other),
-            });
+        let unplaced = || Error::Stretch {
+            input: number,
+            stretch: String::new(),
+        };
+        let first = placements.next().flatten().ok_or_else(unplaced)?;
+        for other in placements {
+            let other = other.ok_or_else(unplaced)?;
+            if other != first {
+                return Err(Error::Disagree {
+                    input: number,
+                    moves: ((first.2, first.3), (other.2, other.3)),
+                });
+            }
         }
-        // No check that `align − moved` gives every input one base: where a recording is the
-        // capture behind a moved or cut conversion, its move also holds the conversion's origin.
-        let moved = within(|| format!("input {number}'s move"), first.0)?;
-        let align = within(|| format!("input {number}'s align"), first.1)?;
+        let (stretch, q, moved, align) = first;
         inputs.push(InputMap {
-            factor: f as u64,
-            align,
-            moved,
+            q,
+            stretch,
+            align: within(|| format!("input {number}'s align"), align)?,
+            moved: within(|| format!("input {number}'s move"), moved)?,
         });
     }
     let mut channels = Vec::with_capacity(header.channels.len());
+    let mut length = 1i128;
     for c in &header.channels {
         let j = offsets
             .iter()
@@ -1416,67 +1835,57 @@ pub fn expected(header: &Header, against: Vec<Recording>) -> Result<Recording, E
                 source_name: c.source_name.clone(),
             });
         }
-        let map = inputs[j];
-        let offset_m = within(
-            || format!("{}'s offset", c.name),
-            i128::from(c.shaping.offset.as_ref().map_or(0, |o| o.ticks))
-                - i128::from(map.factor)
-                    * i128::from(input_channel.shaping.offset.as_ref().map_or(0, |o| o.ticks)),
-        )?;
-        let shift = map.moved + offset_m;
         let kept = c.shaping.kept.ok_or_else(|| Error::NoKept {
             name: c.name.clone(),
         })?;
-        let f = map.factor as i64;
-        let (from, to) = (kept.from - shift, kept.to - shift);
-        if from % f != 0 || to % f != 0 {
-            return Err(Error::NotWhole {
-                name: c.name.clone(),
-                from: kept.from,
-                to: kept.to,
-            });
-        }
-        let (from, to) = (from / f, to / f);
+        let (from, to) = (kept.from, kept.to);
         let span = Span {
             from: Some(from),
             to: Some(to),
         };
+        let own = input_mapping(r, input_channel)
+            .map(|map| own_span(r, input_channel, &map))
+            .ok_or_else(|| Error::Stretch {
+                input: j + 1,
+                stretch: String::new(),
+            })?;
         let samples = match &input_channel.data {
             ChannelData::Digital(_) => None,
             ChannelData::Analog(a) => {
-                let cut = AnalogCut::new(a, (from > 0).then_some(from), to).ok_or_else(|| {
-                    Error::NoGridSample {
-                        name: c.name.clone(),
-                        span,
-                        q: grid(a.period),
-                    }
-                })?;
+                let cut =
+                    AnalogCut::new(a, (from > own.0).then_some(from), to).ok_or_else(|| {
+                        Error::NoGridSample {
+                            name: c.name.clone(),
+                            span,
+                            q: grid(a.period),
+                        }
+                    })?;
                 Some((cut.skip, cut.keep))
             }
         };
-        let unit = match &c.data {
-            escapement_tickwave_format::header::ChannelKind::Analog { unit, .. } => {
-                Some(unit.clone())
-            }
-            escapement_tickwave_format::header::ChannelKind::Digital { .. } => None,
+        let (unit, edges) = match &c.data {
+            ChannelKind::Analog { unit, .. } => (Some(unit.clone()), None),
+            ChannelKind::Digital { edges, .. } => (None, Some(*edges)),
         };
-        channels.push(finish_channel(
-            ChannelMap {
-                input: j,
-                channel: ic,
-                name: c.name.clone(),
-                source: c.source,
-                from,
-                to,
-                samples,
-                shift,
-                shaping: Shaping::default(),
-                unit,
-            },
-            input_channel,
-            map.factor,
-            offset_m,
-        )?);
+        // The channel's end on the merged axis, by the header's own mapping.
+        let end = header
+            .mapping(channels.len())
+            .and_then(|m| m.axis(to))
+            .unwrap_or(i64::MAX);
+        length = length.max(i128::from(end));
+        channels.push(ChannelMap {
+            input: j,
+            channel: ic,
+            name: c.name.clone(),
+            source: c.source,
+            from,
+            to,
+            cut: from > own.0 || to < own.1,
+            samples,
+            edges,
+            shaping: c.shaping.clone(),
+            unit,
+        });
     }
     // Each derived channel is one of its input's, over the channels the header takes from it.
     for d in &header.derived {
@@ -1487,10 +1896,14 @@ pub fn expected(header: &Header, against: Vec<Recording>) -> Result<Recording, E
                 .map(|c| (c.input, against[c.input].channels[c.channel].name.as_str()))
         };
         let layout_of = |name: &str| {
-            channels
-                .iter()
-                .find(|c| c.name == name)
-                .map(|c| (c.from, c.to, c.samples, c.shift))
+            channels.iter().find(|c| c.name == name).map(|c| {
+                (
+                    c.from,
+                    c.to,
+                    c.samples,
+                    c.shaping.offset.as_ref().map(|o| o.ticks),
+                )
+            })
         };
         if layout_of(&d.product[0]) != layout_of(&d.product[1]) {
             return Err(Error::DerivedApart {
@@ -1515,9 +1928,12 @@ pub fn expected(header: &Header, against: Vec<Recording>) -> Result<Recording, E
             });
         }
     }
+    if length >= i128::from(JSON_SAFE) {
+        return Err(Error::Length(length));
+    }
     let layout = Layout {
         timebase,
-        length: layout_length(&channels),
+        length: length as i64,
         inputs,
         channels,
         derived: header.derived.clone(),

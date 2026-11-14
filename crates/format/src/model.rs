@@ -149,18 +149,22 @@ pub enum ChannelData {
 }
 
 pub struct Digital {
-    /// The level at tick 0, before any edge there.
+    /// The level at the channel's start, before any edge there: its kept span's `from`, or the
+    /// source tick at the axis's tick 0.
     pub initial: bool,
-    /// The level is known at ticks `0..end`, and `end` is at most the recording's length. A source
-    /// can stop knowing one channel before another. At 0 the level is never known, and `initial`
-    /// is false.
+    /// A source tick: the level is known from the channel's start to `end`, which maps to the
+    /// recording's length or before it. A source can stop knowing one channel before another. At
+    /// the start the level is never known, and `initial` is false.
     pub end: i64,
-    /// Ticks at which the level flips, in order, each in `0..end`. Two can share a tick: a pulse
-    /// the source stamped with one time. The VCD reader collapses changes at one time to their net
-    /// change, and the Saleae reader refuses edges out of order.
+    /// Source ticks at which the level flips, in order, each in the channel's start to `end`. Two
+    /// can share a tick: a pulse the source stamped with one time. The VCD reader collapses
+    /// changes at one time to their net change, and the Saleae reader refuses edges out of order.
     pub edges: Edges,
-    /// Spans where the level is not known, in order. No edge lies in a gap's `from..=to`, and a
-    /// gap from tick 0 needs `initial` false.
+    /// How many edges `edges` gives: the encoder takes the channel's density from it before it
+    /// reads any, and refuses a channel that gives another number.
+    pub count: u64,
+    /// Spans where the level is not known, in source ticks and in order. No edge lies in a gap's
+    /// `from..=to`, and a gap from the channel's start needs `initial` false.
     pub gaps: Vec<Gap>,
 }
 
@@ -181,9 +185,11 @@ pub struct Analog {
     pub samples: Samples,
 }
 
-/// The tick of sample `index`: `first + floor(index × period)`.
+/// The source tick of sample `index`: `first + floor(index × period)`, saturating for an index
+/// past any sample a header allows.
 pub fn sample_tick(first: i64, period: Ratio, index: u64) -> i64 {
-    first + (u128::from(index) * u128::from(period.num()) / u128::from(period.den())) as i64
+    let steps = u128::from(index) * u128::from(period.num()) / u128::from(period.den());
+    first.saturating_add(i64::try_from(steps).unwrap_or(i64::MAX))
 }
 
 /// The tick of sample `index` of a channel with `breaks`: the run it falls in starts at its
@@ -354,12 +360,14 @@ pub struct Source {
     pub format: SourceFormat,
     /// File names read, without directories.
     pub files: Vec<String>,
-    /// The source's tick rate. The recording's timebase is a whole multiple of it.
+    /// The source's tick rate, any exact ratio. One of its ticks lasts `m` axis ticks.
     pub timebase: Ratio,
-    /// The recording's tick where the source's tick 0 lies, before any channel's offset.
+    /// The axis tick where the source's tick 0 lies, before any channel's offset.
     pub origin: i64,
-    /// Ticks of the recording the source was moved by to line it up with others.
+    /// Axis ticks the source was moved by to line it up with others.
     pub align: Option<i64>,
+    /// How much the source's ticks were lengthened to line its clock up with others'; None is 1.
+    pub stretch: Option<Ratio>,
     pub instrument: Option<String>,
     pub software: Option<String>,
     /// The source's own time at its tick 0 in seconds, where it has one (Saleae's `begin`).
@@ -381,7 +389,7 @@ pub struct Source {
 }
 
 impl Source {
-    /// A source of `format` ticking at `timebase`, its tick 0 at the recording's, that states
+    /// A source of `format` ticking at `timebase`, its tick 0 at the axis's, that states
     /// nothing else.
     pub fn new(format: SourceFormat, timebase: Ratio) -> Self {
         Self {
@@ -390,6 +398,7 @@ impl Source {
             timebase,
             origin: 0,
             align: None,
+            stretch: None,
             instrument: None,
             software: None,
             begin_s: None,
@@ -408,7 +417,7 @@ impl fmt::Debug for Digital {
         f.debug_struct("Digital")
             .field("initial", &self.initial)
             .field("end", &self.end)
-            .field("edges", &self.edges.size_hint())
+            .field("count", &self.count)
             .field("gaps", &self.gaps)
             .finish()
     }

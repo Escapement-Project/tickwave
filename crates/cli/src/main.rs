@@ -26,10 +26,10 @@ use escapement_tickwave_import::convert::{
     self, Keep, Pass, Progress, Settings, Step, counted, select, set_units,
 };
 use escapement_tickwave_import::input::map;
-use escapement_tickwave_import::merge;
 use escapement_tickwave_import::saleae::SampleRate;
 use escapement_tickwave_import::shape::{Plan, check_time};
 use escapement_tickwave_import::sigrok::Skipped;
+use escapement_tickwave_import::{drift, merge};
 use escapement_tickwave_import::{saleae, sigrok, vcd};
 use indicatif::ProgressStyle;
 use tracing::span::EnteredSpan;
@@ -69,6 +69,10 @@ enum Command {
         /// Print the header and the block statistics as JSON.
         #[arg(long)]
         json: bool,
+        /// Measure the drift between sources that recorded one periodic signal. It decodes every
+        /// block; without it, `info` reads the footer alone.
+        #[arg(long)]
+        drift: bool,
     },
     /// Check a recording against the source it was converted from, edge by edge and sample by
     /// sample. A moved or trimmed channel is checked through its offset and kept span, and a
@@ -80,9 +84,9 @@ enum Command {
         #[arg(long, required = true)]
         against: Vec<PathBuf>,
     },
-    /// Merge recordings onto one time axis, at the least common multiple of their tick rates. A
-    /// capture goes through `tickwave convert` first. The output is checked against the inputs
-    /// before it is written.
+    /// Merge recordings onto one time axis, at the least common multiple of their tick rates, or
+    /// at the fastest of them where the multiple has a term past 2^53. A capture goes through
+    /// `tickwave convert` first. The output is checked against the inputs before it is written.
     Merge {
         /// Two or more .tickwave recordings, in order.
         #[arg(required = true, num_args = 2..)]
@@ -96,10 +100,17 @@ enum Command {
         channels: Vec<(usize, String, Option<String>)>,
         /// Move an input's channels together, as `<input>=<time>`, at the merged rate: a whole
         /// number of merged ticks, or a decimal with a unit, within 0.01 of a merged tick.
-        /// Positive moves it later.
+        /// Positive moves it later. Or place it by two marks, `<input>=<x>@<y>,<x>@<y>`: each
+        /// an event's time in the input's own time and the merged time it takes, which give the
+        /// input's move and its stretch.
         #[arg(long = "align", value_name = "N=TIME", value_parser = align)]
         aligns: Vec<(usize, String)>,
-        /// Move an output channel, as `<name>=<time>`, at the merged rate. Positive is later.
+        /// Stretch an input's ticks, as `<input>=<a>/<b>` or `<input>=<±N>ppm`: above 1, or a
+        /// positive change, says its clock ran slow, so each of its ticks takes longer.
+        #[arg(long = "stretch", value_name = "N=RATIO", value_parser = stretch)]
+        stretches: Vec<(usize, String)>,
+        /// Move an output channel, as `<name>=<time>`, in its source's own ticks: a whole number
+        /// of them, or a decimal with a unit, within 0.01 of one. Positive is later.
         #[arg(long = "offset", value_name = "NAME=TIME", value_parser = offset)]
         offsets: Vec<(String, String)>,
         /// Keep only part of an output channel, as `<name>=<from>..<to>`, in its input's own
@@ -353,13 +364,31 @@ fn taken(s: &str) -> Result<(usize, String, Option<String>), String> {
     Ok((input, name.to_owned(), new.map(str::to_owned)))
 }
 
-/// `<input>=<time>`, the input counted from 1.
+/// `<input>=<time>` or `<input>=<x>@<y>,<x>@<y>`, the input counted from 1.
 fn align(s: &str) -> Result<(usize, String), String> {
-    let wrong = || format!("expected <input>=<time>, got {s:?}");
+    let wrong = || format!("expected <input>=<time> or <input>=<x>@<y>,<x>@<y>, got {s:?}");
     let (input, time) = s.split_once('=').ok_or_else(wrong)?;
     let input: usize = input.parse().ok().filter(|&n| n >= 1).ok_or_else(wrong)?;
-    check_time(time)?;
+    match time.split_once(',') {
+        None => check_time(time)?,
+        Some((a, b)) => {
+            for mark in [a, b] {
+                let (x, y) = mark.split_once('@').ok_or_else(wrong)?;
+                check_time(x)?;
+                check_time(y)?;
+            }
+        }
+    }
     Ok((input, time.to_owned()))
+}
+
+/// `<input>=<a>/<b>` or `<input>=<±N>ppm`, the input counted from 1.
+fn stretch(s: &str) -> Result<(usize, String), String> {
+    let wrong = || format!("expected <input>=<a>/<b> or <input>=<±N>ppm, got {s:?}");
+    let (input, ratio) = s.split_once('=').ok_or_else(wrong)?;
+    let input: usize = input.parse().ok().filter(|&n| n >= 1).ok_or_else(wrong)?;
+    merge::parse_stretch(ratio)?;
+    Ok((input, ratio.to_owned()))
 }
 
 fn offset(s: &str) -> Result<(String, String), String> {
@@ -488,13 +517,24 @@ fn execute(command: Command, max: usize) -> Result<()> {
             )?;
             and_open.serve(viewer, &output, max)
         }
-        Command::Info { file, json } => info(&file, json, max),
+        Command::Info { file, json, drift } => {
+            let (_, len, head) = read_footer(&file, max)?;
+            write_info(
+                &mut std::io::stdout().lock(),
+                &head,
+                len,
+                json,
+                &*map(&file)?,
+                drift,
+            )
+        }
         Command::Verify { file, against } => verify_file(&file, &against, max),
         Command::Merge {
             inputs,
             output,
             channels,
             aligns,
+            stretches,
             offsets,
             keeps,
             units,
@@ -532,6 +572,14 @@ fn execute(command: Command, max: usize) -> Result<()> {
                 })?;
                 if input.align.replace(time).is_some() {
                     bail!("input {n} is given an alignment twice");
+                }
+            }
+            for (n, ratio) in stretches {
+                let input = settings.inputs.get_mut(n - 1).with_context(|| {
+                    format!("--stretch {n}={ratio}: there are {} inputs", inputs.len())
+                })?;
+                if input.stretch.replace(ratio).is_some() {
+                    bail!("input {n} is given a stretch twice");
                 }
             }
             merge_files(&inputs, &output, &settings, max)?;
@@ -769,9 +817,19 @@ fn seconds(ticks: i64, header: &Header) -> String {
     }
 }
 
-fn info(file: &Path, json: bool, max: usize) -> Result<()> {
-    let (_, len, head) = read_footer(file, max)?;
+/// What `info` prints of the recording `head` ends, `len` bytes long. Only `drift` reads `input`
+/// past the footer.
+fn write_info(
+    out: &mut impl Write,
+    head: &Footer,
+    len: u64,
+    json: bool,
+    input: &dyn escapement_tickwave_import::input::Input,
+    drift: bool,
+) -> Result<()> {
     let h = &head.header;
+    let drifts = drift.then(|| drift::of_footer(input, head)).transpose()?;
+    let candidates = drift::candidates(head);
     let mut lengths: Vec<u32> = head.rows.iter().map(|r| r.length).collect();
     lengths.sort_unstable();
     let median = lengths.get(lengths.len() / 2).copied().unwrap_or(0);
@@ -779,7 +837,6 @@ fn info(file: &Path, json: bool, max: usize) -> Result<()> {
     let overview_rows = head.overview_rows.iter().flatten();
     let overview_count = overview_rows.clone().count();
     let overview_total: u64 = overview_rows.map(|r| u64::from(r.length)).sum();
-    let mut out = std::io::stdout().lock();
     if json {
         let report = serde_json::json!({
             "header": h,
@@ -787,6 +844,19 @@ fn info(file: &Path, json: bool, max: usize) -> Result<()> {
             "footer_bytes": head.trailer.footer_len,
             "block_bytes": { "total": blocks_total, "min": lengths.first(), "median": median, "max": lengths.last() },
             "overview_block_bytes": { "count": overview_count, "total": overview_total },
+            "drift_candidates": candidates.map(|c| serde_json::json!({
+                "channels": c.channels,
+                "blocks": c.blocks,
+                "bytes": c.bytes,
+            })),
+            "drift": drifts.as_ref().map(|drifts| drifts.iter().map(|d| serde_json::json!({
+                "channels": [&h.channels[d.a.channel].name, &h.channels[d.b.channel].name],
+                "ppm": d.ppm,
+                "ppm_se": d.ppm_se,
+                "periods_s": [d.a.period, d.b.period],
+                "rises": [d.a.rises, d.b.rises],
+                "rms_s": [d.a.rms, d.b.rms],
+            })).collect::<Vec<_>>()),
         });
         writeln!(out, "{}", serde_json::to_string_pretty(&report)?)?;
         return Ok(());
@@ -812,15 +882,22 @@ fn info(file: &Path, json: bool, max: usize) -> Result<()> {
         } else {
             format!(": {}", s.files.join(", "))
         };
-        // A merged recording's source ticks slower than the recording, by its factor.
-        let factor = escapement_tickwave_format::header::factor(h.timebase, s.timebase)
-            .filter(|&f| f != 1)
-            .map_or(String::new(), |f| {
-                format!(" ({f} of the recording's ticks each)")
+        // A merged recording's source ticks slower than the recording: each of its ticks is m of
+        // the recording's.
+        let m = h
+            .m(i)
+            .filter(|m| m.num() != m.den())
+            .map_or(String::new(), |m| match m.den() {
+                1 => format!(" ({} of the recording's ticks each)", m.num()),
+                d => format!(" ({}/{d} of the recording's ticks each)", m.num()),
             });
+        let stretch = s.stretch.map_or(String::new(), |st| {
+            let ppm = (st.num() as f64 / st.den() as f64 - 1.0) * 1e6;
+            format!(", stretched {}/{} ({ppm:+.1} ppm)", st.num(), st.den())
+        });
         writeln!(
             out,
-            "  source {i}: {} at {}/{} ticks a second{factor}, its tick 0 at {}{align}{files}",
+            "  source {i}: {} at {}/{} ticks a second{m}, its tick 0 at {}{align}{stretch}{files}",
             s.format,
             s.timebase.num(),
             s.timebase.den(),
@@ -835,7 +912,7 @@ fn info(file: &Path, json: bool, max: usize) -> Result<()> {
         }
     }
     let several = h.sources.len() > 1;
-    for c in &h.channels {
+    for (i, c) in h.channels.iter().enumerate() {
         let from = if several {
             format!(", source {}", c.source)
         } else {
@@ -852,7 +929,9 @@ fn info(file: &Path, json: bool, max: usize) -> Result<()> {
                 "  {:<12} digital, {edges} edges, starts {}, known to {} ({}{from})",
                 c.name,
                 u8::from(*initial),
-                seconds(*end, h),
+                h.mapping(i)
+                    .and_then(|m| m.axis(*end))
+                    .map_or_else(|| format!("source tick {end}"), |t| seconds(t, h)),
                 c.source_name
             )?,
             ChannelKind::Analog {
@@ -919,7 +998,47 @@ fn info(file: &Path, json: bool, max: usize) -> Result<()> {
         let lines = text.lines().filter(|l| !l.trim().is_empty()).count();
         writeln!(out, "  bundled {name}, {lines} lines")?;
     }
+    match (&drifts, candidates) {
+        (Some(drifts), _) => {
+            for d in drifts {
+                writeln!(out, "{}", describe_drift(h, d))?;
+            }
+        }
+        (None, Some(c)) => writeln!(
+            out,
+            "drift: {} digital channels from two or more sources may share a signal; `tickwave \
+             info --drift` measures it, decoding all {} blocks, {:.3} MB",
+            c.channels,
+            c.blocks,
+            c.bytes as f64 / 1e6
+        )?,
+        (None, None) => {}
+    }
     Ok(())
+}
+
+/// A drift as `info` and `verify` state it.
+fn describe_drift(h: &Header, d: &drift::Drift) -> String {
+    let name = |p: &drift::Periodic| &h.channels[p.channel].name;
+    format!(
+        "drift: {} (source {}) against {} (source {}): {:+.1} ± {:.1} ppm, the stretch source {} \
+         would take to tick as source {} does; periods {:.6} ms and {:.6} ms over {} and {} rises, \
+         {:.1} µs and {:.1} µs rms off a straight line",
+        name(&d.a),
+        d.a.source,
+        name(&d.b),
+        d.b.source,
+        d.ppm,
+        d.ppm_se,
+        d.a.source,
+        d.b.source,
+        d.a.period * 1e3,
+        d.b.period * 1e3,
+        d.a.rises,
+        d.b.rises,
+        d.a.rms * 1e6,
+        d.b.rms * 1e6,
+    )
 }
 
 /// A coding as `info` shows it.
@@ -997,8 +1116,11 @@ fn verify_file(file: &Path, against: &[PathBuf], max: usize) -> Result<()> {
     let source = if one_capture {
         // A conversion: its moves and cuts from the header, its origin among them.
         let source = capture(h, 0, &against[0])?;
-        let plan = Plan::of_header(&source, h)
+        let mut plan = Plan::of_header(&source, h)
             .context("the recording's moves and cuts do not fit its source")?;
+        if plan.cuts_edges() {
+            plan.count(capture(h, 0, &against[0])?);
+        }
         plan.apply(source)
     } else {
         let mut recordings = Vec::with_capacity(against.len());
@@ -1035,6 +1157,10 @@ fn verify_file(file: &Path, against: &[PathBuf], max: usize) -> Result<()> {
     bars.end(Pass::Verify);
     let names: Vec<String> = against.iter().map(|p| p.display().to_string()).collect();
     info!("{}: matches {}", file.display(), names.join(", "));
+    let (h, drifts) = drift::of_file(map(file)?)?;
+    for d in &drifts {
+        info!("{}", describe_drift(&h, d));
+    }
     Ok(())
 }
 
@@ -1689,27 +1815,29 @@ mod tests {
             .collect();
         use escapement_tickwave_format::header::Kept;
         // D0, moved 5 earlier, starts the recording and is kept whole: its 5,000 samples. The
-        // source's tick 0 is then the recording's tick 5.
+        // source's tick 0 is then the recording's tick 5. Every span is in the source's ticks.
         assert_eq!(
             shaping,
             [
                 (Some(-5), Some(Kept { from: 0, to: 5000 })),
-                (None, Some(Kept { from: 15, to: 105 })),
-                (Some(3), Some(Kept { from: 8, to: 5008 })),
+                (None, Some(Kept { from: 10, to: 100 })),
+                (Some(3), Some(Kept { from: 0, to: 5000 })),
             ]
         );
         assert_eq!(head.header.sources[0].origin, 5);
         // Checked through the origin, the offsets and the kept spans.
         verify_file(&output, std::slice::from_ref(&source), 64 << 20).unwrap();
 
-        // The same file stating D2 moved one tick further, in its declaration and its footer.
+        // The same file stating D2 moved one tick less, in its declaration and its footer. Its
+        // moves and cuts then end the recording a tick sooner than the file does. One tick more
+        // would put its end past the length, which the reader refuses.
         let doctored = dir.path().join("doctored.tickwave");
         fs::write(
             &doctored,
             rewritten(
                 &fs::read(&output).unwrap(),
                 r#""offset":3,"#,
-                r#""offset":4,"#,
+                r#""offset":2,"#,
             ),
         )
         .unwrap();
@@ -1718,10 +1846,10 @@ mod tests {
             verify_file(&doctored, std::slice::from_ref(&source), 64 << 20).expect_err("refused");
         assert_eq!(
             format!("{err:#}"),
-            "the recording does not match its source: channel D2: the offset or the kept span \
-             differs"
+            "the recording does not match its source: the length differs"
         );
-        // Or its source's tick 0 one tick later than the moves and cuts put it.
+        // Or its source's tick 0 one tick later than the moves and cuts put it: no channel then
+        // starts the recording, which the reader refuses.
         fs::write(
             &doctored,
             rewritten(
@@ -1733,11 +1861,206 @@ mod tests {
         .unwrap();
         let err =
             verify_file(&doctored, std::slice::from_ref(&source), 64 << 20).expect_err("refused");
-        assert_eq!(
-            format!("{err:#}"),
-            "the recording's moves and cuts do not fit its source: the recording's channels \
-             start -5 ticks into the source, but its source states an origin of 6, not 5"
+        assert!(
+            format!("{err:#}").ends_with(
+                "no channel's kept span starts at the axis's tick 0, where the recording starts"
+            ),
+            "{err:#}"
         );
+    }
+
+    #[test]
+    fn a_merge_takes_a_stretch_or_two_marks_for_an_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let testdata = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/import");
+        let (a, b, m) = (
+            dir.path().join("a.tickwave"),
+            dir.path().join("b.tickwave"),
+            dir.path().join("m.tickwave"),
+        );
+        let logic = testdata.join("demo-logic.sr");
+        let mixed = testdata.join("demo-mixed.vcd");
+        convert(
+            &|| Ok(sigrok::read(&logic)?.recording),
+            &a,
+            &common(&["sigrok", "x.sr", "-o", "x"]),
+            64 << 20,
+        )
+        .unwrap();
+        convert(
+            &|| Ok(vcd::read(&mixed)?.recording),
+            &b,
+            &common(&["vcd", "x.vcd", "-o", "x"]),
+            64 << 20,
+        )
+        .unwrap();
+        let merge = |flags: &[&str]| {
+            let mut args = vec![
+                std::ffi::OsString::from("merge"),
+                a.clone().into(),
+                b.clone().into(),
+                "-o".into(),
+                m.clone().into(),
+            ];
+            args.extend(flags.iter().map(std::ffi::OsString::from));
+            let args: Vec<&std::ffi::OsStr> = args.iter().map(|a| a.as_os_str()).collect();
+            cli(&args).map_err(|e| format!("{e:#}"))
+        };
+        use escapement_tickwave_format::model::Ratio;
+        merge(&["--stretch", "2=+1000ppm"]).unwrap();
+        let (_, _, head) = read_footer(&m, 64 << 20).unwrap();
+        let stretches: Vec<_> = head.header.sources.iter().map(|s| s.stretch).collect();
+        assert_eq!(stretches, [None, Ratio::new(1001, 1000)]);
+        // Two marks: the VCD's 0 at 10 us and its 1 ms at 1.012 ms, a stretch of 1.002.
+        merge(&["--align", "2=0@10us,1ms@1.012ms"]).unwrap();
+        let (_, _, head) = read_footer(&m, 64 << 20).unwrap();
+        let s = &head.header.sources[1];
+        assert_eq!(
+            (s.stretch, s.origin, s.align),
+            (Ratio::new(501, 500), 100, Some(100))
+        );
+        verify_file(&m, &[a.clone(), b.clone()], 64 << 20).unwrap();
+        for (flags, why) in [
+            (
+                &["--stretch", "2=+1ppm", "--align", "2=0@0,1ms@1ms"][..],
+                "input 2 is given a stretch and two marks, which give one each",
+            ),
+            (
+                &["--stretch", "3=+1ppm"],
+                "--stretch 3=+1ppm: there are 2 inputs",
+            ),
+            (
+                &["--stretch", "2=+1ppm", "--stretch", "2=-1ppm"],
+                "input 2 is given a stretch twice",
+            ),
+            (
+                &["--stretch", "2=fast"],
+                "\"fast\": a stretch is a ratio a/b, or a change such as +20ppm",
+            ),
+            (
+                &["--align", "2=0@0,1ms"],
+                "expected <input>=<time> or <input>=<x>@<y>,<x>@<y>, got \"2=0@0,1ms\"",
+            ),
+        ] {
+            let err = merge(flags).unwrap_err();
+            assert!(err.contains(why), "{flags:?}: {err}");
+        }
+    }
+
+    /// A recording's bytes as an input that counts its reads.
+    struct Counted {
+        bytes: Vec<u8>,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl escapement_tickwave_import::input::Input for Counted {
+        fn size(&self) -> u64 {
+            self.bytes.len() as u64
+        }
+        fn read_at(&self, offset: u64, buf: &mut [u8]) {
+            self.reads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            buf.copy_from_slice(&self.bytes[offset as usize..][..buf.len()]);
+        }
+    }
+
+    /// A marker high for 2 ms every 10 ms, 200 times, as a source at `rate` Hz whose clock reads
+    /// `ppm` fast sees it.
+    fn marker(rate: u64, ppm: f64) -> Vec<u8> {
+        use escapement_tickwave_format::model::{Channel, ChannelData, Digital, Ratio, Shaping};
+        let scale = rate as f64 * 1e-3 * (1.0 + ppm / 1e6);
+        let edges: Vec<i64> = (1..=200i64)
+            .flat_map(|k| {
+                let rise = (10.0 * k as f64 * scale).round() as i64;
+                [rise, rise + (2.0 * scale).round() as i64]
+            })
+            .collect();
+        let end = (2_020.0 * scale) as i64;
+        let tb = Ratio::integer(rate).unwrap();
+        escapement_tickwave_format::encode::encode(
+            Recording {
+                timebase: tb,
+                length: end,
+                channels: vec![Channel {
+                    name: "M".into(),
+                    source_name: "m".into(),
+                    source: 0,
+                    data: ChannelData::Digital(Digital {
+                        initial: false,
+                        end,
+                        count: edges.len() as u64,
+                        edges: Box::new(edges.into_iter()),
+                        gaps: Vec::new(),
+                    }),
+                    shaping: Shaping::default(),
+                }],
+                derived: Vec::new(),
+                sources: vec![escapement_tickwave_format::model::Source::new(
+                    SourceFormat::Other("marker".into()),
+                    tb,
+                )],
+            },
+            &escapement_tickwave_format::encode::Options {
+                level: 3,
+                block_bytes: 1 << 10,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn info_reads_the_footer_alone_and_measures_the_drift_only_when_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b, m) = (
+            dir.path().join("a.tickwave"),
+            dir.path().join("b.tickwave"),
+            dir.path().join("m.tickwave"),
+        );
+        // B's clock 1,000 ppm fast: A takes a stretch of +1,000 ppm to tick as B does.
+        fs::write(&a, marker(1_000_000, 0.0)).unwrap();
+        fs::write(&b, marker(2_000_000, 1_000.0)).unwrap();
+        merge_files(
+            &[a, b],
+            &m,
+            &merge::Settings {
+                inputs: vec![merge::InputSettings::default(); 2],
+                level: 3,
+                block_kib: 1,
+                ..merge::Settings::default()
+            },
+            64 << 20,
+        )
+        .unwrap();
+        let (_, len, head) = read_footer(&m, 64 << 20).unwrap();
+        let input = Counted {
+            bytes: fs::read(&m).unwrap(),
+            reads: Default::default(),
+        };
+        let reads = || input.reads.load(std::sync::atomic::Ordering::Relaxed);
+        for json in [false, true] {
+            let mut out = Vec::new();
+            write_info(&mut out, &head, len, json, &input, false).unwrap();
+            let out = String::from_utf8(out).unwrap();
+            assert_eq!(reads(), 0, "{out}");
+            if !json {
+                let hint = format!(
+                    "drift: 2 digital channels from two or more sources may share a signal; \
+                     `tickwave info --drift` measures it, decoding all {} blocks",
+                    head.rows.len()
+                );
+                assert!(out.contains(&hint), "{out}");
+            }
+        }
+        let mut out = Vec::new();
+        write_info(&mut out, &head, len, false, &input, true).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(reads() > 0);
+        assert!(
+            out.contains("drift: M (source 0) against b/M (source 1): +1000.0 ± "),
+            "{out}"
+        );
+        assert!(!out.contains("--drift"), "{out}");
     }
 
     /// Runs `tickwave` as a user would, with `args`.
@@ -1796,8 +2119,8 @@ mod tests {
         .unwrap();
         let (_, _, head) = read_footer(&m, 64 << 20).unwrap();
         let h = &head.header;
-        // 2.5 MHz and 10 MHz: a factor of 4 and of 1. The conversion's source tick 0, 5 of its
-        // ticks in, is 20 merged ticks in; the VCD's, aligned by 100, at 100.
+        // 2.5 MHz and 10 MHz: an m of 4 and of 1. The conversion's source tick 0, 5 of its ticks
+        // in, is 20 merged ticks in; the VCD's, aligned by 100, at 100.
         assert_eq!(
             h.timebase,
             escapement_tickwave_format::model::Ratio::integer(10_000_000).unwrap()
@@ -1836,11 +2159,12 @@ mod tests {
         let bytes = fs::read(&m).unwrap();
         let tampered = dir.path().join("t.tickwave");
         for (from, to, why) in [
-            // At a factor of 1 the spans still sit on the VCD's ticks: its edges move instead.
+            // The VCD's channels end at the length: a tick later, they pass it.
             (
                 r#""origin":100,"align":100"#,
                 r#""origin":101,"align":100"#,
-                "channel libsigrok.D0: edge at tick 417 differs",
+                "channel libsigrok.D0 is kept from source tick 0 to 952381, which is empty or \
+                 maps outside the axis's 0 to 952481",
             ),
             (
                 r#""origin":100,"align":100"#,
@@ -1849,8 +2173,8 @@ mod tests {
             ),
             // A kept span the reader takes and the inputs rebuild: the id pins it.
             (
-                r#""kept":[60,420]"#,
-                r#""kept":[60,424]"#,
+                r#""kept":[10,100]"#,
+                r#""kept":[10,101]"#,
                 "the content id does not match the content",
             ),
         ] {
@@ -1931,7 +2255,7 @@ mod tests {
     }
 
     #[test]
-    fn a_merge_carries_the_sidecar_beside_an_input_and_info_shows_each_factor() {
+    fn a_merge_carries_the_sidecar_beside_an_input_and_each_source_has_its_m() {
         let dir = tempfile::tempdir().unwrap();
         let testdata = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/import");
         let (a, b, m) = (
@@ -2009,13 +2333,15 @@ mod tests {
             Some("m.tickwave"),
         )
         .unwrap();
-        // info states each source's factor.
-        let mut out = Vec::new();
-        for (i, s) in h.sources.iter().enumerate() {
-            let f = escapement_tickwave_format::header::factor(h.timebase, s.timebase).unwrap();
-            out.push((i, f));
-        }
-        assert_eq!(out, [(0, 4), (1, 1)]);
+        // Each source's m, which info states.
+        let ms: Vec<_> = (0..h.sources.len()).map(|i| h.m(i)).collect();
+        assert_eq!(
+            ms,
+            [
+                escapement_tickwave_format::model::Ratio::new(4, 1),
+                Some(escapement_tickwave_format::model::Ratio::ONE)
+            ]
+        );
     }
 
     /// `file` with `from` replaced by `to`, of the same length, in every record that holds it, and

@@ -9,7 +9,8 @@ use std::ops::Range;
 use std::sync::atomic::AtomicBool;
 
 use escapement_tickwave_format::header::Exact;
-use escapement_tickwave_format::model::{Break, Ratio, sample_support};
+use escapement_tickwave_format::mapping::Mapping;
+use escapement_tickwave_format::model::{Break, Ratio};
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 
@@ -111,15 +112,19 @@ fn ratio(n: &BigInt, d: &BigInt) -> f64 {
     n.to_f64().unwrap_or(f64::NAN) / d.to_f64().unwrap_or(f64::NAN)
 }
 
-/// Each sample's time, as `model::sample_support` gives it, for samples taken in index order:
+/// Each sample's time on the axis, as `Runs::support` gives it, for samples taken in index order:
 /// the run a sample falls in is found once a run, and a sample's place is the one worked out for
-/// the end of the sample before it.
+/// the end of the sample before it. Places are worked in the source's ticks, then mapped.
 struct Supports<'a> {
     first: i64,
     /// The period's terms.
     num: u128,
     den: u128,
     breaks: &'a [Break],
+    map: Mapping,
+    /// Whether `map` is the identity, which skips the mapping for every sample.
+    identity: bool,
+    /// The axis tick no support runs past.
     length: i64,
     /// The run of the last sample asked for.
     run: Run,
@@ -127,8 +132,8 @@ struct Supports<'a> {
     ahead: Option<(u64, i128)>,
 }
 
-/// A run's samples `start..end`, from `tick`, and where its last sample's time ends when a run
-/// follows it: the next run's tick or the length, whichever comes first.
+/// A run's samples `start..end`, from source tick `tick`, and where its last sample's time ends
+/// when a run follows it: the next run's tick.
 #[derive(Clone, Copy)]
 struct Run {
     start: u64,
@@ -144,6 +149,8 @@ impl<'a> Supports<'a> {
             num: u128::from(runs.period.num()),
             den: u128::from(runs.period.den()),
             breaks: runs.breaks,
+            map: runs.map,
+            identity: runs.map.is_identity(),
             length,
             run: Run {
                 start: 0,
@@ -166,7 +173,7 @@ impl<'a> Supports<'a> {
             start,
             end: next.map_or(u64::MAX, |b| b.index),
             tick,
-            cut: next.map(|b| b.tick.min(self.length)),
+            cut: next.map(|b| b.tick),
         }
     }
 
@@ -196,12 +203,19 @@ impl<'a> Supports<'a> {
         };
         let to = self.place(&r, steps + 1);
         self.ahead = Some((i + 1, to));
-        let cap = match r.cut {
-            Some(cut) if i + 1 == r.end => cut,
-            _ => self.length,
+        let to = match r.cut {
+            Some(cut) if i + 1 == r.end => to.min(i128::from(cut)),
+            _ => to,
         };
         let length = i128::from(self.length);
-        from.min(length) as i64..to.min(i128::from(cap)) as i64
+        if self.identity {
+            return from.min(length) as i64..to.min(length) as i64;
+        }
+        let axis = |x: i128| {
+            let x = x.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64;
+            self.map.axis_saturating(x).min(self.length)
+        };
+        axis(from)..axis(to)
     }
 }
 
@@ -303,6 +317,7 @@ impl Recording {
             period,
             count,
             rule,
+            map,
             ..
         } = place
         else {
@@ -331,10 +346,16 @@ impl Recording {
                 j
             };
             let hi = self.index_at(c, b)?;
-            let whole = if exact.is_some() && period.den() == 1 {
-                self.whole_buckets(c, period.num() as i64, a, b, &mut t, cancel)?
-            } else {
-                Vec::new()
+            // A whole number of source ticks a sample, each a whole number of axis ticks: every
+            // sample a run holds lasts as long on the axis.
+            let m = map.m();
+            let p = (period.den() == 1 && m.den() == 1)
+                .then(|| period.num().checked_mul(m.num()))
+                .flatten()
+                .and_then(|p| i64::try_from(p).ok());
+            let whole = match (exact, p) {
+                (Some(_), Some(p)) => self.whole_buckets(c, p, a, b, &mut t, cancel)?,
+                _ => Vec::new(),
             };
             // Every sample outside the buckets taken, one by one: before the first, between
             // each two, and after the last.
@@ -369,8 +390,8 @@ impl Recording {
         })
     }
 
-    /// Adds to `t` the overview's whole buckets of [a, b) for a whole-tick period of `p` ticks:
-    /// those whose every sample's time lies inside, a full period each, the coarsest first.
+    /// Adds to `t` the overview's whole buckets of [a, b) for a whole-tick period of `p` axis
+    /// ticks: those whose every sample's time lies inside, a full period each, the coarsest first.
     /// Leaves out each bucket that holds a run's last sample whose time a run or the length cuts
     /// short. The tick ranges taken, in order.
     fn whole_buckets(
@@ -394,15 +415,14 @@ impl Recording {
         }
         // Each run's last sample whose time the next run or the length cuts short of a full
         // period, from the run holding `a` on. They come in order of their ticks.
-        let from = runs.breaks.partition_point(|x| x.tick <= a);
+        let from = runs.breaks.partition_point(|x| runs.axis(x.tick) <= a);
         let mut short = Vec::new();
         for i in runs.breaks[from..]
             .iter()
             .map(|x| x.index - 1)
             .chain([count - 1])
         {
-            let s = sample_support(runs.first, runs.period, runs.breaks, *count, self.length, i)
-                .expect("a run's last sample");
+            let s = runs.support(i, self.length).expect("a run's last sample");
             if s.start >= region_end {
                 break;
             }
@@ -475,6 +495,7 @@ impl Recording {
 mod tests {
     use std::ops::Range;
 
+    use escapement_tickwave_format::mapping::Mapping;
     use escapement_tickwave_format::model::{Break, Ratio, sample_support};
 
     use super::Supports;
@@ -498,6 +519,7 @@ mod tests {
             period: Ratio::integer(2).unwrap(),
             count: 8,
             breaks: &breaks,
+            map: Mapping::IDENTITY,
         };
         let mut s = Supports::new(&runs, 14);
         let got: Vec<Range<i64>> = (0..8).map(|i| s.of(i)).collect();
@@ -549,6 +571,7 @@ mod tests {
                 period,
                 count,
                 breaks: &breaks,
+                map: Mapping::IDENTITY,
             };
             let want = |i| sample_support(first, period, &breaks, count, length, i).unwrap();
             let at = format!("{first} every {period:?}, {breaks:?}");

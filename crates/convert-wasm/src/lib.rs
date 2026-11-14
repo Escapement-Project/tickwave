@@ -434,9 +434,12 @@ struct MergeInput {
     file: FileRef,
     /// The file's name without its extension: it names a clashing channel or generator apart.
     stem: String,
-    /// A time at the merged rate, positive later.
+    /// A time at the merged rate, positive later, or two marks `x@y,x@y` in seconds.
     #[serde(default)]
     align: Option<String>,
+    /// The input's clock against the axis: `a/b` or `±N ppm`.
+    #[serde(default)]
+    stretch: Option<String>,
     /// `[name, new name or null]`, in the order to store them; none takes every channel.
     #[serde(default)]
     channels: Vec<(String, Option<String>)>,
@@ -489,7 +492,7 @@ impl MergedFile {
 }
 
 /// Merges .tickwave recordings as `tickwave merge` does, with the same defaults and checks.
-/// `request` is `{inputs: [{file, stem, align, channels, annotations}], offsets, keeps, units,
+/// `request` is `{inputs: [{file, stem, align, stretch, channels, annotations}], offsets, keeps, units,
 /// title, meta, level, blockKib, stem}`, as JSON.
 #[wasm_bindgen]
 pub fn merge(request: &str) -> Result<MergedFile, JsError> {
@@ -502,6 +505,7 @@ pub fn merge(request: &str) -> Result<MergedFile, JsError> {
             .iter()
             .map(|i| InputSettings {
                 align: i.align.clone().filter(|a| !a.is_empty()),
+                stretch: i.stretch.clone().filter(|s| !s.is_empty()),
                 channels: i.channels.clone(),
             })
             .collect(),

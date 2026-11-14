@@ -32,6 +32,7 @@ fn recording(edges_a: Vec<i64>, values: Vec<f32>) -> Recording {
                 data: ChannelData::Digital(Digital {
                     initial: true,
                     end: LENGTH,
+                    count: edges_a.len() as u64,
                     edges: Box::new(edges_a.into_iter()),
                     gaps: Vec::new(),
                 }),
@@ -45,6 +46,7 @@ fn recording(edges_a: Vec<i64>, values: Vec<f32>) -> Recording {
                     initial: false,
                     end: 9001,
                     edges: Box::new(std::iter::empty()),
+                    count: 0,
                     gaps: Vec::new(),
                 }),
                 shaping: Default::default(),
@@ -100,7 +102,9 @@ fn round_trips_through_many_blocks() {
             .unwrap();
         for (c, channel) in block.channels.iter().enumerate() {
             match channel {
-                BlockChannel::Digital { initial, edges: e } if c == 0 => {
+                BlockChannel::Digital {
+                    initial, edges: e, ..
+                } if c == 0 => {
                     levels.push((block.start, *initial));
                     for &t in e {
                         assert!(t >= block.start && t < block.end, "{t} in block {i}");
@@ -166,15 +170,16 @@ fn same_tick_items_share_a_block() {
 fn the_overview_matches_the_edges() {
     let file = encode(recording(EDGES_A.to_vec(), values()), &Options::default()).unwrap();
     let head = Footer::parse_file(&file).unwrap();
-    // 10,000 ticks fit one level of 2^12-tick buckets: 0..4095, 4096..8191, 8192..10000.
-    assert_eq!(head.header.overview, [12]);
+    // V, a sample every 10 ticks, is the densest: about 1,024 of them a bucket is
+    // round(log2(10,240)) = 13. 10,001 ticks fit one level of 2^13-tick buckets: 0..8191 and
+    // 8192..10000.
+    assert_eq!(head.header.overview_shift, 13);
+    assert_eq!(head.header.overview, [13]);
     let a = &head.overview[0].channels[0];
-    // Bucket 0: starts high, changes. Bucket 1: edges 1-3, 100, 101 and 200 are six flips
-    // before it, so it starts high; 5000 changes it. Bucket 2: low after 5000; 9999 and 10000
-    // change it.
+    // Bucket 0: starts high, and edges 1-3, 100, 101, 200 and 5000 change it. Bucket 1: low after
+    // those seven flips; 9999 and 10000 change it.
     assert_eq!(a.digital(0), Some((true, true)));
-    assert_eq!(a.digital(1), Some((true, true)));
-    assert_eq!(a.digital(2), Some((false, true)));
+    assert_eq!(a.digital(1), Some((false, true)));
 }
 
 #[test]
@@ -249,7 +254,10 @@ fn round_trips_edges_that_share_a_tick() {
         let block = head
             .decode_block(i, &file[offset as usize..][..len as usize])
             .unwrap();
-        let BlockChannel::Digital { initial, edges: e } = &block.channels[0] else {
+        let BlockChannel::Digital {
+            initial, edges: e, ..
+        } = &block.channels[0]
+        else {
             panic!()
         };
         let before = EDGES_SHARED.iter().filter(|&&t| t < block.start).count();
@@ -271,7 +279,7 @@ fn refuses_an_edge_past_the_channel_end() {
     );
     let mut rec = recording(EDGES_A.to_vec(), values());
     if let ChannelData::Digital(d) = &mut rec.channels[1].data {
-        d.edges = Box::new([9001].into_iter());
+        (d.edges, d.count) = (Box::new([9001].into_iter()), 1);
     }
     let err = encode(rec, &Options::default()).unwrap_err();
     assert!(

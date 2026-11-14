@@ -24,7 +24,11 @@ fn a_duty_rounds_as_to_fixed_and_math_round_do() {
         (0, 5, "0\u{a0}%"),
     ];
     for (high, period, want) in cases {
-        assert_eq!(format_duty(high, period, 1), want, "{high} of {period}");
+        assert_eq!(
+            format_duty(high, period, Ratio::ONE),
+            want,
+            "{high} of {period}"
+        );
     }
 }
 
@@ -64,9 +68,12 @@ fn a_value_reads_as_the_decimal_it_prints_as() {
 
 #[test]
 fn intervals_below_zero() {
-    assert_eq!(format_brief(-999_600_000, GS, 1), "\u{2212}1.00\u{a0}s");
     assert_eq!(
-        format_interval(-1, Ratio::new(3, 1).unwrap(), 1),
+        format_brief(-999_600_000, GS, Ratio::ONE),
+        "\u{2212}1.00\u{a0}s"
+    );
+    assert_eq!(
+        format_interval(-1, Ratio::new(3, 1).unwrap(), Ratio::ONE),
         "\u{2212}300\u{a0}ms"
     );
 }

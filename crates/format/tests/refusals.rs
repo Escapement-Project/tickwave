@@ -148,6 +148,7 @@ fn analog(coding_bits: Option<u8>, values: Vec<f32>) -> (Recording, Options) {
                     initial: false,
                     end: 1_000_000_001,
                     edges: Box::new([5, 1_000_000_000].into_iter()),
+                    count: 2,
                     gaps: Vec::new(),
                 }),
                 shaping: Default::default(),
@@ -359,7 +360,7 @@ fn the_encoder_refuses_what_the_reader_would_and_says_which_channel() {
     rec.length = 0;
     rec.channels.truncate(1);
     if let ChannelData::Digital(d) = &mut rec.channels[0].data {
-        (d.end, d.edges) = (0, Box::new(std::iter::empty()));
+        (d.end, d.edges, d.count) = (0, Box::new(std::iter::empty()), 0);
     }
     assert_eq!(
         refused(rec, &options),
@@ -372,7 +373,7 @@ fn the_encoder_refuses_what_the_reader_would_and_says_which_channel() {
     }
     assert_eq!(
         refused(rec, &options),
-        "V: a run at tick -3 lies before tick 0"
+        "V: source tick -3 lies outside 0 to 2^53"
     );
 
     let (mut rec, options) = analog(None, vec![1.0; 10]);
@@ -405,6 +406,19 @@ fn the_encoder_refuses_what_the_reader_would_and_says_which_channel() {
         refused(rec, &options),
         "the declaration: channel V's codes are 0 bits; a codes coding holds 1 to 16"
     );
+
+    // A digital channel's count is what the density takes, so a source of edges states it
+    // exactly: one more or one fewer than it gives is refused.
+    for (promised, delivered) in [(3, 2), (1, 2), (0, 2)] {
+        let (mut rec, options) = analog(None, vec![1.0; 10]);
+        if let ChannelData::Digital(d) = &mut rec.channels[0].data {
+            d.count = promised;
+        }
+        assert_eq!(
+            refused(rec, &options),
+            format!("C: {promised} items promised, {delivered} delivered")
+        );
+    }
 }
 
 #[test]
@@ -427,8 +441,10 @@ fn a_zero_term_in_a_header_ratio_is_refused() {
 #[test]
 fn a_header_integer_past_2_pow_53_is_refused() {
     let (mut rec, options) = analog(None, vec![1.0; 10]);
-    // 10^15 ticks a second: sixteen digits, as 2^53 + 1 has, so the patch keeps every offset.
+    // 10^15 ticks a second: sixteen digits, as 2^53 + 1 has, so the patch keeps every offset. A
+    // recording of one source ticks at its rate.
     rec.timebase = Ratio::integer(1_000_000_000_000_000).unwrap();
+    rec.sources[0].timebase = rec.timebase;
     let file = encode(rec, &options).unwrap();
     assert!(Footer::parse_file(&file).is_ok());
     let bad = patched(
@@ -482,6 +498,7 @@ fn a_channel_never_known_has_a_low_initial_level() {
                 initial,
                 end: 0,
                 edges: Box::new(std::iter::empty()),
+                count: 0,
                 gaps: Vec::new(),
             }),
             shaping: Default::default(),
@@ -555,7 +572,8 @@ fn an_item_at_the_length_or_the_end_is_refused() {
         .decode_block(0, &file[offset as usize..][..len as usize])
         .expect_err("refused");
     assert!(
-        err.to_string().contains("an edge lies outside the block"),
+        err.to_string()
+            .contains("an edge lies outside its channel's start and end"),
         "{err}"
     );
 }

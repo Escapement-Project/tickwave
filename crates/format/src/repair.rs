@@ -12,12 +12,14 @@ use crate::header::{
     BlockRow, ChannelHeader, ChannelKind, Declaration, DeclaredKind, Header, LEVEL_BIT,
     OverviewRow, Words,
 };
+use crate::mapping::Mapping;
 use crate::model::{Break, Gap};
 use crate::overview::{self, Builder, Settled};
 use crate::reader::{Ending, Event, Reader};
 use crate::record::{self, BlockHead, Kind};
 use crate::writer::{
-    Bundle, WriteError, assemble, bundled_files, compress, finished_header, generated,
+    Bundle, OVERVIEW_BLOCK_LEVEL, WriteError, assemble, bundled_files, compress, finished_header,
+    generated,
 };
 
 /// A cut-off file's length (FORMAT.md, "Repairing a cut-off file"): the later of the last
@@ -34,7 +36,7 @@ pub(crate) fn latest_start(latest: Option<i64>, record: &record::Annotation) -> 
     }
 }
 
-/// A digital channel a file with no block declares high at tick 0: no block carries that level,
+/// A digital channel a file with no block declares high at its start: no block carries that level,
 /// and with no block the channel is never known, so its `initial` would have to be false.
 pub(crate) fn high_without_block(d: &Declaration) -> Option<&str> {
     d.channels.iter().find_map(|c| match c.data {
@@ -87,8 +89,11 @@ enum Channel {
         hasher: ChannelHasher,
         edges: u64,
         gaps: Vec<Gap>,
+        /// Each gap's `to` on the axis.
+        gap_ends: Vec<i64>,
         /// The level after the last block: its start's, through its edges and gap ends.
         level: bool,
+        map: Mapping,
     },
     Analog {
         hasher: ChannelHasher,
@@ -161,32 +166,48 @@ impl Repairer {
         match event {
             Event::Declaration(d) => {
                 self.builder = Some(Builder::new(d.overview_shift, &d.channels, &d.derived));
-                self.channels = d
-                    .channels
-                    .iter()
-                    .enumerate()
-                    .map(|(c, channel)| match &channel.data {
+                let mut channels = Vec::with_capacity(d.channels.len());
+                for (c, channel) in d.channels.iter().enumerate() {
+                    let (Some(hasher), Some(map)) = (ChannelHasher::declared(&d, c), d.mapping(c))
+                    else {
+                        self.error
+                            .get_or_insert(format!("channel {c} has no mapping to the axis"));
+                        return;
+                    };
+                    channels.push(match &channel.data {
                         DeclaredKind::Digital { initial } => Channel::Digital {
-                            hasher: ChannelHasher::declared(&d, c),
+                            hasher,
                             edges: 0,
                             gaps: Vec::new(),
+                            gap_ends: Vec::new(),
                             level: *initial,
+                            map,
                         },
                         DeclaredKind::Analog { .. } => Channel::Analog {
-                            hasher: ChannelHasher::declared(&d, c),
+                            hasher,
                             count: 0,
                             runs: Vec::new(),
                         },
-                    })
-                    .collect();
+                    });
+                }
+                self.channels = channels;
                 self.words = Words::new(d.channels.len());
                 self.declaration = Some(*d);
             }
             Event::Gap { channel, gap } => {
-                if let Channel::Digital { gaps, .. } = &mut self.channels[channel] {
+                if let Channel::Digital {
+                    gaps,
+                    gap_ends,
+                    map,
+                    ..
+                } = &mut self.channels[channel]
+                {
+                    // The reader holds a gap's ends inside the axis.
+                    let to = map.axis(gap.to).unwrap_or(i64::MAX);
                     gaps.push(gap);
+                    gap_ends.push(to);
+                    self.builder.as_mut().unwrap().gap(channel, gap, to);
                 }
-                self.builder.as_mut().unwrap().gap(channel, gap);
             }
             Event::Run { channel, run } => {
                 if let Channel::Analog { runs, .. } = &mut self.channels[channel] {
@@ -195,26 +216,29 @@ impl Repairer {
             }
             Event::Block(block) => {
                 let builder = self.builder.as_mut().unwrap();
-                for (c, got) in block.channels.into_iter().enumerate() {
+                for (c, got) in block.channels.iter().enumerate() {
+                    let source = got.source_ticks().unwrap_or_default();
                     match (got, &mut self.channels[c]) {
                         (
-                            BlockChannel::Digital { edges, initial },
+                            BlockChannel::Digital { edges, initial, .. },
                             Channel::Digital {
                                 hasher,
                                 edges: n,
                                 gaps,
+                                gap_ends,
                                 level,
+                                ..
                             },
                         ) => {
-                            for &tick in &edges {
-                                hasher.edge(tick);
-                                builder.edge(c, tick);
+                            for (&k, &tick) in source.iter().zip(edges) {
+                                hasher.edge(k);
+                                builder.edge(c, k, tick);
                                 *n += 1;
                             }
                             *level = level_after(
-                                initial,
-                                &edges,
-                                gaps_ending_in(gaps, block.head.start, block.head.end),
+                                *initial,
+                                source,
+                                gaps_ending_in(gaps, gap_ends, block.head.start, block.head.end),
                             );
                         }
                         (
@@ -224,11 +248,13 @@ impl Repairer {
                             },
                             Channel::Analog { hasher, count, .. },
                         ) => {
-                            for (index, value) in (first_index..).zip(values.iter()) {
-                                let tick = self
-                                    .reader
-                                    .sample_tick(c, index)
-                                    .expect("the reader checks a block's samples have a run");
+                            for (index, value) in (*first_index..).zip(values.iter()) {
+                                let Some(tick) = self.reader.sample_axis_tick(c, index) else {
+                                    self.error.get_or_insert(format!(
+                                        "channel {c}: sample {index} has no place on the axis"
+                                    ));
+                                    return;
+                                };
                                 hasher.sample(value);
                                 if let Err(e) = builder.sample(c, tick, value) {
                                     self.error.get_or_insert(e.to_string());
@@ -325,7 +351,7 @@ impl Repairer {
         for Settled { shift, k, level } in std::mem::take(&mut self.settled).into_iter().chain(last)
         {
             let mut raw = Vec::new();
-            overview::write(&[level], &mut raw);
+            overview::write_level(&level, &mut raw);
             let row = match self.present.get(&(shift, k)) {
                 Some((offset, frame)) => {
                     let got = inflate_limited(frame, raw.len(), MAX_DECODED)?;
@@ -339,7 +365,7 @@ impl Repairer {
                     }
                 }
                 None => {
-                    let frame = compress(&raw, self.level).map_err(WriteError::from)?;
+                    let frame = compress(&raw, OVERVIEW_BLOCK_LEVEL).map_err(WriteError::from)?;
                     let at = keep + tail.len() as u64;
                     record::write(
                         &mut tail,
@@ -366,18 +392,17 @@ impl Repairer {
                         hasher,
                         edges,
                         gaps,
+                        map,
                         ..
                     },
                     DeclaredKind::Digital { initial },
                 ) => {
-                    // Known to the last block's end; a gap that reaches it ends what is known at
-                    // its `from`, unless that lies past the end too: a recorder can learn of a
-                    // loss before it writes the block the loss starts in.
-                    let kept = gaps
-                        .iter()
-                        .position(|g| g.to >= last_end)
-                        .unwrap_or(gaps.len());
-                    let end = gaps.get(kept).map_or(last_end, |g| g.from.min(last_end));
+                    // Known to the source tick at the last block's end; a gap that reaches it ends
+                    // what is known at its `from`, unless that lies past the end too: a recorder
+                    // can learn of a loss before it writes the block the loss starts in.
+                    let last = map.first_at(last_end);
+                    let kept = gaps.iter().position(|g| g.to >= last).unwrap_or(gaps.len());
+                    let end = gaps.get(kept).map_or(last, |g| g.from.min(last));
                     let gaps = gaps[..kept].to_vec();
                     digests.push(hasher.finish_digital(end, &gaps));
                     ChannelKind::Digital {

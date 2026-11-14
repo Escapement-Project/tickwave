@@ -47,7 +47,7 @@ pub struct Recutter {
     gaps: Vec<VecDeque<Gap>>,
     /// Each analog channel's runs not yet handed on: a run goes in before its sample.
     runs: Vec<VecDeque<Break>>,
-    /// The latest tick handed on.
+    /// The latest axis tick handed on.
     pushed: Option<i64>,
     footer: Option<Box<Footer>>,
     annotations: bool,
@@ -113,15 +113,22 @@ impl Recutter {
             .expect("records follow the declaration")
     }
 
-    /// Hands on every waiting gap whose `from` lies before `tick`.
-    fn gaps_before(&mut self, tick: i64) -> Result<(), RecutError> {
+    /// Hands on every waiting gap that comes before an item at axis tick `tick`: one whose
+    /// `from` maps before it, and, of channel `item`'s, one whose `from` lies before the item's
+    /// source tick, which can share its axis tick.
+    fn gaps_before(&mut self, tick: i64, item: Option<(usize, i64)>) -> Result<(), RecutError> {
         let writer = self
             .writer
             .as_mut()
             .expect("records follow the declaration");
         for (c, gaps) in self.gaps.iter_mut().enumerate() {
-            while let Some(g) = gaps.front().filter(|g| g.from < tick) {
-                writer.gap(c, *g)?;
+            let map = self.reader.mapping(c);
+            let before = |g: &Gap| {
+                map.and_then(|m| m.axis(g.from)).is_some_and(|t| t < tick)
+                    || item.is_some_and(|(ic, k)| ic == c && g.from < k)
+            };
+            while let Some(&g) = gaps.front().filter(|g| before(g)) {
+                writer.gap(c, g)?;
                 gaps.pop_front();
             }
         }
@@ -137,7 +144,9 @@ impl Recutter {
             }
             Event::Gap { channel, gap } => {
                 // A gap learned after items past its `from` went in: the edges before it are in.
-                if self.pushed.is_some_and(|t| t > gap.from) && self.gaps[channel].is_empty() {
+                let from = self.reader.mapping(channel).and_then(|m| m.axis(gap.from));
+                let passed = self.pushed.zip(from).is_some_and(|(t, from)| t > from);
+                if passed && self.gaps[channel].is_empty() {
                     self.writer().gap(channel, gap)?;
                 } else {
                     self.gaps[channel].push_back(gap);
@@ -156,32 +165,41 @@ impl Recutter {
         Ok(())
     }
 
-    /// Hands on a block's items in tick order across the channels.
+    /// Hands on a block's items in axis order across the channels, each channel's in the order
+    /// of its source ticks.
     fn block(&mut self, block: ReadBlock) -> Result<(), RecutError> {
         self.blocks = true;
         let channels = block.channels;
         let mut at = vec![0usize; channels.len()];
-        let tick_of = |reader: &Reader, c: usize, i: usize| -> Option<i64> {
+        // The item's axis tick, and a digital edge's source tick. The reader holds every sample of
+        // a block it hands on inside the block, so each has a place.
+        let tick_of = |reader: &Reader, c: usize, i: usize| -> Option<(i64, i64)> {
             match &channels[c] {
-                BlockChannel::Digital { edges, .. } => edges.get(i).copied(),
+                got @ BlockChannel::Digital { edges, .. } => {
+                    let source = got.source_ticks()?;
+                    Some((*edges.get(i)?, *source.get(i)?))
+                }
                 BlockChannel::Analog {
                     first_index,
                     values,
-                } => (i < values.len()).then(|| {
-                    reader
-                        .sample_tick(c, first_index + i as u64)
-                        .expect("the reader checks a block's samples have a run")
-                }),
+                } => {
+                    let index = first_index + i as u64;
+                    (i < values.len()).then(|| {
+                        let place = reader.sample_tick(c, index).unwrap_or(i64::MAX);
+                        let tick = reader.sample_axis_tick(c, index).unwrap_or(i64::MAX);
+                        (tick, place)
+                    })
+                }
             }
         };
         loop {
             let next = (0..channels.len())
                 .filter_map(|c| tick_of(&self.reader, c, at[c]).map(|t| (t, c)))
-                .min();
-            let Some((tick, c)) = next else {
+                .min_by_key(|&((tick, _), c)| (tick, c));
+            let Some(((tick, source), c)) = next else {
                 break;
             };
-            self.gaps_before(tick)?;
+            self.gaps_before(tick, Some((c, source)))?;
             let i = at[c];
             at[c] += 1;
             let writer = self
@@ -189,7 +207,7 @@ impl Recutter {
                 .as_mut()
                 .expect("records follow the declaration");
             match &channels[c] {
-                BlockChannel::Digital { .. } => writer.edge(c, tick)?,
+                BlockChannel::Digital { .. } => writer.edge(c, source)?,
                 BlockChannel::Analog {
                     first_index,
                     values,
@@ -206,7 +224,7 @@ impl Recutter {
             }
             self.pushed = Some(tick);
         }
-        self.gaps_before(block.head.end)?;
+        self.gaps_before(block.head.end, None)?;
         Ok(())
     }
 
@@ -283,12 +301,11 @@ impl Recutter {
                 if length < 1 {
                     return Err(RecutError::Nothing);
                 }
-                let ends: Vec<i64> = writer
-                    .declaration()
-                    .channels
-                    .iter()
-                    .filter(|c| c.coding().is_none())
-                    .map(|_| last_end)
+                // The source tick at the last block's end, as repair has it.
+                let d = writer.declaration();
+                let ends: Vec<i64> = (0..d.channels.len())
+                    .filter(|&c| d.channels[c].coding().is_none())
+                    .map(|c| d.mapping(c).map_or(last_end, |m| m.first_at(last_end)))
                     .collect();
                 // Repair's gap rule: a gap that reaches the last block's end ends what is known at
                 // its `from`, even one that ends inside the length the marks gave.

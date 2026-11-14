@@ -10,7 +10,8 @@ use escapement_tickwave_format::decode::{DecodeError, FIRST_READ, Footer};
 use escapement_tickwave_format::header::{
     AnalogCoding, ChannelKind as HeaderKind, Exact, Header, MAGIC, PREAMBLE_LEN, SourceHeader,
 };
-use escapement_tickwave_format::model::{Break, Gap, Ratio, Sample, sample_support};
+use escapement_tickwave_format::mapping::Mapping;
+use escapement_tickwave_format::model::{Break, Gap, Ratio, Sample};
 use escapement_tickwave_format::overview::{self as format_overview};
 use escapement_tickwave_format::samples::{self, Product};
 
@@ -116,20 +117,24 @@ impl Rule {
     }
 }
 
-/// Where a channel's data lies, and for an analog one where its samples sit.
+/// Where a channel's data lies, and for an analog one where its samples sit. A digital channel's
+/// ticks are axis ticks; an analog channel's runs are its source's, which `map` places.
 #[derive(Clone, Debug)]
 pub(crate) enum Place {
     Digital {
         initial: bool,
-        /// Where the level is first known: past a gap from tick 0.
+        /// Where the level is first known: the channel's start, or past a gap from there.
         start: i64,
         end: i64,
-        /// The gap from tick 0, if there is one: its level is the level at `start`.
+        /// The gap from the channel's start, if there is one: its level is the level at `start`.
         leading: Option<Gap>,
         /// The gaps after `start`.
         gaps: Vec<Gap>,
-        /// Every gap the header states, one from tick 0 included.
+        /// Every gap the header states, one from the start included.
         gap_count: usize,
+        /// The channel's start in its source's ticks, and its mapping, for a live channel's gaps.
+        source_start: i64,
+        map: Mapping,
     },
     Analog {
         first: i64,
@@ -138,9 +143,10 @@ pub(crate) enum Place {
         breaks: Vec<Break>,
         /// The samples the breaks say were lost, summed.
         lost: u64,
-        /// Where the last sample's time ends, or `first` with none.
+        /// Where the last sample's time ends on the axis, or the first sample's tick with none.
         end: i64,
         rule: Rule,
+        map: Mapping,
     },
 }
 
@@ -152,12 +158,14 @@ impl Place {
                 period,
                 count,
                 breaks,
+                map,
                 ..
             } => Some(Runs {
                 first: *first,
                 period: *period,
                 count: *count,
                 breaks,
+                map: *map,
             }),
             Self::Digital { .. } => None,
         }
@@ -311,16 +319,35 @@ fn analog_info(
     }
 }
 
-fn digital_place(initial: bool, end: i64, gaps: &[Gap]) -> Place {
-    // A gap from tick 0 says where the channel's data starts; the others are gaps in it.
-    let leading = gaps.first().filter(|g| g.from == 0).copied();
+/// A gap's source ticks on the axis.
+fn gap_on_axis(map: &Mapping, g: &Gap) -> Gap {
+    Gap {
+        from: map.axis_saturating(g.from),
+        to: map.axis_saturating(g.to),
+        level: g.level,
+    }
+}
+
+/// A digital channel's place from its start, end and gaps, all source ticks.
+fn digital_place(initial: bool, start: i64, end: i64, gaps: &[Gap], map: Mapping) -> Place {
+    // A gap from the channel's start says where its level is first known; the others are gaps in
+    // it.
+    let leading = gaps
+        .first()
+        .filter(|g| g.from == start)
+        .map(|g| gap_on_axis(&map, g));
     Place::Digital {
         initial,
-        start: leading.map_or(0, |g| g.to),
-        end,
+        start: leading.map_or(map.axis_saturating(start), |g| g.to),
+        end: map.axis_saturating(end),
         leading,
-        gaps: gaps[usize::from(leading.is_some())..].to_vec(),
+        gaps: gaps[usize::from(leading.is_some())..]
+            .iter()
+            .map(|g| gap_on_axis(&map, g))
+            .collect(),
         gap_count: gaps.len(),
+        source_start: start,
+        map,
     }
 }
 
@@ -331,15 +358,17 @@ fn analog_place(
     breaks: Vec<Break>,
     length: i64,
     rule: Rule,
+    map: Mapping,
 ) -> Place {
     let runs = Runs {
         first,
         period,
         count,
         breaks: &breaks,
+        map,
     };
     let end = match count {
-        0 => first,
+        0 => runs.start(),
         n => length.min(place_after(&runs, n - 1)),
     };
     let lost = breaks.iter().map(|b| b.lost).sum();
@@ -351,6 +380,7 @@ fn analog_place(
         lost,
         end,
         rule,
+        map,
     }
 }
 
@@ -368,6 +398,7 @@ fn add_derived(
             breaks,
             lost,
             end,
+            map,
             ..
         } = &built.places[a]
         else {
@@ -381,6 +412,7 @@ fn add_derived(
             lost: *lost,
             end: *end,
             rule: Rule::Product(product),
+            map: *map,
         });
         built.channels.push(ChannelInfo {
             name: d.name.clone(),
@@ -405,7 +437,9 @@ fn header_channels(h: &Header, products: &[(usize, usize, Product)]) -> Built {
         channels: Vec::new(),
         places: Vec::new(),
     };
-    for c in &h.channels {
+    for (i, c) in h.channels.iter().enumerate() {
+        // A checked header maps every channel.
+        let map = h.mapping(i).unwrap_or(Mapping::IDENTITY);
         match &c.data {
             HeaderKind::Digital {
                 initial, end, gaps, ..
@@ -417,7 +451,10 @@ fn header_channels(h: &Header, products: &[(usize, usize, Product)]) -> Built {
                     resolution: None,
                     significant: None,
                 });
-                built.places.push(digital_place(*initial, *end, gaps));
+                let start = h.start(i).unwrap_or(0);
+                built
+                    .places
+                    .push(digital_place(*initial, start, *end, gaps, map));
             }
             HeaderKind::Analog {
                 unit,
@@ -438,6 +475,7 @@ fn header_channels(h: &Header, products: &[(usize, usize, Product)]) -> Built {
                     breaks.clone(),
                     h.length,
                     Rule::Coding(*coding),
+                    map,
                 ));
             }
         }
@@ -614,7 +652,9 @@ impl Recording {
             channels: Vec::new(),
             places: Vec::new(),
         };
-        for ch in &d.channels {
+        for (i, ch) in d.channels.iter().enumerate() {
+            // A writer takes only a declaration that maps every channel.
+            let map = d.mapping(i).unwrap_or(Mapping::IDENTITY);
             match &ch.data {
                 DeclaredKind::Digital { initial } => {
                     built.channels.push(ChannelInfo {
@@ -624,7 +664,10 @@ impl Recording {
                         resolution: None,
                         significant: None,
                     });
-                    built.places.push(digital_place(*initial, 0, &[]));
+                    let start = d.start(i).unwrap_or(0);
+                    built
+                        .places
+                        .push(digital_place(*initial, start, start, &[], map));
                 }
                 DeclaredKind::Analog {
                     unit,
@@ -642,6 +685,7 @@ impl Recording {
                         Vec::new(),
                         0,
                         Rule::Coding(*coding),
+                        map,
                     ));
                 }
             }
@@ -761,18 +805,22 @@ impl Recording {
                         leading,
                         gaps,
                         gap_count,
+                        source_start,
+                        map,
                         ..
                     },
                     BlockChannel::Digital { edges, .. },
                 ) => {
                     last = last.max(edges.last().copied().unwrap_or(i64::MIN));
                     for g in snapshot.gaps_from(c, seen.gaps[c]) {
-                        // A gap from tick 0 says where the data starts; the others are gaps in it.
-                        if *gap_count == 0 && g.from == 0 {
-                            *start = g.to;
-                            *leading = Some(*g);
+                        // A gap from the channel's start says where its level is first known;
+                        // the others are gaps in it.
+                        let on_axis = gap_on_axis(map, g);
+                        if *gap_count == 0 && g.from == *source_start {
+                            *start = on_axis.to;
+                            *leading = Some(on_axis);
                         } else {
-                            gaps.push(*g);
+                            gaps.push(on_axis);
                         }
                         *gap_count += 1;
                     }
@@ -785,6 +833,7 @@ impl Recording {
                         count,
                         breaks,
                         lost,
+                        map,
                         ..
                     },
                     BlockChannel::Analog {
@@ -803,7 +852,8 @@ impl Recording {
                     }
                     *count = first_index + values.len() as u64;
                     if !values.is_empty() {
-                        last = last.max(run_sample_tick(*first, *period, breaks, *count - 1));
+                        let k = run_sample_tick(*first, *period, breaks, *count - 1);
+                        last = last.max(map.axis_saturating(k));
                     }
                 }
                 _ => unreachable!("a block's channels follow the declaration"),
@@ -819,6 +869,7 @@ impl Recording {
                     count,
                     breaks,
                     end,
+                    map,
                     ..
                 } => {
                     let runs = Runs {
@@ -826,9 +877,10 @@ impl Recording {
                         period: *period,
                         count: *count,
                         breaks,
+                        map: *map,
                     };
                     *end = match *count {
-                        0 => *first,
+                        0 => runs.start(),
                         n => (*length).min(place_after(&runs, n - 1)),
                     };
                 }
@@ -973,6 +1025,15 @@ impl Recording {
         &self.sources
     }
 
+    /// Where channel `channel`'s source ticks lie on the axis (FORMAT.md, "Times"): its source's
+    /// `m`, origin and its own offset, for a readout exact to the source's tick. A derived
+    /// channel's is its operands'.
+    pub fn mapping(&self, channel: usize) -> Result<Mapping, Error> {
+        match self.place(channel)? {
+            Place::Digital { map, .. } | Place::Analog { map, .. } => Ok(*map),
+        }
+    }
+
     /// An analog or derived channel's samples the instrument lost between runs, its breaks'
     /// `lost` summed; 0 for a digital channel or one past the last.
     pub fn lost(&self, channel: usize) -> u64 {
@@ -1005,18 +1066,11 @@ impl Recording {
         let mut extent: Option<Range<i64>> = None;
         let stored = self.places.len() - self.products.len();
         for place in &self.places[..stored] {
-            if let Place::Analog {
-                first,
-                period,
-                count,
-                breaks,
-                ..
-            } = place
-                && *count > 0
+            if let Some(runs) = place.runs()
+                && runs.count > 0
+                && let Some(last) = runs.support(runs.count - 1, self.length)
             {
-                let last = sample_support(*first, *period, breaks, *count, self.length, count - 1)
-                    .expect("the last sample");
-                widen(&mut extent, *first..last.end);
+                widen(&mut extent, runs.start()..last.end);
             }
         }
         if extent.is_none() {
@@ -1033,7 +1087,8 @@ impl Recording {
     }
 
     /// Analog or derived channel `channel`'s runs: its first sample's tick, period, count and
-    /// breaks, as the recording holds them now.
+    /// breaks, as the recording holds them now, in its source's ticks, and its mapping to the
+    /// axis, which the runs' methods apply.
     pub fn runs(&self, channel: usize) -> Result<Runs<'_>, Error> {
         self.place(channel)?.runs().ok_or(Error::NoChannel(channel))
     }

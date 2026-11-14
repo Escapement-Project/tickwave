@@ -27,13 +27,24 @@ fn kept(from: i64, to: i64) -> Option<Kept> {
     Some(Kept { from, to })
 }
 
-/// Channel C, cut from tick 100 to 4000 and moved by -40: a gap from tick 0 to 150 where an
-/// instrument gap the cut lies in joins the cut, then edges, and the instrument's end at 3000,
-/// before the cut's. Channel D, moved only, so kept from tick 0 to the length, as every channel
-/// states a kept span once one does. Analog V, cut from 200 to 3500, its first sample at 201 and
-/// its last at 3401: `first` above `from`. With `shaped` false, no channel states anything.
+/// Every tick here is a source tick; the source's tick 0 lies at axis tick -10 when `shaped`, so
+/// D, moved by 10, starts the recording at axis tick 0.
+///
+/// Channel C, cut from source tick 150 to 4050 and moved by -40, so axis ticks 100 to 4000: it
+/// starts with a gap the instrument left, from the cut to 200, then edges, and the instrument's
+/// end at 3050, before the cut's. Channel D, moved only, so kept from its source's tick 0 to the
+/// length, as every channel states a kept span once one does. Analog V, cut from 210 to 3510, its
+/// first sample at 211 and its last at 3411: `first` above `from`. With `shaped` false, no
+/// channel states anything and the source's tick 0 is the axis's.
 fn recording(shaped: bool) -> Recording {
     let shaping = |s: Shaping| if shaped { s } else { Shaping::default() };
+    let mut source = Source::new(
+        SourceFormat::Other("test".into()),
+        Ratio::integer(1_000_000).unwrap(),
+    );
+    if shaped {
+        source.origin = -10;
+    }
     Recording {
         timebase: Ratio::integer(1_000_000).unwrap(),
         length: LENGTH,
@@ -44,17 +55,18 @@ fn recording(shaped: bool) -> Recording {
                 source: 0,
                 data: ChannelData::Digital(Digital {
                     initial: false,
-                    end: 3000,
-                    edges: Box::new([300, 400, 2000].into_iter()),
+                    end: 3050,
+                    edges: Box::new([350, 450, 2050].into_iter()),
+                    count: 3,
                     gaps: vec![Gap {
-                        from: 0,
-                        to: 150,
+                        from: 150,
+                        to: 200,
                         level: true,
                     }],
                 }),
                 shaping: shaping(Shaping {
                     offset: offset(-40),
-                    kept: kept(100, 4000),
+                    kept: kept(150, 4050),
                 }),
             },
             Channel {
@@ -65,10 +77,11 @@ fn recording(shaped: bool) -> Recording {
                     initial: true,
                     end: LENGTH,
                     edges: Box::new([10, 20].into_iter()),
+                    count: 2,
                     gaps: Vec::new(),
                 }),
                 shaping: shaping(Shaping {
-                    offset: offset(1_000_000_000_000_000),
+                    offset: offset(10),
                     kept: kept(0, LENGTH),
                 }),
             },
@@ -79,7 +92,7 @@ fn recording(shaped: bool) -> Recording {
                 data: ChannelData::Analog(Analog {
                     significant: None,
                     unit: "V".into(),
-                    first: 201,
+                    first: 211,
                     period: Ratio::integer(100).unwrap(),
                     count: 33,
                     breaks: Vec::new(),
@@ -87,15 +100,12 @@ fn recording(shaped: bool) -> Recording {
                 }),
                 shaping: shaping(Shaping {
                     offset: None,
-                    kept: kept(200, 3500),
+                    kept: kept(210, 3510),
                 }),
             },
         ],
         derived: Vec::new(),
-        sources: vec![Source::new(
-            SourceFormat::Other("test".into()),
-            Ratio::integer(1_000_000).unwrap(),
-        )],
+        sources: vec![source],
     }
 }
 
@@ -107,15 +117,15 @@ fn shapings() -> [Shaping; 3] {
     [
         Shaping {
             offset: offset(-40),
-            kept: kept(100, 4000),
+            kept: kept(150, 4050),
         },
         Shaping {
-            offset: offset(1_000_000_000_000_000),
+            offset: offset(10),
             kept: kept(0, LENGTH),
         },
         Shaping {
             offset: None,
-            kept: kept(200, 3500),
+            kept: kept(210, 3510),
         },
     ]
 }
@@ -159,13 +169,17 @@ fn content_id_by_hand(shaped: bool) -> ContentId {
         h.update(&(text.len() as u64).to_le_bytes());
         h.update(text.as_bytes());
     }
-    fn flags(h: &mut blake3::Hasher, shaping: &Shaping) {
+    /// The flags, then what each states; `origin` is the source's, placing it once it isn't 0.
+    fn flags(h: &mut blake3::Hasher, shaping: &Shaping, origin: i64) {
         let mut flags = 0u8;
         if shaping.offset.is_some() {
             flags |= 1;
         }
         if shaping.kept.is_some() {
             flags |= 2;
+        }
+        if origin != 0 {
+            flags |= 4;
         }
         if flags == 0 {
             return;
@@ -179,7 +193,19 @@ fn content_id_by_hand(shaped: bool) -> ContentId {
             h.update(&k.from.to_le_bytes());
             h.update(&k.to.to_le_bytes());
         }
+        if origin != 0 {
+            // m 1/1, the origin, no align, no stretch: 1/1.
+            for v in [1u64, 1] {
+                h.update(&v.to_le_bytes());
+            }
+            h.update(&origin.to_le_bytes());
+            h.update(&0i64.to_le_bytes());
+            for v in [1u64, 1] {
+                h.update(&v.to_le_bytes());
+            }
+        }
     }
+    let origin = if shaped { -10 } else { 0 };
     let shapings = if shaped {
         shapings()
     } else {
@@ -190,9 +216,9 @@ fn content_id_by_hand(shaped: bool) -> ContentId {
         (
             "C",
             false,
-            &[300i64, 400, 2000][..],
-            3000i64,
-            &[(0i64, 150i64, true)][..],
+            &[350i64, 450, 2050][..],
+            3050i64,
+            &[(150i64, 200i64, true)][..],
             &shapings[0],
         ),
         ("D", true, &[10, 20][..], LENGTH, &[][..], &shapings[1]),
@@ -201,7 +227,7 @@ fn content_id_by_hand(shaped: bool) -> ContentId {
         s(&mut h, name);
         s(&mut h, "digital");
         h.update(&[u8::from(initial)]);
-        flags(&mut h, shaping);
+        flags(&mut h, shaping, origin);
         for e in edges {
             h.update(&e.to_le_bytes());
         }
@@ -220,11 +246,11 @@ fn content_id_by_hand(shaped: bool) -> ContentId {
     s(&mut h, "V");
     h.update(&100u64.to_le_bytes());
     h.update(&1u64.to_le_bytes());
-    flags(&mut h, &shapings[2]);
+    flags(&mut h, &shapings[2], origin);
     for i in 0..33 {
         h.update(&(i as f32).to_bits().to_le_bytes());
     }
-    h.update(&201i64.to_le_bytes());
+    h.update(&211i64.to_le_bytes());
     h.update(&33u64.to_le_bytes());
     h.update(&0u64.to_le_bytes());
     digests.push(h.finalize());
@@ -264,14 +290,14 @@ fn the_content_id_is_format_mds_and_pins_each_stated_field() {
             c[0].shaping.offset.as_mut().unwrap().kind = "align".into()
         }),
         ("kept from", &|c| {
-            c[0].shaping.kept.as_mut().unwrap().from = 99
+            c[0].shaping.kept.as_mut().unwrap().from = 149
         }),
         ("kept to", &|c| {
-            c[0].shaping.kept.as_mut().unwrap().to = 4001
+            c[0].shaping.kept.as_mut().unwrap().to = 4051
         }),
         ("no offset", &|c| c[0].shaping.offset = None),
         ("V's kept to", &|c| {
-            c[2].shaping.kept.as_mut().unwrap().to = 3499
+            c[2].shaping.kept.as_mut().unwrap().to = 3509
         }),
     ];
     let mut seen = vec![id(true)];
@@ -298,49 +324,45 @@ fn a_kept_span_the_data_contradicts_is_refused_and_named() {
             "channel C states an offset_kind without an offset",
         ),
         (
-            r#""offset":1000000000000000"#,
-            r#""offset":9007199254740993"#,
-            "channel D's offset is past 2^53",
+            r#""kept":[150,4050]"#,
+            r#""kept":[150,6050]"#,
+            "channel C is kept from source tick 150 to 6050, which is empty or maps outside the axis's 0 to 5000",
         ),
         (
-            r#""kept":[100,4000]"#,
-            r#""kept":[100,6000]"#,
-            "channel C is kept from 100 to 6000, which is empty or leaves the capture's 0 to 5000",
+            r#""kept":[150,4050]"#,
+            r#""kept":[-10,4050]"#,
+            "channel C is kept from source tick -10 to 4050",
         ),
         (
-            r#""kept":[100,4000]"#,
-            r#""kept":[-10,4000]"#,
-            "channel C is kept from -10 to 4000",
+            r#""kept":[150,4050]"#,
+            r#""kept":[4050,150]"#,
+            "channel C is kept from source tick 4050 to 150",
+        ),
+        // C starts at its kept span's `from`: a gap or an edge before it lies outside.
+        (
+            r#""kept":[150,4050]"#,
+            r#""kept":[151,4050]"#,
+            "channel C: a gap from 150 to 200 is out of place",
         ),
         (
-            r#""kept":[100,4000]"#,
-            r#""kept":[4000,100]"#,
-            "channel C is kept from 4000 to 100",
+            r#""gaps":[[150,200,true]]"#,
+            r#""gaps":[[149,200,true]]"#,
+            "channel C: a gap from 149 to 200 is out of place",
         ),
         (
-            r#""kept":[100,4000]"#,
-            r#""kept":[151,4000]"#,
-            "channel C is kept from 151, but no gap from tick 0 covers the ticks before",
+            r#""kept":[150,4050]"#,
+            r#""kept":[150,3049]"#,
+            "channel C is known to 3050, past where it is kept to, 3049",
         ),
         (
-            r#""gaps":[[0,150,true]]"#,
-            r#""gaps":[[1,150,true]]"#,
-            "channel C is kept from 100, but no gap from tick 0 covers the ticks before",
+            r#""kept":[210,3510]"#,
+            r#""kept":[212,3510]"#,
+            "channel V is kept from 212 to 3510, but its samples run from 211 to 3411",
         ),
         (
-            r#""kept":[100,4000]"#,
-            r#""kept":[100,2999]"#,
-            "channel C is known to 3000, past where it is kept to, 2999",
-        ),
-        (
-            r#""kept":[200,3500]"#,
-            r#""kept":[202,3500]"#,
-            "channel V is kept from 202 to 3500, but its samples run from 201 to 3401",
-        ),
-        (
-            r#""kept":[200,3500]"#,
-            r#""kept":[200,3401]"#,
-            "channel V is kept from 200 to 3401, but its samples run from 201 to 3401",
+            r#""kept":[210,3510]"#,
+            r#""kept":[210,3411]"#,
+            "channel V is kept from 210 to 3411, but its samples run from 211 to 3411",
         ),
     ] {
         let bad = patched(&file, from, to);
@@ -348,30 +370,29 @@ fn a_kept_span_the_data_contradicts_is_refused_and_named() {
         assert!(err.contains(why), "{to}: {err}");
     }
 
-    // The bounds themselves read: a gap from 0 reaching exactly the cut, an end exactly at the
-    // kept span's, and V's first sample on its `from`, its last just before its `to`.
+    // The bounds themselves read: an end exactly at the kept span's, and V's first sample on its
+    // `from`, its last just before its `to`.
     for (from, to) in [
-        (r#""kept":[100,4000]"#, r#""kept":[150,4000]"#),
-        (r#""kept":[100,4000]"#, r#""kept":[100,3000]"#),
-        (r#""kept":[200,3500]"#, r#""kept":[201,3500]"#),
-        (r#""kept":[200,3500]"#, r#""kept":[200,3402]"#),
+        (r#""kept":[150,4050]"#, r#""kept":[150,3050]"#),
+        (r#""kept":[210,3510]"#, r#""kept":[211,3510]"#),
+        (r#""kept":[210,3510]"#, r#""kept":[210,3412]"#),
     ] {
         Footer::parse_file(&patched(&file, from, to)).unwrap_or_else(|e| panic!("{to}: {e}"));
     }
 }
 
-/// The inequalities FORMAT.md allows: a cut next to an instrument's gap, which the gap from tick
-/// 0 then runs past, and an instrument that stops before the cut's end. The file `recording`
-/// writes has both, on channel C.
+/// The inequalities FORMAT.md allows: a cut inside an instrument's gap, which then starts at the
+/// cut, and an instrument that stops before the cut's end. The file `recording` writes has both,
+/// on channel C.
 #[test]
-fn a_valid_file_may_join_a_cut_to_the_instruments_gap_and_end_before_the_cut() {
+fn a_valid_file_may_start_a_cut_in_the_instruments_gap_and_end_before_the_cut() {
     let head = Footer::parse_file(&file(true)).unwrap();
     let c = &head.header.channels[0];
     let ChannelKind::Digital { end, gaps, .. } = &c.data else {
         panic!("C is digital");
     };
     let kept = c.shaping.kept.unwrap();
-    assert!(gaps[0].from == 0 && gaps[0].to > kept.from, "{gaps:?}");
+    assert!(gaps[0].from == kept.from, "{gaps:?}");
     assert!(*end < kept.to, "{end}");
     let ChannelKind::Analog { first, .. } = &head.header.channels[2].data else {
         panic!("V is analog");
@@ -379,37 +400,38 @@ fn a_valid_file_may_join_a_cut_to_the_instruments_gap_and_end_before_the_cut() {
     assert!(*first > head.header.channels[2].shaping.kept.unwrap().from);
 }
 
-/// A channel never known: its gap from tick 0 reached its end, which a writer then sets to 0 and
-/// lists no gap. A kept span from above 0 is then covered.
+/// A channel never known: its end at its start, the kept span's `from`, and no gap.
 #[test]
 fn a_channel_cut_where_it_was_never_known_reads() {
     let mut rec = recording(true);
     let ChannelData::Digital(d) = &mut rec.channels[0].data else {
         unreachable!()
     };
-    d.end = 0;
+    d.end = 150;
     d.edges = Box::new(std::iter::empty());
+    d.count = 0;
     d.gaps.clear();
     let file = encode(rec, &Options::default()).unwrap();
     let head = Footer::parse_file(&file).unwrap();
     assert!(matches!(
         head.header.channels[0].data,
-        ChannelKind::Digital { end: 0, .. }
+        ChannelKind::Digital { end: 150, .. }
     ));
-    // With no gap or end to check, only the span's own order refuses this one.
-    let bad = patched(&file, r#""kept":[100,4000]"#, r#""kept":[4000,100]"#);
+    // With no gap or edge to check, only the span's own order refuses this one.
+    let bad = patched(&file, r#""kept":[150,4050]"#, r#""kept":[4050,150]"#);
     let err = Footer::parse_file(&bad).expect_err("refused").to_string();
     assert!(
-        err.contains("channel C is kept from 4000 to 100, which is empty"),
+        err.contains("channel C is kept from source tick 4050 to 150, which is empty"),
         "{err}"
     );
 }
 
-/// C and V of `recording`, V kept from `v_from`: C is kept from 100, so only V can start at 0.
+/// C and V of `recording`, V kept from `v_from`: C starts at axis tick 100, so only V can start
+/// at 0, from source tick 10.
 fn without_d(v_from: i64) -> Recording {
     let mut rec = recording(true);
     rec.channels.remove(1);
-    rec.channels[1].shaping.kept = kept(v_from, 3500);
+    rec.channels[1].shaping.kept = kept(v_from, 3510);
     rec
 }
 
@@ -419,7 +441,7 @@ fn every_channel_states_a_kept_span_or_none_does_and_one_starts_at_tick_0() {
     let file = file(true);
     for (from, to, channel) in [
         (r#""kept":[0,5000]"#, r#""kepx":[0,5000]"#, "D"),
-        (r#""kept":[100,4000]"#, r#""kepx":[100,4000]"#, "C"),
+        (r#""kept":[150,4050]"#, r#""kepx":[150,4050]"#, "C"),
     ] {
         let err = Footer::parse_file(&patched(&file, from, to))
             .expect_err(to)
@@ -433,24 +455,19 @@ fn every_channel_states_a_kept_span_or_none_does_and_one_starts_at_tick_0() {
         );
     }
 
-    // One starts at 0: V's span moved off tick 0 leaves none there. V's samples, from 201, and
-    // C's gap still fit.
-    let file = encode(without_d(0), &Options::default()).unwrap();
+    // One starts at 0: V's span moved off axis tick 0 leaves none there. V's samples, from
+    // 211, and C's gap still fit.
+    let file = encode(without_d(10), &Options::default()).unwrap();
     Footer::parse_file(&file).unwrap();
-    let bad = patched(&file, r#""kept":[0,3500]"#, r#""kept":[9,3500]"#);
+    let why = "no channel's kept span starts at the axis's tick 0, where the recording starts";
+    let bad = patched(&file, r#""kept":[10,3510]"#, r#""kept":[19,3510]"#);
     let err = Footer::parse_file(&bad).expect_err("refused").to_string();
-    assert!(
-        err.contains("no channel is kept from tick 0, where the recording starts"),
-        "{err}"
-    );
+    assert!(err.contains(why), "{err}");
     // A writer refuses to write one.
-    let err = encode(without_d(200), &Options::default())
+    let err = encode(without_d(210), &Options::default())
         .expect_err("refused")
         .to_string();
-    assert!(
-        err.contains("no channel is kept from tick 0, where the recording starts"),
-        "{err}"
-    );
+    assert!(err.contains(why), "{err}");
 
     // Every channel kept with one from 0 reads (above), and so does a file that states nothing.
     Footer::parse_file(&self::file(false)).unwrap();
@@ -460,7 +477,7 @@ fn every_channel_states_a_kept_span_or_none_does_and_one_starts_at_tick_0() {
     let why = "channel C is moved, but no channel states a kept span: a recording with a channel \
                moved states one on every channel";
     let mut bad = self::file(true);
-    for kept in [r#"[100,4000]"#, r#"[0,5000]"#, r#"[200,3500]"#] {
+    for kept in [r#"[150,4050]"#, r#"[0,5000]"#, r#"[210,3510]"#] {
         bad = patched(
             &bad,
             &format!(r#""kept":{kept}"#),

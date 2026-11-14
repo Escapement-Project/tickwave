@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use escapement_tickwave_format::decode::{BlockChannel, Footer};
 use escapement_tickwave_format::header::{
     AnalogCoding, ChannelKind, Declaration, DeclaredChannel, DeclaredKind, Derived, Exact, Header,
-    IntCoding, Kept, SourceFormat, SourceHeader,
+    IntCoding, Kept, Offset, SourceFormat, SourceHeader,
 };
 use escapement_tickwave_format::model::{
     Analog, Break, Channel, ChannelData, Digital, Gap, Ratio, Recording, Sample, Samples, Source,
@@ -191,6 +191,7 @@ fn recording(file: &[u8]) -> Recording {
                     initial: *initial,
                     end: *end,
                     edges: Box::new(edges[c].clone().into_iter()),
+                    count: edges[c].len() as u64,
                     gaps: gaps.clone(),
                 }),
                 ChannelKind::Analog {
@@ -585,15 +586,16 @@ fn the_content_id_of_f64_and_int_channels_and_lost_samples_is_formats() {
 }
 
 /// Two sources, at 1 MHz and 250 kHz, the second aligned by 8 ticks: every channel states its
-/// kept span, and its digest its source's factor and align.
+/// kept span in its source's ticks, and its digest its source's m, origin, align and stretch.
+/// B's ticks are the slow source's, 4 axis ticks each, from axis tick 8.
 #[test]
-fn a_channel_of_a_recording_of_several_sources_hashes_its_factor_and_align() {
+fn a_channel_of_a_recording_of_several_sources_hashes_its_placement() {
     let timebase = Ratio::integer(1_000_000).unwrap();
     let mut a = digital("A", false);
     a.shaping.kept = Some(Kept { from: 0, to: 100 });
     let mut b = digital("B", false);
     b.source = 1;
-    b.shaping.kept = Some(Kept { from: 8, to: 100 });
+    b.shaping.kept = Some(Kept { from: 0, to: 23 });
     let mut slow = SourceHeader::new(
         SourceFormat::Other("slow".into()),
         Ratio::integer(250_000).unwrap(),
@@ -614,24 +616,27 @@ fn a_channel_of_a_recording_of_several_sources_hashes_its_factor_and_align() {
     };
     let mut w = Writer::new(declaration, options()).unwrap();
     w.edge(0, 5).unwrap();
+    // B is not known at its start, axis tick 8, until its source tick 1, axis tick 12.
     w.gap(
         1,
         Gap {
             from: 0,
-            to: 8,
+            to: 1,
             level: true,
         },
     )
     .unwrap();
-    w.edge(1, 12).unwrap();
-    let f = w.finish(100, &[100, 100], Finish::default()).unwrap();
+    w.edge(1, 2).unwrap();
+    let mut file = w.take_output();
+    let f = w.finish(100, &[100, 23], Finish::default()).unwrap();
+    file.extend_from_slice(&f.tail);
 
-    // Flags 2 (kept) and 4 (several sources), then kept, then the factor and the align.
+    // Flags 2 (kept) and 4 (several sources), then kept, then m, origin, align and stretch.
     let digest = |name: &str,
                   kept: (i64, i64),
-                  factor: u64,
-                  align: i64,
+                  (m, origin, align): (u64, i64, i64),
                   edge: i64,
+                  end: i64,
                   gaps: &[(i64, i64, bool)]| {
         let mut h = blake3::Hasher::new();
         by_hand::string(&mut h, name);
@@ -639,10 +644,14 @@ fn a_channel_of_a_recording_of_several_sources_hashes_its_factor_and_align() {
         h.update(&[0, 2 | 4]);
         h.update(&kept.0.to_le_bytes());
         h.update(&kept.1.to_le_bytes());
-        h.update(&factor.to_le_bytes());
+        h.update(&m.to_le_bytes());
+        h.update(&1u64.to_le_bytes());
+        h.update(&origin.to_le_bytes());
         h.update(&align.to_le_bytes());
+        h.update(&1u64.to_le_bytes());
+        h.update(&1u64.to_le_bytes());
         h.update(&edge.to_le_bytes());
-        h.update(&100i64.to_le_bytes());
+        h.update(&end.to_le_bytes());
         h.update(&(gaps.len() as u64).to_le_bytes());
         for &(from, to, level) in gaps {
             h.update(&from.to_le_bytes());
@@ -655,11 +664,14 @@ fn a_channel_of_a_recording_of_several_sources_hashes_its_factor_and_align() {
         (1_000_000, 1),
         100,
         &[
-            digest("A", (0, 100), 1, 0, 5, &[]),
-            digest("B", (8, 100), 4, 8, 12, &[(0, 8, true)]),
+            digest("A", (0, 100), (1, 0, 0), 5, 100, &[]),
+            digest("B", (0, 23), (4, 8, 8), 2, 23, &[(0, 1, true)]),
         ],
     );
     assert_eq!(f.header.content_id.to_string(), id);
+    // B's edge at source tick 2 lies at axis tick 16.
+    let (_, edges, _) = decoded(&file);
+    assert_eq!(edges, [vec![5], vec![16]]);
 }
 
 /// verge's declaration (FORMAT-REVIEW.md): V int 32 u [1, 1000] V, I int 32 u [1, 1e9] A, P the
@@ -1102,7 +1114,35 @@ fn a_declaration_breaking_a_header_rule_is_refused_plainly() {
     let cases: Vec<(Edit, &str)> = vec![
         (
             Box::new(|d| d.sources[0].timebase = Ratio::integer(7).unwrap()),
-            "source 0 ticks 7/1 times a second, and the recording's 96000000/1 is not a whole multiple of that",
+            "the recording has one source, ticking 7/1 times a second, and ticks 96000000/1 \
+             itself: a recording of one source ticks at its rate",
+        ),
+        (
+            Box::new(|d| d.sources[0].stretch = Ratio::new(1 << 53, 1)),
+            "source 0's stretch has a term past 2^53",
+        ),
+        (
+            Box::new(|d| d.sources[0].stretch = Ratio::new(1_000_001, 1_000_000)),
+            "channel V states no kept span, but its source is stretched: a recording with a \
+             stretched source states one on every channel",
+        ),
+        (
+            Box::new(|d| d.sources[0].origin = 5),
+            "the recording states no kept span, so it starts where its source's data does, but \
+             its source's origin is 5, after the axis's tick 0",
+        ),
+        (
+            Box::new(|d| {
+                for c in &mut d.channels {
+                    c.shaping.kept = Some(Kept { from: 0, to: 10 });
+                }
+                d.channels[0].shaping.offset = Some(Offset {
+                    ticks: 1,
+                    kind: Offset::DELAY.into(),
+                });
+            }),
+            "derived channel P: I and V come from different sources, or have different periods \
+             or moves",
         ),
         (
             Box::new(|d| d.channels[1].source = 1),
@@ -1125,11 +1165,12 @@ fn a_declaration_breaking_a_header_rule_is_refused_plainly() {
         ),
         (
             Box::new(|d| {
-                // 2^52 ticks a second over a source of 4 ticks a second: a factor of 2^54.
+                // 2^52 ticks a second over a source of 4 ticks a second: an m of 2^54.
                 d.timebase = Ratio::integer(1 << 52).unwrap();
                 d.sources[0].timebase = Ratio::new(1, 4).unwrap();
             }),
-            "source 0's factor, the recording's ticks in one of its own, is past 2^53",
+            "source 0's m, the axis ticks in one of its ticks, has a term past 2^53 in lowest \
+             terms",
         ),
         (
             Box::new(|d| d.channels[1].name = "V".into()),
@@ -1168,7 +1209,7 @@ fn a_declaration_breaking_a_header_rule_is_refused_plainly() {
                     *period = Ratio::integer(480).unwrap();
                 }
             }),
-            "derived channel P: I and V come from different sources or have different periods",
+            "derived channel P: I and V come from different sources, or have different periods or moves",
         ),
         (
             Box::new(|d| {
@@ -1216,10 +1257,8 @@ fn a_declaration_breaking_a_header_rule_is_refused_plainly() {
         edit(&mut d);
         assert_eq!(refused(d), why);
     }
-    // A factor of 2^52, and significant figures of 1, are within the rules.
+    // Significant figures of 1 are within the rules.
     let mut d = verge();
-    d.timebase = Ratio::integer(1 << 52).unwrap();
-    d.sources[0].timebase = Ratio::new(1, 1).unwrap();
     d.derived[0].significant = Some(1);
     Writer::new(d, options()).unwrap();
     // Several sources, and a channel without a kept span.
@@ -1237,7 +1276,15 @@ fn a_declaration_breaking_a_header_rule_is_refused_plainly() {
     for c in &mut d.channels {
         c.shaping.kept = Some(Kept { from: 0, to: 10 });
     }
-    Writer::new(d, options()).unwrap();
+    Writer::new(d.clone(), options()).unwrap();
+    // The slow source's m: 2^52 is within the rules, 2^53 is not.
+    d.sources[1].timebase = Ratio::new(96_000_000, 1 << 52).unwrap();
+    Writer::new(d.clone(), options()).unwrap();
+    d.sources[1].timebase = Ratio::new(48_000_000, 1 << 52).unwrap();
+    assert_eq!(
+        refused(d),
+        "source 1's m, the axis ticks in one of its ticks, has a term past 2^53 in lowest terms"
+    );
 }
 
 #[test]
@@ -1382,7 +1429,7 @@ fn verify_checks_each_sources_mapping() {
     let err = verify(&file[..], moved).unwrap_err();
     assert_eq!(
         err.to_string(),
-        "source 0: the format, timebase, origin or align differs"
+        "source 0: the format, timebase, origin, align or stretch differs"
     );
     // The coding is the source's: another scale is another recording.
     let mut model = recording(&file);

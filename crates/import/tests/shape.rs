@@ -1,6 +1,7 @@
 //! Moving and trimming channels at conversion: where the recording starts, what each channel
 //! keeps, what its entry states, and what the converter refuses. Expected values are worked by
-//! hand from FORMAT.md, not from the converter's own arithmetic.
+//! hand from FORMAT.md, not from the converter's own arithmetic. A channel keeps its source's
+//! ticks, which the file stores; its axis ticks are `origin + tick + offset`.
 
 mod common;
 
@@ -41,6 +42,7 @@ fn source() -> Recording {
         data: ChannelData::Digital(Digital {
             initial,
             end: LENGTH,
+            count: edges.len() as u64,
             edges: Box::new(edges.into_iter()),
             gaps: Vec::new(),
         }),
@@ -93,15 +95,18 @@ fn settings(offsets: &[(&str, &str)], keeps: &[KeepRow]) -> Settings {
     }
 }
 
-/// What a conversion wrote, read back: each digital channel's edges, each analog channel's
-/// samples as (tick, value). `base` is the plan's for the same source and settings, which the
+/// What a conversion wrote, read back: each digital channel's edges in its source's ticks, as the
+/// file stores them, and on the axis; each analog channel's samples as (place, value) and as
+/// (axis tick, value). `base` is the plan's for the same source and settings, which the
 /// positions, the length and the source's `origin` each check apart from it.
 struct Out {
     header: Header,
     base: i64,
     file: Vec<u8>,
     edges: Vec<Vec<i64>>,
+    axis: Vec<Vec<i64>>,
     samples: Vec<Vec<(i64, f32)>>,
+    axis_samples: Vec<Vec<(i64, f32)>>,
 }
 
 impl Out {
@@ -144,23 +149,28 @@ fn try_run(
     let head = Footer::parse_file(&file).unwrap();
     assert_eq!(head.header, converted.header);
     let n = head.header.channels.len();
-    let (mut edges, mut samples) = (vec![Vec::new(); n], vec![Vec::new(); n]);
+    let (mut edges, mut axis) = (vec![Vec::new(); n], vec![Vec::new(); n]);
+    let (mut samples, mut axis_samples) = (vec![Vec::new(); n], vec![Vec::new(); n]);
     for i in 0..head.rows.len() {
         let (offset, len) = head.block_location(i);
         let block = head
             .decode_block(i, &file[offset as usize..][..len as usize])
             .unwrap();
-        for (c, got) in block.channels.into_iter().enumerate() {
+        for (c, got) in block.channels.iter().enumerate() {
             match got {
-                BlockChannel::Digital { edges: e, .. } => edges[c].extend(e),
+                BlockChannel::Digital { edges: e, .. } => {
+                    edges[c].extend(got.source_ticks().unwrap());
+                    axis[c].extend(e);
+                }
                 BlockChannel::Analog {
                     first_index,
                     values,
-                } => samples[c].extend(
-                    (first_index..)
-                        .zip(values.as_f32().expect("f32 values"))
-                        .map(|(index, &v)| (head.sample_tick(c, index).unwrap(), v)),
-                ),
+                } => {
+                    for (index, &v) in (*first_index..).zip(values.as_f32().expect("f32 values")) {
+                        samples[c].push((head.sample_tick(c, index).unwrap(), v));
+                        axis_samples[c].push((head.sample_axis_tick(c, index).unwrap(), v));
+                    }
+                }
             }
         }
     }
@@ -169,7 +179,9 @@ fn try_run(
         base,
         file,
         edges,
+        axis,
         samples,
+        axis_samples,
     })
 }
 
@@ -198,23 +210,23 @@ fn an_offset_later_moves_one_channel_and_the_recording_keeps_its_start() {
         (out.header.sources[0].origin, out.header.sources[0].begin_s),
         (0, Some(2.0))
     );
-    // B, moved: unknown until its start, at 7.
-    assert_eq!(
-        out.digital(1),
-        (false, 107, &[gap(0, 7, true)][..], &[12, 57][..])
-    );
+    // B, moved: its ticks as the source has them, and on the axis 7 later, from its start there.
+    // Before it, its kept span says, it holds nothing of the source.
+    assert_eq!(out.digital(1), (true, 100, &[][..], &[5, 50][..]));
+    assert_eq!(out.axis[1], [12, 57]);
     assert_eq!(
         *out.shaping(1),
         Shaping {
             offset: moved(7),
-            kept: kept(7, 107)
+            kept: kept(0, 100)
         }
     );
     // A and V as the source has them, not moved, each kept whole from the source's start.
     assert_eq!(out.digital(0), (false, 100, &[][..], &[10, 20, 30, 40][..]));
-    assert_eq!(out.kepts(), [kept(0, 100), kept(7, 107), kept(0, 100)]);
+    assert_eq!(out.axis[0], [10, 20, 30, 40]);
+    assert_eq!(out.kepts(), [kept(0, 100); 3]);
     assert!(out.shaping(0).offset.is_none() && out.shaping(2).offset.is_none());
-    assert_eq!(out.samples[2][..3], [(0, 0.0), (1, 1.0), (3, 2.0)]);
+    assert_eq!(out.axis_samples[2][..3], [(0, 0.0), (1, 1.0), (3, 2.0)]);
 }
 
 #[test]
@@ -228,7 +240,9 @@ fn an_offset_earlier_than_the_sources_start_starts_the_recording_there() {
         (out.header.sources[0].origin, out.header.sources[0].begin_s),
         (15, Some(2.0))
     );
+    // A's ticks as the source has them, at 15 + t − 15 on the axis.
     assert_eq!(out.digital(0), (false, 100, &[][..], &[10, 20, 30, 40][..]));
+    assert_eq!(out.axis[0], [10, 20, 30, 40]);
     assert_eq!(
         *out.shaping(0),
         Shaping {
@@ -236,16 +250,15 @@ fn an_offset_earlier_than_the_sources_start_starts_the_recording_there() {
             kept: kept(0, 100)
         }
     );
-    // B and V, not moved, start 15 ticks in; nothing is known of B before.
-    assert_eq!(
-        out.digital(1),
-        (false, 115, &[gap(0, 15, true)][..], &[20, 65][..])
-    );
-    // B's ticks before 15 lie before its source's data: its kept span says so.
-    assert_eq!(out.kepts(), [kept(0, 100), kept(15, 115), kept(15, 115)]);
+    // B and V, not moved, start 15 ticks in: their kept spans, from the source's tick 0, say
+    // the axis before holds nothing of the source.
+    assert_eq!(out.digital(1), (true, 100, &[][..], &[5, 50][..]));
+    assert_eq!(out.axis[1], [20, 65]);
+    assert_eq!(out.kepts(), [kept(0, 100); 3]);
     assert!(out.shaping(1).offset.is_none());
-    assert_eq!(out.samples[2][..3], [(15, 0.0), (16, 1.0), (18, 2.0)]);
-    assert_eq!(out.samples[2].last(), Some(&(15 + 88, 59.0)));
+    assert_eq!(out.samples[2][..3], [(0, 0.0), (1, 1.0), (3, 2.0)]);
+    assert_eq!(out.axis_samples[2][..3], [(15, 0.0), (16, 1.0), (18, 2.0)]);
+    assert_eq!(out.axis_samples[2].last(), Some(&(15 + 88, 59.0)));
 }
 
 #[test]
@@ -265,20 +278,25 @@ fn every_channel_cut_from_one_tick_starts_the_recording_at_the_cut() {
         (out.header.sources[0].origin, out.header.sources[0].begin_s),
         (-20, Some(2.0))
     );
-    // A's edge at 20 is the cut's: A is low from tick 0.
-    assert_eq!(out.digital(0), (false, 80, &[][..], &[10, 20][..]));
-    assert_eq!(out.digital(1), (false, 80, &[][..], &[30][..]));
-    assert_eq!(out.kepts(), [kept(0, 80); 3]);
-    // V's first sample at or after 20 is sample 14, at 21, on its grid.
-    assert_eq!(out.samples[2][0], (1, 14.0));
+    // A's edge at 20 lies in its kept span, so it stays, and A's level at the cut is the one
+    // just before it: high, after the edge at 10.
+    assert_eq!(out.digital(0), (true, 100, &[][..], &[20, 30, 40][..]));
+    assert_eq!(out.axis[0], [0, 10, 20]);
+    // B is low from its edge at 5.
+    assert_eq!(out.digital(1), (false, 100, &[][..], &[50][..]));
+    assert_eq!(out.axis[1], [30]);
+    // V's first sample at or after 20 is sample 14, at 21, on its grid, so its cut stays at 20.
+    assert_eq!(out.kepts(), [kept(20, 100); 3]);
+    assert_eq!(out.samples[2][0], (21, 14.0));
+    assert_eq!(out.axis_samples[2][0], (1, 14.0));
 }
 
 #[test]
-fn a_cut_at_an_edge_folds_the_edge_into_the_gaps_level() {
-    for (from, level, edges) in [
-        // The edge at 20 takes A low: the level after it.
-        ("20", false, &[30, 40][..]),
-        ("30", true, &[40][..]),
+fn a_cut_at_an_edge_keeps_the_edge_and_starts_at_the_level_before_it() {
+    for (from, initial, edges) in [
+        // The edge at 20, which takes A low, lies in the span: A starts high, before it.
+        ("20", true, &[20, 30, 40][..]),
+        ("30", false, &[30, 40][..]),
         // Inside the pulse from 10 to 20: high, and its fall is kept.
         ("15", true, &[20, 30, 40][..]),
     ] {
@@ -287,7 +305,7 @@ fn a_cut_at_an_edge_folds_the_edge_into_the_gaps_level() {
         assert_eq!(out.base, 0);
         assert_eq!(
             out.digital(0),
-            (false, 100, &[gap(0, at, level)][..], edges),
+            (initial, 100, &[][..], edges),
             "cut at {from}"
         );
         assert_eq!(out.kepts(), [kept(at, 100), kept(0, 100), kept(0, 100)]);
@@ -305,6 +323,7 @@ fn a_cut_at_the_end_alone_keeps_the_edges_at_tick_0_as_the_source_has_them() {
             initial: false,
             end: LENGTH,
             edges: Box::new([0, 0, 40].into_iter()),
+            count: 3,
             gaps: Vec::new(),
         });
         Ok(r)
@@ -316,15 +335,13 @@ fn a_cut_at_the_end_alone_keeps_the_edges_at_tick_0_as_the_source_has_them() {
 
 #[test]
 fn a_cut_at_either_end_or_both_keeps_what_lies_between() {
-    // Inside the pulse at 10 to 20, to inside the one at 30 to 40: A is known to the cut.
+    // Inside the pulse at 10 to 20, to inside the one at 30 to 40: A starts high and is known
+    // to the cut.
     let out = run(
         &|| Ok(source()),
         &settings(&[], &[("A", Some("15"), Some("35"))]),
     );
-    assert_eq!(
-        out.digital(0),
-        (false, 35, &[gap(0, 15, true)][..], &[20, 30][..])
-    );
+    assert_eq!(out.digital(0), (true, 35, &[][..], &[20, 30][..]));
     assert_eq!(out.kepts(), [kept(15, 35), kept(0, 100), kept(0, 100)]);
     assert_eq!(out.header.length, 100);
 
@@ -389,7 +406,8 @@ fn a_shaped_conversion_checks_against_the_source_moved_and_cut() {
     );
     // `convert` checked the file it wrote; check it again, against the source shaped and not.
     let out = run(&|| Ok(source()), &s);
-    let plan = Plan::new(&source(), &s.offsets, &s.keeps).unwrap();
+    let mut plan = Plan::new(&source(), &s.offsets, &s.keeps).unwrap();
+    plan.count(source());
     verify(&out.file[..], plan.apply(source())).unwrap();
     let err = verify(&out.file[..], source()).expect_err("the source as it is differs");
     assert!(
@@ -402,7 +420,8 @@ fn a_shaped_conversion_checks_against_the_source_moved_and_cut() {
         &[("A", "-3"), ("V", "5")],
         &[("A", Some("12"), Some("91")), ("V", Some("4"), None)],
     );
-    let plan = Plan::new(&source(), &other.offsets, &other.keeps).unwrap();
+    let mut plan = Plan::new(&source(), &other.offsets, &other.keeps).unwrap();
+    plan.count(source());
     assert!(verify(&out.file[..], plan.apply(source())).is_err());
 }
 
@@ -438,6 +457,7 @@ fn with_gaps() -> Recording {
                     initial: true,
                     end: LENGTH,
                     edges: Box::new([10, 20, 50, 80].into_iter()),
+                    count: 4,
                     gaps: vec![gap(30, 40, false), gap(60, 70, true)],
                 }),
                 shaping: Shaping::default(),
@@ -471,14 +491,14 @@ fn with_gaps() -> Recording {
 }
 
 #[test]
-fn an_instruments_gaps_and_breaks_are_cut_moved_and_joined_to_a_cut() {
+fn an_instruments_gaps_and_breaks_are_cut_and_a_cut_in_a_gap_starts_the_channel_with_it() {
     for (offsets, keeps, initial, gaps, edges, end) in [
-        // The cut inside a gap, or at its start, joins it.
+        // The cut inside a gap, or at its start, starts the channel with the gap, from the cut.
         (
             &[][..],
             &[("G", Some("35"), None)][..],
             false,
-            &[gap(0, 40, false), gap(60, 70, true)][..],
+            &[gap(35, 40, false), gap(60, 70, true)][..],
             &[50, 80][..],
             100,
         ),
@@ -486,7 +506,7 @@ fn an_instruments_gaps_and_breaks_are_cut_moved_and_joined_to_a_cut() {
             &[],
             &[("G", Some("30"), None)],
             false,
-            &[gap(0, 40, false), gap(60, 70, true)],
+            &[gap(30, 40, false), gap(60, 70, true)],
             &[50, 80],
             100,
         ),
@@ -494,8 +514,8 @@ fn an_instruments_gaps_and_breaks_are_cut_moved_and_joined_to_a_cut() {
         (
             &[],
             &[("G", Some("25"), None)],
-            false,
-            &[gap(0, 25, true), gap(30, 40, false), gap(60, 70, true)],
+            true,
+            &[gap(30, 40, false), gap(60, 70, true)],
             &[50, 80],
             100,
         ),
@@ -509,19 +529,22 @@ fn an_instruments_gaps_and_breaks_are_cut_moved_and_joined_to_a_cut() {
             &[10, 20, 50],
             60,
         ),
-        // Moved 10 later as well: the joined gap and the rest move with the channel.
+        // Moved 10 later as well: the ticks stay the source's, and the move is the offset.
         (
             &[("G", "10")][..],
             &[("G", Some("35"), None)],
             false,
-            &[gap(0, 50, false), gap(70, 80, true)],
-            &[60, 90],
-            110,
+            &[gap(35, 40, false), gap(60, 70, true)],
+            &[50, 80],
+            100,
         ),
     ] {
         let out = run(&|| Ok(with_gaps()), &settings(offsets, keeps));
         assert_eq!(out.digital(0), (initial, end, gaps, edges), "{keeps:?}");
         assert_eq!(out.kepts()[1], kept(0, 100), "{keeps:?}");
+        let moved: i64 = offsets.first().map_or(0, |o| o.1.parse().unwrap());
+        let on_axis: Vec<i64> = edges.iter().map(|t| t + moved).collect();
+        assert_eq!(out.axis[0], on_axis, "{keeps:?}");
     }
 
     for (keeps, samples, breaks) in [
@@ -569,7 +592,8 @@ fn an_instruments_gaps_and_breaks_are_cut_moved_and_joined_to_a_cut() {
 }
 
 /// A digital channel can stop being known before the recording ends, as a Saleae export's can.
-/// Kept only after that, it is never known: no gap, an end of 0, and its kept span still stated.
+/// Kept only after that, it is never known: no gap, its end at its start, and its kept span still
+/// stated.
 #[test]
 fn a_channel_cut_after_its_instrument_stopped_is_never_known() {
     let open = || {
@@ -581,14 +605,12 @@ fn a_channel_cut_after_its_instrument_stopped_is_never_known() {
         Ok(rec)
     };
     let out = run(&open, &settings(&[], &[("A", Some("60"), None)]));
-    assert_eq!(out.digital(0), (false, 0, &[][..], &[][..]));
+    assert_eq!(out.digital(0), (false, 60, &[][..], &[][..]));
     assert_eq!(out.kepts(), [kept(60, 100), kept(0, 100), kept(0, 100)]);
-    // Cut before it stops: known from the cut to where it stopped.
+    // Cut before it stops: known from the cut, high after the edges at 10, 20 and 30, to where
+    // it stopped.
     let out = run(&open, &settings(&[], &[("A", Some("35"), None)]));
-    assert_eq!(
-        out.digital(0),
-        (false, 45, &[gap(0, 35, true)][..], &[40][..])
-    );
+    assert_eq!(out.digital(0), (true, 45, &[][..], &[40][..]));
 }
 
 fn refused(offsets: &[(&str, &str)], keeps: &[KeepRow]) -> String {
@@ -682,7 +704,8 @@ fn settings_that_cannot_be_followed_are_refused_plainly() {
     // Exactly 0.01 of a tick off is on the grid.
     let out = run(&|| Ok(source()), &settings(&[("A", "-1.01 ns")], &[]));
     assert_eq!(out.shaping(0).offset, moved(-1));
-    assert_eq!(out.kepts(), [kept(0, 100), kept(1, 101), kept(1, 101)]);
+    assert_eq!(out.kepts(), [kept(0, 100); 3]);
+    assert_eq!(out.header.sources[0].origin, 1);
 }
 
 /// A name is the one stored: a channel renamed is named by its new name, and one not taken is no
@@ -736,29 +759,38 @@ fn a_captures_channels_move_and_cut_as_the_whole_conversion_has_them() {
         .map(|c| c.name.as_str())
         .collect();
     let at = |name| names.iter().position(|n| *n == name).unwrap();
-    // A1, moved 5 earlier, starts the recording.
+    // A1, moved 5 earlier, starts the recording: the source's tick 0 lies at axis tick 5.
     assert_eq!(shaped.base, -5);
+    assert_eq!(shaped.header.sources[0].origin, 5);
     let (d3, a0, a1, d0) = (at("D3"), at("A0"), at("A1"), at("D0"));
+    // D3 keeps the whole conversion's edges in its span, one at its `from` included, at their
+    // source ticks, and lies 5 + 50 later on the axis.
     let want: Vec<i64> = whole.edges[d3]
         .iter()
-        .filter(|&&t| 100 < t && t < 2000)
-        .map(|t| t + 55)
+        .copied()
+        .filter(|&t| (100..2000).contains(&t))
         .collect();
     assert!(!want.is_empty());
     assert_eq!(shaped.edges[d3], want);
-    assert_eq!(shaped.shaping(d3).kept, kept(155, 2055));
-    // The rest state their spans too: A1 not moved past base, A0 cut from 1000, D0 whole.
+    let on_axis: Vec<i64> = want.iter().map(|t| t + 55).collect();
+    assert_eq!(shaped.axis[d3], on_axis);
+    assert_eq!(shaped.shaping(d3).kept, kept(100, 2000));
+    // The rest state their spans too, in source ticks: D0 and A1 whole, A0 cut from 1000.
     assert_eq!(
         [d0, a0, a1].map(|c| shaped.shaping(c).kept),
-        [kept(5, 3005), kept(1005, 3005), kept(0, 3000)]
+        [kept(0, 3000), kept(1000, 3000), kept(0, 3000)]
     );
-    let want: Vec<i64> = whole.edges[d0].iter().map(|t| t + 5).collect();
-    assert_eq!(shaped.edges[d0], want);
+    assert_eq!(shaped.edges[d0], whole.edges[d0]);
+    let on_axis: Vec<i64> = whole.edges[d0].iter().map(|t| t + 5).collect();
+    assert_eq!(shaped.axis[d0], on_axis);
     assert_eq!(shaped.samples[a1], whole.samples[a1]);
+    assert_eq!(shaped.axis_samples[a1], whole.samples[a1]);
     let want: Vec<(i64, f32)> = whole.samples[a0]
         .iter()
+        .copied()
         .filter(|s| s.0 >= 1000)
-        .map(|&(t, v)| (t + 5, v))
         .collect();
     assert_eq!(shaped.samples[a0], want);
+    let on_axis: Vec<(i64, f32)> = want.iter().map(|&(t, v)| (t + 5, v)).collect();
+    assert_eq!(shaped.axis_samples[a0], on_axis);
 }

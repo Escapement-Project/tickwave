@@ -9,7 +9,9 @@
         {"fn":"tick_place","args":{"timebase":[100000,1]},"expect":-5,"note":"10 us"},
         {"fn":"tick_place","args":{"timebase":[200000,1]},"expect":-6,"note":"5 us: 1 us is the largest power below"},
         {"fn":"tick_place","args":{"timebase":[3000000,1]},"expect":-7,"note":"333.3 ns: 100 ns"},
-        {"fn":"tick_place","args":{"timebase":[1,3]},"expect":0,"note":"3 s ticks: 1 s"}
+        {"fn":"tick_place","args":{"timebase":[1,3]},"expect":0,"note":"3 s ticks: 1 s"},
+        {"fn":"tick_place","args":{"timebase":[1000000000,1],"step":[199,20]},"expect":-9,"note":"A source whose tick is 199/20 of the recording's, 9.95 ns: 1 ns. The step rounded to 10 ticks would give 10 ns."},
+        {"fn":"tick_place","args":{"timebase":[1000000000,1],"step":[1001,8]},"expect":-7,"note":"125.125 ns: 100 ns. The numerator alone, 1001 ns, would give 1 µs."}
       ]
     },
     {
@@ -25,7 +27,8 @@
         {"fn":"format_interval","args":{"ticks":1000000000,"timebase":[1000000000,1]},"expect":"1.000000000\u00a0s"},
         {"fn":"format_interval","args":{"ticks":123,"timebase":[100000,1]},"expect":"1.23\u00a0ms","note":"123 ticks of 10 us is 1.23 ms."},
         {"fn":"format_interval","args":{"ticks":247,"timebase":[200000,1]},"expect":"1.235\u00a0ms","note":"247 ticks of 5 us is 1.235 ms, exact at the us digit."},
-        {"fn":"format_interval","args":{"ticks":4,"timebase":[3000000,1]},"expect":"1.3\u00a0µs","note":"4 ticks at 3 MS/s is 1.333... us; the tick is 333 ns, so the last digit is 100 ns. One digit more (1.33 us) or fewer (1 us) is the off-by-one this row catches."}
+        {"fn":"format_interval","args":{"ticks":4,"timebase":[3000000,1]},"expect":"1.3\u00a0µs","note":"4 ticks at 3 MS/s is 1.333... us; the tick is 333 ns, so the last digit is 100 ns. One digit more (1.33 us) or fewer (1 us) is the off-by-one this row catches."},
+        {"fn":"format_interval","args":{"ticks":1234567,"timebase":[12000000000,1],"step":[1001,8]},"expect":"102.88\u00a0µs","note":"102.880583 µs on a 12 GHz axis, read from a 96 MHz source stretched 1,000 ppm, whose tick is 1001/8 of the axis's, 10.43 ns: to 10 ns."}
       ]
     },
     {
@@ -34,6 +37,7 @@
         {"fn":"format_rate","args":{"periods":1,"span":40,"timebase":[1000000000,1]},"expect":"25.0\u00a0MHz","note":"One 40 ns period: 25 MHz, uncertain by 25 MHz / 40 = 625 kHz, so the last digit is 100 kHz. Rounding the place up instead of down would print 25 MHz."},
         {"fn":"format_rate","args":{"periods":1000,"span":40000,"timebase":[1000000000,1]},"expect":"25.0000\u00a0MHz","note":"1000 periods over 40000 ticks: 25 MHz, uncertain by 625 Hz: last digit 100 Hz."},
         {"fn":"format_rate","args":{"periods":1,"span":1000,"timebase":[1000000000,1]},"expect":"1.000\u00a0MHz","note":"One 1 us period: 1 MHz, uncertain by exactly 1 kHz, a power of ten: last digit 1 kHz. A \"smaller than\" rule instead of \"not larger than\" would print 1.0000 MHz."},
+        {"fn":"format_rate","args":{"periods":1,"span":1000,"timebase":[1000000000,1],"step":[199,20]},"expect":"1.000\u00a0MHz","note":"The same from a source whose tick is 9.95 ns: uncertain by 9.95 kHz, last digit 1 kHz. The step rounded to 10 ticks would give 10 kHz and 1.00 MHz."},
         {"fn":"format_rate","args":{"periods":45,"span":45016,"timebase":[1000000000,1]},"expect":"999.64\u00a0kHz","note":"45 periods over 45016 ticks: 999,644.57 Hz, uncertain by 22.2 Hz: to 10 Hz, 999,640 Hz."},
         {"fn":"format_rate","args":{"periods":0,"span":100,"timebase":[1000000000,1]},"expect":null},
         {"fn":"format_rate","args":{"periods":3,"span":0,"timebase":[1000000000,1]},"expect":null}
@@ -161,6 +165,8 @@
       "name": "the running clock's count: one period, one of several, a mean of the rest",
       "rows": [
         {"fn":"measure_reading","args":{"what":"period","level":0,"ticks":[1000,1039,1079],"timebase":[1000000000,1]},"expect":{"value":"79\u00a0ns","note":"one period"},"note":"A single 79 ns period: \"79 ns, one period\", not \"mean of 1 periods\"."},
+        {"fn":"measure_reading","args":{"what":"period","level":0,"ticks":[1000,60941,120882],"timebase":[12000000000,1],"step":[125,1]},"expect":{"value":"9.99\u00a0µs","note":"one period"},"note":"A 96 MHz source's marker on a 12 GHz axis: one period of 119,882 ticks, 9.990167 µs, uncertain by one of the source's ticks, 125 of the axis's, 10.4 ns: to 10 ns. A step of 1 would read 9.99017 µs."},
+        {"fn":"measure_reading","args":{"what":"duration","level":0,"ticks":[1000,50000],"timebase":[12000000000,1],"step":[125,1]},"expect":{"value":"4.08\u00a0µs","note":"first edge to last"},"note":"49,000 ticks at 12 GHz, 4.083333 µs, to the source's tick of 10.4 ns: 10 ns. A step of 1 would read 4.08333 µs."},
         {"fn":"clock_note","args":{"stats":{"count":7,"median":27,"min":27,"max":27,"used":1,"runs":1,"span":27}},"expect":"one of 7 periods"},
         {"fn":"clock_note","args":{"stats":{"count":7,"median":27,"min":27,"max":27,"used":7,"runs":1,"span":27}},"expect":"mean of 7 periods"},
         {"fn":"clock_note","args":{"stats":{"count":32,"median":27,"min":27,"max":27,"used":31,"runs":1,"span":27}},"expect":"mean of 31 of 32 periods"}

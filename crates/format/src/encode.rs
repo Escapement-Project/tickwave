@@ -1,13 +1,13 @@
 //! The encoder: a `model::Recording` in, a file out through any `Write`. It merges the channels'
-//! items into tick order and hands them to a `Writer`, so a capture larger than memory streams
-//! through.
+//! items into axis order and hands them to a `Writer`, each in its source's ticks, so a capture
+//! larger than memory streams through.
 
 use std::collections::BTreeMap;
 use std::io::Write;
 
 use crate::header::{AnalogCoding, Declaration, DeclaredChannel, DeclaredKind, SourceHeader};
+use crate::mapping::{self, Mapping, Spacing};
 use crate::model::{Break, ChannelData, Edges, Gap, Recording, Sample, Samples, run_sample_tick};
-use crate::overview;
 use crate::samples::coding_name;
 pub use crate::writer::{
     Bundle, Finish, Finished, WriteError, WriteOptions, Writer, code_of, generator_file,
@@ -17,7 +17,7 @@ pub use crate::writer::{
 pub enum EncodeError {
     #[error(transparent)]
     Write(#[from] WriteError),
-    #[error("{channel}: {promised} samples promised, {delivered} delivered")]
+    #[error("{channel}: {promised} items promised, {delivered} delivered")]
     Count {
         channel: String,
         promised: u64,
@@ -49,9 +49,11 @@ pub struct Options {
     /// A coding for each analog channel, by channel index. Absent or None stores the samples as
     /// their type has them; f32 samples can also go in `codes`.
     pub analog: Vec<Option<AnalogCoding>>,
-    /// The finest overview level's shift; None for the converter's, from the length.
+    /// The finest overview level's shift; None for the one the data's density gives
+    /// (`mapping::finest_shift`).
     pub overview_shift: Option<u8>,
-    /// Generated annotations to write, each with its generator's name; their times are ticks.
+    /// Generated annotations to write, each with its generator's name; their times are axis
+    /// ticks.
     pub annotations: Vec<(String, serde_json::Map<String, serde_json::Value>)>,
     /// Bundle the annotations into the footer rather than handing them back.
     pub bundle: Option<Bundle>,
@@ -80,6 +82,9 @@ enum Stream {
         next: Option<i64>,
         gaps: std::vec::IntoIter<Gap>,
         next_gap: Option<Gap>,
+        /// Edges handed on, and how many the channel promised.
+        index: u64,
+        count: u64,
     },
     Analog {
         samples: Box<dyn Iterator<Item = Sample> + Send>,
@@ -93,7 +98,8 @@ enum Stream {
 }
 
 impl Stream {
-    /// The next item's tick: a gap's at its `from`, so it goes in before the edges after it.
+    /// The next item's source tick: a gap's at its `from`, so it goes in before the edges after
+    /// it.
     fn next_tick(&self) -> Option<i64> {
         match self {
             Stream::Digital { next, next_gap, .. } => match (next, next_gap) {
@@ -110,6 +116,12 @@ impl Stream {
             } => next.map(|_| run_sample_tick(*first, *period, breaks, *index)),
         }
     }
+}
+
+/// Where the next item of a stream lies on the axis. One that maps nowhere goes first, for the
+/// writer to refuse.
+fn axis_of(map: &Mapping, tick: i64) -> i64 {
+    map.axis(tick).unwrap_or(i64::MIN)
 }
 
 fn drain(writer: &mut Writer, out: &mut impl Write) -> std::io::Result<()> {
@@ -139,6 +151,9 @@ pub fn encode_to(
     let mut streams = Vec::with_capacity(channels.len());
     let mut names = Vec::with_capacity(channels.len());
     let mut ends = Vec::new();
+    // Each channel's items, a digital one's as its iterator promises them, and a digital
+    // channel's end: what the overview's density needs.
+    let mut items = Vec::with_capacity(channels.len());
     for (i, channel) in channels.into_iter().enumerate() {
         let coding = options.analog.get(i).copied().flatten();
         let data = match channel.data {
@@ -148,6 +163,7 @@ pub fn encode_to(
                         channel: channel.name,
                     });
                 }
+                items.push((d.count, d.end));
                 let mut edges = d.edges;
                 let next = edges.next();
                 let mut gaps = d.gaps.into_iter();
@@ -157,6 +173,8 @@ pub fn encode_to(
                     next,
                     gaps,
                     next_gap,
+                    index: 0,
+                    count: d.count,
                 });
                 ends.push(d.end);
                 DeclaredKind::Digital { initial: d.initial }
@@ -179,6 +197,7 @@ pub fn encode_to(
                         });
                     }
                 };
+                items.push((a.count, 0));
                 let mut samples = a.samples.into_samples();
                 let next = samples.next();
                 streams.push(Stream::Analog {
@@ -207,7 +226,7 @@ pub fn encode_to(
             shaping: channel.shaping,
         });
     }
-    let declaration = Declaration {
+    let mut declaration = Declaration {
         timebase,
         channels: declared,
         derived,
@@ -219,6 +238,7 @@ pub fn encode_to(
                 timebase: source.timebase,
                 origin: source.origin,
                 align: source.align,
+                stretch: source.stretch,
                 instrument: source.instrument,
                 software: source.software,
                 begin_s: source.begin_s,
@@ -232,10 +252,15 @@ pub fn encode_to(
             .collect(),
         title: options.title.clone(),
         meta: options.meta.clone(),
-        overview_shift: options
-            .overview_shift
-            .unwrap_or_else(|| overview::converter_finest(length)),
+        overview_shift: 0,
     };
+    // A channel whose source has no `m` maps nowhere: the writer refuses its declaration.
+    let maps: Vec<Mapping> = (0..declaration.channels.len())
+        .map(|c| declaration.mapping(c).unwrap_or(Mapping::IDENTITY))
+        .collect();
+    declaration.overview_shift = options
+        .overview_shift
+        .unwrap_or_else(|| mapping::finest_shift(densest(&declaration, &maps, &items)));
     let batch = options
         .batch
         .unwrap_or_else(|| 4 * rayon::current_num_threads().max(1));
@@ -255,9 +280,9 @@ pub fn encode_to(
         let next = streams
             .iter()
             .enumerate()
-            .filter_map(|(i, s)| s.next_tick().map(|t| (t, i)))
-            .min();
-        let Some((tick, c)) = next else {
+            .filter_map(|(i, s)| s.next_tick().map(|t| (axis_of(&maps[i], t), t, i)))
+            .min_by_key(|&(axis, _, i)| (axis, i));
+        let Some((_, tick, c)) = next else {
             break;
         };
         match &mut streams[c] {
@@ -266,6 +291,8 @@ pub fn encode_to(
                 next,
                 gaps,
                 next_gap,
+                index,
+                count,
             } => {
                 if let Some(g) = *next_gap
                     && g.from == tick
@@ -274,7 +301,15 @@ pub fn encode_to(
                     writer.gap(c, g)?;
                     *next_gap = gaps.next();
                 } else {
+                    if *index >= *count {
+                        return Err(EncodeError::Count {
+                            channel: names[c].clone(),
+                            promised: *count,
+                            delivered: *index + 1 + edges.by_ref().count() as u64,
+                        });
+                    }
                     writer.edge(c, tick)?;
+                    *index += 1;
                     *next = edges.next();
                 }
             }
@@ -310,7 +345,7 @@ pub fn encode_to(
         }
     }
     for (stream, name) in streams.iter().zip(&names) {
-        if let Stream::Analog { index, count, .. } = stream
+        if let Stream::Analog { index, count, .. } | Stream::Digital { index, count, .. } = stream
             && index != count
         {
             return Err(EncodeError::Count {
@@ -332,6 +367,31 @@ pub fn encode_to(
     out.write_all(&finished.tail)?;
     out.flush()?;
     Ok(finished)
+}
+
+/// The densest channel's spacing in axis ticks (FORMAT.md, "Overview"): an analog channel's
+/// period times its source's `m`, a digital one's span from its start to its end over its edges.
+/// `items` holds each channel's count, which the encoder holds it to, and a digital channel's
+/// end. A channel with no item does not count.
+fn densest(declaration: &Declaration, maps: &[Mapping], items: &[(u64, i64)]) -> Option<Spacing> {
+    let spacings = declaration
+        .channels
+        .iter()
+        .zip(items)
+        .enumerate()
+        .filter(|(_, (_, (count, _)))| *count > 0)
+        .filter_map(|(c, (channel, &(count, end)))| match &channel.data {
+            DeclaredKind::Analog { period, .. } => {
+                let m = declaration.m(channel.source as usize)?;
+                Some(Spacing::of_samples(*period, m))
+            }
+            DeclaredKind::Digital { .. } => {
+                let start = declaration.start(c)?;
+                let span = maps[c].axis(end)?.checked_sub(maps[c].axis(start)?)?;
+                Spacing::of_edges(u64::try_from(span).ok()?, count)
+            }
+        });
+    Spacing::closest(spacings)
 }
 
 /// Encodes `recording` into memory.

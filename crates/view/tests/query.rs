@@ -270,6 +270,7 @@ fn oracle_columns(
         period: *period,
         count: *count,
         breaks,
+        map: f.header.mapping(c).unwrap(),
     };
     let truth = oracle(file);
     let samples = &truth[c].as_ref().unwrap().samples;
@@ -576,6 +577,7 @@ fn columns_come_from_the_coarsest_level_no_wider_than_a_column() {
         period: *period,
         count: *count,
         breaks,
+        map: footer.header.mapping(0).unwrap(),
     };
     let end = common::oracle(&file)[0]
         .as_ref()

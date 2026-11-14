@@ -32,12 +32,7 @@ impl From<DecodeError> for Error {
 /// The recording `input` holds, with the footer's header, which says what the model doesn't: its
 /// title, meta, bundled annotations and content id.
 pub fn read(input: Arc<dyn Input>) -> Result<(Header, Recording), Error> {
-    let size = input.size();
-    let from = size.saturating_sub(TAIL);
-    let footer = match Footer::parse(&tail(&*input, from), size) {
-        Err(DecodeError::NeedFrom(at)) if at < from => Footer::parse(&tail(&*input, at), size)?,
-        footer => footer?,
-    };
+    let footer = footer(&*input)?;
     let blocks = Arc::new(Blocks { input, footer });
     for i in 0..blocks.footer.rows.len() {
         blocks.decode(i)?;
@@ -54,13 +49,18 @@ pub fn read(input: Arc<dyn Input>) -> Result<(Header, Recording), Error> {
             shaping: ch.shaping.clone(),
             data: match &ch.data {
                 ChannelKind::Digital {
-                    initial, end, gaps, ..
+                    initial,
+                    end,
+                    gaps,
+                    edges,
                 } => ChannelData::Digital(Digital {
                     initial: *initial,
                     end: *end,
                     gaps: gaps.clone(),
+                    count: *edges,
+                    // The model holds a channel's source ticks, as the file stores them.
                     edges: Box::new(blocks.clone().items(c, |data| match data {
-                        BlockChannel::Digital { edges, .. } => edges,
+                        BlockChannel::Digital { edges, source, .. } => source.unwrap_or(edges),
                         BlockChannel::Analog { .. } => {
                             unreachable!("a block decodes each channel as the header has it")
                         }
@@ -95,6 +95,7 @@ pub fn read(input: Arc<dyn Input>) -> Result<(Header, Recording), Error> {
             timebase: s.timebase,
             origin: s.origin,
             align: s.align,
+            stretch: s.stretch,
             instrument: s.instrument.clone(),
             software: s.software.clone(),
             begin_s: s.begin_s,
@@ -153,6 +154,24 @@ fn samples(blocks: &Arc<Blocks>, c: usize, coding: AnalogCoding) -> Samples {
     }
 }
 
+/// The footer of the recording `input` holds, read from its end.
+pub fn footer(input: &dyn Input) -> Result<Footer, Error> {
+    let size = input.size();
+    let from = size.saturating_sub(TAIL);
+    Ok(match Footer::parse(&tail(input, from), size) {
+        Err(DecodeError::NeedFrom(at)) if at < from => Footer::parse(&tail(input, at), size)?,
+        footer => footer?,
+    })
+}
+
+/// Block `i` of the recording `input` holds, decoded, `footer` its footer.
+pub fn block(input: &dyn Input, footer: &Footer, i: usize) -> Result<Vec<BlockChannel>, Error> {
+    let (offset, length) = footer.block_location(i);
+    let mut frame = vec![0; length as usize];
+    input.read_at(offset, &mut frame);
+    Ok(footer.decode_block(i, &frame)?.channels)
+}
+
 fn tail(input: &dyn Input, from: u64) -> Vec<u8> {
     let mut bytes = vec![0; (input.size() - from) as usize];
     input.read_at(from, &mut bytes);
@@ -165,11 +184,8 @@ struct Blocks {
 }
 
 impl Blocks {
-    fn decode(&self, i: usize) -> Result<Vec<BlockChannel>, DecodeError> {
-        let (offset, length) = self.footer.block_location(i);
-        let mut frame = vec![0; length as usize];
-        self.input.read_at(offset, &mut frame);
-        Ok(self.footer.decode_block(i, &frame)?.channels)
+    fn decode(&self, i: usize) -> Result<Vec<BlockChannel>, Error> {
+        block(&*self.input, &self.footer, i)
     }
 
     /// Channel `c`'s items, block after block, as `take` finds them in its data.

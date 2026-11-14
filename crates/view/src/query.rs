@@ -5,8 +5,6 @@
 use std::ops::Range;
 use std::sync::atomic::AtomicBool;
 
-use escapement_tickwave_format::model::sample_support;
-
 use crate::columns::{
     self, AnalogOverview, DigitalColumns, DigitalOverview, Edges, Grid, Samples, State,
 };
@@ -490,16 +488,7 @@ impl Recording {
                 .enumerate()
                 .map(|(k, i)| Point {
                     tick: ticks[k],
-                    end: sample_support(
-                        runs.first,
-                        runs.period,
-                        runs.breaks,
-                        *count,
-                        self.length,
-                        i,
-                    )
-                    .expect("a sample")
-                    .end,
+                    end: runs.support(i, self.length).expect("a sample").end,
                     value: values[k],
                     flagged: flagged[k],
                     joined: i > lo && runs.breaks.binary_search_by_key(&i, |b| b.index).is_err(),

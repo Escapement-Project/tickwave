@@ -12,6 +12,7 @@ pub mod edit;
 pub mod encode;
 pub mod hash;
 pub mod header;
+pub mod mapping;
 pub mod model;
 pub mod overview;
 pub mod reader;

@@ -20,7 +20,10 @@ columns it reaches.
 
 For a reader that wants the samples themselves, as an export does, `Recording::each_sample` gives
 each sample's value and its integer code over a range of indices, `index_at` the index at a tick,
-`edges` a digital channel's edges, and `runs` and `known` where a channel's data lies.
+`edges` a digital channel's edges, and `runs` and `known` where a channel's data lies. Every tick
+they take and give is on the recording's time axis. A channel's source keeps its own ticks: `runs`
+states an analog channel's samples in them, its methods place them on the axis, and `mapping` gives
+the source's `m`, origin and the channel's offset, for a readout exact to the source's tick.
 
 `Recording::query` answers a `Query`: a window in ticks, its columns, the channels drawn, the
 statistics and the markers. The columns cover the window and one width either side, so a pan has
@@ -30,7 +33,8 @@ across a break, and a column that touches a span the instrument lost is pale.
 
 `Recording::statistics` counts each sample whose time covers part of the interval, one that starts
 before it included, and weights its value by the ticks it covers there, exactly for integer codes.
-For a period of whole ticks it takes whole overview buckets where it can. While a recording is
+Where every sample lasts the same whole number of the recording's ticks, it takes whole overview
+buckets where it can. While a recording is
 being written, its overview reaches no further than the end of the last block the writer closed,
 so the samples after that are counted one by one.
 

@@ -9,14 +9,14 @@ use crate::runs::{Runs, place_after};
 /// What `known_spans` reads of a channel.
 #[derive(Clone, Copy, Debug)]
 pub enum ChannelPlace<'a> {
-    /// The level is known from `start` to `end`, outside `gaps`. A gap from tick 0 gives `start`
-    /// and is not one of `gaps`.
+    /// The level is known from `start` to `end`, outside `gaps`, all axis ticks. A gap from the
+    /// channel's start gives `start` and is not one of `gaps`.
     Digital {
         start: i64,
         end: i64,
         gaps: &'a [Gap],
     },
-    /// The samples' places, and where the last one's time ends.
+    /// The samples' places, and where the last one's time ends on the axis.
     Analog { runs: Runs<'a>, end: i64 },
 }
 
@@ -26,7 +26,7 @@ impl ChannelPlace<'_> {
     pub fn start(&self) -> i64 {
         match self {
             Self::Digital { start, .. } => *start,
-            Self::Analog { runs, .. } => runs.first,
+            Self::Analog { runs, .. } => runs.start(),
         }
     }
 
@@ -57,13 +57,17 @@ pub fn known_spans(c: &ChannelPlace, start: i64, end: i64) -> Vec<Range<i64>> {
             let b = runs.breaks;
             // Run k starts at break k − 1's tick: the runs before the one holding `start` end
             // before it, and those from `stop` on start after the window.
-            for k in b.partition_point(|x| x.tick <= start)..=b.len() {
-                let from = if k == 0 { runs.first } else { b[k - 1].tick };
+            for k in b.partition_point(|x| runs.axis(x.tick) <= start)..=b.len() {
+                let from = if k == 0 {
+                    runs.start()
+                } else {
+                    runs.break_tick(k - 1)
+                };
                 if from >= stop {
                     break;
                 }
                 let to = match b.get(k) {
-                    Some(next) => next.tick.min(place_after(runs, next.index - 1)),
+                    Some(next) => runs.break_tick(k).min(place_after(runs, next.index - 1)),
                     None => *end,
                 };
                 keep(from, to);
