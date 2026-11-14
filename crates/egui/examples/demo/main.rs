@@ -5,7 +5,8 @@
 //!
 //! With `--live N` it records a synthetic capture at N pairs a second, laid out as verge's energy
 //! captures are, and shows it as it is written; with `--seconds S` as well, the recorder
-//! finishes after S seconds and the demo reopens the recording finished. The colours are the
+//! finishes after S seconds and the demo reopens the recording finished; with `--from S` it starts
+//! S seconds in, written as fast as they can be. The colours are the
 //! project's design tokens, from `site/tokens.css`. `--trace FILE` writes every span as a Chrome
 //! trace, for Perfetto or chrome://tracing, and `--quit-after S` closes the window after S
 //! seconds. For measuring, `--window FROM..TO` opens at a window, in seconds, and `--repaint`
@@ -37,7 +38,11 @@ struct Args {
     /// With `--live`, finish the recording after this many seconds and reopen it finished.
     #[arg(long, requires = "live")]
     seconds: Option<u64>,
-    /// Close the window after this many seconds.
+    /// With `--live`, write this many seconds as fast as they can be before showing it, to
+    /// follow a recording that has run that long.
+    #[arg(long, requires = "live", default_value_t = 0)]
+    from: u64,
+    /// Close the window this many seconds after its first frame.
     #[arg(long)]
     quit_after: Option<f64>,
     /// Write every span, at debug level, as a Chrome trace to this file.
@@ -77,6 +82,8 @@ struct Demo {
     /// The fixed range Fit Y replaced, for Fit Y pressed again.
     unfit: Option<Y>,
     quit_after: Option<f64>,
+    /// egui's time at the first frame, which `quit_after` counts from.
+    first: Option<f64>,
     repaint: bool,
     live: Option<live::Live>,
 }
@@ -92,7 +99,7 @@ impl Demo {
         ctx.set_visuals(tokens::visuals(&faces[usize::from(night)]));
         let (viewer, live, follow) = match (&args.recording, args.live) {
             (_, Some(rate)) => {
-                let (viewer, live) = live::start(ctx, rate, args.seconds)?;
+                let (viewer, live) = live::start(ctx, rate, args.seconds, args.from)?;
                 let timebase = viewer.recording(|r| r.timebase());
                 let span = LIVE_SPAN * (timebase.num() / timebase.den()) as i64;
                 (viewer, Some(live), Window::Follow { span })
@@ -148,6 +155,7 @@ impl Demo {
             follow,
             unfit: None,
             quit_after: args.quit_after,
+            first: None,
             repaint: args.repaint,
             live,
         })
@@ -201,6 +209,7 @@ impl eframe::App for Demo {
         }
         if let Some(after) = self.quit_after {
             let now = ui.input(|i| i.time);
+            let after = after + *self.first.get_or_insert(now);
             if now >= after {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
             } else {

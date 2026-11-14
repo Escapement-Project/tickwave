@@ -237,11 +237,13 @@ impl Drop for Live {
 }
 
 /// Starts recording `rate` pairs a second, for `seconds` if given, then finished and reopened.
-/// The viewer is made from the first batch's snapshot.
+/// The first `from` seconds are written as fast as they can be, and the viewer is made from the
+/// snapshot of the batch after them.
 pub fn start(
     ctx: &egui::Context,
     rate: u64,
     seconds: Option<u64>,
+    from: u64,
 ) -> Result<(Arc<Viewer>, Live), String> {
     if rate == 0 || !CLOCK_HZ.is_multiple_of(rate) {
         return Err(format!(
@@ -274,7 +276,11 @@ pub fn start(
         noise: 0x2545_f491_4f6c_dd1d,
         due: Vec::new(),
     };
-    synth.write(due(1, rate))?;
+    for s in 0..from {
+        synth.write((s + 1) * rate)?;
+    }
+    let first = from * BATCHES_A_SECOND + 1;
+    synth.write(due(first, rate))?;
     let viewer =
         Arc::new(Viewer::live(ctx, &path, synth.writer.snapshot()).map_err(|e| e.to_string())?);
     let published = Arc::new(Mutex::new(Some((synth.end(), Instant::now()))));
@@ -288,7 +294,7 @@ pub fn start(
         );
         std::thread::Builder::new()
             .name("synthetic recorder".into())
-            .spawn(move || record(synth, &viewer, &stop, &published, seconds))
+            .spawn(move || record(synth, &viewer, &stop, &published, seconds, first))
             .map_err(|e| e.to_string())?
     };
     Ok((
@@ -308,14 +314,15 @@ fn due(n: u64, rate: u64) -> u64 {
     (u128::from(n) * u128::from(rate) / u128::from(BATCHES_A_SECOND)) as u64
 }
 
-/// Writes a batch every `BATCH`, in step with the clock, and hands the viewer a snapshot at most
-/// once a `FRAME`, after the bytes it covers are in the file.
+/// Writes a batch every `BATCH`, in step with the clock, from the batch after `first`, and hands
+/// the viewer a snapshot at most once a `FRAME`, after the bytes it covers are in the file.
 fn record(
     mut synth: Synth,
     viewer: &Viewer,
     stop: &AtomicBool,
     published: &Mutex<Option<(i64, Instant)>>,
     seconds: Option<u64>,
+    first: u64,
 ) {
     let publish = |end: Option<i64>| {
         *published.lock().unwrap_or_else(|e| e.into_inner()) = end.map(|e| (e, Instant::now()));
@@ -324,10 +331,10 @@ fn record(
     let end = seconds.map(|s| s * synth.rate);
     let mut behind = false;
     let mut last = Instant::now();
-    let mut n = 1;
+    let mut n = first;
     while !stop.load(Ordering::Relaxed) {
         n += 1;
-        let at = started + BATCH * (n - 1) as u32;
+        let at = started + BATCH * (n - first) as u32;
         match at.checked_duration_since(Instant::now()) {
             Some(wait) => std::thread::sleep(wait),
             None if !behind => {

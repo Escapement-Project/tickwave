@@ -93,10 +93,11 @@ are, and shows it as it is written. It writes a batch of pairs every 10 ms, as a
 messages arrive, and hands the viewer a snapshot at most once a 16 ms frame. The now it passes
 to the graph is the newest snapshot's data end plus the time since that snapshot, at most 50 ms
 past the data. With `--seconds S` the recording finishes after S seconds and the demo reopens it
-finished. `--trace FILE` writes every span as a Chrome trace, for Perfetto
-or chrome://tracing, and `--quit-after S` closes the window after S seconds. For measuring a
-frame, `--window FROM..TO` opens at a window, in seconds, and `--repaint` draws every frame
-though nothing changes.
+finished; with `--from S` it starts S seconds in, those written as fast as they can be before the
+window shows them. `--trace FILE` writes every span as a Chrome trace, for Perfetto or
+chrome://tracing, and `--quit-after S` closes the window S seconds after its first frame. For
+measuring a frame, `--window FROM..TO` opens at a window, in seconds, and `--repaint` draws every
+frame though nothing changes.
 
 `tests/shots.rs` renders the graph and the strip to PNG files through egui_kittest's wgpu
 renderer, in both faces: set `TICKWAVE_SHOTS` to a folder and run it with `--ignored`.
