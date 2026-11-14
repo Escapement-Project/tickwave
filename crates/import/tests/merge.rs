@@ -2169,75 +2169,64 @@ fn two_marks_give_an_inputs_move_and_its_stretch() {
         (file(analyser()), "analyser", None),
         (file(probe()), "probe", None),
     ];
-    // The probe's time 0 at 0.25 us and its 1 ms at 1.00125 ms: a stretch of 1.001, and its tick
-    // 0 at 0.25 us, 3,000 merged ticks.
-    let (out, _) = run(
-        &inputs,
+    let placed = |marks: &str| {
+        let (out, _) = run(
+            &inputs,
+            &settings(vec![InputSettings::default(), aligned(marks)]),
+        )
+        .unwrap();
+        let h = Footer::parse_file(&out).unwrap().header;
+        (out, h.sources[1].stretch, h.sources[1].origin)
+    };
+    // Each mark's probe time is good to one 96 MHz tick and its merged time to one 12 GHz tick, and
+    // the stretch is the simplest ratio those allow; the expected values are worked in Python's
+    // Fraction. The probe's time 0 at 0.25 us and its 1 s at 1.00100025 s allow 1.001 ± 1.05e-8: a
+    // stretch of 1001/1000, and its tick 0 at 0.25 us, 3,000 merged ticks.
+    let (out, ..) = placed("0@0.25us,1s@1.00100025s");
+    let (h, (edges, _)) = items(&out);
+    assert_eq!(h.sources[1].stretch, Ratio::new(1001, 1000));
+    assert_eq!(origins(&h), [(0, None), (3_000, Some(3_000))]);
+    assert_eq!(edges[1], [4_251, 5_502, 6_753]);
+    // The same line through two other marks: its 1 s at 1.00100025 s and its 2 s at 2.00200025 s.
+    // Its tick 0 is the first mark's merged time less its own, stretched.
+    let (again, ..) = placed("1s@1.00100025s,2s@2.00200025s");
+    assert_eq!(origins(&items(&again).0), [(0, None), (3_000, Some(3_000))]);
+    assert!(again == out);
+    // The simplest ratio within the error. On the line of 2001/1999, 21.019485 ms apart, the marks
+    // allow 1.0010000002 to 1.0010010003: 2001/1999, between the simpler 1001/1000, 2.2e-10 below,
+    // and 1000/999, 7.2e-10 above, each nearer an end than one merged tick moves it (4.0e-9). And
+    // not the nearest: 1 ms apart on the first line, they allow 1.0009895 to 1.0010105, and 991/990
+    // (1.0010101) lies 4.1e-7 inside the end, where 990/989 lies 6.1e-7 past it; the exact
+    // 1001/1000 is not the simplest. Its tick 0 is still 0.25 us in.
+    assert_eq!(
+        placed("0@0.25us,21.019485ms@21.040765ms").1,
+        Ratio::new(2001, 1999)
+    );
+    let (_, s, origin) = placed("0@0.25us,1ms@1.00125ms");
+    assert_eq!((s, origin), (Ratio::new(991, 990), 3_000));
+    // A merged input's marks are good to its coarsest source's tick, the probe's at 96 MHz, not to
+    // its own at 12 GHz or to its analyser's at 500 MHz: the same marks give 991/990 as the probe's
+    // own do, where those ticks would give 1001/1000 and 999/998.
+    let (both, _) = run(&inputs, &settings(vec![InputSettings::default(); 2])).unwrap();
+    let (merged, _) = run(
+        &[(file(analyser()), "analyser", None), (both, "both", None)],
         &settings(vec![
             InputSettings::default(),
             aligned("0@0.25us,1ms@1.00125ms"),
         ]),
     )
     .unwrap();
-    let (h, (edges, _)) = items(&out);
-    assert_eq!(h.sources[1].stretch, Ratio::new(1001, 1000));
-    assert_eq!(origins(&h), [(0, None), (3_000, Some(3_000))]);
-    assert_eq!(edges[1], [4_251, 5_502, 6_753]);
-    // The same line through two other marks: its 1 ms at 1.00125 ms and its 2 ms at 2.00225 ms.
-    // Its tick 0 is the first mark's merged time less its own, stretched.
-    let (again, _) = run(
-        &inputs,
-        &settings(vec![
-            InputSettings::default(),
-            aligned("1ms@1.00125ms,2ms@2.00225ms"),
-        ]),
-    )
-    .unwrap();
-    assert_eq!(origins(&items(&again).0), [(0, None), (3_000, Some(3_000))]);
-    assert!(again == out);
-    // Marks whose ratio has terms past 2^53 take the nearest ratio whose terms keep every m below
-    // it.
-    let (near, _) = run(
-        &inputs,
-        &settings(vec![
-            InputSettings::default(),
-            aligned("0@0,0.12345678901234567s@0.12358024691358024s"),
-        ]),
-    )
-    .unwrap();
-    let h = Footer::parse_file(&near).unwrap().header;
-    let s = h.sources[1].stretch.unwrap();
-    let wanted = 12_358_024_691_358_024f64 / 12_345_678_901_234_567f64;
-    let got = s.num() as f64 / s.den() as f64;
-    assert!(
-        (got / wanted - 1.0).abs() < 1e-12,
-        "{s:?}: {got} for {wanted}"
+    let h = Footer::parse_file(&merged).unwrap().header;
+    let stretches: Vec<_> = h.sources.iter().map(|s| s.stretch).collect();
+    assert_eq!(
+        stretches,
+        [None, Ratio::new(991, 990), Ratio::new(991, 990)]
     );
-    assert!(s.num() < 1 << 53 && h.m(1).is_some(), "{s:?}");
-    // Marks to the picosecond nine seconds apart, whose cross products pass 128 bits unreduced.
-    let (fine, _) = run(
-        &inputs,
-        &settings(vec![
-            InputSettings::default(),
-            aligned("1234567891ps@750000123ns,9123456789123ps@9873134567ns"),
-        ]),
-    )
-    .unwrap();
-    let h = Footer::parse_file(&fine).unwrap().header;
-    let s = h.sources[1].stretch.unwrap();
-    let wanted = (9_873_134_567e-9 - 750_000_123e-9) / (9_123_456_789_123e-12 - 1_234_567_891e-12);
-    let got = s.num() as f64 / s.den() as f64;
-    assert!(
-        (got / wanted - 1.0).abs() < 1e-12,
-        "{s:?}: {got} for {wanted}"
-    );
-    // Its tick 0 at (0.750000123 − 0.001234567891 s) × 12 GHz, to the nearest merged tick.
-    let at = (750_000_123e-9 - 1_234_567_891e-12 * got) * 12e9;
-    assert!(
-        (h.sources[1].origin as f64 - at).abs() <= 1.0,
-        "{} for {at}",
-        h.sources[1].origin
-    );
+    // Marks to the picosecond nine seconds apart, whose cross products pass 128 bits unreduced:
+    // 1.0001000000598 ± 1.15e-9 gives 10001/10000, and its tick 0 at
+    // (0.750000123 − 0.001234567891 × 1.0001) s × 12 GHz = 8,985,185,179.83 merged ticks.
+    let (_, s, origin) = placed("1234567891ps@750000123ns,9123456789123ps@9873134567ns");
+    assert_eq!((s, origin), (Ratio::new(10_001, 10_000), 8_985_185_180));
     // What the marks can't give.
     let refused = |input: InputSettings| {
         run(&inputs, &settings(vec![InputSettings::default(), input]))
@@ -2259,6 +2248,23 @@ fn two_marks_give_an_inputs_move_and_its_stretch() {
     assert_eq!(
         refused(aligned("0@1ms,0@2ms")),
         "input 2's alignment: the marks must lie apart, and in the same order, in both times"
+    );
+    // Under one probe tick apart in its time, or one merged tick in the merged time.
+    for marks in ["0@0,10ns@10ns", "0@0,1ms@0.08ns"] {
+        assert_eq!(
+            refused(aligned(marks)),
+            "input 2's alignment: the marks lie too far apart, or too close, to give a stretch",
+            "{marks}"
+        );
+    }
+    // Marks 10^21 s apart allow 1.000123456789 ± 1.05e-29, and the simplest ratio there,
+    // 300877918586492 / 300840777750067, makes an m past 2^53.
+    assert_eq!(
+        refused(aligned(
+            "0@0,1000000000000000000000s@1000123456789012345678.91s"
+        )),
+        "input 2's alignment: the marks lie so far apart that no stretch within their error has \
+         terms below 2^53"
     );
     assert_eq!(
         refused(aligned("0,1ms@2ms")),

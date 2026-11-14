@@ -560,42 +560,6 @@ impl Alignment {
     }
 }
 
-/// The ratio nearest `p / q` whose terms are both at most `max`, by its continued fraction.
-fn approximate(p: u128, q: u128, max: u128) -> (u128, u128) {
-    let (mut h0, mut h1, mut k0, mut k1) = (0u128, 1u128, 1u128, 0u128);
-    let (mut a, mut b) = (p, q);
-    while b != 0 {
-        let t = a / b;
-        let (h2, k2) = (
-            t.saturating_mul(h1).saturating_add(h0),
-            t.saturating_mul(k1).saturating_add(k0),
-        );
-        if h2 > max || k2 > max {
-            // The best of the last convergent and the largest semiconvergent within the bound.
-            let room = |h: u128, k: u128| {
-                let by_h = (max - h0).checked_div(h).unwrap_or(u128::MAX);
-                let by_k = (max - k0).checked_div(k).unwrap_or(u128::MAX);
-                by_h.min(by_k)
-            };
-            let n = room(h1, k1).min(t);
-            let (hs, ks) = (n * h1 + h0, n * k1 + k0);
-            // |p/q − h/k| compared without division: |p k − q h| / (q k).
-            let off = |h: u128, k: u128| {
-                let (pk, qh) = (p as f64 * k as f64, q as f64 * h as f64);
-                (pk - qh).abs() / (q as f64 * k as f64)
-            };
-            return if n > 0 && off(hs, ks) < off(h1, k1) {
-                (hs, ks)
-            } else {
-                (h1, k1.max(1))
-            };
-        }
-        (h0, h1, k0, k1) = (h1, h2, k1, k2);
-        (a, b) = (b, a - t * b);
-    }
-    (h1, k1.max(1))
-}
-
 /// Where input j's axis lies on the merged axis: its tick `x` at merged tick
 /// `moved + floor(x × q)`, `q = stretch × R / R_j`, with `moved = align − base`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1035,7 +999,7 @@ fn input_placement(
                 problem: "the marks lie too far apart, or too close, to give a stretch".into(),
             };
             let [x1, y1, x2, y2] = [x1, y1, x2, y2].map(Q::of);
-            // s = (y2 − y1) / (x2 − x1), in exact seconds.
+            // Δx and Δy, in exact seconds.
             let (dx, dy) = (
                 x2.sub(x1).ok_or_else(too_far)?,
                 y2.sub(y1).ok_or_else(too_far)?,
@@ -1047,20 +1011,41 @@ fn input_placement(
                         .into(),
                 });
             }
-            let exact = dy.div(dx).ok_or_else(too_far)?;
-            let (p, q) = (exact.n.unsigned_abs(), exact.d.unsigned_abs());
-            // The nearest stretch with terms small enough for every m it makes.
-            let mut max = u128::from(JSON_SAFE) - 1;
-            let s = loop {
-                let (n, d) = approximate(p, q, max);
-                if let Some(s) = ratio_of(n, d).filter(|&s| fits(s)) {
-                    break s;
-                }
-                max >>= 4;
-                if max < 1_000_000 {
-                    return Err(too_far());
-                }
+            let (dx, dy) = (dx.abs().ok_or_else(too_far)?, dy.abs().ok_or_else(too_far)?);
+            // Each mark's x is good to one of the input's ticks, its coarsest source's for a merged
+            // input, and its y to one merged tick. So the stretch is any slope through both marks
+            // within those, from (Δy − δy) / (Δx + δx) to (Δy + δy) / (Δx − δx), and takes the
+            // simplest ratio there.
+            let tick = |rate: Ratio, stretch: Option<Ratio>| {
+                let s = stretch.unwrap_or(Ratio::ONE);
+                Q::new(
+                    i128::from(s.num()).checked_mul(i128::from(rate.den()))?,
+                    i128::from(s.den()).checked_mul(i128::from(rate.num()))?,
+                )
             };
+            let dx_tick = input
+                .sources
+                .iter()
+                .try_fold(tick(input.timebase, None).ok_or_else(too_far)?, |a, s| {
+                    a.max(tick(s.timebase, s.stretch)?)
+                })
+                .ok_or_else(too_far)?;
+            let dy_tick = tick(timebase, None).ok_or_else(too_far)?;
+            let lo = dy.sub(dy_tick).zip(dx.add(dx_tick));
+            let hi = dy.add(dy_tick).zip(dx.sub(dx_tick));
+            let (n, d) = lo
+                .zip(hi)
+                .filter(|&((a, b), (c, d))| [a, b, c, d].iter().all(|q| q.n > 0))
+                .and_then(|((a, b), (c, d))| simplest(a.div(b)?, c.div(d)?))
+                .ok_or_else(too_far)?;
+            let s = ratio_of(n, d)
+                .filter(|&s| fits(s))
+                .ok_or_else(|| Error::Time {
+                    name: name.clone(),
+                    problem: "the marks lie so far apart that no stretch within their error has \
+                              terms below 2^53"
+                        .into(),
+                })?;
             // The input's tick 0 lies where its first mark's time, stretched, meets the merged
             // time: (y1 − x1 × s) × R merged ticks, to the nearest.
             let (r, s_q) = (Q::ratio(timebase), Q::ratio(s));
@@ -1141,6 +1126,45 @@ impl Q {
             self.n.checked_mul(b)?.checked_sub(o.n.checked_mul(a)?)?,
             self.d.checked_mul(b)?,
         )
+    }
+
+    fn add(self, o: Self) -> Option<Self> {
+        self.sub(Self::new(o.n.checked_neg()?, o.d)?)
+    }
+
+    fn abs(self) -> Option<Self> {
+        Self::new(self.n.checked_abs()?, self.d)
+    }
+
+    fn max(self, o: Self) -> Option<Self> {
+        Some(if self.sub(o)?.n < 0 { o } else { self })
+    }
+}
+
+/// The ratio of least denominator in `[lo, hi]`, `0 < lo ≤ hi`, by continued fractions: where an
+/// integer lies in the interval the least one ends the fraction; otherwise both ends share an
+/// integer part `a`, and the ratio is `a + 1 / r`, with `r` the simplest in
+/// `[1 / (hi − a), 1 / (lo − a)]`.
+fn simplest(mut lo: Q, mut hi: Q) -> Option<(u128, u128)> {
+    let (mut h0, mut h1, mut k0, mut k1) = (0u128, 1u128, 1u128, 0u128);
+    loop {
+        let a = lo.n.div_euclid(lo.d);
+        let ceil = if lo.n.rem_euclid(lo.d) == 0 { a } else { a + 1 };
+        let ends = ceil.checked_mul(hi.d)? <= hi.n;
+        let t = u128::try_from(if ends { ceil } else { a }).ok()?;
+        let (h2, k2) = (
+            t.checked_mul(h1)?.checked_add(h0)?,
+            t.checked_mul(k1)?.checked_add(k0)?,
+        );
+        if ends {
+            return Some((h2, k2));
+        }
+        (h0, h1, k0, k1) = (h1, h2, k1, k2);
+        let whole = Q::new(a, 1)?;
+        (lo, hi) = (
+            Q::new(1, 1)?.div(hi.sub(whole)?)?,
+            Q::new(1, 1)?.div(lo.sub(whole)?)?,
+        );
     }
 }
 

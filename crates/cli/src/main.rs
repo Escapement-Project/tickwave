@@ -1911,8 +1911,8 @@ mod tests {
         let (_, _, head) = read_footer(&m, 64 << 20).unwrap();
         let stretches: Vec<_> = head.header.sources.iter().map(|s| s.stretch).collect();
         assert_eq!(stretches, [None, Ratio::new(1001, 1000)]);
-        // Two marks: the VCD's 0 at 10 us and its 1 ms at 1.012 ms, a stretch of 1.002.
-        merge(&["--align", "2=0@10us,1ms@1.012ms"]).unwrap();
+        // Two marks: the VCD's 0 at 10 us and its 1 s at 1.00201 s, a stretch of 1.002.
+        merge(&["--align", "2=0@10us,1s@1.00201s"]).unwrap();
         let (_, _, head) = read_footer(&m, 64 << 20).unwrap();
         let s = &head.header.sources[1];
         assert_eq!(
