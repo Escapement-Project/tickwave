@@ -900,3 +900,82 @@ fn an_annotation_source_that_can_t_name_a_file_on_its_own_is_refused() {
         );
     }
 }
+
+/// Annotation records whose lines break a rule ANNOTATIONS.md gives a generator's line, as a
+/// writer other than tickwave's, or one from before it held lines to them, leaves them: repair
+/// and recut leave each out and name it, the rest resolve bundled, and a line left out sets no
+/// length. A recut of the repaired file, finished, keeps its content id.
+#[test]
+fn repair_and_recut_leave_out_an_annotation_its_bundle_would_not_resolve() {
+    use escapement_tickwave_format::annotations::{Included, resolve};
+    use escapement_tickwave_format::header::Header;
+    use escapement_tickwave_format::recut::Recutter;
+    use escapement_tickwave_format::repair::Repairer;
+    use escapement_tickwave_format::writer::Bundle;
+    let mut w = Writer::new(declaration(), options()).unwrap();
+    w.edge(0, 1).unwrap();
+    w.flush(2).unwrap();
+    let mut cut = w.take_output();
+    for line in [
+        r#"{"id": "m/1", "start": 1}"#,
+        r#"{"id": "m/2", "start": 1, "colour": "red"}"#,
+        r#"{"start": 900}"#,
+        r#"{"id": "m/1", "start": 1}"#,
+    ] {
+        let a = format!(r#"{{"source": "gen", "annotation": {line}}}"#);
+        record::write(&mut cut, Kind::Annotation, &[a.as_bytes()]);
+    }
+    let left_as_wanted = |left: &[String]| {
+        let want = [
+            "generator \"gen\": annotation \"m/2\": unknown field `colour`",
+            "generator \"gen\": annotation with no id: missing field `id`",
+            "generator \"gen\": annotation \"m/1\": generator \"gen\" has an annotation of this id \
+             already",
+        ];
+        assert_eq!(left.len(), want.len(), "{left:?}");
+        for (got, want) in left.iter().zip(want) {
+            assert!(got.starts_with(want), "{got}");
+        }
+    };
+    let ids = |header: &Header| -> Vec<String> {
+        let files = header.annotations.clone().expect("bundled");
+        let included: Vec<Included<'_>> = files
+            .iter()
+            .filter(|(name, _)| name.ends_with(".jsonl"))
+            .map(|(name, text)| Included { name, text })
+            .collect();
+        resolve(&files["rec.annotations.toml"], &included, header, None)
+            .unwrap()
+            .into_iter()
+            .map(|a| a.id)
+            .collect()
+    };
+    let bundled = || Bundle::Generated { stem: "rec".into() };
+
+    let mut r = Repairer::new(3);
+    r.bundle(bundled());
+    r.feed(&cut).unwrap();
+    left_as_wanted(r.left_out());
+    let repaired = r.finish().unwrap();
+    assert_eq!(repaired.header.length, 2);
+    assert_eq!(ids(&repaired.header), ["gen/m/1"]);
+    assert_eq!(repaired.generated["gen"].len(), 1);
+    let mut whole = cut[..repaired.keep as usize].to_vec();
+    whole.extend_from_slice(&repaired.tail);
+
+    for (input, finished) in [(&cut, false), (&whole, true)] {
+        let mut rc = Recutter::new(options());
+        rc.bundle(bundled());
+        rc.feed(input).unwrap();
+        left_as_wanted(rc.left_out());
+        let mut out = rc.take_output();
+        let f = rc.finish().unwrap();
+        out.extend_from_slice(&f.tail);
+        let h = Footer::parse_file(&out).unwrap().header;
+        assert_eq!(h.length, 2, "finished: {finished}");
+        assert_eq!(ids(&h), ["gen/m/1"], "finished: {finished}");
+        if finished {
+            assert_eq!(h.content_id, repaired.header.content_id);
+        }
+    }
+}

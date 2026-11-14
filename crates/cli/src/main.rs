@@ -1380,6 +1380,7 @@ fn repair_file(file: &Path, output: &Path, level: i32) -> Result<()> {
         }
         repairer.feed(&chunk[..n])?;
     }
+    let left_out = repairer.left_out().to_vec();
     let repaired = match repairer.finish() {
         Ok(repaired) => repaired,
         Err(RepairError::Shaped(_)) => bail!(
@@ -1393,6 +1394,7 @@ fn repair_file(file: &Path, output: &Path, level: i32) -> Result<()> {
         copy_then(&mut opened, repaired.keep, &repaired.tail, out)
     })?;
     write_generated(output, &repaired.header, &repaired.generated)?;
+    warn_left_out(&left_out);
     info!(
         "{}: {} of {} bytes kept, {} blocks to {}, {}",
         output.display(),
@@ -1403,6 +1405,13 @@ fn repair_file(file: &Path, output: &Path, level: i32) -> Result<()> {
         repaired.header.content_id
     );
     Ok(())
+}
+
+/// The annotation lines repair or recut left out, as they would not resolve.
+fn warn_left_out(left_out: &[String]) {
+    for why in left_out {
+        warn!("left out an annotation that would not resolve: {why}");
+    }
 }
 
 /// Each annotation generator's file beside `output`, as `<stem>.<source>.jsonl`.
@@ -1434,7 +1443,7 @@ fn recut_file(input: &Path, output: &Path, block_kib: u32, level: i32) -> Result
         block_bytes: block_kib as usize * 1024,
         batch: 4 * std::thread::available_parallelism().map_or(1, |n| n.get()),
     });
-    let finished = write_atomically(output, |out| {
+    let (finished, left_out) = write_atomically(output, |out| {
         let mut chunk = vec![0; 1 << 20];
         loop {
             let n = opened.read(&mut chunk)?;
@@ -1449,6 +1458,7 @@ fn recut_file(input: &Path, output: &Path, block_kib: u32, level: i32) -> Result
             recutter.consume(written);
         }
         out.write_all(recutter.output())?;
+        let left_out = recutter.left_out().to_vec();
         let finished = match recutter.finish() {
             Ok(finished) => finished,
             Err(RecutError::Shaped(_)) => bail!(
@@ -1459,7 +1469,7 @@ fn recut_file(input: &Path, output: &Path, block_kib: u32, level: i32) -> Result
             Err(e) => return Err(e).with_context(|| format!("re-cutting {}", input.display())),
         };
         out.write_all(&finished.tail)?;
-        Ok(finished)
+        Ok((finished, left_out))
     })?;
     let (_, _, check) = read_footer(output, usize::MAX)?;
     if check.header.content_id != finished.header.content_id {
@@ -1469,6 +1479,7 @@ fn recut_file(input: &Path, output: &Path, block_kib: u32, level: i32) -> Result
     if finished.header.annotations.is_none() {
         write_generated(output, &finished.header, &finished.generated)?;
     }
+    warn_left_out(&left_out);
     info!(
         "{}: {:.2} MB from {:.2} MB, {} blocks, {} in {:.1} s",
         output.display(),

@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+use crate::annotations::Lines;
 use crate::decode::{
     BlockChannel, DecodeError, MAX_DECODED, check_header, corrupt, gaps_ending_in, inflate_limited,
     level_after, overview_room,
@@ -161,6 +162,9 @@ pub struct Repairer {
     annotations: Vec<record::Annotation>,
     /// The latest start among the annotation records.
     latest_annotation: Option<i64>,
+    /// Held to the declaration's channels once it is read.
+    lines: Option<Lines>,
+    left_out: Vec<String>,
     bundle: Option<Bundle>,
     /// A record that does not hold together: a derived channel's operands that don't pair.
     error: Option<String>,
@@ -183,6 +187,8 @@ impl Repairer {
             overview_records: 0,
             annotations: Vec::new(),
             latest_annotation: None,
+            lines: None,
+            left_out: Vec::new(),
             bundle: None,
             error: None,
         }
@@ -192,6 +198,13 @@ impl Repairer {
     /// them back as generator files alone.
     pub fn bundle(&mut self, bundle: Bundle) {
         self.bundle = Some(bundle);
+    }
+
+    /// The annotation records read so far whose line breaks a rule ANNOTATIONS.md gives a
+    /// generator's line, each as its generator and the rule. Repair leaves them out of what it
+    /// gives and of the length the marks set, so its annotations resolve.
+    pub fn left_out(&self) -> &[String] {
+        &self.left_out
     }
 
     /// The file's next bytes, from its start.
@@ -238,6 +251,7 @@ impl Repairer {
                 }
                 self.channels = channels;
                 self.words = Words::new(d.channels.len());
+                self.lines = Some(Lines::declared(&d));
                 self.declaration = Some(*d);
             }
             Event::Gap { channel, gap } => {
@@ -358,6 +372,15 @@ impl Repairer {
                 self.overview_records += 1;
             }
             Event::Annotation(a) => {
+                if let Some(Err(why)) = self
+                    .lines
+                    .as_mut()
+                    .map(|l| l.take(&a.source, &a.annotation))
+                {
+                    self.left_out
+                        .push(format!("generator {:?}: {why}", a.source));
+                    return;
+                }
                 self.latest_annotation = latest_start(self.latest_annotation, &a);
                 self.annotations.push(a);
             }

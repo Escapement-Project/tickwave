@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::header::{ChannelKind, ContentId, Header};
+use crate::header::{ChannelKind, ContentId, Declaration, DeclaredKind, Header};
 use crate::model::Ratio;
 use crate::record::check_source;
 
@@ -329,6 +329,14 @@ impl Lines {
             channels: channels.into_iter().collect(),
             ids: BTreeSet::new(),
         }
+    }
+
+    /// Lines on the channels `declaration` declares.
+    pub fn declared(declaration: &Declaration) -> Self {
+        Self::new(declaration.channels.iter().map(|c| {
+            let digital = matches!(c.data, DeclaredKind::Digital { .. });
+            (c.name.clone(), digital)
+        }))
     }
 
     /// Takes generator `source`'s `line`, or says why it can't stand: `annotation "<id>": ...`,

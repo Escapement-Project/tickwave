@@ -53,6 +53,7 @@ pub struct Recutter {
     annotations: bool,
     blocks: bool,
     latest_annotation: Option<i64>,
+    left_out: Vec<String>,
     bundle: Option<Bundle>,
 }
 
@@ -69,8 +70,15 @@ impl Recutter {
             annotations: false,
             blocks: false,
             latest_annotation: None,
+            left_out: Vec::new(),
             bundle: None,
         }
+    }
+
+    /// The annotation records read so far that the writer refused, each as its generator and
+    /// the rule its line breaks, as `Repairer::left_out` gives them. The recut leaves them out.
+    pub fn left_out(&self) -> &[String] {
+        &self.left_out
     }
 
     /// Bundles a cut-off input's annotations into the footer, as the writer would have, as
@@ -155,9 +163,18 @@ impl Recutter {
             Event::Run { channel, run } => self.runs[channel].push_back(run),
             Event::Block(block) => self.block(block)?,
             Event::Annotation(a) => {
-                self.annotations = true;
-                self.latest_annotation = latest_start(self.latest_annotation, &a);
-                self.writer().annotation(&a.source, a.annotation)?;
+                let latest = latest_start(self.latest_annotation, &a);
+                match self.writer().annotation(&a.source, a.annotation) {
+                    Ok(()) => {
+                        self.annotations = true;
+                        self.latest_annotation = latest;
+                    }
+                    Err(WriteError::Annotation(why)) => {
+                        self.left_out
+                            .push(format!("generator {:?}: {why}", a.source));
+                    }
+                    Err(e) => return Err(e.into()),
+                }
             }
             Event::Footer(footer) => self.footer = Some(footer),
             Event::OverviewBlock { .. } | Event::Skipped { .. } => {}

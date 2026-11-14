@@ -539,7 +539,8 @@ is not a name ANNOTATIONS.md allows a generator, since the source's file is name
 tickwave's writer refuses, at the call, an annotation its generator's file could not hold: one
 whose fields, ticks or channels break ANNOTATIONS.md's rules for a line, or whose id its
 generator has given already. Its length aside, which the writer learns only when it finishes, each
-annotation it takes resolves.
+annotation it takes resolves. Repair and recut leave out a record whose line breaks those rules,
+as another writer may have written it, and name each one they leave out.
 
 Annotation records let a live recorder keep what it generates as safely as its data. The footer
 does not index them, so a reader with random access never sees them. When a file is finished or

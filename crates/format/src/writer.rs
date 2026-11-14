@@ -671,10 +671,7 @@ impl Writer {
         let mut out = Vec::new();
         out.extend_from_slice(&Preamble::CURRENT.to_bytes());
         record::write(&mut out, Kind::Declaration, &[&json]);
-        let lines = crate::annotations::Lines::new(declaration.channels.iter().map(|c| {
-            let digital = matches!(c.data, DeclaredKind::Digital { .. });
-            (c.name.clone(), digital)
-        }));
+        let lines = crate::annotations::Lines::declared(&declaration);
         let mut writer = Self {
             overview: Builder::new(
                 declaration.overview_shift,
