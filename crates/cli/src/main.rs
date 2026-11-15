@@ -57,8 +57,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Convert a capture into a tickwave recording. The output is checked against the source
-    /// before it is written.
+    /// Convert a capture into a tickwave recording. `tickwave verify` checks it against the
+    /// capture.
     Convert {
         #[command(subcommand)]
         from: Source,
@@ -86,7 +86,7 @@ enum Command {
     },
     /// Merge recordings onto one time axis, at the least common multiple of their tick rates, or
     /// at the fastest of them where the multiple has a term past 2^53. A capture goes through
-    /// `tickwave convert` first. The output is checked against the inputs before it is written.
+    /// `tickwave convert` first. `tickwave verify` checks the merge against its inputs.
     Merge {
         /// Two or more .tickwave recordings, in order.
         #[arg(required = true, num_args = 2..)]
@@ -202,8 +202,8 @@ struct Serve {
 
 #[derive(Args)]
 struct AndOpen {
-    /// Open the recording in the browser once it is written and checked, as `tickwave open`
-    /// does, and serve it until Ctrl-C.
+    /// Open the recording in the browser once it is written, as `tickwave open` does, and serve
+    /// it until Ctrl-C.
     #[arg(long)]
     open: bool,
     /// With --open: the port to serve on. Without it, the system chooses one.
@@ -468,7 +468,7 @@ fn execute(command: Command, max: usize) -> Result<()> {
                     recording.timebase.num()
                 );
             }
-            convert(&|| Ok(export.recording()), &output, &common, max)?;
+            convert(&|| Ok(export.recording()), &output, &common)?;
             and_open.serve(viewer, &output)
         }
         Command::Convert {
@@ -487,7 +487,6 @@ fn execute(command: Command, max: usize) -> Result<()> {
                 &|| select(sigrok::read(&file)?.recording, &channels),
                 &output,
                 &common,
-                max,
             )?;
             and_open.serve(viewer, &output)
         }
@@ -507,7 +506,6 @@ fn execute(command: Command, max: usize) -> Result<()> {
                 &|| select(vcd::read(&file)?.recording, &channels),
                 &output,
                 &common,
-                max,
             )?;
             and_open.serve(viewer, &output)
         }
@@ -576,7 +574,7 @@ fn execute(command: Command, max: usize) -> Result<()> {
                     bail!("input {n} is given a stretch twice");
                 }
             }
-            merge_files(&inputs, &output, &settings, max)?;
+            merge_files(&inputs, &output, &settings)?;
             and_open.serve(viewer, &output)
         }
         Command::Bundle {
@@ -679,23 +677,16 @@ impl Common {
     }
 }
 
-/// Converts what `open` reads, checks the output against the source, and writes it.
+/// Converts what `open` reads and writes it.
 fn convert(
     open: &dyn Fn() -> Result<Recording, convert::Error>,
     output: &Path,
     common: &Common,
-    max: usize,
 ) -> Result<()> {
     let started = Instant::now();
     let settings = common.settings();
     let converted = write_atomically(output, |file| {
-        Ok(convert::convert(
-            open,
-            &settings,
-            max,
-            &Bars::default(),
-            file,
-        )?)
+        Ok(convert::convert(open, &settings, &Bars::default(), file)?)
     })?;
     for (name, bits) in &converted.codes {
         match bits {
@@ -1204,12 +1195,7 @@ fn merge_input(path: &Path) -> Result<merge::Input> {
     Ok(input)
 }
 
-fn merge_files(
-    inputs: &[PathBuf],
-    output: &Path,
-    settings: &merge::Settings,
-    max: usize,
-) -> Result<()> {
+fn merge_files(inputs: &[PathBuf], output: &Path, settings: &merge::Settings) -> Result<()> {
     let started = Instant::now();
     let open = || -> Result<Vec<merge::Input>, merge::Error> {
         inputs
@@ -1225,7 +1211,7 @@ fn merge_files(
             .collect()
     };
     let merged = write_atomically(output, |file| {
-        Ok(merge::merge(&open, settings, max, &Bars::default(), file)?)
+        Ok(merge::merge(&open, settings, &Bars::default(), file)?)
     })?;
     for note in &merged.notes {
         if note.warns() {
@@ -1828,7 +1814,7 @@ mod tests {
         let open = || Ok(sigrok::read(&source)?.recording);
         let run = |flags: &[&str]| {
             let common = common(&[&["sigrok", "x.sr", "-o", "x.tickwave"], flags].concat());
-            convert(&open, &output, &common, 64 << 20)
+            convert(&open, &output, &common)
         };
         let err = run(&["--offset", "D0=5", "--offset", "D0=6"]).expect_err("refused");
         assert_eq!(err.to_string(), r#""D0" is given an offset twice"#);
@@ -1920,14 +1906,12 @@ mod tests {
             &|| Ok(sigrok::read(&logic)?.recording),
             &a,
             &common(&["sigrok", "x.sr", "-o", "x"]),
-            64 << 20,
         )
         .unwrap();
         convert(
             &|| Ok(vcd::read(&mixed)?.recording),
             &b,
             &common(&["vcd", "x.vcd", "-o", "x"]),
-            64 << 20,
         )
         .unwrap();
         let merge = |flags: &[&str]| {
@@ -1947,6 +1931,7 @@ mod tests {
         let (_, _, head) = read_footer(&m).unwrap();
         let stretches: Vec<_> = head.header.sources.iter().map(|s| s.stretch).collect();
         assert_eq!(stretches, [None, Ratio::new(1001, 1000)]);
+        verify_file(&m, &[a.clone(), b.clone()], 64 << 20).unwrap();
         // Two marks: the VCD's 0 at 10 us and its 1 s at 1.00201 s, a stretch of 1.002.
         merge(&["--align", "2=0@10us,1s@1.00201s"]).unwrap();
         let (_, _, head) = read_footer(&m).unwrap();
@@ -2067,7 +2052,6 @@ mod tests {
                 block_kib: 1,
                 ..merge::Settings::default()
             },
-            64 << 20,
         )
         .unwrap();
         let input = Counted {
@@ -2150,15 +2134,9 @@ mod tests {
             "--keep",
             "D1=10..100",
         ]);
-        convert(&open_logic, &a, &common_a, 64 << 20).unwrap();
+        convert(&open_logic, &a, &common_a).unwrap();
         let open_mixed = || Ok(vcd::read(&mixed)?.recording);
-        convert(
-            &open_mixed,
-            &b,
-            &common(&["vcd", "x.vcd", "-o", "x"]),
-            64 << 20,
-        )
-        .unwrap();
+        convert(&open_mixed, &b, &common(&["vcd", "x.vcd", "-o", "x"])).unwrap();
         let os = |s: &Path| s.as_os_str().to_owned();
         let arg = |s: &str| std::ffi::OsString::from(s);
         cli(&[
@@ -2269,6 +2247,7 @@ mod tests {
         .unwrap();
         let (_, _, head) = read_footer(&m2).unwrap();
         assert_eq!(head.header.channels[0].name, "clock");
+        verify_file(&m2, &[a.clone(), b.clone()], 64 << 20).unwrap();
         assert_eq!(
             head.header
                 .channels
@@ -2319,22 +2298,10 @@ mod tests {
         );
         let logic = testdata.join("demo-logic.sr");
         let open_logic = || Ok(sigrok::read(&logic)?.recording);
-        convert(
-            &open_logic,
-            &a,
-            &common(&["sigrok", "x.sr", "-o", "x"]),
-            64 << 20,
-        )
-        .unwrap();
+        convert(&open_logic, &a, &common(&["sigrok", "x.sr", "-o", "x"])).unwrap();
         let mixed = testdata.join("demo-mixed.vcd");
         let open_mixed = || Ok(vcd::read(&mixed)?.recording);
-        convert(
-            &open_mixed,
-            &b,
-            &common(&["vcd", "x.vcd", "-o", "x"]),
-            64 << 20,
-        )
-        .unwrap();
+        convert(&open_mixed, &b, &common(&["vcd", "x.vcd", "-o", "x"])).unwrap();
         let (_, _, head) = read_footer(&b).unwrap();
         let id = head.header.content_id;
         // B's sidecar beside it: a generator's file, and a hand-written annotation of its own.
@@ -2358,13 +2325,14 @@ mod tests {
         .unwrap();
         let args = [
             std::ffi::OsString::from("merge"),
-            a.into_os_string(),
-            b.into_os_string(),
+            a.clone().into_os_string(),
+            b.clone().into_os_string(),
             "-o".into(),
             m.clone().into_os_string(),
         ];
         let args: Vec<&std::ffi::OsStr> = args.iter().map(|a| a.as_os_str()).collect();
         cli(&args).unwrap();
+        verify_file(&m, &[a, b], 64 << 20).unwrap();
         let (_, _, head) = read_footer(&m).unwrap();
         let h = &head.header;
         let bytes = fs::read(&m).unwrap();
@@ -2446,7 +2414,7 @@ mod tests {
                 ]
                 .concat(),
             );
-            convert(&open, &path, &common, 64 << 20).unwrap();
+            convert(&open, &path, &common).unwrap();
             fs::read(path).unwrap()
         };
         let shaped = converted(
@@ -2518,7 +2486,7 @@ mod tests {
         let open = || Ok(sigrok::read(&source)?.recording);
         let whole = dir.path().join("whole.tickwave");
         let common = common(&["sigrok", "x.sr", "-o", "x.tickwave"]);
-        convert(&open, &whole, &common, 64 << 20).unwrap();
+        convert(&open, &whole, &common).unwrap();
         let mut file = fs::read(&whole).unwrap();
         let footer = Footer::parse_file(&file).unwrap();
         file.truncate(footer.trailer.footer_offset as usize);

@@ -1,6 +1,8 @@
 //! A finished tickwave recording read back into the model, so it can be shaped and merged as a
-//! capture is. Every block is decoded once when the recording is opened, so a damaged one is
-//! refused there; each channel then decodes its blocks again as it is read.
+//! capture is. `read` decodes every block once when the recording is opened, so a damaged one is
+//! refused there. `open` decodes none: its `Check` decodes the channels a caller is about to read.
+//! Each channel then decodes its blocks again as it is read, and ends at a block that no longer
+//! decodes, short of the count its header states, which the encoder refuses.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -16,8 +18,6 @@ use crate::input::Input;
 
 /// The bytes read first for the footer: as many as the web reader takes.
 const TAIL: u64 = 32 << 10;
-
-const CHECKED: &str = "every block decoded when the recording was opened";
 
 // The decode error is in the message, not the source too: a chained report would say it twice.
 #[derive(Debug, thiserror::Error)]
@@ -42,6 +42,39 @@ pub type Files = BTreeMap<String, String>;
 
 /// `read`, with the annotation files the recording bundles.
 pub fn read_bundled(input: Arc<dyn Input>) -> Result<(Header, Option<Files>, Recording), Error> {
+    let opened = open(input)?;
+    for c in 0..opened.header.channels.len() {
+        opened.check.channel(c)?;
+    }
+    Ok((opened.header, opened.bundled, opened.recording))
+}
+
+/// A recording opened with no block decoded.
+pub struct Opened {
+    pub header: Header,
+    pub bundled: Option<Files>,
+    pub recording: Recording,
+    pub check: Check,
+}
+
+/// Decodes an opened recording's channels before they are read, so a damaged block is refused
+/// before the work that reads it starts.
+#[derive(Clone)]
+pub struct Check(Arc<Blocks>);
+
+impl Check {
+    /// Decodes every block of channel `c`.
+    pub fn channel(&self, c: usize) -> Result<(), Error> {
+        for b in self.0.refs.get(c).into_iter().flatten() {
+            self.0.decode(c, b)?;
+        }
+        Ok(())
+    }
+}
+
+/// The recording `input` holds: its footer, lists, bundle and every channel's index pages read,
+/// and no block.
+pub fn open(input: Arc<dyn Input>) -> Result<Opened, Error> {
     let mut footer = footer(&*input)?;
     footer.load_lists(fetch(&*input))?;
     let bundled = footer.read_bundle(fetch(&*input))?;
@@ -53,11 +86,6 @@ pub fn read_bundled(input: Arc<dyn Input>) -> Result<(Header, Option<Files>, Rec
         footer,
         refs,
     });
-    for (c, refs) in blocks.refs.iter().enumerate() {
-        for b in refs {
-            blocks.decode(c, b)?;
-        }
-    }
     let header = blocks.footer.header.clone();
     let listed = "every list read when the recording was opened";
     let channels = header
@@ -140,7 +168,12 @@ pub fn read_bundled(input: Arc<dyn Input>) -> Result<(Header, Option<Files>, Rec
         derived: header.derived.iter().map(|d| d.declared()).collect(),
         sources,
     };
-    Ok((header, bundled, recording))
+    Ok(Opened {
+        header,
+        bundled,
+        recording,
+        check: Check(blocks),
+    })
 }
 
 /// Analog channel `c`'s samples, block after block, in the type its coding stores.
@@ -236,7 +269,8 @@ impl Blocks {
         block(&*self.input, &self.footer, c, b)
     }
 
-    /// Channel `c`'s items, block after block, as `take` finds them in its data.
+    /// Channel `c`'s items, block after block, as `take` finds them in its data, up to a block
+    /// that doesn't decode.
     fn items<T>(
         self: Arc<Self>,
         c: usize,
@@ -246,6 +280,7 @@ impl Blocks {
         T: Send,
     {
         (0..self.refs[c].len())
-            .flat_map(move |i| take(self.decode(c, &self.refs[c][i]).expect(CHECKED)))
+            .map_while(move |i| self.decode(c, &self.refs[c][i]).ok().map(take))
+            .flatten()
     }
 }

@@ -6,7 +6,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use escapement_tickwave_format::decode::MAX_DECODED;
 use escapement_tickwave_format::model::{ChannelData, Recording};
 use escapement_tickwave_import::convert::{self, Keep, Pass, Progress, Settings, Step, select};
 use escapement_tickwave_import::input::{Input, read_all};
@@ -23,7 +22,7 @@ extern "C" {
     /// cannot be read.
     #[wasm_bindgen(js_namespace = tickwaveConvert)]
     fn read(file: u32, offset: f64, into: &mut [u8]);
-    /// A pass starts: `check`, `codes` (with the channel), `encode` or `verify`, over `total` items.
+    /// A pass starts: `check`, `codes` (with the channel) or `encode`, over `total` items.
     #[wasm_bindgen(js_namespace = tickwaveConvert)]
     fn start(pass: &str, channel: &str, total: f64);
     /// The pass under way has taken `n` more items.
@@ -279,6 +278,7 @@ impl Progress for Report {
             Pass::Check => start("check", "", total as f64),
             Pass::Codes(channel) => start("codes", channel, total as f64),
             Pass::Encode => start("encode", "", total as f64),
+            // `tickwave verify`'s pass: neither a conversion nor a merge checks what it writes.
             Pass::Verify => start("verify", "", total as f64),
         }
         Arc::new(|n| step(n as f64))
@@ -395,13 +395,7 @@ pub fn convert(request: &str) -> Result<Converted, JsError> {
                 .collect();
             let headers = saleae::Headers::read(files, &r.channels, r.rate).map_err(js)?;
             let export = convert::check_saleae(headers, &Report).map_err(js)?;
-            convert::convert(
-                &|| Ok(export.recording()),
-                &settings,
-                MAX_DECODED,
-                &Report,
-                &mut out,
-            )
+            convert::convert(&|| Ok(export.recording()), &settings, &Report, &mut out)
         }
         Kind::Sigrok => {
             let f = single(&r.files)?;
@@ -412,13 +406,13 @@ pub fn convert(request: &str) -> Result<Converted, JsError> {
                     &r.channels,
                 )
             };
-            convert::convert(&open, &settings, MAX_DECODED, &Report, &mut out)
+            convert::convert(&open, &settings, &Report, &mut out)
         }
         Kind::Vcd => {
             let f = single(&r.files)?;
             let bytes = read_all(&*f.input());
             let open = || select(vcd::read_from(&bytes[..], &f.name)?.recording, &r.channels);
-            convert::convert(&open, &settings, MAX_DECODED, &Report, &mut out)
+            convert::convert(&open, &settings, &Report, &mut out)
         }
     }
     .map_err(js)?;
@@ -491,7 +485,8 @@ impl MergedFile {
     }
 }
 
-/// Merges .tickwave recordings as `tickwave merge` does, with the same defaults and checks.
+/// Merges .tickwave recordings as `tickwave merge` does, with the same defaults and checks. It
+/// decodes only the channels the merge takes.
 /// `request` is `{inputs: [{file, stem, align, stretch, channels, annotations}], offsets, keeps, units,
 /// title, meta, level, blockKib, stem}`, as JSON.
 #[wasm_bindgen]
@@ -531,7 +526,7 @@ pub fn merge(request: &str) -> Result<MergedFile, JsError> {
             .collect()
     };
     let mut out = std::io::Cursor::new(Vec::new());
-    let merged = merge::merge(&open, &settings, MAX_DECODED, &Report, &mut out).map_err(js)?;
+    let merged = merge::merge(&open, &settings, &Report, &mut out).map_err(js)?;
     let report: Vec<String> = merged.notes.iter().map(|n| n.to_string()).collect();
     Ok(MergedFile {
         report: serde_json::to_string(&report).map_err(js)?,

@@ -5,7 +5,6 @@
 use std::io::Cursor;
 use std::sync::Arc;
 
-use escapement_tickwave_format::decode::MAX_DECODED;
 use escapement_tickwave_format::encode::{Options, encode};
 use escapement_tickwave_format::model::{
     Channel, ChannelData, Digital, Ratio, Recording, Shaping, Source, SourceFormat,
@@ -87,7 +86,6 @@ fn merged(files: &[Vec<u8>], inputs: Vec<InputSettings>) -> Vec<u8> {
             level: 3,
             ..merge::Settings::default()
         },
-        MAX_DECODED,
         &Quiet,
         &mut out,
     )

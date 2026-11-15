@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::sync::Arc;
 
-use escapement_tickwave_format::decode::{BlockChannel, Footer, Index, MAX_DECODED, from_memory};
+use escapement_tickwave_format::decode::{BlockChannel, Footer, Index, from_memory};
 use escapement_tickwave_format::encode::{Bundle, Options, encode};
 use escapement_tickwave_format::header::{ChannelKind, DerivedHeader, Header, Kept};
 use escapement_tickwave_format::model::{
@@ -119,7 +119,8 @@ fn file(recording: Recording) -> Vec<u8> {
     .unwrap()
 }
 
-/// Merges `files`, each a .tickwave with its stem and sidecar, as `settings` say.
+/// Merges `files`, each a .tickwave with its stem and sidecar, as `settings` say, and checks the
+/// merge against them as `tickwave verify` does.
 fn run(files: &[File<'_>], settings: &Settings) -> Result<(Vec<u8>, Merged), Error> {
     let open = || -> Result<Vec<Input>, Error> {
         files
@@ -134,8 +135,15 @@ fn run(files: &[File<'_>], settings: &Settings) -> Result<(Vec<u8>, Merged), Err
             .collect()
     };
     let mut out = Cursor::new(Vec::new());
-    let merged = merge(&open, settings, MAX_DECODED, &Quiet, &mut out)?;
-    Ok((out.into_inner(), merged))
+    let merged = merge(&open, settings, &Quiet, &mut out)?;
+    let out = out.into_inner();
+    let against = files
+        .iter()
+        .map(|(b, ..)| read(Arc::new(b.clone())).unwrap().1)
+        .collect();
+    verify(&out[..], expected(&merged.header, against)?)
+        .unwrap_or_else(|e| panic!("the merge does not map back to its inputs: {e}"));
+    Ok((out, merged))
 }
 
 fn settings(inputs: Vec<InputSettings>) -> Settings {
@@ -412,7 +420,6 @@ fn shaped() -> Vec<u8> {
             keeps: vec![("E".into(), Some("200".into()), Some("800".into()))],
             ..ConvertSettings::default()
         },
-        MAX_DECODED,
         &Quiet,
         &mut out,
     )
@@ -2391,4 +2398,148 @@ fn a_bundled_line_breaking_a_rule_is_left_out_of_a_merge() {
         ),
         "{notes:?}"
     );
+}
+
+/// The passes a conversion or a merge starts, in order.
+#[derive(Default)]
+struct Passes(std::sync::Mutex<Vec<String>>);
+
+impl Progress for Passes {
+    fn start(&self, pass: Pass<'_>, _: u64) -> Step {
+        self.0.lock().unwrap().push(format!("{pass:?}"));
+        Arc::new(|_| {})
+    }
+}
+
+#[test]
+fn a_conversion_and_a_merge_check_nothing_they_wrote_and_a_merge_opens_its_inputs_once() {
+    let passes = Passes::default();
+    let mut out = Cursor::new(Vec::new());
+    let conversion = escapement_tickwave_import::convert::Settings {
+        level: 3,
+        ..Default::default()
+    };
+    escapement_tickwave_import::convert::convert(&|| Ok(probe()), &conversion, &passes, &mut out)
+        .unwrap();
+    assert_eq!(passes.0.into_inner().unwrap(), ["Codes(\"I\")", "Encode"]);
+
+    let files = [file(analyser()), file(probe())];
+    let opened = std::cell::Cell::new(0);
+    let open = || -> Result<Vec<Input>, Error> {
+        opened.set(opened.get() + 1);
+        files
+            .iter()
+            .zip(["analyser", "probe"])
+            .map(|(b, stem)| Input::read(Arc::new(b.clone()), stem))
+            .collect()
+    };
+    let passes = Passes::default();
+    let mut out = Cursor::new(Vec::new());
+    merge(&open, &settings(vec![]), &passes, &mut out).unwrap();
+    assert_eq!(
+        (opened.get(), passes.0.into_inner().unwrap()),
+        (1, vec!["Encode".to_owned()])
+    );
+}
+
+/// The probe's file with its I's one block damaged, its frame's last byte flipped (part of the
+/// content checksum), and that frame's span in the file.
+fn damaged_probe() -> (Vec<u8>, std::ops::Range<u64>) {
+    let mut bytes = file(probe());
+    let index = Index::of_file(&bytes).unwrap();
+    assert_eq!(index.blocks[1].len(), 1);
+    let row = index.blocks[1][0].row;
+    let frame = row.offset..row.offset + u64::from(row.length);
+    bytes[frame.end as usize - 1] ^= 0xff;
+    (bytes, frame)
+}
+
+/// A recording's bytes as an input that keeps the spans read from it.
+struct Watched {
+    bytes: Vec<u8>,
+    reads: std::sync::Mutex<Vec<std::ops::Range<u64>>>,
+}
+
+impl escapement_tickwave_import::input::Input for Watched {
+    fn size(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+
+    fn read_at(&self, offset: u64, buf: &mut [u8]) {
+        self.reads
+            .lock()
+            .unwrap()
+            .push(offset..offset + buf.len() as u64);
+        buf.copy_from_slice(&self.bytes[offset as usize..][..buf.len()]);
+    }
+}
+
+#[test]
+fn a_merge_reads_no_channel_it_leaves_out_and_refuses_a_damaged_one_it_takes_before_writing() {
+    let (damaged, frame) = damaged_probe();
+    let analyser = file(analyser());
+    let merge_taking = |channels: Vec<(String, Option<String>)>| {
+        let watched = Arc::new(Watched {
+            bytes: damaged.clone(),
+            reads: Default::default(),
+        });
+        let open = || -> Result<Vec<Input>, Error> {
+            Ok(vec![
+                Input::read(Arc::new(analyser.clone()), "analyser")?,
+                Input::read(watched.clone(), "probe")?,
+            ])
+        };
+        let probe = InputSettings {
+            channels,
+            ..InputSettings::default()
+        };
+        let mut out = Cursor::new(Vec::new());
+        let merged = merge(
+            &open,
+            &settings(vec![InputSettings::default(), probe]),
+            &Quiet,
+            &mut out,
+        );
+        let reads = watched.reads.lock().unwrap().clone();
+        (merged, out.into_inner(), reads)
+    };
+    // The probe's CLK alone: its I's block is never fetched. The footer's read of the file's last
+    // 32 KiB, which ends at its end, holds the whole of a file this small.
+    let size = damaged.len() as u64;
+    let (merged, out, reads) = merge_taking(vec![("CLK".into(), Some("PCLK".into()))]);
+    let names: Vec<String> = merged
+        .unwrap()
+        .header
+        .channels
+        .into_iter()
+        .map(|c| c.name)
+        .collect();
+    assert_eq!(names, ["CLK", "PCLK"]);
+    assert!(!out.is_empty());
+    assert!(
+        reads
+            .iter()
+            .filter(|r| r.end != size)
+            .all(|r| r.end <= frame.start || frame.end <= r.start),
+        "{frame:?} read: {reads:?}"
+    );
+    // Every channel: refused as the damaged block it is, before a byte is written.
+    let (merged, out, _) = merge_taking(Vec::new());
+    let err = merged.err().expect("refused");
+    assert!(matches!(err, Error::Read(_)), "{err}");
+    assert_eq!(out.len(), 0);
+}
+
+#[test]
+fn a_channel_read_without_its_check_ends_at_a_damaged_block() {
+    use escapement_tickwave_import::recording;
+    let (damaged, _) = damaged_probe();
+    assert!(read(Arc::new(damaged.clone())).is_err());
+    let opened = recording::open(Arc::new(damaged)).unwrap();
+    opened.check.channel(0).unwrap();
+    assert!(opened.check.channel(1).is_err());
+    let ChannelData::Analog(i) = opened.recording.channels.into_iter().nth(1).unwrap().data else {
+        panic!("the probe's I is analog")
+    };
+    assert_eq!((i.count, i.samples.into_samples().count()), (200, 0));
 }

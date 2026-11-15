@@ -8,7 +8,7 @@ mod common;
 use std::io::Cursor;
 use std::sync::Arc;
 
-use escapement_tickwave_format::decode::{BlockChannel, Index, MAX_DECODED};
+use escapement_tickwave_format::decode::{BlockChannel, Index};
 use escapement_tickwave_format::header::{ChannelKind, Header};
 use escapement_tickwave_format::model::{
     Analog, Channel, ChannelData, Digital, Gap, Kept, Offset, Ratio, Recording, Samples, Shaping,
@@ -145,9 +145,17 @@ fn try_run(
     settings: &Settings,
 ) -> Result<Out, convert::Error> {
     let mut out = Cursor::new(Vec::new());
-    let converted = convert::convert(open, settings, MAX_DECODED, &Quiet, &mut out)?;
+    let converted = convert::convert(open, settings, &Quiet, &mut out)?;
     let base = Plan::new(&open()?, &settings.offsets, &settings.keeps)?.base();
     let file = out.into_inner();
+    // Checked against the source, moved and cut as its header says, as `tickwave verify` does.
+    let source = || convert::set_units(open()?, &settings.units);
+    let mut plan = Plan::of_header(&source()?, &converted.header)?;
+    if plan.cuts_edges() {
+        plan.count(source()?);
+    }
+    verify(&file[..], plan.apply(source()?))
+        .unwrap_or_else(|e| panic!("the conversion does not match its source: {e}"));
     let index = Index::of_file(&file).unwrap();
     let head = &index.footer;
     assert_eq!(head.header, converted.header);

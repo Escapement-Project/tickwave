@@ -6,7 +6,7 @@ use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use escapement_tickwave_format::decode::{BlockChannel, Footer, Index, MAX_DECODED};
+use escapement_tickwave_format::decode::{BlockChannel, Footer, Index};
 use escapement_tickwave_format::encode::{Options, encode};
 use escapement_tickwave_format::header::ChannelKind;
 use escapement_tickwave_format::model::{
@@ -191,7 +191,6 @@ fn a_merge_whose_densest_channel_is_digital_takes_its_density() {
             level: 3,
             ..merge::Settings::default()
         },
-        MAX_DECODED,
         &Quiet,
         &mut out,
     )
@@ -220,7 +219,7 @@ fn a_cut_conversion_whose_densest_channel_is_digital_takes_its_density() {
         ..Settings::default()
     };
     let mut out = Cursor::new(Vec::new());
-    convert::convert(&open, &settings, MAX_DECODED, &Quiet, &mut out).unwrap();
+    convert::convert(&open, &settings, &Quiet, &mut out).unwrap();
     let out = out.into_inner();
     assert_eq!(shift(&out), [7, 13]);
     assert_eq!(by_hand(&out), [7, 13]);

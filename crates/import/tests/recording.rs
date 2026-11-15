@@ -5,7 +5,7 @@ use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use escapement_tickwave_format::decode::{Footer, Index, MAX_DECODED};
+use escapement_tickwave_format::decode::{Footer, Index};
 use escapement_tickwave_format::header::{ChannelKind, Header, SourceHeader};
 use escapement_tickwave_format::model::{
     Analog, Break, Channel, ChannelData, Digital, Gap, Ratio, Recording, Samples, Shaping, Source,
@@ -41,7 +41,7 @@ fn fixtures() -> Vec<(String, Vec<u8>)> {
 
 fn convert(open: &dyn Fn() -> Result<Recording, convert::Error>, settings: &Settings) -> Vec<u8> {
     let mut out = Cursor::new(Vec::new());
-    convert::convert(open, settings, MAX_DECODED, &Quiet, &mut out).unwrap();
+    convert::convert(open, settings, &Quiet, &mut out).unwrap();
     out.into_inner()
 }
 

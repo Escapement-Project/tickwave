@@ -1,15 +1,14 @@
 //! A conversion's passes, which the CLI and the browser share, so both write the same bytes from
-//! the same source: exact analog codes, the encoding, and a check of the output against the
-//! source.
+//! the same source: exact analog codes, then the encoding. `tickwave verify` checks a recording
+//! against its source.
 
 use std::collections::BTreeMap;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Seek, SeekFrom, Write};
 use std::sync::Arc;
 
 use escapement_tickwave_format::encode::{EncodeError, Options, encode_to};
 use escapement_tickwave_format::header::{AnalogCoding, Header};
 use escapement_tickwave_format::model::{Channel, ChannelData, Recording, Samples, Wrap};
-use escapement_tickwave_format::verify::{VerifyError, verify_limited};
 
 use crate::shape::{self, Plan};
 use crate::{codes, saleae, sigrok, vcd};
@@ -32,8 +31,6 @@ pub enum Error {
     UnitOnDigital(String),
     #[error("encoding: {0}")]
     Encode(#[from] EncodeError),
-    #[error("the output does not match the source: {0}")]
-    Verify(#[from] VerifyError),
     #[error(transparent)]
     Shape(#[from] shape::Error),
 }
@@ -81,7 +78,8 @@ pub enum Pass<'a> {
     /// Looking for one analog channel's exact codes.
     Codes(&'a str),
     Encode,
-    /// Checking the output against the source.
+    /// Checking a recording against its source, as `tickwave verify` does. A conversion and a
+    /// merge don't check what they write.
     Verify,
 }
 
@@ -102,7 +100,7 @@ pub trait Progress {
 pub type Found = Vec<(String, Option<u8>)>;
 
 pub struct Converted {
-    /// The recording's header, its file checked against the source.
+    /// The recording's header, as the writer finished it.
     pub header: Header,
     pub codes: Found,
 }
@@ -278,14 +276,12 @@ fn recover_codes(
     (codings, found)
 }
 
-/// Converts what `open` reads into `out`, from its start, and checks what it wrote against the
-/// source, moved and cut as `settings` asks, by reading it back. `open` is called once for each
-/// pass: to find analog codes, to encode, and to check. `max` is the most the check decodes from
-/// one frame.
-pub fn convert<F: Read + Write + Seek>(
+/// Converts what `open` reads into `out`, from its start, moved and cut as `settings` asks.
+/// `open` is called once for each pass, to find analog codes and to encode, and once more before
+/// them where a cut digital channel's edges need counting.
+pub fn convert<F: Write + Seek>(
     open: &dyn Fn() -> Result<Recording, Error>,
     settings: &Settings,
-    max: usize,
     progress: &dyn Progress,
     out: &mut F,
 ) -> Result<Converted, Error> {
@@ -324,18 +320,14 @@ pub fn convert<F: Read + Write + Seek>(
         ..Options::default()
     };
     out.seek(SeekFrom::Start(0)).map_err(EncodeError::Io)?;
-    encode_to(
+    let finished = encode_to(
         counted(open()?, progress, Pass::Encode),
         &options,
         std::io::BufWriter::with_capacity(1 << 20, &mut *out),
     )?;
     progress.end(Pass::Encode);
-    out.seek(SeekFrom::Start(0)).map_err(EncodeError::Io)?;
-    let header = verify_limited(
-        std::io::BufReader::with_capacity(1 << 20, &mut *out),
-        counted(open()?, progress, Pass::Verify),
-        max,
-    )?;
-    progress.end(Pass::Verify);
-    Ok(Converted { header, codes })
+    Ok(Converted {
+        header: finished.header,
+        codes,
+    })
 }

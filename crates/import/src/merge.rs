@@ -7,7 +7,7 @@
 //! rebuilds the merge from the header and its inputs alone.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Seek, SeekFrom, Write};
 use std::sync::Arc;
 
 use escapement_tickwave_format::annotations::{self, ExactTicks, Time};
@@ -17,9 +17,9 @@ use escapement_tickwave_format::mapping::{Mapping, axis_ratio};
 use escapement_tickwave_format::model::{
     Channel, ChannelData, Kept, Offset, Ratio, Recording, Shaping, Source,
 };
-use escapement_tickwave_format::verify::{VerifyError, verify_limited};
 
 use crate::convert::{Pass, Progress, counted};
+use crate::recording::{Check, Opened};
 use crate::shape::{self, AnalogCut, Keep, Span, exact, grid, off_grid, rounded};
 
 #[derive(Debug, thiserror::Error)]
@@ -185,11 +185,9 @@ pub enum Error {
     DerivedApart { name: String, a: String, b: String },
     #[error("encoding: {0}")]
     Encode(#[from] EncodeError),
-    #[error("the merged recording does not map back to its inputs: {0}")]
-    Verify(#[from] VerifyError),
 }
 
-/// A recording to merge, as `recording::read` gives it, with what the model does not hold.
+/// A recording to merge, as `recording::open` gives it, with what the model does not hold.
 pub struct Input {
     pub recording: Recording,
     /// Its file's name without the extension: it names a clashing channel or generator apart.
@@ -199,16 +197,23 @@ pub struct Input {
     /// Each channel's coding, by index, so the merge stores the samples as the input does: None
     /// for a digital channel.
     pub codings: Vec<Option<AnalogCoding>>,
+    check: Check,
 }
 
 impl Input {
-    /// The recording `input` holds. The sidecar is its bundle; the caller may give it one found
+    /// The recording `input` holds, with no block decoded: the merge decodes the channels it
+    /// takes before it writes. The sidecar is its bundle; the caller may give it one found
     /// beside the file instead.
     pub fn read(
         input: Arc<dyn crate::input::Input>,
         stem: impl Into<String>,
     ) -> Result<Self, Error> {
-        let (header, bundled, mut recording) = crate::recording::read_bundled(input)?;
+        let Opened {
+            header,
+            bundled,
+            mut recording,
+            check,
+        } = crate::recording::open(input)?;
         // Its title and meta go with its sources, which the merged recording's own don't keep. A
         // source that came from a merge already has its own recording's.
         for s in &mut recording.sources {
@@ -222,6 +227,7 @@ impl Input {
             stem: stem.into(),
             bundled,
             codings: header.channels.iter().map(|c| c.coding()).collect(),
+            check,
         })
     }
 }
@@ -1423,7 +1429,14 @@ fn source_offsets<'a>(inputs: impl Iterator<Item = &'a Recording>) -> Vec<u32> {
 
 /// Reads `inputs`, the recordings the layout was made from, for each cut digital channel's edges
 /// in its kept span: the count the encoder holds the channel to.
-fn count_cut_edges(layout: &mut Layout, inputs: Vec<Input>) {
+fn count_cut_edges(layout: &mut Layout, inputs: Vec<Input>) -> Result<(), Error> {
+    for c in layout
+        .channels
+        .iter()
+        .filter(|c| c.cut && c.samples.is_none())
+    {
+        inputs[c.input].check.channel(c.channel)?;
+    }
     let mut channels: Vec<Vec<Option<Channel>>> = inputs
         .into_iter()
         .map(|i| i.recording.channels.into_iter().map(Some).collect())
@@ -1438,6 +1451,7 @@ fn count_cut_edges(layout: &mut Layout, inputs: Vec<Input>) {
             c.edges = Some(d.edges.filter(|t| span.contains(t)).count() as u64);
         }
     }
+    Ok(())
 }
 
 /// The merged recording `layout` describes, from its inputs: each channel keeps its source's
@@ -1685,12 +1699,12 @@ fn carried(inputs: &[Input], layout: &Layout, notes: &mut Vec<Note>) -> Annotati
     out
 }
 
-/// Merges what `open` gives into `out`, from its start, and checks what it wrote by rebuilding
-/// it from its header and its inputs, opened again. `open` is called once for each pass.
-pub fn merge<F: Read + Write + Seek>(
+/// Merges what `open` gives into `out`, from its start. It decodes only the channels it takes.
+/// `open` is called once, and once more where a cut digital channel's edges need counting first.
+/// `tickwave verify` checks a merged recording against its inputs, through `expected`.
+pub fn merge<F: Write + Seek>(
     open: &dyn Fn() -> Result<Vec<Input>, Error>,
     settings: &Settings,
-    max: usize,
     progress: &dyn Progress,
     out: &mut F,
 ) -> Result<Merged, Error> {
@@ -1699,7 +1713,12 @@ pub fn merge<F: Read + Write + Seek>(
     let annotations = carried(&inputs, &layout, &mut notes);
     // A cut digital channel's edges kept are counted before the declaration is written.
     if layout.channels.iter().any(|c| c.cut && c.samples.is_none()) {
-        count_cut_edges(&mut layout, open()?);
+        count_cut_edges(&mut layout, open()?)?;
+    }
+    // Each channel taken is decoded first, so a damaged block is refused as itself before
+    // anything is written, not later as a channel short of its count.
+    for c in &layout.channels {
+        inputs[c.input].check.channel(c.channel)?;
     }
     let analog = layout
         .channels
@@ -1733,15 +1752,6 @@ pub fn merge<F: Read + Write + Seek>(
         std::io::BufWriter::with_capacity(1 << 20, &mut *out),
     )?;
     progress.end(Pass::Encode);
-    let against = open()?.into_iter().map(|i| i.recording).collect();
-    let expected = expected(&finished.header, against)?;
-    out.seek(SeekFrom::Start(0)).map_err(io)?;
-    verify_limited(
-        std::io::BufReader::with_capacity(1 << 20, &mut *out),
-        counted(expected, progress, Pass::Verify),
-        max,
-    )?;
-    progress.end(Pass::Verify);
     Ok(Merged {
         header: finished.header,
         notes,
