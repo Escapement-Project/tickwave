@@ -7,6 +7,8 @@
 use std::cell::RefCell;
 use std::io;
 #[cfg(feature = "encode")]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "encode")]
 use std::sync::{Arc, Condvar, Mutex};
 
 use zstd::zstd_safe::{self, CCtx, CParameter, InBuffer, OutBuffer, ResetDirective};
@@ -114,6 +116,8 @@ pub fn compress(raw: &[u8], level: i32) -> io::Result<Vec<u8>> {
 pub(crate) struct Slot {
     done: Mutex<Option<io::Result<Vec<u8>>>>,
     ready: Condvar,
+    /// Set once `done` holds the frame, so a poll needs no lock before then.
+    filled: AtomicBool,
 }
 
 #[cfg(feature = "encode")]
@@ -123,11 +127,13 @@ impl Slot {
         let slot = Arc::new(Self {
             done: Mutex::new(None),
             ready: Condvar::new(),
+            filled: AtomicBool::new(false),
         });
         let filled = Arc::clone(&slot);
         rayon::spawn(move || {
             let frame = compress(&raw, level);
             *filled.done.lock().unwrap_or_else(|e| e.into_inner()) = Some(frame);
+            filled.filled.store(true, Ordering::Release);
             filled.ready.notify_all();
         });
         slot
@@ -135,6 +141,9 @@ impl Slot {
 
     /// The frame, if it is done.
     pub fn try_take(&self) -> Option<io::Result<Vec<u8>>> {
+        if !self.filled.load(Ordering::Acquire) {
+            return None;
+        }
         self.done.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 
@@ -153,6 +162,29 @@ impl Slot {
 #[cfg(all(test, feature = "encode"))]
 mod tests {
     use super::*;
+
+    /// A frame another thread compresses is taken by a poll once it is done, and only once. The
+    /// bound is in polls, as a writer polls it on each call.
+    #[test]
+    fn a_frame_compressed_elsewhere_is_taken_once_when_done() {
+        let raw = Arc::new(
+            (0..100_000u32)
+                .flat_map(|i| (i % 251).to_le_bytes())
+                .collect(),
+        );
+        let slot = Slot::spawn(Arc::clone(&raw), 3);
+        let mut polls = 0u64;
+        let frame = loop {
+            if let Some(frame) = slot.try_take() {
+                break frame.unwrap();
+            }
+            polls += 1;
+            assert!(polls < 10_000_000, "not taken in {polls} polls");
+            std::thread::yield_now();
+        };
+        assert_eq!(frame, compress(&raw, 3).unwrap());
+        assert!(slot.try_take().is_none(), "taken twice");
+    }
 
     #[test]
     fn a_frame_is_the_same_in_slices_however_the_calls_fall_and_decodes_whole() {

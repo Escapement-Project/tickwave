@@ -275,6 +275,13 @@ impl EdgeRun {
         }
     }
 
+    /// Whether an edge taken in could make the section larger than `limit`: each number it codes
+    /// takes at most 10 bytes, and a smaller step codes every interval again.
+    fn may_pass(&self, limit: usize) -> bool {
+        self.size().saturating_add(10) > limit
+            || self.ticks.len().saturating_add(2).saturating_mul(10) > limit
+    }
+
     /// The section's size with an edge at `tick`, no earlier than the last, taken in.
     fn size_with(&self, tick: i64) -> usize {
         let Some(&last) = self.ticks.last() else {
@@ -693,6 +700,11 @@ pub struct Writer {
     head: u64,
     cursor: u64,
     slicers: Vec<Slicer>,
+    /// The queue's frames in `State::Off`: every change of a frame's state to or from it moves
+    /// this count.
+    offloaded: usize,
+    /// The most frames compressing on other threads before a call waits for the oldest.
+    offload_limit: usize,
     annotations: Chunks<record::Annotation>,
     lines: crate::annotations::Lines,
     /// A compression that failed where no error could be returned.
@@ -789,6 +801,10 @@ impl Writer {
         out.extend_from_slice(&Preamble::CURRENT.to_bytes());
         record::write(&mut out, Kind::Declaration, &[&json]);
         let lines = crate::annotations::Lines::declared(&declaration);
+        let offload_limit = match options.compression {
+            Compression::Offload => 2 * rayon::current_num_threads().max(1) + 2,
+            Compression::Spread => 0,
+        };
         Ok(Self {
             declaration: Arc::new(declaration),
             options,
@@ -806,6 +822,8 @@ impl Writer {
             head: 0,
             cursor: 0,
             slicers: Vec::new(),
+            offloaded: 0,
+            offload_limit,
             annotations: Chunks::new(),
             lines,
             failed: None,
@@ -945,7 +963,10 @@ impl Writer {
             return Err(WriteError::BlockTooLarge(ch.items as usize));
         }
         let size = match (&ch.data, edge) {
-            (Data::Digital(d), Some(tick)) => d.open.size_with(tick),
+            (Data::Digital(d), Some(tick)) if d.open.may_pass(u32::MAX as usize) => {
+                d.open.size_with(tick)
+            }
+            (Data::Digital(_), Some(_)) => 0,
             (Data::Analog(a), _) => ch.size + a.coding.sample_len(),
             (Data::Digital(_), None) => unreachable!("a digital channel's item is an edge"),
         };
@@ -990,6 +1011,9 @@ impl Writer {
             return Ok(());
         }
         self.promise = before;
+        if self.full.is_empty() {
+            return Ok(());
+        }
         let full = self.full.clone();
         for c in full {
             self.try_close(c)?;
@@ -1561,7 +1585,10 @@ impl Writer {
     fn queue_frame(&mut self, of: FrameOf, raw: Arc<Vec<u8>>, level: i32) {
         let state = match self.options.compression {
             Compression::Spread => State::Waiting,
-            Compression::Offload => State::Off(Slot::spawn(Arc::clone(&raw), level)),
+            Compression::Offload => {
+                self.offloaded += 1;
+                State::Off(Slot::spawn(Arc::clone(&raw), level))
+            }
         };
         self.queue.push_back(Item::Frame {
             of,
@@ -1658,25 +1685,22 @@ impl Writer {
                 }
             }
         } else {
-            // Wait for the oldest frames while more are being compressed than the threads hold.
-            let limit = 2 * rayon::current_num_threads().max(1) + 2;
-            loop {
-                let running = self
-                    .queue
+            debug_assert_eq!(
+                self.offloaded,
+                self.queue
                     .iter()
-                    .filter(|i| {
-                        matches!(
-                            i,
-                            Item::Frame {
-                                state: State::Off(_),
-                                ..
-                            }
-                        )
-                    })
-                    .count();
-                if running <= limit {
-                    break;
-                }
+                    .filter(|i| matches!(
+                        i,
+                        Item::Frame {
+                            state: State::Off(_),
+                            ..
+                        }
+                    ))
+                    .count(),
+                "the frames compressing on other threads"
+            );
+            // Wait for the oldest frames while more are being compressed than the threads hold.
+            while self.offloaded > self.offload_limit {
                 let Some(Item::Frame { state, .. }) = self.queue.iter_mut().find(|i| {
                     matches!(
                         i,
@@ -1692,6 +1716,7 @@ impl Writer {
                     unreachable!()
                 };
                 *state = State::Done(slot.wait()?);
+                self.offloaded -= 1;
                 self.emit()?;
             }
         }
@@ -1717,6 +1742,7 @@ impl Writer {
                     State::Off(slot) => match slot.try_take() {
                         Some(frame) => {
                             *state = State::Done(frame?);
+                            self.offloaded -= 1;
                             true
                         }
                         None => false,
@@ -1807,6 +1833,7 @@ impl Writer {
                     && let State::Off(slot) = state
                 {
                     *state = State::Done(slot.wait()?);
+                    self.offloaded -= 1;
                 }
             }
         }
