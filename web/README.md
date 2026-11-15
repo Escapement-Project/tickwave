@@ -93,13 +93,19 @@ into `info().channels`, and ticks are integers below 2^53 counted from the captu
 
 - `info()`: the timebase in ticks a second, the length, the title, the download size, and each
   channel's name, kind and end tick. An analog channel adds its unit, first tick, sample period,
-  sample count, the value of one code step (null for a source that stored floats) and its range.
+  sample count, the value of one code step (null for a source that stored floats), its range, and
+  the samples it lost before its first and after its last.
 - `edges(channel, start, end)`: the level at `start` and the edges in `[start, end)`.
 - `overview(channel, start, end, maxBucket)`: the coarsest level no coarser than `maxBucket`, or
-  null when there is none. The renderer then reads edges or samples.
+  null when there is none. The renderer then reads edges or samples. With no limit, it is the
+  channel's coarsest level, which a first draw takes from the footer alone.
 - `samples(channel, start, end)`: an analog channel's values. Sample i sits at
   `first + floor(i × period)`.
 - `prefetch()`: the footer, ahead of a view.
+
+A channel with more than 64 gaps or breaks keeps them out of `info()`: it says `paged`, and each
+answer for it carries, as `listed`, those its span needs. The renderer draws each answer's span
+with them.
 
 A loader reads the recordings at the URLs it accepts (`registerLoader`). Every element on the page
 shares one source per URL.
@@ -111,27 +117,37 @@ URLs with `registerFile(file)`. A loader registered later is asked first. While 
 URL no loader takes waits for one; after that it is refused (`TickwaveNoLoader`). Each recording is
 opened once, in one worker that holds the WASM module.
 
-- The footer, which holds the header and the index, comes first, by HTTP Range: the file's last
-  32 KiB (`bytes=-32768`), then the rest of the footer if it is longer. Data blocks and overview
-  blocks come by Range as a view needs them. Adjacent missing blocks share one request, and a block
-  inside the first read is not fetched again.
+- The footer comes first, by HTTP Range: the file's last 32 KiB (`bytes=-32768`), then the rest of
+  the footer if it is longer. It holds the header, the top of each channel's index, and each
+  channel's strip, its coarsest overview level. A view draws from the strips of the channels it
+  shows while the rest comes.
+- Each channel has blocks, an overview and an index of its own. For the span a view shows, and a
+  span's width either side, a view reads each of its channels' index pages, then the overview
+  blocks or blocks they place, by Range. A long gap or break list is in pages too, read only for
+  the span. Reads asked for together, as a view's channels' are, that lie within 512 bytes of
+  each other share one request, and a read inside the first is not fetched again.
 - Where a digital channel's level was not known (a gap), or an analog channel's instrument lost
-  samples, the row is shaded and the trace breaks. A pause only breaks it. A derived channel, such
-  as power from current and voltage, reads as an analog channel after the stored ones.
+  samples, the row is shaded and the trace breaks: between runs, before the first sample and after
+  the last. A pause only breaks it. A view spans the samples lost at either end. A derived
+  channel, such as power from current and voltage, reads as an analog channel after the stored
+  ones.
 - A server that answers 200 instead of 206 has sent the whole file. It is kept, and every later
   read is served from it.
 - A 206 with a `Content-Encoding` is refused: its ranges count bytes of the compressed stream.
 - A local file reads through `File.slice`.
-- Decoded blocks sit in an LRU of 192 MiB, shared by every recording on the page.
+- Decoded blocks and index pages sit in an LRU of 192 MiB, shared by every recording on the
+  page.
 - An aborted request stops at once, and so does a read no other request is waiting on.
 - `configure({ firstRead, maxDecodedBytes, cacheBytes })` changes the first read, the most the
   decoder takes from one block, and the cache's size.
 
 An element's `annotations` attribute names a sidecar's TOML file. The worker fetches it and the
 files it includes, relative to its URL, and resolves them with the Rust core. Without the
-attribute, a recording with a bundled sidecar uses that. A sidecar's problems go to the console and
-to a short notice in the element, and the recording still draws. A notice goes with its cause: a
-new recording or sidecar starts without the last one's.
+attribute, a recording with a bundled sidecar uses that, read from the file when a view first asks
+for it. A view draws before its annotations come, with room kept for their lane. Once they have
+come, a lane with none on the channels shown says so. A sidecar's problems go to the console and to
+a short notice in the element, and the recording still draws. A notice goes with its cause: a new
+recording or sidecar starts without the last one's.
 
 Resolved annotations keep sidecar order: the hand-written file's, then each included file's. The
 order says which kind a view steps through first. The lane and the stepping sort by time
@@ -190,8 +206,9 @@ Include one module, and the three elements are defined:
 
 `tickwave.js` reads recordings through a decoder in a worker. The first time a page needs a
 recording, it loads `tickwave-worker.js` and `tickwave.wasm` from beside itself, so keep the three
-files together. Recordings are fetched by byte range: the footer first, then only the blocks a view
-shows. A server that ignores ranges still works, as long as it sends the whole file.
+files together. Recordings are fetched by byte range: the footer first, then only the channels
+and the span a view shows. A server that ignores ranges still works, as long as it sends the
+whole file.
 
 A page that shows a closed view can write the view's title and facts into it. The view then lays
 out before `tickwave.js` has loaded, and keeps its height once it has:
@@ -515,4 +532,4 @@ view's Open button reads Close while the view is open, and is as wide either way
 | `recordingInfo(src)` | what a recording holds, from its footer: title, length, channels, size, content id |
 | `previewMerge(inputs)` | several recordings on one time axis, as `tickwave merge` would put them: `inputs` is `[{src, stem}]`, each with its file's name without the extension. Resolves to `{src, merged}`: a `src` a view draws, and the preview, whose `mergedInfo` gives each channel's name (a later recording's clashing name takes its stem, as `stem/name`), `origin(channel)` the recording it comes from, and `ratios` the merged ticks in one of each recording's, as `{num, den}`. The preview ticks at the least common multiple of the recordings' rates, or at the fastest of them where the multiple has a term past 2^53, as `tickwave merge` does. Every recording starts at tick 0; a view moves them with `aligns` |
 | `resolveSidecar(src, text, annotations)` | the annotations of a sidecar whose hand-written file is `text`, checked against the recording as `tickwave annotations check` checks them. Its includes are read beside `annotations`, the sidecar's address, or from the files registered with the recording when that is null. Rejects with every problem, one a line |
-| `configure({firstRead, maxDecodedBytes, cacheBytes})` | the size of the first read, from a recording's end, 32 KiB by default; the most the decoder takes from one block, overview block or footer overview, 64 MiB, past which it refuses the recording; and the size of the cache of decoded blocks, 192 MiB |
+| `configure({firstRead, maxDecodedBytes, cacheBytes})` | the size of the first read, from a recording's end, 32 KiB by default; the most the decoder takes from one block, overview block or strip, 64 MiB, past which it refuses the recording; and the size of the cache of decoded blocks and index pages, 192 MiB |

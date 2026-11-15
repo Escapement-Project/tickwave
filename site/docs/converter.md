@@ -1,6 +1,6 @@
 # The converter
 
-`tickwave` is a command-line program. It converts captures into tickwave recordings, describes a recording, opens one in your browser, checks one against the capture it came from, checks and bundles a recording's sidecar of annotations, and finishes a recording that was cut off before its end. [The Open page](../open.html) runs the same conversion in a browser.
+`tickwave` is a command-line program. It converts captures into tickwave recordings, describes a recording, opens one in your browser, checks one against the capture it came from, checks and bundles a recording's sidecar of annotations, finishes a recording that was cut off before its end, and re-cuts a recording that a recorder flushed often into blocks of the usual size. [The Open page](../open.html) runs the same conversion in a browser.
 
 ## Building it
 
@@ -46,7 +46,7 @@ tickwave convert saleae identify-swd/ --channel digital_3_0=SWCLK --channel digi
 It reports the file it wrote, its size, its blocks and its content id:
 
 ```text
-identify-swd.tickwave: 0.01 MB, 1 blocks, blake3:ccc8b7d8c3e4cb30da7fc6088e54ebeba2858ad402eb3fb5a9aeb50be989accf in 0.0 s
+identify-swd.tickwave: 0.00 MB, 2 blocks, blake3:ccc8b7d8c3e4cb30da7fc6088e54ebeba2858ad402eb3fb5a9aeb50be989accf in 0.0 s
 ```
 
 Logic 8, Logic Pro 8 and Logic Pro 16 write version 0 of the export, and its digital files don't record the sample rate. If you name an analog channel, the converter takes the rate its file records. Otherwise it infers the rate from the edges of every digital file in the export, named or not. It takes the lowest rate that divides 1 GHz and puts every edge on its grid, each on a tick of its own. With many edges, that is the capture's rate. With only a few, it can come out lower, and the recording then claims coarser timing than the capture had, never finer. An export with no edges has no rate to infer.
@@ -93,10 +93,10 @@ If the source doesn't state a channel's unit, give it with `--unit <name>=<unit>
 | `--offset <name>=<time>` | move a channel, later when the time is positive (above) |
 | `--keep <name>=<from>..<to>` | keep only that part of a channel (above) |
 | `--level <n>` | the zstd compression level, 19 by default |
-| `--block-kib <n>` | how much decoded data each block aims to hold, 1024 KiB by default and at most 65,536 |
+| `--block-kib <n>` | how much decoded data each of a channel's blocks aims to hold, 1024 KiB by default and at most 65,536 |
 | `--open` | open the recording in your browser once it's written, as [`tickwave open`](#opening-a-recording) does |
 
-A block is the smallest piece of data a viewer fetches. Smaller blocks mean less waiting for a narrow view of a long capture, and a larger file.
+A block holds one channel's edges or samples over one stretch of time, and it is the smallest piece of a channel's data a viewer fetches. Smaller blocks mean less waiting for a narrow view of a long capture, and a larger file.
 
 Every command that reads a recording takes `--max-decoded-mib <n>`: the most it decodes from one block, 64 MiB by default. A recording that needs more is refused, as a page's viewer refuses it unless the page sets a larger limit. A block at the largest `--block-kib` stays under the default.
 
@@ -165,10 +165,12 @@ tickwave info identify-swd.tickwave
   source 0: saleae-binary-1 at 1000000000/1 ticks a second, its tick 0 at 0: digital_3_0.bin, digital_3_1.bin
   SWCLK        digital, 15286 edges, starts 1, known to 0.523583070 s (digital_3_0)
   SWDIO        digital, 1874 edges, starts 1, known to 0.523583100 s (digital_3_1)
-0.004 MB: footer 715 bytes (1 overview levels), 1 blocks of 3095-3095 bytes, median 3095
+0.005 MB: footer 846 bytes, 2 blocks of 1424-1727 bytes, median 1727
+  SWCLK        overview strip at 2^21
+  SWDIO        overview strip at 2^24
 ```
 
-Times are in seconds to one tick, here a nanosecond: never more digits than the recording carries. `--json` prints the header and the block statistics as JSON, for a script. `info` reads only the recording's footer, at its end, however large the recording.
+Times are in seconds to one tick, here a nanosecond: never more digits than the recording carries. Each channel has an overview of its own: levels of buckets of 2^n ticks, which a view draws from when it is zoomed out, from finer ones in the file to the strip in the footer. `--json` prints the header and the block statistics as JSON, for a script. `info` reads the recording's footer, at its end, and its index a page at a time, so it holds little however large the recording.
 
 For a merged recording, `info` lists each instrument's source, with how many of the merged recording's ticks one of its ticks lasts and any stretch. Where two instruments may have recorded the same periodic signal, such as a marker line, it says that `--drift` measures the drift between their clocks. `tickwave info --drift` decodes the whole recording for it. Here an analyser at 1 GHz and a probe at 100 MHz both recorded a 10 ms marker, and the probe's clock ran 1,000 ppm fast, so it measured each period as 10.01 ms:
 
@@ -182,7 +184,9 @@ tickwave info --drift both.tickwave
   source 1: vcd at 100000000/1 ticks a second (10 of the recording's ticks each), its tick 0 at 0: probe.vcd
   analyser.MARK digital, 1800 edges, starts 0, known to 9.020000000 s (analyser.MARK, source 0)
   probe.MARK   digital, 1800 edges, starts 0, known to 9.029020000 s (probe.MARK, source 1)
-0.002 MB: footer 929 bytes (1 overview levels), 1 blocks of 113-113 bytes, median 113
+0.002 MB: footer 1009 bytes, 2 blocks of 46-76 bytes, median 76
+  analyser.MARK overview strip at 2^28
+  probe.MARK   overview strip at 2^28
 drift: analyser.MARK (source 0) against probe.MARK (source 1): +1000.0 ± 0.0 ppm, the stretch source 0 would take to tick as source 1 does; periods 10.000000 ms and 10.010000 ms over 900 and 900 rises, 0.6 µs and 1.7 µs rms off a straight line
 ```
 
@@ -276,7 +280,23 @@ tickwave repair identify-swd.cut.tickwave -o identify-swd.tickwave
 ```
 
 ```text
-identify-swd.tickwave: 2891 of 3000 bytes kept, 4 blocks to 0.384873226 s, blake3:ce7b9c6e2418c6a46f417d7ad2297120d46cfa0be2f19a77801662300709fe4a
+identify-swd.tickwave: 2952 of 3000 bytes kept, 8 blocks to 0.388970979 s, blake3:0ba2d62a24ad16ad2f44142d329ed63750eb97e66629611c9c233ff08f4d7b1a
 ```
 
-It keeps every whole block, writes the index after the last one, and writes the copy to `-o`. The capture ends where the last whole block ends: what came after it was lost with the rest of the file. If the recorder generated annotations, each generator's file goes beside the copy, as `<name>.<generator>.jsonl`. A finished recording is refused, since there is nothing to repair. So is one with a channel moved or trimmed: convert it again from its capture.
+A recorder that flushes notes, after each flush, the time up to which every channel's data is in the file. Where the file holds such a note, repair keeps every channel to the latest one. Otherwise it keeps each channel's blocks up to its last whole one, and the capture ends where the latest of those ends. Either way what came after was lost with the rest of the file. It then writes the index and the footer, and writes the copy to `-o`. If the recorder generated annotations, each generator's file goes beside the copy, as `<name>.<generator>.jsonl`. A finished recording is refused, since there is nothing to repair. So is one with a channel moved or trimmed: convert it again from its capture.
+
+## Re-cutting a recording
+
+A recorder that flushes often, as a live capture does so that a crash loses little, closes each channel's block at every flush. At a low data rate those blocks are small, and each costs the same few dozen bytes of framing and index, so the file comes out larger than its data. `tickwave recut` writes it again with blocks of the usual size. The repository's `web/fixtures/energy.tickwave` is laid out this way: a synthetic recording of five channels over 30 ms, its current and voltage in six short blocks each, as a recorder flushing every 5 ms leaves them:
+
+```sh
+tickwave recut energy.tickwave -o energy.recut.tickwave
+```
+
+```text
+energy.recut.tickwave: 0.01 MB from 0.02 MB, 5 blocks, blake3:ed46435e115fa7f0cf831415a7cb8452cbf413a496cba9c974abb8b115e8a21a in 0.0 s
+```
+
+`tickwave info` counts 23 blocks of 13 to 360 bytes in the original and 5 of 21 to 530 bytes in the copy, 18 KB against 15 KB.
+
+The copy holds the same content, with the same content id, and is checked before it is written. `--block-kib` and `--level` work as they do for a conversion. A recording cut off before its end is finished as `repair` would finish it, and each annotation generator's file goes beside the copy.

@@ -76,6 +76,11 @@ A long pulse can end far past what the view has read, as on a quiet line seen cl
 then says it is measuring. Keep the pointer within the pulse and it goes on; once measured, the
 pulse reads at once anywhere along it.
 
+Where the instrument lost data, the row is shaded: where a digital channel's level was not known,
+and where an analog channel lost samples, between two runs of samples, before its first or after
+its last. The trace breaks there. Where the instrument only paused, the trace breaks and nothing
+is shaded.
+
 ## Row heights
 
 Drag a row's lower edge in the names column to make the row taller or shorter. With that edge
