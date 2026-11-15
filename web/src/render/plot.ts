@@ -26,20 +26,15 @@ import { timeAxis } from "./axis.ts";
 import {
   analogFromOverview,
   analogFromSamples,
-  BUSY,
   digitalFromEdges,
   digitalFromOverview,
-  FALL,
-  HIGH,
   lineSamples,
-  LOW,
-  NONE,
-  RISE,
   type AnalogColumns,
   type DigitalColumns,
   type Grid,
 } from "./columns.ts";
 import { layoutNotes, type NoteIn, type NoteOut } from "./notes.ts";
+import { digitalTrace } from "./trace.ts";
 import { grain, Track, type Layer, type Tile } from "./track.ts";
 
 export interface PlotConfig {
@@ -792,40 +787,7 @@ export class Plot {
     const left = Math.round(l.plotLeft * dpr);
     const line = new Path2D();
     const fill = new Path2D();
-    let pen: number | null = null;
-    let busyFrom = -1;
-    const pad = (lw - 1) / 2;
-    const flushBusy = (c: number) => {
-      if (busyFrom < 0) return;
-      fill.rect(left + busyFrom - pad, yH - lw / 2, c - busyFrom + 2 * pad, yL - yH + lw);
-      busyFrom = -1;
-    };
-    for (let c = 0; c < grid.count; c++) {
-      const st = cols.state[c];
-      const x = left + c;
-      if (st !== BUSY) flushBusy(c);
-      if (st === NONE) {
-        pen = null;
-      } else if (st === LOW || st === HIGH) {
-        const y = st === HIGH ? yH : yL;
-        if (pen !== y) line.moveTo(x, y);
-        line.lineTo(x + 1, y);
-        pen = y;
-      } else if (st === RISE || st === FALL) {
-        const ya = st === RISE ? yL : yH;
-        const yb = st === RISE ? yH : yL;
-        const ex = x + cols.at[c];
-        if (pen !== ya) line.moveTo(x, ya);
-        line.lineTo(ex, ya);
-        line.lineTo(ex, yb);
-        line.lineTo(x + 1, yb);
-        pen = yb;
-      } else {
-        if (busyFrom < 0) busyFrom = c;
-        pen = null;
-      }
-    }
-    flushBusy(grid.count);
+    digitalTrace(cols, grid.count, { left, yH, yL, lw }, grain(tile) <= grid.per, line, fill);
     return { line, fill };
   }
 
