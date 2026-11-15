@@ -12,7 +12,11 @@ snapshot. When the writer finishes the file, or a compacted copy replaces it, `V
 opens the file at the path again, finished; the view stays as it was.
 
 Queries run on a thread of their own. A newer query replaces one that hasn't started and cancels
-one that has, so only the newest answer is kept, and its arrival asks egui for a frame. A graph
+one that has, so only the newest answer is kept, and its arrival asks egui for a frame. Until the
+first answer arrives, the graph and the strip draw a sketch of the first query, from each
+channel's coarsest level: a finished file's footer holds it, so the first frame waits on nothing
+past the footer. The graph keeps room for the marker labels from that frame on whenever the
+recording has markers, read or not. A graph
 following a recording as it is written draws every frame. After each snapshot the viewer answers
 the followed request again itself, at once: it keeps the columns of the answer it holds before
 the first tick the snapshot changed, and reads only from there. The graph asks again only when
@@ -78,8 +82,9 @@ verge fills it from its design tokens. The demo reads the project's tokens from
 
 A frame's work is in `tracing` spans at debug level: `graph`, and in it `layout`,
 `build query`, `axes`, `trace`, `lane`, `markers` and `tessellate`, and `strip`. The query
-thread's are `query job` and `snapshot`, around the view core's own: `query`, and `extend` where
-a snapshot's answer extends the one held, followed by `query` where it can't.
+thread's are `sketch job`, `query job` and `snapshot`, around the view core's own: `sketch`,
+`query`, and `extend` where a snapshot's answer extends the one held, followed by `query` where
+it can't.
 
 ## The demo
 

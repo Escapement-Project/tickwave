@@ -8,12 +8,29 @@ scale, time axis and point probes.
 
 ## A recording and a query
 
-`Recording::open` reads a finished file through its footer and every channel's index pages, from any
-`Bytes`: a file, or bytes in memory. `Recording::live` reads a file a writer in the same process is
-still writing, through the writer's `Snapshot`, and `Recording::update` takes each newer snapshot,
-reading only what the writer added since. A file cut off by a crash is `Error::Unfinished`; the
-format crate's Recutter repairs it. Decoded blocks and overview blocks go in a `Cache`, which a
-recording's snapshots share.
+`Recording::open` reads a finished file's trailer and footer, from any `Bytes`: a file, or bytes in
+memory. Nothing else is read until a query asks for it. A channel's strip is decoded when it is
+first drawn. A query reads only the index pages that place the blocks and overview blocks its
+span covers, directory pages included. Where a channel has more than 64 gaps or breaks, its list
+is in pages too: a query, statistics, `edges` and `index_at` read only the list pages their span
+needs, and each block a query decodes is checked against the entries its own ticks need.
+`runs` and `known` read the whole list. The bundled annotations are read when markers are first
+asked for; `load_markers` reads them and says why they don't resolve, where they don't.
+`Recording::live` reads a file a writer in the same process is still writing, through the
+writer's `Snapshot`, and `Recording::update` takes each newer snapshot, reading only what the
+writer added since and decoding only the blocks it hasn't yet, and the open block. Its cost
+follows those, not the recording's length. A file cut off by a crash is `Error::Unfinished`; the
+format crate's Recutter repairs it.
+
+Index pages, decoded blocks and overview blocks go in a `Cache`, which a recording's snapshots
+share. A query holds what it takes until it ends, so it decodes each block once, however many of
+its channels, its strip and its statistics read the block, and whatever the cache drops meanwhile.
+
+`Recording::sketch` draws a query from each channel's coarsest level alone: a finished file's
+strips, which its footer holds. It reads nothing past the footer, so a host draws it first, while
+the exact answer is on the way. It holds no single samples, statistics or markers. A channel
+whose list is in pages is sketched from its header alone: without its gaps, breaks and lost
+spans, its data running to the length.
 
 A query's work follows what its window holds, not how long the recording is: a channel's runs,
 gaps and lost spans are found by binary search, and each run's columns are worked out over the
@@ -30,15 +47,19 @@ the source's `m`, origin and the channel's offset, for a readout exact to the so
 statistics and the markers. The columns cover the window and one width either side, so a pan has
 columns to draw while its own answer is on the way. A column takes the coarsest overview level no
 wider than it among its channel's levels, or the samples and edges themselves below the finest. An
-analog trace draws no line across a break, and a column that touches a span the instrument lost is
-pale.
+analog trace draws no line across a break. A column that touches a span the instrument lost is
+pale: the samples lost at a break, and those lost before a channel's first sample and after its
+last. The extent reaches over those, so statistics count them as time no sample measured.
 
 A window that follows a recording as it is written asks for `Query::aligned` columns: each a
 whole number of ticks, ⌈width / columns⌉, from tick 0, so every window as wide shares them. The
 window's end moves on to the end of its column, and `around` starts on a multiple of a window's
 columns, two windows back, so it moves a window at a time. `Recording::extend` answers such a
 query from the answer to the one before it: it keeps the columns before the first tick the
-snapshots since then changed, works out the rest, and gives exactly what `query` would. It
+snapshots since then changed, works out the rest, and gives exactly what `query` would. A
+writer takes each channel's items in that channel's order, so one channel can lag the others:
+past a channel's promise its columns are provisional. A channel changes from its promise in the
+snapshot before, or from the start of a gap reported since, which can lie further back. It
 declines where it can't, and the caller queries whole: the query asks anything else, the window
 moved back or by more than its width, `around`'s start moved on, or the answer is another
 recording's or older than the 64 snapshots whose changes a recording keeps. Every answer names
@@ -71,8 +92,9 @@ It builds for `wasm32-unknown-unknown` with its `live` feature off, given clang 
 target to compile libzstd. `live`, on by default, turns on the format crate's encoder, which holds
 the `Snapshot` of a recording a writer in the same process is still writing.
 
-Opening a recording, each query, each channel drawn, the strip, statistics and every block
-decoded are `tracing` spans at debug level, so a host's subscriber shows where a view's time goes.
+Opening a recording, each query and sketch, each channel drawn, the strip, statistics, every block
+decoded, and every page, list, strip and bundle read are `tracing` spans at debug level, so a
+host's subscriber shows where a view's time goes.
 
 `examples/synth.rs` writes a recording laid out as verge's energy captures are, and
 `examples/timing.rs` times opening one and a view's queries of it. With `--trace FILE` it writes

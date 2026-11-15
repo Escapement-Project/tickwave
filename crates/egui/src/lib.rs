@@ -7,7 +7,7 @@
 //!
 //! A frame's work is in `tracing` spans at debug level: `graph`, and in it `layout`,
 //! `build query`, `axes`, `trace`, `lane`, `markers` and `tessellate`, and `strip`. The query
-//! thread's are `query job` and `snapshot`, around the view core's own.
+//! thread's are `sketch job`, `query job` and `snapshot`, around the view core's own.
 
 mod draw;
 mod graph;
