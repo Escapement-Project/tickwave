@@ -36,7 +36,7 @@ use escapement_tickwave_format::header::DeclaredKind;
 #[cfg(feature = "live")]
 use escapement_tickwave_format::model::run_sample_tick;
 #[cfg(feature = "live")]
-use escapement_tickwave_format::snapshot::Snapshot;
+use escapement_tickwave_format::snapshot::{LevelSnapshot, Snapshot};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -790,6 +790,18 @@ fn span_of(markers: &[Marker]) -> Option<Range<i64>> {
     span
 }
 
+/// A level's blocks not yet written, then its run, as `Snapshot::unwritten_overview` lists
+/// them: each one's `k`, `n` and bytes.
+#[cfg(feature = "live")]
+fn unwritten_keys(level: &LevelSnapshot) -> Vec<(u64, u64, &Arc<Vec<u8>>)> {
+    level
+        .queued
+        .iter()
+        .map(|s| (s.k, u64::from(s.n), &s.raw))
+        .chain(level.run.iter().map(|r| (r.k, r.n, &r.raw)))
+        .collect()
+}
+
 /// Markers from a sidecar, in the order it gives them, which is their arrival.
 fn markers_of(annotations: Vec<Annotation>) -> Vec<Marker> {
     let mut markers: Vec<Marker> = annotations
@@ -1000,14 +1012,14 @@ impl Recording {
             })),
             revision: Revision::new(),
         };
-        rec.advance()?;
+        rec.advance(None)?;
         Ok(rec)
     }
 
     /// Takes a newer snapshot of the writer this recording was made live from. Its work is what
     /// the writer added since the last one: the blocks written, gaps, runs and annotations since,
-    /// and the blocks not yet written, decoded again. On an error the recording keeps the last
-    /// snapshot.
+    /// the blocks not yet written that the last one didn't hold, and the open block, decoded. On
+    /// an error the recording keeps the last snapshot.
     #[cfg(feature = "live")]
     #[tracing::instrument(level = "debug", name = "update", skip_all)]
     pub fn update(&mut self, snapshot: Snapshot) -> Result<(), Error> {
@@ -1015,7 +1027,7 @@ impl Recording {
             return Err(Error::NotLive);
         };
         let previous = std::mem::replace(&mut live.snapshot, snapshot);
-        let advanced = self.advance();
+        let advanced = self.advance(Some(&previous));
         if advanced.is_err()
             && let Store::Live(live) = &mut self.store
         {
@@ -1025,8 +1037,10 @@ impl Recording {
     }
 
     /// Brings the tables up to the live snapshot, reading only past what `seen` counts.
+    /// `previous` is the snapshot the tables were brought up to before: a block not yet written
+    /// that it held too is decoded already.
     #[cfg(feature = "live")]
-    fn advance(&mut self) -> Result<(), Error> {
+    fn advance(&mut self, previous: Option<&Snapshot>) -> Result<(), Error> {
         let Self {
             bytes,
             store,
@@ -1059,13 +1073,36 @@ impl Recording {
         };
 
         // What can fail goes first, so an error leaves the tables as they were: each channel's
-        // pages past those it has, and the blocks and overview blocks not yet written, decoded
-        // again each time, few as they are.
+        // pages past those it has, and the blocks and overview blocks not yet written that the
+        // previous snapshot didn't hold.
         let mut fresh_refs = Vec::with_capacity(stored);
         let mut fresh = Vec::with_capacity(stored);
+        let mut opens = Vec::with_capacity(stored);
         for (c, known) in refs.iter().enumerate() {
-            fresh_refs.push(snapshot.block_refs(c, known, &mut fetch)?);
-            fresh.push(snapshot.unwritten_blocks(c)?);
+            fresh_refs.push(snapshot.block_refs_from(c, known, &mut fetch)?);
+            let now = snapshot.channel(c).map_or(&[][..], |ch| &ch.unwritten);
+            let before = previous
+                .and_then(|p| p.channel(c))
+                .map_or(&[][..], |p| &p.unwritten);
+            // The open block, last, is new in every snapshot.
+            let closed = now.len().saturating_sub(1);
+            let mut blocks = Vec::with_capacity(now.len());
+            for (j, u) in now[..closed].iter().enumerate() {
+                let held = before
+                    .iter()
+                    .position(|b| {
+                        Arc::ptr_eq(&b.raw, &u.raw)
+                            && b.head == u.head
+                            && b.first_index == u.first_index
+                    })
+                    .and_then(|i| unwritten.get(c)?.get(i));
+                blocks.push(match held {
+                    Some(b) => Arc::clone(b),
+                    None => Arc::new(snapshot.unwritten_block(c, j)?),
+                });
+            }
+            fresh.push(blocks);
+            opens.push(snapshot.unwritten_block(c, closed)?);
         }
         let mut fresh_rows = Vec::with_capacity(places.len());
         let mut fresh_overview = Vec::with_capacity(places.len());
@@ -1076,8 +1113,28 @@ impl Recording {
                 if level.in_blocks {
                     let known = known_rows.get(li).map_or(&[][..], |r| &r[..]);
                     level_rows.push(snapshot.level_refs(o, li, known, &mut fetch)?);
-                    let blocks = snapshot.unwritten_overview(o, li)?;
-                    level_blocks.push(blocks.into_iter().map(Arc::new).collect::<Vec<_>>());
+                    // The previous snapshot's blocks of this level, each with what the tables
+                    // hold of it decoded: none where the level wasn't in blocks.
+                    let before: Vec<_> = previous
+                        .and_then(|p| p.overview(o)?.levels.get(li))
+                        .map(unwritten_keys)
+                        .unwrap_or_default();
+                    let decoded = unwritten_overview
+                        .get(o)
+                        .and_then(|l| l.get(li))
+                        .map_or(&[][..], |b| &b[..]);
+                    let mut blocks = Vec::new();
+                    for (j, (k, n, raw)) in unwritten_keys(level).into_iter().enumerate() {
+                        let held = before
+                            .iter()
+                            .zip(decoded)
+                            .find(|(b, _)| (b.0, b.1) == (k, n) && Arc::ptr_eq(b.2, raw));
+                        blocks.push(match held {
+                            Some((_, d)) => Arc::clone(d),
+                            None => Arc::new(snapshot.unwritten_overview_block(o, li, j)?),
+                        });
+                    }
+                    level_blocks.push(blocks);
                 } else {
                     level_rows.push(Vec::new());
                     level_blocks.push(Vec::new());
@@ -1100,7 +1157,7 @@ impl Recording {
         }
         let mut new_length = 0i64;
         for (c, place) in places[..stored].iter_mut().enumerate() {
-            let open = fresh[c].last().expect("a channel's open block");
+            let open = &opens[c];
             let mut last = open.start - 1;
             match (place, &open.data) {
                 (
@@ -1241,32 +1298,38 @@ impl Recording {
         }
 
         // Each channel's written blocks, then those not yet written, the open one to the length.
-        for c in 0..stored {
-            let open = fresh[c].len() - 1;
-            blocks[c] = fresh_refs[c]
-                .iter()
-                .map(|b| BlockAt {
-                    start: b.start,
-                    end: b.end,
-                    from: BlockFrom::Frame(*b),
+        // A channel's table starts with an entry for each of its refs.
+        for (c, ((keep, after), mut open)) in fresh_refs.into_iter().zip(opens).enumerate() {
+            let at = |start: i64, end: i64, j: usize| {
+                (end > start).then_some(BlockAt {
+                    start,
+                    end,
+                    from: BlockFrom::Unwritten(j),
                 })
-                .chain(fresh[c].iter().enumerate().filter_map(|(j, u)| {
-                    let end = if j == open { *length } else { u.end };
-                    (end > u.start).then_some(BlockAt {
-                        start: u.start,
-                        end,
-                        from: BlockFrom::Unwritten(j),
+            };
+            blocks[c].truncate(keep);
+            blocks[c].extend(
+                after
+                    .iter()
+                    .map(|b| BlockAt {
+                        start: b.start,
+                        end: b.end,
+                        from: BlockFrom::Frame(*b),
                     })
-                }))
-                .collect();
-            let o = &mut fresh[c][open];
-            o.end = (*length).max(o.start);
+                    .chain(
+                        fresh[c]
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(j, u)| at(u.start, u.end, j)),
+                    )
+                    .chain(at(open.start, *length, fresh[c].len())),
+            );
+            refs[c].truncate(keep);
+            refs[c].extend(after);
+            open.end = (*length).max(open.start);
+            fresh[c].push(Arc::new(open));
         }
-        *refs = fresh_refs;
-        *unwritten = fresh
-            .into_iter()
-            .map(|blocks| blocks.into_iter().map(Arc::new).collect())
-            .collect();
+        *unwritten = fresh;
 
         // Each channel's levels a file finished at this length would keep, so a live view
         // chooses as that file's would. A few a channel, built again.
@@ -1843,10 +1906,12 @@ impl Recording {
 
 #[cfg(all(test, feature = "live"))]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
+    use escapement_tickwave_format::decode::{Block, OverviewBlock};
     use escapement_tickwave_format::header::{
-        Declaration, DeclaredChannel, DeclaredKind, SourceFormat, SourceHeader,
+        AnalogCoding, Declaration, DeclaredChannel, DeclaredKind, IntCoding, SourceFormat,
+        SourceHeader,
     };
     use escapement_tickwave_format::model::{Gap, Ratio};
     use escapement_tickwave_format::writer::{WriteOptions, Writer};
@@ -1930,6 +1995,125 @@ mod tests {
                 live.refs[0].len() + live.unwritten[0].len() - 1,
                 "after edge {k}"
             );
+        }
+    }
+
+    /// A block or overview block not yet written is decoded once, however many snapshots hold
+    /// it, and the open block, which changes, in each.
+    #[test]
+    fn an_update_decodes_a_block_not_yet_written_once() {
+        let timebase = Ratio::integer(1000).unwrap();
+        let d = Declaration {
+            timebase,
+            channels: vec![DeclaredChannel {
+                name: "V".into(),
+                source_name: "v".into(),
+                source: 0,
+                data: DeclaredKind::Analog {
+                    unit: "V".into(),
+                    period: Ratio::integer(10).unwrap(),
+                    coding: AnalogCoding::Int(IntCoding::new(32, false)),
+                    significant: None,
+                },
+                shaping: Default::default(),
+                overview_shift: None,
+            }],
+            derived: Vec::new(),
+            sources: vec![SourceHeader::new(
+                SourceFormat::Other("crafted".into()),
+                timebase,
+            )],
+            title: None,
+            meta: Default::default(),
+            overview_shift: 4,
+        };
+        // A 64 KiB block of 16,384 samples takes eight calls to compress, at 8 KiB a call.
+        let options = WriteOptions {
+            level: 1,
+            block_bytes: 1 << 16,
+            promise_with_items: true,
+            ..WriteOptions::default()
+        };
+        let mut w = Writer::new(d, options).unwrap();
+        let file = Arc::new(Mutex::new(w.take_output()));
+        w.run(0, 0, 0).unwrap();
+        let mut rec: Option<Recording> = None;
+        // Each block's bytes, held so no other block's take their address, and what decoded it;
+        // an overview block's with its `k` and `n`.
+        let mut blocks: Vec<(Arc<Vec<u8>>, Arc<Block>)> = Vec::new();
+        type Key = (Arc<Vec<u8>>, u64, u64);
+        let mut overview: Vec<(Key, Arc<OverviewBlock>)> = Vec::new();
+        let (mut held_again, mut level_held_again) = (0, 0);
+        for i in 0..70_000u64 {
+            w.sample(0, 3300 + i * 7 % 13).unwrap();
+            // Every call while a block closes and compresses, and every 500 otherwise.
+            if !(i % 16_384 < 32 || i % 500 == 499) {
+                continue;
+            }
+            let snapshot = w.snapshot();
+            file.lock().unwrap().extend(w.take_output());
+            match &mut rec {
+                None => {
+                    let bytes = Arc::new(Shared(Arc::clone(&file)));
+                    rec = Some(Recording::live(snapshot, bytes, Cache::new(1 << 20)).unwrap());
+                }
+                Some(r) => r.update(snapshot).unwrap(),
+            }
+            let Store::Live(live) = &rec.as_ref().unwrap().store else {
+                unreachable!()
+            };
+            let now = &live.snapshot.channel(0).unwrap().unwritten;
+            for (u, b) in now.iter().zip(&live.unwritten[0]).take(now.len() - 1) {
+                match blocks.iter().find(|(raw, _)| Arc::ptr_eq(raw, &u.raw)) {
+                    Some((_, before)) => {
+                        assert!(Arc::ptr_eq(before, b), "after sample {i}");
+                        held_again += 1;
+                    }
+                    None => blocks.push((Arc::clone(&u.raw), Arc::clone(b))),
+                }
+            }
+            let open = live.unwritten[0].last().unwrap();
+            assert!(!blocks.iter().any(|(_, b)| Arc::ptr_eq(b, open)));
+            for (li, level) in live.snapshot.overview(0).unwrap().levels.iter().enumerate() {
+                if !level.in_blocks {
+                    continue;
+                }
+                let decoded = &live.unwritten_overview[0][li];
+                assert_eq!(decoded.len(), super::unwritten_keys(level).len());
+                for ((k, n, raw), b) in super::unwritten_keys(level).into_iter().zip(decoded) {
+                    match overview
+                        .iter()
+                        .find(|((r, kk, nn), _)| Arc::ptr_eq(r, raw) && (*kk, *nn) == (k, n))
+                    {
+                        Some((_, before)) => {
+                            assert!(Arc::ptr_eq(before, b), "after sample {i}, level {li}");
+                            level_held_again += 1;
+                        }
+                        None => overview.push(((Arc::clone(raw), k, n), Arc::clone(b))),
+                    }
+                }
+            }
+        }
+        assert!(held_again > 8, "{held_again} blocks held again");
+        assert!(
+            level_held_again > 100,
+            "{level_held_again} overview blocks held again"
+        );
+    }
+
+    /// A file a writer appends to, read as it is now.
+    struct Shared(Arc<Mutex<Vec<u8>>>);
+
+    impl crate::Bytes for Shared {
+        fn size(&self) -> std::io::Result<u64> {
+            Ok(self.0.lock().unwrap().len() as u64)
+        }
+
+        fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+            let file = self.0.lock().unwrap();
+            let at = offset as usize;
+            buf.copy_from_slice(&file[at..at + buf.len()]);
+            Ok(())
         }
     }
 }

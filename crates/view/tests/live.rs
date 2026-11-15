@@ -506,3 +506,90 @@ fn one_recording_updated_with_each_snapshot_reads_as_one_made_from_it() {
         }
     }
 }
+
+#[test]
+fn a_long_recording_updated_with_each_snapshot_reads_as_one_made_from_it() {
+    // 70,000 pairs, a pair a finest bucket, alike from 20,000 to 60,000, so a level's run of
+    // alike overview blocks grows from one snapshot to the next; 64 KiB blocks, which take
+    // several calls to compress, so a snapshot taken just after a flush closes one holds it
+    // not yet written.
+    let (mut d, _) = session();
+    for c in &mut d.channels[..2] {
+        if let DeclaredKind::Analog { period, .. } = &mut c.data {
+            *period = Ratio::integer(16).unwrap();
+        }
+    }
+    let options = WriteOptions {
+        level: 1,
+        block_bytes: 1 << 16,
+        compression: Compression::Spread,
+        promise_with_items: true,
+    };
+    let mut w = Writer::new(d, options).unwrap();
+    let file = Arc::new(Growing(std::sync::Mutex::new(w.take_output())));
+    w.run(0, 0, 0).unwrap();
+    w.run(1, 0, 0).unwrap();
+    let cancel = AtomicBool::new(false);
+    let mut updated: Option<Recording> = None;
+    let (mut unwritten, mut runs) = (0, 0);
+    for i in 0..70_000u64 {
+        if i % 5000 == 0 {
+            w.edge(2, i as i64 * 16).unwrap();
+        }
+        if i % 1000 == 999 {
+            w.flush(i as i64 * 16 - 5).unwrap();
+        }
+        let x = if (20_000..60_000).contains(&i) {
+            0
+        } else {
+            i * 7 % 13
+        };
+        w.sample(0, 3300 + x).unwrap();
+        w.sample(1, 1_000_000 + x * 37).unwrap();
+        // Each pair for a while from each flush, where blocks close and wait to be compressed.
+        if (i + 1) % 1000 >= 12 {
+            continue;
+        }
+        let snapshot = w.snapshot();
+        file.0.lock().unwrap().extend(w.take_output());
+        unwritten += (0..2)
+            .filter(|&c| snapshot.channel(c).unwrap().unwritten.len() > 1)
+            .count();
+        runs += snapshot
+            .overview(1)
+            .unwrap()
+            .levels
+            .iter()
+            .filter(|l| l.in_blocks && l.run.as_ref().is_some_and(|r| r.n > 1))
+            .count();
+        let fresh = Recording::live(snapshot.clone(), file.clone(), Cache::new(1 << 20)).unwrap();
+        match &mut updated {
+            None => {
+                updated =
+                    Some(Recording::live(snapshot, file.clone(), Cache::new(1 << 20)).unwrap())
+            }
+            Some(u) => u.update(snapshot).unwrap(),
+        }
+        let u = updated.as_ref().unwrap();
+        let length = u.length();
+        // The whole of it from the strip, and the end, where the blocks not yet written are,
+        // from each level in blocks: 4,000 ticks a column from 2^8, 100 from 2^4.
+        for (window, columns) in [
+            (0..length, 20),
+            (length - 400_000..length, 100),
+            (length - 20_000..length, 200),
+        ] {
+            let q = query(window.clone(), columns);
+            let want = fresh.query(&q, &cancel).unwrap();
+            let got = Answer {
+                revision: want.revision,
+                ..u.query(&q, &cancel).unwrap()
+            };
+            assert_eq!(got, want, "after pair {i}, {window:?} in {columns} columns");
+        }
+    }
+    assert!(
+        unwritten > 10 && runs > 100,
+        "{unwritten} channels held a closed block not yet written, {runs} levels a run"
+    );
+}

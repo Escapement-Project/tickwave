@@ -198,33 +198,49 @@ impl Snapshot {
     }
 
     /// Channel `c`'s blocks in the file, their pages read through `fetch` from those it holds
-    /// already in `known` on: pass the refs a previous snapshot gave, whose pages don't change.
+    /// already in `known` on: pass the refs a previous snapshot of this writer gave, whose rows
+    /// don't change.
     pub fn block_refs<E: From<DecodeError>>(
         &self,
         c: usize,
         known: &[BlockRef],
-        mut fetch: impl FnMut(u64, u32) -> Result<Vec<u8>, E>,
+        fetch: impl FnMut(u64, u32) -> Result<Vec<u8>, E>,
     ) -> Result<Vec<BlockRef>, E> {
+        let (keep, mut after) = self.block_refs_from(c, known, fetch)?;
+        let mut out = known[..keep].to_vec();
+        out.append(&mut after);
+        Ok(out)
+    }
+
+    /// `block_refs` as how many of `known` it keeps, every one but the last, and the refs after
+    /// those: its cost follows the blocks written since `known`, not how many the channel has.
+    pub fn block_refs_from<E: From<DecodeError>>(
+        &self,
+        c: usize,
+        known: &[BlockRef],
+        mut fetch: impl FnMut(u64, u32) -> Result<Vec<u8>, E>,
+    ) -> Result<(usize, Vec<BlockRef>), E> {
         let ch = self
             .channels
             .get(c)
             .ok_or_else(|| corrupt(format!("no channel {c}")))?;
         let digital = self.digital(c);
-        let mut rows: Vec<(u64, BlockRow)> = Vec::new();
         let paged = ch.blocks.rows as usize;
-        // The refs a view holds already cover the pages they came from; past those, read again.
-        let reuse = known.len().min(paged) / crate::index::PAGE * crate::index::PAGE;
-        let mut items = 0u64;
-        for r in &known[..reuse] {
-            rows.push((r.first_index, r.row));
-            items = r.first_index + u64::from(r.row.items(digital));
-        }
-        if reuse < paged {
+        // A written block's row stays as it is, and so does a ref to it with a row after it. The
+        // last of `known` is made again: its end and the word after it are the next row's, which
+        // may be new.
+        let keep = known.len().min(paged + ch.rows.len()).saturating_sub(1);
+        let mut rows: Vec<(u64, BlockRow)> = Vec::new();
+        // The pages from the one that holds row `keep`, read again.
+        let first_page = keep / crate::index::PAGE;
+        let mut j = first_page * crate::index::PAGE;
+        if j < paged {
+            let mut items = known.get(j).map_or(0, |r| r.first_index);
             let pages = ch.blocks.pages(0, &mut fetch)?;
-            for (j, e) in pages.iter().enumerate().skip(reuse / crate::index::PAGE) {
+            for (p, e) in pages.iter().enumerate().skip(first_page) {
                 let bytes = fetch(e.offset, e.length)?;
                 let Page::Blocks { number, rows: page } =
-                    ch.blocks.parse_page(0, j as u64, e, &bytes)?
+                    ch.blocks.parse_page(0, p as u64, e, &bytes)?
                 else {
                     unreachable!("a block table's pages hold blocks")
                 };
@@ -235,13 +251,19 @@ impl Snapshot {
                     .into());
                 }
                 for row in page {
-                    rows.push((items, row));
+                    if j >= keep {
+                        rows.push((items, row));
+                    }
                     items += u64::from(row.items(digital));
+                    j += 1;
                 }
             }
         }
-        let mut items = ch.rows_first;
-        for row in ch.rows.iter() {
+        let mut items = match known.get(keep) {
+            Some(r) if keep > paged => r.first_index,
+            _ => ch.rows_first,
+        };
+        for row in ch.rows.iter_from(keep.saturating_sub(paged)) {
             rows.push((items, *row));
             items += u64::from(row.items(digital));
         }
@@ -257,7 +279,7 @@ impl Snapshot {
                 next_word: next.map(|r| r.word),
             });
         }
-        Ok(out)
+        Ok((keep, out))
     }
 
     fn section(&self, c: usize, first_index: u64) -> Section {
@@ -312,24 +334,35 @@ impl Snapshot {
             .channels
             .get(c)
             .ok_or_else(|| corrupt(format!("no channel {c}")))?;
-        let mut out = Vec::with_capacity(ch.unwritten.len());
-        for u in &ch.unwritten {
-            let data = decode_section(
-                &u.raw,
-                &self.section(c, u.first_index),
-                u.head.word,
-                u.head.start,
-                u.head.end,
-            )
-            .map_err(|what| corrupt(format!("channel {c}, a block not yet written: {what}")))?;
-            out.push(Block {
-                channel: c,
-                start: u.head.start,
-                end: u.head.end,
-                data,
-            });
-        }
-        Ok(out)
+        (0..ch.unwritten.len())
+            .map(|j| self.unwritten_block(c, j))
+            .collect()
+    }
+
+    /// `unwritten_blocks`' `j`th, alone. A block is the same however many snapshots hold it: an
+    /// `Unwritten` with the same `raw`, head and first index decodes the same.
+    pub fn unwritten_block(&self, c: usize, j: usize) -> Result<Block, DecodeError> {
+        let u = self
+            .channels
+            .get(c)
+            .ok_or_else(|| corrupt(format!("no channel {c}")))?
+            .unwritten
+            .get(j)
+            .ok_or_else(|| corrupt(format!("channel {c} has no block {j} not yet written")))?;
+        let data = decode_section(
+            &u.raw,
+            &self.section(c, u.first_index),
+            u.head.word,
+            u.head.start,
+            u.head.end,
+        )
+        .map_err(|what| corrupt(format!("channel {c}, a block not yet written: {what}")))?;
+        Ok(Block {
+            channel: c,
+            start: u.head.start,
+            end: u.head.end,
+            data,
+        })
     }
 
     /// Overview channel `o`'s level `li`'s rows in the file, their pages read through `fetch`
@@ -413,31 +446,47 @@ impl Snapshot {
         o: usize,
         li: usize,
     ) -> Result<Vec<OverviewBlock>, DecodeError> {
-        let x = self
-            .overview
+        let level = self.level(o, li)?;
+        (0..level.queued.len() + usize::from(level.run.is_some()))
+            .map(|j| self.unwritten_overview_block(o, li, j))
+            .collect()
+    }
+
+    /// `unwritten_overview`'s `j`th, alone: a queued block below the level's `queued.len()`, its
+    /// run at it. Either is the same however many snapshots hold it: the same `raw`, `k` and `n`
+    /// at a level of the same shift parse the same.
+    pub fn unwritten_overview_block(
+        &self,
+        o: usize,
+        li: usize,
+        j: usize,
+    ) -> Result<OverviewBlock, DecodeError> {
+        let level = self.level(o, li)?;
+        let (k, n, raw) = match (level.queued.get(j), &level.run) {
+            (Some(s), _) => (s.k, u64::from(s.n), &s.raw),
+            (None, Some(r)) if j == level.queued.len() => (r.k, r.n, &r.raw),
+            _ => {
+                return Err(corrupt(format!(
+                    "channel {o}'s overview level {li} has no block {j} not yet written"
+                )));
+            }
+        };
+        Level::parse(raw, level.shift, BLOCK_BUCKETS, self.overview[o].column)
+            .map(|level| OverviewBlock {
+                first: k * BLOCK_BUCKETS,
+                n: n as u32,
+                level,
+            })
+            .ok_or_else(|| corrupt(format!("channel {o}: an overview block does not parse")))
+    }
+
+    fn level(&self, o: usize, li: usize) -> Result<&LevelSnapshot, DecodeError> {
+        self.overview
             .get(o)
-            .ok_or_else(|| corrupt(format!("no channel {o}")))?;
-        let level = x
+            .ok_or_else(|| corrupt(format!("no channel {o}")))?
             .levels
             .get(li)
-            .ok_or_else(|| corrupt(format!("channel {o} has no overview level {li}")))?;
-        let parse = |k: u64, n: u64, raw: &[u8]| {
-            Level::parse(raw, level.shift, BLOCK_BUCKETS, x.column)
-                .map(|level| OverviewBlock {
-                    first: k * BLOCK_BUCKETS,
-                    n: n as u32,
-                    level,
-                })
-                .ok_or_else(|| corrupt(format!("channel {o}: an overview block does not parse")))
-        };
-        let mut out = Vec::new();
-        for s in &level.queued {
-            out.push(parse(s.k, u64::from(s.n), &s.raw)?);
-        }
-        if let Some(r) = &level.run {
-            out.push(parse(r.k, r.n, &r.raw)?);
-        }
-        Ok(out)
+            .ok_or_else(|| corrupt(format!("channel {o} has no overview level {li}")))
     }
 
     /// Derived channel `d`'s samples from its operands' samples in `a` and `b`, which hold the

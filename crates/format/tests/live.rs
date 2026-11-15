@@ -423,7 +423,13 @@ fn snapshot_blocks(snapshot: &Snapshot, file: &[u8], c: usize) -> Vec<Block> {
             snapshot.decode_block(c, b, frame).unwrap()
         })
         .collect();
-    blocks.extend(snapshot.unwritten_blocks(c).unwrap());
+    let unwritten = snapshot.unwritten_blocks(c).unwrap();
+    // One at a time, the same.
+    for (j, b) in unwritten.iter().enumerate() {
+        assert_eq!(&snapshot.unwritten_block(c, j).unwrap(), b);
+    }
+    assert!(snapshot.unwritten_block(c, unwritten.len()).is_err());
+    blocks.extend(unwritten);
     blocks
 }
 
@@ -570,17 +576,23 @@ fn a_snapshot_goes_to_another_thread() {
 }
 
 /// The session's channels at a pair every 100 ticks for 6,000,000 ticks: V's finest level,
-/// 2^4, has 375,000 buckets and goes in overview blocks, 92 of them.
+/// 2^4, has 375,000 buckets and goes in overview blocks, 92 of them. Then at a pair every 64
+/// ticks, V the same from pair 10,000 to 40,000: its overview blocks there, 1,024 pairs each,
+/// are alike, and a snapshot holds a run of them.
 #[test]
 fn a_snapshot_reads_every_settled_bucket_the_finished_file_has() {
-    let (mut d, _) = session();
-    for c in &mut d.channels {
-        if let DeclaredKind::Analog { period, .. } = &mut c.data {
-            *period = Ratio::integer(100).unwrap();
-        }
-    }
     const PAIRS: u64 = 60_000;
-    for compression in [Compression::Spread, Compression::Offload] {
+    for (p, alike, compression) in [
+        (100, 0..0, Compression::Spread),
+        (100, 0..0, Compression::Offload),
+        (64, 10_000..40_000, Compression::Spread),
+    ] {
+        let (mut d, _) = session();
+        for c in &mut d.channels {
+            if let DeclaredKind::Analog { period, .. } = &mut c.data {
+                *period = Ratio::integer(p).unwrap();
+            }
+        }
         let mut w = Writer::new(
             d.clone(),
             WriteOptions {
@@ -596,12 +608,20 @@ fn a_snapshot_reads_every_settled_bucket_the_finished_file_has() {
         w.run(1, 0, 0).unwrap();
         let mut kept: Vec<Snapshot> = Vec::new();
         for i in 0..PAIRS {
-            let t = i as i64 * 100;
+            let t = (i * p) as i64;
             if i > 0 && i % 2000 == 0 {
                 w.flush(t).unwrap();
             }
             w.promise(t).unwrap();
-            w.sample(0, 3300 + i % 7).unwrap();
+            w.sample(
+                0,
+                if alike.contains(&i) {
+                    3300
+                } else {
+                    3300 + i % 7
+                },
+            )
+            .unwrap();
             w.sample(1, 1_000_000 + (i * 7919) % 100_000).unwrap();
             if i % 37 == 0 {
                 w.edge(2, t + 50).unwrap();
@@ -611,14 +631,16 @@ fn a_snapshot_reads_every_settled_bucket_the_finished_file_has() {
             }
             file.extend(w.take_output());
         }
-        let f = w.finish(PAIRS as i64 * 100, &[PAIRS as i64 * 100], Finish::default());
+        let length = (PAIRS * p) as i64;
+        let f = w.finish(length, &[length], Finish::default());
         file.extend(f.unwrap().tail);
         let index = Index::of_file(&file).unwrap();
         assert_eq!(index.header().channels[0].overview_blocks[0].shift, 4);
         let finished = index.level_in(&file, 0, 0).unwrap();
-        let mut in_blocks = 0;
+        let (mut in_blocks, mut runs) = (0, 0);
         for s in &kept {
             let level = &s.overview(0).unwrap().levels[0];
+            runs += usize::from(level.run.as_ref().is_some_and(|r| r.n > 1));
             assert_eq!(level.shift, 4);
             // Rows in the file, then blocks not yet written, then the run, then the buckets after.
             let mut got = Level::empty(4, s.overview(0).unwrap().column);
@@ -630,12 +652,17 @@ fn a_snapshot_reads_every_settled_bucket_the_finished_file_has() {
                     got.append(&b.level);
                 }
             }
-            for b in s.unwritten_overview(0, 0).unwrap() {
+            let unwritten = s.unwritten_overview(0, 0).unwrap();
+            for (j, b) in unwritten.iter().enumerate() {
                 assert_eq!(b.first, got.buckets);
                 for _ in 0..b.n {
                     got.append(&b.level);
                 }
+                // One at a time, the same.
+                let one = s.unwritten_overview_block(0, 0, j).unwrap();
+                assert_eq!((one.first, one.n, &one.level), (b.first, b.n, &b.level));
             }
+            assert!(s.unwritten_overview_block(0, 0, unwritten.len()).is_err());
             if level.in_blocks {
                 in_blocks += 1;
             }
@@ -653,6 +680,10 @@ fn a_snapshot_reads_every_settled_bucket_the_finished_file_has() {
         assert!(
             in_blocks >= 20,
             "{compression:?}: {in_blocks} snapshots in blocks"
+        );
+        assert!(
+            alike.is_empty() || runs >= 5,
+            "{runs} snapshots with a run of alike blocks"
         );
         let _ = BLOCK_BUCKETS;
     }
