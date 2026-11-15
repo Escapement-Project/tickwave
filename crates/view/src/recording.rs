@@ -12,7 +12,9 @@ use std::sync::{Arc, OnceLock, RwLock, RwLockReadGuard};
 use escapement_tickwave_format::annotations::{self, Annotation, Included};
 #[cfg(feature = "live")]
 use escapement_tickwave_format::decode::LevelRef;
-use escapement_tickwave_format::decode::{BlockRef, DecodeError, FIRST_READ, Footer, List};
+use escapement_tickwave_format::decode::{
+    BlockRef, DecodeError, FIRST_READ, Footer, List, lost_after_end, lost_before_start,
+};
 use escapement_tickwave_format::header::{
     AnalogCoding, ChannelKind as HeaderKind, Exact, MAGIC, PREAMBLE_LEN, SourceHeader,
 };
@@ -192,6 +194,43 @@ impl Place {
             },
         }
     }
+
+    /// Where an analog channel's samples lost before its first and after its last sit on the
+    /// axis (FORMAT.md, "Gaps"), each where there are any: before, from the place of `-lost` on
+    /// the first run's grid to the first sample; after, from the place after the last sample to
+    /// the place of `count + lost` on the last run's grid.
+    pub fn end_losses(&self) -> [Option<Range<i64>>; 2] {
+        let Self::Analog {
+            first,
+            period,
+            count,
+            breaks,
+            lost_before,
+            lost_after,
+            map,
+            ..
+        } = self
+        else {
+            return [None, None];
+        };
+        let before = (*lost_before > 0)
+            .then(|| lost_before_start(*first, *period, *lost_before))
+            .flatten()
+            .map(|from| map.axis_saturating(from)..map.axis_saturating(*first));
+        let after = (*lost_after > 0 && *count > 0)
+            .then(|| {
+                let run = breaks.last().copied().unwrap_or(Break {
+                    index: 0,
+                    tick: *first,
+                    lost: 0,
+                });
+                let runs = self.runs()?;
+                let to = lost_after_end(run, *period, *count, *lost_after)?;
+                Some(place_after(&runs, *count - 1)..map.axis_saturating(to))
+            })
+            .flatten();
+        [before, after]
+    }
 }
 
 /// One channel's block, and where its decoded items come from.
@@ -296,6 +335,8 @@ pub(crate) struct Live {
     seen: Seen,
     /// What the latest snapshots changed, oldest first, at most `CHANGES` of them.
     changes: VecDeque<Change>,
+    /// Each channel's promise in the snapshot before: its items before it were all in then.
+    promises: Vec<i64>,
 }
 
 /// The snapshots whose changes a live recording keeps: an answer older than these is not
@@ -955,6 +996,7 @@ impl Recording {
                     annotations: 0,
                 },
                 changes: VecDeque::new(),
+                promises: vec![0; n],
             })),
             revision: Revision::new(),
         };
@@ -1008,6 +1050,7 @@ impl Recording {
             unwritten_overview,
             seen,
             changes,
+            promises,
         } = &mut **live;
         let d = snapshot.declaration();
         let stored = d.channels.len();
@@ -1045,10 +1088,16 @@ impl Recording {
         }
 
         // The gaps and runs since the last snapshot, each channel's count, and the latest tick.
-        // Every item a writer takes is at or after its channel's latest one, which ended the old
-        // length, so a channel's data changes from there, and from each new gap's start.
+        // A channel's items since then are at or after its promise then, and the length ends
+        // its data, so it changes from the earlier of the two, and from each new gap's start: a
+        // gap can be reported after the time it starts. A channel behind the others has its
+        // promise before the length.
         let settled = (*length).saturating_sub(1);
         let mut changed = vec![settled; places.len()];
+        for (c, promise) in promises.iter_mut().enumerate() {
+            changed[c] = settled.min(*promise);
+            *promise = snapshot.channel(c).map_or(0, |ch| ch.promise);
+        }
         let mut new_length = 0i64;
         for (c, place) in places[..stored].iter_mut().enumerate() {
             let open = fresh[c].last().expect("a channel's open block");
@@ -1445,9 +1494,9 @@ impl Recording {
     }
 
     /// From the first sample to the end of the last sample's time, over every analog channel,
-    /// widened by the markers, a finished file's read from its bundle if they aren't yet. A
-    /// recording with no analog sample takes its digital channels' known span instead. None
-    /// before any data and any marker.
+    /// widened by the samples lost before the first and after the last, and by the markers, a
+    /// finished file's read from its bundle if they aren't yet. A recording with no analog sample
+    /// takes its digital channels' known span instead. None before any data and any marker.
     pub fn extent(&self) -> Option<Range<i64>> {
         let mut extent = self.data_extent();
         if let Ok(Markers {
@@ -1510,6 +1559,11 @@ impl Recording {
                 if let Place::Digital { start, end, .. } = &*place {
                     widen(&mut extent, *start..*end);
                 }
+            }
+        }
+        for place in &places {
+            for lost in place.end_losses().into_iter().flatten() {
+                widen(&mut extent, lost);
             }
         }
         extent

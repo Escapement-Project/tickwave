@@ -96,7 +96,8 @@ pub enum Drawn {
         /// Every sample `around` holds, and one either side, when it holds no more than there
         /// are columns.
         samples: Option<Vec<Point>>,
-        /// The spans the instrument lost, shaded. A pause is a break with no span.
+        /// The spans the instrument lost, shaded: before the first sample, at each break and
+        /// after the last. A pause is a break with no span.
         lost: Vec<Range<i64>>,
         /// The smallest and largest value over the window's columns, or its samples where there
         /// are any.
@@ -569,11 +570,18 @@ impl Recording {
                     }
                 }
                 // Shaded whole, kept columns too: a break's lost span can reach back before the
-                // first tick a snapshot records as changed, to its run's last sample.
-                let lost: Vec<Range<i64>> = lost_spans_in(&runs, range.clone())
+                // first tick a snapshot records as changed, to its run's last sample. The samples
+                // lost before the first come before every break's, and those after the last
+                // after them.
+                let [before, after] = place.end_losses();
+                let breaks = lost_spans_in(&runs, range.clone())
                     .into_iter()
-                    .filter(|l| l.to > l.from)
-                    .map(|l| l.from..l.to)
+                    .map(|l| l.from..l.to);
+                let lost: Vec<Range<i64>> = before
+                    .into_iter()
+                    .chain(breaks)
+                    .chain(after)
+                    .filter(|l| l.end > l.start && l.end > range.start && l.start < range.end)
                     .collect();
                 for l in &lost {
                     for k in columns_over(g, l.start, l.end) {

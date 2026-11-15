@@ -805,3 +805,166 @@ fn a_finished_recording_extends_a_window_moved_on_within_its_page() {
     }
     assert!(extended > 80, "{extended}");
 }
+
+/// A writer whose channels keep their own order: V, I and D0 lead, F and D1 lag behind them by up
+/// to 300 ticks, each channel promising only what it has, and D0 now and then reports a gap that
+/// started before the last snapshot's end.
+struct Lagging {
+    w: Writer,
+    file: Arc<Growing>,
+    r: Random,
+    /// The leaders' and the laggards' promises.
+    lead: i64,
+    lag: i64,
+    /// The next pair's tick, and F's next sample's source tick.
+    pair: i64,
+    step: i64,
+    /// D0's and D1's least source tick for their next edge.
+    edge: [i64; 2],
+    /// Where D0's last edge or gap ends: a gap may start after it.
+    after: i64,
+    pairs: u64,
+}
+
+impl Lagging {
+    fn new(seed: u64) -> Self {
+        let mut r = Random(seed);
+        let options = WriteOptions {
+            level: 1,
+            block_bytes: 32 + r.below(200) as usize,
+            compression: Compression::Spread,
+            promise_with_items: false,
+        };
+        let mut w = Writer::new(declaration(3, 1 << 40), options).unwrap();
+        let file = Arc::new(Growing::default());
+        file.bytes.lock().unwrap().extend(w.take_output());
+        w.run(V, 0, 0).unwrap();
+        w.run(I, 0, 0).unwrap();
+        w.run(F, 0, 0).unwrap();
+        Self {
+            w,
+            file,
+            r,
+            lead: 0,
+            lag: 0,
+            pair: 0,
+            step: 0,
+            edge: [0; 2],
+            after: -1,
+            pairs: 0,
+        }
+    }
+
+    /// Edges of digital channel `d` from its least next tick, and its promise, up to before axis
+    /// tick `to`.
+    fn edges(&mut self, d: usize, to: i64) {
+        let (c, axis): (usize, fn(i64) -> i64) = if d == 0 { (D0, |k| k) } else { (D1, axis1) };
+        let promised = if d == 0 { self.lead } else { first1(self.lag) };
+        self.edge[d] = self.edge[d].max(promised);
+        while self.r.one_in(2) {
+            let k = self.edge[d] + self.r.below(40) as i64;
+            if axis(k) >= to {
+                break;
+            }
+            self.w.edge(c, k).unwrap();
+            self.edge[d] = k + 1;
+            if d == 0 {
+                self.after = k;
+            }
+        }
+    }
+
+    fn batch(&mut self) -> Snapshot {
+        let lead = self.lead + 1 + self.r.below(150) as i64;
+        while self.pair < lead {
+            let n = self.pairs;
+            self.w.sample(V, 3300 + n % 7).unwrap();
+            self.w.sample(I, 1_000_000 + (n * 7919) % 50_000).unwrap();
+            self.pairs += 1;
+            self.pair += PAIR;
+        }
+        self.edges(0, lead);
+        // A gap of D0 reported now, from past its last edge to before its promise: it can start
+        // before its promise in the last snapshot, and before that snapshot's end.
+        if self.r.one_in(5) {
+            let from = self.after + 1 + self.r.below(10) as i64;
+            let to = lead - 1 - self.r.below(5) as i64;
+            let level = self.r.one_in(2);
+            if to > from && self.w.gap(D0, Gap { from, to, level }).is_ok() {
+                self.edge[0] = to + 1;
+                self.after = to;
+            }
+        }
+        for c in [V, I, D0] {
+            self.w.promise_channel(c, lead).unwrap();
+        }
+        self.lead = lead;
+        let lag = self.lag.max(lead - self.r.below(300) as i64);
+        while axis1(self.step) < lag {
+            let x = (self.r.below(2000) as f32 - 1000.0) / 8.0;
+            self.w.sample(F, x).unwrap();
+            self.step += STEP;
+        }
+        self.edges(1, lag);
+        for c in [F, D1] {
+            self.w.promise_channel(c, lag).unwrap();
+        }
+        self.lag = lag;
+        let snapshot = self.w.snapshot();
+        self.file.bytes.lock().unwrap().extend(self.w.take_output());
+        snapshot
+    }
+}
+
+/// A channel that lags the others gets its items before the last snapshot's end, and a gap
+/// reported late starts before it: an extend reads each channel again from its own promise, so
+/// its answer is still a fresh query's.
+#[test]
+fn an_extend_follows_a_channel_that_lags_and_a_gap_reported_late() {
+    let cancel = AtomicBool::new(false);
+    let follows = [(64, 8), (170, 10), (600, 13), (3000, 11)];
+    let mut extended = vec![0u32; follows.len()];
+    for seed in 1..=4u64 {
+        let mut rec = Lagging::new(seed.wrapping_mul(0x2545_f491_4f6c_dd1d));
+        let mut live: Option<Recording> = None;
+        let mut held: Vec<Option<(Answer, Query)>> = follows.iter().map(|_| None).collect();
+        for n in 0..200u64 {
+            let snapshot = rec.batch();
+            match &mut live {
+                None => {
+                    let cache = Cache::new(1 << 20);
+                    live = Some(Recording::live(snapshot, rec.file.clone(), cache).unwrap());
+                }
+                Some(r) => r.update(snapshot).unwrap(),
+            }
+            let r = live.as_ref().unwrap();
+            let Some(extent) = r.extent() else {
+                continue;
+            };
+            for (k, &(width, columns)) in follows.iter().enumerate() {
+                let q = query(followed(&extent, width, 0), columns, Some((F, 7)));
+                let at = format!("seed {seed}, snapshot {n}, {width} ticks in {columns} columns");
+                let fresh = r.query(&q, &cancel).unwrap();
+                let next = match &held[k] {
+                    Some((answer, asked)) => match r.extend(answer, asked, &q, &cancel).unwrap() {
+                        Some(e) => {
+                            same(&e, &fresh, &at);
+                            extended[k] += 1;
+                            e
+                        }
+                        None => fresh,
+                    },
+                    None => fresh,
+                };
+                held[k] = Some((next, q));
+            }
+        }
+    }
+    for (k, &(width, columns)) in follows.iter().enumerate() {
+        assert!(
+            extended[k] > 100,
+            "{width} ticks in {columns} columns: {} extended",
+            extended[k]
+        );
+    }
+}
