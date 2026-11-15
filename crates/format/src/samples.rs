@@ -321,7 +321,7 @@ pub fn product_values(product: Product, a: &Values, b: &Values) -> Result<Values
             (Values::U64(x), Values::I64(y)) => signed(x, y),
             (Values::I64(x), Values::U64(y)) => signed(x, y),
             (Values::I64(x), Values::I64(y)) => signed(x, y),
-            _ => unreachable!("an integer product's operands are int channels"),
+            _ => return Err(NOT_INT.into()),
         }),
         (Product::F64 { a: ca, b: cb }, a, b) => {
             let mut out = Vec::with_capacity(a.len());
@@ -330,9 +330,11 @@ pub fn product_values(product: Product, a: &Values, b: &Values) -> Result<Values
             each_f64(b, cb, |y| *slots.next().expect("as many as a's") *= y);
             Values::F64(out)
         }
-        _ => unreachable!("an integer product's operands are int channels"),
+        _ => return Err(NOT_INT.into()),
     })
 }
+
+const NOT_INT: &str = "an integer product's operands don't hold integer codes";
 
 /// Calls `f` with each of `values`' samples as `value_f64` gives it under `coding`, the match on
 /// the samples' type made once rather than for each sample.
@@ -628,6 +630,26 @@ mod tests {
                 .collect();
             let block = product_values(p, a, b).unwrap();
             assert_eq!(block.iter().collect::<Vec<_>>(), each, "{p:?}");
+        }
+    }
+
+    #[test]
+    fn an_integer_product_of_anything_but_codes_is_refused() {
+        let empty = Values::F64(Vec::new());
+        for p in [
+            Product::of(int(32, false), int(32, false)),
+            Product::of(int(8, true), int(8, false)),
+        ] {
+            assert_eq!(
+                product_values(p, &empty, &empty),
+                Err(NOT_INT.to_owned()),
+                "{p:?}"
+            );
+            let one = Values::F32(vec![1.0]);
+            assert_eq!(
+                product_values(p, &one, &Values::U64(vec![1])),
+                Err(NOT_INT.to_owned())
+            );
         }
     }
 }
