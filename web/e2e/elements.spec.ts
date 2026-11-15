@@ -400,3 +400,169 @@ test("an inset's notes draw on with its sweep, not whole once it has passed them
   expect(ink.length).toBeGreaterThan(10);
   expect(grown.size).toBeGreaterThanOrEqual(8);
 });
+
+// The empty lane's words. identify-swd.tickwave with a sidecar whose one annotation lies on SWDIO
+// alone, from 376.7 to 377.1 ms of the 523.6 ms capture: shown SWCLK, no annotation falls on a
+// shown channel anywhere in the recording.
+const EMPTY_LANE = "No annotations on the channels shown";
+const ON_SWDIO = [
+  'format = "tickwave-annotations/1"',
+  'recording = "identify-swd.tickwave"',
+  'recording_id = "blake3:ccc8b7d8c3e4cb30da7fc6088e54ebeba2858ad402eb3fb5a9aeb50be989accf"',
+  "",
+  "[[annotation]]",
+  'id = "on-swdio"',
+  'start = "376.719436 ms"',
+  'end = "377.140560 ms"',
+  'channels = ["SWDIO"]',
+  'label = "On SWDIO alone"',
+  "",
+].join("\n");
+
+/** Serves ON_SWDIO as fixtures/lane.annotations.toml, or fails it with `status`, once `release` is called. */
+async function heldSidecar(page: Page, status = 200): Promise<() => void> {
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  await page.route("**/fixtures/lane.annotations.toml", async (route) => {
+    await held;
+    await route.fulfill({ status, contentType: "text/plain", body: status === 200 ? ON_SWDIO : "" });
+  });
+  return release;
+}
+
+/** The view of identify-swd.tickwave with that sidecar, showing `channels`. */
+async function openWith(page: Page, channels: string): Promise<Locator> {
+  await page.goto(`${VIEW}?annotations=fixtures/lane.annotations.toml`);
+  const view = page.locator("#v");
+  await view.evaluate((v, c) => {
+    v.setAttribute("channels", c);
+    v.setAttribute("open", "");
+  }, channels);
+  return view;
+}
+
+/** The ink in the lane's first sub-lane over the canvas's width from `f0` to `f1`, as its leftmost
+ * and rightmost inked device column (or null where there is none), and the width in CSS pixels
+ * that the empty lane's words take in the lane's own font. */
+async function laneInk(view: Locator, f0 = 0, f1 = 1): Promise<{ ink: [number, number] | null; dpr: number; words: number }> {
+  return view.evaluate(
+    (v, [f0, f1, words]) => {
+      const canvas = v.shadowRoot!.querySelector("canvas")!;
+      const dpr = canvas.width / canvas.getBoundingClientRect().width;
+      // The lane sits 2 px below the canvas's top, its first sub-lane 2 px below that, 18 px tall.
+      const y0 = Math.round(4 * dpr);
+      const h = Math.round(18 * dpr);
+      const x0 = Math.round(canvas.width * f0);
+      const w = Math.round(canvas.width * (f1 - f0));
+      const d = canvas.getContext("2d")!.getImageData(x0, y0, w, h).data;
+      let [lo, hi] = [Infinity, -Infinity];
+      for (let i = 0; i < w * h; i++) {
+        if (d[4 * i + 3] === 0) continue;
+        lo = Math.min(lo, x0 + (i % w));
+        hi = Math.max(hi, x0 + (i % w));
+      }
+      // The plot's labels: 12 px of the page's text face, resolved as the view resolves it.
+      const probe = v.shadowRoot!.querySelector(".probe") as HTMLElement;
+      const was = probe.style.fontFamily;
+      probe.style.fontFamily = "var(--font-text, system-ui, sans-serif)";
+      const family = getComputedStyle(probe).fontFamily;
+      probe.style.fontFamily = was;
+      const ctx = document.createElement("canvas").getContext("2d")!;
+      ctx.font = `400 12px ${family}`;
+      const m = ctx.measureText(words as string);
+      return { ink: lo <= hi ? ([lo, hi] as [number, number]) : null, dpr, words: m.actualBoundingBoxLeft + m.actualBoundingBoxRight };
+    },
+    [f0, f1, EMPTY_LANE] as const,
+  );
+}
+
+const frames = (page: Page) => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+/** The plot group, whose accessible description carries the words while the lane draws them. */
+const plotGroup = (view: Locator) => view.locator('.plot[role="group"]');
+/** The element the group's description comes from, if any: whether it or an ancestor is live or a status. */
+const describedBy = (view: Locator) =>
+  view.evaluate((v) => {
+    const id = v.shadowRoot!.querySelector(".plot")!.getAttribute("aria-describedby");
+    const el = id ? v.shadowRoot!.getElementById(id) : null;
+    return el && { text: el.textContent, live: el.closest("[aria-live], [role=status], [role=alert], [role=log]") !== null };
+  });
+const box = (view: Locator) => view.locator(".plot").evaluate((p) => JSON.stringify(p.getBoundingClientRect()));
+const settled = (view: Locator) => view.evaluate((v) => (v as unknown as { settled(): Promise<void> }).settled());
+
+test("a lane with no annotation on the channels shown says so once they have landed, not while they load, and keeps its height", async ({ page }) => {
+  const release = await heldSidecar(page);
+  const view = await openWith(page, "SWCLK");
+  const height = await drawn(view);
+  await frames(page);
+  // The sidecar is held: the lane is kept for it, and says nothing.
+  expect((await laneInk(view)).ink).toBeNull();
+  await expect(plotGroup(view)).toHaveAccessibleDescription("");
+  expect(await describedBy(view)).toBeNull();
+  const laidOut = await box(view);
+  release();
+  await settled(view);
+  await frames(page);
+  const { ink, dpr, words } = await laneInk(view);
+  // The words, whole, in the lane's label face.
+  expect(ink).not.toBeNull();
+  expect(Math.abs((ink![1] - ink![0] + 1) / dpr - words)).toBeLessThan(1.5);
+  expect(await drawn(view)).toBe(height);
+  expect(await box(view)).toBe(laidOut);
+  // Read with the plot when assistive tech reaches it, from an element that is not live.
+  await expect(plotGroup(view)).toHaveAccessibleDescription(EMPTY_LANE);
+  expect(await describedBy(view)).toEqual({ text: EMPTY_LANE, live: false });
+  // Nothing that announces holds them: no live region, no status.
+  const live = await view.evaluate((v) => [...v.shadowRoot!.querySelectorAll("[aria-live], [role=status], [role=alert], [role=log]")].map((e) => e.textContent ?? ""));
+  expect(live.some((t) => t.includes("No annotations"))).toBe(false);
+});
+
+test("a lane with annotations on a shown channel says nothing, zoomed out or into a stretch with none", async ({ page }) => {
+  const release = await heldSidecar(page);
+  release();
+  const view = await openWith(page, "SWCLK SWDIO");
+  await drawn(view);
+  await settled(view);
+  await frames(page);
+  // The note sits at 72 % of the width; left of it, nothing.
+  expect((await laneInk(view, 0, 0.6)).ink).toBeNull();
+  expect((await laneInk(view, 0.6, 1)).ink).not.toBeNull();
+  await expect(plotGroup(view)).toHaveAccessibleDescription("");
+  // From 100 to 200 ms no annotation lies in view; the recording still has one on SWDIO.
+  await view.evaluate((v) => (v as unknown as { setWindow(a: number, b: number): void }).setWindow(100_000_000, 200_000_000));
+  await settled(view);
+  await frames(page);
+  expect((await laneInk(view)).ink).toBeNull();
+  await expect(plotGroup(view)).toHaveAccessibleDescription("");
+});
+
+test("the lane tests the channels shown again when they change, and a failed sidecar keeps its notice and no words", async ({ page }) => {
+  const release = await heldSidecar(page);
+  release();
+  const view = await openWith(page, "SWCLK");
+  await drawn(view);
+  await settled(view);
+  await frames(page);
+  expect((await laneInk(view)).ink).not.toBeNull();
+  await expect(plotGroup(view)).toHaveAccessibleDescription(EMPTY_LANE);
+  await view.evaluate((v) => v.setAttribute("channels", "SWCLK SWDIO"));
+  await settled(view);
+  await frames(page);
+  expect((await laneInk(view, 0, 0.6)).ink).toBeNull();
+  await expect(plotGroup(view)).toHaveAccessibleDescription("");
+  expect(await describedBy(view)).toBeNull();
+  await view.evaluate((v) => v.setAttribute("channels", "SWCLK"));
+  await settled(view);
+  await frames(page);
+  expect((await laneInk(view)).ink).not.toBeNull();
+  await expect(plotGroup(view)).toHaveAccessibleDescription(EMPTY_LANE);
+  // A sidecar that fails: its notice, and the lane says nothing.
+  await page.unrouteAll();
+  const fail = await heldSidecar(page, 404);
+  fail();
+  const failed = await openWith(page, "SWCLK");
+  await drawn(failed);
+  await expect(notice(failed)).toBeVisible();
+  await frames(page);
+  expect((await laneInk(failed)).ink).toBeNull();
+  await expect(plotGroup(failed)).toHaveAccessibleDescription("");
+});

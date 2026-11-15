@@ -170,6 +170,11 @@ export class Plot {
   annotations: Resolved | null = null;
   /** The annotation lane shows even with nothing in it, as while a page edits the annotations. */
   keepLane = false;
+  /** Said in a kept lane where no annotation falls on a shown channel, anywhere in the recording.
+   * Null while the annotations are read, or where the sidecar failed and the notice speaks. */
+  emptyLane: string | null = null;
+  /** Whether an annotation falls on a shown channel, for these annotations and these channels. */
+  #onShown: { annotations: Resolved | null; channels: string; on: boolean } | null = null;
   /** CSS pixels kept at the names column's left for the view's move grips, while it shapes. */
   grip = 0;
   /** Rows' kept spans, by channel index, in the plot's ticks: the trace outside one fades, as the
@@ -289,6 +294,24 @@ export class Plot {
     const r = this.annotations;
     if (!r) return [];
     return laneAnnotations(r, new Set(this.tracks.map((t) => t.channel.name)), this.laneFilter);
+  }
+
+  /** What the lane says for itself: `emptyLane` where no annotation, drawn in the lane or painting
+   * a row, falls on a shown channel; else nothing. */
+  laneSays(): string | null {
+    const say = this.emptyLane;
+    const l = this.layout;
+    if (say === null || !l || l.laneHeight === 0) return null;
+    // Asked at every draw; the list is walked again only for other annotations or other channels.
+    const names = this.tracks.map((t) => t.channel.name);
+    const key = names.join("\n");
+    let m = this.#onShown;
+    if (!m || m.annotations !== this.annotations || m.channels !== key) {
+      const shown = new Set(names);
+      const on = (this.annotations?.byTime ?? []).some((a) => a.channels === null || a.channels.some((c) => shown.has(c)));
+      m = this.#onShown = { annotations: this.annotations, channels: key, on };
+    }
+    return m.on ? null : say;
   }
 
   /** An analog channel's whole range: its least and greatest values, out to round steps. */
@@ -1016,6 +1039,14 @@ export class Plot {
       }
     }
     ctx.restore();
+    // In the first sub-lane, where a label sits after the start of its note.
+    const say = this.laneSays();
+    if (say !== null) {
+      ctx.font = this.#font(this.config.labelPx, 400);
+      ctx.fillStyle = p.ink2;
+      ctx.textAlign = "left";
+      ctx.fillText(say, l.plotLeft + 4, l.laneTop + 2 + LANE_ROW - 7);
+    }
   }
 
   #drawAxis(): void {

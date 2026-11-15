@@ -33,6 +33,7 @@ ${SUMMARY_CSS}.viewer { display: flex; flex-direction: column; flex: 1 1 auto; m
 .plot:focus-visible { outline-offset: -2px; border-radius: 4px; }
 .plot.panning { cursor: grabbing; }
 canvas { display: block; }
+.lane-says { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .readout { display: grid; gap: 3px; padding: 6px 14px 0; font-size: 13px; color: var(--ink-2, GrayText); }
 .readout:empty { display: none; }
 .readout .line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 14px; }
@@ -99,6 +100,9 @@ const HTML = `
 
 /** Between the hover label and the row it reads, in CSS pixels. */
 const LABEL_GAP = 6;
+
+/** What a kept annotation lane says once its annotations are in and none falls on a shown channel. */
+const EMPTY_LANE = "No annotations on the channels shown";
 
 const SNAP_PX = 6;
 /** The heights a reader can give a row, in CSS pixels. */
@@ -436,6 +440,7 @@ export class TickwaveView extends TickwaveElement {
     const seq = ++this.#textSeq;
     const annotations = await loadAnnotations(l.src, this.getAttribute("annotations"), this.#annotationsText);
     if (seq !== this.#textSeq || this.#loaded !== l) return;
+    this.#plot.emptyLane = annotations.errors.length === 0 ? EMPTY_LANE : null;
     this.#loaded = { ...l, annotations };
     if (this.#asLoaded) this.#asLoaded = { ...this.#asLoaded, annotations };
     this.#reportSidecar(annotations.errors);
@@ -486,6 +491,7 @@ export class TickwaveView extends TickwaveElement {
       this.#loaded = null;
       this.#readyFired = false;
       this.#annotated = false;
+      this.#plot.emptyLane = null;
       this.clearProblems();
       const text = this.#annotationsText;
       // The recording draws from its footer while its annotations are read, which a bundled
@@ -509,8 +515,9 @@ export class TickwaveView extends TickwaveElement {
           const list = await loadAnnotations(head.src, annotations, text);
           if (this.#loadKey !== key) return null;
           this.#annotated = true;
+          if (!at && this.#textSeq !== seq) return this.#loaded;
+          this.#plot.emptyLane = list.errors.length === 0 ? EMPTY_LANE : null;
           if (at) first({ ...head, annotations: list });
-          else if (this.#textSeq !== seq) return this.#loaded;
           else {
             this.#loaded = { ...this.#loaded!, annotations: list };
             if (this.#asLoaded) this.#asLoaded = { ...this.#asLoaded, annotations: list };
@@ -632,6 +639,7 @@ export class TickwaveView extends TickwaveElement {
     }
     this.#renderKinds();
     this.#layout(fresh || annotated);
+    this.#describeLane();
     const w = this.getAttribute("window");
     if (w !== this.#windowAttr) {
       this.#windowAttr = w;
@@ -641,6 +649,30 @@ export class TickwaveView extends TickwaveElement {
     }
     const pending = this.#pendingWindow;
     if (pending) this.#showTicks(pending[0], pending[1]);
+  }
+
+  /**
+   * The plot group's description: the lane's words while the plot draws them, read when assistive
+   * tech reaches the plot and never announced. The element exists only then. It sits beside the
+   * group, and assistive tech skips it where it sits, so the words are read once, with the group.
+   */
+  #describeLane(): void {
+    const says = this.#plot.laneSays();
+    let el = this.root.querySelector<HTMLElement>(".lane-says");
+    if (says === null) {
+      el?.remove();
+      this.#plotBox.removeAttribute("aria-describedby");
+      return;
+    }
+    if (!el) {
+      el = document.createElement("span");
+      el.className = "lane-says";
+      el.id = "lane-says";
+      el.setAttribute("aria-hidden", "true");
+      this.#plotBox.after(el);
+    }
+    el.textContent = says;
+    this.#plotBox.setAttribute("aria-describedby", el.id);
   }
 
   /** A new recording starts clean: the last one's cursors, selection and place among its
@@ -678,6 +710,7 @@ export class TickwaveView extends TickwaveElement {
     canvas.style.height = height;
     const given = box > 1 ? box : null;
     this.#plot.resize(this.#size.width, given);
+    this.#describeLane();
     this.#placeHandles();
     this.#placeScales();
     this.#placeShaping();
