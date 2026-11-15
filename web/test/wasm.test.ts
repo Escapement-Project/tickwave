@@ -1,7 +1,8 @@
 // The WASM connector in Node: the same reader and recording code the worker runs, over the real
 // decoder. Expected values come from the Saleae export (file sizes, an independent decode), from
 // the converter's own report, or from the .tickwavefx fixture, which my extractor wrote from the
-// export without the Rust core: two pipelines that must agree.
+// export without the Rust core: two pipelines that must agree. Which bytes a reader fetches comes
+// from test/layout.ts, which reads a file's top index and pages by FORMAT.md without the decoder.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -18,19 +19,25 @@ import { formatLevels, MemorySource } from "../src/memory-source.ts";
 import { isAbort } from "../src/source.ts";
 import { formatInterval, measureReading, ONE as STEP_ONE } from "../src/readouts.ts";
 import { openTickwave, wasm } from "../scripts/node-wasm.ts";
+import { blockRows, layout as tables, leaves, levelRows, range } from "./layout.ts";
 
 const at = (p: string) => new URL(`../${p}`, import.meta.url);
 const ONE = readFileSync(at("fixtures/identify-swd.tickwave"));
 const NINE = readFileSync(at("fixtures/identify-swd.4k.tickwave"));
 const memory = () => readFixture(readFileSync(at("fixtures/identify-swd.tickwavefx"))).then((r) => new MemorySource(r));
 
-/** Where a file's footer starts, as its trailer says, and where each block's frame lies. */
-function layout(file: Uint8Array) {
-  const view = new DataView(file.buffer, file.byteOffset, file.byteLength);
-  const footer = Number(view.getBigUint64(file.length - 24, true));
-  const r = new (wasm().Recording)(file, file.length);
-  const blocks = Array.from({ length: r.blockCount }, (_, i) => r.blockRange(i) as unknown as [number, number]);
-  return { footer, blocks: blocks.map(([a, b]) => [Number(a), Number(b)] as [number, number]) };
+/** Where a file's footer starts, as its trailer says, and where channel `c`'s block page and its
+ * blocks' frames lie. */
+function layout(file: Uint8Array, c = 0) {
+  const t = tables(file);
+  const blocks = t.channels[c].blocks!;
+  return { footer: t.footer, page: range(leaves(file, blocks)[0]), blocks: blockRows(file, blocks).map((r) => [r.from, r.to] as [number, number]) };
+}
+
+/** A channel's finest overview shift, as its header entry or the recording's states it. */
+function finest(file: Uint8Array, c: number): number {
+  const h = tables(file).header as unknown as { overview_shift: number; channels: { overview_shift?: number }[] };
+  return h.channels[c].overview_shift ?? h.overview_shift;
 }
 
 test("the footer: what the recording says, from one read at the end", async () => {
@@ -52,13 +59,80 @@ test("the footer: what the recording says, from one read at the end", async () =
   );
 });
 
-test("a small first read: the footer in two reads from the end, then the block by its range", async () => {
+test("the footer is parsed once: footerStart reads only the trailer, and the Recording the footer", () => {
+  const { footerStart, Recording } = wasm();
+  const { footer } = layout(ONE);
+  // A byte of the footer's header changed: the trailer still says where the footer starts.
+  const bad = Uint8Array.from(ONE);
+  bad[footer + 5 + 8 + 2] ^= 0x20;
+  assert.equal(footerStart(bad, bad.length), 0);
+  assert.equal(footerStart(bad.subarray(bad.length - 512), bad.length), footer);
+  assert.throws(() => new Recording(bad, bad.length), /footer record is not whole/);
+  // A tail too short for the trailer asks for the trailer; one that is no trailer is refused.
+  assert.equal(footerStart(bad.subarray(bad.length - 10), bad.length), bad.length - 24);
+  assert.throws(() => footerStart(bad.subarray(0, bad.length - 1), bad.length - 1), /no trailer at the end/);
+});
+
+test("a first draw reads only the trailer, the footer and the strips of the channels it shows", async () => {
+  // swd50-cut's footer lies in its last 32 KiB, with pages and overview blocks before it.
+  const file = readFileSync(at("fixtures/swd50-cut.tickwave"));
+  const bytes = new MemoryBytes(file, "swd50-cut.tickwave");
+  const r = await Opened.open(wasm(), bytes);
+  assert.deepEqual(bytes.reads, [[file.length - FIRST_READ, file.length]]);
+  assert.ok(tables(file).footer > file.length - FIRST_READ);
+  for (const [c, ch] of r.info.channels.entries()) {
+    const strip = (await r.overview(c, 0, ch.end, Infinity))!;
+    // The strip, a level coarser than the overview blocks below it.
+    assert.equal(strip.bucket, ch.kind === "analog" ? 2 ** 14 : 2 ** 62);
+  }
+  assert.equal(bytes.reads.length, 1);
+  // The exact answer reads on: SWCLK's 2^6 level's page and its rows.
+  await r.overview(0, 0, r.info.length, 64);
+  assert.ok(bytes.reads.length > 1);
+});
+
+test("a query reads only its channel's page and the blocks of its span", async () => {
+  // energy: V, I and the pins each have blocks of their own, six of V and of I.
+  const file = readFileSync(at("fixtures/energy.tickwave"));
+  const bytes = new MemoryBytes(file, "energy.tickwave");
+  const r = await Opened.open(wasm(), bytes, 2048);
+  const opened = bytes.reads.length;
+  const t = tables(file);
+  const rows = blockRows(file, t.channels[1].blocks!);
+  // I's samples from 1,008,000 (after the loss) to 1,440,000 lie in its block from 960,000 to
+  // 1,440,000 alone.
+  const s = await r.samples(1, 1_008_000, 1_440_000);
+  assert.equal(s.first, 1000);
+  assert.deepEqual(rows[2].start, 960_000);
+  assert.deepEqual(bytes.reads.slice(opened), [range(leaves(file, t.channels[1].blocks!)[0]), [rows[2].from, rows[2].to]]);
+});
+
+test("a bundled sidecar is read when first asked for, once", async () => {
+  const file = readFileSync(at("fixtures/energy.tickwave"));
+  const bytes = new MemoryBytes(file, "energy.tickwave");
+  // A first read shorter than the footer, which starts after the bundle.
+  const r = await Opened.open(wasm(), bytes, 2048);
+  const { bundle, footer } = tables(file);
+  assert.deepEqual(bytes.reads, [[file.length - 2048, file.length], [footer, file.length - 2048]]);
+  const files = await r.bundle();
+  assert.deepEqual(Object.keys(files ?? {}).sort(), ["energy.annotations.toml", "energy.verge.jsonl"]);
+  assert.deepEqual(bytes.reads.slice(2), [bundle]);
+  await r.bundle();
+  assert.equal(bytes.reads.length, 3);
+  // A recording that bundles none reads nothing for it.
+  const one = new MemoryBytes(ONE, "identify-swd.tickwave");
+  assert.equal(await (await Opened.open(wasm(), one)).bundle(), null);
+  assert.equal(one.reads.length, 1);
+});
+
+test("a small first read: the footer in two reads from the end, then the channel's index page and its block by range", async () => {
   const bytes = new MemoryBytes(ONE, "identify-swd.tickwave");
-  const { footer, blocks } = layout(ONE);
+  const { footer, page, blocks } = layout(ONE, 1);
   assert.ok(footer < ONE.length - 512, "a footer longer than the first read");
   const r = await Opened.open(wasm(), bytes, 512);
   const e = await r.edges(1, 377094000, 377107000);
-  assert.deepEqual(bytes.reads, [[ONE.length - 512, ONE.length], [footer, ONE.length - 512], blocks[0]]);
+  // SWDIO's page and its one block; nothing of SWCLK's.
+  assert.deepEqual(bytes.reads, [[ONE.length - 512, ONE.length], [footer, ONE.length - 512], page, blocks[0]]);
   assert.equal(e.level, 0);
   assert.deepEqual([...e.ticks], [377094556, 377095556, 377096556, 377097556, 377099556, 377100556, 377101556, 377104078, 377106074]);
 });
@@ -73,55 +147,69 @@ test("nine blocks: every edge and every level agree with the extractor's fixture
     assert.equal(all.ticks.length, [15286, 1874][ch]);
     assert.deepEqual(all, want);
   }
-  // Windows that start and end on each side of every block boundary.
-  for (let b = 1; b < r.header.blocks; b++) {
-    const t = r.blockStart(b);
-    for (const [s, e] of [
-      [t - 1, t + 1],
-      [t, t + 5000],
-      [t - 5000, t],
-      [t - 3000, t + 3000],
-    ]) {
-      for (const ch of [0, 1]) assert.deepEqual(await r.edges(ch, s, e), await m.edges(ch, s, e), `channel ${ch}, [${s}, ${e})`);
+  // Windows that start and end on each side of every block boundary of each channel: SWCLK's
+  // eight blocks, SWDIO's one.
+  const t = tables(NINE);
+  const starts = [0, 1].map((ch) => blockRows(NINE, t.channels[ch].blocks!).map((b) => b.start));
+  assert.deepEqual(starts.map((s) => s.length), [8, 1]);
+  for (const ch of [0, 1]) {
+    for (const b of starts[ch].slice(1)) {
+      for (const [s, e] of [
+        [b - 1, b + 1],
+        [b, b + 5000],
+        [b - 5000, b],
+        [b - 3000, b + 3000],
+      ]) {
+        for (const c of [0, 1]) assert.deepEqual(await r.edges(c, s, e), await m.edges(c, s, e), `channel ${c}, [${s}, ${e})`);
+      }
     }
   }
 });
 
-test("the overview: unpacked from the footer, as the extractor's fixture computes it", async () => {
+test("the overview: each channel's own levels, unpacked from the footer, as the extractor's fixture computes them", async () => {
   const r = await openTickwave("fixtures/identify-swd.tickwave");
-  // The converter's finest level puts about 1,024 of SWCLK's edges in a bucket: 15,286 edges over
-  // 523,583,070 ticks, 34,253 ticks apart, so round(log2(1,024 × 34,253)) = 25. Its 16 buckets of
-  // 2^25 ticks, by hand: high throughout, the even count of edges all in bucket 11, from
-  // 369,098,752.
-  assert.equal(r.header.overview_shift, 25);
-  const ov = (await r.overview(0, 0, r.info.length, 2 ** 25))!;
-  assert.equal(ov.kind, "digital");
-  if (ov.kind !== "digital") return;
-  assert.equal(ov.start, 0);
-  assert.deepEqual([...ov.level], Array(16).fill(1));
-  assert.deepEqual([...ov.changes], [...Array(11).fill(0), 1, 0, 0, 0, 0]);
-  // Every level the footer holds, over the whole capture, against the TypeScript computation.
-  const levels = formatLevels(r.info.length, r.header.overview_shift);
-  const m = new MemorySource(await readFixture(readFileSync(at("fixtures/identify-swd.tickwavefx"))), { levels });
-  assert.deepEqual(r.header.overview.map((s) => 2 ** s), levels);
-  assert.equal(r.header.overview_blocks, undefined);
-  for (const bucket of levels) {
-    for (const ch of [0, 1]) {
-      assert.deepEqual(await r.overview(ch, 0, r.info.length, bucket), await m.overview(ch, 0, r.info.length, bucket), `${bucket}, ${ch}`);
-    }
+  // The converter's finest level puts about 64 of a channel's edges in a bucket. SWCLK: 15,286
+  // edges over 523,583,070 ticks, 34,252 ticks apart, so round(log2(64 × 34,252)) = 21. SWDIO:
+  // 1,874 over 523,583,100, 279,393 apart, so round(log2(64 × 279,393)) = 24. Each is the
+  // channel's strip: 250 and 32 buckets, at most 1,024.
+  assert.deepEqual([finest(ONE, 0), finest(ONE, 1)], [21, 24]);
+  const ov = (await r.overview(0, 0, r.info.length, 2 ** 21))!;
+  assert.ok(ov.kind === "digital");
+  assert.deepEqual([ov.start, ov.bucket, ov.level.length], [0, 2 ** 21, 250]);
+  // Every level of each channel, over the whole capture, against the TypeScript computation.
+  const fixture = await readFixture(readFileSync(at("fixtures/identify-swd.tickwavefx")));
+  for (const ch of [0, 1]) {
+    const levels = formatLevels(r.info.length, finest(ONE, ch));
+    assert.deepEqual(levels, [2 ** [21, 24][ch]]);
+    const m = new MemorySource(fixture, { levels });
+    for (const bucket of levels) assert.deepEqual(await r.overview(ch, 0, r.info.length, bucket), await m.overview(ch, 0, r.info.length, bucket), `${bucket}, ${ch}`);
+    // Not vacuous: SWCLK's buckets change, and not all of them.
+    const got = (await r.overview(ch, 0, r.info.length, levels[0]))!;
+    assert.ok(got.kind === "digital" && got.changes.includes(1) && got.changes.includes(0));
   }
-  assert.equal(await r.overview(0, 0, r.info.length, 2 ** 25 - 1), null);
+  assert.equal(await r.overview(0, 0, r.info.length, 2 ** 21 - 1), null);
+  assert.equal(await r.overview(1, 0, r.info.length, 2 ** 24 - 1), null);
 });
 
-test("overview blocks: a finer level read by range, as the TypeScript computation has it", async () => {
+test("overview blocks: a finer level read by range, each channel's own, as the TypeScript computation has it", async () => {
   // The JTAG identify capture without TDO: 626,263,880 ticks, so 2^12 has 152,898 buckets, too
-  // many for the footer. Its file declares 2^12 as its finest level (web/README.md, "Fixtures"),
-  // so that level sits in 38 overview blocks of 4,096 buckets.
+  // many for a strip. Its file declares 2^12 as its finest level (web/README.md, "Fixtures"), so
+  // each channel's 2^12 level sits in 38 overview blocks of 4,096 buckets and its 2^16 level in 3,
+  // and its strip is 2^20.
   const file = readFileSync(at("fixtures/identify-jtag.tickwave"));
   const bytes = new MemoryBytes(file, "identify-jtag.tickwave");
   const r = await Opened.open(wasm(), bytes);
-  assert.deepEqual(r.header.overview, [16, 20]);
-  assert.deepEqual(r.header.overview_blocks, [{ shift: 12, blocks: 38 }]);
+  const t = tables(file);
+  for (const ch of [0, 1, 2]) {
+    assert.deepEqual(formatLevels(r.info.length, finest(file, ch)), [2 ** 12, 2 ** 16, 2 ** 20]);
+    assert.deepEqual(
+      r.header.channels[ch].overview_blocks?.map((l) => [l.shift, l.blocks]),
+      [
+        [12, 38],
+        [16, 3],
+      ],
+    );
+  }
   // The edges, counted against the export's file sizes: (377124 - 60) / 8, (3980 - 60) / 8 and
   // (59308 - 60) / 8.
   const edges = await Promise.all([0, 1, 2].map((ch) => r.edges(ch, 0, r.info.length)));
@@ -145,9 +233,31 @@ test("overview blocks: a finer level read by range, as the TypeScript computatio
       assert.deepEqual(got, await m.overview(ch, s, e, 4096), `[${s}, ${e}), ${ch}`);
     }
   }
-  // Each overview block spans 4,096 × 4,096 ticks. The window needs blocks 15 and 16, one request;
-  // the whole capture adds blocks 0 to 14 and 17 to 37, a request each side. None is read twice.
-  assert.equal(bytes.reads.length, reads + 3);
+  // Each overview block spans 4,096 × 4,096 ticks. The window needs blocks 15 and 16, which each
+  // channel's first row stands for, with 20 more alike (a quiet stretch): for each channel its
+  // level's page, then that row's frame. The whole capture adds the channel's other rows, which
+  // lie in two stretches of the file, a row within 30 bytes of the one before: a read a stretch.
+  // None is read twice, and none of another level or of the blocks.
+  const rows = [0, 1, 2].map((ch) => levelRows(file, t.channels[ch].levels[0]));
+  const stretches = [
+    [1, 6, 7, 8],
+    [1, 2, 3, 4],
+    [1, 6, 7, 8],
+  ];
+  for (const [ch, [a, b, c, d]] of stretches.entries()) {
+    assert.equal(rows[ch].length, d + 1);
+    assert.deepEqual([rows[ch][0].k, rows[ch][0].n], [0, 22]);
+    for (let i = a; i < d; i++) assert.ok(rows[ch][i + 1].from - rows[ch][i].to <= (i === b ? Infinity : 30), `channel ${ch}, row ${i}`);
+    assert.ok(rows[ch][c].from - rows[ch][b].to > 512);
+  }
+  const page = (ch: number) => range(leaves(file, t.channels[ch].levels[0])[0]);
+  assert.deepEqual(bytes.reads.slice(reads), [
+    ...[0, 1, 2].flatMap((ch) => [page(ch), [rows[ch][0].from, rows[ch][0].to]]),
+    ...stretches.flatMap(([a, b, c, d], ch) => [
+      [rows[ch][a].from, rows[ch][b].to],
+      [rows[ch][c].from, rows[ch][d].to],
+    ]),
+  ]);
 });
 
 /** A server over a file, honouring Range or not, and recording what it was asked. */
@@ -171,17 +281,22 @@ function server(file: Uint8Array, opts: { ranges: boolean; encoding?: string; sh
   return { log, bytes: new HttpBytes(`https://example.org/r/${name}`, fetchFn) };
 }
 
-test("HTTP: the end first, blocks by range, adjacent missing blocks in one request, nothing fetched twice", async () => {
-  // A first read shorter than the footer's 968 bytes, so the footer takes a second.
+test("HTTP: the end first, a channel's page and blocks by range, adjacent blocks in one request, nothing fetched twice", async () => {
+  // A first read shorter than the footer's 820 bytes, so the footer takes a second.
   const s = server(NINE, { ranges: true });
-  const { footer, blocks } = layout(NINE);
+  const { footer, page, blocks } = layout(NINE, 0);
+  const swdio = layout(NINE, 1);
   const r = await Opened.open(wasm(), s.bytes, 512);
   assert.deepEqual(s.log, ["bytes=-512", `bytes=${footer}-${NINE.length - 512 - 1}`]);
+  // SWCLK's page, then its eight blocks, which lie one after another: one request.
   await r.edges(0, 0, r.info.length);
-  assert.equal(s.log.length, 3);
-  assert.equal(s.log[2], `bytes=${blocks[0][0]}-${blocks[blocks.length - 1][1] - 1}`);
+  assert.deepEqual(s.log.slice(2), [`bytes=${page[0]}-${page[1] - 1}`, `bytes=${blocks[0][0]}-${blocks[blocks.length - 1][1] - 1}`]);
+  // SWDIO's page and its block, a request each; SWCLK's are not asked again.
   await r.edges(1, 377094000, 377107000);
-  assert.equal(s.log.length, 3);
+  await r.edges(0, 377094000, 377107000);
+  assert.deepEqual(s.log.slice(4), [`bytes=${swdio.page[0]}-${swdio.page[1] - 1}`, `bytes=${swdio.blocks[0][0]}-${swdio.blocks[0][1] - 1}`]);
+  await r.edges(1, 0, r.info.length);
+  assert.equal(s.log.length, 6);
 });
 
 test("HTTP: a file shorter than the first read is read whole once, and not again for its block", async () => {
@@ -212,20 +327,25 @@ class SlowBytes implements Bytes {
   readonly name = "slow";
   reads = 0;
   aborts = 0;
+  /** Set, every read comes at once. */
+  free = false;
   #inner: Bytes;
   #release: (() => void)[] = [];
   constructor(inner: Bytes) {
     this.#inner = inner;
   }
+  /** Lets every read waiting go, and every read after it. */
   release() {
+    this.free = true;
     for (const r of this.#release.splice(0)) r();
   }
-  /** The end comes at once: only the block reads wait. */
+  /** The end comes at once: only the page and block reads wait. */
   tail(n: number) {
     return this.#inner.tail(n);
   }
   async read(from: number, to: number, signal?: AbortSignal): Promise<Uint8Array> {
     this.reads++;
+    if (this.free) return this.#inner.read(from, to);
     await new Promise<void>((resolve, reject) => {
       this.#release.push(resolve);
       // A real fetch rejects a moment after its abort, not at once, and never resolves after it.
@@ -239,15 +359,58 @@ class SlowBytes implements Bytes {
   }
 }
 
+test("two channels asked for at once read together: their pages in one request, their blocks in another", async () => {
+  const bytes = new MemoryBytes(NINE, "identify-swd.4k.tickwave");
+  const r = await Opened.open(wasm(), bytes, 2048);
+  const opened = bytes.reads.length;
+  const [swclk, swdio] = [layout(NINE, 0), layout(NINE, 1)];
+  // The two pages lie side by side before the footer; SWDIO's one block lies 41 bytes after
+  // SWCLK's last.
+  assert.equal(swclk.page[1], swdio.page[0]);
+  assert.equal(swdio.blocks[0][0] - swclk.blocks[swclk.blocks.length - 1][1], 41);
+  const [a, b] = await Promise.all([r.edges(0, 0, r.info.length), r.edges(1, 0, r.info.length)]);
+  assert.deepEqual([a.ticks.length, b.ticks.length], [15286, 1874]);
+  assert.deepEqual(bytes.reads.slice(opened), [
+    [swclk.page[0], swdio.page[1]],
+    [swclk.blocks[0][0], swdio.blocks[0][1]],
+  ]);
+});
+
+test("a query's reads wait on no timer: the reads asked for in a task start when it ends", async (t) => {
+  const bytes = new MemoryBytes(NINE, "identify-swd.4k.tickwave");
+  const r = await Opened.open(wasm(), bytes, 2048);
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "setImmediate"] });
+  const task = () =>
+    new Promise<void>((resolve) => {
+      const { port1, port2 } = new MessageChannel();
+      port1.onmessage = () => {
+        port1.close();
+        resolve();
+      };
+      port2.postMessage(null);
+    });
+  // A thousand tasks, none of them a timer's, and the query has its answer.
+  const later = async () => {
+    for (let i = 0; i < 1000; i++) await task();
+    return "a thousand tasks later, no answer";
+  };
+  const got = await Promise.race([r.edges(0, 0, r.info.length).then((e) => e.ticks.length), later()]);
+  assert.equal(got, 15286);
+});
+
 test("an abort stops the request at once, and the read no other request waits on", async () => {
-  const head = (await openTickwave("fixtures/identify-swd.4k.tickwave")).header;
   const slow = new SlowBytes(new MemoryBytes(NINE, "identify-swd.4k.tickwave"));
-  // The footer comes at once, with the whole file in the first read; every block read waits.
+  // The footer comes at once, with the whole file in the first read; every page and block read
+  // waits. Two requests for SWCLK share its page's read.
   const s = await Opened.open(wasm(), slow);
-  assert.equal(s.header.blocks, head.blocks);
+  /** Until `f` holds: a request reaches its read after a few steps of its own. */
+  const until = async (f: () => boolean) => {
+    while (!f()) await new Promise((r) => setTimeout(r, 0));
+  };
   const c = new AbortController();
   const first = s.edges(0, 0, s.info.length, c.signal);
-  const second = s.edges(1, 0, s.info.length).catch((e: unknown) => e);
+  const second = s.edges(0, 0, s.info.length).catch((e: unknown) => e);
+  await until(() => slow.reads === 1);
   c.abort();
   await assert.rejects(first, (e) => isAbort(e));
   // The second request still waits on the read, so it was not aborted.
@@ -255,11 +418,14 @@ test("an abort stops the request at once, and the read no other request waits on
   slow.release();
   const got = await second;
   assert.ok(!(got instanceof Error) && !isAbort(got), `the second request failed: ${got}`);
-  assert.equal((got as { ticks: Float64Array }).ticks.length, 1874);
+  assert.equal((got as { ticks: Float64Array }).ticks.length, 15286);
   // Alone on a read, an abort stops it.
+  slow.free = false;
   setCacheBytes(1);
   const d = new AbortController();
+  const reads = slow.reads;
   const third = s.edges(0, 0, s.info.length, d.signal);
+  await until(() => slow.reads > reads);
   d.abort();
   await assert.rejects(third, (e) => isAbort(e));
   assert.equal(slow.aborts, 1);
@@ -274,7 +440,22 @@ test("an abort stops the request at once, and the read no other request waits on
   setCacheBytes(192 << 20);
 });
 
-test("the block cache: an evicted block is read again", async () => {
+test("a bundle asked for twice at once: the first caller's abort leaves the other's read going", async () => {
+  const file = readFileSync(at("fixtures/energy.tickwave"));
+  const slow = new SlowBytes(new MemoryBytes(file, "energy.tickwave"));
+  const r = await Opened.open(wasm(), slow);
+  const a = new AbortController();
+  const first = r.bundle(a.signal);
+  const second = r.bundle();
+  while (slow.reads === 0) await new Promise((r) => setTimeout(r, 0));
+  a.abort();
+  await assert.rejects(first, { name: "AbortError" });
+  slow.release();
+  assert.deepEqual(Object.keys((await second) ?? {}).sort(), ["energy.annotations.toml", "energy.verge.jsonl"]);
+  assert.deepEqual([slow.reads, slow.aborts], [1, 0]);
+});
+
+test("the cache: an evicted page or block is read again", async () => {
   const bytes = new MemoryBytes(NINE, "identify-swd.4k.tickwave");
   // A first read shorter than the footer, which then takes two reads.
   const r = await Opened.open(wasm(), bytes, 512);
@@ -284,14 +465,15 @@ test("the block cache: an evicted block is read again", async () => {
   setCacheBytes(192 << 20);
   await r.edges(0, 0, r.info.length);
   await r.edges(0, 0, r.info.length);
-  // Two footer reads; two full reads while the cache held nothing; one after it held everything.
-  assert.equal(bytes.reads.length, 2 + 2 + 1);
-  // Each recording's open asks for the page's size again: the same size keeps every block, and
+  // Two footer reads; SWCLK's page and blocks twice while the cache held nothing, and once after
+  // it held everything.
+  assert.equal(bytes.reads.length, 2 + 2 * 2 + 2);
+  // Each recording's open asks for the page's size again: the same size keeps every entry, and
   // a smaller one that still holds them keeps them too.
   setCacheBytes(192 << 20);
   setCacheBytes(64 << 20);
   await r.edges(0, 0, r.info.length);
-  assert.equal(bytes.reads.length, 2 + 2 + 1);
+  assert.equal(bytes.reads.length, 2 + 2 * 2 + 2);
   setCacheBytes(192 << 20);
 });
 
@@ -349,9 +531,8 @@ function saleaeVolts(path: string): Float32Array {
   return new Float32Array(b.buffer.slice(b.byteOffset + 64, b.byteOffset + 64 + 4 * count));
 }
 
-/** An analog channel from samples, for the TypeScript overview. */
-function analogSource(r: Opened, channels: { name: string; first: number; values: Float32Array }[]) {
-  const levels = formatLevels(r.info.length, r.header.overview_shift);
+/** An analog channel from samples, for the TypeScript overview at `levels`. */
+function analogSource(r: Opened, channels: { name: string; first: number; values: Float32Array }[], levels: number[]) {
   return new MemorySource(
     {
     title: "",
@@ -420,16 +601,17 @@ test("analog: samples come with each whole run's smallest and largest value, fro
   }
 });
 
-test("analog: the footer's overview, as the TypeScript computation has it from the samples", async () => {
+test("analog: each channel's overview, its blocks' and its strip's, as the TypeScript computation has it from the samples", async () => {
   const r = await openTickwave("fixtures/swd50-cut.tickwave");
-  // Samples a tick apart: round(log2(1,024)) = 10.
-  assert.deepEqual(r.header.overview, [10, 14]);
+  // Samples a tick apart: round(log2(64)) = 6, then steps of 4 to a strip of 674 buckets.
+  const file = readFileSync(at("fixtures/swd50-cut.tickwave"));
+  for (const ch of [0, 1]) assert.deepEqual(formatLevels(r.info.length, finest(file, ch)), [64, 1024, 16384]);
   const values = await Promise.all([0, 1].map((ch) => r.samples(ch, 0, r.info.length)));
   const m = analogSource(r, [
     { name: "SWCLK", first: 0, values: values[0].values as Float32Array },
     { name: "SWDIO", first: 0, values: values[1].values as Float32Array },
-  ]);
-  for (const bucket of [1024, 16384]) {
+  ], [64, 1024, 16384]);
+  for (const bucket of [64, 1024, 16384]) {
     for (const ch of [0, 1]) {
       const got = (await r.overview(ch, 0, r.info.length, bucket))!;
       const want = (await m.overview(ch, 0, r.info.length, bucket))!;
@@ -442,12 +624,13 @@ test("analog: the footer's overview, as the TypeScript computation has it from t
 
 const SESSION50 = new URL("../fixtures-local/session50.tickwave", import.meta.url);
 
-test("analog overview blocks: session50's 2^10 level, as the TypeScript computation has it", { skip: !existsSync(SESSION50) && "no fixtures-local/session50.tickwave" }, async () => {
+test("analog overview blocks: session50's 2^6 and 2^10 levels, as the TypeScript computation has them", { skip: !existsSync(SESSION50) && "no fixtures-local/session50.tickwave" }, async () => {
   const r = await openTickwave(SESSION50.pathname);
-  // Samples a tick apart: a finest level of 2^10, its 1,232,766 buckets in 301 overview blocks.
-  assert.deepEqual(r.header.overview_blocks, [{ shift: 10, blocks: 301 }]);
-  // The analog samples end at tick 100,002,000, inside overview block 23, though the capture runs
-  // to 1.26 s. Two windows of whole buckets: one inside the samples, one across their end.
+  // Samples a tick apart: a finest level of 2^6, then 2^10, each in overview blocks.
+  for (const ch of [0, 1]) assert.deepEqual(r.header.channels[ch].overview_blocks?.slice(0, 2).map((l) => l.shift), [6, 10]);
+  // The analog samples end at tick 100,002,000, inside the 2^10 level's overview block 23, though
+  // the capture runs to 1.26 s. Two windows of whole buckets: one inside the samples, one across
+  // their end.
   for (const [s, e] of [
     [49 * 2 ** 20, 50 * 2 ** 20],
     [95 * 2 ** 20, 96 * 2 ** 20],
@@ -457,14 +640,16 @@ test("analog overview blocks: session50's 2^10 level, as the TypeScript computat
       assert.ok(c.kind === "analog" && c.period.num === 1 && c.period.den === 1 && c.first === 0);
       assert.equal(c.end, 100002000);
       const values = await r.samples(ch, s, e);
-      const m = analogSource(r, [{ name: c.name, first: values.first, values: values.values as Float32Array }]);
-      const got = (await r.overview(ch, s, e, 1024))!;
-      const want = (await m.overview(0, s, e, 1024))!;
-      assert.ok(got.kind === "analog" && want.kind === "analog");
-      assert.equal(got.bucket, 1024);
-      // Not vacuous: the buckets hold samples.
-      assert.ok(got.min.length > 0 && numbers(got.min).every(Number.isFinite), `[${s}, ${e}) has samples`);
-      assert.deepEqual([got.start, numbers(got.min), numbers(got.max)], [want.start, numbers(want.min), numbers(want.max)], `[${s}, ${e}), channel ${ch}`);
+      const m = analogSource(r, [{ name: c.name, first: values.first, values: values.values as Float32Array }], [64, 1024]);
+      for (const bucket of [64, 1024]) {
+        const got = (await r.overview(ch, s, e, bucket))!;
+        const want = (await m.overview(0, s, e, bucket))!;
+        assert.ok(got.kind === "analog" && want.kind === "analog");
+        assert.equal(got.bucket, bucket);
+        // Not vacuous: the buckets hold samples.
+        assert.ok(got.min.length > 0 && numbers(got.min).every(Number.isFinite), `[${s}, ${e}) has samples`);
+        assert.deepEqual([got.start, numbers(got.min), numbers(got.max)], [want.start, numbers(want.min), numbers(want.max)], `[${s}, ${e}), channel ${ch}, ${bucket}`);
+      }
     }
   }
 });
@@ -492,45 +677,66 @@ test("duration: first edge to last, of either polarity, of the edges in [start, 
   assert.equal((await duration(1, 377104000, 377105000)).reading, null);
 });
 
+/** Everything a view can read of a file: its footer, then each channel's every level over the whole
+ * capture, a bucket of each power of two asking for the coarsest no wider, and its items. */
+async function readAll(file: Uint8Array, name: string): Promise<void> {
+  const r = await Opened.open(wasm(), new MemoryBytes(file, name));
+  for (const [c, ch] of r.info.channels.entries()) {
+    for (let s = 62; s >= 0; s--) await r.overview(c, 0, r.info.length, 2 ** s);
+    await r.overview(c, 0, r.info.length, Infinity);
+    if (ch.kind === "digital") await r.edges(c, 0, r.info.length);
+    else await r.samples(c, 0, r.info.length);
+  }
+}
+
 test("a crafted recording is refused with an error, and the module goes on decoding", async () => {
-  const { footerStart, Recording } = wasm();
-  const open = (bytes: Uint8Array) => {
-    assert.equal(footerStart(bytes, bytes.length), 0);
-    const r = new Recording(bytes, bytes.length);
-    for (let i = 0; i < r.blockCount; i++) {
-      const [from, to] = r.blockRange(i);
-      r.decodeBlock(i, bytes.subarray(from, to));
-    }
-  };
   const why: Record<string, RegExp> = {
     "header-wrap": /footer's lengths do not fit it/,
     levels: /not the ones the format sets/,
     "big-decoded": /more than this reader holds/,
     "huge-count": /too short for its edges/,
-    "sections-wrap": /sections do not fill it/,
+    "page-count": /its head differs from where the table's shape puts it/,
   };
   for (const [name, expected] of Object.entries(why)) {
-    assert.throws(
-      () => open(readFileSync(at(`fixtures/crafted/${name}.tickwave`))),
+    await assert.rejects(
+      readAll(readFileSync(at(`fixtures/crafted/${name}.tickwave`)), name),
       (e: unknown) => !(e instanceof WebAssembly.RuntimeError) && expected.test(String((e as Error).message)),
       name,
     );
     // A panic would have ended the module; a refusal leaves it decoding the next file.
-    open(ONE);
+    await readAll(ONE, "identify-swd.tickwave");
   }
-  // Past the last block, the index throws rather than reading out of bounds.
-  const r = new Recording(ONE, ONE.length);
-  assert.throws(() => r.blockRange(r.blockCount), /no block/);
-  assert.throws(() => r.blockStart(r.blockCount), /no block/);
+  // Asked of what the recording doesn't hold, the decoder throws rather than reading out of
+  // bounds.
+  const r = new (wasm().Recording)(ONE, ONE.length);
+  const page = [0, 3727, 60, 0, 0, NaN, NaN];
+  for (const [what, f] of Object.entries({
+    "a channel past the last": () => r.blockPages(2, 0, 1),
+    "a level it lacks": () => r.levelPages(0, 0, 0, 1),
+    "a list it lacks": () => r.listPages(0, 0, 1),
+    "a located page of six numbers": () => r.blockPage(0, page.slice(0, 6), ONE.subarray(3727, 3787)),
+    "a page's bytes cut short": () => r.blockPage(0, page, ONE.subarray(3727, 3786)),
+    "a block of seven numbers": () => r.decodeBlockAt(0, [0, 1, 0, 527, 1727, 4000, 0], ONE.subarray(527, 2254)),
+    "a block's frame cut short": () => r.decodeBlockAt(0, [0, 523583100, 0, 527, 1727, 4000, 0, NaN], ONE.subarray(527, 2253)),
+    "a list of four numbers": () => r.decodeBlockAt(0, [0, 523583100, 0, 527, 1727, 4000, 0, NaN], ONE.subarray(527, 2254), new Float64Array(4)),
+    "a derived channel it lacks": () => r.productValues(0, new Float32Array(1), new Float32Array(1)),
+    "an overview row of four numbers": () => r.decodeOverviewAt(0, 0, [0, 0, 0, 0], new Uint8Array(1)),
+    "a bundle it lacks": () => r.bundleFiles(new Uint8Array(4)),
+  })) {
+    assert.throws(f, (e: unknown) => !(e instanceof WebAssembly.RuntimeError) && e instanceof Error, what);
+  }
+  // The page handed in as it lies, which those refusals left the module to read.
+  assert.equal(r.blockPage(0, page, ONE.subarray(3727, 3787)).length, 8);
 });
 
 test("the most the decoder takes from one frame is the page's to set", async () => {
-  // identify-jtag's footer overview, its 2^16 and 2^20 levels of three channels, decodes to more
-  // than 64 bytes.
+  // identify-jtag's strips, of 598 buckets of three digital channels, decode to more than 64 bytes
+  // each; the first draw reads them.
   const jtag = readFileSync(at("fixtures/identify-jtag.tickwave"));
-  await assert.rejects(Opened.open(wasm(), new MemoryBytes(jtag, "jtag.tickwave"), FIRST_READ, 64), /more than this reader holds \(64\)/);
+  const small = await Opened.open(wasm(), new MemoryBytes(jtag, "jtag.tickwave"), FIRST_READ, 64);
+  await assert.rejects(small.overview(0, 0, small.info.length, Infinity), /more than this reader holds \(64\)/);
   const r = await Opened.open(wasm(), new MemoryBytes(jtag, "jtag.tickwave"), FIRST_READ, 1 << 20);
-  assert.ok(r.info.length > 0);
+  assert.ok((await r.overview(0, 0, r.info.length, Infinity))!.bucket === 2 ** 20);
 });
 
 test("a channel known only from a gap's end starts there, at the gap's level, and so does the rest after any gap", async () => {

@@ -6,7 +6,22 @@ import { covers, laneAnnotations, type Annotation, type Resolved } from "../anno
 import type { Palette } from "../palette.ts";
 import { formatMarks, niceStep } from "../readouts.ts";
 import { rangeMarks, type ValueRange } from "./scale.ts";
-import { axisPeriod, channelSampleTick, channelStart, knownSpans, lostSpans, named, rebased, type AnalogChannel, type Channel, type RecordingInfo, type Source } from "../source.ts";
+import {
+  axisPeriod,
+  channelExtent,
+  channelSampleTick,
+  channelStart,
+  endLosses,
+  knownSpans,
+  lostSpans,
+  named,
+  rebased,
+  spanned,
+  type AnalogChannel,
+  type Channel,
+  type RecordingInfo,
+  type Source,
+} from "../source.ts";
 import { timeAxis } from "./axis.ts";
 import {
   analogFromOverview,
@@ -25,7 +40,7 @@ import {
   type Grid,
 } from "./columns.ts";
 import { layoutNotes, type NoteIn, type NoteOut } from "./notes.ts";
-import { grain, Track, type Tile } from "./track.ts";
+import { grain, Track, type Layer, type Tile } from "./track.ts";
 
 export interface PlotConfig {
   readonly axis: boolean;
@@ -95,6 +110,25 @@ const STALL_MS = 5000;
 function notLoaded(e: unknown): Error {
   const out = named(e instanceof Error ? e.name : "Error", `Data did not load: ${e instanceof Error ? e.message : String(e)}`);
   out.cause = e;
+  return out;
+}
+
+/** Where channel `c` lost data, as `layers` draw it: a digital channel's gaps, an analog channel's
+ * lost samples. A channel whose list is in pages has each layer's, inside the layer's span, and
+ * the samples lost before its first from its header. */
+export function lostIn(c: Channel, layers: readonly Layer[]): readonly { from: number; to: number }[] {
+  const of = (cc: Channel): readonly { from: number; to: number }[] => (cc.kind === "digital" ? (cc.gaps ?? []) : lostSpans(cc));
+  if (!c.paged) return of(c);
+  const out: { from: number; to: number }[] = c.kind === "analog" ? endLosses(c) : [];
+  // The loss before the first is the header's, already in: no layer pales it again.
+  const rest: Channel = c.kind === "analog" ? { ...c, lostBefore: undefined } : c;
+  for (const { tile, start, end } of layers) {
+    for (const g of of(spanned(rest, tile.data.listed))) {
+      const from = Math.max(g.from, start);
+      const to = Math.min(g.to, end);
+      if (to > from) out.push({ from, to });
+    }
+  }
   return out;
 }
 
@@ -599,10 +633,14 @@ export class Plot {
       this.#shown.delete(r.track.index);
     }
 
-    // Nothing before the channel's data, at or past its end, or right of the sweep.
+    // Nothing before the channel's data, at or past its end, or right of the sweep; the samples an
+    // analog channel lost before its first and after its last are pale out to the extent.
     const x0 = Math.max(l.plotLeft, this.xAt(channelStart(c)));
     const x1 = Math.min(l.plotRight, this.xAt(c.end), revealX);
-    if (x1 <= x0) return;
+    const extent = channelExtent(c);
+    const lx0 = Math.max(l.plotLeft, this.xAt(extent.start));
+    const lx1 = Math.min(l.plotRight, this.xAt(extent.end), revealX);
+    if (lx1 <= lx0) return;
     const width = (weight: number) => Math.max(1, Math.round(weight * dpr));
     // Each layer in device pixels, at each line width a stretch draws at (the shapes align to the
     // width). Neighbours share a rounded edge, so no seam shows between them. A layer with buckets
@@ -614,33 +652,37 @@ export class Plot {
     const piecesAt = (lw: number): Piece[] => {
       let pieces = byWidth.get(lw);
       if (pieces) return pieces;
-      // One piece a span of the channel's data, so nothing joins across a gap or a break.
-      pieces = r.track.layers().flatMap(({ tile, start, end }) =>
-        knownSpans(c, start, end).flatMap(([from, to]) => {
+      // One piece a span of the channel's data, so nothing joins across a gap or a break. A channel
+      // whose list is in pages takes each tile's.
+      pieces = r.track.layers().flatMap(({ tile, start, end }) => {
+        const cc = spanned(c, tile.data.listed);
+        return knownSpans(cc, start, end).flatMap(([from, to]) => {
           const px0 = Math.round(Math.max(x0, this.xAt(from)) * dpr);
           const px1 = Math.round(Math.min(x1, this.xAt(to)) * dpr);
           if (px1 <= px0) return [];
           let shapes;
-          if (c.kind === "analog") shapes = this.#analogShapes(r, c, grid, tile, from, to, lw, shown);
+          if (cc.kind === "analog") shapes = this.#analogShapes(r, cc, grid, tile, from, to, lw, shown);
           else if (tile.kind === "edges") {
             // Past a gap in the tile the level is the gap's, not the one its edges carry to there.
-            const at = rebased(c, tile.start, tile.data, from);
+            const at = rebased(cc, tile.start, tile.data, from);
             shapes = this.#digitalShapes(r, grid, { ...tile, start: at.start, data: at.edges }, from, to, lw);
           } else shapes = this.#digitalShapes(r, grid, tile, from, to, lw);
           return [{ px0, px1, shapes, coarse: grain(tile) > grid.per }];
-        }),
-      );
+        });
+      });
       byWidth.set(lw, pieces);
       return pieces;
     };
-    if (piecesAt(width(TRACE_WEIGHT)).length === 0) return;
+    // Off the plot, the trace leaves only the losses at either end to draw.
+    const traced = x1 > x0;
+    if (traced && piecesAt(width(TRACE_WEIGHT)).length === 0) return;
     if (shown.lo <= shown.hi) this.#shown.set(r.track.index, { lo: shown.lo, hi: shown.hi });
 
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.lineJoin = "miter";
     // Every pixel is painted once, so a faded fill never lands on another colour's.
-    for (const s of this.#stretches(c.name, Math.round(x0 * dpr), Math.round(x1 * dpr))) {
+    for (const s of traced ? this.#stretches(c.name, Math.round(x0 * dpr), Math.round(x1 * dpr)) : []) {
       const lw = width(s.weight);
       ctx.lineWidth = lw;
       for (const { px0, px1, shapes, coarse } of piecesAt(lw)) {
@@ -663,13 +705,13 @@ export class Plot {
 
     // Where the instrument lost data: a digital channel's gaps, an analog channel's lost samples. A
     // pause only breaks the trace.
-    const lost = c.kind === "digital" ? (c.gaps ?? []) : lostSpans(c);
+    const lost = lostIn(c, r.track.layers());
     if (lost.length > 0) {
       ctx.save();
       ctx.fillStyle = p.wash;
       for (const g of lost) {
-        const a = Math.max(x0, this.xAt(g.from));
-        const b = Math.min(x1, this.xAt(g.to));
+        const a = Math.max(lx0, this.xAt(g.from));
+        const b = Math.min(lx1, this.xAt(g.to));
         if (b > a) ctx.fillRect(a, r.top, Math.max(1, b - a), r.height);
       }
       ctx.restore();

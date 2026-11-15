@@ -83,12 +83,12 @@ test("a recording added merges with the one shown, each under its head, lined up
   expect(() => tickwave(["verify", copy, "--against", join(FIXTURES, "identify-swd.tickwave"), "--against", join(FIXTURES, "energy.tickwave")])).not.toThrow();
   // identify-swd's decoder's annotations came with it, from its sidecar, and the energy fixture's
   // bundled ones with it, under the merged recording's id; the hand-written ones did not.
-  const listed = JSON.parse(tickwave(["info", copy, "--json"])) as { header: { annotations?: Record<string, string> } };
-  expect(Object.keys(listed.header.annotations ?? {}).sort()).toEqual(["identify-swd+energy.annotations.toml", "identify-swd+energy.swd.jsonl", "identify-swd+energy.verge.jsonl"]);
+  const bundled = JSON.parse(execFileSync(process.execPath, ["scripts/bundled.ts", copy], { encoding: "utf8" })) as string[];
+  expect(bundled).toEqual(["identify-swd+energy.annotations.toml", "identify-swd+energy.swd.jsonl", "identify-swd+energy.verge.jsonl"]);
   await expect(page.locator("#found")).toContainText("hand-written");
   // The merged recording opens as saved, and Shape again goes back to the merge as it was.
   await expect(view).not.toHaveAttribute("shaping");
-  await expect(page.locator("#took")).toContainText("merged and checked");
+  await expect(page.locator("#took")).toContainText("merged in");
   await page.getByRole("button", { name: "Shape again" }).click();
   await expect(page.locator("#channels tr.input")).toHaveCount(2);
   await expect(page.getByLabel("Take under_range")).not.toBeChecked();

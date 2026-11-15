@@ -87,7 +87,7 @@ export interface Described {
   rateMissing: boolean;
 }
 
-export type Pass = "check" | "codes" | "encode" | "verify";
+export type Pass = "check" | "codes" | "encode";
 
 /** An annotation's fields in the hand-written file, as the editor writes them (ANNOTATIONS.md). A
  * time is text, such as "317.85882 ms", or ticks. */

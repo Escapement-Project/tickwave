@@ -8,7 +8,7 @@ import { formatValue } from "./readouts.ts";
 import type { Plot, PulseMark } from "./render/plot.ts";
 import type { Tile } from "./render/track.ts";
 import { lowerBound } from "./search.ts";
-import { inChannel, readingStep, rebased, type RecordingInfo, type Source } from "./source.ts";
+import { inChannel, readingStep, rebased, spanned, type RecordingInfo, type Source } from "./source.ts";
 
 /** A pulse whose edges lie past the data drawn is measured once the pointer rests this long. */
 const REST_MS = 150;
@@ -150,7 +150,8 @@ export class Prober {
     const t0 = this.#plot.tickAt(col);
     const t1 = this.#plot.tickAt(col + 1);
     const tick = Math.floor(this.#plot.tickAt(p.x));
-    const c = track.channel;
+    // A channel whose list is in pages, as the tile's span sees it.
+    const c = spanned(track.channel, tile?.data.listed);
     if (!tile || tick < tile.start || tick >= tile.end || !inChannel(c, tick)) {
       this.#set(null);
       return false;

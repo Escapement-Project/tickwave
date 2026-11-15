@@ -3,7 +3,7 @@
 // capture's own, so a channel moved before the capture's start reaches below tick 0, and nothing
 // else moves with it. Nothing is resampled: every edge and sample keeps its tick, plus the offset.
 
-import { mapOf, type Channel, type Edges, type Overview, type RecordingInfo, type Samples, type Source } from "./source.ts";
+import { listedOnAxis, mapOf, type Channel, type Edges, type Overview, type RecordingInfo, type Samples, type Source } from "./source.ts";
 
 export class ShapedSource implements Source {
   readonly #inner: Source;
@@ -59,19 +59,25 @@ export class ShapedSource implements Source {
   async edges(channel: number, start: number, end: number, signal?: AbortSignal): Promise<Edges> {
     const [s, e, d] = this.#span(channel, start, end);
     const got = await this.#inner.edges(channel, s, e, signal);
-    return d === 0 ? got : { level: got.level, ticks: got.ticks.map((t) => t + d) };
+    if (d === 0) return got;
+    const listed = listedOnAxis(got.listed, (t) => t + d);
+    return { level: got.level, ticks: got.ticks.map((t) => t + d), ...(listed && { listed }) };
   }
 
   async overview(channel: number, start: number, end: number, maxBucket: number, signal?: AbortSignal): Promise<Overview | null> {
     const [s, e, d] = this.#span(channel, start, end);
     const got = await this.#inner.overview(channel, s, e, maxBucket, signal);
-    return got && d !== 0 ? { ...got, start: got.start + d } : got;
+    if (!got || d === 0) return got;
+    const listed = listedOnAxis(got.listed, (t) => t + d);
+    return { ...got, start: got.start + d, ...(listed && { listed }) };
   }
 
-  samples(channel: number, start: number, end: number, signal?: AbortSignal): Promise<Samples> {
+  async samples(channel: number, start: number, end: number, signal?: AbortSignal): Promise<Samples> {
     // Samples go by index: the moved channel's `first` places them.
-    const [s, e] = this.#span(channel, start, end);
-    return this.#inner.samples(channel, s, e, signal);
+    const [s, e, d] = this.#span(channel, start, end);
+    const got = await this.#inner.samples(channel, s, e, signal);
+    if (d === 0 || !got.listed) return got;
+    return { ...got, listed: listedOnAxis(got.listed, (t) => t + d) };
   }
 }
 

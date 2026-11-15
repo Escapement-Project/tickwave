@@ -95,7 +95,7 @@ for (const c of CASES) {
   });
 }
 
-test("a Saleae export's passes: its edges checked once, then codes, encoding and the check against it", () => {
+test("a Saleae export's passes: its edges checked once, then codes and encoding, and nothing checks what it wrote", () => {
   const dir = join(DATA, "saleae/swd50-cut");
   const passes: string[] = [];
   convertFiles(
@@ -104,14 +104,14 @@ test("a Saleae export's passes: its edges checked once, then codes, encoding and
     { channels: [["digital_4_0", "SWCLK"], ["analog_0", "VTREF"]] },
     { start: (pass, channel, total) => passes.push(`${pass}${channel ? ` ${channel}` : ""} ${total}`) },
   );
-  assert.deepEqual(passes, ["check 0", "codes VTREF 50000", "encode 50000", "verify 50000"]);
+  assert.deepEqual(passes, ["check 0", "codes VTREF 50000", "encode 50000"]);
   const identify = join(DATA, "saleae/identify-swd");
   const steps: number[] = [];
   convertFiles("saleae", readdirSync(identify).map((f) => join(identify, f)), { channels: [["digital_3_0", "SWCLK"], ["digital_3_1", "SWDIO"]] }, {
     start: (pass, _, total) => passes.push(`${pass} ${total}`),
     step: (n) => steps.push(n),
   });
-  assert.deepEqual(passes.slice(4), ["check 17160", "encode 17160", "verify 17160"]);
+  assert.deepEqual(passes.slice(3), ["check 17160", "encode 17160"]);
   assert.deepEqual(steps, [], "fewer than 65,536 items a pass report no step");
 });
 

@@ -41,6 +41,14 @@ test("a one-channel recording says one channel; one without a size leaves it out
   assert.deepEqual(summaryFacts(one), [["fact-length", nb("1.00 ms")], ["fact-channels", "1 channel: TCKC"]]);
 });
 
+test("the span a view of some channels covers reaches over the samples an analog one lost after its last", () => {
+  // V samples every 1,000 ticks from 0 to 500,000; three lost after its last reach 503,000.
+  const v = { kind: "analog" as const, name: "V", end: 500_000, unit: "V", first: 0, period: { num: 1000, den: 1 }, count: 500, resolution: null, min: 0, max: 1 };
+  const info: RecordingInfo = { ...CJTAG, channels: [...CJTAG.channels, v, { ...v, name: "W", lostAfter: 3 }] };
+  assert.equal(shownExtent(info, [3]), 500_000);
+  assert.equal(shownExtent(info, [4]), 503_000);
+});
+
 test("the span a view covers: the length with every channel, else the furthest end, else the length", () => {
   assert.equal(shownExtent(CJTAG, [0, 1, 2]), 1_000_000);
   assert.equal(shownExtent(CJTAG, [2, 1, 0]), 1_000_000);

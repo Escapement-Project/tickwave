@@ -1924,6 +1924,18 @@ impl Footer {
         frame: &[u8],
         list: &List,
     ) -> Result<Block, DecodeError> {
+        self.decode_block_in_with(c, b, frame, list, inflate)
+    }
+
+    /// `decode_block_in` with another zstd decoder, as `decode_block_with`.
+    pub fn decode_block_in_with(
+        &self,
+        c: usize,
+        b: &BlockRef,
+        frame: &[u8],
+        list: &List,
+        inflate: impl Fn(&[u8], usize) -> Result<Vec<u8>, DecodeError>,
+    ) -> Result<Block, DecodeError> {
         let map = self.maps.get(c).copied().unwrap_or(Mapping::IDENTITY);
         match list {
             List::Gaps(gaps) => {

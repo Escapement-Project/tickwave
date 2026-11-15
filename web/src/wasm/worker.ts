@@ -67,7 +67,8 @@ async function handle(m: Request, signal: AbortSignal): Promise<unknown> {
     }
     case "bundled": {
       const r = await recording(m.key);
-      const files = r.header.annotations;
+      // Read the first time a view asks: a first draw reads nothing past the footer.
+      const files = await r.bundle(signal);
       if (!files) return null;
       const hand = Object.keys(files).filter((n) => n.endsWith(".toml"));
       if (hand.length !== 1) throw new Error(`the bundled sidecar has ${hand.length} TOML files, not one`);
@@ -87,12 +88,14 @@ function buffers(v: unknown): Transferable[] {
   return [...new Set([...views(v), ...nested].map((x) => x.buffer as ArrayBuffer))];
 }
 
-self.onmessage = async (e: MessageEvent<Request | { op: "abort"; id: number }>) => {
+self.onmessage = (e: MessageEvent<Request | { op: "abort"; id: number } | { op: "batch"; requests: Request[] }>) => {
   const m = e.data;
-  if (m.op === "abort") {
-    running.get(m.id)?.abort();
-    return;
-  }
+  if (m.op === "abort") running.get(m.id)?.abort();
+  else if (m.op === "batch") for (const r of m.requests) void run(r);
+  else void run(m);
+};
+
+async function run(m: Request): Promise<void> {
   const controller = new AbortController();
   running.set(m.id, controller);
   let reply: Reply;
@@ -106,4 +109,4 @@ self.onmessage = async (e: MessageEvent<Request | { op: "abort"; id: number }>) 
     running.delete(m.id);
   }
   (self as unknown as Worker).postMessage(reply, reply.ok ? buffers(reply.value) : []);
-};
+}

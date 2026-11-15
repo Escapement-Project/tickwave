@@ -68,7 +68,6 @@ export class Track {
   failed = false;
   /** The finest tile yet that covers the whole channel. */
   #base: Tile | null = null;
-  #baseAsked = false;
   #pending: Pending | null = null;
   #retryAt = 0;
   /** A request for buckets no larger than this came back null: there is no level that fine. */
@@ -82,6 +81,9 @@ export class Track {
     this.channel = channel;
     this.#changed = changed;
     this.#failed = failed;
+    // The base is asked for at once, not at the first draw: a first draw comes from it, and the
+    // draw that asks would leave it a frame later.
+    void this.#fetchBase();
   }
 
   /** The channel moved by `by` ticks, now `channel`: the tiles in hand move with it, so the row
@@ -150,10 +152,6 @@ export class Track {
 
   /** Starts a fetch if the current tile and any pending one do not fit the view. */
   need(start: number, end: number, per: number): void {
-    if (!this.#baseAsked) {
-      this.#baseAsked = true;
-      void this.#fetchBase();
-    }
     const mode = this.#mode(per);
     if (this.tile && this.#fits(this.tile, mode, start, end, per)) {
       this.#pending?.abort.abort();

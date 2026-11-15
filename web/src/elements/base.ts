@@ -46,9 +46,15 @@ export interface Loaded {
  * the recording still draws.
  */
 export async function loadRecording(src: string, annotations: string | null, text: string | null = null): Promise<Loaded> {
+  const head = await loadHead(src);
+  return { ...head, annotations: await loadAnnotations(head.src, annotations, text) };
+}
+
+/** The recording at `src` without its annotations: what a first draw needs. */
+export async function loadHead(src: string): Promise<Omit<Loaded, "annotations">> {
   const url = absolute(src);
   const [source, info] = await Promise.all([sourceFor(url), infoFor(url)]);
-  return { src: url, source, info, annotations: await loadAnnotations(url, annotations, text) };
+  return { src: url, source, info };
 }
 
 /** The recording's sidecar: the hand-written file's `text` when given, with its includes beside

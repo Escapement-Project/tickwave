@@ -659,7 +659,6 @@ function openPage(): void {
       check: "Checking the export's edges",
       codes: `Looking for exact codes in ${channel}`,
       encode: merging ? "Merging" : "Encoding",
-      verify: merging ? "Checking the merged recording against its recordings" : "Checking the recording against the capture",
     })[pass];
 
   function run(chosen: Settings): void {
@@ -724,7 +723,7 @@ function openPage(): void {
   function conversionFacts(file: File, codes: [string, number | null][], seconds: number, report: string[] | null = null): void {
     const exact = codes.filter(([, bits]) => bits !== null).map(([n, bits]) => `${n} (${bits}-bit)`);
     const f32 = codes.filter(([, bits]) => bits === null).map(([n]) => n);
-    byId("took").textContent = `${formatBytes(file.size)}, ${report ? "merged" : "converted"} and checked in ${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)} s`;
+    byId("took").textContent = `${formatBytes(file.size)}, ${report ? "merged" : "converted"} in ${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)} s`;
     found.textContent = report ? report.join(" ") : [exact.length ? `Exact codes: ${exact.join(", ")}.` : "", f32.length ? `Stored as f32: ${f32.join(", ")}.` : ""].filter(Boolean).join(" ");
   }
 

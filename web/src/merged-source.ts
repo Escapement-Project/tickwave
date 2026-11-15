@@ -5,7 +5,7 @@
 // multiple. Every input starts at tick 0; a view shaping the preview moves each one by its
 // alignment. Nothing is resampled: every edge and sample keeps its tick, mapped.
 
-import { channelStart, mapOf, mulDivFloor, type Channel, type Edges, type Overview, type Ratio, type RecordingInfo, type Samples, type Source } from "./source.ts";
+import { channelStart, listedOnAxis, mapOf, mulDivFloor, type Channel, type Edges, type Overview, type Ratio, type RecordingInfo, type Samples, type Source } from "./source.ts";
 
 export interface MergeInput {
   readonly source: Source;
@@ -207,7 +207,8 @@ export class MergedSource implements Source {
     while (lo < ticks.length && ticks[lo] < start) lo++;
     let hi = ticks.length;
     while (hi > lo && ticks[hi - 1] >= end) hi--;
-    return { level: (got.level ^ (lo & 1)) as 0 | 1, ticks: ticks.subarray(lo, hi) };
+    const listed = listedOnAxis(got.listed, (t) => scaled(t, q));
+    return { level: (got.level ^ (lo & 1)) as 0 | 1, ticks: ticks.subarray(lo, hi), ...(listed && { listed }) };
   }
 
   async overview(channel: number, start: number, end: number, maxBucket: number, signal?: AbortSignal): Promise<Overview | null> {
@@ -216,12 +217,15 @@ export class MergedSource implements Source {
     // the caller reads edges or samples.
     if (q.den !== 1) return null;
     const got = await input.source.overview(c, s, e, Math.floor(maxBucket / q.num), signal);
-    return got && { ...got, bucket: got.bucket * q.num, start: got.start * q.num };
+    if (!got) return got;
+    const listed = listedOnAxis(got.listed, (t) => scaled(t, q));
+    return { ...got, bucket: got.bucket * q.num, start: got.start * q.num, ...(listed && { listed }) };
   }
 
-  samples(channel: number, start: number, end: number, signal?: AbortSignal): Promise<Samples> {
+  async samples(channel: number, start: number, end: number, signal?: AbortSignal): Promise<Samples> {
     // Samples go by index: the merged channel's `first`, `period` and `map` place them.
-    const { input, c, s, e } = this.#span(channel, start, end);
-    return input.source.samples(c, s, e, signal);
+    const { input, c, s, e, q } = this.#span(channel, start, end);
+    const got = await input.source.samples(c, s, e, signal);
+    return got.listed ? { ...got, listed: listedOnAxis(got.listed, (t) => scaled(t, q)) } : got;
   }
 }

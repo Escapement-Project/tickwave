@@ -15,6 +15,17 @@ async function drawn(view: Locator): Promise<number> {
 const readout = (view: Locator) => view.locator(".readout");
 const notice = (view: Locator) => view.locator('[part="notice"]');
 
+/** How many reads a view of `src` makes to draw its whole capture, counted on a load of its own:
+ * its footer, then each channel's index pages and the overview blocks or blocks that draw it. */
+async function readsToDraw(page: Page, src: string, tag: string): Promise<number> {
+  await page.goto(`${VIEW}?open&src=${src}&tag=${tag}&firstRead=256`);
+  const view = page.locator("#v");
+  await drawn(view);
+  await view.evaluate((v) => (v as unknown as { settled(): Promise<void> }).settled());
+  const log = (await (await fetch(`http://127.0.0.1:8124/__log?tag=${tag}`)).json()) as unknown[];
+  return log.length;
+}
+
 /** A click in the first row of the plot, `x` CSS pixels from its left. */
 async function clickRow(page: Page, view: Locator, x: number): Promise<void> {
   const box = (await view.locator(".plot").boundingBox())!;
@@ -110,18 +121,15 @@ test("a failed load is tried again, and a new recording's view drops the old not
 
 test("a read the old recording's rows had out, failing after a new recording, says nothing", async ({ page }, info) => {
   const tag = `rows-${info.project.name}-${info.repeatEachIndex}-${Date.now()}`;
-  // Past the footer's two reads, every read waits 2 s, then fails.
-  await page.goto(`${VIEW}?open&src=fixtures/swd50-cut.tickwave&tag=${tag}&firstRead=256&after=2&stall=2000&fail=500`);
+  // Past the reads of the whole capture, every read waits 2 s, then fails.
+  const n = await readsToDraw(page, "fixtures/swd50-cut.tickwave", `whole-${tag}`);
+  await page.goto(`${VIEW}?open&src=fixtures/swd50-cut.tickwave&tag=${tag}&firstRead=256&after=${n}&stall=2000&fail=500`);
   const view = page.locator("#v");
   await drawn(view);
+  await view.evaluate((v) => (v as unknown as { settled(): Promise<void> }).settled());
   const title = (await view.locator(".summary .title").textContent())!;
-  // Zoomed in, the rows read the recording's blocks.
-  await view.evaluate((v) => {
-    const w = v as HTMLElement & { window: { start: number; end: number }; setWindow(a: number, b: number): void };
-    const { start, end } = w.window;
-    const mid = (start + end) / 2;
-    w.setWindow(mid, mid + (end - start) / 2000);
-  });
+  // Zoomed in to the analog samples, the first 50 µs, the rows read the channels' blocks.
+  await view.evaluate((v) => (v as unknown as { setWindow(a: number, b: number): void }).setWindow(1000, 1100));
   const log = async () => (await (await fetch(`http://127.0.0.1:8124/__log?tag=${tag}`)).json()) as { status: number }[];
   await expect.poll(async () => (await log()).some((e) => e.status === 0)).toBe(true);
   await view.evaluate((v) => v.setAttribute("src", "../../fixtures/identify-swd.tickwave"));
@@ -134,15 +142,22 @@ test("a read the old recording's rows had out, failing after a new recording, sa
 
 test("a read the old recording's readout had out, failing after a new recording, says nothing", async ({ page }, info) => {
   const tag = `readout-${info.project.name}-${info.repeatEachIndex}-${Date.now()}`;
-  // Past the footer's two reads, every read waits 2 s, then fails. Fitted, the rows read nothing more.
-  await page.goto(`${VIEW}?open&src=fixtures/swd50-cut.tickwave&tag=${tag}&firstRead=256&after=2&stall=2000&fail=500`);
+  // Past the reads of the whole capture, every read waits 2 s, then fails. Fitted, the rows read
+  // nothing more once those are in.
+  const n = await readsToDraw(page, "fixtures/swd50-cut.tickwave", `whole-${tag}`);
+  await page.goto(`${VIEW}?open&src=fixtures/swd50-cut.tickwave&tag=${tag}&firstRead=256&after=${n}&stall=2000&fail=500`);
   const view = page.locator("#v");
   await drawn(view);
+  await view.evaluate((v) => (v as unknown as { settled(): Promise<void> }).settled());
   const title = (await view.locator(".summary .title").textContent())!;
   const log = async () => (await (await fetch(`http://127.0.0.1:8124/__log?tag=${tag}`)).json()) as { status: number }[];
   const before = (await log()).length;
-  // Cursor A's readout reads each channel's value there.
-  await clickRow(page, view, 300);
+  // Cursor A's readout at tick 25,000, inside the first 50 µs where the analog samples lie, reads
+  // each analog channel's value there, from its block.
+  const box = (await view.locator(".plot").boundingBox())!;
+  const tickAt = (x: number) => view.evaluate((v, x) => (v as unknown as { tickAt(x: number): number }).tickAt(x), x);
+  const [t0, t1] = [await tickAt(box.x + 100), await tickAt(box.x + 400)];
+  await page.mouse.click(box.x + 100 + ((25_000 - t0) * 300) / (t1 - t0), box.y + 60);
   await expect.poll(async () => (await log()).length).toBeGreaterThan(before);
   await view.evaluate((v) => v.setAttribute("src", "../../fixtures/identify-swd.tickwave"));
   await expect(view.locator(".summary .title")).not.toHaveText(title, { timeout: 20_000 });
@@ -316,7 +331,7 @@ test("a collapsed view keeps its height when its footer arrives", async ({ page 
   });
   // The server holds every read a second, the footer's too.
   await page.goto(`${VIEW}?tag=${tag}&after=0&stall=1000`);
-  await expect(page.locator("#v .facts")).toHaveText("524 ms; 2 channels: SWCLK, SWDIO; 4.2 KiB", { timeout: 10_000 });
+  await expect(page.locator("#v .facts")).toHaveText("524 ms; 2 channels: SWCLK, SWDIO; 4.6 KiB", { timeout: 10_000 });
   const frames = await page.evaluate(() => (window as unknown as { frames: [number, string][] }).frames);
   // Frames before the footer and after it, at one height.
   expect(frames.filter(([, f]) => f === "").length).toBeGreaterThan(20);

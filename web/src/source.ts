@@ -72,6 +72,12 @@ export interface DigitalChannel {
   readonly end: number;
   /** Spans after `start` where the level was not known, in order (FORMAT.md, "Gaps"). */
   readonly gaps?: readonly Gap[];
+  /**
+   * The gaps are in the file's list pages, read only for the spans a view reads: `gaps` is
+   * absent, `start` is where the channel starts before any gap from there, and each answer for
+   * the channel carries the gaps its span needs (`Listed`).
+   */
+  readonly paged?: boolean;
   /** Where its source's ticks lie on the axis, which places its stated `kept` span; absent, at
    * their own ticks. Its other ticks are on the axis already. */
   readonly map?: Mapping;
@@ -111,6 +117,15 @@ export interface AnalogChannel {
   readonly count: number;
   /** Where the samples start again after a stop, in order, in the source's ticks. */
   readonly breaks?: readonly Break[];
+  /**
+   * The breaks are in the file's list pages, read only for the spans a view reads: `breaks` is
+   * absent, `end` is the recording's length, and each answer for the channel carries the breaks
+   * its span needs (`Listed`).
+   */
+  readonly paged?: boolean;
+  /** Samples the instrument lost before the first and after the last, where it lost any. */
+  readonly lostBefore?: number;
+  readonly lostAfter?: number;
   /** Where the source's ticks lie on the axis; absent, at their own ticks. */
   readonly map?: Mapping;
   /**
@@ -296,16 +311,85 @@ function indexAtOrAfterSource(c: Pick<AnalogChannel, "first" | "period" | "count
 
 /** The span each break's lost samples cover, as FORMAT.md words it: from place `index` to place
  * `index + lost` on the grid of the run before the break, ending at the break's tick if that comes
- * sooner. Whole ticks. */
+ * sooner. Then those lost before the first sample, on the first run's grid up to it, and after the
+ * last, on the last run's grid from the place after it. Whole ticks. */
 export function lostSpans(c: AnalogChannel): { from: number; to: number; lost: number }[] {
   const runs = c.breaks ?? [];
   const map = mapOf(c);
-  return runs.flatMap((b, k) => {
+  const out = runs.flatMap((b, k) => {
     if (b.lost === 0) return [];
     const [index, tick] = k === 0 ? [0, c.first] : [runs[k - 1].index, runs[k - 1].tick];
     const place = (i: number) => axisTick(map, Math.min(b.tick, sampleTick(tick, c.period, i - index)));
     return [{ from: place(b.index), to: place(b.index + b.lost), lost: b.lost }];
   });
+  return [...out, ...endLosses(c)];
+}
+
+/** The spans of the samples lost before the first and after the last (FORMAT.md, "Gaps"). A
+ * channel whose breaks are in pages knows its last run, and the span after it, only from an answer
+ * that reaches its end (`spanned`): without one, the span after is left out. */
+export function endLosses(c: AnalogChannel): { from: number; to: number; lost: number }[] {
+  const out: { from: number; to: number; lost: number }[] = [];
+  const map = mapOf(c);
+  if (c.lostBefore) out.push({ from: axisTick(map, sampleTick(c.first, c.period, -c.lostBefore)), to: axisTick(map, c.first), lost: c.lostBefore });
+  if (c.lostAfter && c.count > 0 && !(c.paged && c.breaks === undefined)) {
+    const runs = c.breaks ?? [];
+    const [index, tick] = runs.length === 0 ? [0, c.first] : [runs[runs.length - 1].index, runs[runs.length - 1].tick];
+    const place = (i: number) => axisTick(map, sampleTick(tick, c.period, i - index));
+    out.push({ from: place(c.count), to: place(c.count + c.lostAfter), lost: c.lostAfter });
+  }
+  return out;
+}
+
+/** The ticks a channel spans in a view: its data, and the samples an analog channel lost before
+ * its first and after its last, which a view shows as lost. */
+export function channelExtent(c: Channel): { start: number; end: number } {
+  let start = channelStart(c);
+  let end = c.end;
+  if (c.kind === "analog") {
+    for (const l of endLosses(c)) {
+      start = Math.min(start, l.from);
+      end = Math.max(end, l.to);
+    }
+  }
+  return { start, end };
+}
+
+/**
+ * What an answer for a span of a channel whose gaps or breaks are in pages (`paged`) carries: those
+ * the span needs. A digital channel's gaps on the axis, as `DigitalChannel.gaps` holds them: the
+ * last two that start at or before the span's start, every one that starts inside it, and the
+ * first that starts at or past its end. An analog channel's breaks in its source's ticks: the last
+ * that starts a run at or before the span's start, the one before it, and every one after it
+ * through the first at or past its end.
+ */
+export interface Listed {
+  readonly gaps?: readonly Gap[];
+  /** A digital channel's first known tick, where the answer reaches a gap from its start. */
+  readonly start?: number;
+  readonly breaks?: readonly Break[];
+  /** An analog channel's end, where the answer reaches its last run. */
+  readonly end?: number;
+}
+
+/** `listed` with each of its axis ticks through `f`, as a source that moves or rescales a channel
+ * moves its answers; breaks are in the source's ticks, which a channel's `map` places. */
+export function listedOnAxis(listed: Listed | undefined, f: (tick: number) => number): Listed | undefined {
+  if (!listed) return undefined;
+  return {
+    ...listed,
+    ...(listed.gaps && { gaps: listed.gaps.map((g) => ({ ...g, from: f(g.from), to: f(g.to) })) }),
+    ...(listed.start !== undefined && { start: f(listed.start) }),
+    ...(listed.end !== undefined && { end: f(listed.end) }),
+  };
+}
+
+/** The channel as an answer's span sees it: one whose gaps or breaks are in pages takes the
+ * answer's, which hold for ticks in that span. Any other is itself. */
+export function spanned(c: Channel, listed: Listed | undefined): Channel {
+  if (!c.paged || !listed) return c;
+  if (c.kind === "digital") return { ...c, gaps: listed.gaps ?? [], ...(listed.start !== undefined && { start: listed.start }) };
+  return { ...c, breaks: listed.breaks ?? [], ...(listed.end !== undefined ? { end: listed.end } : { lostAfter: undefined }) };
 }
 
 /** `a / b` in lowest terms, exactly: each term below 2^53 once reduced. */
@@ -404,6 +488,8 @@ export interface RecordingInfo {
   readonly contentId?: ContentId;
   readonly sources?: readonly SourceHeader[];
   readonly meta?: Readonly<Record<string, string>>;
+  /** The file bundles a sidecar, whose annotations a view reads when it first asks for them. */
+  readonly bundled?: boolean;
 }
 
 export interface Edges {
@@ -411,6 +497,8 @@ export interface Edges {
   readonly level: 0 | 1;
   /** Every edge in [start, end), in order. Two can share a tick: a pulse the source stamped with one time. */
   readonly ticks: Float64Array;
+  /** For a channel whose gaps are in pages, the gaps the span needs. */
+  readonly listed?: Listed;
 }
 
 /** Buckets of `bucket` ticks, the first starting at `start`, a multiple of `bucket`. */
@@ -422,6 +510,9 @@ export interface DigitalOverview {
   readonly level: Uint8Array;
   /** 1 where the level changes inside the bucket. */
   readonly changes: Uint8Array;
+  /** For a channel whose gaps are in pages, the gaps the span needs; absent from the coarsest
+   * level asked for with no limit, which a first draw reads from the footer alone. */
+  readonly listed?: Listed;
 }
 
 export interface AnalogOverview {
@@ -431,6 +522,8 @@ export interface AnalogOverview {
   /** The smallest and largest value in each bucket; +Infinity and -Infinity in one with no sample. */
   readonly min: Float64Array | Float32Array;
   readonly max: Float64Array | Float32Array;
+  /** For a channel whose breaks are in pages, as `DigitalOverview.listed`. */
+  readonly listed?: Listed;
 }
 
 export type Overview = DigitalOverview | AnalogOverview;
@@ -445,6 +538,8 @@ export interface Samples {
    * time to build what each draw reads.
    */
   readonly runs?: SampleRuns;
+  /** For a channel whose breaks are in pages, the breaks the span needs. */
+  readonly listed?: Listed;
 }
 
 export interface SampleRuns {
@@ -477,7 +572,8 @@ export interface Source {
   /**
    * The coarsest overview level whose bucket is no larger than `maxBucket` ticks, covering
    * [start, end). Null when even the finest level is coarser than that, or the source has none:
-   * the caller then reads edges or samples.
+   * the caller then reads edges or samples. With no limit, `Infinity`, it is the first draw's:
+   * the coarsest level, from what the footer holds alone, so it carries no `listed`.
    */
   overview(
     channel: number,

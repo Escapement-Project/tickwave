@@ -2,23 +2,23 @@
 // channels the view shows. No DOM, so the wording can be tested without a page.
 
 import { formatBrief, formatBytes } from "./readouts.ts";
-import { channelStart, readingStep, type RecordingInfo } from "./source.ts";
+import { channelExtent, readingStep, type RecordingInfo } from "./source.ts";
 
 /**
  * The first tick a view of `shown` channels spans: the capture's start, or earlier where a channel's
  * data starts before it, as a channel moved earlier in the convert flow's preview does.
  */
 export function shownStart(info: RecordingInfo, shown: readonly number[]): number {
-  return Math.min(0, ...shown.map((i) => channelStart(info.channels[i])));
+  return Math.min(0, ...shown.map((i) => channelExtent(info.channels[i]).start));
 }
 
 /**
  * The ticks a view of `shown` channels spans: the recording's length with all of them, else as far
- * as the furthest of them ends.
+ * as the furthest of them ends, the samples an analog channel lost after its last included.
  */
 export function shownExtent(info: RecordingInfo, shown: readonly number[]): number {
   if (new Set(shown).size === info.channels.length) return info.length;
-  const end = Math.max(0, ...shown.map((i) => info.channels[i].end));
+  const end = Math.max(0, ...shown.map((i) => channelExtent(info.channels[i]).end));
   return end > 0 ? end : info.length;
 }
 

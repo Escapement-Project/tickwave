@@ -11,6 +11,18 @@ import { MemorySource } from "../src/memory-source.ts";
 const LENGTH = 2 ** 24;
 const COLUMNS = 1000;
 
+test("a track asks for its coarsest level when it is made, before any draw asks for a view", () => {
+  const asked: number[] = [];
+  const source = new MemorySource({ title: "c", timebase: { num: 1e9, den: 1 }, length: LENGTH, channels: [{ kind: "digital", name: "CLK", end: LENGTH, initial: 0, ticks: new Float64Array([10]) }] });
+  const overview = source.overview.bind(source);
+  source.overview = (c, s, e, maxBucket, signal) => {
+    asked.push(maxBucket);
+    return overview(c, s, e, maxBucket, signal);
+  };
+  new Track(source, 0, { kind: "digital", name: "CLK", end: LENGTH }, () => {}, () => {});
+  assert.deepEqual(asked, [Infinity]);
+});
+
 function clockTrack(): Track {
   const ticks = new Float64Array(Math.floor(LENGTH / 1000) - 1).map((_, i) => (i + 1) * 1000);
   const source = new MemorySource({

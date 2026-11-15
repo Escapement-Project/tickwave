@@ -3,7 +3,21 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { channelIndexAtOrAfter, channelSampleTick, inChannel, knownSpans, lostSpans, placeAfter, sampleAtOrBefore, type AnalogChannel, type DigitalChannel } from "../src/source.ts";
+import {
+  channelExtent,
+  channelIndexAtOrAfter,
+  channelSampleTick,
+  endLosses,
+  inChannel,
+  knownSpans,
+  listedOnAxis,
+  lostSpans,
+  placeAfter,
+  sampleAtOrBefore,
+  spanned,
+  type AnalogChannel,
+  type DigitalChannel,
+} from "../src/source.ts";
 
 /** Samples 0 to 4 from tick 0, every 3/2 ticks (ticks 0, 1, 3, 4, 6); two lost; then samples 5
  * to 9 from tick 30 (ticks 30, 31, 33, 34, 36). */
@@ -71,4 +85,57 @@ test("a digital channel's data splits around its gaps", () => {
   assert.deepEqual(knownSpans(g, 15, 65), [[20, 60]]);
   assert.deepEqual(knownSpans({ ...g, start: 5 }, 0, 12), [[5, 10]]);
   assert.deepEqual([9, 10, 19, 20].map((t) => inChannel(g, t)), [true, false, false, true]);
+});
+
+test("the samples lost before the first and after the last: on the first run's grid and the last's", () => {
+  // Three lost before tick 10, every 3/2 ticks: places -3 to -1 on the first run's grid, from
+  // 10 + floor(-4.5) = 5. Two lost after sample 9, the second run's fifth: on the grid of the run
+  // at 30, from sample 5, places 10 to 12 run from 30 + floor(7.5) = 37 to 30 + floor(10.5) = 40.
+  const lost: AnalogChannel = { ...w, first: 10, breaks: [{ index: 5, tick: 30, lost: 0 }], lostBefore: 3, lostAfter: 2 };
+  assert.deepEqual(endLosses(lost), [
+    { from: 5, to: 10, lost: 3 },
+    { from: 37, to: 40, lost: 2 },
+  ]);
+  // A view pales them as it pales the samples lost at a break, and spans them.
+  assert.deepEqual(lostSpans({ ...lost, breaks: [{ index: 5, tick: 30, lost: 2 }] }), [
+    { from: 17, to: 20, lost: 2 },
+    { from: 5, to: 10, lost: 3 },
+    { from: 37, to: 40, lost: 2 },
+  ]);
+  assert.deepEqual(channelExtent({ ...lost, end: 37 }), { start: 5, end: 40 });
+  // Without a break the last run is the first: places 10 and 12 from 10 are 25 and 28.
+  assert.deepEqual(endLosses({ ...lost, breaks: [], lostBefore: undefined }), [{ from: 25, to: 28, lost: 2 }]);
+  // None lost: the extent is the data's.
+  assert.deepEqual(channelExtent(w), { start: 0, end: 40 });
+});
+
+test("a channel whose list is in pages takes an answer's, which holds for the answer's span", () => {
+  const paged: AnalogChannel = { ...w, breaks: undefined, paged: true, end: 100, lostAfter: 2 };
+  // Breaks around a span in the middle: the place after the last sample is not known, so nor is
+  // the loss after it.
+  const middle = spanned(paged, { breaks: [{ index: 5, tick: 30, lost: 2 }] });
+  assert.ok(middle.kind === "analog");
+  assert.deepEqual([middle.breaks, middle.end, middle.lostAfter], [[{ index: 5, tick: 30, lost: 2 }], 100, undefined]);
+  // Without an answer the last run is not known, nor the loss after it.
+  assert.deepEqual(endLosses(paged), []);
+  // An answer that reaches the end gives it, and the loss after it follows.
+  const end = spanned(paged, { breaks: [{ index: 5, tick: 30, lost: 2 }], end: 37 }) as AnalogChannel;
+  assert.deepEqual([end.end, endLosses(end)], [37, [{ from: 37, to: 40, lost: 2 }]]);
+  // A digital channel's gaps, and where its level is first known.
+  const d: DigitalChannel = { kind: "digital", name: "D", end: 100, paged: true };
+  const at = spanned(d, { gaps: [{ from: 40, to: 50, level: 1 }], start: 30 });
+  assert.deepEqual(knownSpans(at, 0, 100), [
+    [30, 40],
+    [50, 100],
+  ]);
+  // A channel whose list is in its header is itself, whatever an answer carries.
+  const g: DigitalChannel = { kind: "digital", name: "G", end: 100, gaps: [{ from: 10, to: 20, level: 1 }] };
+  assert.equal(spanned(g, { gaps: [] }), g);
+  // Moved along the axis, an answer's gaps and ends move with it; its breaks are the source's ticks.
+  assert.deepEqual(listedOnAxis({ gaps: [{ from: 40, to: 50, level: 1 }], start: 30, end: 90, breaks: [{ index: 1, tick: 7, lost: 0 }] }, (t) => t + 5), {
+    gaps: [{ from: 45, to: 55, level: 1 }],
+    start: 35,
+    end: 95,
+    breaks: [{ index: 1, tick: 7, lost: 0 }],
+  });
 });

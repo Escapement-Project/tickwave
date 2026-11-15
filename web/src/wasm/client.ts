@@ -40,6 +40,25 @@ function start(): Worker {
 
 type Body = Request extends infer R ? (R extends { id: number } ? Omit<R, "id"> : never) : never;
 
+/**
+ * The requests not yet posted. The first queues a microtask that posts it, with every request made
+ * before that microtask runs, in one message: the worker starts them in one task of its own, so
+ * the reads they need, a view's channels' at once, go out together. A request made after it runs
+ * goes in the next message.
+ */
+let batch: Request[] | null = null;
+
+function post(w: Worker, m: Request): void {
+  if (!batch) {
+    const b: Request[] = (batch = []);
+    queueMicrotask(() => {
+      batch = null;
+      if (b.length > 0) w.postMessage(b.length === 1 ? b[0] : { op: "batch", requests: b });
+    });
+  }
+  batch.push(m);
+}
+
 function call<T>(body: Body, signal?: AbortSignal): Promise<T> {
   if (signal?.aborted) return Promise.reject(aborted());
   const w = start();
@@ -47,7 +66,10 @@ function call<T>(body: Body, signal?: AbortSignal): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const onAbort = () => {
       if (!pending.delete(id)) return;
-      w.postMessage({ op: "abort", id });
+      // Not posted yet: it goes no further. Else the worker stops it.
+      const at = batch?.findIndex((m) => m.id === id) ?? -1;
+      if (at >= 0) batch!.splice(at, 1);
+      else w.postMessage({ op: "abort", id });
       reject(aborted());
     };
     pending.set(id, {
@@ -61,7 +83,7 @@ function call<T>(body: Body, signal?: AbortSignal): Promise<T> {
       },
     });
     signal?.addEventListener("abort", onAbort, { once: true });
-    w.postMessage({ ...body, id });
+    post(w, { ...body, id } as Request);
   });
 }
 

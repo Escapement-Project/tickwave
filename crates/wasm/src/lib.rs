@@ -1,18 +1,29 @@
 //! tickwave's decoder for the browser. JavaScript fetches the bytes (the file's end, then the
-//! index pages it asks for, then the blocks a view covers) and hands them in; this decodes them.
+//! pages a view's channels and span need, then the blocks they place) and hands them in; this
+//! decodes them.
+//!
+//! Two ways to read the index. A page reads it a page at a time: `blockPages`, `levelPages` and
+//! `listPages` say which pages of a channel's table hold a span, `blockPage`, `levelPage` and
+//! `listPage` check one and give its entries, and `decodeBlockAt` and `decodeOverviewAt` decode
+//! the frames they place. A script that reads everything hands in the whole index through
+//! `indexRanges` and `addIndexPage` and asks by block and row number.
 
 use std::collections::HashMap;
+use std::ops::ControlFlow;
 
 #[cfg(feature = "annotations")]
 use escapement_tickwave_format::annotations::{self, Included};
 use escapement_tickwave_format::decode::{
-    self, BlockChannel, BlockRef, DecodeError, Footer, Index, LevelRef,
+    self, BlockChannel, BlockRef, DecodeError, Footer, Index, LevelRef, List,
 };
-use escapement_tickwave_format::header::AnalogCoding;
-use escapement_tickwave_format::index::TableIndex;
+use escapement_tickwave_format::header::{
+    AnalogCoding, BlockRow, MAJOR, OverviewRow, PREAMBLE_LEN, TRAILER_LEN, Trailer,
+};
+use escapement_tickwave_format::index::{Entry, Located, TableIndex};
+use escapement_tickwave_format::model::{Break, Gap};
 use escapement_tickwave_format::overview::{AnalogOverview, ChannelOverview, Level};
-use escapement_tickwave_format::samples::{Product, Values};
-use js_sys::{Float32Array, Float64Array, Uint8Array};
+use escapement_tickwave_format::samples::{self, Product, Values};
+use js_sys::{BigInt64Array, Float32Array, Float64Array, Uint8Array};
 use wasm_bindgen::prelude::*;
 
 fn limit(max_decoded: Option<u32>) -> usize {
@@ -29,14 +40,39 @@ fn no_channel(c: usize) -> JsError {
 
 /// Where the footer starts, from the file's last bytes, `tail`, of a file `fileLen` long: the
 /// offset to read from to the end. When `tail` already holds the footer, that is where `tail`
-/// starts. Throws when the bytes are not a finished tickwave recording.
+/// starts. It reads only the trailer, so the footer is parsed once, by `new Recording`. Throws
+/// when the trailer is not a finished tickwave recording's.
 #[wasm_bindgen(js_name = footerStart)]
 pub fn footer_start(tail: &[u8], file_len: f64) -> Result<f64, JsError> {
-    match Footer::parse(tail, file_len as u64) {
-        Ok(_) => Ok(file_len - tail.len() as f64),
-        Err(DecodeError::NeedFrom(at)) => Ok(at as f64),
-        Err(e) => Err(js(e)),
+    let len = file_len as u64;
+    let tail_start = len
+        .checked_sub(tail.len() as u64)
+        .ok_or_else(|| JsError::new("more bytes than the file holds"))?;
+    if len < (PREAMBLE_LEN + TRAILER_LEN) as u64 {
+        return Err(js(DecodeError::NotTickwave));
     }
+    if tail.len() < TRAILER_LEN {
+        return Ok((len - TRAILER_LEN as u64) as f64);
+    }
+    let trailer = Trailer::parse(&tail[tail.len() - TRAILER_LEN..])
+        .ok_or_else(|| js(DecodeError::Unfinished))?;
+    if trailer.major != MAJOR {
+        return Err(js(DecodeError::Version {
+            major: trailer.major,
+            minor: trailer.minor,
+        }));
+    }
+    let ends = trailer.footer_offset >= PREAMBLE_LEN as u64
+        && trailer
+            .footer_offset
+            .checked_add(u64::from(trailer.footer_len))
+            .is_some_and(|end| end == len - TRAILER_LEN as u64);
+    if !ends {
+        return Err(JsError::new(
+            "the trailer's footer does not end where the trailer starts",
+        ));
+    }
+    Ok(trailer.footer_offset.min(tail_start) as f64)
 }
 
 /// A recording as its footer and index say: its header, and once JavaScript has handed in the
@@ -46,6 +82,11 @@ pub struct Recording {
     read: Read,
     /// The index pages handed in, by offset, until the index is read.
     pages: HashMap<u64, Vec<u8>>,
+    /// The directory pages handed in through `addDirectory`, by offset: one for every 16 M
+    /// entries of a table, so they are kept.
+    dirs: HashMap<u64, Vec<u8>>,
+    /// The directory pages the last look-up lacked.
+    missing: Vec<(u64, u32)>,
     header: String,
     /// The most it decodes from one frame.
     max: usize,
@@ -91,6 +132,8 @@ impl Recording {
             header: String::from_utf8_lossy(stored).into_owned(),
             read: Read::Footer(footer),
             pages: HashMap::new(),
+            dirs: HashMap::new(),
+            missing: Vec::new(),
             max: limit(max_decoded),
         })
     }
@@ -373,6 +416,455 @@ impl Recording {
     }
 }
 
+/// A located page as `blockPages`, `levelPages` and `listPages` give it: its place among the
+/// table's pages, its record's offset and length, the `first` and `number` of its entry, and the
+/// next page's, NaN for the table's last page.
+const LOCATED: usize = 7;
+/// A block as `blockPage` gives it: its start and end, its first item's index, its frame's offset,
+/// length and decoded length, its word, and the next block's word, NaN for a page's last block.
+const BLOCK: usize = 8;
+/// An overview row as `levelPage` gives it: the first block it stands for, its frame's offset,
+/// length and decoded length, and how many blocks it stands for.
+const ROW: usize = 5;
+
+fn located(at: &[f64]) -> Result<Located, JsError> {
+    let &[j, offset, length, first, number, next_first, next_number] = at else {
+        return Err(JsError::new(&format!(
+            "a located page is {LOCATED} numbers, not {}",
+            at.len()
+        )));
+    };
+    Ok(Located {
+        j: j as u64,
+        entry: Entry {
+            first: first as i64,
+            number: number as u64,
+            offset: offset as u64,
+            length: length as u32,
+        },
+        next: (!next_first.is_nan()).then_some((next_first as i64, next_number as u64)),
+    })
+}
+
+fn located_numbers(pages: &[Located]) -> Vec<f64> {
+    let mut out = Vec::with_capacity(pages.len() * LOCATED);
+    for p in pages {
+        let (nf, nn) = p
+            .next
+            .map_or((f64::NAN, f64::NAN), |(f, n)| (f as f64, n as f64));
+        out.extend([
+            p.j as f64,
+            p.entry.offset as f64,
+            f64::from(p.entry.length),
+            p.entry.first as f64,
+            p.entry.number as f64,
+            nf,
+            nn,
+        ]);
+    }
+    out
+}
+
+fn block_ref(b: &[f64]) -> Result<BlockRef, JsError> {
+    let &[start, end, first_index, offset, length, decoded, word, next] = b else {
+        return Err(JsError::new(&format!(
+            "a block is {BLOCK} numbers, not {}",
+            b.len()
+        )));
+    };
+    Ok(BlockRef {
+        start: start as i64,
+        end: end as i64,
+        first_index: first_index as u64,
+        row: BlockRow {
+            start: start as i64,
+            offset: offset as u64,
+            length: length as u32,
+            decoded_length: decoded as u32,
+            word: word as u32,
+        },
+        next_word: (!next.is_nan()).then_some(next as u32),
+    })
+}
+
+/// A channel's gaps or breaks as `listPage` gives them, three numbers an entry.
+fn list_of(digital: bool, entries: &[f64]) -> Result<List, JsError> {
+    let (entries, rest) = entries.as_chunks::<3>();
+    if !rest.is_empty() {
+        return Err(JsError::new("a list is three numbers an entry"));
+    }
+    Ok(if digital {
+        List::Gaps(
+            entries
+                .iter()
+                .map(|&[from, to, level]| Gap {
+                    from: from as i64,
+                    to: to as i64,
+                    level: level != 0.0,
+                })
+                .collect(),
+        )
+    } else {
+        List::Breaks(
+            entries
+                .iter()
+                .map(|&[index, tick, lost]| Break {
+                    index: index as u64,
+                    tick: tick as i64,
+                    lost: lost as u64,
+                })
+                .collect(),
+        )
+    })
+}
+
+/// The page-at-a-time index: what a view reads for the channels and the span it shows.
+#[wasm_bindgen]
+impl Recording {
+    /// Hands in the directory page at `offset`, as `missing` asked.
+    #[wasm_bindgen(js_name = addDirectory)]
+    pub fn add_directory(&mut self, offset: f64, bytes: &[u8]) {
+        self.dirs.insert(offset as u64, bytes.to_vec());
+    }
+
+    /// The directory pages the last `blockPages`, `levelPages` or `listPages` lacked, as byte
+    /// ranges `[offset, end, offset, end, ...]`.
+    pub fn missing(&self) -> Vec<f64> {
+        self.missing
+            .iter()
+            .flat_map(|&(o, l)| [o as f64, (o + u64::from(l)) as f64])
+            .collect()
+    }
+
+    /// The pages of `table` holding entries whose keys lie in `keys`, located through the
+    /// directories handed in; None where one on the way is not in yet, which `missing` names.
+    fn locate(
+        &mut self,
+        table: &TableIndex,
+        keys: std::ops::Range<i64>,
+    ) -> Result<Option<Vec<f64>>, JsError> {
+        let Self { dirs, missing, .. } = self;
+        missing.clear();
+        let mut fetch = |offset: u64, len: u32| match dirs.get(&offset) {
+            Some(bytes) if bytes.len() == len as usize => Ok(bytes.clone()),
+            _ => {
+                missing.push((offset, len));
+                Err(DecodeError::Corrupt(format!(
+                    "the directory page at byte {offset} is not in yet"
+                )))
+            }
+        };
+        let mut pages = Vec::new();
+        let walked = table.locate(keys, &mut fetch, |at| {
+            pages.push(at);
+            Ok::<_, DecodeError>(ControlFlow::Continue(()))
+        });
+        if !self.missing.is_empty() {
+            return Ok(None);
+        }
+        walked.map_err(js)?;
+        Ok(Some(located_numbers(&pages)))
+    }
+
+    /// The pages of channel `c`'s block table that hold any tick of `[start, end)`, each as
+    /// seven numbers: its place, its record's offset and length, its entry's `first` and `number`,
+    /// and the next page's, NaN after the last. Undefined where a directory page on the way is
+    /// not in yet: `missing` says which, to hand in through `addDirectory` before asking again.
+    #[wasm_bindgen(js_name = blockPages)]
+    pub fn block_pages(
+        &mut self,
+        c: usize,
+        start: f64,
+        end: f64,
+    ) -> Result<Option<Vec<f64>>, JsError> {
+        let table = self
+            .footer()
+            .channels
+            .get(c)
+            .and_then(|ch| ch.blocks.clone())
+            .ok_or_else(|| no_channel(c))?;
+        let from = start.floor() as i64;
+        let to = (end.ceil() as i64).max(from.saturating_add(1));
+        self.locate(&table, from..to)
+    }
+
+    /// The pages of overview channel `o`'s level `li` (of those in overview blocks, finest first)
+    /// that hold rows standing for any of its blocks `k0..k1`, as `blockPages` gives them.
+    #[wasm_bindgen(js_name = levelPages)]
+    pub fn level_pages(
+        &mut self,
+        o: usize,
+        li: usize,
+        k0: f64,
+        k1: f64,
+    ) -> Result<Option<Vec<f64>>, JsError> {
+        let table = self
+            .footer()
+            .channels
+            .get(o)
+            .and_then(|ch| ch.levels.get(li))
+            .map(|(_, t)| t.clone())
+            .ok_or_else(|| {
+                JsError::new(&format!("channel {o} has no overview level {li} in blocks"))
+            })?;
+        let from = k0.floor() as i64;
+        self.locate(&table, from..(k1.ceil() as i64).max(from.saturating_add(1)))
+    }
+
+    /// The pages of channel `c`'s gaps or breaks, where they are in list pages, that hold entries
+    /// keyed `[k0, k1)`: a gap's `from`, a break's `tick`, source ticks. Where the keys lie before
+    /// every entry, the first page, whose entries bound the run before them. As `blockPages` gives
+    /// them.
+    #[wasm_bindgen(js_name = listPages)]
+    pub fn list_pages(&mut self, c: usize, k0: f64, k1: f64) -> Result<Option<Vec<f64>>, JsError> {
+        let table = self
+            .footer()
+            .channels
+            .get(c)
+            .and_then(|ch| ch.list.clone())
+            .ok_or_else(|| JsError::new(&format!("channel {c} has no list in pages")))?;
+        let from = k0.floor() as i64;
+        let pages = self.locate(&table, from..(k1.ceil() as i64).max(from.saturating_add(1)))?;
+        let first = table.levels.last().and_then(|l| l.first()).map(|e| e.first);
+        match (pages, first) {
+            (Some(p), Some(first)) if p.is_empty() => {
+                self.locate(&table, first..first.saturating_add(1))
+            }
+            (pages, _) => Ok(pages),
+        }
+    }
+
+    /// Channel `c`'s blocks on the page `at` locates (seven numbers, as `blockPages` gives it),
+    /// from exactly the page record's bytes, each checked as the whole table would be: eight
+    /// numbers a block, its start and end, its first item's index, its frame's offset, length and
+    /// decoded length, its word, and the next block's word, NaN for the page's last. A channel
+    /// whose gaps or breaks are in pages is checked against them block by block, as
+    /// `decodeBlockAt` decodes each.
+    #[wasm_bindgen(js_name = blockPage)]
+    pub fn block_page(&self, c: usize, at: &[f64], bytes: &[u8]) -> Result<Vec<f64>, JsError> {
+        let at = located(at)?;
+        let footer = self.footer();
+        let table = footer
+            .channels
+            .get(c)
+            .and_then(|ch| ch.blocks.as_ref())
+            .ok_or_else(|| no_channel(c))?;
+        let page = table.parse_page(0, at.j, &at.entry, bytes).map_err(js)?;
+        let refs = footer.block_page(c, &at, &page, None).map_err(js)?;
+        let mut out = Vec::with_capacity(refs.len() * BLOCK);
+        for b in refs {
+            out.extend([
+                b.start as f64,
+                b.end as f64,
+                b.first_index as f64,
+                b.row.offset as f64,
+                f64::from(b.row.length),
+                f64::from(b.row.decoded_length),
+                f64::from(b.row.word),
+                b.next_word.map_or(f64::NAN, f64::from),
+            ]);
+        }
+        Ok(out)
+    }
+
+    /// Overview channel `o`'s level `li`'s rows on the page `at` locates, from exactly its bytes,
+    /// checked: five numbers a row, the first block it stands for, its frame's offset, length and
+    /// decoded length, and how many blocks it stands for.
+    #[wasm_bindgen(js_name = levelPage)]
+    pub fn level_page(
+        &self,
+        o: usize,
+        li: usize,
+        at: &[f64],
+        bytes: &[u8],
+    ) -> Result<Vec<f64>, JsError> {
+        let at = located(at)?;
+        let footer = self.footer();
+        let (_, table) = footer
+            .channels
+            .get(o)
+            .and_then(|ch| ch.levels.get(li))
+            .ok_or_else(|| {
+                JsError::new(&format!("channel {o} has no overview level {li} in blocks"))
+            })?;
+        let page = table.parse_page(0, at.j, &at.entry, bytes).map_err(js)?;
+        let rows = footer.level_page(o, li, &at, &page).map_err(js)?;
+        let mut out = Vec::with_capacity(rows.len() * ROW);
+        for r in rows {
+            out.extend([
+                r.k as f64,
+                r.row.offset as f64,
+                f64::from(r.row.length),
+                f64::from(r.row.decoded_length),
+                f64::from(r.row.n),
+            ]);
+        }
+        Ok(out)
+    }
+
+    /// Channel `c`'s gaps or breaks on the list page `at` locates, from exactly its bytes, checked
+    /// as the whole list would be: three numbers an entry, a gap's `from`, `to` and level (0 or
+    /// 1), or a break's index, tick and samples lost, in source ticks.
+    #[wasm_bindgen(js_name = listPage)]
+    pub fn list_page(&self, c: usize, at: &[f64], bytes: &[u8]) -> Result<Vec<f64>, JsError> {
+        let at = located(at)?;
+        let footer = self.footer();
+        let table = footer
+            .channels
+            .get(c)
+            .and_then(|ch| ch.list.as_ref())
+            .ok_or_else(|| JsError::new(&format!("channel {c} has no list in pages")))?;
+        let page = table.parse_page(0, at.j, &at.entry, bytes).map_err(js)?;
+        Ok(match footer.list_page(c, &at, &page).map_err(js)? {
+            List::Gaps(g) => g
+                .iter()
+                .flat_map(|g| [g.from as f64, g.to as f64, f64::from(u8::from(g.level))])
+                .collect(),
+            List::Breaks(b) => b
+                .iter()
+                .flat_map(|b| [b.index as f64, b.tick as f64, b.lost as f64])
+                .collect(),
+        })
+    }
+
+    /// Decodes channel `c`'s block `block` (eight numbers, as `blockPage` gives it) from exactly
+    /// its frame's bytes. `list` is a channel's gaps or breaks that the block's ticks need, as
+    /// `listPage` gives them, where they are in pages; undefined where the header holds them.
+    #[wasm_bindgen(js_name = decodeBlockAt)]
+    pub fn decode_block_at(
+        &self,
+        c: usize,
+        block: &[f64],
+        frame: &[u8],
+        list: Option<Vec<f64>>,
+    ) -> Result<Block, JsError> {
+        let b = block_ref(block)?;
+        let footer = self.footer();
+        let ch = footer.header.channels.get(c).ok_or_else(|| no_channel(c))?;
+        let inflate = |f: &[u8], len| decode::inflate_limited(f, len, self.max);
+        let block = match list {
+            Some(entries) => {
+                let digital = ch.coding().is_none();
+                footer.decode_block_in_with(c, &b, frame, &list_of(digital, &entries)?, inflate)
+            }
+            None => footer.decode_block_with(c, &b, frame, inflate),
+        }
+        .map_err(js)?;
+        Ok(Block {
+            start: block.start,
+            end: block.end,
+            coding: ch.coding(),
+            data: block.data,
+        })
+    }
+
+    /// Decodes overview channel `o`'s level `li`'s row `row` (five numbers, as `levelPage` gives
+    /// it) from exactly its frame's bytes.
+    #[wasm_bindgen(js_name = decodeOverviewAt)]
+    pub fn decode_overview_at(
+        &self,
+        o: usize,
+        li: usize,
+        row: &[f64],
+        frame: &[u8],
+    ) -> Result<OverviewLevel, JsError> {
+        let &[k, offset, length, decoded, n] = row else {
+            return Err(JsError::new(&format!(
+                "an overview row is {ROW} numbers, not {}",
+                row.len()
+            )));
+        };
+        let r = LevelRef {
+            k: k as u64,
+            row: OverviewRow {
+                offset: offset as u64,
+                length: length as u32,
+                decoded_length: decoded as u32,
+                n: n as u32,
+            },
+        };
+        let block = self
+            .footer()
+            .decode_overview_with(o, li, &r, frame, |f, len| {
+                decode::inflate_limited(f, len, self.max)
+            })
+            .map_err(js)?;
+        Ok(self.level(o, block.first, block.n, block.level))
+    }
+
+    /// Derived channel `d`'s values from its operands' samples at the same indices, each as its
+    /// channel stores them: an `f32` or `codes` channel's values as a Float32Array, an `f64`
+    /// channel's as a Float64Array, an `int` channel's codes as a BigInt64Array (an unsigned
+    /// code's bits as they are), as `Block.codes` gives them.
+    #[wasm_bindgen(js_name = productValues)]
+    pub fn product_values(
+        &self,
+        d: usize,
+        a: JsValue,
+        b: JsValue,
+    ) -> Result<Float64Array, JsError> {
+        let footer = self.footer();
+        let &(ia, ib, product) = footer
+            .products
+            .get(d)
+            .ok_or_else(|| JsError::new(&format!("no derived channel {d}")))?;
+        let coding = |c: usize| footer.header.channels.get(c).and_then(|ch| ch.coding());
+        let (a, b) = (stored(a, coding(ia))?, stored(b, coding(ib))?);
+        let values = samples::product_values(product, &a, &b)
+            .map_err(|what| JsError::new(&format!("derived channel {d}: {what}")))?;
+        let values: Vec<f64> = values.iter().map(|s| product.value(s)).collect();
+        Ok(Float64Array::from(&values[..]))
+    }
+
+    /// The annotation bundle record's byte range, `[offset, end)`; empty without one.
+    #[wasm_bindgen(js_name = bundleRange)]
+    pub fn bundle_range(&self) -> Vec<f64> {
+        self.footer().bundle.map_or_else(Vec::new, |(at, len)| {
+            vec![at as f64, (at + u64::from(len)) as f64]
+        })
+    }
+
+    /// The annotation bundle's files, from exactly its record's bytes: a JSON object of each
+    /// file's name and text.
+    #[wasm_bindgen(js_name = bundleFiles)]
+    pub fn bundle_files(&self, bytes: &[u8]) -> Result<String, JsError> {
+        let files = self
+            .footer()
+            .read_bundle(|_, len| {
+                if bytes.len() == len as usize {
+                    Ok(bytes.to_vec())
+                } else {
+                    Err(DecodeError::Corrupt(format!(
+                        "the annotation bundle is {len} bytes, not the {} handed in",
+                        bytes.len()
+                    )))
+                }
+            })
+            .map_err(js)?
+            .ok_or_else(|| JsError::new("the recording bundles no annotations"))?;
+        Ok(serde_json::to_string(&files).expect("strings serialise"))
+    }
+}
+
+/// An operand's samples as JavaScript holds them, read as its coding stores them.
+fn stored(v: JsValue, coding: Option<AnalogCoding>) -> Result<Values, JsError> {
+    let wrong = || JsError::new("an operand's samples are not as its channel stores them");
+    Ok(match coding.ok_or_else(wrong)? {
+        AnalogCoding::Int(int) => {
+            let codes = v.dyn_into::<BigInt64Array>().map_err(|_| wrong())?.to_vec();
+            if int.signed {
+                Values::I64(codes)
+            } else {
+                Values::U64(codes.into_iter().map(|c| c as u64).collect())
+            }
+        }
+        AnalogCoding::F64 => {
+            Values::F64(v.dyn_into::<Float64Array>().map_err(|_| wrong())?.to_vec())
+        }
+        _ => Values::F32(v.dyn_into::<Float32Array>().map_err(|_| wrong())?.to_vec()),
+    })
+}
+
 /// Notes each of `table`'s pages that `pages` lacks: its directories first, then, once they are
 /// in, the pages they list.
 fn each_page(table: &TableIndex, pages: &HashMap<u64, Vec<u8>>, missing: &mut Vec<(u64, u32)>) {
@@ -600,6 +1092,17 @@ impl Block {
             _ => return None,
         };
         Some(Float64Array::from(&values[..]))
+    }
+
+    /// An `int` channel's codes in the block, an unsigned code's bits as they are: what
+    /// `productValues` takes of an integer operand.
+    pub fn codes(&self) -> Option<BigInt64Array> {
+        let codes: Vec<i64> = match self.data.values()? {
+            Values::I64(v) => v.clone(),
+            Values::U64(v) => v.iter().map(|&c| c as i64).collect(),
+            _ => return None,
+        };
+        Some(BigInt64Array::from(&codes[..]))
     }
 
     /// An analog channel's index of the block's first sample.
