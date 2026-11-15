@@ -5,10 +5,12 @@
 use std::ops::Range;
 use std::sync::atomic::AtomicBool;
 
+use crate::cache::Reading;
 use crate::columns::{
     self, AnalogOverview, DigitalColumns, DigitalOverview, Edges, Grid, Samples, State,
 };
 use crate::markers::{Marker, MarkerCursor, Page};
+use crate::read::index_in;
 use crate::recording::{Error, Place, Recording, Revision};
 use crate::runs::lost_spans_in;
 use crate::spans::known_spans;
@@ -130,6 +132,13 @@ pub struct Answer {
     pub markers: MarkerAnswer,
     pub extent: Option<Range<i64>>,
     pub revision: Revision,
+}
+
+/// Whether an answer is exact, or a sketch from each channel's coarsest level.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum How {
+    Exact,
+    Sketch,
 }
 
 /// A query's window, `around`, and the grid over it.
@@ -267,7 +276,17 @@ impl Recording {
     /// `Error::Cancelled`.
     #[tracing::instrument(level = "debug", name = "query", skip_all, fields(columns = q.columns, ticks = q.window.end - q.window.start))]
     pub fn query(&self, q: &Query, cancel: &AtomicBool) -> Result<Answer, Error> {
-        self.answer(q, layout(q), &[], cancel)
+        self.answer(q, layout(q), &[], &Reading::new(cancel), How::Exact)
+    }
+
+    /// What `query` would draw of `q`, each channel from its coarsest level alone: a finished
+    /// file's strips, which its footer holds, so it reads nothing past the footer. A first draw
+    /// draws it while the exact answer is on the way. A column takes the buckets it touches,
+    /// however wide they are. It holds no single samples, no statistics and no markers, and its
+    /// extent, the strip's included, is the data's, the markers aside.
+    #[tracing::instrument(level = "debug", name = "sketch", skip_all, fields(columns = q.columns, ticks = q.window.end - q.window.start))]
+    pub fn sketch(&self, q: &Query, cancel: &AtomicBool) -> Result<Answer, Error> {
+        self.answer(q, layout(q), &[], &Reading::new(cancel), How::Sketch)
     }
 
     /// What `query` answers, worked out from `held`, this recording's answer to `asked`: the
@@ -311,7 +330,7 @@ impl Recording {
         let mut keep = Vec::with_capacity(query.channels.len());
         for (&c, drawn) in query.channels.iter().zip(&held.channels) {
             let kind = matches!(
-                (self.place(c)?, drawn),
+                (self.places.get(c).ok_or(Error::NoChannel(c))?, drawn),
                 (Place::Digital { .. }, Drawn::Digital { .. })
                     | (Place::Analog { .. }, Drawn::Analog { .. })
             );
@@ -326,7 +345,8 @@ impl Recording {
                 from: column.clamp(0, before.grid.count.min(now.grid.count) as i128) as usize,
             });
         }
-        self.answer(query, now, &keep, cancel).map(Some)
+        self.answer(query, now, &keep, &Reading::new(cancel), How::Exact)
+            .map(Some)
     }
 
     /// The answer to `q` over `layout`, each channel's columns from `keep`'s where it has one.
@@ -335,7 +355,8 @@ impl Recording {
         q: &Query,
         layout: Layout,
         keep: &[Keep<'_>],
-        cancel: &AtomicBool,
+        r: &Reading,
+        how: How,
     ) -> Result<Answer, Error> {
         let Layout {
             window,
@@ -347,9 +368,14 @@ impl Recording {
         for (i, &c) in q.channels.iter().enumerate() {
             let flag = q.flags.iter().find(|f| f.0 == c).map(|f| f.1);
             let keep = keep.get(i).copied();
-            channels.push(self.drawn(c, &grid, &around, Some(&window), flag, keep, cancel)?);
+            let drawn = self.drawn(c, &grid, &around, Some(&window), flag, keep, r, how)?;
+            channels.push(drawn);
         }
-        let strip = match (q.strip, self.extent()) {
+        let extent = match how {
+            How::Exact => self.extent(),
+            How::Sketch => self.sketch_extent(),
+        };
+        let strip = match (q.strip, extent) {
             (Some((c, n)), Some(extent)) => {
                 let _span = tracing::debug_span!("strip").entered();
                 let n = n.max(1) as usize;
@@ -358,7 +384,7 @@ impl Recording {
                     per: (extent.end - extent.start) as f64 / n as f64,
                     count: n,
                 };
-                let channel = self.drawn(c, &grid, &extent, None, None, None, cancel)?;
+                let channel = self.drawn(c, &grid, &extent, None, None, None, r, how)?;
                 Some(StripAnswer {
                     extent,
                     grid,
@@ -367,10 +393,27 @@ impl Recording {
             }
             _ => None,
         };
+        if how == How::Sketch {
+            return Ok(Answer {
+                window,
+                around,
+                grid,
+                channels,
+                strip,
+                statistics: Vec::new(),
+                markers: MarkerAnswer::default(),
+                extent: self.sketch_extent(),
+                revision: self.revision,
+            });
+        }
+        let m = &q.markers;
+        if m.limit > 0 || m.list.is_some() || m.successor_of.is_some() {
+            self.read_markers()?;
+        }
         let statistics = q
             .statistics
             .iter()
-            .map(|r| self.statistics(r.clone(), cancel))
+            .map(|i| self.statistics_in(r, i.clone()))
             .collect::<Result<Vec<_>, _>>()?;
         let markers = MarkerAnswer {
             window: self.markers(window.clone(), None, q.markers.limit),
@@ -396,7 +439,7 @@ impl Recording {
     /// Channel `c` over `range` on `g`. With a `window`, an analog channel's single samples
     /// where there are few enough, and its fit over the window. With `keep`, on an aligned grid,
     /// the columns before its `from` are the held ones, and only data from there on is read for
-    /// the columns.
+    /// the columns. A sketch takes the channel's coarsest level and no single samples.
     #[expect(
         clippy::too_many_arguments,
         reason = "a channel, its grid and range, what it draws with, and what it keeps"
@@ -410,11 +453,19 @@ impl Recording {
         window: Option<&Range<i64>>,
         flag: Option<usize>,
         keep: Option<Keep<'_>>,
-        cancel: &AtomicBool,
+        r: &Reading,
+        how: How,
     ) -> Result<Drawn, Error> {
-        let place = self.place(c)?;
+        let place = match how {
+            How::Exact => self.place_over(r, c, range.clone())?,
+            How::Sketch => self.sketch_place(c)?,
+        };
+        let place = &*place;
         let spans = known_spans(&place.known(), range.start, range.end);
-        let level = self.level_for(c, g.per);
+        let level = match how {
+            How::Exact => self.level_for(c, g.per),
+            How::Sketch => self.level_for(c, f64::INFINITY),
+        };
         match place {
             Place::Digital { gaps, .. } => {
                 let mut cols = DigitalColumns::empty(g.count);
@@ -437,7 +488,7 @@ impl Recording {
                         k => span.start.max(start_of(g, k))..span.end,
                     };
                     if span.end > span.start {
-                        self.digital_span(c, g, span, level, &mut cols, &mut piece, cancel)?;
+                        self.digital_span(c, place, g, span, level, &mut cols, &mut piece, r)?;
                     }
                 }
                 // The gaps `range` reaches: they lie in order and apart.
@@ -504,7 +555,7 @@ impl Recording {
                     };
                     part.min[ks_new.clone()].fill(f64::INFINITY);
                     part.max[ks_new.clone()].fill(f64::NEG_INFINITY);
-                    self.analog_span(c, g, span, level, &mut part, cancel)?;
+                    self.analog_span(c, place, g, span, level, &mut part, r)?;
                     columns::connect_over(&mut part, joins);
                     let full = |k: usize| part.min[k] <= part.max[k];
                     for k in ks_new {
@@ -529,9 +580,9 @@ impl Recording {
                         cols.pale[k] = true;
                     }
                 }
-                let samples = match window {
-                    Some(_) => self.points(c, g, range, flag, cancel)?,
-                    None => None,
+                let samples = match (window, how) {
+                    (Some(_), How::Exact) => self.points(c, place, g, range, flag, r)?,
+                    _ => None,
                 };
                 let fit = window.and_then(|w| match &samples {
                     Some(points) => {
@@ -566,14 +617,20 @@ impl Recording {
 
     /// Widens `part` with analog channel `c`'s ranges over [from, to): from level `level` where
     /// it holds the span, each finer level for what it doesn't, and the samples past the finest.
+    /// `place` is the channel's, exact over the span.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a channel's span, its place and grid, and the buffer it widens"
+    )]
     fn analog_span(
         &self,
         c: usize,
+        place: &Place,
         g: &Grid,
         span: Range<i64>,
         level: Option<usize>,
         part: &mut columns::AnalogColumns,
-        cancel: &AtomicBool,
+        r: &Reading,
     ) -> Result<(), Error> {
         let mut at = span.start;
         let mut level = level;
@@ -585,7 +642,7 @@ impl Recording {
                     let to = span.end.min(covered);
                     if to > at {
                         let (k0, k1) = (at >> shift, ((to - 1) >> shift) + 1);
-                        let b = self.analog_buckets(c, l, k0 as u64, k1 as u64, cancel)?;
+                        let b = self.analog_buckets(r, c, l, k0 as u64, k1 as u64)?;
                         let ov = AnalogOverview {
                             bucket: 1 << shift,
                             start: k0 << shift,
@@ -598,9 +655,9 @@ impl Recording {
                     level = l.checked_sub(1);
                 }
                 None => {
-                    let runs = self.place(c)?.runs().expect("analog");
-                    let (i0, i1) = (self.index_at(c, at)?, self.index_at(c, span.end)?);
-                    let values = self.values(c, i0, i1, cancel)?;
+                    let runs = place.runs().expect("analog");
+                    let (i0, i1) = (index_in(c, place, at)?, index_in(c, place, span.end)?);
+                    let values = self.values(r, c, place, i0, i1)?;
                     let s = Samples {
                         first: i0,
                         values: &values,
@@ -624,12 +681,13 @@ impl Recording {
     fn digital_span(
         &self,
         c: usize,
+        place: &Place,
         g: &Grid,
         span: Range<i64>,
         level: Option<usize>,
         cols: &mut DigitalColumns,
         piece: &mut DigitalColumns,
-        cancel: &AtomicBool,
+        r: &Reading,
     ) -> Result<(), Error> {
         let mut at = span.start;
         let mut level = level;
@@ -650,7 +708,7 @@ impl Recording {
                     if to > at {
                         let (k0, k1) = (at >> shift, ((to - 1) >> shift) + 1);
                         let (levels, changes) =
-                            self.digital_buckets(c, l, k0 as u64, k1 as u64, cancel)?;
+                            self.digital_buckets(r, c, l, k0 as u64, k1 as u64)?;
                         let ov = DigitalOverview {
                             bucket: 1 << shift,
                             start: k0 << shift,
@@ -666,7 +724,7 @@ impl Recording {
                     level = l.checked_sub(1);
                 }
                 None => {
-                    let (initial, ticks) = self.edges(c, at, span.end, cancel)?;
+                    let (initial, ticks) = self.edges_in(r, c, place, at, span.end)?;
                     let edges = Edges {
                         level: initial,
                         ticks: &ticks,
@@ -687,29 +745,35 @@ impl Recording {
     }
 
     /// Channel `c`'s samples over `range` and one either side, when `range` holds no more than
-    /// `g` has columns.
+    /// `g` has columns; `place` the channel's, exact over them.
     fn points(
         &self,
         c: usize,
+        place: &Place,
         g: &Grid,
         range: &Range<i64>,
         flag: Option<usize>,
-        cancel: &AtomicBool,
+        r: &Reading,
     ) -> Result<Option<Vec<Point>>, Error> {
-        let place = self.place(c)?;
         let (Some(runs), Place::Analog { count, .. }) = (place.runs(), place) else {
             return Ok(None);
         };
-        let (i0, i1) = (self.index_at(c, range.start)?, self.index_at(c, range.end)?);
+        let (i0, i1) = (
+            index_in(c, place, range.start)?,
+            index_in(c, place, range.end)?,
+        );
         if i1 - i0 > g.count as u64 {
             return Ok(None);
         }
         let lo = i0.saturating_sub(1);
         let hi = (i1 + 1).min(*count);
-        let values = self.values(c, lo, hi, cancel)?;
+        let values = self.values(r, c, place, lo, hi)?;
         let ticks: Vec<i64> = (lo..hi).map(|i| runs.tick(i)).collect();
         let flagged = match (flag, ticks.first(), ticks.last()) {
-            (Some(f), Some(&a), Some(&b)) => self.levels_at(f, &ticks, a, b + 1, cancel)?,
+            (Some(f), Some(&a), Some(&b)) => {
+                let flag_place = self.place_over(r, f, a..b + 1)?;
+                self.levels_at(r, f, &flag_place, &ticks, a, b + 1)?
+            }
             _ => vec![false; ticks.len()],
         };
         Ok(Some(
@@ -730,19 +794,20 @@ impl Recording {
     /// false where its level isn't known.
     fn levels_at(
         &self,
+        r: &Reading,
         c: usize,
+        place: &Place,
         ticks: &[i64],
         from: i64,
         to: i64,
-        cancel: &AtomicBool,
     ) -> Result<Vec<bool>, Error> {
         let Place::Digital {
             start, end, gaps, ..
-        } = self.place(c)?
+        } = place
         else {
             return Err(Error::NoChannel(c));
         };
-        let (level, edges) = self.edges(c, from, to, cancel)?;
+        let (level, edges) = self.edges_in(r, c, place, from, to)?;
         // The level from `from`, flipped at each edge, and set by each gap's end it passes.
         let mut out = Vec::with_capacity(ticks.len());
         let (mut l, mut e) = (level, 0);

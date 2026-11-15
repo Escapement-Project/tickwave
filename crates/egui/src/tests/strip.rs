@@ -177,6 +177,8 @@ fn a_strip_before_any_answer_draws_its_ground_and_moves_nothing() {
     let mut h = harness(at(2 * SECOND..4 * SECOND));
     h.state_mut().strip = true;
     h.state_mut().viewer = Some(gated(&h.ctx, fixture().write(), &gate, false));
+    // Nothing to draw: no sketch either.
+    viewer(&h).no_sketch();
     // After the harness, so it opens the gate before the viewer waits for its thread.
     let _opens = Opens(Arc::clone(&gate));
     // Opened, and held back from its first read.

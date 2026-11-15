@@ -14,7 +14,8 @@ use escapement_tickwave_format::model::{Break, Ratio};
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 
-use crate::read::check;
+use crate::cache::Reading;
+use crate::read::{check, index_in};
 use crate::recording::{Error, Place, Recording};
 use crate::runs::Runs;
 
@@ -291,16 +292,30 @@ impl Tally {
 impl Recording {
     /// Each analog and derived channel's statistics over `interval`. Cancel is checked between
     /// blocks.
-    #[tracing::instrument(level = "debug", name = "statistics", skip_all)]
     pub fn statistics(
         &self,
         interval: Range<i64>,
         cancel: &AtomicBool,
     ) -> Result<Statistics, Error> {
+        self.statistics_in(&Reading::new(cancel), interval)
+    }
+
+    #[tracing::instrument(level = "debug", name = "statistics", skip_all)]
+    pub(crate) fn statistics_in(
+        &self,
+        r: &Reading,
+        interval: Range<i64>,
+    ) -> Result<Statistics, Error> {
+        // Each channel's place over the interval alone: a list in pages reads only the pages it
+        // needs.
+        let span = interval.start.max(0)..interval.end.min(self.length).max(interval.start.max(0));
         let channels = (0..self.places.len())
-            .map(|c| match &self.places[c] {
-                Place::Digital { .. } => Ok(None),
-                Place::Analog { .. } => self.channel_statistics(c, &interval, cancel).map(Some),
+            .map(|c| match self.places.get(c) {
+                Some(Place::Analog { .. }) => {
+                    let place = self.place_over(r, c, span.clone())?;
+                    self.channel_statistics(r, c, &place, &interval).map(Some)
+                }
+                _ => Ok(None),
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Statistics { interval, channels })
@@ -308,11 +323,11 @@ impl Recording {
 
     fn channel_statistics(
         &self,
+        r: &Reading,
         c: usize,
+        place: &Place,
         interval: &Range<i64>,
-        cancel: &AtomicBool,
     ) -> Result<ChannelStatistics, Error> {
-        let place = self.place(c)?;
         let Place::Analog {
             period,
             count,
@@ -339,13 +354,13 @@ impl Recording {
         if b > a && *count > 0 {
             let mut supports = Supports::new(&runs, self.length);
             // The first sample whose time reaches past `a`, and the first at or past `b`.
-            let j = self.index_at(c, a)?;
+            let j = index_in(c, place, a)?;
             let lo = if j > 0 && supports.of(j - 1).end > a {
                 j - 1
             } else {
                 j
             };
-            let hi = self.index_at(c, b)?;
+            let hi = index_in(c, place, b)?;
             // A whole number of source ticks a sample, each a whole number of axis ticks: every
             // sample a run holds lasts as long on the axis.
             let m = map.m();
@@ -354,21 +369,21 @@ impl Recording {
                 .flatten()
                 .and_then(|p| i64::try_from(p).ok());
             let whole = match (exact, p) {
-                (Some(_), Some(p)) => self.whole_buckets(c, p, a, b, &mut t, cancel)?,
+                (Some(_), Some(p)) => self.whole_buckets(r, c, place, p, a, b, &mut t)?,
                 _ => Vec::new(),
             };
             // Every sample outside the buckets taken, one by one: before the first, between
             // each two, and after the last.
             let mut one_by_one = |from: u64, to: u64, t: &mut Tally| {
-                self.each_sample(c, from, to, cancel, |i, v, code| {
+                self.each_sample_in(r, c, place, from, to, |i, v, code| {
                     let s = supports.of(i);
                     t.sample(v, code, s.end.min(b) - s.start.max(a))
                 })
             };
             let mut from = lo;
             for r in &whole {
-                one_by_one(from, self.index_at(c, r.start)?.min(hi), &mut t)?;
-                from = self.index_at(c, r.end)?.max(from);
+                one_by_one(from, index_in(c, place, r.start)?.min(hi), &mut t)?;
+                from = index_in(c, place, r.end)?.max(from);
             }
             one_by_one(from, hi, &mut t)?;
         }
@@ -394,16 +409,20 @@ impl Recording {
     /// ticks: those whose every sample's time lies inside, a full period each, the coarsest first.
     /// Leaves out each bucket that holds a run's last sample whose time a run or the length cuts
     /// short. The tick ranges taken, in order.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a channel's place, its period, the interval and the tally"
+    )]
     fn whole_buckets(
         &self,
+        reading: &Reading,
         c: usize,
+        place: &Place,
         p: i64,
         a: i64,
         b: i64,
         t: &mut Tally,
-        cancel: &AtomicBool,
     ) -> Result<Vec<Range<i64>>, Error> {
-        let place = self.place(c)?;
         let (Some(runs), Place::Analog { count, .. }) = (place.runs(), place) else {
             return Err(Error::NoChannel(c));
         };
@@ -463,12 +482,12 @@ impl Recording {
                     while end < last && clean(&(end * size..(end + 1) * size)) {
                         end += 1;
                     }
-                    check(cancel)?;
-                    let buckets = self.analog_buckets(c, l, k as u64, end as u64, cancel)?;
+                    check(reading.cancel)?;
+                    let buckets = self.analog_buckets(reading, c, l, k as u64, end as u64)?;
                     let sums = buckets.sums.as_ref().expect("an exact channel's sums");
                     for (o, kk) in (k..end).enumerate() {
                         let (s, e) = (kk * size, (kk + 1) * size);
-                        let n = self.index_at(c, e)? - self.index_at(c, s)?;
+                        let n = index_in(c, place, e)? - index_in(c, place, s)?;
                         if n > 0 {
                             t.bucket(n, p, buckets.min[o], buckets.max[o], sums[o])?;
                         }

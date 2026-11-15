@@ -76,7 +76,8 @@ pub(crate) struct Held {
 pub(crate) struct Facts {
     pub timebase: Ratio,
     pub channels: Arc<[ChannelInfo]>,
-    pub marker_count: usize,
+    /// The recording has markers, read or not: the graph keeps room for their labels.
+    pub markers: bool,
     /// Made from a writer's snapshot, and not reopened since.
     pub live: bool,
 }
@@ -86,7 +87,7 @@ impl Facts {
         Self {
             timebase: r.timebase(),
             channels: r.channels().into(),
-            marker_count: r.marker_count(),
+            markers: r.has_markers(),
             live,
         }
     }
@@ -108,6 +109,9 @@ struct Slot {
     running: Option<Arc<AtomicBool>>,
     sent: Option<Arc<Request>>,
     held: Option<Held>,
+    /// What a frame draws while no answer is held: the first request's sketch, from the
+    /// recording's coarsest levels.
+    sketch: Option<Held>,
     query_failure: Option<String>,
     update_failure: Option<String>,
     #[cfg(feature = "live")]
@@ -126,6 +130,11 @@ struct Slot {
     /// Answers extended from the one held, for the tests.
     #[cfg(test)]
     extends: u64,
+    /// Sketches held, for the tests.
+    #[cfg(test)]
+    sketches: u64,
+    /// No sketch is made: for the tests of what a viewer holding nothing draws.
+    no_sketch: bool,
     stopped: bool,
 }
 
@@ -163,6 +172,7 @@ impl Slot {
                     query: Arc::new(query),
                     answer: Arc::new(answer),
                 });
+                self.sketch = None;
                 self.query_failure = None;
             }
             Ok(Err(e)) => self.query_failure = Some(e.to_string()),
@@ -249,6 +259,7 @@ impl Viewer {
                 running: None,
                 sent: None,
                 held: None,
+                sketch: None,
                 query_failure: None,
                 update_failure: None,
                 #[cfg(feature = "live")]
@@ -263,6 +274,9 @@ impl Viewer {
                 landed: Vec::new(),
                 #[cfg(test)]
                 extends: 0,
+                #[cfg(test)]
+                sketches: 0,
+                no_sketch: false,
                 stopped: false,
             }),
             recording: RwLock::new(recording),
@@ -385,8 +399,22 @@ impl Viewer {
         self.shared.slot().sent.clone()
     }
 
+    /// The answer held, or before the first lands, the sketch drawn meanwhile.
     pub(crate) fn held(&self) -> Option<Held> {
-        self.shared.slot().held.clone()
+        let slot = self.shared.slot();
+        slot.held.clone().or_else(|| slot.sketch.clone())
+    }
+
+    /// Sketches held so far.
+    #[cfg(test)]
+    pub(crate) fn sketches(&self) -> u64 {
+        self.shared.slot().sketches
+    }
+
+    /// Makes no sketch from now on, so the viewer holds nothing until an answer lands.
+    #[cfg(test)]
+    pub(crate) fn no_sketch(&self) {
+        self.shared.slot().no_sketch = true;
     }
 
     pub(crate) fn facts(&self) -> Facts {
@@ -504,6 +532,15 @@ fn answer(shared: &Shared) {
                 slot = shared.wake.wait(slot).unwrap_or_else(|e| e.into_inner());
             }
         };
+        // Nothing held yet for this recording: a sketch from its coarsest levels first, which a
+        // finished file's footer holds, so a frame draws while the query reads what it needs.
+        let unsketched = {
+            let slot = shared.slot();
+            slot.held.is_none() && !slot.no_sketch
+        };
+        if unsketched {
+            sketch(shared, &job, live);
+        }
         let answered = {
             let _span = tracing::debug_span!("query job", generation = job.generation).entered();
             let recording = shared.read();
@@ -536,6 +573,43 @@ fn answer(shared: &Shared) {
     }
 }
 
+/// The sketch of `job`'s request, held for frames to draw until an answer lands, unless the job
+/// was cancelled or a newer request issued meanwhile. Its window is resolved against the data's
+/// extent, which the sketch reads without the markers.
+fn sketch(shared: &Shared, job: &Job, live: bool) {
+    let sketched = {
+        let _span = tracing::debug_span!("sketch job", generation = job.generation).entered();
+        let recording = shared.read();
+        catch_unwind(AssertUnwindSafe(|| {
+            let extent = recording.sketch(&Query::default(), &job.cancel)?.extent;
+            let query = job.request.query(extent.as_ref(), live);
+            recording
+                .sketch(&query, &job.cancel)
+                .map(|answer| (answer, query))
+        }))
+    };
+    let Ok(Ok((answer, query))) = sketched else {
+        return;
+    };
+    let mut slot = shared.slot();
+    if job.cancel.load(Ordering::Relaxed) || job.generation != slot.issued || slot.held.is_some() {
+        return;
+    }
+    slot.sketch = Some(Held {
+        request: Arc::clone(&job.request),
+        #[cfg(feature = "live")]
+        generation: job.generation,
+        query: Arc::new(query),
+        answer: Arc::new(answer),
+    });
+    #[cfg(test)]
+    {
+        slot.sketches += 1;
+    }
+    drop(slot);
+    shared.ctx.request_repaint();
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -554,6 +628,7 @@ mod tests {
             running: None,
             sent: None,
             held,
+            sketch: None,
             query_failure: None,
             update_failure: None,
             #[cfg(feature = "live")]
@@ -562,13 +637,15 @@ mod tests {
             facts: Facts {
                 timebase: Ratio::ONE,
                 channels: Arc::new([]),
-                marker_count: 0,
+                markers: false,
                 live: true,
             },
             snapshots: 0,
             runs: 0,
             landed: Vec::new(),
             extends: 0,
+            sketches: 0,
+            no_sketch: false,
             stopped: false,
         }
     }

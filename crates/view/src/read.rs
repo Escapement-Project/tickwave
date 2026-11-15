@@ -1,20 +1,22 @@
-//! What a query reads of a recording: decoded blocks, through the cache, and from them a
-//! channel's edges and sample values; overview buckets at a level.
+//! What a query reads of a recording: a finished file's index pages, a page at a time for the
+//! span asked for, and its decoded blocks, through the cache, and from them a channel's edges and
+//! sample values; overview buckets at a level.
 
-use std::ops::Range;
+use std::ops::{ControlFlow, Range};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use escapement_tickwave_format::decode::{
-    Block, BlockChannel, DecodeError, LevelRef, OverviewBlock,
+    Block, BlockChannel, BlockRef, DecodeError, LevelRef, OverviewBlock,
 };
+use escapement_tickwave_format::index::{Located, Table, TableIndex};
 use escapement_tickwave_format::model::Sample;
 use escapement_tickwave_format::overview::{AnalogOverview, BLOCK_BUCKETS, ChannelOverview, Level};
 use escapement_tickwave_format::samples::{self, Values};
 
 use crate::bytes::read;
-use crate::cache::{Entry, Key, block_size};
-use crate::recording::{BlockFrom, Error, Part, Place, Recording, Rule, Store};
+use crate::cache::{Entry, Key, Reading, block_size, list_size};
+use crate::recording::{BlockAt, BlockFrom, Error, Finished, Part, Place, Recording, Rule, Store};
 use crate::runs::index_at_or_after;
 
 /// The most samples `values` takes room for before any block decodes: 128 MB of them.
@@ -55,31 +57,176 @@ pub(crate) struct AnalogBuckets {
     pub sums: Option<Vec<i128>>,
 }
 
+/// An entry of a kind its key doesn't hold, which a file can make by listing one record in two
+/// tables.
+fn misplaced(what: &str) -> Error {
+    DecodeError::Corrupt(format!("{what} is listed where another kind of record is")).into()
+}
+
 impl Recording {
-    /// Channel `c`'s blocks holding any tick of [from, to).
-    pub(crate) fn blocks_covering(&self, c: usize, from: i64, to: i64) -> Range<usize> {
-        let b = &self.blocks[c];
-        let first = b.partition_point(|x| x.end <= from);
-        let last = b.partition_point(|x| x.start < to).max(first);
-        first..last
+    /// Channel `c`'s blocks holding any tick of [from, to). A finished file's come from the pages
+    /// of its index that hold them, each read once and kept in the cache.
+    pub(crate) fn blocks_covering(
+        &self,
+        r: &Reading,
+        c: usize,
+        from: i64,
+        to: i64,
+    ) -> Result<Vec<BlockAt>, Error> {
+        let f = match &self.store {
+            Store::Finished(f) => f,
+            #[cfg(feature = "live")]
+            Store::Live(_) => {
+                let b = self.blocks.get(c).ok_or(Error::NoChannel(c))?;
+                let first = b.partition_point(|x| x.end <= from);
+                let last = b.partition_point(|x| x.start < to).max(first);
+                return Ok(b[first..last].to_vec());
+            }
+        };
+        let table = f
+            .footer()
+            .channels
+            .get(c)
+            .and_then(|ch| ch.blocks.clone())
+            .ok_or(Error::NoChannel(c))?;
+        let mut out = Vec::new();
+        for at in self.pages(r, &table, c, from..to.max(from.saturating_add(1)))? {
+            let refs = self.block_page(r, f, &table, c, &at)?;
+            let first = refs.partition_point(|x| x.end <= from);
+            let last = refs.partition_point(|x| x.start < to).max(first);
+            out.extend(refs[first..last].iter().map(|b| BlockAt {
+                start: b.start,
+                end: b.end,
+                from: BlockFrom::Frame(*b),
+            }));
+        }
+        Ok(out)
     }
 
-    /// Channel `c`'s block `i`, decoded.
-    pub(crate) fn block(
+    /// The pages at depth 0 of channel `o`'s `table` that hold entries of `keys`, its directory
+    /// pages on the way read through the cache.
+    pub(crate) fn pages(
         &self,
+        r: &Reading,
+        table: &TableIndex,
+        o: usize,
+        keys: Range<i64>,
+    ) -> Result<Vec<Located>, Error> {
+        let mut fetch = |offset: u64, len: u32| -> Result<Vec<u8>, Error> {
+            let key = Key::Page(o, table.table, offset);
+            let entry = r.get_or_make(&self.cache, key, || {
+                let _span = tracing::debug_span!("read directory", channel = o, offset).entered();
+                let bytes = read(&*self.bytes, offset, len as usize)?;
+                let size = list_size(&bytes);
+                Ok::<_, Error>((Entry::Bytes(Arc::new(bytes)), size))
+            })?;
+            match entry {
+                Entry::Bytes(b) if b.len() == len as usize => Ok(b.to_vec()),
+                _ => Err(misplaced("a directory page")),
+            }
+        };
+        let mut out = Vec::new();
+        table.locate(keys, &mut fetch, |at| {
+            out.push(at);
+            Ok(ControlFlow::Continue(()))
+        })?;
+        Ok(out)
+    }
+
+    /// The blocks on page `at` of finished channel `c`'s block table. Where the channel's list
+    /// is in pages not read whole, they are not checked against it here: a page's ticks can span
+    /// the whole list. `block` checks each block it decodes against the entries its own ticks
+    /// need instead.
+    fn block_page(
+        &self,
+        r: &Reading,
+        f: &Finished,
+        table: &TableIndex,
         c: usize,
-        i: usize,
-        cancel: &AtomicBool,
-    ) -> Result<Arc<Block>, Error> {
-        check(cancel)?;
-        match self.blocks[c][i].from {
+        at: &Located,
+    ) -> Result<Arc<Vec<BlockRef>>, Error> {
+        let key = Key::Leaf(c, Table::Blocks, at.j);
+        let entry = r.get_or_make(&self.cache, key, || {
+            let _span = tracing::debug_span!("read page", channel = c, page = at.j).entered();
+            let bytes = read(&*self.bytes, at.entry.offset, at.entry.length as usize)?;
+            let page = table.parse_page(0, at.j, &at.entry, &bytes)?;
+            let refs = f.footer().block_page(c, at, &page, None)?;
+            let size = list_size(&refs);
+            Ok::<_, Error>((Entry::Blocks(Arc::new(refs)), size))
+        })?;
+        match entry {
+            Entry::Blocks(b) => Ok(b),
+            _ => Err(misplaced("a page of blocks")),
+        }
+    }
+
+    /// Finished overview channel `o`'s level `li`'s rows standing for any of its blocks `b0..b1`.
+    fn rows_covering(
+        &self,
+        r: &Reading,
+        f: &Finished,
+        o: usize,
+        li: usize,
+        b0: u64,
+        b1: u64,
+    ) -> Result<Vec<LevelRef>, Error> {
+        let footer = f.footer();
+        let (level, table) = footer
+            .channels
+            .get(o)
+            .and_then(|ch| ch.levels.get(li))
+            .ok_or(Error::NoChannel(o))?;
+        let keys = i64::try_from(b0).unwrap_or(i64::MAX)..i64::try_from(b1).unwrap_or(i64::MAX);
+        let mut out = Vec::new();
+        for at in self.pages(r, table, o, keys)? {
+            let key = Key::Leaf(o, Table::Level(level.shift), at.j);
+            let entry = r.get_or_make(&self.cache, key, || {
+                let _span = tracing::debug_span!("read page", channel = o, page = at.j).entered();
+                let bytes = read(&*self.bytes, at.entry.offset, at.entry.length as usize)?;
+                let page = table.parse_page(0, at.j, &at.entry, &bytes)?;
+                let rows = footer.level_page(o, li, &at, &page)?;
+                let size = list_size(&rows);
+                Ok::<_, Error>((Entry::Rows(Arc::new(rows)), size))
+            })?;
+            let Entry::Rows(rows) = entry else {
+                return Err(misplaced("a page of overview rows"));
+            };
+            let first = rows.partition_point(|x| x.k + u64::from(x.row.n) <= b0);
+            let last = rows.partition_point(|x| x.k < b1).max(first);
+            out.extend_from_slice(&rows[first..last]);
+        }
+        Ok(out)
+    }
+
+    /// Finished overview channel `o`'s strip, decoded the first time it is asked for.
+    fn strip<'s>(&'s self, f: &'s Finished, o: usize) -> Result<&'s Level, Error> {
+        let cell = f.strips.get(o).ok_or(Error::NoChannel(o))?;
+        if let Some(strip) = cell.get() {
+            return Ok(strip);
+        }
+        let strip = {
+            let _span = tracing::debug_span!("decode strip", channel = o).entered();
+            f.footer().strip(o)?
+        };
+        Ok(cell.get_or_init(|| strip))
+    }
+
+    /// Channel `c`'s block `at`, decoded.
+    pub(crate) fn block(&self, r: &Reading, c: usize, at: &BlockAt) -> Result<Arc<Block>, Error> {
+        check(r.cancel)?;
+        match at.from {
             #[cfg(feature = "live")]
             BlockFrom::Unwritten(j) => match &self.store {
-                Store::Live(live) => Ok(Arc::clone(&live.unwritten[c][j])),
+                Store::Live(live) => live
+                    .unwritten
+                    .get(c)
+                    .and_then(|u| u.get(j))
+                    .cloned()
+                    .ok_or(Error::NoChannel(c)),
                 Store::Finished(_) => unreachable!("a finished file's blocks are written {j}"),
             },
             BlockFrom::Frame(b) => {
-                let entry = self.cache.get_or_make(Key::Block(b.row.offset), || {
+                let entry = r.get_or_make(&self.cache, Key::Block(b.row.offset), || {
                     let _span = tracing::debug_span!(
                         "decode block",
                         channel = c,
@@ -89,7 +236,12 @@ impl Recording {
                     .entered();
                     let frame = read(&*self.bytes, b.row.offset, b.row.length as usize)?;
                     let block = match &self.store {
-                        Store::Finished(f) => f.footer.decode_block(c, &b, &frame)?,
+                        // A list in pages not read whole: the entries the block's ticks need.
+                        Store::Finished(f) if self.paged(c) => {
+                            let list = self.list_over(r, f, c, b.start..b.end)?.list;
+                            f.footer().decode_block_in(c, &b, &frame, &list)?
+                        }
+                        Store::Finished(f) => f.footer().decode_block(c, &b, &frame)?,
                         #[cfg(feature = "live")]
                         Store::Live(live) => live.snapshot.decode_block(c, &b, &frame)?,
                     };
@@ -98,26 +250,27 @@ impl Recording {
                 })?;
                 match entry {
                     Entry::Block(b) => Ok(b),
-                    Entry::Overview(_) => unreachable!("a block's key holds a block"),
+                    _ => Err(misplaced("a block")),
                 }
             }
         }
     }
 
     /// Stored analog channel `c`'s samples `i0..i1` as it stores them, from the blocks that
-    /// hold them.
+    /// hold them; `place` is the channel's, exact over those samples.
     fn stored_values(
         &self,
+        r: &Reading,
         c: usize,
+        place: &Place,
         i0: u64,
         i1: u64,
-        cancel: &AtomicBool,
     ) -> Result<Values, Error> {
-        let runs = self.place(c)?.runs().ok_or(Error::NoChannel(c))?;
+        let runs = place.runs().ok_or(Error::NoChannel(c))?;
         let (from, to) = (runs.tick(i0), runs.tick(i1 - 1) + 1);
         let mut out: Option<Values> = None;
-        for b in self.blocks_covering(c, from, to) {
-            let block = self.block(c, b, cancel)?;
+        for at in self.blocks_covering(r, c, from, to)? {
+            let block = self.block(r, c, &at)?;
             let BlockChannel::Analog {
                 first_index,
                 values,
@@ -151,22 +304,36 @@ impl Recording {
         to: i64,
         cancel: &AtomicBool,
     ) -> Result<(bool, Vec<i64>), Error> {
+        let r = Reading::new(cancel);
+        let place = self.place_over(&r, channel, from..to.max(from.saturating_add(1)))?;
+        self.edges_in(&r, channel, &place, from, to)
+    }
+
+    /// `edges`, `place` the channel's, exact over [from, to).
+    pub(crate) fn edges_in(
+        &self,
+        r: &Reading,
+        channel: usize,
+        place: &Place,
+        from: i64,
+        to: i64,
+    ) -> Result<(bool, Vec<i64>), Error> {
         let Place::Digital {
             gaps,
             leading,
             initial,
             ..
-        } = self.place(channel)?
+        } = place
         else {
             return Err(Error::NoChannel(channel));
         };
         let from = from.clamp(0, self.length.max(1) - 1);
         let to = to.min(self.length);
-        let range = self.blocks_covering(channel, from, to.max(from + 1));
+        let covering = self.blocks_covering(r, channel, from, to.max(from + 1))?;
         let mut level = *initial;
         let mut out = Vec::new();
-        for (k, i) in range.enumerate() {
-            let block = self.block(channel, i, cancel)?;
+        for (k, at) in covering.iter().enumerate() {
+            let block = self.block(r, channel, at)?;
             let BlockChannel::Digital { initial, edges, .. } = &block.data else {
                 return Err(Error::NoChannel(channel));
             };
@@ -193,31 +360,37 @@ impl Recording {
     }
 
     /// Analog or derived channel `channel`'s sample values, samples `i0..i1`, as far as the
-    /// blocks that hold them decode.
+    /// blocks that hold them decode; `place` the channel's, exact over them.
     pub(crate) fn values(
         &self,
+        r: &Reading,
         channel: usize,
+        place: &Place,
         i0: u64,
         i1: u64,
-        cancel: &AtomicBool,
     ) -> Result<Vec<f64>, Error> {
+        let Place::Analog { rule, .. } = place else {
+            return Err(Error::NoChannel(channel));
+        };
+        let rule = *rule;
         let n = i1.saturating_sub(i0);
         // The count is the header's, which a block that does not decode can't back: up front it
         // costs at most 128 MB before the blocks refuse it, and past that the values grow with
         // what the blocks give. A view's samples are fewer than that by far.
         if n <= SAMPLES_UP_FRONT {
             let mut out = vec![f64::NAN; n as usize];
-            self.each_sample(channel, i0, i1, cancel, |i, value, _| {
-                out[(i - i0) as usize] = value;
+            self.each_stored(r, channel, place, i0, i1, |first, values, range| {
+                fill(&mut out[(first - i0) as usize..], values, range, rule);
                 Ok(())
             })?;
             return Ok(out);
         }
         let mut out = Vec::new();
-        self.each_sample(channel, i0, i1, cancel, |i, value, _| {
-            // Samples come in index order; one the blocks skip stays NaN, as up front.
-            out.resize((i - i0) as usize, f64::NAN);
-            out.push(value);
+        self.each_stored(r, channel, place, i0, i1, |first, values, range| {
+            // Stretches come in index order; a sample the blocks skip stays NaN, as up front.
+            let at = (first - i0) as usize;
+            out.resize(at + range.len(), f64::NAN);
+            fill(&mut out[at..], values, range, rule);
             Ok(())
         })?;
         Ok(out)
@@ -232,10 +405,44 @@ impl Recording {
         i0: u64,
         i1: u64,
         cancel: &AtomicBool,
-        mut f: impl FnMut(u64, f64, Option<i128>) -> Result<(), Error>,
+        f: impl FnMut(u64, f64, Option<i128>) -> Result<(), Error>,
     ) -> Result<(), Error> {
         let place = self.place(channel)?;
-        let Place::Analog { rule, count, .. } = place else {
+        self.each_sample_in(&Reading::new(cancel), channel, place, i0, i1, f)
+    }
+
+    /// `each_sample`, `place` the channel's, exact over samples `i0..i1`.
+    pub(crate) fn each_sample_in(
+        &self,
+        r: &Reading,
+        channel: usize,
+        place: &Place,
+        i0: u64,
+        i1: u64,
+        mut f: impl FnMut(u64, f64, Option<i128>) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        let Place::Analog { rule, .. } = place else {
+            return Err(Error::NoChannel(channel));
+        };
+        let rule = *rule;
+        self.each_stored(r, channel, place, i0, i1, |first, values, range| {
+            each_value(values, range, first, rule, &mut f)
+        })
+    }
+
+    /// Calls `f` with each stretch of samples `i0..i1` of analog or derived channel `channel` as
+    /// it is stored, in index order: the index of its first sample, the samples that hold it, and
+    /// where in them it lies. A stored channel's stretches are its blocks' samples, not copied.
+    fn each_stored(
+        &self,
+        r: &Reading,
+        channel: usize,
+        place: &Place,
+        i0: u64,
+        i1: u64,
+        mut f: impl FnMut(u64, &Values, Range<usize>) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        let Place::Analog { count, .. } = place else {
             return Err(Error::NoChannel(channel));
         };
         let i1 = i1.min(*count);
@@ -243,14 +450,43 @@ impl Recording {
             return Ok(());
         }
         let stored = self.places.len() - self.products.len();
-        let values = if channel < stored {
-            self.stored_values(channel, i0, i1, cancel)?
-        } else {
-            // A derived channel's samples are its operands' at the same indices.
+        if channel < stored {
+            let runs = place.runs().ok_or(Error::NoChannel(channel))?;
+            let (from, to) = (runs.tick(i0), runs.tick(i1 - 1) + 1);
+            for at in self.blocks_covering(r, channel, from, to)? {
+                let block = self.block(r, channel, &at)?;
+                let BlockChannel::Analog {
+                    first_index,
+                    values,
+                } = &block.data
+                else {
+                    return Err(Error::NoChannel(channel));
+                };
+                let lo = i0.max(*first_index);
+                let hi = i1.min(first_index + values.len() as u64);
+                if hi > lo {
+                    f(
+                        lo,
+                        values,
+                        (lo - first_index) as usize..(hi - first_index) as usize,
+                    )?;
+                }
+            }
+            return Ok(());
+        }
+        let values = {
+            // A derived channel's samples are its operands' at the same indices, which share its
+            // breaks: their places over the samples' ticks.
             let (a, b, product) = self.products[channel - stored];
+            let runs = place.runs().ok_or(Error::NoChannel(channel))?;
+            let ticks = runs.tick(i0)..runs.tick(i1 - 1).saturating_add(1);
+            let (pa, pb) = (
+                self.place_over(r, a, ticks.clone())?,
+                self.place_over(r, b, ticks)?,
+            );
             let (va, vb) = (
-                self.stored_values(a, i0, i1, cancel)?,
-                self.stored_values(b, i0, i1, cancel)?,
+                self.stored_values(r, a, &pa, i0, i1)?,
+                self.stored_values(r, b, &pb, i0, i1)?,
             );
             samples::product_values(product, &va, &vb).map_err(|what| {
                 DecodeError::Corrupt(format!(
@@ -259,23 +495,7 @@ impl Recording {
                 ))
             })?
         };
-        let rule = *rule;
-        // One match on how the samples are stored, rather than one a sample.
-        match &values {
-            Values::F32(v) => (i0..)
-                .zip(v)
-                .try_for_each(|(i, &x)| f(i, rule.value(Sample::F32(x)), None))?,
-            Values::F64(v) => (i0..)
-                .zip(v)
-                .try_for_each(|(i, &x)| f(i, rule.value(Sample::F64(x)), None))?,
-            Values::U64(v) => (i0..)
-                .zip(v)
-                .try_for_each(|(i, &x)| f(i, rule.value(Sample::U64(x)), Some(i128::from(x))))?,
-            Values::I64(v) => (i0..)
-                .zip(v)
-                .try_for_each(|(i, &x)| f(i, rule.value(Sample::I64(x)), Some(i128::from(x))))?,
-        }
-        Ok(())
+        f(i0, &values, 0..values.len())
     }
 
     /// Channel `c`'s coarsest level whose buckets are no wider than `ticks`, of those with any
@@ -291,11 +511,11 @@ impl Recording {
     /// holds them, in order: each with the level's index of its first bucket.
     pub(crate) fn pieces(
         &self,
+        r: &Reading,
         c: usize,
         level: usize,
         k0: u64,
         k1: u64,
-        cancel: &AtomicBool,
     ) -> Result<Vec<(u64, Piece<'_>)>, Error> {
         let l = &self.levels[c][level];
         let k1 = k1.min(l.covered);
@@ -313,21 +533,15 @@ impl Recording {
             }
         };
         let (b0, b1) = (k0 / BLOCK_BUCKETS, (k1 - 1) / BLOCK_BUCKETS);
-        let rows_covering = |rows: &[LevelRef]| {
-            let first = rows.partition_point(|r| r.k + u64::from(r.row.n) <= b0);
-            let last = rows.partition_point(|r| r.k <= b1).max(first);
-            first..last
-        };
         for part in &l.parts {
             match (*part, &self.store) {
                 (Part::Strip, Store::Finished(f)) => {
-                    out.push((0, Piece::Borrowed(&f.strips[c])));
+                    out.push((0, Piece::Borrowed(self.strip(f, c)?)));
                 }
                 (Part::Blocks(li), Store::Finished(f)) => {
-                    let rows = &f.rows[c][li];
-                    for r in &rows[rows_covering(rows)] {
-                        let block = self.overview_block(r, cancel, |frame| {
-                            Ok(f.footer.decode_overview(c, li, r, frame)?)
+                    for row in self.rows_covering(r, f, c, li, b0, b1 + 1)? {
+                        let block = self.overview_block(r, &row, |frame| {
+                            Ok(f.footer().decode_overview(c, li, &row, frame)?)
                         })?;
                         push(block, &mut out);
                     }
@@ -335,9 +549,11 @@ impl Recording {
                 #[cfg(feature = "live")]
                 (Part::LiveBlocks(li), Store::Live(live)) => {
                     let rows = &live.rows[c][li];
-                    for r in &rows[rows_covering(rows)] {
-                        let block = self.overview_block(r, cancel, |frame| {
-                            Ok(live.snapshot.decode_overview(c, li, r, frame)?)
+                    let first = rows.partition_point(|r| r.k + u64::from(r.row.n) <= b0);
+                    let last = rows.partition_point(|r| r.k <= b1).max(first);
+                    for row in &rows[first..last] {
+                        let block = self.overview_block(r, row, |frame| {
+                            Ok(live.snapshot.decode_overview(c, li, row, frame)?)
                         })?;
                         push(block, &mut out);
                     }
@@ -372,13 +588,13 @@ impl Recording {
 
     fn overview_block(
         &self,
-        r: &LevelRef,
-        cancel: &AtomicBool,
+        r: &Reading,
+        row: &LevelRef,
         decode: impl FnOnce(&[u8]) -> Result<OverviewBlock, Error>,
     ) -> Result<Arc<OverviewBlock>, Error> {
-        check(cancel)?;
-        let (offset, length) = (r.row.offset, r.row.length);
-        let entry = self.cache.get_or_make(Key::Overview(offset), || {
+        check(r.cancel)?;
+        let (offset, length) = (row.row.offset, row.row.length);
+        let entry = r.get_or_make(&self.cache, Key::Overview(offset), || {
             let _span = tracing::debug_span!("decode overview block", offset, length).entered();
             let frame = read(&*self.bytes, offset, length as usize)?;
             let block = decode(&frame)?;
@@ -387,7 +603,7 @@ impl Recording {
         })?;
         match entry {
             Entry::Overview(b) => Ok(b),
-            Entry::Block(_) => unreachable!("an overview block's key holds one"),
+            _ => Err(misplaced("an overview block")),
         }
     }
 
@@ -395,13 +611,14 @@ impl Recording {
     /// Buckets past what the level holds read as empty.
     pub(crate) fn analog_buckets(
         &self,
+        r: &Reading,
         channel: usize,
         level: usize,
         k0: u64,
         k1: u64,
-        cancel: &AtomicBool,
     ) -> Result<AnalogBuckets, Error> {
-        let Place::Analog { rule, .. } = self.place(channel)? else {
+        // The rule alone, which a place holds whether or not its list is read.
+        let Some(Place::Analog { rule, .. }) = self.places.get(channel) else {
             return Err(Error::NoChannel(channel));
         };
         let n = k1.saturating_sub(k0) as usize;
@@ -410,7 +627,7 @@ impl Recording {
             max: vec![f64::NEG_INFINITY; n],
             sums: rule.exact().map(|_| vec![0; n]),
         };
-        for (first, piece) in self.pieces(channel, level, k0, k1, cancel)? {
+        for (first, piece) in self.pieces(r, channel, level, k0, k1)? {
             let level = piece.level();
             let Some(a) = level.data.analog() else {
                 return Err(Error::NoChannel(channel));
@@ -434,18 +651,18 @@ impl Recording {
     /// whether it changes inside. Buckets past what the level holds read as low and quiet.
     pub(crate) fn digital_buckets(
         &self,
+        r: &Reading,
         channel: usize,
         level: usize,
         k0: u64,
         k1: u64,
-        cancel: &AtomicBool,
     ) -> Result<(Vec<bool>, Vec<bool>), Error> {
-        let Place::Digital { .. } = self.place(channel)? else {
+        let Some(Place::Digital { .. }) = self.places.get(channel) else {
             return Err(Error::NoChannel(channel));
         };
         let n = k1.saturating_sub(k0) as usize;
         let (mut levels, mut changes) = (vec![false; n], vec![false; n]);
-        for (first, piece) in self.pieces(channel, level, k0, k1, cancel)? {
+        for (first, piece) in self.pieces(r, channel, level, k0, k1)? {
             let level = piece.level();
             let c = &level.data;
             if !matches!(c, ChannelOverview::Digital { .. }) {
@@ -462,12 +679,20 @@ impl Recording {
 
     /// The index of the first sample at or after `tick` of analog or derived channel `channel`.
     pub fn index_at(&self, channel: usize, tick: i64) -> Result<u64, Error> {
-        let runs = self
-            .place(channel)?
-            .runs()
-            .ok_or(Error::NoChannel(channel))?;
-        Ok(index_at_or_after(&runs, tick as f64))
+        let r = Reading::new(&NEVER);
+        let place = self.place_over(&r, channel, tick..tick.saturating_add(1))?;
+        index_in(channel, &place, tick)
     }
+}
+
+/// A cancel flag nothing raises.
+static NEVER: AtomicBool = AtomicBool::new(false);
+
+/// The index of the first sample at or after `tick` of analog or derived channel `channel`,
+/// `place` its place, exact at `tick`.
+pub(crate) fn index_in(channel: usize, place: &Place, tick: i64) -> Result<u64, Error> {
+    let runs = place.runs().ok_or(Error::NoChannel(channel))?;
+    Ok(index_at_or_after(&runs, tick as f64))
 }
 
 /// Bucket `i`'s smallest and largest value and its codes' sum. A code's value through a negative
@@ -523,5 +748,58 @@ fn empty_like(like: &Values) -> Values {
         Values::F64(_) => Values::F64(Vec::new()),
         Values::U64(_) => Values::U64(Vec::new()),
         Values::I64(_) => Values::I64(Vec::new()),
+    }
+}
+
+/// `values[range]` under `rule` into `out`, as many as both hold. One match on how the samples are
+/// stored, rather than one a sample, and a loop the compiler can vectorise.
+fn fill(out: &mut [f64], values: &Values, range: Range<usize>, rule: Rule) {
+    match values {
+        Values::F32(v) => {
+            for (o, &x) in out.iter_mut().zip(&v[range]) {
+                *o = rule.value(Sample::F32(x));
+            }
+        }
+        Values::F64(v) => {
+            for (o, &x) in out.iter_mut().zip(&v[range]) {
+                *o = rule.value(Sample::F64(x));
+            }
+        }
+        Values::U64(v) => {
+            for (o, &x) in out.iter_mut().zip(&v[range]) {
+                *o = rule.value(Sample::U64(x));
+            }
+        }
+        Values::I64(v) => {
+            for (o, &x) in out.iter_mut().zip(&v[range]) {
+                *o = rule.value(Sample::I64(x));
+            }
+        }
+    }
+}
+
+/// Calls `f` with each of `values[range]`, the first sample `first`: its index, its value under
+/// `rule`, and its code where it is an integer. One match on how the samples are stored, rather
+/// than one a sample.
+fn each_value(
+    values: &Values,
+    range: Range<usize>,
+    first: u64,
+    rule: Rule,
+    mut f: impl FnMut(u64, f64, Option<i128>) -> Result<(), Error>,
+) -> Result<(), Error> {
+    match values {
+        Values::F32(v) => (first..)
+            .zip(&v[range])
+            .try_for_each(|(i, &x)| f(i, rule.value(Sample::F32(x)), None)),
+        Values::F64(v) => (first..)
+            .zip(&v[range])
+            .try_for_each(|(i, &x)| f(i, rule.value(Sample::F64(x)), None)),
+        Values::U64(v) => (first..)
+            .zip(&v[range])
+            .try_for_each(|(i, &x)| f(i, rule.value(Sample::U64(x)), Some(i128::from(x)))),
+        Values::I64(v) => (first..)
+            .zip(&v[range])
+            .try_for_each(|(i, &x)| f(i, rule.value(Sample::I64(x)), Some(i128::from(x)))),
     }
 }

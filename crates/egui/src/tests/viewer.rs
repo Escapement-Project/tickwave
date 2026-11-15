@@ -42,6 +42,8 @@ fn superseded_queries_cannot_replace_a_new_selection() {
     let ctx = egui::Context::default();
     let gate = Arc::new(Gate::default());
     let v = gated(&ctx, fixture().write(), &gate, false);
+    // What the viewer holds is the queries' alone.
+    v.no_sketch();
     // After the viewer, so it opens the gate before the viewer waits for its thread.
     let _opens = Opens(Arc::clone(&gate));
     let selection = |g: i64| Some(g * SECOND / 10..(g + 1) * SECOND / 10);

@@ -298,11 +298,7 @@ impl Graph<'_> {
         facts: &Facts,
         before: Option<&Shown>,
     ) -> ((f64, f64), Option<(f64, f64)>) {
-        let rows = if facts.marker_count > 0 {
-            LABEL_ROWS
-        } else {
-            0
-        };
+        let rows = if facts.markers { LABEL_ROWS } else { 0 };
         let fit = trace.and_then(|t| t.fit(view)).map(|raw| {
             fitted(
                 raw,

@@ -820,3 +820,43 @@ fn at_two_pixels_a_point_a_query_asks_a_column_a_pixel() {
     let blank = blank(&h, &extent);
     assert!(blank.is_empty(), "blank at {blank:?}");
 }
+
+/// A first draw: before the first answer lands, the graph draws the sketch, from the coarsest
+/// levels the footer holds, over the whole extent, while the query waits on what it reads; then
+/// the answer replaces it.
+#[test]
+fn a_first_frame_draws_the_sketch_while_the_query_reads() {
+    let cap = fixture();
+    let gate = Arc::new(Gate::default());
+    // Opening reads the magic and the last 32 KiB, which hold the footer; nothing after.
+    gate.pass(2);
+    let mut h = harness(ViewState::default());
+    h.state_mut().viewer = Some(gated(&h.ctx, cap.write(), &gate, true));
+    // Dropped before the harness, so a failure lets the query thread's read through.
+    let _opens = Opens(Arc::clone(&gate));
+    for _ in 0..400 {
+        h.step();
+        if viewer(&h).sketches() > 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    h.step();
+    assert_eq!(viewer(&h).sketches(), 1);
+    assert!(
+        viewer(&h).answer().is_none(),
+        "the query waits on its reads"
+    );
+    let extent = 0..cap.length();
+    assert_eq!(drawn(&h).window, extent);
+    assert_eq!(
+        blank(&h, &extent),
+        Vec::<f32>::new(),
+        "the sketch covers the extent"
+    );
+    gate.open();
+    let a = wait(&mut h);
+    assert_eq!(a.window, extent);
+    assert!(a.statistics.len() == 1, "the answer, not the sketch");
+    assert_eq!(blank(&h, &extent), Vec::<f32>::new());
+}

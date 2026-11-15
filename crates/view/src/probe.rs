@@ -295,7 +295,8 @@ pub fn find_edge(
     let (k0, k1) = (lo >> shift, ((hi.min(covered) - 1) >> shift) + 1);
     let mut spans: Vec<(i64, i64)> = Vec::new();
     if k1 > k0 {
-        let (_, changes) = rec.digital_buckets(channel, level, k0 as u64, k1 as u64, cancel)?;
+        let reading = crate::cache::Reading::new(cancel);
+        let (_, changes) = rec.digital_buckets(&reading, channel, level, k0 as u64, k1 as u64)?;
         for (j, &changed) in changes.iter().enumerate() {
             if changed {
                 let k = k0 + j as i64;

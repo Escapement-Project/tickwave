@@ -84,9 +84,9 @@ pub(crate) fn generated(
 
 impl Recording {
     /// The markers that start in `interval`, in order, after `after` where it is given, at most
-    /// `limit` of them.
+    /// `limit` of them; none where they don't read (a query asking for markers says why).
     pub fn markers(&self, interval: Range<i64>, after: Option<MarkerCursor>, limit: usize) -> Page {
-        let m = &self.markers;
+        let m = self.read_markers().map_or(&[][..], |m| &m.list);
         let lo = m.partition_point(|x| x.cursor.tick < interval.start);
         let hi = m.partition_point(|x| x.cursor.tick < interval.end).max(lo);
         let from = match after {
@@ -103,7 +103,8 @@ impl Recording {
 
     /// The marker after `cursor` in order, wherever it starts.
     pub fn marker_after(&self, cursor: MarkerCursor) -> Option<Marker> {
-        let i = self.markers.partition_point(|x| x.cursor <= cursor);
-        self.markers.get(i).cloned()
+        let m = self.read_markers().map_or(&[][..], |m| &m.list);
+        let i = m.partition_point(|x| x.cursor <= cursor);
+        m.get(i).cloned()
     }
 }
