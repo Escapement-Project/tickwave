@@ -603,7 +603,16 @@ fn execute(command: Command, max: usize) -> Result<()> {
             output,
             block_kib,
             level,
-        } => recut_file(&input, &output, block_kib, level),
+        } => recut_file(
+            &input,
+            &output,
+            WriteOptions {
+                level,
+                block_bytes: block_kib as usize * 1024,
+                compression: Compression::Offload,
+                ..WriteOptions::default()
+            },
+        ),
         Command::Open {
             recording,
             annotations,
@@ -1459,17 +1468,12 @@ fn write_generated(
     Ok(())
 }
 
-fn recut_file(input: &Path, output: &Path, block_kib: u32, level: i32) -> Result<()> {
+fn recut_file(input: &Path, output: &Path, options: WriteOptions) -> Result<()> {
     let mut opened =
         fs::File::open(input).with_context(|| format!("reading {}", input.display()))?;
     let len = opened.metadata()?.len();
     let started = Instant::now();
-    let mut recutter = Recutter::new(WriteOptions {
-        level,
-        block_bytes: block_kib as usize * 1024,
-        compression: Compression::Offload,
-        ..WriteOptions::default()
-    });
+    let mut recutter = Recutter::new(options);
     let (finished, left_out) = write_atomically(output, |out| {
         let mut chunk = vec![0; 1 << 20];
         loop {
@@ -1484,7 +1488,7 @@ fn recut_file(input: &Path, output: &Path, block_kib: u32, level: i32) -> Result
             let written = recutter.output().len();
             recutter.consume(written);
         }
-        out.write_all(recutter.output())?;
+        // What the last `consume` compressed waits in the output, and the finish's tail holds it.
         let left_out = recutter.left_out().to_vec();
         let finished = match recutter.finish() {
             Ok(finished) => finished,
@@ -1498,7 +1502,13 @@ fn recut_file(input: &Path, output: &Path, block_kib: u32, level: i32) -> Result
         out.write_all(&finished.tail)?;
         Ok((finished, left_out))
     })?;
-    let (_, _, check) = read_footer(output)?;
+    let check = match read_footer(output) {
+        Ok((_, _, check)) => check,
+        Err(e) => {
+            let _ = fs::remove_file(output);
+            return Err(e.context("the copy does not read back"));
+        }
+    };
     if check.header.content_id != finished.header.content_id {
         let _ = fs::remove_file(output);
         bail!("the copy does not read back with its content id");
@@ -2539,5 +2549,84 @@ mod tests {
             .err()
             .expect("refused");
         assert!(e.to_string().starts_with("reading "), "{e}");
+    }
+
+    /// A recut whose last `consume` leaves bytes in the output: the finish's tail holds them, so
+    /// the copy holds them once and reads back.
+    #[test]
+    fn a_recut_writes_what_its_last_feed_left_waiting_once() {
+        use escapement_tickwave_format::model::{Analog, Channel, ChannelData, Ratio, Samples};
+        let dir = tempfile::tempdir().unwrap();
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        // Blocks of 1,024 samples in and out: each output block one slice, so the one the last
+        // input block's promise closes is still to compress when the last feed ends.
+        let n = 200 * 1024u64;
+        let samples: Vec<f32> = (0..n)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                (x % 4096) as f32
+            })
+            .collect();
+        let tb = escapement_tickwave_format::model::Ratio::integer(1_000_000).unwrap();
+        let bytes = escapement_tickwave_format::encode::encode(
+            Recording {
+                timebase: tb,
+                length: n as i64,
+                channels: vec![Channel {
+                    name: "A".into(),
+                    source_name: "a".into(),
+                    source: 0,
+                    data: ChannelData::Analog(Analog {
+                        unit: "V".into(),
+                        first: 0,
+                        period: Ratio::ONE,
+                        count: n,
+                        breaks: Vec::new(),
+                        significant: None,
+                        samples: Samples::F32(Box::new(samples.into_iter())),
+                        lost_before: 0,
+                        lost_after: 0,
+                    }),
+                    shaping: Default::default(),
+                }],
+                derived: Vec::new(),
+                sources: vec![escapement_tickwave_format::model::Source::new(
+                    SourceFormat::Other("probe".into()),
+                    tb,
+                )],
+            },
+            &escapement_tickwave_format::encode::Options {
+                level: 1,
+                block_bytes: 4 << 10,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let input = dir.path().join("in.tickwave");
+        fs::write(&input, &bytes).unwrap();
+        let options = WriteOptions {
+            level: 1,
+            block_bytes: 4 << 10,
+            compression: Compression::Spread,
+            ..WriteOptions::default()
+        };
+        // The case: recut_file's loop, as its reads come, leaves bytes waiting.
+        let mut r = Recutter::new(options.clone());
+        for chunk in bytes.chunks(1 << 20) {
+            r.feed(chunk).unwrap();
+            let n = r.output().len();
+            r.consume(n);
+        }
+        assert!(
+            !r.output().is_empty(),
+            "nothing waits after the last consume"
+        );
+        let output = dir.path().join("out.tickwave");
+        recut_file(&input, &output, options).unwrap();
+        let (_, _, head) = read_footer(&output).unwrap();
+        let (_, _, was) = read_footer(&input).unwrap();
+        assert_eq!(head.header.content_id, was.header.content_id);
     }
 }
