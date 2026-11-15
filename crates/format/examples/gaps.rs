@@ -24,6 +24,7 @@ fn write(gap: Gap) -> Vec<u8> {
         source: 0,
         data: DeclaredKind::Digital { initial: false },
         shaping: Default::default(),
+        overview_shift: None,
     };
     let timebase = Ratio::integer(1_000_000_000).unwrap();
     let declaration = Declaration {

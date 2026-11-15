@@ -34,8 +34,47 @@ pub fn patched(file: &[u8], from: &str, to: &str) -> Vec<u8> {
     })
 }
 
-/// Where row `i`'s word for channel `c` sits in the footer's payload.
-pub fn word_at(footer: &[u8], channels: usize, i: usize, c: usize) -> usize {
-    let header_len = u32::from_le_bytes(footer[..4].try_into().unwrap()) as usize;
-    8 + header_len + i * BlockRow::size(channels) + 24 + 4 * c
+/// `file` with channel `c`'s first index page of its blocks edited: its rows through `edit`, and
+/// the page record's check made again, so a reader sees what the edit says.
+pub fn rows_edited(file: &[u8], c: usize, edit: impl FnOnce(&mut [BlockRow])) -> Vec<u8> {
+    let footer = escapement_tickwave_format::decode::Footer::parse_file(file).unwrap();
+    let entry = footer.channels[c].blocks.as_ref().unwrap().levels[0][0];
+    let at = entry.offset as usize;
+    let len = entry.length as usize;
+    let payload = &file[at + 5..at + len - 8];
+    let head = escapement_tickwave_format::index::PAGE_HEAD;
+    let (rows, _) = payload[head..].as_chunks::<{ BlockRow::SIZE }>();
+    let mut rows: Vec<BlockRow> = rows.iter().map(|r| BlockRow::parse(r)).collect();
+    edit(&mut rows);
+    let mut edited = payload[..head].to_vec();
+    for r in &rows {
+        r.write(&mut edited);
+    }
+    let mut record = Vec::new();
+    escapement_tickwave_format::record::write(
+        &mut record,
+        escapement_tickwave_format::record::Kind::IndexPage,
+        &[&edited],
+    );
+    let mut out = file.to_vec();
+    out[at..at + len].copy_from_slice(&record);
+    out
+}
+
+/// `file` with its footer's header replaced by `header`, the top index and the strips kept.
+pub fn with_header(file: &[u8], header: &escapement_tickwave_format::header::Header) -> Vec<u8> {
+    let t = file.len() - 24;
+    let at = u64::from_le_bytes(file[t..t + 8].try_into().unwrap()) as usize;
+    let len = u32::from_le_bytes(file[t + 8..t + 12].try_into().unwrap()) as usize;
+    let payload = &file[at + 5..at + len - 8];
+    let header_len = u32::from_le_bytes(payload[..4].try_into().unwrap()) as usize;
+    let json = serde_json::to_vec(header).unwrap();
+    let mut new = Vec::new();
+    new.extend_from_slice(&(json.len() as u32).to_le_bytes());
+    new.extend_from_slice(&payload[4..8]);
+    new.extend_from_slice(&json);
+    new.extend_from_slice(&payload[8 + header_len..]);
+    let mut out = file[..at].to_vec();
+    escapement_tickwave_format::record::write_footer(&mut out, 0, &new);
+    out
 }

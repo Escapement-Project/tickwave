@@ -13,6 +13,7 @@ use crate::model::{Break, Gap, Ratio, Sample};
 
 const BUFFER: usize = 1 << 16;
 
+#[derive(Clone)]
 pub struct ChannelHasher {
     hasher: blake3::Hasher,
     buffer: Vec<u8>,
@@ -178,6 +179,7 @@ impl ChannelHasher {
     }
 
     /// An f32 value's bits as u32, an f64's as u64, a code as an i64 or a u64.
+    #[inline]
     pub fn sample(&mut self, sample: Sample) {
         match sample {
             Sample::F32(v) => self.put(&v.to_bits().to_le_bytes()),
@@ -205,7 +207,15 @@ impl ChannelHasher {
         h.finalize()
     }
 
-    pub fn finish_analog(mut self, first: i64, count: u64, breaks: &[Break]) -> blake3::Hash {
+    /// `lost` is the samples lost before the first and after the last: both follow the breaks
+    /// where either is stated, so a channel that states neither has the id its data alone gives.
+    pub fn finish_analog(
+        mut self,
+        first: i64,
+        count: u64,
+        breaks: &[Break],
+        lost: (u64, u64),
+    ) -> blake3::Hash {
         let h = self.items_done();
         h.update(&first.to_le_bytes());
         h.update(&count.to_le_bytes());
@@ -214,6 +224,10 @@ impl ChannelHasher {
             h.update(&b.index.to_le_bytes());
             h.update(&b.tick.to_le_bytes());
             h.update(&b.lost.to_le_bytes());
+        }
+        if lost != (0, 0) {
+            h.update(&lost.0.to_le_bytes());
+            h.update(&lost.1.to_le_bytes());
         }
         h.finalize()
     }

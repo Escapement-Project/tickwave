@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use escapement_tickwave_format::decode::{BlockChannel, Footer};
+use escapement_tickwave_format::decode::{BlockChannel, Footer, Index, from_memory};
 use escapement_tickwave_format::encode::{Options, encode};
 use escapement_tickwave_format::header::{
     AnalogCoding, ChannelKind, Declaration, DeclaredChannel, DeclaredKind, LEVEL_BIT, SourceFormat,
@@ -34,6 +34,7 @@ fn declaration() -> Declaration {
                 source: 0,
                 data: DeclaredKind::Digital { initial: false },
                 shaping: Default::default(),
+                overview_shift: None,
             },
             DeclaredChannel {
                 name: "V".into(),
@@ -46,6 +47,7 @@ fn declaration() -> Declaration {
                     coding: AnalogCoding::F32,
                 },
                 shaping: Default::default(),
+                overview_shift: None,
             },
         ],
         derived: Vec::new(),
@@ -63,7 +65,7 @@ fn options() -> WriteOptions {
     WriteOptions {
         level: 3,
         block_bytes: 32,
-        batch: 1,
+        ..WriteOptions::default()
     }
 }
 
@@ -208,17 +210,19 @@ fn a_gap_learned_after_a_flush_inside_it_keeps_the_level_from_before() {
     );
     assert_eq!(finished.header, footer.header);
     // Every block decodes, and each checks the next one's starting level.
+    let index = Index::of_file(&file).unwrap();
     let mut starts = Vec::new();
-    for i in 0..footer.rows.len() {
-        let (offset, len) = footer.block_location(i);
-        let block = footer
-            .decode_block(i, &file[offset as usize..][..len as usize])
-            .unwrap();
-        let BlockChannel::Digital { initial, .. } = block.channels[0] else {
+    for (i, block) in index
+        .channel_blocks(&file, 0)
+        .unwrap()
+        .into_iter()
+        .enumerate()
+    {
+        let BlockChannel::Digital { initial, .. } = block.data else {
             panic!()
         };
         starts.push((block.start, initial));
-        assert_eq!(initial, footer.words.of(i)[0] & LEVEL_BIT != 0);
+        assert_eq!(initial, index.blocks[0][i].row.word & LEVEL_BIT != 0);
     }
     // High after the edge at 47, through the gap; the block holding 120 starts high too, since
     // the gap's end is inside it. From 120 the level is the gap's, high: the edges at 145 and 146
@@ -232,7 +236,8 @@ fn a_gap_learned_after_a_flush_inside_it_keeps_the_level_from_before() {
 
     // The overview's buckets of 16 ticks: bucket 2 (32..48) changes at 47; buckets 3 to 6 carry
     // high through the gap; bucket 7 (112..128) holds the gap's end at 120 and starts high.
-    let a = &footer.overview[0].channels[0];
+    let strip = footer.strip(0).unwrap();
+    let a = &strip.data;
     assert_eq!(a.digital(2), Some((false, true)));
     for b in 3..7 {
         assert_eq!(a.digital(b), Some((true, false)), "bucket {b}");
@@ -278,10 +283,20 @@ fn a_late_gap_or_an_edge_in_a_gap_is_refused() {
         Err(WriteError::GapOrder { .. })
     ));
     w.edge(0, 151).unwrap();
-    assert!(matches!(w.flush(151), Err(WriteError::Flush { .. })));
+    // A flush at an item's tick leaves it in the open block; one before the latest is refused.
+    w.flush(151).unwrap();
+    assert!(matches!(
+        w.flush(150),
+        Err(WriteError::Flush {
+            before: 150,
+            last: 151
+        })
+    ));
     w.flush(152).unwrap();
-    // A flush at the open block's start does nothing.
+    // A flush at the latest flush's tick does nothing.
+    let at = w.position();
     w.flush(152).unwrap();
+    assert_eq!(w.position(), at);
     assert!(matches!(w.sample(1, 1.0), Err(WriteError::NoRun { .. })));
     // A gap from tick 0 on a channel declared high.
     let mut d = declaration();
@@ -375,8 +390,10 @@ fn a_file_cut_in_its_footer_or_trailer_is_repaired_to_the_file_it_was() {
     let footer_at = Footer::parse_file(&file).unwrap().trailer.footer_offset as usize;
     for cut in footer_at..file.len() {
         let r = repair(&file[..cut], 3).unwrap_or_else(|e| panic!("cut at {cut}: {e}"));
-        assert_eq!(r.keep as usize, footer_at, "cut at {cut}");
-        let fixed = [&file[..footer_at], &r.tail[..]].concat();
+        // Cut after the known-through record the finish writes at the length, with the last
+        // pages and overview blocks after it written again as they were.
+        assert!(r.keep as usize <= footer_at, "cut at {cut}");
+        let fixed = [&file[..r.keep as usize], &r.tail[..]].concat();
         assert!(fixed == file, "cut at {cut}: the repaired file differs");
     }
 }
@@ -467,6 +484,8 @@ fn runs_place_the_samples_and_come_back_as_breaks() {
                         tick: 260,
                     }],
                     samples: Samples::F32(Box::new(values.clone().into_iter())),
+                    lost_before: 0,
+                    lost_after: 0,
                 }),
                 shaping: Default::default(),
             },
@@ -531,6 +550,7 @@ fn finish_takes_what_the_source_states_at_its_end() {
                 extra: vec![extra.clone()],
                 bundle: None,
                 drop_gaps_past_end: false,
+                lost_after: Default::default(),
             },
         )
         .unwrap();
@@ -621,23 +641,16 @@ fn gap_at_the_boundary(level: bool) -> (Vec<u8>, Vec<u64>) {
 #[test]
 fn a_gap_ending_where_a_block_starts_takes_effect_in_that_block() {
     let (file, at) = gap_at_the_boundary(false);
-    let footer = Footer::parse_file(&file).unwrap();
-    let starts: Vec<(i64, bool)> = footer
-        .rows
+    let index = Index::of_file(&file).unwrap();
+    let starts: Vec<(i64, bool)> = index.blocks[0]
         .iter()
-        .enumerate()
-        .map(|(i, r)| (r.start, footer.words.of(i)[0] & LEVEL_BIT != 0))
+        .map(|b| (b.start, b.row.word & LEVEL_BIT != 0))
         .collect();
     // The block from 100 starts at the level from before the gap, high: the gap's end is in it.
-    // Its three edges after the gap's low take A high, so the block from 200 starts high, and the
-    // empty one from 300 too.
-    assert_eq!(starts, [(0, false), (100, true), (200, true), (300, true)]);
-    for i in 0..footer.rows.len() {
-        let (o, n) = footer.block_location(i);
-        footer
-            .decode_block(i, &file[o as usize..][..n as usize])
-            .unwrap();
-    }
+    // Its three edges after the gap's low take A high, so the block from 200 starts high. The
+    // quiet flush at 300 writes no block of A: its known-through record says A held.
+    assert_eq!(starts, [(0, false), (100, true), (200, true)]);
+    index.channel_blocks(&file, 0).unwrap();
     let (_, ending) = events(&file, 17);
     assert_eq!(ending, Ending::Complete);
     // Repaired where the gap's end is the recording's: the gap is dropped, and A is known up to
@@ -677,20 +690,11 @@ fn a_gap_s_level_is_part_of_the_content() {
 #[test]
 fn a_block_that_starts_at_the_wrong_level_after_a_gap_ends_in_the_one_before_is_refused() {
     let (file, _) = gap_at_the_boundary(false);
-    // The blocks from 200 and 300 start high; say low. Without decoding the block from 100, which
-    // holds the gap's end, the footer cannot tell: from 200 on the levels agree with each other.
-    let bad = common::refooted(&file, |footer| {
-        for i in [2, 3] {
-            let at = common::word_at(footer, 2, i, 0);
-            let word = u32::from_le_bytes(footer[at..at + 4].try_into().unwrap()) ^ LEVEL_BIT;
-            footer[at..at + 4].copy_from_slice(&word.to_le_bytes());
-        }
-    });
-    let footer = Footer::parse_file(&bad).unwrap();
-    let (o, n) = footer.block_location(1);
-    let err = footer
-        .decode_block(1, &bad[o as usize..][..n as usize])
-        .unwrap_err();
+    // The block from 200 starts high; say low. Without decoding the block from 100, which holds
+    // the gap's end, the index cannot tell.
+    let bad = common::rows_edited(&file, 0, |rows| rows[2].word ^= LEVEL_BIT);
+    let index = Index::of_file(&bad).unwrap();
+    let err = index.block_in(&bad, 0, 1).unwrap_err();
     assert!(
         err.to_string()
             .contains("the next block starts at the wrong level"),
@@ -701,14 +705,10 @@ fn a_block_that_starts_at_the_wrong_level_after_a_gap_ends_in_the_one_before_is_
 #[test]
 fn a_footer_whose_index_is_not_the_blocks_read_is_refused_in_order() {
     let (file, _) = gap_at_the_boundary(false);
-    // Block 0's frame said to start a byte later: still inside the file, so the footer alone
-    // takes it, but the block record says otherwise.
-    let bad = common::refooted(&file, |footer| {
-        let at = common::word_at(footer, 2, 0, 0) - 24 + 8;
-        let offset = u64::from_le_bytes(footer[at..at + 8].try_into().unwrap()) + 1;
-        footer[at..at + 8].copy_from_slice(&offset.to_le_bytes());
-    });
-    Footer::parse_file(&bad).unwrap();
+    // Block 0's frame said to start a byte later in its page: still inside the file, so the
+    // footer and the page alone take it, but the block record says otherwise.
+    let bad = common::rows_edited(&file, 0, |rows| rows[0].offset += 1);
+    Index::of_file(&bad).unwrap();
     let mut r = Reader::default();
     r.feed(&bad);
     let err = loop {
@@ -719,7 +719,8 @@ fn a_footer_whose_index_is_not_the_blocks_read_is_refused_in_order() {
         }
     };
     assert!(
-        err.to_string().contains("index differs from the blocks"),
+        err.to_string()
+            .contains("differs from the one the records before it give"),
         "{err}"
     );
 }
@@ -727,12 +728,12 @@ fn a_footer_whose_index_is_not_the_blocks_read_is_refused_in_order() {
 #[test]
 fn a_gap_after_the_block_holding_its_end_is_refused_in_order() {
     let (file, at) = gap_at_the_boundary(false);
-    // The records to the end of the empty block from 200, then a gap after A's last edge, at 170,
-    // that ends inside that block.
-    let mut bad = file[..at[2] as usize].to_vec();
+    // The records to the flush at 200, then a gap after A's last edge, at 170, that ends inside
+    // the block that flush closed.
+    let mut bad = file[..at[1] as usize].to_vec();
     let gap = Gap {
         from: 180,
-        to: 250,
+        to: 190,
         level: true,
     };
     record::write(&mut bad, Kind::Gap, &[&record::gap_bytes(0, gap)]);
@@ -779,16 +780,26 @@ fn a_cut_off_file_holding_an_overview_block_its_content_does_not_give_is_not_rep
     repair(&file, 3).expect("the file as written repairs");
     // A block past the level's last.
     let mut stray = file.clone();
-    let mut payload = record::overview_head(4, 9_999).to_vec();
-    payload.extend_from_slice(&file[overview[0].start + 5 + record::OVERVIEW_HEAD_LEN..][..1]);
+    let mut payload = record::OverviewHead {
+        channel: 0,
+        shift: 4,
+        k: 9_999,
+        n: 1,
+    }
+    .to_bytes()
+    .to_vec();
+    payload.extend_from_slice(&file[overview[0].start + 5 + record::OverviewHead::LEN..][..1]);
     record::write(&mut stray, Kind::OverviewBlock, &[&payload]);
     // A block written twice.
     let twice = [&file[..], &file[overview[0].clone()]].concat();
+    // The in-order reader refuses either: an overview block's `k` follows its level's last.
     for (what, bytes) in [("a stray block", stray), ("a block twice", twice)] {
+        let err = repair(&bytes, 3)
+            .err()
+            .unwrap_or_else(|| panic!("{what}: repaired"));
         assert!(
-            matches!(repair(&bytes, 3), Err(RepairError::Overview)),
-            "{what}: {:?}",
-            repair(&bytes, 3).map(|r| r.keep)
+            matches!(&err, RepairError::Decode(_)) && err.to_string().contains("is out of place"),
+            "{what}: {err}"
         );
     }
 }
@@ -827,6 +838,8 @@ fn verify_refuses_a_gap_or_a_block_past_the_source_s_length() {
                     breaks: Vec::new(),
                     significant: None,
                     samples: Samples::F32(Box::new(std::iter::empty())),
+                    lost_before: 0,
+                    lost_after: 0,
                 }),
                 shaping: Default::default(),
             },
@@ -852,12 +865,11 @@ fn verify_refuses_a_gap_or_a_block_past_the_source_s_length() {
         file.extend(w.finish(20, &[20], Finish::default()).unwrap().tail);
         let gaps = if with_gap { vec![gap] } else { Vec::new() };
         let err = verify(&file[..], source(gaps)).unwrap_err().to_string();
-        let want = if with_gap {
-            "channel A: a gap after the block that ends the recording"
-        } else {
-            "a block ends at tick 20, past the length, 10"
-        };
-        assert_eq!(err, want);
+        // The flush at 10 writes no block: there is nothing before it. A's one block runs to 20.
+        assert_eq!(
+            err,
+            "channel A: a block ends at tick 20, past the source's length, 10"
+        );
     }
 }
 
@@ -908,7 +920,6 @@ fn an_annotation_source_that_can_t_name_a_file_on_its_own_is_refused() {
 #[test]
 fn repair_and_recut_leave_out_an_annotation_its_bundle_would_not_resolve() {
     use escapement_tickwave_format::annotations::{Included, resolve};
-    use escapement_tickwave_format::header::Header;
     use escapement_tickwave_format::recut::Recutter;
     use escapement_tickwave_format::repair::Repairer;
     use escapement_tickwave_format::writer::Bundle;
@@ -937,8 +948,13 @@ fn repair_and_recut_leave_out_an_annotation_its_bundle_would_not_resolve() {
             assert!(got.starts_with(want), "{got}");
         }
     };
-    let ids = |header: &Header| -> Vec<String> {
-        let files = header.annotations.clone().expect("bundled");
+    let ids = |file: &[u8]| -> Vec<String> {
+        let footer = Footer::parse_file(file).unwrap();
+        let header = &footer.header;
+        let files = footer
+            .read_bundle(from_memory(file))
+            .unwrap()
+            .expect("bundled");
         let included: Vec<Included<'_>> = files
             .iter()
             .filter(|(name, _)| name.ends_with(".jsonl"))
@@ -958,22 +974,28 @@ fn repair_and_recut_leave_out_an_annotation_its_bundle_would_not_resolve() {
     left_as_wanted(r.left_out());
     let repaired = r.finish().unwrap();
     assert_eq!(repaired.header.length, 2);
-    assert_eq!(ids(&repaired.header), ["gen/m/1"]);
     assert_eq!(repaired.generated["gen"].len(), 1);
     let mut whole = cut[..repaired.keep as usize].to_vec();
     whole.extend_from_slice(&repaired.tail);
+    assert_eq!(ids(&whole), ["gen/m/1"]);
 
     for (input, finished) in [(&cut, false), (&whole, true)] {
         let mut rc = Recutter::new(options());
         rc.bundle(bundled());
         rc.feed(input).unwrap();
-        left_as_wanted(rc.left_out());
+        if finished {
+            // Repair cut the file at its known-through record and wrote again only the
+            // annotation that resolves.
+            assert!(rc.left_out().is_empty(), "{:?}", rc.left_out());
+        } else {
+            left_as_wanted(rc.left_out());
+        }
         let mut out = rc.take_output();
         let f = rc.finish().unwrap();
         out.extend_from_slice(&f.tail);
         let h = Footer::parse_file(&out).unwrap().header;
         assert_eq!(h.length, 2, "finished: {finished}");
-        assert_eq!(ids(&h), ["gen/m/1"], "finished: {finished}");
+        assert_eq!(ids(&out), ["gen/m/1"], "finished: {finished}");
         if finished {
             assert_eq!(h.content_id, repaired.header.content_id);
         }

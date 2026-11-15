@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use escapement_tickwave_format::decode::Footer;
+use escapement_tickwave_format::decode::{Footer, Index};
 use escapement_tickwave_format::header::{
     ChannelKind as HeaderKind, Declaration, DeclaredChannel, DeclaredKind, SourceFormat,
     SourceHeader,
@@ -57,6 +57,7 @@ fn pulse_at_block_end(at: i64, shift: u8) -> Vec<u8> {
                     significant: None,
                 },
                 shaping: Default::default(),
+                overview_shift: None,
             },
             DeclaredChannel {
                 name: "D".into(),
@@ -64,6 +65,7 @@ fn pulse_at_block_end(at: i64, shift: u8) -> Vec<u8> {
                 source: 0,
                 data: DeclaredKind::Digital { initial: false },
                 shaping: Default::default(),
+                overview_shift: None,
             },
         ],
         derived: Vec::new(),
@@ -140,6 +142,7 @@ fn a_zoom_answers_every_column_of_its_window() {
             source: 0,
             data: DeclaredKind::Digital { initial: false },
             shaping: Default::default(),
+            overview_shift: None,
         }],
         derived: Vec::new(),
         sources: vec![SourceHeader::new(
@@ -247,7 +250,7 @@ fn single_samples_come_with_their_flag_once_the_view_holds_few_enough() {
 }
 
 /// Analog channel `c`'s columns as the rule reads them: each known span's own, joined, then
-/// together; from the footer's level `level`, or from every sample with None.
+/// together; from the channel's level `level`, finest first, or from every sample with None.
 fn oracle_columns(
     file: &[u8],
     c: usize,
@@ -255,12 +258,11 @@ fn oracle_columns(
     range: std::ops::Range<i64>,
     level: Option<usize>,
 ) -> (Vec<f64>, Vec<f64>) {
-    let f = Footer::parse_file(file).unwrap();
+    let f = Index::of_file(file).unwrap().footer;
     let HeaderKind::Analog {
         first,
         period,
         count,
-        breaks,
         ..
     } = &f.header.channels[c].data
     else {
@@ -270,9 +272,10 @@ fn oracle_columns(
         first: *first,
         period: *period,
         count: *count,
-        breaks,
+        breaks: f.breaks(c).unwrap(),
         map: f.header.mapping(c).unwrap(),
     };
+    let levels = common::levels(file, c);
     let truth = oracle(file);
     let samples = &truth[c].as_ref().unwrap().samples;
     let end = samples.last().unwrap().1;
@@ -295,8 +298,8 @@ fn oracle_columns(
                 span.end as f64,
             ),
             Some(l) => {
-                let lv = &f.overview[l];
-                let Some(Buckets::U64(b)) = lv.channels[c].analog() else {
+                let lv = &levels[l];
+                let Some(Buckets::U64(b)) = lv.data.analog() else {
                     panic!()
                 };
                 let scale = 1e-9;
@@ -341,8 +344,8 @@ fn columns_from_samples_and_from_the_overview_hold_what_the_rule_gives() {
     let file = fixture("energy.tickwave");
     let rec = open(&file);
     let cancel = AtomicBool::new(false);
-    // I's columns from every sample (500 ticks a column, below the 4,096 of the only level),
-    // then from its buckets at 16,000 and 102,857 ticks a column. Its value is a nA code at
+    // I's columns from every sample (500 ticks a column, below the 4,096 of its only level, the
+    // strip), then from its buckets at 16,000 and 102,857 ticks a column. Its value is a nA code at
     // 1/10^9: the oracle reads the codes as I does.
     for (window, cols, level) in [
         (900_000..1_100_000, 400, None),
@@ -565,18 +568,22 @@ fn a_file_reads_as_its_bytes_do_and_a_small_cache_holds_little() {
 
 #[test]
 fn columns_come_from_the_coarsest_level_no_wider_than_a_column() {
-    // The synthetic cases' levels: 2^4 in overview blocks, 2^8 and 2^12 in the footer (818
-    // buckets at 2^12 end them). A's value is a code at 1/1000.
+    // The synthetic cases' A: levels 2^4 and 2^8 in overview blocks, and its strip at 2^12 (818
+    // buckets at 2^12 end them). Its value is a code at 1/1000.
     let file = common::synth_cases(1 << 16);
     let rec = open(&file);
-    let footer = Footer::parse_file(&file).unwrap();
-    assert_eq!(footer.header.overview, [8, 12]);
+    let footer = Index::of_file(&file).unwrap().footer;
+    let levels = common::levels(&file, 0);
+    let shifts: Vec<u8> = levels.iter().map(|l| l.shift).collect();
+    assert_eq!(
+        (shifts, footer.channels[0].levels.len()),
+        (vec![4, 8, 12], 2)
+    );
     let cancel = AtomicBool::new(false);
     let HeaderKind::Analog {
         first,
         period,
         count,
-        breaks,
         ..
     } = &footer.header.channels[0].data
     else {
@@ -586,7 +593,7 @@ fn columns_come_from_the_coarsest_level_no_wider_than_a_column() {
         first: *first,
         period: *period,
         count: *count,
-        breaks,
+        breaks: footer.breaks(0).unwrap(),
         map: footer.header.mapping(0).unwrap(),
     };
     let end = common::oracle(&file)[0]
@@ -596,9 +603,9 @@ fn columns_come_from_the_coarsest_level_no_wider_than_a_column() {
         .last()
         .unwrap()
         .1;
-    // Ticks a column, and the footer's level they read: 300 is past 2^8 and short of 2^12, and
-    // 70,000 past every level.
-    for (per, level) in [(300, 0), (4_095, 0), (4_096, 1), (5_000, 1), (70_000, 1)] {
+    // Ticks a column, and A's level they read: 300 is past 2^8 and short of 2^12, and 70,000
+    // past every level.
+    for (per, level) in [(300, 1), (4_095, 1), (4_096, 2), (5_000, 2), (70_000, 2)] {
         let window = 500_000..500_000 + per * 40;
         let a = rec
             .query(&query(window.clone(), 40, vec![0]), &cancel)
@@ -606,8 +613,8 @@ fn columns_come_from_the_coarsest_level_no_wider_than_a_column() {
         let Drawn::Analog { columns, .. } = &a.channels[0] else {
             panic!()
         };
-        let lv = &footer.overview[level];
-        let Some(Buckets::U64(b)) = lv.channels[0].analog() else {
+        let lv = &levels[level];
+        let Some(Buckets::U64(b)) = lv.data.analog() else {
             panic!()
         };
         let value = |x: u64| x as f64 / 1000.0;
@@ -671,6 +678,7 @@ fn markers_outside_the_data_widen_the_extent() {
                 significant: None,
             },
             shaping: Default::default(),
+            overview_shift: None,
         }],
         derived: Vec::new(),
         sources: vec![SourceHeader::new(
@@ -720,6 +728,7 @@ fn gaps_at_block_ends() -> Vec<u8> {
             source: 0,
             data: DeclaredKind::Digital { initial: false },
             shaping: Default::default(),
+            overview_shift: None,
         }],
         derived: Vec::new(),
         sources: vec![SourceHeader::new(
@@ -828,7 +837,8 @@ fn columns_hold_what_the_rule_gives_at_every_zoom_across_runs() {
                 let Drawn::Analog { columns, .. } = &a.channels[0] else {
                     panic!()
                 };
-                // The view's level: the footer's only one, 2^12 ticks, once a column is as wide.
+                // The view's level: I's only one, its strip at 2^12 ticks, once a column is as
+                // wide.
                 let level = (a.grid.per >= 4096.0).then_some(0);
                 let (min, max) = oracle_columns(&file, 1, &a.grid, a.around.clone(), level);
                 for k in 0..a.grid.count {
@@ -868,6 +878,7 @@ fn a_sample_count_the_blocks_do_not_back_is_not_allocated_before_they_decode() {
                 significant: None,
             },
             shaping: Default::default(),
+            overview_shift: None,
         }],
         derived: Vec::new(),
         sources: vec![SourceHeader::new(SourceFormat::Other("t".into()), timebase)],
@@ -880,26 +891,41 @@ fn a_sample_count_the_blocks_do_not_back_is_not_allocated_before_they_decode() {
     w.sample(0, 1.5f32).unwrap();
     let mut file = w.take_output();
     file.extend(w.finish(8192, &[], Finish::default()).unwrap().tail);
-    let mut footer = Footer::parse_file(&file).unwrap();
+    use escapement_tickwave_format::header::BlockRow;
+    use escapement_tickwave_format::index::PAGE_HEAD;
+    use escapement_tickwave_format::record::{self, Kind, PAYLOAD_AT};
     const CLAIMED: u32 = 4_000_000_000;
-    let HeaderKind::Analog { count, .. } = &mut footer.header.channels[0].data else {
+    // The block's row in its index page claims them, its record's check made again.
+    let footer = Footer::parse_file(&file).unwrap();
+    let page = footer.channels[0].blocks.as_ref().unwrap().levels[0][0];
+    let at = page.offset as usize;
+    let mut payload = file[at + PAYLOAD_AT..at + page.length as usize - 8].to_vec();
+    let row_at = PAGE_HEAD..PAGE_HEAD + BlockRow::SIZE;
+    let mut row = BlockRow::parse(&payload[row_at.clone()]);
+    row.word = CLAIMED;
+    let mut bytes = Vec::new();
+    row.write(&mut bytes);
+    payload[row_at].copy_from_slice(&bytes);
+    let mut fixed = Vec::new();
+    record::write(&mut fixed, Kind::IndexPage, &[&payload]);
+    file[at..at + fixed.len()].copy_from_slice(&fixed);
+    // And the footer's header, written again.
+    let keep = footer.trailer.footer_offset as usize;
+    let payload = &file[keep + PAYLOAD_AT..keep + footer.trailer.footer_len as usize - 8];
+    let header_len = u32::from_le_bytes(payload[..4].try_into().unwrap()) as usize;
+    let mut header = footer.header.clone();
+    let HeaderKind::Analog { count, .. } = &mut header.channels[0].data else {
         panic!()
     };
     *count = u64::from(CLAIMED);
-    footer.words.of_mut(0)[0] = CLAIMED;
-    let rows: Vec<_> = footer.overview_rows.iter().flatten().copied().collect();
-    let bytes = escapement_tickwave_format::record::footer_bytes(
-        &footer.header,
-        &footer.rows,
-        &footer.words,
-        &rows,
-        &footer.overview_frame,
-    )
-    .unwrap();
-    let keep = footer.trailer.footer_offset;
-    file.truncate(keep as usize);
+    let json = serde_json::to_vec(&header).unwrap();
+    let mut new = (json.len() as u32).to_le_bytes().to_vec();
+    new.extend_from_slice(&payload[4..8]);
+    new.extend_from_slice(&json);
+    new.extend_from_slice(&payload[8 + header_len..]);
+    file.truncate(keep);
     let mut tail = Vec::new();
-    escapement_tickwave_format::record::write_footer(&mut tail, keep, &bytes);
+    record::write_footer(&mut tail, keep as u64, &new);
     file.extend(tail);
     let rec = open(&file);
     let err = rec
@@ -930,6 +956,7 @@ fn a_verge_recorder_s_markers_write_bundle_and_open() {
                     significant: None,
                 },
                 shaping: Default::default(),
+                overview_shift: None,
             },
             DeclaredChannel {
                 name: "DIO0".into(),
@@ -937,6 +964,7 @@ fn a_verge_recorder_s_markers_write_bundle_and_open() {
                 source: 0,
                 data: DeclaredKind::Digital { initial: false },
                 shaping: Default::default(),
+                overview_shift: None,
             },
         ],
         derived: Vec::new(),

@@ -940,6 +940,8 @@ impl Export {
                         samples: Samples::F32(Box::new(
                             a.file.items::<4>(a.header, a.count).map(f32::from_le_bytes),
                         )),
+                        lost_before: 0,
+                        lost_after: 0,
                     }),
                 },
                 shaping: Default::default(),

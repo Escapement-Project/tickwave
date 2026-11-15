@@ -4,7 +4,9 @@
 
 use std::collections::BTreeMap;
 
-use escapement_tickwave_format::decode::{BlockChannel, Footer};
+use escapement_tickwave_format::decode::{
+    BlockChannel, Footer, Index, derived_values, from_memory,
+};
 use escapement_tickwave_format::header::{
     AnalogCoding, ChannelKind, Declaration, DeclaredChannel, DeclaredKind, Derived, Exact, Header,
     IntCoding, Kept, Offset, SourceFormat, SourceHeader,
@@ -48,6 +50,7 @@ fn analog(name: &str, coding: AnalogCoding, period: u64) -> DeclaredChannel {
             significant: None,
         },
         shaping: Default::default(),
+        overview_shift: None,
     }
 }
 
@@ -58,6 +61,7 @@ fn digital(name: &str, initial: bool) -> DeclaredChannel {
         source: 0,
         data: DeclaredKind::Digital { initial },
         shaping: Default::default(),
+        overview_shift: None,
     }
 }
 
@@ -81,7 +85,7 @@ fn options() -> WriteOptions {
     WriteOptions {
         level: 3,
         block_bytes: 1 << 20,
-        batch: 1,
+        ..WriteOptions::default()
     }
 }
 
@@ -133,22 +137,18 @@ fn write(
 
 /// Each channel's items, decoded from every block: edges, or samples.
 fn decoded(file: &[u8]) -> (Footer, Vec<Vec<i64>>, Vec<Vec<Sample>>) {
-    let head = Footer::parse_file(file).unwrap();
-    let n = head.header.channels.len();
+    let index = Index::of_file(file).unwrap();
+    let n = index.blocks.len();
     let (mut edges, mut samples) = (vec![Vec::new(); n], vec![Vec::new(); n]);
-    for i in 0..head.rows.len() {
-        let (offset, len) = head.block_location(i);
-        let block = head
-            .decode_block(i, &file[offset as usize..][..len as usize])
-            .unwrap();
-        for (c, ch) in block.channels.into_iter().enumerate() {
-            match ch {
+    for c in 0..n {
+        for block in index.channel_blocks(file, c).unwrap() {
+            match block.data {
                 BlockChannel::Digital { edges: e, .. } => edges[c].extend(e),
                 BlockChannel::Analog { values, .. } => samples[c].extend(values.iter()),
             }
         }
     }
-    (head, edges, samples)
+    (index.footer, edges, samples)
 }
 
 /// A sample's stored bits, so NaNs and signed zeros compare.
@@ -161,8 +161,9 @@ fn bits(s: &Sample) -> (u8, u64) {
     }
 }
 
-fn analog_overview(head: &Footer, level: usize, c: usize) -> &AnalogOverview {
-    head.overview[level].channels[c].analog().unwrap()
+/// Channel `c`'s strip, its coarsest level.
+fn analog_overview(head: &Footer, c: usize) -> AnalogOverview {
+    head.strip(c).unwrap().data.analog().unwrap().clone()
 }
 
 fn buckets<T: Num>(c: &Columns<T>) -> Vec<(T, T, T::Sum)> {
@@ -202,6 +203,7 @@ fn recording(file: &[u8]) -> Recording {
                     breaks,
                     coding,
                     significant,
+                    ..
                 } => {
                     let s = samples[c].clone();
                     ChannelData::Analog(Analog {
@@ -239,6 +241,8 @@ fn recording(file: &[u8]) -> Recording {
                                 })),
                             ),
                         },
+                        lost_before: 0,
+                        lost_after: 0,
                     })
                 }
             },
@@ -248,7 +252,7 @@ fn recording(file: &[u8]) -> Recording {
         timebase: h.timebase,
         length: h.length,
         channels,
-        derived: h.derived.clone(),
+        derived: h.derived.iter().map(|d| d.declared()).collect(),
         sources: h
             .sources
             .iter()
@@ -306,25 +310,24 @@ fn every_coding_round_trips_its_extremes_and_its_overview_is_formats() {
             head.header.channels[c].name
         );
     }
-    let level = 0;
-    let AnalogOverview::U64(c) = analog_overview(&head, level, 2) else {
+    let AnalogOverview::U64(c) = &analog_overview(&head, 2) else {
         panic!()
     };
     // 2^64 - 1 twice: max + 0, and 1 + (max - 1). Past a u64, exact in the i128 sums.
     let max = i128::from(u64::MAX);
     assert_eq!(buckets(c), [(0, u64::MAX, max), (1, u64::MAX - 1, max)]);
-    let AnalogOverview::I64(c) = analog_overview(&head, level, 3) else {
+    let AnalogOverview::I64(c) = &analog_overview(&head, 3) else {
         panic!()
     };
     assert_eq!(buckets(c), [(i64::MIN, i64::MAX, -1), (-1, 0, -1)]);
     // An int channel sums its codes, not its values: -2048 + 2047, -1 + 0.
-    let AnalogOverview::I64(c) = analog_overview(&head, level, 4) else {
+    let AnalogOverview::I64(c) = &analog_overview(&head, 4) else {
         panic!()
     };
     assert_eq!(buckets(c), [(-2048, 2047, -1), (-1, 0, -1)]);
     // NaN is left out; infinities count. Bucket 1: -inf and -0.0, so the max is -0.0 and the sum
     // 0 + -inf + -0.0 = -inf.
-    let AnalogOverview::F64(c) = analog_overview(&head, level, 5) else {
+    let AnalogOverview::F64(c) = &analog_overview(&head, 5) else {
         panic!()
     };
     assert_eq!(
@@ -335,7 +338,7 @@ fn every_coding_round_trips_its_extremes_and_its_overview_is_formats() {
         ]
     );
     assert!(c.max[1].is_sign_negative());
-    let AnalogOverview::F32(c) = analog_overview(&head, level, 6) else {
+    let AnalogOverview::F32(c) = &analog_overview(&head, 6) else {
         panic!()
     };
     assert_eq!(
@@ -346,7 +349,7 @@ fn every_coding_round_trips_its_extremes_and_its_overview_is_formats() {
         ]
     );
     // A codes channel's buckets are of its f32 values: -1 + 0.5, 2046.5 + 0.
-    let AnalogOverview::F32(c) = analog_overview(&head, level, 7) else {
+    let AnalogOverview::F32(c) = &analog_overview(&head, 7) else {
         panic!()
     };
     assert_eq!(buckets(c), [(-1.0, 0.5, -0.5), (0.0, 2046.5, 2046.5)]);
@@ -443,7 +446,7 @@ fn a_sample_outside_its_coding_or_of_another_type_is_refused_by_the_writer() {
     .unwrap();
     assert_eq!(
         w.run(0, 0, 2).unwrap_err().to_string(),
-        "V: the first run loses 2 samples; nothing comes before it to lose"
+        "V: the 2 samples lost before the first run would start before source or axis tick 0"
     );
     w.run(0, 0, 0).unwrap();
     w.sample(0, 1.0).unwrap();
@@ -705,19 +708,20 @@ fn a_derived_product_of_verges_codes_is_exact_and_its_sums_are_i128() {
     let file = write(verge(), &samples, &[], 4096);
     let (head, _, _) = decoded(&file);
     // By hand: (2^32 - 1)^2 = 18,446,744,065,119,617,025, then 10 and 21; the sum adds 31.
-    let AnalogOverview::U64(p) = analog_overview(&head, 0, 2) else {
+    let AnalogOverview::U64(p) = &analog_overview(&head, 2) else {
         panic!("an unsigned integer product")
     };
     assert_eq!(
         buckets(p),
         [(10, 18_446_744_065_119_617_025, 18_446_744_065_119_617_056)]
     );
-    let (offset, len) = head.block_location(0);
-    let block = head
-        .decode_block(0, &file[offset as usize..][..len as usize])
-        .unwrap();
+    let index = Index::of_file(&file).unwrap();
+    let (v, i) = (
+        index.block_in(&file, 0, 0).unwrap(),
+        index.block_in(&file, 1, 0).unwrap(),
+    );
     assert_eq!(
-        head.derived(&block, 0).unwrap(),
+        derived_values(&i.data, &v.data, head.products[0].2).unwrap(),
         Values::U64(vec![18_446_744_065_119_617_025, 10, 21])
     );
     // Its scale is 1/10^12: one code a picowatt.
@@ -749,7 +753,7 @@ fn a_derived_product_past_64_bits_or_of_floats_is_an_f64_rounded_once() {
     let (head, _, _) = decoded(&file);
     let once = f64::from(0.1f32) * 3.0;
     assert_ne!(once, f64::from(0.1f32 * 3.0f32));
-    let AnalogOverview::F64(p) = analog_overview(&head, 0, 2) else {
+    let AnalogOverview::F64(p) = &analog_overview(&head, 2) else {
         panic!("an f64 product")
     };
     assert_eq!(buckets(p), [(-1.0, once, 0.0 + once + -1.0)]);
@@ -771,7 +775,7 @@ fn a_derived_product_past_64_bits_or_of_floats_is_an_f64_rounded_once() {
     let samples = vec![vec![Sample::U64((1 << 32) + 3)], vec![Sample::U64(1 << 31)]];
     let file = write(d, &samples, &[], 16);
     let (head, _, _) = decoded(&file);
-    let AnalogOverview::F64(p) = analog_overview(&head, 0, 2) else {
+    let AnalogOverview::F64(p) = &analog_overview(&head, 2) else {
         panic!("an f64 product")
     };
     assert_eq!(p.max[0], 9_223_372_043_297_226_752.0);
@@ -816,8 +820,9 @@ fn a_pulse_at_tick_0_keeps_both_edges_through_write_read_verify_and_repair() {
     };
     assert_eq!((initial, n), (false, 3));
     // Bucket 0 enters at `initial`, before the edges at its first tick, and changes.
-    assert_eq!(head.overview[0].channels[0].digital(0), Some((false, true)));
-    assert_eq!(head.overview[0].channels[0].digital(1), Some((true, false)));
+    let strip = head.strip(0).unwrap();
+    assert_eq!(strip.data.digital(0), Some((false, true)));
+    assert_eq!(strip.data.digital(1), Some((true, false)));
     verify(&file[..], recording(&file)).unwrap();
     // Cut off in its footer: repair gives the file back, both edges and all.
     let at = head.trailer.footer_offset as usize;
@@ -828,9 +833,7 @@ fn a_pulse_at_tick_0_keeps_both_edges_through_write_read_verify_and_repair() {
     let mut blocks = 0;
     while let Some(e) = reader.next_event().unwrap() {
         if let Event::Block(b) = e {
-            assert!(
-                matches!(&b.channels[0], BlockChannel::Digital { edges, .. } if edges == &[0, 0, 5])
-            );
+            assert!(matches!(&b.data, BlockChannel::Digital { edges, .. } if edges == &[0, 0, 5]));
             blocks += 1;
         }
     }
@@ -889,15 +892,21 @@ fn repair_keeps_marks_past_the_last_block_and_a_file_of_marks_alone() {
     // The length is one past the last mark's start, an empty block from 200 runs to it, and the
     // digital channel is known to the last block's end.
     assert_eq!(fixed.header.length, 351);
-    assert_eq!(fixed.header.blocks, 2);
+    assert_eq!(
+        (
+            fixed.header.channels[0].blocks,
+            fixed.header.channels[1].blocks
+        ),
+        (2, 2)
+    );
     let ChannelKind::Digital { end, .. } = fixed.header.channels[0].data else {
         panic!()
     };
     assert_eq!(end, 200);
     assert_eq!(fixed.generated["verge"].len(), 2);
     let file = [&cut[..fixed.keep as usize], &fixed.tail].concat();
-    let head = Footer::parse_file(&file).unwrap();
-    assert_eq!(head.rows[1].start, 200);
+    let index = Index::of_file(&file).unwrap();
+    assert_eq!(index.blocks[0][1].start, 200);
     // What a writer finishing there writes.
     let mut w = Writer::new(d.clone(), options()).unwrap();
     session(&mut w);
@@ -911,7 +920,10 @@ fn repair_keeps_marks_past_the_last_block_and_a_file_of_marks_alone() {
     w.annotation("verge", mark(100)).unwrap();
     let cut = w.take_output();
     let fixed = repair(&cut, 3).unwrap();
-    assert_eq!((fixed.header.length, fixed.header.blocks), (101, 1));
+    assert_eq!(
+        (fixed.header.length, fixed.header.channels[0].blocks),
+        (101, 1)
+    );
     let ChannelKind::Digital { end, initial, .. } = fixed.header.channels[0].data else {
         panic!()
     };
@@ -928,17 +940,28 @@ fn repair_keeps_marks_past_the_last_block_and_a_file_of_marks_alone() {
     let fixed = repair(&w.take_output(), 3).unwrap();
     assert_eq!(fixed.header.length, 101);
     assert_eq!(fixed.generated["verge"].len(), 2);
-    // No block, and a digital channel declared high: no block carries the level, and a channel
-    // never known starts low.
+    // No block, and a digital channel declared high: it is never known, and keeps its declared
+    // level.
     let mut high = d.clone();
     high.channels[0].data = DeclaredKind::Digital { initial: true };
     let mut w = Writer::new(high, options()).unwrap();
     w.annotation("verge", mark(10)).unwrap();
-    let err = repair(&w.take_output(), 3).err().unwrap();
-    assert_eq!(
-        err.to_string(),
-        "the file holds no block, and channel E is declared high at tick 0: no block carries \
-         that level, so it isn't repaired"
+    let cut = w.take_output();
+    let fixed = repair(&cut, 3).unwrap();
+    let file = [&cut[..fixed.keep as usize], &fixed.tail].concat();
+    let e = &Footer::parse_file(&file).unwrap().header.channels[0];
+    assert!(
+        matches!(
+            e.data,
+            ChannelKind::Digital {
+                initial: true,
+                end: 0,
+                edges: 0,
+                ..
+            }
+        ),
+        "{:?}",
+        e.data
     );
     // Neither a block nor a mark: nothing to repair.
     let w = Writer::new(d, options()).unwrap();
@@ -1023,16 +1046,30 @@ fn a_gap_recorded_past_the_last_block_leaves_nothing_known_beyond_it_and_repair_
     // A re-cut of the cut-off file finishes as repair does.
     let (_, direct) = recut(&cut, None).unwrap();
     assert_eq!(direct.content_id, fixed.header.content_id);
-    assert_eq!(direct.channels, fixed.header.channels);
+    // The same channels, cut into their own blocks.
+    let data = |h: &Header| {
+        h.channels
+            .iter()
+            .map(|c| c.data.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(data(&direct), data(&fixed.header));
     // And bundles what repair bundles, in one pass.
     let stem = || Bundle::Generated { stem: "rec".into() };
     let mut r = Repairer::new(3);
     r.bundle(stem());
     r.feed(&cut).unwrap();
     let bundled = r.finish().unwrap();
-    let (_, direct) = recut(&cut, Some(stem())).unwrap();
-    assert!(direct.annotations.is_some());
-    assert_eq!(direct.annotations, bundled.header.annotations);
+    let (file, direct) = recut(&cut, Some(stem())).unwrap();
+    let theirs = [&cut[..bundled.keep as usize], &bundled.tail].concat();
+    let bundle = |f: &[u8]| {
+        Footer::parse_file(f)
+            .unwrap()
+            .read_bundle(from_memory(f))
+            .unwrap()
+    };
+    assert!(bundle(&file).is_some());
+    assert_eq!(bundle(&file), bundle(&theirs));
     assert_eq!(direct.content_id, bundled.header.content_id);
 }
 
@@ -1057,12 +1094,13 @@ fn a_writer_bundles_its_annotations_with_a_sidecar_that_checks() {
                 extra: vec![],
                 bundle: Some(Bundle::Generated { stem: "cap".into() }),
                 drop_gaps_past_end: false,
+                lost_after: Default::default(),
             },
         )
         .unwrap();
     file.extend(&f.tail);
     let head = Footer::parse_file(&file).unwrap();
-    let files = head.header.annotations.clone().unwrap();
+    let files = head.read_bundle(from_memory(&file)).unwrap().unwrap();
     assert_eq!(
         files.keys().collect::<Vec<_>>(),
         ["cap.annotations.toml", "cap.verge.jsonl"]
@@ -1307,10 +1345,10 @@ fn a_header_breaking_a_rule_only_the_end_settles_is_refused_by_the_reader() {
     let err = Footer::parse_file(&bad).unwrap_err();
     assert!(
         err.to_string()
-            .contains("derived channel P: I and V differ in first, count or breaks"),
+            .contains("derived channel P: I and V differ in first, count, breaks or losses"),
         "{err}"
     );
-    // A first run that loses samples: nothing came before it to lose.
+    // A first run at tick 0 that loses a sample: the loss would start before tick 0.
     let mut r = Reader::default();
     let mut doctored = file.clone();
     let run = doctored
@@ -1399,7 +1437,7 @@ fn a_gap_record_from_tick_0_after_an_edge_there_is_refused_by_the_reader() {
 }
 
 #[test]
-fn an_operand_sample_left_unpaired_when_its_block_closes_is_refused() {
+fn an_operand_may_run_ahead_of_the_other_and_one_left_unpaired_is_refused_at_the_finish() {
     let mut d = verge();
     d.channels.push(digital("E", false));
     let mut w = Writer::new(
@@ -1413,11 +1451,18 @@ fn an_operand_sample_left_unpaired_when_its_block_closes_is_refused() {
     w.run(0, 0, 0).unwrap();
     w.run(1, 0, 0).unwrap();
     w.sample(0, 1u64).unwrap();
-    // The block is full, so the edge after it closes it, with I's sample at 0 never in.
-    let err = w.edge(2, 5).unwrap_err();
+    // Each channel in its own order: V's sample waits for I's, past E's edge at 5 and V's own
+    // full block, and pairs once it comes.
+    w.edge(2, 5).unwrap();
+    w.sample(0, 2u64).unwrap();
+    w.sample(1, 3u64).unwrap();
+    w.sample(1, 4u64).unwrap();
+    // A sample of V that I never gives is refused at the finish.
+    w.sample(0, 5u64).unwrap();
+    let err = w.finish(4096, &[4096], Finish::default()).unwrap_err();
     assert_eq!(
         err.to_string(),
-        "derived channel P: V has a sample at tick 0 that I lacks"
+        "derived channel P: V has a sample at tick 1920 that I lacks"
     );
 }
 

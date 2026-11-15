@@ -1,30 +1,35 @@
 //! The writer: a recording's items in, the file's bytes out, with no I/O of its own.
 //!
-//! A caller declares the recording, then hands in its items in axis order across the channels,
-//! each in its own source's ticks, and drains the bytes as they come: `output` and `consume`, or
-//! `take_output`. Blocks close on their size, or at `flush`, which a live recorder calls on its
-//! own clock. `snapshot` gives a view in the same process what is written so far. `finish` closes
-//! the last block and writes the footer and the trailer, bundling the annotations if asked.
+//! A caller declares the recording, then hands in each channel's items in that channel's order,
+//! in its source's ticks, and promises as it goes that every item before a tick is in. Each
+//! channel's block closes at a promise once it reaches its size, or at `flush`, which a live
+//! recorder calls on its own clock and which writes a known-through record. Frames are
+//! compressed a slice at a time over the calls that follow, on the caller's thread, or on other
+//! threads by option. The caller drains the bytes as they come: `output` and `consume`, or
+//! `take_output`. `snapshot` gives a view in the same process what is held so far. `finish`
+//! closes each channel's last block and writes the last pages, the annotation bundle if asked,
+//! the footer and the trailer.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
-use rayon::prelude::*;
-
 use crate::codec::put_uleb;
-use crate::decode::check_declaration;
+use crate::compress::{SLICE, Slicer, Slot, compress};
+use crate::decode::{check_declaration, level_after, lost_after_end, lost_before_start};
 use crate::hash::{self, ChannelHasher};
 use crate::header::{
     AnalogCoding, BlockRow, ChannelHeader, ChannelKind, ContentId, Declaration, DeclaredKind,
-    Header, JSON_SAFE, LEVEL_BIT, OverviewLevel, OverviewRow, Preamble, Words, code_value,
+    DerivedHeader, Header, INLINE_LIST, JSON_SAFE, LEVEL_BIT, OverviewLevel, OverviewRow, Preamble,
+    code_value,
 };
+use crate::index::{Due, Entry, Row, Table, TableIndex, TableWriter};
 use crate::mapping::Mapping;
 use crate::model::{Break, Gap, Ratio, Sample};
-use crate::overview::{self, Builder, Settled, Unpaired};
-use crate::record::{self, BlockHead, Kind};
+use crate::overview::{self, Column, Ladder, Pair, Settled, Unpaired};
+use crate::record::{self, BlockHead, Kind, OverviewHead};
 use crate::samples;
 use crate::shared::Chunks;
-use crate::snapshot::{Snapshot, Written};
+use crate::snapshot::{ChannelSnapshot, LevelSnapshot, OverviewSnapshot, Snapshot, Unwritten};
 
 #[derive(Debug, thiserror::Error)]
 pub enum WriteError {
@@ -32,8 +37,6 @@ pub enum WriteError {
     TooLarge { what: &'static str, value: u64 },
     #[error("the block size target must lie between 1 and 2^30 bytes")]
     BlockSize,
-    #[error("a batch holds at least one block")]
-    Batch,
     #[error("the declaration: {0}")]
     Declaration(String),
     #[error("no channel {0}")]
@@ -46,6 +49,17 @@ pub enum WriteError {
         tick: i64,
         previous: i64,
     },
+    #[error(
+        "{channel}: an item at axis tick {tick} comes before tick {promise}, before which every \
+         item was promised in"
+    )]
+    BeforePromise {
+        channel: String,
+        tick: i64,
+        promise: i64,
+    },
+    #[error("a promise or flush at tick {before} comes before the latest, at {last}")]
+    Promise { before: i64, last: i64 },
     #[error("{channel}: an edge at tick {tick} lies inside the gap to {to}")]
     EdgeInGap { channel: String, tick: i64, to: i64 },
     #[error("{channel}: a gap from {from} to {to} is empty or runs backwards")]
@@ -88,8 +102,18 @@ pub enum WriteError {
     },
     #[error("{channel}: a sample before the channel's first run")]
     NoRun { channel: String },
-    #[error("{channel}: the first run loses {lost} samples; nothing comes before it to lose")]
-    FirstRunLost { channel: String, lost: u64 },
+    #[error(
+        "{channel}: the {lost} samples lost before the first run would start before source or \
+         axis tick 0"
+    )]
+    LostBefore { channel: String, lost: u64 },
+    #[error(
+        "{channel}: the {lost} samples lost after the last would end past the length, or the \
+         channel has no sample"
+    )]
+    LostAfter { channel: String, lost: u64 },
+    #[error("channel {0} is not an analog channel, so it loses no samples after its last")]
+    LostAfterChannel(usize),
     #[error("{channel}: sample {index}: {why}")]
     Sample {
         channel: String,
@@ -105,13 +129,13 @@ pub enum WriteError {
         value: f32,
         coding: AnalogCoding,
     },
-    #[error("a flush at tick {before} does not lie past every item in, the last at {last}")]
+    #[error("a flush at tick {before} comes before the latest promise or flush, at {last}")]
     Flush { before: i64, last: i64 },
     #[error("a block of {0} items or bytes, more than its index word or length holds")]
     BlockTooLarge(usize),
     #[error("the length {length} does not lie past every item and block in, the last at {last}")]
     Length { length: i64, last: i64 },
-    #[error("{expected} digital channel ends given, {given} expected")]
+    #[error("{given} digital channel ends given, {expected} expected")]
     Ends { given: usize, expected: usize },
     #[error(
         "{channel}: its end, source tick {end}, lies outside its start to the length, {length}"
@@ -129,8 +153,10 @@ pub enum WriteError {
     },
     #[error("{channel}: the gap to {to} lies inside the recording but not before the end, {end}")]
     GapPastEnd { channel: String, to: i64, end: i64 },
-    #[error("{channel}: never known, so its initial level is false")]
-    UnknownInitial { channel: String },
+    #[error(
+        "{channel}: the end leaves out a gap already written in a list page, which can't change"
+    )]
+    GapPaged { channel: String },
     #[error("source {index}'s extra already holds {key}")]
     Extra { index: usize, key: String },
     #[error("extra keys for {given} sources, but the recording has {sources}")]
@@ -140,38 +166,41 @@ pub enum WriteError {
     Annotation(String),
     #[error("the footer is {0} bytes, more than its u32 length holds")]
     FooterTooLarge(usize),
-    #[error(
-        "tick {end} needs {blocks} overview blocks at 2^{shift}-tick buckets, more than tickwave \
-         keeps ({max}); a coarser overview_shift reaches further"
-    )]
-    Overview {
-        end: i64,
-        blocks: u64,
-        shift: u8,
-        max: u64,
-    },
     #[error("the header would not read back: {0}")]
     Header(String),
     #[error("zstd: {0}")]
     Zstd(#[from] std::io::Error),
 }
 
-/// The most overview blocks the writer keeps queued before it writes what waits, the blocks of a
-/// batch not yet full included.
-const QUEUED_OVERVIEW: usize = 64;
+/// The overview blocks a ladder settles before the writer compresses what waits: a call that
+/// settles a long span holds this many at a time.
+const SETTLE_STEP: usize = 16;
 
-/// The zstd level overview blocks are compressed at, whatever `WriteOptions::level`: a level
-/// that moves into overview blocks writes every settled one at once.
+/// The zstd level overview blocks are compressed at, whatever `WriteOptions::level`.
 pub const OVERVIEW_BLOCK_LEVEL: i32 = 3;
+
+/// Where frames are compressed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Compression {
+    /// On the caller's thread, a slice of at most 8 KiB of decoded bytes a call, so no call does
+    /// much work however large a block is.
+    #[default]
+    Spread,
+    /// On rayon's threads, channels in parallel, giving the bytes `Spread` gives. A call waits
+    /// only when more frames are being compressed than twice the threads and two more.
+    Offload,
+}
 
 #[derive(Clone, Debug)]
 pub struct WriteOptions {
-    /// The zstd level for blocks and the footer's overview.
+    /// The zstd level for blocks, strips and the annotation bundle.
     pub level: i32,
-    /// The decoded size at which a block closes.
+    /// The decoded size at which a channel's block closes, at its next promise.
     pub block_bytes: usize,
-    /// How many closed blocks compress together, in parallel. 1 writes each block as it closes.
-    pub batch: usize,
+    /// Each item promises its own axis tick: for a caller that hands items in axis order across
+    /// the channels, as the encoder does.
+    pub promise_with_items: bool,
+    pub compression: Compression,
 }
 
 impl Default for WriteOptions {
@@ -179,16 +208,10 @@ impl Default for WriteOptions {
         Self {
             level: 19,
             block_bytes: 1 << 20,
-            batch: 1,
+            promise_with_items: false,
+            compression: Compression::Spread,
         }
     }
-}
-
-/// One zstd frame with a content checksum, which the readers require.
-pub(crate) fn compress(raw: &[u8], level: i32) -> std::io::Result<Vec<u8>> {
-    let mut compressor = zstd::bulk::Compressor::new(level)?;
-    compressor.set_parameter(zstd::stream::raw::CParameter::ChecksumFlag(true))?;
-    compressor.compress(raw)
 }
 
 /// The code for `value` under `coding`, if one reproduces it exactly.
@@ -209,36 +232,6 @@ pub fn code_of(value: f32, coding: AnalogCoding) -> Option<u16> {
     (code_value(code, scale, offset).to_bits() == value.to_bits()).then_some(code)
 }
 
-struct DigitalState {
-    initial: bool,
-    /// The level after the edges and the gap ends the blocks have passed.
-    level: bool,
-    map: Mapping,
-    /// The channel's start, in its source's ticks.
-    start: i64,
-    /// The last edge's source tick, or the channel's start before the first.
-    last_edge: i64,
-    edges: u64,
-    gaps: Chunks<Gap>,
-    /// Gaps whose `to` no block has passed yet, each with its `to` on the axis.
-    pending: VecDeque<(Gap, i64)>,
-    hasher: ChannelHasher,
-}
-
-struct AnalogState {
-    period: Ratio,
-    coding: AnalogCoding,
-    map: Mapping,
-    /// Every run so far, the first at index 0.
-    runs: Chunks<Break>,
-    /// A run the next sample starts: its source tick and the samples lost before it.
-    next_run: Option<(i64, u64)>,
-    count: u64,
-    /// The last sample's place, a source tick.
-    last_tick: Option<i64>,
-    hasher: ChannelHasher,
-}
-
 fn uleb_len(v: u64) -> usize {
     (64 - v.leading_zeros() as usize).div_ceil(7).max(1)
 }
@@ -250,7 +243,7 @@ fn gcd(mut a: u64, mut b: u64) -> u64 {
     a
 }
 
-/// A digital channel's edges in the open block, in its source's ticks, and the size its section
+/// A digital channel's edges in its open block, in its source's ticks, and the size its section
 /// comes to (FORMAT.md, "Blocks"): `step`, the first edge, then each later interval over `step`.
 #[derive(Clone, Debug, Default)]
 struct EdgeRun {
@@ -262,6 +255,14 @@ struct EdgeRun {
 }
 
 impl EdgeRun {
+    fn of(ticks: &[i64]) -> Self {
+        let mut run = Self::default();
+        for &t in ticks {
+            run.push(t);
+        }
+        run
+    }
+
     fn step(&self) -> u64 {
         self.step.max(1)
     }
@@ -272,6 +273,27 @@ impl EdgeRun {
             None => 0,
             Some(&first) => uleb_len(self.step()) + uleb_len(first as u64) + self.intervals,
         }
+    }
+
+    /// The section's size with an edge at `tick`, no earlier than the last, taken in.
+    fn size_with(&self, tick: i64) -> usize {
+        let Some(&last) = self.ticks.last() else {
+            return uleb_len(1) + uleb_len(tick as u64);
+        };
+        let first = self.ticks[0];
+        let interval = (tick - last) as u64;
+        let step = gcd(self.step, interval);
+        let intervals = if step == self.step {
+            self.intervals + uleb_len(interval / self.step())
+        } else {
+            let step = step.max(1);
+            self.ticks
+                .windows(2)
+                .map(|w| uleb_len((w[1] - w[0]) as u64 / step))
+                .sum::<usize>()
+                + uleb_len(interval / step)
+        };
+        uleb_len(step.max(1)) + uleb_len(first as u64) + intervals
     }
 
     /// Takes an edge at `tick`, no earlier than the last, and returns the section's new size.
@@ -312,90 +334,126 @@ impl EdgeRun {
     }
 }
 
-enum State {
+/// A block's decoded payload from an analog channel's samples as the writer holds them, each
+/// sample's bytes together: codes split into byte planes.
+pub(crate) fn analog_raw(section: &[u8], coding: AnalogCoding) -> Vec<u8> {
+    if coding.planes() {
+        let mut out = Vec::with_capacity(section.len());
+        samples::to_planes(section, coding.sample_len(), &mut out);
+        out
+    } else {
+        section.to_vec()
+    }
+}
+
+struct DigitalState {
+    initial: bool,
+    /// The level at the open block's start.
+    level: bool,
+    /// The channel's start, in its source's ticks.
+    start: i64,
+    /// The last edge's source tick, or the channel's start before the first.
+    last_edge: i64,
+    edges: u64,
+    open: EdgeRun,
+    gaps: Chunks<Gap>,
+    /// Gaps whose `to` no closed block has passed, each with its `to` on the axis.
+    pending: VecDeque<(Gap, i64)>,
+    list: TableWriter<Gap>,
+}
+
+struct AnalogState {
+    period: Ratio,
+    coding: AnalogCoding,
+    /// Every run so far, the first at index 0.
+    runs: Chunks<Break>,
+    /// A run the next sample starts: its source tick and the samples lost before it.
+    next_run: Option<(i64, u64)>,
+    count: u64,
+    /// The last sample's place, a source tick.
+    last_tick: Option<i64>,
+    /// The open block's samples, each one's bytes together.
+    open: Vec<u8>,
+    list: TableWriter<Break>,
+}
+
+enum Data {
     Digital(DigitalState),
     Analog(AnalogState),
 }
 
-struct Open {
+struct Chan {
+    map: Mapping,
+    /// Every item before this axis tick is in: the channel's own promise, or a later global one.
+    promise: i64,
+    /// The open block's start, where the last closed block ended.
     start: i64,
-    /// Each analog channel's section so far; a digital channel's is empty.
-    sections: Vec<Vec<u8>>,
-    /// Each digital channel's edges so far; an analog channel's holds none.
-    edges: Vec<EdgeRun>,
-    words: Vec<u32>,
+    /// The open block's items, its decoded size, and its first and last item's axis ticks.
+    items: u32,
     size: usize,
-    /// The last item's axis tick; `start` while it holds none.
-    last: i64,
-    items: bool,
+    first_tick: i64,
+    last_tick: i64,
+    /// The items in the blocks closed.
+    closed_items: u64,
+    blocks_closed: u64,
+    blocks: TableWriter<BlockRow>,
+    hasher: ChannelHasher,
+    data: Data,
+    full: bool,
 }
 
-impl Open {
-    /// A stand-in while the open block is being replaced.
-    fn empty(start: i64) -> Self {
-        Self {
-            start,
-            sections: Vec::new(),
-            edges: Vec::new(),
-            words: Vec::new(),
-            size: 0,
-            last: start,
-            items: false,
-        }
-    }
-
-    /// Every channel's section as the block holds it, a digital channel's coded now.
-    fn sections(&self) -> Vec<Vec<u8>> {
-        self.sections
-            .iter()
-            .zip(&self.edges)
-            .map(|(section, edges)| {
-                if edges.ticks.is_empty() {
-                    section.clone()
-                } else {
-                    let mut out = Vec::with_capacity(edges.size());
-                    edges.encode(&mut out);
-                    out
-                }
-            })
-            .collect()
-    }
+/// An overview channel's ladder and the tables of its levels in overview blocks.
+struct OChan {
+    ladder: Option<Ladder>,
+    column: Column,
+    levels: Vec<Option<TableWriter<OverviewRow>>>,
 }
 
-/// A block's decoded payload from its channels' sections as the writer builds them: the section
-/// table, then each section, codes split into byte planes.
-pub(crate) fn assemble(sections: &[Vec<u8>], codings: &[Option<AnalogCoding>]) -> Vec<u8> {
-    let size: usize = sections.iter().map(Vec::len).sum();
-    let mut raw = Vec::with_capacity(size + 4 * sections.len());
-    for section in sections {
-        raw.extend_from_slice(&(section.len() as u32).to_le_bytes());
-    }
-    for (section, coding) in sections.iter().zip(codings) {
-        match coding {
-            Some(coding) if coding.planes() => {
-                samples::to_planes(section, coding.sample_len(), &mut raw)
-            }
-            _ => raw.extend_from_slice(section),
-        }
-    }
-    raw
+enum Placed {
+    Nothing,
+    Gap(usize, Gap),
+    Run(usize, Break),
 }
 
-/// What waits to be written, in file order.
-pub(crate) enum Queued {
+enum State {
+    Waiting,
+    Running { consumed: usize, out: Vec<u8> },
+    Done(Vec<u8>),
+    Off(Arc<Slot>),
+}
+
+enum FrameOf {
     Block {
         head: BlockHead,
-        raw: Vec<u8>,
-        /// Each channel's count of items before the block.
-        firsts: Vec<u64>,
+        first_index: u64,
     },
     Overview {
-        shift: u8,
-        k: u64,
-        /// Shared with the snapshots taken before it is written.
-        raw: Arc<Vec<u8>>,
+        o: usize,
+        li: usize,
+        head: OverviewHead,
     },
-    Record(Vec<u8>),
+}
+
+enum Item {
+    Record(Vec<u8>, Placed),
+    Frame {
+        of: FrameOf,
+        raw: Arc<Vec<u8>>,
+        level: i32,
+        state: State,
+    },
+}
+
+impl Item {
+    fn pending(&self) -> bool {
+        matches!(
+            self,
+            Item::Frame {
+                state: State::Waiting | State::Running { .. },
+                ..
+            }
+        )
+    }
 }
 
 /// What a finished recording comes to.
@@ -420,15 +478,17 @@ pub struct Finish {
     /// What each source states only at its end, such as a probe's totals, added to its `extra`,
     /// by source index. It may list fewer sources than the recording has.
     pub extra: Vec<BTreeMap<String, String>>,
-    /// Bundle annotations into the footer's header, so the recording is one file.
+    /// Bundle annotations into the file, so the recording is one file.
     pub bundle: Option<Bundle>,
     /// Take a gap that reaches a digital channel's end as ending what is known at its `from`,
     /// even where the gap ends inside the recording, as repair does for a file cut off. Otherwise
     /// such a gap is refused, as most likely a caller's mistake.
     pub drop_gaps_past_end: bool,
+    /// Samples the instrument lost after an analog channel's last, by channel index.
+    pub lost_after: BTreeMap<usize, u64>,
 }
 
-/// What a finished file bundles into its header's `annotations`.
+/// What a finished file bundles in its annotation bundle record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Bundle {
     /// The writer's own annotations: each source's generator file `<stem>.<source>.jsonl`, and
@@ -437,45 +497,6 @@ pub enum Bundle {
     Generated { stem: String },
     /// These files exactly: a re-cutter carries a file's bundle over.
     Files(BTreeMap<String, String>),
-}
-
-/// The footer's header for what a writer declared and what the end settled: the declaration's
-/// values, `extra` added to each source's, the channels' totals, and the levels `plan` sets.
-pub(crate) fn finished_header(
-    declaration: &Declaration,
-    length: i64,
-    channels: Vec<ChannelHeader>,
-    digests: &[blake3::Hash],
-    blocks: u32,
-    plan: &overview::Plan,
-    extra: Vec<BTreeMap<String, String>>,
-) -> Header {
-    let mut sources = declaration.sources.clone();
-    for (source, extra) in sources.iter_mut().zip(extra) {
-        source.extra.extend(extra);
-    }
-    Header {
-        timebase: declaration.timebase,
-        length,
-        channels,
-        derived: declaration.derived.clone(),
-        sources,
-        title: declaration.title.clone(),
-        meta: declaration.meta.clone(),
-        content_id: hash::content_id(declaration.timebase, length, digests),
-        blocks,
-        overview_shift: declaration.overview_shift,
-        overview: plan.head.clone(),
-        overview_blocks: plan
-            .blocks
-            .iter()
-            .map(|&shift| OverviewLevel {
-                shift,
-                blocks: overview::block_count(length, shift) as u32,
-            })
-            .collect(),
-        annotations: None,
-    }
 }
 
 /// The files a bundle of `generated` holds for a recording `<stem>.tickwave` with `id`: each
@@ -506,23 +527,13 @@ pub(crate) fn bundled_files(
     files
 }
 
-/// Overview rows a level at a time, finest first. Each level's blocks are written in order from
-/// block 0, and the levels interleave as a long span settles in steps: a sort would take the
-/// steps' runs one by one.
-pub(crate) fn by_level(rows: Vec<(u8, u64, OverviewRow)>) -> Vec<(u8, u64, OverviewRow)> {
-    let mut levels = [false; 64];
-    for &(shift, ..) in &rows {
-        levels[usize::from(shift)] = true;
-    }
-    let out: Vec<_> = (0..64u8)
-        .filter(|&shift| levels[usize::from(shift)])
-        .flat_map(|shift| rows.iter().filter(move |r| r.0 == shift).copied())
-        .collect();
-    debug_assert!(
-        out.windows(2).all(|w| w[0].0 != w[1].0 || w[0].1 < w[1].1),
-        "each level's overview blocks in order"
-    );
-    out
+/// The annotation bundle record's payload for `files`, compressed at `level`.
+pub(crate) fn bundle_payload(
+    files: &BTreeMap<String, String>,
+    level: i32,
+) -> Result<Vec<u8>, WriteError> {
+    crate::bundle::bundle_payload(files, level)
+        .map_err(|e| WriteError::Zstd(std::io::Error::other(e.to_string())))
 }
 
 /// A generator file: its first line, then `lines` (ANNOTATIONS.md).
@@ -580,43 +591,112 @@ pub(crate) fn generated<'a>(
     generated
 }
 
-pub struct Writer {
-    declaration: Arc<Declaration>,
-    options: WriteOptions,
-    states: Vec<State>,
-    codings: Vec<Option<AnalogCoding>>,
-    out: Vec<u8>,
-    /// Bytes handed out before `out`.
-    taken: u64,
-    open: Open,
-    /// The latest item's axis tick, across every channel.
-    last_tick: i64,
-    /// Where the last closed block ended; 0 before the first.
-    closed: i64,
-    /// Each channel's count of items in the blocks closed so far.
-    counts: Vec<u64>,
-    written: Chunks<Written>,
-    overview_rows: Vec<(u8, u64, OverviewRow)>,
-    queue: Vec<Queued>,
-    queued_blocks: usize,
-    queued_overview: usize,
-    overview: Builder,
-    annotations: Chunks<record::Annotation>,
-    lines: crate::annotations::Lines,
-    /// The last overview block's level and its decoded bytes: a span with no item settles block
-    /// after block of one shared level, which is written out once.
-    last_level: Option<(Arc<overview::Level>, Arc<Vec<u8>>)>,
-    /// The last overview block's decoded bytes and frame, which a block of the same bytes takes
-    /// rather than compressing them again.
-    last_frame: Option<(Arc<Vec<u8>>, Vec<u8>)>,
-}
-
 fn check_safe(what: &'static str, value: u64) -> Result<(), WriteError> {
     if value < JSON_SAFE {
         Ok(())
     } else {
         Err(WriteError::TooLarge { what, value })
     }
+}
+
+/// The run that holds sample `index` of a channel whose runs are `runs`, the first at index 0.
+fn run_of(runs: &Chunks<Break>, index: u64) -> Option<Break> {
+    let (mut lo, mut hi) = (0, runs.len());
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if runs.get(mid)?.index <= index {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    runs.get(lo.checked_sub(1)?).copied()
+}
+
+/// Sample `index`'s place on the run `run` starts: a source tick, saturating.
+#[inline]
+fn place_in(run: Break, period: Ratio, index: u64) -> i64 {
+    // A whole period, as most are, needs no division.
+    let steps = if period.den() == 1 {
+        u128::from(index - run.index) * u128::from(period.num())
+    } else {
+        u128::from(index - run.index) * u128::from(period.num()) / u128::from(period.den())
+    };
+    i64::try_from(steps)
+        .ok()
+        .and_then(|s| run.tick.checked_add(s))
+        .unwrap_or(i64::MAX)
+}
+
+/// Writes `due`, and any directory pages it fills, to `out`, whose first byte is at `taken`.
+pub(crate) fn place_dues<R: Row>(
+    table: &mut TableWriter<R>,
+    mut due: Option<Due>,
+    out: &mut Vec<u8>,
+    taken: u64,
+) {
+    while let Some(d) = due {
+        let at = taken + out.len() as u64;
+        out.extend_from_slice(&d.record);
+        due = table.placed(&d, at);
+    }
+}
+
+/// Which channels close their blocks together: each derived channel's operands, and theirs in
+/// turn. Each channel's partners.
+fn groups(channels: usize, products: &[(usize, usize, samples::Product)]) -> Vec<Vec<usize>> {
+    let mut group: Vec<usize> = (0..channels).collect();
+    fn root(g: &[usize], mut c: usize) -> usize {
+        while g[c] != c {
+            c = g[c];
+        }
+        c
+    }
+    for &(a, b, _) in products {
+        let (ra, rb) = (root(&group, a), root(&group, b));
+        if ra != rb {
+            group[ra] = rb;
+        }
+    }
+    let roots: Vec<usize> = (0..channels).map(|c| root(&group, c)).collect();
+    (0..channels)
+        .map(|c| {
+            (0..channels)
+                .filter(|&p| p != c && roots[p] == roots[c])
+                .collect()
+        })
+        .collect()
+}
+
+pub struct Writer {
+    declaration: Arc<Declaration>,
+    options: WriteOptions,
+    chans: Vec<Chan>,
+    ochans: Vec<OChan>,
+    pairs: Vec<Pair>,
+    /// Each channel's derived channels, by derived index.
+    operand_of: Vec<Vec<usize>>,
+    /// Each channel's partners, which close their blocks with it.
+    partners: Vec<Vec<usize>>,
+    /// Channels whose open block has reached its size, waiting for a promise past their first
+    /// item.
+    full: Vec<usize>,
+    /// The latest promise to every channel.
+    promise: i64,
+    /// The latest known-through record's tick; 0 before the first.
+    known: i64,
+    out: Vec<u8>,
+    /// Bytes handed out before `out`.
+    taken: u64,
+    queue: VecDeque<Item>,
+    /// The sequence number of the queue's first item, and of the first frame still to compress.
+    head: u64,
+    cursor: u64,
+    slicers: Vec<Slicer>,
+    annotations: Chunks<record::Annotation>,
+    lines: crate::annotations::Lines,
+    /// A compression that failed where no error could be returned.
+    failed: Option<String>,
 }
 
 impl Writer {
@@ -626,80 +706,110 @@ impl Writer {
         if options.block_bytes == 0 || options.block_bytes > 1 << 30 {
             return Err(WriteError::BlockSize);
         }
-        if options.batch == 0 {
-            return Err(WriteError::Batch);
-        }
         check_declaration(&declaration).map_err(|e| WriteError::Declaration(e.to_string()))?;
         let unmapped = || WriteError::Declaration("a channel has no mapping to the axis".into());
-        let mut states = Vec::with_capacity(declaration.channels.len());
-        let mut codings = Vec::with_capacity(declaration.channels.len());
+        let mut chans = Vec::with_capacity(declaration.channels.len());
         for (c, channel) in declaration.channels.iter().enumerate() {
             let hasher = ChannelHasher::declared(&declaration, c).ok_or_else(unmapped)?;
             let map = declaration.mapping(c).ok_or_else(unmapped)?;
-            match &channel.data {
+            let data = match &channel.data {
                 DeclaredKind::Digital { initial } => {
                     let start = declaration.start(c).ok_or_else(unmapped)?;
-                    states.push(State::Digital(DigitalState {
+                    Data::Digital(DigitalState {
                         initial: *initial,
                         level: *initial,
-                        map,
                         start,
                         last_edge: start,
                         edges: 0,
+                        open: EdgeRun::default(),
                         gaps: Chunks::new(),
                         pending: VecDeque::new(),
-                        hasher,
-                    }));
-                    codings.push(None);
+                        list: TableWriter::new(c as u32, Table::Gaps, true),
+                    })
                 }
-                DeclaredKind::Analog { period, coding, .. } => {
-                    states.push(State::Analog(AnalogState {
-                        period: *period,
-                        coding: *coding,
-                        map,
-                        runs: Chunks::new(),
-                        next_run: None,
-                        count: 0,
-                        last_tick: None,
-                        hasher,
-                    }));
-                    codings.push(Some(*coding));
+                DeclaredKind::Analog { period, coding, .. } => Data::Analog(AnalogState {
+                    period: *period,
+                    coding: *coding,
+                    runs: Chunks::new(),
+                    next_run: None,
+                    count: 0,
+                    last_tick: None,
+                    open: Vec::new(),
+                    list: TableWriter::new(c as u32, Table::Breaks, false),
+                }),
+            };
+            let digital = matches!(data, Data::Digital(_));
+            chans.push(Chan {
+                map,
+                promise: 0,
+                start: 0,
+                items: 0,
+                size: 0,
+                first_tick: 0,
+                last_tick: 0,
+                closed_items: 0,
+                blocks_closed: 0,
+                blocks: TableWriter::new(c as u32, Table::Blocks, digital),
+                hasher,
+                data,
+                full: false,
+            });
+        }
+        let columns = overview::columns(&declaration.channels, &declaration.derived);
+        let ochans = columns
+            .iter()
+            .enumerate()
+            .map(|(o, &column)| {
+                let initial = match declaration.channels.get(o).map(|c| &c.data) {
+                    Some(DeclaredKind::Digital { initial }) => Some(*initial),
+                    _ => None,
+                };
+                let shift = declaration
+                    .shift(o)
+                    .expect("a checked declaration's channel");
+                OChan {
+                    ladder: Some(Ladder::new(shift, column, initial)),
+                    column,
+                    levels: Vec::new(),
                 }
+            })
+            .collect();
+        let pairs = Pair::of(&declaration.channels, &declaration.derived);
+        let products = overview::products(&declaration.channels, &declaration.derived);
+        let mut operand_of = vec![Vec::new(); chans.len()];
+        for (d, &(a, b, _)) in products.iter().enumerate() {
+            operand_of[a].push(d);
+            if b != a {
+                operand_of[b].push(d);
             }
         }
+        let partners = groups(chans.len(), &products);
         let json = serde_json::to_vec(&declaration).expect("a declaration serialises");
         let mut out = Vec::new();
         out.extend_from_slice(&Preamble::CURRENT.to_bytes());
         record::write(&mut out, Kind::Declaration, &[&json]);
         let lines = crate::annotations::Lines::declared(&declaration);
-        let mut writer = Self {
-            overview: Builder::new(
-                declaration.overview_shift,
-                &declaration.channels,
-                &declaration.derived,
-            ),
-            counts: vec![0; states.len()],
+        Ok(Self {
             declaration: Arc::new(declaration),
             options,
-            states,
-            codings,
+            chans,
+            ochans,
+            pairs,
+            operand_of,
+            partners,
+            full: Vec::new(),
+            promise: 0,
+            known: 0,
             out,
             taken: 0,
-            open: Open::empty(0),
-            last_tick: 0,
-            closed: 0,
-            written: Chunks::new(),
-            overview_rows: Vec::new(),
-            queue: Vec::new(),
-            queued_blocks: 0,
-            queued_overview: 0,
+            queue: VecDeque::new(),
+            head: 0,
+            cursor: 0,
+            slicers: Vec::new(),
             annotations: Chunks::new(),
             lines,
-            last_level: None,
-            last_frame: None,
-        };
-        writer.open = writer.new_block(0);
-        Ok(writer)
+            failed: None,
+        })
     }
 
     /// The bytes written and not yet taken.
@@ -707,16 +817,37 @@ impl Writer {
         &self.out
     }
 
-    /// Takes the first `n` bytes of `output`.
+    /// Takes the first `n` bytes of `output`, then compresses the next slice of what waits. A
+    /// compression that fails here is the next fallible call's error.
     pub fn consume(&mut self, n: usize) {
         self.out.drain(..n);
         self.taken += n as u64;
+        self.advance_quietly();
     }
 
-    /// Takes every byte written so far.
+    /// Compresses the next slice of what waits, then takes every byte written so far. A
+    /// compression that fails here is the next fallible call's error.
     pub fn take_output(&mut self) -> Vec<u8> {
+        self.advance_quietly();
         self.taken += self.out.len() as u64;
         std::mem::take(&mut self.out)
+    }
+
+    fn advance_quietly(&mut self) {
+        if self.failed.is_none()
+            && let Err(e) = self.advance()
+        {
+            self.failed = Some(e.to_string());
+        }
+    }
+
+    /// A compression that failed in a call that returns no error: the writer stops there.
+    #[inline]
+    fn check_failed(&self) -> Result<(), WriteError> {
+        match &self.failed {
+            Some(e) => Err(WriteError::Zstd(std::io::Error::other(e.clone()))),
+            None => Ok(()),
+        }
     }
 
     /// The file's length so far: the bytes taken and those in `output`.
@@ -728,40 +859,43 @@ impl Writer {
         &self.declaration
     }
 
+    /// The latest promise to every channel.
+    pub fn promised(&self) -> i64 {
+        self.promise
+    }
+
+    /// The latest known-through record's tick, 0 before the first.
+    pub fn known_through(&self) -> i64 {
+        self.known
+    }
+
+    /// Whether frames wait to be compressed or written: the bytes of every record made so far are
+    /// in `output` once this is false.
+    pub fn pending(&self) -> bool {
+        !self.queue.is_empty()
+    }
+
     fn name(&self, c: usize) -> String {
         self.declaration.channels[c].name.clone()
     }
 
-    fn new_block(&self, start: i64) -> Open {
-        Open {
-            start,
-            sections: vec![Vec::new(); self.states.len()],
-            edges: vec![EdgeRun::default(); self.states.len()],
-            words: self
-                .states
-                .iter()
-                .map(|s| match s {
-                    State::Digital(d) if d.level => LEVEL_BIT,
-                    _ => 0,
-                })
-                .collect(),
-            size: 0,
-            last: start,
-            items: false,
-        }
-    }
-
+    #[inline]
     fn check_channel(&self, c: usize) -> Result<(), WriteError> {
-        if c < self.states.len() {
+        if c < self.chans.len() {
             Ok(())
         } else {
             Err(WriteError::NoChannel(c))
         }
     }
 
+    fn promise_of(&self, c: usize) -> i64 {
+        self.chans[c].promise.max(self.promise)
+    }
+
     /// Where source tick `k` of channel `c` lies on the axis, refusing either tick outside
     /// `0..2^53` (FORMAT.md, "Times"), as a reader would.
-    fn place(&self, c: usize, map: &Mapping, k: i64) -> Result<i64, WriteError> {
+    #[inline]
+    fn place(&self, c: usize, k: i64) -> Result<i64, WriteError> {
         let safe = 0..JSON_SAFE as i64;
         if !safe.contains(&k) {
             return Err(WriteError::SourceTick {
@@ -769,7 +903,7 @@ impl Writer {
                 tick: k,
             });
         }
-        match map.axis(k) {
+        match self.chans[c].map.axis(k) {
             Some(t) if safe.contains(&t) => Ok(t),
             _ => Err(WriteError::AxisTick {
                 channel: self.name(c),
@@ -778,47 +912,185 @@ impl Writer {
         }
     }
 
-    fn check_order(&self, c: usize, tick: i64) -> Result<(), WriteError> {
-        if tick < self.last_tick || tick < self.open.start {
-            return Err(WriteError::Order {
+    /// An item of channel `c` at axis tick `t`, an edge at source tick `edge` or else a sample, is
+    /// about to go in: promise it where every item promises its own tick, and refuse it before
+    /// the channel's promise or open block, or past what a block's word and length hold.
+    #[inline]
+    fn before_item(&mut self, c: usize, t: i64, edge: Option<i64>) -> Result<(), WriteError> {
+        if self.options.promise_with_items && t > self.promise {
+            self.promise(t)?;
+        }
+        let promise = self.promise_of(c);
+        if t < promise {
+            return Err(WriteError::BeforePromise {
                 channel: self.name(c),
-                tick,
-                previous: self.last_tick.max(self.open.start),
+                tick: t,
+                promise,
             });
         }
-        Ok(())
-    }
-
-    /// An item at `tick` is about to go in: close the open block first if it is full and the item
-    /// is later than its last.
-    fn before_item(&mut self, tick: i64) -> Result<(), WriteError> {
-        if self.open.size >= self.options.block_bytes && self.open.items && tick > self.open.last {
-            self.close(tick)?;
+        if t < self.chans[c].start {
+            return Err(WriteError::Order {
+                channel: self.name(c),
+                tick: t,
+                previous: self.chans[c].start,
+            });
+        }
+        let max = if matches!(self.chans[c].data, Data::Digital(_)) {
+            LEVEL_BIT - 1
+        } else {
+            u32::MAX
+        };
+        let ch = &self.chans[c];
+        if ch.items >= max {
+            return Err(WriteError::BlockTooLarge(ch.items as usize));
+        }
+        let size = match (&ch.data, edge) {
+            (Data::Digital(d), Some(tick)) => d.open.size_with(tick),
+            (Data::Analog(a), _) => ch.size + a.coding.sample_len(),
+            (Data::Digital(_), None) => unreachable!("a digital channel's item is an edge"),
+        };
+        if size > u32::MAX as usize {
+            return Err(WriteError::BlockTooLarge(size));
         }
         Ok(())
     }
 
-    fn word_room(&self, c: usize, digital: bool) -> Result<(), WriteError> {
-        let max = if digital { LEVEL_BIT - 1 } else { u32::MAX };
-        let count = self.open.words[c] & if digital { !LEVEL_BIT } else { u32::MAX };
-        if count >= max {
-            return Err(WriteError::BlockTooLarge(count as usize));
+    /// An item of channel `c` at axis tick `t` went in, its open block now `size` bytes.
+    #[inline]
+    fn after_item(&mut self, c: usize, t: i64, size: usize) -> Result<(), WriteError> {
+        let ch = &mut self.chans[c];
+        if ch.items == 0 {
+            ch.first_tick = t;
+        }
+        ch.items += 1;
+        ch.size = size;
+        ch.last_tick = t;
+        if ch.size >= self.options.block_bytes && !ch.full {
+            ch.full = true;
+            self.full.push(c);
+            self.try_close(c)?;
+            if !self.chans[c].full {
+                self.full.retain(|&x| x != c);
+            }
+        }
+        self.advance()
+    }
+
+    /// Every item of every channel before axis tick `before` is in. A channel's open block that
+    /// has reached its size closes there. Promises go forward.
+    pub fn promise(&mut self, before: i64) -> Result<(), WriteError> {
+        self.check_failed()?;
+        if before < self.promise {
+            return Err(WriteError::Promise {
+                before,
+                last: self.promise,
+            });
+        }
+        if before == self.promise {
+            return Ok(());
+        }
+        self.promise = before;
+        let full = self.full.clone();
+        for c in full {
+            self.try_close(c)?;
+        }
+        let chans = &self.chans;
+        self.full.retain(|&c| chans[c].full);
+        Ok(())
+    }
+
+    /// Every item of channel `c` before axis tick `before` is in: its open block closes there if
+    /// it has reached its size, and so does a full partner's that waited on `c`. A channel's
+    /// promises go forward.
+    pub fn promise_channel(&mut self, c: usize, before: i64) -> Result<(), WriteError> {
+        self.check_failed()?;
+        self.check_channel(c)?;
+        if before < self.chans[c].promise {
+            return Err(WriteError::Promise {
+                before,
+                last: self.chans[c].promise,
+            });
+        }
+        self.chans[c].promise = before;
+        for i in 0..=self.partners[c].len() {
+            let x = if i == 0 { c } else { self.partners[c][i - 1] };
+            if self.chans[x].full {
+                self.try_close(x)?;
+                if !self.chans[x].full {
+                    self.full.retain(|&y| y != x);
+                }
+            }
         }
         Ok(())
+    }
+
+    /// Closes channel `c`'s full block at the latest promise to it and its partners, once its
+    /// items before that tick reach the target size. Whether it is still full after is its
+    /// `full`.
+    fn try_close(&mut self, c: usize) -> Result<(), WriteError> {
+        let p = self.partners[c]
+            .iter()
+            .map(|&x| self.promise_of(x))
+            .fold(self.promise_of(c), i64::min);
+        let ch = &self.chans[c];
+        if p > ch.start
+            && ch.items > 0
+            && ch.first_tick < p
+            && self.size_before(c, p) >= self.options.block_bytes
+        {
+            self.close(c, p)?;
+        }
+        let ch = &mut self.chans[c];
+        ch.full = ch.size >= self.options.block_bytes;
+        Ok(())
+    }
+
+    /// The decoded size of channel `c`'s open block's items before axis tick `p`.
+    fn size_before(&self, c: usize, p: i64) -> usize {
+        let ch = &self.chans[c];
+        if ch.last_tick < p {
+            return ch.size;
+        }
+        match &ch.data {
+            Data::Digital(d) => {
+                let n = d
+                    .open
+                    .ticks
+                    .partition_point(|&k| ch.map.axis_saturating(k) < p);
+                EdgeRun::of(&d.open.ticks[..n]).size()
+            }
+            Data::Analog(a) => {
+                let len = a.coding.sample_len();
+                let n = a.open.len() / len;
+                let first = ch.closed_items;
+                let (mut lo, mut hi) = (0usize, n);
+                while lo < hi {
+                    let mid = (lo + hi) / 2;
+                    let index = first + mid as u64;
+                    let run = run_of(&a.runs, index).expect("a sample follows its run");
+                    if ch.map.axis_saturating(place_in(run, a.period, index)) < p {
+                        lo = mid + 1;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                lo * len
+            }
+        }
     }
 
     /// An edge of digital channel `c` at source tick `tick`. An edge at the channel's start flips
     /// the level from the declared `initial`, as any edge does.
     pub fn edge(&mut self, c: usize, tick: i64) -> Result<(), WriteError> {
+        self.check_failed()?;
         self.check_channel(c)?;
-        let State::Digital(d) = &self.states[c] else {
+        let Data::Digital(d) = &self.chans[c].data else {
             return Err(WriteError::Kind {
                 channel: self.name(c),
                 kind: "analog",
             });
         };
-        let t = self.place(c, &d.map, tick)?;
-        self.check_order(c, t)?;
+        let t = self.place(c, tick)?;
         if tick < d.start {
             return Err(WriteError::BeforeStart {
                 channel: self.name(c),
@@ -842,46 +1114,35 @@ impl Writer {
                 to: g.to,
             });
         }
-        self.word_room(c, true)?;
-        self.before_item(t)?;
-        let State::Digital(d) = &mut self.states[c] else {
+        self.before_item(c, t, Some(tick))?;
+        let ch = &mut self.chans[c];
+        let Data::Digital(d) = &mut ch.data else {
             unreachable!()
         };
-        while let Some(&(g, _)) = d.pending.front().filter(|(g, _)| g.to < tick) {
-            d.level = g.level;
-            d.pending.pop_front();
-        }
-        let run = &mut self.open.edges[c];
-        let before = run.size();
-        let after = run.push(tick);
-        self.open.size = self.open.size - before + after;
-        self.open.words[c] += 1;
+        let size = d.open.push(tick);
         d.last_edge = tick;
         d.edges += 1;
-        d.level = !d.level;
-        d.hasher.edge(tick);
-        self.overview.edge(c, tick, t);
-        self.item_in(t);
-        Ok(())
-    }
-
-    fn item_in(&mut self, tick: i64) {
-        self.open.last = tick;
-        self.open.items = true;
-        self.last_tick = tick;
+        ch.hasher.edge(tick);
+        self.ochans[c]
+            .ladder
+            .as_mut()
+            .expect("a ladder until the finish")
+            .edge(tick, t);
+        self.after_item(c, t, size)
     }
 
     /// A gap of digital channel `c`, in its source's ticks. It may start in a block already
     /// written, but not end in one.
     pub fn gap(&mut self, c: usize, gap: Gap) -> Result<(), WriteError> {
+        self.check_failed()?;
         self.check_channel(c)?;
         let name = self.name(c);
-        let State::Digital(d) = &self.states[c] else {
+        if !matches!(self.chans[c].data, Data::Digital(_)) {
             return Err(WriteError::Kind {
                 channel: name,
                 kind: "analog",
             });
-        };
+        }
         if gap.to <= gap.from {
             return Err(WriteError::GapSpan {
                 channel: name,
@@ -889,8 +1150,11 @@ impl Writer {
                 to: gap.to,
             });
         }
-        self.place(c, &d.map, gap.from)?;
-        let to = self.place(c, &d.map, gap.to)?;
+        self.place(c, gap.from)?;
+        let to = self.place(c, gap.to)?;
+        let Data::Digital(d) = &self.chans[c].data else {
+            unreachable!()
+        };
         if gap.from < d.start {
             return Err(WriteError::BeforeStart {
                 channel: name,
@@ -914,39 +1178,46 @@ impl Writer {
         if gap.from == d.start && d.initial {
             return Err(WriteError::GapFromStart { channel: name });
         }
-        if to < self.open.start {
+        if to < self.chans[c].start {
             return Err(WriteError::GapLate {
                 channel: name,
                 to: gap.to,
-                closed: self.open.start,
+                closed: self.chans[c].start,
             });
         }
-        let State::Digital(d) = &mut self.states[c] else {
+        let Data::Digital(d) = &mut self.chans[c].data else {
             unreachable!()
         };
         d.gaps.push(gap);
         d.pending.push_back((gap, to));
-        self.overview.gap(c, gap, to);
+        self.ochans[c]
+            .ladder
+            .as_mut()
+            .expect("a ladder until the finish")
+            .gap(gap, to);
         let mut bytes = Vec::new();
         record::write(&mut bytes, Kind::Gap, &[&record::gap_bytes(c as u32, gap)]);
-        self.put_record(bytes);
-        Ok(())
+        self.put(bytes, Placed::Gap(c, gap));
+        self.advance()
     }
 
     /// Analog channel `c`'s next sample starts a run at source tick `tick`, after `lost` samples
-    /// the instrument lost: 0 when it only paused, and 0 for the first run. A run no sample has
-    /// followed yet is replaced.
+    /// the instrument lost: 0 when it only paused. The first run's `lost` are samples lost
+    /// before the channel's first. A run no sample has followed yet is replaced.
     pub fn run(&mut self, c: usize, tick: i64, lost: u64) -> Result<(), WriteError> {
+        self.check_failed()?;
         self.check_channel(c)?;
         let name = self.name(c);
-        let State::Analog(a) = &self.states[c] else {
+        if !matches!(self.chans[c].data, Data::Analog(_)) {
             return Err(WriteError::Kind {
                 channel: name,
                 kind: "digital",
             });
-        };
-        self.place(c, &a.map, tick)?;
-        let State::Analog(a) = &mut self.states[c] else {
+        }
+        self.place(c, tick)?;
+        check_safe("lost count", lost)?;
+        let map = self.chans[c].map;
+        let Data::Analog(a) = &mut self.chans[c].data else {
             unreachable!()
         };
         let previous = a.last_tick.unwrap_or(0);
@@ -958,14 +1229,16 @@ impl Writer {
             });
         }
         if a.count == 0 && lost > 0 {
-            return Err(WriteError::FirstRunLost {
-                channel: name,
-                lost,
-            });
+            let start = lost_before_start(tick, a.period, lost);
+            if start.is_none_or(|t| map.axis(t).is_none_or(|t| t < 0)) {
+                return Err(WriteError::LostBefore {
+                    channel: name,
+                    lost,
+                });
+            }
         }
-        check_safe("lost count", lost)?;
         a.next_run = Some((tick, lost));
-        Ok(())
+        self.advance()
     }
 
     /// The next sample of analog channel `c`, in the type its coding stores: an f32 for an `f32`
@@ -973,10 +1246,15 @@ impl Writer {
     /// u64 or an i64 code for an `int` one, in its range. Its place, a source tick, follows from
     /// its run and the period.
     pub fn sample(&mut self, c: usize, value: impl Into<Sample>) -> Result<(), WriteError> {
-        let sample = value.into();
+        self.sample_one(c, value.into())
+    }
+
+    /// `sample`, compiled in this crate whatever the caller's type, so the item path inlines.
+    fn sample_one(&mut self, c: usize, sample: Sample) -> Result<(), WriteError> {
+        self.check_failed()?;
         self.check_channel(c)?;
         // The channel's name only for an error: a sample is the writer's commonest call.
-        let State::Analog(a) = &self.states[c] else {
+        let Data::Analog(a) = &self.chans[c].data else {
             return Err(WriteError::Kind {
                 channel: self.name(c),
                 kind: "digital",
@@ -992,23 +1270,17 @@ impl Writer {
                 });
             }
         };
-        let steps =
-            u128::from(index - run.index) * u128::from(a.period.num()) / u128::from(a.period.den());
-        let place = i64::try_from(steps)
-            .ok()
-            .and_then(|s| run.tick.checked_add(s))
-            .unwrap_or(i64::MAX);
-        let map = a.map;
-        let tick = self.place(c, &map, place)?;
-        self.check_order(c, tick)?;
-        if let Some(why) = samples::misfit(sample, a.coding) {
+        let place = place_in(run, a.period, index);
+        let coding = a.coding;
+        let tick = self.place(c, place)?;
+        if let Some(why) = samples::misfit(sample, coding) {
             return Err(WriteError::Sample {
                 channel: self.name(c),
                 index,
                 why,
             });
         }
-        let code = match (a.coding, sample) {
+        let code = match (coding, sample) {
             (coding @ AnalogCoding::Codes { .. }, Sample::F32(value)) => {
                 Some(code_of(value, coding).ok_or_else(|| WriteError::Coding {
                     channel: self.name(c),
@@ -1019,33 +1291,48 @@ impl Writer {
             }
             _ => None,
         };
-        self.overview.pairs_with(c, tick)?;
-        self.word_room(c, false)?;
-        self.before_item(tick)?;
+        for &d in &self.operand_of[c] {
+            self.pairs[d].pairs_with(c, tick)?;
+        }
+        self.before_item(c, tick, None)?;
         if starts {
             let mut bytes = Vec::new();
             record::write(&mut bytes, Kind::Run, &[&record::run_bytes(c as u32, run)]);
-            self.put_record(bytes);
+            self.put(bytes, Placed::Run(c, run));
         }
-        let State::Analog(a) = &mut self.states[c] else {
+        let ch = &mut self.chans[c];
+        let Data::Analog(a) = &mut ch.data else {
             unreachable!()
         };
         if starts {
             a.runs.push(run);
             a.next_run = None;
         }
-        let section = &mut self.open.sections[c];
-        samples::put(section, sample, a.coding, code);
-        self.open.size += a.coding.sample_len();
-        self.open.words[c] += 1;
+        samples::put(&mut a.open, sample, coding, code);
+        let size = a.open.len();
         a.count += 1;
         a.last_tick = Some(place);
-        a.hasher.sample(sample);
-        self.overview
-            .sample(c, tick, sample)
-            .expect("pairs_with checked the derived channels");
-        self.item_in(tick);
-        Ok(())
+        ch.hasher.sample(sample);
+        self.ochans[c]
+            .ladder
+            .as_mut()
+            .expect("a ladder until the finish")
+            .sample(tick, sample);
+        let stored = self.chans.len();
+        for i in 0..self.operand_of[c].len() {
+            let d = self.operand_of[c][i];
+            if let Some(product) = self.pairs[d]
+                .take(c, tick, sample)
+                .expect("pairs_with checked the derived channels")
+            {
+                self.ochans[stored + d]
+                    .ladder
+                    .as_mut()
+                    .expect("a ladder until the finish")
+                    .sample(tick, product);
+            }
+        }
+        self.after_item(c, tick, size)
     }
 
     /// One generated annotation, from generator `source`. Its times are axis ticks.
@@ -1054,6 +1341,7 @@ impl Writer {
         source: &str,
         annotation: serde_json::Map<String, serde_json::Value>,
     ) -> Result<(), WriteError> {
+        self.check_failed()?;
         // As `resolve` reads a generator's line, so a bundle of them resolves.
         self.lines
             .take(source, &annotation)
@@ -1065,327 +1353,624 @@ impl Writer {
         let json = serde_json::to_vec(&a).expect("an annotation serialises");
         let mut bytes = Vec::new();
         record::write(&mut bytes, Kind::Annotation, &[&json]);
-        self.put_record(bytes);
+        self.put(bytes, Placed::Nothing);
         self.annotations.push(a);
-        Ok(())
+        self.advance()
     }
 
-    /// Every item before axis tick `before` is in: close the open block there. A live recorder
-    /// calls this so a crash loses little. At the open block's start it does nothing.
+    /// Every item before axis tick `before` is in: promises it, closes there every channel's open
+    /// block that holds an item before it, and writes a known-through record after those blocks.
+    /// Items at or after `before` stay in the open blocks. A flush at the latest known-through
+    /// tick writes nothing new. A live recorder calls this so a crash loses little.
     pub fn flush(&mut self, before: i64) -> Result<(), WriteError> {
-        if before == self.open.start && !self.open.items {
-            return Ok(());
-        }
+        self.check_failed()?;
         check_safe("flush tick", before.max(0) as u64)?;
-        if before <= self.open.start || (self.open.items && before <= self.open.last) {
+        if before < self.promise {
             return Err(WriteError::Flush {
                 before,
-                last: if self.open.items {
-                    self.open.last
-                } else {
-                    self.open.start
-                },
+                last: self.promise,
             });
         }
-        self.close(before)?;
-        self.drain_queue()
+        self.promise(before)?;
+        for c in 0..self.chans.len() {
+            let ch = &self.chans[c];
+            if ch.start < before && ch.items > 0 && ch.first_tick < before {
+                self.close(c, before)?;
+            }
+        }
+        if before > self.known {
+            self.known = before;
+            let mut bytes = Vec::new();
+            record::write(
+                &mut bytes,
+                Kind::KnownThrough,
+                &[&record::known_through_bytes(before)],
+            );
+            self.put(bytes, Placed::Nothing);
+            for o in 0..self.ochans.len() {
+                self.settle(o)?;
+            }
+        }
+        self.advance()
     }
 
-    /// Closes the open block at `end` and opens the next there.
-    fn close(&mut self, end: i64) -> Result<(), WriteError> {
-        crate::decode::overview_room(end, self.declaration.overview_shift).map_err(|past| {
-            WriteError::Overview {
-                end,
-                blocks: past.blocks,
-                shift: past.finest,
-                max: crate::decode::MAX_OVERVIEW_BLOCKS,
-            }
-        })?;
-        let open = std::mem::replace(&mut self.open, Open::empty(end));
-        let raw = assemble(&open.sections(), &self.codings);
-        let decoded_length =
-            u32::try_from(raw.len()).map_err(|_| WriteError::BlockTooLarge(raw.len()))?;
-        let firsts = self.counts.clone();
-        for (count, (&word, coding)) in self
-            .counts
-            .iter_mut()
-            .zip(open.words.iter().zip(&self.codings))
-        {
-            *count += u64::from(if coding.is_some() {
-                word
-            } else {
-                word & !LEVEL_BIT
-            });
-        }
-        self.queue.push(Queued::Block {
-            head: BlockHead {
-                start: open.start,
-                end,
-                decoded_length,
-                words: open.words,
-            },
-            raw,
-            firsts,
-        });
-        self.queued_blocks += 1;
-        self.closed = end;
-        // The next block's level bits: gap ends before its start have taken effect.
-        for state in &mut self.states {
-            if let State::Digital(d) = state {
-                while let Some(&(g, _)) = d.pending.front().filter(|&&(_, to)| to < end) {
-                    d.level = g.level;
-                    d.pending.pop_front();
-                }
+    /// Where overview channel `o` is known to: every item before it is in. A channel is known to
+    /// the end of its last closed block and to the latest known-through tick; a derived channel
+    /// where both operands are.
+    fn known_of(&self, o: usize) -> i64 {
+        match self.chans.get(o) {
+            Some(ch) => ch.start.max(self.known),
+            None => {
+                let d = o - self.chans.len();
+                let [(a, _), (b, _)] = &self.pairs[d].operands;
+                self.known_of(*a).min(self.known_of(*b))
             }
         }
-        self.open = self.new_block(end);
-        // A derived channel's operand sample still waiting for its partner never gets one: the
-        // partner would come at a tick before the next block.
-        // A long span settles overview blocks by the thousand, which hold their buckets until
-        // written, and a snapshot decodes each one still queued.
+    }
+
+    /// Settles overview channel `o` to where it is known, and queues the overview blocks that
+    /// settles.
+    fn settle(&mut self, o: usize) -> Result<(), WriteError> {
+        let to = self.known_of(o);
         loop {
-            let reached = self.overview.settle_step(end)?;
-            for settled in self.overview.take_settled() {
-                self.queue_overview(settled);
-                if self.queued_overview >= QUEUED_OVERVIEW {
-                    self.drain_queue()?;
-                }
+            let Some(ladder) = self.ochans[o].ladder.as_mut() else {
+                return Ok(());
+            };
+            let reached = ladder.settle_some(to, SETTLE_STEP);
+            for s in ladder.take_settled() {
+                self.queue_overview(o, s);
             }
             if reached {
+                return Ok(());
+            }
+            // A long span settles many blocks: what waits is compressed before more settle, so
+            // the queue holds a few.
+            self.drain_all()?;
+        }
+    }
+
+    fn queue_overview(&mut self, o: usize, s: Settled) {
+        let head = OverviewHead {
+            channel: o as u32,
+            shift: s.shift,
+            k: s.k,
+            n: s.n,
+        };
+        self.queue_frame(
+            FrameOf::Overview { o, li: s.li, head },
+            s.raw,
+            OVERVIEW_BLOCK_LEVEL,
+        );
+    }
+
+    /// Closes channel `c`'s open block at axis tick `end`: its items before `end` go in the
+    /// closed block, those at or after it stay. Its partners close there too where they can.
+    fn close(&mut self, c: usize, end: i64) -> Result<(), WriteError> {
+        let ch = &mut self.chans[c];
+        let start = ch.start;
+        debug_assert!(end > start, "a block ends after it starts");
+        let (raw, word, kept, kept_size) = match &mut ch.data {
+            Data::Digital(d) => {
+                let map = ch.map;
+                let split = d
+                    .open
+                    .ticks
+                    .partition_point(|&k| map.axis_saturating(k) < end);
+                let (closing, kept) = if split == d.open.ticks.len() {
+                    (std::mem::take(&mut d.open), EdgeRun::default())
+                } else {
+                    (
+                        EdgeRun::of(&d.open.ticks[..split]),
+                        EdgeRun::of(&d.open.ticks[split..]),
+                    )
+                };
+                let mut raw = Vec::with_capacity(closing.size());
+                closing.encode(&mut raw);
+                let word = closing.ticks.len() as u32 | if d.level { LEVEL_BIT } else { 0 };
+                let ending = d.pending.iter().take_while(|&&(_, t)| t < end).count();
+                let gaps: Vec<Gap> = d.pending.drain(..ending).map(|(g, _)| g).collect();
+                d.level = level_after(d.level, &closing.ticks, &gaps);
+                let n = closing.ticks.len();
+                let size = kept.size();
+                d.open = kept;
+                (raw, word, n as u32, size)
+            }
+            Data::Analog(a) => {
+                let first = ch.closed_items;
+                let len = a.coding.sample_len();
+                let n = a.open.len() / len;
+                // The first sample at or after `end`.
+                let (mut lo, mut hi) = (0usize, n);
+                while lo < hi {
+                    let mid = (lo + hi) / 2;
+                    let index = first + mid as u64;
+                    let run = run_of(&a.runs, index).expect("a sample follows its run");
+                    if ch.map.axis_saturating(place_in(run, a.period, index)) < end {
+                        lo = mid + 1;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                let rest = a.open.split_off(lo * len);
+                let raw = analog_raw(&a.open, a.coding);
+                let size = rest.len();
+                a.open = rest;
+                (raw, lo as u32, lo as u32, size)
+            }
+        };
+        let decoded_length =
+            u32::try_from(raw.len()).map_err(|_| WriteError::BlockTooLarge(raw.len()))?;
+        let ch = &mut self.chans[c];
+        let items_left = ch.items - kept;
+        let head = BlockHead {
+            channel: c as u32,
+            start,
+            end,
+            word,
+            decoded_length,
+        };
+        let first_index = ch.closed_items;
+        ch.closed_items += u64::from(kept);
+        ch.blocks_closed += 1;
+        ch.start = end;
+        ch.items = items_left;
+        ch.size = kept_size;
+        if items_left > 0 {
+            self.chans[c].first_tick = self.first_open_tick(c);
+        }
+        let level = self.options.level;
+        self.queue_frame(FrameOf::Block { head, first_index }, Arc::new(raw), level);
+        self.settle(c)?;
+        for i in 0..self.operand_of[c].len() {
+            let d = self.operand_of[c][i];
+            self.settle(self.chans.len() + d)?;
+        }
+        for i in 0..self.partners[c].len() {
+            let p = self.partners[c][i];
+            if self.chans[p].start < end && self.promise_of(p) >= end {
+                self.close(p, end)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The axis tick of the first item in channel `c`'s open block, which holds one.
+    fn first_open_tick(&self, c: usize) -> i64 {
+        let ch = &self.chans[c];
+        match &ch.data {
+            Data::Digital(d) => ch.map.axis_saturating(d.open.ticks[0]),
+            Data::Analog(a) => {
+                let index = ch.closed_items;
+                let run = run_of(&a.runs, index).expect("a sample follows its run");
+                ch.map.axis_saturating(place_in(run, a.period, index))
+            }
+        }
+    }
+
+    /// A record that needs no compressing: straight out, unless records before it still wait.
+    fn put(&mut self, bytes: Vec<u8>, placed: Placed) {
+        if self.queue.is_empty() {
+            let at = self.position();
+            self.out.extend_from_slice(&bytes);
+            self.placed(placed, at);
+        } else {
+            self.queue.push_back(Item::Record(bytes, placed));
+        }
+    }
+
+    fn queue_frame(&mut self, of: FrameOf, raw: Arc<Vec<u8>>, level: i32) {
+        let state = match self.options.compression {
+            Compression::Spread => State::Waiting,
+            Compression::Offload => State::Off(Slot::spawn(Arc::clone(&raw), level)),
+        };
+        self.queue.push_back(Item::Frame {
+            of,
+            raw,
+            level,
+            state,
+        });
+    }
+
+    /// A record without a frame now in the file at `at`: its list takes it.
+    fn placed(&mut self, placed: Placed, _at: u64) {
+        let taken = self.taken;
+        match placed {
+            Placed::Nothing => {}
+            Placed::Gap(c, gap) => {
+                if let Data::Digital(d) = &mut self.chans[c].data {
+                    let due = d.list.push(gap);
+                    place_dues(&mut d.list, due, &mut self.out, taken);
+                }
+            }
+            Placed::Run(c, run) => {
+                if run.index > 0
+                    && let Data::Analog(a) = &mut self.chans[c].data
+                {
+                    let due = a.list.push(run);
+                    place_dues(&mut a.list, due, &mut self.out, taken);
+                }
+            }
+        }
+    }
+
+    /// Which of `slicers` is `level`'s, made the first time it's needed.
+    fn slicer(&mut self, level: i32) -> Result<usize, WriteError> {
+        Ok(match self.slicers.iter().position(|s| s.level() == level) {
+            Some(i) => i,
+            None => {
+                self.slicers.push(Slicer::new(level)?);
+                self.slicers.len() - 1
+            }
+        })
+    }
+
+    /// The next slices of what waits to be compressed, at most `budget` decoded bytes of them
+    /// (the first slice always runs), then every record now ready.
+    fn compress(&mut self, budget: usize) -> Result<(), WriteError> {
+        if self.options.compression == Compression::Spread {
+            let mut spent = 0usize;
+            loop {
+                // The first frame still to compress, from the cursor on.
+                let mut at = (self.cursor - self.head) as usize;
+                while at < self.queue.len() && !self.queue[at].pending() {
+                    at += 1;
+                }
+                self.cursor = self.head + at as u64;
+                if at == self.queue.len() {
+                    break;
+                }
+                let Item::Frame {
+                    raw, level, state, ..
+                } = &self.queue[at]
+                else {
+                    unreachable!("a pending item is a frame")
+                };
+                let consumed = match state {
+                    State::Running { consumed, .. } => *consumed,
+                    _ => 0,
+                };
+                let next = SLICE.min(raw.len() - consumed);
+                if spent > 0 && spent + next > budget {
+                    break;
+                }
+                let (raw, level) = (Arc::clone(raw), *level);
+                let si = self.slicer(level)?;
+                let slicer = &mut self.slicers[si];
+                let Item::Frame { state, .. } = &mut self.queue[at] else {
+                    unreachable!()
+                };
+                if matches!(state, State::Waiting) {
+                    slicer.begin(raw.len())?;
+                    *state = State::Running {
+                        consumed: 0,
+                        out: Vec::new(),
+                    };
+                }
+                let State::Running { consumed, out } = state else {
+                    unreachable!()
+                };
+                let end = *consumed + next;
+                slicer.slice(&raw[*consumed..end], end == raw.len(), out)?;
+                *consumed = end;
+                spent += next;
+                if end == raw.len() {
+                    *state = State::Done(std::mem::take(out));
+                }
+            }
+        } else {
+            // Wait for the oldest frames while more are being compressed than the threads hold.
+            let limit = 2 * rayon::current_num_threads().max(1) + 2;
+            loop {
+                let running = self
+                    .queue
+                    .iter()
+                    .filter(|i| {
+                        matches!(
+                            i,
+                            Item::Frame {
+                                state: State::Off(_),
+                                ..
+                            }
+                        )
+                    })
+                    .count();
+                if running <= limit {
+                    break;
+                }
+                let Some(Item::Frame { state, .. }) = self.queue.iter_mut().find(|i| {
+                    matches!(
+                        i,
+                        Item::Frame {
+                            state: State::Off(_),
+                            ..
+                        }
+                    )
+                }) else {
+                    break;
+                };
+                let State::Off(slot) = state else {
+                    unreachable!()
+                };
+                *state = State::Done(slot.wait()?);
+                self.emit()?;
+            }
+        }
+        self.emit()
+    }
+
+    /// What every call does: the next slice of compression, then the records ready.
+    fn advance(&mut self) -> Result<(), WriteError> {
+        if self.queue.is_empty() {
+            return Ok(());
+        }
+        self.compress(SLICE)
+    }
+
+    /// Writes the queue's ready records, in order, up to the first frame not yet compressed.
+    fn emit(&mut self) -> Result<(), WriteError> {
+        loop {
+            let ready = match self.queue.front_mut() {
+                None => break,
+                Some(Item::Record(..)) => true,
+                Some(Item::Frame { state, .. }) => match state {
+                    State::Done(_) => true,
+                    State::Off(slot) => match slot.try_take() {
+                        Some(frame) => {
+                            *state = State::Done(frame?);
+                            true
+                        }
+                        None => false,
+                    },
+                    _ => false,
+                },
+            };
+            if !ready {
                 break;
             }
-        }
-        if self.queued_blocks >= self.options.batch {
-            self.drain_queue()?;
-        }
-        Ok(())
-    }
-
-    /// A record that needs no compressing: straight out, unless blocks before it still wait.
-    fn put_record(&mut self, bytes: Vec<u8>) {
-        if self.queue.is_empty() {
-            self.out.extend_from_slice(&bytes);
-        } else {
-            self.queue.push(Queued::Record(bytes));
-        }
-    }
-
-    /// An overview block that has settled, decoded, queued to be written. One that shares the
-    /// last one's level shares its bytes.
-    fn queue_overview(&mut self, Settled { shift, k, level }: Settled) {
-        let raw = match &self.last_level {
-            Some((last, raw)) if Arc::ptr_eq(last, &level) => Arc::clone(raw),
-            _ => {
-                let mut raw = Vec::new();
-                overview::write_level(&level, &mut raw);
-                let raw = Arc::new(raw);
-                self.last_level = Some((level, Arc::clone(&raw)));
-                raw
-            }
-        };
-        self.queue.push(Queued::Overview { shift, k, raw });
-        self.queued_overview += 1;
-    }
-
-    /// Compresses what waits, together, and writes it in order. An overview block whose bytes are
-    /// the one before's takes that one's frame.
-    fn drain_queue(&mut self) -> Result<(), WriteError> {
-        let level = self.options.level;
-        let mut before = self.last_frame.as_ref().map(|(raw, _)| Arc::clone(raw));
-        let repeats: Vec<bool> = self
-            .queue
-            .iter()
-            .map(|q| match q {
-                Queued::Overview { raw, .. } => {
-                    let same = before.as_ref().is_some_and(|b| Arc::ptr_eq(b, raw));
-                    before = Some(Arc::clone(raw));
-                    same
-                }
-                _ => false,
-            })
-            .collect();
-        let frame = |(q, &repeat): (&Queued, &bool)| match q {
-            Queued::Block { raw, .. } => compress(raw, level).map(Some),
-            Queued::Overview { .. } if repeat => Ok(None),
-            Queued::Overview { raw, .. } => compress(raw, OVERVIEW_BLOCK_LEVEL).map(Some),
-            Queued::Record(_) => Ok(None),
-        };
-        // A quiet span queues a few overview blocks to compress and many repeats: too little to
-        // be worth the threads, which a span with an item in every block is.
-        let to_compress = self
-            .queue
-            .iter()
-            .zip(&repeats)
-            .filter(|&(q, &repeat)| !repeat && !matches!(q, Queued::Record(_)))
-            .count();
-        let frames = if self.queued_blocks > 0 || to_compress >= 8 {
-            self.queue
-                .par_iter()
-                .zip(&repeats)
-                .map(frame)
-                .collect::<Result<Vec<_>, _>>()?
-        } else {
-            self.queue
-                .iter()
-                .zip(&repeats)
-                .map(frame)
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        let channels = self.states.len();
-        for (q, frame) in std::mem::take(&mut self.queue).into_iter().zip(frames) {
+            let item = self.queue.pop_front().expect("a front item");
+            self.head += 1;
+            self.cursor = self.cursor.max(self.head);
             let at = self.position();
-            match (q, frame) {
-                (Queued::Block { head, raw, firsts }, Some(frame)) => {
-                    let length = u32::try_from(frame.len())
-                        .map_err(|_| WriteError::BlockTooLarge(frame.len()))?;
-                    let head_bytes = head.to_bytes();
-                    record::write(&mut self.out, Kind::Block, &[&head_bytes, &frame]);
-                    self.written.push(Written {
-                        row: BlockRow {
-                            start: head.start,
-                            offset: at + (record::PAYLOAD_AT + BlockHead::len(channels)) as u64,
-                            length,
-                            decoded_length: raw.len() as u32,
-                        },
-                        words: head.words,
-                        end: head.end,
-                        firsts,
-                    });
+            match item {
+                Item::Record(bytes, placed) => {
+                    self.out.extend_from_slice(&bytes);
+                    self.placed(placed, at);
                 }
-                (Queued::Overview { shift, k, raw }, frame) => {
-                    let frame = match (frame, &self.last_frame) {
-                        (Some(frame), _) => {
-                            self.last_frame = Some((Arc::clone(&raw), frame.clone()));
-                            frame
-                        }
-                        (None, Some((_, frame))) => frame.clone(),
-                        (None, None) => unreachable!("a repeat follows a frame"),
-                    };
-                    let length = u32::try_from(frame.len())
-                        .map_err(|_| WriteError::BlockTooLarge(frame.len()))?;
-                    record::write(
-                        &mut self.out,
-                        Kind::OverviewBlock,
-                        &[&record::overview_head(shift, k), &frame],
-                    );
-                    self.overview_rows.push((
-                        shift,
-                        k,
-                        OverviewRow {
-                            offset: at + (record::PAYLOAD_AT + record::OVERVIEW_HEAD_LEN) as u64,
-                            length,
-                            decoded_length: raw.len() as u32,
-                        },
-                    ));
-                }
-                (Queued::Record(bytes), None) => self.out.extend_from_slice(&bytes),
-                _ => unreachable!("frames follow the queue"),
+                Item::Frame {
+                    of,
+                    raw,
+                    state: State::Done(frame),
+                    ..
+                } => self.write_frame(of, &raw, &frame, at)?,
+                Item::Frame { .. } => unreachable!("only a compressed frame is ready"),
             }
         }
-        self.queued_blocks = 0;
-        self.queued_overview = 0;
         Ok(())
     }
 
-    /// What the writer holds so far, for a view of the recording while it is written: the
-    /// blocks and overview blocks written, the gaps, runs and annotations, the overview's held
-    /// levels, and the blocks and overview blocks not yet written, the open block last. Taking
-    /// one shares what the writer holds rather than copying it, apart from the blocks not yet
-    /// written.
-    ///
-    /// The blocks it lists may sit in bytes still in `output`: publish a snapshot to a view only
-    /// once those bytes are in the file the view reads.
-    pub fn snapshot(&self) -> Snapshot {
-        let queued = self
-            .queue
-            .iter()
-            .filter_map(|q| match q {
-                Queued::Block { head, raw, firsts } => {
-                    Some((head.clone(), raw.clone(), firsts.clone()))
+    /// A compressed frame's record, at `at` in the file, and its row in its table.
+    fn write_frame(
+        &mut self,
+        of: FrameOf,
+        raw: &[u8],
+        frame: &[u8],
+        at: u64,
+    ) -> Result<(), WriteError> {
+        let length =
+            u32::try_from(frame.len()).map_err(|_| WriteError::BlockTooLarge(frame.len()))?;
+        let taken = self.taken;
+        match of {
+            FrameOf::Block { head, .. } => {
+                record::write(&mut self.out, Kind::Block, &[&head.to_bytes(), frame]);
+                let row = BlockRow {
+                    start: head.start,
+                    offset: at + (record::PAYLOAD_AT + BlockHead::LEN) as u64,
+                    length,
+                    decoded_length: head.decoded_length,
+                    word: head.word,
+                };
+                let c = head.channel as usize;
+                let due = self.chans[c].blocks.push(row);
+                place_dues(&mut self.chans[c].blocks, due, &mut self.out, taken);
+            }
+            FrameOf::Overview { o, li, head } => {
+                record::write(
+                    &mut self.out,
+                    Kind::OverviewBlock,
+                    &[&head.to_bytes(), frame],
+                );
+                let row = OverviewRow {
+                    offset: at + (record::PAYLOAD_AT + OverviewHead::LEN) as u64,
+                    length,
+                    decoded_length: raw.len() as u32,
+                    n: head.n,
+                };
+                let levels = &mut self.ochans[o].levels;
+                if levels.len() <= li {
+                    levels.resize_with(li + 1, || None);
                 }
-                _ => None,
-            })
-            .collect();
-        let queued_overview = self
-            .queue
-            .iter()
-            .filter_map(|q| match q {
-                Queued::Overview { shift, k, raw } => Some((*shift, *k, Arc::clone(raw))),
-                _ => None,
-            })
-            .collect();
-        let mut gaps = Vec::with_capacity(self.states.len());
-        let mut runs = Vec::with_capacity(self.states.len());
-        for state in &self.states {
-            match state {
-                State::Digital(d) => {
-                    gaps.push(d.gaps.clone());
-                    runs.push(Chunks::new());
-                }
-                State::Analog(a) => {
-                    gaps.push(Chunks::new());
-                    runs.push(a.runs.clone());
+                let table = levels[li].get_or_insert_with(|| {
+                    TableWriter::new(o as u32, Table::Level(head.shift), false)
+                });
+                let due = table.push(row);
+                place_dues(table, due, &mut self.out, taken);
+            }
+        }
+        Ok(())
+    }
+
+    /// Compresses and writes everything that waits.
+    fn drain_all(&mut self) -> Result<(), WriteError> {
+        if self.options.compression == Compression::Offload {
+            for item in &mut self.queue {
+                if let Item::Frame { state, .. } = item
+                    && let State::Off(slot) = state
+                {
+                    *state = State::Done(slot.wait()?);
                 }
             }
         }
-        // `close` counts a block's items as it queues it, so the queued blocks are in already.
-        let firsts = self.counts.clone();
+        while !self.queue.is_empty() {
+            self.compress(usize::MAX)?;
+        }
+        Ok(())
+    }
+
+    /// What the writer holds so far, for a view of the recording while it is written: each
+    /// channel's blocks in the file through its index's pages and the rows no page holds yet,
+    /// the blocks closed but not yet written and the open block, each decoded, its gaps and runs,
+    /// each overview level's rows, blocks not yet written, open run and settled buckets, and the
+    /// annotations. Its cost follows the channels and what waits to be written, not the
+    /// recording's length.
+    ///
+    /// What it lists in the file may sit in bytes still in `output`: publish a snapshot to a view
+    /// only once those bytes are in the file the view reads.
+    pub fn snapshot(&self) -> Snapshot {
+        let mut unwritten: Vec<Vec<Unwritten>> = vec![Vec::new(); self.chans.len()];
+        let mut queued: Vec<Vec<Vec<Settled>>> = vec![Vec::new(); self.ochans.len()];
+        for item in &self.queue {
+            if let Item::Frame { of, raw, .. } = item {
+                match of {
+                    FrameOf::Block { head, first_index } => {
+                        unwritten[head.channel as usize].push(Unwritten {
+                            head: *head,
+                            raw: Arc::clone(raw),
+                            first_index: *first_index,
+                        });
+                    }
+                    FrameOf::Overview { o, li, head } => {
+                        let q = &mut queued[*o];
+                        if q.len() <= *li {
+                            q.resize_with(li + 1, Vec::new);
+                        }
+                        q[*li].push(Settled {
+                            li: *li,
+                            shift: head.shift,
+                            k: head.k,
+                            n: head.n,
+                            raw: Arc::clone(raw),
+                        });
+                    }
+                }
+            }
+        }
+        let channels = self
+            .chans
+            .iter()
+            .zip(unwritten)
+            .enumerate()
+            .map(|(c, (ch, mut unwritten))| {
+                let (raw, word, gaps, runs) = match &ch.data {
+                    Data::Digital(d) => {
+                        let mut raw = Vec::new();
+                        d.open.encode(&mut raw);
+                        let word = ch.items | if d.level { LEVEL_BIT } else { 0 };
+                        (raw, word, d.gaps.clone(), Chunks::new())
+                    }
+                    Data::Analog(a) => (
+                        analog_raw(&a.open, a.coding),
+                        ch.items,
+                        Chunks::new(),
+                        a.runs.clone(),
+                    ),
+                };
+                unwritten.push(Unwritten {
+                    head: BlockHead {
+                        channel: c as u32,
+                        start: ch.start,
+                        end: i64::MAX,
+                        word,
+                        decoded_length: raw.len() as u32,
+                    },
+                    raw: Arc::new(raw),
+                    first_index: ch.closed_items,
+                });
+                ChannelSnapshot {
+                    promise: ch.promise.max(self.promise),
+                    blocks: TableIndex::of(&ch.blocks),
+                    rows: ch.blocks.open().clone(),
+                    rows_first: ch.blocks.paged_sum(),
+                    unwritten,
+                    gaps,
+                    runs,
+                }
+            })
+            .collect();
+        let overview = self
+            .ochans
+            .iter()
+            .zip(queued)
+            .map(|(oc, queued)| OverviewSnapshot {
+                column: oc.column,
+                levels: oc
+                    .ladder
+                    .as_ref()
+                    .map(|l| l.held())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(li, held)| {
+                        let table = oc.levels.get(li).and_then(Option::as_ref);
+                        LevelSnapshot {
+                            shift: held.shift,
+                            in_blocks: held.blocks,
+                            table: table.map(TableIndex::of),
+                            rows: table.map(|t| t.open().clone()).unwrap_or_default(),
+                            rows_first: table.map_or(0, TableWriter::paged_sum),
+                            queued: queued.get(li).cloned().unwrap_or_default(),
+                            run: held.run,
+                            held: held.held,
+                        }
+                    })
+                    .collect(),
+            })
+            .collect();
         Snapshot::new(
             Arc::clone(&self.declaration),
-            self.written.clone(),
-            queued,
-            (
-                BlockHead {
-                    start: self.open.start,
-                    end: i64::MAX,
-                    decoded_length: 0,
-                    words: self.open.words.clone(),
-                },
-                assemble(&self.open.sections(), &self.codings),
-                firsts,
-            ),
-            gaps,
-            runs,
+            channels,
+            overview,
             self.annotations.clone(),
-            self.overview.held(),
-            &self.overview_rows,
-            queued_overview,
             self.position(),
-            self.states
-                .iter()
-                .map(|s| match s {
-                    State::Digital(d) => (d.map, d.start),
-                    State::Analog(a) => (a.map, 0),
-                })
-                .collect(),
+            self.promise,
+            self.known,
         )
     }
 
     /// The recording ends at axis tick `length`. `ends` gives each digital channel's `end`, a
-    /// source tick, in channel order. Closes the last block, then writes the footer and the
-    /// trailer, with `finish`'s extras and bundle.
+    /// source tick, in channel order. Closes each channel's last block, then writes the last
+    /// pages, the annotation bundle if asked, the footer and the trailer, with `finish`'s extras
+    /// and losses.
     pub fn finish(
         mut self,
         length: i64,
         ends: &[i64],
         finish: Finish,
     ) -> Result<Finished, WriteError> {
-        let last = if self.open.items {
-            self.open.last
-        } else {
-            self.open.start - 1
-        };
-        if length < 1 || length <= last || length < self.open.start {
+        self.check_failed()?;
+        let last = self
+            .chans
+            .iter()
+            .map(|ch| {
+                if ch.items > 0 {
+                    ch.last_tick.max(ch.start - 1)
+                } else {
+                    ch.start - 1
+                }
+            })
+            .max()
+            .unwrap_or(-1)
+            .max(self.known - 1);
+        if length < 1 || length <= last {
             return Err(WriteError::Length {
                 length,
-                last: last.max(self.open.start),
+                last: last.max(0),
             });
         }
         check_safe("length", length as u64)?;
         let digital = self
-            .states
+            .chans
             .iter()
-            .filter(|s| matches!(s, State::Digital(_)))
+            .filter(|c| matches!(c.data, Data::Digital(_)))
             .count();
         if ends.len() != digital {
             return Err(WriteError::Ends {
@@ -1409,15 +1994,40 @@ impl Writer {
                 }
             }
         }
-        if let Some(e) = self.overview.unpaired() {
+        if let Some(e) = self.pairs.iter().find_map(Pair::unpaired) {
             return Err(e.into());
         }
-        // Check every channel's end before anything is closed, so a refusal leaves no half-written
+        for (&c, &lost) in &finish.lost_after {
+            let Some(Data::Analog(a)) = self.chans.get(c).map(|ch| &ch.data) else {
+                return Err(WriteError::LostAfterChannel(c));
+            };
+            if lost == 0 {
+                continue;
+            }
+            check_safe("lost count", lost)?;
+            let fits = a.runs.last().is_some_and(|&run| {
+                lost_after_end(run, a.period, a.count, lost)
+                    .and_then(|k| {
+                        self.chans[c]
+                            .map
+                            .axis(k)
+                            .filter(|_| (0..JSON_SAFE as i64).contains(&k))
+                    })
+                    .is_some_and(|t| t <= length)
+            });
+            if !fits {
+                return Err(WriteError::LostAfter {
+                    channel: self.name(c),
+                    lost,
+                });
+            }
+        }
+        // Every channel's end, before anything is closed, so a refusal leaves no half-written
         // footer.
-        let mut settled_ends = Vec::with_capacity(self.states.len());
+        let mut settled_ends = Vec::with_capacity(self.chans.len());
         let mut ends = ends.iter();
-        for (c, state) in self.states.iter().enumerate() {
-            let State::Digital(d) = state else {
+        for (c, ch) in self.chans.iter().enumerate() {
+            let Data::Digital(d) = &ch.data else {
                 settled_ends.push(None);
                 continue;
             };
@@ -1426,7 +2036,7 @@ impl Writer {
                 unreachable!("one end a digital channel, counted above")
             };
             let mut end = given;
-            let on_axis = d
+            let on_axis = ch
                 .map
                 .axis(end)
                 .filter(|_| (0..JSON_SAFE as i64).contains(&end));
@@ -1440,7 +2050,7 @@ impl Writer {
             // A gap that reaches the end: the level is not known from its `from` on.
             let mut kept = d.gaps.len();
             if let Some((i, &g)) = d.gaps.iter().enumerate().find(|(_, g)| g.to >= end) {
-                let inside = d.map.axis(g.to).is_some_and(|t| t < length);
+                let inside = ch.map.axis(g.to).is_some_and(|t| t < length);
                 if inside && !finish.drop_gaps_past_end {
                     return Err(WriteError::GapPastEnd {
                         channel: name,
@@ -1451,6 +2061,12 @@ impl Writer {
                 end = end.min(g.from);
                 kept = i;
             }
+            // Gaps go in list pages a page at a time as they come: one already written can't be
+            // left out.
+            let paged = d.gaps.len() / crate::index::PAGE * crate::index::PAGE;
+            if kept < paged {
+                return Err(WriteError::GapPaged { channel: name });
+            }
             if d.edges > 0 && d.last_edge >= end {
                 return Err(WriteError::EdgePastEnd {
                     channel: name,
@@ -1458,64 +2074,146 @@ impl Writer {
                     end,
                 });
             }
-            if end == d.start && d.initial {
-                return Err(WriteError::UnknownInitial { channel: name });
-            }
             check_safe("edge count", d.edges)?;
             settled_ends.push(Some((end, kept)));
         }
-        for state in &self.states {
-            if let State::Analog(a) = state {
+        for ch in &self.chans {
+            if let Data::Analog(a) = &ch.data {
                 check_safe("analog sample count", a.count)?;
             }
         }
-        if length > self.open.start || self.written.is_empty() && self.queue.is_empty() {
-            self.close(length)?;
+        for c in 0..self.chans.len() {
+            if self.chans[c].start < length {
+                self.close(c, length)?;
+            }
         }
-        let (done, settled) =
-            std::mem::replace(&mut self.overview, Builder::new(0, &[], &[])).finish(length)?;
-        for settled in settled {
-            self.queue_overview(settled);
+        // A file a crash cuts off in its last pages or its footer repairs to the length, where
+        // known-through records would cut it at the last flush.
+        if self.known > 0 && length > self.known {
+            self.known = length;
+            let mut bytes = Vec::new();
+            record::write(
+                &mut bytes,
+                Kind::KnownThrough,
+                &[&record::known_through_bytes(length)],
+            );
+            self.put(bytes, Placed::Nothing);
         }
-        self.drain_queue()?;
+        // The overview to the length, each ladder's last blocks and its strip.
+        let mut strips = Vec::with_capacity(self.ochans.len());
+        let mut ladders = Vec::with_capacity(self.ochans.len());
+        for o in 0..self.ochans.len() {
+            let ladder = self.ochans[o]
+                .ladder
+                .take()
+                .expect("a ladder until the finish");
+            let end = ladder.finish(length);
+            for s in end.settled {
+                self.queue_overview(o, s);
+            }
+            strips.push(end.strip);
+            ladders.push(end.levels);
+        }
+        self.drain_all()?;
 
-        let mut digests = Vec::with_capacity(self.states.len());
-        let mut channels = Vec::with_capacity(self.states.len());
-        for ((state, declared), settled) in std::mem::take(&mut self.states)
-            .into_iter()
+        // Each table's last pages.
+        let taken = self.taken;
+        for c in 0..self.chans.len() {
+            let ch = &mut self.chans[c];
+            loop {
+                let due = ch.blocks.finish_next(0);
+                if due.is_none() {
+                    break;
+                }
+                place_dues(&mut ch.blocks, due, &mut self.out, taken);
+            }
+            match (&mut ch.data, settled_ends[c]) {
+                (Data::Digital(d), Some((_, kept))) => {
+                    let dropped = d.list.count() - kept as u64;
+                    d.list
+                        .drop_last(dropped)
+                        .expect("a dropped gap is in the open page, checked above");
+                    loop {
+                        let due = d.list.finish_next(INLINE_LIST as u64);
+                        if due.is_none() {
+                            break;
+                        }
+                        place_dues(&mut d.list, due, &mut self.out, taken);
+                    }
+                }
+                (Data::Analog(a), _) => loop {
+                    let due = a.list.finish_next(INLINE_LIST as u64);
+                    if due.is_none() {
+                        break;
+                    }
+                    place_dues(&mut a.list, due, &mut self.out, taken);
+                },
+                _ => unreachable!("a digital channel's end was settled"),
+            }
+        }
+        for oc in &mut self.ochans {
+            for table in oc.levels.iter_mut().flatten() {
+                loop {
+                    let due = table.finish_next(0);
+                    if due.is_none() {
+                        break;
+                    }
+                    place_dues(table, due, &mut self.out, taken);
+                }
+            }
+        }
+
+        let mut digests = Vec::with_capacity(self.chans.len());
+        let mut channels = Vec::with_capacity(self.chans.len());
+        for (c, (ch, declared)) in self
+            .chans
+            .iter()
             .zip(&self.declaration.channels)
-            .zip(settled_ends)
+            .enumerate()
         {
-            let data = match state {
-                State::Digital(d) => {
-                    let (end, kept) = settled.unwrap();
+            let data = match &ch.data {
+                Data::Digital(d) => {
+                    let (end, kept) = settled_ends[c].expect("a digital channel's end");
                     let gaps: Vec<Gap> = d.gaps.iter().take(kept).copied().collect();
-                    digests.push(d.hasher.finish_digital(end, &gaps));
+                    let paged = gaps.len() > INLINE_LIST;
+                    digests.push(ch.hasher.clone().finish_digital(end, &gaps));
                     ChannelKind::Digital {
                         initial: d.initial,
                         end,
                         edges: d.edges,
-                        gaps,
+                        gap_count: paged.then_some(gaps.len() as u64),
+                        gaps: if paged { Vec::new() } else { gaps },
                     }
                 }
-                State::Analog(a) => {
+                Data::Analog(a) => {
                     let first = a.runs.get(0).map_or(0, |r| r.tick);
+                    let lost_before = a.runs.get(0).map_or(0, |r| r.lost);
+                    let lost_after = finish.lost_after.get(&c).copied().unwrap_or(0);
                     let breaks: Vec<Break> = a.runs.iter().skip(1).copied().collect();
-                    digests.push(a.hasher.finish_analog(first, a.count, &breaks));
+                    digests.push(ch.hasher.clone().finish_analog(
+                        first,
+                        a.count,
+                        &breaks,
+                        (lost_before, lost_after),
+                    ));
                     let DeclaredKind::Analog {
                         unit, significant, ..
                     } = &declared.data
                     else {
                         unreachable!("states follow the declaration")
                     };
+                    let paged = breaks.len() > INLINE_LIST;
                     ChannelKind::Analog {
                         unit: unit.clone(),
                         first,
                         period: a.period,
                         count: a.count,
-                        breaks,
+                        break_count: paged.then_some(breaks.len() as u64),
+                        breaks: if paged { Vec::new() } else { breaks },
                         coding: a.coding,
                         significant: *significant,
+                        lost_before,
+                        lost_after,
                     }
                 }
             };
@@ -1525,45 +2223,245 @@ impl Writer {
                 source: declared.source,
                 data,
                 shaping: declared.shaping.clone(),
+                overview_shift: declared.overview_shift,
+                blocks: ch.blocks_closed,
+                overview_blocks: levels_of(&self.ochans[c], &ladders[c], length),
             });
         }
-        let overview_rows = by_level(std::mem::take(&mut self.overview_rows));
-        let rows: Vec<BlockRow> = self.written.iter().map(|w| w.row).collect();
-        let mut words = Words::with_capacity(self.declaration.channels.len(), rows.len());
-        for w in self.written.iter() {
-            words.push(&w.words);
+        let stored = self.chans.len();
+        let derived = self
+            .declaration
+            .derived
+            .iter()
+            .enumerate()
+            .map(|(d, x)| DerivedHeader {
+                name: x.name.clone(),
+                unit: x.unit.clone(),
+                product: x.product.clone(),
+                significant: x.significant,
+                overview_blocks: levels_of(&self.ochans[stored + d], &ladders[stored + d], length),
+            })
+            .collect();
+        let mut sources = self.declaration.sources.clone();
+        for (source, extra) in sources.iter_mut().zip(finish.extra) {
+            source.extra.extend(extra);
         }
-        let mut header = finished_header(
-            &self.declaration,
+        let header = Header {
+            timebase: self.declaration.timebase,
             length,
             channels,
-            &digests,
-            rows.len() as u32,
-            &done.plan,
-            finish.extra,
-        );
+            derived,
+            sources,
+            title: self.declaration.title.clone(),
+            meta: self.declaration.meta.clone(),
+            content_id: hash::content_id(self.declaration.timebase, length, &digests),
+            overview_shift: self.declaration.overview_shift,
+        };
+        // The reader's own rules, so the writer never writes a header the reader refuses.
+        crate::decode::check_header(&header).map_err(|e| WriteError::Header(e.to_string()))?;
         let generated = generated(self.annotations.iter(), length);
-        header.annotations = match finish.bundle {
+        let files = match finish.bundle {
             None => None,
             Some(Bundle::Generated { stem }) => {
                 Some(bundled_files(&stem, header.content_id, &generated))
             }
             Some(Bundle::Files(files)) => Some(files),
         };
-        // The reader's own rules, so the writer never writes a header the reader refuses.
-        crate::decode::check_header(&header).map_err(|e| WriteError::Header(e.to_string()))?;
-        let mut overview_raw = Vec::new();
-        overview::write(&done.head, &mut overview_raw);
-        let overview_frame = compress(&overview_raw, self.options.level)?;
-        let overview_rows: Vec<OverviewRow> =
-            overview_rows.into_iter().map(|(_, _, r)| r).collect();
-        let footer = record::footer_bytes(&header, &rows, &words, &overview_rows, &overview_frame)
-            .map_err(WriteError::FooterTooLarge)?;
-        record::write_footer(&mut self.out, self.taken, &footer);
+        let bundle = match files {
+            None => (0, 0),
+            Some(files) => {
+                let at = self.position();
+                let payload = bundle_payload(&files, self.options.level)?;
+                record::write(&mut self.out, Kind::Bundle, &[&payload]);
+                (at, (self.position() - at) as u32)
+            }
+        };
+        let tops: Vec<ChannelTops> = (0..self.ochans.len())
+            .map(|o| ChannelTops {
+                blocks: self.chans.get(o).and_then(|ch| ch.blocks.top()),
+                levels: self.ochans[o]
+                    .levels
+                    .iter()
+                    .take(ladders[o].len())
+                    .map(|t| t.as_ref().and_then(TableWriter::top))
+                    .collect(),
+                list: self.chans.get(o).and_then(|ch| match &ch.data {
+                    Data::Digital(d) => d.list.top(),
+                    Data::Analog(a) => a.list.top(),
+                }),
+            })
+            .collect();
+        let footer = footer_payload(
+            &header,
+            bundle,
+            &tops,
+            &strips,
+            &self.ochans_columns(),
+            self.options.level,
+        )?;
+        let taken = self.taken;
+        record::write_footer(&mut self.out, taken, &footer);
         Ok(Finished {
             header,
             tail: std::mem::take(&mut self.out),
             generated,
         })
+    }
+
+    fn ochans_columns(&self) -> Vec<Column> {
+        self.ochans.iter().map(|o| o.column).collect()
+    }
+}
+
+/// A channel's levels in overview blocks, as its header states them.
+fn levels_of(oc: &OChan, shifts: &[u8], length: i64) -> Vec<OverviewLevel> {
+    shifts
+        .iter()
+        .enumerate()
+        .map(|(li, &shift)| OverviewLevel {
+            shift,
+            blocks: overview::block_count(length, shift),
+            rows: oc
+                .levels
+                .get(li)
+                .and_then(Option::as_ref)
+                .map_or(0, TableWriter::count),
+        })
+        .collect()
+}
+
+/// One channel's tables in the top index: its blocks', its levels', its list's, each a depth and
+/// its entries where it has pages.
+pub(crate) struct ChannelTops {
+    pub blocks: Option<(u8, Vec<Entry>)>,
+    pub levels: Vec<Option<(u8, Vec<Entry>)>>,
+    pub list: Option<(u8, Vec<Entry>)>,
+}
+
+/// The footer's payload: the header, the top index from `bundle` and each channel's `tops`, and
+/// each channel's strip compressed at `level`.
+pub(crate) fn footer_payload(
+    header: &Header,
+    bundle: (u64, u32),
+    tops: &[ChannelTops],
+    strips: &[overview::Level],
+    columns: &[Column],
+    level: i32,
+) -> Result<Vec<u8>, WriteError> {
+    let json = serde_json::to_vec(header).expect("a header always serialises");
+    let mut top = Vec::new();
+    top.extend_from_slice(&bundle.0.to_le_bytes());
+    top.extend_from_slice(&bundle.1.to_le_bytes());
+    let mut frames = Vec::new();
+    let table = |top: &mut Vec<u8>, t: &(u8, Vec<Entry>)| {
+        top.push(t.0);
+        top.push(t.1.len() as u8);
+        for e in &t.1 {
+            e.write(top);
+        }
+    };
+    for ((tops, strip), &column) in tops.iter().zip(strips).zip(columns) {
+        let raw = strip.to_bytes(column);
+        let frame = compress(&raw, level)?;
+        top.extend_from_slice(&(frame.len() as u32).to_le_bytes());
+        top.extend_from_slice(&(raw.len() as u32).to_le_bytes());
+        frames.extend_from_slice(&frame);
+        if let Some(t) = &tops.blocks {
+            table(&mut top, t);
+        }
+        for t in tops.levels.iter().flatten() {
+            table(&mut top, t);
+        }
+        if let Some(t) = &tops.list {
+            table(&mut top, t);
+        }
+    }
+    record::footer_bytes(&json, &top, &frames).map_err(WriteError::FooterTooLarge)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::header::{DeclaredChannel, IntCoding, SourceFormat, SourceHeader};
+
+    fn writer() -> Writer {
+        let timebase = Ratio::integer(1000).unwrap();
+        let d = Declaration {
+            timebase,
+            channels: vec![
+                DeclaredChannel {
+                    name: "V".into(),
+                    source_name: "v".into(),
+                    source: 0,
+                    data: DeclaredKind::Analog {
+                        unit: "V".into(),
+                        period: Ratio::integer(1).unwrap(),
+                        coding: AnalogCoding::Int(IntCoding::new(32, false)),
+                        significant: None,
+                    },
+                    shaping: Default::default(),
+                    overview_shift: None,
+                },
+                DeclaredChannel {
+                    name: "D".into(),
+                    source_name: "d".into(),
+                    source: 0,
+                    data: DeclaredKind::Digital { initial: false },
+                    shaping: Default::default(),
+                    overview_shift: None,
+                },
+            ],
+            derived: Vec::new(),
+            sources: vec![SourceHeader::new(SourceFormat::Other("t".into()), timebase)],
+            title: None,
+            meta: Default::default(),
+            overview_shift: 4,
+        };
+        Writer::new(d, WriteOptions::default()).unwrap()
+    }
+
+    /// An item that would take its open block's decoded size past what a block record's length
+    /// holds is refused at the item, before the writer holds it: here the open blocks are said
+    /// to be that large already, as 4 GiB of items would leave them.
+    #[test]
+    fn an_item_past_a_blocks_length_is_refused_at_the_item() {
+        let mut w = writer();
+        w.run(0, 0, 0).unwrap();
+        w.sample(0, 1u64).unwrap();
+        // Two edges, so a third two ticks on keeps the step and adds an interval's byte.
+        w.edge(1, 5).unwrap();
+        w.edge(1, 7).unwrap();
+        w.chans[0].size = u32::MAX as usize - 3;
+        let Data::Digital(d) = &mut w.chans[1].data else {
+            unreachable!()
+        };
+        // A step byte, the first edge's byte and these: one more interval's byte passes u32.
+        d.open.intervals = u32::MAX as usize - 2;
+        assert!(matches!(
+            w.sample(0, 2u64),
+            Err(WriteError::BlockTooLarge(n)) if n == u32::MAX as usize + 1
+        ));
+        assert!(matches!(w.edge(1, 9), Err(WriteError::BlockTooLarge(_))));
+        // A sample that still fits goes in.
+        w.chans[0].size = u32::MAX as usize - 4;
+        w.sample(0, 2u64).unwrap();
+    }
+
+    /// `size_with` gives the size `push` then gives, through a step that shrinks.
+    #[test]
+    fn an_edges_size_with_is_its_size_once_pushed() {
+        let mut run = EdgeRun::default();
+        for t in [
+            1000i64,
+            3000,
+            5000,
+            5000,
+            6001,
+            70_000_000_000,
+            70_000_000_003,
+        ] {
+            let ahead = run.size_with(t);
+            assert_eq!(run.push(t), ahead, "at {t}");
+        }
     }
 }

@@ -7,12 +7,13 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use escapement_tickwave_format::decode::{BlockChannel, Footer};
+use escapement_tickwave_format::decode::{BlockChannel, Index};
 use escapement_tickwave_format::header::{
     AnalogCoding, ChannelKind, Declaration, DeclaredChannel, DeclaredKind, Derived, Exact,
     IntCoding, SourceFormat, SourceHeader,
 };
 use escapement_tickwave_format::model::{Ratio, Sample, run_sample_tick, sample_support};
+use escapement_tickwave_format::overview::Level;
 use escapement_tickwave_format::samples::value_f64;
 use escapement_tickwave_format::writer::{Finish, WriteOptions, Writer};
 use escapement_tickwave_view::{Cache, Recording};
@@ -26,6 +27,17 @@ pub fn fixture(name: &str) -> Vec<u8> {
 
 pub fn open(file: &[u8]) -> Recording {
     Recording::open(Arc::new(file.to_vec()), Cache::new(64 << 20)).unwrap()
+}
+
+/// Channel `o`'s overview levels in a finished file, finest first, each whole: those in overview
+/// blocks, then the strip.
+pub fn levels(file: &[u8], o: usize) -> Vec<Level> {
+    let index = Index::of_file(file).unwrap();
+    let mut out: Vec<Level> = (0..index.footer.channels[o].levels.len())
+        .map(|li| index.level_in(file, o, li).unwrap())
+        .collect();
+    out.push(index.footer.strip(o).unwrap());
+    out
 }
 
 /// One analog or derived channel's samples, as the oracle reads them.
@@ -84,23 +96,24 @@ impl Oracle {
 /// Every analog and derived channel's samples of a finished file, by channel index; None for a
 /// digital channel.
 pub fn oracle(file: &[u8]) -> Vec<Option<Oracle>> {
-    let f = Footer::parse_file(file).unwrap();
+    let index = Index::of_file(file).unwrap();
+    let f = &index.footer;
     let h = &f.header;
     let n = h.channels.len();
     let mut values: Vec<Vec<Sample>> = vec![Vec::new(); n + h.derived.len()];
-    for i in 0..f.rows.len() {
-        let (offset, len) = f.block_location(i);
-        let block = f
-            .decode_block(i, &file[offset as usize..][..len as usize])
-            .unwrap();
-        for (c, ch) in block.channels.iter().enumerate() {
-            if let BlockChannel::Analog { values: v, .. } = ch {
-                values[c].extend(v.iter());
+    for (c, channel) in values[..n].iter_mut().enumerate() {
+        for block in index.channel_blocks(file, c).unwrap() {
+            if let BlockChannel::Analog { values: v, .. } = &block.data {
+                channel.extend(v.iter());
             }
         }
-        for d in 0..h.derived.len() {
-            values[n + d].extend(f.derived(&block, d).unwrap().iter());
-        }
+    }
+    for (d, &(a, b, product)) in f.products.iter().enumerate() {
+        values[n + d] = values[a]
+            .iter()
+            .zip(&values[b])
+            .map(|(&x, &y)| product.sample(x, y))
+            .collect();
     }
     (0..n + h.derived.len())
         .map(|c| {
@@ -113,13 +126,13 @@ pub fn oracle(file: &[u8]) -> Vec<Option<Oracle>> {
                 first,
                 period,
                 count,
-                breaks,
                 coding,
                 ..
             } = &h.channels[stored].data
             else {
                 return None;
             };
+            let breaks = f.breaks(stored).unwrap();
             let samples = values[c]
                 .iter()
                 .enumerate()
@@ -182,6 +195,7 @@ pub fn synth(p: u64, shift: u8, runs: &[Run], cut: i64, block_bytes: usize) -> V
             significant: None,
         },
         shaping: Default::default(),
+        overview_shift: None,
     };
     let int = |bits, signed, num, den| {
         AnalogCoding::Int(IntCoding {
@@ -202,6 +216,7 @@ pub fn synth(p: u64, shift: u8, runs: &[Run], cut: i64, block_bytes: usize) -> V
                 source: 0,
                 data: DeclaredKind::Digital { initial: false },
                 shaping: Default::default(),
+                overview_shift: None,
             },
         ],
         derived: vec![Derived {
@@ -223,7 +238,8 @@ pub fn synth(p: u64, shift: u8, runs: &[Run], cut: i64, block_bytes: usize) -> V
         WriteOptions {
             level: 1,
             block_bytes,
-            batch: 1,
+            promise_with_items: true,
+            ..WriteOptions::default()
         },
     )
     .unwrap();

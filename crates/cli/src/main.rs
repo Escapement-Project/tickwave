@@ -14,14 +14,14 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use escapement_tickwave_format::annotations::{self, Included};
-use escapement_tickwave_format::decode::{DecodeError, FIRST_READ, Footer, inflate_limited};
+use escapement_tickwave_format::decode::{DecodeError, FIRST_READ, Footer, Index};
 use escapement_tickwave_format::header::{AnalogCoding, ChannelKind, Header, MAGIC};
 use escapement_tickwave_format::model::{RateOrigin, Recording, SourceFormat};
 use escapement_tickwave_format::recut::{RecutError, Recutter};
 use escapement_tickwave_format::repair::{RepairError, Repairer};
 use escapement_tickwave_format::samples::coding_name;
 use escapement_tickwave_format::verify::verify_limited;
-use escapement_tickwave_format::writer::{WriteOptions, generator_file};
+use escapement_tickwave_format::writer::{Compression, WriteOptions, generator_file};
 use escapement_tickwave_import::convert::{
     self, Keep, Pass, Progress, Settings, Step, counted, select, set_units,
 };
@@ -49,8 +49,8 @@ use tracing_subscriber::util::SubscriberInitExt;
 struct Cli {
     #[command(subcommand)]
     command: Command,
-    /// The most to decode from one block, overview block or footer overview, in MiB. A recording
-    /// that needs more is refused, as a page's reader refuses it unless configured.
+    /// The most to decode from one block, overview block or strip, in MiB. A recording that needs
+    /// more is refused, as a page's reader refuses it unless configured.
     #[arg(long, global = true, default_value_t = 64, value_name = "MIB")]
     max_decoded_mib: u16,
 }
@@ -222,12 +222,7 @@ impl AndOpen {
     }
 
     /// Opens `recording` with `viewer`, if there is one.
-    fn serve(
-        &self,
-        viewer: Option<Box<dyn open::Site>>,
-        recording: &Path,
-        max: usize,
-    ) -> Result<()> {
+    fn serve(&self, viewer: Option<Box<dyn open::Site>>, recording: &Path) -> Result<()> {
         match viewer {
             Some(site) => open_file(
                 site,
@@ -235,7 +230,6 @@ impl AndOpen {
                 None,
                 self.port.unwrap_or(0),
                 !self.no_browser,
-                max,
             ),
             None => Ok(()),
         }
@@ -475,7 +469,7 @@ fn execute(command: Command, max: usize) -> Result<()> {
                 );
             }
             convert(&|| Ok(export.recording()), &output, &common, max)?;
-            and_open.serve(viewer, &output, max)
+            and_open.serve(viewer, &output)
         }
         Command::Convert {
             from:
@@ -495,7 +489,7 @@ fn execute(command: Command, max: usize) -> Result<()> {
                 &common,
                 max,
             )?;
-            and_open.serve(viewer, &output, max)
+            and_open.serve(viewer, &output)
         }
         Command::Convert {
             from:
@@ -515,13 +509,13 @@ fn execute(command: Command, max: usize) -> Result<()> {
                 &common,
                 max,
             )?;
-            and_open.serve(viewer, &output, max)
+            and_open.serve(viewer, &output)
         }
         Command::Info { file, json, drift } => {
-            let (_, len, head) = read_footer(&file, max)?;
+            let (_, len, head) = read_footer(&file)?;
             write_info(
                 &mut std::io::stdout().lock(),
-                &head,
+                head,
                 len,
                 json,
                 &*map(&file)?,
@@ -583,13 +577,13 @@ fn execute(command: Command, max: usize) -> Result<()> {
                 }
             }
             merge_files(&inputs, &output, &settings, max)?;
-            and_open.serve(viewer, &output, max)
+            and_open.serve(viewer, &output)
         }
         Command::Bundle {
             recording,
             sidecar,
             output,
-        } => bundle_file(&recording, &sidecar, &output, max),
+        } => bundle_file(&recording, &sidecar, &output),
         Command::Annotations {
             command:
                 AnnotationsCommand::Check {
@@ -597,7 +591,7 @@ fn execute(command: Command, max: usize) -> Result<()> {
                     sidecar,
                     json,
                 },
-        } => check_annotations(&recording, &sidecar, json, max),
+        } => check_annotations(&recording, &sidecar, json),
         Command::Repair {
             file,
             output,
@@ -619,7 +613,6 @@ fn execute(command: Command, max: usize) -> Result<()> {
             annotations.as_deref(),
             serve.port,
             !serve.no_browser,
-            max,
         ),
     }
 }
@@ -715,7 +708,7 @@ fn convert(
         "{}: {:.2} MB, {} blocks, {} in {:.1} s",
         output.display(),
         len as f64 / 1e6,
-        converted.header.blocks,
+        blocks(&converted.header),
         converted.header.content_id,
         started.elapsed().as_secs_f64()
     );
@@ -752,8 +745,13 @@ fn write_atomically<T>(path: &Path, write: impl FnOnce(&mut fs::File) -> Result<
     }
 }
 
+/// Every channel's blocks.
+fn blocks(h: &Header) -> u64 {
+    h.channels.iter().map(|c| c.blocks).sum()
+}
+
 /// The recording at `path`, open, its length, and its footer, read from its end.
-fn read_footer(path: &Path, max: usize) -> Result<(fs::File, u64, Footer)> {
+fn read_footer(path: &Path) -> Result<(fs::File, u64, Footer)> {
     let mut file = fs::File::open(path).with_context(|| format!("reading {}", path.display()))?;
     let len = file.metadata()?.len();
     let mut from = len.saturating_sub(FIRST_READ as u64);
@@ -761,7 +759,7 @@ fn read_footer(path: &Path, max: usize) -> Result<(fs::File, u64, Footer)> {
         file.seek(SeekFrom::Start(from))?;
         let mut tail = Vec::new();
         file.read_to_end(&mut tail)?;
-        match Footer::parse_with(&tail, len, |f, n| inflate_limited(f, n, max)) {
+        match Footer::parse(&tail, len) {
             Ok(footer) => return Ok((file, len, footer)),
             Err(DecodeError::NeedFrom(at)) if at < from => from = at,
             Err(DecodeError::Unfinished) => bail!(
@@ -817,26 +815,34 @@ fn seconds(ticks: i64, header: &Header) -> String {
     }
 }
 
-/// What `info` prints of the recording `head` ends, `len` bytes long. Only `drift` reads `input`
-/// past the footer.
+/// What `info` prints of the recording `head` ends, `len` bytes long. It reads the index from
+/// `input`, and only `drift` reads blocks.
 fn write_info(
     out: &mut impl Write,
-    head: &Footer,
+    head: Footer,
     len: u64,
     json: bool,
     input: &dyn escapement_tickwave_import::input::Input,
     drift: bool,
 ) -> Result<()> {
-    let h = &head.header;
-    let drifts = drift.then(|| drift::of_footer(input, head)).transpose()?;
-    let candidates = drift::candidates(head);
-    let mut lengths: Vec<u32> = head.rows.iter().map(|r| r.length).collect();
+    let fetch = || escapement_tickwave_import::recording::fetch(input);
+    let bundled = head.read_bundle(fetch())?;
+    let index = Index::read(head, fetch())?;
+    let (head, h) = (&index.footer, index.header());
+    let drifts = drift.then(|| drift::of_index(input, &index)).transpose()?;
+    let candidates = drift::candidates(&index);
+    let mut lengths: Vec<u32> = index
+        .blocks
+        .iter()
+        .flatten()
+        .map(|b| b.row.length)
+        .collect();
     lengths.sort_unstable();
     let median = lengths.get(lengths.len() / 2).copied().unwrap_or(0);
     let blocks_total: u64 = lengths.iter().map(|&l| u64::from(l)).sum();
-    let overview_rows = head.overview_rows.iter().flatten();
+    let overview_rows = index.levels.iter().flatten().flatten();
     let overview_count = overview_rows.clone().count();
-    let overview_total: u64 = overview_rows.map(|r| u64::from(r.length)).sum();
+    let overview_total: u64 = overview_rows.map(|r| u64::from(r.row.length)).sum();
     if json {
         let report = serde_json::json!({
             "header": h,
@@ -971,30 +977,39 @@ fn write_info(
     }
     writeln!(
         out,
-        "{:.3} MB: footer {} bytes ({} overview levels), {} blocks of {}-{} bytes, median {median}",
+        "{:.3} MB: footer {} bytes, {} blocks of {}-{} bytes, median {median}",
         len as f64 / 1e6,
         head.trailer.footer_len,
-        h.overview.len(),
         lengths.len(),
         lengths.first().unwrap_or(&0),
         lengths.last().unwrap_or(&0),
     )?;
-    if overview_count > 0 {
-        let shifts: Vec<String> = h
-            .overview_blocks
-            .iter()
-            .map(|l| format!("2^{}", l.shift))
-            .collect();
+    let names = h
+        .channels
+        .iter()
+        .map(|c| &c.name)
+        .chain(h.derived.iter().map(|d| &d.name));
+    for (o, name) in names.enumerate() {
+        let strip = head.channels[o].strip_shift;
+        let levels = h.levels(o).unwrap_or_default();
+        if levels.is_empty() {
+            writeln!(out, "  {name:<12} overview strip at 2^{strip}")?;
+            continue;
+        }
+        let shifts: Vec<String> = levels.iter().map(|l| format!("2^{}", l.shift)).collect();
+        let rows = index.levels[o].iter().flatten();
         writeln!(
             out,
-            "  overview levels {} in {overview_count} blocks, {overview_total} bytes",
-            shifts.join(", ")
+            "  {name:<12} overview levels {} in {} blocks, {} bytes, strip at 2^{strip}",
+            shifts.join(", "),
+            rows.clone().count(),
+            rows.map(|r| u64::from(r.row.length)).sum::<u64>()
         )?;
     }
     for (k, v) in &h.meta {
         writeln!(out, "  {k} = {v}")?;
     }
-    for (name, text) in h.annotations.iter().flatten() {
+    for (name, text) in bundled.iter().flatten() {
         let lines = text.lines().filter(|l| !l.trim().is_empty()).count();
         writeln!(out, "  bundled {name}, {lines} lines")?;
     }
@@ -1007,7 +1022,7 @@ fn write_info(
         (None, Some(c)) => writeln!(
             out,
             "drift: {} digital channels from two or more sources may share a signal; `tickwave \
-             info --drift` measures it, decoding all {} blocks, {:.3} MB",
+             info --drift` measures it, decoding their {} blocks, {:.3} MB",
             c.channels,
             c.blocks,
             c.bytes as f64 / 1e6
@@ -1110,7 +1125,7 @@ fn capture(h: &Header, source: usize, against: &Path) -> Result<Recording> {
 }
 
 fn verify_file(file: &Path, against: &[PathBuf], max: usize) -> Result<()> {
-    let (mut opened, _, head) = read_footer(file, max)?;
+    let (mut opened, _, head) = read_footer(file)?;
     let h = &head.header;
     let one_capture = h.sources.len() == 1 && against.len() == 1 && !is_recording(&against[0]);
     let source = if one_capture {
@@ -1224,7 +1239,7 @@ fn merge_files(
         "{}: {:.2} MB, {} blocks, {} in {:.1} s",
         output.display(),
         len as f64 / 1e6,
-        merged.header.blocks,
+        blocks(&merged.header),
         merged.header.content_id,
         started.elapsed().as_secs_f64()
     );
@@ -1328,8 +1343,8 @@ fn resolve_sidecar(
     }
 }
 
-fn check_annotations(recording: &Path, sidecar: &Path, json: bool, max: usize) -> Result<()> {
-    let (_, _, head) = read_footer(recording, max)?;
+fn check_annotations(recording: &Path, sidecar: &Path, json: bool) -> Result<()> {
+    let (_, _, head) = read_footer(recording)?;
     let (resolved, _) = load_sidecar(&head.header, recording, sidecar)?;
     if json {
         writeln!(
@@ -1349,13 +1364,22 @@ fn check_annotations(recording: &Path, sidecar: &Path, json: bool, max: usize) -
     Ok(())
 }
 
-fn bundle_file(recording: &Path, sidecar: &Path, output: &Path, max: usize) -> Result<()> {
-    let (mut file, _, head) = read_footer(recording, max)?;
+fn bundle_file(recording: &Path, sidecar: &Path, output: &Path) -> Result<()> {
+    let (mut file, _, head) = read_footer(recording)?;
     let (resolved, files) = load_sidecar(&head.header, recording, sidecar)?;
-    let (keep, tail) =
-        escapement_tickwave_format::bundle::bundled_tail(&head, files.into_iter().collect())?;
+    let mut record = vec![0; head.trailer.footer_len as usize];
+    file.seek(SeekFrom::Start(head.trailer.footer_offset))?;
+    file.read_exact(&mut record)?;
+    // At the converter's level: a sidecar is small, and read once.
+    let level = Settings::default().level;
+    let (keep, tail) = escapement_tickwave_format::bundle::bundled_tail(
+        &record,
+        &head,
+        files.into_iter().collect(),
+        level,
+    )?;
     write_atomically(output, |out| copy_then(&mut file, keep, &tail, out))?;
-    let (_, _, check) = read_footer(output, max)?;
+    let (_, _, check) = read_footer(output)?;
     if check.header.content_id != head.header.content_id {
         bail!("bundling changed the content id");
     }
@@ -1400,7 +1424,7 @@ fn repair_file(file: &Path, output: &Path, level: i32) -> Result<()> {
         output.display(),
         repaired.keep,
         len,
-        repaired.header.blocks,
+        blocks(&repaired.header),
         seconds(repaired.header.length, &repaired.header),
         repaired.header.content_id
     );
@@ -1441,7 +1465,8 @@ fn recut_file(input: &Path, output: &Path, block_kib: u32, level: i32) -> Result
     let mut recutter = Recutter::new(WriteOptions {
         level,
         block_bytes: block_kib as usize * 1024,
-        batch: 4 * std::thread::available_parallelism().map_or(1, |n| n.get()),
+        compression: Compression::Offload,
+        ..WriteOptions::default()
     });
     let (finished, left_out) = write_atomically(output, |out| {
         let mut chunk = vec![0; 1 << 20];
@@ -1471,12 +1496,12 @@ fn recut_file(input: &Path, output: &Path, block_kib: u32, level: i32) -> Result
         out.write_all(&finished.tail)?;
         Ok((finished, left_out))
     })?;
-    let (_, _, check) = read_footer(output, usize::MAX)?;
+    let (_, _, check) = read_footer(output)?;
     if check.header.content_id != finished.header.content_id {
         let _ = fs::remove_file(output);
         bail!("the copy does not read back with its content id");
     }
-    if finished.header.annotations.is_none() {
+    if check.bundle.is_none() {
         write_generated(output, &finished.header, &finished.generated)?;
     }
     warn_left_out(&left_out);
@@ -1485,7 +1510,7 @@ fn recut_file(input: &Path, output: &Path, block_kib: u32, level: i32) -> Result
         output.display(),
         fs::metadata(output)?.len() as f64 / 1e6,
         len as f64 / 1e6,
-        finished.header.blocks,
+        blocks(&finished.header),
         finished.header.content_id,
         started.elapsed().as_secs_f64()
     );
@@ -1509,9 +1534,8 @@ fn open_file(
     sidecar: Option<&Path>,
     port: u16,
     browser: bool,
-    max: usize,
 ) -> Result<()> {
-    let (_, _, head) = read_footer(recording, max)?;
+    let (_, _, head) = read_footer(recording)?;
     let files = open::Files {
         recording: open::Named {
             name: file_name(recording)?,
@@ -1641,8 +1665,12 @@ mod tests {
                 end: 1_000_000,
                 edges: 10,
                 gaps: Vec::new(),
+                gap_count: None,
             },
             shaping: Default::default(),
+            overview_shift: None,
+            blocks: 1,
+            overview_blocks: Vec::new(),
         };
         Header {
             timebase: escapement_tickwave_format::model::Ratio::integer(1_000_000_000).unwrap(),
@@ -1658,11 +1686,7 @@ mod tests {
             content_id: "blake3:00ff000000000000000000000000000000000000000000000000000000000000"
                 .parse()
                 .unwrap(),
-            blocks: 1,
             overview_shift: 12,
-            overview: vec![12],
-            overview_blocks: vec![],
-            annotations: None,
         }
     }
 
@@ -1819,7 +1843,7 @@ mod tests {
             "D1=10..100",
         ])
         .unwrap();
-        let (_, _, head) = read_footer(&output, 64 << 20).unwrap();
+        let (_, _, head) = read_footer(&output).unwrap();
         let shaping: Vec<_> = head.header.channels[..3]
             .iter()
             .map(|c| (c.shaping.offset.as_ref().map(|o| o.ticks), c.shaping.kept))
@@ -1852,12 +1876,13 @@ mod tests {
             ),
         )
         .unwrap();
-        read_footer(&doctored, 64 << 20).unwrap();
+        read_footer(&doctored).unwrap();
         let err =
             verify_file(&doctored, std::slice::from_ref(&source), 64 << 20).expect_err("refused");
         assert_eq!(
             format!("{err:#}"),
-            "the recording does not match its source: the length differs"
+            "the recording does not match its source: channel D0: a block ends at tick 5008, past \
+             the source's length, 5007"
         );
         // Or its source's tick 0 one tick later than the moves and cuts put it: no channel then
         // starts the recording, which the reader refuses.
@@ -1919,12 +1944,12 @@ mod tests {
         };
         use escapement_tickwave_format::model::Ratio;
         merge(&["--stretch", "2=+1000ppm"]).unwrap();
-        let (_, _, head) = read_footer(&m, 64 << 20).unwrap();
+        let (_, _, head) = read_footer(&m).unwrap();
         let stretches: Vec<_> = head.header.sources.iter().map(|s| s.stretch).collect();
         assert_eq!(stretches, [None, Ratio::new(1001, 1000)]);
         // Two marks: the VCD's 0 at 10 us and its 1 s at 1.00201 s, a stretch of 1.002.
         merge(&["--align", "2=0@10us,1s@1.00201s"]).unwrap();
-        let (_, _, head) = read_footer(&m, 64 << 20).unwrap();
+        let (_, _, head) = read_footer(&m).unwrap();
         let s = &head.header.sources[1];
         assert_eq!(
             (s.stretch, s.origin, s.align),
@@ -1958,10 +1983,10 @@ mod tests {
         }
     }
 
-    /// A recording's bytes as an input that counts its reads.
+    /// A recording's bytes as an input that keeps the spans it reads.
     struct Counted {
         bytes: Vec<u8>,
-        reads: std::sync::atomic::AtomicUsize,
+        reads: std::sync::Mutex<Vec<std::ops::Range<u64>>>,
     }
 
     impl escapement_tickwave_import::input::Input for Counted {
@@ -1970,7 +1995,9 @@ mod tests {
         }
         fn read_at(&self, offset: u64, buf: &mut [u8]) {
             self.reads
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                .lock()
+                .unwrap()
+                .push(offset..offset + buf.len() as u64);
             buf.copy_from_slice(&self.bytes[offset as usize..][..buf.len()]);
         }
     }
@@ -2021,7 +2048,7 @@ mod tests {
     }
 
     #[test]
-    fn info_reads_the_footer_alone_and_measures_the_drift_only_when_asked() {
+    fn info_reads_the_index_alone_and_measures_the_drift_only_when_asked() {
         let dir = tempfile::tempdir().unwrap();
         let (a, b, m) = (
             dir.path().join("a.tickwave"),
@@ -2043,30 +2070,46 @@ mod tests {
             64 << 20,
         )
         .unwrap();
-        let (_, len, head) = read_footer(&m, 64 << 20).unwrap();
         let input = Counted {
             bytes: fs::read(&m).unwrap(),
             reads: Default::default(),
         };
-        let reads = || input.reads.load(std::sync::atomic::Ordering::Relaxed);
+        let index = Index::of_file(&input.bytes).unwrap();
+        let frames: Vec<std::ops::Range<u64>> = index
+            .blocks
+            .iter()
+            .flatten()
+            .map(|b| b.row.offset..b.row.offset + u64::from(b.row.length))
+            .collect();
+        // Whether any read so far took bytes of a block.
+        let read_a_block = || {
+            let reads = input.reads.lock().unwrap();
+            reads
+                .iter()
+                .any(|r| frames.iter().any(|f| r.start < f.end && f.start < r.end))
+        };
+        let len = input.bytes.len() as u64;
         for json in [false, true] {
             let mut out = Vec::new();
-            write_info(&mut out, &head, len, json, &input, false).unwrap();
+            let head = Footer::parse_file(&input.bytes).unwrap();
+            write_info(&mut out, head, len, json, &input, false).unwrap();
             let out = String::from_utf8(out).unwrap();
-            assert_eq!(reads(), 0, "{out}");
+            assert!(!input.reads.lock().unwrap().is_empty(), "the index is read");
+            assert!(!read_a_block(), "{out}");
             if !json {
                 let hint = format!(
                     "drift: 2 digital channels from two or more sources may share a signal; \
-                     `tickwave info --drift` measures it, decoding all {} blocks",
-                    head.rows.len()
+                     `tickwave info --drift` measures it, decoding their {} blocks",
+                    frames.len()
                 );
                 assert!(out.contains(&hint), "{out}");
             }
         }
         let mut out = Vec::new();
-        write_info(&mut out, &head, len, false, &input, true).unwrap();
+        let head = Footer::parse_file(&input.bytes).unwrap();
+        write_info(&mut out, head, len, false, &input, true).unwrap();
         let out = String::from_utf8(out).unwrap();
-        assert!(reads() > 0);
+        assert!(read_a_block());
         assert!(
             out.contains("drift: M (source 0) against b/M (source 1): +1000.0 ± "),
             "{out}"
@@ -2128,7 +2171,7 @@ mod tests {
             &arg("2=100"),
         ])
         .unwrap();
-        let (_, _, head) = read_footer(&m, 64 << 20).unwrap();
+        let (_, _, head) = read_footer(&m).unwrap();
         let h = &head.header;
         // 2.5 MHz and 10 MHz: an m of 4 and of 1. The conversion's source tick 0, 5 of its ticks
         // in, is 20 merged ticks in; the VCD's, aligned by 100, at 100.
@@ -2224,7 +2267,7 @@ mod tests {
             &arg("1:D1=clock"),
         ])
         .unwrap();
-        let (_, _, head) = read_footer(&m2, 64 << 20).unwrap();
+        let (_, _, head) = read_footer(&m2).unwrap();
         assert_eq!(head.header.channels[0].name, "clock");
         assert_eq!(
             head.header
@@ -2292,7 +2335,7 @@ mod tests {
             64 << 20,
         )
         .unwrap();
-        let (_, _, head) = read_footer(&b, 64 << 20).unwrap();
+        let (_, _, head) = read_footer(&b).unwrap();
         let id = head.header.content_id;
         // B's sidecar beside it: a generator's file, and a hand-written annotation of its own.
         fs::write(
@@ -2322,9 +2365,13 @@ mod tests {
         ];
         let args: Vec<&std::ffi::OsStr> = args.iter().map(|a| a.as_os_str()).collect();
         cli(&args).unwrap();
-        let (_, _, head) = read_footer(&m, 64 << 20).unwrap();
+        let (_, _, head) = read_footer(&m).unwrap();
         let h = &head.header;
-        let files = h.annotations.as_ref().expect("bundled");
+        let bytes = fs::read(&m).unwrap();
+        let files = head
+            .read_bundle(escapement_tickwave_format::decode::from_memory(&bytes))
+            .unwrap();
+        let files = files.as_ref().expect("bundled");
         let jsonl = &files["m.dec.jsonl"];
         // At 10 MHz the VCD's tick is the recording's: 7 stays 7.
         assert!(
@@ -2435,8 +2482,26 @@ mod tests {
                 .path()
                 .join(format!("whole-{percent}-repaired.tickwave"));
             repair_file(&input, &output, 3).unwrap();
-            let (_, _, head) = read_footer(&output, 64 << 20).unwrap();
+            let (_, _, head) = read_footer(&output).unwrap();
             assert!(head.header.channels.iter().all(|c| c.shaping.is_whole()));
+            // The converter closes a sparse channel's one block at the finish. D0 and D7, high
+            // at their start, have none before the 40 % cut: never known there, their declared
+            // level kept.
+            if percent == 40 {
+                for name in ["D0", "D7"] {
+                    let c = head
+                        .header
+                        .channels
+                        .iter()
+                        .find(|c| c.name == name)
+                        .unwrap();
+                    let ChannelKind::Digital { initial, end, .. } = c.data else {
+                        panic!("{name} is digital")
+                    };
+                    assert!(initial, "{name}");
+                    assert_eq!(Some(end), head.header.start(0), "{name}");
+                }
+            }
         }
     }
 

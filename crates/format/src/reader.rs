@@ -1,20 +1,24 @@
 //! The in-order reader: a file's bytes in, from its start, and what they hold out, record by
 //! record. It does no I/O. It needs no footer, so it reads a file cut off at any byte, or one a
-//! recorder is still writing, up to its last whole record.
+//! recorder is still writing, up to its last whole record. It follows every table as the writer
+//! built it, so each page and directory must be the one the records before it give, and the
+//! footer's top index the one they all give.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use crate::decode::{
     BlockChannel, DecodeError, Footer, MAX_DECODED, Section, check_declaration, corrupt,
-    decode_sections, edge_in_gap, inflate_limited, level_after,
+    decode_section, edge_in_gap, inflate_limited, level_after, lost_before_start,
 };
 use crate::header::{
-    BlockRow, ChannelKind, Declaration, DeclaredKind, JSON_SAFE, MAJOR, PREAMBLE_LEN, Preamble,
-    TRAILER_LEN, Trailer, Words,
+    BlockRow, ChannelKind, Declaration, DeclaredKind, INLINE_LIST, JSON_SAFE, MAJOR, OverviewRow,
+    PREAMBLE_LEN, Preamble, TRAILER_LEN, Trailer,
 };
+use crate::index::{Due, PageHead, Row, Table, TableWriter};
 use crate::mapping::Mapping;
 use crate::model::{Break, Gap, run_sample_tick};
-use crate::record::{self, BlockHead, Kind, Next};
+use crate::overview;
+use crate::record::{self, BlockHead, Kind, Next, OverviewHead};
 
 /// One block, decoded, and where its frame sits in the file.
 #[derive(Debug, PartialEq)]
@@ -23,7 +27,7 @@ pub struct ReadBlock {
     /// Where the block's zstd frame starts in the file, and its length.
     pub frame_offset: u64,
     pub frame_len: u32,
-    pub channels: Vec<BlockChannel>,
+    pub data: BlockChannel,
 }
 
 #[derive(Debug)]
@@ -40,15 +44,26 @@ pub enum Event {
         channel: usize,
         run: Break,
     },
+    /// Every item before `tick` is in a block record before this one.
+    KnownThrough {
+        tick: i64,
+    },
     /// An overview block's frame, not decoded: its size follows from the length, which the
     /// footer gives.
     OverviewBlock {
-        shift: u8,
-        k: u64,
+        head: OverviewHead,
         frame_offset: u64,
         frame: Vec<u8>,
     },
+    /// An index or list page, which the reader has checked against the records before it: its
+    /// head and its record's length.
+    Page {
+        head: PageHead,
+        len: u32,
+    },
     Annotation(record::Annotation),
+    /// The annotation bundle record's payload (`decode::parse_bundle` reads it).
+    Bundle(Vec<u8>),
     /// The footer, which the trailer has been checked against.
     Footer(Box<Footer>),
     /// A record a later minor version added, skipped.
@@ -79,6 +94,97 @@ enum Phase {
     Stopped,
 }
 
+/// A table as the reader follows it: the writer's state, and the page record due next, which
+/// must come before another entry does.
+struct Follow<R: Row> {
+    channel: u32,
+    table: TableWriter<R>,
+    due: Option<Due>,
+    /// Its last pages have begun: no entry comes after.
+    finishing: bool,
+}
+
+impl<R: Row> Follow<R> {
+    fn new(channel: u32, table: Table, digital: bool) -> Self {
+        Self {
+            channel,
+            table: TableWriter::new(channel, table, digital),
+            due: None,
+            finishing: false,
+        }
+    }
+
+    fn push(&mut self, row: R) -> Result<(), DecodeError> {
+        if self.due.is_some() || self.finishing {
+            return Err(corrupt(format!(
+                "channel {}'s {}: an entry comes where a page is due",
+                self.channel(),
+                crate::index::table_name(self.table.table())
+            )));
+        }
+        self.due = self.table.push(row);
+        Ok(())
+    }
+
+    fn channel(&self) -> u32 {
+        self.channel
+    }
+
+    /// The page record `record`, at `at`, of this table: the one due, or the next of its last
+    /// pages, a list's after dropping the entries its page leaves out.
+    fn page(&mut self, record: &[u8], at: u64, count: u32, inline: u64) -> Result<(), DecodeError> {
+        let due = match self.due.take() {
+            Some(due) => due,
+            None => {
+                let mut finishing = self.table.clone();
+                // Only a gap list's last page leaves entries out: the gaps past the end.
+                if !self.finishing && finishing.table() == Table::Gaps {
+                    let open = finishing.open().len() as u64;
+                    if let Some(drop) = open.checked_sub(u64::from(count))
+                        && drop > 0
+                    {
+                        finishing.drop_last(drop);
+                    }
+                }
+                let due = finishing
+                    .finish_next(inline)
+                    .ok_or_else(|| corrupt("a page record that no table's entries give"))?;
+                self.table = finishing;
+                self.finishing = true;
+                due
+            }
+        };
+        if due.record != record {
+            return Err(corrupt(format!(
+                "a page of channel {}'s {} differs from the one the records before it give",
+                self.channel,
+                crate::index::table_name(self.table.table())
+            )));
+        }
+        self.due = self.table.placed(&due, at);
+        Ok(())
+    }
+
+    /// The table's top index entry once every page is read: a list of `inline` entries or fewer
+    /// has none.
+    fn top(&mut self, inline: u64) -> Result<Option<(u8, Vec<crate::index::Entry>)>, DecodeError> {
+        if self.due.is_some() {
+            return Err(corrupt("a page is due before the footer"));
+        }
+        if !self.finishing {
+            self.finishing = true;
+            if self.table.finish_next(inline).is_some() {
+                return Err(corrupt("a table's last page is missing before the footer"));
+            }
+        } else if self.table.finish_next(inline).is_some() {
+            return Err(corrupt(
+                "a table's last directory is missing before the footer",
+            ));
+        }
+        Ok(self.table.top())
+    }
+}
+
 enum Channel {
     Digital {
         /// The level at the next block's start, as far as the blocks read so far say.
@@ -92,6 +198,7 @@ enum Channel {
         map: Mapping,
         /// The channel's start, in its source's ticks.
         start: i64,
+        list: Follow<Gap>,
     },
     Analog {
         next_index: u64,
@@ -99,6 +206,7 @@ enum Channel {
         coding: crate::header::AnalogCoding,
         period: crate::model::Ratio,
         map: Mapping,
+        list: Follow<Break>,
     },
 }
 
@@ -107,6 +215,13 @@ fn on_axis(map: &Mapping, k: i64) -> Option<i64> {
     let safe = 0..JSON_SAFE as i64;
     map.axis(k)
         .filter(|t| safe.contains(t) && safe.contains(&k))
+}
+
+/// One overview channel's levels as the reader follows them: by shift, the next block's `k` and
+/// the level's table.
+struct Levels {
+    finest: u8,
+    by_shift: HashMap<u8, (u64, Follow<OverviewRow>)>,
 }
 
 pub struct Reader {
@@ -119,13 +234,16 @@ pub struct Reader {
     phase: Phase,
     declaration: Option<Declaration>,
     channels: Vec<Channel>,
-    /// The next block's start.
-    next_start: i64,
-    /// The blocks read, as the footer's index must have them, and their words.
-    rows: Vec<BlockRow>,
-    words: Words,
-    /// The overview blocks read: shift, `k`, frame offset and length.
-    overview_seen: Vec<(u8, u64, u64, u32)>,
+    /// Each channel's next block's start, its blocks so far and its index.
+    next_start: Vec<i64>,
+    blocks: Vec<Follow<BlockRow>>,
+    levels: Vec<Levels>,
+    /// The latest known-through record's tick.
+    known: Option<i64>,
+    /// The annotation bundle record's place, once read.
+    bundle: Option<(u64, u32)>,
+    /// Where the record the last event came from starts.
+    record_at: u64,
     /// Bytes fed past the trailer.
     after_end: bool,
 }
@@ -148,10 +266,12 @@ impl Reader {
             phase: Phase::Preamble,
             declaration: None,
             channels: Vec::new(),
-            next_start: 0,
-            rows: Vec::new(),
-            words: Words::default(),
-            overview_seen: Vec::new(),
+            next_start: Vec::new(),
+            blocks: Vec::new(),
+            levels: Vec::new(),
+            known: None,
+            bundle: None,
+            record_at: 0,
             after_end: false,
         }
     }
@@ -175,9 +295,19 @@ impl Reader {
         self.at + self.pos as u64
     }
 
-    /// Where the next block starts: the end of the last one read.
-    pub fn next_start(&self) -> i64 {
-        self.next_start
+    /// Where the record the last event came from starts.
+    pub fn record_at(&self) -> u64 {
+        self.record_at
+    }
+
+    /// Where channel `c`'s next block starts: the end of its last one read.
+    pub fn next_start(&self, c: usize) -> Option<i64> {
+        self.next_start.get(c).copied()
+    }
+
+    /// The latest known-through record's tick.
+    pub fn known_through(&self) -> Option<i64> {
+        self.known
     }
 
     pub fn declaration(&self) -> Option<&Declaration> {
@@ -254,6 +384,7 @@ impl Reader {
                     else {
                         unreachable!()
                     };
+                    self.record_at = footer_at;
                     return Ok(Some(Event::Footer(footer)));
                 }
                 Phase::Records => {
@@ -273,9 +404,11 @@ impl Reader {
                         Next::Record { kind, payload, len } => (kind, payload, len),
                     };
                     let record_at = self.position();
+                    let record = rest[..len].to_vec();
                     let payload = payload.to_vec();
                     self.pos += len;
-                    if let Some(event) = self.take(kind, &payload, record_at, len)? {
+                    self.record_at = record_at;
+                    if let Some(event) = self.take(kind, &payload, &record, record_at, len)? {
                         return Ok(Some(event));
                     }
                 }
@@ -302,6 +435,7 @@ impl Reader {
         &mut self,
         kind: u8,
         payload: &[u8],
+        record_bytes: &[u8],
         record_at: u64,
         len: usize,
     ) -> Result<Option<Event>, DecodeError> {
@@ -317,6 +451,11 @@ impl Reader {
             } else {
                 "the first record is not the declaration"
             }));
+        }
+        if self.bundle.is_some() && kind != Kind::Footer {
+            return Err(corrupt(
+                "a record comes between the annotation bundle and the footer",
+            ));
         }
         let channel_count = self.channels.len();
         let channel = |c: u32| -> Result<usize, DecodeError> {
@@ -336,7 +475,10 @@ impl Reader {
                 let unmapped = || corrupt("a channel has no mapping to the axis");
                 let maps = d.mappings().ok_or_else(unmapped)?;
                 let mut channels = Vec::with_capacity(d.channels.len());
+                let mut blocks = Vec::with_capacity(d.channels.len());
                 for (c, (channel, map)) in d.channels.iter().zip(maps).enumerate() {
+                    let digital = matches!(channel.data, DeclaredKind::Digital { .. });
+                    blocks.push(Follow::new(c as u32, Table::Blocks, digital));
                     channels.push(match &channel.data {
                         DeclaredKind::Digital { initial } => {
                             let start = d.start(c).ok_or_else(unmapped)?;
@@ -348,6 +490,7 @@ impl Reader {
                                 pending: VecDeque::new(),
                                 map,
                                 start,
+                                list: Follow::new(c as u32, Table::Gaps, true),
                             }
                         }
                         DeclaredKind::Analog { coding, period, .. } => Channel::Analog {
@@ -356,11 +499,20 @@ impl Reader {
                             coding: *coding,
                             period: *period,
                             map,
+                            list: Follow::new(c as u32, Table::Breaks, false),
                         },
                     });
                 }
+                let overview_channels = d.channels.len() + d.derived.len();
+                self.levels = (0..overview_channels)
+                    .map(|o| Levels {
+                        finest: d.shift(o).expect("a checked declaration's channel"),
+                        by_shift: HashMap::new(),
+                    })
+                    .collect();
+                self.next_start = vec![0; d.channels.len()];
                 self.channels = channels;
-                self.words = Words::new(d.channels.len());
+                self.blocks = blocks;
                 self.declaration = Some(d.clone());
                 Event::Declaration(Box::new(d))
             }
@@ -368,7 +520,7 @@ impl Reader {
                 let (c, gap) =
                     record::parse_gap(payload).ok_or_else(|| corrupt("a gap record's size"))?;
                 let c = channel(c)?;
-                let start = self.next_start;
+                let start = self.next_start[c];
                 let Channel::Digital {
                     last_edge,
                     edges,
@@ -376,6 +528,7 @@ impl Reader {
                     pending,
                     map,
                     start: channel_start,
+                    list,
                     ..
                 } = &mut self.channels[c]
                 else {
@@ -397,6 +550,7 @@ impl Reader {
                 }
                 gaps.push(gap);
                 pending.push_back((gap, to.unwrap_or(i64::MAX)));
+                list.push(gap)?;
                 Event::Gap { channel: c, gap }
             }
             Kind::Run => {
@@ -407,34 +561,97 @@ impl Reader {
                     next_index,
                     runs,
                     map,
+                    period,
+                    list,
                     ..
                 } = &mut self.channels[c]
                 else {
                     return Err(corrupt("a run on a digital channel"));
                 };
                 let in_order = match runs.last() {
-                    None => run.index == 0 && run.lost == 0,
+                    None => {
+                        run.index == 0
+                            && (run.lost == 0
+                                || lost_before_start(run.tick, *period, run.lost)
+                                    .and_then(|t| on_axis(map, t))
+                                    .is_some())
+                    }
                     Some(r) => run.index > r.index && run.tick >= r.tick,
                 };
-                if !in_order || run.index < *next_index || on_axis(map, run.tick).is_none() {
+                if !in_order
+                    || run.index < *next_index
+                    || run.lost >= JSON_SAFE
+                    || on_axis(map, run.tick).is_none()
+                {
                     return Err(corrupt(format!("channel {c}: a run is out of place")));
                 }
                 runs.push(run);
+                if run.index > 0 {
+                    list.push(run)?;
+                }
                 Event::Run { channel: c, run }
+            }
+            Kind::KnownThrough => {
+                let tick = record::parse_known_through(payload)
+                    .ok_or_else(|| corrupt("a known-through record's size"))?;
+                if tick < 0 || self.known.is_some_and(|k| tick <= k) {
+                    return Err(corrupt(format!(
+                        "a known-through record at tick {tick} does not come after the last"
+                    )));
+                }
+                self.known = Some(tick);
+                Event::KnownThrough { tick }
             }
             Kind::Block => Event::Block(self.block(payload, record_at)?),
             Kind::OverviewBlock => {
-                let (shift, k, frame) = record::parse_overview(payload)
+                let (head, frame) = OverviewHead::parse(payload)
                     .ok_or_else(|| corrupt("an overview block record's size"))?;
-                let frame_offset =
-                    record_at + (record::PAYLOAD_AT + record::OVERVIEW_HEAD_LEN) as u64;
-                self.overview_seen
-                    .push((shift, k, frame_offset, frame.len() as u32));
+                let o = head.channel as usize;
+                let levels = self
+                    .levels
+                    .get_mut(o)
+                    .ok_or_else(|| corrupt("an overview block names a channel past the last"))?;
+                let on_ladder = head.shift >= levels.finest
+                    && head.shift <= overview::MAX_SHIFT
+                    && (head.shift - levels.finest).is_multiple_of(overview::STEP);
+                let (k, follow) = levels
+                    .by_shift
+                    .entry(head.shift)
+                    .or_insert_with(|| (0, Follow::new(o as u32, Table::Level(head.shift), false)));
+                if !on_ladder || head.k != *k || head.n == 0 {
+                    return Err(corrupt(format!(
+                        "channel {o}: an overview block of level 2^{} at block {} is out of place",
+                        head.shift, head.k
+                    )));
+                }
+                *k += u64::from(head.n);
+                let frame_offset = record_at + (record::PAYLOAD_AT + OverviewHead::LEN) as u64;
+                // A level's last block may hold fewer buckets, which only the length says: the
+                // row takes the size the frame states, which the footer's rows are held to.
+                let decoded = zstd::zstd_safe::get_frame_content_size(frame)
+                    .ok()
+                    .flatten()
+                    .and_then(|n| u32::try_from(n).ok())
+                    .ok_or_else(|| corrupt("an overview block's frame does not state its size"))?;
+                follow.push(OverviewRow {
+                    offset: frame_offset,
+                    length: frame.len() as u32,
+                    decoded_length: decoded,
+                    n: head.n,
+                })?;
                 Event::OverviewBlock {
-                    shift,
-                    k,
+                    head,
                     frame_offset,
                     frame: frame.to_vec(),
+                }
+            }
+            Kind::IndexPage | Kind::ListPage => {
+                let (head, _) =
+                    PageHead::parse(payload).ok_or_else(|| corrupt("a page record's size"))?;
+                self.page(head, record_bytes, record_at)?;
+                Event::Page {
+                    head,
+                    len: len as u32,
                 }
             }
             Kind::Annotation => {
@@ -445,16 +662,18 @@ impl Reader {
                 }
                 Event::Annotation(a)
             }
+            Kind::Bundle => {
+                self.bundle = Some((record_at, len as u32));
+                Event::Bundle(payload.to_vec())
+            }
             Kind::Footer => {
                 // The footer parses as a random-access reader parses it: from its own bytes and
                 // a trailer made for them, which the real one is checked against next.
                 let mut bytes = Vec::with_capacity(len + TRAILER_LEN);
                 record::write_footer(&mut bytes, record_at, payload);
                 let file_len = record_at + bytes.len() as u64;
-                let max = self.max;
-                let footer =
-                    Footer::parse_with(&bytes, file_len, |f, n| inflate_limited(f, n, max))?;
-                self.check_footer(&footer)?;
+                let footer = Footer::parse(&bytes, file_len)?;
+                self.check_footer(&footer, record_at)?;
                 self.phase = Phase::Trailer {
                     footer_at: record_at,
                     footer: Box::new(footer),
@@ -464,9 +683,41 @@ impl Reader {
         }))
     }
 
-    /// The footer says what the records said: the declaration, the blocks and the overview
-    /// blocks where they were read, and the gaps and runs that lie inside the recording.
-    fn check_footer(&mut self, footer: &Footer) -> Result<(), DecodeError> {
+    /// A page record: the one due in its table, or its next last page.
+    fn page(&mut self, head: PageHead, record: &[u8], at: u64) -> Result<(), DecodeError> {
+        let c = head.channel as usize;
+        let unexpected = || corrupt("a page record that no table's entries give");
+        match head.table {
+            0 => self
+                .blocks
+                .get_mut(c)
+                .ok_or_else(unexpected)?
+                .page(record, at, head.count, 0),
+            1 => {
+                let (_, follow) = self
+                    .levels
+                    .get_mut(c)
+                    .and_then(|l| l.by_shift.get_mut(&head.shift))
+                    .ok_or_else(unexpected)?;
+                follow.page(record, at, head.count, 0)
+            }
+            2 | 3 => match (self.channels.get_mut(c), head.table) {
+                (Some(Channel::Digital { list, .. }), 2) => {
+                    list.page(record, at, head.count, INLINE_LIST as u64)
+                }
+                (Some(Channel::Analog { list, .. }), 3) => {
+                    list.page(record, at, head.count, INLINE_LIST as u64)
+                }
+                _ => Err(unexpected()),
+            },
+            _ => Err(unexpected()),
+        }
+    }
+
+    /// The footer says what the records said: the declaration, each channel's blocks and its
+    /// index, each level's overview blocks and its index, the gaps and runs that lie inside the
+    /// recording, and the annotation bundle where it was read.
+    fn check_footer(&mut self, footer: &Footer, footer_at: u64) -> Result<(), DecodeError> {
         let h = &footer.header;
         let d = self
             .declaration
@@ -481,7 +732,11 @@ impl Reader {
             && h.meta == d.meta
             && h.overview_shift == d.overview_shift
             && sources == d.sources
-            && h.derived == d.derived
+            && h.derived.len() == d.derived.len()
+            && h.derived
+                .iter()
+                .zip(&d.derived)
+                .all(|(h, d)| h.declared() == *d)
             && h.channels.len() == d.channels.len()
             && h.channels
                 .iter()
@@ -490,178 +745,241 @@ impl Reader {
         if !declared {
             return Err(corrupt("the footer's header differs from the declaration"));
         }
-        if footer.rows != self.rows || footer.words != self.words || self.next_start != h.length {
-            return Err(corrupt("the footer's index differs from the blocks"));
+        if self.known.is_some_and(|k| k > h.length) {
+            return Err(corrupt("a known-through record lies past the length"));
         }
-        let mut seen = std::mem::take(&mut self.overview_seen);
-        seen.sort_by_key(|&(shift, k, ..)| (shift, k));
-        let listed = h
-            .overview_blocks
-            .iter()
-            .zip(&footer.overview_rows)
-            .flat_map(|(l, rows)| {
-                rows.iter()
-                    .enumerate()
-                    .map(move |(k, r)| (l.shift, k as u64, r.offset, r.length))
-            });
-        if !seen.iter().copied().eq(listed) {
+        if footer.bundle != self.bundle
+            || self
+                .bundle
+                .is_some_and(|(at, len)| at + u64::from(len) != footer_at)
+        {
             return Err(corrupt(
-                "the footer's overview blocks differ from those read",
+                "the footer's annotation bundle differs from the one read",
             ));
         }
-        for ((state, c), i) in self.channels.iter().zip(&h.channels).zip(0..) {
-            let fits = match (state, &c.data) {
+        let differs = |c: usize, what: &str| {
+            corrupt(format!(
+                "channel {c}: the footer's {what} differs from what was read"
+            ))
+        };
+        for (c, ch) in h.channels.iter().enumerate() {
+            if self.next_start[c] != h.length || self.blocks[c].table.count() != ch.blocks {
+                return Err(differs(c, "blocks"));
+            }
+            let top = self.blocks[c].top(0)?;
+            if top != footer.channels[c].blocks.as_ref().map(top_of) {
+                return Err(differs(c, "block index"));
+            }
+            let fits = match (&mut self.channels[c], &ch.data) {
                 // A gap left out of the header reaches its channel's end, which is then at its
                 // `from` or sooner; a repaired file's can end inside the length its marks gave.
                 (
-                    Channel::Digital { gaps, .. },
+                    Channel::Digital {
+                        gaps, edges, list, ..
+                    },
                     ChannelKind::Digital {
-                        gaps: kept, end, ..
+                        gaps: kept,
+                        gap_count,
+                        end,
+                        edges: e,
+                        ..
                     },
                 ) => {
-                    gaps.starts_with(kept)
-                        && gaps[kept.len()..].first().is_none_or(|g| g.from >= *end)
+                    let n = gap_count.unwrap_or(kept.len() as u64) as usize;
+                    // A paged list's pages were each held to the records' gaps as they came.
+                    let prefix = gap_count.is_some() || gaps.starts_with(kept);
+                    let rest_past = gaps
+                        .get(n..)
+                        .is_some_and(|r| r.first().is_none_or(|g| g.from >= *end));
+                    let top = list.top(INLINE_LIST as u64)?;
+                    let stated = footer.channels[c].list.as_ref().map(top_of);
+                    *edges == *e && prefix && rest_past && top == stated
                 }
                 (
-                    Channel::Analog { runs, .. },
+                    Channel::Analog {
+                        runs,
+                        next_index,
+                        list,
+                        ..
+                    },
                     ChannelKind::Analog {
                         first,
                         count,
                         breaks,
+                        break_count,
+                        lost_before,
                         ..
                     },
                 ) => {
                     let kept: Vec<Break> =
                         runs.iter().copied().filter(|r| r.index < *count).collect();
-                    match kept.split_first() {
-                        Some((r, rest)) => r.tick == *first && rest == breaks.as_slice(),
-                        None => *count == 0 && breaks.is_empty(),
-                    }
+                    let runs_fit = match kept.split_first() {
+                        Some((r, rest)) => {
+                            r.tick == *first
+                                && r.lost == *lost_before
+                                && match break_count {
+                                    None => rest == breaks.as_slice(),
+                                    Some(n) => rest.len() as u64 == *n,
+                                }
+                        }
+                        None => *count == 0 && breaks.is_empty() && break_count.is_none(),
+                    };
+                    let top = list.top(INLINE_LIST as u64)?;
+                    let stated = footer.channels[c].list.as_ref().map(top_of);
+                    *next_index == *count && runs_fit && top == stated
                 }
                 _ => false,
             };
             if !fits {
-                return Err(corrupt(format!(
-                    "channel {i}: the footer's gaps or runs differ from those read"
-                )));
+                return Err(differs(c, "gaps or runs"));
+            }
+        }
+        for (o, index) in footer.channels.iter().enumerate() {
+            let levels = &mut self.levels[o];
+            if levels.by_shift.len() != index.levels.len() {
+                return Err(differs(o, "overview levels"));
+            }
+            for (level, table) in &index.levels {
+                let Some((k, follow)) = levels.by_shift.get_mut(&level.shift) else {
+                    return Err(differs(o, "overview levels"));
+                };
+                let top = follow.top(0)?;
+                if *k != level.blocks
+                    || follow.table.count() != level.rows
+                    || top != Some(top_of(table))
+                {
+                    return Err(differs(o, "overview levels"));
+                }
             }
         }
         Ok(())
     }
 
     fn block(&mut self, payload: &[u8], record_at: u64) -> Result<ReadBlock, DecodeError> {
-        let channels = self.channels.len();
         let (head, frame) =
-            BlockHead::parse(payload, channels).ok_or_else(|| corrupt("a block record's size"))?;
-        let i = self.rows.len();
-        if head.start != self.next_start || head.end <= head.start {
-            return Err(corrupt(format!("block {i} is out of place")));
+            BlockHead::parse(payload).ok_or_else(|| corrupt("a block record's size"))?;
+        let c = head.channel as usize;
+        if c >= self.channels.len() {
+            return Err(corrupt(format!("a block names channel {c}, past the last")));
+        }
+        if head.start != self.next_start[c] || head.end <= head.start {
+            return Err(corrupt(format!(
+                "channel {c}: a block from {} to {} is out of place",
+                head.start, head.end
+            )));
         }
         let raw = inflate_limited(frame, head.decoded_length as usize, self.max)?;
-        let sections: Vec<Section> = self
-            .channels
-            .iter()
-            .map(|c| match c {
-                Channel::Digital { start, map, .. } => Section::Digital {
-                    start: *start,
-                    end: i64::MAX,
-                    map: *map,
+        let section = match &self.channels[c] {
+            Channel::Digital { start, map, .. } => Section::Digital {
+                start: *start,
+                end: i64::MAX,
+                map: *map,
+            },
+            Channel::Analog {
+                next_index, coding, ..
+            } => Section::Analog {
+                coding: *coding,
+                first_index: *next_index,
+            },
+        };
+        let data = decode_section(&raw, &section, head.word, head.start, head.end)
+            .map_err(|what| corrupt(format!("channel {c}, the block at {}: {what}", head.start)))?;
+        let known = self.known.unwrap_or(i64::MIN);
+        let bad = |what: &str| corrupt(format!("channel {c}, the block at {}: {what}", head.start));
+        match (&mut self.channels[c], &data) {
+            (
+                Channel::Digital {
+                    level,
+                    last_edge,
+                    edges: seen,
+                    gaps,
+                    pending,
+                    ..
                 },
-                Channel::Analog {
-                    next_index, coding, ..
-                } => Section::Analog {
-                    coding: *coding,
-                    first_index: *next_index,
-                },
-            })
-            .collect();
-        let decoded = decode_sections(&raw, &sections, &head.words, head.start, head.end)
-            .map_err(|what| corrupt(format!("block {i}: {what}")))?;
-        for (c, (state, got)) in self.channels.iter_mut().zip(&decoded).enumerate() {
-            let bad = |what: &str| corrupt(format!("block {i}, channel {c}: {what}"));
-            match (state, got) {
-                (
-                    Channel::Digital {
-                        level,
-                        last_edge,
-                        edges: seen,
-                        gaps,
-                        pending,
-                        ..
-                    },
-                    BlockChannel::Digital { initial, .. },
-                ) => {
-                    let edges = got.source_ticks().unwrap_or_default();
-                    // Gap ends before this block's start have taken effect.
-                    while let Some(&(g, _)) = pending.front().filter(|&&(_, t)| t < head.start) {
-                        *level = g.level;
-                        pending.pop_front();
-                    }
-                    if *initial != *level {
-                        return Err(bad("the block starts at the wrong level"));
-                    }
-                    if edges.first().is_some_and(|&t| t < *last_edge) {
-                        return Err(bad("an edge comes before the last one"));
-                    }
-                    if edge_in_gap(edges, gaps).is_some() {
-                        return Err(bad("an edge lies inside a gap"));
-                    }
-                    let ending: Vec<Gap> = pending
-                        .iter()
-                        .take_while(|&&(_, t)| t < head.end)
-                        .map(|&(g, _)| g)
-                        .collect();
-                    *level = level_after(*initial, edges, &ending);
-                    pending.drain(..ending.len());
-                    if let Some(&t) = edges.last() {
-                        *last_edge = t;
-                    }
-                    *seen += edges.len() as u64;
+                BlockChannel::Digital { initial, edges, .. },
+            ) => {
+                let source = data.source_ticks().unwrap_or_default();
+                // Gap ends before this block's start have taken effect.
+                while let Some(&(g, _)) = pending.front().filter(|&&(_, t)| t < head.start) {
+                    *level = g.level;
+                    pending.pop_front();
                 }
-                (
-                    Channel::Analog {
-                        next_index,
-                        runs,
-                        period,
-                        map,
-                        ..
-                    },
-                    BlockChannel::Analog { values, .. },
-                ) => {
-                    let n = values.len() as u64;
-                    if n > 0 {
-                        let (from, to) = (*next_index, *next_index + n - 1);
-                        let Some(first) = runs.first().filter(|r| r.index == 0) else {
-                            return Err(bad("a sample before the channel's first run"));
-                        };
-                        let tick = |index| {
-                            on_axis(map, run_sample_tick(first.tick, *period, &runs[1..], index))
-                        };
-                        if tick(from).is_none_or(|t| t < head.start)
-                            || tick(to).is_none_or(|t| t >= head.end)
-                        {
-                            return Err(bad("the samples lie outside the block's ticks"));
-                        }
-                    }
-                    *next_index += n;
+                if *initial != *level {
+                    return Err(bad("the block starts at the wrong level"));
                 }
-                _ => unreachable!("sections follow the channels"),
+                if source.first().is_some_and(|&t| t < *last_edge) {
+                    return Err(bad("an edge comes before the last one"));
+                }
+                if edges.first().is_some_and(|&t| t < known) {
+                    return Err(bad("an edge lies before the latest known-through tick"));
+                }
+                if edge_in_gap(source, gaps).is_some() {
+                    return Err(bad("an edge lies inside a gap"));
+                }
+                let ending: Vec<Gap> = pending
+                    .iter()
+                    .take_while(|&&(_, t)| t < head.end)
+                    .map(|&(g, _)| g)
+                    .collect();
+                *level = level_after(*initial, source, &ending);
+                pending.drain(..ending.len());
+                if let Some(&t) = source.last() {
+                    *last_edge = t;
+                }
+                *seen += source.len() as u64;
             }
+            (
+                Channel::Analog {
+                    next_index,
+                    runs,
+                    period,
+                    map,
+                    ..
+                },
+                BlockChannel::Analog { values, .. },
+            ) => {
+                let n = values.len() as u64;
+                if n > 0 {
+                    let (from, to) = (*next_index, *next_index + n - 1);
+                    let Some(first) = runs.first().filter(|r| r.index == 0) else {
+                        return Err(bad("a sample before the channel's first run"));
+                    };
+                    let tick = |index| {
+                        on_axis(map, run_sample_tick(first.tick, *period, &runs[1..], index))
+                    };
+                    if tick(from).is_none_or(|t| t < head.start.max(known))
+                        || tick(to).is_none_or(|t| t >= head.end)
+                    {
+                        return Err(bad(
+                            "the samples lie outside the block's ticks, or before the latest \
+                             known-through tick",
+                        ));
+                    }
+                }
+                *next_index += n;
+            }
+            _ => unreachable!("sections follow the channels"),
         }
-        self.next_start = head.end;
-        let frame_offset = record_at + (record::PAYLOAD_AT + BlockHead::len(channels)) as u64;
-        self.rows.push(BlockRow {
+        self.next_start[c] = head.end;
+        let frame_offset = record_at + (record::PAYLOAD_AT + BlockHead::LEN) as u64;
+        self.blocks[c].push(BlockRow {
             start: head.start,
             offset: frame_offset,
             length: frame.len() as u32,
             decoded_length: head.decoded_length,
-        });
-        self.words.push(&head.words);
+            word: head.word,
+        })?;
         Ok(ReadBlock {
             frame_offset,
             frame_len: frame.len() as u32,
             head,
-            channels: decoded,
+            data,
         })
     }
+}
+
+/// A finished table's depth and top-index entries.
+fn top_of(t: &crate::index::TableIndex) -> (u8, Vec<crate::index::Entry>) {
+    let depth = t.levels.len() - 1;
+    (depth as u8, t.levels[depth].clone())
 }

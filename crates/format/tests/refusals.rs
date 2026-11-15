@@ -2,7 +2,7 @@
 //! than their coding, and headers whose extents leave the capture.
 
 use escapement_tickwave_format::decode::{
-    DecodeError, Footer, MAX_DECODED, inflate, inflate_limited,
+    DecodeError, Footer, Index, MAX_DECODED, inflate, inflate_limited,
 };
 use escapement_tickwave_format::encode::{Options, encode};
 use escapement_tickwave_format::header::AnalogCoding;
@@ -12,7 +12,7 @@ use escapement_tickwave_format::model::{
 use zstd::zstd_safe::CParameter;
 
 mod common;
-use common::{patched, refooted, word_at};
+use common::{patched, rows_edited};
 
 /// Bytes zstd cannot shrink, so it stores them in a raw block: a flipped byte changes the content
 /// without breaking the frame, and only the checksum can catch it.
@@ -164,6 +164,8 @@ fn analog(coding_bits: Option<u8>, values: Vec<f32>) -> (Recording, Options) {
                     period: Ratio::integer(100_000_000).unwrap(),
                     count,
                     breaks: Vec::new(),
+                    lost_before: 0,
+                    lost_after: 0,
                     samples: Samples::F32(Box::new(values.into_iter())),
                 }),
                 shaping: Default::default(),
@@ -196,11 +198,7 @@ fn a_code_wider_than_its_coding_is_refused() {
     values.push(40_000.0);
     let (rec, options) = analog(Some(16), values);
     let file = encode(rec, &options).unwrap();
-    let decode = |file: &[u8]| {
-        let head = Footer::parse_file(file)?;
-        let (offset, len) = head.block_location(0);
-        head.decode_block(0, &file[offset as usize..][..len as usize])
-    };
+    let decode = |file: &[u8]| Index::of_file(file)?.block_in(file, 1, 0);
     decode(&file).unwrap();
     let narrowed = patched(&file, r#""bits":16"#, r#""bits":12"#);
     let err = decode(&narrowed).expect_err("refused");
@@ -251,15 +249,11 @@ fn a_block_starting_at_the_wrong_level_is_refused() {
         },
     )
     .unwrap();
-    let head = Footer::parse_file(&file).unwrap();
-    assert!(head.rows.len() > 2);
-    for block in [0, head.rows.len() - 1] {
-        let bad = refooted(&file, |footer| {
-            let at = word_at(footer, 2, block, 0);
-            let word = u32::from_le_bytes(footer[at..at + 4].try_into().unwrap()) ^ LEVEL_BIT;
-            footer[at..at + 4].copy_from_slice(&word.to_le_bytes());
-        });
-        let err = Footer::parse_file(&bad).expect_err("refused");
+    let blocks = Index::of_file(&file).unwrap().blocks[0].len();
+    assert!(blocks >= 2);
+    for block in [0, blocks - 1] {
+        let bad = rows_edited(&file, 0, |rows| rows[block].word ^= LEVEL_BIT);
+        let err = Index::of_file(&bad).expect_err("refused");
         assert!(
             err.to_string()
                 .contains(&format!("block {block} starts at the wrong level")),
@@ -307,15 +301,12 @@ fn a_file_without_its_trailer_last_is_refused() {
 fn a_block_past_the_index_is_refused() {
     let (rec, options) = analog(None, vec![1.0; 10]);
     let file = encode(rec, &options).unwrap();
-    let head = Footer::parse_file(&file).unwrap();
-    let n = head.rows.len();
-    let err = head.decode_block(n, &[]).expect_err("refused");
+    let index = Index::of_file(&file).unwrap();
+    let n = index.blocks[1].len();
+    let err = index.block_in(&file, 1, n).expect_err("refused");
     assert!(err.to_string().contains(&format!("no block {n}")), "{err}");
-    let levels = head.overview_rows.len();
-    let err = head
-        .decode_overview_block(levels, 0, &[])
-        .expect_err("refused");
-    assert!(err.to_string().contains("no overview block"), "{err}");
+    let err = index.overview_in(&file, 1, 0, 0).expect_err("refused");
+    assert!(err.to_string().contains("no row 0"), "{err}");
 }
 
 #[test]
@@ -335,13 +326,19 @@ fn a_frame_said_to_decode_past_the_limit_is_refused_before_anything_is_allocated
         err.to_string().contains("more than this reader holds"),
         "{err}"
     );
-    // A footer whose overview needs more than the reader is set to hold.
+    // A strip that decodes to more than the reader is set to hold.
     let (rec, options) = analog(None, vec![1.0; 10]);
     let file = encode(rec, &options).unwrap();
-    assert!(Footer::parse_file_limited(&file, MAX_DECODED).is_ok());
-    let err = Footer::parse_file_limited(&file, 16).expect_err("refused");
+    let head = Footer::parse_file(&file).unwrap();
+    // V's strip is one bucket, 16 bytes: an f32 minimum and maximum and an f64 sum.
+    let limited = |f: &[u8], n: usize| inflate_limited(f, n, 15);
     assert!(
-        err.to_string().contains("more than this reader holds (16)"),
+        head.strip_with(0, limited).is_ok(),
+        "a digital strip of a few bytes"
+    );
+    let err = head.strip_with(1, limited).expect_err("refused");
+    assert!(
+        err.to_string().contains("more than this reader holds (15)"),
         "{err}"
     );
 }
@@ -461,33 +458,30 @@ fn an_index_that_moves_samples_out_of_their_block_is_refused() {
     let (rec, mut options) = analog(None, (0..10).map(|i| i as f32).collect());
     options.block_bytes = 16;
     let file = encode(rec, &options).unwrap();
-    let head = Footer::parse_file(&file).unwrap();
-    assert!(head.rows.len() > 2, "{} blocks", head.rows.len());
-    // The analog channel's word, channel 1, in each of the first two rows: one sample moves from
-    // block 1 to block 0, so the counts still add up to the header's.
-    let bad = refooted(&file, |footer| {
-        let word = |footer: &[u8], i: usize| {
-            let at = word_at(footer, 2, i, 1);
-            (
-                at,
-                u32::from_le_bytes(footer[at..at + 4].try_into().unwrap()),
-            )
-        };
-        let (at0, w0) = word(footer, 0);
-        let (at1, w1) = word(footer, 1);
-        assert!(w1 > 0);
-        footer[at0..at0 + 4].copy_from_slice(&(w0 + 1).to_le_bytes());
-        footer[at1..at1 + 4].copy_from_slice(&(w1 - 1).to_le_bytes());
+    let index = Index::of_file(&file).unwrap();
+    assert!(
+        index.blocks[1].len() > 2,
+        "{} blocks",
+        index.blocks[1].len()
+    );
+    // The analog channel's word in each of the first two rows: one sample moves from block 1 to
+    // block 0, so the counts still add up to the header's.
+    let bad = rows_edited(&file, 1, |rows| {
+        assert!(rows[1].word > 0);
+        rows[0].word += 1;
+        rows[1].word -= 1;
     });
-    let err = Footer::parse_file(&bad).expect_err("refused");
+    let err = Index::of_file(&bad).expect_err("refused");
     assert!(
         err.to_string().contains("samples lie outside its ticks"),
         "{err}"
     );
 }
 
+/// A channel never known, its end at its start, keeps its declared `initial`, which says
+/// nothing of a level: either is written and read.
 #[test]
-fn a_channel_never_known_has_a_low_initial_level() {
+fn a_channel_never_known_keeps_its_declared_initial_level() {
     let never = |initial: bool| {
         let (mut rec, options) = analog(None, vec![0.0; 11]);
         rec.channels.push(Channel {
@@ -505,25 +499,18 @@ fn a_channel_never_known_has_a_low_initial_level() {
         });
         (rec, options)
     };
-    let (rec, options) = never(true);
-    assert_eq!(
-        encode(rec, &options).expect_err("refused").to_string(),
-        "N: never known, so its initial level is false"
-    );
-    let (rec, options) = never(false);
-    let file = encode(rec, &options).unwrap();
-    Footer::parse_file(&file).unwrap();
-    let bad = patched(
-        &file,
-        r#""initial":false,"end":0,"#,
-        r#""initial":true ,"end":0,"#,
-    );
-    let err = Footer::parse_file(&bad).expect_err("refused");
-    assert!(
-        err.to_string()
-            .contains("never known but has a high initial level"),
-        "{err}"
-    );
+    for initial in [false, true] {
+        let (rec, options) = never(initial);
+        let file = encode(rec, &options).unwrap();
+        let h = Footer::parse_file(&file).unwrap().header;
+        let n = h.channels.iter().find(|c| c.name == "N").unwrap();
+        assert!(
+            matches!(n.data, escapement_tickwave_format::header::ChannelKind::Digital { initial: i, end: 0, edges: 0, .. } if i == initial),
+            "{:?}",
+            n.data
+        );
+        escapement_tickwave_format::verify::verify(&file[..], never(initial).0).unwrap();
+    }
 }
 
 /// The analog recording's file with its length or channel C's end one tick shorter, so that
@@ -558,18 +545,17 @@ fn an_item_at_the_length_or_the_end_is_refused() {
     );
 
     // C's second edge, at 10^9, starts a block of its own.
-    let err = Footer::parse_file(&shortened(1, 1, length, shorter)).expect_err("refused");
+    let err = Index::of_file(&shortened(1, 1, length, shorter)).expect_err("refused");
     assert!(
-        err.to_string().contains("block 1's row is out of place"),
+        err.to_string().contains("a block starts past the length"),
         "{err}"
     );
 
     // The same edge at C's end, in a capture that still covers it.
     let file = shortened(1, 1 << 20, length, length);
-    let head = Footer::parse_file(&file).unwrap();
-    let (offset, len) = head.block_location(0);
-    let err = head
-        .decode_block(0, &file[offset as usize..][..len as usize])
+    let err = Index::of_file(&file)
+        .unwrap()
+        .block_in(&file, 0, 0)
         .expect_err("refused");
     assert!(
         err.to_string()
@@ -600,6 +586,7 @@ fn a_float_the_declaration_s_json_cannot_hold_is_refused() {
                 significant: None,
             },
             shaping: Default::default(),
+            overview_shift: None,
         }],
         derived: Vec::new(),
         sources: vec![SourceHeader {
@@ -657,6 +644,7 @@ fn an_annotation_its_bundle_would_not_resolve_is_refused_at_the_call() {
         source: 0,
         data,
         shaping: Default::default(),
+        overview_shift: None,
     };
     let d = Declaration {
         timebase: Ratio::ONE,
@@ -682,6 +670,7 @@ fn an_annotation_its_bundle_would_not_resolve_is_refused_at_the_call() {
         overview_shift: 10,
     };
     let mut w = Writer::new(d, WriteOptions::default()).unwrap();
+    let start = w.take_output();
     let mut take = |source: &str, line: serde_json::Value| -> Result<(), String> {
         let serde_json::Value::Object(m) = line else {
             unreachable!()
@@ -760,8 +749,15 @@ fn an_annotation_its_bundle_would_not_resolve_is_refused_at_the_call() {
         bundle: Some(Bundle::Generated { stem: "rec".into() }),
         ..Finish::default()
     };
-    let header = w.finish(5, &[5], finish).unwrap().header;
-    let files = header.annotations.clone().unwrap();
+    let finished = w.finish(5, &[5], finish).unwrap();
+    let header = finished.header;
+    let mut file = start;
+    file.extend(finished.tail);
+    let files = Footer::parse_file(&file)
+        .unwrap()
+        .read_bundle(escapement_tickwave_format::decode::from_memory(&file))
+        .unwrap()
+        .unwrap();
     let included: Vec<_> = files
         .iter()
         .filter(|(name, _)| name.ends_with(".jsonl"))
@@ -771,4 +767,32 @@ fn an_annotation_its_bundle_would_not_resolve_is_refused_at_the_call() {
     let spans: Vec<_> = resolved.iter().map(|a| (a.id.as_str(), a.end)).collect();
     // The span past the length ends there.
     assert_eq!(spans, [("other/m/1", Some(5)), ("verge/m/1", None)]);
+}
+
+/// Bundling takes the footer record its footer was parsed from: one too short for its lengths, or
+/// whose header length runs past it, is refused, not read past its end.
+#[test]
+fn bundling_a_record_that_is_not_the_footers_is_refused() {
+    use escapement_tickwave_format::bundle::bundled_tail;
+    use escapement_tickwave_format::record;
+    let (rec, options) = analog(None, vec![0.0; 11]);
+    let file = encode(rec, &options).unwrap();
+    let footer = Footer::parse_file(&file).unwrap();
+    let files: std::collections::BTreeMap<String, String> =
+        [("a.annotations.toml".to_string(), String::new())].into();
+    for payload in [vec![1, 2], [u32::MAX.to_le_bytes(), [0; 4]].concat()] {
+        let mut wrong = Vec::new();
+        record::write_footer(&mut wrong, 0, &payload);
+        let record = &wrong[..wrong.len() - 24];
+        let err = bundled_tail(record, &footer, files.clone(), 3).expect_err("refused");
+        assert_eq!(
+            err.to_string(),
+            "the footer record is not the one its footer was parsed from",
+            "{payload:?}"
+        );
+    }
+    // The right record bundles.
+    let at = footer.trailer.footer_offset as usize;
+    let record = &file[at..at + footer.trailer.footer_len as usize];
+    bundled_tail(record, &footer, files, 3).unwrap();
 }

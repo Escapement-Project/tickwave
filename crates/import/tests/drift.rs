@@ -140,3 +140,43 @@ fn markers_whose_periods_differ_by_more_than_a_percent_are_not_compared() {
     // One source alone has no drift, and reads no block for it.
     assert_eq!(drifts(a), []);
 }
+
+/// What the drift would read is the blocks of the channels it compares: a third source's channel
+/// of two edges, too few to fit, adds none of its own.
+#[test]
+fn what_the_drift_would_read_is_its_channels_blocks_alone() {
+    use escapement_tickwave_format::decode::{BlockChannel, Index};
+    let a = marker("A", 1_000_000, 0.0, &|_| 0, &|_| false);
+    let b = marker("B", 2_000_000, 1_000.0, &|_| 0, &|_| false);
+    // Two rises at 1 MHz, as a marker that fired once.
+    let c = marker("C", 1_000_000, 0.0, &|_| 0, &|k| k > 1);
+    let file = merged(&[a, b, c], vec![]);
+    let index = Index::of_file(&file).unwrap();
+    let edges: Vec<usize> = (0..3)
+        .map(|ch| {
+            index
+                .channel_blocks(&file, ch)
+                .unwrap()
+                .iter()
+                .map(|b| match &b.data {
+                    BlockChannel::Digital { edges, .. } => edges.len(),
+                    BlockChannel::Analog { .. } => 0,
+                })
+                .sum()
+        })
+        .collect();
+    assert_eq!(edges, [400, 400, 2]);
+    let found = drift::candidates(&index).unwrap();
+    let blocks = |ch: usize| index.blocks[ch].len();
+    let bytes = |ch: usize| -> u64 {
+        index.blocks[ch]
+            .iter()
+            .map(|b| u64::from(b.row.length))
+            .sum()
+    };
+    assert_eq!(
+        (found.channels, found.blocks, found.bytes),
+        (2, blocks(0) + blocks(1), bytes(0) + bytes(1))
+    );
+    assert!(blocks(2) > 0);
+}

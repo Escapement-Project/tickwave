@@ -154,7 +154,8 @@ pub struct Digital {
     pub initial: bool,
     /// A source tick: the level is known from the channel's start to `end`, which maps to the
     /// recording's length or before it. A source can stop knowing one channel before another. At
-    /// the start the level is never known, and `initial` is false.
+    /// the start the level is never known, and `initial` is the declaration's, which says nothing
+    /// of the level.
     pub end: i64,
     /// Source ticks at which the level flips, in order, each in the channel's start to `end`. Two
     /// can share a tick: a pulse the source stamped with one time. The VCD reader collapses
@@ -180,6 +181,10 @@ pub struct Analog {
     pub count: u64,
     /// Where the samples start again after a stop, in order, each index in `1..count`.
     pub breaks: Vec<Break>,
+    /// Samples the instrument lost before the first and after the last, 0 for none
+    /// (FORMAT.md, "Gaps").
+    pub lost_before: u64,
+    pub lost_after: u64,
     /// At most this many significant figures in a reading, where the source says so.
     pub significant: Option<u8>,
     pub samples: Samples,
@@ -431,6 +436,8 @@ impl fmt::Debug for Analog {
             .field("period", &self.period)
             .field("count", &self.count)
             .field("breaks", &self.breaks)
+            .field("lost_before", &self.lost_before)
+            .field("lost_after", &self.lost_after)
             .field("significant", &self.significant)
             .finish_non_exhaustive()
     }

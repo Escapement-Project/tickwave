@@ -73,8 +73,12 @@ fn header() -> Header {
             end: 1_000_000,
             edges: 10,
             gaps: Vec::new(),
+            gap_count: None,
         },
         shaping: Default::default(),
+        overview_shift: None,
+        blocks: 1,
+        overview_blocks: Vec::new(),
     };
     Header {
         timebase: Ratio::integer(1_000_000_000).unwrap(),
@@ -88,11 +92,7 @@ fn header() -> Header {
         title: None,
         meta: Default::default(),
         content_id: ID.parse().unwrap(),
-        blocks: 1,
         overview_shift: 12,
-        overview: vec![12],
-        overview_blocks: vec![],
-        annotations: None,
     }
 }
 

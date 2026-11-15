@@ -80,6 +80,7 @@ fn declaration(period: u64) -> Declaration {
             significant: Some(4),
         },
         shaping: Default::default(),
+        overview_shift: None,
     };
     let digital = |name: &str| DeclaredChannel {
         name: name.into(),
@@ -87,6 +88,7 @@ fn declaration(period: u64) -> Declaration {
         source: 0,
         data: DeclaredKind::Digital { initial: false },
         shaping: Default::default(),
+        overview_shift: None,
     };
     Declaration {
         timebase,
@@ -258,7 +260,8 @@ pub fn start(
         WriteOptions {
             level: 16,
             block_bytes: 1 << 20,
-            batch: 1,
+            promise_with_items: true,
+            ..WriteOptions::default()
         },
     )
     .map_err(|e| e.to_string())?;

@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use escapement_tickwave_format::decode::{BlockChannel, Footer};
+use escapement_tickwave_format::decode::{BlockChannel, Index};
 use escapement_tickwave_format::header::{ChannelKind, Header};
 
 use crate::input::Input;
@@ -148,8 +148,8 @@ fn wanted(header: &Header) -> Option<Vec<bool>> {
     sources.any(|s| s != first).then_some(wanted)
 }
 
-/// What measuring the drift would read: the channels it compares, and the blocks it decodes,
-/// every one, since a block holds every channel.
+/// What measuring the drift would read: the channels it compares, and their blocks, which it
+/// decodes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Candidates {
     pub channels: usize,
@@ -158,45 +158,51 @@ pub struct Candidates {
     pub bytes: u64,
 }
 
-/// What `of_footer` would read of the recording `footer` ends, from the footer alone; None where
+/// What `of_index` would read of the recording `index` places, from the index alone; None where
 /// it would read nothing.
-pub fn candidates(footer: &Footer) -> Option<Candidates> {
-    let wanted = wanted(&footer.header)?;
+pub fn candidates(index: &Index) -> Option<Candidates> {
+    let wanted = wanted(index.header())?;
+    let rows = || {
+        index
+            .blocks
+            .iter()
+            .zip(&wanted)
+            .filter(|(_, w)| **w)
+            .flat_map(|(b, _)| b)
+    };
     Some(Candidates {
         channels: wanted.iter().filter(|w| **w).count(),
-        blocks: footer.rows.len(),
-        bytes: footer.rows.iter().map(|r| u64::from(r.length)).sum(),
+        blocks: rows().count(),
+        bytes: rows().map(|b| u64::from(b.row.length)).sum(),
     })
 }
 
-/// The drift in the recording `input` holds, `footer` its footer. Only a recording of several
+/// The drift in the recording `input` holds, `index` its index. Only a recording of several
 /// sources has any, and only its digital channels of 3 to `MAX_EDGES` edges are read; with none
 /// such from two sources, no block is.
-pub fn of_footer(input: &dyn Input, footer: &Footer) -> Result<Vec<Drift>, Error> {
+pub fn of_index(input: &dyn Input, index: &Index) -> Result<Vec<Drift>, Error> {
+    let footer = &index.footer;
     let header = &footer.header;
     let Some(wanted) = wanted(header) else {
         return Ok(Vec::new());
     };
-    let mut rises: Vec<Option<Vec<i64>>> = wanted.iter().map(|&w| w.then(Vec::new)).collect();
-    // Each channel's level as its edges go by, and its next gap whose end sets it.
-    let mut next_gap = vec![0usize; header.channels.len()];
-    for i in 0..footer.rows.len() {
-        let block = recording::block(input, footer, i)?;
-        for (c, data) in block.iter().enumerate() {
-            let Some(out) = rises[c].as_mut() else {
-                continue;
-            };
-            let (BlockChannel::Digital { initial, edges, .. }, ChannelKind::Digital { gaps, .. }) =
-                (data, &header.channels[c].data)
-            else {
-                continue;
+    let mut rises: Vec<Option<Vec<i64>>> = vec![None; wanted.len()];
+    for c in (0..wanted.len()).filter(|&c| wanted[c]) {
+        let gaps = footer.gaps(c).expect("an index holds every list");
+        // The channel's level as its edges go by, and its next gap whose end sets it.
+        let mut next_gap = 0;
+        let mut out = Vec::new();
+        for b in &index.blocks[c] {
+            let data = recording::block(input, footer, c, b)?;
+            let BlockChannel::Digital { initial, edges, .. } = &data else {
+                unreachable!("a digital channel's blocks decode as digital")
             };
             let source = data.source_ticks().unwrap_or(edges);
             let mut level = *initial;
             for (&k, &t) in source.iter().zip(edges) {
-                while let Some(g) = gaps.get(next_gap[c]).filter(|g| g.to < k) {
+                while let Some(g) = gaps.get(next_gap).filter(|g| g.to < k) {
                     level = g.level;
-                    next_gap[c] += 1;
+                    next_gap += 1;
                 }
                 level = !level;
                 if level {
@@ -204,15 +210,17 @@ pub fn of_footer(input: &dyn Input, footer: &Footer) -> Result<Vec<Drift>, Error
                 }
             }
         }
+        rises[c] = Some(out);
     }
     Ok(drifts(header, &rises))
 }
 
-/// `of_footer` for the recording `input` holds, its footer read first.
+/// `of_index` for the recording `input` holds, its index read first.
 pub fn of_file(input: Arc<dyn Input>) -> Result<(Header, Vec<Drift>), Error> {
     let footer = recording::footer(&*input)?;
-    let drifts = of_footer(&*input, &footer)?;
-    Ok((footer.header, drifts))
+    let index = Index::read(footer, recording::fetch(&*input))?;
+    let drifts = of_index(&*input, &index)?;
+    Ok((index.footer.header, drifts))
 }
 
 #[cfg(test)]

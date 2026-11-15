@@ -51,6 +51,7 @@ fn recording() -> Vec<u8> {
         source: 0,
         data: DeclaredKind::Digital { initial: false },
         shaping: Default::default(),
+        overview_shift: None,
     };
     let declaration = Declaration {
         timebase,
@@ -69,6 +70,7 @@ fn recording() -> Vec<u8> {
                     significant: Some(4),
                 },
                 shaping: Default::default(),
+                overview_shift: None,
             },
             digital("DIO0"),
             digital("DIO1"),

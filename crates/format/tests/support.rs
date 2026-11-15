@@ -163,10 +163,10 @@ fn every_tick_of_a_run_is_covered_once() {
 fn the_energy_fixtures_loss_is_the_fifty_pairs_between_its_runs() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../web/fixtures/energy.tickwave");
     let footer = Footer::parse_file(&std::fs::read(path).unwrap()).unwrap();
+    let breaks = footer.breaks(0).unwrap();
     let ChannelKind::Analog {
         first,
         period,
-        breaks,
         count,
         ..
     } = &footer.header.channels[0].data

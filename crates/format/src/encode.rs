@@ -1,18 +1,17 @@
 //! The encoder: a `model::Recording` in, a file out through any `Write`. It merges the channels'
-//! items into axis order and hands them to a `Writer`, each in its source's ticks, so a capture
-//! larger than memory streams through.
+//! items into axis order and hands them to a `Writer`, each in its source's ticks and promising
+//! its tick, so a capture larger than memory streams through.
 
 use std::collections::BTreeMap;
 use std::io::Write;
 
-use crate::decode::overview_room;
 use crate::header::{AnalogCoding, Declaration, DeclaredChannel, DeclaredKind, SourceHeader};
 use crate::mapping::{self, Mapping, Spacing};
 use crate::model::{Break, ChannelData, Edges, Gap, Recording, Sample, Samples, run_sample_tick};
-use crate::overview;
 use crate::samples::coding_name;
 pub use crate::writer::{
-    Bundle, Finish, Finished, WriteError, WriteOptions, Writer, code_of, generator_file,
+    Bundle, Compression, Finish, Finished, WriteError, WriteOptions, Writer, code_of,
+    generator_file,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -38,12 +37,13 @@ pub enum EncodeError {
 }
 
 pub struct Options {
-    /// The zstd level for blocks and the overview.
+    /// The zstd level for blocks and the strips.
     pub level: i32,
-    /// The decoded size a block aims for.
+    /// The decoded size a channel's block aims for.
     pub block_bytes: usize,
-    /// How many blocks compress together; None for four a thread.
-    pub batch: Option<usize>,
+    /// Where frames are compressed: by default other threads, for throughput, and the caller's
+    /// in WASM, which has none to give.
+    pub compression: Compression,
     pub title: Option<String>,
     pub meta: BTreeMap<String, String>,
     /// The `converter` of every source that doesn't state one.
@@ -51,13 +51,13 @@ pub struct Options {
     /// A coding for each analog channel, by channel index. Absent or None stores the samples as
     /// their type has them; f32 samples can also go in `codes`.
     pub analog: Vec<Option<AnalogCoding>>,
-    /// The finest overview level's shift; None for the one the data's density gives
-    /// (`mapping::finest_shift`).
+    /// Every channel's finest overview level's shift; None for the one each channel's own
+    /// density gives (`mapping::finest_shift`).
     pub overview_shift: Option<u8>,
     /// Generated annotations to write, each with its generator's name; their times are axis
     /// ticks.
     pub annotations: Vec<(String, serde_json::Map<String, serde_json::Value>)>,
-    /// Bundle the annotations into the footer rather than handing them back.
+    /// Bundle the annotations into the file rather than handing them back.
     pub bundle: Option<Bundle>,
 }
 
@@ -66,7 +66,11 @@ impl Default for Options {
         Self {
             level: 19,
             block_bytes: 1 << 20,
-            batch: None,
+            compression: if cfg!(target_family = "wasm") {
+                Compression::Spread
+            } else {
+                Compression::Offload
+            },
             title: None,
             meta: BTreeMap::new(),
             converter: None,
@@ -96,6 +100,7 @@ enum Stream {
         first: i64,
         period: crate::model::Ratio,
         breaks: Vec<Break>,
+        lost_before: u64,
     },
 }
 
@@ -153,6 +158,7 @@ pub fn encode_to(
     let mut streams = Vec::with_capacity(channels.len());
     let mut names = Vec::with_capacity(channels.len());
     let mut ends = Vec::new();
+    let mut lost_after = BTreeMap::new();
     // Each channel's items, a digital one's as its iterator promises them, and a digital
     // channel's end: what the overview's density needs.
     let mut items = Vec::with_capacity(channels.len());
@@ -200,6 +206,9 @@ pub fn encode_to(
                     }
                 };
                 items.push((a.count, 0));
+                if a.lost_after > 0 {
+                    lost_after.insert(i, a.lost_after);
+                }
                 let mut samples = a.samples.into_samples();
                 let next = samples.next();
                 streams.push(Stream::Analog {
@@ -210,6 +219,7 @@ pub fn encode_to(
                     first: a.first,
                     period: a.period,
                     breaks: a.breaks,
+                    lost_before: a.lost_before,
                 });
                 DeclaredKind::Analog {
                     unit: a.unit,
@@ -226,6 +236,7 @@ pub fn encode_to(
             source: channel.source,
             data,
             shaping: channel.shaping,
+            overview_shift: None,
         });
     }
     let mut declaration = Declaration {
@@ -260,21 +271,27 @@ pub fn encode_to(
     let maps: Vec<Mapping> = (0..declaration.channels.len())
         .map(|c| declaration.mapping(c).unwrap_or(Mapping::IDENTITY))
         .collect();
-    declaration.overview_shift = options.overview_shift.unwrap_or_else(|| {
-        finest_kept(
-            length,
-            mapping::finest_shift(densest(&declaration, &maps, &items)),
-        )
-    });
-    let batch = options
-        .batch
-        .unwrap_or_else(|| 4 * rayon::current_num_threads().max(1));
+    match options.overview_shift {
+        Some(shift) => declaration.overview_shift = shift,
+        None => {
+            // Each channel's own shift; the recording's is the densest's, and a channel states
+            // its own where it differs.
+            let shifts: Vec<u8> = (0..declaration.channels.len())
+                .map(|c| mapping::finest_shift(spacing(&declaration, &maps, &items, c)))
+                .collect();
+            declaration.overview_shift = shifts.iter().copied().min().unwrap_or(62);
+            for (channel, shift) in declaration.channels.iter_mut().zip(shifts) {
+                channel.overview_shift = (shift != declaration.overview_shift).then_some(shift);
+            }
+        }
+    }
     let mut writer = Writer::new(
         declaration,
         WriteOptions {
             level: options.level,
             block_bytes: options.block_bytes,
-            batch,
+            promise_with_items: true,
+            compression: options.compression,
         },
     )?;
     for (source, annotation) in &options.annotations {
@@ -325,6 +342,7 @@ pub fn encode_to(
                 count,
                 first,
                 breaks,
+                lost_before,
                 ..
             } => {
                 let value = next.take().unwrap();
@@ -336,7 +354,7 @@ pub fn encode_to(
                     });
                 }
                 if *index == 0 {
-                    writer.run(c, *first, 0)?;
+                    writer.run(c, *first, *lost_before)?;
                 } else if let Ok(b) = breaks.binary_search_by_key(index, |b| b.index) {
                     writer.run(c, breaks[b].tick, breaks[b].lost)?;
                 }
@@ -366,6 +384,7 @@ pub fn encode_to(
         &ends,
         Finish {
             bundle: options.bundle.clone(),
+            lost_after,
             ..Finish::default()
         },
     )?;
@@ -374,39 +393,32 @@ pub fn encode_to(
     Ok(finished)
 }
 
-/// The densest channel's spacing in axis ticks (FORMAT.md, "Overview"): an analog channel's
-/// period times its source's `m`, a digital one's span from its start to its end over its edges.
-/// `items` holds each channel's count, which the encoder holds it to, and a digital channel's
-/// end. A channel with no item does not count.
-fn densest(declaration: &Declaration, maps: &[Mapping], items: &[(u64, i64)]) -> Option<Spacing> {
-    let spacings = declaration
-        .channels
-        .iter()
-        .zip(items)
-        .enumerate()
-        .filter(|(_, (_, (count, _)))| *count > 0)
-        .filter_map(|(c, (channel, &(count, end)))| match &channel.data {
-            DeclaredKind::Analog { period, .. } => {
-                let m = declaration.m(channel.source as usize)?;
-                Some(Spacing::of_samples(*period, m))
-            }
-            DeclaredKind::Digital { .. } => {
-                let start = declaration.start(c)?;
-                let span = maps[c].axis(end)?.checked_sub(maps[c].axis(start)?)?;
-                Spacing::of_edges(u64::try_from(span).ok()?, count)
-            }
-        });
-    Spacing::closest(spacings)
-}
-
-/// The finest overview level for a recording of `length`: the densest channel's, `dense`, or the
-/// least coarser one whose overview blocks tickwave keeps (`decode::MAX_OVERVIEW_BLOCKS`). The
-/// length is known here; a live writer, which learns it as it goes, refuses past the bound
-/// instead.
-fn finest_kept(length: i64, dense: u8) -> u8 {
-    (dense..overview::MAX_SHIFT)
-        .find(|&shift| overview_room(length, shift).is_ok())
-        .unwrap_or(overview::MAX_SHIFT)
+/// Channel `c`'s spacing in axis ticks (FORMAT.md, "Overview"): an analog channel's period times
+/// its source's `m`, a digital one's span from its start to its end over its edges. `items`
+/// holds each channel's count, which the encoder holds it to, and a digital channel's end. None
+/// for a channel with no item.
+pub fn spacing(
+    declaration: &Declaration,
+    maps: &[Mapping],
+    items: &[(u64, i64)],
+    c: usize,
+) -> Option<Spacing> {
+    let channel = declaration.channels.get(c)?;
+    let &(count, end) = items.get(c)?;
+    if count == 0 {
+        return None;
+    }
+    match &channel.data {
+        DeclaredKind::Analog { period, .. } => {
+            let m = declaration.m(channel.source as usize)?;
+            Some(Spacing::of_samples(*period, m))
+        }
+        DeclaredKind::Digital { .. } => {
+            let start = declaration.start(c)?;
+            let span = maps[c].axis(end)?.checked_sub(maps[c].axis(start)?)?;
+            Spacing::of_edges(u64::try_from(span).ok()?.max(1), count)
+        }
+    }
 }
 
 /// Encodes `recording` into memory.
@@ -414,25 +426,4 @@ pub fn encode(recording: Recording, options: &Options) -> Result<Vec<u8>, Encode
     let mut out = Vec::new();
     encode_to(recording, options, &mut out)?;
     Ok(out)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Where a recording's overview passes 2^20 blocks, counted by hand from FORMAT.md's levels:
-    /// at 2^10-tick buckets, 4,123,223,130,112 ticks is 4,026,585,088 buckets, 983,053 blocks,
-    /// and the levels at 2^14, 2^18 and 2^22 add 61,441, 3,841 and 241: 1,048,576. A tick more
-    /// starts block 983,054. Ten hours at 1 GHz needs 1,072,883 blocks at 2^13 alone, and
-    /// 572,197 in all at 2^14. The longest axis, 2^63 ticks, needs 2^20 at 2^31 before its
-    /// coarser levels, and 559,232 in all at 2^32.
-    #[test]
-    fn a_recording_past_the_overview_bound_takes_the_least_coarser_finest_level() {
-        const KEPT: i64 = 4_123_223_130_112;
-        assert_eq!(finest_kept(KEPT, 10), 10);
-        assert_eq!(finest_kept(KEPT + 1, 10), 11);
-        assert_eq!(finest_kept(KEPT + 1, 12), 12);
-        assert_eq!(finest_kept(36_000_000_000_000, 10), 14);
-        assert_eq!(finest_kept(i64::MAX, 0), 32);
-    }
 }

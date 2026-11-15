@@ -114,6 +114,7 @@ impl Capture {
                 significant: Some(4),
             },
             shaping: Default::default(),
+            overview_shift: None,
         };
         let digital = |name: &str| DeclaredChannel {
             name: name.into(),
@@ -121,6 +122,7 @@ impl Capture {
             source: 0,
             data: DeclaredKind::Digital { initial: false },
             shaping: Default::default(),
+            overview_shift: None,
         };
         let timebase = Ratio::integer(SECOND as u64).unwrap();
         let declaration = Declaration {
@@ -154,7 +156,8 @@ impl Capture {
             WriteOptions {
                 level: 1,
                 block_bytes: 1 << 16,
-                batch: 1,
+                promise_with_items: true,
+                ..WriteOptions::default()
             },
         )
         .unwrap();

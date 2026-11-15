@@ -194,19 +194,18 @@ impl Spacing {
     }
 }
 
-/// The items a bucket of the finest overview level aims to hold, for the densest channel.
-pub const ITEMS_A_BUCKET: u128 = 1024;
+/// The items a bucket of a channel's finest overview level aims to hold.
+pub const ITEMS_A_BUCKET: u128 = 64;
 
-/// The finest overview level's shift for the densest channel's spacing (FORMAT.md, "Overview"):
-/// the whole number nearest `log2(1,024 × t)`, held to `0..=62`. That is the `s` for which
-/// `(1,024 t)²` lies between `2^(2s − 1)` and `2^(2s + 1)`; no ratio falls on either bound. With
-/// no item at all, 62.
-pub fn finest_shift(densest: Option<Spacing>) -> u8 {
+/// A channel's finest overview level's shift for its spacing (FORMAT.md, "Overview"): the whole
+/// number nearest `log2(64 × t)`, held to `0..=62`. That is the `s` for which `(64 t)²` lies
+/// between `2^(2s − 1)` and `2^(2s + 1)`; no ratio falls on either bound. With no item at all, 62.
+pub fn finest_shift(spacing: Option<Spacing>) -> u8 {
     const MAX: i32 = crate::overview::MAX_SHIFT as i32;
-    let Some(t) = densest else {
+    let Some(t) = spacing else {
         return MAX as u8;
     };
-    // x = a / b with a = 1,024 × num, b = den; num and den are below 2^106 for every spacing the
+    // x = a / b with a = 64 × num, b = den; num and den are below 2^106 for every spacing the
     // format gives, and a ratio this far out still rounds right as long as a fits.
     let Some(a) = t.num.checked_mul(ITEMS_A_BUCKET) else {
         return MAX as u8;
@@ -337,27 +336,29 @@ mod tests {
         }
     }
 
-    /// The whole number nearest log2(1024 t), from f64, for spacings far from a rounding bound.
+    /// The whole number nearest log2(64 t), from f64, for spacings far from a rounding bound.
     fn by_float(t: Spacing) -> u8 {
-        let x = 1024.0 * t.num as f64 / t.den as f64;
+        let x = 64.0 * t.num as f64 / t.den as f64;
         x.log2().round().clamp(0.0, 62.0) as u8
     }
 
     #[test]
-    fn the_finest_shift_puts_about_1024_items_in_a_bucket() {
+    fn the_finest_shift_puts_about_64_items_in_a_bucket() {
         let s = |n, d| finest_shift(Spacing::new(n, d));
-        // verge's pair: 96,000 ticks at 96 MHz and 1 kHz: log2(98,304,000) = 26.55.
-        assert_eq!(s(96_000, 1), 27);
-        // A sample a tick: 2^10 exactly.
-        assert_eq!(s(1, 1), 10);
-        // The bound between 10 and 11 is 2^10.5 = 1448.15...: 1448/1024 rounds down, 1449 up.
-        assert_eq!(s(1448, 1024), 10);
-        assert_eq!(s(1449, 1024), 11);
-        // Below a 1,024th of a tick a bucket of one tick holds more.
-        assert_eq!(s(1, 4096), 0);
+        // verge's pair at 100 kHz on 150 MHz: 1,500 ticks, log2(96,000) = 16.55.
+        assert_eq!(s(1500, 1), 17);
+        // verge's pair: 96,000 ticks at 96 MHz and 1 kHz: log2(6,144,000) = 22.55.
+        assert_eq!(s(96_000, 1), 23);
+        // A sample a tick: 2^6 exactly.
+        assert_eq!(s(1, 1), 6);
+        // The bound between 6 and 7 is 2^6.5 = 90.50...: 90/64 rounds down, 91/64 up.
+        assert_eq!(s(90, 64), 6);
+        assert_eq!(s(91, 64), 7);
+        // Below a 64th of a tick a bucket of one tick holds more.
+        assert_eq!(s(1, 256), 0);
         assert_eq!(finest_shift(None), 62);
         // The same data at a timebase 8 times finer: three more.
-        assert_eq!(s(8 * 96_000, 1), 30);
+        assert_eq!(s(8 * 96_000, 1), 26);
         // Near the top of the terms the spacing can have.
         let big = (1u128 << 105) + 12345;
         assert_eq!(s(big, 1), 62);

@@ -7,9 +7,9 @@ use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::sync::Arc;
 
-use escapement_tickwave_format::decode::{BlockChannel, Footer, MAX_DECODED};
+use escapement_tickwave_format::decode::{BlockChannel, Footer, Index, MAX_DECODED, from_memory};
 use escapement_tickwave_format::encode::{Bundle, Options, encode};
-use escapement_tickwave_format::header::{ChannelKind, Header, Kept};
+use escapement_tickwave_format::header::{ChannelKind, DerivedHeader, Header, Kept};
 use escapement_tickwave_format::model::{
     Analog, Break, Channel, ChannelData, Derived, Digital, Exact, IntCoding, Offset, Ratio,
     Recording, Sample, Samples, Shaping, Source, SourceFormat,
@@ -97,6 +97,8 @@ fn probe() -> Recording {
                     breaks: Vec::new(),
                     significant: None,
                     samples: Samples::F32(Box::new((0..200).map(|i| i as f32))),
+                    lost_before: 0,
+                    lost_after: 0,
                 }),
                 shaping: Shaping::default(),
             },
@@ -153,16 +155,13 @@ fn aligned(ticks: &str) -> InputSettings {
 
 /// Each channel's edges, and each analog channel's samples as (tick, value), on the merged axis.
 fn items(file: &[u8]) -> (Header, Items) {
-    let head = Footer::parse_file(file).unwrap();
+    let index = Index::of_file(file).unwrap();
+    let head = &index.footer;
     let n = head.header.channels.len();
     let (mut edges, mut samples) = (vec![Vec::new(); n], vec![Vec::new(); n]);
-    for i in 0..head.rows.len() {
-        let (offset, len) = head.block_location(i);
-        let block = head
-            .decode_block(i, &file[offset as usize..][..len as usize])
-            .unwrap();
-        for (c, ch) in block.channels.into_iter().enumerate() {
-            match ch {
+    for c in 0..n {
+        for block in index.channel_blocks(file, c).unwrap() {
+            match block.data {
                 BlockChannel::Digital { edges: e, .. } => edges[c].extend(e),
                 BlockChannel::Analog {
                     first_index,
@@ -175,7 +174,7 @@ fn items(file: &[u8]) -> (Header, Items) {
             }
         }
     }
-    (head.header, (edges, samples))
+    (index.footer.header, (edges, samples))
 }
 
 fn kepts(h: &Header) -> Vec<(i64, i64)> {
@@ -549,6 +548,8 @@ fn verge(stem_v: &str) -> Recording {
             breaks: Vec::new(),
             significant: Some(4),
             samples: Samples::U64(coding, Box::new(values.into_iter())),
+            lost_before: 0,
+            lost_after: 0,
         }),
         shaping: Shaping::default(),
     };
@@ -851,6 +852,8 @@ fn every_refusal_says_plainly_what_it_refuses() {
                     }],
                     significant: None,
                     samples: Samples::F32(Box::new([0.0, 1.0, 2.0].into_iter())),
+                    lost_before: 0,
+                    lost_after: 0,
                 }),
                 shaping: Shaping::default(),
             }],
@@ -892,6 +895,8 @@ fn every_refusal_says_plainly_what_it_refuses() {
                     breaks: Vec::new(),
                     significant: None,
                     samples: Samples::F32(Box::new([0.0].into_iter())),
+                    lost_before: 0,
+                    lost_after: 0,
                 }),
                 shaping: Shaping::default(),
             }],
@@ -960,6 +965,7 @@ fn declared(kind: &str, ticks: i64, align: Option<i64>) -> Vec<u8> {
                 }),
                 kept: Some(Kept { from: 0, to: 10 }),
             },
+            overview_shift: None,
         }],
         derived: Vec::new(),
         sources: vec![SourceHeader {
@@ -1124,7 +1130,7 @@ fn bundle_of(
     )
     .unwrap();
     let footer = Footer::parse_file(&bytes).unwrap();
-    let mut files = footer.header.annotations.clone().unwrap();
+    let mut files = bundled(&bytes).unwrap();
     for line in text_lines {
         let jsonl = files.get_mut("in.dec.jsonl").unwrap();
         jsonl.push_str(line);
@@ -1133,7 +1139,15 @@ fn bundle_of(
     if let Some(hand) = hand {
         files.get_mut("in.annotations.toml").unwrap().push_str(hand);
     }
-    escapement_tickwave_format::bundle::bundle(&bytes, &footer, files).unwrap()
+    escapement_tickwave_format::bundle::bundle(&bytes, &footer, files, 3).unwrap()
+}
+
+/// The annotation files `file` bundles.
+fn bundled(file: &[u8]) -> Option<BTreeMap<String, String>> {
+    Footer::parse_file(file)
+        .unwrap()
+        .read_bundle(from_memory(file))
+        .unwrap()
 }
 
 #[test]
@@ -1177,7 +1191,7 @@ fn generated_annotations_come_over_mapped_and_hand_written_ones_are_counted() {
     };
     let (out, merged) = run(&[(a, "analyser", None), (p, "my probe", None)], &s).unwrap();
     let h = Footer::parse_file(&out).unwrap().header;
-    let files = h.annotations.clone().expect("bundled");
+    let files = bundled(&out).expect("bundled");
     assert_eq!(
         files.keys().collect::<Vec<_>>(),
         [
@@ -1262,18 +1276,12 @@ fn generated_annotations_come_over_mapped_and_hand_written_ones_are_counted() {
         &settings(vec![]),
     )
     .unwrap();
-    assert!(
-        Footer::parse_file(&out)
-            .unwrap()
-            .header
-            .annotations
-            .is_none()
-    );
+    assert!(bundled(&out).is_none());
 }
 
-/// Each annotation the bundle of `h` resolves to.
-fn resolved_in(h: &Header) -> Vec<Measured> {
-    let files = h.annotations.clone().expect("bundled");
+/// Each annotation the bundle of `file`, whose header is `h`, resolves to.
+fn resolved_in(file: &[u8], h: &Header) -> Vec<Measured> {
+    let files = bundled(file).expect("bundled");
     let toml = files
         .keys()
         .find(|n| n.ends_with(".annotations.toml"))
@@ -1332,7 +1340,7 @@ fn annotations_follow_renamed_channels_and_what_stays_behind_is_noted() {
     let h = Footer::parse_file(&out).unwrap().header;
     let s = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
     assert_eq!(
-        resolved_in(&h),
+        resolved_in(&out, &h),
         [
             ("dec/a/100".into(), 2_400, None, s(&["CLK"]), None),
             (
@@ -1394,7 +1402,7 @@ fn annotations_follow_renamed_channels_and_what_stays_behind_is_noted() {
     let h = Footer::parse_file(&out).unwrap().header;
     assert_eq!(h.length, 24_000);
     assert_eq!(
-        resolved_in(&h),
+        resolved_in(&out, &h),
         [
             (
                 "dec/span/150".into(),
@@ -1423,15 +1431,12 @@ fn annotations_follow_renamed_channels_and_what_stays_behind_is_noted() {
 
     // A sidecar's generator file read past blank lines before its head, and a file whose head is
     // of another format, which is no generator's and no hand-written file either.
-    let files = Footer::parse_file(&bundle_of(
+    let files = bundled(&bundle_of(
         analyser(),
         &[json!({"id": "e/100", "start": 100, "channels": ["CLK"]})],
         &[],
         None,
     ))
-    .unwrap()
-    .header
-    .annotations
     .unwrap();
     let dec = &files["in.dec.jsonl"];
     let (head, rest) = dec.split_once('\n').unwrap();
@@ -1461,7 +1466,7 @@ fn annotations_follow_renamed_channels_and_what_stays_behind_is_noted() {
     )
     .unwrap();
     let h = Footer::parse_file(&out).unwrap().header;
-    let ids: Vec<String> = resolved_in(&h).into_iter().map(|a| a.0).collect();
+    let ids: Vec<String> = resolved_in(&out, &h).into_iter().map(|a| a.0).collect();
     assert_eq!(ids, ["blank/e/100", "dec/e/100"]);
     let notes: Vec<String> = merged.notes.iter().map(|n| n.to_string()).collect();
     assert_eq!(
@@ -1476,17 +1481,13 @@ fn annotations_follow_renamed_channels_and_what_stays_behind_is_noted() {
 #[test]
 fn a_sidecar_given_beside_an_input_comes_over_as_a_bundled_one_does() {
     use serde_json::json;
-    let bundled = bundle_of(
+    let input = bundle_of(
         analyser(),
         &[json!({"id": "edge/100", "start": 100, "channels": ["CLK"]})],
         &[],
         None,
     );
-    let files = Footer::parse_file(&bundled)
-        .unwrap()
-        .header
-        .annotations
-        .unwrap();
+    let files = bundled(&input).unwrap();
     let (out, _) = run(
         &[
             (file(analyser()), "analyser", Some(files)),
@@ -1495,8 +1496,8 @@ fn a_sidecar_given_beside_an_input_comes_over_as_a_bundled_one_does() {
         &settings(vec![]),
     )
     .unwrap();
-    let h = Footer::parse_file(&out).unwrap().header;
-    let jsonl = &h.annotations.unwrap()["merged.dec.jsonl"];
+    let files = bundled(&out).unwrap();
+    let jsonl = &files["merged.dec.jsonl"];
     assert!(jsonl.contains(r#""start":2400"#), "{jsonl}");
 }
 
@@ -1846,8 +1847,8 @@ fn generated_annotations_before_the_merged_start_are_left_out_or_start_there() {
         ..settings(vec![InputSettings::default(), aligned("100000")])
     };
     let (out, merged) = run(&[(a, "analyser", None), (file(probe()), "probe", None)], &s).unwrap();
-    let h = Footer::parse_file(&out).unwrap().header;
-    let jsonl = &h.annotations.unwrap()["merged.dec.jsonl"];
+    let files = bundled(&out).unwrap();
+    let jsonl = &files["merged.dec.jsonl"];
     let lines: Vec<&str> = jsonl.lines().skip(1).collect();
     assert_eq!(lines.len(), 1, "{jsonl}");
     // The span from 100 to 300 runs from -2,400 to 2,400: it starts at 0.
@@ -1938,11 +1939,12 @@ fn expected_refuses_a_header_its_inputs_do_not_give() {
         "channel CLK states no kept span, which a merged recording states on every channel"
     );
     let mut extra = h.clone();
-    extra.derived.push(Derived {
+    extra.derived.push(DerivedHeader {
         name: "Q".into(),
         unit: "W".into(),
         product: ["I".into(), "I".into()],
         significant: None,
+        overview_blocks: Vec::new(),
     });
     assert_eq!(
         expected(&extra, recordings(&[&m, &c_bytes]))
@@ -2056,7 +2058,7 @@ fn each_inputs_title_and_meta_go_with_its_sources_and_a_merged_inputs_keep_their
     let m = {
         let mut head = Footer::parse_file(&m).unwrap();
         head.header.title = Some("both".into());
-        escapement_tickwave_format::bundle::bundle(&m, &head, Default::default()).unwrap()
+        escapement_tickwave_format::bundle::bundle(&m, &head, Default::default(), 3).unwrap()
     };
     let (again, _) = run(
         &[(m, "both", None), (titled(c, "third", &[]), "third", None)],
@@ -2327,6 +2329,9 @@ fn expected_refuses_a_header_naming_an_input_channel_twice_or_as_another_kind() 
         breaks: Vec::new(),
         coding: escapement_tickwave_format::header::AnalogCoding::F32,
         significant: None,
+        break_count: None,
+        lost_before: 0,
+        lost_after: 0,
     };
     let name = c.name.clone();
     assert_eq!(
@@ -2375,7 +2380,7 @@ fn a_bundled_line_breaking_a_rule_is_left_out_of_a_merge() {
     )
     .unwrap();
     let h = Footer::parse_file(&out).unwrap().header;
-    let ids: Vec<String> = resolved_in(&h).into_iter().map(|r| r.0).collect();
+    let ids: Vec<String> = resolved_in(&out, &h).into_iter().map(|r| r.0).collect();
     assert_eq!(ids, ["dec/a/100"]);
     let notes: Vec<String> = merged.notes.iter().map(|n| n.to_string()).collect();
     assert!(

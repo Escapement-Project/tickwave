@@ -1,0 +1,854 @@
+//! The index (FORMAT.md, "Index"): each channel's blocks, each level of its overview in overview
+//! blocks, and each long gap or break list is a table, its entries in pages of 4,096, the pages
+//! listed in directory pages once there are more than 16, and the footer's top index listing at
+//! most 16 entries a table. Pages are records: a writer writes one right after the record of its
+//! last entry, a directory right after its last page, so a reader in order meets each where the
+//! writer wrote it.
+
+use crate::header::{BlockRow, LEVEL_BIT, OverviewRow};
+use crate::model::{Break, Gap};
+use crate::record::{self, Kind};
+use crate::shared::Chunks;
+
+/// Entries a page holds, and directory entries a directory page.
+pub const PAGE: usize = 4096;
+/// The most entries the top index holds for one table.
+pub const TOP: usize = 16;
+/// A page record's payload before its entries.
+pub const PAGE_HEAD: usize = 19;
+
+/// A directory entry, 28 bytes, and a top-index entry: where a page starts, and its record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Entry {
+    /// For blocks, the first block's start tick; for an overview level, the first row's `k`;
+    /// for gaps, the first gap's `from`; for breaks, the first break's `tick`.
+    pub first: i64,
+    /// For blocks, the first block's first item's index in the channel; for an overview level
+    /// and for gaps, the first entry's place; for breaks, the first break's `index`.
+    pub number: u64,
+    /// The page record's offset in the file, and its length, its framing included.
+    pub offset: u64,
+    pub length: u32,
+}
+
+impl Entry {
+    pub const SIZE: usize = 28;
+
+    pub fn write(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.first.to_le_bytes());
+        out.extend_from_slice(&self.number.to_le_bytes());
+        out.extend_from_slice(&self.offset.to_le_bytes());
+        out.extend_from_slice(&self.length.to_le_bytes());
+    }
+
+    /// `bytes` is exactly one entry.
+    pub fn parse(bytes: &[u8]) -> Self {
+        Self {
+            first: i64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+            number: u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+            offset: u64::from_le_bytes(bytes[16..24].try_into().unwrap()),
+            length: u32::from_le_bytes(bytes[24..28].try_into().unwrap()),
+        }
+    }
+}
+
+/// Which table a page belongs to: its code in a page's head, and an overview level's shift.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Table {
+    Blocks,
+    Level(u8),
+    Gaps,
+    Breaks,
+}
+
+impl Table {
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Blocks => 0,
+            Self::Level(_) => 1,
+            Self::Gaps => 2,
+            Self::Breaks => 3,
+        }
+    }
+
+    pub fn shift(self) -> u8 {
+        match self {
+            Self::Level(s) => s,
+            _ => 0,
+        }
+    }
+
+    /// The record kind of its pages at `depth`: a list's own pages are list pages, every other
+    /// page and every directory an index page.
+    pub fn kind(self, depth: u8) -> Kind {
+        match self {
+            Self::Gaps | Self::Breaks if depth == 0 => Kind::ListPage,
+            _ => Kind::IndexPage,
+        }
+    }
+
+    /// The bytes one of its entries takes at depth 0.
+    pub fn row_size(self) -> usize {
+        match self {
+            Self::Blocks => BlockRow::SIZE,
+            Self::Level(_) => OverviewRow::SIZE,
+            Self::Gaps => GAP_SIZE,
+            Self::Breaks => BREAK_SIZE,
+        }
+    }
+}
+
+const GAP_SIZE: usize = 17;
+const BREAK_SIZE: usize = 24;
+
+/// An entry of a table at depth 0.
+pub trait Row: Copy + std::fmt::Debug + Send + Sync + 'static {
+    fn write(&self, out: &mut Vec<u8>);
+    /// What the entry adds to the count a directory's `number` carries: a block's items, an
+    /// overview row's blocks. `digital` says how a block's word counts.
+    fn weight(&self, digital: bool) -> u64;
+    /// Its `first` and `number`, `sum` being the weights before it and `place` its place.
+    fn key(&self, sum: u64, place: u64) -> (i64, u64);
+}
+
+impl Row for BlockRow {
+    fn write(&self, out: &mut Vec<u8>) {
+        BlockRow::write(self, out)
+    }
+    fn weight(&self, digital: bool) -> u64 {
+        u64::from(if digital {
+            self.word & !LEVEL_BIT
+        } else {
+            self.word
+        })
+    }
+    fn key(&self, sum: u64, _: u64) -> (i64, u64) {
+        (self.start, sum)
+    }
+}
+
+impl Row for OverviewRow {
+    fn write(&self, out: &mut Vec<u8>) {
+        OverviewRow::write(self, out)
+    }
+    fn weight(&self, _: bool) -> u64 {
+        u64::from(self.n)
+    }
+    fn key(&self, sum: u64, place: u64) -> (i64, u64) {
+        (sum as i64, place)
+    }
+}
+
+impl Row for Gap {
+    fn write(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.from.to_le_bytes());
+        out.extend_from_slice(&self.to.to_le_bytes());
+        out.push(u8::from(self.level));
+    }
+    fn weight(&self, _: bool) -> u64 {
+        1
+    }
+    fn key(&self, _: u64, place: u64) -> (i64, u64) {
+        (self.from, place)
+    }
+}
+
+impl Row for Break {
+    fn write(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.index.to_le_bytes());
+        out.extend_from_slice(&self.tick.to_le_bytes());
+        out.extend_from_slice(&self.lost.to_le_bytes());
+    }
+    fn weight(&self, _: bool) -> u64 {
+        1
+    }
+    fn key(&self, _: u64, _: u64) -> (i64, u64) {
+        (self.tick, self.index)
+    }
+}
+
+/// The pages a table of `rows` entries has at `depth`: `ceil(rows / 4,096)` at depth 0, and
+/// `ceil(pages / 4,096)` of the depth below at each depth above.
+pub fn pages_at(rows: u64, depth: u8) -> u64 {
+    let mut n = rows.div_ceil(PAGE as u64);
+    for _ in 0..depth {
+        n = n.div_ceil(PAGE as u64);
+    }
+    n
+}
+
+/// The depth a table of `rows` entries has (FORMAT.md, "Index"): the least at which its pages
+/// number at most 16, which the top index lists.
+pub fn depth_of(rows: u64) -> u8 {
+    let mut depth = 0;
+    while pages_at(rows, depth) > TOP as u64 {
+        depth += 1;
+    }
+    depth
+}
+
+/// A page's head, as its record has it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageHead {
+    pub channel: u32,
+    pub table: u8,
+    pub shift: u8,
+    pub depth: u8,
+    /// Its first entry's place among the entries at its depth.
+    pub place: u64,
+    pub count: u32,
+}
+
+impl PageHead {
+    fn write(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.channel.to_le_bytes());
+        out.push(self.table);
+        out.push(self.shift);
+        out.push(self.depth);
+        out.extend_from_slice(&self.place.to_le_bytes());
+        out.extend_from_slice(&self.count.to_le_bytes());
+    }
+
+    /// None if the payload is shorter than a head.
+    pub fn parse(payload: &[u8]) -> Option<(Self, &[u8])> {
+        let head = payload.get(..PAGE_HEAD)?;
+        Some((
+            Self {
+                channel: u32::from_le_bytes(head[0..4].try_into().unwrap()),
+                table: head[4],
+                shift: head[5],
+                depth: head[6],
+                place: u64::from_le_bytes(head[7..15].try_into().unwrap()),
+                count: u32::from_le_bytes(head[15..19].try_into().unwrap()),
+            },
+            &payload[PAGE_HEAD..],
+        ))
+    }
+}
+
+/// A page record whose place in the file is not known yet, and the entry a directory will hold
+/// for it once it is.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Due {
+    pub depth: u8,
+    pub record: Vec<u8>,
+    first: i64,
+    number: u64,
+}
+
+/// One table as a writer builds it, and as a reader in order follows it: its entries come in
+/// order, each once its record has a place, and it says which page records follow from them.
+/// It holds the open page's entries and, at each depth, the entries of the pages written that no
+/// directory lists yet: at most 4,095 each, however long the table.
+#[derive(Clone, Debug)]
+pub struct TableWriter<R: Row> {
+    channel: u32,
+    table: Table,
+    digital: bool,
+    /// Entries taken.
+    count: u64,
+    /// Their weights, summed, and those of the open page's alone.
+    sum: u64,
+    open_sum: u64,
+    /// The open page: entries no page holds yet, from entry `count - open.len()`.
+    open: Chunks<R>,
+    /// The open page's first entry's `first` and `number`.
+    open_key: (i64, u64),
+    /// At each depth, the pages written that no directory lists.
+    pending: Vec<Chunks<Entry>>,
+    /// At each depth, the pages written.
+    pages: Vec<u64>,
+    finished: bool,
+}
+
+impl<R: Row> TableWriter<R> {
+    pub fn new(channel: u32, table: Table, digital: bool) -> Self {
+        Self {
+            channel,
+            table,
+            digital,
+            count: 0,
+            sum: 0,
+            open_sum: 0,
+            open: Chunks::new(),
+            open_key: (0, 0),
+            pending: Vec::new(),
+            pages: Vec::new(),
+            finished: false,
+        }
+    }
+
+    pub fn table(&self) -> Table {
+        self.table
+    }
+
+    /// Entries taken so far.
+    pub fn count(&self) -> u64 {
+        self.count
+    }
+
+    /// The entries' weights so far: a block table's items, an overview level's blocks.
+    pub fn sum(&self) -> u64 {
+        self.sum
+    }
+
+    /// The entries no page holds yet.
+    pub fn open(&self) -> &Chunks<R> {
+        &self.open
+    }
+
+    /// The entries in pages written: every entry before the open page's.
+    pub fn paged(&self) -> u64 {
+        self.count - self.open.len() as u64
+    }
+
+    /// The weights of the entries in pages written: the open page's first entry's items before
+    /// it, or its first block.
+    pub fn paged_sum(&self) -> u64 {
+        self.sum - self.open_sum
+    }
+
+    /// The entries of the pages written that no directory lists, depth by depth.
+    pub fn pending(&self) -> &[Chunks<Entry>] {
+        &self.pending
+    }
+
+    /// The next entry. When it fills a page, the page record that follows it, for the caller to
+    /// place and pass to `placed`.
+    pub fn push(&mut self, row: R) -> Option<Due> {
+        debug_assert!(!self.finished, "an entry after the table's last page");
+        if self.open.is_empty() {
+            self.open_key = row.key(self.sum, self.count);
+        }
+        self.count += 1;
+        let w = row.weight(self.digital);
+        self.sum += w;
+        self.open_sum += w;
+        self.open.push(row);
+        (self.open.len() == PAGE).then(|| self.page())
+    }
+
+    /// The open page as a record, its entries handed over.
+    fn page(&mut self) -> Due {
+        let rows = std::mem::take(&mut self.open);
+        self.open_sum = 0;
+        let n = rows.len();
+        let mut record =
+            Vec::with_capacity(record::FRAMING + PAGE_HEAD + n * self.table.row_size());
+        let mut payload = Vec::with_capacity(PAGE_HEAD + n * self.table.row_size());
+        PageHead {
+            channel: self.channel,
+            table: self.table.code(),
+            shift: self.table.shift(),
+            depth: 0,
+            place: self.count - n as u64,
+            count: n as u32,
+        }
+        .write(&mut payload);
+        for row in rows.iter() {
+            row.write(&mut payload);
+        }
+        record::write(&mut record, self.table.kind(0), &[&payload]);
+        Due {
+            depth: 0,
+            record,
+            first: self.open_key.0,
+            number: self.open_key.1,
+        }
+    }
+
+    /// The directory page of depth `depth + 1` that lists the pending pages of `depth`.
+    fn directory(&mut self, depth: u8) -> Due {
+        let d = usize::from(depth);
+        let entries = std::mem::take(&mut self.pending[d]);
+        let n = entries.len();
+        let first = *entries.get(0).expect("a directory lists a page");
+        let listed_before = self.pages[d] - n as u64;
+        let mut payload = Vec::with_capacity(PAGE_HEAD + n * Entry::SIZE);
+        PageHead {
+            channel: self.channel,
+            table: self.table.code(),
+            shift: self.table.shift(),
+            depth: depth + 1,
+            place: listed_before,
+            count: n as u32,
+        }
+        .write(&mut payload);
+        for e in entries.iter() {
+            e.write(&mut payload);
+        }
+        let mut record = Vec::with_capacity(record::FRAMING + payload.len());
+        record::write(&mut record, self.table.kind(depth + 1), &[&payload]);
+        Due {
+            depth: depth + 1,
+            record,
+            first: first.first,
+            number: first.number,
+        }
+    }
+
+    /// `due` is in the file at `offset`. When it fills a directory page, the directory record
+    /// that follows it.
+    pub fn placed(&mut self, due: &Due, offset: u64) -> Option<Due> {
+        let d = usize::from(due.depth);
+        if self.pending.len() <= d {
+            self.pending.resize_with(d + 1, Chunks::new);
+            self.pages.resize(d + 1, 0);
+        }
+        self.pending[d].push(Entry {
+            first: due.first,
+            number: due.number,
+            offset,
+            length: due.record.len() as u32,
+        });
+        self.pages[d] += 1;
+        (!self.finished && self.pending[d].len() == PAGE).then(|| self.directory(due.depth))
+    }
+
+    /// Drops the open page's last `n` entries: a gap list's that its channel's end leaves out.
+    /// None if fewer are open, so some are in a page written already.
+    pub fn drop_last(&mut self, n: u64) -> Option<()> {
+        if n > self.open.len() as u64 {
+            return None;
+        }
+        let mut kept = Chunks::new();
+        let keep = self.open.len() - n as usize;
+        for row in self.open.iter().take(keep) {
+            kept.push(*row);
+        }
+        for row in self.open.iter().skip(keep) {
+            let w = row.weight(self.digital);
+            self.sum -= w;
+            self.open_sum -= w;
+        }
+        self.open = kept;
+        self.count -= n;
+        Some(())
+    }
+
+    /// The next of the table's last pages: the open page, then the directories its shape needs,
+    /// each placed before the next is asked for. None once the top index can list the pages.
+    /// A table of `inline` entries or fewer needs no page: its entries go in the header.
+    pub fn finish_next(&mut self, inline: u64) -> Option<Due> {
+        if self.count <= inline && self.paged() == 0 {
+            self.finished = true;
+            return None;
+        }
+        if !self.open.is_empty() {
+            return Some(self.page());
+        }
+        self.finished = true;
+        let mut d = 0;
+        loop {
+            let pages = self.pages.get(d).copied().unwrap_or(0);
+            if pages <= TOP as u64 {
+                return None;
+            }
+            if !self.pending[d].is_empty() {
+                return Some(self.directory(d as u8));
+            }
+            d += 1;
+        }
+    }
+
+    /// The top index's entries for the table, once `finish_next` has given its last page: its
+    /// depth and its entries. None for a table whose entries go in the header.
+    pub fn top(&self) -> Option<(u8, Vec<Entry>)> {
+        let d = self.pending.iter().rposition(|p| !p.is_empty())?;
+        debug_assert_eq!(d as u8, depth_of(self.count));
+        Some((d as u8, self.pending[d].to_vec()))
+    }
+
+    /// The open page's entries, for a header's inline list.
+    pub fn inline(&self) -> Vec<R> {
+        self.open.to_vec()
+    }
+}
+
+/// A table as a reader finds it: its entries in pages from the top index's, or, for a writer's
+/// snapshot, from the pages no directory lists yet at each depth.
+#[derive(Clone, Debug)]
+pub struct TableIndex {
+    pub channel: u32,
+    pub table: Table,
+    /// Entries in pages.
+    pub rows: u64,
+    /// At each depth, page entries no directory in the table lists: for a finished table only
+    /// its depth's, the top index's.
+    pub levels: Vec<Vec<Entry>>,
+}
+
+impl TableIndex {
+    /// A finished table: `rows` entries listed by `top` at `depth`.
+    pub fn finished(channel: u32, table: Table, rows: u64, depth: u8, top: Vec<Entry>) -> Self {
+        let mut levels = vec![Vec::new(); usize::from(depth) + 1];
+        levels[usize::from(depth)] = top;
+        Self {
+            channel,
+            table,
+            rows,
+            levels,
+        }
+    }
+
+    /// The table a writer's `TableWriter` holds in pages so far.
+    pub fn of<R: Row>(t: &TableWriter<R>) -> Self {
+        Self {
+            channel: t.channel,
+            table: t.table,
+            rows: t.paged(),
+            levels: t.pending.iter().map(|p| p.to_vec()).collect(),
+        }
+    }
+
+    /// The pages at `depth` in order, `entries` of each, through `fetch` for the directories
+    /// above: what a reader walks to read every entry. Each page is checked against the entry
+    /// that lists it.
+    pub fn pages<E: From<crate::decode::DecodeError>>(
+        &self,
+        depth: u8,
+        fetch: &mut impl FnMut(u64, u32) -> Result<Vec<u8>, E>,
+    ) -> Result<Vec<Entry>, E> {
+        let d = usize::from(depth);
+        let mut out = Vec::new();
+        if d + 1 < self.levels.len() {
+            for (j, dir) in self.pages(depth + 1, fetch)?.into_iter().enumerate() {
+                let bytes = fetch(dir.offset, dir.length)?;
+                let page = self.parse_page(depth + 1, j as u64, &dir, &bytes)?;
+                match page {
+                    Page::Directory(entries) => out.extend(entries),
+                    _ => unreachable!("a page above depth 0 is a directory"),
+                }
+            }
+        }
+        if let Some(level) = self.levels.get(d) {
+            out.extend_from_slice(level);
+        }
+        Ok(out)
+    }
+
+    /// The entries at depth 0, every page read through `fetch`.
+    pub fn read_all<E: From<crate::decode::DecodeError>>(
+        &self,
+        fetch: &mut impl FnMut(u64, u32) -> Result<Vec<u8>, E>,
+    ) -> Result<Vec<Page>, E> {
+        let mut out = Vec::new();
+        for (j, e) in self.pages(0, fetch)?.into_iter().enumerate() {
+            let bytes = fetch(e.offset, e.length)?;
+            out.push(self.parse_page(0, j as u64, &e, &bytes)?);
+        }
+        Ok(out)
+    }
+
+    /// Page `j` of `depth`, listed by `entry`, from exactly its record's bytes. It must be the
+    /// page the table's shape puts there, with its entries in order, and start where the entry
+    /// says.
+    pub fn parse_page(
+        &self,
+        depth: u8,
+        j: u64,
+        entry: &Entry,
+        bytes: &[u8],
+    ) -> Result<Page, crate::decode::DecodeError> {
+        use crate::decode::corrupt;
+        let bad = |what: &str| {
+            corrupt(format!(
+                "channel {}: page {j} at depth {depth} of its {}: {what}",
+                self.channel,
+                table_name(self.table)
+            ))
+        };
+        let payload = match record::next(bytes, bytes.len()) {
+            record::Next::Record { kind, payload, len }
+                if kind == self.table.kind(depth) as u8 && len == bytes.len() =>
+            {
+                payload
+            }
+            _ => return Err(bad("the record is not a whole page of its kind")),
+        };
+        let (head, body) =
+            PageHead::parse(payload).ok_or_else(|| bad("the record is too short"))?;
+        let below = if depth == 0 {
+            self.rows
+        } else {
+            pages_at(self.rows, depth - 1)
+        };
+        let place = j.saturating_mul(PAGE as u64);
+        let count = below.saturating_sub(place).min(PAGE as u64);
+        if head.channel != self.channel
+            || head.table != self.table.code()
+            || head.shift != self.table.shift()
+            || head.depth != depth
+            || head.place != place
+            || u64::from(head.count) != count
+            || count == 0
+        {
+            return Err(bad("its head differs from where the table's shape puts it"));
+        }
+        let size = if depth == 0 {
+            self.table.row_size()
+        } else {
+            Entry::SIZE
+        };
+        if body.len() as u64 != count * size as u64 {
+            return Err(bad("its entries do not fill it"));
+        }
+        let chunks = body.chunks_exact(size);
+        let page = if depth > 0 {
+            let entries: Vec<Entry> = chunks.map(Entry::parse).collect();
+            if !entries
+                .windows(2)
+                .all(|w| w[0].first <= w[1].first && w[0].number <= w[1].number)
+            {
+                return Err(bad("its entries are out of order"));
+            }
+            if entries.iter().any(|e| e.offset >= entry.offset) {
+                return Err(bad("it lists a page that does not come before it"));
+            }
+            let e = entries[0];
+            if (e.first, e.number) != (entry.first, entry.number) {
+                return Err(bad("it starts where its directory says it doesn't"));
+            }
+            Page::Directory(entries)
+        } else {
+            match self.table {
+                Table::Blocks => {
+                    let rows: Vec<BlockRow> = chunks.map(BlockRow::parse).collect();
+                    let ordered = rows
+                        .windows(2)
+                        .all(|w| w[0].start < w[1].start && w[0].offset < w[1].offset);
+                    if !ordered {
+                        return Err(bad("its blocks are out of order"));
+                    }
+                    if rows.iter().any(|r| {
+                        r.offset < crate::header::PREAMBLE_LEN as u64
+                            || r.offset.saturating_add(u64::from(r.length)) > entry.offset
+                    }) {
+                        return Err(bad("a block's frame does not lie before the page"));
+                    }
+                    if rows[0].start != entry.first {
+                        return Err(bad("it starts where its directory says it doesn't"));
+                    }
+                    Page::Blocks {
+                        number: entry.number,
+                        rows,
+                    }
+                }
+                Table::Level(_) => {
+                    let rows: Vec<OverviewRow> = chunks.map(OverviewRow::parse).collect();
+                    if rows.iter().any(|r| r.n == 0) {
+                        return Err(bad("a row stands for no block"));
+                    }
+                    if !rows.windows(2).all(|w| w[0].offset < w[1].offset) {
+                        return Err(bad("its rows are out of order"));
+                    }
+                    if rows.iter().any(|r| {
+                        r.offset < crate::header::PREAMBLE_LEN as u64
+                            || r.offset.saturating_add(u64::from(r.length)) > entry.offset
+                    }) {
+                        return Err(bad("a row's frame does not lie before the page"));
+                    }
+                    if entry.number != place {
+                        return Err(bad("it starts where its directory says it doesn't"));
+                    }
+                    Page::Level {
+                        k: u64::try_from(entry.first).map_err(|_| bad("a negative k"))?,
+                        rows,
+                    }
+                }
+                Table::Gaps => {
+                    let mut gaps = Vec::with_capacity(count as usize);
+                    for b in chunks {
+                        if b[16] > 1 {
+                            return Err(bad("a gap's level is not 0 or 1"));
+                        }
+                        gaps.push(Gap {
+                            from: i64::from_le_bytes(b[0..8].try_into().unwrap()),
+                            to: i64::from_le_bytes(b[8..16].try_into().unwrap()),
+                            level: b[16] == 1,
+                        });
+                    }
+                    if !gaps.iter().all(|g| g.from < g.to)
+                        || !gaps.windows(2).all(|w| w[0].to < w[1].from)
+                    {
+                        return Err(bad("its gaps are out of order"));
+                    }
+                    if gaps[0].from != entry.first || entry.number != place {
+                        return Err(bad("it starts where its directory says it doesn't"));
+                    }
+                    Page::Gaps(gaps)
+                }
+                Table::Breaks => {
+                    let breaks: Vec<Break> = chunks
+                        .map(|b| Break {
+                            index: u64::from_le_bytes(b[0..8].try_into().unwrap()),
+                            tick: i64::from_le_bytes(b[8..16].try_into().unwrap()),
+                            lost: u64::from_le_bytes(b[16..24].try_into().unwrap()),
+                        })
+                        .collect();
+                    if !breaks
+                        .windows(2)
+                        .all(|w| w[0].index < w[1].index && w[0].tick <= w[1].tick)
+                    {
+                        return Err(bad("its breaks are out of order"));
+                    }
+                    if (breaks[0].tick, breaks[0].index) != (entry.first, entry.number) {
+                        return Err(bad("it starts where its directory says it doesn't"));
+                    }
+                    Page::Breaks(breaks)
+                }
+            }
+        };
+        Ok(page)
+    }
+}
+
+/// A table's name, for a message.
+pub fn table_name(table: Table) -> String {
+    match table {
+        Table::Blocks => "blocks".into(),
+        Table::Level(s) => format!("overview level 2^{s}"),
+        Table::Gaps => "gaps".into(),
+        Table::Breaks => "breaks".into(),
+    }
+}
+
+/// A page, parsed.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Page {
+    /// Block rows, the first block's first item at index `number` of the channel.
+    Blocks {
+        number: u64,
+        rows: Vec<BlockRow>,
+    },
+    /// Overview rows of one level, the first standing for blocks from `k`.
+    Level {
+        k: u64,
+        rows: Vec<OverviewRow>,
+    },
+    Gaps(Vec<Gap>),
+    Breaks(Vec<Break>),
+    Directory(Vec<Entry>),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_tables_depth_is_the_least_at_which_16_pages_list_it() {
+        // 16 pages of 4,096: the top index lists them. One row more needs a directory.
+        assert_eq!(depth_of(1), 0);
+        assert_eq!(depth_of(16 * 4096), 0);
+        assert_eq!(depth_of(16 * 4096 + 1), 1);
+        assert_eq!(pages_at(16 * 4096 + 1, 0), 17);
+        assert_eq!(pages_at(16 * 4096 + 1, 1), 1);
+        // One directory level lists 16 x 4,096 pages of 4,096 rows: 2^28.
+        assert_eq!(depth_of(1 << 28), 1);
+        assert_eq!(depth_of((1 << 28) + 1), 2);
+        assert_eq!(depth_of((1 << 40) + 1), 3);
+        // Three list 2^52, and counts are below 2^53: four directory levels at most.
+        assert_eq!(depth_of(1 << 52), 3);
+        assert_eq!(depth_of((1 << 52) + 1), 4);
+        assert_eq!(depth_of((1 << 53) - 1), 4);
+    }
+
+    /// Writes a block table of `n` rows as a writer would, each page placed right after it is
+    /// due, and returns the records in order and the top.
+    fn written(n: u64) -> (Vec<Due>, Option<(u8, Vec<Entry>)>) {
+        let mut t = TableWriter::<BlockRow>::new(3, Table::Blocks, false);
+        let mut out = Vec::new();
+        let mut at = 1 << 20;
+        let mut place =
+            |t: &mut TableWriter<BlockRow>, mut due: Option<Due>, out: &mut Vec<Due>| {
+                while let Some(d) = due {
+                    due = t.placed(&d, at);
+                    at += d.record.len() as u64;
+                    out.push(d);
+                }
+            };
+        for i in 0..n {
+            let due = t.push(BlockRow {
+                start: i as i64,
+                offset: 12 + i,
+                length: 1,
+                decoded_length: 0,
+                word: 2,
+            });
+            place(&mut t, due, &mut out);
+        }
+        loop {
+            let due = t.finish_next(0);
+            if due.is_none() {
+                break;
+            }
+            place(&mut t, due, &mut out);
+        }
+        (out, t.top())
+    }
+
+    #[test]
+    fn a_writer_pages_a_table_as_its_shape_says() {
+        for n in [1, 4095, 4096, 4097, 16 * 4096, 16 * 4096 + 1, 17 * 4096 + 5] {
+            let (records, top) = written(n);
+            let (depth, entries) = top.expect("a block table has a top");
+            assert_eq!(depth, depth_of(n), "{n} rows");
+            assert_eq!(entries.len() as u64, pages_at(n, depth), "{n} rows");
+            let pages = records.iter().filter(|r| r.depth == 0).count() as u64;
+            let directories = records.iter().filter(|r| r.depth == 1).count() as u64;
+            assert_eq!(pages, pages_at(n, 0), "{n} rows");
+            assert_eq!(
+                directories,
+                if depth == 0 { 0 } else { pages_at(n, 1) },
+                "{n} rows"
+            );
+            // The top's entries start where the pages do: block i at tick i, two items each.
+            for (j, e) in entries.iter().enumerate() {
+                let per = PAGE.pow(u32::from(depth)) as u64 * PAGE as u64;
+                assert_eq!(
+                    (e.first, e.number),
+                    ((j as u64 * per) as i64, 2 * j as u64 * per)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_reader_reads_back_every_row_and_refuses_a_page_out_of_place() {
+        let n = 17 * 4096 + 5;
+        let (records, top) = written(n);
+        let mut file = vec![0u8; 1 << 20];
+        for r in &records {
+            file.extend_from_slice(&r.record);
+        }
+        let (depth, entries) = top.unwrap();
+        let index = TableIndex::finished(3, Table::Blocks, n, depth, entries);
+        let mut fetch = |offset: u64, len: u32| -> Result<Vec<u8>, crate::decode::DecodeError> {
+            Ok(file[offset as usize..][..len as usize].to_vec())
+        };
+        let pages = index.read_all(&mut fetch).unwrap();
+        let rows: Vec<BlockRow> = pages
+            .iter()
+            .flat_map(|p| match p {
+                Page::Blocks { rows, .. } => rows.clone(),
+                _ => panic!("block pages"),
+            })
+            .collect();
+        assert_eq!(rows.len() as u64, n);
+        assert!(rows.iter().enumerate().all(|(i, r)| r.start == i as i64));
+        // The same table read as one of a count it isn't: the last page's count is wrong.
+        let wrong = TableIndex {
+            rows: n - 1,
+            ..index.clone()
+        };
+        let err = wrong.read_all(&mut fetch).unwrap_err().to_string();
+        assert!(err.contains("its head differs"), "{err}");
+        // As another channel's.
+        let other = TableIndex {
+            channel: 4,
+            ..index
+        };
+        let err = other.read_all(&mut fetch).unwrap_err().to_string();
+        assert!(err.contains("its head differs"), "{err}");
+    }
+}

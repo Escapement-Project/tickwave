@@ -7,13 +7,14 @@ use std::ops::Range;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
+use escapement_tickwave_format::decode::from_memory;
 use escapement_tickwave_format::header::{
     AnalogCoding, Declaration, DeclaredChannel, DeclaredKind, Derived, Exact, IntCoding,
     SourceFormat, SourceHeader,
 };
 use escapement_tickwave_format::model::{Gap, Kept, Ratio, Shaping};
 use escapement_tickwave_format::snapshot::Snapshot;
-use escapement_tickwave_format::writer::{Finish, WriteOptions, Writer};
+use escapement_tickwave_format::writer::{Compression, Finish, WriteOptions, Writer};
 use escapement_tickwave_view::{Answer, Bytes, Cache, Drawn, MarkerQuery, Query, Recording};
 
 /// A file a writer still appends to, which records where each read starts.
@@ -110,6 +111,7 @@ fn declaration(shift: u8, to: i64) -> Declaration {
             significant: Some(4),
         },
         shaping: kept(source),
+        overview_shift: None,
     };
     let digital = |name: &str, source: u32, initial| DeclaredChannel {
         name: name.into(),
@@ -117,6 +119,7 @@ fn declaration(shift: u8, to: i64) -> Declaration {
         source,
         data: DeclaredKind::Digital { initial },
         shaping: kept(source),
+        overview_shift: None,
     };
     Declaration {
         timebase: axis,
@@ -171,7 +174,12 @@ impl Recorder {
         let options = WriteOptions {
             level: 1,
             block_bytes: 32 + r.below(400) as usize,
-            batch: 1 + r.below(2) as usize,
+            compression: if r.below(2) == 0 {
+                Compression::Spread
+            } else {
+                Compression::Offload
+            },
+            promise_with_items: true,
         };
         let mut w = Writer::new(declaration(3, to), options).unwrap();
         let file = Arc::new(Growing::default());
@@ -621,13 +629,14 @@ fn an_extended_answer_is_a_fresh_querys_after_every_snapshot() {
     }
 }
 
-/// A live recording of V and I at a pair every 10 ticks to tick 1,990, in blocks of 8 pairs,
-/// read through `file`, and its writer.
+/// A live recording of V and I at a pair every 10 ticks to tick 1,990, in blocks of 16 samples,
+/// each item promising its tick, read through `file`, and its writer.
 fn pairs_to_1990(file: &Arc<Growing>) -> (Writer, Recording) {
     let options = WriteOptions {
         level: 1,
         block_bytes: 64,
-        batch: 1,
+        promise_with_items: true,
+        ..WriteOptions::default()
     };
     // Buckets of 256 ticks, wider than the columns asked of it: they read the samples.
     let mut w = Writer::new(declaration(8, 1 << 40), options).unwrap();
@@ -702,22 +711,18 @@ fn an_extend_keeps_the_columns_before_the_first_change_and_reads_from_there() {
     assert_eq!(&e.max, &f.max);
     // Only the blocks from column 19's start, 1,960, were read, where the fresh query read
     // every block from `around`'s start.
+    let bytes = file.bytes.lock().unwrap().clone();
+    let refs = snapshot.block_refs(I, &[], from_memory(&bytes)).unwrap();
     let block_of = |offset: u64| {
-        (0..snapshot.block_count())
-            .find(|&i| {
-                let row = snapshot.row(i).unwrap();
-                (row.offset..row.offset + u64::from(row.length)).contains(&offset)
-            })
+        *refs
+            .iter()
+            .find(|b| (b.row.offset..b.row.offset + u64::from(b.row.length)).contains(&offset))
             .unwrap()
     };
     assert!(!reads.is_empty());
     for offset in &reads {
         let b = block_of(*offset);
-        assert!(
-            snapshot.block_end(b).unwrap() > 1960,
-            "block {b}: {:?}",
-            snapshot.row(b)
-        );
+        assert!(b.end > 1960, "the block at {}: {b:?}", b.start);
     }
     file.reads.lock().unwrap().clear();
     rec.query(&q, &cancel).unwrap();

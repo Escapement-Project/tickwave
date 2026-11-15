@@ -2,7 +2,7 @@
 //! recording's tick 0, an origin of -1,000. Repair and recut keep its channels' source ticks and
 //! its origin, and end each digital channel at the source tick of the last block's end.
 
-use escapement_tickwave_format::decode::{BlockChannel, Footer};
+use escapement_tickwave_format::decode::{BlockChannel, Footer, Index};
 use escapement_tickwave_format::header::{
     AnalogCoding, ChannelKind, Declaration, DeclaredChannel, DeclaredKind, SourceFormat,
     SourceHeader,
@@ -28,6 +28,7 @@ fn declaration() -> Declaration {
                     significant: None,
                 },
                 shaping: Shaping::default(),
+                overview_shift: None,
             },
             DeclaredChannel {
                 name: "D".into(),
@@ -35,6 +36,7 @@ fn declaration() -> Declaration {
                 source: 0,
                 data: DeclaredKind::Digital { initial: false },
                 shaping: Shaping::default(),
+                overview_shift: None,
             },
         ],
         derived: Vec::new(),
@@ -52,7 +54,7 @@ fn options() -> WriteOptions {
     WriteOptions {
         level: 3,
         block_bytes: 1 << 20,
-        batch: 1,
+        ..WriteOptions::default()
     }
 }
 
@@ -121,16 +123,12 @@ fn written(stop: usize) -> (Writer, Vec<u8>, Vec<usize>) {
 
 /// Each channel's source ticks: edges, and the samples' count, from every block.
 fn source_items(file: &[u8]) -> (Vec<i64>, u64) {
-    let head = Footer::parse_file(file).unwrap();
+    let index = Index::of_file(file).unwrap();
     let (mut edges, mut samples) = (Vec::new(), 0);
-    for i in 0..head.rows.len() {
-        let (offset, len) = head.block_location(i);
-        let block = head
-            .decode_block(i, &file[offset as usize..][..len as usize])
-            .unwrap();
-        for ch in &block.channels {
-            match ch {
-                BlockChannel::Digital { .. } => edges.extend(ch.source_ticks().unwrap()),
+    for c in 0..index.blocks.len() {
+        for block in index.channel_blocks(file, c).unwrap() {
+            match &block.data {
+                ch @ BlockChannel::Digital { .. } => edges.extend(ch.source_ticks().unwrap()),
                 BlockChannel::Analog { values, .. } => samples += values.len() as u64,
             }
         }

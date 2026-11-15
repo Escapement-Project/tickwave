@@ -97,6 +97,8 @@ fn recording(shaped: bool) -> Recording {
                     count: 33,
                     breaks: Vec::new(),
                     samples: Samples::F32(Box::new((0..33).map(|i| i as f32))),
+                    lost_before: 0,
+                    lost_after: 0,
                 }),
                 shaping: shaping(Shaping {
                     offset: None,
@@ -512,7 +514,7 @@ fn a_moved_or_trimmed_recording_cut_off_is_not_repaired() {
     };
     c.end = LENGTH;
     let whole = encode(rec, &small).unwrap();
-    assert!(Footer::parse_file(&shaped).unwrap().rows.len() > 4);
+    assert!(Footer::parse_file(&shaped).unwrap().header.channels[2].blocks > 4);
     for percent in [30, 50, 70, 90, 100] {
         let at = |file: &[u8]| (file.len() * percent / 100).min(file.len() - 1);
         let err = match repair(&shaped[..at(&shaped)], 3) {
@@ -527,6 +529,8 @@ fn a_moved_or_trimmed_recording_cut_off_is_not_repaired() {
         );
 
         let cut = &whole[..at(&whole)];
+        // D, declared high, closes its one block at the finish: cut before it, D is never known
+        // in the repaired file, and keeps its declared level.
         let repaired = repair(cut, 3).unwrap_or_else(|e| panic!("cut at {percent} %: {e}"));
         let mut file = cut[..repaired.keep as usize].to_vec();
         file.extend_from_slice(&repaired.tail);

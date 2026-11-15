@@ -1,33 +1,37 @@
 //! Repair: a footer and a trailer for a file cut off before them, by a crash, a power cut or a
-//! full disk. The records up to the first that is not whole stay as they are.
+//! full disk (FORMAT.md, "Repairing a cut-off file"). The file is cut just after its latest
+//! known-through record, or, with none, after its last record at which every derived channel's
+//! operands hold as many samples; the records before the cut stay as they are.
 
-use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
+use std::collections::{BTreeMap, VecDeque};
 
 use crate::annotations::Lines;
+use crate::compress::compress;
 use crate::decode::{
     BlockChannel, DecodeError, MAX_DECODED, check_header, corrupt, gaps_ending_in, inflate_limited,
-    level_after, overview_room,
+    level_after,
 };
-use crate::hash::ChannelHasher;
+use crate::hash::{self, ChannelHasher};
 use crate::header::{
-    BlockRow, ChannelHeader, ChannelKind, Declaration, DeclaredKind, Header, LEVEL_BIT,
-    OverviewRow, Words,
+    BlockRow, ChannelHeader, ChannelKind, Declaration, DeclaredKind, DerivedHeader, Header,
+    INLINE_LIST, LEVEL_BIT, OverviewLevel, OverviewRow,
 };
+use crate::index::{Due, Row, Table, TableWriter};
 use crate::mapping::Mapping;
 use crate::model::{Break, Gap};
-use crate::overview::{self, Builder, Settled};
+use crate::overview::{self, Column, Ladder, Level, Pair, Settled};
 use crate::reader::{Ending, Event, Reader};
-use crate::record::{self, BlockHead, Kind};
+use crate::record::{self, BlockHead, Kind, OverviewHead};
 use crate::writer::{
-    Bundle, OVERVIEW_BLOCK_LEVEL, WriteError, assemble, bundled_files, compress, finished_header,
-    generated,
+    Bundle, ChannelTops, OVERVIEW_BLOCK_LEVEL, WriteError, bundle_payload, bundled_files,
+    footer_payload, generated,
 };
 
-/// A cut-off file's length (FORMAT.md, "Repairing a cut-off file"): the later of the last
-/// block's end, 0 with no block, and one past the latest start among the annotation records.
-pub fn repaired_length(last_end: i64, latest_annotation: Option<i64>) -> i64 {
-    latest_annotation.map_or(last_end, |start| last_end.max(start.saturating_add(1)))
+/// A cut-off file's length: the later of `end`, the latest known-through tick or, with none,
+/// the latest end of any kept block, 0 with none, and one past the latest start among the
+/// annotation records.
+pub fn repaired_length(end: i64, latest_annotation: Option<i64>) -> i64 {
+    latest_annotation.map_or(end, |start| end.max(start.saturating_add(1)))
 }
 
 /// The latest start among annotation records, with `record` taken in.
@@ -38,13 +42,30 @@ pub(crate) fn latest_start(latest: Option<i64>, record: &record::Annotation) -> 
     }
 }
 
-/// A digital channel a file with no block declares high at its start: no block carries that level,
-/// and with no block the channel is never known, so its `initial` would have to be false.
-pub(crate) fn high_without_block(d: &Declaration) -> Option<&str> {
-    d.channels.iter().find_map(|c| match c.data {
-        DeclaredKind::Digital { initial: true } => Some(c.name.as_str()),
-        _ => None,
-    })
+pub use crate::decode::HOLD;
+
+/// The overview blocks a ladder settles at a step, as a writer does.
+const SETTLE_STEP: usize = 16;
+
+/// About the bytes `event` takes in memory once read.
+fn held_size(event: &Event) -> usize {
+    64 + match event {
+        Event::Block(b) => match &b.data {
+            BlockChannel::Digital { edges, source, .. } => {
+                8 * (edges.len() + source.as_ref().map_or(0, Vec::len))
+            }
+            BlockChannel::Analog { values, .. } => match values {
+                crate::samples::Values::F32(v) => 4 * v.len(),
+                v => 8 * v.len(),
+            },
+        },
+        Event::OverviewBlock { frame, .. } => frame.len(),
+        Event::Annotation(a) => {
+            a.source.len() + serde_json::to_vec(&a.annotation).map_or(0, |j| 2 * j.len())
+        }
+        Event::Bundle(b) => b.len(),
+        _ => 0,
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -57,13 +78,14 @@ pub enum RepairError {
     NoDeclaration,
     #[error("the file holds neither a whole block nor an annotation record")]
     NoBlock,
-    #[error(
-        "the file holds no block, and channel {0} is declared high at tick 0: no block carries \
-         that level, so it isn't repaired"
-    )]
-    HighWithoutBlock(String),
-    #[error("an overview block in the file differs from the one its content gives")]
+    #[error("an overview block or page in the file differs from the one its content gives")]
     Overview,
+    #[error(
+        "the file holds {0} bytes of decoded records past its latest known-through record, or \
+         since its derived channels' operands last held as many samples: more than repair holds \
+         back, {HOLD}, before it can tell whether they stand"
+    )]
+    HeldBack(usize),
     /// Channel `0` states a kept span: it was moved or cut, or the recording merges several
     /// sources. The declaration fixed each kept span before the length was known, and the content
     /// id pins it, so a file cut off before them has no footer that would hold. Its sources make
@@ -86,61 +108,374 @@ pub struct Repaired {
     pub generated: BTreeMap<String, Vec<String>>,
 }
 
-enum Channel {
+/// The records of a file read in order that a repair or a re-cut may still drop: those after its
+/// latest known-through record, or, before any, those after the last record at which every
+/// derived channel's operands hold as many samples. What it holds back it gives up, in order,
+/// once a later record shows it stands. It holds at most `HOLD` bytes of what it decoded: a
+/// writer's file holds back a flush interval, or one block of a derived channel's operand.
+pub(crate) struct Hold {
+    held: Vec<(u64, Event)>,
+    /// About the bytes `held` takes in memory.
+    bytes: usize,
+    known: bool,
+    /// Each derived channel's operands, by channel.
+    pairs: Vec<(usize, usize)>,
+    /// Each channel's samples in the blocks taken, held back or not.
+    counts: Vec<u64>,
+}
+
+impl Hold {
+    pub fn new(d: &Declaration) -> Self {
+        Self {
+            held: Vec::new(),
+            bytes: 0,
+            known: false,
+            pairs: overview::products(&d.channels, &d.derived)
+                .into_iter()
+                .map(|(a, b, _)| (a, b))
+                .collect(),
+            counts: vec![0; d.channels.len()],
+        }
+    }
+
+    /// The record at `at` read as `event`: the records that now stand, in order. Past `HOLD`
+    /// bytes held back, the bytes held.
+    pub fn take(&mut self, at: u64, event: Event) -> Result<Vec<(u64, Event)>, usize> {
+        let mut stands = matches!(event, Event::KnownThrough { .. } | Event::Footer(_));
+        if let Event::Block(b) = &event
+            && let BlockChannel::Analog { values, .. } = &b.data
+        {
+            self.counts[b.head.channel as usize] += values.len() as u64;
+        }
+        if matches!(event, Event::KnownThrough { .. }) {
+            self.known = true;
+        }
+        self.bytes += held_size(&event);
+        self.held.push((at, event));
+        if !self.known {
+            stands |= self
+                .pairs
+                .iter()
+                .all(|&(a, b)| self.counts[a] == self.counts[b]);
+        }
+        if stands {
+            self.bytes = 0;
+            Ok(std::mem::take(&mut self.held))
+        } else if self.bytes > HOLD {
+            Err(self.bytes)
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    /// The records held back when the file ends: they go.
+    pub fn dropped(self) -> Vec<(u64, Event)> {
+        self.held
+    }
+}
+
+/// A table as repair keeps it, with the page its entries make due until the file shows it.
+struct Follow<R: Row> {
+    table: TableWriter<R>,
+    due: Option<Due>,
+    /// The file holds some of the table's last pages: a writer's finish began them.
+    finishing: bool,
+}
+
+impl<R: Row> Follow<R> {
+    fn new(channel: usize, table: Table, digital: bool) -> Self {
+        Self {
+            table: TableWriter::new(channel as u32, table, digital),
+            due: None,
+            finishing: false,
+        }
+    }
+
+    fn push(&mut self, row: R) {
+        debug_assert!(
+            self.due.is_none(),
+            "the reader holds a page due before an entry"
+        );
+        self.due = self.table.push(row);
+    }
+
+    /// The file's page record at `at`, `len` bytes, of `count` entries, which the reader has
+    /// held to the one due, or to the next of the table's last pages.
+    fn page(&mut self, at: u64, len: u32, count: u32, inline: u64) -> Result<(), RepairError> {
+        let due = match self.due.take() {
+            Some(due) => due,
+            None => {
+                if !self.finishing {
+                    // Only a gap list's last page leaves entries out: the gaps past the end.
+                    let open = self.table.open().len() as u64;
+                    if let Some(drop) = open.checked_sub(u64::from(count)).filter(|&d| d > 0)
+                        && self.table.table() == Table::Gaps
+                    {
+                        self.table.drop_last(drop);
+                    }
+                    self.finishing = true;
+                }
+                self.table
+                    .finish_next(inline)
+                    .ok_or(RepairError::Overview)?
+            }
+        };
+        if due.record.len() != len as usize {
+            return Err(RepairError::Overview);
+        }
+        self.due = self.table.placed(&due, at);
+        Ok(())
+    }
+
+    /// Writes what is due, then the table's last pages, to `tail` at `keep`.
+    fn finish(&mut self, inline: u64, tail: &mut Vec<u8>, keep: u64) {
+        let mut due = self.due.take();
+        loop {
+            while let Some(d) = due {
+                let at = keep + tail.len() as u64;
+                tail.extend_from_slice(&d.record);
+                due = self.table.placed(&d, at);
+            }
+            due = self.table.finish_next(inline);
+            if due.is_none() {
+                return;
+            }
+        }
+    }
+}
+
+enum Data {
     Digital {
-        hasher: ChannelHasher,
+        initial: bool,
         edges: u64,
         gaps: Vec<Gap>,
         /// Each gap's `to` on the axis.
         gap_ends: Vec<i64>,
         /// The level after the last block: its start's, through its edges and gap ends.
         level: bool,
-        map: Mapping,
+        list: Follow<Gap>,
     },
     Analog {
-        hasher: ChannelHasher,
         count: u64,
         runs: Vec<Break>,
+        list: Follow<Break>,
     },
 }
 
-/// An overview block the content settles, as repair keeps it until it finishes: its decoded
-/// bytes' length and hash, which the file's must match where the file holds it, and its frame
-/// for where it doesn't. Kept so, a block costs its frame, not its buckets.
-#[derive(Clone)]
-struct Made {
-    shift: u8,
-    k: u64,
-    len: usize,
-    raw: blake3::Hash,
-    frame: Arc<[u8]>,
+struct Chan {
+    hasher: ChannelHasher,
+    map: Mapping,
+    start: i64,
+    next_start: i64,
+    blocks: Follow<BlockRow>,
+    blocks_count: u64,
+    data: Data,
 }
 
-impl Made {
-    /// `last` is the block made before: a span with no item settles block after block of one
-    /// level, whose bytes and frame are made once, as the writer makes them.
-    fn of(s: Settled, last: &mut Option<(Arc<overview::Level>, Made)>) -> Result<Self, WriteError> {
-        if let Some((level, made)) = last
-            && Arc::ptr_eq(level, &s.level)
-        {
-            return Ok(Made {
-                shift: s.shift,
-                k: s.k,
-                ..made.clone()
+struct OChan {
+    ladder: Option<Ladder>,
+    column: Column,
+    levels: Vec<Option<Follow<OverviewRow>>>,
+}
+
+struct State {
+    declaration: Declaration,
+    chans: Vec<Chan>,
+    ochans: Vec<OChan>,
+    pairs: Vec<Pair>,
+    operand_of: Vec<Vec<usize>>,
+    known: Option<i64>,
+    /// The overview blocks the content settles that the file has not shown, by overview
+    /// channel, in the order a writer settles them, which is the order it writes them.
+    expected: VecDeque<(usize, Settled)>,
+    /// What the content asked of the ladders and they have not done: an overview channel and
+    /// the tick it settles to.
+    asked: VecDeque<(usize, i64)>,
+    /// The ladders' ends, once the file shows a writer's finish began them: the length, and
+    /// each overview channel's strip and levels in blocks.
+    ended: Option<(i64, Vec<Level>, Vec<Vec<u8>>)>,
+}
+
+impl State {
+    fn new(d: Declaration) -> Result<Self, String> {
+        let mut chans = Vec::with_capacity(d.channels.len());
+        for (c, channel) in d.channels.iter().enumerate() {
+            let (Some(hasher), Some(map), Some(start)) =
+                (ChannelHasher::declared(&d, c), d.mapping(c), d.start(c))
+            else {
+                return Err(format!("channel {c} has no mapping to the axis"));
+            };
+            let digital = matches!(channel.data, DeclaredKind::Digital { .. });
+            chans.push(Chan {
+                hasher,
+                map,
+                start,
+                next_start: 0,
+                blocks: Follow::new(c, Table::Blocks, digital),
+                blocks_count: 0,
+                data: match &channel.data {
+                    DeclaredKind::Digital { initial } => Data::Digital {
+                        initial: *initial,
+                        edges: 0,
+                        gaps: Vec::new(),
+                        gap_ends: Vec::new(),
+                        level: *initial,
+                        list: Follow::new(c, Table::Gaps, true),
+                    },
+                    DeclaredKind::Analog { .. } => Data::Analog {
+                        count: 0,
+                        runs: Vec::new(),
+                        list: Follow::new(c, Table::Breaks, false),
+                    },
+                },
             });
         }
-        let mut raw = Vec::new();
-        overview::write_level(&s.level, &mut raw);
-        let made = Made {
-            shift: s.shift,
-            k: s.k,
-            len: raw.len(),
-            raw: blake3::hash(&raw),
-            // Copied out of the compressor's buffer, which has room for the bytes uncompressed.
-            frame: Arc::from(compress(&raw, OVERVIEW_BLOCK_LEVEL)?),
-        };
-        *last = Some((s.level, made.clone()));
-        Ok(made)
+        let columns = overview::columns(&d.channels, &d.derived);
+        let ochans = columns
+            .iter()
+            .enumerate()
+            .map(|(o, &column)| {
+                let initial = match d.channels.get(o).map(|c| &c.data) {
+                    Some(DeclaredKind::Digital { initial }) => Some(*initial),
+                    _ => None,
+                };
+                OChan {
+                    ladder: Some(Ladder::new(
+                        d.shift(o).expect("a checked declaration's channel"),
+                        column,
+                        initial,
+                    )),
+                    column,
+                    levels: Vec::new(),
+                }
+            })
+            .collect();
+        let products = overview::products(&d.channels, &d.derived);
+        let mut operand_of = vec![Vec::new(); d.channels.len()];
+        for (k, &(a, b, _)) in products.iter().enumerate() {
+            operand_of[a].push(k);
+            if b != a {
+                operand_of[b].push(k);
+            }
+        }
+        Ok(Self {
+            pairs: Pair::of(&d.channels, &d.derived),
+            declaration: d,
+            chans,
+            ochans,
+            operand_of,
+            known: None,
+            expected: VecDeque::new(),
+            asked: VecDeque::new(),
+            ended: None,
+        })
+    }
+
+    /// An overview block record comes that the content has settled no block for: where every
+    /// channel's blocks end at one tick, a writer's finish closed them there and then ended the
+    /// ladders, whose last blocks follow. They end here as they did there.
+    fn end_ladders(&mut self) {
+        let length = self.chans.first().map_or(0, |c| c.next_start);
+        if self.ended.is_some() || length < 1 || self.chans.iter().any(|c| c.next_start != length) {
+            return;
+        }
+        let mut strips = Vec::with_capacity(self.ochans.len());
+        let mut levels = Vec::with_capacity(self.ochans.len());
+        for o in 0..self.ochans.len() {
+            let Some(ladder) = self.ochans[o].ladder.take() else {
+                return;
+            };
+            let end = ladder.finish(length);
+            for s in end.settled {
+                self.expected.push_back((o, s));
+            }
+            strips.push(end.strip);
+            levels.push(end.levels);
+        }
+        self.ended = Some((length, strips, levels));
+    }
+
+    fn known_of(&self, o: usize) -> i64 {
+        let k = self.known.unwrap_or(0);
+        match self.chans.get(o) {
+            Some(ch) => ch.next_start.max(k),
+            None => {
+                let [(a, _), (b, _)] = &self.pairs[o - self.chans.len()].operands;
+                self.known_of(*a).min(self.known_of(*b))
+            }
+        }
+    }
+
+    /// Overview channel `o` settles to where it is known: asked now, done as the file's overview
+    /// blocks or the finish need it, in the order asked, so a long span's blocks are made a few
+    /// at a time.
+    fn settle(&mut self, o: usize) {
+        let to = self.known_of(o);
+        self.asked.push_back((o, to));
+    }
+
+    /// Does what was asked, a step at a time, until an overview block is expected or nothing is
+    /// left to do.
+    fn fill(&mut self) {
+        while self.expected.is_empty() {
+            let Some(&(o, to)) = self.asked.front() else {
+                return;
+            };
+            let reached = match self.ochans[o].ladder.as_mut() {
+                Some(l) => {
+                    let reached = l.settle_some(to, SETTLE_STEP);
+                    for s in l.take_settled() {
+                        self.expected.push_back((o, s));
+                    }
+                    reached
+                }
+                None => true,
+            };
+            if reached {
+                self.asked.pop_front();
+            }
+        }
+    }
+
+    /// Writes every overview block the content settles and the file lacks, in order, to `tail`
+    /// at `keep`, each with its row and the pages that come due.
+    fn write_expected(&mut self, tail: &mut Vec<u8>, keep: u64) -> Result<(), RepairError> {
+        loop {
+            self.fill();
+            let Some((o, s)) = self.expected.pop_front() else {
+                return Ok(());
+            };
+            let at = keep + tail.len() as u64;
+            let frame = compress(&s.raw, OVERVIEW_BLOCK_LEVEL).map_err(WriteError::from)?;
+            let head = OverviewHead {
+                channel: o as u32,
+                shift: s.shift,
+                k: s.k,
+                n: s.n,
+            };
+            record::write(tail, Kind::OverviewBlock, &[&head.to_bytes(), &frame]);
+            let levels = &mut self.ochans[o].levels;
+            if levels.len() <= s.li {
+                levels.resize_with(s.li + 1, || None);
+            }
+            let follow =
+                levels[s.li].get_or_insert_with(|| Follow::new(o, Table::Level(s.shift), false));
+            follow.due = follow.table.push(OverviewRow {
+                offset: at + (record::PAYLOAD_AT + OverviewHead::LEN) as u64,
+                length: frame.len() as u32,
+                decoded_length: s.raw.len() as u32,
+                n: s.n,
+            });
+            follow.finish_due(tail, keep);
+        }
+    }
+
+    fn settle_channel(&mut self, c: usize) {
+        self.settle(c);
+        for i in 0..self.operand_of[c].len() {
+            let d = self.operand_of[c][i];
+            self.settle(self.chans.len() + d);
+        }
     }
 }
 
@@ -148,17 +483,8 @@ impl Made {
 pub struct Repairer {
     reader: Reader,
     level: i32,
-    declaration: Option<Declaration>,
-    builder: Option<Builder>,
-    channels: Vec<Channel>,
-    rows: Vec<BlockRow>,
-    words: Words,
-    made: Vec<Made>,
-    last_made: Option<(Arc<overview::Level>, Made)>,
-    /// The overview blocks the file holds: their frames' offsets and bytes.
-    present: HashMap<(u8, u64), (u64, Vec<u8>)>,
-    /// The overview block records read, a repeated one counted again.
-    overview_records: usize,
+    hold: Option<Hold>,
+    state: Option<State>,
     annotations: Vec<record::Annotation>,
     /// The latest start among the annotation records.
     latest_annotation: Option<i64>,
@@ -167,7 +493,7 @@ pub struct Repairer {
     left_out: Vec<String>,
     bundle: Option<Bundle>,
     /// A record that does not hold together: a derived channel's operands that don't pair.
-    error: Option<String>,
+    error: Option<RepairError>,
 }
 
 impl Repairer {
@@ -176,15 +502,8 @@ impl Repairer {
         Self {
             reader: Reader::new(MAX_DECODED),
             level,
-            declaration: None,
-            builder: None,
-            channels: Vec::new(),
-            rows: Vec::new(),
-            words: Words::default(),
-            made: Vec::new(),
-            last_made: None,
-            present: HashMap::new(),
-            overview_records: 0,
+            hold: None,
+            state: None,
             annotations: Vec::new(),
             latest_annotation: None,
             lines: None,
@@ -194,7 +513,7 @@ impl Repairer {
         }
     }
 
-    /// Bundles the annotations into the footer, as the writer would have, rather than handing
+    /// Bundles the annotations into the file, as the writer would have, rather than handing
     /// them back as generator files alone.
     pub fn bundle(&mut self, bundle: Bundle) {
         self.bundle = Some(bundle);
@@ -211,344 +530,401 @@ impl Repairer {
     pub fn feed(&mut self, bytes: &[u8]) -> Result<(), RepairError> {
         self.reader.feed(bytes);
         while let Some(event) = self.reader.next_event()? {
-            if self.error.is_none() {
-                self.take(event);
+            let at = self.reader.record_at();
+            if let Event::Declaration(d) = &event {
+                self.hold = Some(Hold::new(d));
+                self.lines = Some(Lines::declared(d));
+                match State::new((**d).clone()) {
+                    Ok(state) => self.state = Some(state),
+                    Err(e) => {
+                        self.error.get_or_insert(RepairError::Decode(corrupt(e)));
+                    }
+                }
+                continue;
+            }
+            // An annotation's line is checked as it is read, wherever the cut falls.
+            if let Event::Annotation(a) = &event
+                && let Some(Err(why)) = self
+                    .lines
+                    .as_mut()
+                    .map(|l| l.take(&a.source, &a.annotation))
+            {
+                self.left_out
+                    .push(format!("generator {:?}: {why}", a.source));
+                continue;
+            }
+            let Some(hold) = self.hold.as_mut() else {
+                continue;
+            };
+            let stand = match hold.take(at, event) {
+                Ok(stand) => stand,
+                Err(held) => return Err(RepairError::HeldBack(held)),
+            };
+            for (at, event) in stand {
+                if self.error.is_none()
+                    && let Err(e) = self.commit(at, event)
+                {
+                    self.error = Some(e);
+                }
             }
         }
-        match &self.error {
-            Some(e) => Err(RepairError::Decode(corrupt(e.clone()))),
+        match self.error.take() {
+            Some(e) => Err(e),
             None => Ok(()),
         }
     }
 
-    fn take(&mut self, event: Event) {
+    /// An annotation record whose line checked, wherever it lies.
+    fn annotation(&mut self, a: record::Annotation) {
+        self.latest_annotation = latest_start(self.latest_annotation, &a);
+        self.annotations.push(a);
+    }
+
+    /// A record that stands: its content counts, and its overview blocks and pages are held to
+    /// what that content gives.
+    fn commit(&mut self, at: u64, event: Event) -> Result<(), RepairError> {
+        if let Event::Annotation(a) = event {
+            self.annotation(a);
+            return Ok(());
+        }
+        let Some(s) = self.state.as_mut() else {
+            return Ok(());
+        };
         match event {
-            Event::Declaration(d) => {
-                self.builder = Some(Builder::new(d.overview_shift, &d.channels, &d.derived));
-                let mut channels = Vec::with_capacity(d.channels.len());
-                for (c, channel) in d.channels.iter().enumerate() {
-                    let (Some(hasher), Some(map)) = (ChannelHasher::declared(&d, c), d.mapping(c))
-                    else {
-                        self.error
-                            .get_or_insert(format!("channel {c} has no mapping to the axis"));
-                        return;
-                    };
-                    channels.push(match &channel.data {
-                        DeclaredKind::Digital { initial } => Channel::Digital {
-                            hasher,
-                            edges: 0,
-                            gaps: Vec::new(),
-                            gap_ends: Vec::new(),
-                            level: *initial,
-                            map,
-                        },
-                        DeclaredKind::Analog { .. } => Channel::Analog {
-                            hasher,
-                            count: 0,
-                            runs: Vec::new(),
-                        },
-                    });
-                }
-                self.channels = channels;
-                self.words = Words::new(d.channels.len());
-                self.lines = Some(Lines::declared(&d));
-                self.declaration = Some(*d);
-            }
             Event::Gap { channel, gap } => {
-                if let Channel::Digital {
+                let ch = &mut s.chans[channel];
+                if let Data::Digital {
                     gaps,
                     gap_ends,
-                    map,
+                    list,
                     ..
-                } = &mut self.channels[channel]
+                } = &mut ch.data
                 {
                     // The reader holds a gap's ends inside the axis.
-                    let to = map.axis(gap.to).unwrap_or(i64::MAX);
+                    let to = ch.map.axis(gap.to).unwrap_or(i64::MAX);
                     gaps.push(gap);
                     gap_ends.push(to);
-                    self.builder.as_mut().unwrap().gap(channel, gap, to);
+                    list.push(gap);
+                    if let Some(l) = s.ochans[channel].ladder.as_mut() {
+                        l.gap(gap, to);
+                    }
                 }
             }
             Event::Run { channel, run } => {
-                if let Channel::Analog { runs, .. } = &mut self.channels[channel] {
+                if let Data::Analog { runs, list, .. } = &mut s.chans[channel].data {
                     runs.push(run);
+                    if run.index > 0 {
+                        list.push(run);
+                    }
                 }
             }
+            Event::KnownThrough { tick } => {
+                s.known = Some(tick);
+                for o in 0..s.ochans.len() {
+                    s.settle(o);
+                }
+            }
+            Event::Block(_) if s.ended.is_some() => {
+                return Err(corrupt("a block record after the overview's last blocks").into());
+            }
             Event::Block(block) => {
-                let builder = self.builder.as_mut().unwrap();
-                if let Err(e) = overview_room(block.head.end, builder.finest()) {
-                    self.error.get_or_insert(format!(
-                        "block {} ends at tick {}, where {e}",
-                        self.rows.len(),
-                        block.head.end
-                    ));
-                    return;
-                }
-                for (c, got) in block.channels.iter().enumerate() {
-                    let source = got.source_ticks().unwrap_or_default();
-                    match (got, &mut self.channels[c]) {
-                        (
-                            BlockChannel::Digital { edges, initial, .. },
-                            Channel::Digital {
-                                hasher,
-                                edges: n,
-                                gaps,
-                                gap_ends,
-                                level,
-                                ..
-                            },
-                        ) => {
-                            for (&k, &tick) in source.iter().zip(edges) {
-                                hasher.edge(k);
-                                builder.edge(c, k, tick);
-                                *n += 1;
-                            }
-                            *level = level_after(
-                                *initial,
-                                source,
-                                gaps_ending_in(gaps, gap_ends, block.head.start, block.head.end),
-                            );
+                let c = block.head.channel as usize;
+                let stored = s.chans.len();
+                let source = block.data.source_ticks().unwrap_or_default().to_vec();
+                let ch = &mut s.chans[c];
+                match (&block.data, &mut ch.data) {
+                    (
+                        BlockChannel::Digital { edges, initial, .. },
+                        Data::Digital {
+                            edges: n,
+                            gaps,
+                            gap_ends,
+                            level,
+                            ..
+                        },
+                    ) => {
+                        let l = s.ochans[c]
+                            .ladder
+                            .as_mut()
+                            .expect("a ladder until the finish");
+                        for (&k, &tick) in source.iter().zip(edges) {
+                            ch.hasher.edge(k);
+                            l.edge(k, tick);
+                            *n += 1;
                         }
-                        (
-                            BlockChannel::Analog {
-                                values,
-                                first_index,
-                            },
-                            Channel::Analog { hasher, count, .. },
-                        ) => {
-                            for (index, value) in (*first_index..).zip(values.iter()) {
-                                let Some(tick) = self.reader.sample_axis_tick(c, index) else {
-                                    self.error.get_or_insert(format!(
-                                        "channel {c}: sample {index} has no place on the axis"
-                                    ));
-                                    return;
-                                };
-                                hasher.sample(value);
-                                if let Err(e) = builder.sample(c, tick, value) {
-                                    self.error.get_or_insert(e.to_string());
+                        *level = level_after(
+                            *initial,
+                            &source,
+                            gaps_ending_in(gaps, gap_ends, block.head.start, block.head.end),
+                        );
+                    }
+                    (
+                        BlockChannel::Analog {
+                            values,
+                            first_index,
+                        },
+                        Data::Analog { count, .. },
+                    ) => {
+                        for (index, value) in (*first_index..).zip(values.iter()) {
+                            let tick = self.reader.sample_axis_tick(c, index).ok_or_else(|| {
+                                corrupt(format!(
+                                    "channel {c}: sample {index} has no place on the axis"
+                                ))
+                            })?;
+                            ch.hasher.sample(value);
+                            s.ochans[c]
+                                .ladder
+                                .as_mut()
+                                .expect("a ladder until the finish")
+                                .sample(tick, value);
+                            for i in 0..s.operand_of[c].len() {
+                                let d = s.operand_of[c][i];
+                                if let Some(p) = s.pairs[d]
+                                    .take(c, tick, value)
+                                    .map_err(|e| corrupt(e.to_string()))?
+                                {
+                                    s.ochans[stored + d]
+                                        .ladder
+                                        .as_mut()
+                                        .expect("a ladder until the finish")
+                                        .sample(tick, p);
                                 }
-                                *count += 1;
                             }
+                            *count += 1;
                         }
-                        _ => unreachable!("blocks follow the declaration"),
                     }
+                    _ => unreachable!("blocks follow the declaration"),
                 }
-                'settle: loop {
-                    let reached = match builder.settle_step(block.head.end) {
-                        Ok(reached) => reached,
-                        Err(e) => {
-                            self.error.get_or_insert(e.to_string());
-                            break;
-                        }
-                    };
-                    for s in builder.take_settled() {
-                        match Made::of(s, &mut self.last_made) {
-                            Ok(made) => self.made.push(made),
-                            Err(e) => {
-                                self.error.get_or_insert(e.to_string());
-                                break 'settle;
-                            }
-                        }
-                    }
-                    if reached {
-                        break;
-                    }
-                }
-                self.rows.push(BlockRow {
+                let ch = &mut s.chans[c];
+                ch.next_start = block.head.end;
+                ch.blocks_count += 1;
+                ch.blocks.push(BlockRow {
                     start: block.head.start,
                     offset: block.frame_offset,
                     length: block.frame_len,
                     decoded_length: block.head.decoded_length,
+                    word: block.head.word,
                 });
-                self.words.push(&block.head.words);
+                s.settle_channel(c);
             }
-            Event::OverviewBlock {
-                shift,
-                k,
-                frame_offset,
-                frame,
-            } => {
-                self.present.insert((shift, k), (frame_offset, frame));
-                self.overview_records += 1;
-            }
-            Event::Annotation(a) => {
-                if let Some(Err(why)) = self
-                    .lines
-                    .as_mut()
-                    .map(|l| l.take(&a.source, &a.annotation))
-                {
-                    self.left_out
-                        .push(format!("generator {:?}: {why}", a.source));
-                    return;
+            Event::OverviewBlock { head, frame, .. } => {
+                let o = head.channel as usize;
+                s.fill();
+                if s.expected.is_empty() {
+                    s.end_ladders();
                 }
-                self.latest_annotation = latest_start(self.latest_annotation, &a);
-                self.annotations.push(a);
+                let (_, want) = s
+                    .expected
+                    .pop_front()
+                    .filter(|(x, w)| (*x, w.shift, w.k, w.n) == (o, head.shift, head.k, head.n))
+                    .ok_or(RepairError::Overview)?;
+                let oc = &mut s.ochans[o];
+                if inflate_limited(&frame, want.raw.len(), MAX_DECODED)? != *want.raw {
+                    return Err(RepairError::Overview);
+                }
+                let levels = &mut oc.levels;
+                if levels.len() <= want.li {
+                    levels.resize_with(want.li + 1, || None);
+                }
+                levels[want.li]
+                    .get_or_insert_with(|| Follow::new(o, Table::Level(head.shift), false))
+                    .push(OverviewRow {
+                        offset: at + (record::PAYLOAD_AT + OverviewHead::LEN) as u64,
+                        length: frame.len() as u32,
+                        decoded_length: want.raw.len() as u32,
+                        n: head.n,
+                    });
             }
-            Event::Footer(_) | Event::Skipped { .. } => {}
+            Event::Page { head, len } => {
+                let c = head.channel as usize;
+                let n = head.count;
+                let inline = INLINE_LIST as u64;
+                match head.table {
+                    0 => s.chans[c].blocks.page(at, len, n, 0)?,
+                    1 => {
+                        let oc = &mut s.ochans[c];
+                        let li = oc
+                            .levels
+                            .iter()
+                            .position(|l| {
+                                l.as_ref()
+                                    .is_some_and(|l| l.table.table() == Table::Level(head.shift))
+                            })
+                            .ok_or(RepairError::Overview)?;
+                        oc.levels[li].as_mut().expect("found").page(at, len, n, 0)?;
+                    }
+                    _ => match &mut s.chans[c].data {
+                        Data::Digital { list, .. } => list.page(at, len, n, inline)?,
+                        Data::Analog { list, .. } => list.page(at, len, n, inline)?,
+                    },
+                }
+            }
+            Event::Footer(_) => return Err(RepairError::Finished),
+            Event::Declaration(_)
+            | Event::Annotation(_)
+            | Event::Bundle(_)
+            | Event::Skipped { .. } => {}
         }
+        Ok(())
     }
 
     /// No more bytes come: the footer for what was read.
     pub fn finish(mut self) -> Result<Repaired, RepairError> {
-        let Ending::CutOff { at: keep } = self.reader.end()? else {
+        let Ending::CutOff { at: end_at } = self.reader.end()? else {
             return Err(RepairError::Finished);
         };
-        let declaration = self.declaration.take().ok_or(RepairError::NoDeclaration)?;
-        if let Some(c) = declaration.channels.iter().find(|c| !c.shaping.is_whole()) {
+        let mut state = self.state.take().ok_or(RepairError::NoDeclaration)?;
+        let d = state.declaration.clone();
+        if let Some(c) = d.channels.iter().find(|c| !c.shaping.is_whole()) {
             return Err(RepairError::Shaped(c.name.clone()));
         }
-        let mut builder = self.builder.take().ok_or(RepairError::NoDeclaration)?;
-        if self.rows.is_empty() && self.annotations.is_empty() {
+        let dropped = self.hold.take().map(Hold::dropped).unwrap_or_default();
+        let keep = dropped.first().map_or(end_at, |&(at, _)| at);
+        // The annotation records after the cut stand, and are written again after it.
+        let mut again = Vec::new();
+        for (_, event) in dropped {
+            if let Event::Annotation(a) = event {
+                self.annotation(a.clone());
+                again.push(a);
+            }
+        }
+        let any_block = state.chans.iter().any(|c| c.blocks_count > 0);
+        if !any_block && self.annotations.is_empty() {
             return Err(RepairError::NoBlock);
         }
-        if self.rows.is_empty()
-            && let Some(name) = high_without_block(&declaration)
-        {
-            return Err(RepairError::HighWithoutBlock(name.to_owned()));
-        }
-        let last_end = self.reader.next_start();
-        let length = repaired_length(last_end, self.latest_annotation);
+        let last_end = state.chans.iter().map(|c| c.next_start).max().unwrap_or(0);
+        let length = repaired_length(state.known.unwrap_or(last_end), self.latest_annotation);
         if length < 1 {
             return Err(RepairError::NoBlock);
         }
-        // The marks can put the length past the last block, as far as a tick goes.
-        overview_room(length, builder.finest())
-            .map_err(|e| corrupt(format!("the length the marks give, {length}: {e}")))?;
         let mut tail = Vec::new();
-        // Marks past the last block: an empty block runs to them.
-        if length > last_end {
-            let words: Vec<u32> = self
-                .channels
-                .iter()
-                .map(|c| match c {
-                    Channel::Digital { level: true, .. } => LEVEL_BIT,
-                    _ => 0,
-                })
-                .collect();
-            let raw = assemble(&vec![Vec::new(); words.len()], &vec![None; words.len()]);
-            let frame = compress(&raw, self.level).map_err(WriteError::from)?;
+        // What the content settled and the file lacks, as a writer's queue would hold it.
+        state.write_expected(&mut tail, keep)?;
+        for a in &again {
+            let json = serde_json::to_vec(a).expect("an annotation serialises");
+            record::write(&mut tail, Kind::Annotation, &[&json]);
+        }
+        // Each digital channel is known to the source tick at the latest known-through tick, or,
+        // with none, at its own last block's end, or its start with no block.
+        let known_to: Vec<i64> = state
+            .chans
+            .iter()
+            .map(|ch| match (state.known, ch.blocks_count) {
+                (Some(k), _) => ch.map.first_at(k).max(ch.start),
+                (None, 0) => ch.start,
+                (None, _) => ch.map.first_at(ch.next_start).max(ch.start),
+            })
+            .collect();
+        // Each channel's block from its last one's end to the length, as a writer's finish closes
+        // them, each followed by the overview blocks it settles.
+        let level = self.level;
+        for c in 0..state.chans.len() {
+            let ch = &mut state.chans[c];
+            if ch.next_start >= length {
+                continue;
+            }
+            let word = match &ch.data {
+                Data::Digital { level: true, .. } => LEVEL_BIT,
+                _ => 0,
+            };
+            let frame = compress(&[], level).map_err(WriteError::from)?;
             let head = BlockHead {
-                start: last_end,
+                channel: c as u32,
+                start: ch.next_start,
                 end: length,
-                decoded_length: raw.len() as u32,
-                words,
+                word,
+                decoded_length: 0,
             };
+            let at = keep + tail.len() as u64;
             record::write(&mut tail, Kind::Block, &[&head.to_bytes(), &frame]);
-            self.rows.push(BlockRow {
-                start: last_end,
-                offset: keep + (record::PAYLOAD_AT + BlockHead::len(head.words.len())) as u64,
+            ch.blocks.due = ch.blocks.table.push(BlockRow {
+                start: head.start,
+                offset: at + (record::PAYLOAD_AT + BlockHead::LEN) as u64,
                 length: frame.len() as u32,
-                decoded_length: raw.len() as u32,
+                decoded_length: 0,
+                word,
             });
-            self.words.push(&head.words);
+            ch.blocks.finish_due(&mut tail, keep);
+            ch.blocks_count += 1;
+            ch.next_start = length;
+            state.settle_channel(c);
+            state.write_expected(&mut tail, keep)?;
         }
-        // To the length in steps, as at each block.
-        loop {
-            let reached = builder
-                .settle_step(length)
-                .map_err(|e| RepairError::Decode(corrupt(e.to_string())))?;
-            for s in builder.take_settled() {
-                self.made.push(Made::of(s, &mut self.last_made)?);
-            }
-            if reached {
-                break;
-            }
+        // The known-through record a writer's finish writes at the length, after the closes.
+        if state.known.is_some_and(|k| length > k) {
+            record::write(
+                &mut tail,
+                Kind::KnownThrough,
+                &[&record::known_through_bytes(length)],
+            );
         }
-        let (done, last) = builder
-            .finish(length)
-            .map_err(|e| RepairError::Decode(corrupt(e.to_string())))?;
-        let mut overview_rows = Vec::new();
-        let mut kept = 0;
-        let mut checked: Option<(&Vec<u8>, blake3::Hash)> = None;
-        let mut last_made = self.last_made.take();
-        let last = last
-            .into_iter()
-            .map(|s| Made::of(s, &mut last_made))
-            .collect::<Result<Vec<_>, _>>()?;
-        for Made {
-            shift,
-            k,
-            len,
-            raw,
-            frame,
-        } in std::mem::take(&mut self.made).into_iter().chain(last)
-        {
-            let row = match self.present.get(&(shift, k)) {
-                Some((offset, got)) => {
-                    // A span with no item repeats one level, and a writer one frame for it:
-                    // that frame is checked once.
-                    let repeat = checked.is_some_and(|(f, r)| f == got && r == raw);
-                    if !repeat {
-                        if blake3::hash(&inflate_limited(got, len, MAX_DECODED)?) != raw {
-                            return Err(RepairError::Overview);
-                        }
-                        checked = Some((got, raw));
+        // Each ladder to the length, its last overview blocks and its strip, unless the file
+        // holds the finish that ended them.
+        let (strips, ladders) = match state.ended.take() {
+            Some((ended, strips, ladders)) if ended == length => (strips, ladders),
+            Some(_) => return Err(RepairError::Overview),
+            None => {
+                let mut strips = Vec::with_capacity(state.ochans.len());
+                let mut ladders = Vec::with_capacity(state.ochans.len());
+                for o in 0..state.ochans.len() {
+                    let end = state.ochans[o]
+                        .ladder
+                        .take()
+                        .expect("a ladder until the finish")
+                        .finish(length);
+                    for s in end.settled {
+                        state.expected.push_back((o, s));
                     }
-                    kept += 1;
-                    OverviewRow {
-                        offset: *offset,
-                        length: got.len() as u32,
-                        decoded_length: len as u32,
-                    }
+                    strips.push(end.strip);
+                    ladders.push(end.levels);
                 }
-                None => {
-                    let at = keep + tail.len() as u64;
-                    record::write(
-                        &mut tail,
-                        Kind::OverviewBlock,
-                        &[&record::overview_head(shift, k), &frame],
-                    );
-                    OverviewRow {
-                        offset: at + (record::PAYLOAD_AT + record::OVERVIEW_HEAD_LEN) as u64,
-                        length: frame.len() as u32,
-                        decoded_length: len as u32,
-                    }
-                }
-            };
-            overview_rows.push((shift, k, row));
-        }
-        // A record the content settles no block for, or a second one for a block, would stay in the
-        // file beside a footer that doesn't list it.
-        if kept != self.overview_records {
-            return Err(RepairError::Overview);
-        }
-        let overview_rows = crate::writer::by_level(overview_rows);
-
-        let mut digests = Vec::with_capacity(self.channels.len());
-        let mut channels = Vec::with_capacity(self.channels.len());
-        for (state, declared) in self.channels.into_iter().zip(&declaration.channels) {
-            let data = match (state, &declared.data) {
+                (strips, ladders)
+            }
+        };
+        state.write_expected(&mut tail, keep)?;
+        // Each channel's end, gaps and runs; each table's last pages.
+        let mut digests = Vec::with_capacity(state.chans.len());
+        let mut channels = Vec::with_capacity(state.chans.len());
+        for (c, (ch, declared)) in state.chans.iter_mut().zip(&d.channels).enumerate() {
+            ch.blocks.finish(0, &mut tail, keep);
+            let data = match (&mut ch.data, &declared.data) {
                 (
-                    Channel::Digital {
-                        hasher,
+                    Data::Digital {
+                        initial,
                         edges,
                         gaps,
-                        map,
+                        list,
                         ..
                     },
-                    DeclaredKind::Digital { initial },
+                    DeclaredKind::Digital { .. },
                 ) => {
-                    // Known to the source tick at the last block's end; a gap that reaches it ends
-                    // what is known at its `from`, unless that lies past the end too: a recorder
-                    // can learn of a loss before it writes the block the loss starts in.
-                    let last = map.first_at(last_end);
+                    // A gap that reaches the end ends what is known at its `from`, unless that
+                    // lies past the end too: a recorder can learn of a loss before it writes the
+                    // block the loss starts in.
+                    let last = known_to[c];
                     let kept = gaps.iter().position(|g| g.to >= last).unwrap_or(gaps.len());
                     let end = gaps.get(kept).map_or(last, |g| g.from.min(last));
+                    let dropped = gaps.len() - kept;
+                    list.finish_due(&mut tail, keep);
+                    if !list.finishing {
+                        list.table
+                            .drop_last(dropped as u64)
+                            .ok_or(RepairError::Overview)?;
+                    }
+                    list.finish(INLINE_LIST as u64, &mut tail, keep);
                     let gaps = gaps[..kept].to_vec();
-                    digests.push(hasher.finish_digital(end, &gaps));
+                    digests.push(ch.hasher.clone().finish_digital(end, &gaps));
+                    let paged = gaps.len() > INLINE_LIST;
                     ChannelKind::Digital {
                         initial: *initial,
                         end,
-                        edges,
-                        gaps,
+                        edges: *edges,
+                        gap_count: paged.then_some(gaps.len() as u64),
+                        gaps: if paged { Vec::new() } else { gaps },
                     }
                 }
                 (
-                    Channel::Analog {
-                        hasher,
-                        count,
-                        runs,
-                    },
+                    Data::Analog { count, runs, list },
                     DeclaredKind::Analog {
                         unit,
                         period,
@@ -556,54 +932,114 @@ impl Repairer {
                         significant,
                     },
                 ) => {
-                    let runs: Vec<Break> = runs.into_iter().filter(|r| r.index < count).collect();
+                    list.finish(INLINE_LIST as u64, &mut tail, keep);
+                    let runs: Vec<Break> =
+                        runs.iter().copied().filter(|r| r.index < *count).collect();
                     let first = runs.first().map_or(0, |r| r.tick);
+                    let lost_before = runs.first().map_or(0, |r| r.lost);
                     let breaks = runs.get(1..).unwrap_or_default().to_vec();
-                    digests.push(hasher.finish_analog(first, count, &breaks));
+                    digests.push(ch.hasher.clone().finish_analog(
+                        first,
+                        *count,
+                        &breaks,
+                        (lost_before, 0),
+                    ));
+                    let paged = breaks.len() > INLINE_LIST;
                     ChannelKind::Analog {
                         unit: unit.clone(),
                         first,
                         period: *period,
-                        count,
-                        breaks,
+                        count: *count,
+                        break_count: paged.then_some(breaks.len() as u64),
+                        breaks: if paged { Vec::new() } else { breaks },
                         coding: *coding,
                         significant: *significant,
+                        lost_before,
+                        lost_after: 0,
                     }
                 }
                 _ => unreachable!("channels follow the declaration"),
             };
+            let levels = &state.ochans[c].levels;
             channels.push(ChannelHeader {
                 name: declared.name.clone(),
                 source_name: declared.source_name.clone(),
                 source: declared.source,
                 data,
                 shaping: declared.shaping.clone(),
+                overview_shift: declared.overview_shift,
+                blocks: ch.blocks_count,
+                overview_blocks: level_list(levels, &ladders[c], length),
             });
         }
-        let mut header = finished_header(
-            &declaration,
+        for oc in &mut state.ochans {
+            for follow in oc.levels.iter_mut().flatten() {
+                follow.finish(0, &mut tail, keep);
+            }
+        }
+        let stored = state.chans.len();
+        let derived = d
+            .derived
+            .iter()
+            .enumerate()
+            .map(|(k, x)| DerivedHeader {
+                name: x.name.clone(),
+                unit: x.unit.clone(),
+                product: x.product.clone(),
+                significant: x.significant,
+                overview_blocks: level_list(
+                    &state.ochans[stored + k].levels,
+                    &ladders[stored + k],
+                    length,
+                ),
+            })
+            .collect();
+        let header = Header {
+            timebase: d.timebase,
             length,
             channels,
-            &digests,
-            self.rows.len() as u32,
-            &done.plan,
-            Vec::new(),
-        );
+            derived,
+            sources: d.sources.clone(),
+            title: d.title.clone(),
+            meta: d.meta.clone(),
+            content_id: hash::content_id(d.timebase, length, &digests),
+            overview_shift: d.overview_shift,
+        };
+        check_header(&header)?;
         let generated = generated(&self.annotations, length);
-        header.annotations = match self.bundle {
+        let files = match self.bundle {
             None => None,
             Some(Bundle::Generated { stem }) => {
                 Some(bundled_files(&stem, header.content_id, &generated))
             }
             Some(Bundle::Files(files)) => Some(files),
         };
-        check_header(&header)?;
-        let mut overview_raw = Vec::new();
-        overview::write(&done.head, &mut overview_raw);
-        let overview_frame = compress(&overview_raw, self.level).map_err(WriteError::from)?;
-        let rows: Vec<OverviewRow> = overview_rows.into_iter().map(|(_, _, r)| r).collect();
-        let footer = record::footer_bytes(&header, &self.rows, &self.words, &rows, &overview_frame)
-            .map_err(WriteError::FooterTooLarge)?;
+        let bundle = match files {
+            None => (0, 0),
+            Some(files) => {
+                let at = keep + tail.len() as u64;
+                let payload = bundle_payload(&files, self.level)?;
+                record::write(&mut tail, Kind::Bundle, &[&payload]);
+                (at, (keep + tail.len() as u64 - at) as u32)
+            }
+        };
+        let tops: Vec<ChannelTops> = (0..state.ochans.len())
+            .map(|o| ChannelTops {
+                blocks: state.chans.get(o).and_then(|ch| ch.blocks.table.top()),
+                levels: state.ochans[o]
+                    .levels
+                    .iter()
+                    .take(ladders[o].len())
+                    .map(|t| t.as_ref().and_then(|f| f.table.top()))
+                    .collect(),
+                list: state.chans.get(o).and_then(|ch| match &ch.data {
+                    Data::Digital { list, .. } => list.table.top(),
+                    Data::Analog { list, .. } => list.table.top(),
+                }),
+            })
+            .collect();
+        let columns: Vec<Column> = state.ochans.iter().map(|o| o.column).collect();
+        let footer = footer_payload(&header, bundle, &tops, &strips, &columns, self.level)?;
         let at = keep + tail.len() as u64;
         let mut end = Vec::new();
         record::write_footer(&mut end, at, &footer);
@@ -615,6 +1051,38 @@ impl Repairer {
             generated,
         })
     }
+}
+
+impl<R: Row> Follow<R> {
+    /// Writes the page due, if one is, and the directories it fills.
+    fn finish_due(&mut self, tail: &mut Vec<u8>, keep: u64) {
+        let mut due = self.due.take();
+        while let Some(d) = due {
+            let at = keep + tail.len() as u64;
+            tail.extend_from_slice(&d.record);
+            due = self.table.placed(&d, at);
+        }
+    }
+}
+
+/// A channel's levels in overview blocks for the header: each one's shift, blocks and rows.
+fn level_list(
+    levels: &[Option<Follow<OverviewRow>>],
+    shifts: &[u8],
+    length: i64,
+) -> Vec<OverviewLevel> {
+    shifts
+        .iter()
+        .enumerate()
+        .map(|(li, &shift)| OverviewLevel {
+            shift,
+            blocks: overview::block_count(length, shift),
+            rows: levels
+                .get(li)
+                .and_then(Option::as_ref)
+                .map_or(0, |f| f.table.count()),
+        })
+        .collect()
 }
 
 /// Repairs a cut-off file held in memory.

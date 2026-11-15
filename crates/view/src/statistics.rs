@@ -410,7 +410,7 @@ impl Recording {
         // A sample in a bucket that starts at or after `a` and ends by b − p + 1 covers a full
         // period inside [a, b), unless it ends a run cut short.
         let region_end = b.saturating_sub(p - 1);
-        if self.levels.is_empty() || region_end <= a {
+        if self.levels[c].is_empty() || region_end <= a {
             return Ok(Vec::new());
         }
         // Each run's last sample whose time the next run or the length cuts short of a full
@@ -442,10 +442,10 @@ impl Recording {
         )]
         let mut left = vec![a..region_end];
         let mut taken = Vec::new();
-        for l in (0..self.levels.len()).rev() {
-            let shift = self.levels[l].shift;
+        for l in (0..self.levels[c].len()).rev() {
+            let shift = self.levels[c][l].shift;
             let size = 1i64.checked_shl(u32::from(shift)).unwrap_or(i64::MAX);
-            let covered = self.levels[l].end();
+            let covered = self.levels[c][l].end();
             let mut next = Vec::new();
             for r in left {
                 let first = r.start.div_euclid(size) + i64::from(r.start.rem_euclid(size) != 0);

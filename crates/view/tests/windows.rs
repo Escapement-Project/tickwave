@@ -272,6 +272,7 @@ fn a_run_that_shares_a_column_with_the_one_before_joins_from_its_own_values() {
                 significant: None,
             },
             shaping: Default::default(),
+            overview_shift: None,
         }],
         derived: Vec::new(),
         sources: vec![SourceHeader::new(
@@ -366,6 +367,7 @@ fn a_live_recordings_gap_from_tick_0_sets_the_level_from_its_end() {
             source: 0,
             data: DeclaredKind::Digital { initial: false },
             shaping: Default::default(),
+            overview_shift: None,
         }],
         derived: Vec::new(),
         sources: vec![SourceHeader::new(

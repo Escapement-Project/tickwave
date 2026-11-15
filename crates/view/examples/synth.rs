@@ -165,6 +165,7 @@ fn main() {
             significant: Some(4),
         },
         shaping: Default::default(),
+        overview_shift: None,
     };
     let digital = |name: &str| DeclaredChannel {
         name: name.into(),
@@ -172,6 +173,7 @@ fn main() {
         source: 0,
         data: DeclaredKind::Digital { initial: false },
         shaping: Default::default(),
+        overview_shift: None,
     };
     let declaration = Declaration {
         timebase,
@@ -212,7 +214,7 @@ fn main() {
         WriteOptions {
             level: 16,
             block_bytes: 1 << 20,
-            batch: 1,
+            ..WriteOptions::default()
         },
     )
     .unwrap();

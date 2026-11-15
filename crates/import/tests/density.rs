@@ -1,12 +1,12 @@
-//! Every importer gives the encoder each digital channel's edge count, so the finest overview
-//! level follows the densest channel (FORMAT.md, "Overview"), a digital one included. Each
+//! Every importer gives the encoder each digital channel's edge count, so each channel's finest
+//! overview level follows its own density (FORMAT.md, "Overview"), a digital one's included. Each
 //! expected shift is worked from the file's decoded edges, not from the count the encoder took.
 
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use escapement_tickwave_format::decode::{BlockChannel, Footer, MAX_DECODED};
+use escapement_tickwave_format::decode::{BlockChannel, Footer, Index, MAX_DECODED};
 use escapement_tickwave_format::encode::{Options, encode};
 use escapement_tickwave_format::header::ChannelKind;
 use escapement_tickwave_format::model::{
@@ -30,25 +30,25 @@ fn testdata(path: &str) -> PathBuf {
         .join(path)
 }
 
-/// The finest shift by FORMAT.md's rule, worked in floating point from what the file holds:
-/// each channel's axis ticks an item, the densest of them, `round(log2(1,024 x that))`. A
-/// digital channel's items are its decoded edges over its span on the axis.
-fn by_hand(file: &[u8]) -> u8 {
-    let head = Footer::parse_file(file).unwrap();
-    let h = &head.header;
-    let mut edges = vec![0u64; h.channels.len()];
-    for i in 0..head.rows.len() {
-        let (offset, len) = head.block_location(i);
-        let block = head
-            .decode_block(i, &file[offset as usize..][..len as usize])
-            .unwrap();
-        for (c, ch) in block.channels.into_iter().enumerate() {
-            if let BlockChannel::Digital { edges: e, .. } = ch {
-                edges[c] += e.len() as u64;
-            }
-        }
-    }
-    let mut densest = f64::INFINITY;
+/// Each channel's finest shift by FORMAT.md's rule, worked in floating point from what the file
+/// holds: the channel's axis ticks an item, `round(log2(64 x that))`, 62 with no item. A digital
+/// channel's items are its decoded edges over its span on the axis.
+fn by_hand(file: &[u8]) -> Vec<u8> {
+    let index = Index::of_file(file).unwrap();
+    let h = index.header();
+    let edges: Vec<u64> = (0..h.channels.len())
+        .map(|c| {
+            let blocks = index.channel_blocks(file, c).unwrap();
+            blocks
+                .iter()
+                .map(|b| match &b.data {
+                    BlockChannel::Digital { edges, .. } => edges.len() as u64,
+                    BlockChannel::Analog { .. } => 0,
+                })
+                .sum()
+        })
+        .collect();
+    let mut shifts = Vec::new();
     for (c, channel) in h.channels.iter().enumerate() {
         let source = &h.sources[channel.source as usize];
         let m = h.m(channel.source as usize).unwrap();
@@ -63,16 +63,20 @@ fn by_hand(file: &[u8]) -> u8 {
                 let start = channel.shaping.kept.map_or(-source.origin, |k| k.from);
                 (axis(*end) - axis(start)) / edges[c] as f64
             }
-            _ => continue,
+            _ => {
+                shifts.push(62);
+                continue;
+            }
         };
-        densest = densest.min(spacing);
+        shifts.push((64.0 * spacing).log2().round().clamp(0.0, 62.0) as u8);
     }
-    assert!(densest.is_finite(), "no channel holds an item");
-    (1024.0 * densest).log2().round().clamp(0.0, 62.0) as u8
+    shifts
 }
 
-fn shift(file: &[u8]) -> u8 {
-    Footer::parse_file(file).unwrap().header.overview_shift
+/// Each channel's finest shift as the file's header states it.
+fn shift(file: &[u8]) -> Vec<u8> {
+    let h = Footer::parse_file(file).unwrap().header;
+    (0..h.channels.len()).map(|c| h.shift(c).unwrap()).collect()
 }
 
 fn digital_only(r: &Recording) -> bool {
@@ -114,7 +118,7 @@ fn a_digital_only_import_from_each_reader_takes_its_density() {
         let file = encoded(recording);
         let (got, want) = (shift(&file), by_hand(&file));
         assert_eq!(got, want, "{name}");
-        assert!(got < 40, "{name}: {got}");
+        assert!(got.iter().any(|&s| s < 40), "{name}: {got:?}");
     }
     // A recording read back from a file, as `recording::read` gives it to a merge or a
     // re-conversion.
@@ -159,7 +163,8 @@ fn one_source(timebase: Ratio, length: i64, channels: Vec<Channel>) -> Recording
 fn a_merge_whose_densest_channel_is_digital_takes_its_density() {
     // D: 499 edges 2 ticks apart at 500 MHz, beside a 96 MHz input whose densest channel is a
     // slow clock. At 12 GHz D's edges are 48 merged ticks apart, over its span of 1,000 ticks:
-    // 24,000 / 499 a edge, 1,024 x that about 2^15.6, so a shift of 16.
+    // 24,000 / 499 an edge, 64 x that about 2^11.6, so a shift of 12. CLK's 3 edges over its
+    // 300 ticks, 125 merged ticks each: 12,500 an edge, 64 x that about 2^19.6, so 20.
     let fast = one_source(
         Ratio::integer(500_000_000).unwrap(),
         1_000,
@@ -192,14 +197,15 @@ fn a_merge_whose_densest_channel_is_digital_takes_its_density() {
     )
     .unwrap();
     let out = out.into_inner();
-    assert_eq!(shift(&out), 16);
-    assert_eq!(by_hand(&out), 16);
+    assert_eq!(shift(&out), [12, 20]);
+    assert_eq!(by_hand(&out), [12, 20]);
 }
 
 #[test]
 fn a_cut_conversion_whose_densest_channel_is_digital_takes_its_density() {
     // D kept from 400 to 600 of 1,000 ticks: its 100 edges there, 2 ticks apart over 200
-    // ticks, are its density, not its 500 over the whole capture. 1,024 x 2 is 2^11.
+    // ticks, are its density, not its 500 over the whole capture. 64 x 2 is 2^7. S: 9 edges
+    // over 1,000 ticks, 64 x 1,000 / 9 about 2^12.8, so 13.
     let timebase = Ratio::integer(1_000_000).unwrap();
     let open = || {
         Ok(one_source(
@@ -216,6 +222,6 @@ fn a_cut_conversion_whose_densest_channel_is_digital_takes_its_density() {
     let mut out = Cursor::new(Vec::new());
     convert::convert(&open, &settings, MAX_DECODED, &Quiet, &mut out).unwrap();
     let out = out.into_inner();
-    assert_eq!(shift(&out), 11);
-    assert_eq!(by_hand(&out), 11);
+    assert_eq!(shift(&out), [7, 13]);
+    assert_eq!(by_hand(&out), [7, 13]);
 }

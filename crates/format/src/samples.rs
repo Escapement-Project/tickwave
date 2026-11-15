@@ -65,6 +65,7 @@ pub fn value_f64(sample: Sample, coding: AnalogCoding) -> f64 {
 }
 
 /// Why a sample doesn't fit its channel's coding.
+#[inline]
 pub fn misfit(sample: Sample, coding: AnalogCoding) -> Option<String> {
     match (sample, coding) {
         (Sample::F32(_), AnalogCoding::F32 | AnalogCoding::Codes { .. })
@@ -100,6 +101,7 @@ pub fn coding_name(coding: AnalogCoding) -> String {
 /// Appends a sample's bytes to a section being built: an f32 or f64 whole, a code as its
 /// `ceil(bits / 8)` low bytes, little-endian, in two's complement. `to_planes` then splits
 /// the codes into byte planes. `code` is the `codes` channel's code for an f32 sample.
+#[inline]
 pub fn put(section: &mut Vec<u8>, sample: Sample, coding: AnalogCoding, code: Option<u16>) {
     match (sample, coding) {
         (Sample::F32(_), AnalogCoding::Codes { .. }) => {
@@ -205,8 +207,14 @@ pub enum Product {
     /// The integer product of two `int` channels' codes, neither with an offset, their bits
     /// summing to at most 64, and their scales' numerators' product and denominators' product
     /// each of a magnitude below 2^53: signed if either is. Its scale is the numerators' product
-    /// over the denominators', each exact in f64.
-    Int { signed: bool, num: f64, den: f64 },
+    /// over the denominators', each exact in f64. Its codes are `bits` wide, the operands'
+    /// summed.
+    Int {
+        signed: bool,
+        bits: u8,
+        num: f64,
+        den: f64,
+    },
     /// `f64(a) × f64(b)`, rounded once.
     F64 { a: AnalogCoding, b: AnalogCoding },
 }
@@ -227,6 +235,7 @@ impl Product {
                 }
                 Self::Int {
                     signed: x.signed || y.signed,
+                    bits: x.bits + y.bits,
                     num: num as f64,
                     den: den as f64,
                 }
@@ -353,7 +362,7 @@ mod tests {
             assert_eq!(misfit(s, coding), None, "{s:?}");
             put(&mut section, s, coding, None);
         }
-        crate::writer::assemble(&[section], &[Some(coding)])[4..].to_vec()
+        crate::writer::analog_raw(&section, coding)
     }
 
     #[test]
@@ -500,6 +509,7 @@ mod tests {
             p,
             Product::Int {
                 signed: false,
+                bits: 64,
                 num: 1.0,
                 den: 1e12
             }
@@ -517,6 +527,7 @@ mod tests {
             Product::of(a, b),
             Product::Int {
                 signed: true,
+                bits: 32,
                 num: -15.0,
                 den: 14.0
             }

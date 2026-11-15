@@ -12,8 +12,9 @@
 //! - `range` and `under_range`, digital, a few edges each; DIO0, a pulse at tick 0 (two edges
 //!   there), a gap while the pairs were lost, and edges either side.
 //! - Five markers from `verge`, kind `marker` with a unitless `number`, the one after the loss
-//!   `marker-after-loss`, bundled into the footer at finish.
-//! - A flush every 5 ms, so six short blocks; `end_reason` added to the source at its end.
+//!   `marker-after-loss`, bundled into the file at finish.
+//! - A flush every 5 ms, so six short blocks of V and of I; `end_reason` added to the source at
+//!   its end.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -77,6 +78,7 @@ fn main() {
             significant: Some(4),
         },
         shaping: Default::default(),
+        overview_shift: None,
     };
     let digital = |name: &str| DeclaredChannel {
         name: name.into(),
@@ -84,6 +86,7 @@ fn main() {
         source: 0,
         data: DeclaredKind::Digital { initial: false },
         shaping: Default::default(),
+        overview_shift: None,
     };
     let declaration = Declaration {
         timebase,
@@ -199,6 +202,7 @@ fn main() {
                     stem: "energy".into(),
                 }),
                 drop_gaps_past_end: false,
+                lost_after: Default::default(),
             },
         )
         .unwrap();
@@ -207,7 +211,12 @@ fn main() {
     println!(
         "energy.tickwave: {} bytes, {} blocks, {}",
         out.len(),
-        finished.header.blocks,
+        finished
+            .header
+            .channels
+            .iter()
+            .map(|c| c.blocks)
+            .sum::<u64>(),
         finished.header.content_id
     );
 }

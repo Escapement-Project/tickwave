@@ -32,6 +32,7 @@ fn digital(edges: &[i64], block_bytes: usize) -> Vec<u8> {
             source: 0,
             data: DeclaredKind::Digital { initial: false },
             shaping: Default::default(),
+            overview_shift: None,
         }],
         derived: Vec::new(),
         sources: vec![SourceHeader::new(
@@ -149,6 +150,7 @@ fn a_search_past_the_buckets_the_overview_has_reads_the_edges_there() {
             source: 0,
             data: DeclaredKind::Digital { initial: false },
             shaping: Default::default(),
+            overview_shift: None,
         }],
         derived: Vec::new(),
         sources: vec![SourceHeader::new(

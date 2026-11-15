@@ -528,6 +528,8 @@ pub(crate) fn analog(a: Analog, skip: u64, keep: u64) -> Analog {
         breaks,
         significant: a.significant,
         samples: a.samples.map(Cut(skip, keep)),
+        lost_before: if skip == 0 { a.lost_before } else { 0 },
+        lost_after: if end == a.count { a.lost_after } else { 0 },
     }
 }
 

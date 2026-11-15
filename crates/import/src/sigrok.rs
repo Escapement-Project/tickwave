@@ -233,6 +233,8 @@ pub fn read_bytes(bytes: impl Into<Arc<[u8]>>, file_name: &str) -> Result<Import
                     pos: 0,
                     len: 0,
                 })),
+                lost_before: 0,
+                lost_after: 0,
             }),
             shaping: Default::default(),
         });

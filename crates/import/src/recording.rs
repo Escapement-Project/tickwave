@@ -1,10 +1,11 @@
 //! A finished tickwave recording read back into the model, so it can be shaped and merged as a
 //! capture is. Every block is decoded once when the recording is opened, so a damaged one is
-//! refused there; each channel then decodes the blocks again as it is read.
+//! refused there; each channel then decodes its blocks again as it is read.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use escapement_tickwave_format::decode::{BlockChannel, DecodeError, Footer};
+use escapement_tickwave_format::decode::{BlockChannel, BlockRef, DecodeError, Footer};
 use escapement_tickwave_format::header::{AnalogCoding, ChannelKind, Header};
 use escapement_tickwave_format::model::{
     Analog, Channel, ChannelData, Digital, Recording, Samples, Source,
@@ -30,14 +31,35 @@ impl From<DecodeError> for Error {
 }
 
 /// The recording `input` holds, with the footer's header, which says what the model doesn't: its
-/// title, meta, bundled annotations and content id.
+/// title, meta and content id.
 pub fn read(input: Arc<dyn Input>) -> Result<(Header, Recording), Error> {
-    let footer = footer(&*input)?;
-    let blocks = Arc::new(Blocks { input, footer });
-    for i in 0..blocks.footer.rows.len() {
-        blocks.decode(i)?;
+    let (header, _, recording) = read_bundled(input)?;
+    Ok((header, recording))
+}
+
+/// Annotation files by name, as a recording bundles them.
+pub type Files = BTreeMap<String, String>;
+
+/// `read`, with the annotation files the recording bundles.
+pub fn read_bundled(input: Arc<dyn Input>) -> Result<(Header, Option<Files>, Recording), Error> {
+    let mut footer = footer(&*input)?;
+    footer.load_lists(fetch(&*input))?;
+    let bundled = footer.read_bundle(fetch(&*input))?;
+    let refs = (0..footer.header.channels.len())
+        .map(|c| footer.block_refs(c, fetch(&*input)))
+        .collect::<Result<Vec<_>, DecodeError>>()?;
+    let blocks = Arc::new(Blocks {
+        input,
+        footer,
+        refs,
+    });
+    for (c, refs) in blocks.refs.iter().enumerate() {
+        for b in refs {
+            blocks.decode(c, b)?;
+        }
     }
     let header = blocks.footer.header.clone();
+    let listed = "every list read when the recording was opened";
     let channels = header
         .channels
         .iter()
@@ -51,12 +73,12 @@ pub fn read(input: Arc<dyn Input>) -> Result<(Header, Recording), Error> {
                 ChannelKind::Digital {
                     initial,
                     end,
-                    gaps,
                     edges,
+                    ..
                 } => ChannelData::Digital(Digital {
                     initial: *initial,
                     end: *end,
-                    gaps: gaps.clone(),
+                    gaps: blocks.footer.gaps(c).expect(listed).to_vec(),
                     count: *edges,
                     // The model holds a channel's source ticks, as the file stores them.
                     edges: Box::new(blocks.clone().items(c, |data| match data {
@@ -71,17 +93,21 @@ pub fn read(input: Arc<dyn Input>) -> Result<(Header, Recording), Error> {
                     first,
                     period,
                     count,
-                    breaks,
                     coding,
                     significant,
+                    lost_before,
+                    lost_after,
+                    ..
                 } => ChannelData::Analog(Analog {
                     unit: unit.clone(),
                     first: *first,
                     period: *period,
                     count: *count,
-                    breaks: breaks.clone(),
+                    breaks: blocks.footer.breaks(c).expect(listed).to_vec(),
                     significant: *significant,
                     samples: samples(&blocks, c, *coding),
+                    lost_before: *lost_before,
+                    lost_after: *lost_after,
                 }),
             },
         })
@@ -111,10 +137,10 @@ pub fn read(input: Arc<dyn Input>) -> Result<(Header, Recording), Error> {
         timebase: header.timebase,
         length: header.length,
         channels,
-        derived: header.derived.clone(),
+        derived: header.derived.iter().map(|d| d.declared()).collect(),
         sources,
     };
-    Ok((header, recording))
+    Ok((header, bundled, recording))
 }
 
 /// Analog channel `c`'s samples, block after block, in the type its coding stores.
@@ -164,12 +190,32 @@ pub fn footer(input: &dyn Input) -> Result<Footer, Error> {
     })
 }
 
-/// Block `i` of the recording `input` holds, decoded, `footer` its footer.
-pub fn block(input: &dyn Input, footer: &Footer, i: usize) -> Result<Vec<BlockChannel>, Error> {
-    let (offset, length) = footer.block_location(i);
-    let mut frame = vec![0; length as usize];
-    input.read_at(offset, &mut frame);
-    Ok(footer.decode_block(i, &frame)?.channels)
+/// `input`'s bytes as `Footer`'s readers fetch them, refused where they run past its end.
+pub fn fetch(input: &dyn Input) -> impl FnMut(u64, u32) -> Result<Vec<u8>, DecodeError> + '_ {
+    move |offset, len| {
+        if offset
+            .checked_add(u64::from(len))
+            .is_none_or(|end| end > input.size())
+        {
+            return Err(DecodeError::Corrupt(format!(
+                "{len} bytes at byte {offset} run past the end of the file"
+            )));
+        }
+        let mut bytes = vec![0; len as usize];
+        input.read_at(offset, &mut bytes);
+        Ok(bytes)
+    }
+}
+
+/// Channel `c`'s block `b` of the recording `input` holds, decoded, `footer` its footer.
+pub fn block(
+    input: &dyn Input,
+    footer: &Footer,
+    c: usize,
+    b: &BlockRef,
+) -> Result<BlockChannel, Error> {
+    let frame = fetch(input)(b.row.offset, b.row.length)?;
+    Ok(footer.decode_block(c, b, &frame)?.data)
 }
 
 fn tail(input: &dyn Input, from: u64) -> Vec<u8> {
@@ -181,11 +227,13 @@ fn tail(input: &dyn Input, from: u64) -> Vec<u8> {
 struct Blocks {
     input: Arc<dyn Input>,
     footer: Footer,
+    /// Each channel's blocks.
+    refs: Vec<Vec<BlockRef>>,
 }
 
 impl Blocks {
-    fn decode(&self, i: usize) -> Result<Vec<BlockChannel>, Error> {
-        block(&*self.input, &self.footer, i)
+    fn decode(&self, c: usize, b: &BlockRef) -> Result<BlockChannel, Error> {
+        block(&*self.input, &self.footer, c, b)
     }
 
     /// Channel `c`'s items, block after block, as `take` finds them in its data.
@@ -197,9 +245,7 @@ impl Blocks {
     where
         T: Send,
     {
-        (0..self.footer.rows.len()).flat_map(move |i| {
-            let mut channels = self.decode(i).expect(CHECKED);
-            take(channels.swap_remove(c))
-        })
+        (0..self.refs[c].len())
+            .flat_map(move |i| take(self.decode(c, &self.refs[c][i]).expect(CHECKED)))
     }
 }

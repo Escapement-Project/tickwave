@@ -4,7 +4,9 @@
 use std::path::PathBuf;
 
 use escapement_tickwave_format::annotations::{Included, resolve};
-use escapement_tickwave_format::decode::{BlockChannel, DecodeError, Footer};
+use escapement_tickwave_format::decode::{
+    BlockChannel, DecodeError, Footer, Index, derived_values, from_memory,
+};
 use escapement_tickwave_format::header::{AnalogCoding, ChannelKind, Exact, IntCoding};
 use escapement_tickwave_format::model::{Break, Gap, Ratio};
 use escapement_tickwave_format::samples::Values;
@@ -18,11 +20,16 @@ fn fixture(name: &str) -> Vec<u8> {
     .unwrap()
 }
 
-/// The first block of `file`, decoded through its footer.
+/// Channel 0's first block of `file`, decoded through its footer and its index page.
 fn first_block(file: &[u8]) -> Result<escapement_tickwave_format::decode::Block, DecodeError> {
     let head = Footer::parse_file(file)?;
-    let (offset, len) = head.block_location(0);
-    head.decode_block(0, &file[offset as usize..][..len as usize])
+    let blocks = head.block_refs(0, from_memory(file))?;
+    let b = &blocks[0];
+    head.decode_block(
+        0,
+        b,
+        &file[b.row.offset as usize..][..b.row.length as usize],
+    )
 }
 
 #[test]
@@ -31,7 +38,7 @@ fn each_crafted_recording_is_refused_for_what_it_states() {
         ("header-wrap", "the footer's lengths do not fit it"),
         (
             "levels",
-            "the overview levels are not the ones the format sets for this length",
+            "channel A: the overview levels are not the ones the format sets for this length",
         ),
         (
             "big-decoded",
@@ -39,11 +46,12 @@ fn each_crafted_recording_is_refused_for_what_it_states() {
         ),
         (
             "huge-count",
-            "block 0: the section is too short for its edges",
+            "channel A, the block at tick 0: the section is too short for its edges",
         ),
         (
-            "sections-wrap",
-            "block 0: the block's sections do not fill it",
+            "page-count",
+            "channel 0: page 0 at depth 0 of its blocks: its head differs from where the table's \
+             shape puts it",
         ),
     ] {
         let file = fixture(&format!("crafted/{name}.tickwave"));
@@ -141,19 +149,25 @@ fn the_energy_fixture_holds_what_its_example_says() {
             8
         )
     );
-    assert_eq!(head.rows.len(), 6);
-    let block = first_block(&file).unwrap();
-    let BlockChannel::Digital { edges, .. } = &block.channels[4] else {
+    // A flush every 480,000 ticks: six blocks of V and of I, one a flush.
+    assert_eq!((h.channels[0].blocks, h.channels[1].blocks), (6, 6));
+    let index = Index::of_file(&file).unwrap();
+    let dio = index.block_in(&file, 4, 0).unwrap();
+    let BlockChannel::Digital { edges, .. } = &dio.data else {
         panic!()
     };
     assert_eq!(edges[..2], [0, 0], "the pulse at tick 0");
     // P's first sample: I's 1,000,000 nA times V's 3,300 mV, 3,300,000,000 pW.
-    let Values::U64(p) = head.derived(&block, 0).unwrap() else {
+    let (v, i) = (
+        index.block_in(&file, 0, 0).unwrap(),
+        index.block_in(&file, 1, 0).unwrap(),
+    );
+    let Values::U64(p) = derived_values(&i.data, &v.data, head.products[0].2).unwrap() else {
         panic!("an integer product")
     };
     assert_eq!(p[0], 3_300_000_000);
     // The bundled sidecar checks against the recording.
-    let files = h.annotations.as_ref().unwrap();
+    let files = head.read_bundle(from_memory(&file)).unwrap().unwrap();
     let resolved = resolve(
         &files["energy.annotations.toml"],
         &[Included {

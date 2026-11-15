@@ -4,7 +4,7 @@
 //! reader given extreme values in a header.
 
 use escapement_tickwave_format::codec::get_uleb;
-use escapement_tickwave_format::decode::{BlockChannel, Footer, inflate};
+use escapement_tickwave_format::decode::{BlockChannel, Footer, Index, from_memory, inflate};
 use escapement_tickwave_format::encode::{Options, encode};
 use escapement_tickwave_format::header::{
     Declaration, DeclaredChannel, DeclaredKind, Kept, Offset, SourceFormat, SourceHeader,
@@ -12,7 +12,7 @@ use escapement_tickwave_format::header::{
 use escapement_tickwave_format::model::{
     Analog, Channel, ChannelData, Digital, Gap, Ratio, Recording, Samples, Shaping, Source,
 };
-use escapement_tickwave_format::record;
+
 use escapement_tickwave_format::writer::{Finish, WriteError, WriteOptions, Writer};
 
 mod common;
@@ -72,6 +72,8 @@ fn analog(
             breaks: Vec::new(),
             significant: None,
             samples: Samples::F32(Box::new(values.into_iter())),
+            lost_before: 0,
+            lost_after: 0,
         }),
         shaping,
     }
@@ -79,27 +81,30 @@ fn analog(
 
 /// Every block's channels, decoded.
 fn blocks(file: &[u8]) -> (Footer, Vec<Vec<BlockChannel>>) {
-    let head = Footer::parse_file(file).unwrap();
-    let blocks = (0..head.rows.len())
-        .map(|i| {
-            let (offset, len) = head.block_location(i);
-            head.decode_block(i, &file[offset as usize..][..len as usize])
+    let index = Index::of_file(file).unwrap();
+    let blocks = (0..index.blocks.len())
+        .map(|c| {
+            index
+                .channel_blocks(file, c)
                 .unwrap()
-                .channels
+                .into_iter()
+                .map(|b| b.data)
+                .collect()
         })
         .collect();
-    (head, blocks)
+    (index.footer, blocks)
 }
 
-/// A channel's edges over every block: axis ticks, and source ticks.
+/// A channel's edges over every block: axis ticks, and source ticks. `blocks` holds each
+/// channel's blocks.
 fn edges(blocks: &[Vec<BlockChannel>], c: usize) -> (Vec<i64>, Vec<i64>) {
     let (mut axis, mut source) = (Vec::new(), Vec::new());
-    for block in blocks {
-        let BlockChannel::Digital { edges, .. } = &block[c] else {
+    for block in &blocks[c] {
+        let BlockChannel::Digital { edges, .. } = block else {
             panic!("channel {c} is digital");
         };
         axis.extend(edges);
-        source.extend(block[c].source_ticks().unwrap());
+        source.extend(block.source_ticks().unwrap());
     }
     (axis, source)
 }
@@ -190,19 +195,14 @@ fn a_channel_keeps_its_sources_ticks_and_maps_them_with_a_floor() {
 
 /// The step of the first block's section of channel `c`: the section's first number.
 fn first_step(file: &[u8], c: usize) -> u64 {
-    let head = Footer::parse_file(file).unwrap();
-    let (offset, len) = head.block_location(0);
+    let index = Index::of_file(file).unwrap();
+    let row = index.blocks[c][0].row;
     let raw = inflate(
-        &file[offset as usize..][..len as usize],
-        head.rows[0].decoded_length as usize,
+        &file[row.offset as usize..][..row.length as usize],
+        row.decoded_length as usize,
     )
     .unwrap();
-    let channels = head.header.channels.len();
-    let lengths: Vec<usize> = (0..channels)
-        .map(|i| u32::from_le_bytes(raw[4 * i..4 * i + 4].try_into().unwrap()) as usize)
-        .collect();
-    let at = 4 * channels + lengths[..c].iter().sum::<usize>();
-    get_uleb(&raw[at..at + lengths[c]], &mut 0).unwrap()
+    get_uleb(&raw, &mut 0).unwrap()
 }
 
 /// One digital channel at `hz`, its edges `edges`, known to `end`.
@@ -371,6 +371,7 @@ fn declaration(stretch: Option<Ratio>) -> Declaration {
                 source: 0,
                 data: DeclaredKind::Digital { initial: false },
                 shaping: Shaping { offset: None, kept },
+                overview_shift: None,
             },
             DeclaredChannel {
                 name: "V".into(),
@@ -383,6 +384,7 @@ fn declaration(stretch: Option<Ratio>) -> Declaration {
                     significant: None,
                 },
                 shaping: Shaping { offset: None, kept },
+                overview_shift: None,
             },
         ],
         derived: Vec::new(),
@@ -399,7 +401,7 @@ fn writer(stretch: Option<Ratio>) -> Writer {
         WriteOptions {
             level: 3,
             block_bytes: 1 << 16,
-            batch: 1,
+            ..WriteOptions::default()
         },
     )
     .unwrap()
@@ -544,27 +546,15 @@ fn a_header_with_extreme_values_is_refused_without_a_panic() {
             for &r in &ratios {
                 let mut h = head.header.clone();
                 edit(&mut h, v, r);
-                let Ok(footer) = record::footer_bytes(
-                    &h,
-                    &head.rows,
-                    &head.words,
-                    &head.overview_rows.concat(),
-                    &head.overview_frame,
-                ) else {
-                    continue;
-                };
-                let mut bad = file[..head.trailer.footer_offset as usize].to_vec();
-                // `bad` starts at the file's first byte.
-                record::write_footer(&mut bad, 0, &footer);
+                let bad = common::with_header(&file, &h);
                 if let Ok(f) = Footer::parse_file(&bad) {
                     read += 1;
-                    for i in 0..f.rows.len() {
-                        let (offset, len) = f.block_location(i);
-                        let _ = f.decode_block(i, &bad[offset as usize..][..len as usize]);
-                    }
-                    for c in 0..f.header.channels.len() {
-                        let _ = f.sample_axis_tick(c, 0);
-                        let _ = f.sample_axis_tick(c, u64::MAX);
+                    if let Ok(index) = Index::read(f, from_memory(&bad)) {
+                        for c in 0..index.blocks.len() {
+                            let _ = index.channel_blocks(&bad, c);
+                            let _ = index.footer.sample_axis_tick(c, 0);
+                            let _ = index.footer.sample_axis_tick(c, u64::MAX);
+                        }
                     }
                 }
             }

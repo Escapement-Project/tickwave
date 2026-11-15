@@ -28,6 +28,7 @@ fn main() {
             source: 0,
             data: DeclaredKind::Digital { initial: false },
             shaping: Default::default(),
+            overview_shift: None,
         }],
         derived: Vec::new(),
         sources: vec![SourceHeader::new(

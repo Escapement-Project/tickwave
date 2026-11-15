@@ -4,18 +4,18 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use escapement_tickwave_format::decode::{Block, BlockChannel, Footer, OverviewBlock};
+use escapement_tickwave_format::decode::{Block, BlockChannel, Footer, Index, from_memory};
 use escapement_tickwave_format::header::{
-    AnalogCoding, Declaration, DeclaredChannel, DeclaredKind, Derived, Exact, IntCoding,
-    SourceFormat, SourceHeader,
+    AnalogCoding, ChannelKind, Declaration, DeclaredChannel, DeclaredKind, Derived, Exact, Header,
+    IntCoding, SourceFormat, SourceHeader,
 };
 use escapement_tickwave_format::model::{Break, Gap, Ratio, Sample};
-use escapement_tickwave_format::overview::{AnalogOverview, BLOCK_BUCKETS, HEAD_BUCKETS, Level};
-use escapement_tickwave_format::recut::{RecutError, Recutter};
+use escapement_tickwave_format::overview::{BLOCK_BUCKETS, Level};
+use escapement_tickwave_format::recut::{RecutError, Recutter, shifts_for};
 use escapement_tickwave_format::repair::repair;
 use escapement_tickwave_format::samples::Values;
 use escapement_tickwave_format::snapshot::Snapshot;
-use escapement_tickwave_format::writer::{Finish, Finished, WriteOptions, Writer};
+use escapement_tickwave_format::writer::{Compression, Finish, Finished, WriteOptions, Writer};
 
 mod common;
 
@@ -28,7 +28,7 @@ fn options(block_bytes: usize) -> WriteOptions {
     WriteOptions {
         level: 3,
         block_bytes,
-        batch: 1,
+        ..WriteOptions::default()
     }
 }
 
@@ -53,16 +53,12 @@ fn recut(
 
 /// Every channel's items: edges, or samples, from every block of a finished file.
 fn items(file: &[u8]) -> (Vec<Vec<i64>>, Vec<Vec<Sample>>) {
-    let head = Footer::parse_file(file).unwrap();
-    let n = head.header.channels.len();
+    let index = Index::of_file(file).unwrap();
+    let n = index.blocks.len();
     let (mut edges, mut samples) = (vec![Vec::new(); n], vec![Vec::new(); n]);
-    for i in 0..head.rows.len() {
-        let (offset, len) = head.block_location(i);
-        let block = head
-            .decode_block(i, &file[offset as usize..][..len as usize])
-            .unwrap();
-        for (c, ch) in block.channels.into_iter().enumerate() {
-            match ch {
+    for c in 0..n {
+        for block in index.channel_blocks(file, c).unwrap() {
+            match block.data {
                 BlockChannel::Digital { edges: e, .. } => edges[c].extend(e),
                 BlockChannel::Analog { values, .. } => samples[c].extend(values.iter()),
             }
@@ -71,25 +67,38 @@ fn items(file: &[u8]) -> (Vec<Vec<i64>>, Vec<Vec<Sample>>) {
     (edges, samples)
 }
 
+/// Each channel's data, without where its blocks are.
+fn data(h: &Header) -> Vec<ChannelKind> {
+    h.channels.iter().map(|c| c.data.clone()).collect()
+}
+
 #[test]
 fn a_flushed_file_recut_has_full_size_blocks_and_the_same_content() {
     let file = energy();
     let before = Footer::parse_file(&file).unwrap();
-    assert_eq!(before.header.blocks, 6, "the fixture's flushes");
+    assert_eq!(before.header.channels[0].blocks, 6, "the fixture's flushes");
     for piece in [1 << 20, 997] {
         let (out, f) = recut(&file, piece, options(1 << 20)).unwrap();
         let after = Footer::parse_file(&out).unwrap();
         assert_eq!(after.header.content_id, before.header.content_id);
         assert_eq!(f.header, after.header);
-        // Every item in one block of 1 MiB.
-        assert_eq!(after.header.blocks, 1);
+        // Every channel's items in one block of 1 MiB.
+        assert!(after.header.channels.iter().all(|c| c.blocks == 1));
         assert_eq!(items(&out), items(&file));
         // The same header, apart from where the blocks are: the bundle, the extras and the
         // derived channel come over.
         let mut header = after.header.clone();
-        header.blocks = before.header.blocks;
+        for (a, b) in header.channels.iter_mut().zip(&before.header.channels) {
+            a.blocks = b.blocks;
+        }
         assert_eq!(header, before.header);
-        assert_eq!(after.overview, before.overview);
+        for o in 0..before.overview_channels() {
+            assert_eq!(after.strip(o).unwrap(), before.strip(o).unwrap());
+        }
+        assert_eq!(
+            after.read_bundle(from_memory(&out)).unwrap(),
+            before.read_bundle(from_memory(&file)).unwrap()
+        );
     }
 }
 
@@ -113,6 +122,7 @@ fn flushed_each_second() -> Vec<u8> {
             significant: None,
         },
         shaping: Default::default(),
+        overview_shift: None,
     };
     let d = Declaration {
         timebase,
@@ -152,22 +162,66 @@ fn flushed_each_second() -> Vec<u8> {
 #[test]
 fn a_file_flushed_each_second_recut_comes_out_in_blocks_of_the_size_asked_for() {
     let file = flushed_each_second();
-    let before = Footer::parse_file(&file).unwrap();
-    assert_eq!(before.header.blocks, 20);
-    // Each second's block holds 10,000 pairs: 80,000 bytes of codes and an 8-byte table.
-    assert!(before.rows.iter().all(|r| r.decoded_length == 80_008));
+    let before = Index::of_file(&file).unwrap();
+    for c in 0..2 {
+        assert_eq!(before.header().channels[c].blocks, 20);
+        // Each second's block holds 10,000 codes of 4 bytes.
+        assert!(
+            before.blocks[c]
+                .iter()
+                .all(|b| b.row.decoded_length == 40_000)
+        );
+    }
     let target = 256 << 10;
     let (out, _) = recut(&file, 1 << 16, options(target)).unwrap();
+    let after = Index::of_file(&out).unwrap();
+    assert_eq!(after.header().content_id, before.header().content_id);
+    // 800 KB a channel in blocks closed once their items before a promise reach 256 KiB: the
+    // Recutter promises each input block's end, every 10,000 codes, so a block closes at the
+    // first such end past 65,536 codes, 70,000, both channels at once.
+    for (c, blocks) in after.blocks.iter().enumerate().take(2) {
+        let sizes: Vec<u32> = blocks.iter().map(|b| b.row.decoded_length).collect();
+        assert_eq!(sizes, [280_000, 280_000, 240_000], "channel {c}");
+    }
+    assert_eq!(
+        after.blocks[0].iter().map(|b| b.start).collect::<Vec<_>>(),
+        after.blocks[1].iter().map(|b| b.start).collect::<Vec<_>>(),
+        "V's and I's blocks close together"
+    );
+    assert_eq!(items(&out), items(&file));
+}
+
+/// The Recutter gives each channel the shift the 64-items rule gives its own items, or the
+/// shifts it is told, and the content stays.
+#[test]
+fn a_recut_takes_each_channels_shift_from_its_items_or_as_given() {
+    let file = energy();
+    let before = Footer::parse_file(&file).unwrap();
+    // V and I, a pair every 960 ticks: log2(64 x 960) = 15.9; the pins by their edges over
+    // 2,880,000 ticks: range 3 edges, log2(61,440,000) = 25.9; under_range 4, 25.46; DIO0 8,
+    // 24.46.
+    let shifts = shifts_for(&before.header);
+    assert_eq!(shifts, [16, 16, 26, 25, 24]);
+    let mut r = Recutter::new(options(1 << 20));
+    r.shifts(shifts.clone());
+    r.feed(&file).unwrap();
+    let mut out = r.take_output();
+    out.extend(r.finish().unwrap().tail);
     let after = Footer::parse_file(&out).unwrap();
     assert_eq!(after.header.content_id, before.header.content_id);
-    // 1.6 MB in blocks closed once they reach 256 KiB: a pair is 8 bytes, so 32,768 pairs, then
-    // the next pair closes it. Six full blocks, then the rest.
-    let sizes: Vec<u32> = after.rows.iter().map(|r| r.decoded_length).collect();
-    let (full, last) = sizes.split_at(sizes.len() - 1);
-    assert_eq!(full.len(), 6, "{sizes:?}");
-    assert!(full.iter().all(|&s| s == 8 + 8 * 32_768), "{sizes:?}");
-    assert_eq!(last[0], 8 + 8 * (200_000 - 6 * 32_768), "{sizes:?}");
-    assert_eq!(items(&out), items(&file));
+    assert_eq!(
+        (0..5)
+            .map(|c| after.header.shift(c).unwrap())
+            .collect::<Vec<_>>(),
+        shifts
+    );
+    // P takes the coarser of its operands'.
+    assert_eq!(after.header.shift(5), Some(16));
+    // A count of shifts that isn't the channels' is refused.
+    let mut r = Recutter::new(options(1 << 20));
+    r.shifts(vec![4]);
+    let err = r.feed(&file).unwrap_err();
+    assert_eq!(err.to_string(), "1 overview shifts given, for 5 channels");
 }
 
 #[test]
@@ -183,10 +237,7 @@ fn a_cut_off_file_recut_gives_what_repair_gives() {
             head.header.content_id, repaired.header.content_id,
             "cut at {at}"
         );
-        assert_eq!(
-            head.header.channels, repaired.header.channels,
-            "cut at {at}"
-        );
+        assert_eq!(data(&head.header), data(&repaired.header), "cut at {at}");
         assert_eq!(head.header.length, repaired.header.length, "cut at {at}");
         assert_eq!(f.generated, repaired.generated, "cut at {at}");
         let fixed = [&cut[..repaired.keep as usize], &repaired.tail].concat();
@@ -250,6 +301,7 @@ fn session() -> (Declaration, Vec<Op>) {
             significant: Some(4),
         },
         shaping: Default::default(),
+        overview_shift: None,
     };
     let d = Declaration {
         timebase,
@@ -262,6 +314,7 @@ fn session() -> (Declaration, Vec<Op>) {
                 source: 0,
                 data: DeclaredKind::Digital { initial: false },
                 shaping: Default::default(),
+                overview_shift: None,
             },
         ],
         derived: vec![Derived {
@@ -359,65 +412,102 @@ fn codes(values: &Values) -> Vec<u64> {
     }
 }
 
+/// Channel `c`'s blocks as `snapshot` gives them, those in `file` and those not yet written.
+fn snapshot_blocks(snapshot: &Snapshot, file: &[u8], c: usize) -> Vec<Block> {
+    let mut blocks: Vec<Block> = snapshot
+        .block_refs(c, &[], from_memory(file))
+        .unwrap()
+        .iter()
+        .map(|b| {
+            let frame = &file[b.row.offset as usize..][..b.row.length as usize];
+            snapshot.decode_block(c, b, frame).unwrap()
+        })
+        .collect();
+    blocks.extend(snapshot.unwritten_blocks(c).unwrap());
+    blocks
+}
+
 #[test]
 fn a_snapshot_with_the_bytes_written_so_far_gives_every_item_pushed() {
     let (d, ops) = session();
-    // Blocks close on their size too: 64 bytes is a few pairs.
-    for (block_bytes, batch) in [(64, 1), (64, 3), (1 << 20, 1)] {
+    // Blocks close at flushes and, at 64 bytes and a promise each op, on their size.
+    for (block_bytes, compression, promise) in [
+        (64, Compression::Spread, true),
+        (64, Compression::Offload, true),
+        (64, Compression::Spread, false),
+        (1 << 20, Compression::Spread, false),
+    ] {
         let mut w = Writer::new(
             d.clone(),
             WriteOptions {
                 level: 3,
                 block_bytes,
-                batch,
+                compression,
+                ..WriteOptions::default()
             },
         )
         .unwrap();
         let mut file = w.take_output();
-        let mut rows_seen = 0;
+        let mut written_seen = 0;
+        let mut pair_at: i64 = -10;
         for (n, op) in ops.iter().enumerate() {
             apply(&mut w, op);
+            match op {
+                Op::Run(t, _) => pair_at = t - 10,
+                Op::Pair(..) => pair_at += 10,
+                _ => {}
+            }
+            // Every item of every channel before the last pair's tick is in.
+            if promise && matches!(op, Op::Pair(..)) && pair_at > w.promised() {
+                w.promise(pair_at).unwrap();
+            }
             let snapshot = w.snapshot();
             // The caller writes what the writer has given out, then publishes the snapshot.
             file.extend(w.take_output());
-            assert_eq!(snapshot.position(), file.len() as u64);
-            let mut blocks: Vec<Block> = (0..snapshot.block_count())
-                .map(|i| {
-                    let row = snapshot.row(i).unwrap();
-                    let frame = &file[row.offset as usize..][..row.length as usize];
-                    snapshot.decode_block(i, frame).unwrap()
-                })
-                .collect();
-            blocks.extend(snapshot.queued_blocks().unwrap());
-            blocks.push(snapshot.open_block().unwrap());
-            for pair in blocks.windows(2) {
-                assert_eq!(pair[0].end, pair[1].start, "after op {n}");
-            }
-            // Each block's first sample is the count of samples in the blocks before it, queued
-            // ones and the open one too.
-            let mut before = 0;
-            for b in &blocks {
-                let BlockChannel::Analog {
-                    first_index,
-                    values,
-                } = &b.channels[0]
-                else {
-                    panic!("V is analog")
-                };
-                assert_eq!(*first_index, before, "{block_bytes} {batch}, after op {n}");
-                before += codes(values).len() as u64;
-            }
-            let (mut edges, mut v, mut i, mut p) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-            for b in &blocks {
-                if let BlockChannel::Digital { edges: e, .. } = &b.channels[2] {
-                    edges.extend(e);
+            assert!(snapshot.position() <= file.len() as u64);
+            let mut channel_items = Vec::new();
+            for c in 0..3 {
+                let blocks = snapshot_blocks(&snapshot, &file, c);
+                assert_eq!(blocks[0].start, 0);
+                for pair in blocks.windows(2) {
+                    assert_eq!(pair[0].end, pair[1].start, "channel {c}, after op {n}");
                 }
-                v.extend(codes(b.channels[0].values().unwrap()));
-                i.extend(codes(b.channels[1].values().unwrap()));
-                p.extend(codes(&snapshot.derived(b, 0).unwrap()));
+                assert_eq!(blocks.last().unwrap().end, i64::MAX, "the open block");
+                let mut before = 0;
+                let mut items = Vec::new();
+                for b in &blocks {
+                    match &b.data {
+                        BlockChannel::Analog {
+                            first_index,
+                            values,
+                        } => {
+                            assert_eq!(*first_index, before, "channel {c}, after op {n}");
+                            before += values.len() as u64;
+                            items.extend(codes(values));
+                        }
+                        BlockChannel::Digital { edges, .. } => {
+                            items.extend(edges.iter().map(|&t| t as u64))
+                        }
+                    }
+                }
+                written_seen = written_seen.max(snapshot.channel(c).unwrap().blocks.rows);
+                channel_items.push(items);
             }
-            assert_eq!((edges, v, i, p), pushed(&ops[..=n]), "after op {n}");
-            let gaps: Vec<Gap> = snapshot.gaps(2).copied().collect();
+            let p: Vec<u64> = channel_items[1]
+                .iter()
+                .zip(&channel_items[0])
+                .map(|(a, b)| a * b)
+                .collect();
+            let edges: Vec<i64> = channel_items[2].iter().map(|&t| t as i64).collect();
+            let (want_edges, v, i, want_p) = pushed(&ops[..=n]);
+            assert_eq!(edges, want_edges, "after op {n}");
+            assert_eq!(
+                (&channel_items[0], &channel_items[1]),
+                (&v, &i),
+                "after op {n}"
+            );
+            assert_eq!(p, want_p, "after op {n}");
+            let gaps: Vec<Gap> = snapshot.gaps_from(2, 0).copied().collect();
             let want: Vec<Gap> = ops[..=n]
                 .iter()
                 .filter_map(|op| match op {
@@ -426,18 +516,17 @@ fn a_snapshot_with_the_bytes_written_so_far_gives_every_item_pushed() {
                 })
                 .collect();
             assert_eq!(gaps, want, "after op {n}");
-            let runs: Vec<Break> = snapshot.runs(0).copied().collect();
-            assert_eq!(runs, snapshot.runs(1).copied().collect::<Vec<_>>());
+            let runs: Vec<Break> = snapshot.runs_from(0, 0).copied().collect();
+            assert_eq!(runs, snapshot.runs_from(1, 0).copied().collect::<Vec<_>>());
             let marks = ops[..=n]
                 .iter()
                 .filter(|op| matches!(op, Op::Mark(_)))
                 .count();
             assert_eq!(snapshot.annotations().count(), marks, "after op {n}");
-            rows_seen = rows_seen.max(snapshot.block_count());
         }
-        assert!(rows_seen >= 2, "{block_bytes} {batch}: blocks were written");
+        assert_eq!(written_seen, 0, "every page still open: few blocks");
         let last = w.snapshot();
-        let runs: Vec<Break> = last.runs(0).copied().collect();
+        let runs: Vec<Break> = last.runs_from(0, 0).copied().collect();
         assert_eq!(
             runs,
             [
@@ -458,17 +547,17 @@ fn a_snapshot_with_the_bytes_written_so_far_gives_every_item_pushed() {
                 }
             ]
         );
-        // The held finest level is the footer's finest level, as far as it has settled: one
-        // chunk, since 45 buckets of 16 ticks cover the session.
-        let held = &last.overview()[0];
-        assert_eq!((held.first, held.chunks.len()), (0, 1));
+        // V's finest level, 2^4, held as far as it has settled: 45 buckets of 16 ticks cover the
+        // session, so it is the strip and none of it goes in blocks.
+        let held = last.overview(0).unwrap().levels[0].held.clone();
+        assert_eq!(held.first, 0);
         let settled = held.buckets() / 8 * 8;
         assert!(settled > 0);
         let f = w.finish(720, &[720], Finish::default()).unwrap();
         file.extend(&f.tail);
         let footer = Footer::parse_file(&file).unwrap();
         assert_eq!(
-            footer.overview[0].slice(0, settled),
+            footer.strip(0).unwrap().slice(0, settled),
             held.chunks[0].slice(0, settled)
         );
     }
@@ -480,47 +569,10 @@ fn a_snapshot_goes_to_another_thread() {
     shared::<Snapshot>();
 }
 
-/// Bucket `i` of each of `level`'s channels, to compare one bucket at a time.
-fn bucket(level: &Level, i: u64) -> Vec<String> {
-    level
-        .channels
-        .iter()
-        .map(|c| match c.analog() {
-            None => format!("{:?}", c.digital(i).unwrap()),
-            Some(AnalogOverview::F32(a)) => format!("{:?}", a.bucket(i as usize)),
-            Some(AnalogOverview::F64(a)) => format!("{:?}", a.bucket(i as usize)),
-            Some(AnalogOverview::U64(a)) => format!("{:?}", a.bucket(i as usize)),
-            Some(AnalogOverview::I64(a)) => format!("{:?}", a.bucket(i as usize)),
-        })
-        .collect()
-}
-
-/// `piece`'s buckets are the finished level's from bucket `first` on. Its blocks hold the
-/// finished level, 65,536 buckets each.
-fn same_as_finished(piece: &Level, first: u64, finished: &[OverviewBlock]) {
-    let block = &finished[(first / BLOCK_BUCKETS) as usize];
-    let at = first - block.first;
-    let whole = piece.buckets / 8 * 8;
-    assert_eq!(
-        piece.slice(0, whole),
-        block.level.slice(at, whole),
-        "buckets {first} to {}",
-        first + whole
-    );
-    for i in whole..piece.buckets {
-        assert_eq!(
-            bucket(piece, i),
-            bucket(&block.level, at + i),
-            "bucket {}",
-            first + i
-        );
-    }
-}
-
-/// The session's channels at a pair every 100 ticks for 6,000,000 ticks: past 2^21, where the
-/// finest level, 2^4, has more than 2^17 buckets and goes in overview blocks, and into its sixth.
+/// The session's channels at a pair every 100 ticks for 6,000,000 ticks: V's finest level,
+/// 2^4, has 375,000 buckets and goes in overview blocks, 92 of them.
 #[test]
-fn a_snapshot_past_the_heads_bucket_count_reads_every_finest_bucket_the_finished_file_has() {
+fn a_snapshot_reads_every_settled_bucket_the_finished_file_has() {
     let (mut d, _) = session();
     for c in &mut d.channels {
         if let DeclaredKind::Analog { period, .. } = &mut c.data {
@@ -528,16 +580,14 @@ fn a_snapshot_past_the_heads_bucket_count_reads_every_finest_bucket_the_finished
         }
     }
     const PAIRS: u64 = 60_000;
-    // Blocks close on their size, a few hundred pairs each, and at a flush every 2,000 pairs. In
-    // batches of 3, an overview block that settles with the first or second of a batch waits
-    // with it, unwritten, until the third or the flush.
-    for batch in [1, 3] {
+    for compression in [Compression::Spread, Compression::Offload] {
         let mut w = Writer::new(
             d.clone(),
             WriteOptions {
                 level: 3,
                 block_bytes: 4096,
-                batch,
+                compression,
+                ..WriteOptions::default()
             },
         )
         .unwrap();
@@ -545,108 +595,74 @@ fn a_snapshot_past_the_heads_bucket_count_reads_every_finest_bucket_the_finished
         w.run(0, 0, 0).unwrap();
         w.run(1, 0, 0).unwrap();
         let mut kept: Vec<Snapshot> = Vec::new();
-        // Each different count of written and queued blocks, while some are queued.
-        let mut queued_seen = Vec::new();
         for i in 0..PAIRS {
             let t = i as i64 * 100;
             if i > 0 && i % 2000 == 0 {
                 w.flush(t).unwrap();
             }
+            w.promise(t).unwrap();
             w.sample(0, 3300 + i % 7).unwrap();
             w.sample(1, 1_000_000 + (i * 7919) % 100_000).unwrap();
             if i % 37 == 0 {
                 w.edge(2, t + 50).unwrap();
             }
-            // A queued overview block waits a block at least, a few hundred pairs.
-            if i % 50 != 49 {
-                continue;
+            if i % 1999 == 0 {
+                kept.push(w.snapshot());
             }
-            let s = w.snapshot();
             file.extend(w.take_output());
-            let written = s
-                .overview_blocks()
-                .first()
-                .map_or(0, |l| u64::from(l.blocks));
-            let queued = (s.overview()[0].first > written * BLOCK_BUCKETS)
-                .then_some((written, s.overview()[0].first));
-            if queued.is_some_and(|q| !queued_seen.contains(&q)) || i % 6000 == 5999 {
-                queued_seen.extend(queued);
-                kept.push(s);
-            }
-        }
-        if batch > 1 {
-            assert!(
-                queued_seen.iter().any(|&(written, _)| written > 0),
-                "a snapshot held a queued overview block after a written one: {queued_seen:?}"
-            );
         }
         let f = w.finish(PAIRS as i64 * 100, &[PAIRS as i64 * 100], Finish::default());
         file.extend(f.unwrap().tail);
-        let footer = Footer::parse_file(&file).unwrap();
-        assert_eq!(footer.header.overview_blocks[0].shift, 4);
-        let finished: Vec<OverviewBlock> = (0..footer.header.overview_blocks[0].blocks as usize)
-            .map(|k| {
-                let (offset, len) = footer.overview_block_location(0, k);
-                let frame = &file[offset as usize..][..len as usize];
-                footer.decode_overview_block(0, k, frame).unwrap()
-            })
-            .collect();
-        let mut past_head = 0;
-        let mut decoded = 0;
+        let index = Index::of_file(&file).unwrap();
+        assert_eq!(index.header().channels[0].overview_blocks[0].shift, 4);
+        let finished = index.level_in(&file, 0, 0).unwrap();
+        let mut in_blocks = 0;
         for s in &kept {
-            let held = &s.overview()[0];
-            assert_eq!(held.shift, 4);
-            let mut blocks = 0;
-            if let Some(l) = s.overview_blocks().first() {
-                assert_eq!(l.shift, 4);
-                // A written block's frame is the finished file's: decode each once.
-                for (k, want) in finished.iter().enumerate().take(l.blocks as usize) {
-                    let at = s.overview_block_location(0, k);
-                    assert_eq!(at, footer.overview_block_location(0, k), "block {k}");
-                    if k >= decoded {
-                        let frame = &file[at.0 as usize..][..at.1 as usize];
-                        let block = s.decode_overview_block(0, k, frame).unwrap();
-                        assert_eq!(block.first, k as u64 * BLOCK_BUCKETS);
-                        assert_eq!(block.level, want.level, "block {k}, batch {batch}");
-                        decoded = k + 1;
-                    }
+            let level = &s.overview(0).unwrap().levels[0];
+            assert_eq!(level.shift, 4);
+            // Rows in the file, then blocks not yet written, then the run, then the buckets after.
+            let mut got = Level::empty(4, s.overview(0).unwrap().column);
+            for r in s.level_refs(0, 0, &[], from_memory(&file)).unwrap() {
+                let frame = &file[r.row.offset as usize..][..r.row.length as usize];
+                let b = s.decode_overview(0, 0, &r, frame).unwrap();
+                assert_eq!(b.first, got.buckets);
+                for _ in 0..b.n {
+                    got.append(&b.level);
                 }
-                let queued = s.queued_overview_blocks(0).unwrap();
-                for (j, block) in queued.iter().enumerate() {
-                    let k = l.blocks as usize + j;
-                    assert_eq!(block.first, k as u64 * BLOCK_BUCKETS);
-                    assert_eq!(block.level, finished[k].level, "queued {k}, batch {batch}");
+            }
+            for b in s.unwritten_overview(0, 0).unwrap() {
+                assert_eq!(b.first, got.buckets);
+                for _ in 0..b.n {
+                    got.append(&b.level);
                 }
-                blocks = l.blocks as u64 + queued.len() as u64;
             }
-            // The held buckets follow the blocks, and run to the last settled bucket: the
-            // last before the open block's start.
-            assert_eq!(held.first, blocks * BLOCK_BUCKETS);
-            let mut first = held.first;
-            for chunk in &held.chunks {
-                same_as_finished(chunk, first, &finished);
-                first += chunk.buckets;
+            if level.in_blocks {
+                in_blocks += 1;
             }
-            assert_eq!(
-                first,
-                s.open_block().unwrap().start as u64 >> 4,
-                "batch {batch}"
-            );
-            if first > HEAD_BUCKETS {
-                past_head += 1;
+            assert_eq!(level.held.first, got.buckets);
+            for chunk in &level.held.chunks {
+                got.append(chunk);
             }
+            let n = got.buckets / 8 * 8;
+            assert!(n <= finished.buckets);
+            assert_eq!(got.slice(0, n), finished.slice(0, n), "{compression:?}");
+            // Settled to what the known-through records and V's blocks say.
+            let known = s.known_through().max(0) as u64;
+            assert!(got.buckets >= known >> 4, "{} {}", got.buckets, known >> 4);
         }
         assert!(
-            past_head >= 5,
-            "batch {batch}: {past_head} snapshots past 2^17 buckets"
+            in_blocks >= 20,
+            "{compression:?}: {in_blocks} snapshots in blocks"
         );
+        let _ = BLOCK_BUCKETS;
     }
 }
 
-/// A recorder's file cut off after a gap whose end no block reached, with a mark past it: repair
-/// drops the gap and ends what is known at its start, and the Recutter does the same.
+/// A recorder's file cut off after a gap whose end no block reached, reported after its last
+/// flush, with a mark past it: repair cuts the file at that flush's known-through record, so the
+/// gap, after it, goes and the pin reads as known to the flush. The Recutter does the same.
 #[test]
-fn a_cut_off_input_recut_follows_repairs_gap_rule() {
+fn a_cut_off_input_recut_follows_repairs_cut() {
     let (d, _) = session();
     let mut w = Writer::new(d, options(1 << 20)).unwrap();
     w.run(0, 0, 0).unwrap();
@@ -675,24 +691,24 @@ fn a_cut_off_input_recut_follows_repairs_gap_rule() {
     w.annotation("verge", m).unwrap();
     let cut = w.take_output();
     let repaired = repair(&cut, 3).unwrap();
-    // Length one past the mark; DIO0 known to the gap's start, the gap left out.
+    // Length one past the mark; DIO0 known to the flush, the gap left out with its record.
     assert_eq!(repaired.header.length, 401);
-    let escapement_tickwave_format::header::ChannelKind::Digital { end, gaps, .. } =
-        &repaired.header.channels[2].data
-    else {
+    let ChannelKind::Digital { end, gaps, .. } = &repaired.header.channels[2].data else {
         panic!()
     };
-    assert_eq!((*end, gaps.len()), (150, 0));
+    assert_eq!((*end, gaps.len()), (200, 0));
     let (out, f) = recut(&cut, 4096, options(1 << 20)).unwrap();
     assert_eq!(f.header.content_id, repaired.header.content_id);
-    assert_eq!(f.header.channels, repaired.header.channels);
+    assert_eq!(data(&f.header), data(&repaired.header));
     assert_eq!(f.header.length, repaired.header.length);
     let fixed = [&cut[..repaired.keep as usize], &repaired.tail].concat();
     assert_eq!(items(&out), items(&fixed));
 }
 
+/// A cut-off input with no block and a digital channel declared high recuts as repair finishes
+/// it: the channel never known, its declared level kept.
 #[test]
-fn a_cut_off_input_with_no_block_and_a_channel_declared_high_is_refused() {
+fn a_cut_off_input_with_no_block_and_a_channel_declared_high_recuts_as_repair_finishes_it() {
     let (mut d, _) = session();
     d.channels[2].data = DeclaredKind::Digital { initial: true };
     let mut w = Writer::new(d, options(1 << 20)).unwrap();
@@ -700,12 +716,13 @@ fn a_cut_off_input_with_no_block_and_a_channel_declared_high_is_refused() {
         unreachable!()
     };
     w.annotation("verge", m).unwrap();
-    let err = recut(&w.take_output(), 4096, options(1 << 20))
-        .err()
-        .unwrap();
-    assert_eq!(
-        err.to_string(),
-        "the input is cut off with no block, and channel DIO0 is declared high at tick 0: no \
-         block carries that level, so it isn't finished"
-    );
+    let cut = w.take_output();
+    let (_, f) = recut(&cut, 4096, options(1 << 20)).unwrap();
+    let repaired = escapement_tickwave_format::repair::repair(&cut, 3).unwrap();
+    assert_eq!(f.header.content_id, repaired.header.content_id);
+    let ChannelKind::Digital { initial, end, .. } = f.header.channels[2].data else {
+        panic!()
+    };
+    assert!(initial);
+    assert_eq!(Some(end), f.header.start(2));
 }

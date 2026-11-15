@@ -1,5 +1,5 @@
 //! What a file says about itself: the preamble, the trailer, the declaration that opens the
-//! records, the header the footer holds, and the index's rows.
+//! records, the header the footer holds, and the rows its index pages hold.
 //!
 //! Layout, little-endian:
 //!
@@ -24,7 +24,6 @@ pub const MAJOR: u16 = 1;
 pub const MINOR: u16 = 0;
 pub const PREAMBLE_LEN: usize = 12;
 pub const TRAILER_LEN: usize = 24;
-pub const ROW_FIXED: usize = 24;
 pub const LEVEL_BIT: u32 = 1 << 31;
 
 /// Every integer in the header stays below this, so a JavaScript reader parses it exactly.
@@ -126,6 +125,9 @@ pub struct DeclaredChannel {
     pub data: DeclaredKind,
     #[serde(flatten)]
     pub shaping: Shaping,
+    /// Its finest overview level's shift; None takes the recording's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overview_shift: Option<u8>,
 }
 
 /// A channel computed from two analog channels, which blocks do not store: FORMAT.md's derived
@@ -138,6 +140,30 @@ pub struct Derived {
     pub product: [String; 2],
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub significant: Option<u8>,
+}
+
+/// A derived channel as the footer's header states it: the declaration's entry, and the levels
+/// of its overview that go in overview blocks.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DerivedHeader {
+    pub name: String,
+    pub unit: String,
+    pub product: [String; 2],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub significant: Option<u8>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overview_blocks: Vec<OverviewLevel>,
+}
+
+impl DerivedHeader {
+    pub fn declared(&self) -> Derived {
+        Derived {
+            name: self.name.clone(),
+            unit: self.unit.clone(),
+            product: self.product.clone(),
+            significant: self.significant,
+        }
+    }
 }
 
 /// What a converter did to a channel that the instrument did not: FORMAT.md's moved and trimmed
@@ -219,31 +245,24 @@ pub struct Header {
     pub length: i64,
     pub channels: Vec<ChannelHeader>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub derived: Vec<Derived>,
+    pub derived: Vec<DerivedHeader>,
     pub sources: Vec<SourceHeader>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub meta: BTreeMap<String, String>,
     pub content_id: ContentId,
-    pub blocks: u32,
-    /// The finest overview level's shift, as the declaration gave it.
+    /// The finest overview level's shift of a channel that states none.
     pub overview_shift: u8,
-    /// The overview levels in the footer, as bucket widths of 2^shift ticks, finest first.
-    pub overview: Vec<u8>,
-    /// The finer overview levels kept in overview blocks, finest first.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub overview_blocks: Vec<OverviewLevel>,
-    /// The sidecar's files by name, the hand-written TOML file and what it includes; in a
-    /// bundled file only.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub annotations: Option<BTreeMap<String, String>>,
 }
 
+/// One level of a channel's overview that goes in overview blocks: its shift, its blocks of 4,096
+/// buckets, and the rows of its index, a run of alike blocks a row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OverviewLevel {
     pub shift: u8,
-    pub blocks: u32,
+    pub blocks: u64,
+    pub rows: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -257,6 +276,14 @@ pub struct ChannelHeader {
     pub data: ChannelKind,
     #[serde(flatten)]
     pub shaping: Shaping,
+    /// Its finest overview level's shift, where it states one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overview_shift: Option<u8>,
+    /// Its blocks, which tile `0..length`.
+    pub blocks: u64,
+    /// The levels of its overview in overview blocks, finest first.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub overview_blocks: Vec<OverviewLevel>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -268,8 +295,12 @@ pub enum ChannelKind {
         /// A source tick: the level is known from the channel's start to here.
         end: i64,
         edges: u64,
+        /// The gaps, when there are at most `INLINE_LIST` of them.
         #[serde(skip_serializing_if = "Vec::is_empty")]
         gaps: Vec<Gap>,
+        /// How many gaps the list pages hold, when there are more; `gaps` is then empty.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        gap_count: Option<u64>,
     },
     Analog {
         unit: String,
@@ -277,12 +308,53 @@ pub enum ChannelKind {
         /// Ticks from one sample to the next.
         period: Ratio,
         count: u64,
+        /// The breaks, when there are at most `INLINE_LIST` of them.
         #[serde(skip_serializing_if = "Vec::is_empty")]
         breaks: Vec<Break>,
+        /// How many breaks the list pages hold, when there are more; `breaks` is then empty.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        break_count: Option<u64>,
         coding: AnalogCoding,
         #[serde(skip_serializing_if = "Option::is_none")]
         significant: Option<u8>,
+        /// Samples the instrument lost before the first, 0 for none.
+        #[serde(skip_serializing_if = "is_zero")]
+        lost_before: u64,
+        /// Samples the instrument lost after the last, 0 for none.
+        #[serde(skip_serializing_if = "is_zero")]
+        lost_after: u64,
     },
+}
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
+}
+
+/// The most entries a gap or break list holds in the header; a longer one goes in list pages.
+pub const INLINE_LIST: usize = 64;
+
+impl ChannelKind {
+    /// How many gaps or breaks the channel has, inline or paged.
+    pub fn list_len(&self) -> u64 {
+        match self {
+            Self::Digital {
+                gaps, gap_count, ..
+            } => gap_count.unwrap_or(gaps.len() as u64),
+            Self::Analog {
+                breaks,
+                break_count,
+                ..
+            } => break_count.unwrap_or(breaks.len() as u64),
+        }
+    }
+
+    /// Whether its gaps or breaks are in list pages.
+    pub fn paged(&self) -> bool {
+        match self {
+            Self::Digital { gap_count, .. } => gap_count.is_some(),
+            Self::Analog { break_count, .. } => break_count.is_some(),
+        }
+    }
 }
 
 /// An exact ratio of signed integers with a positive denominator: an `int` coding's scale and
@@ -476,16 +548,23 @@ struct RawChannel {
     end: Option<i64>,
     edges: Option<u64>,
     gaps: Option<Vec<Gap>>,
+    gap_count: Option<u64>,
     unit: Option<String>,
     first: Option<i64>,
     period: Option<Ratio>,
     count: Option<u64>,
     breaks: Option<Vec<Break>>,
+    break_count: Option<u64>,
     coding: Option<RawCoding>,
     significant: Option<u8>,
+    lost_before: Option<u64>,
+    lost_after: Option<u64>,
     offset: Option<i64>,
     offset_kind: Option<String>,
     kept: Option<Kept>,
+    overview_shift: Option<u8>,
+    blocks: Option<u64>,
+    overview_blocks: Option<Vec<OverviewLevel>>,
 }
 
 impl RawChannel {
@@ -624,27 +703,70 @@ impl RawCoding {
     }
 }
 
+/// A list stated inline or as a count of paged entries, never both: an inline list holds at most
+/// `INLINE_LIST` entries, a paged one more, and a list of none states neither.
+fn list<T>(
+    name: &str,
+    inline: Option<Vec<T>>,
+    paged: Option<u64>,
+    what: &str,
+) -> Result<(Vec<T>, Option<u64>), String> {
+    match (inline, paged) {
+        (Some(_), Some(_)) => Err(format!(
+            "channel {name} states its {what} both inline and as a count"
+        )),
+        (Some(v), None) if v.len() > INLINE_LIST => Err(format!(
+            "channel {name} states {} {what} inline, more than the {INLINE_LIST} a header holds",
+            v.len()
+        )),
+        (None, Some(n)) if n <= INLINE_LIST as u64 => Err(format!(
+            "channel {name} states {n} {what} in list pages, which a header holds inline"
+        )),
+        (inline, paged) => Ok((inline.unwrap_or_default(), paged)),
+    }
+}
+
+/// A loss at either end, which is at least 1 where it is stated.
+fn loss(name: &str, value: Option<u64>, what: &str) -> Result<u64, String> {
+    match value {
+        Some(0) => Err(format!(
+            "channel {name} states a {what} of 0; it states none"
+        )),
+        v => Ok(v.unwrap_or(0)),
+    }
+}
+
 impl TryFrom<RawChannel> for ChannelHeader {
     type Error = String;
 
     fn try_from(mut raw: RawChannel) -> Result<Self, String> {
         let shaping = raw.shaping()?;
         let data = match raw.kind {
-            RawKind::Digital => ChannelKind::Digital {
-                initial: need(raw.initial, "initial")?,
-                end: need(raw.end, "end")?,
-                edges: need(raw.edges, "edges")?,
-                gaps: raw.gaps.unwrap_or_default(),
-            },
-            RawKind::Analog => ChannelKind::Analog {
-                unit: need(raw.unit, "unit")?,
-                first: need(raw.first, "first")?,
-                period: need(raw.period, "period")?,
-                count: need(raw.count, "count")?,
-                breaks: raw.breaks.unwrap_or_default(),
-                coding: need(raw.coding, "coding")?.coding()?,
-                significant: raw.significant,
-            },
+            RawKind::Digital => {
+                let (gaps, gap_count) = list(&raw.name, raw.gaps, raw.gap_count, "gaps")?;
+                ChannelKind::Digital {
+                    initial: need(raw.initial, "initial")?,
+                    end: need(raw.end, "end")?,
+                    edges: need(raw.edges, "edges")?,
+                    gaps,
+                    gap_count,
+                }
+            }
+            RawKind::Analog => {
+                let (breaks, break_count) = list(&raw.name, raw.breaks, raw.break_count, "breaks")?;
+                ChannelKind::Analog {
+                    unit: need(raw.unit, "unit")?,
+                    first: need(raw.first, "first")?,
+                    period: need(raw.period, "period")?,
+                    count: need(raw.count, "count")?,
+                    breaks,
+                    break_count,
+                    coding: need(raw.coding, "coding")?.coding()?,
+                    significant: raw.significant,
+                    lost_before: loss(&raw.name, raw.lost_before, "lost_before")?,
+                    lost_after: loss(&raw.name, raw.lost_after, "lost_after")?,
+                }
+            }
         };
         Ok(Self {
             name: raw.name,
@@ -652,6 +774,9 @@ impl TryFrom<RawChannel> for ChannelHeader {
             source: raw.source,
             data,
             shaping,
+            overview_shift: raw.overview_shift,
+            blocks: need(raw.blocks, "blocks")?,
+            overview_blocks: raw.overview_blocks.unwrap_or_default(),
         })
     }
 }
@@ -678,6 +803,7 @@ impl TryFrom<RawChannel> for DeclaredChannel {
             source: raw.source,
             data,
             shaping,
+            overview_shift: raw.overview_shift,
         })
     }
 }
@@ -705,6 +831,7 @@ impl ChannelHeader {
                 },
             },
             shaping: self.shaping.clone(),
+            overview_shift: self.overview_shift,
         }
     }
 
@@ -791,6 +918,43 @@ impl Declaration {
         let channel = self.channels.get(c)?;
         channel_start(&self.sources, channel.source, &channel.shaping)
     }
+
+    /// Overview channel `o`'s finest level's shift: a channel's own or the recording's, and a
+    /// derived channel's operands' coarser (FORMAT.md, "Overview"). None past the last.
+    pub fn shift(&self, o: usize) -> Option<u8> {
+        let names = self.derived.iter().map(|d| &d.product);
+        shift_of(
+            self.overview_shift,
+            &self
+                .channels
+                .iter()
+                .map(|c| (c.name.as_str(), c.overview_shift))
+                .collect::<Vec<_>>(),
+            names,
+            o,
+        )
+    }
+}
+
+/// Overview channel `o`'s finest shift, from each channel's name and stated shift and each
+/// derived channel's operands by name.
+fn shift_of<'a>(
+    recording: u8,
+    channels: &[(&str, Option<u8>)],
+    mut derived: impl Iterator<Item = &'a [String; 2]>,
+    o: usize,
+) -> Option<u8> {
+    if let Some(&(_, own)) = channels.get(o) {
+        return Some(own.unwrap_or(recording));
+    }
+    let [a, b] = derived.nth(o - channels.len())?;
+    let of = |name: &String| {
+        channels
+            .iter()
+            .find(|c| c.0 == name)
+            .map(|c| c.1.unwrap_or(recording))
+    };
+    Some(of(a)?.max(of(b)?))
 }
 
 impl Header {
@@ -821,13 +985,35 @@ impl Header {
         channel_start(&self.sources, channel.source, &channel.shaping)
     }
 
+    /// Overview channel `o`'s finest shift, as `Declaration::shift`.
+    pub fn shift(&self, o: usize) -> Option<u8> {
+        shift_of(
+            self.overview_shift,
+            &self
+                .channels
+                .iter()
+                .map(|c| (c.name.as_str(), c.overview_shift))
+                .collect::<Vec<_>>(),
+            self.derived.iter().map(|d| &d.product),
+            o,
+        )
+    }
+
+    /// Overview channel `o`'s levels in overview blocks, as the header states them.
+    pub fn levels(&self, o: usize) -> Option<&[OverviewLevel]> {
+        match self.channels.get(o) {
+            Some(c) => Some(&c.overview_blocks),
+            None => Some(&self.derived.get(o - self.channels.len())?.overview_blocks),
+        }
+    }
+
     /// What the declaration said: the header's values without what only the end settles. A
     /// source's `extra` keeps the keys the end added, which the declaration may not have.
     pub fn declaration(&self) -> Declaration {
         Declaration {
             timebase: self.timebase,
             channels: self.channels.iter().map(ChannelHeader::declared).collect(),
-            derived: self.derived.clone(),
+            derived: self.derived.iter().map(DerivedHeader::declared).collect(),
             sources: self.sources.clone(),
             title: self.title.clone(),
             meta: self.meta.clone(),
@@ -1008,8 +1194,8 @@ pub enum RateOrigin {
     Given,
 }
 
-/// A block's row in the index: where it starts, and where its frame is. Its channels' words are
-/// in `Words`, apart, so an index of many blocks holds them in one allocation.
+/// A block's row in its channel's index pages, 28 bytes: where it starts, where its frame is,
+/// and the channel's word, as its block record has them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BlockRow {
     pub start: i64,
@@ -1017,109 +1203,72 @@ pub struct BlockRow {
     pub offset: u64,
     pub length: u32,
     pub decoded_length: u32,
+    /// A digital channel's edge count with the level at the block's start in `LEVEL_BIT`, or an
+    /// analog channel's sample count.
+    pub word: u32,
 }
 
 impl BlockRow {
-    pub fn size(channels: usize) -> usize {
-        ROW_FIXED + 4 * channels
-    }
+    pub const SIZE: usize = 28;
 
-    /// The row as the index holds it, with the block's `words`.
-    pub fn write(&self, words: &[u32], out: &mut Vec<u8>) {
+    pub fn write(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&self.start.to_le_bytes());
         out.extend_from_slice(&self.offset.to_le_bytes());
         out.extend_from_slice(&self.length.to_le_bytes());
         out.extend_from_slice(&self.decoded_length.to_le_bytes());
-        for word in words {
-            out.extend_from_slice(&word.to_le_bytes());
-        }
+        out.extend_from_slice(&self.word.to_le_bytes());
     }
 
-    /// `bytes` is exactly one row; its words go on the end of `words`.
-    pub fn parse(bytes: &[u8], words: &mut Words) -> Self {
+    /// `bytes` is exactly one row.
+    pub fn parse(bytes: &[u8]) -> Self {
         let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
-        let (channel_words, _) = bytes[ROW_FIXED..].as_chunks::<4>();
-        words
-            .words
-            .extend(channel_words.iter().map(|w| u32::from_le_bytes(*w)));
         Self {
             start: i64::from_le_bytes(bytes[0..8].try_into().unwrap()),
             offset: u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
             length: u32_at(16),
             decoded_length: u32_at(20),
+            word: u32_at(24),
+        }
+    }
+
+    /// The items the block holds: a digital word keeps the level in its top bit.
+    pub fn items(&self, digital: bool) -> u32 {
+        if digital {
+            self.word & !LEVEL_BIT
+        } else {
+            self.word
         }
     }
 }
 
-/// Every block's channel words, in block order: a word a channel, digital the edge count with
-/// the level at the block's start in `LEVEL_BIT`, analog the sample count.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Words {
-    channels: usize,
-    words: Vec<u32>,
-}
-
-impl Words {
-    pub fn new(channels: usize) -> Self {
-        Self {
-            channels,
-            words: Vec::new(),
-        }
-    }
-
-    pub fn with_capacity(channels: usize, blocks: usize) -> Self {
-        Self {
-            channels,
-            words: Vec::with_capacity(channels * blocks),
-        }
-    }
-
-    /// Block `block`'s words.
-    #[inline]
-    pub fn of(&self, block: usize) -> &[u32] {
-        &self.words[block * self.channels..][..self.channels]
-    }
-
-    pub fn of_mut(&mut self, block: usize) -> &mut [u32] {
-        &mut self.words[block * self.channels..][..self.channels]
-    }
-
-    /// The next block's words: one a channel.
-    pub fn push(&mut self, words: &[u32]) {
-        assert_eq!(words.len(), self.channels, "one word a channel");
-        self.words.extend_from_slice(words);
-    }
-
-    /// The blocks it holds the words of.
-    pub fn blocks(&self) -> usize {
-        self.words.len().checked_div(self.channels).unwrap_or(0)
-    }
-}
-
-/// An overview block's place in the file. The index holds these after the data blocks' rows, by
-/// level in the header's order, then in time order.
+/// A row of one overview level's index, 20 bytes: an overview block record's frame, and `n`, the
+/// blocks it stands for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OverviewRow {
     pub offset: u64,
     pub length: u32,
     pub decoded_length: u32,
+    pub n: u32,
 }
 
 impl OverviewRow {
-    pub const SIZE: usize = 16;
+    pub const SIZE: usize = 20;
 
     pub fn write(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&self.offset.to_le_bytes());
         out.extend_from_slice(&self.length.to_le_bytes());
         out.extend_from_slice(&self.decoded_length.to_le_bytes());
+        out.extend_from_slice(&self.n.to_le_bytes());
     }
 
     /// `bytes` is exactly one row.
     pub fn parse(bytes: &[u8]) -> Self {
+        let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
         Self {
             offset: u64::from_le_bytes(bytes[0..8].try_into().unwrap()),
-            length: u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
-            decoded_length: u32::from_le_bytes(bytes[12..16].try_into().unwrap()),
+            length: u32_at(8),
+            decoded_length: u32_at(12),
+            n: u32_at(16),
         }
     }
 }
@@ -1190,8 +1339,11 @@ mod tests {
                 tick: 20,
                 lost: 3,
             }],
+            break_count: None,
             coding,
             significant: Some(4),
+            lost_before: 2,
+            lost_after: 0,
         };
         for data in [
             ChannelKind::Digital {
@@ -1199,6 +1351,7 @@ mod tests {
                 end: 7,
                 edges: 3,
                 gaps: Vec::new(),
+                gap_count: None,
             },
             ChannelKind::Digital {
                 initial: false,
@@ -1209,6 +1362,14 @@ mod tests {
                     to: 4,
                     level: true,
                 }],
+                gap_count: None,
+            },
+            ChannelKind::Digital {
+                initial: false,
+                end: 9,
+                edges: 1,
+                gaps: Vec::new(),
+                gap_count: Some(65),
             },
             analog(AnalogCoding::F32),
             analog(AnalogCoding::F64),
@@ -1232,6 +1393,13 @@ mod tests {
                     source: 2,
                     data: data.clone(),
                     shaping,
+                    overview_shift: Some(9),
+                    blocks: 3,
+                    overview_blocks: vec![OverviewLevel {
+                        shift: 9,
+                        blocks: 2,
+                        rows: 2,
+                    }],
                 };
                 let json = serde_json::to_string(&channel).unwrap();
                 assert_eq!(parse(&json).unwrap(), channel, "{json}");
@@ -1275,13 +1443,17 @@ mod tests {
                 end: 7,
                 edges: 3,
                 gaps: Vec::new(),
+                gap_count: None,
             },
             shaping,
+            overview_shift: None,
+            blocks: 1,
+            overview_blocks: Vec::new(),
         };
         let [whole, .., both] = shapings();
         assert_eq!(
             serde_json::to_string(&channel(whole)).unwrap(),
-            r#"{"name":"a","source_name":"b","source":0,"kind":"digital","initial":true,"end":7,"edges":3}"#
+            r#"{"name":"a","source_name":"b","source":0,"kind":"digital","initial":true,"end":7,"edges":3,"blocks":1}"#
         );
         assert_eq!(
             serde_json::to_string(&channel(both).declared()).unwrap(),
@@ -1291,7 +1463,7 @@ mod tests {
 
     #[test]
     fn an_offset_and_its_kind_come_together() {
-        let named = r#""name":"SWCLK","source_name":"b","source":0,"kind":"digital","initial":true,"end":7,"edges":3"#;
+        let named = r#""name":"SWCLK","source_name":"b","source":0,"kind":"digital","initial":true,"end":7,"edges":3,"blocks":1"#;
         for (fields, problem) in [
             (
                 r#""offset":4"#,
@@ -1317,7 +1489,7 @@ mod tests {
 
     #[test]
     fn a_channel_missing_a_field_of_its_kind_is_refused() {
-        let named = r#""name":"a","source_name":"b","source":0"#;
+        let named = r#""name":"a","source_name":"b","source":0,"blocks":1"#;
         let analog = r#""kind":"analog","unit":"V","first":0,"period":[1,1],"count":1"#;
         for (json, problem) in [
             (
@@ -1358,9 +1530,28 @@ mod tests {
                 "a codes coding's `scale` is a number",
             ),
             (
-                r#"{"name":"a","source_name":"b","kind":"digital","initial":true,"end":7,"edges":3}"#
+                r#"{"name":"a","source_name":"b","kind":"digital","initial":true,"end":7,"edges":3,"blocks":1}"#
                     .to_owned(),
                 "missing field `source`",
+            ),
+            (
+                format!(r#"{{{named},"kind":"digital","initial":true,"end":7,"edges":3,"gap_count":64}}"#),
+                "states 64 gaps in list pages, which a header holds inline",
+            ),
+            (
+                format!(
+                    r#"{{{named},"kind":"digital","initial":true,"end":7,"edges":3,"gaps":[],"gap_count":65}}"#
+                ),
+                "states its gaps both inline and as a count",
+            ),
+            (
+                format!(r#"{{{named},{analog},"coding":{{"type":"f32"}},"lost_after":0}}"#),
+                "states a lost_after of 0",
+            ),
+            (
+                r#"{"name":"a","source_name":"b","source":0,"kind":"digital","initial":true,"end":7,"edges":3}"#
+                    .to_owned(),
+                "missing field `blocks`",
             ),
         ] {
             let err = parse(&json).unwrap_err().to_string();

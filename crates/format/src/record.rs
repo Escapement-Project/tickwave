@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::header::{BlockRow, Header, OverviewRow, Preamble, Trailer, Words};
+use crate::header::{Preamble, Trailer};
 use crate::model::{Break, Gap};
 
 /// A record's bytes besides its payload: the kind, the length and the check.
@@ -20,6 +20,10 @@ pub enum Kind {
     OverviewBlock = 5,
     Annotation = 6,
     Footer = 7,
+    KnownThrough = 8,
+    IndexPage = 10,
+    ListPage = 11,
+    Bundle = 12,
 }
 
 impl Kind {
@@ -32,6 +36,10 @@ impl Kind {
             5 => Self::OverviewBlock,
             6 => Self::Annotation,
             7 => Self::Footer,
+            8 => Self::KnownThrough,
+            10 => Self::IndexPage,
+            11 => Self::ListPage,
+            12 => Self::Bundle,
             _ => return None,
         })
     }
@@ -118,44 +126,43 @@ pub fn next(bytes: &[u8], max: usize) -> Next<'_> {
 pub const PAYLOAD_AT: usize = 5;
 
 /// A block record's payload up to its zstd frame.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BlockHead {
+    pub channel: u32,
     pub start: i64,
+    /// The channel's next block's start, or the length for its last.
     pub end: i64,
+    /// The channel's word, as the index has it.
+    pub word: u32,
     pub decoded_length: u32,
-    /// A word a channel, as the index has it.
-    pub words: Vec<u32>,
 }
 
 impl BlockHead {
-    pub fn len(channels: usize) -> usize {
-        20 + 4 * channels
-    }
+    pub const LEN: usize = 28;
 
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(Self::len(self.words.len()));
-        out.extend_from_slice(&self.start.to_le_bytes());
-        out.extend_from_slice(&self.end.to_le_bytes());
-        out.extend_from_slice(&self.decoded_length.to_le_bytes());
-        for word in &self.words {
-            out.extend_from_slice(&word.to_le_bytes());
-        }
+    pub fn to_bytes(&self) -> [u8; Self::LEN] {
+        let mut out = [0; Self::LEN];
+        out[..4].copy_from_slice(&self.channel.to_le_bytes());
+        out[4..12].copy_from_slice(&self.start.to_le_bytes());
+        out[12..20].copy_from_slice(&self.end.to_le_bytes());
+        out[20..24].copy_from_slice(&self.word.to_le_bytes());
+        out[24..28].copy_from_slice(&self.decoded_length.to_le_bytes());
         out
     }
 
     /// The head and the frame after it; None if the payload is shorter than a head.
-    pub fn parse(payload: &[u8], channels: usize) -> Option<(Self, &[u8])> {
-        let len = Self::len(channels);
-        let head = payload.get(..len)?;
+    pub fn parse(payload: &[u8]) -> Option<(Self, &[u8])> {
+        let head = payload.get(..Self::LEN)?;
         let u32_at = |at: usize| u32::from_le_bytes(head[at..at + 4].try_into().unwrap());
         Some((
             Self {
-                start: i64::from_le_bytes(head[0..8].try_into().unwrap()),
-                end: i64::from_le_bytes(head[8..16].try_into().unwrap()),
-                decoded_length: u32_at(16),
-                words: (0..channels).map(|c| u32_at(20 + 4 * c)).collect(),
+                channel: u32_at(0),
+                start: i64::from_le_bytes(head[4..12].try_into().unwrap()),
+                end: i64::from_le_bytes(head[12..20].try_into().unwrap()),
+                word: u32_at(20),
+                decoded_length: u32_at(24),
             },
-            &payload[len..],
+            &payload[Self::LEN..],
         ))
     }
 }
@@ -214,24 +221,53 @@ pub fn parse_run(payload: &[u8]) -> Option<(u32, Break)> {
     ))
 }
 
-/// An overview block record's payload before its frame: the level's shift, then `k`.
-pub const OVERVIEW_HEAD_LEN: usize = 9;
-
-pub fn overview_head(shift: u8, k: u64) -> [u8; OVERVIEW_HEAD_LEN] {
-    let mut out = [0; OVERVIEW_HEAD_LEN];
-    out[0] = shift;
-    out[1..].copy_from_slice(&k.to_le_bytes());
-    out
+/// An overview block record's payload before its frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OverviewHead {
+    /// The overview channel: a derived channel numbered after the channels.
+    pub channel: u32,
+    pub shift: u8,
+    /// Its first block is block `k` of the level.
+    pub k: u64,
+    /// The blocks it stands for, each its frame's bytes.
+    pub n: u32,
 }
 
-/// The shift, `k` and the frame; None if the payload is shorter than the head.
-pub fn parse_overview(payload: &[u8]) -> Option<(u8, u64, &[u8])> {
-    let head = payload.get(..OVERVIEW_HEAD_LEN)?;
-    Some((
-        head[0],
-        u64::from_le_bytes(head[1..].try_into().unwrap()),
-        &payload[OVERVIEW_HEAD_LEN..],
-    ))
+impl OverviewHead {
+    pub const LEN: usize = 17;
+
+    pub fn to_bytes(&self) -> [u8; Self::LEN] {
+        let mut out = [0; Self::LEN];
+        out[..4].copy_from_slice(&self.channel.to_le_bytes());
+        out[4] = self.shift;
+        out[5..13].copy_from_slice(&self.k.to_le_bytes());
+        out[13..17].copy_from_slice(&self.n.to_le_bytes());
+        out
+    }
+
+    /// The head and the frame after it; None if the payload is shorter than a head.
+    pub fn parse(payload: &[u8]) -> Option<(Self, &[u8])> {
+        let head = payload.get(..Self::LEN)?;
+        Some((
+            Self {
+                channel: u32::from_le_bytes(head[..4].try_into().unwrap()),
+                shift: head[4],
+                k: u64::from_le_bytes(head[5..13].try_into().unwrap()),
+                n: u32::from_le_bytes(head[13..17].try_into().unwrap()),
+            },
+            &payload[Self::LEN..],
+        ))
+    }
+}
+
+/// A known-through record's payload: its tick.
+pub fn known_through_bytes(tick: i64) -> [u8; 8] {
+    tick.to_le_bytes()
+}
+
+/// None unless the payload is exactly a tick.
+pub fn parse_known_through(payload: &[u8]) -> Option<i64> {
+    Some(i64::from_le_bytes(payload.try_into().ok()?))
 }
 
 /// An annotation record's payload.
@@ -260,36 +296,22 @@ pub(crate) fn check_source(source: &str) -> Option<String> {
     None
 }
 
-/// The footer record's payload before the header: its length, then the index's.
+/// The footer record's payload before the header: its length, then the top index's.
 pub const FOOTER_HEAD_LEN: usize = 8;
 
-/// The footer record's payload: the header, the index, then the overview's frame. Err with the
+/// The footer record's payload: the header's JSON, the top index, then the strips. Err with the
 /// size if it passes what a record's u32 length holds.
-pub fn footer_bytes(
-    header: &Header,
-    rows: &[BlockRow],
-    words: &Words,
-    overview_rows: &[OverviewRow],
-    overview_frame: &[u8],
-) -> Result<Vec<u8>, usize> {
-    let json = serde_json::to_vec(header).expect("a header always serialises");
-    let index_len = rows.len() * BlockRow::size(header.channels.len())
-        + overview_rows.len() * OverviewRow::SIZE;
-    let total = FOOTER_HEAD_LEN + json.len() + index_len + overview_frame.len();
+pub fn footer_bytes(json: &[u8], top: &[u8], strips: &[u8]) -> Result<Vec<u8>, usize> {
+    let total = FOOTER_HEAD_LEN + json.len() + top.len() + strips.len();
     if u32::try_from(total + FRAMING).is_err() {
         return Err(total);
     }
     let mut out = Vec::with_capacity(total);
     out.extend_from_slice(&(json.len() as u32).to_le_bytes());
-    out.extend_from_slice(&(index_len as u32).to_le_bytes());
-    out.extend_from_slice(&json);
-    for (i, row) in rows.iter().enumerate() {
-        row.write(words.of(i), &mut out);
-    }
-    for row in overview_rows {
-        row.write(&mut out);
-    }
-    out.extend_from_slice(overview_frame);
+    out.extend_from_slice(&(top.len() as u32).to_le_bytes());
+    out.extend_from_slice(json);
+    out.extend_from_slice(top);
+    out.extend_from_slice(strips);
     Ok(out)
 }
 

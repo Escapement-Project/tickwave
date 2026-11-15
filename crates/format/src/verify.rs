@@ -1,20 +1,17 @@
 //! Checks a file against the source it was converted from, reading the file in order: every edge
-//! and sample, every gap and run, the overview and the content id. A channel stores its source's
-//! ticks, so the two compare directly.
+//! and sample, every gap and run, each channel's overview blocks and strip, and the content id.
+//! A channel stores its source's ticks, so the two compare directly.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::Read;
-use std::sync::Arc;
 
-use crate::decode::{
-    BlockChannel, DecodeError, MAX_DECODED, corrupt, inflate_limited, overview_room,
-};
+use crate::decode::{BlockChannel, DecodeError, HOLD, MAX_DECODED, inflate_limited};
 use crate::hash::{self, ChannelHasher};
 use crate::header::{AnalogCoding, ChannelKind, DeclaredKind, Header};
 use crate::model::{
     Break, ChannelData, Edges, Gap, Ratio, Recording, Sample, Samples, run_sample_tick,
 };
-use crate::overview::{self, Builder, Level, Settled};
+use crate::overview::{self, Column, Ladder, Level, Pair, Settled};
 use crate::reader::{Ending, Event, Reader};
 
 /// Whether two samples are the same stored number: floats by their bits.
@@ -62,6 +59,8 @@ enum Want {
         significant: Option<u8>,
         count: u64,
         breaks: Vec<Break>,
+        lost_before: u64,
+        lost_after: u64,
         hasher: Option<ChannelHasher>,
     },
 }
@@ -71,32 +70,117 @@ pub fn verify(file: impl Read, source: Recording) -> Result<Header, VerifyError>
     verify_limited(file, source, MAX_DECODED)
 }
 
-/// An overview block the content settles, as verify waits for the file's: its buckets, and the
-/// hash of its decoded bytes, which the file's must match.
-struct Expected {
-    buckets: u64,
-    raw: blake3::Hash,
+/// The overview the content gives: each overview channel's ladder, the derived channels'
+/// pairing, and, by channel and shift, the overview block records the content settles and the
+/// file has not shown yet.
+struct Overview {
+    ladders: Vec<Option<Ladder>>,
+    columns: Vec<Column>,
+    pairs: Vec<Pair>,
+    operand_of: Vec<Vec<usize>>,
+    expected: HashMap<(usize, u8), VecDeque<Settled>>,
+    /// The bytes `expected` holds.
+    held: usize,
+    /// What the content asked of the ladders and they have not done: done as the file's overview
+    /// blocks need it, so a long span's blocks are made a few at a time.
+    asked: VecDeque<Ask>,
+    /// Every ladder's end has been asked: no item comes after.
+    ending: bool,
+    /// Each ladder's strip, once it ended.
+    strips: Option<Vec<Level>>,
 }
 
-impl Expected {
-    /// `last` is the level hashed before: a span with no item settles block after block of one.
-    fn of(s: Settled, last: &mut Option<(Arc<Level>, blake3::Hash)>) -> Self {
-        let raw = match last {
-            Some((level, raw)) if Arc::ptr_eq(level, &s.level) => *raw,
-            _ => {
-                let mut raw = Vec::new();
-                overview::write_level(&s.level, &mut raw);
-                let raw = blake3::hash(&raw);
-                *last = Some((Arc::clone(&s.level), raw));
-                raw
+/// What the content asks of the ladders, in the order it asks.
+enum Ask {
+    /// Channel `0`'s ladder settled to the tick.
+    Settle(usize, i64),
+    /// Every ladder ended at the length.
+    End(i64),
+}
+
+impl Overview {
+    fn settle(&mut self, o: usize, tick: i64) {
+        self.asked.push_back(Ask::Settle(o, tick));
+    }
+
+    fn end(&mut self, length: i64) {
+        self.ending = true;
+        self.asked.push_back(Ask::End(length));
+    }
+
+    fn push(&mut self, o: usize, s: Settled) {
+        self.held += s.raw.len();
+        self.expected.entry((o, s.shift)).or_default().push_back(s);
+    }
+
+    /// Does the first thing asked, or a step of it: whether anything was asked.
+    fn step(&mut self) -> bool {
+        match self.asked.front() {
+            None => false,
+            Some(&Ask::Settle(o, tick)) => {
+                let reached = match self.ladders[o].as_mut() {
+                    Some(l) => {
+                        let reached = l.settle_some(tick, SETTLE_STEP);
+                        for s in l.take_settled() {
+                            self.push(o, s);
+                        }
+                        reached
+                    }
+                    None => true,
+                };
+                if reached {
+                    self.asked.pop_front();
+                }
+                true
             }
-        };
-        Self {
-            buckets: s.level.buckets,
-            raw,
+            Some(&Ask::End(length)) => {
+                let mut strips = Vec::with_capacity(self.ladders.len());
+                for o in 0..self.ladders.len() {
+                    let end = self.ladders[o]
+                        .take()
+                        .expect("a ladder until the length")
+                        .finish(length);
+                    for s in end.settled {
+                        self.push(o, s);
+                    }
+                    strips.push(end.strip);
+                }
+                self.strips = Some(strips);
+                self.asked.pop_front();
+                true
+            }
+        }
+    }
+
+    /// The next overview block the content gives channel `o`'s level 2^`shift`, doing what was
+    /// asked until it comes; refused once the blocks of other levels it makes on the way hold
+    /// more than `HOLD`.
+    fn next(&mut self, o: usize, shift: u8) -> Result<Option<Settled>, VerifyError> {
+        loop {
+            if let Some(s) = self
+                .expected
+                .get_mut(&(o, shift))
+                .and_then(VecDeque::pop_front)
+            {
+                self.held -= s.raw.len();
+                return Ok(Some(s));
+            }
+            if self.held > HOLD {
+                return Err(mismatch(format!(
+                    "the overview blocks come in an order that holds back {} bytes of other \
+                     levels' before channel {o}'s level 2^{shift}, more than {HOLD}",
+                    self.held
+                )));
+            }
+            if !self.step() {
+                return Ok(None);
+            }
         }
     }
 }
+
+/// The overview blocks a ladder settles at a step, as a writer does.
+const SETTLE_STEP: usize = 16;
 
 /// `verify`, holding at most `max` decoded bytes a frame.
 pub fn verify_limited(
@@ -142,17 +226,15 @@ pub fn verify_limited(
                 significant: a.significant,
                 count: a.count,
                 breaks: a.breaks,
+                lost_before: a.lost_before,
+                lost_after: a.lost_after,
             },
         });
         shapings.push(channel.shaping);
     }
     let mut reader = Reader::new(max);
-    let mut builder: Option<Builder> = None;
-    let mut expected: HashMap<(u8, u64), Expected> = HashMap::new();
-    let mut last_level = None;
-    let mut last_frame: Option<(Vec<u8>, blake3::Hash)> = None;
-    let mut head: Option<Vec<Level>> = None;
-    let mut columns = Vec::new();
+    let mut ov: Option<Overview> = None;
+    let mut ended = vec![false; wants.len()];
     let mut header = None;
     let mut chunk = vec![0; 1 << 20];
     let mut eof = false;
@@ -271,8 +353,41 @@ pub fn verify_limited(
                         )));
                     }
                 }
-                builder = Some(Builder::new(d.overview_shift, &d.channels, &d.derived));
-                columns = overview::columns(&d.channels, &d.derived);
+                let columns = overview::columns(&d.channels, &d.derived);
+                let ladders = columns
+                    .iter()
+                    .enumerate()
+                    .map(|(o, &column)| {
+                        let initial = match d.channels.get(o).map(|c| &c.data) {
+                            Some(DeclaredKind::Digital { initial }) => Some(*initial),
+                            _ => None,
+                        };
+                        Some(Ladder::new(
+                            d.shift(o).expect("a checked declaration's channel"),
+                            column,
+                            initial,
+                        ))
+                    })
+                    .collect();
+                let products = overview::products(&d.channels, &d.derived);
+                let mut operand_of = vec![Vec::new(); d.channels.len()];
+                for (k, &(a, b, _)) in products.iter().enumerate() {
+                    operand_of[a].push(k);
+                    if b != a {
+                        operand_of[b].push(k);
+                    }
+                }
+                ov = Some(Overview {
+                    ladders,
+                    columns,
+                    pairs: Pair::of(&d.channels, &d.derived),
+                    operand_of,
+                    expected: HashMap::new(),
+                    held: 0,
+                    asked: VecDeque::new(),
+                    ending: false,
+                    strips: None,
+                });
             }
             Event::Gap { channel: c, gap } => {
                 let Want::Digital { gaps, next_gap, .. } = &mut wants[c] else {
@@ -288,20 +403,30 @@ pub fn verify_limited(
                     .ok_or_else(|| {
                         mismatch(format!("channel {}: a gap has no place", names[c].0))
                     })?;
-                let Some(b) = builder.as_mut() else {
+                let Some(l) = ov
+                    .as_mut()
+                    .filter(|o| !o.ending)
+                    .and_then(|o| o.ladders[c].as_mut())
+                else {
                     return Err(mismatch(format!(
                         "channel {}: a gap after the block that ends the recording",
                         names[c].0
                     )));
                 };
-                b.gap(c, gap, to);
+                l.gap(gap, to);
             }
             Event::Run { channel: c, run } => {
-                let Want::Analog { first, breaks, .. } = &wants[c] else {
+                let Want::Analog {
+                    first,
+                    breaks,
+                    lost_before,
+                    ..
+                } = &wants[c]
+                else {
                     unreachable!("the reader checks a run's channel")
                 };
                 let fits = if run.index == 0 {
-                    run.tick == *first && run.lost == 0
+                    run.tick == *first && run.lost == *lost_before
                 } else {
                     breaks.contains(&run)
                 };
@@ -309,136 +434,145 @@ pub fn verify_limited(
                     return Err(mismatch(format!("channel {}: a run differs", names[c].0)));
                 }
             }
-            Event::Block(block) => {
-                // The block that ends at the length finishes the overview; none comes after it.
-                // A block past the length, where none ends at it, is left to the length's check.
-                let Some(b) = builder.as_mut() else {
-                    return Err(mismatch(format!(
-                        "a block ends at tick {}, past the length, {length}",
-                        block.head.end
-                    )));
-                };
-                overview_room(block.head.end, b.finest()).map_err(|e| {
-                    corrupt(format!(
-                        "a block ends at tick {}, where {e}",
-                        block.head.end
-                    ))
-                })?;
-                for (c, got) in block.channels.iter().enumerate() {
-                    let name = &names[c].0;
-                    let source = got.source_ticks().unwrap_or_default();
-                    match (got, &mut wants[c]) {
-                        (
-                            BlockChannel::Digital { edges, .. },
-                            Want::Digital {
-                                edges: want,
-                                hasher,
-                                count,
-                                ..
-                            },
-                        ) => {
-                            let hasher = hasher.as_mut().expect("the declaration came first");
-                            for (&k, &tick) in source.iter().zip(edges) {
-                                if want.next() != Some(k) {
-                                    return Err(mismatch(format!(
-                                        "channel {name}: edge at source tick {k} differs"
-                                    )));
-                                }
-                                hasher.edge(k);
-                                b.edge(c, k, tick);
-                                *count += 1;
-                            }
-                        }
-                        (
-                            BlockChannel::Analog {
-                                values,
-                                first_index,
-                            },
-                            Want::Analog {
-                                samples,
-                                first,
-                                period,
-                                breaks,
-                                hasher,
-                                ..
-                            },
-                        ) => {
-                            let hasher = hasher.as_mut().expect("the declaration came first");
-                            let map = reader.mapping(c);
-                            for (index, value) in (*first_index..).zip(values.iter()) {
-                                if !samples.next().is_some_and(|s| same(s, value)) {
-                                    return Err(mismatch(format!(
-                                        "channel {name}: sample {index} differs"
-                                    )));
-                                }
-                                hasher.sample(value);
-                                let tick = map
-                                    .and_then(|map| {
-                                        map.axis(run_sample_tick(*first, *period, breaks, index))
-                                    })
-                                    .ok_or_else(|| {
-                                        mismatch(format!(
-                                            "channel {name}: sample {index} has no place"
-                                        ))
-                                    })?;
-                                b.sample(c, tick, value)
-                                    .map_err(|e| mismatch(e.to_string()))?;
-                            }
-                        }
-                        _ => unreachable!("blocks follow the declaration"),
-                    }
+            Event::KnownThrough { tick } => {
+                let ov = ov.as_mut().expect("records follow the declaration");
+                for o in 0..ov.ladders.len() {
+                    ov.settle(o, tick);
                 }
-                loop {
-                    let reached = b
-                        .settle_step(block.head.end)
-                        .map_err(|e| mismatch(e.to_string()))?;
-                    for s in b.take_settled() {
-                        expected.insert((s.shift, s.k), Expected::of(s, &mut last_level));
+            }
+            Event::Block(block) => {
+                let c = block.head.channel as usize;
+                let ov = ov.as_mut().expect("records follow the declaration");
+                if ended[c] || block.head.end > length {
+                    return Err(mismatch(format!(
+                        "channel {}: a block ends at tick {}, past the source's length, {length}",
+                        names[c].0, block.head.end
+                    )));
+                }
+                let name = &names[c].0;
+                let got = &block.data;
+                let source = got.source_ticks().unwrap_or_default();
+                match (got, &mut wants[c]) {
+                    (
+                        BlockChannel::Digital { edges, .. },
+                        Want::Digital {
+                            edges: want,
+                            hasher,
+                            count,
+                            ..
+                        },
+                    ) => {
+                        let hasher = hasher.as_mut().expect("the declaration came first");
+                        let l = ov.ladders[c].as_mut().expect("a ladder until the length");
+                        for (&k, &tick) in source.iter().zip(edges) {
+                            if want.next() != Some(k) {
+                                return Err(mismatch(format!(
+                                    "channel {name}: edge at source tick {k} differs"
+                                )));
+                            }
+                            hasher.edge(k);
+                            l.edge(k, tick);
+                            *count += 1;
+                        }
                     }
-                    if reached {
-                        break;
+                    (
+                        BlockChannel::Analog {
+                            values,
+                            first_index,
+                        },
+                        Want::Analog {
+                            samples,
+                            first,
+                            period,
+                            breaks,
+                            hasher,
+                            ..
+                        },
+                    ) => {
+                        let hasher = hasher.as_mut().expect("the declaration came first");
+                        let map = reader.mapping(c);
+                        let stored = wants_len(&ov.columns, &ov.pairs);
+                        for (index, value) in (*first_index..).zip(values.iter()) {
+                            if !samples.next().is_some_and(|s| same(s, value)) {
+                                return Err(mismatch(format!(
+                                    "channel {name}: sample {index} differs"
+                                )));
+                            }
+                            hasher.sample(value);
+                            let tick = map
+                                .and_then(|map| {
+                                    map.axis(run_sample_tick(*first, *period, breaks, index))
+                                })
+                                .ok_or_else(|| {
+                                    mismatch(format!("channel {name}: sample {index} has no place"))
+                                })?;
+                            ov.ladders[c]
+                                .as_mut()
+                                .expect("a ladder until the length")
+                                .sample(tick, value);
+                            for i in 0..ov.operand_of[c].len() {
+                                let d = ov.operand_of[c][i];
+                                if let Some(p) = ov.pairs[d]
+                                    .take(c, tick, value)
+                                    .map_err(|e| mismatch(e.to_string()))?
+                                {
+                                    ov.ladders[stored + d]
+                                        .as_mut()
+                                        .expect("a ladder until the length")
+                                        .sample(tick, p);
+                                }
+                            }
+                        }
                     }
+                    _ => unreachable!("blocks follow the declaration"),
+                }
+                let known = reader.known_through().unwrap_or(0);
+                ov.settle(c, block.head.end.max(known));
+                let stored = wants_len(&ov.columns, &ov.pairs);
+                for i in 0..ov.operand_of[c].len() {
+                    let d = ov.operand_of[c][i];
+                    let (a, b) = (ov.pairs[d].operands[0].0, ov.pairs[d].operands[1].0);
+                    let to = reader
+                        .next_start(a)
+                        .unwrap_or(0)
+                        .min(reader.next_start(b).unwrap_or(0))
+                        .max(known);
+                    ov.settle(stored + d, to);
                 }
                 if block.head.end == length {
-                    let (done, last) = builder
-                        .take()
-                        .unwrap()
-                        .finish(length)
-                        .map_err(|e| mismatch(e.to_string()))?;
-                    for s in last {
-                        expected.insert((s.shift, s.k), Expected::of(s, &mut last_level));
+                    ended[c] = true;
+                    if ended.iter().all(|&e| e) {
+                        if let Some(e) = ov.pairs.iter().find_map(Pair::unpaired) {
+                            return Err(mismatch(e.to_string()));
+                        }
+                        ov.end(length);
                     }
-                    head = Some(done.head);
                 }
             }
-            Event::OverviewBlock {
-                shift, k, frame, ..
-            } => {
-                // Matched by place, not order: a writer settles a long span in steps, and the
-                // levels' blocks interleave as the steps fall.
-                let want = expected.remove(&(shift, k)).ok_or_else(|| {
-                    mismatch(format!(
-                        "overview block {k} of level 2^{shift} is out of place: the content \
-                         settles no such block before it, or the file holds it twice"
-                    ))
-                })?;
-                // A span with no item settles block after block of one level, which a writer
-                // writes as one frame repeated: that frame is checked once.
-                let repeat = last_frame
-                    .as_ref()
-                    .is_some_and(|(f, raw)| *f == frame && *raw == want.raw);
-                if !repeat {
-                    let len = overview::decoded_len(want.buckets, &columns) as usize;
-                    let raw = inflate_limited(&frame, len, max)?;
-                    if blake3::hash(&raw) != want.raw {
-                        return Err(mismatch(format!(
-                            "overview level 2^{shift}, block {k}: differs from the content"
-                        )));
-                    }
-                    last_frame = Some((frame, want.raw));
+            Event::OverviewBlock { head, frame, .. } => {
+                let ov = ov.as_mut().expect("records follow the declaration");
+                let o = head.channel as usize;
+                let (k, shift) = (head.k, head.shift);
+                let want = ov
+                    .next(o, shift)?
+                    .filter(|s| s.k == k && s.n == head.n)
+                    .ok_or_else(|| {
+                        mismatch(format!(
+                            "channel {o}: overview block {k} of level 2^{shift} is out of place: \
+                             the content settles no such block there"
+                        ))
+                    })?;
+                let raw = inflate_limited(&frame, want.raw.len(), max)?;
+                if raw != *want.raw {
+                    return Err(mismatch(format!(
+                        "channel {o}: overview level 2^{shift}, block {k}: differs from the content"
+                    )));
                 }
             }
-            Event::Annotation(_) | Event::Skipped { .. } => {}
+            Event::Annotation(_)
+            | Event::Skipped { .. }
+            | Event::Page { .. }
+            | Event::Bundle(_) => {}
             Event::Footer(footer) => header = Some(*footer),
         }
     }
@@ -452,13 +586,25 @@ pub fn verify_limited(
     if h.length != length {
         return Err(mismatch("the length differs"));
     }
-    if !expected.is_empty() {
+    let mut ov = ov.expect("a footer follows the declaration");
+    // What is still asked: any block it gives is one the file lacks.
+    while ov.held == 0 && ov.step() {}
+    if ov.held > 0 {
         return Err(mismatch(
             "the file lacks overview blocks the content settles",
         ));
     }
-    if head.as_ref() != Some(&footer.overview) {
-        return Err(mismatch("the footer's overview differs from the content"));
+    let strips = ov
+        .strips
+        .take()
+        .ok_or_else(|| mismatch("the blocks don't reach the length"))?;
+    for (o, strip) in strips.iter().enumerate() {
+        let got = footer.strip(o)?;
+        if got.to_bytes(ov.columns[o]) != strip.to_bytes(ov.columns[o]) {
+            return Err(mismatch(format!(
+                "channel {o}: the footer's strip differs from the content"
+            )));
+        }
     }
     let mut digests = Vec::with_capacity(wants.len());
     for ((want, c), (name, _)) in wants.into_iter().zip(&h.channels).zip(&names) {
@@ -477,10 +623,15 @@ pub fn verify_limited(
                     end: e,
                     edges: n,
                     gaps: g,
+                    gap_count,
                     ..
                 },
             ) => {
-                if end != *e || count != *n || gaps != *g || next_gap != gaps.len() {
+                let listed = match gap_count {
+                    Some(k) => *k == gaps.len() as u64,
+                    None => gaps == *g,
+                };
+                if end != *e || count != *n || !listed || next_gap != gaps.len() {
                     return Err(mismatch(format!(
                         "channel {name}: the end, count or gaps differ"
                     )));
@@ -498,6 +649,8 @@ pub fn verify_limited(
                     first,
                     count,
                     breaks,
+                    lost_before,
+                    lost_after,
                     hasher,
                     ..
                 },
@@ -505,20 +658,31 @@ pub fn verify_limited(
                     first: f,
                     count: n,
                     breaks: b,
+                    break_count,
+                    lost_before: lb,
+                    lost_after: la,
                     ..
                 },
             ) => {
                 let first = if count == 0 { 0 } else { first };
-                if first != *f || count != *n || breaks != *b {
+                let listed = match break_count {
+                    Some(k) => *k == breaks.len() as u64,
+                    None => breaks == *b,
+                };
+                if first != *f || count != *n || !listed || (lost_before, lost_after) != (*lb, *la)
+                {
                     return Err(mismatch(format!(
-                        "channel {name}: the first tick, count or breaks differ"
+                        "channel {name}: the first tick, count, breaks or losses differ"
                     )));
                 }
                 (
                     samples.next().is_some(),
-                    hasher
-                        .expect("the declaration came first")
-                        .finish_analog(first, count, &breaks),
+                    hasher.expect("the declaration came first").finish_analog(
+                        first,
+                        count,
+                        &breaks,
+                        (lost_before, lost_after),
+                    ),
                 )
             }
             _ => return Err(mismatch(format!("channel {name}: the kind differs"))),
@@ -534,4 +698,9 @@ pub fn verify_limited(
         return Err(mismatch("the content id does not match the content"));
     }
     Ok(footer.header)
+}
+
+/// The stored channels, from every overview channel's column less the derived ones.
+fn wants_len(columns: &[Column], pairs: &[Pair]) -> usize {
+    columns.len() - pairs.len()
 }

@@ -100,6 +100,8 @@ fn three_sources() -> Vec<u8> {
                     }],
                     significant: None,
                     samples: Samples::F32(Box::new((0..1_000).map(|i| i as f32))),
+                    lost_before: 0,
+                    lost_after: 0,
                 }),
                 shaping: kept(0, 1_600),
             },
@@ -139,6 +141,8 @@ fn three_sources() -> Vec<u8> {
                         IntCoding::new(16, false),
                         Box::new((0..2_000).map(|i| i % 7)),
                     ),
+                    lost_before: 0,
+                    lost_after: 0,
                 }),
                 shaping: kept(0, 4_000),
             },
@@ -313,6 +317,7 @@ fn attached() -> (
         source: 0,
         data: DeclaredKind::Digital { initial: false },
         shaping: Shaping::default(),
+        overview_shift: None,
     };
     let declaration = Declaration {
         timebase: tb,
@@ -328,6 +333,7 @@ fn attached() -> (
                     significant: None,
                 },
                 shaping: Shaping::default(),
+                overview_shift: None,
             },
             digital("D"),
             digital("E"),

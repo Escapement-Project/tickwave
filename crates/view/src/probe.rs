@@ -283,15 +283,15 @@ pub fn find_edge(
     if hi - lo <= DIRECT {
         return edge_in(rec, channel, lo, hi, forward, cancel);
     }
-    let Some(level) = rec.level_for(((hi - lo + FAN - 1) / FAN) as f64) else {
+    let Some(level) = rec.level_for(channel, ((hi - lo + FAN - 1) / FAN) as f64) else {
         return edge_in(rec, channel, lo, hi, forward, cancel);
     };
-    let shift = rec.levels[level].shift;
+    let shift = rec.levels[channel][level].shift;
     let bucket = 1i64 << shift;
     if bucket >= hi - lo {
         return edge_in(rec, channel, lo, hi, forward, cancel);
     }
-    let covered = rec.levels[level].end();
+    let covered = rec.levels[channel][level].end();
     let (k0, k1) = (lo >> shift, ((hi.min(covered) - 1) >> shift) + 1);
     let mut spans: Vec<(i64, i64)> = Vec::new();
     if k1 > k0 {

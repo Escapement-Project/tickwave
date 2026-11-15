@@ -10,7 +10,7 @@ use escapement_tickwave_format::header::{
     SourceFormat, SourceHeader,
 };
 use escapement_tickwave_format::model::{Gap, Ratio};
-use escapement_tickwave_format::writer::{Bundle, Finish, WriteOptions, Writer};
+use escapement_tickwave_format::writer::{Bundle, Compression, Finish, WriteOptions, Writer};
 use escapement_tickwave_view::{Answer, Cache, Drawn, Query, Recording};
 
 /// What a recorder pushes, in order.
@@ -45,6 +45,7 @@ fn session() -> (Declaration, Vec<Op>) {
             significant: Some(4),
         },
         shaping: Default::default(),
+        overview_shift: None,
     };
     let d = Declaration {
         timebase,
@@ -57,6 +58,7 @@ fn session() -> (Declaration, Vec<Op>) {
                 source: 0,
                 data: DeclaredKind::Digital { initial: false },
                 shaping: Default::default(),
+                overview_shift: None,
             },
         ],
         derived: vec![Derived {
@@ -185,14 +187,19 @@ fn a_live_recording_reads_as_the_same_file_finished_where_it_ends() {
     let (d, ops) = session();
     let cancel = AtomicBool::new(false);
     let mut compared = 0;
-    for (block_bytes, batch) in [(64, 1), (64, 3), (1 << 20, 1)] {
+    for (block_bytes, compression) in [
+        (64, Compression::Spread),
+        (64, Compression::Offload),
+        (1 << 20, Compression::Spread),
+    ] {
         let options = WriteOptions {
             level: 3,
             block_bytes,
-            batch,
+            compression,
+            promise_with_items: true,
         };
         for n in 0..ops.len() {
-            let at = format!("{block_bytes} {batch}, after op {n} ({:?})", ops[n]);
+            let at = format!("{block_bytes} {compression:?}, after op {n} ({:?})", ops[n]);
             let mut w = Writer::new(d.clone(), options.clone()).unwrap();
             let mut file = w.take_output();
             for op in &ops[..=n] {
@@ -200,7 +207,13 @@ fn a_live_recording_reads_as_the_same_file_finished_where_it_ends() {
             }
             let snapshot = w.snapshot();
             file.extend(w.take_output());
-            let held = snapshot.overview()[0].clone();
+            // Where each channel's finest level's settled buckets end.
+            let settled: Vec<i64> = (0..d.channels.len() + d.derived.len())
+                .map(|o| {
+                    let l = &snapshot.overview(o).unwrap().levels[0];
+                    ((l.held.first + l.held.buckets()) as i64) << l.shift
+                })
+                .collect();
             let live =
                 Recording::live(snapshot, Arc::new(file.clone()), Cache::new(1 << 20)).unwrap();
             let length = live.length();
@@ -306,7 +319,6 @@ fn a_live_recording_reads_as_the_same_file_finished_where_it_ends() {
             }
             // From the overview, where the live level holds the buckets: past them the live view
             // reads its samples, which a column can show finer than a bucket does.
-            let settled = (held.first + held.buckets()) as i64 * 16;
             for columns in [2, 3, 5] {
                 let q = query(0..length, columns);
                 let (x, y) = (
@@ -321,7 +333,7 @@ fn a_live_recording_reads_as_the_same_file_finished_where_it_ends() {
                         p,
                         r,
                         &x.grid,
-                        Some(settled),
+                        Some(settled[c]),
                         &format!("{at}, {columns} columns, channel {c}"),
                     );
                 }
@@ -341,7 +353,7 @@ fn a_long_live_recording_reads_the_levels_the_file_finished_there_keeps() {
     let options = WriteOptions {
         level: 1,
         block_bytes: 1 << 12,
-        batch: 1,
+        ..WriteOptions::default()
     };
     let write = |w: &mut Writer| {
         w.run(0, 0, 0).unwrap();
@@ -359,7 +371,8 @@ fn a_long_live_recording_reads_the_levels_the_file_finished_there_keeps() {
     write(&mut w);
     let snapshot = w.snapshot();
     file.extend(w.take_output());
-    let settled = (snapshot.overview()[0].first + snapshot.overview()[0].buckets()) as i64 * 16;
+    let finest = &snapshot.overview(1).unwrap().levels[0];
+    let settled = ((finest.held.first + finest.held.buckets()) as i64) << finest.shift;
     let live = Recording::live(snapshot, Arc::new(file), Cache::new(1 << 20)).unwrap();
     let length = live.length();
     let mut f = Writer::new(d, options).unwrap();
@@ -404,17 +417,22 @@ fn one_recording_updated_with_each_snapshot_reads_as_one_made_from_it() {
     // A mark that comes after a later one, and one past the data, which widens the extent.
     ops.extend([Op::Mark(30), Op::Mark(5_000)]);
     let cancel = AtomicBool::new(false);
-    for (block_bytes, batch) in [(64, 1), (64, 3), (1 << 20, 1)] {
+    for (block_bytes, compression) in [
+        (64, Compression::Spread),
+        (64, Compression::Offload),
+        (1 << 20, Compression::Spread),
+    ] {
         let options = WriteOptions {
             level: 3,
             block_bytes,
-            batch,
+            compression,
+            promise_with_items: true,
         };
         let mut w = Writer::new(d.clone(), options).unwrap();
         let file = Arc::new(Growing(std::sync::Mutex::new(w.take_output())));
         let mut updated: Option<Recording> = None;
         for (n, op) in ops.iter().enumerate() {
-            let at = format!("{block_bytes} {batch}, after op {n} ({op:?})");
+            let at = format!("{block_bytes} {compression:?}, after op {n} ({op:?})");
             apply(&mut w, op);
             let snapshot = w.snapshot();
             file.0.lock().unwrap().extend(w.take_output());

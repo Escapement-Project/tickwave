@@ -3,36 +3,20 @@
 
 use std::sync::{Arc, Mutex};
 
-use escapement_tickwave_format::decode::{Block, OverviewBlock};
+use escapement_tickwave_format::decode::{Block, BlockChannel, OverviewBlock};
 use escapement_tickwave_format::samples::Values;
 use lru::LruCache;
 
-/// A block decoded, with its derived channels' samples.
-#[derive(Debug)]
-pub(crate) struct Decoded {
-    pub block: Block,
-    /// Each derived channel's samples in the block.
-    pub derived: Vec<Values>,
-}
-
-impl Decoded {
-    /// About the bytes it holds.
-    pub fn size(&self) -> usize {
-        use escapement_tickwave_format::decode::BlockChannel;
-        let values = |v: &Values| match v {
+/// About the bytes a decoded block holds.
+pub(crate) fn block_size(block: &Block) -> usize {
+    64 + match &block.data {
+        BlockChannel::Digital { edges, source, .. } => {
+            (edges.len() + source.as_ref().map_or(0, Vec::len)) * 8
+        }
+        BlockChannel::Analog { values, .. } => match values {
             Values::F32(v) => v.len() * 4,
-            _ => v.len() * 8,
-        };
-        64 + self
-            .block
-            .channels
-            .iter()
-            .map(|c| match c {
-                BlockChannel::Digital { edges, .. } => edges.len() * 8 + 32,
-                BlockChannel::Analog { values: v, .. } => values(v) + 32,
-            })
-            .sum::<usize>()
-            + self.derived.iter().map(values).sum::<usize>()
+            _ => values.len() * 8,
+        },
     }
 }
 
@@ -46,7 +30,7 @@ pub(crate) enum Key {
 
 #[derive(Clone)]
 pub(crate) enum Entry {
-    Block(Arc<Decoded>),
+    Block(Arc<Block>),
     Overview(Arc<OverviewBlock>),
 }
 

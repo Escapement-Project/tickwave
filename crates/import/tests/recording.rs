@@ -5,7 +5,7 @@ use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use escapement_tickwave_format::decode::{Footer, MAX_DECODED};
+use escapement_tickwave_format::decode::{Footer, Index, MAX_DECODED};
 use escapement_tickwave_format::header::{ChannelKind, Header, SourceHeader};
 use escapement_tickwave_format::model::{
     Analog, Break, Channel, ChannelData, Digital, Gap, Ratio, Recording, Samples, Shaping, Source,
@@ -75,7 +75,8 @@ fn every_fixture_reads_back_as_its_file_holds_it() {
             })
             .collect();
         assert_eq!(sources, header.sources, "{name}");
-        assert_eq!(recording.derived, header.derived, "{name}");
+        let derived: Vec<_> = header.derived.iter().map(|d| d.declared()).collect();
+        assert_eq!(recording.derived, derived, "{name}");
         let checked = verify(&file[..], recording).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(checked.content_id, header.content_id, "{name}");
     }
@@ -154,6 +155,8 @@ fn with_gaps() -> Recording {
                         lost: 0,
                     }],
                     samples: Samples::F32(Box::new((0..10).map(|i| i as f32 * 0.1))),
+                    lost_before: 0,
+                    lost_after: 0,
                 }),
                 shaping: Shaping::default(),
             },
@@ -200,10 +203,11 @@ fn a_damaged_block_is_refused_when_the_recording_is_opened() {
         .into_iter()
         .find(|(n, _)| n == "identify-swd.4k.tickwave")
         .unwrap();
-    let footer = Footer::parse_file(&file).unwrap();
-    assert!(footer.rows.len() > 2);
-    let (offset, length) = footer.block_location(footer.rows.len() - 2);
-    file[(offset + u64::from(length) / 2) as usize] ^= 0x40;
+    let index = Index::of_file(&file).unwrap();
+    let blocks = &index.blocks[0];
+    assert!(blocks.len() > 2);
+    let row = blocks[blocks.len() - 2].row;
+    file[(row.offset + u64::from(row.length) / 2) as usize] ^= 0x40;
     let err = read(Arc::new(file)).err().unwrap();
     assert!(
         err.to_string().starts_with("the recording can't be read: "),
@@ -220,7 +224,8 @@ fn a_file_too_short_or_not_a_recording_is_refused() {
 
 #[test]
 fn a_footer_longer_than_the_first_read_is_read_whole() {
-    // Two million edges in 1 KiB blocks: some two thousand index rows.
+    // A meta value of 48 KiB, which the footer's header carries, beside two million edges in
+    // 1 KiB blocks: some two thousand rows in an index page.
     let many = || {
         Ok(Recording {
             timebase: Ratio::integer(1_000_000_000).unwrap(),
@@ -248,10 +253,12 @@ fn a_footer_longer_than_the_first_read_is_read_whole() {
     let settings = Settings {
         level: 1,
         block_kib: 1,
+        meta: [("note".to_string(), "n".repeat(48 << 10))].into(),
         ..Settings::default()
     };
     let file = convert(&many, &settings);
     let footer = Footer::parse_file(&file).unwrap();
+    assert!(footer.header.channels[0].blocks > 1000);
     let footer_len = footer.trailer.footer_len;
     assert!(footer_len > 40 << 10, "the footer is {footer_len} bytes");
     let (header, recording) = read(Arc::new(file.clone())).unwrap();
@@ -259,35 +266,34 @@ fn a_footer_longer_than_the_first_read_is_read_whole() {
     verify(&file[..], recording).unwrap();
 }
 
-/// A footer row whose frame runs past the file: `recording::block` reads a frame of the row's
-/// length, so the footer is refused before any block is read, rather than read into a buffer of
-/// up to 4 GiB.
+/// An index page row whose frame runs past the file: `recording::block` reads a frame of the
+/// row's length, so the page is refused before any block is read, rather than read into a buffer
+/// of up to 4 GiB.
 #[test]
 fn a_row_whose_frame_runs_past_the_file_is_refused_before_it_is_read() {
-    use escapement_tickwave_format::record;
+    use escapement_tickwave_format::index::PAGE_HEAD;
+    use escapement_tickwave_format::record::{self, Kind, Next};
     let mut file = std::fs::read(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../web/fixtures/identify-swd.tickwave"),
     )
     .unwrap();
-    let mut footer = Footer::parse_file(&file).unwrap();
-    footer.rows[0].length = u32::MAX;
-    let rows: Vec<_> = footer.overview_rows.iter().flatten().copied().collect();
-    let bytes = record::footer_bytes(
-        &footer.header,
-        &footer.rows,
-        &footer.words,
-        &rows,
-        &footer.overview_frame,
-    )
-    .unwrap();
-    let keep = footer.trailer.footer_offset;
-    file.truncate(keep as usize);
-    let mut tail = Vec::new();
-    record::write_footer(&mut tail, keep, &bytes);
-    file.extend(tail);
+    let footer = Footer::parse_file(&file).unwrap();
+    let page = footer.channels[0].blocks.as_ref().unwrap().levels[0][0];
+    let at = page.offset as usize;
+    let Next::Record { kind, payload, len } = record::next(&file[at..], usize::MAX) else {
+        panic!("no page record at {at}")
+    };
+    assert_eq!((kind, len), (Kind::IndexPage as u8, page.length as usize));
+    // Row 0's frame length.
+    let mut payload = payload.to_vec();
+    payload[PAGE_HEAD + 16..PAGE_HEAD + 20].copy_from_slice(&u32::MAX.to_le_bytes());
+    let mut fixed = Vec::new();
+    record::write(&mut fixed, Kind::IndexPage, &[&payload]);
+    file[at..at + len].copy_from_slice(&fixed);
     let err = read(Arc::new(file)).expect_err("refused");
     assert!(
-        err.to_string().contains("block 0's row is out of place"),
+        err.to_string()
+            .contains("a block's frame does not lie before the page"),
         "{err}"
     );
 }

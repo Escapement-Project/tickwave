@@ -289,7 +289,7 @@ fn a_reopen_after_compaction_reads_the_file_renamed_over_the_live_one() {
     let mut recut = Recutter::new(WriteOptions {
         level: 1,
         block_bytes: 1 << 20,
-        batch: 1,
+        ..WriteOptions::default()
     });
     recut.feed(&finished).unwrap();
     let mut compacted = recut.take_output();

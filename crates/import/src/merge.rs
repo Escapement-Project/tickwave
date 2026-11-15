@@ -208,7 +208,7 @@ impl Input {
         input: Arc<dyn crate::input::Input>,
         stem: impl Into<String>,
     ) -> Result<Self, Error> {
-        let (header, mut recording) = crate::recording::read(input)?;
+        let (header, bundled, mut recording) = crate::recording::read_bundled(input)?;
         // Its title and meta go with its sources, which the merged recording's own don't keep. A
         // source that came from a merge already has its own recording's.
         for s in &mut recording.sources {
@@ -220,7 +220,7 @@ impl Input {
         Ok(Self {
             recording,
             stem: stem.into(),
-            bundled: header.annotations,
+            bundled,
             codings: header.channels.iter().map(|c| c.coding()).collect(),
         })
     }
@@ -2000,7 +2000,7 @@ pub fn expected(header: &Header, against: Vec<Recording>) -> Result<Recording, E
         length: length as i64,
         inputs,
         channels,
-        derived: header.derived.clone(),
+        derived: header.derived.iter().map(|d| d.declared()).collect(),
     };
     Ok(apply(&layout, against))
 }

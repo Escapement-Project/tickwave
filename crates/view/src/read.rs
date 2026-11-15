@@ -5,13 +5,15 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use escapement_tickwave_format::decode::{BlockChannel, OverviewBlock};
+use escapement_tickwave_format::decode::{
+    Block, BlockChannel, DecodeError, LevelRef, OverviewBlock,
+};
 use escapement_tickwave_format::model::Sample;
 use escapement_tickwave_format::overview::{AnalogOverview, BLOCK_BUCKETS, ChannelOverview, Level};
-use escapement_tickwave_format::samples::Values;
+use escapement_tickwave_format::samples::{self, Values};
 
 use crate::bytes::read;
-use crate::cache::{Decoded, Entry, Key};
+use crate::cache::{Entry, Key, block_size};
 use crate::recording::{BlockFrom, Error, Part, Place, Recording, Rule, Store};
 use crate::runs::index_at_or_after;
 
@@ -54,52 +56,45 @@ pub(crate) struct AnalogBuckets {
 }
 
 impl Recording {
-    /// The blocks holding any tick of [from, to).
-    pub(crate) fn blocks_covering(&self, from: i64, to: i64) -> Range<usize> {
-        let b = &self.blocks;
+    /// Channel `c`'s blocks holding any tick of [from, to).
+    pub(crate) fn blocks_covering(&self, c: usize, from: i64, to: i64) -> Range<usize> {
+        let b = &self.blocks[c];
         let first = b.partition_point(|x| x.end <= from);
         let last = b.partition_point(|x| x.start < to).max(first);
         first..last
     }
 
-    pub(crate) fn block(&self, i: usize, cancel: &AtomicBool) -> Result<Arc<Decoded>, Error> {
+    /// Channel `c`'s block `i`, decoded.
+    pub(crate) fn block(
+        &self,
+        c: usize,
+        i: usize,
+        cancel: &AtomicBool,
+    ) -> Result<Arc<Block>, Error> {
         check(cancel)?;
-        let at = self.blocks[i];
-        match at.from {
+        match self.blocks[c][i].from {
             #[cfg(feature = "live")]
             BlockFrom::Unwritten(j) => match &self.store {
-                Store::Live(live) => Ok(Arc::clone(&live.unwritten[j])),
+                Store::Live(live) => Ok(Arc::clone(&live.unwritten[c][j])),
                 Store::Finished(_) => unreachable!("a finished file's blocks are written {j}"),
             },
-            BlockFrom::Frame {
-                index,
-                offset,
-                length,
-            } => {
-                let entry = self.cache.get_or_make(Key::Block(offset), || {
-                    let _span =
-                        tracing::debug_span!("decode block", block = index, length).entered();
-                    let frame = read(&*self.bytes, offset, length as usize)?;
-                    let (block, derived) = match &self.store {
-                        Store::Finished(footer) => {
-                            let block = footer.decode_block(index, &frame)?;
-                            let derived = (0..self.products.len())
-                                .map(|d| footer.derived(&block, d))
-                                .collect::<Result<Vec<_>, _>>()?;
-                            (block, derived)
-                        }
+            BlockFrom::Frame(b) => {
+                let entry = self.cache.get_or_make(Key::Block(b.row.offset), || {
+                    let _span = tracing::debug_span!(
+                        "decode block",
+                        channel = c,
+                        start = b.start,
+                        length = b.row.length
+                    )
+                    .entered();
+                    let frame = read(&*self.bytes, b.row.offset, b.row.length as usize)?;
+                    let block = match &self.store {
+                        Store::Finished(f) => f.footer.decode_block(c, &b, &frame)?,
                         #[cfg(feature = "live")]
-                        Store::Live(live) => {
-                            let block = live.snapshot.decode_block(index, &frame)?;
-                            let derived = (0..self.products.len())
-                                .map(|d| live.snapshot.derived(&block, d))
-                                .collect::<Result<Vec<_>, _>>()?;
-                            (block, derived)
-                        }
+                        Store::Live(live) => live.snapshot.decode_block(c, &b, &frame)?,
                     };
-                    let decoded = Decoded { block, derived };
-                    let size = decoded.size();
-                    Ok::<_, Error>((Entry::Block(Arc::new(decoded)), size))
+                    let size = block_size(&block);
+                    Ok::<_, Error>((Entry::Block(Arc::new(block)), size))
                 })?;
                 match entry {
                     Entry::Block(b) => Ok(b),
@@ -107,6 +102,44 @@ impl Recording {
                 }
             }
         }
+    }
+
+    /// Stored analog channel `c`'s samples `i0..i1` as it stores them, from the blocks that
+    /// hold them.
+    fn stored_values(
+        &self,
+        c: usize,
+        i0: u64,
+        i1: u64,
+        cancel: &AtomicBool,
+    ) -> Result<Values, Error> {
+        let runs = self.place(c)?.runs().ok_or(Error::NoChannel(c))?;
+        let (from, to) = (runs.tick(i0), runs.tick(i1 - 1) + 1);
+        let mut out: Option<Values> = None;
+        for b in self.blocks_covering(c, from, to) {
+            let block = self.block(c, b, cancel)?;
+            let BlockChannel::Analog {
+                first_index,
+                values,
+            } = &block.data
+            else {
+                return Err(Error::NoChannel(c));
+            };
+            let lo = i0.max(*first_index);
+            let hi = i1.min(first_index + values.len() as u64);
+            if hi <= lo {
+                continue;
+            }
+            let (a, z) = ((lo - first_index) as usize, (hi - first_index) as usize);
+            match (out.get_or_insert_with(|| empty_like(values)), values) {
+                (Values::F32(o), Values::F32(v)) => o.extend_from_slice(&v[a..z]),
+                (Values::F64(o), Values::F64(v)) => o.extend_from_slice(&v[a..z]),
+                (Values::U64(o), Values::U64(v)) => o.extend_from_slice(&v[a..z]),
+                (Values::I64(o), Values::I64(v)) => o.extend_from_slice(&v[a..z]),
+                _ => unreachable!("a channel's blocks store its samples alike"),
+            }
+        }
+        Ok(out.unwrap_or(Values::F64(Vec::new())))
     }
 
     /// Digital channel `channel`'s level at `from` and its edges in [from, to), within the
@@ -129,13 +162,12 @@ impl Recording {
         };
         let from = from.clamp(0, self.length.max(1) - 1);
         let to = to.min(self.length);
-        let range = self.blocks_covering(from, to.max(from + 1));
+        let range = self.blocks_covering(channel, from, to.max(from + 1));
         let mut level = *initial;
         let mut out = Vec::new();
         for (k, i) in range.enumerate() {
-            let block = self.block(i, cancel)?;
-            let BlockChannel::Digital { initial, edges, .. } = &block.block.channels[channel]
-            else {
+            let block = self.block(channel, i, cancel)?;
+            let BlockChannel::Digital { initial, edges, .. } = &block.data else {
                 return Err(Error::NoChannel(channel));
             };
             let lo = edges.partition_point(|&t| t < from);
@@ -144,7 +176,7 @@ impl Recording {
                 // A block's level bit carries the level from before a gap until the gap's end, which
                 // sets it: the last gap ending in the block, at or before `from`. A gap ending at
                 // the block's start is in the block. The gap from tick 0 comes before the others.
-                let start = block.block.start;
+                let start = block.start;
                 let last_ended = match gaps.partition_point(|g| g.to <= from) {
                     0 => leading.as_ref().filter(|g| g.to <= from),
                     n => Some(&gaps[n - 1]),
@@ -203,7 +235,7 @@ impl Recording {
         mut f: impl FnMut(u64, f64, Option<i128>) -> Result<(), Error>,
     ) -> Result<(), Error> {
         let place = self.place(channel)?;
-        let (Some(runs), Place::Analog { rule, count, .. }) = (place.runs(), place) else {
+        let Place::Analog { rule, count, .. } = place else {
             return Err(Error::NoChannel(channel));
         };
         let i1 = i1.min(*count);
@@ -211,111 +243,118 @@ impl Recording {
             return Ok(());
         }
         let stored = self.places.len() - self.products.len();
-        let (from, to) = (runs.tick(i0), runs.tick(i1 - 1) + 1);
-        for b in self.blocks_covering(from, to) {
-            let block = self.block(b, cancel)?;
-            let (first, values) = if channel < stored {
-                match &block.block.channels[channel] {
-                    BlockChannel::Analog {
-                        first_index,
-                        values,
-                    } => (*first_index, values),
-                    BlockChannel::Digital { .. } => return Err(Error::NoChannel(channel)),
-                }
-            } else {
-                // A derived channel's samples sit where its first operand's do.
-                let (a, _, _) = self.products[channel - stored];
-                let BlockChannel::Analog { first_index, .. } = &block.block.channels[a] else {
-                    return Err(Error::NoChannel(channel));
-                };
-                (*first_index, &block.derived[channel - stored])
-            };
-            let lo = i0.max(first);
-            let hi = i1.min(first + values.len() as u64);
-            let (a, z) = ((lo - first) as usize, (hi - first) as usize);
-            // One match a block on how it stores its samples, rather than one a sample.
-            match values {
-                Values::F32(v) => (lo..)
-                    .zip(&v[a..z])
-                    .try_for_each(|(i, &x)| f(i, rule.value(Sample::F32(x)), None))?,
-                Values::F64(v) => (lo..)
-                    .zip(&v[a..z])
-                    .try_for_each(|(i, &x)| f(i, rule.value(Sample::F64(x)), None))?,
-                Values::U64(v) => (lo..).zip(&v[a..z]).try_for_each(|(i, &x)| {
-                    f(i, rule.value(Sample::U64(x)), Some(i128::from(x)))
-                })?,
-                Values::I64(v) => (lo..).zip(&v[a..z]).try_for_each(|(i, &x)| {
-                    f(i, rule.value(Sample::I64(x)), Some(i128::from(x)))
-                })?,
-            }
+        let values = if channel < stored {
+            self.stored_values(channel, i0, i1, cancel)?
+        } else {
+            // A derived channel's samples are its operands' at the same indices.
+            let (a, b, product) = self.products[channel - stored];
+            let (va, vb) = (
+                self.stored_values(a, i0, i1, cancel)?,
+                self.stored_values(b, i0, i1, cancel)?,
+            );
+            samples::product_values(product, &va, &vb).map_err(|what| {
+                DecodeError::Corrupt(format!(
+                    "derived channel {}: {what}",
+                    self.channels[channel].name
+                ))
+            })?
+        };
+        let rule = *rule;
+        // One match on how the samples are stored, rather than one a sample.
+        match &values {
+            Values::F32(v) => (i0..)
+                .zip(v)
+                .try_for_each(|(i, &x)| f(i, rule.value(Sample::F32(x)), None))?,
+            Values::F64(v) => (i0..)
+                .zip(v)
+                .try_for_each(|(i, &x)| f(i, rule.value(Sample::F64(x)), None))?,
+            Values::U64(v) => (i0..)
+                .zip(v)
+                .try_for_each(|(i, &x)| f(i, rule.value(Sample::U64(x)), Some(i128::from(x))))?,
+            Values::I64(v) => (i0..)
+                .zip(v)
+                .try_for_each(|(i, &x)| f(i, rule.value(Sample::I64(x)), Some(i128::from(x))))?,
         }
         Ok(())
     }
 
-    /// The coarsest level whose buckets are no wider than `ticks`, of those with any bucket.
-    pub(crate) fn level_for(&self, ticks: f64) -> Option<usize> {
+    /// Channel `c`'s coarsest level whose buckets are no wider than `ticks`, of those with any
+    /// bucket.
+    pub(crate) fn level_for(&self, c: usize, ticks: f64) -> Option<usize> {
         self.levels
+            .get(c)?
             .iter()
             .rposition(|l| ((1u64 << l.shift) as f64) <= ticks && l.covered > 0)
     }
 
-    /// Level `level`'s buckets that hold any of `k0..k1`, from each place that holds them, in
-    /// order: each with the level's index of its first bucket.
+    /// Channel `c`'s level `level`'s buckets that hold any of `k0..k1`, from each place that
+    /// holds them, in order: each with the level's index of its first bucket.
     pub(crate) fn pieces(
         &self,
+        c: usize,
         level: usize,
         k0: u64,
         k1: u64,
         cancel: &AtomicBool,
     ) -> Result<Vec<(u64, Piece<'_>)>, Error> {
-        let l = &self.levels[level];
+        let l = &self.levels[c][level];
         let k1 = k1.min(l.covered);
         let mut out = Vec::new();
         if k1 <= k0 {
             return Ok(out);
         }
-        let blocks = |n: usize| {
-            let first = (k0 / BLOCK_BUCKETS) as usize;
-            first..(((k1 - 1) / BLOCK_BUCKETS) as usize + 1).min(n)
+        // A run's block stands for each of its `n` blocks: those that hold any of `k0..k1`.
+        let push = |block: Arc<OverviewBlock>, out: &mut Vec<(u64, Piece<'_>)>| {
+            let (first, n) = (block.first, u64::from(block.n));
+            let a = k0.saturating_sub(first) / BLOCK_BUCKETS;
+            let z = (k1.saturating_sub(first)).div_ceil(BLOCK_BUCKETS).min(n);
+            for j in a..z {
+                out.push((first + j * BLOCK_BUCKETS, Piece::Block(Arc::clone(&block))));
+            }
+        };
+        let (b0, b1) = (k0 / BLOCK_BUCKETS, (k1 - 1) / BLOCK_BUCKETS);
+        let rows_covering = |rows: &[LevelRef]| {
+            let first = rows.partition_point(|r| r.k + u64::from(r.row.n) <= b0);
+            let last = rows.partition_point(|r| r.k <= b1).max(first);
+            first..last
         };
         for part in &l.parts {
             match (*part, &self.store) {
-                (Part::Head(i), Store::Finished(footer)) => {
-                    out.push((0, Piece::Borrowed(&footer.overview[i])));
+                (Part::Strip, Store::Finished(f)) => {
+                    out.push((0, Piece::Borrowed(&f.strips[c])));
                 }
-                (Part::Blocks(level), Store::Finished(footer)) => {
-                    for k in blocks(footer.overview_rows[level].len()) {
-                        let (offset, length) = footer.overview_block_location(level, k);
-                        let block = self.overview_block(offset, length, cancel, |frame| {
-                            Ok(footer.decode_overview_block(level, k, frame)?)
+                (Part::Blocks(li), Store::Finished(f)) => {
+                    let rows = &f.rows[c][li];
+                    for r in &rows[rows_covering(rows)] {
+                        let block = self.overview_block(r, cancel, |frame| {
+                            Ok(f.footer.decode_overview(c, li, r, frame)?)
                         })?;
-                        out.push((block.first, Piece::Block(block)));
+                        push(block, &mut out);
                     }
                 }
                 #[cfg(feature = "live")]
-                (
-                    Part::LiveBlocks {
-                        level,
-                        written,
-                        queued,
-                    },
-                    Store::Live(live),
-                ) => {
-                    for k in blocks(written + queued) {
-                        let block = if k < written {
-                            let (offset, length) = live.snapshot.overview_block_location(level, k);
-                            self.overview_block(offset, length, cancel, |frame| {
-                                Ok(live.snapshot.decode_overview_block(level, k, frame)?)
-                            })?
-                        } else {
-                            Arc::clone(&live.queued_overview[level][k - written])
-                        };
-                        out.push((block.first, Piece::Block(block)));
+                (Part::LiveBlocks(li), Store::Live(live)) => {
+                    let rows = &live.rows[c][li];
+                    for r in &rows[rows_covering(rows)] {
+                        let block = self.overview_block(r, cancel, |frame| {
+                            Ok(live.snapshot.decode_overview(c, li, r, frame)?)
+                        })?;
+                        push(block, &mut out);
+                    }
+                    for block in &live.unwritten_overview[c][li] {
+                        let end = block.first + u64::from(block.n) * BLOCK_BUCKETS;
+                        if block.first < k1 && end > k0 {
+                            push(Arc::clone(block), &mut out);
+                        }
                     }
                 }
                 #[cfg(feature = "live")]
-                (Part::Held(i), Store::Live(live)) => {
-                    let held = &live.snapshot.overview()[i];
+                (Part::Held(li), Store::Live(live)) => {
+                    let ladder = live
+                        .snapshot
+                        .overview(c)
+                        .expect("an overview for every channel");
+                    let held = &ladder.levels[li].held;
                     let mut first = held.first;
                     for chunk in &held.chunks {
                         if first < k1 && first + chunk.buckets > k0 {
@@ -333,12 +372,12 @@ impl Recording {
 
     fn overview_block(
         &self,
-        offset: u64,
-        length: u32,
+        r: &LevelRef,
         cancel: &AtomicBool,
         decode: impl FnOnce(&[u8]) -> Result<OverviewBlock, Error>,
     ) -> Result<Arc<OverviewBlock>, Error> {
         check(cancel)?;
+        let (offset, length) = (r.row.offset, r.row.length);
         let entry = self.cache.get_or_make(Key::Overview(offset), || {
             let _span = tracing::debug_span!("decode overview block", offset, length).entered();
             let frame = read(&*self.bytes, offset, length as usize)?;
@@ -371,9 +410,9 @@ impl Recording {
             max: vec![f64::NEG_INFINITY; n],
             sums: rule.exact().map(|_| vec![0; n]),
         };
-        for (first, piece) in self.pieces(level, k0, k1, cancel)? {
+        for (first, piece) in self.pieces(channel, level, k0, k1, cancel)? {
             let level = piece.level();
-            let Some(a) = level.channels[channel].analog() else {
+            let Some(a) = level.data.analog() else {
                 return Err(Error::NoChannel(channel));
             };
             let from = k0.max(first);
@@ -406,9 +445,9 @@ impl Recording {
         };
         let n = k1.saturating_sub(k0) as usize;
         let (mut levels, mut changes) = (vec![false; n], vec![false; n]);
-        for (first, piece) in self.pieces(level, k0, k1, cancel)? {
+        for (first, piece) in self.pieces(channel, level, k0, k1, cancel)? {
             let level = piece.level();
-            let c = &level.channels[channel];
+            let c = &level.data;
             if !matches!(c, ChannelOverview::Digital { .. }) {
                 return Err(Error::NoChannel(channel));
             }
@@ -464,20 +503,25 @@ fn bucket(a: &AnalogOverview, i: usize, rule: Rule) -> (f64, f64, Option<i128>) 
 
 /// About the bytes a decoded overview level holds.
 fn format_size(level: &Level) -> usize {
-    level
-        .channels
-        .iter()
-        .map(|c| match c {
-            ChannelOverview::Digital { level, change } => level.len() + change.len(),
-            ChannelOverview::Analog(a) => {
-                a.len()
-                    * match a {
-                        AnalogOverview::F32(_) => 16,
-                        AnalogOverview::F64(_) => 24,
-                        AnalogOverview::U64(_) | AnalogOverview::I64(_) => 32,
-                    }
-            }
-        })
-        .sum::<usize>()
-        + 64
+    64 + match &level.data {
+        ChannelOverview::Digital { level, change } => level.len() + change.len(),
+        ChannelOverview::Analog(a) => {
+            a.len()
+                * match a {
+                    AnalogOverview::F32(_) => 16,
+                    AnalogOverview::F64(_) => 24,
+                    AnalogOverview::U64(_) | AnalogOverview::I64(_) => 32,
+                }
+        }
+    }
+}
+
+/// An empty list of samples stored as `like`'s are.
+fn empty_like(like: &Values) -> Values {
+    match like {
+        Values::F32(_) => Values::F32(Vec::new()),
+        Values::F64(_) => Values::F64(Vec::new()),
+        Values::U64(_) => Values::U64(Vec::new()),
+        Values::I64(_) => Values::I64(Vec::new()),
+    }
 }

@@ -1,17 +1,21 @@
-//! The random-access decoder. It does no I/O: a caller fetches the file's end, then the bytes of
-//! the blocks it needs, by HTTP Range in the browser or from a file natively, and hands them in.
+//! The random-access decoder. It does no I/O: a caller fetches the file's end, then the bytes a
+//! view needs, by HTTP Range in the browser or from a file natively, and hands them in. The
+//! footer holds the header, the top index and every channel's strip; a channel's pages, blocks
+//! and overview blocks are fetched by the places the top index and its pages give.
 
+use std::collections::BTreeMap;
 use std::ops::Range;
 
 use crate::codec::get_uleb;
 use crate::header::{
     AnalogCoding, BlockRow, ChannelHeader, ChannelKind, Declaration, DeclaredChannel, DeclaredKind,
-    Header, JSON_SAFE, Kept, LEVEL_BIT, MAGIC, MAJOR, OverviewRow, PREAMBLE_LEN, TRAILER_LEN,
-    Trailer, Words,
+    Header, JSON_SAFE, Kept, LEVEL_BIT, MAGIC, MAJOR, OverviewLevel, OverviewRow, PREAMBLE_LEN,
+    TRAILER_LEN, Trailer,
 };
+use crate::index::{Entry, Page, TOP, Table, TableIndex, depth_of, pages_at};
 use crate::mapping::Mapping;
 use crate::model::{Break, Gap, Ratio, run_sample_tick};
-use crate::overview::{self, Column, Level};
+use crate::overview::{self, BLOCK_BUCKETS, Column, Level};
 use crate::record::{self, Kind};
 use crate::samples::{self, Product, Values};
 
@@ -39,6 +43,10 @@ pub(crate) fn corrupt(what: impl Into<String>) -> DecodeError {
     DecodeError::Corrupt(what.into())
 }
 
+/// The most a repair, a re-cut or verify holds of what it decoded or made while it can't yet tell
+/// whether it stands or where it goes.
+pub const HOLD: usize = 4 * MAX_DECODED;
+
 /// How many bytes from its end a reader reads first: enough for most footers.
 pub const FIRST_READ: usize = 32 << 10;
 
@@ -59,60 +67,10 @@ pub fn buffer(len: usize, max: usize) -> Result<Vec<u8>, DecodeError> {
     Ok(out)
 }
 
-/// The most a reader decodes from one frame unless it is set otherwise: a block, an overview block
-/// or the footer's overview. The format sets no maximum, and a file can state up to 4 GiB.
+/// The most a reader decodes from one frame unless it is set otherwise: a block, an overview
+/// block, a strip or the annotation bundle. The format sets no maximum, and a file can state up
+/// to 4 GiB.
 pub const MAX_DECODED: usize = 64 << 20;
-
-/// The most overview blocks tickwave writes, repairs or checks for one recording: their rows
-/// take 16 MiB of the footer's index, a quarter of what an in-order reader holds of one record
-/// (`MAX_DECODED`). Settling them costs a span about a third of a second natively; the format
-/// would allow four times as many, at four times the cost.
-pub(crate) const MAX_OVERVIEW_BLOCKS: u64 = (MAX_DECODED / OverviewRow::SIZE / 4) as u64;
-
-/// A recording reaching axis tick `end`, its finest overview level `finest`, whose overview
-/// blocks pass `MAX_OVERVIEW_BLOCKS`.
-#[derive(Debug)]
-pub(crate) struct OverviewPast {
-    pub end: i64,
-    pub finest: u8,
-    pub blocks: u64,
-}
-
-impl std::fmt::Display for OverviewPast {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self {
-            end,
-            finest,
-            blocks,
-        } = self;
-        write!(
-            f,
-            "its finest overview level, of 2^{finest}-tick buckets, needs {blocks} overview blocks \
-             to reach tick {end}, more than tickwave keeps ({MAX_OVERVIEW_BLOCKS})"
-        )
-    }
-}
-
-/// Whether tickwave keeps the overview of a recording reaching axis tick `end`, its finest
-/// overview level `finest`: the overview blocks the format sets for it are no more than
-/// `MAX_OVERVIEW_BLOCKS`. Settling the overview costs time and memory for each of those blocks,
-/// so whatever settles it, for a span a file or a caller states, is held to this first.
-pub(crate) fn overview_room(end: i64, finest: u8) -> Result<(), OverviewPast> {
-    let plan = overview::plan(end, finest);
-    let blocks: u64 = plan
-        .blocks
-        .iter()
-        .map(|&shift| overview::block_count(end, shift))
-        .sum();
-    if blocks > MAX_OVERVIEW_BLOCKS {
-        return Err(OverviewPast {
-            end,
-            finest,
-            blocks,
-        });
-    }
-    Ok(())
-}
 
 /// Decompresses exactly one zstd frame, which must fill `frame`, come to exactly `len` bytes and
 /// carry a checksum that matches. A skippable frame, a frame that names a dictionary, or any byte
@@ -157,11 +115,17 @@ pub fn inflate_limited(frame: &[u8], len: usize, max: usize) -> Result<Vec<u8>, 
     Ok(out)
 }
 
-/// One overview block, decoded: buckets `first..first + level.buckets` of its level.
-#[derive(Debug)]
-pub struct OverviewBlock {
-    pub first: u64,
-    pub level: Level,
+/// The annotation bundle record's files: a u32 decoded length, then one zstd frame of a JSON
+/// object of strings.
+pub fn parse_bundle(
+    payload: &[u8],
+    inflate: impl Fn(&[u8], usize) -> Result<Vec<u8>, DecodeError>,
+) -> Result<BTreeMap<String, String>, DecodeError> {
+    let (len, frame) = payload
+        .split_first_chunk::<4>()
+        .ok_or_else(|| corrupt("the annotation bundle is too short for its length"))?;
+    let raw = inflate(frame, u32::from_le_bytes(*len) as usize)?;
+    Ok(serde_json::from_slice(&raw)?)
 }
 
 #[derive(Debug, PartialEq)]
@@ -198,43 +162,58 @@ impl BlockChannel {
             Self::Analog { .. } => None,
         }
     }
+
+    /// Its items: edges or samples.
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Digital { edges, .. } => edges.len(),
+            Self::Analog { values, .. } => values.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
-/// A derived channel's samples in a block, from its operands' there: `a` and `b` index the
-/// block's channels, and `product` is the rule (`overview::products` gives each derived
+/// One channel's block, decoded: its items over `start..end` of the axis.
+#[derive(Debug, PartialEq)]
+pub struct Block {
+    pub channel: usize,
+    pub start: i64,
+    /// Exclusive: the channel's next block's start, or the length for its last.
+    pub end: i64,
+    pub data: BlockChannel,
+}
+
+/// A derived channel's samples from its operands' samples `a` and `b`, which start at the same
+/// index and hold as many: `product` is the rule (`overview::products` gives each derived
 /// channel's). The browser and the native views take derived samples from here, so both follow
 /// one rule.
 pub fn derived_values(
-    channels: &[BlockChannel],
-    (a, b, product): (usize, usize, Product),
+    a: &BlockChannel,
+    b: &BlockChannel,
+    product: Product,
 ) -> Result<Values, String> {
     let (
-        Some(BlockChannel::Analog {
+        BlockChannel::Analog {
             first_index: fa,
             values: va,
-        }),
-        Some(BlockChannel::Analog {
+        },
+        BlockChannel::Analog {
             first_index: fb,
             values: vb,
-        }),
-    ) = (channels.get(a), channels.get(b))
+        },
+    ) = (a, b)
     else {
         return Err("a derived channel's operands are analog channels".into());
     };
     if fa != fb {
         return Err(format!(
-            "its operands' samples start at index {fa} and {fb} in the block"
+            "its operands' samples start at index {fa} and {fb}"
         ));
     }
     samples::product_values(product, va, vb)
-}
-
-#[derive(Debug, PartialEq)]
-pub struct Block {
-    pub start: i64,
-    /// Exclusive: the next block's start, or the length for the last block.
-    pub end: i64,
-    pub channels: Vec<BlockChannel>,
 }
 
 /// The place of the last of a run's `n` samples, the first at `tick`, in source ticks, in u128 so
@@ -243,6 +222,11 @@ pub struct Block {
 fn run_last(tick: i64, period: Ratio, n: u64) -> u128 {
     tick as u128
         + u128::from(n.saturating_sub(1)) * u128::from(period.num()) / u128::from(period.den())
+}
+
+/// Place `steps` periods on from `tick`, in u128 for the same reason.
+fn place_on(tick: i64, period: Ratio, steps: u64) -> u128 {
+    tick as u128 + u128::from(steps) * u128::from(period.num()) / u128::from(period.den())
 }
 
 /// A source tick a channel names: in `0..2^53` (FORMAT.md, "Times").
@@ -345,6 +329,11 @@ pub(crate) fn check_declaration(d: &Declaration) -> Result<(), DecodeError> {
             && !within(offset.ticks)
         {
             return Err(corrupt(format!("channel {name}'s offset is past 2^53")));
+        }
+        if c.overview_shift.is_some_and(|s| s > overview::MAX_SHIFT) {
+            return Err(corrupt(format!(
+                "channel {name}'s finest overview level's shift is past 62"
+            )));
         }
         let DeclaredKind::Analog {
             period,
@@ -501,12 +490,130 @@ pub(crate) fn check_declaration(d: &Declaration) -> Result<(), DecodeError> {
     Ok(())
 }
 
+/// A digital channel's gaps, against what its header states of it (FORMAT.md, "Gaps"): in order,
+/// each inside the channel's start to its end, and none from its start unless its level there is
+/// low.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn check_gaps(
+    name: &str,
+    gaps: &[Gap],
+    start: i64,
+    end: i64,
+    initial: bool,
+    map: &Mapping,
+    length: i64,
+) -> Result<(), DecodeError> {
+    let mut after = start - 1;
+    for g in gaps {
+        if g.from <= after
+            || g.to <= g.from
+            || g.to >= end
+            || !maps_inside(map, g.from, length)
+            || !maps_inside(map, g.to, length)
+        {
+            return Err(corrupt(format!(
+                "channel {name}: a gap from {} to {} is out of place",
+                g.from, g.to
+            )));
+        }
+        if g.from == start && initial {
+            return Err(corrupt(format!(
+                "channel {name} has a gap from its start but a high initial level"
+            )));
+        }
+        after = g.to;
+    }
+    Ok(())
+}
+
+/// An analog channel's runs, against what its header states of it: each break in order and
+/// inside its samples, each run's last sample at or before the next run's tick, and every sample
+/// and the losses at either end inside the capture. Its last run.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn check_runs(
+    name: &str,
+    first: i64,
+    period: Ratio,
+    count: u64,
+    breaks: &[Break],
+    lost_after: u64,
+    map: &Mapping,
+    length: i64,
+) -> Result<Break, DecodeError> {
+    let outside = || corrupt(format!("channel {name}'s samples lie outside the capture"));
+    let mut run = Break {
+        index: 0,
+        tick: first,
+        lost: 0,
+    };
+    if count == 0 {
+        // With no sample, `first` places nothing.
+        if !breaks.is_empty() {
+            return Err(corrupt(format!("channel {name}: a break is out of place")));
+        }
+        return Ok(run);
+    }
+    if !maps_inside(map, first, length) {
+        return Err(outside());
+    }
+    for b in breaks {
+        if b.index <= run.index || b.index >= count || !maps_inside(map, b.tick, length) {
+            return Err(corrupt(format!("channel {name}: a break is out of place")));
+        }
+        if b.lost >= JSON_SAFE {
+            return Err(corrupt(format!(
+                "channel {name}: a break's lost count is past 2^53"
+            )));
+        }
+        if run_last(run.tick, period, b.index - run.index) > b.tick as u128 {
+            return Err(outside());
+        }
+        run = *b;
+    }
+    let last = run_last(run.tick, period, count - run.index);
+    if last >= u128::from(JSON_SAFE) || !maps_inside(map, last as i64, length) {
+        return Err(outside());
+    }
+    if lost_after > 0 {
+        let end = place_on(run.tick, period, count - run.index + lost_after);
+        let fits = end < u128::from(JSON_SAFE) && maps_up_to(map, end as i64, length);
+        if !fits {
+            return Err(corrupt(format!(
+                "channel {name}: the {lost_after} samples lost after its last end past the length"
+            )));
+        }
+    }
+    Ok(run)
+}
+
+/// Where the samples lost before an analog channel's first start: the place of `-lost` on the
+/// first run's grid, `first - ceil(lost × period)`; None below source tick 0.
+pub fn lost_before_start(first: i64, period: Ratio, lost: u64) -> Option<i64> {
+    let span = (u128::from(lost) * u128::from(period.num())).div_ceil(u128::from(period.den()));
+    i64::try_from(i128::from(first) - i128::try_from(span).ok()?)
+        .ok()
+        .filter(|&t| t >= 0)
+}
+
+/// Where the samples lost after an analog channel's last end: the place of `count + lost` on the
+/// last run's grid.
+pub fn lost_after_end(run: Break, period: Ratio, count: u64, lost: u64) -> Option<i64> {
+    i64::try_from(place_on(
+        run.tick,
+        period,
+        (count - run.index).checked_add(lost)?,
+    ))
+    .ok()
+}
+
 /// What the header promises about the capture's extent, checked before anything relies on it.
+/// A channel's list in pages is checked once it is read (`Footer::load_list`).
 pub(crate) fn check_header(h: &Header) -> Result<(), DecodeError> {
     if !(1..JSON_SAFE as i64).contains(&h.length) {
         return Err(corrupt("the length covers no tick or is past 2^53"));
     }
-    check_declaration(&h.declaration())?;
+    let declaration = h.declaration();
+    check_declaration(&declaration)?;
     let length = h.length;
     let safe = |v: u64| v < JSON_SAFE;
     for (c, ch) in h.channels.iter().enumerate() {
@@ -521,12 +628,23 @@ pub(crate) fn check_header(h: &Header) -> Result<(), DecodeError> {
                  outside the axis's 0 to {length}"
             )));
         }
+        if ch.blocks == 0 || ch.blocks > length as u64 {
+            return Err(corrupt(format!(
+                "channel {name} states {} blocks; its blocks tile the length, {length}",
+                ch.blocks
+            )));
+        }
+        let list = ch.data.list_len();
+        if !safe(list) {
+            return Err(corrupt(format!("channel {name}'s list is past 2^53")));
+        }
         match &ch.data {
             ChannelKind::Digital {
                 initial,
                 end,
                 edges,
                 gaps,
+                ..
             } => {
                 let start = h.start(c).ok_or_else(unmapped)?;
                 if !source_tick(start) {
@@ -537,90 +655,101 @@ pub(crate) fn check_header(h: &Header) -> Result<(), DecodeError> {
                 if *end < start || !maps_up_to(&map, *end, length) {
                     return Err(corrupt(format!("channel {name} ends outside the capture")));
                 }
-                if *end == start && *initial {
-                    return Err(corrupt(format!(
-                        "channel {name} is never known but has a high initial level"
-                    )));
-                }
                 if !safe(*edges) {
                     return Err(corrupt(format!("channel {name}'s edge count is past 2^53")));
                 }
-                let mut after = start - 1;
-                for g in gaps {
-                    if g.from <= after
-                        || g.to <= g.from
-                        || g.to >= *end
-                        || !maps_inside(&map, g.from, length)
-                        || !maps_inside(&map, g.to, length)
-                    {
-                        return Err(corrupt(format!(
-                            "channel {name}: a gap from {} to {} is out of place",
-                            g.from, g.to
-                        )));
-                    }
-                    if g.from == start && *initial {
-                        return Err(corrupt(format!(
-                            "channel {name} has a gap from its start but a high initial level"
-                        )));
-                    }
-                    after = g.to;
-                }
+                check_gaps(name, gaps, start, *end, *initial, &map, length)?;
             }
             ChannelKind::Analog {
                 first,
                 period,
                 count,
                 breaks,
+                break_count,
+                lost_before,
+                lost_after,
                 ..
             } => {
-                if !safe(*count) {
-                    return Err(corrupt(format!("channel {name}'s count is past 2^53")));
+                if !safe(*count) || !safe(*lost_before) || !safe(*lost_after) {
+                    return Err(corrupt(format!(
+                        "channel {name}'s count or losses are past 2^53"
+                    )));
                 }
-                let outside =
-                    || corrupt(format!("channel {name}'s samples lie outside the capture"));
-                if *count == 0 {
-                    // With no sample, `first` places nothing.
-                    if !breaks.is_empty() {
-                        return Err(corrupt(format!("channel {name}: a break is out of place")));
+                if *count == 0 && (*lost_before > 0 || *lost_after > 0) {
+                    return Err(corrupt(format!(
+                        "channel {name} states samples lost at either end of none"
+                    )));
+                }
+                if break_count.is_some_and(|n| n >= *count) {
+                    return Err(corrupt(format!(
+                        "channel {name} states more breaks than its samples hold"
+                    )));
+                }
+                if *lost_before > 0 {
+                    let start = lost_before_start(*first, *period, *lost_before);
+                    if start.is_none_or(|t| map.axis(t).is_none_or(|t| t < 0)) {
+                        return Err(corrupt(format!(
+                            "channel {name}: the {lost_before} samples lost before its first \
+                             start below tick 0"
+                        )));
                     }
-                } else {
-                    if !maps_inside(&map, *first, length) {
-                        return Err(outside());
-                    }
-                    // Each run's last sample: at or before the next run's tick, and inside the
-                    // capture.
-                    let mut run = Break {
-                        index: 0,
-                        tick: *first,
-                        lost: 0,
-                    };
-                    for b in breaks {
-                        if b.index <= run.index
-                            || b.index >= *count
-                            || !maps_inside(&map, b.tick, length)
-                        {
-                            return Err(corrupt(format!(
-                                "channel {name}: a break is out of place"
-                            )));
-                        }
-                        if !safe(b.lost) {
-                            return Err(corrupt(format!(
-                                "channel {name}: a break's lost count is past 2^53"
-                            )));
-                        }
-                        if run_last(run.tick, *period, b.index - run.index) > b.tick as u128 {
-                            return Err(outside());
-                        }
-                        run = *b;
-                    }
-                    let last = run_last(run.tick, *period, count - run.index);
-                    if last >= u128::from(JSON_SAFE) || !maps_inside(&map, last as i64, length) {
-                        return Err(outside());
-                    }
+                }
+                if break_count.is_none() {
+                    let run = check_runs(
+                        name,
+                        *first,
+                        *period,
+                        *count,
+                        breaks,
+                        *lost_after,
+                        &map,
+                        length,
+                    )?;
+                    check_shaping(ch, run)?;
+                } else if *count > 0 && !maps_inside(&map, *first, length) {
+                    return Err(corrupt(format!(
+                        "channel {name}'s samples lie outside the capture"
+                    )));
                 }
             }
         }
-        check_shaping(ch)?;
+        if let ChannelKind::Digital { .. } = &ch.data {
+            check_shaping(
+                ch,
+                Break {
+                    index: 0,
+                    tick: 0,
+                    lost: 0,
+                },
+            )?;
+        }
+    }
+    let overview_channels = h.channels.len() + h.derived.len();
+    for o in 0..overview_channels {
+        let shift = h
+            .shift(o)
+            .ok_or_else(|| corrupt("a derived channel names no channel"))?;
+        let levels = h.levels(o).unwrap_or_default();
+        let ladder = overview::ladder(length, shift);
+        let name = match h.channels.get(o) {
+            Some(c) => c.name.clone(),
+            None => h.derived[o - h.channels.len()].name.clone(),
+        };
+        let fits = levels.len() + 1 == ladder.len()
+            && levels.iter().zip(&ladder).all(|(l, &s)| {
+                let blocks = overview::block_count(length, s);
+                l.shift == s
+                    && l.blocks == blocks
+                    && l.rows >= 1
+                    && l.rows <= blocks
+                    && (blocks == 1 || l.rows >= 2)
+            });
+        if !fits {
+            return Err(corrupt(format!(
+                "channel {name}: the overview levels are not the ones the format sets for this \
+                 length"
+            )));
+        }
     }
     // A derived channel's sample i sits where its operands' do.
     for d in &h.derived {
@@ -633,14 +762,24 @@ pub(crate) fn check_header(h: &Header) -> Result<(), DecodeError> {
                         first,
                         count,
                         breaks,
+                        break_count,
+                        lost_before,
+                        lost_after,
                         ..
-                    } => Some((*first, *count, breaks)),
+                    } => Some((
+                        *first,
+                        *count,
+                        breaks,
+                        *break_count,
+                        *lost_before,
+                        *lost_after,
+                    )),
                     ChannelKind::Digital { .. } => None,
                 })
         };
         if extent(&d.product[0]) != extent(&d.product[1]) {
             return Err(corrupt(format!(
-                "derived channel {}: {} and {} differ in first, count or breaks",
+                "derived channel {}: {} and {} differ in first, count, breaks or losses",
                 d.name, d.product[0], d.product[1]
             )));
         }
@@ -649,8 +788,9 @@ pub(crate) fn check_header(h: &Header) -> Result<(), DecodeError> {
 }
 
 /// A moved or trimmed channel's statements, against its data: FORMAT.md's moved and trimmed
-/// channels. `check_header` has checked the data itself, and the kept span's own bounds.
-fn check_shaping(c: &ChannelHeader) -> Result<(), DecodeError> {
+/// channels. `check_header` has checked the data itself, and the kept span's own bounds; `run` is
+/// an analog channel's last run.
+fn check_shaping(c: &ChannelHeader, run: Break) -> Result<(), DecodeError> {
     let name = &c.name;
     let Some(Kept { from, to }) = c.shaping.kept else {
         return Ok(());
@@ -668,17 +808,11 @@ fn check_shaping(c: &ChannelHeader) -> Result<(), DecodeError> {
             first,
             period,
             count,
-            breaks,
             ..
         } => {
             if *count == 0 {
                 return Ok(());
             }
-            let run = breaks.last().copied().unwrap_or(Break {
-                index: 0,
-                tick: *first,
-                lost: 0,
-            });
             let last = run_last(run.tick, *period, count - run.index);
             if *first < from || last >= to as u128 {
                 // As an i64: formatting a u128 costs the browser's decoder more than this check.
@@ -690,80 +824,6 @@ fn check_shaping(c: &ChannelHeader) -> Result<(), DecodeError> {
         }
     }
     Ok(())
-}
-
-/// A channel's item count from its index word: a digital word keeps the level in its top bit, and
-/// an analog word is all count.
-pub(crate) fn item_count(word: u32, digital: bool) -> u32 {
-    if digital { word & !LEVEL_BIT } else { word }
-}
-
-/// How to read one channel's section of a block.
-pub(crate) enum Section {
-    /// Every edge lies in `start..end` of the channel's source ticks, `end` `i64::MAX` while it
-    /// is not known, and `map` places it on the axis.
-    Digital { start: i64, end: i64, map: Mapping },
-    Analog {
-        coding: AnalogCoding,
-        first_index: u64,
-    },
-}
-
-/// A block's decoded payload, split into its channels' items.
-pub(crate) fn decode_sections(
-    raw: &[u8],
-    sections: &[Section],
-    words: &[u32],
-    start: i64,
-    end: i64,
-) -> Result<Vec<BlockChannel>, String> {
-    let channels = sections.len();
-    let lengths: Vec<usize> = raw
-        .get(..4 * channels)
-        .ok_or("the block is too short for its section table")?
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|&c| u32::from_le_bytes(c) as usize)
-        .collect();
-    // In u64: on a 32-bit usize the lengths could wrap to the block's size.
-    if 4 * channels as u64 + lengths.iter().map(|&l| l as u64).sum::<u64>() != raw.len() as u64 {
-        return Err("the block's sections do not fill it".into());
-    }
-    let mut pos = 4 * channels;
-    let mut out = Vec::with_capacity(channels);
-    for ((kind, len), &word) in sections.iter().zip(lengths).zip(words) {
-        let section = &raw[pos..pos + len];
-        pos += len;
-        out.push(match kind {
-            Section::Digital {
-                start: from,
-                end: to,
-                map,
-            } => {
-                let (edges, source) = digital_edges(
-                    section,
-                    item_count(word, true) as usize,
-                    map,
-                    *from..*to,
-                    start..end,
-                )?;
-                BlockChannel::Digital {
-                    initial: word & LEVEL_BIT != 0,
-                    edges,
-                    source,
-                }
-            }
-            Section::Analog {
-                coding,
-                first_index,
-            } => BlockChannel::Analog {
-                first_index: *first_index,
-                values: analog_values(section, word as usize, *coding)?,
-            },
-        });
-    }
-    Ok(out)
 }
 
 /// The level after a block's edges and the gap ends in it, from `level` at its start. No edge
@@ -805,61 +865,215 @@ pub(crate) fn gap_ends(gaps: &[Gap], map: &Mapping) -> Vec<i64> {
         .collect()
 }
 
-/// A finished file's footer: the header, the index and the overview. Parsed from the file's last
-/// bytes, it says where every block is.
+/// How to read one channel's block.
+pub(crate) enum Section {
+    /// Every edge lies in `start..end` of the channel's source ticks, `end` `i64::MAX` while it
+    /// is not known, and `map` places it on the axis.
+    Digital { start: i64, end: i64, map: Mapping },
+    Analog {
+        coding: AnalogCoding,
+        first_index: u64,
+    },
+}
+
+/// A block's decoded payload as its channel's items. `word` is the block's word.
+pub(crate) fn decode_section(
+    raw: &[u8],
+    section: &Section,
+    word: u32,
+    start: i64,
+    end: i64,
+) -> Result<BlockChannel, String> {
+    Ok(match section {
+        Section::Digital {
+            start: from,
+            end: to,
+            map,
+        } => {
+            let (edges, source) = digital_edges(
+                raw,
+                (word & !LEVEL_BIT) as usize,
+                map,
+                *from..*to,
+                start..end,
+            )?;
+            BlockChannel::Digital {
+                initial: word & LEVEL_BIT != 0,
+                edges,
+                source,
+            }
+        }
+        Section::Analog {
+            coding,
+            first_index,
+        } => BlockChannel::Analog {
+            first_index: *first_index,
+            values: analog_values(raw, word as usize, *coding)?,
+        },
+    })
+}
+
+/// A block as a channel's index places it: its row, where it ends, the index of its first item,
+/// and the next block's word, which says the level a digital block leaves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlockRef {
+    pub start: i64,
+    pub end: i64,
+    pub first_index: u64,
+    pub row: BlockRow,
+    pub next_word: Option<u32>,
+}
+
+/// An overview row as its level's index places it: blocks `k..k + n`, each the frame's bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LevelRef {
+    pub k: u64,
+    pub row: OverviewRow,
+}
+
+/// One overview block, decoded: buckets `first..first + level.buckets` of its level, and the `n`
+/// blocks it stands for, each the same buckets.
 #[derive(Debug)]
+pub struct OverviewBlock {
+    pub first: u64,
+    pub n: u32,
+    pub level: Level,
+}
+
+/// A channel's gaps or breaks.
+#[derive(Clone, Debug, PartialEq)]
+pub enum List {
+    Gaps(Vec<Gap>),
+    Breaks(Vec<Break>),
+}
+
+/// What the footer says of one channel or derived channel.
+#[derive(Clone, Debug)]
+pub struct ChannelIndex {
+    /// Its finest overview level's shift.
+    pub finest: u8,
+    pub column: Column,
+    /// Its strip's shift: its coarsest level's.
+    pub strip_shift: u8,
+    strip: Range<usize>,
+    strip_decoded: u32,
+    /// Its blocks; None for a derived channel.
+    pub blocks: Option<TableIndex>,
+    /// Each level of its overview in overview blocks, finest first.
+    pub levels: Vec<(OverviewLevel, TableIndex)>,
+    /// Its gaps or breaks, where they are in list pages.
+    pub list: Option<TableIndex>,
+}
+
+impl ChannelIndex {
+    /// Its strip's frame's bytes in the footer, and what they decode to.
+    pub fn strip_size(&self) -> (usize, u32) {
+        (self.strip.len(), self.strip_decoded)
+    }
+}
+
+/// A finished file's footer: the header, the top index and the strips. Parsed from the file's
+/// last bytes, it says where every channel's pages are.
+#[derive(Clone, Debug)]
 pub struct Footer {
     pub trailer: Trailer,
     pub header: Header,
-    pub rows: Vec<BlockRow>,
-    /// Each block's channel words, beside its row.
-    pub words: Words,
-    pub overview: Vec<Level>,
-    /// For each level in `header.overview_blocks`, its overview blocks' places in the file.
-    pub overview_rows: Vec<Vec<OverviewRow>>,
-    /// The footer's overview, as the file holds it: one zstd frame.
-    pub overview_frame: Vec<u8>,
+    /// The annotation bundle record's offset and length, framing included, where there is one.
+    pub bundle: Option<(u64, u32)>,
+    /// Each channel's, then each derived channel's.
+    pub channels: Vec<ChannelIndex>,
     /// Each derived channel's operands, by channel index, and its rule.
     pub products: Vec<(usize, usize, Product)>,
-    /// For each analog channel, the index of its first sample in each block.
-    first_sample: Vec<Vec<u64>>,
-    columns: Vec<Column>,
+    strips: Vec<u8>,
     /// Each channel's mapping to the axis.
     maps: Vec<Mapping>,
     /// Each channel's start, in its source's ticks.
     channel_starts: Vec<i64>,
-    /// Each digital channel's gaps' ends on the axis; empty for an analog channel.
+    /// Each channel's gaps or breaks, inline from the header or once read from its pages.
+    lists: Vec<Option<List>>,
+    /// Each digital channel's gaps' ends on the axis, once its gaps are known.
     gap_ends: Vec<Vec<i64>>,
 }
 
-impl Footer {
-    /// Parses the footer from the file's last bytes, `tail`, of a file `file_len` long.
-    /// `NeedFrom` says where the footer starts when `tail` holds less of it.
-    pub fn parse(tail: &[u8], file_len: u64) -> Result<Self, DecodeError> {
-        Self::parse_with(tail, file_len, inflate)
+/// Reads one table's entry in the top index: its depth, its entry count and its entries.
+fn top_table(
+    cursor: &mut &[u8],
+    channel: usize,
+    table: Table,
+    rows: u64,
+    footer_offset: u64,
+) -> Result<TableIndex, DecodeError> {
+    let bad = |what: &str| {
+        corrupt(format!(
+            "the top index's {} of channel {channel}: {what}",
+            crate::index::table_name(table)
+        ))
+    };
+    let [depth, e] = *cursor
+        .split_first_chunk::<2>()
+        .ok_or_else(|| bad("cut short"))?
+        .0;
+    *cursor = &cursor[2..];
+    if depth != depth_of(rows) || u64::from(e) != pages_at(rows, depth) || usize::from(e) > TOP {
+        return Err(bad(&format!(
+            "depth {depth} and {e} entries, where its {rows} entries give depth {} and {}",
+            depth_of(rows),
+            pages_at(rows, depth_of(rows))
+        )));
     }
+    let bytes = cursor
+        .get(..usize::from(e) * Entry::SIZE)
+        .ok_or_else(|| bad("cut short"))?;
+    *cursor = &cursor[bytes.len()..];
+    let (entries, _) = bytes.as_chunks::<{ Entry::SIZE }>();
+    let entries: Vec<Entry> = entries.iter().map(|e| Entry::parse(e)).collect();
+    let smallest = record::FRAMING + crate::index::PAGE_HEAD;
+    for (i, en) in entries.iter().enumerate() {
+        let inside = en.offset >= PREAMBLE_LEN as u64
+            && (en.length as usize) >= smallest
+            && en
+                .offset
+                .checked_add(u64::from(en.length))
+                .is_some_and(|end| end <= footer_offset);
+        let after = i == 0 || {
+            let p = entries[i - 1];
+            p.first <= en.first && p.number <= en.number && p.offset < en.offset
+        };
+        if !inside || !after {
+            return Err(bad("an entry is out of place"));
+        }
+    }
+    let first = entries[0];
+    let starts = match table {
+        Table::Blocks | Table::Level(_) => (first.first, first.number) == (0, 0),
+        Table::Gaps => first.number == 0,
+        Table::Breaks => true,
+    };
+    if !starts {
+        return Err(bad("its first entry does not start the table"));
+    }
+    Ok(TableIndex::finished(
+        channel as u32,
+        table,
+        rows,
+        depth,
+        entries,
+    ))
+}
 
+impl Footer {
     /// Parses a whole file's footer.
     pub fn parse_file(file: &[u8]) -> Result<Self, DecodeError> {
-        Self::parse_file_limited(file, MAX_DECODED)
-    }
-
-    /// `parse_file`, holding at most `max` decoded bytes a frame.
-    pub fn parse_file_limited(file: &[u8], max: usize) -> Result<Self, DecodeError> {
         if !file.starts_with(&MAGIC) {
             return Err(DecodeError::NotTickwave);
         }
-        Self::parse_with(file, file.len() as u64, |f, len| {
-            inflate_limited(f, len, max)
-        })
+        Self::parse(file, file.len() as u64)
     }
 
-    /// `parse` with another zstd decoder, which must do what this module's `inflate` does.
-    pub fn parse_with(
-        tail: &[u8],
-        file_len: u64,
-        inflate: impl Fn(&[u8], usize) -> Result<Vec<u8>, DecodeError>,
-    ) -> Result<Self, DecodeError> {
+    /// Parses the footer from the file's last bytes, `tail`, of a file `file_len` long.
+    /// `NeedFrom` says where the footer starts when `tail` holds less of it. The strips are not
+    /// decoded until asked for, so no zstd decoder runs here.
+    pub fn parse(tail: &[u8], file_len: u64) -> Result<Self, DecodeError> {
         let tail_start = file_len
             .checked_sub(tail.len() as u64)
             .ok_or_else(|| corrupt("more bytes than the file holds"))?;
@@ -916,204 +1130,619 @@ impl Footer {
         let (header_end, index_end) = (header_end as usize, index_end as usize);
         let header: Header = serde_json::from_slice(&payload[record::FOOTER_HEAD_LEN..header_end])?;
         check_header(&header)?;
-        // The levels follow from the length and the finest shift. Holding the header to them
-        // bounds every level's size, and their count, before anything is allocated for them.
-        let plan = overview::plan(header.length, header.overview_shift);
-        if header.overview != plan.head
-            || !header
-                .overview_blocks
-                .iter()
-                .map(|l| l.shift)
-                .eq(plan.blocks.iter().copied())
-        {
-            return Err(corrupt(
-                "the overview levels are not the ones the format sets for this length",
-            ));
-        }
-        for level in &header.overview_blocks {
-            if u64::from(level.blocks) != overview::block_count(header.length, level.shift) {
-                return Err(corrupt(format!(
-                    "overview level 2^{} has {} blocks, not the {} its buckets need",
-                    level.shift,
-                    level.blocks,
-                    overview::block_count(header.length, level.shift)
-                )));
-            }
-        }
-        let channels = header.channels.len();
-        let row_size = BlockRow::size(channels);
-        let overview_count: u64 = header
-            .overview_blocks
-            .iter()
-            .map(|l| u64::from(l.blocks))
-            .sum();
-        // In u64: a corrupt header's counts must not wrap a 32-bit usize into a plausible length.
-        if u64::from(index_len)
-            != u64::from(header.blocks) * row_size as u64
-                + overview_count * OverviewRow::SIZE as u64
-        {
-            return Err(corrupt("the index does not hold one row a block"));
-        }
-        let data_len = header.blocks as usize * row_size;
-        let mut words = Words::with_capacity(channels, header.blocks as usize);
-        let rows: Vec<BlockRow> = payload[header_end..header_end + data_len]
-            .chunks_exact(row_size)
-            .map(|row| BlockRow::parse(row, &mut words))
-            .collect();
-        let inside = |offset: u64, len: u32| {
-            offset >= PREAMBLE_LEN as u64
-                && offset
-                    .checked_add(u64::from(len))
-                    .is_some_and(|e| e <= trailer.footer_offset)
-        };
-        for (i, row) in rows.iter().enumerate() {
-            let after_last =
-                i == 0 || (row.start > rows[i - 1].start && row.offset > rows[i - 1].offset);
-            if !after_last || row.start >= header.length || !inside(row.offset, row.length) {
-                return Err(corrupt(format!("block {i}'s row is out of place")));
-            }
-        }
-        if rows.first().is_none_or(|r| r.start != 0) {
-            return Err(corrupt("the first block does not start at tick 0"));
-        }
-        let mut overview_rows = Vec::with_capacity(header.overview_blocks.len());
-        let mut pos = header_end + data_len;
-        for level in &header.overview_blocks {
-            let mut level_rows = Vec::with_capacity(level.blocks as usize);
-            for _ in 0..level.blocks {
-                let row = OverviewRow::parse(&payload[pos..pos + OverviewRow::SIZE]);
-                pos += OverviewRow::SIZE;
-                if !inside(row.offset, row.length) {
-                    return Err(corrupt("an overview block's row is out of place"));
-                }
-                level_rows.push(row);
-            }
-            overview_rows.push(level_rows);
-        }
         let declaration = header.declaration();
         let columns = overview::columns(&declaration.channels, &declaration.derived);
         let products = overview::products(&declaration.channels, &declaration.derived);
-        let overview_len: u64 = header
-            .overview
-            .iter()
-            .map(|&shift| overview::decoded_len(overview::buckets(header.length, shift), &columns))
-            .sum();
-        let overview_len = usize::try_from(overview_len).map_err(|_| {
-            corrupt(format!(
-                "the overview decodes to {overview_len} bytes, more than this reader can hold"
-            ))
-        })?;
-        let overview_frame = payload[index_end..].to_vec();
-        let raw = inflate(&overview_frame, overview_len)?;
-        let overview = overview::parse(&raw, &header.overview, header.length, &columns)
-            .ok_or_else(|| corrupt("the overview does not match its levels"))?;
-        let end_of = |i: usize| rows.get(i + 1).map_or(header.length, |r| r.start);
-        let unmapped = || corrupt("a channel has no mapping to the axis");
-        let maps = header.mappings().ok_or_else(unmapped)?;
-        let channel_starts = (0..channels)
-            .map(|c| header.start(c).ok_or_else(unmapped))
-            .collect::<Result<Vec<i64>, _>>()?;
-        let gap_ends: Vec<Vec<i64>> = header
-            .channels
-            .iter()
-            .zip(&maps)
-            .map(|(c, map)| match &c.data {
-                ChannelKind::Digital { gaps, .. } => gap_ends(gaps, map),
-                ChannelKind::Analog { .. } => Vec::new(),
-            })
-            .collect();
-        let mut first_sample = vec![Vec::new(); channels];
-        for (c, kind) in header.channels.iter().enumerate() {
-            let name = &kind.name;
-            let mut total = 0u64;
-            let mut starts = Vec::with_capacity(rows.len());
-            // A digital channel's level at each block's start follows from `initial`, the edge
-            // counts before it and the gap ends. Without decoding, a block holding a gap end says
-            // nothing of the next one's level; `decode_block` checks that one.
-            let mut level = match &kind.data {
-                ChannelKind::Digital { initial, .. } => Some(*initial),
-                ChannelKind::Analog { .. } => None,
-            };
-            for (i, row) in rows.iter().enumerate() {
-                let word = words.of(i)[c];
-                if let (Some(l), ChannelKind::Digital { gaps, .. }) = (&mut level, &kind.data) {
-                    let bit = word & LEVEL_BIT != 0;
-                    let known = i == 0
-                        || gaps_ending_in(gaps, &gap_ends[c], rows[i - 1].start, row.start)
-                            .is_empty();
-                    if known && bit != *l {
-                        return Err(corrupt(format!(
-                            "channel {name}: block {i} starts at the wrong level"
-                        )));
-                    }
-                    *l = bit ^ (word & 1 != 0);
-                }
-                starts.push(total);
-                total += u64::from(item_count(word, level.is_some()));
+        let footer_offset = trailer.footer_offset;
+
+        let mut cursor = &payload[header_end..index_end];
+        let (Some(bundle_at), Some(bundle_len)) = (
+            cursor
+                .get(..8)
+                .map(|b| u64::from_le_bytes(b.try_into().unwrap())),
+            cursor
+                .get(8..12)
+                .map(|b| u32::from_le_bytes(b.try_into().unwrap())),
+        ) else {
+            return Err(corrupt(
+                "the top index is too short for the annotation bundle's place",
+            ));
+        };
+        cursor = &cursor[12..];
+        let bundle = match (bundle_at, bundle_len) {
+            (0, 0) => None,
+            (at, len)
+                if at >= PREAMBLE_LEN as u64
+                    && (len as usize) > record::FRAMING + 4
+                    && at.checked_add(u64::from(len)) == Some(footer_offset) =>
+            {
+                Some((at, len))
             }
-            let promised = match kind.data {
-                ChannelKind::Digital { edges, .. } => edges,
-                ChannelKind::Analog { count, .. } => count,
-            };
-            if total != promised {
+            _ => {
+                return Err(corrupt(
+                    "the annotation bundle does not lie just before the footer",
+                ));
+            }
+        };
+        let channels_n = header.channels.len();
+        let mut channels = Vec::with_capacity(columns.len());
+        let mut strip_at = index_end;
+        for (o, &column) in columns.iter().enumerate() {
+            let (Some(frame_len), Some(decoded)) = (
+                cursor
+                    .get(..4)
+                    .map(|b| u32::from_le_bytes(b.try_into().unwrap())),
+                cursor
+                    .get(4..8)
+                    .map(|b| u32::from_le_bytes(b.try_into().unwrap())),
+            ) else {
                 return Err(corrupt(format!(
-                    "channel {name}: the index counts {total} items, the header {promised}"
+                    "the top index is cut short at channel {o}"
+                )));
+            };
+            cursor = &cursor[8..];
+            let finest = header.shift(o).expect("a checked header's channel");
+            let ladder = overview::ladder(header.length, finest);
+            let strip_shift = *ladder.last().expect("a ladder has a strip");
+            let want = column.decoded_len(overview::buckets(header.length, strip_shift));
+            if u64::from(decoded) != want {
+                return Err(corrupt(format!(
+                    "channel {o}'s strip decodes to {decoded} bytes, where its {} buckets take {want}",
+                    overview::buckets(header.length, strip_shift)
                 )));
             }
-            if let ChannelKind::Analog {
+            let strip_end = strip_at
+                .checked_add(frame_len as usize)
+                .filter(|&e| e <= payload.len())
+                .ok_or_else(|| corrupt(format!("channel {o}'s strip runs past the footer")))?;
+            let blocks = match header.channels.get(o) {
+                Some(c) => Some(top_table(
+                    &mut cursor,
+                    o,
+                    Table::Blocks,
+                    c.blocks,
+                    footer_offset,
+                )?),
+                None => None,
+            };
+            let levels_stated = header.levels(o).unwrap_or_default();
+            let mut levels = Vec::with_capacity(levels_stated.len());
+            for l in levels_stated {
+                let t = top_table(&mut cursor, o, Table::Level(l.shift), l.rows, footer_offset)?;
+                levels.push((*l, t));
+            }
+            let list = match header.channels.get(o).map(|c| &c.data) {
+                Some(ChannelKind::Digital {
+                    gap_count: Some(n), ..
+                }) => Some(top_table(&mut cursor, o, Table::Gaps, *n, footer_offset)?),
+                Some(ChannelKind::Analog {
+                    break_count: Some(n),
+                    ..
+                }) => Some(top_table(&mut cursor, o, Table::Breaks, *n, footer_offset)?),
+                _ => None,
+            };
+            channels.push(ChannelIndex {
+                finest,
+                column,
+                strip_shift,
+                strip: strip_at..strip_end,
+                strip_decoded: decoded,
+                blocks,
+                levels,
+                list,
+            });
+            strip_at = strip_end;
+        }
+        if !cursor.is_empty() {
+            return Err(corrupt("the top index holds bytes past its last table"));
+        }
+        if strip_at != payload.len() {
+            return Err(corrupt("the strips don't end where the footer does"));
+        }
+        let strips = payload[index_end..].to_vec();
+        let base = index_end;
+        for c in &mut channels {
+            c.strip = c.strip.start - base..c.strip.end - base;
+        }
+        let unmapped = || corrupt("a channel has no mapping to the axis");
+        let maps = header.mappings().ok_or_else(unmapped)?;
+        let channel_starts = (0..channels_n)
+            .map(|c| header.start(c).ok_or_else(unmapped))
+            .collect::<Result<Vec<i64>, _>>()?;
+        let mut lists = Vec::with_capacity(channels_n);
+        let mut ends = Vec::with_capacity(channels_n);
+        for (c, ch) in header.channels.iter().enumerate() {
+            match &ch.data {
+                ChannelKind::Digital {
+                    gaps, gap_count, ..
+                } => {
+                    lists.push(gap_count.is_none().then(|| List::Gaps(gaps.clone())));
+                    ends.push(gap_ends(gaps, &maps[c]));
+                }
+                ChannelKind::Analog {
+                    breaks,
+                    break_count,
+                    ..
+                } => {
+                    lists.push(break_count.is_none().then(|| List::Breaks(breaks.clone())));
+                    ends.push(Vec::new());
+                }
+            }
+        }
+        Ok(Self {
+            trailer,
+            header,
+            bundle,
+            channels,
+            products,
+            strips,
+            maps,
+            channel_starts,
+            lists,
+            gap_ends: ends,
+        })
+    }
+
+    /// The channels and derived channels the footer indexes.
+    pub fn overview_channels(&self) -> usize {
+        self.channels.len()
+    }
+
+    /// Overview channel `o`'s strip: its coarsest level, every bucket.
+    pub fn strip(&self, o: usize) -> Result<Level, DecodeError> {
+        self.strip_with(o, inflate)
+    }
+
+    /// `strip` with another zstd decoder, which must do what this module's `inflate` does.
+    pub fn strip_with(
+        &self,
+        o: usize,
+        inflate: impl Fn(&[u8], usize) -> Result<Vec<u8>, DecodeError>,
+    ) -> Result<Level, DecodeError> {
+        let c = self
+            .channels
+            .get(o)
+            .ok_or_else(|| corrupt(format!("no channel {o}")))?;
+        let raw = inflate(&self.strips[c.strip.clone()], c.strip_decoded as usize)?;
+        let n = overview::buckets(self.header.length, c.strip_shift);
+        Level::parse(&raw, c.strip_shift, n, c.column)
+            .ok_or_else(|| corrupt(format!("channel {o}'s strip does not parse")))
+    }
+
+    /// Channel `c`'s gaps, inline or once read; None for an analog channel, or one whose gaps
+    /// are in pages not yet read (`load_list`).
+    pub fn gaps(&self, c: usize) -> Option<&[Gap]> {
+        match self.lists.get(c)? {
+            Some(List::Gaps(g)) => Some(g),
+            _ => None,
+        }
+    }
+
+    /// Channel `c`'s breaks, as `gaps`.
+    pub fn breaks(&self, c: usize) -> Option<&[Break]> {
+        match self.lists.get(c)? {
+            Some(List::Breaks(b)) => Some(b),
+            _ => None,
+        }
+    }
+
+    /// Whether channel `c`'s list is known: inline, or read from its pages.
+    pub fn list_known(&self, c: usize) -> bool {
+        self.lists.get(c).is_some_and(Option::is_some)
+    }
+
+    /// Reads every channel's list that is in pages, through `fetch`.
+    pub fn load_lists<E: From<DecodeError>>(
+        &mut self,
+        mut fetch: impl FnMut(u64, u32) -> Result<Vec<u8>, E>,
+    ) -> Result<(), E> {
+        for c in 0..self.header.channels.len() {
+            self.load_list(c, &mut fetch)?;
+        }
+        Ok(())
+    }
+
+    /// Reads channel `c`'s gaps or breaks from its list pages, through `fetch`, and checks them
+    /// against its header. Nothing to read for a list in the header.
+    pub fn load_list<E: From<DecodeError>>(
+        &mut self,
+        c: usize,
+        fetch: &mut impl FnMut(u64, u32) -> Result<Vec<u8>, E>,
+    ) -> Result<(), E> {
+        if self.list_known(c) {
+            return Ok(());
+        }
+        let Some(table) = self.channels.get(c).and_then(|ch| ch.list.clone()) else {
+            return Err(corrupt(format!("no channel {c}")).into());
+        };
+        let pages = table.read_all(fetch)?;
+        let h = &self.header;
+        let ch = &h.channels[c];
+        let name = &ch.name;
+        let map = self.maps[c];
+        let list = match &ch.data {
+            ChannelKind::Digital { initial, end, .. } => {
+                let gaps: Vec<Gap> = pages
+                    .into_iter()
+                    .flat_map(|p| match p {
+                        Page::Gaps(g) => g,
+                        _ => unreachable!("a gap list's pages hold gaps"),
+                    })
+                    .collect();
+                check_gaps(
+                    name,
+                    &gaps,
+                    self.channel_starts[c],
+                    *end,
+                    *initial,
+                    &map,
+                    h.length,
+                )?;
+                self.gap_ends[c] = gap_ends(&gaps, &map);
+                List::Gaps(gaps)
+            }
+            ChannelKind::Analog {
                 first,
                 period,
-                breaks,
+                count,
+                lost_after,
                 ..
-            } = &kind.data
-            {
-                // A view fetches blocks by tick, so a sample in a block that does not cover its
-                // tick would never be drawn.
-                let map = maps[c];
-                for (i, row) in rows.iter().enumerate() {
-                    let (from, to) = (starts[i], starts.get(i + 1).copied().unwrap_or(total));
+            } => {
+                let breaks: Vec<Break> = pages
+                    .into_iter()
+                    .flat_map(|p| match p {
+                        Page::Breaks(b) => b,
+                        _ => unreachable!("a break list's pages hold breaks"),
+                    })
+                    .collect();
+                let run = check_runs(
+                    name,
+                    *first,
+                    *period,
+                    *count,
+                    &breaks,
+                    *lost_after,
+                    &map,
+                    h.length,
+                )?;
+                check_shaping(ch, run)?;
+                // A derived channel's operands share their breaks.
+                for d in &h.derived {
+                    let partner = if d.product[0] == *name {
+                        &d.product[1]
+                    } else if d.product[1] == *name {
+                        &d.product[0]
+                    } else {
+                        continue;
+                    };
+                    let p = h.channels.iter().position(|x| x.name == *partner);
+                    if let Some(theirs) = p.and_then(|p| self.breaks(p))
+                        && theirs != breaks.as_slice()
+                    {
+                        return Err(corrupt(format!(
+                            "derived channel {}: {} and {} differ in breaks",
+                            d.name, d.product[0], d.product[1]
+                        ))
+                        .into());
+                    }
+                }
+                List::Breaks(breaks)
+            }
+        };
+        self.lists[c] = Some(list);
+        Ok(())
+    }
+
+    /// Channel `c`'s blocks, every page of its index read through `fetch`, each checked against
+    /// the header: they tile `0..length` in order and hold the items it counts.
+    pub fn block_refs<E: From<DecodeError>>(
+        &self,
+        c: usize,
+        mut fetch: impl FnMut(u64, u32) -> Result<Vec<u8>, E>,
+    ) -> Result<Vec<BlockRef>, E> {
+        let ch = self
+            .header
+            .channels
+            .get(c)
+            .ok_or_else(|| corrupt(format!("no channel {c}")))?;
+        let table = self.channels[c]
+            .blocks
+            .as_ref()
+            .expect("a channel has blocks");
+        let digital = matches!(ch.data, ChannelKind::Digital { .. });
+        let name = &ch.name;
+        let mut rows: Vec<(u64, BlockRow)> = Vec::new();
+        let mut items = 0u64;
+        for page in table.read_all(&mut fetch)? {
+            let Page::Blocks { number, rows: page } = page else {
+                unreachable!("a block table's pages hold blocks")
+            };
+            if number != items || rows.last().is_some_and(|(_, r)| r.start >= page[0].start) {
+                return Err(corrupt(format!(
+                    "channel {name}: its index pages don't follow on from each other"
+                ))
+                .into());
+            }
+            for row in page {
+                rows.push((items, row));
+                items += u64::from(row.items(digital));
+            }
+        }
+        let promised = match ch.data {
+            ChannelKind::Digital { edges, .. } => edges,
+            ChannelKind::Analog { count, .. } => count,
+        };
+        if rows.len() as u64 != ch.blocks || items != promised {
+            return Err(corrupt(format!(
+                "channel {name}: the index holds {} blocks of {items} items, the header {} of {promised}",
+                rows.len(),
+                ch.blocks
+            ))
+            .into());
+        }
+        let length = self.header.length;
+        if rows.last().is_some_and(|(_, r)| r.start >= length) {
+            return Err(corrupt(format!("channel {name}: a block starts past the length")).into());
+        }
+        let mut out = Vec::with_capacity(rows.len());
+        for (i, &(first_index, row)) in rows.iter().enumerate() {
+            let next = rows.get(i + 1).map(|(_, r)| *r);
+            out.push(BlockRef {
+                start: row.start,
+                end: next.map_or(length, |r| r.start),
+                first_index,
+                row,
+                next_word: next.map(|r| r.word),
+            });
+        }
+        self.check_blocks(c, &out)?;
+        Ok(out)
+    }
+
+    /// What a channel's blocks say without being decoded, against its gaps or runs where they
+    /// are known: a digital channel's level at each block's start, and an analog channel's
+    /// samples inside each block's ticks.
+    fn check_blocks(&self, c: usize, blocks: &[BlockRef]) -> Result<(), DecodeError> {
+        let ch = &self.header.channels[c];
+        let name = &ch.name;
+        match &ch.data {
+            ChannelKind::Digital { initial, .. } => {
+                if blocks[0].row.word & LEVEL_BIT != 0 && !initial
+                    || blocks[0].row.word & LEVEL_BIT == 0 && *initial
+                {
+                    return Err(corrupt(format!(
+                        "channel {name}: block 0 starts at the wrong level"
+                    )));
+                }
+                let Some(gaps) = self.gaps(c) else {
+                    return Ok(());
+                };
+                for (i, w) in blocks.windows(2).enumerate() {
+                    let ending = gaps_ending_in(gaps, &self.gap_ends[c], w[0].start, w[0].end);
+                    let level = w[0].row.word & LEVEL_BIT != 0;
+                    let flips = w[0].row.word & 1 != 0;
+                    if ending.is_empty() && (w[1].row.word & LEVEL_BIT != 0) != (level ^ flips) {
+                        return Err(corrupt(format!(
+                            "channel {name}: block {} starts at the wrong level",
+                            i + 1
+                        )));
+                    }
+                }
+            }
+            ChannelKind::Analog { first, period, .. } => {
+                let Some(breaks) = self.breaks(c) else {
+                    return Ok(());
+                };
+                let map = self.maps[c];
+                for (i, b) in blocks.iter().enumerate() {
+                    let n = u64::from(b.row.word);
+                    if n == 0 {
+                        continue;
+                    }
                     let tick = |index| map.axis(run_sample_tick(*first, *period, breaks, index));
-                    if to > from
-                        && (tick(from).is_none_or(|t| t < row.start)
-                            || tick(to - 1).is_none_or(|t| t >= end_of(i)))
+                    if tick(b.first_index).is_none_or(|t| t < b.start)
+                        || tick(b.first_index + n - 1).is_none_or(|t| t >= b.end)
                     {
                         return Err(corrupt(format!(
                             "channel {name}: block {i}'s samples lie outside its ticks"
                         )));
                     }
                 }
-                first_sample[c] = starts;
             }
         }
-        Ok(Self {
-            trailer,
-            header,
-            rows,
-            words,
-            overview,
-            overview_rows,
-            overview_frame,
-            products,
-            first_sample,
-            columns,
-            maps,
-            channel_starts,
-            gap_ends,
+        Ok(())
+    }
+
+    /// Overview channel `o`'s level `li` (of `channels[o].levels`), every page of its index read
+    /// through `fetch`: each row with the first block it stands for.
+    pub fn level_refs<E: From<DecodeError>>(
+        &self,
+        o: usize,
+        li: usize,
+        mut fetch: impl FnMut(u64, u32) -> Result<Vec<u8>, E>,
+    ) -> Result<Vec<LevelRef>, E> {
+        let ch = self
+            .channels
+            .get(o)
+            .ok_or_else(|| corrupt(format!("no channel {o}")))?;
+        let (level, table) = ch
+            .levels
+            .get(li)
+            .ok_or_else(|| corrupt(format!("channel {o} has no overview level {li} in blocks")))?;
+        let bad = || {
+            corrupt(format!(
+                "channel {o}: overview level 2^{}'s rows don't stand for its {} blocks",
+                level.shift, level.blocks
+            ))
+        };
+        let mut out = Vec::new();
+        let mut k = 0u64;
+        for page in table.read_all(&mut fetch)? {
+            let Page::Level { k: first, rows } = page else {
+                unreachable!("a level's pages hold its rows")
+            };
+            if first != k {
+                return Err(bad().into());
+            }
+            for row in rows {
+                let (_, n) = overview::block_buckets(self.header.length, level.shift, k);
+                let want = ch.column.decoded_len(n);
+                if n == 0 || u64::from(row.decoded_length) != want {
+                    return Err(bad().into());
+                }
+                out.push(LevelRef { k, row });
+                k = k.checked_add(u64::from(row.n)).ok_or_else(bad)?;
+            }
+        }
+        if k != level.blocks
+            || out.len() as u64 != level.rows
+            || out.last().is_none_or(|r| r.row.n != 1)
+        {
+            return Err(bad().into());
+        }
+        Ok(out)
+    }
+
+    /// Decodes overview channel `o`'s level `li` row `r` from exactly its frame's bytes.
+    pub fn decode_overview(
+        &self,
+        o: usize,
+        li: usize,
+        r: &LevelRef,
+        frame: &[u8],
+    ) -> Result<OverviewBlock, DecodeError> {
+        self.decode_overview_with(o, li, r, frame, inflate)
+    }
+
+    /// `decode_overview` with another zstd decoder, which must do what this module's `inflate`
+    /// does.
+    pub fn decode_overview_with(
+        &self,
+        o: usize,
+        li: usize,
+        r: &LevelRef,
+        frame: &[u8],
+        inflate: impl Fn(&[u8], usize) -> Result<Vec<u8>, DecodeError>,
+    ) -> Result<OverviewBlock, DecodeError> {
+        let ch = self
+            .channels
+            .get(o)
+            .ok_or_else(|| corrupt(format!("no channel {o}")))?;
+        let (level, _) = ch
+            .levels
+            .get(li)
+            .ok_or_else(|| corrupt(format!("channel {o} has no overview level {li} in blocks")))?;
+        decode_overview_frame(
+            ch.column,
+            level.shift,
+            self.header.length,
+            r,
+            frame,
+            inflate,
+        )
+    }
+
+    /// Where overview channel `o`'s level `li`'s blocks holding any tick in `[start, end)` are:
+    /// the range of `level_refs`'s rows.
+    pub fn rows_covering(refs: &[LevelRef], shift: u8, start: i64, end: i64) -> Range<usize> {
+        let block = |t: i64| (t.max(0) as u64 >> shift) / BLOCK_BUCKETS;
+        let (a, b) = (block(start), block(end.max(start.saturating_add(1)) - 1));
+        let first = refs.partition_point(|r| r.k + u64::from(r.row.n) <= a);
+        let last = refs.partition_point(|r| r.k <= b);
+        first..last.max(first)
+    }
+
+    /// The blocks of `refs` holding any tick in `[start, end)`.
+    pub fn blocks_covering(refs: &[BlockRef], start: i64, end: i64) -> Range<usize> {
+        let first = refs.partition_point(|r| r.end <= start);
+        let last = refs.partition_point(|r| r.start < end).max(first);
+        first..last
+    }
+
+    /// Decodes channel `c`'s block `b` from exactly its frame's bytes.
+    pub fn decode_block(&self, c: usize, b: &BlockRef, frame: &[u8]) -> Result<Block, DecodeError> {
+        self.decode_block_with(c, b, frame, inflate)
+    }
+
+    /// `decode_block` with another zstd decoder. `inflate` must do what this module's `inflate`
+    /// does: decode exactly `len` bytes and refuse a frame whose checksum is missing or wrong.
+    pub fn decode_block_with(
+        &self,
+        c: usize,
+        b: &BlockRef,
+        frame: &[u8],
+        inflate: impl Fn(&[u8], usize) -> Result<Vec<u8>, DecodeError>,
+    ) -> Result<Block, DecodeError> {
+        let ch = self
+            .header
+            .channels
+            .get(c)
+            .ok_or_else(|| corrupt(format!("no channel {c}")))?;
+        if frame.len() != b.row.length as usize {
+            return Err(corrupt(format!(
+                "channel {}: a block is {} bytes, the index says {}",
+                ch.name,
+                frame.len(),
+                b.row.length
+            )));
+        }
+        let raw = inflate(frame, b.row.decoded_length as usize)?;
+        let section = match &ch.data {
+            ChannelKind::Digital { end, .. } => Section::Digital {
+                start: self.channel_starts[c],
+                end: *end,
+                map: self.maps[c],
+            },
+            ChannelKind::Analog { coding, .. } => Section::Analog {
+                coding: *coding,
+                first_index: b.first_index,
+            },
+        };
+        let bad = |what: String| {
+            corrupt(format!(
+                "channel {}, the block at tick {}: {what}",
+                ch.name, b.start
+            ))
+        };
+        let data = decode_section(&raw, &section, b.row.word, b.start, b.end).map_err(bad)?;
+        if let (BlockChannel::Digital { initial, .. }, Some(gaps)) = (&data, self.gaps(c)) {
+            let edges = data.source_ticks().unwrap_or_default();
+            if let Some(t) = edge_in_gap(edges, gaps) {
+                return Err(bad(format!("an edge at source tick {t} lies inside a gap")));
+            }
+            if let Some(next) = b.next_word {
+                let ending = gaps_ending_in(gaps, &self.gap_ends[c], b.start, b.end);
+                if level_after(*initial, edges, ending) != (next & LEVEL_BIT != 0) {
+                    return Err(bad("the next block starts at the wrong level".into()));
+                }
+            }
+        }
+        Ok(Block {
+            channel: c,
+            start: b.start,
+            end: b.end,
+            data,
         })
     }
 
-    /// Derived channel `d`'s samples in `block`, one this footer decoded.
-    pub fn derived(&self, block: &Block, d: usize) -> Result<Values, DecodeError> {
-        let operands = *self
-            .products
-            .get(d)
-            .ok_or_else(|| corrupt(format!("no derived channel {d}")))?;
-        derived_values(&block.channels, operands).map_err(|what| {
-            corrupt(format!(
-                "derived channel {}: {what}",
-                self.header.derived[d].name
-            ))
-        })
+    /// The annotation bundle's files, its record read through `fetch`; None without one.
+    pub fn read_bundle<E: From<DecodeError>>(
+        &self,
+        mut fetch: impl FnMut(u64, u32) -> Result<Vec<u8>, E>,
+    ) -> Result<Option<BTreeMap<String, String>>, E> {
+        let Some((at, len)) = self.bundle else {
+            return Ok(None);
+        };
+        let bytes = fetch(at, len)?;
+        let payload = match record::next(&bytes, bytes.len()) {
+            record::Next::Record { kind, payload, len }
+                if kind == Kind::Bundle as u8 && len == bytes.len() =>
+            {
+                payload
+            }
+            _ => return Err(corrupt("the annotation bundle record is not whole").into()),
+        };
+        Ok(Some(parse_bundle(payload, inflate)?))
     }
 
     /// Channel `c`'s mapping from its source's ticks to the axis.
@@ -1121,171 +1750,165 @@ impl Footer {
         self.maps.get(c).copied()
     }
 
-    /// The axis tick of sample `index` of analog channel `c`.
+    /// Channel `c`'s start, in its source's ticks.
+    pub fn channel_start(&self, c: usize) -> Option<i64> {
+        self.channel_starts.get(c).copied()
+    }
+
+    /// The axis tick of sample `index` of analog channel `c`, once its breaks are known.
     pub fn sample_axis_tick(&self, c: usize, index: u64) -> Option<i64> {
         self.mapping(c)?.axis(self.sample_tick(c, index)?)
     }
 
-    /// The source tick of sample `index` of analog channel `c`: its place.
+    /// The source tick of sample `index` of analog channel `c`, its place, once its breaks are
+    /// known.
     pub fn sample_tick(&self, c: usize, index: u64) -> Option<i64> {
         match &self.header.channels.get(c)?.data {
-            ChannelKind::Analog {
-                first,
-                period,
-                breaks,
-                ..
-            } => Some(run_sample_tick(*first, *period, breaks, index)),
+            ChannelKind::Analog { first, period, .. } => {
+                Some(run_sample_tick(*first, *period, self.breaks(c)?, index))
+            }
             ChannelKind::Digital { .. } => None,
         }
     }
+}
 
-    /// Where overview block `k` of `header.overview_blocks[level]` sits: offset and length.
-    pub fn overview_block_location(&self, level: usize, k: usize) -> (u64, u32) {
-        let row = self.overview_rows[level][k];
-        (row.offset, row.length)
-    }
+/// A finished file's whole index, read once: its footer with every list read, and every
+/// channel's blocks and every level's rows. What a reader that wants every block starts from.
+#[derive(Debug)]
+pub struct Index {
+    pub footer: Footer,
+    /// Each channel's blocks.
+    pub blocks: Vec<Vec<BlockRef>>,
+    /// Each overview channel's levels in overview blocks, finest first, each its rows.
+    pub levels: Vec<Vec<Vec<LevelRef>>>,
+}
 
-    /// The overview blocks of `header.overview_blocks[level]` holding any tick in `[start, end)`.
-    pub fn overview_blocks_covering(&self, level: usize, start: i64, end: i64) -> Range<usize> {
-        let shift = self.header.overview_blocks[level].shift;
-        let last = self.header.length.max(1) - 1;
-        // Every tick in 0..length falls in a block, so clamping keeps the range inside the level.
-        let block =
-            |tick: i64| ((tick.clamp(0, last) as u64 >> shift) / overview::BLOCK_BUCKETS) as usize;
-        let first = block(start);
-        first..block(end.max(start.saturating_add(1)) - 1) + 1
-    }
-
-    /// Decodes overview block `k` of `header.overview_blocks[level]` from exactly its bytes.
-    pub fn decode_overview_block(
-        &self,
-        level: usize,
-        k: usize,
-        frame: &[u8],
-    ) -> Result<OverviewBlock, DecodeError> {
-        self.decode_overview_block_with(level, k, frame, inflate)
-    }
-
-    /// `decode_overview_block` with another zstd decoder, which must do what this module's
-    /// `inflate` does.
-    pub fn decode_overview_block_with(
-        &self,
-        level: usize,
-        k: usize,
-        frame: &[u8],
-        inflate: impl Fn(&[u8], usize) -> Result<Vec<u8>, DecodeError>,
-    ) -> Result<OverviewBlock, DecodeError> {
-        let row = *self
-            .overview_rows
-            .get(level)
-            .and_then(|rows| rows.get(k))
-            .ok_or_else(|| corrupt(format!("no overview block {k} of level {level}")))?;
-        if frame.len() != row.length as usize {
-            return Err(corrupt(format!(
-                "overview block {k} is {} bytes, the index says {}",
-                frame.len(),
-                row.length
-            )));
-        }
-        let shift = self.header.overview_blocks[level].shift;
-        let (first, n) = overview::block_buckets(self.header.length, shift, k as u64);
-        if u64::from(row.decoded_length) != overview::decoded_len(n, &self.columns) {
-            return Err(corrupt(format!(
-                "overview block {k}'s decoded length is wrong"
-            )));
-        }
-        let raw = inflate(frame, row.decoded_length as usize)?;
-        let level = overview::parse_block(&raw, shift, n, &self.columns)
-            .ok_or_else(|| corrupt(format!("overview block {k} does not parse")))?;
-        Ok(OverviewBlock { first, level })
-    }
-
-    /// Where block `i` ends: the next block's start, or the length.
-    pub fn block_end(&self, i: usize) -> i64 {
-        self.rows.get(i + 1).map_or(self.header.length, |r| r.start)
-    }
-
-    /// The blocks holding any tick in `[start, end)`.
-    pub fn blocks_covering(&self, start: i64, end: i64) -> Range<usize> {
-        let first = self.rows.partition_point(|r| r.start <= start).max(1) - 1;
-        let last = self.rows.partition_point(|r| r.start < end);
-        first..last.max(first + 1).min(self.rows.len())
-    }
-
-    /// Where block `i`'s zstd frame sits in the file: offset and length.
-    pub fn block_location(&self, i: usize) -> (u64, u32) {
-        (self.rows[i].offset, self.rows[i].length)
-    }
-
-    /// Decodes block `i` from exactly its frame's bytes.
-    pub fn decode_block(&self, i: usize, frame: &[u8]) -> Result<Block, DecodeError> {
-        self.decode_block_with(i, frame, inflate)
-    }
-
-    /// `decode_block` with another zstd decoder. `inflate` must do what this module's `inflate`
-    /// does: decode exactly `len` bytes and refuse a frame whose checksum is missing or wrong.
-    pub fn decode_block_with(
-        &self,
-        i: usize,
-        frame: &[u8],
-        inflate: impl Fn(&[u8], usize) -> Result<Vec<u8>, DecodeError>,
-    ) -> Result<Block, DecodeError> {
-        let row = self
-            .rows
-            .get(i)
-            .ok_or_else(|| corrupt(format!("no block {i}")))?;
-        if frame.len() != row.length as usize {
-            return Err(corrupt(format!(
-                "block {i} is {} bytes, the index says {}",
-                frame.len(),
-                row.length
-            )));
-        }
-        let raw = inflate(frame, row.decoded_length as usize)?;
-        let (start, end) = (row.start, self.block_end(i));
-        let sections: Vec<Section> = self
-            .header
-            .channels
-            .iter()
-            .enumerate()
-            .map(|(c, kind)| match &kind.data {
-                ChannelKind::Digital { end, .. } => Section::Digital {
-                    start: self.channel_starts[c],
-                    end: *end,
-                    map: self.maps[c],
-                },
-                ChannelKind::Analog { coding, .. } => Section::Analog {
-                    coding: *coding,
-                    first_index: self.first_sample[c][i],
-                },
+impl Index {
+    /// `footer`'s file's index, its pages read through `fetch`.
+    pub fn read<E: From<DecodeError>>(
+        mut footer: Footer,
+        mut fetch: impl FnMut(u64, u32) -> Result<Vec<u8>, E>,
+    ) -> Result<Self, E> {
+        footer.load_lists(&mut fetch)?;
+        let blocks = (0..footer.header.channels.len())
+            .map(|c| footer.block_refs(c, &mut fetch))
+            .collect::<Result<Vec<_>, E>>()?;
+        let levels = (0..footer.channels.len())
+            .map(|o| {
+                (0..footer.channels[o].levels.len())
+                    .map(|li| footer.level_refs(o, li, &mut fetch))
+                    .collect::<Result<Vec<_>, E>>()
             })
-            .collect();
-        let channels = decode_sections(&raw, &sections, self.words.of(i), start, end)
-            .map_err(|what| corrupt(format!("block {i}: {what}")))?;
-        for (c, (got, kind)) in channels.iter().zip(&self.header.channels).enumerate() {
-            if let (BlockChannel::Digital { initial, .. }, ChannelKind::Digital { gaps, .. }) =
-                (got, &kind.data)
-            {
-                let bad =
-                    |what: String| corrupt(format!("block {i}, channel {}: {what}", kind.name));
-                let edges = got.source_ticks().unwrap_or_default();
-                if let Some(t) = edge_in_gap(edges, gaps) {
-                    return Err(bad(format!("an edge at source tick {t} lies inside a gap")));
-                }
-                if i + 1 < self.rows.len() {
-                    let ending = gaps_ending_in(gaps, &self.gap_ends[c], start, end);
-                    let after = level_after(*initial, edges, ending);
-                    if after != (self.words.of(i + 1)[c] & LEVEL_BIT != 0) {
-                        return Err(bad("the next block starts at the wrong level".into()));
-                    }
-                }
+            .collect::<Result<Vec<_>, E>>()?;
+        Ok(Self {
+            footer,
+            blocks,
+            levels,
+        })
+    }
+
+    /// A whole file's index, the file in memory.
+    pub fn of_file(file: &[u8]) -> Result<Self, DecodeError> {
+        Self::read(Footer::parse_file(file)?, from_memory(file))
+    }
+
+    pub fn header(&self) -> &Header {
+        &self.footer.header
+    }
+
+    /// Channel `c`'s block `i`'s frame in `file`, decoded.
+    pub fn block_in(&self, file: &[u8], c: usize, i: usize) -> Result<Block, DecodeError> {
+        let b = self
+            .blocks
+            .get(c)
+            .and_then(|b| b.get(i))
+            .ok_or_else(|| corrupt(format!("no block {i} of channel {c}")))?;
+        let frame = from_memory(file)(b.row.offset, b.row.length)?;
+        self.footer.decode_block(c, b, &frame)
+    }
+
+    /// Every block of channel `c` in `file`, decoded, in order.
+    pub fn channel_blocks(&self, file: &[u8], c: usize) -> Result<Vec<Block>, DecodeError> {
+        (0..self.blocks.get(c).map_or(0, Vec::len))
+            .map(|i| self.block_in(file, c, i))
+            .collect()
+    }
+
+    /// Overview channel `o`'s level `li`'s row `r`'s frame in `file`, decoded.
+    pub fn overview_in(
+        &self,
+        file: &[u8],
+        o: usize,
+        li: usize,
+        r: usize,
+    ) -> Result<OverviewBlock, DecodeError> {
+        let row = self
+            .levels
+            .get(o)
+            .and_then(|l| l.get(li))
+            .and_then(|l| l.get(r))
+            .ok_or_else(|| corrupt(format!("no row {r} of channel {o}'s level {li}")))?;
+        let frame = from_memory(file)(row.row.offset, row.row.length)?;
+        self.footer.decode_overview(o, li, row, &frame)
+    }
+
+    /// Overview channel `o`'s level `li` from `file`, every bucket, its runs spelled out.
+    pub fn level_in(&self, file: &[u8], o: usize, li: usize) -> Result<Level, DecodeError> {
+        let (level, _) = &self.footer.channels[o].levels[li];
+        let mut out = Level::empty(level.shift, self.footer.channels[o].column);
+        for r in 0..self.levels[o][li].len() {
+            let b = self.overview_in(file, o, li, r)?;
+            for _ in 0..b.n {
+                out.append(&b.level);
             }
         }
-        Ok(Block {
-            start,
-            end,
-            channels,
-        })
+        Ok(out)
+    }
+}
+
+/// An overview block record's frame for row `r` of a level of `shift` in a recording of
+/// `length`, decoded: its buckets, the size its block holds.
+pub(crate) fn decode_overview_frame(
+    column: Column,
+    shift: u8,
+    length: i64,
+    r: &LevelRef,
+    frame: &[u8],
+    inflate: impl Fn(&[u8], usize) -> Result<Vec<u8>, DecodeError>,
+) -> Result<OverviewBlock, DecodeError> {
+    if frame.len() != r.row.length as usize {
+        return Err(corrupt(format!(
+            "overview block {} is {} bytes, the index says {}",
+            r.k,
+            frame.len(),
+            r.row.length
+        )));
+    }
+    let (first, n) = overview::block_buckets(length, shift, r.k);
+    if u64::from(r.row.decoded_length) != column.decoded_len(n) || n == 0 {
+        return Err(corrupt(format!(
+            "overview block {}'s decoded length is wrong",
+            r.k
+        )));
+    }
+    let raw = inflate(frame, r.row.decoded_length as usize)?;
+    let level = Level::parse(&raw, shift, n, column)
+        .ok_or_else(|| corrupt(format!("overview block {} does not parse", r.k)))?;
+    Ok(OverviewBlock {
+        first,
+        n: r.row.n,
+        level,
+    })
+}
+
+/// Reads `[offset, offset + len)` of a file held in memory, refusing a range past its end.
+pub fn from_memory(file: &[u8]) -> impl FnMut(u64, u32) -> Result<Vec<u8>, DecodeError> + '_ {
+    move |offset, len| {
+        usize::try_from(offset)
+            .ok()
+            .and_then(|o| file.get(o..o.checked_add(len as usize)?))
+            .map(<[u8]>::to_vec)
+            .ok_or_else(|| corrupt(format!("{len} bytes at {offset} lie past the file's end")))
     }
 }
 
@@ -1383,9 +2006,12 @@ fn analog_values(section: &[u8], count: usize, coding: AnalogCoding) -> Result<V
 mod tests {
     use super::*;
     use crate::header::{ChannelHeader, SourceFormat, SourceHeader};
-    use crate::model::Ratio;
 
     fn header(breaks: Vec<Break>) -> Header {
+        losses(breaks, 0, 0)
+    }
+
+    fn losses(breaks: Vec<Break>, lost_before: u64, lost_after: u64) -> Header {
         Header {
             timebase: Ratio::ONE,
             length: 100,
@@ -1395,25 +2021,27 @@ mod tests {
                 source: 0,
                 data: ChannelKind::Analog {
                     unit: String::new(),
-                    first: 0,
+                    first: 20,
                     period: Ratio::integer(10).unwrap(),
                     count: 5,
                     breaks,
+                    break_count: None,
                     coding: AnalogCoding::F32,
                     significant: None,
+                    lost_before,
+                    lost_after,
                 },
                 shaping: Default::default(),
+                overview_shift: None,
+                blocks: 1,
+                overview_blocks: vec![],
             }],
             derived: Vec::new(),
             sources: vec![SourceHeader::new(SourceFormat::Vcd, Ratio::ONE)],
             title: None,
             meta: Default::default(),
             content_id: format!("blake3:{}", "0".repeat(64)).parse().unwrap(),
-            blocks: 1,
             overview_shift: 12,
-            overview: vec![12],
-            overview_blocks: vec![],
-            annotations: None,
         }
     }
 
@@ -1437,13 +2065,17 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_break_must_lie_inside_the_samples_and_the_capture() {
-        let b = |index, tick| Break {
+    fn b(index: u64, tick: i64) -> Break {
+        Break {
             index,
             tick,
             lost: 0,
-        };
+        }
+    }
+
+    #[test]
+    fn a_break_must_lie_inside_the_samples_and_the_capture() {
+        // Samples at 20, 30, 40, 50, 60 without a break.
         assert!(check_header(&header(vec![])).is_ok());
         assert!(check_header(&header(vec![b(2, 50)])).is_ok());
         for (breaks, why) in [
@@ -1454,7 +2086,7 @@ mod tests {
             (vec![b(5, 60)], "an index at the count"),
             (vec![b(0, 60)], "index 0, which is the first run's"),
             (vec![b(3, 50), b(2, 70)], "indexes out of order"),
-            (vec![b(2, 5)], "before the sample ahead of it, at 10"),
+            (vec![b(2, 25)], "before the sample ahead of it, at 30"),
             (vec![b(2, 100)], "a tick at the length"),
             (
                 vec![Break {
@@ -1470,6 +2102,25 @@ mod tests {
         ] {
             assert!(check_header(&header(breaks)).is_err(), "{why}");
         }
+    }
+
+    /// FORMAT.md, "Gaps": samples lost before the first sit at places -lost_before to -1 of the
+    /// first run's grid, those after the last at places count to count + lost_after - 1 of the
+    /// last run's; the first may not start below tick 0, the second may not end past the length.
+    #[test]
+    fn a_loss_at_either_end_lies_inside_the_capture() {
+        // The first sample at 20, every 10 ticks: two lost before start at 0, three at -10.
+        assert!(check_header(&losses(vec![], 2, 0)).is_ok());
+        let err = check_header(&losses(vec![], 3, 0)).unwrap_err().to_string();
+        assert!(err.contains("start below tick 0"), "{err}");
+        // The last sample at 60: places 5, 6, 7 end at place 8, 100, the length; 4 end at 110.
+        assert!(check_header(&losses(vec![], 0, 3)).is_ok());
+        let err = check_header(&losses(vec![], 0, 4)).unwrap_err().to_string();
+        assert!(err.contains("end past the length"), "{err}");
+        // On the last run's grid: a run at 70 from sample 3 puts sample 4 at 80, and places 5
+        // and 6 end at 100.
+        assert!(check_header(&losses(vec![b(3, 70)], 0, 1)).is_ok());
+        assert!(check_header(&losses(vec![b(3, 70)], 0, 2)).is_err());
     }
 
     fn uleb(values: &[u64]) -> Vec<u8> {

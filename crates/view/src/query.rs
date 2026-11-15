@@ -414,7 +414,7 @@ impl Recording {
     ) -> Result<Drawn, Error> {
         let place = self.place(c)?;
         let spans = known_spans(&place.known(), range.start, range.end);
-        let level = self.level_for(g.per);
+        let level = self.level_for(c, g.per);
         match place {
             Place::Digital { gaps, .. } => {
                 let mut cols = DigitalColumns::empty(g.count);
@@ -580,8 +580,8 @@ impl Recording {
         while at < span.end {
             match level {
                 Some(l) => {
-                    let shift = self.levels[l].shift;
-                    let covered = self.levels[l].end();
+                    let shift = self.levels[c][l].shift;
+                    let covered = self.levels[c][l].end();
                     let to = span.end.min(covered);
                     if to > at {
                         let (k0, k1) = (at >> shift, ((to - 1) >> shift) + 1);
@@ -644,8 +644,8 @@ impl Recording {
         while at < span.end {
             match level {
                 Some(l) => {
-                    let shift = self.levels[l].shift;
-                    let covered = self.levels[l].end();
+                    let shift = self.levels[c][l].shift;
+                    let covered = self.levels[c][l].end();
                     let to = span.end.min(covered);
                     if to > at {
                         let (k0, k1) = (at >> shift, ((to - 1) >> shift) + 1);
