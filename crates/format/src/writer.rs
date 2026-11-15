@@ -675,6 +675,15 @@ fn groups(channels: usize, products: &[(usize, usize, samples::Product)]) -> Vec
         .collect()
 }
 
+/// Writes one recording (see the module's documentation).
+///
+/// Its memory follows the channels, the block size and the frames waiting for compression, not
+/// the recording's length, except for two things it holds until the finish. Every gap and break,
+/// 24 bytes each, since the content id hashes a list's count before its entries. And every
+/// annotation it takes, whole and with its id, for the bundle or the generator files the finish
+/// writes and for refusing an id given twice. The rest is bounded, but a coarse overview level's
+/// open block takes days to fill and a directory's open page months, so it rises slowly toward
+/// its bound.
 pub struct Writer {
     declaration: Arc<Declaration>,
     options: WriteOptions,

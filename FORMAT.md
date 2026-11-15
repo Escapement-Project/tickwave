@@ -825,10 +825,14 @@ pending.
 
 **Memory.** It holds each channel's open block, each table's open pages at each depth (at most
 4,096 entries each) and the top index's entries, each overview level's open block and open run, and
-the frames waiting for compression. None of that grows with the recording's length, so a month-long
-recording holds kilobytes of index, not every block's row. It also holds every gap and break until
-the finish, 17 bytes a gap and 24 a break: the content id hashes a list's count before its
-entries, so their hash waits for the count.
+the frames waiting for compression. Each of those is bounded whatever the recording's length, so a
+month-long recording holds a few open pages of index, not every block's row. Some fill slowly: a
+coarse level's open block over days, a directory's open page over months, so the writer's memory
+rises toward that bound for a long while. Only two things it holds grow with the recording. Every
+gap and break stays until the finish, 24 bytes each: the content id hashes a list's count before
+its entries, so their hash waits for the count. Every annotation it takes stays until the finish
+too, whole and with its id: the finish writes the bundle or the generator files from them, and an
+id its generator has given already is refused.
 
 ## Reading
 
