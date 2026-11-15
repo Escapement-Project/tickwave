@@ -6,10 +6,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use escapement_tickwave_format::decode::Footer;
+use escapement_tickwave_format::decode::{Footer, Index};
+use escapement_tickwave_format::reader::{Ending, Reader};
+use escapement_tickwave_format::verify::verify;
 use escapement_tickwave_fuzz::{self as fz, RAW};
 use escapement_tickwave_import::convert::{self, Pass, Progress, Settings, Step};
-use escapement_tickwave_import::{merge, vcd};
+use escapement_tickwave_import::{merge, recording, vcd};
 
 struct Quiet;
 
@@ -40,6 +42,48 @@ impl Corpus {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join(format!("seed-{name}")), data).unwrap();
         *self.count.entry(target).or_default() += 1;
+    }
+}
+
+/// Panics unless `rebuilt`, the file `original`'s structure builds, reads as `original` does: its
+/// index, every block and overview block, in order to its end, and matching `original`'s items.
+fn reads_as_original(name: &str, original: &[u8], rebuilt: &[u8]) {
+    let fail = |what: &str, e: &dyn std::fmt::Display| -> ! {
+        panic!("{name}: rebuilt from its structure, {what}: {e}")
+    };
+    let index = Index::of_file(rebuilt).unwrap_or_else(|e| fail("its index doesn't read", &e));
+    for c in 0..index.header().channels.len() {
+        if let Err(e) = index.channel_blocks(rebuilt, c) {
+            fail("a block doesn't decode", &e);
+        }
+    }
+    for o in 0..index.footer.overview_channels() {
+        if let Err(e) = index.footer.strip(o) {
+            fail("a strip doesn't decode", &e);
+        }
+        for li in 0..index.levels[o].len() {
+            if let Err(e) = index.level_in(rebuilt, o, li) {
+                fail("an overview block doesn't decode", &e);
+            }
+        }
+    }
+    let mut reader = Reader::default();
+    reader.feed(rebuilt);
+    loop {
+        match reader.next_event() {
+            Ok(Some(_)) => {}
+            Ok(None) => break,
+            Err(e) => fail("it doesn't read in order", &e),
+        }
+    }
+    match reader.end() {
+        Ok(Ending::Complete) => {}
+        other => fail("it doesn't read to its end", &format!("{other:?}")),
+    }
+    let input: Arc<[u8]> = original.into();
+    let source = recording::read(Arc::new(input)).unwrap().1;
+    if let Err(e) = verify(rebuilt, source) {
+        fail("it doesn't match the original", &e);
     }
 }
 
@@ -146,8 +190,8 @@ fn main() {
         let s = fz::structure(&bytes).expect("a fixture structures");
         let rebuilt = fz::file(&s);
         let crafted = path.parent().unwrap().ends_with("crafted");
-        if !crafted && let Err(e) = Footer::parse_file(&rebuilt) {
-            panic!("{name}: rebuilt from its structure, it doesn't read: {e}");
+        if !crafted {
+            reads_as_original(&name, &bytes, &rebuilt);
         }
         let mut cut = Vec::new();
         // Cut before its footer, and at a few bytes inside a record.

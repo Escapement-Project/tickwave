@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use escapement_tickwave_format::decode::Footer;
 use escapement_tickwave_format::model::Recording;
-use escapement_tickwave_format::verify::verify_limited;
+use escapement_tickwave_format::verify::verify;
 use escapement_tickwave_import::convert::{self, Pass, Progress, Settings, Step};
 use escapement_tickwave_import::{saleae, sigrok, vcd};
 use libfuzzer_sys::fuzz_target;
@@ -57,11 +57,9 @@ fuzz_target!(|data: &[u8]| {
     let mut out = Cursor::new(Vec::new());
     if convert::convert(&*open, &settings, &Quiet, &mut out).is_ok() {
         Footer::parse_file(out.get_ref()).expect("a converted file reads");
-        // What `convert` checked of its output before it left that to `tickwave verify`. The
-        // settings neither move, cut nor set units, so the source as read is what it checked
-        // against.
-        if let Ok(source) = open() {
-            let _ = verify_limited(&out.get_ref()[..], source, 1 << 20);
-        }
+        // The settings neither move, cut nor set units, so the source as read is what the
+        // output holds.
+        let source = open().expect("a source that converted opens again");
+        verify(&out.get_ref()[..], source).expect("a converted file matches its source");
     }
 });

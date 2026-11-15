@@ -5,21 +5,40 @@
 //! `structure` turns a fixture into such an input, for the seeds.
 //!
 //! A structured input is a flags byte, then records, each `[kind u8][mode u8][len u32][body]`.
-//! The body is the record's payload, except that a block, an overview block and the footer give
-//! their frames decoded, and `file` compresses them when the mode says so:
+//! The body is the record's payload, except that with `COMPRESS` a block, an overview block, the
+//! footer and the annotation bundle give their frames decoded, and `file` compresses them:
 //!
-//! - block: `[head_len u16][head][decoded]`
-//! - overview block: `[9-byte head][decoded]`
-//! - footer: `[header_len u32][header][index_len u32][index][decoded overview]`
+//! - block: `[28-byte head][decoded]`. `file` sets the head's decoded length to the decoded
+//!   bytes'.
+//! - overview block: `[17-byte head][decoded]`.
+//! - footer: `[header_len u32][header][index_len u32][top index][decoded strips]`. The strips lie
+//!   back to back: `file` cuts them at the decoded lengths the top index gives each channel,
+//!   compresses each, and writes each frame's length there. Bytes past the last channel's strip
+//!   go in one more frame.
+//! - annotation bundle: `[decoded]`. `file` writes its length before the frame.
+//!
+//! With `FIX_INDEX`, `file` points the index at the records it wrote, counting each kind in the
+//! order it wrote them. Row `i` of a channel's blocks, in an index page, takes the start, frame,
+//! decoded length and word of the channel's `i`th block record. Row `i` of an overview level
+//! takes the frame, decoded length and `n` of the level's `i`th overview block record. Entry `i`
+//! of a directory page at place `p` points at page `p + i` of its table at the depth below, and
+//! entry `i` of a table in the top index at page `i` of the table at the depth it states. The top
+//! index's bundle place points at the latest bundle record. Every other field stays as the input
+//! gives it.
 
+use std::collections::HashMap;
 use std::io::Read;
 
-use escapement_tickwave_format::header::{MAJOR, MINOR, PREAMBLE_LEN, Preamble, Trailer};
-use escapement_tickwave_format::record::{self, Kind, Next};
+use escapement_tickwave_format::header::{
+    BlockRow, ChannelKind, Header, MAJOR, MINOR, OverviewRow, PREAMBLE_LEN, Preamble, TRAILER_LEN,
+    Trailer,
+};
+use escapement_tickwave_format::index::{Entry, PAGE_HEAD, PageHead, Table};
+use escapement_tickwave_format::record::{self, BlockHead, Kind, Next, OverviewHead};
 
 /// Flags: a trailer after the last footer record, made for it.
 pub const AUTO_TRAILER: u8 = 1;
-/// Flags: the footer's index rows rewritten to point at the frames written.
+/// Flags: the index pointed at the records written.
 pub const FIX_INDEX: u8 = 2;
 /// Flags: no preamble before the records.
 pub const NO_PREAMBLE: u8 = 4;
@@ -39,56 +58,274 @@ pub fn compress(raw: &[u8]) -> Vec<u8> {
     c.compress(raw).expect("zstd compresses any bytes")
 }
 
-struct Frame {
-    /// The block's head, or the overview block's shift and `k`.
-    head: Vec<u8>,
-    offset: u64,
-    length: u32,
-    decoded: u32,
-}
-
 fn u32_at(b: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes(b.get(at..at + 4)?.try_into().ok()?))
 }
 
-/// The footer's index with its rows pointed at the frames written: a block row at the block in
-/// its place, an overview row at the overview blocks in the footer's order, by shift then `k`.
-fn fix_index(header: &[u8], index: &mut [u8], blocks: &[Frame], overview: &mut [Frame]) {
-    let Ok(h) = serde_json::from_slice::<serde_json::Value>(header) else {
-        return;
-    };
-    let channels = h["channels"].as_array().map_or(0, Vec::len);
-    let row = 24 + 4 * channels;
-    let n = usize::try_from(h["blocks"].as_u64().unwrap_or(0)).unwrap_or(usize::MAX);
-    for (i, b) in blocks.iter().enumerate().take(n) {
-        let Some(r) = index.get_mut(i * row..(i + 1) * row) else {
-            return;
-        };
-        if b.head.len() < 20 + 4 * channels {
-            continue;
+/// A frame `file` wrote: its offset and length, and what it decodes to where `file` compressed an
+/// overview block's.
+#[derive(Clone, Copy)]
+struct Placed {
+    offset: u64,
+    length: u32,
+    decoded: Option<u32>,
+}
+
+/// An overview level: its channel and shift.
+type Level = (u32, u8);
+
+/// A table's pages at one depth: the channel, the table's code and shift, and the depth.
+type Pages = (u32, u8, u8, u8);
+
+/// What `file` has written that the index points at, each kind in the order it wrote them.
+#[derive(Default)]
+struct Written {
+    /// Each channel's block records.
+    blocks: HashMap<u32, Vec<(BlockHead, Placed)>>,
+    /// Each overview level's block records.
+    overview: HashMap<Level, Vec<(OverviewHead, Placed)>>,
+    /// Each table's page records at each depth: offset and length.
+    pages: HashMap<Pages, Vec<(u64, u32)>>,
+    /// The latest annotation bundle record: offset and length.
+    bundle: Option<(u64, u32)>,
+}
+
+impl Written {
+    /// The record of `kind` and `payload` just written at `offset`. `decoded` is what an overview
+    /// block's frame decodes to, where `file` compressed it.
+    fn note(&mut self, kind: u8, offset: u64, payload: &[u8], decoded: Option<u32>) {
+        let frame_at = |head: usize| offset + (record::PAYLOAD_AT + head) as u64;
+        match Kind::from_byte(kind) {
+            Some(Kind::Block) => {
+                if let Some((head, frame)) = BlockHead::parse(payload) {
+                    let placed = Placed {
+                        offset: frame_at(BlockHead::LEN),
+                        length: frame.len() as u32,
+                        decoded: None,
+                    };
+                    self.blocks
+                        .entry(head.channel)
+                        .or_default()
+                        .push((head, placed));
+                }
+            }
+            Some(Kind::OverviewBlock) => {
+                if let Some((head, frame)) = OverviewHead::parse(payload) {
+                    let placed = Placed {
+                        offset: frame_at(OverviewHead::LEN),
+                        length: frame.len() as u32,
+                        decoded,
+                    };
+                    self.overview
+                        .entry((head.channel, head.shift))
+                        .or_default()
+                        .push((head, placed));
+                }
+            }
+            Some(Kind::IndexPage | Kind::ListPage) => {
+                if let Some((h, _)) = PageHead::parse(payload) {
+                    let len = (record::FRAMING + payload.len()) as u32;
+                    self.pages
+                        .entry((h.channel, h.table, h.shift, h.depth))
+                        .or_default()
+                        .push((offset, len));
+                }
+            }
+            Some(Kind::Bundle) => {
+                self.bundle = Some((offset, (record::FRAMING + payload.len()) as u32));
+            }
+            _ => {}
         }
-        r[..8].copy_from_slice(&b.head[..8]);
-        r[8..16].copy_from_slice(&b.offset.to_le_bytes());
-        r[16..20].copy_from_slice(&b.length.to_le_bytes());
-        r[20..24].copy_from_slice(&b.head[16..20]);
-        r[24..].copy_from_slice(&b.head[20..20 + 4 * channels]);
     }
-    overview.sort_by_key(|o| {
-        (
-            o.head[0],
-            u64::from_le_bytes(o.head[1..9].try_into().unwrap()),
-        )
-    });
-    let base = n.saturating_mul(row);
-    for (j, o) in overview.iter().enumerate() {
-        let Some(r) = index.get_mut(base.saturating_add(16 * j)..base.saturating_add(16 * (j + 1)))
-        else {
+
+    /// An index or list page's payload pointed at the records written before it: its block or
+    /// overview rows, or its directory entries.
+    fn fix_page(&self, payload: &mut [u8]) {
+        let Some((h, _)) = PageHead::parse(payload) else {
             return;
         };
-        r[..8].copy_from_slice(&o.offset.to_le_bytes());
-        r[8..12].copy_from_slice(&o.length.to_le_bytes());
-        r[12..16].copy_from_slice(&o.decoded.to_le_bytes());
+        let first = usize::try_from(h.place).unwrap_or(usize::MAX);
+        let body = &mut payload[PAGE_HEAD..];
+        if h.depth > 0 {
+            let pages = self.pages.get(&(h.channel, h.table, h.shift, h.depth - 1));
+            for (i, e) in body
+                .as_chunks_mut::<{ Entry::SIZE }>()
+                .0
+                .iter_mut()
+                .enumerate()
+            {
+                if let Some(&(offset, length)) = pages.and_then(|p| p.get(first.saturating_add(i)))
+                {
+                    put_place(e, offset, length);
+                }
+            }
+        } else if h.table == Table::Blocks.code() {
+            let blocks = self.blocks.get(&h.channel);
+            for (i, r) in body
+                .as_chunks_mut::<{ BlockRow::SIZE }>()
+                .0
+                .iter_mut()
+                .enumerate()
+            {
+                if let Some((head, p)) = blocks.and_then(|b| b.get(first.saturating_add(i))) {
+                    r[..8].copy_from_slice(&head.start.to_le_bytes());
+                    r[8..16].copy_from_slice(&p.offset.to_le_bytes());
+                    r[16..20].copy_from_slice(&p.length.to_le_bytes());
+                    r[20..24].copy_from_slice(&head.decoded_length.to_le_bytes());
+                    r[24..28].copy_from_slice(&head.word.to_le_bytes());
+                }
+            }
+        } else if h.table == Table::Level(h.shift).code() {
+            let level = self.overview.get(&(h.channel, h.shift));
+            for (i, r) in body
+                .as_chunks_mut::<{ OverviewRow::SIZE }>()
+                .0
+                .iter_mut()
+                .enumerate()
+            {
+                if let Some((head, p)) = level.and_then(|l| l.get(first.saturating_add(i))) {
+                    r[..8].copy_from_slice(&p.offset.to_le_bytes());
+                    r[8..12].copy_from_slice(&p.length.to_le_bytes());
+                    if let Some(d) = p.decoded {
+                        r[12..16].copy_from_slice(&d.to_le_bytes());
+                    }
+                    r[16..20].copy_from_slice(&head.n.to_le_bytes());
+                }
+            }
+        }
     }
+
+    /// The top index pointed at the records written: each table's entries at its pages, and the
+    /// bundle's place at the bundle record.
+    fn fix_top(&self, index: &mut [u8], tables: &[TopTable]) {
+        if let (Some((at, len)), Some(place)) = (self.bundle, index.get_mut(..12)) {
+            place[..8].copy_from_slice(&at.to_le_bytes());
+            place[8..].copy_from_slice(&len.to_le_bytes());
+        }
+        for t in tables {
+            let (Some(&depth), Some(&e)) = (index.get(t.at), index.get(t.at + 1)) else {
+                continue;
+            };
+            let pages = self
+                .pages
+                .get(&(t.channel, t.table.code(), t.table.shift(), depth));
+            for i in 0..usize::from(e) {
+                let at = t.at + 2 + i * Entry::SIZE;
+                if let (Some(&(offset, length)), Some(entry)) = (
+                    pages.and_then(|p| p.get(i)),
+                    index.get_mut(at..at + Entry::SIZE),
+                ) {
+                    put_place(entry, offset, length);
+                }
+            }
+        }
+    }
+}
+
+/// A page record's offset and length, into a directory or top-index entry.
+fn put_place(entry: &mut [u8], offset: u64, length: u32) {
+    entry[16..24].copy_from_slice(&offset.to_le_bytes());
+    entry[24..28].copy_from_slice(&length.to_le_bytes());
+}
+
+/// One table's entries in the top index: where its depth byte lies, and whose table it is.
+struct TopTable {
+    at: usize,
+    channel: u32,
+    table: Table,
+}
+
+/// The top index `index` as the header `h` lays it out (FORMAT.md, "Footer"): where each
+/// channel's strip lengths lie, and each table's entries, as far as the index holds them.
+fn top_layout(h: &Header, index: &[u8]) -> (Vec<usize>, Vec<TopTable>) {
+    let (mut strips, mut tables) = (Vec::new(), Vec::new());
+    let mut at = 12;
+    for o in 0..h.channels.len() + h.derived.len() {
+        if at + 8 > index.len() {
+            break;
+        }
+        strips.push(at);
+        at += 8;
+        let mut own = Vec::new();
+        if o < h.channels.len() {
+            own.push(Table::Blocks);
+        }
+        own.extend(
+            h.levels(o)
+                .unwrap_or_default()
+                .iter()
+                .map(|l| Table::Level(l.shift)),
+        );
+        match h.channels.get(o).map(|c| &c.data) {
+            Some(ChannelKind::Digital {
+                gap_count: Some(_), ..
+            }) => own.push(Table::Gaps),
+            Some(ChannelKind::Analog {
+                break_count: Some(_),
+                ..
+            }) => own.push(Table::Breaks),
+            _ => {}
+        }
+        for table in own {
+            let Some(&e) = index.get(at + 1) else {
+                return (strips, tables);
+            };
+            tables.push(TopTable {
+                at,
+                channel: o as u32,
+                table,
+            });
+            at += 2 + usize::from(e) * Entry::SIZE;
+        }
+    }
+    (strips, tables)
+}
+
+/// The decoded strips `raw` as frames, cut at the decoded length the top index `index` gives at
+/// each of `strips`, each frame's length written there, and its decoded length where `raw` runs
+/// out first. Bytes past the last strip go in one more frame.
+fn strip_frames(index: &mut [u8], strips: &[usize], mut raw: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for &at in strips {
+        let n = (u32_at(index, at + 4).unwrap_or(0) as usize).min(raw.len());
+        let (strip, rest) = raw.split_at(n);
+        raw = rest;
+        let frame = compress(strip);
+        index[at..at + 4].copy_from_slice(&(frame.len() as u32).to_le_bytes());
+        index[at + 4..at + 8].copy_from_slice(&(n as u32).to_le_bytes());
+        out.extend_from_slice(&frame);
+    }
+    if !raw.is_empty() {
+        out.extend_from_slice(&compress(raw));
+    }
+    out
+}
+
+/// A structured footer's body as the footer's payload: its strips compressed, and its top index
+/// pointed at what `file` wrote where `written` is given.
+fn footer_payload(body: &[u8], written: Option<&Written>) -> Vec<u8> {
+    let header_len = u32_at(body, 0).unwrap_or(0) as usize;
+    let header = body
+        .get(4..)
+        .map_or(&[][..], |b| &b[..header_len.min(b.len())]);
+    let after = (4 + header.len()).min(body.len());
+    let index_len = u32_at(body, after).unwrap_or(0) as usize;
+    let index_at = (after + 4).min(body.len());
+    let mut index = body[index_at..][..index_len.min(body.len() - index_at)].to_vec();
+    let raw = &body[index_at + index.len()..];
+    let (strips, tables) = serde_json::from_slice::<Header>(header)
+        .map_or_else(|_| (Vec::new(), Vec::new()), |h| top_layout(&h, &index));
+    let frames = strip_frames(&mut index, &strips, raw);
+    if let Some(w) = written {
+        w.fix_top(&mut index, &tables);
+    }
+    let mut payload = Vec::with_capacity(8 + header.len() + index.len() + frames.len());
+    payload.extend_from_slice(&(header.len() as u32).to_le_bytes());
+    payload.extend_from_slice(&(index.len() as u32).to_le_bytes());
+    payload.extend_from_slice(header);
+    payload.extend_from_slice(&index);
+    payload.extend_from_slice(&frames);
+    payload
 }
 
 /// The recording a structured input describes.
@@ -96,12 +333,12 @@ pub fn file(data: &[u8]) -> Vec<u8> {
     let Some((&flags, mut rest)) = data.split_first() else {
         return Vec::new();
     };
+    let fix = flags & FIX_INDEX != 0;
     let mut out = Vec::new();
     if flags & NO_PREAMBLE == 0 {
         out.extend_from_slice(&Preamble::CURRENT.to_bytes());
     }
-    let mut blocks = Vec::new();
-    let mut overview = Vec::new();
+    let mut written = Written::default();
     let mut footer: Option<(u64, u32)> = None;
     while rest.len() >= 6 {
         let (kind, mode) = (rest[0], rest[1]);
@@ -112,66 +349,42 @@ pub fn file(data: &[u8]) -> Vec<u8> {
             out.extend_from_slice(body);
             continue;
         }
-        let at = out.len() as u64;
         let compressed = mode & COMPRESS != 0;
-        let mut payload = Vec::with_capacity(body.len());
-        match kind {
-            2 if compressed && body.len() >= 2 => {
-                let head_len =
-                    (u16::from_le_bytes([body[0], body[1]]) as usize).min(body.len() - 2);
-                let (head, raw) = body[2..].split_at(head_len);
-                let frame = compress(raw);
-                payload.extend_from_slice(head);
-                payload.extend_from_slice(&frame);
-                blocks.push(Frame {
-                    head: head.to_vec(),
-                    offset: at + (record::PAYLOAD_AT + head_len) as u64,
-                    length: frame.len() as u32,
-                    decoded: raw.len() as u32,
-                });
-            }
-            5 if compressed && body.len() >= 9 => {
-                let (head, raw) = body.split_at(9);
-                let frame = compress(raw);
-                payload.extend_from_slice(head);
-                payload.extend_from_slice(&frame);
-                overview.push(Frame {
-                    head: head.to_vec(),
-                    offset: at + (record::PAYLOAD_AT + 9) as u64,
-                    length: frame.len() as u32,
-                    decoded: raw.len() as u32,
-                });
-            }
-            7 if compressed => {
-                let header_len = u32_at(body, 0).unwrap_or(0) as usize;
-                let header = body
-                    .get(4..)
-                    .map_or(&[][..], |b| &b[..header_len.min(b.len())]);
-                let after = (4 + header.len()).min(body.len());
-                let index_len = u32_at(body, after).unwrap_or(0) as usize;
-                let index_at = (after + 4).min(body.len());
-                let mut index = body[index_at..][..index_len.min(body.len() - index_at)].to_vec();
-                let raw = &body[index_at + index.len()..];
-                if flags & FIX_INDEX != 0 {
-                    fix_index(header, &mut index, &blocks, &mut overview);
-                }
-                payload.extend_from_slice(&(header.len() as u32).to_le_bytes());
-                payload.extend_from_slice(&(index.len() as u32).to_le_bytes());
-                payload.extend_from_slice(header);
-                payload.extend_from_slice(&index);
+        let mut decoded = None;
+        let mut payload = match kind {
+            2 if compressed && body.len() >= BlockHead::LEN => {
+                let (head, raw) = body.split_at(BlockHead::LEN);
+                let mut payload = head.to_vec();
+                payload[24..28].copy_from_slice(&(raw.len() as u32).to_le_bytes());
                 payload.extend_from_slice(&compress(raw));
+                payload
             }
-            _ => payload.extend_from_slice(body),
+            5 if compressed && body.len() >= OverviewHead::LEN => {
+                let (head, raw) = body.split_at(OverviewHead::LEN);
+                decoded = Some(raw.len() as u32);
+                [head, &compress(raw)].concat()
+            }
+            7 if compressed => footer_payload(body, fix.then_some(&written)),
+            12 if compressed => {
+                let mut payload = (body.len() as u32).to_le_bytes().to_vec();
+                payload.extend_from_slice(&compress(body));
+                payload
+            }
+            _ => body.to_vec(),
+        };
+        if fix && (kind == Kind::IndexPage as u8 || kind == Kind::ListPage as u8) {
+            written.fix_page(&mut payload);
         }
-        let start = out.len();
+        let start = out.len() as u64;
         frame(&mut out, kind, &payload);
         if mode & BAD_CHECK != 0
             && let Some(last) = out.last_mut()
         {
             *last ^= 1;
         }
+        written.note(kind, start, &payload, decoded);
         if kind == Kind::Footer as u8 {
-            footer = Some((start as u64, (out.len() - start) as u32));
+            footer = Some((start, (out.len() as u64 - start) as u32));
         }
     }
     if flags & AUTO_TRAILER != 0
@@ -204,9 +417,10 @@ fn frame(out: &mut Vec<u8>, kind: u8, payload: &[u8]) {
     out.extend_from_slice(&h.finalize().as_bytes()[..8]);
 }
 
-fn decode_all(frame: &[u8]) -> Option<Vec<u8>> {
+/// Every zstd frame in `frames`, decoded and joined.
+fn decode_all(frames: &[u8]) -> Option<Vec<u8>> {
     let mut out = Vec::new();
-    zstd::stream::Decoder::new(frame)
+    zstd::stream::Decoder::new(frames)
         .ok()?
         .read_to_end(&mut out)
         .ok()?;
@@ -220,75 +434,55 @@ fn put(out: &mut Vec<u8>, kind: u8, mode: u8, body: &[u8]) {
     out.extend_from_slice(body);
 }
 
-/// A footer's payload as a structured footer's body, its overview decoded.
+/// A block's or overview block's payload as its structured body: its `head` bytes, then its frame
+/// decoded.
+fn head_and_decoded(payload: &[u8], head: usize) -> Option<Vec<u8>> {
+    let (head, frame) = payload.split_at_checked(head)?;
+    Some([head, &decode_all(frame)?].concat())
+}
+
+/// A footer's payload as a structured footer's body, its strips decoded and joined.
 fn footer_body(payload: &[u8]) -> Option<Vec<u8>> {
     let header_len = u32_at(payload, 0)? as usize;
     let index_len = u32_at(payload, 4)? as usize;
     let header = payload.get(8..8usize.checked_add(header_len)?)?;
     let index = payload.get(8 + header_len..(8 + header_len).checked_add(index_len)?)?;
-    let frame = &payload[8 + header_len + index_len..];
+    let frames = &payload[8 + header_len + index_len..];
     let mut body = (header_len as u32).to_le_bytes().to_vec();
     body.extend_from_slice(header);
     body.extend_from_slice(&(index_len as u32).to_le_bytes());
     body.extend_from_slice(index);
-    body.extend_from_slice(&decode_all(frame)?);
+    body.extend_from_slice(&decode_all(frames)?);
     Some(body)
 }
 
 /// A recording as a structured input that `file` builds into an equivalent file: its frames
-/// decoded, its checks, index offsets and trailer left for `file` to make.
+/// decoded, its checks, index places and trailer left for `file` to make.
 pub fn structure(bytes: &[u8]) -> Option<Vec<u8>> {
     if bytes.len() < PREAMBLE_LEN || Preamble::parse(bytes).is_none() {
         return None;
     }
     let mut out = vec![AUTO_TRAILER | FIX_INDEX];
     let mut pos = PREAMBLE_LEN;
-    let mut channels = 0;
     let mut finished = false;
     while let Next::Record { kind, payload, len } = record::next(&bytes[pos..], usize::MAX) {
         pos += len;
-        match Kind::from_byte(kind) {
-            Some(Kind::Declaration) => {
-                let d: Option<serde_json::Value> = serde_json::from_slice(payload).ok();
-                channels = d
-                    .as_ref()
-                    .and_then(|d| d["channels"].as_array())
-                    .map_or(0, Vec::len);
-                put(&mut out, kind, 0, payload);
-            }
-            Some(Kind::Block) => {
-                let head_len = 20 + 4 * channels;
-                let (head, frame) = payload.split_at(head_len.min(payload.len()));
-                match decode_all(frame) {
-                    Some(raw) => {
-                        let mut body = (head.len() as u16).to_le_bytes().to_vec();
-                        body.extend_from_slice(head);
-                        body.extend_from_slice(&raw);
-                        put(&mut out, kind, COMPRESS, &body);
-                    }
-                    None => put(&mut out, kind, 0, payload),
-                }
-            }
-            Some(Kind::OverviewBlock) => {
-                let (head, frame) = payload.split_at(9.min(payload.len()));
-                match decode_all(frame) {
-                    Some(raw) => put(&mut out, kind, COMPRESS, &[head, &raw].concat()),
-                    None => put(&mut out, kind, 0, payload),
-                }
-            }
-            Some(Kind::Footer) => {
-                match footer_body(payload) {
-                    Some(body) => put(&mut out, kind, COMPRESS, &body),
-                    None => put(&mut out, kind, 0, payload),
-                }
-                finished = true;
-                // The trailer follows; `file` makes it.
-                pos = bytes
-                    .len()
-                    .min(pos + escapement_tickwave_format::header::TRAILER_LEN);
-                break;
-            }
-            _ => put(&mut out, kind, 0, payload),
+        let decoded = match Kind::from_byte(kind) {
+            Some(Kind::Block) => head_and_decoded(payload, BlockHead::LEN),
+            Some(Kind::OverviewBlock) => head_and_decoded(payload, OverviewHead::LEN),
+            Some(Kind::Bundle) => payload.get(4..).and_then(decode_all),
+            Some(Kind::Footer) => footer_body(payload),
+            _ => None,
+        };
+        match decoded {
+            Some(body) => put(&mut out, kind, COMPRESS, &body),
+            None => put(&mut out, kind, 0, payload),
+        }
+        if kind == Kind::Footer as u8 {
+            finished = true;
+            // The trailer follows; `file` makes it.
+            pos = bytes.len().min(pos + TRAILER_LEN);
+            break;
         }
     }
     if !finished || pos < bytes.len() {

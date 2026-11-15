@@ -9,7 +9,7 @@ use std::sync::Arc;
 use escapement_tickwave_format::bundle;
 use escapement_tickwave_format::decode::Footer;
 use escapement_tickwave_format::model::Recording;
-use escapement_tickwave_format::verify::verify_limited;
+use escapement_tickwave_format::verify::verify;
 use escapement_tickwave_import::convert::{Pass, Progress, Step};
 use escapement_tickwave_import::shape::Plan;
 use escapement_tickwave_import::{merge, recording, vcd};
@@ -64,15 +64,13 @@ fuzz_target!(|data: &[u8]| {
         let mut out = std::io::Cursor::new(Vec::new());
         if let Ok(merged) = merge::merge(&open, &settings, &Quiet, &mut out) {
             Footer::parse_file(out.get_ref()).expect("a merged file reads");
-            // What `merge` checked of its output before it left that to `tickwave verify`.
-            if let Ok(inputs) = open()
-                && let Ok(expected) = merge::expected(
-                    &merged.header,
-                    inputs.into_iter().map(|i| i.recording).collect(),
-                )
-            {
-                let _ = verify_limited(&out.get_ref()[..], expected, 1 << 20);
-            }
+            let inputs = open().expect("inputs that merged open again");
+            let expected = merge::expected(
+                &merged.header,
+                inputs.into_iter().map(|i| i.recording).collect(),
+            )
+            .expect("a merged file's header follows from its inputs");
+            verify(&out.get_ref()[..], expected).expect("a merged file matches its inputs");
         }
     } else if mode & 1 == 0 {
         if let Ok(r) = merge::expected(h, vec![read(SWD), read(ENERGY)]) {
