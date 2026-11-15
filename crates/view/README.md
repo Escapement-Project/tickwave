@@ -8,11 +8,12 @@ scale, time axis and point probes.
 
 ## A recording and a query
 
-`Recording::open` reads a finished file through its footer, from any `Bytes`: a file, or bytes in
-memory. `Recording::live` reads a file a writer in the same process is still writing, through the
-writer's `Snapshot`, and `Recording::update` takes each newer snapshot, reading only what the
-writer added since. A file cut off by a crash is `Error::Unfinished`; the format crate's Recutter
-repairs it. Decoded blocks and overview blocks go in a `Cache`, which a recording's snapshots share.
+`Recording::open` reads a finished file through its footer and every channel's index pages, from any
+`Bytes`: a file, or bytes in memory. `Recording::live` reads a file a writer in the same process is
+still writing, through the writer's `Snapshot`, and `Recording::update` takes each newer snapshot,
+reading only what the writer added since. A file cut off by a crash is `Error::Unfinished`; the
+format crate's Recutter repairs it. Decoded blocks and overview blocks go in a `Cache`, which a
+recording's snapshots share.
 
 A query's work follows what its window holds, not how long the recording is: a channel's runs,
 gaps and lost spans are found by binary search, and each run's columns are worked out over the
@@ -28,8 +29,9 @@ the source's `m`, origin and the channel's offset, for a readout exact to the so
 `Recording::query` answers a `Query`: a window in ticks, its columns, the channels drawn, the
 statistics and the markers. The columns cover the window and one width either side, so a pan has
 columns to draw while its own answer is on the way. A column takes the coarsest overview level no
-wider than it, or the samples and edges themselves below the finest. An analog trace draws no line
-across a break, and a column that touches a span the instrument lost is pale.
+wider than it among its channel's levels, or the samples and edges themselves below the finest. An
+analog trace draws no line across a break, and a column that touches a span the instrument lost is
+pale.
 
 A window that follows a recording as it is written asks for `Query::aligned` columns: each a
 whole number of ticks, ⌈width / columns⌉, from tick 0, so every window as wide shares them. The
@@ -46,8 +48,8 @@ the recording and snapshot it was made from.
 before it included, and weights its value by the ticks it covers there, exactly for integer codes.
 Where every sample lasts the same whole number of the recording's ticks, it takes whole overview
 buckets where it can. While a recording is
-being written, its overview reaches no further than the end of the last block the writer closed,
-so the samples after that are counted one by one.
+being written, a channel's overview reaches no further than its settled buckets, so the samples
+after them are counted one by one.
 
 ## Modules
 

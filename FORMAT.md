@@ -184,7 +184,7 @@ figures, as an instrument whose step changes with its range does.
   a while (see Gaps, below). A channel's start is its kept span's `from` (see Moved and trimmed
   channels). In a recording that states no kept span it is the source tick at the axis's tick 0,
   `−origin`. An `end` at the channel's start says the level is never known. Such a channel has no
-  edges and no gaps, and its `initial` is false.
+  edges and no gaps, and its `initial` is its declaration's, which says nothing of the level.
 - `"analog"`: `unit` (empty when the source states none), `first` (the first sample's source tick,
   0 when there is no sample), `period` (source ticks from one sample to the next, `[num, den]`),
   `count`, its breaks where the samples stopped for a while and its losses at either end (see
@@ -458,14 +458,16 @@ A block's decoded payload is its channel's section:
 
 ## Known-through records
 
-A known-through record's payload is one i64, `tick`: every channel is known up to axis tick `tick`.
-Every item of every channel before it is in a block record before this record. So a channel whose
-last block ends before `tick` holds nothing from that end to `tick`, and is known there. Each
+A known-through record's payload is one i64, `tick`: every item of every channel before axis tick
+`tick` is in a block record before this record. So a channel whose last block ends before `tick`
+holds no item from that end to `tick`. A gap is not an item: a gap record after a known-through
+record may start before its tick, as a recorder that reports a loss when it ends writes one. Each
 known-through record's tick is later than the one before it, and no later than the length. A reader
 refuses a block record after it that holds an item before its tick.
 
 A live recorder writes one at each flush, after that flush's block records (see Writing), so a
 channel with nothing new needs no record of its own, and repair cuts every channel to the same tick.
+A flush at the tick of the flush before it writes none.
 
 ## Gap and run records
 
@@ -671,7 +673,7 @@ A table's shape follows from its count `R`. Its depth-0 pages are `ceil(R / 4,09
 at a depth number at most 16, the top index lists them, and that depth is the table's. Otherwise
 directory pages one depth up list them, 4,096 entries a page in order, the last the rest. Counts
 are below 2^53, so a table has at most four directory levels: pages alone list 2^16 entries, one
-directory level 2^28, two 2^40, three 2^52. A reader refuses a page whose channel, table, shift or depth differ
+directory level 2^28, two 2^40, three 2^52, and a fourth every count past that. A reader refuses a page whose channel, table, shift or depth differ
 from the entry that points at it, whose first place or count differ from what the shape gives, or
 whose entries are out of order; a directory entry whose `first` or `number` differ from its page's;
 and a top index whose depth or entry count for a table differ from what the table's count gives.
@@ -777,9 +779,10 @@ A writer:
   it, or a known-through record's tick does. A run of alike blocks is written when it ends: when a
   block with other bytes settles, or at the finish.
 - Writes each table's pages as they fill (see Index).
-- At the end, closes every channel's last block at the length, writes each overview level's last
-  block and its open run, every table's last pages and the annotation bundle if any, then the footer
-  and the trailer.
+- At the end, closes every channel's last block at the length, then writes a known-through record
+  at the length if it has written any (so a file cut off inside its end repairs to itself), each
+  overview level's last block and its open run, every table's last pages and the annotation bundle
+  if any, then the footer and the trailer.
 
 A writer refuses, as an error, any tick, count or length that a reader would refuse, the axis tick
 an item maps to included, rather than write a file no reader opens.
@@ -788,38 +791,44 @@ an item maps to included, rather than write a file no reader opens.
 
 **Order and promise.** It takes each channel's items in that channel's order, and refuses an item
 before the start of its channel's open block. A promise, `promise(before)`, says every item of
-every channel before axis tick `before` is in. A channel's open block that has reached the target
-size closes at the latest promise: its items before that tick go in the closed block, and those at
-or after it stay in the open one. So a producer can write a channel ahead of what it has promised,
-as a probe's samples come ahead of the pin edges that lie among them. Promises and flushes go
-forward: each is at or after the one before, so every block a writer closes before a flush ends at
-or before the flush's tick. The encoder, which takes items in axis order across channels, promises
-with each item, so its blocks close as they reach the target.
+every channel before axis tick `before` is in; `promise_channel(c, before)` says it of channel `c`
+alone. It refuses an item before the latest promise to its channel. A channel's open block closes
+once its items before the latest promise to it and to its partners reach the target size: those go
+in the closed block, and those at or after that tick stay in the open one. A derived channel's
+operands are partners: they close their blocks together, at one tick. So a producer can write a channel ahead of what it has promised,
+as a probe's samples come ahead of the pin edges that lie among them. Without a promise, a block
+closes only at a flush or the finish. Promises and flushes go forward: each is at or after the one
+before, so every block a writer closes before a flush ends at or before the flush's tick. The
+encoder, which takes items in axis order across channels, promises with each item, so its blocks
+close as they reach the target, and a sparse channel's one block at the finish.
 
 **Flush.** `flush(before)` promises `before`, closes at `before` every channel's open block that
 holds an item before it, and then writes one known-through record at `before`, after every block
 record that flush closed. Items at or after `before` stay in the open blocks. A channel with
-nothing before `before` in its open block writes no record; the known-through record says it is
-known to `before`. A live recorder flushes at least every second and syncs the file to disk after
+nothing before `before` in its open block writes no record; the known-through record says it holds
+nothing new before `before`. A flush at the latest known-through tick writes nothing. A live recorder flushes at least every second and syncs the file to disk after
 each, so how often it flushes, and the compression still pending, bound what a crash loses.
 
 **Compression.** It compresses blocks at the level it is given, and overview blocks at zstd level 3,
 whatever that level is. Strips and the annotation bundle are compressed at the finish. By default
 the compression of every other frame is spread over the calls after its record is made, on the
-caller's thread: while any frame is pending, every call, `take_output` included, compresses the
-next 32 KiB of the pending frames' decoded bytes, so no call does much work however large a block
-is. Each 32 KiB ends a zstd block inside the frame, so the frame's bytes depend on the data, the
+caller's thread: a frame is cut into slices of 8 KiB of decoded bytes from its start, and while
+any frame is pending, every call, `take_output` included, compresses the next slice, and the
+slices after it while they fit in 8 KiB together, so no call does much work however large a block
+is. Each slice ends a zstd block inside the frame, so the frame's bytes depend on the data, the
 level and the slice, never on how the calls fall. Its records leave in file order: a record waits
 behind the frames before it, so a flush's known-through record leaves only after the bytes of that
-flush's blocks. A closed block reaches the output within `ceil(Q / 32 KiB)` calls of its close,
-where `Q` is the decoded bytes still to compress up to and including its own. A ready-made option
-compresses on other threads instead, channels in parallel, and gives the same bytes. `finish`
-compresses whatever is still pending.
+flush's blocks. A closed block reaches the output within one call for each slice still to compress
+of the frames up to and including its own. A ready-made option compresses on other threads
+instead, channels in parallel, and gives the same bytes. `finish` compresses whatever is still
+pending.
 
 **Memory.** It holds each channel's open block, each table's open pages at each depth (at most
 4,096 entries each) and the top index's entries, each overview level's open block and open run, and
 the frames waiting for compression. None of that grows with the recording's length, so a month-long
-recording holds kilobytes of index, not every block's row.
+recording holds kilobytes of index, not every block's row. It also holds every gap and break until
+the finish, 17 bytes a gap and 24 a break: the content id hashes a list's count before its
+entries, so their hash waits for the count.
 
 ## Reading
 
@@ -840,7 +849,8 @@ waits. It decodes each block once for a view, whatever channels the view takes f
 A reader takes the records from the start. Each block record carries its channel, its span and its
 word, so the reader decodes a channel's blocks without the footer, and each known-through record
 extends every channel to its tick. It may skip pages and the annotation bundle, whose contents
-follow from the records it reads. It stops at the first record that runs past the end of the file
+follow from the records it reads; tickwave's reader checks each page against them instead, and
+refuses one that differs by a byte from the page the records before it give. It stops at the first record that runs past the end of the file
 or whose check does not match, and keeps every record before it. After the footer record come
 exactly the trailer's 24 bytes.
 
@@ -857,14 +867,15 @@ A cut-off file is repaired by appending what a finished file has after its last 
    block nor an annotation record.
 2. Where they hold a known-through record, cut the file just after the latest one: every channel is
    then known to its tick, and none holds more. Keep the annotation records that came after it, to
-   write again after the cut. Where they hold none, cut the file at the first bad record, and each
-   channel keeps its blocks to its last whole one.
+   write again after the cut. Where they hold none, each channel keeps its blocks to its last
+   whole one, except that a derived channel's operands keep only the samples both hold: cut the
+   file just after the last record at which every derived channel's operands hold as many
+   samples, and keep the annotation records after the cut as above.
 3. The length is the later of that known-through tick (or, with none, the latest end of any kept
    block, 0 with no block) and one past the latest start among the annotation records, so what a
    recorder marked after its last data survives, and a recording of marks alone too. Each channel
    whose last kept block ends before the length gets an empty block from there, or from tick 0, to
-   the length. A file with no block whose declaration states a digital channel's `initial` as true
-   is refused: no block carries that level.
+   the length.
 4. Every digital channel's `end` is the source tick at the latest known-through tick, or, with
    none, at its own last kept block's end, or its start with no block, before the gap rule above. A
    file that can be repaired states no kept span, so its one source maps by `T = k + origin`, and
