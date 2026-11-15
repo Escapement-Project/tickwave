@@ -76,12 +76,15 @@ enum Command {
     },
     /// Check a recording against the source it was converted from, edge by edge and sample by
     /// sample. A moved or trimmed channel is checked through its offset and kept span, and a
-    /// merged recording through each source's origin and alignment.
+    /// merged recording through each source's origin and alignment. Without --against, the
+    /// recording is checked on its own, as a recorder's file has no other source: every record's
+    /// check, every block decoded and held to the blocks its index places, the overview blocks
+    /// and strips against the content, and the content id.
     Verify {
         file: PathBuf,
         /// The source: a capture (for a Saleae export, its directory) or a .tickwave recording.
         /// A merged recording takes one for each recording merged into it, in the merge's order.
-        #[arg(long, required = true)]
+        #[arg(long)]
         against: Vec<PathBuf>,
     },
     /// Merge recordings onto one time axis, at the least common multiple of their tick rates, or
@@ -1119,7 +1122,13 @@ fn verify_file(file: &Path, against: &[PathBuf], max: usize) -> Result<()> {
     let (mut opened, _, head) = read_footer(file)?;
     let h = &head.header;
     let one_capture = h.sources.len() == 1 && against.len() == 1 && !is_recording(&against[0]);
-    let source = if one_capture {
+    let source = if against.is_empty() {
+        // The recording as its index places its blocks, against its records read in order.
+        let input = map(file).with_context(|| format!("reading {}", file.display()))?;
+        escapement_tickwave_import::recording::read(input)
+            .with_context(|| format!("reading {}", file.display()))?
+            .1
+    } else if one_capture {
         // A conversion: its moves and cuts from the header, its origin among them.
         let source = capture(h, 0, &against[0])?;
         let mut plan = Plan::of_header(&source, h)
@@ -1161,8 +1170,15 @@ fn verify_file(file: &Path, against: &[PathBuf], max: usize) -> Result<()> {
     )
     .context("the recording does not match its source")?;
     bars.end(Pass::Verify);
-    let names: Vec<String> = against.iter().map(|p| p.display().to_string()).collect();
-    info!("{}: matches {}", file.display(), names.join(", "));
+    if against.is_empty() {
+        info!(
+            "{}: checks on its own: its records, blocks, overview and content id",
+            file.display()
+        );
+    } else {
+        let names: Vec<String> = against.iter().map(|p| p.display().to_string()).collect();
+        info!("{}: matches {}", file.display(), names.join(", "));
+    }
     let (h, drifts) = drift::of_file(map(file)?)?;
     for d in &drifts {
         info!("{}", describe_drift(&h, d));
