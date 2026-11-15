@@ -471,6 +471,24 @@ pub fn resolve_json(
     }
 }
 
+/// Where an entry came from, as a problem names it.
+#[derive(Clone, Copy)]
+enum At<'a> {
+    /// The TOML file's annotation, counted from 1.
+    Hand(usize),
+    /// An included file's line, counted from 1.
+    Line(&'a str, usize),
+}
+
+impl std::fmt::Display for At<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            At::Hand(n) => write!(f, "annotation {n}"),
+            At::Line(name, n) => write!(f, "{name}, line {n}"),
+        }
+    }
+}
+
 fn resolve_file(
     file: HandFile,
     included: &[Included<'_>],
@@ -512,9 +530,9 @@ fn resolve_file(
     }
 
     // (source, entry, where it came from)
-    let mut entries: Vec<(Option<String>, Entry, String)> = Vec::new();
+    let mut entries: Vec<(Option<String>, Entry, At<'_>)> = Vec::new();
     for (i, entry) in file.annotation.into_iter().enumerate() {
-        entries.push((None, entry, format!("annotation {}", i + 1)));
+        entries.push((None, entry, At::Hand(i + 1)));
     }
     // Sidecar order: the TOML file's annotations, then each included file's in `include` order.
     let mut by_include: Vec<&Included<'_>> = included.iter().collect();
@@ -553,11 +571,9 @@ fn resolve_file(
         }
         for (n, line) in lines {
             match json::<Entry>(line) {
-                Ok(entry) => entries.push((
-                    Some(head.source.clone()),
-                    entry,
-                    format!("{}, line {}", inc.name, n + 1),
-                )),
+                Ok(entry) => {
+                    entries.push((Some(head.source.clone()), entry, At::Line(inc.name, n + 1)))
+                }
                 Err(e) => problems.push(format!("{}, line {}: {e}", inc.name, n + 1)),
             }
         }
@@ -644,13 +660,18 @@ fn resolve_file(
     }
     // A ref names a generated annotation (ANNOTATIONS.md): a name for a decoder's find, not a
     // second name for a hand-written one.
-    let by_id: BTreeMap<String, Annotation> = plain
-        .iter()
-        .filter(|(_, _, a)| a.source.is_some())
-        .map(|(_, _, a)| (a.id.clone(), a.clone()))
-        .collect();
+    let by_id: BTreeMap<&str, &Annotation> = if refs.is_empty() {
+        BTreeMap::new()
+    } else {
+        plain
+            .iter()
+            .filter(|(_, _, a)| a.source.is_some())
+            .map(|(_, _, a)| (a.id.as_str(), a))
+            .collect()
+    };
+    let mut followed = Vec::with_capacity(refs.len());
     for (position, id, target, entry, at) in refs {
-        let Some(t) = by_id.get(&target) else {
+        let Some(t) = by_id.get(target.as_str()) else {
             let hand = plain.iter().any(|(_, _, a)| a.id == target);
             problems.push(if hand {
                 format!("{at}: ref {target:?} names a hand-written annotation, not a generated one")
@@ -659,7 +680,7 @@ fn resolve_file(
             });
             continue;
         };
-        plain.push((
+        followed.push((
             position,
             at,
             Annotation {
@@ -678,6 +699,7 @@ fn resolve_file(
             },
         ));
     }
+    plain.extend(followed);
 
     for (_, at, a) in &plain {
         let place = place_problems(

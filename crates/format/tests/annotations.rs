@@ -442,6 +442,17 @@ fn messages_point_at_what_the_author_wrote() {
         &format!("\n\n\n{}", GENERATED.replace("\"source\"", "\"sauce\"")),
     );
     assert_problem(&found, "rec.wire_swd.jsonl, line 4:");
+    // An entry's problem is reported where it was written: a generator's line, blank lines
+    // counted, and the TOML file's annotation by its count.
+    let found = problems(
+        &HAND.replace("\"SWCLK\", \"SWDIO\"]", "\"SWCLK\", \"TCK\"]"),
+        &GENERATED.replace(
+            r#""channels": ["SWDIO"], "paint""#,
+            r#""channels": ["NOPE"], "paint""#,
+        ),
+    );
+    assert_problem(&found, "rec.wire_swd.jsonl, line 4: no channel \"NOPE\"");
+    assert_problem(&found, "annotation 1: no channel \"TCK\"");
     // The page's JSON of the TOML file has no line the author could look up.
     let found = escapement_tickwave_format::annotations::resolve_json(
         "{\"format\": 1}",
