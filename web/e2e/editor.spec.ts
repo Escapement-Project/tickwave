@@ -186,6 +186,43 @@ test("the view says where its cursors are, in ticks and as times, and which anno
   await expect(page.locator("#note-title")).toHaveText(id);
 });
 
+test("a label clicked while the editor reads its sidecar is the one it opens on", async ({ page }) => {
+  await page.goto(IDENTIFY);
+  const view = await viewReady(page);
+  await view.evaluate((v) => (v as unknown as { settled(): Promise<void> }).settled());
+  await view.evaluate((v) => (v as unknown as { setWindow(a: number, b: number): void }).setWindow(376719436, 377140560));
+  // The editor's own read of the sidecar, held: the view has its annotations already.
+  let asked!: () => void;
+  const reading = new Promise<void>((r) => (asked = r));
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  await page.route("**/fixtures/identify-swd.annotations.toml", async (route) => {
+    asked();
+    await held;
+    await route.continue();
+  });
+  await page.locator("#edit").click();
+  await reading;
+  // A label in the lane at the plot's top, clicked while the read is held.
+  const box = (await view.locator(".plot").boundingBox())!;
+  const x = box.x + box.width / 2;
+  let y = box.y + 2;
+  for (; y < box.y + 40; y += 2) {
+    await page.mouse.move(x, y);
+    if ((await view.locator(".plot").evaluate((p) => (p as HTMLElement).style.cursor)) === "pointer") break;
+  }
+  expect(y).toBeLessThan(box.y + 40);
+  // Listening before the click: the event comes as it lands.
+  await view.evaluate((v) => {
+    (v as unknown as { e2eNamed: Promise<string> }).e2eNamed = new Promise((resolve) => v.addEventListener("tickwave-annotation", (e) => resolve((e as CustomEvent<{ id: string }>).detail.id), { once: true }));
+  });
+  await page.mouse.click(x, y);
+  const id = await view.evaluate((v) => (v as unknown as { e2eNamed: Promise<string> }).e2eNamed);
+  await expect(page.locator("#note-title")).toHaveText("");
+  release();
+  await expect(page.locator("#note-title")).toHaveText(id);
+});
+
 test("a sidecar's text handed in before the view has loaded is the one it shows", async ({ page }) => {
   await page.goto(`${SITE}open.html`);
   const count = await page.evaluate(async (id) => {

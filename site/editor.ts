@@ -113,6 +113,9 @@ export function attachEditor(view: TickwaveView, info: RecordingInfo, sidecar: S
   /** The id field follows the label until it is typed in. */
   let idTyped = false;
   let starting: Promise<boolean> | null = null;
+  /** While the sidecar is read, the annotation last named in the view: the editor opens on it. */
+  let reading = false;
+  let named: string | null = null;
 
   const fileName = sidecar.file?.name ?? (sidecar.save ?? sidecar.annotations)?.split("/").pop()?.split("?")[0] ?? null;
   const ownName = fileName ? decodeURIComponent(fileName) : `${sidecar.recording.replace(/\.tickwave$/i, "")}.annotations.toml`;
@@ -147,6 +150,7 @@ export function attachEditor(view: TickwaveView, info: RecordingInfo, sidecar: S
   /** Reads the file to edit, or starts one. */
   async function start(): Promise<boolean> {
     state.textContent = "Reading the sidecar";
+    reading = true;
     try {
       let from: string | null = null;
       if (sidecar.save && sidecar.annotations) {
@@ -172,12 +176,24 @@ export function attachEditor(view: TickwaveView, info: RecordingInfo, sidecar: S
     } catch (e) {
       // Said beside the button: the panel stays closed.
       state.textContent = `The sidecar can't be edited here: ${message(e)}`;
+      reading = false;
+      named = null;
       return false;
     }
+    reading = false;
     view.annotationsText = text;
     edit(null);
+    if (named !== null) choose(named);
+    named = null;
     showState();
     return true;
+  }
+
+  /** The editor on annotation `id`, where the sidecar holds it. */
+  function choose(id: string): void {
+    const a = resolved.find((x) => x.id === id);
+    if (!a) return;
+    edit(a.source === null ? { kind: "hand", index: hand.findIndex((h) => h.id === a.id) } : { kind: "generated", id: a.id });
   }
 
   /** Applies `edit`, keeping it only if the sidecar then checks. */
@@ -395,10 +411,8 @@ export function attachEditor(view: TickwaveView, info: RecordingInfo, sidecar: S
   });
   on(byId("note-new"), "click", () => edit({ kind: "new", ref: null }));
   on(view, "tickwave-annotation" as keyof HTMLElementEventMap, ((e: CustomEvent<{ id: string }>) => {
-    if (panel.hidden) return;
-    const a = resolved.find((x) => x.id === e.detail.id);
-    if (!a) return;
-    edit(a.source === null ? { kind: "hand", index: hand.findIndex((h) => h.id === a.id) } : { kind: "generated", id: a.id });
+    if (reading) named = e.detail.id;
+    else if (!panel.hidden) choose(e.detail.id);
   }) as (e: Event) => void);
 
   on(saveButton, "click", async () => {
