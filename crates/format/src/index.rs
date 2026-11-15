@@ -5,6 +5,8 @@
 //! last entry, a directory right after its last page, so a reader in order meets each where the
 //! writer wrote it.
 
+use std::ops::{ControlFlow, Range};
+
 use crate::header::{BlockRow, LEVEL_BIT, OverviewRow};
 use crate::model::{Break, Gap};
 use crate::record::{self, Kind};
@@ -465,6 +467,15 @@ impl<R: Row> TableWriter<R> {
     }
 }
 
+/// A page of a table at depth 0 as `TableIndex::locate` finds it: its place, the entry that lists
+/// it, and the `first` and `number` of the page after it, None for the table's last page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Located {
+    pub j: u64,
+    pub entry: Entry,
+    pub next: Option<(i64, u64)>,
+}
+
 /// A table as a reader finds it: its entries in pages from the top index's, or, for a writer's
 /// snapshot, from the pages no directory lists yet at each depth.
 #[derive(Clone, Debug)]
@@ -538,6 +549,120 @@ impl TableIndex {
             out.push(self.parse_page(0, j as u64, &e, &bytes)?);
         }
         Ok(out)
+    }
+
+    /// Each page at depth 0 that can hold an entry whose `first` lies in `keys`, in order, given to
+    /// `f`; `f` ends the walk early with `Break`. A page holds the entries from its own `first` to
+    /// the next page's. The directory pages on the way are read through `fetch`, one a depth at a
+    /// time, each checked as `pages` checks it; the pages at depth 0 are not read.
+    pub fn locate<E: From<crate::decode::DecodeError>>(
+        &self,
+        keys: Range<i64>,
+        fetch: &mut impl FnMut(u64, u32) -> Result<Vec<u8>, E>,
+        mut f: impl FnMut(Located) -> Result<ControlFlow<()>, E>,
+    ) -> Result<(), E> {
+        self.walk(&keys, fetch, &mut |at, _| f(at))
+    }
+
+    /// Every page at depth 0 in order, each read through `fetch` and checked as `read_all` checks
+    /// it, given to `f` with where it lies; `f` ends the walk early with `Break`. It holds one
+    /// page a depth at a time, so a reader can count a table of any length.
+    pub fn visit<E: From<crate::decode::DecodeError>>(
+        &self,
+        fetch: &mut impl FnMut(u64, u32) -> Result<Vec<u8>, E>,
+        mut f: impl FnMut(Located, Page) -> Result<ControlFlow<()>, E>,
+    ) -> Result<(), E> {
+        self.walk(&(i64::MIN..i64::MAX), fetch, &mut |at, fetch| {
+            let bytes = fetch(at.entry.offset, at.entry.length)?;
+            let page = self.parse_page(0, at.j, &at.entry, &bytes)?;
+            f(at, page)
+        })
+    }
+
+    /// The walk `locate` and `visit` share: the entries no directory lists, deepest first, each
+    /// directory's pages before the pages written after it, and `leaf` for each page at depth 0
+    /// that `keys` reaches.
+    fn walk<E, F>(
+        &self,
+        keys: &Range<i64>,
+        fetch: &mut F,
+        leaf: &mut impl FnMut(Located, &mut F) -> Result<ControlFlow<()>, E>,
+    ) -> Result<(), E>
+    where
+        E: From<crate::decode::DecodeError>,
+        F: FnMut(u64, u32) -> Result<Vec<u8>, E>,
+    {
+        // The entries at each depth that no directory lists follow, in the file, those every
+        // directory above them lists: a writer's directories list only full pages, so the first
+        // of them is page 4,096 × (the pages at the depth above) of its depth.
+        let mut roots = Vec::new();
+        let mut above = 0u64;
+        for d in (0..self.levels.len()).rev() {
+            let base = above.saturating_mul(PAGE as u64);
+            for (i, e) in self.levels[d].iter().enumerate() {
+                roots.push((d as u8, base + i as u64, *e));
+            }
+            above = base + self.levels[d].len() as u64;
+        }
+        for (i, &(depth, j, entry)) in roots.iter().enumerate() {
+            let after = roots.get(i + 1).map(|r| (r.2.first, r.2.number));
+            if self
+                .descend(keys, depth, j, entry, after, fetch, leaf)?
+                .is_break()
+            {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a page's place, its bounds, and the walk's keys, fetch and leaf"
+    )]
+    fn descend<E, F>(
+        &self,
+        keys: &Range<i64>,
+        depth: u8,
+        j: u64,
+        entry: Entry,
+        after: Option<(i64, u64)>,
+        fetch: &mut F,
+        leaf: &mut impl FnMut(Located, &mut F) -> Result<ControlFlow<()>, E>,
+    ) -> Result<ControlFlow<()>, E>
+    where
+        E: From<crate::decode::DecodeError>,
+        F: FnMut(u64, u32) -> Result<Vec<u8>, E>,
+    {
+        if entry.first >= keys.end {
+            return Ok(ControlFlow::Break(()));
+        }
+        if after.is_some_and(|a| a.0 <= keys.start) {
+            return Ok(ControlFlow::Continue(()));
+        }
+        if depth == 0 {
+            let at = Located {
+                j,
+                entry,
+                next: after,
+            };
+            return leaf(at, fetch);
+        }
+        let bytes = fetch(entry.offset, entry.length)?;
+        let Page::Directory(entries) = self.parse_page(depth, j, &entry, &bytes)? else {
+            unreachable!("a page above depth 0 is a directory")
+        };
+        for (i, e) in entries.iter().enumerate() {
+            let next = entries.get(i + 1).map(|n| (n.first, n.number)).or(after);
+            let place = j.saturating_mul(PAGE as u64) + i as u64;
+            if self
+                .descend(keys, depth - 1, place, *e, next, fetch, leaf)?
+                .is_break()
+            {
+                return Ok(ControlFlow::Break(()));
+            }
+        }
+        Ok(ControlFlow::Continue(()))
     }
 
     /// Page `j` of `depth`, listed by `entry`, from exactly its record's bytes. It must be the
@@ -850,5 +975,224 @@ mod tests {
         };
         let err = other.read_all(&mut fetch).unwrap_err().to_string();
         assert!(err.contains("its head differs"), "{err}");
+    }
+
+    /// The rows of block table pages, flattened.
+    fn rows_of<'a>(pages: impl IntoIterator<Item = &'a Page>) -> Vec<BlockRow> {
+        pages
+            .into_iter()
+            .flat_map(|p| match p {
+                Page::Blocks { rows, .. } => rows.clone(),
+                _ => panic!("block pages"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_walk_gives_each_page_where_the_next_starts_and_reads_only_what_its_keys_reach() {
+        for n in [4097, 17 * 4096 + 5] {
+            let (records, top) = written(n);
+            let mut file = vec![0u8; 1 << 20];
+            for r in &records {
+                file.extend_from_slice(&r.record);
+            }
+            let (depth, entries) = top.unwrap();
+            let index = TableIndex::finished(3, Table::Blocks, n, depth, entries);
+            let directories = u64::from(depth) * pages_at(n, 1);
+            let fetched = std::cell::Cell::new(0u64);
+            let mut fetch =
+                |offset: u64, len: u32| -> Result<Vec<u8>, crate::decode::DecodeError> {
+                    fetched.set(fetched.get() + 1);
+                    Ok(file[offset as usize..][..len as usize].to_vec())
+                };
+            let all = index.read_all(&mut fetch).unwrap();
+            let pages = pages_at(n, 0);
+            // Every page in order, each with where the next starts: block i at tick i, two items
+            // each, and the last with none after it.
+            fetched.set(0);
+            let mut seen = Vec::new();
+            index
+                .visit(&mut fetch, |at, page| {
+                    seen.push((at, page));
+                    Ok(ControlFlow::Continue(()))
+                })
+                .unwrap();
+            assert_eq!(
+                fetched.get(),
+                pages + directories,
+                "{n} rows: one read a page"
+            );
+            assert_eq!(seen.len() as u64, pages, "{n} rows");
+            for (j, (at, _)) in seen.iter().enumerate() {
+                let j = j as u64;
+                let start = (j * PAGE as u64) as i64;
+                assert_eq!((at.j, at.entry.first), (j, start), "{n} rows, page {j}");
+                let next =
+                    (j + 1 < pages).then(|| (start + PAGE as i64, 2 * (j + 1) * PAGE as u64));
+                assert_eq!(at.next, next, "{n} rows, page {j}");
+            }
+            assert_eq!(
+                rows_of(seen.iter().map(|s| &s.1)),
+                rows_of(&all),
+                "{n} rows"
+            );
+            // A span inside page 5, one from page 3 to 6, and one from before the table to past
+            // its end: only the pages that hold them, the last holding every later tick, and
+            // only the directory above them read.
+            let last = pages - 1;
+            for (keys, want) in [
+                (5 * 4096 + 10..5 * 4096 + 20, 5.min(last)..6.min(pages)),
+                (3 * 4096 + 4095..6 * 4096 + 1, 3.min(last)..7.min(pages)),
+                (-10..i64::MAX, 0..pages),
+            ] {
+                fetched.set(0);
+                let mut got = Vec::new();
+                index
+                    .locate(keys.clone(), &mut fetch, |at| {
+                        got.push(at.j);
+                        Ok(ControlFlow::Continue(()))
+                    })
+                    .unwrap();
+                assert_eq!(got, want.collect::<Vec<_>>(), "{n} rows, {keys:?}");
+                assert_eq!(
+                    fetched.get(),
+                    directories,
+                    "{n} rows, {keys:?}: no page read"
+                );
+            }
+            // `Break` ends the walk at once.
+            let mut got = 0;
+            index
+                .locate(0..i64::MAX, &mut fetch, |_| {
+                    got += 1;
+                    Ok(ControlFlow::Break(()))
+                })
+                .unwrap();
+            assert_eq!(got, 1, "{n} rows");
+        }
+    }
+
+    /// Directory page `place` of depth 1 listing pages `pages` of a block table whose page j
+    /// starts at tick 4,096 j: its record, and its entry.
+    fn directory(file: &mut Vec<u8>, place: u64, pages: Range<u64>) -> Entry {
+        let entry = |j: u64| Entry {
+            first: (j * PAGE as u64) as i64,
+            number: 2 * j * PAGE as u64,
+            offset: 12 + j,
+            length: 40,
+        };
+        let mut payload = Vec::new();
+        PageHead {
+            channel: 3,
+            table: Table::Blocks.code(),
+            shift: 0,
+            depth: 1,
+            place,
+            count: pages.clone().count() as u32,
+        }
+        .write(&mut payload);
+        for j in pages.clone() {
+            entry(j).write(&mut payload);
+        }
+        let offset = file.len() as u64;
+        record::write(file, Kind::IndexPage, &[&payload]);
+        Entry {
+            offset,
+            length: (file.len() as u64 - offset) as u32,
+            ..entry(pages.start)
+        }
+    }
+
+    /// Past one directory page, a page's next is the first under the next directory, or the
+    /// first of the pages a writer has written since; and those pages take their places after
+    /// every page the directories list. Only the directories are read: the pages they list here
+    /// are not there.
+    #[test]
+    fn a_walk_carries_where_the_next_page_starts_across_directories() {
+        let per = PAGE as u64;
+        let mut file = vec![0u8; 1 << 20];
+        let first = directory(&mut file, 0, 0..per);
+        let second = directory(&mut file, per, per..per + 1);
+        let finished =
+            TableIndex::finished(3, Table::Blocks, (per + 1) * per, 1, vec![first, second]);
+        // A writer's: one directory written, two pages since.
+        let pending = |j: u64| Entry {
+            first: (j * per) as i64,
+            number: 2 * j * per,
+            offset: file.len() as u64 + j,
+            length: 40,
+        };
+        let live = TableIndex {
+            channel: 3,
+            table: Table::Blocks,
+            rows: (per + 2) * per,
+            levels: vec![vec![pending(per), pending(per + 1)], vec![first]],
+        };
+        let mut fetch = |offset: u64, len: u32| -> Result<Vec<u8>, crate::decode::DecodeError> {
+            Ok(file[offset as usize..][..len as usize].to_vec())
+        };
+        for (index, pages) in [(finished, per + 1), (live, per + 2)] {
+            let mut got = Vec::new();
+            index
+                .locate(i64::MIN..i64::MAX, &mut fetch, |at| {
+                    got.push(at);
+                    Ok(ControlFlow::Continue(()))
+                })
+                .unwrap();
+            assert_eq!(got.len() as u64, pages);
+            for (j, at) in got.iter().enumerate() {
+                let j = j as u64;
+                let next = (j + 1 < pages).then(|| (((j + 1) * per) as i64, 2 * (j + 1) * per));
+                assert_eq!((at.j, at.entry.first, at.next), (j, (j * per) as i64, next));
+            }
+        }
+    }
+
+    /// A writer's table before its finish, as a snapshot lists it: the pages written, with the
+    /// rows of its open page left to the snapshot's own list.
+    #[test]
+    fn a_walk_of_a_table_still_written_gives_the_pages_it_has() {
+        let mut t = TableWriter::<BlockRow>::new(3, Table::Blocks, false);
+        let mut file = vec![0u8; 1 << 20];
+        let n = 5 * 4096 + 7;
+        for i in 0..n {
+            let mut due = t.push(BlockRow {
+                start: i as i64,
+                offset: 12 + i,
+                length: 1,
+                decoded_length: 0,
+                word: 2,
+            });
+            while let Some(d) = due {
+                due = t.placed(&d, file.len() as u64);
+                file.extend_from_slice(&d.record);
+            }
+        }
+        let index = TableIndex::of(&t);
+        let mut fetch = |offset: u64, len: u32| -> Result<Vec<u8>, crate::decode::DecodeError> {
+            Ok(file[offset as usize..][..len as usize].to_vec())
+        };
+        let mut seen = Vec::new();
+        index
+            .visit(&mut fetch, |at, page| {
+                seen.push((at.j, at.next, page));
+                Ok(ControlFlow::Continue(()))
+            })
+            .unwrap();
+        let js: Vec<(u64, Option<(i64, u64)>)> = seen.iter().map(|s| (s.0, s.1)).collect();
+        let want: Vec<(u64, Option<(i64, u64)>)> = (0..5u64)
+            .map(|j| {
+                (
+                    j,
+                    (j < 4).then(|| (((j + 1) * 4096) as i64, 2 * (j + 1) * 4096)),
+                )
+            })
+            .collect();
+        assert_eq!(js, want);
+        let pages: Vec<Page> = seen.into_iter().map(|s| s.2).collect();
+        assert_eq!(
+            rows_of(&pages),
+            rows_of(&index.read_all(&mut fetch).unwrap())
+        );
     }
 }

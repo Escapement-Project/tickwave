@@ -161,19 +161,32 @@ pub struct Candidates {
 /// What `of_index` would read of the recording `index` places, from the index alone; None where
 /// it would read nothing.
 pub fn candidates(index: &Index) -> Option<Candidates> {
-    let wanted = wanted(index.header())?;
-    let rows = || {
-        index
-            .blocks
+    let blocks: Vec<(u64, u64)> = index
+        .blocks
+        .iter()
+        .map(|b| {
+            let bytes = b.iter().map(|r| u64::from(r.row.length)).sum();
+            (b.len() as u64, bytes)
+        })
+        .collect();
+    candidates_in(index.header(), &blocks)
+}
+
+/// `candidates` from each channel's block count and the bytes of their frames, by channel index,
+/// for a reader that counts the index a page at a time rather than holding it.
+pub fn candidates_in(header: &Header, blocks: &[(u64, u64)]) -> Option<Candidates> {
+    let wanted = wanted(header)?;
+    let taken = || {
+        blocks
             .iter()
             .zip(&wanted)
             .filter(|(_, w)| **w)
-            .flat_map(|(b, _)| b)
+            .map(|(b, _)| b)
     };
     Some(Candidates {
         channels: wanted.iter().filter(|w| **w).count(),
-        blocks: rows().count(),
-        bytes: rows().map(|b| u64::from(b.row.length)).sum(),
+        blocks: taken().map(|b| b.0 as usize).sum(),
+        bytes: taken().map(|b| b.1).sum(),
     })
 }
 

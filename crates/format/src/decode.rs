@@ -12,7 +12,7 @@ use crate::header::{
     Header, JSON_SAFE, Kept, LEVEL_BIT, MAGIC, MAJOR, OverviewLevel, OverviewRow, PREAMBLE_LEN,
     TRAILER_LEN, Trailer,
 };
-use crate::index::{Entry, Page, TOP, Table, TableIndex, depth_of, pages_at};
+use crate::index::{Entry, Located, PAGE, Page, TOP, Table, TableIndex, depth_of, pages_at};
 use crate::mapping::Mapping;
 use crate::model::{Break, Gap, Ratio, run_sample_tick};
 use crate::overview::{self, BLOCK_BUCKETS, Column, Level};
@@ -940,7 +940,10 @@ pub struct OverviewBlock {
     pub level: Level,
 }
 
-/// A channel's gaps or breaks.
+/// A channel's gaps or breaks: all of them, or those a span of its ticks needs. For a span, a
+/// channel's breaks are the last at or before its start, the one before that, and every one
+/// after it through the first at or past its end; its gaps are the last two starting at or
+/// before its start and every one starting inside it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum List {
     Gaps(Vec<Gap>),
@@ -1495,30 +1498,227 @@ impl Footer {
                 next_word: next.map(|r| r.word),
             });
         }
-        self.check_blocks(c, &out)?;
+        self.check_blocks(c, &out, 0, None)?;
         Ok(out)
+    }
+
+    /// Channel `c`'s blocks on the page `at` locates in its block table, `page` that page as
+    /// `TableIndex::visit` or `parse_page` gives it: each as `block_refs` gives it, but the last
+    /// with no `next_word`, since the next block is on the next page. They are checked to tile
+    /// to where the next page starts or, for the last page, to the length and the channel's
+    /// count, so the pages a reader reads one at a time tile as the whole table does. And they
+    /// are checked as `block_refs` checks them against the channel's gaps or breaks: `list`
+    /// where it is given, which must hold every one the page's ticks need (see `List`), else the
+    /// footer's where it holds them. One thing goes unchecked: the level a page's last block
+    /// leaves, which only the next page's first block states.
+    pub fn block_page(
+        &self,
+        c: usize,
+        at: &Located,
+        page: &Page,
+        list: Option<&List>,
+    ) -> Result<Vec<BlockRef>, DecodeError> {
+        let ch = self
+            .header
+            .channels
+            .get(c)
+            .ok_or_else(|| corrupt(format!("no channel {c}")))?;
+        let Page::Blocks { number, rows } = page else {
+            return Err(corrupt(format!(
+                "channel {c}: a block page holds no blocks"
+            )));
+        };
+        let name = &ch.name;
+        let digital = matches!(ch.data, ChannelKind::Digital { .. });
+        let promised = match ch.data {
+            ChannelKind::Digital { edges, .. } => edges,
+            ChannelKind::Analog { count, .. } => count,
+        };
+        let (end, items_to) = at.next.unwrap_or((self.header.length, promised));
+        let mut out = Vec::with_capacity(rows.len());
+        let mut items = *number;
+        for (i, &row) in rows.iter().enumerate() {
+            let next = rows.get(i + 1);
+            out.push(BlockRef {
+                start: row.start,
+                end: next.map_or(end, |r| r.start),
+                first_index: items,
+                row,
+                next_word: next.map(|r| r.word),
+            });
+            items = items
+                .checked_add(u64::from(row.items(digital)))
+                .ok_or_else(|| corrupt(format!("channel {name}: its items pass 2^64")))?;
+        }
+        if items != items_to || rows.last().is_none_or(|r| r.start >= end) {
+            return Err(corrupt(format!(
+                "channel {name}: index page {} doesn't end where the next starts",
+                at.j
+            )));
+        }
+        self.check_blocks(c, &out, at.j.saturating_mul(PAGE as u64), list)?;
+        Ok(out)
+    }
+
+    /// One page of channel `c`'s gaps or breaks, the page `at` locates in its list's table,
+    /// checked as `load_list` checks the whole list: each entry against the header and the one
+    /// before it, the last against where the next page starts, the first page's first against
+    /// the channel's start, and the last page's last run against the capture's end. So a reader
+    /// can take a list a page at a time. Not checked: that a derived channel's operands' pages
+    /// agree, which `load_list` checks of their whole lists.
+    pub fn list_page(&self, c: usize, at: &Located, page: &Page) -> Result<List, DecodeError> {
+        let ch = self
+            .header
+            .channels
+            .get(c)
+            .ok_or_else(|| corrupt(format!("no channel {c}")))?;
+        let name = &ch.name;
+        let map = self.maps[c];
+        let length = self.header.length;
+        let out_of_place = || {
+            corrupt(format!(
+                "channel {name}: list page {} is out of place",
+                at.j
+            ))
+        };
+        match (&ch.data, page) {
+            (ChannelKind::Digital { initial, end, .. }, Page::Gaps(gaps)) => {
+                // As `check_gaps`: each gap after the one before, the first page's first after
+                // the channel's start; a later page's first was held to its `from` by the page
+                // before.
+                let start = self.channel_starts[c];
+                let mut after = if at.j == 0 { start - 1 } else { i64::MIN };
+                for g in gaps {
+                    if g.from <= after
+                        || g.from < start
+                        || g.to <= g.from
+                        || g.to >= *end
+                        || !maps_inside(&map, g.from, length)
+                        || !maps_inside(&map, g.to, length)
+                    {
+                        return Err(out_of_place());
+                    }
+                    if g.from == start && *initial {
+                        return Err(corrupt(format!(
+                            "channel {name} has a gap from its start but a high initial level"
+                        )));
+                    }
+                    after = g.to;
+                }
+                if let (Some(last), Some((next, _))) = (gaps.last(), at.next)
+                    && last.to >= next
+                {
+                    return Err(out_of_place());
+                }
+                Ok(List::Gaps(gaps.clone()))
+            }
+            (
+                ChannelKind::Analog {
+                    first,
+                    period,
+                    count,
+                    lost_after,
+                    ..
+                },
+                Page::Breaks(breaks),
+            ) => {
+                let outside =
+                    || corrupt(format!("channel {name}'s samples lie outside the capture"));
+                let mut run = (at.j == 0).then_some(Break {
+                    index: 0,
+                    tick: *first,
+                    lost: 0,
+                });
+                if *count == 0 {
+                    return Err(out_of_place());
+                }
+                for b in breaks {
+                    if run.is_some_and(|r| b.index <= r.index)
+                        || b.index >= *count
+                        || !maps_inside(&map, b.tick, length)
+                        || b.lost >= JSON_SAFE
+                    {
+                        return Err(out_of_place());
+                    }
+                    if let Some(r) = run
+                        && run_last(r.tick, *period, b.index - r.index) > b.tick as u128
+                    {
+                        return Err(outside());
+                    }
+                    run = Some(*b);
+                }
+                let Some(last) = run else {
+                    return Err(out_of_place());
+                };
+                match at.next {
+                    Some((tick, index)) => {
+                        if index <= last.index
+                            || run_last(last.tick, *period, index - last.index) > tick as u128
+                        {
+                            return Err(out_of_place());
+                        }
+                    }
+                    None => {
+                        // The last run, as `check_runs` ends.
+                        let end = run_last(last.tick, *period, count - last.index);
+                        if end >= u128::from(JSON_SAFE) || !maps_inside(&map, end as i64, length) {
+                            return Err(outside());
+                        }
+                        if *lost_after > 0 {
+                            let to = place_on(last.tick, *period, count - last.index + lost_after);
+                            if to >= u128::from(JSON_SAFE) || !maps_up_to(&map, to as i64, length) {
+                                return Err(outside());
+                            }
+                        }
+                        check_shaping(ch, last)?;
+                    }
+                }
+                Ok(List::Breaks(breaks.clone()))
+            }
+            _ => Err(out_of_place()),
+        }
     }
 
     /// What a channel's blocks say without being decoded, against its gaps or runs where they
     /// are known: a digital channel's level at each block's start, and an analog channel's
-    /// samples inside each block's ticks.
-    fn check_blocks(&self, c: usize, blocks: &[BlockRef]) -> Result<(), DecodeError> {
+    /// samples inside each block's ticks. `blocks` are the channel's from block `from` on; the
+    /// gaps or breaks are `list` where it is given, else the footer's.
+    fn check_blocks(
+        &self,
+        c: usize,
+        blocks: &[BlockRef],
+        from: u64,
+        list: Option<&List>,
+    ) -> Result<(), DecodeError> {
         let ch = &self.header.channels[c];
         let name = &ch.name;
+        let given_ends;
+        let (gaps, ends) = match list {
+            Some(List::Gaps(g)) => {
+                given_ends = gap_ends(g, &self.maps[c]);
+                (Some(&g[..]), &given_ends[..])
+            }
+            _ => (self.gaps(c), &self.gap_ends[c][..]),
+        };
+        let breaks = match list {
+            Some(List::Breaks(b)) => Some(&b[..]),
+            _ => self.breaks(c),
+        };
         match &ch.data {
             ChannelKind::Digital { initial, .. } => {
-                if blocks[0].row.word & LEVEL_BIT != 0 && !initial
-                    || blocks[0].row.word & LEVEL_BIT == 0 && *initial
+                if from == 0
+                    && (blocks[0].row.word & LEVEL_BIT != 0 && !initial
+                        || blocks[0].row.word & LEVEL_BIT == 0 && *initial)
                 {
                     return Err(corrupt(format!(
                         "channel {name}: block 0 starts at the wrong level"
                     )));
                 }
-                let Some(gaps) = self.gaps(c) else {
+                let Some(gaps) = gaps else {
                     return Ok(());
                 };
-                for (i, w) in blocks.windows(2).enumerate() {
-                    let ending = gaps_ending_in(gaps, &self.gap_ends[c], w[0].start, w[0].end);
+                for (i, w) in (from..).zip(blocks.windows(2)) {
+                    let ending = gaps_ending_in(gaps, ends, w[0].start, w[0].end);
                     let level = w[0].row.word & LEVEL_BIT != 0;
                     let flips = w[0].row.word & 1 != 0;
                     if ending.is_empty() && (w[1].row.word & LEVEL_BIT != 0) != (level ^ flips) {
@@ -1529,24 +1729,12 @@ impl Footer {
                     }
                 }
             }
-            ChannelKind::Analog { first, period, .. } => {
-                let Some(breaks) = self.breaks(c) else {
+            ChannelKind::Analog { .. } => {
+                let Some(breaks) = breaks else {
                     return Ok(());
                 };
-                let map = self.maps[c];
-                for (i, b) in blocks.iter().enumerate() {
-                    let n = u64::from(b.row.word);
-                    if n == 0 {
-                        continue;
-                    }
-                    let tick = |index| map.axis(run_sample_tick(*first, *period, breaks, index));
-                    if tick(b.first_index).is_none_or(|t| t < b.start)
-                        || tick(b.first_index + n - 1).is_none_or(|t| t >= b.end)
-                    {
-                        return Err(corrupt(format!(
-                            "channel {name}: block {i}'s samples lie outside its ticks"
-                        )));
-                    }
+                for b in blocks {
+                    self.samples_inside(c, b, breaks)?;
                 }
             }
         }
@@ -1599,6 +1787,54 @@ impl Footer {
             || out.last().is_none_or(|r| r.row.n != 1)
         {
             return Err(bad().into());
+        }
+        Ok(out)
+    }
+
+    /// Overview channel `o`'s level `li`'s rows on the page `at` locates in its table, `page` that
+    /// page: each with the first block it stands for, checked as `level_refs` checks them,
+    /// against where the next page starts or, for the last page, the level's blocks.
+    pub fn level_page(
+        &self,
+        o: usize,
+        li: usize,
+        at: &Located,
+        page: &Page,
+    ) -> Result<Vec<LevelRef>, DecodeError> {
+        let ch = self
+            .channels
+            .get(o)
+            .ok_or_else(|| corrupt(format!("no channel {o}")))?;
+        let (level, _) = ch
+            .levels
+            .get(li)
+            .ok_or_else(|| corrupt(format!("channel {o} has no overview level {li} in blocks")))?;
+        let bad = || {
+            corrupt(format!(
+                "channel {o}: overview level 2^{}'s page {} doesn't stand for its blocks",
+                level.shift, at.j
+            ))
+        };
+        let Page::Level { k: first, rows } = page else {
+            return Err(bad());
+        };
+        let blocks_to = match at.next {
+            Some((k, _)) => u64::try_from(k).map_err(|_| bad())?,
+            None => level.blocks,
+        };
+        let mut out = Vec::with_capacity(rows.len());
+        let mut k = *first;
+        for &row in rows {
+            let (_, n) = overview::block_buckets(self.header.length, level.shift, k);
+            if n == 0 || u64::from(row.decoded_length) != ch.column.decoded_len(n) {
+                return Err(bad());
+            }
+            out.push(LevelRef { k, row });
+            k = k.checked_add(u64::from(row.n)).ok_or_else(bad)?;
+        }
+        let last = at.next.is_none() && out.last().is_none_or(|r| r.row.n != 1);
+        if k != blocks_to || last {
+            return Err(bad());
         }
         Ok(out)
     }
@@ -1673,6 +1909,66 @@ impl Footer {
         frame: &[u8],
         inflate: impl Fn(&[u8], usize) -> Result<Vec<u8>, DecodeError>,
     ) -> Result<Block, DecodeError> {
+        let gaps = self.gaps(c).map(|g| (g, &self.gap_ends[c][..]));
+        self.decode_checked(c, b, frame, inflate, gaps)
+    }
+
+    /// `decode_block` checked against `list`, the channel's gaps or breaks that the block's
+    /// ticks need (see `List`), which the footer may not hold: a digital block's edges outside
+    /// its gaps and the level it leaves, as `decode_block` checks them, and an analog block's
+    /// samples inside its ticks, as `block_refs` checks them.
+    pub fn decode_block_in(
+        &self,
+        c: usize,
+        b: &BlockRef,
+        frame: &[u8],
+        list: &List,
+    ) -> Result<Block, DecodeError> {
+        let map = self.maps.get(c).copied().unwrap_or(Mapping::IDENTITY);
+        match list {
+            List::Gaps(gaps) => {
+                let ends = gap_ends(gaps, &map);
+                self.decode_checked(c, b, frame, inflate, Some((gaps, &ends)))
+            }
+            List::Breaks(breaks) => {
+                let block = self.decode_checked(c, b, frame, inflate, None)?;
+                self.samples_inside(c, b, breaks)?;
+                Ok(block)
+            }
+        }
+    }
+
+    /// Whether block `b` of analog channel `c` holds its samples inside its ticks, by `breaks`.
+    fn samples_inside(&self, c: usize, b: &BlockRef, breaks: &[Break]) -> Result<(), DecodeError> {
+        let ch = &self.header.channels[c];
+        let ChannelKind::Analog { first, period, .. } = &ch.data else {
+            return Ok(());
+        };
+        let n = u64::from(b.row.word);
+        if n == 0 {
+            return Ok(());
+        }
+        let map = self.maps[c];
+        let tick = |index| map.axis(run_sample_tick(*first, *period, breaks, index));
+        if tick(b.first_index).is_none_or(|t| t < b.start)
+            || tick(b.first_index + n - 1).is_none_or(|t| t >= b.end)
+        {
+            return Err(corrupt(format!(
+                "channel {}: the block at tick {}: its samples lie outside its ticks",
+                ch.name, b.start
+            )));
+        }
+        Ok(())
+    }
+
+    fn decode_checked(
+        &self,
+        c: usize,
+        b: &BlockRef,
+        frame: &[u8],
+        inflate: impl Fn(&[u8], usize) -> Result<Vec<u8>, DecodeError>,
+        gaps: Option<(&[Gap], &[i64])>,
+    ) -> Result<Block, DecodeError> {
         let ch = self
             .header
             .channels
@@ -1705,13 +2001,13 @@ impl Footer {
             ))
         };
         let data = decode_section(&raw, &section, b.row.word, b.start, b.end).map_err(bad)?;
-        if let (BlockChannel::Digital { initial, .. }, Some(gaps)) = (&data, self.gaps(c)) {
+        if let (BlockChannel::Digital { initial, .. }, Some((gaps, ends))) = (&data, gaps) {
             let edges = data.source_ticks().unwrap_or_default();
             if let Some(t) = edge_in_gap(edges, gaps) {
                 return Err(bad(format!("an edge at source tick {t} lies inside a gap")));
             }
             if let Some(next) = b.next_word {
-                let ending = gaps_ending_in(gaps, &self.gap_ends[c], b.start, b.end);
+                let ending = gaps_ending_in(gaps, ends, b.start, b.end);
                 if level_after(*initial, edges, ending) != (next & LEVEL_BIT != 0) {
                     return Err(bad("the next block starts at the wrong level".into()));
                 }

@@ -7,6 +7,7 @@ mod open;
 use std::cell::RefCell;
 use std::fs;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -818,11 +819,121 @@ fn seconds(ticks: i64, header: &Header) -> String {
     }
 }
 
+/// Frames below this many bytes are counted by length for `info`'s median; one this long or
+/// longer takes as many bytes of the file, so the longer ones held one by one are few.
+const SHORT_FRAME: usize = 1 << 16;
+
+/// The frames `info` describes: every block's length for the median, each channel's blocks and
+/// their bytes, and each overview channel's rows in overview blocks and their bytes.
+struct Sizes {
+    short: Vec<u64>,
+    long: Vec<u32>,
+    blocks: Vec<(u64, u64)>,
+    overview: Vec<(u64, u64)>,
+}
+
+impl Sizes {
+    fn new(footer: &Footer) -> Self {
+        Self {
+            short: vec![0; SHORT_FRAME],
+            long: Vec::new(),
+            blocks: vec![(0, 0); footer.header.channels.len()],
+            overview: vec![(0, 0); footer.channels.len()],
+        }
+    }
+
+    fn block(&mut self, c: usize, length: u32) {
+        match self.short.get_mut(length as usize) {
+            Some(n) => *n += 1,
+            None => self.long.push(length),
+        }
+        self.blocks[c].0 += 1;
+        self.blocks[c].1 += u64::from(length);
+    }
+
+    fn row(&mut self, o: usize, length: u32) {
+        self.overview[o].0 += 1;
+        self.overview[o].1 += u64::from(length);
+    }
+
+    /// Every channel's blocks a page at a time, each page checked as a whole index read is and
+    /// dropped once counted, so a recording of any length is described in bounded memory.
+    fn read(footer: &Footer, input: &dyn escapement_tickwave_import::input::Input) -> Result<Self> {
+        let mut sizes = Self::new(footer);
+        let mut fetch = escapement_tickwave_import::recording::fetch(input);
+        for (c, ch) in footer.channels.iter().enumerate() {
+            if let Some(table) = &ch.blocks {
+                table.visit(&mut fetch, |at, page| {
+                    for b in footer.block_page(c, &at, &page, None)? {
+                        sizes.block(c, b.row.length);
+                    }
+                    Ok::<_, DecodeError>(ControlFlow::Continue(()))
+                })?;
+            }
+            for (li, (_, table)) in ch.levels.iter().enumerate() {
+                table.visit(&mut fetch, |at, page| {
+                    for r in footer.level_page(c, li, &at, &page)? {
+                        sizes.row(c, r.row.length);
+                    }
+                    Ok::<_, DecodeError>(ControlFlow::Continue(()))
+                })?;
+            }
+        }
+        Ok(sizes)
+    }
+
+    fn of_index(index: &Index) -> Self {
+        let mut sizes = Self::new(&index.footer);
+        for (c, blocks) in index.blocks.iter().enumerate() {
+            for b in blocks {
+                sizes.block(c, b.row.length);
+            }
+        }
+        for (o, levels) in index.levels.iter().enumerate() {
+            for r in levels.iter().flatten() {
+                sizes.row(o, r.row.length);
+            }
+        }
+        sizes
+    }
+
+    fn count(&self) -> u64 {
+        self.blocks.iter().map(|b| b.0).sum()
+    }
+
+    fn total(&self) -> u64 {
+        self.blocks.iter().map(|b| b.1).sum()
+    }
+
+    fn min(&self) -> Option<u32> {
+        let short = self.short.iter().position(|&n| n > 0).map(|l| l as u32);
+        short.or_else(|| self.long.iter().min().copied())
+    }
+
+    fn max(&self) -> Option<u32> {
+        let long = self.long.iter().max().copied();
+        long.or_else(|| self.short.iter().rposition(|&n| n > 0).map(|l| l as u32))
+    }
+
+    /// The length at place n / 2 of every block's in order, 0 for none.
+    fn median(&mut self) -> u32 {
+        let mut rank = self.count() / 2;
+        for (length, &n) in self.short.iter().enumerate() {
+            if rank < n {
+                return length as u32;
+            }
+            rank -= n;
+        }
+        self.long.sort_unstable();
+        self.long.get(rank as usize).copied().unwrap_or(0)
+    }
+}
+
 /// What `info` prints of the recording `head` ends, `len` bytes long. It reads the index from
-/// `input`, and only `drift` reads blocks.
+/// `input` a page at a time, and only `drift` reads blocks, holding the index whole to do so.
 fn write_info(
     out: &mut impl Write,
-    head: Footer,
+    mut head: Footer,
     len: u64,
     json: bool,
     input: &dyn escapement_tickwave_import::input::Input,
@@ -830,28 +941,33 @@ fn write_info(
 ) -> Result<()> {
     let fetch = || escapement_tickwave_import::recording::fetch(input);
     let bundled = head.read_bundle(fetch())?;
-    let index = Index::read(head, fetch())?;
-    let (head, h) = (&index.footer, index.header());
-    let drifts = drift.then(|| drift::of_index(input, &index)).transpose()?;
-    let candidates = drift::candidates(&index);
-    let mut lengths: Vec<u32> = index
-        .blocks
-        .iter()
-        .flatten()
-        .map(|b| b.row.length)
-        .collect();
-    lengths.sort_unstable();
-    let median = lengths.get(lengths.len() / 2).copied().unwrap_or(0);
-    let blocks_total: u64 = lengths.iter().map(|&l| u64::from(l)).sum();
-    let overview_rows = index.levels.iter().flatten().flatten();
-    let overview_count = overview_rows.clone().count();
-    let overview_total: u64 = overview_rows.map(|r| u64::from(r.row.length)).sum();
+    let (head, drifts, mut sizes) = if drift {
+        let index = Index::read(head, fetch())?;
+        let drifts = drift::of_index(input, &index)?;
+        let sizes = Sizes::of_index(&index);
+        (index.footer, Some(drifts), sizes)
+    } else {
+        head.load_lists(fetch())?;
+        let sizes = Sizes::read(&head, input)?;
+        (head, None, sizes)
+    };
+    let (head, h) = (&head, &head.header);
+    let candidates = drift::candidates_in(h, &sizes.blocks);
+    let (median, blocks_total, blocks, min, max) = (
+        sizes.median(),
+        sizes.total(),
+        sizes.count(),
+        sizes.min(),
+        sizes.max(),
+    );
+    let overview_count: u64 = sizes.overview.iter().map(|r| r.0).sum();
+    let overview_total: u64 = sizes.overview.iter().map(|r| r.1).sum();
     if json {
         let report = serde_json::json!({
             "header": h,
             "file_bytes": len,
             "footer_bytes": head.trailer.footer_len,
-            "block_bytes": { "total": blocks_total, "min": lengths.first(), "median": median, "max": lengths.last() },
+            "block_bytes": { "total": blocks_total, "min": min, "median": median, "max": max },
             "overview_block_bytes": { "count": overview_count, "total": overview_total },
             "drift_candidates": candidates.map(|c| serde_json::json!({
                 "channels": c.channels,
@@ -980,12 +1096,11 @@ fn write_info(
     }
     writeln!(
         out,
-        "{:.3} MB: footer {} bytes, {} blocks of {}-{} bytes, median {median}",
+        "{:.3} MB: footer {} bytes, {blocks} blocks of {}-{} bytes, median {median}",
         len as f64 / 1e6,
         head.trailer.footer_len,
-        lengths.len(),
-        lengths.first().unwrap_or(&0),
-        lengths.last().unwrap_or(&0),
+        min.unwrap_or(0),
+        max.unwrap_or(0),
     )?;
     let names = h
         .channels
@@ -1000,13 +1115,11 @@ fn write_info(
             continue;
         }
         let shifts: Vec<String> = levels.iter().map(|l| format!("2^{}", l.shift)).collect();
-        let rows = index.levels[o].iter().flatten();
+        let (rows, bytes) = sizes.overview[o];
         writeln!(
             out,
-            "  {name:<12} overview levels {} in {} blocks, {} bytes, strip at 2^{strip}",
+            "  {name:<12} overview levels {} in {rows} blocks, {bytes} bytes, strip at 2^{strip}",
             shifts.join(", "),
-            rows.clone().count(),
-            rows.map(|r| u64::from(r.row.length)).sum::<u64>()
         )?;
     }
     for (k, v) in &h.meta {
@@ -2125,6 +2238,116 @@ mod tests {
             "{out}"
         );
         assert!(!out.contains("--drift"), "{out}");
+    }
+
+    /// The median, least and greatest of lengths below and above the counted ones, against the
+    /// lengths sorted: each count of a short length is a rank, and the long ones are held.
+    #[test]
+    fn info_takes_the_median_of_every_block_length_counted_or_held() {
+        let energy = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../web/fixtures/energy.tickwave"
+        );
+        let footer = Footer::parse_file(&fs::read(energy).unwrap()).unwrap();
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        for n in [1usize, 2, 3, 10, 1001] {
+            for long in [0u64, 1, 2, 3] {
+                let mut sizes = Sizes::new(&footer);
+                let mut all = Vec::new();
+                for i in 0..n {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    // Every long-th length past the counted ones, the rest below them.
+                    let l = if long > 0 && x % 4 < long {
+                        SHORT_FRAME as u32 + (x >> 40) as u32
+                    } else {
+                        (x >> 48) as u32
+                    };
+                    sizes.block(i % 2, l);
+                    all.push(l);
+                }
+                all.sort_unstable();
+                let at = format!("{n} lengths, {long} in 4 long");
+                assert_eq!(sizes.min(), all.first().copied(), "{at}");
+                assert_eq!(sizes.max(), all.last().copied(), "{at}");
+                assert_eq!(sizes.median(), all[n / 2], "{at}");
+                assert_eq!(sizes.count(), n as u64, "{at}");
+            }
+        }
+    }
+
+    /// A channel's 70,000 blocks, in 18 pages under a directory, and its overview level's rows
+    /// in two pages: `info` counts them a page at a time as the whole index gives them.
+    #[test]
+    fn info_counts_an_index_a_page_at_a_time_as_the_whole_index_gives_it() {
+        use escapement_tickwave_format::header::{Declaration, DeclaredChannel, DeclaredKind};
+        use escapement_tickwave_format::model::Ratio;
+        use escapement_tickwave_format::writer::{Finish, Writer};
+        let timebase = Ratio::integer(1_000_000_000).unwrap();
+        let digital = |name: &str, shift| DeclaredChannel {
+            name: name.into(),
+            source_name: name.into(),
+            source: 0,
+            data: DeclaredKind::Digital { initial: false },
+            shaping: Default::default(),
+            overview_shift: shift,
+        };
+        let d = Declaration {
+            timebase,
+            channels: vec![digital("D", None), digital("L", Some(0))],
+            derived: Vec::new(),
+            sources: vec![SourceHeader::new(SourceFormat::Other("t".into()), timebase)],
+            title: None,
+            meta: Default::default(),
+            overview_shift: 40,
+        };
+        let options = WriteOptions {
+            block_bytes: 1,
+            promise_with_items: true,
+            level: 1,
+            ..WriteOptions::default()
+        };
+        let mut w = Writer::new(d, options).unwrap();
+        let mut file = w.take_output();
+        // D's edges a block each; L's one in each 4,096-tick overview block, each in another
+        // place, so its 4,100 rows are all apart.
+        let mut edges: Vec<(i64, usize)> = (0..70_000i64).map(|k| (10 * k, 0)).collect();
+        edges.extend((0..4_100i64).map(|k| (k * 4096 + 1 + (k * 37) % 4000, 1)));
+        edges.sort();
+        for (t, c) in edges {
+            w.edge(c, t).unwrap();
+            file.extend(w.take_output());
+        }
+        let length = 4_101 * 4096;
+        file.extend(
+            &w.finish(length, &[length, length], Finish::default())
+                .unwrap()
+                .tail,
+        );
+        let len = file.len() as u64;
+        let info = |drift: bool, json: bool| {
+            let mut out = Vec::new();
+            let head = Footer::parse_file(&file).unwrap();
+            write_info(&mut out, head, len, json, &file, drift).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        let report =
+            |drift| -> serde_json::Value { serde_json::from_str(&info(drift, true)).unwrap() };
+        let (paged, whole) = (report(false), report(true));
+        assert_eq!(paged["block_bytes"], whole["block_bytes"]);
+        assert_eq!(paged["overview_block_bytes"], whole["overview_block_bytes"]);
+        // At shifts 0, 4, 8 and 12, the last of 2^0's 4,101 blocks holding no edge.
+        assert_eq!(whole["overview_block_bytes"]["count"], 4_101 + 257 + 17 + 2);
+        let lines = |text: String| -> Vec<String> {
+            text.lines()
+                .filter(|l| l.contains("blocks"))
+                .map(str::to_owned)
+                .collect()
+        };
+        let text = lines(info(false, false));
+        assert!(text.iter().any(|l| l.contains("74101 blocks")), "{text:?}");
+        assert_eq!(text, lines(info(true, false)));
     }
 
     /// Runs `tickwave` as a user would, with `args`.
