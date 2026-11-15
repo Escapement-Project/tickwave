@@ -23,14 +23,10 @@ fn main() {
                         b.head, b.frame_offset, b.frame_len
                     ),
                     Event::OverviewBlock {
-                        shift,
-                        k,
+                        head,
                         frame_offset,
                         frame,
-                    } => format!(
-                        "overview block shift {shift} k {k} at {frame_offset}+{}",
-                        frame.len()
-                    ),
+                    } => format!("overview block {head:?} at {frame_offset}+{}", frame.len()),
                     Event::Footer(f) =>
                         format!("footer {}", serde_json::to_string(&f.header).unwrap()),
                     other => format!("{other:?}"),

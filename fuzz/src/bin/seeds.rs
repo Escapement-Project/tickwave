@@ -194,7 +194,6 @@ fn main() {
             level: 1,
             ..merge::Settings::default()
         },
-        64 << 20,
         &Quiet,
         &mut out,
     )
@@ -223,7 +222,6 @@ fn main() {
             keeps: vec![(channels[0].clone(), Some("10".into()), Some("200".into()))],
             ..Settings::default()
         },
-        64 << 20,
         &Quiet,
         &mut out,
     )

@@ -1,7 +1,7 @@
 //! `verify --against`: a recording's header checked against what it says it came from, rebuilt
 //! by `merge::expected` from two fixtures, or shaped by `Plan::of_header` from a capture. And a
 //! recording that opens bundled with a sidecar, and merged with a fixture, as convert-wasm's
-//! `merge` does.
+//! `merge` does, the merge then verified against its inputs.
 #![no_main]
 
 use std::sync::Arc;
@@ -9,6 +9,7 @@ use std::sync::Arc;
 use escapement_tickwave_format::bundle;
 use escapement_tickwave_format::decode::Footer;
 use escapement_tickwave_format::model::Recording;
+use escapement_tickwave_format::verify::verify_limited;
 use escapement_tickwave_import::convert::{Pass, Progress, Step};
 use escapement_tickwave_import::shape::Plan;
 use escapement_tickwave_import::{merge, recording, vcd};
@@ -43,7 +44,7 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     let sidecar = std::collections::BTreeMap::from([("r.annotations.toml".to_owned(), "x".into())]);
-    if let Ok(bundled) = bundle::bundle(&file, &footer, sidecar) {
+    if let Ok(bundled) = bundle::bundle(&file, &footer, sidecar, 1) {
         Footer::parse_file(&bundled).expect("a bundled file reads");
     }
     let h = &footer.header;
@@ -61,8 +62,17 @@ fuzz_target!(|data: &[u8]| {
             ..merge::Settings::default()
         };
         let mut out = std::io::Cursor::new(Vec::new());
-        if merge::merge(&open, &settings, 1 << 20, &Quiet, &mut out).is_ok() {
+        if let Ok(merged) = merge::merge(&open, &settings, &Quiet, &mut out) {
             Footer::parse_file(out.get_ref()).expect("a merged file reads");
+            // What `merge` checked of its output before it left that to `tickwave verify`.
+            if let Ok(inputs) = open()
+                && let Ok(expected) = merge::expected(
+                    &merged.header,
+                    inputs.into_iter().map(|i| i.recording).collect(),
+                )
+            {
+                let _ = verify_limited(&out.get_ref()[..], expected, 1 << 20);
+            }
         }
     } else if mode & 1 == 0 {
         if let Ok(r) = merge::expected(h, vec![read(SWD), read(ENERGY)]) {

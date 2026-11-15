@@ -5,7 +5,7 @@
 use escapement_tickwave_format::decode::Footer;
 use escapement_tickwave_format::reader::{Ending, Reader};
 use escapement_tickwave_format::recut::Recutter;
-use escapement_tickwave_format::writer::{Bundle, WriteOptions};
+use escapement_tickwave_format::writer::{Bundle, Compression, WriteOptions};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -14,7 +14,12 @@ fuzz_target!(|data: &[u8]| {
     let mut r = Recutter::new(WriteOptions {
         level: 1,
         block_bytes: 16 << (knob & 15),
-        batch: 1 + usize::from(knob >> 6),
+        compression: if knob >> 6 == 0 {
+            Compression::Spread
+        } else {
+            Compression::Offload
+        },
+        ..WriteOptions::default()
     });
     if knob & 16 != 0 {
         r.bundle(Bundle::Generated { stem: "r".into() });

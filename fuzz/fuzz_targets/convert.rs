@@ -6,6 +6,8 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 use escapement_tickwave_format::decode::Footer;
+use escapement_tickwave_format::model::Recording;
+use escapement_tickwave_format::verify::verify_limited;
 use escapement_tickwave_import::convert::{self, Pass, Progress, Settings, Step};
 use escapement_tickwave_import::{saleae, sigrok, vcd};
 use libfuzzer_sys::fuzz_target;
@@ -18,6 +20,8 @@ impl Progress for Quiet {
     }
 }
 
+type Open<'a> = Box<dyn Fn() -> Result<Recording, convert::Error> + 'a>;
+
 fuzz_target!(|data: &[u8]| {
     let [kind, knob, rest @ ..] = data else {
         return;
@@ -28,8 +32,7 @@ fuzz_target!(|data: &[u8]| {
         codes: knob & 8 != 0,
         ..Settings::default()
     };
-    let mut out = Cursor::new(Vec::new());
-    let converted = match kind % 3 {
+    let open: Open<'_> = match kind % 3 {
         0 => {
             let [rate, export @ ..] = rest else {
                 return;
@@ -43,25 +46,22 @@ fuzz_target!(|data: &[u8]| {
             let Ok(export) = convert::check_saleae(headers, &Quiet) else {
                 return;
             };
-            convert::convert(
-                &|| Ok(export.recording()),
-                &settings,
-                1 << 20,
-                &Quiet,
-                &mut out,
-            )
+            Box::new(move || Ok(export.recording()))
         }
         1 => {
             let bytes: Arc<[u8]> = escapement_tickwave_fuzz::session(rest).into();
-            let open = || Ok(sigrok::read_bytes(Arc::clone(&bytes), "f.sr")?.recording);
-            convert::convert(&open, &settings, 1 << 20, &Quiet, &mut out)
+            Box::new(move || Ok(sigrok::read_bytes(Arc::clone(&bytes), "f.sr")?.recording))
         }
-        _ => {
-            let open = || Ok(vcd::read_from(rest, "f.vcd")?.recording);
-            convert::convert(&open, &settings, 1 << 20, &Quiet, &mut out)
-        }
+        _ => Box::new(|| Ok(vcd::read_from(rest, "f.vcd")?.recording)),
     };
-    if converted.is_ok() {
+    let mut out = Cursor::new(Vec::new());
+    if convert::convert(&*open, &settings, &Quiet, &mut out).is_ok() {
         Footer::parse_file(out.get_ref()).expect("a converted file reads");
+        // What `convert` checked of its output before it left that to `tickwave verify`. The
+        // settings neither move, cut nor set units, so the source as read is what it checked
+        // against.
+        if let Ok(source) = open() {
+            let _ = verify_limited(&out.get_ref()[..], source, 1 << 20);
+        }
     }
 });

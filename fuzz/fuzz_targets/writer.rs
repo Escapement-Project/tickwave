@@ -17,7 +17,7 @@ use escapement_tickwave_format::header::{
 use escapement_tickwave_format::mapping::Mapping;
 use escapement_tickwave_format::model::{Gap, Ratio, Sample, sample_tick};
 use escapement_tickwave_format::reader::{Ending, Reader};
-use escapement_tickwave_format::writer::{Bundle, Finish, WriteOptions, Writer};
+use escapement_tickwave_format::writer::{Bundle, Compression, Finish, WriteOptions, Writer};
 use escapement_tickwave_view::{Bytes, Cache, Query, Recording};
 use libfuzzer_sys::fuzz_target;
 
@@ -65,9 +65,10 @@ struct Chan {
 }
 
 /// A tick some way on from the last. `Far` and `Pow` reach at most 2^(shift + 22) ticks on,
-/// 1,024 overview blocks of the finest level: a span near the most tickwave keeps writes a
-/// million blocks alike, seconds of an instrumented build's time for no new path. `Wild` still
-/// reaches every tick, the bound's past included, and the format's tests write at the bound.
+/// 1,024 overview blocks of the finest channel's finest level: a span near the most tickwave
+/// keeps writes a million blocks alike, seconds of an instrumented build's time for no new path.
+/// `Wild` still reaches every tick, the bound's past included, and the format's tests write at
+/// the bound.
 #[derive(Arbitrary, Debug)]
 enum Tick {
     Step(u8),
@@ -127,13 +128,20 @@ struct Plan {
     shift: u8,
     shaped: bool,
     block_bytes: u16,
-    batch: u8,
+    /// Bit 0: each item promises its own tick. Bit 1: frames compress on rayon's threads.
+    writing: u8,
     ops: Vec<Op>,
     length: Tick,
     ends: Vec<Tick>,
     bundle: u8,
     drop_gaps: bool,
     extra: Option<(u8, String)>,
+    // Added after the corpus was made, and last, so that its inputs decode as they did up to
+    // `extra`.
+    /// Each channel's finest overview shift, by channel; None takes the recording's.
+    shifts: Vec<Option<u8>>,
+    /// Samples lost after an analog channel's last, by channel.
+    lost_after: Vec<(u8, u16)>,
 }
 
 fn ratio((n, d): (u32, u16)) -> Ratio {
@@ -215,6 +223,7 @@ fn declaration(p: &Plan) -> Declaration {
                 }),
                 kept: None,
             },
+            overview_shift: p.shifts.get(i).copied().flatten().map(|s| s % 63),
         })
         .collect();
     let derived = p
@@ -321,7 +330,12 @@ fuzz_target!(|p: Plan| {
     let options = WriteOptions {
         level: 1,
         block_bytes: usize::from(p.block_bytes),
-        batch: usize::from(p.batch % 4),
+        promise_with_items: p.writing & 1 != 0,
+        compression: if p.writing & 2 != 0 {
+            Compression::Offload
+        } else {
+            Compression::Spread
+        },
     };
     let Ok(mut w) = Writer::new(d, options) else {
         return;
@@ -334,7 +348,14 @@ fuzz_target!(|p: Plan| {
     let cancel = AtomicBool::new(false);
     // The latest axis tick of an item the writer took.
     let mut last_axis = 0i64;
-    let cap = (u32::from(w.declaration().overview_shift) + 22).min(62);
+    let shift = w.declaration().overview_shift;
+    let finest = w
+        .declaration()
+        .channels
+        .iter()
+        .map(|c| c.overview_shift.unwrap_or(shift))
+        .fold(shift, u8::min);
+    let cap = (u32::from(finest) + 22).min(62);
     let on = |base: i64, at: &Tick| -> i64 {
         match *at {
             Tick::Step(s) => base.saturating_add(i64::from(s)),
@@ -473,10 +494,16 @@ fuzz_target!(|p: Plan| {
             }
             Op::Snapshot => {
                 let snapshot = w.snapshot();
-                let _ = snapshot.open_block();
-                let _ = snapshot.queued_blocks();
-                for level in 0..snapshot.overview_blocks().len() {
-                    let _ = snapshot.queued_overview_blocks(level);
+                for c in 0..n {
+                    let _ = snapshot.unwritten_blocks(c);
+                }
+                for o in 0.. {
+                    let Some(overview) = snapshot.overview(o) else {
+                        break;
+                    };
+                    for li in 0..overview.levels.len() {
+                        let _ = snapshot.unwritten_overview(o, li);
+                    }
                 }
                 take(&mut w);
                 let view = match live.as_mut() {
@@ -530,6 +557,11 @@ fuzz_target!(|p: Plan| {
             )]))),
         },
         drop_gaps_past_end: p.drop_gaps,
+        lost_after: p
+            .lost_after
+            .iter()
+            .map(|&(c, lost)| (usize::from(c) % n.max(1), u64::from(lost)))
+            .collect(),
     };
     take(&mut w);
     let length = axis_tick(last_axis + 1, &p.length);
