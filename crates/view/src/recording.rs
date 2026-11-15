@@ -144,6 +144,9 @@ pub(crate) enum Place {
         breaks: Vec<Break>,
         /// The samples the breaks say were lost, summed.
         lost: u64,
+        /// The samples lost before the first and after the last (FORMAT.md, "Gaps").
+        lost_before: u64,
+        lost_after: u64,
         /// Where the last sample's time ends on the axis, or the first sample's tick with none.
         end: i64,
         rule: Rule,
@@ -422,11 +425,14 @@ fn digital_place(initial: bool, start: i64, end: i64, gaps: &[Gap], map: Mapping
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn analog_place(
     first: i64,
     period: Ratio,
     count: u64,
     breaks: Vec<Break>,
+    lost_before: u64,
+    lost_after: u64,
     length: i64,
     rule: Rule,
     map: Mapping,
@@ -449,6 +455,8 @@ fn analog_place(
         count,
         breaks,
         lost,
+        lost_before,
+        lost_after,
         end,
         rule,
         map,
@@ -468,6 +476,8 @@ fn add_derived(
             count,
             breaks,
             lost,
+            lost_before,
+            lost_after,
             end,
             map,
             ..
@@ -481,6 +491,8 @@ fn add_derived(
             count: *count,
             breaks: breaks.clone(),
             lost: *lost,
+            lost_before: *lost_before,
+            lost_after: *lost_after,
             end: *end,
             rule: Rule::Product(product),
             map: *map,
@@ -535,6 +547,8 @@ fn header_channels(footer: &Footer) -> Built {
                 count,
                 coding,
                 significant,
+                lost_before,
+                lost_after,
                 ..
             } => {
                 built
@@ -545,6 +559,8 @@ fn header_channels(footer: &Footer) -> Built {
                     *period,
                     *count,
                     footer.breaks(i).unwrap_or_default().to_vec(),
+                    *lost_before,
+                    *lost_after,
                     h.length,
                     Rule::Coding(*coding),
                     map,
@@ -775,6 +791,8 @@ impl Recording {
                         0,
                         Vec::new(),
                         0,
+                        0,
+                        0,
                         Rule::Coding(*coding),
                         map,
                     ));
@@ -945,6 +963,7 @@ impl Recording {
                         count,
                         breaks,
                         lost,
+                        lost_before,
                         map,
                         ..
                     },
@@ -956,6 +975,7 @@ impl Recording {
                     for r in snapshot.runs_from(c, seen.runs[c]) {
                         if seen.runs[c] == 0 {
                             *first = r.tick;
+                            *lost_before = r.lost;
                         } else {
                             breaks.push(*r);
                             *lost += r.lost;
@@ -1010,6 +1030,7 @@ impl Recording {
                     count,
                     breaks,
                     lost,
+                    lost_before,
                     map,
                     ..
                 },
@@ -1019,6 +1040,7 @@ impl Recording {
                     count: d_count,
                     breaks: d_breaks,
                     lost: d_lost,
+                    lost_before: d_lost_before,
                     end: d_end,
                     ..
                 },
@@ -1038,7 +1060,8 @@ impl Recording {
                 0 => runs.start(),
                 n => (*length).min(place_after(&runs, n - 1)),
             };
-            (*d_first, *d_count, *d_lost, *d_end) = (*first, n, *lost, end);
+            (*d_first, *d_count, *d_lost, *d_lost_before, *d_end) =
+                (*first, n, *lost, *lost_before, end);
             d_breaks.extend_from_slice(&breaks[d_breaks.len()..]);
         }
 
@@ -1188,6 +1211,25 @@ impl Recording {
     pub fn lost(&self, channel: usize) -> u64 {
         match self.places.get(channel) {
             Some(Place::Analog { lost, .. }) => *lost,
+            _ => 0,
+        }
+    }
+
+    /// An analog or derived channel's samples the instrument lost before its first sample
+    /// (FORMAT.md, "Gaps"); 0 for a digital channel or one past the last.
+    pub fn lost_before(&self, channel: usize) -> u64 {
+        match self.places.get(channel) {
+            Some(Place::Analog { lost_before, .. }) => *lost_before,
+            _ => 0,
+        }
+    }
+
+    /// An analog or derived channel's samples the instrument lost after its last sample; 0 for a
+    /// digital channel or one past the last. A live recording's is 0: only the writer's finish
+    /// states it.
+    pub fn lost_after(&self, channel: usize) -> u64 {
+        match self.places.get(channel) {
+            Some(Place::Analog { lost_after, .. }) => *lost_after,
             _ => 0,
         }
     }
