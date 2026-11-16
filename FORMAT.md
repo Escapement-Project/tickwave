@@ -209,7 +209,8 @@ can state `codec`, how its blocks are stored. This version defines none, and a c
 stores its blocks as Blocks says. A reader treats a channel with a `codec` it doesn't know as
 unavailable. No `requires`, `codec` or operation changes a channel's entries in the top index or
 the headers of its records, so a reader finds and skips an unavailable channel's tables and records
-by their layout alone.
+by their layout alone. Nor does one change the JSON type of a field this version defines, so a
+reader that doesn't know it still parses the entry.
 
 - `"digital"`: `initial` (the level at the channel's start before any edge there, a boolean), `end`
   (a source tick: the level is known from the channel's start to `end`; a source can stop knowing
@@ -415,7 +416,9 @@ A cut keeps every edge in its span, one at `from` included, and the channel's `i
 just before `from`. It keeps every analog sample whose place lies in the span, and each keeps its
 place: a run that the cut starts inside starts at its first kept sample, at that sample's place, its
 whole tick as the run's tick and the rest as its phase. Nothing moves forward, and no kept sample is
-lost.
+lost. That phase is the channel's declared one, so it sets the grid, and a later run's phase has to
+be a whole number of the new grid's units. A converter refuses a cut where it isn't, which only a
+run whose phase has a finer denominator than the period's and the cut's first phase can meet.
 
 When no channel is moved or cut, and there is one source with no stretch, the recording starts at
 the source's tick `−origin`: where the source does, for a capture converted whole. Otherwise it
@@ -1048,8 +1051,9 @@ and pages, from its first output byte, so the caller writes the output from the 
 before the start of its channel's open block. A promise, `promise(before)`, says every item of
 every channel before axis tick `before` is in; `promise_channel(c, before)` says it of channel `c`
 alone. It refuses an item before the latest promise to its channel. A channel's open block closes
-once its items before the latest promise to it and to its partners reach the target size: those go
-in the closed block, and those at or after that tick stay in the open one. A derived channel's
+once its items before the latest promise to it and to its partners reach the target size, the gaps
+it has taken that end before that tick counted at 17 bytes each: those items go in the closed
+block, and those at or after that tick stay in the open one. A derived channel's
 operands are partners: they close their blocks together, at one tick. So a producer can write a
 channel ahead of what it has promised, as a probe's samples come ahead of the pin edges that lie
 among them. Without a promise, a block closes only at a flush or the finish. Promises and flushes
@@ -1068,10 +1072,10 @@ MiB of that operand's samples, in its coding, waiting for the other operand's: a
 ahead of its partner by at most that much.
 
 **Flush.** `flush(before)` promises `before`, closes at `before` every channel's open block that
-holds an item before it, and then writes one known-through record at `before`, after every block
-record that flush closed. Items at or after `before` stay in the open blocks. A channel with
-nothing before `before` in its open block writes no record; the known-through record says it holds
-nothing new before `before`. A flush at the latest known-through tick writes nothing. A live
+holds an item, or the end of a gap it has taken, before it, and then writes one known-through
+record at `before`, after every block record that flush closed. Items at or after `before` stay in
+the open blocks. A channel with nothing before `before` in its open block writes no record; the
+known-through record says it holds nothing new before `before`. A flush at the latest known-through tick writes nothing. A live
 recorder flushes at least every second and syncs the file to disk after each, so how often it
 flushes, and the compression still pending, bound what a crash loses.
 
