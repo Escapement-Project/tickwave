@@ -287,6 +287,87 @@ fn a_record_or_part_that_is_not_lines_of_json_objects_is_refused() {
     }
 }
 
+/// `line_span` as it read a line before it stopped building `serde_json::Value`s: the line as a
+/// map of them, each of `start` and `end` taken from the map as a `Time`.
+fn span_from_values(line: &str, timebase: Ratio) -> Result<(i64, i64), String> {
+    use escapement_tickwave_format::times::{Time, ticks};
+    let fields: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(line).map_err(|_| "not a JSON object")?;
+    let time = |key: &str| -> Result<Option<i64>, String> {
+        fields
+            .get(key)
+            .map(|v| {
+                let t: Time =
+                    serde_json::from_value(v.clone()).map_err(|e| format!("{key}: {e}"))?;
+                ticks(&t, timebase).map_err(|e| format!("{key}: {e}"))
+            })
+            .transpose()
+    };
+    let start = time("start")?.ok_or("no start")?;
+    let end = time("end")?.unwrap_or(start);
+    Ok((start, end))
+}
+
+/// A part's row states its lines' span, so a reader reads each line's start and end as a JSON
+/// object of any values would hold them: the last of a key's, every value parsed whole, and why a
+/// time is refused in `Time`'s words.
+#[test]
+fn a_lines_span_reads_as_a_map_of_json_values_would() {
+    let deep = format!(
+        "{{\"start\":1,\"x\":{}1{}}}",
+        "[".repeat(200),
+        "]".repeat(200)
+    );
+    let lines = [
+        r#"{"start":1}"#,
+        r#"{"start":-5,"end":7}"#,
+        r#"{"start":"1.5 us","end":"2 us"}"#,
+        r#"{"end":5}"#,
+        r#"{"start":1.5}"#,
+        r#"{"start":true}"#,
+        r#"{"start":null}"#,
+        r#"{"start":[1,2]}"#,
+        r#"{"start":{"a":1}}"#,
+        r#"{"start":"1 parsec"}"#,
+        r#"{"start":18446744073709551615}"#,
+        r#"{"start":1e3}"#,
+        r#"{"start":1,"end":null}"#,
+        r#"{"start":"bad","start":3}"#,
+        r#"{"start":3,"start":"bad"}"#,
+        r#"{"start":4}"#,
+        r#"{"start":1,"x":1e999}"#,
+        r#"{"start":1,"x":[1e999]}"#,
+        r#"{"start":[1e999]}"#,
+        r#"{"start":1,"x":"\ud800"}"#,
+        r#"{"start":1,"x":{"y":[true,null,"z",-1,2.5]}}"#,
+        r#"{"start":1} x"#,
+        r#"[1]"#,
+        r#""start""#,
+        r#"{"start":1,}"#,
+        "",
+        &deep,
+    ];
+    let timebase = Ratio::integer(1_000_000_000).unwrap();
+    let mut why = std::collections::BTreeSet::new();
+    let mut read = 0;
+    for line in lines {
+        let want = span_from_values(line, timebase);
+        match &want {
+            Ok(_) => read += 1,
+            Err(e) => {
+                why.insert(e.clone());
+            }
+        }
+        assert_eq!(
+            escapement_tickwave_format::parts::line_span(line, timebase),
+            want,
+            "{line}"
+        );
+    }
+    // Not vacuous: six lines read, and the refusals worded twelve ways.
+    assert_eq!((read, why.len()), (6, 12), "{why:#?}");
+}
+
 /// FORMAT.md, "tickwave's writer": a generator's part goes out once its lines since its last part
 /// reach 64 KiB, right after the record whose line takes them there; before a line that would
 /// take them past 4 MiB, the lines held go in a part first. A line alone past 4 MiB is refused.

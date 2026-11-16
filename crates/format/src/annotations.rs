@@ -626,15 +626,37 @@ pub fn resolve_apart_json<'a>(
     }
 }
 
+/// `included` in `include`'s order: those it doesn't list first, each in the order given, as a
+/// stable sort by place in `include` would put them, without a sort's code for each caller.
+fn in_include_order<'b, 'a>(
+    include: &[String],
+    included: &'b [Included<'a>],
+) -> Vec<&'b Included<'a>> {
+    let places: Vec<Option<usize>> = included
+        .iter()
+        .map(|inc| include.iter().position(|n| n == inc.name))
+        .collect();
+    let at = |place: Option<usize>| {
+        included
+            .iter()
+            .zip(&places)
+            .filter(move |(_, p)| **p == place)
+            .map(|(inc, _)| inc)
+    };
+    let mut order: Vec<&Included<'a>> = at(None).collect();
+    for k in 0..include.len() {
+        order.extend(at(Some(k)));
+    }
+    order
+}
+
 fn apart<'a>(
     file: HandFile,
     included: &[Included<'a>],
     header: &Header,
     targets: Targets<'_>,
 ) -> Apart<'a> {
-    // `find`'s order.
-    let mut order: Vec<&Included<'a>> = included.iter().collect();
-    order.sort_by_key(|inc| file.include.iter().position(|n| n == inc.name));
+    let order = in_include_order(&file.include, included);
     let found = find(file, included, header, None, Some(targets));
     let (kept, left_out) = found.kept();
     let annotations = kept.into_iter().map(|(p, a)| (p, a.clone())).collect();
@@ -751,9 +773,7 @@ fn find<'a>(
         entries.push((None, entry, At::Hand(i + 1)));
     }
     // Sidecar order: the TOML file's annotations, then each included file's in `include` order.
-    let mut by_include: Vec<&Included<'a>> = included.iter().collect();
-    by_include.sort_by_key(|inc| file.include.iter().position(|n| n == inc.name));
-    for inc in by_include {
+    for inc in in_include_order(&file.include, included) {
         let mut lines = inc
             .text
             .lines()

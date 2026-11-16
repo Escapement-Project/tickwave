@@ -7,6 +7,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::{ControlFlow, Range};
 
+use serde::{Deserialize, de};
+
 use crate::decode::{DecodeError, Footer, corrupt, inflate_limited};
 use crate::index::Page;
 use crate::model::Ratio;
@@ -121,21 +123,151 @@ pub fn placed_span(line: &str, timebase: Ratio) -> Result<(i64, i64), String> {
 
 /// One generator line's start and end in ticks, a point's end at its start.
 pub fn line_span(line: &str, timebase: Ratio) -> Result<(i64, i64), String> {
-    let fields: serde_json::Map<String, serde_json::Value> =
-        serde_json::from_str(line).map_err(|_| "not a JSON object")?;
-    let time = |key: &str| -> Result<Option<i64>, String> {
-        fields
-            .get(key)
-            .map(|v| {
-                let t: Time =
-                    serde_json::from_value(v.clone()).map_err(|e| format!("{key}: {e}"))?;
-                ticks(&t, timebase).map_err(|e| format!("{key}: {e}"))
+    let fields: SpanFields = serde_json::from_str(line).map_err(|_| "not a JSON object")?;
+    let time = |key: &str, field: Option<Result<Time, String>>| {
+        field
+            .map(|t| {
+                t.and_then(|t| ticks(&t, timebase))
+                    .map_err(|e| format!("{key}: {e}"))
             })
             .transpose()
     };
-    let start = time("start")?.ok_or("no start")?;
-    let end = time("end")?.unwrap_or(start);
+    let start = time("start", fields.start)?.ok_or("no start")?;
+    let end = time("end", fields.end)?.unwrap_or(start);
     Ok((start, end))
+}
+
+/// A line's `start` and `end`, each the last of its key's, read as a map of `serde_json::Value`s
+/// would read the line, without building one: every value parsed whole, and a JSON object whose
+/// values don't all parse refused.
+#[derive(Default)]
+struct SpanFields {
+    start: Option<Result<Time, String>>,
+    end: Option<Result<Time, String>>,
+}
+
+impl<'de> Deserialize<'de> for SpanFields {
+    fn deserialize<D: de::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Fields;
+        impl<'de> de::Visitor<'de> for Fields {
+            type Value = SpanFields;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a JSON object")
+            }
+            fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<SpanFields, A::Error> {
+                let mut out = SpanFields::default();
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "start" => out.start = Some(map.next_value::<TimeField>()?.0),
+                        "end" => out.end = Some(map.next_value::<TimeField>()?.0),
+                        _ => {
+                            map.next_value::<AnyValue>()?;
+                        }
+                    }
+                }
+                Ok(out)
+            }
+        }
+        d.deserialize_map(Fields)
+    }
+}
+
+/// A `start` or `end`: its time, or why `Time` refuses the value, in the words `Time` gives it
+/// read from a `serde_json::Value`.
+struct TimeField(Result<Time, String>);
+
+impl TimeField {
+    fn of<'de, D: de::Deserializer<'de, Error = serde_json::Error>>(d: D) -> Self {
+        Self(Time::deserialize(d).map_err(|e| e.to_string()))
+    }
+}
+
+impl<'de> Deserialize<'de> for TimeField {
+    fn deserialize<D: de::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::value::{
+            BoolDeserializer, F64Deserializer, I64Deserializer, MapDeserializer, SeqDeserializer,
+            StrDeserializer, U64Deserializer, UnitDeserializer,
+        };
+        struct Field;
+        impl<'de> de::Visitor<'de> for Field {
+            type Value = TimeField;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a JSON value")
+            }
+            fn visit_bool<E>(self, v: bool) -> Result<TimeField, E> {
+                Ok(TimeField::of(BoolDeserializer::new(v)))
+            }
+            fn visit_i64<E>(self, v: i64) -> Result<TimeField, E> {
+                Ok(TimeField::of(I64Deserializer::new(v)))
+            }
+            fn visit_u64<E>(self, v: u64) -> Result<TimeField, E> {
+                Ok(TimeField::of(U64Deserializer::new(v)))
+            }
+            fn visit_f64<E>(self, v: f64) -> Result<TimeField, E> {
+                Ok(TimeField::of(F64Deserializer::new(v)))
+            }
+            fn visit_str<E>(self, v: &str) -> Result<TimeField, E> {
+                Ok(TimeField::of(StrDeserializer::new(v)))
+            }
+            fn visit_unit<E>(self) -> Result<TimeField, E> {
+                Ok(TimeField::of(UnitDeserializer::new()))
+            }
+            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<TimeField, A::Error> {
+                while seq.next_element::<AnyValue>()?.is_some() {}
+                let none = std::iter::empty::<u64>();
+                Ok(TimeField::of(SeqDeserializer::new(none)))
+            }
+            fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<TimeField, A::Error> {
+                while map.next_entry::<String, AnyValue>()?.is_some() {}
+                let none = std::iter::empty::<(u64, u64)>();
+                Ok(TimeField::of(MapDeserializer::new(none)))
+            }
+        }
+        d.deserialize_any(Field)
+    }
+}
+
+/// Any JSON value, parsed whole and dropped. Not `IgnoredAny`: serde_json skips that without
+/// checking a number's range, where a `serde_json::Value` refuses one past an f64's.
+struct AnyValue;
+
+impl<'de> Deserialize<'de> for AnyValue {
+    fn deserialize<D: de::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Any;
+        impl<'de> de::Visitor<'de> for Any {
+            type Value = AnyValue;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a JSON value")
+            }
+            fn visit_bool<E>(self, _: bool) -> Result<AnyValue, E> {
+                Ok(AnyValue)
+            }
+            fn visit_i64<E>(self, _: i64) -> Result<AnyValue, E> {
+                Ok(AnyValue)
+            }
+            fn visit_u64<E>(self, _: u64) -> Result<AnyValue, E> {
+                Ok(AnyValue)
+            }
+            fn visit_f64<E>(self, _: f64) -> Result<AnyValue, E> {
+                Ok(AnyValue)
+            }
+            fn visit_str<E>(self, _: &str) -> Result<AnyValue, E> {
+                Ok(AnyValue)
+            }
+            fn visit_unit<E>(self) -> Result<AnyValue, E> {
+                Ok(AnyValue)
+            }
+            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<AnyValue, A::Error> {
+                while seq.next_element::<AnyValue>()?.is_some() {}
+                Ok(AnyValue)
+            }
+            fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<AnyValue, A::Error> {
+                while map.next_entry::<String, AnyValue>()?.is_some() {}
+                Ok(AnyValue)
+            }
+        }
+        d.deserialize_any(Any)
+    }
 }
 
 /// The sidecar's files whole, as `Footer::read_sidecar` joins them, and what it left out.

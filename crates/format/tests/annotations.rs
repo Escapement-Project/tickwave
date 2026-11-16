@@ -190,6 +190,51 @@ fn included_files_follow_the_include_list_not_the_callers_order() {
     );
 }
 
+/// Resolved apart, the files come in sidecar order too: any the list doesn't name first, in the
+/// order given, then the list's.
+#[test]
+fn files_resolved_apart_come_in_sidecar_order() {
+    let hand = HAND.replace(
+        r#"include = ["rec.wire_swd.jsonl"]"#,
+        r#"include = ["rec.b.jsonl", "rec.wire_swd.jsonl"]"#,
+    );
+    let head = |source: &str| {
+        format!(
+            "{{\"format\": \"tickwave-annotations/1\", \"source\": \"{source}\", \"recording_id\": \"{ID}\"}}\n"
+        )
+    };
+    let (b, c, d) = (head("b"), head("c"), head("d"));
+    let given = [
+        Included {
+            name: "rec.wire_swd.jsonl",
+            text: GENERATED,
+        },
+        Included {
+            name: "rec.d.jsonl",
+            text: &d,
+        },
+        Included {
+            name: "rec.b.jsonl",
+            text: &b,
+        },
+        Included {
+            name: "rec.c.jsonl",
+            text: &c,
+        },
+    ];
+    let apart = resolve_apart(&hand, &given, &header(), &|_| None);
+    let names: Vec<&str> = apart.files.iter().map(|(name, _)| *name).collect();
+    assert_eq!(
+        names,
+        [
+            "rec.d.jsonl",
+            "rec.c.jsonl",
+            "rec.b.jsonl",
+            "rec.wire_swd.jsonl"
+        ]
+    );
+}
+
 /// Resolves, expecting problems, and returns them.
 fn problems(hand: &str, generated: &str) -> Vec<String> {
     resolve(hand, &included(generated), &header(), Some("rec.tickwave")).unwrap_err()
