@@ -282,8 +282,17 @@ function gcd(a: number, b: number): number {
   return a;
 }
 
+/** Each channel's grid, once worked out: a channel's period and phase never change. */
+const grids = new WeakMap<Pick<AnalogChannel, "period" | "phase">, Grid>();
+
 /** Channel `c`'s grid, from its period and declared phase. */
 export function gridOf(c: Pick<AnalogChannel, "period" | "phase">): Grid {
+  let held = grids.get(c);
+  if (!held) grids.set(c, (held = gridFrom(c)));
+  return held;
+}
+
+function gridFrom(c: Pick<AnalogChannel, "period" | "phase">): Grid {
   const g = gcd(c.period.num, c.period.den);
   const [pn, pd] = [c.period.num / g, c.period.den / g];
   const f = c.phase ?? { num: 0, den: 1 };
@@ -364,6 +373,45 @@ export function channelSampleTick(c: Runs, i: number): number {
   return axisPlace(mapOf(c), placeOf(g, runOf(c, g, i), i), g.d);
 }
 
+/**
+ * `channelSampleTick` for many samples of one channel, as a drawing or a search asks for them: the
+ * channel's grid and mapping, and the run of the sample asked for last, are held, so a sample in
+ * that run costs a multiply-add and the mapping.
+ */
+export function sampleTicks(c: Runs): (i: number) => number {
+  const g = gridOf(c);
+  const map = mapOf(c);
+  const { d, step } = g;
+  // `axisPlace`'s plain-number path, its terms held: `origin + floor((units + offset × d) × num /
+  // (den × d))`, each product and sum still below 2^53, as its checks have them.
+  const [origin, shift, num, q] = [map.origin, map.offset * d, map.m.num, map.m.den * d];
+  const plain = Number.isSafeInteger(shift) && Number.isSafeInteger(q);
+  const b = c.breaks ?? [];
+  // The run held: the indices it places, `from` to `to`, its first index and its start.
+  let [from, to, index, start] = [0, 0, 0, 0 as Int];
+  return (i) => {
+    if (!(i >= from && i < to)) {
+      let k = 0;
+      for (let hi = b.length; k < hi; ) {
+        const mid = (k + hi) >>> 1;
+        if (b[mid].index <= i) k = mid + 1;
+        else hi = mid;
+      }
+      // The first run places every index before the first break, as `runOf` has it.
+      const run = k === 0 ? firstRun(c, g) : breakRun(b[k - 1]);
+      [from, to, index, start] = [k === 0 ? -Infinity : run.index, k < b.length ? b[k].index : Infinity, run.index, startOf(g, run)];
+    }
+    const along = (i - index) * step;
+    if (plain && typeof start === "number" && Number.isSafeInteger(along)) {
+      const units = start + along;
+      const x = units + shift;
+      const product = x * num;
+      if (Number.isSafeInteger(units) && Number.isSafeInteger(x) && Number.isSafeInteger(product)) return origin + Math.floor(product / q);
+    }
+    return axisPlace(map, add(start, mul(i - index, step)), d);
+  };
+}
+
 /** The axis tick of the place after sample `i` on its run's grid: where its time ends, unless the
  * next run or the length comes sooner (FORMAT.md, "Gaps"). */
 export function placeAfter(c: Runs, i: number): number {
@@ -422,6 +470,48 @@ function firstPast(c: Runs, tick: number, strict: boolean): number {
 export function channelIndexAtOrAfter(c: Runs, tick: number): number {
   if (Number.isNaN(tick)) return c.count;
   return firstPast(c, tick, false);
+}
+
+/**
+ * `channelIndexAtOrAfter` for a run of ticks that never falls, as a grid's columns give them. Each
+ * answer carries on from the one before: it guesses as many samples on as the last step took,
+ * steps 1, 2, 4, ... samples on or back from the guess until it passes the answer, and bisects
+ * that step. Columns of an even width take a tick or three each, however many samples each holds.
+ * A tick lower than the one before starts again from the first sample.
+ */
+export function indicesAtOrAfter(c: Runs): (tick: number) => number {
+  const count = c.count;
+  const tickOf = sampleTicks(c);
+  // Every sample before `last` lies before `prev`, the tick asked for last; `ahead` is how far the
+  // answer before it moved on.
+  let [last, ahead, prev] = [0, 0, -Infinity];
+  return (tick) => {
+    if (Number.isNaN(tick)) return count;
+    if (tick < prev) [last, ahead] = [0, 0];
+    prev = tick;
+    if (last >= count || tickOf(last) >= tick) return last;
+    // The answer is past `last`: in `lo..=hi`, where sample `lo - 1` lies before `tick` and `hi`
+    // reaches it, or is `count`.
+    const guess = Math.min(count, last + Math.max(1, ahead));
+    let [lo, hi] = [last + 1, guess];
+    if (guess < count && tickOf(guess) < tick) {
+      lo = guess + 1;
+      hi = lo;
+      for (let step = 1; hi < count && tickOf(hi) < tick; step *= 2) [lo, hi] = [hi + 1, hi + step];
+      hi = Math.min(hi, count);
+    } else {
+      let step = 1;
+      for (; hi - step > last && tickOf(hi - step) >= tick; step *= 2) hi -= step;
+      lo = Math.max(last + 1, hi - step + 1);
+    }
+    while (lo < hi) {
+      const mid = lo + Math.floor((hi - lo) / 2);
+      if (tickOf(mid) >= tick) hi = mid;
+      else lo = mid + 1;
+    }
+    [ahead, last] = [lo - last, lo];
+    return lo;
+  };
 }
 
 /** The span each break's lost samples cover, as FORMAT.md words it: from place `index` to place

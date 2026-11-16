@@ -10,10 +10,12 @@ import { openTickwave } from "../scripts/node-wasm.ts";
 import {
   channelIndexAtOrAfter,
   channelSampleTick,
+  indicesAtOrAfter,
   knownSpans,
   lostSpans,
   placeAfter,
   sampleAtOrBefore,
+  sampleTicks,
   type AnalogChannel,
   type Break,
   type Mapping,
@@ -78,38 +80,39 @@ function reference(c: AnalogChannel, i: number): number {
   return map.origin + Number(n % q !== 0n && n < 0n ? t - 1n : t);
 }
 
+const r = (num: number, den: number): Ratio => ({ num, den });
+const brk = (index: number, tick: number, phase = 0): Break => ({ index, tick, lost: 0, ...(phase && { phase }) });
+const map = (origin: number, offset: number, m: Ratio): Mapping => ({ origin, offset, m });
+const far = 2 ** 50;
+const channel = (first: number, count: number, period: Ratio, phase: Ratio | undefined, breaks: Break[], m?: Mapping): AnalogChannel => ({
+  kind: "analog",
+  name: "x",
+  end: Infinity,
+  unit: "V",
+  first,
+  period,
+  ...(phase && { phase }),
+  count,
+  breaks,
+  ...(m && { map: m }),
+  resolution: null,
+  min: 0,
+  max: 1,
+});
+// crates/view/src/runs.rs's cases, the far one at 2^50 rather than 2^60: a JavaScript tick is a
+// double, exact below 2^53.
+const cases = [
+  channel(5, 100, r(1, 1), undefined, []),
+  channel(5, 100, r(960, 1), undefined, [brk(40, 50_000)], map(-7, 3, r(1, 1))),
+  channel(5, 100, r(7, 3), r(1, 3), [brk(30, 200, 2), brk(31, 205)]),
+  channel(5, 100, r(3, 2), r(1, 4), [], map(100, -12, r(1001, 1000))),
+  channel(5, 100, r(1, 1), undefined, [brk(50, 70)], map(0, 0, r(999, 1000))),
+  channel(5, 100, r(5, 4), undefined, [], map(10, 0, r(3, 1))),
+  channel(5, 100, r(1, 1), undefined, [], map(0, 0, r(1, 2))),
+  channel(far, 1000, r(1, 1), undefined, [brk(600, far + 700)]),
+];
+
 test("the search for a tick's sample finds what a bisection over the format's ticks finds", () => {
-  const r = (num: number, den: number): Ratio => ({ num, den });
-  const brk = (index: number, tick: number, phase = 0): Break => ({ index, tick, lost: 0, ...(phase && { phase }) });
-  const map = (origin: number, offset: number, m: Ratio): Mapping => ({ origin, offset, m });
-  const far = 2 ** 50;
-  const channel = (first: number, count: number, period: Ratio, phase: Ratio | undefined, breaks: Break[], m?: Mapping): AnalogChannel => ({
-    kind: "analog",
-    name: "x",
-    end: Infinity,
-    unit: "V",
-    first,
-    period,
-    ...(phase && { phase }),
-    count,
-    breaks,
-    ...(m && { map: m }),
-    resolution: null,
-    min: 0,
-    max: 1,
-  });
-  // crates/view/src/runs.rs's cases, the far one at 2^50 rather than 2^60: a JavaScript tick is a
-  // double, exact below 2^53.
-  const cases = [
-    channel(5, 100, r(1, 1), undefined, []),
-    channel(5, 100, r(960, 1), undefined, [brk(40, 50_000)], map(-7, 3, r(1, 1))),
-    channel(5, 100, r(7, 3), r(1, 3), [brk(30, 200, 2), brk(31, 205)]),
-    channel(5, 100, r(3, 2), r(1, 4), [], map(100, -12, r(1001, 1000))),
-    channel(5, 100, r(1, 1), undefined, [brk(50, 70)], map(0, 0, r(999, 1000))),
-    channel(5, 100, r(5, 4), undefined, [], map(10, 0, r(3, 1))),
-    channel(5, 100, r(1, 1), undefined, [], map(0, 0, r(1, 2))),
-    channel(far, 1000, r(1, 1), undefined, [brk(600, far + 700)]),
-  ];
   let checked = 0;
   for (const c of cases) {
     const ticks = Array.from({ length: c.count }, (_, i) => reference(c, i));
@@ -133,4 +136,38 @@ test("the search for a tick's sample finds what a bisection over the format's ti
     }
   }
   assert.ok(checked > 3000, `${checked}`);
+});
+
+test("held over many samples and many columns, placing and searching give what they give one at a time", () => {
+  // The sweep's cases, and one whose places pass 2^53 in its grid's units (2^50 ticks in thirds),
+  // where they are held in BigInt.
+  const all = [...cases, channel(far, 100, r(7, 3), r(1, 3), [brk(50, far + 200, 2)])];
+  let [columns, moved, stayed, leapt] = [0, 0, 0, 0];
+  for (const c of all) {
+    // Every sample, in order and then from the far end back, each run's first included.
+    const tickOf = sampleTicks(c);
+    const order = Array.from({ length: c.count }, (_, i) => i);
+    for (const i of [...order, ...order.reverse()]) assert.equal(tickOf(i), channelSampleTick(c, i), `${JSON.stringify(c)} sample ${i}`);
+    // Columns from three ticks before the first sample to past the last, narrower than a sample,
+    // about one, and many samples wide; each answer what a lookup alone gives.
+    const [lo, hi] = [channelSampleTick(c, 0) - 3, channelSampleTick(c, c.count - 1) + 3];
+    for (const per of [0.37, 1, 2.5, 7.3, 61]) {
+      const next = indicesAtOrAfter(c);
+      let before = -1;
+      for (let t = lo; t < hi; t += per) {
+        const got = next(t);
+        assert.equal(got, channelIndexAtOrAfter(c, t), `${JSON.stringify(c)}, columns of ${per} at ${t}`);
+        if (got === before) stayed++;
+        else if (got - before > 1) leapt++;
+        else moved++;
+        before = got;
+        columns++;
+      }
+      // A tick lower than the one before is looked up afresh.
+      assert.equal(next(lo + (hi - lo) / 3), channelIndexAtOrAfter(c, lo + (hi - lo) / 3));
+      assert.equal(next(Number.NaN), c.count);
+    }
+  }
+  // Not vacuous: answers that stay, step one sample on, and leap several.
+  assert.ok(stayed > 1000 && moved > 1000 && leapt > 100, `${stayed} ${moved} ${leapt} of ${columns}`);
 });

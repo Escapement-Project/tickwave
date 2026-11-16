@@ -6,6 +6,7 @@ import { countOf } from "./shade.ts";
 import {
   channelIndexAtOrAfter,
   fillRuns,
+  indicesAtOrAfter,
   SAMPLES_PER_RUN,
   type AnalogChannel,
   type AnalogOverview,
@@ -209,13 +210,16 @@ function runsOf(s: Samples, r0: number, r1: number): SampleRuns {
   return runs;
 }
 
-/** Where an analog channel's samples sit: its first, period, count and breaks, and the mapping
- * that puts them on the axis. */
-export type Runs = Pick<AnalogChannel, "first" | "period" | "count" | "breaks" | "map">;
+/** Where an analog channel's samples sit: its first, period, phase, count and breaks, and the
+ * mapping that puts them on the axis. */
+export type Runs = Pick<AnalogChannel, "first" | "period" | "phase" | "count" | "breaks" | "map">;
+
+/** The tile's own index of a channel index, held to the tile. */
+const inTile = (s: Samples, i: number): number => Math.max(0, Math.min(i, s.first + s.values.length) - s.first);
 
 /** The tile's own index of its first sample at or after `tick`. */
 function tileIndex(s: Samples, runs: Runs, tick: number): number {
-  return Math.max(0, Math.min(channelIndexAtOrAfter(runs, tick), s.first + s.values.length) - s.first);
+  return inTile(s, channelIndexAtOrAfter(runs, tick));
 }
 
 /** Each column's range from the samples in it. For several samples a column. */
@@ -230,9 +234,11 @@ export function analogFromSamples(
   const { min, max } = cols;
   const v = s.values;
   const [c0, c1] = columnRange(g, from, to);
-  const at = (tick: number) => tileIndex(s, channel, tick);
+  // The columns' ends rise, so one search carries on through them.
+  const next = indicesAtOrAfter(channel);
+  const at = (tick: number) => inTile(s, next(tick));
   let i = at(Math.max(from, g.x0 + c0 * g.per));
-  const runs = runsOf(s, Math.ceil(i / RUN), Math.floor(at(Math.min(to, g.x0 + c1 * g.per)) / RUN));
+  const runs = runsOf(s, Math.ceil(i / RUN), Math.floor(tileIndex(s, channel, Math.min(to, g.x0 + c1 * g.per)) / RUN));
   for (let c = c0; c < c1; c++) {
     const j = Math.max(i, at(Math.min(to, g.x0 + (c + 1) * g.per)));
     // NaN samples are left out, as the overview leaves them out.
