@@ -316,12 +316,17 @@ impl Recording {
         })?;
         let parts = self.read_parts(&footer, &rows)?;
         let read = kept_lines(file, &parts)?;
+        // Read whole, a bundle's hand-written file is there: `read_file_annotations` refuses a
+        // bundle without one. A file with no bundle has no part either, since `kept_lines`
+        // refuses a part whose generator has no file in the bundle.
+        let Some((hand, included)) = bundled(&file.files) else {
+            return Ok(Markers::default());
+        };
         let by_id: HashMap<&str, &Annotation> = read
             .markers
             .iter()
             .map(|&(_, a)| (a.id.as_str(), a))
             .collect();
-        let (hand, included) = hand_and_included(&file.files)?;
         let apart = annotations::resolve_apart(hand, &included, &footer.header, &|target| {
             by_id.get(target).map(|a| (*a).clone())
         });

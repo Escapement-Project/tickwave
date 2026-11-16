@@ -170,6 +170,33 @@ fn within(rec: &Recording, range: Range<i64>) -> Vec<Marker> {
     rec.markers(range, None, usize::MAX).entries
 }
 
+/// A finished file with no annotation bundle has no markers, read whole or by range, and nothing
+/// left out.
+#[test]
+fn a_file_with_no_bundle_has_no_markers() {
+    let mut w = Writer::new(
+        declaration(vec![analog("V")], vec![]),
+        WriteOptions::default(),
+    )
+    .unwrap();
+    w.run(0, 100, 0).unwrap();
+    for i in 0..10u64 {
+        w.sample(0, i).unwrap();
+    }
+    let mut file = w.take_output();
+    file.extend(w.finish(200, &[], Finish::default()).unwrap().tail);
+    let bundle = Footer::parse_file(&file)
+        .unwrap()
+        .read_bundle(|at, len| Ok::<_, DecodeError>(file[at as usize..][..len as usize].to_vec()))
+        .unwrap();
+    assert!(bundle.is_none());
+    let rec = Recording::open(Arc::new(file), Cache::new(1 << 20)).unwrap();
+    rec.load_markers().unwrap();
+    assert!(!rec.has_markers());
+    assert!(within(&rec, 0..200).is_empty());
+    assert!(rec.markers_left_out().is_empty());
+}
+
 /// A range's markers come from the parts the range meets and no other, each part read once; the
 /// span the markers add to the extent comes from the parts table, no part read. Read whole
 /// afterwards, the same markers come with the same cursors.
