@@ -7,7 +7,7 @@ use std::sync::atomic::AtomicBool;
 use escapement_tickwave_format::decode::Footer;
 use escapement_tickwave_format::header::ChannelKind as HeaderKind;
 use escapement_tickwave_format::mapping::Mapping;
-use escapement_tickwave_format::model::{Break, Gap, Ratio, lost_span};
+use escapement_tickwave_format::model::{Break, Gap, Grid, Ratio};
 use escapement_tickwave_view::runs::{Runs, lost_spans_in, place_after};
 use escapement_tickwave_view::spans::{ChannelPlace, known_spans};
 use escapement_tickwave_view::{Drawn, Query};
@@ -47,7 +47,7 @@ const BREAKS: [Break; 4] = [
 fn runs() -> Runs<'static> {
     Runs {
         first: 0,
-        period: Ratio::new(3, 2).unwrap(),
+        grid: Grid::new(Ratio::new(3, 2).unwrap(), None).unwrap(),
         count: 17,
         breaks: &BREAKS,
         map: Mapping::IDENTITY,
@@ -63,7 +63,8 @@ fn windows(lo: i64, hi: i64) -> impl Iterator<Item = Range<i64>> {
 fn a_windows_lost_spans_are_the_channels_that_reach_into_it() {
     let r = runs();
     let all: Vec<Range<i64>> = (0..BREAKS.len())
-        .filter_map(|k| lost_span(r.first, r.period, r.breaks, k))
+        .filter_map(|k| r.grid.lost_time(r.first, r.breaks, k))
+        .map(|t| r.at(t.start)..r.at(t.end))
         .collect();
     for w in windows(-3, 70) {
         let want: Vec<Range<i64>> = all
@@ -170,7 +171,6 @@ fn an_answer_joins_nothing_across_a_runs_edge_and_gives_the_gaps_it_reaches() {
     let cancel = AtomicBool::new(false);
     let HeaderKind::Analog {
         first,
-        period,
         count,
         breaks,
         ..
@@ -180,7 +180,7 @@ fn an_answer_joins_nothing_across_a_runs_edge_and_gives_the_gaps_it_reaches() {
     };
     let runs = Runs {
         first: *first,
-        period: *period,
+        grid: f.grid(0).unwrap(),
         count: *count,
         breaks,
         map: f.header.mapping(0).unwrap(),

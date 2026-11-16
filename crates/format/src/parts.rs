@@ -149,6 +149,60 @@ pub struct Sidecar {
     pub left_out: Vec<String>,
 }
 
+/// Each generator's file in a bundle's `files`, the file's name by the generator's: those whose
+/// first line names a generator. A bundle that holds two files of one generator, or files of more
+/// generators than a recording has, is refused.
+pub fn generator_files(
+    files: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>, DecodeError> {
+    let mut by_source: BTreeMap<String, String> = BTreeMap::new();
+    for (name, text) in files {
+        if let Some(source) = head_source(text)
+            && by_source.insert(source.clone(), name.clone()).is_some()
+        {
+            return Err(corrupt(format!(
+                "the annotation bundle holds two files of generator {source:?}"
+            )));
+        }
+    }
+    if by_source.len() > MAX_GENERATORS {
+        return Err(corrupt(format!(
+            "the annotation bundle holds {} generators' files, more than the {MAX_GENERATORS} a \
+             recording has",
+            by_source.len()
+        )));
+    }
+    Ok(by_source)
+}
+
+/// `Footer::decode_part` for a recording of `timebase`.
+pub(crate) fn decode_part(
+    row: &PartRow,
+    frame: &[u8],
+    timebase: Ratio,
+) -> Result<Part, DecodeError> {
+    if frame.len() != row.length as usize {
+        return Err(corrupt(format!(
+            "an annotation part is {} bytes, its row says {}",
+            frame.len(),
+            row.length
+        )));
+    }
+    let raw = inflate_limited(frame, row.decoded_length as usize, MAX_PART)?;
+    let part = Part::parse_raw(&raw)
+        .map_err(|e| corrupt(format!("the annotation part at {}: {e}", row.offset)))?;
+    let span = part
+        .span(timebase)
+        .map_err(|e| corrupt(format!("the annotation part at {}: {e}", row.offset)))?;
+    if span != (row.start, row.end) {
+        return Err(corrupt(format!(
+            "the annotation part at {} covers ticks {} to {}, its row says {} to {}",
+            row.offset, span.0, span.1, row.start, row.end
+        )));
+    }
+    Ok(part)
+}
+
 /// The generator a bundled file's first line names, where it is a generator's head.
 pub(crate) fn head_source(text: &str) -> Option<String> {
     let first = text.lines().next()?;
@@ -184,19 +238,44 @@ impl Footer {
     pub fn parts_meeting<E: From<DecodeError>>(
         &self,
         span: Range<i64>,
-        mut fetch: impl FnMut(u64, u32) -> Result<Vec<u8>, E>,
+        fetch: impl FnMut(u64, u32) -> Result<Vec<u8>, E>,
     ) -> Result<Vec<PartRow>, E> {
+        Ok(self
+            .parts_meeting_at(span, fetch)?
+            .into_iter()
+            .map(|(_, r)| r)
+            .collect())
+    }
+
+    /// `parts_meeting`, each row with its place among the rows, the order the parts were
+    /// written in.
+    pub fn parts_meeting_at<E: From<DecodeError>>(
+        &self,
+        span: Range<i64>,
+        mut fetch: impl FnMut(u64, u32) -> Result<Vec<u8>, E>,
+    ) -> Result<Vec<(u64, PartRow)>, E> {
         let Some(table) = &self.parts else {
             return Ok(Vec::new());
         };
         let mut rows = Vec::new();
-        table.visit_in(span.clone(), &mut fetch, |_, page| {
+        table.visit_in(span.clone(), &mut fetch, |at, page| {
             if let Page::Parts(page) = page {
-                rows.extend(page.into_iter().filter(|r| r.meets(&span)));
+                let first = at.j * crate::index::PAGE as u64;
+                rows.extend((first..).zip(page).filter(|(_, r)| r.meets(&span)));
             }
             Ok(ControlFlow::Continue(()))
         })?;
         Ok(rows)
+    }
+
+    /// The span the annotation parts' rows cover, from the top index alone: the earliest start
+    /// and the latest end. Rows may pass the length, which a reader cuts them at. None without
+    /// parts.
+    pub fn parts_span(&self) -> Option<(i64, i64)> {
+        let top = self.parts.as_ref()?.levels.last()?;
+        let start = top.iter().map(|e| e.first).min()?;
+        let end = top.iter().map(|e| e.number).max()?;
+        Some((start, i64::try_from(end).ok()?))
     }
 
     /// Every annotation part's row, in the order the parts were written.
@@ -210,26 +289,7 @@ impl Footer {
     /// The part `row` places, from exactly its frame's bytes. It must decode to the length the
     /// row states, within the format's limit, and its lines must cover the span the row states.
     pub fn decode_part(&self, row: &PartRow, frame: &[u8]) -> Result<Part, DecodeError> {
-        if frame.len() != row.length as usize {
-            return Err(corrupt(format!(
-                "an annotation part is {} bytes, its row says {}",
-                frame.len(),
-                row.length
-            )));
-        }
-        let raw = inflate_limited(frame, row.decoded_length as usize, MAX_PART)?;
-        let part = Part::parse_raw(&raw)
-            .map_err(|e| corrupt(format!("the annotation part at {}: {e}", row.offset)))?;
-        let span = part
-            .span(self.header.timebase)
-            .map_err(|e| corrupt(format!("the annotation part at {}: {e}", row.offset)))?;
-        if span != (row.start, row.end) {
-            return Err(corrupt(format!(
-                "the annotation part at {} covers ticks {} to {}, its row says {} to {}",
-                row.offset, span.0, span.1, row.start, row.end
-            )));
-        }
-        Ok(part)
+        decode_part(row, frame, self.header.timebase)
     }
 
     /// The sidecar's files whole, joined from the annotation bundle and every part through
@@ -246,25 +306,7 @@ impl Footer {
         let Some(mut files) = self.read_bundle(&mut fetch)? else {
             return Ok(None);
         };
-        let mut by_source: BTreeMap<String, String> = BTreeMap::new();
-        for (name, text) in &files {
-            if let Some(source) = head_source(text)
-                && by_source.insert(source.clone(), name.clone()).is_some()
-            {
-                return Err(corrupt(format!(
-                    "the annotation bundle holds two files of generator {source:?}"
-                ))
-                .into());
-            }
-        }
-        if by_source.len() > MAX_GENERATORS {
-            return Err(corrupt(format!(
-                "the annotation bundle holds {} generators' files, more than the {MAX_GENERATORS} a \
-                 recording has",
-                by_source.len()
-            ))
-            .into());
-        }
+        let by_source = generator_files(&files)?;
         let length = self.header.length;
         let timebase = self.header.timebase;
         let mut left_out = Vec::new();

@@ -85,7 +85,7 @@ impl<'a> Trace<'a> {
                     columns,
                     lost,
                 }),
-                Drawn::Digital { .. } => None,
+                Drawn::Digital { .. } | Drawn::Unavailable => None,
             },
             _ => None,
         };

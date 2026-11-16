@@ -452,6 +452,21 @@ fn codes(values: &Values) -> Vec<u64> {
 }
 
 /// Channel `c`'s blocks as `snapshot` gives them, those in `file` and those not yet written.
+/// Every annotation line a snapshot holds, with its generator: the parts in `file`, then those
+/// not yet written.
+fn snapshot_lines(snapshot: &Snapshot, file: &[u8]) -> Vec<(String, String)> {
+    let mut parts = Vec::new();
+    for row in snapshot.part_rows_from(0, from_memory(file)).unwrap() {
+        let frame = &file[row.offset as usize..][..row.length as usize];
+        parts.push(snapshot.decode_part(&row, frame).unwrap());
+    }
+    parts.extend(snapshot.unwritten_parts().unwrap());
+    parts
+        .iter()
+        .flat_map(|p| p.lines().map(|l| (p.source.clone(), l.to_owned())))
+        .collect()
+}
+
 fn snapshot_blocks(snapshot: &Snapshot, file: &[u8], c: usize) -> Vec<Block> {
     let mut blocks: Vec<Block> = snapshot
         .block_refs(c, &[], from_memory(file))
@@ -552,7 +567,7 @@ fn a_snapshot_with_the_bytes_written_so_far_gives_every_item_pushed() {
                 "after op {n}"
             );
             assert_eq!(p, want_p, "after op {n}");
-            let gaps: Vec<Gap> = snapshot.gaps_from(2, 0).copied().collect();
+            let gaps: Vec<Gap> = snapshot.gaps_from(2, 0, from_memory(&file)).unwrap();
             let want: Vec<Gap> = ops[..=n]
                 .iter()
                 .filter_map(|op| match op {
@@ -561,17 +576,22 @@ fn a_snapshot_with_the_bytes_written_so_far_gives_every_item_pushed() {
                 })
                 .collect();
             assert_eq!(gaps, want, "after op {n}");
-            let runs: Vec<Break> = snapshot.runs_from(0, 0).copied().collect();
-            assert_eq!(runs, snapshot.runs_from(1, 0).copied().collect::<Vec<_>>());
+            let runs: Vec<Break> = snapshot.runs_from(0, 0, from_memory(&file)).unwrap();
+            assert_eq!(runs, snapshot.runs_from(1, 0, from_memory(&file)).unwrap());
             let marks = ops[..=n]
                 .iter()
                 .filter(|op| matches!(op, Op::Mark(_)))
                 .count();
-            assert_eq!(snapshot.annotations().count(), marks, "after op {n}");
+            assert_eq!(
+                snapshot_lines(&snapshot, &file).len(),
+                marks,
+                "after op {n}"
+            );
         }
         assert_eq!(written_seen, 0, "every page still open: few blocks");
         let last = w.snapshot();
-        let runs: Vec<Break> = last.runs_from(0, 0).copied().collect();
+        file.extend(w.take_output());
+        let runs: Vec<Break> = last.runs_from(0, 0, from_memory(&file)).unwrap();
         assert_eq!(
             runs,
             [
@@ -800,4 +820,126 @@ fn a_cut_off_input_with_no_block_and_a_channel_declared_high_recuts_as_repair_fi
     };
     assert!(initial);
     assert_eq!(Some(end), f.header.start(2));
+}
+
+/// The writer holds no gap, break or annotation once its list or part is in the file
+/// (FORMAT.md, "Memory"): a snapshot gives them from the file's pages and parts, read through a
+/// fetch, then from the open page and what waits. Past 4,096 gaps and breaks the lists' pages
+/// are in the file, and a snapshot holds only the open page and the waiting ones; a reader that
+/// asks from any entry on gets the rest, page boundaries included. The writer keeps the runs its
+/// open block's samples need.
+#[test]
+fn a_snapshots_gaps_breaks_and_annotations_come_from_the_files_pages() {
+    let timebase = Ratio::integer(1000).unwrap();
+    let channel = |name: &str, data| DeclaredChannel {
+        name: name.into(),
+        source_name: name.to_lowercase(),
+        source: 0,
+        data,
+        shaping: Default::default(),
+        overview_shift: None,
+        codec: None,
+        requires: Vec::new(),
+    };
+    let d = Declaration {
+        timebase,
+        channels: vec![
+            channel("D", DeclaredKind::Digital { initial: false }),
+            channel(
+                "V",
+                DeclaredKind::Analog {
+                    unit: "V".into(),
+                    period: Ratio::integer(1).unwrap(),
+                    coding: AnalogCoding::F32,
+                    significant: None,
+                    phase: None,
+                },
+            ),
+        ],
+        derived: Vec::new(),
+        sources: vec![SourceHeader::new(
+            SourceFormat::Other("test".into()),
+            timebase,
+        )],
+        title: None,
+        meta: BTreeMap::new(),
+        overview_shift: 4,
+        requires: Vec::new(),
+    };
+    let mut w = Writer::new(d, options(64)).unwrap();
+    let mut file = w.take_output();
+    let (mut gaps, mut runs, mut lines) = (Vec::new(), Vec::new(), Vec::new());
+    let n = 9_000i64;
+    for k in 0..n {
+        let t = 10 * k;
+        w.edge(0, t).unwrap();
+        let gap = Gap {
+            from: t + 1,
+            to: t + 5,
+            level: k % 2 == 0,
+        };
+        w.gap(0, gap).unwrap();
+        gaps.push(gap);
+        let lost = u64::from(k % 3 == 0 && k > 0);
+        w.run(1, t + 2, lost).unwrap();
+        w.sample(1, k as f32).unwrap();
+        runs.push(Break::new(k as u64, t + 2, lost));
+        if k % 4 == 0 {
+            let m =
+                serde_json::json!({"id": format!("m/{k}"), "start": t, "text": "x".repeat(200)});
+            let serde_json::Value::Object(m) = m else {
+                unreachable!()
+            };
+            w.annotation("verge", m).unwrap();
+            lines.push(t);
+        }
+        // Behind the items, so a block closes with samples of several runs left open.
+        if t >= 25 {
+            w.promise(t - 25).unwrap();
+        }
+        if k % 1000 != 999 && k != 4100 {
+            continue;
+        }
+        let snapshot = w.snapshot();
+        file.extend(w.take_output());
+        let held = snapshot.channel(0).unwrap();
+        let listed = held.gaps.table.as_ref().unwrap().rows;
+        assert!(held.gaps.open.len() < 4096, "after {k}: one page open");
+        assert!(
+            held.gaps.waiting.len() < 100,
+            "after {k}: {}",
+            held.gaps.waiting.len()
+        );
+        let ran = snapshot.channel(1).unwrap();
+        assert!(ran.breaks.open.len() < 4096 && ran.breaks.waiting.len() < 100);
+        for from in [0, 1, 4095, 4096, 4097, 8191, 8192, 8193, gaps.len() as u64] {
+            let from = from.min(gaps.len() as u64);
+            let got = snapshot.gaps_from(0, from, from_memory(&file)).unwrap();
+            assert_eq!(got, gaps[from as usize..], "after {k}, gaps from {from}");
+            let got = snapshot.runs_from(1, from, from_memory(&file)).unwrap();
+            assert_eq!(got, runs[from as usize..], "after {k}, runs from {from}");
+        }
+        if k >= 4100 {
+            assert!(listed >= 4096, "after {k}: {listed} gaps in pages");
+        }
+        let got: Vec<i64> = snapshot_lines(&snapshot, &file)
+            .iter()
+            .map(|(_, l)| {
+                let fields: serde_json::Value = serde_json::from_str(l).unwrap();
+                fields["start"].as_i64().unwrap()
+            })
+            .collect();
+        assert_eq!(got, lines, "after {k}");
+        // Later, parts are in the file, and a reader from part 1 on gets every row but the
+        // first.
+        let rows = snapshot.part_rows_from(0, from_memory(&file)).unwrap();
+        if k < 4999 {
+            continue;
+        }
+        assert!(rows.len() > 1, "after {k}: {} parts", rows.len());
+        assert_eq!(
+            snapshot.part_rows_from(1, from_memory(&file)).unwrap(),
+            rows[1..]
+        );
+    }
 }

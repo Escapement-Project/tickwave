@@ -78,3 +78,19 @@ pub fn with_header(file: &[u8], header: &escapement_tickwave_format::header::Hea
     escapement_tickwave_format::record::write_footer(&mut out, 0, &new);
     out
 }
+
+/// Each generator's lines in `file`'s sidecar, joined from its bundle and parts, by generator.
+pub fn generated(file: &[u8]) -> std::collections::BTreeMap<String, Vec<String>> {
+    let footer = escapement_tickwave_format::decode::Footer::parse_file(file).unwrap();
+    let sidecar = footer
+        .read_sidecar(escapement_tickwave_format::decode::from_memory(file))
+        .unwrap();
+    let mut out = std::collections::BTreeMap::new();
+    for text in sidecar.iter().flat_map(|s| s.files.values()) {
+        if let Some(source) = escapement_tickwave_format::annotations::generator_source(text) {
+            let lines = text.lines().skip(1).filter(|l| !l.trim().is_empty());
+            out.insert(source, lines.map(str::to_owned).collect());
+        }
+    }
+    out
+}

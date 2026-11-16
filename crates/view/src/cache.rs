@@ -1,5 +1,5 @@
-//! Decoded blocks, overview blocks and index pages of one file, the least recently used dropped
-//! first once they hold more than the cache's bytes.
+//! Decoded blocks, overview blocks, index pages and annotation parts of one file, the least
+//! recently used dropped first once they hold more than the cache's bytes.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -43,6 +43,8 @@ pub(crate) enum Key {
     /// where the table's shape puts it, so the same record listed at another place is checked
     /// there again.
     Leaf(usize, Table, u64),
+    /// An annotation part's markers, by its frame's offset.
+    Part(u64),
 }
 
 #[derive(Clone)]
@@ -53,6 +55,7 @@ pub(crate) enum Entry {
     Rows(Arc<Vec<LevelRef>>),
     List(Arc<List>),
     Bytes(Arc<Vec<u8>>),
+    Part(Arc<crate::markers::PartMarkers>),
 }
 
 struct Held {

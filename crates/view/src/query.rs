@@ -44,7 +44,8 @@ pub struct Query {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MarkerQuery {
-    /// At most this many of the window's markers.
+    /// At most this many of the window's markers; at 0, none is read and the window's page is
+    /// empty.
     pub limit: usize,
     /// A page of the list of every marker: from after a cursor, at most so many.
     pub list: Option<(Option<MarkerCursor>, usize)>,
@@ -93,8 +94,8 @@ pub struct Point {
 pub enum Drawn {
     Analog {
         columns: AnalogColumns,
-        /// Every sample `around` holds, and one either side, when it holds no more than there
-        /// are columns.
+        /// Every sample `around` holds, when it holds no more than there are columns, and the one
+        /// either side whose line to them, or whose time, reaches into it.
         samples: Option<Vec<Point>>,
         /// The spans the instrument lost, shaded: before the first sample, at each break and
         /// after the last. A pause is a break with no span.
@@ -108,6 +109,9 @@ pub enum Drawn {
         /// Where the level wasn't known, shaded.
         gaps: Vec<Range<i64>>,
     },
+    /// A channel this version can't read (FORMAT.md, "Unavailable channels"), shown as such in its
+    /// place: `ChannelInfo::unavailable` says why.
+    Unavailable,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -220,6 +224,7 @@ impl Drawn {
                     .all(|&n| n == count)
             }
             Self::Digital { columns: c, .. } => c.state.len() == count && c.at.len() == count,
+            Self::Unavailable => true,
         }
     }
 }
@@ -334,6 +339,7 @@ impl Recording {
                 (self.places.get(c).ok_or(Error::NoChannel(c))?, drawn),
                 (Place::Digital { .. }, Drawn::Digital { .. })
                     | (Place::Analog { .. }, Drawn::Analog { .. })
+                    | (Place::Unavailable(_), Drawn::Unavailable)
             );
             if !kind || !drawn.holds(before.grid.count) {
                 return Ok(None);
@@ -408,7 +414,12 @@ impl Recording {
             });
         }
         let m = &q.markers;
-        if m.limit > 0 || m.list.is_some() || m.successor_of.is_some() {
+        // The window's markers are read by range; a list or a successor reads them all.
+        let window_markers = match m.limit {
+            0 => Page::default(),
+            limit => self.markers_in(window.clone(), None, limit)?,
+        };
+        if m.list.is_some() || m.successor_of.is_some() {
             self.read_markers()?;
         }
         let statistics = q
@@ -417,7 +428,7 @@ impl Recording {
             .map(|i| self.statistics_in(r, i.clone()))
             .collect::<Result<Vec<_>, _>>()?;
         let markers = MarkerAnswer {
-            window: self.markers(window.clone(), None, q.markers.limit),
+            window: window_markers,
             list: q
                 .markers
                 .list
@@ -468,6 +479,7 @@ impl Recording {
             How::Sketch => self.level_for(c, f64::INFINITY),
         };
         match place {
+            Place::Unavailable(_) => Ok(Drawn::Unavailable),
             Place::Digital { gaps, .. } => {
                 let mut cols = DigitalColumns::empty(g.count);
                 let mut piece = DigitalColumns::empty(g.count);
@@ -752,8 +764,8 @@ impl Recording {
         Ok(())
     }
 
-    /// Channel `c`'s samples over `range` and one either side, when `range` holds no more than
-    /// `g` has columns; `place` the channel's, exact over them.
+    /// Channel `c`'s samples over `range` and the one either side that reaches into it, when
+    /// `range` holds no more than `g` has columns; `place` the channel's, exact over them.
     fn points(
         &self,
         c: usize,
@@ -773,8 +785,21 @@ impl Recording {
         if i1 - i0 > g.count as u64 {
             return Ok(None);
         }
-        let lo = i0.saturating_sub(1);
-        let hi = (i1 + 1).min(*count);
+        // A sample outside `range` draws there only by its line to one inside, or its time: so
+        // a range past the last sample, or before a break, reads none of the block before it.
+        let joined = |i: u64| {
+            i > 0 && i < *count && runs.breaks.binary_search_by_key(&i, |b| b.index).is_err()
+        };
+        let reaches = |i: u64| {
+            runs.support(i, self.length)
+                .is_some_and(|s| s.end > range.start)
+        };
+        let lo = if i0 > 0 && (joined(i0) || reaches(i0 - 1)) {
+            i0 - 1
+        } else {
+            i0
+        };
+        let hi = if joined(i1) { i1 + 1 } else { i1 };
         let values = self.values(r, c, place, lo, hi)?;
         let ticks: Vec<i64> = (lo..hi).map(|i| runs.tick(i)).collect();
         let flagged = match (flag, ticks.first(), ticks.last()) {

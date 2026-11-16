@@ -57,7 +57,7 @@ pub fn known_spans(c: &ChannelPlace, start: i64, end: i64) -> Vec<Range<i64>> {
             let b = runs.breaks;
             // Run k starts at break k − 1's tick: the runs before the one holding `start` end
             // before it, and those from `stop` on start after the window.
-            for k in b.partition_point(|x| runs.axis(x.tick) <= start)..=b.len() {
+            for k in b.partition_point(|x| runs.at(runs.grid.start(*x)) <= start)..=b.len() {
                 let from = if k == 0 {
                     runs.start()
                 } else {

@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use escapement_tickwave_format::decode::{
     Block, BlockChannel, BlockRef, DecodeError, LevelRef, OverviewBlock,
 };
+use escapement_tickwave_format::header::ChannelKind as HeaderKind;
 use escapement_tickwave_format::index::{Located, Table, TableIndex};
 use escapement_tickwave_format::model::Sample;
 use escapement_tickwave_format::overview::{
@@ -311,6 +312,73 @@ impl Recording {
         self.edges_in(&r, channel, &place, from, to)
     }
 
+    /// How many edges digital channel `channel` has in [from, to), within the recording. A
+    /// finished file's are counted from its index, its page numbers and block words, with only
+    /// the blocks holding `from` and `to` decoded; a live recording's edges are read.
+    pub fn edge_count(
+        &self,
+        channel: usize,
+        from: i64,
+        to: i64,
+        cancel: &AtomicBool,
+    ) -> Result<u64, Error> {
+        let r = Reading::new(cancel);
+        match self.places.get(channel) {
+            Some(Place::Digital { .. }) => {}
+            Some(Place::Unavailable(why)) => {
+                return Err(Error::Unavailable {
+                    channel,
+                    why: why.clone(),
+                });
+            }
+            _ => return Err(Error::NoChannel(channel)),
+        }
+        let (from, to) = (from.max(0), to.min(self.length));
+        if to <= from {
+            return Ok(0);
+        }
+        if self.finished().is_none() {
+            let place = self.place_over(&r, channel, from..to)?;
+            return Ok(self.edges_in(&r, channel, &place, from, to)?.1.len() as u64);
+        }
+        Ok(self.edges_before(&r, channel, to)? - self.edges_before(&r, channel, from)?)
+    }
+
+    /// How many of finished digital channel `c`'s edges lie before tick `t`.
+    fn edges_before(&self, r: &Reading, c: usize, t: i64) -> Result<u64, Error> {
+        if t <= 0 {
+            return Ok(0);
+        }
+        if t >= self.length {
+            let f = self.finished().ok_or(Error::NoChannel(c))?;
+            return match f.footer().header.channels.get(c).map(|ch| &ch.data) {
+                Some(HeaderKind::Digital { edges, .. }) => Ok(*edges),
+                _ => Err(Error::NoChannel(c)),
+            };
+        }
+        let covering = self.blocks_covering(r, c, t, t + 1)?;
+        let Some(at) = covering.first() else {
+            return Err(
+                DecodeError::Corrupt(format!("channel {c}: no block holds tick {t}")).into(),
+            );
+        };
+        // A finished file's blocks are all in it.
+        #[cfg(feature = "live")]
+        let BlockFrom::Frame(b) = at.from else {
+            return Err(Error::NoChannel(c));
+        };
+        #[cfg(not(feature = "live"))]
+        let BlockFrom::Frame(b) = at.from;
+        if b.start == t {
+            return Ok(b.first_index);
+        }
+        let block = self.block(r, c, at)?;
+        let BlockChannel::Digital { edges, .. } = &block.data else {
+            return Err(Error::NoChannel(c));
+        };
+        Ok(b.first_index + edges.partition_point(|&e| e < t) as u64)
+    }
+
     /// `edges`, `place` the channel's, exact over [from, to).
     pub(crate) fn edges_in(
         &self,
@@ -479,7 +547,7 @@ impl Recording {
         let values = {
             // A derived channel's samples are its operands' at the same indices, which share its
             // breaks: their places over the samples' ticks.
-            let (a, b, product) = self.products[channel - stored];
+            let (a, b, product) = self.product(channel - stored)?;
             let runs = place.runs().ok_or(Error::NoChannel(channel))?;
             let ticks = runs.tick(i0)..runs.tick(i1 - 1).saturating_add(1);
             let (pa, pb) = (

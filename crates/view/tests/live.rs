@@ -245,17 +245,21 @@ fn a_live_recording_reads_as_the_same_file_finished_where_it_ends() {
             let finished = Recording::open(Arc::new(finished_file), Cache::new(1 << 20)).unwrap();
             assert_eq!(finished.length(), length, "{at}");
 
-            // A finished file drops what a recorder marked at or past its length.
+            // A finished file drops what a recorder marked at or past its length. Its arrivals
+            // number its parts' lines, so only their order is the same.
             let all = live.markers(i64::MIN..i64::MAX, None, usize::MAX).entries;
             let kept: Vec<_> = all
                 .iter()
                 .filter(|m| m.cursor.tick < length)
-                .cloned()
+                .map(|m| &m.annotation)
                 .collect();
             assert_eq!(
                 finished
                     .markers(i64::MIN..i64::MAX, None, usize::MAX)
-                    .entries,
+                    .entries
+                    .iter()
+                    .map(|m| &m.annotation)
+                    .collect::<Vec<_>>(),
                 kept,
                 "{at}"
             );
@@ -473,27 +477,26 @@ fn one_recording_updated_with_each_snapshot_reads_as_one_made_from_it() {
                 "{at}"
             );
             // Both go through one update, so the marks also against the ops: in order of their
-            // ticks, then of their arrival, and inside the extent.
-            let mut marks: Vec<(i64, usize)> = ops[..=n]
+            // ticks, then of their arrival, and inside the extent. One generator's arrivals
+            // follow the order its writer took them in.
+            let mut marks: Vec<i64> = ops[..=n]
                 .iter()
                 .filter_map(|op| match op {
                     Op::Mark(t) => Some(*t),
                     _ => None,
                 })
-                .enumerate()
-                .map(|(arrival, t)| (t, arrival))
                 .collect();
             marks.sort_unstable();
-            let got: Vec<(i64, usize)> = u
-                .markers(i64::MIN..i64::MAX, None, usize::MAX)
-                .entries
-                .iter()
-                .map(|m| (m.cursor.tick, m.cursor.arrival))
-                .collect();
+            let entries = u.markers(i64::MIN..i64::MAX, None, usize::MAX).entries;
+            let got: Vec<i64> = entries.iter().map(|m| m.cursor.tick).collect();
             assert_eq!(got, marks, "{at}");
-            if let (Some(extent), Some(&(last, _))) = (u.extent(), marks.iter().max()) {
+            assert!(
+                entries.windows(2).all(|w| w[0].cursor < w[1].cursor),
+                "{at}: cursors in order, each its own"
+            );
+            if let (Some(extent), Some(&last)) = (u.extent(), marks.iter().max()) {
                 assert!(
-                    extent.end > last && extent.start <= marks[0].0,
+                    extent.end > last && extent.start <= marks[0],
                     "{at}: {extent:?}"
                 );
             }

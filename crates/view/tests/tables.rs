@@ -433,7 +433,8 @@ fn with_samples<R>(a: &Value, then: impl FnOnce(&Samples<f64>, &Runs) -> R) -> R
     let b = breaks(&a["runs"]["breaks"]);
     let runs = Runs {
         first: int(&a["runs"]["first"]),
-        period: ratio(&a["runs"]["period"]),
+        grid: escapement_tickwave_format::model::Grid::new(ratio(&a["runs"]["period"]), None)
+            .unwrap(),
         count: count(&a["runs"]["count"]),
         breaks: &b,
         map: Mapping::IDENTITY,

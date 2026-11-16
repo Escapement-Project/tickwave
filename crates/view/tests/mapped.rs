@@ -16,7 +16,7 @@ use escapement_tickwave_format::model::{
 use escapement_tickwave_format::writer::{Finish, WriteOptions, Writer};
 use escapement_tickwave_view::runs::lost_spans;
 use escapement_tickwave_view::spans::{ChannelPlace, known_spans};
-use escapement_tickwave_view::{Cache, Recording, Sum};
+use escapement_tickwave_view::{Cache, Recording, Sum, Ticks};
 
 fn open(file: &[u8]) -> Recording {
     Recording::open(Arc::new(file.to_vec()), Cache::new(64 << 20)).unwrap()
@@ -41,12 +41,19 @@ fn b_axis(k: i64, offset: i64) -> i64 {
     (37 + (i128::from(k + offset) * 1001).div_euclid(400)) as i64
 }
 
-/// B1's sample `i`'s source tick: every 3/2 ticks from 0, and from 800 on from sample 500.
-fn b1_tick(i: u64) -> i64 {
+/// B1's sample `i`'s place in half ticks of its source: every 3/2 ticks from 0, and from 800 on
+/// from sample 500.
+fn b1_place(i: u64) -> i64 {
     match i {
-        0..500 => (i * 3 / 2) as i64,
-        _ => 800 + ((i - 500) * 3 / 2) as i64,
+        0..500 => (i * 3) as i64,
+        _ => 1_600 + ((i - 500) * 3) as i64,
     }
+}
+
+/// A place of `halves` half ticks of source 1 on the axis: origin 37, m = 1001/400, so
+/// `37 + floor(halves × 1001 / 800)`.
+fn b_half(halves: i64) -> i64 {
+    (37 + (i128::from(halves) * 1001).div_euclid(800)) as i64
 }
 
 /// A 1 kHz recording of three sources. Source 0 ticks at the rate: A0, edges at 100, 200 and
@@ -193,10 +200,10 @@ fn a_stretched_source_s_samples_and_edges_lie_where_its_mapping_puts_them() {
         (map.m(), map.origin(), map.offset()),
         (Ratio::new(1001, 400).unwrap(), 37, 0)
     );
-    // Sample 1 at source tick 1, 2.5025 ticks past 37; sample 500 at 800, 2,002 past it.
-    assert_eq!((runs.tick(1), runs.tick(500)), (39, 2_039));
+    // Sample 1 at source place 1.5, 3.75375 ticks past 37; sample 500 at 800, 2,002 past it.
+    assert_eq!((runs.tick(1), runs.tick(500)), (40, 2_039));
     for i in 0..1_000 {
-        let t = b_axis(b1_tick(i), 0);
+        let t = b_half(b1_place(i));
         assert_eq!(runs.tick(i), t, "sample {i}");
         // The first sample at or after its tick is itself, and one tick on, the next.
         assert_eq!(rec.index_at(b1, t).unwrap(), i, "sample {i}");
@@ -211,15 +218,24 @@ fn a_stretched_source_s_samples_and_edges_lie_where_its_mapping_puts_them() {
         [37..b_axis(750, 0), 2_039..b_axis(1_550, 0)]
     );
     assert_eq!((b_axis(750, 0), b_axis(1_550, 0)), (1_913, 3_915));
-    // The 3 lost, places 500 to 503 on run 0's grid: source ticks 750 to 754.
+    // The 3 lost, places 500 to 503 on run 0's grid: source places 750 to 754.5, 1,500 to 1,509
+    // halves, 37 + 1,888.13 on the axis.
     let lost: Vec<_> = lost_spans(&runs).iter().map(|l| (l.from, l.to)).collect();
-    assert_eq!(lost, [(1_913, b_axis(754, 0))]);
-    // Every sample's time inside the recording, each to the next place on the axis.
+    assert_eq!(lost, [(1_913, b_half(1_509))]);
+    assert_eq!(b_half(1_509), 1_925, "worked by hand");
+    // Every sample's time inside the recording, each from its place to the next, exactly: two
+    // runs of 750 source ticks, 1,500 halves, each 1,500 × 1,001 / 800 = 1,876.875 axis ticks.
     let all = rec.statistics(0..16_000, &cancel).unwrap();
     let s = all.channels[b1].as_ref().unwrap();
     assert_eq!(
         (s.samples, s.measured),
-        (1_000, (1_913 - 37) + (3_915 - 2_039))
+        (
+            1_000,
+            Ticks {
+                units: 2 * 1_500 * 1_001,
+                per: std::num::NonZeroU128::new(800).unwrap()
+            }
+        )
     );
     let values = {
         let mut v = Vec::new();
@@ -282,12 +298,12 @@ fn a_stretched_source_s_samples_and_edges_lie_where_its_mapping_puts_them() {
             .unwrap();
         let (a, b) = (interval.start, interval.end);
         // Each sample from 8 i to 8 i + 8, cut to the interval.
-        let mut want = (0u64, 0i64, 0i128);
+        let mut want = (0u64, Ticks::whole(0), 0i128);
         for i in 0..2_000i64 {
             let ticks = (8 * i + 8).min(b) - (8 * i).max(a);
             if ticks > 0 {
                 want.0 += 1;
-                want.1 += ticks;
+                want.1.units += i128::from(ticks);
                 want.2 += i128::from(i % 7) * i128::from(ticks);
             }
         }
@@ -452,4 +468,63 @@ fn an_attached_stream_s_ticks_lie_its_origin_earlier_finished_and_live() {
             "{name}"
         );
     }
+}
+
+/// A period of 65,537/65,535 source ticks, a grid of 65,535ths, on a source stretched
+/// (2^52 − 1)/(2^52 − 3): the statistics count in 1/(65,535 × (2^52 − 3)) axis ticks, past what a
+/// u64 holds. Three samples, each lasting a period times `m` on the axis, measure exactly 3 ×
+/// 65,537 × (2^52 − 1) of those units. Worked by hand.
+#[test]
+fn a_grid_and_a_stretch_whose_units_pass_a_u64_measure_exactly() {
+    let b = (1u64 << 52) - 3;
+    let timebase = Ratio::integer(1000).unwrap();
+    let d = Declaration {
+        timebase,
+        channels: vec![DeclaredChannel {
+            name: "V".into(),
+            source_name: "v".into(),
+            source: 0,
+            data: DeclaredKind::Analog {
+                unit: "V".into(),
+                period: Ratio::new(65_537, 65_535).unwrap(),
+                coding: AnalogCoding::F32,
+                significant: None,
+                phase: None,
+            },
+            shaping: kept(0, 10),
+            overview_shift: None,
+            codec: None,
+            requires: Vec::new(),
+        }],
+        derived: Vec::new(),
+        sources: vec![SourceHeader {
+            stretch: Ratio::new((1 << 52) - 1, b),
+            ..SourceHeader::new(SourceFormat::Other("test".into()), timebase)
+        }],
+        title: None,
+        meta: Default::default(),
+        overview_shift: 4,
+        requires: Vec::new(),
+    };
+    let mut w = Writer::new(d, WriteOptions::default()).unwrap();
+    w.run(0, 0, 0).unwrap();
+    for i in 0..3 {
+        w.sample(0, i as f32).unwrap();
+    }
+    let mut file = w.take_output();
+    file.extend(w.finish(11, &[], Finish::default()).unwrap().tail);
+    let rec = open(&file);
+    let s = rec
+        .statistics(0..11, &AtomicBool::new(false))
+        .unwrap()
+        .channels[0]
+        .clone()
+        .unwrap();
+    let per = 65_535 * u128::from(b);
+    assert!(per > u128::from(u64::MAX));
+    assert_eq!(s.measured.per.get(), per);
+    assert_eq!(
+        (s.samples, s.measured.units),
+        (3, 3 * 65_537 * i128::from((1u64 << 52) - 1))
+    );
 }

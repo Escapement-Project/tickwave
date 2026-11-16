@@ -210,6 +210,9 @@ impl Recutter {
                 c.overview_shift = (s != recording).then_some(s);
             }
         }
+        // The writer refuses a declaration this version can't write again, before anything
+        // here takes its derived channels.
+        let writer = Writer::new(d.clone(), self.options.clone())?;
         self.hold = Some(Hold::new(&d));
         self.checks = Some(Lines::declared(&d));
         self.gaps = vec![VecDeque::new(); d.channels.len()];
@@ -224,7 +227,7 @@ impl Recutter {
             }
         }
         self.partners = partners;
-        self.writer = Some(Writer::new(d, self.options.clone())?);
+        self.writer = Some(writer);
         Ok(())
     }
 

@@ -864,3 +864,97 @@ fn a_cut_whose_first_run_cannot_state_a_later_runs_phase_is_refused() {
         "{err}"
     );
 }
+
+/// The cuts in testdata/format/places.json: each keeps the samples at or after its tick, the
+/// first starting the channel at its whole tick and phase, and every later run kept as it was.
+#[test]
+fn the_reference_cuts_keep_what_the_vectors_say() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/format/places.json");
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let int = |v: &serde_json::Value| v.as_i64().unwrap();
+    let ratio = |v: &serde_json::Value| Ratio::new(int(&v[0]) as u64, int(&v[1]) as u64);
+    for case in v["trims"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let c = case["channel"].clone();
+        let open = move || {
+            let mut rec = source();
+            let count = int(&c["count"]) as u64;
+            let breaks = c["breaks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|b| escapement_tickwave_format::model::Break {
+                    phase: int(&b[3]) as u32,
+                    ..escapement_tickwave_format::model::Break::new(
+                        int(&b[0]) as u64,
+                        int(&b[1]),
+                        int(&b[2]) as u64,
+                    )
+                })
+                .collect();
+            rec.channels.push(Channel {
+                name: "X".into(),
+                source_name: "x".into(),
+                source: 0,
+                data: ChannelData::Analog(Analog {
+                    unit: "V".into(),
+                    first: int(&c["first"]),
+                    phase: c["phase"].as_array().and_then(|_| ratio(&c["phase"])),
+                    period: ratio(&c["period"]).unwrap(),
+                    count,
+                    breaks,
+                    significant: None,
+                    samples: Samples::F32(Box::new((0..count).map(|i| i as f32))),
+                    lost_before: 0,
+                    lost_after: 0,
+                }),
+                shaping: Shaping::default(),
+            });
+            Ok(rec)
+        };
+        let from = int(&case["channel"]["from"]).to_string();
+        let out = run(&open, &settings(&[], &[("X", Some(&from), None)]));
+        let e = &case["expect"];
+        let ChannelKind::Analog {
+            first,
+            phase,
+            breaks,
+            count,
+            ..
+        } = &out.header.channels[3].data
+        else {
+            panic!("{name}: X is analog")
+        };
+        let breaks: Vec<[i64; 4]> = breaks
+            .iter()
+            .map(|b| [b.index as i64, b.tick, b.lost as i64, i64::from(b.phase)])
+            .collect();
+        let want: Vec<[i64; 4]> = e["breaks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| [int(&b[0]), int(&b[1]), int(&b[2]), int(&b[3])])
+            .collect();
+        assert_eq!(
+            (*first, *phase, *count as i64, breaks),
+            (
+                int(&e["first"]),
+                e["phase"].as_array().and_then(|_| ratio(&e["phase"])),
+                int(&e["count"]),
+                want
+            ),
+            "{name}"
+        );
+        // Each kept sample at the whole tick its place lies in, in order.
+        let d = int(&e["d"]);
+        let ticks: Vec<i64> = out.samples[3].iter().map(|&(t, _)| t).collect();
+        let want: Vec<i64> = e["places"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| int(p).div_euclid(d))
+            .collect();
+        assert_eq!(ticks, want, "{name}");
+    }
+}

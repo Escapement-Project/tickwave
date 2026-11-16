@@ -35,6 +35,9 @@ const LONGEST_HEADER: usize = 64;
 /// recordings measured so far sit within 6.4e-4.
 pub const GRID_TOLERANCE: f64 = 0.01;
 
+/// An analog file's begin, off the digital channels' grid, is stated to a thousandth of a sample.
+const PHASE_DEN: i64 = 1000;
+
 /// The highest sample rate a version 0 export's rate is inferred as, in hertz.
 const MOST_INFERRED: u64 = 1_000_000_000;
 
@@ -72,8 +75,10 @@ pub enum Error {
          capture ran at"
     )]
     NoRate(&'static str),
-    #[error("{path}: begins {residual:.3} samples off the digital channels' sample grid")]
-    AnalogOffGrid { path: PathBuf, residual: f64 },
+    #[error("{path}: its begin, {begin}, is no time")]
+    AnalogNoBegin { path: PathBuf, begin: f64 },
+    #[error("{path}: begins {samples:.3} samples before the digital channels do")]
+    AnalogBefore { path: PathBuf, samples: f64 },
     #[error("{path}: edge {index} lies {residual:.3} samples off the sample grid")]
     OffGrid {
         path: PathBuf,
@@ -708,8 +713,8 @@ pub struct Headers {
 impl Headers {
     /// Opens the named channels' files among `files`, every `.bin` file of the export, opened as
     /// for `read_files`. Tick 0 is the digital channels' `begin`, or the first analog channel's
-    /// when there are no digital ones. Analog channels must sit on that grid, at the same sample
-    /// rate.
+    /// when there are no digital ones. Analog channels sample at the same rate, at or after tick
+    /// 0, each at its own offset from that grid: its phase, to a thousandth of a sample.
     ///
     /// The sample rate is `rate`, if given, which every file that records one must match. Without
     /// it, it is the rate a named file records. A version 0 digital file records none, so where
@@ -840,22 +845,29 @@ impl Headers {
             }
         };
         let mut length = 0;
-        let mut firsts = Vec::with_capacity(self.files.len());
+        let mut firsts: Vec<(i64, Option<Ratio>)> = Vec::with_capacity(self.files.len());
         let mut trigger: Option<(f64, &PathBuf)> = None;
         for opened in &self.files {
             match opened {
                 Opened::Digital(d) => {
                     length = length.max(d.end(rate));
-                    firsts.push(0);
+                    firsts.push((0, None));
                 }
                 Opened::Analog(a) => {
-                    let exact = tick_of(a.begin, self.begin, rate);
-                    let first = exact.round();
-                    let residual = (exact - first).abs();
-                    if residual.is_nan() || residual > GRID_TOLERANCE {
-                        return Err(Error::AnalogOffGrid {
+                    // Its offset from the digital channels' grid is its phase (FORMAT.md, "Times"),
+                    // to the nearest thousandth of a sample.
+                    if !a.begin.is_finite() {
+                        return Err(Error::AnalogNoBegin {
                             path: a.file.path.clone(),
-                            residual,
+                            begin: a.begin,
+                        });
+                    }
+                    let exact = tick_of(a.begin, self.begin, rate);
+                    let thousandths = (exact * PHASE_DEN as f64).round();
+                    if thousandths < 0.0 {
+                        return Err(Error::AnalogBefore {
+                            path: a.file.path.clone(),
+                            samples: -exact,
                         });
                     }
                     if let Some(t) = a.trigger {
@@ -871,16 +883,32 @@ impl Headers {
                             None => trigger = Some((t, &a.file.path)),
                         }
                     }
-                    // The cast saturates for a begin far from the digital channels', where the
-                    // samples' end would pass what a tick holds.
-                    let first = first as i64;
-                    let end = first.checked_add(a.count as i64).ok_or_else(|| {
+                    // A begin far from the digital channels' passes what a tick holds, or the
+                    // samples' end does.
+                    let far = || {
                         a.file.unsupported(format!(
                             "an analog file beginning {exact:e} samples from the export's start"
                         ))
-                    })?;
+                    };
+                    // Past an i64, or no number where the digital channels' begin is none.
+                    if thousandths.is_nan() || thousandths >= i64::MAX as f64 {
+                        return Err(far());
+                    }
+                    let thousandths = thousandths as i64;
+                    let (first, phase) = (
+                        thousandths.div_euclid(PHASE_DEN),
+                        thousandths.rem_euclid(PHASE_DEN) as u64,
+                    );
+                    // Past the last sample's time: the count after the first sample's tick, and
+                    // one more where its phase puts it past that tick.
+                    let end = (first + i64::from(phase > 0))
+                        .checked_add(a.count as i64)
+                        .ok_or_else(far)?;
                     length = length.max(end);
-                    firsts.push(first);
+                    firsts.push((
+                        first,
+                        Ratio::new(phase, PHASE_DEN as u64).map(Ratio::lowest),
+                    ));
                 }
             }
         }
@@ -903,8 +931,8 @@ impl Headers {
 pub struct Export {
     headers: Headers,
     rate: SampleRate,
-    /// Each file's first tick: an analog file's first sample, 0 for a digital file.
-    firsts: Vec<i64>,
+    /// Each file's first tick and phase: an analog file's first sample's, 0 for a digital file.
+    firsts: Vec<(i64, Option<Ratio>)>,
     trigger: Option<f64>,
     length: i64,
 }
@@ -918,7 +946,7 @@ impl Export {
             .iter()
             .zip(&h.channels)
             .zip(&self.firsts)
-            .map(|((opened, (stem, name)), &first)| Channel {
+            .map(|((opened, (stem, name)), &(first, phase))| Channel {
                 name: name.clone(),
                 source_name: stem.clone(),
                 source: 0,
@@ -933,7 +961,7 @@ impl Export {
                     Opened::Analog(a) => ChannelData::Analog(Analog {
                         unit: "V".into(),
                         first,
-                        phase: None,
+                        phase,
                         period: Ratio::ONE,
                         count: a.count,
                         breaks: Vec::new(),

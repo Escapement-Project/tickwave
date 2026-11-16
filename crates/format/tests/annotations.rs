@@ -505,3 +505,33 @@ fn a_generator_name_holding_a_path_separator_is_refused() {
         assert!(problems.contains(&want), "{problems:?}");
     }
 }
+
+/// A lenient reader keeps what it can: a `ref` resolves only to an annotation it keeps, so a
+/// `ref` to a generated annotation it leaves out is left out too, and named. Of an id given twice
+/// it keeps the first, and a `ref` takes that one.
+#[test]
+fn a_lenient_ref_resolves_only_to_an_annotation_kept() {
+    use escapement_tickwave_format::annotations::resolve_lenient;
+    // The generator file is for another recording, so its lines are left out, and the alias with
+    // them.
+    let generated = GENERATED.replacen("00ff", "aaaa", 1);
+    let got = resolve_lenient(HAND, &included(&generated), &header(), Some("rec.tickwave"));
+    let ids: Vec<&str> = got.annotations.iter().map(|a| a.id.as_str()).collect();
+    assert_eq!(ids, ["read-ack-check"]);
+    assert_problem(
+        &got.problems,
+        "annotation 2: ref \"wire_swd/misread/412000\" names an annotation left out",
+    );
+    // The misread given twice, the second at 413,000: the first is kept, and the alias's span
+    // is the first's.
+    let second = r#"{"id": "misread/412000", "kind": "misread", "start": 413000, "end": 413900, "channels": ["SWDIO"]}"#;
+    let generated = format!("{GENERATED}{second}\n");
+    let got = resolve_lenient(HAND, &included(&generated), &header(), Some("rec.tickwave"));
+    let alias = got
+        .annotations
+        .iter()
+        .find(|a| a.id == "first-misread")
+        .unwrap();
+    assert_eq!((alias.start, alias.end), (412_000, Some(412_900)));
+    assert_problem(&got.problems, "is used twice");
+}

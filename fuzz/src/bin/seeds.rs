@@ -87,6 +87,102 @@ fn reads_as_original(name: &str, original: &[u8], rebuilt: &[u8]) {
     }
 }
 
+fn stem(p: &Path) -> String {
+    p.file_stem().unwrap().to_string_lossy().into_owned()
+}
+
+/// A recording of what FORMAT.md's revision added: a phase and runs at phases of their own, a
+/// subtraction beside a product, annotation parts of two generators, and a re-cut with parts
+/// that stand alone.
+fn revision() -> Vec<u8> {
+    use escapement_tickwave_format::header::{
+        AnalogCoding, Declaration, DeclaredChannel, DeclaredKind, Derived, Exact, IntCoding,
+        SourceFormat, SourceHeader,
+    };
+    use escapement_tickwave_format::model::Ratio;
+    use escapement_tickwave_format::recut::Recutter;
+    use escapement_tickwave_format::writer::{Bundle, Finish, WriteOptions, Writer};
+    let analog = |name: &str| DeclaredChannel {
+        name: name.into(),
+        source_name: name.to_lowercase(),
+        source: 0,
+        data: DeclaredKind::Analog {
+            unit: "V".into(),
+            period: Ratio::new(7, 3).unwrap(),
+            coding: AnalogCoding::Int(IntCoding {
+                scale: Exact::new(1, 1000),
+                ..IntCoding::new(12, false)
+            }),
+            significant: None,
+            phase: Ratio::new(1, 3),
+        },
+        shaping: Default::default(),
+        overview_shift: None,
+        codec: None,
+        requires: Vec::new(),
+    };
+    let timebase = Ratio::integer(1000).unwrap();
+    let d = Declaration {
+        timebase,
+        channels: vec![analog("V"), analog("I")],
+        derived: vec![
+            Derived::multiply("P", "W", "I", "V"),
+            Derived::subtract("D", "V", "V", "I"),
+        ],
+        sources: vec![SourceHeader::new(
+            SourceFormat::Other("seeds".into()),
+            timebase,
+        )],
+        title: None,
+        meta: BTreeMap::new(),
+        overview_shift: 4,
+        requires: Vec::new(),
+    };
+    let options = WriteOptions {
+        level: 1,
+        block_bytes: 64,
+        promise_with_items: true,
+        ..WriteOptions::default()
+    };
+    let mut w = Writer::new(d, options).unwrap();
+    for (run, (tick, phase)) in [(0i64, 1u32), (400, 2), (900, 0)].into_iter().enumerate() {
+        for c in 0..2 {
+            w.run_at(c, tick, phase, u64::from(run == 2)).unwrap();
+        }
+        for i in 0..100u64 {
+            w.sample(0, i % 4096).unwrap();
+            w.sample(1, (3 * i) % 4096).unwrap();
+            if i % 10 == 0 {
+                let t = tick + i as i64 * 7 / 3;
+                for (g, id) in [("verge", "m"), ("swd", "p")] {
+                    let serde_json::Value::Object(m) =
+                        serde_json::json!({"id": format!("{id}/{t}"), "start": t, "end": t + 2})
+                    else {
+                        unreachable!()
+                    };
+                    w.annotation(g, m).unwrap();
+                }
+            }
+        }
+    }
+    let mut file = w.take_output();
+    let finish = Finish {
+        bundle: Some(Bundle::Generated { stem: "rev".into() }),
+        ..Finish::default()
+    };
+    file.extend(w.finish(1200, &[], finish).unwrap().tail);
+    // Again through a re-cut, which takes a channel's items a block at a time: its annotations
+    // as parts that stand alone.
+    let mut r = Recutter::new(WriteOptions {
+        level: 1,
+        ..WriteOptions::default()
+    });
+    r.feed(&file).unwrap();
+    let mut out = r.take_output();
+    out.extend(r.finish().unwrap().tail);
+    out
+}
+
 /// A structured input holding `bytes` as they are, with no preamble of its own.
 fn raw(bytes: &[u8]) -> Vec<u8> {
     let mut out = vec![fz::NO_PREAMBLE, 0, RAW];
@@ -181,21 +277,27 @@ fn main() {
         count: BTreeMap::new(),
     };
     let fixtures = repo.join("web/fixtures");
-    let mut recordings = files(&fixtures, "tickwave");
-    recordings.extend(files(&fixtures.join("crafted"), "tickwave"));
+    let mut recordings: Vec<(String, Vec<u8>, bool)> = files(&fixtures, "tickwave")
+        .iter()
+        .map(|p| (stem(p), fs::read(p).unwrap(), false))
+        .collect();
+    recordings.extend(
+        files(&fixtures.join("crafted"), "tickwave")
+            .iter()
+            .map(|p| (stem(p), fs::read(p).unwrap(), true)),
+    );
+    recordings.push(("revision".into(), revision(), false));
 
-    for path in &recordings {
-        let name = path.file_stem().unwrap().to_string_lossy().into_owned();
-        let bytes = fs::read(path).unwrap();
-        let s = fz::structure(&bytes).expect("a fixture structures");
+    for (name, bytes, crafted) in &recordings {
+        let (name, bytes, crafted) = (name.as_str(), &bytes[..], *crafted);
+        let s = fz::structure(bytes).expect("a fixture structures");
         let rebuilt = fz::file(&s);
-        let crafted = path.parent().unwrap().ends_with("crafted");
         if !crafted {
-            reads_as_original(&name, &bytes, &rebuilt);
+            reads_as_original(name, bytes, &rebuilt);
         }
         let mut cut = Vec::new();
         // Cut before its footer, and at a few bytes inside a record.
-        if let Ok(f) = Footer::parse_file(&bytes) {
+        if let Ok(f) = Footer::parse_file(bytes) {
             let at = f.trailer.footer_offset as usize;
             cut.push(("unfinished", fz::structure(&bytes[..at]).unwrap()));
             cut.push((
@@ -213,9 +315,20 @@ fn main() {
                     _ => data.to_vec(),
                 }
             };
-            c.put(target, &name, &prefixed(&s));
+            c.put(target, name, &prefixed(&s));
+            // What this version doesn't know, and every compressed body at its kind's limit.
+            if matches!(target, "footer" | "block" | "reader" | "view") {
+                for (what, flags) in [
+                    ("unknown", fz::REQUIRES | fz::CODEC | fz::OPERATION),
+                    ("limits", fz::LIMITS),
+                ] {
+                    let mut moded = s.clone();
+                    moded[0] |= flags;
+                    c.put(target, &format!("{name}-{what}"), &prefixed(&moded));
+                }
+            }
             if matches!(target, "footer" | "reader" | "repair" | "recut") {
-                c.put(target, &format!("{name}-raw"), &prefixed(&raw(&bytes)));
+                c.put(target, &format!("{name}-raw"), &prefixed(&raw(bytes)));
             }
             if matches!(target, "reader" | "recut" | "repair") {
                 for (what, data) in &cut {

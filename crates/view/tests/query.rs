@@ -35,7 +35,7 @@ fn query(window: std::ops::Range<i64>, columns: u32, channels: Vec<usize>) -> Qu
 fn digital(d: &Drawn) -> &[State] {
     match d {
         Drawn::Digital { columns, .. } => &columns.state,
-        Drawn::Analog { .. } => panic!("an analog channel"),
+        other => panic!("not digital: {other:?}"),
     }
 }
 
@@ -268,18 +268,12 @@ fn oracle_columns(
     level: Option<usize>,
 ) -> (Vec<f64>, Vec<f64>) {
     let f = Index::of_file(file).unwrap().footer;
-    let HeaderKind::Analog {
-        first,
-        period,
-        count,
-        ..
-    } = &f.header.channels[c].data
-    else {
+    let HeaderKind::Analog { first, count, .. } = &f.header.channels[c].data else {
         panic!()
     };
     let runs = Runs {
         first: *first,
-        period: *period,
+        grid: f.grid(c).unwrap(),
         count: *count,
         breaks: f.breaks(c).unwrap(),
         map: f.header.mapping(c).unwrap(),
@@ -287,7 +281,9 @@ fn oracle_columns(
     let levels = common::levels(file, c);
     let truth = oracle(file);
     let samples = &truth[c].as_ref().unwrap().samples;
-    let end = samples.last().unwrap().1;
+    // Where the last sample's time ends, in whole ticks.
+    let per = i128::try_from(truth[c].as_ref().unwrap().per).unwrap();
+    let end = samples.last().unwrap().1.div_euclid(per) as i64;
     let values: Vec<f64> = samples.iter().map(|s| s.2).collect();
     let (mut min, mut max) = (
         vec![f64::INFINITY; g.count],
@@ -421,20 +417,20 @@ fn the_strip_spans_the_extent() {
 fn markers_by_page_cursor_and_successor() {
     let rec = open(&fixture("energy.tickwave"));
     let cancel = AtomicBool::new(false);
+    // A cursor is the host's to hand back, not to make: these come from the list.
+    let every: Vec<MarkerCursor> = rec
+        .markers(i64::MIN..i64::MAX, None, usize::MAX)
+        .entries
+        .iter()
+        .map(|m| m.cursor)
+        .collect();
+    let ticks: Vec<i64> = every.iter().map(|c| c.tick).collect();
+    assert_eq!(ticks, [96_000, 480_000, 1_008_000, 2_000_000, 2_700_000]);
     let q = Query {
         markers: MarkerQuery {
             limit: 2,
-            list: Some((
-                Some(MarkerCursor {
-                    tick: 480_000,
-                    arrival: 1,
-                }),
-                2,
-            )),
-            successor_of: Some(MarkerCursor {
-                tick: 2_000_000,
-                arrival: 3,
-            }),
+            list: Some((Some(every[1]), 2)),
+            successor_of: Some(every[3]),
         },
         ..query(0..2_880_000, 10, vec![])
     };
@@ -443,13 +439,7 @@ fn markers_by_page_cursor_and_successor() {
         p.entries.iter().map(|m| m.cursor.tick).collect::<Vec<_>>()
     };
     assert_eq!(ticks(&a.markers.window), [96_000, 480_000]);
-    assert_eq!(
-        a.markers.window.next,
-        Some(MarkerCursor {
-            tick: 480_000,
-            arrival: 1
-        })
-    );
+    assert_eq!(a.markers.window.next, Some(every[1]));
     assert_eq!(a.markers.window.total, 5);
     let list = a.markers.list.unwrap();
     assert_eq!(ticks(&list), [1_008_000, 2_000_000]);
@@ -460,27 +450,9 @@ fn markers_by_page_cursor_and_successor() {
     );
     assert_eq!(third.values.as_ref().unwrap()["number"], "3");
     let (asked, next) = a.markers.successor.unwrap();
-    assert_eq!(
-        asked,
-        MarkerCursor {
-            tick: 2_000_000,
-            arrival: 3
-        }
-    );
-    assert_eq!(
-        next.unwrap().cursor,
-        MarkerCursor {
-            tick: 2_700_000,
-            arrival: 4
-        }
-    );
-    assert_eq!(
-        rec.marker_after(MarkerCursor {
-            tick: 2_700_000,
-            arrival: 4
-        }),
-        None
-    );
+    assert_eq!(asked, every[3]);
+    assert_eq!(next.unwrap().cursor, every[4]);
+    assert_eq!(rec.marker_after(every[4]), None);
     // The last page has no next.
     assert_eq!(
         rec.markers(0..i64::MAX, a.markers.window.next, 10).next,
@@ -589,29 +561,23 @@ fn columns_come_from_the_coarsest_level_no_wider_than_a_column() {
         (vec![4, 8, 12], 2)
     );
     let cancel = AtomicBool::new(false);
-    let HeaderKind::Analog {
-        first,
-        period,
-        count,
-        ..
-    } = &footer.header.channels[0].data
-    else {
+    let HeaderKind::Analog { first, count, .. } = &footer.header.channels[0].data else {
         panic!()
     };
     let runs = Runs {
         first: *first,
-        period: *period,
+        grid: footer.grid(0).unwrap(),
         count: *count,
         breaks: footer.breaks(0).unwrap(),
         map: footer.header.mapping(0).unwrap(),
     };
-    let end = common::oracle(&file)[0]
-        .as_ref()
-        .unwrap()
+    let a0 = common::oracle(&file)[0].clone().unwrap();
+    let end = a0
         .samples
         .last()
         .unwrap()
-        .1;
+        .1
+        .div_euclid(i128::try_from(a0.per).unwrap()) as i64;
     // Ticks a column, and A's level they read: 300 is past 2^8 and short of 2^12, and 70,000
     // past every level.
     for (per, level) in [(300, 1), (4_095, 1), (4_096, 2), (5_000, 2), (70_000, 2)] {

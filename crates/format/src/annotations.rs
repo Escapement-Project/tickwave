@@ -435,13 +435,69 @@ struct Found<'a> {
     problems: Vec<(Owner<'a>, String)>,
 }
 
+impl Found<'_> {
+    /// The annotations a lenient reader keeps, with their places: those but the ones that break a
+    /// rule, or whose file's first line does. And why it leaves out each `ref` whose target it
+    /// leaves out: a `ref` resolves only to an annotation the reader keeps.
+    fn kept(&self) -> (Vec<(usize, &Annotation)>, Vec<String>) {
+        let mut entries = BTreeSet::new();
+        let mut files = BTreeSet::new();
+        for (owner, _) in &self.problems {
+            match owner {
+                Owner::Entry(p) => {
+                    entries.insert(*p);
+                }
+                Owner::File(name) => {
+                    files.insert(*name);
+                }
+                Owner::Sidecar => {}
+            }
+        }
+        let dropped = |p: usize, at: &At<'_>| {
+            entries.contains(&p) || matches!(at, At::Line(file, _) if files.contains(file))
+        };
+        let kept_ids: BTreeSet<&str> = self
+            .annotations
+            .iter()
+            .filter(|(p, at, a)| a.source.is_some() && !dropped(*p, at))
+            .map(|(_, _, a)| a.id.as_str())
+            .collect();
+        let left_out: BTreeSet<&str> = self
+            .annotations
+            .iter()
+            .filter(|(p, at, a)| a.source.is_some() && dropped(*p, at))
+            .map(|(_, _, a)| a.id.as_str())
+            .filter(|id| !kept_ids.contains(id))
+            .collect();
+        let mut problems = Vec::new();
+        let kept = self
+            .annotations
+            .iter()
+            .filter(|(p, at, a)| {
+                if dropped(*p, at) {
+                    return false;
+                }
+                match &a.target {
+                    Some(t) if left_out.contains(t.as_str()) => {
+                        problems.push(format!("{at}: ref {t:?} names an annotation left out"));
+                        false
+                    }
+                    _ => true,
+                }
+            })
+            .map(|(p, _, a)| (*p, a))
+            .collect();
+        (kept, problems)
+    }
+}
+
 fn resolve_file(
     file: HandFile,
     included: &[Included<'_>],
     header: &Header,
     recording_file: Option<&str>,
 ) -> Result<Vec<Annotation>, Vec<String>> {
-    let found = find(file, included, header, recording_file);
+    let found = find(file, included, header, recording_file, None);
     if found.problems.is_empty() {
         Ok(found.annotations.into_iter().map(|(.., a)| a).collect())
     } else {
@@ -458,6 +514,125 @@ pub struct Resolved {
     pub problems: Vec<String>,
 }
 
+/// One line of generator `source`'s file resolved alone, as `resolve` resolves it: its fields,
+/// times and place held to the recording's `header`, or every rule it breaks. What only the whole
+/// sidecar says, an id given twice or a `ref`, it can't check: a reader that reads a few parts
+/// of a recording's annotations resolves their lines this way.
+pub fn resolve_line(source: &str, line: &str, header: &Header) -> Result<Annotation, Vec<String>> {
+    let entry: Entry = json(line).map_err(|e| vec![e.to_string()])?;
+    let mut problems = field_problems(&entry, true);
+    if entry.target.is_some() {
+        problems.push(GENERATED_REF.to_owned());
+    }
+    let time = |t: &Option<Time>, key: &str| {
+        t.as_ref()
+            .map(|t| ticks(t, header.timebase).map_err(|e| format!("{key}: {e}")))
+            .transpose()
+    };
+    let (start, end) = match (time(&entry.start, "start"), time(&entry.end, "end")) {
+        (Ok(Some(start)), Ok(end)) => (start, end),
+        (Ok(None), _) => return Err(vec!["no start".into()]),
+        (Err(e), _) | (_, Err(e)) => return Err(vec![e]),
+    };
+    // Held to the length as a reader holds a part's lines (FORMAT.md, "Annotations").
+    if start >= header.length {
+        return Err(vec![format!(
+            "starts at or past the length, {}",
+            header.length
+        )]);
+    }
+    let end = end.map(|e| e.min(header.length));
+    let channels: BTreeMap<&str, bool> = header
+        .channels
+        .iter()
+        .map(|c| {
+            (
+                c.name.as_str(),
+                matches!(c.data, ChannelKind::Digital { .. }),
+            )
+        })
+        .collect();
+    let a = Annotation {
+        id: format!("{source}/{}", entry.id),
+        source: Some(source.to_owned()),
+        target: None,
+        start,
+        end,
+        channels: entry.channels.unwrap_or_default(),
+        label: entry.label,
+        kind: entry.kind,
+        text: entry.text,
+        paint: entry.paint,
+        measure: entry.measure,
+        values: entry.values,
+    };
+    problems.extend(place_problems(
+        a.start,
+        a.end,
+        &a.channels,
+        a.measure.as_ref(),
+        Some(header.length),
+        |c| channels.get(c).copied(),
+    ));
+    if problems.is_empty() {
+        Ok(a)
+    } else {
+        Err(problems)
+    }
+}
+
+/// A sidecar resolved apart from its generator files' lines, as a reader that reads those from a
+/// recording's annotation parts resolves it, leaving out what breaks a rule as `resolve_lenient`
+/// does: `included` the bundle's generator files, each its first line alone. Each `ref` is
+/// followed through `targets`, the generated annotations by full id.
+#[cfg(feature = "toml")]
+pub fn resolve_apart<'a>(
+    hand: &str,
+    included: &[Included<'a>],
+    header: &Header,
+    targets: Targets<'_>,
+) -> Apart<'a> {
+    let file: HandFile = match toml::from_str(hand) {
+        Ok(file) => file,
+        Err(e) => {
+            return Apart {
+                annotations: Vec::new(),
+                files: Vec::new(),
+                problems: vec![format!("the TOML file: {e}")],
+            };
+        }
+    };
+    // `find`'s order.
+    let mut order: Vec<&Included<'a>> = included.iter().collect();
+    order.sort_by_key(|inc| file.include.iter().position(|n| n == inc.name));
+    let found = find(file, included, header, None, Some(targets));
+    let (kept, left_out) = found.kept();
+    let annotations = kept.into_iter().map(|(p, a)| (p, a.clone())).collect();
+    let dropped = |owner: Owner<'_>| found.problems.iter().any(|(o, _)| *o == owner);
+    let files = order
+        .into_iter()
+        .map(|inc| (inc.name, !dropped(Owner::File(inc.name))))
+        .collect();
+    let mut problems: Vec<String> = found.problems.into_iter().map(|(_, p)| p).collect();
+    problems.extend(left_out);
+    Apart {
+        annotations,
+        files,
+        problems,
+    }
+}
+
+/// `resolve_apart`'s answer.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Apart<'a> {
+    /// The hand-written file's annotations kept, each with its place in it.
+    pub annotations: Vec<(usize, Annotation)>,
+    /// The included files in sidecar order, which puts their lines after the hand-written file's
+    /// annotations, each with whether its lines are kept: not where its first line breaks a rule.
+    pub files: Vec<(&'a str, bool)>,
+    pub problems: Vec<String>,
+}
+
 /// As `resolve`, leaving out what breaks a rule rather than refusing the sidecar.
 #[cfg(feature = "toml")]
 pub fn resolve_lenient(
@@ -468,23 +643,14 @@ pub fn resolve_lenient(
 ) -> Resolved {
     match toml::from_str(hand) {
         Ok(file) => {
-            let found = find(file, included, header, recording_file);
-            let dropped = |position: usize, at: &At<'_>| {
-                found.problems.iter().any(|(owner, _)| match (owner, at) {
-                    (Owner::Entry(p), _) => *p == position,
-                    (Owner::File(name), At::Line(file, _)) => name == file,
-                    _ => false,
-                })
-            };
-            let annotations = found
-                .annotations
-                .iter()
-                .filter(|(position, at, _)| !dropped(*position, at))
-                .map(|(.., a)| a.clone())
-                .collect();
+            let found = find(file, included, header, recording_file, None);
+            let (kept, left_out) = found.kept();
+            let annotations = kept.into_iter().map(|(_, a)| a.clone()).collect();
+            let mut problems: Vec<String> = found.problems.into_iter().map(|(_, p)| p).collect();
+            problems.extend(left_out);
             Resolved {
                 annotations,
-                problems: found.problems.into_iter().map(|(_, p)| p).collect(),
+                problems,
             }
         }
         Err(e) => Resolved {
@@ -494,11 +660,16 @@ pub fn resolve_lenient(
     }
 }
 
+/// The generated annotations a hand-written file's `ref` can name where its generator files are
+/// read apart from it, as a reader of a few parts reads them: by full id.
+pub type Targets<'t> = &'t dyn Fn(&str) -> Option<Annotation>;
+
 fn find<'a>(
     file: HandFile,
     included: &[Included<'a>],
     header: &Header,
     recording_file: Option<&str>,
+    elsewhere: Option<Targets<'_>>,
 ) -> Found<'a> {
     let mut problems: Vec<(Owner<'a>, String)> = Vec::new();
     if file.format != FORMAT {
@@ -688,15 +859,17 @@ fn find<'a>(
     let by_id: BTreeMap<&str, &Annotation> = if refs.is_empty() {
         BTreeMap::new()
     } else {
-        plain
-            .iter()
-            .filter(|(_, _, a)| a.source.is_some())
-            .map(|(_, _, a)| (a.id.as_str(), a))
-            .collect()
+        // The first of an id, which a reader keeps.
+        let mut by_id = BTreeMap::new();
+        for (_, _, a) in plain.iter().filter(|(_, _, a)| a.source.is_some()) {
+            by_id.entry(a.id.as_str()).or_insert(a);
+        }
+        by_id
     };
     let mut followed = Vec::with_capacity(refs.len());
     for (position, id, target, entry, at) in refs {
-        let Some(t) = by_id.get(target.as_str()) else {
+        let found = elsewhere.and_then(|f| f(&target));
+        let Some(t) = by_id.get(target.as_str()).copied().or(found.as_ref()) else {
             let hand = plain.iter().any(|(_, _, a)| a.id == target);
             problems.push((
                 Owner::Entry(position),

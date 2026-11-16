@@ -2,7 +2,7 @@
 
 use std::sync::atomic::AtomicBool;
 
-use escapement_tickwave_view::{ChannelStatistics, Recording, Sum};
+use escapement_tickwave_view::{ChannelStatistics, Recording, Sum, Ticks};
 
 mod common;
 use common::{Oracle, Truth, fixture, open, oracle, synth_cases};
@@ -65,7 +65,7 @@ fn the_synthetic_cases_against_every_sample() {
     let a = truth[0].as_ref().unwrap();
     let run_ends: Vec<i64> = [40_000, 65_000, 95_000, 145_000, 205_000, 325_000]
         .iter()
-        .map(|&i: &usize| a.samples[i - 1].0)
+        .map(|&i: &usize| (a.samples[i - 1].0 / i128::try_from(a.per).unwrap()) as i64)
         .collect();
     let mut ticks = run_ends.clone();
     ticks.extend([1 << 12, 1 << 16, 3 << 20, 123_457, 1_000_003]);
@@ -118,7 +118,7 @@ fn the_energy_fixtures_power_is_the_exact_sum_of_its_codes_products() {
         .samples
         .iter()
         .zip(&i.samples)
-        .map(|(v, i)| v.3.unwrap() * i.3.unwrap() * i128::from(v.1 - v.0))
+        .map(|(v, i)| v.3.unwrap() * i.3.unwrap() * (v.1 - v.0))
         .sum();
     let s = rec.statistics(extent.clone(), &cancel).unwrap();
     let p = s.channels[5].as_ref().unwrap();
@@ -135,9 +135,12 @@ fn the_energy_fixtures_power_is_the_exact_sum_of_its_codes_products() {
         (scale.num(), scale.den(), offset.num()),
         (1, 1_000_000_000_000, 0)
     );
-    assert_eq!((p.samples, p.measured), (2600, 2600 * 960));
+    assert_eq!((p.samples, p.measured), (2600, Ticks::whole(2600 * 960)));
     // The capture lost 50 pairs, and paused: the extent's other ticks.
-    assert_eq!(p.unmeasured(&extent, &extent), 2_768_000 - 2600 * 960);
+    assert_eq!(
+        p.unmeasured(&extent, &extent),
+        Ticks::whole(2_768_000 - 2600 * 960)
+    );
     check(
         &rec,
         &truth,
@@ -157,13 +160,13 @@ fn a_window_past_the_capture_counts_only_the_capture_as_unmeasured() {
     let s = rec.statistics(past.clone(), &cancel).unwrap();
     let v = s.channels[0].as_ref().unwrap();
     // The last pair's 960 ticks end the extent; 40 of them lie before the window.
-    assert_eq!(v.measured, 1000);
-    assert_eq!(v.unmeasured(&past, &extent), 0);
+    assert_eq!(v.measured, Ticks::whole(1000));
+    assert_eq!(v.unmeasured(&past, &extent), Ticks::whole(0));
     let before = -500_000..500;
     let s = rec.statistics(before.clone(), &cancel).unwrap();
     assert_eq!(
         s.channels[0].as_ref().unwrap().unmeasured(&before, &extent),
-        0
+        Ticks::whole(0)
     );
 }
 
@@ -174,7 +177,7 @@ fn a_mean_and_an_integral_from_the_exact_sum() {
     // The first pair alone: V 3.300 V for 960 ticks at 96 MHz, 10 us.
     let s = rec.statistics(0..960, &cancel).unwrap();
     let v = s.channels[0].as_ref().unwrap();
-    assert_eq!((v.samples, v.measured), (1, 960));
+    assert_eq!((v.samples, v.measured), (1, Ticks::whole(960)));
     assert_eq!(v.mean(), Some(3.3));
     assert_eq!(v.integral(rec.timebase()), 3.3e-5);
     // Nothing measured, no mean.

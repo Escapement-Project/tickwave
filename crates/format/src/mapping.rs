@@ -112,6 +112,17 @@ impl Mapping {
         i64::try_from(p.div_euclid(q).checked_add(i128::from(self.origin))?).ok()
     }
 
+    /// The axis time a place of `units / d` source ticks maps to, exactly, unrounded, counted in
+    /// `1 / (d × den)` axis ticks, `den` being `m`'s: `origin × d × den + (units + offset × d) ×
+    /// num`. `axis_place` is its floor in whole ticks. None where it passes 128 bits.
+    pub fn axis_time(&self, units: i128, d: u64) -> Option<i128> {
+        let per = i128::from(d).checked_mul(i128::from(self.den))?;
+        let at = units.checked_add(i128::from(self.offset).checked_mul(i128::from(d))?)?;
+        i128::from(self.origin)
+            .checked_mul(per)?
+            .checked_add(at.checked_mul(i128::from(self.num))?)
+    }
+
     /// The source time axis tick `t` maps back to, exactly: `(t − origin) / m − offset`, as a
     /// numerator and a positive denominator, `m`'s numerator (FORMAT.md, "Gaps").
     pub fn source_time(&self, t: i64) -> (i128, i128) {

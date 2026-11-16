@@ -1039,6 +1039,11 @@ fn write_info(
         }
     }
     let several = h.sources.len() > 1;
+    // Why this version can't read channel `o`, where it can't.
+    let unavailable = |o: usize| match head.check_available(o) {
+        Ok(()) => String::new(),
+        Err(e) => format!("; {e}"),
+    };
     for (i, c) in h.channels.iter().enumerate() {
         let from = if several {
             format!(", source {}", c.source)
@@ -1053,19 +1058,21 @@ fn write_info(
                 ..
             } => writeln!(
                 out,
-                "  {:<12} digital, {edges} edges, starts {}, known to {} ({}{from})",
+                "  {:<12} digital, {edges} edges, starts {}, known to {} ({}{from}){}",
                 c.name,
                 u8::from(*initial),
                 h.mapping(i)
                     .and_then(|m| m.axis(*end))
                     .map_or_else(|| format!("source tick {end}"), |t| seconds(t, h)),
-                c.source_name
+                c.source_name,
+                unavailable(i)
             )?,
             ChannelKind::Analog {
                 unit,
                 count,
                 coding,
                 breaks,
+                phase,
                 ..
             } => {
                 let lost: u64 = breaks.iter().map(|b| b.lost).sum();
@@ -1079,23 +1086,37 @@ fn write_info(
                 } else {
                     format!(" in {unit}")
                 };
+                let phase = phase.map_or(String::new(), |p| {
+                    format!(
+                        ", {}/{} of a tick past its grid's whole ticks",
+                        p.num(),
+                        p.den()
+                    )
+                });
                 writeln!(
                     out,
-                    "  {:<12} analog, {count} samples{unit}{breaks}, {} ({}{from})",
+                    "  {:<12} analog, {count} samples{unit}{breaks}{phase}, {} ({}{from}){}",
                     c.name,
                     describe_coding(*coding),
-                    c.source_name
+                    c.source_name,
+                    unavailable(i)
                 )?
             }
         }
     }
-    for d in &h.derived {
+    for (k, d) in h.derived.iter().enumerate() {
         let of = match (&d.op, d.operands.as_slice()) {
             (Op::Multiply, [a, b]) if d.params.is_empty() => format!("{a} × {b}"),
             (Op::Subtract, [a, b]) if d.params.is_empty() => format!("{a} − {b}"),
             (op, operands) => format!("{op}({})", operands.join(", ")),
         };
-        writeln!(out, "  {:<12} derived, {of} in {}", d.name, d.unit)?;
+        writeln!(
+            out,
+            "  {:<12} derived, {of} in {}{}",
+            d.name,
+            d.unit,
+            unavailable(h.channels.len() + k)
+        )?;
     }
     writeln!(
         out,
@@ -1127,6 +1148,9 @@ fn write_info(
     }
     for (k, v) in &h.meta {
         writeln!(out, "  {k} = {v}")?;
+    }
+    if let Some(parts) = h.annotation_parts {
+        writeln!(out, "  {parts} annotation parts")?;
     }
     for (name, text) in bundled.iter().flatten() {
         let lines = text.lines().filter(|l| !l.trim().is_empty()).count();
@@ -1668,9 +1692,6 @@ fn recut_file(input: &Path, output: &Path, options: WriteOptions) -> Result<()> 
     if check.header.content_id != finished.header.content_id {
         let _ = fs::remove_file(output);
         bail!("the copy does not read back with its content id");
-    }
-    if check.bundle.is_none() {
-        write_generated(output, &finished.header, &finished.generated)?;
     }
     warn_left_out(&left_out);
     info!(
@@ -2367,6 +2388,125 @@ mod tests {
                 assert_eq!(sizes.count(), n as u64, "{at}");
             }
         }
+    }
+
+    /// `info` on the revision: a channel's phase, a channel this version can't read and the
+    /// derived channel over it, each named as such and why, and the annotation parts. Its JSON
+    /// keeps the keys the bench tools read.
+    #[test]
+    fn info_states_a_phase_an_unavailable_channel_and_the_annotation_parts() {
+        use escapement_tickwave_format::header::{
+            AnalogCoding, Declaration, DeclaredChannel, DeclaredKind, Derived, Exact, IntCoding,
+        };
+        use escapement_tickwave_format::model::Ratio;
+        use escapement_tickwave_format::writer::{Bundle, Finish, WriteOptions, Writer};
+        let analog = |name: &str, phase| DeclaredChannel {
+            name: name.into(),
+            source_name: name.to_lowercase(),
+            source: 0,
+            data: DeclaredKind::Analog {
+                unit: "V".into(),
+                period: Ratio::integer(1).unwrap(),
+                coding: AnalogCoding::Int(IntCoding {
+                    scale: Exact::new(1, 1000),
+                    ..IntCoding::new(16, false)
+                }),
+                significant: None,
+                phase,
+            },
+            shaping: Default::default(),
+            overview_shift: None,
+            codec: None,
+            requires: Vec::new(),
+        };
+        let tb = Ratio::integer(1000).unwrap();
+        let d = Declaration {
+            timebase: tb,
+            channels: vec![analog("V", Ratio::new(1, 3)), analog("I", Ratio::new(1, 3))],
+            derived: vec![Derived::multiply("P", "W", "I", "V")],
+            sources: vec![SourceHeader::new(SourceFormat::Other("t".into()), tb)],
+            title: None,
+            meta: Default::default(),
+            overview_shift: 4,
+            requires: Vec::new(),
+        };
+        let mut w = Writer::new(d, WriteOptions::default()).unwrap();
+        for c in 0..2 {
+            w.run(c, 0, 0).unwrap();
+        }
+        for i in 0..10u64 {
+            w.sample(0, i).unwrap();
+            w.sample(1, i + 1).unwrap();
+        }
+        let serde_json::Value::Object(m) = serde_json::json!({"id": "m", "start": 4}) else {
+            unreachable!()
+        };
+        w.annotation("verge", m).unwrap();
+        let mut file = w.take_output();
+        let finish = Finish {
+            bundle: Some(Bundle::Generated { stem: "rec".into() }),
+            ..Finish::default()
+        };
+        file.extend(w.finish(20, &[], finish).unwrap().tail);
+        let mut header = Footer::parse_file(&file).unwrap().header;
+        header.channels[1].requires = vec!["frobs".into()];
+        // The footer's header replaced, its top index and strips kept.
+        let t = file.len() - 24;
+        let at = u64::from_le_bytes(file[t..t + 8].try_into().unwrap()) as usize;
+        let len = u32::from_le_bytes(file[t + 8..t + 12].try_into().unwrap()) as usize;
+        let payload = &file[at + 5..at + len - 8];
+        let header_len = u32::from_le_bytes(payload[..4].try_into().unwrap()) as usize;
+        let json = serde_json::to_vec(&header).unwrap();
+        let mut new = (json.len() as u32).to_le_bytes().to_vec();
+        new.extend_from_slice(&payload[4..8]);
+        new.extend_from_slice(&json);
+        new.extend_from_slice(&payload[8 + header_len..]);
+        let mut edited = file[..at].to_vec();
+        escapement_tickwave_format::record::write_footer(&mut edited, 0, &new);
+
+        let input = Counted {
+            bytes: edited,
+            reads: Default::default(),
+        };
+        let len = input.bytes.len() as u64;
+        let mut out = Vec::new();
+        let head = Footer::parse_file(&input.bytes).unwrap();
+        write_info(&mut out, head, len, false, &input, false).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        let line = |name: &str| {
+            out.lines()
+                .find(|l| l.trim_start().starts_with(&format!("{name} ")))
+                .unwrap_or_else(|| panic!("{name}: {out}"))
+                .to_owned()
+        };
+        assert!(
+            line("V").contains(", 1/3 of a tick past its grid's whole ticks"),
+            "{out}"
+        );
+        assert!(!line("V").contains("unavailable"), "{out}");
+        assert!(
+            line("I").contains("; channel I is unavailable to this reader"),
+            "{out}"
+        );
+        assert!(
+            line("P").contains("; channel P is unavailable to this reader"),
+            "{out}"
+        );
+        assert!(out.contains("\n  1 annotation parts\n"), "{out}");
+        assert!(out.contains("bundled rec.verge.jsonl, 2 lines"), "{out}");
+        let mut out = Vec::new();
+        let head = Footer::parse_file(&input.bytes).unwrap();
+        write_info(&mut out, head, len, true, &input, false).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let h = &v["header"];
+        assert!(
+            h["timebase"].is_array() && h["content_id"].is_string(),
+            "{v}"
+        );
+        let s = &h["sources"][0];
+        assert!(s["timebase"].is_array() && s.get("origin").is_some(), "{s}");
+        let c = &h["channels"][0];
+        assert!(c["name"].is_string() && c["source"].is_number(), "{c}");
     }
 
     /// A channel's 70,000 blocks, in 18 pages under a directory, and its overview level's rows

@@ -29,4 +29,4 @@ pub use query::{
     AnalogColumns, Answer, Drawn, MarkerAnswer, MarkerQuery, Point, Query, StripAnswer,
 };
 pub use recording::{ChannelInfo, ChannelKind, Error, Recording, Resolution, Revision};
-pub use statistics::{ChannelStatistics, Statistics, Sum};
+pub use statistics::{ChannelStatistics, Statistics, Sum, Ticks};

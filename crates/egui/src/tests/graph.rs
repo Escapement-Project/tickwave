@@ -401,7 +401,11 @@ fn a_window_past_the_capture_counts_only_the_capture_as_unmeasured() {
         let a = answered(&mut h, window.clone());
         let extent = a.extent.clone().unwrap();
         let s = a.statistics[0].channels[I].as_ref().unwrap();
-        assert_eq!(s.unmeasured(&window, &extent), unmeasured, "{window:?}");
+        assert_eq!(
+            s.unmeasured(&window, &extent),
+            escapement_tickwave_view::Ticks::whole(unmeasured),
+            "{window:?}"
+        );
     }
 }
 

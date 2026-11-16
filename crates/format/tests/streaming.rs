@@ -371,7 +371,7 @@ fn repair_writes_what_finishing_at_the_same_block_would() {
         finished.extend_from_slice(&f.tail);
         assert_eq!(fixed, finished, "repaired after the flush at {end}");
         assert_eq!(r.header, f.header);
-        assert_eq!(r.generated, f.generated);
+        assert_eq!(r.generated, common::generated(&finished));
         // A gap still open at the cut: the level is not known from its start.
         if end < 120 {
             let ChannelKind::Digital { end: e, gaps, .. } = &r.header.channels[0].data else {
@@ -524,8 +524,8 @@ fn runs_place_the_samples_and_come_back_as_breaks() {
 
 #[test]
 fn annotations_past_the_length_are_dropped_or_cut_and_come_back_as_a_generator_file() {
-    let (_, _, finished) = written(&session(), usize::MAX);
-    let lines = &finished.generated["verge"];
+    let (file, _, finished) = written(&session(), usize::MAX);
+    let lines = &common::generated(&file)["verge"];
     assert_eq!(
         lines,
         &[

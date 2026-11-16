@@ -283,14 +283,114 @@ fn analog_alone_starts_at_its_own_begin() {
     assert_eq!(rec.sources[0].begin_s, Some(-1.999594440162178e-06));
 }
 
+/// An analog file whose begin sits off the digital channels' sample grid states its offset as
+/// its phase, to the nearest thousandth of a sample (FORMAT.md, "Times"), and keeps its samples
+/// there: the tick each lies in is the one before its place.
 #[test]
-fn refuses_analog_off_the_digital_grid() {
-    let dir = broken_from(SWD50, "analog_off_grid", "analog_0.bin", |b| {
+fn an_analog_file_off_the_digital_grid_takes_the_offset_as_its_phase() {
+    for (test, shift, first, phase) in [
+        ("analog_phase_0_4", 0.4e-9, 0, Ratio::new(2, 5)),
+        ("analog_phase_1_2374", 1.2374e-9, 1, Ratio::new(237, 1000)),
+        // Within a thousandth of the grid: no phase.
+        ("analog_phase_0", 0.0004e-9, 0, None),
+    ] {
+        let dir = broken_from(SWD50, test, "analog_0.bin", |b| {
+            let begin = f64::from_le_bytes(b[24..32].try_into().unwrap());
+            b[24..32].copy_from_slice(&(begin + shift).to_le_bytes());
+        });
+        let rec = saleae::read(&dir, &swd50_names(), None).unwrap();
+        let ChannelData::Analog(a) = &rec.channels[1].data else {
+            panic!("SWCLK is analog")
+        };
+        assert_eq!((a.first, a.phase), (first, phase), "{test}");
+        // The digital channel ends past the analog ones, so the length stays its.
+        assert_eq!(rec.length, 11031886, "{test}");
+    }
+    // Without the digital channel, tick 0 is SWDIO's begin, and SWCLK's last sample, at 49,999.4,
+    // lasts into tick 50,000: the length covers it.
+    let dir = broken_from(SWD50, "analog_phase_alone", "analog_0.bin", |b| {
         let begin = f64::from_le_bytes(b[24..32].try_into().unwrap());
         b[24..32].copy_from_slice(&(begin + 0.4e-9).to_le_bytes());
     });
+    let names: Vec<(String, String)> = [("analog_1", "SWDIO"), ("analog_0", "SWCLK")]
+        .iter()
+        .map(|(s, n)| (s.to_string(), n.to_string()))
+        .collect();
+    let rec = saleae::read(&dir, &names, None).unwrap();
+    assert_eq!(rec.length, 50_001);
+}
+
+/// A converted analog file off the digital grid keeps its phase and its samples' places: sample
+/// `i` of a begin 0.4 samples on sits at `i + 2/5`, in the tick `i`.
+#[test]
+fn a_phased_analog_file_converts_with_its_places() {
+    use escapement_tickwave_format::decode::Footer;
+    use escapement_tickwave_format::header::ChannelKind;
+    use escapement_tickwave_import::convert::{self, Pass, Progress, Settings, Step};
+    struct Quiet;
+    impl Progress for Quiet {
+        fn start(&self, _: Pass<'_>, _: u64) -> Step {
+            std::sync::Arc::new(|_| {})
+        }
+    }
+    let dir = broken_from(SWD50, "analog_phase_convert", "analog_0.bin", |b| {
+        let begin = f64::from_le_bytes(b[24..32].try_into().unwrap());
+        b[24..32].copy_from_slice(&(begin + 0.4e-9).to_le_bytes());
+    });
+    let settings = Settings {
+        level: 1,
+        ..Settings::default()
+    };
+    let mut out = std::io::Cursor::new(Vec::new());
+    convert::convert(
+        &|| Ok(saleae::read(&dir, &swd50_names(), None)?),
+        &settings,
+        &Quiet,
+        &mut out,
+    )
+    .unwrap();
+    let file = out.into_inner();
+    let footer = Footer::parse_file(&file).unwrap();
+    let ChannelKind::Analog { phase, first, .. } = &footer.header.channels[1].data else {
+        panic!("SWCLK is analog")
+    };
+    assert_eq!((*first, *phase), (0, Ratio::new(2, 5)));
+    let grid = footer.grid(1).unwrap();
+    assert_eq!(grid.d(), 5);
+    for i in [0u64, 1, 49_999] {
+        assert_eq!(
+            footer.sample_place(1, i),
+            Some(i128::from(5 * i + 2)),
+            "sample {i}"
+        );
+        assert_eq!(footer.sample_axis_tick(1, i), Some(i as i64), "sample {i}");
+    }
+}
+
+/// An analog file that begins before the digital channels, or at no time, is refused.
+#[test]
+fn refuses_analog_before_the_digital_channels_or_at_no_time() {
+    let dir = broken_from(SWD50, "analog_before", "analog_0.bin", |b| {
+        let begin = f64::from_le_bytes(b[24..32].try_into().unwrap());
+        b[24..32].copy_from_slice(&(begin - 0.25e-9).to_le_bytes());
+    });
     let err = saleae::read(&dir, &swd50_names(), None).unwrap_err();
-    assert!(matches!(err, Error::AnalogOffGrid { .. }), "{err}");
+    assert!(
+        matches!(err, Error::AnalogBefore { samples, .. } if (samples - 0.25).abs() < 1e-3),
+        "{err}"
+    );
+    for (test, begin, shown) in [
+        ("analog_nan", f64::NAN, "NaN"),
+        ("analog_inf", f64::INFINITY, "inf"),
+    ] {
+        let dir = broken_from(SWD50, test, "analog_0.bin", |b| {
+            b[24..32].copy_from_slice(&begin.to_le_bytes());
+        });
+        let err = saleae::read(&dir, &swd50_names(), None).unwrap_err();
+        assert!(matches!(err, Error::AnalogNoBegin { .. }), "{err}");
+        let want = format!("its begin, {shown}, is no time");
+        assert!(err.to_string().ends_with(&want), "{err}");
+    }
 }
 
 /// An analog file that begins so far from the digital ones that its first sample's tick passes

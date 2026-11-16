@@ -29,8 +29,10 @@ use crate::overview::{self, Column, Ladder, Pair, Settled, Unpaired};
 use crate::parts::{Part, PartRow, placed_span};
 use crate::record::{self, BlockHead, Kind, MAX_BLOCK, MAX_GENERATORS, MAX_PART, OverviewHead};
 use crate::samples;
-use crate::shared::Chunks;
-use crate::snapshot::{ChannelSnapshot, LevelSnapshot, OverviewSnapshot, Snapshot, Unwritten};
+use crate::snapshot::{
+    Annotations, ChannelSnapshot, LevelSnapshot, ListSnapshot, OverviewSnapshot, Snapshot,
+    Unwritten,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum WriteError {
@@ -416,8 +418,9 @@ struct DigitalState {
     last_edge: i64,
     edges: u64,
     open: EdgeRun,
-    /// Every gap taken, for snapshots.
-    gaps: Chunks<Gap>,
+    /// The last gap taken, and how many.
+    last_gap: Option<Gap>,
+    gap_count: u64,
     /// Gaps whose `to` no closed block has passed, each with its `to` on the axis. They are
     /// hashed and listed once one has.
     pending: VecDeque<(Gap, i64)>,
@@ -430,8 +433,12 @@ struct DigitalState {
 struct AnalogState {
     grid: Grid,
     coding: AnalogCoding,
-    /// Every run so far, the first at index 0.
-    runs: Chunks<Break>,
+    /// The runs a sample still needs: from the run holding the open block's first sample, or a
+    /// lagging partner's next sample, on.
+    runs: VecDeque<Break>,
+    /// The first run, and how many runs there are.
+    first_run: Option<Break>,
+    run_count: u64,
     /// A run the next sample starts, its `index` the sample's.
     next_run: Option<Break>,
     count: u64,
@@ -533,8 +540,6 @@ pub struct Finished {
     pub header: Header,
     /// The bytes not yet taken: the end of the file.
     pub tail: Vec<u8>,
-    /// Each generator's annotations, its file's lines after the first, by source.
-    pub generated: BTreeMap<String, Vec<String>>,
 }
 
 impl Finished {
@@ -862,18 +867,11 @@ fn check_safe(what: &'static str, value: u64) -> Result<(), WriteError> {
     }
 }
 
-/// The run that holds sample `index` of a channel whose runs are `runs`, the first at index 0.
-fn run_of(runs: &Chunks<Break>, index: u64) -> Option<Break> {
-    let (mut lo, mut hi) = (0, runs.len());
-    while lo < hi {
-        let mid = (lo + hi) / 2;
-        if runs.get(mid)?.index <= index {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
-    }
-    runs.get(lo.checked_sub(1)?).copied()
+/// The run that holds sample `index` of a channel whose runs from one at or before `index` on
+/// are `runs`.
+fn run_of(runs: &VecDeque<Break>, index: u64) -> Option<Break> {
+    let after = runs.partition_point(|r| r.index <= index);
+    runs.get(after.checked_sub(1)?).copied()
 }
 
 /// Sample `index`'s axis tick on the run `run` starts, saturating at the ends of i64.
@@ -926,11 +924,9 @@ fn groups(channels: usize, products: &[(usize, usize, samples::Product)]) -> Vec
 /// Writes one recording (see the module's documentation).
 ///
 /// Its memory follows the channels, the block size and the frames waiting for compression, not
-/// the recording's length, except for two things it holds until the finish. Every gap and break,
-/// 24 bytes each, for `snapshot()`. And every annotation it takes, for `snapshot()` and
-/// `Finished::generated`. The rest is bounded, but a coarse overview level's
-/// open block takes days to fill and a directory's open page months, so it rises slowly toward
-/// its bound.
+/// the recording's length (FORMAT.md, "Memory"): a snapshot's gaps, breaks and annotations come
+/// from the file's list pages and parts. A coarse overview level's open block takes days to fill
+/// and a directory's open page months, so it rises slowly toward its bound.
 pub struct Writer {
     declaration: Arc<Declaration>,
     options: WriteOptions,
@@ -961,8 +957,6 @@ pub struct Writer {
     offloaded: usize,
     /// The most frames compressing on other threads before a call waits for the oldest.
     offload_limit: usize,
-    /// Every annotation taken, for snapshots and `Finished::generated`.
-    annotations: Chunks<record::Annotation>,
     lines: crate::annotations::Lines,
     /// Each generator's lines since its last part, in the order of its first annotation.
     generators: Vec<Pending>,
@@ -1016,7 +1010,8 @@ impl Writer {
                         last_edge: start,
                         edges: 0,
                         open: EdgeRun::default(),
-                        gaps: Chunks::new(),
+                        last_gap: None,
+                        gap_count: 0,
                         pending: VecDeque::new(),
                         listed: ListHasher::new(),
                         last_listed: None,
@@ -1026,7 +1021,9 @@ impl Writer {
                 DeclaredKind::Analog { coding, .. } => Data::Analog(AnalogState {
                     grid: channel.grid().ok_or_else(unmapped)?,
                     coding: *coding,
-                    runs: Chunks::new(),
+                    runs: VecDeque::new(),
+                    first_run: None,
+                    run_count: 0,
                     next_run: None,
                     count: 0,
                     listed: ListHasher::new(),
@@ -1099,7 +1096,6 @@ impl Writer {
             slicers: Vec::new(),
             offloaded: 0,
             offload_limit,
-            annotations: Chunks::new(),
             lines,
             generators: Vec::new(),
             took_records: false,
@@ -1503,7 +1499,7 @@ impl Writer {
                 previous: d.last_edge,
             });
         }
-        if let Some(g) = d.gaps.last()
+        if let Some(g) = d.last_gap
             && tick <= g.to
         {
             return Err(WriteError::EdgeInGap {
@@ -1560,8 +1556,8 @@ impl Writer {
                 start: d.start,
             });
         }
-        let last = d.gaps.last().map_or(d.last_edge, |g| g.to.max(d.last_edge));
-        let after_last = if d.gaps.is_empty() && d.edges == 0 {
+        let last = d.last_gap.map_or(d.last_edge, |g| g.to.max(d.last_edge));
+        let after_last = if d.gap_count == 0 && d.edges == 0 {
             true
         } else {
             gap.from > last
@@ -1592,7 +1588,8 @@ impl Writer {
         let Data::Digital(d) = &mut self.chans[c].data else {
             unreachable!()
         };
-        d.gaps.push(gap);
+        d.last_gap = Some(gap);
+        d.gap_count += 1;
         d.pending.push_back((gap, to));
         self.ochans[c]
             .ladder
@@ -1665,7 +1662,7 @@ impl Writer {
                 tick,
             });
         }
-        if let Some(&last) = a.runs.last().filter(|_| !first) {
+        if let Some(&last) = a.runs.back().filter(|_| !first) {
             if start < grid.place(last, a.count - 1) {
                 return Err(WriteError::RunOrder {
                     channel: name,
@@ -1714,7 +1711,7 @@ impl Writer {
             });
         };
         let index = a.count;
-        let (run, starts) = match (a.next_run, a.runs.last()) {
+        let (run, starts) = match (a.next_run, a.runs.back()) {
             (Some(run), _) => (run, true),
             (None, Some(run)) => (*run, false),
             (None, None) => {
@@ -1758,7 +1755,9 @@ impl Writer {
             unreachable!()
         };
         if starts {
-            a.runs.push(run);
+            a.runs.push_back(run);
+            a.first_run.get_or_insert(run);
+            a.run_count += 1;
             a.next_run = None;
         }
         samples::put(&mut a.open, sample, coding, code);
@@ -1813,14 +1812,12 @@ impl Writer {
         if self.generators[g].lines.len() >= PART_TARGET {
             self.write_part(g);
         }
-        self.annotations.push(a);
         self.advance()
     }
 
     /// One line of generator `source`'s file, which goes in a part that stands alone, with no
     /// annotation record: a re-cutter's (FORMAT.md, "Re-cutting"). Its parts go out as
-    /// `annotation`'s do, and its times may be decimals with a unit. The writer holds no more of
-    /// it than its part's lines, so `Finished::generated` leaves it out.
+    /// `annotation`'s do, and its times may be decimals with a unit.
     pub(crate) fn standalone_line(&mut self, source: &str, line: &str) -> Result<(), WriteError> {
         self.check_failed()?;
         let span = placed_span(line, self.declaration.timebase)
@@ -2048,6 +2045,8 @@ impl Writer {
         let first_index = ch.closed_items;
         ch.closed_items += u64::from(kept);
         ch.blocks_closed += 1;
+        self.prune_runs(c);
+        let ch = &mut self.chans[c];
         ch.start = end;
         ch.items = items_left;
         ch.size = kept_size;
@@ -2070,6 +2069,18 @@ impl Writer {
             }
         }
         Ok(())
+    }
+
+    /// Drops the runs of channel `c` before the one holding its open block's first sample. A
+    /// lagging partner's next sample, which `check_partner` places on these runs, comes no
+    /// earlier: a block closes only at a promise, and the partner's samples before it are in.
+    fn prune_runs(&mut self, c: usize) {
+        let from = self.chans[c].closed_items;
+        if let Data::Analog(a) = &mut self.chans[c].data {
+            while a.runs.get(1).is_some_and(|r| r.index <= from) {
+                a.runs.pop_front();
+            }
+        }
     }
 
     /// The axis tick of the first item in channel `c`'s open block, which holds one.
@@ -2374,17 +2385,30 @@ impl Writer {
 
     /// What the writer holds so far, for a view of the recording while it is written: each
     /// channel's blocks in the file through its index's pages and the rows no page holds yet,
-    /// the blocks closed but not yet written and the open block, each decoded, its gaps and runs,
-    /// each overview level's rows, blocks not yet written, open run and settled buckets, and the
-    /// annotations. Its cost follows the channels and what waits to be written, not the
-    /// recording's length.
+    /// the blocks closed but not yet written and the open block, each decoded, its gap or break
+    /// list's pages and open page and the entries not yet listed, each overview level's rows,
+    /// blocks not yet written, open run and settled buckets, and the annotation parts' table, the
+    /// parts not yet written and each generator's lines since its last part. Its cost follows
+    /// the channels and what waits to be written, not the recording's length.
     ///
     /// What it lists in the file may sit in bytes still in `output`: publish a snapshot to a view
     /// only once those bytes are in the file the view reads.
     pub fn snapshot(&self) -> Snapshot {
         let mut unwritten: Vec<Vec<Unwritten>> = vec![Vec::new(); self.chans.len()];
         let mut queued: Vec<Vec<Vec<Settled>>> = vec![Vec::new(); self.ochans.len()];
+        let mut queued_parts = Vec::new();
+        // The gaps and breaks a closed block took off its channel's waiting ones, which its list
+        // takes once the block is written.
+        let mut queued_gaps: Vec<Vec<Gap>> = vec![Vec::new(); self.chans.len()];
+        let mut queued_breaks: Vec<Vec<Break>> = vec![Vec::new(); self.chans.len()];
         for item in &self.queue {
+            match item {
+                Item::Record(_, Placed::Gaps(c, gaps)) => queued_gaps[*c].extend_from_slice(gaps),
+                Item::Record(_, Placed::Breaks(c, breaks)) => {
+                    queued_breaks[*c].extend_from_slice(breaks)
+                }
+                _ => {}
+            }
             if let Item::Frame { of, raw, .. } = item {
                 match of {
                     FrameOf::Block { head, first_index } => {
@@ -2407,7 +2431,7 @@ impl Writer {
                             raw: Arc::clone(raw),
                         });
                     }
-                    FrameOf::Part { .. } => {}
+                    FrameOf::Part { .. } => queued_parts.push(Arc::clone(raw)),
                 }
             }
         }
@@ -2417,19 +2441,36 @@ impl Writer {
             .zip(unwritten)
             .enumerate()
             .map(|(c, (ch, mut unwritten))| {
-                let (raw, word, gaps, runs) = match &ch.data {
+                let (raw, word, gaps, breaks, first_run) = match &ch.data {
                     Data::Digital(d) => {
                         let mut raw = Vec::new();
                         d.open.encode(&mut raw);
                         let word = ch.items | if d.level { LEVEL_BIT } else { 0 };
-                        (raw, word, d.gaps.clone(), Chunks::new())
+                        let mut waiting = std::mem::take(&mut queued_gaps[c]);
+                        waiting.extend(d.pending.iter().map(|&(g, _)| g));
+                        let gaps = ListSnapshot {
+                            table: Some(TableIndex::of(&d.list)),
+                            open: d.list.open().clone(),
+                            waiting,
+                        };
+                        (raw, word, gaps, ListSnapshot::default(), None)
                     }
-                    Data::Analog(a) => (
-                        analog_raw(&a.open, a.coding),
-                        ch.items,
-                        Chunks::new(),
-                        a.runs.clone(),
-                    ),
+                    Data::Analog(a) => {
+                        // Then the breaks whose first sample no closed block holds yet.
+                        let mut waiting = std::mem::take(&mut queued_breaks[c]);
+                        waiting.extend(
+                            a.runs
+                                .iter()
+                                .filter(|r| r.index > 0 && r.index >= ch.closed_items),
+                        );
+                        let breaks = ListSnapshot {
+                            table: Some(TableIndex::of(&a.list)),
+                            open: a.list.open().clone(),
+                            waiting,
+                        };
+                        let raw = analog_raw(&a.open, a.coding);
+                        (raw, ch.items, ListSnapshot::default(), breaks, a.first_run)
+                    }
                 };
                 unwritten.push(Unwritten {
                     head: BlockHead {
@@ -2449,7 +2490,8 @@ impl Writer {
                     rows_first: ch.blocks.paged_sum(),
                     unwritten,
                     gaps,
-                    runs,
+                    breaks,
+                    first_run,
                 }
             })
             .collect();
@@ -2486,7 +2528,16 @@ impl Writer {
             Arc::clone(&self.declaration),
             channels,
             overview,
-            self.annotations.clone(),
+            Annotations {
+                table: TableIndex::of(&self.parts),
+                rows: self.parts.open().clone(),
+                queued: queued_parts,
+                generators: self
+                    .generators
+                    .iter()
+                    .map(|g| (g.source.clone(), g.lines.clone()))
+                    .collect(),
+            },
             self.position(),
             self.promise,
             self.known,
@@ -2563,7 +2614,7 @@ impl Writer {
                 continue;
             }
             check_safe("lost count", lost)?;
-            let fits = a.runs.last().is_some_and(|&run| {
+            let fits = a.runs.back().is_some_and(|&run| {
                 lost_after_end(a.grid, run, a.count, lost)
                     .filter(|&u| (0..JSON_SAFE as i64).contains(&a.grid.floor(u)))
                     .and_then(|u| self.chans[c].map.axis_place(u, a.grid.d()))
@@ -2621,7 +2672,7 @@ impl Writer {
             // A waiting gap that reaches the end is left out: the level is not known from its
             // `from` on. A flush past a gap's end closes its block, so the overview never takes
             // the end of a gap still waiting.
-            let mut kept = d.gaps.len();
+            let mut kept = d.gap_count as usize;
             if let Some((i, &(g, to))) =
                 d.pending.iter().enumerate().find(|(_, (g, _))| g.to >= end)
             {
@@ -2634,7 +2685,7 @@ impl Writer {
                     });
                 }
                 end = end.min(g.from);
-                kept = d.gaps.len() - (d.pending.len() - i);
+                kept = d.gap_count as usize - (d.pending.len() - i);
             }
             if d.edges > 0 && d.last_edge >= end {
                 return Err(WriteError::EdgePastEnd {
@@ -2654,7 +2705,7 @@ impl Writer {
         // The gaps the ends leave out: out of what the last blocks list, and out of the overview.
         for (c, end) in settled_ends.iter().enumerate() {
             if let (Some((_, kept)), Data::Digital(d)) = (end, &mut self.chans[c].data) {
-                let out = d.gaps.len() - kept;
+                let out = d.gap_count as usize - kept;
                 let first_out = d.pending.len() - out;
                 if let Some(&(g, _)) = d.pending.get(first_out) {
                     d.pending.truncate(first_out);
@@ -2784,11 +2835,11 @@ impl Writer {
                     }
                 }
                 Data::Analog(a) => {
-                    let first = a.runs.get(0).map_or(0, |r| r.tick);
-                    let lost_before = a.runs.get(0).map_or(0, |r| r.lost);
+                    let first = a.first_run.map_or(0, |r| r.tick);
+                    let lost_before = a.first_run.map_or(0, |r| r.lost);
                     let lost_after = finish.lost_after.get(&c).copied().unwrap_or(0);
                     let breaks = a.listed.count();
-                    debug_assert_eq!(breaks, a.runs.len().saturating_sub(1) as u64);
+                    debug_assert_eq!(breaks, a.run_count.saturating_sub(1));
                     digests.push(ch.hasher.clone().finish_analog(
                         first,
                         a.count,
@@ -2871,7 +2922,6 @@ impl Writer {
         };
         // The reader's own rules, so the writer never writes a header the reader refuses.
         crate::decode::check_header(&header).map_err(|e| WriteError::Header(e.to_string()))?;
-        let generated = generated(self.annotations.iter(), length, self.declaration.timebase);
         let files = match bundling {
             Bundling::None => None,
             Bundling::Generated { stem } => (!self.generators.is_empty()).then(|| {
@@ -2921,7 +2971,6 @@ impl Writer {
         Ok(Finished {
             header,
             tail: std::mem::take(&mut self.out),
-            generated,
         })
     }
 

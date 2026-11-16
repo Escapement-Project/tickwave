@@ -1,6 +1,7 @@
-//! The `Writer` fed arbitrary calls after a declaration: edges, gaps, runs, samples, annotations,
-//! flushes, snapshots read by a live view, output taken, and the finish. A call that breaks a rule
-//! returns an error. A recording it finishes reads back: at random, in order, and in the view.
+//! The `Writer` fed arbitrary calls after a declaration: edges, gaps, runs at any phase, samples,
+//! annotations, flushes, snapshots read by a live view, output taken, and the finish. A call that
+//! breaks a rule returns an error. A recording it finishes reads back: at random, in order, and in
+//! the view, its markers by range and whole and its edges counted.
 #![no_main]
 
 use std::collections::BTreeMap;
@@ -15,7 +16,7 @@ use escapement_tickwave_format::header::{
     Offset, Shaping, SourceFormat, SourceHeader,
 };
 use escapement_tickwave_format::mapping::Mapping;
-use escapement_tickwave_format::model::{Gap, Ratio, Sample, sample_tick};
+use escapement_tickwave_format::model::{Break, Gap, Grid, Ratio, Sample};
 use escapement_tickwave_format::reader::{Ending, Reader};
 use escapement_tickwave_format::writer::{Bundle, Compression, Finish, WriteOptions, Writer};
 use escapement_tickwave_view::{Bytes, Cache, Query, Recording};
@@ -142,6 +143,12 @@ struct Plan {
     shifts: Vec<Option<u8>>,
     /// Samples lost after an analog channel's last, by channel.
     lost_after: Vec<(u8, u16)>,
+    /// Each analog channel's declared phase, `num % den` over `den`, by channel.
+    phases: Vec<Option<(u16, u16)>>,
+    /// Each `Op::Run`'s phase in turn, in `1/D` ticks of its channel's grid.
+    run_phases: Vec<u16>,
+    /// Each derived channel's operation: a subtraction where true.
+    subtract: Vec<bool>,
 }
 
 fn ratio((n, d): (u32, u16)) -> Ratio {
@@ -214,7 +221,10 @@ fn declaration(p: &Plan) -> Declaration {
                     period: ratio((u32::from(period.0), period.1)),
                     coding: coding(k),
                     significant: *significant,
-                    phase: None,
+                    phase: p.phases.get(i).copied().flatten().and_then(|(n, d)| {
+                        let d = u64::from(d.max(1));
+                        Ratio::new(u64::from(n) % d, d)
+                    }),
                 },
             },
             shaping: Shaping {
@@ -237,7 +247,11 @@ fn declaration(p: &Plan) -> Declaration {
         .map(|(i, &(a, b))| Derived {
             name: format!("d{i}"),
             unit: "W".into(),
-            op: escapement_tickwave_format::header::Op::Multiply,
+            op: if p.subtract.get(i).copied().unwrap_or(false) {
+                escapement_tickwave_format::header::Op::Subtract
+            } else {
+                escapement_tickwave_format::header::Op::Multiply
+            },
             operands: vec![
                 format!("c{}", usize::from(a) % channels.len().max(1)),
                 format!("c{}", usize::from(b) % channels.len().max(1)),
@@ -304,9 +318,10 @@ struct Track {
 }
 
 struct Analog {
-    period: Ratio,
+    grid: Grid,
     coding: AnalogCoding,
-    run: Option<(i64, u64)>,
+    /// The latest run: its tick, first sample and phase.
+    run: Option<(i64, u64, u32)>,
     count: u64,
 }
 
@@ -323,8 +338,8 @@ fuzz_target!(|p: Plan| {
                 map,
                 last: start,
                 analog: match &d.channels[c].data {
-                    DeclaredKind::Analog { period, coding, .. } => Some(Analog {
-                        period: *period,
+                    DeclaredKind::Analog { coding, .. } => Some(Analog {
+                        grid: d.channels[c].grid().unwrap_or(Grid::WHOLE),
                         coding: *coding,
                         run: None,
                         count: 0,
@@ -373,6 +388,8 @@ fuzz_target!(|p: Plan| {
     };
     let source_tick = |t: &Track, at: &Tick| on(t.last, at);
     let axis_tick = on;
+    // The runs started so far, which picks each one's phase.
+    let mut runs = 0usize;
     for op in &p.ops {
         match op {
             Op::Edge(c, at) if n > 0 => {
@@ -402,10 +419,18 @@ fuzz_target!(|p: Plan| {
                 let c = usize::from(*c) % n;
                 let t = &mut tracks[c];
                 let k = source_tick(t, at);
-                if w.run(c, k, u64::from(*lost)).is_ok()
+                // The first run takes the declared phase; a later one the plan's, where it has one.
+                let phase = match (&t.analog, p.run_phases.get(runs)) {
+                    (Some(a), Some(&f)) if a.run.is_some() => u32::from(f) % a.grid.d() as u32,
+                    (Some(a), _) => a.grid.phase(),
+                    (None, _) => 0,
+                };
+                runs += 1;
+                if w.run_at(c, k, phase, u64::from(*lost)).is_ok()
                     && let Some(a) = &mut t.analog
                 {
-                    a.run = Some((k, a.count));
+                    let phase = if a.count == 0 { a.grid.phase() } else { phase };
+                    a.run = Some((k, a.count, phase));
                 }
             }
             Op::Samples {
@@ -455,8 +480,15 @@ fuzz_target!(|p: Plan| {
                     match w.sample(c, sample) {
                         Ok(()) => {
                             a.count += 1;
-                            if let Some((tick, index)) = a.run {
-                                let place = sample_tick(tick, a.period, a.count - 1 - index);
+                            if let Some((tick, index, phase)) = a.run {
+                                let grid = a.grid;
+                                let run = Break {
+                                    index,
+                                    tick,
+                                    lost: 0,
+                                    phase,
+                                };
+                                let place = grid.floor(grid.place(run, a.count - 1));
                                 t.last = place;
                                 last_axis = last_axis.max(t.map.axis(place).unwrap_or(0));
                             }
@@ -593,8 +625,24 @@ fuzz_target!(|p: Plan| {
     assert_eq!(reader.end().unwrap(), Ending::Complete);
     // The writer takes only annotations a generator's file can hold, so a bundle of them
     // resolves; a bundle of files a toml one names is the caller's, and may not.
+    let length = footer.header.length;
     match Recording::open(Arc::new(bytes), Cache::new(1 << 20)) {
-        Ok(_) => {}
+        Ok(rec) => {
+            // Markers by range, then whole; edges counted from the index against those read.
+            let half = length / 2;
+            let _ = rec.markers(0..half, None, 16);
+            let _ = rec.markers(half..length, None, 16);
+            let whole = rec.load_markers();
+            if whole.is_ok() {
+                let _ = (rec.marker_count(), rec.markers_left_out());
+            }
+            for c in 0..n {
+                if let Ok(count) = rec.edge_count(c, half / 2, length, &cancel) {
+                    let read = rec.edges(c, half / 2, length, &cancel).unwrap().1;
+                    assert_eq!(count, read.len() as u64, "channel {c}'s edges counted");
+                }
+            }
+        }
         Err(escapement_tickwave_view::Error::Annotations(_)) if p.bundle % 3 == 2 => {}
         Err(e) => panic!("the view refuses a finished recording: {e}"),
     }

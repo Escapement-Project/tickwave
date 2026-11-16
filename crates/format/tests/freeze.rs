@@ -1522,3 +1522,76 @@ fn a_derived_channels_operands_runs_are_compared_record_by_record() {
         "channels 0 and 1, a derived channel's operands: their runs at sample 2 differ"
     );
 }
+
+/// `file` with its declaration record's JSON edited by `edit` and framed again. The records after
+/// it keep their bytes, so a footer's places past it no longer hold: for readers in order.
+fn with_declaration(file: &[u8], edit: impl FnOnce(&mut serde_json::Value)) -> Vec<u8> {
+    let at = escapement_tickwave_format::header::PREAMBLE_LEN;
+    let len = u32::from_le_bytes(file[at + 1..at + 5].try_into().unwrap()) as usize;
+    let mut json: serde_json::Value = serde_json::from_slice(&file[at + 5..at + 5 + len]).unwrap();
+    edit(&mut json);
+    let mut out = file[..at].to_vec();
+    record::write(
+        &mut out,
+        Kind::Declaration,
+        &[&serde_json::to_vec(&json).unwrap()],
+    );
+    out.extend_from_slice(&file[at + 5 + len + record::CHECK_LEN..]);
+    out
+}
+
+/// A declaration that names a feature, a codec or an operation this version doesn't know is one
+/// repair and the re-cutter can't write again: each refuses it, where both once panicked taking
+/// its derived channel's operands (the fuzzer's artifacts/p5c-short2b/recut/crash-b97c791e and
+/// repair/crash-d33e5722).
+#[test]
+fn repair_and_recut_refuse_a_declaration_they_cant_write_again() {
+    use escapement_tickwave_format::recut::Recutter;
+    use escapement_tickwave_format::repair::repair;
+    let d = declaration(
+        vec![
+            analog("V", int(16, false, (1, 1000)), Ratio::ONE, None),
+            analog("I", int(16, false, (1, 1000)), Ratio::ONE, None),
+        ],
+        vec![Derived::multiply("P", "W", "I", "V")],
+    );
+    let mut w = Writer::new(d, options()).unwrap();
+    for c in 0..2 {
+        w.run(c, 0, 0).unwrap();
+    }
+    for i in 0..4u64 {
+        w.sample(0, i).unwrap();
+        w.sample(1, i + 1).unwrap();
+    }
+    w.flush(4).unwrap();
+    // As a crash leaves it: through the flush, no index page yet.
+    let unfinished = w.output().to_vec();
+    let file = finished(w, 8, 0);
+    type Edit = fn(&mut serde_json::Value);
+    let edits: [(&str, Edit); 3] = [
+        ("requires", |v| {
+            v["channels"][0]["requires"] = serde_json::json!(["frobs"])
+        }),
+        ("codec", |v| v["channels"][1]["codec"] = "delta".into()),
+        ("op", |v| v["derived"][0]["op"] = "integrate".into()),
+    ];
+    for (what, edit) in edits {
+        let Err(err) = repair(&with_declaration(&unfinished, edit), 3) else {
+            panic!("repair, {what}: repaired")
+        };
+        let err = err.to_string();
+        assert!(
+            err.contains("unavailable to this version"),
+            "repair, {what}: {err}"
+        );
+        let mut r = Recutter::new(options());
+        let err = r
+            .feed(&with_declaration(&file, edit))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("which this version doesn't define"),
+            "recut, {what}: {err}"
+        );
+    }
+}

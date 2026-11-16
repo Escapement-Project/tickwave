@@ -1,5 +1,5 @@
 //! Recordings for the data layer's tests, and an oracle that reads them through the format crate
-//! alone: every block decoded, every sample's time from `model::sample_support`.
+//! alone: every block decoded, every sample's time from `Grid::sample_time`, exactly.
 
 #![allow(dead_code)]
 
@@ -12,11 +12,11 @@ use escapement_tickwave_format::header::{
     AnalogCoding, ChannelKind, Declaration, DeclaredChannel, DeclaredKind, Derived, Exact,
     IntCoding, SourceFormat, SourceHeader,
 };
-use escapement_tickwave_format::model::{Ratio, Sample, run_sample_tick, sample_support};
+use escapement_tickwave_format::model::{Ratio, Sample};
 use escapement_tickwave_format::overview::Level;
 use escapement_tickwave_format::samples::value_f64;
 use escapement_tickwave_format::writer::{Finish, WriteOptions, Writer};
-use escapement_tickwave_view::{Cache, Recording};
+use escapement_tickwave_view::{Cache, Recording, Ticks};
 
 pub fn fixture(name: &str) -> Vec<u8> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -43,16 +43,19 @@ pub fn levels(file: &[u8], o: usize) -> Vec<Level> {
 /// One analog or derived channel's samples, as the oracle reads them.
 #[derive(Clone, Debug)]
 pub struct Oracle {
-    /// Each sample: its tick, where its time ends, its value, and its code where it has one.
-    pub samples: Vec<(i64, i64, f64, Option<i128>)>,
+    /// The units of its times: `1 / per` axis ticks.
+    pub per: u128,
+    /// Each sample: where its time starts and ends, in those units, its value, and its code where
+    /// it has one.
+    pub samples: Vec<(i128, i128, f64, Option<i128>)>,
 }
 
-/// What the oracle sums over an interval: samples, measured ticks, min, max, Σ code × ticks
-/// where every sample has a code, else Σ value × ticks.
+/// What the oracle sums over an interval: samples, measured time, min, max, Σ code × time in the
+/// oracle's units where every sample has a code, else Σ value × ticks.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Truth {
     pub samples: u64,
-    pub measured: i64,
+    pub measured: Ticks,
     pub min: Option<f64>,
     pub max: Option<f64>,
     pub codes: Option<i128>,
@@ -63,30 +66,35 @@ impl Oracle {
     pub fn over(&self, a: i64, b: i64) -> Truth {
         let mut t = Truth {
             samples: 0,
-            measured: 0,
+            measured: Ticks {
+                units: 0,
+                per: std::num::NonZeroU128::new(self.per).unwrap(),
+            },
             min: None,
             max: None,
             codes: self.samples.first().and_then(|s| s.3).map(|_| 0),
             float: 0.0,
         };
-        // Ticks and the ends of the samples' times both only grow, so the samples that reach
+        let per = i128::try_from(self.per).unwrap();
+        let (a, b) = (i128::from(a) * per, i128::from(b) * per);
+        // Starts and the ends of the samples' times both only grow, so the samples that reach
         // past `a` start here, and none at or past `b` counts.
         let first = self.samples.partition_point(|s| s.1 <= a);
-        for &(tick, end, value, code) in &self.samples[first..] {
-            if tick >= b {
+        for &(start, end, value, code) in &self.samples[first..] {
+            if start >= b {
                 break;
             }
-            let ticks = end.min(b) - tick.max(a);
-            if ticks <= 0 || value.is_nan() {
+            let units = end.min(b) - start.max(a);
+            if units <= 0 || value.is_nan() {
                 continue;
             }
             t.samples += 1;
-            t.measured += ticks;
+            t.measured.units += units;
             t.min = Some(t.min.map_or(value, |m: f64| m.min(value)));
             t.max = Some(t.max.map_or(value, |m: f64| m.max(value)));
             match (&mut t.codes, code) {
-                (Some(s), Some(c)) => *s += c * i128::from(ticks),
-                _ => t.float += value * ticks as f64,
+                (Some(s), Some(c)) => *s += c * units,
+                _ => t.float += value * (units as f64 / self.per as f64),
             }
         }
         t
@@ -127,7 +135,6 @@ pub fn oracle(file: &[u8]) -> Vec<Option<Oracle>> {
             };
             let ChannelKind::Analog {
                 first,
-                period,
                 count,
                 coding,
                 ..
@@ -136,15 +143,18 @@ pub fn oracle(file: &[u8]) -> Vec<Option<Oracle>> {
                 return None;
             };
             let breaks = f.breaks(stored).unwrap();
+            let grid = f.grid(stored).unwrap();
+            let map = h.mapping(stored).unwrap();
+            let per = u128::from(grid.d()) * u128::from(map.m().den());
+            let cap = i128::from(h.length) * i128::try_from(per).unwrap();
+            let at = |u: i128| map.axis_time(u, grid.d()).unwrap().min(cap);
             let samples = values[c]
                 .iter()
                 .enumerate()
                 .map(|(i, &s)| {
                     let i = i as u64;
-                    let tick = run_sample_tick(*first, *period, breaks, i);
-                    let end = sample_support(*first, *period, breaks, *count, h.length, i)
-                        .unwrap()
-                        .end;
+                    let time = grid.sample_time(*first, breaks, *count, i, None).unwrap();
+                    let (tick, end) = (at(time.start), at(time.end));
                     let value = match product {
                         Some(p) => p.value(s),
                         None => value_f64(s, *coding),
@@ -168,7 +178,7 @@ pub fn oracle(file: &[u8]) -> Vec<Option<Oracle>> {
                     .all(|w| w[0].0 <= w[1].0 && w[0].1 <= w[1].1),
                 "ticks and ends only grow"
             );
-            Some(Oracle { samples })
+            Some(Oracle { per, samples })
         })
         .collect()
 }
@@ -182,9 +192,9 @@ pub struct Run {
 }
 
 /// A recording with A (u32 codes at 1/1000), B (i16 codes at −1/7) and their product P, every
-/// `p` ticks in `runs`; F, f32, every 3/2 ticks; G, u8 codes, every 7/3 ticks with a break; and a
-/// digital channel D with an edge every 777 ticks. Its length ends `cut` ticks after A's last
-/// sample.
+/// `p` ticks in `runs`; F, f32, every 3/2 ticks; G, u8 codes, every 7/3 ticks from a third of a
+/// tick, with a break to a run at two thirds; and a digital channel D with an edge every 777
+/// ticks. Its length ends `cut` ticks after A's last sample.
 pub fn synth(p: u64, shift: u8, runs: &[Run], cut: i64, block_bytes: usize) -> Vec<u8> {
     let timebase = Ratio::integer(1_000_000).unwrap();
     let analog = |name: &str, period: Ratio, coding| DeclaredChannel {
@@ -215,7 +225,16 @@ pub fn synth(p: u64, shift: u8, runs: &[Run], cut: i64, block_bytes: usize) -> V
             analog("A", Ratio::integer(p).unwrap(), int(32, false, 1, 1000)),
             analog("B", Ratio::integer(p).unwrap(), int(16, true, -1, 7)),
             analog("F", Ratio::new(3, 2).unwrap(), AnalogCoding::F32),
-            analog("G", Ratio::new(7, 3).unwrap(), int(8, false, 1, 1)),
+            DeclaredChannel {
+                data: DeclaredKind::Analog {
+                    unit: "V".into(),
+                    period: Ratio::new(7, 3).unwrap(),
+                    coding: int(8, false, 1, 1),
+                    significant: None,
+                    phase: Some(Ratio::new(1, 3).unwrap()),
+                },
+                ..analog("G", Ratio::new(7, 3).unwrap(), AnalogCoding::F32)
+            },
             DeclaredChannel {
                 name: "D".into(),
                 source_name: "d".into(),
@@ -258,6 +277,8 @@ pub fn synth(p: u64, shift: u8, runs: &[Run], cut: i64, block_bytes: usize) -> V
     // Every item with its tick, in tick order: (tick, order, what).
     enum Item {
         Run(usize, i64, u64),
+        /// A run at a phase in thirds of a tick.
+        RunAt(usize, i64, u32, u64),
         Pair(u64),
         F(u64),
         G(u64),
@@ -286,15 +307,16 @@ pub fn synth(p: u64, shift: u8, runs: &[Run], cut: i64, block_bytes: usize) -> V
     for i in 0..f_count {
         items.push(((i * 3 / 2) as i64, 2, Item::F(i)));
     }
-    // G: a run from 0, a break at 5,000 with 4 lost, the rest from tick 20,000.
+    // G: a run from a third of a tick, a break at 5,000 with 4 lost, the rest from 20,000 and
+    // two thirds. Each sample at the whole tick its place lies in.
     let mut g = 0u64;
     for i in 0..5_000u64 {
-        items.push(((i * 7 / 3) as i64, 3, Item::G(g)));
+        items.push(((i * 7 + 1).div_euclid(3) as i64, 3, Item::G(g)));
         g += 1;
     }
-    items.push((20_000, 0, Item::Run(3, 20_000, 4)));
+    items.push((20_000, 0, Item::RunAt(3, 20_000, 2, 4)));
     for i in 0..5_000u64 {
-        items.push((20_000 + (i * 7 / 3) as i64, 3, Item::G(g)));
+        items.push((20_000 + (i * 7 + 2).div_euclid(3) as i64, 3, Item::G(g)));
         g += 1;
     }
     let mut e = 777;
@@ -310,6 +332,7 @@ pub fn synth(p: u64, shift: u8, runs: &[Run], cut: i64, block_bytes: usize) -> V
     for (_, _, item) in items {
         match item {
             Item::Run(c, t, lost) => w.run(c, t, lost).unwrap(),
+            Item::RunAt(c, t, phase, lost) => w.run_at(c, t, phase, lost).unwrap(),
             Item::Pair(i) => {
                 w.sample(0, (i * 7919) % 100_000).unwrap();
                 w.sample(1, ((i * 31) % 2000) as i64 - 1000).unwrap();

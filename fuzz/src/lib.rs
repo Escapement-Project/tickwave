@@ -15,16 +15,25 @@
 //!   back to back: `file` cuts them at the decoded lengths the top index gives each channel,
 //!   compresses each, and writes each frame's length there. Bytes past the last channel's strip
 //!   go in one more frame.
-//! - annotation bundle: `[decoded]`. `file` writes its length before the frame.
+//! - annotation bundle and annotation part: `[decoded]`. `file` writes its length before the
+//!   frame.
 //!
 //! With `FIX_INDEX`, `file` points the index at the records it wrote, counting each kind in the
 //! order it wrote them. Row `i` of a channel's blocks, in an index page, takes the start, frame,
 //! decoded length and word of the channel's `i`th block record. Row `i` of an overview level
-//! takes the frame, decoded length and `n` of the level's `i`th overview block record. Entry `i`
-//! of a directory page at place `p` points at page `p + i` of its table at the depth below, and
-//! entry `i` of a table in the top index at page `i` of the table at the depth it states. The top
-//! index's bundle place points at the latest bundle record. Every other field stays as the input
-//! gives it.
+//! takes the frame, decoded length and `n` of the level's `i`th overview block record. Row `i` of
+//! the annotation parts table takes the frame and decoded length of the `i`th part record; its
+//! span stays the input's. Entry `i` of a directory page at place `p` points at page `p + i` of
+//! its table at the depth below, and entry `i` of a table in the top index at page `i` of the
+//! table at the depth it states. The top index's bundle place points at the latest bundle
+//! record. Every other field stays as the input gives it.
+//!
+//! The flags `REQUIRES`, `CODEC` and `OPERATION` make a declaration's and a footer's header name
+//! what this version doesn't know (FORMAT.md, "Unavailable channels"): a feature channel 0
+//! requires, a codec the last channel states, and the first derived channel's operation. With
+//! `LIMITS`, `file` pads a compressed body's decoded bytes with zeros to one byte short of its
+//! kind's limit, the limit, or one past it, as the body's first byte picks: a block's and an
+//! annotation part's 4 MiB, a bundle's 64 MiB.
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -42,6 +51,14 @@ pub const AUTO_TRAILER: u8 = 1;
 pub const FIX_INDEX: u8 = 2;
 /// Flags: no preamble before the records.
 pub const NO_PREAMBLE: u8 = 4;
+/// Flags: channel 0 requires a feature this version doesn't know.
+pub const REQUIRES: u8 = 8;
+/// Flags: the last channel states a codec this version doesn't know.
+pub const CODEC: u8 = 16;
+/// Flags: the first derived channel's operation is one this version doesn't know.
+pub const OPERATION: u8 = 32;
+/// Flags: compressed bodies padded to their kinds' limits.
+pub const LIMITS: u8 = 64;
 
 /// Mode: the frame is compressed from the decoded bytes the body gives.
 pub const COMPRESS: u8 = 1;
@@ -88,6 +105,8 @@ struct Written {
     pages: HashMap<Pages, Vec<(u64, u32)>>,
     /// The latest annotation bundle record: offset and length.
     bundle: Option<(u64, u32)>,
+    /// The annotation part records' frames, with their decoded lengths.
+    parts: Vec<Placed>,
 }
 
 impl Written {
@@ -134,6 +153,11 @@ impl Written {
             Some(Kind::Bundle) => {
                 self.bundle = Some((offset, (record::FRAMING + payload.len()) as u32));
             }
+            Some(Kind::Part) if payload.len() >= 4 => self.parts.push(Placed {
+                offset: frame_at(4),
+                length: (payload.len() - 4) as u32,
+                decoded: u32_at(payload, 0),
+            }),
             _ => {}
         }
     }
@@ -192,6 +216,21 @@ impl Written {
                     r[16..20].copy_from_slice(&head.n.to_le_bytes());
                 }
             }
+        } else if h.table == Table::Parts.code() {
+            for (i, r) in body
+                .as_chunks_mut::<{ escapement_tickwave_format::parts::PartRow::SIZE }>()
+                .0
+                .iter_mut()
+                .enumerate()
+            {
+                if let Some(p) = self.parts.get(first.saturating_add(i)) {
+                    r[..8].copy_from_slice(&p.offset.to_le_bytes());
+                    r[8..12].copy_from_slice(&p.length.to_le_bytes());
+                    if let Some(d) = p.decoded {
+                        r[12..16].copy_from_slice(&d.to_le_bytes());
+                    }
+                }
+            }
         }
     }
 
@@ -240,6 +279,17 @@ struct TopTable {
 fn top_layout(h: &Header, index: &[u8]) -> (Vec<usize>, Vec<TopTable>) {
     let (mut strips, mut tables) = (Vec::new(), Vec::new());
     let mut at = 12;
+    if h.annotation_parts.is_some() {
+        let Some(&e) = index.get(at + 1) else {
+            return (strips, tables);
+        };
+        tables.push(TopTable {
+            at,
+            channel: 0,
+            table: Table::Parts,
+        });
+        at += 2 + usize::from(e) * Entry::SIZE;
+    }
     for o in 0..h.channels.len() + h.derived.len() {
         if at + 8 > index.len() {
             break;
@@ -301,9 +351,48 @@ fn strip_frames(index: &mut [u8], strips: &[usize], mut raw: &[u8]) -> Vec<u8> {
     out
 }
 
+/// A header's or declaration's JSON naming what `flags` asks of it that this version doesn't
+/// know; the bytes as they are where they don't read as a JSON object.
+fn unknown(json: &[u8], flags: u8) -> Vec<u8> {
+    if flags & (REQUIRES | CODEC | OPERATION) == 0 {
+        return json.to_vec();
+    }
+    let Ok(serde_json::Value::Object(mut v)) = serde_json::from_slice(json) else {
+        return json.to_vec();
+    };
+    if let Some(serde_json::Value::Array(channels)) = v.get_mut("channels") {
+        if flags & REQUIRES != 0
+            && let Some(serde_json::Value::Object(c)) = channels.first_mut()
+        {
+            c.insert("requires".into(), serde_json::json!(["x-fuzz"]));
+        }
+        if flags & CODEC != 0
+            && let Some(serde_json::Value::Object(c)) = channels.last_mut()
+        {
+            c.insert("codec".into(), "x-fuzz".into());
+        }
+    }
+    if flags & OPERATION != 0
+        && let Some(serde_json::Value::Array(derived)) = v.get_mut("derived")
+        && let Some(serde_json::Value::Object(d)) = derived.first_mut()
+    {
+        d.insert("op".into(), "x-fuzz".into());
+    }
+    serde_json::to_vec(&v).unwrap_or_else(|_| json.to_vec())
+}
+
+/// `raw` padded with zeros to one byte short of `limit`, `limit`, or one past it, as its first
+/// byte picks.
+fn at_limit(raw: &[u8], limit: usize) -> Vec<u8> {
+    let n = limit - 1 + usize::from(raw.first().map_or(0, |b| b % 3));
+    let mut out = raw[..raw.len().min(n)].to_vec();
+    out.resize(n, 0);
+    out
+}
+
 /// A structured footer's body as the footer's payload: its strips compressed, and its top index
 /// pointed at what `file` wrote where `written` is given.
-fn footer_payload(body: &[u8], written: Option<&Written>) -> Vec<u8> {
+fn footer_payload(body: &[u8], written: Option<&Written>, flags: u8) -> Vec<u8> {
     let header_len = u32_at(body, 0).unwrap_or(0) as usize;
     let header = body
         .get(4..)
@@ -313,6 +402,7 @@ fn footer_payload(body: &[u8], written: Option<&Written>) -> Vec<u8> {
     let index_at = (after + 4).min(body.len());
     let mut index = body[index_at..][..index_len.min(body.len() - index_at)].to_vec();
     let raw = &body[index_at + index.len()..];
+    let header = &unknown(header, flags)[..];
     let (strips, tables) = serde_json::from_slice::<Header>(header)
         .map_or_else(|_| (Vec::new(), Vec::new()), |h| top_layout(&h, &index));
     let frames = strip_frames(&mut index, &strips, raw);
@@ -350,10 +440,19 @@ pub fn file(data: &[u8]) -> Vec<u8> {
             continue;
         }
         let compressed = mode & COMPRESS != 0;
+        let limits = flags & LIMITS != 0;
         let mut decoded = None;
         let mut payload = match kind {
+            1 => unknown(body, flags),
             2 if compressed && body.len() >= BlockHead::LEN => {
                 let (head, raw) = body.split_at(BlockHead::LEN);
+                let padded;
+                let raw = if limits {
+                    padded = at_limit(raw, record::MAX_BLOCK);
+                    &padded[..]
+                } else {
+                    raw
+                };
                 let mut payload = head.to_vec();
                 payload[24..28].copy_from_slice(&(raw.len() as u32).to_le_bytes());
                 payload.extend_from_slice(&compress(raw));
@@ -364,10 +463,22 @@ pub fn file(data: &[u8]) -> Vec<u8> {
                 decoded = Some(raw.len() as u32);
                 [head, &compress(raw)].concat()
             }
-            7 if compressed => footer_payload(body, fix.then_some(&written)),
-            12 if compressed => {
-                let mut payload = (body.len() as u32).to_le_bytes().to_vec();
-                payload.extend_from_slice(&compress(body));
+            7 if compressed => footer_payload(body, fix.then_some(&written), flags),
+            12 | 13 if compressed => {
+                let limit = if kind == 12 {
+                    record::MAX_BUNDLE
+                } else {
+                    record::MAX_PART
+                };
+                let padded;
+                let raw = if limits {
+                    padded = at_limit(body, limit);
+                    &padded[..]
+                } else {
+                    body
+                };
+                let mut payload = (raw.len() as u32).to_le_bytes().to_vec();
+                payload.extend_from_slice(&compress(raw));
                 payload
             }
             _ => body.to_vec(),
@@ -470,7 +581,7 @@ pub fn structure(bytes: &[u8]) -> Option<Vec<u8>> {
         let decoded = match Kind::from_byte(kind) {
             Some(Kind::Block) => head_and_decoded(payload, BlockHead::LEN),
             Some(Kind::OverviewBlock) => head_and_decoded(payload, OverviewHead::LEN),
-            Some(Kind::Bundle) => payload.get(4..).and_then(decode_all),
+            Some(Kind::Bundle | Kind::Part) => payload.get(4..).and_then(decode_all),
             Some(Kind::Footer) => footer_body(payload),
             _ => None,
         };

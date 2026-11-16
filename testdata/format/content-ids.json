@@ -1,0 +1,23 @@
+{
+ "note": "A recording of two int channels and a derived one, written five ways. The content id changes with the derived channel's operation and with its operands' order, and not with the compression level, the block size or a re-cut. The ids pin this implementation (FORMAT.md, \"Content id\"); see README.md.",
+ "recording": {
+  "timebase": [1000, 1],
+  "length": 20,
+  "channels": [
+   {"name": "V", "samples": "i for i in 0..20"},
+   {"name": "I", "samples": "i + 1 for i in 0..20"}
+  ],
+  "coding": {"int": {"bits": 16, "signed": false, "scale": [1, 1000]}},
+  "period": [1, 1],
+  "derived": {"name": "P", "unit": "W"}
+ },
+ "variants": [
+  {"name": "multiply", "op": "multiply", "operands": ["I", "V"], "level": 19, "block_bytes": 1048576, "content_id": "blake3:164245233d2f806c2a6fd9ebc9c4d15bd5362f3a2e5d72c54215e4882340df9c"},
+  {"name": "subtract", "op": "subtract", "operands": ["I", "V"], "level": 19, "block_bytes": 1048576, "content_id": "blake3:951777b4ce986c61058329b393aa2c5812541a38b7142ef43dbf30ce666b8903"},
+  {"name": "swapped", "op": "multiply", "operands": ["V", "I"], "level": 19, "block_bytes": 1048576, "content_id": "blake3:5b5b670da616f5f81cec665abfcb03209995640eb0ab22b3d04ff46af78e309b"},
+  {"name": "recompressed", "op": "multiply", "operands": ["I", "V"], "level": 1, "block_bytes": 8, "content_id": "blake3:164245233d2f806c2a6fd9ebc9c4d15bd5362f3a2e5d72c54215e4882340df9c"},
+  {"name": "recut", "op": "multiply", "operands": ["I", "V"], "level": 19, "block_bytes": 8, "recut": {"level": 3, "block_bytes": 64}, "content_id": "blake3:164245233d2f806c2a6fd9ebc9c4d15bd5362f3a2e5d72c54215e4882340df9c"}
+ ],
+ "same": [["multiply", "recompressed", "recut"]],
+ "different": [["multiply", "subtract"], ["multiply", "swapped"], ["subtract", "swapped"]]
+}

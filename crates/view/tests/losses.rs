@@ -13,7 +13,7 @@ use escapement_tickwave_format::header::{
 };
 use escapement_tickwave_format::model::Ratio;
 use escapement_tickwave_format::writer::{Finish, WriteOptions, Writer};
-use escapement_tickwave_view::{Bytes, Cache, Drawn, Query, Recording};
+use escapement_tickwave_view::{Bytes, Cache, Drawn, Query, Recording, Ticks};
 
 /// A file a writer still appends to.
 #[derive(Default)]
@@ -263,7 +263,7 @@ fn the_spans_lost_at_either_end_are_pale_and_unmeasured() {
         let v = s.channels[c].as_ref().unwrap();
         assert_eq!(
             (v.samples, v.measured, v.unmeasured(&s.interval, &extent)),
-            (40, 400, 80),
+            (40, Ticks::whole(400), Ticks::whole(80)),
             "channel {c}"
         );
     }

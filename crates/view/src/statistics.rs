@@ -3,14 +3,17 @@
 //!
 //! A sample counts, and its value is one of the extremes, when its time (FORMAT.md, "Gaps")
 //! clipped to the interval is above zero: one starting before the interval that reaches into it
-//! counts. A NaN sample counts in nothing.
+//! counts. A NaN sample counts in nothing. A sample's time runs from its place to the next, which a
+//! phase, a fractional period or a source's `m` puts between axis ticks: it is measured exactly, in
+//! `1 / per` axis ticks, `per` being the channel's grid `d` times its `m`'s denominator.
 
+use std::num::NonZeroU128;
 use std::ops::Range;
 use std::sync::atomic::AtomicBool;
 
 use escapement_tickwave_format::header::Exact;
 use escapement_tickwave_format::mapping::Mapping;
-use escapement_tickwave_format::model::{Break, Ratio};
+use escapement_tickwave_format::model::{Break, Grid, Ratio};
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 
@@ -22,32 +25,63 @@ use crate::runs::Runs;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Statistics {
     pub interval: Range<i64>,
-    /// By channel index: None for a digital channel.
+    /// By channel index: None for a digital channel and one this version can't read.
     pub channels: Vec<Option<ChannelStatistics>>,
+}
+
+/// A span of axis time, exactly: `units / per` ticks.
+#[derive(Clone, Copy, Debug)]
+pub struct Ticks {
+    pub units: i128,
+    /// A channel's grid `d` times its `m`'s denominator: below 2^69.
+    pub per: NonZeroU128,
+}
+
+impl Ticks {
+    /// `ticks` whole ticks.
+    pub const fn whole(ticks: i64) -> Self {
+        Self {
+            units: ticks as i128,
+            per: NonZeroU128::MIN,
+        }
+    }
+
+    /// In ticks, for presenting.
+    pub fn as_f64(self) -> f64 {
+        self.units as f64 / self.per.get() as f64
+    }
+}
+
+/// Equal as numbers, whatever their units.
+impl PartialEq for Ticks {
+    fn eq(&self, other: &Self) -> bool {
+        BigInt::from(self.units) * BigInt::from(other.per.get())
+            == BigInt::from(other.units) * BigInt::from(self.per.get())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChannelStatistics {
     pub samples: u64,
-    /// The ticks the counted samples cover inside the interval: whole ticks, since every
-    /// sample's time is.
-    pub measured: i64,
+    /// The time the counted samples cover inside the interval.
+    pub measured: Ticks,
     pub min: Option<f64>,
     pub max: Option<f64>,
-    /// Σ value × the ticks it covers inside the interval.
+    /// Σ value × the time it covers inside the interval.
     pub sum: Sum,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Sum {
-    /// An `int` channel's or an integer product's: Σ code × ticks, exactly, and the scale and
-    /// offset that make a code a value. The value sum is `scale × codes_ticks + offset × measured`.
+    /// An `int` channel's or an integer product's: Σ code × time, exactly, in `1 / per` ticks,
+    /// `measured`'s units, and the scale and offset that make a code a value. The value sum, in
+    /// ticks, is `(scale × codes_ticks + offset × measured.units) / per`.
     Exact {
         codes_ticks: i128,
         scale: Exact,
         offset: Exact,
     },
-    /// A float channel's, summed in f64.
+    /// A float channel's, in value × ticks, summed in f64.
     Float(f64),
 }
 
@@ -65,9 +99,9 @@ impl ChannelStatistics {
                 offset,
             } => {
                 let ((sn, sd), (on, od)) = (exact(scale), exact(offset));
-                let n =
-                    sn * &od * BigInt::from(codes_ticks) + on * &sd * BigInt::from(self.measured);
-                Some((n, sd * od))
+                let n = sn * &od * BigInt::from(codes_ticks)
+                    + on * &sd * BigInt::from(self.measured.units);
+                Some((n, sd * od * BigInt::from(self.measured.per.get())))
             }
             Sum::Float(_) => None,
         }
@@ -75,14 +109,18 @@ impl ChannelStatistics {
 
     /// The mean value over the time the samples cover. None with nothing measured.
     pub fn mean(&self) -> Option<f64> {
-        if self.measured == 0 {
+        if self.measured.units == 0 {
             return None;
         }
         Some(match self.sum {
-            Sum::Float(s) => s / self.measured as f64,
+            Sum::Float(s) => s / self.measured.as_f64(),
             Sum::Exact { .. } => {
                 let (n, d) = self.weighted().expect("exact");
-                ratio(&n, &(d * BigInt::from(self.measured)))
+                let m = &self.measured;
+                ratio(
+                    &(n * BigInt::from(m.per.get())),
+                    &(d * BigInt::from(m.units)),
+                )
             }
         })
     }
@@ -101,10 +139,20 @@ impl ChannelStatistics {
         }
     }
 
-    /// The ticks of `interval` inside `extent` that no sample covers.
-    pub fn unmeasured(&self, interval: &Range<i64>, extent: &Range<i64>) -> i64 {
-        let inside = interval.end.min(extent.end) - interval.start.max(extent.start);
-        inside.max(0) - self.measured
+    /// The time of `interval` inside `extent` that no sample covers.
+    pub fn unmeasured(&self, interval: &Range<i64>, extent: &Range<i64>) -> Ticks {
+        let inside = i128::from(interval.end.min(extent.end))
+            .saturating_sub(i128::from(interval.start.max(extent.start)))
+            .max(0);
+        // An extent of axis ticks below 2^53 times `per` below 2^69 stays inside an i128; past
+        // that it saturates.
+        let per = i128::try_from(self.measured.per.get()).unwrap_or(i128::MAX);
+        Ticks {
+            units: inside
+                .saturating_mul(per)
+                .saturating_sub(self.measured.units),
+            per: self.measured.per,
+        }
     }
 }
 
@@ -113,115 +161,66 @@ fn ratio(n: &BigInt, d: &BigInt) -> f64 {
     n.to_f64().unwrap_or(f64::NAN) / d.to_f64().unwrap_or(f64::NAN)
 }
 
-/// Each sample's time on the axis, as `Runs::support` gives it, for samples taken in index order:
-/// the run a sample falls in is found once a run, and a sample's place is the one worked out for
-/// the end of the sample before it. Places are worked in the source's ticks, then mapped.
+/// Each sample's time on the axis, exactly, in `1 / per` ticks: from its place to the next on its
+/// run's grid, or the next run's start if that comes sooner, and no later than the length.
 struct Supports<'a> {
     first: i64,
-    /// The period's terms.
-    num: u128,
-    den: u128,
+    grid: Grid,
     breaks: &'a [Break],
     map: Mapping,
-    /// Whether `map` is the identity, which skips the mapping for every sample.
-    identity: bool,
-    /// The axis tick no support runs past.
-    length: i64,
-    /// The run of the last sample asked for.
-    run: Run,
-    /// The sample after the last one asked for, and its place on the run's grid, uncapped.
-    ahead: Option<(u64, i128)>,
-}
-
-/// A run's samples `start..end`, from source tick `tick`, and where its last sample's time ends
-/// when a run follows it: the next run's tick.
-#[derive(Clone, Copy)]
-struct Run {
-    start: u64,
-    end: u64,
-    tick: i64,
-    cut: Option<i64>,
+    /// `d` times `m`'s denominator, the units of a tick: below 2^69, `d` below 2^16 and the
+    /// denominator below 2^53.
+    per: NonZeroU128,
+    /// The length, in those units.
+    length: i128,
 }
 
 impl<'a> Supports<'a> {
     fn new(runs: &Runs<'a>, length: i64) -> Self {
+        // Both terms are at least 1, and their product fits a u128.
+        let per = NonZeroU128::new(u128::from(runs.grid.d()) * u128::from(runs.map.m().den()))
+            .unwrap_or(NonZeroU128::MIN);
         Self {
             first: runs.first,
-            num: u128::from(runs.period.num()),
-            den: u128::from(runs.period.den()),
+            grid: runs.grid,
             breaks: runs.breaks,
             map: runs.map,
-            identity: runs.map.is_identity(),
-            length,
-            run: Run {
-                start: 0,
-                end: 0,
-                tick: 0,
-                cut: None,
-            },
-            ahead: None,
+            per,
+            // Below 2^122 for a length below 2^53; saturating past it.
+            length: i128::from(length).saturating_mul(units(per)),
         }
     }
 
-    fn run_of(&self, i: u64) -> Run {
-        let k = self.breaks.partition_point(|b| b.index <= i);
-        let (start, tick) = match k.checked_sub(1).and_then(|p| self.breaks.get(p)) {
-            None => (0, self.first),
-            Some(b) => (b.index, b.tick),
-        };
-        let next = self.breaks.get(k);
-        Run {
-            start,
-            end: next.map_or(u64::MAX, |b| b.index),
-            tick,
-            cut: next.map(|b| b.tick),
-        }
-    }
-
-    /// Place `steps` samples into run `r`, uncapped.
-    fn place(&self, r: &Run, steps: u64) -> i128 {
-        let n = u128::from(steps) * self.num;
-        let ticks = match self.den {
-            1 => n,
-            d => n / d,
-        };
-        i128::from(r.tick).saturating_add(i128::try_from(ticks).unwrap_or(i128::MAX))
+    /// A place of `units / d` source ticks on the axis, in `1 / per` ticks, saturating.
+    fn at(&self, units: i128) -> i128 {
+        self.map
+            .axis_time(units, self.grid.d())
+            .unwrap_or(if units < 0 { i128::MIN } else { i128::MAX })
     }
 
     /// The time of sample `i`, one the channel has.
-    fn of(&mut self, i: u64) -> Range<i64> {
-        if !(self.run.start..self.run.end).contains(&i) {
-            self.run = self.run_of(i);
-            self.ahead = None;
+    fn of(&mut self, i: u64) -> Range<i128> {
+        let k = self.breaks.partition_point(|b| b.index <= i);
+        let run = match k.checked_sub(1) {
+            None => self.grid.first_run(self.first, 0),
+            Some(p) => self.breaks[p],
+        };
+        let mut to = self.grid.place(run, i.saturating_add(1));
+        if let Some(next) = self.breaks.get(k).filter(|b| b.index == i + 1) {
+            to = to.min(self.grid.start(*next));
         }
-        let r = self.run;
-        // Breaks come in index order, a file's checked and a writer's as it makes them, which puts
-        // the run's start at or before `i`.
-        let steps = i.saturating_sub(r.start);
-        let from = match self.ahead {
-            Some((j, p)) if j == i => p,
-            _ => self.place(&r, steps),
-        };
-        let to = self.place(&r, steps + 1);
-        self.ahead = Some((i + 1, to));
-        let to = match r.cut {
-            Some(cut) if i + 1 == r.end => to.min(i128::from(cut)),
-            _ => to,
-        };
-        let length = i128::from(self.length);
-        if self.identity {
-            return from.min(length) as i64..to.min(length) as i64;
-        }
-        let axis = |x: i128| {
-            let x = x.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64;
-            self.map.axis_saturating(x).min(self.length)
-        };
-        axis(from)..axis(to)
+        let from = self.at(self.grid.place(run, i)).min(self.length);
+        from..self.at(to).min(self.length)
     }
 }
 
-/// Σ value × ticks so far: of the codes, exactly, for an `int` channel or an integer product, or
-/// of the values in f64.
+/// `per` as the i128 a tick's units multiply by: it is below 2^69.
+fn units(per: NonZeroU128) -> i128 {
+    i128::try_from(per.get()).unwrap_or(i128::MAX)
+}
+
+/// Σ value × time so far: of the codes, exactly, in code × `1 / per` ticks, for an `int` channel
+/// or an integer product, or of the values in f64, in value × ticks.
 enum Weighted {
     Codes(i128),
     Float(f64),
@@ -230,7 +229,9 @@ enum Weighted {
 /// What an interval's samples add up to so far.
 struct Tally {
     samples: u64,
-    measured: i64,
+    /// In `1 / per` ticks.
+    measured: i128,
+    per: NonZeroU128,
     min: f64,
     max: f64,
     sum: Weighted,
@@ -242,47 +243,46 @@ impl Tally {
         self.max = self.max.max(v);
     }
 
-    fn measure(&mut self, samples: u64, ticks: i64) -> Result<(), Error> {
+    fn measure(&mut self, samples: u64, units: i128) -> Result<(), Error> {
         self.samples += samples;
-        self.measured = self.measured.checked_add(ticks).ok_or(Error::Overflow)?;
+        self.measured = self.measured.checked_add(units).ok_or(Error::Overflow)?;
         Ok(())
     }
 
-    fn add_codes(&mut self, codes: i128, ticks: i64) -> Result<(), Error> {
+    fn add_codes(&mut self, codes: i128, units: i128) -> Result<(), Error> {
         let Weighted::Codes(sum) = &mut self.sum else {
             unreachable!("only an exact channel's codes are summed");
         };
         *sum = codes
-            .checked_mul(i128::from(ticks))
+            .checked_mul(units)
             .and_then(|x| sum.checked_add(x))
             .ok_or(Error::Overflow)?;
         Ok(())
     }
 
-    /// One sample over `ticks` of the interval; its code where the channel is exact.
-    fn sample(&mut self, v: f64, code: Option<i128>, ticks: i64) -> Result<(), Error> {
-        if ticks <= 0 || v.is_nan() {
+    /// One sample over `units` of the interval, in `1 / per` ticks; its code where the channel is
+    /// exact.
+    fn sample(&mut self, v: f64, code: Option<i128>, units: i128) -> Result<(), Error> {
+        if units <= 0 || v.is_nan() {
             return Ok(());
         }
-        self.measure(1, ticks)?;
+        self.measure(1, units)?;
         self.value(v);
         match (&mut self.sum, code) {
-            (Weighted::Codes(_), Some(code)) => self.add_codes(code, ticks),
+            (Weighted::Codes(_), Some(code)) => self.add_codes(code, units),
             (Weighted::Codes(_), None) => unreachable!("an exact channel's samples have codes"),
             (Weighted::Float(sum), _) => {
-                *sum += v * ticks as f64;
+                *sum += v * (units as f64 / self.per.get() as f64);
                 Ok(())
             }
         }
     }
 
-    /// `n` samples a bucket holds, a full period `p` each, with its extremes and its codes' sum.
-    fn bucket(&mut self, n: u64, p: i64, min: f64, max: f64, codes: i128) -> Result<(), Error> {
-        let ticks = i64::try_from(n)
-            .ok()
-            .and_then(|n| n.checked_mul(p))
-            .ok_or(Error::Overflow)?;
-        self.measure(n, ticks)?;
+    /// `n` samples a bucket holds, a full period of `p` units each, with its extremes and its
+    /// codes' sum.
+    fn bucket(&mut self, n: u64, p: i128, min: f64, max: f64, codes: i128) -> Result<(), Error> {
+        let units = i128::from(n).checked_mul(p).ok_or(Error::Overflow)?;
+        self.measure(n, units)?;
         self.value(min);
         self.value(max);
         self.add_codes(codes, p)
@@ -329,7 +329,7 @@ impl Recording {
         interval: &Range<i64>,
     ) -> Result<ChannelStatistics, Error> {
         let Place::Analog {
-            period,
+            grid,
             count,
             rule,
             map,
@@ -340,9 +340,12 @@ impl Recording {
         };
         let runs = place.runs().expect("analog");
         let exact = rule.exact();
+        let mut supports = Supports::new(&runs, self.length);
+        let per = supports.per;
         let mut t = Tally {
             samples: 0,
             measured: 0,
+            per,
             min: f64::INFINITY,
             max: f64::NEG_INFINITY,
             sum: match exact {
@@ -351,21 +354,25 @@ impl Recording {
             },
         };
         let (a, b) = (interval.start.max(0), interval.end.min(self.length));
+        // Used only where both lie in 0..=length, below length × per; saturating otherwise.
+        let (au, bu) = (
+            i128::from(a).saturating_mul(units(per)),
+            i128::from(b).saturating_mul(units(per)),
+        );
         if b > a && *count > 0 {
-            let mut supports = Supports::new(&runs, self.length);
             // The first sample whose time reaches past `a`, and the first at or past `b`.
             let j = index_in(c, place, a)?;
-            let lo = if j > 0 && supports.of(j - 1).end > a {
+            let lo = if j > 0 && supports.of(j - 1).end > au {
                 j - 1
             } else {
                 j
             };
             let hi = index_in(c, place, b)?;
-            // A whole number of source ticks a sample, each a whole number of axis ticks: every
-            // sample a run holds lasts as long on the axis.
+            // Places on whole source ticks, each a whole number of axis ticks: every sample a run
+            // holds lasts as long on the axis, and lies wholly in the bucket of its tick.
             let m = map.m();
-            let p = (period.den() == 1 && m.den() == 1)
-                .then(|| period.num().checked_mul(m.num()))
+            let p = (grid.d() == 1 && m.den() == 1)
+                .then(|| u64::try_from(grid.step()).ok()?.checked_mul(m.num()))
                 .flatten()
                 .and_then(|p| i64::try_from(p).ok());
             let whole = match (exact, p) {
@@ -377,7 +384,7 @@ impl Recording {
             let mut one_by_one = |from: u64, to: u64, t: &mut Tally| {
                 self.each_sample_in(r, c, place, from, to, |i, v, code| {
                     let s = supports.of(i);
-                    t.sample(v, code, s.end.min(b) - s.start.max(a))
+                    t.sample(v, code, s.end.min(bu) - s.start.max(au))
                 })
             };
             let mut from = lo;
@@ -390,7 +397,10 @@ impl Recording {
         let some = |x: f64| (t.samples > 0).then_some(x);
         Ok(ChannelStatistics {
             samples: t.samples,
-            measured: t.measured,
+            measured: Ticks {
+                units: t.measured,
+                per,
+            },
             min: some(t.min),
             max: some(t.max),
             sum: match (t.sum, exact) {
@@ -434,7 +444,9 @@ impl Recording {
         }
         // Each run's last sample whose time the next run or the length cuts short of a full
         // period, from the run holding `a` on. They come in order of their ticks.
-        let from = runs.breaks.partition_point(|x| runs.axis(x.tick) <= a);
+        let from = runs
+            .breaks
+            .partition_point(|x| runs.at(runs.grid.start(*x)) <= a);
         let mut short = Vec::new();
         for i in runs.breaks[from..]
             .iter()
@@ -489,6 +501,7 @@ impl Recording {
                         let (s, e) = (kk * size, (kk + 1) * size);
                         let n = index_in(c, place, e)? - index_in(c, place, s)?;
                         if n > 0 {
+                            let p = i128::from(p);
                             t.bucket(n, p, buckets.min[o], buckets.max[o], sums[o])?;
                         }
                     }
@@ -515,7 +528,7 @@ mod tests {
     use std::ops::Range;
 
     use escapement_tickwave_format::mapping::Mapping;
-    use escapement_tickwave_format::model::{Break, Ratio, sample_support};
+    use escapement_tickwave_format::model::{Break, Grid, Ratio};
 
     use super::Supports;
     use crate::runs::Runs;
@@ -536,27 +549,57 @@ mod tests {
         let breaks = [brk(5, 9)];
         let runs = Runs {
             first: 0,
-            period: Ratio::integer(2).unwrap(),
+            grid: Grid::new(Ratio::integer(2).unwrap(), None).unwrap(),
             count: 8,
             breaks: &breaks,
             map: Mapping::IDENTITY,
         };
         let mut s = Supports::new(&runs, 14);
-        let got: Vec<Range<i64>> = (0..8).map(|i| s.of(i)).collect();
+        let got: Vec<Range<i128>> = (0..8).map(|i| s.of(i)).collect();
         assert_eq!(got, [0..2, 2..4, 4..6, 6..8, 8..9, 9..11, 11..13, 13..14]);
     }
 
-    /// Against `sample_support` for every sample of each channel: in order from each sample, in
-    /// steps of three, and backwards.
+    /// A phase of a quarter tick and a period of 3/2: places at 1/4, 7/4, 13/4 and so on, in
+    /// quarters of a tick; on a source of `m` 2, eighths of an axis tick, from twice the place.
+    /// Worked by hand.
     #[test]
-    fn each_samples_time_is_sample_supports() {
+    fn a_samples_time_runs_from_its_exact_place_to_the_next() {
+        let grid = Grid::new(Ratio::new(3, 2).unwrap(), Some(Ratio::new(1, 4).unwrap())).unwrap();
+        assert_eq!(grid.d(), 4);
+        let runs = Runs {
+            first: 0,
+            grid,
+            count: 4,
+            breaks: &[],
+            map: Mapping::IDENTITY,
+        };
+        let mut s = Supports::new(&runs, 100);
+        assert_eq!(s.per.get(), 4);
+        let got: Vec<Range<i128>> = (0..4).map(|i| s.of(i)).collect();
+        assert_eq!(got, [1..7, 7..13, 13..19, 19..25]);
+        let m2 = Mapping::new(0, 0, Ratio::integer(2).unwrap());
+        let runs = Runs { map: m2, ..runs };
+        let mut s = Supports::new(&runs, 100);
+        assert_eq!(s.per.get(), 4);
+        let got: Vec<Range<i128>> = (0..2).map(|i| s.of(i)).collect();
+        assert_eq!(got, [2..14, 14..26]);
+        // A length of 3 axis ticks cuts the second at 12 quarters.
+        let mut s = Supports::new(&runs, 3);
+        assert_eq!(s.of(1), 12..12);
+    }
+
+    /// Against `Grid::sample_time` for every sample of each channel, held to the length: in order
+    /// from each sample, in steps of three, and backwards.
+    #[test]
+    fn each_samples_time_is_the_grids() {
         let cases = [
-            // A whole-tick period, the length inside the last sample's.
-            (0, Ratio::integer(960).unwrap(), 1000, vec![], 959_500),
+            // A whole-tick period, the length inside the last sample's time.
+            (0, Ratio::integer(960).unwrap(), None, 1000, vec![], 959_500),
             // tests/runs.rs's channel: two lost at a break.
             (
                 0,
                 Ratio::new(3, 2).unwrap(),
+                None,
                 10,
                 vec![Break {
                     index: 5,
@@ -566,35 +609,51 @@ mod tests {
                 }],
                 40,
             ),
-            // A run cut short by the next, a run of one sample cut short by the next, and a last
-            // sample of no time at the length.
+            // A phase of a third and a run at a phase of its own cut short by the next, a run of
+            // one sample cut short by the next, and a last sample of no time at the length.
             (
                 5,
                 Ratio::new(7, 3).unwrap(),
+                Some(Ratio::new(1, 3).unwrap()),
                 15,
-                vec![brk(4, 13), brk(9, 40), brk(10, 41)],
+                vec![
+                    Break {
+                        index: 4,
+                        tick: 13,
+                        lost: 0,
+                        phase: 2,
+                    },
+                    brk(9, 40),
+                    brk(10, 41),
+                ],
                 50,
             ),
             // A break on the grid's next place.
-            (0, Ratio::integer(2).unwrap(), 6, vec![brk(3, 6)], 12),
-            // Places past an i64, held to the length.
+            (0, Ratio::integer(2).unwrap(), None, 6, vec![brk(3, 6)], 12),
+            // Places past an i64, held to the length: places are i128, so they don't wrap.
             (
                 i64::MAX - 10,
                 Ratio::integer(4).unwrap(),
+                None,
                 5,
                 vec![],
                 i64::MAX,
             ),
         ];
-        for (first, period, count, breaks, length) in cases {
+        for (first, period, phase, count, breaks, length) in cases {
+            let grid = Grid::new(period, phase).unwrap();
             let runs = Runs {
                 first,
-                period,
+                grid,
                 count,
                 breaks: &breaks,
                 map: Mapping::IDENTITY,
             };
-            let want = |i| sample_support(first, period, &breaks, count, length, i).unwrap();
+            let cap = i128::from(length) * i128::from(grid.d());
+            let want = |i| {
+                let t = grid.sample_time(first, &breaks, count, i, None).unwrap();
+                t.start.min(cap)..t.end.min(cap)
+            };
             let at = format!("{first} every {period:?}, {breaks:?}");
             for from in 0..count {
                 let mut s = Supports::new(&runs, length);
@@ -606,6 +665,27 @@ mod tests {
             for i in (0..count).step_by(3).chain((0..count).rev()) {
                 assert_eq!(s.of(i), want(i), "{at}: sample {i}, stepping");
             }
+        }
+    }
+
+    /// A place whose axis time passes what an i128 holds saturates, and so is held to the length:
+    /// tick 2^62 on a grid of 2^15ths, 2^77 units, on a source of `m` (2^52 − 1)/1, past 2^129.
+    #[test]
+    fn a_place_past_what_an_i128_maps_is_held_to_the_length() {
+        let grid = Grid::new(Ratio::ONE, Some(Ratio::new(1, 1 << 15).unwrap())).unwrap();
+        assert_eq!(grid.d(), 1 << 15);
+        let map = Mapping::new(0, 0, Ratio::integer((1 << 52) - 1).unwrap());
+        let runs = Runs {
+            first: 1 << 62,
+            grid,
+            count: 3,
+            breaks: &[],
+            map,
+        };
+        let mut s = Supports::new(&runs, 1000);
+        let end = 1000 << 15;
+        for i in 0..3 {
+            assert_eq!(s.of(i), end..end, "sample {i}");
         }
     }
 }

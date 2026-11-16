@@ -34,7 +34,6 @@ use escapement_tickwave_format::decode::{Block, BlockChannel, OverviewBlock};
 #[cfg(feature = "live")]
 use escapement_tickwave_format::header::DeclaredKind;
 #[cfg(feature = "live")]
-use escapement_tickwave_format::model::run_sample_tick;
 #[cfg(feature = "live")]
 use escapement_tickwave_format::snapshot::{LevelSnapshot, Snapshot};
 
@@ -59,6 +58,9 @@ pub enum Error {
     /// `update` on a finished recording, which takes no snapshot.
     #[error("the recording is finished: it takes no snapshot")]
     NotLive,
+    /// A channel this version can't read (FORMAT.md, "Unavailable channels"), and why.
+    #[error("channel {channel} is unavailable to this version: {why}")]
+    Unavailable { channel: usize, why: String },
 }
 
 /// What a channel holds.
@@ -70,6 +72,9 @@ pub enum ChannelKind {
     Derived {
         operands: (usize, usize),
     },
+    /// A channel this version can't read (FORMAT.md, "Unavailable channels"): kept in its place
+    /// by its name, with nothing of its data; `ChannelInfo::unavailable` says why.
+    Unavailable,
 }
 
 /// The finest a channel's readings show.
@@ -92,6 +97,8 @@ pub struct ChannelInfo {
     /// None for a digital channel and a float one.
     pub resolution: Option<Resolution>,
     pub significant: Option<u8>,
+    /// Why this version can't read the channel, where it can't.
+    pub unavailable: Option<String>,
 }
 
 /// How a channel's stored samples become values.
@@ -136,6 +143,8 @@ impl Rule {
 /// ticks are axis ticks; an analog channel's runs are its source's, which `map` places.
 #[derive(Clone, Debug)]
 pub(crate) enum Place {
+    /// A channel this version can't read, and why.
+    Unavailable(String),
     Digital {
         initial: bool,
         /// Where the level is first known: the channel's start, or past a gap from there.
@@ -152,8 +161,10 @@ pub(crate) enum Place {
         map: Mapping,
     },
     Analog {
+        /// The first run's whole source tick; its first sample lies the grid's phase past it.
         first: i64,
-        period: Ratio,
+        /// The period and the declared phase, places in `1/d` source ticks.
+        grid: Grid,
         count: u64,
         breaks: Vec<Break>,
         /// The samples the breaks say were lost, summed.
@@ -173,24 +184,30 @@ impl Place {
         match self {
             Self::Analog {
                 first,
-                period,
+                grid,
                 count,
                 breaks,
                 map,
                 ..
             } => Some(Runs {
                 first: *first,
-                period: *period,
+                grid: *grid,
                 count: *count,
                 breaks,
                 map: *map,
             }),
-            Self::Digital { .. } => None,
+            Self::Digital { .. } | Self::Unavailable(_) => None,
         }
     }
 
     pub fn known(&self) -> ChannelPlace<'_> {
         match self {
+            // No data: its known span is empty.
+            Self::Unavailable(_) => ChannelPlace::Digital {
+                start: 0,
+                end: 0,
+                gaps: &[],
+            },
             Self::Digital {
                 start, end, gaps, ..
             } => ChannelPlace::Digital {
@@ -212,7 +229,7 @@ impl Place {
     pub fn end_losses(&self) -> [Option<Range<i64>>; 2] {
         let Self::Analog {
             first,
-            period,
+            grid,
             count,
             breaks,
             lost_before,
@@ -223,13 +240,12 @@ impl Place {
         else {
             return [None, None];
         };
-        // The view places samples on a whole grid until it takes phases (5c).
-        let grid = Grid::new(*period, None).unwrap_or(Grid::WHOLE);
+        let grid = *grid;
         let at = |u: i128| map.axis_place(u, grid.d()).unwrap_or(i64::MAX);
         let before = (*lost_before > 0)
             .then(|| lost_before_start(grid, *first, *lost_before))
             .flatten()
-            .map(|from| at(from)..map.axis_saturating(*first));
+            .map(|from| at(from)..at(grid.start(grid.first_run(*first, 0))));
         let after = (*lost_after > 0 && *count > 0)
             .then(|| {
                 let run = breaks.last().copied().unwrap_or(grid.first_run(*first, 0));
@@ -411,12 +427,14 @@ impl Changed {
 }
 
 /// How much of the writer's append-only lists the tables hold: each channel's gaps or runs, and
-/// the annotation records.
+/// the annotation parts in the file.
 #[cfg(feature = "live")]
 struct Seen {
     gaps: Vec<usize>,
     runs: Vec<usize>,
-    annotations: usize,
+    parts: u64,
+    /// The markers of the parts not yet in the file, which the next snapshot gives again.
+    unwritten: std::collections::HashSet<MarkerCursor>,
 }
 
 /// A recording a view reads.
@@ -439,12 +457,16 @@ pub struct Recording {
     pub(crate) levels: Vec<Vec<LevelAt>>,
     /// A finished file's are read from its bundle when first asked for; what went wrong, where
     /// that failed.
-    markers: OnceLock<Result<Markers, String>>,
+    pub(crate) markers: OnceLock<Result<Markers, String>>,
+    /// A finished file's bundle as markers read a range of it need it, read when first asked
+    /// for.
+    pub(crate) bundle: OnceLock<Result<crate::markers::FileAnnotations, String>>,
     /// Whether a finished file's footer places an annotation bundle; None once its markers come
     /// from elsewhere, a sidecar or a writer.
-    bundled: Option<bool>,
+    pub(crate) bundled: Option<bool>,
     pub(crate) sources: Vec<SourceHeader>,
-    pub(crate) products: Vec<(usize, usize, Product)>,
+    /// Each derived channel's operands and rule; None for one this version can't compute.
+    pub(crate) products: Vec<Option<(usize, usize, Product)>>,
     /// The data's extent, markers aside: worked out when first asked for, since a finished
     /// file's places can need their lists read.
     extent: OnceLock<Option<Range<i64>>>,
@@ -464,7 +486,7 @@ pub(crate) struct Markers {
 }
 
 impl Markers {
-    fn of(list: Vec<Marker>) -> Self {
+    pub(crate) fn of(list: Vec<Marker>) -> Self {
         Self {
             span: span_of(&list),
             list,
@@ -490,6 +512,7 @@ fn analog_info(
         name: name.into(),
         kind: ChannelKind::Analog,
         unit: unit.into(),
+        unavailable: None,
         resolution: match coding {
             AnalogCoding::Int(int) => Some(Resolution::Code {
                 scale: int.scale(),
@@ -537,7 +560,7 @@ fn digital_place(initial: bool, start: i64, end: i64, gaps: &[Gap], map: Mapping
 #[allow(clippy::too_many_arguments)]
 fn analog_place(
     first: i64,
-    period: Ratio,
+    grid: Grid,
     count: u64,
     breaks: Vec<Break>,
     lost_before: u64,
@@ -548,7 +571,7 @@ fn analog_place(
 ) -> Place {
     let runs = Runs {
         first,
-        period,
+        grid,
         count,
         breaks: &breaks,
         map,
@@ -560,7 +583,7 @@ fn analog_place(
     let lost = breaks.iter().map(|b| b.lost).sum();
     Place::Analog {
         first,
-        period,
+        grid,
         count,
         breaks,
         lost,
@@ -576,7 +599,7 @@ fn analog_place(
 fn derived_place(operand: &Place, product: Product) -> Place {
     let Place::Analog {
         first,
-        period,
+        grid,
         count,
         breaks,
         lost,
@@ -591,7 +614,7 @@ fn derived_place(operand: &Place, product: Product) -> Place {
     };
     Place::Analog {
         first: *first,
-        period: *period,
+        grid: *grid,
         count: *count,
         breaks: breaks.clone(),
         lost: *lost,
@@ -612,6 +635,7 @@ fn derived_info(
         name: d.name.clone(),
         kind: ChannelKind::Derived { operands },
         unit: d.unit.clone(),
+        unavailable: None,
         resolution: match product {
             Product::Int { num, den, .. } => {
                 Exact::new(num as i64, den as i64).map(|scale| Resolution::Code {
@@ -638,6 +662,7 @@ fn derived_info(
 }
 
 /// Adds the derived channels, placed as their first operand's samples are.
+#[cfg(feature = "live")]
 fn add_derived(
     built: &mut Built,
     derived: &[escapement_tickwave_format::header::Derived],
@@ -647,6 +672,12 @@ fn add_derived(
         built.places.push(derived_place(&built.places[a], product));
         built.channels.push(derived_info(d, (a, b), product));
     }
+}
+
+/// The grid of an analog channel of `period` and `phase`, which a checked header or declaration
+/// gives every analog channel.
+fn grid_of(period: Ratio, phase: Option<Ratio>) -> Grid {
+    Grid::new(period, phase).unwrap_or(Grid::WHOLE)
 }
 
 /// Stored channel `i` of `footer`, with its gaps or breaks as the footer holds them: none for a
@@ -669,6 +700,7 @@ fn stored_place(footer: &Footer, i: usize) -> Place {
         HeaderKind::Analog {
             first,
             period,
+            phase,
             count,
             coding,
             lost_before,
@@ -676,7 +708,7 @@ fn stored_place(footer: &Footer, i: usize) -> Place {
             ..
         } => analog_place(
             *first,
-            *period,
+            grid_of(*period, *phase),
             *count,
             footer.breaks(i).unwrap_or_default().to_vec(),
             *lost_before,
@@ -714,6 +746,7 @@ fn sliced_place(footer: &Footer, i: usize, slice: Slice) -> Place {
             HeaderKind::Analog {
                 first,
                 period,
+                phase,
                 count,
                 coding,
                 lost_before,
@@ -723,7 +756,7 @@ fn sliced_place(footer: &Footer, i: usize, slice: Slice) -> Place {
             List::Breaks(breaks),
         ) => analog_place(
             *first,
-            *period,
+            grid_of(*period, *phase),
             *count,
             breaks,
             *lost_before,
@@ -735,6 +768,7 @@ fn sliced_place(footer: &Footer, i: usize, slice: Slice) -> Place {
         _ => stored_place(footer, i),
     };
     match &mut place {
+        Place::Unavailable(_) => {}
         Place::Digital { gap_count, .. } => *gap_count = c.data.list_len() as usize,
         Place::Analog {
             end, lost_after, ..
@@ -762,14 +796,46 @@ fn header_place(place: &Place, length: i64) -> Place {
     place
 }
 
-/// The channels of `footer`, those whose lists are in pages not yet read with none.
-fn header_channels(footer: &Footer, products: &[(usize, usize, Product)]) -> Built {
+/// Channel `o` of `footer`, one this version can't read, kept in its place by its name.
+fn unavailable_info(footer: &Footer, o: usize) -> (ChannelInfo, Place) {
+    let h = &footer.header;
+    let (name, unit) = match h.channels.get(o) {
+        Some(c) => (c.name.clone(), String::new()),
+        None => {
+            let d = &h.derived[o - h.channels.len()];
+            (d.name.clone(), d.unit.clone())
+        }
+    };
+    let why = match footer.check_available(o) {
+        Err(e) => e.to_string(),
+        Ok(()) => "an operand is unavailable".into(),
+    };
+    let info = ChannelInfo {
+        name,
+        kind: ChannelKind::Unavailable,
+        unit,
+        resolution: None,
+        significant: None,
+        unavailable: Some(why.clone()),
+    };
+    (info, Place::Unavailable(why))
+}
+
+/// The channels of `footer`, those whose lists are in pages not yet read with none, and those
+/// this version can't read kept in their places.
+fn header_channels(footer: &Footer, products: &[Option<(usize, usize, Product)>]) -> Built {
     let h = &footer.header;
     let mut built = Built {
         channels: Vec::new(),
         places: Vec::new(),
     };
     for (i, c) in h.channels.iter().enumerate() {
+        if !footer.available(i) {
+            let (info, place) = unavailable_info(footer, i);
+            built.channels.push(info);
+            built.places.push(place);
+            continue;
+        }
         built.channels.push(match &c.data {
             HeaderKind::Digital { .. } => ChannelInfo {
                 name: c.name.clone(),
@@ -777,6 +843,7 @@ fn header_channels(footer: &Footer, products: &[(usize, usize, Product)]) -> Bui
                 unit: String::new(),
                 resolution: None,
                 significant: None,
+                unavailable: None,
             },
             HeaderKind::Analog {
                 unit,
@@ -787,17 +854,33 @@ fn header_channels(footer: &Footer, products: &[(usize, usize, Product)]) -> Bui
         });
         built.places.push(stored_place(footer, i));
     }
-    let derived: Vec<_> = h.derived.iter().map(|d| d.declared()).collect();
-    add_derived(&mut built, &derived, products);
+    let stored = h.channels.len();
+    for (k, (d, product)) in h.derived.iter().zip(products).enumerate() {
+        match product {
+            Some((a, b, product)) if footer.available(stored + k) => {
+                built
+                    .places
+                    .push(derived_place(&built.places[*a], *product));
+                built
+                    .channels
+                    .push(derived_info(&d.declared(), (*a, *b), *product));
+            }
+            _ => {
+                let (info, place) = unavailable_info(footer, stored + k);
+                built.channels.push(info);
+                built.places.push(place);
+            }
+        }
+    }
     built
 }
 
 /// The ticks `a` marks: its span, or one tick for a point.
-fn marked(a: &Annotation) -> Range<i64> {
+pub(crate) fn marked(a: &Annotation) -> Range<i64> {
     a.start..a.end.unwrap_or(a.start).max(a.start + 1)
 }
 
-fn widen(extent: &mut Option<Range<i64>>, r: Range<i64>) {
+pub(crate) fn widen(extent: &mut Option<Range<i64>>, r: Range<i64>) {
     if r.end > r.start {
         *extent = Some(match extent.take() {
             None => r,
@@ -834,7 +917,7 @@ fn markers_of(annotations: Vec<Annotation>) -> Vec<Marker> {
         .map(|(arrival, annotation)| Marker {
             cursor: MarkerCursor {
                 tick: annotation.start,
-                arrival,
+                arrival: arrival as u64,
             },
             annotation,
         })
@@ -844,7 +927,7 @@ fn markers_of(annotations: Vec<Annotation>) -> Vec<Marker> {
 }
 
 /// The hand-written file of a bundle and the files it includes.
-fn bundled(files: &BTreeMap<String, String>) -> Option<(&str, Vec<Included<'_>>)> {
+pub(crate) fn bundled(files: &BTreeMap<String, String>) -> Option<(&str, Vec<Included<'_>>)> {
     let hand = files.iter().find(|(name, _)| name.ends_with(".toml"))?;
     let included = files
         .iter()
@@ -875,23 +958,21 @@ impl Recording {
                 Err(e) => return Err(e.into()),
             }
         };
-        // Unavailable channels are kept in place and shown from 5c; until then the view refuses
-        // a recording that has one.
-        for o in 0..footer.overview_channels() {
-            footer.check_available(o)?;
-        }
-        let products: Vec<(usize, usize, Product)> = footer
-            .products
-            .iter()
-            .map(|p| p.expect("available"))
-            .collect();
+        let products = footer.products.clone();
         let Built { channels, places } = header_channels(&footer, &products);
         let h = &footer.header;
         let stored = h.channels.len();
         // A channel's list in pages, or its first operand's, is read when it is first asked for.
+        // A channel this version can't read, or a derived one it can't compute, has none to read.
         let listed = (0..places.len())
             .map(|o| {
-                let c = o.checked_sub(stored).map_or(o, |k| products[k].0);
+                if matches!(places[o], Place::Unavailable(_)) {
+                    return None;
+                }
+                let c = match o.checked_sub(stored) {
+                    Some(k) => products.get(k).copied().flatten()?.0,
+                    None => o,
+                };
                 (!footer.list_known(c)).then(OnceLock::new)
             })
             .collect();
@@ -899,6 +980,10 @@ impl Recording {
             .channels
             .iter()
             .map(|ch| {
+                // Nothing of an unavailable channel's overview is read.
+                if !ch.available {
+                    return Vec::new();
+                }
                 let in_blocks = ch.levels.iter().enumerate().map(|(li, (l, _))| LevelAt {
                     shift: l.shift,
                     parts: vec![Part::Blocks(li)],
@@ -926,6 +1011,7 @@ impl Recording {
             blocks: vec![Vec::new(); stored],
             levels,
             markers: OnceLock::new(),
+            bundle: OnceLock::new(),
             bundled: Some(footer.bundle.is_some()),
             extent: OnceLock::new(),
             sketch_extent: OnceLock::new(),
@@ -952,9 +1038,13 @@ impl Recording {
                 ));
             }
         };
-        let list =
+        let mut list =
             markers_of(resolved.map_err(|problems| Error::Annotations(problems.join("; ")))?);
-        self.markers = OnceLock::from(Ok(Markers::of(list)));
+        let mut left_out = Vec::new();
+        self.keep_available(&mut list, &mut left_out);
+        let mut markers = Markers::of(list);
+        markers.left_out = left_out;
+        self.markers = OnceLock::from(Ok(markers));
         self.bundled = None;
         Ok(self)
     }
@@ -983,6 +1073,7 @@ impl Recording {
                         unit: String::new(),
                         resolution: None,
                         significant: None,
+                        unavailable: None,
                     });
                     let start = d.start(i).unwrap_or(0);
                     built
@@ -992,16 +1083,16 @@ impl Recording {
                 DeclaredKind::Analog {
                     unit,
                     period,
+                    phase,
                     coding,
                     significant,
-                    ..
                 } => {
                     built
                         .channels
                         .push(analog_info(&ch.name, unit, *coding, *significant));
                     built.places.push(analog_place(
                         0,
-                        *period,
+                        grid_of(*period, *phase),
                         0,
                         Vec::new(),
                         0,
@@ -1020,7 +1111,7 @@ impl Recording {
             timebase: d.timebase,
             length: 0,
             sources: d.sources.clone(),
-            products,
+            products: products.into_iter().map(Some).collect(),
             bytes,
             cache,
             channels: built.channels,
@@ -1028,6 +1119,7 @@ impl Recording {
             blocks: vec![Vec::new(); n],
             levels: vec![Vec::new(); overviews],
             markers: OnceLock::from(Ok(Markers::default())),
+            bundle: OnceLock::new(),
             bundled: None,
             extent: OnceLock::new(),
             sketch_extent: OnceLock::new(),
@@ -1040,7 +1132,8 @@ impl Recording {
                 seen: Seen {
                     gaps: vec![0; n],
                     runs: vec![0; n],
-                    annotations: 0,
+                    parts: 0,
+                    unwritten: Default::default(),
                 },
                 changes: VecDeque::new(),
                 promises: vec![0; n],
@@ -1113,8 +1206,12 @@ impl Recording {
         let mut fresh_refs = Vec::with_capacity(stored);
         let mut fresh = Vec::with_capacity(stored);
         let mut opens = Vec::with_capacity(stored);
+        let mut new_gaps = Vec::with_capacity(stored);
+        let mut new_runs = Vec::with_capacity(stored);
         for (c, known) in refs.iter().enumerate() {
             fresh_refs.push(snapshot.block_refs_from(c, known, &mut fetch)?);
+            new_gaps.push(snapshot.gaps_from(c, seen.gaps[c] as u64, &mut fetch)?);
+            new_runs.push(snapshot.runs_from(c, seen.runs[c] as u64, &mut fetch)?);
             let now = snapshot.channel(c).map_or(&[][..], |ch| &ch.unwritten);
             let before = previous
                 .and_then(|p| p.channel(c))
@@ -1178,6 +1275,13 @@ impl Recording {
             fresh_rows.push(level_rows);
             fresh_overview.push(level_blocks);
         }
+        // The annotation parts written since, and those not yet written.
+        let mut written_parts = Vec::new();
+        for row in snapshot.part_rows_from(seen.parts, &mut fetch)? {
+            let frame = fetch(row.offset, row.length)?;
+            written_parts.push(snapshot.decode_part(&row, &frame)?);
+        }
+        let unwritten_parts = snapshot.unwritten_parts()?;
 
         // The gaps and runs since the last snapshot, each channel's count, and the latest tick.
         // A channel's items since then are at or after its promise then, and the length ends
@@ -1208,7 +1312,7 @@ impl Recording {
                     BlockChannel::Digital { edges, .. },
                 ) => {
                     last = last.max(edges.last().copied().unwrap_or(i64::MIN));
-                    for g in snapshot.gaps_from(c, seen.gaps[c]) {
+                    for g in &new_gaps[c] {
                         // A gap from the channel's start says where its level is first known;
                         // the others are gaps in it.
                         let on_axis = gap_on_axis(map, g);
@@ -1226,7 +1330,7 @@ impl Recording {
                 (
                     Place::Analog {
                         first,
-                        period,
+                        grid,
                         count,
                         breaks,
                         lost,
@@ -1239,7 +1343,7 @@ impl Recording {
                         values,
                     },
                 ) => {
-                    for r in snapshot.runs_from(c, seen.runs[c]) {
+                    for r in &new_runs[c] {
                         if seen.runs[c] == 0 {
                             *first = r.tick;
                             *lost_before = r.lost;
@@ -1251,8 +1355,8 @@ impl Recording {
                     }
                     *count = first_index + values.len() as u64;
                     if !values.is_empty() {
-                        let k = run_sample_tick(*first, *period, breaks, *count - 1);
-                        last = last.max(map.axis_saturating(k));
+                        let place = grid.sample_place(*first, breaks, *count - 1);
+                        last = last.max(map.axis_place(place, grid.d()).unwrap_or(i64::MAX));
                     }
                 }
                 _ => unreachable!("a block's channel follows the declaration"),
@@ -1262,10 +1366,12 @@ impl Recording {
         *length = new_length.max(0);
         for place in &mut places[..stored] {
             match place {
+                // A writer writes no channel this version can't read.
+                Place::Unavailable(_) => {}
                 Place::Digital { end, .. } => *end = *length,
                 Place::Analog {
                     first,
-                    period,
+                    grid,
                     count,
                     breaks,
                     end,
@@ -1274,7 +1380,7 @@ impl Recording {
                 } => {
                     let runs = Runs {
                         first: *first,
-                        period: *period,
+                        grid: *grid,
                         count: *count,
                         breaks,
                         map: *map,
@@ -1287,13 +1393,13 @@ impl Recording {
             }
         }
         // A derived channel's samples sit where its operands' do, as many as both hold.
-        for (k, &(a, b, _)) in products.iter().enumerate() {
+        for (k, &(a, b, _)) in products.iter().flatten().enumerate() {
             changed[stored + k] = changed[a].min(changed[b]);
             let (operands, derived) = places.split_at_mut(stored);
             let (
                 Place::Analog {
                     first,
-                    period,
+                    grid,
                     count,
                     breaks,
                     lost,
@@ -1318,7 +1424,7 @@ impl Recording {
             let n = (*count).min(*other);
             let runs = Runs {
                 first: *first,
-                period: *period,
+                grid: *grid,
                 count: n,
                 breaks,
                 map: *map,
@@ -1424,8 +1530,10 @@ impl Recording {
             levels: moved,
         });
 
-        // The annotation records since the last snapshot, each a line of its generator's file.
-        // A recorder's come in order of their ticks, so each goes in at the end, as a rule.
+        // The markers of the parts written since the last snapshot, and of those not yet written,
+        // which replace the last snapshot's. Each line's arrival is the one it has in the finished
+        // file, but for a part not yet written, whose row comes after the written ones'. A
+        // recorder's come in order of their ticks, so each goes in at the end, as a rule.
         let Some(Ok(Markers {
             list: markers,
             span: marker_span,
@@ -1434,22 +1542,39 @@ impl Recording {
         else {
             unreachable!("a live recording's markers are its writer's")
         };
-        for r in snapshot.annotations_from(seen.annotations) {
-            // A writer's line is a JSON object.
-            let fields = r.fields().unwrap_or_default();
-            let annotation = crate::markers::generated(&r.source, &fields, seen.annotations);
-            let marker = Marker {
-                cursor: MarkerCursor {
-                    tick: annotation.start,
-                    arrival: seen.annotations,
-                },
-                annotation,
-            };
-            seen.annotations += 1;
-            widen(marker_span, marked(&marker.annotation));
-            let at = markers.partition_point(|m| m.cursor <= marker.cursor);
-            markers.insert(at, marker);
+        if !seen.unwritten.is_empty() {
+            markers.retain(|m| !seen.unwritten.contains(&m.cursor));
+            seen.unwritten.clear();
         }
+        let ranks: BTreeMap<&str, usize> = snapshot
+            .generators()
+            .enumerate()
+            .map(|(i, s)| (s, i + 1))
+            .collect();
+        let written = written_parts.iter().map(|p| (p, false));
+        let first = seen.parts;
+        for (k, (part, unwritten)) in written
+            .chain(unwritten_parts.iter().map(|p| (p, true)))
+            .enumerate()
+        {
+            let rank = ranks.get(part.source.as_str()).copied().unwrap_or(0);
+            for (n, line) in part.lines().enumerate() {
+                // A writer's line is a JSON object.
+                let fields = serde_json::from_str(line).unwrap_or_default();
+                let annotation = crate::markers::generated(&part.source, &fields, n);
+                let cursor = MarkerCursor {
+                    tick: annotation.start,
+                    arrival: crate::markers::arrival(rank, first + k as u64, n),
+                };
+                if unwritten {
+                    seen.unwritten.insert(cursor);
+                }
+                widen(marker_span, marked(&annotation));
+                let at = markers.partition_point(|m| m.cursor <= cursor);
+                markers.insert(at, Marker { cursor, annotation });
+            }
+        }
+        seen.parts = snapshot.part_count();
         self.extent = OnceLock::new();
         self.sketch_extent = OnceLock::new();
         Ok(())
@@ -1487,6 +1612,10 @@ impl Recording {
     pub fn mapping(&self, channel: usize) -> Result<Mapping, Error> {
         match self.place(channel)? {
             Place::Digital { map, .. } | Place::Analog { map, .. } => Ok(*map),
+            Place::Unavailable(why) => Err(Error::Unavailable {
+                channel,
+                why: why.clone(),
+            }),
         }
     }
 
@@ -1528,21 +1657,23 @@ impl Recording {
         }
     }
 
-    /// The markers, a finished file's read from its bundle if they aren't yet; 0 where they
-    /// don't read (a query asking for markers says why).
+    /// How many markers there are, a finished file's every one read if they aren't yet; 0 where
+    /// they don't read (a query asking for markers says why).
     pub fn marker_count(&self) -> usize {
         self.read_markers().map_or(0, |m| m.list.len())
     }
 
     /// The annotations reading a finished file's markers left out, each with why: one that breaks
-    /// a rule of ANNOTATIONS.md, one past the length, or a second of an id its generator gave
-    /// already (FORMAT.md, "Annotations"). The rest are its markers. Empty where they don't read.
+    /// a rule of ANNOTATIONS.md, one past the length, a second of an id its generator gave
+    /// already (FORMAT.md, "Annotations"), or one naming a channel this version can't read
+    /// ("Unavailable channels"). The rest are its markers. Reads every marker; empty where they
+    /// don't read.
     pub fn markers_left_out(&self) -> &[String] {
         self.read_markers().map_or(&[], |m| &m.left_out)
     }
 
-    /// Reads a finished file's markers from its bundle if they aren't read yet:
-    /// `Error::Annotations` on every call while the bundle doesn't resolve, where
+    /// Reads every one of a finished file's markers, from its bundle and every annotation part,
+    /// if they aren't read yet: `Error::Annotations` on every call while they don't read, where
     /// `marker_count`, `markers` and `extent` give none. Threads that ask at once read the bundle
     /// once.
     pub fn load_markers(&self) -> Result<(), Error> {
@@ -1560,7 +1691,7 @@ impl Recording {
         }
     }
 
-    /// The markers, a finished file's read from its bundle the first time.
+    /// Every marker, a finished file's read from its bundle and parts the first time.
     pub(crate) fn read_markers(&self) -> Result<&Markers, Error> {
         self.markers
             .get_or_init(|| self.bundled_markers().map_err(|e| e.to_string()))
@@ -1569,7 +1700,7 @@ impl Recording {
     }
 
     /// The store of a finished file; None for a live recording.
-    fn finished(&self) -> Option<&Finished> {
+    pub(crate) fn finished(&self) -> Option<&Finished> {
         match &self.store {
             Store::Finished(f) => Some(f),
             #[cfg(feature = "live")]
@@ -1577,42 +1708,25 @@ impl Recording {
         }
     }
 
+    /// A finished file's markers whole: every part's lines and the hand-written file's
+    /// annotations, its refs followed (FORMAT.md, "Annotations").
     fn bundled_markers(&self) -> Result<Markers, Error> {
-        let Some(f) = self.finished() else {
+        if self.finished().is_none() {
             return Ok(Markers::default());
-        };
+        }
         let _span = tracing::debug_span!("read markers").entered();
-        let footer = f.footer();
-        let fetch = |offset: u64, len: u32| -> Result<Vec<u8>, Error> {
-            Ok(read(&*self.bytes, offset, len as usize)?)
-        };
-        let Some(sidecar) = footer.read_sidecar(fetch)? else {
-            return Ok(Markers::default());
-        };
-        let Some((hand, included)) = bundled(&sidecar.files) else {
-            return Err(Error::Annotations(
-                "the bundle holds no hand-written file".into(),
-            ));
-        };
-        // A line that breaks a rule is left out and named, not the whole sidecar.
-        let resolved = annotations::resolve_lenient(hand, &included, &footer.header, None);
-        let mut markers = Markers::of(markers_of(resolved.annotations));
-        markers.left_out = sidecar.left_out;
-        markers.left_out.extend(resolved.problems);
-        Ok(markers)
+        self.every_marker()
     }
 
     /// From the first sample to the end of the last sample's time, over every analog channel,
-    /// widened by the samples lost before the first and after the last, and by the markers, a
-    /// finished file's read from its bundle if they aren't yet. A recording with no analog sample
-    /// takes its digital channels' known span instead. None before any data and any marker.
+    /// widened by the samples lost before the first and after the last, and by the markers. A
+    /// finished file's markers' span comes from its parts table and its bundle, no part read,
+    /// until every marker is read. A recording with no analog sample takes its digital channels'
+    /// known span instead. None before any data and any marker.
     pub fn extent(&self) -> Option<Range<i64>> {
         let mut extent = self.data_extent();
-        if let Ok(Markers {
-            span: Some(span), ..
-        }) = self.read_markers()
-        {
-            widen(&mut extent, span.clone());
+        if let Some(span) = self.markers_span() {
+            widen(&mut extent, span);
         }
         extent
     }
@@ -1691,6 +1805,19 @@ impl Recording {
         Ok(self.place(channel)?.known())
     }
 
+    /// Derived channel `k`'s operands and rule; `Error::Unavailable` for one this version can't
+    /// compute.
+    pub(crate) fn product(&self, k: usize) -> Result<(usize, usize, Product), Error> {
+        let channel = self.places.len() - self.products.len() + k;
+        self.products[k].ok_or_else(|| Error::Unavailable {
+            channel,
+            why: self.channels[channel]
+                .unavailable
+                .clone()
+                .unwrap_or_default(),
+        })
+    }
+
     /// Channel `channel`'s place. A finished file's channel whose list, or first operand's, is
     /// in pages reads it the first time.
     pub(crate) fn place(&self, channel: usize) -> Result<&Place, Error> {
@@ -1707,7 +1834,7 @@ impl Recording {
         let stored = self.places.len() - self.products.len();
         let listed = match channel.checked_sub(stored) {
             Some(k) => {
-                let (a, _, product) = self.products[k];
+                let (a, _, product) = self.product(k)?;
                 derived_place(self.place(a)?, product)
             }
             None => {
@@ -1755,7 +1882,7 @@ impl Recording {
         };
         let stored = self.places.len() - self.products.len();
         if let Some(k) = channel.checked_sub(stored) {
-            let (a, _, product) = self.products[k];
+            let (a, _, product) = self.product(k)?;
             let operand = self.place_over(r, a, span)?;
             return Ok(Cow::Owned(derived_place(&operand, product)));
         }
@@ -2034,7 +2161,14 @@ mod tests {
             );
             assert_eq!(
                 live.seen.gaps[0],
-                live.snapshot.gaps_from(0, 0).count(),
+                live.snapshot
+                    .gaps_from(0, 0, |at, len| {
+                        Ok::<_, escapement_tickwave_format::decode::DecodeError>(
+                            file[at as usize..][..len as usize].to_vec(),
+                        )
+                    })
+                    .unwrap()
+                    .len(),
                 "after edge {k}"
             );
             // The written blocks, those not yet written, then the open one where it holds

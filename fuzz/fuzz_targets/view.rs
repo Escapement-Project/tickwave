@@ -1,5 +1,6 @@
 //! The view's `Recording::open` on any file, and on a file that opens: queries, an extend, the
-//! statistics, the markers, and the readers' helpers, at spans and columns the input picks.
+//! statistics, the markers by range and whole, edges read and counted, and the readers' helpers,
+//! at spans and columns the input picks.
 #![no_main]
 
 use std::sync::Arc;
@@ -91,13 +92,17 @@ fuzz_target!(|data: &[u8]| {
         let _ = rec.extend(&answer, &q, &later, &cancel);
     }
     let _ = rec.statistics(i64::MIN..i64::MAX, &cancel);
+    let _ = rec.markers(from..to, None, usize::from(a.limit));
+    let _ = rec.extent();
     let _ = rec.markers(i64::MIN..i64::MAX, None, usize::MAX);
+    let _ = rec.markers_left_out();
     let step = rec.mapping(0).map(|m| m.m()).unwrap_or(rec.timebase());
     let _ = readouts::format_interval(to.saturating_sub(from), rec.timebase(), step);
     let _ = readouts::format_brief(to.saturating_sub(from), rec.timebase(), step);
     let _ = readouts::format_rate(3, to.saturating_sub(from), rec.timebase(), 1, step);
     for c in 0..=n {
         let _ = rec.edges(c, from, to, &cancel);
+        let _ = rec.edge_count(c, from, to, &cancel);
         let _ = rec.each_sample(
             c,
             a.index,

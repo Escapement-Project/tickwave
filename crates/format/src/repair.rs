@@ -150,8 +150,11 @@ impl Hold {
             held: Vec::new(),
             bytes: 0,
             known: false,
-            pairs: overview::products(&d.channels, &d.derived)
+            // A derived channel this version can't compute pairs nothing: repair and the
+            // re-cutter refuse its file once they come to write it.
+            pairs: overview::rules(&d.channels, &d.derived)
                 .into_iter()
+                .flatten()
                 .map(|(a, b, _)| (a, b))
                 .collect(),
             counts: vec![0; d.channels.len()],
