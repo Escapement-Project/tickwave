@@ -433,8 +433,18 @@ struct Seen {
     gaps: Vec<usize>,
     runs: Vec<usize>,
     parts: u64,
-    /// The markers of the parts not yet in the file, which the next snapshot gives again.
-    unwritten: std::collections::HashSet<MarkerCursor>,
+    /// The parts not yet in the file whose markers the list holds, in the snapshot's order.
+    unwritten: Vec<Pending>,
+}
+
+/// A part not yet in the file, as far as the markers read it: its generator, its row, the bytes
+/// of its lines read, and each line's cursor.
+#[cfg(feature = "live")]
+struct Pending {
+    source: String,
+    row: u64,
+    read: usize,
+    cursors: Vec<MarkerCursor>,
 }
 
 /// A recording a view reads.
@@ -1530,10 +1540,10 @@ impl Recording {
             levels: moved,
         });
 
-        // The markers of the parts written since the last snapshot, and of those not yet written,
-        // which replace the last snapshot's. Each line's arrival is the one it has in the finished
-        // file, but for a part not yet written, whose row comes after the written ones'. A
-        // recorder's come in order of their ticks, so each goes in at the end, as a rule.
+        // The markers of the parts written since the last snapshot, and of those not yet written.
+        // Each line's arrival is the one it has in the finished file, but for a part not yet
+        // written, whose row comes after the written ones'. A recorder's come in order of their
+        // ticks, so each goes in at the end, as a rule.
         let Some(Ok(Markers {
             list: markers,
             span: marker_span,
@@ -1542,38 +1552,72 @@ impl Recording {
         else {
             unreachable!("a live recording's markers are its writer's")
         };
-        if !seen.unwritten.is_empty() {
-            markers.retain(|m| !seen.unwritten.contains(&m.cursor));
-            seen.unwritten.clear();
+        // A part not yet written keeps the markers read of it while its generator and row stay
+        // the same: the snapshot gives parts cut from a generator's lines before every
+        // generator's lines since its last part, so a part cut from them moves those after it to
+        // a later row, and lines at one row only grow. Only the lines past those read are read.
+        // The markers of a part read before that keeps no place go.
+        let first = seen.parts;
+        let unwritten_from = first + written_parts.len() as u64;
+        let mut before = std::mem::take(&mut seen.unwritten);
+        let mut pending = Vec::with_capacity(unwritten_parts.len());
+        for (j, part) in unwritten_parts.iter().enumerate() {
+            let row = unwritten_from + j as u64;
+            let kept = before.iter().position(|p| {
+                p.row == row && p.source == part.source && part.lines.get(p.read..).is_some()
+            });
+            pending.push(match kept {
+                Some(i) => before.swap_remove(i),
+                None => Pending {
+                    source: part.source.clone(),
+                    row,
+                    read: 0,
+                    cursors: Vec::new(),
+                },
+            });
+        }
+        let gone: std::collections::HashSet<MarkerCursor> = before
+            .iter()
+            .flat_map(|p| p.cursors.iter().copied())
+            .collect();
+        if let Some(&earliest) = gone.iter().min() {
+            let from = markers.partition_point(|m| m.cursor < earliest);
+            let tail = markers.split_off(from);
+            markers.extend(tail.into_iter().filter(|m| !gone.contains(&m.cursor)));
         }
         let ranks: BTreeMap<&str, usize> = snapshot
             .generators()
             .enumerate()
             .map(|(i, s)| (s, i + 1))
             .collect();
-        let written = written_parts.iter().map(|p| (p, false));
-        let first = seen.parts;
-        for (k, (part, unwritten)) in written
-            .chain(unwritten_parts.iter().map(|p| (p, true)))
-            .enumerate()
-        {
-            let rank = ranks.get(part.source.as_str()).copied().unwrap_or(0);
-            for (n, line) in part.lines().enumerate() {
+        let mut take = |source: &str, lines: &str, row: u64, from: usize| {
+            let rank = ranks.get(source).copied().unwrap_or(0);
+            let mut cursors = Vec::new();
+            for (n, line) in (from..).zip(lines.split_terminator('\n')) {
                 // A writer's line is a JSON object.
                 let fields = serde_json::from_str(line).unwrap_or_default();
-                let annotation = crate::markers::generated(&part.source, &fields, n);
+                let annotation = crate::markers::generated(source, &fields, n);
                 let cursor = MarkerCursor {
                     tick: annotation.start,
-                    arrival: crate::markers::arrival(rank, first + k as u64, n),
+                    arrival: crate::markers::arrival(rank, row, n),
                 };
-                if unwritten {
-                    seen.unwritten.insert(cursor);
-                }
+                cursors.push(cursor);
                 widen(marker_span, marked(&annotation));
                 let at = markers.partition_point(|m| m.cursor <= cursor);
                 markers.insert(at, Marker { cursor, annotation });
             }
+            cursors
+        };
+        for (k, part) in written_parts.iter().enumerate() {
+            take(&part.source, &part.lines, first + k as u64, 0);
         }
+        for (part, p) in unwritten_parts.iter().zip(&mut pending) {
+            let read = &part.lines[p.read..];
+            let mut cursors = take(&part.source, read, p.row, p.cursors.len());
+            p.cursors.append(&mut cursors);
+            p.read = part.lines.len();
+        }
+        seen.unwritten = pending;
         seen.parts = snapshot.part_count();
         self.extent = OnceLock::new();
         self.sketch_extent = OnceLock::new();

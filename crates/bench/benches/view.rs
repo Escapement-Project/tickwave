@@ -5,8 +5,10 @@ use std::hint::black_box;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use escapement_tickwave_bench::{CLOCK_HZ, Capture};
+use escapement_tickwave_bench::{CLOCK_HZ, Capture, RATE, Synth};
 use escapement_tickwave_format::decode::Footer;
+use escapement_tickwave_format::model::Ratio;
+use escapement_tickwave_format::snapshot::Snapshot;
 use escapement_tickwave_view::{Bytes, Cache, MarkerQuery, Query, Recording};
 use gungraun::prelude::*;
 use gungraun::{Callgrind, FlamegraphConfig};
@@ -99,6 +101,36 @@ fn markers_by_range(rec: Recording) {
     black_box(rec.markers(0..rec.length(), None, 512));
 }
 
+/// Verge's layout live: a second written with `markers` markers, every one still in lines no
+/// part holds yet, and the recording made live from a snapshot then; and the snapshot after a
+/// 10 ms batch more, to update it with. A recorder writing a marker a minute has 60 pending an
+/// hour in, and 600 ten hours in.
+fn live(markers: u64) -> (Recording, Snapshot) {
+    let mut s = Synth::new(Ratio::integer(CLOCK_HZ / RATE).unwrap(), RATE, 1);
+    s.second(0, true, markers);
+    let first = s.writer.snapshot();
+    let pending: usize = (first.unwritten_parts().unwrap().iter())
+        .map(|p| p.lines().count())
+        .sum();
+    assert_eq!(pending as u64, markers, "every marker in pending lines");
+    s.batch(1, RATE / 100, true);
+    let next = s.writer.snapshot();
+    let bytes: Arc<dyn Bytes> = Arc::new(s.file);
+    let rec = Recording::live(first, bytes, Cache::new(64 << 20)).unwrap();
+    (rec, next)
+}
+
+// One live update by a 10 ms batch with no marker in it. The recording is returned, so dropping
+// it isn't counted.
+#[library_benchmark]
+#[bench::one_marker_pending(args = (1,), setup = live)]
+#[bench::sixty_markers_pending(args = (60,), setup = live)]
+#[bench::six_hundred_markers_pending(args = (600,), setup = live)]
+fn live_update((mut rec, next): (Recording, Snapshot)) -> Recording {
+    rec.update(black_box(next)).unwrap();
+    rec
+}
+
 library_benchmark_group!(
     name = view,
     benchmarks = [
@@ -106,7 +138,8 @@ library_benchmark_group!(
         query_cold,
         open_recording,
         statistics_each_sample,
-        markers_by_range
+        markers_by_range,
+        live_update
     ]
 );
 

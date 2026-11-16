@@ -165,29 +165,13 @@ impl Synth {
     /// Second `s`'s pairs, synth's edges where `with_edges`, `markers` markers spread over it,
     /// and the flush at its end.
     pub fn second(&mut self, s: u64, with_edges: bool, markers: u64) {
-        let w = &mut self.writer;
         let mut due = if with_edges { edges(s) } else { Vec::new() }
             .into_iter()
             .peekable();
         for _ in 0..self.rate {
-            let tick = (u128::from(self.pairs) * u128::from(self.period.num())
-                / u128::from(self.period.den())) as i64;
-            while let Some(&(t, c)) = due.peek()
-                && t <= tick
-            {
-                w.edge(c, t).unwrap();
-                due.next();
-            }
-            let x = &mut self.noise;
-            *x ^= *x << 13;
-            *x ^= *x >> 7;
-            *x ^= *x << 17;
-            let step = (s / 5) % 10;
-            w.sample(0, 3300 - step + (*x & 7)).unwrap();
-            w.sample(1, 1_000_000 + step * 5_000_000 + ((*x >> 8) & 0xfff))
-                .unwrap();
-            self.pairs += 1;
+            self.pair(s, &mut due);
         }
+        let w = &mut self.writer;
         for (t, c) in due {
             w.edge(c, t).unwrap();
         }
@@ -198,6 +182,40 @@ impl Synth {
         }
         w.flush(((s + 1) * CLOCK_HZ) as i64).unwrap();
         self.file.extend(w.take_output());
+    }
+
+    /// The first `n` pairs of second `s`, with synth's edges up to the last of them where
+    /// `with_edges`, as a recorder's batch: no flush.
+    pub fn batch(&mut self, s: u64, n: u64, with_edges: bool) {
+        let mut due = if with_edges { edges(s) } else { Vec::new() }
+            .into_iter()
+            .peekable();
+        for _ in 0..n {
+            self.pair(s, &mut due);
+        }
+        self.file.extend(self.writer.take_output());
+    }
+
+    /// The next pair of second `s`, after the edges in `due` up to its tick.
+    fn pair(&mut self, s: u64, due: &mut std::iter::Peekable<std::vec::IntoIter<(i64, usize)>>) {
+        let w = &mut self.writer;
+        let tick = (u128::from(self.pairs) * u128::from(self.period.num())
+            / u128::from(self.period.den())) as i64;
+        while let Some(&(t, c)) = due.peek()
+            && t <= tick
+        {
+            w.edge(c, t).unwrap();
+            due.next();
+        }
+        let x = &mut self.noise;
+        *x ^= *x << 13;
+        *x ^= *x >> 7;
+        *x ^= *x << 17;
+        let step = (s / 5) % 10;
+        w.sample(0, 3300 - step + (*x & 7)).unwrap();
+        w.sample(1, 1_000_000 + step * 5_000_000 + ((*x >> 8) & 0xfff))
+            .unwrap();
+        self.pairs += 1;
     }
 
     /// The whole file, finished `seconds` in.

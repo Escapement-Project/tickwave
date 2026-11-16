@@ -520,6 +520,111 @@ fn one_recording_updated_with_each_snapshot_reads_as_one_made_from_it() {
 }
 
 #[test]
+fn markers_read_a_snapshot_at_a_time_are_those_read_whole() {
+    // Generators a and b, two lines of a to one of b. a's lines are 4 KB, so its part's 64 KiB
+    // fills every 16 lines; b's too for its first 33, then about 110. A part cut from b's lines
+    // moves a's later lines to a later row, and a's lines coming back before b's move b's; once
+    // b's are short, a's new lines take the row b's had and hold more bytes than were read of
+    // b's. Spread compression keeps a cut part waiting a few calls. After each call, the markers
+    // of the recording updated with every snapshot are those of one made live from it.
+    let (d, _) = session();
+    let options = WriteOptions {
+        level: 3,
+        block_bytes: 64,
+        compression: Compression::Spread,
+        promise_with_items: true,
+    };
+    let mut w = Writer::new(d, options).unwrap();
+    let file = Arc::new(Growing(std::sync::Mutex::new(w.take_output())));
+    w.run(0, 0, 0).unwrap();
+    w.run(1, 0, 0).unwrap();
+    let (long, short) = ("x".repeat(4000), "y".repeat(50));
+    let mut updated: Option<Recording> = None;
+    // Each generator's last part not yet written, as (row, lines), at the snapshot before.
+    let mut last: BTreeMap<String, (u64, String)> = BTreeMap::new();
+    let (mut grew, mut moved, mut taken, mut queued, mut written) = (0, 0, 0, 0, 0);
+    let mut marks = 0;
+    for i in 0..160u64 {
+        for call in 0..2 {
+            if call == 0 {
+                let source = if i % 3 == 2 { "b" } else { "a" };
+                let label = if source == "b" && i >= 100 {
+                    &short
+                } else {
+                    &long
+                };
+                let serde_json::Value::Object(m) = serde_json::json!({
+                    "id": format!("{source}/{i}"), "start": i * 10, "kind": "marker", "label": label
+                }) else {
+                    unreachable!()
+                };
+                w.annotation(source, m).unwrap();
+                marks += 1;
+            } else {
+                w.sample(0, 3300u64).unwrap();
+                w.sample(1, 1_000_000u64).unwrap();
+            }
+            let snapshot = w.snapshot();
+            file.0.lock().unwrap().extend(w.take_output());
+            let at = format!("annotation {i}, call {call}");
+
+            let unwritten = snapshot.unwritten_parts().unwrap();
+            let rows = snapshot.part_count()..;
+            written = written.max(snapshot.part_count());
+            queued += unwritten
+                .iter()
+                .filter(|p| p.lines.len() >= escapement_tickwave_format::writer::PART_TARGET)
+                .count();
+            let mut now = BTreeMap::new();
+            for (row, part) in rows.zip(&unwritten) {
+                now.insert(part.source.clone(), (row, part.lines.clone()));
+            }
+            for (source, (row, lines)) in &now {
+                if let Some((r, l)) = last.get(source)
+                    && lines.starts_with(l.as_str())
+                {
+                    if r == row {
+                        grew += usize::from(lines.len() > l.len());
+                    } else {
+                        moved += 1;
+                    }
+                }
+                taken += last
+                    .iter()
+                    .filter(|(s, (r, l))| *s != source && r == row && l.len() <= lines.len())
+                    .count();
+            }
+            last = now;
+
+            let fresh =
+                Recording::live(snapshot.clone(), file.clone(), Cache::new(1 << 20)).unwrap();
+            match &mut updated {
+                None => {
+                    updated =
+                        Some(Recording::live(snapshot, file.clone(), Cache::new(1 << 20)).unwrap())
+                }
+                Some(u) => u.update(snapshot).unwrap(),
+            }
+            let u = updated.as_ref().unwrap();
+            let got = u.markers(i64::MIN..i64::MAX, None, usize::MAX);
+            assert_eq!(got.entries.len(), marks, "{at}");
+            assert_eq!(
+                got,
+                fresh.markers(i64::MIN..i64::MAX, None, usize::MAX),
+                "{at}"
+            );
+        }
+    }
+    // The cases the rule is for, each met: a part's lines read on from where the last update
+    // left them; a part whose lines keep on but whose row moved; a row another generator's part
+    // held, with no fewer bytes; a part waiting to be written; parts in the file.
+    assert!(
+        grew > 100 && moved > 0 && taken > 0 && queued > 0 && written > 4,
+        "grew {grew}, moved {moved}, taken {taken}, queued {queued}, written {written}"
+    );
+}
+
+#[test]
 fn a_long_recording_updated_with_each_snapshot_reads_as_one_made_from_it() {
     // 70,000 pairs, a pair a finest bucket, alike from 20,000 to 60,000, so a level's run of
     // alike overview blocks grows from one snapshot to the next; 64 KiB blocks, which take
