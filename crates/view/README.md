@@ -88,7 +88,8 @@ after them are counted one by one.
 | `time` | `web/src/time.ts` | a time written as ticks or as a decimal with a unit, to ticks |
 | `scale` | `web/src/render/scale.ts` | an analog row's value range: its limits, zoom, move, fit and labels |
 | `axis` | `web/src/render/axis.ts` | the time axis's labelled ticks |
-| `columns` | `web/src/render/columns.ts` | what each pixel column of a row shows, from edges, samples or overview buckets |
+| `columns` | `web/src/render/columns.ts` | what each pixel column of a row shows, from edges, samples or overview buckets, and a digital column's edges and time high |
+| `shade` | `web/src/render/shade.ts` | how a digital column with edges reads: the edges a density stands for, the band's opacity from the edge rate on one fixed scale, a lone edge's stroke, each level's rail from its share of the time, and each column's look: a stroke, or a run's band and rails |
 | `probe` | `web/src/probe.ts` | the pulse around a tick, its figures, an analog channel at a pixel, and the searches for a pulse's edges |
 | `runs` | `web/src/source.ts` | which sample sits at or around a tick, where a sample's time ends, and a break's lost samples |
 | `spans` | `web/src/source.ts` | where a channel's data lies, between its gaps or across its runs |

@@ -12,6 +12,7 @@ implementations are held to one set of cases.
 | `axis.json` | `web/src/render/axis.ts`, `axis` | `layout.test.ts` |
 | `columns.json` | `web/src/render/columns.ts`, `columns` | `columns.test.ts` |
 | `probe.json` | `web/src/probe.ts`, `probe` | `probe.test.ts` |
+| `shade.json` | `web/src/render/shade.ts`, `shade` | `shade.test.ts` |
 
 A file holds `tests`, each a named group of rows that runs as one test. A row gives:
 
@@ -27,11 +28,13 @@ A file holds `tests`, each a named group of rows that runs as one test. A row gi
 - `then`, optionally: rows called on the result, as a `stats` argument.
 - `note`: why the expected value is what it is.
 
-Expected values are worked by hand from the inputs, never copied from what the code gives. JSON has
-no literal for some numbers, so `"Infinity"`, `"-Infinity"` and `"NaN"` stand for them, and a
-count of `"Infinity"` is a tile whose channel's count doesn't matter. A no-break space and the
-minus sign are written `\u00a0` and `\u2212`, since they look like a space and a hyphen. A pulse's
-edge is a tick, `null` where there is none, or `"unread"` where the edges in hand don't reach it.
+Expected values are worked by hand from the inputs, never copied from what the code gives.
+`make-shade.py` writes `shade.json`: it works the edge counts a density stands for from FORMAT.md's
+definition in exact integers, and holds the other rows as worked by hand. JSON has no literal for
+some numbers, so `"Infinity"`, `"-Infinity"` and `"NaN"` stand for them, and a count of
+`"Infinity"` is a tile whose channel's count doesn't matter. A no-break space and the minus sign
+are written `\u00a0` and `\u2212`, since they look like a space and a hyphen. A pulse's edge is a
+tick, `null` where there is none, or `"unread"` where the edges in hand don't reach it.
 
 Rows in one group that name the same `samples` read one tile in the web's tests, as two draws of
 one tile do: the web keeps a tile's runs between draws.
