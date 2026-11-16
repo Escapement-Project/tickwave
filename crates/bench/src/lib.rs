@@ -139,8 +139,13 @@ pub struct Synth {
 impl Synth {
     /// `rate` pairs a second, one every `period` ticks, at zstd `level`.
     pub fn new(period: Ratio, rate: u64, level: i32) -> Self {
+        Self::declared(declaration(period), period, rate, level)
+    }
+
+    /// `new`'s, with `declaration`, verge's layout at that `period` changed as a caller needs.
+    pub fn declared(declaration: Declaration, period: Ratio, rate: u64, level: i32) -> Self {
         let mut writer = Writer::new(
-            declaration(period),
+            declaration,
             WriteOptions {
                 level,
                 block_bytes: 1 << 20,
@@ -246,6 +251,10 @@ pub enum Capture {
     Markers,
     /// 10 s at 1,000 pairs a second and 1,000 markers a second, cut to its first 60 % of bytes.
     CutMarkers,
+    /// 1 s at 1,000 pairs a second, DIO0 an edge every 96 ticks: a million edges, a 500 kHz
+    /// clock. DIO0's finest level is 2^13, the converter's rule's for it (about 64 edges a
+    /// bucket), where a live recorder would give it the recording's.
+    Clock,
 }
 
 impl Capture {
@@ -255,6 +264,7 @@ impl Capture {
             Self::HalfTicks => "half-ticks",
             Self::Markers => "markers",
             Self::CutMarkers => "cut-markers",
+            Self::Clock => "clock",
         }
     }
 
@@ -274,6 +284,17 @@ impl Capture {
             Self::CutMarkers => {
                 let file = whole(every(CLOCK_HZ / 1000), 1000, 10, false, 1000);
                 file[..file.len() * 6 / 10].to_vec()
+            }
+            Self::Clock => {
+                let period = every(CLOCK_HZ / 1000);
+                let mut d = declaration(period);
+                d.channels[DIO0].overview_shift = Some(13);
+                let mut synth = Synth::declared(d, period, 1000, 1);
+                for k in 0..CLOCK_HZ as i64 / 96 {
+                    synth.writer.edge(DIO0, k * 96).unwrap();
+                }
+                synth.second(0, false, 0);
+                synth.finish(1)
             }
         }
     }

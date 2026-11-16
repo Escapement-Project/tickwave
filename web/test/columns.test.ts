@@ -11,13 +11,14 @@ import {
   analogFromSamples,
   BUSY,
   digitalFromEdges,
-  digitalFromOverview,
+  digitalFromLevels,
   FALL,
   HIGH,
   lineSamples,
   LOW,
   NONE,
   RISE,
+  type DigitalColumns,
   type Grid,
 } from "../src/render/columns.ts";
 import { MemorySource } from "../src/memory-source.ts";
@@ -25,7 +26,7 @@ import { fillRuns, sampleTick, SAMPLES_PER_RUN, type Ratio, type Samples } from 
 import { ratio, runTable, type Row } from "./tables.ts";
 
 const STATES: Record<number, string> = { [NONE]: "NONE", [LOW]: "LOW", [HIGH]: "HIGH", [BUSY]: "BUSY", [RISE]: "RISE", [FALL]: "FALL" };
-const digital = (c: { state: Uint8Array; at: Float64Array }) => ({ state: [...c.state].map((s) => STATES[s]), at: [...c.at] });
+const digital = (c: DigitalColumns) => ({ state: [...c.state].map((s) => STATES[s]), at: [...c.at], edges: [...c.edges], high: [...c.high], known: [...c.known] });
 const analog = (c: { min: Float64Array; max: Float64Array }) => ({ min: [...c.min], max: [...c.max] });
 const edges = (e: { level: 0 | 1; ticks: number[] }) => ({ level: e.level, ticks: Float64Array.from(e.ticks) });
 const runs = (r: { first: number; period: [number, number]; count: number }) => ({ first: r.first, period: ratio(r.period), count: r.count });
@@ -40,9 +41,7 @@ const tile = (a: Row["args"], shared: <T>(input: unknown, make: () => T) => T): 
 runTable("columns", {
   digital_from_edges: (a) => digital(digitalFromEdges(a.grid, edges(a.edges), a.from, a.to)),
   digital_from_overview: (a) =>
-    digital(
-      digitalFromOverview(a.grid, { kind: "digital", bucket: a.overview.bucket, start: a.overview.start, level: Uint8Array.from(a.overview.level), changes: Uint8Array.from(a.overview.changes) }, a.from, a.to),
-    ),
+    digital(digitalFromLevels(a.grid, { bucket: a.overview.bucket, start: a.overview.start, density: Uint8Array.from(a.overview.density), duty: Uint8Array.from(a.overview.duty) }, a.from, a.to)),
   analog_from_samples: (a, { shared }) => analog(analogFromSamples(a.grid, tile(a, shared), runs(a.runs), a.from, a.to)),
   analog_from_overview: (a) =>
     analog(analogFromOverview(a.grid, { kind: "analog", bucket: a.overview.bucket, start: a.overview.start, min: Float64Array.from(a.overview.min), max: Float64Array.from(a.overview.max) }, a.from, a.to)),

@@ -223,7 +223,7 @@ impl Drawn {
                     .iter()
                     .all(|&n| n == count)
             }
-            Self::Digital { columns: c, .. } => c.state.len() == count && c.at.len() == count,
+            Self::Digital { columns: c, .. } => c.holds(count),
             Self::Unavailable => true,
         }
     }
@@ -491,6 +491,9 @@ impl Recording {
                     }) => {
                         cols.state[..from].copy_from_slice(&h.state[..from]);
                         cols.at[..from].copy_from_slice(&h.at[..from]);
+                        cols.edges[..from].copy_from_slice(&h.edges[..from]);
+                        cols.high[..from].copy_from_slice(&h.high[..from]);
+                        cols.known[..from].copy_from_slice(&h.known[..from]);
                         from
                     }
                     _ => 0,
@@ -711,12 +714,16 @@ impl Recording {
     ) -> Result<(), Error> {
         let mut at = span.start;
         let mut level = level;
-        // Only the columns the piece reaches: the others hold another piece's, or nothing.
+        // Only the columns the piece reaches: the others hold another piece's, or nothing. A
+        // column's edges and time are its pieces' summed.
         let put = |reached: Range<usize>, piece: &DigitalColumns, cols: &mut DigitalColumns| {
             for k in reached {
                 let (s, a) = merge((cols.state[k], cols.at[k]), (piece.state[k], piece.at[k]));
                 cols.state[k] = s;
                 cols.at[k] = a;
+                cols.edges[k] += piece.edges[k];
+                cols.high[k] += piece.high[k];
+                cols.known[k] += piece.known[k];
             }
         };
         while at < span.end {
@@ -727,13 +734,13 @@ impl Recording {
                     let to = span.end.min(covered);
                     if to > at {
                         let (k0, k1) = (at >> shift, ((to - 1) >> shift) + 1);
-                        let (levels, changes) =
+                        let (density, duty) =
                             self.digital_buckets(r, c, l, k0 as u64, k1 as u64)?;
                         let ov = DigitalOverview {
                             bucket: 1 << shift,
                             start: k0 << shift,
-                            level: &levels,
-                            changes: &changes,
+                            density: &density,
+                            duty: &duty,
                         };
                         let reached = columns::digital_from_overview_into(
                             g, &ov, at as f64, to as f64, piece,

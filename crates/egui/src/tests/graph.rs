@@ -30,8 +30,23 @@ fn shade(p: &Palette) -> Color32 {
     p.attention_fill.gamma_multiply(p.shade)
 }
 
-fn busy(p: &Palette) -> Color32 {
-    p.trace.gamma_multiply(p.busy)
+/// The vertices of `clip`'s meshes in the trace's colour at an opacity between none and full:
+/// a lane's shaded columns, which `shade` gives their opacities.
+fn shaded(h: &Harness<'_, Host>, clip: Rect, p: &Palette) -> Vec<Pos2> {
+    shapes(h)
+        .iter()
+        .filter(|s| s.clip_rect == clip)
+        .filter_map(|s| match &s.shape {
+            Shape::Mesh(mesh) => Some(mesh.vertices.clone()),
+            _ => None,
+        })
+        .flatten()
+        .filter(|v| {
+            let a = v.color.a();
+            a > 0 && a < 255 && v.color == p.trace.gamma_multiply(f32::from(a) / 255.0)
+        })
+        .map(|v| v.pos)
+        .collect()
 }
 
 /// Where tick `t` sits across the plot as last drawn.
@@ -700,7 +715,7 @@ fn a_drag_on_the_value_axis_zooms_y_about_where_it_started() {
 }
 
 #[test]
-fn a_lane_shades_its_gaps_and_fills_what_it_cannot_resolve() {
+fn a_lane_shades_its_gaps_and_what_it_cannot_resolve() {
     // DIO3 high for 2 ms of every 10, with its edges lost from 5.0013 s to 5.0057 s.
     let mut cap = Capture::new(1000, 20_000, noisy);
     cap.dio = true;
@@ -709,8 +724,8 @@ fn a_lane_shades_its_gaps_and_fills_what_it_cannot_resolve() {
     wait(&mut h);
     let p = palette();
     let lane = drawn(&h).layout.lanes[3];
-    // Zoomed out, a column holds several pulses: busy.
-    assert!(!spans_of(&h, lane, busy(&p)).is_empty());
+    // Zoomed out, a column holds several pulses: shaded.
+    assert!(!shaded(&h, lane, &p).is_empty());
     let window = 4_990 * MS..5_020 * MS;
     h.state_mut().state.window = Window::At(window.clone());
     answered(&mut h, window);
@@ -719,8 +734,8 @@ fn a_lane_shades_its_gaps_and_fills_what_it_cannot_resolve() {
     assert_eq!(gaps.len(), 1, "{gaps:?}");
     let (a, b) = (x_of(&h, 5_001_300), x_of(&h, 5_005_700));
     assert!((gaps[0].left() - a).abs() < 1.0 && (gaps[0].right() - b).abs() < 1.0);
-    // Zoomed in, every pulse resolves: levels as lines, nothing busy.
-    assert!(spans_of(&h, lane, busy(&p)).is_empty());
+    // Zoomed in, every pulse resolves: levels as lines, nothing shaded.
+    assert!(shaded(&h, lane, &p).is_empty());
     let levels = vertices_of(&h, lane, p.trace);
     assert!(levels.iter().any(|v| v.x < a) && levels.iter().any(|v| v.x > b));
     // The other lanes are flat low lines, with nothing shaded.

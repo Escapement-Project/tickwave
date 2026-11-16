@@ -548,6 +548,10 @@ impl AnalogOverview {
     }
 }
 
+/// `ceil(2^(63 + r/4))` for r = 1, 2, 3: the thresholds between a doubling's density steps, for a
+/// count shifted up to bit 63 (FORMAT.md, "Overview").
+pub const DENSITY_STEPS: [u64; 3] = [0x9837f0518db8a970, 0xb504f333f9de6485, 0xd744fccad69d6af5];
+
 /// A bucket's density from its edge count `e` (FORMAT.md, "Overview"): 0 for none, and otherwise
 /// `1 + floor(4 × log2(e))`, in integers: a floating-point log2 lands on the wrong side of a step
 /// for some counts below 2^53.
@@ -556,10 +560,8 @@ pub fn density(e: u64) -> u8 {
         return 0;
     }
     let l = 63 - e.leading_zeros();
-    // `ceil(2^(63 + r/4))` for r = 1, 2, 3.
-    const STEPS: [u64; 3] = [0x9837f0518db8a970, 0xb504f333f9de6485, 0xd744fccad69d6af5];
     let x = e << (63 - l);
-    let r = STEPS.iter().filter(|&&t| x >= t).count() as u32;
+    let r = DENSITY_STEPS.iter().filter(|&&t| x >= t).count() as u32;
     // A count below 2^64 gives at most 1 + 4 × 63 + 3.
     (1 + 4 * l + r).min(255) as u8
 }

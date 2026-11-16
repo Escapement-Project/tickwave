@@ -89,12 +89,10 @@ fn color32(c: Premultiplied) -> Color32 {
 }
 
 /// The opacities verge's bench draws with (verge gui/src/bench.rs): a column that touches a
-/// loss and a sample read under range, a column's band, lost time, and a busy DIO column. They
-/// are not tokens.
+/// loss and a sample read under range, a column's band, and lost time. They are not tokens.
 const PALE: f32 = 0.35;
 const FILL: f32 = 0.45;
 const SHADE: f32 = 0.2;
-const BUSY: f32 = 0.6;
 
 /// The day or night face, as verge fills its graph from tokens.rs: the trace in
 /// `--series-verge`, the selection in `--wash`, figures and labels in monospace at 11 points.
@@ -122,7 +120,6 @@ pub fn face(night: bool) -> Result<Face, String> {
             pale: PALE,
             fill: FILL,
             shade: SHADE,
-            busy: BUSY,
         },
     })
 }

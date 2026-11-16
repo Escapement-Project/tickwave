@@ -1,5 +1,5 @@
 {
-  "about": "What each pixel column of a row shows, on real data: identify-swd's SWDIO and SWCLK and the first twelve current samples of verge's energy capture (nA, 100 kHz). Expected states are worked by hand. The two overviews are the ones columns.test.ts's MemorySource cases build and check.",
+  "about": "What each pixel column of a row shows, on real data: identify-swd's SWDIO and SWCLK and the first twelve current samples of verge's energy capture (nA, 100 kHz). Expected values are worked by hand. The digital overview's density and duty are SWCLK's, worked by hand from its edges in columns.test.ts.",
   "source": "web/src/render/columns.ts",
   "tests": [
     {
@@ -29,16 +29,35 @@
       ]
     },
     {
-      "name": "digital from overview: busy wherever a changing bucket overlaps",
+      "name": "digital from overview: busy wherever a bucket with an edge overlaps, or buckets at different levels",
       "rows": [
-        {"fn":"digital_from_overview","args":{"grid":{"x0":376701000,"per":3000,"count":7},"overview":{"bucket":4096,"start":376696832,"level":[1,1,1,1,1,1,1],"changes":[0,0,0,0,0,1,1]},"from":376696832,"to":376725504},"expect":{"state":["HIGH","HIGH","HIGH","HIGH","HIGH","BUSY","BUSY"]},"note":"SWCLK's first edges in buckets of 4096 from 376696832: the first edge, 376719436, is in bucket 5 with three more; bucket 6 holds the last two. SWCLK idles high."},
-        {"fn":"digital_from_overview","args":{"grid":{"x0":376718000,"per":3000,"count":1},"overview":{"bucket":4096,"start":376696832,"level":[1,1,1,1,1,1,1],"changes":[0,0,0,0,0,1,1]},"from":376696832,"to":376725504},"expect":{"state":["BUSY"]},"note":"[376718000, 376721000) holds no bucket's start, only the tail of bucket 5, which changes."}
+        {"fn":"digital_from_overview","args":{"grid":{"x0":376701000,"per":3000,"count":7},"overview":{"bucket":4096,"start":376696832,"density":[0,0,0,0,0,9,5],"duty":[14,14,14,14,14,10,12]},"from":376696832,"to":376725504},"expect":{"state":["HIGH","HIGH","HIGH","HIGH","HIGH","BUSY","BUSY"]},"note":"SWCLK's first edges in buckets of 4096 from 376696832: the first edge, 376719436, is in bucket 5 with three more, so its density is 9 (4 edges); bucket 6 holds the last two, density 5. SWCLK idles high: bucket 5 is high 2849 of its 4096 ticks, duty 10 (28 x 2849 + 4096 over 8192, 10.2); bucket 6 3596, duty 12 (12.8)."},
+        {"fn":"digital_from_overview","args":{"grid":{"x0":376718000,"per":3000,"count":1},"overview":{"bucket":4096,"start":376696832,"density":[0,0,0,0,0,9,5],"duty":[14,14,14,14,14,10,12]},"from":376696832,"to":376725504},"expect":{"state":["BUSY"]},"note":"[376718000, 376721000) holds no bucket's start, only the tail of bucket 5, which changes."},
+        {"fn":"digital_from_overview","args":{"grid":{"x0":0,"per":200,"count":1},"overview":{"bucket":100,"start":0,"density":[0,0],"duty":[0,14]},"from":0,"to":200},"expect":{"state":["BUSY"],"edges":[0],"high":[100],"known":[200]},"note":"Bucket 0 wholly low, bucket 1 wholly high, neither with an edge: the level changes on their boundary, as at a gap's end there, so the column over both is busy."},
+        {"fn":"digital_from_overview","args":{"grid":{"x0":0,"per":200,"count":1},"overview":{"bucket":100,"start":0,"density":[0,0],"duty":[0,0]},"from":0,"to":200},"expect":{"state":["LOW"],"high":[0],"known":[200]},"note":"Both wholly low: low."}
       ]
     },
     {
       "name": "digital from overview: a bucket wider than a column spans its columns",
       "rows": [
-        {"fn":"digital_from_overview","args":{"grid":{"x0":376713216,"per":1024,"count":12},"overview":{"bucket":4096,"start":376696832,"level":[1,1,1,1,1,1,1],"changes":[0,0,0,0,0,1,1]},"from":376696832,"to":376725504},"expect":{"state":["HIGH","HIGH","HIGH","HIGH","BUSY","BUSY","BUSY","BUSY","BUSY","BUSY","BUSY","BUSY"]},"note":"Four columns a bucket from bucket 4: bucket 4 holds no edge, 5 and 6 change."}
+        {"fn":"digital_from_overview","args":{"grid":{"x0":376713216,"per":1024,"count":12},"overview":{"bucket":4096,"start":376696832,"density":[0,0,0,0,0,9,5],"duty":[14,14,14,14,14,10,12]},"from":376696832,"to":376725504},"expect":{"state":["HIGH","HIGH","HIGH","HIGH","BUSY","BUSY","BUSY","BUSY","BUSY","BUSY","BUSY","BUSY"]},"note":"Four columns a bucket from bucket 4: bucket 4 holds no edge, 5 and 6 change."}
+      ]
+    },
+    {
+      "name": "digital from edges: each column's edges, and its ticks high of those it covers, exactly",
+      "rows": [
+        {"fn":"digital_from_edges","args":{"grid":{"x0":377094000,"per":1000,"count":13},"edges":{"level":0,"ticks":[377094556,377095556,377096556,377097556,377099556,377100556,377101556,377104078,377106074]},"from":377094000,"to":377107000},"expect":{"edges":[1,1,1,1,0,1,1,1,0,0,1,0,1],"high":[444,556,444,556,0,444,556,444,1000,1000,78,0,926],"known":[1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000]},"note":"A rise at 556 into a column is high its last 444 ticks, a fall at 556 its first 556."},
+        {"fn":"digital_from_edges","args":{"grid":{"x0":377094000,"per":2000,"count":7},"edges":{"level":0,"ticks":[377094556,377095556,377096556,377097556,377099556,377100556,377101556,377104078,377106074]},"from":377094000,"to":377108000},"expect":{"edges":[2,2,1,2,0,1,1],"high":[1000,1000,444,1000,2000,78,1926],"known":[2000,2000,2000,2000,2000,2000,2000]},"note":"Column 3 falls at 556 and rises at 1556: high 556 + 444."},
+        {"fn":"digital_from_edges","args":{"grid":{"x0":377094000,"per":2000,"count":7},"edges":{"level":0,"ticks":[377094556,377095556,377096556,377097556,377099556,377100556,377101556,377104078,377106074]},"from":377094000,"to":377105000},"expect":{"known":[2000,2000,2000,2000,2000,1000,0],"high":{"5":78,"6":0}},"note":"The channel ends at 377105000, half way through column 5: only its first 1000 ticks are known."},
+        {"fn":"digital_from_edges","args":{"grid":{"x0":0,"per":5,"count":8},"edges":{"level":0,"ticks":[10,20,20,30]},"from":0,"to":40},"expect":{"edges":[0,0,1,0,2,0,1,0],"high":[0,0,5,5,5,5,0,0]},"note":"A fall and a rise at tick 20: high for none of the time between them."}
+      ]
+    },
+    {
+      "name": "digital from overview: a column's edges and ticks high, each bucket's by the share of it the column covers",
+      "rows": [
+        {"fn":"digital_from_overview","args":{"grid":{"x0":376716000,"per":3000,"count":2},"overview":{"bucket":4096,"start":376696832,"density":[0,0,0,0,0,9,5],"duty":[14,14,14,14,14,10,12]},"from":376696832,"to":376725504},"expect":{"state":["BUSY","BUSY"],"edges":[1.6484375,2.640625],"high":[2517.714285714286,2227.4285714285716],"known":[3000,3000]},"close":1e-09,"note":"Column 0 covers 1312 ticks of bucket 4 and 1688 of bucket 5, whose density 9 stands for 4 edges: 1688 / 4096 x 4 edges, and 1312 + 1688 x 10/14 ticks high. Column 1 covers 2408 of bucket 5 and 592 of bucket 6 (density 5, 2 edges): 2408 / 4096 x 4 + 592 / 4096 x 2 edges, 2408 x 10/14 + 592 x 12/14 high."},
+        {"fn":"digital_from_overview","args":{"grid":{"x0":0,"per":100,"count":3},"overview":{"bucket":100,"start":0,"density":[0,1,0],"duty":[15,7,14]},"from":0,"to":300},"expect":{"state":["NONE","BUSY","HIGH"],"edges":[0,1,0],"high":[0,50,100],"known":[0,100,100]},"note":"Bucket 0 lies wholly outside the kept span, duty 15: its column draws nothing. Bucket 1 holds one edge and is high half its time."},
+        {"fn":"digital_from_overview","args":{"grid":{"x0":0,"per":200,"count":1},"overview":{"bucket":100,"start":0,"density":[0,1,0],"duty":[15,7,14]},"from":0,"to":300},"expect":{"state":["BUSY"],"edges":[1],"high":[50],"known":[100]},"note":"A column over buckets 0 and 1: only bucket 1's ticks are known."}
       ]
     },
     {

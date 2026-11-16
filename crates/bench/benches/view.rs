@@ -131,6 +131,31 @@ fn live_update((mut rec, next): (Recording, Snapshot)) -> Recording {
     rec
 }
 
+/// The clock's 1,920 columns of DIO0 alone, `per` ticks a column from the second's start: a
+/// million edges, at its finest level's edge (`per` 2^13) and over the whole second.
+fn clock(per: i64) -> (Recording, Query) {
+    let rec = open(Capture::Clock);
+    let width = per * 1920;
+    let q = Query {
+        window: 0..width,
+        columns: 1920,
+        channels: vec![escapement_tickwave_bench::DIO0],
+        ..Query::default()
+    };
+    rec.query(&q, &AtomicBool::new(false)).unwrap();
+    (rec, q)
+}
+
+// A dense digital channel's columns, warm: from its finest level's buckets, from the edges one
+// step in, and the whole second from a level, as the model's edges and time high are summed.
+#[library_benchmark]
+#[bench::finest_edge(args = (1 << 13,), setup = clock)]
+#[bench::one_step_in(args = (1 << 12,), setup = clock)]
+#[bench::whole_second(args = (CLOCK_HZ as i64 / 1920,), setup = clock)]
+fn query_dense((rec, q): (Recording, Query)) {
+    black_box(rec.query(black_box(&q), &AtomicBool::new(false)).unwrap());
+}
+
 library_benchmark_group!(
     name = view,
     benchmarks = [
@@ -139,7 +164,8 @@ library_benchmark_group!(
         open_recording,
         statistics_each_sample,
         markers_by_range,
-        live_update
+        live_update,
+        query_dense
     ]
 );
 

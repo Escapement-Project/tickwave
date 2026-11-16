@@ -30,6 +30,4 @@ pub struct Palette {
     pub fill: f32,
     /// The opacity of `attention_fill` over lost time.
     pub shade: f32,
-    /// The opacity of a DIO column that holds more than one edge.
-    pub busy: f32,
 }

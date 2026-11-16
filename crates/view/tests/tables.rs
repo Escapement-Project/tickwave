@@ -13,7 +13,7 @@ use escapement_tickwave_view::probe::{self, AnalogAt, EdgeAt, Known, Pulse};
 use escapement_tickwave_view::readouts::{self, Measure, PeriodStats};
 use escapement_tickwave_view::runs::Runs;
 use escapement_tickwave_view::scale::{self, ScaleLimits, ValueRange};
-use escapement_tickwave_view::{axis, time};
+use escapement_tickwave_view::{axis, shade, time};
 use serde_json::{Map, Value, json};
 
 fn table(name: &str) -> Value {
@@ -394,8 +394,26 @@ fn state_name(s: State) -> &'static str {
     }
 }
 
+fn state_of(name: &str) -> State {
+    match name {
+        "NONE" => State::None,
+        "LOW" => State::Low,
+        "HIGH" => State::High,
+        "BUSY" => State::Busy,
+        "RISE" => State::Rise,
+        "FALL" => State::Fall,
+        other => panic!("no state {other}"),
+    }
+}
+
 fn digital_out(c: &columns::DigitalColumns) -> Value {
-    json!({"state": c.state.iter().map(|&s| state_name(s)).collect::<Vec<_>>(), "at": floats_out(&c.at)})
+    json!({
+        "state": c.state.iter().map(|&s| state_name(s)).collect::<Vec<_>>(),
+        "at": floats_out(&c.at),
+        "edges": floats_out(&c.edges),
+        "high": floats_out(&c.high),
+        "known": floats_out(&c.known),
+    })
 }
 
 fn analog_out(c: &columns::AnalogColumns) -> Value {
@@ -469,16 +487,20 @@ fn columns() {
             ))
         }
         "digital_from_overview" => {
-            let bits = |v: &Value| v.as_array().unwrap().iter().map(bit).collect::<Vec<_>>();
-            let (level, changes) = (
-                bits(&a["overview"]["level"]),
-                bits(&a["overview"]["changes"]),
+            let bytes = |v: &Value| {
+                (v.as_array().unwrap().iter())
+                    .map(|x| u8::try_from(uint(x)).unwrap())
+                    .collect::<Vec<_>>()
+            };
+            let (density, duty) = (
+                bytes(&a["overview"]["density"]),
+                bytes(&a["overview"]["duty"]),
             );
             let ov = DigitalOverview {
                 bucket: int(&a["overview"]["bucket"]),
                 start: int(&a["overview"]["start"]),
-                level: &level,
-                changes: &changes,
+                density: &density,
+                duty: &duty,
             };
             digital_out(&columns::digital_from_overview(
                 &grid(&a["grid"]),
@@ -516,6 +538,70 @@ fn columns() {
             json!([k0, k1])
         }),
         other => panic!("columns has no {other}"),
+    });
+}
+
+#[test]
+fn shade() {
+    let byte = |v: &Value| u8::try_from(uint(v)).unwrap();
+    run("shade", |name, a, _| match name {
+        "counts" => match shade::counts(byte(&a["density"])) {
+            Some((lo, hi)) => json!([lo, hi]),
+            None => Value::Null,
+        },
+        "count" => num(shade::count(byte(&a["density"]))),
+        "rate" => num(shade::rate(
+            f(&a["edges"]),
+            f(&a["ticks"]),
+            ratio(&a["timebase"]),
+        )),
+        "band" => num(shade::band(f(&a["rate"]))),
+        "stroke" => num(shade::stroke(
+            f(&a["band"]),
+            f(&a["spacing"]),
+            f(&a["width"]),
+        )),
+        "rails" => {
+            let (h, l) = shade::rails(f(&a["high"]), bit(&a["edges"]));
+            json!([num(h), num(l)])
+        }
+        "looks" => {
+            let c = &a["columns"];
+            let cols = columns::DigitalColumns {
+                state: (c["state"].as_array().unwrap().iter())
+                    .map(|s| state_of(s.as_str().unwrap()))
+                    .collect(),
+                at: floats(&c["at"]),
+                edges: floats(&c["edges"]),
+                high: floats(&c["high"]),
+                known: floats(&c["known"]),
+            };
+            let shown = uint(&a["shown"][0]) as usize..uint(&a["shown"][1]) as usize;
+            let looks = shade::looks(
+                &cols,
+                shown,
+                f(&a["width"]),
+                f(&a["per"]),
+                ratio(&a["timebase"]),
+            );
+            Value::Array(
+                looks
+                    .into_iter()
+                    .map(|l| match l {
+                        shade::Look::Flat => json!("flat"),
+                        shade::Look::Stroke(a) => json!(["stroke", num(a)]),
+                        shade::Look::Shade { band, high, low } => {
+                            json!(["shade", num(band), num(high), num(low)])
+                        }
+                    })
+                    .collect(),
+            )
+        }
+        "duty_share" => match shade::duty_share(byte(&a["duty"])) {
+            Some((mid, lo, hi)) => json!([num(mid), num(lo), num(hi)]),
+            None => Value::Null,
+        },
+        other => panic!("no function {other}"),
     });
 }
 

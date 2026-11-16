@@ -1,0 +1,111 @@
+{
+  "about": "How a digital column with edges reads: the edge counts a density stands for, the edge rate, the band's opacity on its fixed scale, a lone edge's stroke, the rails' from the share high, what a duty stands for, and how each column of a row draws. make-shade.py writes this file: the counts from FORMAT.md's definition in exact integers, the rest worked by hand.",
+  "source": "web/src/render/shade.ts",
+  "tests": [
+    {
+      "name": "counts: the least and most edges a density stands for",
+      "rows": [
+        {"fn":"counts","args":{"density":0},"expect":null},
+        {"fn":"counts","args":{"density":1},"expect":[1,1]},
+        {"fn":"counts","args":{"density":2},"expect":[2,2],"note":"No count has density 2, 3 or 4: one edge is 1, two are 5. Each stands for the next count up, 2, alone."},
+        {"fn":"counts","args":{"density":3},"expect":[2,2]},
+        {"fn":"counts","args":{"density":4},"expect":[2,2]},
+        {"fn":"counts","args":{"density":5},"expect":[2,2]},
+        {"fn":"counts","args":{"density":6},"expect":[3,3],"note":"Density 6 stands for 3, the next count up; 3 itself is 7."},
+        {"fn":"counts","args":{"density":7},"expect":[3,3]},
+        {"fn":"counts","args":{"density":8},"expect":[4,4]},
+        {"fn":"counts","args":{"density":9},"expect":[4,4]},
+        {"fn":"counts","args":{"density":12},"expect":[7,7]},
+        {"fn":"counts","args":{"density":13},"expect":[8,9],"note":"8 and 9 are both 13: 8^4 = 2^12 and 9^4 < 2^13."},
+        {"fn":"counts","args":{"density":40},"expect":[862,1023]},
+        {"fn":"counts","args":{"density":100},"expect":[28215802,33554431]},
+        {"fn":"counts","args":{"density":212},"expect":[7574121564787630,9007199254740991],"note":"The largest density a count below 2^53 gives: 2^53 - 1 is the most."}
+      ]
+    },
+    {
+      "name": "count: the geometric mean of the least and most",
+      "rows": [
+        {"fn":"count","args":{"density":0},"expect":0,"note":"No edge."},
+        {"fn":"count","args":{"density":1},"expect":1.0,"note":"Small counts are exact."},
+        {"fn":"count","args":{"density":5},"expect":2.0},
+        {"fn":"count","args":{"density":7},"expect":3.0},
+        {"fn":"count","args":{"density":9},"expect":4.0},
+        {"fn":"count","args":{"density":13},"expect":8.48528137423857,"close":1e-09,"note":"sqrt(8 x 9)."},
+        {"fn":"count","args":{"density":40},"expect":939.0559088786993,"close":1e-09},
+        {"fn":"count","args":{"density":100},"expect":30769549.579391994,"close":3.0769549579391994e-05},
+        {"fn":"count","args":{"density":212},"expect":8259638134547591.0,"close":8259.638134547591}
+      ]
+    },
+    {
+      "name": "rate: edges a second from edges over ticks of the axis",
+      "rows": [
+        {"fn":"rate","args":{"edges":2,"ticks":96000000,"timebase":[96000000,1]},"expect":2,"note":"Two edges in a second of a 96 MHz axis."},
+        {"fn":"rate","args":{"edges":1.5,"ticks":1000,"timebase":[1000000,1]},"expect":1500,"note":"1.5 edges, an estimate from buckets, in a millisecond."},
+        {"fn":"rate","args":{"edges":3,"ticks":2,"timebase":[3,2]},"expect":2.25,"note":"Ticks of 2/3 s: 2 ticks are 4/3 s, 3 edges over them 9/4 a second."},
+        {"fn":"rate","args":{"edges":0,"ticks":1000,"timebase":[1000,1]},"expect":0}
+      ]
+    },
+    {
+      "name": "band: the floor up to one edge a second, full from 1e8, linear in the logarithm between",
+      "rows": [
+        {"fn":"band","args":{"rate":0},"expect":0,"note":"No edge: no band."},
+        {"fn":"band","args":{"rate":-1},"expect":0},
+        {"fn":"band","args":{"rate":"NaN"},"expect":0},
+        {"fn":"band","args":{"rate":0.001},"expect":0.2,"note":"Below one edge a second: the floor, so a rare edge still shows."},
+        {"fn":"band","args":{"rate":1},"expect":0.2},
+        {"fn":"band","args":{"rate":10000},"expect":0.6,"close":1e-12,"note":"Half way along 1 to 1e8 in the logarithm: 0.2 + 0.8 / 2."},
+        {"fn":"band","args":{"rate":100},"expect":0.4,"close":1e-12,"note":"A quarter of the way: 0.2 + 0.8 / 4."},
+        {"fn":"band","args":{"rate":100000000.0},"expect":1},
+        {"fn":"band","args":{"rate":4000000000.0},"expect":1,"note":"Past full: held there."}
+      ]
+    },
+    {
+      "name": "stroke: a lone edge's stroke covers its stretch of band as the band at its spacing's rate would, up to full ink",
+      "rows": [
+        {"fn":"stroke","args":{"band":0.4,"spacing":3,"width":2},"expect":0.6,"close":1e-12,"note":"Edges 3 device pixels apart, a line 2 wide: the strokes cover 2/3 of the band, so 0.4 of it takes 0.6."},
+        {"fn":"stroke","args":{"band":0.3,"spacing":4,"width":2},"expect":0.6,"close":1e-12},
+        {"fn":"stroke","args":{"band":0.2,"spacing":20,"width":2},"expect":1,"note":"Past full ink: held there."},
+        {"fn":"stroke","args":{"band":0,"spacing":"Infinity","width":2},"expect":1,"note":"No edge beside it: full ink, though no rate is left to shade."}
+      ]
+    },
+    {
+      "name": "rails: each level's share of the known time, at least the floor where the column has an edge",
+      "rows": [
+        {"fn":"rails","args":{"high":0.5,"edges":false},"expect":[0.5,0.5]},
+        {"fn":"rails","args":{"high":0,"edges":false},"expect":[0,1],"note":"Wholly low, no edge: the low rail alone, as a flat column draws."},
+        {"fn":"rails","args":{"high":1,"edges":false},"expect":[1,0]},
+        {"fn":"rails","args":{"high":0,"edges":true},"expect":[0.2,1],"note":"A share that rounds to none of the time high, with an edge: the high rail at the floor."},
+        {"fn":"rails","args":{"high":1,"edges":true},"expect":[1,0.2]},
+        {"fn":"rails","args":{"high":0.1,"edges":true},"expect":[0.2,0.9]},
+        {"fn":"rails","args":{"high":0.75,"edges":true},"expect":[0.75,0.25]},
+        {"fn":"rails","args":{"high":"NaN","edges":true},"expect":[0,0],"note":"Nothing of the column known: neither rail."}
+      ]
+    },
+    {
+      "name": "duty_share: what a duty stands for, and the shares that round to it",
+      "rows": [
+        {"fn":"duty_share","args":{"duty":0},"expect":[0,0,0.03571428571428571],"note":"Under 1/28 of the time high rounds to 0."},
+        {"fn":"duty_share","args":{"duty":1},"expect":[0.07142857142857142,0.03571428571428571,0.10714285714285714],"close":1e-15},
+        {"fn":"duty_share","args":{"duty":7},"expect":[0.5,0.4642857142857143,0.5357142857142857],"close":1e-15},
+        {"fn":"duty_share","args":{"duty":14},"expect":[1,0.9642857142857143,1],"close":1e-15},
+        {"fn":"duty_share","args":{"duty":15},"expect":null,"note":"Wholly outside the kept span: no share."}
+      ]
+    },
+    {
+      "name": "looks: lone edges and busy columns alone stroked, the rest of a run shaded, its rails over the columns about each",
+      "rows": [
+        {"fn":"looks","args":{"columns":{"state":["LOW","LOW","LOW","LOW","LOW","RISE","HIGH","HIGH","HIGH","HIGH","HIGH"],"at":[0,0,0,0,0,0.5,0,0,0,0,0],"edges":[0,0,0,0,0,1,0,0,0,0,0],"high":[0,0,0,0,0,500.0,1000,1000,1000,1000,1000],"known":[1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000]},"shown":[0,11],"width":2,"per":1000,"timebase":[1000000,1]},"expect":{"4":"flat","5":["stroke",1],"6":"flat"},"close":1e-12,"note":"A lone edge with none beside it: full ink."},
+        {"fn":"looks","args":{"columns":{"state":["LOW","LOW","RISE","HIGH","HIGH","HIGH","FALL","LOW","LOW","LOW","RISE","HIGH","HIGH"],"at":[0,0,0.5,0,0,0,0.5,0,0,0,0.5,0,0],"edges":[0,0,1,0,0,0,1,0,0,0,1,0,0],"high":[0,0,500.0,1000,1000,1000,500.0,0,0,0,500.0,1000,1000],"known":[1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000]},"shown":[0,13],"width":2,"per":1000,"timebase":[1000000,1]},"expect":{"2":["stroke",0.8795880017344075],"6":["stroke",0.8795880017344075],"10":["stroke",0.8795880017344075]},"close":1e-12,"note":"Edges 4 columns apart, a line 2 wide: a gap of 2 between strokes, none joined. An edge every 4 ms, 250 a second, its band 0.44: each stroke 0.88."},
+        {"fn":"looks","args":{"columns":{"state":["LOW","LOW","RISE","HIGH","HIGH","HIGH","FALL","LOW","LOW","LOW","LOW","LOW","LOW","LOW","LOW","LOW","LOW","LOW","RISE","HIGH","HIGH","HIGH","HIGH","HIGH"],"at":[0,0,0.5,0,0,0,0.5,0,0,0,0,0,0,0,0,0,0,0,0.5,0,0,0,0,0],"edges":[0,0,1,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0],"high":[0,0,500.0,1000,1000,1000,500.0,0,0,0,0,0,0,0,0,0,0,0,500.0,1000,1000,1000,1000,1000],"known":[1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000]},"shown":[0,24],"width":2,"per":1000,"timebase":[1000000,1]},"expect":{"6":["stroke",0.8795880017344075],"18":["stroke",1]},"close":1e-12,"note":"Column 6's edge is 4 columns from one neighbour and 12 from the other: it takes the nearer. Column 18's, 12 from its only neighbour: an edge every 12 ms, 83 a second, band 0.39, its stroke past full ink."},
+        {"fn":"looks","args":{"columns":{"state":["LOW","LOW","RISE","HIGH","FALL","LOW","RISE","HIGH","FALL","LOW","RISE","HIGH","HIGH"],"at":[0,0,0.5,0,0.5,0,0.5,0,0.5,0,0.5,0,0],"edges":[0,0,1,0,1,0,1,0,1,0,1,0,0],"high":[0,0,500.0,1000,500.0,0,500.0,1000,500.0,0,500.0,1000,1000],"known":[1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000]},"shown":[0,13],"width":2,"per":1000,"timebase":[1000000,1]},"expect":{"1":"flat","2":["shade",0.47447274948966944,0.6666666666666666,0.33333333333333337],"3":["shade",0.47447274948966944,0.5,0.5],"4":["shade",0.47447274948966944,0.5,0.5],"5":["shade",0.47447274948966944,0.6,0.4],"6":["shade",0.47447274948966944,0.5,0.5],"7":["shade",0.47447274948966944,0.4,0.6],"8":["shade",0.47447274948966944,0.5,0.5],"9":["shade",0.47447274948966944,0.5,0.5],"10":["shade",0.47447274948966944,0.3333333333333333,0.6666666666666667],"11":"flat"},"close":1e-12,"note":"Edges 2 columns apart join, with the columns between, in a run from column 2 to 10: 5 edges in 9 ms. Column 2's rails take columns 2 to 4, high 2,000 of 3,000; column 7's 5 to 9, 2,000 of 5,000."},
+        {"fn":"looks","args":{"columns":{"state":["LOW","LOW","BUSY","BUSY","BUSY","LOW","LOW","LOW","LOW","LOW"],"at":[0,0,0,0,0,0,0,0,0,0],"edges":[0,0,2,2,2,0,0,0,0,0],"high":[0,0,1,1,1,0,0,0,0,0],"known":[1000,1000,1000,1000,1000,1000,1000,1000,1000,1000]},"shown":[0,10],"width":2,"per":1000,"timebase":[1000000,1]},"expect":{"2":["shade",0.5301029995663982,0.2,0.999],"3":["shade",0.5301029995663982,0.2,0.999],"4":["shade",0.5301029995663982,0.2,0.999]},"close":1e-12,"note":"Busy columns 2 to 4, two edges each and high a tick each: each column's window is the whole run, high 3 of 3,000 ticks, so its high rail takes the floor."},
+        {"fn":"looks","args":{"columns":{"state":["LOW","LOW","BUSY","LOW","BUSY","LOW","LOW","LOW","LOW","LOW"],"at":[0,0,0,0,0,0,0,0,0,0],"edges":[0,0,2,0,2,0,0,0,0,0],"high":[0,0,1,0,1,0,0,0,0,0],"known":[1000,1000,1000,1000,1000,1000,1000,1000,1000,1000]},"shown":[0,10],"width":2,"per":1000,"timebase":[1000000,1]},"expect":{"2":["shade",0.51249387366083,0.2,0.9993333333333333],"3":["shade",0.51249387366083,0.2,0.9993333333333333],"4":["shade",0.51249387366083,0.2,0.9993333333333333]},"close":1e-12,"note":"Column 3 holds no edge, but its window, columns 2 to 4, does: its high rail takes the floor too."},
+        {"fn":"looks","args":{"columns":{"state":["LOW","LOW","RISE","HIGH","FALL","NONE","NONE","NONE","NONE","NONE"],"at":[0,0,0.5,0,0.5,0,0,0,0,0],"edges":[0,0,1,0,1,0,0,0,0,0],"high":[0,0,500.0,1000,500.0,0,0,0,0,0],"known":[1000,1000,1000,1000,600,0,0,0,0,0]},"shown":[0,10],"width":2,"per":1000,"timebase":[1000000,1]},"expect":{"2":["shade",0.48239087409443193,0.7692307692307693,0.23076923076923073],"4":["shade",0.48239087409443193,0.7692307692307693,0.23076923076923073]},"close":1e-12,"note":"Column 4 is known for 600 ticks, high 500: the window's share is its ticks high over its ticks known, 2,000 of 2,600, 0.769, not its columns' shares' mean, 0.778."},
+        {"fn":"looks","args":{"columns":{"state":["LOW","LOW","LOW","LOW","BUSY","LOW","LOW","RISE","HIGH","HIGH","HIGH"],"at":[0,0,0,0,0,0,0,0.5,0,0,0],"edges":[0,0,0,0,0,0,0,1,0,0,0],"high":[0,0,0,0,500.0,0,0,500.0,1000,1000,1000],"known":[1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000]},"shown":[0,11],"width":2,"per":1000,"timebase":[1000000,1]},"expect":{"4":["stroke",0.6784318117920507]},"close":1e-12,"note":"A busy column with no edge changes level at least once: it strokes as one edge over the 3 ms to its neighbour."},
+        {"fn":"looks","args":{"columns":{"state":["LOW","LOW","LOW","LOW","RISE","NONE","FALL","LOW","LOW","LOW","LOW"],"at":[0,0,0,0,0.9,0,0.1,0,0,0,0],"edges":[0,0,0,0,1,0,1,0,0,0,0],"high":[0,0,0,0,99.99999999999997,1000,100.0,0,0,0,0],"known":[1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000]},"shown":[0,11],"width":2,"per":1000,"timebase":[1000000,1]},"expect":{"4":["stroke",0.29524912523714253],"6":["stroke",0.29524912523714253]},"close":1e-12,"note":"Edges 1.2 columns apart, either side of a column with no data: close enough to join, but a column with no data ends a run."},
+        {"fn":"looks","args":{"columns":{"state":["LOW","LOW","LOW","LOW","BUSY","LOW","LOW","LOW","LOW"],"at":[0,0,0,0,0,0,0,0,0],"edges":[0,0,0,0,2,0,0,0,0],"high":[0,0,0,0,500.0,0,0,0,0],"known":[1000,1000,1000,1000,1000,1000,1000,1000,1000]},"shown":[0,9],"width":2,"per":1000,"timebase":[1000000,1]},"expect":{"4":["stroke",1]},"close":1e-12,"note":"A busy column, a pair as verge's under-range flag gives one, with nothing beside it: a lone stroke at full ink."},
+        {"fn":"looks","args":{"columns":{"state":["LOW","LOW","LOW","LOW","BUSY","LOW","LOW","RISE","HIGH","HIGH","HIGH"],"at":[0,0,0,0,0,0,0,0.5,0,0,0],"edges":[0,0,0,0,2,0,0,1,0,0,0],"high":[0,0,0,0,500.0,0,0,500.0,1000,1000,1000],"known":[1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000]},"shown":[0,11],"width":2,"per":1000,"timebase":[1000000,1]},"expect":{"4":["stroke",0.7235863111416478],"7":["stroke",0.6784318117920507]},"close":1e-12,"note":"A busy column and an edge 3 columns apart, a gap of 1 between their paint: each a stroke, the busy column's at the rate of its 2 edges over the 3 ms, 0.72."}
+      ]
+    }
+  ]
+}

@@ -123,6 +123,9 @@ function coverage(rects: Rect[], band: TraceBand, count: number): Uint8Array {
   return out;
 }
 
+/** Columns' edge counts and time, none: the trace draws from state and position alone. */
+const unsummed = (n: number) => ({ edges: new Float64Array(n), high: new Float64Array(n), known: new Float64Array(n) });
+
 /** Each column's state and edge position, from a seed: `dense` is the chance a column changes. */
 function columns(seed: number, count: number, dense: number, busy: number): DigitalColumns {
   let s = seed;
@@ -141,7 +144,7 @@ function columns(seed: number, count: number, dense: number, busy: number): Digi
       level ^= 1;
     } else state[c] = level ? HIGH : LOW;
   }
-  return { state, at };
+  return { state, at, ...unsummed(count) };
 }
 
 function both(cols: DigitalColumns, count: number, band: TraceBand, join: boolean) {
@@ -196,7 +199,7 @@ test("beside a column with no data, a run paints the margins the strokes left ba
   for (const [name, s, t] of cases) {
     for (const lw of [2, 3, 4, 5, 6]) {
       const band: TraceBand = { left: 10, yH: lw % 2 ? 6.5 : 6, yL: lw % 2 ? 30.5 : 30, lw };
-      const cols = { state: Uint8Array.from(s), at: Float64Array.from(t) };
+      const cols = { state: Uint8Array.from(s), at: Float64Array.from(t), ...unsummed(s.length) };
       const { old, now } = both(cols, s.length, band, true);
       assert.ok(now.fill.length > 1, `${name}, lw ${lw}: one rectangle`);
       const a = coverage(painted(old.line, old.fill, lw), band, s.length);
@@ -233,7 +236,7 @@ test("a run of edges a column apart is one shape; lone edges keep their strokes"
   const band: TraceBand = { left: 0, yH: 6.5, yL: 30.5, lw: 3 };
   // 1,000 columns, an edge in each: the strokes overlap all the way along.
   const n = 1000;
-  const dense: DigitalColumns = { state: Uint8Array.from({ length: n }, (_, c) => (c % 2 ? FALL : RISE)), at: new Float64Array(n).fill(0.5) };
+  const dense: DigitalColumns = { state: Uint8Array.from({ length: n }, (_, c) => (c % 2 ? FALL : RISE)), at: new Float64Array(n).fill(0.5), ...unsummed(n) };
   const { old, now } = both(dense, n, band, true);
   assert.equal(old.line.length, 3 * n + 1);
   // The band and the margin above whole; the margin below, which the line comes in on from the
@@ -244,7 +247,7 @@ test("a run of edges a column apart is one shape; lone edges keep their strokes"
   ]);
   assert.deepEqual(now.line, [["M", 0, 30.5], ["L", 0.5, 30.5], ["M", n - 1 + 0.5, 30.5], ["L", n, 30.5]]);
   // Edges ten columns apart: each stroked as before, nothing filled.
-  const sparse: DigitalColumns = { state: Uint8Array.from({ length: 100 }, (_, c) => (c % 10 === 5 ? (c % 20 === 5 ? RISE : FALL) : c % 20 < 5 || c % 20 > 15 ? LOW : HIGH)), at: new Float64Array(100).fill(0.25) };
+  const sparse: DigitalColumns = { state: Uint8Array.from({ length: 100 }, (_, c) => (c % 10 === 5 ? (c % 20 === 5 ? RISE : FALL) : c % 20 < 5 || c % 20 > 15 ? LOW : HIGH)), at: new Float64Array(100).fill(0.25), ...unsummed(100) };
   const s = both(sparse, 100, band, true);
   assert.deepEqual(s.now, s.old);
   assert.deepEqual(s.now.fill, []);

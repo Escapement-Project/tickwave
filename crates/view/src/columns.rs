@@ -27,6 +27,15 @@ pub struct DigitalColumns {
     pub state: Vec<State>,
     /// For `Rise` and `Fall`, where in the column the edge sits, from 0 to 1.
     pub at: Vec<f64>,
+    /// The edges in each column: counted from edges, and from overview buckets each bucket's
+    /// `shade::count` times the share of the bucket the column covers.
+    pub edges: Vec<f64>,
+    /// The ticks of each column at the high level, of those in `known`: from edges exactly, from
+    /// overview buckets each bucket's ticks in the column at its duty's share.
+    pub high: Vec<f64>,
+    /// The ticks of each column whose level is drawn: in the channel's data, and from overview
+    /// buckets, in its kept span.
+    pub known: Vec<f64>,
 }
 
 impl DigitalColumns {
@@ -34,6 +43,30 @@ impl DigitalColumns {
         Self {
             state: vec![State::None; count],
             at: vec![0.0; count],
+            edges: vec![0.0; count],
+            high: vec![0.0; count],
+            known: vec![0.0; count],
+        }
+    }
+
+    /// Whether each list holds `count` columns.
+    pub(crate) fn holds(&self, count: usize) -> bool {
+        [
+            self.state.len(),
+            self.at.len(),
+            self.edges.len(),
+            self.high.len(),
+            self.known.len(),
+        ]
+        .iter()
+        .all(|&n| n == count)
+    }
+
+    /// Column `k`'s share of its known time high, NaN where none is known.
+    pub fn share(&self, k: usize) -> f64 {
+        match self.known[k] > 0.0 {
+            true => self.high[k] / self.known[k],
+            false => f64::NAN,
         }
     }
 }
@@ -54,15 +87,16 @@ pub struct Edges<'a> {
     pub ticks: &'a [i64],
 }
 
-/// Buckets of `bucket` ticks, the first starting at `start`, a multiple of `bucket`.
+/// Buckets of `bucket` ticks, the first starting at `start`, a multiple of `bucket`, as a level
+/// stores them (FORMAT.md, "Overview").
 #[derive(Clone, Copy, Debug)]
 pub struct DigitalOverview<'a> {
     pub bucket: i64,
     pub start: i64,
-    /// The level at each bucket's start.
-    pub level: &'a [bool],
-    /// Where the level changes inside the bucket.
-    pub changes: &'a [bool],
+    /// Each bucket's density: 0 for no edge, one step up a quarter of a doubling of its edges.
+    pub density: &'a [u8],
+    /// Each bucket's duty: 0 wholly low to 14 wholly high, 15 wholly outside the kept span.
+    pub duty: &'a [u8],
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -150,13 +184,20 @@ pub(crate) fn digital_from_edges_into(
     to: f64,
     cols: &mut DigitalColumns,
 ) -> Range<usize> {
-    let DigitalColumns { state, at } = cols;
+    let DigitalColumns {
+        state,
+        at,
+        edges: count,
+        high,
+        known,
+    } = cols;
     let t = edges.ticks;
     let (c0, c1) = column_range(g, from, to);
     let col_start = |c: usize| js::max(from, g.x0 + c as f64 * g.per);
     let mut i = lower_bound(t, col_start(c0), 0);
     let mut level = edges.level ^ (i % 2 == 1);
     for c in c0..c1 {
+        let start = col_start(c);
         let end = js::min(to, g.x0 + (c + 1) as f64 * g.per);
         let j = lower_bound(t, end, i);
         let n = j - i;
@@ -170,6 +211,20 @@ pub(crate) fn digital_from_edges_into(
             }
             _ => State::Busy,
         };
+        // The time high: the falls' ticks less the rises', and the column's end where it ends
+        // high less its start where it starts high. The edges alternate, the first falling where
+        // the column starts high; whole ticks below 2^53 sum exactly.
+        let (pairs, last) = t[i..j].as_chunks::<2>();
+        let alternate =
+            pairs.iter().map(|[a, b]| a - b).sum::<i64>() + last.first().map_or(0, |x| *x);
+        let mut h = (if level { alternate } else { -alternate }) as f64;
+        if level {
+            h -= start;
+        }
+        if level ^ (n % 2 == 1) {
+            h += end;
+        }
+        (count[c], high[c], known[c]) = (n as f64, h, js::max(0.0, end - start));
         level ^= n % 2 == 1;
         i = j;
     }
@@ -177,8 +232,10 @@ pub(crate) fn digital_from_edges_into(
 }
 
 /// Columns from an overview's buckets, whatever their width against a column's. A column any
-/// changing bucket overlaps is busy: the overview cannot say where in the bucket the change was,
-/// or how many.
+/// bucket with an edge, or a level between low and high, overlaps is busy, and so is one whose
+/// buckets lie at different levels: the overview cannot say where the change was. A bucket counts toward a column's edges and time by
+/// the share of it the column covers. A column whose buckets all lie outside the kept span draws
+/// nothing.
 pub fn digital_from_overview(g: &Grid, ov: &DigitalOverview, from: f64, to: f64) -> DigitalColumns {
     let mut cols = DigitalColumns::empty(g.count);
     digital_from_overview_into(g, ov, from, to, &mut cols);
@@ -193,26 +250,42 @@ pub(crate) fn digital_from_overview_into(
     to: f64,
     cols: &mut DigitalColumns,
 ) -> Range<usize> {
-    let n = ov.level.len();
+    let n = ov.density.len();
     let (start, bucket) = (ov.start as f64, ov.bucket as f64);
     let lo = js::max(from, start);
     let hi = js::min(to, start + n as f64 * bucket);
     let (c0, c1) = column_range(g, lo, hi);
     cols.at[c0..c1].fill(0.0);
-    for (c, state) in cols.state.iter_mut().enumerate().take(c1).skip(c0) {
+    for c in c0..c1 {
         let s = js::max(lo, g.x0 + c as f64 * g.per);
         let e = js::min(hi, g.x0 + (c + 1) as f64 * g.per);
         let k0 = js::max(0.0, ((s - start) / bucket).floor()) as usize;
         let k1 = js::min(n as f64, ((e - start) / bucket).ceil()) as usize;
-        let busy = (k0..k1).any(|k| ov.changes.get(k).copied().unwrap_or(false));
-        // Past the buckets reads as low, as the web's out-of-range read does.
-        *state = if busy {
-            State::Busy
-        } else if ov.level.get(k0).copied().unwrap_or(false) {
-            State::High
-        } else {
-            State::Low
+        let (mut edges, mut high, mut known) = (0.0, 0.0, 0.0);
+        let (mut busy, mut level) = (false, None);
+        for k in k0..k1 {
+            let b0 = start + k as f64 * bucket;
+            let ticks = js::max(0.0, js::min(e, b0 + bucket) - js::max(s, b0));
+            // A bucket past the duties reads as outside the kept span.
+            let density = ov.density[k];
+            let duty = ov.duty.get(k).copied().unwrap_or(15);
+            edges += ticks / bucket * crate::shade::count(density);
+            busy |= density > 0 || (1..=13).contains(&duty);
+            if duty <= 14 {
+                known += ticks;
+                high += ticks * f64::from(duty) / 14.0;
+                // Wholly high, or wholly low: a level differing from the one before is a change
+                // with no edge, a gap's end on the buckets' boundary.
+                busy |= *level.get_or_insert(duty == 14) != (duty == 14);
+            }
+        }
+        cols.state[c] = match (busy, level) {
+            (true, _) => State::Busy,
+            (false, Some(true)) => State::High,
+            (false, Some(false)) => State::Low,
+            (false, None) => State::None,
         };
+        (cols.edges[c], cols.high[c], cols.known[c]) = (edges, high, known);
     }
     c0..c1
 }

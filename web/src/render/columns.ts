@@ -2,6 +2,7 @@
 // Pure functions, so the drawing rules can be tested without a canvas.
 
 import { lowerBound } from "../search.ts";
+import { countOf } from "./shade.ts";
 import {
   channelIndexAtOrAfter,
   fillRuns,
@@ -26,6 +27,33 @@ export interface DigitalColumns {
   readonly state: Uint8Array;
   /** For RISE and FALL, where in the column the edge sits, from 0 to 1. */
   readonly at: Float64Array;
+  /**
+   * The edges in each column: counted from edges, and from a level's buckets each bucket's
+   * `shade.countOf` times the share of the bucket the column covers.
+   */
+  readonly edges: Float64Array;
+  /**
+   * The ticks of each column at the high level, of those in `known`: from edges exactly, from a
+   * level's buckets each bucket's ticks in the column at its duty's share.
+   */
+  readonly high: Float64Array;
+  /** The ticks of each column whose level is drawn: in the channel's data, and from a level's buckets, in its kept span. */
+  readonly known: Float64Array;
+}
+
+/** Buckets of `bucket` ticks from `start`, as a level stores them (FORMAT.md, "Overview"). */
+export interface DigitalLevels {
+  readonly bucket: number;
+  readonly start: number;
+  /** Each bucket's density: 0 for no edge, one step up a quarter of a doubling of its edges. */
+  readonly density: Uint8Array;
+  /** Each bucket's duty: 0 wholly low to 14 wholly high, 15 wholly outside the kept span. */
+  readonly duty: Uint8Array;
+}
+
+/** Column `k`'s share of its known time high, NaN where none is known. */
+export function share(cols: DigitalColumns, k: number): number {
+  return cols.known[k] > 0 ? cols.high[k] / cols.known[k] : NaN;
 }
 
 /** The ticks a column grid covers, clipped to [from, to): columns outside get NONE. */
@@ -48,12 +76,14 @@ function columnRange(g: Grid, from: number, to: number): [number, number] {
 export function digitalFromEdges(g: Grid, edges: Edges, from: number, to: number): DigitalColumns {
   const state = new Uint8Array(g.count);
   const at = new Float64Array(g.count);
+  const [count, high, known] = [new Float64Array(g.count), new Float64Array(g.count), new Float64Array(g.count)];
   const t = edges.ticks;
   const [c0, c1] = columnRange(g, from, to);
   const colStart = (c: number) => Math.max(from, g.x0 + c * g.per);
   let i = lowerBound(t, colStart(c0));
   let level = edges.level ^ (i & 1);
   for (let c = c0; c < c1; c++) {
+    const start = colStart(c);
     const end = Math.min(to, g.x0 + (c + 1) * g.per);
     const j = lowerBound(t, end, i);
     const n = j - i;
@@ -62,10 +92,24 @@ export function digitalFromEdges(g: Grid, edges: Edges, from: number, to: number
       state[c] = level ? FALL : RISE;
       at[c] = (t[i] - (g.x0 + c * g.per)) / g.per;
     } else state[c] = BUSY;
+    // The time high: the falls' ticks less the rises', and the column's end where it ends high
+    // less its start where it starts high. The edges alternate, the first falling where the column
+    // starts high; whole ticks below 2^53 sum exactly.
+    let alternate = 0;
+    let k = i;
+    for (; k + 1 < j; k += 2) alternate += t[k] - t[k + 1];
+    if (k < j) alternate += t[k];
+    // `0 - x`, not `-x`: a column with no edge, low, is high +0 ticks, not -0.
+    let h = level ? alternate : 0 - alternate;
+    if (level) h -= start;
+    if (level ^ (n & 1)) h += end;
+    count[c] = n;
+    high[c] = h;
+    known[c] = Math.max(0, end - start);
     level ^= n & 1;
     i = j;
   }
-  return { state, at };
+  return { state, at, edges: count, high, known };
 }
 
 /**
@@ -89,7 +133,59 @@ export function digitalFromOverview(g: Grid, ov: DigitalOverview, from: number, 
     for (let k = k0; k < k1 && !busy; k++) busy = ov.changes[k] === 1;
     state[c] = busy ? BUSY : ov.level[k0] ? HIGH : LOW;
   }
-  return { state, at };
+  // A level's bits hold no count or share: until the web reads density and duty, none.
+  return { state, at, edges: new Float64Array(g.count), high: new Float64Array(g.count), known: new Float64Array(g.count) };
+}
+
+/**
+ * Columns from a level's buckets, whatever their width against a column's. A column any bucket
+ * with an edge, or a level between low and high, overlaps is busy, and so is one whose buckets lie
+ * at different levels: the level cannot say where the change was. A bucket counts toward a column's edges and time by the share of it
+ * the column covers. A column whose buckets all lie outside the kept span draws nothing.
+ */
+export function digitalFromLevels(g: Grid, ov: DigitalLevels, from: number, to: number): DigitalColumns {
+  const state = new Uint8Array(g.count);
+  const at = new Float64Array(g.count);
+  const [count, high, known] = [new Float64Array(g.count), new Float64Array(g.count), new Float64Array(g.count)];
+  const n = ov.density.length;
+  const lo = Math.max(from, ov.start);
+  const hi = Math.min(to, ov.start + n * ov.bucket);
+  const [c0, c1] = columnRange(g, lo, hi);
+  for (let c = c0; c < c1; c++) {
+    const s = Math.max(lo, g.x0 + c * g.per);
+    const e = Math.min(hi, g.x0 + (c + 1) * g.per);
+    const k0 = Math.max(0, Math.floor((s - ov.start) / ov.bucket));
+    const k1 = Math.min(n, Math.ceil((e - ov.start) / ov.bucket));
+    let edges = 0;
+    let h = 0;
+    let known1 = 0;
+    let busy = false;
+    // The first known bucket's level, where none has an edge: 1 high, 0 low, -1 none known.
+    let level = -1;
+    for (let k = k0; k < k1; k++) {
+      const b0 = ov.start + k * ov.bucket;
+      const ticks = Math.max(0, Math.min(e, b0 + ov.bucket) - Math.max(s, b0));
+      // A bucket past the duties reads as outside the kept span.
+      const density = ov.density[k];
+      const duty = ov.duty[k] ?? 15;
+      edges += (ticks / ov.bucket) * countOf(density);
+      busy ||= density > 0 || (duty >= 1 && duty <= 13);
+      if (duty <= 14) {
+        known1 += ticks;
+        h += (ticks * duty) / 14;
+        // Wholly high, or wholly low: a level differing from the one before is a change with no
+        // edge, a gap's end on the buckets' boundary.
+        const now = duty === 14 ? 1 : 0;
+        if (level < 0) level = now;
+        else busy ||= level !== now;
+      }
+    }
+    state[c] = busy ? BUSY : level < 0 ? NONE : level ? HIGH : LOW;
+    count[c] = edges;
+    high[c] = h;
+    known[c] = known1;
+  }
+  return { state, at, edges: count, high, known };
 }
 
 export interface AnalogColumns {

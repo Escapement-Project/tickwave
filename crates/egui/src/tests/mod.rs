@@ -402,7 +402,6 @@ pub fn palette() -> Palette {
         pale: 0.35,
         fill: 0.45,
         shade: 0.2,
-        busy: 0.6,
     }
 }
 

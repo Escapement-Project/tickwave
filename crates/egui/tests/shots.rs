@@ -166,6 +166,104 @@ fn shots() {
     }
 }
 
+/// Pictures of a list of views, for a question a person settles by looking, as how a dense digital
+/// channel reads at each zoom:
+///
+///     TICKWAVE_SHOTS=DIR TICKWAVE_VIEWS=LIST \
+///         cargo test -p escapement-tickwave-egui --test shots -- --ignored views
+///
+/// LIST's lines, tab-separated: a name, a recording's path, the trace's channel (`-` for none,
+/// where every channel is digital), the window in ticks as `from..to` (`whole` for the whole
+/// recording), and the lanes' channels, comma-separated. Each is rendered at two device pixels a
+/// point, as a page at a DPR of 2 draws, to `DIR/<name>.png`, with `DIR/<name>.txt` saying the
+/// window, its ticks a device column and the face. Lines starting with `#` are skipped.
+#[test]
+#[ignore = "renders the listed views with wgpu into TICKWAVE_SHOTS"]
+fn views() {
+    let dir = PathBuf::from(std::env::var("TICKWAVE_SHOTS").expect("TICKWAVE_SHOTS"));
+    let list = std::env::var("TICKWAVE_VIEWS").expect("TICKWAVE_VIEWS");
+    std::fs::create_dir_all(&dir).unwrap();
+    for line in std::fs::read_to_string(list).unwrap().lines() {
+        if line.trim().is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let [name, path, trace, window, lanes] = line.split('\t').collect::<Vec<_>>()[..] else {
+            panic!("not five fields: {line:?}");
+        };
+        let window = match window {
+            "whole" => ViewState::default().window,
+            w => {
+                let (a, b) = w.split_once("..").expect("from..to");
+                Window::At(a.parse().unwrap()..b.parse().unwrap())
+            }
+        };
+        let lanes: Vec<&str> = lanes.split(',').filter(|s| !s.is_empty()).collect();
+        let height = 64.0 + 24.0 * lanes.len() as f32 + if trace == "-" { 0.0 } else { 160.0 };
+        let face = tokens::face(false).unwrap();
+        let host = Host {
+            viewer: None,
+            state: ViewState {
+                window,
+                ..ViewState::default()
+            },
+            face,
+            trace: 0,
+            flag: None,
+            lanes: Vec::new(),
+        };
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(SIZE.x, height))
+            .with_pixels_per_point(2.0)
+            .wgpu()
+            .build_ui_state(
+                |ui, host: &mut Host| {
+                    let Some(viewer) = &host.viewer else { return };
+                    ui.painter()
+                        .rect_filled(ui.ctx().content_rect(), 0.0, host.face.page);
+                    let graph = Graph::new(viewer, &mut host.state, &host.face.palette, host.trace)
+                        .flag(host.flag)
+                        .lanes(&host.lanes)
+                        .include_zero(true)
+                        .height(ui.available_height());
+                    ui.add(graph);
+                },
+                host,
+            );
+        let viewer = Viewer::open(&h.ctx, Path::new(path)).unwrap();
+        let (trace, flag, lanes) = viewer.recording(|r| {
+            let by = |n: &str| {
+                r.channel(n)
+                    .unwrap_or_else(|| panic!("{name}: no channel {n}"))
+            };
+            let lanes: Vec<usize> = lanes.iter().map(|n| by(n)).collect();
+            let trace = if trace == "-" { lanes[0] } else { by(trace) };
+            (trace, r.channel("under_range"), lanes)
+        });
+        let host = h.state_mut();
+        (host.trace, host.flag, host.lanes) = (trace, flag, lanes);
+        host.viewer = Some(viewer);
+        h.ctx.set_visuals(tokens::visuals(&h.state().face));
+        settle(&mut h);
+        let answer = h.state().viewer.as_ref().unwrap().answer().unwrap();
+        let w = &answer.window;
+        std::fs::write(
+            dir.join(format!("{name}.txt")),
+            format!(
+                "{path}\nwindow {}..{} ({} ticks), {} ticks a device column, day face\n",
+                w.start,
+                w.end,
+                w.end - w.start,
+                answer.grid.per
+            ),
+        )
+        .unwrap();
+        h.render()
+            .unwrap()
+            .save(dir.join(format!("{name}.png")))
+            .unwrap();
+    }
+}
+
 /// The faces as `site/tokens.css` states them, read by hand: the day's surface and ink, the
 /// night's, and `--wash`, `color-mix(in srgb, var(--ink) 12%, transparent)`: the face's own ink at
 /// 12 % alpha, premultiplied as egui keeps colours.

@@ -17,6 +17,7 @@ pub mod readouts;
 mod recording;
 pub mod runs;
 pub mod scale;
+pub mod shade;
 pub mod spans;
 mod statistics;
 pub mod time;

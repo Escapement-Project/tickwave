@@ -9,6 +9,7 @@ use escapement_tickwave_view::columns::{DigitalColumns, Grid, State};
 use escapement_tickwave_view::format::model::Ratio;
 use escapement_tickwave_view::readouts::format_marks;
 use escapement_tickwave_view::scale::{ValueRange, range_marks};
+use escapement_tickwave_view::shade::{self, Look};
 use escapement_tickwave_view::{AnalogColumns, Drawn, Marker, Point, StripAnswer};
 
 use crate::graph::{LABEL_TOP, Layout, View, fitted};
@@ -587,7 +588,8 @@ fn trace(f: &Frame, px: f32, plot: &egui::Painter) -> (Mesh, Lines, Vec<CircleSh
     (fills, lines, circles)
 }
 
-/// Digital channel `c`'s lane: its gaps shaded, its busy columns filled, its levels as lines.
+/// Digital channel `c`'s lane: its gaps shaded, its levels as lines, and where edges crowd, the
+/// band between the levels and each level's rail at the opacities `shade` gives them.
 fn lane(ui: &Ui, f: &Frame, c: usize, rect: Rect, px: f32) {
     let p = f.palette;
     let Some(held) = f.held else { return };
@@ -614,20 +616,47 @@ fn lane(ui: &Ui, f: &Frame, c: usize, rect: Rect, px: f32) {
     let mut fills = Mesh::default();
     let mut lines = Lines::default();
     let stroke = Stroke::new(LANE_WIDTH, p.trace);
-    let busy = p.trace.gamma_multiply(p.busy);
     let g = &held.answer.grid;
-    let DigitalColumns { state, at } = columns;
+    let shown = columns_over(g, w.start.max(a.start), w.end.min(a.end));
+    let width = f64::from(LANE_WIDTH / px);
+    let looks = shade::looks(columns, shown.clone(), width, g.per, f.facts.timebase);
+    let DigitalColumns { state, at, .. } = columns;
+    let half = LANE_WIDTH / 2.0;
     let mut line = Vec::new();
     let mut pen: Option<f32> = None;
-    for k in columns_over(g, w.start.max(a.start), w.end.min(a.end)) {
+    for k in shown {
         let x0 = f.view.x(g.x0 + k as f64 * g.per);
         let x1 = f.view.x(g.x0 + (k + 1) as f64 * g.per);
-        match state[k] {
-            State::None => {
+        match (state[k], looks[k]) {
+            (State::None, _) => {
                 lines.add(&mut line, stroke);
                 pen = None;
             }
-            State::Low | State::High => {
+            (
+                _,
+                Look::Shade {
+                    band,
+                    high: h,
+                    low: l,
+                },
+            ) => {
+                let (band, h, l) = (band as f32, h as f32, l as f32);
+                lines.add(&mut line, stroke);
+                pen = None;
+                let x1 = x1.max(x0 + px);
+                let mut rect = |top: f32, bottom: f32, alpha: f32| {
+                    if alpha > 0.0 {
+                        fills.add_colored_rect(
+                            Rect::from_min_max(pos2(x0, top), pos2(x1, bottom)),
+                            p.trace.gamma_multiply(alpha),
+                        );
+                    }
+                };
+                rect(high + half, low - half, band);
+                rect(high - half, high + half, h);
+                rect(low - half, low + half, l);
+            }
+            (State::Low | State::High, _) => {
                 let y = if state[k] == State::High { high } else { low };
                 if pen != Some(y) {
                     lines.add(&mut line, stroke);
@@ -636,7 +665,30 @@ fn lane(ui: &Ui, f: &Frame, c: usize, rect: Rect, px: f32) {
                 step(&mut line, pos2(x1, y));
                 pen = Some(y);
             }
-            State::Rise | State::Fall => {
+            (State::Busy, Look::Stroke(alpha)) => {
+                // Alone, as a lone edge: the line in at the level before it to its middle, a
+                // stroke across the band, and out at the level the next column starts at.
+                let x = (x0 + x1) / 2.0;
+                if let Some(y) = pen {
+                    step(&mut line, pos2(x, y));
+                }
+                lines.add(&mut line, stroke);
+                fills.add_colored_rect(
+                    Rect::from_min_max(pos2(x - half, high - half), pos2(x + half, low + half)),
+                    p.trace.gamma_multiply(alpha as f32),
+                );
+                let after = match state.get(k + 1) {
+                    Some(State::High | State::Fall) => Some(high),
+                    Some(State::Low | State::Rise) => Some(low),
+                    _ => pen,
+                };
+                pen = after;
+                if let Some(y) = after {
+                    line.extend([pos2(x, y), pos2(x1, y)]);
+                }
+            }
+            (State::Rise | State::Fall, Look::Stroke(alpha)) => {
+                let alpha = alpha as f32;
                 let (ya, yb) = if state[k] == State::Rise {
                     (low, high)
                 } else {
@@ -648,16 +700,22 @@ fn lane(ui: &Ui, f: &Frame, c: usize, rect: Rect, px: f32) {
                     line.push(pos2(x0, ya));
                 }
                 step(&mut line, pos2(x, ya));
-                line.extend([pos2(x, yb), pos2(x1, yb)]);
+                if alpha >= 1.0 {
+                    line.push(pos2(x, yb));
+                } else {
+                    // Its levels at full ink, the edge itself at the opacity the model gives it.
+                    lines.add(&mut line, stroke);
+                    fills.add_colored_rect(
+                        Rect::from_min_max(pos2(x - half, high - half), pos2(x + half, low + half)),
+                        p.trace.gamma_multiply(alpha),
+                    );
+                    line.push(pos2(x, yb));
+                }
+                line.push(pos2(x1, yb));
                 pen = Some(yb);
             }
-            State::Busy => {
-                lines.add(&mut line, stroke);
-                pen = None;
-                fills.add_colored_rect(
-                    Rect::from_min_max(pos2(x0, high), pos2(x1.max(x0 + px), low)),
-                    busy,
-                );
+            (State::Rise | State::Fall | State::Busy, _) => {
+                debug_assert!(false, "a changing column is a stroke or a shade");
             }
         }
     }

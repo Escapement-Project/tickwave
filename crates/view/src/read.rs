@@ -717,8 +717,8 @@ impl Recording {
         Ok(out)
     }
 
-    /// Digital channel `channel`'s buckets `k0..k1` of level `level`: the level entering each and
-    /// whether it changes inside. Buckets past what the level holds read as low and quiet.
+    /// Digital channel `channel`'s buckets `k0..k1` of level `level`: each one's density and duty.
+    /// Buckets past what the level holds read as quiet and outside the kept span.
     pub(crate) fn digital_buckets(
         &self,
         r: &Reading,
@@ -726,12 +726,12 @@ impl Recording {
         level: usize,
         k0: u64,
         k1: u64,
-    ) -> Result<(Vec<bool>, Vec<bool>), Error> {
+    ) -> Result<(Vec<u8>, Vec<u8>), Error> {
         let Some(Place::Digital { .. }) = self.places.get(channel) else {
             return Err(Error::NoChannel(channel));
         };
         let n = k1.saturating_sub(k0) as usize;
-        let (mut levels, mut changes) = (vec![false; n], vec![false; n]);
+        let (mut density, mut duty) = (vec![0; n], vec![DigitalBucket::OUTSIDE; n]);
         for (first, piece) in self.pieces(r, channel, level, k0, k1)? {
             let level = piece.level();
             let c = &level.data;
@@ -739,12 +739,12 @@ impl Recording {
                 return Err(Error::NoChannel(channel));
             }
             for k in k0.max(first)..k1.min(first + level.buckets) {
-                let (l, ch) = level_and_change(c.digital(k - first).expect("digital"));
-                levels[(k - k0) as usize] = l;
-                changes[(k - k0) as usize] = ch;
+                let b = c.digital(k - first).expect("digital");
+                density[(k - k0) as usize] = b.density;
+                duty[(k - k0) as usize] = b.duty;
             }
         }
-        Ok((levels, changes))
+        Ok((density, duty))
     }
 
     /// The index of the first sample at or after `tick` of analog or derived channel `channel`.
@@ -794,14 +794,6 @@ fn bucket(a: &AnalogOverview, i: usize, rule: Rule) -> (f64, f64, Option<i128>) 
             codes(Sample::I64(b.min), Sample::I64(b.max), b.min > b.max, b.sum)
         }
     }
-}
-
-/// A digital bucket as the view draws it until it draws density and duty (phase 6): whether its
-/// level changes inside it, from an edge or a gap's end, and its level where it holds still. A
-/// busy bucket's level says nothing; one wholly outside the kept span reads low.
-pub(crate) fn level_and_change(b: DigitalBucket) -> (bool, bool) {
-    let busy = b.density > 0 || !matches!(b.duty, 0 | 14 | DigitalBucket::OUTSIDE);
-    (b.duty >= 7 && b.duty != DigitalBucket::OUTSIDE, busy)
 }
 
 /// About the bytes a decoded overview level holds.

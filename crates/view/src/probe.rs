@@ -296,9 +296,9 @@ pub fn find_edge(
     let mut spans: Vec<(i64, i64)> = Vec::new();
     if k1 > k0 {
         let reading = crate::cache::Reading::new(cancel);
-        let (_, changes) = rec.digital_buckets(&reading, channel, level, k0 as u64, k1 as u64)?;
-        for (j, &changed) in changes.iter().enumerate() {
-            if changed {
+        let (density, _) = rec.digital_buckets(&reading, channel, level, k0 as u64, k1 as u64)?;
+        for (j, &d) in density.iter().enumerate() {
+            if d > 0 {
                 let k = k0 + j as i64;
                 spans.push((lo.max(k * bucket), hi.min((k + 1) * bucket)));
             }
