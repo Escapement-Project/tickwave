@@ -234,7 +234,7 @@ test("a sidecar's text handed in before the view has loaded is the one it shows"
     document.body.append(view);
     await new Promise((resolve) => view.addEventListener("tickwave-ready", resolve, { once: true }));
     return view.shadowRoot!.querySelector(".steps .count")!.textContent;
-  }, "blake3:ccc8b7d8c3e4cb30da7fc6088e54ebeba2858ad402eb3fb5a9aeb50be989accf");
+  }, "blake3:63773d56fb3420735c864932f8d2441acd6f31a51b557e073bf27755a0534697");
   // The text's one annotation, not the file's sixteen WAITs.
   expect(count).toBe("– of 1");
 });

@@ -64,6 +64,12 @@ export class ShapedSource implements Source {
     return { level: got.level, ticks: got.ticks.map((t) => t + d), ...(listed && { listed }) };
   }
 
+  async edgeCount(channel: number, start: number, end: number, signal?: AbortSignal): Promise<number> {
+    const [s, e] = this.#span(channel, start, end);
+    if (this.#inner.edgeCount) return this.#inner.edgeCount(channel, s, e, signal);
+    return (await this.#inner.edges(channel, s, e, signal)).ticks.length;
+  }
+
   async overview(channel: number, start: number, end: number, maxBucket: number, signal?: AbortSignal): Promise<Overview | null> {
     const [s, e, d] = this.#span(channel, start, end);
     const got = await this.#inner.overview(channel, s, e, maxBucket, signal);
@@ -85,7 +91,8 @@ export class ShapedSource implements Source {
 export function shaped(info: RecordingInfo, offsets: readonly number[]): RecordingInfo {
   const channels = info.channels.map((c, i): Channel => {
     const d = offsets[i] ?? 0;
-    if (d === 0) return c;
+    // A channel this version can't read has nothing to move.
+    if (d === 0 || c.kind === "unavailable") return c;
     // Its source's ticks stay its own: the source's tick 0 moves. A digital channel's other ticks
     // are on the axis already; its map only places a stated kept span, where it has one.
     const map = mapOf(c);

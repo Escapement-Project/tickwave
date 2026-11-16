@@ -82,8 +82,8 @@ export class Track {
     this.#changed = changed;
     this.#failed = failed;
     // The base is asked for at once, not at the first draw: a first draw comes from it, and the
-    // draw that asks would leave it a frame later.
-    void this.#fetchBase();
+    // draw that asks would leave it a frame later. A channel this version can't read has none.
+    if (channel.kind !== "unavailable") void this.#fetchBase();
   }
 
   /** The channel moved by `by` ticks, now `channel`: the tiles in hand move with it, so the row
@@ -108,6 +108,7 @@ export class Track {
   #mode(per: number): Mode {
     const c = this.channel;
     if (c.kind === "digital") return per > this.#noOverviewAtOrBelow ? "overview" : "edges";
+    if (c.kind === "unavailable") return "overview";
     const period = axisPeriod(c);
     if (per < SAMPLES_PER_COLUMN * period) return "samples";
     return per > this.#noOverviewAtOrBelow ? "overview" : "samples";
@@ -145,13 +146,16 @@ export class Track {
     return out;
   }
 
-  /** Whether the current tile is the one this view wants. */
+  /** Whether the current tile is the one this view wants: always, for a channel this version
+   * can't read, which reads nothing. */
   settled(start: number, end: number, per: number): boolean {
+    if (this.channel.kind === "unavailable") return true;
     return this.tile !== null && this.#fits(this.tile, this.#mode(per), start, end, per) && this.#pending === null;
   }
 
   /** Starts a fetch if the current tile and any pending one do not fit the view. */
   need(start: number, end: number, per: number): void {
+    if (this.channel.kind === "unavailable") return;
     const mode = this.#mode(per);
     if (this.tile && this.#fits(this.tile, mode, start, end, per)) {
       this.#pending?.abort.abort();

@@ -5,6 +5,16 @@
 import type { Annotation } from "./annotations.ts";
 import { named, type RecordingInfo, type Source } from "./source.ts";
 
+/** Bundled annotations as far as they are read: a recording's parts are read a range at a time
+ * (FORMAT.md, "Annotations"). */
+export interface BundledRead {
+  readonly annotations: Annotation[];
+  /** What reading them left out, and why. */
+  readonly problems: readonly string[];
+  /** Whether every one is read. */
+  readonly complete: boolean;
+}
+
 export interface Loader {
   /** Whether this loader reads the recording at `url`. */
   accepts(url: URL): boolean;
@@ -13,6 +23,9 @@ export interface Loader {
   annotations?(annotations: URL, recording: URL, source: Source): Promise<Annotation[]>;
   /** The annotations bundled into the recording itself, or null when it carries none. */
   bundled?(recording: URL, source: Source): Promise<Annotation[] | null>;
+  /** Those of the bundled annotations that ticks `span` meet, with any read before; every one
+   * where `span` is null. A loader without it serves `bundled`, whole. */
+  bundledIn?(recording: URL, source: Source, span: readonly [number, number] | null): Promise<BundledRead | null>;
   /** The resolved annotations of a sidecar whose hand-written file is `text`, with its includes
    * beside `base` (or the recording's local files when `base` is null). */
   annotationsText?(text: string, base: URL | null, recording: URL, source: Source): Promise<Annotation[]>;
@@ -120,6 +133,15 @@ export function bundledFor(recording: URL): Promise<Annotation[] | null> {
     const loader = await loaderFor(recording);
     return loader.bundled ? loader.bundled(recording, await sourceFor(recording)) : null;
   });
+}
+
+/** The bundled annotations ticks `span` meet, with any read before, or every one where `span` is
+ * null; null where the recording bundles none. Not cached here: the loader keeps what it reads. */
+export async function bundledIn(recording: URL, span: readonly [number, number] | null): Promise<BundledRead | null> {
+  const loader = await loaderFor(recording);
+  if (loader.bundledIn) return loader.bundledIn(recording, await sourceFor(recording), span);
+  const list = await bundledFor(recording);
+  return list && { annotations: list, problems: [], complete: true };
 }
 
 /** The head and the sidecar, ahead of a view: `<tickwave-ref>` calls this when it scrolls into view. */

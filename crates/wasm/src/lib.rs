@@ -12,18 +12,23 @@ use std::collections::HashMap;
 use std::ops::ControlFlow;
 
 #[cfg(feature = "annotations")]
-use escapement_tickwave_format::annotations::{self, Included};
+use escapement_tickwave_format::annotations::{self, Annotation, Included};
 use escapement_tickwave_format::decode::{
     self, BlockChannel, BlockRef, DecodeError, Footer, Index, LevelRef, List,
 };
 use escapement_tickwave_format::header::{
     AnalogCoding, BlockRow, MAJOR, OverviewRow, PREAMBLE_LEN, TRAILER_LEN, Trailer,
 };
-use escapement_tickwave_format::index::{Entry, Located, TableIndex};
+use escapement_tickwave_format::index::{Entry, Located, PAGE, Page, TableIndex};
 use escapement_tickwave_format::model::{Break, Gap};
-use escapement_tickwave_format::overview::{AnalogOverview, ChannelOverview, DigitalBucket, Level};
+use escapement_tickwave_format::overview::{AnalogOverview, ChannelOverview, Level};
+#[cfg(feature = "annotations")]
+use escapement_tickwave_format::parts;
+use escapement_tickwave_format::parts::PartRow;
 use escapement_tickwave_format::samples::{self, Product, Values};
 use js_sys::{BigInt64Array, Float32Array, Float64Array, Uint8Array};
+#[cfg(feature = "annotations")]
+use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
 fn limit(max_decoded: Option<u32>) -> usize {
@@ -142,6 +147,15 @@ impl Recording {
     #[wasm_bindgen(getter)]
     pub fn header(&self) -> String {
         self.header.clone()
+    }
+
+    /// Why this version can't read overview channel `o` (FORMAT.md, "Unavailable channels"), a
+    /// channel or a derived channel numbered after the channels; undefined for one it reads.
+    pub fn unavailable(&self, o: usize) -> Option<String> {
+        self.footer()
+            .check_available(o)
+            .err()
+            .map(|e| e.to_string())
     }
 
     /// The index pages and directories still to hand in through `addIndexPage`, as byte ranges
@@ -281,6 +295,17 @@ impl Recording {
             .map_err(|what| JsError::new(&format!("derived channel {d}: {what}")))?;
         let values: Vec<f64> = values.iter().map(|s| product.value(s)).collect();
         Ok(Float64Array::from(&values[..]))
+    }
+
+    /// The value one step of derived channel `d`'s code stands for, where its operation gives an
+    /// integer code (FORMAT.md, "Derived channels"); undefined for an f64 result, or a channel
+    /// this version doesn't compute.
+    #[wasm_bindgen(js_name = derivedStep)]
+    pub fn derived_step(&self, d: usize) -> Option<f64> {
+        match self.footer().products.get(d).copied().flatten()?.2 {
+            Product::Int { num, den, .. } | Product::Difference { num, den, .. } => Some(num / den),
+            Product::F64 { .. } | Product::F64Difference { .. } => None,
+        }
     }
 
     /// Resolves and checks a sidecar: the hand-written TOML file parsed and written out as JSON,
@@ -430,6 +455,25 @@ const BLOCK: usize = 8;
 /// An overview row as `levelPage` gives it: the first block it stands for, its frame's offset,
 /// length and decoded length, and how many blocks it stands for.
 const ROW: usize = 5;
+/// An annotation part's row as `partPage` gives it: its place among the rows, its frame's offset,
+/// length and decoded length, and the earliest tick and the latest its annotations reach.
+const PART: usize = 6;
+
+fn part_row(r: &[f64]) -> Result<PartRow, JsError> {
+    let &[_, offset, length, decoded, start, end] = r else {
+        return Err(JsError::new(&format!(
+            "a part row is {PART} numbers, not {}",
+            r.len()
+        )));
+    };
+    Ok(PartRow {
+        offset: offset as u64,
+        length: length as u32,
+        decoded_length: decoded as u32,
+        start: start as i64,
+        end: end as i64,
+    })
+}
 
 fn located(at: &[f64]) -> Result<Located, JsError> {
     let &[j, offset, length, first, number, next_first, next_number] = at else {
@@ -815,6 +859,145 @@ impl Recording {
         Ok(Float64Array::from(&values[..]))
     }
 
+    /// The pages of the annotation parts table that hold a part whose span meets ticks
+    /// `[start, end)`, as `blockPages` gives them; empty for a recording with no parts.
+    #[wasm_bindgen(js_name = partPages)]
+    pub fn part_pages(&mut self, start: f64, end: f64) -> Result<Option<Vec<f64>>, JsError> {
+        let Some(table) = self.footer().parts.clone() else {
+            return Ok(Some(Vec::new()));
+        };
+        let from = start.floor() as i64;
+        self.locate(
+            &table,
+            from..(end.ceil() as i64).max(from.saturating_add(1)),
+        )
+    }
+
+    /// The part rows on the parts table's page `at` (seven numbers, as `partPages` gives it),
+    /// from exactly the page record's bytes, checked: six numbers a row, its place among the rows,
+    /// which is the order the parts were written in, its frame's offset, length and decoded
+    /// length, and the earliest tick and the latest its annotations reach.
+    #[wasm_bindgen(js_name = partPage)]
+    pub fn part_page(&self, at: &[f64], bytes: &[u8]) -> Result<Vec<f64>, JsError> {
+        let at = located(at)?;
+        let table = self
+            .footer()
+            .parts
+            .as_ref()
+            .ok_or_else(|| JsError::new("the recording has no annotation parts"))?;
+        let Page::Parts(rows) = table.parse_page(0, at.j, &at.entry, bytes).map_err(js)? else {
+            return Err(JsError::new("an annotation parts page holds other rows"));
+        };
+        let first = at.j.saturating_mul(PAGE as u64);
+        let mut out = Vec::with_capacity(rows.len() * PART);
+        for (place, r) in (first..).zip(rows) {
+            out.extend([
+                place as f64,
+                r.offset as f64,
+                f64::from(r.length),
+                f64::from(r.decoded_length),
+                r.start as f64,
+                r.end as f64,
+            ]);
+        }
+        Ok(out)
+    }
+
+    /// The annotation part at `row` (six numbers, as `partPage` gives it), from exactly its
+    /// frame's bytes, each line resolved alone (FORMAT.md, "Annotations"). JSON: its generator,
+    /// `source`, and its `lines`, each with its `id` where it reads, and either its `annotation`
+    /// or why it is `left` out. One that starts at or past the length is `past` it too, and
+    /// claims no id.
+    #[cfg(feature = "annotations")]
+    #[wasm_bindgen(js_name = partAnnotations)]
+    pub fn part_annotations(&self, row: &[f64], frame: &[u8]) -> Result<String, JsError> {
+        let footer = self.footer();
+        let part = footer.decode_part(&part_row(row)?, frame).map_err(js)?;
+        let header = &footer.header;
+        let lines: Vec<PartLine> = part
+            .lines()
+            .map(|line| {
+                // A line whose id is not a string has none, as the resolver reads it.
+                let id = serde_json::from_str::<LineId>(line).ok().and_then(|l| l.id);
+                let name = format!("{}/{}", part.source, id.as_deref().unwrap_or("(no id)"));
+                if let Ok((start, _)) = parts::line_span(line, header.timebase)
+                    && start >= header.length
+                {
+                    let why = format!("{name}: starts at or past the length, {}", header.length);
+                    return PartLine {
+                        left: Some(why),
+                        past: true,
+                        ..PartLine::default()
+                    };
+                }
+                match annotations::resolve_line(&part.source, line, header) {
+                    Ok(a) => PartLine {
+                        id,
+                        annotation: Some(a),
+                        ..PartLine::default()
+                    },
+                    Err(problems) => PartLine {
+                        id,
+                        left: Some(format!("{name}: {}", problems.join("; "))),
+                        ..PartLine::default()
+                    },
+                }
+            })
+            .collect();
+        let out = PartOut {
+            source: &part.source,
+            lines,
+        };
+        Ok(serde_json::to_string(&out).expect("a part serialises"))
+    }
+
+    /// A bundled sidecar's hand-written annotations, resolved apart from its generator files'
+    /// lines, which the annotation parts hold, leaving out what breaks a rule (FORMAT.md,
+    /// "Annotations"). `hand` is the TOML file parsed and written out as JSON, `names` and
+    /// `texts` the bundle's generator files, each its first line alone, and `targets` a JSON
+    /// array of the generated annotations its refs may name; a ref to one not there is left out.
+    /// JSON: its `annotations`, each with its `place` in the file; its included `files` in
+    /// sidecar order, each with whether its lines are `kept`; and its `problems`.
+    #[cfg(feature = "annotations")]
+    #[wasm_bindgen(js_name = resolveBundled)]
+    pub fn resolve_bundled(
+        &self,
+        hand: &str,
+        names: Vec<String>,
+        texts: Vec<String>,
+        targets: &str,
+    ) -> Result<String, JsError> {
+        let targets: Vec<Annotation> = serde_json::from_str(targets)
+            .map_err(|e| JsError::new(&format!("the refs' targets: {e}")))?;
+        let by_id: HashMap<&str, &Annotation> =
+            targets.iter().map(|a| (a.id.as_str(), a)).collect();
+        let included: Vec<Included<'_>> = names
+            .iter()
+            .zip(&texts)
+            .map(|(name, text)| Included { name, text })
+            .collect();
+        let apart = annotations::resolve_apart_json(hand, &included, &self.footer().header, &|t| {
+            by_id.get(t).map(|a| (*a).clone())
+        });
+        let out = Apart {
+            annotations: apart
+                .annotations
+                .iter()
+                .map(|(place, annotation)| Placed {
+                    place: *place,
+                    annotation,
+                })
+                .collect(),
+            files: apart
+                .files
+                .iter()
+                .map(|&(name, kept)| Kept { name, kept })
+                .collect(),
+            problems: &apart.problems,
+        };
+        Ok(serde_json::to_string(&out).expect("annotations serialise"))
+    }
+
     /// The annotation bundle record's byte range, `[offset, end)`; empty without one.
     #[wasm_bindgen(js_name = bundleRange)]
     pub fn bundle_range(&self) -> Vec<f64> {
@@ -843,6 +1026,57 @@ impl Recording {
             .ok_or_else(|| JsError::new("the recording bundles no annotations"))?;
         Ok(serde_json::to_string(&files).expect("strings serialise"))
     }
+}
+
+/// A line's id, where it is a string.
+#[cfg(feature = "annotations")]
+#[derive(Deserialize)]
+struct LineId {
+    id: Option<String>,
+}
+
+/// A line of an annotation part as `partAnnotations` gives it.
+#[cfg(feature = "annotations")]
+#[derive(Default, Serialize)]
+struct PartLine {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    annotation: Option<Annotation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    left: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    past: bool,
+}
+
+#[cfg(feature = "annotations")]
+#[derive(Serialize)]
+struct PartOut<'a> {
+    source: &'a str,
+    lines: Vec<PartLine>,
+}
+
+/// `resolveBundled`'s answer.
+#[cfg(feature = "annotations")]
+#[derive(Serialize)]
+struct Apart<'a> {
+    annotations: Vec<Placed<'a>>,
+    files: Vec<Kept<'a>>,
+    problems: &'a [String],
+}
+
+#[cfg(feature = "annotations")]
+#[derive(Serialize)]
+struct Placed<'a> {
+    place: usize,
+    annotation: &'a Annotation,
+}
+
+#[cfg(feature = "annotations")]
+#[derive(Serialize)]
+struct Kept<'a> {
+    name: &'a str,
+    kept: bool,
 }
 
 /// An operand's samples as JavaScript holds them, read as its coding stores them.
@@ -910,8 +1144,8 @@ impl OverviewLevel {
         self.level.buckets as f64
     }
 
-    /// A digital channel's level bits and change bits, one byte array each, bucket `first + i` in
-    /// bit i % 8 of byte i / 8.
+    /// A digital channel's densities and duties, a byte a bucket each, bucket `first + i` at `i`
+    /// (FORMAT.md, "Overview"): the duties unpacked from their nibbles.
     pub fn digital(&self) -> Option<Vec<Uint8Array>> {
         digital(&self.level.data)
     }
@@ -941,28 +1175,16 @@ impl OverviewLevel {
     }
 }
 
-/// A digital level as the page draws it until it draws density and duty (phase 6): each
-/// bucket's level and whether it changes inside, as bits, bucket i in bit `i % 8` of byte
-/// `i / 8`. A busy bucket's level says nothing; one wholly outside the kept span reads low.
 fn digital(channel: &ChannelOverview) -> Option<Vec<Uint8Array>> {
     let ChannelOverview::Digital { density, .. } = channel else {
         return None;
     };
-    let n = density.len();
-    let (mut level, mut change) = (vec![0u8; n.div_ceil(8)], vec![0u8; n.div_ceil(8)]);
-    for i in 0..n {
-        let b = channel.digital(i as u64)?;
-        let busy = b.density > 0 || !matches!(b.duty, 0 | 14 | DigitalBucket::OUTSIDE);
-        if b.duty >= 7 && b.duty != DigitalBucket::OUTSIDE {
-            level[i / 8] |= 1 << (i % 8);
-        }
-        if busy {
-            change[i / 8] |= 1 << (i % 8);
-        }
-    }
+    let duty: Option<Vec<u8>> = (0..density.len() as u64)
+        .map(|i| Some(channel.digital(i)?.duty))
+        .collect();
     Some(vec![
-        Uint8Array::from(&level[..]),
-        Uint8Array::from(&change[..]),
+        Uint8Array::from(&density[..]),
+        Uint8Array::from(&duty?[..]),
     ])
 }
 

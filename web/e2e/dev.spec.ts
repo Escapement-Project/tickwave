@@ -4,7 +4,7 @@
 import { test, expect, type Page, type Locator } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { blockRows, layout, leaves, levelRows, range } from "../test/layout.ts";
+import { blockRows, layout, leaves, levelRows, partRows, range } from "../test/layout.ts";
 
 const LOCAL = existsSync("fixtures-local/gcc-swd-reads.tickwavefx") && existsSync("fixtures-local/stock-reads.tickwavefx");
 const VENDOR = existsSync("dev/vendor/tokens.css");
@@ -191,9 +191,11 @@ const levelOf = (file: Uint8Array, c: number, li: number): [number, number][] =>
 
 test("a collapsed view fetches its footer, and only its footer, once it scrolls into view", async ({ page }, info) => {
   const tag = tagged(info, "collapsed");
-  // A small first read, so the footer (from byte 3,847 of 4,694) and the pages and blocks before it
-  // are separate.
+  // A small first read, so the footer and the pages and blocks before it are separate: the footer
+  // starts more than 512 bytes from the file's end.
   const file = new Uint8Array(readFileSync("fixtures/identify-swd.tickwave"));
+  const { footer } = layout(file);
+  expect(file.length - footer).toBeGreaterThan(512);
   await page.goto(`/e2e/pages/view.html?below&firstRead=512&tag=${tag}`);
   const view = page.locator("#v");
   await expect(view.locator(".summary .title")).toHaveText("identify-swd.tickwave");
@@ -206,7 +208,7 @@ test("a collapsed view fetches its footer, and only its footer, once it scrolls 
   await page.waitForTimeout(300);
   expect((await served(tag)).map((e) => [e.range, e.status])).toEqual([
     ["bytes=-512", 206],
-    ["bytes=3847-4181", 206],
+    [`bytes=${footer}-${file.length - 513}`, 206],
   ]);
   // Opened at the whole capture, a column is some 500,000 ticks. Each channel's strip, of 2^21 and
   // 2^24 ticks a bucket, is coarser than that: so sparse a recording draws from its edges, and
@@ -227,8 +229,11 @@ test("a collapsed view fetches its footer, and only its footer, once it scrolls 
 
 test("a recording shorter than the first read comes whole from its end, and serves its block", async ({ page }, info) => {
   const tag = tagged(info, "short");
-  // identify-swd is 4,694 bytes: the first read, the last 32 KiB, asks for more than the file holds.
-  // The server answers 416 with the size, as GitHub Pages does, and the file comes whole.
+  // identify-swd is shorter than the first read, the last 32 KiB, which asks for more than the
+  // file holds. The server answers 416 with the size, as GitHub Pages does, and the file comes
+  // whole.
+  const length = readFileSync("fixtures/identify-swd.tickwave").length;
+  expect(length).toBeLessThan(32768);
   await recordReady(page);
   await page.goto(`/e2e/pages/view.html?open&tag=${tag}`);
   await waitReady(page, ["v"]);
@@ -240,7 +245,7 @@ test("a recording shorter than the first read comes whole from its end, and serv
   });
   expect((await served(tag)).map((e) => [e.range, e.status])).toEqual([
     ["bytes=-32768", 416],
-    ["bytes=0-4693", 206],
+    [`bytes=0-${length - 1}`, 206],
   ]);
 });
 
@@ -278,15 +283,16 @@ test("a finer overview level comes from overview blocks by range, not from the d
   const data = [0, 1, 2].flatMap((c) => blocksOf(file, c));
   const level = (li: number) => [0, 1, 2].flatMap((c) => levelOf(file, c, li));
   await recordReady(page);
-  // The JTAG identify capture: its footer from 17,086 to the end, 18,606. A first read of 1,024
-  // bytes leaves the footer's start to a second.
+  // The JTAG identify capture: a first read of 1,024 bytes leaves the footer's start to a second.
+  const { footer } = layout(file);
+  expect(file.length - footer).toBeGreaterThan(1024);
   await page.goto(`/e2e/pages/view.html?open&src=${JTAG}&firstRead=1024&tag=${tag}`);
   await waitReady(page, ["v"]);
   const view = page.locator("#v");
   // At the whole capture a column is about 400,000 ticks: each channel's 2^16 level draws it,
   // from its overview blocks, the strip of 2^20 in the footer until they come. No data block.
   const whole = await served(tag);
-  expect(whole.slice(0, 2).map((e) => e.range)).toEqual(["bytes=-1024", "bytes=17086-17581"]);
+  expect(whole.slice(0, 2).map((e) => e.range)).toEqual(["bytes=-1024", `bytes=${footer}-${file.length - 1025}`]);
   expect(whole.length).toBeGreaterThan(2);
   expect(readsOf(ranges(whole.slice(2)), level(1), data)).toBe(true);
   // 20 ms over the view's columns is about 13,000 ticks a column: the 2^12 level, from blocks.
@@ -362,9 +368,11 @@ test("analog through the WASM path: the footer's strip, the overview blocks, the
   const tag = tagged(info, "analog");
   await page.setViewportSize({ width: 700, height: 600 });
   await recordReady(page);
-  // swd50-cut: 50,000 samples a channel at 1 GS/s in an 11 ms capture; its footer runs from byte
-  // 73,104 to the end, 74,758.
+  // swd50-cut: 50,000 samples a channel at 1 GS/s in an 11 ms capture; a first read of 1,024
+  // bytes leaves the footer's start to a second.
   const file = new Uint8Array(readFileSync("fixtures/swd50-cut.tickwave"));
+  const { footer } = layout(file);
+  expect(file.length - footer).toBeGreaterThan(1024);
   await page.goto(`/e2e/pages/view.html?open&src=fixtures/swd50-cut.tickwave&firstRead=1024&tag=${tag}`);
   await waitReady(page, ["v"]);
   const view = page.locator("#v");
@@ -372,7 +380,7 @@ test("analog through the WASM path: the footer's strip, the overview blocks, the
   // level's overview blocks, and NRST, which holds no edge, from its one block. No analog block is
   // read.
   const whole = await served(tag);
-  expect(whole.slice(0, 2).map((e) => e.range)).toEqual(["bytes=-1024", "bytes=73104-73733"]);
+  expect(whole.slice(0, 2).map((e) => e.range)).toEqual(["bytes=-1024", `bytes=${footer}-${file.length - 1025}`]);
   expect(readsOf(ranges(whole.slice(2)), [...levelOf(file, 0, 1), ...levelOf(file, 1, 1), ...blocksOf(file, 2)], [...blocksOf(file, 0), ...blocksOf(file, 1)])).toBe(true);
   const drawn = await view.evaluate((v) => {
     const canvas = v.shadowRoot!.querySelector("canvas")!;
@@ -464,32 +472,121 @@ test("a bundled recording draws from its footer while its sidecar is read, and k
   test.skip(!existsSync(BUNDLE), "needs target/release/tickwave: scripts/generate.ts bundles with it");
   const file = new Uint8Array(readFileSync(BUNDLE));
   const { bundle } = layout(file);
+  // The first read, the last 256 bytes, leaves the bundle to a read of its own.
+  expect(bundle![1]).toBeLessThan(file.length - 256);
+  // That read alone waits 10 s, found by its bytes: the reads' order varies from load to load,
+  // as annotation parts are read beside the data.
+  let bundleRead = false;
+  await page.route("**/identify-swd.bundle.tickwave*", async (route) => {
+    const r = /^bytes=(\d+)-(\d+)$/.exec(route.request().headers()["range"] ?? "");
+    if (!r || Number(r[1]) >= bundle![1] || Number(r[2]) < bundle![0]) return route.continue();
+    await new Promise((done) => setTimeout(done, 10_000));
+    await route.continue();
+    bundleRead = true;
+  });
   await recordReady(page);
-  // Which read is the bundle's, counted on a load of its own.
-  const whole = tagged(info, "bundle-whole");
-  await page.goto(`/e2e/pages/view.html?open&src=${BUNDLE}&firstRead=256&tag=${whole}`);
-  await waitReady(page, ["v"]);
-  // The first read is from the end (bytes=-N), which ranges() doesn't take.
-  const spans = (log: { range: string | null }[]): [number, number][] =>
-    log.map((e) => (/^bytes=-(\d+)$/.test(e.range ?? "") ? [file.length - Number(e.range!.slice(7)), file.length] : ranges([e])[0]));
-  const n = spans(await served(whole)).findIndex(([a, b]) => a < bundle![1] && bundle![0] < b);
-  expect(n).toBeGreaterThan(0);
-  // That read alone waits 10 s: Chromium would hold every read after it as long.
-  const tag = tagged(info, "bundle-first");
-  await page.goto(`/e2e/pages/view.html?open&src=${BUNDLE}&firstRead=256&tag=${tag}&after=${n}&until=${n + 1}&stall=10000`);
+  await page.goto(`/e2e/pages/view.html?open&src=${BUNDLE}&firstRead=256&tag=${tagged(info, "bundle-first")}`);
   const view = page.locator("#v");
   const height = () => view.locator("canvas").evaluate((c) => (c as HTMLCanvasElement).style.height);
   await expect.poll(height, { timeout: 25_000 }).not.toBe("");
   const first = await height();
-  const log = await served(tag);
-  const read = spans(log);
-  const ofBundle = log.filter((_, i) => read[i][0] < bundle![1] && bundle![0] < read[i][1]);
-  expect(ofBundle.map((e) => e.status)).toEqual(ofBundle.map(() => 0));
+  expect(bundleRead).toBe(false);
   expect(await page.evaluate(() => (window as unknown as { ready: Set<string> }).ready.has("v"))).toBe(false);
   await waitReady(page, ["v"]);
+  // The stall held the bundle's read, so the test is not vacuous.
+  expect(bundleRead).toBe(true);
   await view.evaluate((v) => (v as unknown as { show(id: string): Promise<void> }).show("first-wait"));
   await expect(view.locator(".steps .count")).toHaveText("1 of 16");
   expect(await height()).toBe(first);
+});
+
+test("a bundled recording's view reads the annotation parts its span meets, and the others as it moves to them", async ({ page }, info) => {
+  const BUNDLE = "fixtures/identify-swd.bundle.tickwave";
+  test.skip(!existsSync(BUNDLE), "needs target/release/tickwave: scripts/generate.ts bundles with it");
+  const file = new Uint8Array(readFileSync(BUNDLE));
+  const parts = partRows(file, layout(file).parts!);
+  // Part 0 reaches 376,719,436 to 387,020,485, part 1 387,012,484 to 389,759,129: a view of 377
+  // to 378 ms, with a view's width either side, meets the first alone.
+  expect(parts.map((p) => [p.start, p.end])).toEqual([
+    [376_719_436, 387_020_485],
+    [387_012_484, 389_759_129],
+  ]);
+  const tag = tagged(info, "parts");
+  await recordReady(page);
+  await page.goto(`/e2e/pages/view.html?open&src=${BUNDLE}&firstRead=256&window=${encodeURIComponent("377ms 378ms")}&tag=${tag}`);
+  const view = page.locator("#v");
+  await waitReady(page, ["v"]);
+  const touched = async () => {
+    const read = ranges((await served(tag)).filter((e) => e.range && !e.range.startsWith("bytes=-")));
+    return parts.map((p) => read.some(([a, b]) => a < p.to && p.from < b));
+  };
+  expect(await touched()).toEqual([true, false]);
+  // Moved to 388 ms, the view reads the second.
+  await view.evaluate((v) => {
+    const view = v as unknown as { setWindow(a: number, b: number): void; settled(): Promise<void> };
+    view.setWindow(388_000_000, 389_000_000);
+    return view.settled();
+  });
+  await expect.poll(touched).toEqual([true, true]);
+});
+
+test("a read of more annotation parts that fails keeps those read, and says so", async ({ page }, info) => {
+  const BUNDLE = "fixtures/identify-swd.bundle.tickwave";
+  test.skip(!existsSync(BUNDLE), "needs target/release/tickwave: scripts/generate.ts bundles with it");
+  const file = new Uint8Array(readFileSync(BUNDLE));
+  const second = partRows(file, layout(file).parts!)[1];
+  // Every read of the second part's bytes fails.
+  await page.route("**/identify-swd.bundle.tickwave*", (route) => {
+    const r = /^bytes=(\d+)-(\d+)$/.exec(route.request().headers()["range"] ?? "");
+    return r && Number(r[1]) < second.to && second.from <= Number(r[2]) ? route.fulfill({ status: 503 }) : route.continue();
+  });
+  await recordReady(page);
+  await page.goto(`/e2e/pages/view.html?open&src=${BUNDLE}&firstRead=256&window=${encodeURIComponent("377ms 378ms")}&tag=${tagged(info, "parts-fail")}`);
+  const view = page.locator("#v");
+  await waitReady(page, ["v"]);
+  const count = view.locator(".steps .count");
+  const before = await count.textContent();
+  expect(before).not.toBe("– of 0");
+  await view.evaluate((v) => (v as unknown as { setWindow(a: number, b: number): void }).setWindow(388_000_000, 389_000_000));
+  await expect(view.locator(".notice")).toContainText("HTTP 503");
+  expect(await count.textContent()).toBe(before);
+});
+
+test("an inset of a bundled recording reads the parts its annotation's span meets before it draws, and every part for an alias", async ({ page }, info) => {
+  const BUNDLE = "fixtures/identify-swd.bundle.tickwave";
+  test.skip(!existsSync(BUNDLE), "needs target/release/tickwave: scripts/generate.ts bundles with it");
+  const file = new Uint8Array(readFileSync(BUNDLE));
+  const parts = partRows(file, layout(file).parts!);
+  const touched = async (tag: string) => {
+    const read = ranges((await served(tag)).filter((e) => e.range && !e.range.startsWith("bytes=-")));
+    return parts.map((p) => read.some(([a, b]) => a < p.to && p.from < b));
+  };
+  await recordReady(page);
+  // attach, hand-written, spans 376.719 to 377.141 ms: with its length either side, the first
+  // part's span alone. The inset draws its notes inside it, which that part holds.
+  const own = tagged(info, "inset-own");
+  await page.goto(`/e2e/pages/inset.html?src=${BUNDLE}&annotation=attach&firstRead=256&tag=${own}`);
+  await waitReady(page, ["i"]);
+  await expect(page.locator("#i figcaption")).toHaveText(/^Attaching/);
+  expect(await touched(own)).toEqual([true, false]);
+  // dpidr-read is an alias, whose ref resolves once every part is read: asked for by the same
+  // inset, as a chart's popover asks for one annotation after another, or by an inset of its own.
+  // Not read yet is not missing: no notice says so, even for a moment.
+  const warned: string[] = [];
+  page.on("console", (m) => {
+    if (m.type() === "warning") warned.push(m.text());
+  });
+  await page.locator("#i").evaluate((i) => i.setAttribute("annotation", "dpidr-read"));
+  await expect(page.locator("#i figcaption")).toHaveText("Reading the debug port's ID register");
+  expect(await touched(own)).toEqual([true, true]);
+  await expect(page.locator("#i .notice")).toBeHidden();
+  expect(warned).toEqual([]);
+  const alias = tagged(info, "inset-alias");
+  await page.goto(`/e2e/pages/inset.html?src=${BUNDLE}&annotation=dpidr-read&firstRead=256&tag=${alias}`);
+  await waitReady(page, ["i"]);
+  await expect(page.locator("#i figcaption")).toHaveText("Reading the debug port's ID register");
+  expect(await touched(alias)).toEqual([true, true]);
+  await expect(page.locator("#i .notice")).toBeHidden();
 });
 
 test("a sidecar's problems show in the element and the console; the trace still draws", async ({ page }) => {

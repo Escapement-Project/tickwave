@@ -67,15 +67,18 @@ const identifyClock = () =>
     { levels: [4096] },
   );
 
-test("overview: level at each bucket's start, and whether it changes", async () => {
+test("overview: each bucket's density and duty, from its edges and its time high", async () => {
   // Buckets of 4096 from 376696832 (91967 * 4096). The first edge, 376719436, is in bucket 5,
-  // [376717312, 376721408), with three more; bucket 6 holds the last two. SWCLK idles high.
+  // [376717312, 376721408), with three more: density 1 + 4 log2(4) = 9. Bucket 6 holds the last
+  // two: 5. SWCLK idles high, so buckets 0 to 4 are wholly high, 14. Bucket 5 is high for
+  // 2124 + 647 + 78 = 2849 of its 4096 ticks, 14 × 2849 / 4096 = 9.74, so 10; bucket 6 for
+  // 569 + 3027 = 3596, 12.29, so 12.
   const ov = await identifyClock().overview(0, 376700000, 376725504, 4096);
   assert.ok(ov && ov.kind === "digital");
   assert.equal(ov.bucket, 4096);
   assert.equal(ov.start, 376696832);
-  assert.deepEqual([...ov.level], [1, 1, 1, 1, 1, 1, 1]);
-  assert.deepEqual([...ov.changes], [0, 0, 0, 0, 0, 1, 1]);
+  assert.deepEqual([...ov.density], [0, 0, 0, 0, 0, 9, 5]);
+  assert.deepEqual([...ov.duty], [14, 14, 14, 14, 14, 10, 12]);
   assert.equal(await identifyClock().overview(0, 376700000, 376725504, 4095), null);
   // The columns from these buckets are columns.json's "digital from overview" cases.
 });

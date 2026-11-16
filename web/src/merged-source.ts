@@ -148,6 +148,7 @@ export class MergedSource implements Source {
       const q = this.#ratios[input];
       const name = this.#names[i];
       const source = first[input] + (c.source ?? 0);
+      if (c.kind === "unavailable") return { ...c, name, source, end: scaled(c.end, q) };
       // The source's ticks stay its own, each `q` times as long, its tick 0 restated.
       const map = mapOf(c);
       const merged = { origin: scaled(map.origin, q), offset: map.offset, m: product(map.m, q) };
@@ -162,14 +163,13 @@ export class MergedSource implements Source {
           map: merged,
         };
       }
-      const product_ = c.product?.map((n) => renamed[input].get(n) ?? n) as [string, string] | undefined;
       return {
         ...c,
         name,
         source,
         map: merged,
         end: scaled(c.end, q),
-        ...(product_ && { product: product_ }),
+        ...(c.derived && { derived: { ...c.derived, operands: c.derived.operands.map((n) => renamed[input].get(n) ?? n) } }),
       };
     });
     return {

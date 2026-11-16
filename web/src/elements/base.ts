@@ -1,8 +1,8 @@
-import { indexAnnotations, type Annotation, type Resolved } from "../annotations.ts";
+import { indexAnnotations, readable, type Annotation, type Resolved } from "../annotations.ts";
 import { parseSeries } from "../attributes.ts";
 import { onFaceChange, onFontsLoaded } from "../face.ts";
 import { resolvePalette, type Palette } from "../palette.ts";
-import { absolute, annotationsFor, annotationsFromText, bundledFor, infoFor, sourceFor } from "../registry.ts";
+import { absolute, annotationsFor, annotationsFromText, bundledIn, infoFor, sourceFor } from "../registry.ts";
 import type { RecordingInfo, Source } from "../source.ts";
 import { HOST_TEXT } from "./summary-style.ts";
 
@@ -57,18 +57,38 @@ export async function loadHead(src: string): Promise<Omit<Loaded, "annotations">
   return { src: url, source, info };
 }
 
-/** The recording's sidecar: the hand-written file's `text` when given, with its includes beside
- * `annotations`; else the file at `annotations`; else the bundled one. Problems are in `errors`. */
-export async function loadAnnotations(recording: URL, annotations: string | null, text: string | null): Promise<Resolved> {
-  let list: Annotation[] = [];
-  const errors: string[] = [];
+/**
+ * The recording's sidecar: the hand-written file's `text` when given, with its includes beside
+ * `annotations`; else the file at `annotations`; else the bundled one, as far as it is read: those
+ * of its annotations ticks `span` meet, with any read before, or every one where `span` is null.
+ * Problems are in `errors`, and so is each annotation left out for naming a channel this version
+ * can't read.
+ */
+export async function loadAnnotations(recording: URL, annotations: string | null, text: string | null, span: readonly [number, number] | null = null): Promise<Resolved> {
   try {
-    const at = annotations ? absolute(annotations) : null;
-    list = (text !== null ? await annotationsFromText(text, at, recording) : at ? await annotationsFor(at, recording) : await bundledFor(recording)) ?? [];
+    return await readAnnotations(recording, annotations, text, span);
   } catch (e) {
-    errors.push(e instanceof Error ? e.message : String(e));
+    return indexAnnotations([], [e instanceof Error ? e.message : String(e)]);
   }
-  return indexAnnotations(list, errors);
+}
+
+/** As `loadAnnotations`, rejecting where they don't read: a read of more of a bundled sidecar
+ * that fails leaves what was read before. */
+export async function readAnnotations(recording: URL, annotations: string | null, text: string | null, span: readonly [number, number] | null): Promise<Resolved> {
+  let list: Annotation[];
+  const errors: string[] = [];
+  let partial = false;
+  const at = annotations ? absolute(annotations) : null;
+  if (text !== null) list = await annotationsFromText(text, at, recording);
+  else if (at) list = await annotationsFor(at, recording);
+  else {
+    const read = await bundledIn(recording, span);
+    list = read?.annotations ?? [];
+    errors.push(...(read?.problems ?? []));
+    partial = read !== null && !read.complete;
+  }
+  list = readable(list, (await infoFor(recording)).channels, errors);
+  return indexAnnotations(list, errors, partial);
 }
 
 export abstract class TickwaveElement extends HTMLElement {

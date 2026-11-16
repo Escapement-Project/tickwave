@@ -1,7 +1,7 @@
 // <tickwave-view>: the full capture. Collapsed to its title and facts until `open`; open, a time axis, one row
 // a channel and an annotation lane, with zoom, pan, cursors, a selection and its readouts.
 
-import { indexAnnotations, ofKind, type Annotation } from "../annotations.ts";
+import { indexAnnotations, ofKind, type Annotation, type Resolved } from "../annotations.ts";
 import { parseChannels, parseWindow, VIEW_ATTRIBUTES } from "../attributes.ts";
 import { reducedMotion } from "../face.ts";
 import { absolute, events as registryEvents, infoFor, peekInfo } from "../registry.ts";
@@ -13,7 +13,7 @@ import { channelIndices, Plot } from "../render/plot.ts";
 import { clampRange, fitRange, moveRange, scaleLimits, zoomRange, type ScaleLimits, type ValueRange } from "../render/scale.ts";
 import { channelSampleTick, channelStart, inChannel, isAbort, named, readingStep, sampleAtOrBefore, spanned } from "../source.ts";
 import { parseTime, toTicks, type TimeSpec } from "../time.ts";
-import { DRAG_PX, TickwaveElement, loadAnnotations, loadHead, zoomKey, type Loaded } from "./base.ts";
+import { DRAG_PX, TickwaveElement, loadAnnotations, loadHead, readAnnotations, zoomKey, type Loaded } from "./base.ts";
 import { ShapedSource } from "../shaped-source.ts";
 import { SUMMARY_CSS } from "./summary-style.ts";
 import { shownExtent, shownStart, summaryFacts } from "../summary.ts";
@@ -106,7 +106,7 @@ const EMPTY_LANE = "No annotations on the channels shown";
 
 const SNAP_PX = 6;
 /** The heights a reader can give a row, in CSS pixels. */
-const ROW_LIMITS = { digital: [24, 400], analog: [40, 600] } as const;
+const ROW_LIMITS = { digital: [24, 400], analog: [40, 600], unavailable: [24, 400] } as const;
 /** A handle's arrow keys move it this far, or the second with Shift. */
 const ROW_STEP = [4, 16] as const;
 
@@ -438,8 +438,11 @@ export class TickwaveView extends TickwaveElement {
     // A load under way reads the text once it has the recording.
     if (!l) return;
     const seq = ++this.#textSeq;
-    const annotations = await loadAnnotations(l.src, this.getAttribute("annotations"), this.#annotationsText);
+    this.#readSpans = [];
+    const span = this.#annotationSpan();
+    const annotations = await loadAnnotations(l.src, this.getAttribute("annotations"), this.#annotationsText, span);
     if (seq !== this.#textSeq || this.#loaded !== l) return;
+    if (annotations.partial) this.#readSpans.push(span);
     this.#plot.emptyLane = annotations.errors.length === 0 ? EMPTY_LANE : null;
     this.#loaded = { ...l, annotations };
     if (this.#asLoaded) this.#asLoaded = { ...this.#asLoaded, annotations };
@@ -510,9 +513,13 @@ export class TickwaveView extends TickwaveElement {
             if (this.#shaping) this.#applyPending();
           };
           if (!at) first({ ...head, annotations: indexAnnotations([]) });
-          // A sidecar's text set meanwhile reads its own annotations over the drawn recording.
+          // A sidecar's text set meanwhile reads its own annotations over the drawn recording. A
+          // bundled one's are read for the span drawn, or whole for a view that opens at one.
           const seq = this.#textSeq;
-          const list = await loadAnnotations(head.src, annotations, text);
+          this.#readSpans = [];
+          const span = at ? null : this.#annotationSpan();
+          const list = await loadAnnotations(head.src, annotations, text, span);
+          if (span && list.partial) this.#readSpans.push(span);
           if (this.#loadKey !== key) return null;
           this.#annotated = true;
           if (!at && this.#textSeq !== seq) return this.#loaded;
@@ -525,6 +532,8 @@ export class TickwaveView extends TickwaveElement {
           }
           this.#reportSidecar(list.errors);
           if (this.#annotationsText !== text) void this.#reannotate();
+          // The view may have moved past the span read while it was read.
+          else this.#readMore();
           return this.#loaded;
         },
         (e) => {
@@ -765,14 +774,14 @@ export class TickwaveView extends TickwaveElement {
    * trims with its first operand, whose samples it sits on. */
   #derived(i: number): boolean {
     const c = this.#asLoaded?.info.channels[i];
-    return c?.kind === "analog" && c.product !== undefined;
+    return c?.kind === "analog" && c.derived !== undefined;
   }
 
   /** The derived channels whose first operand is channel `i`. */
   #followers(i: number): number[] {
     const channels = this.#asLoaded?.info.channels ?? [];
     const name = channels[i]?.name;
-    return channels.flatMap((c, j) => (c.kind === "analog" && c.product?.[0] === name ? [j] : []));
+    return channels.flatMap((c, j) => (c.kind === "analog" && c.derived?.operands[0] === name ? [j] : []));
   }
 
   /** Alignments and shapes asked for before the recording was here to shape. */
@@ -1505,6 +1514,8 @@ export class TickwaveView extends TickwaveElement {
     this.update();
     // The load resolves once its annotations are in, which the view may draw before.
     await this.#loading;
+    // An annotation not yet read may be in a part not read: every one is read before it is missed.
+    if (this.#loaded && !this.#loaded.annotations.byId.has(id) && this.#loaded.annotations.partial) await this.#readAnnotations(null);
     const loaded = this.#loaded;
     if (!loaded) return;
     const a = loaded.annotations.byId.get(id);
@@ -1574,12 +1585,72 @@ export class TickwaveView extends TickwaveElement {
     this.#clampView();
     this.#plot.invalidate();
     this.#prober.probe();
+    this.#readMore();
     if (this.#windowEventQueued) return;
     this.#windowEventQueued = true;
     requestAnimationFrame(() => {
       this.#windowEventQueued = false;
       this.emit("tickwave-window", this.window);
     });
+  }
+
+  /** The ticks a bundled sidecar's annotations are read for while some are still to read, each
+   * span as it was asked for. */
+  #readSpans: [number, number][] = [];
+  /** A read of more of them is under way. */
+  #reading = false;
+
+  /** The span to read a bundled sidecar's annotations for: the view, and a view's width either
+   * side, as a row reads its data, so a pan seldom waits. */
+  #annotationSpan(): [number, number] {
+    const { start, end } = this.#plot.view;
+    const w = end - start;
+    return [Math.floor(start - w), Math.ceil(end + w)];
+  }
+
+  /** Reads a bundled sidecar's annotations for the view where it has moved past those read, while
+   * some are still to read: one read at a time, and the view as it is once each lands. */
+  #readMore(): void {
+    const l = this.#loaded;
+    if (!l?.annotations.partial || !this.#annotated || this.#reading) return;
+    const { start, end } = this.#plot.view;
+    if (this.#readSpans.some(([a, b]) => a <= start && end <= b)) return;
+    this.#reading = true;
+    void this.#readAnnotations(this.#annotationSpan()).finally(() => {
+      this.#reading = false;
+      this.#readMore();
+    });
+  }
+
+  /** A bundled sidecar's annotations again, with those `span` meets read too, or every one where
+   * it is null. The reader keeps its place among them, and what it has focused. */
+  async #readAnnotations(span: [number, number] | null): Promise<void> {
+    const l = this.#loaded;
+    if (!l) return;
+    const seq = this.#textSeq;
+    let annotations: Resolved;
+    try {
+      annotations = await readAnnotations(l.src, this.getAttribute("annotations"), this.#annotationsText, span);
+    } catch (e) {
+      // What was read stays, and the span is not asked for again until the view moves past it.
+      if (seq !== this.#textSeq || this.#loaded?.src.href !== l.src.href) return;
+      if (span) this.#readSpans.push(span);
+      this.fail(named("TickwaveSidecarError", e instanceof Error ? e.message : String(e)));
+      return;
+    }
+    const now = this.#loaded;
+    if (seq !== this.#textSeq || !now || now.src.href !== l.src.href) return;
+    if (span) this.#readSpans.push(span);
+    const focus = this.#plot.focus;
+    const at = this.#ofKind()[this.#stepIndex]?.id;
+    this.#plot.emptyLane = annotations.errors.length === 0 ? EMPTY_LANE : null;
+    this.#loaded = { ...now, annotations };
+    if (this.#asLoaded) this.#asLoaded = { ...this.#asLoaded, annotations };
+    this.#reportSidecar(annotations.errors);
+    this.#apply();
+    this.#plot.focus = focus !== null && annotations.byId.has(focus) ? focus : null;
+    this.#stepIndex = at === undefined ? -1 : this.#ofKind().findIndex((a) => a.id === at);
+    this.#renderSteps();
   }
 
   #drawn(): void {
@@ -2017,16 +2088,25 @@ export class TickwaveView extends TickwaveElement {
       counts.append("…");
       this.#setReadout(lines);
       try {
-        const results = await Promise.all(digital.map((t) => l.source.edges(t.index, sel.start, sel.end)));
+        const chosen = Math.max(0, digital.indexOf(this.#plot.tracks[this.#periodChannel]));
+        // Each channel's count from the source's index where it keeps one; the edges themselves
+        // only for the channel whose periods the readout measures.
+        const [ns, r] = await Promise.all([
+          Promise.all(
+            digital.map((t) =>
+              l.source.edgeCount ? l.source.edgeCount(t.index, sel.start, sel.end) : l.source.edges(t.index, sel.start, sel.end).then((e) => countEdges(e.ticks, sel.start, sel.end)),
+            ),
+          ),
+          digital[chosen] ? l.source.edges(digital[chosen].index, sel.start, sel.end) : Promise.resolve(null),
+        ]);
         if (seq !== this.#readoutSeq) return;
         counts.textContent = "";
         const edgeCounts: Record<string, number> = {};
         digital.forEach((t, i) => {
-          const n = countEdges(results[i].ticks, sel.start, sel.end);
+          const n = ns[i];
           edgeCounts[t.channel.name] = n;
           counts.append(item(t.channel.name, `${formatCount(n)} edge${n === 1 ? "" : "s"}`));
         });
-        const chosen = Math.max(0, digital.indexOf(this.#plot.tracks[this.#periodChannel]));
         const select = document.createElement("select");
         select.setAttribute("aria-label", "Channel for periods");
         for (const t of digital) select.append(new Option(t.channel.name, String(t.index)));
@@ -2038,7 +2118,6 @@ export class TickwaveView extends TickwaveElement {
         const label = document.createElement("label");
         label.append("Periods of", select);
         periods.append(label);
-        const r = results[chosen];
         const stats = r ? periodStats(r.level, r.ticks) : null;
         let periodDetail: Record<string, unknown> | null = null;
         if (stats) {
@@ -2102,6 +2181,13 @@ export class TickwaveView extends TickwaveElement {
   }
 
   #step(by: number): void {
+    // Steps go through every annotation of the kind, in order: those not yet read come first.
+    if (this.#loaded?.annotations.partial) {
+      void this.#readAnnotations(null).then(() => {
+        if (!this.#loaded?.annotations.partial) this.#step(by);
+      });
+      return;
+    }
     const list = this.#ofKind();
     if (list.length === 0) return;
     let i = this.#stepIndex;

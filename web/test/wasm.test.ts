@@ -166,6 +166,38 @@ test("nine blocks: every edge and every level agree with the extractor's fixture
   }
 });
 
+test("an edge count comes from the index and the blocks at the span's ends, exactly, reading no block between", async () => {
+  const m = await memory();
+  const t = tables(NINE);
+  const rows = blockRows(NINE, t.channels[0].blocks!);
+  // SWCLK's eight blocks: spans that start and end on each side of each boundary, a block's
+  // start, the capture's ends, and past them.
+  const ticks = [-5, 0, 1, ...rows.slice(1).flatMap((b) => [b.start - 1, b.start, b.start + 1]), 523583069, 523583100, 523583200];
+  const r = await openTickwave("fixtures/identify-swd.4k.tickwave");
+  let counted = 0;
+  for (const s of ticks) {
+    for (const e of ticks) {
+      if (e < s) continue;
+      for (const c of [0, 1]) assert.equal(await r.edgeCount(c, s, e), await m.edgeCount(c, s, e), `channel ${c}, [${s}, ${e})`);
+      counted++;
+    }
+  }
+  // 27 ticks, every pair in order.
+  assert.equal(counted, (27 * 28) / 2);
+  // Not vacuous: the whole capture's counts.
+  assert.deepEqual([await r.edgeCount(0, 0, 523583100), await r.edgeCount(1, 0, 523583100)], [15286, 1874]);
+  // From the second block's middle to the seventh's: those two blocks' frames are read, and no
+  // other's.
+  const bytes = new MemoryBytes(NINE, "identify-swd.4k.tickwave");
+  const fresh = await Opened.open(wasm(), bytes, NINE.length - t.footer);
+  const before = bytes.reads.length;
+  const [a, b] = [(rows[1].start + rows[2].start) / 2, (rows[6].start + rows[7].start) / 2];
+  assert.equal(await fresh.edgeCount(0, a, b), await m.edgeCount(0, a, b));
+  const frames = rows.map((row) => [row.from, row.to] as const);
+  const touched = frames.map(([from, to]) => bytes.reads.slice(before).some(([x, y]) => x < to && y > from));
+  assert.deepEqual(touched, [false, true, false, false, false, false, true, false]);
+});
+
 test("the overview: each channel's own levels, unpacked from the footer, as the extractor's fixture computes them", async () => {
   const r = await openTickwave("fixtures/identify-swd.tickwave");
   // The converter's finest level puts about 64 of a channel's edges in a bucket. SWCLK: 15,286
@@ -175,7 +207,7 @@ test("the overview: each channel's own levels, unpacked from the footer, as the 
   assert.deepEqual([finest(ONE, 0), finest(ONE, 1)], [21, 24]);
   const ov = (await r.overview(0, 0, r.info.length, 2 ** 21))!;
   assert.ok(ov.kind === "digital");
-  assert.deepEqual([ov.start, ov.bucket, ov.level.length], [0, 2 ** 21, 250]);
+  assert.deepEqual([ov.start, ov.bucket, ov.density.length, ov.duty.length], [0, 2 ** 21, 250, 250]);
   // Every level of each channel, over the whole capture, against the TypeScript computation.
   const fixture = await readFixture(readFileSync(at("fixtures/identify-swd.tickwavefx")));
   for (const ch of [0, 1]) {
@@ -183,9 +215,11 @@ test("the overview: each channel's own levels, unpacked from the footer, as the 
     assert.deepEqual(levels, [2 ** [21, 24][ch]]);
     const m = new MemorySource(fixture, { levels });
     for (const bucket of levels) assert.deepEqual(await r.overview(ch, 0, r.info.length, bucket), await m.overview(ch, 0, r.info.length, bucket), `${bucket}, ${ch}`);
-    // Not vacuous: SWCLK's buckets change, and not all of them.
+    // Not vacuous: some of each channel's buckets hold edges and some none, and some lie wholly
+    // at one level and some between.
     const got = (await r.overview(ch, 0, r.info.length, levels[0]))!;
-    assert.ok(got.kind === "digital" && got.changes.includes(1) && got.changes.includes(0));
+    assert.ok(got.kind === "digital" && got.density.includes(0) && got.density.some((d) => d > 0), `${ch}`);
+    assert.ok(got.duty.some((d) => d === 0 || d === 14) && got.duty.some((d) => d > 0 && d < 14), `${ch}`);
   }
   assert.equal(await r.overview(0, 0, r.info.length, 2 ** 21 - 1), null);
   assert.equal(await r.overview(1, 0, r.info.length, 2 ** 24 - 1), null);
@@ -693,8 +727,8 @@ test("a crafted recording is refused with an error, and the module goes on decod
   const why: Record<string, RegExp> = {
     "header-wrap": /footer's lengths do not fit it/,
     levels: /not the ones the format sets/,
-    "big-decoded": /more than this reader holds/,
-    "huge-count": /too short for its edges/,
+    "big-decoded": /past the format's limits/,
+    "huge-count": /more than the 4194304 a block holds/,
     "page-count": /its head differs from where the table's shape puts it/,
   };
   for (const [name, expected] of Object.entries(why)) {

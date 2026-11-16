@@ -272,7 +272,7 @@ test("Ctrl or Cmd with the wheel zooms an inset about the pointer, and out to it
   expect(await win(inset)).toEqual(whole);
 });
 
-test("where one pixel holds several edges, an inset says how to zoom in, and zoomed in there it reads the pulse", async ({ page }) => {
+test("where one pixel holds several edges, an inset reads their count and time high and says how to zoom in, and zoomed in there it reads the pulse", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
   // The whole attach sequence, hundreds of clocks across the inset.
   await page.goto(INSET.replace("annotation=dpidr-read", "annotation=attach"));
@@ -281,11 +281,16 @@ test("where one pixel holds several edges, an inset says how to zoom in, and zoo
   await inset.evaluate((e) => (e as HTMLElement & { settled(): Promise<void> }).settled());
   const b = (await inset.locator("canvas").boundingBox())!;
   let r: string[] | null = null;
-  for (let fx = 0.2; fx < 0.95 && r?.[1] !== "zoom in to measure"; fx += 0.01) {
+  for (let fx = 0.2; fx < 0.95 && !/ edges in /.test(r?.[1] ?? ""); fx += 0.01) {
     await page.mouse.move(b.x + b.width * fx, b.y + 40);
     r = await reading(inset);
   }
-  expect(r).toEqual(["SWCLK", "zoom in to measure", expect.stringMatching(/^(Ctrl|Cmd) \+ scroll$/)]);
+  expect(r).toEqual([
+    "SWCLK",
+    expect.stringMatching(/^[\d,]+ edges in [\d.]+ µs$/),
+    expect.stringMatching(/^high \d+\.\d %$/),
+    expect.stringMatching(/^(Ctrl|Cmd) \+ scroll to measure$/),
+  ]);
   await ctrlWheel(page, -1500);
   await expect.poll(async () => (await reading(inset))?.[0] ?? "").toMatch(/^SWCLK (high|low) \d/);
 });

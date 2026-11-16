@@ -133,11 +133,27 @@ test("a pulse being measured goes on measuring as the pointer moves within it, a
   expect(await text()).toMatch(/^high 4\.494 µs/);
 });
 
-test("zoomed out, a pixel with several edges asks for a closer look", async ({ page }) => {
+test("zoomed out, a pixel with several edges reads their count and its time high, and asks for a closer look", async ({ page }) => {
   await page.goto(`${VIEW}?open`);
   const view = page.locator("#v");
   await settle(view);
-  expect(await labels(page, view, await xOf(view, 380_000_000))).toContain("zoom in to measure");
+  const seen = await labels(page, view, await xOf(view, 380_000_000));
+  // SWCLK's row and SWDIO's: each label its pixel's count and share, then the ask.
+  const dense = seen.filter((s) => s.endsWith("zoom in to measure"));
+  expect(dense.length).toBe(2);
+  for (const s of dense) expect(s).toMatch(/^[\d,]+ edges in [\d.]+ µs\nhigh \d+\.\d %\nzoom in to measure$/);
+});
+
+test("zoomed out over an overview, a crowded pixel reads the bounds its buckets' densities and duties give", async ({ page }) => {
+  // The JTAG capture's whole view draws each channel from its 2^16 level, a few buckets a pixel;
+  // 475 ms is in its busiest stretch.
+  await page.goto(`${VIEW}?open&src=fixtures/identify-jtag.tickwave`);
+  const view = page.locator("#v");
+  await settle(view);
+  const dense = (await labels(page, view, await xOf(view, 475_000_000))).filter((s) => s.endsWith("zoom in to measure"));
+  expect(dense.length).toBeGreaterThan(0);
+  // A duty is a share's bounds, so the share is a range, or under or over a bound.
+  for (const s of dense) expect(s).toMatch(/^[\d,]+( to [\d,]+)? edges in [\d.]+ µs\nhigh (under [\d.]+|over [\d.]+|[\d.]+ to [\d.]+) %\nzoom in to measure$/);
 });
 
 test("an analog channel: the exact value where a pixel holds one sample, the cursor's value; a range zoomed out", async ({ page }) => {

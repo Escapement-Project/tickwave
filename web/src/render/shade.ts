@@ -41,6 +41,24 @@ export function counts(d: number): [bigint, bigint] | null {
   return [lo, hi > lo ? hi : lo];
 }
 
+/** The density a bucket of `edges` edges stores (FORMAT.md, "Overview"): 0 for none, and
+ * otherwise `1 + floor(4 × log2(edges))`, worked in integers as the format words it. */
+export function densityOf(edges: number): number {
+  if (edges <= 0) return 0;
+  const e = BigInt(edges);
+  const l = e.toString(2).length - 1;
+  const x = e << BigInt(63 - l);
+  return 1 + 4 * l + STEPS.filter((t) => x >= t).length;
+}
+
+/** The duty a bucket stores whose `known` ticks in the channel's kept span hold `high` high ones
+ * (FORMAT.md, "Overview"): 15 where none is, else `14 × high / known` rounded, a half up. */
+export function dutyOf(high: number, known: number): number {
+  if (known <= 0) return 15;
+  const [h, k] = [BigInt(high), BigInt(known)];
+  return Number((28n * h + k) / (2n * k));
+}
+
 /**
  * The edge count density `d` stands for: the geometric mean of the least and most it stands for,
  * so a count it stands for lies within `sqrt(most / least) − 1` of it, under 9.1 % at any density,

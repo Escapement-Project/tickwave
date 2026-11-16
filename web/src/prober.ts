@@ -3,18 +3,38 @@
 // trace. A pulse whose edges lie past the data drawn is finished once the pointer rests within it.
 // The view's label and the inset's reading line both show what it reads.
 
-import { analogFromOverview, analogFromSamples, complete, completePulse, knownSpan, pulseFigures, pulseFromEdges, type Pulse, type PulseFigures } from "./probe.ts";
+import {
+  analogFromOverview,
+  analogFromSamples,
+  complete,
+  completePulse,
+  denseFigures,
+  denseFromEdges,
+  denseFromOverview,
+  knownSpan,
+  pulseFigures,
+  pulseFromEdges,
+  type Pulse,
+  type PulseFigures,
+} from "./probe.ts";
 import { formatValue } from "./readouts.ts";
 import type { Plot, PulseMark } from "./render/plot.ts";
 import type { Tile } from "./render/track.ts";
 import { lowerBound } from "./search.ts";
-import { inChannel, readingStep, rebased, spanned, type RecordingInfo, type Source } from "./source.ts";
+import { inChannel, readingStep, rebased, spanned, type DigitalOverview, type RecordingInfo, type Source } from "./source.ts";
 
 /** A pulse whose edges lie past the data drawn is measured once the pointer rests this long. */
 const REST_MS = 150;
 
-/** The reading where one pixel holds several edges. */
+/** The reading where one pixel holds several edges, after its edges and its share of time high. */
 export const ZOOM_IN = "zoom in to measure";
+
+/** Bucket `k`'s level where it holds one throughout, as far as its duty says: 0 or 1, or null for
+ * one that holds an edge, changes level, or lies outside the channel's kept span. */
+function quietLevel(o: DigitalOverview, k: number): 0 | 1 | null {
+  if (o.density[k] !== 0) return null;
+  return o.duty[k] === 0 ? 0 : o.duty[k] === 14 ? 1 : null;
+}
 
 export type Probed =
   /** An analog value or range, a level while its pulse is measured, or a request to zoom in. */
@@ -47,8 +67,9 @@ function onePulse(tile: Tile, a: number, b: number): boolean {
     const o = tile.data;
     const k0 = Math.floor((lo - o.start) / o.bucket);
     const k1 = Math.floor((hi - o.start) / o.bucket);
-    if (k0 < 0 || k1 >= o.changes.length) return false;
-    for (let k = k0; k <= k1; k++) if (o.changes[k]) return false;
+    if (k0 < 0 || k1 >= o.density.length) return false;
+    const level = quietLevel(o, k0);
+    for (let k = k0; k <= k1; k++) if (level === null || quietLevel(o, k) !== level) return false;
     return true;
   }
   return false;
@@ -166,26 +187,28 @@ export class Prober {
       return false;
     }
     let pulse: Pulse | null = null;
+    const step = readingStep(loaded.info, [track.index]);
     if (tile.kind === "edges") {
+      const from = rebased(c, tile.start, tile.data, tick);
       const t = tile.data.ticks;
       // Two edges in the pixel: no one pulse is under the pointer.
       if (lowerBound(t, Math.ceil(t1)) - lowerBound(t, Math.ceil(t0)) > 1) {
-        text([ZOOM_IN]);
+        text([...denseFigures(denseFromEdges(from.edges, t0, t1, knownSpan(c, tick)), loaded.info.timebase, step), ZOOM_IN]);
         return false;
       }
-      const from = rebased(c, tile.start, tile.data, tick);
       pulse = pulseFromEdges(from.edges, from.start, tile.end, knownSpan(c, tick), tick);
     } else if (tile.kind === "digital-overview") {
       const o = tile.data;
       const k0 = Math.max(0, Math.floor((t0 - o.start) / o.bucket));
-      const k1 = Math.min(o.changes.length, Math.ceil((t1 - o.start) / o.bucket));
-      let changes = false;
-      for (let k = k0; k < k1; k++) changes ||= o.changes[k] === 1;
-      if (changes) {
-        text([ZOOM_IN]);
+      const k1 = Math.min(o.density.length, Math.ceil((t1 - o.start) / o.bucket));
+      const level = k0 < k1 ? quietLevel(o, k0) : null;
+      let quiet = level !== null;
+      for (let k = k0 + 1; k < k1 && quiet; k++) quiet = quietLevel(o, k) === level;
+      if (!quiet) {
+        text([...denseFigures(denseFromOverview(o, t0, t1, loaded.info.length), loaded.info.timebase, step), ZOOM_IN]);
         return false;
       }
-      if (k0 < o.level.length) pulse = { level: o.level[k0] ? 1 : 0, start: undefined, end: undefined, next: undefined };
+      pulse = { level: level!, start: undefined, end: undefined, next: undefined };
     }
     if (!pulse) {
       this.#set(null);
@@ -194,7 +217,7 @@ export class Prober {
     const known = this.#measured;
     if (!complete(pulse) && known?.source === loaded.source && known.index === track.index && within(known.pulse, tick)) pulse = known.pulse;
     if (complete(pulse)) {
-      const figures = pulseFigures(pulse, loaded.info.timebase, knownSpan(c, tick), readingStep(loaded.info, [track.index]));
+      const figures = pulseFigures(pulse, loaded.info.timebase, knownSpan(c, tick), step);
       const { start, end } = pulse;
       const mark: PulseMark | null =
         typeof start === "number" && typeof end === "number"

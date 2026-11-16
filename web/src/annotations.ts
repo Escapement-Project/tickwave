@@ -2,7 +2,7 @@
 // order (ANNOTATIONS.md). A `.tickwave` recording's sidecar is resolved by the Rust core
 // (`Recording.resolveAnnotations`); `resolveRaw` does the same for the dev page's JSON fixtures.
 
-import type { Ratio } from "./source.ts";
+import type { Channel, Ratio } from "./source.ts";
 import { parseTime, toTicks } from "./time.ts";
 
 /** What a measure reads from a channel's edges in a span (ANNOTATIONS.md, "Measures"). */
@@ -63,16 +63,32 @@ export interface Resolved {
   /** Generated annotations a hand-written one stands in for; drawn once, as the hand-written one. */
   readonly named: ReadonlySet<string>;
   readonly errors: readonly string[];
+  /** A bundled sidecar read a range at a time, with some of its annotations still to read: a
+   * hand-written `ref`, and the bundle's own problems, wait for every one. */
+  readonly partial: boolean;
+}
+
+/** `list` without the annotations that name one of `channels` this version can't read, in
+ * `channels` or a measure, each named in `errors` (FORMAT.md, "Unavailable channels"). */
+export function readable(list: Annotation[], channels: readonly Channel[], errors: string[]): Annotation[] {
+  const unread = new Set(channels.filter((c) => c.kind === "unavailable").map((c) => c.name));
+  if (unread.size === 0) return list;
+  return list.filter((a) => {
+    const named = [...(a.channels ?? []), ...(a.measure ? [a.measure.channel] : [])].find((n) => unread.has(n));
+    if (named === undefined) return true;
+    errors.push(`${a.id}: names channel ${JSON.stringify(named)}, which this version can't read`);
+    return false;
+  });
 }
 
 /** Indexes a resolved list. An alias's `ref` names the generated annotation it stands in for. */
-export function indexAnnotations(list: readonly Annotation[], errors: readonly string[] = []): Resolved {
+export function indexAnnotations(list: readonly Annotation[], errors: readonly string[] = [], partial = false): Resolved {
   const byId = new Map<string, Annotation>();
   for (const a of list) if (!byId.has(a.id)) byId.set(a.id, a);
   const named = new Set<string>();
   for (const a of list) if (a.ref !== null) named.add(a.ref);
   const byTime = [...list].sort((a, b) => a.start - b.start || (b.end ?? b.start) - (a.end ?? a.start));
-  return { list, byTime, byId, named, errors };
+  return { list, byTime, byId, named, errors, partial };
 }
 
 /** One annotation as the Rust resolver serialises it. */

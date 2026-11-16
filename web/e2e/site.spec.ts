@@ -5,7 +5,7 @@ import { test, expect, type Page } from "@playwright/test";
 import { mkdirSync, readFileSync } from "node:fs";
 
 const SITE = "/dist/site/";
-const IDENTIFY_ID = "blake3:ccc8b7d8c3e4cb30da7fc6088e54ebeba2858ad402eb3fb5a9aeb50be989accf";
+const IDENTIFY_ID = "blake3:63773d56fb3420735c864932f8d2441acd6f31a51b557e073bf27755a0534697";
 
 /** The facts list beside the view, as [term, value] pairs. */
 async function facts(page: Page): Promise<Record<string, string>> {
@@ -317,7 +317,7 @@ test("on a phone, an example opens with its view in sight and focused, the forms
   await expect(page.getByText("Open another recording")).toBeVisible();
   await expect(page.locator("#facts")).toBeHidden();
   await page.getByText("Recording details").click();
-  await expect(page.locator("#facts")).toContainText("blake3:ccc8b7d8");
+  await expect(page.locator("#facts")).toContainText("blake3:63773d56");
   // Unfolded, the forms open another.
   await page.getByText("Open another recording").click();
   await page.locator("#src").fill("fixtures/swd50-cut.tickwave");
@@ -379,10 +379,12 @@ test("the docs sit in the project's doc frame: every doc in a rail, this one's s
     "Index",
     "Footer",
     "Content id",
+    "Limits",
     "Writing",
     "tickwave's writer",
     "Reading",
     "With random access",
+    "Unavailable channels",
     "In order",
     "Repairing a cut-off file",
     "Re-cutting",

@@ -27,15 +27,24 @@ import {
   analogFromOverview,
   analogFromSamples,
   digitalFromEdges,
-  digitalFromOverview,
+  digitalFromLevels,
   lineSamples,
   type AnalogColumns,
   type DigitalColumns,
   type Grid,
 } from "./columns.ts";
 import { layoutNotes, type NoteIn, type NoteOut } from "./notes.ts";
-import { digitalTrace } from "./trace.ts";
+import { looks } from "./shade.ts";
+import { digitalTrace, SHADES } from "./trace.ts";
 import { grain, Track, type Layer, type Tile } from "./track.ts";
+
+/** A piece of a row's trace: its line, stroked, its fill, and a digital row's fills at each
+ * opacity step (trace.ts). */
+interface Shapes {
+  readonly line: Path2D;
+  readonly fill: Path2D;
+  readonly shades?: ReadonlyMap<number, Path2D>;
+}
 
 export interface PlotConfig {
   readonly axis: boolean;
@@ -91,8 +100,10 @@ const HEAD_PX = 22;
 /** The selection's bar along the top of the axis band, clear of the labels below it. */
 const SELECTION_BAR = 4;
 const RIGHT_PAD = 10;
-/** The opacity of what a coarse layer cannot place: the trace's colour, faded. */
+/** The opacity of an analog band a coarse layer cannot place: the trace's colour, faded. */
 const UNRESOLVED_ALPHA = 0.35;
+/** What the row of a channel this version can't read says. */
+export const UNAVAILABLE = "unavailable to this version";
 /** A trace's line, in CSS pixels. */
 const TRACE_WEIGHT = 1.5;
 /** A paint role that draws heavier than a trace, so its lines differ from the others' by more than
@@ -112,8 +123,8 @@ function notLoaded(e: unknown): Error {
  * lost samples. A channel whose list is in pages has each layer's, inside the layer's span, and
  * the samples lost before its first from its header. */
 export function lostIn(c: Channel, layers: readonly Layer[]): readonly { from: number; to: number }[] {
-  const of = (cc: Channel): readonly { from: number; to: number }[] => (cc.kind === "digital" ? (cc.gaps ?? []) : lostSpans(cc));
-  if (!c.paged) return of(c);
+  const of = (cc: Channel): readonly { from: number; to: number }[] => (cc.kind === "digital" ? (cc.gaps ?? []) : cc.kind === "analog" ? lostSpans(cc) : []);
+  if (c.kind === "unavailable" || !c.paged) return of(c);
   const out: { from: number; to: number }[] = c.kind === "analog" ? endLosses(c) : [];
   // The loss before the first is the header's, already in: no layer pales it again.
   const rest: Channel = c.kind === "analog" ? { ...c, lostBefore: undefined } : c;
@@ -650,6 +661,13 @@ export class Plot {
       ctx.stroke();
       this.#shown.delete(r.track.index);
     }
+    // A channel this version can't read holds its place, and says so (FORMAT.md, "Unavailable
+    // channels").
+    if (c.kind === "unavailable") {
+      ctx.fillStyle = p.ink2;
+      ctx.fillText(UNAVAILABLE, l.plotLeft + 6, r.top + r.height / 2 + 4, l.plotRight - l.plotLeft - 12);
+      return;
+    }
 
     // Nothing before the channel's data, at or past its end, or right of the sweep; the samples an
     // analog channel lost before its first and after its last are pale out to the extent.
@@ -662,9 +680,9 @@ export class Plot {
     const width = (weight: number) => Math.max(1, Math.round(weight * dpr));
     // Each layer in device pixels, at each line width a stretch draws at (the shapes align to the
     // width). Neighbours share a rounded edge, so no seam shows between them. A layer with buckets
-    // wider than a column is coarse: its busy runs and analog bands may claim activity the view
-    // does not hold, so they draw faded. Its flat buckets are exact at any scale and draw as they are.
-    type Piece = { px0: number; px1: number; shapes: { line: Path2D; fill: Path2D }; coarse: boolean };
+    // wider than a column is coarse: its analog bands may claim values the view does not hold, so
+    // they draw faded. A digital row's shades come from its model alone (shade.ts).
+    type Piece = { px0: number; px1: number; shapes: Shapes; coarse: boolean };
     const shown = { lo: Infinity, hi: -Infinity };
     const byWidth = new Map<number, Piece[]>();
     const piecesAt = (lw: number): Piece[] => {
@@ -714,7 +732,11 @@ export class Plot {
         ctx.strokeStyle = s.colour;
         ctx.stroke(shapes.line);
         ctx.fillStyle = s.colour;
-        if (coarse) ctx.globalAlpha = UNRESOLVED_ALPHA;
+        for (const [q, path] of shapes.shades ?? []) {
+          ctx.globalAlpha = q / SHADES;
+          ctx.fill(path);
+        }
+        ctx.globalAlpha = coarse ? UNRESOLVED_ALPHA : 1;
         ctx.fill(shapes.fill);
         ctx.restore();
       }
@@ -797,21 +819,27 @@ export class Plot {
     return out;
   }
 
-  #digitalShapes(r: Row, grid: Grid, tile: Tile, from: number, to: number, lw: number): { line: Path2D; fill: Path2D } {
+  #digitalShapes(r: Row, grid: Grid, tile: Tile, from: number, to: number, lw: number): Shapes {
     const l = this.layout!;
     const dpr = this.#dpr;
     let cols: DigitalColumns;
     if (tile.kind === "edges") cols = digitalFromEdges(grid, tile.data, from, to);
-    else if (tile.kind === "digital-overview") cols = digitalFromOverview(grid, tile.data, from, to);
+    else if (tile.kind === "digital-overview") cols = digitalFromLevels(grid, tile.data, from, to);
     else return { line: new Path2D(), fill: new Path2D() };
     const snap = (y: number) => (lw % 2 === 1 ? Math.floor(y) + 0.5 : Math.round(y));
     const yH = snap((r.top + 6) * dpr);
     const yL = snap((r.top + r.height - 6) * dpr);
     const left = Math.round(l.plotLeft * dpr);
     const line = new Path2D();
-    const fill = new Path2D();
-    digitalTrace(cols, grid.count, { left, yH, yL, lw }, grain(tile) <= grid.per, line, fill);
-    return { line, fill };
+    const shades = new Map<number, Path2D>();
+    const shade = (q: number) => {
+      let p = shades.get(q);
+      if (!p) shades.set(q, (p = new Path2D()));
+      return p;
+    };
+    const look = looks(cols, 0, grid.count, lw, grid.per, this.info!.timebase);
+    digitalTrace(cols, look, grid.count, { left, yH, yL, lw }, line, shade);
+    return { line, fill: new Path2D(), shades };
   }
 
   #analogShapes(
@@ -823,7 +851,7 @@ export class Plot {
     to: number,
     lw: number,
     shown: { lo: number; hi: number },
-  ): { line: Path2D; fill: Path2D } {
+  ): Shapes {
     const l = this.layout!;
     const dpr = this.#dpr;
     const range = r.range!;

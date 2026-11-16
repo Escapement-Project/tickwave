@@ -8,6 +8,7 @@
   ?tag=   appended to the recording's URL, so the server's log can tell this page's requests apart
   ?annotations=  a sidecar, relative to web/
   ?open   open the view; otherwise it stays collapsed
+  ?window=  the view's window attribute
   ?below  put the view and a reference to it below the fold
   ?firstRead=N  the decoder's first read of the head, in bytes
   ?after=N&fail=S, ?after=N&stall=MS, ?until=M  passed on to the server with the recording's URL
@@ -23,6 +24,7 @@ view.id = "v";
 view.setAttribute("src", src);
 if (q.get("annotations")) view.setAttribute("annotations", `../../${q.get("annotations")}`);
 if (q.has("open")) view.setAttribute("open", "");
+if (q.get("window")) view.setAttribute("window", q.get("window"));
 if (q.has("shaping")) view.setAttribute("shaping", "");
 const ref = document.createElement("tickwave-ref");
 ref.setAttribute("for", "v");

@@ -50,6 +50,8 @@ async function handle(m: Request, signal: AbortSignal): Promise<unknown> {
       return (await recording(m.key)).edges(m.channel, m.start, m.end, signal);
     case "samples":
       return (await recording(m.key)).samples(m.channel, m.start, m.end, signal);
+    case "edgeCount":
+      return (await recording(m.key)).edgeCount(m.channel, m.start, m.end, signal);
     case "overview":
       return (await recording(m.key)).overview(m.channel, m.start, m.end, m.maxBucket, signal);
     case "sidecar": {
@@ -65,17 +67,9 @@ async function handle(m: Request, signal: AbortSignal): Promise<unknown> {
       const texts = m.base ? await Promise.all(include.map((n) => fetchText(new URL(n, m.base!).href, signal))) : [];
       return r.resolveAnnotations(json, m.base ? include : [], texts, m.recordingFile);
     }
-    case "bundled": {
-      const r = await recording(m.key);
+    case "bundled":
       // Read the first time a view asks: a first draw reads nothing past the footer.
-      const files = await r.bundle(signal);
-      if (!files) return null;
-      const hand = Object.keys(files).filter((n) => n.endsWith(".toml"));
-      if (hand.length !== 1) throw new Error(`the bundled sidecar has ${hand.length} TOML files, not one`);
-      const names = Object.keys(files).filter((n) => n !== hand[0]);
-      // The sidecar travels inside the recording, so the file's own name proves nothing.
-      return r.resolveAnnotations(handJson(files[hand[0]], hand[0]).json, names, names.map((n) => files[n]), null);
-    }
+      return (await recording(m.key)).annotations(m.span, signal);
   }
 }
 

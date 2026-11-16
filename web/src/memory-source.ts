@@ -2,6 +2,7 @@
 // real file's head would hold (FORMAT.md, "Overview"), so the renderer meets the same coarseness
 // and the same gaps it will meet in a real file.
 
+import { densityOf, dutyOf } from "./render/shade.ts";
 import { lowerBound } from "./search.ts";
 import {
   aborted,
@@ -142,6 +143,14 @@ export class MemorySource implements Source {
     });
   }
 
+  edgeCount(channel: number, start: number, end: number, signal?: AbortSignal): Promise<number> {
+    return this.#answer(signal, () => {
+      const t = this.#digital(channel).ticks;
+      const lo = lowerBound(t, start);
+      return Math.max(0, lowerBound(t, end, lo) - lo);
+    });
+  }
+
   samples(channel: number, start: number, end: number, signal?: AbortSignal): Promise<Samples> {
     return this.#answer(signal, () => {
       const c = this.#analog(channel);
@@ -166,16 +175,30 @@ export class MemorySource implements Source {
       const s0 = Math.floor(Math.max(0, start) / bucket) * bucket;
       const n = Math.max(0, Math.ceil((Math.min(end, c.end) - s0) / bucket));
       if (c.kind === "digital") {
-        const level = new Uint8Array(n);
-        const changes = new Uint8Array(n);
-        let i = lowerBound(c.ticks, s0);
+        const density = new Uint8Array(n);
+        const duty = new Uint8Array(n);
+        const t = c.ticks;
+        let i = lowerBound(t, s0);
         for (let k = 0; k < n; k++) {
-          const b = s0 + k * bucket;
-          i = lowerBound(c.ticks, b, i);
-          level[k] = c.initial ^ (i & 1);
-          changes[k] = i < c.ticks.length && c.ticks[i] < b + bucket ? 1 : 0;
+          const b0 = s0 + k * bucket;
+          // The channel's kept span runs from its start, tick 0, to the length.
+          const b1 = Math.min(b0 + bucket, this.#rec.length);
+          const j = lowerBound(t, b0 + bucket, i);
+          density[k] = densityOf(j - i);
+          // The level at a tick is taken through every edge at or before it.
+          let level = c.initial ^ (i & 1);
+          let at = b0;
+          let high = 0;
+          for (let e = i; e < j; e++) {
+            if (level) high += t[e] - at;
+            at = t[e];
+            level ^= 1;
+          }
+          if (level) high += b1 - at;
+          duty[k] = dutyOf(high, b1 - b0);
+          i = j;
         }
-        return { kind: "digital", bucket, start: s0, level, changes };
+        return { kind: "digital", bucket, start: s0, density, duty };
       }
       const min = new Float64Array(n).fill(Infinity);
       const max = new Float64Array(n).fill(-Infinity);

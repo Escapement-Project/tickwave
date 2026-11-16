@@ -18,7 +18,7 @@ const served = new URLSearchParams([...q].filter(([k]) => ["tag", "after", "unti
 const inset = document.createElement("tickwave-inset");
 inset.id = "i";
 inset.setAttribute("src", `../../${q.get("src")}${served.size > 0 ? `?${served}` : ""}`);
-inset.setAttribute("annotations", `../../${q.get("annotations")}`);
+if (q.get("annotations")) inset.setAttribute("annotations", `../../${q.get("annotations")}`);
 inset.setAttribute("annotation", q.get("annotation"));
 if (!q.has("sweep")) inset.setAttribute("sweep", "off");
 for (const name of ["channels", "href"]) if (q.has(name)) inset.setAttribute(name, q.get(name));

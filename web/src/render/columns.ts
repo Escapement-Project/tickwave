@@ -42,14 +42,7 @@ export interface DigitalColumns {
 }
 
 /** Buckets of `bucket` ticks from `start`, as a level stores them (FORMAT.md, "Overview"). */
-export interface DigitalLevels {
-  readonly bucket: number;
-  readonly start: number;
-  /** Each bucket's density: 0 for no edge, one step up a quarter of a doubling of its edges. */
-  readonly density: Uint8Array;
-  /** Each bucket's duty: 0 wholly low to 14 wholly high, 15 wholly outside the kept span. */
-  readonly duty: Uint8Array;
-}
+export type DigitalLevels = Pick<DigitalOverview, "bucket" | "start" | "density" | "duty">;
 
 /** Column `k`'s share of its known time high, NaN where none is known. */
 export function share(cols: DigitalColumns, k: number): number {
@@ -110,31 +103,6 @@ export function digitalFromEdges(g: Grid, edges: Edges, from: number, to: number
     i = j;
   }
   return { state, at, edges: count, high, known };
-}
-
-/**
- * Columns from an overview's buckets, whatever their width against a column's. A column any
- * changing bucket overlaps is busy: the overview cannot say where in the bucket the change was, or
- * how many.
- */
-export function digitalFromOverview(g: Grid, ov: DigitalOverview, from: number, to: number): DigitalColumns {
-  const state = new Uint8Array(g.count);
-  const at = new Float64Array(g.count);
-  const n = ov.level.length;
-  const lo = Math.max(from, ov.start);
-  const hi = Math.min(to, ov.start + n * ov.bucket);
-  const [c0, c1] = columnRange(g, lo, hi);
-  for (let c = c0; c < c1; c++) {
-    const s = Math.max(lo, g.x0 + c * g.per);
-    const e = Math.min(hi, g.x0 + (c + 1) * g.per);
-    const k0 = Math.max(0, Math.floor((s - ov.start) / ov.bucket));
-    const k1 = Math.min(n, Math.ceil((e - ov.start) / ov.bucket));
-    let busy = false;
-    for (let k = k0; k < k1 && !busy; k++) busy = ov.changes[k] === 1;
-    state[c] = busy ? BUSY : ov.level[k0] ? HIGH : LOW;
-  }
-  // A level's bits hold no count or share: until the web reads density and duty, none.
-  return { state, at, edges: new Float64Array(g.count), high: new Float64Array(g.count), known: new Float64Array(g.count) };
 }
 
 /**

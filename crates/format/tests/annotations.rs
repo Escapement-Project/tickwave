@@ -1,4 +1,6 @@
-use escapement_tickwave_format::annotations::{Included, resolve, resolve_json};
+use escapement_tickwave_format::annotations::{
+    Included, resolve, resolve_apart, resolve_apart_json, resolve_json,
+};
 use escapement_tickwave_format::header::{
     AnalogCoding, ChannelHeader, ChannelKind, Header, SourceFormat, SourceHeader,
 };
@@ -534,4 +536,24 @@ fn a_lenient_ref_resolves_only_to_an_annotation_kept() {
         .unwrap();
     assert_eq!((alias.start, alias.end), (412_000, Some(412_900)));
     assert_problem(&got.problems, "is used twice");
+}
+
+/// A page hands the hand-written file in as its TOML's JSON. Resolved apart from its generator
+/// files' lines, it reads as its TOML does, and a problem in it names no line of the JSON, which
+/// its author never saw.
+#[test]
+fn a_hand_written_file_resolved_apart_reads_the_same_from_its_json() {
+    let json = serde_json::to_string(&toml::from_str::<toml::Value>(HAND).unwrap()).unwrap();
+    let inc = included(GENERATED);
+    let none = |_: &str| None;
+    let from_toml = resolve_apart(HAND, &inc, &header(), &none);
+    assert!(!from_toml.annotations.is_empty());
+    assert_eq!(resolve_apart_json(&json, &inc, &header(), &none), from_toml);
+    let bad = resolve_apart_json("{\"format\": 1}", &inc, &header(), &none);
+    assert!(!bad.problems.is_empty());
+    assert!(
+        bad.problems.iter().all(|p| !p.contains(" at line ")),
+        "{:#?}",
+        bad.problems
+    );
 }

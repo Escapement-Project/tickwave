@@ -13,7 +13,7 @@ import { formatInterval, measureReading } from "../readouts.ts";
 import { channelIndices, Plot, ROLE_WEIGHT } from "../render/plot.ts";
 import { isAbort, named, readingStep, type RecordingInfo } from "../source.ts";
 import { secondsValue, toTicks } from "../time.ts";
-import { DRAG_PX, TickwaveElement, loadRecording, zoomKey, type Loaded } from "./base.ts";
+import { DRAG_PX, TickwaveElement, loadAnnotations, loadHead, readAnnotations, zoomKey, type Loaded } from "./base.ts";
 import type { TickwaveView } from "./view.ts";
 
 const CSS = `
@@ -259,24 +259,90 @@ export class TickwaveInset extends TickwaveElement {
       this.#loaded = null;
       this.#missing = null;
       this.clearProblems();
-      loadRecording(src, annotations).then(
-        (l) => {
-          if (this.#loadKey !== key) return;
-          this.#loaded = l;
-          for (const e of l.annotations.errors) this.fail(named("TickwaveSidecarError", e));
-          this.#show();
-        },
-        (e) => {
-          // A load the inset has moved on from says nothing about the one it shows now. A failed
-          // one is not kept: the next update tries again.
-          if (this.#loadKey !== key) return;
-          this.#loadKey = "";
-          this.fail(e);
-        },
-      );
+      this.#readSpans = [];
+      loadHead(src)
+        .then(async (head) => ({ ...head, annotations: await this.#annotated(head.src, annotations) }))
+        .then(
+          (l) => {
+            if (this.#loadKey !== key) return;
+            this.#loaded = l;
+            for (const e of l.annotations.errors) this.fail(named("TickwaveSidecarError", e));
+            this.#show();
+          },
+          (e) => {
+            // A load the inset has moved on from says nothing about the one it shows now. A failed
+            // one is not kept: the next update tries again.
+            if (this.#loadKey !== key) return;
+            this.#loadKey = "";
+            this.fail(e);
+          },
+        );
       return;
     }
     this.#show();
+  }
+
+  /** The ticks a bundled sidecar's annotations are read for while some are still to read. */
+  #readSpans: [number, number][] = [];
+  #readingMore = false;
+
+  /** The annotations an inset needs before it draws, read as far as they must be: a bundled
+   * sidecar's hand-written file, then the parts its annotation's span meets, a span of its own
+   * length either side, or every part where the annotation is not among the hand-written ones. */
+  async #annotated(src: URL, annotations: string | null) {
+    const id = this.getAttribute("annotation");
+    const hand = await loadAnnotations(src, annotations, null, [0, 0]);
+    if (!hand.partial) return hand;
+    const a = id ? hand.byId.get(id) : undefined;
+    if (!a) return loadAnnotations(src, annotations, null, null);
+    const span = this.#around(a);
+    const list = await loadAnnotations(src, annotations, null, span);
+    if (list.partial) this.#readSpans.push(span);
+    return list;
+  }
+
+  /** The ticks to read annotations for about `a`: its span, and as much again either side, or
+   * about a two-thousandth of the recording beside a point, as its default pad shows. */
+  #around(a: Annotation): [number, number] {
+    const end = a.end ?? a.start;
+    const reach = Math.max(end - a.start, Math.ceil((this.#loaded?.info.length ?? 0) / 1000), 1000);
+    return [a.start - reach, end + reach];
+  }
+
+  /** Reads more of a bundled sidecar's annotations, where some are still to read: every one for
+   * an annotation not among those read, or those the span shown meets past what was read. */
+  #readMore(): void {
+    const l = this.#loaded;
+    if (!l?.annotations.partial || this.#readingMore) return;
+    const id = this.getAttribute("annotation");
+    const v = this.#plot.layout ? this.#plot.view : null;
+    let span: [number, number] | null;
+    if (id && !l.annotations.byId.has(id)) span = null;
+    else if (v && !this.#readSpans.some(([a, b]) => a <= v.start && v.end <= b)) {
+      const w = v.end - v.start;
+      span = [Math.floor(v.start - w), Math.ceil(v.end + w)];
+    } else return;
+    this.#readingMore = true;
+    const key = this.#loadKey;
+    void readAnnotations(l.src, this.getAttribute("annotations"), null, span)
+      .then(
+        (annotations) => {
+          if (this.#loadKey !== key || !this.#loaded) return;
+          if (span) this.#readSpans.push(span);
+          this.#loaded = { ...this.#loaded, annotations };
+          this.#show();
+        },
+        // What was read stays; a span that failed is not asked for again until the view moves
+        // past it, nor every annotation for one not found.
+        (e) => {
+          if (this.#loadKey !== key || !this.#loaded) return;
+          this.#readSpans.push(span ?? [-Infinity, Infinity]);
+          this.fail(named("TickwaveSidecarError", e instanceof Error ? e.message : String(e)));
+        },
+      )
+      .finally(() => {
+        this.#readingMore = false;
+      });
   }
 
   /** Whether the sweep is playing. */
@@ -320,7 +386,12 @@ export class TickwaveInset extends TickwaveElement {
     const id = this.getAttribute("annotation");
     const a = id ? (l.annotations.byId.get(id) ?? null) : null;
     // One inset can show annotation after annotation, a chart's popover for one: a missing one
-    // stays in the notice only while it is the one asked for.
+    // stays in the notice only while it is the one asked for. One that may be in a part not read
+    // is not missing until every part is.
+    if (id && !a && l.annotations.partial) {
+      this.#readMore();
+      return;
+    }
     const absent = id && !a ? `no annotation ${id}` : null;
     if (this.#missing !== null && this.#missing !== absent) this.forgetProblem(this.#missing);
     this.#missing = absent;
@@ -352,6 +423,7 @@ export class TickwaveInset extends TickwaveElement {
     this.#renderMeasure();
     this.#renderKey();
     this.#renderHit();
+    this.#readMore();
   }
 
   #layout(): void {
@@ -706,8 +778,10 @@ export class TickwaveInset extends TickwaveElement {
     }
     const name: Item = [["what", track.channel.name]];
     if (r.kind === "text") {
-      const items = [name, ...r.lines.map((t): Item => [[t === "high" || t === "low" ? "level" : "", t]])];
-      if (r.lines.includes(ZOOM_IN)) items.push([["what", this.#pointerType === "touch" ? "pinch" : `${zoomKey()} + scroll`]]);
+      // The ask to zoom in says how, in one item after the figures, where the line has room.
+      const lines = r.lines.filter((t) => t !== ZOOM_IN);
+      const items = [name, ...lines.map((t): Item => [[t === "high" || t === "low" ? "level" : "", t]])];
+      if (lines.length < r.lines.length) items.push([["what", `${this.#pointerType === "touch" ? "pinch" : `${zoomKey()} + scroll`} to measure`]]);
       this.#read(items);
       return;
     }

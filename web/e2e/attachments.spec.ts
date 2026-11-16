@@ -7,7 +7,7 @@ import { join } from "node:path";
 
 const PAGE = "/dist/site/open.html";
 const ZIPS = "fixtures/zip";
-const IDENTIFY_ID = "blake3:ccc8b7d8c3e4cb30da7fc6088e54ebeba2858ad402eb3fb5a9aeb50be989accf";
+const IDENTIFY_ID = "blake3:63773d56fb3420735c864932f8d2441acd6f31a51b557e073bf27755a0534697";
 const ATTACHMENT = "https://github.com/user-attachments/files/30440851/identify-swd.zip";
 
 /** The facts list beside the view, as [term, value] pairs. */

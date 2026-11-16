@@ -72,19 +72,20 @@ struct GeneratorHead {
 }
 
 /// One annotation, resolved: times in ticks, a `ref` followed.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Annotation {
     /// The full id: a hand-written id, or `<source>/<id>` for a generated one.
     pub id: String,
     /// The generator's name; None for a hand-written annotation.
     pub source: Option<String>,
     /// For a hand-written alias, the full id of the generated annotation it names.
-    #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "ref", default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
     pub start: i64,
     /// None for a point.
     pub end: Option<i64>,
     /// Empty means every channel.
+    #[serde(default)]
     pub channels: Vec<String>,
     pub label: Option<String>,
     pub kind: Option<String>,
@@ -592,16 +593,45 @@ pub fn resolve_apart<'a>(
     header: &Header,
     targets: Targets<'_>,
 ) -> Apart<'a> {
-    let file: HandFile = match toml::from_str(hand) {
-        Ok(file) => file,
+    match toml::from_str(hand) {
+        Ok(file) => apart(file, included, header, targets),
+        Err(e) => Apart {
+            problems: vec![format!("the TOML file: {e}")],
+            ..Apart::default()
+        },
+    }
+}
+
+/// As `resolve_apart`, with the hand-written file's TOML already parsed and written out as JSON.
+pub fn resolve_apart_json<'a>(
+    hand: &str,
+    included: &[Included<'a>],
+    header: &Header,
+    targets: Targets<'_>,
+) -> Apart<'a> {
+    match json(hand) {
+        Ok(file) => apart(file, included, header, targets),
         Err(e) => {
-            return Apart {
-                annotations: Vec::new(),
-                files: Vec::new(),
-                problems: vec![format!("the TOML file: {e}")],
-            };
+            // The position is in the JSON the page made from the TOML, as in `resolve_json`.
+            let text = e.to_string();
+            let at = format!(" at line {} column {}", e.line(), e.column());
+            Apart {
+                problems: vec![format!(
+                    "the TOML file: {}",
+                    text.strip_suffix(&at).unwrap_or(&text)
+                )],
+                ..Apart::default()
+            }
         }
-    };
+    }
+}
+
+fn apart<'a>(
+    file: HandFile,
+    included: &[Included<'a>],
+    header: &Header,
+    targets: Targets<'_>,
+) -> Apart<'a> {
     // `find`'s order.
     let mut order: Vec<&Included<'a>> = included.iter().collect();
     order.sort_by_key(|inc| file.include.iter().position(|n| n == inc.name));

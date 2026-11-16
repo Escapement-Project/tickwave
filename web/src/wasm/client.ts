@@ -2,8 +2,9 @@
 // holds the WASM module. The worker starts when something first needs a recording.
 
 import { fromCore, type Annotation, type CoreAnnotation } from "../annotations.ts";
-import type { Loader } from "../registry.ts";
+import type { BundledRead, Loader } from "../registry.ts";
 import { aborted, type Edges, type Overview, type RecordingInfo, type Samples, type Source } from "../source.ts";
+import type { AnnotationsRead } from "./opened.ts";
 import { FIRST_READ, MAX_DECODED, type Reply, type Request } from "./protocol.ts";
 
 const settings = { firstRead: FIRST_READ, maxDecodedBytes: MAX_DECODED, cacheBytes: 192 << 20 };
@@ -139,6 +140,11 @@ export class WasmSource implements Source {
     return call<Edges>({ op: "edges", key: this.#key, channel, start, end }, signal);
   }
 
+  async edgeCount(channel: number, start: number, end: number, signal?: AbortSignal): Promise<number> {
+    await this.#open();
+    return call<number>({ op: "edgeCount", key: this.#key, channel, start, end }, signal);
+  }
+
   async samples(channel: number, start: number, end: number, signal?: AbortSignal): Promise<Samples> {
     await this.#open();
     return call<Samples>({ op: "samples", key: this.#key, channel, start, end }, signal);
@@ -168,18 +174,27 @@ export class WasmSource implements Source {
     return (JSON.parse(json) as CoreAnnotation[]).map(fromCore);
   }
 
-  /** A local file's sidecar files when it came with them, else the recording's bundled sidecar. */
+  /** A local file's sidecar files when it came with them, else the recording's bundled sidecar,
+   * whole. */
   async bundled(): Promise<Annotation[] | null> {
+    return (await this.bundledIn(null))?.annotations ?? null;
+  }
+
+  /** A local file's sidecar files when it came with them, whole; else the recording's bundled
+   * annotations the parts meeting ticks `span` hold, with those read before, every part's where
+   * `span` is null. */
+  async bundledIn(span: readonly [number, number] | null): Promise<BundledRead | null> {
     await this.#open();
-    let json: string | null;
     if (this.#sidecar.length > 0) {
       const hand = this.#sidecar.filter((f) => f.name.endsWith(".toml"));
       if (hand.length !== 1) throw new Error(`a sidecar needs one .toml file; ${hand.length} came with ${this.fileName}`);
       const rest = this.#sidecar.filter((f) => f !== hand[0]);
       const [text, ...texts] = await Promise.all([hand[0].text(), ...rest.map((f) => f.text())]);
-      json = await call<string>({ op: "resolve", key: this.#key, hand: text, names: rest.map((f) => f.name), texts, recordingFile: this.fileName });
-    } else json = await call<string | null>({ op: "bundled", key: this.#key });
-    return json === null ? null : (JSON.parse(json) as CoreAnnotation[]).map(fromCore);
+      const json = await call<string>({ op: "resolve", key: this.#key, hand: text, names: rest.map((f) => f.name), texts, recordingFile: this.fileName });
+      return { annotations: (JSON.parse(json) as CoreAnnotation[]).map(fromCore), problems: [], complete: true };
+    }
+    const read = await call<AnnotationsRead | null>({ op: "bundled", key: this.#key, span });
+    return read && { annotations: read.list.map(fromCore), problems: read.problems, complete: read.complete };
   }
 }
 
@@ -214,4 +229,5 @@ export const tickwaveLoader: Loader = {
   annotations: (annotations, _recording, source) => (source as WasmSource).sidecar(annotations),
   annotationsText: (text, base, _recording, source) => (source as WasmSource).sidecarText(text, base),
   bundled: (_recording, source) => (source as WasmSource).bundled(),
+  bundledIn: (_recording, source, span) => (source as WasmSource).bundledIn(span),
 };

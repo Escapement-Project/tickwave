@@ -13,6 +13,7 @@ import {
   channelSampleTick,
   fillRuns,
   firstAt,
+  IDENTITY,
   named,
   placeAfter,
   SAMPLES_PER_RUN,
@@ -31,7 +32,9 @@ import {
   type Samples,
   type SourceHeader,
 } from "../source.ts";
+import type { CoreAnnotation } from "../annotations.ts";
 import { join, type Bytes } from "./bytes.ts";
+import { handJson } from "./hand.ts";
 import { FIRST_READ } from "./protocol.ts";
 
 /** What the opened recording needs from the wasm-bindgen module. */
@@ -52,7 +55,14 @@ interface HeaderTables {
   overview_blocks?: { shift: number; blocks: number; rows: number }[];
 }
 
-interface HeaderDigital extends HeaderShaped, HeaderTables {
+/** What makes a channel unavailable to a reader that doesn't know it (FORMAT.md, "Unavailable
+ * channels"). */
+interface HeaderNeeds {
+  requires?: string[];
+  codec?: string;
+}
+
+interface HeaderDigital extends HeaderShaped, HeaderTables, HeaderNeeds {
   name: string;
   source_name: string;
   source: number;
@@ -73,7 +83,7 @@ type Coding =
   | { type: "int"; bits: number; signed: boolean; scale?: [number, number]; offset?: [number, number] }
   | { type: "codes"; bits: number; scale: number; offset: number };
 
-interface HeaderAnalog extends HeaderShaped, HeaderTables {
+interface HeaderAnalog extends HeaderShaped, HeaderTables, HeaderNeeds {
   name: string;
   source_name: string;
   source: number;
@@ -83,6 +93,8 @@ interface HeaderAnalog extends HeaderShaped, HeaderTables {
   period: [number, number];
   count: number;
   blocks: number;
+  /** Where the samples sit within a tick of the source's grid (FORMAT.md, "Times"). */
+  phase?: [number, number];
   /** [index, tick, samples lost before it]. */
   breaks?: [number, number, number][];
   /** How many breaks the list pages hold, where they are in pages. */
@@ -93,12 +105,15 @@ interface HeaderAnalog extends HeaderShaped, HeaderTables {
   significant?: number;
 }
 
-/** A channel computed from two analog channels (FORMAT.md, "Derived channels"). */
+/** A channel computed from analog channels (FORMAT.md, "Derived channels"). */
 interface HeaderDerived extends HeaderTables {
   name: string;
-  unit: string;
-  product: [string, string];
+  unit?: string;
+  op: string;
+  operands: string[];
+  params?: Record<string, string>;
   significant?: number;
+  requires?: string[];
 }
 
 /** Whether a channel's values come through the decoder as f64: an f64 or integer coding. */
@@ -127,6 +142,8 @@ export interface Header {
   content_id: ContentId;
   /** The finest overview level's shift of a channel that states none (FORMAT.md, "Overview"). */
   overview_shift: number;
+  /** How many annotation parts the recording holds, where it holds any. */
+  annotation_parts?: number;
 }
 
 interface Sized {
@@ -143,13 +160,13 @@ type DecodedBlock = Sized &
         readonly end: number;
         readonly first: number;
         readonly values: Float32Array | Float64Array;
-        /** An integer operand's codes, for a derived channel's exact product. */
+        /** An integer operand's codes, for a derived channel's exact result. */
         readonly codes?: BigInt64Array;
       }
   );
 
-/** A level's buckets, laid out as `OverviewLevel` gives them: [level bits, change bits] for a
- * digital channel, [min, max] for an analog one. */
+/** A level's buckets, laid out as `OverviewLevel` gives them: [density, duty] for a digital
+ * channel, a byte a bucket each, and [min, max] for an analog one. */
 type Arrays = Uint8Array[] | Float32Array[] | Float64Array[];
 
 /** One overview block, decoded: the buckets of each of the `n` blocks it stands for. */
@@ -162,10 +179,61 @@ interface DecodedPage extends Sized {
   readonly entries: Float64Array;
 }
 
-/** Numbers a located page, a block and an overview row take (crates/wasm). */
+/** Numbers a located page, a block, an overview row and a part row take (crates/wasm). */
 const LOCATED = 7;
 const BLOCK = 8;
 const ROW = 5;
+const PART = 6;
+
+/** A line of an annotation part, as `partAnnotations` gives it: its id where it reads, and its
+ * annotation or why it is left out; `past` the length, it claims no id. */
+interface PartLine {
+  readonly id?: string | null;
+  readonly annotation?: CoreAnnotation;
+  readonly left?: string;
+  readonly past?: boolean;
+}
+
+/** An annotation part, read, each of its lines resolved alone. */
+interface PartRead extends Sized {
+  readonly source: string;
+  readonly lines: readonly PartLine[];
+}
+
+/** The annotation bundle as reading annotations a range at a time needs it. */
+interface BundleRead {
+  /** The hand-written file as JSON, and the full ids its refs name. */
+  readonly hand: string;
+  readonly refs: ReadonlySet<string>;
+  /** The generator files, each its first line alone. */
+  readonly names: string[];
+  readonly texts: string[];
+  /** Each generator's file's place in the sidecar's order, from 1, by the generator's name; null
+   * where its first line breaks a rule, which leaves out every line of it. */
+  readonly ranks: ReadonlyMap<string, number | null>;
+}
+
+/** A bundled sidecar's annotations as far as they are read (FORMAT.md, "Annotations"). */
+export interface AnnotationsRead {
+  /** In the sidecar's order: the hand-written file's, then each generator file's lines. */
+  readonly list: CoreAnnotation[];
+  /** What reading them left out, and why. */
+  readonly problems: string[];
+  /** Whether every part is read: until then a hand-written `ref` and the bundle's own problems
+   * wait, since a ref resolves only once every part is read. */
+  readonly complete: boolean;
+}
+
+/** The generator a bundled file's first line names, where it is a generator file's head. */
+function generatorOf(text: string): string | null {
+  try {
+    const head: unknown = JSON.parse(text.split("\n", 1)[0]);
+    if (head && typeof head === "object" && "format" in head && "source" in head && typeof head.source === "string") return head.source;
+  } catch {
+    // Not JSON: the hand-written resolver says what is wrong with the file.
+  }
+  return null;
+}
 /** Buckets in an overview block (FORMAT.md, "Overview"). */
 const BLOCK_BUCKETS = 4096;
 
@@ -403,7 +471,7 @@ export class Opened {
   /** Each overview channel's levels' shifts, finest first, the strip's last. */
   readonly #shifts = new Map<number, number[]>();
   readonly #strips = new Map<number, Arrays>();
-  /** The stored channels some derived channel multiplies as integer codes. */
+  /** The stored `int` channels some derived channel takes, as codes. */
   readonly #operands = new Set<number>();
 
   private constructor(rec: WasmRecording, fileLength: number, bytes: Bytes) {
@@ -437,6 +505,9 @@ export class Opened {
     });
     const channels: Channel[] = h.channels.map((c, i) => {
       const map = this.#maps[i];
+      // What this version can't read keeps its place and name (FORMAT.md, "Unavailable channels").
+      const why = rec.unavailable(i);
+      if (why !== undefined) return { kind: "unavailable", name: c.name, sourceName: c.source_name, source: c.source, why, end: h.length };
       if (c.kind === "digital") {
         // A gap from the channel's start says where its level is first known, and the others
         // are gaps in it.
@@ -490,29 +561,28 @@ export class Opened {
     // A derived channel reads as an analog one after the stored channels, placed as its first
     // operand's samples are (they share first, period, count, breaks and losses).
     for (const [d, dc] of (h.derived ?? []).entries()) {
-      const [a, b] = dc.product.map((name) => channels.findIndex((c) => c.name === name));
+      const o = h.channels.length + d;
+      const [a, b] = dc.operands.map((name) => channels.findIndex((c) => c.name === name));
+      // The decoder checked that its operands name channels, which give its place.
+      this.#maps.push(this.#maps[a] ?? IDENTITY);
+      this.#starts.push(this.#starts[a] ?? 0);
+      const why = rec.unavailable(o);
+      if (why !== undefined) {
+        channels.push({ kind: "unavailable", name: dc.name, sourceName: dc.name, why, end: h.length });
+        continue;
+      }
       const ca = channels[a];
       const cb = channels[b];
-      if (ca?.kind !== "analog" || cb?.kind !== "analog") throw named("TickwaveNotRecording", `${bytes.name}: ${dc.name} is the product of channels it doesn't hold`);
-      const [min, max] = this.#range(h.channels.length + d);
-      const [sa, sb] = [a, b].map((i) => (h.channels[i] as HeaderAnalog).coding);
-      // An integer product's step is the product of the two exact scales, divided once.
-      const step = sa.type === "int" && sb.type === "int" ? ((sa.scale?.[0] ?? 1) * (sb.scale?.[0] ?? 1)) / ((sa.scale?.[1] ?? 1) * (sb.scale?.[1] ?? 1)) : null;
-      for (const [i, s] of [
-        [a, sa],
-        [b, sb],
-      ] as const) {
-        if (s.type === "int") this.#operands.add(i);
-      }
-      this.#maps.push(this.#maps[a]);
-      this.#starts.push(this.#starts[a]);
+      if (ca?.kind !== "analog" || cb?.kind !== "analog") throw named("TickwaveNotRecording", `${bytes.name}: ${dc.name} is derived from channels it doesn't hold`);
+      const [min, max] = this.#range(o);
+      for (const i of [a, b]) if ((h.channels[i] as HeaderAnalog).coding.type === "int") this.#operands.add(i);
       channels.push({
         ...ca,
         name: dc.name,
         sourceName: dc.name,
-        unit: dc.unit,
-        product: [dc.product[0], dc.product[1]],
-        resolution: step,
+        unit: dc.unit ?? "",
+        derived: { op: dc.op, operands: [...dc.operands] },
+        resolution: rec.derivedStep(d) ?? null,
         ...(dc.significant !== undefined ? { significant: dc.significant } : { significant: undefined }),
         min,
         max,
@@ -607,7 +677,7 @@ export class Opened {
   #listedBy(o: number): number {
     const C = this.header.channels.length;
     if (o < C) return o;
-    return this.header.channels.findIndex((c) => c.name === this.header.derived![o - C].product[0]);
+    return this.header.channels.findIndex((c) => c.name === this.header.derived![o - C].operands[0]);
   }
 
   /** The pages of a table that hold keys `[k0, k1)`, located through its directories, which are
@@ -787,7 +857,14 @@ export class Opened {
     return [s, Math.max(s + 1, Math.min(Math.ceil(end), this.header.length))];
   }
 
+  /** Throws, saying why, for a channel this version can't read: nothing of it is fetched. */
+  #readable(channel: number): void {
+    const c = this.info.channels[channel];
+    if (c?.kind === "unavailable") throw new RangeError(c.why);
+  }
+
   async edges(channel: number, start: number, end: number, signal?: AbortSignal): Promise<Edges> {
+    this.#readable(channel);
     const h = this.header.channels[channel] as HeaderChannel | undefined;
     if (h?.kind !== "digital") throw new RangeError(`channel ${channel} is not digital`);
     const [s, e] = this.#clamp(start, end);
@@ -825,7 +902,35 @@ export class Opened {
     return { level, ticks, ...(listed && { listed }) };
   }
 
+  /** How many of digital channel `channel`'s edges lie in `[start, end)`, from the index: each
+   * block's first edge's place among the channel's edges, and the edges of the blocks holding
+   * the span's two ends, decoded (FORMAT.md, "Index"). */
+  async edgeCount(channel: number, start: number, end: number, signal?: AbortSignal): Promise<number> {
+    this.#readable(channel);
+    const h = this.header.channels[channel] as HeaderChannel | undefined;
+    if (h?.kind !== "digital") throw new RangeError(`channel ${channel} is not digital`);
+    const [s, e] = [Math.max(0, Math.ceil(start)), Math.min(this.header.length, Math.ceil(end))];
+    if (e <= s) return 0;
+    const [before, upTo] = await Promise.all([this.#edgesBefore(channel, h, s, signal), this.#edgesBefore(channel, h, e, signal)]);
+    return upTo - before;
+  }
+
+  /** How many of digital channel `c`'s edges lie before tick `t`. */
+  async #edgesBefore(c: number, h: HeaderDigital, t: number, signal?: AbortSignal): Promise<number> {
+    if (t <= 0 || h.edges === 0) return 0;
+    if (t >= this.header.length) return h.edges;
+    const refs = await this.#blockRefs(c, t, t + 1, signal);
+    if (refs.length === 0) throw new Error(`${this.#name}: channel ${c}: no block holds tick ${t}`);
+    // A block's third number is its first edge's place among the channel's.
+    if (refs[0][0] === t) return refs[0][2];
+    const { blocks } = await this.#covered(c, t, t + 1, signal);
+    const b = blocks[0];
+    if (b?.kind !== "digital") throw new RangeError(`channel ${c} is not digital`);
+    return refs[0][2] + lowerBound(b.edges, t);
+  }
+
   async samples(channel: number, start: number, end: number, signal?: AbortSignal): Promise<Samples> {
+    this.#readable(channel);
     const info = this.info.channels[channel];
     if (info?.kind !== "analog") throw new RangeError(`channel ${channel} is not analog`);
     const C = this.header.channels.length;
@@ -861,9 +966,9 @@ export class Opened {
   }
 
   /** Derived channel `d`'s samples `i0..i1`, whose ticks lie in `[from, to)`: its operands'
-   * samples at the same indices, multiplied by the format's rule in the decoder. */
+   * samples at the same indices, through its operation by the format's rule in the decoder. */
   async #product(d: number, from: number, to: number, i0: number, i1: number, signal?: AbortSignal): Promise<Float64Array> {
-    const names = this.header.derived![d].product;
+    const names = this.header.derived![d].operands;
     const operands = names.map((n) => this.header.channels.findIndex((c) => c.name === n));
     const stored = await Promise.all(
       operands.map(async (c) => {
@@ -893,6 +998,7 @@ export class Opened {
    * `listed`.
    */
   async overview(channel: number, start: number, end: number, maxBucket: number, signal?: AbortSignal): Promise<DigitalOverview | AnalogOverview | null> {
+    this.#readable(channel);
     const shifts = this.#levels(channel);
     let li = -1;
     shifts.forEach((sh, i) => {
@@ -949,19 +1055,18 @@ export class Opened {
     const listed = slice ? this.#listed(channel, slice, start, end) : undefined;
     const n = k1 - k0;
     if (c?.kind === "digital") {
-      const level = new Uint8Array(n);
-      const changes = new Uint8Array(n);
+      const density = new Uint8Array(n);
+      // A bucket no level holds lies outside the channel's kept span, for all this answer knows.
+      const duty = new Uint8Array(n).fill(15);
       for (const [first, arrays] of parts) {
-        const [bits, changeBits] = arrays as Uint8Array[];
+        const [d, u] = arrays as Uint8Array[];
         const from = Math.max(k0, first);
-        const to = Math.min(k1, first + bits.length * 8);
-        for (let k = from; k < to; k++) {
-          const i = k - first;
-          level[k - k0] = (bits[i >> 3] >> (i & 7)) & 1;
-          changes[k - k0] = (changeBits[i >> 3] >> (i & 7)) & 1;
-        }
+        const to = Math.min(k1, first + d.length);
+        if (to <= from) continue;
+        density.set(d.subarray(from - first, to - first), from - k0);
+        duty.set(u.subarray(from - first, to - first), from - k0);
       }
-      return { kind: "digital", bucket, start: k0 * bucket, level, changes, ...(listed && { listed }) };
+      return { kind: "digital", bucket, start: k0 * bucket, density, duty, ...(listed && { listed }) };
     }
     const Values = !c || wide(c) ? Float64Array : Float32Array;
     const min = new Values(n).fill(Infinity);
@@ -988,6 +1093,117 @@ export class Opened {
       signal,
     );
     return b.files;
+  }
+
+  /** The parts read so far, by row. */
+  readonly #parts = new Map<number, PartRead>();
+  #bundleRead: Promise<BundleRead | null> | null = null;
+
+  /** The bundle as reading annotations needs it, read the first time asked; null without one. */
+  #readBundle(): Promise<BundleRead | null> {
+    // Read once for every caller, so none's abort ends another's read: it is one range.
+    this.#bundleRead ??= (async () => {
+      const files = await this.bundle();
+      if (!files) return null;
+      const hand = Object.keys(files).filter((n) => n.endsWith(".toml"));
+      if (hand.length !== 1) throw new Error(`${this.#name}: the bundled sidecar has ${hand.length} TOML files, not one`);
+      const { json } = handJson(files[hand[0]], hand[0]);
+      const names = Object.keys(files).filter((n) => n !== hand[0]);
+      const texts = names.map((n) => files[n]);
+      const refs = new Set<string>();
+      const entries: unknown = (JSON.parse(json) as { annotation?: unknown }).annotation;
+      for (const a of Array.isArray(entries) ? entries : []) if (a && typeof a === "object" && typeof a.ref === "string") refs.add(a.ref);
+      // The files' order and which are kept come from resolving the file apart, refs aside.
+      const apart = JSON.parse(this.#rec.resolveBundled(json, names, texts, "[]")) as { files: { name: string; kept: boolean }[] };
+      const rank = new Map(apart.files.map((f, i) => [f.name, f.kept ? i + 1 : null]));
+      const ranks = new Map<string, number | null>();
+      for (const name of names) {
+        const source = generatorOf(files[name]);
+        if (source === null) continue;
+        if (ranks.has(source)) throw new Error(`${this.#name}: the annotation bundle holds two files of generator ${JSON.stringify(source)}`);
+        ranks.set(source, rank.get(name) ?? null);
+      }
+      return { hand: json, refs, names, texts, ranks };
+    })();
+    this.#bundleRead.catch(() => (this.#bundleRead = null));
+    return this.#bundleRead;
+  }
+
+  /**
+   * The bundled annotations as a reader that reads a range at a time has them (FORMAT.md,
+   * "Annotations"): the hand-written file's, and the lines of every part read so far, with those
+   * of the parts whose span meets ticks `span` read now; of every part where `span` is null, and
+   * of none more where it is empty. Null for a recording that bundles none. A part that repeats
+   * an id a part read before it in the parts' order gave is left out, so a part not read can leave
+   * a repeat in.
+   */
+  async annotations(span: readonly [number, number] | null, signal?: AbortSignal): Promise<AnnotationsRead | null> {
+    const b = await this.#readBundle();
+    if (!b) return null;
+    // Rows may pass the length, and start before 0 only in a crafted file: every tick a double holds.
+    const [lo, hi] = span ?? [-(2 ** 53), 2 ** 53];
+    if (hi <= lo) return this.#gathered(b);
+    const at = await this.#located(() => this.#rec.partPages(lo, hi), signal);
+    const pages = await this.#pages(at, (j) => `${this.#id} p${j}`, (p, bytes) => this.#rec.partPage(p, bytes), signal);
+    const rows: Float64Array[] = [];
+    for (const { entries } of pages) {
+      for (let i = 0; i < entries.length; i += PART) {
+        // A part meets the span where it starts before the span's end and ends at or after its start.
+        if (entries[i + 4] < hi && entries[i + 5] >= lo && !this.#parts.has(entries[i])) rows.push(entries.subarray(i, i + PART));
+      }
+    }
+    const read = await this.#reader.get(
+      rows.map((r) => ({
+        key: `${this.#id} a${r[0]}`,
+        from: r[1],
+        to: r[1] + r[2],
+        make: (frame: Uint8Array): PartRead => ({ ...(JSON.parse(this.#rec.partAnnotations(r, frame)) as Omit<PartRead, "size">), size: 64 + 2 * r[3] }),
+      })),
+      signal,
+    );
+    rows.forEach((r, i) => this.#parts.set(r[0], read[i]));
+    return this.#gathered(b);
+  }
+
+  /** The annotations of the bundle and the parts read so far. */
+  #gathered(b: BundleRead): AnnotationsRead {
+    const problems: string[] = [];
+    const generated: { order: [number, number, number]; a: CoreAnnotation }[] = [];
+    const claimed = new Set<string>();
+    for (const row of [...this.#parts.keys()].sort((x, y) => x - y)) {
+      const part = this.#parts.get(row)!;
+      const rank = b.ranks.get(part.source);
+      if (rank === undefined) throw new Error(`${this.#name}: an annotation part of generator ${JSON.stringify(part.source)}, which has no file in the bundle`);
+      part.lines.forEach((line, n) => {
+        if (line.past) {
+          problems.push(line.left!);
+          return;
+        }
+        if (line.id != null) {
+          const id = `${part.source}\n${line.id}`;
+          if (claimed.has(id)) {
+            problems.push(`${part.source}/${line.id}: an id its generator has given already`);
+            return;
+          }
+          claimed.add(id);
+        }
+        // A file whose first line breaks a rule: the bundle's problems name it.
+        if (rank === null) return;
+        if (line.annotation) generated.push({ order: [rank, row, n], a: line.annotation });
+        else problems.push(line.left!);
+      });
+    }
+    generated.sort((x, y) => x.order[0] - y.order[0] || x.order[1] - y.order[1] || x.order[2] - y.order[2]);
+    const complete = this.#parts.size === (this.header.annotation_parts ?? 0);
+    // A ref resolves once every part is read: a part not read can hold its target's id first.
+    const targets = complete ? generated.filter((g) => b.refs.has(g.a.id)).map((g) => g.a) : [];
+    const apart = JSON.parse(this.#rec.resolveBundled(b.hand, b.names, b.texts, JSON.stringify(targets))) as {
+      annotations: { place: number; annotation: CoreAnnotation }[];
+      problems: string[];
+    };
+    if (complete) problems.push(...apart.problems);
+    const hand = apart.annotations.sort((x, y) => x.place - y.place).map((h) => h.annotation);
+    return { list: [...hand, ...generated.map((g) => g.a)], problems, complete };
   }
 
   /** Resolves a sidecar (the hand-written file as JSON, and the files it includes) against this recording. */

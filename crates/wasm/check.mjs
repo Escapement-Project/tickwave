@@ -1,7 +1,7 @@
 // Decodes a recording through the WASM build and prints each digital channel's edge count, tick
 // sum and XOR, for comparison against values computed independently from the source. Where a
 // channel's finest level is in overview blocks, it also checks that level against the channel's
-// blocks: a digital channel's change bits against its edges, an analog channel's minimums and
+// blocks: a digital channel's densities against its edges, an analog channel's minimums and
 // maximums against its samples' values.
 //   node crates/wasm/check.mjs FILE.tickwave
 import { readFileSync } from "node:fs";
@@ -89,8 +89,8 @@ header.channels.forEach((c, k) => {
         extremes.checked += min.length;
       }
       if (c.kind === "digital") {
-        const [, change] = block.digital();
-        for (const byte of change) for (let bit = byte; bit; bit &= bit - 1) changed++;
+        const [density] = block.digital();
+        for (const d of density) if (d > 0) changed++;
       }
     }
     block.free();
@@ -100,7 +100,7 @@ header.channels.forEach((c, k) => {
     ok &&= extremes.checked === buckets;
   }
   if (c.kind === "digital") {
-    console.log(`${c.name}: 2^${finest} buckets with a change: ${changed}, from edges: ${sums.buckets.size}`);
+    console.log(`${c.name}: 2^${finest} buckets with an edge: ${changed}, from edges: ${sums.buckets.size}`);
     ok &&= changed === sums.buckets.size;
   }
 });

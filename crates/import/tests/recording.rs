@@ -23,12 +23,17 @@ impl Progress for Quiet {
     }
 }
 
+/// The fixture whose channels this version can't all read, which `read` refuses.
+const UNAVAILABLE: &str = "unavailable.tickwave";
+
+/// Every committed fixture this version reads whole.
 fn fixtures() -> Vec<(String, Vec<u8>)> {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../web/fixtures");
     let mut files: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
         .map(|e| e.unwrap().path())
         .filter(|p| p.extension().is_some_and(|e| e == "tickwave"))
+        .filter(|p| p.file_name().is_some_and(|n| n != UNAVAILABLE))
         .map(|p| {
             let name = p.file_name().unwrap().to_string_lossy().into_owned();
             (name, std::fs::read(&p).unwrap())
@@ -80,6 +85,22 @@ fn every_fixture_reads_back_as_its_file_holds_it() {
         let checked = verify(&file[..], recording).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(checked.content_id, header.content_id, "{name}");
     }
+}
+
+/// A recording with a channel this version can't read can't be converted again: `read` refuses
+/// it, naming the channel (FORMAT.md, "Unavailable channels").
+#[test]
+fn a_recording_with_a_channel_this_version_cant_read_is_refused_naming_it() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../web/fixtures")
+        .join(UNAVAILABLE);
+    let err = read(Arc::new(std::fs::read(path).unwrap()))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("channel V is unavailable to this reader"),
+        "{err}"
+    );
 }
 
 #[test]

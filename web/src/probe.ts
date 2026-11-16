@@ -1,10 +1,25 @@
 // What the view measures at one point: a digital channel's pulse around a tick, with its width,
-// period, frequency and duty, and an analog channel's value or range at a pixel. The view shows it
-// beside the pointer and in cursor A's readout line.
+// period, frequency and duty, or where a pixel is too crowded for a pulse, its edges and its
+// share of time high; and an analog channel's value or range at a pixel. The view shows it beside
+// the pointer and in cursor A's readout line.
 
-import { formatInterval, formatRate, ONE } from "./readouts.ts";
+import { formatCount, formatInterval, formatRate, ONE } from "./readouts.ts";
+import { counts, dutyShare } from "./render/shade.ts";
 import { lowerBound } from "./search.ts";
-import { channelSampleTick, channelStart, knownSpans, sampleAtOrBefore, type AnalogChannel, type AnalogOverview, type Channel, type Edges, type Ratio, type Samples, type Source } from "./source.ts";
+import {
+  channelSampleTick,
+  channelStart,
+  knownSpans,
+  sampleAtOrBefore,
+  type AnalogChannel,
+  type AnalogOverview,
+  type Channel,
+  type DigitalOverview,
+  type Edges,
+  type Ratio,
+  type Samples,
+  type Source,
+} from "./source.ts";
 
 /** The ticks where a channel's level is known, `start..end`: every edge lies after `start`. */
 export interface Known {
@@ -63,7 +78,7 @@ const FAN = 64;
 
 /**
  * The first edge in [lo, hi) (`dir` 1) or the last (`dir` -1), or null where there is none. It reads
- * the overview's change bits to narrow the span, a level at a time, and the edges of one small span
+ * the overview's densities to narrow the span, a level at a time, and the edges of one small span
  * at the end, so finding the edges of a long quiet stretch downloads little.
  */
 export async function findEdge(source: Source, channel: number, lo: number, hi: number, dir: 1 | -1, signal?: AbortSignal): Promise<number | null> {
@@ -76,10 +91,10 @@ export async function findEdge(source: Source, channel: number, lo: number, hi: 
   if (hi - lo <= DIRECT) return direct();
   const ov = await source.overview(channel, lo, hi, Math.ceil((hi - lo) / FAN), signal);
   if (!ov || ov.kind !== "digital" || ov.bucket >= hi - lo) return direct();
-  const n = ov.changes.length;
+  const n = ov.density.length;
   for (let j = 0; j < n; j++) {
     const k = dir > 0 ? j : n - 1 - j;
-    if (!ov.changes[k]) continue;
+    if (ov.density[k] === 0) continue;
     const s = Math.max(lo, ov.start + k * ov.bucket);
     const e = Math.min(hi, ov.start + (k + 1) * ov.bucket);
     if (e <= s) continue;
@@ -203,4 +218,86 @@ export function analogFromOverview(o: AnalogOverview, t0: number, t1: number): A
     if (o.max[k] > max) max = o.max[k];
   }
   return min <= max ? (min === max ? { kind: "value", value: min } : { kind: "range", min, max }) : { kind: "none" };
+}
+
+/**
+ * A pixel too crowded to measure a pulse in: how many edges, over how many ticks, and its known
+ * time's share high. From edges each is exact; from an overview each is the bounds its buckets'
+ * densities and duties give (FORMAT.md, "Overview"), over the buckets the pixel meets, whole.
+ */
+export interface Dense {
+  /** The least and the most edges, equal where exact. */
+  readonly edges: readonly [number, number];
+  /** The ticks the figures cover. */
+  readonly ticks: number;
+  /** From edges: its ticks high, of those known. */
+  readonly exact?: { readonly high: number; readonly known: number };
+  /** From an overview: the least and the most share of its known time high, 0 to 1. */
+  readonly share?: readonly [number, number];
+}
+
+/** Ticks `[t0, t1)` from edges whose level at their span's start is `e.level`, within `known`. */
+export function denseFromEdges(e: Edges, t0: number, t1: number, known: Known): Dense {
+  const a = Math.max(Math.ceil(t0), known.start);
+  const b = Math.max(a, Math.min(Math.ceil(t1), known.end));
+  const t = e.ticks;
+  const i = lowerBound(t, a);
+  const j = lowerBound(t, b, i);
+  let level = (e.level ^ (i & 1)) & 1;
+  let at = a;
+  let high = 0;
+  for (let k = i; k < j; k++) {
+    if (level) high += t[k] - at;
+    at = t[k];
+    level ^= 1;
+  }
+  if (level) high += b - at;
+  return { edges: [j - i, j - i], ticks: b - a, exact: { high, known: b - a } };
+}
+
+/** Ticks `[t0, t1)` from an overview: the buckets they meet, whole, held to the recording's
+ * `length`. A bucket outside the channel's kept span adds its edges and none of its time. */
+export function denseFromOverview(o: DigitalOverview, t0: number, t1: number, length: number): Dense {
+  const k0 = Math.max(0, Math.floor((t0 - o.start) / o.bucket));
+  const k1 = Math.min(o.density.length, Math.max(k0 + 1, Math.ceil((t1 - o.start) / o.bucket)));
+  let [lo, hi] = [0n, 0n];
+  let [known, least, most] = [0, 0, 0];
+  for (let k = k0; k < k1; k++) {
+    const c = counts(o.density[k]);
+    if (c) [lo, hi] = [lo + c[0], hi + c[1]];
+    const b0 = o.start + k * o.bucket;
+    const ticks = Math.max(0, Math.min(b0 + o.bucket, length) - b0);
+    const s = dutyShare(o.duty[k]);
+    if (!s) continue;
+    known += ticks;
+    least += ticks * s[1];
+    most += ticks * s[2];
+  }
+  const start = o.start + k0 * o.bucket;
+  return {
+    edges: [Number(lo), Number(hi)],
+    ticks: Math.max(0, Math.min(o.start + k1 * o.bucket, length) - start),
+    ...(known > 0 && { share: [least / known, most / known] as const }),
+  };
+}
+
+/** A share from 0 to 1 as a percentage to a tenth: the bounds a duty gives are 1/28 apart, and an
+ * exact share to more would only crowd the label. */
+const percent = (x: number) => `${(100 * x).toFixed(1)} %`;
+
+/** A crowded pixel's figures as the label's lines: its edges over its time, then its share of
+ * that time high, where any of it is known. `step` as `pulseFigures` takes it, for the time. */
+export function denseFigures(d: Dense, timebase: Ratio, step: Ratio = ONE): string[] {
+  const [lo, hi] = d.edges;
+  const count = lo === hi ? formatCount(lo) : `${formatCount(lo)} to ${formatCount(hi)}`;
+  const lines = [`${count} edge${hi === 1 ? "" : "s"} in ${formatInterval(d.ticks, timebase, step)}`];
+  if (d.exact && d.exact.known > 0) lines.push(`high ${percent(d.exact.high / d.exact.known)}`);
+  else if (d.share) {
+    const [least, most] = d.share;
+    if (least === most) lines.push(`high ${percent(least)}`);
+    else if (least <= 0) lines.push(`high under ${percent(most)}`);
+    else if (most >= 1) lines.push(`high over ${percent(least)}`);
+    else lines.push(`high ${(100 * least).toFixed(1)} to ${percent(most)}`);
+  }
+  return lines;
 }

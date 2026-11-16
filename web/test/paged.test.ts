@@ -172,7 +172,7 @@ test("a channel's gaps in pages: edges read the pages a window needs, and the le
   const listPages = leaves(LISTS, t.channels[2].list!);
   assert.equal(listPages.length, 3);
   const d = r.info.channels[2];
-  assert.deepEqual([d.kind, d.paged, d.kind === "digital" && d.gaps, d.kind === "digital" && d.start], ["digital", true, undefined, undefined]);
+  assert.deepEqual([d.kind, d.kind === "digital" && d.paged, d.kind === "digital" && d.gaps, d.kind === "digital" && d.start], ["digital", true, undefined, undefined]);
   const gaps: Gap[] = written.gaps.map(([from, to, level]) => ({ from, to, level: level ? 1 : 0 }));
   /** The level at `s`, out of a gap: low until 30, each edge flips it, a gap's end sets it. */
   const level = (s: number) => {

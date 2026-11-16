@@ -7,7 +7,7 @@ import { TickwaveView } from "./elements/view.ts";
 import { registerLoader } from "./registry.ts";
 import { tickwaveLoader } from "./wasm/client.ts";
 
-export { registerLoader, type Loader } from "./registry.ts";
+export { registerLoader, type BundledRead, type Loader } from "./registry.ts";
 export { recordingInfo, resolveSidecar } from "./recording-info.ts";
 export { configure, registerFile } from "./wasm/client.ts";
 export { previewMerge } from "./merge-preview.ts";

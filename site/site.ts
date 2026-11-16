@@ -38,13 +38,13 @@ function problems(box: HTMLElement): { say: (lead: string, items?: string[]) => 
  * where it holds the source's data, where it states them. Its header states both in its source's
  * ticks, `m` of the recording's each: the move as a time, the span where it lies in the view. */
 function channelFacts(c: Channel, tb: Ratio, m: Ratio): string {
-  const notes = c.kind === "analog" ? ["analog", c.unit] : [];
+  const notes = c.kind === "analog" ? ["analog", c.unit] : c.kind === "unavailable" ? ["unavailable to this version"] : [];
   if (c.offset) {
     const why = c.offset.kind === "delay" ? "for a known delay" : `(${c.offset.kind})`;
     notes.push(`moved ${formatSourceInterval(Math.abs(c.offset.ticks), tb, m)} ${c.offset.ticks > 0 ? "later" : "earlier"} ${why}`);
   }
   // A recording with a channel moved or cut states each channel's span of source data.
-  const at = (k: number) => formatInterval(axisTick(c.map ?? IDENTITY, k), tb, m);
+  const at = (k: number) => formatInterval(axisTick((c.kind !== "unavailable" && c.map) || IDENTITY, k), tb, m);
   if (c.kept) notes.push(`source data from ${at(c.kept.from)} to ${at(c.kept.to)}`);
   return notes.length > 0 ? `${c.name} (${notes.join(", ")})` : c.name;
 }
@@ -556,10 +556,10 @@ function openPage(): void {
       .filter((tr) => input(tr, "take")!.checked)
       .map((tr) => shownNames.get(tr.dataset.source!))
       .filter((n): n is string => n !== undefined);
-    // A derived channel shows while both its operands are taken, after its first.
+    // A derived channel shows while its operands are taken, after its first.
     for (const c of merged?.mergedInfo.channels ?? []) {
-      if (c.kind !== "analog" || !c.product || !c.product.every((n) => names.includes(n))) continue;
-      names.splice(names.indexOf(c.product[0]) + 1, 0, c.name);
+      if (c.kind !== "analog" || !c.derived || !c.derived.operands.every((n) => names.includes(n))) continue;
+      names.splice(names.indexOf(c.derived.operands[0]) + 1, 0, c.name);
     }
     if (names.length > 0) v.setAttribute("channels", names.join(" "));
   }
@@ -1005,7 +1005,7 @@ function openPage(): void {
         head.append(th);
         const own = info.channels.flatMap((c, i) => {
           const o = m.origin(i);
-          return o.input === k && !(c.kind === "analog" && c.product) ? [{ c, mine: recording.info.channels[o.channel] }] : [];
+          return o.input === k && !(c.kind === "analog" && c.derived) ? [{ c, mine: recording.info.channels[o.channel] }] : [];
         });
         return [
           head,

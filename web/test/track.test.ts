@@ -3,7 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { digitalFromEdges, digitalFromOverview, NONE } from "../src/render/columns.ts";
+import { digitalFromEdges, digitalFromLevels, NONE } from "../src/render/columns.ts";
 import { Track } from "../src/render/track.ts";
 import { MemorySource } from "../src/memory-source.ts";
 
@@ -43,7 +43,7 @@ function blank(track: Track, start: number, end: number): number {
   const drawn = new Uint8Array(COLUMNS);
   for (const { tile, start: from, end: to } of track.layers()) {
     if (tile.kind !== "edges" && tile.kind !== "digital-overview") assert.fail(tile.kind);
-    const cols = tile.kind === "edges" ? digitalFromEdges(g, tile.data, from, to) : digitalFromOverview(g, tile.data, from, to);
+    const cols = tile.kind === "edges" ? digitalFromEdges(g, tile.data, from, to) : digitalFromLevels(g, tile.data, from, to);
     cols.state.forEach((s, c) => {
       if (s !== NONE) drawn[c] = 1;
     });

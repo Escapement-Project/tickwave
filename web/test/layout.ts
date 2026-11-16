@@ -23,8 +23,15 @@ export interface ChannelTables {
 
 export interface Layout {
   readonly footer: number;
-  readonly header: { length: number; channels: { name: string; kind: string; overview_blocks?: unknown[]; gap_count?: number; break_count?: number }[]; derived?: unknown[] };
+  readonly header: {
+    length: number;
+    channels: { name: string; kind: string; overview_blocks?: unknown[]; gap_count?: number; break_count?: number }[];
+    derived?: unknown[];
+    annotation_parts?: number;
+  };
   readonly bundle: [number, number] | null;
+  /** The annotation parts table, where the header states `annotation_parts`. */
+  readonly parts: Table | null;
   readonly channels: readonly ChannelTables[];
 }
 
@@ -51,6 +58,7 @@ export function layout(file: Uint8Array): Layout {
     for (let i = 0; i < e; i++, at += 28) entries.push({ first: i64(file, at), number: u64(file, at + 8), offset: u64(file, at + 16), length: u32(file, at + 24) });
     return { depth, entries };
   };
+  const parts = header.annotation_parts ? table() : null;
   const channels: ChannelTables[] = [];
   const all = [...header.channels, ...(header.derived ?? []).map((d) => ({ ...(d as object), kind: "derived" }) as Layout["header"]["channels"][number])];
   for (const c of all) {
@@ -60,7 +68,7 @@ export function layout(file: Uint8Array): Layout {
     const list = c.gap_count !== undefined || c.break_count !== undefined ? table() : null;
     channels.push({ blocks, levels, list });
   }
-  return { footer, header, bundle: bundleLen ? [bundleAt, bundleAt + bundleLen] : null, channels };
+  return { footer, header, bundle: bundleLen ? [bundleAt, bundleAt + bundleLen] : null, parts, channels };
 }
 
 /** A page record's entries, each `size` bytes, after its 19-byte head. */
@@ -127,6 +135,24 @@ export function levelRows(file: Uint8Array, t: Table): LevelRow[] {
       const row = { k, n, from, to: from + u32(b, 8) };
       k += n;
       return row;
+    }),
+  );
+}
+
+/** A part row: its frame's byte range, and the span its annotations reach. */
+export interface PartRow {
+  readonly from: number;
+  readonly to: number;
+  readonly start: number;
+  readonly end: number;
+}
+
+/** Every row of the annotation parts table, in the order the parts were written. */
+export function partRows(file: Uint8Array, t: Table): PartRow[] {
+  return leaves(file, t).flatMap((e) =>
+    page(file, e, 32).map((b) => {
+      const from = u64(b, 0);
+      return { from, to: from + u32(b, 8), start: i64(b, 16), end: i64(b, 24) };
     }),
   );
 }

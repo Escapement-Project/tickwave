@@ -7,7 +7,19 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { MemorySource, type MemoryRecording } from "../src/memory-source.ts";
-import { analogFromOverview, analogFromSamples, completePulse, findEdge, formatDuty, pulseFigures, pulseFromEdges, type EdgeAt } from "../src/probe.ts";
+import {
+  analogFromOverview,
+  analogFromSamples,
+  completePulse,
+  denseFigures,
+  denseFromEdges,
+  denseFromOverview,
+  findEdge,
+  formatDuty,
+  pulseFigures,
+  pulseFromEdges,
+  type EdgeAt,
+} from "../src/probe.ts";
 import { inChannel, type AnalogChannel, type Source } from "../src/source.ts";
 import { ratio, runTable } from "./tables.ts";
 
@@ -111,4 +123,44 @@ test("a pulse the source stamped with one time: the pulse before it ends there, 
   // Found by search: the period ends at the pair's second edge, not at the edge after it.
   const p = await completePulse(source, 0, { level: 0, start: undefined, end: undefined, next: undefined }, 10_000_000, { start: 0, end: 60_000_000 });
   assert.deepEqual(p, { level: 0, start: 30, end: 50_000_000, next: 50_000_000 });
+});
+
+const NB = "\u00a0";
+
+test("a pixel too crowded for a pulse reads its edges and its time high, exactly, from edges", () => {
+  // High at 0; edges at 10, 20, 25 and 40, two at 50. The pixel [12, 42): low from the edge at
+  // 10 to 20, high to 25, low to 40, high to 42: 7 of its 30 ticks high, and three edges.
+  const e = { level: 1 as const, ticks: Float64Array.from([10, 20, 25, 40, 50, 50]) };
+  const d = denseFromEdges(e, 12, 42, { start: 0, end: 100 });
+  assert.deepEqual(d, { edges: [3, 3], ticks: 30, exact: { high: 7, known: 30 } });
+  assert.deepEqual(denseFigures(d, NS), [`3 edges in 30${NB}ns`, `high 23.3${NB}%`]);
+  // An edge at the pixel's first tick counts, and sets the level there; two at one tick count
+  // twice and hold no time. [40, 52): high from 40, low and high again at 50: high throughout.
+  assert.deepEqual(denseFromEdges(e, 40, 52, { start: 0, end: 100 }), { edges: [3, 3], ticks: 12, exact: { high: 12, known: 12 } });
+  // Held to the channel's known span, high after the pair: past its end nothing is counted.
+  assert.deepEqual(denseFromEdges(e, 90, 120, { start: 0, end: 100 }), { edges: [0, 0], ticks: 10, exact: { high: 10, known: 10 } });
+});
+
+test("from an overview, the bounds its buckets' densities and duties give, over the buckets the pixel meets, whole", () => {
+  const o = (density: number[], duty: number[]) => ({ kind: "digital" as const, bucket: 100, start: 0, density: Uint8Array.from(density), duty: Uint8Array.from(duty) });
+  const ov = o([0, 9, 5, 13, 1, 1, 0], [14, 10, 12, 7, 0, 14, 15]);
+  // Bucket 1 alone: density 9 is four edges exactly; duty 10 is a share from 19/28 to 21/28.
+  const one = denseFromOverview(ov, 150, 160, 10_000);
+  assert.deepEqual(one, { edges: [4, 4], ticks: 100, share: [19 / 28, 21 / 28] });
+  assert.deepEqual(denseFigures(one, NS), [`4 edges in 100${NB}ns`, `high 67.9 to 75.0${NB}%`]);
+  // Buckets 1 and 2: four and two edges; the shares weighted by their ticks.
+  const two = denseFromOverview(ov, 150, 250, 10_000);
+  assert.deepEqual(two, { edges: [6, 6], ticks: 200, share: [(19 + 23) / 56, (21 + 25) / 56] });
+  assert.deepEqual(denseFigures(two, NS), [`6 edges in 200${NB}ns`, `high 75.0 to 82.1${NB}%`]);
+  // Density 13 stands for eight or nine edges.
+  assert.deepEqual(denseFigures(denseFromOverview(ov, 300, 310, 10_000), NS)[0], `8 to 9 edges in 100${NB}ns`);
+  // A bucket with an edge and duty 0 spent some time high, under 1/28 of it; duty 14, over 27/28.
+  assert.deepEqual(denseFigures(denseFromOverview(ov, 400, 410, 10_000), NS), [`1 edge in 100${NB}ns`, `high under 3.6${NB}%`]);
+  assert.deepEqual(denseFigures(denseFromOverview(ov, 500, 510, 10_000), NS), [`1 edge in 100${NB}ns`, `high over 96.4${NB}%`]);
+  // A bucket outside the kept span adds no time; the last is held to the length.
+  assert.deepEqual(denseFromOverview(ov, 550, 650, 640), { edges: [1, 1], ticks: 140, share: [27 / 28, 1] });
+  // And weighs as what it holds of it: 100 ticks under 1/28 high, then 50 over 27/28.
+  const cut = o([0, 1, 1], [14, 0, 14]);
+  assert.deepEqual(denseFromOverview(cut, 150, 250, 250), { edges: [2, 2], ticks: 150, share: [(100 * 0 + 50 * (27 / 28)) / 150, (100 * (1 / 28) + 50 * 1) / 150] });
+  assert.deepEqual(denseFigures(denseFromOverview(o([0], [15]), 0, 10, 100), NS), [`0 edges in 100${NB}ns`]);
 });

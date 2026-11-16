@@ -139,9 +139,24 @@ export interface AnalogChannel {
   /** The smallest and largest value in the recording. */
   readonly min: number;
   readonly max: number;
-  /** A derived channel: the product of these two channels' values, by name. The file stores none
-   * of its samples, and it sits where they do. */
-  readonly product?: readonly [string, string];
+  /** A derived channel: computed by `op` from its `operands`' values, named in order (FORMAT.md,
+   * "Derived channels"). The file stores none of its samples, and it sits where they do. */
+  readonly derived?: { readonly op: string; readonly operands: readonly string[] };
+}
+
+/**
+ * A channel this version can't read (FORMAT.md, "Unavailable channels"): it keeps its place, so
+ * every other channel keeps its number, and its name, and nothing of its data is read.
+ */
+export interface UnavailableChannel {
+  readonly kind: "unavailable";
+  readonly name: string;
+  /** The source's own name for the channel, as the header's `source_name` gives it. */
+  readonly sourceName?: string;
+  /** Why this version can't read it. */
+  readonly why: string;
+  /** The recording's length: nothing of it is drawn. */
+  readonly end: number;
 }
 
 /** What a channel moved or trimmed when it was converted states (FORMAT.md, "Moved and trimmed
@@ -160,7 +175,7 @@ export interface Sourced {
   readonly source?: number;
 }
 
-export type Channel = (DigitalChannel | AnalogChannel) & Shaped & Sourced;
+export type Channel = (DigitalChannel | AnalogChannel | UnavailableChannel) & Shaped & Sourced;
 
 /** An analog channel's mapping to the axis. */
 export function mapOf(c: Pick<AnalogChannel, "map">): Mapping {
@@ -175,14 +190,15 @@ export function axisPeriod(c: Pick<AnalogChannel, "period" | "map">): number {
 }
 
 /** The first tick the channel can hold data at: a digital channel's `start` (0 when absent), an
- * analog channel's first sample. */
+ * analog channel's first sample; 0 for one this version can't read. */
 export function channelStart(c: Channel): number {
-  return c.kind === "digital" ? (c.start ?? 0) : axisTick(mapOf(c), c.first);
+  if (c.kind === "analog") return axisTick(mapOf(c), c.first);
+  return c.kind === "digital" ? (c.start ?? 0) : 0;
 }
 
 /** Whether `tick` lies in the channel's data: ticks `channelStart(c)..end`, outside its gaps. */
 export function inChannel(c: Channel, tick: number): boolean {
-  return tick >= channelStart(c) && tick < c.end && (c.kind !== "digital" || gapAt(c, tick) === null);
+  return c.kind !== "unavailable" && tick >= channelStart(c) && tick < c.end && (c.kind !== "digital" || gapAt(c, tick) === null);
 }
 
 /** The gap holding `tick`, or null. */
@@ -201,6 +217,7 @@ export function gapAt(c: DigitalChannel, tick: number): Gap | null {
  */
 export function knownSpans(c: Channel, start: number, end: number): [number, number][] {
   const spans: [number, number][] = [];
+  if (c.kind === "unavailable") return spans;
   const stop = Math.min(end, c.end);
   const keep = (a: number, b: number) => {
     const [s, e] = [Math.max(a, start, channelStart(c)), Math.min(b, stop)];
@@ -387,7 +404,7 @@ export function listedOnAxis(listed: Listed | undefined, f: (tick: number) => nu
 /** The channel as an answer's span sees it: one whose gaps or breaks are in pages takes the
  * answer's, which hold for ticks in that span. Any other is itself. */
 export function spanned(c: Channel, listed: Listed | undefined): Channel {
-  if (!c.paged || !listed) return c;
+  if (c.kind === "unavailable" || !c.paged || !listed) return c;
   if (c.kind === "digital") return { ...c, gaps: listed.gaps ?? [], ...(listed.start !== undefined && { start: listed.start }) };
   return { ...c, breaks: listed.breaks ?? [], ...(listed.end !== undefined ? { end: listed.end } : { lostAfter: undefined }) };
 }
@@ -501,15 +518,18 @@ export interface Edges {
   readonly listed?: Listed;
 }
 
-/** Buckets of `bucket` ticks, the first starting at `start`, a multiple of `bucket`. */
+/** Buckets of `bucket` ticks, the first starting at `start`, a multiple of `bucket`, as a level
+ * stores them (FORMAT.md, "Overview"). */
 export interface DigitalOverview {
   readonly kind: "digital";
   readonly bucket: number;
   readonly start: number;
-  /** The level at each bucket's start. */
-  readonly level: Uint8Array;
-  /** 1 where the level changes inside the bucket. */
-  readonly changes: Uint8Array;
+  /** Each bucket's density: 0 for no edge, and one step up for each quarter of a doubling of its
+   * edges. */
+  readonly density: Uint8Array;
+  /** Each bucket's duty: its share of the ticks in the channel's kept span that are high, in
+   * fourteenths rounded, 0 wholly low to 14 wholly high; 15 for a bucket wholly outside that span. */
+  readonly duty: Uint8Array;
   /** For a channel whose gaps are in pages, the gaps the span needs; absent from the coarsest
    * level asked for with no limit, which a first draw reads from the footer alone. */
   readonly listed?: Listed;
@@ -568,6 +588,11 @@ export interface Source {
   info(signal?: AbortSignal): Promise<RecordingInfo>;
 
   edges(channel: number, start: number, end: number, signal?: AbortSignal): Promise<Edges>;
+
+  /** How many edges a digital channel has in [start, end), counted without reading them all where
+   * the source can: a `.tickwave` file's from its index and the blocks at the span's ends. A
+   * source without it is counted from `edges`. */
+  edgeCount?(channel: number, start: number, end: number, signal?: AbortSignal): Promise<number>;
 
   /**
    * The coarsest overview level whose bucket is no larger than `maxBucket` ticks, covering
