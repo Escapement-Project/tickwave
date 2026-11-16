@@ -55,9 +55,12 @@ fn main() {
             period: Ratio::integer(10).unwrap(),
             coding: AnalogCoding::Int(IntCoding::new(16, false)),
             significant: None,
+            phase: None,
         },
         shaping: Default::default(),
         overview_shift: Some(6),
+        codec: None,
+        requires: Vec::new(),
     };
     let declaration = Declaration {
         timebase,
@@ -71,12 +74,17 @@ fn main() {
                 data: DeclaredKind::Digital { initial: false },
                 shaping: Default::default(),
                 overview_shift: Some(6),
+                codec: None,
+                requires: Vec::new(),
             },
         ],
         derived: vec![Derived {
             name: "P".into(),
             unit: "W".into(),
-            product: ["A".into(), "B".into()],
+            op: escapement_tickwave_format::header::Op::Multiply,
+            operands: vec!["A".into(), "B".into()],
+            params: Default::default(),
+            requires: Vec::new(),
             significant: None,
         }],
         sources: vec![SourceHeader::new(
@@ -86,6 +94,7 @@ fn main() {
         title: None,
         meta: BTreeMap::new(),
         overview_shift: 6,
+        requires: Vec::new(),
     };
     let mut w = Writer::new(
         declaration,
@@ -195,6 +204,8 @@ fn blocks(dir: &std::path::Path) {
         data: DeclaredKind::Digital { initial: false },
         shaping: Default::default(),
         overview_shift: None,
+        codec: None,
+        requires: Vec::new(),
     };
     let declaration = Declaration {
         timebase,
@@ -207,6 +218,7 @@ fn blocks(dir: &std::path::Path) {
         title: None,
         meta: BTreeMap::new(),
         overview_shift: 12,
+        requires: Vec::new(),
     };
     let mut w = Writer::new(declaration, WriteOptions::default()).unwrap();
     let mut file = w.take_output();

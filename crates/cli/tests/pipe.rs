@@ -16,7 +16,7 @@ fn a_reader_that_stops_early_ends_the_output_quietly() {
     std::fs::write(
         &sidecar,
         "format = \"tickwave-annotations/1\"\n\
-         recording_id = \"blake3:ccc8b7d8c3e4cb30da7fc6088e54ebeba2858ad402eb3fb5a9aeb50be989accf\"\n\n\
+         recording_id = \"blake3:63773d56fb3420735c864932f8d2441acd6f31a51b557e073bf27755a0534697\"\n\n\
          [[annotation]]\nid = \"start\"\nkind = \"note\"\nstart = \"100 ms\"\nlabel = \"A note\"\n",
     )
     .unwrap();

@@ -108,7 +108,7 @@ pub fn oracle(file: &[u8]) -> Vec<Option<Oracle>> {
             }
         }
     }
-    for (d, &(a, b, product)) in f.products.iter().enumerate() {
+    for (d, (a, b, product)) in f.products.iter().map(|p| p.unwrap()).enumerate() {
         values[n + d] = values[a]
             .iter()
             .zip(&values[b])
@@ -120,7 +120,10 @@ pub fn oracle(file: &[u8]) -> Vec<Option<Oracle>> {
             let (stored, product) = if c < n {
                 (c, None)
             } else {
-                (f.products[c - n].0, Some(f.products[c - n].2))
+                (
+                    f.products[c - n].unwrap().0,
+                    Some(f.products[c - n].unwrap().2),
+                )
             };
             let ChannelKind::Analog {
                 first,
@@ -193,9 +196,12 @@ pub fn synth(p: u64, shift: u8, runs: &[Run], cut: i64, block_bytes: usize) -> V
             period,
             coding,
             significant: None,
+            phase: None,
         },
         shaping: Default::default(),
         overview_shift: None,
+        codec: None,
+        requires: Vec::new(),
     };
     let int = |bits, signed, num, den| {
         AnalogCoding::Int(IntCoding {
@@ -217,12 +223,17 @@ pub fn synth(p: u64, shift: u8, runs: &[Run], cut: i64, block_bytes: usize) -> V
                 data: DeclaredKind::Digital { initial: false },
                 shaping: Default::default(),
                 overview_shift: None,
+                codec: None,
+                requires: Vec::new(),
             },
         ],
         derived: vec![Derived {
             name: "P".into(),
             unit: "W".into(),
-            product: ["A".into(), "B".into()],
+            op: escapement_tickwave_format::header::Op::Multiply,
+            operands: vec!["A".into(), "B".into()],
+            params: Default::default(),
+            requires: Vec::new(),
             significant: None,
         }],
         sources: vec![SourceHeader::new(
@@ -232,6 +243,7 @@ pub fn synth(p: u64, shift: u8, runs: &[Run], cut: i64, block_bytes: usize) -> V
         title: None,
         meta: BTreeMap::new(),
         overview_shift: shift,
+        requires: Vec::new(),
     };
     let mut w = Writer::new(
         d,
@@ -330,7 +342,7 @@ pub fn synth_cases(block_bytes: usize) -> Vec<u8> {
         Run {
             count: 30_000,
             then: 0,
-            lost: 2,
+            lost: 0,
         },
         Run {
             count: 50_000,

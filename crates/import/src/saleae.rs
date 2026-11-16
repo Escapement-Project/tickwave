@@ -933,6 +933,7 @@ impl Export {
                     Opened::Analog(a) => ChannelData::Analog(Analog {
                         unit: "V".into(),
                         first,
+                        phase: None,
                         period: Ratio::ONE,
                         count: a.count,
                         breaks: Vec::new(),

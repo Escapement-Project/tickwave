@@ -8,7 +8,7 @@ use escapement_tickwave_format::encode::{Options, encode};
 use escapement_tickwave_format::header::{
     Declaration, DeclaredChannel, DeclaredKind, OverviewLevel, SourceFormat, SourceHeader,
 };
-use escapement_tickwave_format::overview::{self, AnalogOverview, coarsen};
+use escapement_tickwave_format::overview::{self, AnalogOverview, coarsen, density, duty};
 use escapement_tickwave_format::record::{self, Kind};
 use escapement_tickwave_format::verify::verify;
 use escapement_tickwave_format::writer::{Finish, WriteOptions, Writer};
@@ -61,6 +61,7 @@ fn recording(edges: Vec<i64>) -> Recording {
                     samples: Samples::F32(Box::new((0..SAMPLES).map(|i| i as f32))),
                     lost_before: 0,
                     lost_after: 0,
+                    phase: None,
                 }),
                 shaping: Default::default(),
             },
@@ -95,6 +96,40 @@ fn overview_records(file: &[u8]) -> usize {
     n
 }
 
+/// C's digital level of `shift` by FORMAT.md's definition, from its edges alone: each bucket's
+/// edges, and its high ticks against its ticks below the length.
+fn by_definition(shift: u8) -> Vec<(u8, u8)> {
+    let n = ((LENGTH - 1) >> shift) as usize + 1;
+    let (mut edges, mut high) = (vec![0u64; n], vec![0u64; n]);
+    let (mut level, mut at) = (false, 0i64);
+    let add = |a: i64, b: i64, high: &mut Vec<u64>| {
+        let mut t = a;
+        while t < b {
+            let k = (t >> shift) as usize;
+            let end = ((k as i64 + 1) << shift).min(b);
+            high[k] += (end - t) as u64;
+            t = end;
+        }
+    };
+    for t in EDGES {
+        if level {
+            add(at, t, &mut high);
+        }
+        level = !level;
+        edges[(t >> shift) as usize] += 1;
+        at = t;
+    }
+    if level {
+        add(at, LENGTH, &mut high);
+    }
+    (0..n)
+        .map(|k| {
+            let ticks = (((k as i64 + 1) << shift).min(LENGTH) - ((k as i64) << shift)) as u64;
+            (density(edges[k]), duty(high[k], ticks))
+        })
+        .collect()
+}
+
 #[test]
 fn a_long_recording_keeps_each_channels_levels_before_its_strip_in_blocks() {
     let file = file();
@@ -120,20 +155,25 @@ fn a_long_recording_keeps_each_channels_levels_before_its_strip_in_blocks() {
     // V's samples, one every 256 buckets and each a value of its own, make every block differ.
     assert_eq!(index.levels[1][0].len(), 65);
 
-    // Expected bits from the edges themselves, not from the builder that wrote them.
+    // Expected buckets from the edges themselves, not from the builder that wrote them.
     let level = index.level_in(&file, 0, 0).unwrap();
     assert_eq!(level.buckets, (1 << 18) + 1);
-    let digital = |i: u64| level.data.digital(i).unwrap();
-    // 5000 and 5001 fall in bucket 1, which starts low; bucket 0 is low and quiet.
-    assert_eq!(digital(0), (false, false));
-    assert_eq!(digital(1), (false, true));
-    assert_eq!(digital(2), (false, false));
-    // 300,000,000 is in bucket 73,242, which starts low.
-    assert_eq!(digital(73_242), (false, true));
-    assert_eq!(digital(73_243), (true, false));
-    // The last edge is at the final tick, the first tick of the last bucket: the bucket starts
-    // at the level before it, high, and changes.
-    assert_eq!(digital(1 << 18), (true, true));
+    let digital = |i: u64| {
+        let b = level.data.digital(i).unwrap();
+        (b.density, b.duty)
+    };
+    // 5000 and 5001 fall in bucket 1, high for one of its 4,096 ticks: two edges, density 5,
+    // duty floor(4,124 / 8,192) = 0. Bucket 0 is low and quiet.
+    assert_eq!(digital(0), (0, 0));
+    assert_eq!(digital(1), (5, 0));
+    assert_eq!(digital(2), (0, 0));
+    // 300,000,000 is in bucket 73,242, which ends at 300,003,328: high its last 3,328 ticks,
+    // duty floor(97,280 / 8,192) = 11.
+    assert_eq!(digital(73_242), (1, 11));
+    assert_eq!(digital(73_243), (0, 14));
+    // The last edge is at the final tick, the only tick of the last bucket the length holds: it
+    // reads low there.
+    assert_eq!(digital(1 << 18), (1, 0));
 
     let v = index.level_in(&file, 1, 0).unwrap();
     let Some(AnalogOverview::F32(v)) = v.data.analog() else {
@@ -147,21 +187,37 @@ fn a_long_recording_keeps_each_channels_levels_before_its_strip_in_blocks() {
     assert_eq!((v.min[256], v.max[256], v.sum[256]), (1.0, 1.0, 1.0));
     assert_eq!(v.min[1 << 18], (SAMPLES - 1) as f32);
 
-    // Every coarser level, and the strip, folds the finest.
-    for (c, ch) in h.channels.iter().enumerate().take(2) {
-        let finest = index.level_in(&file, c, 0).unwrap();
-        for (li, level) in ch.overview_blocks.iter().enumerate().take(3).skip(1) {
-            let shift = level.shift;
-            assert_eq!(
-                index.level_in(&file, c, li).unwrap(),
-                coarsen(&finest, shift, LENGTH),
-                "channel {c}, level 2^{shift}"
-            );
-        }
+    // Every coarser level, and the strip: V's folds its finest, and C's each follows from the
+    // edges by FORMAT.md's definition.
+    let ch = &h.channels[1];
+    let finest = index.level_in(&file, 1, 0).unwrap();
+    for (li, level) in ch.overview_blocks.iter().enumerate().take(3).skip(1) {
+        let shift = level.shift;
         assert_eq!(
-            index.footer.strip(c).unwrap(),
-            coarsen(&finest, 24, LENGTH),
-            "channel {c}'s strip"
+            Some(index.level_in(&file, 1, li).unwrap()),
+            coarsen(&finest, shift, LENGTH),
+            "V, level 2^{shift}"
+        );
+    }
+    assert_eq!(
+        Some(index.footer.strip(1).unwrap()),
+        coarsen(&finest, 24, LENGTH),
+        "V's strip"
+    );
+    let mut levels: Vec<_> = (0..3)
+        .map(|li| index.level_in(&file, 0, li).unwrap())
+        .collect();
+    levels.push(index.footer.strip(0).unwrap());
+    for level in &levels {
+        let got: Vec<(u8, u8)> = (0..level.buckets)
+            .map(|i| level.data.digital(i).unwrap())
+            .map(|b| (b.density, b.duty))
+            .collect();
+        assert_eq!(
+            got,
+            by_definition(level.shift),
+            "C, level 2^{}",
+            level.shift
         );
     }
 
@@ -193,12 +249,15 @@ fn clock(period: i64, length: i64, shift: u8) -> Vec<u8> {
             data: DeclaredKind::Digital { initial: false },
             shaping: Default::default(),
             overview_shift: None,
+            codec: None,
+            requires: Vec::new(),
         }],
         derived: Vec::new(),
         sources: vec![SourceHeader::new(SourceFormat::Other("t".into()), timebase)],
         title: None,
         meta: Default::default(),
         overview_shift: shift,
+        requires: Vec::new(),
     };
     let mut w = Writer::new(
         d,
@@ -249,12 +308,15 @@ fn runs_collapse_alike_blocks_and_never_take_the_last_one() {
             data: DeclaredKind::Digital { initial: false },
             shaping: Default::default(),
             overview_shift: None,
+            codec: None,
+            requires: Vec::new(),
         }],
         derived: Vec::new(),
         sources: vec![SourceHeader::new(SourceFormat::Other("t".into()), timebase)],
         title: None,
         meta: Default::default(),
         overview_shift: 4,
+        requires: Vec::new(),
     };
     let started = std::time::Instant::now();
     let mut w = Writer::new(d, WriteOptions::default()).unwrap();

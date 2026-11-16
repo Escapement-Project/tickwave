@@ -1,14 +1,16 @@
 //! The content id: a hash of what a recording holds, not of how a file stores it. Recompressing,
 //! re-cutting blocks or bundling annotations leaves it unchanged; a sidecar pins it.
 //!
-//! BLAKE3 over: the timebase (two u64), the length (i64), then each channel's own BLAKE3 digest.
-//! A channel's digest covers what its declaration fixes, then its items, then what only the end
-//! settles, so a writer computes it as the items arrive. Every tick in it is a source tick. All
-//! little-endian; strings as a u64 length and UTF-8 bytes. A moved or trimmed channel, every
-//! channel of a recording of several sources, and a channel whose source does not map its ticks to
-//! the axis unchanged, adds what it states between its declaration and its items.
+//! BLAKE3 over: the timebase (two u64), the length (i64), then each channel's own BLAKE3 digest,
+//! then each derived channel's. A channel's digest covers what its declaration fixes, then its
+//! items, then what only the end settles, so a writer computes it as the items arrive. A
+//! channel's gaps or breaks go into a digest of their own, which the channel's takes with their
+//! count at its end, so a writer holds none of them to hash them. Every tick in it is a source
+//! tick. All little-endian; strings as a u64 length and UTF-8 bytes. A moved or trimmed channel,
+//! every channel of a recording of several sources, and a channel whose source does not map its
+//! ticks to the axis unchanged, adds what it states between its declaration and its items.
 
-use crate::header::{AnalogCoding, ContentId, Declaration, DeclaredKind, Shaping};
+use crate::header::{AnalogCoding, ContentId, Declaration, DeclaredKind, Derived, Shaping};
 use crate::model::{Break, Gap, Ratio, Sample};
 
 const BUFFER: usize = 1 << 16;
@@ -103,11 +105,13 @@ impl ChannelHasher {
     }
 
     /// An `f32` and a `codes` channel add nothing for their coding, so the two codings of one
-    /// capture's values give one digest.
+    /// capture's values give one digest. The period and the phase go in lowest terms, the
+    /// phase as 0 and 1 where there is none.
     pub fn analog(
         name: &str,
         unit: &str,
         period: Ratio,
+        phase: Option<Ratio>,
         coding: AnalogCoding,
         shaping: &Shaping,
         placed: Option<Placed>,
@@ -116,8 +120,15 @@ impl ChannelHasher {
         put_str(&mut hasher, name);
         put_str(&mut hasher, "analog");
         put_str(&mut hasher, unit);
+        let period = lowest(period);
         hasher.update(&period.num().to_le_bytes());
         hasher.update(&period.den().to_le_bytes());
+        let (num, den) = phase.map_or((0, 1), |f| {
+            let f = lowest(f);
+            (f.num(), f.den())
+        });
+        hasher.update(&num.to_le_bytes());
+        hasher.update(&den.to_le_bytes());
         match coding {
             AnalogCoding::F32 | AnalogCoding::Codes { .. } => {}
             AnalogCoding::F64 => put_str(&mut hasher, "f64"),
@@ -147,11 +158,13 @@ impl ChannelHasher {
                 unit,
                 period,
                 coding,
+                phase,
                 ..
             } => Self::analog(
                 &channel.name,
                 unit,
                 *period,
+                *phase,
                 *coding,
                 &channel.shaping,
                 placed,
@@ -195,36 +208,31 @@ impl ChannelHasher {
         &mut self.hasher
     }
 
-    pub fn finish_digital(mut self, end: i64, gaps: &[Gap]) -> blake3::Hash {
+    /// `gaps` is the channel's gaps as the header lists them, hashed by a `ListHasher`.
+    pub fn finish_digital(mut self, end: i64, gaps: Listed) -> blake3::Hash {
         let h = self.items_done();
         h.update(&end.to_le_bytes());
-        h.update(&(gaps.len() as u64).to_le_bytes());
-        for g in gaps {
-            h.update(&g.from.to_le_bytes());
-            h.update(&g.to.to_le_bytes());
-            h.update(&[u8::from(g.level)]);
-        }
+        h.update(&gaps.count.to_le_bytes());
+        h.update(gaps.digest.as_bytes());
         h.finalize()
     }
 
-    /// `lost` is the samples lost before the first and after the last: both follow the breaks
-    /// where either is stated, so a channel that states neither has the id its data alone gives.
+    /// `breaks` is the channel's breaks as the header lists them, hashed by a `ListHasher`.
+    /// `lost` is the samples lost before the first and after the last: both follow the breaks'
+    /// digest where either is stated, so a channel that states neither has the id its data alone
+    /// gives.
     pub fn finish_analog(
         mut self,
         first: i64,
         count: u64,
-        breaks: &[Break],
+        breaks: Listed,
         lost: (u64, u64),
     ) -> blake3::Hash {
         let h = self.items_done();
         h.update(&first.to_le_bytes());
         h.update(&count.to_le_bytes());
-        h.update(&(breaks.len() as u64).to_le_bytes());
-        for b in breaks {
-            h.update(&b.index.to_le_bytes());
-            h.update(&b.tick.to_le_bytes());
-            h.update(&b.lost.to_le_bytes());
-        }
+        h.update(&breaks.count.to_le_bytes());
+        h.update(breaks.digest.as_bytes());
         if lost != (0, 0) {
             h.update(&lost.0.to_le_bytes());
             h.update(&lost.1.to_le_bytes());
@@ -233,6 +241,94 @@ impl ChannelHasher {
     }
 }
 
+/// A gap or break list's count and digest, as a channel's digest takes them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Listed {
+    pub count: u64,
+    pub digest: blake3::Hash,
+}
+
+/// Hashes a channel's gaps or breaks as they come, in the header's order, holding none.
+#[derive(Clone, Debug, Default)]
+pub struct ListHasher {
+    hasher: blake3::Hasher,
+    count: u64,
+}
+
+impl ListHasher {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A gap: `from` and `to` as i64, its level as one byte.
+    pub fn gap(&mut self, g: Gap) {
+        self.hasher.update(&g.from.to_le_bytes());
+        self.hasher.update(&g.to.to_le_bytes());
+        self.hasher.update(&[u8::from(g.level)]);
+        self.count += 1;
+    }
+
+    /// A break: `index` as u64, `tick` as i64, `lost` as u64, `phase` as u32.
+    pub fn brk(&mut self, b: Break) {
+        self.hasher.update(&b.index.to_le_bytes());
+        self.hasher.update(&b.tick.to_le_bytes());
+        self.hasher.update(&b.lost.to_le_bytes());
+        self.hasher.update(&b.phase.to_le_bytes());
+        self.count += 1;
+    }
+
+    pub fn count(&self) -> u64 {
+        self.count
+    }
+
+    pub fn finish(&self) -> Listed {
+        Listed {
+            count: self.count,
+            digest: self.hasher.finalize(),
+        }
+    }
+}
+
+/// A whole list of gaps, hashed.
+pub fn gaps_listed(gaps: &[Gap]) -> Listed {
+    let mut h = ListHasher::new();
+    for &g in gaps {
+        h.gap(g);
+    }
+    h.finish()
+}
+
+/// A whole list of breaks, hashed.
+pub fn breaks_listed(breaks: &[Break]) -> Listed {
+    let mut h = ListHasher::new();
+    for &b in breaks {
+        h.brk(b);
+    }
+    h.finish()
+}
+
+/// A derived channel's digest: its name, unit and operation, its operands' count and names in
+/// order, then its `params`' count and each key and value in the byte order of the keys. All are
+/// strings, so it is the same whether or not a reader knows the operation.
+pub fn derived_digest(d: &Derived) -> blake3::Hash {
+    let mut hasher = blake3::Hasher::new();
+    put_str(&mut hasher, &d.name);
+    put_str(&mut hasher, &d.unit);
+    put_str(&mut hasher, d.op.as_str());
+    hasher.update(&(d.operands.len() as u64).to_le_bytes());
+    for o in &d.operands {
+        put_str(&mut hasher, o);
+    }
+    hasher.update(&(d.params.len() as u64).to_le_bytes());
+    for (k, v) in &d.params {
+        put_str(&mut hasher, k);
+        put_str(&mut hasher, v);
+    }
+    hasher.finalize()
+}
+
+/// The content id from the timebase, the length, and each channel's digest followed by each
+/// derived channel's.
 pub fn content_id(timebase: Ratio, length: i64, channels: &[blake3::Hash]) -> ContentId {
     let mut hasher = blake3::Hasher::new();
     hasher.update(&timebase.num().to_le_bytes());

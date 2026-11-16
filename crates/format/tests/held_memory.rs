@@ -7,12 +7,12 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
-use escapement_tickwave_format::decode::MAX_DECODED;
 use escapement_tickwave_format::header::{
     AnalogCoding, Declaration, DeclaredChannel, DeclaredKind, Derived, IntCoding, SourceFormat,
     SourceHeader,
 };
 use escapement_tickwave_format::model::Ratio;
+use escapement_tickwave_format::record::MAX_BLOCK;
 use escapement_tickwave_format::record::{self, BlockHead, Kind};
 use escapement_tickwave_format::recut::{RecutError, Recutter};
 use escapement_tickwave_format::repair::{HOLD, RepairError, repair};
@@ -81,9 +81,12 @@ fn crafted(blocks: i64) -> Vec<u8> {
             period: Ratio::integer(1).unwrap(),
             coding: AnalogCoding::Int(IntCoding::new(32, false)),
             significant: None,
+            phase: None,
         },
         shaping: Default::default(),
         overview_shift: None,
+        codec: None,
+        requires: Vec::new(),
     };
     let d = Declaration {
         timebase,
@@ -91,7 +94,10 @@ fn crafted(blocks: i64) -> Vec<u8> {
         derived: vec![Derived {
             name: "P".into(),
             unit: "W".into(),
-            product: ["I".into(), "V".into()],
+            op: escapement_tickwave_format::header::Op::Multiply,
+            operands: vec!["I".into(), "V".into()],
+            params: Default::default(),
+            requires: Vec::new(),
             significant: None,
         }],
         sources: vec![SourceHeader::new(
@@ -101,21 +107,22 @@ fn crafted(blocks: i64) -> Vec<u8> {
         title: None,
         meta: Default::default(),
         overview_shift: 30,
+        requires: Vec::new(),
     };
     let mut w = Writer::new(d, WriteOptions::default()).unwrap();
     // The declaration, and V's first run record, which its first sample brings.
     w.run(0, 0, 0).unwrap();
     w.sample(0, 0u64).unwrap();
     let mut file = w.take_output();
-    let n = (MAX_DECODED / 4) as i64;
-    let frame = escapement_tickwave_format::compress::compress(&vec![0; MAX_DECODED], 1).unwrap();
+    let n = (MAX_BLOCK / 4) as i64;
+    let frame = escapement_tickwave_format::compress::compress(&vec![0; MAX_BLOCK], 1).unwrap();
     for k in 0..blocks {
         let head = BlockHead {
             channel: 0,
             start: k * n,
             end: (k + 1) * n,
             word: n as u32,
-            decoded_length: MAX_DECODED as u32,
+            decoded_length: MAX_BLOCK as u32,
         };
         record::write(&mut file, Kind::Block, &[&head.to_bytes(), &frame]);
     }
@@ -133,11 +140,12 @@ fn peak<T>(f: impl FnOnce() -> T) -> (T, usize) {
 #[test]
 fn records_held_back_past_the_hold_are_refused_not_held() {
     let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
-    // Eight blocks, 512 MiB of codes and 1 GiB as u64 values, in a file of a few hundred KB.
-    let file = crafted(8);
+    // 128 blocks of the most a block holds, 512 MiB of codes and 1 GiB as u64 values, in a file
+    // of a few hundred KB.
+    let file = crafted(128);
     assert!(file.len() < 512 << 10, "{} bytes", file.len());
     // At most what the hold allows, one block decoding past it, and its raw bytes.
-    let bound = HOLD + 2 * MAX_DECODED + MAX_DECODED;
+    let bound = HOLD + 3 * MAX_BLOCK;
     let (repaired, held) = peak(|| repair(&file, 3));
     eprintln!("repair held {held} bytes at most, the bound {bound}");
     assert!(

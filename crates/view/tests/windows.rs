@@ -22,21 +22,25 @@ const BREAKS: [Break; 4] = [
         index: 5,
         tick: 30,
         lost: 2,
+        phase: 0,
     },
     Break {
         index: 8,
         tick: 40,
         lost: 0,
+        phase: 0,
     },
     Break {
         index: 12,
         tick: 47,
         lost: 6,
+        phase: 0,
     },
     Break {
         index: 15,
         tick: 60,
         lost: 1,
+        phase: 0,
     },
 ];
 
@@ -270,9 +274,12 @@ fn a_run_that_shares_a_column_with_the_one_before_joins_from_its_own_values() {
                 period: Ratio::integer(10).unwrap(),
                 coding: AnalogCoding::Int(IntCoding::new(32, false)),
                 significant: None,
+                phase: None,
             },
             shaping: Default::default(),
             overview_shift: None,
+            codec: None,
+            requires: Vec::new(),
         }],
         derived: Vec::new(),
         sources: vec![SourceHeader::new(
@@ -282,6 +289,7 @@ fn a_run_that_shares_a_column_with_the_one_before_joins_from_its_own_values() {
         title: None,
         meta: Default::default(),
         overview_shift: 12,
+        requires: Vec::new(),
     };
     // A run of ten 0s from tick 0, a pause, then 100 at 95 and 10 at 105 and 115.
     let mut w = Writer::new(d, WriteOptions::default()).unwrap();
@@ -368,6 +376,8 @@ fn a_live_recordings_gap_from_tick_0_sets_the_level_from_its_end() {
             data: DeclaredKind::Digital { initial: false },
             shaping: Default::default(),
             overview_shift: None,
+            codec: None,
+            requires: Vec::new(),
         }],
         derived: Vec::new(),
         sources: vec![SourceHeader::new(
@@ -377,6 +387,7 @@ fn a_live_recordings_gap_from_tick_0_sets_the_level_from_its_end() {
         title: None,
         meta: Default::default(),
         overview_shift: 4,
+        requires: Vec::new(),
     };
     // Declared low, not known until 300 and high there, then edges at 400 and 405; a flush first
     // so the recording is made before the gap and takes it in an update.

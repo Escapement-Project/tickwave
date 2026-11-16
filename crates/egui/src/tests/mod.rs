@@ -112,9 +112,12 @@ impl Capture {
                 period: Ratio::integer(self.period() as u64).unwrap(),
                 coding,
                 significant: Some(4),
+                phase: None,
             },
             shaping: Default::default(),
             overview_shift: None,
+            codec: None,
+            requires: Vec::new(),
         };
         let digital = |name: &str| DeclaredChannel {
             name: name.into(),
@@ -123,6 +126,8 @@ impl Capture {
             data: DeclaredKind::Digital { initial: false },
             shaping: Default::default(),
             overview_shift: None,
+            codec: None,
+            requires: Vec::new(),
         };
         let timebase = Ratio::integer(SECOND as u64).unwrap();
         let declaration = Declaration {
@@ -139,7 +144,10 @@ impl Capture {
             derived: vec![Derived {
                 name: "P".into(),
                 unit: "W".into(),
-                product: ["I".into(), "V".into()],
+                op: escapement_tickwave_format::header::Op::Multiply,
+                operands: vec!["I".into(), "V".into()],
+                params: Default::default(),
+                requires: Vec::new(),
                 significant: None,
             }],
             sources: vec![SourceHeader::new(
@@ -150,6 +158,7 @@ impl Capture {
             meta: BTreeMap::new(),
             // The Recorder's rule: round(log2(1024 × ticks a pair)).
             overview_shift: (1024.0 * self.period() as f64).log2().round() as u8,
+            requires: Vec::new(),
         };
         let mut w = Writer::new(
             declaration,

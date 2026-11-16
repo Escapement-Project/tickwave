@@ -33,7 +33,7 @@ fuzz_target!(|data: &[u8]| {
             let _ = Footer::blocks_covering(refs, i64::MIN, i64::MAX);
         }
         // Each derived channel from its operands' blocks at the same place in their channels.
-        for &(a, b, product) in &footer.products {
+        for &(a, b, product) in footer.products.iter().flatten() {
             let (Some(ra), Some(rb)) = (refs.get(a), refs.get(b)) else {
                 continue;
             };

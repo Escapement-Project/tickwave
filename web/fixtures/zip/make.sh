@@ -19,7 +19,7 @@ cp "$repo/web/fixtures/identify-swd.tickwave" "$work/identify-swd/"
 cat > "$work/identify-swd/identify-swd.annotations.toml" <<'EOF'
 format = "tickwave-annotations/1"
 recording = "identify-swd.tickwave"
-recording_id = "blake3:ccc8b7d8c3e4cb30da7fc6088e54ebeba2858ad402eb3fb5a9aeb50be989accf"
+recording_id = "blake3:63773d56fb3420735c864932f8d2441acd6f31a51b557e073bf27755a0534697"
 
 [[annotation]]
 id = "from-a-zip"

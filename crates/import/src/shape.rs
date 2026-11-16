@@ -8,8 +8,8 @@ use std::fmt;
 use escapement_tickwave_format::annotations::{self, ExactTicks};
 use escapement_tickwave_format::header::{Header, JSON_SAFE};
 use escapement_tickwave_format::model::{
-    Analog, Break, Channel, ChannelData, Digital, Gap, Kept, Offset, Ratio, Recording, Shaping,
-    Wrap, run_sample_tick,
+    Analog, Break, Channel, ChannelData, Digital, Gap, Grid, Kept, Offset, Ratio, Recording,
+    Shaping, Wrap,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -43,10 +43,10 @@ pub enum Error {
         length: i64,
     },
     #[error(
-        "{name}: kept {span}; its samples keep their ticks only from one a multiple of {q} into \
-         its run, and none in that span is"
+        "{name}: kept {span}; its first kept sample's phase gives a coarser grid than a later \
+         run's phase needs, which a channel can't state"
     )]
-    NoGridSample { name: String, span: Span, q: u64 },
+    GridChanges { name: String, span: Span },
     #[error(
         "the recording's channels start {base} ticks into the source, but its source states an \
          origin of {origin}, not {}",
@@ -248,10 +248,9 @@ impl Plan {
             (plan.from, plan.to) = (from, to);
             if let ChannelData::Analog(a) = &recording.channels[c].data {
                 let cut = AnalogCut::new(a, from, to.unwrap_or(length)).ok_or_else(|| {
-                    Error::NoGridSample {
+                    Error::GridChanges {
                         name: name.clone(),
                         span,
-                        q: grid(a.period),
                     }
                 })?;
                 plan.from = cut.from;
@@ -481,26 +480,50 @@ pub(crate) fn digital(d: Digital, from: i64, to: i64, count: u64) -> Digital {
     }
 }
 
-/// An analog channel with its first `skip` samples left out and the next `keep` kept. Its
-/// samples keep their places: the first kept one's place is its `first`, and its breaks keep
-/// their ticks.
-pub(crate) fn analog(a: Analog, skip: u64, keep: u64) -> Analog {
-    let end = skip + keep;
-    let first = if keep == 0 {
-        0
-    } else {
-        run_sample_tick(a.first, a.period, &a.breaks, skip)
-    };
+/// An analog channel's grid; a whole one for a grid no header allows, which the writer refuses.
+fn grid_of(a: &Analog) -> Grid {
+    Grid::new(a.period, a.phase).unwrap_or(Grid::WHOLE)
+}
+
+/// Where an analog channel with its first `skip` samples left out starts, with `breaks`: its
+/// first kept sample's place as a whole tick and a phase, and each later run's phase on the grid
+/// that phase gives. None where a later run's phase is finer than that grid holds (FORMAT.md,
+/// "Header": a channel's grid follows from its phase and period).
+fn cut_start(a: &Analog, skip: u64) -> Option<(i64, Option<Ratio>, Vec<Break>)> {
+    let grid = grid_of(a);
+    let (first, f) = grid.split(grid.sample_place(a.first, &a.breaks, skip));
+    let phase = Ratio::new(u64::from(f), grid.d()).map(Ratio::lowest);
+    let new = Grid::new(a.period, phase)?;
+    // The new grid divides the old one: a break's phase in its units is a whole number of the
+    // new ones, or the cut can't be stated.
+    let scale = grid.d() / new.d();
     let breaks = a
         .breaks
         .iter()
-        .filter(|b| b.index > skip && b.index < end)
-        .map(|b| Break {
-            index: b.index - skip,
-            tick: b.tick,
-            lost: b.lost,
+        .filter(|b| b.index > skip)
+        .map(|b| {
+            (u64::from(b.phase) % scale == 0).then_some(Break {
+                index: b.index - skip,
+                phase: b.phase / scale as u32,
+                ..*b
+            })
         })
-        .collect();
+        .collect::<Option<Vec<_>>>()?;
+    Some((first, phase, breaks))
+}
+
+/// An analog channel with its first `skip` samples left out and the next `keep` kept. Every kept
+/// sample keeps its place (FORMAT.md, "Moved and trimmed channels"): a cut inside a run starts
+/// the first run at the first kept sample's place, its whole tick as `first` and the rest as its
+/// phase. `AnalogCut::new` has checked that the cut can be stated.
+pub(crate) fn analog(a: Analog, skip: u64, keep: u64) -> Analog {
+    let end = skip + keep;
+    let (first, phase, breaks) = if keep == 0 {
+        (0, None, Vec::new())
+    } else {
+        cut_start(&a, skip).expect("a cut AnalogCut::new checked")
+    };
+    let breaks = breaks.into_iter().filter(|b| b.index < keep).collect();
     /// Skips `0` samples, then keeps `1`.
     struct Cut(u64, u64);
     impl Wrap for Cut {
@@ -523,6 +546,7 @@ pub(crate) fn analog(a: Analog, skip: u64, keep: u64) -> Analog {
     Analog {
         unit: a.unit,
         first,
+        phase,
         period: a.period,
         count: keep,
         breaks,
@@ -533,92 +557,61 @@ pub(crate) fn analog(a: Analog, skip: u64, keep: u64) -> Analog {
     }
 }
 
-/// `q` of a period `p/q` in lowest terms: a run's samples sit on its grid every `q` samples.
-pub(crate) fn grid(period: Ratio) -> u64 {
-    let (mut a, mut b) = (period.num(), period.den());
-    while b != 0 {
-        (a, b) = (b, a % b);
-    }
-    period.den() / a
-}
-
 /// Where an analog channel kept at ticks `from..to` keeps its samples.
 pub(crate) struct AnalogCut {
     pub(crate) skip: u64,
     pub(crate) keep: u64,
-    /// The cut's start: `from`, or the first sample kept where the grid moved it there.
+    /// The cut's start, `from`, as given: no sample moves.
     pub(crate) from: Option<i64>,
 }
 
 impl AnalogCut {
-    /// None when the grid moves the first sample kept past every sample before `to`, which the
-    /// span would then claim without holding.
+    /// Every sample whose place lies in `from..to` is kept. None where the first kept sample's
+    /// phase gives a grid too coarse for a later run's phase.
     pub(crate) fn new(a: &Analog, from: Option<i64>, to: i64) -> Option<Self> {
-        let runs = runs(a);
-        let end = first_at(&runs, a.period, to).1;
-        let Some(cut) = from else {
-            return Some(Self {
-                skip: 0,
-                keep: end,
-                from,
-            });
-        };
-        let (run, at) = first_at(&runs, a.period, cut);
-        if at >= end {
-            return Some(Self {
-                skip: at,
-                keep: 0,
-                from,
-            });
+        let grid = grid_of(a);
+        let runs = runs(a, grid);
+        let end = first_at(&runs, grid, to);
+        let skip = from.map_or(0, |f| first_at(&runs, grid, f)).min(end);
+        if skip < end && skip > 0 {
+            cut_start(a, skip)?;
         }
-        let q = grid(a.period);
-        let run_end = runs.iter().find(|r| r.0 > run).map_or(a.count, |r| r.0);
-        let on_grid = (run + (at - run).div_ceil(q) * q).min(run_end);
-        if on_grid == at {
-            return Some(Self {
-                skip: at,
-                keep: end - at,
-                from,
-            });
-        }
-        // The samples from `at` to `on_grid` are left out: the cut moves past them.
-        (on_grid < end).then(|| Self {
-            skip: on_grid,
-            keep: end - on_grid,
-            from: Some(run_sample_tick(a.first, a.period, &a.breaks, on_grid)),
+        Some(Self {
+            skip,
+            keep: end - skip,
+            from,
         })
     }
 }
 
-/// An analog channel's runs: each one's first index, its tick, and its sample count.
-fn runs(a: &Analog) -> Vec<(u64, i64, u64)> {
-    let starts: Vec<(u64, i64)> = std::iter::once((0, a.first))
-        .chain(a.breaks.iter().map(|b| (b.index, b.tick)))
+/// An analog channel's runs: each one, and its sample count.
+fn runs(a: &Analog, grid: Grid) -> Vec<(Break, u64)> {
+    let starts: Vec<Break> = std::iter::once(grid.first_run(a.first, a.lost_before))
+        .chain(a.breaks.iter().copied())
         .collect();
     starts
         .iter()
         .enumerate()
-        .map(|(i, &(index, tick))| {
-            let next = starts.get(i + 1).map_or(a.count, |s| s.0);
-            (index, tick, next - index)
+        .map(|(i, &run)| {
+            let next = starts.get(i + 1).map_or(a.count, |s| s.index);
+            (run, next - run.index)
         })
         .collect()
 }
 
-/// The first sample at or after `tick`, and the index of the run that holds it; the count, and
-/// the last run's index, when every sample lies before it. Ticks never fall from one sample to
-/// the next.
-fn first_at(runs: &[(u64, i64, u64)], period: Ratio, tick: i64) -> (u64, u64) {
-    for &(index, start, len) in runs {
-        // floor(k × num / den) ≥ tick − start holds from k = ceil((tick − start) × den / num).
-        let k = match tick - start {
+/// The first sample whose place lies at or after source tick `tick`; the count when every sample
+/// lies before it. Places never fall from one sample to the next.
+fn first_at(runs: &[(Break, u64)], grid: Grid, tick: i64) -> u64 {
+    let at = i128::from(tick) * i128::from(grid.d());
+    for &(run, len) in runs {
+        // place(k) = start + k × step ≥ at from k = ceil((at − start) / step).
+        let k = match at - grid.start(run) {
             ..=0 => 0,
-            after => (after as u128 * u128::from(period.den())).div_ceil(u128::from(period.num())),
+            after => (after as u128).div_ceil(grid.step()),
         };
         if k < u128::from(len) {
-            return (index, index + k as u64);
+            return run.index + k as u64;
         }
     }
-    let count = runs.last().map_or(0, |r| r.0 + r.2);
-    (runs.last().map_or(0, |r| r.0), count)
+    runs.last().map_or(0, |(r, len)| r.index + len)
 }

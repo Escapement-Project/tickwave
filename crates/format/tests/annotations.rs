@@ -26,6 +26,8 @@ fn header() -> Header {
                 overview_shift: None,
                 blocks: 1,
                 overview_blocks: Vec::new(),
+                codec: None,
+                requires: Vec::new(),
             },
             ChannelHeader {
                 name: "SWDIO".into(),
@@ -42,6 +44,8 @@ fn header() -> Header {
                 overview_shift: None,
                 blocks: 1,
                 overview_blocks: Vec::new(),
+                codec: None,
+                requires: Vec::new(),
             },
             ChannelHeader {
                 name: "V".into(),
@@ -58,11 +62,14 @@ fn header() -> Header {
                     break_count: None,
                     lost_before: 0,
                     lost_after: 0,
+                    phase: None,
                 },
                 shaping: Default::default(),
                 overview_shift: None,
                 blocks: 1,
                 overview_blocks: Vec::new(),
+                codec: None,
+                requires: Vec::new(),
             },
         ],
         derived: Vec::new(),
@@ -74,6 +81,8 @@ fn header() -> Header {
         meta: Default::default(),
         content_id: ID.parse().unwrap(),
         overview_shift: 12,
+        annotation_parts: None,
+        requires: Vec::new(),
     }
 }
 

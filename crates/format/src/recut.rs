@@ -216,6 +216,12 @@ impl Recutter {
             Event::Gap { channel, gap } => self.gaps[channel].push_back(gap),
             Event::Run { channel, run } => self.runs[channel].push_back(run),
             Event::Block(block) => self.block(block)?,
+            Event::UnreadBlock(_) => {
+                return Err(crate::decode::corrupt(
+                    "a block of a channel this version can't read, so it can't write again",
+                )
+                .into());
+            }
             Event::KnownThrough { tick } => {
                 self.known_through = Some(tick);
                 let w = self.writer();
@@ -284,7 +290,7 @@ impl Recutter {
                 for (index, value) in (*first_index..).zip(values.iter()) {
                     while let Some(run) = self.runs[c].front().filter(|r| r.index <= index) {
                         if run.index == index {
-                            writer.run(c, run.tick, run.lost)?;
+                            writer.run_at(c, run.tick, run.phase, run.lost)?;
                         }
                         self.runs[c].pop_front();
                     }

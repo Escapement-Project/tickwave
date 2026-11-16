@@ -79,6 +79,8 @@ fn header() -> Header {
         overview_shift: None,
         blocks: 1,
         overview_blocks: Vec::new(),
+        codec: None,
+        requires: Vec::new(),
     };
     Header {
         timebase: Ratio::integer(1_000_000_000).unwrap(),
@@ -93,6 +95,8 @@ fn header() -> Header {
         meta: Default::default(),
         content_id: ID.parse().unwrap(),
         overview_shift: 12,
+        annotation_parts: None,
+        requires: Vec::new(),
     }
 }
 

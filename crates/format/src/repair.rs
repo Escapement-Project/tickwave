@@ -178,6 +178,8 @@ impl Hold {
 struct Follow<R: Row> {
     table: TableWriter<R>,
     due: Option<Due>,
+    /// Entries behind the page due, as a block's gaps or breaks fill a page partway.
+    backlog: VecDeque<R>,
     /// The file holds some of the table's last pages: a writer's finish began them.
     finishing: bool,
 }
@@ -187,34 +189,35 @@ impl<R: Row> Follow<R> {
         Self {
             table: TableWriter::new(channel as u32, table, digital),
             due: None,
+            backlog: VecDeque::new(),
             finishing: false,
         }
     }
 
     fn push(&mut self, row: R) {
-        debug_assert!(
-            self.due.is_none(),
-            "the reader holds a page due before an entry"
-        );
-        self.due = self.table.push(row);
+        if self.due.is_some() {
+            self.backlog.push_back(row);
+        } else {
+            self.due = self.table.push(row);
+        }
+    }
+
+    /// The entries behind a page once it is placed, until the next page falls due.
+    fn drain(&mut self) {
+        while self.due.is_none()
+            && let Some(row) = self.backlog.pop_front()
+        {
+            self.due = self.table.push(row);
+        }
     }
 
     /// The file's page record at `at`, `len` bytes, of `count` entries, which the reader has
     /// held to the one due, or to the next of the table's last pages.
-    fn page(&mut self, at: u64, len: u32, count: u32, inline: u64) -> Result<(), RepairError> {
+    fn page(&mut self, at: u64, len: u32, inline: u64) -> Result<(), RepairError> {
         let due = match self.due.take() {
             Some(due) => due,
             None => {
-                if !self.finishing {
-                    // Only a gap list's last page leaves entries out: the gaps past the end.
-                    let open = self.table.open().len() as u64;
-                    if let Some(drop) = open.checked_sub(u64::from(count)).filter(|&d| d > 0)
-                        && self.table.table() == Table::Gaps
-                    {
-                        self.table.drop_last(drop);
-                    }
-                    self.finishing = true;
-                }
+                self.finishing = true;
                 self.table
                     .finish_next(inline)
                     .ok_or(RepairError::Overview)?
@@ -224,12 +227,14 @@ impl<R: Row> Follow<R> {
             return Err(RepairError::Overview);
         }
         self.due = self.table.placed(&due, at);
+        self.drain();
         Ok(())
     }
 
     /// Writes what is due, then the table's last pages, to `tail` at `keep`.
     fn finish(&mut self, inline: u64, tail: &mut Vec<u8>, keep: u64) {
-        let mut due = self.due.take();
+        self.finish_due(tail, keep);
+        let mut due = self.table.finish_next(inline);
         loop {
             while let Some(d) = due {
                 let at = keep + tail.len() as u64;
@@ -251,6 +256,8 @@ enum Data {
         gaps: Vec<Gap>,
         /// Each gap's `to` on the axis.
         gap_ends: Vec<i64>,
+        /// The gaps the list holds: those whose ends a block read holds.
+        listed: usize,
         /// The level after the last block: its start's, through its edges and gap ends.
         level: bool,
         list: Follow<Gap>,
@@ -319,6 +326,7 @@ impl State {
                         edges: 0,
                         gaps: Vec::new(),
                         gap_ends: Vec::new(),
+                        listed: 0,
                         level: *initial,
                         list: Follow::new(c, Table::Gaps, true),
                     },
@@ -330,24 +338,19 @@ impl State {
                 },
             });
         }
+        if let Some(o) = (0..d.channels.len() + d.derived.len()).find(|&o| !d.available(o)) {
+            return Err(format!(
+                "channel {o} is unavailable to this version, which can't write it again"
+            ));
+        }
         let columns = overview::columns(&d.channels, &d.derived);
         let ochans = columns
             .iter()
             .enumerate()
-            .map(|(o, &column)| {
-                let initial = match d.channels.get(o).map(|c| &c.data) {
-                    Some(DeclaredKind::Digital { initial }) => Some(*initial),
-                    _ => None,
-                };
-                OChan {
-                    ladder: Some(Ladder::new(
-                        d.shift(o).expect("a checked declaration's channel"),
-                        column,
-                        initial,
-                    )),
-                    column,
-                    levels: Vec::new(),
-                }
+            .map(|(o, &column)| OChan {
+                ladder: Some(overview::ladder_of(&d, o, column)),
+                column,
+                levels: Vec::new(),
             })
             .collect();
         let products = overview::products(&d.channels, &d.derived);
@@ -412,6 +415,43 @@ impl State {
     fn settle(&mut self, o: usize) {
         let to = self.known_of(o);
         self.asked.push_back((o, to));
+    }
+
+    /// Does what was asked, a step at a time, until an overview block of overview channel `o`'s
+    /// level of `shift` is expected, or nothing is left to do. A channel's levels keep their own
+    /// order, and no other.
+    fn fill_for(&mut self, o: usize, shift: u8) {
+        while !self
+            .expected
+            .iter()
+            .any(|(x, s)| (*x, s.shift) == (o, shift))
+        {
+            let Some(&(a, to)) = self.asked.front() else {
+                return;
+            };
+            let reached = match self.ochans[a].ladder.as_mut() {
+                Some(l) => {
+                    let reached = l.settle_some(to, SETTLE_STEP);
+                    for s in l.take_settled() {
+                        self.expected.push_back((a, s));
+                    }
+                    reached
+                }
+                None => true,
+            };
+            if reached {
+                self.asked.pop_front();
+            }
+        }
+    }
+
+    /// The next overview block expected of overview channel `o`'s level of `shift`, taken.
+    fn take_expected(&mut self, o: usize, shift: u8) -> Option<Settled> {
+        let i = self
+            .expected
+            .iter()
+            .position(|(x, s)| (*x, s.shift) == (o, shift))?;
+        self.expected.remove(i).map(|(_, s)| s)
     }
 
     /// Does what was asked, a step at a time, until an overview block is expected or nothing is
@@ -593,30 +633,25 @@ impl Repairer {
         match event {
             Event::Gap { channel, gap } => {
                 let ch = &mut s.chans[channel];
-                if let Data::Digital {
-                    gaps,
-                    gap_ends,
-                    list,
-                    ..
-                } = &mut ch.data
-                {
-                    // The reader holds a gap's ends inside the axis.
+                if let Data::Digital { gaps, gap_ends, .. } = &mut ch.data {
+                    // The reader holds a gap's ends inside the axis. Its list takes it with the
+                    // block that holds its end.
                     let to = ch.map.axis(gap.to).unwrap_or(i64::MAX);
                     gaps.push(gap);
                     gap_ends.push(to);
-                    list.push(gap);
                     if let Some(l) = s.ochans[channel].ladder.as_mut() {
                         l.gap(gap, to);
                     }
                 }
             }
             Event::Run { channel, run } => {
-                if let Data::Analog { runs, list, .. } = &mut s.chans[channel].data {
+                // Its list takes it with the block that holds its first sample.
+                if let Data::Analog { runs, .. } = &mut s.chans[channel].data {
                     runs.push(run);
-                    if run.index > 0 {
-                        list.push(run);
-                    }
                 }
+            }
+            Event::UnreadBlock(_) => {
+                return Err(corrupt("a block of a channel this version can't read").into());
             }
             Event::KnownThrough { tick } => {
                 s.known = Some(tick);
@@ -639,7 +674,9 @@ impl Repairer {
                             edges: n,
                             gaps,
                             gap_ends,
+                            listed,
                             level,
+                            list,
                             ..
                         },
                     ) => {
@@ -657,14 +694,23 @@ impl Repairer {
                             &source,
                             gaps_ending_in(gaps, gap_ends, block.head.start, block.head.end),
                         );
+                        while *listed < gaps.len() && gap_ends[*listed] < block.head.end {
+                            list.push(gaps[*listed]);
+                            *listed += 1;
+                        }
                     }
                     (
                         BlockChannel::Analog {
                             values,
                             first_index,
                         },
-                        Data::Analog { count, .. },
+                        Data::Analog { count, runs, list },
                     ) => {
+                        let to = *first_index + values.len() as u64;
+                        let from = runs.partition_point(|r| r.index < (*first_index).max(1));
+                        for r in runs[from..].iter().take_while(|r| r.index < to) {
+                            list.push(*r);
+                        }
                         for (index, value) in (*first_index..).zip(values.iter()) {
                             let tick = self.reader.sample_axis_tick(c, index).ok_or_else(|| {
                                 corrupt(format!(
@@ -679,10 +725,7 @@ impl Repairer {
                                 .sample(tick, value);
                             for i in 0..s.operand_of[c].len() {
                                 let d = s.operand_of[c][i];
-                                if let Some(p) = s.pairs[d]
-                                    .take(c, tick, value)
-                                    .map_err(|e| corrupt(e.to_string()))?
-                                {
+                                if let Some(p) = s.pairs[d].take(c, value) {
                                     s.ochans[stored + d]
                                         .ladder
                                         .as_mut()
@@ -709,14 +752,16 @@ impl Repairer {
             }
             Event::OverviewBlock { head, frame, .. } => {
                 let o = head.channel as usize;
-                s.fill();
-                if s.expected.is_empty() {
+                s.fill_for(o, head.shift);
+                if s.expected
+                    .iter()
+                    .all(|(x, w)| (*x, w.shift) != (o, head.shift))
+                {
                     s.end_ladders();
                 }
-                let (_, want) = s
-                    .expected
-                    .pop_front()
-                    .filter(|(x, w)| (*x, w.shift, w.k, w.n) == (o, head.shift, head.k, head.n))
+                let want = s
+                    .take_expected(o, head.shift)
+                    .filter(|w| (w.k, w.n) == (head.k, head.n))
                     .ok_or(RepairError::Overview)?;
                 let oc = &mut s.ochans[o];
                 if inflate_limited(&frame, want.raw.len(), MAX_DECODED)? != *want.raw {
@@ -737,10 +782,9 @@ impl Repairer {
             }
             Event::Page { head, len } => {
                 let c = head.channel as usize;
-                let n = head.count;
                 let inline = INLINE_LIST as u64;
                 match head.table {
-                    0 => s.chans[c].blocks.page(at, len, n, 0)?,
+                    0 => s.chans[c].blocks.page(at, len, 0)?,
                     1 => {
                         let oc = &mut s.ochans[c];
                         let li = oc
@@ -751,11 +795,11 @@ impl Repairer {
                                     .is_some_and(|l| l.table.table() == Table::Level(head.shift))
                             })
                             .ok_or(RepairError::Overview)?;
-                        oc.levels[li].as_mut().expect("found").page(at, len, n, 0)?;
+                        oc.levels[li].as_mut().expect("found").page(at, len, 0)?;
                     }
                     _ => match &mut s.chans[c].data {
-                        Data::Digital { list, .. } => list.page(at, len, n, inline)?,
-                        Data::Analog { list, .. } => list.page(at, len, n, inline)?,
+                        Data::Digital { list, .. } => list.page(at, len, inline)?,
+                        Data::Analog { list, .. } => list.page(at, len, inline)?,
                     },
                 }
             }
@@ -815,6 +859,35 @@ impl Repairer {
                 (None, _) => ch.map.first_at(ch.next_start).max(ch.start),
             })
             .collect();
+        // The gaps each channel's end keeps: those that end before it.
+        let kept_gaps: Vec<usize> = state
+            .chans
+            .iter()
+            .zip(&known_to)
+            .map(|(ch, &last)| match &ch.data {
+                Data::Digital { gaps, .. } => {
+                    gaps.iter().position(|g| g.to >= last).unwrap_or(gaps.len())
+                }
+                Data::Analog { .. } => 0,
+            })
+            .collect();
+        for (c, &kept) in kept_gaps.iter().enumerate() {
+            if let Data::Digital { listed, gaps, .. } = &state.chans[c].data
+                && *listed > kept
+            {
+                return Err(corrupt(format!(
+                    "channel {c}: the end leaves out the gap from {}, whose block was written",
+                    gaps[kept].from
+                ))
+                .into());
+            }
+            if let Data::Digital { gaps, .. } = &state.chans[c].data
+                && let Some(g) = gaps.get(kept)
+                && let Some(l) = state.ochans[c].ladder.as_mut()
+            {
+                l.forget_gaps(g.from);
+            }
+        }
         // Each channel's block from its last one's end to the length, as a writer's finish closes
         // them, each followed by the overview blocks it settles.
         let level = self.level;
@@ -847,6 +920,17 @@ impl Repairer {
             ch.blocks.finish_due(&mut tail, keep);
             ch.blocks_count += 1;
             ch.next_start = length;
+            if let Data::Digital {
+                gaps, listed, list, ..
+            } = &mut ch.data
+            {
+                list.finish_due(&mut tail, keep);
+                while *listed < kept_gaps[c] {
+                    list.push(gaps[*listed]);
+                    *listed += 1;
+                    list.finish_due(&mut tail, keep);
+                }
+            }
             state.settle_channel(c);
             state.write_expected(&mut tail, keep)?;
         }
@@ -902,18 +986,15 @@ impl Repairer {
                     // lies past the end too: a recorder can learn of a loss before it writes the
                     // block the loss starts in.
                     let last = known_to[c];
-                    let kept = gaps.iter().position(|g| g.to >= last).unwrap_or(gaps.len());
+                    let kept = kept_gaps[c];
                     let end = gaps.get(kept).map_or(last, |g| g.from.min(last));
-                    let dropped = gaps.len() - kept;
-                    list.finish_due(&mut tail, keep);
-                    if !list.finishing {
-                        list.table
-                            .drop_last(dropped as u64)
-                            .ok_or(RepairError::Overview)?;
-                    }
                     list.finish(INLINE_LIST as u64, &mut tail, keep);
                     let gaps = gaps[..kept].to_vec();
-                    digests.push(ch.hasher.clone().finish_digital(end, &gaps));
+                    digests.push(
+                        ch.hasher
+                            .clone()
+                            .finish_digital(end, hash::gaps_listed(&gaps)),
+                    );
                     let paged = gaps.len() > INLINE_LIST;
                     ChannelKind::Digital {
                         initial: *initial,
@@ -930,6 +1011,7 @@ impl Repairer {
                         period,
                         coding,
                         significant,
+                        phase,
                     },
                 ) => {
                     list.finish(INLINE_LIST as u64, &mut tail, keep);
@@ -941,7 +1023,7 @@ impl Repairer {
                     digests.push(ch.hasher.clone().finish_analog(
                         first,
                         *count,
-                        &breaks,
+                        hash::breaks_listed(&breaks),
                         (lost_before, 0),
                     ));
                     let paged = breaks.len() > INLINE_LIST;
@@ -949,6 +1031,7 @@ impl Repairer {
                         unit: unit.clone(),
                         first,
                         period: *period,
+                        phase: *phase,
                         count: *count,
                         break_count: paged.then_some(breaks.len() as u64),
                         breaks: if paged { Vec::new() } else { breaks },
@@ -970,8 +1053,11 @@ impl Repairer {
                 overview_shift: declared.overview_shift,
                 blocks: ch.blocks_count,
                 overview_blocks: level_list(levels, &ladders[c], length),
+                requires: Vec::new(),
+                codec: None,
             });
         }
+        digests.extend(d.derived.iter().map(hash::derived_digest));
         for oc in &mut state.ochans {
             for follow in oc.levels.iter_mut().flatten() {
                 follow.finish(0, &mut tail, keep);
@@ -985,8 +1071,11 @@ impl Repairer {
             .map(|(k, x)| DerivedHeader {
                 name: x.name.clone(),
                 unit: x.unit.clone(),
-                product: x.product.clone(),
+                op: x.op.clone(),
+                operands: x.operands.clone(),
+                params: x.params.clone(),
                 significant: x.significant,
+                requires: x.requires.clone(),
                 overview_blocks: level_list(
                     &state.ochans[stored + k].levels,
                     &ladders[stored + k],
@@ -1004,6 +1093,8 @@ impl Repairer {
             meta: d.meta.clone(),
             content_id: hash::content_id(d.timebase, length, &digests),
             overview_shift: d.overview_shift,
+            requires: Vec::new(),
+            annotation_parts: None,
         };
         check_header(&header)?;
         let generated = generated(&self.annotations, length);
@@ -1056,11 +1147,17 @@ impl Repairer {
 impl<R: Row> Follow<R> {
     /// Writes the page due, if one is, and the directories it fills.
     fn finish_due(&mut self, tail: &mut Vec<u8>, keep: u64) {
-        let mut due = self.due.take();
-        while let Some(d) = due {
-            let at = keep + tail.len() as u64;
-            tail.extend_from_slice(&d.record);
-            due = self.table.placed(&d, at);
+        loop {
+            let mut due = self.due.take();
+            while let Some(d) = due {
+                let at = keep + tail.len() as u64;
+                tail.extend_from_slice(&d.record);
+                due = self.table.placed(&d, at);
+            }
+            self.drain();
+            if self.due.is_none() {
+                return;
+            }
         }
     }
 }

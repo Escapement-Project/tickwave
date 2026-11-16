@@ -163,9 +163,12 @@ fn main() {
             period: Ratio::integer(period).unwrap(),
             coding,
             significant: Some(4),
+            phase: None,
         },
         shaping: Default::default(),
         overview_shift: None,
+        codec: None,
+        requires: Vec::new(),
     };
     let digital = |name: &str| DeclaredChannel {
         name: name.into(),
@@ -174,6 +177,8 @@ fn main() {
         data: DeclaredKind::Digital { initial: false },
         shaping: Default::default(),
         overview_shift: None,
+        codec: None,
+        requires: Vec::new(),
     };
     let declaration = Declaration {
         timebase,
@@ -190,7 +195,10 @@ fn main() {
         derived: vec![Derived {
             name: "P".into(),
             unit: "W".into(),
-            product: ["I".into(), "V".into()],
+            op: escapement_tickwave_format::header::Op::Multiply,
+            operands: vec!["I".into(), "V".into()],
+            params: Default::default(),
+            requires: Vec::new(),
             significant: None,
         }],
         sources: vec![SourceHeader::new(
@@ -200,6 +208,7 @@ fn main() {
         title: Some("A synthetic energy capture".into()),
         meta: BTreeMap::new(),
         overview_shift: shift,
+        requires: Vec::new(),
     };
     info!(
         rate = args.rate,

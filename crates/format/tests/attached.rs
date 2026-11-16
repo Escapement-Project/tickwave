@@ -26,9 +26,12 @@ fn declaration() -> Declaration {
                     period: Ratio::integer(10).unwrap(),
                     coding: AnalogCoding::F32,
                     significant: None,
+                    phase: None,
                 },
                 shaping: Shaping::default(),
                 overview_shift: None,
+                codec: None,
+                requires: Vec::new(),
             },
             DeclaredChannel {
                 name: "D".into(),
@@ -37,6 +40,8 @@ fn declaration() -> Declaration {
                 data: DeclaredKind::Digital { initial: false },
                 shaping: Shaping::default(),
                 overview_shift: None,
+                codec: None,
+                requires: Vec::new(),
             },
         ],
         derived: Vec::new(),
@@ -47,6 +52,7 @@ fn declaration() -> Declaration {
         title: None,
         meta: Default::default(),
         overview_shift: 4,
+        requires: Vec::new(),
     }
 }
 

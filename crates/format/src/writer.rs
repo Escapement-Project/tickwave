@@ -16,7 +16,7 @@ use std::sync::Arc;
 use crate::codec::put_uleb;
 use crate::compress::{SLICE, Slicer, Slot, compress};
 use crate::decode::{check_declaration, level_after, lost_after_end, lost_before_start};
-use crate::hash::{self, ChannelHasher};
+use crate::hash::{self, ChannelHasher, ListHasher};
 use crate::header::{
     AnalogCoding, BlockRow, ChannelHeader, ChannelKind, ContentId, Declaration, DeclaredKind,
     DerivedHeader, Header, INLINE_LIST, JSON_SAFE, LEVEL_BIT, OverviewLevel, OverviewRow, Preamble,
@@ -24,9 +24,9 @@ use crate::header::{
 };
 use crate::index::{Due, Entry, Row, Table, TableIndex, TableWriter};
 use crate::mapping::Mapping;
-use crate::model::{Break, Gap, Ratio, Sample};
+use crate::model::{Break, Gap, Grid, Sample};
 use crate::overview::{self, Column, Ladder, Pair, Settled, Unpaired};
-use crate::record::{self, BlockHead, Kind, OverviewHead};
+use crate::record::{self, BlockHead, Kind, MAX_BLOCK, OverviewHead};
 use crate::samples;
 use crate::shared::Chunks;
 use crate::snapshot::{ChannelSnapshot, LevelSnapshot, OverviewSnapshot, Snapshot, Unwritten};
@@ -35,7 +35,7 @@ use crate::snapshot::{ChannelSnapshot, LevelSnapshot, OverviewSnapshot, Snapshot
 pub enum WriteError {
     #[error("{what} {value} does not fit the header, which holds integers below 2^53")]
     TooLarge { what: &'static str, value: u64 },
-    #[error("the block size target must lie between 1 and 2^30 bytes")]
+    #[error("the block size target must lie between 1 byte and 2 MiB, half the most a block holds")]
     BlockSize,
     #[error("the declaration: {0}")]
     Declaration(String),
@@ -100,6 +100,20 @@ pub enum WriteError {
         tick: i64,
         previous: i64,
     },
+    #[error(
+        "{channel}: a run at tick {tick} states {lost} lost samples, but starts no later than \
+         where the first of them would sit"
+    )]
+    LostRunStart {
+        channel: String,
+        tick: i64,
+        lost: u64,
+    },
+    #[error(
+        "{channel}: a run's phase of {phase} is not below the channel's grid, {d}, or the first \
+         run's is not the declared one"
+    )]
+    RunPhase { channel: String, phase: u32, d: u64 },
     #[error("{channel}: a sample before the channel's first run")]
     NoRun { channel: String },
     #[error(
@@ -133,6 +147,25 @@ pub enum WriteError {
     Flush { before: i64, last: i64 },
     #[error("a block of {0} items or bytes, more than its index word or length holds")]
     BlockTooLarge(usize),
+    #[error(
+        "{channel}: an item at axis tick {tick} would take its open block past 4 MiB, and the \
+         block can't close before it: promise or flush past the items it holds"
+    )]
+    BlockFull { channel: String, tick: i64 },
+    #[error(
+        "{channel}: a sample would leave more than 4 MiB of its samples waiting for {partner}'s, \
+         with which derived channel {derived} pairs it"
+    )]
+    OperandAhead {
+        channel: String,
+        partner: String,
+        derived: String,
+    },
+    #[error(
+        "{channel}: a gap would leave more than 4 MiB of gaps waiting for the blocks that hold \
+         their ends: promise or flush past them"
+    )]
+    GapsWaiting { channel: String },
     #[error("the length {length} does not lie past every item and block in, the last at {last}")]
     Length { length: i64, last: i64 },
     #[error("{given} digital channel ends given, {expected} expected")]
@@ -154,9 +187,15 @@ pub enum WriteError {
     #[error("{channel}: the gap to {to} lies inside the recording but not before the end, {end}")]
     GapPastEnd { channel: String, to: i64, end: i64 },
     #[error(
-        "{channel}: the end leaves out a gap already written in a list page, which can't change"
+        "{channel}: the end, source tick {end}, leaves out the gap from {from} to {to}, which is \
+         already in the content id and the overview"
     )]
-    GapPaged { channel: String },
+    EndLeavesOutGap {
+        channel: String,
+        from: i64,
+        to: i64,
+        end: i64,
+    },
     #[error("source {index}'s extra already holds {key}")]
     Extra { index: usize, key: String },
     #[error("extra keys for {given} sources, but the recording has {sources}")]
@@ -179,6 +218,14 @@ const SETTLE_STEP: usize = 16;
 /// The zstd level overview blocks are compressed at, whatever `WriteOptions::level`.
 pub const OVERVIEW_BLOCK_LEVEL: i32 = 3;
 
+/// The most a writer's block size target can be: half the most a block holds, so a block can
+/// take the items that come before it can close (FORMAT.md, "tickwave's writer").
+pub const MAX_TARGET: usize = MAX_BLOCK / 2;
+
+/// The most bytes of gaps a channel holds waiting for the blocks that hold their ends, at 17
+/// bytes each.
+pub const MAX_WAITING_GAPS: usize = 4 << 20;
+
 /// Where frames are compressed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Compression {
@@ -195,7 +242,8 @@ pub enum Compression {
 pub struct WriteOptions {
     /// The zstd level for blocks, strips and the annotation bundle.
     pub level: i32,
-    /// The decoded size at which a channel's block closes, at its next promise.
+    /// The decoded size at which a channel's block closes, at its next promise: 1 byte to
+    /// `MAX_TARGET`.
     pub block_bytes: usize,
     /// Each item promises its own axis tick: for a caller that hands items in axis order across
     /// the channels, as the encoder does.
@@ -363,22 +411,27 @@ struct DigitalState {
     last_edge: i64,
     edges: u64,
     open: EdgeRun,
+    /// Every gap taken, for snapshots.
     gaps: Chunks<Gap>,
-    /// Gaps whose `to` no closed block has passed, each with its `to` on the axis.
+    /// Gaps whose `to` no closed block has passed, each with its `to` on the axis. They are
+    /// hashed and listed once one has.
     pending: VecDeque<(Gap, i64)>,
+    /// The gaps hashed, in the header's order, and the last one's `to`.
+    listed: ListHasher,
+    last_listed: Option<Gap>,
     list: TableWriter<Gap>,
 }
 
 struct AnalogState {
-    period: Ratio,
+    grid: Grid,
     coding: AnalogCoding,
     /// Every run so far, the first at index 0.
     runs: Chunks<Break>,
-    /// A run the next sample starts: its source tick and the samples lost before it.
-    next_run: Option<(i64, u64)>,
+    /// A run the next sample starts, its `index` the sample's.
+    next_run: Option<Break>,
     count: u64,
-    /// The last sample's place, a source tick.
-    last_tick: Option<i64>,
+    /// The breaks hashed, in order: each with its first sample's block.
+    listed: ListHasher,
     /// The open block's samples, each one's bytes together.
     open: Vec<u8>,
     list: TableWriter<Break>,
@@ -416,10 +469,12 @@ struct OChan {
     levels: Vec<Option<TableWriter<OverviewRow>>>,
 }
 
+/// What a record's place in the file settles besides its bytes: the gaps and breaks a closed
+/// block lists, whose list pages come after it.
 enum Placed {
     Nothing,
-    Gap(usize, Gap),
-    Run(usize, Break),
+    Gaps(usize, Vec<Gap>),
+    Breaks(usize, Vec<Break>),
 }
 
 enum State {
@@ -620,18 +675,10 @@ fn run_of(runs: &Chunks<Break>, index: u64) -> Option<Break> {
     runs.get(lo.checked_sub(1)?).copied()
 }
 
-/// Sample `index`'s place on the run `run` starts: a source tick, saturating.
+/// Sample `index`'s axis tick on the run `run` starts, saturating at the ends of i64.
 #[inline]
-fn place_in(run: Break, period: Ratio, index: u64) -> i64 {
-    // A whole period, as most are, needs no division.
-    let steps = if period.den() == 1 {
-        u128::from(index - run.index) * u128::from(period.num())
-    } else {
-        u128::from(index - run.index) * u128::from(period.num()) / u128::from(period.den())
-    };
-    i64::try_from(steps)
-        .ok()
-        .and_then(|s| run.tick.checked_add(s))
+fn axis_in(map: &Mapping, grid: Grid, run: Break, index: u64) -> i64 {
+    map.axis_place(grid.place(run, index), grid.d())
         .unwrap_or(i64::MAX)
 }
 
@@ -724,10 +771,30 @@ impl Writer {
     /// Writes the preamble and the declaration to the output. The declaration is held to the
     /// rules a reader holds it to.
     pub fn new(declaration: Declaration, options: WriteOptions) -> Result<Self, WriteError> {
-        if options.block_bytes == 0 || options.block_bytes > 1 << 30 {
+        if options.block_bytes == 0 || options.block_bytes > MAX_TARGET {
             return Err(WriteError::BlockSize);
         }
         check_declaration(&declaration).map_err(|e| WriteError::Declaration(e.to_string()))?;
+        // This version defines no feature, codec or further operation: it writes none.
+        let unknown = |what: String| {
+            WriteError::Declaration(format!(
+                "{what}, which this version doesn't define, so it writes no such channel"
+            ))
+        };
+        if let Some(c) = declaration.channels.iter().find(|c| !c.available()) {
+            return Err(unknown(format!(
+                "channel {} states a feature or codec",
+                c.name
+            )));
+        }
+        if let Some(d) = (0..declaration.derived.len())
+            .find(|&d| !declaration.available(declaration.channels.len() + d))
+        {
+            return Err(unknown(format!(
+                "derived channel {} states an operation, params or features",
+                declaration.derived[d].name
+            )));
+        }
         let unmapped = || WriteError::Declaration("a channel has no mapping to the axis".into());
         let mut chans = Vec::with_capacity(declaration.channels.len());
         for (c, channel) in declaration.channels.iter().enumerate() {
@@ -745,16 +812,18 @@ impl Writer {
                         open: EdgeRun::default(),
                         gaps: Chunks::new(),
                         pending: VecDeque::new(),
+                        listed: ListHasher::new(),
+                        last_listed: None,
                         list: TableWriter::new(c as u32, Table::Gaps, true),
                     })
                 }
-                DeclaredKind::Analog { period, coding, .. } => Data::Analog(AnalogState {
-                    period: *period,
+                DeclaredKind::Analog { coding, .. } => Data::Analog(AnalogState {
+                    grid: channel.grid().ok_or_else(unmapped)?,
                     coding: *coding,
                     runs: Chunks::new(),
                     next_run: None,
                     count: 0,
-                    last_tick: None,
+                    listed: ListHasher::new(),
                     open: Vec::new(),
                     list: TableWriter::new(c as u32, Table::Breaks, false),
                 }),
@@ -780,19 +849,10 @@ impl Writer {
         let ochans = columns
             .iter()
             .enumerate()
-            .map(|(o, &column)| {
-                let initial = match declaration.channels.get(o).map(|c| &c.data) {
-                    Some(DeclaredKind::Digital { initial }) => Some(*initial),
-                    _ => None,
-                };
-                let shift = declaration
-                    .shift(o)
-                    .expect("a checked declaration's channel");
-                OChan {
-                    ladder: Some(Ladder::new(shift, column, initial)),
-                    column,
-                    levels: Vec::new(),
-                }
+            .map(|(o, &column)| OChan {
+                ladder: Some(overview::ladder_of(&declaration, o, column)),
+                column,
+                levels: Vec::new(),
             })
             .collect();
         let pairs = Pair::of(&declaration.channels, &declaration.derived);
@@ -939,6 +999,61 @@ impl Writer {
         }
     }
 
+    /// Where a sample's place of `units / d` source ticks lies on the axis, refusing a place whose
+    /// whole tick lies outside `0..2^53`, or that maps outside it.
+    #[inline]
+    fn place_units(&self, c: usize, units: i128, grid: Grid) -> Result<i64, WriteError> {
+        let safe = 0..JSON_SAFE as i64;
+        let k = grid.floor(units);
+        if !safe.contains(&k) {
+            return Err(WriteError::SourceTick {
+                channel: self.name(c),
+                tick: k,
+            });
+        }
+        match self.chans[c].map.axis_place(units, grid.d()) {
+            Some(t) if safe.contains(&t) => Ok(t),
+            _ => Err(WriteError::AxisTick {
+                channel: self.name(c),
+                tick: k,
+            }),
+        }
+    }
+
+    /// Sample `index` of channel `c`, on the run `run`, against derived channel `d`'s other
+    /// operand: it sits on the run the partner's sample `index` sits on, where the partner has
+    /// one, and it leaves no more than `MAX_AHEAD` bytes of `c`'s samples waiting.
+    fn check_partner(&self, c: usize, d: usize, index: u64, run: Break) -> Result<(), WriteError> {
+        let pair = &self.pairs[d];
+        let [(a, _), (b, _)] = pair.operands;
+        let p = if a == c { b } else { a };
+        if p == c {
+            return Ok(());
+        }
+        if pair.too_far_ahead(c) {
+            return Err(WriteError::OperandAhead {
+                channel: self.name(c),
+                partner: self.name(p),
+                derived: pair.name.clone(),
+            });
+        }
+        if let Data::Analog(pa) = &self.chans[p].data
+            && pa.count > index
+            && run_of(&pa.runs, index) != Some(run)
+        {
+            return Err(Unpaired(
+                pair.name.clone(),
+                format!(
+                    "{}'s sample {index} starts or sits on another run than {}'s",
+                    self.name(c),
+                    self.name(p)
+                ),
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     /// An item of channel `c` at axis tick `t`, an edge at source tick `edge` or else a sample, is
     /// about to go in: promise it where every item promises its own tick, and refuse it before
     /// the channel's promise or open block, or past what a block's word and length hold.
@@ -962,27 +1077,37 @@ impl Writer {
                 previous: self.chans[c].start,
             });
         }
-        let max = if matches!(self.chans[c].data, Data::Digital(_)) {
-            LEVEL_BIT - 1
-        } else {
-            u32::MAX
-        };
-        let ch = &self.chans[c];
-        if ch.items >= max {
-            return Err(WriteError::BlockTooLarge(ch.items as usize));
-        }
-        let size = match (&ch.data, edge) {
-            (Data::Digital(d), Some(tick)) if d.open.may_pass(u32::MAX as usize) => {
-                d.open.size_with(tick)
+        if self.size_with(c, edge) > MAX_BLOCK {
+            // Closing at the latest promise to the channel and its partners may make room.
+            let p = self.partners[c]
+                .iter()
+                .map(|&x| self.promise_of(x))
+                .fold(self.promise_of(c), i64::min);
+            let ch = &self.chans[c];
+            if p > ch.start && ch.items > 0 && ch.first_tick < p {
+                self.close(c, p)?;
             }
+            if self.size_with(c, edge) > MAX_BLOCK {
+                return Err(WriteError::BlockFull {
+                    channel: self.name(c),
+                    tick: t,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Channel `c`'s open block's decoded size with its next item taken: an edge at source tick
+    /// `edge`, or else a sample. An edge's is worked out only near the limit.
+    #[inline]
+    fn size_with(&self, c: usize, edge: Option<i64>) -> usize {
+        let ch = &self.chans[c];
+        match (&ch.data, edge) {
+            (Data::Digital(d), Some(tick)) if d.open.may_pass(MAX_BLOCK) => d.open.size_with(tick),
             (Data::Digital(_), Some(_)) => 0,
             (Data::Analog(a), _) => ch.size + a.coding.sample_len(),
             (Data::Digital(_), None) => unreachable!("a digital channel's item is an edge"),
-        };
-        if size > u32::MAX as usize {
-            return Err(WriteError::BlockTooLarge(size));
         }
-        Ok(())
     }
 
     /// An item of channel `c` at axis tick `t` went in, its open block now `size` bytes.
@@ -995,15 +1120,43 @@ impl Writer {
         ch.items += 1;
         ch.size = size;
         ch.last_tick = t;
-        if ch.size >= self.options.block_bytes && !ch.full {
-            ch.full = true;
+        self.mark_full(c)?;
+        self.advance()
+    }
+
+    /// Channel `c`'s open block, once what it holds reaches the target: full, closing at the next
+    /// promise past what it holds, or now if one has come.
+    fn mark_full(&mut self, c: usize) -> Result<(), WriteError> {
+        if self.chans[c].full {
+            return Ok(());
+        }
+        let held = self.chans[c].size + self.waiting_bytes(c, i64::MAX);
+        if held >= self.options.block_bytes {
+            self.chans[c].full = true;
             self.full.push(c);
             self.try_close(c)?;
             if !self.chans[c].full {
                 self.full.retain(|&x| x != c);
             }
         }
-        self.advance()
+        Ok(())
+    }
+
+    /// The gaps digital channel `c` has taken that end before axis tick `p` and wait for their
+    /// block, at 17 bytes each: they count toward the target (FORMAT.md, "tickwave's writer").
+    fn waiting_bytes(&self, c: usize, p: i64) -> usize {
+        match &self.chans[c].data {
+            // In order of their ends, as they come.
+            Data::Digital(d) => 17 * d.pending.partition_point(|&(_, t)| t < p),
+            Data::Analog(_) => 0,
+        }
+    }
+
+    /// Whether channel `c`'s open block holds an item, or the end of a gap it has taken, before
+    /// axis tick `p`: a block a promise or flush there can close.
+    fn holds_before(&self, c: usize, p: i64) -> bool {
+        let ch = &self.chans[c];
+        (ch.items > 0 && ch.first_tick < p) || self.waiting_bytes(c, p) > 0
     }
 
     /// Every item of every channel before axis tick `before` is in. A channel's open block that
@@ -1065,16 +1218,14 @@ impl Writer {
             .iter()
             .map(|&x| self.promise_of(x))
             .fold(self.promise_of(c), i64::min);
-        let ch = &self.chans[c];
-        if p > ch.start
-            && ch.items > 0
-            && ch.first_tick < p
-            && self.size_before(c, p) >= self.options.block_bytes
+        if p > self.chans[c].start
+            && self.holds_before(c, p)
+            && self.size_before(c, p) + self.waiting_bytes(c, p) >= self.options.block_bytes
         {
             self.close(c, p)?;
         }
-        let ch = &mut self.chans[c];
-        ch.full = ch.size >= self.options.block_bytes;
+        let held = self.chans[c].size + self.waiting_bytes(c, i64::MAX);
+        self.chans[c].full = held >= self.options.block_bytes;
         Ok(())
     }
 
@@ -1101,7 +1252,7 @@ impl Writer {
                     let mid = (lo + hi) / 2;
                     let index = first + mid as u64;
                     let run = run_of(&a.runs, index).expect("a sample follows its run");
-                    if ch.map.axis_saturating(place_in(run, a.period, index)) < p {
+                    if axis_in(&ch.map, a.grid, run, index) < p {
                         lo = mid + 1;
                     } else {
                         hi = mid;
@@ -1211,12 +1362,18 @@ impl Writer {
         if gap.from == d.start && d.initial {
             return Err(WriteError::GapFromStart { channel: name });
         }
-        if to < self.chans[c].start {
+        // Its end can't lie where the overview has settled: before the channel's last block's
+        // end or the latest known-through tick.
+        let settled = self.known_of(c);
+        if to < settled {
             return Err(WriteError::GapLate {
                 channel: name,
                 to: gap.to,
-                closed: self.chans[c].start,
+                closed: settled,
             });
+        }
+        if (d.pending.len() + 1) * 17 > MAX_WAITING_GAPS {
+            return Err(WriteError::GapsWaiting { channel: name });
         }
         let Data::Digital(d) = &mut self.chans[c].data else {
             unreachable!()
@@ -1230,14 +1387,30 @@ impl Writer {
             .gap(gap, to);
         let mut bytes = Vec::new();
         record::write(&mut bytes, Kind::Gap, &[&record::gap_bytes(c as u32, gap)]);
-        self.put(bytes, Placed::Gap(c, gap));
+        self.put(bytes, Placed::Nothing);
+        self.mark_full(c)?;
         self.advance()
     }
 
-    /// Analog channel `c`'s next sample starts a run at source tick `tick`, after `lost` samples
-    /// the instrument lost: 0 when it only paused. The first run's `lost` are samples lost
-    /// before the channel's first. A run no sample has followed yet is replaced.
+    /// Analog channel `c`'s next sample starts a run at source tick `tick` plus the channel's
+    /// declared phase, after `lost` samples the instrument lost: 0 when it only paused. The first
+    /// run's `lost` are samples lost before the channel's first. A run no sample has followed yet
+    /// is replaced.
     pub fn run(&mut self, c: usize, tick: i64, lost: u64) -> Result<(), WriteError> {
+        self.check_channel(c)?;
+        let phase = match &self.chans[c].data {
+            Data::Analog(a) => a.grid.phase(),
+            Data::Digital(_) => 0,
+        };
+        self.run_at(c, tick, phase, lost)
+    }
+
+    /// `run` at another phase: sample `index` starts a run at `tick` plus `phase / D`, `D` the
+    /// channel's grid, as a run after a pause on a clock that kept running, or a cut inside a
+    /// run, can. The first run's phase is the declared one. Each run starts at or after the place
+    /// of the sample before it, and where it states lost samples, past where the first of them
+    /// would sit (FORMAT.md, "Gaps").
+    pub fn run_at(&mut self, c: usize, tick: i64, phase: u32, lost: u64) -> Result<(), WriteError> {
         self.check_failed()?;
         self.check_channel(c)?;
         let name = self.name(c);
@@ -1253,24 +1426,57 @@ impl Writer {
         let Data::Analog(a) = &mut self.chans[c].data else {
             unreachable!()
         };
-        let previous = a.last_tick.unwrap_or(0);
-        if tick < previous {
-            return Err(WriteError::RunOrder {
+        let grid = a.grid;
+        let first = a.count == 0;
+        if u64::from(phase) >= grid.d() || (first && phase != grid.phase()) {
+            return Err(WriteError::RunPhase {
                 channel: name,
-                tick,
-                previous,
+                phase,
+                d: grid.d(),
             });
         }
-        if a.count == 0 && lost > 0 {
-            let start = lost_before_start(tick, a.period, lost);
-            if start.is_none_or(|t| map.axis(t).is_none_or(|t| t < 0)) {
+        let run = Break {
+            index: a.count,
+            tick,
+            lost,
+            phase,
+        };
+        let start = grid.start(run);
+        if map
+            .axis_place(start, grid.d())
+            .is_none_or(|t| !(0..JSON_SAFE as i64).contains(&t))
+        {
+            return Err(WriteError::AxisTick {
+                channel: name,
+                tick,
+            });
+        }
+        if let Some(&last) = a.runs.last().filter(|_| !first) {
+            if start < grid.place(last, a.count - 1) {
+                return Err(WriteError::RunOrder {
+                    channel: name,
+                    tick,
+                    previous: grid.floor(grid.place(last, a.count - 1)),
+                });
+            }
+            if lost > 0 && start <= grid.place(last, a.count) {
+                return Err(WriteError::LostRunStart {
+                    channel: name,
+                    tick,
+                    lost,
+                });
+            }
+        }
+        if first && lost > 0 {
+            let start = lost_before_start(grid, tick, lost);
+            if start.is_none_or(|u| map.axis_place(u, grid.d()).is_none_or(|t| t < 0)) {
                 return Err(WriteError::LostBefore {
                     channel: name,
                     lost,
                 });
             }
         }
-        a.next_run = Some((tick, lost));
+        a.next_run = Some(run);
         self.advance()
     }
 
@@ -1295,7 +1501,7 @@ impl Writer {
         };
         let index = a.count;
         let (run, starts) = match (a.next_run, a.runs.last()) {
-            (Some((tick, lost)), _) => (Break { index, tick, lost }, true),
+            (Some(run), _) => (run, true),
             (None, Some(run)) => (*run, false),
             (None, None) => {
                 return Err(WriteError::NoRun {
@@ -1303,9 +1509,9 @@ impl Writer {
                 });
             }
         };
-        let place = place_in(run, a.period, index);
+        let grid = a.grid;
         let coding = a.coding;
-        let tick = self.place(c, place)?;
+        let tick = self.place_units(c, grid.place(run, index), grid)?;
         if let Some(why) = samples::misfit(sample, coding) {
             return Err(WriteError::Sample {
                 channel: self.name(c),
@@ -1325,13 +1531,13 @@ impl Writer {
             _ => None,
         };
         for &d in &self.operand_of[c] {
-            self.pairs[d].pairs_with(c, tick)?;
+            self.check_partner(c, d, index, run)?;
         }
         self.before_item(c, tick, None)?;
         if starts {
             let mut bytes = Vec::new();
             record::write(&mut bytes, Kind::Run, &[&record::run_bytes(c as u32, run)]);
-            self.put(bytes, Placed::Run(c, run));
+            self.put(bytes, Placed::Nothing);
         }
         let ch = &mut self.chans[c];
         let Data::Analog(a) = &mut ch.data else {
@@ -1344,7 +1550,6 @@ impl Writer {
         samples::put(&mut a.open, sample, coding, code);
         let size = a.open.len();
         a.count += 1;
-        a.last_tick = Some(place);
         ch.hasher.sample(sample);
         self.ochans[c]
             .ladder
@@ -1354,10 +1559,7 @@ impl Writer {
         let stored = self.chans.len();
         for i in 0..self.operand_of[c].len() {
             let d = self.operand_of[c][i];
-            if let Some(product) = self.pairs[d]
-                .take(c, tick, sample)
-                .expect("pairs_with checked the derived channels")
-            {
+            if let Some(product) = self.pairs[d].take(c, sample) {
                 self.ochans[stored + d]
                     .ladder
                     .as_mut()
@@ -1392,7 +1594,8 @@ impl Writer {
     }
 
     /// Every item before axis tick `before` is in: promises it, closes there every channel's open
-    /// block that holds an item before it, and writes a known-through record after those blocks.
+    /// block that holds an item, or the end of a gap it has taken, before it, and writes a
+    /// known-through record after those blocks.
     /// Items at or after `before` stay in the open blocks. A flush at the latest known-through
     /// tick writes nothing new. A live recorder calls this so a crash loses little.
     pub fn flush(&mut self, before: i64) -> Result<(), WriteError> {
@@ -1406,8 +1609,7 @@ impl Writer {
         }
         self.promise(before)?;
         for c in 0..self.chans.len() {
-            let ch = &self.chans[c];
-            if ch.start < before && ch.items > 0 && ch.first_tick < before {
+            if self.chans[c].start < before && self.holds_before(c, before) {
                 self.close(c, before)?;
             }
         }
@@ -1482,6 +1684,7 @@ impl Writer {
         let ch = &mut self.chans[c];
         let start = ch.start;
         debug_assert!(end > start, "a block ends after it starts");
+        let listed;
         let (raw, word, kept, kept_size) = match &mut ch.data {
             Data::Digital(d) => {
                 let map = ch.map;
@@ -1503,6 +1706,14 @@ impl Writer {
                 let ending = d.pending.iter().take_while(|&&(_, t)| t < end).count();
                 let gaps: Vec<Gap> = d.pending.drain(..ending).map(|(g, _)| g).collect();
                 d.level = level_after(d.level, &closing.ticks, &gaps);
+                // The gaps this block ends go in the content id and the list now.
+                for &g in &gaps {
+                    d.listed.gap(g);
+                }
+                if let Some(&g) = gaps.last() {
+                    d.last_listed = Some(g);
+                }
+                listed = Placed::Gaps(c, gaps);
                 let n = closing.ticks.len();
                 let size = kept.size();
                 d.open = kept;
@@ -1518,7 +1729,7 @@ impl Writer {
                     let mid = (lo + hi) / 2;
                     let index = first + mid as u64;
                     let run = run_of(&a.runs, index).expect("a sample follows its run");
-                    if ch.map.axis_saturating(place_in(run, a.period, index)) < end {
+                    if axis_in(&ch.map, a.grid, run, index) < end {
                         lo = mid + 1;
                     } else {
                         hi = mid;
@@ -1528,6 +1739,23 @@ impl Writer {
                 let raw = analog_raw(&a.open, a.coding);
                 let size = rest.len();
                 a.open = rest;
+                // The breaks whose first sample this block holds.
+                let to = first + lo as u64;
+                let breaks: Vec<Break> = a
+                    .runs
+                    .iter()
+                    .rev()
+                    .take_while(|r| r.index >= first)
+                    .filter(|r| r.index > 0 && r.index < to)
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
+                for &b in &breaks {
+                    a.listed.brk(b);
+                }
+                listed = Placed::Breaks(c, breaks);
                 (raw, lo as u32, lo as u32, size)
             }
         };
@@ -1553,6 +1781,8 @@ impl Writer {
         }
         let level = self.options.level;
         self.queue_frame(FrameOf::Block { head, first_index }, Arc::new(raw), level);
+        // Its list's entries follow the block, so a list page comes after it.
+        self.put(Vec::new(), listed);
         self.settle(c)?;
         for i in 0..self.operand_of[c].len() {
             let d = self.operand_of[c][i];
@@ -1575,7 +1805,7 @@ impl Writer {
             Data::Analog(a) => {
                 let index = ch.closed_items;
                 let run = run_of(&a.runs, index).expect("a sample follows its run");
-                ch.map.axis_saturating(place_in(run, a.period, index))
+                axis_in(&ch.map, a.grid, run, index)
             }
         }
     }
@@ -1607,23 +1837,25 @@ impl Writer {
         });
     }
 
-    /// A record without a frame now in the file at `at`: its list takes it.
+    /// A record without a frame now in the file at `at`: its list takes what it lists.
     fn placed(&mut self, placed: Placed, _at: u64) {
         let taken = self.taken;
         match placed {
             Placed::Nothing => {}
-            Placed::Gap(c, gap) => {
+            Placed::Gaps(c, gaps) => {
                 if let Data::Digital(d) = &mut self.chans[c].data {
-                    let due = d.list.push(gap);
-                    place_dues(&mut d.list, due, &mut self.out, taken);
+                    for gap in gaps {
+                        let due = d.list.push(gap);
+                        place_dues(&mut d.list, due, &mut self.out, taken);
+                    }
                 }
             }
-            Placed::Run(c, run) => {
-                if run.index > 0
-                    && let Data::Analog(a) = &mut self.chans[c].data
-                {
-                    let due = a.list.push(run);
-                    place_dues(&mut a.list, due, &mut self.out, taken);
+            Placed::Breaks(c, breaks) => {
+                if let Data::Analog(a) = &mut self.chans[c].data {
+                    for run in breaks {
+                        let due = a.list.push(run);
+                        place_dues(&mut a.list, due, &mut self.out, taken);
+                    }
                 }
             }
         }
@@ -2042,13 +2274,9 @@ impl Writer {
             }
             check_safe("lost count", lost)?;
             let fits = a.runs.last().is_some_and(|&run| {
-                lost_after_end(run, a.period, a.count, lost)
-                    .and_then(|k| {
-                        self.chans[c]
-                            .map
-                            .axis(k)
-                            .filter(|_| (0..JSON_SAFE as i64).contains(&k))
-                    })
+                lost_after_end(a.grid, run, a.count, lost)
+                    .filter(|&u| (0..JSON_SAFE as i64).contains(&a.grid.floor(u)))
+                    .and_then(|u| self.chans[c].map.axis_place(u, a.grid.d()))
                     .is_some_and(|t| t <= length)
             });
             if !fits {
@@ -2083,10 +2311,25 @@ impl Writer {
                     length,
                 });
             }
-            // A gap that reaches the end: the level is not known from its `from` on.
+            // A gap already hashed, its block closed, is in the header whatever the end.
+            if let Some(g) = d.last_listed
+                && g.to >= end
+            {
+                return Err(WriteError::EndLeavesOutGap {
+                    channel: name,
+                    from: g.from,
+                    to: g.to,
+                    end,
+                });
+            }
+            // A waiting gap that reaches the end is left out: the level is not known from its
+            // `from` on. A flush past a gap's end closes its block, so the overview never takes
+            // the end of a gap still waiting.
             let mut kept = d.gaps.len();
-            if let Some((i, &g)) = d.gaps.iter().enumerate().find(|(_, g)| g.to >= end) {
-                let inside = ch.map.axis(g.to).is_some_and(|t| t < length);
+            if let Some((i, &(g, to))) =
+                d.pending.iter().enumerate().find(|(_, (g, _))| g.to >= end)
+            {
+                let inside = to < length;
                 if inside && !finish.drop_gaps_past_end {
                     return Err(WriteError::GapPastEnd {
                         channel: name,
@@ -2095,13 +2338,7 @@ impl Writer {
                     });
                 }
                 end = end.min(g.from);
-                kept = i;
-            }
-            // Gaps go in list pages a page at a time as they come: one already written can't be
-            // left out.
-            let paged = d.gaps.len() / crate::index::PAGE * crate::index::PAGE;
-            if kept < paged {
-                return Err(WriteError::GapPaged { channel: name });
+                kept = d.gaps.len() - (d.pending.len() - i);
             }
             if d.edges > 0 && d.last_edge >= end {
                 return Err(WriteError::EdgePastEnd {
@@ -2116,6 +2353,21 @@ impl Writer {
         for ch in &self.chans {
             if let Data::Analog(a) = &ch.data {
                 check_safe("analog sample count", a.count)?;
+            }
+        }
+        // The gaps the ends leave out: out of what the last blocks list, and out of the overview.
+        for (c, end) in settled_ends.iter().enumerate() {
+            if let (Some((_, kept)), Data::Digital(d)) = (end, &mut self.chans[c].data) {
+                let out = d.gaps.len() - kept;
+                let first_out = d.pending.len() - out;
+                if let Some(&(g, _)) = d.pending.get(first_out) {
+                    d.pending.truncate(first_out);
+                    self.ochans[c]
+                        .ladder
+                        .as_mut()
+                        .expect("a ladder until the finish")
+                        .forget_gaps(g.from);
+                }
             }
         }
         for c in 0..self.chans.len() {
@@ -2165,10 +2417,7 @@ impl Writer {
             }
             match (&mut ch.data, settled_ends[c]) {
                 (Data::Digital(d), Some((_, kept))) => {
-                    let dropped = d.list.count() - kept as u64;
-                    d.list
-                        .drop_last(dropped)
-                        .expect("a dropped gap is in the open page, checked above");
+                    debug_assert_eq!(d.list.count(), kept as u64, "the gaps the header lists");
                     loop {
                         let due = d.list.finish_next(INLINE_LIST as u64);
                         if due.is_none() {
@@ -2210,42 +2459,48 @@ impl Writer {
             let data = match &ch.data {
                 Data::Digital(d) => {
                     let (end, kept) = settled_ends[c].expect("a digital channel's end");
-                    let gaps: Vec<Gap> = d.gaps.iter().take(kept).copied().collect();
-                    let paged = gaps.len() > INLINE_LIST;
-                    digests.push(ch.hasher.clone().finish_digital(end, &gaps));
+                    debug_assert_eq!(d.listed.count(), kept as u64, "the gaps hashed");
+                    let paged = kept > INLINE_LIST;
+                    digests.push(ch.hasher.clone().finish_digital(end, d.listed.finish()));
                     ChannelKind::Digital {
                         initial: d.initial,
                         end,
                         edges: d.edges,
-                        gap_count: paged.then_some(gaps.len() as u64),
-                        gaps: if paged { Vec::new() } else { gaps },
+                        gap_count: paged.then_some(kept as u64),
+                        gaps: if paged { Vec::new() } else { d.list.inline() },
                     }
                 }
                 Data::Analog(a) => {
                     let first = a.runs.get(0).map_or(0, |r| r.tick);
                     let lost_before = a.runs.get(0).map_or(0, |r| r.lost);
                     let lost_after = finish.lost_after.get(&c).copied().unwrap_or(0);
-                    let breaks: Vec<Break> = a.runs.iter().skip(1).copied().collect();
+                    let breaks = a.listed.count();
+                    debug_assert_eq!(breaks, a.runs.len().saturating_sub(1) as u64);
                     digests.push(ch.hasher.clone().finish_analog(
                         first,
                         a.count,
-                        &breaks,
+                        a.listed.finish(),
                         (lost_before, lost_after),
                     ));
                     let DeclaredKind::Analog {
-                        unit, significant, ..
+                        unit,
+                        significant,
+                        period,
+                        phase,
+                        ..
                     } = &declared.data
                     else {
                         unreachable!("states follow the declaration")
                     };
-                    let paged = breaks.len() > INLINE_LIST;
+                    let paged = breaks > INLINE_LIST as u64;
                     ChannelKind::Analog {
                         unit: unit.clone(),
                         first,
-                        period: a.period,
+                        period: *period,
+                        phase: *phase,
                         count: a.count,
-                        break_count: paged.then_some(breaks.len() as u64),
-                        breaks: if paged { Vec::new() } else { breaks },
+                        break_count: paged.then_some(breaks),
+                        breaks: if paged { Vec::new() } else { a.list.inline() },
                         coding: a.coding,
                         significant: *significant,
                         lost_before,
@@ -2262,9 +2517,12 @@ impl Writer {
                 overview_shift: declared.overview_shift,
                 blocks: ch.blocks_closed,
                 overview_blocks: levels_of(&self.ochans[c], &ladders[c], length),
+                requires: Vec::new(),
+                codec: None,
             });
         }
         let stored = self.chans.len();
+        digests.extend(self.declaration.derived.iter().map(hash::derived_digest));
         let derived = self
             .declaration
             .derived
@@ -2273,8 +2531,11 @@ impl Writer {
             .map(|(d, x)| DerivedHeader {
                 name: x.name.clone(),
                 unit: x.unit.clone(),
-                product: x.product.clone(),
+                op: x.op.clone(),
+                operands: x.operands.clone(),
+                params: x.params.clone(),
                 significant: x.significant,
+                requires: x.requires.clone(),
                 overview_blocks: levels_of(&self.ochans[stored + d], &ladders[stored + d], length),
             })
             .collect();
@@ -2292,6 +2553,8 @@ impl Writer {
             meta: self.declaration.meta.clone(),
             content_id: hash::content_id(self.declaration.timebase, length, &digests),
             overview_shift: self.declaration.overview_shift,
+            requires: Vec::new(),
+            annotation_parts: None,
         };
         // The reader's own rules, so the writer never writes a header the reader refuses.
         crate::decode::check_header(&header).map_err(|e| WriteError::Header(e.to_string()))?;
@@ -2419,6 +2682,7 @@ pub(crate) fn footer_payload(
 mod tests {
     use super::*;
     use crate::header::{DeclaredChannel, IntCoding, SourceFormat, SourceHeader};
+    use crate::model::Ratio;
 
     fn writer() -> Writer {
         let timebase = Ratio::integer(1000).unwrap();
@@ -2434,9 +2698,12 @@ mod tests {
                         period: Ratio::integer(1).unwrap(),
                         coding: AnalogCoding::Int(IntCoding::new(32, false)),
                         significant: None,
+                        phase: None,
                     },
                     shaping: Default::default(),
                     overview_shift: None,
+                    codec: None,
+                    requires: Vec::new(),
                 },
                 DeclaredChannel {
                     name: "D".into(),
@@ -2445,6 +2712,8 @@ mod tests {
                     data: DeclaredKind::Digital { initial: false },
                     shaping: Default::default(),
                     overview_shift: None,
+                    codec: None,
+                    requires: Vec::new(),
                 },
             ],
             derived: Vec::new(),
@@ -2452,35 +2721,51 @@ mod tests {
             title: None,
             meta: Default::default(),
             overview_shift: 4,
+            requires: Vec::new(),
         };
         Writer::new(d, WriteOptions::default()).unwrap()
     }
 
-    /// An item that would take its open block's decoded size past what a block record's length
-    /// holds is refused at the item, before the writer holds it: here the open blocks are said
-    /// to be that large already, as 4 GiB of items would leave them.
+    /// An item that would take its open block's decoded size past 4 MiB, the most a block
+    /// holds, is refused at the item where the block can't close before it: here the open
+    /// blocks are said to be that full already. Once a promise lets the block close, the item
+    /// goes in.
     #[test]
-    fn an_item_past_a_blocks_length_is_refused_at_the_item() {
+    fn an_item_past_the_most_a_block_holds_is_refused_unless_the_block_can_close() {
         let mut w = writer();
         w.run(0, 0, 0).unwrap();
         w.sample(0, 1u64).unwrap();
         // Two edges, so a third two ticks on keeps the step and adds an interval's byte.
         w.edge(1, 5).unwrap();
         w.edge(1, 7).unwrap();
-        w.chans[0].size = u32::MAX as usize - 3;
+        w.chans[0].size = MAX_BLOCK - 3;
         let Data::Digital(d) = &mut w.chans[1].data else {
             unreachable!()
         };
-        // A step byte, the first edge's byte and these: one more interval's byte passes u32.
-        d.open.intervals = u32::MAX as usize - 2;
+        // A step byte, the first edge's byte and these: one more interval's byte passes 4 MiB.
+        d.open.intervals = MAX_BLOCK - 2;
         assert!(matches!(
             w.sample(0, 2u64),
-            Err(WriteError::BlockTooLarge(n)) if n == u32::MAX as usize + 1
+            Err(WriteError::BlockFull { tick: 1, .. })
         ));
-        assert!(matches!(w.edge(1, 9), Err(WriteError::BlockTooLarge(_))));
+        assert!(matches!(
+            w.edge(1, 9),
+            Err(WriteError::BlockFull { tick: 9, .. })
+        ));
         // A sample that still fits goes in.
-        w.chans[0].size = u32::MAX as usize - 4;
+        w.chans[0].size = MAX_BLOCK - 4;
         w.sample(0, 2u64).unwrap();
+        // A promise past the items held lets each block close before the item: it goes in.
+        w.chans[0].size = MAX_BLOCK - 3;
+        let Data::Digital(d) = &mut w.chans[1].data else {
+            unreachable!()
+        };
+        d.open.intervals = MAX_BLOCK - 2;
+        w.promise_channel(0, 2).unwrap();
+        w.promise_channel(1, 8).unwrap();
+        w.sample(0, 3u64).unwrap();
+        w.edge(1, 9).unwrap();
+        assert_eq!((w.chans[0].start, w.chans[1].start), (2, 8));
     }
 
     /// `size_with` gives the size `push` then gives, through a step that shrinks.

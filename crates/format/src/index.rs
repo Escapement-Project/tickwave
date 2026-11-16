@@ -101,7 +101,7 @@ impl Table {
 }
 
 const GAP_SIZE: usize = 17;
-const BREAK_SIZE: usize = 24;
+const BREAK_SIZE: usize = 28;
 
 /// An entry of a table at depth 0.
 pub trait Row: Copy + std::fmt::Debug + Send + Sync + 'static {
@@ -160,6 +160,7 @@ impl Row for Break {
         out.extend_from_slice(&self.index.to_le_bytes());
         out.extend_from_slice(&self.tick.to_le_bytes());
         out.extend_from_slice(&self.lost.to_le_bytes());
+        out.extend_from_slice(&self.phase.to_le_bytes());
     }
     fn weight(&self, _: bool) -> u64 {
         1
@@ -640,6 +641,18 @@ impl TableIndex {
         if after.is_some_and(|a| a.0 <= keys.start) {
             return Ok(ControlFlow::Continue(()));
         }
+        // The shape gives the page's length, which is checked before anything is fetched.
+        let want = self.page_len(depth, j);
+        if u64::from(entry.length) != want {
+            return Err(crate::decode::corrupt(format!(
+                "channel {}: page {j} at depth {depth} of its {} is {} bytes, where its entries \
+                 take {want}",
+                self.channel,
+                table_name(self.table),
+                entry.length
+            ))
+            .into());
+        }
         if depth == 0 {
             let at = Located {
                 j,
@@ -663,6 +676,29 @@ impl TableIndex {
             }
         }
         Ok(ControlFlow::Continue(()))
+    }
+
+    /// The length page `j` at `depth` of the table's shape has as a record, its framing
+    /// included: 32 bytes and its entries, each its table's own size at depth 0 and a directory
+    /// entry's above. 0 for a page past the table's end.
+    pub fn page_len(&self, depth: u8, j: u64) -> u64 {
+        let below = if depth == 0 {
+            self.rows
+        } else {
+            pages_at(self.rows, depth - 1)
+        };
+        let count = below
+            .saturating_sub(j.saturating_mul(PAGE as u64))
+            .min(PAGE as u64);
+        if count == 0 {
+            return 0;
+        }
+        let size = if depth == 0 {
+            self.table.row_size()
+        } else {
+            Entry::SIZE
+        };
+        (record::FRAMING + PAGE_HEAD) as u64 + count * size as u64
     }
 
     /// Page `j` of `depth`, listed by `entry`, from exactly its record's bytes. It must be the
@@ -809,6 +845,7 @@ impl TableIndex {
                             index: u64::from_le_bytes(b[0..8].try_into().unwrap()),
                             tick: i64::from_le_bytes(b[8..16].try_into().unwrap()),
                             lost: u64::from_le_bytes(b[16..24].try_into().unwrap()),
+                            phase: u32::from_le_bytes(b[24..28].try_into().unwrap()),
                         })
                         .collect();
                     if !breaks
@@ -1072,14 +1109,18 @@ mod tests {
         }
     }
 
+    /// A full page of 4,096 block rows, framing included.
+    const FULL: u32 = (record::FRAMING + PAGE_HEAD + PAGE * BlockRow::SIZE) as u32;
+
     /// Directory page `place` of depth 1 listing pages `pages` of a block table whose page j
     /// starts at tick 4,096 j: its record, and its entry.
     fn directory(file: &mut Vec<u8>, place: u64, pages: Range<u64>) -> Entry {
+        // A full page of block rows, as the table's shape gives each of these.
         let entry = |j: u64| Entry {
             first: (j * PAGE as u64) as i64,
             number: 2 * j * PAGE as u64,
             offset: 12 + j,
-            length: 40,
+            length: FULL,
         };
         let mut payload = Vec::new();
         PageHead {
@@ -1120,7 +1161,7 @@ mod tests {
             first: (j * per) as i64,
             number: 2 * j * per,
             offset: file.len() as u64 + j,
-            length: 40,
+            length: FULL,
         };
         let live = TableIndex {
             channel: 3,

@@ -52,6 +52,8 @@ fn recording() -> Vec<u8> {
         data: DeclaredKind::Digital { initial: false },
         shaping: Default::default(),
         overview_shift: None,
+        codec: None,
+        requires: Vec::new(),
     };
     let declaration = Declaration {
         timebase,
@@ -68,9 +70,12 @@ fn recording() -> Vec<u8> {
                         ..IntCoding::new(32, false)
                     }),
                     significant: Some(4),
+                    phase: None,
                 },
                 shaping: Default::default(),
                 overview_shift: None,
+                codec: None,
+                requires: Vec::new(),
             },
             digital("DIO0"),
             digital("DIO1"),
@@ -83,6 +88,7 @@ fn recording() -> Vec<u8> {
         title: None,
         meta: BTreeMap::new(),
         overview_shift: 20,
+        requires: Vec::new(),
     };
     let mut w = Writer::new(declaration, WriteOptions::default()).unwrap();
     w.run(0, 0, 0).unwrap();

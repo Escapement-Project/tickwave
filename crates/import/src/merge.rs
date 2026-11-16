@@ -20,7 +20,7 @@ use escapement_tickwave_format::model::{
 
 use crate::convert::{Pass, Progress, counted};
 use crate::recording::{Check, Opened};
-use crate::shape::{self, AnalogCut, Keep, Span, exact, grid, off_grid, rounded};
+use crate::shape::{self, AnalogCut, Keep, Span, exact, off_grid, rounded};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -112,10 +112,10 @@ pub enum Error {
         to: i64,
     },
     #[error(
-        "{name}: kept {span}; its samples keep their ticks only from one a multiple of {q} into \
-         its run, and none in that span is"
+        "{name}: kept {span}; its first kept sample's phase gives a coarser grid than a later \
+         run's phase needs, which a channel can't state"
     )]
-    NoGridSample { name: String, span: Span, q: u64 },
+    GridChanges { name: String, span: Span },
     #[error(
         "{name}: its input states a {kind:?} offset, which the merge's own offset can't add to"
     )]
@@ -859,36 +859,30 @@ fn choose(inputs: &[Input], settings: &Settings) -> Result<(Chosen, Vec<Note>), 
             }
         }
         for d in &r.derived {
-            match (
-                names_in.get(d.product[0].as_str()),
-                names_in.get(d.product[1].as_str()),
-            ) {
-                (Some(a), Some(b)) => {
+            let renamed: Vec<Option<&String>> = d
+                .operands
+                .iter()
+                .map(|o| names_in.get(o.as_str()))
+                .collect();
+            match renamed.iter().position(Option::is_none) {
+                None => {
                     let name = unique(&d.name, &input.stem, &taken);
                     taken.insert(name.clone());
                     derived.push((
                         j,
                         Derived {
                             name,
-                            unit: d.unit.clone(),
-                            product: [a.clone(), b.clone()],
-                            significant: d.significant,
+                            operands: renamed.into_iter().flatten().cloned().collect(),
+                            ..d.clone()
                         },
                         d.clone(),
                     ));
                 }
-                (a, _) => notes.push(Note::DerivedLeftOut {
+                Some(i) => notes.push(Note::DerivedLeftOut {
                     input: number,
                     stem: input.stem.clone(),
                     name: d.name.clone(),
-                    why: format!(
-                        "its operand {} is not taken",
-                        if a.is_none() {
-                            &d.product[0]
-                        } else {
-                            &d.product[1]
-                        }
-                    ),
+                    why: format!("its operand {} is not taken", d.operands[i]),
                 }),
             }
         }
@@ -1270,10 +1264,9 @@ fn place(inputs: &[Input], chosen: &Chosen, timebase: Ratio) -> Result<Layout, E
             ChannelData::Analog(a) => {
                 let cut =
                     AnalogCut::new(a, (from > own_from).then_some(from), to).ok_or_else(|| {
-                        Error::NoGridSample {
+                        Error::GridChanges {
                             name: name.clone(),
                             span,
-                            q: grid(a.period),
                         }
                     })?;
                 (cut.from.unwrap_or(from), Some((cut.skip, cut.keep)))
@@ -1373,7 +1366,8 @@ fn place(inputs: &[Input], chosen: &Chosen, timebase: Ratio) -> Result<Layout, E
                 )
             })
         };
-        if layout_of(&d.product[0]) == layout_of(&d.product[1]) {
+        let first = d.operands.first().map(|o| layout_of(o));
+        if d.operands.iter().all(|o| Some(layout_of(o)) == first) {
             derived.push(d.clone());
         }
     }
@@ -1398,8 +1392,8 @@ fn derived_notes(inputs: &[Input], chosen: &Chosen, layout: &Layout) -> Vec<Note
             stem: inputs[*j].stem.clone(),
             name: input_derived.name.clone(),
             why: format!(
-                "its operands {} and {} are moved or cut apart",
-                input_derived.product[0], input_derived.product[1]
+                "its operands {} are moved or cut apart",
+                input_derived.operands.join(" and ")
             ),
         })
         .collect()
@@ -1923,10 +1917,9 @@ pub fn expected(header: &Header, against: Vec<Recording>) -> Result<Recording, E
             ChannelData::Analog(a) => {
                 let cut =
                     AnalogCut::new(a, (from > own.0).then_some(from), to).ok_or_else(|| {
-                        Error::NoGridSample {
+                        Error::GridChanges {
                             name: c.name.clone(),
                             span,
-                            q: grid(a.period),
                         }
                     })?;
                 Some((cut.skip, cut.keep))
@@ -1979,25 +1972,35 @@ pub fn expected(header: &Header, against: Vec<Recording>) -> Result<Recording, E
                 )
             })
         };
-        if layout_of(&d.product[0]) != layout_of(&d.product[1]) {
+        let pair = |i: usize| d.operands.get(i).cloned().unwrap_or_default();
+        let first = d.operands.first().map(|o| layout_of(o));
+        if !d.operands.iter().all(|o| Some(layout_of(o)) == first) {
             return Err(Error::DerivedApart {
                 name: d.name.clone(),
-                a: d.product[0].clone(),
-                b: d.product[1].clone(),
+                a: pair(0),
+                b: pair(1),
             });
         }
-        let found = match (operand(&d.product[0]), operand(&d.product[1])) {
-            (Some((ja, a)), Some((jb, b))) if ja == jb => against[ja]
-                .derived
-                .iter()
-                .any(|e| e.product == [a.to_owned(), b.to_owned()] && e.unit == d.unit),
+        let operands: Option<Vec<(usize, &str)>> = d.operands.iter().map(|o| operand(o)).collect();
+        let found = match operands {
+            Some(ops) if !ops.is_empty() && ops.iter().all(|(j, _)| *j == ops[0].0) => {
+                against[ops[0].0].derived.iter().any(|e| {
+                    e.op == d.op
+                        && e.params == d.params
+                        && e.unit == d.unit
+                        && e.operands
+                            .iter()
+                            .map(String::as_str)
+                            .eq(ops.iter().map(|o| o.1))
+                })
+            }
             _ => false,
         };
         if !found {
             return Err(Error::NoDerived {
                 name: d.name.clone(),
-                a: d.product[0].clone(),
-                b: d.product[1].clone(),
+                a: pair(0),
+                b: pair(1),
                 unit: d.unit.clone(),
             });
         }

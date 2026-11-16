@@ -11,7 +11,9 @@ use escapement_tickwave_format::decode::{
 };
 use escapement_tickwave_format::index::{Located, Table, TableIndex};
 use escapement_tickwave_format::model::Sample;
-use escapement_tickwave_format::overview::{AnalogOverview, BLOCK_BUCKETS, ChannelOverview, Level};
+use escapement_tickwave_format::overview::{
+    AnalogOverview, BLOCK_BUCKETS, ChannelOverview, DigitalBucket, Level,
+};
 use escapement_tickwave_format::samples::{self, Values};
 
 use crate::bytes::read;
@@ -669,7 +671,7 @@ impl Recording {
                 return Err(Error::NoChannel(channel));
             }
             for k in k0.max(first)..k1.min(first + level.buckets) {
-                let (l, ch) = c.digital(k - first).expect("digital");
+                let (l, ch) = level_and_change(c.digital(k - first).expect("digital"));
                 levels[(k - k0) as usize] = l;
                 changes[(k - k0) as usize] = ch;
             }
@@ -726,10 +728,18 @@ fn bucket(a: &AnalogOverview, i: usize, rule: Rule) -> (f64, f64, Option<i128>) 
     }
 }
 
+/// A digital bucket as the view draws it until it draws density and duty (phase 6): whether its
+/// level changes inside it, from an edge or a gap's end, and its level where it holds still. A
+/// busy bucket's level says nothing; one wholly outside the kept span reads low.
+pub(crate) fn level_and_change(b: DigitalBucket) -> (bool, bool) {
+    let busy = b.density > 0 || !matches!(b.duty, 0 | 14 | DigitalBucket::OUTSIDE);
+    (b.duty >= 7 && b.duty != DigitalBucket::OUTSIDE, busy)
+}
+
 /// About the bytes a decoded overview level holds.
 fn format_size(level: &Level) -> usize {
     64 + match &level.data {
-        ChannelOverview::Digital { level, change } => level.len() + change.len(),
+        ChannelOverview::Digital { density, duty } => density.len() + duty.len(),
         ChannelOverview::Analog(a) => {
             a.len()
                 * match a {

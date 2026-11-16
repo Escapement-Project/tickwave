@@ -4,7 +4,7 @@
 use crate::header::JSON_SAFE;
 use crate::model::Ratio;
 
-fn gcd(mut a: u64, mut b: u64) -> u64 {
+pub(crate) fn gcd(mut a: u64, mut b: u64) -> u64 {
     while b != 0 {
         (a, b) = (b, a % b);
     }
@@ -94,6 +94,30 @@ impl Mapping {
         let x = i128::from(k) + i128::from(self.offset);
         let t = floor_scaled(x, self.num, self.den) + i128::from(self.origin);
         t.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
+    }
+
+    /// The axis tick a place of `units / d` source ticks maps to, exactly: `origin + floor((units
+    /// + offset × d) × m / d)` (FORMAT.md, "Times"). None where it does not fit an i64, or the
+    /// product passes 128 bits, which no place a header allows does: with `|units| < 2^70` and
+    /// `m`'s terms below 2^53 it stays below 2^123.
+    #[inline]
+    pub fn axis_place(&self, units: i128, d: u64) -> Option<i64> {
+        if d == 1 {
+            let k = i64::try_from(units).ok()?;
+            return self.axis(k);
+        }
+        let x = units.checked_add(i128::from(self.offset).checked_mul(i128::from(d))?)?;
+        let p = x.checked_mul(i128::from(self.num))?;
+        let q = i128::from(self.den).checked_mul(i128::from(d))?;
+        i64::try_from(p.div_euclid(q).checked_add(i128::from(self.origin))?).ok()
+    }
+
+    /// The source time axis tick `t` maps back to, exactly: `(t − origin) / m − offset`, as a
+    /// numerator and a positive denominator, `m`'s numerator (FORMAT.md, "Gaps").
+    pub fn source_time(&self, t: i64) -> (i128, i128) {
+        let num = (i128::from(t) - i128::from(self.origin)) * i128::from(self.den)
+            - i128::from(self.offset) * i128::from(self.num);
+        (num, i128::from(self.num))
     }
 
     /// The least source tick that maps to axis tick `t` or later, saturating at the ends of i64.

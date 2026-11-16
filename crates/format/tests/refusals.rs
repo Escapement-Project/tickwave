@@ -167,6 +167,7 @@ fn analog(coding_bits: Option<u8>, values: Vec<f32>) -> (Recording, Options) {
                     lost_before: 0,
                     lost_after: 0,
                     samples: Samples::F32(Box::new(values.into_iter())),
+                    phase: None,
                 }),
                 shaping: Default::default(),
             },
@@ -584,9 +585,12 @@ fn a_float_the_declaration_s_json_cannot_hold_is_refused() {
                 period: Ratio::ONE,
                 coding,
                 significant: None,
+                phase: None,
             },
             shaping: Default::default(),
             overview_shift: None,
+            codec: None,
+            requires: Vec::new(),
         }],
         derived: Vec::new(),
         sources: vec![SourceHeader {
@@ -596,6 +600,7 @@ fn a_float_the_declaration_s_json_cannot_hold_is_refused() {
         title: None,
         meta: Default::default(),
         overview_shift: 10,
+        requires: Vec::new(),
     };
     let codes = |scale, offset| AnalogCoding::Codes {
         bits: 8,
@@ -645,6 +650,8 @@ fn an_annotation_its_bundle_would_not_resolve_is_refused_at_the_call() {
         data,
         shaping: Default::default(),
         overview_shift: None,
+        codec: None,
+        requires: Vec::new(),
     };
     let d = Declaration {
         timebase: Ratio::ONE,
@@ -657,6 +664,7 @@ fn an_annotation_its_bundle_would_not_resolve_is_refused_at_the_call() {
                     period: Ratio::ONE,
                     coding: AnalogCoding::F32,
                     significant: None,
+                    phase: None,
                 },
             ),
         ],
@@ -668,6 +676,7 @@ fn an_annotation_its_bundle_would_not_resolve_is_refused_at_the_call() {
         title: None,
         meta: Default::default(),
         overview_shift: 10,
+        requires: Vec::new(),
     };
     let mut w = Writer::new(d, WriteOptions::default()).unwrap();
     let start = w.take_output();

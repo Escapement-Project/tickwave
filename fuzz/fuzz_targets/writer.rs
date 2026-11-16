@@ -214,6 +214,7 @@ fn declaration(p: &Plan) -> Declaration {
                     period: ratio((u32::from(period.0), period.1)),
                     coding: coding(k),
                     significant: *significant,
+                    phase: None,
                 },
             },
             shaping: Shaping {
@@ -224,6 +225,8 @@ fn declaration(p: &Plan) -> Declaration {
                 kept: None,
             },
             overview_shift: p.shifts.get(i).copied().flatten().map(|s| s % 63),
+            codec: None,
+            requires: Vec::new(),
         })
         .collect();
     let derived = p
@@ -234,10 +237,13 @@ fn declaration(p: &Plan) -> Declaration {
         .map(|(i, &(a, b))| Derived {
             name: format!("d{i}"),
             unit: "W".into(),
-            product: [
+            op: escapement_tickwave_format::header::Op::Multiply,
+            operands: vec![
                 format!("c{}", usize::from(a) % channels.len().max(1)),
                 format!("c{}", usize::from(b) % channels.len().max(1)),
             ],
+            params: Default::default(),
+            requires: Vec::new(),
             significant: None,
         })
         .collect();
@@ -249,6 +255,7 @@ fn declaration(p: &Plan) -> Declaration {
         title: None,
         meta: BTreeMap::new(),
         overview_shift: p.shift % 63,
+        requires: Vec::new(),
     };
     // Kept spans where the format calls for them, the first channel's from at the axis's tick 0.
     let shaped = p.shaped

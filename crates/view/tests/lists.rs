@@ -88,9 +88,12 @@ fn listed_with(pairs: bool) -> (Vec<u8>, i64) {
             period: Ratio::integer(10).unwrap(),
             coding: AnalogCoding::Int(IntCoding::new(16, false)),
             significant: None,
+            phase: None,
         },
         shaping: Default::default(),
         overview_shift: Some(6),
+        codec: None,
+        requires: Vec::new(),
     };
     let d = Declaration {
         timebase,
@@ -104,18 +107,24 @@ fn listed_with(pairs: bool) -> (Vec<u8>, i64) {
                 data: DeclaredKind::Digital { initial: false },
                 shaping: Default::default(),
                 overview_shift: Some(6),
+                codec: None,
+                requires: Vec::new(),
             },
         ],
         derived: vec![Derived {
             name: "P".into(),
             unit: "W".into(),
-            product: ["A".into(), "B".into()],
+            op: escapement_tickwave_format::header::Op::Multiply,
+            operands: vec!["A".into(), "B".into()],
+            params: Default::default(),
+            requires: Vec::new(),
             significant: None,
         }],
         sources: vec![SourceHeader::new(SourceFormat::Other("t".into()), timebase)],
         title: None,
         meta: BTreeMap::new(),
         overview_shift: 6,
+        requires: Vec::new(),
     };
     let mut w = Writer::new(
         d,
@@ -439,7 +448,7 @@ fn a_block_that_disagrees_with_the_list_pages_its_ticks_need_is_refused() {
         .expect("a block ending inside a run on page 1");
     let edited = list_edited(&file, A, 1, |entries| {
         let tick = breaks[k].tick + 15;
-        entries[(k - 4096) * 24 + 8..][..8].copy_from_slice(&tick.to_le_bytes());
+        entries[(k - 4096) * 28 + 8..][..8].copy_from_slice(&tick.to_le_bytes());
     });
     refused(edited, end, "samples lie outside its ticks");
 }
@@ -453,7 +462,7 @@ fn a_list_page_out_of_place_is_refused() {
     let cancel = AtomicBool::new(false);
     // Page 1's last break moved past page 2's first.
     let edited = list_edited(&file, A, 1, |entries| {
-        let last = &mut entries[4095 * 24..][..24];
+        let last = &mut entries[4095 * 28..][..28];
         let tick = pa[2].0.entry.first + 5;
         last[8..16].copy_from_slice(&tick.to_le_bytes());
     });

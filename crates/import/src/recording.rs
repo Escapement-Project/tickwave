@@ -120,6 +120,7 @@ pub fn open(input: Arc<dyn Input>) -> Result<Opened, Error> {
                     unit,
                     first,
                     period,
+                    phase,
                     count,
                     coding,
                     significant,
@@ -129,6 +130,7 @@ pub fn open(input: Arc<dyn Input>) -> Result<Opened, Error> {
                 } => ChannelData::Analog(Analog {
                     unit: unit.clone(),
                     first: *first,
+                    phase: *phase,
                     period: *period,
                     count: *count,
                     breaks: blocks.footer.breaks(c).expect(listed).to_vec(),

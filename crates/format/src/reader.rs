@@ -7,8 +7,8 @@
 use std::collections::{HashMap, VecDeque};
 
 use crate::decode::{
-    BlockChannel, DecodeError, Footer, MAX_DECODED, Section, check_declaration, corrupt,
-    decode_section, edge_in_gap, inflate_limited, level_after, lost_before_start,
+    BlockChannel, DecodeError, Footer, MAX_DECODED, Section, check_break, check_declaration,
+    corrupt, decode_section, edge_in_gap, inflate_limited, level_after, lost_before_start, placed,
 };
 use crate::header::{
     BlockRow, ChannelKind, Declaration, DeclaredKind, INLINE_LIST, JSON_SAFE, MAJOR, OverviewRow,
@@ -16,7 +16,7 @@ use crate::header::{
 };
 use crate::index::{Due, PageHead, Row, Table, TableWriter};
 use crate::mapping::Mapping;
-use crate::model::{Break, Gap, run_sample_tick};
+use crate::model::{Break, Gap, Grid};
 use crate::overview;
 use crate::record::{self, BlockHead, Kind, Next, OverviewHead};
 
@@ -34,6 +34,9 @@ pub struct ReadBlock {
 pub enum Event {
     Declaration(Box<Declaration>),
     Block(ReadBlock),
+    /// A block of a channel this version can't read (FORMAT.md, "Unavailable channels"): placed
+    /// in its channel's order, not decoded.
+    UnreadBlock(BlockHead),
     Gap {
         channel: usize,
         gap: Gap,
@@ -84,6 +87,15 @@ pub enum Ending {
 enum Phase {
     Preamble,
     Records,
+    /// Inside a record of a kind a later minor version added, longer than the reader holds: its
+    /// bytes are hashed as they come, and `left` of them are still to come, its check included.
+    Skipping {
+        kind: u8,
+        hasher: Box<blake3::Hasher>,
+        left: u64,
+        check: Vec<u8>,
+        start: u64,
+    },
     /// The footer was read; the trailer follows. The footer record started at `footer_at`.
     Trailer {
         footer_at: u64,
@@ -100,6 +112,9 @@ struct Follow<R: Row> {
     channel: u32,
     table: TableWriter<R>,
     due: Option<Due>,
+    /// Entries behind the page due: a block's gaps or breaks, listed after it, can fill a page
+    /// partway, and the rest follow the page.
+    backlog: VecDeque<R>,
     /// Its last pages have begun: no entry comes after.
     finishing: bool,
 }
@@ -110,20 +125,36 @@ impl<R: Row> Follow<R> {
             channel,
             table: TableWriter::new(channel, table, digital),
             due: None,
+            backlog: VecDeque::new(),
             finishing: false,
         }
     }
 
+    /// The next entry, which waits behind a page due. Past what a page holds behind it, or after
+    /// the last pages have begun, it is refused.
     fn push(&mut self, row: R) -> Result<(), DecodeError> {
-        if self.due.is_some() || self.finishing {
+        if self.finishing || self.backlog.len() >= crate::index::PAGE {
             return Err(corrupt(format!(
                 "channel {}'s {}: an entry comes where a page is due",
                 self.channel(),
                 crate::index::table_name(self.table.table())
             )));
         }
-        self.due = self.table.push(row);
+        if self.due.is_some() {
+            self.backlog.push_back(row);
+        } else {
+            self.due = self.table.push(row);
+        }
         Ok(())
+    }
+
+    /// The entries behind a page once it is placed, until the next page falls due.
+    fn drain(&mut self) {
+        while self.due.is_none()
+            && let Some(row) = self.backlog.pop_front()
+        {
+            self.due = self.table.push(row);
+        }
     }
 
     fn channel(&self) -> u32 {
@@ -131,25 +162,15 @@ impl<R: Row> Follow<R> {
     }
 
     /// The page record `record`, at `at`, of this table: the one due, or the next of its last
-    /// pages, a list's after dropping the entries its page leaves out.
-    fn page(&mut self, record: &[u8], at: u64, count: u32, inline: u64) -> Result<(), DecodeError> {
+    /// pages.
+    fn page(&mut self, record: &[u8], at: u64, inline: u64) -> Result<(), DecodeError> {
         let due = match self.due.take() {
             Some(due) => due,
             None => {
-                let mut finishing = self.table.clone();
-                // Only a gap list's last page leaves entries out: the gaps past the end.
-                if !self.finishing && finishing.table() == Table::Gaps {
-                    let open = finishing.open().len() as u64;
-                    if let Some(drop) = open.checked_sub(u64::from(count))
-                        && drop > 0
-                    {
-                        finishing.drop_last(drop);
-                    }
-                }
-                let due = finishing
+                let due = self
+                    .table
                     .finish_next(inline)
                     .ok_or_else(|| corrupt("a page record that no table's entries give"))?;
-                self.table = finishing;
                 self.finishing = true;
                 due
             }
@@ -162,13 +183,14 @@ impl<R: Row> Follow<R> {
             )));
         }
         self.due = self.table.placed(&due, at);
+        self.drain();
         Ok(())
     }
 
     /// The table's top index entry once every page is read: a list of `inline` entries or fewer
     /// has none.
     fn top(&mut self, inline: u64) -> Result<Option<(u8, Vec<crate::index::Entry>)>, DecodeError> {
-        if self.due.is_some() {
+        if self.due.is_some() || !self.backlog.is_empty() {
             return Err(corrupt("a page is due before the footer"));
         }
         if !self.finishing {
@@ -204,7 +226,7 @@ enum Channel {
         next_index: u64,
         runs: Vec<Break>,
         coding: crate::header::AnalogCoding,
-        period: crate::model::Ratio,
+        grid: Grid,
         map: Mapping,
         list: Follow<Break>,
     },
@@ -217,6 +239,14 @@ fn on_axis(map: &Mapping, k: i64) -> Option<i64> {
         .filter(|t| safe.contains(t) && safe.contains(&k))
 }
 
+/// A sample's place, in `1/d` ticks of `grid`, on the axis, where its whole tick and the axis
+/// tick lie in `0..2^53`.
+fn place_on_axis(map: &Mapping, grid: Grid, units: i128) -> Option<i64> {
+    let safe = 0..JSON_SAFE as i64;
+    map.axis_place(units, grid.d())
+        .filter(|t| safe.contains(t) && safe.contains(&grid.floor(units)))
+}
+
 /// One overview channel's levels as the reader follows them: by shift, the next block's `k` and
 /// the level's table.
 struct Levels {
@@ -226,6 +256,15 @@ struct Levels {
 
 pub struct Reader {
     max: usize,
+    /// The preamble's versions, which the trailer repeats.
+    preamble: Option<Preamble>,
+    /// The latest end of any block record read: no known-through record comes before it.
+    blocks_end: i64,
+    /// Each channel's partners: the other operand of each derived channel this version computes
+    /// over it, which shares its runs.
+    partners: Vec<Vec<usize>>,
+    /// Whether each channel is available to this version, whose blocks it decodes.
+    available: Vec<bool>,
     buf: Vec<u8>,
     /// Where `buf[0]` sits in the file.
     at: u64,
@@ -244,6 +283,8 @@ pub struct Reader {
     bundle: Option<(u64, u32)>,
     /// Where the record the last event came from starts.
     record_at: u64,
+    /// Where a skipped record whose check didn't match starts: the file is cut off there.
+    cut_at: Option<u64>,
     /// Bytes fed past the trailer.
     after_end: bool,
 }
@@ -260,6 +301,10 @@ impl Reader {
     pub fn new(max: usize) -> Self {
         Self {
             max,
+            preamble: None,
+            blocks_end: 0,
+            partners: Vec::new(),
+            available: Vec::new(),
             buf: Vec::new(),
             at: 0,
             pos: 0,
@@ -272,6 +317,7 @@ impl Reader {
             known: None,
             bundle: None,
             record_at: 0,
+            cut_at: None,
             after_end: false,
         }
     }
@@ -323,15 +369,23 @@ impl Reader {
 
     /// The axis tick of sample `index` of analog channel `c`, from the runs read so far.
     pub fn sample_axis_tick(&self, c: usize, index: u64) -> Option<i64> {
-        on_axis(&self.mapping(c)?, self.sample_tick(c, index)?)
+        let (grid, place) = self.sample_place(c, index)?;
+        place_on_axis(&self.mapping(c)?, grid, place)
     }
 
     /// The source tick of sample `index` of analog channel `c`, from the runs read so far.
     pub fn sample_tick(&self, c: usize, index: u64) -> Option<i64> {
+        let (grid, place) = self.sample_place(c, index)?;
+        Some(grid.floor(place))
+    }
+
+    /// The place of sample `index` of analog channel `c`, in `1/d` ticks of its grid, from the
+    /// runs read so far, and the grid.
+    pub fn sample_place(&self, c: usize, index: u64) -> Option<(Grid, i128)> {
         match self.channels.get(c)? {
-            Channel::Analog { runs, period, .. } => {
+            Channel::Analog { runs, grid, .. } => {
                 let first = runs.first().filter(|r| r.index == 0)?;
-                Some(run_sample_tick(first.tick, *period, &runs[1..], index))
+                Some((*grid, grid.sample_place(first.tick, &runs[1..], index)))
             }
             Channel::Digital { .. } => None,
         }
@@ -359,8 +413,48 @@ impl Reader {
                             minor: p.minor,
                         });
                     }
+                    self.preamble = Some(p);
                     self.pos += PREAMBLE_LEN;
                     self.phase = Phase::Records;
+                }
+                Phase::Skipping { .. } => {
+                    if rest.is_empty() {
+                        return Ok(None);
+                    }
+                    let Phase::Skipping {
+                        kind,
+                        mut hasher,
+                        mut left,
+                        mut check,
+                        start,
+                    } = std::mem::replace(&mut self.phase, Phase::Stopped)
+                    else {
+                        unreachable!()
+                    };
+                    let take = (left as usize).min(rest.len());
+                    let payload_left = left.saturating_sub(record::CHECK_LEN as u64) as usize;
+                    let into_payload = take.min(payload_left);
+                    hasher.update(&rest[..into_payload]);
+                    check.extend_from_slice(&rest[into_payload..take]);
+                    left -= take as u64;
+                    self.pos += take;
+                    if left > 0 {
+                        self.phase = Phase::Skipping {
+                            kind,
+                            hasher,
+                            left,
+                            check,
+                            start,
+                        };
+                        continue;
+                    }
+                    if check[..] != hasher.finalize().as_bytes()[..record::CHECK_LEN] {
+                        // As a record whose check doesn't match: the reader stops at its start.
+                        self.cut_at = Some(start);
+                        return Ok(None);
+                    }
+                    self.phase = Phase::Records;
+                    return Ok(Some(Event::Skipped { kind }));
                 }
                 Phase::Trailer { footer_at, .. } => {
                     if rest.len() < TRAILER_LEN {
@@ -369,6 +463,12 @@ impl Reader {
                     let footer_at = *footer_at;
                     let trailer = Trailer::parse(&rest[..TRAILER_LEN])
                         .ok_or_else(|| corrupt("the footer is not followed by a trailer"))?;
+                    if self
+                        .preamble
+                        .is_some_and(|p| (p.major, p.minor) != (trailer.major, trailer.minor))
+                    {
+                        return Err(corrupt("the trailer's versions differ from the preamble's"));
+                    }
                     let footer_len = self.position() - footer_at;
                     if trailer.footer_offset != footer_at
                         || u64::from(trailer.footer_len) != footer_len
@@ -388,18 +488,44 @@ impl Reader {
                     return Ok(Some(Event::Footer(footer)));
                 }
                 Phase::Records => {
-                    let (kind, payload, len) = match record::next(rest, self.max) {
+                    let (kind, payload, len) = match record::next_checked(rest, self.max) {
                         Next::Need(_) => return Ok(None),
                         Next::Bad => {
                             self.phase = Phase::Stopped;
                             return Ok(None);
                         }
+                        Next::TooLarge(n) if record::skippable(rest[0]) => {
+                            // A later minor version's record past what the reader holds: hashed as
+                            // it comes, never held. Only after the declaration.
+                            if self.declaration.is_none() {
+                                return Err(corrupt("the first record is not the declaration"));
+                            }
+                            let mut hasher = blake3::Hasher::new();
+                            hasher.update(&rest[..1]);
+                            hasher.update(&rest[1..5]);
+                            let start = self.position();
+                            self.record_at = start;
+                            self.pos += 5;
+                            self.phase = Phase::Skipping {
+                                kind: rest[0],
+                                hasher: Box::new(hasher),
+                                left: n + record::CHECK_LEN as u64,
+                                check: Vec::new(),
+                                start,
+                            };
+                            continue;
+                        }
                         Next::TooLarge(n) => {
-                            return Err(corrupt(format!(
+                            return Err(DecodeError::Resource(format!(
                                 "the record at byte {} holds {n} bytes, more than this reader holds ({})",
                                 self.position(),
                                 self.max
                             )));
+                        }
+                        // Not a whole record of its kind: the file is cut off where it starts.
+                        Next::Oversized { .. } => {
+                            self.phase = Phase::Stopped;
+                            return Ok(None);
                         }
                         Next::Record { kind, payload, len } => (kind, payload, len),
                     };
@@ -425,8 +551,9 @@ impl Reader {
             Phase::Done => Ending::Complete,
             // A footer without its whole trailer goes too: a repair writes both again.
             Phase::Trailer { footer_at, .. } => Ending::CutOff { at: *footer_at },
+            Phase::Skipping { start, .. } => Ending::CutOff { at: *start },
             _ => Ending::CutOff {
-                at: self.position(),
+                at: self.cut_at.unwrap_or(self.position()),
             },
         })
     }
@@ -440,6 +567,9 @@ impl Reader {
         len: usize,
     ) -> Result<Option<Event>, DecodeError> {
         let Some(kind) = Kind::from_byte(kind) else {
+            if self.declaration.is_none() {
+                return Err(corrupt("the first record is not the declaration"));
+            }
             if record::skippable(kind) {
                 return Ok(Some(Event::Skipped { kind }));
             }
@@ -493,11 +623,11 @@ impl Reader {
                                 list: Follow::new(c as u32, Table::Gaps, true),
                             }
                         }
-                        DeclaredKind::Analog { coding, period, .. } => Channel::Analog {
+                        DeclaredKind::Analog { coding, .. } => Channel::Analog {
                             next_index: 0,
                             runs: Vec::new(),
                             coding: *coding,
-                            period: *period,
+                            grid: channel.grid().ok_or_else(unmapped)?,
                             map,
                             list: Follow::new(c as u32, Table::Breaks, false),
                         },
@@ -511,6 +641,18 @@ impl Reader {
                     })
                     .collect();
                 self.next_start = vec![0; d.channels.len()];
+                self.available = d.channels.iter().map(|c| c.available()).collect();
+                let mut partners = vec![Vec::new(); d.channels.len()];
+                for (a, b, _) in overview::rules(&d.channels, &d.derived)
+                    .into_iter()
+                    .flatten()
+                {
+                    if a != b {
+                        partners[a].push(b);
+                        partners[b].push(a);
+                    }
+                }
+                self.partners = partners;
                 self.channels = channels;
                 self.blocks = blocks;
                 self.declaration = Some(d.clone());
@@ -528,7 +670,6 @@ impl Reader {
                     pending,
                     map,
                     start: channel_start,
-                    list,
                     ..
                 } = &mut self.channels[c]
                 else {
@@ -537,58 +678,66 @@ impl Reader {
                 let after = gaps.last().map_or(*last_edge, |g| g.to.max(*last_edge));
                 let first = gaps.is_empty() && *edges == 0;
                 let to = on_axis(map, gap.to);
+                // Its end lies in the channel's open block, and at or after the latest
+                // known-through tick, where the overview may already be written.
+                let settled = start.max(self.known.unwrap_or(0));
                 if gap.to <= gap.from
                     || gap.from < *channel_start
                     || (!first && gap.from <= after)
                     || on_axis(map, gap.from).is_none()
-                    || to.is_none_or(|t| t < start)
+                    || to.is_none_or(|t| t < settled)
                 {
                     return Err(corrupt(format!(
                         "channel {c}: a gap from {} to {} is out of place",
                         gap.from, gap.to
                     )));
                 }
+                // Its list takes it once the block that holds its end is read.
                 gaps.push(gap);
                 pending.push_back((gap, to.unwrap_or(i64::MAX)));
-                list.push(gap)?;
                 Event::Gap { channel: c, gap }
             }
             Kind::Run => {
                 let (c, run) =
                     record::parse_run(payload).ok_or_else(|| corrupt("a run record's size"))?;
                 let c = channel(c)?;
+                self.run_against_partners(c, run)?;
                 let Channel::Analog {
                     next_index,
                     runs,
                     map,
-                    period,
-                    list,
+                    grid,
                     ..
                 } = &mut self.channels[c]
                 else {
                     return Err(corrupt("a run on a digital channel"));
                 };
+                let grid = *grid;
                 let in_order = match runs.last() {
                     None => {
                         run.index == 0
+                            && run.phase == grid.phase()
                             && (run.lost == 0
-                                || lost_before_start(run.tick, *period, run.lost)
-                                    .and_then(|t| on_axis(map, t))
+                                || lost_before_start(grid, run.tick, run.lost)
+                                    .and_then(|u| place_on_axis(map, grid, u))
                                     .is_some())
                     }
-                    Some(r) => run.index > r.index && run.tick >= r.tick,
+                    Some(r) => run.index > r.index,
                 };
                 if !in_order
                     || run.index < *next_index
                     || run.lost >= JSON_SAFE
+                    || u64::from(run.phase) >= grid.d()
                     || on_axis(map, run.tick).is_none()
+                    || place_on_axis(map, grid, grid.start(run)).is_none()
                 {
                     return Err(corrupt(format!("channel {c}: a run is out of place")));
                 }
-                runs.push(run);
-                if run.index > 0 {
-                    list.push(run)?;
+                if let Some(&r) = runs.last() {
+                    check_break(&format!("{c}"), grid, r, run)?;
                 }
+                // Its list takes it once the block that holds its first sample is read.
+                runs.push(run);
                 Event::Run { channel: c, run }
             }
             Kind::KnownThrough => {
@@ -599,10 +748,19 @@ impl Reader {
                         "a known-through record at tick {tick} does not come after the last"
                     )));
                 }
+                if self.blocks_end > tick {
+                    return Err(corrupt(format!(
+                        "a known-through record at tick {tick} comes after a block that ends at {}",
+                        self.blocks_end
+                    )));
+                }
                 self.known = Some(tick);
                 Event::KnownThrough { tick }
             }
-            Kind::Block => Event::Block(self.block(payload, record_at)?),
+            Kind::Block => match self.block(payload, record_at)? {
+                Ok(block) => Event::Block(block),
+                Err(head) => Event::UnreadBlock(head),
+            },
             Kind::OverviewBlock => {
                 let (head, frame) = OverviewHead::parse(payload)
                     .ok_or_else(|| corrupt("an overview block record's size"))?;
@@ -692,21 +850,21 @@ impl Reader {
                 .blocks
                 .get_mut(c)
                 .ok_or_else(unexpected)?
-                .page(record, at, head.count, 0),
+                .page(record, at, 0),
             1 => {
                 let (_, follow) = self
                     .levels
                     .get_mut(c)
                     .and_then(|l| l.by_shift.get_mut(&head.shift))
                     .ok_or_else(unexpected)?;
-                follow.page(record, at, head.count, 0)
+                follow.page(record, at, 0)
             }
             2 | 3 => match (self.channels.get_mut(c), head.table) {
                 (Some(Channel::Digital { list, .. }), 2) => {
-                    list.page(record, at, head.count, INLINE_LIST as u64)
+                    list.page(record, at, INLINE_LIST as u64)
                 }
                 (Some(Channel::Analog { list, .. }), 3) => {
-                    list.page(record, at, head.count, INLINE_LIST as u64)
+                    list.page(record, at, INLINE_LIST as u64)
                 }
                 _ => Err(unexpected()),
             },
@@ -855,7 +1013,12 @@ impl Reader {
         Ok(())
     }
 
-    fn block(&mut self, payload: &[u8], record_at: u64) -> Result<ReadBlock, DecodeError> {
+    /// A block record, decoded, or its head where its channel is unavailable.
+    fn block(
+        &mut self,
+        payload: &[u8],
+        record_at: u64,
+    ) -> Result<Result<ReadBlock, BlockHead>, DecodeError> {
         let (head, frame) =
             BlockHead::parse(payload).ok_or_else(|| corrupt("a block record's size"))?;
         let c = head.channel as usize;
@@ -868,7 +1031,35 @@ impl Reader {
                 head.start, head.end
             )));
         }
-        let raw = inflate_limited(frame, head.decoded_length as usize, self.max)?;
+        if !self.available[c] {
+            // Its layout is not this version's: the block is placed, and not decoded. Its word
+            // still counts an analog channel's samples, and its ticks end gaps.
+            match &mut self.channels[c] {
+                Channel::Digital { pending, list, .. } => {
+                    while let Some(&(g, _)) = pending.front().filter(|&&(_, t)| t < head.end) {
+                        pending.pop_front();
+                        list.push(g)?;
+                    }
+                }
+                Channel::Analog {
+                    next_index,
+                    runs,
+                    list,
+                    ..
+                } => {
+                    let from = *next_index;
+                    *next_index += u64::from(head.word);
+                    list_runs(runs, from, *next_index, list)?;
+                }
+            }
+            self.placed_block(head, frame, record_at)?;
+            return Ok(Err(head));
+        }
+        let raw = inflate_limited(
+            frame,
+            head.decoded_length as usize,
+            self.max.min(record::MAX_BLOCK),
+        )?;
         let section = match &self.channels[c] {
             Channel::Digital { start, map, .. } => Section::Digital {
                 start: *start,
@@ -883,7 +1074,7 @@ impl Reader {
             },
         };
         let data = decode_section(&raw, &section, head.word, head.start, head.end)
-            .map_err(|what| corrupt(format!("channel {c}, the block at {}: {what}", head.start)))?;
+            .map_err(|e| placed(e, || format!("channel {c}, the block at {}", head.start)))?;
         let known = self.known.unwrap_or(i64::MIN);
         let bad = |what: &str| corrupt(format!("channel {c}, the block at {}: {what}", head.start));
         match (&mut self.channels[c], &data) {
@@ -894,6 +1085,7 @@ impl Reader {
                     edges: seen,
                     gaps,
                     pending,
+                    list,
                     ..
                 },
                 BlockChannel::Digital { initial, edges, .. },
@@ -923,6 +1115,9 @@ impl Reader {
                     .collect();
                 *level = level_after(*initial, source, &ending);
                 pending.drain(..ending.len());
+                for &g in &ending {
+                    list.push(g)?;
+                }
                 if let Some(&t) = source.last() {
                     *last_edge = t;
                 }
@@ -932,8 +1127,9 @@ impl Reader {
                 Channel::Analog {
                     next_index,
                     runs,
-                    period,
+                    grid,
                     map,
+                    list,
                     ..
                 },
                 BlockChannel::Analog { values, .. },
@@ -945,7 +1141,7 @@ impl Reader {
                         return Err(bad("a sample before the channel's first run"));
                     };
                     let tick = |index| {
-                        on_axis(map, run_sample_tick(first.tick, *period, &runs[1..], index))
+                        place_on_axis(map, *grid, grid.sample_place(first.tick, &runs[1..], index))
                     };
                     if tick(from).is_none_or(|t| t < head.start.max(known))
                         || tick(to).is_none_or(|t| t >= head.end)
@@ -956,11 +1152,34 @@ impl Reader {
                         ));
                     }
                 }
+                let from = *next_index;
                 *next_index += n;
+                list_runs(runs, from, *next_index, list)?;
+                let to = *next_index;
+                self.samples_against_partners(c, from, to)?;
             }
             _ => unreachable!("sections follow the channels"),
         }
+        let frame_offset = self.placed_block(head, frame, record_at)?;
+        Ok(Ok(ReadBlock {
+            frame_offset,
+            frame_len: frame.len() as u32,
+            head,
+            data,
+        }))
+    }
+
+    /// A block record placed: its channel's next start, the latest block end, and its row. Its
+    /// frame's offset.
+    fn placed_block(
+        &mut self,
+        head: BlockHead,
+        frame: &[u8],
+        record_at: u64,
+    ) -> Result<u64, DecodeError> {
+        let c = head.channel as usize;
         self.next_start[c] = head.end;
+        self.blocks_end = self.blocks_end.max(head.end);
         let frame_offset = record_at + (record::PAYLOAD_AT + BlockHead::LEN) as u64;
         self.blocks[c].push(BlockRow {
             start: head.start,
@@ -969,13 +1188,77 @@ impl Reader {
             decoded_length: head.decoded_length,
             word: head.word,
         })?;
-        Ok(ReadBlock {
-            frame_offset,
-            frame_len: frame.len() as u32,
-            head,
-            data,
-        })
+        Ok(frame_offset)
     }
+}
+
+impl Reader {
+    /// Channel `c`'s analog runs and the samples its blocks have held; None for a digital one.
+    fn runs_of(&self, c: usize) -> Option<(&[Break], u64)> {
+        match self.channels.get(c)? {
+            Channel::Analog {
+                runs, next_index, ..
+            } => Some((runs, *next_index)),
+            Channel::Digital { .. } => None,
+        }
+    }
+
+    fn unpaired(c: usize, p: usize, index: u64) -> DecodeError {
+        corrupt(format!(
+            "channels {c} and {p}, a derived channel's operands: their runs at sample {index} differ"
+        ))
+    }
+
+    /// A run record of channel `c` against each partner's (FORMAT.md, "Derived channels": the
+    /// operands share their breaks): the partner's run of the same index is the same, and a
+    /// partner whose samples have passed that index without a run there has none to share.
+    fn run_against_partners(&self, c: usize, run: Break) -> Result<(), DecodeError> {
+        for &p in self.partners.get(c).into_iter().flatten() {
+            let Some((runs, held)) = self.runs_of(p) else {
+                continue;
+            };
+            match runs.binary_search_by_key(&run.index, |r| r.index) {
+                Ok(k) if runs[k] == run => {}
+                Err(_) if held <= run.index => {}
+                _ => return Err(Self::unpaired(c, p, run.index)),
+            }
+        }
+        Ok(())
+    }
+
+    /// Channel `c`'s samples `from..to`, a block's, against each partner's runs among them: `c`
+    /// has a run wherever its partner does.
+    fn samples_against_partners(&self, c: usize, from: u64, to: u64) -> Result<(), DecodeError> {
+        let Some((mine, _)) = self.runs_of(c) else {
+            return Ok(());
+        };
+        for &p in self.partners.get(c).into_iter().flatten() {
+            let Some((theirs, _)) = self.runs_of(p) else {
+                continue;
+            };
+            let start = theirs.partition_point(|r| r.index < from);
+            for r in theirs[start..].iter().take_while(|r| r.index < to) {
+                if mine.binary_search_by_key(&r.index, |m| m.index).is_err() {
+                    return Err(Self::unpaired(c, p, r.index));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The breaks among `runs` whose first sample is one of `from..to`, a block's, into `list`.
+fn list_runs(
+    runs: &[Break],
+    from: u64,
+    to: u64,
+    list: &mut Follow<Break>,
+) -> Result<(), DecodeError> {
+    let start = runs.partition_point(|r| r.index < from.max(1));
+    for r in runs[start..].iter().take_while(|r| r.index < to) {
+        list.push(*r)?;
+    }
+    Ok(())
 }
 
 /// A finished table's depth and top-index entries.

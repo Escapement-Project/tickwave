@@ -74,6 +74,7 @@ fn analog(
             samples: Samples::F32(Box::new(values.into_iter())),
             lost_before: 0,
             lost_after: 0,
+            phase: None,
         }),
         shaping,
     }
@@ -155,8 +156,8 @@ fn by_hand(origin: i64, offset: i64, (num, den): (i128, i128), k: i64) -> i64 {
 fn a_channel_keeps_its_sources_ticks_and_maps_them_with_a_floor() {
     for (stretch, m) in [
         (None, (125, 1)),
-        // 1,234 ppm slow: m = 125 × 1,001,234 / 1,000,000 = 500,617 / 4,000.
-        (Ratio::new(1_001_234, 1_000_000), (500_617, 4_000)),
+        // 1,234 ppm slow: m = 125 × 500,617 / 500,000 = 500,617 / 4,000.
+        (Ratio::new(500_617, 500_000), (500_617, 4_000)),
     ] {
         let file = encode(merged(stretch), &Options::default()).unwrap();
         let (head, blocks) = blocks(&file);
@@ -184,11 +185,7 @@ fn a_channel_keeps_its_sources_ticks_and_maps_them_with_a_floor() {
     // -3 × 500,617 / 4,000 = -375.46 axis ticks from its origin: the floor gives 624, truncation
     // would give 625.
     assert_eq!(by_hand(1000, -3, (500_617, 4_000), 0), 624);
-    let file = encode(
-        merged(Ratio::new(1_001_234, 1_000_000)),
-        &Options::default(),
-    )
-    .unwrap();
+    let file = encode(merged(Ratio::new(500_617, 500_000)), &Options::default()).unwrap();
     let (_, blocks) = blocks(&file);
     assert_eq!(edges(&blocks, 1).0[0], 624);
 }
@@ -332,10 +329,19 @@ fn a_sources_placement_is_part_of_the_content() {
     };
     // A stretch alone changes the id.
     let plain = id(merged(None));
-    let stretched = id(merged(Ratio::new(1_001_234, 1_000_000)));
+    let stretched = id(merged(Ratio::new(500_617, 500_000)));
     assert_ne!(plain, stretched);
-    // Stated unreduced, the same stretch: the same id.
-    assert_eq!(stretched, id(merged(Ratio::new(2_002_468, 2_000_000))));
+    // Stated unreduced, a stretch is refused: one value has one spelling, and one id.
+    let err = encode(
+        merged(Ratio::new(1_001_234, 1_000_000)),
+        &Options::default(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("source 1's timebase or stretch is not in lowest terms"),
+        "{err}"
+    );
     // The same m, 250, split two ways: B at 96 MHz stretched twofold, or at 48 MHz. Every tick
     // maps alike, so only the stretch the id pins tells them apart.
     let doubled = id(merged(Ratio::new(2, 1)));
@@ -372,6 +378,8 @@ fn declaration(stretch: Option<Ratio>) -> Declaration {
                 data: DeclaredKind::Digital { initial: false },
                 shaping: Shaping { offset: None, kept },
                 overview_shift: None,
+                codec: None,
+                requires: Vec::new(),
             },
             DeclaredChannel {
                 name: "V".into(),
@@ -382,9 +390,12 @@ fn declaration(stretch: Option<Ratio>) -> Declaration {
                     period: rate(10),
                     coding: escapement_tickwave_format::header::AnalogCoding::F32,
                     significant: None,
+                    phase: None,
                 },
                 shaping: Shaping { offset: None, kept },
                 overview_shift: None,
+                codec: None,
+                requires: Vec::new(),
             },
         ],
         derived: Vec::new(),
@@ -392,6 +403,7 @@ fn declaration(stretch: Option<Ratio>) -> Declaration {
         title: None,
         meta: Default::default(),
         overview_shift: 12,
+        requires: Vec::new(),
     }
 }
 
@@ -441,12 +453,26 @@ fn the_writer_refuses_a_tick_past_the_formats_bounds_as_it_comes_in() {
         Err(WriteError::SourceTick { .. })
     ));
     // A source tick inside the bounds that a stretch maps past them.
-    let mut w = writer(Ratio::new(4, 1));
+    let mut w = writer(Ratio::new(2, 1));
     assert!(matches!(
         w.edge(0, past / 2),
         Err(WriteError::AxisTick { .. })
     ));
     w.edge(0, past / 8).unwrap();
+    // A stretch lies in 1/2 to 2: past either end, the declaration is refused.
+    for (n, d) in [(4, 1), (1, 4), (2001, 1000), (499, 1000)] {
+        let err = Writer::new(declaration(Ratio::new(n, d)), WriteOptions::default())
+            .err()
+            .expect("refused")
+            .to_string();
+        assert!(
+            err.contains("source 0's stretch lies outside 1/2 to 2"),
+            "{n}/{d}: {err}"
+        );
+    }
+    for (n, d) in [(2, 1), (1, 2)] {
+        Writer::new(declaration(Ratio::new(n, d)), WriteOptions::default()).unwrap();
+    }
     let mut w = writer(None);
     w.edge(0, 5).unwrap();
     assert!(matches!(w.flush(past), Err(WriteError::TooLarge { .. })));
@@ -468,11 +494,7 @@ fn the_writer_refuses_a_tick_past_the_formats_bounds_as_it_comes_in() {
 /// reads, and decoding every block of one that reads never panics.
 #[test]
 fn a_header_with_extreme_values_is_refused_without_a_panic() {
-    let file = encode(
-        merged(Ratio::new(1_001_234, 1_000_000)),
-        &Options::default(),
-    )
-    .unwrap();
+    let file = encode(merged(Ratio::new(500_617, 500_000)), &Options::default()).unwrap();
     let head = Footer::parse_file(&file).unwrap();
     let extremes = [
         i64::MIN,
@@ -568,16 +590,12 @@ fn a_header_with_extreme_values_is_refused_without_a_panic() {
 /// A stretch with a zero or a negative term, so an `m` of zero or below: the header does not read.
 #[test]
 fn a_stretch_with_a_term_not_above_zero_is_refused() {
-    let file = encode(
-        merged(Ratio::new(1_001_234, 1_000_000)),
-        &Options::default(),
-    )
-    .unwrap();
-    let stated = r#""stretch":[1001234,1000000]"#;
+    let file = encode(merged(Ratio::new(500_617, 500_000)), &Options::default()).unwrap();
+    let stated = r#""stretch":[500617,500000]"#;
     for bad in [
-        r#""stretch":[      0,1000000]"#,
-        r#""stretch":[1001234,      0]"#,
-        r#""stretch":[-100123,1000000]"#,
+        r#""stretch":[     0,500000]"#,
+        r#""stretch":[500617,     0]"#,
+        r#""stretch":[-50061,500000]"#,
     ] {
         let err = Footer::parse_file(&patched(&file, stated, bad))
             .expect_err(bad)

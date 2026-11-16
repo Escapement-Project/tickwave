@@ -134,7 +134,7 @@ fn info_json_keeps_every_field_the_wire_decoders_read() {
 fn annotations_check_json_gives_each_annotation_resolved_with_every_field() {
     let dir = tempfile::tempdir().unwrap();
     let recording = repo().join("web/fixtures/identify-swd.tickwave");
-    let id = "blake3:ccc8b7d8c3e4cb30da7fc6088e54ebeba2858ad402eb3fb5a9aeb50be989accf";
+    let id = "blake3:63773d56fb3420735c864932f8d2441acd6f31a51b557e073bf27755a0534697";
     let sidecar = dir.path().join("rec.annotations.toml");
     std::fs::write(
         &sidecar,

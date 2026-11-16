@@ -8,7 +8,8 @@ use crate::model::{Break, Gap};
 
 /// A record's bytes besides its payload: the kind, the length and the check.
 pub const FRAMING: usize = 1 + 4 + CHECK_LEN;
-const CHECK_LEN: usize = 8;
+/// The bytes of a record's check, after its payload.
+pub const CHECK_LEN: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -50,6 +51,76 @@ pub fn skippable(kind: u8) -> bool {
     kind >= 128
 }
 
+/// The most bytes a block decodes to (FORMAT.md, "Limits").
+pub const MAX_BLOCK: usize = 1 << 22;
+/// The most an overview block decodes to: 4,096 buckets of at most 32 bytes.
+pub const MAX_OVERVIEW_BLOCK: usize = 4096 * 32;
+/// The most a strip decodes to: 1,024 buckets of at most 32 bytes.
+pub const MAX_STRIP: usize = 1024 * 32;
+/// The most an annotation bundle decodes to.
+pub const MAX_BUNDLE: usize = 64 << 20;
+/// The most an annotation part decodes to, and an annotation record's payload.
+pub const MAX_PART: usize = 4 << 20;
+/// The most a declaration's payload holds, and a footer's header.
+pub const MAX_DECLARATION: usize = 64 << 20;
+/// The most a footer record holds, its framing included.
+pub const MAX_FOOTER: usize = 256 << 20;
+/// The most channels and derived channels a recording has, together.
+pub const MAX_CHANNELS: usize = 4096;
+/// The most generators a recording's annotations have.
+pub const MAX_GENERATORS: usize = 256;
+
+/// zstd's `ZSTD_COMPRESSBOUND`: the most bytes a frame of `n` decoded bytes needs.
+pub const fn compress_bound(n: usize) -> usize {
+    let margin = if n < 128 << 10 {
+        ((128 << 10) - n) >> 11
+    } else {
+        0
+    };
+    n + (n >> 8) + margin
+}
+
+/// The most a page record's payload holds: its head and 4,096 entries of the largest size, a
+/// part row's 32 bytes. A page's exact length follows from its table's shape.
+const MAX_PAGE: usize = crate::index::PAGE_HEAD + 4096 * 32;
+
+/// The payload's length a record of `kind` may have: an exact length where the kind has one, and
+/// otherwise the most it holds. A kind from 128 up can be any length; one this version doesn't
+/// define from 1 to 127 has none.
+pub fn payload_limit(kind: u8) -> Option<Limit> {
+    let most = |n: usize| Some(Limit::Most(n as u64));
+    match Kind::from_byte(kind) {
+        Some(Kind::Declaration) => most(MAX_DECLARATION),
+        Some(Kind::Block) => most(BlockHead::LEN + compress_bound(MAX_BLOCK)),
+        Some(Kind::Gap) => Some(Limit::Exactly(GAP_LEN as u64)),
+        Some(Kind::Run) => Some(Limit::Exactly(RUN_LEN as u64)),
+        Some(Kind::OverviewBlock) => most(OverviewHead::LEN + compress_bound(MAX_OVERVIEW_BLOCK)),
+        Some(Kind::Annotation) => most(MAX_PART),
+        Some(Kind::Footer) => most(MAX_FOOTER - FRAMING),
+        Some(Kind::KnownThrough) => Some(Limit::Exactly(8)),
+        Some(Kind::IndexPage | Kind::ListPage) => most(MAX_PAGE),
+        Some(Kind::Bundle) => most(4 + compress_bound(MAX_BUNDLE)),
+        None if skippable(kind) => most(u32::MAX as usize),
+        None => None,
+    }
+}
+
+/// A record kind's payload length: exactly this, or at most this.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Limit {
+    Exactly(u64),
+    Most(u64),
+}
+
+impl Limit {
+    pub fn allows(self, n: u64) -> bool {
+        match self {
+            Limit::Exactly(e) => n == e,
+            Limit::Most(m) => n <= m,
+        }
+    }
+}
+
 fn check(kind: u8, parts: &[&[u8]]) -> [u8; CHECK_LEN] {
     let len: usize = parts.iter().map(|p| p.len()).sum();
     let mut hasher = blake3::Hasher::new();
@@ -84,12 +155,32 @@ pub enum Next<'a> {
     Bad,
     /// A payload of this many bytes, past what the reader holds: whole or not, it cannot tell.
     TooLarge(u64),
+    /// A payload of `n` bytes, which no record of `kind` holds (`payload_limit`): not a whole
+    /// record, as `Bad`.
+    Oversized { kind: u8, n: u64 },
     Record {
         kind: u8,
         payload: &'a [u8],
         /// The record's whole length, its framing included.
         len: usize,
     },
+}
+
+/// The record at the start of `bytes`, with a payload of at most `max` bytes: `Oversized`,
+/// before the payload is read, where its kind holds no payload of its length (`payload_limit`).
+/// A reader stops there as at a record that doesn't check: what follows a crash can be any
+/// bytes. A kind this version doesn't define below 128 has no limit here; the reader refuses it
+/// once its record checks.
+pub fn next_checked(bytes: &[u8], max: usize) -> Next<'_> {
+    if let (Some(&kind), Some(n)) = (bytes.first(), bytes.get(1..5))
+        && kind != 0
+    {
+        let n = u32::from_le_bytes(n.try_into().unwrap()) as u64;
+        if payload_limit(kind).is_some_and(|limit| !limit.allows(n)) {
+            return Next::Oversized { kind, n };
+        }
+    }
+    next(bytes, max)
 }
 
 /// The record at the start of `bytes`, with a payload of at most `max` bytes.
@@ -193,20 +284,21 @@ pub fn parse_gap(payload: &[u8]) -> Option<(u32, Gap)> {
     ))
 }
 
-pub const RUN_LEN: usize = 28;
+pub const RUN_LEN: usize = 32;
 
-/// A run record's payload: sample `run.index` of `channel` starts a run at `run.tick`, after
-/// `run.lost` samples the instrument lost.
+/// A run record's payload: sample `run.index` of `channel` starts a run at `run.tick` plus
+/// `run.phase / D`, after `run.lost` samples the instrument lost.
 pub fn run_bytes(channel: u32, run: Break) -> [u8; RUN_LEN] {
     let mut out = [0; RUN_LEN];
     out[..4].copy_from_slice(&channel.to_le_bytes());
     out[4..12].copy_from_slice(&run.index.to_le_bytes());
     out[12..20].copy_from_slice(&run.tick.to_le_bytes());
     out[20..28].copy_from_slice(&run.lost.to_le_bytes());
+    out[28..32].copy_from_slice(&run.phase.to_le_bytes());
     out
 }
 
-/// None unless the payload is exactly a run: channel, index, tick, lost.
+/// None unless the payload is exactly a run: channel, index, tick, lost, phase.
 pub fn parse_run(payload: &[u8]) -> Option<(u32, Break)> {
     if payload.len() != RUN_LEN {
         return None;
@@ -217,6 +309,7 @@ pub fn parse_run(payload: &[u8]) -> Option<(u32, Break)> {
             index: u64::from_le_bytes(payload[4..12].try_into().unwrap()),
             tick: i64::from_le_bytes(payload[12..20].try_into().unwrap()),
             lost: u64::from_le_bytes(payload[20..28].try_into().unwrap()),
+            phase: u32::from_le_bytes(payload[28..32].try_into().unwrap()),
         },
     ))
 }

@@ -99,6 +99,7 @@ fn recording(shaped: bool) -> Recording {
                     samples: Samples::F32(Box::new((0..33).map(|i| i as f32))),
                     lost_before: 0,
                     lost_after: 0,
+                    phase: None,
                 }),
                 shaping: shaping(Shaping {
                     offset: None,
@@ -234,12 +235,15 @@ fn content_id_by_hand(shaped: bool) -> ContentId {
             h.update(&e.to_le_bytes());
         }
         h.update(&end.to_le_bytes());
+        // The gaps' count, then their own digest.
         h.update(&(gaps.len() as u64).to_le_bytes());
+        let mut list = blake3::Hasher::new();
         for &(from, to, level) in gaps {
-            h.update(&from.to_le_bytes());
-            h.update(&to.to_le_bytes());
-            h.update(&[u8::from(level)]);
+            list.update(&from.to_le_bytes());
+            list.update(&to.to_le_bytes());
+            list.update(&[u8::from(level)]);
         }
+        h.update(list.finalize().as_bytes());
         digests.push(h.finalize());
     }
     let mut h = blake3::Hasher::new();
@@ -248,13 +252,18 @@ fn content_id_by_hand(shaped: bool) -> ContentId {
     s(&mut h, "V");
     h.update(&100u64.to_le_bytes());
     h.update(&1u64.to_le_bytes());
+    // No phase: 0 and 1.
+    h.update(&0u64.to_le_bytes());
+    h.update(&1u64.to_le_bytes());
     flags(&mut h, &shapings[2], origin);
     for i in 0..33 {
         h.update(&(i as f32).to_bits().to_le_bytes());
     }
     h.update(&211i64.to_le_bytes());
     h.update(&33u64.to_le_bytes());
+    // No break: their count, and the digest of none.
     h.update(&0u64.to_le_bytes());
+    h.update(blake3::hash(&[]).as_bytes());
     digests.push(h.finalize());
 
     let mut h = blake3::Hasher::new();

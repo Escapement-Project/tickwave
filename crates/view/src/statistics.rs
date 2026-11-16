@@ -525,6 +525,7 @@ mod tests {
             index,
             tick,
             lost: 0,
+            phase: 0,
         }
     }
 
@@ -561,6 +562,7 @@ mod tests {
                     index: 5,
                     tick: 30,
                     lost: 2,
+                    phase: 0,
                 }],
                 40,
             ),

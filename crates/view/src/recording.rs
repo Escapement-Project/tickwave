@@ -20,7 +20,7 @@ use escapement_tickwave_format::header::{
 };
 use escapement_tickwave_format::index::{Located, TableIndex};
 use escapement_tickwave_format::mapping::Mapping;
-use escapement_tickwave_format::model::{Break, Gap, Ratio, Sample};
+use escapement_tickwave_format::model::{Break, Gap, Grid, Ratio, Sample};
 use escapement_tickwave_format::overview::{self as format_overview, Level};
 use escapement_tickwave_format::samples::{self, Product};
 
@@ -117,6 +117,16 @@ impl Rule {
             Self::Product(Product::Int { num, den, .. }) => {
                 Some((Exact::new(num as i64, den as i64)?, Exact::ZERO))
             }
+            Self::Product(Product::Difference {
+                num,
+                den,
+                onum,
+                oden,
+                ..
+            }) => Some((
+                Exact::new(num as i64, den as i64)?,
+                Exact::new(onum as i64, oden as i64)?,
+            )),
             _ => None,
         }
     }
@@ -213,20 +223,19 @@ impl Place {
         else {
             return [None, None];
         };
+        // The view places samples on a whole grid until it takes phases (5c).
+        let grid = Grid::new(*period, None).unwrap_or(Grid::WHOLE);
+        let at = |u: i128| map.axis_place(u, grid.d()).unwrap_or(i64::MAX);
         let before = (*lost_before > 0)
-            .then(|| lost_before_start(*first, *period, *lost_before))
+            .then(|| lost_before_start(grid, *first, *lost_before))
             .flatten()
-            .map(|from| map.axis_saturating(from)..map.axis_saturating(*first));
+            .map(|from| at(from)..map.axis_saturating(*first));
         let after = (*lost_after > 0 && *count > 0)
             .then(|| {
-                let run = breaks.last().copied().unwrap_or(Break {
-                    index: 0,
-                    tick: *first,
-                    lost: 0,
-                });
+                let run = breaks.last().copied().unwrap_or(grid.first_run(*first, 0));
                 let runs = self.runs()?;
-                let to = lost_after_end(run, *period, *count, *lost_after)?;
-                Some(place_after(&runs, *count - 1)..map.axis_saturating(to))
+                let to = lost_after_end(grid, run, *count, *lost_after)?;
+                Some(place_after(&runs, *count - 1)..at(to))
             })
             .flatten();
         [before, after]
@@ -607,7 +616,19 @@ fn derived_info(
                     offset: Exact::ZERO,
                 })
             }
-            Product::F64 { .. } => None,
+            Product::Difference {
+                num,
+                den,
+                onum,
+                oden,
+                ..
+            } => Exact::new(num as i64, den as i64).and_then(|scale| {
+                Some(Resolution::Code {
+                    scale,
+                    offset: Exact::new(onum as i64, oden as i64)?,
+                })
+            }),
+            Product::F64 { .. } | Product::F64Difference { .. } => None,
         },
         significant: d.significant,
     }
@@ -739,7 +760,7 @@ fn header_place(place: &Place, length: i64) -> Place {
 }
 
 /// The channels of `footer`, those whose lists are in pages not yet read with none.
-fn header_channels(footer: &Footer) -> Built {
+fn header_channels(footer: &Footer, products: &[(usize, usize, Product)]) -> Built {
     let h = &footer.header;
     let mut built = Built {
         channels: Vec::new(),
@@ -764,7 +785,7 @@ fn header_channels(footer: &Footer) -> Built {
         built.places.push(stored_place(footer, i));
     }
     let derived: Vec<_> = h.derived.iter().map(|d| d.declared()).collect();
-    add_derived(&mut built, &derived, &footer.products);
+    add_derived(&mut built, &derived, products);
     built
 }
 
@@ -851,13 +872,23 @@ impl Recording {
                 Err(e) => return Err(e.into()),
             }
         };
-        let Built { channels, places } = header_channels(&footer);
+        // Unavailable channels are kept in place and shown from 5c; until then the view refuses
+        // a recording that has one.
+        for o in 0..footer.overview_channels() {
+            footer.check_available(o)?;
+        }
+        let products: Vec<(usize, usize, Product)> = footer
+            .products
+            .iter()
+            .map(|p| p.expect("available"))
+            .collect();
+        let Built { channels, places } = header_channels(&footer, &products);
         let h = &footer.header;
         let stored = h.channels.len();
         // A channel's list in pages, or its first operand's, is read when it is first asked for.
         let listed = (0..places.len())
             .map(|o| {
-                let c = o.checked_sub(stored).map_or(o, |k| footer.products[k].0);
+                let c = o.checked_sub(stored).map_or(o, |k| products[k].0);
                 (!footer.list_known(c)).then(OnceLock::new)
             })
             .collect();
@@ -883,7 +914,7 @@ impl Recording {
             timebase: h.timebase,
             length: h.length,
             sources: h.sources.clone(),
-            products: footer.products.clone(),
+            products,
             bytes,
             cache,
             channels,
@@ -960,6 +991,7 @@ impl Recording {
                     period,
                     coding,
                     significant,
+                    ..
                 } => {
                     built
                         .channels
@@ -1932,6 +1964,8 @@ mod tests {
                 data: DeclaredKind::Digital { initial: false },
                 shaping: Default::default(),
                 overview_shift: None,
+                codec: None,
+                requires: Vec::new(),
             }],
             derived: Vec::new(),
             sources: vec![SourceHeader::new(
@@ -1941,6 +1975,7 @@ mod tests {
             title: None,
             meta: Default::default(),
             overview_shift: 4,
+            requires: Vec::new(),
         };
         let mut w = Writer::new(d, WriteOptions::default()).unwrap();
         let mut file = w.take_output();
@@ -2014,9 +2049,12 @@ mod tests {
                     period: Ratio::integer(10).unwrap(),
                     coding: AnalogCoding::Int(IntCoding::new(32, false)),
                     significant: None,
+                    phase: None,
                 },
                 shaping: Default::default(),
                 overview_shift: None,
+                codec: None,
+                requires: Vec::new(),
             }],
             derived: Vec::new(),
             sources: vec![SourceHeader::new(
@@ -2026,6 +2064,7 @@ mod tests {
             title: None,
             meta: Default::default(),
             overview_shift: 4,
+            requires: Vec::new(),
         };
         // A 64 KiB block of 16,384 samples takes eight calls to compress, at 8 KiB a call.
         let options = WriteOptions {

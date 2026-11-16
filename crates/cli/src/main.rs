@@ -16,7 +16,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use escapement_tickwave_format::annotations::{self, Included};
 use escapement_tickwave_format::decode::{DecodeError, FIRST_READ, Footer, Index};
-use escapement_tickwave_format::header::{AnalogCoding, ChannelKind, Header, MAGIC};
+use escapement_tickwave_format::header::{AnalogCoding, ChannelKind, Header, MAGIC, Op};
 use escapement_tickwave_format::model::{RateOrigin, Recording, SourceFormat};
 use escapement_tickwave_format::recut::{RecutError, Recutter};
 use escapement_tickwave_format::repair::{RepairError, Repairer};
@@ -1088,11 +1088,12 @@ fn write_info(
         }
     }
     for d in &h.derived {
-        writeln!(
-            out,
-            "  {:<12} derived, {} × {} in {}",
-            d.name, d.product[0], d.product[1], d.unit
-        )?;
+        let of = match (&d.op, d.operands.as_slice()) {
+            (Op::Multiply, [a, b]) if d.params.is_empty() => format!("{a} × {b}"),
+            (Op::Subtract, [a, b]) if d.params.is_empty() => format!("{a} − {b}"),
+            (op, operands) => format!("{op}({})", operands.join(", ")),
+        };
+        writeln!(out, "  {:<12} derived, {of} in {}", d.name, d.unit)?;
     }
     writeln!(
         out,
@@ -1796,6 +1797,8 @@ mod tests {
             overview_shift: None,
             blocks: 1,
             overview_blocks: Vec::new(),
+            codec: None,
+            requires: Vec::new(),
         };
         Header {
             timebase: escapement_tickwave_format::model::Ratio::integer(1_000_000_000).unwrap(),
@@ -1812,6 +1815,8 @@ mod tests {
                 .parse()
                 .unwrap(),
             overview_shift: 12,
+            annotation_parts: None,
+            requires: Vec::new(),
         }
     }
 
@@ -2292,6 +2297,8 @@ mod tests {
             data: DeclaredKind::Digital { initial: false },
             shaping: Default::default(),
             overview_shift: shift,
+            codec: None,
+            requires: Vec::new(),
         };
         let d = Declaration {
             timebase,
@@ -2301,6 +2308,7 @@ mod tests {
             title: None,
             meta: Default::default(),
             overview_shift: 40,
+            requires: Vec::new(),
         };
         let options = WriteOptions {
             block_bytes: 1,
@@ -2811,6 +2819,7 @@ mod tests {
                         samples: Samples::F32(Box::new(samples.into_iter())),
                         lost_before: 0,
                         lost_after: 0,
+                        phase: None,
                     }),
                     shaping: Default::default(),
                 }],

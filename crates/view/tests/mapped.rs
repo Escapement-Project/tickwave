@@ -97,11 +97,13 @@ fn three_sources() -> Vec<u8> {
                         index: 500,
                         tick: 800,
                         lost: 3,
+                        phase: 0,
                     }],
                     significant: None,
                     samples: Samples::F32(Box::new((0..1_000).map(|i| i as f32))),
                     lost_before: 0,
                     lost_after: 0,
+                    phase: None,
                 }),
                 shaping: kept(0, 1_600),
             },
@@ -143,6 +145,7 @@ fn three_sources() -> Vec<u8> {
                     ),
                     lost_before: 0,
                     lost_after: 0,
+                    phase: None,
                 }),
                 shaping: kept(0, 4_000),
             },
@@ -318,6 +321,8 @@ fn attached() -> (
         data: DeclaredKind::Digital { initial: false },
         shaping: Shaping::default(),
         overview_shift: None,
+        codec: None,
+        requires: Vec::new(),
     };
     let declaration = Declaration {
         timebase: tb,
@@ -331,9 +336,12 @@ fn attached() -> (
                     period: Ratio::integer(10).unwrap(),
                     coding: AnalogCoding::F32,
                     significant: None,
+                    phase: None,
                 },
                 shaping: Shaping::default(),
                 overview_shift: None,
+                codec: None,
+                requires: Vec::new(),
             },
             digital("D"),
             digital("E"),
@@ -346,6 +354,7 @@ fn attached() -> (
         title: None,
         meta: Default::default(),
         overview_shift: 4,
+        requires: Vec::new(),
     };
     let mut w = Writer::new(declaration, WriteOptions::default()).unwrap();
     // (source tick, what, sample index): a gap, a sample, an edge.

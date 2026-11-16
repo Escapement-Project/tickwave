@@ -86,9 +86,12 @@ fn declaration() -> Declaration {
             period: Ratio::integer(1500).unwrap(),
             coding: AnalogCoding::Int(IntCoding::new(32, false)),
             significant: None,
+            phase: None,
         },
         shaping: Default::default(),
         overview_shift: None,
+        codec: None,
+        requires: Vec::new(),
     };
     Declaration {
         timebase,
@@ -102,6 +105,8 @@ fn declaration() -> Declaration {
                 data: DeclaredKind::Digital { initial: false },
                 shaping: Default::default(),
                 overview_shift: None,
+                codec: None,
+                requires: Vec::new(),
             },
         ],
         derived: Vec::new(),
@@ -112,6 +117,7 @@ fn declaration() -> Declaration {
         title: None,
         meta: Default::default(),
         overview_shift: 17,
+        requires: Vec::new(),
     }
 }
 
@@ -195,6 +201,7 @@ fn sparse() -> Recording {
                 lost_after: 0,
                 significant: None,
                 samples: Samples::F32(Box::new((0..BLOCKS).map(|b| b as f32))),
+                phase: None,
             }),
             shaping: Default::default(),
         }],

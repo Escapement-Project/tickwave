@@ -14,6 +14,7 @@ const BREAKS: [Break; 1] = [Break {
     index: 5,
     tick: 30,
     lost: 2,
+    phase: 0,
 }];
 
 fn supports(breaks: &[Break], count: u64, length: i64) -> Vec<(i64, i64)> {
@@ -57,6 +58,7 @@ fn a_runs_last_sample_ends_at_the_next_runs_tick_if_that_comes_sooner() {
         index: 5,
         tick: 6,
         lost: 0,
+        phase: 0,
     }];
     assert_eq!(supports(&at_six, 7, 40)[4..], [(6, 6), (6, 7), (7, 9)]);
     // At 7, exactly its next place.
@@ -64,6 +66,7 @@ fn a_runs_last_sample_ends_at_the_next_runs_tick_if_that_comes_sooner() {
         index: 5,
         tick: 7,
         lost: 0,
+        phase: 0,
     }];
     assert_eq!(supports(&at_seven, 6, 40)[4..], [(6, 7), (7, 8)]);
 }
@@ -78,6 +81,7 @@ fn the_lost_samples_sit_where_the_run_before_the_break_would_have_put_them() {
         index: 5,
         tick: 9,
         lost: 4,
+        phase: 0,
     }];
     assert_eq!(lost_span(0, PERIOD, &short, 0), Some(7..9));
     // The run starts again before place 5: the lost time is empty, at the break.
@@ -85,6 +89,7 @@ fn the_lost_samples_sit_where_the_run_before_the_break_would_have_put_them() {
         index: 5,
         tick: 6,
         lost: 1,
+        phase: 0,
     }];
     assert_eq!(lost_span(0, PERIOD, &early, 0), Some(6..6));
     // A pause loses nothing.
@@ -92,6 +97,7 @@ fn the_lost_samples_sit_where_the_run_before_the_break_would_have_put_them() {
         index: 5,
         tick: 30,
         lost: 0,
+        phase: 0,
     }];
     assert_eq!(lost_span(0, PERIOD, &pause, 0), None);
     assert_eq!(lost_span(0, PERIOD, &BREAKS, 1), None);
@@ -103,6 +109,7 @@ fn the_lost_samples_sit_where_the_run_before_the_break_would_have_put_them() {
             index: 8,
             tick: 50,
             lost: 3,
+            phase: 0,
         },
     ];
     assert_eq!(lost_span(0, PERIOD, &two, 1), Some(34..39));
@@ -111,6 +118,7 @@ fn the_lost_samples_sit_where_the_run_before_the_break_would_have_put_them() {
         index: 5,
         tick: 30,
         lost: u64::MAX,
+        phase: 0,
     }];
     assert_eq!(
         lost_span(0, Ratio::new(1 << 52, 1).unwrap(), &huge, 0),
@@ -130,11 +138,13 @@ fn every_tick_of_a_run_is_covered_once() {
                 index: 17,
                 tick: 9_000,
                 lost: 3,
+                phase: 0,
             },
             Break {
                 index: 40,
                 tick: 60_000,
                 lost: 0,
+                phase: 0,
             },
         ];
         let count = 64;

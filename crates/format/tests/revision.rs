@@ -14,7 +14,7 @@ use escapement_tickwave_format::header::{
 use escapement_tickwave_format::model::{
     Analog, Break, Channel, ChannelData, Digital, Gap, Ratio, Recording, Sample, Samples, Source,
 };
-use escapement_tickwave_format::overview::{AnalogOverview, Columns, Num};
+use escapement_tickwave_format::overview::{AnalogOverview, Columns, DigitalBucket, Num};
 use escapement_tickwave_format::reader::{Event, Reader};
 use escapement_tickwave_format::recut::{RecutError, Recutter};
 use escapement_tickwave_format::repair::{Repairer, repair};
@@ -48,9 +48,12 @@ fn analog(name: &str, coding: AnalogCoding, period: u64) -> DeclaredChannel {
             period: Ratio::integer(period).unwrap(),
             coding,
             significant: None,
+            phase: None,
         },
         shaping: Default::default(),
         overview_shift: None,
+        codec: None,
+        requires: Vec::new(),
     }
 }
 
@@ -62,6 +65,8 @@ fn digital(name: &str, initial: bool) -> DeclaredChannel {
         data: DeclaredKind::Digital { initial },
         shaping: Default::default(),
         overview_shift: None,
+        codec: None,
+        requires: Vec::new(),
     }
 }
 
@@ -78,6 +83,7 @@ fn declaration(channels: Vec<DeclaredChannel>, derived: Vec<Derived>, shift: u8)
         title: None,
         meta: BTreeMap::new(),
         overview_shift: shift,
+        requires: Vec::new(),
     }
 }
 
@@ -243,6 +249,7 @@ fn recording(file: &[u8]) -> Recording {
                         },
                         lost_before: 0,
                         lost_after: 0,
+                        phase: None,
                     })
                 }
             },
@@ -460,24 +467,45 @@ mod by_hand {
         h.update(s.as_bytes());
     }
 
-    /// The "analog" part a channel's digest starts with.
+    /// The "analog" part a channel's digest starts with: the period, then the phase, 0 and 1
+    /// where there is none.
     pub fn analog(h: &mut blake3::Hasher, name: &str, unit: &str, period: (u64, u64)) {
         string(h, name);
         string(h, "analog");
         string(h, unit);
         h.update(&period.0.to_le_bytes());
         h.update(&period.1.to_le_bytes());
+        h.update(&0u64.to_le_bytes());
+        h.update(&1u64.to_le_bytes());
     }
 
+    /// `first`, `count`, then the breaks' count and their own digest: each break's index, tick,
+    /// lost and phase (0 here).
     pub fn end_analog(h: &mut blake3::Hasher, first: i64, count: u64, breaks: &[(u64, i64, u64)]) {
         h.update(&first.to_le_bytes());
         h.update(&count.to_le_bytes());
         h.update(&(breaks.len() as u64).to_le_bytes());
+        let mut list = blake3::Hasher::new();
         for &(index, tick, lost) in breaks {
-            h.update(&index.to_le_bytes());
-            h.update(&tick.to_le_bytes());
-            h.update(&lost.to_le_bytes());
+            list.update(&index.to_le_bytes());
+            list.update(&tick.to_le_bytes());
+            list.update(&lost.to_le_bytes());
+            list.update(&0u32.to_le_bytes());
         }
+        h.update(list.finalize().as_bytes());
+    }
+
+    /// A digital channel's end, then its gaps' count and their own digest.
+    pub fn end_digital(h: &mut blake3::Hasher, end: i64, gaps: &[(i64, i64, bool)]) {
+        h.update(&end.to_le_bytes());
+        h.update(&(gaps.len() as u64).to_le_bytes());
+        let mut list = blake3::Hasher::new();
+        for &(from, to, level) in gaps {
+            list.update(&from.to_le_bytes());
+            list.update(&to.to_le_bytes());
+            list.update(&[u8::from(level)]);
+        }
+        h.update(list.finalize().as_bytes());
     }
 
     pub fn id(timebase: (u64, u64), length: i64, digests: &[blake3::Hash]) -> String {
@@ -566,8 +594,7 @@ fn the_content_id_of_f64_and_int_channels_and_lost_samples_is_formats() {
     e.update(&[0]);
     e.update(&0i64.to_le_bytes());
     e.update(&0i64.to_le_bytes());
-    e.update(&60i64.to_le_bytes());
-    e.update(&0u64.to_le_bytes());
+    by_hand::end_digital(&mut e, 60, &[]);
 
     let id = by_hand::id(
         (1_000_000, 1),
@@ -583,7 +610,8 @@ fn the_content_id_of_f64_and_int_channels_and_lost_samples_is_formats() {
         &[Break {
             index: 2,
             tick: 50,
-            lost: 3
+            lost: 3,
+            phase: 0,
         }]
     );
 }
@@ -616,6 +644,7 @@ fn a_channel_of_a_recording_of_several_sources_hashes_its_placement() {
         title: None,
         meta: BTreeMap::new(),
         overview_shift: 4,
+        requires: Vec::new(),
     };
     let mut w = Writer::new(declaration, options()).unwrap();
     w.edge(0, 5).unwrap();
@@ -654,13 +683,7 @@ fn a_channel_of_a_recording_of_several_sources_hashes_its_placement() {
         h.update(&1u64.to_le_bytes());
         h.update(&1u64.to_le_bytes());
         h.update(&edge.to_le_bytes());
-        h.update(&end.to_le_bytes());
-        h.update(&(gaps.len() as u64).to_le_bytes());
-        for &(from, to, level) in gaps {
-            h.update(&from.to_le_bytes());
-            h.update(&to.to_le_bytes());
-            h.update(&[u8::from(level)]);
-        }
+        by_hand::end_digital(&mut h, end, gaps);
         h.finalize()
     };
     let id = by_hand::id(
@@ -688,7 +711,10 @@ fn verge() -> Declaration {
         vec![Derived {
             name: "P".into(),
             unit: "W".into(),
-            product: ["I".into(), "V".into()],
+            op: escapement_tickwave_format::header::Op::Multiply,
+            operands: vec!["I".into(), "V".into()],
+            params: Default::default(),
+            requires: Vec::new(),
             significant: None,
         }],
         12,
@@ -721,11 +747,11 @@ fn a_derived_product_of_verges_codes_is_exact_and_its_sums_are_i128() {
         index.block_in(&file, 1, 0).unwrap(),
     );
     assert_eq!(
-        derived_values(&i.data, &v.data, head.products[0].2).unwrap(),
+        derived_values(&i.data, &v.data, head.products[0].unwrap().2).unwrap(),
         Values::U64(vec![18_446_744_065_119_617_025, 10, 21])
     );
     // Its scale is 1/10^12: one code a picowatt.
-    let (_, _, product) = head.products[0];
+    let (_, _, product) = head.products[0].unwrap();
     assert_eq!(product.value(Sample::U64(21)), 21.0 / 1e12);
 }
 
@@ -739,7 +765,10 @@ fn a_derived_product_past_64_bits_or_of_floats_is_an_f64_rounded_once() {
         vec![Derived {
             name: "P".into(),
             unit: "W".into(),
-            product: ["A".into(), "B".into()],
+            op: escapement_tickwave_format::header::Op::Multiply,
+            operands: vec!["A".into(), "B".into()],
+            params: Default::default(),
+            requires: Vec::new(),
             significant: None,
         }],
         4,
@@ -767,7 +796,10 @@ fn a_derived_product_past_64_bits_or_of_floats_is_an_f64_rounded_once() {
         vec![Derived {
             name: "P".into(),
             unit: "W".into(),
-            product: ["A".into(), "B".into()],
+            op: escapement_tickwave_format::header::Op::Multiply,
+            operands: vec!["A".into(), "B".into()],
+            params: Default::default(),
+            requires: Vec::new(),
             significant: None,
         }],
         4,
@@ -790,7 +822,7 @@ fn operands_that_do_not_share_their_samples_are_refused() {
     let err = w.sample(1, 1u64).unwrap_err();
     assert_eq!(
         err.to_string(),
-        "derived channel P: V has a sample at tick 0 where I has one at 960"
+        "derived channel P: I's sample 0 starts or sits on another run than V's"
     );
     // One operand a sample short: refused when the block closes.
     let mut w = Writer::new(verge(), options()).unwrap();
@@ -802,7 +834,7 @@ fn operands_that_do_not_share_their_samples_are_refused() {
     let err = w.finish(4096, &[], Finish::default()).unwrap_err();
     assert_eq!(
         err.to_string(),
-        "derived channel P: V has a sample at tick 960 that I lacks"
+        "derived channel P: V has sample 1 that I lacks"
     );
 }
 
@@ -819,10 +851,12 @@ fn a_pulse_at_tick_0_keeps_both_edges_through_write_read_verify_and_repair() {
         panic!()
     };
     assert_eq!((initial, n), (false, 3));
-    // Bucket 0 enters at `initial`, before the edges at its first tick, and changes.
+    // Bucket 0 holds all three edges, both at tick 0 taken before that tick reads low, then high
+    // from 5: 11 of 16 ticks, duty floor(324 / 32) = 10, and density 7.
     let strip = head.strip(0).unwrap();
-    assert_eq!(strip.data.digital(0), Some((false, true)));
-    assert_eq!(strip.data.digital(1), Some((true, false)));
+    let bucket = |density, duty| Some(DigitalBucket { density, duty });
+    assert_eq!(strip.data.digital(0), bucket(7, 10));
+    assert_eq!(strip.data.digital(1), bucket(0, 14));
     verify(&file[..], recording(&file)).unwrap();
     // Cut off in its footer: repair gives the file back, both edges and all.
     let at = head.trailer.footer_offset as usize;
@@ -1181,8 +1215,8 @@ fn a_declaration_breaking_a_header_rule_is_refused_plainly() {
                     kind: Offset::DELAY.into(),
                 });
             }),
-            "derived channel P: I and V come from different sources, or have different periods \
-             or moves",
+            "derived channel P: I and V come from different sources, or have different periods, \
+             phases or moves",
         ),
         (
             Box::new(|d| d.channels[1].source = 1),
@@ -1240,8 +1274,8 @@ fn a_declaration_breaking_a_header_rule_is_refused_plainly() {
             "derived channel P: another channel has its name",
         ),
         (
-            Box::new(|d| d.derived[0].product[1] = "W".into()),
-            "derived channel P: no analog channel W",
+            Box::new(|d| d.derived[0].operands[1] = "W".into()),
+            "derived channel P: no channel W",
         ),
         (
             Box::new(|d| {
@@ -1249,7 +1283,7 @@ fn a_declaration_breaking_a_header_rule_is_refused_plainly() {
                     *period = Ratio::integer(480).unwrap();
                 }
             }),
-            "derived channel P: I and V come from different sources, or have different periods or moves",
+            "derived channel P: I and V come from different sources, or have different periods, phases or moves",
         ),
         (
             Box::new(|d| {
@@ -1318,9 +1352,10 @@ fn a_declaration_breaking_a_header_rule_is_refused_plainly() {
     }
     Writer::new(d.clone(), options()).unwrap();
     // The slow source's m: 2^52 is within the rules, 2^53 is not.
-    d.sources[1].timebase = Ratio::new(96_000_000, 1 << 52).unwrap();
+    // 96,000,000 / 2^52 and 48,000,000 / 2^52 in lowest terms.
+    d.sources[1].timebase = Ratio::new(46_875, 1 << 41).unwrap();
     Writer::new(d.clone(), options()).unwrap();
-    d.sources[1].timebase = Ratio::new(48_000_000, 1 << 52).unwrap();
+    d.sources[1].timebase = Ratio::new(46_875, 1 << 42).unwrap();
     assert_eq!(
         refused(d),
         "source 1's m, the axis ticks in one of its ticks, has a term past 2^53 in lowest terms"
@@ -1345,7 +1380,7 @@ fn a_header_breaking_a_rule_only_the_end_settles_is_refused_by_the_reader() {
     let err = Footer::parse_file(&bad).unwrap_err();
     assert!(
         err.to_string()
-            .contains("derived channel P: I and V differ in first, count, breaks or losses"),
+            .contains("derived channel P: I and V differ in first, phase, count, breaks or losses"),
         "{err}"
     );
     // A first run at tick 0 that loses a sample: the loss would start before tick 0.
@@ -1353,13 +1388,13 @@ fn a_header_breaking_a_rule_only_the_end_settles_is_refused_by_the_reader() {
     let mut doctored = file.clone();
     let run = doctored
         .windows(4)
-        .position(|w| w == [4, 28, 0, 0])
+        .position(|w| w == [4, 32, 0, 0])
         .expect("a run record");
     doctored[run + 5 + 20] = 1;
-    let check = run + 5 + 28;
+    let check = run + 5 + 32;
     let mut h = blake3::Hasher::new();
     h.update(&[4]);
-    h.update(&28u32.to_le_bytes());
+    h.update(&32u32.to_le_bytes());
     h.update(&doctored[run + 5..check]);
     doctored[check..check + 8].copy_from_slice(&h.finalize().as_bytes()[..8]);
     r.feed(&doctored);
@@ -1462,7 +1497,7 @@ fn an_operand_may_run_ahead_of_the_other_and_one_left_unpaired_is_refused_at_the
     let err = w.finish(4096, &[4096], Finish::default()).unwrap_err();
     assert_eq!(
         err.to_string(),
-        "derived channel P: V has a sample at tick 1920 that I lacks"
+        "derived channel P: V has sample 2 that I lacks"
     );
 }
 
@@ -1505,5 +1540,5 @@ fn a_declaration_a_reader_meets_is_held_to_the_rules_before_anything_relies_on_i
     // from it, refuses it plainly.
     let doctored = rewritten(&cut, br#"["I","V"]"#, br#"["I","W"]"#);
     let err = repair(&doctored, 3).err().unwrap();
-    assert_eq!(err.to_string(), "derived channel P: no analog channel W");
+    assert_eq!(err.to_string(), "derived channel P: no channel W");
 }

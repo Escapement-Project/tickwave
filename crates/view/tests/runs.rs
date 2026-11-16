@@ -11,6 +11,7 @@ const BREAKS: [Break; 1] = [Break {
     index: 5,
     tick: 30,
     lost: 2,
+    phase: 0,
 }];
 const W: Runs = Runs {
     first: 0,

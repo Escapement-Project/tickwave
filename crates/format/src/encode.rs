@@ -7,7 +7,7 @@ use std::io::Write;
 
 use crate::header::{AnalogCoding, Declaration, DeclaredChannel, DeclaredKind, SourceHeader};
 use crate::mapping::{self, Mapping, Spacing};
-use crate::model::{Break, ChannelData, Edges, Gap, Recording, Sample, Samples, run_sample_tick};
+use crate::model::{Break, ChannelData, Edges, Gap, Grid, Recording, Sample, Samples};
 use crate::samples::coding_name;
 pub use crate::writer::{
     Bundle, Compression, Finish, Finished, WriteError, WriteOptions, Writer, code_of,
@@ -98,37 +98,38 @@ enum Stream {
         index: u64,
         count: u64,
         first: i64,
-        period: crate::model::Ratio,
+        grid: Grid,
         breaks: Vec<Break>,
         lost_before: u64,
     },
 }
 
 impl Stream {
-    /// The next item's source tick: a gap's at its `from`, so it goes in before the edges after
-    /// it.
-    fn next_tick(&self) -> Option<i64> {
+    /// Where the next item lies on the axis, and a digital item's source tick: a gap's at its
+    /// `from`, so it goes in before the edges after it. One that maps nowhere goes first, for
+    /// the writer to refuse.
+    fn next_item(&self, map: &Mapping) -> Option<(i64, i64)> {
         match self {
-            Stream::Digital { next, next_gap, .. } => match (next, next_gap) {
-                (Some(t), Some(g)) => Some((*t).min(g.from)),
-                (t, g) => t.or(g.map(|g| g.from)),
-            },
+            Stream::Digital { next, next_gap, .. } => {
+                let t = match (next, next_gap) {
+                    (Some(t), Some(g)) => (*t).min(g.from),
+                    (t, g) => t.or(g.map(|g| g.from))?,
+                };
+                Some((map.axis(t).unwrap_or(i64::MIN), t))
+            }
             Stream::Analog {
                 next,
                 index,
                 first,
-                period,
+                grid,
                 breaks,
                 ..
-            } => next.map(|_| run_sample_tick(*first, *period, breaks, *index)),
+            } => next.map(|_| {
+                let place = grid.sample_place(*first, breaks, *index);
+                (map.axis_place(place, grid.d()).unwrap_or(i64::MIN), 0)
+            }),
         }
     }
-}
-
-/// Where the next item of a stream lies on the axis. One that maps nowhere goes first, for the
-/// writer to refuse.
-fn axis_of(map: &Mapping, tick: i64) -> i64 {
-    map.axis(tick).unwrap_or(i64::MIN)
 }
 
 fn drain(writer: &mut Writer, out: &mut impl Write) -> std::io::Result<()> {
@@ -211,13 +212,15 @@ pub fn encode_to(
                 }
                 let mut samples = a.samples.into_samples();
                 let next = samples.next();
+                // A grid past 2^16 is refused with the declaration.
+                let grid = Grid::new(a.period, a.phase).unwrap_or(Grid::WHOLE);
                 streams.push(Stream::Analog {
                     samples,
                     next,
                     index: 0,
                     count: a.count,
                     first: a.first,
-                    period: a.period,
+                    grid,
                     breaks: a.breaks,
                     lost_before: a.lost_before,
                 });
@@ -226,6 +229,7 @@ pub fn encode_to(
                     period: a.period,
                     coding,
                     significant: a.significant,
+                    phase: a.phase,
                 }
             }
         };
@@ -237,6 +241,8 @@ pub fn encode_to(
             data,
             shaping: channel.shaping,
             overview_shift: None,
+            requires: Vec::new(),
+            codec: None,
         });
     }
     let mut declaration = Declaration {
@@ -266,6 +272,7 @@ pub fn encode_to(
         title: options.title.clone(),
         meta: options.meta.clone(),
         overview_shift: 0,
+        requires: Vec::new(),
     };
     // A channel whose source has no `m` maps nowhere: the writer refuses its declaration.
     let maps: Vec<Mapping> = (0..declaration.channels.len())
@@ -302,7 +309,7 @@ pub fn encode_to(
         let next = streams
             .iter()
             .enumerate()
-            .filter_map(|(i, s)| s.next_tick().map(|t| (axis_of(&maps[i], t), t, i)))
+            .filter_map(|(i, s)| s.next_item(&maps[i]).map(|(axis, t)| (axis, t, i)))
             .min_by_key(|&(axis, _, i)| (axis, i));
         let Some((_, tick, c)) = next else {
             break;
@@ -356,7 +363,8 @@ pub fn encode_to(
                 if *index == 0 {
                     writer.run(c, *first, *lost_before)?;
                 } else if let Ok(b) = breaks.binary_search_by_key(index, |b| b.index) {
-                    writer.run(c, breaks[b].tick, breaks[b].lost)?;
+                    let b = breaks[b];
+                    writer.run_at(c, b.tick, b.phase, b.lost)?;
                 }
                 writer.sample(c, value)?;
                 *index += 1;

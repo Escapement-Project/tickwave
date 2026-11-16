@@ -52,9 +52,12 @@ fn declaration() -> Declaration {
             period: Ratio::integer(10).unwrap(),
             coding: AnalogCoding::Int(IntCoding::new(16, false)),
             significant: None,
+            phase: None,
         },
         shaping: Default::default(),
         overview_shift: None,
+        codec: None,
+        requires: Vec::new(),
     };
     Declaration {
         timebase,
@@ -68,12 +71,17 @@ fn declaration() -> Declaration {
                 data: DeclaredKind::Digital { initial: false },
                 shaping: Default::default(),
                 overview_shift: None,
+                codec: None,
+                requires: Vec::new(),
             },
         ],
         derived: vec![Derived {
             name: "P".into(),
             unit: String::new(),
-            product: ["I".into(), "V".into()],
+            op: escapement_tickwave_format::header::Op::Multiply,
+            operands: vec!["I".into(), "V".into()],
+            params: Default::default(),
+            requires: Vec::new(),
             significant: None,
         }],
         sources: vec![SourceHeader::new(
@@ -83,6 +91,7 @@ fn declaration() -> Declaration {
         title: None,
         meta: BTreeMap::new(),
         overview_shift: 4,
+        requires: Vec::new(),
     }
 }
 

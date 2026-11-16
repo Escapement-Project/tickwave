@@ -12,6 +12,7 @@ use escapement_tickwave_format::header::{
 use escapement_tickwave_format::model::{
     Analog, Break, Channel, ChannelData, Digital, Gap, Ratio, Recording, Samples, Source,
 };
+use escapement_tickwave_format::overview::DigitalBucket;
 use escapement_tickwave_format::reader::{Ending, Reader};
 use escapement_tickwave_format::record::{self, Kind};
 use escapement_tickwave_format::repair::repair;
@@ -35,6 +36,8 @@ fn declaration() -> Declaration {
                 data: DeclaredKind::Digital { initial: false },
                 shaping: Default::default(),
                 overview_shift: None,
+                codec: None,
+                requires: Vec::new(),
             },
             DeclaredChannel {
                 name: "V".into(),
@@ -45,9 +48,12 @@ fn declaration() -> Declaration {
                     unit: "V".into(),
                     period: Ratio::integer(10).unwrap(),
                     coding: AnalogCoding::F32,
+                    phase: None,
                 },
                 shaping: Default::default(),
                 overview_shift: None,
+                codec: None,
+                requires: Vec::new(),
             },
         ],
         derived: Vec::new(),
@@ -58,6 +64,7 @@ fn declaration() -> Declaration {
         title: None,
         meta: BTreeMap::new(),
         overview_shift: 4,
+        requires: Vec::new(),
     }
 }
 
@@ -234,17 +241,20 @@ fn a_gap_learned_after_a_flush_inside_it_keeps_the_level_from_before() {
     let after = starts.iter().find(|(s, _)| *s > 146 && *s <= 301).unwrap();
     assert!(after.1, "{starts:?}");
 
-    // The overview's buckets of 16 ticks: bucket 2 (32..48) changes at 47; buckets 3 to 6 carry
-    // high through the gap; bucket 7 (112..128) holds the gap's end at 120 and starts high.
+    // The overview's buckets of 16 ticks: bucket 2 (32..48) goes high at 47, one tick of 16,
+    // duty floor(44 / 32) = 1; buckets 3 to 6 carry high through the gap; bucket 7 (112..128)
+    // holds the gap's end at 120, high on both sides of it and no edge; bucket 9 (144..160) is low
+    // at 145 alone, 15 of 16 high, duty floor(436 / 32) = 13, with two edges.
     let strip = footer.strip(0).unwrap();
     let a = &strip.data;
-    assert_eq!(a.digital(2), Some((false, true)));
+    let bucket = |density, duty| Some(DigitalBucket { density, duty });
+    assert_eq!(a.digital(2), bucket(1, 1));
     for b in 3..7 {
-        assert_eq!(a.digital(b), Some((true, false)), "bucket {b}");
+        assert_eq!(a.digital(b), bucket(0, 14), "bucket {b}");
     }
-    assert_eq!(a.digital(7), Some((true, true)));
-    assert_eq!(a.digital(8), Some((true, false)));
-    assert_eq!(a.digital(9), Some((true, true)));
+    assert_eq!(a.digital(7), bucket(0, 14));
+    assert_eq!(a.digital(8), bucket(0, 14));
+    assert_eq!(a.digital(9), bucket(5, 13));
 }
 
 #[test]
@@ -437,7 +447,8 @@ fn runs_place_the_samples_and_come_back_as_breaks() {
             &[Break {
                 lost: 0,
                 index: 20,
-                tick: 260
+                tick: 260,
+                phase: 0,
             }][..]
         )
     );
@@ -482,10 +493,12 @@ fn runs_place_the_samples_and_come_back_as_breaks() {
                         lost: 0,
                         index: 20,
                         tick: 260,
+                        phase: 0,
                     }],
                     samples: Samples::F32(Box::new(values.clone().into_iter())),
                     lost_before: 0,
                     lost_after: 0,
+                    phase: None,
                 }),
                 shaping: Default::default(),
             },
@@ -840,6 +853,7 @@ fn verify_refuses_a_gap_or_a_block_past_the_source_s_length() {
                     samples: Samples::F32(Box::new(std::iter::empty())),
                     lost_before: 0,
                     lost_after: 0,
+                    phase: None,
                 }),
                 shaping: Default::default(),
             },

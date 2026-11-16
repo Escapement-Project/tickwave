@@ -32,9 +32,12 @@ fn verge() -> Declaration {
             period: Ratio::integer(1500).unwrap(),
             coding: AnalogCoding::Int(IntCoding::new(32, false)),
             significant: None,
+            phase: None,
         },
         shaping: Default::default(),
         overview_shift: None,
+        codec: None,
+        requires: Vec::new(),
     };
     Declaration {
         timebase,
@@ -48,12 +51,17 @@ fn verge() -> Declaration {
                 data: DeclaredKind::Digital { initial: false },
                 shaping: Default::default(),
                 overview_shift: None,
+                codec: None,
+                requires: Vec::new(),
             },
         ],
         derived: vec![Derived {
             name: "P".into(),
             unit: "W".into(),
-            product: ["I".into(), "V".into()],
+            op: escapement_tickwave_format::header::Op::Multiply,
+            operands: vec!["I".into(), "V".into()],
+            params: Default::default(),
+            requires: Vec::new(),
             significant: None,
         }],
         sources: vec![SourceHeader::new(
@@ -63,6 +71,7 @@ fn verge() -> Declaration {
         title: None,
         meta: BTreeMap::new(),
         overview_shift: 17,
+        requires: Vec::new(),
     }
 }
 
@@ -664,7 +673,7 @@ fn losses_at_either_end_sit_on_the_runs_grid_and_enter_the_content_id() {
         .unwrap_err();
     assert!(
         err.to_string()
-            .contains("differ in first, count, breaks or losses"),
+            .contains("differ in first, phase, count, breaks or losses"),
         "{err}"
     );
     // The file reads in order, its first run's loss on the run record.
@@ -693,12 +702,15 @@ fn a_channel_past_the_directory_threshold_gets_directory_pages() {
             data: DeclaredKind::Digital { initial: false },
             shaping: Default::default(),
             overview_shift: None,
+            codec: None,
+            requires: Vec::new(),
         }],
         derived: Vec::new(),
         sources: vec![SourceHeader::new(SourceFormat::Other("t".into()), timebase)],
         title: None,
         meta: BTreeMap::new(),
         overview_shift: 40,
+        requires: Vec::new(),
     };
     // An edge every 10 ticks, a block each: 70,000 blocks, 18 pages, one directory.
     const N: i64 = 70_000;
@@ -939,12 +951,15 @@ fn a_snapshot_reads_only_the_pages_after_those_a_view_holds() {
             data: DeclaredKind::Digital { initial: false },
             shaping: Default::default(),
             overview_shift: Some(0),
+            codec: None,
+            requires: Vec::new(),
         }],
         derived: Vec::new(),
         sources: vec![SourceHeader::new(SourceFormat::Other("t".into()), timebase)],
         title: None,
         meta: BTreeMap::new(),
         overview_shift: 0,
+        requires: Vec::new(),
     };
     // An edge a block, 2,000 to 4,000 ticks apart, so each overview block of 4,096 one-tick
     // buckets holds a change at its own place and none join a run: past 4,096 of either, a page.
@@ -1214,6 +1229,7 @@ fn a_converted_file_cut_in_its_finish_repairs_to_the_file_it_was() {
                     lost_after: 0,
                     significant: None,
                     samples: Samples::F32(Box::new((0..4000).map(|i| (i % 17) as f32))),
+                    phase: None,
                 }),
                 shaping: Default::default(),
             },
@@ -1294,7 +1310,7 @@ fn an_operand_sample_its_partner_never_pairs_is_refused() {
     let err = w.sample(1, 1u64).unwrap_err();
     assert_eq!(
         err.to_string(),
-        "derived channel P: V has a sample at tick 0 where I has one at 1"
+        "derived channel P: I's sample 0 starts or sits on another run than V's"
     );
     let mut w = Writer::new(verge(), options(3)).unwrap();
     w.run(0, 0, 0).unwrap();
@@ -1307,7 +1323,7 @@ fn an_operand_sample_its_partner_never_pairs_is_refused() {
     };
     assert_eq!(
         err.to_string(),
-        "derived channel P: V has a sample at tick 1500 that I lacks"
+        "derived channel P: V has sample 1 that I lacks"
     );
 }
 
@@ -1340,6 +1356,7 @@ fn verify_takes_the_overview_blocks_of_a_span_in_any_order() {
                 lost_after: 0,
                 significant: None,
                 samples: Samples::U64(int, Box::new((0..PAIRS).map(move |i| f(pair(i))))),
+                phase: None,
             }),
             shaping: Default::default(),
         };
@@ -1427,6 +1444,11 @@ fn verify_takes_the_overview_blocks_of_a_span_in_any_order() {
     let reordered = reordered(&encoded);
     assert!(order(&reordered) != b);
     verify(&reordered[..], model()).unwrap();
+    // Repair takes that order too, comparing each channel's levels on their own.
+    let footer = Footer::parse_file(&reordered).unwrap();
+    let at = footer.trailer.footer_offset as usize;
+    let fixed = escapement_tickwave_format::repair::repair(&reordered[..at], 3).unwrap();
+    assert_eq!(fixed.header.content_id, footer.header.content_id);
 }
 
 /// `file` with each run of adjacent overview block records stably sorted coarsest level first,

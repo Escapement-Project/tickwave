@@ -28,6 +28,8 @@ fn base() -> Vec<u8> {
         data: DeclaredKind::Digital { initial: false },
         shaping: Default::default(),
         overview_shift: None,
+        codec: None,
+        requires: Vec::new(),
     };
     let timebase = Ratio::integer(1_000_000_000).unwrap();
     let declaration = Declaration {
@@ -41,6 +43,7 @@ fn base() -> Vec<u8> {
         title: None,
         meta: BTreeMap::new(),
         overview_shift: 12,
+        requires: Vec::new(),
     };
     let mut w = Writer::new(declaration, WriteOptions::default()).unwrap();
     for t in [10, 20, 30] {

@@ -55,9 +55,12 @@ fn pulse_at_block_end(at: i64, shift: u8) -> Vec<u8> {
                     period: Ratio::integer(1 << 18).unwrap(),
                     coding: escapement_tickwave_format::header::AnalogCoding::F32,
                     significant: None,
+                    phase: None,
                 },
                 shaping: Default::default(),
                 overview_shift: None,
+                codec: None,
+                requires: Vec::new(),
             },
             DeclaredChannel {
                 name: "D".into(),
@@ -66,6 +69,8 @@ fn pulse_at_block_end(at: i64, shift: u8) -> Vec<u8> {
                 data: DeclaredKind::Digital { initial: false },
                 shaping: Default::default(),
                 overview_shift: None,
+                codec: None,
+                requires: Vec::new(),
             },
         ],
         derived: Vec::new(),
@@ -76,6 +81,7 @@ fn pulse_at_block_end(at: i64, shift: u8) -> Vec<u8> {
         title: None,
         meta: BTreeMap::new(),
         overview_shift: shift,
+        requires: Vec::new(),
     };
     let mut w = Writer::new(d, WriteOptions::default()).unwrap();
     w.run(0, 0, 0).unwrap();
@@ -143,6 +149,8 @@ fn a_zoom_answers_every_column_of_its_window() {
             data: DeclaredKind::Digital { initial: false },
             shaping: Default::default(),
             overview_shift: None,
+            codec: None,
+            requires: Vec::new(),
         }],
         derived: Vec::new(),
         sources: vec![SourceHeader::new(
@@ -152,6 +160,7 @@ fn a_zoom_answers_every_column_of_its_window() {
         title: None,
         meta: BTreeMap::new(),
         overview_shift: 12,
+        requires: Vec::new(),
     };
     let mut w = Writer::new(d, WriteOptions::default()).unwrap();
     for i in 1..length / 1000 {
@@ -676,9 +685,12 @@ fn markers_outside_the_data_widen_the_extent() {
                 period: Ratio::integer(10).unwrap(),
                 coding: escapement_tickwave_format::header::AnalogCoding::F32,
                 significant: None,
+                phase: None,
             },
             shaping: Default::default(),
             overview_shift: None,
+            codec: None,
+            requires: Vec::new(),
         }],
         derived: Vec::new(),
         sources: vec![SourceHeader::new(
@@ -688,6 +700,7 @@ fn markers_outside_the_data_widen_the_extent() {
         title: None,
         meta: BTreeMap::new(),
         overview_shift: 4,
+        requires: Vec::new(),
     };
     let mut w = Writer::new(d, WriteOptions::default()).unwrap();
     let mark = |w: &mut Writer, t: i64| {
@@ -729,6 +742,8 @@ fn gaps_at_block_ends() -> Vec<u8> {
             data: DeclaredKind::Digital { initial: false },
             shaping: Default::default(),
             overview_shift: None,
+            codec: None,
+            requires: Vec::new(),
         }],
         derived: Vec::new(),
         sources: vec![SourceHeader::new(
@@ -738,6 +753,7 @@ fn gaps_at_block_ends() -> Vec<u8> {
         title: None,
         meta: BTreeMap::new(),
         overview_shift: 12,
+        requires: Vec::new(),
     };
     let mut w = Writer::new(d, WriteOptions::default()).unwrap();
     w.edge(0, 10).unwrap();
@@ -803,9 +819,10 @@ fn a_column_across_a_short_gap_holds_both_sides() {
 }
 
 #[test]
-fn a_loss_with_no_time_left_before_its_run_shades_nothing() {
-    // The synthetic cases' third run starts at its second run's last tick, 949,983, after two
-    // lost pairs: their time ends at that tick, so it is empty.
+fn a_run_from_the_last_samples_tick_shades_nothing() {
+    // The synthetic cases' third run starts at its second run's last tick, 949,983: a pause with
+    // no time in it. A run that states lost samples starts past where the first of them would
+    // sit (FORMAT.md, "Gaps"), so a loss always has time; the writer refuses one that doesn't.
     let rec = open(&common::synth_cases(1 << 16));
     let cancel = AtomicBool::new(false);
     let a = rec
@@ -816,8 +833,8 @@ fn a_loss_with_no_time_left_before_its_run_shades_nothing() {
     };
     assert!(lost.is_empty(), "{lost:?}");
     assert!(columns.pale.iter().all(|&p| !p));
-    // These two and the fourth run's 50.
-    assert_eq!(rec.lost(0), 52);
+    // The fourth run's 50.
+    assert_eq!(rec.lost(0), 50);
 }
 
 #[test]
@@ -857,8 +874,8 @@ fn columns_hold_what_the_rule_gives_at_every_zoom_across_runs() {
     }
 }
 
-/// A footer whose analog channel claims 4,000,000,000 samples in a block that holds one, at
-/// 2^20 a tick so they fit in its ticks: the file opens, and a query narrower than a bucket reads
+/// A footer whose analog channel claims 4,000,000,000 samples in a block that holds one, over
+/// 2^33 ticks so they fit in its ticks: the file opens, and a query narrower than a bucket reads
 /// samples. Their values grow with what the block gives, which it refuses, rather than taking
 /// the claimed count up front.
 #[test]
@@ -873,24 +890,28 @@ fn a_sample_count_the_blocks_do_not_back_is_not_allocated_before_they_decode() {
             source: 0,
             data: DeclaredKind::Analog {
                 unit: "V".into(),
-                period: Ratio::new(1, 1 << 20).unwrap(),
+                period: Ratio::ONE,
                 coding: AnalogCoding::F32,
                 significant: None,
+                phase: None,
             },
             shaping: Default::default(),
             overview_shift: None,
+            codec: None,
+            requires: Vec::new(),
         }],
         derived: Vec::new(),
         sources: vec![SourceHeader::new(SourceFormat::Other("t".into()), timebase)],
         title: None,
         meta: BTreeMap::new(),
         overview_shift: 12,
+        requires: Vec::new(),
     };
     let mut w = Writer::new(d, WriteOptions::default()).unwrap();
     w.run(0, 0, 0).unwrap();
     w.sample(0, 1.5f32).unwrap();
     let mut file = w.take_output();
-    file.extend(w.finish(8192, &[], Finish::default()).unwrap().tail);
+    file.extend(w.finish(1 << 33, &[], Finish::default()).unwrap().tail);
     use escapement_tickwave_format::header::BlockRow;
     use escapement_tickwave_format::index::PAGE_HEAD;
     use escapement_tickwave_format::record::{self, Kind, PAYLOAD_AT};
@@ -954,9 +975,12 @@ fn a_verge_recorder_s_markers_write_bundle_and_open() {
                     period: Ratio::integer(960).unwrap(),
                     coding: escapement_tickwave_format::header::AnalogCoding::F32,
                     significant: None,
+                    phase: None,
                 },
                 shaping: Default::default(),
                 overview_shift: None,
+                codec: None,
+                requires: Vec::new(),
             },
             DeclaredChannel {
                 name: "DIO0".into(),
@@ -965,6 +989,8 @@ fn a_verge_recorder_s_markers_write_bundle_and_open() {
                 data: DeclaredKind::Digital { initial: false },
                 shaping: Default::default(),
                 overview_shift: None,
+                codec: None,
+                requires: Vec::new(),
             },
         ],
         derived: Vec::new(),
@@ -975,6 +1001,7 @@ fn a_verge_recorder_s_markers_write_bundle_and_open() {
         title: None,
         meta: BTreeMap::new(),
         overview_shift: 20,
+        requires: Vec::new(),
     };
     let mut w = Writer::new(d, WriteOptions::default()).unwrap();
     w.run(0, 0, 0).unwrap();

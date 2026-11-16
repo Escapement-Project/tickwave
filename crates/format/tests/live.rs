@@ -120,9 +120,12 @@ fn flushed_each_second() -> Vec<u8> {
             period: Ratio::integer(9600).unwrap(),
             coding,
             significant: None,
+            phase: None,
         },
         shaping: Default::default(),
         overview_shift: None,
+        codec: None,
+        requires: Vec::new(),
     };
     let d = Declaration {
         timebase,
@@ -130,7 +133,10 @@ fn flushed_each_second() -> Vec<u8> {
         derived: vec![Derived {
             name: "P".into(),
             unit: "W".into(),
-            product: ["I".into(), "V".into()],
+            op: escapement_tickwave_format::header::Op::Multiply,
+            operands: vec!["I".into(), "V".into()],
+            params: Default::default(),
+            requires: Vec::new(),
             significant: None,
         }],
         sources: vec![SourceHeader::new(
@@ -140,6 +146,7 @@ fn flushed_each_second() -> Vec<u8> {
         title: None,
         meta: BTreeMap::new(),
         overview_shift: 16,
+        requires: Vec::new(),
     };
     let mut w = Writer::new(d, options(1 << 20)).unwrap();
     w.run(0, 0, 0).unwrap();
@@ -299,9 +306,12 @@ fn session() -> (Declaration, Vec<Op>) {
             period: Ratio::integer(10).unwrap(),
             coding,
             significant: Some(4),
+            phase: None,
         },
         shaping: Default::default(),
         overview_shift: None,
+        codec: None,
+        requires: Vec::new(),
     };
     let d = Declaration {
         timebase,
@@ -315,12 +325,17 @@ fn session() -> (Declaration, Vec<Op>) {
                 data: DeclaredKind::Digital { initial: false },
                 shaping: Default::default(),
                 overview_shift: None,
+                codec: None,
+                requires: Vec::new(),
             },
         ],
         derived: vec![Derived {
             name: "P".into(),
             unit: "W".into(),
-            product: ["I".into(), "V".into()],
+            op: escapement_tickwave_format::header::Op::Multiply,
+            operands: vec!["I".into(), "V".into()],
+            params: Default::default(),
+            requires: Vec::new(),
             significant: None,
         }],
         sources: vec![SourceHeader::new(
@@ -330,6 +345,7 @@ fn session() -> (Declaration, Vec<Op>) {
         title: None,
         meta: BTreeMap::new(),
         overview_shift: 4,
+        requires: Vec::new(),
     };
     let mut ops = vec![Op::Run(0, 0), Op::Edge(0), Op::Edge(0)];
     let mut index = 0u64;
@@ -539,17 +555,20 @@ fn a_snapshot_with_the_bytes_written_so_far_gives_every_item_pushed() {
                 Break {
                     index: 0,
                     tick: 0,
-                    lost: 0
+                    lost: 0,
+                    phase: 0,
                 },
                 Break {
                     index: 12,
                     tick: 160,
-                    lost: 4
+                    lost: 4,
+                    phase: 0,
                 },
                 Break {
                     index: 21,
                     tick: 400,
-                    lost: 0
+                    lost: 0,
+                    phase: 0,
                 }
             ]
         );

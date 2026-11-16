@@ -33,6 +33,8 @@ fn digital(edges: &[i64], block_bytes: usize) -> Vec<u8> {
             data: DeclaredKind::Digital { initial: false },
             shaping: Default::default(),
             overview_shift: None,
+            codec: None,
+            requires: Vec::new(),
         }],
         derived: Vec::new(),
         sources: vec![SourceHeader::new(
@@ -42,6 +44,7 @@ fn digital(edges: &[i64], block_bytes: usize) -> Vec<u8> {
         title: None,
         meta: BTreeMap::new(),
         overview_shift: 12,
+        requires: Vec::new(),
     };
     let mut w = Writer::new(
         d,
@@ -151,6 +154,8 @@ fn a_search_past_the_buckets_the_overview_has_reads_the_edges_there() {
             data: DeclaredKind::Digital { initial: false },
             shaping: Default::default(),
             overview_shift: None,
+            codec: None,
+            requires: Vec::new(),
         }],
         derived: Vec::new(),
         sources: vec![SourceHeader::new(
@@ -160,6 +165,7 @@ fn a_search_past_the_buckets_the_overview_has_reads_the_edges_there() {
         title: None,
         meta: BTreeMap::new(),
         overview_shift: 0,
+        requires: Vec::new(),
     };
     let mut w = Writer::new(d, WriteOptions::default()).unwrap();
     w.edge(0, 10).unwrap();

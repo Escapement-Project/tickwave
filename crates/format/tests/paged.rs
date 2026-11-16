@@ -36,6 +36,8 @@ fn recording() -> Vec<u8> {
         data: DeclaredKind::Digital { initial: false },
         shaping: Default::default(),
         overview_shift: shift,
+        codec: None,
+        requires: Vec::new(),
     };
     let d = Declaration {
         timebase,
@@ -50,9 +52,12 @@ fn recording() -> Vec<u8> {
                     period: Ratio::integer(7).unwrap(),
                     coding: AnalogCoding::Int(IntCoding::new(16, false)),
                     significant: None,
+                    phase: None,
                 },
                 shaping: Default::default(),
                 overview_shift: None,
+                codec: None,
+                requires: Vec::new(),
             },
             digital("L", Some(0)),
         ],
@@ -61,6 +66,7 @@ fn recording() -> Vec<u8> {
         title: None,
         meta: BTreeMap::new(),
         overview_shift: 40,
+        requires: Vec::new(),
     };
     let mut w = Writer::new(
         d,

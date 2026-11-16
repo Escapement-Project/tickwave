@@ -410,6 +410,7 @@ fn breaks(v: &Value) -> Vec<Break> {
             index: uint(&b["index"]),
             tick: int(&b["tick"]),
             lost: uint(&b["lost"]),
+            phase: 0,
         })
         .collect()
 }

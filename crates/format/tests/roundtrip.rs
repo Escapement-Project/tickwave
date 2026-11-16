@@ -4,6 +4,7 @@ use escapement_tickwave_format::header::AnalogCoding;
 use escapement_tickwave_format::model::{
     Analog, Channel, ChannelData, Digital, Ratio, Recording, Sample, Samples, Source, SourceFormat,
 };
+use escapement_tickwave_format::overview::DigitalBucket;
 use escapement_tickwave_format::verify::{VerifyError, verify};
 
 const EDGES_A: [i64; 9] = [1, 2, 3, 100, 101, 200, 5000, 9999, 10000];
@@ -65,6 +66,7 @@ fn recording(edges_a: Vec<i64>, values: Vec<f32>) -> Recording {
                     lost_before: 0,
                     lost_after: 0,
                     samples: Samples::F32(Box::new(values.into_iter())),
+                    phase: None,
                 }),
                 shaping: Default::default(),
             },
@@ -179,10 +181,12 @@ fn the_overview_matches_the_edges() {
     // 10,001 ticks fit one level of 2^13-tick buckets, A's strip: 0..8191 and 8192..10000.
     assert_eq!(head.channels[0].strip_shift, 13);
     let strip = head.strip(0).unwrap();
-    // Bucket 0: starts high, and edges 1-3, 100, 101, 200 and 5000 change it. Bucket 1: low after
-    // those seven flips; 9999 and 10000 change it.
-    assert_eq!(strip.data.digital(0), Some((true, true)));
-    assert_eq!(strip.data.digital(1), Some((false, true)));
+    // Bucket 0: high at the start, seven edges (1-3, 100, 101, 200, 5000), high 1 + 1 + 1 + 4,800
+    // of its 8,192 ticks: density 1 + 4 x 2 + 3 = 12, duty floor(142,676 / 16,384) = 8.
+    // Bucket 1, 8,192..10,001: low, high only at 9,999, two edges: density 5, duty 0.
+    let bucket = |density, duty| Some(DigitalBucket { density, duty });
+    assert_eq!(strip.data.digital(0), bucket(12, 8));
+    assert_eq!(strip.data.digital(1), bucket(5, 0));
 }
 
 /// FORMAT.md, "Overview": each channel's finest level puts about 64 of its items in a bucket,
@@ -474,6 +478,7 @@ fn codes_are_stored_in_byte_planes() {
                 samples: Samples::F32(Box::new(
                     [0x0102 as f32, 0x0304 as f32, 0x0506 as f32].into_iter(),
                 )),
+                phase: None,
             }),
             shaping: Default::default(),
         }],

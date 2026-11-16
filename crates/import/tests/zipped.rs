@@ -149,8 +149,8 @@ fn a_zip_over_its_limits_is_refused_before_anything_is_unzipped() {
         err.to_string(),
         "it holds 4 entries, more than the 3 tickwave reads"
     );
-    // deflated.zip's two files unzip to 4,946 bytes, as `unzip -l` totals them.
-    let total = 4_946;
+    // deflated.zip's two files unzip to 4,967 bytes, as `unzip -l` totals them.
+    let total = 4_967;
     let at = |inflated| Limits {
         inflated,
         ..Limits::default()

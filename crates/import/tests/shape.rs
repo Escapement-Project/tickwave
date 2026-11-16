@@ -68,6 +68,7 @@ fn source() -> Recording {
                     samples: Samples::F32(Box::new((0..60).map(|i| i as f32))),
                     lost_before: 0,
                     lost_after: 0,
+                    phase: None,
                 }),
                 shaping: Shaping::default(),
             },
@@ -378,17 +379,17 @@ fn a_cut_at_either_end_or_both_keeps_what_lies_between() {
 }
 
 #[test]
-fn an_analog_cut_on_a_fractional_period_keeps_every_samples_tick() {
-    // V's period is 3/2: a run's samples sit on its ticks every second sample.
+fn an_analog_cut_on_a_fractional_period_keeps_every_sample_at_its_place() {
+    // V's period is 3/2: sample i's place is 1.5 i, drawn at the tick it maps to, 1.5 i's floor.
     for (from, first, kept_from, count) in [
-        // Sample 3, at 4, is odd: the cut moves on to sample 4, at 6.
-        ("4", (6, 4.0), 6, 56),
-        // Sample 2, at 3, is even.
+        // Sample 3, at 4.5, is the first at or after 4: it starts the run at tick 4, phase 1/2.
+        ("4", (4, 3.0), 4, 57),
+        // Sample 2, at 3.
         ("3", (3, 2.0), 3, 58),
         // Between samples: sample 2 is the first after the cut, which stays where it was put.
         ("2", (3, 2.0), 2, 58),
         // Rounded to the nearest tick: 4.4 ns is tick 4.
-        ("4.4ns", (6, 4.0), 6, 56),
+        ("4.4ns", (4, 3.0), 4, 57),
     ] {
         let out = run(&|| Ok(source()), &settings(&[], &[("V", Some(from), None)]));
         let samples = &out.samples[2];
@@ -484,10 +485,12 @@ fn with_gaps() -> Recording {
                         index: 5,
                         tick: 30,
                         lost: 0,
+                        phase: 0,
                     }],
                     samples: Samples::F32(Box::new((0..10).map(|i| i as f32))),
                     lost_before: 0,
                     lost_after: 0,
+                    phase: None,
                 }),
                 shaping: Shaping::default(),
             },
@@ -558,10 +561,10 @@ fn an_instruments_gaps_and_breaks_are_cut_and_a_cut_in_a_gap_starts_the_channel_
     }
 
     for (keeps, samples, breaks) in [
-        // From 31: sample 6 is 1 into its run, off the grid; the cut moves to sample 7, at 33.
+        // From 31: sample 6, at 31.5, one into its run, starts the channel there.
         (
             &[("W", Some("31"), None)][..],
-            &[(33, 7.0), (34, 8.0), (36, 9.0)][..],
+            &[(31, 6.0), (33, 7.0), (34, 8.0), (36, 9.0)][..],
             &[][..],
         ),
         // From 5: sample 4 at 6 is 4 into the first run, on the grid; the break stays.
@@ -700,13 +703,6 @@ fn settings_that_cannot_be_followed_are_refused_plainly() {
             r#"A: "40 parsecs": unknown unit "parsecs""#,
         ),
         (&[], &[("A", Some("1.5"), None)], r#"A: "1.5": no unit"#),
-        // Sample 3, at 4, is off V's grid, and sample 4 sits at 6, the cut's end.
-        (
-            &[],
-            &[("V", Some("4"), Some("6"))],
-            "V: kept from tick 4 to 6; its samples keep their ticks only from one a multiple of 2 \
-             into its run, and none in that span is",
-        ),
     ] {
         let got = refused(offsets, keeps);
         assert!(got.contains(message), "{offsets:?} {keeps:?}: {got}");
@@ -803,4 +799,68 @@ fn a_captures_channels_move_and_cut_as_the_whole_conversion_has_them() {
     assert_eq!(shaped.samples[a0], want);
     let on_axis: Vec<(i64, f32)> = want.iter().map(|&(t, v)| (t + 5, v)).collect();
     assert_eq!(shaped.axis_samples[a0], on_axis);
+}
+
+/// A cut keeps every sample whose place lies in its span, and states where the first kept one
+/// sits as its run's tick and phase (FORMAT.md, "Moved and trimmed channels"). A cut that starts
+/// the channel on a run whose phase gives a coarser grid than a later run's phase needs can't be
+/// stated, and is refused.
+#[test]
+fn a_cut_whose_first_run_cannot_state_a_later_runs_phase_is_refused() {
+    // X: a period of 2 and a phase of 1/2, a grid of halves: samples at 0.5 and 2.5, a run from
+    // 10 at phase 0 (10, 12), and one from 20 at phase 1/2 (20.5, 22.5).
+    let open = || {
+        let mut rec = source();
+        rec.channels.push(Channel {
+            name: "X".into(),
+            source_name: "x".into(),
+            source: 0,
+            data: ChannelData::Analog(Analog {
+                unit: "V".into(),
+                first: 0,
+                phase: Ratio::new(1, 2),
+                period: Ratio::integer(2).unwrap(),
+                count: 6,
+                breaks: vec![
+                    escapement_tickwave_format::model::Break::new(2, 10, 0),
+                    escapement_tickwave_format::model::Break {
+                        phase: 1,
+                        ..escapement_tickwave_format::model::Break::new(4, 20, 0)
+                    },
+                ],
+                significant: None,
+                samples: Samples::F32(Box::new((0..6).map(|i| i as f32))),
+                lost_before: 0,
+                lost_after: 0,
+            }),
+            shaping: Shaping::default(),
+        });
+        Ok(rec)
+    };
+    // From 1: sample 1, at 2.5, starts the channel on the grid of halves, and both runs stay.
+    let out = run(&open, &settings(&[], &[("X", Some("1"), None)]));
+    let ChannelKind::Analog {
+        first,
+        phase,
+        breaks,
+        ..
+    } = &out.header.channels[3].data
+    else {
+        panic!()
+    };
+    let breaks: Vec<(u64, i64, u32)> = breaks.iter().map(|b| (b.index, b.tick, b.phase)).collect();
+    assert_eq!((*first, *phase), (2, Ratio::new(1, 2)));
+    assert_eq!(breaks, [(1, 10, 0), (3, 20, 1)]);
+    // From 9: sample 2, at 10, starts the channel at phase 0, a grid of whole ticks, which the
+    // run at 20.5 can't sit on.
+    let err = match try_run(&open, &settings(&[], &[("X", Some("9"), None)])) {
+        Ok(_) => panic!("converted"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        err.contains("X: kept from tick 9")
+            && err
+                .contains("its first kept sample's phase gives a coarser grid than a later run's"),
+        "{err}"
+    );
 }

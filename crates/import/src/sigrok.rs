@@ -222,6 +222,7 @@ pub fn read_bytes(bytes: impl Into<Arc<[u8]>>, file_name: &str) -> Result<Import
                 // srzip records no unit, and libsigrok labels every analog channel volts.
                 unit: String::new(),
                 first: 0,
+                phase: None,
                 period: Ratio::ONE,
                 count,
                 breaks: Vec::new(),

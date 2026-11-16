@@ -43,9 +43,12 @@ fn session() -> (Declaration, Vec<Op>) {
             period: Ratio::integer(10).unwrap(),
             coding,
             significant: Some(4),
+            phase: None,
         },
         shaping: Default::default(),
         overview_shift: None,
+        codec: None,
+        requires: Vec::new(),
     };
     let d = Declaration {
         timebase,
@@ -59,12 +62,17 @@ fn session() -> (Declaration, Vec<Op>) {
                 data: DeclaredKind::Digital { initial: false },
                 shaping: Default::default(),
                 overview_shift: None,
+                codec: None,
+                requires: Vec::new(),
             },
         ],
         derived: vec![Derived {
             name: "P".into(),
             unit: "W".into(),
-            product: ["I".into(), "V".into()],
+            op: escapement_tickwave_format::header::Op::Multiply,
+            operands: vec!["I".into(), "V".into()],
+            params: Default::default(),
+            requires: Vec::new(),
             significant: None,
         }],
         sources: vec![SourceHeader::new(
@@ -74,6 +82,7 @@ fn session() -> (Declaration, Vec<Op>) {
         title: None,
         meta: BTreeMap::new(),
         overview_shift: 4,
+        requires: Vec::new(),
     };
     let mut ops = vec![Op::Run(0, 0), Op::Edge(0), Op::Edge(0)];
     let mut index = 0u64;

@@ -14,9 +14,11 @@ use crate::header::{
 };
 use crate::index::{Entry, Located, PAGE, Page, TOP, Table, TableIndex, depth_of, pages_at};
 use crate::mapping::Mapping;
-use crate::model::{Break, Gap, Ratio, run_sample_tick};
+use crate::model::{Break, Gap, Grid, Ratio};
 use crate::overview::{self, BLOCK_BUCKETS, Column, Level};
-use crate::record::{self, Kind};
+use crate::record::{
+    self, Kind, MAX_BLOCK, MAX_CHANNELS, MAX_DECLARATION, MAX_FOOTER, compress_bound,
+};
 use crate::samples::{self, Product, Values};
 
 #[derive(Debug, thiserror::Error)]
@@ -37,11 +39,18 @@ pub enum DecodeError {
     Corrupt(String),
     #[error("zstd: {0}")]
     Zstd(String),
+    /// A part of the file within the format's limits that this reader can't hold: more than it
+    /// is set to, or more than it can allocate.
+    #[error("{0}")]
+    Resource(String),
 }
 
 pub(crate) fn corrupt(what: impl Into<String>) -> DecodeError {
     DecodeError::Corrupt(what.into())
 }
+
+/// What a section decoder's message starts with where it can't allocate.
+pub(crate) const CANT_HOLD: &str = "this reader can't hold";
 
 /// The most a repair, a re-cut or verify holds of what it decoded or made while it can't yet tell
 /// whether it stands or where it goes.
@@ -54,23 +63,20 @@ pub const FIRST_READ: usize = 32 << 10;
 /// file, so a reader refuses one it is not set to hold, or cannot allocate, rather than aborting:
 /// in WASM an abort ends every recording on the page.
 pub fn buffer(len: usize, max: usize) -> Result<Vec<u8>, DecodeError> {
-    let too_big = || {
-        corrupt(format!(
-            "it decodes to {len} bytes, more than this reader holds ({max})"
-        ))
-    };
     if len > max {
-        return Err(too_big());
+        return Err(DecodeError::Resource(format!(
+            "it decodes to {len} bytes, more than this reader holds ({max})"
+        )));
     }
     let mut out = Vec::new();
-    out.try_reserve_exact(len).map_err(|_| too_big())?;
+    out.try_reserve_exact(len)
+        .map_err(|_| DecodeError::Resource(format!("{CANT_HOLD} the {len} bytes it decodes to")))?;
     Ok(out)
 }
 
-/// The most a reader decodes from one frame unless it is set otherwise: a block, an overview
-/// block, a strip or the annotation bundle. The format sets no maximum, and a file can state up
-/// to 4 GiB.
-pub const MAX_DECODED: usize = 64 << 20;
+/// The most a reader decodes from one frame unless it is set otherwise: the most any frame the
+/// format allows decodes to, an annotation bundle's 64 MiB (FORMAT.md, "Limits").
+pub const MAX_DECODED: usize = record::MAX_BUNDLE;
 
 /// Decompresses exactly one zstd frame, which must fill `frame`, come to exactly `len` bytes and
 /// carry a checksum that matches. A skippable frame, a frame that names a dictionary, or any byte
@@ -82,6 +88,12 @@ pub fn inflate(frame: &[u8], len: usize) -> Result<Vec<u8>, DecodeError> {
 /// `inflate`, holding at most `max` decoded bytes. libzstd checks the frame's checksum.
 pub fn inflate_limited(frame: &[u8], len: usize, max: usize) -> Result<Vec<u8>, DecodeError> {
     use zstd::zstd_safe;
+    if frame.len() > compress_bound(len) {
+        return Err(corrupt(format!(
+            "a frame of {} bytes for {len} decoded bytes, more than zstd's bound for them",
+            frame.len()
+        )));
+    }
     let mut out = buffer(len, max)?;
     // RFC 8878: the magic number, then the frame header descriptor, whose bit 2 says the frame
     // ends in a checksum and whose bits 0-1 give the size of a dictionary id. libzstd would read
@@ -216,22 +228,28 @@ pub fn derived_values(
     samples::product_values(product, va, vb)
 }
 
-/// The place of the last of a run's `n` samples, the first at `tick`, in source ticks, in u128 so
-/// that an absurd count or period cannot wrap into a tick inside the capture. `tick` is not
-/// negative.
-fn run_last(tick: i64, period: Ratio, n: u64) -> u128 {
-    tick as u128
-        + u128::from(n.saturating_sub(1)) * u128::from(period.num()) / u128::from(period.den())
-}
-
-/// Place `steps` periods on from `tick`, in u128 for the same reason.
-fn place_on(tick: i64, period: Ratio, steps: u64) -> u128 {
-    tick as u128 + u128::from(steps) * u128::from(period.num()) / u128::from(period.den())
-}
-
 /// A source tick a channel names: in `0..2^53` (FORMAT.md, "Times").
 fn source_tick(k: i64) -> bool {
     (0..JSON_SAFE as i64).contains(&k)
+}
+
+/// Whether a place of `units / d` source ticks lies at a source time in `0..2^53` and maps into
+/// `0..length`: every sample's place.
+fn place_inside(map: &Mapping, units: i128, d: u64, length: i64) -> bool {
+    units >= 0
+        && units.div_euclid(i128::from(d)) < i128::from(JSON_SAFE)
+        && map
+            .axis_place(units, d)
+            .is_some_and(|t| (0..length).contains(&t))
+}
+
+/// Whether such a place maps into `0..=length`: the end of a loss after the last sample.
+fn place_up_to(map: &Mapping, units: i128, d: u64, length: i64) -> bool {
+    units >= 0
+        && units.div_euclid(i128::from(d)) < i128::from(JSON_SAFE)
+        && map
+            .axis_place(units, d)
+            .is_some_and(|t| (0..=length).contains(&t))
 }
 
 /// Whether source tick `k` lies in `0..2^53` and maps into `0..length`.
@@ -257,8 +275,25 @@ pub(crate) fn check_declaration(d: &Declaration) -> Result<(), DecodeError> {
     let safe = |v: u64| v < JSON_SAFE;
     let within = |v: i64| v.unsigned_abs() < JSON_SAFE;
     let terms = |r: Ratio| safe(r.num()) && safe(r.den());
+    // This version defines no feature a recording can require.
+    if !d.requires.is_empty() {
+        return Err(corrupt(format!(
+            "the recording requires {}, which this reader doesn't know",
+            d.requires.join(", ")
+        )));
+    }
+    if d.channels.len() + d.derived.len() > MAX_CHANNELS {
+        return Err(corrupt(format!(
+            "{} channels and {} derived channels, more than the {MAX_CHANNELS} a recording holds",
+            d.channels.len(),
+            d.derived.len()
+        )));
+    }
     if !terms(d.timebase) {
         return Err(corrupt("the timebase has a term past 2^53"));
+    }
+    if !d.timebase.is_lowest() {
+        return Err(corrupt("the timebase is not in lowest terms"));
     }
     if d.overview_shift > overview::MAX_SHIFT {
         return Err(corrupt("the finest overview level's shift is past 62"));
@@ -274,10 +309,30 @@ pub(crate) fn check_declaration(d: &Declaration) -> Result<(), DecodeError> {
                 "source {s}'s stretch has a term past 2^53"
             )));
         }
-        if d.m(s).is_none() {
+        if !source.timebase.is_lowest() || source.stretch.is_some_and(|r| !r.is_lowest()) {
+            return Err(corrupt(format!(
+                "source {s}'s timebase or stretch is not in lowest terms"
+            )));
+        }
+        let (half, two) = (Ratio::new(1, 2).unwrap(), Ratio::integer(2).unwrap());
+        if source
+            .stretch
+            .is_some_and(|r| r.less_than(half) || two.less_than(r))
+        {
+            return Err(corrupt(format!(
+                "source {s}'s stretch lies outside 1/2 to 2"
+            )));
+        }
+        let Some(m) = d.m(s) else {
             return Err(corrupt(format!(
                 "source {s}'s m, the axis ticks in one of its ticks, has a term past 2^53 in \
                  lowest terms"
+            )));
+        };
+        if m.less_than(half) {
+            return Err(corrupt(format!(
+                "source {s}'s m, the axis ticks in one of its ticks, is below 1/2: more than two \
+                 of its ticks would share an axis tick"
             )));
         }
         if !within(source.origin) || source.align.is_some_and(|a| !within(a)) {
@@ -352,6 +407,24 @@ pub(crate) fn check_declaration(d: &Declaration) -> Result<(), DecodeError> {
         if !terms(*period) {
             return Err(corrupt(format!("channel {name}'s period is past 2^53")));
         }
+        if !period.is_lowest() || period.num() < period.den() {
+            return Err(corrupt(format!(
+                "channel {name}'s period is not in lowest terms, or is below one tick"
+            )));
+        }
+        if let DeclaredKind::Analog { phase: Some(f), .. } = &c.data
+            && (!f.is_lowest() || f.num() >= f.den())
+        {
+            return Err(corrupt(format!(
+                "channel {name}'s phase is not in lowest terms, or not below one tick"
+            )));
+        }
+        if c.grid().is_none() {
+            return Err(corrupt(format!(
+                "channel {name}'s grid, the least common multiple of its phase's and period's \
+                 denominators, is 2^16 or more"
+            )));
+        }
         match coding {
             AnalogCoding::F32 | AnalogCoding::F64 => {}
             AnalogCoding::Codes {
@@ -386,6 +459,11 @@ pub(crate) fn check_declaration(d: &Declaration) -> Result<(), DecodeError> {
                             "channel {name}'s {what} has a term past 2^53"
                         )));
                     }
+                    if ratio.is_some_and(|r| !r.is_lowest()) {
+                        return Err(corrupt(format!(
+                            "channel {name}'s {what} is not in lowest terms"
+                        )));
+                    }
                 }
             }
         }
@@ -404,29 +482,45 @@ pub(crate) fn check_declaration(d: &Declaration) -> Result<(), DecodeError> {
                 "derived channel {name} states 0 significant figures; it states at least 1"
             )));
         }
-        let mut operands = Vec::with_capacity(2);
-        for operand in &derived.product {
-            let Some(c) = d
-                .channels
-                .iter()
-                .find(|c| c.name == *operand && c.coding().is_some())
-            else {
+        // Checked of every derived channel, whether or not this version computes it.
+        if derived.operands.is_empty() {
+            return Err(corrupt(format!("derived channel {name} names no operand")));
+        }
+        let mut operands = Vec::with_capacity(derived.operands.len());
+        for operand in &derived.operands {
+            let Some(c) = d.channels.iter().find(|c| c.name == *operand) else {
                 return Err(corrupt(format!(
-                    "derived channel {name}: no analog channel {operand}"
+                    "derived channel {name}: no channel {operand}"
                 )));
             };
             operands.push(c);
         }
-        let (a, b) = (operands[0], operands[1]);
-        let period = |c: &DeclaredChannel| match &c.data {
-            DeclaredKind::Analog { period, .. } => Some(*period),
+        // An operation this version doesn't know, or one given `params` or `requires`, makes
+        // the channel unavailable, and so does an operand that is.
+        if !derived.known() || operands.iter().any(|c| !c.available()) {
+            continue;
+        }
+        let [a, b] = operands[..] else {
+            return Err(corrupt(format!(
+                "derived channel {name}: {} takes two operands, not {}",
+                derived.op,
+                operands.len()
+            )));
+        };
+        if a.coding().is_none() || b.coding().is_none() {
+            return Err(corrupt(format!(
+                "derived channel {name}: its operands are analog channels"
+            )));
+        }
+        let grid = |c: &DeclaredChannel| match &c.data {
+            DeclaredKind::Analog { period, phase, .. } => Some((*period, *phase)),
             DeclaredKind::Digital { .. } => None,
         };
         let moved = |c: &DeclaredChannel| c.shaping.offset.as_ref().map_or(0, |o| o.ticks);
-        if a.source != b.source || period(a) != period(b) || moved(a) != moved(b) {
+        if a.source != b.source || grid(a) != grid(b) || moved(a) != moved(b) {
             return Err(corrupt(format!(
                 "derived channel {name}: {} and {} come from different sources, or have \
-                 different periods or moves",
+                 different periods, phases or moves",
                 a.name, b.name
             )));
         }
@@ -526,14 +620,15 @@ pub(crate) fn check_gaps(
     Ok(())
 }
 
-/// An analog channel's runs, against what its header states of it: each break in order and
-/// inside its samples, each run's last sample at or before the next run's tick, and every sample
-/// and the losses at either end inside the capture. Its last run.
+/// An analog channel's runs, against what its header states of it (FORMAT.md, "Gaps"): each
+/// break in order, inside its samples, its phase on the grid, starting at or after the place of
+/// the sample before it and, where it states lost samples, past place `index` on the run before
+/// it; every sample and the losses at either end inside the capture. Its last run.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn check_runs(
     name: &str,
+    grid: Grid,
     first: i64,
-    period: Ratio,
     count: u64,
     breaks: &[Break],
     lost_after: u64,
@@ -541,11 +636,8 @@ pub(crate) fn check_runs(
     length: i64,
 ) -> Result<Break, DecodeError> {
     let outside = || corrupt(format!("channel {name}'s samples lie outside the capture"));
-    let mut run = Break {
-        index: 0,
-        tick: first,
-        lost: 0,
-    };
+    let d = grid.d();
+    let mut run = grid.first_run(first, 0);
     if count == 0 {
         // With no sample, `first` places nothing.
         if !breaks.is_empty() {
@@ -553,11 +645,16 @@ pub(crate) fn check_runs(
         }
         return Ok(run);
     }
-    if !maps_inside(map, first, length) {
+    if !source_tick(first) || !place_inside(map, grid.start(run), d, length) {
         return Err(outside());
     }
     for b in breaks {
-        if b.index <= run.index || b.index >= count || !maps_inside(map, b.tick, length) {
+        if b.index <= run.index
+            || b.index >= count
+            || u64::from(b.phase) >= d
+            || !source_tick(b.tick)
+            || !place_inside(map, grid.start(*b), d, length)
+        {
             return Err(corrupt(format!("channel {name}: a break is out of place")));
         }
         if b.lost >= JSON_SAFE {
@@ -565,19 +662,16 @@ pub(crate) fn check_runs(
                 "channel {name}: a break's lost count is past 2^53"
             )));
         }
-        if run_last(run.tick, period, b.index - run.index) > b.tick as u128 {
-            return Err(outside());
-        }
+        check_break(name, grid, run, *b)?;
         run = *b;
     }
-    let last = run_last(run.tick, period, count - run.index);
-    if last >= u128::from(JSON_SAFE) || !maps_inside(map, last as i64, length) {
+    let last = grid.place(run, count - 1);
+    if !place_inside(map, last, d, length) {
         return Err(outside());
     }
     if lost_after > 0 {
-        let end = place_on(run.tick, period, count - run.index + lost_after);
-        let fits = end < u128::from(JSON_SAFE) && maps_up_to(map, end as i64, length);
-        if !fits {
+        let end = grid.place(run, count.saturating_add(lost_after));
+        if !place_up_to(map, end, d, length) {
             return Err(corrupt(format!(
                 "channel {name}: the {lost_after} samples lost after its last end past the length"
             )));
@@ -586,24 +680,39 @@ pub(crate) fn check_runs(
     Ok(run)
 }
 
+/// A break `b` after the run `run`: it starts at or after the place of the sample before it, and
+/// where it states lost samples, past place `b.index` on `run`'s grid, so that part of a lost
+/// sample lies before it.
+pub(crate) fn check_break(name: &str, grid: Grid, run: Break, b: Break) -> Result<(), DecodeError> {
+    let start = grid.start(b);
+    if start < grid.place(run, b.index - 1) {
+        return Err(corrupt(format!(
+            "channel {name}: the run at sample {} starts before the sample before it",
+            b.index
+        )));
+    }
+    if b.lost > 0 && start <= grid.place(run, b.index) {
+        return Err(corrupt(format!(
+            "channel {name}: the run at sample {} states {} lost samples, but starts no later \
+             than where the first of them would sit",
+            b.index, b.lost
+        )));
+    }
+    Ok(())
+}
+
 /// Where the samples lost before an analog channel's first start: the place of `-lost` on the
-/// first run's grid, `first - ceil(lost × period)`; None below source tick 0.
-pub fn lost_before_start(first: i64, period: Ratio, lost: u64) -> Option<i64> {
-    let span = (u128::from(lost) * u128::from(period.num())).div_ceil(u128::from(period.den()));
-    i64::try_from(i128::from(first) - i128::try_from(span).ok()?)
-        .ok()
-        .filter(|&t| t >= 0)
+/// first run's grid, in `1/d` ticks; None below source tick 0.
+pub fn lost_before_start(grid: Grid, first: i64, lost: u64) -> Option<i128> {
+    let run = grid.first_run(first, 0);
+    let back = i128::try_from(u128::from(lost).checked_mul(grid.step())?).ok()?;
+    Some(grid.start(run).checked_sub(back)?).filter(|&u| u >= 0)
 }
 
 /// Where the samples lost after an analog channel's last end: the place of `count + lost` on the
-/// last run's grid.
-pub fn lost_after_end(run: Break, period: Ratio, count: u64, lost: u64) -> Option<i64> {
-    i64::try_from(place_on(
-        run.tick,
-        period,
-        (count - run.index).checked_add(lost)?,
-    ))
-    .ok()
+/// last run's grid, in `1/d` ticks.
+pub fn lost_after_end(grid: Grid, run: Break, count: u64, lost: u64) -> Option<i128> {
+    Some(grid.place(run, count.checked_add(lost)?))
 }
 
 /// What the header promises about the capture's extent, checked before anything relies on it.
@@ -658,11 +767,14 @@ pub(crate) fn check_header(h: &Header) -> Result<(), DecodeError> {
                 if !safe(*edges) {
                     return Err(corrupt(format!("channel {name}'s edge count is past 2^53")));
                 }
-                check_gaps(name, gaps, start, *end, *initial, &map, length)?;
+                if ch.available() {
+                    check_gaps(name, gaps, start, *end, *initial, &map, length)?;
+                }
             }
             ChannelKind::Analog {
                 first,
                 period,
+                phase,
                 count,
                 breaks,
                 break_count,
@@ -670,6 +782,8 @@ pub(crate) fn check_header(h: &Header) -> Result<(), DecodeError> {
                 lost_after,
                 ..
             } => {
+                let grid = Grid::new(*period, *phase)
+                    .ok_or_else(|| corrupt(format!("channel {name}'s grid is 2^16 or more")))?;
                 if !safe(*count) || !safe(*lost_before) || !safe(*lost_after) {
                     return Err(corrupt(format!(
                         "channel {name}'s count or losses are past 2^53"
@@ -686,19 +800,21 @@ pub(crate) fn check_header(h: &Header) -> Result<(), DecodeError> {
                     )));
                 }
                 if *lost_before > 0 {
-                    let start = lost_before_start(*first, *period, *lost_before);
-                    if start.is_none_or(|t| map.axis(t).is_none_or(|t| t < 0)) {
+                    let start = lost_before_start(grid, *first, *lost_before);
+                    if start.is_none_or(|u| map.axis_place(u, grid.d()).is_none_or(|t| t < 0)) {
                         return Err(corrupt(format!(
                             "channel {name}: the {lost_before} samples lost before its first \
                              start below tick 0"
                         )));
                     }
                 }
-                if break_count.is_none() {
+                if !ch.available() {
+                    // Its data is not this version's to check.
+                } else if break_count.is_none() {
                     let run = check_runs(
                         name,
+                        grid,
                         *first,
-                        *period,
                         *count,
                         breaks,
                         *lost_after,
@@ -706,23 +822,30 @@ pub(crate) fn check_header(h: &Header) -> Result<(), DecodeError> {
                         length,
                     )?;
                     check_shaping(ch, run)?;
-                } else if *count > 0 && !maps_inside(&map, *first, length) {
+                } else if *count > 0
+                    && !place_inside(
+                        &map,
+                        grid.start(grid.first_run(*first, 0)),
+                        grid.d(),
+                        length,
+                    )
+                {
                     return Err(corrupt(format!(
                         "channel {name}'s samples lie outside the capture"
                     )));
                 }
             }
         }
-        if let ChannelKind::Digital { .. } = &ch.data {
-            check_shaping(
-                ch,
-                Break {
-                    index: 0,
-                    tick: 0,
-                    lost: 0,
-                },
-            )?;
+        if let ChannelKind::Digital { .. } = &ch.data
+            && ch.available()
+        {
+            check_shaping(ch, Break::default())?;
         }
+    }
+    if h.annotation_parts == Some(0) {
+        return Err(corrupt(
+            "the header states 0 annotation parts; a recording with none states no count",
+        ));
     }
     let overview_channels = h.channels.len() + h.derived.len();
     for o in 0..overview_channels {
@@ -751,8 +874,12 @@ pub(crate) fn check_header(h: &Header) -> Result<(), DecodeError> {
             )));
         }
     }
-    // A derived channel's sample i sits where its operands' do.
-    for d in &h.derived {
+    // A derived channel's sample i sits where its operands' do: compared from what the header
+    // holds, and of paged breaks where a reader fetches both lists.
+    for (i, d) in h.derived.iter().enumerate() {
+        if !h.available(h.channels.len() + i) {
+            continue;
+        }
         let extent = |operand: &String| {
             h.channels
                 .iter()
@@ -760,6 +887,7 @@ pub(crate) fn check_header(h: &Header) -> Result<(), DecodeError> {
                 .and_then(|c| match &c.data {
                     ChannelKind::Analog {
                         first,
+                        phase,
                         count,
                         breaks,
                         break_count,
@@ -768,6 +896,7 @@ pub(crate) fn check_header(h: &Header) -> Result<(), DecodeError> {
                         ..
                     } => Some((
                         *first,
+                        *phase,
                         *count,
                         breaks,
                         *break_count,
@@ -777,10 +906,10 @@ pub(crate) fn check_header(h: &Header) -> Result<(), DecodeError> {
                     ChannelKind::Digital { .. } => None,
                 })
         };
-        if extent(&d.product[0]) != extent(&d.product[1]) {
+        if extent(&d.operands[0]) != extent(&d.operands[1]) {
             return Err(corrupt(format!(
-                "derived channel {}: {} and {} differ in first, count, breaks or losses",
-                d.name, d.product[0], d.product[1]
+                "derived channel {}: {} and {} differ in first, phase, count, breaks or losses",
+                d.name, d.operands[0], d.operands[1]
             )));
         }
     }
@@ -807,16 +936,21 @@ fn check_shaping(c: &ChannelHeader, run: Break) -> Result<(), DecodeError> {
         ChannelKind::Analog {
             first,
             period,
+            phase,
             count,
             ..
         } => {
             if *count == 0 {
                 return Ok(());
             }
-            let last = run_last(run.tick, *period, count - run.index);
-            if *first < from || last >= to as u128 {
-                // As an i64: formatting a u128 costs the browser's decoder more than this check.
-                let last = i64::try_from(last).unwrap_or(i64::MAX);
+            let Some(grid) = Grid::new(*period, *phase) else {
+                return Err(corrupt(format!("channel {name}'s grid is 2^16 or more")));
+            };
+            let d = i128::from(grid.d());
+            let last = grid.place(run, count - 1);
+            if *first < from || last >= i128::from(to) * d {
+                // As an i64: formatting an i128 costs the browser's decoder more than this check.
+                let last = grid.floor(last);
                 return Err(corrupt(format!(
                     "channel {name} is kept from {from} to {to}, but its samples run from {first} to {last}"
                 )));
@@ -876,14 +1010,16 @@ pub(crate) enum Section {
     },
 }
 
-/// A block's decoded payload as its channel's items. `word` is the block's word.
+/// A block's decoded payload as its channel's items. `word` is the block's word. A section that
+/// breaks the format is a `Corrupt` error whose message the caller places; one this reader can't
+/// allocate for is a `Resource` error.
 pub(crate) fn decode_section(
     raw: &[u8],
     section: &Section,
     word: u32,
     start: i64,
     end: i64,
-) -> Result<BlockChannel, String> {
+) -> Result<BlockChannel, DecodeError> {
     Ok(match section {
         Section::Digital {
             start: from,
@@ -908,9 +1044,23 @@ pub(crate) fn decode_section(
             first_index,
         } => BlockChannel::Analog {
             first_index: *first_index,
-            values: analog_values(raw, word as usize, *coding)?,
+            values: analog_values(raw, word as usize, *coding).map_err(|e| {
+                if e.starts_with(CANT_HOLD) {
+                    DecodeError::Resource(e)
+                } else {
+                    DecodeError::Corrupt(e)
+                }
+            })?,
         },
     })
+}
+
+/// A section decoder's error with `what` placed before its message, where the format is broken.
+pub(crate) fn placed(e: DecodeError, what: impl FnOnce() -> String) -> DecodeError {
+    match e {
+        DecodeError::Corrupt(m) => corrupt(format!("{}: {m}", what())),
+        other => other,
+    }
 }
 
 /// A block as a channel's index places it: its row, where it ends, the index of its first item,
@@ -955,6 +1105,10 @@ pub enum List {
 pub struct ChannelIndex {
     /// Its finest overview level's shift.
     pub finest: u8,
+    /// Whether this version reads it (FORMAT.md, "Unavailable channels"). An unavailable
+    /// channel's tables are listed, so a reader finds its way past them, but nothing of its
+    /// blocks, overview or strip is read, and its `column` says nothing.
+    pub available: bool,
     pub column: Column,
     /// Its strip's shift: its coarsest level's.
     pub strip_shift: u8,
@@ -985,8 +1139,9 @@ pub struct Footer {
     pub bundle: Option<(u64, u32)>,
     /// Each channel's, then each derived channel's.
     pub channels: Vec<ChannelIndex>,
-    /// Each derived channel's operands, by channel index, and its rule.
-    pub products: Vec<(usize, usize, Product)>,
+    /// Each derived channel's operands, by channel index, and its rule; None for one this
+    /// version can't compute, which is unavailable.
+    pub products: Vec<Option<(usize, usize, Product)>>,
     strips: Vec<u8>,
     /// Each channel's mapping to the axis.
     maps: Vec<Mapping>,
@@ -1094,6 +1249,12 @@ impl Footer {
                 minor: trailer.minor,
             });
         }
+        if trailer.footer_len as usize > MAX_FOOTER {
+            return Err(corrupt(format!(
+                "the footer is {} bytes, more than the {MAX_FOOTER} a footer holds",
+                trailer.footer_len
+            )));
+        }
         let footer_end = trailer
             .footer_offset
             .checked_add(u64::from(trailer.footer_len));
@@ -1131,11 +1292,17 @@ impl Footer {
             return Err(corrupt("the footer's lengths do not fit it"));
         }
         let (header_end, index_end) = (header_end as usize, index_end as usize);
+        if header_len as usize > MAX_DECLARATION {
+            return Err(corrupt(format!(
+                "the footer's header is {header_len} bytes, more than the {MAX_DECLARATION} a \
+                 header holds"
+            )));
+        }
         let header: Header = serde_json::from_slice(&payload[record::FOOTER_HEAD_LEN..header_end])?;
         check_header(&header)?;
         let declaration = header.declaration();
         let columns = overview::columns(&declaration.channels, &declaration.derived);
-        let products = overview::products(&declaration.channels, &declaration.derived);
+        let products = overview::rules(&declaration.channels, &declaration.derived);
         let footer_offset = trailer.footer_offset;
 
         let mut cursor = &payload[header_end..index_end];
@@ -1187,11 +1354,21 @@ impl Footer {
             let finest = header.shift(o).expect("a checked header's channel");
             let ladder = overview::ladder(header.length, finest);
             let strip_shift = *ladder.last().expect("a ladder has a strip");
+            let available = header.available(o);
+            // An unavailable channel's strip has a layout this version can't know.
             let want = column.decoded_len(overview::buckets(header.length, strip_shift));
-            if u64::from(decoded) != want {
+            if available && u64::from(decoded) != want {
                 return Err(corrupt(format!(
                     "channel {o}'s strip decodes to {decoded} bytes, where its {} buckets take {want}",
                     overview::buckets(header.length, strip_shift)
+                )));
+            }
+            if decoded as usize > record::MAX_STRIP
+                || frame_len as usize > compress_bound(decoded as usize)
+            {
+                return Err(corrupt(format!(
+                    "channel {o}'s strip is {frame_len} bytes for {decoded}, past the format's \
+                     limits"
                 )));
             }
             let strip_end = strip_at
@@ -1226,6 +1403,7 @@ impl Footer {
             };
             channels.push(ChannelIndex {
                 finest,
+                available,
                 column,
                 strip_shift,
                 strip: strip_at..strip_end,
@@ -1291,6 +1469,39 @@ impl Footer {
         self.channels.len()
     }
 
+    /// Whether this version reads overview channel `o`: false for one it shows as unavailable,
+    /// and for no such channel.
+    pub fn available(&self, o: usize) -> bool {
+        self.channels.get(o).is_some_and(|c| c.available)
+    }
+
+    /// An error naming overview channel `o` where it is unavailable, or there is no such channel.
+    pub fn check_available(&self, o: usize) -> Result<(), DecodeError> {
+        if self.available(o) {
+            return Ok(());
+        }
+        let name = match self.header.channels.get(o) {
+            Some(c) => c.name.clone(),
+            None => self
+                .header
+                .derived
+                .get(o.wrapping_sub(self.header.channels.len()))
+                .map_or_else(|| format!("{o}"), |d| d.name.clone()),
+        };
+        Err(corrupt(format!(
+            "channel {name} is unavailable to this reader: it needs a feature, codec or \
+             operation this version doesn't know, or is derived from one that does"
+        )))
+    }
+
+    /// Analog channel `c`'s grid; None for a digital channel, or no such channel.
+    pub fn grid(&self, c: usize) -> Option<Grid> {
+        match &self.header.channels.get(c)?.data {
+            ChannelKind::Analog { period, phase, .. } => Grid::new(*period, *phase),
+            ChannelKind::Digital { .. } => None,
+        }
+    }
+
     /// Overview channel `o`'s strip: its coarsest level, every bucket.
     pub fn strip(&self, o: usize) -> Result<Level, DecodeError> {
         self.strip_with(o, inflate)
@@ -1306,6 +1517,7 @@ impl Footer {
             .channels
             .get(o)
             .ok_or_else(|| corrupt(format!("no channel {o}")))?;
+        self.check_available(o)?;
         let raw = inflate(&self.strips[c.strip.clone()], c.strip_decoded as usize)?;
         let n = overview::buckets(self.header.length, c.strip_shift);
         Level::parse(&raw, c.strip_shift, n, c.column)
@@ -1387,6 +1599,7 @@ impl Footer {
             ChannelKind::Analog {
                 first,
                 period,
+                phase,
                 count,
                 lost_after,
                 ..
@@ -1398,10 +1611,11 @@ impl Footer {
                         _ => unreachable!("a break list's pages hold breaks"),
                     })
                     .collect();
+                let grid = Grid::new(*period, *phase).expect("a checked header's grid");
                 let run = check_runs(
                     name,
+                    grid,
                     *first,
-                    *period,
                     *count,
                     &breaks,
                     *lost_after,
@@ -1409,12 +1623,16 @@ impl Footer {
                     h.length,
                 )?;
                 check_shaping(ch, run)?;
-                // A derived channel's operands share their breaks.
-                for d in &h.derived {
-                    let partner = if d.product[0] == *name {
-                        &d.product[1]
-                    } else if d.product[1] == *name {
-                        &d.product[0]
+                // A derived channel's operands share their breaks: checked where both lists are
+                // read, never by reading one only to check it.
+                for (i, d) in h.derived.iter().enumerate() {
+                    if self.products.get(i).is_none_or(Option::is_none) {
+                        continue;
+                    }
+                    let partner = if d.operands[0] == *name {
+                        &d.operands[1]
+                    } else if d.operands[1] == *name {
+                        &d.operands[0]
                     } else {
                         continue;
                     };
@@ -1424,7 +1642,7 @@ impl Footer {
                     {
                         return Err(corrupt(format!(
                             "derived channel {}: {} and {} differ in breaks",
-                            d.name, d.product[0], d.product[1]
+                            d.name, d.operands[0], d.operands[1]
                         ))
                         .into());
                     }
@@ -1616,6 +1834,7 @@ impl Footer {
                 ChannelKind::Analog {
                     first,
                     period,
+                    phase,
                     count,
                     lost_after,
                     ..
@@ -1624,26 +1843,24 @@ impl Footer {
             ) => {
                 let outside =
                     || corrupt(format!("channel {name}'s samples lie outside the capture"));
-                let mut run = (at.j == 0).then_some(Break {
-                    index: 0,
-                    tick: *first,
-                    lost: 0,
-                });
+                let grid = Grid::new(*period, *phase).expect("a checked header's grid");
+                let d = grid.d();
+                let mut run = (at.j == 0).then_some(grid.first_run(*first, 0));
                 if *count == 0 {
                     return Err(out_of_place());
                 }
                 for b in breaks {
                     if run.is_some_and(|r| b.index <= r.index)
                         || b.index >= *count
-                        || !maps_inside(&map, b.tick, length)
+                        || u64::from(b.phase) >= d
+                        || !source_tick(b.tick)
+                        || !place_inside(&map, grid.start(*b), d, length)
                         || b.lost >= JSON_SAFE
                     {
                         return Err(out_of_place());
                     }
-                    if let Some(r) = run
-                        && run_last(r.tick, *period, b.index - r.index) > b.tick as u128
-                    {
-                        return Err(outside());
+                    if let Some(r) = run {
+                        check_break(name, grid, r, *b)?;
                     }
                     run = Some(*b);
                 }
@@ -1652,21 +1869,23 @@ impl Footer {
                 };
                 match at.next {
                     Some((tick, index)) => {
+                        // The next page's first break, of which its directory entry gives the
+                        // tick and index: it starts at or after the place of the sample before
+                        // it, whatever its phase.
                         if index <= last.index
-                            || run_last(last.tick, *period, index - last.index) > tick as u128
+                            || grid.place(last, index - 1) >= (i128::from(tick) + 1) * d as i128
                         {
                             return Err(out_of_place());
                         }
                     }
                     None => {
                         // The last run, as `check_runs` ends.
-                        let end = run_last(last.tick, *period, count - last.index);
-                        if end >= u128::from(JSON_SAFE) || !maps_inside(&map, end as i64, length) {
+                        if !place_inside(&map, grid.place(last, count - 1), d, length) {
                             return Err(outside());
                         }
                         if *lost_after > 0 {
-                            let to = place_on(last.tick, *period, count - last.index + lost_after);
-                            if to >= u128::from(JSON_SAFE) || !maps_up_to(&map, to as i64, length) {
+                            let to = grid.place(last, count.saturating_add(*lost_after));
+                            if !place_up_to(&map, to, d, length) {
                                 return Err(outside());
                             }
                         }
@@ -1681,8 +1900,9 @@ impl Footer {
 
     /// What a channel's blocks say without being decoded, against its gaps or runs where they
     /// are known: a digital channel's level at each block's start, and an analog channel's
-    /// samples inside each block's ticks. `blocks` are the channel's from block `from` on; the
-    /// gaps or breaks are `list` where it is given, else the footer's.
+    /// samples inside each block's ticks. Each row's frame lies within the format's limits, so
+    /// nothing past them is fetched. `blocks` are the channel's from block `from` on; the gaps or
+    /// breaks are `list` where it is given, else the footer's.
     fn check_blocks(
         &self,
         c: usize,
@@ -1692,6 +1912,32 @@ impl Footer {
     ) -> Result<(), DecodeError> {
         let ch = &self.header.channels[c];
         let name = &ch.name;
+        if let Some(b) = blocks.iter().find(|b| {
+            b.row.decoded_length as usize > MAX_BLOCK
+                || b.row.length as usize > compress_bound(b.row.decoded_length as usize)
+        }) {
+            return Err(corrupt(format!(
+                "channel {name}: the block at tick {} is {} bytes for {}, past the format's \
+                 limits",
+                b.start, b.row.length, b.row.decoded_length
+            )));
+        }
+        // Each item takes a byte at least, so a block holds at most as many as it decodes to.
+        let digital = matches!(ch.data, ChannelKind::Digital { .. });
+        if let Some(b) = blocks
+            .iter()
+            .find(|b| b.row.items(digital) as usize > MAX_BLOCK)
+        {
+            return Err(corrupt(format!(
+                "channel {name}: the block at tick {} holds {} items, more than the {MAX_BLOCK} a \
+                 block holds",
+                b.start,
+                b.row.items(digital)
+            )));
+        }
+        if !ch.available() {
+            return Ok(());
+        }
         let given_ends;
         let (gaps, ends) = match list {
             Some(List::Gaps(g)) => {
@@ -1775,7 +2021,11 @@ impl Footer {
             for row in rows {
                 let (_, n) = overview::block_buckets(self.header.length, level.shift, k);
                 let want = ch.column.decoded_len(n);
-                if n == 0 || u64::from(row.decoded_length) != want {
+                if n == 0
+                    || (ch.available && u64::from(row.decoded_length) != want)
+                    || row.length as usize > compress_bound(row.decoded_length as usize)
+                    || row.decoded_length as usize > record::MAX_OVERVIEW_BLOCK
+                {
                     return Err(bad().into());
                 }
                 out.push(LevelRef { k, row });
@@ -1826,7 +2076,11 @@ impl Footer {
         let mut k = *first;
         for &row in rows {
             let (_, n) = overview::block_buckets(self.header.length, level.shift, k);
-            if n == 0 || u64::from(row.decoded_length) != ch.column.decoded_len(n) {
+            if n == 0
+                || (ch.available && u64::from(row.decoded_length) != ch.column.decoded_len(n))
+                || row.length as usize > compress_bound(row.decoded_length as usize)
+                || row.decoded_length as usize > record::MAX_OVERVIEW_BLOCK
+            {
                 return Err(bad());
             }
             out.push(LevelRef { k, row });
@@ -1868,6 +2122,7 @@ impl Footer {
             .levels
             .get(li)
             .ok_or_else(|| corrupt(format!("channel {o} has no overview level {li} in blocks")))?;
+        self.check_available(o)?;
         decode_overview_frame(
             ch.column,
             level.shift,
@@ -1953,7 +2208,7 @@ impl Footer {
     /// Whether block `b` of analog channel `c` holds its samples inside its ticks, by `breaks`.
     fn samples_inside(&self, c: usize, b: &BlockRef, breaks: &[Break]) -> Result<(), DecodeError> {
         let ch = &self.header.channels[c];
-        let ChannelKind::Analog { first, period, .. } = &ch.data else {
+        let ChannelKind::Analog { first, .. } = &ch.data else {
             return Ok(());
         };
         let n = u64::from(b.row.word);
@@ -1961,7 +2216,8 @@ impl Footer {
             return Ok(());
         }
         let map = self.maps[c];
-        let tick = |index| map.axis(run_sample_tick(*first, *period, breaks, index));
+        let grid = self.grid(c).expect("a checked header's grid");
+        let tick = |index| map.axis_place(grid.sample_place(*first, breaks, index), grid.d());
         if tick(b.first_index).is_none_or(|t| t < b.start)
             || tick(b.first_index + n - 1).is_none_or(|t| t >= b.end)
         {
@@ -1986,6 +2242,13 @@ impl Footer {
             .channels
             .get(c)
             .ok_or_else(|| corrupt(format!("no channel {c}")))?;
+        self.check_available(c)?;
+        if b.row.decoded_length as usize > MAX_BLOCK {
+            return Err(corrupt(format!(
+                "channel {}: a block decodes to {} bytes, more than the {MAX_BLOCK} a block holds",
+                ch.name, b.row.decoded_length
+            )));
+        }
         if frame.len() != b.row.length as usize {
             return Err(corrupt(format!(
                 "channel {}: a block is {} bytes, the index says {}",
@@ -2012,7 +2275,11 @@ impl Footer {
                 ch.name, b.start
             ))
         };
-        let data = decode_section(&raw, &section, b.row.word, b.start, b.end).map_err(bad)?;
+        let data = decode_section(&raw, &section, b.row.word, b.start, b.end).map_err(|e| {
+            placed(e, || {
+                format!("channel {}, the block at tick {}", ch.name, b.start)
+            })
+        })?;
         if let (BlockChannel::Digital { initial, .. }, Some((gaps, ends))) = (&data, gaps) {
             let edges = data.source_ticks().unwrap_or_default();
             if let Some(t) = edge_in_gap(edges, gaps) {
@@ -2063,17 +2330,26 @@ impl Footer {
         self.channel_starts.get(c).copied()
     }
 
-    /// The axis tick of sample `index` of analog channel `c`, once its breaks are known.
+    /// The axis tick of sample `index` of analog channel `c`, once its breaks are known: the
+    /// tick its place maps to.
     pub fn sample_axis_tick(&self, c: usize, index: u64) -> Option<i64> {
-        self.mapping(c)?.axis(self.sample_tick(c, index)?)
+        let grid = self.grid(c)?;
+        self.mapping(c)?
+            .axis_place(self.sample_place(c, index)?, grid.d())
     }
 
-    /// The source tick of sample `index` of analog channel `c`, its place, once its breaks are
-    /// known.
+    /// The whole source tick at or before sample `index`'s place, of analog channel `c`, once its
+    /// breaks are known.
     pub fn sample_tick(&self, c: usize, index: u64) -> Option<i64> {
+        Some(self.grid(c)?.floor(self.sample_place(c, index)?))
+    }
+
+    /// Sample `index`'s place, in `1/d` source ticks of analog channel `c`'s grid, once its
+    /// breaks are known.
+    pub fn sample_place(&self, c: usize, index: u64) -> Option<i128> {
         match &self.header.channels.get(c)?.data {
-            ChannelKind::Analog { first, period, .. } => {
-                Some(run_sample_tick(*first, *period, self.breaks(c)?, index))
+            ChannelKind::Analog { first, .. } => {
+                Some(self.grid(c)?.sample_place(*first, self.breaks(c)?, index))
             }
             ChannelKind::Digital { .. } => None,
         }
@@ -2234,74 +2510,101 @@ fn digital_edges(
     map: &Mapping,
     channel: Range<i64>,
     block: Range<i64>,
-) -> Result<(Vec<i64>, Option<Vec<i64>>), String> {
+) -> Result<(Vec<i64>, Option<Vec<i64>>), DecodeError> {
+    digital_edges_in(section, count, map, channel, block).map_err(|e| match e {
+        Err(what) => DecodeError::Corrupt(what.to_owned()),
+        Ok(r) => r,
+    })
+}
+
+/// `try_reserve_exact` of `n` ticks, as a `Resource` error where it fails.
+fn ticks(n: usize) -> Result<Vec<i64>, Result<DecodeError, &'static str>> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(n)
+        .map_err(|_| Ok(DecodeError::Resource(format!("{CANT_HOLD} {n} edges"))))?;
+    Ok(v)
+}
+
+/// `digital_edges`, a format error as `Err(Err(message))`.
+#[allow(clippy::type_complexity)]
+fn digital_edges_in(
+    section: &[u8],
+    count: usize,
+    map: &Mapping,
+    channel: Range<i64>,
+    block: Range<i64>,
+) -> Result<(Vec<i64>, Option<Vec<i64>>), Result<DecodeError, &'static str>> {
     if count == 0 {
         if !section.is_empty() {
-            return Err("bytes in the section of a channel with no edge in the block".into());
+            return Err(Err(
+                "bytes in the section of a channel with no edge in the block",
+            ));
         }
         return Ok((Vec::new(), None));
     }
     // Every number takes a byte at least: the step, then one an edge.
     if count >= section.len() {
-        return Err("the section is too short for its edges".into());
+        return Err(Err("the section is too short for its edges"));
     }
     let mut at = 0;
-    let step = get_uleb(section, &mut at).ok_or("the section's step is cut short")?;
+    let step = get_uleb(section, &mut at).ok_or(Err("the section's step is cut short"))?;
     if step == 0 {
-        return Err("the section's step is 0".into());
+        return Err(Err("the section's step is 0"));
     }
-    let first = get_uleb(section, &mut at).ok_or("the first edge is cut short")?;
+    let first = get_uleb(section, &mut at).ok_or(Err("the first edge is cut short"))?;
     let limit = JSON_SAFE;
+    const PAST: &str = "an edge lies past source tick 2^53";
+    let past = || Err(PAST);
     if first >= limit {
-        return Err("an edge lies past source tick 2^53".into());
+        return Err(past());
     }
-    let mut ticks = Vec::with_capacity(count);
+    let mut out = ticks(count)?;
     let mut k = first;
-    ticks.push(k as i64);
+    out.push(k as i64);
     let lo = first as i64;
-    let past = || "an edge lies past source tick 2^53";
+    let cut = || Err("an interval is cut short");
     if step == 1 {
         // Most sections: no multiply on the per-edge path.
         for _ in 1..count {
-            let interval = get_uleb(section, &mut at).ok_or("an interval is cut short")?;
+            let interval = get_uleb(section, &mut at).ok_or_else(cut)?;
             k = k
                 .checked_add(interval)
                 .filter(|&k| k < limit)
                 .ok_or_else(past)?;
-            ticks.push(k as i64);
+            out.push(k as i64);
         }
     } else {
         for _ in 1..count {
-            let interval = get_uleb(section, &mut at).ok_or("an interval is cut short")?;
+            let interval = get_uleb(section, &mut at).ok_or_else(cut)?;
             k = interval
                 .checked_mul(step)
                 .and_then(|d| k.checked_add(d))
                 .filter(|&k| k < limit)
                 .ok_or_else(past)?;
-            ticks.push(k as i64);
+            out.push(k as i64);
         }
     }
     if at != section.len() {
-        return Err("bytes follow the last edge".into());
+        return Err(Err("bytes follow the last edge"));
     }
     let hi = k as i64;
     if lo < channel.start || hi >= channel.end {
-        return Err("an edge lies outside its channel's start and end".into());
+        return Err(Err("an edge lies outside its channel's start and end"));
     }
     if map.is_identity() {
         if lo < block.start || hi >= block.end {
-            return Err("an edge lies outside the block".into());
+            return Err(Err("an edge lies outside the block"));
         }
-        return Ok((ticks, None));
+        return Ok((out, None));
     }
-    let mut edges = Vec::with_capacity(count);
-    for &k in &ticks {
+    let mut edges = ticks(count)?;
+    for &k in &out {
         match map.axis(k) {
             Some(t) if block.contains(&t) => edges.push(t),
-            _ => return Err("an edge lies outside the block".into()),
+            _ => return Err(Err("an edge lies outside the block")),
         }
     }
-    Ok((edges, Some(ticks)))
+    Ok((edges, Some(out)))
 }
 
 /// An analog section's `count` samples in `coding`.
@@ -2338,11 +2641,14 @@ mod tests {
                     significant: None,
                     lost_before,
                     lost_after,
+                    phase: None,
                 },
                 shaping: Default::default(),
                 overview_shift: None,
                 blocks: 1,
                 overview_blocks: vec![],
+                codec: None,
+                requires: Vec::new(),
             }],
             derived: Vec::new(),
             sources: vec![SourceHeader::new(SourceFormat::Vcd, Ratio::ONE)],
@@ -2350,6 +2656,8 @@ mod tests {
             meta: Default::default(),
             content_id: format!("blake3:{}", "0".repeat(64)).parse().unwrap(),
             overview_shift: 12,
+            annotation_parts: None,
+            requires: Vec::new(),
         }
     }
 
@@ -2378,6 +2686,7 @@ mod tests {
             index,
             tick,
             lost: 0,
+            phase: 0,
         }
     }
 
@@ -2485,14 +2794,16 @@ mod tests {
                 "outside its channel's start and end",
             ),
         ] {
-            let err = read(values, count, block).expect_err(why);
+            let err = read(values, count, block).expect_err(why).to_string();
             assert!(err.contains(why), "{values:?}: {err}");
         }
         // Bytes in the section of a channel with no edge in the block.
-        let err = read(&[1], 0, 0..10).expect_err("refused");
+        let err = read(&[1], 0, 0..10).expect_err("refused").to_string();
         assert!(err.contains("no edge in the block"), "{err}");
         // An edge before the channel's start.
-        let err = digital_edges(&uleb(&[1, 4]), 1, &map, 5..100, 0..10_000).expect_err("refused");
+        let err = digital_edges(&uleb(&[1, 4]), 1, &map, 5..100, 0..10_000)
+            .expect_err("refused")
+            .to_string();
         assert!(err.contains("outside its channel's start and end"), "{err}");
     }
 }

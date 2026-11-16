@@ -70,9 +70,12 @@ fn recording() -> Vec<u8> {
             period: Ratio::integer(10).unwrap(),
             coding: AnalogCoding::Int(IntCoding::new(32, false)),
             significant: None,
+            phase: None,
         },
         shaping: Default::default(),
         overview_shift: Some(shift),
+        codec: None,
+        requires: Vec::new(),
     };
     let d = Declaration {
         timebase,
@@ -86,18 +89,24 @@ fn recording() -> Vec<u8> {
                 data: DeclaredKind::Digital { initial: false },
                 shaping: Default::default(),
                 overview_shift: None,
+                codec: None,
+                requires: Vec::new(),
             },
         ],
         derived: vec![Derived {
             name: "P".into(),
             unit: "W".into(),
-            product: ["I".into(), "V".into()],
+            op: escapement_tickwave_format::header::Op::Multiply,
+            operands: vec!["I".into(), "V".into()],
+            params: Default::default(),
+            requires: Vec::new(),
             significant: None,
         }],
         sources: vec![SourceHeader::new(SourceFormat::Other("t".into()), timebase)],
         title: None,
         meta: BTreeMap::new(),
         overview_shift: 6,
+        requires: Vec::new(),
     };
     let mut w = Writer::new(
         d,
@@ -451,9 +460,12 @@ fn marked(bundle: escapement_tickwave_format::writer::Bundle) -> Vec<u8> {
                 period: Ratio::integer(10).unwrap(),
                 coding: AnalogCoding::F32,
                 significant: None,
+                phase: None,
             },
             shaping: Default::default(),
             overview_shift: None,
+            codec: None,
+            requires: Vec::new(),
         }],
         derived: Vec::new(),
         sources: vec![SourceHeader::new(
@@ -463,6 +475,7 @@ fn marked(bundle: escapement_tickwave_format::writer::Bundle) -> Vec<u8> {
         title: None,
         meta: BTreeMap::new(),
         overview_shift: 4,
+        requires: Vec::new(),
     };
     let mut w = Writer::new(d, WriteOptions::default()).unwrap();
     let mark = |w: &mut Writer, t: i64| {

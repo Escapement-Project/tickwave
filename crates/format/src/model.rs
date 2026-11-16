@@ -55,6 +55,23 @@ impl Ratio {
     pub const fn den(self) -> u64 {
         self.den.get()
     }
+
+    /// Whether it is in lowest terms, as the header holds every ratio.
+    pub fn is_lowest(self) -> bool {
+        gcd(self.num(), self.den()) == 1
+    }
+
+    /// The same ratio in lowest terms.
+    pub fn lowest(self) -> Self {
+        let g = gcd(self.num(), self.den());
+        Self::new(self.num() / g, self.den() / g).expect("positive terms")
+    }
+
+    /// Whether it is less than `other`, exactly.
+    pub fn less_than(self, other: Ratio) -> bool {
+        u128::from(self.num()) * u128::from(other.den())
+            < u128::from(other.num()) * u128::from(self.den())
+    }
 }
 
 impl From<[NonZeroU64; 2]> for Ratio {
@@ -91,26 +108,259 @@ impl From<Gap> for (i64, i64, bool) {
     }
 }
 
-/// Where an analog channel's samples start again after a stop: sample `index` sits at `tick`, and
-/// the samples after it follow at the channel's period. The instrument lost `lost` samples
-/// before it, 0 when it only paused. It reads and writes as `[index, tick, lost]`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(from = "(u64, i64, u64)", into = "(u64, i64, u64)")]
+/// Where an analog channel's samples start again after a stop: sample `index` starts a run at
+/// source tick `tick` plus `phase / D`, `D` the channel's grid (`Grid`), and the samples after it
+/// follow at the channel's period. The instrument lost `lost` samples before it, 0 when it only
+/// paused. It reads and writes as `[index, tick, lost]`, or `[index, tick, lost, phase]` where
+/// the phase is not 0.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Break {
     pub index: u64,
     pub tick: i64,
     pub lost: u64,
+    pub phase: u32,
+}
+
+impl Break {
+    /// A run at a whole tick: phase 0.
+    pub const fn new(index: u64, tick: i64, lost: u64) -> Self {
+        Self {
+            index,
+            tick,
+            lost,
+            phase: 0,
+        }
+    }
 }
 
 impl From<(u64, i64, u64)> for Break {
     fn from((index, tick, lost): (u64, i64, u64)) -> Self {
-        Self { index, tick, lost }
+        Self::new(index, tick, lost)
     }
 }
 
-impl From<Break> for (u64, i64, u64) {
-    fn from(b: Break) -> Self {
-        (b.index, b.tick, b.lost)
+impl Serialize for Break {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeTuple;
+        let n = if self.phase == 0 { 3 } else { 4 };
+        let mut t = s.serialize_tuple(n)?;
+        t.serialize_element(&self.index)?;
+        t.serialize_element(&self.tick)?;
+        t.serialize_element(&self.lost)?;
+        if self.phase != 0 {
+            t.serialize_element(&self.phase)?;
+        }
+        t.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for Break {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Visit;
+        impl<'de> serde::de::Visitor<'de> for Visit {
+            type Value = Break;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("[index, tick, lost] or [index, tick, lost, phase]")
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut s: A) -> Result<Break, A::Error> {
+                let short = || serde::de::Error::custom("a break is [index, tick, lost, phase?]");
+                let index = s.next_element()?.ok_or_else(short)?;
+                let tick = s.next_element()?.ok_or_else(short)?;
+                let lost = s.next_element()?.ok_or_else(short)?;
+                let phase = s.next_element()?.unwrap_or(0);
+                if s.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                    return Err(short());
+                }
+                Ok(Break {
+                    index,
+                    tick,
+                    lost,
+                    phase,
+                })
+            }
+        }
+        d.deserialize_seq(Visit)
+    }
+}
+
+/// The most a channel's grid can be: `D` is below 2^16 (FORMAT.md, "Header").
+pub const GRID_LIMIT: u64 = 1 << 16;
+
+fn gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+
+/// An analog channel's grid (FORMAT.md, "Header"): every place of its samples is a whole number
+/// of `1/d` source ticks, where `d` is the least common multiple of its phase's and its period's
+/// denominators in lowest terms. Places are counted in those units, exactly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Grid {
+    d: u64,
+    /// The period, in `1/d` ticks.
+    step: u128,
+    /// The declared phase, the first run's, in `1/d` ticks.
+    phase: u32,
+}
+
+impl Grid {
+    /// The grid of a channel of `period` and declared `phase` (None for 0). None where `d`
+    /// reaches 2^16, or the phase is not below one tick.
+    pub fn new(period: Ratio, phase: Option<Ratio>) -> Option<Self> {
+        let (pn, pd) = {
+            let g = gcd(period.num(), period.den());
+            (period.num() / g, period.den() / g)
+        };
+        let (fnum, fden) = match phase {
+            None => (0, 1),
+            Some(f) => {
+                let g = gcd(f.num(), f.den());
+                (f.num() / g, f.den() / g)
+            }
+        };
+        if fnum >= fden {
+            return None;
+        }
+        let d = (pd / gcd(pd, fden)).checked_mul(fden)?;
+        if d >= GRID_LIMIT {
+            return None;
+        }
+        Some(Self {
+            d,
+            step: u128::from(pn) * u128::from(d / pd),
+            phase: (fnum * (d / fden)) as u32,
+        })
+    }
+
+    /// A whole grid: places at whole ticks, a period of one tick.
+    pub const WHOLE: Grid = Grid {
+        d: 1,
+        step: 1,
+        phase: 0,
+    };
+
+    pub fn d(self) -> u64 {
+        self.d
+    }
+
+    /// The period in `1/d` ticks.
+    pub fn step(self) -> u128 {
+        self.step
+    }
+
+    /// The declared phase, in `1/d` ticks.
+    pub fn phase(self) -> u32 {
+        self.phase
+    }
+
+    /// The channel's first run, the one at sample 0, starting at `first`.
+    pub fn first_run(self, first: i64, lost_before: u64) -> Break {
+        Break {
+            index: 0,
+            tick: first,
+            lost: lost_before,
+            phase: self.phase,
+        }
+    }
+
+    /// Where `run` starts, in `1/d` ticks.
+    pub fn start(self, run: Break) -> i128 {
+        i128::from(run.tick) * i128::from(self.d) + i128::from(run.phase)
+    }
+
+    /// The place of sample `index` on the grid of `run`, in `1/d` ticks, exactly; saturating for
+    /// an index no header allows. An index before the run's counts back from it.
+    pub fn place(self, run: Break, index: u64) -> i128 {
+        let steps =
+            |n: u64| i128::try_from(u128::from(n).saturating_mul(self.step)).unwrap_or(i128::MAX);
+        let start = self.start(run);
+        if index >= run.index {
+            start.saturating_add(steps(index - run.index))
+        } else {
+            start.saturating_sub(steps(run.index - index))
+        }
+    }
+
+    /// The whole source tick at or before a place of `units / d` ticks, saturating.
+    pub fn floor(self, units: i128) -> i64 {
+        let t = units.div_euclid(i128::from(self.d));
+        t.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
+    }
+
+    /// A place of `units / d` ticks as a whole tick and a phase below `d`.
+    pub fn split(self, units: i128) -> (i64, u32) {
+        (
+            self.floor(units),
+            units.rem_euclid(i128::from(self.d)) as u32,
+        )
+    }
+
+    /// The run that holds sample `index` of a channel whose first run starts at `first` and
+    /// whose later runs are `breaks`.
+    pub fn run_of(self, first: i64, breaks: &[Break], index: u64) -> Break {
+        match breaks.partition_point(|b| b.index <= index) {
+            0 => self.first_run(first, 0),
+            n => breaks[n - 1],
+        }
+    }
+
+    /// The place of sample `index` of such a channel, in `1/d` ticks.
+    pub fn sample_place(self, first: i64, breaks: &[Break], index: u64) -> i128 {
+        self.place(self.run_of(first, breaks, index), index)
+    }
+
+    /// The time sample `index` of a channel of `count` samples covers (FORMAT.md, "Gaps"), in
+    /// `1/d` ticks: from its place to the next place on its run's grid, or the next run's start
+    /// if that comes sooner, and `cap` if that comes sooner still (a kept span's `to`, in `1/d`
+    /// ticks). The source time the length maps back to, which needn't be a whole number of
+    /// `1/d` ticks, is the caller's to cut at. None past the last sample.
+    pub fn sample_time(
+        self,
+        first: i64,
+        breaks: &[Break],
+        count: u64,
+        index: u64,
+        cap: Option<i128>,
+    ) -> Option<std::ops::Range<i128>> {
+        if index >= count {
+            return None;
+        }
+        let run = self.run_of(first, breaks, index);
+        let from = self.place(run, index);
+        let mut to = self.place(run, index + 1);
+        if let Some(next) = breaks.get(breaks.partition_point(|b| b.index <= index))
+            && next.index == index + 1
+        {
+            to = to.min(self.start(*next));
+        }
+        if let Some(cap) = cap {
+            to = to.min(cap);
+        }
+        Some(from..to.max(from))
+    }
+
+    /// The time the samples lost before `breaks[k]` would have covered, in `1/d` ticks: from
+    /// place `index` to place `index + lost` on the grid of the run before the break, ending at
+    /// the break's start if that comes sooner. None for a pause, and for no break `k`.
+    pub fn lost_time(
+        self,
+        first: i64,
+        breaks: &[Break],
+        k: usize,
+    ) -> Option<std::ops::Range<i128>> {
+        let b = *breaks.get(k)?;
+        if b.lost == 0 {
+            return None;
+        }
+        let run = match k {
+            0 => self.first_run(first, 0),
+            _ => breaks[k - 1],
+        };
+        let end = self.start(b);
+        let from = self.place(run, b.index).min(end);
+        Some(from..self.place(run, b.index.saturating_add(b.lost)).min(end))
     }
 }
 
@@ -174,9 +424,12 @@ pub type Edges = Box<dyn Iterator<Item = i64> + Send>;
 pub struct Analog {
     /// The unit of the values, as the source names it ("V", "mA"); empty when it names none.
     pub unit: String,
-    /// The tick of the first sample.
+    /// The tick the first run starts at: its first sample sits at `first + phase`.
     pub first: i64,
-    /// Ticks from one sample to the next.
+    /// The first run's place past `first`, a fraction of a tick; None for 0 (FORMAT.md,
+    /// "Header").
+    pub phase: Option<Ratio>,
+    /// Ticks from one sample to the next, at least 1.
     pub period: Ratio,
     pub count: u64,
     /// Where the samples start again after a stop, in order, each index in `1..count`.
@@ -433,6 +686,7 @@ impl fmt::Debug for Analog {
         f.debug_struct("Analog")
             .field("unit", &self.unit)
             .field("first", &self.first)
+            .field("phase", &self.phase)
             .field("period", &self.period)
             .field("count", &self.count)
             .field("breaks", &self.breaks)

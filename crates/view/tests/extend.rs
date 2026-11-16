@@ -109,9 +109,12 @@ fn declaration(shift: u8, to: i64) -> Declaration {
             period: Ratio::integer(period as u64).unwrap(),
             coding,
             significant: Some(4),
+            phase: None,
         },
         shaping: kept(source),
         overview_shift: None,
+        codec: None,
+        requires: Vec::new(),
     };
     let digital = |name: &str, source: u32, initial| DeclaredChannel {
         name: name.into(),
@@ -120,6 +123,8 @@ fn declaration(shift: u8, to: i64) -> Declaration {
         data: DeclaredKind::Digital { initial },
         shaping: kept(source),
         overview_shift: None,
+        codec: None,
+        requires: Vec::new(),
     };
     Declaration {
         timebase: axis,
@@ -133,7 +138,10 @@ fn declaration(shift: u8, to: i64) -> Declaration {
         derived: vec![Derived {
             name: "P".into(),
             unit: "W".into(),
-            product: ["I".into(), "V".into()],
+            op: escapement_tickwave_format::header::Op::Multiply,
+            operands: vec!["I".into(), "V".into()],
+            params: Default::default(),
+            requires: Vec::new(),
             significant: None,
         }],
         sources: vec![
@@ -146,6 +154,7 @@ fn declaration(shift: u8, to: i64) -> Declaration {
         title: None,
         meta: BTreeMap::new(),
         overview_shift: shift,
+        requires: Vec::new(),
     }
 }
 
@@ -253,15 +262,22 @@ impl Recorder {
         // A run starts where none has, where a pause left the floor past the next place, and
         // now and then of itself: a pause, or samples lost.
         if pairs && (self.pair.is_none_or(|p| p < self.floor) || self.r.one_in(12)) {
-            let at = self.pair.unwrap_or(0).max(self.floor) + self.r.below(40) as i64;
+            let mut at = self.pair.unwrap_or(0).max(self.floor) + self.r.below(40) as i64;
             let lost = if self.pairs == 0 { 0 } else { self.r.below(3) };
+            // A run that states lost samples starts past where the first of them would sit.
+            if lost > 0 {
+                at = at.max(self.pair.unwrap_or(0) + 1);
+            }
             self.w.run(V, at, lost).unwrap();
             self.w.run(I, at, lost).unwrap();
             self.pair = Some(at);
         }
         if fs && (self.step.is_none_or(|s| axis1(s) < self.floor) || self.r.one_in(12)) {
-            let at = self.step.unwrap_or(0).max(first1(self.floor)) + self.r.below(15) as i64;
+            let mut at = self.step.unwrap_or(0).max(first1(self.floor)) + self.r.below(15) as i64;
             let lost = if self.fs == 0 { 0 } else { self.r.below(3) };
+            if lost > 0 {
+                at = at.max(self.step.unwrap_or(0) + 1);
+            }
             self.w.run(F, at, lost).unwrap();
             self.step = Some(at);
         }

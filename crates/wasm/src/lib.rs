@@ -21,7 +21,7 @@ use escapement_tickwave_format::header::{
 };
 use escapement_tickwave_format::index::{Entry, Located, TableIndex};
 use escapement_tickwave_format::model::{Break, Gap};
-use escapement_tickwave_format::overview::{AnalogOverview, ChannelOverview, Level};
+use escapement_tickwave_format::overview::{AnalogOverview, ChannelOverview, DigitalBucket, Level};
 use escapement_tickwave_format::samples::{self, Product, Values};
 use js_sys::{BigInt64Array, Float32Array, Float64Array, Uint8Array};
 use wasm_bindgen::prelude::*;
@@ -268,11 +268,15 @@ impl Recording {
     /// samples: each through its product's scale.
     #[wasm_bindgen(js_name = derivedValues)]
     pub fn derived_values(&self, d: usize, a: &Block, b: &Block) -> Result<Float64Array, JsError> {
-        let (_, _, product) = *self
+        let (_, _, product) = self
             .footer()
             .products
             .get(d)
-            .ok_or_else(|| JsError::new(&format!("no derived channel {d}")))?;
+            .copied()
+            .flatten()
+            .ok_or_else(|| {
+                JsError::new(&format!("no derived channel {d} this version computes"))
+            })?;
         let values = decode::derived_values(&a.data, &b.data, product)
             .map_err(|what| JsError::new(&format!("derived channel {d}: {what}")))?;
         let values: Vec<f64> = values.iter().map(|s| product.value(s)).collect();
@@ -410,8 +414,8 @@ impl Recording {
             coding: footer.header.channels.get(o).and_then(|c| c.coding()),
             product: o
                 .checked_sub(stored)
-                .and_then(|d| footer.products.get(d))
-                .map(|&(_, _, p)| p),
+                .and_then(|d| footer.products.get(d).copied().flatten())
+                .map(|(_, _, p)| p),
         }
     }
 }
@@ -508,11 +512,7 @@ fn list_of(digital: bool, entries: &[f64]) -> Result<List, JsError> {
         List::Breaks(
             entries
                 .iter()
-                .map(|&[index, tick, lost]| Break {
-                    index: index as u64,
-                    tick: tick as i64,
-                    lost: lost as u64,
-                })
+                .map(|&[index, tick, lost]| Break::new(index as u64, tick as i64, lost as u64))
                 .collect(),
         )
     })
@@ -804,10 +804,9 @@ impl Recording {
         b: JsValue,
     ) -> Result<Float64Array, JsError> {
         let footer = self.footer();
-        let &(ia, ib, product) = footer
-            .products
-            .get(d)
-            .ok_or_else(|| JsError::new(&format!("no derived channel {d}")))?;
+        let (ia, ib, product) = footer.products.get(d).copied().flatten().ok_or_else(|| {
+            JsError::new(&format!("no derived channel {d} this version computes"))
+        })?;
         let coding = |c: usize| footer.header.channels.get(c).and_then(|ch| ch.coding());
         let (a, b) = (stored(a, coding(ia))?, stored(b, coding(ib))?);
         let values = samples::product_values(product, &a, &b)
@@ -942,14 +941,29 @@ impl OverviewLevel {
     }
 }
 
+/// A digital level as the page draws it until it draws density and duty (phase 6): each
+/// bucket's level and whether it changes inside, as bits, bucket i in bit `i % 8` of byte
+/// `i / 8`. A busy bucket's level says nothing; one wholly outside the kept span reads low.
 fn digital(channel: &ChannelOverview) -> Option<Vec<Uint8Array>> {
-    match channel {
-        ChannelOverview::Digital { level, change } => Some(vec![
-            Uint8Array::from(&level[..]),
-            Uint8Array::from(&change[..]),
-        ]),
-        ChannelOverview::Analog { .. } => None,
+    let ChannelOverview::Digital { density, .. } = channel else {
+        return None;
+    };
+    let n = density.len();
+    let (mut level, mut change) = (vec![0u8; n.div_ceil(8)], vec![0u8; n.div_ceil(8)]);
+    for i in 0..n {
+        let b = channel.digital(i as u64)?;
+        let busy = b.density > 0 || !matches!(b.duty, 0 | 14 | DigitalBucket::OUTSIDE);
+        if b.duty >= 7 && b.duty != DigitalBucket::OUTSIDE {
+            level[i / 8] |= 1 << (i % 8);
+        }
+        if busy {
+            change[i / 8] |= 1 << (i % 8);
+        }
     }
+    Some(vec![
+        Uint8Array::from(&level[..]),
+        Uint8Array::from(&change[..]),
+    ])
 }
 
 fn analog(channel: &ChannelOverview) -> Option<Vec<Float32Array>> {

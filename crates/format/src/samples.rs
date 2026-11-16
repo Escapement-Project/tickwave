@@ -1,7 +1,7 @@
 //! Analog samples as blocks store them, and derived channels' products: the rules every writer
 //! and reader here share, so a value, a code's bytes and a product come out the same everywhere.
 
-use crate::header::{AnalogCoding, Stored, code_value};
+use crate::header::{AnalogCoding, IntCoding, Op, Stored, code_value};
 use crate::model::Sample;
 
 /// A block's samples of one analog channel, in the type it stores: f32 values for an `f32` or a
@@ -123,47 +123,64 @@ pub fn to_planes(section: &[u8], width: usize, out: &mut Vec<u8>) {
     }
 }
 
+/// An empty list with room for `n` items, or an error starting with `decode::CANT_HOLD` where
+/// the reader can't allocate it.
+fn room<T>(n: usize) -> Result<Vec<T>, String> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(n)
+        .map_err(|_| format!("{} {n} samples", crate::decode::CANT_HOLD))?;
+    Ok(v)
+}
+
 /// The codes in `count` codes' byte planes of `width` bytes each, as u64s, each code's bytes in
 /// place and the bytes above them zero.
-fn from_planes(section: &[u8], count: usize, width: usize) -> Vec<u64> {
-    let mut codes = vec![0u64; count];
+fn from_planes(section: &[u8], count: usize, width: usize) -> Result<Vec<u64>, String> {
+    let mut codes = room(count)?;
+    codes.resize(count, 0u64);
     for (plane, bytes) in section.chunks_exact(count.max(1)).take(width).enumerate() {
         for (code, &b) in codes.iter_mut().zip(bytes) {
             *code |= u64::from(b) << (8 * plane);
         }
     }
-    codes
+    Ok(codes)
 }
 
 /// An analog section's `count` samples in `coding`. A code outside its coding's range is
-/// refused.
+/// refused. Where the reader can't allocate the samples, the error starts with
+/// `decode::CANT_HOLD`.
 pub fn decode(section: &[u8], count: usize, coding: AnalogCoding) -> Result<Values, String> {
     if count.checked_mul(coding.sample_len()) != Some(section.len()) {
         return Err("the section does not hold its samples".into());
     }
     Ok(match coding {
-        AnalogCoding::F32 => Values::F32(
-            section
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|&b| f32::from_le_bytes(b))
-                .collect(),
-        ),
-        AnalogCoding::F64 => Values::F64(
-            section
-                .as_chunks::<8>()
-                .0
-                .iter()
-                .map(|&b| f64::from_le_bytes(b))
-                .collect(),
-        ),
+        AnalogCoding::F32 => {
+            let mut v = room(count)?;
+            v.extend(
+                section
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|&b| f32::from_le_bytes(b)),
+            );
+            Values::F32(v)
+        }
+        AnalogCoding::F64 => {
+            let mut v = room(count)?;
+            v.extend(
+                section
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .map(|&b| f64::from_le_bytes(b)),
+            );
+            Values::F64(v)
+        }
         AnalogCoding::Codes {
             bits,
             scale,
             offset,
         } => {
-            let codes = from_planes(section, count, coding.sample_len());
+            let codes = from_planes(section, count, coding.sample_len())?;
             // One OR over every code, apart from the conversion, so both loops stay vectorised.
             let all = codes.iter().fold(0, |a, &c| a | c);
             if all >> bits != 0 {
@@ -179,7 +196,7 @@ pub fn decode(section: &[u8], count: usize, coding: AnalogCoding) -> Result<Valu
         }
         AnalogCoding::Int(int) => {
             let width = int.planes();
-            let codes = from_planes(section, count, width);
+            let codes = from_planes(section, count, width)?;
             if int.signed {
                 // Sign-extended from the top stored bit, then held to the coding's bits.
                 let spare = 64 - 8 * width as u32;
@@ -201,7 +218,8 @@ pub fn decode(section: &[u8], count: usize, coding: AnalogCoding) -> Result<Valu
     })
 }
 
-/// How a derived channel's samples follow from its operands' (FORMAT.md, "Derived channels").
+/// How a derived channel's samples follow from its operands' (FORMAT.md, "Derived channels"):
+/// a product or a difference, as integer codes where the rule allows and as f64 otherwise.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Product {
     /// The integer product of two `int` channels' codes, neither with an offset, their bits
@@ -217,10 +235,116 @@ pub enum Product {
     },
     /// `f64(a) × f64(b)`, rounded once.
     F64 { a: AnalogCoding, b: AnalogCoding },
+    /// The difference of two `int` channels as a signed code, `ka × a − kb × b`, `bits` wide,
+    /// whose value is `code × num / den + onum / oden`: `num / den` the greatest common divisor
+    /// of the operands' scales, and `onum / oden` their offsets' difference, each term of a
+    /// magnitude below 2^53.
+    Difference {
+        ka: i128,
+        kb: i128,
+        bits: u8,
+        num: f64,
+        den: f64,
+        onum: f64,
+        oden: f64,
+    },
+    /// `f64(a) − f64(b)`, rounded once.
+    F64Difference { a: AnalogCoding, b: AnalogCoding },
+}
+
+fn gcd128(mut a: u128, mut b: u128) -> u128 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+
+/// The least and greatest code an `int` coding allows.
+fn code_range(c: IntCoding) -> (i128, i128) {
+    let bits = u32::from(c.bits);
+    if c.signed {
+        let half = 1i128 << (bits - 1);
+        (-half, half - 1)
+    } else {
+        (0, (1i128 << bits) - 1)
+    }
+}
+
+/// The least and greatest of `k × c` for `c` in `lo..=hi`; None where it passes 128 bits.
+fn scaled_range(k: i128, (lo, hi): (i128, i128)) -> Option<(i128, i128)> {
+    let (a, b) = (k.checked_mul(lo)?, k.checked_mul(hi)?);
+    Some((a.min(b), a.max(b)))
+}
+
+/// The fewest bits of a signed code that hold every one of `lo..=hi`.
+fn signed_bits(lo: i128, hi: i128) -> u32 {
+    (1..=128)
+        .find(|&b| {
+            let half = 1i128.checked_shl(b - 1).unwrap_or(i128::MAX);
+            b == 128 || (lo >= -half && hi < half)
+        })
+        .unwrap_or(128)
 }
 
 impl Product {
-    /// The rule for operands coded `a` and `b`.
+    /// The rule for operation `op` on operands coded `a` and `b`; None for an operation this
+    /// version doesn't define.
+    pub fn rule(op: &Op, a: AnalogCoding, b: AnalogCoding) -> Option<Self> {
+        match op {
+            Op::Multiply => Some(Self::of(a, b)),
+            Op::Subtract => Some(Self::difference(a, b)),
+            Op::Other(_) => None,
+        }
+    }
+
+    /// The difference rule for operands coded `a` and `b` (FORMAT.md, "Derived channels").
+    pub fn difference(a: AnalogCoding, b: AnalogCoding) -> Self {
+        let f64_rule = Self::F64Difference { a, b };
+        let (AnalogCoding::Int(x), AnalogCoding::Int(y)) = (a, b) else {
+            return f64_rule;
+        };
+        let (sx, sy) = (x.scale(), y.scale());
+        let (p, q) = (i128::from(sx.num()), i128::from(sx.den()));
+        let (u, v) = (i128::from(sy.num()), i128::from(sy.den()));
+        // s = gcd(|p| v, |u| q) / (q v): every term is below 2^53, so each product is below 2^106.
+        let g = gcd128(p.unsigned_abs() * v as u128, u.unsigned_abs() * q as u128);
+        let qv = (q * v) as u128;
+        let g2 = gcd128(g, qv);
+        let (snum, sden) = (g / g2, qv / g2);
+        // scale_a / s and scale_b / s, whole numbers.
+        let ka = p * v / g as i128;
+        let kb = u * q / g as i128;
+        let range = scaled_range(ka, code_range(x)).and_then(|(alo, ahi)| {
+            let (blo, bhi) = scaled_range(kb, code_range(y))?;
+            Some((alo.checked_sub(bhi)?, ahi.checked_sub(blo)?))
+        });
+        let Some((lo, hi)) = range else {
+            return f64_rule;
+        };
+        let bits = signed_bits(lo, hi);
+        let (oa, ob) = (x.offset(), y.offset());
+        let (oan, oad) = (i128::from(oa.num()), i128::from(oa.den()));
+        let (obn, obd) = (i128::from(ob.num()), i128::from(ob.den()));
+        let on = oan * obd - obn * oad;
+        let od = oad * obd;
+        let og = gcd128(on.unsigned_abs(), od as u128).max(1) as i128;
+        let (onum, oden) = (on / og, od / og);
+        let safe = |t: i128| t.unsigned_abs() < 1 << 53;
+        if bits > 64 || !safe(snum as i128) || !safe(sden as i128) || !safe(onum) || !safe(oden) {
+            return f64_rule;
+        }
+        Self::Difference {
+            ka,
+            kb,
+            bits: bits as u8,
+            num: snum as f64,
+            den: sden as f64,
+            onum: onum as f64,
+            oden: oden as f64,
+        }
+    }
+
+    /// The product rule for operands coded `a` and `b`.
     pub fn of(a: AnalogCoding, b: AnalogCoding) -> Self {
         match (a, b) {
             (AnalogCoding::Int(x), AnalogCoding::Int(y))
@@ -247,8 +371,16 @@ impl Product {
     pub fn stored(&self) -> Stored {
         match self {
             Self::Int { signed: false, .. } => Stored::U64,
-            Self::Int { signed: true, .. } => Stored::I64,
-            Self::F64 { .. } => Stored::F64,
+            Self::Int { signed: true, .. } | Self::Difference { .. } => Stored::I64,
+            Self::F64 { .. } | Self::F64Difference { .. } => Stored::F64,
+        }
+    }
+
+    /// An integer result's code width in bits; None for an f64 result.
+    pub fn bits(&self) -> Option<u8> {
+        match self {
+            Self::Int { bits, .. } | Self::Difference { bits, .. } => Some(*bits),
+            Self::F64 { .. } | Self::F64Difference { .. } => None,
         }
     }
 
@@ -268,29 +400,53 @@ impl Product {
             (Self::F64 { a: ca, b: cb }, x, y) => {
                 Sample::F64(value_f64(x, *ca) * value_f64(y, *cb))
             }
+            (Self::Difference { ka, kb, .. }, x, y) => {
+                // `bits` is at most 64, so the code fits an i64.
+                Sample::I64((ka * int_of(x) - kb * int_of(y)) as i64)
+            }
+            (Self::F64Difference { a: ca, b: cb }, x, y) => {
+                Sample::F64(value_f64(x, *ca) - value_f64(y, *cb))
+            }
             _ => unreachable!("an integer product's operands are int channels"),
         }
     }
 
-    /// A derived sample's value in f64: an integer product's code by the rule for an `int`
-    /// channel, `fl(fl(code × num) / den)`; an f64 product as it is.
+    /// A derived sample's value in f64: an integer result's code by the rule for an `int`
+    /// channel, `fl(fl(code × num) / den)` and its offset added; an f64 result as it is.
     #[inline]
     pub fn value(&self, sample: Sample) -> f64 {
         match (self, sample) {
-            (Self::Int { .. }, Sample::U64(c)) => self.scaled(c as f64),
-            (Self::Int { .. }, Sample::I64(c)) => self.scaled(c as f64),
+            (Self::Int { .. } | Self::Difference { .. }, Sample::U64(c)) => self.scaled(c as f64),
+            (Self::Int { .. } | Self::Difference { .. }, Sample::I64(c)) => self.scaled(c as f64),
             (_, s) => value_f64(s, AnalogCoding::F64),
         }
     }
 
-    /// `x` through an integer product's scale, as `value` takes a code: times the numerator, then
-    /// over the denominator, each in f64. An f64 product's `x` as it is.
+    /// `x` through an integer result's scale and offset, as `value` takes a code: times the
+    /// numerator, then over the denominator, then the offset added, each in f64. An f64 result's
+    /// `x` as it is.
     #[inline]
     pub fn scaled(&self, x: f64) -> f64 {
         match self {
             Self::Int { num, den, .. } => (x * num) / den,
-            Self::F64 { .. } => x,
+            Self::Difference {
+                num,
+                den,
+                onum,
+                oden,
+                ..
+            } => (x * num) / den + onum / oden,
+            Self::F64 { .. } | Self::F64Difference { .. } => x,
         }
+    }
+}
+
+/// An `int` sample's code.
+fn int_of(s: Sample) -> i128 {
+    match s {
+        Sample::U64(c) => i128::from(c),
+        Sample::I64(c) => i128::from(c),
+        _ => unreachable!("an integer result's operands are int channels"),
     }
 }
 
@@ -329,6 +485,33 @@ pub fn product_values(product: Product, a: &Values, b: &Values) -> Result<Values
             let mut slots = out.iter_mut();
             each_f64(b, cb, |y| *slots.next().expect("as many as a's") *= y);
             Values::F64(out)
+        }
+        (Product::F64Difference { a: ca, b: cb }, a, b) => {
+            let mut out = Vec::with_capacity(a.len());
+            each_f64(a, ca, |x| out.push(x));
+            let mut slots = out.iter_mut();
+            each_f64(b, cb, |y| *slots.next().expect("as many as a's") -= y);
+            Values::F64(out)
+        }
+        (Product::Difference { ka, kb, .. }, a, b) => {
+            fn diff<A: Copy + Into<i128>, B: Copy + Into<i128>>(
+                a: &[A],
+                b: &[B],
+                ka: i128,
+                kb: i128,
+            ) -> Vec<i64> {
+                a.iter()
+                    .zip(b)
+                    .map(|(&x, &y)| (ka * x.into() - kb * y.into()) as i64)
+                    .collect()
+            }
+            Values::I64(match (a, b) {
+                (Values::U64(x), Values::U64(y)) => diff(x, y, ka, kb),
+                (Values::U64(x), Values::I64(y)) => diff(x, y, ka, kb),
+                (Values::I64(x), Values::U64(y)) => diff(x, y, ka, kb),
+                (Values::I64(x), Values::I64(y)) => diff(x, y, ka, kb),
+                _ => return Err(NOT_INT.into()),
+            })
         }
         _ => return Err(NOT_INT.into()),
     })

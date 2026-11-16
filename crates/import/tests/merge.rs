@@ -99,6 +99,7 @@ fn probe() -> Recording {
                     samples: Samples::F32(Box::new((0..200).map(|i| i as f32))),
                     lost_before: 0,
                     lost_after: 0,
+                    phase: None,
                 }),
                 shaping: Shaping::default(),
             },
@@ -277,16 +278,16 @@ fn two_rates_merge_at_their_least_common_multiple() {
     assert_eq!(edges[1], [1_250, 2_500, 3_750]);
     assert_eq!(digital_of(&h, 0), (false, 1_000, vec![]));
     assert_eq!(digital_of(&h, 1), (true, 300, vec![]));
-    // The current keeps its period of 3/2 source ticks. Sample i lies at source tick
-    // floor(1.5 i), so on the axis at 125 times that: sample 1 at 125, not at 187.5's floor;
-    // sample 199 at 125 x 298 = 37,250.
+    // The current keeps its period of 3/2 source ticks. Sample i's place is 1.5 i source ticks
+    // exactly, which maps to the axis before any floor: sample 1 at floor(187.5) = 187, not at 125
+    // times its place's whole tick; sample 199 at floor(125 x 298.5) = 37,312.
     let ChannelKind::Analog { period, first, .. } = &h.channels[2].data else {
         panic!()
     };
     assert_eq!((*period, *first), (Ratio::new(3, 2).unwrap(), 0));
-    assert_eq!(samples[2][1], (125, Sample::F32(1.0)));
+    assert_eq!(samples[2][1], (187, Sample::F32(1.0)));
     assert_eq!(samples[2][2], (375, Sample::F32(2.0)));
-    assert_eq!(samples[2][199], (37_250, Sample::F32(199.0)));
+    assert_eq!(samples[2][199], (37_312, Sample::F32(199.0)));
     // Each source is kept whole, its origin and align restated.
     assert_eq!(origins(&h), [(0, None), (0, None)]);
     let a = &h.sources[0];
@@ -557,6 +558,7 @@ fn verge(stem_v: &str) -> Recording {
             samples: Samples::U64(coding, Box::new(values.into_iter())),
             lost_before: 0,
             lost_after: 0,
+            phase: None,
         }),
         shaping: Shaping::default(),
     };
@@ -570,7 +572,10 @@ fn verge(stem_v: &str) -> Recording {
         derived: vec![Derived {
             name: "P".into(),
             unit: "W".into(),
-            product: ["I".into(), stem_v.into()],
+            op: escapement_tickwave_format::header::Op::Multiply,
+            operands: vec!["I".into(), stem_v.into()],
+            params: Default::default(),
+            requires: Vec::new(),
             significant: None,
         }],
         sources: vec![source("verge-energy", timebase)],
@@ -604,7 +609,7 @@ fn names_clash_apart_and_derived_channels_follow_their_operands() {
         .map(|d| {
             (
                 d.name.as_str(),
-                [d.product[0].as_str(), d.product[1].as_str()],
+                [d.operands[0].as_str(), d.operands[1].as_str()],
             )
         })
         .collect();
@@ -797,15 +802,6 @@ fn every_refusal_says_plainly_what_it_refuses() {
         ),
         "CLK: kept from tick 2000 to the end, which leaves nothing of the ticks its input holds, 0 to 1000"
     );
-    // I's samples sit at 0, 1, 3, 4, ...: from tick 1 only sample 1, which isn't on the grid of
-    // a 3/2 period, comes before 2.
-    assert_eq!(
-        refused(
-            &[a(), p()],
-            &with(&|s| s.keeps = vec![("I".into(), Some("1".into()), Some("2".into()))])
-        ),
-        "I: kept from tick 1 to 2; its samples keep their ticks only from one a multiple of 2 into its run, and none in that span is"
-    );
     // Rates whose multiple is past 2^53.
     let rate = |n: u64| {
         let tb = Ratio::integer(n).unwrap();
@@ -834,11 +830,11 @@ fn every_refusal_says_plainly_what_it_refuses() {
         (h.m(0), h.m(1)),
         (Ratio::new((1 << 52) + 1, (1 << 52) - 1), Some(Ratio::ONE))
     );
-    // A break at the tick of the sample before it: samples at source ticks 0 and 1 (1.5
-    // floored), the run after starting at 1. Each channel keeps its source's ticks, so a merge at
-    // twice the rate keeps the break on its sample before, at merged tick 2. At a period of 1 the
-    // same.
-    for period in [Ratio::new(3, 2).unwrap(), Ratio::ONE] {
+    // A break at the place of the sample before it: samples at places 0 and 1.5, the run after
+    // starting at tick 1 and phase 1/2, so at 1.5 too. Each channel keeps its source's places, so
+    // a merge at twice the rate keeps the break on its sample before, at merged tick 3. At a
+    // period of 1, samples at 0 and 1 and the run at 1: merged tick 2.
+    for (period, phase, merged) in [(Ratio::new(3, 2).unwrap(), 1, 3), (Ratio::ONE, 0, 2)] {
         let tb = Ratio::integer(1_000).unwrap();
         let broken = Recording {
             timebase: tb,
@@ -856,11 +852,13 @@ fn every_refusal_says_plainly_what_it_refuses() {
                         index: 2,
                         tick: 1,
                         lost: 0,
+                        phase,
                     }],
                     significant: None,
                     samples: Samples::F32(Box::new([0.0, 1.0, 2.0].into_iter())),
                     lost_before: 0,
                     lost_after: 0,
+                    phase: None,
                 }),
                 shaping: Shaping::default(),
             }],
@@ -879,7 +877,7 @@ fn every_refusal_says_plainly_what_it_refuses() {
         );
         assert_eq!(
             samples[0].iter().map(|(t, _)| *t).collect::<Vec<_>>(),
-            [0, 2, 2],
+            [0, merged, merged],
             "{period:?}"
         );
     }
@@ -904,6 +902,7 @@ fn every_refusal_says_plainly_what_it_refuses() {
                     samples: Samples::F32(Box::new([0.0].into_iter())),
                     lost_before: 0,
                     lost_after: 0,
+                    phase: None,
                 }),
                 shaping: Shaping::default(),
             }],
@@ -973,6 +972,8 @@ fn declared(kind: &str, ticks: i64, align: Option<i64>) -> Vec<u8> {
                 kept: Some(Kept { from: 0, to: 10 }),
             },
             overview_shift: None,
+            codec: None,
+            requires: Vec::new(),
         }],
         derived: Vec::new(),
         sources: vec![SourceHeader {
@@ -983,6 +984,7 @@ fn declared(kind: &str, ticks: i64, align: Option<i64>) -> Vec<u8> {
         title: None,
         meta: BTreeMap::new(),
         overview_shift: 4,
+        requires: Vec::new(),
     };
     let mut w = Writer::new(declaration, WriteOptions::default()).unwrap();
     let mut out = w.take_output();
@@ -1670,16 +1672,20 @@ fn a_keep_is_in_its_inputs_time_inside_its_own_span_and_on_its_samples_grid() {
     let h = items(&out).0;
     assert_eq!(kepts(&h)[0], (500, 1_000));
     assert_eq!(digital_of(&h, 0).1, 1_000);
-    // I kept from tick 1: sample 1 sits there, off its period's grid of 2, so the cut moves to
-    // sample 2 at tick 3, 375 merged ticks.
+    // I kept from tick 1: sample 1, at its place 1.5, is the first kept, and keeps its place:
+    // the cut starts the run at tick 1 and phase 1/2, and nothing moves forward.
     let s = Settings {
         keeps: vec![("I".into(), Some("1".into()), None)],
         ..settings(vec![])
     };
     let (out, _) = run(&inputs(), &s).unwrap();
     let (h, (_, samples)) = items(&out);
-    assert_eq!(kepts(&h)[2], (3, 300));
-    assert_eq!(samples[2][0], (375, Sample::F32(2.0)));
+    assert_eq!(kepts(&h)[2], (1, 300));
+    assert_eq!(samples[2][0], (187, Sample::F32(1.0)));
+    let ChannelKind::Analog { first, phase, .. } = &h.channels[2].data else {
+        panic!()
+    };
+    assert_eq!((*first, *phase), (1, Ratio::new(1, 2)));
     // A keep reaching before an input channel's own span keeps only its span: E is its
     // input's from 210, its source's from 200.
     let s = Settings {
@@ -1727,8 +1733,8 @@ fn an_input_keeps_its_edges_at_its_tick_0_moved_or_not() {
 fn gaps_and_breaks_keep_their_source_ticks_and_map_with_their_source() {
     use escapement_tickwave_format::model::Gap;
     // At 500 MHz beside the probe, an m of 24. G rises at 100, is unknown from 200 to 400 and
-    // high after, and falls at 600. The probe's I pauses: sample 100 starts a run at tick 150, two
-    // after sample 99 at 148.
+    // high after, and falls at 600. The probe's I loses three samples: sample 100 starts a run at
+    // tick 151, past place 150, where the first of them would sit after sample 99 at 148.5.
     let tb = Ratio::integer(500_000_000).unwrap();
     let gappy = Recording {
         timebase: tb,
@@ -1754,8 +1760,9 @@ fn gaps_and_breaks_keep_their_source_ticks_and_map_with_their_source() {
     if let ChannelData::Analog(a) = &mut paused.channels[1].data {
         a.breaks = vec![Break {
             index: 100,
-            tick: 150,
+            tick: 151,
             lost: 3,
+            phase: 0,
         }];
     }
     let inputs = [(file(gappy), "gappy", None), (file(paused), "paused", None)];
@@ -1763,8 +1770,8 @@ fn gaps_and_breaks_keep_their_source_ticks_and_map_with_their_source() {
     let (h, (edges, samples)) = items(&out);
     assert_eq!(edges[0], [2_400, 14_400]);
     assert_eq!(digital_of(&h, 0), (false, 1_000, vec![(200, 400, true)]));
-    // The break stays at source tick 150, 125 x 150 on the axis; sample 101 at source tick
-    // 150 + floor(1.5), 125 x 151.
+    // The break stays at source tick 151, 125 x 151 on the axis; sample 101 at its place, 152.5,
+    // floor(125 x 152.5) on the axis.
     let ChannelKind::Analog { breaks, .. } = &h.channels[2].data else {
         panic!()
     };
@@ -1773,10 +1780,10 @@ fn gaps_and_breaks_keep_their_source_ticks_and_map_with_their_source() {
             .iter()
             .map(|b| (b.index, b.tick, b.lost))
             .collect::<Vec<_>>(),
-        [(100, 150, 3)]
+        [(100, 151, 3)]
     );
-    assert_eq!(samples[2][100].0, 18_750);
-    assert_eq!(samples[2][101].0, 18_875);
+    assert_eq!(samples[2][100].0, 18_875);
+    assert_eq!(samples[2][101].0, 19_062);
     // G kept from 300, inside its gap: the gap starts at the channel's start, so its initial is
     // false, and ends at 400.
     let s = Settings {
@@ -1949,7 +1956,10 @@ fn expected_refuses_a_header_its_inputs_do_not_give() {
     extra.derived.push(DerivedHeader {
         name: "Q".into(),
         unit: "W".into(),
-        product: ["I".into(), "I".into()],
+        op: escapement_tickwave_format::header::Op::Multiply,
+        operands: vec!["I".into(), "I".into()],
+        params: Default::default(),
+        requires: Vec::new(),
         significant: None,
         overview_blocks: Vec::new(),
     });
@@ -1978,7 +1988,7 @@ fn expected_refuses_a_header_its_inputs_do_not_give() {
         "derived channel P: its input states no product of its channels I and V in \"mW\""
     );
     let mut across = both.clone();
-    across.derived[0].product = ["I".into(), "two/V".into()];
+    across.derived[0].operands = vec!["I".into(), "two/V".into()];
     assert_eq!(
         expected(&across, recordings(&[&v, &v]))
             .err()
@@ -2109,8 +2119,8 @@ fn a_stretch_scales_an_inputs_ticks_and_its_sources_state_it() {
     assert_eq!((h.m(0), h.m(1)), (Ratio::integer(24), Ratio::new(1001, 8)));
     assert_eq!(edges[0], [2_400, 4_800]);
     assert_eq!(edges[1], [1_251, 2_502, 3_753]);
-    // I's sample 199 at source tick 298: 37,287.25.
-    assert_eq!(samples[2][199].0, 37_287);
+    // I's sample 199 at its place, source tick 298.5: 37,349.0625.
+    assert_eq!(samples[2][199].0, 37_349);
     // The probe's end, 300, at 37,537.5.
     assert_eq!(h.length, 37_537);
     let against = inputs
@@ -2339,6 +2349,7 @@ fn expected_refuses_a_header_naming_an_input_channel_twice_or_as_another_kind() 
         break_count: None,
         lost_before: 0,
         lost_after: 0,
+        phase: None,
     };
     let name = c.name.clone();
     assert_eq!(

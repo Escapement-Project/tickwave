@@ -112,6 +112,9 @@ pub struct Declaration {
     pub meta: BTreeMap<String, String>,
     /// The finest overview level's shift: the writer picks it before it knows the length.
     pub overview_shift: u8,
+    /// Features a reader must know to read the recording at all. This version defines none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -128,18 +131,121 @@ pub struct DeclaredChannel {
     /// Its finest overview level's shift; None takes the recording's.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overview_shift: Option<u8>,
+    /// Features a reader must know to read this channel; one it doesn't know makes the channel
+    /// unavailable to it. This version defines none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub requires: Vec<String>,
+    /// How its blocks are stored, where not as FORMAT.md's "Blocks" says. This version defines
+    /// none, so a channel that states one is unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codec: Option<String>,
 }
 
-/// A channel computed from two analog channels, which blocks do not store: FORMAT.md's derived
+/// A derived channel's operation. It reads and writes as its name, and keeps a name this
+/// version doesn't know, which makes the channel unavailable.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
+pub enum Op {
+    /// `a × b`.
+    Multiply,
+    /// `a − b`.
+    Subtract,
+    Other(String),
+}
+
+impl Op {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Op::Multiply => "multiply",
+            Op::Subtract => "subtract",
+            Op::Other(name) => name,
+        }
+    }
+}
+
+impl From<String> for Op {
+    fn from(name: String) -> Self {
+        match name.as_str() {
+            "multiply" => Op::Multiply,
+            "subtract" => Op::Subtract,
+            _ => Op::Other(name),
+        }
+    }
+}
+
+impl From<Op> for String {
+    fn from(op: Op) -> Self {
+        match op {
+            Op::Other(name) => name,
+            known => known.as_str().to_owned(),
+        }
+    }
+}
+
+impl fmt::Display for Op {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A channel computed from analog channels, which blocks do not store: FORMAT.md's derived
 /// channels.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Derived {
     pub name: String,
+    #[serde(default)]
     pub unit: String,
-    /// The two analog channels it is the product of, by name.
-    pub product: [String; 2],
+    pub op: Op,
+    /// The channels it is computed from, by name, in order: two for the operations this version
+    /// defines.
+    pub operands: Vec<String>,
+    /// An operation's further terms; none for the operations this version defines.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub significant: Option<u8>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires: Vec<String>,
+}
+
+impl Derived {
+    /// `a × b`, as power is current times voltage.
+    pub fn multiply(name: &str, unit: &str, a: &str, b: &str) -> Self {
+        Self::of(Op::Multiply, name, unit, a, b)
+    }
+
+    /// `a − b`, as a differential probe's two inputs give one signal.
+    pub fn subtract(name: &str, unit: &str, a: &str, b: &str) -> Self {
+        Self::of(Op::Subtract, name, unit, a, b)
+    }
+
+    fn of(op: Op, name: &str, unit: &str, a: &str, b: &str) -> Self {
+        Self {
+            name: name.into(),
+            unit: unit.into(),
+            op,
+            operands: vec![a.into(), b.into()],
+            params: BTreeMap::new(),
+            significant: None,
+            requires: Vec::new(),
+        }
+    }
+
+    /// Whether this version knows how to compute it, from its own entry: an operation it
+    /// defines, given no `params`, and no `requires`. Its operands must be available too.
+    pub fn known(&self) -> bool {
+        matches!(self.op, Op::Multiply | Op::Subtract)
+            && self.params.is_empty()
+            && self.requires.is_empty()
+    }
+
+    /// Its two operands, for an operation this version defines.
+    pub fn pair(&self) -> Option<[&str; 2]> {
+        match self.operands.as_slice() {
+            [a, b] => Some([a, b]),
+            _ => None,
+        }
+    }
 }
 
 /// A derived channel as the footer's header states it: the declaration's entry, and the levels
@@ -147,10 +253,16 @@ pub struct Derived {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DerivedHeader {
     pub name: String,
+    #[serde(default)]
     pub unit: String,
-    pub product: [String; 2],
+    pub op: Op,
+    pub operands: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub significant: Option<u8>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub overview_blocks: Vec<OverviewLevel>,
 }
@@ -160,8 +272,11 @@ impl DerivedHeader {
         Derived {
             name: self.name.clone(),
             unit: self.unit.clone(),
-            product: self.product.clone(),
+            op: self.op.clone(),
+            operands: self.operands.clone(),
+            params: self.params.clone(),
             significant: self.significant,
+            requires: self.requires.clone(),
         }
     }
 }
@@ -229,11 +344,15 @@ pub enum DeclaredKind {
     },
     Analog {
         unit: String,
+        /// Source ticks from one sample to the next, at least 1.
         period: Ratio,
         coding: AnalogCoding,
         /// At most this many significant figures in a reading.
         #[serde(skip_serializing_if = "Option::is_none")]
         significant: Option<u8>,
+        /// The first run's place past its whole tick, a fraction of a tick; None for 0.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        phase: Option<Ratio>,
     },
 }
 
@@ -254,6 +373,12 @@ pub struct Header {
     pub content_id: ContentId,
     /// The finest overview level's shift of a channel that states none.
     pub overview_shift: u8,
+    /// Features a reader must know to read the recording at all.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires: Vec<String>,
+    /// The number of annotation parts, at least 1; None where there are none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotation_parts: Option<u64>,
 }
 
 /// One level of a channel's overview that goes in overview blocks: its shift, its blocks of 4,096
@@ -284,6 +409,12 @@ pub struct ChannelHeader {
     /// The levels of its overview in overview blocks, finest first.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub overview_blocks: Vec<OverviewLevel>,
+    /// As `DeclaredChannel::requires`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub requires: Vec<String>,
+    /// As `DeclaredChannel::codec`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codec: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -317,6 +448,9 @@ pub enum ChannelKind {
         coding: AnalogCoding,
         #[serde(skip_serializing_if = "Option::is_none")]
         significant: Option<u8>,
+        /// The first run's place past `first`, a fraction of a tick; None for 0.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        phase: Option<Ratio>,
         /// Samples the instrument lost before the first, 0 for none.
         #[serde(skip_serializing_if = "is_zero")]
         lost_before: u64,
@@ -386,6 +520,11 @@ impl Exact {
     /// Positive.
     pub const fn den(self) -> i64 {
         self.den
+    }
+
+    /// Whether it is in lowest terms, as the header holds every ratio: 0 only as `[0, 1]`.
+    pub fn is_lowest(self) -> bool {
+        crate::mapping::gcd(self.num.unsigned_abs(), self.den as u64) == 1
     }
 
     /// `x × num / den` in f64, each step rounded once: multiplied by the numerator, then divided
@@ -565,6 +704,9 @@ struct RawChannel {
     overview_shift: Option<u8>,
     blocks: Option<u64>,
     overview_blocks: Option<Vec<OverviewLevel>>,
+    phase: Option<Ratio>,
+    requires: Option<Vec<String>>,
+    codec: Option<String>,
 }
 
 impl RawChannel {
@@ -763,6 +905,7 @@ impl TryFrom<RawChannel> for ChannelHeader {
                     break_count,
                     coding: need(raw.coding, "coding")?.coding()?,
                     significant: raw.significant,
+                    phase: raw.phase,
                     lost_before: loss(&raw.name, raw.lost_before, "lost_before")?,
                     lost_after: loss(&raw.name, raw.lost_after, "lost_after")?,
                 }
@@ -777,6 +920,8 @@ impl TryFrom<RawChannel> for ChannelHeader {
             overview_shift: raw.overview_shift,
             blocks: need(raw.blocks, "blocks")?,
             overview_blocks: raw.overview_blocks.unwrap_or_default(),
+            requires: raw.requires.unwrap_or_default(),
+            codec: raw.codec,
         })
     }
 }
@@ -795,6 +940,7 @@ impl TryFrom<RawChannel> for DeclaredChannel {
                 period: need(raw.period, "period")?,
                 coding: need(raw.coding, "coding")?.coding()?,
                 significant: raw.significant,
+                phase: raw.phase,
             },
         };
         Ok(Self {
@@ -804,6 +950,8 @@ impl TryFrom<RawChannel> for DeclaredChannel {
             data,
             shaping,
             overview_shift: raw.overview_shift,
+            requires: raw.requires.unwrap_or_default(),
+            codec: raw.codec,
         })
     }
 }
@@ -822,17 +970,26 @@ impl ChannelHeader {
                     period,
                     coding,
                     significant,
+                    phase,
                     ..
                 } => DeclaredKind::Analog {
                     unit: unit.clone(),
                     period: *period,
                     coding: *coding,
                     significant: *significant,
+                    phase: *phase,
                 },
             },
             shaping: self.shaping.clone(),
             overview_shift: self.overview_shift,
+            requires: self.requires.clone(),
+            codec: self.codec.clone(),
         }
+    }
+
+    /// Whether this version can read the channel: it states no `requires` and no `codec`.
+    pub fn available(&self) -> bool {
+        self.requires.is_empty() && self.codec.is_none()
     }
 
     /// The analog channel's coding; None for a digital one.
@@ -851,6 +1008,19 @@ impl DeclaredChannel {
             DeclaredKind::Analog { coding, .. } => Some(*coding),
             DeclaredKind::Digital { .. } => None,
         }
+    }
+
+    /// The analog channel's grid; None for a digital one, or one whose grid passes 2^16.
+    pub fn grid(&self) -> Option<crate::model::Grid> {
+        match &self.data {
+            DeclaredKind::Analog { period, phase, .. } => crate::model::Grid::new(*period, *phase),
+            DeclaredKind::Digital { .. } => None,
+        }
+    }
+
+    /// Whether this version can read the channel: it states no `requires` and no `codec`.
+    pub fn available(&self) -> bool {
+        self.requires.is_empty() && self.codec.is_none()
     }
 }
 
@@ -922,7 +1092,7 @@ impl Declaration {
     /// Overview channel `o`'s finest level's shift: a channel's own or the recording's, and a
     /// derived channel's operands' coarser (FORMAT.md, "Overview"). None past the last.
     pub fn shift(&self, o: usize) -> Option<u8> {
-        let names = self.derived.iter().map(|d| &d.product);
+        let names = self.derived.iter().map(|d| d.operands.as_slice());
         shift_of(
             self.overview_shift,
             &self
@@ -934,27 +1104,62 @@ impl Declaration {
             o,
         )
     }
+
+    /// Whether this version can read overview channel `o`: a channel that states no `requires`
+    /// or `codec`, or a derived channel whose operation it knows over channels it can read.
+    pub fn available(&self, o: usize) -> bool {
+        available_of(
+            &self
+                .channels
+                .iter()
+                .map(|c| (c.name.as_str(), c.available()))
+                .collect::<Vec<_>>(),
+            self.derived.get(o.wrapping_sub(self.channels.len())),
+            o,
+        )
+    }
+}
+
+/// Whether overview channel `o` is available, from each channel's name and availability and,
+/// for a derived channel, its entry.
+fn available_of(channels: &[(&str, bool)], derived: Option<&Derived>, o: usize) -> bool {
+    if let Some(&(_, available)) = channels.get(o) {
+        return available;
+    }
+    derived.is_some_and(|d| {
+        d.known()
+            && d.operands
+                .iter()
+                .all(|name| channels.iter().find(|c| c.0 == name).is_some_and(|c| c.1))
+    })
 }
 
 /// Overview channel `o`'s finest shift, from each channel's name and stated shift and each
-/// derived channel's operands by name.
+/// derived channel's operands by name: a derived channel takes the coarsest of its operands',
+/// whatever its operation. None for no such channel, or a derived channel with no operand or
+/// one that names no channel.
 fn shift_of<'a>(
     recording: u8,
     channels: &[(&str, Option<u8>)],
-    mut derived: impl Iterator<Item = &'a [String; 2]>,
+    mut derived: impl Iterator<Item = &'a [String]>,
     o: usize,
 ) -> Option<u8> {
     if let Some(&(_, own)) = channels.get(o) {
         return Some(own.unwrap_or(recording));
     }
-    let [a, b] = derived.nth(o - channels.len())?;
+    let operands = derived.nth(o - channels.len())?;
     let of = |name: &String| {
         channels
             .iter()
             .find(|c| c.0 == name)
             .map(|c| c.1.unwrap_or(recording))
     };
-    Some(of(a)?.max(of(b)?))
+    let mut shift: Option<u8> = None;
+    for name in operands {
+        let s = of(name)?;
+        shift = Some(shift.map_or(s, |a| a.max(s)));
+    }
+    shift
 }
 
 impl Header {
@@ -994,7 +1199,21 @@ impl Header {
                 .iter()
                 .map(|c| (c.name.as_str(), c.overview_shift))
                 .collect::<Vec<_>>(),
-            self.derived.iter().map(|d| &d.product),
+            self.derived.iter().map(|d| d.operands.as_slice()),
+            o,
+        )
+    }
+
+    /// Whether this version can read overview channel `o`, as `Declaration::available`.
+    pub fn available(&self, o: usize) -> bool {
+        let derived = self.derived.get(o.wrapping_sub(self.channels.len()));
+        available_of(
+            &self
+                .channels
+                .iter()
+                .map(|c| (c.name.as_str(), c.available()))
+                .collect::<Vec<_>>(),
+            derived.map(DerivedHeader::declared).as_ref(),
             o,
         )
     }
@@ -1018,6 +1237,7 @@ impl Header {
             title: self.title.clone(),
             meta: self.meta.clone(),
             overview_shift: self.overview_shift,
+            requires: self.requires.clone(),
         }
     }
 }
@@ -1338,12 +1558,14 @@ mod tests {
                 index: 4,
                 tick: 20,
                 lost: 3,
+                phase: 0,
             }],
             break_count: None,
             coding,
             significant: Some(4),
             lost_before: 2,
             lost_after: 0,
+            phase: None,
         };
         for data in [
             ChannelKind::Digital {
@@ -1400,6 +1622,8 @@ mod tests {
                         blocks: 2,
                         rows: 2,
                     }],
+                    codec: None,
+                    requires: Vec::new(),
                 };
                 let json = serde_json::to_string(&channel).unwrap();
                 assert_eq!(parse(&json).unwrap(), channel, "{json}");
@@ -1449,6 +1673,8 @@ mod tests {
             overview_shift: None,
             blocks: 1,
             overview_blocks: Vec::new(),
+            codec: None,
+            requires: Vec::new(),
         };
         let [whole, .., both] = shapings();
         assert_eq!(

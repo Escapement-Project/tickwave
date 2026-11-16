@@ -8,9 +8,7 @@ use std::io::Read;
 use crate::decode::{BlockChannel, DecodeError, HOLD, MAX_DECODED, inflate_limited};
 use crate::hash::{self, ChannelHasher};
 use crate::header::{AnalogCoding, ChannelKind, DeclaredKind, Header};
-use crate::model::{
-    Break, ChannelData, Edges, Gap, Ratio, Recording, Sample, Samples, run_sample_tick,
-};
+use crate::model::{Break, ChannelData, Edges, Gap, Ratio, Recording, Sample, Samples};
 use crate::overview::{self, Column, Ladder, Level, Pair, Settled};
 use crate::reader::{Ending, Event, Reader};
 
@@ -54,6 +52,7 @@ enum Want {
         unit: String,
         first: i64,
         period: Ratio,
+        phase: Option<Ratio>,
         /// The coding the samples' type has: f32 samples may also be stored as codes.
         natural: AnalogCoding,
         significant: Option<u8>,
@@ -223,6 +222,7 @@ pub fn verify_limited(
                 unit: a.unit,
                 first: a.first,
                 period: a.period,
+                phase: a.phase,
                 significant: a.significant,
                 count: a.count,
                 breaks: a.breaks,
@@ -234,6 +234,7 @@ pub fn verify_limited(
     }
     let mut reader = Reader::new(max);
     let mut ov: Option<Overview> = None;
+    let mut grids: Vec<Option<crate::model::Grid>> = Vec::new();
     let mut ended = vec![false; wants.len()];
     let mut header = None;
     let mut chunk = vec![0; 1 << 20];
@@ -324,10 +325,12 @@ pub fn verify_limited(
                                 period,
                                 coding,
                                 significant,
+                                phase,
                             },
                             Want::Analog {
                                 unit: u,
                                 period: p,
+                                phase: f,
                                 natural,
                                 significant: s,
                                 hasher,
@@ -335,6 +338,7 @@ pub fn verify_limited(
                             },
                         ) if unit == u
                             && period == p
+                            && phase == f
                             && significant == s
                             && (coding == natural
                                 || matches!(
@@ -357,18 +361,9 @@ pub fn verify_limited(
                 let ladders = columns
                     .iter()
                     .enumerate()
-                    .map(|(o, &column)| {
-                        let initial = match d.channels.get(o).map(|c| &c.data) {
-                            Some(DeclaredKind::Digital { initial }) => Some(*initial),
-                            _ => None,
-                        };
-                        Some(Ladder::new(
-                            d.shift(o).expect("a checked declaration's channel"),
-                            column,
-                            initial,
-                        ))
-                    })
+                    .map(|(o, &column)| Some(overview::ladder_of(&d, o, column)))
                     .collect();
+                grids = d.channels.iter().map(|c| c.grid()).collect();
                 let products = overview::products(&d.channels, &d.derived);
                 let mut operand_of = vec![Vec::new(); d.channels.len()];
                 for (k, &(a, b, _)) in products.iter().enumerate() {
@@ -426,7 +421,8 @@ pub fn verify_limited(
                     unreachable!("the reader checks a run's channel")
                 };
                 let fits = if run.index == 0 {
-                    run.tick == *first && run.lost == *lost_before
+                    let declared = grids[c].map_or(0, |g| g.phase());
+                    run.tick == *first && run.lost == *lost_before && run.phase == declared
                 } else {
                     breaks.contains(&run)
                 };
@@ -483,7 +479,6 @@ pub fn verify_limited(
                         Want::Analog {
                             samples,
                             first,
-                            period,
                             breaks,
                             hasher,
                             ..
@@ -491,6 +486,7 @@ pub fn verify_limited(
                     ) => {
                         let hasher = hasher.as_mut().expect("the declaration came first");
                         let map = reader.mapping(c);
+                        let grid = grids[c].expect("an analog channel's grid");
                         let stored = wants_len(&ov.columns, &ov.pairs);
                         for (index, value) in (*first_index..).zip(values.iter()) {
                             if !samples.next().is_some_and(|s| same(s, value)) {
@@ -501,7 +497,10 @@ pub fn verify_limited(
                             hasher.sample(value);
                             let tick = map
                                 .and_then(|map| {
-                                    map.axis(run_sample_tick(*first, *period, breaks, index))
+                                    map.axis_place(
+                                        grid.sample_place(*first, breaks, index),
+                                        grid.d(),
+                                    )
                                 })
                                 .ok_or_else(|| {
                                     mismatch(format!("channel {name}: sample {index} has no place"))
@@ -512,10 +511,7 @@ pub fn verify_limited(
                                 .sample(tick, value);
                             for i in 0..ov.operand_of[c].len() {
                                 let d = ov.operand_of[c][i];
-                                if let Some(p) = ov.pairs[d]
-                                    .take(c, tick, value)
-                                    .map_err(|e| mismatch(e.to_string()))?
-                                {
+                                if let Some(p) = ov.pairs[d].take(c, value) {
                                     ov.ladders[stored + d]
                                         .as_mut()
                                         .expect("a ladder until the length")
@@ -548,6 +544,9 @@ pub fn verify_limited(
                         ov.end(length);
                     }
                 }
+            }
+            Event::UnreadBlock(_) => {
+                return Err(mismatch("a block of a channel this version can't read"));
             }
             Event::OverviewBlock { head, frame, .. } => {
                 let ov = ov.as_mut().expect("records follow the declaration");
@@ -640,7 +639,7 @@ pub fn verify_limited(
                     edges.next().is_some(),
                     hasher
                         .expect("the declaration came first")
-                        .finish_digital(end, &gaps),
+                        .finish_digital(end, hash::gaps_listed(&gaps)),
                 )
             }
             (
@@ -680,7 +679,7 @@ pub fn verify_limited(
                     hasher.expect("the declaration came first").finish_analog(
                         first,
                         count,
-                        &breaks,
+                        hash::breaks_listed(&breaks),
                         (lost_before, lost_after),
                     ),
                 )
@@ -694,6 +693,7 @@ pub fn verify_limited(
         }
         digests.push(digest);
     }
+    digests.extend(derived.iter().map(hash::derived_digest));
     if hash::content_id(timebase, length, &digests) != h.content_id {
         return Err(mismatch("the content id does not match the content"));
     }

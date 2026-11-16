@@ -42,11 +42,12 @@ fn each_crafted_recording_is_refused_for_what_it_states() {
         ),
         (
             "big-decoded",
-            "it decodes to 2147483648 bytes, more than this reader holds (67108864)",
+            "channel A: the block at tick 0 is 17 bytes for 2147483648, past the format's limits",
         ),
         (
             "huge-count",
-            "channel A, the block at tick 0: the section is too short for its edges",
+            "channel A: the block at tick 0 holds 268435457 items, more than the 4194304 a block \
+             holds",
         ),
         (
             "page-count",
@@ -91,11 +92,13 @@ fn the_energy_fixture_holds_what_its_example_says() {
             index: 1000,
             tick: 1_008_000,
             lost: 50,
+            phase: 0,
         },
         Break {
             index: 1800,
             tick: 2_000_000,
             lost: 0,
+            phase: 0,
         },
     ];
     for (c, unit, coding) in [(0, "V", int(1000)), (1, "A", int(1_000_000_000))] {
@@ -134,7 +137,7 @@ fn the_energy_fixture_holds_what_its_example_says() {
     assert_eq!(999 * 960 + 960 + 50 * 960, lost[0].tick);
     let names: Vec<&str> = h.channels.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(names, ["V", "I", "range", "under_range", "DIO0"]);
-    assert_eq!(h.derived[0].product, ["I".to_owned(), "V".to_owned()]);
+    assert_eq!(h.derived[0].operands, ["I".to_owned(), "V".to_owned()]);
     let ChannelKind::Digital { gaps, edges, .. } = &h.channels[4].data else {
         panic!()
     };
@@ -162,7 +165,8 @@ fn the_energy_fixture_holds_what_its_example_says() {
         index.block_in(&file, 0, 0).unwrap(),
         index.block_in(&file, 1, 0).unwrap(),
     );
-    let Values::U64(p) = derived_values(&i.data, &v.data, head.products[0].2).unwrap() else {
+    let Values::U64(p) = derived_values(&i.data, &v.data, head.products[0].unwrap().2).unwrap()
+    else {
         panic!("an integer product")
     };
     assert_eq!(p[0], 3_300_000_000);
