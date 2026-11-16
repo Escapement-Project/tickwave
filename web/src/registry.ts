@@ -144,9 +144,15 @@ export async function bundledIn(recording: URL, span: readonly [number, number] 
   return list && { annotations: list, problems: [], complete: true };
 }
 
-/** The head and the sidecar, ahead of a view: `<tickwave-ref>` calls this when it scrolls into view. */
+/** A span no annotation part meets: a read of a bundled sidecar's annotations for it reads the
+ * bundle alone, the hand-written file and its generator files' first lines. */
+export const BUNDLE_ONLY: readonly [number, number] = [0, 0];
+
+/** The head and the sidecar, ahead of a view: `<tickwave-ref>` calls this when it scrolls into
+ * view. Of a bundled sidecar, the bundle alone: its generated annotations wait in the recording's
+ * parts until something reads their span. */
 export async function prefetch(src: URL, annotations: URL | null): Promise<void> {
   const s = await sourceFor(src);
   await s.prefetch();
-  await Promise.allSettled([infoFor(src), annotations ? annotationsFor(annotations, src) : bundledFor(src)]);
+  await Promise.allSettled([infoFor(src), annotations ? annotationsFor(annotations, src) : bundledIn(src, BUNDLE_ONLY)]);
 }

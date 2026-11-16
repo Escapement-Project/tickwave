@@ -42,6 +42,9 @@ canvas { display: block; }
 .readout select { min-height: 22px; padding: 1px 4px; font-size: 12px; }
 .steps { display: flex; gap: 4px; align-items: center; }
 .steps .count { min-width: 5.5em; text-align: center; color: var(--ink-2, GrayText); font-size: 13px; }
+/* "or more" while some annotations are still to read: its room kept, so the count stays put. */
+.steps .count::after { content: "+"; visibility: hidden; }
+.steps .count.partial::after { visibility: visible; }
 .hint { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); pointer-events: none;
   padding: 6px 12px; border-radius: 6px; background: var(--ink, CanvasText); color: var(--page, Canvas);
   font-size: 13px; white-space: nowrap; opacity: 0; transition: opacity .15s; }
@@ -2176,6 +2179,8 @@ export class TickwaveView extends TickwaveElement {
     const list = this.#ofKind();
     const count = this.#steps.querySelector(".count")!;
     count.textContent = `${this.#stepIndex >= 0 ? formatCount(this.#stepIndex + 1) : "\u2013"} of ${formatCount(list.length)}`;
+    // A bundled sidecar read a range at a time may hold more of the kind: the count says so.
+    count.classList.toggle("partial", this.#loaded?.annotations.partial === true);
     (this.#steps.querySelector(".prev") as HTMLButtonElement).disabled = list.length === 0 || this.#stepIndex === 0;
     (this.#steps.querySelector(".next") as HTMLButtonElement).disabled = list.length === 0 || this.#stepIndex === list.length - 1;
   }

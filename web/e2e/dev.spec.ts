@@ -589,6 +589,52 @@ test("an inset of a bundled recording reads the parts its annotation's span meet
   await expect(page.locator("#i .notice")).toBeHidden();
 });
 
+test("while some of a bundled recording's annotations are still to read, the steps' count says there may be more", async ({ page }) => {
+  const BUNDLE = "fixtures/identify-swd.bundle.tickwave";
+  test.skip(!existsSync(BUNDLE), "needs target/release/tickwave: scripts/generate.ts bundles with it");
+  await recordReady(page);
+  // 377 to 378 ms, with a view's width either side, meets the first of the two parts alone.
+  await page.goto(`/e2e/pages/view.html?open&src=${BUNDLE}&firstRead=256&window=${encodeURIComponent("377ms 378ms")}`);
+  await waitReady(page, ["v"]);
+  const view = page.locator("#v");
+  const count = view.locator(".steps .count");
+  const more = () => count.evaluate((c) => getComputedStyle(c, "::after").visibility);
+  // The "+" keeps its room either way, so the count doesn't move when it goes.
+  expect(await more()).toBe("visible");
+  const width = await count.evaluate((c) => c.getBoundingClientRect().width);
+  // A step reads every part first, and then the count is whole.
+  await view.locator(".steps .next").click();
+  await expect.poll(more).toBe("hidden");
+  await expect(count).toHaveText(/^\d+ of \d+$/);
+  expect(await count.evaluate((c) => c.getBoundingClientRect().width)).toBe(width);
+});
+
+test("a reference to a bundled recording prefetches its bundle alone, and reads the parts once the reader opens it", async ({ page }, info) => {
+  const BUNDLE = "fixtures/identify-swd.bundle.tickwave";
+  test.skip(!existsSync(BUNDLE), "needs target/release/tickwave: scripts/generate.ts bundles with it");
+  const file = new Uint8Array(readFileSync(BUNDLE));
+  const l = layout(file);
+  const parts = partRows(file, l.parts!).map((p) => [p.from, p.to] as const);
+  const tag = tagged(info, "ref-bundle");
+  const read = async () => ranges((await served(tag)).filter((e) => e.range && !e.range.startsWith("bytes=-")));
+  const touches = (rs: [number, number][], [from, to]: readonly [number, number]) => rs.some(([a, b]) => a < to && from < b);
+  await recordReady(page);
+  // The view stays collapsed; its reference, far below, cites dpidr-read, an alias whose target
+  // is in a part.
+  await page.goto(`/e2e/pages/view.html?below&src=${BUNDLE}&firstRead=256&tag=${tag}`);
+  const ref = page.locator("tickwave-ref");
+  await ref.scrollIntoViewIfNeeded();
+  await expect.poll(async () => touches(await read(), l.bundle!)).toBe(true);
+  await page.waitForTimeout(300);
+  const before = await read();
+  expect(parts.map((p) => touches(before, p))).toEqual([false, false]);
+  // Opened, its popover's inset reads every part for the alias, and the annotation describes it.
+  await ref.hover();
+  await expect(ref).toHaveAttribute("aria-description", /^Reading the debug port's ID register\. A DP read of DPIDR/);
+  const all = await read();
+  expect(parts.map((p) => touches(all, p))).toEqual([true, true]);
+});
+
 test("a sidecar's problems show in the element and the console; the trace still draws", async ({ page }) => {
   const warnings: string[] = [];
   page.on("console", (m) => {

@@ -5,7 +5,7 @@
 
 import { autoUpdate, computePosition, flip, inline, offset, shift } from "@floating-ui/dom";
 import { REF_ATTRIBUTES } from "../attributes.ts";
-import { absolute, annotationsFor, bundledFor, prefetch } from "../registry.ts";
+import { absolute, annotationsFor, BUNDLE_ONLY, bundledIn, prefetch } from "../registry.ts";
 import { TickwaveElement } from "./base.ts";
 import type { TickwaveInset } from "./inset.ts";
 import type { TickwaveView } from "./view.ts";
@@ -34,8 +34,11 @@ export class TickwaveRef extends TickwaveElement {
   #intersect: IntersectionObserver;
   #prefetched = "";
   #closing = 0;
-  /** The prefetched sidecar's annotations, which describe the reference. */
+  /** The prefetched sidecar's annotations, which describe the reference: a bundled sidecar's
+   * hand-written ones, until the popover reads every one. */
   #list: readonly { id: string; label: string | null; text: string | null }[] = [];
+  /** Some of the bundled annotations are still to read: the annotation cited may be among them. */
+  #partial = false;
 
   constructor() {
     super(CSS, `<slot></slot><div class="pop" part="popover" popover="manual"></div>`);
@@ -113,6 +116,7 @@ export class TickwaveRef extends TickwaveElement {
     const key = `${this.#borrowed("src")}\n${this.#borrowed("annotations") ?? ""}`;
     if (this.#prefetched && key !== this.#prefetched) {
       this.#list = [];
+      this.#partial = false;
       this.#prefetched = "";
       this.#prefetch();
     }
@@ -136,15 +140,39 @@ export class TickwaveRef extends TickwaveElement {
     const sidecar = annotations ? absolute(annotations) : null;
     // A recording or sidecar the reference has moved off says nothing about the one it cites now.
     prefetch(recording, sidecar)
-      .then(() => (sidecar ? annotationsFor(sidecar, recording) : bundledFor(recording)))
-      .then((list) => {
+      .then(() => (sidecar ? annotationsFor(sidecar, recording).then((list) => ({ list, partial: false })) : this.#bundled(recording, BUNDLE_ONLY)))
+      .then(({ list, partial }) => {
         if (this.#prefetched !== key) return;
-        this.#list = list ?? [];
+        [this.#list, this.#partial] = [list, partial];
         this.#describe();
       })
       .catch((e) => {
         if (this.#prefetched === key) this.fail(e);
       });
+  }
+
+  async #bundled(recording: URL, span: readonly [number, number] | null) {
+    const read = await bundledIn(recording, span);
+    return { list: read?.annotations ?? [], partial: read !== null && !read.complete };
+  }
+
+  /** Reads every bundled annotation where the one cited is not among those read: once the reader
+   * opens the reference, whose inset reads them for it anyway. */
+  #readRest(): void {
+    const src = this.#borrowed("src");
+    const key = this.#prefetched;
+    if (!src || !this.#partial || this.#list.some((x) => x.id === this.getAttribute("annotation"))) return;
+    this.#partial = false;
+    this.#bundled(absolute(src), null).then(
+      ({ list, partial }) => {
+        if (this.#prefetched !== key) return;
+        [this.#list, this.#partial] = [list, partial];
+        this.#describe();
+      },
+      (e) => {
+        if (this.#prefetched === key) this.fail(e);
+      },
+    );
   }
 
   /** The inset is drawn, and a screen reader cannot reach into it: the annotation's label and text
@@ -168,6 +196,7 @@ export class TickwaveRef extends TickwaveElement {
 
   #open(): void {
     if (!this.#borrowed("src") || this.#pop.matches(":popover-open")) return;
+    this.#readRest();
     if (!this.#inset) {
       this.#inset = document.createElement("tickwave-inset") as TickwaveInset;
       this.#configure(this.#inset);
