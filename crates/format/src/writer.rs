@@ -7,8 +7,8 @@
 //! compressed a slice at a time over the calls that follow, on the caller's thread, or on other
 //! threads by option. The caller drains the bytes as they come: `output` and `consume`, or
 //! `take_output`. `snapshot` gives a view in the same process what is held so far. `finish`
-//! closes each channel's last block and writes the last pages, the annotation bundle if asked,
-//! the footer and the trailer.
+//! closes each channel's last block and writes each generator's last annotation part, the last
+//! pages, the annotation bundle where it took any annotation, the footer and the trailer.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
@@ -26,7 +26,8 @@ use crate::index::{Due, Entry, Row, Table, TableIndex, TableWriter};
 use crate::mapping::Mapping;
 use crate::model::{Break, Gap, Grid, Sample};
 use crate::overview::{self, Column, Ladder, Pair, Settled, Unpaired};
-use crate::record::{self, BlockHead, Kind, MAX_BLOCK, OverviewHead};
+use crate::parts::{Part, PartRow, placed_span};
+use crate::record::{self, BlockHead, Kind, MAX_BLOCK, MAX_GENERATORS, MAX_PART, OverviewHead};
 use crate::samples;
 use crate::shared::Chunks;
 use crate::snapshot::{ChannelSnapshot, LevelSnapshot, OverviewSnapshot, Snapshot, Unwritten};
@@ -203,6 +204,10 @@ pub enum WriteError {
     /// A caller's annotation that would not resolve in a sidecar: which, and the rule it breaks.
     #[error("{0}")]
     Annotation(String),
+    /// The annotation bundle the finish would write: none asked for where the writer took
+    /// annotations, or files it can't split into parts.
+    #[error("the annotation bundle: {0}")]
+    Bundle(String),
     #[error("the footer is {0} bytes, more than its u32 length holds")]
     FooterTooLarge(usize),
     #[error("the header would not read back: {0}")]
@@ -240,7 +245,7 @@ pub enum Compression {
 
 #[derive(Clone, Debug)]
 pub struct WriteOptions {
-    /// The zstd level for blocks, strips and the annotation bundle.
+    /// The zstd level for blocks, annotation parts, strips and the annotation bundle.
     pub level: i32,
     /// The decoded size at which a channel's block closes, at its next promise: 1 byte to
     /// `MAX_TARGET`.
@@ -494,6 +499,10 @@ enum FrameOf {
         li: usize,
         head: OverviewHead,
     },
+    /// An annotation part, its frame decoding to `raw`, its annotations covering `span`.
+    Part {
+        span: (i64, i64),
+    },
 }
 
 enum Item {
@@ -540,7 +549,9 @@ pub struct Finish {
     /// What each source states only at its end, such as a probe's totals, added to its `extra`,
     /// by source index. It may list fewer sources than the recording has.
     pub extra: Vec<BTreeMap<String, String>>,
-    /// Bundle annotations into the file, so the recording is one file.
+    /// How to bundle the annotations the writer took, so the recording is one file. A writer
+    /// that took any bundles them whatever this says, its files named after `DEFAULT_STEM` where
+    /// it is None.
     pub bundle: Option<Bundle>,
     /// Take a gap that reaches a digital channel's end as ending what is known at its `from`,
     /// even where the gap ends inside the recording, as repair does for a file cut off. Otherwise
@@ -553,29 +564,235 @@ pub struct Finish {
 /// What a finished file bundles in its annotation bundle record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Bundle {
-    /// The writer's own annotations: each source's generator file `<stem>.<source>.jsonl`, and
-    /// a hand-written `<stem>.annotations.toml` that holds no annotation and includes them, where
+    /// The writer's own annotations: each source's generator file `<stem>.<source>.jsonl`, its
+    /// first line alone, the rest in its parts, and a hand-written `<stem>.annotations.toml` that
+    /// holds no annotation and includes them in the order of their first annotations, where
     /// `<stem>` names the recording `<stem>.tickwave`.
     Generated { stem: String },
-    /// These files exactly: a re-cutter carries a file's bundle over.
+    /// These files, for a writer that took no annotation of its own: each generator file the
+    /// hand-written file includes goes in parts that stand alone, in its order, its first line in
+    /// the bundle, and every other file in the bundle whole.
     Files(BTreeMap<String, String>),
 }
 
-/// The files a bundle of `generated` holds for a recording `<stem>.tickwave` with `id`: each
-/// source's generator file, and a hand-written file that includes them and holds no annotation
-/// of its own.
-pub(crate) fn bundled_files(
+/// The decoded size past which a writer writes a generator's lines as a part (FORMAT.md,
+/// "tickwave's writer").
+pub const PART_TARGET: usize = 64 << 10;
+
+/// A part as a writer holds it before compressing it: what its frame decodes to, and the span
+/// its annotations cover.
+pub(crate) type RawPart = (Vec<u8>, (i64, i64));
+
+/// One generator's lines since its last part, and the span they cover.
+#[derive(Clone, Debug)]
+pub(crate) struct Pending {
+    pub source: String,
+    /// Each line with its newline.
+    pub lines: String,
+    pub span: Option<(i64, i64)>,
+}
+
+impl Pending {
+    pub fn new(source: &str) -> Self {
+        Self {
+            source: source.to_owned(),
+            lines: String::new(),
+            span: None,
+        }
+    }
+
+    /// What a part of its lines and `more` bytes of lines more decodes to.
+    pub fn part_len(&self, more: usize) -> usize {
+        2 + self.source.len() + self.lines.len() + more
+    }
+
+    /// `line`, without its newline, covering `span`.
+    pub fn push(&mut self, line: &str, span: (i64, i64)) {
+        self.lines.push_str(line);
+        self.lines.push('\n');
+        self.span = Some(
+            self.span
+                .map_or(span, |(s, e)| (s.min(span.0), e.max(span.1))),
+        );
+    }
+
+    /// Its lines as a part's decoded bytes, and their span; None while it holds none.
+    pub fn take(&mut self) -> Option<RawPart> {
+        let span = self.span.take()?;
+        let part = Part {
+            source: self.source.clone(),
+            lines: std::mem::take(&mut self.lines),
+        };
+        Some((part.to_raw(), span))
+    }
+}
+
+/// The lines of generator `source`, without their newlines, as parts that stand alone: each
+/// part's decoded bytes and span, about `PART_TARGET` bytes each and none past 4 MiB. Blank
+/// lines are skipped. Err where a line's times don't read or a line alone passes 4 MiB.
+pub(crate) fn split_into_parts<'a>(
+    source: &str,
+    lines: impl IntoIterator<Item = &'a str>,
+    timebase: crate::model::Ratio,
+) -> Result<Vec<RawPart>, String> {
+    let mut parts = Vec::new();
+    let mut pending = Pending::new(source);
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let span = placed_span(line, timebase).map_err(|e| format!("generator {source:?}: {e}"))?;
+        if Pending::new(source).part_len(line.len() + 1) > MAX_PART {
+            return Err(format!(
+                "generator {source:?}: a line of {} bytes, past what a part holds, 4 MiB",
+                line.len()
+            ));
+        }
+        if pending.part_len(line.len() + 1) > MAX_PART {
+            parts.extend(pending.take());
+        }
+        pending.push(line, span);
+        if pending.lines.len() >= PART_TARGET {
+            parts.extend(pending.take());
+        }
+    }
+    parts.extend(pending.take());
+    Ok(parts)
+}
+
+/// A part record for `raw`, which covers `span`, compressed at `level`, appended to `out`, whose
+/// first byte is at `at` in the file; its row.
+pub(crate) fn write_part_record(
+    out: &mut Vec<u8>,
+    at: u64,
+    raw: &[u8],
+    span: (i64, i64),
+    level: i32,
+) -> Result<PartRow, WriteError> {
+    let frame = compress(raw, level)?;
+    let row = PartRow {
+        offset: at + out.len() as u64 + (record::PAYLOAD_AT + 4) as u64,
+        length: frame.len() as u32,
+        decoded_length: raw.len() as u32,
+        start: span.0,
+        end: span.1,
+    };
+    record::write(
+        out,
+        Kind::Part,
+        &[&(raw.len() as u32).to_le_bytes(), &frame],
+    );
+    Ok(row)
+}
+
+/// The name a bundle gives its files where a writer that took annotations is asked for none:
+/// `recording.annotations.toml` and `recording.<source>.jsonl`.
+pub const DEFAULT_STEM: &str = "recording";
+
+/// What a finish bundles given `bundle`: the bundle's files but the parts' lines, and the
+/// generator files' other lines as parts that stand alone, in the order the hand-written file
+/// includes them. `generators` are the writer's own, in the order of their first annotations,
+/// which a bundle of given files can't hold too.
+pub(crate) enum Bundling {
+    None,
+    Generated {
+        stem: String,
+    },
+    Files {
+        files: BTreeMap<String, String>,
+        parts: Vec<RawPart>,
+    },
+}
+
+impl Bundling {
+    /// `generators` are the writer's, `records` whether it wrote annotation records. A writer's
+    /// parts that stand alone may go with given files, a re-cutter's carrying its input's bundle,
+    /// where each generator has a file among them.
+    pub fn of(
+        bundle: Option<Bundle>,
+        generators: &[Pending],
+        records: bool,
+        timebase: crate::model::Ratio,
+    ) -> Result<Self, WriteError> {
+        match bundle {
+            None if generators.is_empty() => Ok(Self::None),
+            // A recording that holds annotations ends with them bundled, whatever the caller
+            // asked: under names of its own where it named none.
+            None => Ok(Self::Generated {
+                stem: DEFAULT_STEM.into(),
+            }),
+            Some(Bundle::Generated { stem }) => Ok(Self::Generated { stem }),
+            Some(Bundle::Files(_)) if records => Err(WriteError::Bundle(
+                "files given to bundle, and the writer took annotations of its own".into(),
+            )),
+            Some(Bundle::Files(files))
+                if generators.iter().any(|g| {
+                    !files.values().any(|t| {
+                        crate::annotations::generator_source(t).as_deref() == Some(&g.source)
+                    })
+                }) =>
+            {
+                Err(WriteError::Bundle(
+                    "files given to bundle, and a generator of the writer's parts has none".into(),
+                ))
+            }
+            Some(Bundle::Files(mut files)) => {
+                let mut parts = Vec::new();
+                for name in included_generators(&files) {
+                    let text = files.get_mut(&name).expect("an included file");
+                    let source = crate::annotations::generator_source(text)
+                        .expect("an included generator file");
+                    let mut lines = text.lines();
+                    let first = lines.next().unwrap_or_default().to_owned();
+                    parts.extend(
+                        split_into_parts(&source, lines, timebase).map_err(WriteError::Bundle)?,
+                    );
+                    *text = format!("{first}\n");
+                }
+                Ok(Self::Files { files, parts })
+            }
+        }
+    }
+}
+
+/// The generator files among `files` that its hand-written file includes, in its order. None
+/// where no hand-written TOML file reads.
+fn included_generators(files: &BTreeMap<String, String>) -> Vec<String> {
+    let Some(hand) = files
+        .iter()
+        .find(|(name, _)| name.ends_with(".toml"))
+        .map(|(_, text)| text)
+    else {
+        return Vec::new();
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    crate::annotations::include_order(hand)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|name| {
+            files
+                .get(name)
+                .is_some_and(|t| crate::annotations::generator_source(t).is_some())
+                && seen.insert(name.clone())
+        })
+        .collect()
+}
+
+/// The files a bundle holds for a recording `<stem>.tickwave` with `id` whose generators are
+/// `sources`, in the order of their first annotations: each one's file, its first line alone,
+/// and a hand-written file that includes them in that order and holds no annotation of its own.
+pub(crate) fn bundled_files<'a>(
     stem: &str,
     id: ContentId,
-    generated: &BTreeMap<String, Vec<String>>,
+    sources: impl IntoIterator<Item = &'a str>,
 ) -> BTreeMap<String, String> {
     // A JSON string is a TOML basic string: serde_json escapes nothing TOML lacks.
     let quoted = |s: &str| serde_json::to_string(s).expect("a string serialises");
     let mut files = BTreeMap::new();
     let mut include = Vec::new();
-    for (source, lines) in generated {
+    for source in sources {
         let name = format!("{stem}.{source}.jsonl");
-        files.insert(name.clone(), generator_file(source, None, id, lines));
+        files.insert(name.clone(), generator_file(source, None, id, &[]));
         include.push(quoted(&name));
     }
     files.insert(
@@ -621,32 +838,16 @@ pub fn generator_file(
     out
 }
 
-/// Drops an annotation that starts at or past `length`, and ends a span that runs past it at the
-/// length. Times are axis ticks.
-pub(crate) fn clip_annotation(
-    mut a: serde_json::Map<String, serde_json::Value>,
-    length: i64,
-) -> Option<String> {
-    let start = a.get("start")?.as_i64()?;
-    if start >= length {
-        return None;
-    }
-    if let Some(end) = a.get("end").and_then(|e| e.as_i64())
-        && end > length
-    {
-        a.insert("end".into(), length.into());
-    }
-    Some(serde_json::to_string(&a).expect("a map serialises"))
-}
-
-/// Each source's annotations clipped to `length`, as its generator file's lines.
+/// Each source's annotations held to `length` as a reader holds them, as its generator file's
+/// lines.
 pub(crate) fn generated<'a>(
     annotations: impl IntoIterator<Item = &'a record::Annotation>,
     length: i64,
+    timebase: crate::model::Ratio,
 ) -> BTreeMap<String, Vec<String>> {
     let mut generated: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for a in annotations {
-        if let Some(line) = clip_annotation(a.annotation.clone(), length) {
+        if let Some(line) = crate::parts::clipped(&a.line, length, timebase) {
             generated.entry(a.source.clone()).or_default().push(line);
         }
     }
@@ -726,9 +927,8 @@ fn groups(channels: usize, products: &[(usize, usize, samples::Product)]) -> Vec
 ///
 /// Its memory follows the channels, the block size and the frames waiting for compression, not
 /// the recording's length, except for two things it holds until the finish. Every gap and break,
-/// 24 bytes each, since the content id hashes a list's count before its entries. And every
-/// annotation it takes, whole and with its id, for the bundle or the generator files the finish
-/// writes and for refusing an id given twice. The rest is bounded, but a coarse overview level's
+/// 24 bytes each, for `snapshot()`. And every annotation it takes, for `snapshot()` and
+/// `Finished::generated`. The rest is bounded, but a coarse overview level's
 /// open block takes days to fill and a directory's open page months, so it rises slowly toward
 /// its bound.
 pub struct Writer {
@@ -761,8 +961,14 @@ pub struct Writer {
     offloaded: usize,
     /// The most frames compressing on other threads before a call waits for the oldest.
     offload_limit: usize,
+    /// Every annotation taken, for snapshots and `Finished::generated`.
     annotations: Chunks<record::Annotation>,
     lines: crate::annotations::Lines,
+    /// Each generator's lines since its last part, in the order of its first annotation.
+    generators: Vec<Pending>,
+    /// Whether it wrote an annotation record, which a bundle of given files can't hold.
+    took_records: bool,
+    parts: TableWriter<PartRow>,
     /// A compression that failed where no error could be returned.
     failed: Option<String>,
 }
@@ -895,6 +1101,9 @@ impl Writer {
             offload_limit,
             annotations: Chunks::new(),
             lines,
+            generators: Vec::new(),
+            took_records: false,
+            parts: TableWriter::new(0, Table::Parts, false),
             failed: None,
         })
     }
@@ -973,6 +1182,11 @@ impl Writer {
         } else {
             Err(WriteError::NoChannel(c))
         }
+    }
+
+    /// The latest promise made to channel `c` alone, which `promise_channel` can't go back from.
+    pub(crate) fn promised_to(&self, c: usize) -> i64 {
+        self.chans[c].promise
     }
 
     fn promise_of(&self, c: usize) -> i64 {
@@ -1570,7 +1784,9 @@ impl Writer {
         self.after_item(c, tick, size)
     }
 
-    /// One generated annotation, from generator `source`. Its times are axis ticks.
+    /// One generated annotation, from generator `source`. Its times are axis ticks. Its record
+    /// goes out at once; its generator's lines go in a part once they reach `PART_TARGET` bytes,
+    /// after its record, and before a line that would take them past 4 MiB.
     pub fn annotation(
         &mut self,
         source: &str,
@@ -1581,16 +1797,75 @@ impl Writer {
         self.lines
             .take(source, &annotation)
             .map_err(WriteError::Annotation)?;
+        let line = serde_json::to_string(&annotation).expect("a map serialises");
+        let span = placed_span(&line, self.declaration.timebase)
+            .map_err(|e| WriteError::Annotation(format!("generator {source:?}: {e}")))?;
+        let g = self.generator_for(source, &line)?;
         let a = record::Annotation {
             source: source.to_owned(),
-            annotation,
+            line,
         };
-        let json = serde_json::to_vec(&a).expect("an annotation serialises");
         let mut bytes = Vec::new();
-        record::write(&mut bytes, Kind::Annotation, &[&json]);
+        record::write(&mut bytes, Kind::Annotation, &[&a.to_payload()]);
         self.put(bytes, Placed::Nothing);
+        self.took_records = true;
+        self.generators[g].push(&a.line, span);
+        if self.generators[g].lines.len() >= PART_TARGET {
+            self.write_part(g);
+        }
         self.annotations.push(a);
         self.advance()
+    }
+
+    /// One line of generator `source`'s file, which goes in a part that stands alone, with no
+    /// annotation record: a re-cutter's (FORMAT.md, "Re-cutting"). Its parts go out as
+    /// `annotation`'s do, and its times may be decimals with a unit. The writer holds no more of
+    /// it than its part's lines, so `Finished::generated` leaves it out.
+    pub(crate) fn standalone_line(&mut self, source: &str, line: &str) -> Result<(), WriteError> {
+        self.check_failed()?;
+        let span = placed_span(line, self.declaration.timebase)
+            .map_err(|e| WriteError::Annotation(format!("generator {source:?}: {e}")))?;
+        let g = self.generator_for(source, line)?;
+        self.generators[g].push(line, span);
+        if self.generators[g].lines.len() >= PART_TARGET {
+            self.write_part(g);
+        }
+        self.advance()
+    }
+
+    /// Generator `source`'s place among the writer's, met for the first time or not, ready to
+    /// take `line`: one no part can hold, or a 257th generator, is refused, and the lines held
+    /// go in a part first where `line` would take them past 4 MiB.
+    fn generator_for(&mut self, source: &str, line: &str) -> Result<usize, WriteError> {
+        if Pending::new(source).part_len(line.len() + 1) > MAX_PART {
+            return Err(WriteError::Annotation(format!(
+                "generator {source:?}: a line of {} bytes, past what a part holds, 4 MiB",
+                line.len()
+            )));
+        }
+        let g = match self.generators.iter().position(|g| g.source == source) {
+            Some(g) => g,
+            None if self.generators.len() == MAX_GENERATORS => {
+                return Err(WriteError::Annotation(format!(
+                    "generator {source:?}: a recording has at most {MAX_GENERATORS} generators"
+                )));
+            }
+            None => {
+                self.generators.push(Pending::new(source));
+                self.generators.len() - 1
+            }
+        };
+        if self.generators[g].part_len(line.len() + 1) > MAX_PART {
+            self.write_part(g);
+        }
+        Ok(g)
+    }
+
+    /// Generator `g`'s lines since its last part, as a part queued for compression.
+    fn write_part(&mut self, g: usize) {
+        if let Some((raw, span)) = self.generators[g].take() {
+            self.queue_frame(FrameOf::Part { span }, Arc::new(raw), self.options.level);
+        }
     }
 
     /// Every item before axis tick `before` is in: promises it, closes there every channel's open
@@ -2062,6 +2337,19 @@ impl Writer {
                 let due = table.push(row);
                 place_dues(table, due, &mut self.out, taken);
             }
+            FrameOf::Part { span } => {
+                let decoded = raw.len() as u32;
+                record::write(&mut self.out, Kind::Part, &[&decoded.to_le_bytes(), frame]);
+                let row = PartRow {
+                    offset: at + (record::PAYLOAD_AT + 4) as u64,
+                    length,
+                    decoded_length: decoded,
+                    start: span.0,
+                    end: span.1,
+                };
+                let due = self.parts.push(row);
+                place_dues(&mut self.parts, due, &mut self.out, taken);
+            }
         }
         Ok(())
     }
@@ -2119,6 +2407,7 @@ impl Writer {
                             raw: Arc::clone(raw),
                         });
                     }
+                    FrameOf::Part { .. } => {}
                 }
             }
         }
@@ -2205,14 +2494,15 @@ impl Writer {
     }
 
     /// The recording ends at axis tick `length`. `ends` gives each digital channel's `end`, a
-    /// source tick, in channel order. Closes each channel's last block, then writes the last
-    /// pages, the annotation bundle if asked, the footer and the trailer, with `finish`'s extras
-    /// and losses.
+    /// source tick, in channel order. Closes each channel's last block, then writes each
+    /// generator's last annotation part, the last pages, the annotation bundle where it took any
+    /// annotation or was given files, the footer and the trailer, with `finish`'s extras and
+    /// losses.
     pub fn finish(
         mut self,
         length: i64,
         ends: &[i64],
-        finish: Finish,
+        mut finish: Finish,
     ) -> Result<Finished, WriteError> {
         self.check_failed()?;
         let last = self
@@ -2286,6 +2576,12 @@ impl Writer {
                 });
             }
         }
+        let mut bundling = Bundling::of(
+            finish.bundle.take(),
+            &self.generators,
+            self.took_records,
+            self.declaration.timebase,
+        )?;
         // Every channel's end, before anything is closed, so a refusal leaves no half-written
         // footer.
         let mut settled_ends = Vec::with_capacity(self.chans.len());
@@ -2402,6 +2698,16 @@ impl Writer {
             strips.push(end.strip);
             ladders.push(end.levels);
         }
+        // Each generator's last part, in the order of its first annotation, then the parts a
+        // bundle of given files holds.
+        for g in 0..self.generators.len() {
+            self.write_part(g);
+        }
+        if let Bundling::Files { parts, .. } = &mut bundling {
+            for (raw, span) in parts.drain(..) {
+                self.queue_frame(FrameOf::Part { span }, Arc::new(raw), self.options.level);
+            }
+        }
         self.drain_all()?;
 
         // Each table's last pages.
@@ -2446,6 +2752,13 @@ impl Writer {
                     place_dues(table, due, &mut self.out, taken);
                 }
             }
+        }
+        loop {
+            let due = self.parts.finish_next(0);
+            if due.is_none() {
+                break;
+            }
+            place_dues(&mut self.parts, due, &mut self.out, taken);
         }
 
         let mut digests = Vec::with_capacity(self.chans.len());
@@ -2554,17 +2867,21 @@ impl Writer {
             content_id: hash::content_id(self.declaration.timebase, length, &digests),
             overview_shift: self.declaration.overview_shift,
             requires: Vec::new(),
-            annotation_parts: None,
+            annotation_parts: (self.parts.count() > 0).then_some(self.parts.count()),
         };
         // The reader's own rules, so the writer never writes a header the reader refuses.
         crate::decode::check_header(&header).map_err(|e| WriteError::Header(e.to_string()))?;
-        let generated = generated(self.annotations.iter(), length);
-        let files = match finish.bundle {
-            None => None,
-            Some(Bundle::Generated { stem }) => {
-                Some(bundled_files(&stem, header.content_id, &generated))
-            }
-            Some(Bundle::Files(files)) => Some(files),
+        let generated = generated(self.annotations.iter(), length, self.declaration.timebase);
+        let files = match bundling {
+            Bundling::None => None,
+            Bundling::Generated { stem } => (!self.generators.is_empty()).then(|| {
+                bundled_files(
+                    &stem,
+                    header.content_id,
+                    self.generators.iter().map(|g| g.source.as_str()),
+                )
+            }),
+            Bundling::Files { files, .. } => Some(files),
         };
         let bundle = match files {
             None => (0, 0),
@@ -2593,6 +2910,7 @@ impl Writer {
         let footer = footer_payload(
             &header,
             bundle,
+            self.parts.top(),
             &tops,
             &strips,
             &self.ochans_columns(),
@@ -2637,11 +2955,12 @@ pub(crate) struct ChannelTops {
     pub list: Option<(u8, Vec<Entry>)>,
 }
 
-/// The footer's payload: the header, the top index from `bundle` and each channel's `tops`, and
-/// each channel's strip compressed at `level`.
+/// The footer's payload: the header, the top index from `bundle`, the annotation parts table's
+/// `parts` and each channel's `tops`, and each channel's strip compressed at `level`.
 pub(crate) fn footer_payload(
     header: &Header,
     bundle: (u64, u32),
+    parts: Option<(u8, Vec<Entry>)>,
     tops: &[ChannelTops],
     strips: &[overview::Level],
     columns: &[Column],
@@ -2659,6 +2978,9 @@ pub(crate) fn footer_payload(
             e.write(top);
         }
     };
+    if let Some(t) = &parts {
+        table(&mut top, t);
+    }
     for ((tops, strip), &column) in tops.iter().zip(strips).zip(columns) {
         let raw = strip.to_bytes(column);
         let frame = compress(&raw, level)?;
@@ -2724,6 +3046,45 @@ mod tests {
             requires: Vec::new(),
         };
         Writer::new(d, WriteOptions::default()).unwrap()
+    }
+
+    /// FORMAT.md, "Annotations": a re-cutter's lines go in parts that stand alone and carry its
+    /// input's bundle as files given, which must hold a file for each of their generators. A
+    /// writer that wrote records of its own can't take files given.
+    #[test]
+    fn standalone_lines_go_with_given_files_that_name_their_generators() {
+        let line = r#"{"id":"g/1","start":1}"#;
+        let files = |source: &str| {
+            let id: ContentId =
+                "blake3:00ff000000000000000000000000000000000000000000000000000000000000"
+                    .parse()
+                    .unwrap();
+            BTreeMap::from([(
+                "rec.g.jsonl".to_owned(),
+                generator_file(source, None, id, &[]),
+            )])
+        };
+        let finish = |files| Finish {
+            bundle: Some(Bundle::Files(files)),
+            ..Finish::default()
+        };
+        let mut w = writer();
+        w.standalone_line("g", line).unwrap();
+        let f = w.finish(10, &[10], finish(files("g"))).unwrap();
+        assert_eq!(f.header.annotation_parts, Some(1));
+        let mut w = writer();
+        w.standalone_line("g", line).unwrap();
+        match w.finish(10, &[10], finish(files("other"))) {
+            Err(WriteError::Bundle(e)) => assert!(e.ends_with("has none"), "{e}"),
+            other => panic!("{other:?}"),
+        }
+        let mut w = writer();
+        w.annotation("g", serde_json::from_str(line).unwrap())
+            .unwrap();
+        match w.finish(10, &[10], finish(files("g"))) {
+            Err(WriteError::Bundle(e)) => assert!(e.ends_with("of its own"), "{e}"),
+            other => panic!("{other:?}"),
+        }
     }
 
     /// An item that would take its open block's decoded size past 4 MiB, the most a block

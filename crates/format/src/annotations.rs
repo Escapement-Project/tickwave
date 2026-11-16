@@ -11,39 +11,9 @@ use serde::{Deserialize, Serialize};
 use crate::header::{ChannelKind, ContentId, Declaration, DeclaredKind, Header};
 use crate::model::Ratio;
 use crate::record::check_source;
+pub use crate::times::{ExactTicks, Time, exact_ticks, ticks};
 
 pub const FORMAT: &str = "tickwave-annotations/1";
-
-/// A time as a file writes it: a tick count, or a decimal with a unit.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Time {
-    Ticks(i64),
-    Text(String),
-}
-
-impl<'de> Deserialize<'de> for Time {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct Visit;
-        impl serde::de::Visitor<'_> for Visit {
-            type Value = Time;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str(r#"a whole tick count or a decimal with a unit, as "1.5 us""#)
-            }
-            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Time, E> {
-                Ok(Time::Ticks(v))
-            }
-            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Time, E> {
-                i64::try_from(v)
-                    .map(Time::Ticks)
-                    .map_err(|_| E::custom(format!("{v} ticks is out of range")))
-            }
-            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Time, E> {
-                Ok(Time::Text(v.to_owned()))
-            }
-        }
-        d.deserialize_any(Visit)
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -130,92 +100,6 @@ pub struct Annotation {
 pub struct Included<'a> {
     pub name: &'a str,
     pub text: &'a str,
-}
-
-/// Converts a time to ticks, rounding to the nearest tick (halves away from zero). A text time is
-/// a decimal and a unit (`s`, `ms`, `us`, `µs`, `ns`, `ps`), with or without a space between.
-/// The arithmetic is exact: `0.1 ms` at 1 GS/s is 100,000 ticks, not 99,999.
-pub fn ticks(time: &Time, timebase: Ratio) -> Result<i64, String> {
-    let text = match time {
-        Time::Ticks(t) => return Ok(*t),
-        Time::Text(s) => s.trim(),
-    };
-    exact_ticks(text, timebase)?
-        .rounded()
-        .ok_or_else(|| format!("{text:?}: out of range"))
-}
-
-/// A text time in ticks, exactly: `numerator / denominator`, negated when `negative`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ExactTicks {
-    pub negative: bool,
-    pub numerator: i128,
-    /// Positive.
-    pub denominator: i128,
-}
-
-impl ExactTicks {
-    /// The nearest tick, halves away from zero; None where it would pass i64.
-    pub fn rounded(&self) -> Option<i64> {
-        // Halves away from zero, on the magnitude. Checked: 2 × numerator can pass i128 where the
-        // quotient would not, and a wrapped sum is a wrong tick, not an error.
-        let rounded = self
-            .numerator
-            .checked_mul(2)
-            .and_then(|n| n.checked_add(self.denominator))
-            .zip(self.denominator.checked_mul(2))
-            .map(|(n, d)| n / d)?;
-        let value = i64::try_from(rounded).ok()?;
-        Some(if self.negative { -value } else { value })
-    }
-}
-
-/// A text time, a decimal and a unit, in ticks, exactly; `ticks` rounds it.
-pub fn exact_ticks(text: &str, timebase: Ratio) -> Result<ExactTicks, String> {
-    let text = text.trim();
-    let split = text
-        .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == '+'))
-        .ok_or_else(|| format!("{text:?}: no unit"))?;
-    let (number, unit) = (text[..split].trim(), text[split..].trim());
-    let unit_exp: u32 = match unit {
-        "s" => 0,
-        "ms" => 3,
-        "us" | "µs" => 6,
-        "ns" => 9,
-        "ps" => 12,
-        _ => return Err(format!("{text:?}: unknown unit {unit:?}")),
-    };
-    let (negative, digits) = match number.strip_prefix('-') {
-        Some(rest) => (true, rest),
-        None => (false, number.strip_prefix('+').unwrap_or(number)),
-    };
-    let (whole, fraction) = digits.split_once('.').unwrap_or((digits, ""));
-    if whole.is_empty() && fraction.is_empty()
-        || !whole
-            .chars()
-            .chain(fraction.chars())
-            .all(|c| c.is_ascii_digit())
-    {
-        return Err(format!("{text:?}: not a decimal"));
-    }
-    let too_big = || format!("{text:?}: out of range");
-    let mantissa: i128 = format!("{whole}{fraction}")
-        .parse()
-        .map_err(|_| too_big())?;
-    // seconds = mantissa / 10^(fraction digits + unit exponent); ticks = seconds × num / den.
-    let scale_exp = fraction.len() as u32 + unit_exp;
-    let denominator = 10i128
-        .checked_pow(scale_exp)
-        .and_then(|p| p.checked_mul(i128::from(timebase.den())))
-        .ok_or_else(too_big)?;
-    let numerator = mantissa
-        .checked_mul(i128::from(timebase.num()))
-        .ok_or_else(too_big)?;
-    Ok(ExactTicks {
-        negative,
-        numerator,
-        denominator,
-    })
 }
 
 /// Why a `values` entry is refused, if it is: its name must be lower-case letters, digits and
@@ -314,20 +198,19 @@ fn place_problems(
 }
 
 /// Generators' lines, held to what `resolve` asks of each before the recording's length is known,
-/// as a writer takes them: the line's fields and their types, times in whole ticks, a place on
-/// the recording's channels, and an id its generator gives no other. The writer's finish drops a
-/// line that starts at or past the length and ends a span there, which keeps the rest.
+/// as a writer takes them: the line's fields and their types, times in whole ticks, and a place on
+/// the recording's channels. Ids are not held to be unique, which would mean holding every one: a
+/// reader keeps the first of an id its generator gives twice (FORMAT.md, "Annotations"). A reader
+/// drops a line that starts at or past the length and ends a span there, which keeps the rest.
 pub struct Lines {
     /// Each channel's name, and whether it is digital.
     channels: BTreeMap<String, bool>,
-    ids: BTreeSet<(String, String)>,
 }
 
 impl Lines {
     pub fn new(channels: impl IntoIterator<Item = (String, bool)>) -> Self {
         Self {
             channels: channels.into_iter().collect(),
-            ids: BTreeSet::new(),
         }
     }
 
@@ -339,12 +222,45 @@ impl Lines {
         }))
     }
 
+    /// As `take`, for a line as its file's text gives it.
+    pub fn take_line(&mut self, source: &str, line: &str) -> Result<(), String> {
+        match serde_json::from_str(line) {
+            Ok(fields) => self.take(source, &fields),
+            Err(e) => Err(format!("annotation with no id: {e}")),
+        }
+    }
+
+    /// As `take_line`, for a line of a generator's file rather than an annotation record: its
+    /// times may be decimals with a unit, at `timebase`, as ANNOTATIONS.md allows a file's.
+    pub fn take_file_line(
+        &mut self,
+        source: &str,
+        line: &str,
+        timebase: Ratio,
+    ) -> Result<(), String> {
+        match serde_json::from_str(line) {
+            Ok(fields) => self.check(source, &fields, Some(timebase)),
+            Err(e) => Err(format!("annotation with no id: {e}")),
+        }
+    }
+
     /// Takes generator `source`'s `line`, or says why it can't stand: `annotation "<id>": ...`,
     /// or `annotation with no id: ...`.
     pub fn take(
         &mut self,
         source: &str,
         line: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), String> {
+        self.check(source, line, None)
+    }
+
+    /// `take`, with times in ticks alone where `timebase` is None, or also as decimals with a
+    /// unit at it.
+    fn check(
+        &mut self,
+        source: &str,
+        line: &serde_json::Map<String, serde_json::Value>,
+        timebase: Option<Ratio>,
     ) -> Result<(), String> {
         let who = match line.get("id").and_then(|id| id.as_str()) {
             Some(id) => format!("annotation {id:?}"),
@@ -358,15 +274,23 @@ impl Lines {
             Ok(entry) => entry,
             Err(e) => return refused(&e.to_string()),
         };
-        let tick = |key: &'static str| line.get(key).map(|t| t.as_i64().ok_or(key));
+        let tick = |key: &'static str| {
+            line.get(key)
+                .map(|t| match (t.as_i64(), t.as_str(), timebase) {
+                    (Some(t), ..) => Ok(t),
+                    (None, Some(text), Some(timebase)) => {
+                        ticks(&Time::Text(text.to_owned()), timebase)
+                            .map_err(|e| format!("{key}: {e}"))
+                    }
+                    _ => Err(format!(
+                        "{key} is not a whole tick count: a writer's times are axis ticks"
+                    )),
+                })
+        };
         let (start, end) = match (tick("start"), tick("end").transpose()) {
             (Some(Ok(start)), Ok(end)) => (start, end),
             (None, _) => return refused("no start"),
-            (Some(Err(key)), _) | (_, Err(key)) => {
-                return refused(&format!(
-                    "{key} is not a whole tick count: a writer's times are axis ticks"
-                ));
-            }
+            (Some(Err(why)), _) | (_, Err(why)) => return refused(&why),
         };
         let mut problems = field_problems(&entry, true);
         if entry.target.is_some() {
@@ -382,11 +306,6 @@ impl Lines {
         ));
         if !problems.is_empty() {
             return refused(&problems.join("; "));
-        }
-        if !self.ids.insert((source.to_owned(), entry.id)) {
-            return refused(&format!(
-                "generator {source:?} has an annotation of this id already"
-            ));
         }
         Ok(())
     }
@@ -413,6 +332,17 @@ pub fn generator_source(text: &str) -> Option<String> {
     let first = text.lines().find(|l| !l.trim().is_empty())?;
     let head: GeneratorHead = json(first).ok()?;
     (head.format == FORMAT).then_some(head.source)
+}
+
+/// The files a hand-written file includes, in its order; None when its TOML doesn't read.
+#[cfg(feature = "toml")]
+pub fn include_order(hand: &str) -> Option<Vec<String>> {
+    #[derive(Deserialize)]
+    struct Include {
+        #[serde(default)]
+        include: Vec<String>,
+    }
+    toml::from_str::<Include>(hand).ok().map(|i| i.include)
 }
 
 /// How many annotations a hand-written file holds; None when its TOML doesn't read.
@@ -489,53 +419,138 @@ impl std::fmt::Display for At<'_> {
     }
 }
 
+/// Whom a problem found while resolving belongs to: one annotation, by its place in sidecar
+/// order, an included file's lines, or the sidecar as a whole.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Owner<'a> {
+    Entry(usize),
+    File(&'a str),
+    Sidecar,
+}
+
+/// A sidecar resolved as far as it goes: each annotation that resolved, with its place in
+/// sidecar order and its file, and every problem found, with whom it belongs to.
+struct Found<'a> {
+    annotations: Vec<(usize, At<'a>, Annotation)>,
+    problems: Vec<(Owner<'a>, String)>,
+}
+
 fn resolve_file(
     file: HandFile,
     included: &[Included<'_>],
     header: &Header,
     recording_file: Option<&str>,
 ) -> Result<Vec<Annotation>, Vec<String>> {
-    let mut problems = Vec::new();
+    let found = find(file, included, header, recording_file);
+    if found.problems.is_empty() {
+        Ok(found.annotations.into_iter().map(|(.., a)| a).collect())
+    } else {
+        Err(found.problems.into_iter().map(|(_, p)| p).collect())
+    }
+}
+
+/// A sidecar resolved the way a reader shows one (FORMAT.md, "Annotations"): each annotation that
+/// breaks a rule is left out, and so are an included file's lines where its first line does,
+/// rather than the whole sidecar; the first of an id given twice stays. `problems` names each.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Resolved {
+    pub annotations: Vec<Annotation>,
+    pub problems: Vec<String>,
+}
+
+/// As `resolve`, leaving out what breaks a rule rather than refusing the sidecar.
+#[cfg(feature = "toml")]
+pub fn resolve_lenient(
+    hand: &str,
+    included: &[Included<'_>],
+    header: &Header,
+    recording_file: Option<&str>,
+) -> Resolved {
+    match toml::from_str(hand) {
+        Ok(file) => {
+            let found = find(file, included, header, recording_file);
+            let dropped = |position: usize, at: &At<'_>| {
+                found.problems.iter().any(|(owner, _)| match (owner, at) {
+                    (Owner::Entry(p), _) => *p == position,
+                    (Owner::File(name), At::Line(file, _)) => name == file,
+                    _ => false,
+                })
+            };
+            let annotations = found
+                .annotations
+                .iter()
+                .filter(|(position, at, _)| !dropped(*position, at))
+                .map(|(.., a)| a.clone())
+                .collect();
+            Resolved {
+                annotations,
+                problems: found.problems.into_iter().map(|(_, p)| p).collect(),
+            }
+        }
+        Err(e) => Resolved {
+            annotations: Vec::new(),
+            problems: vec![format!("the TOML file: {e}")],
+        },
+    }
+}
+
+fn find<'a>(
+    file: HandFile,
+    included: &[Included<'a>],
+    header: &Header,
+    recording_file: Option<&str>,
+) -> Found<'a> {
+    let mut problems: Vec<(Owner<'a>, String)> = Vec::new();
     if file.format != FORMAT {
-        problems.push(format!(
-            "the TOML file's format is {:?}, not {FORMAT:?}",
-            file.format
+        problems.push((
+            Owner::Sidecar,
+            format!(
+                "the TOML file's format is {:?}, not {FORMAT:?}",
+                file.format
+            ),
         ));
     }
     if let (Some(named), Some(actual)) = (&file.recording, recording_file)
         && named != actual
     {
-        problems.push(format!("the TOML file names {named:?}, not {actual:?}"));
+        problems.push((
+            Owner::Sidecar,
+            format!("the TOML file names {named:?}, not {actual:?}"),
+        ));
     }
     if file.recording_id != header.content_id {
-        problems.push(format!(
-            "the TOML file is for {}, but the recording is {}",
-            file.recording_id, header.content_id
+        problems.push((
+            Owner::Sidecar,
+            format!(
+                "the TOML file is for {}, but the recording is {}",
+                file.recording_id, header.content_id
+            ),
         ));
     }
     for name in &file.include {
         if name.contains(['/', '\\']) || name == ".." || name == "." {
-            problems.push(format!(
-                "{name}: an included file is named on its own, as it sits beside this one"
+            problems.push((
+                Owner::Sidecar,
+                format!("{name}: an included file is named on its own, as it sits beside this one"),
             ));
         }
     }
     let listed: BTreeSet<&str> = file.include.iter().map(String::as_str).collect();
     let given: BTreeSet<&str> = included.iter().map(|i| i.name).collect();
     for name in listed.difference(&given) {
-        problems.push(format!("{name}: included but not provided"));
+        problems.push((Owner::Sidecar, format!("{name}: included but not provided")));
     }
     for name in given.difference(&listed) {
-        problems.push(format!("{name}: provided but not included"));
+        problems.push((Owner::Sidecar, format!("{name}: provided but not included")));
     }
 
     // (source, entry, where it came from)
-    let mut entries: Vec<(Option<String>, Entry, At<'_>)> = Vec::new();
+    let mut entries: Vec<(Option<String>, Entry, At<'a>)> = Vec::new();
     for (i, entry) in file.annotation.into_iter().enumerate() {
         entries.push((None, entry, At::Hand(i + 1)));
     }
     // Sidecar order: the TOML file's annotations, then each included file's in `include` order.
-    let mut by_include: Vec<&Included<'_>> = included.iter().collect();
+    let mut by_include: Vec<&Included<'a>> = included.iter().collect();
     by_include.sort_by_key(|inc| file.include.iter().position(|n| n == inc.name));
     for inc in by_include {
         let mut lines = inc
@@ -543,38 +558,46 @@ fn resolve_file(
             .lines()
             .enumerate()
             .filter(|(_, l)| !l.trim().is_empty());
+        let whole = Owner::File(inc.name);
         let Some((first_n, first)) = lines.next() else {
-            problems.push(format!("{}: empty", inc.name));
+            problems.push((whole, format!("{}: empty", inc.name)));
             continue;
         };
         let head: GeneratorHead = match json(first) {
             Ok(head) => head,
             Err(e) => {
-                problems.push(format!("{}, line {}: {e}", inc.name, first_n + 1));
+                problems.push((whole, format!("{}, line {}: {e}", inc.name, first_n + 1)));
                 continue;
             }
         };
         if head.format != FORMAT {
-            problems.push(format!(
-                "{}: format {:?}, not {FORMAT:?}",
-                inc.name, head.format
+            problems.push((
+                whole,
+                format!("{}: format {:?}, not {FORMAT:?}", inc.name, head.format),
             ));
         }
         if head.recording_id != header.content_id {
-            problems.push(format!(
-                "{}: generated for {}, but the recording is {}",
-                inc.name, head.recording_id, header.content_id
+            problems.push((
+                whole,
+                format!(
+                    "{}: generated for {}, but the recording is {}",
+                    inc.name, head.recording_id, header.content_id
+                ),
             ));
         }
         if let Some(problem) = check_source(&head.source) {
-            problems.push(format!("{}: {problem}", inc.name));
+            problems.push((whole, format!("{}: {problem}", inc.name)));
         }
         for (n, line) in lines {
             match json::<Entry>(line) {
                 Ok(entry) => {
                     entries.push((Some(head.source.clone()), entry, At::Line(inc.name, n + 1)))
                 }
-                Err(e) => problems.push(format!("{}, line {}: {e}", inc.name, n + 1)),
+                // A line that doesn't read is no annotation: nothing of it is left to drop.
+                Err(e) => problems.push((
+                    Owner::Entry(usize::MAX),
+                    format!("{}, line {}: {e}", inc.name, n + 1),
+                )),
             }
         }
     }
@@ -598,32 +621,34 @@ fn resolve_file(
             Some(s) => format!("{s}/{}", entry.id),
             None => entry.id.clone(),
         };
+        let own = Owner::Entry(position);
         for problem in field_problems(&entry, source.is_some()) {
-            problems.push(format!("{at}: {problem}"));
+            problems.push((own, format!("{at}: {problem}")));
         }
         if !seen.insert(id.clone()) {
-            problems.push(format!("{at}: id {id:?} is used twice"));
+            problems.push((own, format!("{at}: id {id:?} is used twice")));
         }
         if let Some(target) = entry.target.clone() {
             if source.is_some() {
-                problems.push(format!("{at}: {GENERATED_REF}"));
+                problems.push((own, format!("{at}: {GENERATED_REF}")));
             }
             if entry.start.is_some() || entry.end.is_some() {
-                problems.push(format!(
-                    "{at}: a ref takes its span from its target; drop start and end"
+                problems.push((
+                    own,
+                    format!("{at}: a ref takes its span from its target; drop start and end"),
                 ));
             }
             refs.push((position, id, target, entry, at));
             continue;
         }
         let Some(start) = &entry.start else {
-            problems.push(format!("{at}: no start"));
+            problems.push((own, format!("{at}: no start")));
             continue;
         };
         let start = match ticks(start, header.timebase) {
             Ok(t) => t,
             Err(e) => {
-                problems.push(format!("{at}: start: {e}"));
+                problems.push((own, format!("{at}: start: {e}")));
                 continue;
             }
         };
@@ -635,7 +660,7 @@ fn resolve_file(
         {
             Ok(e) => e,
             Err(e) => {
-                problems.push(format!("{at}: end: {e}"));
+                problems.push((own, format!("{at}: end: {e}")));
                 continue;
             }
         };
@@ -673,11 +698,16 @@ fn resolve_file(
     for (position, id, target, entry, at) in refs {
         let Some(t) = by_id.get(target.as_str()) else {
             let hand = plain.iter().any(|(_, _, a)| a.id == target);
-            problems.push(if hand {
-                format!("{at}: ref {target:?} names a hand-written annotation, not a generated one")
-            } else {
-                format!("{at}: ref {target:?} does not resolve")
-            });
+            problems.push((
+                Owner::Entry(position),
+                if hand {
+                    format!(
+                        "{at}: ref {target:?} names a hand-written annotation, not a generated one"
+                    )
+                } else {
+                    format!("{at}: ref {target:?} does not resolve")
+                },
+            ));
             continue;
         };
         followed.push((
@@ -701,7 +731,7 @@ fn resolve_file(
     }
     plain.extend(followed);
 
-    for (_, at, a) in &plain {
+    for (position, at, a) in &plain {
         let place = place_problems(
             a.start,
             a.end,
@@ -710,13 +740,16 @@ fn resolve_file(
             Some(header.length),
             |c| channels.get(c).copied(),
         );
-        problems.extend(place.into_iter().map(|p| format!("{at}: {p}")));
+        problems.extend(
+            place
+                .into_iter()
+                .map(|p| (Owner::Entry(*position), format!("{at}: {p}"))),
+        );
     }
-    if problems.is_empty() {
-        plain.sort_by_key(|(position, ..)| *position);
-        Ok(plain.into_iter().map(|(.., a)| a).collect())
-    } else {
-        Err(problems)
+    plain.sort_by_key(|(position, ..)| *position);
+    Found {
+        annotations: plain,
+        problems,
     }
 }
 

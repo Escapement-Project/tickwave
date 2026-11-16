@@ -77,7 +77,9 @@ impl Check {
 pub fn open(input: Arc<dyn Input>) -> Result<Opened, Error> {
     let mut footer = footer(&*input)?;
     footer.load_lists(fetch(&*input))?;
-    let bundled = footer.read_bundle(fetch(&*input))?;
+    // The sidecar's files whole: the bundle holds each generator file's first line, its parts
+    // the rest.
+    let bundled = footer.read_sidecar(fetch(&*input))?.map(|s| s.files);
     let refs = (0..footer.header.channels.len())
         .map(|c| footer.block_refs(c, fetch(&*input)))
         .collect::<Result<Vec<_>, DecodeError>>()?;

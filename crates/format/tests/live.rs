@@ -96,8 +96,14 @@ fn a_flushed_file_recut_has_full_size_blocks_and_the_same_content() {
             assert_eq!(after.strip(o).unwrap(), before.strip(o).unwrap());
         }
         assert_eq!(
-            after.read_bundle(from_memory(&out)).unwrap(),
-            before.read_bundle(from_memory(&file)).unwrap()
+            after
+                .read_sidecar(from_memory(&out))
+                .map(|s| s.map(|s| s.files))
+                .unwrap(),
+            before
+                .read_sidecar(from_memory(&file))
+                .map(|s| s.map(|s| s.files))
+                .unwrap()
         );
     }
 }
@@ -238,7 +244,7 @@ fn a_cut_off_file_recut_gives_what_repair_gives() {
     for at in [footer_at / 3, footer_at / 2, footer_at - 5, footer_at + 9] {
         let cut = &file[..at];
         let repaired = repair(cut, 3).unwrap_or_else(|e| panic!("cut at {at}: {e}"));
-        let (out, f) = recut(cut, 4096, options(1 << 20)).unwrap();
+        let (out, _) = recut(cut, 4096, options(1 << 20)).unwrap();
         let head = Footer::parse_file(&out).unwrap();
         assert_eq!(
             head.header.content_id, repaired.header.content_id,
@@ -246,8 +252,25 @@ fn a_cut_off_file_recut_gives_what_repair_gives() {
         );
         assert_eq!(data(&head.header), data(&repaired.header), "cut at {at}");
         assert_eq!(head.header.length, repaired.header.length, "cut at {at}");
-        assert_eq!(f.generated, repaired.generated, "cut at {at}");
         let fixed = [&cut[..repaired.keep as usize], &repaired.tail].concat();
+        // The same generator files, joined from each one's bundle and parts, whatever they're
+        // named.
+        let generated = |f: &[u8]| -> Vec<String> {
+            Footer::parse_file(f)
+                .unwrap()
+                .read_sidecar(from_memory(f))
+                .unwrap()
+                .map(|s| {
+                    s.files
+                        .into_iter()
+                        .filter(|(name, _)| name.ends_with(".jsonl"))
+                        .map(|(_, text)| text)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        assert_eq!(generated(&out), generated(&fixed), "cut at {at}");
+        assert!(!generated(&out).is_empty());
         assert_eq!(items(&out), items(&fixed), "cut at {at}");
     }
 }
@@ -709,8 +732,10 @@ fn a_snapshot_reads_every_settled_bucket_the_finished_file_has() {
 }
 
 /// A recorder's file cut off after a gap whose end no block reached, reported after its last
-/// flush, with a mark past it: repair cuts the file at that flush's known-through record, so the
-/// gap, after it, goes and the pin reads as known to the flush. The Recutter does the same.
+/// flush, with a mark past it: repair cuts the file at that flush's known-through record and
+/// writes the gap's record again after it, since its `from` lies before the flush (FORMAT.md,
+/// "Repairing a cut-off file"), so the pin reads as known to the gap's `from` and the gap, which
+/// reaches that end, is left out. The Recutter does the same.
 #[test]
 fn a_cut_off_input_recut_follows_repairs_cut() {
     let (d, _) = session();
@@ -741,12 +766,12 @@ fn a_cut_off_input_recut_follows_repairs_cut() {
     w.annotation("verge", m).unwrap();
     let cut = w.take_output();
     let repaired = repair(&cut, 3).unwrap();
-    // Length one past the mark; DIO0 known to the flush, the gap left out with its record.
+    // Length one past the mark; DIO0 known to the gap's `from`, the gap left out.
     assert_eq!(repaired.header.length, 401);
     let ChannelKind::Digital { end, gaps, .. } = &repaired.header.channels[2].data else {
         panic!()
     };
-    assert_eq!((*end, gaps.len()), (200, 0));
+    assert_eq!((*end, gaps.len()), (150, 0));
     let (out, f) = recut(&cut, 4096, options(1 << 20)).unwrap();
     assert_eq!(f.header.content_id, repaired.header.content_id);
     assert_eq!(data(&f.header), data(&repaired.header));

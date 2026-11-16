@@ -15,6 +15,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use escapement_tickwave_format::annotations::{self, Included};
+use escapement_tickwave_format::bundle::Tail;
 use escapement_tickwave_format::decode::{DecodeError, FIRST_READ, Footer, Index};
 use escapement_tickwave_format::header::{AnalogCoding, ChannelKind, Header, MAGIC, Op};
 use escapement_tickwave_format::model::{RateOrigin, Recording, SourceFormat};
@@ -22,7 +23,7 @@ use escapement_tickwave_format::recut::{RecutError, Recutter};
 use escapement_tickwave_format::repair::{RepairError, Repairer};
 use escapement_tickwave_format::samples::coding_name;
 use escapement_tickwave_format::verify::verify_limited;
-use escapement_tickwave_format::writer::{Compression, WriteOptions, generator_file};
+use escapement_tickwave_format::writer::{Bundle, Compression, WriteOptions, generator_file};
 use escapement_tickwave_import::convert::{
     self, Keep, Pass, Progress, Settings, Step, counted, select, set_units,
 };
@@ -940,7 +941,8 @@ fn write_info(
     drift: bool,
 ) -> Result<()> {
     let fetch = || escapement_tickwave_import::recording::fetch(input);
-    let bundled = head.read_bundle(fetch())?;
+    // The sidecar's files whole, each generator file's lines joined back from its parts.
+    let bundled = head.read_sidecar(fetch())?.map(|s| s.files);
     let (head, drifts, mut sizes) = if drift {
         let index = Index::read(head, fetch())?;
         let drifts = drift::of_index(input, &index)?;
@@ -1497,13 +1499,50 @@ fn bundle_file(recording: &Path, sidecar: &Path, output: &Path) -> Result<()> {
     file.read_exact(&mut record)?;
     // At the converter's level: a sidecar is small, and read once.
     let level = Settings::default().level;
-    let (keep, tail) = escapement_tickwave_format::bundle::bundled_tail(
+    let fetch = |offset: u64, len: u32| -> Result<Vec<u8>> {
+        let mut bytes = vec![0; len as usize];
+        file.seek(SeekFrom::Start(offset))?;
+        file.read_exact(&mut bytes)?;
+        Ok(bytes)
+    };
+    let tail = escapement_tickwave_format::bundle::bundled_tail(
         &record,
         &head,
         files.into_iter().collect(),
         level,
+        fetch,
     )?;
-    write_atomically(output, |out| copy_then(&mut file, keep, &tail, out))?;
+    match tail {
+        Tail::Append { keep, tail } => {
+            write_atomically(output, |out| copy_then(&mut file, keep, &tail, out))?
+        }
+        // A recorder's file: its annotations are written again in parts with the copy.
+        Tail::Recut(files) => {
+            let mut recutter = Recutter::new(WriteOptions {
+                level,
+                ..WriteOptions::default()
+            });
+            recutter.sidecar(files);
+            file.seek(SeekFrom::Start(0))?;
+            write_atomically(output, |out| {
+                let mut chunk = vec![0; 1 << 20];
+                loop {
+                    let n = file.read(&mut chunk)?;
+                    if n == 0 {
+                        break;
+                    }
+                    recutter
+                        .feed(&chunk[..n])
+                        .with_context(|| format!("reading {}", recording.display()))?;
+                    out.write_all(recutter.output())?;
+                    let written = recutter.output().len();
+                    recutter.consume(written);
+                }
+                out.write_all(&recutter.finish()?.tail)?;
+                Ok(())
+            })?
+        }
+    }
     let (_, _, check) = read_footer(output)?;
     if check.header.content_id != head.header.content_id {
         bail!("bundling changed the content id");
@@ -1521,6 +1560,9 @@ fn repair_file(file: &Path, output: &Path, level: i32) -> Result<()> {
     let mut opened = fs::File::open(file).with_context(|| format!("reading {}", file.display()))?;
     let len = opened.metadata()?.len();
     let mut repairer = Repairer::new(level);
+    repairer.bundle(Bundle::Generated {
+        stem: stem_of(output),
+    });
     let mut chunk = vec![0; 1 << 20];
     loop {
         let n = opened.read(&mut chunk)?;
@@ -1529,7 +1571,6 @@ fn repair_file(file: &Path, output: &Path, level: i32) -> Result<()> {
         }
         repairer.feed(&chunk[..n])?;
     }
-    let left_out = repairer.left_out().to_vec();
     let repaired = match repairer.finish() {
         Ok(repaired) => repaired,
         Err(RepairError::Shaped(_)) => bail!(
@@ -1543,7 +1584,7 @@ fn repair_file(file: &Path, output: &Path, level: i32) -> Result<()> {
         copy_then(&mut opened, repaired.keep, &repaired.tail, out)
     })?;
     write_generated(output, &repaired.header, &repaired.generated)?;
-    warn_left_out(&left_out);
+    warn_left_out(&repaired.left_out);
     info!(
         "{}: {} of {} bytes kept, {} blocks to {}, {}",
         output.display(),
@@ -1569,9 +1610,7 @@ fn write_generated(
     header: &Header,
     generated: &std::collections::BTreeMap<String, Vec<String>>,
 ) -> Result<()> {
-    let stem = output
-        .file_stem()
-        .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+    let stem = stem_of(output);
     let dir = output.parent().unwrap_or(Path::new(""));
     for (source, lines) in generated {
         let path = dir.join(format!("{stem}.{source}.jsonl"));
@@ -1588,6 +1627,9 @@ fn recut_file(input: &Path, output: &Path, options: WriteOptions) -> Result<()> 
     let len = opened.metadata()?.len();
     let started = Instant::now();
     let mut recutter = Recutter::new(options);
+    recutter.bundle(Bundle::Generated {
+        stem: stem_of(output),
+    });
     let (finished, left_out) = write_atomically(output, |out| {
         let mut chunk = vec![0; 1 << 20];
         loop {
@@ -1822,6 +1864,51 @@ mod tests {
 
     const HAND: &str = "format = \"tickwave-annotations/1\"\nrecording_id = \
                         \"blake3:00ff000000000000000000000000000000000000000000000000000000000000\"\n";
+
+    /// A recorder's file, its markers in records and in parts before its last pages, bundled
+    /// with another sidecar: the copy is written again with that sidecar's annotations alone.
+    #[test]
+    fn bundling_a_recorders_file_writes_it_again_with_the_sidecar_given() {
+        use escapement_tickwave_format::reader::{Event, Reader};
+        let dir = tempfile::tempdir().unwrap();
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../web/fixtures/energy.tickwave");
+        let recording = dir.path().join("energy.tickwave");
+        fs::copy(&fixture, &recording).unwrap();
+        let (_, _, head) = read_footer(&recording).unwrap();
+        let id = head.header.content_id;
+        let hand = format!(
+            "format = \"tickwave-annotations/1\"\nrecording_id = \"{id}\"\ninclude = \
+             [\"energy.notes.jsonl\"]\n"
+        );
+        let notes = generator_file("notes", None, id, &[r#"{"id":"n/1","start":100}"#.into()]);
+        let sidecar = dir.path().join("energy.annotations.toml");
+        fs::write(&sidecar, &hand).unwrap();
+        fs::write(dir.path().join("energy.notes.jsonl"), &notes).unwrap();
+        let output = dir.path().join("shared.tickwave");
+        bundle_file(&recording, &sidecar, &output).unwrap();
+        let bytes = fs::read(&output).unwrap();
+        let footer = Footer::parse_file(&bytes).unwrap();
+        assert_eq!(footer.header.content_id, id);
+        let files = footer
+            .read_sidecar(escapement_tickwave_format::decode::from_memory(&bytes))
+            .unwrap()
+            .unwrap()
+            .files;
+        assert_eq!(
+            files,
+            [
+                ("energy.annotations.toml".to_owned(), hand),
+                ("energy.notes.jsonl".to_owned(), notes)
+            ]
+            .into()
+        );
+        let mut r = Reader::default();
+        r.feed(&bytes);
+        while let Some(e) = r.next_event().unwrap() {
+            assert!(!matches!(e, Event::Annotation(_)), "a record left in");
+        }
+    }
 
     #[test]
     fn the_page_may_save_a_sidecar_that_checks() {
@@ -2594,8 +2681,9 @@ mod tests {
         let h = &head.header;
         let bytes = fs::read(&m).unwrap();
         let files = head
-            .read_bundle(escapement_tickwave_format::decode::from_memory(&bytes))
-            .unwrap();
+            .read_sidecar(escapement_tickwave_format::decode::from_memory(&bytes))
+            .unwrap()
+            .map(|s| s.files);
         let files = files.as_ref().expect("bundled");
         let jsonl = &files["m.dec.jsonl"];
         // At 10 MHz the VCD's tick is the recording's: 7 stays 7.
@@ -2753,8 +2841,11 @@ mod tests {
         let output = out.join("rec.tickwave");
         for source in ["x", "x/../../escaped"] {
             let mut cut = file.clone();
-            let a = serde_json::json!({"source": source, "annotation": {"id": "m", "start": 1}});
-            record::write(&mut cut, Kind::Annotation, &[a.to_string().as_bytes()]);
+            let a = record::Annotation {
+                source: source.into(),
+                line: r#"{"id":"m","start":1}"#.into(),
+            };
+            record::write(&mut cut, Kind::Annotation, &[&a.to_payload()]);
             let input = dir.path().join("cut.tickwave");
             fs::write(&input, &cut).unwrap();
             let got = repair_file(&input, &output, 3);

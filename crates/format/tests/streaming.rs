@@ -906,9 +906,11 @@ fn an_annotation_source_that_can_t_name_a_file_on_its_own_is_refused() {
         w.edge(0, 1).unwrap();
         w.flush(2).unwrap();
         let mut file = w.take_output();
-        let a = serde_json::json!({"source": source, "annotation": {"id": "n", "start": 1}})
-            .to_string();
-        record::write(&mut file, Kind::Annotation, &[a.as_bytes()]);
+        let a = record::Annotation {
+            source: source.into(),
+            line: r#"{"id":"n","start":1}"#.into(),
+        };
+        record::write(&mut file, Kind::Annotation, &[&a.to_payload()]);
         let repaired = repair(&file, 3);
         if named {
             wrote.unwrap();
@@ -930,7 +932,8 @@ fn an_annotation_source_that_can_t_name_a_file_on_its_own_is_refused() {
 /// Annotation records whose lines break a rule ANNOTATIONS.md gives a generator's line, as a
 /// writer other than tickwave's, or one from before it held lines to them, leaves them: repair
 /// and recut leave each out and name it, the rest resolve bundled, and a line left out sets no
-/// length. A recut of the repaired file, finished, keeps its content id.
+/// length. An id given twice is the reader's to drop: the bundle's sidecar keeps the first. A
+/// recut of the repaired file, finished, keeps its content id.
 #[test]
 fn repair_and_recut_leave_out_an_annotation_its_bundle_would_not_resolve() {
     use escapement_tickwave_format::annotations::{Included, resolve};
@@ -947,15 +950,16 @@ fn repair_and_recut_leave_out_an_annotation_its_bundle_would_not_resolve() {
         r#"{"start": 900}"#,
         r#"{"id": "m/1", "start": 1}"#,
     ] {
-        let a = format!(r#"{{"source": "gen", "annotation": {line}}}"#);
-        record::write(&mut cut, Kind::Annotation, &[a.as_bytes()]);
+        let a = record::Annotation {
+            source: "gen".into(),
+            line: line.into(),
+        };
+        record::write(&mut cut, Kind::Annotation, &[&a.to_payload()]);
     }
     let left_as_wanted = |left: &[String]| {
         let want = [
             "generator \"gen\": annotation \"m/2\": unknown field `colour`",
             "generator \"gen\": annotation with no id: missing field `id`",
-            "generator \"gen\": annotation \"m/1\": generator \"gen\" has an annotation of this id \
-             already",
         ];
         assert_eq!(left.len(), want.len(), "{left:?}");
         for (got, want) in left.iter().zip(want) {
@@ -966,7 +970,8 @@ fn repair_and_recut_leave_out_an_annotation_its_bundle_would_not_resolve() {
         let footer = Footer::parse_file(file).unwrap();
         let header = &footer.header;
         let files = footer
-            .read_bundle(from_memory(file))
+            .read_sidecar(from_memory(file))
+            .map(|s| s.map(|s| s.files))
             .unwrap()
             .expect("bundled");
         let included: Vec<Included<'_>> = files
@@ -985,10 +990,10 @@ fn repair_and_recut_leave_out_an_annotation_its_bundle_would_not_resolve() {
     let mut r = Repairer::new(3);
     r.bundle(bundled());
     r.feed(&cut).unwrap();
-    left_as_wanted(r.left_out());
     let repaired = r.finish().unwrap();
+    left_as_wanted(&repaired.left_out);
     assert_eq!(repaired.header.length, 2);
-    assert_eq!(repaired.generated["gen"].len(), 1);
+    assert_eq!(repaired.generated["gen"].len(), 2);
     let mut whole = cut[..repaired.keep as usize].to_vec();
     whole.extend_from_slice(&repaired.tail);
     assert_eq!(ids(&whole), ["gen/m/1"]);

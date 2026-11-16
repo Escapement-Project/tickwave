@@ -569,6 +569,7 @@ pub fn verify_limited(
                 }
             }
             Event::Annotation(_)
+            | Event::Part { .. }
             | Event::Skipped { .. }
             | Event::Page { .. }
             | Event::Bundle(_) => {}

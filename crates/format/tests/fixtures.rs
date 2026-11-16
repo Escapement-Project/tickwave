@@ -171,7 +171,11 @@ fn the_energy_fixture_holds_what_its_example_says() {
     };
     assert_eq!(p[0], 3_300_000_000);
     // The bundled sidecar checks against the recording.
-    let files = head.read_bundle(from_memory(&file)).unwrap().unwrap();
+    let files = head
+        .read_sidecar(from_memory(&file))
+        .map(|s| s.map(|s| s.files))
+        .unwrap()
+        .unwrap();
     let resolved = resolve(
         &files["energy.annotations.toml"],
         &[Included {

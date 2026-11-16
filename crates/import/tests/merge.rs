@@ -8,7 +8,7 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 use escapement_tickwave_format::decode::{BlockChannel, Footer, Index, from_memory};
-use escapement_tickwave_format::encode::{Bundle, Options, encode};
+use escapement_tickwave_format::encode::{Options, encode};
 use escapement_tickwave_format::header::{ChannelKind, DerivedHeader, Header, Kept};
 use escapement_tickwave_format::model::{
     Analog, Break, Channel, ChannelData, Derived, Digital, Exact, IntCoding, Offset, Ratio,
@@ -1115,48 +1115,65 @@ fn ticks_past_2_53_on_the_way_to_the_merged_recording_are_refused() {
     );
 }
 
-/// A sidecar as a recorder bundles it: generator `dec`'s annotations, at the input's ticks. A
-/// writer takes times in ticks only, so `text_lines` (a time with a unit, say) and `hand`, more of
-/// the hand-written file, go into the bundle after it.
+/// A sidecar bundled as a recorder bundles it: generator `dec`'s annotations, at the input's
+/// ticks, as the writer writes them, then `text_lines` (a time with a unit, say), and `hand`, more
+/// of the hand-written file.
 fn bundle_of(
     recording: Recording,
     lines: &[serde_json::Value],
     text_lines: &[&str],
     hand: Option<&str>,
 ) -> Vec<u8> {
-    let annotations = lines
-        .iter()
-        .map(|l| ("dec".to_owned(), l.as_object().unwrap().clone()))
-        .collect();
     let bytes = encode(
         recording,
         &Options {
             level: 3,
-            annotations,
-            bundle: Some(Bundle::Generated { stem: "in".into() }),
             ..Options::default()
         },
     )
     .unwrap();
     let footer = Footer::parse_file(&bytes).unwrap();
-    let mut files = bundled(&bytes).unwrap();
-    for line in text_lines {
-        let jsonl = files.get_mut("in.dec.jsonl").unwrap();
-        jsonl.push_str(line);
-        jsonl.push('\n');
-    }
-    if let Some(hand) = hand {
-        files.get_mut("in.annotations.toml").unwrap().push_str(hand);
-    }
+    let files = sidecar_of(footer.header.content_id, lines, text_lines, hand);
     escapement_tickwave_format::bundle::bundle(&bytes, &footer, files, 3).unwrap()
 }
 
-/// The annotation files `file` bundles.
+/// Generator `dec`'s file and a hand-written file that includes it, for the recording `id`:
+/// `lines` as the writer writes them, then `text_lines`, and `hand`, more of the hand-written file.
+fn sidecar_of(
+    id: escapement_tickwave_format::header::ContentId,
+    lines: &[serde_json::Value],
+    text_lines: &[&str],
+    hand: Option<&str>,
+) -> BTreeMap<String, String> {
+    let mut jsonl = escapement_tickwave_format::writer::generator_file(
+        "dec",
+        None,
+        id,
+        &lines.iter().map(|l| l.to_string()).collect::<Vec<_>>(),
+    );
+    for line in text_lines {
+        jsonl.push_str(line);
+        jsonl.push('\n');
+    }
+    let mut toml = format!(
+        "format = \"tickwave-annotations/1\"\nrecording_id = \"{id}\"\ninclude = [\"in.dec.jsonl\"]\n"
+    );
+    if let Some(hand) = hand {
+        toml.push_str(hand);
+    }
+    BTreeMap::from([
+        ("in.annotations.toml".to_owned(), toml),
+        ("in.dec.jsonl".to_owned(), jsonl),
+    ])
+}
+
+/// The annotation files `file` bundles, each generator file's lines joined from its parts.
 fn bundled(file: &[u8]) -> Option<BTreeMap<String, String>> {
     Footer::parse_file(file)
         .unwrap()
-        .read_bundle(from_memory(file))
+        .read_sidecar(from_memory(file))
         .unwrap()
+        .map(|s| s.files)
 }
 
 #[test]
@@ -1325,9 +1342,10 @@ fn annotations_follow_renamed_channels_and_what_stays_behind_is_noted() {
         None,
     );
     // The probe's CLK, with a measure on it, and two lines that don't read: no JSON, and a time
-    // in an unknown unit.
-    let p = bundle_of(
-        probe(),
+    // in an unknown unit. No part holds such a line, so they come in a sidecar beside it.
+    let p = file(probe());
+    let beside = sidecar_of(
+        Footer::parse_file(&p).unwrap().header.content_id,
         &[
             json!({"id": "c/10", "start": 10, "end": 20, "channels": ["CLK"],
                  "measure": {"channel": "CLK", "what": "rate"}}),
@@ -1340,31 +1358,32 @@ fn annotations_follow_renamed_channels_and_what_stays_behind_is_noted() {
     let (out, merged) = run(
         &[
             (a, "analyser", None),
-            (p.clone(), "probe", None),
-            (p.clone(), "probe", None),
+            (p.clone(), "probe", Some(beside.clone())),
+            (p.clone(), "probe", Some(beside)),
         ],
         &settings(vec![]),
     )
     .unwrap();
     let h = Footer::parse_file(&out).unwrap().header;
     let s = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    // In the order of the generators' first annotations, which the merge takes input by input.
     assert_eq!(
         resolved_in(&out, &h),
         [
             ("dec/a/100".into(), 2_400, None, s(&["CLK"]), None),
-            (
-                "probe-2-dec/c/10".into(),
-                1_250,
-                Some(2_500),
-                s(&["probe-2/CLK"]),
-                Some("probe-2/CLK".into())
-            ),
             (
                 "probe-dec/c/10".into(),
                 1_250,
                 Some(2_500),
                 s(&["probe/CLK"]),
                 Some("probe/CLK".into())
+            ),
+            (
+                "probe-2-dec/c/10".into(),
+                1_250,
+                Some(2_500),
+                s(&["probe-2/CLK"]),
+                Some("probe-2/CLK".into())
             ),
         ]
     );
@@ -1384,8 +1403,10 @@ fn annotations_follow_renamed_channels_and_what_stays_behind_is_noted() {
 
     // The probe kept to its first 100 ticks, so the analyser's end, 24,000, ends the recording:
     // a span from the probe's 150 to 250 ends there, and a point at 250 or at 2^60 lies past it.
-    let p = bundle_of(
-        probe(),
+    // No part holds a tick past 2^53, so the lines come in a sidecar beside it.
+    let p = file(probe());
+    let beside = sidecar_of(
+        Footer::parse_file(&p).unwrap().header.content_id,
         &[
             json!({"id": "span/150", "start": 150, "end": 250}),
             json!({"id": "point/250", "start": 250}),
@@ -1404,7 +1425,10 @@ fn annotations_follow_renamed_channels_and_what_stays_behind_is_noted() {
         ..settings(vec![])
     };
     let (out, merged) = run(
-        &[(file(analyser()), "analyser", None), (p, "probe", None)],
+        &[
+            (file(analyser()), "analyser", None),
+            (p, "probe", Some(beside)),
+        ],
         &s_keep,
     )
     .unwrap();

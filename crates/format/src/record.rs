@@ -1,8 +1,6 @@
 //! Records, the file's body: a kind, the payload's length, the payload, then a check over all
 //! three, so a reader taking them in order finds where a cut-off file stops being whole.
 
-use serde::{Deserialize, Serialize};
-
 use crate::header::{Preamble, Trailer};
 use crate::model::{Break, Gap};
 
@@ -25,6 +23,7 @@ pub enum Kind {
     IndexPage = 10,
     ListPage = 11,
     Bundle = 12,
+    Part = 13,
 }
 
 impl Kind {
@@ -41,6 +40,7 @@ impl Kind {
             10 => Self::IndexPage,
             11 => Self::ListPage,
             12 => Self::Bundle,
+            13 => Self::Part,
             _ => return None,
         })
     }
@@ -100,6 +100,7 @@ pub fn payload_limit(kind: u8) -> Option<Limit> {
         Some(Kind::KnownThrough) => Some(Limit::Exactly(8)),
         Some(Kind::IndexPage | Kind::ListPage) => most(MAX_PAGE),
         Some(Kind::Bundle) => most(4 + compress_bound(MAX_BUNDLE)),
+        Some(Kind::Part) => most(4 + compress_bound(MAX_PART)),
         None if skippable(kind) => most(u32::MAX as usize),
         None => None,
     }
@@ -363,13 +364,74 @@ pub fn parse_known_through(payload: &[u8]) -> Option<i64> {
     Some(i64::from_le_bytes(payload.try_into().ok()?))
 }
 
-/// An annotation record's payload.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// An annotation record's payload (FORMAT.md, "Annotations"): a generator's name and one line of
+/// its file.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Annotation {
     /// The generator's name, as its file's first line gives it.
     pub source: String,
-    /// One line of the generator's file: one annotation, its times in ticks.
-    pub annotation: serde_json::Map<String, serde_json::Value>,
+    /// One line of the generator's file, without its newline: a JSON object, one annotation.
+    pub line: String,
+}
+
+impl Annotation {
+    /// The line's fields; None where it is not a JSON object.
+    pub fn fields(&self) -> Option<serde_json::Map<String, serde_json::Value>> {
+        serde_json::from_str(&self.line).ok()
+    }
+
+    /// The line's `start` where it is a whole tick count.
+    pub fn start(&self) -> Option<i64> {
+        self.fields()?.get("start")?.as_i64()
+    }
+
+    /// The record's payload: the name's length as a u16, the name, then the line and its newline.
+    pub fn to_payload(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(2 + self.source.len() + self.line.len() + 1);
+        out.extend_from_slice(&(self.source.len() as u16).to_le_bytes());
+        out.extend_from_slice(self.source.as_bytes());
+        out.extend_from_slice(self.line.as_bytes());
+        out.push(b'\n');
+        out
+    }
+
+    /// A record's payload, or why a reader refuses it: a generator name ANNOTATIONS.md doesn't
+    /// allow, or a line that holds a newline before its end, lacks its newline, or is not a JSON
+    /// object.
+    pub fn parse(payload: &[u8]) -> Result<Self, String> {
+        let (source, line) = named(payload)?;
+        let line = line
+            .strip_suffix(b"\n")
+            .ok_or("its line does not end with a newline")?;
+        if line.contains(&b'\n') {
+            return Err("its line holds a newline before its end".into());
+        }
+        let line = std::str::from_utf8(line).map_err(|_| "its line is not UTF-8".to_owned())?;
+        if serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(line).is_err() {
+            return Err("its line is not a JSON object".into());
+        }
+        Ok(Self {
+            source,
+            line: line.to_owned(),
+        })
+    }
+}
+
+/// A generator's name, as an annotation record or a part's lines start with it: a u16 length,
+/// then the name, which must be one a generator may take. The name and the bytes after it.
+pub(crate) fn named(bytes: &[u8]) -> Result<(String, &[u8]), String> {
+    let (len, rest) = bytes
+        .split_first_chunk::<2>()
+        .ok_or("too short for its generator's name")?;
+    let len = usize::from(u16::from_le_bytes(*len));
+    let name = rest
+        .get(..len)
+        .ok_or("too short for its generator's name")?;
+    let name = std::str::from_utf8(name).map_err(|_| "its generator's name is not UTF-8")?;
+    if let Some(problem) = check_source(name) {
+        return Err(problem);
+    }
+    Ok((name.to_owned(), &rest[len..]))
 }
 
 /// Why `source` can't name a generator, if it can't. Its file is `<stem>.<source>.jsonl`,

@@ -1,7 +1,8 @@
 //! Repair: a footer and a trailer for a file cut off before them, by a crash, a power cut or a
 //! full disk (FORMAT.md, "Repairing a cut-off file"). The file is cut just after its latest
 //! known-through record, or, with none, after its last record at which every derived channel's
-//! operands hold as many samples; the records before the cut stay as they are.
+//! operands hold as many samples, and before the first record only a finish writes; the records
+//! before the cut stay as they are.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -20,25 +21,41 @@ use crate::index::{Due, Row, Table, TableWriter};
 use crate::mapping::Mapping;
 use crate::model::{Break, Gap};
 use crate::overview::{self, Column, Ladder, Level, Pair, Settled};
+use crate::parts::{Part, PartRow, placed_span};
 use crate::reader::{Ending, Event, Reader};
 use crate::record::{self, BlockHead, Kind, OverviewHead};
 use crate::writer::{
-    Bundle, ChannelTops, OVERVIEW_BLOCK_LEVEL, WriteError, bundle_payload, bundled_files,
-    footer_payload, generated,
+    Bundle, Bundling, ChannelTops, OVERVIEW_BLOCK_LEVEL, Pending, WriteError, bundle_payload,
+    bundled_files, footer_payload, generated, write_part_record,
 };
 
 /// A cut-off file's length: the later of `end`, the latest known-through tick or, with none,
 /// the latest end of any kept block, 0 with none, and one past the latest start among the
-/// annotation records.
+/// annotations kept.
 pub fn repaired_length(end: i64, latest_annotation: Option<i64>) -> i64 {
     latest_annotation.map_or(end, |start| end.max(start.saturating_add(1)))
 }
 
-/// The latest start among annotation records, with `record` taken in.
-pub(crate) fn latest_start(latest: Option<i64>, record: &record::Annotation) -> Option<i64> {
-    match record.annotation.get("start").and_then(|s| s.as_i64()) {
+/// The latest start among annotations, with the line `line` taken in.
+pub(crate) fn latest_start(latest: Option<i64>, line: &str) -> Option<i64> {
+    let start = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(line)
+        .ok()?
+        .get("start")?
+        .as_i64();
+    match start {
         Some(start) => Some(latest.map_or(start, |l| l.max(start))),
         None => latest,
+    }
+}
+
+/// A record only a writer's finish writes (FORMAT.md, "Repairing a cut-off file"): a table's last
+/// page, one of fewer than 4,096 entries, or the annotation bundle. A file cut where one lies was
+/// cut inside its finish.
+fn finish_only(event: &Event) -> bool {
+    match event {
+        Event::Page { head, .. } => (head.count as usize) < crate::index::PAGE,
+        Event::Bundle(_) => true,
+        _ => false,
     }
 }
 
@@ -60,9 +77,8 @@ fn held_size(event: &Event) -> usize {
             },
         },
         Event::OverviewBlock { frame, .. } => frame.len(),
-        Event::Annotation(a) => {
-            a.source.len() + serde_json::to_vec(&a.annotation).map_or(0, |j| 2 * j.len())
-        }
+        Event::Annotation(a) => a.source.len() + a.line.len(),
+        Event::Part { part, .. } => part.source.len() + part.lines.len(),
         Event::Bundle(b) => b.len(),
         _ => 0,
     }
@@ -106,6 +122,10 @@ pub struct Repaired {
     pub header: Header,
     /// Each generator's annotations, its file's lines after the first, by source.
     pub generated: BTreeMap<String, Vec<String>>,
+    /// The annotation records after the cut whose line breaks a rule ANNOTATIONS.md gives a
+    /// generator's line, each as its generator and the rule: repair leaves them out of what it
+    /// writes again and of the length the marks set.
+    pub left_out: Vec<String>,
 }
 
 /// The records of a file read in order that a repair or a re-cut may still drop: those after its
@@ -180,8 +200,6 @@ struct Follow<R: Row> {
     due: Option<Due>,
     /// Entries behind the page due, as a block's gaps or breaks fill a page partway.
     backlog: VecDeque<R>,
-    /// The file holds some of the table's last pages: a writer's finish began them.
-    finishing: bool,
 }
 
 impl<R: Row> Follow<R> {
@@ -190,7 +208,6 @@ impl<R: Row> Follow<R> {
             table: TableWriter::new(channel as u32, table, digital),
             due: None,
             backlog: VecDeque::new(),
-            finishing: false,
         }
     }
 
@@ -211,18 +228,10 @@ impl<R: Row> Follow<R> {
         }
     }
 
-    /// The file's page record at `at`, `len` bytes, of `count` entries, which the reader has
-    /// held to the one due, or to the next of the table's last pages.
-    fn page(&mut self, at: u64, len: u32, inline: u64) -> Result<(), RepairError> {
-        let due = match self.due.take() {
-            Some(due) => due,
-            None => {
-                self.finishing = true;
-                self.table
-                    .finish_next(inline)
-                    .ok_or(RepairError::Overview)?
-            }
-        };
+    /// The file's page record at `at`, `len` bytes, which the reader has held to the one due. A
+    /// table's last pages are a finish's, which repair writes again.
+    fn page(&mut self, at: u64, len: u32) -> Result<(), RepairError> {
+        let due = self.due.take().ok_or(RepairError::Overview)?;
         if due.record.len() != len as usize {
             return Err(RepairError::Overview);
         }
@@ -525,8 +534,9 @@ pub struct Repairer {
     level: i32,
     hold: Option<Hold>,
     state: Option<State>,
+    /// Every annotation kept, for `Repaired::generated`.
     annotations: Vec<record::Annotation>,
-    /// The latest start among the annotation records.
+    /// The latest start among the annotations kept.
     latest_annotation: Option<i64>,
     /// Held to the declaration's channels once it is read.
     lines: Option<Lines>,
@@ -534,6 +544,13 @@ pub struct Repairer {
     bundle: Option<Bundle>,
     /// A record that does not hold together: a derived channel's operands that don't pair.
     error: Option<RepairError>,
+    /// Each generator's lines since its last part kept, in the order of its first annotation.
+    generators: Vec<Pending>,
+    parts: Follow<PartRow>,
+    /// Where the file's finish began, at its first record only a finish writes, and the records
+    /// from there on, which go as those after the cut do.
+    finishing: Option<u64>,
+    after: Vec<(u64, Event)>,
 }
 
 impl Repairer {
@@ -550,18 +567,22 @@ impl Repairer {
             left_out: Vec::new(),
             bundle: None,
             error: None,
+            generators: Vec::new(),
+            parts: Follow::new(0, Table::Parts, false),
+            finishing: None,
+            after: Vec::new(),
         }
     }
 
-    /// Bundles the annotations into the file, as the writer would have, rather than handing
-    /// them back as generator files alone.
+    /// Bundles the annotations into the file, as the writer would have. A file that holds
+    /// annotations needs one: a recording with them ends with them bundled.
     pub fn bundle(&mut self, bundle: Bundle) {
         self.bundle = Some(bundle);
     }
 
-    /// The annotation records read so far whose line breaks a rule ANNOTATIONS.md gives a
-    /// generator's line, each as its generator and the rule. Repair leaves them out of what it
-    /// gives and of the length the marks set, so its annotations resolve.
+    /// What `Repaired::left_out` will hold: empty until `finish`, which alone knows where the
+    /// cut falls. A record before the cut stays where it is, and the part after it covers it
+    /// whatever it holds.
     pub fn left_out(&self) -> &[String] {
         &self.left_out
     }
@@ -582,15 +603,11 @@ impl Repairer {
                 }
                 continue;
             }
-            // An annotation's line is checked as it is read, wherever the cut falls.
-            if let Event::Annotation(a) = &event
-                && let Some(Err(why)) = self
-                    .lines
-                    .as_mut()
-                    .map(|l| l.take(&a.source, &a.annotation))
-            {
-                self.left_out
-                    .push(format!("generator {:?}: {why}", a.source));
+            if self.finishing.is_none() && finish_only(&event) {
+                self.finishing = Some(at);
+            }
+            if self.finishing.is_some() {
+                self.after.push((at, event));
                 continue;
             }
             let Some(hold) = self.hold.as_mut() else {
@@ -614,18 +631,72 @@ impl Repairer {
         }
     }
 
-    /// An annotation record whose line checked, wherever it lies.
-    fn annotation(&mut self, a: record::Annotation) {
-        self.latest_annotation = latest_start(self.latest_annotation, &a);
+    /// Generator `source`'s lines since its last part, met for the first time or not.
+    fn generator(&mut self, source: &str) -> &mut Pending {
+        let g = match self.generators.iter().position(|g| g.source == source) {
+            Some(g) => g,
+            None => {
+                self.generators.push(Pending::new(source));
+                self.generators.len() - 1
+            }
+        };
+        &mut self.generators[g]
+    }
+
+    /// An annotation record kept: its line waits for a part.
+    fn annotation(&mut self, a: record::Annotation) -> Result<(), RepairError> {
+        let timebase = self.timebase();
+        let span = placed_span(&a.line, timebase).map_err(|e| {
+            corrupt(format!(
+                "an annotation record of generator {:?}, which a part can't hold: {e}",
+                a.source
+            ))
+        })?;
+        self.latest_annotation = latest_start(self.latest_annotation, &a.line);
+        self.generator(&a.source).push(&a.line, span);
         self.annotations.push(a);
+        Ok(())
+    }
+
+    /// A part kept where it lies, or written again after the cut: its row, and its lines where it
+    /// stands alone. One that covers records takes the lines its generator held for it.
+    fn part(&mut self, part: &Part, row: PartRow, covers: u64) {
+        let pending = self.generator(&part.source);
+        if covers > 0 {
+            pending.take();
+        }
+        self.parts.push(row);
+        for line in part.lines() {
+            self.latest_annotation = latest_start(self.latest_annotation, line);
+            if covers == 0 {
+                self.annotations.push(record::Annotation {
+                    source: part.source.clone(),
+                    line: line.to_owned(),
+                });
+            }
+        }
+    }
+
+    fn timebase(&self) -> crate::model::Ratio {
+        self.reader
+            .declaration()
+            .expect("records follow the declaration")
+            .timebase
     }
 
     /// A record that stands: its content counts, and its overview blocks and pages are held to
     /// what that content gives.
     fn commit(&mut self, at: u64, event: Event) -> Result<(), RepairError> {
-        if let Event::Annotation(a) = event {
-            self.annotation(a);
-            return Ok(());
+        match event {
+            Event::Annotation(a) => return self.annotation(a),
+            Event::Part { part, row, covers } => {
+                self.part(&part, row, covers);
+                return Ok(());
+            }
+            Event::Page { head, len } if head.table == Table::Parts.code() => {
+                return self.parts.page(at, len);
+            }
+            _ => {}
         }
         let Some(s) = self.state.as_mut() else {
             return Ok(());
@@ -782,9 +853,8 @@ impl Repairer {
             }
             Event::Page { head, len } => {
                 let c = head.channel as usize;
-                let inline = INLINE_LIST as u64;
                 match head.table {
-                    0 => s.chans[c].blocks.page(at, len, 0)?,
+                    0 => s.chans[c].blocks.page(at, len)?,
                     1 => {
                         let oc = &mut s.ochans[c];
                         let li = oc
@@ -795,17 +865,18 @@ impl Repairer {
                                     .is_some_and(|l| l.table.table() == Table::Level(head.shift))
                             })
                             .ok_or(RepairError::Overview)?;
-                        oc.levels[li].as_mut().expect("found").page(at, len, 0)?;
+                        oc.levels[li].as_mut().expect("found").page(at, len)?;
                     }
                     _ => match &mut s.chans[c].data {
-                        Data::Digital { list, .. } => list.page(at, len, inline)?,
-                        Data::Analog { list, .. } => list.page(at, len, inline)?,
+                        Data::Digital { list, .. } => list.page(at, len)?,
+                        Data::Analog { list, .. } => list.page(at, len)?,
                     },
                 }
             }
             Event::Footer(_) => return Err(RepairError::Finished),
             Event::Declaration(_)
             | Event::Annotation(_)
+            | Event::Part { .. }
             | Event::Bundle(_)
             | Event::Skipped { .. } => {}
         }
@@ -822,18 +893,72 @@ impl Repairer {
         if let Some(c) = d.channels.iter().find(|c| !c.shaping.is_whole()) {
             return Err(RepairError::Shaped(c.name.clone()));
         }
-        let dropped = self.hold.take().map(Hold::dropped).unwrap_or_default();
-        let keep = dropped.first().map_or(end_at, |&(at, _)| at);
-        // The annotation records after the cut stand, and are written again after it.
-        let mut again = Vec::new();
+        let mut dropped = self.hold.take().map(Hold::dropped).unwrap_or_default();
+        let keep = dropped
+            .first()
+            .map(|&(at, _)| at)
+            .or(self.finishing)
+            .unwrap_or(end_at);
+        dropped.append(&mut self.after);
+        // What stands after the cut, to write again in the order it came: annotation records
+        // whose line checks, parts that stand alone, and, where a known-through record cuts the
+        // file, gap records whose `from` maps before its tick.
+        let mut again: Vec<Again> = Vec::new();
         for (_, event) in dropped {
-            if let Event::Annotation(a) = event {
-                self.annotation(a.clone());
-                again.push(a);
+            match event {
+                Event::Annotation(a) => {
+                    let checked = self
+                        .lines
+                        .as_mut()
+                        .map_or(Ok(()), |l| l.take_line(&a.source, &a.line));
+                    match checked {
+                        Ok(()) => again.push(Again::Annotation(a)),
+                        Err(why) => self
+                            .left_out
+                            .push(format!("generator {:?}: {why}", a.source)),
+                    }
+                }
+                Event::Part {
+                    part, covers: 0, ..
+                } => again.push(Again::Part(part)),
+                Event::Gap { channel, gap } => {
+                    let map = state.chans[channel].map;
+                    if state
+                        .known
+                        .is_some_and(|k| map.axis(gap.from).is_some_and(|t| t < k))
+                    {
+                        again.push(Again::Gap(channel, gap));
+                    }
+                }
+                _ => {}
+            }
+        }
+        for a in &again {
+            match a {
+                Again::Annotation(a) => {
+                    self.latest_annotation = latest_start(self.latest_annotation, &a.line)
+                }
+                Again::Part(p) => {
+                    for line in p.lines() {
+                        self.latest_annotation = latest_start(self.latest_annotation, line);
+                    }
+                }
+                Again::Gap(c, gap) => {
+                    // A loss the recorder had begun to report: its channel ends at its `from`.
+                    let to = state.chans[*c].map.axis(gap.to).unwrap_or(i64::MAX);
+                    if let Data::Digital { gaps, gap_ends, .. } = &mut state.chans[*c].data {
+                        gap_ends.push(to);
+                        gaps.push(*gap);
+                    }
+                }
             }
         }
         let any_block = state.chans.iter().any(|c| c.blocks_count > 0);
-        if !any_block && self.annotations.is_empty() {
+        let any_annotation = !self.annotations.is_empty()
+            || again
+                .iter()
+                .any(|a| matches!(a, Again::Annotation(_) | Again::Part(_)));
+        if !any_block && !any_annotation {
             return Err(RepairError::NoBlock);
         }
         let last_end = state.chans.iter().map(|c| c.next_start).max().unwrap_or(0);
@@ -841,12 +966,44 @@ impl Repairer {
         if length < 1 {
             return Err(RepairError::NoBlock);
         }
+        // The generators kept, those after the cut among them, which the bundle names.
+        let mut generators = self.generators.clone();
+        for a in &again {
+            let source = match a {
+                Again::Annotation(a) => &a.source,
+                Again::Part(p) => &p.source,
+                Again::Gap(..) => continue,
+            };
+            if !generators.iter().any(|g| &g.source == source) {
+                generators.push(Pending::new(source));
+            }
+        }
+        let records = !generators.is_empty();
+        let bundling = Bundling::of(self.bundle.take(), &generators, records, d.timebase)?;
         let mut tail = Vec::new();
         // What the content settled and the file lacks, as a writer's queue would hold it.
         state.write_expected(&mut tail, keep)?;
-        for a in &again {
-            let json = serde_json::to_vec(a).expect("an annotation serialises");
-            record::write(&mut tail, Kind::Annotation, &[&json]);
+        for a in again {
+            match a {
+                Again::Annotation(a) => {
+                    record::write(&mut tail, Kind::Annotation, &[&a.to_payload()]);
+                    self.annotation(a)?;
+                }
+                Again::Part(part) => {
+                    // The generator's records since its last part go in a part of their own
+                    // first, so this one still covers none.
+                    self.write_pending(&part.source, &mut tail, keep)?;
+                    let span = part
+                        .span(d.timebase)
+                        .map_err(|e| corrupt(format!("an annotation part: {e}")))?;
+                    let row = write_part_record(&mut tail, keep, &part.to_raw(), span, self.level)?;
+                    self.part(&part, row, 0);
+                    self.parts.finish_due(&mut tail, keep);
+                }
+                Again::Gap(c, gap) => {
+                    record::write(&mut tail, Kind::Gap, &[&record::gap_bytes(c as u32, gap)]);
+                }
+            }
         }
         // Each digital channel is known to the source tick at the latest known-through tick, or,
         // with none, at its own last block's end, or its start with no block.
@@ -966,6 +1123,20 @@ impl Repairer {
             }
         };
         state.write_expected(&mut tail, keep)?;
+        // Each generator's records since its last part, in parts, in the order of its first
+        // annotation; then the parts a bundle of given files holds.
+        for g in 0..self.generators.len() {
+            let source = self.generators[g].source.clone();
+            self.write_pending(&source, &mut tail, keep)?;
+        }
+        let mut bundling = bundling;
+        if let Bundling::Files { parts, .. } = &mut bundling {
+            for (raw, span) in std::mem::take(parts) {
+                let row = write_part_record(&mut tail, keep, &raw, span, self.level)?;
+                self.parts.push(row);
+                self.parts.finish_due(&mut tail, keep);
+            }
+        }
         // Each channel's end, gaps and runs; each table's last pages.
         let mut digests = Vec::with_capacity(state.chans.len());
         let mut channels = Vec::with_capacity(state.chans.len());
@@ -1063,6 +1234,7 @@ impl Repairer {
                 follow.finish(0, &mut tail, keep);
             }
         }
+        self.parts.finish(0, &mut tail, keep);
         let stored = state.chans.len();
         let derived = d
             .derived
@@ -1094,16 +1266,23 @@ impl Repairer {
             content_id: hash::content_id(d.timebase, length, &digests),
             overview_shift: d.overview_shift,
             requires: Vec::new(),
-            annotation_parts: None,
+            annotation_parts: {
+                let parts = self.parts.table.count();
+                (parts > 0).then_some(parts)
+            },
         };
         check_header(&header)?;
-        let generated = generated(&self.annotations, length);
-        let files = match self.bundle {
-            None => None,
-            Some(Bundle::Generated { stem }) => {
-                Some(bundled_files(&stem, header.content_id, &generated))
-            }
-            Some(Bundle::Files(files)) => Some(files),
+        let generated = generated(&self.annotations, length, d.timebase);
+        let files = match bundling {
+            Bundling::None => None,
+            Bundling::Generated { stem } => (!self.generators.is_empty()).then(|| {
+                bundled_files(
+                    &stem,
+                    header.content_id,
+                    self.generators.iter().map(|g| g.source.as_str()),
+                )
+            }),
+            Bundling::Files { files, .. } => Some(files),
         };
         let bundle = match files {
             None => (0, 0),
@@ -1130,7 +1309,15 @@ impl Repairer {
             })
             .collect();
         let columns: Vec<Column> = state.ochans.iter().map(|o| o.column).collect();
-        let footer = footer_payload(&header, bundle, &tops, &strips, &columns, self.level)?;
+        let footer = footer_payload(
+            &header,
+            bundle,
+            self.parts.table.top(),
+            &tops,
+            &strips,
+            &columns,
+            self.level,
+        )?;
         let at = keep + tail.len() as u64;
         let mut end = Vec::new();
         record::write_footer(&mut end, at, &footer);
@@ -1140,7 +1327,44 @@ impl Repairer {
             tail,
             header,
             generated,
+            left_out: self.left_out,
         })
+    }
+}
+
+/// A record after the cut that stands, to write again.
+enum Again {
+    Annotation(record::Annotation),
+    Part(Part),
+    Gap(usize, Gap),
+}
+
+impl Repairer {
+    /// Generator `source`'s lines since its last part, in parts of about `PART_TARGET` bytes and
+    /// none past 4 MiB, to `tail` at `keep`, each with its row.
+    fn write_pending(
+        &mut self,
+        source: &str,
+        tail: &mut Vec<u8>,
+        keep: u64,
+    ) -> Result<(), RepairError> {
+        let level = self.level;
+        let timebase = self.timebase();
+        let Some(g) = self.generators.iter().position(|g| g.source == source) else {
+            return Ok(());
+        };
+        let Some((raw, _)) = self.generators[g].take() else {
+            return Ok(());
+        };
+        let part = Part::parse_raw(&raw).map_err(corrupt)?;
+        let parts =
+            crate::writer::split_into_parts(source, part.lines(), timebase).map_err(corrupt)?;
+        for (raw, span) in parts {
+            let row = write_part_record(tail, keep, &raw, span, level)?;
+            self.parts.push(row);
+            self.parts.finish_due(tail, keep);
+        }
+        Ok(())
     }
 }
 

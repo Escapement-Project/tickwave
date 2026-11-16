@@ -842,10 +842,18 @@ pub(crate) fn check_header(h: &Header) -> Result<(), DecodeError> {
             check_shaping(ch, Break::default())?;
         }
     }
-    if h.annotation_parts == Some(0) {
-        return Err(corrupt(
-            "the header states 0 annotation parts; a recording with none states no count",
-        ));
+    match h.annotation_parts {
+        Some(0) => {
+            return Err(corrupt(
+                "the header states 0 annotation parts; a recording with none states no count",
+            ));
+        }
+        Some(n) if n >= JSON_SAFE => {
+            return Err(corrupt(format!(
+                "the header states {n} annotation parts, past 2^53"
+            )));
+        }
+        _ => {}
     }
     let overview_channels = h.channels.len() + h.derived.len();
     for o in 0..overview_channels {
@@ -1137,6 +1145,8 @@ pub struct Footer {
     pub header: Header,
     /// The annotation bundle record's offset and length, framing included, where there is one.
     pub bundle: Option<(u64, u32)>,
+    /// The annotation parts table, where the header states `annotation_parts`.
+    pub parts: Option<TableIndex>,
     /// Each channel's, then each derived channel's.
     pub channels: Vec<ChannelIndex>,
     /// Each derived channel's operands, by channel index, and its rule; None for one this
@@ -1193,11 +1203,14 @@ fn top_table(
                 .offset
                 .checked_add(u64::from(en.length))
                 .is_some_and(|end| end <= footer_offset);
+        // A parts entry's keys are the span under it, which keeps no order across entries.
         let after = i == 0 || {
             let p = entries[i - 1];
-            p.first <= en.first && p.number <= en.number && p.offset < en.offset
+            p.offset < en.offset
+                && (table.spans() || (p.first <= en.first && p.number <= en.number))
         };
-        if !inside || !after {
+        let span = !table.spans() || crate::index::span_in_range(en.first, en.number);
+        if !inside || !after || !span {
             return Err(bad("an entry is out of place"));
         }
     }
@@ -1205,7 +1218,7 @@ fn top_table(
     let starts = match table {
         Table::Blocks | Table::Level(_) => (first.first, first.number) == (0, 0),
         Table::Gaps => first.number == 0,
-        Table::Breaks => true,
+        Table::Breaks | Table::Parts => true,
     };
     if !starts {
         return Err(bad("its first entry does not start the table"));
@@ -1334,6 +1347,15 @@ impl Footer {
                 ));
             }
         };
+        let parts = match header.annotation_parts {
+            Some(_) if bundle.is_none() => {
+                return Err(corrupt(
+                    "the header states annotation parts, and the file holds no annotation bundle",
+                ));
+            }
+            Some(n) => Some(top_table(&mut cursor, 0, Table::Parts, n, footer_offset)?),
+            None => None,
+        };
         let channels_n = header.channels.len();
         let mut channels = Vec::with_capacity(columns.len());
         let mut strip_at = index_end;
@@ -1454,6 +1476,7 @@ impl Footer {
             trailer,
             header,
             bundle,
+            parts,
             channels,
             products,
             strips,

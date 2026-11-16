@@ -57,7 +57,7 @@ pub struct Options {
     /// Generated annotations to write, each with its generator's name; their times are axis
     /// ticks.
     pub annotations: Vec<(String, serde_json::Map<String, serde_json::Value>)>,
-    /// Bundle the annotations into the file rather than handing them back.
+    /// How to bundle the annotations (`Finish::bundle`).
     pub bundle: Option<Bundle>,
 }
 

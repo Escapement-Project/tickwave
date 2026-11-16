@@ -1099,7 +1099,8 @@ fn a_gap_recorded_past_the_last_block_leaves_nothing_known_beyond_it_and_repair_
     let bundle = |f: &[u8]| {
         Footer::parse_file(f)
             .unwrap()
-            .read_bundle(from_memory(f))
+            .read_sidecar(from_memory(f))
+            .map(|s| s.map(|s| s.files))
             .unwrap()
     };
     assert!(bundle(&file).is_some());
@@ -1134,7 +1135,11 @@ fn a_writer_bundles_its_annotations_with_a_sidecar_that_checks() {
         .unwrap();
     file.extend(&f.tail);
     let head = Footer::parse_file(&file).unwrap();
-    let files = head.read_bundle(from_memory(&file)).unwrap().unwrap();
+    let files = head
+        .read_sidecar(from_memory(&file))
+        .map(|s| s.map(|s| s.files))
+        .unwrap()
+        .unwrap();
     assert_eq!(
         files.keys().collect::<Vec<_>>(),
         ["cap.annotations.toml", "cap.verge.jsonl"]

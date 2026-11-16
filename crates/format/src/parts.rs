@@ -1,0 +1,313 @@
+//! Annotation parts (FORMAT.md, "Annotations" and "Index"): a run of one generator's lines in one
+//! zstd frame, and the recording's table of them. A part's row, and each directory entry above the
+//! rows, says which times its annotations reach, so a reader fetches only the parts a view meets.
+//! `Footer::parts_meeting` finds them, `Footer::decode_part` reads one, and `Footer::read_sidecar`
+//! joins the sidecar's files back from the bundle and every part.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::ops::{ControlFlow, Range};
+
+use crate::decode::{DecodeError, Footer, corrupt, inflate_limited};
+use crate::index::Page;
+use crate::model::Ratio;
+use crate::record::{MAX_GENERATORS, MAX_PART, named};
+use crate::times::{Time, ticks};
+
+/// A part row, 32 bytes: where the part's frame lies, and the span its annotations cover.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PartRow {
+    /// The offset of its zstd frame in the file, the frame's length and its decoded length.
+    pub offset: u64,
+    pub length: u32,
+    pub decoded_length: u32,
+    /// The earliest axis tick any of its annotations starts at.
+    pub start: i64,
+    /// The latest any of them ends at, a point ending where it starts.
+    pub end: i64,
+}
+
+impl PartRow {
+    pub const SIZE: usize = 32;
+
+    pub fn write(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.offset.to_le_bytes());
+        out.extend_from_slice(&self.length.to_le_bytes());
+        out.extend_from_slice(&self.decoded_length.to_le_bytes());
+        out.extend_from_slice(&self.start.to_le_bytes());
+        out.extend_from_slice(&self.end.to_le_bytes());
+    }
+
+    /// `bytes` is exactly one row.
+    pub fn parse(bytes: &[u8]) -> Self {
+        Self {
+            offset: u64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+            length: u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+            decoded_length: u32::from_le_bytes(bytes[12..16].try_into().unwrap()),
+            start: i64::from_le_bytes(bytes[16..24].try_into().unwrap()),
+            end: i64::from_le_bytes(bytes[24..32].try_into().unwrap()),
+        }
+    }
+
+    /// Whether its span meets ticks `span`: it starts before the span's end and ends at or after
+    /// its start.
+    pub fn meets(&self, span: &Range<i64>) -> bool {
+        self.start < span.end && self.end >= span.start
+    }
+}
+
+/// A part, decoded: a generator's name and a run of its file's lines.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Part {
+    pub source: String,
+    /// The lines, each ending with its newline.
+    pub lines: String,
+}
+
+impl Part {
+    /// What its frame decodes to: the name's length as a u16, the name, then the lines.
+    pub fn to_raw(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(2 + self.source.len() + self.lines.len());
+        out.extend_from_slice(&(self.source.len() as u16).to_le_bytes());
+        out.extend_from_slice(self.source.as_bytes());
+        out.extend_from_slice(self.lines.as_bytes());
+        out
+    }
+
+    /// A part from what its frame decodes to, or why a reader refuses it: a generator name
+    /// ANNOTATIONS.md doesn't allow, or a last line without its newline. `span` refuses one with
+    /// no line.
+    pub fn parse_raw(raw: &[u8]) -> Result<Self, String> {
+        let (source, lines) = named(raw)?;
+        let lines = std::str::from_utf8(lines).map_err(|_| "its lines are not UTF-8")?;
+        if !lines.is_empty() && !lines.ends_with('\n') {
+            return Err("its last line does not end with a newline".into());
+        }
+        Ok(Self {
+            source,
+            lines: lines.to_owned(),
+        })
+    }
+
+    /// Its lines, without their newlines.
+    pub fn lines(&self) -> impl Iterator<Item = &str> {
+        self.lines.split_terminator('\n')
+    }
+
+    /// The span its annotations cover, as its row states it: the earliest start and the latest
+    /// end, a point ending where it starts. Each line's times are ticks, or decimals with a unit
+    /// at `timebase`. Err where a line is not a JSON object with a start.
+    pub fn span(&self, timebase: Ratio) -> Result<(i64, i64), String> {
+        let mut span: Option<(i64, i64)> = None;
+        for (n, line) in self.lines().enumerate() {
+            let (start, end) =
+                line_span(line, timebase).map_err(|e| format!("line {}: {e}", n + 1))?;
+            span = Some(span.map_or((start, end), |(s, e)| (s.min(start), e.max(end))));
+        }
+        span.ok_or_else(|| "it holds no line".into())
+    }
+}
+
+/// One generator line's span as a part's row can state it: in `0..2^53`, its start at most its
+/// end. Err for a line no part can hold.
+pub fn placed_span(line: &str, timebase: Ratio) -> Result<(i64, i64), String> {
+    let (start, end) = line_span(line, timebase)?;
+    if !crate::index::span_in_range(start, end.max(0) as u64) || end < start {
+        return Err(format!(
+            "ticks {start} to {end} lie outside 0 to 2^53, or end before they start"
+        ));
+    }
+    Ok((start, end))
+}
+
+/// One generator line's start and end in ticks, a point's end at its start.
+pub fn line_span(line: &str, timebase: Ratio) -> Result<(i64, i64), String> {
+    let fields: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(line).map_err(|_| "not a JSON object")?;
+    let time = |key: &str| -> Result<Option<i64>, String> {
+        fields
+            .get(key)
+            .map(|v| {
+                let t: Time =
+                    serde_json::from_value(v.clone()).map_err(|e| format!("{key}: {e}"))?;
+                ticks(&t, timebase).map_err(|e| format!("{key}: {e}"))
+            })
+            .transpose()
+    };
+    let start = time("start")?.ok_or("no start")?;
+    let end = time("end")?.unwrap_or(start);
+    Ok((start, end))
+}
+
+/// The sidecar's files whole, as `Footer::read_sidecar` joins them, and what it left out.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Sidecar {
+    /// Each file's name and text: the hand-written file, and each generator's file with every
+    /// line its parts hold.
+    pub files: BTreeMap<String, String>,
+    /// Each annotation left out, and why: one that starts at or past the length, or a second of
+    /// an id its generator has given already.
+    pub left_out: Vec<String>,
+}
+
+/// The generator a bundled file's first line names, where it is a generator's head.
+pub(crate) fn head_source(text: &str) -> Option<String> {
+    let first = text.lines().next()?;
+    let fields: serde_json::Map<String, serde_json::Value> = serde_json::from_str(first).ok()?;
+    fields.get("format")?;
+    Some(fields.get("source")?.as_str()?.to_owned())
+}
+
+/// `line` held to the recording's `length` (FORMAT.md, "Annotations"): None for an annotation
+/// that starts at or past it; a span that ends past it ends there. A line that needs no cut keeps
+/// its bytes.
+pub(crate) fn clipped(line: &str, length: i64, timebase: Ratio) -> Option<String> {
+    let Ok((start, end)) = line_span(line, timebase) else {
+        // A line whose times don't read is the resolver's to report.
+        return Some(line.to_owned());
+    };
+    if start >= length {
+        return None;
+    }
+    if end <= length {
+        return Some(line.to_owned());
+    }
+    let mut fields: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(line).expect("line_span read it");
+    fields.insert("end".into(), length.into());
+    Some(serde_json::to_string(&fields).expect("a map serialises"))
+}
+
+impl Footer {
+    /// The rows of the annotation parts whose span meets ticks `span`, in the order the parts
+    /// were written. Only the table's pages whose span meets it are fetched, through `fetch`,
+    /// and each is checked against the entry that lists it. None of the parts is fetched.
+    pub fn parts_meeting<E: From<DecodeError>>(
+        &self,
+        span: Range<i64>,
+        mut fetch: impl FnMut(u64, u32) -> Result<Vec<u8>, E>,
+    ) -> Result<Vec<PartRow>, E> {
+        let Some(table) = &self.parts else {
+            return Ok(Vec::new());
+        };
+        let mut rows = Vec::new();
+        table.visit_in(span.clone(), &mut fetch, |_, page| {
+            if let Page::Parts(page) = page {
+                rows.extend(page.into_iter().filter(|r| r.meets(&span)));
+            }
+            Ok(ControlFlow::Continue(()))
+        })?;
+        Ok(rows)
+    }
+
+    /// Every annotation part's row, in the order the parts were written.
+    pub fn part_rows<E: From<DecodeError>>(
+        &self,
+        fetch: impl FnMut(u64, u32) -> Result<Vec<u8>, E>,
+    ) -> Result<Vec<PartRow>, E> {
+        self.parts_meeting(i64::MIN..i64::MAX, fetch)
+    }
+
+    /// The part `row` places, from exactly its frame's bytes. It must decode to the length the
+    /// row states, within the format's limit, and its lines must cover the span the row states.
+    pub fn decode_part(&self, row: &PartRow, frame: &[u8]) -> Result<Part, DecodeError> {
+        if frame.len() != row.length as usize {
+            return Err(corrupt(format!(
+                "an annotation part is {} bytes, its row says {}",
+                frame.len(),
+                row.length
+            )));
+        }
+        let raw = inflate_limited(frame, row.decoded_length as usize, MAX_PART)?;
+        let part = Part::parse_raw(&raw)
+            .map_err(|e| corrupt(format!("the annotation part at {}: {e}", row.offset)))?;
+        let span = part
+            .span(self.header.timebase)
+            .map_err(|e| corrupt(format!("the annotation part at {}: {e}", row.offset)))?;
+        if span != (row.start, row.end) {
+            return Err(corrupt(format!(
+                "the annotation part at {} covers ticks {} to {}, its row says {} to {}",
+                row.offset, span.0, span.1, row.start, row.end
+            )));
+        }
+        Ok(part)
+    }
+
+    /// The sidecar's files whole, joined from the annotation bundle and every part through
+    /// `fetch`; None without a bundle. Each generator file is its bundled first line, then the
+    /// lines of each of its generator's parts in the order of their rows. An annotation that
+    /// starts at or past the length is left out and a span that ends past it ends there, and a
+    /// second annotation of an id its generator has given already is left out, so the files pass
+    /// ANNOTATIONS.md's checks; `left_out` says which. A part whose generator has no file in the
+    /// bundle is refused.
+    pub fn read_sidecar<E: From<DecodeError>>(
+        &self,
+        mut fetch: impl FnMut(u64, u32) -> Result<Vec<u8>, E>,
+    ) -> Result<Option<Sidecar>, E> {
+        let Some(mut files) = self.read_bundle(&mut fetch)? else {
+            return Ok(None);
+        };
+        let mut by_source: BTreeMap<String, String> = BTreeMap::new();
+        for (name, text) in &files {
+            if let Some(source) = head_source(text)
+                && by_source.insert(source.clone(), name.clone()).is_some()
+            {
+                return Err(corrupt(format!(
+                    "the annotation bundle holds two files of generator {source:?}"
+                ))
+                .into());
+            }
+        }
+        if by_source.len() > MAX_GENERATORS {
+            return Err(corrupt(format!(
+                "the annotation bundle holds {} generators' files, more than the {MAX_GENERATORS} a \
+                 recording has",
+                by_source.len()
+            ))
+            .into());
+        }
+        let length = self.header.length;
+        let timebase = self.header.timebase;
+        let mut left_out = Vec::new();
+        let mut ids: BTreeSet<(String, String)> = BTreeSet::new();
+        for row in self.part_rows(&mut fetch)? {
+            let frame = fetch(row.offset, row.length)?;
+            let part = self.decode_part(&row, &frame)?;
+            let Some(name) = by_source.get(&part.source) else {
+                return Err(corrupt(format!(
+                    "an annotation part of generator {:?}, which has no file in the bundle",
+                    part.source
+                ))
+                .into());
+            };
+            let text = files.get_mut(name).expect("a bundled file");
+            for line in part.lines() {
+                let id = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(line)
+                    .ok()
+                    .and_then(|f| f.get("id")?.as_str().map(str::to_owned));
+                let Some(line) = clipped(line, length, timebase) else {
+                    left_out.push(format!(
+                        "{}/{}: starts at or past the length, {length}",
+                        part.source,
+                        id.as_deref().unwrap_or("(no id)")
+                    ));
+                    continue;
+                };
+                if let Some(id) = id
+                    && !ids.insert((part.source.clone(), id.clone()))
+                {
+                    left_out.push(format!(
+                        "{}/{id}: an id its generator has given already",
+                        part.source
+                    ));
+                    continue;
+                }
+                if !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                text.push_str(&line);
+                text.push('\n');
+            }
+        }
+        Ok(Some(Sidecar { files, left_out }))
+    }
+}

@@ -446,8 +446,11 @@ fn a_first_draw_reads_nothing_past_the_footer_and_holds_the_exact_picture() {
 }
 
 /// V's samples from 100 to 190, every 10 ticks, and marks at 3 and 400, finished at 500 with
-/// `bundle`.
+/// `bundle`. Files given to bundle stand for the marks: a writer that took annotations bundles
+/// its own.
 fn marked(bundle: escapement_tickwave_format::writer::Bundle) -> Vec<u8> {
+    use escapement_tickwave_format::writer::Bundle;
+    let takes = matches!(bundle, Bundle::Generated { .. });
     let timebase = Ratio::integer(1000).unwrap();
     let d = Declaration {
         timebase,
@@ -483,7 +486,9 @@ fn marked(bundle: escapement_tickwave_format::writer::Bundle) -> Vec<u8> {
         else {
             unreachable!()
         };
-        w.annotation("verge", m).unwrap();
+        if takes {
+            w.annotation("verge", m).unwrap();
+        }
     };
     mark(&mut w, 3);
     w.run(0, 100, 0).unwrap();
@@ -511,6 +516,45 @@ fn markers_query() -> Query {
         },
         ..Query::default()
     }
+}
+
+/// A bundled sidecar whose lines break a rule: the view leaves those out and names them, and shows
+/// the rest (FORMAT.md, "Annotations"), where it once refused every marker. So does the second of
+/// an id its generator gave already, the first kept.
+#[test]
+fn a_bundled_line_that_breaks_a_rule_is_left_out_and_named_and_the_rest_are_markers() {
+    use escapement_tickwave_format::writer::{Bundle, generator_file};
+    let plain = marked(Bundle::Files(BTreeMap::new()));
+    let footer = Footer::parse_file(&plain).unwrap();
+    let id = footer.header.content_id;
+    let lines = [
+        r#"{"id":"m/3","start":3}"#,
+        r#"{"colour":"red","id":"m/5","start":5}"#,
+        r#"{"id":"m/3","start":7}"#,
+        r#"{"channels":["X"],"id":"m/9","start":9}"#,
+    ];
+    let files = BTreeMap::from([
+        (
+            "rec.annotations.toml".to_owned(),
+            format!(
+                "format = \"tickwave-annotations/1\"\nrecording_id = \"{id}\"\ninclude = \
+                 [\"rec.verge.jsonl\"]\n"
+            ),
+        ),
+        (
+            "rec.verge.jsonl".to_owned(),
+            generator_file("verge", None, id, &lines.map(String::from)),
+        ),
+    ]);
+    let file = escapement_tickwave_format::bundle::bundle(&plain, &footer, files, 3).unwrap();
+    let rec = Recording::open(Arc::new(file), Cache::new(1 << 20)).unwrap();
+    rec.load_markers().unwrap();
+    assert_eq!(rec.marker_count(), 1);
+    let left = rec.markers_left_out();
+    assert_eq!(left.len(), 3, "{left:?}");
+    assert_eq!(left[0], "verge/m/3: an id its generator has given already");
+    assert!(left[1].contains("unknown field `colour`"), "{left:?}");
+    assert!(left[2].contains("no channel \"X\""), "{left:?}");
 }
 
 /// The bundle is read once markers are asked for, not by `open` or a sketch; whether there are

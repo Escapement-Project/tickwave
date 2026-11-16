@@ -459,6 +459,8 @@ pub struct Recording {
 pub(crate) struct Markers {
     pub list: Vec<Marker>,
     pub span: Option<Range<i64>>,
+    /// What reading them left out, and why.
+    pub left_out: Vec<String>,
 }
 
 impl Markers {
@@ -466,6 +468,7 @@ impl Markers {
         Self {
             span: span_of(&list),
             list,
+            left_out: Vec::new(),
         }
     }
 }
@@ -1426,12 +1429,15 @@ impl Recording {
         let Some(Ok(Markers {
             list: markers,
             span: marker_span,
+            ..
         })) = markers.get_mut()
         else {
             unreachable!("a live recording's markers are its writer's")
         };
         for r in snapshot.annotations_from(seen.annotations) {
-            let annotation = crate::markers::generated(&r.source, &r.annotation, seen.annotations);
+            // A writer's line is a JSON object.
+            let fields = r.fields().unwrap_or_default();
+            let annotation = crate::markers::generated(&r.source, &fields, seen.annotations);
             let marker = Marker {
                 cursor: MarkerCursor {
                     tick: annotation.start,
@@ -1528,6 +1534,13 @@ impl Recording {
         self.read_markers().map_or(0, |m| m.list.len())
     }
 
+    /// The annotations reading a finished file's markers left out, each with why: one that breaks
+    /// a rule of ANNOTATIONS.md, one past the length, or a second of an id its generator gave
+    /// already (FORMAT.md, "Annotations"). The rest are its markers. Empty where they don't read.
+    pub fn markers_left_out(&self) -> &[String] {
+        self.read_markers().map_or(&[], |m| &m.left_out)
+    }
+
     /// Reads a finished file's markers from its bundle if they aren't read yet:
     /// `Error::Annotations` on every call while the bundle doesn't resolve, where
     /// `marker_count`, `markers` and `extent` give none. Threads that ask at once read the bundle
@@ -1573,19 +1586,20 @@ impl Recording {
         let fetch = |offset: u64, len: u32| -> Result<Vec<u8>, Error> {
             Ok(read(&*self.bytes, offset, len as usize)?)
         };
-        let list = match footer.read_bundle(fetch)?.as_ref().map(bundled) {
-            None => Vec::new(),
-            Some(None) => {
-                return Err(Error::Annotations(
-                    "the bundle holds no hand-written file".into(),
-                ));
-            }
-            Some(Some((hand, included))) => markers_of(
-                annotations::resolve(hand, &included, &footer.header, None)
-                    .map_err(|problems| Error::Annotations(problems.join("; ")))?,
-            ),
+        let Some(sidecar) = footer.read_sidecar(fetch)? else {
+            return Ok(Markers::default());
         };
-        Ok(Markers::of(list))
+        let Some((hand, included)) = bundled(&sidecar.files) else {
+            return Err(Error::Annotations(
+                "the bundle holds no hand-written file".into(),
+            ));
+        };
+        // A line that breaks a rule is left out and named, not the whole sidecar.
+        let resolved = annotations::resolve_lenient(hand, &included, &footer.header, None);
+        let mut markers = Markers::of(markers_of(resolved.annotations));
+        markers.left_out = sidecar.left_out;
+        markers.left_out.extend(resolved.problems);
+        Ok(markers)
     }
 
     /// From the first sample to the end of the last sample's time, over every analog channel,

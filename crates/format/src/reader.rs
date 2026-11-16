@@ -18,7 +18,10 @@ use crate::index::{Due, PageHead, Row, Table, TableWriter};
 use crate::mapping::Mapping;
 use crate::model::{Break, Gap, Grid};
 use crate::overview;
-use crate::record::{self, BlockHead, Kind, Next, OverviewHead};
+use crate::parts::{Part, PartRow};
+use crate::record::{
+    self, BlockHead, Kind, MAX_BUNDLE, MAX_GENERATORS, MAX_PART, Next, OverviewHead,
+};
 
 /// One block, decoded, and where its frame sits in the file.
 #[derive(Debug, PartialEq)]
@@ -65,6 +68,14 @@ pub enum Event {
         len: u32,
     },
     Annotation(record::Annotation),
+    /// An annotation part and its row. `covers` counts its generator's annotation records it
+    /// covers, those since the generator's previous part, which the reader has held it to; 0
+    /// for a part that stands alone.
+    Part {
+        part: Part,
+        row: PartRow,
+        covers: u64,
+    },
     /// The annotation bundle record's payload (`decode::parse_bundle` reads it).
     Bundle(Vec<u8>),
     /// The footer, which the trailer has been checked against.
@@ -247,6 +258,15 @@ fn place_on_axis(map: &Mapping, grid: Grid, units: i128) -> Option<i64> {
         .filter(|t| safe.contains(t) && safe.contains(&grid.floor(units)))
 }
 
+/// A generator's annotation records since its previous part, which its next part covers: their
+/// lines' bytes hashed as they come, not held.
+#[derive(Default)]
+struct Covering {
+    hasher: blake3::Hasher,
+    bytes: u64,
+    records: u64,
+}
+
 /// One overview channel's levels as the reader follows them: by shift, the next block's `k` and
 /// the level's table.
 struct Levels {
@@ -281,6 +301,11 @@ pub struct Reader {
     known: Option<i64>,
     /// The annotation bundle record's place, once read.
     bundle: Option<(u64, u32)>,
+    /// Each generator met, in a record or a part, and its records since its last part.
+    generators: HashMap<String, Covering>,
+    /// The generators of the parts read.
+    part_sources: std::collections::BTreeSet<String>,
+    parts: Follow<PartRow>,
     /// Where the record the last event came from starts.
     record_at: u64,
     /// Where a skipped record whose check didn't match starts: the file is cut off there.
@@ -316,6 +341,9 @@ impl Reader {
             levels: Vec::new(),
             known: None,
             bundle: None,
+            generators: HashMap::new(),
+            part_sources: std::collections::BTreeSet::new(),
+            parts: Follow::new(0, Table::Parts, false),
             record_at: 0,
             cut_at: None,
             after_end: false,
@@ -813,14 +841,18 @@ impl Reader {
                 }
             }
             Kind::Annotation => {
-                let a: record::Annotation = serde_json::from_slice(payload)?;
-                // Repair and recut write each source's annotations to a file named after it.
-                if let Some(problem) = record::check_source(&a.source) {
-                    return Err(corrupt(format!("an annotation record: {problem}")));
-                }
+                let a = record::Annotation::parse(payload)
+                    .map_err(|e| corrupt(format!("an annotation record: {e}")))?;
+                let covering = self.generator(&a.source)?;
+                covering.hasher.update(a.line.as_bytes());
+                covering.hasher.update(b"\n");
+                covering.bytes += a.line.len() as u64 + 1;
+                covering.records += 1;
                 Event::Annotation(a)
             }
+            Kind::Part => self.part(payload, record_at)?,
             Kind::Bundle => {
+                self.bundle_generators(payload)?;
                 self.bundle = Some((record_at, len as u32));
                 Event::Bundle(payload.to_vec())
             }
@@ -868,6 +900,7 @@ impl Reader {
                 }
                 _ => Err(unexpected()),
             },
+            4 if c == 0 => self.parts.page(record, at, 0),
             _ => Err(unexpected()),
         }
     }
@@ -913,6 +946,14 @@ impl Reader {
         {
             return Err(corrupt(
                 "the footer's annotation bundle differs from the one read",
+            ));
+        }
+        let parts_top = self.parts.top(0)?;
+        if h.annotation_parts.unwrap_or(0) != self.parts.table.count()
+            || parts_top != footer.parts.as_ref().map(top_of)
+        {
+            return Err(corrupt(
+                "the footer's annotation parts differ from the ones read",
             ));
         }
         let differs = |c: usize, what: &str| {
@@ -1193,6 +1234,97 @@ impl Reader {
 }
 
 impl Reader {
+    /// Generator `source`'s records since its last part, met for the first time or not. Past
+    /// the most generators a recording has, refused.
+    fn generator(&mut self, source: &str) -> Result<&mut Covering, DecodeError> {
+        if !self.generators.contains_key(source) {
+            if self.generators.len() == MAX_GENERATORS {
+                return Err(corrupt(format!(
+                    "generator {source:?}: a recording has at most {MAX_GENERATORS} generators"
+                )));
+            }
+            self.generators
+                .insert(source.to_owned(), Covering::default());
+        }
+        Ok(self.generators.get_mut(source).expect("inserted"))
+    }
+
+    /// An annotation part record at `record_at`: decoded, held to the records of its generator
+    /// since its previous part where there are any, and its row taken into the table.
+    fn part(&mut self, payload: &[u8], record_at: u64) -> Result<Event, DecodeError> {
+        let bad = |what: String| corrupt(format!("the annotation part at {record_at}: {what}"));
+        let (len, frame) = payload
+            .split_first_chunk::<4>()
+            .ok_or_else(|| bad("too short for its length".into()))?;
+        let decoded = u32::from_le_bytes(*len);
+        if decoded as usize > MAX_PART || frame.len() > record::compress_bound(decoded as usize) {
+            return Err(bad(format!(
+                "{} bytes for {decoded}, past the format's limits",
+                frame.len()
+            )));
+        }
+        let raw = inflate_limited(frame, decoded as usize, self.max.min(MAX_PART))?;
+        let part = Part::parse_raw(&raw).map_err(bad)?;
+        let timebase = self
+            .declaration
+            .as_ref()
+            .expect("records follow the declaration")
+            .timebase;
+        let span = part.span(timebase).map_err(bad)?;
+        if !crate::index::span_in_range(span.0, span.1 as u64) {
+            return Err(bad(format!(
+                "its annotations cover ticks {} to {}, outside 0 to 2^53",
+                span.0, span.1
+            )));
+        }
+        let source = part.source.clone();
+        let covering = std::mem::take(self.generator(&source)?);
+        if covering.records > 0
+            && (covering.bytes != part.lines.len() as u64
+                || covering.hasher.finalize() != blake3::hash(part.lines.as_bytes()))
+        {
+            return Err(bad(format!(
+                "it differs from the {} annotation records of generator {source:?} it covers",
+                covering.records
+            )));
+        }
+        let row = PartRow {
+            offset: record_at + (record::PAYLOAD_AT + 4) as u64,
+            length: frame.len() as u32,
+            decoded_length: decoded,
+            start: span.0,
+            end: span.1,
+        };
+        self.parts.push(row)?;
+        self.part_sources.insert(source);
+        Ok(Event::Part {
+            part,
+            row,
+            covers: covering.records,
+        })
+    }
+
+    /// The annotation bundle's files hold one for each generator whose parts were read
+    /// (FORMAT.md, "Annotations").
+    fn bundle_generators(&self, payload: &[u8]) -> Result<(), DecodeError> {
+        if self.part_sources.is_empty() {
+            return Ok(());
+        }
+        let files = crate::decode::parse_bundle(payload, |frame, len| {
+            inflate_limited(frame, len, self.max.min(MAX_BUNDLE))
+        })?;
+        let bundled: std::collections::BTreeSet<String> = files
+            .values()
+            .filter_map(|text| crate::parts::head_source(text))
+            .collect();
+        if let Some(missing) = self.part_sources.iter().find(|s| !bundled.contains(*s)) {
+            return Err(corrupt(format!(
+                "generator {missing:?} has annotation parts and no file in the annotation bundle"
+            )));
+        }
+        Ok(())
+    }
+
     /// Channel `c`'s analog runs and the samples its blocks have held; None for a digital one.
     fn runs_of(&self, c: usize) -> Option<(&[Break], u64)> {
         match self.channels.get(c)? {

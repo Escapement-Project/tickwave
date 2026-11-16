@@ -7,8 +7,9 @@
 
 use std::ops::{ControlFlow, Range};
 
-use crate::header::{BlockRow, LEVEL_BIT, OverviewRow};
+use crate::header::{BlockRow, JSON_SAFE, LEVEL_BIT, OverviewRow};
 use crate::model::{Break, Gap};
+use crate::parts::PartRow;
 use crate::record::{self, Kind};
 use crate::shared::Chunks;
 
@@ -23,10 +24,12 @@ pub const PAGE_HEAD: usize = 19;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Entry {
     /// For blocks, the first block's start tick; for an overview level, the first row's `k`;
-    /// for gaps, the first gap's `from`; for breaks, the first break's `tick`.
+    /// for gaps, the first gap's `from`; for breaks, the first break's `tick`; for annotation
+    /// parts, the earliest `start` of the rows under it.
     pub first: i64,
     /// For blocks, the first block's first item's index in the channel; for an overview level
-    /// and for gaps, the first entry's place; for breaks, the first break's `index`.
+    /// and for gaps, the first entry's place; for breaks, the first break's `index`; for
+    /// annotation parts, the latest `end` of the rows under it.
     pub number: u64,
     /// The page record's offset in the file, and its length, its framing included.
     pub offset: u64,
@@ -61,6 +64,8 @@ pub enum Table {
     Level(u8),
     Gaps,
     Breaks,
+    /// The recording's annotation parts, channel 0.
+    Parts,
 }
 
 impl Table {
@@ -70,6 +75,7 @@ impl Table {
             Self::Level(_) => 1,
             Self::Gaps => 2,
             Self::Breaks => 3,
+            Self::Parts => 4,
         }
     }
 
@@ -96,7 +102,15 @@ impl Table {
             Self::Level(_) => OverviewRow::SIZE,
             Self::Gaps => GAP_SIZE,
             Self::Breaks => BREAK_SIZE,
+            Self::Parts => PartRow::SIZE,
         }
+    }
+
+    /// Whether its keys are spans, not places: the annotation parts' rows go in the order the
+    /// parts were written, not in order of time, so a directory entry's `first` and `number` are
+    /// the earliest start and latest end under it, and a reader prunes by span.
+    pub fn spans(self) -> bool {
+        self == Self::Parts
     }
 }
 
@@ -111,6 +125,12 @@ pub trait Row: Copy + std::fmt::Debug + Send + Sync + 'static {
     fn weight(&self, digital: bool) -> u64;
     /// Its `first` and `number`, `sum` being the weights before it and `place` its place.
     fn key(&self, sum: u64, place: u64) -> (i64, u64);
+}
+
+/// The `first` and `number` of entries whose keys are spans (`Table::spans`): the earliest start
+/// and the latest end.
+fn span_key(a: (i64, u64), b: (i64, u64)) -> (i64, u64) {
+    (a.0.min(b.0), a.1.max(b.1))
 }
 
 impl Row for BlockRow {
@@ -152,6 +172,18 @@ impl Row for Gap {
     }
     fn key(&self, _: u64, place: u64) -> (i64, u64) {
         (self.from, place)
+    }
+}
+
+impl Row for PartRow {
+    fn write(&self, out: &mut Vec<u8>) {
+        PartRow::write(self, out)
+    }
+    fn weight(&self, _: bool) -> u64 {
+        1
+    }
+    fn key(&self, _: u64, _: u64) -> (i64, u64) {
+        (self.start, self.end as u64)
     }
 }
 
@@ -320,8 +352,11 @@ impl<R: Row> TableWriter<R> {
     /// place and pass to `placed`.
     pub fn push(&mut self, row: R) -> Option<Due> {
         debug_assert!(!self.finished, "an entry after the table's last page");
+        let key = row.key(self.sum, self.count);
         if self.open.is_empty() {
-            self.open_key = row.key(self.sum, self.count);
+            self.open_key = key;
+        } else if self.table.spans() {
+            self.open_key = span_key(self.open_key, key);
         }
         self.count += 1;
         let w = row.weight(self.digital);
@@ -365,7 +400,13 @@ impl<R: Row> TableWriter<R> {
         let d = usize::from(depth);
         let entries = std::mem::take(&mut self.pending[d]);
         let n = entries.len();
-        let first = *entries.get(0).expect("a directory lists a page");
+        let mut first = *entries.get(0).expect("a directory lists a page");
+        if self.table.spans() {
+            (first.first, first.number) =
+                entries.iter().fold((first.first, first.number), |k, e| {
+                    span_key(k, (e.first, e.number))
+                });
+        }
         let listed_before = self.pages[d] - n as u64;
         let mut payload = Vec::with_capacity(PAGE_HEAD + n * Entry::SIZE);
         PageHead {
@@ -571,9 +612,20 @@ impl TableIndex {
     pub fn visit<E: From<crate::decode::DecodeError>>(
         &self,
         fetch: &mut impl FnMut(u64, u32) -> Result<Vec<u8>, E>,
+        f: impl FnMut(Located, Page) -> Result<ControlFlow<()>, E>,
+    ) -> Result<(), E> {
+        self.visit_in(i64::MIN..i64::MAX, fetch, f)
+    }
+
+    /// As `visit`, for the pages at depth 0 that `keys` reaches, as `locate` finds them: for a
+    /// table whose keys are spans (`Table::spans`), those whose span meets `keys`.
+    pub fn visit_in<E: From<crate::decode::DecodeError>>(
+        &self,
+        keys: Range<i64>,
+        fetch: &mut impl FnMut(u64, u32) -> Result<Vec<u8>, E>,
         mut f: impl FnMut(Located, Page) -> Result<ControlFlow<()>, E>,
     ) -> Result<(), E> {
-        self.walk(&(i64::MIN..i64::MAX), fetch, &mut |at, fetch| {
+        self.walk(&keys, fetch, &mut |at, fetch| {
             let bytes = fetch(at.entry.offset, at.entry.length)?;
             let page = self.parse_page(0, at.j, &at.entry, &bytes)?;
             f(at, page)
@@ -635,11 +687,20 @@ impl TableIndex {
         E: From<crate::decode::DecodeError>,
         F: FnMut(u64, u32) -> Result<Vec<u8>, E>,
     {
-        if entry.first >= keys.end {
-            return Ok(ControlFlow::Break(()));
-        }
-        if after.is_some_and(|a| a.0 <= keys.start) {
-            return Ok(ControlFlow::Continue(()));
+        if self.table.spans() {
+            // Rows keep no order of time: a page is passed over where its span misses the keys,
+            // and the walk goes on past it.
+            let end = i64::try_from(entry.number).unwrap_or(i64::MAX);
+            if entry.first >= keys.end || end < keys.start {
+                return Ok(ControlFlow::Continue(()));
+            }
+        } else {
+            if entry.first >= keys.end {
+                return Ok(ControlFlow::Break(()));
+            }
+            if after.is_some_and(|a| a.0 <= keys.start) {
+                return Ok(ControlFlow::Continue(()));
+            }
         }
         // The shape gives the page's length, which is checked before anything is fetched.
         let want = self.page_len(depth, j);
@@ -757,7 +818,14 @@ impl TableIndex {
         let chunks = body.chunks_exact(size);
         let page = if depth > 0 {
             let entries: Vec<Entry> = chunks.map(Entry::parse).collect();
-            if !entries
+            if self.table.spans() {
+                if !entries.windows(2).all(|w| w[0].offset < w[1].offset) {
+                    return Err(bad("its entries are out of order"));
+                }
+                if entries.iter().any(|e| !span_in_range(e.first, e.number)) {
+                    return Err(bad("an entry's span lies outside 0 to 2^53"));
+                }
+            } else if !entries
                 .windows(2)
                 .all(|w| w[0].first <= w[1].first && w[0].number <= w[1].number)
             {
@@ -767,7 +835,14 @@ impl TableIndex {
                 return Err(bad("it lists a page that does not come before it"));
             }
             let e = entries[0];
-            if (e.first, e.number) != (entry.first, entry.number) {
+            let key = if self.table.spans() {
+                entries
+                    .iter()
+                    .fold((e.first, e.number), |k, e| span_key(k, (e.first, e.number)))
+            } else {
+                (e.first, e.number)
+            };
+            if key != (entry.first, entry.number) {
                 return Err(bad("it starts where its directory says it doesn't"));
             }
             Page::Directory(entries)
@@ -859,10 +934,47 @@ impl TableIndex {
                     }
                     Page::Breaks(breaks)
                 }
+                Table::Parts => {
+                    let rows: Vec<PartRow> = chunks.map(PartRow::parse).collect();
+                    if !rows.windows(2).all(|w| w[0].offset < w[1].offset) {
+                        return Err(bad("its parts are out of order"));
+                    }
+                    if rows.iter().any(|r| {
+                        r.offset < crate::header::PREAMBLE_LEN as u64
+                            || r.offset.saturating_add(u64::from(r.length)) > entry.offset
+                    }) {
+                        return Err(bad("a part's frame does not lie before the page"));
+                    }
+                    if rows
+                        .iter()
+                        .any(|r| r.start > r.end || !span_in_range(r.start, r.end as u64))
+                    {
+                        return Err(bad("a part's span lies outside 0 to 2^53"));
+                    }
+                    if rows.iter().any(|r| {
+                        r.decoded_length as usize > record::MAX_PART
+                            || r.length as usize > record::compress_bound(r.decoded_length as usize)
+                    }) {
+                        return Err(bad("a part is past the format's limits"));
+                    }
+                    let key = rows
+                        .iter()
+                        .fold(rows[0].key(0, 0), |k, r| span_key(k, r.key(0, 0)));
+                    if key != (entry.first, entry.number) {
+                        return Err(bad("its span differs from the one its directory states"));
+                    }
+                    Page::Parts(rows)
+                }
             }
         };
         Ok(page)
     }
+}
+
+/// Whether a span's start and end, as a part row or a parts directory entry states them, lie in
+/// `0..2^53`, the start at most the end.
+pub(crate) fn span_in_range(first: i64, number: u64) -> bool {
+    first >= 0 && (first as u64) <= number && number < JSON_SAFE
 }
 
 /// A table's name, for a message.
@@ -872,6 +984,7 @@ pub fn table_name(table: Table) -> String {
         Table::Level(s) => format!("overview level 2^{s}"),
         Table::Gaps => "gaps".into(),
         Table::Breaks => "breaks".into(),
+        Table::Parts => "annotation parts".into(),
     }
 }
 
@@ -890,6 +1003,8 @@ pub enum Page {
     },
     Gaps(Vec<Gap>),
     Breaks(Vec<Break>),
+    /// Annotation part rows, in the order the parts were written.
+    Parts(Vec<PartRow>),
     Directory(Vec<Entry>),
 }
 

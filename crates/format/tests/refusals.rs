@@ -745,10 +745,8 @@ fn an_annotation_its_bundle_would_not_resolve_is_refused_at_the_call() {
         json!({"id": "m/1", "start": 1, "label": "a \\x07 b"}),
     )
     .unwrap();
-    assert_eq!(
-        take("verge", json!({"id": "m/1", "start": 2})),
-        Err("annotation \"m/1\": generator \"verge\" has an annotation of this id already".into())
-    );
+    // An id given twice is taken: the writer holds no ids, and a reader keeps the first.
+    take("verge", json!({"id": "m/1", "start": 2})).unwrap();
     take(
         "other",
         json!({"id": "m/1", "start": 3, "end": 9, "channels": ["D"]}),
@@ -764,7 +762,8 @@ fn an_annotation_its_bundle_would_not_resolve_is_refused_at_the_call() {
     file.extend(finished.tail);
     let files = Footer::parse_file(&file)
         .unwrap()
-        .read_bundle(escapement_tickwave_format::decode::from_memory(&file))
+        .read_sidecar(escapement_tickwave_format::decode::from_memory(&file))
+        .map(|s| s.map(|s| s.files))
         .unwrap()
         .unwrap();
     let included: Vec<_> = files
@@ -774,8 +773,9 @@ fn an_annotation_its_bundle_would_not_resolve_is_refused_at_the_call() {
         .collect();
     let resolved = resolve(&files["rec.annotations.toml"], &included, &header, None).unwrap();
     let spans: Vec<_> = resolved.iter().map(|a| (a.id.as_str(), a.end)).collect();
-    // The span past the length ends there.
-    assert_eq!(spans, [("other/m/1", Some(5)), ("verge/m/1", None)]);
+    // The span past the length ends there. The generators go in the order of their first
+    // annotations, verge's first.
+    assert_eq!(spans, [("verge/m/1", None), ("other/m/1", Some(5))]);
 }
 
 /// Bundling takes the footer record its footer was parsed from: one too short for its lengths, or
@@ -793,7 +793,14 @@ fn bundling_a_record_that_is_not_the_footers_is_refused() {
         let mut wrong = Vec::new();
         record::write_footer(&mut wrong, 0, &payload);
         let record = &wrong[..wrong.len() - 24];
-        let err = bundled_tail(record, &footer, files.clone(), 3).expect_err("refused");
+        let err = bundled_tail(
+            record,
+            &footer,
+            files.clone(),
+            3,
+            escapement_tickwave_format::decode::from_memory(&file),
+        )
+        .expect_err("refused");
         assert_eq!(
             err.to_string(),
             "the footer record is not the one its footer was parsed from",
@@ -803,5 +810,12 @@ fn bundling_a_record_that_is_not_the_footers_is_refused() {
     // The right record bundles.
     let at = footer.trailer.footer_offset as usize;
     let record = &file[at..at + footer.trailer.footer_len as usize];
-    bundled_tail(record, &footer, files, 3).unwrap();
+    bundled_tail(
+        record,
+        &footer,
+        files,
+        3,
+        escapement_tickwave_format::decode::from_memory(&file),
+    )
+    .unwrap();
 }

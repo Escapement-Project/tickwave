@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
+use crate::annotations::Lines;
 use crate::decode::{BlockChannel, DecodeError, Footer, parse_bundle};
 use crate::encode::spacing;
 use crate::header::{ChannelKind, ContentId, Declaration, Header};
@@ -64,16 +65,23 @@ pub fn shifts_for(header: &Header) -> Vec<u8> {
 
 /// Reads a file in order, its bytes fed as they come, and writes the same declaration, items,
 /// gaps, runs and annotations through a `Writer` that cuts blocks to its own options. It holds
-/// the input's blocks after its latest known-through record, which a cut-off input drops, and
-/// what one derived channel's operand holds ahead of the other, besides what the writer holds.
+/// the input's blocks after its latest known-through record, which a cut-off input drops, what
+/// one derived channel's operand holds ahead of the other, and a channel's gaps over two of its
+/// input blocks at most, besides what the writer holds. Each annotation line goes to the writer
+/// as it is read, for parts that stand alone, and the input's bundle is carried as it is.
 pub struct Recutter {
     reader: Reader,
     options: WriteOptions,
     shifts: Option<Vec<u8>>,
     writer: Option<Writer>,
     hold: Option<Hold>,
-    /// Each digital channel's gaps not yet handed on: a gap goes in once the channel's edges
-    /// before its `from` are in.
+    /// Each digital channel's gaps not yet handed on. A gap the header may leave out, as it
+    /// reaches the channel's end, is handed on once the input shows it can't: an edge after it,
+    /// or a block of the channel after the one that ends past its `to`, since the input's writer
+    /// hashed the gap when that one closed. Otherwise at the finish, which leaves out those that
+    /// reach the end as the header does. Until then the channel isn't promised past its `from`,
+    /// so the block that holds the gap's `to` stays open and the gap is never hashed before the
+    /// finish knows the end.
     gaps: Vec<VecDeque<Gap>>,
     /// Each analog channel's runs not yet handed on: a run goes in before its sample.
     runs: Vec<VecDeque<Break>>,
@@ -83,10 +91,14 @@ pub struct Recutter {
     partners: Vec<Vec<usize>>,
     footer: Option<Box<Footer>>,
     bundled: Option<BTreeMap<String, String>>,
+    checks: Option<Lines>,
+    /// Whether any annotation line went to the writer, and the latest start among them.
     annotations: bool,
+    latest_annotation: Option<i64>,
+    /// A sidecar to write in place of the input's annotations.
+    sidecar: Option<BTreeMap<String, String>>,
     blocks: bool,
     known_through: Option<i64>,
-    latest_annotation: Option<i64>,
     left_out: Vec<String>,
     bundle: Option<Bundle>,
 }
@@ -105,10 +117,12 @@ impl Recutter {
             partners: Vec::new(),
             footer: None,
             bundled: None,
+            checks: None,
             annotations: false,
+            latest_annotation: None,
+            sidecar: None,
             blocks: false,
             known_through: None,
-            latest_annotation: None,
             left_out: Vec::new(),
             bundle: None,
         }
@@ -121,8 +135,9 @@ impl Recutter {
         self.shifts = Some(shifts);
     }
 
-    /// The annotation records read so far that the writer refused, each as its generator and
-    /// the rule its line breaks, as `Repairer::left_out` gives them. The recut leaves them out.
+    /// The annotation lines read so far, in records or parts, that break a rule ANNOTATIONS.md
+    /// gives a generator's line, each as its generator and the rule, as `Repairer::left_out`
+    /// gives them. The recut leaves them out.
     pub fn left_out(&self) -> &[String] {
         &self.left_out
     }
@@ -131,6 +146,13 @@ impl Recutter {
     /// `Repairer::bundle` does. A finished input keeps the bundle it holds.
     pub fn bundle(&mut self, bundle: Bundle) {
         self.bundle = Some(bundle);
+    }
+
+    /// Writes `files`, a sidecar's whole, as the copy's annotations, as `tickwave bundle` does,
+    /// in place of the input's annotation records, parts and bundle, which are left out. Set
+    /// before the input is fed.
+    pub fn sidecar(&mut self, files: BTreeMap<String, String>) {
+        self.sidecar = Some(files);
     }
 
     /// The output's bytes written and not yet taken.
@@ -162,8 +184,8 @@ impl Recutter {
                 continue;
             }
             // Annotations keep no order with the items, and every one stands wherever a cut
-            // falls: they go to the writer as they come.
-            if let Event::Annotation(_) = event {
+            // falls.
+            if let Event::Annotation(_) | Event::Part { .. } = event {
                 self.take(event)?;
                 continue;
             }
@@ -189,6 +211,7 @@ impl Recutter {
             }
         }
         self.hold = Some(Hold::new(&d));
+        self.checks = Some(Lines::declared(&d));
         self.gaps = vec![VecDeque::new(); d.channels.len()];
         self.runs = vec![VecDeque::new(); d.channels.len()];
         self.known = vec![0; d.channels.len()];
@@ -203,6 +226,18 @@ impl Recutter {
         self.partners = partners;
         self.writer = Some(Writer::new(d, self.options.clone())?);
         Ok(())
+    }
+
+    /// The axis tick channel `c` may be promised to: the `from` of its first gap not handed on.
+    fn cap(&self, c: usize) -> i64 {
+        let Some(g) = self.gaps[c].front() else {
+            return i64::MAX;
+        };
+        self.writer
+            .as_ref()
+            .and_then(|w| w.declaration().mapping(c))
+            .and_then(|m| m.axis(g.from))
+            .unwrap_or(i64::MAX)
     }
 
     fn writer(&mut self) -> &mut Writer {
@@ -224,23 +259,36 @@ impl Recutter {
             }
             Event::KnownThrough { tick } => {
                 self.known_through = Some(tick);
-                let w = self.writer();
-                if tick > w.promised() {
-                    w.promise(tick)?;
+                for c in 0..self.known.len() {
+                    let to = tick.min(self.cap(c));
+                    let w = self.writer();
+                    if to > w.promised_to(c) {
+                        w.promise_channel(c, to)?;
+                    }
                 }
             }
+            _ if self.sidecar.is_some()
+                && matches!(
+                    event,
+                    Event::Annotation(_) | Event::Part { .. } | Event::Bundle(_)
+                ) => {}
             Event::Annotation(a) => {
-                let latest = latest_start(self.latest_annotation, &a);
-                match self.writer().annotation(&a.source, a.annotation) {
-                    Ok(()) => {
-                        self.annotations = true;
-                        self.latest_annotation = latest;
-                    }
-                    Err(WriteError::Annotation(why)) => {
-                        self.left_out
-                            .push(format!("generator {:?}: {why}", a.source));
-                    }
-                    Err(e) => return Err(e.into()),
+                let checked = self
+                    .checks
+                    .as_mut()
+                    .map_or(Ok(()), |l| l.take_line(&a.source, &a.line));
+                self.carry(&a.source, &a.line, checked)?;
+            }
+            // A part that covers records holds their lines, which went on with the records.
+            Event::Part { covers, .. } if covers > 0 => {}
+            Event::Part { part, .. } => {
+                let timebase = self.writer().declaration().timebase;
+                for line in part.lines() {
+                    let checked = self
+                        .checks
+                        .as_mut()
+                        .map_or(Ok(()), |l| l.take_file_line(&part.source, line, timebase));
+                    self.carry(&part.source, line, checked)?;
                 }
             }
             Event::Bundle(payload) => {
@@ -255,6 +303,33 @@ impl Recutter {
         Ok(())
     }
 
+    /// Generator `source`'s `line` to the writer, for a part that stands alone, where `checked`
+    /// says it keeps the rules ANNOTATIONS.md gives a line, and where the writer takes it; one
+    /// that doesn't is named in `left_out`.
+    fn carry(
+        &mut self,
+        source: &str,
+        line: &str,
+        checked: Result<(), String>,
+    ) -> Result<(), RecutError> {
+        let taken = match checked {
+            Ok(()) => self.writer().standalone_line(source, line),
+            Err(why) => Err(WriteError::Annotation(why)),
+        };
+        match taken {
+            Ok(()) => {
+                self.annotations = true;
+                self.latest_annotation = latest_start(self.latest_annotation, line);
+                Ok(())
+            }
+            Err(WriteError::Annotation(why)) => {
+                self.left_out.push(format!("generator {source:?}: {why}"));
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Hands on a block's items, each in the order of its source ticks, then promises its
     /// channel, and its partners as far as they all go, to its end.
     fn block(&mut self, block: ReadBlock) -> Result<(), RecutError> {
@@ -266,21 +341,25 @@ impl Recutter {
             .expect("records follow the declaration");
         match &block.data {
             got @ BlockChannel::Digital { .. } => {
+                // The channel's block before this one ends at `passed`, and closed before the
+                // input's finish: a gap that ends before it was hashed then, so the header keeps
+                // it.
+                let passed = self.known[c];
+                let map = writer.declaration().mapping(c);
+                while let Some(g) = self.gaps[c]
+                    .front()
+                    .filter(|g| map.and_then(|m| m.axis(g.to)).is_some_and(|t| t < passed))
+                {
+                    writer.gap(c, *g)?;
+                    self.gaps[c].pop_front();
+                }
+                // An edge after a gap shows the header keeps it: the channel is known past it.
                 for &k in got.source_ticks().unwrap_or_default() {
                     while let Some(g) = self.gaps[c].front().filter(|g| g.from < k) {
                         writer.gap(c, *g)?;
                         self.gaps[c].pop_front();
                     }
                     writer.edge(c, k)?;
-                }
-                // The edges before the block's end are in, so are those before its gaps' starts.
-                let map = writer.declaration().mapping(c);
-                while let Some(g) = self.gaps[c].front().filter(|g| {
-                    map.and_then(|m| m.axis(g.from))
-                        .is_some_and(|t| t < block.head.end)
-                }) {
-                    writer.gap(c, *g)?;
-                    self.gaps[c].pop_front();
                 }
             }
             BlockChannel::Analog {
@@ -306,17 +385,17 @@ impl Recutter {
         let group: Vec<usize> = std::iter::once(c)
             .chain(self.partners[c].iter().copied())
             .collect();
-        let writer = self
-            .writer
-            .as_mut()
-            .expect("records follow the declaration");
         for g in group {
             let promise = if g == c && self.partners[c].is_empty() {
                 self.known[c]
             } else {
                 to
             };
-            writer.promise_channel(g, promise.max(0))?;
+            let promise = promise.max(0).min(self.cap(g));
+            let writer = self.writer();
+            if promise > writer.promised_to(g) {
+                writer.promise_channel(g, promise)?;
+            }
         }
         Ok(())
     }
@@ -327,14 +406,17 @@ impl Recutter {
     pub fn finish(mut self) -> Result<Finished, RecutError> {
         let ending = self.reader.end()?;
         let mut writer = self.writer.take().ok_or(RecutError::NoDeclaration)?;
-        for (c, gaps) in self.gaps.iter_mut().enumerate() {
-            for g in gaps.drain(..) {
-                writer.gap(c, g)?;
-            }
-        }
+        let sidecar = self.sidecar.take().map(Bundle::Files);
         match (ending, self.footer) {
             (Ending::Complete, Some(footer)) => {
                 let h = &footer.header;
+                // The header leaves out the gaps that reach their channel's end, and so does the
+                // writer's finish given the same ends.
+                for (c, gaps) in self.gaps.iter_mut().enumerate() {
+                    for g in gaps.drain(..) {
+                        writer.gap(c, g)?;
+                    }
+                }
                 let declared = writer.declaration();
                 let ends: Vec<i64> = h
                     .channels
@@ -367,11 +449,12 @@ impl Recutter {
                             .collect()
                     })
                     .collect();
+                // The input's bundle as it is, its generator files' first lines, or the sidecar
+                // given in its place.
+                let bundle = sidecar.or(self.bundled.map(Bundle::Files)).or(self.bundle);
                 let finish = Finish {
                     extra,
-                    bundle: self.bundled.map(Bundle::Files),
-                    // A repaired input leaves out a gap that reaches its channel's end inside
-                    // the length; the content id checks the ends that come of it.
+                    bundle,
                     drop_gaps_past_end: true,
                     lost_after,
                 };
@@ -393,8 +476,28 @@ impl Recutter {
                 {
                     return Err(RecutError::Shaped(c.name.clone()));
                 }
-                // The records held back after the cut go.
-                drop(self.hold.take());
+                // The records held back after the cut go, but for a gap record whose `from`
+                // maps before the latest known-through tick: a loss the recorder had begun to
+                // report ends its channel there, as repair has it.
+                let held = self.hold.take().map(Hold::dropped).unwrap_or_default();
+                if let Some(k) = self.known_through {
+                    for (_, event) in held {
+                        if let Event::Gap { channel, gap } = event
+                            && writer
+                                .declaration()
+                                .mapping(channel)
+                                .and_then(|m| m.axis(gap.from))
+                                .is_some_and(|t| t < k)
+                        {
+                            self.gaps[channel].push_back(gap);
+                        }
+                    }
+                }
+                for (c, gaps) in self.gaps.iter_mut().enumerate() {
+                    for g in gaps.drain(..) {
+                        writer.gap(c, g)?;
+                    }
+                }
                 if !self.blocks && !self.annotations {
                     return Err(RecutError::Nothing);
                 }
@@ -421,7 +524,7 @@ impl Recutter {
                     })
                     .collect();
                 let finish = Finish {
-                    bundle: self.bundle,
+                    bundle: sidecar.or(self.bundle),
                     drop_gaps_past_end: true,
                     ..Finish::default()
                 };

@@ -20,8 +20,9 @@ zstd = { version = "0.14.3", default-features = false }
 
 [features]
 default = ["encode", "annotations", "toml"]
-# The encoder needs threads; a decoder-only build (the browser's) leaves it out.
-encode = ["dep:rayon", "annotations"]
+# The encoder needs threads; a decoder-only build (the browser's) leaves it out. A writer splits a
+# bundled sidecar's generator files into parts in the order its TOML includes them.
+encode = ["dep:rayon", "annotations", "toml"]
 # Sidecar checks, with the hand-written file handed in as JSON.
 annotations = []
 # Sidecar checks reading the hand-written file's TOML. The browser parses TOML in JavaScript
