@@ -417,7 +417,7 @@ impl Recording {
         // The window's markers are read by range; a list or a successor reads them all.
         let window_markers = match m.limit {
             0 => Page::default(),
-            limit => self.markers_in(window.clone(), None, limit)?,
+            limit => self.try_markers(window.clone(), None, limit)?,
         };
         if m.list.is_some() || m.successor_of.is_some() {
             self.read_markers()?;

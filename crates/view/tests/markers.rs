@@ -209,11 +209,14 @@ fn a_range_reads_only_the_parts_it_meets_and_the_span_none() {
     let bytes = Counted::new(file);
     let rec = Recording::open(bytes.clone(), Cache::new(64 << 20)).unwrap();
     assert_eq!(rec.extent(), Some(0..299_901));
+    assert_eq!(rec.markers_span(), Some(0..299_901));
     assert_eq!(bytes.parts_read(&rows), [] as [usize; 0]);
 
     let third = rows[2].start..rows[2].end + 1;
     let got = within(&rec, third.clone());
     assert_eq!(bytes.parts_read(&rows), [2]);
+    let tried = rec.try_markers(third.clone(), None, usize::MAX).unwrap();
+    assert_eq!(tried.entries, got);
     let ticks: Vec<i64> = got.iter().map(|m| m.cursor.tick).collect();
     let want: Vec<i64> = marks
         .iter()

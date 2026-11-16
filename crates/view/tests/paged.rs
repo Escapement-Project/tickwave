@@ -631,18 +631,25 @@ impl Bytes for Slow {
     }
 }
 
-/// `load_markers` says why a bundle doesn't resolve on every call, and the markers' readers give
-/// none; `has_markers` says there are markers, lost. Threads that ask at once read the bundle
-/// once.
+/// `load_markers` and `try_markers` say why a bundle doesn't resolve on every call, and the
+/// markers' other readers give none; `has_markers` says there are markers, lost. Threads that ask
+/// at once read the bundle once.
 #[test]
 fn load_markers_says_why_on_every_call_and_threads_read_the_bundle_once() {
     use escapement_tickwave_format::writer::Bundle;
     let files = BTreeMap::from([("rec.verge.jsonl".to_owned(), "{}\n".to_owned())]);
     let rec = Recording::open(Arc::new(marked(Bundle::Files(files))), Cache::new(1 << 20)).unwrap();
     for call in 0..2 {
+        let err = rec
+            .try_markers(0..i64::MAX, None, 10)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no hand-written file"), "call {call}: {err}");
         let err = rec.load_markers().unwrap_err().to_string();
         assert!(err.contains("no hand-written file"), "call {call}: {err}");
     }
+    assert!(rec.markers(0..i64::MAX, None, 10).entries.is_empty());
+    assert_eq!(rec.markers_span(), None);
     assert!(rec.has_markers());
     assert_eq!(rec.marker_count(), 0);
     let file = marked(Bundle::Generated { stem: "rec".into() });

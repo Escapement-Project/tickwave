@@ -15,12 +15,13 @@ span covers, directory pages included. Where a channel has more than 64 gaps or 
 is in pages too: a query, statistics, `edges` and `index_at` read only the list pages their span
 needs, and each block a query decodes is checked against the entries its own ticks need.
 `runs` and `known` read the whole list. A finished file's markers are read a range at a time:
-`markers` reads the annotation parts its range meets and the bundle's hand-written file, and the
-extent takes their span from the parts table, no part read. A hand-written `ref` shows once every
-part is read, as `load_markers`, `marker_count`, `markers_left_out` and a query's marker list
-read them; `load_markers` says why they don't read, where they don't. A channel this version can't
-read keeps its place and name as `ChannelKind::Unavailable`, and a marker that names it is left
-out.
+`markers` reads the annotation parts its range meets and the bundle's hand-written file, and
+`try_markers` reads the same and says why they don't read, where they don't. `markers_span`, and
+the extent with it, take their span from the parts table, no part read. A hand-written `ref` shows
+once every part is read, as `load_markers`, `marker_count`, `markers_left_out` and a query's marker
+list read them; `load_markers` says why they don't read, where they don't. A channel this version
+can't read keeps its place and name as `ChannelKind::Unavailable`, and a marker that names it is
+left out.
 `Recording::live` reads a file a writer in the same process is still writing, through the
 writer's `Snapshot`, and `Recording::update` takes each newer snapshot, reading only what the
 writer added since and decoding only the blocks it hasn't yet, and the open block. Its cost

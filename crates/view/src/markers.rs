@@ -248,7 +248,7 @@ impl Recording {
     /// read: a `ref` in its hand-written file shows only then, and the second of an id shows
     /// where the part holding the first isn't read (FORMAT.md, "Annotations").
     pub fn markers(&self, interval: Range<i64>, after: Option<MarkerCursor>, limit: usize) -> Page {
-        self.markers_in(interval, after, limit).unwrap_or_default()
+        self.try_markers(interval, after, limit).unwrap_or_default()
     }
 
     /// The marker after `cursor` in order, wherever it starts. A finished file's markers are
@@ -259,8 +259,9 @@ impl Recording {
         m.get(i).cloned()
     }
 
-    /// `markers`, or why they don't read.
-    pub(crate) fn markers_in(
+    /// `markers`, or why they don't read: the bundle, or a part the interval meets, doesn't
+    /// decode or resolve. It reads what `markers` reads and no more.
+    pub fn try_markers(
         &self,
         interval: Range<i64>,
         after: Option<MarkerCursor>,
@@ -348,8 +349,9 @@ impl Recording {
     /// The span a finished file's own markers cover, from its hand-written annotations and its
     /// parts table, no part read, so it holds whether or not they are read: from the earliest
     /// row's start to past the latest row's end, within the length. It covers the lines the
-    /// markers leave out too. Other markers' span, a live recording's or a sidecar's.
-    pub(crate) fn markers_span(&self) -> Option<Range<i64>> {
+    /// markers leave out too. Other markers' span, a live recording's or a sidecar's. None where
+    /// there is no marker, or the bundle doesn't read (`try_markers` says why).
+    pub fn markers_span(&self) -> Option<Range<i64>> {
         if self.bundled.is_none() {
             return self.markers.get()?.as_ref().ok()?.span.clone();
         }
