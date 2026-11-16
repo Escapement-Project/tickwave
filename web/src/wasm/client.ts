@@ -2,6 +2,7 @@
 // holds the WASM module. The worker starts when something first needs a recording.
 
 import { fromCore, type Annotation, type CoreAnnotation } from "../annotations.ts";
+import type { PeriodStats } from "../readouts.ts";
 import type { BundledRead, Loader } from "../registry.ts";
 import { aborted, type Edges, type Overview, type RecordingInfo, type Samples, type Source } from "../source.ts";
 import type { AnnotationsRead } from "./opened.ts";
@@ -143,6 +144,11 @@ export class WasmSource implements Source {
   async edgeCount(channel: number, start: number, end: number, signal?: AbortSignal): Promise<number> {
     await this.#open();
     return call<number>({ op: "edgeCount", key: this.#key, channel, start, end }, signal);
+  }
+
+  async periods(channel: number, start: number, end: number, signal?: AbortSignal): Promise<PeriodStats | null> {
+    await this.#open();
+    return call<PeriodStats | null>({ op: "periods", key: this.#key, channel, start, end }, signal);
   }
 
   async samples(channel: number, start: number, end: number, signal?: AbortSignal): Promise<Samples> {

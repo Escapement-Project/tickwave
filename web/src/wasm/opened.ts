@@ -5,6 +5,7 @@
 
 import { LRUCache } from "lru-cache";
 import type { Block as WasmBlock, OverviewLevel as WasmLevel, Recording as WasmRecording } from "../../../crates/wasm/pkg/escapement_tickwave_wasm.js";
+import { periodStats, type PeriodStats } from "../readouts.ts";
 import { lowerBound } from "../search.ts";
 import {
   aborted,
@@ -910,6 +911,13 @@ export class Opened {
       at += p.length;
     }
     return { level, ticks, ...(listed && { listed }) };
+  }
+
+  /** `periodStats` of digital channel `channel`'s edges in `[start, end)`, read as `edges` reads
+   * them: every block the span meets, since a median needs every period. */
+  async periods(channel: number, start: number, end: number, signal?: AbortSignal): Promise<PeriodStats | null> {
+    const e = await this.edges(channel, start, end, signal);
+    return periodStats(e.level, e.ticks);
   }
 
   /** How many of digital channel `channel`'s edges lie in `[start, end)`, from the index: each

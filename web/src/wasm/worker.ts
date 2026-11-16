@@ -52,6 +52,8 @@ async function handle(m: Request, signal: AbortSignal): Promise<unknown> {
       return (await recording(m.key)).samples(m.channel, m.start, m.end, signal);
     case "edgeCount":
       return (await recording(m.key)).edgeCount(m.channel, m.start, m.end, signal);
+    case "periods":
+      return (await recording(m.key)).periods(m.channel, m.start, m.end, signal);
     case "overview":
       return (await recording(m.key)).overview(m.channel, m.start, m.end, m.maxBucket, signal);
     case "sidecar": {

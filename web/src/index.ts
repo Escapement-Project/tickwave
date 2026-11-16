@@ -14,6 +14,7 @@ export { previewMerge } from "./merge-preview.ts";
 export type { MergedSource } from "./merged-source.ts";
 export type { Annotation, RawAnnotation, Measure } from "./annotations.ts";
 export type * from "./source.ts";
+export type { PeriodStats } from "./readouts.ts";
 export { TickwaveInset, TickwaveRef, TickwaveView };
 export type { ChannelGroup, ChannelShape, Summary } from "./elements/view.ts";
 

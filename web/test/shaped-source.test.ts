@@ -4,6 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { MemorySource } from "../src/memory-source.ts";
+import { periodStats } from "../src/readouts.ts";
 import { ShapedSource } from "../src/shaped-source.ts";
 import { channelStart, type RecordingInfo } from "../src/source.ts";
 
@@ -49,4 +50,25 @@ test("a channel moved earlier reaches before the capture's start, and its overvi
   const ov = await s.overview(1, -25, 975, 64);
   assert.equal(ov?.start, -25);
   assert.throws(() => s.setOffset(0, 1.5), /whole number of ticks/);
+});
+
+test("a moved channel's periods are its source's over the span moved back, asked of the source where it measures them", async () => {
+  const { s } = await moved([50, 0]);
+  // Moved, CLK rises at 150 and 350: one period of 200. From 160 only the rise at 350.
+  assert.deepEqual(await s.periods(0, 0, 1_050), { count: 1, median: 200, min: 200, max: 200, used: 1, runs: 1, span: 200 });
+  assert.equal(await s.periods(0, 160, 1_050), null);
+  // A source that measures them is asked over the span in its own ticks.
+  class Measuring extends MemorySource {
+    asked: [number, number, number][] = [];
+    async periods(channel: number, start: number, end: number) {
+      this.asked.push([channel, start, end]);
+      const e = await this.edges(channel, start, end);
+      return periodStats(e.level, e.ticks);
+    }
+  }
+  const inner = new Measuring(rec, { levels: [16, 64] });
+  const shaped = new ShapedSource(inner, await inner.info());
+  shaped.setOffset(0, 50);
+  assert.equal((await shaped.periods(0, 100, 1_050))?.median, 200);
+  assert.deepEqual(inner.asked, [[0, 50, 1_000]]);
 });

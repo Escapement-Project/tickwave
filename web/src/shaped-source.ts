@@ -3,6 +3,7 @@
 // capture's own, so a channel moved before the capture's start reaches below tick 0, and nothing
 // else moves with it. Nothing is resampled: every edge and sample keeps its tick, plus the offset.
 
+import { periodStats, type PeriodStats } from "./readouts.ts";
 import { listedOnAxis, mapOf, type Channel, type Edges, type Overview, type RecordingInfo, type Samples, type Source } from "./source.ts";
 
 export class ShapedSource implements Source {
@@ -68,6 +69,14 @@ export class ShapedSource implements Source {
     const [s, e] = this.#span(channel, start, end);
     if (this.#inner.edgeCount) return this.#inner.edgeCount(channel, s, e, signal);
     return (await this.#inner.edges(channel, s, e, signal)).ticks.length;
+  }
+
+  /** A moved channel's periods are its source's: a move shifts every edge alike. */
+  async periods(channel: number, start: number, end: number, signal?: AbortSignal): Promise<PeriodStats | null> {
+    const [s, e] = this.#span(channel, start, end);
+    if (this.#inner.periods) return this.#inner.periods(channel, s, e, signal);
+    const got = await this.#inner.edges(channel, s, e, signal);
+    return periodStats(got.level, got.ticks);
   }
 
   async overview(channel: number, start: number, end: number, maxBucket: number, signal?: AbortSignal): Promise<Overview | null> {

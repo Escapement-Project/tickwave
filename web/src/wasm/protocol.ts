@@ -9,7 +9,7 @@ export const MAX_DECODED = 64 << 20;
 
 export type Request =
   | { id: number; op: "open"; key: string; url?: string; file?: File; firstRead?: number; maxDecoded?: number; cacheBytes?: number }
-  | { id: number; op: "edges" | "samples" | "edgeCount"; key: string; channel: number; start: number; end: number }
+  | { id: number; op: "edges" | "samples" | "edgeCount" | "periods"; key: string; channel: number; start: number; end: number }
   | { id: number; op: "overview"; key: string; channel: number; start: number; end: number; maxBucket: number }
   | { id: number; op: "sidecar"; key: string; url: string; recordingFile: string | null }
   /** The bundled annotations the parts meeting ticks `span` hold, with every part read before; all

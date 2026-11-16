@@ -17,7 +17,7 @@ import { FIRST_READ } from "../src/wasm/protocol.ts";
 import { readFixture } from "../src/fixture-file.ts";
 import { formatLevels, MemorySource } from "../src/memory-source.ts";
 import { isAbort } from "../src/source.ts";
-import { formatInterval, measureReading, ONE as STEP_ONE } from "../src/readouts.ts";
+import { formatInterval, measureReading, ONE as STEP_ONE, periodStats } from "../src/readouts.ts";
 import { openTickwave, wasm } from "../scripts/node-wasm.ts";
 import { blockRows, layout as tables, leaves, levelRows, range } from "./layout.ts";
 
@@ -196,6 +196,30 @@ test("an edge count comes from the index and the blocks at the span's ends, exac
   const frames = rows.map((row) => [row.from, row.to] as const);
   const touched = frames.map(([from, to]) => bytes.reads.slice(before).some(([x, y]) => x < to && y > from));
   assert.deepEqual(touched, [false, true, false, false, false, false, true, false]);
+});
+
+test("a span's periods are worked out beside its edges, as periodStats gives them from the edges", async () => {
+  const m = await memory();
+  const rows = blockRows(NINE, tables(NINE).channels[0].blocks!);
+  const r = await openTickwave("fixtures/identify-swd.4k.tickwave");
+  // Spans that start and end either side of each of SWCLK's block boundaries, and the capture's ends.
+  const ticks = [0, ...rows.slice(1).flatMap((b) => [b.start - 1, b.start + 1]), 523583100];
+  let spans = 0;
+  for (const s of ticks) {
+    for (const e of ticks) {
+      if (e <= s) continue;
+      for (const c of [0, 1]) {
+        const want = await m.edges(c, s, e);
+        assert.deepEqual(await r.periods(c, s, e), periodStats(want.level, want.ticks), `channel ${c}, [${s}, ${e})`);
+      }
+      spans++;
+    }
+  }
+  assert.equal(spans, (16 * 15) / 2);
+  // Not vacuous: the whole capture's 7,643 rising SWCLK edges give 7,642 periods, the export's
+  // count; a span with no edge gives none.
+  assert.equal((await r.periods(0, 0, 523583100))?.count, 7642);
+  assert.equal(await r.periods(0, 0, 1), null);
 });
 
 test("the overview: each channel's own levels, unpacked from the footer, as the extractor's fixture computes them", async () => {

@@ -2092,15 +2092,21 @@ export class TickwaveView extends TickwaveElement {
       this.#setReadout(lines);
       try {
         const chosen = Math.max(0, digital.indexOf(this.#plot.tracks[this.#periodChannel]));
-        // Each channel's count from the source's index where it keeps one; the edges themselves
-        // only for the channel whose periods the readout measures.
-        const [ns, r] = await Promise.all([
+        // Each channel's count from the source's index where it keeps one, and the periods of
+        // the channel the readout measures worked out where its edges are read, where the source
+        // can: no edge comes to the page then.
+        const measured = digital[chosen]?.index;
+        const [ns, stats] = await Promise.all([
           Promise.all(
             digital.map((t) =>
               l.source.edgeCount ? l.source.edgeCount(t.index, sel.start, sel.end) : l.source.edges(t.index, sel.start, sel.end).then((e) => countEdges(e.ticks, sel.start, sel.end)),
             ),
           ),
-          digital[chosen] ? l.source.edges(digital[chosen].index, sel.start, sel.end) : Promise.resolve(null),
+          measured === undefined
+            ? Promise.resolve(null)
+            : l.source.periods
+              ? l.source.periods(measured, sel.start, sel.end)
+              : l.source.edges(measured, sel.start, sel.end).then((r) => periodStats(r.level, r.ticks)),
         ]);
         if (seq !== this.#readoutSeq) return;
         counts.textContent = "";
@@ -2121,7 +2127,6 @@ export class TickwaveView extends TickwaveElement {
         const label = document.createElement("label");
         label.append("Periods of", select);
         periods.append(label);
-        const stats = r ? periodStats(r.level, r.ticks) : null;
         let periodDetail: Record<string, unknown> | null = null;
         if (stats) {
           const step = readingStep(l.info, [digital[chosen].index]);

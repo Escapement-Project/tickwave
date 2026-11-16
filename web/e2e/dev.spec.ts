@@ -715,6 +715,37 @@ test.describe("the identify view", () => {
     await view.screenshot({ path: `screenshots/${test.info().project.name}-identify-readouts.png` });
   });
 
+  test("a selection's periods are worked out in the worker, and the measured channel's edges over it stay there", async ({ page }) => {
+    type Posted = { op: string; channel?: number; start?: number; end?: number };
+    const view = page.locator("#identify");
+    const box = (await plotOf(view).boundingBox())!;
+    // Every request the page posts to the decoder's worker from here on.
+    await page.evaluate(() => {
+      const w = window as unknown as { posted: Posted[] };
+      w.posted = [];
+      const post = Worker.prototype.postMessage;
+      Worker.prototype.postMessage = function (this: Worker, m: unknown, ...rest: unknown[]) {
+        const msg = m as { op?: string; requests?: Posted[] };
+        for (const r of msg?.op === "batch" ? msg.requests! : [msg as Posted]) if (r?.op) w.posted.push({ op: r.op, channel: r.channel, start: r.start, end: r.end });
+        return (post as (...a: unknown[]) => void).call(this, m, ...rest);
+      };
+    });
+    const selected = await nextEvent(view, "tickwave-select");
+    const y = box.y + box.height - 10;
+    await page.mouse.move(box.x + 70, y);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width - 12, y, { steps: 8 });
+    await page.mouse.up();
+    const detail = (await selected()) as { start: number; end: number; periods: { count: number } };
+    expect(detail.periods.count).toBe(7642);
+    const posted = await page.evaluate(() => (window as unknown as { posted: Posted[] }).posted);
+    const over = posted.filter((r) => r.start === detail.start && r.end === detail.end);
+    // SWCLK, channel 0, is the one measured: its periods asked for over the selection, and no
+    // channel's edges over it.
+    expect(over).toContainEqual({ op: "periods", channel: 0, start: detail.start, end: detail.end });
+    expect(over.filter((r) => r.op === "edges")).toEqual([]);
+  });
+
   test("two clicks place cursors A and B and read the interval", async ({ page }) => {
     const view = page.locator("#identify");
     const box = (await plotOf(view).boundingBox())!;

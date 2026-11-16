@@ -6,6 +6,8 @@
 // or gives is on the recording's axis. An analog channel states its samples' places in its
 // source's own ticks, which its `map` places on the axis (FORMAT.md, "Times").
 
+import type { PeriodStats } from "./readouts.ts";
+
 /** A positive rational number, num / den. */
 export interface Ratio {
   readonly num: number;
@@ -700,6 +702,11 @@ export interface Source {
    * the source can: a `.tickwave` file's from its index and the blocks at the span's ends. A
    * source without it is counted from `edges`. */
   edgeCount?(channel: number, start: number, end: number, signal?: AbortSignal): Promise<number>;
+
+  /** A digital channel's periods in [start, end), rising edge to rising edge, as `periodStats`
+   * gives them, worked out where the edges are read, so none of them comes back to the caller.
+   * A source without it is measured from `edges`. */
+  periods?(channel: number, start: number, end: number, signal?: AbortSignal): Promise<PeriodStats | null>;
 
   /**
    * The coarsest overview level whose bucket is no larger than `maxBucket` ticks, covering
