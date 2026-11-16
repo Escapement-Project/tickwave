@@ -30,6 +30,24 @@ export function normalise(css: string): string | null {
   return out === "#010203" && !/^(#010203|rgb\(1, 2, 3\))$/i.test(css.trim()) ? null : out;
 }
 
+let pixel: CanvasRenderingContext2D | null = null;
+const painted = new Map<string, readonly [number, number, number, number]>();
+
+/** `css` as a canvas paints it: red, green and blue from 0 to 255, and alpha from 0 to 1. */
+export function rgba(css: string): readonly [number, number, number, number] {
+  let c = painted.get(css);
+  if (c) return c;
+  pixel ??= Object.assign(document.createElement("canvas"), { width: 1, height: 1 }).getContext("2d", { willReadFrequently: true });
+  const ctx = pixel!;
+  ctx.clearRect(0, 0, 1, 1);
+  ctx.fillStyle = css;
+  ctx.fillRect(0, 0, 1, 1);
+  const d = ctx.getImageData(0, 0, 1, 1).data;
+  c = [d[0], d[1], d[2], d[3] / 255];
+  painted.set(css, c);
+  return c;
+}
+
 const FALLBACK: Record<string, string> = {
   "--ink": "CanvasText",
   "--ink-2": "GrayText",

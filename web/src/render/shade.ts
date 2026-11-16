@@ -129,6 +129,28 @@ export function dutyShare(duty: number): [number, number, number] | null {
  */
 export type Look = "flat" | ["stroke", number] | ["shade", number, number, number];
 
+/** `Looks.kind`: the column's level as the line. */
+export const FLAT = 0;
+/** `Looks.kind`: a stroke across the band at opacity `band`. */
+export const STROKE = 1;
+/** `Looks.kind`: in a run, the band at `band` and the rails at `high` and `low`. */
+export const SHADE = 2;
+
+/** Each column's `Look`, a field to an array, so a row's looks are four arrays and no object a column. */
+export interface Looks {
+  readonly kind: Uint8Array;
+  readonly band: Float64Array;
+  readonly high: Float64Array;
+  readonly low: Float64Array;
+}
+
+/** Column `k`'s look. */
+export function lookAt(l: Looks, k: number): Look {
+  if (l.kind[k] === STROKE) return ["stroke", l.band[k]];
+  if (l.kind[k] === SHADE) return ["shade", l.band[k], l.high[k], l.low[k]];
+  return "flat";
+}
+
 /** The columns either side of one in a run whose time its rails take: a centred window of five device pixels, the odd width nearest four, held to the run. */
 export const RAIL_REACH = 2;
 
@@ -143,47 +165,57 @@ export const RAIL_REACH = 2;
  * `stroke` gives the spacing to its nearest neighbour, at the rate of its own edges, at least one,
  * over that spacing. Columns outside c0..c1 are flat.
  */
-export function looks(cols: DigitalColumns, c0: number, c1: number, width: number, per: number, timebase: Ratio): Look[] {
-  const { state, at } = cols;
-  const out: Look[] = Array.from({ length: state.length }, () => "flat");
+export function looks(cols: DigitalColumns, c0: number, c1: number, width: number, per: number, timebase: Ratio): Looks {
+  const { state, at, edges, high, known } = cols;
+  const m = state.length;
+  const out: Looks = { kind: new Uint8Array(m), band: new Float64Array(m), high: new Float64Array(m), low: new Float64Array(m) };
   // Each changing column, its centre in columns, and how far its paint reaches either side of it.
-  const changing: [number, number, number][] = [];
+  const span = Math.max(0, c1 - c0);
+  const [ks, centre, reach] = [new Int32Array(span), new Float64Array(span), new Float64Array(span)];
+  let n = 0;
   for (let k = c0; k < c1; k++) {
-    if (state[k] === RISE || state[k] === FALL) changing.push([k, k + at[k], width / 2]);
-    else if (state[k] === BUSY) changing.push([k, k + 0.5, 0.5 + (width - 1) / 2]);
+    const s = state[k];
+    if (s !== RISE && s !== FALL && s !== BUSY) continue;
+    ks[n] = k;
+    centre[n] = s === BUSY ? k + 0.5 : k + at[k];
+    reach[n++] = s === BUSY ? 0.5 + (width - 1) / 2 : width / 2;
   }
-  // From centre to centre, and the bare space between their paint.
-  const gap = (i: number, j: number): [number, number] => {
-    const [[, a, ra], [, b, rb]] = [changing[i], changing[j]];
-    return [b - a, b - rb - (a + ra)];
+  // Whether changing columns i and i + 1 join: the bare space between their paint under a device
+  // pixel, and no column between them without data.
+  const joins = (i: number) => {
+    if (centre[i + 1] - reach[i + 1] - (centre[i] + reach[i]) >= 1) return false;
+    for (let k = ks[i]; k < ks[i + 1]; k++) if (state[k] === NONE) return false;
+    return true;
   };
-  const noData = (a: number, b: number) => {
-    for (let k = a; k < b; k++) if (state[k] === NONE) return true;
-    return false;
-  };
-  const sum = (of: Float64Array, a: number, b: number) => {
-    let s = 0;
-    for (let k = a; k <= b; k++) s += of[k];
-    return s;
-  };
-  for (let i = 0; i < changing.length; ) {
+  for (let i = 0; i < n; ) {
     let last = i;
-    while (last + 1 < changing.length && gap(last, last + 1)[1] < 1 && !noData(changing[last][0], changing[last + 1][0])) last++;
-    const [k0, k1] = [changing[i][0], changing[last][0]];
+    while (last + 1 < n && joins(last)) last++;
+    const [k0, k1] = [ks[i], ks[last]];
     if (last === i) {
       let spacing = Infinity;
-      if (i > 0) spacing = Math.min(spacing, gap(i - 1, i)[0]);
-      if (i + 1 < changing.length) spacing = Math.min(spacing, gap(i, i + 1)[0]);
+      if (i > 0) spacing = Math.min(spacing, centre[i] - centre[i - 1]);
+      if (i + 1 < n) spacing = Math.min(spacing, centre[i + 1] - centre[i]);
       // A busy column changes level at least once, though a level's may hold no edge (a gap's end).
-      const edges = Math.max(cols.edges[k0], 1);
-      out[k0] = ["stroke", stroke(band(rate(edges, spacing * per, timebase)), spacing, width)];
+      const count = Math.max(edges[k0], 1);
+      out.kind[k0] = STROKE;
+      out.band[k0] = stroke(band(rate(count, spacing * per, timebase)), spacing, width);
     } else {
-      const b = band(rate(sum(cols.edges, k0, k1), (k1 - k0 + 1) * per, timebase));
+      let all = 0;
+      for (let k = k0; k <= k1; k++) all += edges[k];
+      const b = band(rate(all, (k1 - k0 + 1) * per, timebase));
       for (let k = k0; k <= k1; k++) {
-        const [a, z] = [Math.max(k0, k - RAIL_REACH), Math.min(k1, k + RAIL_REACH)];
-        const known = sum(cols.known, a, z);
-        const [high, low] = rails(known > 0 ? sum(cols.high, a, z) / known : NaN, sum(cols.edges, a, z) > 0);
-        out[k] = ["shade", b, high, low];
+        const z = Math.min(k1, k + RAIL_REACH);
+        let [e, h, t] = [0, 0, 0];
+        for (let j = Math.max(k0, k - RAIL_REACH); j <= z; j++) {
+          e += edges[j];
+          h += high[j];
+          t += known[j];
+        }
+        const [hi, lo] = rails(t > 0 ? h / t : NaN, e > 0);
+        out.kind[k] = SHADE;
+        out.band[k] = b;
+        out.high[k] = hi;
+        out.low[k] = lo;
       }
     }
     i = last + 1;

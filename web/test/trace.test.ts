@@ -1,5 +1,5 @@
 // A digital trace's shapes, each column drawn as its look says (shade.ts), measured by the opacity
-// they paint: the line at full ink, each fill at its step's. A canvas paints a stroked horizontal
+// they paint: the line at full ink, each fill at its alpha. A canvas paints a stroked horizontal
 // as its butt-capped rectangle, and a stroked vertical between two horizontals as its rectangle
 // with the miter joins' corners. Edges that stand apart at full ink are checked against the
 // drawing before the model, every edge stroked, kept here as the reference.
@@ -7,10 +7,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { BUSY, digitalFromEdges, FALL, HIGH, LOW, NONE, RISE, type DigitalColumns } from "../src/render/columns.ts";
-import { looks, type Look } from "../src/render/shade.ts";
-import { digitalTrace, shadeStep, SHADES, type Pen, type TraceBand } from "../src/render/trace.ts";
+import { FLAT, lookAt, looks, SHADE, STROKE, type Look, type Looks } from "../src/render/shade.ts";
+import { digitalTrace, shadeStep, SHADES, type Fills, type Pen, type TraceBand } from "../src/render/trace.ts";
 
-type Op = ["M" | "L", number, number] | ["R", number, number, number, number];
+type Op = ["M" | "L", number, number];
 
 /** A pen that keeps what it is told. */
 function recorder(): Pen & { ops: Op[] } {
@@ -19,20 +19,41 @@ function recorder(): Pen & { ops: Op[] } {
     ops,
     moveTo: (x, y) => void ops.push(["M", x, y]),
     lineTo: (x, y) => void ops.push(["L", x, y]),
-    rect: (x, y, w, h) => void ops.push(["R", x, y, w, h]),
   };
 }
 
-/** What a trace draws: its line, and each opacity step's fills. */
-function draw(cols: DigitalColumns, look: readonly Look[], band: TraceBand): { line: Op[]; shades: Map<number, Op[]> } {
-  const line = recorder();
-  const pens = new Map<number, ReturnType<typeof recorder>>();
-  digitalTrace(cols, look, cols.state.length, band, line, (q) => {
-    let p = pens.get(q);
-    if (!p) pens.set(q, (p = recorder()));
-    return p;
+/** `looks`' arrays holding `list`. */
+function looksOf(list: readonly Look[]): Looks {
+  const n = list.length;
+  const l = { kind: new Uint8Array(n), band: new Float64Array(n), high: new Float64Array(n), low: new Float64Array(n) };
+  list.forEach((x, k) => {
+    if (x === "flat") l.kind[k] = FLAT;
+    else if (x[0] === "stroke") [l.kind[k], l.band[k]] = [STROKE, x[1]];
+    else [l.kind[k], l.band[k], l.high[k], l.low[k]] = [SHADE, x[1], x[2], x[3]];
   });
-  return { line: line.ops, shades: new Map([...pens].map(([q, p]) => [q, p.ops])) };
+  return l;
+}
+
+/** What a trace draws: its line, and its fills. */
+function draw(cols: DigitalColumns, look: readonly Look[] | Looks, band: TraceBand): { line: Op[]; fills: Fills | null } {
+  const line = recorder();
+  const fills = digitalTrace(cols, Array.isArray(look) ? looksOf(look) : (look as Looks), cols.state.length, band, line);
+  return { line: line.ops, fills };
+}
+
+/** Each layer's alphas, the band's and each rail's, null for no fill. */
+const alphas = (f: Fills | null) => f && [[...f.band], [...f.high], [...f.low]];
+
+/** `ops` with each lineTo that carries on along a horizontal joined to it, as a trace gives a
+ * level held over several columns. */
+function joined(ops: Op[]): Op[] {
+  const out: Op[] = [];
+  for (const op of ops) {
+    const [last, before] = [out.at(-1), out.at(-2)];
+    if (op[0] === "L" && last?.[0] === "L" && before && before[2] === last[2] && last[2] === op[2]) last[1] = op[1];
+    else out.push([...op] as Op);
+  }
+  return out;
 }
 
 /** The drawing before the model, as plot.ts had it: every edge stroked, busy columns filled. */
@@ -100,15 +121,22 @@ function painted(line: Op[], lw: number): Rect[] {
   return out;
 }
 
-/** The opacity a drawing paints at (x, y): full where the line does, else its highest fill's. */
-function opacity(d: { line: Op[]; shades: Map<number, Op[]> }, lw: number, x: number, y: number): number {
+/** The opacity a drawing paints at (x, y): full where the line does, else its fill's there: the
+ * band's between the levels, and each rail's a line's width deep about its level. */
+function opacity(d: { line: Op[]; fills: Fills | null }, band: TraceBand, x: number, y: number): number {
+  const { left, yH, yL, lw } = band;
   const inside = ([a, b, c, e]: Rect) => a <= x && x < c && b <= y && y < e;
   if (painted(d.line, lw).some(inside)) return 1;
-  let most = 0;
-  for (const [q, ops] of d.shades) {
-    for (const op of ops) if (op[0] === "R" && inside([op[1], op[2], op[1] + op[3], op[2] + op[4]])) most = Math.max(most, q / SHADES);
-  }
-  return most;
+  const c = Math.floor(x - left);
+  if (!d.fills || c < 0 || c >= d.fills.band.length) return 0;
+  const h = lw / 2;
+  const layers = [
+    [d.fills.band, yH + h, yL - h],
+    [d.fills.high, yH - h, yH + h],
+    [d.fills.low, yL - h, yL + h],
+  ] as const;
+  for (const [alpha, top, bottom] of layers) if (top <= y && y < bottom) return alpha[c] / 255;
+  return 0;
 }
 
 /** Columns from edges at random ticks, `per` ticks a column, from a seed: `rate` is the chance a
@@ -156,8 +184,8 @@ test("edges that stand apart at full ink are the strokes they were, and nothing 
   const old = recorder();
   strokes(cols, n, band, old);
   const now = draw(cols, look, band);
-  assert.deepEqual(now.line, old.ops);
-  assert.equal(now.shades.size, 0);
+  assert.deepEqual(now.line, joined(old.ops));
+  assert.equal(now.fills, null);
 });
 
 test("an edge the model fades keeps its levels on the line, and crosses the band at its opacity", () => {
@@ -172,24 +200,26 @@ test("an edge the model fades keeps its levels on the line, and crosses the band
   const d = draw(cols, ["flat", ["stroke", 0.5], "flat"], band);
   assert.deepEqual(d.line, [
     ["M", 10, 30],
-    ["L", 11, 30],
     ["L", 11.25, 30],
     ["M", 11.25, 6],
-    ["L", 12, 6],
     ["L", 13, 6],
   ]);
-  assert.deepEqual([...d.shades], [[32, [["R", 10.25, 5, 2, 26]]]]);
+  // The stroke from 10.25 to 12.25 at half ink, 255 × 0.5 by the share of each column it covers:
+  // three quarters of column 0, all of 1, a quarter of 2, across the band and both rails.
+  assert.deepEqual(alphas(d.fills), [
+    [96, 128, 32],
+    [96, 128, 32],
+    [96, 128, 32],
+  ]);
   // At full ink the same edge is the line's, and nothing is filled.
   const full = draw(cols, ["flat", ["stroke", 1], "flat"], band);
   assert.deepEqual(full.line, [
     ["M", 10, 30],
-    ["L", 11, 30],
     ["L", 11.25, 30],
     ["L", 11.25, 6],
-    ["L", 12, 6],
     ["L", 13, 6],
   ]);
-  assert.equal(full.shades.size, 0);
+  assert.equal(full.fills, null);
 });
 
 test("a busy column alone is a stroke at its middle, between the levels either side of it", () => {
@@ -204,16 +234,19 @@ test("a busy column alone is a stroke at its middle, between the levels either s
   const d = draw(cols, ["flat", ["stroke", 0.75], "flat"], band);
   assert.deepEqual(d.line, [
     ["M", 0, 6],
-    ["L", 1, 6],
     ["L", 1.5, 6],
     ["M", 1.5, 30],
-    ["L", 2, 30],
     ["L", 3, 30],
   ]);
-  assert.deepEqual([...d.shades], [[48, [["R", 0.5, 5, 2, 26]]]]);
+  // From 0.5 to 2.5 at three quarters ink: half of column 0, all of 1, half of 2.
+  assert.deepEqual(alphas(d.fills), [
+    [96, 191, 96],
+    [96, 191, 96],
+    [96, 191, 96],
+  ]);
 });
 
-test("a run is its band and its rails at their opacities, a rectangle each stretch of one, and the line stops at its sides", () => {
+test("a run is its band and its rails at their opacities, column by column, and the line stops at its sides", () => {
   const band: TraceBand = { left: 0, yH: 6, yL: 30, lw: 2 };
   const cols: DigitalColumns = {
     state: Uint8Array.from([LOW, RISE, FALL, RISE, HIGH, FALL, LOW]),
@@ -231,23 +264,13 @@ test("a run is its band and its rails at their opacities, a rectangle each stret
     ["M", 6, 30],
     ["L", 7, 30],
   ]);
-  // The band whole across the run, between the rails; each rail a rectangle a stretch of one
-  // opacity.
-  assert.deepEqual(
-    [...d.shades].sort((a, b) => a[0] - b[0]),
-    [
-      [16, [["R", 1, 5, 2, 2]]],
-      [
-        32,
-        [
-          ["R", 1, 7, 5, 22],
-          ["R", 3, 5, 3, 2],
-          ["R", 3, 29, 3, 2],
-        ],
-      ],
-      [48, [["R", 1, 29, 2, 2]]],
-    ],
-  );
+  // The band whole across the run at half ink, and each rail at its column's: a quarter, half,
+  // three quarters, each 255 × its step of 64, rounded.
+  assert.deepEqual(alphas(d.fills), [
+    [0, 128, 128, 128, 128, 128, 0],
+    [0, 64, 64, 128, 128, 128, 0],
+    [0, 191, 191, 128, 128, 128, 0],
+  ]);
 });
 
 test("each column paints as its look says: a run's band and rails at their steps, a flat column's level at full ink", () => {
@@ -264,11 +287,12 @@ test("each column paints as its look says: a run's band and rails at their steps
         const kinds = new Set<string>();
         for (let c = 0; c < count; c++) {
           const x = band.left + c + 0.5;
-          const l = look[c];
-          const at = (y: number) => opacity(d, lw, x, y);
+          const l = lookAt(look, c);
+          const at = (y: number) => opacity(d, band, x, y);
           if (l !== "flat" && l[0] === "shade") {
             kinds.add("shade");
-            const [b, h, low] = [l[1], l[2], l[3]].map((a) => shadeStep(a) / SHADES);
+            // Each at its step, as the 8-bit alpha a canvas holds.
+            const [b, h, low] = [l[1], l[2], l[3]].map((a) => Math.round((255 * shadeStep(a)) / SHADES) / 255);
             assert.deepEqual([at(mid), at(band.yH), at(band.yL)], [b, h, low], `lw ${lw}, rate ${rate}, seed ${seed}, column ${c}`);
           } else if (cols.state[c] === LOW || cols.state[c] === HIGH) {
             kinds.add("flat");

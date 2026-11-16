@@ -3,7 +3,7 @@
 // schedules another frame.
 
 import { covers, laneAnnotations, type Annotation, type Resolved } from "../annotations.ts";
-import type { Palette } from "../palette.ts";
+import { rgba, type Palette } from "../palette.ts";
 import { formatMarks, niceStep } from "../readouts.ts";
 import { rangeMarks, type ValueRange } from "./scale.ts";
 import {
@@ -35,15 +35,22 @@ import {
 } from "./columns.ts";
 import { layoutNotes, type NoteIn, type NoteOut } from "./notes.ts";
 import { looks } from "./shade.ts";
-import { digitalTrace, SHADES } from "./trace.ts";
+import { digitalTrace, type Fills } from "./trace.ts";
 import { grain, Track, type Layer, type Tile } from "./track.ts";
 
-/** A piece of a row's trace: its line, stroked, its fill, and a digital row's fills at each
- * opacity step (trace.ts). */
+/** A piece of a row's trace: its line, stroked, its fill, and a digital row's fills (trace.ts). */
 interface Shapes {
   readonly line: Path2D;
   readonly fill: Path2D;
-  readonly shades?: ReadonlyMap<number, Path2D>;
+  readonly fills?: Strips;
+}
+
+/** A digital row's fills: each layer's alpha, a column a device pixel from `left`, and the
+ * layer's top and depth in device pixels, the band's and each rail's. */
+interface Strips {
+  readonly fills: Fills;
+  readonly left: number;
+  readonly layers: readonly (readonly [number, number])[];
 }
 
 export interface PlotConfig {
@@ -195,6 +202,8 @@ export class Plot {
    * head band with the group's name. Empty: no heads. */
   groups = new Map<number, string>();
   #palette: Palette | null = null;
+  /** Where a row's fills are put before they are drawn (`#drawFills`). */
+  #strip: CanvasRenderingContext2D | null = null;
   layout: Layout | null = null;
   view = { start: 0, end: 1 };
   cursors: { a: number | null; b: number | null } = { a: null, b: null };
@@ -732,10 +741,7 @@ export class Plot {
         ctx.strokeStyle = s.colour;
         ctx.stroke(shapes.line);
         ctx.fillStyle = s.colour;
-        for (const [q, path] of shapes.shades ?? []) {
-          ctx.globalAlpha = q / SHADES;
-          ctx.fill(path);
-        }
+        if (shapes.fills) this.#drawFills(shapes.fills, s.colour);
         ctx.globalAlpha = coarse ? UNRESOLVED_ALPHA : 1;
         ctx.fill(shapes.fill);
         ctx.restore();
@@ -831,15 +837,45 @@ export class Plot {
     const yL = snap((r.top + r.height - 6) * dpr);
     const left = Math.round(l.plotLeft * dpr);
     const line = new Path2D();
-    const shades = new Map<number, Path2D>();
-    const shade = (q: number) => {
-      let p = shades.get(q);
-      if (!p) shades.set(q, (p = new Path2D()));
-      return p;
-    };
     const look = looks(cols, 0, grid.count, lw, grid.per, this.info!.timebase);
-    digitalTrace(cols, look, grid.count, { left, yH, yL, lw }, line, shade);
-    return { line, fill: new Path2D(), shades };
+    const fills = digitalTrace(cols, look, grid.count, { left, yH, yL, lw }, line);
+    const h = lw / 2;
+    const layers = [
+      [yH + h, yL - yH - lw],
+      [yH - h, lw],
+      [yL - h, lw],
+    ] as const;
+    return { line, fill: new Path2D(), fills: fills ? { fills, left, layers } : undefined };
+  }
+
+  /**
+   * A row's fills in `colour`: each layer a strip of one-pixel columns at their alphas, drawn
+   * stretched to the layer's depth. One image a piece, where a path of a rectangle a column cost a
+   * browser's rasteriser by the rectangle.
+   */
+  #drawFills({ fills, left, layers }: Strips, colour: string): void {
+    const ctx = this.#ctx;
+    const n = fills.band.length;
+    const [r, g, b, a] = rgba(colour);
+    const image = new ImageData(n, layers.length);
+    const d = image.data;
+    [fills.band, fills.high, fills.low].forEach((alpha, row) => {
+      for (let c = 0, o = 4 * row * n; c < n; c++, o += 4) {
+        if (alpha[c] === 0) continue;
+        [d[o], d[o + 1], d[o + 2], d[o + 3]] = [r, g, b, a * alpha[c]];
+      }
+    });
+    if (!this.#strip || this.#strip.canvas.width !== n) {
+      const canvas = Object.assign(document.createElement("canvas"), { width: n, height: layers.length });
+      this.#strip = canvas.getContext("2d")!;
+    }
+    this.#strip.putImageData(image, 0, 0);
+    ctx.save();
+    ctx.imageSmoothingEnabled = false;
+    layers.forEach(([y, depth], row) => {
+      if (depth > 0) ctx.drawImage(this.#strip!.canvas, 0, row, n, 1, left, y, n, depth);
+    });
+    ctx.restore();
   }
 
   #analogShapes(

@@ -1,7 +1,7 @@
 // How a digital column with edges reads. The fixed cases are in testdata/view/shade.json, which
 // the Rust view core's tests read too.
 
-import { band, count, countOf, counts, dutyShare, looks, rails, rate, stroke } from "../src/render/shade.ts";
+import { band, count, countOf, counts, dutyShare, lookAt, looks, rails, rate, stroke } from "../src/render/shade.ts";
 import { BUSY, FALL, HIGH, LOW, NONE, RISE } from "../src/render/columns.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -26,7 +26,8 @@ runTable("shade", {
       high: Float64Array.from(c.high),
       known: Float64Array.from(c.known),
     };
-    return looks(cols, a.shown[0], a.shown[1], a.width, a.per, ratio(a.timebase));
+    const l = looks(cols, a.shown[0], a.shown[1], a.width, a.per, ratio(a.timebase));
+    return Array.from(l.kind, (_, k) => lookAt(l, k));
   },
 });
 

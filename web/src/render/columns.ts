@@ -1,7 +1,7 @@
 // What each pixel column of a row shows. Column c covers ticks [x0 + c * per, x0 + (c + 1) * per).
 // Pure functions, so the drawing rules can be tested without a canvas.
 
-import { lowerBound } from "../search.ts";
+import { gallop, lowerBound } from "../search.ts";
 import { countOf } from "./shade.ts";
 import {
   channelIndexAtOrAfter,
@@ -78,7 +78,7 @@ export function digitalFromEdges(g: Grid, edges: Edges, from: number, to: number
   for (let c = c0; c < c1; c++) {
     const start = colStart(c);
     const end = Math.min(to, g.x0 + (c + 1) * g.per);
-    const j = lowerBound(t, end, i);
+    const j = gallop(t, end, i);
     const n = j - i;
     if (n === 0) state[c] = level ? HIGH : LOW;
     else if (n === 1) {
