@@ -32,7 +32,7 @@ The converter doesn't read Logic 2's own `.sal` files, because Saleae doesn't do
 
 The converter writes the recording beside its destination first. Then it decodes what it wrote and compares it with the capture, edge by edge and sample by sample. Only a recording that matches takes its place, and if they differ, nothing is left behind.
 
-Every time in a recording is a whole number of ticks from the capture's start, and one tick is the source's resolution. A Saleae export's times become ticks by `round((t − begin) × rate)`. The converter refuses an export with an edge more than 0.01 of a tick off that grid, rather than move it.
+Every edge in a recording lies on a whole tick from the capture's start, and one tick is the source's resolution. A Saleae export's times become ticks by `round((t − begin) × rate)`. The converter refuses an export with an edge more than 0.01 of a tick off that grid, rather than move it. An analog file whose begin sits off that grid keeps the offset as its samples' phase, to a thousandth of a sample, so each sample keeps its place between two ticks. The converter refuses an analog file that begins before the digital channels.
 
 ### From a Saleae export
 

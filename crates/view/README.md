@@ -14,8 +14,13 @@ first drawn. A query reads only the index pages that place the blocks and overvi
 span covers, directory pages included. Where a channel has more than 64 gaps or breaks, its list
 is in pages too: a query, statistics, `edges` and `index_at` read only the list pages their span
 needs, and each block a query decodes is checked against the entries its own ticks need.
-`runs` and `known` read the whole list. The bundled annotations are read when markers are first
-asked for; `load_markers` reads them and says why they don't resolve, where they don't.
+`runs` and `known` read the whole list. A finished file's markers are read a range at a time:
+`markers` reads the annotation parts its range meets and the bundle's hand-written file, and the
+extent takes their span from the parts table, no part read. A hand-written `ref` shows once every
+part is read, as `load_markers`, `marker_count`, `markers_left_out` and a query's marker list
+read them; `load_markers` says why they don't read, where they don't. A channel this version can't
+read keeps its place and name as `ChannelKind::Unavailable`, and a marker that names it is left
+out.
 `Recording::live` reads a file a writer in the same process is still writing, through the
 writer's `Snapshot`, and `Recording::update` takes each newer snapshot, reading only what the
 writer added since and decoding only the blocks it hasn't yet, and the open block. Its cost
@@ -38,7 +43,8 @@ columns it reaches.
 
 For a reader that wants the samples themselves, as an export does, `Recording::each_sample` gives
 each sample's value and its integer code over a range of indices, `index_at` the index at a tick,
-`edges` a digital channel's edges, and `runs` and `known` where a channel's data lies. Every tick
+`edges` a digital channel's edges, `edge_count` how many there are in a span, from the index with
+only the blocks at its ends decoded, and `runs` and `known` where a channel's data lies. Every tick
 they take and give is on the recording's time axis. A channel's source keeps its own ticks: `runs`
 states an analog channel's samples in them, its methods place them on the axis, and `mapping` gives
 the source's `m`, origin and the channel's offset, for a readout exact to the source's tick.
@@ -66,7 +72,8 @@ recording's or older than the 64 snapshots whose changes a recording keeps. Ever
 the recording and snapshot it was made from.
 
 `Recording::statistics` counts each sample whose time covers part of the interval, one that starts
-before it included, and weights its value by the ticks it covers there, exactly for integer codes.
+before it included, and weights its value by the time it covers there, exactly: the measured time
+and an integer channel's sum are exact ratios of the axis's ticks, a phase or a stretch included.
 Where every sample lasts the same whole number of the recording's ticks, it takes whole overview
 buckets where it can. While a recording is
 being written, a channel's overview reaches no further than its settled buckets, so the samples
@@ -93,8 +100,8 @@ target to compile libzstd. `live`, on by default, turns on the format crate's en
 the `Snapshot` of a recording a writer in the same process is still writing.
 
 Opening a recording, each query and sketch, each channel drawn, the strip, statistics, every block
-decoded, and every page, list, strip and bundle read are `tracing` spans at debug level, so a
-host's subscriber shows where a view's time goes.
+decoded, and every page, list, strip, bundle and annotation part read are `tracing` spans at
+debug level, so a host's subscriber shows where a view's time goes.
 
 `examples/synth.rs` writes a recording laid out as verge's energy captures are, and
 `examples/timing.rs` times opening one and a view's queries of it. With `--trace FILE` it writes

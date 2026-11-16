@@ -132,7 +132,9 @@ annotation of the kind a page steps through.
 `tickwave annotations check --json` prints the annotations resolved, in sidecar order, and the
 browser's decoder hands the page the same. Each has its full id, `source` (the generator's name;
 null for a hand-written one), `start` and `end` in ticks, and the fields above. An alias keeps
-`ref`, the full id of the generated annotation it names, so a page can tell the two apart.
+`ref`, the full id of the generated annotation it names, so a page can tell the two apart. A reader
+that leaves out a generated annotation leaves out an alias of it too, and says so: a `ref` resolves
+only to an annotation the reader keeps.
 
 ## Checks
 
