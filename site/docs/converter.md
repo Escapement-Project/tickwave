@@ -46,7 +46,7 @@ tickwave convert saleae identify-swd/ --channel digital_3_0=SWCLK --channel digi
 It reports the file it wrote, its size, its blocks and its content id:
 
 ```text
-identify-swd.tickwave: 0.00 MB, 2 blocks, blake3:ccc8b7d8c3e4cb30da7fc6088e54ebeba2858ad402eb3fb5a9aeb50be989accf in 0.0 s
+identify-swd.tickwave: 0.00 MB, 2 blocks, blake3:63773d56fb3420735c864932f8d2441acd6f31a51b557e073bf27755a0534697 in 0.0 s
 ```
 
 Logic 8, Logic Pro 8 and Logic Pro 16 write version 0 of the export, and its digital files don't record the sample rate. If you name an analog channel, the converter takes the rate its file records. Otherwise it infers the rate from the edges of every digital file in the export, named or not. It takes the lowest rate that divides 1 GHz and puts every edge on its grid, each on a tick of its own. With many edges, that is the capture's rate. With only a few, it can come out lower, and the recording then claims coarser timing than the capture had, never finer. An export with no edges has no rate to infer.
@@ -161,11 +161,12 @@ tickwave info identify-swd.tickwave
 ```
 
 ```text
-0.523583100 s at 1000000000/1 ticks a second, 2 channels, blake3:ccc8b7d8c3e4cb30da7fc6088e54ebeba2858ad402eb3fb5a9aeb50be989accf
+identify-swd
+0.523583100 s at 1000000000/1 ticks a second, 2 channels, blake3:63773d56fb3420735c864932f8d2441acd6f31a51b557e073bf27755a0534697
   source 0: saleae-binary-1 at 1000000000/1 ticks a second, its tick 0 at 0: digital_3_0.bin, digital_3_1.bin
   SWCLK        digital, 15286 edges, starts 1, known to 0.523583070 s (digital_3_0)
   SWDIO        digital, 1874 edges, starts 1, known to 0.523583100 s (digital_3_1)
-0.005 MB: footer 846 bytes, 2 blocks of 1424-1727 bytes, median 1727
+0.005 MB: footer 867 bytes, 2 blocks of 1424-1727 bytes, median 1727
   SWCLK        overview strip at 2^21
   SWDIO        overview strip at 2^24
 ```
@@ -179,12 +180,12 @@ tickwave info --drift both.tickwave
 ```
 
 ```text
-9.029020000 s at 1000000000/1 ticks a second, 2 channels, blake3:635af47f259cfd10d5f9e750e2f82d98a894be04206c7031692a5836b72b1137
+9.029020000 s at 1000000000/1 ticks a second, 2 channels, blake3:e2e5f04029d12cbef8ed7a63f6bee934e2492c79266ca42adf1a4f2bb4b13c78
   source 0: vcd at 1000000000/1 ticks a second, its tick 0 at 0: analyser.vcd
   source 1: vcd at 100000000/1 ticks a second (10 of the recording's ticks each), its tick 0 at 0: probe.vcd
   analyser.MARK digital, 1800 edges, starts 0, known to 9.020000000 s (analyser.MARK, source 0)
   probe.MARK   digital, 1800 edges, starts 0, known to 9.029020000 s (probe.MARK, source 1)
-0.002 MB: footer 1009 bytes, 2 blocks of 46-76 bytes, median 76
+0.002 MB: footer 1033 bytes, 2 blocks of 46-76 bytes, median 76
   analyser.MARK overview strip at 2^28
   probe.MARK   overview strip at 2^28
 drift: analyser.MARK (source 0) against probe.MARK (source 1): +1000.0 ± 0.0 ppm, the stretch source 0 would take to tick as source 1 does; periods 10.000000 ms and 10.010000 ms over 900 and 900 rises, 0.6 µs and 1.7 µs rms off a straight line
@@ -280,7 +281,7 @@ tickwave repair identify-swd.cut.tickwave -o identify-swd.tickwave
 ```
 
 ```text
-identify-swd.tickwave: 2952 of 3000 bytes kept, 8 blocks to 0.388970979 s, blake3:0ba2d62a24ad16ad2f44142d329ed63750eb97e66629611c9c233ff08f4d7b1a
+identify-swd.tickwave: 2929 of 3000 bytes kept, 8 blocks to 0.388970979 s, blake3:3a720b983b1a833de4c025cc9565f15ab5c5c8fa7cf2d7b02dec3902525da876
 ```
 
 A recorder that flushes notes, after each flush, the time up to which every channel's data is in the file. Where the file holds such a note, repair keeps every channel to the latest one. Otherwise it keeps each channel's blocks up to its last whole one, and the capture ends where the latest of those ends. Either way what came after was lost with the rest of the file. It then writes the index and the footer, and writes the copy to `-o`. If the recorder generated annotations, each generator's file goes beside the copy, as `<name>.<generator>.jsonl`. A finished recording is refused, since there is nothing to repair. So is one with a channel moved or trimmed: convert it again from its capture.
@@ -294,9 +295,9 @@ tickwave recut energy.tickwave -o energy.recut.tickwave
 ```
 
 ```text
-energy.recut.tickwave: 0.01 MB from 0.02 MB, 5 blocks, blake3:ed46435e115fa7f0cf831415a7cb8452cbf413a496cba9c974abb8b115e8a21a in 0.0 s
+energy.recut.tickwave: 0.01 MB from 0.02 MB, 5 blocks, blake3:d9a38a24d16a4cdb984ed2a901f89973b02a8c44d80cf3a5deed33b489148326 in 0.0 s
 ```
 
-`tickwave info` counts 23 blocks of 13 to 360 bytes in the original and 5 of 21 to 530 bytes in the copy, 18 KB against 15 KB.
+`tickwave info` counts 24 blocks of 13 to 360 bytes in the original and 5 of 21 to 530 bytes in the copy, 18 KB against 14 KB.
 
 The copy holds the same content, with the same content id, and is checked before it is written. `--block-kib` and `--level` work as they do for a conversion. A recording cut off before its end is finished as `repair` would finish it, and each annotation generator's file goes beside the copy.

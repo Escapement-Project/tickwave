@@ -31,6 +31,10 @@ The page reads files a zip stores as they are or deflated, as common zip tools w
 Under the view, the recording's details give its title, length and channels, the time one tick
 stands for, its size, what it was converted from, and its content id.
 
+A recording can hold a channel this viewer can't read, such as one a newer tool wrote in a way
+this version doesn't know. Its row keeps its place and says it is unavailable, and nothing of it
+is drawn. Annotations that name it are left out, and a note under the view says which.
+
 ## Sharing a capture on GitHub
 
 A capture attached to a GitHub issue or discussion opens in any browser, a phone's included, with
@@ -70,7 +74,14 @@ its period, to the next edge the same way. A label gives the pulse's duty, its f
 enough, the width and the period sit on their spans; until then the label gives them too.
 
 The label sits on the edge of the rows away from the row you point at, so it never covers the wave
-you are reading. Where one pixel holds several edges, it asks you to zoom in.
+you are reading.
+
+Where one pixel holds several edges, the label gives how many there are in the time the pixel
+covers, and how much of that time the channel was high, then asks you to zoom in. Zoomed far out,
+the view reads these from the recording's overview. It keeps each stretch's edge count to within
+about 19 %, and its time high to the nearest fourteenth. There the label gives
+the range those allow, such as "1,024 to 1,217 edges" and "high 32.1 to 39.3 %". A stretch with
+edges and almost no time high reads "high under 3.6 %": the edges show the channel did go high.
 
 A long pulse can end far past what the view has read, as on a quiet line seen close up. The label
 then says it is measuring. Keep the pointer within the pulse and it goes on; once measured, the
@@ -80,6 +91,23 @@ Where the instrument lost data, the row is shaded: where a digital channel's lev
 and where an analog channel lost samples, between two runs of samples, before its first or after
 its last. The trace breaks there. Where the instrument only paused, the trace breaks and nothing
 is shaded.
+
+## Where edges crowd
+
+Zoomed out, a digital channel's edges come closer together than a pixel. There the row shades the
+band between its two levels instead of drawing each edge. How dark the shade is says how fast the
+channel switches, in edges a second. The scale is the same at every zoom and in every recording:
+faint at one edge a second or fewer, solid at 100 million, and darker by the same step for every
+tenfold rise between. Two captures of the same activity look alike side by side.
+
+Each level's line shades as well, by the share of the time the channel spent at that level over
+the few pixels around it. A level the channel held throughout is solid. Wherever the stretch holds
+an edge, both lines show at least faintly, so a rare excursion stays visible at every zoom: a flag
+raised for a few microseconds in an hour still marks its stretch.
+
+An edge that stands apart is a line across the band. Where edges come near each other without
+crowding into one pixel, each line fades towards the shade a stretch of them would take, so
+neighbouring edges and a crowded stretch read alike.
 
 ## Row heights
 

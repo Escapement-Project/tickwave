@@ -1,8 +1,9 @@
 # escapement-tickwave-egui
 
 tickwave's native renderer: a recording drawn with egui, through the view core. A `Graph` draws
-one analog trace with digital lanes under it on the same time axis, and a `Strip` draws the whole
-recording small under the graph. Both draw what a `Viewer` answers.
+one analog trace with digital lanes under it on the same time axis, or, made with
+`Graph::lanes_only`, digital lanes alone, and a `Strip` draws the whole recording small under the
+graph. Both draw what a `Viewer` answers.
 
 ## The viewer
 
@@ -50,13 +51,23 @@ takes no now.
 - A column that touches lost time draws pale, and so does a sample where the flag channel (such
   as `under_range`) is high. Lost time is shaded at least a pixel wide, so a loss stays visible
   at every zoom. A pause only breaks the trace.
-- Each digital lane's levels as lines, a column with more than one edge filled, and its gaps
-  shaded.
+- Each digital lane's levels as lines, and its gaps shaded. Where edges crowd closer than a
+  device pixel, the band between the levels shades by the edge rate, in edges a second, on one
+  scale at every zoom and in every recording: 20 % at one edge a second or fewer, full ink at 100
+  million, linear in the rate's logarithm between. Each level's line shades by the share of time
+  at that level over five columns, at least 20 % where those hold an edge, so a rare excursion
+  stays visible. An edge standing apart is a line across the band; one with neighbours near,
+  faded towards the shade their spacing gives. The view core's `shade` module holds the model,
+  which the web's drawing ports.
 - Marker lines, with their labels in up to three rows across the plot's top. A fitted value
   range keeps those rows clear once the recording has a marker.
 - The selection, washed across the plot and the lanes.
 - The time axis and two value labels, with the digits their source carries and no more, both
   value labels in one unit.
+
+A graph from `Graph::lanes_only` draws its lanes, a band above them for the markers' labels where
+the recording has markers, and the time axis: no trace, no value axis, and no flag. Its height is
+what those take unless the host gives one.
 
 While a query runs, the graph draws the latest answer moved to the window on screen. An answer
 covers the window and a width either side, so a pan draws at once and a zoom stretches what is
@@ -67,7 +78,8 @@ waits for a query.
 
 Drag or scroll to move along time; ctrl-scroll or pinch to zoom it. A vertical drag or scroll
 past 12 points takes the value range off the fit and moves it; a drag along the value axis zooms
-it; a double click fits it again. With `select_mode`, a drag selects.
+it; a double click fits it again. A graph of lanes alone has no value range to move. With
+`select_mode`, a drag selects.
 
 The strip has a time axis along its foot. A click or a drag on it centres the window. A handle
 at each end of the window drags that end, at least one tick short of the other.
