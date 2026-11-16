@@ -95,8 +95,9 @@ interface HeaderAnalog extends HeaderShaped, HeaderTables, HeaderNeeds {
   blocks: number;
   /** Where the samples sit within a tick of the source's grid (FORMAT.md, "Times"). */
   phase?: [number, number];
-  /** [index, tick, samples lost before it]. */
-  breaks?: [number, number, number][];
+  /** [index, tick, samples lost before it], and the run's phase in the grid's `1/d` ticks where
+   * it is not 0. */
+  breaks?: ([number, number, number] | [number, number, number, number])[];
   /** How many breaks the list pages hold, where they are in pages. */
   break_count?: number;
   lost_before?: number;
@@ -425,7 +426,14 @@ class Reader {
   }
 }
 
-/** A channel's gaps or breaks in pages over a span: three numbers an entry, as `listPage` gives
+/** Numbers an entry of a list takes, as `listPage` gives them: a gap's `from`, `to`, level and 0,
+ * or a break's index, tick, samples lost and phase. */
+const ENTRY = 4;
+
+/** A break from a list's entry at `i`. */
+const breakAt = (e: Float64Array, i: number): Break => ({ index: e[i], tick: e[i + 1], lost: e[i + 2], ...(e[i + 3] !== 0 && { phase: e[i + 3] }) });
+
+/** A channel's gaps or breaks in pages over a span, `ENTRY` numbers an entry, as `listPage` gives
  * them, from the list's start where `first`, to its end where `toEnd`. */
 interface Slice {
   readonly entries: Float64Array;
@@ -435,18 +443,18 @@ interface Slice {
 
 /** An entry's key in a slice: a gap's `from`, a break's `tick`. */
 function sliceKey(s: Float64Array, digital: boolean, i: number): number {
-  return s[3 * i + (digital ? 0 : 1)];
+  return s[ENTRY * i + (digital ? 0 : 1)];
 }
 
 /** The entries of `s` that source ticks `[lo, hi)` need, as `Listed` words it: from the one
  * before the last at or before `lo` through the first at or past `hi`. */
 function restrict(s: Float64Array, digital: boolean, lo: number, hi: number): Float64Array {
-  const n = s.length / 3;
+  const n = s.length / ENTRY;
   let atOrBefore = 0;
   while (atOrBefore < n && sliceKey(s, digital, atOrBefore) <= lo) atOrBefore++;
   let before = atOrBefore;
   while (before < n && sliceKey(s, digital, before) < hi) before++;
-  return s.subarray(3 * Math.max(0, atOrBefore - 2), 3 * Math.min(n, before + 1));
+  return s.subarray(ENTRY * Math.max(0, atOrBefore - 2), ENTRY * Math.min(n, before + 1));
 }
 
 /** Pairs `[a, b, c, d, ...]` as `[[a, b], [c, d], ...]`. */
@@ -531,9 +539,10 @@ export class Opened {
       }
       const [min, max] = this.#range(i);
       const period = { num: c.period[0], den: c.period[1] };
+      const phase = c.phase && { num: c.phase[0], den: c.phase[1] };
       const paged = c.break_count !== undefined;
-      const breaks: Break[] = (c.breaks ?? []).map(([index, tick, lost]) => ({ index, tick, lost }));
-      const runs = { first: c.first, period, breaks, map };
+      const breaks: Break[] = (c.breaks ?? []).map(([index, tick, lost, phase]) => ({ index, tick, lost, ...(phase && { phase }) }));
+      const runs = { first: c.first, period, phase, count: c.count, breaks, map };
       return {
         ...shaped(c),
         kind: "analog",
@@ -551,6 +560,7 @@ export class Opened {
         unit: c.unit,
         first: c.first,
         period,
+        ...(phase && { phase }),
         count: c.count,
         resolution: resolution(c.coding),
         ...(c.significant !== undefined && { significant: c.significant }),
@@ -744,7 +754,7 @@ export class Opened {
     const pages = await parse(at);
     const count = (p: DecodedPage, f: (k: number) => boolean) => {
       let n = 0;
-      for (let i = 0; i < p.entries.length / 3; i++) if (f(sliceKey(p.entries, digital, i))) n++;
+      for (let i = 0; i < p.entries.length / ENTRY; i++) if (f(sliceKey(p.entries, digital, i))) n++;
       return n;
     };
     // Two entries at or before the span's start: the page before the first where it holds fewer.
@@ -790,7 +800,7 @@ export class Opened {
     if (h.kind === "digital") {
       const gaps: Gap[] = [];
       let start: number | undefined;
-      for (let i = 0; i < e.length; i += 3) {
+      for (let i = 0; i < e.length; i += ENTRY) {
         // A gap from the channel's start says where its level is first known.
         if (atStart && i === 0 && e[0] === this.#starts[c]) start = axisTick(map, e[1]);
         else gaps.push({ from: axisTick(map, e[i]), to: axisTick(map, e[i + 1]), level: e[i + 2] ? 1 : 0 });
@@ -798,12 +808,12 @@ export class Opened {
       return { gaps, ...(start !== undefined && { start }) };
     }
     const breaks: Break[] = [];
-    for (let i = 0; i < e.length; i += 3) breaks.push({ index: e[i], tick: e[i + 1], lost: e[i + 2] });
+    for (let i = 0; i < e.length; i += ENTRY) breaks.push(breakAt(e, i));
     if (!s.toEnd) return { breaks };
-    // The whole list's last run is the slice's.
-    const all: Break[] = [];
-    for (let i = 0; i < s.entries.length; i += 3) all.push({ index: s.entries[i], tick: s.entries[i + 1], lost: s.entries[i + 2] });
-    const runs = { first: h.first, period: { num: h.period[0], den: h.period[1] }, breaks: all.slice(-1), map };
+    // The whole list's last run is the slice's last entry's.
+    const last = s.entries.length >= ENTRY ? [breakAt(s.entries, s.entries.length - ENTRY)] : [];
+    const phase = h.phase && { num: h.phase[0], den: h.phase[1] };
+    const runs = { first: h.first, period: { num: h.period[0], den: h.period[1] }, phase, count: h.count, breaks: last, map };
     return { breaks, end: Math.min(this.header.length, h.count === 0 ? axisTick(map, h.first) : placeAfter(runs, h.count - 1)) };
   }
 
@@ -875,7 +885,7 @@ export class Opened {
     if (slice) {
       const map = this.#maps[channel];
       gaps = [];
-      for (let i = 0; i < slice.entries.length; i += 3) gaps.push({ from: axisTick(map, slice.entries[i]), to: axisTick(map, slice.entries[i + 1]), level: slice.entries[i + 2] ? 1 : 0 });
+      for (let i = 0; i < slice.entries.length; i += ENTRY) gaps.push({ from: axisTick(map, slice.entries[i]), to: axisTick(map, slice.entries[i + 1]), level: slice.entries[i + 2] ? 1 : 0 });
     }
     // No edge lies in a gap, and a block's level bit carries the level from before one until its
     // `to`: the last gap ending in the first block or at its start, at or before `start`, sets the

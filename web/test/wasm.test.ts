@@ -752,7 +752,7 @@ test("a crafted recording is refused with an error, and the module goes on decod
     "a page's bytes cut short": () => r.blockPage(0, page, ONE.subarray(3727, 3786)),
     "a block of seven numbers": () => r.decodeBlockAt(0, [0, 1, 0, 527, 1727, 4000, 0], ONE.subarray(527, 2254)),
     "a block's frame cut short": () => r.decodeBlockAt(0, [0, 523583100, 0, 527, 1727, 4000, 0, NaN], ONE.subarray(527, 2253)),
-    "a list of four numbers": () => r.decodeBlockAt(0, [0, 523583100, 0, 527, 1727, 4000, 0, NaN], ONE.subarray(527, 2254), new Float64Array(4)),
+    "a list of five numbers": () => r.decodeBlockAt(0, [0, 523583100, 0, 527, 1727, 4000, 0, NaN], ONE.subarray(527, 2254), new Float64Array(5)),
     "a derived channel it lacks": () => r.productValues(0, new Float32Array(1), new Float32Array(1)),
     "an overview row of four numbers": () => r.decodeOverviewAt(0, 0, [0, 0, 0, 0], new Uint8Array(1)),
     "a bundle it lacks": () => r.bundleFiles(new Uint8Array(4)),

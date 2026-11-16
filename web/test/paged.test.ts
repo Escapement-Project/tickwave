@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { MemoryBytes } from "../src/wasm/bytes.ts";
 import { handJson } from "../src/wasm/hand.ts";
 import { Opened } from "../src/wasm/opened.ts";
-import { endLosses, knownSpans, spanned, type AnalogChannel, type Break, type Gap } from "../src/source.ts";
+import { channelSampleTick, endLosses, knownSpans, sampleAtOrBefore, spanned, type AnalogChannel, type Break, type Gap } from "../src/source.ts";
 import { wasm } from "../scripts/node-wasm.ts";
 import { blockRows, directories, layout, leaves, range, type Entry } from "./layout.ts";
 
@@ -20,12 +20,14 @@ const dir = mkdtempSync(join(tmpdir(), "escapement-tickwave-paged-"));
 after(() => rmSync(dir, { recursive: true, force: true }));
 let LISTS: Uint8Array;
 let BLOCKS: Uint8Array;
+let PHASED: Uint8Array;
 let written: { length: number; breaks: [number, number, number][]; gaps: [number, number, boolean][]; edges: number[] };
 
 before(() => {
   execFileSync("cargo", ["run", "-q", "-p", "escapement-tickwave-format", "--example", "paged", "--", dir], { cwd: new URL("../..", import.meta.url).pathname, stdio: ["ignore", "ignore", "inherit"] });
   LISTS = new Uint8Array(readFileSync(join(dir, "lists.tickwave")));
   BLOCKS = new Uint8Array(readFileSync(join(dir, "blocks.tickwave")));
+  PHASED = new Uint8Array(readFileSync(join(dir, "phased-lists.tickwave")));
   written = JSON.parse(readFileSync(join(dir, "lists.json"), "utf8"));
 });
 
@@ -211,6 +213,41 @@ test("a channel's gaps in pages: edges read the pages a window needs, and the le
     assert.equal(listed.start, s === 40 ? 30 : undefined);
     assert.ok(touched(listPages, bytes.reads.slice(at)) <= most, `[${s}, ${e}) read ${touched(listPages, bytes.reads.slice(at))} list pages`);
   }
+});
+
+test("breaks in pages carry their phases: a window's samples sit at the ticks their places map to", async () => {
+  // C: run k of 20 samples from tick 100 + 100 k, the first at the declared phase of 3/4 of a
+  // tick, run k after it k % 4 quarter ticks past its tick; every 5/2 ticks. Sample n holds code n.
+  const { r } = await open(PHASED, "phased-lists.tickwave");
+  const c = r.info.channels[0];
+  assert.ok(c.kind === "analog" && c.paged);
+  const tickOf = (n: number) => {
+    const [k, j] = [Math.floor(n / 20), n % 20];
+    return Math.floor(100 + 100 * k + (k === 0 ? 3 : k % 4) / 4 + 2.5 * j);
+  };
+  let checked = 0;
+  // Windows over runs 1 to 3, over the end of run 100 and the start of 101 across the pause
+  // between, and over run 197: each holds a run whose phase is not 0.
+  for (const [s, e] of [
+    [200, 500],
+    [10_140, 10_260],
+    [19_800, 19_900],
+  ]) {
+    const got = await r.samples(0, s, e);
+    const place = spanned(c, got.listed) as AnalogChannel;
+    assert.ok(got.listed!.breaks!.some((b) => (b.phase ?? 0) !== 0), `[${s}, ${e})`);
+    for (let i = 0; i < got.values.length; i++) {
+      const n = got.first + i;
+      assert.equal(got.values[i], n, `[${s}, ${e}) sample ${n}`);
+      assert.equal(channelSampleTick(place, n), tickOf(n), `[${s}, ${e}) sample ${n}`);
+      assert.equal(sampleAtOrBefore(place, tickOf(n)), n, `[${s}, ${e}) sample ${n}`);
+      checked++;
+    }
+    // The window holds every sample whose tick lies in it, and no other.
+    const want = Array.from({ length: 4000 }, (_, n) => n).filter((n) => tickOf(n) >= s && tickOf(n) < e);
+    assert.deepEqual([got.first, got.values.length], [want[0], want.length], `[${s}, ${e})`);
+  }
+  assert.ok(checked > 50, `${checked}`);
 });
 
 test("a first draw reads no list page; the exact answer reads those its span needs", async () => {

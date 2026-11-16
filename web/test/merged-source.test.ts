@@ -65,15 +65,16 @@ test("each input's ticks scale by its ratio, and a later input's clashing name t
   assert.equal(info.length, 37_500);
   assert.deepEqual([...(await s.edges(0, 0, 24_000)).ticks], [2_400, 4_800]);
   assert.deepEqual([...(await s.edges(1, 0, 37_500)).ticks], [1_250, 2_500, 3_750]);
-  // The current keeps its period of 3/2 of its own ticks, each 125 merged ones: sample 1 at
-  // source tick 1, merged tick 125.
+  // The current keeps its period of 3/2 of its own ticks, each 125 merged ones: sample 1's place,
+  // source tick 1.5, lies at merged tick 187.5, so 187 (FORMAT.md, "Times": the place maps, not
+  // the whole tick before it).
   const i = info.channels[2];
   assert.ok(i.kind === "analog");
   assert.deepEqual([i.period, i.map?.m], [
     { num: 3, den: 2 },
     { num: 125, den: 1 },
   ]);
-  assert.deepEqual([1, 2, 199].map((k) => channelSampleTick(i, k)), [125, 375, 37_250]);
+  assert.deepEqual([1, 2, 199].map((k) => channelSampleTick(i, k)), [187, 375, 37_312]);
 });
 
 test("the level at a span's start counts the edges of the input tick it starts inside", async () => {

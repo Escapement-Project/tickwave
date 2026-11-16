@@ -55,11 +55,6 @@ export function firstAt(map: Mapping, t: number): number {
   return -mulDivFloor(-(t - map.origin), map.m.den, map.m.num) - map.offset;
 }
 
-/** Whether `map` puts every source tick at its own axis tick. */
-function identity(map: Mapping): boolean {
-  return map.origin === 0 && map.offset === 0 && map.m.num === map.m.den;
-}
-
 export interface DigitalChannel {
   readonly kind: "digital";
   readonly name: string;
@@ -91,13 +86,15 @@ export interface Gap {
 }
 
 /**
- * Sample `index` starts a new run at `tick`, after `lost` samples the instrument lost: 0 when it
- * paused (FORMAT.md, "Gaps").
+ * Sample `index` starts a new run at `tick` plus `phase` of its channel's grid's `1/d` ticks
+ * (`gridOf`), after `lost` samples the instrument lost: 0 when it paused (FORMAT.md, "Gaps").
  */
 export interface Break {
   readonly index: number;
   readonly tick: number;
   readonly lost: number;
+  /** In the channel's grid's `1/d` ticks; absent for 0. */
+  readonly phase?: number;
 }
 
 export interface AnalogChannel {
@@ -109,11 +106,14 @@ export interface AnalogChannel {
   readonly end: number;
   /** The unit of a value, such as "V" or "A". */
   readonly unit: string;
-  /** The source tick of sample 0. Sample i sits at first + floor(i * period), or after a break, at
-   * the break's tick plus floor((i - index) * period), in the source's ticks. */
+  /** The source tick the first run starts at. Sample i's place is first + phase + i × period, or
+   * after a break, the break's tick plus its phase plus (i − index) × period, in the source's
+   * ticks, exactly; it lies on the axis at the tick that place maps to (FORMAT.md, "Times"). */
   readonly first: number;
   /** Source ticks between samples. */
   readonly period: Ratio;
+  /** How far past `first` the first sample sits, below a tick; absent for 0. */
+  readonly phase?: Ratio;
   readonly count: number;
   /** Where the samples start again after a stop, in order, in the source's ticks. */
   readonly breaks?: readonly Break[];
@@ -192,7 +192,7 @@ export function axisPeriod(c: Pick<AnalogChannel, "period" | "map">): number {
 /** The first tick the channel can hold data at: a digital channel's `start` (0 when absent), an
  * analog channel's first sample; 0 for one this version can't read. */
 export function channelStart(c: Channel): number {
-  if (c.kind === "analog") return axisTick(mapOf(c), c.first);
+  if (c.kind === "analog") return runStartTick(c, -1);
   return c.kind === "digital" ? (c.start ?? 0) : 0;
 }
 
@@ -225,11 +225,10 @@ export function knownSpans(c: Channel, start: number, end: number): [number, num
   };
   if (c.kind === "analog") {
     const runs = c.breaks ?? [];
-    const map = mapOf(c);
     for (let k = 0; k <= runs.length; k++) {
-      const from = axisTick(map, k === 0 ? c.first : runs[k - 1].tick);
+      const from = runStartTick(c, k - 1);
       const last = (k < runs.length ? runs[k].index : c.count) - 1;
-      const to = k < runs.length ? Math.min(axisTick(map, runs[k].tick), placeAfter(c, last)) : c.end;
+      const to = k < runs.length ? Math.min(runStartTick(c, k), placeAfter(c, last)) : c.end;
       keep(from, to);
     }
     return spans;
@@ -256,104 +255,212 @@ export function rebased(c: Channel, start: number, e: Edges, from: number): { st
   return { start: gap.to, edges: { level: gap.level, ticks: e.ticks.subarray(lo) } };
 }
 
-/** How many of `runs` have `key` at or before `x`: they come in order, so these are the first.
- * A NaN `x` reads as past every run, as a walk back from the last leaves it. */
-function runsUpTo(runs: readonly Break[], key: (b: Break) => number, x: number): number {
-  if (Number.isNaN(x)) return runs.length;
-  let lo = 0;
-  let hi = runs.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1;
-    if (key(runs[mid]) <= x) lo = mid + 1;
-    else hi = mid;
-  }
-  return lo;
+// Where an analog channel's samples sit: crates/view/src/runs.rs, which the Rust view reads. A
+// sample's place is a whole number of its grid's `1/d` source ticks, and lies on the axis at the
+// tick it maps to (FORMAT.md, "Times"). Places are integers held exactly: a number while it is
+// one, a BigInt past 2^53.
+
+/** What places an analog channel's samples: its first run's tick, its period and phase, its
+ * count and breaks, and its mapping to the axis. */
+export type Runs = Pick<AnalogChannel, "first" | "period" | "phase" | "count" | "breaks" | "map">;
+
+/**
+ * An analog channel's grid (FORMAT.md, "Header"): its places are whole numbers of `1/d` source
+ * ticks, `d` the least common multiple of its period's and its phase's denominators; `step` is its
+ * period and `phase` its declared phase, in those.
+ */
+export interface Grid {
+  readonly d: number;
+  readonly step: number;
+  readonly phase: number;
 }
 
-type Runs = Pick<AnalogChannel, "first" | "period" | "breaks" | "map">;
+function gcd(a: number, b: number): number {
+  while (b !== 0) [a, b] = [b, a % b];
+  return a;
+}
 
-/** The source tick of sample `i` of an analog channel, its breaks included. */
-function sourceSampleTick(c: Runs, i: number): number {
-  const runs = c.breaks ?? [];
-  const k = runsUpTo(runs, (b) => b.index, i);
-  return k === 0 ? sampleTick(c.first, c.period, i) : sampleTick(runs[k - 1].tick, c.period, i - runs[k - 1].index);
+/** Channel `c`'s grid, from its period and declared phase. */
+export function gridOf(c: Pick<AnalogChannel, "period" | "phase">): Grid {
+  const g = gcd(c.period.num, c.period.den);
+  const [pn, pd] = [c.period.num / g, c.period.den / g];
+  const f = c.phase ?? { num: 0, den: 1 };
+  const h = gcd(f.num, f.den) || 1;
+  const [fn, fd] = [f.num / h, f.den / h];
+  const d = (pd / gcd(pd, fd)) * fd;
+  return { d, step: pn * (d / pd), phase: fn * (d / fd) };
+}
+
+type Int = number | bigint;
+
+const big = (x: Int): bigint => (typeof x === "bigint" ? x : BigInt(x));
+
+function add(a: Int, b: Int): Int {
+  if (typeof a === "number" && typeof b === "number" && Number.isSafeInteger(a + b)) return a + b;
+  return big(a) + big(b);
+}
+
+function mul(a: Int, b: Int): Int {
+  if (typeof a === "number" && typeof b === "number" && Number.isSafeInteger(a * b)) return a * b;
+  return big(a) * big(b);
+}
+
+const less = (a: Int, b: Int): boolean => (typeof a === "number" && typeof b === "number" ? a < b : big(a) < big(b));
+
+/** A run: the first, whose phase is the declared one, or one a break starts. */
+interface Run {
+  readonly index: number;
+  readonly tick: number;
+  readonly phase: number;
+}
+
+const firstRun = (c: Pick<AnalogChannel, "first">, g: Grid): Run => ({ index: 0, tick: c.first, phase: g.phase });
+const breakRun = (b: Break): Run => ({ index: b.index, tick: b.tick, phase: b.phase ?? 0 });
+
+/** Where `run` starts, in `1/d` ticks. */
+const startOf = (g: Grid, run: Run): Int => add(mul(run.tick, g.d), run.phase);
+
+/** The place of sample `i` on the grid of `run`, in `1/d` ticks; an index before the run's counts
+ * back from it. */
+const placeOf = (g: Grid, run: Run, i: number): Int => add(startOf(g, run), mul(i - run.index, g.step));
+
+/** The axis tick a place of `units / d` source ticks maps to: `origin + floor((units + offset ×
+ * d) × num / (den × d))` (FORMAT.md, "Times"). */
+export function axisPlace(map: Mapping, units: Int, d: number): number {
+  if (d === 1 && typeof units === "number") return axisTick(map, units);
+  const x = add(units, mul(map.offset, d));
+  const q = map.m.den * d;
+  if (typeof x === "number" && Number.isSafeInteger(q)) return map.origin + mulDivFloor(x, map.m.num, q);
+  const n = big(x) * BigInt(map.m.num);
+  const qq = BigInt(map.m.den) * BigInt(d);
+  const t = n / qq;
+  return map.origin + Number(n % qq !== 0n && n < 0n ? t - 1n : t);
+}
+
+/** The run that holds sample `i`: the last that starts at or before it. */
+function runOf(c: Runs, g: Grid, i: number): Run {
+  const b = c.breaks ?? [];
+  let lo = 0;
+  let hi = b.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (b[mid].index <= i) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo === 0 ? firstRun(c, g) : breakRun(b[lo - 1]);
+}
+
+/** The axis tick run `k` starts at: break `k`'s, or the first run's for -1. */
+function runStartTick(c: Runs, k: number): number {
+  const g = gridOf(c);
+  return axisPlace(mapOf(c), startOf(g, k < 0 ? firstRun(c, g) : breakRun(c.breaks![k])), g.d);
 }
 
 /** The axis tick of sample `i` of an analog channel, its breaks included. */
 export function channelSampleTick(c: Runs, i: number): number {
-  return axisTick(mapOf(c), sourceSampleTick(c, i));
+  const g = gridOf(c);
+  return axisPlace(mapOf(c), placeOf(g, runOf(c, g, i), i), g.d);
 }
 
 /** The axis tick of the place after sample `i` on its run's grid: where its time ends, unless the
  * next run or the length comes sooner (FORMAT.md, "Gaps"). */
 export function placeAfter(c: Runs, i: number): number {
-  const runs = c.breaks ?? [];
-  const k = runsUpTo(runs, (b) => b.index, i);
-  const place = k === 0 ? sampleTick(c.first, c.period, i + 1) : sampleTick(runs[k - 1].tick, c.period, i + 1 - runs[k - 1].index);
-  return axisTick(mapOf(c), place);
+  const g = gridOf(c);
+  return axisPlace(mapOf(c), placeOf(g, runOf(c, g, i), i + 1), g.d);
 }
 
-/** The least source tick whose axis tick is at or after axis tick `tick`; for the identity the
- * tick itself, a fraction included. */
-function sourceAtOrAfter(c: Pick<AnalogChannel, "map">, tick: number): number {
-  const map = mapOf(c);
-  if (identity(map) || !Number.isFinite(tick)) return tick;
-  return firstAt(map, Math.ceil(tick));
+/** The least of `count` indices from 0 at which `past` holds, `count` where it never does; `past`
+ * holds from some index on. */
+function firstIndex(count: number, past: (i: number) => boolean): number {
+  let lo = 0;
+  let hi = count;
+  while (lo < hi) {
+    const mid = lo + Math.floor((hi - lo) / 2);
+    if (past(mid)) hi = mid;
+    else lo = mid + 1;
+  }
+  return lo;
 }
 
-/** The greatest source tick whose axis tick is at or before axis tick `tick`; for the identity
- * the tick itself. */
-function sourceAtOrBefore(c: Pick<AnalogChannel, "map">, tick: number): number {
+/**
+ * The first sample whose axis tick reaches `tick` (passes it, where `strict`), `count` where none
+ * does. A sample's axis tick never falls as its index grows, since each run starts after the one
+ * before it ends: so it lies in the last run whose first sample doesn't reach `tick`, or is the
+ * first sample of the run after it.
+ */
+function firstPast(c: Runs, tick: number, strict: boolean): number {
+  const reaches = (t: number) => (strict ? t > tick : t >= tick);
+  const g = gridOf(c);
   const map = mapOf(c);
-  if (identity(map) || !Number.isFinite(tick)) return tick;
-  return firstAt(map, Math.floor(tick) + 1) - 1;
+  const b = c.breaks ?? [];
+  const at = (u: Int) => axisPlace(map, u, g.d);
+  const k = firstIndex(b.length, (j) => reaches(at(startOf(g, breakRun(b[j])))));
+  const run = k === 0 ? firstRun(c, g) : breakRun(b[k - 1]);
+  const from = run.index;
+  const to = k < b.length ? b[k].index : c.count;
+  if (from >= to) return from;
+  const past = (i: number) => reaches(at(placeOf(g, run, i)));
+  // An estimate from the mapping's inverse, settled against the samples' own ticks: off by a
+  // sample or two where a double resolves the ticks, and finished by a bisection where it doesn't.
+  const source = ((tick - map.origin) * map.m.den) / map.m.num - map.offset;
+  const units = source * g.d - Number(startOf(g, run));
+  const estimate = run.index + units / g.step;
+  let i = Number.isNaN(estimate) || estimate <= from ? from : estimate >= to ? to : Math.ceil(estimate);
+  for (let n = 0; n < 8; n++) {
+    if (i > from && past(i - 1)) i--;
+    else if (i < to && !past(i)) i++;
+    else return i;
+  }
+  if (i > from && past(i - 1)) return from + firstIndex(i - from, (j) => past(from + j));
+  return i + firstIndex(to - i, (j) => past(i + j));
 }
 
 /** The index of the first sample at or after axis tick `tick`, breaks included, clamped to
- * `0..=count`. */
-export function channelIndexAtOrAfter(c: Pick<AnalogChannel, "first" | "period" | "count" | "breaks" | "map">, tick: number): number {
-  return indexAtOrAfterSource(c, sourceAtOrAfter(c, tick));
-}
-
-/** `channelIndexAtOrAfter` for a source tick. */
-function indexAtOrAfterSource(c: Pick<AnalogChannel, "first" | "period" | "count" | "breaks">, tick: number): number {
-  const runs = c.breaks ?? [];
-  // The run whose start is the last at or before `tick`; its samples end where the next run's start.
-  const k = runsUpTo(runs, (b) => b.tick, tick);
-  const from = k === 0 ? 0 : runs[k - 1].index;
-  const to = k < runs.length ? runs[k].index : c.count;
-  const start = k === 0 ? c.first : runs[k - 1].tick;
-  return from + sampleIndexAtOrAfter(start, c.period, to - from, tick);
+ * `0..=count`. A NaN tick is past every sample. */
+export function channelIndexAtOrAfter(c: Runs, tick: number): number {
+  if (Number.isNaN(tick)) return c.count;
+  return firstPast(c, tick, false);
 }
 
 /** The span each break's lost samples cover, as FORMAT.md words it: from place `index` to place
- * `index + lost` on the grid of the run before the break, ending at the break's tick if that comes
- * sooner. Then those lost before the first sample, on the first run's grid up to it, and after the
- * last, on the last run's grid from the place after it. Whole ticks. */
+ * `index + lost` on the grid of the run before the break, ending at the break's start if that
+ * comes sooner. Then those lost before the first sample, on the first run's grid up to it, and
+ * after the last, on the last run's grid from the place after it. Whole ticks. */
 export function lostSpans(c: AnalogChannel): { from: number; to: number; lost: number }[] {
   const runs = c.breaks ?? [];
+  const g = gridOf(c);
   const map = mapOf(c);
   const out = runs.flatMap((b, k) => {
     if (b.lost === 0) return [];
-    const [index, tick] = k === 0 ? [0, c.first] : [runs[k - 1].index, runs[k - 1].tick];
-    const place = (i: number) => axisTick(map, Math.min(b.tick, sampleTick(tick, c.period, i - index)));
+    const run = k === 0 ? firstRun(c, g) : breakRun(runs[k - 1]);
+    const end = startOf(g, breakRun(b));
+    const place = (i: number) => {
+      const p = placeOf(g, run, i);
+      return axisPlace(map, less(p, end) ? p : end, g.d);
+    };
     return [{ from: place(b.index), to: place(b.index + b.lost), lost: b.lost }];
   });
   return [...out, ...endLosses(c)];
 }
 
-/** The spans of the samples lost before the first and after the last (FORMAT.md, "Gaps"). A
- * channel whose breaks are in pages knows its last run, and the span after it, only from an answer
- * that reaches its end (`spanned`): without one, the span after is left out. */
+/** The spans of the samples lost before the first and after the last (FORMAT.md, "Gaps"): before,
+ * from the place of `-lostBefore` on the first run's grid, where that is not before tick 0, to the
+ * first sample; after, from the place after the last sample to the place of `count + lostAfter`
+ * on the last run's grid. A channel whose breaks are in pages knows its last run, and the span
+ * after it, only from an answer that reaches its end (`spanned`): without one, the span after is
+ * left out. */
 export function endLosses(c: AnalogChannel): { from: number; to: number; lost: number }[] {
   const out: { from: number; to: number; lost: number }[] = [];
+  const g = gridOf(c);
   const map = mapOf(c);
-  if (c.lostBefore) out.push({ from: axisTick(map, sampleTick(c.first, c.period, -c.lostBefore)), to: axisTick(map, c.first), lost: c.lostBefore });
+  if (c.lostBefore) {
+    const from = placeOf(g, firstRun(c, g), -c.lostBefore);
+    if (!less(from, 0)) out.push({ from: axisPlace(map, from, g.d), to: runStartTick(c, -1), lost: c.lostBefore });
+  }
   if (c.lostAfter && c.count > 0 && !(c.paged && c.breaks === undefined)) {
     const runs = c.breaks ?? [];
-    const [index, tick] = runs.length === 0 ? [0, c.first] : [runs[runs.length - 1].index, runs[runs.length - 1].tick];
-    const place = (i: number) => axisTick(map, sampleTick(tick, c.period, i - index));
-    out.push({ from: place(c.count), to: place(c.count + c.lostAfter), lost: c.lostAfter });
+    const run = runs.length === 0 ? firstRun(c, g) : breakRun(runs[runs.length - 1]);
+    out.push({ from: placeAfter(c, c.count - 1), to: axisPlace(map, placeOf(g, run, c.count + c.lostAfter), g.d), lost: c.lostAfter });
   }
   return out;
 }
@@ -637,17 +744,9 @@ export function sampleIndexAtOrAfter(first: number, period: Ratio, count: number
  * before the first sample or past the channel's end.
  */
 export function sampleAtOrBefore(c: AnalogChannel, tick: number): number | null {
-  if (tick < channelStart(c) || tick >= c.end) return null;
-  tick = sourceAtOrBefore(c, tick);
-  if (c.breaks?.length) {
-    const i = indexAtOrAfterSource(c, tick + 1) - 1;
-    return i < 0 ? null : Math.min(i, c.count - 1);
-  }
-  let i = Math.floor(((tick - c.first) * c.period.den) / c.period.num);
-  // The division can land one off; settle it against the sample ticks themselves.
-  while (i > 0 && sampleTick(c.first, c.period, i) > tick) i--;
-  while (i + 1 < c.count && sampleTick(c.first, c.period, i + 1) <= tick) i++;
-  return Math.min(i, c.count - 1);
+  if (tick < channelStart(c) || tick >= c.end || c.count === 0) return null;
+  const i = firstPast(c, tick, true) - 1;
+  return i < 0 ? null : Math.min(i, c.count - 1);
 }
 
 /**

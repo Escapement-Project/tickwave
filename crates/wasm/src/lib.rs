@@ -535,17 +535,17 @@ fn block_ref(b: &[f64]) -> Result<BlockRef, JsError> {
     })
 }
 
-/// A channel's gaps or breaks as `listPage` gives them, three numbers an entry.
+/// A channel's gaps or breaks as `listPage` gives them, four numbers an entry.
 fn list_of(digital: bool, entries: &[f64]) -> Result<List, JsError> {
-    let (entries, rest) = entries.as_chunks::<3>();
+    let (entries, rest) = entries.as_chunks::<4>();
     if !rest.is_empty() {
-        return Err(JsError::new("a list is three numbers an entry"));
+        return Err(JsError::new("a list is four numbers an entry"));
     }
     Ok(if digital {
         List::Gaps(
             entries
                 .iter()
-                .map(|&[from, to, level]| Gap {
+                .map(|&[from, to, level, _]| Gap {
                     from: from as i64,
                     to: to as i64,
                     level: level != 0.0,
@@ -556,7 +556,10 @@ fn list_of(digital: bool, entries: &[f64]) -> Result<List, JsError> {
         List::Breaks(
             entries
                 .iter()
-                .map(|&[index, tick, lost]| Break::new(index as u64, tick as i64, lost as u64))
+                .map(|&[index, tick, lost, phase]| Break {
+                    phase: phase as u32,
+                    ..Break::new(index as u64, tick as i64, lost as u64)
+                })
                 .collect(),
         )
     })
@@ -747,8 +750,9 @@ impl Recording {
     }
 
     /// Channel `c`'s gaps or breaks on the list page `at` locates, from exactly its bytes, checked
-    /// as the whole list would be: three numbers an entry, a gap's `from`, `to` and level (0 or
-    /// 1), or a break's index, tick and samples lost, in source ticks.
+    /// as the whole list would be: four numbers an entry, a gap's `from`, `to`, level (0 or 1) and
+    /// 0, or a break's index, tick, samples lost and phase, in source ticks and the phase in the
+    /// channel's grid's `1/d` ticks.
     #[wasm_bindgen(js_name = listPage)]
     pub fn list_page(&self, c: usize, at: &[f64], bytes: &[u8]) -> Result<Vec<f64>, JsError> {
         let at = located(at)?;
@@ -762,11 +766,25 @@ impl Recording {
         Ok(match footer.list_page(c, &at, &page).map_err(js)? {
             List::Gaps(g) => g
                 .iter()
-                .flat_map(|g| [g.from as f64, g.to as f64, f64::from(u8::from(g.level))])
+                .flat_map(|g| {
+                    [
+                        g.from as f64,
+                        g.to as f64,
+                        f64::from(u8::from(g.level)),
+                        0.0,
+                    ]
+                })
                 .collect(),
             List::Breaks(b) => b
                 .iter()
-                .flat_map(|b| [b.index as f64, b.tick as f64, b.lost as f64])
+                .flat_map(|b| {
+                    [
+                        b.index as f64,
+                        b.tick as f64,
+                        b.lost as f64,
+                        f64::from(b.phase),
+                    ]
+                })
                 .collect(),
         })
     }

@@ -16,6 +16,12 @@
 //! G has an edge at 100 and one at 600,000. It bundles a sidecar that doesn't resolve: its
 //! hand-written file names another recording's id.
 //!
+//! `phased-lists.tickwave` has a channel whose breaks, each with a phase, are in list pages: C, at
+//! 1 MHz, 16-bit codes every 5/2 ticks, its declared phase 3/4 of a tick, so a grid of quarter
+//! ticks. Run k of 20 samples starts at tick 100 + 100 k, 200 runs: the first at the declared
+//! phase, run k after it k % 4 quarters past its tick. Sample n's code is n. Each run's sample 11
+//! starts a block at its own tick, 28 ticks into the run where its phase is 2/4 or 3/4, else 27.
+//!
 //! Run from the repository:
 //!
 //!     cargo run -p escapement-tickwave-format --example paged -- DIR
@@ -192,6 +198,71 @@ fn main() {
     std::fs::write(dir.join("lists.json"), json).unwrap();
     println!("lists.tickwave");
     blocks(&dir);
+    phased_lists(&dir);
+}
+
+fn phased_lists(dir: &std::path::Path) {
+    const RUNS: u64 = 200;
+    let timebase = Ratio::integer(1_000_000).unwrap();
+    let declaration = Declaration {
+        timebase,
+        channels: vec![DeclaredChannel {
+            name: "C".into(),
+            source_name: "c".into(),
+            source: 0,
+            data: DeclaredKind::Analog {
+                unit: "V".into(),
+                period: Ratio::new(5, 2).unwrap(),
+                coding: AnalogCoding::Int(IntCoding::new(16, false)),
+                significant: None,
+                phase: Some(Ratio::new(3, 4).unwrap()),
+            },
+            shaping: Default::default(),
+            overview_shift: Some(6),
+            codec: None,
+            requires: Vec::new(),
+        }],
+        derived: Vec::new(),
+        sources: vec![SourceHeader::new(
+            SourceFormat::Other("crafted".into()),
+            timebase,
+        )],
+        title: None,
+        meta: BTreeMap::new(),
+        overview_shift: 6,
+        requires: Vec::new(),
+    };
+    let mut w = Writer::new(
+        declaration,
+        WriteOptions {
+            level: 1,
+            ..WriteOptions::default()
+        },
+    )
+    .unwrap();
+    let mut file = w.take_output();
+    for k in 0..RUNS {
+        let tick = 100 + 100 * k as i64;
+        if k == 0 {
+            w.run(0, tick, 0).unwrap();
+        } else {
+            w.run_at(0, tick, (k % 4) as u32, 0).unwrap();
+        }
+        // Sample 11's place is 27.5 ticks and the run's phase past its tick: at 28 where the phase
+        // is 2/4 or 3/4, 27 otherwise. A flush there starts a block at it.
+        let phase = if k == 0 { 3 } else { k % 4 };
+        for j in 0..RUN {
+            if j == 11 {
+                w.flush(tick + if phase >= 2 { 28 } else { 27 }).unwrap();
+            }
+            w.sample(0, k * RUN + j).unwrap();
+        }
+    }
+    file.extend(w.take_output());
+    let length = 100 + 100 * RUNS as i64;
+    file.extend(&w.finish(length, &[], Finish::default()).unwrap().tail);
+    std::fs::write(dir.join("phased-lists.tickwave"), file).unwrap();
+    println!("phased-lists.tickwave");
 }
 
 fn blocks(dir: &std::path::Path) {
