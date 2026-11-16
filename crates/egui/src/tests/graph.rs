@@ -495,7 +495,7 @@ fn a_new_trace_is_asked_for_at_once_and_drawn_only_from_its_own_answer() {
     assert!(viewer(&h).busy());
     let issued = viewer(&h).issued();
     // V in place of I: asked for though a query is under way.
-    h.state_mut().trace = 0;
+    h.state_mut().trace = Some(0);
     h.step();
     assert_eq!(viewer(&h).issued(), issued + 1);
     for _ in 0..3 {

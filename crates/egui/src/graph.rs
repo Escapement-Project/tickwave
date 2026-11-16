@@ -1,5 +1,5 @@
-//! The graph: one analog trace, DIO lanes under it on the same time axis, markers, the selection,
-//! and the gestures that move them.
+//! The graph: one analog trace, or none, DIO lanes under it on the same time axis, markers, the
+//! selection, and the gestures that move them.
 
 use std::ops::Range;
 
@@ -39,9 +39,9 @@ pub struct Extras {
     pub successor_of: Option<MarkerCursor>,
 }
 
-/// An analog or derived channel's trace, with digital channels in lanes under it. It queries
-/// through its `Viewer` and draws the latest answer, mapped to the window on screen while a
-/// newer one is on the way.
+/// An analog or derived channel's trace, with digital channels in lanes under it, or digital
+/// channels alone (`lanes_only`). It queries through its `Viewer` and draws the latest answer,
+/// mapped to the window on screen while a newer one is on the way.
 ///
 /// Drag or scroll to move along time, ctrl-scroll or pinch to zoom it. A vertical drag or
 /// scroll past a 12-point detent takes Y off the fit and moves it, a drag on the value axis
@@ -51,7 +51,7 @@ pub struct Graph<'a> {
     viewer: &'a Viewer,
     state: &'a mut ViewState,
     palette: &'a Palette,
-    trace: usize,
+    trace: Option<usize>,
     flag: Option<usize>,
     lanes: &'a [usize],
     include_zero: bool,
@@ -73,7 +73,7 @@ impl<'a> Graph<'a> {
             viewer,
             state,
             palette,
-            trace,
+            trace: Some(trace),
             flag: None,
             lanes: &[],
             include_zero: false,
@@ -81,6 +81,17 @@ impl<'a> Graph<'a> {
             height: None,
             now: None,
             id_salt: IdSalt::new("tickwave graph"),
+        }
+    }
+
+    /// Digital channels alone, in the lanes `lanes` gives, with no trace: the graph is its lanes,
+    /// a band over them for the markers' labels where the recording has markers, and the time
+    /// axis, and its height is what those take unless `height` gives one. A flag, with no samples
+    /// to draw, does nothing; nor does a vertical drag or the value axis's, which it hasn't.
+    pub fn lanes_only(viewer: &'a Viewer, state: &'a mut ViewState, palette: &'a Palette) -> Self {
+        Self {
+            trace: None,
+            ..Self::new(viewer, state, palette, 0)
         }
     }
 
@@ -236,9 +247,8 @@ impl Graph<'_> {
     fn layout(&self, ui: &mut Ui, facts: &Facts) -> Layout {
         let _span = tracing::debug_span!("layout").entered();
         let p = self.palette;
-        let unit = facts
-            .channels
-            .get(self.trace)
+        let unit = (self.trace)
+            .and_then(|t| facts.channels.get(t))
             .map_or("", |c| c.unit.as_str());
         let measure = |text: String, font: &egui::FontId| {
             ui.painter()
@@ -247,8 +257,11 @@ impl Graph<'_> {
                 .x
         };
         // As wide as the widest value label a unit can take, so the plot stays where it is as
-        // the labels change.
-        let mut gutter = measure(format!("{MINUS}888.888{NBSP}M{unit}"), &p.figures);
+        // the labels change; with no trace, as wide as the lanes' names.
+        let mut gutter = match self.trace {
+            Some(_) => measure(format!("{MINUS}888.888{NBSP}M{unit}"), &p.figures),
+            None => 0.0,
+        };
         for &c in self.lanes {
             if let Some(info) = facts.channels.get(c) {
                 gutter = gutter.max(measure(info.name.clone(), &p.labels));
@@ -257,10 +270,21 @@ impl Graph<'_> {
         let gutter = (gutter + 12.0).ceil().max(40.0);
         let label_row = (ui.fonts_mut(|f| f.row_height(&p.labels)) + 2.0).ceil();
         let lanes = self.lanes.len() as f32 * LANE_HEIGHT;
-        let height = self
-            .height
-            .unwrap_or_else(|| ui.available_height())
-            .max(MIN_TRACE + lanes + AXIS_HEIGHT);
+        let height = match self.trace {
+            Some(_) => self
+                .height
+                .unwrap_or_else(|| ui.available_height())
+                .max(MIN_TRACE + lanes + AXIS_HEIGHT),
+            // The markers' labels in their rows above the lanes, where there are markers.
+            None => {
+                let band = match facts.markers {
+                    true => LABEL_TOP + LABEL_ROWS as f32 * label_row,
+                    false => 0.0,
+                };
+                let least = band + lanes + AXIS_HEIGHT;
+                self.height.unwrap_or(least).max(least)
+            }
+        };
         let width = ui.available_width().max(gutter + 40.0);
         let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
         let plot = Rect::from_min_max(
@@ -325,7 +349,8 @@ impl Graph<'_> {
         facts: &Facts,
         whole: (f64, f64),
     ) -> escapement_tickwave_view::scale::ScaleLimits {
-        let resolution = match facts.channels.get(self.trace).and_then(|c| c.resolution) {
+        let channel = self.trace.and_then(|t| facts.channels.get(t));
+        let resolution = match channel.and_then(|c| c.resolution) {
             Some(Resolution::Code { scale, .. }) => {
                 Some((scale.num() as f64 / scale.den() as f64).abs())
             }
@@ -445,7 +470,7 @@ impl Graph<'_> {
         if delta.x != 0.0 {
             self.pan(view, delta.x, memory);
         }
-        if response.double_clicked() {
+        if response.double_clicked() || self.trace.is_none() {
             return;
         }
         match self.state.y {
@@ -500,7 +525,7 @@ impl Graph<'_> {
     }
 
     fn request(&self, columns: u32) -> Request {
-        let mut channels = vec![self.trace];
+        let mut channels: Vec<usize> = self.trace.into_iter().collect();
         channels.extend_from_slice(self.lanes);
         let following = matches!(self.state.window, Window::Follow { .. });
         Request {
@@ -509,8 +534,8 @@ impl Graph<'_> {
             now: self.now.filter(|_| following),
             columns,
             channels,
-            flags: self.flag.map(|f| (self.trace, f)).into_iter().collect(),
-            strip: Some((self.trace, columns)),
+            flags: (self.trace.zip(self.flag)).into_iter().collect(),
+            strip: self.trace.map(|t| (t, columns)),
             selection: self.state.selection.clone(),
             markers: MarkerQuery {
                 limit: MARKER_LIMIT,
@@ -559,13 +584,16 @@ impl Widget for Graph<'_> {
         let held: Option<Held> = self.viewer.held();
         let layout = self.layout(ui, &facts);
         let mut response = ui.interact(layout.rect, id, Sense::click_and_drag());
-        let value_axis = ui
-            .interact(layout.gutter, id.with("value axis"), Sense::drag())
-            .on_hover_and_drag_cursor(CursorIcon::ResizeVertical);
+        let value_axis = match self.trace {
+            Some(_) => ui
+                .interact(layout.gutter, id.with("value axis"), Sense::drag())
+                .on_hover_and_drag_cursor(CursorIcon::ResizeVertical),
+            None => ui.interact(layout.gutter, id.with("value axis"), Sense::hover()),
+        };
         let mut memory: Memory = ui.data(|d| d.get_temp(id)).unwrap_or_default();
         let before = (self.state.window.clone(), self.state.selection.clone());
         let extent = held.as_ref().and_then(|h| h.answer.extent.clone());
-        let trace = held.as_ref().and_then(|h| Trace::of(h, self.trace));
+        let trace = (held.as_ref().zip(self.trace)).and_then(|(h, t)| Trace::of(h, t));
 
         let view = View::new(
             self.state.window.resolve(extent.as_ref(), self.now),

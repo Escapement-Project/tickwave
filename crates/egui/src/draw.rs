@@ -213,8 +213,8 @@ pub(crate) struct Frame<'a> {
     pub palette: &'a Palette,
     pub facts: &'a Facts,
     pub held: Option<&'a Held>,
-    /// The trace's channel.
-    pub channel: usize,
+    /// The trace's channel; None for a graph of lanes alone.
+    pub channel: Option<usize>,
     pub trace: Option<&'a Trace<'a>>,
     pub lanes: &'a [usize],
     pub selection: Option<&'a Range<i64>>,
@@ -467,15 +467,17 @@ fn axes(ui: &Ui, f: &Frame, field: Rect) -> Vec<(String, Pos2, Align2, egui::Fon
             p.figures.clone(),
         ));
     }
-    let unit = f
-        .facts
-        .channels
-        .get(f.channel)
+    let unit = (f.channel)
+        .and_then(|c| f.facts.channels.get(c))
         .map_or("", |c| c.unit.as_str());
-    if let Some(m) = range_marks(ValueRange {
-        lo: f.y.0,
-        hi: f.y.1,
-    }) {
+    // A graph of lanes alone has no value axis.
+    let marks = f.channel.and_then(|_| {
+        range_marks(ValueRange {
+            lo: f.y.0,
+            hi: f.y.1,
+        })
+    });
+    if let Some(m) = marks {
         let right = l.gutter.right() - 6.0;
         let texts = format_marks(m.top, m.bottom, m.place, unit);
         for (value, text, align, nudge) in [

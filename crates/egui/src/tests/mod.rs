@@ -2,6 +2,7 @@
 //! captures are, a host that keeps a `ViewState`, and readers of what a frame painted.
 
 mod graph;
+mod lanes;
 mod live;
 mod strip;
 mod viewer;
@@ -415,7 +416,8 @@ pub struct Host {
     pub viewer: Option<Viewer>,
     pub state: ViewState,
     pub palette: Palette,
-    pub trace: usize,
+    /// None for a graph of lanes alone.
+    pub trace: Option<usize>,
     pub flag: Option<usize>,
     pub lanes: Vec<usize>,
     pub include_zero: bool,
@@ -441,7 +443,7 @@ pub fn harness_at(state: ViewState, pixels_per_point: f32) -> Harness<'static, H
         viewer: None,
         state,
         palette: palette(),
-        trace: I,
+        trace: Some(I),
         flag: Some(UNDER),
         lanes: LANES.to_vec(),
         include_zero: true,
@@ -462,7 +464,11 @@ pub fn harness_at(state: ViewState, pixels_per_point: f32) -> Harness<'static, H
             |ui, host: &mut Host| {
                 let Some(viewer) = &host.viewer else { return };
                 host.id = Some(ui.make_persistent_id(IdSalt::new(SALT)));
-                let mut graph = Graph::new(viewer, &mut host.state, &host.palette, host.trace)
+                let graph = match host.trace {
+                    Some(t) => Graph::new(viewer, &mut host.state, &host.palette, t),
+                    None => Graph::lanes_only(viewer, &mut host.state, &host.palette),
+                };
+                let mut graph = graph
                     .flag(host.flag)
                     .lanes(&host.lanes)
                     .include_zero(host.include_zero)
