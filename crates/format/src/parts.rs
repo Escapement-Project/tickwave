@@ -352,4 +352,26 @@ impl Footer {
         }
         Ok(Some(Sidecar { files, left_out }))
     }
+
+    /// Each generator's lines through `each`, as its generator and the line, from every part in
+    /// the order of their rows, one part held at a time. An annotation that starts at or past the
+    /// length is left out and a span that ends past it ends there, as in `read_sidecar`; unlike
+    /// it, this needs no bundle and keeps the second annotation of an id.
+    pub fn each_generated_line<E: From<DecodeError>>(
+        &self,
+        mut fetch: impl FnMut(u64, u32) -> Result<Vec<u8>, E>,
+        mut each: impl FnMut(&str, &str) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let (length, timebase) = (self.header.length, self.header.timebase);
+        for row in self.part_rows(&mut fetch)? {
+            let frame = fetch(row.offset, row.length)?;
+            let part = self.decode_part(&row, &frame)?;
+            for line in part.lines() {
+                if let Some(line) = clipped(line, length, timebase) {
+                    each(&part.source, &line)?;
+                }
+            }
+        }
+        Ok(())
+    }
 }

@@ -173,6 +173,17 @@ struct Supports<'a> {
     per: NonZeroU128,
     /// The length, in those units.
     length: i128,
+    /// The run of the last sample asked for, as the samples it holds and its place among the
+    /// breaks. Samples are asked for in order, so the next is most often in it.
+    run: Option<(Range<u64>, usize)>,
+    /// The sample after the last one asked for, where it is in the same run, and its place on the
+    /// axis, not yet held to the length.
+    ahead: Option<(u64, i128)>,
+    /// Whether `map` is the identity, under which a place's axis time is the place.
+    identity: bool,
+    /// How long one sample lasts on a run's grid, in those units: the step times `m`'s
+    /// numerator. None where `origin × per` or it is too large for the bound `of` needs.
+    stride: Option<i128>,
 }
 
 impl<'a> Supports<'a> {
@@ -188,11 +199,26 @@ impl<'a> Supports<'a> {
             per,
             // Below 2^122 for a length below 2^53; saturating past it.
             length: i128::from(length).saturating_mul(units(per)),
+            run: None,
+            ahead: None,
+            identity: runs.map.is_identity(),
+            stride: i128::try_from(runs.grid.step())
+                .ok()
+                .and_then(|s| s.checked_mul(i128::from(runs.map.m().num())))
+                .filter(|&s| {
+                    s < 1 << 90
+                        && i128::from(runs.map.origin())
+                            .checked_mul(units(per))
+                            .is_some_and(|o| o.unsigned_abs() < 1 << 125)
+                }),
         }
     }
 
     /// A place of `units / d` source ticks on the axis, in `1 / per` ticks, saturating.
     fn at(&self, units: i128) -> i128 {
+        if self.identity {
+            return units;
+        }
         self.map
             .axis_time(units, self.grid.d())
             .unwrap_or(if units < 0 { i128::MIN } else { i128::MAX })
@@ -200,17 +226,47 @@ impl<'a> Supports<'a> {
 
     /// The time of sample `i`, one the channel has.
     fn of(&mut self, i: u64) -> Range<i128> {
-        let k = self.breaks.partition_point(|b| b.index <= i);
+        let k = match &self.run {
+            Some((held, k)) if held.contains(&i) => *k,
+            _ => {
+                let k = self.breaks.partition_point(|b| b.index <= i);
+                let from = k.checked_sub(1).map_or(0, |p| self.breaks[p].index);
+                let to = self.breaks.get(k).map_or(u64::MAX, |b| b.index);
+                self.run = Some((from..to, k));
+                k
+            }
+        };
         let run = match k.checked_sub(1) {
             None => self.grid.first_run(self.first, 0),
             Some(p) => self.breaks[p],
         };
-        let mut to = self.grid.place(run, i.saturating_add(1));
-        if let Some(next) = self.breaks.get(k).filter(|b| b.index == i + 1) {
-            to = to.min(self.grid.start(*next));
-        }
-        let from = self.at(self.grid.place(run, i)).min(self.length);
-        from..self.at(to).min(self.length)
+        let from = match self.ahead {
+            Some((j, t)) if j == i => t,
+            _ => self.at(self.grid.place(run, i)),
+        };
+        let next = self.breaks.get(k).filter(|b| b.index == i + 1);
+        let to = match (next, self.stride) {
+            // The time is linear in the place, and with `from` below 2^100 no sum `at` makes for
+            // the next place passes 128 bits, so it is this one's plus the stride exactly.
+            (None, Some(stride)) if from.unsigned_abs() < 1 << 100 => from + stride,
+            (None, _) => self.at(self.grid.place(run, i.saturating_add(1))),
+            (Some(next), _) => {
+                let after = self.grid.place(run, i.saturating_add(1));
+                self.at(after.min(self.grid.start(*next)))
+            }
+        };
+        self.ahead = next.is_none().then_some((i + 1, to));
+        from.min(self.length)..to.min(self.length)
+    }
+}
+
+/// A sum, or the overflow it ran into. `ok_or(Error::Overflow)` builds the error, and drops it,
+/// on every call: this runs for every sample.
+#[inline]
+fn held(x: Option<i128>) -> Result<i128, Error> {
+    match x {
+        Some(x) => Ok(x),
+        None => Err(Error::Overflow),
     }
 }
 
@@ -245,7 +301,7 @@ impl Tally {
 
     fn measure(&mut self, samples: u64, units: i128) -> Result<(), Error> {
         self.samples += samples;
-        self.measured = self.measured.checked_add(units).ok_or(Error::Overflow)?;
+        self.measured = held(self.measured.checked_add(units))?;
         Ok(())
     }
 
@@ -253,15 +309,13 @@ impl Tally {
         let Weighted::Codes(sum) = &mut self.sum else {
             unreachable!("only an exact channel's codes are summed");
         };
-        *sum = codes
-            .checked_mul(units)
-            .and_then(|x| sum.checked_add(x))
-            .ok_or(Error::Overflow)?;
+        *sum = held(codes.checked_mul(units).and_then(|x| sum.checked_add(x)))?;
         Ok(())
     }
 
     /// One sample over `units` of the interval, in `1 / per` ticks; its code where the channel is
     /// exact.
+    #[inline]
     fn sample(&mut self, v: f64, code: Option<i128>, units: i128) -> Result<(), Error> {
         if units <= 0 || v.is_nan() {
             return Ok(());
@@ -281,7 +335,7 @@ impl Tally {
     /// `n` samples a bucket holds, a full period of `p` units each, with its extremes and its
     /// codes' sum.
     fn bucket(&mut self, n: u64, p: i128, min: f64, max: f64, codes: i128) -> Result<(), Error> {
-        let units = i128::from(n).checked_mul(p).ok_or(Error::Overflow)?;
+        let units = held(i128::from(n).checked_mul(p))?;
         self.measure(n, units)?;
         self.value(min);
         self.value(max);
@@ -530,8 +584,28 @@ mod tests {
     use escapement_tickwave_format::mapping::Mapping;
     use escapement_tickwave_format::model::{Break, Grid, Ratio};
 
-    use super::Supports;
+    use super::{Supports, Tally, Weighted};
+    use crate::recording::Error;
     use crate::runs::Runs;
+
+    /// A sum that passes 128 bits, of the time measured or of code × time, is an error, not a
+    /// figure wrapped or held at the bound.
+    #[test]
+    fn a_sum_past_what_128_bits_hold_is_an_error() {
+        let tally = |measured| Tally {
+            samples: 0,
+            measured,
+            per: std::num::NonZeroU128::MIN,
+            min: f64::INFINITY,
+            max: f64::NEG_INFINITY,
+            sum: Weighted::Codes(0),
+        };
+        let overflow = |r: Result<(), Error>| matches!(r, Err(Error::Overflow));
+        assert!(overflow(tally(0).sample(1.0, Some(i128::MAX / 2), 3)));
+        assert!(overflow(tally(i128::MAX).sample(1.0, Some(1), 1)));
+        assert!(overflow(tally(0).bucket(3, i128::MAX / 2, 1.0, 1.0, 1)));
+        assert!(tally(0).sample(1.0, Some(i128::MAX / 3), 3).is_ok());
+    }
 
     fn brk(index: u64, tick: i64) -> Break {
         Break {

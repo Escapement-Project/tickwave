@@ -128,10 +128,11 @@ impl PartMarkers {
     }
 }
 
-/// The markers of some of a file's parts, and what reading them left out.
+/// The markers of some of a file's parts, each its cursor and its annotation in the part, and
+/// what reading them left out.
 #[derive(Default)]
-struct Parts {
-    markers: Vec<Marker>,
+struct Parts<'a> {
+    markers: Vec<(MarkerCursor, &'a Annotation)>,
     /// Each line left out for the length or as the second of an id, in the order of the lines.
     joined: Vec<String>,
     /// Each line left out for a rule it breaks, in the order of the lines.
@@ -141,18 +142,53 @@ struct Parts {
 /// The markers of `m`, sorted, that start in `interval`, after `after` where it is given, at most
 /// `limit` of them.
 fn page(m: &[Marker], interval: Range<i64>, after: Option<MarkerCursor>, limit: usize) -> Page {
-    let lo = m.partition_point(|x| x.cursor.tick < interval.start);
-    let hi = m.partition_point(|x| x.cursor.tick < interval.end).max(lo);
+    let (at, next, total) = page_of(m, |x| x.cursor, interval, after, limit);
+    Page {
+        entries: m[at].to_vec(),
+        next,
+        total,
+    }
+}
+
+/// `page` of markers held by reference, each cloned only where the page takes it.
+fn page_of_refs(
+    m: &[(MarkerCursor, &Annotation)],
+    interval: Range<i64>,
+    after: Option<MarkerCursor>,
+    limit: usize,
+) -> Page {
+    let (at, next, total) = page_of(m, |x| x.0, interval, after, limit);
+    Page {
+        entries: m[at]
+            .iter()
+            .map(|&(cursor, a)| Marker {
+                cursor,
+                annotation: a.clone(),
+            })
+            .collect(),
+        next,
+        total,
+    }
+}
+
+/// Where `page`'s markers lie in `m`, sorted by `cursor`; the cursor to ask from for the next
+/// page, and how many the interval holds.
+fn page_of<T>(
+    m: &[T],
+    cursor: impl Fn(&T) -> MarkerCursor,
+    interval: Range<i64>,
+    after: Option<MarkerCursor>,
+    limit: usize,
+) -> (Range<usize>, Option<MarkerCursor>, usize) {
+    let lo = m.partition_point(|x| cursor(x).tick < interval.start);
+    let hi = m.partition_point(|x| cursor(x).tick < interval.end).max(lo);
     let from = match after {
-        Some(c) => m[lo..hi].partition_point(|x| x.cursor <= c) + lo,
+        Some(c) => m[lo..hi].partition_point(|x| cursor(x) <= c) + lo,
         None => lo,
     };
     let to = hi.min(from.saturating_add(limit));
-    Page {
-        entries: m[from..to].to_vec(),
-        next: (to < hi && to > from).then(|| m[to - 1].cursor),
-        total: hi - lo,
-    }
+    let next = (to < hi && to > from).then(|| cursor(&m[to - 1]));
+    (from..to, next, hi - lo)
 }
 
 /// A writer's annotation, `annotation` one line of generator `source`'s file with its times in
@@ -252,14 +288,17 @@ impl Recording {
             .plain
             .partition_point(|m| m.cursor.tick < interval.end)
             .max(lo);
-        let mut list = file.plain[lo..hi].to_vec();
-        let mut read = self.read_parts(&footer, file, &rows)?;
-        read.markers.retain(|m| {
-            interval.contains(&m.cursor.tick) && self.unavailable_in(&m.annotation).is_none()
-        });
-        list.append(&mut read.markers);
-        list.sort_unstable_by_key(|m| m.cursor);
-        Ok(page(&list, interval, after, limit))
+        let parts = self.read_parts(&footer, &rows)?;
+        let read = kept_lines(file, &parts)?;
+        let mut list: Vec<(MarkerCursor, &Annotation)> = file.plain[lo..hi]
+            .iter()
+            .map(|m| (m.cursor, &m.annotation))
+            .collect();
+        list.extend(read.markers.into_iter().filter(|&(cursor, a)| {
+            interval.contains(&cursor.tick) && self.unavailable_in(a).is_none()
+        }));
+        list.sort_unstable_by_key(|m| m.0);
+        Ok(page_of_refs(&list, interval, after, limit))
     }
 
     /// A finished file's markers whole: every part's lines, and the hand-written file's
@@ -275,11 +314,12 @@ impl Recording {
         let rows = footer.parts_meeting_at(i64::MIN..i64::MAX, |offset, len| {
             self.parts_page(offset, len)
         })?;
-        let read = self.read_parts(&footer, file, &rows)?;
+        let parts = self.read_parts(&footer, &rows)?;
+        let read = kept_lines(file, &parts)?;
         let by_id: HashMap<&str, &Annotation> = read
             .markers
             .iter()
-            .map(|m| (m.annotation.id.as_str(), &m.annotation))
+            .map(|&(_, a)| (a.id.as_str(), a))
             .collect();
         let (hand, included) = hand_and_included(&file.files)?;
         let apart = annotations::resolve_apart(hand, &included, &footer.header, &|target| {
@@ -289,7 +329,10 @@ impl Recording {
         left_out.extend(read.broken);
         left_out.extend(apart.problems);
         let mut list = hand_markers(apart.annotations);
-        list.extend(read.markers);
+        list.extend(read.markers.iter().map(|&(cursor, a)| Marker {
+            cursor,
+            annotation: a.clone(),
+        }));
         self.keep_available(&mut list, &mut left_out);
         list.sort_unstable_by_key(|m| m.cursor);
         let mut markers = Markers::of(list);
@@ -367,62 +410,15 @@ impl Recording {
         })
     }
 
-    /// The markers of the parts at `rows`, given in the order of the rows: each line resolved
-    /// alone, and the second of an id its generator gave already among them left out.
+    /// The parts at `rows`, each with its row, in the order of the rows.
     fn read_parts(
         &self,
         footer: &Footer,
-        file: &FileAnnotations,
         rows: &[(u64, PartRow)],
-    ) -> Result<Parts, Error> {
-        let mut out = Parts::default();
-        let mut ids: HashSet<(&str, &str)> = HashSet::new();
-        let parts = rows
-            .iter()
+    ) -> Result<Vec<(u64, Arc<PartMarkers>)>, Error> {
+        rows.iter()
             .map(|(at, row)| Ok((*at, self.part(footer, row)?)))
-            .collect::<Result<Vec<_>, Error>>()?;
-        for (at, part) in &parts {
-            let Some(&rank) = file.ranks.get(&part.source) else {
-                return Err(DecodeError::Corrupt(format!(
-                    "an annotation part of generator {:?}, which has no file in the bundle",
-                    part.source
-                ))
-                .into());
-            };
-            for (n, line) in part.lines.iter().enumerate() {
-                let (id, annotation) = match line {
-                    PartLine::Past(why) => {
-                        out.joined.push(why.clone());
-                        continue;
-                    }
-                    PartLine::Read { id, annotation } => (id, annotation),
-                };
-                if let Some(id) = id
-                    && !ids.insert((&part.source, id))
-                {
-                    out.joined.push(format!(
-                        "{}/{id}: an id its generator has given already",
-                        part.source
-                    ));
-                    continue;
-                }
-                let Some(rank) = rank else {
-                    // Its file's first line breaks a rule, which the bundle's problems name.
-                    continue;
-                };
-                match annotation {
-                    Ok(a) => out.markers.push(Marker {
-                        cursor: MarkerCursor {
-                            tick: a.start,
-                            arrival: arrival(rank, *at, n),
-                        },
-                        annotation: (**a).clone(),
-                    }),
-                    Err(why) => out.broken.push(why.clone()),
-                }
-            }
-        }
-        Ok(out)
+            .collect()
     }
 
     /// The part at `row`, read and resolved the first time, then from the cache.
@@ -491,6 +487,58 @@ impl Recording {
                     .any(|c| c.unavailable.is_some() && c.name == *name)
             })
     }
+}
+
+/// The markers of `parts`, given in the order of their rows: each line resolved alone, and the
+/// second of an id its generator gave already among them left out.
+fn kept_lines<'a>(
+    file: &FileAnnotations,
+    parts: &'a [(u64, Arc<PartMarkers>)],
+) -> Result<Parts<'a>, Error> {
+    let mut out = Parts::default();
+    let mut ids: HashSet<(&str, &str), foldhash::fast::RandomState> = HashSet::default();
+    for (at, part) in parts {
+        let Some(&rank) = file.ranks.get(&part.source) else {
+            return Err(DecodeError::Corrupt(format!(
+                "an annotation part of generator {:?}, which has no file in the bundle",
+                part.source
+            ))
+            .into());
+        };
+        for (n, line) in part.lines.iter().enumerate() {
+            let (id, annotation) = match line {
+                PartLine::Past(why) => {
+                    out.joined.push(why.clone());
+                    continue;
+                }
+                PartLine::Read { id, annotation } => (id, annotation),
+            };
+            if let Some(id) = id
+                && !ids.insert((&part.source, id))
+            {
+                out.joined.push(format!(
+                    "{}/{id}: an id its generator has given already",
+                    part.source
+                ));
+                continue;
+            }
+            let Some(rank) = rank else {
+                // Its file's first line breaks a rule, which the bundle's problems name.
+                continue;
+            };
+            match annotation {
+                Ok(a) => out.markers.push((
+                    MarkerCursor {
+                        tick: a.start,
+                        arrival: arrival(rank, *at, n),
+                    },
+                    a,
+                )),
+                Err(why) => out.broken.push(why.clone()),
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// The hand-written file of a bundle and its generator files.

@@ -937,8 +937,8 @@ fn repair_keeps_marks_past_the_last_block_and_a_file_of_marks_alone() {
         panic!()
     };
     assert_eq!(end, 200);
-    assert_eq!(fixed.generated["verge"].len(), 2);
     let file = [&cut[..fixed.keep as usize], &fixed.tail].concat();
+    assert_eq!(common::each_generated(&file)["verge"].len(), 2);
     let index = Index::of_file(&file).unwrap();
     assert_eq!(index.blocks[0][1].start, 200);
     // What a writer finishing there writes.
@@ -971,9 +971,11 @@ fn repair_keeps_marks_past_the_last_block_and_a_file_of_marks_alone() {
     let mut w = Writer::new(d.clone(), options()).unwrap();
     w.annotation("verge", mark(100)).unwrap();
     w.annotation("verge", mark(10)).unwrap();
-    let fixed = repair(&w.take_output(), 3).unwrap();
+    let cut = w.take_output();
+    let fixed = repair(&cut, 3).unwrap();
     assert_eq!(fixed.header.length, 101);
-    assert_eq!(fixed.generated["verge"].len(), 2);
+    let file = [&cut[..fixed.keep as usize], &fixed.tail].concat();
+    assert_eq!(common::each_generated(&file)["verge"].len(), 2);
     // No block, and a digital channel declared high: it is never known, and keeps its declared
     // level.
     let mut high = d.clone();

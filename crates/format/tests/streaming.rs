@@ -371,7 +371,7 @@ fn repair_writes_what_finishing_at_the_same_block_would() {
         finished.extend_from_slice(&f.tail);
         assert_eq!(fixed, finished, "repaired after the flush at {end}");
         assert_eq!(r.header, f.header);
-        assert_eq!(r.generated, common::generated(&finished));
+        assert_eq!(common::each_generated(&fixed), common::generated(&finished));
         // A gap still open at the cut: the level is not known from its start.
         if end < 120 {
             let ChannelKind::Digital { end: e, gaps, .. } = &r.header.channels[0].data else {
@@ -914,7 +914,9 @@ fn an_annotation_source_that_can_t_name_a_file_on_its_own_is_refused() {
         let repaired = repair(&file, 3);
         if named {
             wrote.unwrap();
-            assert_eq!(repaired.unwrap().generated["verge"].len(), 2);
+            let r = repaired.unwrap();
+            let fixed = [&file[..r.keep as usize], &r.tail].concat();
+            assert_eq!(common::each_generated(&fixed)["verge"].len(), 2);
             continue;
         }
         match wrote {
@@ -993,9 +995,9 @@ fn repair_and_recut_leave_out_an_annotation_its_bundle_would_not_resolve() {
     let repaired = r.finish().unwrap();
     left_as_wanted(&repaired.left_out);
     assert_eq!(repaired.header.length, 2);
-    assert_eq!(repaired.generated["gen"].len(), 2);
     let mut whole = cut[..repaired.keep as usize].to_vec();
     whole.extend_from_slice(&repaired.tail);
+    assert_eq!(common::each_generated(&whole)["gen"].len(), 2);
     assert_eq!(ids(&whole), ["gen/m/1"]);
 
     for (input, finished) in [(&cut, false), (&whole, true)] {

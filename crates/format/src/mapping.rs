@@ -62,19 +62,23 @@ impl Mapping {
         }
     }
 
+    #[inline]
     pub fn origin(&self) -> i64 {
         self.origin
     }
 
+    #[inline]
     pub fn offset(&self) -> i64 {
         self.offset
     }
 
     /// How many axis ticks one source tick lasts, in lowest terms.
+    #[inline]
     pub fn m(&self) -> Ratio {
         Ratio::new(self.num, self.den).expect("positive terms")
     }
 
+    #[inline]
     pub fn is_identity(&self) -> bool {
         *self == Self::IDENTITY
     }
@@ -115,6 +119,7 @@ impl Mapping {
     /// The axis time a place of `units / d` source ticks maps to, exactly, unrounded, counted in
     /// `1 / (d × den)` axis ticks, `den` being `m`'s: `origin × d × den + (units + offset × d) ×
     /// num`. `axis_place` is its floor in whole ticks. None where it passes 128 bits.
+    #[inline]
     pub fn axis_time(&self, units: i128, d: u64) -> Option<i128> {
         let per = i128::from(d).checked_mul(i128::from(self.den))?;
         let at = units.checked_add(i128::from(self.offset).checked_mul(i128::from(d))?)?;

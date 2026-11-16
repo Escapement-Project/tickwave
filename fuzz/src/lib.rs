@@ -385,8 +385,11 @@ fn unknown(json: &[u8], flags: u8) -> Vec<u8> {
 /// byte picks.
 fn at_limit(raw: &[u8], limit: usize) -> Vec<u8> {
     let n = limit - 1 + usize::from(raw.first().map_or(0, |b| b % 3));
-    let mut out = raw[..raw.len().min(n)].to_vec();
-    out.resize(n, 0);
+    // Zeroed by the allocator and copied whole: a loop over the bytes, which the fuzz build
+    // instruments, takes tens of milliseconds a block.
+    let mut out = vec![0; n];
+    let k = raw.len().min(n);
+    out[..k].copy_from_slice(&raw[..k]);
     out
 }
 

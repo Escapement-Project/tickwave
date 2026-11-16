@@ -47,10 +47,12 @@ impl Ratio {
         }
     }
 
+    #[inline]
     pub const fn num(self) -> u64 {
         self.num.get()
     }
 
+    #[inline]
     pub const fn den(self) -> u64 {
         self.den.get()
     }
@@ -240,21 +242,25 @@ impl Grid {
         phase: 0,
     };
 
+    #[inline]
     pub fn d(self) -> u64 {
         self.d
     }
 
     /// The period in `1/d` ticks.
+    #[inline]
     pub fn step(self) -> u128 {
         self.step
     }
 
     /// The declared phase, in `1/d` ticks.
+    #[inline]
     pub fn phase(self) -> u32 {
         self.phase
     }
 
     /// The channel's first run, the one at sample 0, starting at `first`.
+    #[inline]
     pub fn first_run(self, first: i64, lost_before: u64) -> Break {
         Break {
             index: 0,
@@ -265,15 +271,23 @@ impl Grid {
     }
 
     /// Where `run` starts, in `1/d` ticks.
+    #[inline]
     pub fn start(self, run: Break) -> i128 {
         i128::from(run.tick) * i128::from(self.d) + i128::from(run.phase)
     }
 
     /// The place of sample `index` on the grid of `run`, in `1/d` ticks, exactly; saturating for
     /// an index no header allows. An index before the run's counts back from it.
+    #[inline]
     pub fn place(self, run: Break, index: u64) -> i128 {
-        let steps =
-            |n: u64| i128::try_from(u128::from(n).saturating_mul(self.step)).unwrap_or(i128::MAX);
+        // A step that fits a u64, as nearly every one does, multiplies with no overflow to check.
+        let steps = |n: u64| {
+            let p = match u64::try_from(self.step) {
+                Ok(s) => u128::from(n) * u128::from(s),
+                Err(_) => u128::from(n).saturating_mul(self.step),
+            };
+            i128::try_from(p).unwrap_or(i128::MAX)
+        };
         let start = self.start(run);
         if index >= run.index {
             start.saturating_add(steps(index - run.index))
@@ -283,6 +297,7 @@ impl Grid {
     }
 
     /// The whole source tick at or before a place of `units / d` ticks, saturating.
+    #[inline]
     pub fn floor(self, units: i128) -> i64 {
         let t = units.div_euclid(i128::from(self.d));
         t.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
@@ -298,6 +313,7 @@ impl Grid {
 
     /// The run that holds sample `index` of a channel whose first run starts at `first` and
     /// whose later runs are `breaks`.
+    #[inline]
     pub fn run_of(self, first: i64, breaks: &[Break], index: u64) -> Break {
         match breaks.partition_point(|b| b.index <= index) {
             0 => self.first_run(first, 0),
@@ -306,12 +322,14 @@ impl Grid {
     }
 
     /// The place of sample `index` of such a channel, in `1/d` ticks.
+    #[inline]
     pub fn sample_place(self, first: i64, breaks: &[Break], index: u64) -> i128 {
         self.place(self.run_of(first, breaks, index), index)
     }
 
     /// The whole source tick at or before the place of sample `index` of such a channel: the
     /// tick a sample lies in, where its phase puts it a fraction of a tick after that tick.
+    #[inline]
     pub fn sample_tick(self, first: i64, breaks: &[Break], index: u64) -> i64 {
         self.floor(self.sample_place(first, breaks, index))
     }

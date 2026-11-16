@@ -1607,7 +1607,7 @@ fn repair_file(file: &Path, output: &Path, level: i32) -> Result<()> {
     write_atomically(output, |out| {
         copy_then(&mut opened, repaired.keep, &repaired.tail, out)
     })?;
-    write_generated(output, &repaired.header, &repaired.generated)?;
+    write_generated(output)?;
     warn_left_out(&repaired.left_out);
     info!(
         "{}: {} of {} bytes kept, {} blocks to {}, {}",
@@ -1628,21 +1628,84 @@ fn warn_left_out(left_out: &[String]) {
     }
 }
 
-/// Each annotation generator's file beside `output`, as `<stem>.<source>.jsonl`.
-fn write_generated(
-    output: &Path,
-    header: &Header,
-    generated: &std::collections::BTreeMap<String, Vec<String>>,
-) -> Result<()> {
+/// Each annotation generator's file beside `output`, as `<stem>.<source>.jsonl`, from the parts
+/// of the recording there, a part at a time. Each is written as `<name>.partial` and renamed once
+/// every file has every line. An error leaves no `.partial` file; a failed rename leaves the files
+/// renamed before it.
+fn write_generated(output: &Path) -> Result<()> {
+    let (mut file, _, footer) = read_footer(output)?;
     let stem = stem_of(output);
     let dir = output.parent().unwrap_or(Path::new(""));
-    for (source, lines) in generated {
-        let path = dir.join(format!("{stem}.{source}.jsonl"));
-        let text = generator_file(source, None, header.content_id, lines);
-        write_atomically(&path, |f| Ok(f.write_all(text.as_bytes())?))?;
-        info!("{}: {} annotations", path.display(), lines.len());
+    let mut files: Vec<Generated> = Vec::new();
+    let written = footer
+        .each_generated_line(
+            |offset, len| -> Result<Vec<u8>> {
+                let mut bytes = vec![0; len as usize];
+                file.seek(SeekFrom::Start(offset))?;
+                file.read_exact(&mut bytes)?;
+                Ok(bytes)
+            },
+            |source, line| {
+                let g = match files.iter().position(|g| g.source == source) {
+                    Some(g) => g,
+                    None => {
+                        let path = dir.join(format!("{stem}.{source}.jsonl"));
+                        let mut partial = path.as_os_str().to_owned();
+                        partial.push(".partial");
+                        let partial = PathBuf::from(partial);
+                        let out = fs::File::create(&partial)
+                            .with_context(|| format!("creating {}", partial.display()))?;
+                        files.push(Generated {
+                            source: source.to_owned(),
+                            path,
+                            partial,
+                            out: std::io::BufWriter::new(out),
+                            lines: 0,
+                        });
+                        let g = files.len() - 1;
+                        let head = generator_file(source, None, footer.header.content_id, &[]);
+                        files[g].out.write_all(head.as_bytes())?;
+                        g
+                    }
+                };
+                writeln!(files[g].out, "{line}")?;
+                files[g].lines += 1;
+                Ok(())
+            },
+        )
+        .and_then(|()| {
+            for g in &mut files {
+                g.out.flush()?;
+                g.out.get_ref().sync_all()?;
+            }
+            Ok(())
+        })
+        .with_context(|| format!("writing the generator files beside {}", output.display()));
+    if let Err(e) = written {
+        for g in &files {
+            let _ = fs::remove_file(&g.partial);
+        }
+        return Err(e);
+    }
+    for (i, g) in files.iter().enumerate() {
+        if let Err(e) = fs::rename(&g.partial, &g.path) {
+            for g in &files[i..] {
+                let _ = fs::remove_file(&g.partial);
+            }
+            return Err(e).with_context(|| format!("renaming to {}", g.path.display()));
+        }
+        info!("{}: {} annotations", g.path.display(), g.lines);
     }
     Ok(())
+}
+
+/// A generator's file beside a repaired copy, while its lines go in.
+struct Generated {
+    source: String,
+    path: PathBuf,
+    partial: PathBuf,
+    out: std::io::BufWriter<fs::File>,
+    lines: u64,
 }
 
 fn recut_file(input: &Path, output: &Path, options: WriteOptions) -> Result<()> {
@@ -3000,6 +3063,92 @@ mod tests {
                 assert!(!output.exists());
             }
         }
+    }
+
+    /// The generator file repair writes beside the copy: the head with the copy's content id,
+    /// then each line in the order it came, one whose span ends past the length ending there.
+    #[test]
+    fn repair_writes_each_generator_s_file_from_the_copy_held_to_its_length() {
+        use escapement_tickwave_format::decode::Footer;
+        use escapement_tickwave_format::record::{self, Kind};
+        let dir = tempfile::tempdir().unwrap();
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/import/demo-mixed.sr");
+        let open = || Ok(sigrok::read(&source)?.recording);
+        let whole = dir.path().join("whole.tickwave");
+        let common = common(&["sigrok", "x.sr", "-o", "x.tickwave"]);
+        convert(&open, &whole, &common).unwrap();
+        let mut cut = fs::read(&whole).unwrap();
+        let footer = Footer::parse_file(&cut).unwrap();
+        cut.truncate(footer.trailer.footer_offset as usize);
+        let lines = [
+            r#"{"id":"c","start":3}"#,
+            r#"{"id":"a","start":1,"end":4000000000000}"#,
+            r#"{"id":"b","start":2}"#,
+        ];
+        for line in lines {
+            let a = record::Annotation {
+                source: "x".into(),
+                line: line.into(),
+            };
+            record::write(&mut cut, Kind::Annotation, &[&a.to_payload()]);
+        }
+        let input = dir.path().join("cut.tickwave");
+        fs::write(&input, &cut).unwrap();
+        let output = dir.path().join("rec.tickwave");
+        repair_file(&input, &output, 3).unwrap();
+        let (_, _, head) = read_footer(&output).unwrap();
+        let length = head.header.length;
+        assert!(length < 4_000_000_000_000, "{length}");
+        let want = format!(
+            "{{\"format\":\"tickwave-annotations/1\",\"source\":\"x\",\"recording_id\":\"{}\"}}\n\
+             {}\n{{\"end\":{length},\"id\":\"a\",\"start\":1}}\n{}\n",
+            head.header.content_id, lines[0], lines[2]
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("rec.x.jsonl")).unwrap(),
+            want
+        );
+        let mut partial = dir.path().join("rec.x.jsonl").into_os_string();
+        partial.push(".partial");
+        assert!(!Path::new(&partial).exists());
+    }
+
+    /// Generators x, y and z, and a folder where y's file goes: renaming y's fails. x's file,
+    /// renamed before, stays; no `.partial` file is left, y's or z's.
+    #[test]
+    fn a_failed_rename_of_a_generator_file_leaves_no_partial_file() {
+        use escapement_tickwave_format::decode::Footer;
+        use escapement_tickwave_format::record::{self, Kind};
+        let dir = tempfile::tempdir().unwrap();
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/import/demo-mixed.sr");
+        let open = || Ok(sigrok::read(&source)?.recording);
+        let whole = dir.path().join("whole.tickwave");
+        let common = common(&["sigrok", "x.sr", "-o", "x.tickwave"]);
+        convert(&open, &whole, &common).unwrap();
+        let mut cut = fs::read(&whole).unwrap();
+        let footer = Footer::parse_file(&cut).unwrap();
+        cut.truncate(footer.trailer.footer_offset as usize);
+        for source in ["x", "y", "z"] {
+            let a = record::Annotation {
+                source: source.into(),
+                line: r#"{"id":"m","start":1}"#.into(),
+            };
+            record::write(&mut cut, Kind::Annotation, &[&a.to_payload()]);
+        }
+        let input = dir.path().join("cut.tickwave");
+        fs::write(&input, &cut).unwrap();
+        fs::create_dir(dir.path().join("rec.y.jsonl")).unwrap();
+        let err = repair_file(&input, &dir.path().join("rec.tickwave"), 3).expect_err("refused");
+        assert!(format!("{err:#}").contains("rec.y.jsonl"), "{err:#}");
+        assert!(dir.path().join("rec.x.jsonl").is_file());
+        let partials: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".partial"))
+            .collect();
+        assert!(partials.is_empty(), "{partials:?}");
     }
 
     #[test]

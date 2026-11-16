@@ -843,22 +843,6 @@ pub fn generator_file(
     out
 }
 
-/// Each source's annotations held to `length` as a reader holds them, as its generator file's
-/// lines.
-pub(crate) fn generated<'a>(
-    annotations: impl IntoIterator<Item = &'a record::Annotation>,
-    length: i64,
-    timebase: crate::model::Ratio,
-) -> BTreeMap<String, Vec<String>> {
-    let mut generated: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for a in annotations {
-        if let Some(line) = crate::parts::clipped(&a.line, length, timebase) {
-            generated.entry(a.source.clone()).or_default().push(line);
-        }
-    }
-    generated
-}
-
 fn check_safe(what: &'static str, value: u64) -> Result<(), WriteError> {
     if value < JSON_SAFE {
         Ok(())

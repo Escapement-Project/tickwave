@@ -4,7 +4,7 @@
 //! operands hold as many samples, and before the first record only a finish writes; the records
 //! before the cut stay as they are.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 
 use crate::annotations::Lines;
 use crate::compress::compress;
@@ -26,7 +26,7 @@ use crate::reader::{Ending, Event, Reader};
 use crate::record::{self, BlockHead, Kind, OverviewHead};
 use crate::writer::{
     Bundle, Bundling, ChannelTops, OVERVIEW_BLOCK_LEVEL, Pending, WriteError, bundle_payload,
-    bundled_files, footer_payload, generated, write_part_record,
+    bundled_files, footer_payload, write_part_record,
 };
 
 /// A cut-off file's length: the later of `end`, the latest known-through tick or, with none,
@@ -115,13 +115,13 @@ pub enum RepairError {
     Write(#[from] WriteError),
 }
 
-/// What repair comes to: keep the file's first `keep` bytes, then append `tail`.
+/// What repair comes to: keep the file's first `keep` bytes, then append `tail`. The annotations
+/// it keeps are in the copy's parts: `Footer::each_generated_line` reads them back a part at a
+/// time.
 pub struct Repaired {
     pub keep: u64,
     pub tail: Vec<u8>,
     pub header: Header,
-    /// Each generator's annotations, its file's lines after the first, by source.
-    pub generated: BTreeMap<String, Vec<String>>,
     /// The annotation records after the cut whose line breaks a rule ANNOTATIONS.md gives a
     /// generator's line, each as its generator and the rule: repair leaves them out of what it
     /// writes again and of the length the marks set.
@@ -537,8 +537,8 @@ pub struct Repairer {
     level: i32,
     hold: Option<Hold>,
     state: Option<State>,
-    /// Every annotation kept, for `Repaired::generated`.
-    annotations: Vec<record::Annotation>,
+    /// Whether any annotation is kept.
+    annotated: bool,
     /// The latest start among the annotations kept.
     latest_annotation: Option<i64>,
     /// Held to the declaration's channels once it is read.
@@ -564,7 +564,7 @@ impl Repairer {
             level,
             hold: None,
             state: None,
-            annotations: Vec::new(),
+            annotated: false,
             latest_annotation: None,
             lines: None,
             left_out: Vec::new(),
@@ -657,7 +657,7 @@ impl Repairer {
         })?;
         self.latest_annotation = latest_start(self.latest_annotation, &a.line);
         self.generator(&a.source).push(&a.line, span);
-        self.annotations.push(a);
+        self.annotated = true;
         Ok(())
     }
 
@@ -671,12 +671,7 @@ impl Repairer {
         self.parts.push(row);
         for line in part.lines() {
             self.latest_annotation = latest_start(self.latest_annotation, line);
-            if covers == 0 {
-                self.annotations.push(record::Annotation {
-                    source: part.source.clone(),
-                    line: line.to_owned(),
-                });
-            }
+            self.annotated = true;
         }
     }
 
@@ -957,7 +952,7 @@ impl Repairer {
             }
         }
         let any_block = state.chans.iter().any(|c| c.blocks_count > 0);
-        let any_annotation = !self.annotations.is_empty()
+        let any_annotation = self.annotated
             || again
                 .iter()
                 .any(|a| matches!(a, Again::Annotation(_) | Again::Part(_)));
@@ -1275,7 +1270,6 @@ impl Repairer {
             },
         };
         check_header(&header)?;
-        let generated = generated(&self.annotations, length, d.timebase);
         let files = match bundling {
             Bundling::None => None,
             Bundling::Generated { stem } => (!self.generators.is_empty()).then(|| {
@@ -1329,7 +1323,6 @@ impl Repairer {
             keep,
             tail,
             header,
-            generated,
             left_out: self.left_out,
         })
     }

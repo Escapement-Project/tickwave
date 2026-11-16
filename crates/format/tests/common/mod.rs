@@ -79,6 +79,25 @@ pub fn with_header(file: &[u8], header: &escapement_tickwave_format::header::Hea
     out
 }
 
+/// Each generator's lines in `file`'s parts, as repair's generator files hold them, by
+/// generator.
+pub fn each_generated(file: &[u8]) -> std::collections::BTreeMap<String, Vec<String>> {
+    let footer = escapement_tickwave_format::decode::Footer::parse_file(file).unwrap();
+    let mut out: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    footer
+        .each_generated_line(
+            escapement_tickwave_format::decode::from_memory(file),
+            |source, line| {
+                out.entry(source.to_owned())
+                    .or_default()
+                    .push(line.to_owned());
+                Ok::<_, escapement_tickwave_format::decode::DecodeError>(())
+            },
+        )
+        .unwrap();
+    out
+}
+
 /// Each generator's lines in `file`'s sidecar, joined from its bundle and parts, by generator.
 pub fn generated(file: &[u8]) -> std::collections::BTreeMap<String, Vec<String>> {
     let footer = escapement_tickwave_format::decode::Footer::parse_file(file).unwrap();

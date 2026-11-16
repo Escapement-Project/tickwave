@@ -762,6 +762,29 @@ fn repair_keeps_records_and_standalone_parts_past_the_cut_and_drops_covering_par
     assert!(side.left_out.is_empty());
 }
 
+/// A cut-off file whose only content before its known-through record is a part standing alone:
+/// its lines are the file's annotations, so it repairs to one past their latest start, with no
+/// block.
+#[test]
+fn repair_keeps_a_file_whose_only_annotations_are_a_part_standing_alone() {
+    let mut cut = opening();
+    let s1 = r#"{"id":"s/1","start":23}"#;
+    cut.extend(part_record("s", &format!("{s1}\n")));
+    record::write(
+        &mut cut,
+        Kind::KnownThrough,
+        &[&record::known_through_bytes(5)],
+    );
+    let whole = repaired(&cut);
+    let footer = Footer::parse_file(&whole).unwrap();
+    assert_eq!(footer.header.length, 24);
+    let side = footer.read_sidecar(from_memory(&whole)).unwrap().unwrap();
+    assert_eq!(
+        side.files["rec.s.jsonl"],
+        generator_file("s", None, footer.header.content_id, &[s1.into()])
+    );
+}
+
 /// FORMAT.md, "Repairing a cut-off file": a gap record past the cut whose `from` maps before the
 /// latest known-through tick is written again, and its channel ends at that `from`; one whose
 /// `from` lies past the tick goes.
