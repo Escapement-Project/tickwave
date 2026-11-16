@@ -728,14 +728,15 @@ levels keep no order among themselves: a writer may settle one channel's levels 
 An annotation record's payload is a u16, the length of `s`, then `s`, then `a`. `s` is the
 generator's name in UTF-8, as a generator file's first line gives it, and `a` is one line of that
 file ([ANNOTATIONS.md](ANNOTATIONS.md)): a UTF-8 JSON object, ending with a newline and holding no
-other. Its times are axis ticks. A reader refuses a record whose `s` is not a name ANNOTATIONS.md
-allows a generator, since the source's file is named after it, and one whose `a` holds a newline
-before its end or is not a JSON object. tickwave's writer refuses, at the call, an annotation whose
-fields, ticks or channels break ANNOTATIONS.md's rules for a line, and writes the rest as compact
-JSON. Its length aside, which the writer learns only when it finishes, each annotation it takes
-resolves. Repair and recut leave out a record whose line breaks those rules, as another writer may
-have written it, and name each one they leave out. Annotations keep no order with the channels'
-items.
+other. Its times are axis ticks in `0..2^53`. A reader refuses a record whose `s` is not a name
+ANNOTATIONS.md allows a generator, since the source's file is named after it, and one whose `a`
+holds a newline before its end or is not a JSON object. tickwave's writer refuses, at the call, an
+annotation whose fields, ticks or channels break ANNOTATIONS.md's rules for a line, and writes the
+rest as compact JSON. Its length aside, which the writer learns only when it finishes, each
+annotation it takes resolves. Another writer may write a line that breaks those rules. A re-cutter
+leaves such a line out wherever it lies, and repair among the records it writes again after its cut;
+each names what it leaves out. A record before repair's cut stays where it is, since the part after
+it covers it. Annotations keep no order with the channels' items.
 
 Annotation records let a live recorder keep what it generates as safely as its data. The footer
 does not index them. A file that holds them ends with them bundled, in annotation parts and an
@@ -749,7 +750,9 @@ generator that lie between that generator's previous part and itself in the file
 lines exactly: byte for byte, in the order the records came. Where no record of its generator lies
 between, the part holds lines of its own. A re-cutter and `tickwave bundle` write a file's
 annotations that way, as parts and no annotation records, since a finished file needs none. A reader
-in order checks each part that covers records against them. Repair and re-cutting take a
+in order checks each part that covers records against them. A reader refuses a part with no line,
+and one with a line that has no `start` or a time that doesn't convert to ticks, since its row
+couldn't state the span. Repair and re-cutting take a
 generator's annotations from its parts and from its records after its last part, never from a record
 a part covers, so no annotation comes out twice. The annotation parts table (see Index) gives each
 part's place and the span its annotations cover, so a reader fetches only the parts a view reaches,
@@ -757,10 +760,11 @@ and a long recording's annotations load as its data does.
 
 A writer writes a generator's part once the lines since its last part reach a size it picks, after
 the record whose line takes them there. At the finish it writes each generator's rest as a part,
-the generators in the order of their first annotations. A writer that bundles a sidecar's files, as
-a re-cutter or `tickwave bundle` does, splits each generator file's lines into parts in the file's
-order, and writes them at its finish, the generators in the order the hand-written file includes
-their files.
+the generators in the order of their first annotations. A re-cutter writes parts that stand alone
+the same way, as it reads the lines, and carries its input's bundle. A writer that bundles a
+sidecar's files given whole, as `tickwave bundle` does, splits each generator file's lines into
+parts in the file's order, and writes them at its finish, the generators in the order the
+hand-written file includes their files.
 
 The annotation bundle record holds the sidecar's files without the parts' lines. Its payload is a
 u32, the decoded length, then one zstd frame of UTF-8 JSON: an object of strings, each file's name
@@ -1072,12 +1076,12 @@ MiB of that operand's samples, in its coding, waiting for the other operand's: a
 ahead of its partner by at most that much.
 
 **Flush.** `flush(before)` promises `before`, closes at `before` every channel's open block that
-holds an item, or the end of a gap it has taken, before it, and then writes one known-through
-record at `before`, after every block record that flush closed. Items at or after `before` stay in
-the open blocks. A channel with nothing before `before` in its open block writes no record; the
-known-through record says it holds nothing new before `before`. A flush at the latest known-through tick writes nothing. A live
-recorder flushes at least every second and syncs the file to disk after each, so how often it
-flushes, and the compression still pending, bound what a crash loses.
+holds an item, or the end of a gap it has taken, before it, and then writes one known-through record
+at `before`, after every block record that flush closed. Items at or after `before` stay in the open
+blocks. A channel with nothing before `before` in its open block writes no record; the known-through
+record says it holds nothing new before `before`. A flush at the latest known-through tick writes
+nothing. A live recorder flushes at least every second and syncs the file to disk after each, so how
+often it flushes, and the compression still pending, bound what a crash loses.
 
 **Compression.** It compresses blocks at the level it is given, and overview blocks at zstd level 3,
 whatever that level is. Annotation parts are compressed at the level it is given, strips and the
@@ -1202,11 +1206,12 @@ A cut-off file is repaired by appending what a finished file has after its last 
    write the rest, the open runs included. Refuse a file whose overview blocks or pages differ from
    the ones its content gives. Each channel's levels are compared on their own, in order of `k`,
    whatever order the records of different channels and levels came in.
-7. Write the records kept in step 2 after the cut, in the order they came, then what a writer's
-   finish writes. For each generator, in the order of its first annotation, that is parts of the
-   lines of its records after its last kept part, each within the limits. A record a kept part
-   covers is not written into another part. Then come every table's last pages, the annotation
-   bundle, the footer and the trailer.
+7. Write the records kept in step 2 after the cut, in the order they came. Before a part that stands
+   alone, write a part of the lines of its generator's records written again before it, so that it
+   still stands alone. Then write what a writer's finish writes. For each generator, in the order of
+   its first annotation, that is parts of the lines of its records after its last kept part, each
+   within the limits. A record a kept part covers is not written into another part. Then come every
+   table's last pages, the annotation bundle, the footer and the trailer.
 
 A repaired file holds what a writer that had finished right after the records repair keeps, with
 the same length, would have written, and so has its content id.
@@ -1222,7 +1227,7 @@ A file whose blocks a recorder closed early, at flushes, can be written again wi
 usual size, and a repaired file too. A re-cutter reads the records in order and writes the same
 declaration, then every channel's items, and the gaps and runs its header lists, in the same order,
 and finishes with the same length, ends, losses, extras and annotations. It writes the annotations
-as parts that stand alone, with no annotation records, at its finish (see Annotations). It may give
+as parts that stand alone, with no annotation records (see Annotations). It may give
 the channels other overview shifts than the input declares, such as the ones the rule gives each
 channel's own items; a finished input's header says enough to work them out. It computes the
 overview again. The new file has the same content id. A cut-off file re-cuts as repair would finish
