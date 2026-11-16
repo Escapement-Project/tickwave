@@ -999,12 +999,146 @@ fn repair_keeps_marks_past_the_last_block_and_a_file_of_marks_alone() {
         "{:?}",
         e.data
     );
-    // Neither a block nor a mark: nothing to repair.
+    // A declaration alone: nothing to repair.
     let w = Writer::new(d, options()).unwrap();
     let err = repair(w.output(), 3).err().unwrap();
     assert_eq!(
         err.to_string(),
-        "the file holds neither a whole block nor an annotation record"
+        "the file holds no whole block, no known-through record and no annotation record"
+    );
+}
+
+/// A live recorder that promises tick T before any edge (verge's heartbeat: every edge before T
+/// sent) leaves a declaration and known-through records, and no block. The file says every channel
+/// held its declared level from 0 to T, and repair finishes it as a writer that flushed the same
+/// and finished at T, which has the content id of a writer with no items finished at T.
+#[test]
+fn repair_finishes_a_file_known_through_a_tick_with_no_block() {
+    let t = 5_000;
+    for channels in [
+        vec![digital("A", false), digital("B", true)],
+        vec![
+            digital("A", false),
+            analog("V", AnalogCoding::F32, 10),
+            digital("B", true),
+        ],
+    ] {
+        let d = declaration(channels, Vec::new(), 4);
+        let digitals = d
+            .channels
+            .iter()
+            .filter(|c| matches!(c.data, DeclaredKind::Digital { .. }))
+            .count();
+        let mut w = Writer::new(d.clone(), options()).unwrap();
+        w.flush(t / 2).unwrap();
+        w.flush(t).unwrap();
+        let cut = w.take_output();
+        let mut reader = Reader::default();
+        reader.feed(&cut);
+        let (mut blocks, mut known) = (0, Vec::new());
+        while let Some(e) = reader.next_event().unwrap() {
+            match e {
+                Event::Block(_) | Event::UnreadBlock(_) => blocks += 1,
+                Event::KnownThrough { tick, .. } => known.push(tick),
+                _ => {}
+            }
+        }
+        assert_eq!((blocks, known), (0, vec![t / 2, t]));
+
+        let fixed = repair(&cut, 3).unwrap();
+        let file = [&cut[..fixed.keep as usize], &fixed.tail].concat();
+        let h = &fixed.header;
+        assert_eq!(h.length, t);
+        // Each digital channel at its declared level to T, with no edge; the analog one with no
+        // sample.
+        for (declared, c) in d.channels.iter().zip(&h.channels) {
+            match (&declared.data, &c.data) {
+                (
+                    DeclaredKind::Digital { initial },
+                    ChannelKind::Digital {
+                        initial: i,
+                        end,
+                        edges,
+                        ..
+                    },
+                ) => assert_eq!((i, *end, *edges), (initial, t, 0)),
+                (DeclaredKind::Analog { .. }, ChannelKind::Analog { count, .. }) => {
+                    assert_eq!(*count, 0)
+                }
+                _ => panic!("{} changed kind", declared.name),
+            }
+        }
+        // What a writer that flushed as the recorder did and finished at T writes, byte for byte.
+        let mut flushed = Writer::new(d.clone(), options()).unwrap();
+        flushed.flush(t / 2).unwrap();
+        flushed.flush(t).unwrap();
+        let mut written = flushed.take_output();
+        let ends = vec![t; digitals];
+        written.extend(flushed.finish(t, &ends, Finish::default()).unwrap().tail);
+        assert_eq!(file, written);
+        // And the content of a writer with no items finished at T.
+        let none = Writer::new(d.clone(), options())
+            .unwrap()
+            .finish(t, &ends, Finish::default())
+            .unwrap();
+        assert_eq!(h.content_id, none.header.content_id);
+        // It checks against a recording of each channel at its declared level to T, no item.
+        let model = Recording {
+            timebase: d.timebase,
+            length: t,
+            channels: d
+                .channels
+                .iter()
+                .map(|c| Channel {
+                    name: c.name.clone(),
+                    source_name: c.source_name.clone(),
+                    source: c.source,
+                    shaping: Default::default(),
+                    data: match &c.data {
+                        DeclaredKind::Digital { initial } => ChannelData::Digital(Digital {
+                            initial: *initial,
+                            end: t,
+                            count: 0,
+                            edges: Box::new(std::iter::empty()),
+                            gaps: Vec::new(),
+                        }),
+                        DeclaredKind::Analog { unit, period, .. } => ChannelData::Analog(Analog {
+                            unit: unit.clone(),
+                            first: 0,
+                            phase: None,
+                            period: *period,
+                            count: 0,
+                            breaks: Vec::new(),
+                            significant: None,
+                            samples: Samples::F32(Box::new(std::iter::empty())),
+                            lost_before: 0,
+                            lost_after: 0,
+                        }),
+                    },
+                })
+                .collect(),
+            derived: Vec::new(),
+            sources: vec![Source::new(SourceFormat::Other("test".into()), d.timebase)],
+        };
+        assert_eq!(verify(&file[..], model).unwrap().content_id, h.content_id);
+        // A re-cut of the cut-off file finishes it alike.
+        let (_, recut_header) = recut(&cut, None).unwrap();
+        assert_eq!(
+            (recut_header.length, recut_header.content_id),
+            (t, h.content_id)
+        );
+    }
+    // A declaration alone is still refused, by repair and by a re-cut.
+    let d = declaration(vec![digital("A", false)], Vec::new(), 4);
+    let w = Writer::new(d, options()).unwrap();
+    assert_eq!(
+        repair(w.output(), 3).err().unwrap().to_string(),
+        "the file holds no whole block, no known-through record and no annotation record"
+    );
+    assert_eq!(
+        recut(w.output(), None).err().unwrap().to_string(),
+        "the input is cut off and holds no whole block, no known-through record and no \
+         annotation record"
     );
 }
 

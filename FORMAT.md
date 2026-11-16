@@ -1174,8 +1174,8 @@ known-through records arrive, and adds a coarser level once the length needs one
 
 A cut-off file is repaired by appending what a finished file has after its last good record:
 
-1. Take the records up to the first bad one. Refuse a file with no declaration, or with neither a
-   block nor an annotation record.
+1. Take the records up to the first bad one. Refuse a file with no declaration, or with no block,
+   no known-through record and no annotation record.
 2. Where they hold a known-through record, cut the file just after the latest one: every channel is
    then known to its tick, and none holds more. Keep the annotation records that came after it, to
    write again after the cut. An annotation part after the cut that covers records goes, and its

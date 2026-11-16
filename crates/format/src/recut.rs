@@ -23,7 +23,10 @@ pub enum RecutError {
     Write(#[from] WriteError),
     #[error("the input holds no whole declaration")]
     NoDeclaration,
-    #[error("the input is cut off and holds neither a whole block nor an annotation record")]
+    #[error(
+        "the input is cut off and holds no whole block, no known-through record and no \
+         annotation record"
+    )]
     Nothing,
     #[error(
         "the input is cut off, and channel {0} states the span it keeps, so it isn't repaired: \
@@ -501,7 +504,9 @@ impl Recutter {
                         writer.gap(c, g)?;
                     }
                 }
-                if !self.blocks && !self.annotations {
+                // FORMAT.md's repair step 1. With none of the three the length below comes to 0,
+                // which refuses the file too.
+                if !self.blocks && self.known_through.is_none() && !self.annotations {
                     return Err(RecutError::Nothing);
                 }
                 let d = writer.declaration().clone();

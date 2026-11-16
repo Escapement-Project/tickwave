@@ -92,7 +92,7 @@ pub enum RepairError {
     Finished,
     #[error("the file holds no whole declaration")]
     NoDeclaration,
-    #[error("the file holds neither a whole block nor an annotation record")]
+    #[error("the file holds no whole block, no known-through record and no annotation record")]
     NoBlock,
     #[error("an overview block or page in the file differs from the one its content gives")]
     Overview,
@@ -956,7 +956,9 @@ impl Repairer {
             || again
                 .iter()
                 .any(|a| matches!(a, Again::Annotation(_) | Again::Part(_)));
-        if !any_block && !any_annotation {
+        // FORMAT.md's step 1. With none of the three the length below comes to 0, which refuses
+        // the file too.
+        if !any_block && state.known.is_none() && !any_annotation {
             return Err(RepairError::NoBlock);
         }
         let last_end = state.chans.iter().map(|c| c.next_start).max().unwrap_or(0);
