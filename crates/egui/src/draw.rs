@@ -1147,7 +1147,7 @@ fn lane_ink(f: &Frame, runs: &[Run], rect: Rect, px: f32, weight: f32) -> Ink {
     let high = rect.top() + LANE_PAD;
     let low = high + LANE_SWING;
     let width = f64::from(weight / px);
-    let mut cols: Vec<Col> = Vec::new();
+    let mut cols: Vec<Col> = Vec::with_capacity(runs.iter().map(|r| r.ks.len()).sum());
     for (i, r) in runs.iter().enumerate() {
         let g = r.grid;
         let looks = shade::looks(r.columns, r.ks.clone(), width, g.per, f.facts.timebase);
