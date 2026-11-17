@@ -458,11 +458,13 @@ impl Recutter {
                 // The input's bundle as it is, its generator files' first lines, or the sidecar
                 // given in its place.
                 let bundle = sidecar.or(self.bundled.map(Bundle::Files)).or(self.bundle);
+                // The input's view, where it has one, is in its bundle's hand-written file.
                 let finish = Finish {
                     extra,
                     bundle,
                     drop_gaps_past_end: true,
                     lost_after,
+                    view: None,
                 };
                 let finished = writer.finish(h.length, &ends, finish)?;
                 if finished.header.content_id != h.content_id {

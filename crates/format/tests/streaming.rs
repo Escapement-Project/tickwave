@@ -565,6 +565,7 @@ fn finish_takes_what_the_source_states_at_its_end() {
                 bundle: None,
                 drop_gaps_past_end: false,
                 lost_after: Default::default(),
+                view: None,
             },
         )
         .unwrap();

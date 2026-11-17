@@ -212,6 +212,7 @@ fn main() {
                 }),
                 drop_gaps_past_end: false,
                 lost_after: Default::default(),
+                view: None,
             },
         )
         .unwrap();

@@ -600,6 +600,7 @@ fuzz_target!(|p: Plan| {
             .iter()
             .map(|&(c, lost)| (usize::from(c) % n.max(1), u64::from(lost)))
             .collect(),
+        view: None,
     };
     take(&mut w);
     let length = axis_tick(last_axis + 1, &p.length);

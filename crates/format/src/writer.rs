@@ -13,6 +13,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
+use crate::annotations::View;
 use crate::codec::put_uleb;
 use crate::compress::{SLICE, Slicer, Slot, compress};
 use crate::decode::{check_declaration, level_after, lost_after_end, lost_before_start};
@@ -616,8 +617,8 @@ pub struct Finish {
     /// by source index. It may list fewer sources than the recording has.
     pub extra: Vec<BTreeMap<String, String>>,
     /// How to bundle the annotations the writer took, so the recording is one file. A writer
-    /// that took any bundles them whatever this says, its files named after `DEFAULT_STEM` where
-    /// it is None.
+    /// that took any, or is given a `view`, bundles them whatever this says, its files named
+    /// after `DEFAULT_STEM` where it is None.
     pub bundle: Option<Bundle>,
     /// Take a gap that reaches a digital channel's end as ending what is known at its `from`,
     /// even where the gap ends inside the recording, as repair does for a file cut off. Otherwise
@@ -625,6 +626,11 @@ pub struct Finish {
     pub drop_gaps_past_end: bool,
     /// Samples the instrument lost after an analog channel's last, by channel index.
     pub lost_after: BTreeMap<usize, u64>,
+    /// The stored view (ANNOTATIONS.md, "The stored view"): the `[view]` table of the hand-written
+    /// file in a generated bundle, which the writer then writes even with no annotation. A view
+    /// `annotations check` would refuse is refused with the problems it names, and so is any
+    /// view with `Bundle::Files`, whose hand-written file holds its own.
+    pub view: Option<View>,
 }
 
 /// What a finished file bundles in its annotation bundle record.
@@ -844,14 +850,34 @@ fn included_generators(files: &BTreeMap<String, String>) -> Vec<String> {
         .collect()
 }
 
+/// `view` as the `[view]` table `bundled_files` writes reads: its fields as JSON, as a hand-written
+/// file's TOML gives them to the checks.
+fn view_table(v: &View) -> serde_json::Value {
+    let mut table = serde_json::Map::new();
+    if let Some(channels) = &v.channels {
+        table.insert("channels".into(), channels.clone().into());
+    }
+    if let Some(start) = v.start {
+        table.insert("start".into(), start.into());
+    }
+    if let Some(end) = v.end {
+        table.insert("end".into(), end.into());
+    }
+    if let Some(c) = &v.colour {
+        table.insert("colour".into(), vec![c.day.clone(), c.night.clone()].into());
+    }
+    table.into()
+}
+
 /// The files a bundle holds for a recording `<stem>.tickwave` with `id` whose generators are
 /// `sources`, each with the roles it declares, in the order of their first annotations: each
-/// one's file, its first line alone, and a hand-written file that includes them in that order and
-/// holds no annotation of its own.
+/// one's file, its first line alone, and a hand-written file that includes them in that order,
+/// holds `view` as its `[view]` where there is one, and holds no annotation of its own.
 pub(crate) fn bundled_files<'a>(
     stem: &str,
     id: ContentId,
     sources: impl IntoIterator<Item = (&'a str, &'a [serde_json::Value])>,
+    view: Option<&View>,
 ) -> BTreeMap<String, String> {
     // A JSON string is a TOML basic string: serde_json escapes nothing TOML lacks.
     let quoted = |s: &str| serde_json::to_string(s).expect("a string serialises");
@@ -862,14 +888,33 @@ pub(crate) fn bundled_files<'a>(
         files.insert(name.clone(), generator_head(source, None, id, roles) + "\n");
         include.push(quoted(&name));
     }
-    files.insert(
-        format!("{stem}.annotations.toml"),
-        format!(
-            "format = \"tickwave-annotations/1\"\nrecording_id = {}\ninclude = [{}]\n",
-            quoted(&id.to_string()),
-            include.join(", ")
-        ),
+    let mut hand = format!(
+        "format = \"tickwave-annotations/1\"\nrecording_id = {}\ninclude = [{}]\n",
+        quoted(&id.to_string()),
+        include.join(", ")
     );
+    if let Some(v) = view {
+        hand.push_str("\n[view]\n");
+        if let Some(channels) = &v.channels {
+            let names: Vec<String> = channels.iter().map(|c| quoted(c)).collect();
+            hand.push_str(&format!("channels = [{}]\n", names.join(", ")));
+        }
+        // Ticks, which a time in the table may be.
+        if let Some(start) = v.start {
+            hand.push_str(&format!("start = {start}\n"));
+        }
+        if let Some(end) = v.end {
+            hand.push_str(&format!("end = {end}\n"));
+        }
+        if let Some(c) = &v.colour {
+            hand.push_str(&format!(
+                "colour = [{}, {}]\n",
+                quoted(&c.day),
+                quoted(&c.night)
+            ));
+        }
+    }
+    files.insert(format!("{stem}.annotations.toml"), hand);
     files
 }
 
@@ -2701,8 +2746,21 @@ impl Writer {
                 });
             }
         }
+        let view = finish.view.take();
+        let asked = match (finish.bundle.take(), &view) {
+            (Some(Bundle::Files(_)), Some(_)) => {
+                return Err(WriteError::Bundle(
+                    "a view given with files to bundle, whose hand-written file holds its own"
+                        .into(),
+                ));
+            }
+            (None, Some(_)) => Some(Bundle::Generated {
+                stem: DEFAULT_STEM.into(),
+            }),
+            (asked, _) => asked,
+        };
         let mut bundling = Bundling::of(
-            finish.bundle.take(),
+            asked,
             &self.generators,
             self.took_records,
             self.declaration.timebase,
@@ -2998,16 +3056,26 @@ impl Writer {
         crate::decode::check_header(&header).map_err(|e| WriteError::Header(e.to_string()))?;
         let files = match bundling {
             Bundling::None => None,
-            Bundling::Generated { stem } => (!self.generators.is_empty()).then(|| {
-                bundled_files(
+            Bundling::Generated { .. } if self.generators.is_empty() && view.is_none() => None,
+            Bundling::Generated { stem } => {
+                let files = bundled_files(
                     &stem,
                     header.content_id,
                     self.generators.iter().map(|g| {
                         let roles = self.roles.get(&g.source).map_or(&[][..], Vec::as_slice);
                         (g.source.as_str(), roles)
                     }),
-                )
-            }),
+                    view.as_ref(),
+                );
+                // Held as `annotations check` holds the table, so the bundle never holds a view a
+                // reader refuses. Held as a value, not read back from the file's TOML, so the
+                // writer needs no parser for a hand-written file.
+                if let Some(v) = &view {
+                    crate::annotations::view::view(&view_table(v), &header)
+                        .map_err(|problems| WriteError::Bundle(problems.join("; ")))?;
+                }
+                Some(files)
+            }
             Bundling::Files { files, .. } => Some(files),
         };
         let bundle = match files {

@@ -322,3 +322,39 @@ fn a_hosts_sidecar_gives_its_own_roles_and_view() {
         refused.err()
     );
 }
+
+#[test]
+fn a_writers_own_view_reads_back_as_the_stored_view() {
+    let stored = View {
+        channels: Some(vec!["D".into(), "C".into()]),
+        start: Some(100),
+        end: None,
+        colour: Some(Colour {
+            day: "#d9480f".into(),
+            night: "#ff8a50".into(),
+        }),
+    };
+    for (marked, view) in [
+        (true, Some(stored.clone())),
+        (false, Some(stored)),
+        (true, None),
+    ] {
+        let mut w = Writer::new(declaration(), WriteOptions::default()).unwrap();
+        w.edge(0, 10).unwrap();
+        if marked {
+            let serde_json::Value::Object(m) = serde_json::json!({"id": "m/1", "start": 20}) else {
+                unreachable!()
+            };
+            w.annotation("verge", m).unwrap();
+        }
+        let finish = Finish {
+            bundle: Some(Bundle::Generated { stem: "rec".into() }),
+            view: view.clone(),
+            ..Finish::default()
+        };
+        let mut file = w.take_output();
+        file.extend(w.finish(LENGTH, &[LENGTH, LENGTH], finish).unwrap().tail);
+        let rec = Recording::open(Arc::new(file), Cache::new(1 << 20)).unwrap();
+        assert_eq!(rec.stored_view().unwrap(), view, "marked {marked}");
+    }
+}
