@@ -47,17 +47,26 @@ async function recordFrames(page: Page): Promise<void> {
 
 const frames = (page: Page) => page.evaluate(() => (window as unknown as { frames: Frame[] }).frames);
 
-for (const style of ["", "verge", "bench"]) {
+// With download links, the undefined view keeps their room too: the recording's link, and with
+// `annotations` the sidecar's, beside the button.
+const LINKS: [string, Record<string, string>][] = [
+  ["", {}],
+  ["download links", { download: "" }],
+  ["download links with the sidecar's", { download: "", annotations: "fixtures/identify-swd.annotations.toml" }],
+];
+
+for (const [links, attributes] of LINKS)
+for (const style of links ? ["", "verge"] : ["", "verge", "bench"]) {
   for (const width of [1280, 390]) {
-    test(`a view keeps one height from its first frame through its definition and its footer: ${style || "defaults"}, ${width} px`, async ({ page }, info) => {
+    test(`a view keeps one height from its first frame through its definition and its footer: ${style || "defaults"}, ${width} px${links ? `, ${links}` : ""}`, async ({ page }, info) => {
       const warnings: string[] = [];
       page.on("console", (m) => {
         if (m.type() === "warning") warnings.push(m.text());
       });
       await page.setViewportSize({ width, height: 800 });
       await recordFrames(page);
-      const tag = `slots-${style}-${width}-${info.project.name}-${info.repeatEachIndex}-${Date.now()}`;
-      const q = new URLSearchParams({ src: SRC, title: TITLE, facts: FACTS, style, tag, after: "0", stall: "1000" });
+      const tag = `slots-${style}-${width}-${Object.keys(attributes).length}-${info.project.name}-${info.repeatEachIndex}-${Date.now()}`;
+      const q = new URLSearchParams({ src: SRC, title: TITLE, facts: FACTS, style, tag, after: "0", stall: "1000", ...attributes });
       await page.goto(`${PAGE}?${q}`);
       await expect.poll(async () => (await frames(page)).length).toBeGreaterThan(20);
       await page.evaluate(() => (window as unknown as { define: () => Promise<unknown> }).define());
@@ -79,6 +88,8 @@ for (const style of ["", "verge", "bench"]) {
       });
       expect(lines > 1).toBe(width === 390);
       expect(await page.evaluate(() => (document.getElementById("v") as HTMLElement & { summary: unknown }).summary)).toEqual({ title: TITLE, facts: OWN_FACTS, matches: true });
+      // The links are there once it is defined, and the button where it was.
+      if (links) await expect(page.locator("#v").locator(".download").first()).toBeVisible();
       expect(warnings).toEqual([]);
     });
   }

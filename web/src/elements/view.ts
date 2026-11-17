@@ -2245,13 +2245,25 @@ export class TickwaveView extends TickwaveElement {
     let detail: Record<string, unknown> | null = null;
     if (sel) {
       line(item("Selection", `${formatInterval(sel.start, tb, free)} to ${formatInterval(sel.end, tb, free)}`), item("Δt", formatInterval(sel.end - sel.start, tb, free)));
-      const counts = line();
-      const periods = line();
       const digital = this.#plot.tracks.filter((t) => t.channel.kind === "digital");
-      counts.append("…");
+      const chosen = Math.max(0, digital.indexOf(this.#plot.tracks[this.#periodChannel]));
+      // Each line as it will be, a "…" in the figures' font where a figure goes, so neither grows
+      // as the figures come: the counts by channel, and the periods with their menu.
+      const counts = digital.length > 0 ? line(...digital.map((t) => item(t.channel.name, "…"))) : null;
+      const select = document.createElement("select");
+      select.setAttribute("aria-label", "Channel for periods");
+      for (const t of digital) select.append(new Option(t.channel.name, String(t.index)));
+      select.selectedIndex = chosen;
+      select.addEventListener("change", () => {
+        this.#periodChannel = this.#plot.tracks.findIndex((t) => t.index === Number(select.value));
+        void this.#renderReadout();
+      });
+      const label = document.createElement("label");
+      label.append("Periods of", select);
+      const waiting = fig("…");
+      const periods = digital.length > 0 ? line(label, waiting) : null;
       this.#setReadout(lines);
       try {
-        const chosen = Math.max(0, digital.indexOf(this.#plot.tracks[this.#periodChannel]));
         // Each channel's count from the source's index where it keeps one, and the periods of
         // the channel the readout measures worked out where its edges are read, where the source
         // can: no edge comes to the page then.
@@ -2269,30 +2281,21 @@ export class TickwaveView extends TickwaveElement {
               : l.source.edges(measured, sel.start, sel.end).then((r) => periodStats(r.level, r.ticks)),
         ]);
         if (seq !== this.#readoutSeq) return;
-        counts.textContent = "";
         const edgeCounts: Record<string, number> = {};
+        counts?.replaceChildren();
         digital.forEach((t, i) => {
           const n = ns[i];
           edgeCounts[t.channel.name] = n;
-          counts.append(item(t.channel.name, `${formatCount(n)} edge${n === 1 ? "" : "s"}`));
+          if (i > 0) counts!.append(" ");
+          counts!.append(item(t.channel.name, `${formatCount(n)} edge${n === 1 ? "" : "s"}`));
         });
-        const select = document.createElement("select");
-        select.setAttribute("aria-label", "Channel for periods");
-        for (const t of digital) select.append(new Option(t.channel.name, String(t.index)));
-        select.selectedIndex = chosen;
-        select.addEventListener("change", () => {
-          this.#periodChannel = this.#plot.tracks.findIndex((t) => t.index === Number(select.value));
-          void this.#renderReadout();
-        });
-        const label = document.createElement("label");
-        label.append("Periods of", select);
-        periods.append(label);
+        waiting.remove();
         let periodDetail: Record<string, unknown> | null = null;
         if (stats) {
           const step = readingStep(l.info, [digital[chosen].index]);
           const rate = formatClockRate(stats, tb, step);
           const period = formatClockPeriod(stats, tb, step);
-          periods.append(
+          periods!.append(
             item("count", formatCount(stats.count)),
             item("min", formatInterval(stats.min, tb, step)),
             item("median", stats.median === null ? held("\u2013", formatInterval(stats.max, tb, step)) : formatInterval(stats.median, tb, step)),
@@ -2301,7 +2304,7 @@ export class TickwaveView extends TickwaveElement {
             clockNote(stats),
           );
           periodDetail = { channel: digital[chosen].channel.name, ...stats, rate, period };
-        } else periods.append("fewer than two rising edges");
+        } else periods?.append("fewer than two rising edges");
         detail = { start: sel.start, end: sel.end, duration: formatInterval(sel.end - sel.start, tb, free), edges: edgeCounts, periods: periodDetail };
       } catch (e) {
         failed(e);

@@ -10,6 +10,7 @@
   ?title=, ?facts=   the slotted text; ?facts= alone leaves the title unslotted
   ?src=              the recording, relative to web/ (default fixtures/identify-swd.tickwave)
   ?channels=         the channels attribute
+  ?download          the download attribute; ?annotations= the annotations attribute, relative to web/
   ?style=verge|bench the summary's metrics as the Escapement Project's two pages set them
   ?hidden            the view is hidden
   ?tag=, ?after=, ?stall=  passed on to the server with the recording's URL
@@ -46,6 +47,8 @@ for (const slot of ["title", "facts"]) {
 }
 if (q.has("hidden")) view.hidden = true;
 if (q.has("channels")) view.setAttribute("channels", q.get("channels"));
+if (q.has("download")) view.setAttribute("download", "");
+if (q.has("annotations")) view.setAttribute("annotations", `../../${q.get("annotations")}`);
 document.body.className = q.get("style") ?? "";
 // Whole, in one step, so no frame shows it before its spans and the page's style.
 document.currentScript.before(view);

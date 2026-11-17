@@ -54,10 +54,29 @@ export const SUMMARY_CSS = `
 .summary .toggle::before, .summary .toggle::after { display: block; height: 0; overflow: hidden; visibility: hidden; }
 `;
 
-const UNDEFINED = ":where(tickwave-view:not(:defined):not([hidden]))";
+/** An undefined view, with `attributes` as well, under no specificity, so any rule of the page's
+ * wins. */
+const undefinedView = (attributes = "") => `:where(tickwave-view${attributes}:not(:defined):not([hidden]))`;
+const UNDEFINED = undefinedView();
 
 /** tickwave.css's rules for an undefined view: its summary, from the spans a page slots into it. */
 export function viewSheet(): string {
+  // With download links, the button column holds them too. ::after is as wide as the links and
+  // the button side by side: their words on a line, once with Open's and once with Close's, each
+  // word apart from the next by a right-to-left mark, which takes no room and keeps the two from
+  // kerning into each other as they don't in boxes of their own. Each side of each box's padding is
+  // taken once by ::after's padding, once by its border and, with three boxes, once by its margin;
+  // an empty column after the words, the 1 px borders and the 6 px between boxes. No taller than
+  // nothing: ::before keeps the button's height.
+  const pad = v("--tickwave-open-button-padding");
+  const links = (attributes: string, words: string[], extra: string) => {
+    const line = words.map((w) => `${w}\\200F `).join("");
+    const fixed = 2 * (words.length + 1) + 6 * words.length;
+    return `${undefinedView(attributes)}::after { content: "${line}${WORDS[0]}\\A ${line}${WORDS[1]}"; white-space: pre;
+  display: grid; grid-template-columns: max-content ${fixed}px; border-style: solid; border-color: transparent;
+  border-width: ${pad}; ${extra}border-top-width: 0; border-bottom-width: 0; padding-top: 0; padding-bottom: 0;
+  min-height: 0; height: 0; overflow: hidden; }`;
+  };
   return `${UNDEFINED} { ${HOST_TEXT}
   ${BOX} }
 ${UNDEFINED} > :where([slot="title"]) { ${TITLE} }
@@ -66,5 +85,7 @@ ${UNDEFINED}::before, ${UNDEFINED}::after { ${BUTTON}
   border: 1px solid transparent; visibility: hidden; }
 ${UNDEFINED}::before { content: "${WORDS[0]}"; }
 ${UNDEFINED}::after { content: "${WORDS[1]}"; }
+${links("[download]", ["Download"], "")}
+${links("[download][annotations]", ["Download", "Annotations"], `margin: ${pad}; margin-top: 0; margin-bottom: 0; `)}
 `;
 }
