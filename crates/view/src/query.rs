@@ -178,6 +178,13 @@ struct Layout {
 /// column edges come out in f64 as they do in integers.
 const EXACT: i128 = 1 << 52;
 
+/// The most edges a digital channel's columns read past its finest overview level, the browser's
+/// rule too (web/src/render/track.ts `EDGES_AT_MOST`). Past it, counted from the index where the
+/// strip's buckets can't rule it out, the columns take the finest level, each bucket across the
+/// columns it spans, until the window narrows enough: a burst far denser than the channel's
+/// average density, whose finest level is coarse, never makes a zoom decode it whole.
+pub(crate) const EDGES_AT_MOST: u64 = 1 << 21;
+
 fn layout(q: &Query) -> Layout {
     let width = q.window.end.saturating_sub(q.window.start).max(1);
     let columns = q.columns.max(1) as usize;
@@ -734,6 +741,7 @@ impl Recording {
     ) -> Result<(), Error> {
         let mut at = span.start;
         let mut level = level;
+        let mut counted = false;
         // Only the columns the piece reaches: the others hold another piece's, or nothing. A
         // column's edges and time are its pieces' summed.
         let put = |reached: Range<usize>, piece: &DigitalColumns, cols: &mut DigitalColumns| {
@@ -770,6 +778,10 @@ impl Recording {
                     }
                     level = l.checked_sub(1);
                 }
+                None if !counted && self.too_many_edges(r, c, at, span.end)? => {
+                    counted = true;
+                    level = Some(0);
+                }
                 None => {
                     let (initial, ticks) = self.edges_in(r, c, place, at, span.end)?;
                     let edges = Edges {
@@ -789,6 +801,37 @@ impl Recording {
             }
         }
         Ok(())
+    }
+
+    /// Whether digital channel `c`'s edges in [from, to) are more than `EDGES_AT_MOST`: at most
+    /// what its strip's buckets' densities stand for, the strip being in the footer `open` read,
+    /// else from a finished file's index. A live recording's count reads its edges, so it reads
+    /// them as ever.
+    fn too_many_edges(&self, r: &Reading, c: usize, from: i64, to: i64) -> Result<bool, Error> {
+        let levels = self.levels.get(c).map_or(&[][..], Vec::as_slice);
+        let Some(strip) = levels.last() else {
+            return Ok(false);
+        };
+        if strip.covered == 0 || strip.end() < to || self.finished().is_none() {
+            return Ok(false);
+        }
+        let shift = strip.shift;
+        let (k0, k1) = (from >> shift, ((to - 1) >> shift) + 1);
+        let (density, _) = self.digital_buckets(r, c, levels.len() - 1, k0 as u64, k1 as u64)?;
+        let mut most = 0u64;
+        for d in density {
+            most = most.saturating_add(match d {
+                0 => 0,
+                d => crate::shade::counts(d).map_or(u64::MAX, |(_, hi)| hi),
+            });
+            if most > EDGES_AT_MOST {
+                let (from, to) = (from.max(0), to.min(self.length));
+                return Ok(
+                    self.edges_before(r, c, to)? - self.edges_before(r, c, from)? > EDGES_AT_MOST,
+                );
+            }
+        }
+        Ok(false)
     }
 
     /// Channel `c`'s samples over `range` and the one either side that reaches into it, when

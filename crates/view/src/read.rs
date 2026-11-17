@@ -345,7 +345,7 @@ impl Recording {
     }
 
     /// How many of finished digital channel `c`'s edges lie before tick `t`.
-    fn edges_before(&self, r: &Reading, c: usize, t: i64) -> Result<u64, Error> {
+    pub(crate) fn edges_before(&self, r: &Reading, c: usize, t: i64) -> Result<u64, Error> {
         if t <= 0 {
             return Ok(0);
         }

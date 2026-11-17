@@ -49,7 +49,8 @@ const RETRY_MS = 3000;
  * The most edges a digital row reads for a view. Past it, counted from the index first where the
  * source can, the row keeps its finest overview level, each bucket across the columns it spans,
  * until the view narrows enough: a burst far denser than the channel's average density, whose
- * finest level is coarse, never makes a zoom decode it whole.
+ * finest level is coarse, never makes a zoom decode it whole. The view core's columns keep the same
+ * bound (crates/view/src/query.rs `EDGES_AT_MOST`).
  */
 export const EDGES_AT_MOST = 2 ** 21;
 
