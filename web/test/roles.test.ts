@@ -6,7 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Palette, RoleTokens } from "../src/palette.ts";
-import { lengthAt, paintStretches, parseDash, parseWeight, roleLook, type Role } from "../src/roles.ts";
+import { dashFits, lengthAt, paintStretches, parseDash, parseWeight, roleLook, type Role } from "../src/roles.ts";
 import { runTable } from "./tables.ts";
 
 /** A palette whose page gives `host` for role `name`, with the trace and ink named as such. */
@@ -37,6 +37,7 @@ runTable("roles", {
       args.px1,
     ).map((s) => [s.px0, s.px1, s.role]),
   length_at: (args) => lengthAt((args.paths as number[][]).map((points) => ({ points })), args.x),
+  dash_fits: (args) => dashFits(args.numbers as number[]),
 });
 
 test("a page's dash and weight tokens read as numbers, the bounds left to roleLook and the shared rows", () => {

@@ -135,6 +135,16 @@ fn each_bound_is_a_problem_naming_the_role() {
             "name = \"r\"\ndash = [1, 65]",
             r#"role "r": dash is (dash, gap) pairs"#,
         ),
+        // Under a line width together: a renderer would cut a row into about 10^30 pieces a
+        // line width.
+        (
+            "name = \"r\"\ndash = [1e-30, 1e-30]",
+            r#"role "r": dash is (dash, gap) pairs, at most 8 numbers, each from 0 to 64 line widths, together at least 1"#,
+        ),
+        (
+            "name = \"r\"\ndash = [0.5, 0.25]",
+            r#"role "r": dash is (dash, gap) pairs"#,
+        ),
         (
             "name = \"r\"\ndash = [1, -1]",
             r#"role "r": dash is (dash, gap) pairs"#,
@@ -161,18 +171,21 @@ fn each_bound_is_a_problem_naming_the_role() {
         "name = \"r\"\nweight = 4".into(),
         "name = \"r\"\nweight = 0".into(),
         "name = \"r\"\ndash = [64, 0, 0, 64, 1, 1, 0.5, 0.25]".into(),
+        "name = \"r\"\ndash = [0.5, 0.5]".into(),
         "name = \"r_2\"\ncolour = \"#ABCDEF\"".into(),
     ] {
         assert_eq!(one(&fields), Vec::<String>::new(), "{fields}");
     }
     // In a generator's first line, the same.
-    let (_, problems) = roles_of("", r#"[{"name": "probe", "dash": [1]}]"#);
-    assert!(
-        problems
-            .iter()
-            .any(|p| p.starts_with(r#"rec.swd.jsonl: role "probe": dash"#)),
-        "{problems:?}"
-    );
+    for dash in ["[1]", "[1e-30, 1e-30]"] {
+        let (_, problems) = roles_of("", &format!(r#"[{{"name": "probe", "dash": {dash}}}]"#));
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.starts_with(r#"rec.swd.jsonl: role "probe": dash"#)),
+            "{dash}: {problems:?}"
+        );
+    }
 }
 
 #[test]

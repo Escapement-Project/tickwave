@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 
+use escapement_tickwave_format::annotations::roles::dash_fits;
 use escapement_tickwave_format::mapping::Mapping;
 use escapement_tickwave_format::model::{Break, Ratio};
 use escapement_tickwave_view::columns::{
@@ -774,6 +775,7 @@ fn roles() {
             let paths: Vec<Vec<f64>> = a["paths"].as_array().unwrap().iter().map(floats).collect();
             num(roles::length_at(&paths, f(&a["x"])))
         }
+        "dash_fits" => json!(dash_fits(&floats(&a["numbers"]))),
         other => panic!("no function {other}"),
     });
 }

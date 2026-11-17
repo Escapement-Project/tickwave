@@ -19,6 +19,9 @@ pub const DASH_NUMBERS: usize = 8;
 pub const WEIGHT_AT_MOST: f64 = 4.0;
 /// The greatest dash or gap, in line widths.
 pub const DASH_AT_MOST: f64 = 64.0;
+/// The least a dash's numbers sum to, in line widths: a pattern repeats at most once a line
+/// width, so a renderer cutting a row into dashes cuts a bounded number of pieces.
+pub const DASH_PERIOD_AT_LEAST: f64 = 1.0;
 
 /// A role's colour on the page's day face and on its night face, each `#rrggbb` in lower case.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,13 +52,13 @@ pub fn weight_fits(weight: f64) -> bool {
 }
 
 /// Whether `numbers` make a dash: (dash, gap) pairs, at most `DASH_NUMBERS`, each 0 to
-/// `DASH_AT_MOST`, not all 0. A host's own dash is held to it too.
+/// `DASH_AT_MOST`, together at least `DASH_PERIOD_AT_LEAST`. A host's own dash is held to it too.
 pub fn dash_fits(numbers: &[f64]) -> bool {
     !numbers.is_empty()
         && numbers.len().is_multiple_of(2)
         && numbers.len() <= DASH_NUMBERS
         && numbers.iter().all(|x| (0.0..=DASH_AT_MOST).contains(x))
-        && numbers.iter().sum::<f64>() > 0.0
+        && numbers.iter().sum::<f64>() >= DASH_PERIOD_AT_LEAST
 }
 
 /// Why `name` can't name a role, if it can't: lower-case ASCII letters, digits and `_`, starting
@@ -155,7 +158,7 @@ fn role(v: &Value, file: &str, place: usize) -> Result<Role, String> {
                 _ => {
                     return Err(who(format!(
                         "dash is (dash, gap) pairs, at most {DASH_NUMBERS} numbers, each from 0 \
-                         to {DASH_AT_MOST} line widths, not all 0"
+                         to {DASH_AT_MOST} line widths, together at least {DASH_PERIOD_AT_LEAST}"
                     )));
                 }
             }

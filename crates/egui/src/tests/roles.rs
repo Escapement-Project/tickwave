@@ -91,6 +91,15 @@ fn shown_in(
 /// corners of that colour cut to its clip, where some of them is left and its middle lies in
 /// `within`; with the clip. Feathering's corners fade out, so this is a line's core.
 fn seen(h: &Harness<'_, Host>, colour: Color32, within: Rect) -> Vec<(Rect, Rect)> {
+    seen_if(h, |c| c == colour, within)
+}
+
+/// `seen`, of the colours `colour` takes.
+fn seen_if(
+    h: &Harness<'_, Host>,
+    colour: impl Fn(Color32) -> bool,
+    within: Rect,
+) -> Vec<(Rect, Rect)> {
     let mut out = Vec::new();
     for s in shapes(h) {
         let Shape::Mesh(mesh) = &s.shape else {
@@ -98,7 +107,7 @@ fn seen(h: &Harness<'_, Host>, colour: Color32, within: Rect) -> Vec<(Rect, Rect
         };
         for t in mesh.indices.as_chunks::<3>().0 {
             let v = t.map(|i| mesh.vertices[i as usize]);
-            let corners: Vec<Pos2> = (v.iter().filter(|v| v.color == colour))
+            let corners: Vec<Pos2> = (v.iter().filter(|v| colour(v.color)))
                 .map(|v| v.pos)
                 .collect();
             if corners.is_empty() {
@@ -533,4 +542,26 @@ fn a_role_without_a_colour_takes_the_traces_in_first_place_and_ink_after() {
         assert_eq!(second[0].1, 1.0);
         assert!(first[0].0[0].x < second[0].0[0].x, "in declaration order");
     }
+}
+
+#[test]
+fn a_dash_whose_period_is_under_a_device_pixel_draws_solid() {
+    // A host's line weight of a fifth of a point: neither's dash of 2 and gap of 1 line widths is
+    // 0.6 points a period, under the one pixel a point the tests draw at.
+    let body = format!("{ROLES}{}", paint("n", 6.0, 8.0, "DIO3", "neither"));
+    let h = shown(&body, |p| p.line_weight = 0.2);
+    let lane = drawn(&h).layout.lanes[3];
+    // A line that thin is drawn faded: blue, at a share of its opacity.
+    let blue = seen_if(&h, |c| c.r() == 0 && c.g() == 0 && c.b() > 0, lane);
+    let rects: Vec<Rect> = blue.iter().map(|(_, r)| *r).collect();
+    let along = runs(&rects, 0.0);
+    let span = (x_of(&h, 6 * SECOND), x_of(&h, 8 * SECOND));
+    assert_eq!(
+        along.len(),
+        1,
+        "{} runs: {:?}",
+        along.len(),
+        &along[..along.len().min(4)]
+    );
+    assert!(near(along[0], span), "{along:?} against {span:?}");
 }

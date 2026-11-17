@@ -487,8 +487,12 @@ fn role_pen(f: &Frame, name: &str) -> Option<Pen> {
     let width = p.line_weight + look.weight as f32;
     let dash = match look.dash {
         Dash::Solid => None,
-        Dash::Pattern(d) => Some(d.iter().map(|&x| x as f32 * width).collect()),
+        Dash::Pattern(d) => Some(d.iter().map(|&x| x as f32 * width).collect::<Vec<f32>>()),
     };
+    // A dash is at least a line width a period, but a host's line weight may be tiny: a period
+    // under a device pixel would cut a row into more pieces than it has pixels, and shows as
+    // solid anyway.
+    let dash = dash.filter(|d| d.iter().sum::<f32>() * f.pixels_per_point >= 1.0);
     Some(Pen {
         colour,
         width,

@@ -32,11 +32,13 @@ export interface Look {
   readonly dash: readonly number[] | null;
 }
 
-/** The most a weight adds, in CSS pixels, the longest dash or gap, in line widths, and the most
- * numbers in a dash, as a declaration is held to them (ANNOTATIONS.md, "Roles"). */
+/** The most a weight adds, in CSS pixels, the longest dash or gap, in line widths, the most
+ * numbers in a dash, and the least they sum to, in line widths, as a declaration is held to them
+ * (ANNOTATIONS.md, "Roles"). */
 export const WEIGHT_AT_MOST = 4;
 export const DASH_AT_MOST = 64;
 export const DASH_NUMBERS = 8;
+export const DASH_PERIOD_AT_LEAST = 1;
 
 /** Whether a page's weight for a role is one a declaration may give: 0 to `WEIGHT_AT_MOST`. */
 export function weightFits(weight: number): boolean {
@@ -44,14 +46,14 @@ export function weightFits(weight: number): boolean {
 }
 
 /** Whether a page's dash for a role is one a declaration may give: (dash, gap) pairs, at most
- * `DASH_NUMBERS`, each 0 to `DASH_AT_MOST`, not all 0. */
+ * `DASH_NUMBERS`, each 0 to `DASH_AT_MOST`, together at least `DASH_PERIOD_AT_LEAST`. */
 export function dashFits(numbers: readonly number[]): boolean {
   return (
     numbers.length > 0 &&
     numbers.length % 2 === 0 &&
     numbers.length <= DASH_NUMBERS &&
     numbers.every((n) => n >= 0 && n <= DASH_AT_MOST) &&
-    numbers.reduce((a, b) => a + b, 0) > 0
+    numbers.reduce((a, b) => a + b, 0) >= DASH_PERIOD_AT_LEAST
   );
 }
 
