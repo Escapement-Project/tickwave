@@ -10,8 +10,8 @@ use escapement_tickwave_view::{Answer, Error, MarkerQuery};
 
 use super::live::Live;
 use super::*;
-use crate::Window;
 use crate::viewer::Request;
+use crate::{ViewerOptions, Window};
 
 fn request(window: Window) -> Request {
     Request {
@@ -416,4 +416,58 @@ fn the_whole_recording_followed_starts_at_its_start_and_widens() {
     assert_eq!(drawn(&h).window, 0..2 * SECOND);
     // Its width changes with each snapshot, so none is extended.
     assert_eq!(viewer(&h).extends(), 0);
+}
+
+#[test]
+fn a_small_cache_budget_holds_while_following_and_answers_as_the_default_does() {
+    let mut live = Live::new(Capture::new(100_000, 1_000_000, noisy));
+    let snapshot = live.write(200_000);
+    let ctx = egui::Context::default();
+    let small = ViewerOptions {
+        cache_bytes: 512 << 10,
+        ..ViewerOptions::default()
+    };
+    let a = Viewer::live_with(&ctx, &live.path, snapshot.clone(), small.clone()).unwrap();
+    let b = Viewer::live(&ctx, &live.path, snapshot).unwrap();
+    for v in [&a, &b] {
+        v.request(follow(SECOND));
+    }
+    for k in 0..=10u64 {
+        let to = 200_000 + 10_000 * k;
+        if k > 0 {
+            let s = live.write(to);
+            a.update(s.clone());
+            b.update(s);
+        }
+        let end = live.cap.tick(to);
+        for v in [&a, &b] {
+            until("the snapshot's answer", || {
+                !v.busy() && extent_end(v) == Some(end)
+            });
+        }
+        let (x, y) = (a.answer().unwrap(), b.answer().unwrap());
+        let x = Answer {
+            revision: y.revision,
+            ..Answer::clone(&x)
+        };
+        assert_eq!(x, *y, "snapshot {k}");
+        assert!(
+            a.cached() <= small.cache_bytes,
+            "snapshot {k}: {}",
+            a.cached()
+        );
+    }
+    // The default holds more, so the budget is what kept the small one under it.
+    assert!(b.cached() > small.cache_bytes, "{}", b.cached());
+    // Reopened finished, each keeps its budget.
+    live.finish();
+    for v in [&a, &b] {
+        v.reopen().unwrap();
+        v.request(follow(SECOND));
+        until("the finished file's answer", || {
+            !v.busy() && extent_end(v) == Some(live.cap.length())
+        });
+    }
+    assert!(a.cached() <= small.cache_bytes, "reopened: {}", a.cached());
+    assert!(b.cached() > small.cache_bytes, "reopened: {}", b.cached());
 }

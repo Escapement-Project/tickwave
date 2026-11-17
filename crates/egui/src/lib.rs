@@ -24,4 +24,4 @@ pub use graph::{Extras, Graph, Shown};
 pub use palette::Palette;
 pub use state::{ViewState, Window, Y};
 pub use strip::Strip;
-pub use viewer::Viewer;
+pub use viewer::{Viewer, ViewerOptions};

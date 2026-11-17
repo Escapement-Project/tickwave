@@ -19,9 +19,32 @@ use escapement_tickwave_view::{
 
 use crate::state::Window;
 
-/// Decoded data a viewer keeps: one step in on a synthetic hour at 100k pairs a second, `around`
-/// decodes about 80 MB.
+/// Decoded data a viewer keeps by default: one step in on a synthetic hour at 100k pairs a second,
+/// `around` decodes about 80 MB.
 const CACHE_BYTES: usize = 256 << 20;
+
+/// How a viewer reads its recording. A host builds one with `default` and sets its fields:
+///
+/// ```
+/// # use escapement_tickwave_egui::ViewerOptions;
+/// let mut options = ViewerOptions::default();
+/// options.cache_bytes = 64 << 20;
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ViewerOptions {
+    /// About the most decoded data the viewer keeps, in bytes: index pages, blocks and overview
+    /// blocks, least recently used out. 256 MiB unless set.
+    pub cache_bytes: usize,
+}
+
+impl Default for ViewerOptions {
+    fn default() -> Self {
+        Self {
+            cache_bytes: CACHE_BYTES,
+        }
+    }
+}
 
 /// What a graph asks: a query whose window is resolved against the extent when it runs, so a
 /// followed window ends where the recording does then, or at the host's now where that is later.
@@ -259,6 +282,9 @@ struct Shared {
     /// lock, so a `release` and a `reopen` on two threads agree on which file is let go of.
     bytes: Mutex<Arc<Releasable>>,
     cache_bytes: usize,
+    /// The cache of the latest recording.
+    #[cfg(test)]
+    cache: Mutex<Cache>,
     recording: RwLock<Recording>,
     slot: Mutex<Slot>,
     wake: Condvar,
@@ -302,29 +328,68 @@ impl Viewer {
     /// The finished recording at `path`. `Error::Unfinished` for one with no footer, which the
     /// format crate's Recutter repairs.
     pub fn open(ctx: &egui::Context, path: &Path) -> Result<Self, Error> {
-        Self::opened(ctx, file(path), CACHE_BYTES)
+        Self::open_with(ctx, path, ViewerOptions::default())
+    }
+
+    /// `open`, reading as `options` says.
+    pub fn open_with(
+        ctx: &egui::Context,
+        path: &Path,
+        options: ViewerOptions,
+    ) -> Result<Self, Error> {
+        Self::opened(ctx, file(path), options.cache_bytes)
     }
 
     fn opened(ctx: &egui::Context, open: Opener, cache_bytes: usize) -> Result<Self, Error> {
         let bytes = Releasable::new(open()?);
-        let recording = Recording::open(bytes.clone(), Cache::new(cache_bytes))?;
-        Ok(Self::start(ctx, open, bytes, cache_bytes, recording, false))
+        let cache = Cache::new(cache_bytes);
+        let recording = Recording::open(bytes.clone(), cache.clone())?;
+        Ok(Self::start(
+            ctx,
+            open,
+            bytes,
+            cache,
+            cache_bytes,
+            recording,
+            false,
+        ))
     }
 
     /// The recording at `path` that a writer in this process is writing. `snapshot` is the
     /// writer's, taken after the bytes it covers are in the file; give each newer one to `update`.
     #[cfg(feature = "live")]
     pub fn live(ctx: &egui::Context, path: &Path, snapshot: Snapshot) -> Result<Self, Error> {
+        Self::live_with(ctx, path, snapshot, ViewerOptions::default())
+    }
+
+    /// `live`, reading as `options` says.
+    #[cfg(feature = "live")]
+    pub fn live_with(
+        ctx: &egui::Context,
+        path: &Path,
+        snapshot: Snapshot,
+        options: ViewerOptions,
+    ) -> Result<Self, Error> {
         let open = file(path);
         let bytes = Releasable::new(open()?);
-        let recording = Recording::live(snapshot, bytes.clone(), Cache::new(CACHE_BYTES))?;
-        Ok(Self::start(ctx, open, bytes, CACHE_BYTES, recording, true))
+        let cache = Cache::new(options.cache_bytes);
+        let recording = Recording::live(snapshot, bytes.clone(), cache.clone())?;
+        Ok(Self::start(
+            ctx,
+            open,
+            bytes,
+            cache,
+            options.cache_bytes,
+            recording,
+            true,
+        ))
     }
 
     fn start(
         ctx: &egui::Context,
         open: Opener,
         bytes: Arc<Releasable>,
+        #[cfg_attr(not(test), allow(unused_variables))] cache: Cache,
         cache_bytes: usize,
         recording: Recording,
         live: bool,
@@ -334,6 +399,8 @@ impl Viewer {
             open,
             bytes: Mutex::new(bytes),
             cache_bytes,
+            #[cfg(test)]
+            cache: Mutex::new(cache),
             slot: Mutex::new(Slot {
                 issued: 0,
                 pending: None,
@@ -406,7 +473,8 @@ impl Viewer {
     pub fn reopen(&self) -> Result<(), Error> {
         let opened = (self.shared.open)()?;
         let bytes = Releasable::new(Arc::clone(&opened));
-        let recording = match Recording::open(bytes.clone(), Cache::new(self.shared.cache_bytes)) {
+        let cache = Cache::new(self.shared.cache_bytes);
+        let recording = match Recording::open(bytes.clone(), cache.clone()) {
             Ok(recording) => recording,
             Err(Error::Unfinished) => {
                 let mut slot = self.shared.slot();
@@ -425,6 +493,10 @@ impl Viewer {
         };
         let mut slot = self.shared.slot();
         *self.shared.bytes.lock().unwrap_or_else(|e| e.into_inner()) = bytes;
+        #[cfg(test)]
+        {
+            *self.shared.cache.lock().unwrap_or_else(|e| e.into_inner()) = cache;
+        }
         slot.replace = Some(recording);
         slot.released = false;
         #[cfg(feature = "live")]
@@ -600,8 +672,27 @@ impl Viewer {
         cache_bytes: usize,
     ) -> Result<Self, Error> {
         let bytes = Releasable::new(open()?);
-        let recording = Recording::live(snapshot, bytes.clone(), Cache::new(cache_bytes))?;
-        Ok(Self::start(ctx, open, bytes, cache_bytes, recording, true))
+        let cache = Cache::new(cache_bytes);
+        let recording = Recording::live(snapshot, bytes.clone(), cache.clone())?;
+        Ok(Self::start(
+            ctx,
+            open,
+            bytes,
+            cache,
+            cache_bytes,
+            recording,
+            true,
+        ))
+    }
+
+    /// About the bytes the recording's cache holds.
+    #[cfg(test)]
+    pub(crate) fn cached(&self) -> usize {
+        self.shared
+            .cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .bytes()
     }
 
     #[cfg(test)]
