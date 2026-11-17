@@ -332,7 +332,10 @@ struct Ink {
 }
 
 impl Ink {
+    /// Takes `line`, whose x never falls back, as every line a row draws runs: `paint` cuts a
+    /// line to what a stretch shows by x.
     fn line(&mut self, line: &mut Vec<Pos2>, tint: Tint, chain: u32) {
+        debug_assert!(line.is_sorted_by(|a, b| a.x <= b.x), "{line:?}");
         if line.len() >= 2 {
             self.lines.push((std::mem::take(line), tint, chain));
         } else {
@@ -363,6 +366,38 @@ impl Ink {
     }
 }
 
+/// What each stretch of a row reads of its ink, worked out once for the row: each line's first
+/// and last x, and, where a stretch dashes, each line's lengths along its chain (`Ink::lengths`)
+/// and each chain's lines.
+struct Measured {
+    spans: Vec<(f32, f32)>,
+    lengths: Vec<(f64, Vec<f64>)>,
+    chains: std::collections::HashMap<u32, Vec<usize>>,
+}
+
+impl Measured {
+    /// `ink`'s, for `stretches` stretches, one of them at least dashed where `dashed`: a row in one
+    /// stretch draws whole and takes no spans.
+    fn of(ink: &Ink, stretches: usize, dashed: bool) -> Self {
+        let spans = (ink.lines.iter())
+            .take(if stretches > 1 { usize::MAX } else { 0 })
+            .map(|(points, _, _)| (points[0].x, points[points.len() - 1].x))
+            .collect();
+        let mut chains: std::collections::HashMap<u32, Vec<usize>> =
+            std::collections::HashMap::new();
+        if dashed {
+            for (i, (_, _, chain)) in ink.lines.iter().enumerate() {
+                chains.entry(*chain).or_default().push(i);
+            }
+        }
+        Self {
+            spans,
+            lengths: if dashed { ink.lengths() } else { Vec::new() },
+            chains,
+        }
+    }
+}
+
 /// How a stretch of a row draws: its colour, its line's width in points, and its dash's (dash,
 /// gap) lengths in points, or None for a solid line.
 #[derive(Clone, Debug, PartialEq)]
@@ -372,13 +407,22 @@ struct Pen {
     dash: Option<Vec<f32>>,
 }
 
-/// The dashes of `line` whose pattern, (dash, gap) lengths, is `phase` along at its first point:
-/// each a polyline.
-fn dashes(line: &[Pos2], pattern: &[f32], phase: f32) -> Vec<Vec<Pos2>> {
+/// Each dash of `line` whose pattern, (dash, gap) lengths, is `phase` along at its first point,
+/// handed to `draw` as a polyline in `dash`, which it may keep for the next.
+fn dashes(
+    line: &[Pos2],
+    pattern: &[f32],
+    phase: f32,
+    dash: &mut Vec<Pos2>,
+    mut draw: impl FnMut(&mut Vec<Pos2>),
+) {
     let period: f32 = pattern.iter().sum();
     let lengths = pattern.iter().all(|x| x.is_finite() && *x >= 0.0);
+    dash.clear();
     if line.len() < 2 || !lengths || period <= 0.0 {
-        return vec![line.to_vec()];
+        dash.extend_from_slice(line);
+        draw(dash);
+        return;
     }
     let mut k = 0;
     let mut into = phase.rem_euclid(period);
@@ -388,12 +432,9 @@ fn dashes(line: &[Pos2], pattern: &[f32], phase: f32) -> Vec<Vec<Pos2>> {
     }
     // What is left of element `k`; an even one is a dash.
     let mut left = pattern[k] - into;
-    let mut out = Vec::new();
-    let mut dash = if k % 2 == 0 {
-        vec![line[0]]
-    } else {
-        Vec::new()
-    };
+    if k % 2 == 0 {
+        dash.push(line[0]);
+    }
     for w in line.windows(2) {
         let (a, b) = (w[0], w[1]);
         let length = a.distance(b);
@@ -401,11 +442,13 @@ fn dashes(line: &[Pos2], pattern: &[f32], phase: f32) -> Vec<Vec<Pos2>> {
         while length - done > left {
             done += left;
             let q = a + (b - a) * (done / length);
+            dash.push(q);
             if k % 2 == 0 {
-                dash.push(q);
-                out.push(std::mem::take(&mut dash));
+                draw(dash);
+                dash.clear();
             } else {
-                dash = vec![q];
+                dash.clear();
+                dash.push(q);
             }
             k = (k + 1) % pattern.len();
             left = pattern[k];
@@ -416,15 +459,58 @@ fn dashes(line: &[Pos2], pattern: &[f32], phase: f32) -> Vec<Vec<Pos2>> {
         }
     }
     if dash.len() >= 2 {
-        out.push(dash);
+        draw(dash);
     }
-    out
+}
+
+/// How far from a point a line `width` points wide draws, its joins and feathering included: within
+/// its width and a pixel, as epaint cuts a corner sharper than a right angle.
+fn reach(width: f32) -> f32 {
+    2.0 * width + 2.0
+}
+
+/// The part of `line`, whose x never falls back, between x `lo` and `hi`, into `out`: its points
+/// there, and where it runs past either, the point on its segment there. With where the part
+/// starts: the line's first point at or past `lo`, and how far before it, along the segment from
+/// the point before; None where none of it lies between. The joins between are the line's.
+fn within(line: &[Pos2], lo: f32, hi: f32, out: &mut Vec<Pos2>) -> Option<(usize, f32)> {
+    out.clear();
+    let (first, last) = (
+        line.partition_point(|q| q.x < lo),
+        line.partition_point(|q| q.x <= hi),
+    );
+    let at = |a: Pos2, b: Pos2, x: f32| a + (b - a) * ((x - a.x) / (b.x - a.x));
+    let mut cut = 0.0;
+    if first > 0 {
+        if first == line.len() {
+            return None;
+        }
+        let (a, b) = (line[first - 1], line[first]);
+        let p = at(a, b, lo);
+        cut = a.distance(p);
+        out.push(p);
+    }
+    out.extend_from_slice(&line[first..last]);
+    if last < line.len() {
+        if last == 0 {
+            return None;
+        }
+        let (a, b) = (line[last - 1], line[last]);
+        out.push(at(a, b, hi));
+    }
+    (out.len() >= 2).then_some((first, cut))
 }
 
 /// Draws `ink` in `pen`, clipped to `clip`: its fills, then its lines and dots. Where `whole`,
-/// `clip` is the row's own and every part is drawn; else only the parts that reach into it.
-fn paint(ui: &Ui, ink: &Ink, pen: &Pen, clip: Rect, whole: bool) {
+/// `clip` is the row's own and every part is drawn; else only the parts that reach into it, and of
+/// a line only its part in reach of the clip, so a row's stretches together tessellate it about
+/// once.
+fn paint(ui: &Ui, ink: &Ink, measured: &Measured, pen: &Pen, clip: Rect, whole: bool) {
     let reaches = |a: f32, b: f32| whole || (b >= clip.left() && a <= clip.right());
+    let (lo, hi) = (
+        clip.left() - reach(pen.width),
+        clip.right() + reach(pen.width),
+    );
     let mut fills = Mesh::default();
     for (r, t) in &ink.fills {
         if reaches(r.left(), r.right()) {
@@ -436,50 +522,61 @@ fn paint(ui: &Ui, ink: &Ink, pen: &Pen, clip: Rect, whole: bool) {
     let mut t = Tessellator::new(ui.ctx().pixels_per_point(), options, size, Vec::new());
     t.set_clip_rect(clip);
     let mut mesh = Mesh::default();
-    let mut stroke = |points: Vec<Pos2>, tint: Tint, mesh: &mut Mesh| {
-        t.tessellate_path(
-            &PathShape::line(points, Stroke::new(pen.width, tint.of(pen.colour))),
-            mesh,
-        );
-    };
-    let span = |points: &[Pos2]| {
-        let xs = points.iter().map(|q| q.x);
-        let lo = xs.clone().fold(f32::INFINITY, f32::min);
-        (lo, xs.fold(f32::NEG_INFINITY, f32::max))
-    };
-    match &pen.dash {
-        None => {
-            for (points, tint, _) in &ink.lines {
-                let (a, b) = span(points);
-                if reaches(a, b) {
-                    stroke(points.clone(), *tint, &mut mesh);
-                }
+    // One path's points, kept from line to line and dash to dash.
+    let mut path = PathShape::line(Vec::new(), Stroke::new(pen.width, pen.colour));
+    let mut part = Vec::new();
+    let mut origins: std::collections::HashMap<u32, f64> = std::collections::HashMap::new();
+    for (i, (points, tint, chain)) in ink.lines.iter().enumerate() {
+        // The line, or the part of it in reach of the clip and where that starts (`within`).
+        let (shown, start): (&[Pos2], (usize, f32)) = if whole {
+            (points, (0, 0.0))
+        } else {
+            let (a, b) = measured.spans[i];
+            if !reaches(a, b) {
+                continue;
             }
-        }
-        Some(pattern) => {
-            // One phase along each chain from where the stretch starts, or the chain does.
-            let lengths = ink.lengths();
-            let mut origins: std::collections::HashMap<u32, f64> = std::collections::HashMap::new();
-            for (i, (points, tint, chain)) in ink.lines.iter().enumerate() {
-                let (a, b) = span(points);
-                if !reaches(a, b) {
-                    continue;
-                }
+            match within(points, lo, hi, &mut part) {
+                Some(start) => (&part, start),
+                None => continue,
+            }
+        };
+        path.stroke = Stroke::new(pen.width, tint.of(pen.colour)).into();
+        match &pen.dash {
+            None => {
+                path.points.clear();
+                path.points.extend_from_slice(shown);
+                t.tessellate_path(&path, &mut mesh);
+            }
+            Some(pattern) => {
+                // One phase along each chain from where the stretch starts, or the chain does.
+                let lengths = &measured.lengths;
                 let origin = *origins.entry(*chain).or_insert_with(|| {
-                    let paths: Vec<&[f64]> = (ink.lines.iter().zip(&lengths))
-                        .filter(|((_, _, c), _)| c == chain)
-                        .map(|(_, (_, flat))| flat.as_slice())
+                    let paths: Vec<&[f64]> = (measured.chains.get(chain).into_iter().flatten())
+                        .map(|&j| lengths[j].1.as_slice())
                         .collect();
                     roles::length_at(&paths, f64::from(clip.left()))
                 });
-                let phase = (lengths[i].0 - origin) as f32;
-                for d in dashes(points, pattern, phase) {
-                    stroke(d, *tint, &mut mesh);
-                }
+                // The chain's length where the part starts.
+                let flat = &lengths[i].1;
+                let along = match start {
+                    (0, _) => flat[1],
+                    (first, cut) => flat[2 * first - 1] + f64::from(cut),
+                };
+                let phase = (along - origin) as f32;
+                let mut dash = std::mem::take(&mut path.points);
+                dashes(shown, pattern, phase, &mut dash, |d| {
+                    std::mem::swap(&mut path.points, d);
+                    t.tessellate_path(&path, &mut mesh);
+                    std::mem::swap(&mut path.points, d);
+                });
+                path.points = dash;
             }
         }
     }
     for (q, tint) in &ink.dots {
+        if !reaches(q.x - DOT_RADIUS, q.x + DOT_RADIUS) {
+            continue;
+        }
         t.tessellate_shape(
             Shape::Circle(CircleShape::filled(*q, DOT_RADIUS, tint.of(pen.colour))),
             &mut mesh,
@@ -645,9 +742,14 @@ pub(crate) fn graph(ui: &Ui, f: &Frame) {
         let ink = trace(f, px, &plot);
         let cut = stretches(f, c, l.plot);
         let whole = cut.len() == 1;
+        let measured = Measured::of(
+            &ink,
+            cut.len(),
+            cut.iter().any(|(_, pen)| pen.dash.is_some()),
+        );
         let _span = tracing::debug_span!("tessellate").entered();
         for (clip, pen) in &cut {
-            paint(ui, &ink, pen, *clip, whole);
+            paint(ui, &ink, &measured, pen, *clip, whole);
         }
     }
     for (&c, rect) in f.lanes.iter().zip(&l.lanes) {
@@ -705,9 +807,9 @@ fn key(ui: &Ui, f: &Frame, rect: Rect) {
                 painter.add(PathShape::line(line, stroke));
             }
             Some(pattern) => {
-                for d in dashes(&line, pattern, 0.0) {
-                    painter.add(PathShape::line(d, stroke));
-                }
+                dashes(&line, pattern, 0.0, &mut Vec::new(), |d| {
+                    painter.add(PathShape::line(d.clone(), stroke));
+                });
             }
         }
         right = left - SWATCH_GAP - SWATCH - KEY_GAP;
@@ -985,17 +1087,22 @@ fn lane(ui: &Ui, f: &Frame, c: usize, rect: Rect, px: f32) {
     let cut = stretches(f, c, rect);
     let whole = cut.len() == 1;
     // A lane's geometry follows its line's width: one ink a width its stretches draw at.
-    let mut inks: Vec<(f32, Ink)> = Vec::new();
+    let mut inks: Vec<(f32, Ink, Measured)> = Vec::new();
     for (clip, pen) in &cut {
-        let at = match inks.iter().position(|(width, _)| *width == pen.width) {
+        let at = match inks.iter().position(|(width, ..)| *width == pen.width) {
             Some(at) => at,
             None => {
-                inks.push((pen.width, lane_ink(f, &runs, rect, px, pen.width)));
+                let ink = lane_ink(f, &runs, rect, px, pen.width);
+                // Dashed if any stretch at this width is.
+                let dashed = (cut.iter()).any(|(_, p)| p.width == pen.width && p.dash.is_some());
+                let measured = Measured::of(&ink, cut.len(), dashed);
+                inks.push((pen.width, ink, measured));
                 inks.len() - 1
             }
         };
         let _span = tracing::debug_span!("tessellate").entered();
-        paint(ui, &inks[at].1, pen, *clip, whole);
+        let (_, ink, measured) = &inks[at];
+        paint(ui, ink, measured, pen, *clip, whole);
     }
 }
 
@@ -1288,7 +1395,7 @@ pub(crate) fn strip(
                 dash: None,
             };
             let _span = tracing::debug_span!("tessellate").entered();
-            paint(ui, &ink, &pen, rect, true);
+            paint(ui, &ink, &Measured::of(&ink, 1, false), &pen, rect, true);
         }
     }
     if let Some((a, b)) = across(&view, rect, window.start as f64, window.end as f64, px) {
@@ -1328,5 +1435,91 @@ pub(crate) fn strip_axis(ui: &Ui, rect: Rect, extent: &Range<i64>, timebase: Rat
             p.figures.clone(),
             p.ink_2,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use egui::epaint::{PathShape, TessellationOptions, Tessellator};
+    use egui::{Color32, Mesh, Pos2, Rect, Stroke, pos2};
+
+    use super::{reach, within};
+
+    /// The alpha `mesh` covers `p` with, where its triangles that hold `p` overlap the most.
+    fn cover(mesh: &Mesh, p: Pos2) -> f32 {
+        let mut most: f32 = 0.0;
+        for t in mesh.indices.as_chunks::<3>().0 {
+            let [a, b, c] = t.map(|i| mesh.vertices[i as usize]);
+            let d = (b.pos - a.pos).x * (c.pos - a.pos).y - (b.pos - a.pos).y * (c.pos - a.pos).x;
+            if d.abs() < 1e-9 {
+                continue;
+            }
+            let u = ((b.pos - p).x * (c.pos - p).y - (b.pos - p).y * (c.pos - p).x) / d;
+            let v = ((c.pos - p).x * (a.pos - p).y - (c.pos - p).y * (a.pos - p).x) / d;
+            let w = 1.0 - u - v;
+            if u >= -1e-6 && v >= -1e-6 && w >= -1e-6 {
+                let alpha = |v: egui::epaint::Vertex| f32::from(v.color.a());
+                most = most.max(u * alpha(a) + v * alpha(b) + w * alpha(c));
+            }
+        }
+        most
+    }
+
+    fn stroke(points: Vec<Pos2>, width: f32) -> Mesh {
+        let mut t = Tessellator::new(1.0, TessellationOptions::default(), [1, 1], Vec::new());
+        let mut mesh = Mesh::default();
+        t.tessellate_path(
+            &PathShape::line(points, Stroke::new(width, Color32::RED)),
+            &mut mesh,
+        );
+        mesh
+    }
+
+    /// A row's line cut to its points in reach of a clip draws inside it as the whole line does:
+    /// a zigzag with corners sharper than a right angle, one just outside either edge.
+    #[test]
+    fn a_line_cut_to_its_reach_shows_in_the_clip_as_the_whole_line_does() {
+        let width = 3.0;
+        let line: Vec<Pos2> = (0..100)
+            .map(|k| pos2(k as f32 * 2.5, if k % 2 == 0 { 10.0 } else { 40.0 }))
+            .collect();
+        let clip = Rect::from_min_max(pos2(31.0, 0.0), pos2(61.0, 50.0));
+        let reach = reach(width);
+        let mut part = Vec::new();
+        let (first, cut) = within(&line, clip.left() - reach, clip.right() + reach, &mut part)
+            .expect("a part in reach");
+        assert!(
+            part.len() < line.len() / 2,
+            "{} of {} points",
+            part.len(),
+            line.len()
+        );
+        // The part starts on the segment into its first point, at the reach's edge.
+        assert!(
+            (part[0].x - (clip.left() - reach)).abs() < 1e-4,
+            "{:?}",
+            part[0]
+        );
+        assert!((line[first - 1].distance(part[0]) - cut).abs() < 1e-4);
+        let (whole, cut) = (stroke(line, width), stroke(part, width));
+        let mut worst: f32 = 0.0;
+        for i in 0..=60 {
+            for j in 0..=100 {
+                let p = pos2(clip.left() + i as f32 * 0.5, clip.top() + j as f32 * 0.5);
+                worst = worst.max((cover(&whole, p) - cover(&cut, p)).abs());
+            }
+        }
+        assert!(worst < 1.0, "an alpha differs by {worst} in the clip");
+    }
+
+    #[test]
+    fn a_line_wholly_outside_the_reach_has_no_part() {
+        let line = [pos2(0.0, 0.0), pos2(5.0, 1.0), pos2(9.0, 0.0)];
+        let mut part = Vec::new();
+        assert_eq!(within(&line, 10.0, 20.0, &mut part), None);
+        assert_eq!(within(&line, -20.0, -10.0, &mut part), None);
+        // Wholly inside: the line as it is.
+        assert_eq!(within(&line, -1.0, 10.0, &mut part), Some((0, 0.0)));
+        assert_eq!(part, line);
     }
 }
