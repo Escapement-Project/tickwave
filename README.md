@@ -96,3 +96,11 @@ cargo build --release -p escapement-tickwave-cli --features viewer
 ## Licence
 
 MIT or Apache-2.0, at your choice: `LICENSE-MIT` and `LICENSE-APACHE`.
+
+tickwave's icon and the project's dial in `site/` (`tickwave.svg`, `tickwave-mark.json`, `dial.svg`
+and `favicon-tickwave.ico`) are the Escapement Project's marks, under CC BY 4.0 in
+`site/CC-BY-4.0.txt`. Credit the Escapement Project. Use the marks to refer to the project or its
+tools. Don't use them, changed or not, as another project's mark, or to suggest that the project
+made or endorses something it didn't. The `tickwave` binary built with the `viewer` feature
+carries them, so its crate's licence is `(MIT OR Apache-2.0) AND CC-BY-4.0`. The fonts in
+`site/fonts/` are under the SIL Open Font License, each beside its text.
