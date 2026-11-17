@@ -1,19 +1,25 @@
 // How a digital column that holds edges reads, the same at every zoom and in every recording.
-// Its band, between the two levels' rails, takes an opacity from its edge rate, edges a second, on
-// one fixed log scale; each rail takes the share of the column's time at its level. A column with
-// an edge spent time at both levels, so both rails show at least the floor there, and so does the
-// band: a rare edge never reads as empty. A port of crates/view/src/shade.rs, held to the same
-// cases in testdata/view/shade.json.
+// Edges that stand apart are strokes, and so is a pulse or a burst too short to have a stretch to
+// shade. Where edges crowd, a run's band, between the two levels' rails, takes an opacity from its
+// edge rate, edges a second, on one fixed log scale; each rail takes a part of the band's opacity
+// by its level's share of the time. A column with an edge spent time at both levels, so both rails
+// show at least RAIL_FLOOR of the band there, and the band itself at least FLOOR: a rare edge never
+// reads as empty. A port of crates/view/src/shade.rs, held to the same cases in
+// testdata/view/shade.json.
 
 import type { Ratio } from "../source.ts";
 import { BUSY, FALL, NONE, RISE, type DigitalColumns } from "./columns.ts";
 
-/** The opacity of a band at `RATE_FLOOR` edges a second and below, and the least a rail of a column with an edge takes. */
+/** The opacity of a band at `RATE_FLOOR` edges a second and below. */
 export const FLOOR = 0.2;
+/** The opacity of a band at `RATE_TOP` edges a second and above: short of full ink, so the busiest band still reads as a fill. */
+export const TOP = 0.6;
 /** Edges a second at the floor. */
 export const RATE_FLOOR = 1;
-/** Edges a second at full opacity: a clock of 50 MHz. */
-export const RATE_FULL = 1e8;
+/** Edges a second at the top: a clock of 50 MHz. */
+export const RATE_TOP = 1e8;
+/** The least part of the band's opacity a rail takes where the columns about it hold an edge. */
+export const RAIL_FLOOR = 0.2;
 
 /** `ceil(2^(63 + r/4))` for r = 1, 2, 3: FORMAT.md's thresholds between a doubling's steps. */
 const STEPS = [0x9837f0518db8a970n, 0xb504f333f9de6485n, 0xd744fccad69d6af5n];
@@ -81,13 +87,13 @@ export function rate(edges: number, ticks: number, timebase: Ratio): number {
 }
 
 /**
- * A band's opacity at `rate` edges a second: none at no edge, `FLOOR` up to `RATE_FLOOR`, full from
- * `RATE_FULL`, and linear in the rate's logarithm between.
+ * A band's opacity at `rate` edges a second: none at no edge, `FLOOR` up to `RATE_FLOOR`, `TOP` from
+ * `RATE_TOP`, and linear in the rate's logarithm between.
  */
 export function band(rate: number): number {
   if (!(rate > 0)) return 0;
-  const along = Math.log2(rate / RATE_FLOOR) / Math.log2(RATE_FULL / RATE_FLOOR);
-  return FLOOR + (1 - FLOOR) * Math.min(1, Math.max(0, along));
+  const along = Math.log2(rate / RATE_FLOOR) / Math.log2(RATE_TOP / RATE_FLOOR);
+  return FLOOR + (TOP - FLOOR) * Math.min(1, Math.max(0, along));
 }
 
 /**
@@ -102,14 +108,20 @@ export function stroke(band: number, spacing: number, width: number): number {
 }
 
 /**
- * The high rail's opacity and the low's, for a column whose known time is `high` high, as a share
- * from 0 to 1, NaN where none of it is known. With `edges`, each is at least `FLOOR`.
+ * The high rail's opacity and the low's, for columns whose known time is `high` high, as a share
+ * from 0 to 1, NaN where none of it is known, in a run whose band takes opacity `band`. With
+ * `edges`, each rail takes the band's opacity times its level's share over the larger share, at
+ * least `RAIL_FLOOR` of it: an even wave's rails both at the band's, 75 % high the high rail at it
+ * and the low at a third of it. Without, each takes the band's opacity times its share, so a level
+ * held inside a run reads in the band's tone, not as a line at full ink.
  */
-export function rails(high: number, edges: boolean): [number, number] {
+export function rails(high: number, edges: boolean, band: number): [number, number] {
   if (Number.isNaN(high)) return [0, 0];
   const h = Math.min(1, Math.max(0, high));
   const l = Math.min(1, Math.max(0, 1 - high));
-  return edges ? [Math.max(h, FLOOR), Math.max(l, FLOOR)] : [h, l];
+  if (!edges) return [band * h, band * l];
+  const larger = Math.max(h, l);
+  return [band * Math.max(h / larger, RAIL_FLOOR), band * Math.max(l / larger, RAIL_FLOOR)];
 }
 
 /**
@@ -123,31 +135,45 @@ export function dutyShare(duty: number): [number, number, number] | null {
 }
 
 /**
- * How a column of a digital row draws: its level as the line; a stroke across the band a line's
- * width wide at an opacity (a lone edge where it sits, a busy column alone at its middle); or, in
- * a run, the band between the levels and each level's rail at theirs.
+ * How a column of a digital row draws: its level as the line; a lone edge's stroke across the band
+ * a line's width wide at an opacity, where it sits; a busy column alone or a short run as one such
+ * stroke at an opacity, centred at a place in columns from the row's first; in a run, the band
+ * between the levels and each level's rail at theirs; or, held briefly between two runs, its level's
+ * line at an opacity.
  */
-export type Look = "flat" | ["stroke", number] | ["shade", number, number, number];
+export type Look = "flat" | ["stroke", number] | ["pulse", number, number] | ["shade", number, number, number] | ["held", number];
 
 /** `Looks.kind`: the column's level as the line. */
 export const FLAT = 0;
-/** `Looks.kind`: a stroke across the band at opacity `band`. */
+/** `Looks.kind`: a lone edge's stroke across the band at opacity `band`. */
 export const STROKE = 1;
 /** `Looks.kind`: in a run, the band at `band` and the rails at `high` and `low`. */
 export const SHADE = 2;
+/**
+ * `Looks.kind`: a busy column alone or a short run, one stroke across the band at opacity `band`
+ * centred at `at`, in columns from the row's first. Each of its columns holds it. The line comes in
+ * at the level before its first column and leaves at the level the column after its last starts at.
+ */
+export const PULSE = 3;
+/** `Looks.kind`: a level held briefly between two runs: no band, and its line at opacity `band`, the
+ * larger of the two runs' bands. */
+export const HELD = 4;
 
-/** Each column's `Look`, a field to an array, so a row's looks are four arrays and no object a column. */
+/** Each column's `Look`, a field to an array, so a row's looks are five arrays and no object a column. */
 export interface Looks {
   readonly kind: Uint8Array;
   readonly band: Float64Array;
   readonly high: Float64Array;
   readonly low: Float64Array;
+  readonly at: Float64Array;
 }
 
 /** Column `k`'s look. */
 export function lookAt(l: Looks, k: number): Look {
   if (l.kind[k] === STROKE) return ["stroke", l.band[k]];
+  if (l.kind[k] === PULSE) return ["pulse", l.band[k], l.at[k]];
   if (l.kind[k] === SHADE) return ["shade", l.band[k], l.high[k], l.low[k]];
+  if (l.kind[k] === HELD) return ["held", l.band[k]];
   return "flat";
 }
 
@@ -158,17 +184,29 @@ export const RAIL_REACH = 2;
  * Each of columns c0..c1's look, on a grid of a device pixel a column `per` ticks wide, on an axis
  * of `timebase` ticks a second, the line `width` device pixels wide. Edges whose strokes come
  * within a device pixel of each other, or of a busy column, join in a run with the columns between
- * them; a column with no data ends a run. A run's band takes the rate of its edges over its
- * columns, and each of its columns' rails the share of time high over the `RAIL_REACH` columns
- * either side of it within the run, at least the floor where those hold an edge. A lone edge, or a
- * busy column with no other changing column within a device pixel, is a stroke at the opacity
- * `stroke` gives the spacing to its nearest neighbour, at the rate of its own edges, at least one,
- * over that spacing. Columns outside c0..c1 are flat.
+ * them; a column with no data ends a run. So two changing columns join when their centres are under
+ * `width + 1` apart, the join distance.
+ *
+ * A run whose first and last changing columns are under the join distance apart is short: any two
+ * of its edges would join on their own, so it has no stretch for a band to describe, and a shift of
+ * the column grid could have put a busy column alone in its place. It is a pulse at its middle, as
+ * a busy column alone is at its own. A lone edge is a stroke. Each takes the opacity `stroke` gives
+ * the spacing from its centre to its nearest neighbour's (a pulse's middle, any other changing
+ * column's own centre), at the rate of its own edges, at least one, over that spacing: full ink
+ * where it stands apart. A pulse's spacing counts no pulse beside it, so pulses near each other,
+ * rare flags close together, each take full ink at every zoom.
+ *
+ * A longer run's band takes the rate of its edges over its columns, and each of its columns' rails
+ * `rails` of the share of time high over the `RAIL_REACH` columns either side of it within the run.
+ * Where two longer runs have under the join distance of bare space between them, and no column
+ * without data, the level held between keeps its gap but is held at the larger of their bands: at
+ * full ink it would draw as a speck darker than the runs either side.
+ * Columns outside c0..c1 are flat.
  */
 export function looks(cols: DigitalColumns, c0: number, c1: number, width: number, per: number, timebase: Ratio): Looks {
   const { state, at, edges, high, known } = cols;
   const m = state.length;
-  const out: Looks = { kind: new Uint8Array(m), band: new Float64Array(m), high: new Float64Array(m), low: new Float64Array(m) };
+  const out: Looks = { kind: new Uint8Array(m), band: new Float64Array(m), high: new Float64Array(m), low: new Float64Array(m), at: new Float64Array(m) };
   // Each changing column, its centre in columns, and how far its paint reaches either side of it.
   const span = Math.max(0, c1 - c0);
   const [ks, centre, reach] = [new Int32Array(span), new Float64Array(span), new Float64Array(span)];
@@ -180,25 +218,60 @@ export function looks(cols: DigitalColumns, c0: number, c1: number, width: numbe
     centre[n] = s === BUSY ? k + 0.5 : k + at[k];
     reach[n++] = s === BUSY ? 0.5 + (width - 1) / 2 : width / 2;
   }
-  // Whether changing columns i and i + 1 join: the bare space between their paint under a device
-  // pixel, and no column between them without data.
-  const joins = (i: number) => {
-    if (centre[i + 1] - reach[i + 1] - (centre[i] + reach[i]) >= 1) return false;
-    for (let k = ks[i]; k < ks[i + 1]; k++) if (state[k] === NONE) return false;
-    return true;
+  // The bare space between changing columns i's and j's paint, and whether a column with no data
+  // lies between them.
+  const gap = (i: number, j: number) => centre[j] - reach[j] - (centre[i] + reach[i]);
+  const cut = (i: number, j: number) => {
+    for (let k = ks[i]; k < ks[j]; k++) if (state[k] === NONE) return true;
+    return false;
   };
+  // Each run as its first and last changing column and 1 if it is short; where each changing column
+  // sits as a neighbour, a short run's at its middle, as it draws, any other's at its own centre;
+  // and which are in pulses.
+  const place = centre.slice(0, n);
+  const pulse = new Uint8Array(n);
+  const runs: number[] = [];
   for (let i = 0; i < n; ) {
     let last = i;
-    while (last + 1 < n && joins(last)) last++;
+    while (last + 1 < n && gap(last, last + 1) < 1 && !cut(last, last + 1)) last++;
+    const short = centre[last] - centre[i] < width + 1;
+    if (short) {
+      const mid = (centre[i] + centre[last]) / 2;
+      const p = last > i || state[ks[i]] === BUSY ? 1 : 0;
+      for (let j = i; j <= last; j++) {
+        place[j] = mid;
+        pulse[j] = p;
+      }
+    }
+    runs.push(i, last, short ? 1 : 0);
+    i = last + 1;
+  }
+  // The longer run just before: its last changing column, -1 for none, and its band.
+  let end = -1;
+  let was = 0;
+  for (let r = 0; r < runs.length; r += 3) {
+    const [i, last] = [runs[r], runs[r + 1]];
     const [k0, k1] = [ks[i], ks[last]];
-    if (last === i) {
+    if (runs[r + 2] === 1) {
+      end = -1;
+      const mid = place[i];
       let spacing = Infinity;
-      if (i > 0) spacing = Math.min(spacing, centre[i] - centre[i - 1]);
-      if (i + 1 < n) spacing = Math.min(spacing, centre[i + 1] - centre[i]);
+      if (i > 0 && !(pulse[i] && pulse[i - 1])) spacing = Math.min(spacing, mid - place[i - 1]);
+      if (last + 1 < n && !(pulse[i] && pulse[last + 1])) spacing = Math.min(spacing, place[last + 1] - mid);
       // A busy column changes level at least once, though a level's may hold no edge (a gap's end).
-      const count = Math.max(edges[k0], 1);
-      out.kind[k0] = STROKE;
-      out.band[k0] = stroke(band(rate(count, spacing * per, timebase)), spacing, width);
+      let count = 0;
+      for (let k = k0; k <= k1; k++) count += edges[k];
+      const alpha = stroke(band(rate(Math.max(count, 1), spacing * per, timebase)), spacing, width);
+      if (!pulse[i]) {
+        out.kind[k0] = STROKE;
+        out.band[k0] = alpha;
+      } else {
+        for (let k = k0; k <= k1; k++) {
+          out.kind[k] = PULSE;
+          out.band[k] = alpha;
+          out.at[k] = mid;
+        }
+      }
     } else {
       let all = 0;
       for (let k = k0; k <= k1; k++) all += edges[k];
@@ -211,14 +284,21 @@ export function looks(cols: DigitalColumns, c0: number, c1: number, width: numbe
           h += high[j];
           t += known[j];
         }
-        const [hi, lo] = rails(t > 0 ? h / t : NaN, e > 0);
+        const [hi, lo] = rails(t > 0 ? h / t : NaN, e > 0, b);
         out.kind[k] = SHADE;
         out.band[k] = b;
         out.high[k] = hi;
         out.low[k] = lo;
       }
+      if (end >= 0 && gap(end, i) < width + 1 && !cut(end, i)) {
+        for (let k = ks[end] + 1; k < k0; k++) {
+          out.kind[k] = HELD;
+          out.band[k] = Math.max(was, b);
+        }
+      }
+      end = last;
+      was = b;
     }
-    i = last + 1;
   }
   return out;
 }

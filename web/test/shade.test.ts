@@ -15,7 +15,7 @@ runTable("shade", {
   rate: (a) => rate(a.edges, a.ticks, ratio(a.timebase)),
   band: (a) => band(a.rate),
   stroke: (a) => stroke(a.band, a.spacing, a.width),
-  rails: (a) => rails(a.high, a.edges),
+  rails: (a) => rails(a.high, a.edges, a.band),
   duty_share: (a) => dutyShare(a.duty),
   looks: (a) => {
     const c = a.columns;

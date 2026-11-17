@@ -1,8 +1,8 @@
 // A digital row's trace from its columns and their looks (shade.ts), in device pixels. Pure, so
 // the shapes can be tested without a canvas: the line's pen is a Path2D when the plot draws.
 
-import { BUSY, FALL, HIGH, LOW, NONE, RISE, type DigitalColumns } from "./columns.ts";
-import { SHADE, STROKE, type Looks } from "./shade.ts";
+import { FALL, HIGH, LOW, NONE, RISE, type DigitalColumns } from "./columns.ts";
+import { HELD, PULSE, SHADE, STROKE, type Looks } from "./shade.ts";
 
 /** What a trace draws its line into, stroked at the trace's width. A Path2D is one. */
 export interface Pen {
@@ -43,11 +43,12 @@ export interface Fills {
 /**
  * `count` columns' trace, each drawn as its look says. Flat columns and edges at full ink are a
  * line, stroked; a level held over several columns is one segment. An edge the model fades, and a
- * busy column alone, are a rectangle across the band and both rails a line's width wide at the
- * opacity its stroke takes: an edge where it sits, its levels on the line, and a busy column at
- * its middle, each column it covers in part at that share of the opacity, as a canvas covers it.
- * A run's columns are its band and rails at theirs, and the line stops at a run's sides. The fills
- * are given back, null where there are none. Each opacity is in steps of 1 / SHADES.
+ * pulse, are a rectangle across the band and both rails a line's width wide at the opacity its
+ * stroke takes: an edge where it sits, its levels on the line, and a pulse at its centre, the line
+ * in at the level before it and out at the level after it. Each column the rectangle covers in part
+ * takes that share of the opacity, as a canvas covers it. A run's columns are its band and rails at
+ * theirs, and the line stops at a run's sides. The fills are given back, null where there are none.
+ * Each opacity is in steps of 1 / SHADES.
  */
 export function digitalTrace(cols: DigitalColumns, looks: Looks, count: number, band: TraceBand, line: Pen): Fills | null {
   const { left, yH, yL, lw } = band;
@@ -101,24 +102,35 @@ export function digitalTrace(cols: DigitalColumns, looks: Looks, count: number, 
       lift();
       continue;
     }
+    if (kind === HELD) {
+      fills ??= { band: new Uint8ClampedArray(count), high: new Uint8ClampedArray(count), low: new Uint8ClampedArray(count) };
+      (st === HIGH ? fills.high : fills.low)[c] = alpha(shadeStep(looks.band[c]));
+      lift();
+      continue;
+    }
     if (st === LOW || st === HIGH) {
       along(x, x + 1, st === HIGH ? yH : yL);
       continue;
     }
-    const q = kind === STROKE ? shadeStep(looks.band[c]) : SHADES;
-    if (st === BUSY) {
-      // Alone, as a lone edge: in at the level before it to its middle, a stroke across the
-      // band, and out at the level the next column starts at.
-      const mid = x + 0.5;
-      const before: number | null = pen;
+    if (kind === PULSE) {
+      // As a lone edge: in at the level before its first column to its centre, a stroke across the
+      // band, and out at the level after its last column.
+      const mid = left + looks.at[c];
+      let last = c;
+      while (last + 1 < count && looks.kind[last + 1] === PULSE && looks.at[last + 1] === looks.at[c]) last++;
+      const before: number | null = st === RISE ? yL : st === FALL ? yH : pen;
       if (before !== null) along(x, mid, before);
-      stroke(mid, q);
-      const next = state[c + 1];
-      const after = next === HIGH || next === FALL ? yH : next === LOW || next === RISE ? yL : before;
+      stroke(mid, shadeStep(looks.band[c]));
+      const end = state[last];
+      const next = state[last + 1];
+      const after =
+        end === RISE ? yH : end === FALL ? yL : next === HIGH || next === FALL ? yH : next === LOW || next === RISE ? yL : before;
       lift();
-      if (after !== null) along(mid, x + 1, after);
+      if (after !== null) along(mid, left + last + 1, after);
+      c = last;
       continue;
     }
+    const q = kind === STROKE ? shadeStep(looks.band[c]) : SHADES;
     const [ya, yb] = st === RISE ? [yL, yH] : [yH, yL];
     const ex = x + at[c];
     along(x, ex, ya);

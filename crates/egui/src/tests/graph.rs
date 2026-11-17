@@ -744,6 +744,140 @@ fn a_lane_shades_its_gaps_and_what_it_cannot_resolve() {
 }
 
 #[test]
+fn a_pulse_across_a_column_boundary_draws_as_one_full_ink_stroke_at_its_middle() {
+    // DIO3 high for the one pair at 10 s: a 1 ms pulse alone. Its edges fall in different columns,
+    // `apart` columns apart, under the join distance, a line's width and a pixel: one stroke a line
+    // wide at its middle. A line 1 wide joins them 1.25 apart; a line 3 wide joins them 2.5 apart,
+    // which a line 1 wide leaves apart.
+    let cap = Capture {
+        dio: true,
+        ..Capture::new(
+            1000,
+            20_000,
+            |i| {
+                if i == 10_000 { 3_000_000 } else { 350_000 }
+            },
+        )
+    };
+    let file = cap.write();
+    for (weight, half_span, (lo, hi)) in [(1.0, 400 * MS, (1.0, 2.0)), (3.0, 200 * MS, (2.0, 4.0))]
+    {
+        let window = 10_000 * MS - half_span..10_000 * MS + half_span;
+        let (mut h, _gate) = showing(file.clone(), at(window.clone()), true);
+        h.state_mut().palette.line_weight = weight;
+        answered(&mut h, window);
+        let p = h.state().palette.clone();
+        let lane = drawn(&h).layout.lanes[3];
+        let apart = 1000.0 * drawn(&h).layout.plot.width() / (2 * half_span) as f32;
+        assert!((lo..hi).contains(&apart), "edges {apart} columns apart");
+        assert!(shaded(&h, lane, &p).is_empty(), "weight {weight}");
+        let mid = x_of(&h, 10_000_500);
+        let strokes: Vec<_> = spans_of(&h, lane, p.trace)
+            .into_iter()
+            .filter(|&(a, b)| (b - a - weight).abs() < 0.01 && ((a + b) / 2.0 - mid).abs() < 0.6)
+            .collect();
+        assert!(
+            !strokes.is_empty(),
+            "weight {weight}: no stroke a line wide at {mid}"
+        );
+    }
+}
+
+#[test]
+fn a_short_pause_between_two_runs_keeps_its_gap_and_its_line_takes_the_larger_band() {
+    // DIO3 toggles each millisecond for 60 ms, rests low, then toggles every 2 ms for 60 ms: at a
+    // column a millisecond and a line 3 wide, two runs, the first's band the darker. At 10 s the rest
+    // is 5 ms, last edge to first, a bare 2 between their paint, under the join distance of 4; at
+    // 12 s it is 9 ms, a bare 6.
+    let cap = Capture {
+        dio: true,
+        ..Capture::new(1000, 20_000, |i| {
+            let high = match i {
+                10_000..10_060 | 12_000..12_060 => i % 2 == 0,
+                10_064..10_124 => (i - 10_064) / 2 % 2 == 0,
+                12_068..12_128 => (i - 12_068) / 2 % 2 == 0,
+                _ => false,
+            };
+            if high { 3_000_000 } else { 350_000 }
+        })
+    };
+    let file = cap.write();
+    let width = {
+        let (mut h, _gate) = showing(file.clone(), at(0..1000 * MS), true);
+        answered(&mut h, 0..1000 * MS);
+        plot(&h).width()
+    };
+    let span = (f64::from(width) * MS as f64) as i64;
+    for (start, rest, held) in [(10_000, 5, true), (12_000, 9, false)] {
+        let (last, first) = ((start + 59) * MS, (start + 59 + rest) * MS);
+        let window = (last + first) / 2 - span / 2..(last + first) / 2 + span / 2;
+        let (mut h, _gate) = showing(file.clone(), at(window.clone()), true);
+        h.state_mut().palette.line_weight = 3.0;
+        answered(&mut h, window);
+        let p = h.state().palette.clone();
+        let lane = drawn(&h).layout.lanes[3];
+        // The low level: draw.rs's LANE_PAD and LANE_SWING under the lane's top.
+        let low = lane.top() + 3.0 + 14.0;
+        let (a, b) = (x_of(&h, last), x_of(&h, first));
+        let inside = |x: f32| x > a + 1.5 && x < b - 1.5;
+        // The lane's vertices drawn short of full ink and not clear: its fills, not the line.
+        let toned: Vec<(Pos2, u8)> = shapes(&h)
+            .iter()
+            .filter(|s| s.clip_rect == lane)
+            .filter_map(|s| match &s.shape {
+                Shape::Mesh(mesh) => Some(mesh.vertices.clone()),
+                _ => None,
+            })
+            .flatten()
+            .filter(|v| v.color.a() > 0 && v.color.a() < 255)
+            .map(|v| (v.pos, v.color.a()))
+            .collect();
+        let darkest = |from: i64, to: i64| {
+            let (x0, x1) = (x_of(&h, from), x_of(&h, to));
+            toned
+                .iter()
+                .filter(|(v, _)| v.x > x0 && v.x < x1)
+                .map(|&(_, a)| a)
+                .max()
+                .unwrap_or(0)
+        };
+        let (first_band, second_band) = (
+            darkest((start + 2) * MS, (start + 57) * MS),
+            darkest((start + 62 + rest) * MS, (start + 117 + rest) * MS),
+        );
+        assert!(first_band > second_band, "{first_band} {second_band}");
+        let rest_toned: Vec<(Pos2, u8)> =
+            toned.iter().copied().filter(|(v, _)| inside(v.x)).collect();
+        let ink = spans_of(&h, lane, p.trace)
+            .into_iter()
+            .any(|(x0, x1)| x0 <= (a + b) / 2.0 && x1 >= (a + b) / 2.0);
+        match held {
+            true => {
+                assert!(!rest_toned.is_empty(), "no line in the {rest} ms rest");
+                assert!(
+                    rest_toned
+                        .iter()
+                        .all(|(v, _)| (v.y - low).abs() <= 1.5 + 0.01),
+                    "band in the rest: {rest_toned:?}"
+                );
+                assert!(
+                    rest_toned.iter().all(|&(_, a)| a == first_band),
+                    "{rest_toned:?} against {first_band}"
+                );
+                assert!(!ink, "the rest's line at full ink");
+            }
+            false => {
+                assert!(
+                    rest_toned.is_empty(),
+                    "the {rest} ms rest toned: {rest_toned:?}"
+                );
+                assert!(ink, "no line at full ink in the {rest} ms rest");
+            }
+        }
+    }
+}
+
+#[test]
 fn ctrl_and_the_wheel_zoom_time_about_the_pointer() {
     let (mut h, _gate) = showing(fixture().write(), ViewState::default(), true);
     let before = wait(&mut h).window.clone();

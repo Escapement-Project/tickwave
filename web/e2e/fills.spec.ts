@@ -31,7 +31,10 @@ const runsOf = (col: number[]) =>
     return out;
   }, []);
 
-test("a crowded row's band and rails each draw at one opacity down the column, the rails as deep as the line", async ({ page }) => {
+/** The first row a column paints, and the row past its last. */
+const painted = (c: number[]) => [c.findIndex((a) => a > 0), c.length - [...c].reverse().findIndex((a) => a > 0)];
+
+test("a crowded row's band and rails each draw at one opacity down the column, the rails as deep as the line, the larger at the band's", async ({ page }) => {
   await page.goto(VIEW);
   await page.locator("#v").evaluate((v) => (v as unknown as { settled(): Promise<void> }).settled());
   const cols = await columns(page);
@@ -39,19 +42,29 @@ test("a crowded row's band and rails each draw at one opacity down the column, t
   const flat = cols.map(runsOf).find((r) => r.length === 3 && r[0][0] === 0 && r[1][0] === 255 && r[2][0] === 0);
   expect(flat).toBeDefined();
   const lw = flat![1][1];
-  // A shaded column with its band and rails at three opacities: from the top, nothing, the high
-  // rail, the band, the low rail, nothing.
-  const shaded = cols.map(runsOf).filter((r) => r.length === 5 && r[0][0] === 0 && r[4][0] === 0 && r[1][0] !== r[2][0] && r[2][0] !== r[3][0] && r[2][0] > 0 && r[2][0] < 255);
+  // A shaded column: part ink, part clear down its middle, painted from the high rail's top to the
+  // low rail's bottom.
+  const shaded = cols.filter((c) => {
+    const mid = c[Math.floor(c.length / 2)];
+    return mid > 0 && mid < 255;
+  });
   // Not vacuous: TCK's whole row is mostly such columns.
   expect(shaded.length).toBeGreaterThan(100);
-  for (const r of shaded) {
-    expect([r[1][1], r[3][1]]).toEqual([lw, lw]);
-    // The band fills between them, at one depth in every column.
-    expect(r[2][1]).toBe(shaded[0][2][1]);
+  const [top0, bottom0] = painted(shaded[0]);
+  let unlike = 0;
+  for (const c of shaded) {
+    const [top, bottom] = painted(c);
+    // Each rail a line's width deep, the band between them, at one depth in every column.
+    expect(bottom - top).toBe(bottom0 - top0);
+    const [high, band, low] = [c.slice(top, top + lw), c.slice(top + lw, bottom - lw), c.slice(bottom - lw, bottom)];
+    for (const part of [high, band, low]) expect(new Set(part).size).toBe(1);
+    // The level with the larger share of the time takes the band's opacity; the other a part of
+    // it, at least a fifth, within their steps' rounding.
+    const [b, h, l] = [band[0], high[0], low[0]];
+    expect(Math.abs(Math.max(h, l) - b)).toBeLessThanOrEqual(2);
+    expect(Math.min(h, l)).toBeGreaterThanOrEqual(Math.round(0.2 * b) - 2);
+    if (Math.abs(h - l) > 4) unlike++;
   }
-  // The rails take the shares of time at each level, which sum to one: clear of the floor (0.2,
-  // an alpha of 52), their alphas sum to 255, within their steps' rounding.
-  const shares = shaded.filter((r) => r[1][0] > 60 && r[3][0] > 60);
-  expect(shares.length).toBeGreaterThan(50);
-  for (const r of shares) expect(Math.abs(r[1][0] + r[3][0] - 255)).toBeLessThanOrEqual(6);
+  // Not vacuous: some columns' levels take unlike shares.
+  expect(unlike).toBeGreaterThan(10);
 });

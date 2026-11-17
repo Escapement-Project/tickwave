@@ -562,7 +562,7 @@ fn shade() {
             f(&a["width"]),
         )),
         "rails" => {
-            let (h, l) = shade::rails(f(&a["high"]), bit(&a["edges"]));
+            let (h, l) = shade::rails(f(&a["high"]), bit(&a["edges"]), f(&a["band"]));
             json!([num(h), num(l)])
         }
         "looks" => {
@@ -590,9 +590,11 @@ fn shade() {
                     .map(|l| match l {
                         shade::Look::Flat => json!("flat"),
                         shade::Look::Stroke(a) => json!(["stroke", num(a)]),
+                        shade::Look::Pulse { alpha, at } => json!(["pulse", num(alpha), num(at)]),
                         shade::Look::Shade { band, high, low } => {
                             json!(["shade", num(band), num(high), num(low)])
                         }
+                        shade::Look::Held(a) => json!(["held", num(a)]),
                     })
                     .collect(),
             )

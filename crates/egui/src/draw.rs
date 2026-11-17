@@ -623,13 +623,54 @@ fn lane(ui: &Ui, f: &Frame, c: usize, rect: Rect, px: f32) {
     let half = p.line_weight / 2.0;
     let mut line = Vec::new();
     let mut pen: Option<f32> = None;
-    for k in shown {
+    let mut k = shown.start;
+    while k < shown.end {
         let x0 = f.view.x(g.x0 + k as f64 * g.per);
         let x1 = f.view.x(g.x0 + (k + 1) as f64 * g.per);
         match (state[k], looks[k]) {
             (State::None, _) => {
                 lines.add(&mut line, stroke);
                 pen = None;
+            }
+            (_, Look::Pulse { alpha, at: mid }) => {
+                // As a lone edge: the line in at the level before its first column to its centre,
+                // a stroke across the band, and out at the level after its last column.
+                let last = (k..shown.end)
+                    .take_while(|&j| looks[j] == looks[k])
+                    .last()
+                    .unwrap_or(k);
+                let x = f.view.x(g.x0 + mid * g.per);
+                let before = match state[k] {
+                    State::Rise => Some(low),
+                    State::Fall => Some(high),
+                    _ => pen,
+                };
+                if let Some(y) = before {
+                    if pen != Some(y) {
+                        lines.add(&mut line, stroke);
+                        line.push(pos2(x0, y));
+                    }
+                    step(&mut line, pos2(x, y));
+                }
+                lines.add(&mut line, stroke);
+                fills.add_colored_rect(
+                    Rect::from_min_max(pos2(x - half, high - half), pos2(x + half, low + half)),
+                    p.trace.gamma_multiply(alpha as f32),
+                );
+                let after = match (state[last], state.get(last + 1)) {
+                    (State::Rise, _) => Some(high),
+                    (State::Fall, _) => Some(low),
+                    (_, Some(State::High | State::Fall)) => Some(high),
+                    (_, Some(State::Low | State::Rise)) => Some(low),
+                    _ => before,
+                };
+                pen = after;
+                if let Some(y) = after {
+                    let x1 = f.view.x(g.x0 + (last + 1) as f64 * g.per);
+                    line.extend([pos2(x, y), pos2(x1, y)]);
+                }
+                k = last + 1;
+                continue;
             }
             (
                 _,
@@ -655,6 +696,15 @@ fn lane(ui: &Ui, f: &Frame, c: usize, rect: Rect, px: f32) {
                 rect(high - half, high + half, h);
                 rect(low - half, low + half, l);
             }
+            (State::Low | State::High, Look::Held(alpha)) => {
+                lines.add(&mut line, stroke);
+                pen = None;
+                let y = if state[k] == State::High { high } else { low };
+                fills.add_colored_rect(
+                    Rect::from_min_max(pos2(x0, y - half), pos2(x1.max(x0 + px), y + half)),
+                    p.trace.gamma_multiply(alpha as f32),
+                );
+            }
             (State::Low | State::High, _) => {
                 let y = if state[k] == State::High { high } else { low };
                 if pen != Some(y) {
@@ -663,28 +713,6 @@ fn lane(ui: &Ui, f: &Frame, c: usize, rect: Rect, px: f32) {
                 }
                 step(&mut line, pos2(x1, y));
                 pen = Some(y);
-            }
-            (State::Busy, Look::Stroke(alpha)) => {
-                // Alone, as a lone edge: the line in at the level before it to its middle, a
-                // stroke across the band, and out at the level the next column starts at.
-                let x = (x0 + x1) / 2.0;
-                if let Some(y) = pen {
-                    step(&mut line, pos2(x, y));
-                }
-                lines.add(&mut line, stroke);
-                fills.add_colored_rect(
-                    Rect::from_min_max(pos2(x - half, high - half), pos2(x + half, low + half)),
-                    p.trace.gamma_multiply(alpha as f32),
-                );
-                let after = match state.get(k + 1) {
-                    Some(State::High | State::Fall) => Some(high),
-                    Some(State::Low | State::Rise) => Some(low),
-                    _ => pen,
-                };
-                pen = after;
-                if let Some(y) = after {
-                    line.extend([pos2(x, y), pos2(x1, y)]);
-                }
             }
             (State::Rise | State::Fall, Look::Stroke(alpha)) => {
                 let alpha = alpha as f32;
@@ -714,9 +742,10 @@ fn lane(ui: &Ui, f: &Frame, c: usize, rect: Rect, px: f32) {
                 pen = Some(yb);
             }
             (State::Rise | State::Fall | State::Busy, _) => {
-                debug_assert!(false, "a changing column is a stroke or a shade");
+                debug_assert!(false, "a changing column is a stroke, a pulse or a shade");
             }
         }
+        k += 1;
     }
     lines.add(&mut line, stroke);
     let mesh = {
