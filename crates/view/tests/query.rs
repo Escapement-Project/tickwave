@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+use escapement_tickwave_format::annotations::Included;
 use escapement_tickwave_format::decode::{Footer, Index};
 use escapement_tickwave_format::header::{
     ChannelKind as HeaderKind, Declaration, DeclaredChannel, DeclaredKind, SourceFormat,
@@ -445,6 +446,46 @@ fn a_fallback_is_its_channels_columns_over_the_extent_as_a_strip_of_it_would_be(
     );
 }
 
+/// A finished recording keeps the columns over its extent its last queries read: asked again,
+/// panned, in other columns and after a sketch, each strip and fallback is the strip a recording
+/// that has read nothing else answers.
+#[test]
+fn columns_over_the_extent_a_recording_keeps_are_those_it_would_read() {
+    let file = fixture("energy.tickwave");
+    let rec = open(&file);
+    let cancel = AtomicBool::new(false);
+    let d = (rec.channels().iter())
+        .position(|c| matches!(c.kind, ChannelKind::Digital))
+        .unwrap();
+    // The last in columns fine enough that the query reads past the coarsest level a sketch
+    // takes.
+    for (window, n) in [
+        (0..1000, 100),
+        (0..1000, 100),
+        (900_000..1_200_000, 100),
+        (900_000..1_200_000, 37),
+        (0..1000, 4000),
+    ] {
+        // The strip's channel and columns, one channel in two column counts, and the strip's
+        // channel in other columns.
+        let mut q = query(window.clone(), 10, vec![]);
+        q.strip = Some((1, n));
+        q.fallbacks = vec![(d, n), (d, n + 2), (1, n + 1)];
+        rec.sketch(&q, &cancel).unwrap();
+        let got = rec.query(&q, &cancel).unwrap();
+        let alone = |strip: (usize, u32)| {
+            let mut q = query(window.clone(), 10, vec![]);
+            q.strip = Some(strip);
+            open(&file).query(&q, &cancel).unwrap().strip.unwrap()
+        };
+        let at = format!("{window:?} in {n}");
+        assert_eq!(got.strip.unwrap(), alone((1, n)), "{at}");
+        for (i, &f) in q.fallbacks.iter().enumerate() {
+            assert_eq!(got.fallbacks[i], alone(f), "{at}, fallback {i}");
+        }
+    }
+}
+
 #[test]
 fn a_strip_column_around_cuts_is_read_again_outside_it() {
     let rec = open(&fixture("energy.tickwave"));
@@ -768,6 +809,35 @@ fn markers_outside_the_data_widen_the_extent() {
     // Samples from 100 to 190, the last one's time to 200; marks at 3 and 400.
     assert_eq!(rec.marker_count(), 2);
     assert_eq!(rec.extent(), Some(3..401));
+    // A host's sidecar marks 450 alone: the strip spans the extent that gives, though one over
+    // the extent before was read first.
+    let id = Footer::parse_file(&file).unwrap().header.content_id;
+    let hand = format!(
+        "format = \"tickwave-annotations/1\"\nrecording_id = \"{id}\"\n\n[[annotation]]\nid = \"late\"\nstart = 450\n"
+    );
+    let none: &[Included<'_>] = &[];
+    let cancel = AtomicBool::new(false);
+    let mut q = query(100..200, 10, vec![]);
+    q.strip = Some((0, 10));
+    assert_eq!(
+        rec.query(&q, &cancel).unwrap().strip.unwrap().extent,
+        3..401
+    );
+    let rec = rec.with_sidecar(&hand, none).unwrap();
+    assert_eq!(rec.extent(), Some(100..451));
+    let got = rec.query(&q, &cancel).unwrap();
+    let want = open(&file)
+        .with_sidecar(&hand, none)
+        .unwrap()
+        .query(&q, &cancel);
+    let want = want.unwrap();
+    assert_eq!(
+        Answer {
+            revision: want.revision,
+            ..got
+        },
+        want
+    );
 }
 
 /// D: high at 10; not known from 50 to 100, then low, the gap's end at the second block's start;

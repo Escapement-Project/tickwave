@@ -772,6 +772,23 @@ fn lanes(end: i64) -> Query {
     q
 }
 
+/// `got`, extended from `held`, is `want`, a fresh query's answer, but for the fallbacks an extend
+/// keeps from the answer it extends (`Recording::extend`; tests/extend.rs holds them to its rule).
+fn extended_as(got: &Answer, held: &Answer, want: &Answer, at: &str) {
+    let unfallen = |a: &Answer| Answer {
+        fallbacks: Vec::new(),
+        ..a.clone()
+    };
+    assert_eq!(unfallen(got), unfallen(want), "{at}");
+    for (i, x) in got.fallbacks.iter().enumerate() {
+        let kept = held
+            .fallbacks
+            .get(i)
+            .is_some_and(|h| (&x.extent, &x.grid, &x.channel) == (&h.extent, &h.grid, &h.channel));
+        assert!(x == &want.fallbacks[i] || kept, "{at}, fallback {i}");
+    }
+}
+
 #[test]
 fn a_heartbeat_moves_a_digital_recording_on_to_its_promise() {
     // verge-probe's dio_stream (seed 3, every line, a block a message) as the peer saw it: edges
@@ -819,12 +836,10 @@ fn a_heartbeat_moves_a_digital_recording_on_to_its_promise() {
     let q = lanes(beat);
     assert_ne!(edges % 64_000, 0);
     let extended = live.extend(&held, &asked, &q, &cancel).unwrap();
-    let held = extended.expect("the heartbeat's answer extends the edges'");
-    assert_eq!(
-        held,
-        live.query(&q, &cancel).unwrap(),
-        "after the heartbeat"
-    );
+    let extended = extended.expect("the heartbeat's answer extends the edges'");
+    let fresh = live.query(&q, &cancel).unwrap();
+    extended_as(&extended, &held, &fresh, "after the heartbeat");
+    let held = extended;
 
     // A late gap changes DIO2 from its start, before the length the heartbeat gave.
     w.gap(2, lost).unwrap();
@@ -834,7 +849,8 @@ fn a_heartbeat_moves_a_digital_recording_on_to_its_promise() {
     let (asked, q) = (q, lanes(end));
     let extended = live.extend(&held, &asked, &q, &cancel).unwrap();
     let extended = extended.expect("the loss's answer extends the heartbeat's");
-    assert_eq!(extended, live.query(&q, &cancel).unwrap(), "after the loss");
+    let fresh = live.query(&q, &cancel).unwrap();
+    extended_as(&extended, &held, &fresh, "after the loss");
     let Drawn::Digital { gaps, .. } = &extended.channels[2] else {
         panic!("DIO2 is digital")
     };
@@ -887,4 +903,52 @@ fn a_promise_past_an_analog_channels_last_sample_ends_its_extent_where_that_samp
     let live = Recording::live(s, Arc::new(file.clone()), Cache::new(1 << 20)).unwrap();
     assert_eq!((live.length(), live.extent()), (600, Some(0..500)));
     as_repaired(&live, &file, &q, "after the heartbeat");
+}
+
+#[test]
+fn a_live_recordings_columns_over_the_extent_follow_its_data_where_the_extent_stays() {
+    // Pairs to 490, and nothing promised: DIO0 can take an edge behind them, which leaves the
+    // extent as it was.
+    let (d, _) = session();
+    let options = WriteOptions {
+        level: 3,
+        block_bytes: 1 << 20,
+        compression: Compression::Spread,
+        promise_with_items: false,
+    };
+    let mut w = Writer::new(d, options).unwrap();
+    let file = Arc::new(Growing(std::sync::Mutex::new(w.take_output())));
+    let take = |w: &mut Writer| {
+        let s = w.snapshot();
+        file.0.lock().unwrap().extend(w.take_output());
+        s
+    };
+    w.run(0, 0, 0).unwrap();
+    w.run(1, 0, 0).unwrap();
+    for k in 0..50u64 {
+        w.sample(0, 3300 + k % 5).unwrap();
+        w.sample(1, 1_000_000 + k * 37).unwrap();
+    }
+    let mut q = Query::new(0..500, 50);
+    q.channels = vec![2];
+    q.strip = Some((2, 20));
+    q.fallbacks = vec![(2, 20)];
+    let cancel = AtomicBool::new(false);
+    let mut live = Recording::live(take(&mut w), file.clone(), Cache::new(1 << 20)).unwrap();
+    let before = live.query(&q, &cancel).unwrap();
+    w.edge(2, 300).unwrap();
+    let s = take(&mut w);
+    live.update(s.clone()).unwrap();
+    assert_eq!(live.extent(), before.extent);
+    let want = Recording::live(s, file.clone(), Cache::new(1 << 20)).unwrap();
+    let want = want.query(&q, &cancel).unwrap();
+    let got = live.query(&q, &cancel).unwrap();
+    assert_ne!(got.fallbacks, before.fallbacks, "the edge is in them");
+    assert_eq!(
+        Answer {
+            revision: want.revision,
+            ..got
+        },
+        want
+    );
 }

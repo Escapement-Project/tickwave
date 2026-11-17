@@ -488,6 +488,8 @@ pub struct Recording {
     extent: OnceLock<Option<Range<i64>>>,
     /// The extent a sketch takes, from what the header and the footer state.
     sketch_extent: OnceLock<Option<Range<i64>>>,
+    /// A finished file's columns over the extent that queries asked for last.
+    pub(crate) wholes: crate::query::Wholes,
     pub(crate) revision: Revision,
 }
 
@@ -1032,6 +1034,7 @@ impl Recording {
             declared: OnceLock::new(),
             extent: OnceLock::new(),
             sketch_extent: OnceLock::new(),
+            wholes: Default::default(),
             store: Store::Finished(Box::new(Finished {
                 strips: (0..footer.channels.len())
                     .map(|_| OnceLock::new())
@@ -1149,6 +1152,7 @@ impl Recording {
             declared: OnceLock::from(crate::markers::Declared::default()),
             extent: OnceLock::new(),
             sketch_extent: OnceLock::new(),
+            wholes: Default::default(),
             store: Store::Live(Box::new(Live {
                 snapshot,
                 refs: vec![Vec::new(); n],

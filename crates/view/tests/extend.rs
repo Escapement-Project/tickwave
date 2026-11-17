@@ -1,6 +1,7 @@
 //! A followed window's columns at fixed ticks, and its answer extended from the one before it:
 //! held against a fresh query of the same recording, field for field, after every snapshot of a
-//! writer driven at random.
+//! writer driven at random. A lane's fallback is the exception: an extend keeps the held one where
+//! what a host draws of it is as it was, and `same` holds a kept one to that rule.
 
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -359,6 +360,7 @@ fn query(window: Range<i64>, columns: u32, strip: Option<(usize, u32)>) -> Query
     query.channels = vec![I, D0, F, D1, P, V];
     query.flags = vec![(I, D0), (F, D1)];
     query.strip = strip;
+    query.fallbacks = vec![(D0, 9), (I, 6), (D1, 4)];
     query.markers = {
         let mut markers = MarkerQuery::default();
         markers.limit = 3;
@@ -369,8 +371,9 @@ fn query(window: Range<i64>, columns: u32, strip: Option<(usize, u32)>) -> Query
     query
 }
 
-/// `got` and `want` the same, field for field, each column's floats to the bit.
-fn same(got: &Answer, want: &Answer, at: &str) {
+/// `got`, extended from `held`, and `want`, a fresh query's, the same, field for field, each
+/// column's floats to the bit, but for the fallbacks `got` keeps from `held`: how many it kept.
+fn same(got: &Answer, held: &Answer, want: &Answer, at: &str) -> usize {
     assert_eq!(
         (&got.window, &got.around, &got.grid),
         (&want.window, &want.around, &want.grid),
@@ -454,7 +457,69 @@ fn same(got: &Answer, want: &Answer, at: &str) {
         "{at}"
     );
     // Whatever the fields above leave out.
-    assert_eq!(got, want, "{at}");
+    let unfallen = |a: &Answer| Answer {
+        fallbacks: Vec::new(),
+        ..a.clone()
+    };
+    assert_eq!(unfallen(got), unfallen(want), "{at}");
+    kept(got, held, want, at)
+}
+
+/// `got`'s fallbacks against `want`'s, a fresh query's: each the fresh one, or the one `held` has
+/// of a digital channel, kept where what a host draws of it, before `around`, is as it was. So a
+/// kept one is held to the recording now: the fresh one's extent starts where it does and ends
+/// inside `around`, the kept one reaches `around`, and before `around` both have the same gaps; its
+/// one cut part is that of the column `around` starts in, before it. How many it kept.
+fn kept(got: &Answer, held: &Answer, want: &Answer, at: &str) -> usize {
+    assert_eq!(got.fallbacks.len(), want.fallbacks.len(), "{at}");
+    let a = &got.around;
+    let mut kept = 0;
+    for (i, (x, y)) in got.fallbacks.iter().zip(&want.fallbacks).enumerate() {
+        if x == y {
+            continue;
+        }
+        let at = format!("{at}, fallback {i}");
+        let h = &held.fallbacks[i];
+        assert_eq!(
+            (&x.extent, &x.grid, &x.channel),
+            (&h.extent, &h.grid, &h.channel),
+            "{at}: neither the fresh one nor the held one"
+        );
+        assert!(
+            x.extent.start == y.extent.start && y.extent.end <= a.end && x.extent.end >= a.start,
+            "{at}: kept over {:?}, the fresh one over {:?}, around {a:?}",
+            x.extent,
+            y.extent
+        );
+        let (
+            Drawn::Digital {
+                gaps: kept_gaps, ..
+            },
+            Drawn::Digital { gaps, .. },
+        ) = (&x.channel, &y.channel)
+        else {
+            panic!("{at}: an analog channel's fallback kept")
+        };
+        let before = |gaps: &[Range<i64>]| -> Vec<Range<i64>> {
+            (gaps.iter())
+                .filter(|g| g.start < a.start)
+                .map(|g| g.start..g.end.min(a.start))
+                .collect()
+        };
+        assert_eq!(before(kept_gaps), before(gaps), "{at}: before around");
+        let g = &x.grid;
+        let k = ((a.start as f64 - g.x0) / g.per).floor();
+        let from = ((g.x0 + k * g.per).ceil() as i64).max(x.extent.start);
+        let cut: Vec<Range<i64>> = x.cut.iter().map(|c| c.span.clone()).collect();
+        let inside = x.extent.start < a.start && a.start < x.extent.end && from < a.start;
+        assert_eq!(
+            cut,
+            Vec::from_iter(inside.then_some(from..a.start)),
+            "{at}: cut"
+        );
+        kept += 1;
+    }
+    kept
 }
 
 #[test]
@@ -541,11 +606,11 @@ struct Follow {
 
 /// Each way of following, answered fresh and extended after every snapshot of a recorder whose
 /// runs start of themselves one batch in `run_one_in`, for each of `seeds`: the extended answer
-/// held against the fresh one by `same`. Each way's extends and refusals.
+/// held against the fresh one by `same`. Each way's extends and refusals, and the fallbacks kept.
 fn follow_every_snapshot(
     seeds: std::ops::RangeInclusive<u64>,
     run_one_in: u64,
-) -> (Vec<Follow>, Vec<u32>, Vec<u32>) {
+) -> (Vec<Follow>, Vec<u32>, Vec<u32>, usize) {
     let follows = [
         // Columns of 6, 8 and 9 ticks either side of the finest bucket's 8.
         (40, 7, false, Some((I, 13)), 1),
@@ -571,6 +636,7 @@ fn follow_every_snapshot(
     });
     let cancel = AtomicBool::new(false);
     let (mut extended, mut refused) = (vec![0u32; follows.len()], vec![0u32; follows.len()]);
+    let mut kept = 0;
     for seed in seeds {
         let mut rec = Recorder::new(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15), 1 << 40);
         rec.run_one_in = run_one_in;
@@ -610,7 +676,7 @@ fn follow_every_snapshot(
                 let next = match &held[k] {
                     Some((answer, asked)) => match r.extend(answer, asked, &q, &cancel).unwrap() {
                         Some(e) => {
-                            same(&e, &fresh, &at);
+                            kept += same(&e, answer, &fresh, &at);
                             extended[k] += 1;
                             e
                         }
@@ -625,12 +691,14 @@ fn follow_every_snapshot(
             }
         }
     }
-    (follows.into(), extended, refused)
+    (follows.into(), extended, refused, kept)
 }
 
 #[test]
 fn an_extended_answer_is_a_fresh_querys_after_every_snapshot() {
-    let (follows, extended, refused) = follow_every_snapshot(1..=6, 12);
+    let (follows, extended, refused, kept) = follow_every_snapshot(1..=6, 12);
+    // A followed window's lanes keep their fallbacks while the extent grows inside `around`.
+    assert!(kept > 1000, "{kept} fallbacks kept");
     // Every way of following extended at least as many answers as it refused: for a width that
     // grew while the window began at the extent's, for `around`'s start moving on, or for a
     // window moved more than its width.
@@ -655,7 +723,7 @@ fn an_extended_answer_is_a_fresh_querys_after_every_snapshot() {
 /// before it, backing off past each that starts there.
 #[test]
 fn an_extended_answer_is_a_fresh_querys_with_runs_starting_every_other_batch() {
-    let (follows, extended, _) = follow_every_snapshot(1..=3, 2);
+    let (follows, extended, _, _) = follow_every_snapshot(1..=3, 2);
     for (k, f) in follows.iter().enumerate() {
         assert!(
             extended[k] > 0,
@@ -777,6 +845,7 @@ fn an_extend_answers_only_what_it_can_answer_exactly() {
         let e = extend(&rec, &q).unwrap();
         same(
             &e,
+            &held,
             &rec.query(&q, &cancel).unwrap(),
             &format!("{:?}", q.window),
         );
@@ -834,7 +903,8 @@ fn a_finished_recording_extends_a_window_moved_on_within_its_page() {
         let q = query(start..start + 300, 12, Some((I, 10)));
         let fresh = rec.query(&q, &cancel).unwrap();
         if let Some(e) = rec.extend(&held, &asked, &q, &cancel).unwrap() {
-            same(&e, &fresh, &format!("{:?}", q.window));
+            // Nothing a finished file holds changes, so a fallback kept is the fresh one too.
+            assert_eq!(same(&e, &held, &fresh, &format!("{:?}", q.window)), 0);
             extended += 1;
         }
         (held, asked) = (fresh, q);
@@ -1017,7 +1087,7 @@ fn follow_lagging(v_lags: bool) {
                 let next = match &held[k] {
                     Some((answer, asked)) => match r.extend(answer, asked, &q, &cancel).unwrap() {
                         Some(e) => {
-                            same(&e, &fresh, &at);
+                            same(&e, answer, &fresh, &at);
                             extended[k] += 1;
                             e
                         }
@@ -1036,4 +1106,128 @@ fn follow_lagging(v_lags: bool) {
             extended[k]
         );
     }
+}
+
+/// A window that stays where it is while the recording grows past it, and one ahead of the data
+/// until the data reaches it: each extended after every snapshot, its lanes' fallbacks kept while
+/// the extent grows inside `around`, and read again once it grows past it, or while it ends
+/// before `around`.
+#[test]
+fn a_fallback_is_read_again_where_the_extent_grows_outside_around() {
+    let cancel = AtomicBool::new(false);
+    let mut rec = Recorder::new(0x6a09_e667_f3bc_c908, 1 << 40);
+    let mut live: Option<Recording> = None;
+    // `around` 0 to 3,000, and 3,000 to 6,000.
+    let windows = [1000..2000, 4000..5000];
+    let mut held: Vec<Option<(Answer, Query)>> = vec![None, None];
+    let (mut kept, mut again) = (0, 0);
+    let mut n = 0;
+    while rec.floor < 7000 {
+        let snapshot = rec.batch();
+        match &mut live {
+            None => {
+                let cache = Cache::new(1 << 20);
+                live = Some(Recording::live(snapshot, rec.file.clone(), cache).unwrap());
+            }
+            Some(r) => r.update(snapshot).unwrap(),
+        }
+        n += 1;
+        let r = live.as_ref().unwrap();
+        if r.extent().is_none() {
+            continue;
+        }
+        for (k, w) in windows.iter().enumerate() {
+            let q = query(w.clone(), 10, None);
+            let fresh = r.query(&q, &cancel).unwrap();
+            let next = match &held[k] {
+                Some((answer, asked)) => {
+                    let e = r.extend(answer, asked, &q, &cancel).unwrap();
+                    let e = e.expect("the same window extends");
+                    let at = format!("snapshot {n}, window {w:?}");
+                    kept += same(&e, answer, &fresh, &at);
+                    again += (e.fallbacks.iter().zip(&answer.fallbacks))
+                        .filter(|(x, h)| x.grid != h.grid)
+                        .count();
+                    e
+                }
+                None => fresh,
+            };
+            held[k] = Some((next, q));
+        }
+    }
+    assert!(kept > 50 && again > 50, "{kept} kept, {again} read again");
+}
+
+/// An answer whose `around` ends inside the extent cuts its fallbacks' column there; extended to
+/// a window whose `around` reaches past the extent's end, a fallback kept is cut there no longer.
+#[test]
+fn a_kept_fallback_is_cut_where_around_cuts_it_now() {
+    let rec = Recording::open(Arc::new(finished()), Cache::new(1 << 20)).unwrap();
+    let cancel = AtomicBool::new(false);
+    let end = rec.extent().unwrap().end;
+    let mut tried = 0;
+    // 2,000 ticks in 40 columns of 50, moved on by 500.
+    for to in (end - 2500..end).step_by(25) {
+        let asked = query(to - 2000..to, 40, None);
+        let held = rec.query(&asked, &cancel).unwrap();
+        let q = query(to - 1500..to + 500, 40, None);
+        let Some(e) = rec.extend(&held, &asked, &q, &cancel).unwrap() else {
+            continue;
+        };
+        let cut_at_end = |a: &Answer| {
+            a.fallbacks[0]
+                .cut
+                .iter()
+                .any(|c| c.span.start == a.around.end)
+        };
+        if cut_at_end(&held) && e.around.end >= end {
+            let fresh = rec.query(&q, &cancel).unwrap();
+            assert!(!cut_at_end(&fresh));
+            assert_eq!(same(&e, &held, &fresh, &format!("to {to}")), 0);
+            tried += 1;
+        }
+    }
+    assert!(tried > 0, "no window's `around` crossed the extent's end");
+}
+
+/// Pairs to 490, whose time ends at 500, a heartbeat's flush at 600, then pairs again from 600: a
+/// window from 560 to 600 has `around` from 520, past the extent's end, so its lanes' fallbacks
+/// over the extent then end before it, and are read again once the extent grows into it.
+#[test]
+fn a_fallback_whose_extent_ends_before_around_is_read_again() {
+    let file = Arc::new(Growing::default());
+    let options = WriteOptions {
+        level: 1,
+        block_bytes: 64,
+        promise_with_items: true,
+        ..WriteOptions::default()
+    };
+    let mut w = Writer::new(declaration(3, 1 << 40), options).unwrap();
+    file.bytes.lock().unwrap().extend(w.take_output());
+    let pairs = |w: &mut Writer, from: i64, n: u64| {
+        w.run(V, from, 0).unwrap();
+        w.run(I, from, 0).unwrap();
+        for k in 0..n {
+            w.sample(V, 3300 + k % 7).unwrap();
+            w.sample(I, 1_000_000 + k * 37).unwrap();
+        }
+    };
+    let take = |w: &mut Writer| {
+        let s = w.snapshot();
+        file.bytes.lock().unwrap().extend(w.take_output());
+        s
+    };
+    let cancel = AtomicBool::new(false);
+    pairs(&mut w, 0, 50);
+    w.flush(600).unwrap();
+    let mut rec = Recording::live(take(&mut w), file.clone(), Cache::new(1 << 20)).unwrap();
+    let asked = query(560..600, 8, None);
+    let held = rec.query(&asked, &cancel).unwrap();
+    assert_eq!((rec.extent(), held.around.start), (Some(0..500), 520));
+    pairs(&mut w, 600, 3);
+    rec.update(take(&mut w)).unwrap();
+    let e = rec.extend(&held, &asked, &asked, &cancel).unwrap().unwrap();
+    let fresh = rec.query(&asked, &cancel).unwrap();
+    assert!(rec.extent().unwrap().end <= e.around.end);
+    assert_eq!(same(&e, &held, &fresh, "pairs from 600"), 0);
 }

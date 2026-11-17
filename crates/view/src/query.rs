@@ -2,7 +2,9 @@
 //! width either side, single samples once there are few enough, the overview strip, the
 //! statistics and the markers.
 
+use std::collections::VecDeque;
 use std::ops::Range;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 
 use crate::cache::Reading;
@@ -39,7 +41,8 @@ pub struct Query {
     pub strip: Option<(usize, u32)>,
     /// Channels whose columns over the extent the answer carries too, each with its columns, as
     /// the strip's: what a host draws past `around` while a newer answer is on the way, as a
-    /// trace past `around` draws the strip's.
+    /// trace past `around` draws the strip's. An extend may keep the held answer's
+    /// (`Recording::extend`).
     pub fallbacks: Vec<(usize, u32)>,
     /// Intervals to measure: the window's, the selection's.
     pub statistics: Vec<Range<i64>>,
@@ -201,6 +204,26 @@ fn cut_parts(grid: &Grid, extent: &Range<i64>, around: &Range<i64>) -> Vec<Range
     out
 }
 
+/// How many columns over the extent a finished recording keeps from its queries, and the most
+/// columns each may hold.
+const WHOLES: usize = 8;
+const WHOLE_COLUMNS: usize = 8192;
+
+/// A finished recording's columns over the extent that queries asked for last, a strip's or a
+/// lane fallback's, each by its channel, column count and extent: nothing a finished file holds
+/// changes, so a query asking the same takes them again. A live recording's extent grows with
+/// each snapshot, so it keeps none; an extend keeps its lanes' instead.
+#[derive(Default)]
+pub(crate) struct Wholes(Mutex<VecDeque<Whole>>);
+
+/// A channel's columns over the extent, and what they were read for.
+pub(crate) struct Whole {
+    channel: usize,
+    columns: usize,
+    extent: Range<i64>,
+    drawn: Drawn,
+}
+
 /// Whether an answer is exact, or a sketch from each channel's coarsest level.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum How {
@@ -351,7 +374,7 @@ impl Recording {
     /// `Error::Cancelled`.
     #[tracing::instrument(level = "debug", name = "query", skip_all, fields(columns = q.columns, ticks = q.window.end - q.window.start))]
     pub fn query(&self, q: &Query, cancel: &AtomicBool) -> Result<Answer, Error> {
-        self.answer(q, layout(q), &[], &Reading::new(cancel), How::Exact)
+        self.answer(q, layout(q), &[], &[], &Reading::new(cancel), How::Exact)
     }
 
     /// What `query` would draw of `q`, each channel from its coarsest level alone: a finished
@@ -361,7 +384,7 @@ impl Recording {
     /// extent, the strip's included, is the data's, the markers aside.
     #[tracing::instrument(level = "debug", name = "sketch", skip_all, fields(columns = q.columns, ticks = q.window.end - q.window.start))]
     pub fn sketch(&self, q: &Query, cancel: &AtomicBool) -> Result<Answer, Error> {
-        self.answer(q, layout(q), &[], &Reading::new(cancel), How::Sketch)
+        self.answer(q, layout(q), &[], &[], &Reading::new(cancel), How::Sketch)
     }
 
     /// What `query` answers, worked out from `held`, this recording's answer to `asked`: the
@@ -371,6 +394,13 @@ impl Recording {
     /// None where it can't, for a whole query instead: `query` asks anything else, `held` is
     /// another recording's or older than the changes it keeps, or `around`'s start moved, since
     /// a column's range is joined to the one before it back to there.
+    ///
+    /// A digital channel's fallback is the held one, over the extent it had, where what a host
+    /// draws of it is as it was: the extent starts where it did and ends inside `around`, the
+    /// held one reaches `around`, and nothing before `around` changed. Of its cut parts, the one
+    /// before `around` is left. Every other fallback, and the strip, is worked out as `query`
+    /// would: a break's lost span can reach back past the first tick a snapshot records as
+    /// changed, to its run's last sample.
     #[tracing::instrument(level = "debug", name = "extend", skip_all, fields(columns = query.columns, ticks = query.window.end - query.window.start))]
     pub fn extend(
         &self,
@@ -402,6 +432,19 @@ impl Recording {
         let Some(changed) = self.changed_since(held.revision) else {
             return Ok(None);
         };
+        let extent = self.extent();
+        let around = &now.around;
+        let kept: Vec<Option<&StripAnswer>> = (query.fallbacks.iter().enumerate())
+            .map(|(i, &(c, _))| {
+                held.fallbacks.get(i).filter(|h| {
+                    matches!(h.channel, Drawn::Digital { .. })
+                        && (extent.as_ref())
+                            .is_some_and(|e| e.start == h.extent.start && e.end <= around.end)
+                        && h.extent.end >= around.start
+                        && changed.from(c, h.grid.per) >= around.start
+                })
+            })
+            .collect();
         let mut keep = Vec::with_capacity(query.channels.len());
         for (&c, drawn) in query.channels.iter().zip(&held.channels) {
             let kind = matches!(
@@ -421,16 +464,18 @@ impl Recording {
                 from: column.clamp(0, before.grid.count.min(now.grid.count) as i128) as usize,
             });
         }
-        self.answer(query, now, &keep, &Reading::new(cancel), How::Exact)
+        self.answer(query, now, &keep, &kept, &Reading::new(cancel), How::Exact)
             .map(Some)
     }
 
-    /// The answer to `q` over `layout`, each channel's columns from `keep`'s where it has one.
+    /// The answer to `q` over `layout`, each channel's columns from `keep`'s where it has one,
+    /// and each fallback `kept`'s where it has one.
     fn answer(
         &self,
         q: &Query,
         layout: Layout,
         keep: &[Keep<'_>],
+        kept: &[Option<&StripAnswer>],
         r: &Reading,
         how: How,
     ) -> Result<Answer, Error> {
@@ -458,7 +503,7 @@ impl Recording {
                 per: (extent.end - extent.start) as f64 / n as f64,
                 count: n,
             };
-            let channel = self.drawn(c, &grid, extent, None, None, None, r, how)?;
+            let channel = self.over_extent(c, &grid, extent, r, how)?;
             let mut cut = Vec::new();
             for span in cut_parts(&grid, extent, &around) {
                 let one = Grid {
@@ -480,8 +525,21 @@ impl Recording {
             Some(extent) => {
                 let _span = tracing::debug_span!("strip").entered();
                 let strip = q.strip.map(|(c, n)| whole(c, n, &extent)).transpose()?;
-                let fallbacks = (q.fallbacks.iter())
-                    .map(|&(c, n)| whole(c, n, &extent))
+                let fallbacks = (q.fallbacks.iter().enumerate())
+                    .map(|(i, &(c, n))| match kept.get(i).copied().flatten() {
+                        // `around` starts where it did and reaches past the kept one's extent,
+                        // so of its cut parts only the one before `around` is left.
+                        Some(h) => Ok(StripAnswer {
+                            extent: h.extent.clone(),
+                            grid: h.grid,
+                            channel: h.channel.clone(),
+                            cut: (h.cut.iter())
+                                .filter(|x| x.span.end <= around.start)
+                                .cloned()
+                                .collect(),
+                        }),
+                        None => whole(c, n, &extent),
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 (strip, fallbacks)
             }
@@ -541,6 +599,38 @@ impl Recording {
             extent: self.extent(),
             revision: self.revision,
         })
+    }
+
+    /// Channel `c`'s columns on `grid` over `extent`, a strip's or a lane fallback's: a finished
+    /// recording's from those the last queries read where one asked the same.
+    fn over_extent(
+        &self,
+        c: usize,
+        grid: &Grid,
+        extent: &Range<i64>,
+        r: &Reading,
+        how: How,
+    ) -> Result<Drawn, Error> {
+        let kept = how == How::Exact && self.finished().is_some() && grid.count <= WHOLE_COLUMNS;
+        let same = |w: &&Whole| (w.channel, w.columns, &w.extent) == (c, grid.count, extent);
+        let wholes = || self.wholes.0.lock().unwrap_or_else(|e| e.into_inner());
+        if kept && let Some(w) = wholes().iter().find(same) {
+            return Ok(w.drawn.clone());
+        }
+        let drawn = self.drawn(c, grid, extent, None, None, None, r, how)?;
+        if kept {
+            let mut wholes = wholes();
+            if wholes.len() == WHOLES {
+                wholes.pop_front();
+            }
+            wholes.push_back(Whole {
+                channel: c,
+                columns: grid.count,
+                extent: extent.clone(),
+                drawn: drawn.clone(),
+            });
+        }
+        Ok(drawn)
     }
 
     /// Channel `c` over `range` on `g`. With a `window`, an analog channel's single samples
@@ -1013,5 +1103,81 @@ impl Recording {
             out.push(known && l);
         }
         Ok(out)
+    }
+}
+
+#[cfg(all(test, feature = "live"))]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    use escapement_tickwave_format::header::{
+        Declaration, DeclaredChannel, DeclaredKind, SourceFormat, SourceHeader,
+    };
+    use escapement_tickwave_format::model::Ratio;
+    use escapement_tickwave_format::writer::{Finish, WriteOptions, Writer};
+
+    use super::{Query, WHOLE_COLUMNS, WHOLES};
+    use crate::cache::Cache;
+    use crate::recording::Recording;
+
+    #[test]
+    fn a_finished_recording_keeps_the_last_few_columns_over_its_extent() {
+        let timebase = Ratio::integer(1000).unwrap();
+        let d = Declaration {
+            timebase,
+            channels: vec![DeclaredChannel {
+                name: "D".into(),
+                source_name: "d".into(),
+                source: 0,
+                data: DeclaredKind::Digital { initial: false },
+                shaping: Default::default(),
+                overview_shift: None,
+                codec: None,
+                requires: Vec::new(),
+            }],
+            derived: Vec::new(),
+            sources: vec![SourceHeader::new(SourceFormat::Other("t".into()), timebase)],
+            title: None,
+            meta: Default::default(),
+            overview_shift: 4,
+            requires: Vec::new(),
+        };
+        let mut w = Writer::new(d, WriteOptions::default()).unwrap();
+        w.edge(0, 10).unwrap();
+        let mut file = w.take_output();
+        file.extend(w.finish(1000, &[1000], Finish::default()).unwrap().tail);
+        let rec = Recording::open(Arc::new(file), Cache::new(1 << 20)).unwrap();
+        let cancel = AtomicBool::new(false);
+        let ask = |n: usize| {
+            let mut q = Query::new(0..100, 10);
+            q.fallbacks = vec![(0, n as u32)];
+            rec.query(&q, &cancel).unwrap();
+        };
+        let kept = || -> Vec<usize> {
+            rec.wholes
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|w| w.columns)
+                .collect()
+        };
+        for n in 1..=20 {
+            ask(n);
+        }
+        assert_eq!(
+            kept(),
+            Vec::from_iter(21 - WHOLES..=20),
+            "the last asked, oldest first"
+        );
+        // Asked again, it is taken, and kept no twice.
+        ask(20);
+        assert_eq!(kept(), Vec::from_iter(21 - WHOLES..=20));
+        // None wider than the most one may hold.
+        ask(WHOLE_COLUMNS + 1);
+        assert_eq!(kept(), Vec::from_iter(21 - WHOLES..=20));
+        ask(WHOLE_COLUMNS);
+        assert_eq!(kept().last(), Some(&WHOLE_COLUMNS));
     }
 }
