@@ -208,15 +208,17 @@ impl View {
     }
 }
 
-/// What the graph drew last.
+/// What a graph drew in its last frame: the window across its plot, and the trace's value range.
+/// A host reads it with `Graph::shown`, to fix Y where it is on screen, say. A host builds none.
 #[derive(Clone, Debug)]
-pub(crate) struct Shown {
-    /// Kept while nothing is in view to fit.
+#[non_exhaustive]
+pub struct Shown {
+    pub window: Range<i64>,
+    /// Low, then high, in the trace's unit. A graph of lanes alone draws no value range: this is
+    /// the one a trace would start from.
     pub y: (f64, f64),
     #[cfg(test)]
-    pub window: Range<i64>,
-    #[cfg(test)]
-    pub layout: Layout,
+    pub(crate) layout: Layout,
 }
 
 /// A zoom step under way: the window drawn eases from `from` to the window the graph set.
@@ -753,7 +755,6 @@ impl Widget for Graph<'_> {
         );
         memory.shown = Some(Shown {
             y,
-            #[cfg(test)]
             window: view.window.clone(),
             #[cfg(test)]
             layout,
@@ -771,8 +772,14 @@ impl Widget for Graph<'_> {
     }
 }
 
+impl Graph<'_> {
+    /// What the graph whose response `response` is drew in its last frame; None before its first.
+    pub fn shown(response: &Response) -> Option<Shown> {
+        shown(&response.ctx, response.id)
+    }
+}
+
 /// What the graph with id `id` drew last.
-#[cfg(test)]
 pub(crate) fn shown(ctx: &egui::Context, id: egui::Id) -> Option<Shown> {
     ctx.data(|d| d.get_temp::<Memory>(id)).and_then(|m| m.shown)
 }

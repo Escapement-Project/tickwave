@@ -218,11 +218,17 @@ impl Shared {
 
 /// A recording a graph shows, and the one thread that answers its queries off the UI thread. A
 /// newer query replaces one not yet started and cancels one running; only the newest one's answer
-/// is kept, and its arrival asks egui for a frame.
+/// is kept, and its arrival asks egui for a frame. It is `Send`, so a host may open it off the UI
+/// thread and hand it over.
 pub struct Viewer {
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
 }
+
+const _: fn() = || {
+    fn send<T: Send>() {}
+    send::<Viewer>();
+};
 
 fn file(path: &Path) -> Opener {
     let path: PathBuf = path.to_owned();
@@ -396,8 +402,8 @@ impl Viewer {
         self.shared.slot().extends
     }
 
-    /// A query is waiting or running.
-    pub(crate) fn busy(&self) -> bool {
+    /// A query is waiting or running: the answer drawn may be older than what the graph asks.
+    pub fn busy(&self) -> bool {
         let slot = self.shared.slot();
         slot.pending.is_some() || slot.running.is_some()
     }

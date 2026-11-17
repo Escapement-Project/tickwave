@@ -3,6 +3,7 @@
 
 mod ease;
 mod graph;
+mod host;
 mod lanes;
 mod live;
 mod roles;
@@ -439,6 +440,8 @@ pub struct Host {
     pub now: Option<i64>,
     /// Whether a zoom step eases: off but in the tests of the ease.
     pub motion: bool,
+    /// What the graph's response said it drew, through `Graph::shown`.
+    pub shown: Option<crate::Shown>,
 }
 
 pub fn harness(state: ViewState) -> Harness<'static, Host> {
@@ -463,6 +466,7 @@ pub fn harness_at(state: ViewState, pixels_per_point: f32) -> Harness<'static, H
         strip_changed: false,
         now: None,
         motion: false,
+        shown: None,
     };
     Harness::builder()
         .with_size(egui::vec2(1080.0, 700.0))
@@ -490,6 +494,7 @@ pub fn harness_at(state: ViewState, pixels_per_point: f32) -> Harness<'static, H
                 }
                 let response = ui.add(graph);
                 host.changed |= response.changed();
+                host.shown = Graph::shown(&response);
                 if host.strip {
                     host.strip_id = Some(ui.make_persistent_id(IdSalt::new(STRIP_SALT)));
                     let response = ui.add(
