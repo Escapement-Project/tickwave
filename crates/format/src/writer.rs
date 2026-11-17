@@ -845,20 +845,21 @@ fn included_generators(files: &BTreeMap<String, String>) -> Vec<String> {
 }
 
 /// The files a bundle holds for a recording `<stem>.tickwave` with `id` whose generators are
-/// `sources`, in the order of their first annotations: each one's file, its first line alone,
-/// and a hand-written file that includes them in that order and holds no annotation of its own.
+/// `sources`, each with the roles it declares, in the order of their first annotations: each
+/// one's file, its first line alone, and a hand-written file that includes them in that order and
+/// holds no annotation of its own.
 pub(crate) fn bundled_files<'a>(
     stem: &str,
     id: ContentId,
-    sources: impl IntoIterator<Item = &'a str>,
+    sources: impl IntoIterator<Item = (&'a str, &'a [serde_json::Value])>,
 ) -> BTreeMap<String, String> {
     // A JSON string is a TOML basic string: serde_json escapes nothing TOML lacks.
     let quoted = |s: &str| serde_json::to_string(s).expect("a string serialises");
     let mut files = BTreeMap::new();
     let mut include = Vec::new();
-    for source in sources {
+    for (source, roles) in sources {
         let name = format!("{stem}.{source}.jsonl");
-        files.insert(name.clone(), generator_file(source, None, id, &[]));
+        files.insert(name.clone(), generator_head(source, None, id, roles) + "\n");
         include.push(quoted(&name));
     }
     files.insert(
@@ -870,6 +871,31 @@ pub(crate) fn bundled_files<'a>(
         ),
     );
     files
+}
+
+/// A generator file's first line, `roles` its role tables, without its newline (ANNOTATIONS.md).
+pub fn generator_head(
+    source: &str,
+    version: Option<&str>,
+    recording_id: ContentId,
+    roles: &[serde_json::Value],
+) -> String {
+    // In the order ANNOTATIONS.md shows it.
+    let json = |s: &str| serde_json::to_string(s).expect("a string serialises");
+    let version = version.map_or(String::new(), |v| format!(r#","version":{}"#, json(v)));
+    let roles = if roles.is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#","role":{}"#,
+            serde_json::to_string(roles).expect("roles serialise")
+        )
+    };
+    format!(
+        r#"{{"format":"tickwave-annotations/1","source":{}{version},"recording_id":{}{roles}}}"#,
+        json(source),
+        json(&recording_id.to_string())
+    )
 }
 
 /// The annotation bundle record's payload for `files`, compressed at `level`.
@@ -888,14 +914,7 @@ pub fn generator_file(
     recording_id: ContentId,
     lines: &[String],
 ) -> String {
-    // In the order ANNOTATIONS.md shows it.
-    let json = |s: &str| serde_json::to_string(s).expect("a string serialises");
-    let version = version.map_or(String::new(), |v| format!(r#","version":{}"#, json(v)));
-    let mut out = format!(
-        r#"{{"format":"tickwave-annotations/1","source":{}{version},"recording_id":{}}}"#,
-        json(source),
-        json(&recording_id.to_string())
-    );
+    let mut out = generator_head(source, version, recording_id, &[]);
     out.push('\n');
     for line in lines {
         out.push_str(line);
@@ -1005,6 +1024,8 @@ pub struct Writer {
     lines: crate::annotations::Lines,
     /// Each generator's lines since its last part, in the order of its first annotation.
     generators: Vec<Pending>,
+    /// The roles each generator declares in its file's first line, by its name (`roles`).
+    roles: BTreeMap<String, Vec<serde_json::Value>>,
     /// Whether it wrote an annotation record, which a bundle of given files can't hold.
     took_records: bool,
     parts: TableWriter<PartRow>,
@@ -1143,6 +1164,7 @@ impl Writer {
             offload_limit,
             lines,
             generators: Vec::new(),
+            roles: BTreeMap::new(),
             took_records: false,
             parts: TableWriter::new(0, Table::Parts, false),
             failed: None,
@@ -1826,6 +1848,13 @@ impl Writer {
             }
         }
         self.after_item(c, tick, size)
+    }
+
+    /// The paint roles generator `source` declares (ANNOTATIONS.md, "Roles"), each a role's table,
+    /// for its file's first line in a bundle the writer makes of its own annotations. They are
+    /// held to the schema there, by whatever resolves the bundle.
+    pub fn roles(&mut self, source: &str, roles: Vec<serde_json::Value>) {
+        self.roles.insert(source.to_owned(), roles);
     }
 
     /// One generated annotation, from generator `source`. Its times are axis ticks. Its record
@@ -2973,7 +3002,10 @@ impl Writer {
                 bundled_files(
                     &stem,
                     header.content_id,
-                    self.generators.iter().map(|g| g.source.as_str()),
+                    self.generators.iter().map(|g| {
+                        let roles = self.roles.get(&g.source).map_or(&[][..], Vec::as_slice);
+                        (g.source.as_str(), roles)
+                    }),
                 )
             }),
             Bundling::Files { files, .. } => Some(files),

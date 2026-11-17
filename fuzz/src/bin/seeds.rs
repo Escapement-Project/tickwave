@@ -395,6 +395,22 @@ fn main() {
     let sidecar = [&toml[..], b"\0identify-swd.swd.jsonl\0", &jsonl[..]].concat();
     c.put("annotations", "identify-swd", &sidecar);
     c.put("annotations", "hand-only", &toml);
+    // With roles in both files, a stored view, and a role that breaks a bound.
+    let roles = [
+        &toml[..],
+        b"\n[view]\nchannels = [\"SWDIO\"]\nstart = \"377 ms\"\nend = \"378 ms\"\ncolour = [\"#d9480f\", \"#ff8a50\"]\n\n[[role]]\nname = \"neither\"\nlabel = \"neither drives\"\ncolour = [\"#8a8a8a\", \"#5c5c5c\"]\ndash = [2, 1]\n\n[[role]]\nname = \"probe\"\ndash = [1]\n",
+    ]
+    .concat();
+    // The generator's first line, its roles set whatever it declares already.
+    let head_end = jsonl.iter().position(|&b| b == b'\n').unwrap();
+    let mut head: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_slice(&jsonl[..head_end]).unwrap();
+    head.insert(
+        "role".into(),
+        serde_json::json!([{"name": "probe", "label": "probe drives"}, {"name": "target", "label": "target drives", "weight": 1}]),
+    );
+    let declaring = [&serde_json::to_vec(&head).unwrap()[..], &jsonl[head_end..]].concat();
+    c.put("annotations", "roles", &[&roles[..], b"\0identify-swd.swd.jsonl\0", &declaring[..]].concat());
     for (name, op) in [
         (
             "insert",

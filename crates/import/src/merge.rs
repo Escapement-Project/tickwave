@@ -47,6 +47,10 @@ pub enum Error {
     },
     #[error("input {input} is given a stretch and two marks, which give one each")]
     TwoStretches { input: usize },
+    /// The inputs' generators declare one paint role differently, or a declaration breaks a rule
+    /// (ANNOTATIONS.md, "Roles"): every problem, joined.
+    #[error("the inputs' paint roles: {0}")]
+    Roles(String),
     #[error("input {input} ({stem}) has no channel {name:?}; it has {has:?}")]
     NoChannel {
         input: usize,
@@ -1521,10 +1525,16 @@ fn time_ticks(value: &serde_json::Value, timebase: Ratio) -> Option<i64> {
 /// Generated annotations, each with its generator's name.
 type Annotations = Vec<(String, serde_json::Map<String, serde_json::Value>)>;
 
+/// The roles each carried generator's file declares in its first line, by the generator's name in
+/// the merge, with the file as a problem names it.
+type Roles = Vec<(String, String, Vec<serde_json::Value>)>;
+
 /// Each input's generated annotations, carried: times mapped, generators renamed apart, channels
-/// renamed and dropped. Hand-written annotations are counted, not carried.
-fn carried(inputs: &[Input], layout: &Layout, notes: &mut Vec<Note>) -> Annotations {
+/// renamed and dropped, and the roles their files declare. Hand-written annotations are counted,
+/// not carried, nor the roles and view their file declares.
+fn carried(inputs: &[Input], layout: &Layout, notes: &mut Vec<Note>) -> (Annotations, Roles) {
     let mut out = Vec::new();
+    let mut roles = Vec::new();
     let mut generators: BTreeSet<String> = BTreeSet::new();
     // The writer refuses a line that would not resolve: such a line is left out here instead.
     let mut lines = annotations::Lines::new(layout.channels.iter().map(|c| {
@@ -1576,6 +1586,11 @@ fn carried(inputs: &[Input], layout: &Layout, notes: &mut Vec<Note>) -> Annotati
             };
             let name = unique_generator(&source, &input.stem, &generators);
             generators.insert(name.clone());
+            roles.push((
+                name.clone(),
+                format!("input {number} ({}): {file}", input.stem),
+                annotations::generator_roles(text),
+            ));
             if name != source {
                 notes.push(Note::GeneratorRenamed {
                     input: number,
@@ -1690,7 +1705,7 @@ fn carried(inputs: &[Input], layout: &Layout, notes: &mut Vec<Note>) -> Annotati
             }
         }
     }
-    out
+    (out, roles)
 }
 
 /// Merges what `open` gives into `out`, from its start. It decodes only the channels it takes.
@@ -1704,7 +1719,19 @@ pub fn merge<F: Write + Seek>(
 ) -> Result<Merged, Error> {
     let inputs = open()?;
     let (mut layout, mut notes) = plan(&inputs, settings)?;
-    let annotations = carried(&inputs, &layout, &mut notes);
+    let (annotations, roles) = carried(&inputs, &layout, &mut notes);
+    // One name declared differently by two inputs' generators would leave the merged sidecar
+    // refused by every reader.
+    let problems =
+        annotations::roles::declared(roles.iter().map(|(_, file, r)| (file.as_str(), &r[..]))).1;
+    if !problems.is_empty() {
+        return Err(Error::Roles(problems.join("; ")));
+    }
+    let roles: Vec<(String, Vec<serde_json::Value>)> = roles
+        .into_iter()
+        .filter(|(_, _, r)| !r.is_empty())
+        .map(|(name, _, r)| (name, r))
+        .collect();
     // A cut digital channel's edges kept are counted before the declaration is written.
     if layout.channels.iter().any(|c| c.cut && c.samples.is_none()) {
         count_cut_edges(&mut layout, open()?)?;
@@ -1735,6 +1762,7 @@ pub fn merge<F: Write + Seek>(
             stem: settings.stem.clone(),
         }),
         annotations,
+        roles,
         ..Options::default()
     };
     let recording = apply(&layout, inputs.into_iter().map(|i| i.recording).collect());

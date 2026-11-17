@@ -57,6 +57,9 @@ pub struct Options {
     /// Generated annotations to write, each with its generator's name; their times are axis
     /// ticks.
     pub annotations: Vec<(String, serde_json::Map<String, serde_json::Value>)>,
+    /// The paint roles each generator declares, by its name, for its file's first line in the
+    /// bundle (`Writer::roles`).
+    pub roles: Vec<(String, Vec<serde_json::Value>)>,
     /// How to bundle the annotations (`Finish::bundle`).
     pub bundle: Option<Bundle>,
 }
@@ -77,6 +80,7 @@ impl Default for Options {
             analog: Vec::new(),
             overview_shift: None,
             annotations: Vec::new(),
+            roles: Vec::new(),
             bundle: None,
         }
     }
@@ -301,6 +305,9 @@ pub fn encode_to(
             compression: options.compression,
         },
     )?;
+    for (source, roles) in &options.roles {
+        writer.roles(source, roles.clone());
+    }
     for (source, annotation) in &options.annotations {
         writer.annotation(source, annotation.clone())?;
     }

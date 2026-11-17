@@ -141,6 +141,7 @@ fn annotations_check_json_gives_each_annotation_resolved_with_every_field() {
         format!(
             "format = \"tickwave-annotations/1\"\nrecording_id = \"{id}\"\n\
              include = [\"rec.dec.jsonl\"]\n\n\
+             [[role]]\nname = \"probe\"\n\n\
              [[annotation]]\nid = \"first\"\nref = \"dec/pulse/1\"\nlabel = \"The first pulse\"\n\n\
              [[annotation]]\nid = \"span\"\nstart = \"1 ms\"\nend = \"2.5 ms\"\n\
              channels = [\"SWCLK\"]\nkind = \"note\"\nlabel = \"A span\"\ntext = \"Some text.\"\n\

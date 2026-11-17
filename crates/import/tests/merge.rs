@@ -2578,3 +2578,85 @@ fn a_channel_read_without_its_check_ends_at_a_damaged_block() {
     };
     assert_eq!((i.count, i.samples.into_samples().count()), (200, 0));
 }
+
+/// `bundle_of`, its generator's first line declaring `roles` (JSON).
+fn bundle_with_roles(recording: Recording, roles: &str) -> Vec<u8> {
+    let bytes = encode(
+        recording,
+        &Options {
+            level: 3,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    let footer = Footer::parse_file(&bytes).unwrap();
+    let line = serde_json::json!({"id": "edge/100", "start": 100, "end": 200, "paint": "probe"});
+    let mut files = sidecar_of(footer.header.content_id, &[line], &[], None);
+    let roles: Vec<serde_json::Value> = serde_json::from_str(roles).unwrap();
+    let jsonl = files.get_mut("in.dec.jsonl").unwrap();
+    let rest = jsonl.split_once('\n').unwrap().1.to_owned();
+    *jsonl = escapement_tickwave_format::writer::generator_head(
+        "dec",
+        None,
+        footer.header.content_id,
+        &roles,
+    ) + "\n"
+        + &rest;
+    escapement_tickwave_format::bundle::bundle(&bytes, &footer, files, 3).unwrap()
+}
+
+#[test]
+fn a_generators_roles_come_over_with_it_and_two_inputs_must_declare_a_role_alike() {
+    let roles = r#"[{"name": "probe", "label": "probe drives"}, {"name": "target", "weight": 1}]"#;
+    let a = bundle_with_roles(analyser(), roles);
+    // The same declarations, fields in another order and a label left at its default.
+    let p = bundle_with_roles(
+        probe(),
+        r#"[{"label": "probe drives", "name": "probe"}, {"weight": 1, "name": "target", "label": "target"}]"#,
+    );
+    let (out, _) = run(
+        &[(a, "analyser", None), (p, "probe", None)],
+        &settings(vec![]),
+    )
+    .unwrap();
+    let files = bundled(&out).expect("bundled");
+    let included: Vec<_> = files
+        .iter()
+        .filter(|(n, _)| n.ends_with(".jsonl"))
+        .map(|(name, text)| escapement_tickwave_format::annotations::Included { name, text })
+        .collect();
+    let toml = files.keys().find(|n| n.ends_with(".toml")).unwrap();
+    let (got, problems) = escapement_tickwave_format::annotations::roles(&files[toml], &included);
+    assert_eq!(problems, Vec::<String>::new());
+    let names: Vec<(&str, &str, f64)> = got
+        .iter()
+        .map(|r| (r.name.as_str(), r.label.as_str(), r.weight))
+        .collect();
+    assert_eq!(
+        names,
+        [("probe", "probe drives", 0.0), ("target", "target", 1.0)]
+    );
+    // Both generators' files declare them.
+    for (name, text) in files.iter().filter(|(n, _)| n.ends_with(".jsonl")) {
+        assert!(
+            text.lines().next().unwrap().contains(r#""role":[{"#),
+            "{name}: {text}"
+        );
+    }
+    // Declared differently: the merge says which and where.
+    let a = bundle_with_roles(analyser(), roles);
+    let p = bundle_with_roles(
+        probe(),
+        r#"[{"name": "probe", "label": "probe drives", "weight": 2}]"#,
+    );
+    let Err(Error::Roles(why)) = run(
+        &[(a, "analyser", None), (p, "probe", None)],
+        &settings(vec![]),
+    ) else {
+        panic!("merged");
+    };
+    assert_eq!(
+        why,
+        "role \"probe\": input 1 (analyser): in.dec.jsonl and input 2 (probe): in.dec.jsonl declare it differently (weight)"
+    );
+}

@@ -127,7 +127,13 @@ const kinds = opts.kinds ? new Set(opts.kinds.split(",")) : null;
 const until = opts.until ? Number(opts.until) : -Infinity;
 const kept = (out as Note[]).filter((a) => kinds === null || kinds.has(a.kind) || a.start < until);
 kept.sort((a, b) => a.start - b.start);
-const lines = [JSON.stringify({ format: "tickwave-annotations/1", source: "swd", ...(rec.id && { recording_id: rec.id }) })];
+// Who drives SWDIO, declared so a key names it and the target's lines draw a pixel heavier, which
+// tells the two apart without colour; their colours are the page's, or the view's by their place.
+const ROLES = [
+  { name: "probe", label: "probe drives" },
+  { name: "target", label: "target drives", weight: 1 },
+];
+const lines = [JSON.stringify({ format: "tickwave-annotations/1", source: "swd", ...(rec.id && { recording_id: rec.id }), role: ROLES })];
 for (const a of kept) lines.push(JSON.stringify(a));
 if (opts.out) writeFileSync(opts.out, lines.join("\n") + "\n");
 else console.log(lines.join("\n"));

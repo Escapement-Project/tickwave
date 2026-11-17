@@ -480,3 +480,32 @@ fn an_edit_that_is_not_one_is_refused() {
         assert!(message.starts_with(wanted), "{op}: {message}");
     }
 }
+
+/// The roles and the stored view are edited in the TOML, not the editor: its edits of the
+/// annotations around them leave their tables as they were, byte for byte.
+#[test]
+fn edits_leave_the_role_and_view_tables_alone() {
+    const VIEW: &str = "\n[view]\nchannels = [\"SWDIO\"]   # the one that matters\ncolour = [\"#d9480f\", \"#ff8a50\"]\n";
+    const ROLE: &str = "\n# Who drives.\n[[role]]\nname = \"neither\"\nlabel = \"neither drives\"\ndash = [2, 1]\n";
+    const LAST: &str = "\n[[annotation]]\nid = \"last\"\nstart = 7\n";
+    let text = format!("{HEAD}{VIEW}{A}{ROLE}{B}{LAST}");
+    let keeps = |out: &str| {
+        assert!(out.contains(VIEW.trim()), "{out}");
+        assert!(out.contains(ROLE.trim()), "{out}");
+    };
+    for op in [
+        r#"{"op": "insert", "index": 3, "fields": {"id": "new", "start": 1, "paint": "neither"}}"#,
+        r#"{"op": "insert", "index": 0, "fields": {"id": "new", "start": 1}}"#,
+        r#"{"op": "replace", "index": 1, "fields": {"id": "first-misread", "ref": "wire_swd/misread/412000", "paint": "neither"}}"#,
+        r#"{"op": "remove", "index": 0}"#,
+        r#"{"op": "remove", "index": 2}"#,
+        r#"{"op": "move", "from": 0, "to": 2}"#,
+        r#"{"op": "move", "from": 2, "to": 0}"#,
+    ] {
+        let out = edit_json(&text, op).unwrap_or_else(|e| panic!("{op}: {e}"));
+        keeps(&out);
+        // The annotations are still three or four, the role and view one each.
+        assert_eq!(out.matches("[[role]]").count(), 1, "{op}");
+        assert_eq!(out.matches("[view]").count(), 1, "{op}");
+    }
+}

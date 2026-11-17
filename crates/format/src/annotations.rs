@@ -13,6 +13,11 @@ use crate::model::Ratio;
 use crate::record::check_source;
 pub use crate::times::{ExactTicks, Time, exact_ticks, ticks};
 
+pub mod roles;
+pub mod view;
+pub use roles::{Colour, Role};
+pub use view::View;
+
 pub const FORMAT: &str = "tickwave-annotations/1";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -56,6 +61,11 @@ struct HandFile {
     recording_id: ContentId,
     #[serde(default)]
     include: Vec<String>,
+    /// Checked by `roles::declared`, which names a role in each problem.
+    #[serde(default)]
+    role: Vec<serde_json::Value>,
+    /// Checked by `view::view`.
+    view: Option<serde_json::Value>,
     #[serde(default)]
     annotation: Vec<Entry>,
 }
@@ -69,6 +79,8 @@ struct GeneratorHead {
     #[allow(dead_code)]
     version: Option<String>,
     recording_id: ContentId,
+    #[serde(default)]
+    role: Vec<serde_json::Value>,
 }
 
 /// One annotation, resolved: times in ticks, a `ref` followed.
@@ -142,9 +154,12 @@ fn check_value(name: &str, value: &str) -> Option<String> {
     })
 }
 
-/// The problems with one annotation's id and values.
+/// The problems with one annotation's id, paint and values.
 fn field_problems(entry: &Entry, generated: bool) -> Vec<String> {
     let mut problems: Vec<String> = check_id(&entry.id, generated).into_iter().collect();
+    if let Some(problem) = entry.paint.as_deref().and_then(roles::check_name) {
+        problems.push(format!("paint: {problem}"));
+    }
     for (name, value) in entry.values.iter().flatten() {
         problems.extend(check_value(name, value));
     }
@@ -335,6 +350,16 @@ pub fn generator_source(text: &str) -> Option<String> {
     (head.format == FORMAT).then_some(head.source)
 }
 
+/// The role tables a generator's file declares in its first line, unchecked; none where that
+/// line doesn't read. `roles::declared` holds them to the schema.
+pub fn generator_roles(text: &str) -> Vec<serde_json::Value> {
+    text.lines()
+        .find(|l| !l.trim().is_empty())
+        .and_then(|first| json::<GeneratorHead>(first).ok())
+        .map(|head| head.role)
+        .unwrap_or_default()
+}
+
 /// The files a hand-written file includes, in its order; None when its TOML doesn't read.
 #[cfg(feature = "toml")]
 pub fn include_order(hand: &str) -> Option<Vec<String>> {
@@ -357,6 +382,68 @@ pub fn hand_written_count(hand: &str) -> Option<usize> {
     toml::from_str::<Annotations>(hand)
         .ok()
         .map(|a| a.annotation.len())
+}
+
+/// The roles a sidecar declares (ANNOTATIONS.md, "Roles"), `hand` its hand-written file's TOML and
+/// `included` the files it includes, each whole or its first line alone: the first declaration
+/// of each name, in sidecar order, and every problem with them, as `resolve` reports them.
+#[cfg(feature = "toml")]
+pub fn roles(hand: &str, included: &[Included<'_>]) -> (Vec<Role>, Vec<String>) {
+    match toml::from_str::<HandFile>(hand) {
+        Ok(file) => declared_in(&file, included),
+        Err(e) => (Vec::new(), vec![format!("the TOML file: {e}")]),
+    }
+}
+
+/// As `roles`, with the hand-written file's TOML already parsed and written out as JSON.
+pub fn roles_json(hand: &str, included: &[Included<'_>]) -> (Vec<Role>, Vec<String>) {
+    match json::<HandFile>(hand) {
+        Ok(file) => declared_in(&file, included),
+        Err(e) => (Vec::new(), vec![format!("the TOML file: {e}")]),
+    }
+}
+
+/// A sidecar's stored view (ANNOTATIONS.md, "The stored view"), `hand` its hand-written file's
+/// TOML, held to the recording's `header`: None where it has no `[view]`; every problem with it,
+/// as `resolve` reports them.
+#[cfg(feature = "toml")]
+pub fn view(hand: &str, header: &Header) -> Result<Option<View>, Vec<String>> {
+    match toml::from_str::<HandFile>(hand) {
+        Ok(file) => file
+            .view
+            .as_ref()
+            .map(|v| view::view(v, header))
+            .transpose(),
+        Err(e) => Err(vec![format!("the TOML file: {e}")]),
+    }
+}
+
+/// As `view`, with the hand-written file's TOML already parsed and written out as JSON.
+pub fn view_json(hand: &str, header: &Header) -> Result<Option<View>, Vec<String>> {
+    match json::<HandFile>(hand) {
+        Ok(file) => file
+            .view
+            .as_ref()
+            .map(|v| view::view(v, header))
+            .transpose(),
+        Err(e) => Err(vec![format!("the TOML file: {e}")]),
+    }
+}
+
+/// The roles `file` and the generator files' first lines declare, in sidecar order. A first line
+/// that doesn't read declares none: `find` names its problem.
+fn declared_in(file: &HandFile, included: &[Included<'_>]) -> (Vec<Role>, Vec<String>) {
+    let heads: Vec<(&str, Vec<serde_json::Value>)> = in_include_order(&file.include, included)
+        .into_iter()
+        .filter_map(|inc| {
+            let first = inc.text.lines().find(|l| !l.trim().is_empty())?;
+            Some((inc.name, json::<GeneratorHead>(first).ok()?.role))
+        })
+        .collect();
+    roles::declared(
+        std::iter::once(("the TOML file", &file.role[..]))
+            .chain(heads.iter().map(|(name, r)| (*name, &r[..]))),
+    )
 }
 
 /// Resolves and checks a sidecar against the recording's header, and against the recording's
@@ -758,6 +845,25 @@ fn find<'a>(
             ));
         }
     }
+    problems.extend(
+        declared_in(&file, included)
+            .1
+            .into_iter()
+            .map(|p| (Owner::Sidecar, p)),
+    );
+    let heads: Vec<Vec<serde_json::Value>> =
+        included.iter().map(|i| generator_roles(i.text)).collect();
+    let declared: BTreeSet<String> =
+        roles::names(std::iter::once(&file.role[..]).chain(heads.iter().map(Vec::as_slice)))
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+    // Each undeclared name once, where it is first used: a generator that leaves one out paints
+    // with it on line after line.
+    let mut undeclared: BTreeSet<String> = BTreeSet::new();
+    if let Some(Err(view_problems)) = file.view.as_ref().map(|v| view::view(v, header)) {
+        problems.extend(view_problems.into_iter().map(|p| (Owner::Sidecar, p)));
+    }
     let listed: BTreeSet<&str> = file.include.iter().map(String::as_str).collect();
     let given: BTreeSet<&str> = included.iter().map(|i| i.name).collect();
     for name in listed.difference(&given) {
@@ -845,6 +951,18 @@ fn find<'a>(
         let own = Owner::Entry(position);
         for problem in field_problems(&entry, source.is_some()) {
             problems.push((own, format!("{at}: {problem}")));
+        }
+        // A reader keeps the annotation and draws its channels as if it painted nothing, so the
+        // problem is the sidecar's, not the annotation's.
+        if let Some(paint) = &entry.paint
+            && roles::check_name(paint).is_none()
+            && !declared.contains(paint)
+            && undeclared.insert(paint.clone())
+        {
+            problems.push((
+                Owner::Sidecar,
+                format!("{at}: paint {paint:?} names no role the sidecar declares"),
+            ));
         }
         if !seen.insert(id.clone()) {
             problems.push((own, format!("{at}: id {id:?} is used twice")));

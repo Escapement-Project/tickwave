@@ -1278,7 +1278,7 @@ impl Repairer {
                 bundled_files(
                     &stem,
                     header.content_id,
-                    self.generators.iter().map(|g| g.source.as_str()),
+                    self.generators.iter().map(|g| (g.source.as_str(), &[][..])),
                 )
             }),
             Bundling::Files { files, .. } => Some(files),

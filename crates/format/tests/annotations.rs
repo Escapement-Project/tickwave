@@ -109,7 +109,7 @@ ref = "wire_swd/misread/412000"
 label = "Misreads at 25 MHz"
 "#;
 
-const GENERATED: &str = r#"{"format": "tickwave-annotations/1", "source": "wire_swd", "version": "9f3c2e1", "recording_id": "blake3:00ff000000000000000000000000000000000000000000000000000000000000"}
+const GENERATED: &str = r#"{"format": "tickwave-annotations/1", "source": "wire_swd", "version": "9f3c2e1", "recording_id": "blake3:00ff000000000000000000000000000000000000000000000000000000000000", "role": [{"name": "target"}]}
 {"id": "misread/412000", "kind": "misread", "start": 412000, "end": 412900, "channels": ["SWDIO"], "label": "parity wrong", "values": {"read_data": "24.9 MHz", "asked": "25 MHz"}}
 
 {"id": "drive/400000", "kind": "drive", "start": 400000, "end": 400369, "channels": ["SWDIO"], "paint": "target"}
