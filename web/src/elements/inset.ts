@@ -39,6 +39,8 @@ canvas { display: block; }
    a line of its own: the inset's height is set when its sidecar arrives, and neither its data nor
    the pointer moves anything. */
 .line { flex: 1 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; }
+/* The line's box holds the text's font and the figures' at all times, so a measure or a reading
+   that brings figures in, in a font of its own, grows nothing. */
 .line::before { content: "\\200b"; }
 .key:empty, .line.reads .measure, .line:not(.reads) .reading { display: none; }
 .measure, .reading { color: var(--ink, CanvasText); }
@@ -56,7 +58,7 @@ canvas { display: block; }
 
 const HTML = `<figure part="inset"><figcaption part="label"></figcaption><p class="text" part="text" hidden></p>
 <div class="frame" part="frame"><canvas part="canvas" aria-hidden="true"></canvas><a class="hit" part="plot" hidden></a></div>
-<div class="foot" part="foot"><span class="line" hidden><span class="measure figures" part="measure" hidden></span><span class="reading" part="reading" aria-hidden="true"></span></span><span class="key" part="key"></span></div>
+<div class="foot" part="foot"><span class="line" hidden><span class="strut figures" aria-hidden="true">\u200b</span><span class="measure figures" part="measure" hidden></span><span class="reading" part="reading" aria-hidden="true"></span></span><span class="key" part="key"></span></div>
 <span class="said" aria-live="polite"></span>
 <div class="notice" part="notice" role="status" hidden></div></figure>`;
 
