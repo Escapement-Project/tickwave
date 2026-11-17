@@ -14,6 +14,7 @@
   ?style=verge|bench the summary's metrics as the Escapement Project's two pages set them
   ?hidden            the view is hidden
   ?tag=, ?after=, ?stall=  passed on to the server with the recording's URL
+  ?firstRead=N       the decoder's first read of the head, in bytes, set as define() loads tickwave.js
 -->
 <link rel="stylesheet" href="../../dist/tickwave.css">
 <style>
@@ -52,7 +53,11 @@ if (q.has("annotations")) view.setAttribute("annotations", `../../${q.get("annot
 document.body.className = q.get("style") ?? "";
 // Whole, in one step, so no frame shows it before its spans and the page's style.
 document.currentScript.before(view);
-window.define = () => import("../../dist/tickwave.js");
+window.define = () =>
+  import("../../dist/tickwave.js").then((tw) => {
+    if (q.get("firstRead")) tw.configure({ firstRead: Number(q.get("firstRead")) });
+    return tw;
+  });
 </script>
 <p id="after">What follows the view.</p>
 </body>

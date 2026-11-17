@@ -11,7 +11,7 @@ import { Prober, type Probed } from "../prober.ts";
 import { lowerBound } from "../search.ts";
 import { channelIndices, EASE_MS, Plot } from "../render/plot.ts";
 import { clampRange, fitRange, moveRange, scaleLimits, zoomRange, type ScaleLimits, type ValueRange } from "../render/scale.ts";
-import { channelSampleTick, channelStart, inChannel, isAbort, named, readingStep, sampleAtOrBefore, spanned } from "../source.ts";
+import { channelSampleTick, channelStart, inChannel, isAbort, named, readingStep, sampleAtOrBefore, spanned, type RecordingInfo } from "../source.ts";
 import { parseTime, toTicks, type TimeSpec } from "../time.ts";
 import { DRAG_PX, TickwaveElement, loadAnnotations, loadHead, readAnnotations, zoomKey, type Loaded } from "./base.ts";
 import { ShapedSource } from "../shaped-source.ts";
@@ -208,8 +208,10 @@ export class TickwaveView extends TickwaveElement {
   #annotationsText: string | null = null;
   /** The stored view's span applied, by recording and span, so it sets the window once. */
   #storedSpanAt = "";
-  /** What a collapsed view read of the stored view, for its facts, by recording and sidecar. */
-  #storedRead: { key: string; view: StoredView | null } | null = null;
+  /** The stored view the facts count channels by, by recording and sidecar (`#storedKey`): what a
+   * collapsed view read of it, or a load's sidecar declared. Settled once that read is done,
+   * failed or not; the facts wait for it. */
+  #storedRead: { key: string; view: StoredView | null; settled: boolean } | null = null;
   #key!: HTMLElement;
   /** What the key shows: the roles it was built from, and the palette. */
   #keyShown: { roles: string; palette: Palette } | null = null;
@@ -341,7 +343,7 @@ export class TickwaveView extends TickwaveElement {
 
   /**
    * The recording's own title and facts, and whether the page's slotted text matches them. Null
-   * until the view has the head and has compared.
+   * until the view has the head, and any stored view its facts wait on, and has compared.
    */
   get summary(): Summary | null {
     return this.#summary;
@@ -566,6 +568,7 @@ export class TickwaveView extends TickwaveElement {
           if (holds) {
             early = await loadAnnotations(head.src, annotations, text, BUNDLE_ONLY);
             if (this.#loadKey !== key) return null;
+            this.#settleStored(this.#storedKey(head.src), early.declared.view);
             first({ ...head, annotations: early });
           } else if (!at) first({ ...head, annotations: indexAnnotations([]) });
           // A sidecar's text set meanwhile reads its own annotations over the drawn recording. A
@@ -577,6 +580,7 @@ export class TickwaveView extends TickwaveElement {
           if (span && list.partial) this.#readSpans.push(span);
           if (this.#loadKey !== key) return null;
           this.#annotated = true;
+          this.#settleStored(this.#storedKey(head.src), list.declared.view);
           if (!at && this.#textSeq !== seq) return this.#loaded;
           this.#plot.emptyLane = list.errors.length === 0 ? EMPTY_LANE : null;
           if (at) first({ ...head, annotations: list });
@@ -630,16 +634,41 @@ export class TickwaveView extends TickwaveElement {
    */
   #readStored(src: URL): void {
     const annotations = this.getAttribute("annotations");
-    const key = `${src.href}\n${annotations ?? ""}`;
+    const key = this.#storedKey(src);
     if (this.hasAttribute("channels") || this.#storedRead?.key === key) return;
-    this.#storedRead = { key, view: null };
+    this.#storedRead = { key, view: null, settled: false };
     void infoFor(src)
       .then((info) => (annotations !== null || info.bundled === true ? loadAnnotations(src, annotations, null, BUNDLE_ONLY) : null))
-      .then((r) => {
-        if (this.#storedRead?.key !== key || !r) return;
-        this.#storedRead = { key, view: r.declared.view };
-        this.#renderSummary();
-      });
+      .then(
+        (r) => this.#settleStored(key, r?.declared.view ?? null),
+        () => this.#settleStored(key, null),
+      );
+  }
+
+  #storedKey(src: URL): string {
+    return `${src.href}\n${this.getAttribute("annotations") ?? ""}`;
+  }
+
+  /** `view` is the stored view read for `key`'s recording and sidecar; the summary counts by it.
+   * One read for a recording or sidecar the view has moved on from is dropped. */
+  #settleStored(key: string, view: StoredView | null): void {
+    const src = this.#src;
+    if (!src || this.#storedKey(src) !== key) return;
+    const was = this.#storedRead;
+    if (was?.key === key && was.settled && was.view === view) return;
+    this.#storedRead = { key, view, settled: true };
+    this.#renderSummary();
+  }
+
+  /**
+   * Whether the facts wait on a stored view still to be read: the page names no channels, and the
+   * sidecar it names, or the recording's bundle, may store some. A bundle's view can't be told
+   * from the head, so every bundled recording's facts wait for its bundle to be read.
+   */
+  #storedPending(src: URL, info: RecordingInfo): boolean {
+    if (this.hasAttribute("channels") || (this.getAttribute("annotations") === null && info.bundled !== true)) return false;
+    const read = this.#storedRead;
+    return !(read?.key === this.#storedKey(src) && read.settled);
   }
 
   /**
@@ -657,8 +686,12 @@ export class TickwaveView extends TickwaveElement {
     // Collapsed, the view shows what is here; the head arrives once the view scrolls into sight.
     const info = peekInfo(src);
     const title = info?.title ?? decodeURIComponent(src.pathname.split("/").pop() ?? "");
-    const stored = this.#loaded?.annotations.declared.view ?? this.#storedRead?.view ?? null;
-    const facts = info ? summaryFacts(info, channelIndices(info, this.#channelsShown(stored)).indices) : [];
+    // The facts count the channels the view opens with, so they wait for a stored view still being
+    // read, as they wait for the head: no fact shown, compared or sent before them.
+    const pending = info !== null && this.#storedPending(src, info);
+    const read = this.#storedRead?.key === this.#storedKey(src) ? this.#storedRead.view : null;
+    const stored = this.#loaded?.annotations.declared.view ?? read;
+    const facts = info && !pending ? summaryFacts(info, channelIndices(info, this.#channelsShown(stored)).indices) : [];
     const factsText = facts.map(([, text]) => text).join("; ");
     // Only when they change: new fallback text in a slot with nothing assigned is a slotchange,
     // which renders the summary again.
@@ -672,7 +705,7 @@ export class TickwaveView extends TickwaveElement {
     // A page with several views has several of these buttons: each names its recording.
     this.#toggle.setAttribute("aria-label", `${action} ${pageTitle ?? title}`);
     this.#renderDownloads(src, pageTitle ?? title);
-    if (!info) {
+    if (!info || pending) {
       this.#setSummary(null);
       return;
     }

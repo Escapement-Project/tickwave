@@ -2,7 +2,9 @@
 // it: one height and one title width from the first frame to the footer's arrival, and a console
 // warning where the page's text is not the recording's.
 
+import { readFileSync } from "node:fs";
 import { expect, test, type Page } from "@playwright/test";
+import { layout } from "../test/layout.ts";
 
 const PAGE = "/e2e/pages/summary.html";
 /** As a page writes them; the view's own have no-break spaces between figure and unit. */
@@ -171,4 +173,132 @@ test("the Open button is as wide as Close, so it stays where the reader pressed 
   await toggle.click();
   await expect(toggle).toHaveText("Close");
   expect(await toggle.boundingBox()).toEqual(open);
+});
+
+// A bundled recording whose stored view names its channels: its facts count those, so the view
+// compares, fills its facts and sends its summary only once the bundle is read.
+
+const BUNDLE = "fixtures/roles.bundle.tickwave";
+/** The stored view's channels, in its order, and every channel, in the recording's. */
+const STORED_FACTS = "524 ms; 2 channels: SWDIO, SWCLK; 14 KiB";
+const ALL_FACTS = "524 ms; 2 channels: SWCLK, SWDIO; 14 KiB";
+const own = (facts: string) => facts.replace(/ (ms|KiB)/g, " $1");
+
+/**
+ * Holds every read of the bundle record for `ms`, then answers it, or fails it where `fail`. With
+ * a first read of 256 bytes, the head comes in reads of its own, so the head is in well before the
+ * bundle. Returns how many reads met the bundle.
+ */
+async function holdBundle(page: Page, ms: number, fail = false): Promise<() => number> {
+  const [from, to] = layout(new Uint8Array(readFileSync(BUNDLE))).bundle!;
+  let met = 0;
+  await page.route("**/roles.bundle.tickwave*", async (route) => {
+    const r = /^bytes=(\d+)-(\d+)$/.exec(route.request().headers()["range"] ?? "");
+    if (r && Number(r[1]) < to && from <= Number(r[2])) {
+      met++;
+      await new Promise((go) => setTimeout(go, ms));
+      if (fail) return route.fulfill({ status: 500, body: "" });
+    }
+    await route.continue();
+  });
+  return () => met;
+}
+
+/** Defines the view, recording each summary it sends and each warning. */
+async function define(page: Page): Promise<{ summaries: () => Promise<unknown[]>; warnings: string[] }> {
+  const warnings: string[] = [];
+  page.on("console", (m) => {
+    if (m.type() === "warning") warnings.push(m.text());
+  });
+  await page.evaluate(() => {
+    const w = window as unknown as { summaries: unknown[] };
+    w.summaries = [];
+    document.getElementById("v")!.addEventListener("tickwave-summary", (e) => w.summaries.push((e as CustomEvent).detail));
+    return (window as unknown as { define: () => Promise<unknown> }).define();
+  });
+  return { summaries: () => page.evaluate(() => (window as unknown as { summaries: unknown[] }).summaries), warnings };
+}
+
+test("a bundled recording that stores its channels, with the page's facts for them, warns of nothing and matches from its first summary", async ({ page }) => {
+  const met = await holdBundle(page, 400);
+  await page.goto(`${PAGE}?${new URLSearchParams({ src: BUNDLE, facts: STORED_FACTS, firstRead: "256" })}`);
+  const { summaries, warnings } = await define(page);
+  await expect.poll(summaries, { timeout: 20_000 }).toEqual([{ title: "roles.bundle.tickwave", facts: own(STORED_FACTS), matches: true }]);
+  expect(met()).toBeGreaterThan(0);
+  // Opening reads the sidecar again, and says nothing new.
+  await page.locator("#v .toggle").click();
+  await expect.poll(() => page.locator("#v").evaluate((v) => v.shadowRoot!.querySelector("canvas")!.style.height), { timeout: 20_000 }).not.toBe("");
+  expect(await summaries()).toHaveLength(1);
+  expect(warnings).toEqual([]);
+});
+
+test("with no facts slotted, the view's own name the stored channels from the first it shows", async ({ page }) => {
+  const met = await holdBundle(page, 400);
+  // Each text the facts' slot shows, in turn, from the page's first frame.
+  await page.addInitScript(() => {
+    const w = window as unknown as { shown: string[] };
+    w.shown = [];
+    const tick = () => {
+      const text = document.getElementById("v")?.shadowRoot?.querySelector("slot[name=facts]")?.textContent ?? "";
+      if (text !== (w.shown.at(-1) ?? "")) w.shown.push(text);
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+  await page.goto(`${PAGE}?${new URLSearchParams({ src: BUNDLE, firstRead: "256" })}`);
+  const { summaries } = await define(page);
+  await expect.poll(summaries, { timeout: 20_000 }).toHaveLength(1);
+  expect(met()).toBeGreaterThan(0);
+  expect(await page.evaluate(() => (window as unknown as { shown: string[] }).shown)).toEqual([own(STORED_FACTS)]);
+});
+
+test("a bundle that fails to read settles its facts on every channel", async ({ page }) => {
+  const met = await holdBundle(page, 100, true);
+  await page.goto(`${PAGE}?${new URLSearchParams({ src: BUNDLE, facts: ALL_FACTS, firstRead: "256" })}`);
+  const { summaries, warnings } = await define(page);
+  await expect.poll(summaries, { timeout: 20_000 }).toEqual([{ title: "roles.bundle.tickwave", facts: own(ALL_FACTS), matches: true }]);
+  expect(met()).toBeGreaterThan(0);
+  expect(warnings).toEqual([]);
+});
+
+test("a recording with no sidecar named and none bundled has its summary as soon as its head is in, even off screen", async ({ page }) => {
+  await page.goto(`${PAGE}?${new URLSearchParams({ facts: FACTS })}`);
+  await define(page);
+  // A second view of the recording, off screen: it fetches nothing, and has the head the first read.
+  await page.evaluate(() => {
+    const spacer = Object.assign(document.createElement("div"), { style: "height: 4000px" });
+    const w = document.createElement("tickwave-view");
+    w.id = "w";
+    w.setAttribute("src", document.getElementById("v")!.getAttribute("src")!);
+    document.body.append(spacer, w);
+  });
+  const summary = (id: string) => page.evaluate((id) => (document.getElementById(id) as HTMLElement & { summary: unknown }).summary, id);
+  await expect.poll(() => summary("v"), { timeout: 20_000 }).not.toBeNull();
+  await expect.poll(() => summary("w")).toEqual({ title: "identify-swd.tickwave", facts: OWN_FACTS, matches: true });
+  expect(await page.locator("#w").evaluate((w) => w.getBoundingClientRect().top)).toBeGreaterThan(await page.evaluate(() => innerHeight));
+});
+
+test("a stored view read for a sidecar the view has since moved on from counts for nothing", async ({ page }) => {
+  // Two sidecars of identify-swd, each storing one channel; the first held until released.
+  const sidecar = (channel: string) => `${readFileSync("fixtures/identify-swd.annotations.toml", "utf8")}\n[view]\nchannels = ["${channel}"]\n`;
+  let release!: () => void;
+  const released = new Promise<void>((r) => (release = r));
+  let asked = false;
+  await page.route("**/fixtures/first.annotations.toml", async (route) => {
+    asked = true;
+    await released;
+    await route.fulfill({ contentType: "text/plain", body: sidecar("SWDIO") });
+  });
+  await page.route("**/fixtures/second.annotations.toml", (route) => route.fulfill({ contentType: "text/plain", body: sidecar("SWCLK") }));
+  await page.goto(`${PAGE}?${new URLSearchParams({ annotations: "fixtures/first.annotations.toml" })}`);
+  const { summaries } = await define(page);
+  await expect.poll(() => asked, { timeout: 20_000 }).toBe(true);
+  await page.locator("#v").evaluate((v) => v.setAttribute("annotations", "../../fixtures/second.annotations.toml"));
+  const second = { title: "identify-swd.tickwave", facts: "524 ms; 1 of 2 channels: SWCLK; 4.6 KiB", matches: true };
+  await expect.poll(summaries, { timeout: 20_000 }).toEqual([second]);
+  release();
+  // The first sidecar's read lands, and changes nothing.
+  await page.waitForTimeout(500);
+  expect(await summaries()).toEqual([second]);
+  expect(await page.evaluate(() => (document.getElementById("v") as HTMLElement & { summary: unknown }).summary)).toEqual(second);
 });
