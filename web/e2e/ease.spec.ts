@@ -383,3 +383,37 @@ test("an inset's rows read for where a zoom step goes, as the step is taken, and
   const landed = frames.find(([, s]) => near(s, span(first)))![0];
   expect(posted[0].at).toBeLessThan(landed);
 });
+
+test("a note stepped to during an inset's ease comes into the span the inset is going to, at that span's width", async ({ page }) => {
+  // identify-swd's DPIDR read: zoomed in twice about the middle, the request at the span's start is
+  // out of where the inset is going; stepping to it at once moves that span to it.
+  const inset = await insetReady(page, INSET.replace("annotation=attach", "annotation=dpidr-read"), /^Reading/);
+  await page.keyboard.press("ArrowUp");
+  await page.keyboard.press("ArrowUp");
+  const to = (await zoomed(inset))!;
+  const drawn = await shown(inset);
+  expect(span(drawn)).toBeGreaterThan(span(to) * 1.05);
+  await page.keyboard.press("Shift+ArrowRight");
+  const stepped = (await zoomed(inset))!;
+  const [start, end] = [377_094_557, 377_094_557 + 8001];
+  expect(stepped.start).toBeLessThanOrEqual(start);
+  expect(stepped.end).toBeGreaterThanOrEqual(end);
+  expect(span(stepped)).toBeCloseTo(Math.max(span(to), (end - start) * 1.25), 0);
+});
+
+test("an inset laid out again during an ease to its span's edge goes on easing", async ({ page }) => {
+  // A step about the window's left side goes to a span held at the window's start; the channels,
+  // written another way, lay the inset out again while it eases there.
+  const inset = await insetReady(page);
+  const b = (await inset.locator("canvas").boundingBox())!;
+  await page.mouse.move(b.x + b.width * 0.08, b.y + 40);
+  const recorded = await recordInset(inset, 600);
+  await page.keyboard.down("Control");
+  await page.mouse.wheel(0, -200);
+  await page.keyboard.up("Control");
+  const to = (await zoomed(inset))!;
+  await inset.evaluate((e) => e.setAttribute("channels", "SWCLK  SWDIO"));
+  const whole = (await recorded()).map(([, s]) => s);
+  expect(whole.filter((s) => !near(s, whole[0]) && !near(s, span(to))).length).toBeGreaterThanOrEqual(3);
+  expect(near(whole[whole.length - 1], span(to))).toBe(true);
+});

@@ -494,6 +494,9 @@ export class TickwaveInset extends TickwaveElement {
     if (!w) return null;
     const span = Math.max(this.#plot.minSpan, v.end - v.start);
     if (span >= w.end - w.start) return null;
+    // A span already inside comes back as it is, so laying the inset out again leaves an ease to
+    // it alone.
+    if (span === v.end - v.start && v.start >= w.start && v.end <= w.end) return v;
     const start = Math.min(Math.max(w.start, (v.start + v.end) / 2 - span / 2), w.end - span);
     return { start, end: start + span };
   }
