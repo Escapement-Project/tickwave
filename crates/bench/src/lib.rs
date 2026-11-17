@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use escapement_tickwave_format::decode::Footer;
 use escapement_tickwave_format::header::{
     AnalogCoding, Declaration, DeclaredChannel, DeclaredKind, Derived, Exact, IntCoding,
     SourceFormat, SourceHeader,
@@ -224,18 +225,54 @@ impl Synth {
     }
 
     /// The whole file, finished `seconds` in.
-    pub fn finish(mut self, seconds: u64) -> Vec<u8> {
-        let length = (seconds * CLOCK_HZ) as i64;
-        let finish = Finish {
-            bundle: Some(Bundle::Generated {
+    pub fn finish(self, seconds: u64) -> Vec<u8> {
+        self.finish_bundled(
+            seconds,
+            Some(Bundle::Generated {
                 stem: "bench".into(),
             }),
+        )
+    }
+
+    /// The whole file, finished `seconds` in, `bundle` in it.
+    pub fn finish_bundled(mut self, seconds: u64, bundle: Option<Bundle>) -> Vec<u8> {
+        let length = (seconds * CLOCK_HZ) as i64;
+        let finish = Finish {
+            bundle,
             ..Finish::default()
         };
         let finished = self.writer.finish(length, &[length; 6], finish).unwrap();
         self.file.extend(finished.tail);
         self.file
     }
+}
+
+/// A sidecar for verge's layout naming the recording `id`: two roles, probe and target, target
+/// dashed 2 and 1, painting I and DIO0 to DIO3 over four spans from 4.2 s to 5.9 s.
+fn painted(id: &str) -> String {
+    let mut toml = format!(
+        "format = \"tickwave-annotations/1\"\nrecording_id = \"{id}\"\n\n\
+         [[role]]\nname = \"probe\"\ncolour = \"#00c800\"\nweight = 1\n\n\
+         [[role]]\nname = \"target\"\ndash = [2, 1]\n\n"
+    );
+    let ms = CLOCK_HZ / 1000;
+    for (i, (from, to, role)) in [
+        (4200, 4600, "probe"),
+        (4800, 5200, "target"),
+        (5300, 5500, "probe"),
+        (5600, 5900, "target"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        toml.push_str(&format!(
+            "[[annotation]]\nid = \"p{i}\"\nstart = {}\nend = {}\n\
+             channels = [\"I\", \"DIO0\", \"DIO1\", \"DIO2\", \"DIO3\"]\npaint = \"{role}\"\n\n",
+            from * ms,
+            to * ms
+        ));
+    }
+    toml
 }
 
 /// The recordings the benches read.
@@ -255,6 +292,9 @@ pub enum Capture {
     /// clock. DIO0's finest level is 2^13, the converter's rule's for it (about 64 edges a
     /// bucket), where a live recorder would give it the recording's.
     Clock,
+    /// `Verge` with no markers and a sidecar bundled that paints I and the DIO lanes in two
+    /// roles, one dashed, over four spans from 4.2 s to 5.9 s.
+    Painted,
 }
 
 impl Capture {
@@ -265,6 +305,7 @@ impl Capture {
             Self::Markers => "markers",
             Self::CutMarkers => "cut-markers",
             Self::Clock => "clock",
+            Self::Painted => "painted",
         }
     }
 
@@ -295,6 +336,23 @@ impl Capture {
                 }
                 synth.second(0, false, 0);
                 synth.finish(1)
+            }
+            Self::Painted => {
+                let plain = || {
+                    let mut synth = Synth::new(every(CLOCK_HZ / RATE), RATE, 1);
+                    for s in 0..10 {
+                        synth.second(s, true, 0);
+                    }
+                    synth
+                };
+                // The content id is the data's alone: a first file gives the one the sidecar names.
+                let first = plain().finish_bundled(10, None);
+                let id = Footer::parse_file(&first).unwrap().header.content_id;
+                let files = BTreeMap::from([(
+                    "painted.annotations.toml".to_owned(),
+                    painted(&id.to_string()),
+                )]);
+                plain().finish_bundled(10, Some(Bundle::Files(files)))
             }
         }
     }
