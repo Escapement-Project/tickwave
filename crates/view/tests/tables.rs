@@ -11,6 +11,7 @@ use escapement_tickwave_view::columns::{
 };
 use escapement_tickwave_view::probe::{self, AnalogAt, EdgeAt, Known, Pulse};
 use escapement_tickwave_view::readouts::{self, Measure, PeriodStats};
+use escapement_tickwave_view::roles::{self, LookColour};
 use escapement_tickwave_view::runs::Runs;
 use escapement_tickwave_view::scale::{self, ScaleLimits, ValueRange};
 use escapement_tickwave_view::{axis, shade, time};
@@ -694,5 +695,78 @@ fn probe() {
             analog_at(probe::analog_from_overview(ov, f(&a["t0"]), f(&a["t1"])))
         }),
         other => panic!("probe has no {other}"),
+    });
+}
+
+fn role_in(v: &Value) -> escapement_tickwave_format::annotations::Role {
+    escapement_tickwave_format::annotations::Role {
+        name: v["name"].as_str().unwrap().into(),
+        label: v["label"].as_str().unwrap().into(),
+        colour: opt(&v["colour"], |c| {
+            escapement_tickwave_format::annotations::Colour {
+                day: c["day"].as_str().unwrap().into(),
+                night: c["night"].as_str().unwrap().into(),
+            }
+        }),
+        weight: f(&v["weight"]),
+        dash: opt(&v["dash"], floats),
+    }
+}
+
+#[test]
+fn roles() {
+    run("roles", |name, a, _| match name {
+        "look" => {
+            let roles: Vec<_> = a["roles"].as_array().unwrap().iter().map(role_in).collect();
+            let h = &a["host"];
+            let host = roles::Host {
+                colour: h["colour"].as_str().map(str::to_owned),
+                weight: h.get("weight").map(f),
+                dash: h.get("dash").map(|d| (d != "none").then(|| floats(d))),
+            };
+            match roles::look(&roles, a["name"].as_str().unwrap(), host, bit(&a["night"])) {
+                None => Value::Null,
+                Some(l) => json!({
+                    "label": l.label,
+                    "colour": match l.colour {
+                        LookColour::Host(c) | LookColour::Stored(c) => c,
+                        LookColour::Trace => "trace".into(),
+                        LookColour::Ink => "ink".into(),
+                    },
+                    "weight": num(l.weight),
+                    "dash": l.dash.as_deref().map_or(Value::Null, floats_out),
+                }),
+            }
+        }
+        "stretches" => {
+            let names: Vec<&str> = a["roles"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|n| n.as_str().unwrap())
+                .collect();
+            let roles: Vec<_> = names
+                .iter()
+                .map(|&n| {
+                    role_in(
+                        &json!({"name": n, "label": n, "colour": null, "weight": 0, "dash": null}),
+                    )
+                })
+                .collect();
+            let spans: Vec<(i64, i64, &str)> = (a["spans"].as_array().unwrap().iter())
+                .map(|s| (int(&s[0]), int(&s[1]), s[2].as_str().unwrap()))
+                .collect();
+            Value::Array(
+                roles::stretches(&spans, &roles, int(&a["px0"]), int(&a["px1"]))
+                    .into_iter()
+                    .map(|s| json!([s.px0, s.px1, s.role.map(|r| names[r])]))
+                    .collect(),
+            )
+        }
+        "length_at" => {
+            let paths: Vec<Vec<f64>> = a["paths"].as_array().unwrap().iter().map(floats).collect();
+            num(roles::length_at(&paths, f(&a["x"])))
+        }
+        other => panic!("no function {other}"),
     });
 }

@@ -15,6 +15,7 @@ mod query;
 mod read;
 pub mod readouts;
 mod recording;
+pub mod roles;
 pub mod runs;
 pub mod scale;
 pub mod shade;
@@ -25,7 +26,7 @@ pub mod time;
 pub use bytes::Bytes;
 pub use cache::Cache;
 pub use escapement_tickwave_format as format;
-pub use markers::{Marker, MarkerCursor, Page};
+pub use markers::{Marker, MarkerCursor, Page, Paint};
 pub use query::{
     AnalogColumns, Answer, Drawn, MarkerAnswer, MarkerQuery, Point, Query, StripAnswer,
 };

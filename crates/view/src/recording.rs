@@ -476,6 +476,9 @@ pub struct Recording {
     /// Whether a finished file's footer places an annotation bundle; None once its markers come
     /// from elsewhere, a sidecar or a writer.
     pub(crate) bundled: Option<bool>,
+    /// The roles and the view its sidecar declares: a host's sidecar's, set with it, else a
+    /// finished file's bundle's, read when first asked for.
+    pub(crate) declared: OnceLock<crate::markers::Declared>,
     pub(crate) sources: Vec<SourceHeader>,
     /// Each derived channel's operands and rule; None for one this version can't compute.
     pub(crate) products: Vec<Option<(usize, usize, Product)>>,
@@ -1025,6 +1028,7 @@ impl Recording {
             markers: OnceLock::new(),
             bundle: OnceLock::new(),
             bundled: Some(footer.bundle.is_some()),
+            declared: OnceLock::new(),
             extent: OnceLock::new(),
             sketch_extent: OnceLock::new(),
             store: Store::Finished(Box::new(Finished {
@@ -1041,8 +1045,15 @@ impl Recording {
     /// Markers from a sidecar the host passes, in place of the file's bundled ones: `hand` the
     /// hand-written file's TOML, and the files it includes. Every problem it finds, joined.
     pub fn with_sidecar(mut self, hand: &str, included: &[Included<'_>]) -> Result<Self, Error> {
-        let resolved = match &self.store {
-            Store::Finished(f) => annotations::resolve(hand, included, &f.footer().header, None),
+        let (resolved, declared) = match &self.store {
+            Store::Finished(f) => {
+                let header = &f.footer().header;
+                let declared = crate::markers::Declared {
+                    roles: annotations::roles(hand, included).0,
+                    view: annotations::view(hand, header).map_err(|p| p.join("; ")),
+                };
+                (annotations::resolve(hand, included, header, None), declared)
+            }
             #[cfg(feature = "live")]
             Store::Live(_) => {
                 return Err(Error::Annotations(
@@ -1052,6 +1063,7 @@ impl Recording {
         };
         let mut list =
             markers_of(resolved.map_err(|problems| Error::Annotations(problems.join("; ")))?);
+        self.declared = OnceLock::from(declared);
         let mut left_out = Vec::new();
         self.keep_available(&mut list, &mut left_out);
         let mut markers = Markers::of(list);
@@ -1133,6 +1145,7 @@ impl Recording {
             markers: OnceLock::from(Ok(Markers::default())),
             bundle: OnceLock::new(),
             bundled: None,
+            declared: OnceLock::from(crate::markers::Declared::default()),
             extent: OnceLock::new(),
             sketch_extent: OnceLock::new(),
             store: Store::Live(Box::new(Live {

@@ -9,7 +9,7 @@ use crate::cache::Reading;
 use crate::columns::{
     self, AnalogOverview, DigitalColumns, DigitalOverview, Edges, Grid, Samples, State,
 };
-use crate::markers::{Marker, MarkerCursor, Page};
+use crate::markers::{Marker, MarkerCursor, Page, Paint};
 use crate::read::index_in;
 use crate::recording::{Error, Place, Recording, Revision};
 use crate::runs::lost_spans_in;
@@ -71,6 +71,9 @@ pub struct MarkerQuery {
     pub list: Option<(Option<MarkerCursor>, usize)>,
     /// The marker after this one.
     pub successor_of: Option<MarkerCursor>,
+    /// Every annotation that paints over the answer's `around` with a declared role, however
+    /// many (`Recording::paints`).
+    pub paints: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -80,6 +83,8 @@ pub struct MarkerAnswer {
     pub list: Option<Page>,
     /// The cursor asked about, and the marker after it.
     pub successor: Option<(MarkerCursor, Option<Marker>)>,
+    /// What `MarkerQuery::paints` asks for: the paints over `around`, in sidecar order.
+    pub paints: Vec<Paint>,
 }
 
 /// Each column's range of an analog channel, and how it draws.
@@ -449,6 +454,11 @@ impl Recording {
         if m.list.is_some() || m.successor_of.is_some() {
             self.read_markers()?;
         }
+        let paints = if m.paints {
+            self.paints(around.clone())?
+        } else {
+            Vec::new()
+        };
         let statistics = q
             .statistics
             .iter()
@@ -461,6 +471,7 @@ impl Recording {
                 .list
                 .map(|(after, limit)| self.markers(i64::MIN..i64::MAX, after, limit)),
             successor: q.markers.successor_of.map(|c| (c, self.marker_after(c))),
+            paints,
         };
         Ok(Answer {
             window,

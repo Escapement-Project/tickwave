@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 
-use escapement_tickwave_format::annotations::{self, Annotation, Included};
+use escapement_tickwave_format::annotations::{self, Annotation, Included, Role, View};
 use escapement_tickwave_format::decode::{DecodeError, Footer};
 use escapement_tickwave_format::header::Header;
 use escapement_tickwave_format::index::Table;
@@ -33,6 +33,35 @@ pub struct MarkerCursor {
 pub struct Marker {
     pub cursor: MarkerCursor,
     pub annotation: Annotation,
+}
+
+/// An annotation that paints its channels over its span in a role's look (ANNOTATIONS.md,
+/// "Roles"). Where several paint a channel at a tick, the latest in sidecar order draws it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Paint {
+    /// Its place in sidecar order, as a marker's cursor has it.
+    pub arrival: u64,
+    pub role: String,
+    pub span: Range<i64>,
+    /// Empty: every channel.
+    pub channels: Vec<String>,
+}
+
+/// The roles and the stored view a sidecar declares, as a host's sidecar or a bundle gives them.
+#[derive(Clone, Debug)]
+pub(crate) struct Declared {
+    pub roles: Vec<Role>,
+    /// What's wrong with the `[view]` table, where it doesn't hold.
+    pub view: Result<Option<View>, String>,
+}
+
+impl Default for Declared {
+    fn default() -> Self {
+        Self {
+            roles: Vec::new(),
+            view: Ok(None),
+        }
+    }
 }
 
 /// Markers in order from a cursor, at most a page of them.
@@ -344,6 +373,93 @@ impl Recording {
         let mut markers = Markers::of(list);
         markers.left_out = left_out;
         Ok(markers)
+    }
+
+    /// The roles and view the sidecar declares: a host's sidecar's, else the bundle's, read the
+    /// first time; none for a live recording or one without a bundle.
+    fn declared(&self) -> Result<&Declared, Error> {
+        if let Some(d) = self.declared.get() {
+            return Ok(d);
+        }
+        let file = self.file_annotations()?;
+        let declared = match (self.finished(), bundled(&file.files)) {
+            (Some(f), Some((hand, included))) => Declared {
+                roles: annotations::roles(hand, &included).0,
+                view: annotations::view(hand, &f.footer().header).map_err(|p| p.join("; ")),
+            },
+            _ => Declared::default(),
+        };
+        Ok(self.declared.get_or_init(|| declared))
+    }
+
+    /// The paint roles the sidecar declares, in order (ANNOTATIONS.md, "Roles"): the hand-written
+    /// file's, then each generator file's first line's, in include order. No annotation part is
+    /// read, so a host knows them, and that the recording has roles, as it opens; a role's place
+    /// in this order sets the look it falls back on.
+    pub fn roles(&self) -> Result<Vec<Role>, Error> {
+        Ok(self.declared()?.roles.clone())
+    }
+
+    /// The view the sidecar stores (ANNOTATIONS.md, "The stored view"): the channels shown and
+    /// the span shown where the host gives neither, and the trace's colour; None where it stores
+    /// none. Err where its `[view]` doesn't hold, or the bundle doesn't read.
+    pub fn stored_view(&self) -> Result<Option<View>, Error> {
+        self.declared()?.view.clone().map_err(Error::Annotations)
+    }
+
+    /// Every annotation that paints over `interval` with a role the sidecar declares, in sidecar
+    /// order: however many, so a view draws each span its roles cover. A paint naming no declared
+    /// role is left out, so its channels draw as if it painted nothing. A finished file's are read
+    /// from the parts the interval meets, as `try_markers` reads them.
+    pub fn paints(&self, interval: Range<i64>) -> Result<Vec<Paint>, Error> {
+        let declared = &self.declared()?.roles;
+        let meets = |a: &Annotation| {
+            a.paint
+                .as_ref()
+                .is_some_and(|p| declared.iter().any(|r| &r.name == p))
+                && a.end
+                    .is_some_and(|end| end > interval.start && a.start < interval.end)
+        };
+        let paint = |arrival: u64, a: &Annotation| Paint {
+            arrival,
+            role: a.paint.clone().unwrap_or_default(),
+            span: a.start..a.end.unwrap_or(a.start),
+            channels: a.channels.clone(),
+        };
+        let mut out: Vec<Paint> = if let Some(m) = self.markers.get() {
+            let m = m.as_ref().map_err(|e| Error::Annotations(e.clone()))?;
+            m.list
+                .iter()
+                .filter(|m| meets(&m.annotation))
+                .map(|m| paint(m.cursor.arrival, &m.annotation))
+                .collect()
+        } else {
+            let file = self.file_annotations()?;
+            let Some(f) = self.finished() else {
+                return Ok(Vec::new());
+            };
+            if interval.start >= interval.end {
+                return Ok(Vec::new());
+            }
+            let footer = f.footer();
+            let rows = footer
+                .parts_meeting_at(interval.clone(), |offset, len| self.parts_page(offset, len))?;
+            let parts = self.read_parts(&footer, &rows)?;
+            let read = kept_lines(file, &parts)?;
+            file.plain
+                .iter()
+                .map(|m| (m.cursor, &m.annotation))
+                .chain(
+                    read.markers
+                        .into_iter()
+                        .filter(|&(_, a)| self.unavailable_in(a).is_none()),
+                )
+                .filter(|&(_, a)| meets(a))
+                .map(|(cursor, a)| paint(cursor.arrival, a))
+                .collect()
+        };
+        out.sort_by_key(|p| p.arrival);
+        Ok(out)
     }
 
     /// The span a finished file's own markers cover, from its hand-written annotations and its
