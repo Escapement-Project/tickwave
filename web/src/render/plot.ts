@@ -35,14 +35,79 @@ import {
 } from "./columns.ts";
 import { layoutNotes, type NoteIn, type NoteOut } from "./notes.ts";
 import { looks } from "./shade.ts";
-import { digitalTrace, type Fills } from "./trace.ts";
+import { digitalTrace, type Fills, type Pen } from "./trace.ts";
 import { grain, Track, type Layer, type Tile } from "./track.ts";
 
-/** A piece of a row's trace: its line, stroked, its fill, and a digital row's fills (trace.ts). */
+/** A piece of a row's trace: its line, stroked a path at a time, its fill, and a digital row's
+ * fills (trace.ts). */
 interface Shapes {
-  readonly line: Path2D;
+  readonly lines: readonly Line[];
   readonly fill: Path2D;
   readonly fills?: Strips;
+}
+
+/** A path of a row's line, and the device-pixel columns its stroke can paint, `x0` to `x1`. */
+interface Line {
+  readonly path: Path2D;
+  x0: number;
+  x1: number;
+}
+
+/**
+ * A digital row's line as a pen, in a path for each `width` columns from `left`, so a stretch of the
+ * row strokes only the paths it overlaps. A trace's lines are level or upright (trace.ts): a level
+ * one goes on in the next path from each boundary it crosses, butt ends meeting at a whole pixel.
+ * One that starts on a boundary carries its path past it, so the join before it stays in one path.
+ * A move past the path's columns starts another.
+ */
+class Lines implements Pen {
+  readonly lines: Line[] = [];
+  #line: Line | null = null;
+  /** Where the current path's columns end, and the pen's place. */
+  #end = 0;
+  #x = 0;
+  #y = 0;
+  readonly left: number;
+  readonly width: number;
+  /** How far past its points a path's stroke paints. */
+  readonly reach: number;
+
+  constructor(left: number, width: number, reach: number) {
+    [this.left, this.width, this.reach] = [left, width, reach];
+  }
+
+  #start(x: number, y: number): void {
+    this.#line = { path: new Path2D(), x0: x - this.reach, x1: x + this.reach };
+    this.lines.push(this.#line);
+    this.#line.path.moveTo(x, y);
+    this.#end = this.left + (Math.floor((x - this.left) / this.width) + 1) * this.width;
+    [this.#x, this.#y] = [x, y];
+  }
+
+  moveTo(x: number, y: number): void {
+    if (!this.#line || x >= this.#end || x < this.#end - this.width) return this.#start(x, y);
+    this.#line.path.moveTo(x, y);
+    [this.#x, this.#y] = [x, y];
+  }
+
+  lineTo(x: number, y: number): void {
+    if (y === this.#y) {
+      while (this.#end < x) {
+        if (this.#end === this.#x) {
+          this.#end += this.width;
+          continue;
+        }
+        this.#line!.path.lineTo(this.#end, y);
+        this.#line!.x1 = Math.max(this.#line!.x1, this.#end + this.reach);
+        this.#start(this.#end, y);
+      }
+    }
+    const l = this.#line!;
+    l.path.lineTo(x, y);
+    l.x0 = Math.min(l.x0, x - this.reach);
+    l.x1 = Math.max(l.x1, x + this.reach);
+    [this.#x, this.#y] = [x, y];
+  }
 }
 
 /** A digital row's fills: each layer's alpha, a column a device pixel from `left`, and the
@@ -109,12 +174,20 @@ const SELECTION_BAR = 4;
 const RIGHT_PAD = 10;
 /** The opacity of an analog band a coarse layer cannot place: the trace's colour, faded. */
 const UNRESOLVED_ALPHA = 0.35;
+/** The segments in each path of a line through samples: Firefox strokes a long path of steep
+ * segments far slower than the same segments a few hundred at a time. */
+const LINE_SEGMENTS = 256;
+/** The device-pixel columns of each path of a digital row's line (`Lines`). */
+const LINE_COLUMNS = 256;
 /** What the row of a channel this version can't read says. */
 export const UNAVAILABLE = "unavailable to this version";
 /** Paint roles that draw heavier than a trace, by `HEAVIER` CSS pixels, so their lines differ from
  * the others' by more than colour: the target's drive. */
 export const HEAVY_ROLES: ReadonlySet<string> = new Set(["target"]);
 const HEAVIER = 1;
+/** The fills strips a plot keeps: more than the pieces and colours a row's stretches take turns
+ * at. */
+const STRIPS = 8;
 /** A zoom step's ease, in milliseconds, in a view and an inset. */
 export const EASE_MS = 150;
 /** How long a read may run before the element says it is still loading. */
@@ -203,8 +276,9 @@ export class Plot {
    * head band with the group's name. Empty: no heads. */
   groups = new Map<number, string>();
   #palette: Palette | null = null;
-  /** Where a row's fills are put before they are drawn (`#drawFills`). */
-  #strip: CanvasRenderingContext2D | null = null;
+  /** Where a row's fills are put before they are drawn (`#drawFills`): a few strips, each holding
+   * one piece's fills in one colour, the one used last first. */
+  #strips: { ctx: CanvasRenderingContext2D; holds: Fills | null; colour: string }[] = [];
   layout: Layout | null = null;
   #view = { start: 0, end: 1 };
   /** A zoom step under way: the window drawn goes from `from` to `to` over `ms` from `t0`. */
@@ -743,6 +817,12 @@ export class Plot {
     // they draw faded. A digital row's shades come from its model alone (shade.ts).
     type Piece = { px0: number; px1: number; shapes: Shapes; coarse: boolean };
     const shown = { lo: Infinity, hi: -Infinity };
+    // Off the plot, the trace leaves only the losses at either end to draw.
+    const traced = x1 > x0;
+    const stretches = traced ? this.#stretches(c.name, Math.round(x0 * dpr), Math.round(x1 * dpr)) : [];
+    // A digital row in several stretches takes its line in paths of `LINE_COLUMNS`, each stretch
+    // stroking those it meets; in one, a path.
+    const columns = stretches.length > 1 ? LINE_COLUMNS : Infinity;
     const byWidth = new Map<number, Piece[]>();
     const piecesAt = (lw: number): Piece[] => {
       let pieces = byWidth.get(lw);
@@ -760,16 +840,14 @@ export class Plot {
           else if (tile.kind === "edges") {
             // Past a gap in the tile the level is the gap's, not the one its edges carry to there.
             const at = rebased(cc, tile.start, tile.data, from);
-            shapes = this.#digitalShapes(r, grid, { ...tile, start: at.start, data: at.edges }, from, to, lw);
-          } else shapes = this.#digitalShapes(r, grid, tile, from, to, lw);
+            shapes = this.#digitalShapes(r, grid, { ...tile, start: at.start, data: at.edges }, from, to, lw, columns);
+          } else shapes = this.#digitalShapes(r, grid, tile, from, to, lw, columns);
           return [{ px0, px1, shapes, coarse: grain(tile) > grid.per }];
         });
       });
       byWidth.set(lw, pieces);
       return pieces;
     };
-    // Off the plot, the trace leaves only the losses at either end to draw.
-    const traced = x1 > x0;
     if (traced && piecesAt(width(p.lineWeight)).length === 0) return;
     if (shown.lo <= shown.hi) this.#shown.set(r.track.index, { lo: shown.lo, hi: shown.hi });
 
@@ -777,7 +855,7 @@ export class Plot {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.lineJoin = "miter";
     // Every pixel is painted once, so a faded fill never lands on another colour's.
-    for (const s of traced ? this.#stretches(c.name, Math.round(x0 * dpr), Math.round(x1 * dpr)) : []) {
+    for (const s of stretches) {
       const lw = width(s.weight);
       ctx.lineWidth = lw;
       for (const { px0, px1, shapes, coarse } of piecesAt(lw)) {
@@ -789,7 +867,7 @@ export class Plot {
         ctx.rect(a, r.top * dpr, b - a, r.height * dpr);
         ctx.clip();
         ctx.strokeStyle = s.colour;
-        ctx.stroke(shapes.line);
+        for (const line of shapes.lines) if (line.x1 > a && line.x0 < b) ctx.stroke(line.path);
         ctx.fillStyle = s.colour;
         if (shapes.fills) this.#drawFills(shapes.fills, s.colour);
         ctx.globalAlpha = coarse ? UNRESOLVED_ALPHA : 1;
@@ -876,18 +954,18 @@ export class Plot {
     return out;
   }
 
-  #digitalShapes(r: Row, grid: Grid, tile: Tile, from: number, to: number, lw: number): Shapes {
+  #digitalShapes(r: Row, grid: Grid, tile: Tile, from: number, to: number, lw: number, columns: number): Shapes {
     const l = this.layout!;
     const dpr = this.#dpr;
     let cols: DigitalColumns;
     if (tile.kind === "edges") cols = digitalFromEdges(grid, tile.data, from, to);
     else if (tile.kind === "digital-overview") cols = digitalFromLevels(grid, tile.data, from, to);
-    else return { line: new Path2D(), fill: new Path2D() };
+    else return { lines: [], fill: new Path2D() };
     const snap = (y: number) => (lw % 2 === 1 ? Math.floor(y) + 0.5 : Math.round(y));
     const yH = snap((r.top + 6) * dpr);
     const yL = snap((r.top + r.height - 6) * dpr);
     const left = Math.round(l.plotLeft * dpr);
-    const line = new Path2D();
+    const line = new Lines(left, columns, lw);
     const look = looks(cols, 0, grid.count, lw, grid.per, this.info!.timebase);
     const fills = digitalTrace(cols, look, grid.count, { left, yH, yL, lw }, line);
     const h = lw / 2;
@@ -896,35 +974,46 @@ export class Plot {
       [yH - h, lw],
       [yL - h, lw],
     ] as const;
-    return { line, fill: new Path2D(), fills: fills ? { fills, left, layers } : undefined };
+    return { lines: line.lines, fill: new Path2D(), fills: fills ? { fills, left, layers } : undefined };
   }
 
   /**
    * A row's fills in `colour`: each layer a strip of one-pixel columns at their alphas, drawn
    * stretched to the layer's depth. One image a piece, where a path of a rectangle a column cost a
-   * browser's rasteriser by the rectangle.
+   * browser's rasteriser by the rectangle; and one a piece and colour, so the stretches that
+   * annotations split a row into share it. A piece and colour not on a strip takes the one used
+   * least lately.
    */
   #drawFills({ fills, left, layers }: Strips, colour: string): void {
     const ctx = this.#ctx;
     const n = fills.band.length;
-    const [r, g, b, a] = rgba(colour);
-    const image = new ImageData(n, layers.length);
-    const d = image.data;
-    [fills.band, fills.high, fills.low].forEach((alpha, row) => {
-      for (let c = 0, o = 4 * row * n; c < n; c++, o += 4) {
-        if (alpha[c] === 0) continue;
-        [d[o], d[o + 1], d[o + 2], d[o + 3]] = [r, g, b, a * alpha[c]];
-      }
-    });
-    if (!this.#strip || this.#strip.canvas.width !== n) {
+    const held = this.#strips.findIndex((s) => s.holds === fills && s.colour === colour);
+    let strip = held >= 0 ? this.#strips.splice(held, 1)[0] : this.#strips.length < STRIPS ? null : this.#strips.pop()!;
+    if (!strip || strip.ctx.canvas.width !== n) {
       const canvas = Object.assign(document.createElement("canvas"), { width: n, height: layers.length });
-      this.#strip = canvas.getContext("2d")!;
+      strip = { ctx: canvas.getContext("2d")!, holds: null, colour };
     }
-    this.#strip.putImageData(image, 0, 0);
+    this.#strips.unshift(strip);
+    if (strip.holds !== fills || strip.colour !== colour) {
+      const [r, g, b, a] = rgba(colour);
+      const image = new ImageData(n, layers.length);
+      const d = image.data;
+      [fills.band, fills.high, fills.low].forEach((alpha, row) => {
+        for (let c = 0, o = 4 * row * n; c < n; c++, o += 4) {
+          if (alpha[c] === 0) continue;
+          d[o] = r;
+          d[o + 1] = g;
+          d[o + 2] = b;
+          d[o + 3] = a * alpha[c];
+        }
+      });
+      strip.ctx.putImageData(image, 0, 0);
+      [strip.holds, strip.colour] = [fills, colour];
+    }
     ctx.save();
     ctx.imageSmoothingEnabled = false;
     layers.forEach(([y, depth], row) => {
-      if (depth > 0) ctx.drawImage(this.#strip!.canvas, 0, row, n, 1, left, y, n, depth);
+      if (depth > 0) ctx.drawImage(strip.ctx.canvas, 0, row, n, 1, left, y, n, depth);
     });
     ctx.restore();
   }
@@ -946,7 +1035,7 @@ export class Plot {
     const bottom = (r.top + r.height - 6) * dpr;
     const y = (v: number) => bottom - ((v - range.lo) / (range.hi - range.lo)) * (bottom - top);
     const left = l.plotLeft * dpr;
-    const line = new Path2D();
+    const lines: Line[] = [];
     const fill = new Path2D();
     const period = axisPeriod(c);
     if (tile.kind === "samples" && grid.per < period) {
@@ -959,6 +1048,19 @@ export class Plot {
       // of a miter join at the default limit, and more than a dot's radius.
       const [k0, k1] = lineSamples(grid, s, c, from, to, 10 * lw * grid.per);
       const tickOf = sampleTicks(c);
+      // A path ends halfway along a segment and the next starts there, so each join is in one path.
+      // The pixels the two butt ends share come out a shade lighter. A miter join at the default
+      // limit reaches five line widths from its point.
+      const reach = 5 * lw;
+      const path = (): Line => ({ path: new Path2D(), x0: Infinity, x1: -Infinity });
+      const point = (l: Line, x: number) => {
+        l.x0 = Math.min(l.x0, x - reach);
+        l.x1 = Math.max(l.x1, x + reach);
+      };
+      let line = path();
+      let segments = 0;
+      let lx = 0;
+      let ly = 0;
       for (let k = k0; k < k1; k++) {
         if (Number.isNaN(s.values[k])) continue;
         const t = tickOf(s.first + k);
@@ -968,29 +1070,76 @@ export class Plot {
           shown.hi = Math.max(shown.hi, s.values[k]);
         }
         const yy = y(s.values[k]);
-        if (started) line.lineTo(x, yy);
-        else line.moveTo(x, yy);
+        if (!started) {
+          lines.push(line);
+          line.path.moveTo(x, yy);
+        } else if (segments === LINE_SEGMENTS) {
+          const [mx, my] = [(lx + x) / 2, (ly + yy) / 2];
+          line.path.lineTo(mx, my);
+          point(line, mx);
+          line = path();
+          lines.push(line);
+          line.path.moveTo(mx, my);
+          point(line, mx);
+          line.path.lineTo(x, yy);
+          segments = 1;
+        } else {
+          line.path.lineTo(x, yy);
+          segments++;
+        }
+        point(line, x);
         started = true;
+        lx = x;
+        ly = yy;
         if (dots) {
           fill.moveTo(x + lw, yy);
           fill.arc(x, yy, lw, 0, 2 * Math.PI);
         }
       }
-      return { line, fill };
+      return { lines, fill };
     }
     let cols: AnalogColumns;
     if (tile.kind === "samples") cols = analogFromSamples(grid, tile.data, c, from, to);
     else if (tile.kind === "analog-overview") cols = analogFromOverview(grid, tile.data, from, to);
-    else return { line, fill };
-    for (let k = 0; k < grid.count; k++) {
-      if (cols.min[k] > cols.max[k]) continue;
-      shown.lo = Math.min(shown.lo, cols.min[k]);
-      shown.hi = Math.max(shown.hi, cols.max[k]);
-      const y1 = y(cols.max[k]);
-      const y2 = y(cols.min[k]);
-      fill.rect(Math.round(left) + k, y1 - lw / 2, 1, y2 - y1 + lw);
+    else return { lines, fill };
+    // Each run of columns with a band is one outline, along the bands' tops and back along their
+    // bottoms, with a corner only where a band's end moves: the pixels of a rectangle a column,
+    // which Firefox fills far slower.
+    const x0 = Math.round(left);
+    for (let k = 0; k < grid.count; ) {
+      if (cols.min[k] > cols.max[k]) {
+        k++;
+        continue;
+      }
+      let top = y(cols.max[k]) - lw / 2;
+      fill.moveTo(x0 + k, top);
+      let j = k;
+      for (; j < grid.count && cols.min[j] <= cols.max[j]; j++) {
+        shown.lo = Math.min(shown.lo, cols.min[j]);
+        shown.hi = Math.max(shown.hi, cols.max[j]);
+        const t = y(cols.max[j]) - lw / 2;
+        if (t !== top) {
+          fill.lineTo(x0 + j, top);
+          fill.lineTo(x0 + j, t);
+          top = t;
+        }
+      }
+      let bottom = y(cols.min[j - 1]) + lw / 2;
+      fill.lineTo(x0 + j, top);
+      fill.lineTo(x0 + j, bottom);
+      for (let m = j - 2; m >= k; m--) {
+        const b = y(cols.min[m]) + lw / 2;
+        if (b !== bottom) {
+          fill.lineTo(x0 + m + 1, bottom);
+          fill.lineTo(x0 + m + 1, b);
+          bottom = b;
+        }
+      }
+      fill.lineTo(x0 + k, bottom);
+      fill.closePath();
+      k = j;
     }
-    return { line, fill };
+    return { lines, fill };
   }
 
   // The pulse under the pointer ----------------------------------------------------------------

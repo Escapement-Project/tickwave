@@ -1,6 +1,7 @@
 // A crowded digital row's fills on the canvas: fixtures/identify-jtag.tickwave whole, where TCK's
 // edges crowd closer than a pixel and its row shades. Each layer is drawn a column at a time from
-// an image (plot.ts `#drawFills`), so each column's layers are read here row by row of pixels.
+// an image (plot.ts `#drawFills`), so each column's layers are read here row by row of pixels. Then
+// identify-swd with its sidecar, whose notes split the crowded rows into stretches.
 
 import { test, expect } from "@playwright/test";
 
@@ -67,4 +68,39 @@ test("a crowded row's band and rails each draw at one opacity down the column, t
   }
   // Not vacuous: some columns' levels take unlike shares.
   expect(unlike).toBeGreaterThan(10);
+});
+
+test("a crowded row its notes split into stretches puts each piece's fills once a draw, however many stretches take turns at them", async ({ page }) => {
+  // 40 ms of identify-swd: SWCLK and SWDIO crowd, and the sidecar paints the probe's and the
+  // target's turns, the target's heavier, so each row's stretches take turns at a line width's
+  // fills and another's.
+  await page.goto(`/e2e/pages/view.html?open&src=fixtures/identify-swd.tickwave&annotations=fixtures/identify-swd.annotations.toml&window=${encodeURIComponent("357ms 397ms")}`);
+  const view = page.locator("#v");
+  await view.evaluate((v) => (v as unknown as { settled(): Promise<void> }).settled());
+  // One draw's puts into a strip and draws from one, a pointer onto a row drawing it.
+  await page.evaluate(() => {
+    const n = { puts: 0, images: 0, draws: 0 };
+    const P = CanvasRenderingContext2D.prototype as unknown as Record<string, (...a: unknown[]) => unknown>;
+    for (const [name, key] of [
+      ["putImageData", "puts"],
+      ["drawImage", "images"],
+      ["clearRect", "draws"],
+    ] as const) {
+      const f = P[name];
+      P[name] = function (this: unknown, ...a: unknown[]) {
+        n[key]++;
+        return f.apply(this, a);
+      };
+    }
+    (window as unknown as { e2eCounts: typeof n }).e2eCounts = n;
+  });
+  const box = (await view.locator(".plot").boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + 30);
+  await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+  const n = await page.evaluate(() => (window as unknown as { e2eCounts: { puts: number; images: number; draws: number } }).e2eCounts);
+  expect(n.draws).toBe(1);
+  // Not vacuous: a stretch draws its fills' three layers, and dozens of them do.
+  expect(n.images / 3).toBeGreaterThan(50);
+  // Two rows, each a piece at two line widths: four sets of fills, put once each.
+  expect(n.puts).toBeLessThanOrEqual(4);
 });
