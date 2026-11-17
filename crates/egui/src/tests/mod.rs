@@ -1,6 +1,7 @@
 //! The graph's behaviour, held through egui_kittest: recordings laid out as verge's energy
 //! captures are, a host that keeps a `ViewState`, and readers of what a frame painted.
 
+mod ease;
 mod graph;
 mod lanes;
 mod live;
@@ -433,6 +434,8 @@ pub struct Host {
     pub strip_changed: bool,
     /// The host's now, given to the graph and the strip.
     pub now: Option<i64>,
+    /// Whether a zoom step eases: off but in the tests of the ease.
+    pub motion: bool,
 }
 
 pub fn harness(state: ViewState) -> Harness<'static, Host> {
@@ -456,6 +459,7 @@ pub fn harness_at(state: ViewState, pixels_per_point: f32) -> Harness<'static, H
         strip_id: None,
         strip_changed: false,
         now: None,
+        motion: false,
     };
     Harness::builder()
         .with_size(egui::vec2(1080.0, 700.0))
@@ -476,6 +480,7 @@ pub fn harness_at(state: ViewState, pixels_per_point: f32) -> Harness<'static, H
                     .include_zero(host.include_zero)
                     .extras(host.extras)
                     .now(host.now)
+                    .motion(host.motion)
                     .id_salt(SALT);
                 if host.strip {
                     graph = graph.height(ui.available_height() - STRIP - 8.0);

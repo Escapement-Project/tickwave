@@ -29,6 +29,8 @@ pub(crate) const AXIS_HEIGHT: f32 = 24.0;
 const LABEL_ROWS: usize = 3;
 pub(crate) const LABEL_TOP: f32 = 4.0;
 const MIN_TRACE: f32 = 40.0;
+/// A zoom step's ease, in seconds.
+const EASE: f64 = 0.15;
 
 /// What a host adds to the graph's query for its own panel.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -47,6 +49,10 @@ pub struct Extras {
 /// scroll past a 12-point detent takes Y off the fit and moves it, a drag on the value axis
 /// zooms it, and a double click fits it again. With `select_mode` a drag selects. The response
 /// is `changed()` when the window or the selection moved.
+///
+/// A zoom step sets the host's window to where it goes at once, and the graph eases the window it
+/// draws there over 150 ms, unless `motion` is off. A step during an ease starts again from the
+/// window drawn; a pan, or a window the host sets, jumps.
 pub struct Graph<'a> {
     viewer: &'a Viewer,
     state: &'a mut ViewState,
@@ -59,6 +65,9 @@ pub struct Graph<'a> {
     height: Option<f32>,
     now: Option<i64>,
     id_salt: IdSalt,
+    motion: bool,
+    /// A gesture this frame zoomed the window.
+    zoomed: bool,
 }
 
 impl<'a> Graph<'a> {
@@ -81,6 +90,8 @@ impl<'a> Graph<'a> {
             height: None,
             now: None,
             id_salt: IdSalt::new("tickwave graph"),
+            motion: true,
+            zoomed: false,
         }
     }
 
@@ -136,6 +147,13 @@ impl<'a> Graph<'a> {
     /// Tells two graphs in one `Ui` apart.
     pub fn id_salt(mut self, salt: impl AsIdSalt) -> Self {
         self.id_salt = IdSalt::new(salt);
+        self
+    }
+
+    /// Whether a zoom step eases the window drawn to where it goes; on by default. Off, it jumps,
+    /// for a host whose reader asked for reduced motion.
+    pub fn motion(mut self, on: bool) -> Self {
+        self.motion = on;
         self
     }
 }
@@ -194,8 +212,20 @@ pub(crate) struct Shown {
     pub layout: Layout,
 }
 
+/// A zoom step under way: the window drawn eases from `from` to the window the graph set.
+#[derive(Clone, Debug)]
+struct Ease {
+    /// The window drawn when the step was taken.
+    from: Range<i64>,
+    /// The window the graph set: the host's, until the host sets another.
+    to: Window,
+    /// When the step was taken, in egui's input time.
+    since: f64,
+}
+
 #[derive(Clone, Debug, Default)]
 struct Memory {
+    ease: Option<Ease>,
     /// Vertical travel while Y fits, toward the detent.
     travel: f32,
     /// A pan's part of a tick not yet moved.
@@ -377,16 +407,49 @@ impl Graph<'_> {
         }
     }
 
-    fn zoom(&mut self, view: &View, at: f32, factor: f32) {
-        let w = &view.window;
+    /// Zooms the window the view goes to, `target`, by `factor` about the tick under `at` there. A
+    /// followed window of a recording being written keeps following, its span zoomed about its
+    /// end.
+    fn zoom(&mut self, target: &View, at: f32, factor: f32, live: bool) {
+        let w = &target.window;
         let width = (w.end - w.start) as f64;
-        let min = (f64::from(view.width) / MAX_POINTS_PER_TICK)
+        let min = (f64::from(target.width) / MAX_POINTS_PER_TICK)
             .ceil()
             .max(1.0);
         let new = (width / f64::from(factor)).clamp(min, MAX_TICKS).round();
-        let tick = view.tick(at);
+        self.zoomed = true;
+        if live && let Window::Follow { .. } = self.state.window {
+            self.state.window = Window::Follow { span: new as i64 };
+            return;
+        }
+        let tick = target.tick(at);
         let start = (tick - (tick - w.start as f64) / width * new).round();
         self.moved(start as i64..(start + new) as i64);
+    }
+
+    /// The window drawn: the ease's at time `now`, or the target where none is under way. An ease
+    /// that has run its time ends.
+    fn drawn(&self, memory: &mut Memory, extent: Option<&Range<i64>>, now: f64) -> Range<i64> {
+        let target = self.state.window.resolve(extent, self.now);
+        let Some(e) = &memory.ease else {
+            return target;
+        };
+        let k = ((now - e.since) / EASE).clamp(0.0, 1.0);
+        if k >= 1.0 {
+            memory.ease = None;
+            return target;
+        }
+        // Ease-out: quick at first, settling into place.
+        let f = 1.0 - (1.0 - k).powi(3);
+        let along = |a: i64, b: i64| (a as f64 + (b as f64 - a as f64) * f).round() as i64;
+        match &e.to {
+            Window::At(_) => along(e.from.start, target.start)..along(e.from.end, target.end),
+            // The span eases, its end where the followed window's end is now.
+            Window::Follow { span } => Window::Follow {
+                span: along(e.from.end - e.from.start, *span),
+            }
+            .resolve(extent, self.now),
+        }
     }
 
     /// The value range moved by `by` points down, its content following.
@@ -420,7 +483,7 @@ impl Graph<'_> {
         response: &Response,
         axis: &Response,
         layout: &Layout,
-        view: &View,
+        (view, target): (&View, &View),
         y: (f64, f64),
         fit: Option<(f64, f64)>,
         facts: &Facts,
@@ -436,7 +499,7 @@ impl Graph<'_> {
         if over && let Some(p) = pointer {
             let factor = ui.input(|i| i.zoom_delta_2d().x);
             if factor != 1.0 {
-                self.zoom(view, p.x, factor);
+                self.zoom(target, p.x, factor, facts.live);
             }
         }
         let scroll = if over {
@@ -467,8 +530,9 @@ impl Graph<'_> {
             Vec2::ZERO
         };
         let delta = scroll + drag;
+        // A pan during an ease moves on from where the ease was going.
         if delta.x != 0.0 {
-            self.pan(view, delta.x, memory);
+            self.pan(target, delta.x, memory);
         }
         if response.double_clicked() || self.trace.is_none() {
             return;
@@ -594,8 +658,18 @@ impl Widget for Graph<'_> {
         let before = (self.state.window.clone(), self.state.selection.clone());
         let extent = held.as_ref().and_then(|h| h.answer.extent.clone());
         let trace = (held.as_ref().zip(self.trace)).and_then(|(h, t)| Trace::of(h, t));
+        let time = ui.input(|i| i.time);
+        // The host set a window other than the one the ease is going to: it jumps there.
+        if memory
+            .ease
+            .as_ref()
+            .is_some_and(|e| e.to != self.state.window)
+        {
+            memory.ease = None;
+        }
 
-        let view = View::new(
+        let view = View::new(self.drawn(&mut memory, extent.as_ref(), time), layout.plot);
+        let target = View::new(
             self.state.window.resolve(extent.as_ref(), self.now),
             layout.plot,
         );
@@ -611,17 +685,21 @@ impl Widget for Graph<'_> {
             &response,
             &value_axis,
             &layout,
-            &view,
+            (&view, &target),
             y,
             fit,
             &facts,
             &mut memory,
         );
+        if self.state.window != before.0 {
+            memory.ease = (self.zoomed && self.motion).then(|| Ease {
+                from: view.window.clone(),
+                to: self.state.window.clone(),
+                since: time,
+            });
+        }
 
-        let view = View::new(
-            self.state.window.resolve(extent.as_ref(), self.now),
-            layout.plot,
-        );
+        let view = View::new(self.drawn(&mut memory, extent.as_ref(), time), layout.plot);
         let (y, _) = self.y(
             trace.as_ref(),
             &view,
@@ -659,9 +737,10 @@ impl Widget for Graph<'_> {
             #[cfg(test)]
             layout,
         });
+        let easing = memory.ease.is_some();
         ui.data_mut(|d| d.insert_temp(id, memory));
-        // Following a recording as it is written, the window moves every frame.
-        if facts.live && matches!(self.state.window, Window::Follow { .. }) {
+        // Following a recording as it is written, the window moves every frame; so does an ease.
+        if easing || (facts.live && matches!(self.state.window, Window::Follow { .. })) {
             ui.request_repaint();
         }
         if (self.state.window.clone(), self.state.selection.clone()) != before {

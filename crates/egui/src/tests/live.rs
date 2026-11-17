@@ -429,3 +429,36 @@ fn the_strip_labels_its_time_axis_at_the_times_they_name() {
         );
     }
 }
+
+#[test]
+fn a_zoom_step_while_following_keeps_following_and_eases_the_span_at_the_end() {
+    let mut live = Live::new(Capture::new(1000, 10_000, noisy));
+    let snapshot = live.write(4000);
+    let mut h = harness(follow(SECOND));
+    h.state_mut().motion = true;
+    h.state_mut().viewer = Some(Viewer::live(&h.ctx, &live.path, snapshot).unwrap());
+    followed(&mut h, 4 * SECOND);
+    let p = plot(&h).center();
+    h.event(egui::Event::PointerMoved(p));
+    h.step();
+    h.event(egui::Event::Zoom(2.0));
+    h.step();
+    // The host follows still, at half the span.
+    assert_eq!(h.state().state.window, Window::Follow { span: 500 * MS });
+    // The window drawn ends at the host's now each frame, past the data's end and moving, its span
+    // easing from 1 s to 0.5 s; the host stating its window again each frame, as one that keeps it
+    // does, cancels nothing.
+    let mut spans = Vec::new();
+    for k in 1..=12 {
+        let now = 4 * SECOND + k * 16 * MS;
+        h.state_mut().now = Some(now);
+        h.state_mut().state.window = Window::Follow { span: 500 * MS };
+        h.step();
+        let w = drawn(&h).window;
+        assert_eq!(w.end, now);
+        spans.push(w.end - w.start);
+    }
+    assert!(spans[0] > 600 * MS, "{spans:?}");
+    assert!(spans.windows(2).all(|p| p[1] <= p[0]), "{spans:?}");
+    assert_eq!(*spans.last().unwrap(), 500 * MS, "{spans:?}");
+}

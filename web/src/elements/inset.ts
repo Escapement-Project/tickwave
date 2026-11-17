@@ -10,7 +10,7 @@ import { escapeHtml as esc } from "../escape.ts";
 import { reducedMotion } from "../face.ts";
 import { Prober, ZOOM_IN, type Probed } from "../prober.ts";
 import { formatInterval, measureReading } from "../readouts.ts";
-import { channelIndices, HEAVY_ROLES, Plot } from "../render/plot.ts";
+import { channelIndices, EASE_MS, HEAVY_ROLES, Plot } from "../render/plot.ts";
 import { isAbort, named, readingStep, type RecordingInfo } from "../source.ts";
 import { secondsValue, toTicks } from "../time.ts";
 import { DRAG_PX, TickwaveElement, loadAnnotations, loadHead, readAnnotations, zoomKey, type Loaded } from "./base.ts";
@@ -151,6 +151,8 @@ export class TickwaveInset extends TickwaveElement {
     hit.addEventListener("pointerdown", (e) => {
       this.#touch = e.pointerType === "touch";
       this.#dragged = false;
+      // A drag or a pinch during an ease starts from where the ease was going.
+      if (this.#plot.easing) this.#plot.view = { ...this.#plot.target };
       if (this.#touch && this.#fingerDown(e)) return;
       this.#litAtTouch = this.#lit;
       this.#point(e);
@@ -315,7 +317,7 @@ export class TickwaveInset extends TickwaveElement {
     const l = this.#loaded;
     if (!l?.annotations.partial || this.#readingMore) return;
     const id = this.getAttribute("annotation");
-    const v = this.#plot.layout ? this.#plot.view : null;
+    const v = this.#plot.layout ? this.#plot.target : null;
     let span: [number, number] | null;
     if (id && !l.annotations.byId.has(id)) span = null;
     else if (v && !this.#readSpans.some(([a, b]) => a <= v.start && v.end <= b)) {
@@ -364,7 +366,8 @@ export class TickwaveInset extends TickwaveElement {
     this.#plot.drawNow();
   };
 
-  /** The span shown, `{start, end}` in ticks, or null before the inset has laid out. */
+  /** The span shown, `{start, end}` in ticks, or null before the inset has laid out. While a zoom
+   * step eases, the span drawn; `zoomed` is where it is going. */
   get window(): { start: number; end: number } | null {
     return this.#plot.layout && this.#annotation ? { ...this.#plot.view } : null;
   }
@@ -441,7 +444,10 @@ export class TickwaveInset extends TickwaveElement {
     const w = this.#window(l.info);
     if (w) {
       this.#zoomed = this.#zoomed && this.#inSpan(this.#zoomed);
-      this.#plot.view = this.#zoomed ?? w;
+      // An ease to the span shown goes on: a read landing during it lays the inset out again.
+      const to = this.#zoomed ?? w;
+      const t = this.#plot.target;
+      if (!this.#plot.easing || t.start !== to.start || t.end !== to.end) this.#plot.view = to;
     }
     if (this.#sweepWanted && this.#plot.reveal !== null) this.#plot.reveal = this.#plot.layout!.plotLeft;
     this.#plot.invalidate();
@@ -492,29 +498,42 @@ export class TickwaveInset extends TickwaveElement {
     return { start, end: start + span };
   }
 
-  /** Shows `v`, within the inset's span, and reads again at the pointer. */
-  #zoomTo(v: { start: number; end: number }): void {
+  /** Shows `v`, within the inset's span, at once or eased there, and reads again at the pointer. */
+  #zoomTo(v: { start: number; end: number }, ease = false): void {
     const w = this.#loaded ? this.#window(this.#loaded.info) : null;
     if (!w) return;
     this.#zoomed = this.#inSpan(v);
-    this.#plot.view = this.#zoomed ?? w;
+    if (ease) this.#plot.easeTo(this.#zoomed ?? w, EASE_MS);
+    else this.#plot.view = this.#zoomed ?? w;
     this.#renderHit();
     // The notes take their places in the new span before the pointer finds one.
     this.#plot.drawNow();
     if (this.#pointer) this.#pointAt(this.#pointer);
   }
 
-  /** Zooms by `factor` (above 1 zooms out), keeping tick `at` where it is. */
+  /**
+   * Zooms by `factor` (above 1 zooms out) from where the span is going, keeping tick `at` where it
+   * is there: a step during an ease goes on from where the last one was going, and the span drawn
+   * eases there from where it is, unless the reader asked for reduced motion, read at each step.
+   */
   #zoomBy(factor: number, at: number): void {
-    const { start, end } = this.#plot.view;
+    const { start, end } = this.#plot.target;
     const span = Math.max(this.#plot.minSpan, (end - start) * factor);
     const f = (at - start) / (end - start);
-    this.#zoomTo({ start: at - f * span, end: at - f * span + span });
+    this.#zoomTo({ start: at - f * span, end: at - f * span + span }, !reducedMotion());
   }
 
+  /** Moves along the span by `ticks` from where it is going, at once. */
   #panBy(ticks: number): void {
-    const { start, end } = this.#plot.view;
+    const { start, end } = this.#plot.target;
     this.#zoomTo({ start: start + ticks, end: end + ticks });
+  }
+
+  /** The tick at `x`, in the plot's coordinates, in the span the inset is going to. */
+  #targetTickAt(x: number): number {
+    const l = this.#plot.layout!;
+    const { start, end } = this.#plot.target;
+    return start + ((x - l.plotLeft) / (l.plotRight - l.plotLeft)) * (end - start);
   }
 
   /** Ctrl or Cmd with the wheel, and a trackpad's pinch, zoom about the pointer. Zoomed in, a
@@ -529,7 +548,7 @@ export class TickwaveInset extends TickwaveElement {
     if (e.ctrlKey || e.metaKey) {
       e.preventDefault();
       this.#pointer = p;
-      this.#zoomBy(Math.exp(dy * 0.004), this.#plot.tickAt(p.x));
+      this.#zoomBy(Math.exp(dy * 0.004), this.#targetTickAt(p.x));
     } else if (this.#zoomed && (e.shiftKey || Math.abs(dx) > Math.abs(dy))) {
       e.preventDefault();
       this.#pointer = p;
@@ -829,7 +848,7 @@ export class TickwaveInset extends TickwaveElement {
    */
   arrowKey(e: KeyboardEvent): boolean {
     if (e.altKey || e.ctrlKey || e.metaKey) return false;
-    const { start, end } = this.#plot.view;
+    const { start, end } = this.#plot.target;
     if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
       const dir = e.key === "ArrowRight" ? 1 : -1;
       if (e.shiftKey) this.#step(dir);
@@ -855,7 +874,7 @@ export class TickwaveInset extends TickwaveElement {
     this.#prober.pointer = null;
     this.#prober.hide();
     // Zoomed in, the span moves to the note: at its width, or wider to take the note in whole.
-    const v = this.#plot.view;
+    const v = this.#plot.target;
     const end = n.end ?? n.start;
     if (this.#zoomed && (n.start < v.start || end > v.end)) {
       const span = Math.max(v.end - v.start, (end - n.start) * 1.25);

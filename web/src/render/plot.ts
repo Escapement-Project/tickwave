@@ -115,6 +115,8 @@ export const UNAVAILABLE = "unavailable to this version";
  * the others' by more than colour: the target's drive. */
 export const HEAVY_ROLES: ReadonlySet<string> = new Set(["target"]);
 const HEAVIER = 1;
+/** A zoom step's ease, in milliseconds, in a view and an inset. */
+export const EASE_MS = 150;
 /** How long a read may run before the element says it is still loading. */
 const STALL_MS = 5000;
 
@@ -204,7 +206,9 @@ export class Plot {
   /** Where a row's fills are put before they are drawn (`#drawFills`). */
   #strip: CanvasRenderingContext2D | null = null;
   layout: Layout | null = null;
-  view = { start: 0, end: 1 };
+  #view = { start: 0, end: 1 };
+  /** A zoom step under way: the window drawn goes from `from` to `to` over `ms` from `t0`. */
+  #ease: { from: { start: number; end: number }; to: { start: number; end: number }; t0: number; ms: number } | null = null;
   cursors: { a: number | null; b: number | null } = { a: null, b: null };
   selection: { start: number; end: number } | null = null;
   hoverRow: number | null = null;
@@ -501,6 +505,48 @@ export class Plot {
     return { area: "none" };
   }
 
+  /** The window drawn. Setting it draws there at once, and ends an ease. */
+  get view(): { start: number; end: number } {
+    return this.#view;
+  }
+
+  set view(v: { start: number; end: number }) {
+    this.#view = v;
+    this.#ease = null;
+  }
+
+  /** Where the view is going: an ease's end, or the window drawn. The rows read for it. */
+  get target(): { start: number; end: number } {
+    return this.#ease?.to ?? this.#view;
+  }
+
+  /** Whether the window drawn is easing to the target. */
+  get easing(): boolean {
+    return this.#ease !== null;
+  }
+
+  /** Eases the window drawn from where it is to `to` over `ms`, quick at first, frame by frame. */
+  easeTo(to: { start: number; end: number }, ms: number): void {
+    this.#ease = { from: { ...this.#view }, to, t0: performance.now(), ms };
+    this.invalidate();
+  }
+
+  /** The window drawn now: the ease's, or the window drawn where none is under way. An ease that
+   * has run its time ends; one under way asks for the next frame. */
+  #eased(): void {
+    const e = this.#ease;
+    if (!e) return;
+    const k = Math.min(1, (performance.now() - e.t0) / e.ms);
+    if (k >= 1) {
+      this.#view = e.to;
+      this.#ease = null;
+      return;
+    }
+    const f = 1 - (1 - k) ** 3;
+    this.#view = { start: e.from.start + (e.to.start - e.from.start) * f, end: e.from.end + (e.to.end - e.from.end) * f };
+    this.invalidate();
+  }
+
   // Frames -------------------------------------------------------------------------------------
 
   invalidate(): void {
@@ -511,8 +557,9 @@ export class Plot {
     });
   }
 
-  /** Whether every row has the data its current view wants. */
+  /** Whether the view is where it is going, and every row has the data it wants there. */
   get settled(): boolean {
+    if (this.#ease) return false;
     const per = this.#perColumn();
     return this.tracks.every((t) => t.settled(this.view.start, this.view.end, per));
   }
@@ -535,6 +582,7 @@ export class Plot {
     const l = this.layout;
     const p = this.palette;
     if (!l || !p || !this.info) return;
+    this.#eased();
     const ctx = this.#ctx;
     const dpr = this.#dpr;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -544,7 +592,10 @@ export class Plot {
 
     const ncols = Math.max(1, Math.round((l.plotRight - l.plotLeft) * dpr));
     const grid: Grid = { x0: this.view.start, per: (this.view.end - this.view.start) / ncols, count: ncols };
-    for (const t of this.tracks) t.need(this.view.start, this.view.end, grid.per);
+    // Each row reads for where the view is going, so an ease's step asks for its data at once and
+    // draws what it holds until that lands.
+    const to = this.target;
+    for (const t of this.tracks) t.need(to.start, to.end, (to.end - to.start) / ncols);
 
     const revealX = this.reveal ?? Infinity;
     const lane = this.laneNotes();

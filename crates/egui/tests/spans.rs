@@ -134,7 +134,11 @@ fn a_frame_works_in_spans_at_debug_level() {
         .build_ui_state(
             |ui, host: &mut Host| {
                 if let Some(viewer) = &host.viewer {
-                    ui.add(Graph::new(viewer, &mut host.state, &host.palette, 0).lanes(&[1, 2]));
+                    ui.add(
+                        Graph::new(viewer, &mut host.state, &host.palette, 0)
+                            .motion(false)
+                            .lanes(&[1, 2]),
+                    );
                 }
             },
             host,

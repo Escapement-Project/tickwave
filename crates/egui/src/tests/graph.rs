@@ -58,7 +58,7 @@ fn x_of(h: &Harness<'_, Host>, t: i64) -> f32 {
 }
 
 /// The plot's device pixel columns inside `extent` that no band of the trace covers.
-fn blank(h: &Harness<'_, Host>, extent: &std::ops::Range<i64>) -> Vec<f32> {
+pub(super) fn blank(h: &Harness<'_, Host>, extent: &std::ops::Range<i64>) -> Vec<f32> {
     let s = drawn(h);
     let plot = s.layout.plot;
     let p = palette();

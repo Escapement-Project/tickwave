@@ -9,7 +9,7 @@ import { clockNote, countEdges, formatClockPeriod, formatClockRate, formatCount,
 import { completePulse, knownSpan, pulseFigures, pulseFromEdges, type Pulse } from "../probe.ts";
 import { Prober, type Probed } from "../prober.ts";
 import { lowerBound } from "../search.ts";
-import { channelIndices, Plot } from "../render/plot.ts";
+import { channelIndices, EASE_MS, Plot } from "../render/plot.ts";
 import { clampRange, fitRange, moveRange, scaleLimits, zoomRange, type ScaleLimits, type ValueRange } from "../render/scale.ts";
 import { channelSampleTick, channelStart, inChannel, isAbort, named, readingStep, sampleAtOrBefore, spanned } from "../source.ts";
 import { parseTime, toTicks, type TimeSpec } from "../time.ts";
@@ -313,7 +313,7 @@ export class TickwaveView extends TickwaveElement {
 
   /** The visible span in ticks. */
   get window(): { start: number; end: number } {
-    return { ...this.#plot.view };
+    return { ...this.#plot.target };
   }
 
   /** Cursors A and B in ticks; null where one is not placed. */
@@ -1472,16 +1472,19 @@ export class TickwaveView extends TickwaveElement {
   }
 
   #clampView(): void {
-    const info = this.#loaded?.info;
-    if (!info) return;
+    // A zoom step clamps where it goes as it sets it.
+    if (this.#loaded?.info && !this.#plot.easing) this.#plot.view = this.#clamped(this.#plot.view);
+  }
+
+  /** `w` held to the recording: no wider than it, no narrower than the plot's least span, and
+   * inside it. */
+  #clamped(w: { start: number; end: number }): { start: number; end: number } {
     const extent = this.#extent();
     const lo = this.#start();
-    let { start, end } = this.#plot.view;
-    const span = Math.min(extent - lo, Math.max(this.#plot.minSpan, end - start));
-    const mid = (start + end) / 2;
-    start = Math.min(Math.max(lo, mid - span / 2), extent - span);
-    end = start + span;
-    this.#plot.view = { start, end };
+    const span = Math.min(extent - lo, Math.max(this.#plot.minSpan, w.end - w.start));
+    const mid = (w.start + w.end) / 2;
+    const start = Math.min(Math.max(lo, mid - span / 2), extent - span);
+    return { start, end: start + span };
   }
 
   /** Shows ticks [start, end); numbers are ticks, strings times ("317.8 ms"). Asked before the
@@ -1567,19 +1570,27 @@ export class TickwaveView extends TickwaveElement {
     this.setWindow(this.#start(), this.#extent());
   }
 
-  /** Zooms by `factor` (above 1 zooms out) about x, or the middle. */
+  /**
+   * Zooms by `factor` (above 1 zooms out) about x, or the middle, from where the view is going: a
+   * step during an ease goes on from where the last one was going, and the window drawn eases there
+   * from where it is, unless the reader asked for reduced motion, read at each step.
+   */
   #zoomBy(factor: number, x: number | null): void {
-    if (!this.#plot.layout) return;
-    const { start, end } = this.#plot.view;
-    const at = x === null ? (start + end) / 2 : this.#plot.tickAt(x);
+    const l = this.#plot.layout;
+    if (!l || !this.#loaded?.info) return;
+    const { start, end } = this.#plot.target;
+    const at = x === null ? (start + end) / 2 : start + ((x - l.plotLeft) / (l.plotRight - l.plotLeft)) * (end - start);
     const span = Math.max(this.#plot.minSpan, (end - start) * factor);
     const f = (at - start) / (end - start);
-    this.#plot.view = { start: at - f * span, end: at - f * span + span };
+    const to = this.#clamped({ start: at - f * span, end: at - f * span + span });
+    if (reducedMotion()) this.#plot.view = to;
+    else this.#plot.easeTo(to, EASE_MS);
     this.#viewChanged();
   }
 
+  /** Pans by `ticks` from where the view is going, at once. */
   #panBy(ticks: number): void {
-    const { start, end } = this.#plot.view;
+    const { start, end } = this.#plot.target;
     this.#plot.view = { start: start + ticks, end: end + ticks };
     this.#viewChanged();
   }
@@ -1606,7 +1617,7 @@ export class TickwaveView extends TickwaveElement {
   /** The span to read a bundled sidecar's annotations for: the view, and a view's width either
    * side, as a row reads its data, so a pan seldom waits. */
   #annotationSpan(): [number, number] {
-    const { start, end } = this.#plot.view;
+    const { start, end } = this.#plot.target;
     const w = end - start;
     return [Math.floor(start - w), Math.ceil(end + w)];
   }
@@ -1616,7 +1627,7 @@ export class TickwaveView extends TickwaveElement {
   #readMore(): void {
     const l = this.#loaded;
     if (!l?.annotations.partial || !this.#annotated || this.#reading) return;
-    const { start, end } = this.#plot.view;
+    const { start, end } = this.#plot.target;
     if (this.#readSpans.some(([a, b]) => a <= start && end <= b)) return;
     this.#reading = true;
     void this.#readAnnotations(this.#annotationSpan()).finally(() => {
@@ -1688,6 +1699,8 @@ export class TickwaveView extends TickwaveElement {
       const p = this.#local(e);
       this.#pointers.set(e.pointerId, p);
       box.setPointerCapture(e.pointerId);
+      // A drag or a pinch during an ease starts from where the ease was going.
+      if (this.#plot.easing) this.#plot.view = { ...this.#plot.target };
       if (this.#pointers.size === 2) {
         this.#drag = null;
         const [a, b] = [...this.#pointers.values()];
@@ -1810,7 +1823,7 @@ export class TickwaveView extends TickwaveElement {
       { passive: false },
     );
     box.addEventListener("keydown", (e) => {
-      const span = this.#plot.view.end - this.#plot.view.start;
+      const span = this.#plot.target.end - this.#plot.target.start;
       switch (e.key) {
         case "ArrowLeft":
           this.#panBy(-span * (e.shiftKey ? 0.5 : 0.125));

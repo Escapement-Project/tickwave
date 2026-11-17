@@ -51,6 +51,7 @@ fn harness(path: &Path, window: Window) -> Harness<'static, Host> {
             ui.painter()
                 .rect_filled(ui.ctx().content_rect(), 0.0, host.face.page);
             let graph = Graph::new(viewer, &mut host.state, &host.face.palette, host.trace)
+                .motion(false)
                 .flag(host.flag)
                 .lanes(&host.lanes)
                 .include_zero(true)
@@ -221,6 +222,7 @@ fn views() {
                     ui.painter()
                         .rect_filled(ui.ctx().content_rect(), 0.0, host.face.page);
                     let graph = Graph::new(viewer, &mut host.state, &host.face.palette, host.trace)
+                        .motion(false)
                         .flag(host.flag)
                         .lanes(&host.lanes)
                         .include_zero(true)
