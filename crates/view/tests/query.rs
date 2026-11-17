@@ -446,6 +446,47 @@ fn a_fallback_is_its_channels_columns_over_the_extent_as_a_strip_of_it_would_be(
 }
 
 #[test]
+fn a_strip_column_around_cuts_is_read_again_outside_it() {
+    let rec = open(&fixture("energy.tickwave"));
+    let cancel = AtomicBool::new(false);
+    // `around` from 600,000 to 1,500,000, inside the extent, 0 to 2,768,000; the strip's
+    // columns 27,680 ticks wide, so both its ends fall inside a column.
+    let mut q = query(900_000..1_200_000, 10, vec![]);
+    q.strip = Some((1, 100));
+    let a = rec.query(&q, &cancel).unwrap();
+    assert_eq!(a.around, 600_000..1_500_000);
+    let strip = a.strip.unwrap();
+    let spans: Vec<_> = strip.cut.iter().map(|c| c.span.clone()).collect();
+    // Column 21 is 581,280 to 608,960 and column 54 1,494,720 to 1,522,400, rounded up.
+    assert_eq!(spans, [581_280..600_000, 1_500_000..1_522_400]);
+    for cut in &strip.cut {
+        let Drawn::Analog { columns, .. } = &cut.channel else {
+            panic!("analog")
+        };
+        assert_eq!(columns.min.len(), 1);
+        // Its levels are the span's, as its statistics give them.
+        let mut s = query(cut.span.clone(), 10, vec![]);
+        s.statistics = vec![cut.span.clone()];
+        let stats = rec.query(&s, &cancel).unwrap().statistics[0].channels[1]
+            .clone()
+            .unwrap();
+        assert_eq!(
+            (Some(columns.min[0]), Some(columns.max[0])),
+            (stats.min, stats.max),
+            "{:?}",
+            cut.span
+        );
+    }
+    // A window whose `around` starts before the extent cuts at its end alone.
+    let mut q = query(100_000..400_000, 10, vec![]);
+    q.fallbacks = vec![(1, 100)];
+    let a = rec.query(&q, &cancel).unwrap();
+    assert!(a.around.start < 0);
+    let ends: Vec<_> = a.fallbacks[0].cut.iter().map(|c| c.span.start).collect();
+    assert_eq!(ends, [a.around.end]);
+}
+
+#[test]
 fn markers_by_page_cursor_and_successor() {
     let rec = open(&fixture("energy.tickwave"));
     let cancel = AtomicBool::new(false);

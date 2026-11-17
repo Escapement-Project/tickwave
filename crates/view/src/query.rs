@@ -149,6 +149,17 @@ pub struct StripAnswer {
     /// Over the extent, the strip's columns of it.
     pub grid: Grid,
     pub channel: Drawn,
+    /// The parts outside `around` of the columns `around` cuts, at most one at either end, each
+    /// read again as one column of its own: a host that draws a cut column only past `around`
+    /// draws these, not the whole column's levels, which may come from inside it.
+    pub cut: Vec<Cut>,
+}
+
+/// A part of a strip's column, and its own column.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Cut {
+    pub span: Range<i64>,
+    pub channel: Drawn,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -168,6 +179,26 @@ pub struct Answer {
     pub markers: MarkerAnswer,
     pub extent: Option<Range<i64>>,
     pub revision: Revision,
+}
+
+/// The parts outside `around` of the columns of `grid` over `extent` that `around`'s ends fall
+/// inside: the ticks of a column `k` are those from `x0 + k × per`, rounded up, to the next
+/// column's.
+fn cut_parts(grid: &Grid, extent: &Range<i64>, around: &Range<i64>) -> Vec<Range<i64>> {
+    let first = |k: f64| (grid.x0 + k * grid.per).ceil() as i64;
+    let mut out = Vec::new();
+    for (end, before) in [(around.start, true), (around.end, false)] {
+        if end <= extent.start || end >= extent.end {
+            continue;
+        }
+        let k = ((end as f64 - grid.x0) / grid.per).floor();
+        let (from, to) = (first(k).max(extent.start), first(k + 1.0).min(extent.end));
+        let part = if before { from..end } else { end..to };
+        if part.end > part.start {
+            out.push(part);
+        }
+    }
+    out
 }
 
 /// Whether an answer is exact, or a sketch from each channel's coarsest level.
@@ -428,10 +459,21 @@ impl Recording {
                 count: n,
             };
             let channel = self.drawn(c, &grid, extent, None, None, None, r, how)?;
+            let mut cut = Vec::new();
+            for span in cut_parts(&grid, extent, &around) {
+                let one = Grid {
+                    x0: span.start as f64,
+                    per: (span.end - span.start) as f64,
+                    count: 1,
+                };
+                let channel = self.drawn(c, &one, &span, None, None, None, r, how)?;
+                cut.push(Cut { span, channel });
+            }
             Ok(StripAnswer {
                 extent: extent.clone(),
                 grid,
                 channel,
+                cut,
             })
         };
         let (strip, fallbacks) = match extent {

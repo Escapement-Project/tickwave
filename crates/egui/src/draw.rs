@@ -12,7 +12,7 @@ use escapement_tickwave_view::readouts::format_marks;
 use escapement_tickwave_view::roles::{self, Dash, LookColour};
 use escapement_tickwave_view::scale::{ValueRange, range_marks};
 use escapement_tickwave_view::shade::{self, Look};
-use escapement_tickwave_view::{AnalogColumns, Drawn, Marker, Paint, Point, StripAnswer};
+use escapement_tickwave_view::{AnalogColumns, Cut, Drawn, Marker, Paint, Point, StripAnswer};
 
 use crate::graph::{LABEL_TOP, Layout, View, fitted};
 use crate::palette::Palette;
@@ -57,6 +57,8 @@ struct Columns<'a> {
     grid: &'a Grid,
     columns: &'a AnalogColumns,
     lost: &'a [Range<i64>],
+    /// The strip's: the parts outside `around` of the columns it cuts, read again.
+    cut: &'a [Cut],
 }
 
 /// The trace as the latest answer holds it: columns or single samples over `around`, and past
@@ -88,6 +90,7 @@ impl<'a> Trace<'a> {
                     grid: &s.grid,
                     columns,
                     lost,
+                    cut: &s.cut,
                 }),
                 Drawn::Digital { .. } | Drawn::Unavailable => None,
             },
@@ -99,6 +102,7 @@ impl<'a> Trace<'a> {
                 grid: &answer.grid,
                 columns,
                 lost,
+                cut: &[],
             },
             samples: samples.as_deref(),
             strip,
@@ -172,7 +176,8 @@ impl<'a> Trace<'a> {
 }
 
 /// The columns of `c` over [from, to) with something in them, as pieces after those in `out`:
-/// clipped to it where `clip`, else whole.
+/// clipped to it where `clip`, else whole. A column clipped where `c` holds a part of it read
+/// again takes that part's levels.
 fn part(c: &Columns, from: i64, to: i64, clip: bool, out: &mut Vec<Piece>) {
     if to <= from {
         return;
@@ -181,15 +186,26 @@ fn part(c: &Columns, from: i64, to: i64, clip: bool, out: &mut Vec<Piece>) {
     let ks = columns_over(g, from, to);
     let first = ks.start;
     for k in ks {
-        if cols.min[k] > cols.max[k] {
-            continue;
-        }
         let (mut s, mut e) = (g.x0 + k as f64 * g.per, g.x0 + (k + 1) as f64 * g.per);
+        let (mut min, mut max, mut pale) = (cols.min[k], cols.max[k], cols.pale[k]);
         if clip {
+            let whole = (s, e);
             (s, e) = (s.max(from as f64), e.min(to as f64));
             if e <= s {
                 continue;
             }
+            let cut = (c.cut.iter()).find(|x| (x.span.start as f64) < e && (x.span.end as f64) > s);
+            if (s, e) != whole
+                && let Some(Cut {
+                    channel: Drawn::Analog { columns: one, .. },
+                    ..
+                }) = cut
+            {
+                (min, max, pale) = (one.min[0], one.max[0], one.pale[0]);
+            }
+        }
+        if min > max {
+            continue;
         }
         // Into the first column from the piece before, where it ends where this one starts.
         let joined = if k == first {
@@ -200,10 +216,10 @@ fn part(c: &Columns, from: i64, to: i64, clip: bool, out: &mut Vec<Piece>) {
         out.push(Piece {
             from: s,
             to: e,
-            min: cols.min[k],
-            max: cols.max[k],
+            min,
+            max,
             joined,
-            pale: cols.pale[k],
+            pale,
         });
     }
 }
@@ -859,13 +875,30 @@ fn lane(ui: &Ui, f: &Frame, c: usize, rect: Rect, px: f32) {
     let Some(Drawn::Digital { columns, gaps }) = held.answer.channels.get(at) else {
         return;
     };
-    let fallback = (held.request.fallbacks.iter())
+    let strip = (held.request.fallbacks.iter())
         .position(|&(x, _)| x == c)
-        .and_then(|i| held.answer.fallbacks.get(i))
-        .and_then(|s| match &s.channel {
-            Drawn::Digital { columns, gaps } => Some((&s.grid, columns, gaps)),
+        .and_then(|i| held.answer.fallbacks.get(i));
+    let fallback = strip.and_then(|s| match &s.channel {
+        Drawn::Digital { columns, gaps } => Some((&s.grid, columns, gaps)),
+        _ => None,
+    });
+    // The parts outside `around` of the fallback's columns it cuts, read again, each a column of
+    // its own: before `around`, and after it.
+    let cuts: Vec<(Grid, &DigitalColumns, bool)> = (strip.iter())
+        .flat_map(|s| &s.cut)
+        .filter_map(|x| match &x.channel {
+            Drawn::Digital { columns, .. } => Some((
+                Grid {
+                    x0: x.span.start as f64,
+                    per: (x.span.end - x.span.start) as f64,
+                    count: 1,
+                },
+                columns,
+                x.span.end <= held.answer.around.start,
+            )),
             _ => None,
-        });
+        })
+        .collect();
     let painter = ui.painter().with_clip_rect(rect);
     let high = rect.top() + LANE_PAD;
     let low = high + LANE_SWING;
@@ -895,15 +928,30 @@ fn lane(ui: &Ui, f: &Frame, c: usize, rect: Rect, px: f32) {
         }
     }
     let g = &held.answer.grid;
-    let mut runs = Vec::with_capacity(3);
+    let mut runs = Vec::with_capacity(5);
+    // The fallback's column holding `end`, where a part of it read again stands in for it.
+    let cut_at = |fg: &Grid, end: i64, before: bool| {
+        let k = ((end as f64 - fg.x0) / fg.per).floor();
+        (k >= 0.0)
+            .then_some(k as usize)
+            .zip(cuts.iter().find(|x| x.2 == before))
+    };
     if let Some((fg, fc, _)) = fallback {
+        let mut ks = columns_over(fg, w.start, w.end.min(a.start));
+        let cut = cut_at(fg, a.start, true).filter(|(k, _)| ks.contains(k));
+        if let Some((k, _)) = cut {
+            ks.end = k;
+        }
         runs.push(Run {
             grid: fg,
             columns: fc,
-            ks: columns_over(fg, w.start, w.end.min(a.start)),
+            ks,
             from: f64::NEG_INFINITY,
             to: a.start as f64,
         });
+        if let Some((_, (cg, cc, _))) = cut {
+            runs.push(Run::whole(cg, cc));
+        }
     }
     runs.push(Run {
         grid: g,
@@ -913,10 +961,16 @@ fn lane(ui: &Ui, f: &Frame, c: usize, rect: Rect, px: f32) {
         to: f64::INFINITY,
     });
     if let Some((fg, fc, _)) = fallback {
+        let mut ks = columns_over(fg, w.start.max(a.end), w.end);
+        let cut = cut_at(fg, a.end, false).filter(|(k, _)| ks.contains(k));
+        if let Some((k, (cg, cc, _))) = cut {
+            ks.start = k + 1;
+            runs.push(Run::whole(cg, cc));
+        }
         runs.push(Run {
             grid: fg,
             columns: fc,
-            ks: columns_over(fg, w.start.max(a.end), w.end),
+            ks,
             from: a.end as f64,
             to: f64::INFINITY,
         });
@@ -946,6 +1000,19 @@ struct Run<'a> {
     ks: Range<usize>,
     from: f64,
     to: f64,
+}
+
+impl<'a> Run<'a> {
+    /// Every column of `columns` on `grid`, whole.
+    fn whole(grid: &'a Grid, columns: &'a DigitalColumns) -> Self {
+        Self {
+            grid,
+            columns,
+            ks: 0..grid.count,
+            from: f64::NEG_INFINITY,
+            to: f64::INFINITY,
+        }
+    }
 }
 
 /// A column as a lane draws it: across `x0` to `x1`, its state, where its edge sits from 0 to 1
@@ -1188,6 +1255,7 @@ pub(crate) fn strip(
             grid: &answer.grid,
             columns,
             lost,
+            cut: &[],
         };
         let mut pieces = Vec::new();
         part(

@@ -28,7 +28,7 @@ pub use cache::Cache;
 pub use escapement_tickwave_format as format;
 pub use markers::{Marker, MarkerCursor, Page, Paint};
 pub use query::{
-    AnalogColumns, Answer, Drawn, MarkerAnswer, MarkerQuery, Point, Query, StripAnswer,
+    AnalogColumns, Answer, Cut, Drawn, MarkerAnswer, MarkerQuery, Point, Query, StripAnswer,
 };
 pub use recording::{ChannelInfo, ChannelKind, Error, Recording, Resolution, Revision};
 pub use statistics::{ChannelStatistics, Statistics, Sum, Ticks};
