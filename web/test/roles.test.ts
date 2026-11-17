@@ -39,11 +39,15 @@ runTable("roles", {
   length_at: (args) => lengthAt((args.paths as number[][]).map((points) => ({ points })), args.x),
 });
 
-test("a page's dash and weight tokens read only as the schema's bounds allow", () => {
+test("a page's dash and weight tokens read as numbers, the bounds left to roleLook and the shared rows", () => {
   assert.deepEqual(parseDash("2 1"), [2, 1]);
   assert.deepEqual(parseDash(" 4, 1.5 1 1.5 "), [4, 1.5, 1, 1.5]);
-  for (const bad of ["", "2", "2 1 1", "0 0", "1 65", "-1 1", "a b", "1 1 1 1 1 1 1 1 1 1"]) assert.equal(parseDash(bad), null, bad);
+  // Numbers, whatever their count or size: roleLook holds them to a dash's bounds.
+  assert.deepEqual(parseDash("1 65"), [1, 65]);
+  assert.deepEqual(parseDash("-1 1"), [-1, 1]);
+  for (const bad of ["", "a b", "2 px", "1,,"]) assert.equal(parseDash(bad), null, bad);
   assert.equal(parseWeight("1"), 1);
   assert.equal(parseWeight(" 2.5px "), 2.5);
-  for (const bad of ["", "5", "-1", "thick", "1em"]) assert.equal(parseWeight(bad), null, bad);
+  assert.equal(parseWeight("5"), 5);
+  for (const bad of ["", "-1", "thick", "1em"]) assert.equal(parseWeight(bad), null, bad);
 });

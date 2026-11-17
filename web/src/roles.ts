@@ -32,9 +32,28 @@ export interface Look {
   readonly dash: readonly number[] | null;
 }
 
-/** The most a weight adds, in CSS pixels, and the longest dash or gap, in line widths. */
+/** The most a weight adds, in CSS pixels, the longest dash or gap, in line widths, and the most
+ * numbers in a dash, as a declaration is held to them (ANNOTATIONS.md, "Roles"). */
 export const WEIGHT_AT_MOST = 4;
 export const DASH_AT_MOST = 64;
+export const DASH_NUMBERS = 8;
+
+/** Whether a page's weight for a role is one a declaration may give: 0 to `WEIGHT_AT_MOST`. */
+export function weightFits(weight: number): boolean {
+  return weight >= 0 && weight <= WEIGHT_AT_MOST;
+}
+
+/** Whether a page's dash for a role is one a declaration may give: (dash, gap) pairs, at most
+ * `DASH_NUMBERS`, each 0 to `DASH_AT_MOST`, not all 0. */
+export function dashFits(numbers: readonly number[]): boolean {
+  return (
+    numbers.length > 0 &&
+    numbers.length % 2 === 0 &&
+    numbers.length <= DASH_NUMBERS &&
+    numbers.every((n) => n >= 0 && n <= DASH_AT_MOST) &&
+    numbers.reduce((a, b) => a + b, 0) > 0
+  );
+}
 
 /** A key's swatch for `look`: a short line as the role's lines draw, `lineWeight` the trace's in
  * CSS pixels, its dash in line widths. */
@@ -60,22 +79,21 @@ export function swatch(look: Look, lineWeight: number): SVGSVGElement {
   return svg;
 }
 
-/** A dash a page gives, `--tickwave-role-<name>-dash`: numbers apart by spaces or commas, (dash,
- * gap) pairs, at most 8, each from 0 to 64 line widths and not all 0; null for anything else. */
+/** The numbers of a dash a page gives, `--tickwave-role-<name>-dash`, apart by spaces or commas;
+ * null where they don't read as numbers. `roleLook` holds them to a dash's bounds. */
 export function parseDash(css: string): number[] | null {
   const text = css.trim();
   if (text === "") return null;
-  const numbers = text.split(/[\s,]+/).map(Number);
-  const fits = numbers.length % 2 === 0 && numbers.length <= 8 && numbers.every((n) => Number.isFinite(n) && n >= 0 && n <= DASH_AT_MOST);
-  return fits && numbers.reduce((a, b) => a + b, 0) > 0 ? numbers : null;
+  const pieces = text.split(/[\s,]+/);
+  const numbers = pieces.map(Number);
+  return pieces.every((t, i) => t !== "" && Number.isFinite(numbers[i])) ? numbers : null;
 }
 
-/** A weight a page gives, `--tickwave-role-<name>-weight`: CSS pixels, with or without `px`, from
- * 0 to 4; null for anything else. */
+/** A weight a page gives, `--tickwave-role-<name>-weight`: CSS pixels, with or without `px`; null
+ * where it doesn't read. `roleLook` holds it to a weight's bounds. */
 export function parseWeight(css: string): number | null {
   const m = /^\s*(\+?(?:\d+\.?\d*|\.\d+))\s*(?:px)?\s*$/i.exec(css);
-  const w = m ? Number(m[1]) : NaN;
-  return Number.isFinite(w) && w >= 0 && w <= WEIGHT_AT_MOST ? w : null;
+  return m ? Number(m[1]) : null;
 }
 
 /**
@@ -83,8 +101,9 @@ export function parseWeight(css: string): number | null {
  * `-weight`, `-dash`, read through `p.roleTokens`), then the recording's declaration. A colour
  * neither gives is the place's in `roles`, the order the sidecar declares them in: the first role
  * takes the trace's colour, the rest ink. A dash neither gives is solid, and a weight the
- * declaration's, 0 where it gives none. Null for a role the sidecar doesn't declare: a paint naming
- * one draws as if it painted nothing.
+ * declaration's, 0 where it gives none. A page's weight or dash past a declaration's bounds
+ * (`weightFits`, `dashFits`) is left to the declaration. Null for a role the sidecar doesn't
+ * declare: a paint naming one draws as if it painted nothing.
  */
 export function roleLook(p: Palette, roles: readonly Role[], name: string): Look | null {
   const at = roles.findIndex((r) => r.name === name);
@@ -92,11 +111,12 @@ export function roleLook(p: Palette, roles: readonly Role[], name: string): Look
   const declared = roles[at];
   const page = p.roleTokens(name);
   const stored = declared.colour ? (p.night ? declared.colour.night : declared.colour.day) : null;
-  const dash = page.dash ?? declared.dash;
+  const pageDash = page.dash === "none" || (page.dash !== null && dashFits(page.dash)) ? page.dash : null;
+  const dash = pageDash ?? declared.dash;
   return {
     label: declared.label,
     colour: page.colour ?? stored ?? (at === 0 ? p.trace : p.ink),
-    weight: page.weight ?? declared.weight,
+    weight: page.weight !== null && weightFits(page.weight) ? page.weight : declared.weight,
     dash: dash === "none" ? null : dash,
   };
 }
@@ -158,18 +178,21 @@ export function paintStretches(spans: readonly PaintSpan[], roles: readonly Role
  * The length of a row's line at device-pixel column `x`, where a dashed stretch starting there
  * starts its pattern: the last point at or before `x`, and the way along the segment after it.
  * `paths` are the line's paths in order, each its points' x and the line's length there, flat. A
- * lifted pen adds nothing, so between two paths the length is the first's at its end.
+ * lifted pen adds nothing, so between two paths the length is the first's at its end. A path with
+ * no whole point is passed over, and a number past a path's last whole point is not read. 0 where
+ * no path has a point.
  */
 export function lengthAt(paths: readonly { readonly points?: readonly number[] }[], x: number): number {
-  let lo = 0;
-  let hi = paths.length;
-  while (hi - lo > 1) {
-    const mid = (lo + hi) >> 1;
-    if (paths[mid].points![0] <= x) lo = mid;
-    else hi = mid;
+  // The last path whose first point is at or before `x`, else the first with a point.
+  let chosen: readonly number[] | null = null;
+  for (const path of paths) {
+    const points = path.points ?? [];
+    if (points.length < 2) continue;
+    if (chosen !== null && points[0] > x) break;
+    chosen = points;
   }
-  const pts = paths[lo]?.points;
-  if (!pts) return 0;
+  if (chosen === null) return 0;
+  const pts = chosen.slice(0, chosen.length - (chosen.length % 2));
   let k = 0;
   while (k + 2 < pts.length && pts[k + 2] <= x) k += 2;
   if (k + 2 >= pts.length || pts[k] > x) return pts[k + 1];

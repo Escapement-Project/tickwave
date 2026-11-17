@@ -11,7 +11,7 @@ use escapement_tickwave_view::columns::{
 };
 use escapement_tickwave_view::probe::{self, AnalogAt, EdgeAt, Known, Pulse};
 use escapement_tickwave_view::readouts::{self, Measure, PeriodStats};
-use escapement_tickwave_view::roles::{self, LookColour};
+use escapement_tickwave_view::roles::{self, Dash, LookColour};
 use escapement_tickwave_view::runs::Runs;
 use escapement_tickwave_view::scale::{self, ScaleLimits, ValueRange};
 use escapement_tickwave_view::{axis, shade, time};
@@ -722,19 +722,26 @@ fn roles() {
             let host = roles::Host {
                 colour: h["colour"].as_str().map(str::to_owned),
                 weight: h.get("weight").map(f),
-                dash: h.get("dash").map(|d| (d != "none").then(|| floats(d))),
+                dash: h.get("dash").map(|d| match d.as_str() {
+                    Some("none") => Dash::Solid,
+                    _ => Dash::Pattern(floats(d)),
+                }),
             };
             match roles::look(&roles, a["name"].as_str().unwrap(), host, bit(&a["night"])) {
                 None => Value::Null,
                 Some(l) => json!({
                     "label": l.label,
                     "colour": match l.colour {
-                        LookColour::Host(c) | LookColour::Stored(c) => c,
+                        LookColour::Host(c) => c,
+                        LookColour::Stored([r, g, b]) => format!("#{r:02x}{g:02x}{b:02x}"),
                         LookColour::Trace => "trace".into(),
                         LookColour::Ink => "ink".into(),
                     },
                     "weight": num(l.weight),
-                    "dash": l.dash.as_deref().map_or(Value::Null, floats_out),
+                    "dash": match &l.dash {
+                        Dash::Solid => Value::Null,
+                        Dash::Pattern(p) => floats_out(p),
+                    },
                 }),
             }
         }

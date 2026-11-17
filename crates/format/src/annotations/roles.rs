@@ -42,6 +42,22 @@ pub struct Role {
     pub dash: Option<Vec<f64>>,
 }
 
+/// Whether `weight` is one a role may add: 0 to `WEIGHT_AT_MOST`. A host's own weight for a role is
+/// held to it too, as a page's is.
+pub fn weight_fits(weight: f64) -> bool {
+    (0.0..=WEIGHT_AT_MOST).contains(&weight)
+}
+
+/// Whether `numbers` make a dash: (dash, gap) pairs, at most `DASH_NUMBERS`, each 0 to
+/// `DASH_AT_MOST`, not all 0. A host's own dash is held to it too.
+pub fn dash_fits(numbers: &[f64]) -> bool {
+    !numbers.is_empty()
+        && numbers.len().is_multiple_of(2)
+        && numbers.len() <= DASH_NUMBERS
+        && numbers.iter().all(|x| (0.0..=DASH_AT_MOST).contains(x))
+        && numbers.iter().sum::<f64>() > 0.0
+}
+
 /// Why `name` can't name a role, if it can't: lower-case ASCII letters, digits and `_`, starting
 /// with a letter, at most `NAME_BYTES`. No hyphen, so a page's `--tickwave-role-<name>-weight` and
 /// a role's colour variable never read as each other.
@@ -119,11 +135,10 @@ fn role(v: &Value, file: &str, place: usize) -> Result<Role, String> {
         Some(Ok(c)) => Some(c),
         Some(Err(problem)) => return Err(who(problem)),
     };
-    let number = |v: &Value| v.as_f64().filter(|x| x.is_finite());
     let weight = match fields.get("weight") {
         None => 0.0,
-        Some(w) => match number(w) {
-            Some(w) if (0.0..=WEIGHT_AT_MOST).contains(&w) => w,
+        Some(w) => match w.as_f64() {
+            Some(w) if weight_fits(w) => w,
             _ => {
                 return Err(who(format!(
                     "weight is a number from 0 to {WEIGHT_AT_MOST}"
@@ -134,19 +149,9 @@ fn role(v: &Value, file: &str, place: usize) -> Result<Role, String> {
     let dash = match fields.get("dash") {
         None => None,
         Some(Value::Array(d)) => {
-            let numbers: Option<Vec<f64>> = d
-                .iter()
-                .map(|x| number(x).filter(|x| (0.0..=DASH_AT_MOST).contains(x)))
-                .collect();
+            let numbers: Option<Vec<f64>> = d.iter().map(Value::as_f64).collect();
             match numbers {
-                Some(n)
-                    if !n.is_empty()
-                        && n.len() % 2 == 0
-                        && n.len() <= DASH_NUMBERS
-                        && n.iter().sum::<f64>() > 0.0 =>
-                {
-                    Some(n)
-                }
+                Some(n) if dash_fits(&n) => Some(n),
                 _ => {
                     return Err(who(format!(
                         "dash is (dash, gap) pairs, at most {DASH_NUMBERS} numbers, each from 0 \

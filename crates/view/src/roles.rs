@@ -5,17 +5,26 @@
 //! the browser draw a role alike.
 
 use escapement_tickwave_format::annotations::Role;
+use escapement_tickwave_format::annotations::roles::{dash_fits, weight_fits};
+
+/// How a role's lines run: solid, or dashed.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Dash {
+    Solid,
+    /// (dash, gap) pairs, in the role's line widths, its weight included.
+    Pattern(Vec<f64>),
+}
 
 /// What a host's own setting says of a role's look, `C` its colour type: None for each field it
-/// leaves to the recording.
+/// leaves to the recording. A weight or a dash past the bounds a declaration's are held to
+/// (`weight_fits`, `dash_fits`) is left to the recording too, as a page's is.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Host<C> {
     pub colour: Option<C>,
     /// Added to the trace's line weight.
     pub weight: Option<f64>,
-    /// (dash, gap) pairs in the role's line widths; `Some(None)` for a solid line over a dash the
-    /// declaration gives.
-    pub dash: Option<Option<Vec<f64>>>,
+    /// `Dash::Solid` makes a role the declaration dashes solid.
+    pub dash: Option<Dash>,
 }
 
 impl<C> Default for Host<C> {
@@ -33,8 +42,8 @@ impl<C> Default for Host<C> {
 pub enum LookColour<C> {
     /// The host's own.
     Host(C),
-    /// The declaration's on the host's face, `#rrggbb`.
-    Stored(String),
+    /// The declaration's on the host's face: red, green, blue.
+    Stored([u8; 3]),
     /// The trace's, as the first declared role's place gives it.
     Trace,
     /// Ink, as every later place gives it.
@@ -48,8 +57,16 @@ pub struct Look<C> {
     pub colour: LookColour<C>,
     /// Added to the trace's line weight.
     pub weight: f64,
-    /// (dash, gap) pairs in the role's line widths; None for a solid line.
-    pub dash: Option<Vec<f64>>,
+    pub dash: Dash,
+}
+
+/// `#rrggbb` as red, green and blue; None for anything else. A declaration's colours, and a stored
+/// view's, are held to that form when they are read.
+pub fn rgb(text: &str) -> Option<[u8; 3]> {
+    let hex = (text.strip_prefix('#'))
+        .filter(|h| h.len() == 6 && h.bytes().all(|b| b.is_ascii_hexdigit()))?;
+    let at = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
+    Some([at(0)?, at(2)?, at(4)?])
 }
 
 /// Role `name`'s look among `roles`, the order the sidecar declares them in, each field from the
@@ -60,20 +77,26 @@ pub struct Look<C> {
 pub fn look<C>(roles: &[Role], name: &str, host: Host<C>, night: bool) -> Option<Look<C>> {
     let at = roles.iter().position(|r| r.name == name)?;
     let declared = &roles[at];
-    let colour = match (host.colour, &declared.colour) {
+    let stored =
+        (declared.colour.as_ref()).and_then(|c| rgb(if night { &c.night } else { &c.day }));
+    let colour = match (host.colour, stored) {
         (Some(c), _) => LookColour::Host(c),
-        (None, Some(c)) => LookColour::Stored(if night { &c.night } else { &c.day }.clone()),
+        (None, Some(c)) => LookColour::Stored(c),
         (None, None) if at == 0 => LookColour::Trace,
         (None, None) => LookColour::Ink,
     };
     let dash = match host.dash {
-        Some(dash) => dash,
-        None => declared.dash.clone(),
+        Some(Dash::Pattern(p)) if dash_fits(&p) => Dash::Pattern(p),
+        Some(Dash::Solid) => Dash::Solid,
+        _ => declared.dash.clone().map_or(Dash::Solid, Dash::Pattern),
     };
     Some(Look {
         label: declared.label.clone(),
         colour,
-        weight: host.weight.unwrap_or(declared.weight),
+        weight: host
+            .weight
+            .filter(|&w| weight_fits(w))
+            .unwrap_or(declared.weight),
         dash,
     })
 }
@@ -142,12 +165,26 @@ pub fn stretches(spans: &[(i64, i64, &str)], roles: &[Role], px0: i64, px1: i64)
 /// The length of a row's line at column `x`, where a dashed stretch starting there starts its
 /// pattern: the last point at or before `x`, and the way along the segment after it. `paths` are
 /// the line's paths in order, each its points' x and the line's length there, flat. A lifted pen
-/// adds nothing, so between two paths the length is the first's at its end.
+/// adds nothing, so between two paths the length is the first's at its end. A path with no whole
+/// point is passed over, and a number past a path's last whole point is not read. 0 where no path
+/// has a point.
 pub fn length_at<P: AsRef<[f64]>>(paths: &[P], x: f64) -> f64 {
-    let at = paths.partition_point(|p| p.as_ref().first().is_some_and(|&x0| x0 <= x));
-    let Some(points) = paths.get(at.saturating_sub(1)).map(AsRef::as_ref) else {
+    // The last path whose first point is at or before `x`, else the first with a point.
+    let mut chosen: Option<&[f64]> = None;
+    for p in paths {
+        let points = p.as_ref();
+        if points.len() < 2 {
+            continue;
+        }
+        if chosen.is_some() && points[0] > x {
+            break;
+        }
+        chosen = Some(points);
+    }
+    let Some(points) = chosen else {
         return 0.0;
     };
+    let points = &points[..points.len() / 2 * 2];
     let mut k = 0;
     while k + 2 < points.len() && points[k + 2] <= x {
         k += 2;
@@ -156,4 +193,19 @@ pub fn length_at<P: AsRef<[f64]>>(paths: &[P], x: f64) -> f64 {
         return points[k + 1];
     }
     points[k + 1] + (x - points[k]) * (points[k + 3] - points[k + 1]) / (points[k + 2] - points[k])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rgb;
+
+    #[test]
+    fn rgb_takes_hash_and_six_hex_digits_alone() {
+        assert_eq!(rgb("#d9480f"), Some([0xd9, 0x48, 0x0f]));
+        assert_eq!(rgb("#D9480F"), Some([0xd9, 0x48, 0x0f]));
+        // A sign parses as a number's, but is no hex digit.
+        for text in ["#+1+2+3", "d9480f", "#d9480", "#d9480f0", "#g9480f", ""] {
+            assert_eq!(rgb(text), None, "{text:?}");
+        }
+    }
 }
