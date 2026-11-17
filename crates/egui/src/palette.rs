@@ -1,14 +1,26 @@
 //! The colours, type and line weight the graph draws with, all from the host.
 
+use std::collections::BTreeMap;
+
 use egui::{Color32, FontId, Visuals};
+use escapement_tickwave_view::format::annotations::Colour;
+use escapement_tickwave_view::roles::{Host, rgb};
 
 /// Every colour, font, opacity and line weight the graph uses; it has none of its own. A host
 /// starts from `from_visuals` and sets what its own tokens give.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct Palette {
-    /// The trace, and the DIO lanes' levels.
-    pub trace: Color32,
+    /// The trace, and the DIO lanes' levels: None for the colour the recording stores
+    /// (ANNOTATIONS.md, "The stored view") on the face `dark` names, else `ink`.
+    pub trace: Option<Color32>,
+    /// Whether the host's face is its dark one: a stored colour, the trace's or a role's, takes
+    /// its night colour.
+    pub dark: bool,
+    /// The host's own look for each paint role, by the role's name: each field it gives over the
+    /// recording's declaration (ANNOTATIONS.md, "Roles"), as a page's `--tickwave-role-<name>`
+    /// tokens are. A weight or a dash past a declaration's bounds is left to the declaration.
+    pub roles: BTreeMap<String, Host<Color32>>,
     /// What the graph stands on, and the halo of a marker line and the ground under its label.
     pub surface: Color32,
     /// Rules: the value marks and the time axis's ticks across the plot.
@@ -42,11 +54,14 @@ impl Palette {
     /// labels and lane names in the weak text colour, rules mixed from the text colour into the
     /// panel's, the selection and lost time washed with the text colour, the attention colour from
     /// the theme's warning colour; figures and labels in the host's monospace font at 11 points;
-    /// the web's opacities and its line weight, 1.5 points.
+    /// the web's opacities and its line weight, 1.5 points. The trace takes the recording's stored
+    /// colour where it has one, on the theme's face, and the host sets no role's look.
     pub fn from_visuals(v: &Visuals) -> Self {
         let ink = v.text_color();
         Self {
-            trace: ink,
+            trace: None,
+            dark: v.dark_mode,
+            roles: BTreeMap::new(),
             surface: v.panel_fill,
             hair: mix(ink, v.panel_fill, 0.22),
             ink,
@@ -61,6 +76,14 @@ impl Palette {
             shade: 0.12,
             line_weight: 1.5,
         }
+    }
+
+    /// The trace's colour: the host's, else `stored` on the face `dark` names, else ink.
+    pub(crate) fn trace_colour(&self, stored: Option<&Colour>) -> Color32 {
+        let stored = stored.and_then(|c| rgb(if self.dark { &c.night } else { &c.day }));
+        self.trace
+            .or(stored.map(|[r, g, b]| Color32::from_rgb(r, g, b)))
+            .unwrap_or(self.ink)
     }
 }
 

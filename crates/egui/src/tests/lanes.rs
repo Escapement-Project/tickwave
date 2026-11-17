@@ -115,7 +115,7 @@ fn lanes_only(h: &mut Harness<'_, Host>) {
 /// Lane `k`'s marks: its meshes' corners in the trace's colour at any opacity, as a run's band
 /// and rails are drawn.
 fn marks(h: &Harness<'_, Host>, k: usize) -> Vec<Pos2> {
-    let (lane, trace) = (drawn(h).layout.lanes[k], palette().trace);
+    let (lane, trace) = (drawn(h).layout.lanes[k], palette().trace.unwrap());
     shapes(h)
         .iter()
         .filter(|s| s.clip_rect == lane)

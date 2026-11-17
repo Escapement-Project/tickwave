@@ -109,7 +109,7 @@ fn recording() -> Vec<u8> {
 
 fn palette() -> Palette {
     let mut p = Palette::from_visuals(&egui::Visuals::light());
-    p.trace = egui::Color32::from_rgb(200, 30, 30);
+    p.trace = Some(egui::Color32::from_rgb(200, 30, 30));
     p
 }
 

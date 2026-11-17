@@ -5,6 +5,7 @@ mod ease;
 mod graph;
 mod lanes;
 mod live;
+mod roles;
 mod strip;
 mod viewer;
 
@@ -391,7 +392,9 @@ pub fn gated_live(
 
 pub fn palette() -> Palette {
     Palette {
-        trace: Color32::from_rgb(200, 30, 30),
+        trace: Some(Color32::from_rgb(200, 30, 30)),
+        dark: false,
+        roles: BTreeMap::new(),
         surface: Color32::from_rgb(250, 250, 250),
         hair: Color32::from_rgb(220, 220, 220),
         ink: Color32::from_rgb(10, 10, 10),

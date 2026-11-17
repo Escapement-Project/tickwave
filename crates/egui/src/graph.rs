@@ -28,6 +28,8 @@ pub(crate) const LANE_HEIGHT: f32 = 24.0;
 pub(crate) const AXIS_HEIGHT: f32 = 24.0;
 const LABEL_ROWS: usize = 3;
 pub(crate) const LABEL_TOP: f32 = 4.0;
+/// Room above and below the key's labels.
+const KEY_PAD: f32 = 3.0;
 const MIN_TRACE: f32 = 40.0;
 /// A zoom step's ease, in seconds.
 const EASE: f64 = 0.15;
@@ -171,6 +173,9 @@ pub(crate) struct Layout {
     pub axis: Rect,
     /// A marker label's row.
     pub label_row: f32,
+    /// The key of the recording's paint roles, under the time axis: kept whenever the recording
+    /// declares a role, so its height never changes as the reader moves.
+    pub key: Option<Rect>,
 }
 
 /// The window on screen, along the plot.
@@ -302,18 +307,22 @@ impl Graph<'_> {
         let gutter = (gutter + 12.0).ceil().max(40.0);
         let label_row = (ui.fonts_mut(|f| f.row_height(&p.labels)) + 2.0).ceil();
         let lanes = self.lanes.len() as f32 * LANE_HEIGHT;
+        let key = match facts.roles.is_empty() {
+            true => 0.0,
+            false => label_row + 2.0 * KEY_PAD,
+        };
         let height = match self.trace {
             Some(_) => self
                 .height
                 .unwrap_or_else(|| ui.available_height())
-                .max(MIN_TRACE + lanes + AXIS_HEIGHT),
+                .max(MIN_TRACE + lanes + AXIS_HEIGHT + key),
             // The markers' labels in their rows above the lanes, where there are markers.
             None => {
                 let band = match facts.markers {
                     true => LABEL_TOP + LABEL_ROWS as f32 * label_row,
                     false => 0.0,
                 };
-                let least = band + lanes + AXIS_HEIGHT;
+                let least = band + lanes + AXIS_HEIGHT + key;
                 self.height.unwrap_or(least).max(least)
             }
         };
@@ -321,7 +330,7 @@ impl Graph<'_> {
         let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
         let plot = Rect::from_min_max(
             pos2(rect.left() + gutter, rect.top()),
-            pos2(rect.right(), rect.bottom() - lanes - AXIS_HEIGHT),
+            pos2(rect.right(), rect.bottom() - lanes - AXIS_HEIGHT - key),
         );
         let lanes = (0..self.lanes.len())
             .map(|i| {
@@ -335,9 +344,12 @@ impl Graph<'_> {
         Layout {
             gutter: Rect::from_min_max(rect.left_top(), pos2(plot.left(), plot.bottom())),
             axis: Rect::from_min_max(
-                pos2(plot.left(), rect.bottom() - AXIS_HEIGHT),
-                rect.right_bottom(),
+                pos2(plot.left(), rect.bottom() - key - AXIS_HEIGHT),
+                pos2(rect.right(), rect.bottom() - key),
             ),
+            key: (key > 0.0).then(|| {
+                Rect::from_min_max(pos2(plot.left(), rect.bottom() - key), rect.right_bottom())
+            }),
             rect,
             plot,
             lanes,
@@ -590,7 +602,7 @@ impl Graph<'_> {
         }
     }
 
-    fn request(&self, columns: u32) -> Request {
+    fn request(&self, columns: u32, facts: &Facts) -> Request {
         let mut channels: Vec<usize> = self.trace.into_iter().collect();
         channels.extend_from_slice(self.lanes);
         let following = matches!(self.state.window, Window::Follow { .. });
@@ -598,6 +610,9 @@ impl Graph<'_> {
         markers.limit = MARKER_LIMIT;
         markers.list = self.extras.marker_list;
         markers.successor_of = self.extras.successor_of;
+        // Every paint over the answer's span, however many markers the window holds, where the
+        // recording declares a role to draw it in.
+        markers.paints = !facts.roles.is_empty();
         Request {
             window: self.state.window.clone(),
             // A window of its own doesn't move with now, so a moving now asks nothing.
@@ -714,7 +729,7 @@ impl Widget for Graph<'_> {
             let columns = (layout.plot.width() * ui.pixels_per_point())
                 .round()
                 .max(1.0) as u32;
-            let wanted = self.request(columns);
+            let wanted = self.request(columns, &facts);
             self.ask(wanted, &view.window, held.as_ref());
         }
         draw::graph(
@@ -730,6 +745,10 @@ impl Widget for Graph<'_> {
                 trace: trace.as_ref(),
                 lanes: self.lanes,
                 selection: self.state.selection.as_ref(),
+                ink: self.palette.trace_colour(facts.stored.as_ref()),
+                roles: &facts.roles,
+                paints: held.as_ref().map_or(&[][..], |h| &h.answer.markers.paints),
+                pixels_per_point: ui.pixels_per_point(),
             },
         );
         memory.shown = Some(Shown {

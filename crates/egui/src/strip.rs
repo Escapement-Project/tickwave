@@ -133,7 +133,8 @@ impl Widget for Strip<'_> {
             }
         }
         let window = self.state.window.resolve(Some(&extent), self.now);
-        draw::strip(ui, band, answer, &window, self.include_zero, p);
+        let trace = p.trace_colour(self.viewer.facts().stored.as_ref());
+        draw::strip(ui, band, answer, &window, self.include_zero, p, trace);
         let axis = Rect::from_min_max(pos2(rect.left(), band.bottom()), rect.max);
         draw::strip_axis(ui, axis, &extent, self.viewer.facts().timebase, p);
         let painter = ui.painter().with_clip_rect(band);

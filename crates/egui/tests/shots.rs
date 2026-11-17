@@ -31,9 +31,16 @@ const SIZE: egui::Vec2 = egui::vec2(1280.0, 720.0);
 const STRIP: f32 = 64.0;
 const SPACE: f32 = 8.0;
 
+/// A face whose trace is in `--series-verge`, as a page naming the series draws it.
+fn series_face(night: bool) -> tokens::Face {
+    let mut face = tokens::face(night).unwrap();
+    face.palette.trace = Some(face.series);
+    face
+}
+
 /// A harness showing `path` over `window`, its channels picked by name as the demo picks them.
 fn harness(path: &Path, window: Window) -> Harness<'static, Host> {
-    let face = tokens::face(false).unwrap();
+    let face = series_face(false);
     let host = Host {
         viewer: None,
         state: {
@@ -100,7 +107,7 @@ fn settle(h: &mut Harness<'_, Host>) {
 /// Renders the frame to `<name>-day.png` and `<name>-night.png` in `dir`.
 fn shoot(h: &mut Harness<'_, Host>, dir: &Path, name: &str) {
     for night in [false, true] {
-        h.state_mut().face = tokens::face(night).unwrap();
+        h.state_mut().face = series_face(night);
         h.ctx.set_visuals(tokens::visuals(&h.state().face));
         h.step();
         h.step();
@@ -201,7 +208,7 @@ fn views() {
         };
         let lanes: Vec<&str> = lanes.split(',').filter(|s| !s.is_empty()).collect();
         let height = 64.0 + 24.0 * lanes.len() as f32 + if trace == "-" { 0.0 } else { 160.0 };
-        let face = tokens::face(false).unwrap();
+        let face = series_face(false);
         let host = Host {
             viewer: None,
             state: {
@@ -283,10 +290,10 @@ fn the_demo_reads_each_face_from_the_site_tokens() {
         night.palette.surface,
         egui::Color32::from_rgb(0x15, 0x1b, 0x21)
     );
-    assert_eq!(
-        night.palette.trace,
-        egui::Color32::from_rgb(0x1a, 0xa3, 0x84)
-    );
+    assert_eq!(night.series, egui::Color32::from_rgb(0x1a, 0xa3, 0x84));
+    // The trace is left to a recording's stored colour, on the face's own.
+    assert_eq!((day.palette.trace, day.palette.dark), (None, false));
+    assert_eq!((night.palette.trace, night.palette.dark), (None, true));
     let wash = |ink: [u8; 3]| {
         let [r, g, b] = ink.map(|c| (f32::from(c) * 0.12).round() as u8);
         egui::Color32::from_rgba_premultiplied(r, g, b, (255.0f32 * 0.12).round() as u8)

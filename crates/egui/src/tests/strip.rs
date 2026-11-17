@@ -208,7 +208,7 @@ fn the_strip_draws_the_graph_answer_across_its_own_width_and_asks_nothing() {
     assert_eq!(strip_answer.grid.count, plot.width().round() as usize);
     let rect = strip(&h);
     let p = palette();
-    let fill = p.trace.gamma_multiply(p.fill);
+    let fill = p.trace.unwrap().gamma_multiply(p.fill);
     let spans = spans_of(&h, rect, fill);
     let (a0, b0) = (
         x_at(&h, &extent, extent.start),

@@ -14,6 +14,9 @@ pub struct Face {
     pub page: Color32,
     pub ink: Color32,
     pub night: bool,
+    /// `--series-verge`: the shots draw their traces in it, the demo in the recording's colour.
+    #[cfg_attr(not(test), expect(dead_code, reason = "read by the shots alone"))]
+    pub series: Color32,
     pub palette: Palette,
 }
 
@@ -94,8 +97,9 @@ const PALE: f32 = 0.35;
 const FILL: f32 = 0.45;
 const SHADE: f32 = 0.2;
 
-/// The day or night face, as verge fills its graph from tokens.rs: the trace in
-/// `--series-verge`, the selection in `--wash`, figures and labels in monospace at 11 points.
+/// The day or night face, as verge fills its graph from tokens.rs: the trace in the recording's
+/// stored colour, else ink, the selection in `--wash`, figures and labels in monospace at 11
+/// points.
 pub fn face(night: bool) -> Result<Face, String> {
     let props = block(CSS, if night { "night" } else { "day" })?;
     let get = |name: &str| -> Result<Color32, String> {
@@ -103,7 +107,8 @@ pub fn face(night: bool) -> Result<Face, String> {
         Ok(color32(colour(&props, value)?))
     };
     let mut palette = Palette::from_visuals(&egui::Visuals::default());
-    palette.trace = get("--series-verge")?;
+    palette.trace = None;
+    palette.dark = night;
     palette.surface = get("--surface")?;
     palette.hair = get("--hair")?;
     palette.ink = get("--ink")?;
@@ -121,6 +126,7 @@ pub fn face(night: bool) -> Result<Face, String> {
         page: get("--page")?,
         ink: get("--ink")?,
         night,
+        series: get("--series-verge")?,
         palette,
     })
 }

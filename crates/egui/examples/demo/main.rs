@@ -6,11 +6,13 @@
 //! With `--live N` it records a synthetic capture at N pairs a second, laid out as verge's energy
 //! captures are, and shows it as it is written; with `--seconds S` as well, the recorder
 //! finishes after S seconds and the demo reopens the recording finished; with `--from S` it starts
-//! S seconds in, written as fast as they can be. The colours are the
-//! project's design tokens, from `site/tokens.css`. `--trace FILE` writes every span as a Chrome
-//! trace, for Perfetto or chrome://tracing, and `--quit-after S` closes the window after S
-//! seconds. For measuring, `--window FROM..TO` opens at a window, in seconds, and `--repaint`
-//! draws every frame though nothing changes.
+//! S seconds in, written as fast as they can be. A recording's stored view (ANNOTATIONS.md, "The
+//! stored view") gives the channels drawn, the window it opens at and the trace's colour, as a
+//! page's view takes them; a recording that stores no colour draws its trace in ink. The other
+//! colours are the project's design tokens, from `site/tokens.css`. `--trace FILE` writes every
+//! span as a Chrome trace, for Perfetto or chrome://tracing, and `--quit-after S` closes the
+//! window after S seconds. For measuring, `--window FROM..TO` opens at a window, in seconds, and
+//! `--repaint` draws every frame though nothing changes.
 
 mod live;
 mod tokens;
@@ -112,34 +114,51 @@ impl Demo {
             }
             (None, None) => return Err("a recording or --live".into()),
         };
+        // The view the recording stores, where it stores one that reads.
+        let stored = viewer.recording(|r| r.stored_view()).ok().flatten();
         let (trace, flag, lanes) = viewer.recording(|r| {
             let channels = r.channels();
             let analog = |c: &&escapement_tickwave_egui::view::ChannelInfo| {
                 !matches!(c.kind, ChannelKind::Digital)
             };
-            let trace = r
-                .channel("I")
-                .filter(|&i| analog(&&channels[i]))
-                .or_else(|| channels.iter().position(|c| analog(&c)));
-            let lanes = channels
-                .iter()
-                .enumerate()
-                .filter(|(_, c)| {
-                    matches!(c.kind, ChannelKind::Digital) && c.name.starts_with("DIO")
-                })
-                .map(|(i, _)| i)
-                .collect();
+            // Its channels, in its order: the first analog one the trace, the digital ones lanes.
+            let named: Option<Vec<usize>> = (stored.as_ref())
+                .and_then(|v| v.channels.as_ref())
+                .map(|names| names.iter().filter_map(|n| r.channel(n)).collect());
+            let trace = match &named {
+                Some(named) => named.iter().copied().find(|&i| analog(&&channels[i])),
+                None => r.channel("I").filter(|&i| analog(&&channels[i])),
+            }
+            .or_else(|| channels.iter().position(|c| analog(&c)));
+            let lanes = match &named {
+                Some(named) => (named.iter().copied())
+                    .filter(|&i| matches!(channels[i].kind, ChannelKind::Digital))
+                    .collect(),
+                None => (channels.iter().enumerate())
+                    .filter(|(_, c)| {
+                        matches!(c.kind, ChannelKind::Digital) && c.name.starts_with("DIO")
+                    })
+                    .map(|(i, _)| i)
+                    .collect(),
+            };
             (trace, r.channel("under_range"), lanes)
         });
         let trace = trace.ok_or("the recording has no analog channel to draw")?;
         info!(trace, ?flag, ?lanes, "drawing");
-        let window = match args.window {
-            Some((a, b)) => {
+        let stored_span = (stored.as_ref())
+            .filter(|v| v.start.is_some() || v.end.is_some())
+            .map(|v| {
+                let length = viewer.recording(|r| r.length());
+                Window::At(v.start.unwrap_or(0)..v.end.unwrap_or(length))
+            });
+        let window = match (args.window, stored_span) {
+            (Some((a, b)), _) => {
                 let timebase = viewer.recording(|r| r.timebase());
                 let tick = |s: f64| (s * timebase.num() as f64 / timebase.den() as f64) as i64;
                 Window::At(tick(a)..tick(b))
             }
-            None => follow.clone(),
+            (None, Some(span)) => span,
+            (None, None) => follow.clone(),
         };
         Ok(Self {
             viewer,

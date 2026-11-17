@@ -69,7 +69,7 @@ fn repaint(h: &Harness<'_, Host>) -> Duration {
 fn trace_end(h: &Harness<'_, Host>) -> f32 {
     let plot = plot(h);
     let p = palette();
-    vertices_of(h, plot, p.trace)
+    vertices_of(h, plot, p.trace.unwrap())
         .iter()
         .map(|v| v.x)
         .fold(f32::NEG_INFINITY, f32::max)
@@ -144,11 +144,11 @@ fn nothing_is_drawn_between_the_data_end_and_now() {
     // A dot at the last sample reaches 2.5 points and its feathering past the sample's tick,
     // which lies a period before the end: nothing reaches past the end.
     assert_eq!(
-        past(vertices_of(&h, plot, p.trace), 1.0),
+        past(vertices_of(&h, plot, p.trace.unwrap()), 1.0),
         0,
         "the trace past the data"
     );
-    let pale = p.trace.gamma_multiply(p.pale);
+    let pale = p.trace.unwrap().gamma_multiply(p.pale);
     assert!(
         !vertices_of(&h, plot, pale).is_empty(),
         "pale samples before the end"
@@ -166,9 +166,9 @@ fn nothing_is_drawn_between_the_data_end_and_now() {
         "{shades:?}"
     );
     for lane in &s.layout.lanes {
-        assert!(!vertices_of(&h, *lane, p.trace).is_empty());
+        assert!(!vertices_of(&h, *lane, p.trace.unwrap()).is_empty());
         assert_eq!(
-            past(vertices_of(&h, *lane, p.trace), 1.0),
+            past(vertices_of(&h, *lane, p.trace.unwrap()), 1.0),
             0,
             "a lane past the data"
         );

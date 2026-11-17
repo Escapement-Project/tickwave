@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::thread::JoinHandle;
 
+use escapement_tickwave_view::format::annotations::{Colour, Role};
 use escapement_tickwave_view::format::model::Ratio;
 #[cfg(feature = "live")]
 use escapement_tickwave_view::format::snapshot::Snapshot;
@@ -78,15 +79,24 @@ pub(crate) struct Facts {
     pub markers: bool,
     /// Made from a writer's snapshot, and not reopened since.
     pub live: bool,
+    /// The paint roles the sidecar declares, in order: the graph keeps room for their key
+    /// whenever there are any.
+    pub roles: Arc<[Role]>,
+    /// The trace's colour the sidecar stores (ANNOTATIONS.md, "The stored view").
+    pub stored: Option<Colour>,
 }
 
 impl Facts {
+    /// What a frame reads of `r`. Its roles and stored view come from its bundle alone, read the
+    /// first time, no annotation part with them; a bundle that doesn't read declares none.
     fn of(r: &Recording, live: bool) -> Self {
         Self {
             timebase: r.timebase(),
             channels: r.channels().into(),
             markers: r.has_markers(),
             live,
+            roles: r.roles().unwrap_or_default().into(),
+            stored: r.stored_view().ok().flatten().and_then(|v| v.colour),
         }
     }
 }
@@ -637,6 +647,8 @@ mod tests {
                 channels: Arc::new([]),
                 markers: false,
                 live: true,
+                roles: Arc::new([]),
+                stored: None,
             },
             snapshots: 0,
             runs: 0,

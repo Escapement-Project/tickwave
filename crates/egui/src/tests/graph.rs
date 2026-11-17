@@ -19,11 +19,14 @@ fn at(window: std::ops::Range<i64>) -> ViewState {
 }
 
 fn fill(p: &Palette) -> Color32 {
-    p.trace.gamma_multiply(p.fill)
+    p.trace.unwrap().gamma_multiply(p.fill)
 }
 
 fn pale_fill(p: &Palette) -> Color32 {
-    p.trace.gamma_multiply(p.pale).gamma_multiply(p.fill)
+    p.trace
+        .unwrap()
+        .gamma_multiply(p.pale)
+        .gamma_multiply(p.fill)
 }
 
 fn shade(p: &Palette) -> Color32 {
@@ -43,7 +46,7 @@ fn shaded(h: &Harness<'_, Host>, clip: Rect, p: &Palette) -> Vec<Pos2> {
         .flatten()
         .filter(|v| {
             let a = v.color.a();
-            a > 0 && a < 255 && v.color == p.trace.gamma_multiply(f32::from(a) / 255.0)
+            a > 0 && a < 255 && v.color == p.trace.unwrap().gamma_multiply(f32::from(a) / 255.0)
         })
         .map(|v| v.pos)
         .collect()
@@ -92,7 +95,10 @@ fn fitted_range_leaves_the_label_rows_above_the_trace() {
 fn trace_top(h: &Harness<'_, Host>) -> f32 {
     let plot = plot(h);
     let p = palette();
-    let mut ys: Vec<f32> = vertices_of(h, plot, p.trace).iter().map(|v| v.y).collect();
+    let mut ys: Vec<f32> = vertices_of(h, plot, p.trace.unwrap())
+        .iter()
+        .map(|v| v.y)
+        .collect();
     ys.extend(vertices_of(h, plot, fill(&p)).iter().map(|v| v.y));
     ys.into_iter().fold(f32::INFINITY, f32::min) - plot.top()
 }
@@ -341,7 +347,7 @@ fn zoomed_in_the_answer_holds_samples_and_the_strip_covers_the_extent() {
     // Drawn as samples, not as bands.
     let p = palette();
     assert!(spans_of(&h, plot(&h), fill(&p)).is_empty());
-    assert!(!vertices_of(&h, plot(&h), p.trace).is_empty());
+    assert!(!vertices_of(&h, plot(&h), p.trace.unwrap()).is_empty());
 }
 
 #[test]
@@ -382,11 +388,11 @@ fn a_pause_leaves_a_gap_and_only_lost_time_is_shaded() {
     answered(&mut h, window);
     assert!(rects_of(&h, plot(&h), shade(&p)).is_empty());
     let (a, b) = (x_of(&h, pause.start), x_of(&h, pause.end));
-    let line = vertices_of(&h, plot(&h), p.trace);
+    let line = vertices_of(&h, plot(&h), p.trace.unwrap());
     assert!(line.iter().any(|v| v.x < a) && line.iter().any(|v| v.x > b));
     // Clear of the dots at either end, 2.5 points and their feathering.
     assert!(
-        !crossed(&h, plot(&h), p.trace, a + 4.0, b - 4.0),
+        !crossed(&h, plot(&h), p.trace.unwrap(), a + 4.0, b - 4.0),
         "the trace crosses the pause at {a}..{b}"
     );
 
@@ -399,7 +405,7 @@ fn a_pause_leaves_a_gap_and_only_lost_time_is_shaded() {
     let (a, b) = (x_of(&h, lost[0].start), x_of(&h, lost[0].end));
     assert!((bands[0].left() - a).abs() < 1.0 && (bands[0].right() - b).abs() < 1.0);
     assert!(
-        !crossed(&h, plot(&h), p.trace, a + 4.0, b - 4.0),
+        !crossed(&h, plot(&h), p.trace.unwrap(), a + 4.0, b - 4.0),
         "the trace crosses the loss at {a}..{b}"
     );
 }
@@ -502,7 +508,7 @@ fn a_new_trace_is_asked_for_at_once_and_drawn_only_from_its_own_answer() {
         h.step();
     }
     assert!(spans_of(&h, plot(&h), fill(&p)).is_empty());
-    assert!(vertices_of(&h, plot(&h), p.trace).is_empty());
+    assert!(vertices_of(&h, plot(&h), p.trace.unwrap()).is_empty());
     gate.open();
     for _ in 0..400 {
         h.step();
@@ -736,7 +742,7 @@ fn a_lane_shades_its_gaps_and_what_it_cannot_resolve() {
     assert!((gaps[0].left() - a).abs() < 1.0 && (gaps[0].right() - b).abs() < 1.0);
     // Zoomed in, every pulse resolves: levels as lines, nothing shaded.
     assert!(shaded(&h, lane, &p).is_empty());
-    let levels = vertices_of(&h, lane, p.trace);
+    let levels = vertices_of(&h, lane, p.trace.unwrap());
     assert!(levels.iter().any(|v| v.x < a) && levels.iter().any(|v| v.x > b));
     // The other lanes are flat low lines, with nothing shaded.
     let lane0 = drawn(&h).layout.lanes[0];
@@ -772,7 +778,7 @@ fn a_pulse_across_a_column_boundary_draws_as_one_full_ink_stroke_at_its_middle()
         assert!((lo..hi).contains(&apart), "edges {apart} columns apart");
         assert!(shaded(&h, lane, &p).is_empty(), "weight {weight}");
         let mid = x_of(&h, 10_000_500);
-        let strokes: Vec<_> = spans_of(&h, lane, p.trace)
+        let strokes: Vec<_> = spans_of(&h, lane, p.trace.unwrap())
             .into_iter()
             .filter(|&(a, b)| (b - a - weight).abs() < 0.01 && ((a + b) / 2.0 - mid).abs() < 0.6)
             .collect();
@@ -848,7 +854,7 @@ fn a_short_pause_between_two_runs_keeps_its_gap_and_its_line_takes_the_larger_ba
         assert!(first_band > second_band, "{first_band} {second_band}");
         let rest_toned: Vec<(Pos2, u8)> =
             toned.iter().copied().filter(|(v, _)| inside(v.x)).collect();
-        let ink = spans_of(&h, lane, p.trace)
+        let ink = spans_of(&h, lane, p.trace.unwrap())
             .into_iter()
             .any(|(x0, x1)| x0 <= (a + b) / 2.0 && x1 >= (a + b) / 2.0);
         match held {
@@ -1025,7 +1031,10 @@ fn the_trace_and_the_lanes_draw_at_the_palettes_line_weight() {
         answered(&mut h, window.clone());
         let p = h.state().palette.clone();
         let depth = |clip: Rect| {
-            let ys: Vec<f32> = vertices_of(&h, clip, p.trace).iter().map(|v| v.y).collect();
+            let ys: Vec<f32> = vertices_of(&h, clip, p.trace.unwrap())
+                .iter()
+                .map(|v| v.y)
+                .collect();
             ys.iter().copied().fold(f32::NEG_INFINITY, f32::max)
                 - ys.iter().copied().fold(f32::INFINITY, f32::min)
         };
@@ -1047,7 +1056,10 @@ fn a_palette_from_the_hosts_theme_takes_its_colours_and_the_webs_opacities_and_w
     for v in [egui::Visuals::light(), egui::Visuals::dark()] {
         let p = Palette::from_visuals(&v);
         let ink = v.text_color();
-        assert_eq!((p.trace, p.ink, p.ink_2), (ink, ink, v.weak_text_color()));
+        assert_eq!((p.ink, p.ink_2), (ink, v.weak_text_color()));
+        // The trace left to a recording's stored colour, else ink, on the theme's face.
+        assert_eq!((p.trace, p.dark), (None, v.dark_mode));
+        assert!(p.roles.is_empty());
         assert_eq!(p.surface, v.panel_fill);
         assert_eq!(p.wash, ink.gamma_multiply(0.12));
         assert_eq!(p.attention_ink, v.warn_fg_color);

@@ -6,11 +6,13 @@ use egui::epaint::{CircleShape, PathShape, Tessellator};
 use egui::{Align2, Color32, Mesh, Pos2, Rect, Shape, Stroke, Ui, pos2};
 use escapement_tickwave_view::axis::time_axis;
 use escapement_tickwave_view::columns::{DigitalColumns, Grid, State};
+use escapement_tickwave_view::format::annotations::Role;
 use escapement_tickwave_view::format::model::Ratio;
 use escapement_tickwave_view::readouts::format_marks;
+use escapement_tickwave_view::roles::{self, Dash, LookColour};
 use escapement_tickwave_view::scale::{ValueRange, range_marks};
 use escapement_tickwave_view::shade::{self, Look};
-use escapement_tickwave_view::{AnalogColumns, Drawn, Marker, Point, StripAnswer};
+use escapement_tickwave_view::{AnalogColumns, Drawn, Marker, Paint, Point, StripAnswer};
 
 use crate::graph::{LABEL_TOP, Layout, View, fitted};
 use crate::palette::Palette;
@@ -24,6 +26,10 @@ const DOT_RADIUS: f32 = 2.5;
 const DOT_SPACING: f32 = 6.0;
 const AXIS_GAP: f64 = 16.0;
 const NOTE: &str = "More markers: zoom in or use the list";
+/// A key's entry: its line this long, then this far to its label, and entries this far apart.
+const SWATCH: f32 = 18.0;
+const SWATCH_GAP: f32 = 5.0;
+const KEY_GAP: f32 = 12.0;
 
 /// The columns of `g` that any tick of [from, to) falls in, as the view core picks a window's.
 pub(crate) fn columns_over(g: &Grid, from: i64, to: i64) -> Range<usize> {
@@ -215,6 +221,12 @@ pub(crate) struct Frame<'a> {
     pub trace: Option<&'a Trace<'a>>,
     pub lanes: &'a [usize],
     pub selection: Option<&'a Range<i64>>,
+    /// The trace's colour: the palette's, else the recording's stored one, else ink.
+    pub ink: Color32,
+    /// The paint roles the sidecar declares, in order, and the paints over the answer's span.
+    pub roles: &'a [Role],
+    pub paints: &'a [Paint],
+    pub pixels_per_point: f32,
 }
 
 impl Frame<'_> {
@@ -272,41 +284,278 @@ fn shade_lost(
     }
 }
 
-/// A trace's colour: pale where it touches a loss or is flagged.
-fn colour(p: &Palette, pale: bool) -> Color32 {
-    if pale {
-        p.trace.gamma_multiply(p.pale)
-    } else {
-        p.trace
+/// A colour as a share of the one a row's stretch draws in: that colour `gamma_multiply`'d by
+/// `.0`, then by `.1`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Tint(f32, f32);
+
+impl Tint {
+    const FULL: Self = Self(1.0, 1.0);
+
+    /// A trace's: pale where it touches a loss or is flagged.
+    fn trace(p: &Palette, pale: bool) -> Self {
+        Self(if pale { p.pale } else { 1.0 }, 1.0)
+    }
+
+    fn of(self, c: Color32) -> Color32 {
+        c.gamma_multiply(self.0).gamma_multiply(self.1)
     }
 }
 
-fn stroke(p: &Palette, c: Color32) -> Stroke {
-    Stroke::new(p.line_weight, c)
+/// What a row draws, each part a tint of the colour its stretch draws in: rectangles filled,
+/// polylines, and dots. Each polyline is on a chain: a band's top edge, its bottom edge, a line
+/// through samples, a lane's levels, each from one run of data to the next gap. A dash runs on
+/// along a chain.
+#[derive(Default)]
+struct Ink {
+    fills: Vec<(Rect, Tint)>,
+    lines: Vec<(Vec<Pos2>, Tint, u32)>,
+    dots: Vec<(Pos2, Tint)>,
+}
+
+impl Ink {
+    fn line(&mut self, line: &mut Vec<Pos2>, tint: Tint, chain: u32) {
+        if line.len() >= 2 {
+            self.lines.push((std::mem::take(line), tint, chain));
+        } else {
+            line.clear();
+        }
+    }
+
+    /// Each line's length before it along its chain, and its points' x and the chain's length
+    /// there, flat: where a dash's phase is (`roles::length_at`).
+    fn lengths(&self) -> Vec<(f64, Vec<f64>)> {
+        let mut along: std::collections::HashMap<u32, f64> = std::collections::HashMap::new();
+        self.lines
+            .iter()
+            .map(|(points, _, chain)| {
+                let at = *along.get(chain).unwrap_or(&0.0);
+                let mut length = at;
+                let mut flat = Vec::with_capacity(points.len() * 2);
+                for (i, q) in points.iter().enumerate() {
+                    if i > 0 {
+                        length += f64::from(points[i - 1].distance(*q));
+                    }
+                    flat.extend([f64::from(q.x), length]);
+                }
+                along.insert(*chain, length);
+                (at, flat)
+            })
+            .collect()
+    }
+}
+
+/// How a stretch of a row draws: its colour, its line's width in points, and its dash's (dash,
+/// gap) lengths in points, or None for a solid line.
+#[derive(Clone, Debug, PartialEq)]
+struct Pen {
+    colour: Color32,
+    width: f32,
+    dash: Option<Vec<f32>>,
+}
+
+/// The dashes of `line` whose pattern, (dash, gap) lengths, is `phase` along at its first point:
+/// each a polyline.
+fn dashes(line: &[Pos2], pattern: &[f32], phase: f32) -> Vec<Vec<Pos2>> {
+    let period: f32 = pattern.iter().sum();
+    let lengths = pattern.iter().all(|x| x.is_finite() && *x >= 0.0);
+    if line.len() < 2 || !lengths || period <= 0.0 {
+        return vec![line.to_vec()];
+    }
+    let mut k = 0;
+    let mut into = phase.rem_euclid(period);
+    while into >= pattern[k] {
+        into -= pattern[k];
+        k = (k + 1) % pattern.len();
+    }
+    // What is left of element `k`; an even one is a dash.
+    let mut left = pattern[k] - into;
+    let mut out = Vec::new();
+    let mut dash = if k % 2 == 0 {
+        vec![line[0]]
+    } else {
+        Vec::new()
+    };
+    for w in line.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let length = a.distance(b);
+        let mut done = 0.0;
+        while length - done > left {
+            done += left;
+            let q = a + (b - a) * (done / length);
+            if k % 2 == 0 {
+                dash.push(q);
+                out.push(std::mem::take(&mut dash));
+            } else {
+                dash = vec![q];
+            }
+            k = (k + 1) % pattern.len();
+            left = pattern[k];
+        }
+        left -= length - done;
+        if k % 2 == 0 {
+            dash.push(b);
+        }
+    }
+    if dash.len() >= 2 {
+        out.push(dash);
+    }
+    out
+}
+
+/// Draws `ink` in `pen`, clipped to `clip`: its fills, then its lines and dots. Where `whole`,
+/// `clip` is the row's own and every part is drawn; else only the parts that reach into it.
+fn paint(ui: &Ui, ink: &Ink, pen: &Pen, clip: Rect, whole: bool) {
+    let reaches = |a: f32, b: f32| whole || (b >= clip.left() && a <= clip.right());
+    let mut fills = Mesh::default();
+    for (r, t) in &ink.fills {
+        if reaches(r.left(), r.right()) {
+            fills.add_colored_rect(*r, t.of(pen.colour));
+        }
+    }
+    let options = ui.ctx().tessellation_options(|o| *o);
+    let size = ui.ctx().fonts(|f| f.font_image_size());
+    let mut t = Tessellator::new(ui.ctx().pixels_per_point(), options, size, Vec::new());
+    t.set_clip_rect(clip);
+    let mut mesh = Mesh::default();
+    let mut stroke = |points: Vec<Pos2>, tint: Tint, mesh: &mut Mesh| {
+        t.tessellate_path(
+            &PathShape::line(points, Stroke::new(pen.width, tint.of(pen.colour))),
+            mesh,
+        );
+    };
+    let span = |points: &[Pos2]| {
+        let xs = points.iter().map(|q| q.x);
+        let lo = xs.clone().fold(f32::INFINITY, f32::min);
+        (lo, xs.fold(f32::NEG_INFINITY, f32::max))
+    };
+    match &pen.dash {
+        None => {
+            for (points, tint, _) in &ink.lines {
+                let (a, b) = span(points);
+                if reaches(a, b) {
+                    stroke(points.clone(), *tint, &mut mesh);
+                }
+            }
+        }
+        Some(pattern) => {
+            // One phase along each chain from where the stretch starts, or the chain does.
+            let lengths = ink.lengths();
+            let mut origins: std::collections::HashMap<u32, f64> = std::collections::HashMap::new();
+            for (i, (points, tint, chain)) in ink.lines.iter().enumerate() {
+                let (a, b) = span(points);
+                if !reaches(a, b) {
+                    continue;
+                }
+                let origin = *origins.entry(*chain).or_insert_with(|| {
+                    let paths: Vec<&[f64]> = (ink.lines.iter().zip(&lengths))
+                        .filter(|((_, _, c), _)| c == chain)
+                        .map(|(_, (_, flat))| flat.as_slice())
+                        .collect();
+                    roles::length_at(&paths, f64::from(clip.left()))
+                });
+                let phase = (lengths[i].0 - origin) as f32;
+                for d in dashes(points, pattern, phase) {
+                    stroke(d, *tint, &mut mesh);
+                }
+            }
+        }
+    }
+    for (q, tint) in &ink.dots {
+        t.tessellate_shape(
+            Shape::Circle(CircleShape::filled(*q, DOT_RADIUS, tint.of(pen.colour))),
+            &mut mesh,
+        );
+    }
+    let painter = ui.painter().with_clip_rect(clip);
+    painter.add(Shape::mesh(fills));
+    painter.add(Shape::mesh(mesh));
+}
+
+/// Role `name`'s pen: its look (`roles::look`), the host's over the declaration's, in the trace's
+/// line weight with the role's added.
+fn role_pen(f: &Frame, name: &str) -> Option<Pen> {
+    let p = f.palette;
+    let host = p.roles.get(name).cloned().unwrap_or_default();
+    let look = roles::look(f.roles, name, host, p.dark)?;
+    let colour = match look.colour {
+        LookColour::Host(c) => c,
+        LookColour::Stored([r, g, b]) => Color32::from_rgb(r, g, b),
+        LookColour::Trace => f.ink,
+        LookColour::Ink => p.ink,
+    };
+    let width = p.line_weight + look.weight as f32;
+    let dash = match look.dash {
+        Dash::Solid => None,
+        Dash::Pattern(d) => Some(d.iter().map(|&x| x as f32 * width).collect()),
+    };
+    Some(Pen {
+        colour,
+        width,
+        dash,
+    })
+}
+
+/// Row `rect` of channel `c` cut where the role painting it changes (`roles::stretches`), each
+/// stretch the part of `rect` it covers and its pen: the latest paint in sidecar order with a
+/// declared role draws a column, and the trace's own pen the rest. `rect` alone, in the trace's
+/// pen, where nothing paints it.
+fn stretches(f: &Frame, c: usize, rect: Rect) -> Vec<(Rect, Pen)> {
+    let p = f.palette;
+    let plain = Pen {
+        colour: f.ink,
+        width: p.line_weight,
+        dash: None,
+    };
+    let name = f.facts.channels.get(c).map(|i| i.name.as_str());
+    let (Some(name), false) = (name, f.roles.is_empty()) else {
+        return vec![(rect, plain)];
+    };
+    let ppp = f.pixels_per_point;
+    let column = |t: i64| ((f.view.x(t as f64) - rect.left()) * ppp).round() as i64;
+    let spans: Vec<(i64, i64, &str)> = (f.paints.iter())
+        .filter(|q| q.channels.is_empty() || q.channels.iter().any(|n| n == name))
+        .map(|q| (column(q.span.start), column(q.span.end), q.role.as_str()))
+        .collect();
+    let cut = roles::stretches(&spans, f.roles, 0, (rect.width() * ppp).round() as i64);
+    if cut.iter().all(|s| s.role.is_none()) {
+        return vec![(rect, plain)];
+    }
+    cut.into_iter()
+        .map(|s| {
+            let x = |px: i64| rect.left() + px as f32 / ppp;
+            let clip = Rect::from_x_y_ranges(x(s.px0)..=x(s.px1), rect.y_range());
+            let pen = (s.role)
+                .and_then(|r| role_pen(f, &f.roles[r].name))
+                .unwrap_or_else(|| plain.clone());
+            (clip, pen)
+        })
+        .collect()
 }
 
 /// Each piece's band from its least to its greatest value, filled, with lines along both
-/// edges that step from one piece to the next where they join.
+/// edges that step from one piece to the next where they join. A piece that doesn't join the
+/// one before starts the edges' chains again, from `chain` on.
 fn bands(
     pieces: &[Piece],
     view: &View,
     y_at: impl Fn(f64) -> f32,
     p: &Palette,
-    fills: &mut Mesh,
-    lines: &mut Lines,
+    ink: &mut Ink,
+    chain: &mut u32,
 ) {
     let (mut top, mut bottom) = (Vec::new(), Vec::new());
-    let mut drawing: Option<(Color32, f32, f32)> = None;
+    let mut drawing: Option<(Tint, f32, f32)> = None;
     for piece in pieces {
         let (x0, x1) = (view.x(piece.from), view.x(piece.to));
         let (yt, yb) = (y_at(piece.max), y_at(piece.min));
-        let c = colour(p, piece.pale);
-        fills.add_colored_rect(
+        let t = Tint::trace(p, piece.pale);
+        ink.fills.push((
             Rect::from_min_max(pos2(x0, yt), pos2(x1, yb)),
-            c.gamma_multiply(p.fill),
-        );
+            Tint(t.0, p.fill),
+        ));
         match drawing {
-            Some((same, _, _)) if piece.joined && same == c => {
+            Some((same, _, _)) if piece.joined && same == t => {
                 step(&mut top, pos2(x0, yt));
                 step(&mut top, pos2(x1, yt));
                 step(&mut bottom, pos2(x0, yb));
@@ -314,36 +563,25 @@ fn bands(
             }
             _ => {
                 if let Some((was, pt, pb)) = drawing {
-                    lines.add(&mut top, stroke(p, was));
-                    lines.add(&mut bottom, stroke(p, was));
+                    ink.line(&mut top, was, *chain);
+                    ink.line(&mut bottom, was, *chain + 1);
                     if piece.joined {
                         top.push(pos2(x0, pt));
                         bottom.push(pos2(x0, pb));
                     }
                 }
+                if !piece.joined {
+                    *chain += 2;
+                }
                 top.extend([pos2(x0, yt), pos2(x1, yt)]);
                 bottom.extend([pos2(x0, yb), pos2(x1, yb)]);
             }
         }
-        drawing = Some((c, yt, yb));
+        drawing = Some((t, yt, yb));
     }
-    if let Some((c, _, _)) = drawing {
-        lines.add(&mut top, stroke(p, c));
-        lines.add(&mut bottom, stroke(p, c));
-    }
-}
-
-/// Polylines a frame builds before they are tessellated: each point list with its stroke.
-#[derive(Default)]
-struct Lines(Vec<(Vec<Pos2>, Stroke)>);
-
-impl Lines {
-    fn add(&mut self, line: &mut Vec<Pos2>, stroke: Stroke) {
-        if line.len() >= 2 {
-            self.0.push((std::mem::take(line), stroke));
-        } else {
-            line.clear();
-        }
+    if let Some((t, _, _)) = drawing {
+        ink.line(&mut top, t, *chain);
+        ink.line(&mut bottom, t, *chain + 1);
     }
 }
 
@@ -355,22 +593,6 @@ fn step(line: &mut Vec<Pos2>, p: Pos2) {
     } else {
         line.push(p);
     }
-}
-
-/// Every line of `lines` and every circle of `circles` as one mesh.
-fn tessellate(ui: &Ui, clip: Rect, lines: Lines, circles: Vec<CircleShape>) -> Mesh {
-    let options = ui.ctx().tessellation_options(|o| *o);
-    let size = ui.ctx().fonts(|f| f.font_image_size());
-    let mut t = Tessellator::new(ui.ctx().pixels_per_point(), options, size, Vec::new());
-    t.set_clip_rect(clip);
-    let mut mesh = Mesh::default();
-    for (points, stroke) in lines.0 {
-        t.tessellate_path(&PathShape::line(points, stroke), &mut mesh);
-    }
-    for c in circles {
-        t.tessellate_shape(Shape::Circle(c), &mut mesh);
-    }
-    mesh
 }
 
 /// The text of a marker's label: its number, then its label.
@@ -396,15 +618,15 @@ pub(crate) fn graph(ui: &Ui, f: &Frame) {
         axes(ui, f, field)
     };
     let plot = ui.painter().with_clip_rect(l.plot);
-    {
+    if let Some(c) = f.channel {
         let _span = tracing::debug_span!("trace").entered();
-        let (fills, lines, circles) = trace(f, px, &plot);
-        let mesh = {
-            let _span = tracing::debug_span!("tessellate").entered();
-            tessellate(ui, l.plot, lines, circles)
-        };
-        plot.add(Shape::mesh(fills));
-        plot.add(Shape::mesh(mesh));
+        let ink = trace(f, px, &plot);
+        let cut = stretches(f, c, l.plot);
+        let whole = cut.len() == 1;
+        let _span = tracing::debug_span!("tessellate").entered();
+        for (clip, pen) in &cut {
+            paint(ui, &ink, pen, *clip, whole);
+        }
     }
     for (&c, rect) in f.lanes.iter().zip(&l.lanes) {
         let _span = tracing::debug_span!("lane", channel = c).entered();
@@ -425,6 +647,43 @@ pub(crate) fn graph(ui: &Ui, f: &Frame) {
     }
     for (text, pos, align, font) in axis {
         painter.text(pos, align, text, font, p.ink_2);
+    }
+    if let Some(rect) = l.key {
+        key(ui, f, rect);
+    }
+}
+
+/// The key: every role the sidecar declares, in its order, right-aligned along `rect`, each a
+/// short line drawn as the role's lines are, then its label.
+fn key(ui: &Ui, f: &Frame, rect: Rect) {
+    let p = f.palette;
+    let painter = ui.painter().with_clip_rect(rect);
+    let middle = rect.center().y;
+    let mut right = rect.right();
+    for role in f.roles.iter().rev() {
+        let Some(pen) = role_pen(f, &role.name) else {
+            continue;
+        };
+        let galley = painter.layout_no_wrap(role.label.clone(), p.labels.clone(), p.ink_2);
+        let left = right - galley.size().x;
+        let size = galley.size();
+        painter.galley(pos2(left, middle - size.y / 2.0), galley, p.ink_2);
+        let line = vec![
+            pos2(left - SWATCH_GAP - SWATCH, middle),
+            pos2(left - SWATCH_GAP, middle),
+        ];
+        let stroke = Stroke::new(pen.width, pen.colour);
+        match &pen.dash {
+            None => {
+                painter.add(PathShape::line(line, stroke));
+            }
+            Some(pattern) => {
+                for d in dashes(&line, pattern, 0.0) {
+                    painter.add(PathShape::line(d, stroke));
+                }
+            }
+        }
+        right = left - SWATCH_GAP - SWATCH - KEY_GAP;
     }
 }
 
@@ -514,36 +773,31 @@ fn axes(ui: &Ui, f: &Frame, field: Rect) -> Vec<(String, Pos2, Align2, egui::Fon
     labels
 }
 
-/// The trace's band fills, its lines and its dots, with the lost time shaded under them.
-fn trace(f: &Frame, px: f32, plot: &egui::Painter) -> (Mesh, Lines, Vec<CircleShape>) {
+/// The trace's band fills, its lines and its dots, as tints of the colour each stretch draws in,
+/// with the lost time shaded under them.
+fn trace(f: &Frame, px: f32, plot: &egui::Painter) -> Ink {
     let p = f.palette;
-    let mut fills = Mesh::default();
-    let mut lines = Lines::default();
-    let mut circles = Vec::new();
+    let mut ink = Ink::default();
     let Some(t) = f.trace else {
-        return (fills, lines, circles);
+        return ink;
     };
     let w = &f.view.window;
     shade_lost(plot, f.view, f.layout.plot, t.lost(w), px, p);
-    bands(
-        &t.pieces(w),
-        f.view,
-        |v| f.y_at(v),
-        p,
-        &mut fills,
-        &mut lines,
-    );
+    let mut chain = 0;
+    bands(&t.pieces(w), f.view, |v| f.y_at(v), p, &mut ink, &mut chain);
     if let Some(points) = t.samples {
         let mut line = Vec::new();
-        let mut drawing: Option<(Color32, i64, f32)> = None;
+        let mut drawing: Option<(Tint, i64, f32)> = None;
+        chain += 2;
         for s in points {
             if s.value.is_nan() {
-                if let Some((c, _, _)) = drawing.take() {
-                    lines.add(&mut line, stroke(p, c));
+                if let Some((was, _, _)) = drawing.take() {
+                    ink.line(&mut line, was, chain);
+                    chain += 1;
                 }
                 continue;
             }
-            let c = colour(p, s.flagged);
+            let c = Tint::trace(p, s.flagged);
             let (x0, x1, y) = (
                 f.view.x(s.tick as f64),
                 f.view.x(s.end as f64),
@@ -557,9 +811,11 @@ fn trace(f: &Frame, px: f32, plot: &egui::Painter) -> (Mesh, Lines, Vec<CircleSh
                 }
                 _ => {
                     if let Some((was, _, before)) = drawing {
-                        lines.add(&mut line, stroke(p, was));
+                        ink.line(&mut line, was, chain);
                         if joined {
                             line.push(pos2(x0, before));
+                        } else {
+                            chain += 1;
                         }
                     }
                     line.extend([pos2(x0, y), pos2(x1, y)]);
@@ -568,7 +824,7 @@ fn trace(f: &Frame, px: f32, plot: &egui::Painter) -> (Mesh, Lines, Vec<CircleSh
             drawing = Some((c, s.end, y));
         }
         if let Some((c, _, _)) = drawing {
-            lines.add(&mut line, stroke(p, c));
+            ink.line(&mut line, c, chain);
         }
         let shown = points
             .iter()
@@ -576,19 +832,19 @@ fn trace(f: &Frame, px: f32, plot: &egui::Painter) -> (Mesh, Lines, Vec<CircleSh
             .count();
         if shown > 0 && f.view.width / shown as f32 >= DOT_SPACING {
             for s in points.iter().filter(|s| !s.value.is_nan()) {
-                circles.push(CircleShape::filled(
+                ink.dots.push((
                     pos2(f.view.x(s.tick as f64), f.y_at(s.value)),
-                    DOT_RADIUS,
-                    colour(p, s.flagged),
+                    Tint::trace(p, s.flagged),
                 ));
             }
         }
     }
-    (fills, lines, circles)
+    ink
 }
 
 /// Digital channel `c`'s lane: its gaps shaded, its levels as lines, and where edges crowd, the
-/// band between the levels and each level's rail at the opacities `shade` gives them.
+/// band between the levels and each level's rail at the opacities `shade` gives them, each
+/// stretch in its pen.
 fn lane(ui: &Ui, f: &Frame, c: usize, rect: Rect, px: f32) {
     let p = f.palette;
     let Some(held) = f.held else { return };
@@ -602,7 +858,6 @@ fn lane(ui: &Ui, f: &Frame, c: usize, rect: Rect, px: f32) {
     let high = rect.top() + LANE_PAD;
     let low = high + LANE_SWING;
     let w = &f.view.window;
-    let a = &held.answer.around;
     for g in gaps {
         if let Some((x0, x1)) = f.across(g.start.max(w.start) as f64, g.end.min(w.end) as f64, px) {
             painter.rect_filled(
@@ -612,15 +867,44 @@ fn lane(ui: &Ui, f: &Frame, c: usize, rect: Rect, px: f32) {
             );
         }
     }
-    let mut fills = Mesh::default();
-    let mut lines = Lines::default();
-    let stroke = Stroke::new(p.line_weight, p.trace);
+    let cut = stretches(f, c, rect);
+    let whole = cut.len() == 1;
+    // A lane's geometry follows its line's width: one ink a width its stretches draw at.
+    let mut inks: Vec<(f32, Ink)> = Vec::new();
+    for (clip, pen) in &cut {
+        let at = match inks.iter().position(|(width, _)| *width == pen.width) {
+            Some(at) => at,
+            None => {
+                inks.push((pen.width, lane_ink(f, held, columns, rect, px, pen.width)));
+                inks.len() - 1
+            }
+        };
+        let _span = tracing::debug_span!("tessellate").entered();
+        paint(ui, &inks[at].1, pen, *clip, whole);
+    }
+}
+
+/// A lane's levels as lines and its crowded columns as fills, for a line `weight` points wide.
+fn lane_ink(
+    f: &Frame,
+    held: &Held,
+    columns: &DigitalColumns,
+    rect: Rect,
+    px: f32,
+    weight: f32,
+) -> Ink {
+    let w = &f.view.window;
+    let a = &held.answer.around;
+    let high = rect.top() + LANE_PAD;
+    let low = high + LANE_SWING;
+    let mut ink = Ink::default();
+    let mut chain = 0;
     let g = &held.answer.grid;
     let shown = columns_over(g, w.start.max(a.start), w.end.min(a.end));
-    let width = f64::from(p.line_weight / px);
+    let width = f64::from(weight / px);
     let looks = shade::looks(columns, shown.clone(), width, g.per, f.facts.timebase);
     let DigitalColumns { state, at, .. } = columns;
-    let half = p.line_weight / 2.0;
+    let half = weight / 2.0;
     let mut line = Vec::new();
     let mut pen: Option<f32> = None;
     let mut k = shown.start;
@@ -629,7 +913,9 @@ fn lane(ui: &Ui, f: &Frame, c: usize, rect: Rect, px: f32) {
         let x1 = f.view.x(g.x0 + (k + 1) as f64 * g.per);
         match (state[k], looks[k]) {
             (State::None, _) => {
-                lines.add(&mut line, stroke);
+                // A gap: the line's dash starts again after it.
+                ink.line(&mut line, Tint::FULL, chain);
+                chain += 1;
                 pen = None;
             }
             (_, Look::Pulse { alpha, at: mid }) => {
@@ -647,16 +933,16 @@ fn lane(ui: &Ui, f: &Frame, c: usize, rect: Rect, px: f32) {
                 };
                 if let Some(y) = before {
                     if pen != Some(y) {
-                        lines.add(&mut line, stroke);
+                        ink.line(&mut line, Tint::FULL, chain);
                         line.push(pos2(x0, y));
                     }
                     step(&mut line, pos2(x, y));
                 }
-                lines.add(&mut line, stroke);
-                fills.add_colored_rect(
+                ink.line(&mut line, Tint::FULL, chain);
+                ink.fills.push((
                     Rect::from_min_max(pos2(x - half, high - half), pos2(x + half, low + half)),
-                    p.trace.gamma_multiply(alpha as f32),
-                );
+                    Tint(alpha as f32, 1.0),
+                ));
                 let after = match (state[last], state.get(last + 1)) {
                     (State::Rise, _) => Some(high),
                     (State::Fall, _) => Some(low),
@@ -681,15 +967,15 @@ fn lane(ui: &Ui, f: &Frame, c: usize, rect: Rect, px: f32) {
                 },
             ) => {
                 let (band, h, l) = (band as f32, h as f32, l as f32);
-                lines.add(&mut line, stroke);
+                ink.line(&mut line, Tint::FULL, chain);
                 pen = None;
                 let x1 = x1.max(x0 + px);
                 let mut rect = |top: f32, bottom: f32, alpha: f32| {
                     if alpha > 0.0 {
-                        fills.add_colored_rect(
+                        ink.fills.push((
                             Rect::from_min_max(pos2(x0, top), pos2(x1, bottom)),
-                            p.trace.gamma_multiply(alpha),
-                        );
+                            Tint(alpha, 1.0),
+                        ));
                     }
                 };
                 rect(high + half, low - half, band);
@@ -697,18 +983,18 @@ fn lane(ui: &Ui, f: &Frame, c: usize, rect: Rect, px: f32) {
                 rect(low - half, low + half, l);
             }
             (State::Low | State::High, Look::Held(alpha)) => {
-                lines.add(&mut line, stroke);
+                ink.line(&mut line, Tint::FULL, chain);
                 pen = None;
                 let y = if state[k] == State::High { high } else { low };
-                fills.add_colored_rect(
+                ink.fills.push((
                     Rect::from_min_max(pos2(x0, y - half), pos2(x1.max(x0 + px), y + half)),
-                    p.trace.gamma_multiply(alpha as f32),
-                );
+                    Tint(alpha as f32, 1.0),
+                ));
             }
             (State::Low | State::High, _) => {
                 let y = if state[k] == State::High { high } else { low };
                 if pen != Some(y) {
-                    lines.add(&mut line, stroke);
+                    ink.line(&mut line, Tint::FULL, chain);
                     line.push(pos2(x0, y));
                 }
                 step(&mut line, pos2(x1, y));
@@ -723,7 +1009,7 @@ fn lane(ui: &Ui, f: &Frame, c: usize, rect: Rect, px: f32) {
                 };
                 let x = x0 + at[k] as f32 * (x1 - x0);
                 if pen != Some(ya) {
-                    lines.add(&mut line, stroke);
+                    ink.line(&mut line, Tint::FULL, chain);
                     line.push(pos2(x0, ya));
                 }
                 step(&mut line, pos2(x, ya));
@@ -731,11 +1017,11 @@ fn lane(ui: &Ui, f: &Frame, c: usize, rect: Rect, px: f32) {
                     line.push(pos2(x, yb));
                 } else {
                     // Its levels at full ink, the edge itself at the opacity the model gives it.
-                    lines.add(&mut line, stroke);
-                    fills.add_colored_rect(
+                    ink.line(&mut line, Tint::FULL, chain);
+                    ink.fills.push((
                         Rect::from_min_max(pos2(x - half, high - half), pos2(x + half, low + half)),
-                        p.trace.gamma_multiply(alpha),
-                    );
+                        Tint(alpha, 1.0),
+                    ));
                     line.push(pos2(x, yb));
                 }
                 line.push(pos2(x1, yb));
@@ -747,13 +1033,8 @@ fn lane(ui: &Ui, f: &Frame, c: usize, rect: Rect, px: f32) {
         }
         k += 1;
     }
-    lines.add(&mut line, stroke);
-    let mesh = {
-        let _span = tracing::debug_span!("tessellate").entered();
-        tessellate(ui, rect, lines, Vec::new())
-    };
-    painter.add(Shape::mesh(fills));
-    painter.add(Shape::mesh(mesh));
+    ink.line(&mut line, Tint::FULL, chain);
+    ink
 }
 
 /// The window's markers: a line each with a halo, and labels in up to three rows across the
@@ -812,6 +1093,7 @@ pub(crate) fn strip(
     window: &Range<i64>,
     include_zero: bool,
     p: &Palette,
+    trace: Color32,
 ) {
     let px = 1.0 / ui.ctx().pixels_per_point();
     let painter = ui.painter().with_clip_rect(rect);
@@ -838,14 +1120,15 @@ pub(crate) fn strip(
         if let Some(raw) = raw {
             let (lo, hi) = fitted(raw, include_zero, 0, 0.0, rect.height());
             let y_at = |v: f64| rect.bottom() - ((v - lo) / (hi - lo)) as f32 * rect.height();
-            let (mut fills, mut lines) = (Mesh::default(), Lines::default());
-            bands(&pieces, &view, y_at, p, &mut fills, &mut lines);
-            let mesh = {
-                let _span = tracing::debug_span!("tessellate").entered();
-                tessellate(ui, rect, lines, Vec::new())
+            let mut ink = Ink::default();
+            bands(&pieces, &view, y_at, p, &mut ink, &mut 0);
+            let pen = Pen {
+                colour: trace,
+                width: p.line_weight,
+                dash: None,
             };
-            painter.add(Shape::mesh(fills));
-            painter.add(Shape::mesh(mesh));
+            let _span = tracing::debug_span!("tessellate").entered();
+            paint(ui, &ink, &pen, rect, true);
         }
     }
     if let Some((a, b)) = across(&view, rect, window.start as f64, window.end as f64, px) {
