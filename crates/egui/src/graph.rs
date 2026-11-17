@@ -7,7 +7,8 @@ use egui::{
     AsIdSalt, CursorIcon, IdSalt, PointerButton, Rect, Response, Sense, Ui, Vec2, Widget, pos2,
     vec2,
 };
-use escapement_tickwave_view::readouts::{MINUS, NBSP};
+use escapement_tickwave_view::format::model::Ratio;
+use escapement_tickwave_view::readouts::{MINUS, NBSP, format_interval};
 use escapement_tickwave_view::scale::{ValueRange, move_range, scale_limits, zoom_range};
 use escapement_tickwave_view::{MarkerCursor, MarkerQuery, Resolution};
 
@@ -33,6 +34,8 @@ const KEY_PAD: f32 = 3.0;
 const MIN_TRACE: f32 = 40.0;
 /// A zoom step's ease, in seconds.
 const EASE: f64 = 0.15;
+/// How near a marker's line, in points, the pointer reads it.
+const MARKER_REACH: f32 = 3.0;
 
 /// What a host adds to the graph's query for its own panel. A host builds one with `default` and
 /// sets its fields.
@@ -754,6 +757,9 @@ impl Widget for Graph<'_> {
                 pixels_per_point: ui.pixels_per_point(),
             },
         );
+        if let Some(h) = &held {
+            hover_markers(ui, id, h, &view, &layout, facts.timebase);
+        }
         memory.shown = Some(Shown {
             y,
             window: view.window.clone(),
@@ -770,6 +776,37 @@ impl Widget for Graph<'_> {
             response.mark_changed();
         }
         response
+    }
+}
+
+/// Each marker in the window answers the pointer near its line, over the plot and the lanes, with
+/// its time and its label.
+fn hover_markers(
+    ui: &Ui,
+    id: egui::Id,
+    held: &Held,
+    view: &View,
+    layout: &Layout,
+    timebase: Ratio,
+) {
+    let plot = layout.plot;
+    let bottom = layout.lanes.last().map_or(plot.bottom(), |r| r.bottom());
+    for (i, m) in held.answer.markers.window.entries.iter().enumerate() {
+        let x = view.x(m.cursor.tick as f64);
+        if x < plot.left() || x > plot.right() {
+            continue;
+        }
+        let near = Rect::from_min_max(
+            pos2(x - MARKER_REACH, plot.top()),
+            pos2(x + MARKER_REACH, bottom),
+        );
+        let time = format_interval(m.cursor.tick, timebase, Ratio::ONE);
+        let text = match draw::marker_text(m) {
+            label if label.is_empty() => time,
+            label => format!("{time} · {label}"),
+        };
+        ui.interact(near, id.with(("marker", i)), Sense::hover())
+            .on_hover_text(text);
     }
 }
 

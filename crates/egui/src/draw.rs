@@ -616,7 +616,7 @@ fn step(line: &mut Vec<Pos2>, p: Pos2) {
 }
 
 /// The text of a marker's label: its number, then its label.
-fn marker_text(m: &Marker) -> String {
+pub(crate) fn marker_text(m: &Marker) -> String {
     let a = &m.annotation;
     let number = a.values.as_ref().and_then(|v| v.get("number"));
     [number.map(String::as_str), a.label.as_deref()]
