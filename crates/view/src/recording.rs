@@ -455,7 +455,8 @@ pub struct Recording {
     pub(crate) cache: Cache,
     pub(crate) store: Store,
     pub(crate) timebase: Ratio,
-    /// The ticks it covers: a finished file's length, or the end of what a writer holds.
+    /// The ticks it covers: a finished file's length, or, live, the later of the end of what a
+    /// writer holds and its promise.
     pub(crate) length: i64,
     pub(crate) channels: Vec<ChannelInfo>,
     /// A finished file's channel whose list is in pages holds an empty list here until it is
@@ -1308,10 +1309,10 @@ impl Recording {
         }
         let unwritten_parts = snapshot.unwritten_parts()?;
 
-        // The gaps and runs since the last snapshot, each channel's count, and the latest tick.
-        // A channel's items since then are at or after its promise then, and the length ends
-        // its data, so it changes from the earlier of the two, and from each new gap's start: a
-        // gap can be reported after the time it starts. A channel behind the others has its
+        // The gaps and runs since the last snapshot, each channel's count, and the length. A
+        // channel's items since then are at or after its promise then, and it was known only to
+        // the length, so it changes from the earlier of the two, and from each new gap's start:
+        // a gap can be reported after the time it starts. A channel behind the others has its
         // promise before the length.
         let settled = (*length).saturating_sub(1);
         let mut changed = vec![settled; places.len()];
@@ -1388,7 +1389,9 @@ impl Recording {
             }
             new_length = new_length.max(open.start).max(last + 1);
         }
-        *length = new_length.max(0);
+        // Every item before the promise is in the snapshot, so the recording is known to it
+        // past its data, as a file cut after a known-through record there is.
+        *length = new_length.max(snapshot.promise()).max(0);
         for place in &mut places[..stored] {
             match place {
                 // A writer writes no channel this version can't read.
@@ -1644,8 +1647,8 @@ impl Recording {
         self.timebase
     }
 
-    /// The ticks the recording covers, `0..length`: a finished file's length, or where what a
-    /// writer holds ends.
+    /// The ticks the recording covers, `0..length`: a finished file's length, or, live, the later
+    /// of where what its writer holds ends and the writer's promise.
     pub fn length(&self) -> i64 {
         self.length
     }

@@ -1,5 +1,5 @@
 //! A live recording against the same file finished where the live one ends, after every op of
-//! the format crate's live.rs sequence.
+//! the format crate's live.rs sequence, and against its bytes repaired after a flush.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -10,6 +10,7 @@ use escapement_tickwave_format::header::{
     SourceFormat, SourceHeader,
 };
 use escapement_tickwave_format::model::{Gap, Ratio};
+use escapement_tickwave_format::repair::repair;
 use escapement_tickwave_format::writer::{Bundle, Compression, Finish, WriteOptions, Writer};
 use escapement_tickwave_view::{Answer, Cache, Drawn, Query, Recording};
 
@@ -706,4 +707,184 @@ fn a_long_recording_updated_with_each_snapshot_reads_as_one_made_from_it() {
         unwritten > 10 && runs > 100,
         "{unwritten} channels held a closed block not yet written, {runs} levels a run"
     );
+}
+
+/// `file`, cut off where its writer has got to, repaired as FORMAT.md's "Repairing a cut-off
+/// file" has it.
+fn repaired(file: &[u8]) -> Recording {
+    let r = repair(file, 3).unwrap();
+    let whole = [&file[..r.keep as usize], &r.tail].concat();
+    Recording::open(Arc::new(whole), Cache::new(1 << 20)).unwrap()
+}
+
+/// `live` and its file repaired: the same length and extent, and the same answer to `q`.
+fn as_repaired(live: &Recording, file: &[u8], q: &Query, at: &str) {
+    let fixed = repaired(file);
+    let cancel = AtomicBool::new(false);
+    assert_eq!(
+        (live.length(), live.extent()),
+        (fixed.length(), fixed.extent()),
+        "{at}"
+    );
+    let want = fixed.query(q, &cancel).unwrap();
+    let got = Answer {
+        revision: want.revision,
+        ..live.query(q, &cancel).unwrap()
+    };
+    assert_eq!(got, want, "{at}");
+}
+
+/// DIO0 to DIO3 alone, each low at first, on a 96 MHz axis: a probe's digital stream.
+fn dio() -> Declaration {
+    let timebase = Ratio::integer(96_000_000).unwrap();
+    let line = |n: usize| DeclaredChannel {
+        name: format!("DIO{n}"),
+        source_name: format!("dio{n}"),
+        source: 0,
+        data: DeclaredKind::Digital { initial: false },
+        shaping: Default::default(),
+        overview_shift: None,
+        codec: None,
+        requires: Vec::new(),
+    };
+    Declaration {
+        timebase,
+        channels: (0..4).map(line).collect(),
+        derived: Vec::new(),
+        sources: vec![SourceHeader::new(
+            SourceFormat::Other("verge-probe".into()),
+            timebase,
+        )],
+        title: None,
+        meta: BTreeMap::new(),
+        overview_shift: 16,
+        requires: Vec::new(),
+    }
+}
+
+/// What a graph following DIO0 to DIO3 asks: an aligned window 64,000,000 ticks wide in 1,000
+/// columns, ending at `end`, and each lane's columns over the extent.
+fn lanes(end: i64) -> Query {
+    let mut q = Query::new(end - 64_000_000..end, 1000);
+    q.channels = vec![0, 1, 2, 3];
+    q.fallbacks = (0..4).map(|c| (c, 500)).collect();
+    q.aligned = true;
+    q
+}
+
+#[test]
+fn a_heartbeat_moves_a_digital_recording_on_to_its_promise() {
+    // verge-probe's dio_stream (seed 3, every line, a block a message) as the peer saw it: edges
+    // to a flush at 76,032,366; a heartbeat's flush at 90,740,577 with nothing new before it;
+    // then a loss on DIO2 reported once it has ended, from before the heartbeat.
+    let (edges, beat) = (76_032_366, 90_740_577);
+    let lost = Gap {
+        from: 88_000_000,
+        to: 95_000_000,
+        level: false,
+    };
+    let options = WriteOptions {
+        level: 3,
+        block_bytes: 64,
+        compression: Compression::Spread,
+        promise_with_items: false,
+    };
+    let mut w = Writer::new(dio(), options).unwrap();
+    let file = Arc::new(Growing(std::sync::Mutex::new(w.take_output())));
+    let take = |w: &mut Writer| {
+        let s = w.snapshot();
+        file.0.lock().unwrap().extend(w.take_output());
+        s
+    };
+    let bytes = || file.0.lock().unwrap().clone();
+    let cancel = AtomicBool::new(false);
+    for k in 1..2000 {
+        w.edge(k as usize % 4, k * 37_987).unwrap();
+    }
+    w.flush(edges).unwrap();
+    // DIO1 promised on past the others, so its promise doesn't say it changes where the
+    // length grows from: the length's growth has to.
+    w.promise_channel(1, 100_000_000).unwrap();
+    let mut live = Recording::live(take(&mut w), file.clone(), Cache::new(1 << 20)).unwrap();
+    assert_eq!(live.extent(), Some(0..edges));
+    as_repaired(&live, &bytes(), &lanes(edges), "after the edges");
+    let asked = lanes(edges);
+    let held = live.query(&asked, &cancel).unwrap();
+
+    w.flush(beat).unwrap();
+    live.update(take(&mut w)).unwrap();
+    assert_eq!((live.length(), live.extent()), (beat, Some(0..beat)));
+    as_repaired(&live, &bytes(), &lanes(beat), "after the heartbeat");
+    // The old length falls inside a column, which a column a tick wide would hide.
+    let q = lanes(beat);
+    assert_ne!(edges % 64_000, 0);
+    let extended = live.extend(&held, &asked, &q, &cancel).unwrap();
+    let held = extended.expect("the heartbeat's answer extends the edges'");
+    assert_eq!(
+        held,
+        live.query(&q, &cancel).unwrap(),
+        "after the heartbeat"
+    );
+
+    // A late gap changes DIO2 from its start, before the length the heartbeat gave.
+    w.gap(2, lost).unwrap();
+    live.update(take(&mut w)).unwrap();
+    let end = live.extent().unwrap().end;
+    assert!(end >= beat, "{end}");
+    let (asked, q) = (q, lanes(end));
+    let extended = live.extend(&held, &asked, &q, &cancel).unwrap();
+    let extended = extended.expect("the loss's answer extends the heartbeat's");
+    assert_eq!(extended, live.query(&q, &cancel).unwrap(), "after the loss");
+    let Drawn::Digital { gaps, .. } = &extended.channels[2] else {
+        panic!("DIO2 is digital")
+    };
+    assert_eq!(gaps.first().map(|g| g.start), Some(lost.from));
+
+    // A flush at the loss's end leaves its record to come after the known-through record, so
+    // a repair there doesn't hold it; a tick later it is in.
+    w.flush(lost.to + 1).unwrap();
+    live.update(take(&mut w)).unwrap();
+    assert_eq!(live.length(), lost.to + 1);
+    as_repaired(
+        &live,
+        &bytes(),
+        &lanes(lost.to + 1),
+        "flushed after the loss",
+    );
+}
+
+#[test]
+fn a_promise_past_an_analog_channels_last_sample_ends_its_extent_where_that_samples_time_does() {
+    // Pairs every 10 ticks, the last at 490, whose time ends at 500.
+    let (d, _) = session();
+    let options = WriteOptions {
+        level: 3,
+        block_bytes: 64,
+        compression: Compression::Spread,
+        promise_with_items: true,
+    };
+    let mut w = Writer::new(d, options).unwrap();
+    let mut file = w.take_output();
+    w.run(0, 0, 0).unwrap();
+    w.run(1, 0, 0).unwrap();
+    for k in 0..50u64 {
+        w.sample(0, 3300 + k % 5).unwrap();
+        w.sample(1, 1_000_000 + k * 37).unwrap();
+    }
+    let mut q = query(0..600, 600);
+    q.strip = Some((1, 100));
+    q.fallbacks = vec![(2, 100)];
+    // A promise alone: the length moves on, the extent only as far as the last pair's time.
+    w.promise(537).unwrap();
+    let live = Recording::live(w.snapshot(), Arc::new(file.clone()), Cache::new(1 << 20));
+    let live = live.unwrap();
+    assert_eq!((live.length(), live.extent()), (537, Some(0..500)));
+    // A flush there, then a heartbeat's with nothing new before it: the same as repaired.
+    w.flush(537).unwrap();
+    w.flush(600).unwrap();
+    let s = w.snapshot();
+    file.extend(w.take_output());
+    let live = Recording::live(s, Arc::new(file.clone()), Cache::new(1 << 20)).unwrap();
+    assert_eq!((live.length(), live.extent()), (600, Some(0..500)));
+    as_repaired(&live, &file, &q, "after the heartbeat");
 }
