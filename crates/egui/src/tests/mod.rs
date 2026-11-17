@@ -9,6 +9,7 @@ mod lanes;
 mod live;
 mod roles;
 mod strip;
+mod tail;
 mod viewer;
 
 use std::collections::BTreeMap;
@@ -286,13 +287,15 @@ pub fn noisy(i: u64) -> u64 {
     }
 }
 
-/// Holds reads while closed, and fails them while failing.
+/// Holds reads while closed, fails them while failing, and slows each by `slow`.
 #[derive(Default)]
 pub struct Gate {
     /// The reads let through before it closes; None while it is open.
     reads: Mutex<Option<u64>>,
     turn: Condvar,
     fail: AtomicBool,
+    /// Microseconds each read takes at least.
+    slow: std::sync::atomic::AtomicU64,
 }
 
 impl Gate {
@@ -313,6 +316,11 @@ impl Gate {
 
     pub fn fail(&self, fail: bool) {
         self.fail.store(fail, Ordering::Relaxed);
+    }
+
+    /// Each read takes at least `us` microseconds from now on.
+    pub fn slow(&self, us: u64) {
+        self.slow.store(us, Ordering::Relaxed);
     }
 }
 
@@ -344,6 +352,10 @@ impl Bytes for Gated {
             *n -= 1;
         }
         drop(reads);
+        let slow = self.gate.slow.load(Ordering::Relaxed);
+        if slow > 0 {
+            std::thread::sleep(Duration::from_micros(slow));
+        }
         if self.gate.fail.load(Ordering::Relaxed) {
             return Err(io::Error::other("unreadable"));
         }

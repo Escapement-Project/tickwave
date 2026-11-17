@@ -15,17 +15,17 @@ use super::*;
 use crate::Window;
 
 /// A recording a writer is writing, pair by pair, to a file.
-struct Live {
+pub(super) struct Live {
     _dir: tempfile::TempDir,
-    path: PathBuf,
-    cap: Capture,
+    pub path: PathBuf,
+    pub cap: Capture,
     writer: Writer,
     file: File,
     pairs: u64,
 }
 
 impl Live {
-    fn new(cap: Capture) -> Self {
+    pub fn new(cap: Capture) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("live.tickwave");
         let (writer, head) = cap.writer();
@@ -42,7 +42,7 @@ impl Live {
     }
 
     /// Writes pairs up to `to`, flushed and in the file, and the snapshot that covers them.
-    fn write(&mut self, to: u64) -> Snapshot {
+    pub fn write(&mut self, to: u64) -> Snapshot {
         let end = self.cap.tick(to);
         self.cap.items(&mut self.writer, self.pairs..to);
         self.writer.flush(end).unwrap();
@@ -50,6 +50,15 @@ impl Live {
         self.file.flush().unwrap();
         self.pairs = to;
         self.writer.snapshot()
+    }
+
+    /// Writes the rest of the pairs and finishes the file.
+    pub fn finish(&mut self) {
+        self.write(self.cap.count);
+        let (fresh, _) = self.cap.writer();
+        let w = std::mem::replace(&mut self.writer, fresh);
+        self.file.write_all(&self.cap.finish(w)).unwrap();
+        self.file.flush().unwrap();
     }
 }
 
@@ -309,10 +318,11 @@ fn the_viewer_answers_each_snapshot_again_itself_and_never_on_a_timer() {
     assert!(viewer(&h).started());
     h.step();
     assert_eq!(viewer(&h).issued(), issued);
-    // Another snapshot, and now moving every frame, while that one is in flight: nothing asked.
+    // Another snapshot, and now moving every frame inside what the held answer covers, while
+    // that one is in flight: nothing asked.
     viewer(&h).update(live.write(6000));
     for k in 1..=10 {
-        h.state_mut().now = Some(5 * SECOND + k * 16 * MS);
+        h.state_mut().now = Some(4 * SECOND + k * 16 * MS);
         h.step();
         std::thread::sleep(Duration::from_millis(2));
     }

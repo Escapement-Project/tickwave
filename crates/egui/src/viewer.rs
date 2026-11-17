@@ -118,7 +118,15 @@ struct Slot {
     /// The newest request not yet started; a newer one replaces it.
     pending: Option<Job>,
     running: Option<Arc<AtomicBool>>,
+    /// The job running is a snapshot's follow-up, which a request cancels.
+    following: bool,
+    /// A snapshot is being taken.
+    #[cfg(feature = "live")]
+    applying: bool,
     sent: Option<Arc<Request>>,
+    /// The graph's latest now, which a snapshot's follow-up ends a followed window at.
+    #[cfg(feature = "live")]
+    now: Option<i64>,
     held: Option<Held>,
     /// What a frame draws while no answer is held: the first request's sketch, from the
     /// recording's coarsest levels.
@@ -148,20 +156,31 @@ struct Slot {
     no_sketch: bool,
     /// The file is let go of until `reopen`: the query thread runs nothing.
     released: bool,
+    /// Made from a writer's snapshot and opened finished since: a snapshot given now is one the
+    /// host took before the finish, and is dropped.
+    #[cfg(feature = "live")]
+    finished_live: bool,
     stopped: bool,
 }
 
 type Answered = std::thread::Result<Result<(Answer, Query), Error>>;
 
 impl Slot {
-    /// After a snapshot, the newest request again, where it follows the recording: from the
-    /// answer to it where that is the one held.
+    /// After a snapshot, the newest request again, where it follows the recording, ending at the
+    /// graph's latest now: from the answer to it where that is the one held.
     #[cfg(feature = "live")]
     fn again(&self) -> Option<Job> {
         let request = self.sent.as_ref().filter(|r| r.follows())?;
+        let request = match self.now {
+            now if now == request.now => Arc::clone(request),
+            now => Arc::new(Request {
+                now,
+                ..Request::clone(request)
+            }),
+        };
         Some(Job {
             generation: self.issued,
-            request: Arc::clone(request),
+            request,
             cancel: Arc::new(AtomicBool::new(false)),
             held: self.held.clone().filter(|h| h.generation == self.issued),
         })
@@ -208,6 +227,11 @@ impl Releasable {
     /// Drops the bytes once no read holds them.
     fn release(&self) {
         *self.0.write().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// Reads through `bytes` again, after `release`.
+    fn take_back(&self, bytes: Arc<dyn Bytes>) {
+        *self.0.write().unwrap_or_else(|e| e.into_inner()) = Some(bytes);
     }
 
     fn with<R>(&self, read: impl FnOnce(&dyn Bytes) -> io::Result<R>) -> io::Result<R> {
@@ -314,7 +338,12 @@ impl Viewer {
                 issued: 0,
                 pending: None,
                 running: None,
+                following: false,
+                #[cfg(feature = "live")]
+                applying: false,
                 sent: None,
+                #[cfg(feature = "live")]
+                now: None,
                 held: None,
                 sketch: None,
                 query_failure: None,
@@ -335,6 +364,8 @@ impl Viewer {
                 sketches: 0,
                 no_sketch: false,
                 released: false,
+                #[cfg(feature = "live")]
+                finished_live: false,
                 stopped: false,
             }),
             recording: RwLock::new(recording),
@@ -352,24 +383,54 @@ impl Viewer {
     }
 
     /// A newer snapshot of the same writer. The query thread takes it before its next query; a
-    /// newer one given before then replaces it. Its error, if any, is the `failure`.
+    /// newer one given before then replaces it. Its error, if any, is the `failure`. Once a
+    /// `reopen` has opened the finished file, a snapshot is one taken before the finish, and is
+    /// dropped.
     #[cfg(feature = "live")]
     pub fn update(&self, snapshot: Snapshot) {
-        self.shared.slot().snapshot = Some(snapshot);
+        let mut slot = self.shared.slot();
+        if slot.finished_live {
+            return;
+        }
+        slot.snapshot = Some(snapshot);
+        drop(slot);
         self.shared.wake.notify_all();
     }
 
     /// Opens the file at the path again, finished: once its writer finished it, or after it was
     /// replaced by a compacted copy. The recording and its cache are new; the query under way is
-    /// cancelled, and the graph asks again for the same view. On an error the viewer keeps the
-    /// recording it had, let go of where `release` let go of it.
+    /// cancelled, and the graph asks again for the same view. A live viewer's file that its writer
+    /// hasn't finished is `Error::Unfinished`: the viewer reads it again where `release` let go of
+    /// it, and carries on live. On another error the viewer keeps the recording it had, let go of
+    /// where `release` let go of it.
     pub fn reopen(&self) -> Result<(), Error> {
-        let bytes = Releasable::new((self.shared.open)()?);
-        let recording = Recording::open(bytes.clone(), Cache::new(self.shared.cache_bytes))?;
+        let opened = (self.shared.open)()?;
+        let bytes = Releasable::new(Arc::clone(&opened));
+        let recording = match Recording::open(bytes.clone(), Cache::new(self.shared.cache_bytes)) {
+            Ok(recording) => recording,
+            Err(Error::Unfinished) => {
+                let mut slot = self.shared.slot();
+                if slot.facts.live && slot.released {
+                    let live = self.shared.bytes.lock().unwrap_or_else(|e| e.into_inner());
+                    live.take_back(opened);
+                    slot.released = false;
+                    drop(live);
+                    drop(slot);
+                    self.shared.wake.notify_all();
+                    self.shared.ctx.request_repaint();
+                }
+                return Err(Error::Unfinished);
+            }
+            Err(e) => return Err(e),
+        };
         let mut slot = self.shared.slot();
         *self.shared.bytes.lock().unwrap_or_else(|e| e.into_inner()) = bytes;
         slot.replace = Some(recording);
         slot.released = false;
+        #[cfg(feature = "live")]
+        {
+            slot.finished_live |= slot.facts.live;
+        }
         #[cfg(feature = "live")]
         {
             slot.snapshot = None;
@@ -428,7 +489,8 @@ impl Viewer {
         read(&self.shared.read())
     }
 
-    /// Asks `request`, replacing the one not yet started and cancelling the one running.
+    /// Asks `request`, replacing the one not yet started and cancelling the one running, a
+    /// snapshot's follow-up or a request.
     pub(crate) fn request(&self, request: Request) -> u64 {
         let mut slot = self.shared.slot();
         slot.issued += 1;
@@ -467,10 +529,31 @@ impl Viewer {
         self.shared.slot().extends
     }
 
-    /// A query is waiting or running: the answer drawn may be older than what the graph asks.
+    /// A request or a snapshot is waiting, a snapshot is being taken, or a query runs, a
+    /// snapshot's follow-up included: the answer drawn may be older than what the graph asks.
+    /// Once it is false, a followed window's answer is of the last snapshot given, unless
+    /// `failure` says why not; a window of its own is not asked again after a snapshot.
     pub fn busy(&self) -> bool {
         let slot = self.shared.slot();
+        #[cfg(feature = "live")]
+        if slot.snapshot.is_some() || slot.applying {
+            return true;
+        }
         slot.pending.is_some() || slot.running.is_some()
+    }
+
+    /// A request is waiting or runs, not a snapshot's follow-up: what the graph waits on before
+    /// it asks again, so a pan doesn't cancel its own queries.
+    pub(crate) fn asking(&self) -> bool {
+        let slot = self.shared.slot();
+        slot.pending.is_some() || (slot.running.is_some() && !slot.following)
+    }
+
+    /// The graph's now, each frame, which a snapshot's follow-up ends a followed window at. It
+    /// asks nothing.
+    #[cfg(feature = "live")]
+    pub(crate) fn set_now(&self, now: Option<i64>) {
+        self.shared.slot().now = now;
     }
 
     /// The last request asked; None after a reopen, so the graph asks again.
@@ -532,6 +615,12 @@ impl Viewer {
         self.shared.slot().running.is_some()
     }
 
+    /// `release` has let go of the file, its query under way cancelled.
+    #[cfg(test)]
+    pub(crate) fn released(&self) -> bool {
+        self.shared.slot().released
+    }
+
     /// Requests asked so far.
     #[cfg(test)]
     pub(crate) fn issued(&self) -> u64 {
@@ -580,6 +669,7 @@ fn answer(shared: &Shared) {
                 }
                 #[cfg(feature = "live")]
                 if let Some(snapshot) = slot.snapshot.take() {
+                    slot.applying = true;
                     drop(slot);
                     let updated = {
                         let _span = tracing::debug_span!("snapshot").entered();
@@ -589,6 +679,7 @@ fn answer(shared: &Shared) {
                             .map(|()| Facts::of(&recording, true))
                     };
                     slot = shared.slot();
+                    slot.applying = false;
                     match updated {
                         Ok(facts) => {
                             slot.facts = facts;
@@ -602,6 +693,7 @@ fn answer(shared: &Shared) {
                                 && let Some(job) = slot.again()
                             {
                                 slot.running = Some(Arc::clone(&job.cancel));
+                                slot.following = true;
                                 break (job, true);
                             }
                         }
@@ -644,6 +736,7 @@ fn answer(shared: &Shared) {
         };
         let mut slot = shared.slot();
         slot.running = None;
+        slot.following = false;
         #[cfg(test)]
         {
             slot.runs += 1;
@@ -710,7 +803,12 @@ mod tests {
             issued,
             pending: None,
             running: None,
+            following: false,
+            #[cfg(feature = "live")]
+            applying: false,
             sent: None,
+            #[cfg(feature = "live")]
+            now: None,
             held,
             sketch: None,
             query_failure: None,
@@ -733,6 +831,8 @@ mod tests {
             sketches: 0,
             no_sketch: false,
             released: false,
+            #[cfg(feature = "live")]
+            finished_live: false,
             stopped: false,
         }
     }

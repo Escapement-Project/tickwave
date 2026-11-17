@@ -175,6 +175,8 @@ struct Recorder {
     begun: [bool; 2],
     pairs: u64,
     fs: u64,
+    /// A run starts of itself one batch in this many.
+    run_one_in: u64,
 }
 
 impl Recorder {
@@ -204,6 +206,7 @@ impl Recorder {
             begun: [false; 2],
             pairs: 0,
             fs: 0,
+            run_one_in: 12,
         }
     }
 
@@ -261,7 +264,7 @@ impl Recorder {
         }
         // A run starts where none has, where a pause left the floor past the next place, and
         // now and then of itself: a pause, or samples lost.
-        if pairs && (self.pair.is_none_or(|p| p < self.floor) || self.r.one_in(12)) {
+        if pairs && (self.pair.is_none_or(|p| p < self.floor) || self.r.one_in(self.run_one_in)) {
             let mut at = self.pair.unwrap_or(0).max(self.floor) + self.r.below(40) as i64;
             let lost = if self.pairs == 0 { 0 } else { self.r.below(3) };
             // A run that states lost samples starts past where the first of them would sit.
@@ -272,7 +275,8 @@ impl Recorder {
             self.w.run(I, at, lost).unwrap();
             self.pair = Some(at);
         }
-        if fs && (self.step.is_none_or(|s| axis1(s) < self.floor) || self.r.one_in(12)) {
+        if fs && (self.step.is_none_or(|s| axis1(s) < self.floor) || self.r.one_in(self.run_one_in))
+        {
             let mut at = self.step.unwrap_or(0).max(first1(self.floor)) + self.r.below(15) as i64;
             let lost = if self.fs == 0 { 0 } else { self.r.below(3) };
             if lost > 0 {
@@ -535,8 +539,13 @@ struct Follow {
     every: u64,
 }
 
-#[test]
-fn an_extended_answer_is_a_fresh_querys_after_every_snapshot() {
+/// Each way of following, answered fresh and extended after every snapshot of a recorder whose
+/// runs start of themselves one batch in `run_one_in`, for each of `seeds`: the extended answer
+/// held against the fresh one by `same`. Each way's extends and refusals.
+fn follow_every_snapshot(
+    seeds: std::ops::RangeInclusive<u64>,
+    run_one_in: u64,
+) -> (Vec<Follow>, Vec<u32>, Vec<u32>) {
     let follows = [
         // Columns of 6, 8 and 9 ticks either side of the finest bucket's 8.
         (40, 7, false, Some((I, 13)), 1),
@@ -562,8 +571,9 @@ fn an_extended_answer_is_a_fresh_querys_after_every_snapshot() {
     });
     let cancel = AtomicBool::new(false);
     let (mut extended, mut refused) = (vec![0u32; follows.len()], vec![0u32; follows.len()]);
-    for seed in 1..=6u64 {
+    for seed in seeds {
         let mut rec = Recorder::new(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15), 1 << 40);
+        rec.run_one_in = run_one_in;
         let cache = Cache::new(if seed % 2 == 0 { 0 } else { 1 << 20 });
         let mut live: Option<Recording> = None;
         let mut held: Vec<Option<(Answer, Query)>> = follows.iter().map(|_| None).collect();
@@ -615,6 +625,12 @@ fn an_extended_answer_is_a_fresh_querys_after_every_snapshot() {
             }
         }
     }
+    (follows.into(), extended, refused)
+}
+
+#[test]
+fn an_extended_answer_is_a_fresh_querys_after_every_snapshot() {
+    let (follows, extended, refused) = follow_every_snapshot(1..=6, 12);
     // Every way of following extended at least as many answers as it refused: for a width that
     // grew while the window began at the extent's, for `around`'s start moving on, or for a
     // window moved more than its width.
@@ -630,6 +646,22 @@ fn an_extended_answer_is_a_fresh_querys_after_every_snapshot() {
             f.columns,
             extended[k],
             refused[k]
+        );
+    }
+}
+
+/// Runs that start of themselves every other batch: three can start within two columns, where a
+/// span crossing into the first column worked out again joins its range to the held column's
+/// before it, backing off past each that starts there.
+#[test]
+fn an_extended_answer_is_a_fresh_querys_with_runs_starting_every_other_batch() {
+    let (follows, extended, _) = follow_every_snapshot(1..=3, 2);
+    for (k, f) in follows.iter().enumerate() {
+        assert!(
+            extended[k] > 0,
+            "{} ticks in {} columns",
+            f.width,
+            f.columns
         );
     }
 }
@@ -828,6 +860,11 @@ struct Lagging {
     /// Where D0's last edge or gap ends: a gap may start after it.
     after: i64,
     pairs: u64,
+    /// V lags with F and D1 rather than leading with I, so P's operands' promises differ: V's
+    /// next sample's tick, and its samples so far.
+    v_lags: bool,
+    v_pair: i64,
+    v_pairs: u64,
 }
 
 impl Lagging {
@@ -856,6 +893,9 @@ impl Lagging {
             edge: [0; 2],
             after: -1,
             pairs: 0,
+            v_lags: false,
+            v_pair: 0,
+            v_pairs: 0,
         }
     }
 
@@ -882,7 +922,9 @@ impl Lagging {
         let lead = self.lead + 1 + self.r.below(150) as i64;
         while self.pair < lead {
             let n = self.pairs;
-            self.w.sample(V, 3300 + n % 7).unwrap();
+            if !self.v_lags {
+                self.w.sample(V, 3300 + n % 7).unwrap();
+            }
             self.w.sample(I, 1_000_000 + (n * 7919) % 50_000).unwrap();
             self.pairs += 1;
             self.pair += PAIR;
@@ -900,7 +942,9 @@ impl Lagging {
             }
         }
         for c in [V, I, D0] {
-            self.w.promise_channel(c, lead).unwrap();
+            if c != V || !self.v_lags {
+                self.w.promise_channel(c, lead).unwrap();
+            }
         }
         self.lead = lead;
         let lag = self.lag.max(lead - self.r.below(300) as i64);
@@ -912,6 +956,14 @@ impl Lagging {
         self.edges(1, lag);
         for c in [F, D1] {
             self.w.promise_channel(c, lag).unwrap();
+        }
+        if self.v_lags {
+            while self.v_pair < lag && self.v_pairs < self.pairs {
+                self.w.sample(V, 3300 + self.v_pairs % 7).unwrap();
+                self.v_pairs += 1;
+                self.v_pair += PAIR;
+            }
+            self.w.promise_channel(V, self.v_pair).unwrap();
         }
         self.lag = lag;
         let snapshot = self.w.snapshot();
@@ -925,11 +977,24 @@ impl Lagging {
 /// its answer is still a fresh query's.
 #[test]
 fn an_extend_follows_a_channel_that_lags_and_a_gap_reported_late() {
+    follow_lagging(false);
+}
+
+/// V lags behind I, the first of P's operands: P changes from V's promise, the earlier.
+#[test]
+fn an_extend_follows_a_derived_channel_whose_second_operand_lags() {
+    follow_lagging(true);
+}
+
+/// `Lagging`'s recordings followed, V lagging where `v_lags`, each extend held against a fresh
+/// query.
+fn follow_lagging(v_lags: bool) {
     let cancel = AtomicBool::new(false);
     let follows = [(64, 8), (170, 10), (600, 13), (3000, 11)];
     let mut extended = vec![0u32; follows.len()];
     for seed in 1..=4u64 {
         let mut rec = Lagging::new(seed.wrapping_mul(0x2545_f491_4f6c_dd1d));
+        rec.v_lags = v_lags;
         let mut live: Option<Recording> = None;
         let mut held: Vec<Option<(Answer, Query)>> = follows.iter().map(|_| None).collect();
         for n in 0..200u64 {

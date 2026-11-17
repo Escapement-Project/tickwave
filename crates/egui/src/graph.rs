@@ -643,11 +643,14 @@ impl Graph<'_> {
     /// Asks for `wanted` when it differs from what was asked, now aside. A followed window also
     /// asks when the window on screen has left what the held answer covers; a moving now alone
     /// asks nothing, since the held answer covers a width either side and is drawn moved with
-    /// it, and the viewer answers a followed request again after each snapshot itself. The
-    /// request carries the latest now, so the query ends its window there. A change of the
-    /// channels drawn asks at once; anything else waits for the query under way, so a pan draws
-    /// its answers as they come rather than cancelling each one.
+    /// it, and the viewer answers a followed request again after each snapshot itself, ending its
+    /// window at the now it is given every frame. A change of the channels drawn asks at once;
+    /// anything else waits for a request under way, so a pan draws its answers as they come
+    /// rather than cancelling each one, and cancels a snapshot's follow-up, which the next
+    /// snapshot runs again.
     fn ask(&self, wanted: Request, window: &Range<i64>, held: Option<&Held>) {
+        #[cfg(feature = "live")]
+        self.viewer.set_now(wanted.now);
         let sent = self.viewer.sent();
         let structural = sent.as_ref().is_none_or(|s| {
             s.channels != wanted.channels
@@ -665,7 +668,7 @@ impl Graph<'_> {
             && held.is_some_and(|h| {
                 window.start < h.answer.around.start || window.end > h.answer.around.end
             });
-        if structural || (!self.viewer.busy() && (changed || left)) {
+        if structural || (!self.viewer.asking() && (changed || left)) {
             self.viewer.request(wanted);
         }
     }
