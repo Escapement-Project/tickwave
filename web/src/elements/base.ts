@@ -231,7 +231,7 @@ export abstract class TickwaveElement extends HTMLElement {
         ? (this.#waiting ?? "")
         : problems.length === 1
           ? problems[0]
-          : `${problems[0]} (and ${problems.length - 1} more problems; see the console)`;
+          : `${problems[0]} (and ${problems.length - 1} more ${problems.length === 2 ? "problem" : "problems"}; see the console)`;
   }
 
   protected emit(name: string, detail: unknown): void {

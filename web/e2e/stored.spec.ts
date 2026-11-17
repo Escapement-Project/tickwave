@@ -130,5 +130,5 @@ test("a stored channel the recording lacks is reported by an inset as a view rep
     document.body.prepend(i);
   }, annotations);
   // Its first problem is the view's; a sidecar that doesn't check holds no annotation to show.
-  await expect(page.locator("#made .notice")).toHaveText(`${said} (and 1 more problems; see the console)`, { timeout: 20_000 });
+  await expect(page.locator("#made .notice")).toHaveText(`${said} (and 1 more problem; see the console)`, { timeout: 20_000 });
 });
