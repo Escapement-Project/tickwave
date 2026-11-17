@@ -110,3 +110,68 @@ fn a_marker_under_the_pointer_says_its_time_and_label() {
     );
     assert_ne!(h.state().state.window, Window::At(4 * SECOND..6 * SECOND));
 }
+
+/// Bytes the test's opener gave, counted while alive.
+struct Counted {
+    bytes: Arc<dyn Bytes>,
+    alive: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Drop for Counted {
+    fn drop(&mut self) {
+        self.alive.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl Bytes for Counted {
+    fn size(&self) -> std::io::Result<u64> {
+        self.bytes.size()
+    }
+
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        self.bytes.read_at(offset, buf)
+    }
+}
+
+#[test]
+fn released_the_viewer_holds_no_handle_and_draws_its_answer_until_it_reopens() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let alive = Arc::new(AtomicUsize::new(0));
+    let file: Arc<dyn Bytes> = Arc::new(Arc::<[u8]>::from(fixture().write()));
+    let opener = {
+        let alive = Arc::clone(&alive);
+        Box::new(move || {
+            alive.fetch_add(1, Ordering::SeqCst);
+            Ok(Arc::new(Counted {
+                bytes: Arc::clone(&file),
+                alive: Arc::clone(&alive),
+            }) as Arc<dyn Bytes>)
+        })
+    };
+    let mut h = harness(at(2 * SECOND..4 * SECOND));
+    h.state_mut().viewer = Some(Viewer::with_opener(&h.ctx, opener, 64 << 20).unwrap());
+    let held = wait(&mut h);
+    assert_eq!(alive.load(Ordering::SeqCst), 1);
+    viewer(&h).release();
+    assert_eq!(alive.load(Ordering::SeqCst), 0, "a handle after release");
+    // A pan while let go: the answer held, drawn moved, asks nothing it can answer and fails
+    // nothing.
+    let panned = 2 * SECOND + 500 * MS..4 * SECOND + 500 * MS;
+    h.state_mut().state.window = Window::At(panned.clone());
+    for _ in 0..10 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(Arc::ptr_eq(&viewer(&h).answer().unwrap(), &held));
+    assert_eq!(drawn(&h).window, panned);
+    let blank = super::graph::blank(&h, &(2 * SECOND + 500 * MS..4 * SECOND));
+    assert!(blank.is_empty(), "blank at {blank:?}");
+    assert_eq!(viewer(&h).failure(), None);
+    assert_eq!(alive.load(Ordering::SeqCst), 0);
+    // Opened again: one handle, and the pan's own answer.
+    viewer(&h).reopen().unwrap();
+    assert_eq!(alive.load(Ordering::SeqCst), 1);
+    let a = answered(&mut h, panned);
+    assert!(!Arc::ptr_eq(&a, &held));
+    assert_eq!(alive.load(Ordering::SeqCst), 1);
+}

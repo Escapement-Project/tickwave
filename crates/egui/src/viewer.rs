@@ -146,6 +146,8 @@ struct Slot {
     sketches: u64,
     /// No sketch is made: for the tests of what a viewer holding nothing draws.
     no_sketch: bool,
+    /// The file is let go of until `reopen`: the query thread runs nothing.
+    released: bool,
     stopped: bool,
 }
 
@@ -195,9 +197,43 @@ impl Slot {
 
 type Opener = Box<dyn Fn() -> io::Result<Arc<dyn Bytes>> + Send + Sync>;
 
+/// The bytes the opener gave, until `Viewer::release` lets go of them: a read after that fails.
+struct Releasable(RwLock<Option<Arc<dyn Bytes>>>);
+
+impl Releasable {
+    fn new(bytes: Arc<dyn Bytes>) -> Arc<Self> {
+        Arc::new(Self(RwLock::new(Some(bytes))))
+    }
+
+    /// Drops the bytes once no read holds them.
+    fn release(&self) {
+        *self.0.write().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    fn with<R>(&self, read: impl FnOnce(&dyn Bytes) -> io::Result<R>) -> io::Result<R> {
+        match &*self.0.read().unwrap_or_else(|e| e.into_inner()) {
+            Some(bytes) => read(bytes.as_ref()),
+            None => Err(io::Error::other("the viewer let go of the file")),
+        }
+    }
+}
+
+impl Bytes for Releasable {
+    fn size(&self) -> io::Result<u64> {
+        self.with(|b| b.size())
+    }
+
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        self.with(|b| b.read_at(offset, buf))
+    }
+}
+
 struct Shared {
     ctx: egui::Context,
     open: Opener,
+    /// What the recording reads through, the latest opened. Set and taken only under `slot`'s
+    /// lock, so a `release` and a `reopen` on two threads agree on which file is let go of.
+    bytes: Mutex<Arc<Releasable>>,
     cache_bytes: usize,
     recording: RwLock<Recording>,
     slot: Mutex<Slot>,
@@ -246,8 +282,9 @@ impl Viewer {
     }
 
     fn opened(ctx: &egui::Context, open: Opener, cache_bytes: usize) -> Result<Self, Error> {
-        let recording = Recording::open(open()?, Cache::new(cache_bytes))?;
-        Ok(Self::start(ctx, open, cache_bytes, recording, false))
+        let bytes = Releasable::new(open()?);
+        let recording = Recording::open(bytes.clone(), Cache::new(cache_bytes))?;
+        Ok(Self::start(ctx, open, bytes, cache_bytes, recording, false))
     }
 
     /// The recording at `path` that a writer in this process is writing. `snapshot` is the
@@ -255,13 +292,15 @@ impl Viewer {
     #[cfg(feature = "live")]
     pub fn live(ctx: &egui::Context, path: &Path, snapshot: Snapshot) -> Result<Self, Error> {
         let open = file(path);
-        let recording = Recording::live(snapshot, open()?, Cache::new(CACHE_BYTES))?;
-        Ok(Self::start(ctx, open, CACHE_BYTES, recording, true))
+        let bytes = Releasable::new(open()?);
+        let recording = Recording::live(snapshot, bytes.clone(), Cache::new(CACHE_BYTES))?;
+        Ok(Self::start(ctx, open, bytes, CACHE_BYTES, recording, true))
     }
 
     fn start(
         ctx: &egui::Context,
         open: Opener,
+        bytes: Arc<Releasable>,
         cache_bytes: usize,
         recording: Recording,
         live: bool,
@@ -269,6 +308,7 @@ impl Viewer {
         let shared = Arc::new(Shared {
             ctx: ctx.clone(),
             open,
+            bytes: Mutex::new(bytes),
             cache_bytes,
             slot: Mutex::new(Slot {
                 issued: 0,
@@ -294,6 +334,7 @@ impl Viewer {
                 #[cfg(test)]
                 sketches: 0,
                 no_sketch: false,
+                released: false,
                 stopped: false,
             }),
             recording: RwLock::new(recording),
@@ -321,12 +362,14 @@ impl Viewer {
     /// Opens the file at the path again, finished: once its writer finished it, or after it was
     /// replaced by a compacted copy. The recording and its cache are new; the query under way is
     /// cancelled, and the graph asks again for the same view. On an error the viewer keeps the
-    /// recording it had.
+    /// recording it had, let go of where `release` let go of it.
     pub fn reopen(&self) -> Result<(), Error> {
-        let recording =
-            Recording::open((self.shared.open)()?, Cache::new(self.shared.cache_bytes))?;
+        let bytes = Releasable::new((self.shared.open)()?);
+        let recording = Recording::open(bytes.clone(), Cache::new(self.shared.cache_bytes))?;
         let mut slot = self.shared.slot();
+        *self.shared.bytes.lock().unwrap_or_else(|e| e.into_inner()) = bytes;
         slot.replace = Some(recording);
+        slot.released = false;
         #[cfg(feature = "live")]
         {
             slot.snapshot = None;
@@ -339,6 +382,25 @@ impl Viewer {
         self.shared.wake.notify_all();
         self.shared.ctx.request_repaint();
         Ok(())
+    }
+
+    /// Lets go of the file, as a compaction needs before it renames a copy over it: Windows
+    /// refuses to rename over a file held open. The query under way is cancelled and none runs
+    /// until `reopen`, which opens the file again; meanwhile the graph draws the answer it holds,
+    /// moved to the window on screen, and a snapshot given to `update` waits too. What `recording`
+    /// reads of the file fails until then.
+    pub fn release(&self) {
+        let bytes = {
+            let mut slot = self.shared.slot();
+            slot.released = true;
+            if let Some(cancel) = &slot.running {
+                cancel.store(true, Ordering::Relaxed);
+            }
+            Arc::clone(&self.shared.bytes.lock().unwrap_or_else(|e| e.into_inner()))
+        };
+        // Waits for a read under way, then drops the opener's bytes: the file closes once
+        // nothing else holds it.
+        bytes.release();
     }
 
     /// The latest answer: the window's and the selection's statistics for a host's panel, and the
@@ -454,8 +516,9 @@ impl Viewer {
         snapshot: Snapshot,
         cache_bytes: usize,
     ) -> Result<Self, Error> {
-        let recording = Recording::live(snapshot, open()?, Cache::new(cache_bytes))?;
-        Ok(Self::start(ctx, open, cache_bytes, recording, true))
+        let bytes = Releasable::new(open()?);
+        let recording = Recording::live(snapshot, bytes.clone(), Cache::new(cache_bytes))?;
+        Ok(Self::start(ctx, open, bytes, cache_bytes, recording, true))
     }
 
     #[cfg(test)]
@@ -501,6 +564,10 @@ fn answer(shared: &Shared) {
             loop {
                 if slot.stopped {
                     return;
+                }
+                if slot.released && slot.replace.is_none() {
+                    slot = shared.wake.wait(slot).unwrap_or_else(|e| e.into_inner());
+                    continue;
                 }
                 if let Some(recording) = slot.replace.take() {
                     drop(slot);
@@ -665,6 +732,7 @@ mod tests {
             extends: 0,
             sketches: 0,
             no_sketch: false,
+            released: false,
             stopped: false,
         }
     }
