@@ -10,7 +10,7 @@ import { escapeHtml as esc } from "../escape.ts";
 import { reducedMotion } from "../face.ts";
 import { Prober, ZOOM_IN, type Probed } from "../prober.ts";
 import { formatInterval, measureReading } from "../readouts.ts";
-import { channelIndices, Plot, ROLE_WEIGHT } from "../render/plot.ts";
+import { channelIndices, HEAVY_ROLES, Plot } from "../render/plot.ts";
 import { isAbort, named, readingStep, type RecordingInfo } from "../source.ts";
 import { secondsValue, toTicks } from "../time.ts";
 import { DRAG_PX, TickwaveElement, loadAnnotations, loadHead, readAnnotations, zoomKey, type Loaded } from "./base.ts";
@@ -932,7 +932,7 @@ export class TickwaveInset extends TickwaveElement {
       const swatch = document.createElement("i");
       swatch.style.background = this.palette.role(r);
       // As heavy as the role's lines, so the key tells the roles apart without colour too.
-      if (ROLE_WEIGHT[r]) swatch.className = "heavy";
+      if (HEAVY_ROLES.has(r)) swatch.className = "heavy";
       item.append(swatch, r === "probe" || r === "target" ? `${r} drives` : r);
       this.#key.append(item);
     }

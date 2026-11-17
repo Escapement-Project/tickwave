@@ -102,25 +102,26 @@ pub fn face(night: bool) -> Result<Face, String> {
         let value = props.get(name).ok_or(format!("no {name}"))?;
         Ok(color32(colour(&props, value)?))
     };
+    let mut palette = Palette::from_visuals(&egui::Visuals::default());
+    palette.trace = get("--series-verge")?;
+    palette.surface = get("--surface")?;
+    palette.hair = get("--hair")?;
+    palette.ink = get("--ink")?;
+    palette.ink_2 = get("--ink-2")?;
+    palette.attention_fill = get("--attention-fill")?;
+    palette.attention_ink = get("--attention-ink")?;
+    palette.wash = get("--wash")?;
+    palette.figures = FontId::monospace(11.0);
+    palette.labels = FontId::monospace(11.0);
+    palette.pale = PALE;
+    palette.fill = FILL;
+    palette.shade = SHADE;
+    palette.line_weight = 1.5;
     Ok(Face {
         page: get("--page")?,
         ink: get("--ink")?,
         night,
-        palette: Palette {
-            trace: get("--series-verge")?,
-            surface: get("--surface")?,
-            hair: get("--hair")?,
-            ink: get("--ink")?,
-            ink_2: get("--ink-2")?,
-            attention_fill: get("--attention-fill")?,
-            attention_ink: get("--attention-ink")?,
-            wash: get("--wash")?,
-            figures: FontId::monospace(11.0),
-            labels: FontId::monospace(11.0),
-            pale: PALE,
-            fill: FILL,
-            shade: SHADE,
-        },
+        palette,
     })
 }
 

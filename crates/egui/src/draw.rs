@@ -16,9 +16,6 @@ use crate::graph::{LABEL_TOP, Layout, View, fitted};
 use crate::palette::Palette;
 use crate::viewer::{Facts, Held};
 
-/// A trace's line, in points.
-const TRACE_WIDTH: f32 = 1.2;
-const LANE_WIDTH: f32 = 1.0;
 /// A lane's high level sits this far under its top, its low level `LANE_SWING` under that.
 const LANE_PAD: f32 = 3.0;
 const LANE_SWING: f32 = 14.0;
@@ -284,8 +281,8 @@ fn colour(p: &Palette, pale: bool) -> Color32 {
     }
 }
 
-fn stroke(c: Color32) -> Stroke {
-    Stroke::new(TRACE_WIDTH, c)
+fn stroke(p: &Palette, c: Color32) -> Stroke {
+    Stroke::new(p.line_weight, c)
 }
 
 /// Each piece's band from its least to its greatest value, filled, with lines along both
@@ -317,8 +314,8 @@ fn bands(
             }
             _ => {
                 if let Some((was, pt, pb)) = drawing {
-                    lines.add(&mut top, stroke(was));
-                    lines.add(&mut bottom, stroke(was));
+                    lines.add(&mut top, stroke(p, was));
+                    lines.add(&mut bottom, stroke(p, was));
                     if piece.joined {
                         top.push(pos2(x0, pt));
                         bottom.push(pos2(x0, pb));
@@ -331,8 +328,8 @@ fn bands(
         drawing = Some((c, yt, yb));
     }
     if let Some((c, _, _)) = drawing {
-        lines.add(&mut top, stroke(c));
-        lines.add(&mut bottom, stroke(c));
+        lines.add(&mut top, stroke(p, c));
+        lines.add(&mut bottom, stroke(p, c));
     }
 }
 
@@ -542,7 +539,7 @@ fn trace(f: &Frame, px: f32, plot: &egui::Painter) -> (Mesh, Lines, Vec<CircleSh
         for s in points {
             if s.value.is_nan() {
                 if let Some((c, _, _)) = drawing.take() {
-                    lines.add(&mut line, stroke(c));
+                    lines.add(&mut line, stroke(p, c));
                 }
                 continue;
             }
@@ -560,7 +557,7 @@ fn trace(f: &Frame, px: f32, plot: &egui::Painter) -> (Mesh, Lines, Vec<CircleSh
                 }
                 _ => {
                     if let Some((was, _, before)) = drawing {
-                        lines.add(&mut line, stroke(was));
+                        lines.add(&mut line, stroke(p, was));
                         if joined {
                             line.push(pos2(x0, before));
                         }
@@ -571,7 +568,7 @@ fn trace(f: &Frame, px: f32, plot: &egui::Painter) -> (Mesh, Lines, Vec<CircleSh
             drawing = Some((c, s.end, y));
         }
         if let Some((c, _, _)) = drawing {
-            lines.add(&mut line, stroke(c));
+            lines.add(&mut line, stroke(p, c));
         }
         let shown = points
             .iter()
@@ -617,13 +614,13 @@ fn lane(ui: &Ui, f: &Frame, c: usize, rect: Rect, px: f32) {
     }
     let mut fills = Mesh::default();
     let mut lines = Lines::default();
-    let stroke = Stroke::new(LANE_WIDTH, p.trace);
+    let stroke = Stroke::new(p.line_weight, p.trace);
     let g = &held.answer.grid;
     let shown = columns_over(g, w.start.max(a.start), w.end.min(a.end));
-    let width = f64::from(LANE_WIDTH / px);
+    let width = f64::from(p.line_weight / px);
     let looks = shade::looks(columns, shown.clone(), width, g.per, f.facts.timebase);
     let DigitalColumns { state, at, .. } = columns;
-    let half = LANE_WIDTH / 2.0;
+    let half = p.line_weight / 2.0;
     let mut line = Vec::new();
     let mut pen: Option<f32> = None;
     for k in shown {

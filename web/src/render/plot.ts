@@ -111,11 +111,10 @@ const RIGHT_PAD = 10;
 const UNRESOLVED_ALPHA = 0.35;
 /** What the row of a channel this version can't read says. */
 export const UNAVAILABLE = "unavailable to this version";
-/** A trace's line, in CSS pixels. */
-const TRACE_WEIGHT = 1.5;
-/** A paint role that draws heavier than a trace, so its lines differ from the others' by more than
- * colour: the target's drive. */
-export const ROLE_WEIGHT: Readonly<Record<string, number>> = { target: 2.5 };
+/** Paint roles that draw heavier than a trace, by `HEAVIER` CSS pixels, so their lines differ from
+ * the others' by more than colour: the target's drive. */
+export const HEAVY_ROLES: ReadonlySet<string> = new Set(["target"]);
+const HEAVIER = 1;
 /** How long a read may run before the element says it is still loading. */
 const STALL_MS = 5000;
 
@@ -720,7 +719,7 @@ export class Plot {
     };
     // Off the plot, the trace leaves only the losses at either end to draw.
     const traced = x1 > x0;
-    if (traced && piecesAt(width(TRACE_WEIGHT)).length === 0) return;
+    if (traced && piecesAt(width(p.lineWeight)).length === 0) return;
     if (shown.lo <= shown.hi) this.#shown.set(r.track.index, { lo: shown.lo, hi: shown.hi });
 
     ctx.save();
@@ -789,7 +788,7 @@ export class Plot {
   /**
    * The device-pixel stretches of a channel's row between px0 and px1, each in the colour and line
    * weight that draw it: the role of the last annotation in the list that paints the channel there
-   * (`--tickwave-<role>`, `ROLE_WEIGHT`), else the trace's.
+   * (`--tickwave-<role>`, `HEAVY_ROLES`), else the trace's.
    */
   #stretches(channel: string, px0: number, px1: number): { px0: number; px1: number; colour: string; weight: number }[] {
     const p = this.palette!;
@@ -810,7 +809,8 @@ export class Plot {
     const active = new Set<number>();
     const stretch = (from: number, to: number) => {
       const role = active.size === 0 ? null : roles[Math.max(...active)];
-      out.push({ px0: from, px1: to, colour: role === null ? p.trace : p.role(role), weight: (role !== null && ROLE_WEIGHT[role]) || TRACE_WEIGHT });
+      const heavy = role !== null && HEAVY_ROLES.has(role);
+      out.push({ px0: from, px1: to, colour: role === null ? p.trace : p.role(role), weight: p.lineWeight + (heavy ? HEAVIER : 0) });
     };
     let x = px0;
     for (const m of marks) {

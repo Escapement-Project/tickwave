@@ -1,5 +1,5 @@
-// Colours and fonts for the canvas, read from the host page's tokens through computed style.
-// A page without the tokens gets system colours.
+// Colours, fonts and the line weight for the canvas, read from the host page's tokens through
+// computed style. A page without the tokens gets system colours and the default weight.
 
 export interface Palette {
   readonly ink: string;
@@ -13,8 +13,21 @@ export interface Palette {
   readonly trace: string;
   readonly fontText: string;
   readonly fontFigures: string;
+  /** The traces' line, in CSS pixels: `--tickwave-line-weight`, or `LINE_WEIGHT`. */
+  readonly lineWeight: number;
   /** A paint role's colour. */
   role(name: string): string;
+}
+
+/** The traces' line where the page sets no weight, in CSS pixels. */
+export const LINE_WEIGHT = 1.5;
+
+/** A line weight as the page gives it, a number of CSS pixels with or without `px`; `LINE_WEIGHT`
+ * for anything else, or a weight that is not positive and finite. */
+export function lineWeight(css: string): number {
+  const m = /^\s*(\+?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)\s*(?:px)?\s*$/i.exec(css);
+  const w = m ? Number(m[1]) : NaN;
+  return Number.isFinite(w) && w > 0 ? w : LINE_WEIGHT;
 }
 
 let scratch: CanvasRenderingContext2D | null = null;
@@ -89,6 +102,7 @@ export function resolvePalette(probe: HTMLElement, series: string | null): Palet
     trace: read(seriesExpr, ink),
     fontText: font("var(--font-text, system-ui, sans-serif)"),
     fontFigures: font("var(--font-figures, ui-monospace, monospace)"),
+    lineWeight: lineWeight(getComputedStyle(probe).getPropertyValue("--tickwave-line-weight")),
     role,
   };
   // Resolve the two named roles now, while the probe's styles are this face's.

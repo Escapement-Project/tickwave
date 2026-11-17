@@ -879,3 +879,56 @@ fn a_first_frame_draws_the_sketch_while_the_query_reads() {
     assert!(a.statistics.len() == 1, "the answer, not the sketch");
     assert_eq!(blank(&h, &extent), Vec::<f32>::new());
 }
+
+#[test]
+fn the_trace_and_the_lanes_draw_at_the_palettes_line_weight() {
+    // A flat stretch of the trace, its samples under a point apart so no dot draws, and DIO0's
+    // lane, flat low: each the depth of its line's solid core, at two weights.
+    let window = 2_100 * MS..2_900 * MS;
+    let depths = |weight: f32| {
+        let (mut h, _gate) = showing(fixture().write(), at(window.clone()), true);
+        h.state_mut().palette.line_weight = weight;
+        answered(&mut h, window.clone());
+        let p = h.state().palette.clone();
+        let depth = |clip: Rect| {
+            let ys: Vec<f32> = vertices_of(&h, clip, p.trace).iter().map(|v| v.y).collect();
+            ys.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+                - ys.iter().copied().fold(f32::INFINITY, f32::min)
+        };
+        (depth(plot(&h)), depth(drawn(&h).layout.lanes[0]))
+    };
+    let (thin, thick) = (depths(1.0), depths(3.0));
+    assert!(
+        (thick.0 - thin.0 - 2.0).abs() < 0.01,
+        "trace {thin:?} {thick:?}"
+    );
+    assert!(
+        (thick.1 - thin.1 - 2.0).abs() < 0.01,
+        "lane {thin:?} {thick:?}"
+    );
+}
+
+#[test]
+fn a_palette_from_the_hosts_theme_takes_its_colours_and_the_webs_opacities_and_weight() {
+    for v in [egui::Visuals::light(), egui::Visuals::dark()] {
+        let p = Palette::from_visuals(&v);
+        let ink = v.text_color();
+        assert_eq!((p.trace, p.ink, p.ink_2), (ink, ink, v.weak_text_color()));
+        assert_eq!(p.surface, v.panel_fill);
+        assert_eq!(p.wash, ink.gamma_multiply(0.12));
+        assert_eq!(p.attention_ink, v.warn_fg_color);
+        // The hair 22 % ink, the rest the panel: between the two, nearer the panel.
+        for (h, (i, s)) in [p.hair.r(), p.hair.g(), p.hair.b()].into_iter().zip([
+            (ink.r(), v.panel_fill.r()),
+            (ink.g(), v.panel_fill.g()),
+            (ink.b(), v.panel_fill.b()),
+        ]) {
+            let want = f32::from(i) * 0.22 + f32::from(s) * 0.78;
+            assert!((f32::from(h) - want).abs() <= 0.5, "{h} against {want}");
+        }
+        assert_eq!(
+            (p.pale, p.fill, p.shade, p.line_weight),
+            (0.35, 1.0, 0.12, 1.5)
+        );
+    }
+}

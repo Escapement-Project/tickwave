@@ -108,22 +108,9 @@ fn recording() -> Vec<u8> {
 }
 
 fn palette() -> Palette {
-    use egui::{Color32, FontId};
-    Palette {
-        trace: Color32::from_rgb(200, 30, 30),
-        surface: Color32::from_rgb(250, 250, 250),
-        hair: Color32::from_rgb(220, 220, 220),
-        ink: Color32::from_rgb(10, 10, 10),
-        ink_2: Color32::from_rgb(90, 90, 90),
-        attention_fill: Color32::from_rgb(240, 160, 0),
-        attention_ink: Color32::from_rgb(160, 80, 0),
-        wash: Color32::from_rgba_unmultiplied(0, 0, 200, 40),
-        figures: FontId::monospace(11.0),
-        labels: FontId::monospace(11.0),
-        pale: 0.35,
-        fill: 0.45,
-        shade: 0.2,
-    }
+    let mut p = Palette::from_visuals(&egui::Visuals::light());
+    p.trace = egui::Color32::from_rgb(200, 30, 30);
+    p
 }
 
 struct Host {
