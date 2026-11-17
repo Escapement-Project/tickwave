@@ -103,10 +103,11 @@ impl Widget for Strip<'_> {
         let window = self.state.window.resolve(Some(&extent), self.now);
         let handle =
             |x: f32| Rect::from_center_size(pos2(x, rect.center().y), vec2(HANDLE, rect.height()));
+        // A window that starts before the recording has its handle at the strip's start.
         let ends = [(true, window.start), (false, window.end)].map(|(start, t)| {
             let response = ui
                 .interact(
-                    handle(view.x(t as f64)),
+                    handle(view.x(t as f64).clamp(rect.left(), rect.right())),
                     id.with(("handle", start)),
                     Sense::drag(),
                 )

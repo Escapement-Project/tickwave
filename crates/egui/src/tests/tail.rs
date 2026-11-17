@@ -5,7 +5,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use escapement_tickwave_view::{Error, MarkerQuery};
+use egui::{Pos2, vec2};
+use escapement_tickwave_view::{Answer, Error, MarkerQuery};
 
 use super::live::Live;
 use super::*;
@@ -337,4 +338,82 @@ fn a_query_release_cancels_lands_nothing() {
     std::thread::sleep(Duration::from_millis(50));
     assert_eq!(v.failure(), None);
     assert!(Arc::ptr_eq(&v.answer().unwrap(), &held));
+}
+
+fn following(span: i64) -> ViewState {
+    ViewState {
+        window: Window::Follow { span },
+        ..ViewState::default()
+    }
+}
+
+/// Steps until the answer held covers the recording to `end` and nothing is under way, then
+/// draws it.
+fn landed_to(h: &mut Harness<'_, Host>, end: i64) -> Arc<Answer> {
+    for _ in 0..400 {
+        h.step();
+        if !viewer(h).busy()
+            && let Some(a) = viewer(h).answer()
+            && a.extent == Some(0..end)
+        {
+            h.step();
+            return a;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    panic!("no answer to {end}: {:?}", extent_end(viewer(h)));
+}
+
+#[test]
+fn a_followed_span_longer_than_the_recording_keeps_its_width_and_extends_from_the_first_snapshot() {
+    let mut live = Live::new(Capture::new(1000, 10_000, noisy));
+    let snapshot = live.write(1000);
+    let mut h = harness(following(5 * SECOND));
+    h.state_mut().strip = true;
+    h.state_mut().viewer = Some(Viewer::live(&h.ctx, &live.path, snapshot).unwrap());
+    let a = landed_to(&mut h, SECOND);
+    assert_eq!(drawn(&h).window, -4 * SECOND..SECOND);
+    assert_eq!(a.window.end - a.window.start, 5 * SECOND);
+    // Nothing is drawn before the capture: the trace starts at tick 0.
+    let plot = plot(&h);
+    let x0 = plot.left() + plot.width() * 4.0 / 5.0;
+    let trace = vertices_of(&h, plot, palette().trace.unwrap());
+    let left = trace.iter().map(|v| v.x).fold(f32::INFINITY, f32::min);
+    assert!(!trace.is_empty() && left >= x0 - 1.0, "{left} against {x0}");
+    // Each snapshot extends the answer held, its width the span's.
+    let mut extends = 0;
+    for k in 1..=5u64 {
+        let before = viewer(&h).extends();
+        viewer(&h).update(live.write(1000 + 100 * k));
+        let a = landed_to(&mut h, (1000 + 100 * k) as i64 * MS);
+        assert_eq!(a.window.end - a.window.start, 5 * SECOND, "snapshot {k}");
+        extends += viewer(&h).extends() - before;
+    }
+    assert!(extends >= 4, "{extends} of 5 extended");
+    // The strip spans the recording, and the window's start handle sits at its start: dragged,
+    // it moves the start alone.
+    let (_, band) = crate::strip::shown(&h.ctx, h.state().strip_id.unwrap()).unwrap();
+    let from = Pos2::new(band.left() + 2.0, band.center().y);
+    drag(&mut h, from, vec2(band.width() / 3.0, 0.0), 4);
+    h.step();
+    let Window::At(w) = h.state().state.window.clone() else {
+        panic!("a window of its own")
+    };
+    assert_eq!(w.end, 1500 * MS);
+    assert!((w.start - 500 * MS).abs() < 20 * MS, "{w:?}");
+}
+
+#[test]
+fn the_whole_recording_followed_starts_at_its_start_and_widens() {
+    let mut live = Live::new(Capture::new(1000, 10_000, noisy));
+    let snapshot = live.write(1000);
+    let mut h = harness(following(i64::MAX));
+    h.state_mut().viewer = Some(Viewer::live(&h.ctx, &live.path, snapshot).unwrap());
+    landed_to(&mut h, SECOND);
+    assert_eq!(drawn(&h).window, 0..SECOND);
+    viewer(&h).update(live.write(2000));
+    landed_to(&mut h, 2 * SECOND);
+    assert_eq!(drawn(&h).window, 0..2 * SECOND);
+    // Its width changes with each snapshot, so none is extended.
+    assert_eq!(viewer(&h).extends(), 0);
 }

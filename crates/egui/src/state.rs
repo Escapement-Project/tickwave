@@ -6,7 +6,8 @@ use std::ops::Range;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Window {
     /// The last `span` ticks, moving with the recording's end, or with the host's now where that
-    /// is later: from `span` before that end, or from the extent's start where it is shorter.
+    /// is later: `span` wide from the start, its part before the recording empty, so data enters
+    /// from the right. `span` `i64::MAX` follows the whole recording, from its start.
     Follow {
         span: i64,
     },
@@ -57,18 +58,26 @@ impl Default for ViewState {
 
 impl Window {
     /// The ticks on screen given the recording's extent and the host's now, at least one wide. A
-    /// followed window ends at the later of the extent's end and now, and starts no earlier than
-    /// the extent; before any data and with no now, it starts at tick 0.
+    /// followed window ends at the later of the extent's end and now, or at tick 0 before any
+    /// data and with no now, and starts `span` before that. The whole recording followed starts
+    /// at the extent's start, or at tick 0 before any data.
     pub fn resolve(&self, extent: Option<&Range<i64>>, now: Option<i64>) -> Range<i64> {
         match self {
             Self::At(r) => r.start..r.end.max(r.start.saturating_add(1)),
-            Self::Follow { span } => {
+            Self::Follow { span: i64::MAX } => {
                 let (start, end) = match (extent, now) {
                     (Some(e), now) => (e.start, now.map_or(e.end, |n| n.max(e.end))),
                     (None, Some(n)) => (0, n),
-                    (None, None) => return 0..(*span).max(1),
+                    (None, None) => return 0..i64::MAX,
                 };
-                end.saturating_sub(*span).max(start)..end.max(start + 1)
+                start..end.max(start + 1)
+            }
+            Self::Follow { span } => {
+                let end = match (extent, now) {
+                    (Some(e), now) => now.map_or(e.end, |n| n.max(e.end)),
+                    (None, now) => now.unwrap_or(0),
+                };
+                end.saturating_sub((*span).max(1))..end
             }
         }
     }
