@@ -24,15 +24,19 @@ annotation that paints over a span with a declared role, from the parts the span
 query's `MarkerQuery::paints` asks for those over its columns. A query's `strip` and `fallbacks` ask
 for channels' columns over the whole extent, which a host draws past `around` while a newer answer
 is on the way; each comes with the parts outside `around` of the columns `around` cuts, read again
-on their own (`StripAnswer::cut`). A hand-written `ref` shows once every part is read, as
+on their own (`StripAnswer::cut`). A finished recording keeps the last eight it read, so a query
+asking the same channel in as many columns takes them again without reading; only their cut parts,
+which follow `around`, are read each query. A hand-written `ref` shows once every part is read, as
 `load_markers`, `marker_count`, `markers_left_out` and a query's marker list read them;
 `load_markers` says why they don't read, where they don't. A channel this version can't read keeps
 its place and name as `ChannelKind::Unavailable`, and a marker that names it is left out.
 `Recording::live` reads a file a writer in the same process is still writing, through the
 writer's `Snapshot`, and `Recording::update` takes each newer snapshot, reading only what the
-writer added since and decoding only the blocks it hasn't yet, and the open block. Its cost
-follows those, not the recording's length. A file cut off by a crash is `Error::Unfinished`; the
-format crate's Recutter repairs it.
+writer added since and decoding only the blocks it hasn't yet, and of the open block only what it
+gained since. Its cost follows those, not the recording's length. Its length is the later of where
+the writer's data ends and the writer's promise, so a heartbeat's promise moves it on with no new
+data, and the digital channels are known to it, as in the file cut there and repaired. A file cut
+off by a crash is `Error::Unfinished`; the format crate's Recutter repairs it.
 
 Index pages, decoded blocks and overview blocks go in a `Cache`, which a recording's snapshots
 share. A query holds what it takes until it ends, so it decodes each block once, however many of
@@ -74,14 +78,18 @@ whole number of ticks, ⌈width / columns⌉, from tick 0, so every window as wi
 window's end moves on to the end of its column, and `around` starts on a multiple of a window's
 columns, two windows back, so it moves a window at a time. `Recording::extend` answers such a
 query from the answer to the one before it: it keeps the columns before the first tick the
-snapshots since then changed, works out the rest, and gives exactly what `query` would. A
-writer takes each channel's items in that channel's order, so one channel can lag the others:
-past a channel's promise its columns are provisional. A channel changes from its promise in the
-snapshot before, or from the start of a gap reported since, which can lie further back. It
-declines where it can't, and the caller queries whole: the query asks anything else, the window
-moved back or by more than its width, `around`'s start moved on, or the answer is another
-recording's or older than the 64 snapshots whose changes a recording keeps. Every answer names
-the recording and snapshot it was made from.
+snapshots since then changed, works out the rest, and gives exactly what `query` would, but for
+the fallbacks. It keeps a digital channel's held fallback, over the extent it had, where what a
+host draws of it is as it was: the extent starts where it did and still ends inside `around`, and
+nothing before `around` changed. So a followed recording's lanes are not read over the whole
+extent at each snapshot. The strip is worked out again, as it shows the extent growing. A writer
+takes each channel's items in that channel's order, so one channel can lag the others: past a
+channel's promise its columns are provisional. A channel changes from the earlier of its promise
+in the snapshot before and the length then, or from the start of a gap reported since, which can
+lie further back. It declines where it can't, and the caller queries whole: the query asks
+anything else, the window moved back or by more than its width, `around`'s start moved on, or the
+answer is another recording's or older than the 64 snapshots whose changes a recording keeps.
+Every answer names the recording and snapshot it was made from.
 
 `Recording::statistics` counts each sample whose time covers part of the interval, one that starts
 before it included, and weights its value by the time it covers there, exactly: the measured time

@@ -770,14 +770,14 @@ The annotation bundle record holds the sidecar's files without the parts' lines.
 u32, the decoded length, then one zstd frame of UTF-8 JSON: an object of strings, each file's name
 and text, where a generator file's text is its first line alone, with its newline. The whole
 generator file is that line, then the lines of every part whose generator is its own, in the order
-of the parts' rows. A live recording's hand-written file holds no annotation of its own and includes
-the generator files, in the order of their generators' first annotations. A file holds at most one
-bundle record, written just before the footer, and the footer's top index places it. A recording
-with annotation parts has a bundle record, and each part's generator has a file in it; a reader
-refuses a recording that breaks either. A reader that wants the sidecar's files whole, to write them
-beside the recording, joins them back from the bundle and the parts. It leaves out and cuts
-annotations at the length as below while it joins, so the files it writes pass ANNOTATIONS.md's
-checks.
+of the parts' rows. A live recording's hand-written file holds no annotation of its own, includes
+the generator files in the order of their generators' first annotations, and may hold a `[view]`
+(ANNOTATIONS.md, "The stored view"). A file holds at most one bundle record, written just before the
+footer, and the footer's top index places it. A recording with annotation parts has a bundle record,
+and each part's generator has a file in it; a reader refuses a recording that breaks either. A
+reader that wants the sidecar's files whole, to write them beside the recording, joins them back
+from the bundle and the parts. It leaves out and cuts annotations at the length as below while it
+joins, so the files it writes pass ANNOTATIONS.md's checks.
 
 A reader leaves out an annotation that starts at or past the length, and ends a span that ends past
 it at the length. A generator gives each annotation an id of its own (ANNOTATIONS.md). tickwave's
@@ -1040,7 +1040,7 @@ A writer:
   at the length if it has written any (so a file cut off inside its end repairs to itself), each
   overview level's last block and its open run, each generator's last annotation part, every
   table's last pages, the annotation parts table's included, then the annotation bundle where it
-  took any annotation, the footer and the trailer.
+  took any annotation or was given a stored view, the footer and the trailer.
 
 A writer refuses, as an error, any tick, count or length that a reader would refuse, the axis tick
 an item maps to included, and anything past the limits (see Limits), rather than write a file no

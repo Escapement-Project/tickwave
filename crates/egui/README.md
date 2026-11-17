@@ -10,13 +10,22 @@ graph. Both draw what a `Viewer` answers.
 `Viewer::open` opens a finished recording at a path. `Viewer::live` opens one a writer in the
 same process is still writing, from the writer's snapshot, and `Viewer::update` takes each newer
 snapshot. When the writer finishes the file, or a compacted copy replaces it, `Viewer::reopen`
-opens the file at the path again, finished; the view stays as it was. A `Viewer` is `Send`, so a
-host may open it off the UI thread and hand it over.
+opens the file at the path again, finished; the view stays as it was. A `Viewer` is `Send` and
+`Sync`, so a host may open it off the UI thread and hand it over, or call it from its file thread.
+
+A viewer keeps decoded data in a cache: index pages, blocks and overview blocks, the least recently
+used let go of first. It holds about 256 MiB unless `ViewerOptions::cache_bytes`, given to
+`Viewer::open_with` or `Viewer::live_with`, says otherwise, and `reopen` keeps that budget. A
+recording followed as it is written fills it with the tail's blocks, each decoded as the next
+answer reads it, until it reaches its budget: about 160 seconds into a verge capture at 100,000
+pairs a second, with the default.
 
 A compaction renames a copy over the file, and Windows refuses that while the file is open.
 `Viewer::release` lets go of the file first: it cancels the query under way and runs none until
 `reopen`, while the graph draws the answer it holds, moved to the window on screen. What
-`Viewer::recording` reads of the file fails meanwhile.
+`Viewer::recording` reads of the file fails meanwhile. A `reopen` that finds the file still being
+written returns `Error::Unfinished`, and a live viewer let go of reads the file again and carries
+on live.
 
 Queries run on a thread of their own. A newer query replaces one that hasn't started and cancels
 one that has, so only the newest answer is kept, and its arrival asks egui for a frame. Until the
@@ -26,17 +35,50 @@ past the footer. The graph keeps room for the marker labels from that frame on w
 recording has markers, read or not. A graph
 following a recording as it is written draws every frame. After each snapshot the viewer answers
 the followed request again itself, at once: it keeps the columns of the answer it holds before
-the first tick the snapshot changed, and reads only from there. The graph asks again only when
-what it asks changes, or when the window has moved past what the answer covers; there is no
-timer. An answer covers its window and at least a width either side, so a moving now alone asks
-nothing: the graph draws the answer it holds, moved to the window on screen, and the trace
-scrolls every frame. A followed window's columns sit at fixed ticks, so its answer's window ends
-a whole column on, and now scrolls the picture between columns.
+the first tick the snapshot changed, and reads only from there, its window ending at the now the
+graph gave it last. The graph asks again only when what it asks changes, or when the window has
+moved past what the answer covers; there is no timer. A change of the channels drawn is asked at
+once. Any other change waits only for a request of the graph's own under way, so a pan draws its
+answers as they come rather than cancelling each one. It cancels a snapshot's follow-up, which
+the next snapshot runs again. An answer covers its window and at least a width either side, so a
+moving now alone asks nothing: the graph draws the answer it holds, moved to the window on
+screen, and the trace scrolls every frame. A followed window's columns sit at fixed ticks, so its
+answer's window ends a whole column on, and now scrolls the picture between columns.
 `Viewer::answer` gives the latest answer, with the window's and the selection's statistics for a
-host's panel. `Viewer::busy` says a query is waiting or running, so the answer drawn may be older
-than the view. `Viewer::failure` says why the last query or snapshot failed. `Viewer::recording`
-reads the recording itself, for what it says of the whole capture: samples lost, gaps, sources
-and markers.
+host's panel. `Viewer::busy` says a request or a snapshot is waiting, a snapshot is being taken,
+or a query runs, a follow-up included, so the answer drawn may be older than the view. Once it is
+false, a followed window's answer is of the last snapshot given, unless `Viewer::failure` says
+why not. `Viewer::failure` says why the last query or snapshot failed. `Viewer::recording` reads
+the recording itself, for what it says of the whole capture: samples lost, gaps, sources and
+markers.
+
+## A recording being written
+
+What a host does for a viewer of a recording its writer is still writing:
+
+- **One snapshot a frame.** Give `Viewer::update` the writer's newest snapshot at most once a
+  frame, taken on the UI thread. The viewer keeps only the newest it was given, but each one taken
+  costs the query thread its update and follow-up: given every millisecond at 100,000 pairs a
+  second, they keep it busy almost all the time.
+- **Bytes first.** Give a snapshot only once the bytes it covers are in the file.
+- **One viewer a capture.** Open a new `Viewer::live` for each capture. A snapshot of another
+  writer is the `failure`.
+- **A finite span.** A followed window with a finite span is that span wide from the capture's
+  start: its part before the capture is empty, and the data enters from the right. Its width
+  stays the same, so each snapshot's follow-up extends the answer held. The whole recording
+  followed, `Follow { span: i64::MAX }`, starts at the recording's start and widens with each
+  snapshot, so each follow-up is a whole query.
+- **Now.** Each frame while recording, give `Graph::now` in the recording's ticks: the newest
+  snapshot's data end plus the time since it was published, kept a little ahead of the data at
+  most. From the writer's finish on, give None: a now left set moves a followed window past the
+  recording's end.
+- **Busy.** Once `busy` is false, a followed window's answer is of the last snapshot given, or
+  failed. A host that waits for the answer to a snapshot waits for `busy` to turn false.
+- **The window's statistics.** A snapshot's follow-up ends its window at the now the graph gave the
+  frame before, so `statistics[0]` is of the window drawn then, a frame behind at most.
+- **The finish.** After the writer's finish, `reopen`. A snapshot given after that is one taken
+  before the finish, and is dropped. `release` can come before the finish: a `reopen` then finds
+  the file unfinished, returns `Error::Unfinished`, and the viewer carries on live.
 
 ## The view the host keeps
 
