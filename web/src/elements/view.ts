@@ -249,6 +249,7 @@ export class TickwaveView extends TickwaveElement {
       labelPx: 12,
     });
     this.#plot.onError = (e) => this.fail(e);
+    this.#plot.onRange = () => this.#layout(true);
     this.#plot.onRecovered = (m) => this.forgetProblem(m);
     this.#plot.onStall = (ms) => this.waiting(ms);
     this.#prober = new Prober(
@@ -1430,9 +1431,11 @@ export class TickwaveView extends TickwaveElement {
     return range.hi - range.lo < (lim.whole.hi - lim.whole.lo) * (1 - 1e-9) ? { lo: range.lo, hi: range.hi } : null;
   }
 
+  /** Analog row `row`'s scale's limits; null before its whole range is known. */
   #limits(row: number): ScaleLimits | null {
-    const c = this.#plot.tracks[row]?.channel;
-    return c?.kind === "analog" ? scaleLimits(this.#plot.wholeRange(c), c.resolution) : null;
+    const t = this.#plot.tracks[row];
+    const whole = t && this.#plot.wholeRange(t);
+    return whole && t.channel.kind === "analog" ? scaleLimits(whole, t.channel.resolution) : null;
   }
 
   /** Gives analog row `row` a range of values, within its limits, or its whole range for null. */

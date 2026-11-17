@@ -306,6 +306,19 @@ export class Plot {
   reveal: number | null = null;
   notes: NoteOut[] = [];
   onDraw: (() => void) | null = null;
+  /** Called as a frame begins, once, when the element should lay the plot out again (`resize`):
+   * the layout was held for analog rows' bases that are all in now, or rows it gave no whole range
+   * have one now. Their scales' labels may widen the names column. Once a frame, so rows whose
+   * bases land a few at a time aren't laid out again for each. */
+  onRange: (() => void) | null = null;
+  /** Whether the layout gives some analog row no range. */
+  #rangeless = false;
+  /** Whether the layout was made while an analog row's base was out: the canvas keeps its size
+   * and what it shows, and nothing is drawn, until the bases are in and a frame lays the plot out
+   * again (`onRange`). So no frame shows a names column that then widens. */
+  #held = false;
+  /** Whether a frame's `onRange` is running: the layout it makes is drawn by that frame. */
+  #inFrame = false;
   onError: ((e: unknown) => void) | null = null;
   /** A problem `onError` reported that has gone: every track has read since. */
   onRecovered: ((message: string) => void) | null = null;
@@ -348,11 +361,18 @@ export class Plot {
             const error = notLoaded(e);
             this.#notLoaded.add(error.message);
             this.onError?.(error);
+            // A failed base is in, for a held layout.
+            this.invalidate();
           },
         ),
     );
     this.tracks = tracks;
     this.layout = null;
+  }
+
+  /** Whether every analog row's base is in: landed, null or failed. */
+  #based(): boolean {
+    return this.tracks.every((t) => t.channel.kind !== "analog" || t.baseSettled);
   }
 
   /** Once no track's last read failed, the failures reported are over. */
@@ -415,10 +435,14 @@ export class Plot {
     return m.on ? null : say;
   }
 
-  /** An analog channel's whole range: its least and greatest values, out to round steps. */
-  wholeRange(c: AnalogChannel): { lo: number; hi: number; place: number } {
-    const lo0 = Number.isFinite(c.min) ? c.min : 0;
-    const hi0 = Number.isFinite(c.max) ? Math.max(c.max, lo0) : lo0;
+  /** Analog row `t`'s whole range: its channel's least and greatest values (`Track.wholeRange`), out
+   * to round steps. Null until the row's base lands. */
+  wholeRange(t: Track): { lo: number; hi: number; place: number } | null {
+    const r = t.wholeRange();
+    if (!r || t.channel.kind !== "analog") return null;
+    const c = t.channel;
+    const lo0 = Number.isFinite(r.lo) ? r.lo : 0;
+    const hi0 = Number.isFinite(r.hi) ? Math.max(r.hi, lo0) : lo0;
     const spread = hi0 > lo0 ? hi0 - lo0 : Math.max(c.resolution ?? 0, Math.abs(hi0) * 1e-3, 1e-12);
     const { step, place } = niceStep(spread / 4);
     return { lo: Math.floor(lo0 / step) * step, hi: Math.max(Math.ceil(hi0 / step) * step, Math.floor(lo0 / step) * step + step), place };
@@ -429,7 +453,8 @@ export class Plot {
     if (c.kind !== "analog") return undefined;
     const set = this.ranges.get(t.index);
     if (set) return { lo: set.lo, hi: set.hi, marks: rangeMarks(set) };
-    const whole = this.wholeRange(c);
+    const whole = this.wholeRange(t);
+    if (!whole) return undefined;
     return { lo: whole.lo, hi: whole.hi, marks: { top: whole.hi, bottom: whole.lo, place: whole.place } };
   }
 
@@ -516,6 +541,10 @@ export class Plot {
       top += h;
       return row;
     });
+    this.#rangeless = rows.some((r) => r.track.channel.kind === "analog" && !r.range);
+    // A layout made outside a frame, as an annotation file landing makes, holds on: the frame
+    // sizes the canvas and draws it, once, rather than a task before it.
+    this.#held = !this.#based() || (this.#held && !this.#inFrame);
     const axisTop = top + 2;
     this.layout = {
       width,
@@ -529,6 +558,10 @@ export class Plot {
       axisTop,
     };
     this.#dpr = Math.max(1, globalThis.devicePixelRatio || 1);
+    if (this.#held) {
+      this.invalidate();
+      return this.layout;
+    }
     // Setting a canvas's size clears it, even to the size it has, and the page can paint before the
     // next frame draws: a row dragged taller would flash blank. So keep a bitmap that still fits,
     // and draw a new one at once.
@@ -539,7 +572,7 @@ export class Plot {
     if (w !== this.canvas.width || h !== this.canvas.height) {
       this.canvas.width = w;
       this.canvas.height = h;
-      this.drawNow();
+      if (!this.#inFrame) this.drawNow();
     }
     this.invalidate();
     return this.layout;
@@ -640,6 +673,15 @@ export class Plot {
     // again for where the view has gone since.
     this.#need();
     this.#frame = requestAnimationFrame(() => {
+      // Before `#frame` clears, so the layout's own `invalidate` asks for no second frame.
+      if (this.#held ? this.#based() : this.#rangeless && this.layout?.rows.some((r) => r.track.channel.kind === "analog" && !r.range && this.wholeRange(r.track))) {
+        this.#inFrame = true;
+        try {
+          this.onRange?.();
+        } finally {
+          this.#inFrame = false;
+        }
+      }
       this.#frame = 0;
       this.drawNow();
     });
@@ -680,6 +722,11 @@ export class Plot {
     const l = this.layout;
     const p = this.palette;
     if (!l || !p || !this.info) return;
+    if (this.#held) {
+      // A slow base still says so.
+      this.#watchStall();
+      return;
+    }
     const began = performance.now();
     this.#eased();
     const ctx = this.#ctx;
@@ -817,6 +864,9 @@ export class Plot {
       ctx.stroke();
       this.#shown.delete(r.track.index);
     }
+    // An analog row before its base lands has no whole range to place a value by: its name alone,
+    // until the base comes and the element lays the plot out again (`onRange`).
+    if (c.kind === "analog" && !r.range) return;
     // A channel this version can't read holds its place, and says so (FORMAT.md, "Unavailable
     // channels").
     if (c.kind === "unavailable") {

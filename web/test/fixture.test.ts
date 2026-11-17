@@ -115,7 +115,7 @@ test("the lane and stepping take time order, whatever the sidecar's order", () =
 
 test("a cursor reads the last sample at or before it", () => {
   // verge's energy capture: 100 kHz, sample i at tick 5000 + 10000 i, 306,178 samples.
-  const c: AnalogChannel = { kind: "analog", name: "current", end: 3061780000, unit: "A", first: 5000, period: { num: 10000, den: 1 }, count: 306178, resolution: 1e-9, min: 0, max: 1 };
+  const c: AnalogChannel = { kind: "analog", name: "current", end: 3061780000, unit: "A", first: 5000, period: { num: 10000, den: 1 }, count: 306178, resolution: 1e-9 };
   assert.equal(sampleAtOrBefore(c, 4999), null);
   assert.equal(sampleAtOrBefore(c, 5000), 0);
   // Between samples 1 (15,000) and 2 (25,000): sample 1, not the nearer sample 2.

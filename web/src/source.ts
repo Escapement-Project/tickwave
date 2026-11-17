@@ -138,9 +138,6 @@ export interface AnalogChannel {
   /** At most this many significant figures in a reading, where the channel states it: an instrument
    * whose step changes with its range. */
   readonly significant?: number;
-  /** The smallest and largest value in the recording. */
-  readonly min: number;
-  readonly max: number;
   /** A derived channel: computed by `op` from its `operands`' values, named in order (FORMAT.md,
    * "Derived channels"). The file stores none of its samples, and it sits where they do. */
   readonly derived?: { readonly op: string; readonly operands: readonly string[] };

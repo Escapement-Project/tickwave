@@ -137,6 +137,10 @@ export class TickwaveInset extends TickwaveElement {
       labelPx: 11,
     });
     this.#plot.onError = (e) => this.fail(e);
+    this.#plot.onRange = () => {
+      this.#layoutKey = "";
+      this.#layout();
+    };
     this.#plot.onRecovered = (m) => this.forgetProblem(m);
     this.#plot.onStall = (ms) => this.waiting(ms);
     this.#hit = this.root.querySelector(".hit")!;

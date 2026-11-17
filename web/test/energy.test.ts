@@ -36,8 +36,11 @@ test("its channels: integer readings to four figures, power after them, the runs
   // The loss: from a period past pair 999 (959,040 + 960) for 50 periods, which ends at the next run.
   assert.deepEqual(lostSpans(v), [{ from: 960_000, to: 1_008_000, lost: 50 }]);
   assert.deepEqual(dio.gaps, [{ from: 960_000, to: 1_008_000, level: 1 }]);
-  // The smallest and largest V: 3,285 mV (a step of 3, i % 3 = 0) and 3,302 mV.
-  assert.deepEqual([v.min, v.max], [3285 / 1000, 3302 / 1000]);
+  // The smallest and largest V, which its coarsest overview gives a row: 3,285 mV (a step of 3,
+  // i % 3 = 0) and 3,302 mV.
+  const strip = await r.overview(0, 0, r.info.length, Infinity);
+  assert.equal(strip?.kind, "analog");
+  if (strip?.kind === "analog") assert.deepEqual([Math.min(...strip.min), Math.max(...strip.max)], [3285 / 1000, 3302 / 1000]);
 });
 
 test("its values come as the codes times their scales, and power as their product", async () => {

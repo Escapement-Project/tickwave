@@ -9,7 +9,7 @@ import type { Layer, Tile } from "../src/render/track.ts";
 import type { AnalogChannel, DigitalChannel, Listed } from "../src/source.ts";
 
 /** Samples every 10 ticks from tick 100, 3 lost before, 2 after; 1,000 of them. */
-const a: AnalogChannel = { kind: "analog", name: "A", end: 10_100, unit: "V", first: 100, period: { num: 10, den: 1 }, count: 1000, resolution: null, min: 0, max: 1, lostBefore: 3, lostAfter: 2 };
+const a: AnalogChannel = { kind: "analog", name: "A", end: 10_100, unit: "V", first: 100, period: { num: 10, den: 1 }, count: 1000, resolution: null, lostBefore: 3, lostAfter: 2 };
 
 /** A samples tile over [start, end) whose answer carries `listed`. */
 const layer = (start: number, end: number, listed?: Listed): Layer => {

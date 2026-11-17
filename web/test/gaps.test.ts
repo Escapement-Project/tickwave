@@ -31,8 +31,6 @@ const w: AnalogChannel = {
   count: 10,
   breaks: [{ index: 5, tick: 30, lost: 2 }],
   resolution: null,
-  min: 0,
-  max: 9,
 };
 
 test("a sample's tick follows the run that holds it", () => {

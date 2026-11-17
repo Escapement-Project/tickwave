@@ -185,3 +185,45 @@ test("a row whose overview in hand holds too few edges to pass the bound reads i
   assert.equal(track.tile?.kind, "edges");
   assert.equal(counted, 0);
 });
+
+test("an analog row's whole range is its coarsest tile's least and greatest, and none before that tile lands", async () => {
+  const values = Float64Array.from({ length: 5_000 }, (_, i) => Math.sin(i / 37) * 3);
+  [values[77], values[100], values[4_321]] = [-7, NaN, 12];
+  const source = new MemorySource(
+    { title: "a", timebase: { num: 1e6, den: 1 }, length: 50_000, channels: [{ kind: "analog", name: "A", end: 50_000, unit: "V", first: 0, period: { num: 10, den: 1 }, resolution: null, values }] },
+    { levels: [64, 1024], latency: 5 },
+  );
+  const info = await source.info();
+  const track = new Track(source, 0, info.channels[0], () => {}, (e) => assert.fail(String(e)));
+  // The base is on its way: no range to show yet.
+  assert.equal(track.wholeRange(), null);
+  await new Promise((r) => setTimeout(r, 30));
+  let [lo, hi] = [Infinity, -Infinity];
+  for (const v of values) {
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+  }
+  assert.deepEqual(track.wholeRange(), { lo, hi });
+  assert.equal(lo, -7);
+  assert.equal(hi, 12);
+});
+
+test("an analog row with no overview has its whole range once a read covers its channel, from its samples, leaving out any that is not a number", async () => {
+  const values = Float64Array.from({ length: 5_000 }, (_, i) => Math.cos(i / 41) * 2);
+  [values[0], values[3], values[2_500]] = [NaN, -5, 9];
+  const source = new MemorySource(
+    { title: "a", timebase: { num: 1e6, den: 1 }, length: 50_000, channels: [{ kind: "analog", name: "A", end: 50_000, unit: "V", first: 0, period: { num: 10, den: 1 }, resolution: null, values }] },
+    { levels: [] },
+  );
+  const info = await source.info();
+  const track = new Track(source, 0, info.channels[0], () => {}, (e) => assert.fail(String(e)));
+  // A view of part of it reads part of it: no range.
+  track.need(10_000, 12_000, 2);
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(track.tile?.kind, "samples");
+  assert.equal(track.wholeRange(), null);
+  // The whole of it.
+  track.need(0, 50_000, 50);
+  await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(track.wholeRange(), { lo: -5, hi: 9 });
+});

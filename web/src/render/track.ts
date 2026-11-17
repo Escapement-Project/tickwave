@@ -13,6 +13,7 @@ import {
   type Samples,
   type Source,
 } from "../source.ts";
+import type { ValueRange } from "./scale.ts";
 import { counts } from "./shade.ts";
 
 export type Tile =
@@ -87,6 +88,10 @@ export class Track {
   #retryAt = 0;
   /** A request for buckets no larger than this came back null: there is no level that fine. */
   #noOverviewAtOrBelow = 0;
+  /** When the base's read began, while it is out: until it lands, comes back null or fails. */
+  #baseSince: number | null = null;
+  /** `wholeRange`'s answer, and the base it came from. */
+  #whole: { of: Tile; range: ValueRange } | null = null;
   /** The finest overview level's buckets, once a request has met it. */
   #finest = Infinity;
   /** The last read that would have held more than `EDGES_AT_MOST` edges: its span and the view's
@@ -104,7 +109,10 @@ export class Track {
     this.#failed = failed;
     // The base is asked for at once, not at the first draw: a first draw comes from it, and the
     // draw that asks would leave it a frame later. A channel this version can't read has none.
-    if (channel.kind !== "unavailable") void this.#fetchBase();
+    if (channel.kind !== "unavailable") {
+      this.#baseSince = performance.now();
+      void this.#fetchBase();
+    }
   }
 
   /** The channel moved by `by` ticks, now `channel`: the tiles in hand move with it, so the row
@@ -118,13 +126,38 @@ export class Track {
     this.#pending = null;
   }
 
+  /**
+   * An analog channel's least and greatest values, from the base, the coarsest tile the row reads
+   * that covers the channel: its overview's buckets, or its samples where it has no overview.
+   * Every level's buckets hold the same least and greatest. Infinity and -Infinity where none holds
+   * a value; null until the base lands.
+   */
+  wholeRange(): ValueRange | null {
+    const b = this.#base;
+    if (!b || this.channel.kind !== "analog") return null;
+    if (this.#whole?.of === b) return this.#whole.range;
+    let [lo, hi] = [Infinity, -Infinity];
+    const [mins, maxes] = b.kind === "analog-overview" ? [b.data.min, b.data.max] : b.kind === "samples" ? [b.data.values, b.data.values] : [[], []];
+    for (const v of mins) if (v < lo) lo = v;
+    for (const v of maxes) if (v > hi) hi = v;
+    this.#whole = { of: b, range: { lo, hi } };
+    return this.#whole.range;
+  }
+
   get busy(): boolean {
     return this.#pending !== null;
   }
 
-  /** When the read under way began, in `performance.now()` time; null when none is. */
+  /** Whether the base's read is over: it landed, came back null (no overview) or failed. */
+  get baseSettled(): boolean {
+    return this.#baseSince === null;
+  }
+
+  /** When the read under way began, the base's included, in `performance.now()` time; null when
+   * none is. */
   get waitingSince(): number | null {
-    return this.#pending?.since ?? null;
+    const [p, b] = [this.#pending?.since ?? null, this.#baseSince];
+    return p === null ? b : b === null ? p : Math.min(p, b);
   }
 
   #mode(start: number, end: number, per: number): Mode {
@@ -247,7 +280,11 @@ export class Track {
       const start = channelStart(this.channel);
       const end = this.channel.end;
       const ov = await this.source.overview(this.index, start, end, Infinity);
-      if (!ov) return;
+      this.#baseSince = null;
+      if (!ov) {
+        this.#changed();
+        return;
+      }
       this.#met(ov);
       this.#offerBase(
         ov.kind === "digital"
@@ -257,6 +294,7 @@ export class Track {
       this.failed = false;
       this.#changed();
     } catch (e) {
+      this.#baseSince = null;
       if (isAbort(e)) return;
       this.failed = true;
       this.#failed(e);

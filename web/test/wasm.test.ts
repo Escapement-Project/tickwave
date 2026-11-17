@@ -7,7 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HttpBytes, MemoryBytes, type Bytes, type Fetch } from "../src/wasm/bytes.ts";
@@ -303,6 +303,33 @@ test("past the distinct periods a span counts, here 8, its count, least, most an
   const rising = Array.from(joined.ticks).filter((_, i) => (joined.level ^ (i & 1)) === 0);
   assert.deepEqual(got, { count: want.count, median: null, min: want.min, max: want.max, used: want.count, runs: 1, span: rising[rising.length - 1] - rising[0] });
   assert.ok(want.median !== null);
+});
+
+test("every analog and derived channel's coarsest overview holds its least and greatest values: those of all its samples, exactly", async () => {
+  // A row's whole range comes from that overview (track.ts `wholeRange`), not from the info.
+  let checked = 0;
+  for (const name of readdirSync(at("fixtures")).filter((f) => f.endsWith(".tickwave"))) {
+    const r = await openTickwave(`fixtures/${name}`);
+    for (const [c, ch] of r.info.channels.entries()) {
+      if (ch.kind !== "analog") continue;
+      const strip = await r.overview(c, 0, r.info.length, Infinity);
+      assert.equal(strip?.kind, "analog", `${name} ${ch.name}`);
+      if (strip?.kind !== "analog") continue;
+      const { values } = await r.samples(c, 0, r.info.length);
+      let [lo, hi] = [Infinity, -Infinity];
+      for (const v of values) {
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+      }
+      let [slo, shi] = [Infinity, -Infinity];
+      for (const v of strip.min) if (v < slo) slo = v;
+      for (const v of strip.max) if (v > shi) shi = v;
+      assert.ok(Object.is(slo, lo) && Object.is(shi, hi), `${name} ${ch.name}: ${slo}..${shi} against ${lo}..${hi}`);
+      checked++;
+    }
+  }
+  // Not vacuous: energy's V, I and P, swd50-cut's two, phased's A and B, unavailable's readable ones.
+  assert.ok(checked >= 7, `${checked}`);
 });
 
 test("the overview: each channel's own levels, unpacked from the footer, as the extractor's fixture computes them", async () => {

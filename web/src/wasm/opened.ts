@@ -551,7 +551,6 @@ export class Opened {
           ...(!plain(map) && { map }),
         };
       }
-      const [min, max] = this.#range(i);
       const period = { num: c.period[0], den: c.period[1] };
       const phase = c.phase && { num: c.phase[0], den: c.phase[1] };
       const paged = c.break_count !== undefined;
@@ -578,8 +577,6 @@ export class Opened {
         count: c.count,
         resolution: resolution(c.coding),
         ...(c.significant !== undefined && { significant: c.significant }),
-        min,
-        max,
       };
     });
     // A derived channel reads as an analog one after the stored channels, placed as its first
@@ -598,7 +595,6 @@ export class Opened {
       const ca = channels[a];
       const cb = channels[b];
       if (ca?.kind !== "analog" || cb?.kind !== "analog") throw named("TickwaveNotRecording", `${bytes.name}: ${dc.name} is derived from channels it doesn't hold`);
-      const [min, max] = this.#range(o);
       for (const i of [a, b]) if ((h.channels[i] as HeaderAnalog).coding.type === "int") this.#operands.add(i);
       channels.push({
         ...ca,
@@ -608,8 +604,6 @@ export class Opened {
         derived: { op: dc.op, operands: [...dc.operands] },
         resolution: rec.derivedStep(d) ?? null,
         ...(dc.significant !== undefined ? { significant: dc.significant } : { significant: undefined }),
-        min,
-        max,
       });
     }
     this.info = {
@@ -678,16 +672,6 @@ export class Opened {
     const arrays = !c ? level.derived()?.slice(0, 2) : c.kind === "digital" ? level.digital() : wide(c) ? level.analog64() : level.analog();
     if (!arrays) throw new Error(`${this.#name}: channel ${o}'s overview is not laid out as its kind`);
     return arrays;
-  }
-
-  /** An analog or derived channel's smallest and largest value, from its strip. */
-  #range(o: number): [number, number] {
-    const [lo, hi] = this.#strip(o) as Float32Array[] | Float64Array[];
-    let min = Infinity;
-    let max = -Infinity;
-    for (const v of lo) if (v < min) min = v;
-    for (const v of hi) if (v > max) max = v;
-    return [min, max];
   }
 
   /** Whether stored channel `c`'s gaps or breaks are in list pages. */

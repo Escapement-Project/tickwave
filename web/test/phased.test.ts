@@ -56,7 +56,7 @@ test("a phase and a break's phase place a recording's samples at the ticks their
   assert.deepEqual([after.first, [...after.values]], [11, [1.011]]);
   // Lost samples end at the next run's start where that comes sooner: four lost from place 5 on a
   // whole-tick grid, the run after them starting at 7.
-  const cut: AnalogChannel = { kind: "analog", name: "x", end: 20, unit: "V", first: 0, period: { num: 1, den: 1 }, count: 10, breaks: [{ index: 5, tick: 7, lost: 4 }], resolution: null, min: 0, max: 1 };
+  const cut: AnalogChannel = { kind: "analog", name: "x", end: 20, unit: "V", first: 0, period: { num: 1, den: 1 }, count: 10, breaks: [{ index: 5, tick: 7, lost: 4 }], resolution: null };
   assert.deepEqual(lostSpans(cut), [{ from: 5, to: 7, lost: 4 }]);
 });
 
@@ -96,8 +96,6 @@ const channel = (first: number, count: number, period: Ratio, phase: Ratio | und
   breaks,
   ...(m && { map: m }),
   resolution: null,
-  min: 0,
-  max: 1,
 });
 // crates/view/src/runs.rs's cases, the far one at 2^50 rather than 2^60: a JavaScript tick is a
 // double, exact below 2^53.

@@ -79,12 +79,6 @@ export class MemorySource implements Source {
     this.#latency = options.latency ?? 0;
     const channels: Channel[] = rec.channels.map((c) => {
       if (c.kind === "digital") return { kind: "digital", name: c.name, end: c.end };
-      let min = Infinity;
-      let max = -Infinity;
-      for (const v of c.values) {
-        if (v < min) min = v;
-        if (v > max) max = v;
-      }
       return {
         kind: "analog",
         name: c.name,
@@ -94,8 +88,6 @@ export class MemorySource implements Source {
         period: c.period,
         count: c.values.length,
         resolution: c.resolution,
-        min,
-        max,
       };
     });
     this.#info = {
