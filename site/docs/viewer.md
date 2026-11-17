@@ -37,8 +37,9 @@ nothing else. Bundled into the recording, the sidecar goes with it, so a recordi
 a page opens here as the page showed it.
 
 A view on a page may offer Download beside Open, and Annotations where it has a sidecar. Download
-saves the recording as the page serves it, its bundled sidecar with it; Annotations saves the
-sidecar's hand-written file.
+saves the recording as the page serves it, its bundled sidecar with it. Annotations opens a list
+of the sidecar's files: the hand-written file, then each file it includes. Each link saves one
+file under its own name.
 
 A recording can hold a channel this viewer can't read, such as one a newer tool wrote in a way
 this version doesn't know. Its row keeps its place and says it is unavailable, and nothing of it

@@ -237,17 +237,20 @@ view. The sheet's rules carry no specificity, so any rule of the page's wins. So
 A whole recording. Closed, it shows the recording's title and, under it, the recording's length to
 three significant figures, its channels and its size, with an Open button beside them. A view of
 some of the channels names those out of the recording's, "2 of 3 channels: TCKC, TMSC", and gives
-the length they span. It fetches
-the recording's footer, and nothing else, once it scrolls into view. Open, all of that stays, and
-the button reads Close. Below it come the time axis, one row a channel, the annotations above the
-rows, and a readout under the rows. The button keeps the focus, and names its recording to a screen
-reader.
+the length they span. Once it scrolls into view, it fetches the recording's footer and, where the
+page names no channels, the stored view a sidecar or a bundle may give; nothing else. Open, all of
+that stays, and the button reads Close. Below it come the time axis, one row a channel, the
+annotations above the rows, and a readout under the rows. The button keeps the focus, and names its
+recording to a screen reader.
 
 A page can write the title and the facts itself, as spans with `slot="title"` and `slot="facts"`
 (see Loading). The view shows the page's text in place of its own. Once the footer is in, it compares
-the two, taking any run of spaces as one, and warns in the console of each that differs. `summary`
-and the `tickwave-summary` event say that it has compared, so a page's check can tell a match from
-a view whose footer never came.
+the two, taking any run of spaces as one, and warns in the console of each that differs. Where the
+page names no channels and the recording has a sidecar, named or bundled, the facts count the
+channels its stored view names. So the view reads that first, and only then fills in its own
+facts, compares and sends its summary. A sidecar that doesn't read leaves the facts on every
+channel. `summary` and the `tickwave-summary` event say that it has compared, so a page's check can
+tell a match from a view whose footer never came.
 
 | Attribute | Means |
 |---|---|
@@ -257,7 +260,7 @@ a view whose footer never came.
 | `window` | what an open view shows first: two times (`"317.8 ms 318.0 ms"`), or an annotation's id. Without it, the stored view's span, or else the whole capture |
 | `open` | open the view |
 | `series` | a series name, such as `verge`: the traces take `--series-verge`. Without it, or where the page doesn't set that, the stored view's colour on the page's face, or else ink |
-| `download` | links in the summary that download the recording and, with `annotations`, its sidecar's hand-written file (below) |
+| `download` | a link in the summary that downloads the recording and, with `annotations`, a button that lists its sidecar's files to download (below) |
 | `shaping` | shape the recording, as the Open page's converter does: a grip at each row's name moves its channel in time (sideways) or among the rows (up or down), and bars at its data's ends trim it. A move up or down rewrites `channels`. A group's head has a grip that moves the whole group in time (see `groups`). A derived channel has no grip or bars: it moves and trims with its first operand. Without it, there are no grips or bars, and no room kept for them |
 
 Times in attributes are a decimal with a unit (`s`, `ms`, `us`, `ns`, `ps`), or a whole number of
@@ -269,12 +272,22 @@ then shows the stored channels and span. A bundled recording opened with no `ann
 downloaded file looks as its page showed it.
 
 With `download`, "Download" and, where the view has `annotations`, "Annotations" sit beside Open,
-as links that look like it. Each is named for its recording to a screen reader, as Open is:
-"Download SWD reads", "Download the annotations of SWD reads". Nothing is fetched until one is
-clicked. The recording is saved as served, so a bundled file carries its sidecar. A browser takes
-a link's file name only for a file on the page's own site: one on another site downloads under the
-name its server gives it, or opens in the tab. A local file the page registered downloads under
-its own name, and a merge preview, which no file holds, has no links.
+in its look. Download is a link that saves the recording as served, so a bundled file carries its
+sidecar. Annotations is a button that opens a list over the page, under the button: a link to each
+file of the sidecar, the hand-written file first, then each file it includes, in its order, each
+under its own name. Pressed again, or with Escape, the list closes, and the focus going anywhere
+else closes it too. The list takes the focus at its first link, and Escape gives it back to the
+button. Each is named for its recording to a screen reader, as Open is: "Download SWD reads",
+"Download the annotations of SWD reads", and in the list "Download swd.jsonl, from the annotations
+of SWD reads".
+
+Nothing is fetched until a link is clicked, with one exception. The list reads the hand-written
+file for the files it includes when it first opens, unless the view has read the sidecar already.
+Where that file doesn't read, the list offers it alone and says why. A browser takes a link's file
+name only for a file on the page's own site: one on another site downloads under the name its
+server gives it, or opens in the tab. A local file the page registered downloads under its own
+name, and lists the sidecar files it was registered with, under theirs. A merge preview, which no
+file holds, has no links.
 
 The reader zooms with Ctrl or Cmd and the wheel, a trackpad pinch, or two fingers. The plain wheel
 scrolls the page, and the view says how to zoom. Shift with the wheel, a sideways swipe, a drag or
@@ -365,7 +378,7 @@ It keeps to one line, cut where the toolbar runs out of room.
 | `groups` | channels that belong together, such as the recordings of a merge: `[{name, channels}]`, the channels by name. Each group's rows sit under a head row with its name. While the view shapes, a channel's grip moves its row only among its own group's rows |
 | `aligns` | each group's alignment, by its name: the ticks all its channels are moved by, later when positive, on top of each channel's own offset. Setting it moves the groups it names |
 | `annotationsText` | the sidecar's hand-written file as text, in place of the file at `annotations`, whose includes it still reads. The view redraws the annotations and keeps its place, cursors and selection. While it is set, the annotation lane shows even with nothing in it, so the first annotation added moves nothing. Null goes back to the file |
-| `summary` | the recording's own `title` and `facts`, the facts as one line, and `matches`: whether the text the page slotted matches them. Null until the footer is in |
+| `summary` | the recording's own `title` and `facts`, the facts as one line, and `matches`: whether the text the page slotted matches them. Null until the footer is in, and any stored view the facts wait on (above) |
 
 | Event | When, and its `detail` |
 |---|---|
@@ -376,7 +389,7 @@ It keeps to one line, cut where the toolbar runs out of room.
 | `tickwave-annotation` | an annotation's label is clicked: `{id}` |
 | `tickwave-shape` | the reader moves, trims or reorders a channel, or moves a group: `{shape, aligns, channels, change, channel}`: the whole `shape` and `aligns`, the rows' names in order, what changed (`"move"`, `"trim"`, `"order"` or `"align"`), and the channel's name, or `group` and its name for `"align"` |
 | `tickwave-ready` | the view has first drawn: `{height}` |
-| `tickwave-summary` | the view has the footer and has compared the page's title and facts with it: the `summary`. Again if the page slots other text |
+| `tickwave-summary` | the view has the footer, and any stored view the facts wait on, and has compared the page's title and facts with it: the `summary`. Again if the page slots other text |
 | `tickwave-error` | something failed: `{message, error}`. The view also shows it, and logs it to the console |
 
 ### `<tickwave-inset>`
@@ -533,24 +546,26 @@ after 5 s puts "Still loading" in the element's notice until it lands. A read th
 "Data did not load" there, with the cause, and the stretch stays faded. The row asks again when
 the view next redraws, 3 s or more later, and the notice goes once the read lands.
 
-Each field of a role's look comes from the page's property where it sets one, then from the
-role's declaration, then from the role's place in the order of declarations: the first role in the
-trace's colour, the rest in ink, the third on dashed. A role's value that doesn't read, such as a
-weight of 5, is left to the declaration. The elements follow a change of face as it happens: a
-`data-face`, a class or a style on `<html>` that changes the tokens, or the system's preference. A
-change there that leaves the tokens alone, such as a header marking the page scrolled, redraws
-nothing. A declared colour takes the face's: the day colour while the page is lighter than its ink,
-the night colour while it is darker.
+Each field of a role's look comes from the page's property where it sets one, then from the role's
+declaration. A colour neither gives comes from the role's place in the order of declarations: the
+first role in the trace's colour, the rest in ink. A dash neither gives is a solid line. A role's
+value that doesn't read, such as a weight of 5, is left to the declaration. The elements follow a
+change of face as it happens: a `data-face`, a class or a style on `<html>` that changes the tokens,
+or the system's preference. A change there that leaves the tokens alone, such as a header marking
+the page scrolled, redraws nothing. A declared colour takes the face's: the day colour while the
+page is lighter than its ink, the night colour while it is darker.
 
 The elements take a new face in the frame after it changes. A view's and an inset's panels and
 text follow the page's CSS, and their canvas redraws in that frame. A chart's colours follow the
 page's CSS without a redraw.
 
 Each element exposes its pieces to `::part()`. On the view: `summary`, `title`, `facts`,
-`open-button` (Open, or Close while the view is open), `download-button` (both download links) and
-`annotations-download-button` (the sidecar's), `viewer`, `toolbar`, `key`, `plot`, `hint`,
-`reading` (the label at the pointer), `row-handle`, `readout`, `steps`, `notice` and `button`
-(each button, and each download link).
+`open-button` (Open, or Close while the view is open), `download-button` (Download and
+Annotations), `annotations-download-button` (Annotations), `annotations-download-list` (the list it
+opens), `annotations-download-link` (each link in the list), `annotations-download-note` (why the
+list holds the hand-written file alone), `viewer`, `toolbar`, `key`, `plot`, `hint`, `reading` (the
+label at the pointer), `row-handle`, `readout`, `steps`, `notice` and `button` (each button, and
+the Download link).
 Inside `facts`, each fact is a `fact` and also `fact-length`, `fact-channels` or `fact-size`, with
 a `fact-separator` ("; ") between two. On the inset: `inset`, `label`, `text`, `frame`, `canvas`,
 `plot` (over the canvas, what the pointer and the keys reach), `foot`, `measure`, `reading` (what

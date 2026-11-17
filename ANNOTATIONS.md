@@ -118,11 +118,11 @@ first took. A file that declares one name twice is a problem.
 Each field of a role's look comes from the first of these that gives it:
 
 1. The host: the page's `--tickwave-role-<name>`, `-weight` and `-dash` (web/README.md, "Styling"),
-   or an egui host's `Palette`.
+   or an egui host's `Palette::roles`. A host's weight or dash outside the bounds a declaration's
+   is held to is left to the declaration, and a host can make a dashed role solid.
 2. The role's declaration.
-3. The role's place in the order of declarations. The first role takes the trace's colour, and
-   the rest ink. The first two are solid; the third on take the dashes [2, 2], [1, 1],
-   [5, 2, 1, 2] and [8, 2] in turn. A weight has no fallback by place: it is the declaration's.
+3. For the colour alone, the role's place in the order of declarations: the first role takes the
+   trace's colour, and the rest ink. A role neither gives a dash is solid.
 
 A declared colour takes the host's face: its day colour by day, its night colour by night.
 

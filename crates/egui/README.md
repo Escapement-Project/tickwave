@@ -78,6 +78,15 @@ takes no now.
 - The selection, washed across the plot and the lanes.
 - The time axis and two value labels, with the digits their source carries and no more, both
   value labels in one unit.
+- Where an annotation paints a channel (ANNOTATIONS.md, "Roles"), that stretch of the trace or
+  the lane in the role's look: its colour, its weight added to the line weight, and its dash, in
+  line widths. A dash starts where its stretch starts, and again after a gap in the data. The
+  latest paint in sidecar order draws a column, and a paint that names no declared role draws as
+  none. Every paint over the answer's span draws, however many markers the window holds.
+- Under the time axis, the key: every role the recording declares, in its order, right-aligned,
+  each a short line drawn as the role's lines are, then its label. Its room is kept whenever the
+  recording declares a role, so the plot keeps its height as the reader moves. A recording that
+  declares none has no key and no room for one.
 
 A graph from `Graph::lanes_only` draws its lanes, a band above them for the markers' labels where
 the recording has markers, and the time axis: no trace, no value axis, and no flag. Its height is
@@ -118,6 +127,24 @@ a later version may add a field. `line_weight`, in points, draws the trace's lin
 levels and edges, 1.5 from `from_visuals`. verge fills it from its design tokens. The demo reads
 the project's tokens from `site/tokens.css`, in the day and the night face.
 
+`trace` is the trace's colour and the lanes'. None, as `from_visuals` leaves it, takes the colour
+the recording stores (ANNOTATIONS.md, "The stored view") on the face `dark` names, else `ink`.
+`from_visuals` sets `dark` from the theme. `roles` holds the host's own look for a role, by its
+name: a `view::roles::Host` whose colour, weight and dash each win over the role's declaration,
+as a page's `--tickwave-role-<name>` properties do. A weight outside 0 to 4, or a dash outside the
+bounds a declaration's is held to, is left to the declaration, and `Dash::Solid` draws a dashed
+role solid. A role's colour that neither gives comes from its place among the declared roles: the
+first takes the trace's, the rest `ink`.
+
+## The stored view
+
+A recording's sidecar may store the channels a view shows and the span it opens at. The graph
+draws the channels and the window its host gives it, so applying them is the host's:
+`Viewer::recording` reads them with `Recording::stored_view`. The trace's stored colour is the
+graph's own, through `Palette::trace`. The demo applies the stored view: the first analog
+channel it names is the trace and its digital ones the lanes, in its order, and its span is the
+window where `--window` gives none.
+
 ## Spans
 
 A frame's work is in `tracing` spans at debug level: `graph`, and in it `layout`,
@@ -133,6 +160,7 @@ cargo run --release -p escapement-tickwave-egui --example demo -- web/fixtures/e
 cargo run --release -p escapement-tickwave-egui --example demo -- --live 100000
 ```
 
+A recording opens as its stored view says (above), its trace in its stored colour, else ink.
 `--live N` records a synthetic capture at N pairs a second, laid out as verge's energy captures
 are, and shows it as it is written. It writes a batch of pairs every 10 ms, as an instrument's
 messages arrive, and hands the viewer a snapshot at most once a 16 ms frame. The now it passes

@@ -102,7 +102,7 @@ after them are counted one by one.
 | `probe` | `web/src/probe.ts` | the pulse around a tick, its figures, an analog channel at a pixel, and the searches for a pulse's edges |
 | `runs` | `web/src/source.ts` | which sample sits at or around a tick, where a sample's time ends, and a break's lost samples |
 | `spans` | `web/src/source.ts` | where a channel's data lies, between its gaps or across its runs |
-| `roles` | `web/src/roles.ts` | a paint role's look, field by field from the host's setting, its declaration and its place; which role draws each stretch of a row; and where a dash's phase starts |
+| `roles` | `web/src/roles.ts` | a paint role's look, field by field from the host's setting, held to a declaration's bounds, then its declaration, and for its colour its place; which role draws each stretch of a row; and where a dash's phase starts |
 
 Each port takes the same inputs and gives the same outputs as its TypeScript module, and both are
 tested against the cases in `testdata/view/`.
