@@ -636,10 +636,23 @@ export class Plot {
 
   invalidate(): void {
     if (this.#frame) return;
+    // The first change before a frame sends its reads now, not at the frame; the frame's draw asks
+    // again for where the view has gone since.
+    this.#need();
     this.#frame = requestAnimationFrame(() => {
       this.#frame = 0;
       this.drawNow();
     });
+  }
+
+  /** Each row reads for where the view is going, so an ease's step asks for its data at once and
+   * draws what it holds until that lands. */
+  #need(): void {
+    const l = this.layout;
+    if (!l || !this.info) return;
+    const ncols = Math.max(1, Math.round((l.plotRight - l.plotLeft) * this.#dpr));
+    const to = this.target;
+    for (const t of this.tracks) t.need(to.start, to.end, (to.end - to.start) / ncols);
   }
 
   /** Whether the view is where it is going, and every row has the data it wants there. */
@@ -678,10 +691,7 @@ export class Plot {
 
     const ncols = Math.max(1, Math.round((l.plotRight - l.plotLeft) * dpr));
     const grid: Grid = { x0: this.view.start, per: (this.view.end - this.view.start) / ncols, count: ncols };
-    // Each row reads for where the view is going, so an ease's step asks for its data at once and
-    // draws what it holds until that lands.
-    const to = this.target;
-    for (const t of this.tracks) t.need(to.start, to.end, (to.end - to.start) / ncols);
+    this.#need();
 
     const revealX = this.reveal ?? Infinity;
     const lane = this.laneNotes();

@@ -276,6 +276,47 @@ test("the rows read for where a zoom step goes, as the step is taken, and never 
   expect(posted[0].at).toBeLessThan(landed);
 });
 
+test("a zoom step's first read goes out as the key goes down, before the next frame", async ({ page }) => {
+  const view = await ready(page, "identify-jtag.tickwave");
+  // Each read posted, and whether a frame has run since the last key: the page's frame, asked for
+  // as the key goes down, comes before the view's.
+  await page.evaluate(() => {
+    const w = window as unknown as { posted: boolean[]; e2eFramed: boolean };
+    w.posted = [];
+    w.e2eFramed = true;
+    window.addEventListener(
+      "keydown",
+      () => {
+        w.e2eFramed = false;
+        requestAnimationFrame(() => (w.e2eFramed = true));
+      },
+      true,
+    );
+    const post = Worker.prototype.postMessage;
+    Worker.prototype.postMessage = function (this: Worker, m: unknown, ...rest: unknown[]) {
+      const msg = m as { op?: string; requests?: { op?: string }[] };
+      for (const r of msg?.op === "batch" ? msg.requests! : [msg]) {
+        if (r?.op === "edges" || r?.op === "overview" || r?.op === "samples") w.posted.push(w.e2eFramed);
+      }
+      return (post as (...a: unknown[]) => void).call(this, m, ...rest);
+    };
+  });
+  // Steps in from the whole recording, each settled before the next: those finer than the rows
+  // hold read.
+  let reads = 0;
+  for (let i = 0; i < 6; i++) {
+    await page.evaluate(() => ((window as unknown as { posted: boolean[] }).posted = []));
+    await page.keyboard.press("+");
+    await view.evaluate((v) => (v as unknown as { settled(): Promise<void> }).settled());
+    const posted = await page.evaluate(() => (window as unknown as { posted: boolean[] }).posted);
+    if (posted.length === 0) continue;
+    reads++;
+    expect(posted[0], `step ${i + 1}'s first read went out after a frame`).toBe(false);
+  }
+  // Not vacuous: one at least did.
+  expect(reads).toBeGreaterThan(0);
+});
+
 const INSET = "/e2e/pages/inset.html?src=fixtures/identify-swd.tickwave&annotations=fixtures/identify-swd.annotations.toml&annotation=attach&channels=SWCLK%20SWDIO";
 
 type Inset = { window: Span | null; zoomed: Span | null; settled(): Promise<void> };
