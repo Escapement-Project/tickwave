@@ -20,6 +20,7 @@ import { isAbort } from "../src/source.ts";
 import { formatInterval, measureReading, ONE as STEP_ONE, periodStats } from "../src/readouts.ts";
 import { openTickwave, wasm } from "../scripts/node-wasm.ts";
 import { blockRows, layout as tables, leaves, levelRows, range } from "./layout.ts";
+import { sortedStats } from "./sorted-periods.ts";
 
 const at = (p: string) => new URL(`../${p}`, import.meta.url);
 const ONE = readFileSync(at("fixtures/identify-swd.tickwave"));
@@ -220,6 +221,88 @@ test("a span's periods are worked out beside its edges, as periodStats gives the
   // count; a span with no edge gives none.
   assert.equal((await r.periods(0, 0, 523583100))?.count, 7642);
   assert.equal(await r.periods(0, 0, 1), null);
+});
+
+test("a span's periods, a group of blocks at a time, are the sorted figures of its edges joined, over random spans", async () => {
+  const r = await openTickwave("fixtures/identify-swd.4k.tickwave");
+  let seed = 9;
+  const next = () => (seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31;
+  let blocks = 0;
+  for (let i = 0; i < 300; i++) {
+    const s = Math.floor(next() * 523583100);
+    const e = s + Math.floor(next() * next() * 300_000_000);
+    for (const c of [0, 1]) {
+      const joined = await r.edges(c, s, e);
+      assert.deepEqual(await r.periods(c, s, e), sortedStats(joined.level, joined.ticks), `channel ${c}, [${s}, ${e})`);
+    }
+    blocks += Number(e - s > 40_000_000);
+  }
+  // Not vacuous: many spans cross several of the 4 KiB blocks.
+  assert.ok(blocks > 100, `${blocks}`);
+});
+
+test("a span's periods read its blocks a group at a time, each group's in one read, on both passes", async (t) => {
+  // SWCLK's eight blocks: their first edges at 0, 2,039, 4,079, 6,122, 8,168, 10,214, 12,260 and
+  // 14,304 of 15,286, their frames at bytes 524-894, 935-1265, 1306-1635, 1676-1924, 1965-2231,
+  // 2272-2537, 2578-2921 and 2962-3165. A cache that holds no block, so the second pass reads too.
+  setCacheBytes(1);
+  t.after(() => setCacheBytes(192 << 20));
+  const joined = await (await openTickwave("fixtures/identify-swd.4k.tickwave")).edges(0, 0, 523583100);
+  const want = sortedStats(joined.level, joined.ticks);
+  const footer = tables(NINE).footer;
+  const reads = async (groupEdges?: number) => {
+    const bytes = new MemoryBytes(NINE, "identify-swd.4k.tickwave");
+    const r = await Opened.open(wasm(), bytes, NINE.length - footer);
+    const before = bytes.reads.length;
+    assert.deepEqual(await r.periods(0, 0, 523583100, undefined, { groupEdges }), want);
+    return bytes.reads.slice(before).filter(([a, b]) => a < 3165 && b > 524);
+  };
+  // All of them one group: a read a pass.
+  assert.deepEqual(await reads(), [
+    [524, 3165],
+    [524, 3165],
+  ]);
+  // Groups of at most 4,100 edges: two blocks each.
+  const pairs = [
+    [524, 1265],
+    [1306, 1924],
+    [1965, 2537],
+    [2578, 3165],
+  ];
+  assert.deepEqual(await reads(4_100), [...pairs, ...pairs]);
+  // Of one edge: each block alone.
+  assert.equal((await reads(1)).length, 16);
+});
+
+test("the burst's 10 million periods, a few distinct values, are counted exactly: the sorted figures, its edges never joined", async () => {
+  // web/fixtures/burst.tickwave's D, as crates/format/examples/burst.rs writes it: an edge every
+  // 10 s, and 20,000,000 edges 2 ticks apart from 30 minutes and a tick, low before the first.
+  const [hz, length, at, burst] = [1e9, 3_600e9, 1_800e9 + 1, 20_000_000];
+  const ticks: number[] = [];
+  for (let t = 10 * hz; t < at; t += 10 * hz) ticks.push(t);
+  const before = ticks.length;
+  const all = new Float64Array(before + burst + 200);
+  all.set(ticks);
+  let n = before;
+  for (let i = 0; i < burst; i++) all[n++] = at + 2 * i;
+  for (let t = Math.ceil((at + 2 * burst) / (10 * hz)) * 10 * hz; t < length; t += 10 * hz) all[n++] = t;
+  const want = sortedStats(0, all.subarray(0, n))!;
+  const r = await openTickwave("fixtures/burst.tickwave");
+  assert.deepEqual(await r.periods(0, 0, length), want);
+  // Not vacuous: more periods than the distinct ones counted at most, and the burst's period the
+  // median.
+  assert.ok(want.count > 2 ** 21 && want.median === 4, JSON.stringify(want));
+});
+
+test("past the distinct periods a span counts, here 8, its count, least, most and mean stay exact, and it has no median", async () => {
+  const r = await openTickwave("fixtures/identify-swd.4k.tickwave");
+  const joined = await r.edges(0, 0, 523583100);
+  const want = sortedStats(joined.level, joined.ticks)!;
+  const got = await r.periods(0, 0, 523583100, undefined, { distinctAtMost: 8 });
+  // SWCLK's periods are rising edge to rising edge: their ends, the first and the last.
+  const rising = Array.from(joined.ticks).filter((_, i) => (joined.level ^ (i & 1)) === 0);
+  assert.deepEqual(got, { count: want.count, median: null, min: want.min, max: want.max, used: want.count, runs: 1, span: rising[rising.length - 1] - rising[0] });
+  assert.ok(want.median !== null);
 });
 
 test("the overview: each channel's own levels, unpacked from the footer, as the extractor's fixture computes them", async () => {

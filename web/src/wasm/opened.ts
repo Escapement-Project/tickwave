@@ -5,7 +5,7 @@
 
 import { LRUCache } from "lru-cache";
 import type { Block as WasmBlock, OverviewLevel as WasmLevel, Recording as WasmRecording } from "../../../crates/wasm/pkg/escapement_tickwave_wasm.js";
-import { periodStats, type PeriodStats } from "../readouts.ts";
+import { DISTINCT_AT_MOST, PIECE_EDGES, PeriodCounter, type PeriodStats } from "../readouts.ts";
 import { lowerBound } from "../search.ts";
 import {
   aborted,
@@ -166,6 +166,19 @@ type DecodedBlock = Sized &
         readonly codes?: BigInt64Array;
       }
   );
+
+/**
+ * The level before digital block `b`'s edge `lo`, its first at or past `start`. No edge lies in a
+ * gap, and a block's level bit carries the level from before one until its `to`: the last of
+ * `gaps` ending in the block or at its start, at or before `start`, sets the level the edges
+ * after it flip.
+ */
+function levelBefore(b: DecodedBlock & { kind: "digital" }, lo: number, start: number, gaps: readonly Gap[] | null): 0 | 1 {
+  let gap: Gap | null = null;
+  for (const g of gaps ?? []) if (b.start <= g.to && g.to <= start) gap = g;
+  if (gap) return (gap.level ^ ((lo - lowerBound(b.edges, gap.to)) & 1)) as 0 | 1;
+  return (b.initial ^ (lo & 1)) as 0 | 1;
+}
 
 /** A level's buckets, laid out as `OverviewLevel` gives them: [density, duty] for a digital
  * channel, a byte a bucket each, and [min, max] for an analog one. */
@@ -881,27 +894,13 @@ export class Opened {
     const [s, e] = this.#clamp(start, end);
     const { blocks, slice } = await this.#covered(channel, s, e, signal);
     const listed = slice ? this.#listed(channel, slice, start, end) : undefined;
-    // Every gap the first block can end, the one from the channel's start included.
-    let gaps = this.#gaps[channel];
-    if (slice) {
-      const map = this.#maps[channel];
-      gaps = [];
-      for (let i = 0; i < slice.entries.length; i += ENTRY) gaps.push({ from: axisTick(map, slice.entries[i]), to: axisTick(map, slice.entries[i + 1]), level: slice.entries[i + 2] ? 1 : 0 });
-    }
-    // No edge lies in a gap, and a block's level bit carries the level from before one until its
-    // `to`: the last gap ending in the first block or at its start, at or before `start`, sets the
-    // level the edges after it flip.
+    const gaps = this.#gapsBy(channel, slice);
     const parts: Float64Array[] = [];
     let level: 0 | 1 = 0;
     blocks.forEach((b, k) => {
       if (b.kind !== "digital") throw new RangeError(`channel ${channel} is not digital`);
       const lo = lowerBound(b.edges, start);
-      if (k === 0) {
-        level = (b.initial ^ (lo & 1)) as 0 | 1;
-        let gap: Gap | null = null;
-        for (const g of gaps ?? []) if (b.start <= g.to && g.to <= start) gap = g;
-        if (gap) level = (gap.level ^ ((lo - lowerBound(b.edges, gap.to)) & 1)) as 0 | 1;
-      }
+      if (k === 0) level = levelBefore(b, lo, start, gaps);
       parts.push(b.edges.subarray(lo, lowerBound(b.edges, end, lo)));
     });
     const ticks = new Float64Array(parts.reduce((n, p) => n + p.length, 0));
@@ -913,11 +912,70 @@ export class Opened {
     return { level, ticks, ...(listed && { listed }) };
   }
 
-  /** `periodStats` of digital channel `channel`'s edges in `[start, end)`, read as `edges` reads
-   * them: every block the span meets, since a median needs every period. */
-  async periods(channel: number, start: number, end: number, signal?: AbortSignal): Promise<PeriodStats | null> {
-    const e = await this.edges(channel, start, end, signal);
-    return periodStats(e.level, e.ticks);
+  /** Every gap of digital channel `c` the first block of a read can end, the one from the
+   * channel's start included: from `slice` where the list is in pages. */
+  #gapsBy(c: number, slice: Slice | null): readonly Gap[] | null {
+    if (!slice) return this.#gaps[c];
+    const map = this.#maps[c];
+    const gaps: Gap[] = [];
+    for (let i = 0; i < slice.entries.length; i += ENTRY) gaps.push({ from: axisTick(map, slice.entries[i]), to: axisTick(map, slice.entries[i + 1]), level: slice.entries[i + 2] ? 1 : 0 });
+    return gaps;
+  }
+
+  /**
+   * `periodStats` of digital channel `channel`'s edges in `[start, end)`, read as `edges` reads
+   * them, every block the span meets, but never joined: `PeriodCounter`'s first pass, then its
+   * second, over the same blocks again, where the fences are wanted. The blocks go in groups of at
+   * most `groupEdges` edges by their first edges' places (a block alone may hold more), a group's
+   * reads out together, as `edges` sends a span's; the next group's go out while one is counted.
+   * `limits` are for a test.
+   */
+  async periods(
+    channel: number,
+    start: number,
+    end: number,
+    signal?: AbortSignal,
+    limits: { distinctAtMost?: number; groupEdges?: number } = {},
+  ): Promise<PeriodStats | null> {
+    const { distinctAtMost = DISTINCT_AT_MOST, groupEdges = PIECE_EDGES } = limits;
+    this.#readable(channel);
+    const h = this.header.channels[channel] as HeaderChannel | undefined;
+    if (h?.kind !== "digital") throw new RangeError(`channel ${channel} is not digital`);
+    const [s, e] = this.#clamp(start, end);
+    const refs = await this.#blockRefs(channel, s, e, signal);
+    if (refs.length === 0) return null;
+    const slice = this.#paged(channel) ? await this.#sliceOver(channel, Math.min(s, refs[0][0]), Math.max(e, refs[refs.length - 1][1]), signal) : null;
+    const gaps = this.#gapsBy(channel, slice);
+    // A block's edges run from its first edge's place to the next block's, or to the channel's end.
+    const after = (k: number) => (k + 1 < refs.length ? refs[k + 1][2] : h.edges);
+    const groups: Float64Array[][] = [];
+    for (let i = 0; i < refs.length; ) {
+      let j = i + 1;
+      while (j < refs.length && after(j) - refs[i][2] <= groupEdges) j++;
+      groups.push(refs.slice(i, j));
+      i = j;
+    }
+    let counter = null as PeriodCounter | null;
+    const pass = async (each: (tick: number) => void) => {
+      let next = this.#blocks(channel, groups[0], slice, signal);
+      for (let g = 0; g < groups.length; g++) {
+        const blocks = await next;
+        if (g + 1 < groups.length) {
+          next = this.#blocks(channel, groups[g + 1], slice, signal);
+          // Awaited with the next group; a throw before then would leave it unhandled.
+          next.catch(() => {});
+        }
+        for (const b of blocks) {
+          if (b.kind !== "digital") throw new RangeError(`channel ${channel} is not digital`);
+          const lo = lowerBound(b.edges, start);
+          counter ??= new PeriodCounter(levelBefore(b, lo, start, gaps), distinctAtMost);
+          for (let i = lo, hi = lowerBound(b.edges, end, lo); i < hi; i++) each(b.edges[i]);
+        }
+      }
+    };
+    await pass((t) => counter!.edge(t));
+    if (counter!.fences()) await pass((t) => counter!.again(t));
+    return counter!.stats();
   }
 
   /** How many of digital channel `channel`'s edges lie in `[start, end)`, from the index: each

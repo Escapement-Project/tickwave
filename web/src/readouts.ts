@@ -225,55 +225,237 @@ export function formatCount(n: number): string {
   return COUNT.format(n);
 }
 
+/** The most distinct periods a span's figures count, each value with how many times it occurs:
+ * past it they keep a few numbers, however many periods the span holds. A clock's periods take
+ * few values, so this is far past any clock's. */
+export const DISTINCT_AT_MOST = 2 ** 21;
+
+/** The most edges a span's periods take from a reader at once, so the memory they hold stays
+ * bounded however long the span. */
+export const PIECE_EDGES = 2 ** 20;
+
 export interface PeriodStats {
   /** Periods between consecutive rising edges. */
   readonly count: number;
-  /** In ticks. The median of an even count is the lower middle, so it is a period that occurred. */
-  readonly median: number;
+  /** In ticks. The median of an even count is the lower middle, so it is a period that occurred.
+   * Null past `DISTINCT_AT_MOST` distinct periods. */
+  readonly median: number | null;
   readonly min: number;
   readonly max: number;
   /**
    * The running clock: the periods inside Tukey's fences (ANNOTATIONS.md, "Measures"). The fences
    * keep a clock's jitter and quantisation, and drop pauses and stretched cycles that occur in
    * fewer than a quarter of the periods. `used` periods, in `runs` runs of consecutive periods,
-   * summing to `span` ticks.
+   * summing to `span` ticks. Past `DISTINCT_AT_MOST` distinct periods no fence is set: every
+   * period, one run, from the first rising edge to the last.
    */
   readonly used: number;
   readonly runs: number;
   readonly span: number;
 }
 
+/** A sorted list of distinct periods and how many times each occurs. */
+interface Counts {
+  values: Float64Array;
+  counts: Float64Array;
+  length: number;
+}
+
+/** The distinct periods a counter tallies as they come, before any batch: a clock's few. */
+const HOT = 8;
+
+/** `periods[0, n)`, sorted in place, as distinct values and their counts. */
+function counted(periods: Float64Array, n: number): Counts {
+  const sorted = periods.subarray(0, n).sort();
+  const values = new Float64Array(n);
+  const counts = new Float64Array(n);
+  let length = 0;
+  for (let i = 0; i < n; i++) {
+    if (length > 0 && values[length - 1] === sorted[i]) counts[length - 1]++;
+    else {
+      values[length] = sorted[i];
+      counts[length++] = 1;
+    }
+  }
+  return { values, counts, length };
+}
+
+/** Two sorted lists of distinct values and counts, as one. */
+function merged(a: Counts, b: Counts): Counts {
+  const values = new Float64Array(a.length + b.length);
+  const counts = new Float64Array(a.length + b.length);
+  let [i, j, length] = [0, 0, 0];
+  while (i < a.length || j < b.length) {
+    if (j === b.length || (i < a.length && a.values[i] < b.values[j])) {
+      values[length] = a.values[i];
+      counts[length++] = a.counts[i++];
+    } else if (i === a.length || b.values[j] < a.values[i]) {
+      values[length] = b.values[j];
+      counts[length++] = b.counts[j++];
+    } else {
+      values[length] = a.values[i];
+      counts[length++] = a.counts[i++] + b.counts[j++];
+    }
+  }
+  return { values, counts, length };
+}
+
+/**
+ * A span's periods, rising edge to rising edge, in two passes over its edges in order, as a
+ * reader that walks a span's blocks without joining their edges takes them. The first counts each
+ * distinct period, a batch at a time, sorted and merged: from the counts come the median and
+ * Tukey's fences at `periodStats`' indices. The second, given the fences (`fences`), finds the
+ * periods inside them in order: how many, in how many runs, and their sum, as `periodStats` sums
+ * them. Past `distinctAtMost` distinct periods the counts are dropped, no second pass is wanted,
+ * and only the count, least, most and ends are kept.
+ */
+export class PeriodCounter {
+  readonly #level: 0 | 1;
+  readonly #distinctAtMost: number;
+  #rising: boolean;
+  #first = NaN;
+  #last = NaN;
+  #count = 0;
+  #min = Infinity;
+  #max = -Infinity;
+  /** The periods since the last merge, and the counts merged so far: null past the cap. */
+  #batch = new Float64Array(1 << 16);
+  #held = 0;
+  /** Up to `HOT` distinct periods since the last merge, each with its count, kept out of the
+   * batch; `#hit` the one the last period was. */
+  readonly #hot = new Float64Array(HOT);
+  readonly #hotCounts = new Float64Array(HOT);
+  #hotLength = 0;
+  #hit = 0;
+  #counts: Counts | null = { values: new Float64Array(0), counts: new Float64Array(0), length: 0 };
+  /** The second pass's state, once `fences` gave the fences. */
+  #fence: { lo: number; hi: number; rising: boolean; last: number; inRun: boolean; used: number; runs: number; span: number } | null = null;
+
+  /** `level` is the level before the first edge. */
+  constructor(level: 0 | 1, distinctAtMost = DISTINCT_AT_MOST) {
+    this.#level = level;
+    this.#rising = level === 0;
+    this.#distinctAtMost = distinctAtMost;
+  }
+
+  /** The first pass's next edge. */
+  edge(tick: number): void {
+    if (this.#rising) {
+      if (Number.isNaN(this.#last)) this.#first = tick;
+      else this.#period(tick - this.#last);
+      this.#last = tick;
+    }
+    this.#rising = !this.#rising;
+  }
+
+  #period(p: number): void {
+    this.#count++;
+    if (p < this.#min) this.#min = p;
+    if (p > this.#max) this.#max = p;
+    if (!this.#counts) return;
+    const hot = this.#hot;
+    if (this.#hit < this.#hotLength && hot[this.#hit] === p) {
+      this.#hotCounts[this.#hit]++;
+      return;
+    }
+    for (let k = 0; k < this.#hotLength; k++) {
+      if (hot[k] === p) {
+        this.#hotCounts[k]++;
+        this.#hit = k;
+        return;
+      }
+    }
+    if (this.#hotLength < HOT) {
+      hot[this.#hotLength] = p;
+      this.#hotCounts[this.#hotLength] = 1;
+      this.#hit = this.#hotLength++;
+      return;
+    }
+    if (this.#held === this.#batch.length) this.#merge();
+    this.#batch[this.#held++] = p;
+  }
+
+  /** The batch and the hot periods merged into the counts; a batch at least as long as the
+   * counts after. */
+  #merge(): void {
+    if (!this.#counts) return;
+    const n = this.#hotLength;
+    const order = Array.from({ length: n }, (_, k) => k).sort((a, b) => this.#hot[a] - this.#hot[b]);
+    const hot = { values: Float64Array.from(order, (k) => this.#hot[k]), counts: Float64Array.from(order, (k) => this.#hotCounts[k]), length: n };
+    const all = merged(merged(this.#counts, hot), counted(this.#batch, this.#held));
+    [this.#held, this.#hotLength, this.#hit] = [0, 0, 0];
+    if (all.length > this.#distinctAtMost) {
+      [this.#counts, this.#batch] = [null, new Float64Array(0)];
+      return;
+    }
+    this.#counts = all;
+    if (this.#batch.length < all.length) this.#batch = new Float64Array(2 ** Math.ceil(Math.log2(all.length)));
+  }
+
+  /** The sorted period at index `i`. */
+  #at(i: number): number {
+    const { values, counts, length } = this.#counts!;
+    let k = 0;
+    for (let seen = counts[0]; seen <= i && k + 1 < length; seen += counts[++k]);
+    return values[k];
+  }
+
+  /**
+   * Ends the first pass. The fences, where a second pass over the same edges is wanted: none
+   * where the span has fewer than two rising edges, or past `distinctAtMost` distinct periods.
+   */
+  fences(): { lo: number; hi: number } | null {
+    this.#merge();
+    const n = this.#count;
+    if (n === 0 || !this.#counts) return null;
+    // Tukey's fences: Q1 = p[⌊(n − 1)/4⌋], Q3 = p[⌈3(n − 1)/4⌉], IQR at least one tick.
+    const q1 = this.#at(Math.floor((n - 1) / 4));
+    const q3 = this.#at(Math.ceil((3 * (n - 1)) / 4));
+    const iqr = Math.max(q3 - q1, 1);
+    const [lo, hi] = [q1 - 1.5 * iqr, q3 + 1.5 * iqr];
+    this.#fence = { lo, hi, rising: this.#level === 0, last: NaN, inRun: false, used: 0, runs: 0, span: 0 };
+    return { lo, hi };
+  }
+
+  /** The second pass's next edge, after `fences`. */
+  again(tick: number): void {
+    const f = this.#fence!;
+    if (f.rising) {
+      if (!Number.isNaN(f.last)) {
+        const p = tick - f.last;
+        if (p >= f.lo && p <= f.hi) {
+          f.used++;
+          f.span += p;
+          if (!f.inRun) f.runs++;
+          f.inRun = true;
+        } else f.inRun = false;
+      }
+      f.last = tick;
+    }
+    f.rising = !f.rising;
+  }
+
+  /** The figures, as `periodStats` gives them, once `fences` and any second pass are done. */
+  stats(): PeriodStats | null {
+    const count = this.#count;
+    if (count === 0) return null;
+    const [min, max] = [this.#min, this.#max];
+    if (!this.#counts || !this.#fence) return { count, median: null, min, max, used: count, runs: 1, span: this.#last - this.#first };
+    const { used, runs, span } = this.#fence;
+    return { count, median: this.#at((count - 1) >> 1), min, max, used, runs, span };
+  }
+}
+
 /**
  * Periods measured rising edge to rising edge. `level` is the level before `ticks[0]`. Null when
- * there are fewer than two rising edges.
+ * there are fewer than two rising edges. Past `distinctAtMost` distinct periods (`PeriodCounter`)
+ * the median is null and no fence is set.
  */
-export function periodStats(level: 0 | 1, ticks: ArrayLike<number>): PeriodStats | null {
-  // Edge i is rising when the level before it is low; the level before edge i is level ^ (i & 1).
-  const first = level === 0 ? 0 : 1;
-  const count = Math.max(0, Math.floor((ticks.length - first - 1) / 2));
-  if (count === 0) return null;
-  const periods = new Float64Array(count);
-  for (let k = 0; k < count; k++) periods[k] = ticks[first + 2 * k + 2] - ticks[first + 2 * k];
-  const sorted = periods.slice().sort();
-  const median = sorted[(count - 1) >> 1];
-  // Tukey's fences: Q1 = p[⌊(n − 1)/4⌋], Q3 = p[⌈3(n − 1)/4⌉], IQR at least one tick.
-  const q1 = sorted[Math.floor((count - 1) / 4)];
-  const q3 = sorted[Math.ceil((3 * (count - 1)) / 4)];
-  const iqr = Math.max(q3 - q1, 1);
-  const [lo, hi] = [q1 - 1.5 * iqr, q3 + 1.5 * iqr];
-  let used = 0;
-  let runs = 0;
-  let span = 0;
-  let inRun = false;
-  for (const p of periods) {
-    if (p >= lo && p <= hi) {
-      used++;
-      span += p;
-      if (!inRun) runs++;
-      inRun = true;
-    } else inRun = false;
-  }
-  return { count, median, min: sorted[0], max: sorted[count - 1], used, runs, span };
+export function periodStats(level: 0 | 1, ticks: ArrayLike<number>, distinctAtMost = DISTINCT_AT_MOST): PeriodStats | null {
+  const counter = new PeriodCounter(level, distinctAtMost);
+  for (let i = 0; i < ticks.length; i++) counter.edge(ticks[i]);
+  if (counter.fences()) for (let i = 0; i < ticks.length; i++) counter.again(ticks[i]);
+  return counter.stats();
 }
 
 /** The running clock's rate, with its digits. */
@@ -286,8 +468,13 @@ export function formatClockPeriod(s: PeriodStats, timebase: Ratio, step: Ratio =
   return formatMeanPeriod(s.used, s.span, timebase, s.runs, step)!;
 }
 
-/** "mean of 31 of 32 periods", "mean of 7 periods" when it kept them all, "one of 7 periods", "one period". */
+/**
+ * "mean of 31 of 32 periods", "mean of 7 periods" when it kept them all, "one of 7 periods", "one
+ * period"; past `DISTINCT_AT_MOST` distinct periods, "mean of 3,000,000 periods: no median, and
+ * pauses not set aside, past 2,097,152 distinct periods".
+ */
 export function clockNote(s: PeriodStats): string {
+  if (s.median === null) return `mean of ${formatCount(s.count)} periods: no median, and pauses not set aside, past ${formatCount(DISTINCT_AT_MOST)} distinct periods`;
   if (s.used === 1) return s.count === 1 ? "one period" : `one of ${formatCount(s.count)} periods`;
   return s.used === s.count ? `mean of ${formatCount(s.count)} periods` : `mean of ${formatCount(s.used)} of ${formatCount(s.count)} periods`;
 }

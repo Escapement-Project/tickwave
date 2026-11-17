@@ -38,6 +38,10 @@ canvas { display: block; }
 .readout:empty { display: none; }
 .readout .line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 14px; }
 .readout .figures { color: var(--ink, CanvasText); }
+/* A figure the readout can't give, a dash as wide as the figure it holds the place of. */
+.readout .held { display: inline-grid; justify-items: start; }
+.readout .held > span { grid-area: 1 / 1; }
+.readout .held > .widest { visibility: hidden; }
 .readout label { display: inline-flex; gap: 6px; align-items: baseline; }
 .readout select { min-height: 22px; padding: 1px 4px; font-size: 12px; }
 .steps { display: flex; gap: 4px; align-items: center; }
@@ -2023,10 +2027,22 @@ export class TickwaveView extends TickwaveElement {
       lines.push(div);
       return div;
     };
-    const fig = (text: string) => Object.assign(document.createElement("span"), { className: "figures", textContent: text });
-    const item = (name: string, value: string) => {
+    const fig = (text: string | Node) => {
+      const s = Object.assign(document.createElement("span"), { className: "figures" });
+      s.append(text);
+      return s;
+    };
+    const item = (name: string, value: string | Node) => {
       const s = document.createElement("span");
       s.append(`${name} `, fig(value));
+      return s;
+    };
+    /** `text` in the place `widest` would take, which isn't read out. */
+    const held = (text: string, widest: string) => {
+      const s = Object.assign(document.createElement("span"), { className: "held" });
+      const w = Object.assign(document.createElement("span"), { className: "widest", textContent: widest });
+      w.setAttribute("aria-hidden", "true");
+      s.append(Object.assign(document.createElement("span"), { textContent: text }), w);
       return s;
     };
     const { a, b } = this.#plot.cursors;
@@ -2148,7 +2164,7 @@ export class TickwaveView extends TickwaveElement {
           periods.append(
             item("count", formatCount(stats.count)),
             item("min", formatInterval(stats.min, tb, step)),
-            item("median", formatInterval(stats.median, tb, step)),
+            item("median", stats.median === null ? held("\u2013", formatInterval(stats.max, tb, step)) : formatInterval(stats.median, tb, step)),
             item("max", formatInterval(stats.max, tb, step)),
             item("clock", rate),
             clockNote(stats),

@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { MemorySource } from "../src/memory-source.ts";
 import { mergeAxis, MergedSource, mergedTimebase } from "../src/merged-source.ts";
 import { channelSampleTick, channelStart, readingStep, type RecordingInfo, type SourceHeader } from "../src/source.ts";
-import { formatInterval } from "../src/readouts.ts";
+import { formatInterval, periodStats, PIECE_EDGES } from "../src/readouts.ts";
 
 /** An analyser at 500 MHz: CLK rises at 100 and falls at 200, its ticks. */
 const analyser = {
@@ -148,4 +148,55 @@ test("rates whose multiple is past 2^53 merge at the fastest, a slower input's t
   assert.equal(await s.overview(1, 0, 246, 1_000), null);
   // The real multiple still wins where it fits.
   assert.deepEqual(mergeAxis([{ num: 500e6, den: 1 }, { num: 96e6, den: 1 }]), { num: 12e9, den: 1 });
+});
+
+test("a merge counts a span's edges from its input's count, and works out its periods from the input's edges a piece at a time, as its own edges give them", async () => {
+  /** A clock with jitter, `n` edges 5 ticks apart, each piece of its edges read recorded. */
+  const clockInput = async (rate: number, stem: string, n: number) => {
+    const ticks = Float64Array.from({ length: n }, (_, i) => 5 * i + (i % 7 === 3 ? 1 : 0) + 3);
+    const length = 5 * n + 100;
+    const source = new MemorySource({ title: stem, timebase: { num: rate, den: 1 }, length, channels: [{ kind: "digital", name: stem, end: length, initial: 0, ticks }] });
+    const pieces: number[] = [];
+    const edges = source.edges.bind(source);
+    source.edges = async (...a) => {
+      const got = await edges(...a);
+      pieces.push(got.ticks.length);
+      return got;
+    };
+    return { input: { source, info: await source.info(), stem }, pieces };
+  };
+  // At the multiple, 12 GHz: 24 merged ticks to each of a 500 MHz input's. At 3^33 and 2^52 ticks
+  // a second, the slower input's tick is about 1.234 merged ticks.
+  for (const rates of [
+    [500e6, 96e6],
+    [3 ** 33, 2 ** 52],
+  ]) {
+    const a = await clockInput(rates[0], "A", 4_000);
+    const b = await clockInput(rates[1], "B", 4_000);
+    const s = new MergedSource([a.input, b.input]);
+    let seed = 3;
+    const next = () => (seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31;
+    for (const c of [0, 1]) {
+      const end = s.mergedInfo.channels[c].end;
+      for (let i = 0; i < 40; i++) {
+        const from = Math.floor(next() * end);
+        const to = from + Math.floor(next() * (end - from));
+        const own = await s.edges(c, from, to);
+        assert.equal(await s.edgeCount(c, from, to), own.ticks.length, `${rates} channel ${c} [${from}, ${to})`);
+        assert.deepEqual(await s.periods(c, from, to), periodStats(own.level, own.ticks), `${rates} channel ${c} [${from}, ${to})`);
+        // A span between whole ticks holds the edges of the whole ticks inside it.
+        const inner = await s.edges(c, from + 1, to + 1);
+        assert.equal(await s.edgeCount(c, from + 0.5, to + 0.5), inner.ticks.length, `[${from + 0.5}, ${to + 0.5})`);
+        assert.deepEqual(await s.periods(c, from + 0.5, to + 0.5), periodStats(inner.level, inner.ticks), `[${from + 0.5}, ${to + 0.5})`);
+      }
+    }
+  }
+  // More edges than a piece holds: read in pieces, none past the bound, the figures the same.
+  const big = await clockInput(500e6, "A", 2 * PIECE_EDGES + 12_345);
+  const s = new MergedSource([big.input, (await clockInput(96e6, "B", 10)).input]);
+  const end = s.mergedInfo.channels[0].end;
+  const own = await s.edges(0, 0, end);
+  big.pieces.length = 0;
+  assert.deepEqual(await s.periods(0, 0, end), periodStats(own.level, own.ticks));
+  assert.ok(big.pieces.length >= 3 && Math.max(...big.pieces) <= PIECE_EDGES, `${big.pieces}`);
 });

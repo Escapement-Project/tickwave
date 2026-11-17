@@ -5,6 +5,7 @@
 // multiple. Every input starts at tick 0; a view shaping the preview moves each one by its
 // alignment. Nothing is resampled: every edge and sample keeps its tick, mapped.
 
+import { PIECE_EDGES, PeriodCounter, periodStats, type PeriodStats } from "./readouts.ts";
 import { channelStart, listedOnAxis, mapOf, mulDivFloor, type Channel, type Edges, type Overview, type Ratio, type RecordingInfo, type Samples, type Source } from "./source.ts";
 
 export interface MergeInput {
@@ -209,6 +210,55 @@ export class MergedSource implements Source {
     while (hi > lo && ticks[hi - 1] >= end) hi--;
     const listed = listedOnAxis(got.listed, (t) => scaled(t, q));
     return { level: (got.level ^ (lo & 1)) as 0 | 1, ticks: ticks.subarray(lo, hi), ...(listed && { listed }) };
+  }
+
+  /**
+   * The input's count over the same edges: merged ticks are whole, so [start, end) holds those at
+   * [⌈start⌉, ⌈end⌉), which come from the input's ticks at or past `inputAtOrAfter` of each.
+   * Where the input can't count, the edges are read. `periods` reads the span alike.
+   */
+  async edgeCount(channel: number, start: number, end: number, signal?: AbortSignal): Promise<number> {
+    const { input, c, s, e } = this.#span(channel, Math.ceil(start), Math.ceil(end));
+    if (!input.source.edgeCount) return (await this.edges(channel, Math.ceil(start), Math.ceil(end), signal)).ticks.length;
+    return input.source.edgeCount(c, s, e, signal);
+  }
+
+  /**
+   * The span's periods, from the input's edges read a piece of at most `PIECE_EDGES` at a time,
+   * each mapped as `edges` maps it, in order, twice over for `PeriodCounter`'s two passes. Not the
+   * input's own periods scaled: their fences' one-tick floor would be the input's tick, not the
+   * merge's. Where the input can't count, the edges are read whole.
+   */
+  async periods(channel: number, start: number, end: number, signal?: AbortSignal): Promise<PeriodStats | null> {
+    const { input, c, s, e, q } = this.#span(channel, Math.ceil(start), Math.ceil(end));
+    const source = input.source;
+    if (!source.edgeCount) {
+      const got = await this.edges(channel, Math.ceil(start), Math.ceil(end), signal);
+      return periodStats(got.level, got.ticks);
+    }
+    const pieces: [number, number][] = [];
+    const split = async (a: number, b: number): Promise<void> => {
+      if (b <= a) return;
+      if (b - a > 1 && (await source.edgeCount!(c, a, b, signal)) > PIECE_EDGES) {
+        const mid = Math.floor((a + b) / 2);
+        await split(a, mid);
+        return split(mid, b);
+      }
+      pieces.push([a, b]);
+    };
+    await split(s, e);
+    let counter = null as PeriodCounter | null;
+    // `PeriodCounter`'s two passes, each over the pieces in order.
+    const pass = async (each: (tick: number) => void): Promise<void> => {
+      for (const [a, b] of pieces) {
+        const got = await source.edges(c, a, b, signal);
+        counter ??= new PeriodCounter(got.level);
+        for (const t of got.ticks) each(scaled(t, q));
+      }
+    };
+    await pass((t) => counter!.edge(t));
+    if (counter?.fences()) await pass((t) => counter!.again(t));
+    return counter?.stats() ?? null;
   }
 
   async overview(channel: number, start: number, end: number, maxBucket: number, signal?: AbortSignal): Promise<Overview | null> {
