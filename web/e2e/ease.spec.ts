@@ -10,6 +10,22 @@ const VIEW = "/e2e/pages/view.html?open&src=fixtures/";
 
 type Span = { start: number; end: number };
 
+/**
+ * Draws the plot under `box` a few times with the pointer, then takes the pointer off it. A page's
+ * first draws run its code cold, and a step after three draws longer than a frame jumps (plot.ts
+ * `slow`) where these tests look for an ease.
+ */
+async function warm(page: Page, box: Locator): Promise<void> {
+  const b = (await box.boundingBox())!;
+  const frames = () => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+  for (let i = 0; i < 8; i++) {
+    await page.mouse.move(b.x + b.width * (0.3 + 0.05 * i), b.y + b.height / 2);
+    await frames();
+  }
+  await page.mouse.move(0, 0);
+  await frames();
+}
+
 async function ready(page: Page, file = "identify-swd.tickwave"): Promise<Locator> {
   await page.goto(VIEW + file);
   const view = page.locator("#v");
@@ -23,6 +39,7 @@ async function ready(page: Page, file = "identify-swd.tickwave"): Promise<Locato
     const across = (e.tickAt(plot.left + plot.width * 0.9) - e.tickAt(plot.left + plot.width * 0.4)) / 0.5;
     e.e2eFactor = across / (e.window.end - e.window.start);
   });
+  await warm(page, view.locator(".plot"));
   await view.locator(".plot").focus();
   await noteKeys(page);
   return view;
@@ -165,6 +182,67 @@ test("under reduced motion a zoom step jumps; the setting is read at each step",
   expect(spans.some((s) => !near(s, span(before)) && !near(s, span(to)))).toBe(true);
 });
 
+test("a step after three draws longer than a frame at 60 Hz jumps, an ease whose frames overrun ends there, and a step after a draw inside such a frame eases, as after draws longer than a frame at 240 Hz", async ({ page }) => {
+  const view = await ready(page);
+  // Every draw clears the canvas first: a wait there of `ms` makes each draw take that long, 20 ms
+  // past a frame at 60 Hz, 8 ms past one at 240 Hz but inside one at 60. `e2eSlow` counts the
+  // draws made slow.
+  const slow = (ms: number) =>
+    page.evaluate((ms) => {
+      const c = CanvasRenderingContext2D.prototype as unknown as { clearRect: (...a: number[]) => void; e2eClear?: (...a: number[]) => void };
+      const w = window as unknown as { e2eSlow: number };
+      c.e2eClear ??= c.clearRect;
+      const clear = c.e2eClear;
+      w.e2eSlow = 0;
+      c.clearRect =
+        ms > 0
+          ? function (this: CanvasRenderingContext2D, ...a: number[]) {
+              w.e2eSlow++;
+              const t = performance.now();
+              while (performance.now() - t < ms);
+              clear.apply(this, a);
+            }
+          : clear;
+    }, ms);
+  const step = async (key: string) => {
+    const before = span(await win(view));
+    const recorded = await record(view, 400);
+    await page.keyboard.press(key);
+    const to = span(await win(view));
+    const spans = (await recorded()).drawn.map(([, s]) => s);
+    expect(near(spans[spans.length - 1], to)).toBe(true);
+    return spans.filter((s) => !near(s, before) && !near(s, to)).length;
+  };
+  // The last draws inside a frame: the step eases, its first three frames overrun, the ease ends.
+  await slow(20);
+  expect(await step("+")).toBeLessThanOrEqual(3);
+  // The last three draws over a frame: the next step jumps.
+  expect(await step("+")).toBe(0);
+  // Fast again: the step after the slow draws jumps, and draws inside a frame; the next eases.
+  await slow(0);
+  expect(await step("-")).toBe(0);
+  expect(await step("-")).toBeGreaterThanOrEqual(3);
+  // Draws past a frame at 240 Hz but inside one at 60: a step eases, and so does the next.
+  await slow(8);
+  expect(await step("+")).toBeGreaterThanOrEqual(3);
+  expect(await step("-")).toBeGreaterThanOrEqual(3);
+  expect(await page.evaluate(() => (window as unknown as { e2eSlow: number }).e2eSlow)).toBeGreaterThanOrEqual(6);
+  await slow(0);
+  // One draw over a frame, and then two, as a pointer moving from row to row draws: the next step
+  // still eases.
+  const box = (await view.locator(".plot").boundingBox())!;
+  for (const ys of [[0.25], [0.75, 0.25]]) {
+    await slow(20);
+    for (const y of ys) {
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height * y);
+      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+    }
+    expect(await page.evaluate(() => (window as unknown as { e2eSlow: number }).e2eSlow)).toBe(ys.length);
+    await slow(0);
+    expect(await step(ys.length === 1 ? "+" : "-")).toBeGreaterThanOrEqual(3);
+  }
+});
+
 test("the rows read for where a zoom step goes, as the step is taken, and never for a window on the way there", async ({ page }) => {
   const view = await ready(page, "identify-jtag.tickwave");
   type Posted = { op: string; start?: number; end?: number; at: number };
@@ -220,6 +298,7 @@ async function insetReady(page: Page, url = INSET, label = /^Attaching/): Promis
   const inset = page.locator("#i");
   await expect(inset.locator("figcaption")).toHaveText(label, { timeout: 20_000 });
   await inset.evaluate((e) => (e as unknown as Inset).settled());
+  await warm(page, inset.locator("canvas"));
   await page.keyboard.press("Tab");
   await noteKeys(page);
   return inset;

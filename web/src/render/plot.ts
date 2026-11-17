@@ -190,6 +190,8 @@ const HEAVIER = 1;
 const STRIPS = 8;
 /** A zoom step's ease, in milliseconds, in a view and an inset. */
 export const EASE_MS = 150;
+/** A frame at 60 Hz, in milliseconds: a view whose draws take longer can't ease a step at 60 fps. */
+export const FRAME_MS = 1000 / 60;
 /** How long a read may run before the element says it is still loading. */
 const STALL_MS = 5000;
 
@@ -283,6 +285,8 @@ export class Plot {
   #view = { start: 0, end: 1 };
   /** A zoom step under way: the window drawn goes from `from` to `to` over `ms` from `t0`. */
   #ease: { from: { start: number; end: number }; to: { start: number; end: number }; t0: number; ms: number } | null = null;
+  /** How long the last three draws took, in milliseconds, the last first. */
+  #drawn = [0, 0, 0];
   cursors: { a: number | null; b: number | null } = { a: null, b: null };
   selection: { start: number; end: number } | null = null;
   hoverRow: number | null = null;
@@ -599,6 +603,12 @@ export class Plot {
     return this.#ease !== null;
   }
 
+  /** Whether the last three draws each took longer than a frame: one or two may be the machine's
+   * hiccup, or a page's first draws running cold, not the view's cost. */
+  get slow(): boolean {
+    return Math.min(...this.#drawn) > FRAME_MS;
+  }
+
   /** Eases the window drawn from where it is to `to` over `ms`, quick at first, frame by frame. */
   easeTo(to: { start: number; end: number }, ms: number): void {
     this.#ease = { from: { ...this.#view }, to, t0: performance.now(), ms };
@@ -606,12 +616,13 @@ export class Plot {
   }
 
   /** The window drawn now: the ease's, or the window drawn where none is under way. An ease that
-   * has run its time ends; one under way asks for the next frame. */
+   * has run its time ends, and so does one while the draws are `slow`, at its first frame if they
+   * were slow before it; one under way asks for the next frame. */
   #eased(): void {
     const e = this.#ease;
     if (!e) return;
     const k = Math.min(1, (performance.now() - e.t0) / e.ms);
-    if (k >= 1) {
+    if (k >= 1 || this.slow) {
       this.#view = e.to;
       this.#ease = null;
       return;
@@ -656,6 +667,7 @@ export class Plot {
     const l = this.layout;
     const p = this.palette;
     if (!l || !p || !this.info) return;
+    const began = performance.now();
     this.#eased();
     const ctx = this.#ctx;
     const dpr = this.#dpr;
@@ -706,6 +718,7 @@ export class Plot {
     this.#drawLane(revealX);
     if (this.config.axis) this.#drawAxis();
     this.#drawMarks();
+    this.#drawn = [performance.now() - began, this.#drawn[0], this.#drawn[1]];
 
     this.onDraw?.();
     this.#watchStall();
