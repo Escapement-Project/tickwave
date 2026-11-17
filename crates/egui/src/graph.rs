@@ -4,8 +4,8 @@
 use std::ops::Range;
 
 use egui::{
-    AsIdSalt, CursorIcon, IdSalt, PointerButton, Rect, Response, Sense, Ui, Vec2, Widget, pos2,
-    vec2,
+    AsIdSalt, CursorIcon, IdSalt, PointerButton, Rect, Response, Sense, Stroke, StrokeKind, Ui,
+    Vec2, Widget, WidgetInfo, pos2, vec2,
 };
 use escapement_tickwave_view::format::model::Ratio;
 use escapement_tickwave_view::readouts::{MINUS, NBSP, format_interval};
@@ -36,6 +36,9 @@ const MIN_TRACE: f32 = 40.0;
 const EASE: f64 = 0.15;
 /// How near a marker's line, in points, the pointer reads it.
 const MARKER_REACH: f32 = 3.0;
+/// The Live toggle's word, and the room around it.
+const LIVE: &str = "Live";
+const LIVE_PAD: Vec2 = vec2(7.0, 2.0);
 
 /// What a host adds to the graph's query for its own panel. A host builds one with `default` and
 /// sets its fields.
@@ -735,6 +738,10 @@ impl Widget for Graph<'_> {
             &facts,
             memory.shown.as_ref(),
         );
+        let live = facts.live.then(|| self.live_rect(ui, &layout));
+        if let Some(rect) = live {
+            self.live_toggle(ui, id, rect, &view);
+        }
         {
             let _span = tracing::debug_span!("build query").entered();
             let columns = (layout.plot.width() * ui.pixels_per_point())
@@ -760,8 +767,12 @@ impl Widget for Graph<'_> {
                 roles: &facts.roles,
                 paints: held.as_ref().map_or(&[][..], |h| &h.answer.markers.paints),
                 pixels_per_point: ui.pixels_per_point(),
+                live,
             },
         );
+        if let Some(rect) = live {
+            self.paint_live(ui, id.with("live"), rect);
+        }
         if let Some(h) = &held {
             hover_markers(ui, id, h, &view, &layout, facts.timebase);
         }
@@ -781,6 +792,62 @@ impl Widget for Graph<'_> {
             response.mark_changed();
         }
         response
+    }
+}
+
+impl Graph<'_> {
+    /// Where the Live toggle sits: at the time axis's right end, one size whichever its state.
+    fn live_rect(&self, ui: &Ui, layout: &Layout) -> Rect {
+        let p = self.palette;
+        let word = ui
+            .painter()
+            .layout_no_wrap(LIVE.into(), p.labels.clone(), p.ink);
+        let size = word.size() + 2.0 * LIVE_PAD;
+        let axis = layout.axis;
+        Rect::from_min_size(
+            pos2(axis.right() - size.x - 1.0, axis.center().y - size.y / 2.0),
+            size,
+        )
+    }
+
+    /// The Live toggle, while the recording is being written: a click, or Space or Enter while it
+    /// has the focus, stops following at the window drawn, or follows again at its span.
+    fn live_toggle(&mut self, ui: &Ui, id: egui::Id, rect: Rect, view: &View) {
+        let following = matches!(self.state.window, Window::Follow { .. });
+        let response = ui.interact(rect, id.with("live"), Sense::click());
+        response.widget_info(|| WidgetInfo::selected(egui::Role::Button, true, following, LIVE));
+        if response.clicked() {
+            let w = &view.window;
+            self.state.window = match following {
+                true => Window::At(w.clone()),
+                false => Window::Follow {
+                    span: w.end - w.start,
+                },
+            };
+        }
+    }
+
+    /// The toggle as the window is now: filled in ink while it follows, outlined while not, with
+    /// an ink ring while it has the focus.
+    fn paint_live(&self, ui: &Ui, id: egui::Id, rect: Rect) {
+        let p = self.palette;
+        let following = matches!(self.state.window, Window::Follow { .. });
+        let (fill, text) = match following {
+            true => (p.ink, p.surface),
+            false => (p.surface, p.ink),
+        };
+        let painter = ui.painter();
+        painter.rect(rect, 3.0, fill, Stroke::new(1.0, p.ink), StrokeKind::Inside);
+        let word = painter.layout_no_wrap(LIVE.into(), p.labels.clone(), text);
+        painter.galley(rect.min + LIVE_PAD, word, text);
+        if ui.memory(|m| m.has_focus(id)) {
+            painter.rect_stroke(
+                rect.expand(2.0),
+                4.0,
+                Stroke::new(2.0, p.ink),
+                StrokeKind::Outside,
+            );
+        }
     }
 }
 

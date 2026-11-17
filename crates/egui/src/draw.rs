@@ -243,6 +243,8 @@ pub(crate) struct Frame<'a> {
     pub roles: &'a [Role],
     pub paints: &'a [Paint],
     pub pixels_per_point: f32,
+    /// Where the Live toggle sits, which the axis's labels keep clear of.
+    pub live: Option<Rect>,
 }
 
 impl Frame<'_> {
@@ -666,7 +668,12 @@ pub(crate) fn graph(ui: &Ui, f: &Frame) {
         markers(f, &plot);
     }
     for (text, pos, align, font) in axis {
-        painter.text(pos, align, text, font, p.ink_2);
+        let galley = painter.layout_no_wrap(text, font, p.ink_2);
+        let at = align.anchor_size(pos, galley.size());
+        if f.live.is_some_and(|r| r.intersects(at)) {
+            continue;
+        }
+        painter.galley(at.min, galley, p.ink_2);
     }
     if let Some(rect) = l.key {
         key(ui, f, rect);

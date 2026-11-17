@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use egui::{Pos2, Rect};
+use egui::{Color32, Pos2, Rect};
 use escapement_tickwave_format::snapshot::Snapshot;
 use escapement_tickwave_format::writer::Writer;
 
@@ -487,4 +487,133 @@ fn a_selection_drag_while_following_stops_at_the_window_drawn() {
     answered(&mut h, drawn_then.clone());
     assert_eq!(drawn(&h).window, drawn_then);
     assert_eq!(h.state().state.selection, Some(marked));
+}
+
+/// The Live toggle's AccessKit state, its rect and the fill it was painted with.
+fn toggle(h: &Harness<'_, Host>) -> (bool, Rect, Color32) {
+    use egui_kittest::kittest::{NodeT as _, Queryable as _};
+    let node = h.get_by_label("Live");
+    let on = node.accesskit_node().toggled() == Some(egui::accesskit::Toggled::True);
+    let rect = node.rect();
+    let fill = shapes(h)
+        .iter()
+        .find_map(|s| match &s.shape {
+            egui::Shape::Rect(r) if r.rect == rect => Some(r.fill),
+            _ => None,
+        })
+        .expect("the toggle painted");
+    (on, rect, fill)
+}
+
+fn press_live(h: &mut Harness<'_, Host>) {
+    use egui_kittest::kittest::Queryable as _;
+    h.get_by_label("Live").click();
+    h.step();
+    h.step();
+}
+
+#[test]
+fn the_live_toggle_says_whether_the_view_follows_and_a_press_stops_or_follows_again() {
+    let mut live = Live::new(Capture::new(1000, 10_000, noisy));
+    let snapshot = live.write(4000);
+    let mut h = harness(follow(SECOND));
+    h.state_mut().viewer = Some(Viewer::live(&h.ctx, &live.path, snapshot).unwrap());
+    followed(&mut h, 4 * SECOND);
+    let p = palette();
+    let (on, place, fill) = toggle(&h);
+    assert!(on);
+    assert_eq!(fill, p.ink, "filled in ink while following");
+    // At the time axis's right end.
+    let axis = drawn(&h).layout.axis;
+    assert!(
+        axis.contains_rect(place) && (axis.right() - place.right()) < 2.0,
+        "{place:?} in {axis:?}"
+    );
+    // The axis's labels keep clear of it: windows with a tick a few points from their end.
+    for end in [3_520 * MS, 1_010 * MS, 2_030 * MS] {
+        h.state_mut().state.window = Window::At(0..end);
+        h.step();
+        h.step();
+        let over: Vec<String> = (texts(&h).into_iter())
+            .filter(|(t, r)| t != "Live" && r.intersects(place))
+            .map(|(t, _)| t)
+            .collect();
+        assert!(over.is_empty(), "0..{end}: {over:?} over the toggle");
+    }
+    h.state_mut().state.window = Window::Follow { span: SECOND };
+    followed(&mut h, 4 * SECOND);
+    // A press stops at the window drawn, outlined, in the same place and width.
+    let drawn_then = drawn(&h).window;
+    h.state_mut().changed = false;
+    press_live(&mut h);
+    assert_eq!(h.state().state.window, Window::At(drawn_then.clone()));
+    assert!(h.state().changed, "changed() when it toggles");
+    let (on, rect, fill) = toggle(&h);
+    assert!(!on);
+    assert_eq!(fill, p.surface, "outlined while not");
+    assert_eq!(rect, place);
+    // Again: follows at the window's span.
+    press_live(&mut h);
+    assert_eq!(h.state().state.window, Window::Follow { span: SECOND });
+    assert!(toggle(&h).0);
+    // Space and Enter with the focus on it.
+    {
+        use egui_kittest::kittest::Queryable as _;
+        h.get_by_label("Live").focus();
+    }
+    h.step();
+    h.key_press(egui::Key::Space);
+    h.step();
+    assert!(
+        matches!(h.state().state.window, Window::At(_)),
+        "{:?}",
+        h.state().state.window
+    );
+    h.key_press(egui::Key::Enter);
+    h.step();
+    assert_eq!(h.state().state.window, Window::Follow { span: SECOND });
+}
+
+#[test]
+fn a_followed_window_the_host_sets_fills_the_toggle_and_a_later_press_keeps_its_span() {
+    let mut live = Live::new(Capture::new(1000, 10_000, noisy));
+    let snapshot = live.write(4000);
+    let mut h = harness(follow(SECOND));
+    h.state_mut().viewer = Some(Viewer::live(&h.ctx, &live.path, snapshot).unwrap());
+    followed(&mut h, 4 * SECOND);
+    press_live(&mut h);
+    assert!(!toggle(&h).0);
+    // The host's preset, as verge's 1 s, 10 s and 60 s buttons set it: filled on the next frame.
+    h.state_mut().state.window = Window::Follow { span: 2 * SECOND };
+    h.step();
+    let (on, _, fill) = toggle(&h);
+    assert!(on);
+    assert_eq!(fill, palette().ink);
+    for _ in 0..400 {
+        h.step();
+        if viewer(&h)
+            .answer()
+            .is_some_and(|a| a.window.end - a.window.start == 2 * SECOND)
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    h.step();
+    assert_eq!(drawn(&h).window, 2 * SECOND..4 * SECOND);
+    // Stopped and followed again: the preset's span.
+    press_live(&mut h);
+    assert_eq!(h.state().state.window, Window::At(2 * SECOND..4 * SECOND));
+    press_live(&mut h);
+    assert_eq!(h.state().state.window, Window::Follow { span: 2 * SECOND });
+}
+
+#[test]
+fn a_finished_recording_has_no_live_toggle() {
+    use egui_kittest::kittest::Queryable as _;
+    let (mut h, _gate) = showing(fixture().write(), ViewState::default(), true);
+    wait(&mut h);
+    h.step();
+    assert!(h.query_by_label("Live").is_none());
+    assert!(!texts(&h).iter().any(|(t, _)| t == "Live"));
 }
