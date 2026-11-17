@@ -37,7 +37,8 @@ A `ViewState` holds the window, the value range, the selection and whether a dra
 window follows the recording's end, or stays where it was put. The value range fits what the
 window shows, or stays where it was moved. The graph and the strip change the state as the
 reader moves them, and the host can change it too: a pan, a zoom or a selection gives the window
-a place of its own, and setting it to follow again resumes following.
+a place of its own, and setting it to follow again resumes following. A zoom while following a
+recording being written keeps following, at the new span, about the end.
 
 While a recording is being written, the host passes its now, in ticks, to the graph and the
 strip. A followed window ends at the later of now and the data's end. Nothing is drawn between
@@ -53,12 +54,18 @@ takes no now.
   at every zoom. A pause only breaks the trace.
 - Each digital lane's levels as lines, and its gaps shaded. Where edges crowd closer than a
   device pixel, the band between the levels shades by the edge rate, in edges a second, on one
-  scale at every zoom and in every recording: 20 % at one edge a second or fewer, full ink at 100
-  million, linear in the rate's logarithm between. Each level's line shades by the share of time
-  at that level over five columns, at least 20 % where those hold an edge, so a rare excursion
-  stays visible. An edge standing apart is a line across the band; one with neighbours near,
-  faded towards the shade their spacing gives. The view core's `shade` module holds the model,
-  which the web's drawing ports.
+  scale at every zoom and in every recording: 20 % at one edge a second or fewer, 60 % at 100
+  million and above, linear in the rate's logarithm between. Each level's line takes the band's
+  opacity times its share of time over five columns divided by the larger share, at least a
+  fifth of the band's where those hold an edge, so a rare excursion stays visible; with no edge
+  in them, the band's opacity times its share. A short pause between two runs, under the join
+  distance (a line's width and a device pixel), keeps its gap, and its line takes the larger of
+  the two runs' bands. An edge standing apart is a line across the band. So is a busy column, or
+  a run of edges whose first and last are under the join distance apart, with no other edge
+  within a device pixel: one line at its middle, so a short pulse reads alike wherever the
+  columns fall. A line with neighbours near is faded towards the shade their spacing gives; a
+  pulse counts no pulse as a neighbour, so pulses near each other stay full ink. The view core's
+  `shade` module holds the model, which the web's drawing ports.
 - Marker lines, with their labels in up to three rows across the plot's top. A fitted value
   range keeps those rows clear once the recording has a marker.
 - The selection, washed across the plot and the lanes.
@@ -81,14 +88,28 @@ past 12 points takes the value range off the fit and moves it; a drag along the 
 it; a double click fits it again. A graph of lanes alone has no value range to move. With
 `select_mode`, a drag selects.
 
+A zoom step sets the host's window to where the view is going at once, so the response is
+`changed()` once a step, and the graph eases the window it draws there over 150 ms, quick at
+first. The step's query goes out in that frame, by the usual rule, and until its answer lands the
+graph draws what it holds mapped onto the window drawn, as for any query. A step during an ease
+goes on from where the last one was going, from the window drawn. A pan during an ease moves on
+from where it was going, at once. The graph eases only toward the window it set itself: a window
+the host sets is drawn at once, and a host that states the same window every frame, as one
+following a recording might, stops nothing. A host whose reader asked for less motion passes
+`Graph::motion(false)`, and each step jumps; the graph doesn't read the platform's setting.
+
 The strip has a time axis along its foot. A click or a drag on it centres the window. A handle
 at each end of the window drags that end, at least one tick short of the other.
 
 ## The palette
 
-Every colour, font and opacity comes from the host's `Palette`; the crate has none of its own.
-verge fills it from its design tokens. The demo reads the project's tokens from
-`site/tokens.css`, in the day and the night face.
+Every colour, font, opacity and line weight comes from the host's `Palette`; the crate has none
+of its own. A host starts from `Palette::from_visuals`, which takes the colours from its egui
+theme, as the web's elements take the system's colours on a page without tokens, and the web's
+opacities and line weight, then sets what its own tokens give. A `Palette` is built no other way:
+a later version may add a field. `line_weight`, in points, draws the trace's lines and the lanes'
+levels and edges, 1.5 from `from_visuals`. verge fills it from its design tokens. The demo reads
+the project's tokens from `site/tokens.css`, in the day and the night face.
 
 ## Spans
 

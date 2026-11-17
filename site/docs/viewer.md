@@ -57,7 +57,8 @@ a GitHub sign-in to download, so share captures in a public one.
 
 Hold Ctrl (Cmd on a Mac) and turn the wheel to zoom about the pointer, or pinch on a trackpad or a
 touch screen. The plain wheel scrolls the page. Drag, swipe sideways or hold Shift with the wheel to
-move along the capture.
+move along the capture. A zoom step eases into place over about 150 ms. Where the system is set to
+reduce motion, it jumps there instead.
 
 With the view focused, the left and right arrow keys move it. The up and down arrows, or plus and
 minus, zoom in and out. Home and the Fit button show the whole capture, and every analog channel's
@@ -97,17 +98,26 @@ is shaded.
 Zoomed out, a digital channel's edges come closer together than a pixel. There the row shades the
 band between its two levels instead of drawing each edge. How dark the shade is says how fast the
 channel switches, in edges a second. The scale is the same at every zoom and in every recording:
-faint at one edge a second or fewer, solid at 100 million, and darker by the same step for every
-tenfold rise between. Two captures of the same activity look alike side by side.
+faint at one edge a second or fewer, 60 % of the line's ink at 100 million and above, and darker
+by the same step for every tenfold rise between. Two captures of the same activity look alike side
+by side. Even the busiest band stays lighter than the line, so a crowded stretch reads as a fill.
 
-Each level's line shades as well, by the share of the time the channel spent at that level over
-the few pixels around it. A level the channel held throughout is solid. Wherever the stretch holds
-an edge, both lines show at least faintly, so a rare excursion stays visible at every zoom: a flag
-raised for a few microseconds in an hour still marks its stretch.
+Each level's line shades with the band, by the share of the time the channel spent at that level
+over the few pixels around it. The level it spent most time at takes the band's shade; the other
+takes a part of it, in proportion. An even clock's two lines both take the band's shade; a line
+high three quarters of the time has its high line at the band's shade and its low line at a third
+of it. Wherever the stretch holds an edge, the fainter line shows at least a fifth of the band's
+shade, so a rare excursion stays visible. Outside a busy stretch a held level's line is solid, so
+it steps from solid to the band's shade where a stretch begins. A short pause between two busy
+stretches keeps its gap, and its line takes the band's shade.
 
-An edge that stands apart is a line across the band. Where edges come near each other without
-crowding into one pixel, each line fades towards the shade a stretch of them would take, so
-neighbouring edges and a crowded stretch read alike.
+An edge that stands apart is a line across the band. So is a short pulse or burst that stands
+apart: edges too close together to show apart, spanning too little to fill a stretch, draw as one
+line at their middle, whatever pixel they fall in. A flag raised for a few microseconds in an
+hour reads as a solid line at every zoom, and so does each of several flags raised close
+together. Where other edges come near each other without crowding into one pixel, each line fades
+towards the shade a stretch of them would take, so neighbouring edges and a crowded stretch read
+alike.
 
 ## Row heights
 

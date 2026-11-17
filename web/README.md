@@ -263,6 +263,8 @@ scrolls the page, and the view says how to zoom. Shift with the wheel, a sideway
 the left and right arrow keys move along the capture. With the view focused, the up and down arrows
 or plus and minus zoom in and out. Home and Fit show the whole capture, or all of the channels the
 view shows, with each analog channel's whole range, and Escape clears the cursors and the selection.
+A zoom step eases into place over about 150 ms, and the rows read for where it goes at once. A
+reader who prefers reduced motion sees each step jump there.
 
 Over an analog row's scale, Ctrl or Cmd with the wheel, or two fingers, zoom its values about the
 pointer instead, a drag moves them, and a double click fits them to the values in view. A scale takes
@@ -312,7 +314,7 @@ Clicking an annotation's label shows its span.
 | `settled()` | resolves once the view has drawn everything it shows |
 | `tickAt(clientX)` | the tick under a point in the window, or null before the view has drawn |
 | `open` | whether the view is open; setting it opens or closes it |
-| `window` | the span shown, `{start, end}` in ticks |
+| `window` | where the view is going, `{start, end}` in ticks: the span shown, or while a zoom step eases, the span it eases to |
 | `cursors` | cursors A and B, `{a, b}` in ticks; null where one is not placed |
 | `selection` | the selected span, `{start, end}` in ticks, or null |
 | `shaping` | the attribute, as a boolean |
@@ -369,7 +371,8 @@ fit on the line. On an analog channel it reads the value. Moving away puts the m
 A reader can zoom in within the inset's span, as close as the view goes. Ctrl or Cmd with the
 wheel, a trackpad pinch, or two fingers zoom it. Zoomed in, a drag with the mouse or a finger moves
 along the span, as do Shift with the wheel and a sideways swipe. A drag opens nothing. The inset
-zooms out as far as its span and moves no further than its ends.
+zooms out as far as its span and moves no further than its ends. A zoom step eases as the view's
+does.
 Where one pixel holds several edges, the line says how to zoom in. Shown again after 800 ms, or at
 another annotation, the inset shows its whole span.
 
@@ -403,7 +406,8 @@ tickwave's main page does for the figure beside its name. `settled()` and the `t
 event (`{annotation, height}`) work as on the view, so a page can lay itself out around an inset's
 final height. `sweeping` says whether the sweep is playing. `window` gives the span shown,
 `{start, end}` in ticks, and `zoomed` the span the reader has zoomed to, or null while the whole
-span shows, as it does again when the inset is shown after 800 ms hidden.
+span shows, as it does again when the inset is shown after 800 ms hidden. While a zoom step eases,
+`window` gives the span drawn on the way and `zoomed` where it is going.
 
 ### `<tickwave-ref>`
 
@@ -468,6 +472,7 @@ and fall back to system colours on a page without them:
 | `--attention-ink` | a notice of a problem |
 | `--series-<name>` | the traces, with `series="<name>"` |
 | `--tickwave-<role>` | a line where an annotation's `paint` role drives it. `probe` falls back to the series colour, any other role to ink. The `target` role's lines are heavier as well, so a page without colours still tells the roles apart |
+| `--tickwave-line-weight` | the traces' lines in a view and an inset: an analog trace, and a digital row's levels and edges. A number of CSS pixels, with or without `px`; 1.5 where it is unset or not a positive number. The `target` role's lines draw a pixel heavier. Rules, axes, the selection and markers stay a pixel wide. The chart doesn't read it |
 | `--font-text`, `--font-figures` | labels; the readouts' figures |
 
 While a zoom's finer data loads, a row draws the coarser data it has. Where that data shows a
