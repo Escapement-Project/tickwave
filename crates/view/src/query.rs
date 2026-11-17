@@ -37,6 +37,10 @@ pub struct Query {
     pub flags: Vec<(usize, usize)>,
     /// The overview strip: a channel, and its columns over the extent.
     pub strip: Option<(usize, u32)>,
+    /// Channels whose columns over the extent the answer carries too, each with its columns, as
+    /// the strip's: what a host draws past `around` while a newer answer is on the way, as a
+    /// trace past `around` draws the strip's.
+    pub fallbacks: Vec<(usize, u32)>,
     /// Intervals to measure: the window's, the selection's.
     pub statistics: Vec<Range<i64>>,
     pub markers: MarkerQuery,
@@ -158,6 +162,8 @@ pub struct Answer {
     /// In the query's order.
     pub channels: Vec<Drawn>,
     pub strip: Option<StripAnswer>,
+    /// Each of the query's `fallbacks`, in its order.
+    pub fallbacks: Vec<StripAnswer>,
     pub statistics: Vec<Statistics>,
     pub markers: MarkerAnswer,
     pub extent: Option<Range<i64>>,
@@ -414,23 +420,30 @@ impl Recording {
             How::Exact => self.extent(),
             How::Sketch => self.sketch_extent(),
         };
-        let strip = match (q.strip, extent) {
-            (Some((c, n)), Some(extent)) => {
+        let whole = |c: usize, n: u32, extent: &Range<i64>| -> Result<StripAnswer, Error> {
+            let n = n.max(1) as usize;
+            let grid = Grid {
+                x0: extent.start as f64,
+                per: (extent.end - extent.start) as f64 / n as f64,
+                count: n,
+            };
+            let channel = self.drawn(c, &grid, extent, None, None, None, r, how)?;
+            Ok(StripAnswer {
+                extent: extent.clone(),
+                grid,
+                channel,
+            })
+        };
+        let (strip, fallbacks) = match extent {
+            Some(extent) => {
                 let _span = tracing::debug_span!("strip").entered();
-                let n = n.max(1) as usize;
-                let grid = Grid {
-                    x0: extent.start as f64,
-                    per: (extent.end - extent.start) as f64 / n as f64,
-                    count: n,
-                };
-                let channel = self.drawn(c, &grid, &extent, None, None, None, r, how)?;
-                Some(StripAnswer {
-                    extent,
-                    grid,
-                    channel,
-                })
+                let strip = q.strip.map(|(c, n)| whole(c, n, &extent)).transpose()?;
+                let fallbacks = (q.fallbacks.iter())
+                    .map(|&(c, n)| whole(c, n, &extent))
+                    .collect::<Result<Vec<_>, _>>()?;
+                (strip, fallbacks)
             }
-            _ => None,
+            None => (None, Vec::new()),
         };
         if how == How::Sketch {
             return Ok(Answer {
@@ -439,6 +452,7 @@ impl Recording {
                 grid,
                 channels,
                 strip,
+                fallbacks,
                 statistics: Vec::new(),
                 markers: MarkerAnswer::default(),
                 extent: self.sketch_extent(),
@@ -479,6 +493,7 @@ impl Recording {
             grid,
             channels,
             strip,
+            fallbacks,
             statistics,
             markers,
             extent: self.extent(),

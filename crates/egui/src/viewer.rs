@@ -33,6 +33,8 @@ pub(crate) struct Request {
     pub channels: Vec<usize>,
     pub flags: Vec<(usize, usize)>,
     pub strip: Option<(usize, u32)>,
+    /// The lanes' columns over the extent, which a lane draws past `around`.
+    pub fallbacks: Vec<(usize, u32)>,
     pub selection: Option<Range<i64>>,
     pub markers: MarkerQuery,
 }
@@ -53,6 +55,7 @@ impl Request {
         q.channels = self.channels.clone();
         q.flags = self.flags.clone();
         q.strip = self.strip;
+        q.fallbacks = self.fallbacks.clone();
         q.markers = self.markers.clone();
         q.aligned = live && self.follows();
         q
@@ -682,6 +685,7 @@ mod tests {
             channels: vec![crate::tests::I],
             flags: Vec::new(),
             strip: None,
+            fallbacks: Vec::new(),
             selection: None,
             markers: MarkerQuery::default(),
         };

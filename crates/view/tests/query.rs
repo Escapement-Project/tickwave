@@ -413,6 +413,39 @@ fn the_strip_spans_the_extent() {
 }
 
 #[test]
+fn a_fallback_is_its_channels_columns_over_the_extent_as_a_strip_of_it_would_be() {
+    let rec = open(&fixture("energy.tickwave"));
+    let cancel = AtomicBool::new(false);
+    let d = (rec.channels().iter())
+        .position(|c| matches!(c.kind, ChannelKind::Digital))
+        .unwrap();
+    let mut q = query(0..1000, 10, vec![]);
+    q.fallbacks = vec![(d, 100), (1, 50)];
+    let a = rec.query(&q, &cancel).unwrap();
+    assert_eq!(a.fallbacks.len(), 2);
+    // Each, in the query's order, the strip a query of its channel would answer.
+    for (got, &(c, n)) in a.fallbacks.iter().zip(&q.fallbacks) {
+        let mut s = query(0..1000, 10, vec![]);
+        s.strip = Some((c, n));
+        assert_eq!(*got, rec.query(&s, &cancel).unwrap().strip.unwrap());
+    }
+    // And, read another way, the columns over the extent: a query of the whole extent in 100
+    // columns lays 300 over the extent and a width either side, its middle 100 on the fallback's.
+    let extent = a.fallbacks[0].extent.clone();
+    let whole = rec
+        .query(&query(extent.clone(), 100, vec![d]), &cancel)
+        .unwrap();
+    assert_eq!(whole.grid.per, a.fallbacks[0].grid.per);
+    let states = digital(&a.fallbacks[0].channel);
+    assert_eq!(states, &digital(&whole.channels[0])[100..200]);
+    assert!(
+        states
+            .iter()
+            .any(|s| matches!(s, State::Rise | State::Fall | State::Busy))
+    );
+}
+
+#[test]
 fn markers_by_page_cursor_and_successor() {
     let rec = open(&fixture("energy.tickwave"));
     let cancel = AtomicBool::new(false);

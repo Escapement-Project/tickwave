@@ -21,6 +21,7 @@ fn request(window: Range<i64>, selection: Option<Range<i64>>) -> Request {
         channels: vec![I],
         flags: Vec::new(),
         strip: None,
+        fallbacks: Vec::new(),
         selection,
         markers: MarkerQuery::default(),
     }

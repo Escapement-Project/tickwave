@@ -7,8 +7,9 @@
 //!   is read once first, so it is in the page cache.
 //! - The query: the window's 1,920 columns of I, DIO0 to DIO3 under it, I's single samples
 //!   flagged by `under_range`, the strip of I over the extent, the window's statistics and its
-//!   markers. Centred on the middle of the extent, at 2^shift ticks a column (the last zoom the
-//!   finest level serves) and at half that (the first that decodes samples).
+//!   markers; with `--fallbacks`, DIO0 to DIO3's columns over the extent too, as egui's graph
+//!   asks for its lanes. Centred on the middle of the extent, at 2^shift ticks a column (the last
+//!   zoom the finest level serves) and at half that (the first that decodes samples).
 //! - Cold: the query on a recording opened just before, untimed, with an empty cache. Warm: the
 //!   same query again. Pan: the window moved by a tenth of its width, each run further on.
 //!
@@ -69,6 +70,9 @@ struct Args {
     /// Only this way of asking, and no timing of the open.
     #[arg(long, value_enum)]
     how: Option<How>,
+    /// Ask for the lanes' columns over the extent as well.
+    #[arg(long)]
+    fallbacks: bool,
 }
 
 /// A median and a 95th percentile, in milliseconds.
@@ -148,6 +152,9 @@ fn main() {
                 query.channels = vec![1, 4, 5, 6, 7];
                 query.flags = vec![(1, 3)];
                 query.strip = Some((1, args.columns));
+                if args.fallbacks {
+                    query.fallbacks = [4, 5, 6, 7].map(|c| (c, args.columns)).to_vec();
+                }
                 query.statistics = vec![window];
                 query.markers = {
                     let mut markers = MarkerQuery::default();

@@ -2,6 +2,7 @@
 //! captures are, a host that keeps a `ViewState`, and readers of what a frame painted.
 
 mod ease;
+mod fallback;
 mod graph;
 mod host;
 mod lanes;

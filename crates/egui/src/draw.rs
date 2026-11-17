@@ -848,7 +848,8 @@ fn trace(f: &Frame, px: f32, plot: &egui::Painter) -> Ink {
 
 /// Digital channel `c`'s lane: its gaps shaded, its levels as lines, and where edges crowd, the
 /// band between the levels and each level's rail at the opacities `shade` gives them, each
-/// stretch in its pen.
+/// stretch in its pen. Inside the answer's `around`, the answer's columns; past it, the channel's
+/// columns over the extent, so a window the answer doesn't yet cover draws its levels too.
 fn lane(ui: &Ui, f: &Frame, c: usize, rect: Rect, px: f32) {
     let p = f.palette;
     let Some(held) = f.held else { return };
@@ -858,18 +859,67 @@ fn lane(ui: &Ui, f: &Frame, c: usize, rect: Rect, px: f32) {
     let Some(Drawn::Digital { columns, gaps }) = held.answer.channels.get(at) else {
         return;
     };
+    let fallback = (held.request.fallbacks.iter())
+        .position(|&(x, _)| x == c)
+        .and_then(|i| held.answer.fallbacks.get(i))
+        .and_then(|s| match &s.channel {
+            Drawn::Digital { columns, gaps } => Some((&s.grid, columns, gaps)),
+            _ => None,
+        });
     let painter = ui.painter().with_clip_rect(rect);
     let high = rect.top() + LANE_PAD;
     let low = high + LANE_SWING;
     let w = &f.view.window;
-    for g in gaps {
-        if let Some((x0, x1)) = f.across(g.start.max(w.start) as f64, g.end.min(w.end) as f64, px) {
+    let a = &held.answer.around;
+    // The answer's gaps inside `around`, the fallback's past it, so none is shaded twice.
+    let mut shaded: Vec<(i64, i64)> = (gaps.iter())
+        .map(|g| (g.start.max(a.start), g.end.min(a.end)))
+        .collect();
+    if let Some((_, _, outside)) = fallback {
+        for g in outside {
+            shaded.push((g.start, g.end.min(a.start)));
+            shaded.push((g.start.max(a.end), g.end));
+        }
+    }
+    for (from, to) in shaded {
+        let (from, to) = (from.max(w.start), to.min(w.end));
+        if to <= from {
+            continue;
+        }
+        if let Some((x0, x1)) = f.across(from as f64, to as f64, px) {
             painter.rect_filled(
                 Rect::from_min_max(pos2(x0, high), pos2(x1, low)),
                 0.0,
                 p.attention_fill.gamma_multiply(p.shade),
             );
         }
+    }
+    let g = &held.answer.grid;
+    let mut runs = Vec::with_capacity(3);
+    if let Some((fg, fc, _)) = fallback {
+        runs.push(Run {
+            grid: fg,
+            columns: fc,
+            ks: columns_over(fg, w.start, w.end.min(a.start)),
+            from: f64::NEG_INFINITY,
+            to: a.start as f64,
+        });
+    }
+    runs.push(Run {
+        grid: g,
+        columns,
+        ks: columns_over(g, w.start.max(a.start), w.end.min(a.end)),
+        from: f64::NEG_INFINITY,
+        to: f64::INFINITY,
+    });
+    if let Some((fg, fc, _)) = fallback {
+        runs.push(Run {
+            grid: fg,
+            columns: fc,
+            ks: columns_over(fg, w.start.max(a.end), w.end),
+            from: a.end as f64,
+            to: f64::INFINITY,
+        });
     }
     let cut = stretches(f, c, rect);
     let whole = cut.len() == 1;
@@ -879,7 +929,7 @@ fn lane(ui: &Ui, f: &Frame, c: usize, rect: Rect, px: f32) {
         let at = match inks.iter().position(|(width, _)| *width == pen.width) {
             Some(at) => at,
             None => {
-                inks.push((pen.width, lane_ink(f, held, columns, rect, px, pen.width)));
+                inks.push((pen.width, lane_ink(f, &runs, rect, px, pen.width)));
                 inks.len() - 1
             }
         };
@@ -888,49 +938,81 @@ fn lane(ui: &Ui, f: &Frame, c: usize, rect: Rect, px: f32) {
     }
 }
 
-/// A lane's levels as lines and its crowded columns as fills, for a line `weight` points wide.
-fn lane_ink(
-    f: &Frame,
-    held: &Held,
-    columns: &DigitalColumns,
-    rect: Rect,
-    px: f32,
-    weight: f32,
-) -> Ink {
-    let w = &f.view.window;
-    let a = &held.answer.around;
+/// A run of a lane's columns: `ks` of `columns` on `grid`, each across no more of the ticks than
+/// `from` to `to`.
+struct Run<'a> {
+    grid: &'a Grid,
+    columns: &'a DigitalColumns,
+    ks: Range<usize>,
+    from: f64,
+    to: f64,
+}
+
+/// A column as a lane draws it: across `x0` to `x1`, its state, where its edge sits from 0 to 1
+/// across it, its look, where a pulse's stroke is, and the run it is in.
+struct Col {
+    x0: f32,
+    x1: f32,
+    state: State,
+    at: f64,
+    look: Look,
+    pulse: f32,
+    run: usize,
+}
+
+/// A lane's levels as lines and its crowded columns as fills, for a line `weight` points wide,
+/// from its `runs` in order.
+fn lane_ink(f: &Frame, runs: &[Run], rect: Rect, px: f32, weight: f32) -> Ink {
     let high = rect.top() + LANE_PAD;
     let low = high + LANE_SWING;
+    let width = f64::from(weight / px);
+    let mut cols: Vec<Col> = Vec::new();
+    for (i, r) in runs.iter().enumerate() {
+        let g = r.grid;
+        let looks = shade::looks(r.columns, r.ks.clone(), width, g.per, f.facts.timebase);
+        for k in r.ks.clone() {
+            let start = g.x0 + k as f64 * g.per;
+            let pulse = match looks[k] {
+                Look::Pulse { at, .. } => f.view.x(g.x0 + at * g.per),
+                _ => 0.0,
+            };
+            cols.push(Col {
+                x0: f.view.x(start.max(r.from)),
+                x1: f.view.x((g.x0 + (k + 1) as f64 * g.per).min(r.to)),
+                state: r.columns.state[k],
+                at: r.columns.at[k],
+                look: looks[k],
+                pulse,
+                run: i,
+            });
+        }
+    }
     let mut ink = Ink::default();
     let mut chain = 0;
-    let g = &held.answer.grid;
-    let shown = columns_over(g, w.start.max(a.start), w.end.min(a.end));
-    let width = f64::from(weight / px);
-    let looks = shade::looks(columns, shown.clone(), width, g.per, f.facts.timebase);
-    let DigitalColumns { state, at, .. } = columns;
     let half = weight / 2.0;
     let mut line = Vec::new();
     let mut pen: Option<f32> = None;
-    let mut k = shown.start;
-    while k < shown.end {
-        let x0 = f.view.x(g.x0 + k as f64 * g.per);
-        let x1 = f.view.x(g.x0 + (k + 1) as f64 * g.per);
-        match (state[k], looks[k]) {
+    let mut k = 0;
+    while k < cols.len() {
+        let Col {
+            x0, x1, state, at, ..
+        } = cols[k];
+        match (state, cols[k].look) {
             (State::None, _) => {
                 // A gap: the line's dash starts again after it.
                 ink.line(&mut line, Tint::FULL, chain);
                 chain += 1;
                 pen = None;
             }
-            (_, Look::Pulse { alpha, at: mid }) => {
+            (_, Look::Pulse { alpha, .. }) => {
                 // As a lone edge: the line in at the level before its first column to its centre,
                 // a stroke across the band, and out at the level after its last column.
-                let last = (k..shown.end)
-                    .take_while(|&j| looks[j] == looks[k])
+                let last = (k..cols.len())
+                    .take_while(|&j| cols[j].run == cols[k].run && cols[j].look == cols[k].look)
                     .last()
                     .unwrap_or(k);
-                let x = f.view.x(g.x0 + mid * g.per);
-                let before = match state[k] {
+                let x = cols[k].pulse;
+                let before = match state {
                     State::Rise => Some(low),
                     State::Fall => Some(high),
                     _ => pen,
@@ -947,7 +1029,7 @@ fn lane_ink(
                     Rect::from_min_max(pos2(x - half, high - half), pos2(x + half, low + half)),
                     Tint(alpha as f32, 1.0),
                 ));
-                let after = match (state[last], state.get(last + 1)) {
+                let after = match (cols[last].state, cols.get(last + 1).map(|c| c.state)) {
                     (State::Rise, _) => Some(high),
                     (State::Fall, _) => Some(low),
                     (_, Some(State::High | State::Fall)) => Some(high),
@@ -956,8 +1038,7 @@ fn lane_ink(
                 };
                 pen = after;
                 if let Some(y) = after {
-                    let x1 = f.view.x(g.x0 + (last + 1) as f64 * g.per);
-                    line.extend([pos2(x, y), pos2(x1, y)]);
+                    line.extend([pos2(x, y), pos2(cols[last].x1, y)]);
                 }
                 k = last + 1;
                 continue;
@@ -989,14 +1070,14 @@ fn lane_ink(
             (State::Low | State::High, Look::Held(alpha)) => {
                 ink.line(&mut line, Tint::FULL, chain);
                 pen = None;
-                let y = if state[k] == State::High { high } else { low };
+                let y = if state == State::High { high } else { low };
                 ink.fills.push((
                     Rect::from_min_max(pos2(x0, y - half), pos2(x1.max(x0 + px), y + half)),
                     Tint(alpha as f32, 1.0),
                 ));
             }
             (State::Low | State::High, _) => {
-                let y = if state[k] == State::High { high } else { low };
+                let y = if state == State::High { high } else { low };
                 if pen != Some(y) {
                     ink.line(&mut line, Tint::FULL, chain);
                     line.push(pos2(x0, y));
@@ -1006,12 +1087,12 @@ fn lane_ink(
             }
             (State::Rise | State::Fall, Look::Stroke(alpha)) => {
                 let alpha = alpha as f32;
-                let (ya, yb) = if state[k] == State::Rise {
+                let (ya, yb) = if state == State::Rise {
                     (low, high)
                 } else {
                     (high, low)
                 };
-                let x = x0 + at[k] as f32 * (x1 - x0);
+                let x = x0 + at as f32 * (x1 - x0);
                 if pen != Some(ya) {
                     ink.line(&mut line, Tint::FULL, chain);
                     line.push(pos2(x0, ya));

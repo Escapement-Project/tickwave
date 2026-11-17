@@ -623,6 +623,7 @@ impl Graph<'_> {
             channels,
             flags: (self.trace.zip(self.flag)).into_iter().collect(),
             strip: self.trace.map(|t| (t, columns)),
+            fallbacks: self.lanes.iter().map(|&l| (l, columns)).collect(),
             selection: self.state.selection.clone(),
             markers,
         }
