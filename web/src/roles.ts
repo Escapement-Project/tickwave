@@ -183,20 +183,36 @@ export function paintStretches(spans: readonly PaintSpan[], roles: readonly Role
  * lifted pen adds nothing, so between two paths the length is the first's at its end. A path with
  * no whole point is passed over, and a number past a path's last whole point is not read. 0 where
  * no path has a point.
+ *
+ * The paths, and the points in each, are found by halving: a row's run left to right. Out of
+ * order, the length is unreliable, but every read stays in the paths given.
  */
 export function lengthAt(paths: readonly { readonly points?: readonly number[] }[], x: number): number {
-  // The last path whose first point is at or before `x`, else the first with a point.
-  let chosen: readonly number[] | null = null;
-  for (const path of paths) {
-    const points = path.points ?? [];
-    if (points.length < 2) continue;
-    if (chosen !== null && points[0] > x) break;
-    chosen = points;
+  const pts = (i: number) => paths[i].points ?? [];
+  const whole = (i: number) => pts(i).length >= 2;
+  // The last path whose first point is at or before `x`, else the first with a point. A path with
+  // no point counts as at or before, so the paths up to the halving's end hold the one.
+  let [lo, hi] = [0, paths.length];
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    const p = pts(mid);
+    if (p.length === 0 || p[0] <= x) lo = mid + 1;
+    else hi = mid;
   }
-  if (chosen === null) return 0;
-  const pts = chosen.slice(0, chosen.length - (chosen.length % 2));
-  let k = 0;
-  while (k + 2 < pts.length && pts[k + 2] <= x) k += 2;
-  if (k + 2 >= pts.length || pts[k] > x) return pts[k + 1];
-  return pts[k + 1] + ((x - pts[k]) * (pts[k + 3] - pts[k + 1])) / (pts[k + 2] - pts[k]);
+  let chosen = -1;
+  for (let i = lo - 1; i >= 0 && chosen < 0; i--) if (whole(i) && pts(i)[0] <= x) chosen = i;
+  for (let i = 0; i < paths.length && chosen < 0; i++) if (whole(i)) chosen = i;
+  if (chosen < 0) return 0;
+  const all = pts(chosen);
+  const n = all.length >> 1;
+  // The last point at or before `x`, or the first.
+  [lo, hi] = [0, n];
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (all[2 * mid] <= x) lo = mid + 1;
+    else hi = mid;
+  }
+  const k = 2 * Math.max(lo - 1, 0);
+  if (k + 2 >= 2 * n || all[k] > x) return all[k + 1];
+  return all[k + 1] + ((x - all[k]) * (all[k + 3] - all[k + 1])) / (all[k + 2] - all[k]);
 }

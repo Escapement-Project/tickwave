@@ -168,27 +168,32 @@ pub fn stretches(spans: &[(i64, i64, &str)], roles: &[Role], px0: i64, px1: i64)
 /// adds nothing, so between two paths the length is the first's at its end. A path with no whole
 /// point is passed over, and a number past a path's last whole point is not read. 0 where no path
 /// has a point.
+///
+/// The paths, and the points in each, are found by halving: a row's run left to right. Out of
+/// order, the length is unreliable, but every read stays in the paths given.
 pub fn length_at<P: AsRef<[f64]>>(paths: &[P], x: f64) -> f64 {
-    // The last path whose first point is at or before `x`, else the first with a point.
-    let mut chosen: Option<&[f64]> = None;
-    for p in paths {
-        let points = p.as_ref();
-        if points.len() < 2 {
-            continue;
-        }
-        if chosen.is_some() && points[0] > x {
-            break;
-        }
-        chosen = Some(points);
-    }
-    let Some(points) = chosen else {
+    let whole = |p: &&P| p.as_ref().len() >= 2;
+    // The last path whose first point is at or before `x`, else the first with a point. A path
+    // with no point counts as at or before, so the paths up to the halving's end hold the one.
+    let starts = paths.partition_point(|p| p.as_ref().first().is_none_or(|&first| first <= x));
+    let chosen = (paths[..starts].iter().rev())
+        .find(|p| whole(p) && p.as_ref()[0] <= x)
+        .or_else(|| paths.iter().find(whole));
+    let Some(points) = chosen.map(AsRef::as_ref) else {
         return 0.0;
     };
     let points = &points[..points.len() / 2 * 2];
-    let mut k = 0;
-    while k + 2 < points.len() && points[k + 2] <= x {
-        k += 2;
+    // The last point at or before `x`, or the first.
+    let (mut lo, mut hi) = (0, points.len() / 2);
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if points[2 * mid] <= x {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
     }
+    let k = 2 * lo.saturating_sub(1);
     if k + 2 >= points.len() || points[k] > x {
         return points[k + 1];
     }

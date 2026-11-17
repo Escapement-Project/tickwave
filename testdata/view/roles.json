@@ -72,7 +72,17 @@
         {"fn": "length_at", "args": {"paths": [[], [0, 0, 10, 10]], "x": 5}, "expect": 5, "note": "An empty path before one with points is passed over."},
         {"fn": "length_at", "args": {"paths": [[0, 0, 10, 10], [], [20, 10, 30, 20]], "x": 25}, "expect": 15, "note": "And between two."},
         {"fn": "length_at", "args": {"paths": [[0, 0, 10, 10, 20]], "x": 15}, "expect": 10, "note": "A number past the last whole point is not read: past (10, 10), the line ends at 10."},
-        {"fn": "length_at", "args": {"paths": [[0, 0, 10, 10, 20]], "x": 5}, "expect": 5, "note": "Before it, as if it were not there."}
+        {"fn": "length_at", "args": {"paths": [[0, 0, 10, 10, 20]], "x": 5}, "expect": 5, "note": "Before it, as if it were not there."},
+        {"fn": "length_at", "args": {"paths": [[0, 0, 10, 10], [10, 10, 20, 20]], "x": 10}, "expect": 10, "note": "At the first point of a path that starts where the one before ends: the later path's."},
+        {"fn": "length_at", "args": {"paths": [[0, 0, 1, 1], [2, 1, 3, 2], [4, 2, 5, 3], [6, 3, 7, 4], [8, 4, 9, 5], [10, 5, 11, 6], [12, 6, 13, 7], [14, 7, 15, 8], [16, 8, 17, 9]], "x": 12.5}, "expect": 6.5, "note": "Nine paths, each a step: halfway along the seventh, which starts at 12."},
+        {"fn": "length_at", "args": {"paths": [[0, 0, 1, 1], [2, 1, 3, 2], [4, 2, 5, 3], [6, 3, 7, 4], [8, 4, 9, 5], [10, 5, 11, 6], [12, 6, 13, 7], [14, 7, 15, 8], [16, 8, 17, 9]], "x": 13.5}, "expect": 7, "note": "Between the seventh and the eighth: the seventh's end."},
+        {"fn": "length_at", "args": {"paths": [[0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 14, 14, 15, 15]], "x": 7.25}, "expect": 7.25, "note": "Sixteen points along one path: between the eighth and the ninth."},
+        {"fn": "length_at", "args": {"paths": [[0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 14, 14, 15, 15]], "x": 0}, "expect": 0, "note": "At its first point."},
+        {"fn": "length_at", "args": {"paths": [[0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 14, 14, 15, 15]], "x": 15}, "expect": 15, "note": "At its last point."},
+        {"fn": "length_at", "args": {"paths": [[0, 0, 10, 10], [15], [20, 10, 30, 20], []], "x": 17}, "expect": 10, "note": "Paths with no whole point among the others are passed over wherever they lie: the first path's end."},
+        {"fn": "length_at", "args": {"paths": [[0, 0, 0, 5, 0, 8, 10, 18]], "x": 0}, "expect": 8, "note": "Three points at one column, an edge's: the last of them."},
+        {"fn": "length_at", "args": {"paths": [[0, 0, 10, 10], [10, 12, 20, 22]], "x": 10}, "expect": 12, "note": "A path starting at x is the one: its length there, 12, not the path before's end, 10."},
+        {"fn": "length_at", "args": {"paths": [[5, 3, 10, 8]], "x": 2}, "expect": 3, "note": "Before the line: the first path's length at its start, 3."}
       ]
     },
     {
