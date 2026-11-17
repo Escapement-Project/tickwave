@@ -511,9 +511,10 @@ fn every_channel_states_a_kept_span_or_none_does_and_one_starts_at_tick_0() {
 #[test]
 fn a_moved_or_trimmed_recording_cut_off_is_not_repaired() {
     use escapement_tickwave_format::repair::{RepairError, repair};
-    let small = Options {
-        block_bytes: 8,
-        ..Options::default()
+    let small = {
+        let mut o = Options::default();
+        o.block_bytes = 8;
+        o
     };
     let shaped = encode(recording(true), &small).unwrap();
     // C known to the length, as repair takes every digital channel to be.

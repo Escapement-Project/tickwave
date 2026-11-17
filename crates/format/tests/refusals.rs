@@ -178,16 +178,17 @@ fn analog(coding_bits: Option<u8>, values: Vec<f32>) -> (Recording, Options) {
             Ratio::integer(1_000_000_000).unwrap(),
         )],
     };
-    let options = Options {
-        analog: vec![
+    let options = {
+        let mut o = Options::default();
+        o.analog = vec![
             None,
             coding_bits.map(|bits| AnalogCoding::Codes {
                 bits,
                 scale: 1.0,
                 offset: 0.0,
             }),
-        ],
-        ..Options::default()
+        ];
+        o
     };
     (rec, options)
 }
@@ -242,13 +243,11 @@ fn a_block_starting_at_the_wrong_level_is_refused() {
     // Small blocks, so channel C's second edge starts a block of its own at the level after one
     // edge.
     let (rec, options) = analog(None, vec![0.0; 11]);
-    let file = encode(
-        rec,
-        &Options {
-            block_bytes: 1,
-            ..options
-        },
-    )
+    let file = encode(rec, &{
+        let mut o = options;
+        o.block_bytes = 1;
+        o
+    })
     .unwrap();
     let blocks = Index::of_file(&file).unwrap().blocks[0].len();
     assert!(blocks >= 2);
@@ -521,13 +520,11 @@ fn an_item_at_the_length_or_the_end_is_refused() {
     let shortened = |channels: usize, block_bytes: usize, from: &str, to: &str| {
         let (mut rec, options) = analog(None, vec![0.0; 11]);
         rec.channels.truncate(channels);
-        let file = encode(
-            rec,
-            &Options {
-                block_bytes,
-                ..options
-            },
-        )
+        let file = encode(rec, &{
+            let mut o = options;
+            o.block_bytes = block_bytes;
+            o
+        })
         .unwrap();
         Footer::parse_file(&file).unwrap();
         let mut bad = patched(&file, r#""end":1000000001"#, r#""end":1000000000"#);

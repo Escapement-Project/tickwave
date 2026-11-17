@@ -301,9 +301,10 @@ fn same_data(k: u64, merged: bool) -> Recording {
 /// and merged, within a few % of x1's size. Blocks of 64 KiB, so each holds a first edge.
 #[test]
 fn the_same_data_at_a_finer_timebase_comes_out_about_as_large() {
-    let options = Options {
-        block_bytes: 64 << 10,
-        ..Options::default()
+    let options = {
+        let mut o = Options::default();
+        o.block_bytes = 64 << 10;
+        o
     };
     for merged in [false, true] {
         let size = |k| encode(same_data(k, merged), &options).unwrap().len();

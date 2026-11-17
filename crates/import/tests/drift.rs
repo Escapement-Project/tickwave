@@ -62,9 +62,10 @@ fn marker(
             derived: Vec::new(),
             sources: vec![Source::new(SourceFormat::Other(name.into()), tb)],
         },
-        &Options {
-            level: 3,
-            ..Options::default()
+        &{
+            let mut o = Options::default();
+            o.level = 3;
+            o
         },
     )
     .unwrap()

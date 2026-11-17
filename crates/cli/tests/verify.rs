@@ -58,11 +58,12 @@ fn recording() -> Vec<u8> {
             derived: Vec::new(),
             sources: vec![Source::new(SourceFormat::Other("probe".into()), timebase)],
         },
-        &Options {
-            level: 3,
-            block_bytes: 4 << 10,
-            overview_shift: Some(2),
-            ..Options::default()
+        &{
+            let mut o = Options::default();
+            o.level = 3;
+            o.block_bytes = 4 << 10;
+            o.overview_shift = Some(2);
+            o
         },
     )
     .unwrap()

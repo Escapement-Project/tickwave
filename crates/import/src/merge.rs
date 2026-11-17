@@ -1746,24 +1746,25 @@ pub fn merge<F: Write + Seek>(
         .iter()
         .map(|c| inputs[c.input].codings.get(c.channel).copied().flatten())
         .collect();
-    let options = Options {
-        level: settings.level,
-        block_bytes: settings.block_kib as usize * 1024,
-        title: settings.title.clone(),
-        meta: settings.meta.clone(),
-        converter: Some(format!(
+    let options = {
+        let mut o = Options::default();
+        o.level = settings.level;
+        o.block_bytes = settings.block_kib as usize * 1024;
+        o.title = settings.title.clone();
+        o.meta = settings.meta.clone();
+        o.converter = Some(format!(
             "tickwave {} merge (zstd {}, blocks of {} KiB)",
             env!("CARGO_PKG_VERSION"),
             settings.level,
             settings.block_kib
-        )),
-        analog,
-        bundle: (!annotations.is_empty()).then(|| Bundle::Generated {
+        ));
+        o.analog = analog;
+        o.bundle = (!annotations.is_empty()).then(|| Bundle::Generated {
             stem: settings.stem.clone(),
-        }),
-        annotations,
-        roles,
-        ..Options::default()
+        });
+        o.annotations = annotations;
+        o.roles = roles;
+        o
     };
     let recording = apply(&layout, inputs.into_iter().map(|i| i.recording).collect());
     let io = |e| Error::Encode(EncodeError::Io(e));

@@ -169,21 +169,19 @@ fn three_sources() -> Vec<u8> {
             source("c", 250),
         ],
     };
-    encode(
-        model,
-        &Options {
-            level: 3,
-            block_bytes: 1 << 10,
-            analog: vec![
-                None,
-                None,
-                None,
-                Some(AnalogCoding::Int(IntCoding::new(16, false))),
-            ],
-            overview_shift: Some(6),
-            ..Options::default()
-        },
-    )
+    encode(model, &{
+        let mut o = Options::default();
+        o.level = 3;
+        o.block_bytes = 1 << 10;
+        o.analog = vec![
+            None,
+            None,
+            None,
+            Some(AnalogCoding::Int(IntCoding::new(16, false))),
+        ];
+        o.overview_shift = Some(6);
+        o
+    })
     .unwrap()
 }
 

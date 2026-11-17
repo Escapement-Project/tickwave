@@ -182,8 +182,9 @@ pub fn declared<'a>(
     files: impl IntoIterator<Item = (&'a str, &'a [Value])>,
 ) -> (Vec<Role>, Vec<String>) {
     let mut firsts: Vec<Role> = Vec::new();
-    // Each name's place in `firsts`, and the file that declared it there.
-    let mut places: BTreeMap<String, (usize, &'a str)> = BTreeMap::new();
+    // Each name's place in `firsts`, and the file that declared it there, keyed by the tables'
+    // own text.
+    let mut places: BTreeMap<&'a str, (usize, &'a str)> = BTreeMap::new();
     let mut problems = Vec::new();
     let mut full = false;
     for (file, tables) in files {
@@ -193,7 +194,7 @@ pub fn declared<'a>(
                 tables.len()
             ));
         }
-        let mut here: BTreeSet<String> = BTreeSet::new();
+        let mut here: BTreeSet<&'a str> = BTreeSet::new();
         for (place, v) in tables.iter().take(ROLES_AT_MOST).enumerate() {
             let role = match role(v, file, place + 1) {
                 Ok(r) => r,
@@ -202,11 +203,13 @@ pub fn declared<'a>(
                     continue;
                 }
             };
-            if !here.insert(role.name.clone()) {
+            // `role` read it from the table.
+            let name = v["name"].as_str().unwrap_or_default();
+            if !here.insert(name) {
                 problems.push(format!("{file}: role {:?} is declared twice", role.name));
                 continue;
             }
-            match places.get(&role.name) {
+            match places.get(name) {
                 Some(&(at, first)) if firsts[at] != role => problems.push(format!(
                     "role {:?}: {first} and {file} declare it differently ({})",
                     role.name,
@@ -222,7 +225,7 @@ pub fn declared<'a>(
                     }
                 }
                 None => {
-                    places.insert(role.name.clone(), (firsts.len(), file));
+                    places.insert(name, (firsts.len(), file));
                     firsts.push(role);
                 }
             }

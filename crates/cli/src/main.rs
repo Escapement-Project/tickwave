@@ -2338,10 +2338,11 @@ mod tests {
                     tb,
                 )],
             },
-            &escapement_tickwave_format::encode::Options {
-                level: 3,
-                block_bytes: 1 << 10,
-                ..Default::default()
+            &{
+                let mut o = escapement_tickwave_format::encode::Options::default();
+                o.level = 3;
+                o.block_bytes = 1 << 10;
+                o
             },
         )
         .unwrap()
@@ -3209,10 +3210,11 @@ mod tests {
                     tb,
                 )],
             },
-            &escapement_tickwave_format::encode::Options {
-                level: 1,
-                block_bytes: 4 << 10,
-                ..Default::default()
+            &{
+                let mut o = escapement_tickwave_format::encode::Options::default();
+                o.level = 1;
+                o.block_bytes = 4 << 10;
+                o
             },
         )
         .unwrap();

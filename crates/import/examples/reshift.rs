@@ -15,17 +15,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("usage: reshift IN OUT SHIFT".into());
     };
     let (header, bundled, recording) = read_bundled(Arc::new(std::fs::read(input)?))?;
-    let out = encode(
-        recording,
-        &Options {
-            title: header.title.clone(),
-            meta: header.meta.clone(),
-            analog: header.channels.iter().map(|c| c.coding()).collect(),
-            overview_shift: Some(shift.parse()?),
-            bundle: bundled.map(Bundle::Files),
-            ..Options::default()
-        },
-    )?;
+    let out = encode(recording, &{
+        let mut o = Options::default();
+        o.title = header.title.clone();
+        o.meta = header.meta.clone();
+        o.analog = header.channels.iter().map(|c| c.coding()).collect();
+        o.overview_shift = Some(shift.parse()?);
+        o.bundle = bundled.map(Bundle::Files);
+        o
+    })?;
     std::fs::write(output, out)?;
     Ok(())
 }

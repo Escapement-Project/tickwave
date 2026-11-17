@@ -305,19 +305,20 @@ pub fn convert<F: Write + Seek>(
     } else {
         (Vec::new(), Vec::new())
     };
-    let options = Options {
-        level: settings.level,
-        block_bytes: settings.block_kib as usize * 1024,
-        title: settings.title.clone(),
-        meta: settings.meta.clone(),
-        converter: Some(format!(
+    let options = {
+        let mut o = Options::default();
+        o.level = settings.level;
+        o.block_bytes = settings.block_kib as usize * 1024;
+        o.title = settings.title.clone();
+        o.meta = settings.meta.clone();
+        o.converter = Some(format!(
             "tickwave {} (zstd {}, blocks of {} KiB)",
             env!("CARGO_PKG_VERSION"),
             settings.level,
             settings.block_kib
-        )),
-        analog,
-        ..Options::default()
+        ));
+        o.analog = analog;
+        o
     };
     out.seek(SeekFrom::Start(0)).map_err(EncodeError::Io)?;
     let finished = encode_to(

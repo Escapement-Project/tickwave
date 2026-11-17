@@ -75,10 +75,9 @@ fn recording(edges: Vec<i64>) -> Recording {
 }
 
 fn options() -> Options {
-    Options {
-        overview_shift: Some(12),
-        ..Options::default()
-    }
+    let mut o = Options::default();
+    o.overview_shift = Some(12);
+    o
 }
 
 fn file() -> Vec<u8> {

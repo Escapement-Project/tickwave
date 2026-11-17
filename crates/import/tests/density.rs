@@ -86,13 +86,11 @@ fn digital_only(r: &Recording) -> bool {
 }
 
 fn encoded(recording: Recording) -> Vec<u8> {
-    encode(
-        recording,
-        &Options {
-            level: 3,
-            ..Options::default()
-        },
-    )
+    encode(recording, &{
+        let mut o = Options::default();
+        o.level = 3;
+        o
+    })
     .unwrap()
 }
 

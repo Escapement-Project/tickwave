@@ -110,13 +110,11 @@ fn probe() -> Recording {
 }
 
 fn file(recording: Recording) -> Vec<u8> {
-    encode(
-        recording,
-        &Options {
-            level: 3,
-            ..Options::default()
-        },
-    )
+    encode(recording, &{
+        let mut o = Options::default();
+        o.level = 3;
+        o
+    })
     .unwrap()
 }
 
@@ -1124,13 +1122,11 @@ fn bundle_of(
     text_lines: &[&str],
     hand: Option<&str>,
 ) -> Vec<u8> {
-    let bytes = encode(
-        recording,
-        &Options {
-            level: 3,
-            ..Options::default()
-        },
-    )
+    let bytes = encode(recording, &{
+        let mut o = Options::default();
+        o.level = 3;
+        o
+    })
     .unwrap();
     let footer = Footer::parse_file(&bytes).unwrap();
     let files = sidecar_of(footer.header.content_id, lines, text_lines, hand);
@@ -1651,14 +1647,12 @@ fn a_merged_file_with_an_edge_moved_does_not_verify() {
         let edges = std::mem::replace(&mut d.edges, Box::new(std::iter::empty()));
         d.edges = Box::new(edges.map(|t| if t == 200 { 201 } else { t }));
     }
-    let tampered = encode(
-        recording,
-        &Options {
-            level: 3,
-            analog: header.channels.iter().map(|c| c.coding()).collect(),
-            ..Options::default()
-        },
-    )
+    let tampered = encode(recording, &{
+        let mut o = Options::default();
+        o.level = 3;
+        o.analog = header.channels.iter().map(|c| c.coding()).collect();
+        o
+    })
     .unwrap();
     let against = inputs
         .iter()
@@ -2047,15 +2041,13 @@ fn expected_refuses_a_header_its_inputs_do_not_give() {
 #[test]
 fn each_inputs_title_and_meta_go_with_its_sources_and_a_merged_inputs_keep_their_own() {
     let titled = |recording: Recording, title: &str, meta: &[(&str, &str)]| {
-        encode(
-            recording,
-            &Options {
-                level: 3,
-                title: Some(title.into()),
-                meta: meta.iter().map(|&(k, v)| (k.into(), v.into())).collect(),
-                ..Options::default()
-            },
-        )
+        encode(recording, &{
+            let mut o = Options::default();
+            o.level = 3;
+            o.title = Some(title.into());
+            o.meta = meta.iter().map(|&(k, v)| (k.into(), v.into())).collect();
+            o
+        })
         .unwrap()
     };
     let a = titled(analyser(), "wire", &[("leads", "long"), ("probe", "verge")]);
@@ -2581,13 +2573,11 @@ fn a_channel_read_without_its_check_ends_at_a_damaged_block() {
 
 /// `bundle_of`, its generator's first line declaring `roles` (JSON).
 fn bundle_with_roles(recording: Recording, roles: &str) -> Vec<u8> {
-    let bytes = encode(
-        recording,
-        &Options {
-            level: 3,
-            ..Options::default()
-        },
-    )
+    let bytes = encode(recording, &{
+        let mut o = Options::default();
+        o.level = 3;
+        o
+    })
     .unwrap();
     let footer = Footer::parse_file(&bytes).unwrap();
     let line = serde_json::json!({"id": "edge/100", "start": 100, "end": 200, "paint": "probe"});

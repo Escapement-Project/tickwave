@@ -36,6 +36,7 @@ pub enum EncodeError {
     Io(#[from] std::io::Error),
 }
 
+#[non_exhaustive]
 pub struct Options {
     /// The zstd level for blocks and the strips.
     pub level: i32,

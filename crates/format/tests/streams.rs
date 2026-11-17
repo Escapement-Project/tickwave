@@ -1237,10 +1237,11 @@ fn a_converted_file_cut_in_its_finish_repairs_to_the_file_it_was() {
         derived: Vec::new(),
         sources: vec![Source::new(SourceFormat::Other("t".into()), Ratio::ONE)],
     };
-    let options = Options {
-        level: 3,
-        overview_shift: Some(4),
-        ..Options::default()
+    let options = {
+        let mut o = Options::default();
+        o.level = 3;
+        o.overview_shift = Some(4);
+        o
     };
     let file = encode(recording, &options).unwrap();
     let footer = Footer::parse_file(&file).unwrap();
@@ -1406,14 +1407,12 @@ fn verify_takes_the_overview_blocks_of_a_span_in_any_order() {
         live.extend(w.take_output());
     }
     live.extend(w.finish(length, &[length], Finish::default()).unwrap().tail);
-    let encoded = encode(
-        model(),
-        &Options {
-            level: 3,
-            overview_shift: Some(8),
-            ..Options::default()
-        },
-    )
+    let encoded = encode(model(), &{
+        let mut o = Options::default();
+        o.level = 3;
+        o.overview_shift = Some(8);
+        o
+    })
     .unwrap();
     let order = |file: &[u8]| -> Vec<(u32, u8, u64)> {
         records(file)

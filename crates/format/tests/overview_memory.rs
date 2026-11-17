@@ -216,10 +216,11 @@ fn sparse() -> Recording {
 fn a_settle_of_overview_blocks_that_differ_holds_a_few_at_a_time() {
     let _one = one();
     const MOST: usize = 32 << 20;
-    let options = Options {
-        level: 1,
-        overview_shift: Some(0),
-        ..Options::default()
+    let options = {
+        let mut o = Options::default();
+        o.level = 1;
+        o.overview_shift = Some(0);
+        o
     };
     let (file, held) = peak(|| encode(sparse(), &options).unwrap());
     let footer = Footer::parse_file(&file).unwrap();

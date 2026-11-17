@@ -509,11 +509,12 @@ fn runs_place_the_samples_and_come_back_as_breaks() {
             Ratio::integer(96_000_000).unwrap(),
         )],
     };
-    let options = Options {
-        overview_shift: Some(4),
-        block_bytes: 64,
-        level: 3,
-        ..Options::default()
+    let options = {
+        let mut o = Options::default();
+        o.overview_shift = Some(4);
+        o.block_bytes = 64;
+        o.level = 3;
+        o
     };
     let encoded = encode(model(), &options).unwrap();
     let header = verify(&encoded[..], model()).unwrap();

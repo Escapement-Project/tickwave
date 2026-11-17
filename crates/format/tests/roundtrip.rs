@@ -84,10 +84,9 @@ fn values() -> Vec<f32> {
 }
 
 fn small_blocks() -> Options {
-    Options {
-        block_bytes: 64,
-        ..Options::default()
-    }
+    let mut o = Options::default();
+    o.block_bytes = 64;
+    o
 }
 
 #[test]
@@ -172,9 +171,10 @@ fn each_channels_blocks_tile_the_axis_and_hold_only_its_items() {
 
 #[test]
 fn the_overview_matches_the_edges() {
-    let options = Options {
-        overview_shift: Some(13),
-        ..Options::default()
+    let options = {
+        let mut o = Options::default();
+        o.overview_shift = Some(13);
+        o
     };
     let file = encode(recording(EDGES_A.to_vec(), values()), &options).unwrap();
     let head = Footer::parse_file(&file).unwrap();
@@ -217,9 +217,10 @@ fn codes_round_trip_exactly() {
     };
     // Every value is -3 + 0.5 k: codes reproduce them.
     let exact: Vec<f32> = (0..1000).map(|i| (i % 4000) as f32 * 0.5 - 3.0).collect();
-    let options = Options {
-        analog: vec![None, None, Some(coding)],
-        ..small_blocks()
+    let options = {
+        let mut o = small_blocks();
+        o.analog = vec![None, None, Some(coding)];
+        o
     };
     let file = encode(recording(EDGES_A.to_vec(), exact.clone()), &options).unwrap();
     verify(&file[..], recording(EDGES_A.to_vec(), exact)).unwrap();
@@ -234,9 +235,10 @@ fn refuses_a_value_codes_cannot_hold() {
     };
     let mut v: Vec<f32> = (0..1000).map(|i| i as f32 * 0.5 - 3.0).collect();
     v[500] += 0.25;
-    let options = Options {
-        analog: vec![None, None, Some(coding)],
-        ..Options::default()
+    let options = {
+        let mut o = Options::default();
+        o.analog = vec![None, None, Some(coding)];
+        o
     };
     let err = encode(recording(EDGES_A.to_vec(), v), &options).unwrap_err();
     assert!(
@@ -270,9 +272,10 @@ const EDGES_SHARED: [i64; 17] = [
 
 #[test]
 fn round_trips_edges_that_share_a_tick() {
-    let options = Options {
-        block_bytes: 4,
-        ..Options::default()
+    let options = {
+        let mut o = Options::default();
+        o.block_bytes = 4;
+        o
     };
     let file = encode(recording(EDGES_SHARED.to_vec(), values()), &options).unwrap();
     verify(&file[..], recording(EDGES_SHARED.to_vec(), values())).unwrap();
@@ -488,9 +491,10 @@ fn codes_are_stored_in_byte_planes() {
             Ratio::integer(1_000_000_000).unwrap(),
         )],
     };
-    let options = Options {
-        analog: vec![Some(coding)],
-        ..Options::default()
+    let options = {
+        let mut o = Options::default();
+        o.analog = vec![Some(coding)];
+        o
     };
     let file = encode(rec, &options).unwrap();
     let index = Index::of_file(&file).unwrap();

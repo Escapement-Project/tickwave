@@ -853,11 +853,8 @@ fn find<'a>(
     );
     let heads: Vec<Vec<serde_json::Value>> =
         included.iter().map(|i| generator_roles(i.text)).collect();
-    let declared: BTreeSet<String> =
-        roles::names(std::iter::once(&file.role[..]).chain(heads.iter().map(Vec::as_slice)))
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
+    let declared: BTreeSet<&str> =
+        roles::names(std::iter::once(&file.role[..]).chain(heads.iter().map(Vec::as_slice)));
     // Each undeclared name once, where it is first used: a generator that leaves one out paints
     // with it on line after line.
     let mut undeclared: BTreeSet<String> = BTreeSet::new();
@@ -956,7 +953,7 @@ fn find<'a>(
         // problem is the sidecar's, not the annotation's.
         if let Some(paint) = &entry.paint
             && roles::check_name(paint).is_none()
-            && !declared.contains(paint)
+            && !declared.contains(paint.as_str())
             && undeclared.insert(paint.clone())
         {
             problems.push((
