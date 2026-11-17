@@ -18,7 +18,7 @@ use crate::model::{Break, Gap};
 use crate::overview::{self, BLOCK_BUCKETS, Column, HeldLevel, Level, Run, Settled};
 use crate::parts::{Part, PartRow};
 use crate::record::BlockHead;
-use crate::samples::Product;
+use crate::samples::{Product, Values};
 use crate::shared::Chunks;
 
 pub(crate) fn corrupt(what: impl Into<String>) -> DecodeError {
@@ -514,16 +514,41 @@ impl Snapshot {
     }
 
     /// `unwritten_block`'s `j`th, given `held`, channel `c`'s block as an earlier snapshot of the
-    /// same writer decoded it: where that is an analog channel's block from the same start and
-    /// first item, grown since, as the open block grows, only the items it gained are decoded.
+    /// same writer decoded it: where that is the block grown, as the open block grows, only the
+    /// items it gained are decoded (`gained`).
     pub fn grown_block(&self, c: usize, j: usize, held: &Block) -> Result<Block, DecodeError> {
-        let u = self
-            .channels
-            .get(c)
-            .ok_or_else(|| corrupt(format!("no channel {c}")))?
-            .unwritten
-            .get(j)
-            .ok_or_else(|| corrupt(format!("channel {c} has no block {j} not yet written")))?;
+        let Some(gained) = self.gained(c, j, held)? else {
+            return self.unwritten_block(c, j);
+        };
+        let BlockChannel::Analog {
+            first_index,
+            values,
+        } = &held.data
+        else {
+            return self.unwritten_block(c, j);
+        };
+        let mut values = values.clone();
+        if !values.append(gained) {
+            return self.unwritten_block(c, j);
+        }
+        Ok(Block {
+            channel: c,
+            start: held.start,
+            end: self.unwritten(c, j)?.head.end,
+            data: BlockChannel::Analog {
+                first_index: *first_index,
+                values,
+            },
+        })
+    }
+
+    /// The items channel `c`'s `j`th block not yet written holds past `held`, where `held` is
+    /// that block as an earlier snapshot of the same writer decoded it, before it grew: an
+    /// analog channel's block from the same start and first item, with at least one item. None
+    /// for any other, which `unwritten_block` decodes whole; an empty one gains every item,
+    /// which a whole decode reads at less cost.
+    pub fn gained(&self, c: usize, j: usize, held: &Block) -> Result<Option<Values>, DecodeError> {
+        let u = self.unwritten(c, j)?;
         let count = u.head.word as usize;
         let (
             Section::Analog { coding, .. },
@@ -533,36 +558,31 @@ impl Snapshot {
             },
         ) = (self.section(c, u.first_index), &held.data)
         else {
-            return self.unwritten_block(c, j);
+            return Ok(None);
         };
-        // An empty one gains every item, which a whole decode reads at less cost.
         if held.channel != c
             || held.start != u.head.start
             || *first_index != u.first_index
             || values.is_empty()
             || values.len() > count
         {
-            return self.unwritten_block(c, j);
+            return Ok(None);
         }
-        let gained = crate::samples::decode_from(&u.raw, count, coding, values.len()).map_err(
-            |e| match e.starts_with(CANT_HOLD) {
+        crate::samples::decode_from(&u.raw, count, coding, values.len())
+            .map(Some)
+            .map_err(|e| match e.starts_with(CANT_HOLD) {
                 true => DecodeError::Resource(e),
                 false => corrupt(format!("channel {c}, a block not yet written: {e}")),
-            },
-        )?;
-        let mut values = values.clone();
-        if !values.append(gained) {
-            return self.unwritten_block(c, j);
-        }
-        Ok(Block {
-            channel: c,
-            start: u.head.start,
-            end: u.head.end,
-            data: BlockChannel::Analog {
-                first_index: u.first_index,
-                values,
-            },
-        })
+            })
+    }
+
+    fn unwritten(&self, c: usize, j: usize) -> Result<&Unwritten, DecodeError> {
+        self.channels
+            .get(c)
+            .ok_or_else(|| corrupt(format!("no channel {c}")))?
+            .unwritten
+            .get(j)
+            .ok_or_else(|| corrupt(format!("channel {c} has no block {j} not yet written")))
     }
 
     /// Overview channel `o`'s level `li`'s rows in the file, their pages read through `fetch`

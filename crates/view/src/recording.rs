@@ -428,6 +428,43 @@ impl Changed {
     }
 }
 
+/// A channel's open block as `advance` takes it: decoded whole, or the one the snapshot before
+/// held and the samples it gained since, joined once nothing can fail.
+#[cfg(feature = "live")]
+enum Open {
+    Whole(Block),
+    Grown {
+        held: Arc<Block>,
+        gained: samples::Values,
+    },
+}
+
+#[cfg(feature = "live")]
+impl Open {
+    fn start(&self) -> i64 {
+        match self {
+            Self::Whole(b) => b.start,
+            Self::Grown { held, .. } => held.start,
+        }
+    }
+
+    /// Its items before it grew, where it grew.
+    fn data(&self) -> &BlockChannel {
+        match self {
+            Self::Whole(b) => &b.data,
+            Self::Grown { held, .. } => &held.data,
+        }
+    }
+
+    /// How many samples it gained.
+    fn gained(&self) -> usize {
+        match self {
+            Self::Whole(_) => 0,
+            Self::Grown { gained, .. } => gained.len(),
+        }
+    }
+}
+
 /// How much of the writer's append-only lists the tables hold: each channel's gaps or runs, and
 /// the annotation parts in the file.
 #[cfg(feature = "live")]
@@ -1264,11 +1301,19 @@ impl Recording {
                 });
             }
             fresh.push(blocks);
-            // The open block of the snapshot before, where this one is it grown, has only what
-            // it gained decoded.
-            opens.push(match unwritten.get(c).and_then(|u| u.last()) {
-                Some(held) => snapshot.grown_block(c, closed, held)?,
-                None => snapshot.unwritten_block(c, closed)?,
+            // The open block of the snapshot before, where this one is it grown: only what it
+            // gained is decoded, and joined to it once nothing can fail.
+            let held = unwritten.get(c).and_then(|u| u.last());
+            let gained = match held {
+                Some(h) => snapshot.gained(c, closed, h)?,
+                None => None,
+            };
+            opens.push(match (held, gained) {
+                (Some(h), Some(gained)) => Open::Grown {
+                    held: Arc::clone(h),
+                    gained,
+                },
+                _ => Open::Whole(snapshot.unwritten_block(c, closed)?),
             });
         }
         let mut fresh_rows = Vec::with_capacity(places.len());
@@ -1332,8 +1377,8 @@ impl Recording {
         let mut new_length = 0i64;
         for (c, place) in places[..stored].iter_mut().enumerate() {
             let open = &opens[c];
-            let mut last = open.start - 1;
-            match (place, &open.data) {
+            let mut last = open.start() - 1;
+            match (place, open.data()) {
                 (
                     Place::Digital {
                         start,
@@ -1388,15 +1433,16 @@ impl Recording {
                         }
                         seen.runs[c] += 1;
                     }
-                    *count = first_index + values.len() as u64;
-                    if !values.is_empty() {
+                    let n = values.len() + open.gained();
+                    *count = first_index + n as u64;
+                    if n > 0 {
                         let place = grid.sample_place(*first, breaks, *count - 1);
                         last = last.max(map.axis_place(place, grid.d()).unwrap_or(i64::MAX));
                     }
                 }
                 _ => unreachable!("a block's channel follows the declaration"),
             }
-            new_length = new_length.max(open.start).max(last + 1);
+            new_length = new_length.max(open.start()).max(last + 1);
         }
         // Every item before the promise is in the snapshot, so the recording is known to it
         // past its data, as a file cut after a known-through record there is.
@@ -1477,7 +1523,34 @@ impl Recording {
 
         // Each channel's written blocks, then those not yet written, the open one to the length.
         // A channel's table starts with an entry for each of its refs.
-        for (c, ((keep, after), mut open)) in fresh_refs.into_iter().zip(opens).enumerate() {
+        for (c, ((keep, after), open)) in fresh_refs.into_iter().zip(opens).enumerate() {
+            let mut open = match open {
+                Open::Whole(block) => block,
+                // The tables' own hold on it goes first, so it is grown where it lies.
+                Open::Grown { held, gained } => {
+                    unwritten[c].pop();
+                    let mut block = Arc::try_unwrap(held).unwrap_or_else(|b| match &b.data {
+                        BlockChannel::Analog {
+                            first_index,
+                            values,
+                        } => Block {
+                            channel: b.channel,
+                            start: b.start,
+                            end: b.end,
+                            data: BlockChannel::Analog {
+                                first_index: *first_index,
+                                values: values.clone(),
+                            },
+                        },
+                        BlockChannel::Digital { .. } => unreachable!("only an analog block grows"),
+                    });
+                    if let BlockChannel::Analog { values, .. } = &mut block.data {
+                        let joined = values.append(gained);
+                        debug_assert!(joined, "a channel's blocks store its samples alike");
+                    }
+                    block
+                }
+            };
             let at = |start: i64, end: i64, j: usize| {
                 (end > start).then_some(BlockAt {
                     start,
