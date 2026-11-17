@@ -462,3 +462,29 @@ fn a_zoom_step_while_following_keeps_following_and_eases_the_span_at_the_end() {
     assert!(spans.windows(2).all(|p| p[1] <= p[0]), "{spans:?}");
     assert_eq!(*spans.last().unwrap(), 500 * MS, "{spans:?}");
 }
+
+#[test]
+fn a_selection_drag_while_following_stops_at_the_window_drawn() {
+    let mut live = Live::new(Capture::new(1000, 10_000, noisy));
+    let snapshot = live.write(4000);
+    let mut h = harness(follow(SECOND));
+    h.state_mut().viewer = Some(Viewer::live(&h.ctx, &live.path, snapshot).unwrap());
+    h.state_mut().state.select_mode = true;
+    followed(&mut h, 4 * SECOND);
+    let drawn_then = drawn(&h).window;
+    assert_eq!(drawn_then, 3 * SECOND..4 * SECOND);
+    let p = plot(&h).center();
+    drag(&mut h, p, egui::vec2(-200.0, 0.0), 4);
+    assert_eq!(h.state().state.window, Window::At(drawn_then.clone()));
+    let marked = h.state().state.selection.clone().expect("a selection");
+    assert!(
+        marked.start >= drawn_then.start && marked.end <= drawn_then.end,
+        "{marked:?}"
+    );
+    // More of the recording, and the window stays where the span was marked.
+    let snapshot = live.write(6000);
+    viewer(&h).update(snapshot);
+    answered(&mut h, drawn_then.clone());
+    assert_eq!(drawn(&h).window, drawn_then);
+    assert_eq!(h.state().state.selection, Some(marked));
+}

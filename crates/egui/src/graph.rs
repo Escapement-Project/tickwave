@@ -54,8 +54,9 @@ pub struct Extras {
 ///
 /// Drag or scroll to move along time, ctrl-scroll or pinch to zoom it. A vertical drag or
 /// scroll past a 12-point detent takes Y off the fit and moves it, a drag on the value axis
-/// zooms it, and a double click fits it again. With `select_mode` a drag selects. The response
-/// is `changed()` when the window or the selection moved.
+/// zooms it, and a double click fits it again. With `select_mode` a drag selects, and stops a
+/// followed window where it is drawn; a zoom keeps following. The response is `changed()` when
+/// the window or the selection moved.
 ///
 /// A zoom step sets the host's window to where it goes at once, and the graph eases the window it
 /// draws there over 150 ms, unless `motion` is off. A step during an ease starts again from the
@@ -537,6 +538,10 @@ impl Graph<'_> {
                 let b = tick(p.x);
                 if a != b {
                     self.state.selection = Some(a.min(b)..a.max(b));
+                    // The span marked stays where it was drawn: a followed window stops there.
+                    if let Window::Follow { .. } = self.state.window {
+                        self.moved(view.window.clone());
+                    }
                 }
             }
         }
