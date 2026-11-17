@@ -537,10 +537,11 @@ export class TickwaveInset extends TickwaveElement {
     this.#zoomTo({ start: at - f * span, end: at - f * span + span }, !reducedMotion());
   }
 
-  /** Moves along the span by `ticks` from where it is going, at once. */
-  #panBy(ticks: number): void {
+  /** Moves along the span by `ticks` from where it is going: at once, or with `glide`, as an arrow
+   * key does, eased there as a zoom step is, unless the reader asked for reduced motion. */
+  #panBy(ticks: number, glide = false): void {
     const { start, end } = this.#plot.target;
-    this.#zoomTo({ start: start + ticks, end: end + ticks });
+    this.#zoomTo({ start: start + ticks, end: end + ticks }, glide && !reducedMotion());
   }
 
   /** The tick at `x`, in the plot's coordinates, in the span the inset is going to. */
@@ -867,7 +868,7 @@ export class TickwaveInset extends TickwaveElement {
     if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
       const dir = e.key === "ArrowRight" ? 1 : -1;
       if (e.shiftKey) this.#step(dir);
-      else this.#panBy(dir * (end - start) * 0.125);
+      else this.#panBy(dir * (end - start) * 0.125, true);
     } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
       // About the lit note, which stays where it is, or else the middle.
       const a = this.#lit ? this.#loaded?.annotations.byId.get(this.#lit) : undefined;

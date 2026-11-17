@@ -147,18 +147,237 @@ test("a step during an ease goes on from where the last one was going, and what 
   expect(near(spans[spans.length - 1], span(to))).toBe(true);
 });
 
-test("a pan during an ease moves on from where the ease was going, at once", async ({ page }) => {
+test("an arrow key during a zoom step's ease pans from where the step was going, and the view glides there from the window drawn", async ({ page }) => {
   const view = await ready(page);
+  await learnMiddle(view);
+  const before = await win(view);
   await page.keyboard.press("+");
   const to = await win(view);
-  const recorded = await record(view, 100);
+  const recorded = await record(view, 400);
+  const at = await recordAt(view, 400);
   await page.keyboard.press("ArrowRight");
   const panned = await win(view);
   expect(panned.start).toBeCloseTo(to.start + span(to) * 0.125, 0);
   expect(span(panned)).toBeCloseTo(span(to), 0);
   const spans = (await recorded()).drawn.map(([, s]) => s);
-  // From the first frame after the pan, the view draws where it went.
-  expect(spans.slice(-3).every((s) => near(s, span(panned)))).toBe(true);
+  // The zoom goes on narrowing to the step's span, never back, and lands there.
+  for (let i = 1; i < spans.length; i++) expect(spans[i]).toBeLessThanOrEqual(spans[i - 1] * (1 + 1e-6));
+  expect(near(spans[spans.length - 1], span(panned))).toBe(true);
+  expect(span(before)).toBeGreaterThan(span(panned));
+  // What the middle of the plot shows moves on to the panned window's, by way of frames between.
+  const ticks = (await at()).map(([, t]) => t);
+  expect(near(ticks[ticks.length - 1], middleOf(panned))).toBe(true);
+  expect(ticks.some((t) => !near(t, ticks[0]) && !near(t, middleOf(panned)))).toBe(true);
+});
+
+/** Starts recording, each frame for `ms`, the tick the view draws at the middle of its plot, and
+ * when; resolves to a reader of them. A pan moves it by what it pans. */
+async function recordAt(view: Locator, ms: number): Promise<() => Promise<[number, number][]>> {
+  await view.evaluate((v, ms) => {
+    const plot = v.shadowRoot!.querySelector(".plot")!.getBoundingClientRect();
+    const e = v as unknown as { tickAt(x: number): number; e2eAt: Promise<[number, number][]> };
+    const out: [number, number][] = [];
+    e.e2eAt = new Promise((resolve) => {
+      const t0 = performance.now();
+      const frame = () => {
+        out.push([performance.now(), e.tickAt(plot.left + plot.width * 0.6)]);
+        if (performance.now() - t0 < ms) requestAnimationFrame(frame);
+        else resolve(out);
+      };
+      requestAnimationFrame(frame);
+    });
+  }, ms);
+  return () => view.evaluate((v) => (v as unknown as { e2eAt: Promise<[number, number][]> }).e2eAt);
+}
+
+/** The tick at the middle of the plot box (its names column included) once the view draws `w`. */
+let middleOf: (w: Span) => number = () => NaN;
+
+/** Learns `middleOf` from the view as it stands, settled: the plot box's 0.6 against the window. */
+async function learnMiddle(view: Locator): Promise<void> {
+  const [w, t] = await view.evaluate((v) => {
+    const plot = v.shadowRoot!.querySelector(".plot")!.getBoundingClientRect();
+    const e = v as unknown as { window: Span; tickAt(x: number): number };
+    return [e.window, e.tickAt(plot.left + plot.width * 0.6)] as const;
+  });
+  const f = (t - w.start) / span(w);
+  middleOf = (x: Span) => x.start + f * span(x);
+}
+
+test("an arrow key's pan sets the window at once and announces it once; what the view draws glides there over about 150 ms, quick at first", async ({ page }) => {
+  const view = await ready(page);
+  await page.keyboard.press("+");
+  await page.keyboard.press("+");
+  await view.evaluate((v) => (v as unknown as { settled(): Promise<void> }).settled());
+  await learnMiddle(view);
+  for (const [key, share] of [
+    ["ArrowRight", 0.125],
+    ["ArrowLeft", -0.125],
+    ["Shift+ArrowRight", 0.5],
+  ] as const) {
+    const before = await win(view);
+    const recorded = await record(view, 500);
+    const at = await recordAt(view, 500);
+    await page.keyboard.press(key);
+    const to = await win(view);
+    expect(to.start - before.start).toBeCloseTo(span(before) * share, 0);
+    expect(span(to)).toBeCloseTo(span(before), 0);
+    const { announced } = await recorded();
+    expect(announced.map(([, w]) => w)).toEqual([to]);
+    const frames = await at();
+    const ticks = frames.map(([, t]) => t);
+    // Moving one way frame by frame, never past where it goes, and there in the end.
+    const dir = Math.sign(share);
+    for (let i = 1; i < ticks.length; i++) expect((ticks[i] - ticks[i - 1]) * dir).toBeGreaterThanOrEqual(-1e-6 * span(to));
+    expect(near(ticks[ticks.length - 1], middleOf(to))).toBe(true);
+    const moving = frames.filter(([, t]) => !near(t, middleOf(before)) && !near(t, middleOf(to)));
+    expect(moving.length, key).toBeGreaterThanOrEqual(3);
+    expect(moving[moving.length - 1][0] - moving[0][0]).toBeLessThan(250);
+    expect(quickAtFirst(frames, await keyAt(page), middleOf(before), middleOf(to)), key).toBe(true);
+    await view.evaluate((v) => (v as unknown as { settled(): Promise<void> }).settled());
+  }
+});
+
+test("a held arrow key glides on, never back and never stopping, and lands where the last press goes", async ({ page }) => {
+  const view = await ready(page);
+  // Zoomed in about the middle far enough that ten presses stay inside the capture.
+  for (let i = 0; i < 4; i++) await page.keyboard.press("+");
+  await view.evaluate((v) => (v as unknown as { settled(): Promise<void> }).settled());
+  await learnMiddle(view);
+  const before = await win(view);
+  const at = await recordAt(view, 900);
+  // A held key: a keydown every 33 ms, as a keyboard's repeat sends, ten of them, sent in the page
+  // so their times are the page's.
+  const presses = 10;
+  await view.evaluate(
+    (v, presses) =>
+      new Promise<void>((resolve) => {
+        const plot = v.shadowRoot!.querySelector(".plot")!;
+        let n = 0;
+        const press = () => {
+          (window as unknown as { e2eKey: number }).e2eKey = performance.now();
+          plot.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", repeat: n > 0, bubbles: true, composed: true }));
+          if (++n < presses) setTimeout(press, 33);
+          else resolve();
+        };
+        press();
+      }),
+    presses,
+  );
+  const to = await win(view);
+  expect(to.start - before.start).toBeCloseTo(span(before) * 0.125 * presses, 0);
+  const frames = await at();
+  const ticks = frames.map(([, t]) => t);
+  const step = span(before) * 0.125;
+  // In presses' pans from where it started, frame by frame.
+  const along = ticks.map((t) => (t - ticks[0]) / step);
+  for (let i = 1; i < along.length; i++) expect(along[i], `frame ${i}`).toBeGreaterThanOrEqual(along[i - 1] - 1e-6);
+  expect(near(ticks[ticks.length - 1], middleOf(to))).toBe(true);
+  // Glides: frames between whole presses' pans, not a jump a press.
+  expect(along.filter((x) => Math.abs(x - Math.round(x)) > 0.03).length).toBeGreaterThanOrEqual(3);
+  // While the key is held it keeps moving: over any two frames, a tenth of a press's pan at
+  // least. Two, since a browser under load can draw a frame late.
+  const lastKey = await keyAt(page);
+  const first = along.findIndex((x) => x > 0.03);
+  const held = frames.map((_, i) => i).filter((i) => i >= first + 2 && frames[i][0] <= lastKey);
+  expect(held.length).toBeGreaterThanOrEqual(8);
+  for (const i of held) expect(along[i] - along[i - 2], `frames ${i - 2} to ${i}`).toBeGreaterThan(0.1);
+});
+
+test("a second press before the view has drawn the first glides from the window drawn, not from where the first was going", async ({ page }) => {
+  const view = await ready(page);
+  for (let i = 0; i < 4; i++) await page.keyboard.press("+");
+  await view.evaluate((v) => (v as unknown as { settled(): Promise<void> }).settled());
+  await learnMiddle(view);
+  const before = await win(view);
+  const step = span(before) * 0.125;
+  // Two presses in one task, so the view draws nothing between them; then, in the frame the view
+  // next draws, after its draw, the tick it draws at the middle and how long after the presses.
+  const [drawn, ms] = await view.evaluate(
+    (v) =>
+      new Promise<[number, number]>((resolve) => {
+        const plot = v.shadowRoot!.querySelector(".plot")!;
+        const box = plot.getBoundingClientRect();
+        const press = () => plot.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, composed: true }));
+        const t0 = performance.now();
+        press();
+        press();
+        // Asked for after the view's own frame, which the first press asked for: it runs after
+        // that frame's draw.
+        requestAnimationFrame(() => resolve([(v as unknown as { tickAt(x: number): number }).tickAt(box.left + box.width * 0.6), performance.now() - t0]));
+      }),
+  );
+  expect(ms).toBeLessThan(40);
+  const moved = (drawn - middleOf(before)) / step;
+  // From where it was drawn, two presses' pans away, the first frame's ease, quick at first, has
+  // covered 1 - (1 - t / 150 ms)^3 of them: under a press's pan for any frame within 40 ms. From
+  // where the first press was going, it would be past a whole press's pan already.
+  const k = Math.min(1, ms / 150);
+  expect(moved).toBeLessThanOrEqual(2 * (1 - (1 - k) ** 3) + 0.02);
+  expect(moved).toBeLessThan(1);
+  expect(near((await win(view)).start, before.start + 2 * step)).toBe(true);
+});
+
+test("under reduced motion an arrow key's pan jumps; so do a drag and Shift with the wheel always", async ({ page }) => {
+  const view = await ready(page);
+  await page.keyboard.press("+");
+  await view.evaluate((v) => (v as unknown as { settled(): Promise<void> }).settled());
+  await learnMiddle(view);
+  const jumps = async (act: () => Promise<void>) => {
+    const before = await win(view);
+    const at = await recordAt(view, 300);
+    await act();
+    const to = await win(view);
+    expect(near(middleOf(to), middleOf(before))).toBe(false);
+    const ticks = (await at()).map(([, t]) => t);
+    // Where it was, then where it went: nothing between.
+    expect(ticks.every((t) => near(t, middleOf(before)) || near(t, middleOf(to)))).toBe(true);
+    expect(near(ticks[ticks.length - 1], middleOf(to))).toBe(true);
+    await view.evaluate((v) => (v as unknown as { settled(): Promise<void> }).settled());
+  };
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await jumps(() => page.keyboard.press("ArrowRight"));
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  const b = (await view.locator(".plot").boundingBox())!;
+  await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
+  await jumps(async () => {
+    await page.keyboard.down("Shift");
+    await page.mouse.wheel(0, 120);
+    await page.keyboard.up("Shift");
+  });
+  await jumps(async () => {
+    await page.mouse.move(b.x + b.width * 0.6, b.y + b.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(b.x + b.width * 0.4, b.y + b.height / 2);
+    await page.mouse.up();
+  });
+});
+
+test("a page that sets the window an arrow key's glide is going to leaves it gliding; another window ends it there", async ({ page }) => {
+  const view = await ready(page);
+  await page.keyboard.press("+");
+  await view.evaluate((v) => (v as unknown as { settled(): Promise<void> }).settled());
+  await learnMiddle(view);
+  let before = await win(view);
+  let at = await recordAt(view, 400);
+  await page.keyboard.press("ArrowRight");
+  let to = await win(view);
+  await view.evaluate((v, w) => (v as unknown as { setWindow(a: number, b: number): void }).setWindow(w.start, w.end), to);
+  let ticks = (await at()).map(([, t]) => t);
+  expect(ticks.filter((t) => !near(t, middleOf(before)) && !near(t, middleOf(to))).length).toBeGreaterThanOrEqual(3);
+  expect(near(ticks[ticks.length - 1], middleOf(to))).toBe(true);
+  // Another window, set during a glide: drawn at once.
+  before = to;
+  at = await recordAt(view, 400);
+  await page.keyboard.press("ArrowRight");
+  const other = { start: before.start - span(before) / 4, end: before.end - span(before) / 4 };
+  await view.evaluate((v, w) => (v as unknown as { setWindow(a: number, b: number): void }).setWindow(w.start, w.end), other);
+  to = await win(view);
+  expect(to).toEqual(other);
+  const frames = (await at()).map(([, t]) => t);
+  // At most the frame the key's glide drew before the page's window came, then the page's.
+  expect(frames.filter((t) => !near(t, middleOf(before)) && !near(t, middleOf(other))).length).toBeLessThanOrEqual(1);
+  expect(near(frames[frames.length - 1], middleOf(other))).toBe(true);
 });
 
 test("under reduced motion a zoom step jumps; the setting is read at each step", async ({ page }) => {
@@ -204,14 +423,19 @@ test("a step after three draws longer than a frame at 60 Hz jumps, an ease whose
             }
           : clear;
     }, ms);
-  const step = async (key: string) => {
-    const before = span(await win(view));
+  // The frames drawn between where a key's step or pan starts and where it goes: by the span
+  // drawn, or for a pan by the tick drawn at a place on the plot.
+  const step = async (key: string, by: "span" | "position" = "span") => {
+    if (by === "position") await learnMiddle(view);
+    const w0 = await win(view);
     const recorded = await record(view, 400);
+    const at = await recordAt(view, 400);
     await page.keyboard.press(key);
-    const to = span(await win(view));
-    const spans = (await recorded()).drawn.map(([, s]) => s);
-    expect(near(spans[spans.length - 1], to)).toBe(true);
-    return spans.filter((s) => !near(s, before) && !near(s, to)).length;
+    const w1 = await win(view);
+    const [before, to, drawn] =
+      by === "span" ? [span(w0), span(w1), (await recorded()).drawn.map(([, s]) => s)] : [middleOf(w0), middleOf(w1), (await at()).map(([, t]) => t)];
+    expect(near(drawn[drawn.length - 1], to)).toBe(true);
+    return drawn.filter((s) => !near(s, before) && !near(s, to)).length;
   };
   // The last draws inside a frame: the step eases, its first three frames overrun, the ease ends.
   await slow(20);
@@ -222,6 +446,14 @@ test("a step after three draws longer than a frame at 60 Hz jumps, an ease whose
   await slow(0);
   expect(await step("-")).toBe(0);
   expect(await step("-")).toBeGreaterThanOrEqual(3);
+  // The last three draws over a frame again: an arrow key's pan jumps as a step does.
+  await slow(20);
+  await step("+");
+  await step("-");
+  expect(await step("ArrowRight", "position")).toBe(0);
+  await slow(0);
+  await step("+");
+  expect(await step("ArrowLeft", "position")).toBeGreaterThanOrEqual(3);
   // Draws past a frame at 240 Hz but inside one at 60: a step eases, and so does the next.
   await slow(8);
   expect(await step("+")).toBeGreaterThanOrEqual(3);
@@ -536,4 +768,74 @@ test("an inset laid out again during an ease to its span's edge goes on easing",
   const whole = (await recorded()).map(([, s]) => s);
   expect(whole.filter((s) => !near(s, whole[0]) && !near(s, span(to))).length).toBeGreaterThanOrEqual(3);
   expect(near(whole[whole.length - 1], span(to))).toBe(true);
+});
+
+/** Starts recording, each frame for `ms`, the span an inset shows; resolves to a reader of them,
+ * each with its time. */
+async function recordInsetWindows(inset: Locator, ms: number): Promise<() => Promise<[number, Span][]>> {
+  await inset.evaluate((e, ms) => {
+    const out: [number, Span][] = [];
+    (e as unknown as { e2eWindows: Promise<[number, Span][]> }).e2eWindows = new Promise((resolve) => {
+      const t0 = performance.now();
+      const frame = () => {
+        out.push([performance.now(), { ...(e as unknown as Inset).window! }]);
+        if (performance.now() - t0 < ms) requestAnimationFrame(frame);
+        else resolve(out);
+      };
+      requestAnimationFrame(frame);
+    });
+  }, ms);
+  return () => inset.evaluate((e) => (e as unknown as { e2eWindows: Promise<[number, Span][]> }).e2eWindows);
+}
+
+test("an inset's arrow keys glide along its span from where it is drawn, never out of it, and jump under reduced motion", async ({ page }) => {
+  const inset = await insetReady(page);
+  const whole = await shown(inset);
+  await page.keyboard.press("ArrowUp");
+  await page.keyboard.press("ArrowUp");
+  await page.keyboard.press("ArrowUp");
+  await inset.evaluate((e) => (e as unknown as Inset).settled());
+  // Ticks apart by less than a thousandth of the span shown: an inset's span is short, so its
+  // ticks' own size would make a whole pan look like none.
+  const zoomedSpan = span(await shown(inset));
+  const at = (a: number, b: number) => Math.abs(a - b) <= zoomedSpan * 1e-3;
+  // Right, then left, each an eighth of the span shown, eased there.
+  for (const [key, dir] of [
+    ["ArrowRight", 1],
+    ["ArrowLeft", -1],
+  ] as const) {
+    const before = await shown(inset);
+    const recorded = await recordInsetWindows(inset, 500);
+    await page.keyboard.press(key);
+    const to = (await zoomed(inset))!;
+    expect(to.start - before.start).toBeCloseTo((dir * span(before)) / 8, 0);
+    const frames = await recorded();
+    const starts = frames.map(([, w]) => w.start);
+    for (let i = 1; i < starts.length; i++) expect((starts[i] - starts[i - 1]) * dir).toBeGreaterThanOrEqual(-1e-6 * span(to));
+    expect(at(starts[starts.length - 1], to.start)).toBe(true);
+    expect(starts.filter((s) => !at(s, before.start) && !at(s, to.start)).length, key).toBeGreaterThanOrEqual(3);
+    for (const [, w] of frames) expect(at(span(w), span(to))).toBe(true);
+    await inset.evaluate((e) => (e as unknown as Inset).settled());
+  }
+  // Pressed on past the span's end, it glides to the end and no further: every window drawn on
+  // the way lies inside the span.
+  const recorded = await recordInsetWindows(inset, 900);
+  for (let i = 0; i < 30; i++) await page.keyboard.press("ArrowRight");
+  const frames = await recorded();
+  expect(at((await zoomed(inset))!.end, whole.end)).toBe(true);
+  for (const [, w] of frames) {
+    expect(w.start).toBeGreaterThanOrEqual(whole.start - 1e-6 * span(whole));
+    expect(w.end).toBeLessThanOrEqual(whole.end + 1e-6 * span(whole));
+  }
+  // Under reduced motion, a press jumps there.
+  await inset.evaluate((e) => (e as unknown as Inset).settled());
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const before = await shown(inset);
+  const jumped = await recordInsetWindows(inset, 300);
+  await page.keyboard.press("ArrowLeft");
+  const to = (await zoomed(inset))!;
+  const starts = (await jumped()).map(([, w]) => w.start);
+  expect(at(to.start, before.start)).toBe(false);
+  expect(starts.every((s) => at(s, before.start) || at(s, to.start))).toBe(true);
+  expect(at(starts[starts.length - 1], to.start)).toBe(true);
 });

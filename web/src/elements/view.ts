@@ -1611,7 +1611,12 @@ export class TickwaveView extends TickwaveElement {
     const ticks = (v: number | TimeSpec) => (typeof v === "number" ? v : toTicks(v, info.timebase));
     const s = ticks(start);
     const e = ticks(end);
-    this.#plot.view = { start: Math.min(s, e), end: Math.max(s, e) };
+    const to = { start: Math.min(s, e), end: Math.max(s, e) };
+    // A page that states where an ease is going, as one passing `tickwave-window` back does,
+    // leaves it to go there; any other window ends it.
+    const t = this.#plot.target;
+    if (this.#plot.easing && to.start === t.start && to.end === t.end) return;
+    this.#plot.view = to;
     this.#viewChanged();
   }
 
@@ -1690,10 +1695,15 @@ export class TickwaveView extends TickwaveElement {
     this.#viewChanged();
   }
 
-  /** Pans by `ticks` from where the view is going, at once. */
-  #panBy(ticks: number): void {
+  /**
+   * Pans by `ticks` from where the view is going: at once, or with `glide`, as an arrow key does,
+   * eased there from the window drawn as a zoom step is, by the same rules.
+   */
+  #panBy(ticks: number, glide = false): void {
     const { start, end } = this.#plot.target;
-    this.#plot.view = { start: start + ticks, end: end + ticks };
+    const to = { start: start + ticks, end: end + ticks };
+    if (glide && !reducedMotion()) this.#plot.easeTo(this.#clamped(to), EASE_MS);
+    else this.#plot.view = to;
     this.#viewChanged();
   }
 
@@ -1951,10 +1961,10 @@ export class TickwaveView extends TickwaveElement {
       const span = this.#plot.target.end - this.#plot.target.start;
       switch (e.key) {
         case "ArrowLeft":
-          this.#panBy(-span * (e.shiftKey ? 0.5 : 0.125));
+          this.#panBy(-span * (e.shiftKey ? 0.5 : 0.125), true);
           break;
         case "ArrowRight":
-          this.#panBy(span * (e.shiftKey ? 0.5 : 0.125));
+          this.#panBy(span * (e.shiftKey ? 0.5 : 0.125), true);
           break;
         case "ArrowUp":
         case "+":
