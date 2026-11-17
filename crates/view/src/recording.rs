@@ -1264,7 +1264,12 @@ impl Recording {
                 });
             }
             fresh.push(blocks);
-            opens.push(snapshot.unwritten_block(c, closed)?);
+            // The open block of the snapshot before, where this one is it grown, has only what
+            // it gained decoded.
+            opens.push(match unwritten.get(c).and_then(|u| u.last()) {
+                Some(held) => snapshot.grown_block(c, closed, held)?,
+                None => snapshot.unwritten_block(c, closed)?,
+            });
         }
         let mut fresh_rows = Vec::with_capacity(places.len());
         let mut fresh_overview = Vec::with_capacity(places.len());

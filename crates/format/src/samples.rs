@@ -48,6 +48,18 @@ impl Values {
             _ => None,
         }
     }
+
+    /// `more`'s values after these; false, and these as they were, where it holds another type.
+    pub fn append(&mut self, more: Values) -> bool {
+        match (self, more) {
+            (Self::F32(v), Self::F32(m)) => v.extend(m),
+            (Self::F64(v), Self::F64(m)) => v.extend(m),
+            (Self::U64(v), Self::U64(m)) => v.extend(m),
+            (Self::I64(v), Self::I64(m)) => v.extend(m),
+            _ => return false,
+        }
+        true
+    }
 }
 
 /// A sample's value in f64 under `coding`: the f32 or f64 itself, or an `int` code through
@@ -134,11 +146,16 @@ fn room<T>(n: usize) -> Result<Vec<T>, String> {
 
 /// The codes in `count` codes' byte planes of `width` bytes each, as u64s, each code's bytes in
 /// place and the bytes above them zero.
-fn from_planes(section: &[u8], count: usize, width: usize) -> Result<Vec<u64>, String> {
-    let mut codes = room(count)?;
-    codes.resize(count, 0u64);
+fn from_planes(
+    section: &[u8],
+    count: usize,
+    width: usize,
+    from: usize,
+) -> Result<Vec<u64>, String> {
+    let mut codes = room(count - from)?;
+    codes.resize(count - from, 0u64);
     for (plane, bytes) in section.chunks_exact(count.max(1)).take(width).enumerate() {
-        for (code, &b) in codes.iter_mut().zip(bytes) {
+        for (code, &b) in codes.iter_mut().zip(&bytes[from..]) {
             *code |= u64::from(b) << (8 * plane);
         }
     }
@@ -149,14 +166,27 @@ fn from_planes(section: &[u8], count: usize, width: usize) -> Result<Vec<u64>, S
 /// refused. Where the reader can't allocate the samples, the error starts with
 /// `decode::CANT_HOLD`.
 pub fn decode(section: &[u8], count: usize, coding: AnalogCoding) -> Result<Values, String> {
+    decode_from(section, count, coding, 0)
+}
+
+/// `decode`'s samples from the `from`th on.
+pub fn decode_from(
+    section: &[u8],
+    count: usize,
+    coding: AnalogCoding,
+    from: usize,
+) -> Result<Values, String> {
     if count.checked_mul(coding.sample_len()) != Some(section.len()) {
         return Err("the section does not hold its samples".into());
     }
+    if from > count {
+        return Err(format!("sample {from} of {count}"));
+    }
     Ok(match coding {
         AnalogCoding::F32 => {
-            let mut v = room(count)?;
+            let mut v = room(count - from)?;
             v.extend(
-                section
+                section[4 * from..]
                     .as_chunks::<4>()
                     .0
                     .iter()
@@ -165,9 +195,9 @@ pub fn decode(section: &[u8], count: usize, coding: AnalogCoding) -> Result<Valu
             Values::F32(v)
         }
         AnalogCoding::F64 => {
-            let mut v = room(count)?;
+            let mut v = room(count - from)?;
             v.extend(
-                section
+                section[8 * from..]
                     .as_chunks::<8>()
                     .0
                     .iter()
@@ -180,7 +210,7 @@ pub fn decode(section: &[u8], count: usize, coding: AnalogCoding) -> Result<Valu
             scale,
             offset,
         } => {
-            let codes = from_planes(section, count, coding.sample_len())?;
+            let codes = from_planes(section, count, coding.sample_len(), from)?;
             // One OR over every code, apart from the conversion, so both loops stay vectorised.
             let all = codes.iter().fold(0, |a, &c| a | c);
             if all >> bits != 0 {
@@ -196,7 +226,7 @@ pub fn decode(section: &[u8], count: usize, coding: AnalogCoding) -> Result<Valu
         }
         AnalogCoding::Int(int) => {
             let width = int.planes();
-            let codes = from_planes(section, count, width)?;
+            let codes = from_planes(section, count, width, from)?;
             if int.signed {
                 // Sign-extended from the top stored bit, then held to the coding's bits.
                 let spare = 64 - 8 * width as u32;

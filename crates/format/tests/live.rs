@@ -943,3 +943,105 @@ fn a_snapshots_gaps_breaks_and_annotations_come_from_the_files_pages() {
         );
     }
 }
+
+/// Each analog coding's open block as it grows from snapshot to snapshot, closing now and then
+/// between two runs of samples: `grown_block`, given the block the snapshot before decoded, or
+/// the next channel's, two of them alike, is the block decoded whole.
+#[test]
+fn an_open_block_grown_decodes_as_it_does_whole() {
+    let timebase = Ratio::integer(1000).unwrap();
+    let analog = |name: &str, coding| DeclaredChannel {
+        name: name.into(),
+        source_name: name.to_lowercase(),
+        source: 0,
+        data: DeclaredKind::Analog {
+            unit: "V".into(),
+            period: Ratio::integer(10).unwrap(),
+            coding,
+            significant: None,
+            phase: None,
+        },
+        shaping: Default::default(),
+        overview_shift: None,
+        codec: None,
+        requires: Vec::new(),
+    };
+    let d = Declaration {
+        timebase,
+        channels: vec![
+            analog("A", AnalogCoding::F32),
+            analog("A2", AnalogCoding::F32),
+            analog("B", AnalogCoding::F64),
+            analog("C", AnalogCoding::Int(IntCoding::new(12, false))),
+            analog("D", AnalogCoding::Int(IntCoding::new(20, true))),
+            DeclaredChannel {
+                name: "E".into(),
+                source_name: "e".into(),
+                source: 0,
+                data: DeclaredKind::Digital { initial: false },
+                shaping: Default::default(),
+                overview_shift: None,
+                codec: None,
+                requires: Vec::new(),
+            },
+        ],
+        derived: Vec::new(),
+        sources: vec![SourceHeader::new(SourceFormat::Other("t".into()), timebase)],
+        title: None,
+        meta: BTreeMap::new(),
+        overview_shift: 6,
+        requires: Vec::new(),
+    };
+    let mut w = Writer::new(d, options(512)).unwrap();
+    for c in 0..5 {
+        w.run(c, 0, 0).unwrap();
+    }
+    let mut x = 0x2545_f491_4f6c_dd1du64;
+    let mut next = || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x
+    };
+    let (mut n, mut grew) = (0u64, 0);
+    let mut held: Vec<Option<Block>> = (0..6).map(|_| None).collect();
+    for batch in 0..300 {
+        for half in 0..2 {
+            for _ in 0..next() % 40 {
+                let v = next();
+                w.sample(0, (v % 1000) as f32 / 8.0).unwrap();
+                w.sample(1, (v % 999) as f32 / 4.0).unwrap();
+                w.sample(2, (v % 777) as f64 / 3.0).unwrap();
+                w.sample(3, v % 4096).unwrap();
+                w.sample(4, (v % (1 << 20)) as i64 - (1 << 19)).unwrap();
+                if v % 7 == 0 {
+                    w.edge(5, (10 * n) as i64).unwrap();
+                }
+                n += 1;
+            }
+            if half == 0 && next() % 3 == 0 {
+                w.flush((10 * n) as i64).unwrap();
+            }
+        }
+        let s = w.snapshot();
+        for c in 0..6 {
+            let last = s.channel(c).unwrap().unwritten.len() - 1;
+            let whole = s.unwritten_block(c, last).unwrap();
+            for h in [&held[c], &held[(c + 1) % 6]].into_iter().flatten() {
+                assert_eq!(
+                    s.grown_block(c, last, h).unwrap(),
+                    whole,
+                    "batch {batch}, channel {c}"
+                );
+            }
+            if let (Some(h), BlockChannel::Analog { values, .. }) = (&held[c], &whole.data)
+                && h.start == whole.start
+                && matches!(&h.data, BlockChannel::Analog { values: v, .. } if v.len() < values.len())
+            {
+                grew += 1;
+            }
+            held[c] = Some(whole);
+        }
+    }
+    assert!(grew > 200, "{grew} open blocks grew");
+}

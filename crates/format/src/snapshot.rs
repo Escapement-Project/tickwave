@@ -8,8 +8,8 @@
 use std::sync::Arc;
 
 use crate::decode::{
-    Block, BlockRef, DecodeError, LevelRef, MAX_DECODED, OverviewBlock, Section,
-    decode_overview_frame, decode_section, inflate_limited,
+    Block, BlockChannel, BlockRef, CANT_HOLD, DecodeError, LevelRef, MAX_DECODED, OverviewBlock,
+    Section, decode_overview_frame, decode_section, inflate_limited,
 };
 use crate::header::{BlockRow, Declaration, DeclaredKind, LEVEL_BIT, OverviewRow};
 use crate::index::{PAGE, Page, TableIndex};
@@ -510,6 +510,58 @@ impl Snapshot {
             start: u.head.start,
             end: u.head.end,
             data,
+        })
+    }
+
+    /// `unwritten_block`'s `j`th, given `held`, channel `c`'s block as an earlier snapshot of the
+    /// same writer decoded it: where that is an analog channel's block from the same start and
+    /// first item, grown since, as the open block grows, only the items it gained are decoded.
+    pub fn grown_block(&self, c: usize, j: usize, held: &Block) -> Result<Block, DecodeError> {
+        let u = self
+            .channels
+            .get(c)
+            .ok_or_else(|| corrupt(format!("no channel {c}")))?
+            .unwritten
+            .get(j)
+            .ok_or_else(|| corrupt(format!("channel {c} has no block {j} not yet written")))?;
+        let count = u.head.word as usize;
+        let (
+            Section::Analog { coding, .. },
+            BlockChannel::Analog {
+                first_index,
+                values,
+            },
+        ) = (self.section(c, u.first_index), &held.data)
+        else {
+            return self.unwritten_block(c, j);
+        };
+        // An empty one gains every item, which a whole decode reads at less cost.
+        if held.channel != c
+            || held.start != u.head.start
+            || *first_index != u.first_index
+            || values.is_empty()
+            || values.len() > count
+        {
+            return self.unwritten_block(c, j);
+        }
+        let gained = crate::samples::decode_from(&u.raw, count, coding, values.len()).map_err(
+            |e| match e.starts_with(CANT_HOLD) {
+                true => DecodeError::Resource(e),
+                false => corrupt(format!("channel {c}, a block not yet written: {e}")),
+            },
+        )?;
+        let mut values = values.clone();
+        if !values.append(gained) {
+            return self.unwritten_block(c, j);
+        }
+        Ok(Block {
+            channel: c,
+            start: u.head.start,
+            end: u.head.end,
+            data: BlockChannel::Analog {
+                first_index: u.first_index,
+                values,
+            },
         })
     }
 
