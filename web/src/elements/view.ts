@@ -16,7 +16,8 @@ import { parseTime, toTicks, type TimeSpec } from "../time.ts";
 import { DRAG_PX, TickwaveElement, loadAnnotations, loadHead, readAnnotations, zoomKey, type Loaded } from "./base.ts";
 import { ShapedSource } from "../shaped-source.ts";
 import { isMergePreview } from "../merge-preview.ts";
-import { isRegistered, registeredName } from "../wasm/client.ts";
+import { isRegistered, registeredName, registeredSidecar } from "../wasm/client.ts";
+import { FilesMenu, type SidecarFiles } from "./files-menu.ts";
 import { roleLook, swatch, type Colour } from "../roles.ts";
 import type { Palette } from "../palette.ts";
 import { SUMMARY_CSS } from "./summary-style.ts";
@@ -88,12 +89,21 @@ canvas { display: block; }
   border-radius: 1px; background: var(--ink, CanvasText); opacity: .55; }
 .trim:hover::after, .trim:focus-visible::after, .trim.dragging::after { opacity: 1; }
 .trim:focus-visible { outline: none; }
+/* The Annotations button's list, over the page under the button, so it moves nothing. */
+.files { position: absolute; z-index: 3; top: calc(100% + 4px); right: 0; display: grid; width: max-content;
+  max-width: min(32em, 90vw); padding: 4px; box-sizing: border-box; background: var(--raised, Canvas);
+  border: 1px solid var(--hair, GrayText); border-radius: 6px; font-size: 13px; }
+.files a { padding: 3px 8px; border-radius: 4px; color: var(--ink, CanvasText); text-decoration: none; overflow-wrap: anywhere; }
+.files a:hover { background: var(--wash, color-mix(in srgb, CanvasText 12%, transparent)); }
+.files a:focus-visible { outline-offset: -2px; }
+.files:focus { outline: none; }
+.files .note { margin: 4px 8px; font-size: 12px; color: var(--ink-2, GrayText); }
 `;
 
 const HTML = `
 <div class="summary" part="summary">
   <span class="title" part="title"><slot name="title"></slot></span><span class="facts" part="facts"><slot name="facts"></slot></span>
-  <span class="actions"><a class="download" part="button download-button" hidden>Download</a><a class="download annotations" part="button download-button annotations-download-button" hidden>Annotations</a><button type="button" class="toggle" part="button open-button">Open</button></span>
+  <span class="actions"><a class="download" part="button download-button" hidden>Download</a><button type="button" class="download annotations" part="button download-button annotations-download-button" aria-expanded="false" aria-controls="annotation-files" hidden>Annotations</button><div class="files" id="annotation-files" part="annotations-download-list" role="group" tabindex="-1" hidden></div><button type="button" class="toggle" part="button open-button">Open</button></span>
 </div>
 <div class="viewer box" part="viewer" hidden>
   <div class="toolbar" part="toolbar">
@@ -158,6 +168,7 @@ export class TickwaveView extends TickwaveElement {
   readonly #titleSlot: HTMLSlotElement;
   readonly #factsSlot: HTMLSlotElement;
   readonly #toggle: HTMLButtonElement;
+  readonly #files: FilesMenu;
   readonly #viewer: HTMLElement;
   readonly #plotBox: HTMLElement;
   readonly #readout: HTMLElement;
@@ -252,6 +263,7 @@ export class TickwaveView extends TickwaveElement {
     this.#factsSlot = this.root.querySelector("slot[name=facts]")!;
     for (const slot of [this.#titleSlot, this.#factsSlot]) slot.addEventListener("slotchange", () => this.#renderSummary());
     this.#toggle = this.root.querySelector(".toggle")!;
+    this.#files = new FilesMenu(this.root.querySelector(".download.annotations")!, this.root.querySelector(".files")!);
     this.#viewer = this.root.querySelector(".viewer")!;
     this.#plotBox = this.root.querySelector(".plot")!;
     this.#readout = this.root.querySelector(".readout")!;
@@ -311,6 +323,7 @@ export class TickwaveView extends TickwaveElement {
     this.#resize.disconnect();
     this.#seen.disconnect();
     registryEvents.removeEventListener("tickwave-head", this.#onHead);
+    this.#files.close(false);
   }
 
   get #src(): URL | null {
@@ -680,13 +693,15 @@ export class TickwaveView extends TickwaveElement {
   }
 
   /**
-   * With `download`, links that save the recording and, where the page names one, its sidecar's
-   * hand-written file, as served: a bundled file carries its sidecar already. Nothing is fetched
-   * until one is clicked. A local file registered with the page links its blob; a merge preview,
-   * which has no file, links none.
+   * With `download`, a link that saves the recording and, where the page names a sidecar, a button
+   * that lists its files to save, as served: a bundled file carries its sidecar already. Nothing is
+   * fetched until a link is clicked, and the sidecar's hand-written file, for the files it
+   * includes, not before the list first opens unless the view has read it. A local file registered
+   * with the page links its blob, and lists the sidecar files it came with; a merge preview, which
+   * has no file, links none.
    */
   #renderDownloads(src: URL, title: string): void {
-    const [file, sidecar] = this.root.querySelectorAll<HTMLAnchorElement>(".summary .download");
+    const file = this.root.querySelector<HTMLAnchorElement>(".summary a.download")!;
     const on = this.hasAttribute("download") && (src.protocol === "blob:" ? isRegistered(src) : true) && !isMergePreview(src);
     const name = (u: URL) => decodeURIComponent(u.pathname.split("/").pop() ?? "");
     const show = (a: HTMLAnchorElement, url: URL | null, label: string) => {
@@ -698,7 +713,11 @@ export class TickwaveView extends TickwaveElement {
     };
     show(file, on ? src : null, `Download ${title}`);
     const annotations = this.getAttribute("annotations");
-    show(sidecar, on && annotations !== null ? absolute(annotations) : null, `Download the annotations of ${title}`);
+    const local = src.protocol === "blob:" ? registeredSidecar(src) : [];
+    let files: SidecarFiles | null = null;
+    if (on && annotations !== null) files = { kind: "served", toml: absolute(annotations), recording: src };
+    else if (on && local.filter((f) => f.name.endsWith(".toml")).length === 1) files = { kind: "local", files: local };
+    this.#files.set(files, title);
   }
 
   #setSummary(s: Summary | null): void {

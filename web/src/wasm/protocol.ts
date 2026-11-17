@@ -16,7 +16,10 @@ export type Request =
    * of them where `span` is null. */
   | { id: number; op: "bundled"; key: string; span: readonly [number, number] | null }
   | { id: number; op: "resolve"; key: string; hand: string; names: string[]; texts: string[]; recordingFile: string | null }
-  | { id: number; op: "sidecarText"; key: string; hand: string; base: string | null; recordingFile: string | null };
+  | { id: number; op: "sidecarText"; key: string; hand: string; base: string | null; recordingFile: string | null }
+  /** The names a hand-written file includes, in its order: the file at `url`, else `hand`, which
+   * `where` names in a syntax error. */
+  | { id: number; op: "includes"; url: string | null; hand: string | null; where: string };
 
 export type Reply =
   | { id: number; ok: true; value: unknown }

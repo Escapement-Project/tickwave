@@ -43,7 +43,7 @@ export const SUMMARY_CSS = `
 :host([open]) .summary { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
 .summary .title { ${TITLE} }
 .summary .facts { ${FACTS} }
-.summary .actions { grid-row: 1 / 3; grid-column: 2; display: flex; gap: 6px; align-items: center; }
+.summary .actions { position: relative; grid-row: 1 / 3; grid-column: 2; display: flex; gap: 6px; align-items: center; }
 .summary .toggle { ${BUTTON} }
 /* A download is a link that looks like the Open button: its box and its metrics. */
 .summary .download { ${BUTTON} display: inline-flex; align-items: center; color: var(--ink, CanvasText); text-decoration: none;

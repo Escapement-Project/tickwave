@@ -128,6 +128,12 @@ export function annotationsFor(annotations: URL, recording: URL): Promise<Sideca
   }) as Promise<Sidecar>;
 }
 
+/** The read of the sidecar at `annotations` for the recording at `recording` that `annotationsFor`
+ * has started, settled or not; null where none has, and none is started. */
+export function annotationsStarted(annotations: URL, recording: URL): Promise<Sidecar> | null {
+  return (annotationLists.get(`${annotations.href}\n${recording.href}`) as Promise<Sidecar> | undefined) ?? null;
+}
+
 /** The sidecar whose hand-written file is `text`, resolved against the recording at `recording`.
  * Not cached: an editor hands in a new text with each change. */
 export async function annotationsFromText(text: string, base: URL | null, recording: URL): Promise<Sidecar> {

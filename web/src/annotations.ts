@@ -26,6 +26,8 @@ export const NONE_DECLARED: Declared = { roles: [], view: null };
 /** A sidecar's annotations as a reader resolves them, and what it declares. */
 export interface Sidecar extends Declared {
   readonly annotations: Annotation[];
+  /** The names its hand-written file includes, in its order, where a reader gives them. */
+  readonly files?: readonly string[];
 }
 
 /** What a measure reads from a channel's edges in a span (ANNOTATIONS.md, "Measures"). */

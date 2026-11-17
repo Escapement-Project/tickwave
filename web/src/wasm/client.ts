@@ -164,8 +164,8 @@ export class WasmSource implements Source {
 
   async sidecar(url: URL): Promise<Sidecar> {
     await this.#open();
-    const json = await call<string>({ op: "sidecar", key: this.#key, url: url.href, recordingFile: this.fileName });
-    return sidecarFromCore(json);
+    const { json, names } = await call<{ json: string; names: string[] }>({ op: "sidecar", key: this.#key, url: url.href, recordingFile: this.fileName });
+    return { ...sidecarFromCore(json), files: names };
   }
 
   /** The sidecar whose hand-written file is `text`. Its includes are beside `base`, or among the
@@ -241,6 +241,19 @@ export function isRegistered(url: URL): boolean {
 /** A registered local file's name, which a download of its blob takes; null for any other URL. */
 export function registeredName(url: URL): string | null {
   return files.get(url.href)?.file.name ?? null;
+}
+
+/** The sidecar files a registered local file came with, in the order given; none for any other URL. */
+export function registeredSidecar(url: URL): readonly File[] {
+  return files.get(url.href)?.sidecar ?? [];
+}
+
+/** The names a sidecar's hand-written file includes, in its order: the file served at `url`, or
+ * `text`, which `where` names in a syntax error. Read by the worker, which holds the TOML parser. */
+export function includesOf(from: { url: URL } | { text: string; where: string }): Promise<string[]> {
+  return "url" in from
+    ? call<string[]>({ op: "includes", url: from.url.href, hand: null, where: "" })
+    : call<string[]>({ op: "includes", url: null, hand: from.text, where: from.where });
 }
 
 /** Reads `.tickwave` URLs, in any case, and local files. Not every URL: a page may register a loader

@@ -59,7 +59,7 @@ async function handle(m: Request, signal: AbortSignal): Promise<unknown> {
     case "sidecar": {
       const r = await recording(m.key);
       const { hand, names, texts } = await sidecar(m.url, signal);
-      return r.resolveAnnotations(hand, names, texts, m.recordingFile);
+      return { json: r.resolveAnnotations(hand, names, texts, m.recordingFile), names };
     }
     case "resolve":
       return (await recording(m.key)).resolveAnnotations(handJson(m.hand, "the TOML file").json, m.names, m.texts, m.recordingFile);
@@ -69,6 +69,9 @@ async function handle(m: Request, signal: AbortSignal): Promise<unknown> {
       const texts = m.base ? await Promise.all(include.map((n) => fetchText(new URL(n, m.base!).href, signal))) : [];
       return r.resolveAnnotations(json, m.base ? include : [], texts, m.recordingFile);
     }
+    case "includes":
+      if (m.url) return handJson(await fetchText(m.url, signal), decodeURIComponent(new URL(m.url).pathname)).include;
+      return handJson(m.hand ?? "", m.where).include;
     case "bundled":
       // Read the first time a view asks: a first draw reads nothing past the footer.
       return (await recording(m.key)).annotations(m.span, signal);
