@@ -10,6 +10,11 @@ const loader: Loader = {
   source: (url) => previews.get(url.href)!,
 };
 
+/** Whether `url` is a merge's preview, which no file holds. */
+export function isMergePreview(url: URL): boolean {
+  return url.protocol === "tickwave-merge:";
+}
+
 /**
  * The recordings at `inputs`, each with its file's name without the extension, as one recording a
  * view draws: every channel of each, in order, a later input's clashing name taking its stem.

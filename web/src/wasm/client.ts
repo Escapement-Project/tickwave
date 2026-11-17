@@ -233,6 +233,16 @@ export function registerFile(file: File, sidecar: readonly File[] = []): string 
   return url;
 }
 
+/** Whether `url` is a local file registered with the page. */
+export function isRegistered(url: URL): boolean {
+  return files.has(url.href);
+}
+
+/** A registered local file's name, which a download of its blob takes; null for any other URL. */
+export function registeredName(url: URL): string | null {
+  return files.get(url.href)?.file.name ?? null;
+}
+
 /** Reads `.tickwave` URLs, in any case, and local files. Not every URL: a page may register a loader
  * of its own while it loads, after its elements have asked for recordings. */
 export const tickwaveLoader: Loader = {

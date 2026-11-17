@@ -10,6 +10,7 @@
   ?open   open the view; otherwise it stays collapsed
   ?window=  the view's window attribute
   ?channels=, ?series=  the view's channels and series attributes
+  ?download  the view's download attribute; ?title= a title slotted over the recording's
   ?style=   the view's style attribute
   ?below  put the view and a reference to it below the fold
   ?firstRead=N  the decoder's first read of the head, in bytes
@@ -28,6 +29,8 @@ if (q.get("annotations")) view.setAttribute("annotations", `../../${q.get("annot
 if (q.has("open")) view.setAttribute("open", "");
 if (q.get("window")) view.setAttribute("window", q.get("window"));
 for (const name of ["channels", "series"]) if (q.get(name)) view.setAttribute(name, q.get(name));
+if (q.has("download")) view.setAttribute("download", "");
+if (q.get("title")) view.append(Object.assign(document.createElement("span"), { slot: "title", textContent: q.get("title") }));
 if (q.get("style")) view.setAttribute("style", q.get("style"));
 if (q.has("shaping")) view.setAttribute("shaping", "");
 const ref = document.createElement("tickwave-ref");

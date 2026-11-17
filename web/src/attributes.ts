@@ -4,7 +4,7 @@
 import { parseTime, type Seconds, type TimeSpec } from "./time.ts";
 import { SERIES_TOKEN } from "./tokens.ts";
 
-export const VIEW_ATTRIBUTES = ["src", "annotations", "channels", "window", "open", "series", "shaping"];
+export const VIEW_ATTRIBUTES = ["src", "annotations", "channels", "window", "open", "series", "shaping", "download"];
 export const INSET_ATTRIBUTES = ["src", "annotations", "annotation", "channels", "pad", "scale", "sweep", "series", "for", "href"];
 export const REF_ATTRIBUTES = ["annotation", "for", "src", "annotations", "series"];
 

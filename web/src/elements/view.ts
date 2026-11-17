@@ -15,6 +15,8 @@ import { channelSampleTick, channelStart, inChannel, isAbort, named, readingStep
 import { parseTime, toTicks, type TimeSpec } from "../time.ts";
 import { DRAG_PX, TickwaveElement, loadAnnotations, loadHead, readAnnotations, zoomKey, type Loaded } from "./base.ts";
 import { ShapedSource } from "../shaped-source.ts";
+import { isMergePreview } from "../merge-preview.ts";
+import { isRegistered, registeredName } from "../wasm/client.ts";
 import { roleLook, swatch, type Colour } from "../roles.ts";
 import type { Palette } from "../palette.ts";
 import { SUMMARY_CSS } from "./summary-style.ts";
@@ -91,7 +93,7 @@ canvas { display: block; }
 const HTML = `
 <div class="summary" part="summary">
   <span class="title" part="title"><slot name="title"></slot></span><span class="facts" part="facts"><slot name="facts"></slot></span>
-  <button type="button" class="toggle" part="button open-button">Open</button>
+  <span class="actions"><a class="download" part="button download-button" hidden>Download</a><a class="download annotations" part="button download-button annotations-download-button" hidden>Annotations</a><button type="button" class="toggle" part="button open-button">Open</button></span>
 </div>
 <div class="viewer box" part="viewer" hidden>
   <div class="toolbar" part="toolbar">
@@ -656,6 +658,7 @@ export class TickwaveView extends TickwaveElement {
     const pageTitle = slotted(this.#titleSlot);
     // A page with several views has several of these buttons: each names its recording.
     this.#toggle.setAttribute("aria-label", `${action} ${pageTitle ?? title}`);
+    this.#renderDownloads(src, pageTitle ?? title);
     if (!info) {
       this.#setSummary(null);
       return;
@@ -674,6 +677,28 @@ export class TickwaveView extends TickwaveElement {
       }
     }
     this.#setSummary({ title, facts: factsText, matches });
+  }
+
+  /**
+   * With `download`, links that save the recording and, where the page names one, its sidecar's
+   * hand-written file, as served: a bundled file carries its sidecar already. Nothing is fetched
+   * until one is clicked. A local file registered with the page links its blob; a merge preview,
+   * which has no file, links none.
+   */
+  #renderDownloads(src: URL, title: string): void {
+    const [file, sidecar] = this.root.querySelectorAll<HTMLAnchorElement>(".summary .download");
+    const on = this.hasAttribute("download") && (src.protocol === "blob:" ? isRegistered(src) : true) && !isMergePreview(src);
+    const name = (u: URL) => decodeURIComponent(u.pathname.split("/").pop() ?? "");
+    const show = (a: HTMLAnchorElement, url: URL | null, label: string) => {
+      a.hidden = url === null;
+      if (url === null) return;
+      if (a.href !== url.href) a.href = url.href;
+      a.download = url.protocol === "blob:" ? (registeredName(url) ?? "") : name(url);
+      a.setAttribute("aria-label", label);
+    };
+    show(file, on ? src : null, `Download ${title}`);
+    const annotations = this.getAttribute("annotations");
+    show(sidecar, on && annotations !== null ? absolute(annotations) : null, `Download the annotations of ${title}`);
   }
 
   #setSummary(s: Summary | null): void {
