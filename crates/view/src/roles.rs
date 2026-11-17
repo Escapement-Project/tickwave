@@ -1,14 +1,10 @@
 //! Paint roles (ANNOTATIONS.md, "Roles"): each role's look, field by field, from the host's own
-//! setting, then the recording's declaration, then the built-in look of its place among the
+//! setting, then the recording's declaration, and for its colour the role's place among the
 //! declared roles; which role draws each stretch of a row; and where a dash's phase starts. Ports
 //! `web/src/roles.ts`, and both are held to `testdata/view/roles.json`, so a native renderer and
 //! the browser draw a role alike.
 
 use escapement_tickwave_format::annotations::Role;
-
-/// The dashes the third declared role on takes where neither the host nor the declaration gives
-/// one, in turn, in line widths.
-pub const DASHES: [&[f64]; 4] = [&[2.0, 2.0], &[1.0, 1.0], &[5.0, 2.0, 1.0, 2.0], &[8.0, 2.0]];
 
 /// What a host's own setting says of a role's look, `C` its colour type: None for each field it
 /// leaves to the recording.
@@ -18,7 +14,7 @@ pub struct Host<C> {
     /// Added to the trace's line weight.
     pub weight: Option<f64>,
     /// (dash, gap) pairs in the role's line widths; `Some(None)` for a solid line over a dash the
-    /// declaration or the place gives.
+    /// declaration gives.
     pub dash: Option<Option<Vec<f64>>>,
 }
 
@@ -57,10 +53,10 @@ pub struct Look<C> {
 }
 
 /// Role `name`'s look among `roles`, the order the sidecar declares them in, each field from the
-/// first that gives it: `host`, the declaration, then the role's place. The first place takes the
-/// trace's colour and the rest ink; the third on are dashed in turn (`DASHES`). A weight is the
-/// declaration's. `night` picks a declared colour's night face. None for a role `roles` doesn't
-/// hold: a paint naming one draws as if it painted nothing.
+/// first that gives it: `host`, then the declaration. A colour neither gives is the place's: the
+/// first role takes the trace's colour and the rest ink. A dash neither gives is solid, and a
+/// weight the declaration's. `night` picks a declared colour's night face. None for a role
+/// `roles` doesn't hold: a paint naming one draws as if it painted nothing.
 pub fn look<C>(roles: &[Role], name: &str, host: Host<C>, night: bool) -> Option<Look<C>> {
     let at = roles.iter().position(|r| r.name == name)?;
     let declared = &roles[at];
@@ -72,10 +68,7 @@ pub fn look<C>(roles: &[Role], name: &str, host: Host<C>, night: bool) -> Option
     };
     let dash = match host.dash {
         Some(dash) => dash,
-        None => declared
-            .dash
-            .clone()
-            .or_else(|| at.checked_sub(2).map(|k| DASHES[k % DASHES.len()].to_vec())),
+        None => declared.dash.clone(),
     };
     Some(Look {
         label: declared.label.clone(),

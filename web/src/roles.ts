@@ -1,7 +1,7 @@
 // Paint roles (ANNOTATIONS.md, "Roles"): what a sidecar declares, each role's look, field by field,
-// from the page's tokens, then the declaration, then the built-in look its place in the order of
-// declarations gives, and which role draws each stretch of a row. The view core's `roles` module
-// ports it; both are held to testdata/view/roles.json.
+// from the page's tokens, then the declaration, and for its colour the role's place in the order of
+// declarations, and which role draws each stretch of a row. The view core's `roles` module ports
+// it; both are held to testdata/view/roles.json.
 
 import type { Palette } from "./palette.ts";
 
@@ -31,16 +31,6 @@ export interface Look {
   /** (dash, gap) pairs in the role's line widths; null for a solid line. */
   readonly dash: readonly number[] | null;
 }
-
-/** The dashes the third role on takes where neither the page nor a file gives one, in turn, in
- * line widths: none of the design system's named patterns ([3, 1.5], [1, 2], [4, 1.5, 1, 1.5],
- * [6, 2]), which mean something of their own on the project's pages. */
-export const DASHES: readonly (readonly number[])[] = [
-  [2, 2],
-  [1, 1],
-  [5, 2, 1, 2],
-  [8, 2],
-];
 
 /** The most a weight adds, in CSS pixels, and the longest dash or gap, in line widths. */
 export const WEIGHT_AT_MOST = 4;
@@ -90,9 +80,9 @@ export function parseWeight(css: string): number | null {
 
 /**
  * Role `name`'s look, each field from the first that gives it: the page (`--tickwave-role-<name>`,
- * `-weight`, `-dash`, read through `p.roleTokens`), the recording's declaration, then the built-in
- * look of its place in `roles`, the order the sidecar declares them in. The first role takes the
- * trace's colour, the rest ink; the third on are dashed in turn (`DASHES`). A weight is the
+ * `-weight`, `-dash`, read through `p.roleTokens`), then the recording's declaration. A colour
+ * neither gives is the place's in `roles`, the order the sidecar declares them in: the first role
+ * takes the trace's colour, the rest ink. A dash neither gives is solid, and a weight the
  * declaration's, 0 where it gives none. Null for a role the sidecar doesn't declare: a paint naming
  * one draws as if it painted nothing.
  */
@@ -102,7 +92,7 @@ export function roleLook(p: Palette, roles: readonly Role[], name: string): Look
   const declared = roles[at];
   const page = p.roleTokens(name);
   const stored = declared.colour ? (p.night ? declared.colour.night : declared.colour.day) : null;
-  const dash = page.dash ?? declared.dash ?? (at >= 2 ? DASHES[(at - 2) % DASHES.length] : null);
+  const dash = page.dash ?? declared.dash;
   return {
     label: declared.label,
     colour: page.colour ?? stored ?? (at === 0 ? p.trace : p.ink),
