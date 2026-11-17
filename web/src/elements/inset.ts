@@ -419,7 +419,10 @@ export class TickwaveInset extends TickwaveElement {
     const text = this.root.querySelector(".text") as HTMLElement;
     text.textContent = a?.text ?? "";
     text.hidden = !a?.text;
-    const { indices, missing } = channelIndices(l.info, parseChannels(this.getAttribute("channels")));
+    // The page's channels, else the stored view's, as a view takes them; its span stays the
+    // annotation's.
+    const stored = l.annotations.declared.view?.channels;
+    const { indices, missing } = channelIndices(l.info, parseChannels(this.getAttribute("channels")) ?? (stored ? [...stored] : null));
     for (const m of missing) this.fail(new Error(`no channel ${m}`));
     const recordingKey = `${l.src.href}\n${indices.join(" ")}`;
     if (recordingKey !== this.#recordingKey) {
