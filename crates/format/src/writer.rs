@@ -300,13 +300,42 @@ fn gcd(mut a: u64, mut b: u64) -> u64 {
 
 /// A digital channel's edges in its open block, in its source's ticks, and the size its section
 /// comes to (FORMAT.md, "Blocks"): `step`, the first edge, then each later interval over `step`.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 struct EdgeRun {
     ticks: Vec<i64>,
     /// The greatest common divisor of the intervals that are not zero; 0 while there is none.
     step: u64,
     /// The intervals' bytes over `step`.
     intervals: usize,
+    /// How many intervals have each bit length, 0 to 64: a smaller step's bytes come from these.
+    lengths: Box<[u32; 65]>,
+}
+
+impl Default for EdgeRun {
+    fn default() -> Self {
+        Self {
+            ticks: Vec::new(),
+            step: 0,
+            intervals: 0,
+            lengths: Box::new([0; 65]),
+        }
+    }
+}
+
+/// The inverse of `a`, odd, modulo 2^64: `a × it` is 1. Each step of Newton's method doubles the
+/// bits it is right in, from the 3 that `a` itself is (an odd number is its own inverse modulo 8).
+fn odd_inverse(a: u64) -> u64 {
+    debug_assert!(a % 2 == 1, "{a} is even");
+    let mut x = a;
+    for _ in 0..5 {
+        x = x.wrapping_mul(2u64.wrapping_sub(a.wrapping_mul(x)));
+    }
+    x
+}
+
+/// Bits in `v`: 0 for 0.
+fn bit_length(v: u64) -> usize {
+    64 - v.leading_zeros() as usize
 }
 
 impl EdgeRun {
@@ -337,6 +366,43 @@ impl EdgeRun {
             || self.ticks.len().saturating_add(2).saturating_mul(10) > limit
     }
 
+    /// The intervals' bytes over `step`, a divisor of each. An interval over `step` takes a byte,
+    /// and one more for each `step × 2^7j` it reaches. The intervals' bit lengths say which reach
+    /// each such bound, except where the bound falls inside a bit length some interval has: that
+    /// length's intervals are read.
+    fn coded(&self, step: u64) -> usize {
+        let mut bytes = self.ticks.len().saturating_sub(1);
+        let (mut read, mut reads) = ([0u64; 9], 0);
+        for j in 1..10 {
+            let Some(reach) = step.checked_mul(1 << (7 * j)) else {
+                break;
+            };
+            let b = bit_length(reach);
+            let longer: usize = self.lengths[b + 1..].iter().map(|&c| c as usize).sum();
+            if reach.is_power_of_two() {
+                bytes += longer + self.lengths[b] as usize;
+            } else if self.lengths[b] == 0 {
+                bytes += longer;
+            } else {
+                bytes += longer;
+                read[reads] = reach;
+                reads += 1;
+            }
+        }
+        if reads > 0 {
+            for w in self.ticks.windows(2) {
+                let interval = (w[1] - w[0]) as u64;
+                for &reach in &read[..reads] {
+                    // `reach` lies inside the length's span, so only that length's intervals
+                    // reach it without being counted above.
+                    bytes +=
+                        usize::from(interval >= reach && bit_length(interval) == bit_length(reach));
+                }
+            }
+        }
+        bytes
+    }
+
     /// The section's size with an edge at `tick`, no earlier than the last, taken in.
     fn size_with(&self, tick: i64) -> usize {
         let Some(&last) = self.ticks.last() else {
@@ -348,12 +414,7 @@ impl EdgeRun {
         let intervals = if step == self.step {
             self.intervals + uleb_len(interval / self.step())
         } else {
-            let step = step.max(1);
-            self.ticks
-                .windows(2)
-                .map(|w| uleb_len((w[1] - w[0]) as u64 / step))
-                .sum::<usize>()
-                + uleb_len(interval / step)
+            self.coded(step.max(1)) + uleb_len(interval / step.max(1))
         };
         uleb_len(step.max(1)) + uleb_len(first as u64) + intervals
     }
@@ -364,16 +425,12 @@ impl EdgeRun {
             let interval = (tick - last) as u64;
             let step = gcd(self.step, interval);
             self.ticks.push(tick);
+            self.lengths[bit_length(interval)] += 1;
             if step != self.step {
-                // A smaller step: every interval is coded again. The step only shrinks, by a
-                // factor of 2 at least each time, so this happens fewer than 64 times a block.
+                // A smaller step codes every interval again, at most 64 times a block: the step
+                // only shrinks, by a factor of 2 at least each time.
                 self.step = step;
-                let step = self.step();
-                self.intervals = self
-                    .ticks
-                    .windows(2)
-                    .map(|w| uleb_len((w[1] - w[0]) as u64 / step))
-                    .sum();
+                self.intervals = self.coded(self.step());
             } else {
                 self.intervals += uleb_len(interval / self.step());
             }
@@ -390,8 +447,12 @@ impl EdgeRun {
         let step = self.step();
         put_uleb(out, step);
         put_uleb(out, first as u64);
+        // Every interval is a multiple of the step, so it divides exactly as a shift by the step's
+        // factors of 2 and a product with the inverse of its odd part, modulo 2^64.
+        let shift = step.trailing_zeros();
+        let inverse = odd_inverse(step >> shift);
         for w in self.ticks.windows(2) {
-            put_uleb(out, (w[1] - w[0]) as u64 / step);
+            put_uleb(out, (((w[1] - w[0]) as u64) >> shift).wrapping_mul(inverse));
         }
     }
 }
@@ -3160,6 +3221,112 @@ mod tests {
         w.sample(0, 3u64).unwrap();
         w.edge(1, 9).unwrap();
         assert_eq!((w.chans[0].start, w.chans[1].start), (2, 8));
+    }
+
+    /// The section's size worked out from the edges alone, as FORMAT.md defines it.
+    fn section_size(ticks: &[i64]) -> usize {
+        let intervals = || ticks.windows(2).map(|w| (w[1] - w[0]) as u64);
+        let step = intervals().fold(0, gcd).max(1);
+        uleb_len(step)
+            + uleb_len(ticks[0] as u64)
+            + intervals().map(|i| uleb_len(i / step)).sum::<usize>()
+    }
+
+    /// Each edge's size, and the size `size_with` gives first, are the section's, through steps
+    /// that shrink by powers of two and not, with intervals over the new step on both sides of
+    /// each byte's reach and sharing its bit length.
+    #[test]
+    fn a_shrinking_steps_size_is_the_sections() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        // Intervals over 60 of 5 and 7, 300 and 420, sit either side of the reach 384 of a step
+        // of 3, both 9 bits long.
+        let mut cases: Vec<Vec<i64>> = vec![vec![0, 300, 720, 1020, 1083]];
+        for _ in 0..400 {
+            let base = [96u64, 960, 60, 1000, 3 << 10, 7 * 128][next(6) as usize];
+            let mut t = next(1 << 20) as i64;
+            let mut ticks = vec![t];
+            for _ in 0..1 + next(300) {
+                // Quotients around 2^7 and 2^14 over the base and over its divisors.
+                let q = [
+                    1 + next(4),
+                    100 + next(60),
+                    16_000 + next(800),
+                    next(1 << 30),
+                ][next(4) as usize];
+                t += (base * q) as i64;
+                ticks.push(t);
+            }
+            // An edge off the grid: the step shrinks to a divisor of the base, or to 1.
+            t += [1, 2, 3, 5, base as i64 / 2, base as i64 / 3][next(6) as usize].max(1);
+            ticks.push(t);
+            for _ in 0..next(20) {
+                t += (base * (1 + next(200))) as i64;
+                ticks.push(t);
+            }
+            cases.push(ticks);
+        }
+        for ticks in cases {
+            let mut run = EdgeRun::default();
+            for (i, &t) in ticks.iter().enumerate() {
+                let ahead = run.size_with(t);
+                let size = run.push(t);
+                let want = section_size(&ticks[..=i]);
+                assert_eq!(size, want, "{:?} at {i}", &ticks[..=i]);
+                assert_eq!(ahead, want, "size_with at {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_odd_numbers_inverse_times_it_is_one() {
+        for a in [
+            1u64,
+            3,
+            5,
+            7,
+            95,
+            99,
+            255,
+            3 * 128 + 1,
+            u64::MAX,
+            u64::MAX - 2,
+            1 << 63 | 1,
+        ] {
+            assert_eq!(a.wrapping_mul(odd_inverse(a)), 1, "{a}");
+        }
+    }
+
+    /// A section's bytes are the step, the first edge and each interval over the step, divided as
+    /// integers, whatever the step: odd, even, a power of two, or 1.
+    #[test]
+    fn a_section_codes_each_interval_over_the_step() {
+        for step in [1u64, 2, 3, 96, 960, 1 << 20, 7 * 128, 3 << 40] {
+            let ticks: Vec<i64> = [5i64, 5, 6, 12, 300, 301, 16_400, 1 << 20]
+                .iter()
+                .scan(1_000i64, |t, &q| {
+                    *t += q * step as i64;
+                    Some(*t)
+                })
+                .collect();
+            let mut want = Vec::new();
+            put_uleb(&mut want, step);
+            put_uleb(&mut want, ticks[0] as u64);
+            for w in ticks.windows(2) {
+                put_uleb(&mut want, (w[1] - w[0]) as u64 / step);
+            }
+            let mut got = Vec::new();
+            let run = EdgeRun::of(&ticks);
+            assert_eq!(run.step(), step, "{ticks:?}");
+            run.encode(&mut got);
+            assert_eq!(got, want, "step {step}");
+            assert_eq!(got.len(), run.size(), "step {step}");
+        }
     }
 
     /// `size_with` gives the size `push` then gives, through a step that shrinks.

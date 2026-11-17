@@ -59,6 +59,21 @@ fn flush_dense_block(mut s: Synth) {
     black_box(s);
 }
 
+/// `dense_edges`, then the edge off the grid that shrinks the step to 1.
+fn shrunk(_: ()) -> Synth {
+    let mut s = dense_edges(());
+    s.writer.edge(DIO0, 100_000 * 96 + 1).unwrap();
+    s
+}
+
+// The flush that closes the block, its intervals now coded over a step of 1.
+#[library_benchmark]
+#[bench::hundred_thousand_edges(args = ((),), setup = shrunk)]
+fn flush_shrunk_block(mut s: Synth) {
+    s.writer.flush(100_000 * 96 + 2).unwrap();
+    black_box(s);
+}
+
 /// A second written, then V and I's runs a day on, one pair there.
 fn day_idle(_: ()) -> Synth {
     let mut s = verge(16);
@@ -145,6 +160,7 @@ library_benchmark_group!(
         hundred_ms_of_pairs,
         late_step_shrink,
         flush_dense_block,
+        flush_shrunk_block,
         flush_after_idle,
         snapshot,
         slice_at_16
