@@ -54,7 +54,13 @@ The first line names the generator. Each later line is one annotation. Blank lin
 
 `source` is the generator's name. It is not empty and holds no whitespace, `/` or `\`: tickwave
 names the generator's file after it, `rec.<source>.jsonl`, beside the recording. `version` is
-optional: the generator's own commit or hash, for provenance.
+optional: the generator's own commit or hash, for provenance. `role` is optional too: the paint
+roles the generator's lines paint with, each a table as the hand-written file's `[[role]]` gives
+one (below).
+
+```
+{"format": "tickwave-annotations/1", "source": "wire_swd", "recording_id": "blake3:4f2a…", "role": [{"name": "probe", "label": "probe drives"}, {"name": "target", "label": "target drives", "weight": 1}]}
+```
 
 ## Fields
 
@@ -66,12 +72,91 @@ optional: the generator's own commit or hash, for provenance.
 | `label` | Short text shown with the annotation. |
 | `kind` | A free word (`transfer`, `misread`, `stall`). Styling and filtering key on it. |
 | `text` | Longer text, shown in an inset's caption. |
-| `paint` | A role (`probe`, `target`): the annotation's channels draw over its span in the colour the host page gives that role. The target's lines are also heavier, so the roles differ without colour. |
+| `paint` | A role the sidecar declares (below), such as `probe`: the annotation's channels draw over its span in the role's look. |
 | `measure` | `{channel, what}`: the inset shows a measure taken from the channel's edges inside the span (below). The channel must be digital, and the annotation a span. |
 | `values` | Figures the annotation states, by name, each a decimal and its unit (below). |
 | `ref` | Hand-written only: the full id of a generated annotation. This one takes its span and channels, and any field it leaves out. |
 
 A file may hold no other fields, `measure`'s included: a misspelt one is an error, not ignored.
+
+## Roles
+
+A paint role says who drives a line, or anything else a page colours a stretch of a channel by.
+The sidecar declares each role it paints with: the hand-written file in `[[role]]` tables, and a
+generator in its file's first line, as `role`.
+
+```toml
+[[role]]
+name = "neither"
+label = "neither drives"
+colour = ["#8a8a8a", "#5c5c5c"]
+dash = [2, 1]
+```
+
+| Field | Meaning |
+| --- | --- |
+| `name` | What a `paint` names. Lower-case letters, digits and `_`, starting with a letter, at most 32 bytes. |
+| `label` | What a key and a readout say for the role, at most 200 bytes. The name where it is left out. |
+| `colour` | `"#rrggbb"` for both faces, or a `[day, night]` pair of them. |
+| `weight` | CSS pixels added to the trace's line weight, from 0 to 4. 0 where it is left out. |
+| `dash` | The role's dash and gap lengths, in pairs: at most 8 numbers, each from 0 to 64, not all 0. Each is a number of the role's line widths, its weight included. A solid line where it is left out. |
+
+A role takes no other field. A file declares at most 64 roles, and so do a sidecar's files
+between them. A file that declares more is one problem, and its roles past the 64th are not read.
+
+A `paint` names a declared role. The check reports one that names no declared role, once for each
+name, where it is first used. A reader that shows such a sidecar keeps the annotation, draws its
+channels as if it painted nothing, and keys nothing for it.
+
+Roles keep the order they are declared in: the hand-written file's, then each generator's, in the
+order `include` lists the files. One name may be declared in several files, alike: each field is
+compared once its default is filled in, a label left out being the name, a weight left out 0, and
+one colour being the pair of it. A colour or a dash left out equals only one left out. A name
+declared differently in two files is a problem. A name declared alike again keeps the place it
+first took. A file that declares one name twice is a problem.
+
+Each field of a role's look comes from the first of these that gives it:
+
+1. The host: the page's `--tickwave-role-<name>`, `-weight` and `-dash` (web/README.md, "Styling"),
+   or an egui host's `Palette`.
+2. The role's declaration.
+3. The role's place in the order of declarations. The first role takes the trace's colour, and
+   the rest ink. The first two are solid; the third on take the dashes [2, 2], [1, 1],
+   [5, 2, 1, 2] and [8, 2] in turn. A weight has no fallback by place: it is the declaration's.
+
+A declared colour takes the host's face: its day colour by day, its night colour by night.
+
+Where several annotations paint a channel at a tick, the latest in sidecar order draws it. A dash
+runs on along a painted stretch from where the stretch starts, across the line's edges, and
+starts again after a gap in the data.
+
+The roles travel with the recording when it is bundled, in the hand-written file and the
+generators' first lines. A recording that a writer finishes bundles each generator's roles in its
+file's first line. One repaired after it was cut off before it finished keeps none of them: the
+writer holds them until it finishes. Nor does a recording read from a writer's snapshot as it is
+written have them.
+
+## The stored view
+
+The hand-written file may store how a view of the recording starts, in a `[view]` table. A page or
+a host that says how to show the recording wins over it.
+
+```toml
+[view]
+channels = ["SWDIO", "SWCLK"]
+start = "377.09 ms"
+end = "377.25 ms"
+colour = ["#d9480f", "#ff8a50"]
+```
+
+| Field | Meaning |
+| --- | --- |
+| `channels` | The channels a view shows, in this order. Every channel where it is left out. |
+| `start`, `end` | The span a view shows first: times, as annotations' are. The capture's start and end where they are left out. |
+| `colour` | The trace's colour, `"#rrggbb"` or a `[day, night]` pair, under the page's `series` colour. Ink where it is left out. |
+
+Each channel is the recording's, and named once; `channels` lists one at least. The span lies in
+the capture and ends after it starts. The table takes no other field.
 
 ## Measures
 
@@ -153,7 +238,11 @@ the prose cites breaks the build instead of the page. It checks that:
   not before its `start` and not past `length`;
 - every `measure` names a digital channel, a known measure, and sits on a span;
 - every value is a decimal, with one space and a unit where it has one, under a name of lower-case
-  letters, digits and `_`.
+  letters, digits and `_`;
+- each role declaration holds to the rules above, no name is declared twice in a file or
+  differently in two, and no file declares more than 64 roles, nor the files between them;
+- every `paint` names a declared role;
+- a `[view]` table holds to the rules above.
 
 ## Bundling
 
@@ -161,6 +250,7 @@ the prose cites breaks the build instead of the page. It checks that:
 writes a copy of the recording with the sidecar's files in it, for a single-file share: the
 hand-written file and each generator file's first line in its annotation bundle, and each generator
 file's other lines in annotation parts (FORMAT.md, "Annotations"). The content id stays the same.
+The roles and the stored view are in the bundle, so a reader has them before it reads any part.
 
 ## Merging
 
@@ -187,5 +277,9 @@ leaves out is dropped from `channels`, and an annotation left with none is left 
 on a channel left out is dropped. An annotation without `channels`, which meant every channel of
 its recording, names that input's channels.
 
+Each carried generator's file keeps the roles its first line declares. Two inputs whose
+generators declare one name differently, or a declaration that breaks a rule above, stop the merge:
+the merged sidecar would fail its check.
+
 A hand-written file's annotations are not carried, since their times are the input's. The merge
-says how many it left out.
+says how many it left out. Its roles and its stored view are not carried either.

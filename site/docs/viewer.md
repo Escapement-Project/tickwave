@@ -31,6 +31,15 @@ The page reads files a zip stores as they are or deflated, as common zip tools w
 Under the view, the recording's details give its title, length and channels, the time one tick
 stands for, its size, what it was converted from, and its content id.
 
+A recording's sidecar can store how a view of it starts: which channels it shows, in what order,
+the span it opens at, and the trace's colour. The view starts that way wherever the page says
+nothing else. Bundled into the recording, the sidecar goes with it, so a recording downloaded from
+a page opens here as the page showed it.
+
+A view on a page may offer Download beside Open, and Annotations where it has a sidecar. Download
+saves the recording as the page serves it, its bundled sidecar with it; Annotations saves the
+sidecar's hand-written file.
+
 A recording can hold a channel this viewer can't read, such as one a newer tool wrote in a way
 this version doesn't know. Its row keeps its place and says it is unavailable, and nothing of it
 is drawn. Annotations that name it are left out, and a note under the view says which.
@@ -61,9 +70,11 @@ move along the capture. A zoom step eases into place over about 150 ms. Where th
 reduce motion, it jumps there instead, and so it does where the view takes longer to draw than a
 frame at 60 Hz.
 
-With the view focused, the left and right arrow keys move it. The up and down arrows, or plus and
-minus, zoom in and out. Home and the Fit button show the whole capture, and every analog channel's
-whole range. Escape clears the cursors and the selection.
+With the view focused, the left and right arrow keys move it, an eighth of the span shown at a
+time, or half with Shift. Each move glides into place as a zoom step does, and a key held down
+glides on. The up and down arrows, or plus and minus, zoom in and out. Home and the Fit button
+show the whole capture, and every analog channel's whole range. Escape clears the cursors and the
+selection.
 
 ## Reading a channel
 
@@ -173,6 +184,11 @@ The menu beside the zoom buttons steps through one kind of annotation, such as e
 answered. It starts at the kind of the annotation the view opened at, or else the kind of the
 sidecar's first one.
 
+An annotation can paint its channels in a role, such as who drives a line: the probe, the target,
+or neither. The line takes the role's colour, weight and dash over the annotation's span. The
+sidecar declares its roles, each with a label and a look of its own, which a page can restyle. A
+key beside the zoom buttons lists every role, as its lines are drawn.
+
 ## Editing annotations
 
 On the Open page, Edit annotations opens the sidecar's hand-written file for editing. A recording
@@ -189,6 +205,9 @@ the kind of the first annotation.
 A decoder writes its own annotations, and rewrites them each time it runs, so they can be read here
 but not changed. Name it adds a hand-written annotation that refers to one, for a page to cite by a
 name of your own. It takes the decoder's span and channels, and any field you leave empty.
+
+Paint offers the roles the sidecar declares. A paint must name one of them: declare a new role in
+the sidecar's file first.
 
 A change that would break one of the sidecar's checks is refused, and the form says why. The editor
 changes only what you change: the file keeps its comments, its order and its layout.

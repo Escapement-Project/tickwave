@@ -13,6 +13,7 @@ implementations are held to one set of cases.
 | `columns.json` | `web/src/render/columns.ts`, `columns` | `columns.test.ts` |
 | `probe.json` | `web/src/probe.ts`, `probe` | `probe.test.ts` |
 | `shade.json` | `web/src/render/shade.ts`, `shade` | `shade.test.ts` |
+| `roles.json` | `web/src/roles.ts`, `roles` | `roles.test.ts` |
 
 A file holds `tests`, each a named group of rows that runs as one test. A row gives:
 

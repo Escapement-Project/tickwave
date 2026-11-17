@@ -17,7 +17,11 @@ needs, and each block a query decodes is checked against the entries its own tic
 `runs` and `known` read the whole list. A finished file's markers are read a range at a time:
 `markers` reads the annotation parts its range meets and the bundle's hand-written file, and
 `try_markers` reads the same and says why they don't read, where they don't. `markers_span`, and
-the extent with it, take their span from the parts table, no part read. A hand-written `ref` shows
+the extent with it, take their span from the parts table, no part read. `roles` gives the paint
+roles the sidecar declares, in order, and `stored_view` its stored view (ANNOTATIONS.md, "Roles"
+and "The stored view"): both read the bundle alone, or a host's sidecar. `paints` gives every
+annotation that paints over a span with a declared role, from the parts the span meets, and a
+query's `MarkerQuery::paints` asks for those over its columns. A hand-written `ref` shows
 once every part is read, as `load_markers`, `marker_count`, `markers_left_out` and a query's marker
 list read them; `load_markers` says why they don't read, where they don't. A channel this version
 can't read keeps its place and name as `ChannelKind::Unavailable`, and a marker that names it is
@@ -98,6 +102,7 @@ after them are counted one by one.
 | `probe` | `web/src/probe.ts` | the pulse around a tick, its figures, an analog channel at a pixel, and the searches for a pulse's edges |
 | `runs` | `web/src/source.ts` | which sample sits at or around a tick, where a sample's time ends, and a break's lost samples |
 | `spans` | `web/src/source.ts` | where a channel's data lies, between its gaps or across its runs |
+| `roles` | `web/src/roles.ts` | a paint role's look, field by field from the host's setting, its declaration and its place; which role draws each stretch of a row; and where a dash's phase starts |
 
 Each port takes the same inputs and gives the same outputs as its TypeScript module, and both are
 tested against the cases in `testdata/view/`.

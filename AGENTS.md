@@ -40,9 +40,10 @@ only if a benchmark on real recordings shows the WASM cost matters; record the n
 **Style from the host page's tokens.** The project's design system (colour roles by day and night,
 data colours, line patterns, type roles) lives in the site repository,
 `escapement-project.github.io`; its `design/README.md` explains it. Read the host page's CSS
-variables (`--ink`, `--series-verge`, ...) rather than shipping tickwave's own colours. tickwave's
-own site keeps copies of the site's `static/tokens.css` and `static/fonts/`, and of the project's
-shared header, footer and base sheet, checked with
+variables (`--ink`, `--series-verge`, ...) rather than shipping tickwave's own colours. A
+recording's declared role looks and its stored trace colour are the fallback under the page's
+tokens. tickwave's own site keeps copies of the site's `static/tokens.css` and `static/fonts/`, and
+of the project's shared header, footer and base sheet, checked with
 `uv run design/build.py --check <copies>` run from the site repository. Interaction is hue-free:
 an ink focus ring, an ink wash under the pointer.
 
@@ -58,6 +59,11 @@ a decoder reruns, and generated annotations are told apart from hand-written one
 **Evidence on request, not centre stage.** The host page's prose carries the argument. A reference
 in the text opens a small inset of the annotated span on hover; the full capture stays collapsed
 until the reader opens it.
+
+**Anything presented within a tickwave measurement should be backed by a native tickwave feature
+that works with a .tickwave file opened externally, not a special case we built for this specific
+page.** That way users could download our tickwave measurements and view them locally, and get
+accurate views.
 
 **Licence: MIT OR Apache-2.0.**
 
