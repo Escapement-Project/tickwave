@@ -24,12 +24,9 @@ mod common;
 use common::{fixture, open, oracle};
 
 fn query(window: std::ops::Range<i64>, columns: u32, channels: Vec<usize>) -> Query {
-    Query {
-        window,
-        columns,
-        channels,
-        ..Query::default()
-    }
+    let mut query = Query::new(window, columns);
+    query.channels = channels;
+    query
 }
 
 fn digital(d: &Drawn) -> &[State] {
@@ -225,9 +222,10 @@ fn single_samples_come_with_their_flag_once_the_view_holds_few_enough() {
     let cancel = AtomicBool::new(false);
     // under_range is high from 300,000 to 300,960: of the pairs at 299,520, 300,480 and 301,440,
     // the one at 300,480 is flagged.
-    let q = Query {
-        flags: vec![(1, 3)],
-        ..query(299_500..301_500, 10, vec![1])
+    let q = {
+        let mut query = query(299_500..301_500, 10, vec![1]);
+        query.flags = vec![(1, 3)];
+        query
     };
     let a = rec.query(&q, &cancel).unwrap();
     let Drawn::Analog { samples, fit, .. } = &a.channels[0] else {
@@ -384,9 +382,10 @@ fn columns_from_samples_and_from_the_overview_hold_what_the_rule_gives() {
 fn the_strip_spans_the_extent() {
     let rec = open(&fixture("energy.tickwave"));
     let cancel = AtomicBool::new(false);
-    let q = Query {
-        strip: Some((1, 100)),
-        ..query(0..1000, 10, vec![])
+    let q = {
+        let mut query = query(0..1000, 10, vec![]);
+        query.strip = Some((1, 100));
+        query
     };
     let a = rec.query(&q, &cancel).unwrap();
     let strip = a.strip.unwrap();
@@ -426,13 +425,16 @@ fn markers_by_page_cursor_and_successor() {
         .collect();
     let ticks: Vec<i64> = every.iter().map(|c| c.tick).collect();
     assert_eq!(ticks, [96_000, 480_000, 1_008_000, 2_000_000, 2_700_000]);
-    let q = Query {
-        markers: MarkerQuery {
-            limit: 2,
-            list: Some((Some(every[1]), 2)),
-            successor_of: Some(every[3]),
-        },
-        ..query(0..2_880_000, 10, vec![])
+    let q = {
+        let mut query = query(0..2_880_000, 10, vec![]);
+        query.markers = {
+            let mut markers = MarkerQuery::default();
+            markers.limit = 2;
+            markers.list = Some((Some(every[1]), 2));
+            markers.successor_of = Some(every[3]);
+            markers
+        };
+        query
     };
     let a = rec.query(&q, &cancel).unwrap();
     let ticks = |p: &escapement_tickwave_view::Page| {

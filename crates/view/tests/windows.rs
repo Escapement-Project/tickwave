@@ -208,11 +208,10 @@ fn an_answer_joins_nothing_across_a_runs_edge_and_gives_the_gaps_it_reaches() {
             .chain(near)
         {
             for columns in [7, 40] {
-                let q = Query {
-                    window: start..start + width,
-                    columns,
-                    channels: vec![0, 4],
-                    ..Query::default()
+                let q = {
+                    let mut query = Query::new(start..start + width, columns);
+                    query.channels = vec![0, 4];
+                    query
                 };
                 let a = rec.query(&q, &cancel).unwrap();
                 let at = format!("{:?} at {columns} columns", q.window);
@@ -306,11 +305,10 @@ fn a_run_that_shares_a_column_with_the_one_before_joins_from_its_own_values() {
     let rec = open(&file);
     // `around` 0..120 in six columns of 20 ticks: column 4 holds the first run's last 0 and the
     // second's 100, column 5 its 10s.
-    let q = Query {
-        window: 40..80,
-        columns: 2,
-        channels: vec![0],
-        ..Query::default()
+    let q = {
+        let mut query = Query::new(40..80, 2);
+        query.channels = vec![0];
+        query
     };
     let a = rec.query(&q, &AtomicBool::new(false)).unwrap();
     assert_eq!((a.grid.x0, a.grid.per, a.grid.count), (0.0, 20.0, 6));
@@ -340,11 +338,10 @@ fn a_gap_from_tick_0_sets_the_level_from_its_end() {
         (true, vec![])
     );
     // Drawn from the edges: high from the gap's end to the clock's first fall.
-    let q = Query {
-        window: 300_000..400_000,
-        columns: 100,
-        channels: vec![0],
-        ..Query::default()
+    let q = {
+        let mut query = Query::new(300_000..400_000, 100);
+        query.channels = vec![0];
+        query
     };
     let a = rec.query(&q, &cancel).unwrap();
     let Drawn::Digital { columns, .. } = &a.channels[0] else {

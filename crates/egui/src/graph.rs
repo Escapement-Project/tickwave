@@ -32,8 +32,10 @@ const MIN_TRACE: f32 = 40.0;
 /// A zoom step's ease, in seconds.
 const EASE: f64 = 0.15;
 
-/// What a host adds to the graph's query for its own panel.
+/// What a host adds to the graph's query for its own panel. A host builds one with `default` and
+/// sets its fields.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Extras {
     /// A page of the list of every marker: from after a cursor, at most so many.
     pub marker_list: Option<(Option<MarkerCursor>, usize)>,
@@ -592,6 +594,10 @@ impl Graph<'_> {
         let mut channels: Vec<usize> = self.trace.into_iter().collect();
         channels.extend_from_slice(self.lanes);
         let following = matches!(self.state.window, Window::Follow { .. });
+        let mut markers = MarkerQuery::default();
+        markers.limit = MARKER_LIMIT;
+        markers.list = self.extras.marker_list;
+        markers.successor_of = self.extras.successor_of;
         Request {
             window: self.state.window.clone(),
             // A window of its own doesn't move with now, so a moving now asks nothing.
@@ -601,11 +607,7 @@ impl Graph<'_> {
             flags: (self.trace.zip(self.flag)).into_iter().collect(),
             strip: self.trace.map(|t| (t, columns)),
             selection: self.state.selection.clone(),
-            markers: MarkerQuery {
-                limit: MARKER_LIMIT,
-                list: self.extras.marker_list,
-                successor_of: self.extras.successor_of,
-            },
+            markers,
         }
     }
 

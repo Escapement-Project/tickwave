@@ -36,9 +36,10 @@ fn harness(path: &Path, window: Window) -> Harness<'static, Host> {
     let face = tokens::face(false).unwrap();
     let host = Host {
         viewer: None,
-        state: ViewState {
-            window,
-            ..ViewState::default()
+        state: {
+            let mut state = ViewState::default();
+            state.window = window;
+            state
         },
         face,
         trace: 0,
@@ -203,9 +204,10 @@ fn views() {
         let face = tokens::face(false).unwrap();
         let host = Host {
             viewer: None,
-            state: ViewState {
-                window,
-                ..ViewState::default()
+            state: {
+                let mut state = ViewState::default();
+                state.window = window;
+                state
             },
             face,
             trace: 0,

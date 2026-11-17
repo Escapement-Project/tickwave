@@ -45,18 +45,16 @@ impl Request {
     /// has its columns at fixed ticks, so the next snapshot's answer extends this one's.
     fn query(&self, extent: Option<&Range<i64>>, live: bool) -> Query {
         let window = self.window.resolve(extent, self.now);
-        Query {
-            statistics: std::iter::once(window.clone())
-                .chain(self.selection.clone())
-                .collect(),
-            window,
-            columns: self.columns,
-            channels: self.channels.clone(),
-            flags: self.flags.clone(),
-            strip: self.strip,
-            markers: self.markers.clone(),
-            aligned: live && self.follows(),
-        }
+        let mut q = Query::new(window.clone(), self.columns);
+        q.statistics = std::iter::once(window)
+            .chain(self.selection.clone())
+            .collect();
+        q.channels = self.channels.clone();
+        q.flags = self.flags.clone();
+        q.strip = self.strip;
+        q.markers = self.markers.clone();
+        q.aligned = live && self.follows();
+        q
     }
 }
 

@@ -182,11 +182,10 @@ fn a_window_reads_a_neighbour_only_where_it_reaches_in() {
     let rec = Recording::open(bytes.clone(), Cache::new(0)).unwrap();
     let cancel = AtomicBool::new(false);
     let points = |window: Range<i64>| {
-        let q = Query {
-            window,
-            columns: 100,
-            channels: vec![0],
-            ..Query::default()
+        let q = {
+            let mut query = Query::new(window, 100);
+            query.channels = vec![0];
+            query
         };
         bytes.frames_read(&blocks);
         let a = rec.query(&q, &cancel).unwrap();

@@ -350,20 +350,19 @@ fn followed(extent: &Range<i64>, width: i64, ahead: i64) -> Range<i64> {
 }
 
 fn query(window: Range<i64>, columns: u32, strip: Option<(usize, u32)>) -> Query {
-    Query {
-        statistics: vec![window.clone(), 100..300],
-        window,
-        columns,
-        channels: vec![I, D0, F, D1, P, V],
-        flags: vec![(I, D0), (F, D1)],
-        strip,
-        markers: MarkerQuery {
-            limit: 3,
-            list: Some((None, 2)),
-            successor_of: None,
-        },
-        aligned: true,
-    }
+    let mut query = Query::new(window.clone(), columns);
+    query.statistics = vec![window.clone(), 100..300];
+    query.channels = vec![I, D0, F, D1, P, V];
+    query.flags = vec![(I, D0), (F, D1)];
+    query.strip = strip;
+    query.markers = {
+        let mut markers = MarkerQuery::default();
+        markers.limit = 3;
+        markers.list = Some((None, 2));
+        markers
+    };
+    query.aligned = true;
+    query
 }
 
 /// `got` and `want` the same, field for field, each column's floats to the bit.
@@ -487,11 +486,10 @@ fn an_aligned_grid_has_whole_columns_from_tick_0() {
     let rec = Recording::open(Arc::new(finished()), Cache::new(1 << 20)).unwrap();
     let cancel = AtomicBool::new(false);
     for ((width, columns, end), window, around, (x0, per, count)) in rows {
-        let q = Query {
-            window: end - width..end,
-            columns,
-            aligned: true,
-            ..Query::default()
+        let q = {
+            let mut query = Query::new(end - width..end, columns);
+            query.aligned = true;
+            query
         };
         let a = rec.query(&q, &cancel).unwrap();
         let at = format!("{width} ticks in {columns} columns to {end}");
@@ -503,16 +501,7 @@ fn an_aligned_grid_has_whole_columns_from_tick_0() {
         );
     }
     // Unaligned, the first row's grid starts a width before the window, a seventh of it a column.
-    let a = rec
-        .query(
-            &Query {
-                window: 900..1000,
-                columns: 7,
-                ..Query::default()
-            },
-            &cancel,
-        )
-        .unwrap();
+    let a = rec.query(&Query::new(900..1000, 7), &cancel).unwrap();
     assert_eq!((a.window, a.around.clone()), (900..1000, 800..1100));
     assert_eq!(
         (a.grid.x0, a.grid.per, a.grid.count),
@@ -670,13 +659,10 @@ fn pairs_to_1990(file: &Arc<Growing>) -> (Writer, Recording) {
 }
 
 fn pairs_query(window: Range<i64>) -> Query {
-    Query {
-        window,
-        columns: 10,
-        channels: vec![I],
-        aligned: true,
-        ..Query::default()
-    }
+    let mut query = Query::new(window, 10);
+    query.channels = vec![I];
+    query.aligned = true;
+    query
 }
 
 #[test]
@@ -765,16 +751,18 @@ fn an_extend_answers_only_what_it_can_answer_exactly() {
     }
     let refused = |q: Query, why: &str| assert!(extend(&rec, &q).is_none(), "{why}");
     refused(
-        Query {
-            channels: vec![V],
-            ..pairs_query(1603..2003)
+        {
+            let mut query = pairs_query(1603..2003);
+            query.channels = vec![V];
+            query
         },
         "another channel",
     );
     refused(
-        Query {
-            aligned: false,
-            ..pairs_query(1603..2003)
+        {
+            let mut query = pairs_query(1603..2003);
+            query.aligned = false;
+            query
         },
         "not aligned",
     );

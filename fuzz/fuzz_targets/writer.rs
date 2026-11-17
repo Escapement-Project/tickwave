@@ -556,12 +556,11 @@ fuzz_target!(|p: Plan| {
                         reason = "one interval to measure, not its ticks"
                     )]
                     let statistics = vec![0..r.length()];
-                    let q = Query {
-                        window: 0..r.length().max(1),
-                        columns: 64,
-                        channels: (0..r.channels().len()).collect(),
-                        statistics,
-                        ..Query::default()
+                    let q = {
+                        let mut query = Query::new(0..r.length().max(1), 64);
+                        query.channels = (0..r.channels().len()).collect();
+                        query.statistics = statistics;
+                        query
                     };
                     let _ = r.query(&q, &cancel);
                 }

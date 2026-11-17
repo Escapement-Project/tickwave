@@ -19,11 +19,10 @@ fn columns(
 ) -> (escapement_tickwave_view::columns::DigitalColumns, usize) {
     let c = rec.channel("SWCLK").unwrap();
     let n = (rec.length() + per - 1) / per;
-    let q = Query {
-        window: 0..n * per,
-        columns: n as u32,
-        channels: vec![c],
-        ..Query::default()
+    let q = {
+        let mut query = Query::new(0..n * per, n as u32);
+        query.channels = vec![c];
+        query
     };
     let a = rec.query(&q, &AtomicBool::new(false)).unwrap();
     assert_eq!(a.grid.per, per as f64);
@@ -163,11 +162,10 @@ fn a_column_a_gap_splits_sums_both_sides_of_it() {
     let rec = common::open(&gapped());
     // Columns of 10 ticks, finer than the finest level's 16: read from the edges. Column 100,
     // [1000, 1010), is read in two pieces, [1000, 1003) and [1007, 1010).
-    let q = Query {
-        window: 0..2010,
-        columns: 201,
-        channels: vec![0],
-        ..Query::default()
+    let q = {
+        let mut query = Query::new(0..2010, 201);
+        query.channels = vec![0];
+        query
     };
     let a = rec.query(&q, &AtomicBool::new(false)).unwrap();
     let Drawn::Digital { columns, .. } = &a.channels[0] else {

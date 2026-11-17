@@ -25,8 +25,16 @@ pub enum Y {
     },
 }
 
-/// The view a host keeps for a `Graph`. The graph's gestures change it, and so may the host.
+/// The view a host keeps for a `Graph`. The graph's gestures change it, and so may the host. A
+/// host builds one with `default` and sets its fields:
+///
+/// ```
+/// # use escapement_tickwave_egui::{ViewState, Window};
+/// let mut state = ViewState::default();
+/// state.window = Window::At(0..1_000);
+/// ```
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct ViewState {
     pub window: Window,
     pub y: Y,

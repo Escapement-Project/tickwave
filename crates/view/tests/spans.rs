@@ -8,7 +8,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use common::{fixture, open};
-use escapement_tickwave_view::{MarkerQuery, Query};
+use escapement_tickwave_view::Query;
 
 /// Records the name and level of every span opened.
 #[derive(Default)]
@@ -40,15 +40,11 @@ impl tracing::Subscriber for Spans {
 fn a_query_measures_its_statistics_in_a_span() {
     let rec = open(&fixture("energy.tickwave"));
     let extent = rec.extent().unwrap();
-    let q = Query {
-        window: extent.clone(),
-        columns: 200,
-        channels: vec![0, 4],
-        flags: Vec::new(),
-        strip: None,
-        statistics: vec![extent.clone(), extent.start..extent.start + 1000],
-        markers: MarkerQuery::default(),
-        aligned: false,
+    let q = {
+        let mut query = Query::new(extent.clone(), 200);
+        query.channels = vec![0, 4];
+        query.statistics = vec![extent.clone(), extent.start..extent.start + 1000];
+        query
     };
     let cancel = AtomicBool::new(false);
     let spans = Arc::new(Spans::default());

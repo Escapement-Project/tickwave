@@ -60,34 +60,37 @@ fuzz_target!(|data: &[u8]| {
         reason = "one interval to measure, not its ticks"
     )]
     let statistics = vec![a.stats.0.tick(length)..a.stats.1.tick(length)];
-    let q = Query {
-        window: from..to,
-        columns: u32::from(a.columns % 2048),
-        channels: (0..n).collect(),
-        flags: a
+    let q = {
+        let mut query = Query::new(from..to, u32::from(a.columns % 2048));
+        query.channels = (0..n).collect();
+        query.flags = a
             .flag
             .map(|(x, y)| vec![(usize::from(x) % n.max(1), usize::from(y) % n.max(1))])
-            .unwrap_or_default(),
-        strip: a
+            .unwrap_or_default();
+        query.strip = a
             .strip
-            .map(|(c, w)| (usize::from(c) % n.max(1), u32::from(w % 1024))),
-        statistics,
-        markers: MarkerQuery {
-            limit: usize::from(a.limit),
-            list: Some((None, usize::from(a.limit))),
-            successor_of: Some(MarkerCursor {
+            .map(|(c, w)| (usize::from(c) % n.max(1), u32::from(w % 1024)));
+        query.statistics = statistics;
+        query.markers = {
+            let mut markers = MarkerQuery::default();
+            markers.limit = usize::from(a.limit);
+            markers.list = Some((None, usize::from(a.limit)));
+            markers.successor_of = Some(MarkerCursor {
                 tick: from,
                 arrival: 0,
-            }),
-        },
-        aligned: a.aligned,
+            });
+            markers
+        };
+        query.aligned = a.aligned;
+        query
     };
     if let Ok(answer) = rec.query(&q, &cancel) {
         let width = i128::from(to.saturating_sub(from).max(1));
         let shift = (width * i128::from(a.moved) / 65536) as i64;
-        let later = Query {
-            window: from.saturating_add(shift)..to.saturating_add(shift),
-            ..q.clone()
+        let later = {
+            let mut query = q.clone();
+            query.window = from.saturating_add(shift)..to.saturating_add(shift);
+            query
         };
         let _ = rec.extend(&answer, &q, &later, &cancel);
     }

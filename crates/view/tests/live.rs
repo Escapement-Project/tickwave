@@ -140,12 +140,9 @@ fn apply(w: &mut Writer, op: &Op) {
 }
 
 fn query(window: std::ops::Range<i64>, columns: u32) -> Query {
-    Query {
-        window,
-        columns,
-        channels: vec![0, 1, 2, 3],
-        ..Query::default()
-    }
+    let mut query = Query::new(window, columns);
+    query.channels = vec![0, 1, 2, 3];
+    query
 }
 
 /// Columns of `a` and `b` equal, those that end by `upto` where it is given.

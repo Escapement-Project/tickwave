@@ -143,9 +143,10 @@ impl Demo {
         };
         Ok(Self {
             viewer,
-            state: ViewState {
-                window,
-                ..ViewState::default()
+            state: {
+                let mut state = ViewState::default();
+                state.window = window;
+                state
             },
             faces,
             night,

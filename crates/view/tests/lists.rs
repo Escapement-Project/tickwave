@@ -18,7 +18,7 @@ use escapement_tickwave_format::index::{Located, PAGE_HEAD};
 use escapement_tickwave_format::model::{Gap, Ratio};
 use escapement_tickwave_format::record::{self, Kind};
 use escapement_tickwave_format::writer::{Finish, WriteOptions, Writer};
-use escapement_tickwave_view::{Answer, Bytes, Cache, MarkerQuery, Query, Recording, probe};
+use escapement_tickwave_view::{Answer, Bytes, Cache, Query, Recording, probe};
 
 /// A file in memory that records each read.
 struct Counted {
@@ -239,16 +239,11 @@ fn whole(file: &[u8]) -> Recording {
 }
 
 fn query(window: Range<i64>, columns: u32) -> Query {
-    Query {
-        statistics: vec![window.clone()],
-        window,
-        columns,
-        channels: vec![A, D, P, B],
-        flags: vec![(A, D)],
-        strip: None,
-        markers: MarkerQuery::default(),
-        aligned: false,
-    }
+    let mut query = Query::new(window.clone(), columns);
+    query.statistics = vec![window.clone()];
+    query.channels = vec![A, D, P, B];
+    query.flags = vec![(A, D)];
+    query
 }
 
 /// `got` and `want`, made by two recordings of one file, the same but for their revisions.
@@ -358,9 +353,10 @@ fn a_first_draw_reads_no_list_page_and_the_extent_only_the_last() {
     let rec = Recording::open(bytes.clone(), Cache::new(64 << 20)).unwrap();
     bytes.take();
     let cancel = AtomicBool::new(false);
-    let q = Query {
-        strip: Some((A, 300)),
-        ..query(0..length, 300)
+    let q = {
+        let mut query = query(0..length, 300);
+        query.strip = Some((A, 300));
+        query
     };
     let sketch = rec.sketch(&q, &cancel).unwrap();
     assert_eq!(bytes.take(), [], "the sketch reads nothing");

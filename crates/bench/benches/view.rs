@@ -27,18 +27,18 @@ fn query(rec: &Recording, per: i64) -> Query {
     let width = per * 1920;
     let start = (extent.start + extent.end) / 2 - width / 2;
     let window = start..start + width;
-    Query {
-        window: window.clone(),
-        columns: 1920,
-        channels: vec![1, 4, 5, 6, 7],
-        flags: vec![(1, 3)],
-        strip: Some((1, 1920)),
-        statistics: vec![window],
-        markers: MarkerQuery {
-            limit: 100,
-            ..MarkerQuery::default()
-        },
-        aligned: false,
+    {
+        let mut query = Query::new(window.clone(), 1920);
+        query.channels = vec![1, 4, 5, 6, 7];
+        query.flags = vec![(1, 3)];
+        query.strip = Some((1, 1920));
+        query.statistics = vec![window];
+        query.markers = {
+            let mut markers = MarkerQuery::default();
+            markers.limit = 100;
+            markers
+        };
+        query
     }
 }
 
@@ -136,11 +136,10 @@ fn live_update((mut rec, next): (Recording, Snapshot)) -> Recording {
 fn clock(per: i64) -> (Recording, Query) {
     let rec = open(Capture::Clock);
     let width = per * 1920;
-    let q = Query {
-        window: 0..width,
-        columns: 1920,
-        channels: vec![escapement_tickwave_bench::DIO0],
-        ..Query::default()
+    let q = {
+        let mut query = Query::new(0..width, 1920);
+        query.channels = vec![escapement_tickwave_bench::DIO0];
+        query
     };
     rec.query(&q, &AtomicBool::new(false)).unwrap();
     (rec, q)

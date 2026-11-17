@@ -16,8 +16,15 @@ use crate::runs::lost_spans_in;
 use crate::spans::known_spans;
 use crate::statistics::Statistics;
 
-/// What a view shows and asks for.
+/// What a view shows and asks for. A host builds one with `new` and sets the rest of its fields:
+///
+/// ```
+/// # use escapement_tickwave_view::Query;
+/// let mut q = Query::new(0..1_000, 1920);
+/// q.channels = vec![0, 1];
+/// ```
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Query {
     /// On screen, in ticks.
     pub window: Range<i64>,
@@ -42,7 +49,20 @@ pub struct Query {
     pub aligned: bool,
 }
 
+impl Query {
+    /// `window` over `columns` device pixels, and nothing else asked for.
+    pub fn new(window: Range<i64>, columns: u32) -> Self {
+        Self {
+            window,
+            columns,
+            ..Self::default()
+        }
+    }
+}
+
+/// Which markers a query reads. A host builds one with `default` and sets its fields.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MarkerQuery {
     /// At most this many of the window's markers; at 0, none is read and the window's page is
     /// empty.

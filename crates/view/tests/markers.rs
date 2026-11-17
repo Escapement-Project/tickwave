@@ -497,16 +497,16 @@ fn a_channel_this_version_cant_read_keeps_its_place_and_its_markers_are_left_out
 
     let cancel = AtomicBool::new(false);
     let window = 0..100;
-    let q = Query {
-        window: window.clone(),
-        columns: 10,
-        channels: vec![0, 1, 2, 3],
-        statistics: vec![window],
-        markers: MarkerQuery {
-            limit: 10,
-            ..MarkerQuery::default()
-        },
-        ..Query::default()
+    let q = {
+        let mut query = Query::new(window.clone(), 10);
+        query.channels = vec![0, 1, 2, 3];
+        query.statistics = vec![window];
+        query.markers = {
+            let mut markers = MarkerQuery::default();
+            markers.limit = 10;
+            markers
+        };
+        query
     };
     let a = rec.query(&q, &cancel).unwrap();
     for c in [0, 2, 3] {

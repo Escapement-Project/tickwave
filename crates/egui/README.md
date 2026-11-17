@@ -40,6 +40,13 @@ reader moves them, and the host can change it too: a pan, a zoom or a selection 
 a place of its own, and setting it to follow again resumes following. A zoom while following a
 recording being written keeps following, at the new span, about the end.
 
+A host builds a `ViewState` from `ViewState::default()`, the whole recording followed, and sets
+the fields it wants on that value; the `Extras` a graph adds to its query for a host's own panel
+come the same way, from `Extras::default()`. The view core's `Query` starts from
+`Query::new(window, columns)` and its `MarkerQuery` from `MarkerQuery::default()`. None of the
+four is built as a literal outside its crate, so a later version can add a field, and a host
+matching on the view core's `Error` keeps an arm for errors added later.
+
 While a recording is being written, the host passes its now, in ticks, to the graph and the
 strip. A followed window ends at the later of now and the data's end. Nothing is drawn between
 the data's end and now: the trace and the lanes stop where the data does. A finished recording

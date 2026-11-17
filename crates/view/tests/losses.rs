@@ -175,11 +175,10 @@ fn pale(r: &Recording, extent: std::ops::Range<i64>) -> (Vec<std::ops::Range<i64
     let columns = ((extent.end - extent.start) / 10) as u32;
     let a = r
         .query(
-            &Query {
-                window: extent.clone(),
-                columns,
-                channels: vec![V, P],
-                ..Query::default()
+            &{
+                let mut query = Query::new(extent.clone(), columns);
+                query.channels = vec![V, P];
+                query
             },
             &cancel,
         )

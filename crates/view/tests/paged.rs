@@ -204,16 +204,12 @@ fn open_reads_the_trailer_and_the_footer_and_no_page() {
 }
 
 fn query(window: Range<i64>, columns: u32) -> Query {
-    Query {
-        statistics: vec![window.clone()],
-        window,
-        columns,
-        channels: vec![V, I, P, D],
-        flags: vec![(V, D)],
-        strip: Some((P, 64)),
-        markers: MarkerQuery::default(),
-        aligned: false,
-    }
+    let mut query = Query::new(window.clone(), columns);
+    query.statistics = vec![window.clone()];
+    query.channels = vec![V, I, P, D];
+    query.flags = vec![(V, D)];
+    query.strip = Some((P, 64));
+    query
 }
 
 #[test]
@@ -354,11 +350,10 @@ fn each_channel_takes_its_own_level_for_a_column() {
         let rec = Recording::open(bytes.clone(), Cache::new(64 << 20)).unwrap();
         bytes.take();
         let window = 300_000..300_000 + 100 * per;
-        let q = Query {
-            window,
-            columns: 100,
-            channels: vec![c],
-            ..Query::default()
+        let q = {
+            let mut query = Query::new(window, 100);
+            query.channels = vec![c];
+            query
         };
         rec.query(&q, &cancel).unwrap();
         let reads = bytes.take();
@@ -405,9 +400,10 @@ fn a_first_draw_reads_nothing_past_the_footer_and_holds_the_exact_picture() {
     assert!(opened <= 256 << 10, "{opened} bytes");
     let cancel = AtomicBool::new(false);
     let extent = rec.extent().unwrap();
-    let q = Query {
-        strip: Some((V, 1920)),
-        ..query(extent, 1920)
+    let q = {
+        let mut query = query(extent, 1920);
+        query.strip = Some((V, 1920));
+        query
     };
     let sketch = rec.sketch(&q, &cancel).unwrap();
     assert_eq!(bytes.take(), []);
@@ -506,16 +502,14 @@ fn marked(bundle: escapement_tickwave_format::writer::Bundle) -> Vec<u8> {
 }
 
 fn markers_query() -> Query {
-    Query {
-        window: 0..500,
-        columns: 50,
-        channels: vec![0],
-        markers: MarkerQuery {
-            limit: 10,
-            ..MarkerQuery::default()
-        },
-        ..Query::default()
-    }
+    let mut query = Query::new(0..500, 50);
+    query.channels = vec![0];
+    query.markers = {
+        let mut markers = MarkerQuery::default();
+        markers.limit = 10;
+        markers
+    };
+    query
 }
 
 /// A bundled sidecar whose lines break a rule: the view leaves those out and names them, and shows
@@ -597,9 +591,10 @@ fn a_bundle_that_does_not_resolve_fails_only_the_queries_that_ask_for_markers() 
         .unwrap_err()
         .to_string();
     assert!(err.contains("no hand-written file"), "{err}");
-    let q = Query {
-        markers: MarkerQuery::default(),
-        ..markers_query()
+    let q = {
+        let mut query = markers_query();
+        query.markers = MarkerQuery::default();
+        query
     };
     assert!(rec.query(&q, &cancel).is_ok());
     assert_eq!(rec.marker_count(), 0);

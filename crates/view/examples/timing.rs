@@ -143,18 +143,18 @@ fn main() {
         let query = |start: i64, per: i64| {
             let width = per * i64::from(args.columns);
             let window = start..start + width;
-            Query {
-                window: window.clone(),
-                columns: args.columns,
-                channels: vec![1, 4, 5, 6, 7],
-                flags: vec![(1, 3)],
-                strip: Some((1, args.columns)),
-                statistics: vec![window],
-                markers: MarkerQuery {
-                    limit: 100,
-                    ..MarkerQuery::default()
-                },
-                aligned: false,
+            {
+                let mut query = Query::new(window.clone(), args.columns);
+                query.channels = vec![1, 4, 5, 6, 7];
+                query.flags = vec![(1, 3)];
+                query.strip = Some((1, args.columns));
+                query.statistics = vec![window];
+                query.markers = {
+                    let mut markers = MarkerQuery::default();
+                    markers.limit = 100;
+                    markers
+                };
+                query
             }
         };
         for (which, view, per) in [

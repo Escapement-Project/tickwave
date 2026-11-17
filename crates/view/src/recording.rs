@@ -37,7 +37,9 @@ use escapement_tickwave_format::header::DeclaredKind;
 #[cfg(feature = "live")]
 use escapement_tickwave_format::snapshot::{LevelSnapshot, Snapshot};
 
+/// Why a read failed.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     #[error("{0}")]
     Io(#[from] std::io::Error),
