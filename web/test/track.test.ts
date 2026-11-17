@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { digitalFromEdges, digitalFromLevels, NONE } from "../src/render/columns.ts";
-import { Track } from "../src/render/track.ts";
+import { EDGES_AT_MOST, Track } from "../src/render/track.ts";
 import { MemorySource } from "../src/memory-source.ts";
 
 // A clock edge every 1,000 ticks over 2^24 ticks: overview levels of 4,096 and 65,536 ticks.
@@ -87,4 +87,101 @@ test("zooming out draws the base where the tile does not reach", async () => {
     track.layers().map((l) => l.tile),
     [track.tile],
   );
+});
+
+// A burst far denser than the channel's average: EDGES_AT_MOST + 100,000 edges two ticks apart
+// from 2^29, in 2^30 ticks whose levels are 2^24 and 2^28 ticks, so the whole view's columns are
+// already finer than the finest level.
+const BURST = { length: 2 ** 30, at: 2 ** 29, edges: EDGES_AT_MOST + 100_000 };
+
+function burstTrack(): { track: Track; asked: { edges: number; overviews: number[] } } {
+  const ticks = new Float64Array(BURST.edges).map((_, i) => BURST.at + 2 * i);
+  const source = new MemorySource(
+    { title: "burst", timebase: { num: 1e9, den: 1 }, length: BURST.length, channels: [{ kind: "digital", name: "D", end: BURST.length, initial: 0, ticks }] },
+    { levels: [2 ** 24, 2 ** 28] },
+  );
+  const asked = { edges: 0, overviews: [] as number[] };
+  const [edges, overview] = [source.edges.bind(source), source.overview.bind(source)];
+  source.edges = (...a) => {
+    asked.edges++;
+    return edges(...a);
+  };
+  source.overview = (c, s, e, maxBucket, signal) => {
+    asked.overviews.push(maxBucket);
+    return overview(c, s, e, maxBucket, signal);
+  };
+  const track = new Track(source, 0, { kind: "digital", name: "D", end: BURST.length }, () => {}, (e) => assert.fail(String(e)));
+  return { track, asked };
+}
+
+/** Lets the track's read under way, and every read it leads to, land. */
+async function landed(track: Track): Promise<void> {
+  for (let i = 0; i < 100 && track.busy; i++) await arrive();
+  assert.ok(!track.busy);
+}
+
+test("a row whose read would hold more edges than it reads at most draws its finest overview level, and reads none", async () => {
+  const { track, asked } = burstTrack();
+  await arrive();
+  track.need(0, BURST.length, BURST.length / COLUMNS);
+  await landed(track);
+  assert.equal(asked.edges, 0);
+  assert.equal(track.tile?.kind, "digital-overview");
+  assert.equal(track.tile.data.bucket, 2 ** 24);
+  assert.ok(track.settled(0, BURST.length, BURST.length / COLUMNS));
+  // The view holds every column: the burst's buckets across the columns they span.
+  assert.equal(blank(track, 0, BURST.length), 0);
+  // A view less than twice as fine, whose read lies inside that one, asks for nothing more.
+  const asks = asked.overviews.length;
+  const [start, end] = [0.2 * BURST.length, 0.8 * BURST.length];
+  track.need(start, end, (end - start) / COLUMNS);
+  assert.ok(!track.busy);
+  assert.equal(asked.overviews.length, asks);
+});
+
+test("zoomed in until its read holds few enough edges, the row reads them", async () => {
+  const { track, asked } = burstTrack();
+  await arrive();
+  track.need(0, BURST.length, BURST.length / COLUMNS);
+  await landed(track);
+  // A view of 2^20 ticks in the burst reads three times that: 1,572,864 edges.
+  const [start, end] = [BURST.at + 2 ** 20, BURST.at + 2 ** 21];
+  track.need(start, end, (end - start) / COLUMNS);
+  await landed(track);
+  assert.equal(asked.edges, 1);
+  assert.equal(track.tile?.kind, "edges");
+  assert.equal(track.tile.data.ticks.length, (3 * 2 ** 20) / 2);
+});
+
+test("a row moved forgets where its edges were too many, and counts them again", async () => {
+  const { track } = burstTrack();
+  await arrive();
+  track.need(0, BURST.length, BURST.length / COLUMNS);
+  await landed(track);
+  assert.equal(track.tile?.kind, "digital-overview");
+  // Moved a little, the tile moves with it and still covers a view inside what was read: the row
+  // reads again rather than taking the tile for what that view wants.
+  track.moveBy({ kind: "digital", name: "D", end: BURST.length }, 1000);
+  const [start, end] = [0.2 * BURST.length, 0.8 * BURST.length];
+  track.need(start, end, (end - start) / COLUMNS);
+  assert.ok(track.busy);
+});
+
+test("a row whose overview in hand holds too few edges to pass the bound reads its edges without counting them first", async () => {
+  const ticks = new Float64Array(Math.floor(LENGTH / 1000) - 1).map((_, i) => (i + 1) * 1000);
+  const source = new MemorySource({ title: "clock", timebase: { num: 1e9, den: 1 }, length: LENGTH, channels: [{ kind: "digital", name: "CLK", end: LENGTH, initial: 0, ticks }] });
+  let counted = 0;
+  const count = source.edgeCount.bind(source);
+  source.edgeCount = (...a) => {
+    counted++;
+    return count(...a);
+  };
+  const track = new Track(source, 0, { kind: "digital", name: "CLK", end: LENGTH }, () => {}, (e) => assert.fail(String(e)));
+  await arrive();
+  // A hundredth of the capture, finer than any level: its read holds about 500 edges.
+  const [start, end] = [8_000_000, 8_000_000 + LENGTH / 100];
+  track.need(start, end, (end - start) / COLUMNS);
+  await landed(track);
+  assert.equal(track.tile?.kind, "edges");
+  assert.equal(counted, 0);
 });

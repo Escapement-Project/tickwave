@@ -13,6 +13,7 @@ import {
   type Samples,
   type Source,
 } from "../source.ts";
+import { counts } from "./shade.ts";
 
 export type Tile =
   | { readonly kind: "edges"; readonly start: number; readonly end: number; readonly data: Edges }
@@ -20,7 +21,8 @@ export type Tile =
   | { readonly kind: "samples"; readonly start: number; readonly end: number; readonly data: Samples }
   | { readonly kind: "analog-overview"; readonly start: number; readonly end: number; readonly asked: number; readonly data: AnalogOverview };
 
-type Mode = "edges" | "overview" | "samples";
+/** A digital row's tile of its finest overview level where its edges are `dense`. */
+type Mode = "edges" | "overview" | "samples" | "dense";
 
 /** A tile and the ticks it draws over. */
 export interface Layer {
@@ -42,6 +44,18 @@ const SAMPLES_PER_COLUMN = 32;
  * moving over the plot redraws, so without it a server that keeps failing gets a read a frame.
  */
 const RETRY_MS = 3000;
+
+/**
+ * The most edges a digital row reads for a view. Past it, counted from the index first where the
+ * source can, the row keeps its finest overview level, each bucket across the columns it spans,
+ * until the view narrows enough: a burst far denser than the channel's average density, whose
+ * finest level is coarse, never makes a zoom decode it whole.
+ */
+export const EDGES_AT_MOST = 2 ** 21;
+
+/** The most edges a bucket of each density can hold (shade.ts `counts`): Infinity for one it can't
+ * read, so the row asks the index. */
+const MOST = Float64Array.from({ length: 256 }, (_, d) => (d === 0 ? 0 : Number(counts(d)?.[1] ?? Infinity)));
 
 type Pending = { mode: Mode; start: number; end: number; per: number; abort: AbortController; since: number };
 
@@ -72,6 +86,12 @@ export class Track {
   #retryAt = 0;
   /** A request for buckets no larger than this came back null: there is no level that fine. */
   #noOverviewAtOrBelow = 0;
+  /** The finest overview level's buckets, once a request has met it. */
+  #finest = Infinity;
+  /** The last read that would have held more than `EDGES_AT_MOST` edges: its span and the view's
+   * ticks a column then. A view whose read lies inside it, at no more than twice as fine, is
+   * `dense` too. */
+  #dense: { start: number; end: number; per: number } | null = null;
   readonly #changed: () => void;
   readonly #failed: (e: unknown) => void;
 
@@ -92,6 +112,7 @@ export class Track {
     this.channel = channel;
     if (this.tile) this.tile = moved(this.tile, by);
     if (this.#base) this.#base = moved(this.#base, by);
+    this.#dense = null;
     this.#pending?.abort.abort();
     this.#pending = null;
   }
@@ -105,13 +126,25 @@ export class Track {
     return this.#pending?.since ?? null;
   }
 
-  #mode(per: number): Mode {
+  #mode(start: number, end: number, per: number): Mode {
     const c = this.channel;
-    if (c.kind === "digital") return per > this.#noOverviewAtOrBelow ? "overview" : "edges";
+    if (c.kind === "digital") {
+      if (per > this.#noOverviewAtOrBelow) return "overview";
+      const d = this.#dense;
+      const [lo, hi] = this.#reads(start, end);
+      return d && per > d.per / 2 && d.start <= lo && hi <= d.end ? "dense" : "edges";
+    }
     if (c.kind === "unavailable") return "overview";
     const period = axisPeriod(c);
     if (per < SAMPLES_PER_COLUMN * period) return "samples";
     return per > this.#noOverviewAtOrBelow ? "overview" : "samples";
+  }
+
+  /** What a row reads for the view [start, end): a view's width either side, so a small pan draws
+   * from what is here. */
+  #reads(start: number, end: number): [number, number] {
+    const width = end - start;
+    return [Math.max(channelStart(this.channel), Math.floor(start - width)), Math.min(this.channel.end, Math.ceil(end + width))];
   }
 
   #covers(r: { readonly start: number; readonly end: number }, start: number, end: number): boolean {
@@ -121,6 +154,7 @@ export class Track {
   /** Whether `tile` is what the view [start, end) at `per` ticks a column wants. */
   #fits(tile: Tile, mode: Mode, start: number, end: number, per: number): boolean {
     if (!this.#covers(tile, start, end)) return false;
+    if (mode === "dense") return tile.kind === "digital-overview";
     if (mode !== "overview") return tile.kind === mode;
     if (tile.kind !== "digital-overview" && tile.kind !== "analog-overview") return false;
     // Zoomed out far past what was asked for, a coarser level may exist.
@@ -150,13 +184,13 @@ export class Track {
    * can't read, which reads nothing. */
   settled(start: number, end: number, per: number): boolean {
     if (this.channel.kind === "unavailable") return true;
-    return this.tile !== null && this.#fits(this.tile, this.#mode(per), start, end, per) && this.#pending === null;
+    return this.tile !== null && this.#fits(this.tile, this.#mode(start, end, per), start, end, per) && this.#pending === null;
   }
 
   /** Starts a fetch if the current tile and any pending one do not fit the view. */
   need(start: number, end: number, per: number): void {
     if (this.channel.kind === "unavailable") return;
-    const mode = this.#mode(per);
+    const mode = this.#mode(start, end, per);
     if (this.tile && this.#fits(this.tile, mode, start, end, per)) {
       this.#pending?.abort.abort();
       this.#pending = null;
@@ -168,10 +202,7 @@ export class Track {
     p?.abort.abort();
     this.#pending = null;
     if (performance.now() < this.#retryAt) return;
-    // Fetch a view's width either side, so a small pan draws from what is here.
-    const width = end - start;
-    const lo = Math.max(channelStart(this.channel), Math.floor(start - width));
-    const hi = Math.min(this.channel.end, Math.ceil(end + width));
+    const [lo, hi] = this.#reads(start, end);
     const abort = new AbortController();
     const pending = { mode, start: lo, end: hi, per, abort, since: performance.now() };
     this.#pending = pending;
@@ -190,6 +221,25 @@ export class Track {
     this.#base = tile;
   }
 
+  /** At most how many edges [start, end) holds, by a digital overview in hand that covers it:
+   * Infinity where none does. */
+  #atMost(start: number, end: number): number {
+    for (const t of [this.tile, this.#base]) {
+      if (t?.kind !== "digital-overview" || !this.#covers(t, start, end)) continue;
+      const { start: s0, bucket, density } = t.data;
+      let n = 0;
+      const last = Math.min(density.length, Math.ceil((end - s0) / bucket));
+      for (let i = Math.max(0, Math.floor((start - s0) / bucket)); i < last && n <= EDGES_AT_MOST; i++) n += MOST[density[i]];
+      return n;
+    }
+    return Infinity;
+  }
+
+  /** `ov`'s buckets, where it is the finest level met yet. */
+  #met(ov: DigitalOverview | AnalogOverview): void {
+    this.#finest = Math.min(this.#finest, ov.bucket);
+  }
+
   /** The coarsest overview level, which is small: the base until a finer tile covers the channel. */
   async #fetchBase(): Promise<void> {
     try {
@@ -197,6 +247,7 @@ export class Track {
       const end = this.channel.end;
       const ov = await this.source.overview(this.index, start, end, Infinity);
       if (!ov) return;
+      this.#met(ov);
       this.#offerBase(
         ov.kind === "digital"
           ? { kind: "digital-overview", start, end, asked: Infinity, data: ov }
@@ -224,6 +275,7 @@ export class Track {
     if (p.mode === "overview") {
       const ov = await this.source.overview(this.index, p.start, p.end, p.per, signal);
       if (ov) {
+        this.#met(ov);
         done(
           ov.kind === "digital"
             ? { kind: "digital-overview", start: p.start, end: p.end, asked: p.per, data: ov }
@@ -234,6 +286,31 @@ export class Track {
       this.#noOverviewAtOrBelow = Math.max(this.#noOverviewAtOrBelow, p.per);
       if (this.#pending !== p) return;
       p.mode = this.channel.kind === "digital" ? "edges" : "samples";
+    }
+    // The index's count, a round trip, only where the overview in hand can't rule the bound out.
+    const over = p.mode === "edges" && this.#atMost(p.start, p.end) > EDGES_AT_MOST;
+    if (over && this.source.edgeCount && (await this.source.edgeCount(this.index, p.start, p.end, signal)) > EDGES_AT_MOST) {
+      this.#dense = { start: p.start, end: p.end, per: p.per };
+      if (this.#pending !== p) return;
+      p.mode = "dense";
+    }
+    if (p.mode === "dense") {
+      // The finest level: the first a doubling bucket meets past the largest that met none, short
+      // of the finest met yet (the base's, at first), else that one.
+      let ov: DigitalOverview | AnalogOverview | null = null;
+      for (let b = 2 * Math.max(1, this.#noOverviewAtOrBelow); !ov && b < this.#finest && b < 2 * this.channel.end; b *= 2) {
+        ov = await this.source.overview(this.index, p.start, p.end, b, signal);
+        if (!ov) this.#noOverviewAtOrBelow = Math.max(this.#noOverviewAtOrBelow, b);
+      }
+      ov ??= await this.source.overview(this.index, p.start, p.end, this.#finest, signal);
+      if (ov?.kind === "digital") {
+        this.#met(ov);
+        done({ kind: "digital-overview", start: p.start, end: p.end, asked: ov.bucket, data: ov });
+        return;
+      }
+      // No level at all: the edges, as many as they are.
+      p.mode = "edges";
+      this.#dense = null;
     }
     if (p.mode === "edges") {
       done({ kind: "edges", start: p.start, end: p.end, data: await this.source.edges(this.index, p.start, p.end, signal) });
