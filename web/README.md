@@ -531,7 +531,7 @@ and fall back to system colours on a page without them:
 | `--series-<name>` | the traces, with `series="<name>"`. Where the page doesn't set it, the recording's stored colour |
 | `--tickwave-role-<name>` | the lines paint role `<name>` draws, over the colour its declaration gives (ANNOTATIONS.md, "Roles") |
 | `--tickwave-role-<name>-weight` | CSS pixels the role's lines add to the line weight, from 0 to 4, with or without `px` |
-| `--tickwave-role-<name>-dash` | the role's dash and gap lengths, in line widths, as its declaration gives them: numbers apart by spaces or commas, in pairs. `none` draws a dashed role solid |
+| `--tickwave-role-<name>-dash` | the role's dash and gap lengths, in line widths, as its declaration gives them: numbers apart by spaces or commas, in pairs, together at least 1. `none` draws a dashed role solid |
 | `--tickwave-line-weight` | the traces' lines in a view and an inset: an analog trace, and a digital row's levels and edges. A number of CSS pixels, with or without `px`; 1.5 where it is unset or not a positive number. A role's weight adds to it. Rules, axes, the selection and markers stay a pixel wide. The chart doesn't read it |
 | `--font-text`, `--font-figures` | labels; the readouts' figures |
 

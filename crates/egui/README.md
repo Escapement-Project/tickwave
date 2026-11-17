@@ -10,7 +10,13 @@ graph. Both draw what a `Viewer` answers.
 `Viewer::open` opens a finished recording at a path. `Viewer::live` opens one a writer in the
 same process is still writing, from the writer's snapshot, and `Viewer::update` takes each newer
 snapshot. When the writer finishes the file, or a compacted copy replaces it, `Viewer::reopen`
-opens the file at the path again, finished; the view stays as it was.
+opens the file at the path again, finished; the view stays as it was. A `Viewer` is `Send`, so a
+host may open it off the UI thread and hand it over.
+
+A compaction renames a copy over the file, and Windows refuses that while the file is open.
+`Viewer::release` lets go of the file first: it cancels the query under way and runs none until
+`reopen`, while the graph draws the answer it holds, moved to the window on screen. What
+`Viewer::recording` reads of the file fails meanwhile.
 
 Queries run on a thread of their own. A newer query replaces one that hasn't started and cancels
 one that has, so only the newest answer is kept, and its arrival asks egui for a frame. Until the
@@ -27,7 +33,8 @@ nothing: the graph draws the answer it holds, moved to the window on screen, and
 scrolls every frame. A followed window's columns sit at fixed ticks, so its answer's window ends
 a whole column on, and now scrolls the picture between columns.
 `Viewer::answer` gives the latest answer, with the window's and the selection's statistics for a
-host's panel. `Viewer::failure` says why the last query or snapshot failed. `Viewer::recording`
+host's panel. `Viewer::busy` says a query is waiting or running, so the answer drawn may be older
+than the view. `Viewer::failure` says why the last query or snapshot failed. `Viewer::recording`
 reads the recording itself, for what it says of the whole capture: samples lost, gaps, sources
 and markers.
 
@@ -38,7 +45,11 @@ window follows the recording's end, or stays where it was put. The value range f
 window shows, or stays where it was moved. The graph and the strip change the state as the
 reader moves them, and the host can change it too: a pan, a zoom or a selection gives the window
 a place of its own, and setting it to follow again resumes following. A zoom while following a
-recording being written keeps following, at the new span, about the end.
+recording being written keeps following, at the new span, about the end; a selection drag stops
+following, so the span marked stays where it was drawn.
+
+`Graph::shown` reads, from the graph's response, the window and the value range it drew last. A
+host fixes Y where it is on screen by setting `Y::Fixed` from that range.
 
 A host builds a `ViewState` from `ViewState::default()`, the whole recording followed, and sets
 the fields it wants on that value; the `Extras` a graph adds to its query for a host's own panel
@@ -87,15 +98,28 @@ takes no now.
   each a short line drawn as the role's lines are, then its label. Its room is kept whenever the
   recording declares a role, so the plot keeps its height as the reader moves. A recording that
   declares none has no key and no room for one.
+- At the time axis's right end, while the recording is being written, a Live toggle: filled in
+  ink while the window follows, outlined while it doesn't, in one place and one size either way.
+  A press, or Space or Enter while it has the focus, stops following at the window drawn, or
+  follows again at its span. It shows a followed window the host sets from the next frame, and
+  makes the response `changed()` when it toggles. AccessKit reads it as a toggled button.
+- Near a marker's line, over the plot and the lanes, the pointer reads the marker: its time at
+  the recording's tick, then its number and label.
+
+A dash whose period comes to less than a device pixel, as a tiny `line_weight` makes it, draws
+solid.
 
 A graph from `Graph::lanes_only` draws its lanes, a band above them for the markers' labels where
 the recording has markers, and the time axis: no trace, no value axis, and no flag. Its height is
-what those take unless the host gives one.
+what those take unless the host gives one. It has no strip either: the strip is the trace's
+overview, so a view of digital channels alone has none.
 
 While a query runs, the graph draws the latest answer moved to the window on screen. An answer
 covers the window and a width either side, so a pan draws at once and a zoom stretches what is
-held. Past that, the trace comes from the strip's columns, so nothing goes blank. A drag never
-waits for a query.
+held. Past that, the trace comes from the strip's columns and each lane from its own columns over
+the extent, which the graph asks for with every query, so no column goes blank. A column of those
+that the answer's span cuts draws the levels of its part outside the span, read again, not the
+whole column's. A drag never waits for a query.
 
 ## Gestures
 

@@ -99,7 +99,7 @@ dash = [2, 1]
 | `label` | What a key and a readout say for the role, at most 200 bytes. The name where it is left out. |
 | `colour` | `"#rrggbb"` for both faces, or a `[day, night]` pair of them. |
 | `weight` | CSS pixels added to the trace's line weight, from 0 to 4. 0 where it is left out. |
-| `dash` | The role's dash and gap lengths, in pairs: at most 8 numbers, each from 0 to 64, not all 0. Each is a number of the role's line widths, its weight included. A solid line where it is left out. |
+| `dash` | The role's dash and gap lengths, in pairs: at most 8 numbers, each from 0 to 64, together at least 1. Each is a number of the role's line widths, its weight included. A solid line where it is left out. |
 
 A role takes no other field. A file declares at most 64 roles, and so do a sidecar's files
 between them. A file that declares more is one problem, and its roles past the 64th are not read.

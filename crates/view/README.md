@@ -21,11 +21,13 @@ the extent with it, take their span from the parts table, no part read. `roles` 
 roles the sidecar declares, in order, and `stored_view` its stored view (ANNOTATIONS.md, "Roles"
 and "The stored view"): both read the bundle alone, or a host's sidecar. `paints` gives every
 annotation that paints over a span with a declared role, from the parts the span meets, and a
-query's `MarkerQuery::paints` asks for those over its columns. A hand-written `ref` shows
-once every part is read, as `load_markers`, `marker_count`, `markers_left_out` and a query's marker
-list read them; `load_markers` says why they don't read, where they don't. A channel this version
-can't read keeps its place and name as `ChannelKind::Unavailable`, and a marker that names it is
-left out.
+query's `MarkerQuery::paints` asks for those over its columns. A query's `strip` and `fallbacks` ask
+for channels' columns over the whole extent, which a host draws past `around` while a newer answer
+is on the way; each comes with the parts outside `around` of the columns `around` cuts, read again
+on their own (`StripAnswer::cut`). A hand-written `ref` shows once every part is read, as
+`load_markers`, `marker_count`, `markers_left_out` and a query's marker list read them;
+`load_markers` says why they don't read, where they don't. A channel this version can't read keeps
+its place and name as `ChannelKind::Unavailable`, and a marker that names it is left out.
 `Recording::live` reads a file a writer in the same process is still writing, through the
 writer's `Snapshot`, and `Recording::update` takes each newer snapshot, reading only what the
 writer added since and decoding only the blocks it hasn't yet, and the open block. Its cost
