@@ -58,7 +58,8 @@ a GitHub sign-in to download, so share captures in a public one.
 Hold Ctrl (Cmd on a Mac) and turn the wheel to zoom about the pointer, or pinch on a trackpad or a
 touch screen. The plain wheel scrolls the page. Drag, swipe sideways or hold Shift with the wheel to
 move along the capture. A zoom step eases into place over about 150 ms. Where the system is set to
-reduce motion, it jumps there instead.
+reduce motion, it jumps there instead, and so it does where the view takes longer to draw than a
+frame at 60 Hz.
 
 With the view focused, the left and right arrow keys move it. The up and down arrows, or plus and
 minus, zoom in and out. Home and the Fit button show the whole capture, and every analog channel's
@@ -119,6 +120,9 @@ together. Where other edges come near each other without crowding into one pixel
 towards the shade a stretch of them would take, so neighbouring edges and a crowded stretch read
 alike.
 
+Zoomed in on a burst far busier than the rest of a long capture, the row goes on shading it until
+the view is narrow enough to hold its edges.
+
 ## Row heights
 
 Drag a row's lower edge in the names column to make the row taller or shorter. With that edge
@@ -131,6 +135,12 @@ An analog row's scale, the values at its left, zooms and moves on its own. Hold 
 and turn the wheel over the scale to zoom its values about the pointer, or pinch it with two fingers
 on a touch screen. Drag the scale up or down to move its values. A double click fits it to the values
 in view. It zooms in no further than four steps of the instrument's resolution.
+
+The view waits for every analog channel's overall range before it draws, so the scales and the
+channel names beside them are in place from the first frame. A recording gives the range with the
+first data the view loads. In a merge preview at the fastest recording's rate, a channel whose ticks
+don't fall on whole ticks of that rate has no range at first: its row shows the channel's name
+alone until the view has shown all of the channel, and then its scale.
 
 Once the values are zoomed in, a drag over the row's traces with a mouse or a pen moves them up and
 down as well as along the capture. On a touch screen, a finger moving up or down there scrolls the
@@ -150,7 +160,9 @@ analog channel's value at each cursor, and each digital channel's pulse at curso
 Drag along the time axis to select a span. The readout gives its length and counts each channel's
 edges in it. For one channel it measures the clock: how many periods there are, their least,
 median and greatest, and the running clock. That is the clock's rate and period with the pauses
-left out.
+left out. A span with more than 2,097,152 different periods, far more than a clock has, gets no
+median, and its running clock is the mean of every period, the pauses with them. The readout says
+so.
 
 ## Annotations
 

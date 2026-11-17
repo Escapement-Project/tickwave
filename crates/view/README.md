@@ -56,9 +56,12 @@ rest, the markers from `MarkerQuery::default()`; neither is built as a literal o
 so a later version can add a field. The columns cover the window and one width either side, so a
 pan has columns to draw while its own answer is on the way. A column takes the coarsest overview
 level no wider than it among its channel's levels, or the samples and edges themselves below the
-finest. An analog trace draws no line across a break. A column that touches a span the instrument
-lost is pale: the samples lost at a break, and those lost before a channel's first sample and after
-its last. The extent reaches over those, so statistics count them as time no sample measured.
+finest. A digital channel's columns read at most 2,097,152 edges, as the browser's rows do: where a
+finished recording's index counts more, as a burst far busier than the rest of a long capture can
+hold, they take the finest level until the window narrows enough. An analog trace draws no line
+across a break. A column that touches a span the instrument lost is pale: the samples lost at a
+break, and those lost before a channel's first sample and after its last. The extent reaches over
+those, so statistics count them as time no sample measured.
 
 A window that follows a recording as it is written asks for `Query::aligned` columns: each a
 whole number of ticks, ⌈width / columns⌉, from tick 0, so every window as wide shares them. The

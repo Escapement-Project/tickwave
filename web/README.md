@@ -166,6 +166,7 @@ Committed, in `fixtures/`:
 | `swd50-cut.tickwave` | `tickwave convert saleae testdata/saleae/swd50-cut --channel analog_0=SWCLK --channel analog_1=SWDIO --channel digital_4_0=NRST`: 50 µs of a mixed-signal oscilloscope's analog inputs as 12-bit codes, in an 11 ms capture |
 | `energy.tickwave` | `cargo run -p escapement-tickwave-format --example energy -- web/fixtures`, from the repository: a synthetic recording laid out as verge's energy captures are, with nothing from a capture. V and I as 32-bit integer codes in mV and nA every 960 ticks at 96 MHz, with a loss and a pause; P derived from them; `range`, `under_range` and DIO0, which has a pulse at tick 0 and a gap; markers bundled into the file; six short blocks of V and of I, as a recorder flushing every 5 ms leaves them |
 | `unavailable.tickwave` | `cargo run -p escapement-tickwave-format --example unavailable -- web/fixtures`, from the repository: channels a reader of this version can't read, kept in their places (FORMAT.md, "Unavailable channels"). V requires a feature and E states a codec, neither defined; P is derived from V, and Q requires the feature itself; I, J, D and S = I − J read. Seven annotations bundled: two name V or E, and of two with one id, the first starts past the length |
+| `burst.tickwave` | `cargo run --release -p escapement-tickwave-format --example burst -- web/fixtures`, from the repository: an hour at 1 GHz, idle but for an edge every 10 s, and on D a burst of 20,000,000 edges 2 ticks apart from 30 minutes and a tick, far denser than D's finest overview level. For a row's bound on the edges it reads, and the period figures of a span with more periods than distinct ones |
 | `phased.tickwave` | `cargo run -p escapement-tickwave-format --example phased -- web/fixtures`, from the repository: analog samples whose places fall between ticks (FORMAT.md, "Times"). A every 5/2 ticks with a declared phase of 3/4 of a tick, then a break with a phase of its own, 1/4; B every 5/2 ticks with none; D, digital |
 | `identify-swd.annotations.toml` | the hand-written sidecar for `identify-swd.tickwave` |
 | `identify-swd.tickwavefx` | the in-memory route's fixture, cut from the same export by `scripts/extract-fixtures.ts` |
@@ -264,13 +265,22 @@ the left and right arrow keys move along the capture. With the view focused, the
 or plus and minus zoom in and out. Home and Fit show the whole capture, or all of the channels the
 view shows, with each analog channel's whole range, and Escape clears the cursors and the selection.
 A zoom step eases into place over about 150 ms, and the rows read for where it goes at once. A
-reader who prefers reduced motion sees each step jump there.
+reader who prefers reduced motion sees each step jump there. So does any reader while the view's
+last three draws each took longer than a frame at 60 Hz, and an ease under way then ends.
 
 Over an analog row's scale, Ctrl or Cmd with the wheel, or two fingers, zoom its values about the
 pointer instead, a drag moves them, and a double click fits them to the values in view. A scale takes
 the focus: up and down move it, plus and minus zoom it, Enter fits it and Home shows its whole range.
 Once a row's values are zoomed in, a drag over its traces with a mouse or a pen moves them too, as
 well as along the capture.
+
+An analog row's whole range is the least and greatest value in its channel's coarsest overview,
+which are those of all its samples; the row reads that overview first. The plot draws nothing until
+every analog row's overview has landed, come back empty or failed, so the names column, which the
+scales' labels widen, is in place from the first frame. When the channels shown change, it keeps
+its last frame until the new rows' overviews are in. A channel with no overview, as in a merge
+preview whose recording's ticks don't fall on whole merged ticks, shows its name alone, with no
+scale, until the view has read all of it; its range then widens the names column.
 
 A mouse over a row reads it at the pointer. An analog channel gives the value of the sample
 there in a label, or the smallest and largest value where one pixel covers several samples. On a
@@ -299,7 +309,12 @@ gives each digital channel's pulse at cursor A, with the figures the pointer giv
 A drag along the time axis selects a span. The readout gives its length and each channel's edges
 in it. For one channel it gives the periods' count, minimum, median and maximum, and the running
 clock. The running clock is the mean of the periods inside Tukey's fences, as the sidecar's
-measures define it: it keeps a clock's jitter and quantisation, and drops pauses.
+measures define it: it keeps a clock's jitter and quantisation, and drops pauses. The figures come
+from a count of each distinct period, so their memory grows with how many different periods the
+span holds, not with how many periods. Past 2,097,152 distinct periods, far more than a clock's,
+the count, minimum and maximum stay exact, the median is null (the readout shows a dash in its
+place), and the running clock is the mean of every period, the pauses included. The note says so.
+`tickwave-select`'s `periods` carries the same figures.
 
 A menu beside the zoom buttons steps through one kind of annotation, "3 of 16". It starts with the
 kind of the annotation the view opened at, else the kind of the sidecar's first annotation.
@@ -474,6 +489,11 @@ and fall back to system colours on a page without them:
 | `--tickwave-<role>` | a line where an annotation's `paint` role drives it. `probe` falls back to the series colour, any other role to ink. The `target` role's lines are heavier as well, so a page without colours still tells the roles apart |
 | `--tickwave-line-weight` | the traces' lines in a view and an inset: an analog trace, and a digital row's levels and edges. A number of CSS pixels, with or without `px`; 1.5 where it is unset or not a positive number. The `target` role's lines draw a pixel heavier. Rules, axes, the selection and markers stay a pixel wide. The chart doesn't read it |
 | `--font-text`, `--font-figures` | labels; the readouts' figures |
+
+A digital row reads at most 2,097,152 edges for a view, the view's and a view's width either side.
+Where the overview it holds can't rule more out, it counts them from the recording's index first.
+Where those hold more, as a burst far busier than the rest of a long capture can, the row draws its
+finest overview level, each bucket across the columns it spans, until the view narrows enough.
 
 While a zoom's finer data loads, a row draws the coarser data it has. Where that data shows a
 change it cannot yet place, the row draws it in the trace's colour, faded. A read still going
