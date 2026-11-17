@@ -2,7 +2,7 @@
 // What reads a URL is up to the loaders registered here: tickwave.js registers one for .tickwave
 // files; the dev page registers one for its fixtures.
 
-import type { Annotation } from "./annotations.ts";
+import { NONE_DECLARED, type Annotation, type Declared, type Sidecar } from "./annotations.ts";
 import { named, type RecordingInfo, type Source } from "./source.ts";
 
 /** Bundled annotations as far as they are read: a recording's parts are read a range at a time
@@ -13,29 +13,38 @@ export interface BundledRead {
   readonly problems: readonly string[];
   /** Whether every one is read. */
   readonly complete: boolean;
+  /** The roles and the stored view the bundle declares, whole before any part is read; none
+   * where a loader gives none. */
+  readonly declared?: Declared;
+}
+
+/** A loader's answer as a sidecar: a list alone declares nothing. */
+function sidecarOf(got: Annotation[] | Sidecar): Sidecar {
+  return Array.isArray(got) ? { annotations: got, ...NONE_DECLARED } : got;
 }
 
 export interface Loader {
   /** Whether this loader reads the recording at `url`. */
   accepts(url: URL): boolean;
   source(url: URL): Source;
-  /** The resolved annotations of the sidecar at `annotations`, for the recording at `recording`. */
-  annotations?(annotations: URL, recording: URL, source: Source): Promise<Annotation[]>;
+  /** The resolved annotations of the sidecar at `annotations`, for the recording at `recording`,
+   * with what the sidecar declares beside them where the loader reads that. */
+  annotations?(annotations: URL, recording: URL, source: Source): Promise<Annotation[] | Sidecar>;
   /** The annotations bundled into the recording itself, or null when it carries none. */
-  bundled?(recording: URL, source: Source): Promise<Annotation[] | null>;
+  bundled?(recording: URL, source: Source): Promise<Annotation[] | Sidecar | null>;
   /** Those of the bundled annotations that ticks `span` meet, with any read before; every one
    * where `span` is null. A loader without it serves `bundled`, whole. */
   bundledIn?(recording: URL, source: Source, span: readonly [number, number] | null): Promise<BundledRead | null>;
   /** The resolved annotations of a sidecar whose hand-written file is `text`, with its includes
    * beside `base` (or the recording's local files when `base` is null). */
-  annotationsText?(text: string, base: URL | null, recording: URL, source: Source): Promise<Annotation[]>;
+  annotationsText?(text: string, base: URL | null, recording: URL, source: Source): Promise<Annotation[] | Sidecar>;
 }
 
 const loaders: Loader[] = [];
 const sources = new Map<string, Source>();
 const infos = new Map<string, Promise<RecordingInfo>>();
 const heads = new Map<string, RecordingInfo>();
-const annotationLists = new Map<string, Promise<Annotation[] | null>>();
+const annotationLists = new Map<string, Promise<Sidecar | null>>();
 const waiting: (() => void)[] = [];
 
 /** Fires `tickwave-head` with the URL once a recording's head is here. */
@@ -100,7 +109,7 @@ export function peekInfo(url: URL): RecordingInfo | null {
   return heads.get(url.href) ?? null;
 }
 
-function cached(key: string, load: () => Promise<Annotation[] | null>): Promise<Annotation[] | null> {
+function cached(key: string, load: () => Promise<Sidecar | null>): Promise<Sidecar | null> {
   let p = annotationLists.get(key);
   if (!p) {
     p = load();
@@ -111,27 +120,28 @@ function cached(key: string, load: () => Promise<Annotation[] | null>): Promise<
 }
 
 /** The sidecar at `annotations`, resolved against the recording at `recording`. */
-export function annotationsFor(annotations: URL, recording: URL): Promise<Annotation[]> {
+export function annotationsFor(annotations: URL, recording: URL): Promise<Sidecar> {
   return cached(`${annotations.href}\n${recording.href}`, async () => {
     const loader = await loaderFor(recording);
     if (!loader.annotations) throw new Error(`${recording.pathname}: no reader for its annotations`);
-    return loader.annotations(annotations, recording, await sourceFor(recording));
-  }) as Promise<Annotation[]>;
+    return sidecarOf(await loader.annotations(annotations, recording, await sourceFor(recording)));
+  }) as Promise<Sidecar>;
 }
 
 /** The sidecar whose hand-written file is `text`, resolved against the recording at `recording`.
  * Not cached: an editor hands in a new text with each change. */
-export async function annotationsFromText(text: string, base: URL | null, recording: URL): Promise<Annotation[]> {
+export async function annotationsFromText(text: string, base: URL | null, recording: URL): Promise<Sidecar> {
   const loader = await loaderFor(recording);
   if (!loader.annotationsText) throw new Error(`${recording.pathname}: no reader for its annotations as text`);
-  return loader.annotationsText(text, base, recording, await sourceFor(recording));
+  return sidecarOf(await loader.annotationsText(text, base, recording, await sourceFor(recording)));
 }
 
 /** The annotations bundled into the recording, or null. */
-export function bundledFor(recording: URL): Promise<Annotation[] | null> {
+export function bundledFor(recording: URL): Promise<Sidecar | null> {
   return cached(`\n${recording.href}`, async () => {
     const loader = await loaderFor(recording);
-    return loader.bundled ? loader.bundled(recording, await sourceFor(recording)) : null;
+    const got = loader.bundled ? await loader.bundled(recording, await sourceFor(recording)) : null;
+    return got && sidecarOf(got);
   });
 }
 
@@ -140,8 +150,8 @@ export function bundledFor(recording: URL): Promise<Annotation[] | null> {
 export async function bundledIn(recording: URL, span: readonly [number, number] | null): Promise<BundledRead | null> {
   const loader = await loaderFor(recording);
   if (loader.bundledIn) return loader.bundledIn(recording, await sourceFor(recording), span);
-  const list = await bundledFor(recording);
-  return list && { annotations: list, problems: [], complete: true };
+  const whole = await bundledFor(recording);
+  return whole && { annotations: whole.annotations, problems: [], complete: true, declared: whole };
 }
 
 /** A span no annotation part meets: a read of a bundled sidecar's annotations for it reads the

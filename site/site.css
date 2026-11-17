@@ -89,7 +89,7 @@ html:not(.js) .needs-script { display: none; }
 tickwave-view { margin: 12px 0; }
 /* The overview cites a capture whose probe it does not name: probe-driven lines in secondary ink,
    the target's in ink, and no series hue. */
-.overview { --tickwave-probe: var(--ink-2); }
+.overview { --tickwave-role-probe: var(--ink-2); }
 /* How the overview's section does what it shows: a step down from the section's heading. */
 #page .how { font-size: 17px; font-weight: 600; margin: 32px 0 12px; }
 

@@ -467,7 +467,7 @@ test("a bundled sidecar serves when the view names none", async ({ page }) => {
   await expect(view.locator(".notice")).toBeHidden();
 });
 
-test("a bundled recording draws from its footer while its sidecar is read, and keeps its lane's room", async ({ page }, info) => {
+test("a bundled recording opened at a window draws from its footer while its sidecar is read, and keeps its lane's room", async ({ page }, info) => {
   const BUNDLE = "fixtures/identify-swd.bundle.tickwave";
   test.skip(!existsSync(BUNDLE), "needs target/release/tickwave: scripts/generate.ts bundles with it");
   const file = new Uint8Array(readFileSync(BUNDLE));
@@ -485,7 +485,9 @@ test("a bundled recording draws from its footer while its sidecar is read, and k
     bundleRead = true;
   });
   await recordReady(page);
-  await page.goto(`/e2e/pages/view.html?open&src=${BUNDLE}&firstRead=256&tag=${tagged(info, "bundle-first")}`);
+  // A window from the page: with nothing said, the view reads the bundle first for a stored view
+  // (roles.spec.ts).
+  await page.goto(`/e2e/pages/view.html?open&src=${BUNDLE}&firstRead=256&window=${encodeURIComponent("0 523583100")}&tag=${tagged(info, "bundle-first")}`);
   const view = page.locator("#v");
   const height = () => view.locator("canvas").evaluate((c) => (c as HTMLCanvasElement).style.height);
   await expect.poll(height, { timeout: 25_000 }).not.toBe("");
@@ -845,7 +847,7 @@ test("the target's drive draws heavier than the probe's, so the roles differ wit
   const inset = page.locator("#i");
   await expect(inset.locator("figcaption")).toHaveText("Reading the debug port's ID register");
   await expect(inset.locator(".key > span")).toHaveText(["probe drives", "target drives"]);
-  expect(await inset.locator(".key i").evaluateAll((is) => is.map((i) => getComputedStyle(i).height))).toEqual(["2px", "3px"]);
+  expect(await inset.locator(".key line").evaluateAll((ls) => ls.map((l) => l.getAttribute("stroke-width")))).toEqual(["1.5", "2.5"]);
   // Each column's short runs of ink are the flat stretches of line: 1.5 px is 3 device pixels at
   // this scale, 2.5 px is 5. The probe drives the request and the target the data, so both show.
   const measure = () => inset.locator("canvas").evaluate((canvas: HTMLCanvasElement) => {

@@ -56,7 +56,7 @@ test("a span reads the parts it meets and no other, each once; every part read, 
   // Every part read: the list is the sidecar's files resolved whole, by the resolver a sidecar
   // beside a recording goes through, refs and all.
   const { json } = handJson(readFileSync(at("fixtures/identify-swd.annotations.toml"), "utf8"), "identify-swd.annotations.toml");
-  const whole = JSON.parse(r.resolveAnnotations(json, ["identify-swd.swd.jsonl"], [readFileSync(at("fixtures/identify-swd.swd.jsonl"), "utf8")], null)) as CoreAnnotation[];
+  const whole = (JSON.parse(r.resolveAnnotations(json, ["identify-swd.swd.jsonl"], [readFileSync(at("fixtures/identify-swd.swd.jsonl"), "utf8")], null)) as { annotations: CoreAnnotation[] }).annotations;
   assert.ok(whole.some((a) => a.ref));
   assert.deepEqual(second.list, whole);
   assert.deepEqual(second.problems, []);

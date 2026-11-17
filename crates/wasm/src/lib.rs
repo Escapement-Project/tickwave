@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::ops::ControlFlow;
 
 #[cfg(feature = "annotations")]
-use escapement_tickwave_format::annotations::{self, Annotation, Included};
+use escapement_tickwave_format::annotations::{self, Annotation, Included, Role, View};
 use escapement_tickwave_format::decode::{
     self, BlockChannel, BlockRef, DecodeError, Footer, Index, LevelRef, List,
 };
@@ -309,8 +309,9 @@ impl Recording {
     }
 
     /// Resolves and checks a sidecar: the hand-written TOML file parsed and written out as JSON,
-    /// and the generator files it includes, by name and text. Returns the annotations as JSON.
-    /// Throws with every problem found, one a line.
+    /// and the generator files it includes, by name and text. Returns JSON: its `annotations`, the
+    /// `roles` it declares and its stored `view`, or null. Throws with every problem found, one a
+    /// line.
     #[cfg(feature = "annotations")]
     #[wasm_bindgen(js_name = resolveAnnotations)]
     pub fn resolve_annotations(
@@ -325,14 +326,17 @@ impl Recording {
             .zip(&texts)
             .map(|(name, text)| Included { name, text })
             .collect();
-        annotations::resolve_json(
-            hand,
-            &included,
-            &self.footer().header,
-            recording_file.as_deref(),
-        )
-        .map(|resolved| serde_json::to_string(&resolved).expect("annotations serialise"))
-        .map_err(|problems| JsError::new(&problems.join("\n")))
+        let header = &self.footer().header;
+        let resolved =
+            annotations::resolve_json(hand, &included, header, recording_file.as_deref())
+                .map_err(|problems| JsError::new(&problems.join("\n")))?;
+        // Resolving checked the roles and the view, so neither has a problem left.
+        let out = Sidecar {
+            annotations: &resolved,
+            roles: annotations::roles_json(hand, &included).0,
+            view: annotations::view_json(hand, header).ok().flatten(),
+        };
+        Ok(serde_json::to_string(&out).expect("annotations serialise"))
     }
 
     /// Overview channel `o`'s strip, its coarsest level, decoded: a channel, or a derived channel
@@ -994,9 +998,14 @@ impl Recording {
             .zip(&texts)
             .map(|(name, text)| Included { name, text })
             .collect();
-        let apart = annotations::resolve_apart_json(hand, &included, &self.footer().header, &|t| {
+        let header = &self.footer().header;
+        let apart = annotations::resolve_apart_json(hand, &included, header, &|t| {
             by_id.get(t).map(|a| (*a).clone())
         });
+        // A downloaded file shows the roles and the view before any part is read: they are in
+        // the bundle, the hand-written file's and the generator files' first lines.
+        let roles = annotations::roles_json(hand, &included).0;
+        let view = annotations::view_json(hand, header).ok().flatten();
         let out = Apart {
             annotations: apart
                 .annotations
@@ -1012,6 +1021,8 @@ impl Recording {
                 .map(|&(name, kept)| Kept { name, kept })
                 .collect(),
             problems: &apart.problems,
+            roles,
+            view,
         };
         Ok(serde_json::to_string(&out).expect("annotations serialise"))
     }
@@ -1081,6 +1092,17 @@ struct Apart<'a> {
     annotations: Vec<Placed<'a>>,
     files: Vec<Kept<'a>>,
     problems: &'a [String],
+    roles: Vec<Role>,
+    view: Option<View>,
+}
+
+/// A sidecar resolved whole: its annotations, and what it declares beside them.
+#[cfg(feature = "annotations")]
+#[derive(Serialize)]
+struct Sidecar<'a> {
+    annotations: &'a [Annotation],
+    roles: Vec<Role>,
+    view: Option<View>,
 }
 
 #[cfg(feature = "annotations")]

@@ -1,7 +1,8 @@
-import { indexAnnotations, readable, type Annotation, type Resolved } from "../annotations.ts";
+import { indexAnnotations, NONE_DECLARED, readable, type Annotation, type Declared, type Resolved } from "../annotations.ts";
 import { parseSeries } from "../attributes.ts";
 import { onFaceChange, onFontsLoaded } from "../face.ts";
 import { resolvePalette, type Palette } from "../palette.ts";
+import type { Colour } from "../roles.ts";
 import { absolute, annotationsFor, annotationsFromText, bundledIn, infoFor, sourceFor } from "../registry.ts";
 import type { RecordingInfo, Source } from "../source.ts";
 import { HOST_TEXT } from "./summary-style.ts";
@@ -76,19 +77,23 @@ export async function loadAnnotations(recording: URL, annotations: string | null
  * that fails leaves what was read before. */
 export async function readAnnotations(recording: URL, annotations: string | null, text: string | null, span: readonly [number, number] | null): Promise<Resolved> {
   let list: Annotation[];
+  let declared: Declared = NONE_DECLARED;
   const errors: string[] = [];
   let partial = false;
   const at = annotations ? absolute(annotations) : null;
-  if (text !== null) list = await annotationsFromText(text, at, recording);
-  else if (at) list = await annotationsFor(at, recording);
-  else {
+  if (text !== null || at) {
+    const sidecar = text !== null ? await annotationsFromText(text, at, recording) : await annotationsFor(at!, recording);
+    list = sidecar.annotations;
+    declared = sidecar;
+  } else {
     const read = await bundledIn(recording, span);
     list = read?.annotations ?? [];
+    declared = read?.declared ?? NONE_DECLARED;
     errors.push(...(read?.problems ?? []));
     partial = read !== null && !read.complete;
   }
   list = readable(list, (await infoFor(recording)).channels, errors);
-  return indexAnnotations(list, errors, partial);
+  return indexAnnotations(list, errors, partial, { roles: declared.roles, view: declared.view });
 }
 
 export abstract class TickwaveElement extends HTMLElement {
@@ -151,10 +156,27 @@ export abstract class TickwaveElement extends HTMLElement {
     return parseSeries(this.getAttribute("series"));
   }
 
+  /** The trace colour the recording stores (ANNOTATIONS.md, "The stored view"), under the
+   * page's: an element that has read its sidecar gives it. */
+  protected get storedColour(): Colour | null {
+    return null;
+  }
+
+  /** The stored colour last read, so the palette is read again only when it changes. */
+  #stored: Colour | null = null;
+
   protected refreshPalette(): void {
     if (!this.isConnected || !this.drawsWithPalette) return;
-    this.palette = resolvePalette(this.#probe, this.series);
+    this.#stored = this.storedColour;
+    this.palette = resolvePalette(this.#probe, this.series, this.#stored);
     this.paletteChanged();
+  }
+
+  /** Reads the palette again where the stored colour changed: a sidecar that arrived, or another. */
+  protected storedColourChanged(): void {
+    const c = this.storedColour;
+    if (c?.day === this.#stored?.day && c?.night === this.#stored?.night) return;
+    this.refreshPalette();
   }
 
   protected abstract paletteChanged(): void;

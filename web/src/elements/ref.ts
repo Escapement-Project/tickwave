@@ -140,7 +140,7 @@ export class TickwaveRef extends TickwaveElement {
     const sidecar = annotations ? absolute(annotations) : null;
     // A recording or sidecar the reference has moved off says nothing about the one it cites now.
     prefetch(recording, sidecar)
-      .then(() => (sidecar ? annotationsFor(sidecar, recording).then((list) => ({ list, partial: false })) : this.#bundled(recording, BUNDLE_ONLY)))
+      .then(() => (sidecar ? annotationsFor(sidecar, recording).then((s) => ({ list: s.annotations, partial: false })) : this.#bundled(recording, BUNDLE_ONLY)))
       .then(({ list, partial }) => {
         if (this.#prefetched !== key) return;
         [this.#list, this.#partial] = [list, partial];

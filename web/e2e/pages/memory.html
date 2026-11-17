@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>One view of an in-memory fixture, through the dev page's loader</title>
+<!--
+  The dev page's loader reads a sidecar's JSON as it stands, unchecked, as a reader meets a bundle
+  some other tool wrote: what a view draws of a paint the sidecar doesn't declare.
+  ?src=  a .tickwavefx fixture, relative to web/ (default fixtures/identify-swd.tickwavefx)
+  ?annotations=  its sidecar's hand-written JSON file, relative to web/
+  ?window=  the view's window attribute
+  ?style=   the view's style attribute
+-->
+<script type="importmap">{ "imports": { "tickwave": "../../dist/tickwave.js" } }</script>
+<script type="module">
+import "../../dist/tickwave.js";
+import "../../dist/dev-loader.js";
+const q = new URLSearchParams(location.search);
+const view = document.createElement("tickwave-view");
+view.id = "v";
+view.setAttribute("src", `../../${q.get("src") ?? "fixtures/identify-swd.tickwavefx"}`);
+if (q.get("annotations")) view.setAttribute("annotations", `../../${q.get("annotations")}`);
+if (q.get("window")) view.setAttribute("window", q.get("window"));
+if (q.get("style")) view.setAttribute("style", q.get("style"));
+view.setAttribute("open", "");
+document.body.append(view);
+</script>
+</head>
+<body>
+</body>
+</html>

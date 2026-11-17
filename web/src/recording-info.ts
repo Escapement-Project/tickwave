@@ -1,4 +1,4 @@
-import type { Annotation } from "./annotations.ts";
+import type { Annotation, Sidecar } from "./annotations.ts";
 import { absolute, annotationsFromText, infoFor } from "./registry.ts";
 import type { RecordingInfo } from "./source.ts";
 
@@ -13,6 +13,11 @@ export function recordingInfo(src: string): Promise<RecordingInfo> {
  * the sidecar's address, or from the files registered with the recording when that is null.
  * Rejects with every problem, one a line.
  */
-export function resolveSidecar(src: string, text: string, annotations: string | null): Promise<Annotation[]> {
+export async function resolveSidecar(src: string, text: string, annotations: string | null): Promise<Annotation[]> {
+  return (await readSidecar(src, text, annotations)).annotations;
+}
+
+/** As `resolveSidecar`, with the roles and the stored view the sidecar declares. */
+export function readSidecar(src: string, text: string, annotations: string | null): Promise<Sidecar> {
   return annotationsFromText(text, annotations ? absolute(annotations) : null, absolute(src));
 }

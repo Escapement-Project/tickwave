@@ -4,7 +4,7 @@
 // checks it, so the text in hand always does. Saving writes the file back where `tickwave open`
 // serves it, or downloads it.
 
-import { resolveSidecar, type Annotation, type RecordingInfo, type TickwaveView } from "tickwave";
+import { readSidecar, type Annotation, type RecordingInfo, type Role, type TickwaveView } from "tickwave";
 import type { Edit, Fields, FromWorker, HandAnnotation, ToWorker } from "../web/src/convert/protocol.ts";
 import { formatInterval } from "../web/src/readouts.ts";
 import { idFrom, timeText } from "./editor-fields.ts";
@@ -89,7 +89,7 @@ export function attachEditor(view: TickwaveView, info: RecordingInfo, sidecar: S
     start: byId<HTMLInputElement>("note-start"),
     end: byId<HTMLInputElement>("note-end"),
     text: byId<HTMLTextAreaElement>("note-text"),
-    paint: byId<HTMLSelectElement>("note-paint"),
+    paint: byId<HTMLInputElement>("note-paint"),
     what: byId<HTMLSelectElement>("note-what"),
     measure: byId<HTMLSelectElement>("note-measure"),
   };
@@ -109,6 +109,8 @@ export function attachEditor(view: TickwaveView, info: RecordingInfo, sidecar: S
   let etag: string | null = null;
   let hand: HandAnnotation[] = [];
   let resolved: Annotation[] = [];
+  /** The roles the sidecar declares, for the paint field's list. */
+  let roles: readonly Role[] = [];
   let current: Current = null;
   /** The id field follows the label until it is typed in. */
   let idTyped = false;
@@ -168,7 +170,8 @@ export function attachEditor(view: TickwaveView, info: RecordingInfo, sidecar: S
         from = (await worker.run("", { op: "start", recording: sidecar.recording, recording_id: info.contentId })).text;
       }
       const read = await worker.run(from, null);
-      resolved = await resolveSidecar(sidecar.src, read.text, sidecar.annotations);
+      const whole = await readSidecar(sidecar.src, read.text, sidecar.annotations);
+      [resolved, roles] = [whole.annotations, whole.roles];
       text = read.text;
       // A new file is a change until it is saved; one read from its place is not.
       saved = sidecar.annotations || sidecar.file ? read.text : null;
@@ -202,6 +205,7 @@ export function attachEditor(view: TickwaveView, info: RecordingInfo, sidecar: S
     say(noteProblem, null);
     let next: { text: string; hand: HandAnnotation[] };
     let list: Annotation[];
+    let declared: readonly Role[];
     try {
       next = await worker.run(text, edit);
     } catch (e) {
@@ -209,7 +213,8 @@ export function attachEditor(view: TickwaveView, info: RecordingInfo, sidecar: S
       return false;
     }
     try {
-      list = await resolveSidecar(sidecar.src, next.text, sidecar.annotations);
+      const whole = await readSidecar(sidecar.src, next.text, sidecar.annotations);
+      [list, declared] = [whole.annotations, whole.roles];
     } catch (e) {
       say(noteProblem, "The sidecar wouldn't check with that change:", message(e).split("\n").filter(Boolean));
       return false;
@@ -217,6 +222,7 @@ export function attachEditor(view: TickwaveView, info: RecordingInfo, sidecar: S
     text = next.text;
     hand = next.hand;
     resolved = list;
+    roles = declared;
     view.annotationsText = text;
     renderList();
     showState();
@@ -269,6 +275,9 @@ export function attachEditor(view: TickwaveView, info: RecordingInfo, sidecar: S
     list.replaceChildren(...items);
     const kinds = byId("note-kinds");
     kinds.replaceChildren(...[...new Set(resolved.map((a) => a.kind).filter((k): k is string => !!k))].map((k) => Object.assign(document.createElement("option"), { value: k })));
+    // The roles the sidecar declares, in its order. A paint must name one: the check refuses any
+    // other, as it refuses any change that breaks a rule.
+    byId("note-paints").replaceChildren(...roles.map((r) => Object.assign(document.createElement("option"), { value: r.name, label: r.label })));
   }
 
   /** The recording's channels as ticks, and its digital ones as what a measure can read. */

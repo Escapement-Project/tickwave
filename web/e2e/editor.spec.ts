@@ -96,6 +96,31 @@ test("a change that wouldn't check is refused, and the sidecar stays as it was",
   await expect(page.locator("#edit-state")).toHaveText("");
 });
 
+test("the paint field offers the roles the sidecar declares, and a paint naming none is refused as other problems are", async ({ page }) => {
+  await page.goto(IDENTIFY);
+  const view = await viewReady(page);
+  await page.locator("#edit").click();
+  await page.locator("#notes .pick", { hasText: /^attach/ }).click();
+  // The SWD generator's file declares probe and target, in that order.
+  const offered = page.locator("#note-paints option");
+  await expect(offered).toHaveCount(2);
+  expect(await offered.evaluateAll((os) => os.map((o) => [(o as HTMLOptionElement).value, (o as HTMLOptionElement).label]))).toEqual([
+    ["probe", "probe drives"],
+    ["target", "target drives"],
+  ]);
+  await page.locator("#note-paint").fill("nowhere");
+  await page.locator("#note-apply").click();
+  const problem = page.locator("#note-problem");
+  await expect(problem).toContainText("The sidecar wouldn't check with that change:");
+  await expect(problem.locator("li")).toHaveText(['annotation 2: paint "nowhere" names no role the sidecar declares']);
+  expect(await handed(view)).toBe(SIDECAR);
+  // A declared one goes in.
+  await page.locator("#note-paint").fill("target");
+  await page.locator("#note-apply").click();
+  await expect(problem).toBeHidden();
+  await expect.poll(() => handed(view)).toContain('paint = "target"');
+});
+
 test("a generator's annotation is read, not edited, and naming it adds a hand-written one that refers to it", async ({ page }) => {
   await page.goto(IDENTIFY);
   const view = await viewReady(page);

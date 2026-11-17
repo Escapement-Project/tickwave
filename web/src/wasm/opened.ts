@@ -33,7 +33,8 @@ import {
   type Samples,
   type SourceHeader,
 } from "../source.ts";
-import type { CoreAnnotation } from "../annotations.ts";
+import type { CoreAnnotation, StoredView } from "../annotations.ts";
+import type { Role } from "../roles.ts";
 import { join, type Bytes } from "./bytes.ts";
 import { handJson } from "./hand.ts";
 import { FIRST_READ } from "./protocol.ts";
@@ -237,6 +238,9 @@ export interface AnnotationsRead {
   /** Whether every part is read: until then a hand-written `ref` and the bundle's own problems
    * wait, since a ref resolves only once every part is read. */
   readonly complete: boolean;
+  /** The roles and the stored view the bundle declares, whole before any part is read. */
+  readonly roles: Role[];
+  readonly view: StoredView | null;
 }
 
 /** The generator a bundled file's first line names, where it is a generator file's head. */
@@ -1260,10 +1264,12 @@ export class Opened {
     const apart = JSON.parse(this.#rec.resolveBundled(b.hand, b.names, b.texts, JSON.stringify(targets))) as {
       annotations: { place: number; annotation: CoreAnnotation }[];
       problems: string[];
+      roles: Role[];
+      view: StoredView | null;
     };
     if (complete) problems.push(...apart.problems);
     const hand = apart.annotations.sort((x, y) => x.place - y.place).map((h) => h.annotation);
-    return { list: [...hand, ...generated.map((g) => g.a)], problems, complete };
+    return { list: [...hand, ...generated.map((g) => g.a)], problems, complete, roles: apart.roles, view: apart.view };
   }
 
   /** Resolves a sidecar (the hand-written file as JSON, and the files it includes) against this recording. */

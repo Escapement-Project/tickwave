@@ -10,7 +10,8 @@ import { escapeHtml as esc } from "../escape.ts";
 import { reducedMotion } from "../face.ts";
 import { Prober, ZOOM_IN, type Probed } from "../prober.ts";
 import { formatInterval, measureReading } from "../readouts.ts";
-import { channelIndices, EASE_MS, HEAVY_ROLES, Plot } from "../render/plot.ts";
+import { channelIndices, EASE_MS, Plot } from "../render/plot.ts";
+import { roleLook, swatch, type Colour } from "../roles.ts";
 import { isAbort, named, readingStep, type RecordingInfo } from "../source.ts";
 import { secondsValue, toTicks } from "../time.ts";
 import { DRAG_PX, TickwaveElement, loadAnnotations, loadHead, readAnnotations, zoomKey, type Loaded } from "./base.ts";
@@ -50,8 +51,7 @@ canvas { display: block; }
 .level::after { content: "high"; visibility: hidden; }
 .said { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .key { display: flex; gap: 12px; flex-basis: 100%; justify-content: flex-end; }
-.key i { display: inline-block; width: 14px; height: 2px; vertical-align: middle; margin-right: 5px; }
-.key i.heavy { height: 3px; }
+.key svg { vertical-align: middle; margin-right: 5px; }
 `;
 
 const HTML = `<figure part="inset"><figcaption part="label"></figcaption><p class="text" part="text" hidden></p>
@@ -248,6 +248,10 @@ export class TickwaveInset extends TickwaveElement {
     this.#plot.drawNow();
   }
 
+  protected override get storedColour(): Colour | null {
+    return this.#loaded?.annotations.declared.view?.colour ?? null;
+  }
+
   protected paletteChanged(): void {
     this.#plot.palette = this.palette;
     this.#layoutKey = "";
@@ -423,6 +427,7 @@ export class TickwaveInset extends TickwaveElement {
       this.#layoutKey = "";
     }
     this.#plot.annotations = l.annotations;
+    this.storedColourChanged();
     this.#plot.focus = a?.id ?? null;
     this.#readable = getComputedStyle(this).pointerEvents !== "none";
     if (this.#lit !== null && !l.annotations.byId.has(this.#lit)) this.clear();
@@ -789,7 +794,8 @@ export class TickwaveInset extends TickwaveElement {
     }
     const items: Item[] = [[["", a.label ?? a.id]]];
     if (a.end !== null) items.push([["figures", formatInterval(a.end - a.start, this.#loaded.info.timebase, readingStep(this.#loaded.info))]]);
-    if (a.paint) items.push([["what", a.paint === "probe" || a.paint === "target" ? `${a.paint} drives` : a.paint]]);
+    const look = a.paint && this.palette ? roleLook(this.palette, this.#loaded.annotations.declared.roles, a.paint) : null;
+    if (look) items.push([["what", look.label]]);
     this.#read(items);
     if (said) this.#said.textContent = items.map((i) => i.map(([, t]) => t).join("")).join(", ");
   }
@@ -953,13 +959,13 @@ export class TickwaveInset extends TickwaveElement {
       if (b.paint === null || b.end === null || b.end <= a.start || b.start >= (a.end ?? a.start)) continue;
       if ([...names].some((n) => covers(b, n))) roles.add(b.paint);
     }
-    for (const r of [...roles].sort()) {
+    // In the order the sidecar declares them, each drawn as its lines are, so the key tells the
+    // roles apart without colour too. A paint naming no declared role keys nothing.
+    const declared = l.annotations.declared.roles;
+    for (const { name } of declared.filter((r) => roles.has(r.name))) {
+      const look = roleLook(this.palette, declared, name)!;
       const item = document.createElement("span");
-      const swatch = document.createElement("i");
-      swatch.style.background = this.palette.role(r);
-      // As heavy as the role's lines, so the key tells the roles apart without colour too.
-      if (HEAVY_ROLES.has(r)) swatch.className = "heavy";
-      item.append(swatch, r === "probe" || r === "target" ? `${r} drives` : r);
+      item.append(swatch(look, this.palette.lineWeight), look.label);
       this.#key.append(item);
     }
   }

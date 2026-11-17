@@ -97,7 +97,7 @@ if (new URLSearchParams(location.search).has("local")) document.documentElement.
         <p class="span-fields"><span><label for="note-start">Start</label><input id="note-start" type="text" spellcheck="false" autocomplete="off"></span> <span><label for="note-end">End</label><input id="note-end" type="text" spellcheck="false" autocomplete="off" placeholder="none: a point"></span> <button id="note-take" type="button" class="button">Take the selection</button></p>
         <fieldset id="note-channels-box"><legend>Channels</legend><span id="note-channels" class="channel-ticks"></span><span class="quiet">None ticked: every channel.</span></fieldset>
         <p><label for="note-text">Text</label><textarea id="note-text" rows="3" spellcheck="true"></textarea></p>
-        <p class="pair"><span><label for="note-paint">Paint</label><select id="note-paint"><option value="">none</option><option value="probe">probe</option><option value="target">target</option></select></span>
+        <p class="pair"><span><label for="note-paint">Paint</label><input id="note-paint" type="text" spellcheck="false" list="note-paints" autocomplete="off" placeholder="none"><datalist id="note-paints"></datalist></span>
           <span><label for="note-what">Measure</label><select id="note-what"><option value="">none</option><option value="rate">rate</option><option value="period">period</option><option value="duration">duration</option></select></span>
           <span><label for="note-measure">of</label><select id="note-measure"></select></span></p>
       </div>

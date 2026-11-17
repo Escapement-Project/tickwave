@@ -1,6 +1,18 @@
 // Colours, fonts and the line weight for the canvas, read from the host page's tokens through
 // computed style. A page without the tokens gets system colours and the default weight.
 
+import { parseDash, parseWeight, type Colour } from "./roles.ts";
+
+/** What a page's tokens say of a paint role's look; null for each they leave to the recording. */
+export interface RoleTokens {
+  /** `--tickwave-role-<name>`. */
+  readonly colour: string | null;
+  /** `--tickwave-role-<name>-weight`, CSS pixels added to the trace's. */
+  readonly weight: number | null;
+  /** `--tickwave-role-<name>-dash`, (dash, gap) pairs in line widths; `none` is a solid line. */
+  readonly dash: readonly number[] | "none" | null;
+}
+
 export interface Palette {
   readonly ink: string;
   readonly ink2: string;
@@ -9,14 +21,16 @@ export interface Palette {
   readonly page: string;
   /** Ink at 12 %: what the pointer is on. */
   readonly wash: string;
-  /** The traces: the series colour, or ink. */
+  /** The traces: the series colour, else the recording's stored colour, else ink. */
   readonly trace: string;
+  /** Whether the page's face is its night one: its page colour darker than its ink. */
+  readonly night: boolean;
   readonly fontText: string;
   readonly fontFigures: string;
   /** The traces' line, in CSS pixels: `--tickwave-line-weight`, or `LINE_WEIGHT`. */
   readonly lineWeight: number;
-  /** A paint role's colour. */
-  role(name: string): string;
+  /** What the page's tokens say of a paint role's look (`roleLook` takes the rest). */
+  roleTokens(name: string): RoleTokens;
 }
 
 /** The traces' line where the page sets no weight, in CSS pixels. */
@@ -69,24 +83,47 @@ const FALLBACK: Record<string, string> = {
   "--page": "Canvas",
 };
 
-export function resolvePalette(probe: HTMLElement, series: string | null): Palette {
+/** Whether `page` is darker than `ink`, by their relative luminance. */
+function darker(page: string, ink: string): boolean {
+  const lum = (css: string) => {
+    const [r, g, b] = rgba(css).map((c, i) => (i < 3 ? (c / 255) ** 2.2 : c));
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  return lum(page) < lum(ink);
+}
+
+/**
+ * The page's palette, read through `probe`. `stored` is the recording's own trace colour
+ * (ANNOTATIONS.md, "The stored view"), under the page's: the trace takes `--series-<series>`
+ * where the page names a series and sets it, else the stored colour on this face, else ink.
+ */
+export function resolvePalette(probe: HTMLElement, series: string | null, stored: Colour | null = null): Palette {
   const read = (expr: string, fallback: string) => {
     probe.style.color = expr;
     return normalise(getComputedStyle(probe).color) ?? fallback;
   };
   const token = (name: string) => read(`var(${name}, ${FALLBACK[name] ?? "CanvasText"})`, "rgb(0, 0, 0)");
   const ink = token("--ink");
+  const page = token("--page");
+  const night = darker(page, ink);
   const inkExpr = `var(--ink, CanvasText)`;
-  const seriesExpr = series ? `var(--series-${series}, ${inkExpr})` : inkExpr;
-  const roles = new Map<string, string>();
-  const role = (name: string) => {
-    let c = roles.get(name);
-    if (c === undefined) {
-      const fallback = name === "probe" ? seriesExpr : inkExpr;
-      c = read(`var(--tickwave-${name}, ${fallback})`, ink);
-      roles.set(name, c);
+  const own = stored ? (night ? stored.night : stored.day) : inkExpr;
+  const seriesExpr = series ? `var(--series-${series}, ${own})` : own;
+  const roles = new Map<string, RoleTokens>();
+  const roleTokens = (name: string): RoleTokens => {
+    let t = roles.get(name);
+    if (t === undefined) {
+      const style = getComputedStyle(probe);
+      const colour = style.getPropertyValue(`--tickwave-role-${name}`).trim();
+      const dash = style.getPropertyValue(`--tickwave-role-${name}-dash`).trim();
+      t = {
+        colour: colour === "" ? null : read(`var(--tickwave-role-${name})`, ink),
+        weight: parseWeight(style.getPropertyValue(`--tickwave-role-${name}-weight`)),
+        dash: dash === "none" ? "none" : parseDash(dash),
+      };
+      roles.set(name, t);
     }
-    return c;
+    return t;
   };
   const font = (expr: string) => {
     probe.style.fontFamily = expr;
@@ -97,16 +134,14 @@ export function resolvePalette(probe: HTMLElement, series: string | null): Palet
     ink2: token("--ink-2"),
     hair: token("--hair"),
     rule: token("--rule"),
-    page: token("--page"),
+    page,
+    night,
     wash: read(`var(--wash, color-mix(in srgb, ${inkExpr} 12%, transparent))`, "rgba(0, 0, 0, 0.12)"),
     trace: read(seriesExpr, ink),
     fontText: font("var(--font-text, system-ui, sans-serif)"),
     fontFigures: font("var(--font-figures, ui-monospace, monospace)"),
     lineWeight: lineWeight(getComputedStyle(probe).getPropertyValue("--tickwave-line-weight")),
-    role,
+    roleTokens,
   };
-  // Resolve the two named roles now, while the probe's styles are this face's.
-  role("probe");
-  role("target");
   return palette;
 }

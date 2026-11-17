@@ -2,8 +2,31 @@
 // order (ANNOTATIONS.md). A `.tickwave` recording's sidecar is resolved by the Rust core
 // (`Recording.resolveAnnotations`); `resolveRaw` does the same for the dev page's JSON fixtures.
 
+import type { Colour, Role } from "./roles.ts";
 import type { Channel, Ratio } from "./source.ts";
 import { parseTime, toTicks } from "./time.ts";
+
+/** The view a sidecar stores (ANNOTATIONS.md, "The stored view"): what a view shows where the page
+ * says nothing, and the trace's colour under the page's. Times in ticks. */
+export interface StoredView {
+  readonly channels: readonly string[] | null;
+  readonly start: number | null;
+  readonly end: number | null;
+  readonly colour: Colour | null;
+}
+
+/** What a sidecar declares beside its annotations. */
+export interface Declared {
+  readonly roles: readonly Role[];
+  readonly view: StoredView | null;
+}
+
+export const NONE_DECLARED: Declared = { roles: [], view: null };
+
+/** A sidecar's annotations as a reader resolves them, and what it declares. */
+export interface Sidecar extends Declared {
+  readonly annotations: Annotation[];
+}
 
 /** What a measure reads from a channel's edges in a span (ANNOTATIONS.md, "Measures"). */
 export type MeasureKind = "rate" | "period" | "duration";
@@ -66,6 +89,9 @@ export interface Resolved {
   /** A bundled sidecar read a range at a time, with some of its annotations still to read: a
    * hand-written `ref`, and the bundle's own problems, wait for every one. */
   readonly partial: boolean;
+  /** The roles the sidecar declares, in order, and the stored view: a bundle's whole before any
+   * of its parts is read. */
+  readonly declared: Declared;
 }
 
 /** `list` without the annotations that name one of `channels` this version can't read, in
@@ -82,13 +108,18 @@ export function readable(list: Annotation[], channels: readonly Channel[], error
 }
 
 /** Indexes a resolved list. An alias's `ref` names the generated annotation it stands in for. */
-export function indexAnnotations(list: readonly Annotation[], errors: readonly string[] = [], partial = false): Resolved {
+export function indexAnnotations(list: readonly Annotation[], errors: readonly string[] = [], partial = false, declared: Declared = NONE_DECLARED): Resolved {
   const byId = new Map<string, Annotation>();
   for (const a of list) if (!byId.has(a.id)) byId.set(a.id, a);
   const named = new Set<string>();
   for (const a of list) if (a.ref !== null) named.add(a.ref);
   const byTime = [...list].sort((a, b) => a.start - b.start || (b.end ?? b.start) - (a.end ?? a.start));
-  return { list, byTime, byId, named, errors, partial };
+  return { list, byTime, byId, named, errors, partial, declared };
+}
+
+/** What the Rust resolver says a sidecar declares, as the page holds it. */
+export function declaredFromCore(roles: readonly Role[] | undefined, view: StoredView | null | undefined): Declared {
+  return { roles: roles ?? [], view: view ?? null };
 }
 
 /** One annotation as the Rust resolver serialises it. */

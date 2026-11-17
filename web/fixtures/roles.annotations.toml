@@ -1,0 +1,66 @@
+format = "tickwave-annotations/1"
+recording = "identify-swd.tickwave"
+recording_id = "blake3:63773d56fb3420735c864932f8d2441acd6f31a51b557e073bf27755a0534697"
+# Written by scripts/swd-annotations.ts from the recording; not committed.
+include = ["identify-swd.swd.jsonl"]
+
+# A sidecar with a third role, stored colours, a dash and a stored view, for the roles' tests and
+# for a bundle opened with no attributes (scripts/generate.ts bundles it).
+
+# What a view shows where its page says nothing: SWDIO over SWCLK, the first read and write.
+[view]
+channels = ["SWDIO", "SWCLK"]
+start = "377.09 ms"
+end = "377.25 ms"
+colour = ["#d9480f", "#ff8a50"]
+
+# Roles are placed in the order they are declared, this file's first: probe and target as the
+# generator declares them, so they keep the first two places, then a third.
+[[role]]
+name = "probe"
+label = "probe drives"
+
+[[role]]
+name = "target"
+label = "target drives"
+weight = 1
+
+[[role]]
+name = "neither"
+label = "neither drives"
+colour = ["#8a8a8a", "#5c5c5c"]
+dash = [2, 1]
+
+# The turnarounds of the first read and the first write, where neither end drives SWDIO.
+
+[[annotation]]
+id = "read-request-turnaround"
+start = 377102558
+end = 377103058
+channels = ["SWDIO"]
+kind = "turnaround"
+paint = "neither"
+
+[[annotation]]
+id = "read-data-turnaround"
+start = 377139060
+end = 377140560
+channels = ["SWDIO"]
+kind = "turnaround"
+paint = "neither"
+
+[[annotation]]
+id = "write-request-turnaround"
+start = 377238478
+end = 377238979
+channels = ["SWDIO"]
+kind = "turnaround"
+paint = "neither"
+
+[[annotation]]
+id = "write-ack-turnaround"
+start = 377241979
+end = 377243479
+channels = ["SWDIO"]
+kind = "turnaround"
+paint = "neither"

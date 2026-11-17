@@ -1,10 +1,10 @@
 // <tickwave-view>: the full capture. Collapsed to its title and facts until `open`; open, a time axis, one row
 // a channel and an annotation lane, with zoom, pan, cursors, a selection and its readouts.
 
-import { indexAnnotations, ofKind, type Annotation, type Resolved } from "../annotations.ts";
+import { indexAnnotations, ofKind, type Annotation, type Resolved, type StoredView } from "../annotations.ts";
 import { parseChannels, parseWindow, VIEW_ATTRIBUTES } from "../attributes.ts";
 import { reducedMotion } from "../face.ts";
-import { absolute, events as registryEvents, infoFor, peekInfo } from "../registry.ts";
+import { absolute, BUNDLE_ONLY, events as registryEvents, infoFor, peekInfo } from "../registry.ts";
 import { clockNote, countEdges, formatClockPeriod, formatClockRate, formatCount, formatInterval, formatMarks, formatRate, formatValue, periodStats } from "../readouts.ts";
 import { completePulse, knownSpan, pulseFigures, pulseFromEdges, type Pulse } from "../probe.ts";
 import { Prober, type Probed } from "../prober.ts";
@@ -15,6 +15,8 @@ import { channelSampleTick, channelStart, inChannel, isAbort, named, readingStep
 import { parseTime, toTicks, type TimeSpec } from "../time.ts";
 import { DRAG_PX, TickwaveElement, loadAnnotations, loadHead, readAnnotations, zoomKey, type Loaded } from "./base.ts";
 import { ShapedSource } from "../shaped-source.ts";
+import { roleLook, swatch, type Colour } from "../roles.ts";
+import type { Palette } from "../palette.ts";
 import { SUMMARY_CSS } from "./summary-style.ts";
 import { shownExtent, shownStart, summaryFacts } from "../summary.ts";
 
@@ -29,6 +31,11 @@ ${SUMMARY_CSS}.viewer { display: flex; flex-direction: column; flex: 1 1 auto; m
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px;
   padding: 0 10px 6px 14px; }
 .toolbar .group { display: flex; gap: 4px; align-items: center; }
+/* The roles the sidecar declares, on the toolbar's line between its groups: one line, cut where it
+   runs out of room, so roles arriving with the sidecar move nothing else. */
+.key { display: flex; flex: 1 1 0; min-width: 0; justify-content: flex-end; gap: 12px; overflow: hidden;
+  white-space: nowrap; font-size: 13px; color: var(--ink-2, GrayText); }
+.key svg { vertical-align: middle; margin-right: 5px; }
 .plot { position: relative; flex: 1 1 auto; min-height: 0; touch-action: pan-y; cursor: crosshair; }
 .plot:focus-visible { outline-offset: -2px; border-radius: 4px; }
 .plot.panning { cursor: grabbing; }
@@ -93,6 +100,7 @@ const HTML = `
       <button type="button" class="zoom-in" part="button" aria-label="Zoom in">+</button>
       <button type="button" class="fit" part="button">Fit</button>
     </div>
+    <div class="key" part="key"></div>
     <div class="steps" part="steps" hidden>
       <select class="kind" aria-label="Annotation kind"></select>
       <button type="button" class="prev" part="button" aria-label="Previous">‹</button>
@@ -185,6 +193,13 @@ export class TickwaveView extends TickwaveElement {
   #summary: Summary | null = null;
   /** The hand-written sidecar as text, from a page editing it; null to read the sidecar's file. */
   #annotationsText: string | null = null;
+  /** The stored view's span applied, by recording and span, so it sets the window once. */
+  #storedSpanAt = "";
+  /** What a collapsed view read of the stored view, for its facts, by recording and sidecar. */
+  #storedRead: { key: string; view: StoredView | null } | null = null;
+  #key!: HTMLElement;
+  /** What the key shows: the roles it was built from, and the palette. */
+  #keyShown: { roles: string; palette: Palette } | null = null;
   /** Counts the texts handed in: one handed in later makes an earlier one's annotations stale. */
   #textSeq = 0;
   /** The sidecar's problems last reported, forgotten when another sidecar replaces it. */
@@ -239,6 +254,7 @@ export class TickwaveView extends TickwaveElement {
     this.#plotBox = this.root.querySelector(".plot")!;
     this.#readout = this.root.querySelector(".readout")!;
     this.#steps = this.root.querySelector(".steps")!;
+    this.#key = this.root.querySelector(".key")!;
     this.#kind = this.root.querySelector(".kind")!;
     this.#plot = new Plot(this.root.querySelector("canvas")!, {
       axis: true,
@@ -464,8 +480,13 @@ export class TickwaveView extends TickwaveElement {
     for (const e of errors) this.fail(named("TickwaveSidecarError", e));
   }
 
+  protected override get storedColour(): Colour | null {
+    return this.#loaded?.annotations.declared.view?.colour ?? null;
+  }
+
   protected paletteChanged(): void {
     this.#plot.palette = this.palette;
+    this.#renderKey();
     if (this.#loaded) this.#layout(true);
   }
 
@@ -520,13 +541,24 @@ export class TickwaveView extends TickwaveElement {
             this.#apply();
             if (this.#shaping) this.#applyPending();
           };
-          if (!at) first({ ...head, annotations: indexAnnotations([]) });
+          // A downloaded file opened with nothing said of it shows the view it stores from its
+          // first frame: what its bundle declares is read first, the bundle alone. A page that
+          // gives a sidecar, channels or a window draws from the footer at once, as ever, and a
+          // stored view in its sidecar applies when the sidecar lands.
+          const holds =
+            !at && head.info.bundled === true && text === null && annotations === null && !this.hasAttribute("channels") && !this.hasAttribute("window");
+          let early: Resolved | null = null;
+          if (holds) {
+            early = await loadAnnotations(head.src, annotations, text, BUNDLE_ONLY);
+            if (this.#loadKey !== key) return null;
+            first({ ...head, annotations: early });
+          } else if (!at) first({ ...head, annotations: indexAnnotations([]) });
           // A sidecar's text set meanwhile reads its own annotations over the drawn recording. A
           // bundled one's are read for the span drawn, or whole for a view that opens at one.
           const seq = this.#textSeq;
           this.#readSpans = [];
           const span = at ? null : this.#annotationSpan();
-          const list = await loadAnnotations(head.src, annotations, text, span);
+          const list = early && !early.partial ? early : await loadAnnotations(head.src, annotations, text, span);
           if (span && list.partial) this.#readSpans.push(span);
           if (this.#loadKey !== key) return null;
           this.#annotated = true;
@@ -565,6 +597,34 @@ export class TickwaveView extends TickwaveElement {
     infoFor(src).catch((e) => {
       if (this.#src?.href === src.href) this.fail(e);
     });
+    this.#readStored(src);
+  }
+
+  /**
+   * The channels the view shows: those the page's `channels` attribute names, else those the
+   * recording's stored view does (ANNOTATIONS.md, "The stored view"), else null for every one.
+   */
+  #channelsShown(stored: StoredView | null): string[] | null {
+    const given = parseChannels(this.getAttribute("channels"));
+    return given ?? (stored?.channels ? [...stored.channels] : null);
+  }
+
+  /**
+   * A collapsed view's facts count the channels it opens with, so where the page names none, it
+   * reads what the sidecar declares: a bundle's alone, no part of it.
+   */
+  #readStored(src: URL): void {
+    const annotations = this.getAttribute("annotations");
+    const key = `${src.href}\n${annotations ?? ""}`;
+    if (this.hasAttribute("channels") || this.#storedRead?.key === key) return;
+    this.#storedRead = { key, view: null };
+    void infoFor(src)
+      .then((info) => (annotations !== null || info.bundled === true ? loadAnnotations(src, annotations, null, BUNDLE_ONLY) : null))
+      .then((r) => {
+        if (this.#storedRead?.key !== key || !r) return;
+        this.#storedRead = { key, view: r.declared.view };
+        this.#renderSummary();
+      });
   }
 
   /**
@@ -582,7 +642,8 @@ export class TickwaveView extends TickwaveElement {
     // Collapsed, the view shows what is here; the head arrives once the view scrolls into sight.
     const info = peekInfo(src);
     const title = info?.title ?? decodeURIComponent(src.pathname.split("/").pop() ?? "");
-    const facts = info ? summaryFacts(info, channelIndices(info, parseChannels(this.getAttribute("channels"))).indices) : [];
+    const stored = this.#loaded?.annotations.declared.view ?? this.#storedRead?.view ?? null;
+    const facts = info ? summaryFacts(info, channelIndices(info, this.#channelsShown(stored)).indices) : [];
     const factsText = facts.map(([, text]) => text).join("; ");
     // Only when they change: new fallback text in a slot with nothing assigned is a slotchange,
     // which renders the summary again.
@@ -630,7 +691,7 @@ export class TickwaveView extends TickwaveElement {
       "aria-label",
       `${l.info.title}. Left and right arrows pan, up and down zoom, Home fits the capture; Enter or a click places a cursor, drag on the time axis to select.`,
     );
-    const { indices, missing } = channelIndices(l.info, parseChannels(this.getAttribute("channels")));
+    const { indices, missing } = channelIndices(l.info, this.#channelsShown(l.annotations.declared.view));
     for (const m of missing) this.fail(new Error(`no channel ${m}`));
     const recordingKey = `${l.src.href}\n${indices.join(" ")}`;
     const fresh = recordingKey !== this.#recordingKey;
@@ -651,6 +712,8 @@ export class TickwaveView extends TickwaveElement {
     const annotated = this.#plot.annotations !== l.annotations;
     if (annotated) {
       this.#plot.annotations = l.annotations;
+      this.storedColourChanged();
+      this.#renderKey();
       this.#plot.focus = null;
       this.#stepIndex = -1;
     }
@@ -663,6 +726,13 @@ export class TickwaveView extends TickwaveElement {
       const spec = parseWindow(w);
       if (spec?.kind === "annotation") this.show(spec.id);
       else if (spec) this.setWindow(toTicks(spec.start, l.info.timebase), toTicks(spec.end, l.info.timebase));
+    }
+    // The stored view's span, where the page gives no window: once a recording, as it opens.
+    const stored = l.annotations.declared.view;
+    const storedKey = `${l.src.href}\n${stored?.start ?? ""} ${stored?.end ?? ""}`;
+    if (w === null && stored && (stored.start !== null || stored.end !== null) && storedKey !== this.#storedSpanAt) {
+      this.#storedSpanAt = storedKey;
+      this.setWindow(stored.start ?? 0, stored.end ?? l.info.length);
     }
     const pending = this.#pendingWindow;
     if (pending) this.#showTicks(pending[0], pending[1]);
@@ -1600,6 +1670,29 @@ export class TickwaveView extends TickwaveElement {
     const { start, end } = this.#plot.target;
     this.#plot.view = { start: start + ticks, end: end + ticks };
     this.#viewChanged();
+  }
+
+  /**
+   * The key: every role the sidecar declares, in its order, each its swatch and label
+   * (`roleLook`). A legend of the recording, not of the window: built again only when the roles or
+   * the palette change, so neither a pan nor a part of the annotations read moves it.
+   */
+  #renderKey(): void {
+    const roles = this.#loaded?.annotations.declared.roles ?? [];
+    const p = this.palette;
+    if (!p) return;
+    const key = { roles: JSON.stringify(roles), palette: p };
+    const k = this.#keyShown;
+    if (k && k.roles === key.roles && k.palette === key.palette) return;
+    this.#keyShown = key;
+    this.#key.replaceChildren(
+      ...roles.map((r) => {
+        const look = roleLook(p, roles, r.name)!;
+        const item = document.createElement("span");
+        item.append(swatch(look, p.lineWeight), look.label);
+        return item;
+      }),
+    );
   }
 
   #viewChanged(): void {

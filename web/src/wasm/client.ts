@@ -1,7 +1,8 @@
 // The page's side of the decoder: a Source for each .tickwave recording, answered by one worker that
 // holds the WASM module. The worker starts when something first needs a recording.
 
-import { fromCore, type Annotation, type CoreAnnotation } from "../annotations.ts";
+import { declaredFromCore, fromCore, NONE_DECLARED, type CoreAnnotation, type Sidecar, type StoredView } from "../annotations.ts";
+import type { Role } from "../roles.ts";
 import type { PeriodStats } from "../readouts.ts";
 import type { BundledRead, Loader } from "../registry.ts";
 import { aborted, type Edges, type Overview, type RecordingInfo, type Samples, type Source } from "../source.ts";
@@ -161,15 +162,15 @@ export class WasmSource implements Source {
     return call<Overview | null>({ op: "overview", key: this.#key, channel, start, end, maxBucket }, signal);
   }
 
-  async sidecar(url: URL): Promise<Annotation[]> {
+  async sidecar(url: URL): Promise<Sidecar> {
     await this.#open();
     const json = await call<string>({ op: "sidecar", key: this.#key, url: url.href, recordingFile: this.fileName });
-    return (JSON.parse(json) as CoreAnnotation[]).map(fromCore);
+    return sidecarFromCore(json);
   }
 
   /** The sidecar whose hand-written file is `text`. Its includes are beside `base`, or among the
    * local files that came with the recording when there is no `base`. */
-  async sidecarText(text: string, base: URL | null): Promise<Annotation[]> {
+  async sidecarText(text: string, base: URL | null): Promise<Sidecar> {
     await this.#open();
     let json: string;
     if (base === null && this.#sidecar.length > 0) {
@@ -177,13 +178,14 @@ export class WasmSource implements Source {
       const texts = await Promise.all(rest.map((f) => f.text()));
       json = await call<string>({ op: "resolve", key: this.#key, hand: text, names: rest.map((f) => f.name), texts, recordingFile: this.fileName });
     } else json = await call<string>({ op: "sidecarText", key: this.#key, hand: text, base: base?.href ?? null, recordingFile: this.fileName });
-    return (JSON.parse(json) as CoreAnnotation[]).map(fromCore);
+    return sidecarFromCore(json);
   }
 
   /** A local file's sidecar files when it came with them, else the recording's bundled sidecar,
    * whole. */
-  async bundled(): Promise<Annotation[] | null> {
-    return (await this.bundledIn(null))?.annotations ?? null;
+  async bundled(): Promise<Sidecar | null> {
+    const read = await this.bundledIn(null);
+    return read && { annotations: read.annotations, ...(read.declared ?? NONE_DECLARED) };
   }
 
   /** A local file's sidecar files when it came with them, whole; else the recording's bundled
@@ -197,11 +199,18 @@ export class WasmSource implements Source {
       const rest = this.#sidecar.filter((f) => f !== hand[0]);
       const [text, ...texts] = await Promise.all([hand[0].text(), ...rest.map((f) => f.text())]);
       const json = await call<string>({ op: "resolve", key: this.#key, hand: text, names: rest.map((f) => f.name), texts, recordingFile: this.fileName });
-      return { annotations: (JSON.parse(json) as CoreAnnotation[]).map(fromCore), problems: [], complete: true };
+      const whole = sidecarFromCore(json);
+      return { annotations: whole.annotations, problems: [], complete: true, declared: whole };
     }
     const read = await call<AnnotationsRead | null>({ op: "bundled", key: this.#key, span });
-    return read && { annotations: read.list.map(fromCore), problems: read.problems, complete: read.complete };
+    return read && { annotations: read.list.map(fromCore), problems: read.problems, complete: read.complete, declared: declaredFromCore(read.roles, read.view) };
   }
+}
+
+/** A sidecar as the decoder resolves it whole (`Recording.resolveAnnotations`). */
+function sidecarFromCore(json: string): Sidecar {
+  const s = JSON.parse(json) as { annotations: CoreAnnotation[]; roles: Role[]; view: StoredView | null };
+  return { annotations: s.annotations.map(fromCore), ...declaredFromCore(s.roles, s.view) };
 }
 
 function abortOf(signal: AbortSignal): Promise<never> {

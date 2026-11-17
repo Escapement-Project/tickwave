@@ -5,6 +5,7 @@
 import { covers, laneAnnotations, type Annotation, type Resolved } from "../annotations.ts";
 import { rgba, type Palette } from "../palette.ts";
 import { formatMarks, niceStep } from "../readouts.ts";
+import { lengthAt, paintStretches, roleLook, type Look, type PaintSpan } from "../roles.ts";
 import { rangeMarks, type ValueRange } from "./scale.ts";
 import {
   axisPeriod,
@@ -51,6 +52,11 @@ interface Line {
   readonly path: Path2D;
   x0: number;
   x1: number;
+  /** In a row a dashed role draws: the length of the row's line before this path, in device
+   * pixels, and each of its points' x and length, flat. A dash's phase runs on along the line from
+   * where its stretch starts (`lengthAt`), whatever paths it is stroked in. */
+  readonly at?: number;
+  readonly points?: number[];
 }
 
 /**
@@ -67,17 +73,24 @@ class Lines implements Pen {
   #end = 0;
   #x = 0;
   #y = 0;
+  /** The line's length so far, where `dashed`. */
+  #length = 0;
   readonly left: number;
   readonly width: number;
   /** How far past its points a path's stroke paints. */
   readonly reach: number;
+  /** Whether a dashed role draws the row: each move starts a path, since a dash starts again at
+   * every move in a path, and each path keeps its points' lengths. */
+  readonly dashed: boolean;
 
-  constructor(left: number, width: number, reach: number) {
-    [this.left, this.width, this.reach] = [left, width, reach];
+  constructor(left: number, width: number, reach: number, dashed = false) {
+    [this.left, this.width, this.reach, this.dashed] = [left, width, reach, dashed];
   }
 
   #start(x: number, y: number): void {
-    this.#line = { path: new Path2D(), x0: x - this.reach, x1: x + this.reach };
+    this.#line = this.dashed
+      ? { path: new Path2D(), x0: x - this.reach, x1: x + this.reach, at: this.#length, points: [x, this.#length] }
+      : { path: new Path2D(), x0: x - this.reach, x1: x + this.reach };
     this.lines.push(this.#line);
     this.#line.path.moveTo(x, y);
     this.#end = this.left + (Math.floor((x - this.left) / this.width) + 1) * this.width;
@@ -85,8 +98,18 @@ class Lines implements Pen {
   }
 
   moveTo(x: number, y: number): void {
-    if (!this.#line || x >= this.#end || x < this.#end - this.width) return this.#start(x, y);
+    if (this.dashed || !this.#line || x >= this.#end || x < this.#end - this.width) return this.#start(x, y);
     this.#line.path.moveTo(x, y);
+    [this.#x, this.#y] = [x, y];
+  }
+
+  #to(x: number, y: number): void {
+    const l = this.#line!;
+    l.path.lineTo(x, y);
+    if (this.dashed) {
+      this.#length += Math.hypot(x - this.#x, y - this.#y);
+      l.points!.push(x, this.#length);
+    }
     [this.#x, this.#y] = [x, y];
   }
 
@@ -97,17 +120,27 @@ class Lines implements Pen {
           this.#end += this.width;
           continue;
         }
-        this.#line!.path.lineTo(this.#end, y);
+        this.#to(this.#end, y);
         this.#line!.x1 = Math.max(this.#line!.x1, this.#end + this.reach);
         this.#start(this.#end, y);
       }
     }
     const l = this.#line!;
-    l.path.lineTo(x, y);
+    this.#to(x, y);
     l.x0 = Math.min(l.x0, x - this.reach);
     l.x1 = Math.max(l.x1, x + this.reach);
-    [this.#x, this.#y] = [x, y];
   }
+}
+
+/** A stretch of a row's device-pixel columns and how its line draws there. */
+interface Stretch {
+  readonly px0: number;
+  readonly px1: number;
+  readonly colour: string;
+  /** In CSS pixels. */
+  readonly weight: number;
+  /** In line widths; null for a solid line. */
+  readonly dash: readonly number[] | null;
 }
 
 /** A digital row's fills: each layer's alpha, a column a device pixel from `left`, and the
@@ -181,10 +214,6 @@ const LINE_SEGMENTS = 256;
 const LINE_COLUMNS = 256;
 /** What the row of a channel this version can't read says. */
 export const UNAVAILABLE = "unavailable to this version";
-/** Paint roles that draw heavier than a trace, by `HEAVIER` CSS pixels, so their lines differ from
- * the others' by more than colour: the target's drive. */
-export const HEAVY_ROLES: ReadonlySet<string> = new Set(["target"]);
-const HEAVIER = 1;
 /** The fills strips a plot keeps: more than the pieces and colours a row's stretches take turns
  * at. */
 const STRIPS = 8;
@@ -896,6 +925,7 @@ export class Plot {
     // A digital row in several stretches takes its line in paths of `LINE_COLUMNS`, each stretch
     // stroking those it meets; in one, a path.
     const columns = stretches.length > 1 ? LINE_COLUMNS : Infinity;
+    const dashed = stretches.some((s) => s.dash !== null);
     const byWidth = new Map<number, Piece[]>();
     const piecesAt = (lw: number): Piece[] => {
       let pieces = byWidth.get(lw);
@@ -909,12 +939,12 @@ export class Plot {
           const px1 = Math.round(Math.min(x1, this.xAt(to)) * dpr);
           if (px1 <= px0) return [];
           let shapes;
-          if (cc.kind === "analog") shapes = this.#analogShapes(r, cc, grid, tile, from, to, lw, shown);
+          if (cc.kind === "analog") shapes = this.#analogShapes(r, cc, grid, tile, from, to, lw, shown, dashed);
           else if (tile.kind === "edges") {
             // Past a gap in the tile the level is the gap's, not the one its edges carry to there.
             const at = rebased(cc, tile.start, tile.data, from);
-            shapes = this.#digitalShapes(r, grid, { ...tile, start: at.start, data: at.edges }, from, to, lw, columns);
-          } else shapes = this.#digitalShapes(r, grid, tile, from, to, lw, columns);
+            shapes = this.#digitalShapes(r, grid, { ...tile, start: at.start, data: at.edges }, from, to, lw, columns, dashed);
+          } else shapes = this.#digitalShapes(r, grid, tile, from, to, lw, columns, dashed);
           return [{ px0, px1, shapes, coarse: grain(tile) > grid.per }];
         });
       });
@@ -931,6 +961,8 @@ export class Plot {
     for (const s of stretches) {
       const lw = width(s.weight);
       ctx.lineWidth = lw;
+      // A dash is in line widths, the role's weight included.
+      ctx.setLineDash(s.dash ? s.dash.map((d) => d * lw) : []);
       for (const { px0, px1, shapes, coarse } of piecesAt(lw)) {
         const a = Math.max(px0, s.px0);
         const b = Math.min(px1, s.px1);
@@ -940,7 +972,16 @@ export class Plot {
         ctx.rect(a, r.top * dpr, b - a, r.height * dpr);
         ctx.clip();
         ctx.strokeStyle = s.colour;
-        for (const line of shapes.lines) if (line.x1 > a && line.x0 < b) ctx.stroke(line.path);
+        if (s.dash) {
+          // One phase along the stretch, from its start or the data's after a gap, in whatever
+          // paths its line is in.
+          const origin = lengthAt(shapes.lines, a);
+          for (const line of shapes.lines) {
+            if (line.x1 <= a || line.x0 >= b) continue;
+            ctx.lineDashOffset = line.at! - origin;
+            ctx.stroke(line.path);
+          }
+        } else for (const line of shapes.lines) if (line.x1 > a && line.x0 < b) ctx.stroke(line.path);
         ctx.fillStyle = s.colour;
         if (shapes.fills) this.#drawFills(shapes.fills, s.colour);
         ctx.globalAlpha = coarse ? UNRESOLVED_ALPHA : 1;
@@ -988,46 +1029,31 @@ export class Plot {
   }
 
   /**
-   * The device-pixel stretches of a channel's row between px0 and px1, each in the colour and line
-   * weight that draw it: the role of the last annotation in the list that paints the channel there
-   * (`--tickwave-<role>`, `HEAVY_ROLES`), else the trace's.
+   * The device-pixel stretches of a channel's row between px0 and px1, each in the colour, line
+   * weight and dash that draw it: the look (`roleLook`) of the role of the last annotation in the
+   * list that paints the channel there with a declared role, else the trace's (`paintStretches`).
    */
-  #stretches(channel: string, px0: number, px1: number): { px0: number; px1: number; colour: string; weight: number }[] {
+  #stretches(channel: string, px0: number, px1: number): Stretch[] {
     const p = this.palette!;
+    const roles = this.annotations?.declared.roles ?? [];
     const dpr = this.#dpr;
-    const marks: { at: number; i: number; on: boolean }[] = [];
-    const roles: string[] = [];
-    for (const a of this.annotations?.list ?? []) {
-      if (a.paint === null || a.end === null || !covers(a, channel)) continue;
-      const from = Math.max(px0, Math.round(this.xAt(a.start) * dpr));
-      const to = Math.min(px1, Math.round(this.xAt(a.end) * dpr));
-      if (to <= from) continue;
-      marks.push({ at: from, i: roles.length, on: true }, { at: to, i: roles.length, on: false });
-      roles.push(a.paint);
-    }
-    // At one x, a span ends before the next begins.
-    marks.sort((m, n) => m.at - n.at || Number(m.on) - Number(n.on));
-    const out: { px0: number; px1: number; colour: string; weight: number }[] = [];
-    const active = new Set<number>();
-    const stretch = (from: number, to: number) => {
-      const role = active.size === 0 ? null : roles[Math.max(...active)];
-      const heavy = role !== null && HEAVY_ROLES.has(role);
-      out.push({ px0: from, px1: to, colour: role === null ? p.trace : p.role(role), weight: p.lineWeight + (heavy ? HEAVIER : 0) });
-    };
-    let x = px0;
-    for (const m of marks) {
-      if (m.at > x) {
-        stretch(x, m.at);
-        x = m.at;
+    const spans: PaintSpan[] = [];
+    if (roles.length > 0) {
+      for (const a of this.annotations?.list ?? []) {
+        if (a.paint === null || a.end === null || !covers(a, channel)) continue;
+        spans.push({ from: Math.round(this.xAt(a.start) * dpr), to: Math.round(this.xAt(a.end) * dpr), role: a.paint });
       }
-      if (m.on) active.add(m.i);
-      else active.delete(m.i);
     }
-    if (x < px1) stretch(x, px1);
-    return out;
+    const lookOf = new Map<string, Look>();
+    return paintStretches(spans, roles, px0, px1).map(({ px0, px1, role }) => {
+      if (role === null) return { px0, px1, colour: p.trace, weight: p.lineWeight, dash: null };
+      let look = lookOf.get(role);
+      if (!look) lookOf.set(role, (look = roleLook(p, roles, role)!));
+      return { px0, px1, colour: look.colour, weight: p.lineWeight + look.weight, dash: look.dash };
+    });
   }
 
-  #digitalShapes(r: Row, grid: Grid, tile: Tile, from: number, to: number, lw: number, columns: number): Shapes {
+  #digitalShapes(r: Row, grid: Grid, tile: Tile, from: number, to: number, lw: number, columns: number, dashed: boolean): Shapes {
     const l = this.layout!;
     const dpr = this.#dpr;
     let cols: DigitalColumns;
@@ -1038,7 +1064,7 @@ export class Plot {
     const yH = snap((r.top + 6) * dpr);
     const yL = snap((r.top + r.height - 6) * dpr);
     const left = Math.round(l.plotLeft * dpr);
-    const line = new Lines(left, columns, lw);
+    const line = new Lines(left, columns, lw, dashed);
     const look = looks(cols, 0, grid.count, lw, grid.per, this.info!.timebase);
     const fills = digitalTrace(cols, look, grid.count, { left, yH, yL, lw }, line);
     const h = lw / 2;
@@ -1100,6 +1126,7 @@ export class Plot {
     to: number,
     lw: number,
     shown: { lo: number; hi: number },
+    dashed: boolean,
   ): Shapes {
     const l = this.layout!;
     const dpr = this.#dpr;
@@ -1115,7 +1142,6 @@ export class Plot {
       // Fewer samples than columns: a line through the samples, with a dot on each once they
       // stand apart.
       const s = tile.data;
-      let started = false;
       const dots = period / grid.per >= 8 * dpr;
       // A held tile can be far wider than the view. The pad, ten line widths, is twice the reach
       // of a miter join at the default limit, and more than a dot's radius.
@@ -1125,12 +1151,21 @@ export class Plot {
       // The pixels the two butt ends share come out a shade lighter. A miter join at the default
       // limit reaches five line widths from its point.
       const reach = 5 * lw;
-      const path = (): Line => ({ path: new Path2D(), x0: Infinity, x1: -Infinity });
+      // A dashed row's paths carry their lengths, as `Lines` gives a digital row's.
+      let length = 0;
+      const path = (x: number): Line =>
+        dashed ? { path: new Path2D(), x0: Infinity, x1: -Infinity, at: length, points: [x, length] } : { path: new Path2D(), x0: Infinity, x1: -Infinity };
       const point = (l: Line, x: number) => {
         l.x0 = Math.min(l.x0, x - reach);
         l.x1 = Math.max(l.x1, x + reach);
       };
-      let line = path();
+      const along = (l: Line, x0: number, y0: number, x: number, yy: number) => {
+        l.path.lineTo(x, yy);
+        if (!dashed) return;
+        length += Math.hypot(x - x0, yy - y0);
+        l.points!.push(x, length);
+      };
+      let line: Line | null = null;
       let segments = 0;
       let lx = 0;
       let ly = 0;
@@ -1143,25 +1178,25 @@ export class Plot {
           shown.hi = Math.max(shown.hi, s.values[k]);
         }
         const yy = y(s.values[k]);
-        if (!started) {
+        if (!line) {
+          line = path(x);
           lines.push(line);
           line.path.moveTo(x, yy);
         } else if (segments === LINE_SEGMENTS) {
           const [mx, my] = [(lx + x) / 2, (ly + yy) / 2];
-          line.path.lineTo(mx, my);
+          along(line, lx, ly, mx, my);
           point(line, mx);
-          line = path();
+          line = path(mx);
           lines.push(line);
           line.path.moveTo(mx, my);
           point(line, mx);
-          line.path.lineTo(x, yy);
+          along(line, mx, my, x, yy);
           segments = 1;
         } else {
-          line.path.lineTo(x, yy);
+          along(line, lx, ly, x, yy);
           segments++;
         }
         point(line, x);
-        started = true;
         lx = x;
         ly = yy;
         if (dots) {
