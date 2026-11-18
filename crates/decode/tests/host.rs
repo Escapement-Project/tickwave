@@ -2068,6 +2068,7 @@ fn three() -> Vec<SettingDecl> {
         SettingDecl::int("cycles", 1..=4, 1),
         SettingDecl::choice("edge", ["rise", "fall"], 0),
         SettingDecl::flag("assume", true),
+        SettingDecl::list("lengths", 1..=8, 3, vec![]),
     ]
 }
 
@@ -2109,9 +2110,19 @@ fn a_decoder_is_made_with_the_settings_given_by_name_and_the_rest_at_their_defau
         (Some(3), Some(1), Some(true))
     );
     assert_eq!(
-        (b.flag(cycles), b.int(edge), b.int(SettingId(3))),
+        (b.flag(cycles), b.int(edge), b.int(SettingId(4))),
         (None, None, None)
     );
+    let lengths = SettingId(3);
+    assert_eq!(b.list(lengths), Some(&[][..]));
+    assert_eq!(b.list(cycles), None);
+    let b = bound(
+        configured(three()),
+        vec![true, true],
+        &[("lengths", Setting::List(vec![4, 6]))],
+    )
+    .unwrap();
+    assert_eq!(b.list(lengths), Some(&[4, 6][..]));
     assert!(b.port(0) && b.port(1) && !b.port(2));
     let b = bound(configured(three()), vec![true, true], &[]).unwrap();
     assert_eq!((b.int(cycles), b.choice(edge)), (Some(1), Some(0)));
@@ -2120,6 +2131,14 @@ fn a_decoder_is_made_with_the_settings_given_by_name_and_the_rest_at_their_defau
     let value = |n: &'static str| Err(BindError::SettingValue(name(n)));
     assert_eq!(refused(&[("cycles", Setting::Int(5))]), value("cycles"));
     assert_eq!(refused(&[("cycles", Setting::Flag(true))]), value("cycles"));
+    // A list's entries each in its range, and no more of them than it takes.
+    for list in [vec![0], vec![9], vec![1, 2, 3, 4]] {
+        assert_eq!(
+            refused(&[("lengths", Setting::List(list))]),
+            value("lengths")
+        );
+    }
+    assert!(refused(&[("lengths", Setting::List(vec![1, 8, 8]))]).is_ok());
     assert_eq!(
         refused(&[("edge", Setting::Name(name("both")))]),
         value("edge")
@@ -2170,6 +2189,18 @@ fn a_definition_whose_settings_or_ports_clash_is_refused() {
         refused(vec![SettingDecl::choice("n", Vec::<Name>::new(), 0)]),
         schema(SchemaError::SettingDefault(name("n")))
     );
+    // A list's default out of its range or longer than it takes, and one taking more than the
+    // contract's lists hold.
+    for default in [vec![0], vec![1, 1, 1]] {
+        assert_eq!(
+            refused(vec![SettingDecl::list("n", 1..=4, 2, default)]),
+            schema(SchemaError::SettingDefault(name("n")))
+        );
+    }
+    assert!(matches!(
+        refused(vec![SettingDecl::list("n", 1..=4, 257, vec![])]),
+        Err(BindError::Schema(SchemaError::TooMany { .. }))
+    ));
     assert_eq!(
         refused(vec![SettingDecl::choice("n", ["a", "a"], 0)]),
         schema(SchemaError::DuplicateChoice {

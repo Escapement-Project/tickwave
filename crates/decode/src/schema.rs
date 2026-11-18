@@ -86,6 +86,13 @@ pub enum SettingType {
         names: Vec<Name>,
         default: usize,
     },
+    /// Whole numbers, each from `min` to `max`, at most `at_most` of them.
+    List {
+        min: i64,
+        max: i64,
+        at_most: usize,
+        default: Vec<i64>,
+    },
 }
 
 /// A setting's value as a binding gives it, as a recipe's TOML holds it: a choice by its name.
@@ -95,6 +102,7 @@ pub enum Setting {
     Flag(bool),
     Int(i64),
     Name(Name),
+    List(Vec<i64>),
 }
 
 /// A setting, by its index in the definition's settings.
@@ -305,6 +313,15 @@ impl Definition {
                     }
                     *default < names.len()
                 }
+                SettingType::List {
+                    min,
+                    max,
+                    at_most: most,
+                    default,
+                } => {
+                    at_most(*most, MAX_LIST, "list entries")?;
+                    default.len() <= *most && default.iter().all(|d| (min..=max).contains(&d))
+                }
             };
             if !fits {
                 return Err(SchemaError::SettingDefault(s.name.clone()));
@@ -328,6 +345,24 @@ impl SettingDecl {
             ty: SettingType::Int {
                 min: *range.start(),
                 max: *range.end(),
+                default,
+            },
+        }
+    }
+
+    /// Whole numbers in `range`, at most `at_most` of them; `default` when a binding leaves it out.
+    pub fn list(
+        name: impl Into<Name>,
+        range: std::ops::RangeInclusive<i64>,
+        at_most: usize,
+        default: Vec<i64>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            ty: SettingType::List {
+                min: *range.start(),
+                max: *range.end(),
+                at_most,
                 default,
             },
         }

@@ -547,11 +547,12 @@ pub struct Bound {
     ports: Vec<bool>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Held {
     Flag(bool),
     Int(i64),
     Choice(usize),
+    List(Vec<i64>),
 }
 
 impl Bound {
@@ -576,6 +577,7 @@ impl Bound {
                 (&SettingType::Flag { default }, None) => Some(Held::Flag(default)),
                 (&SettingType::Int { default, .. }, None) => Some(Held::Int(default)),
                 (&SettingType::Choice { default, .. }, None) => Some(Held::Choice(default)),
+                (SettingType::List { default, .. }, None) => Some(Held::List(default.clone())),
                 (SettingType::Flag { .. }, Some(&Setting::Flag(f))) => Some(Held::Flag(f)),
                 (&SettingType::Int { min, max, .. }, Some(&Setting::Int(i))) => {
                     (min..=max).contains(&i).then_some(Held::Int(i))
@@ -583,6 +585,13 @@ impl Bound {
                 (SettingType::Choice { names, .. }, Some(Setting::Name(n))) => {
                     names.iter().position(|c| c == n).map(Held::Choice)
                 }
+                (
+                    &SettingType::List {
+                        min, max, at_most, ..
+                    },
+                    Some(Setting::List(v)),
+                ) => (v.len() <= at_most && v.iter().all(|x| (min..=max).contains(x)))
+                    .then(|| Held::List(v.clone())),
                 _ => None,
             };
             settings.push(held.ok_or_else(|| BindError::SettingValue(d.name.clone()))?);
@@ -608,6 +617,14 @@ impl Bound {
     pub fn choice(&self, s: SettingId) -> Option<usize> {
         match self.settings.get(usize::from(s.0))? {
             &Held::Choice(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    /// The whole numbers list setting `s` holds.
+    pub fn list(&self, s: SettingId) -> Option<&[i64]> {
+        match self.settings.get(usize::from(s.0))? {
+            Held::List(l) => Some(l),
             _ => None,
         }
     }
