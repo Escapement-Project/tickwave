@@ -341,10 +341,6 @@ impl Store {
         self.open.values().map(|o| o.start).min()
     }
 
-    /// Applies a batch whole or not at all. Every op is checked against the open items as the
-    /// batch leaves them so far before any is recorded. The whole batch is refused, at the op that
-    /// does it, if it ever holds more than `at_most` items open. Returns the index of the first
-    /// refused op.
     /// About how many bytes the store holds, for a checkpoint budget: its open items, and its
     /// kept items with their fields, elements and links. An estimate, not an exact figure.
     pub fn bytes(&self) -> usize {
@@ -366,6 +362,10 @@ impl Store {
         size_of::<Self>() + open + items + self.keep.capacity() * size_of::<Span>()
     }
 
+    /// Applies a batch whole or not at all. Every op is checked against the open items as the
+    /// batch leaves them so far before any is recorded. The whole batch is refused, at the op that
+    /// does it, if it ever holds more than `at_most` items open. Returns the index of the first
+    /// refused op.
     pub fn apply_batch(&mut self, ops: &[Op], at_most: usize) -> Result<(), (usize, Refused)> {
         self.batch = self.batch.wrapping_add(1);
         self.undo.clear();
