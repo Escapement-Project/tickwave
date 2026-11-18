@@ -6,8 +6,8 @@
 use escapement_tickwave_decode::{
     AnalysisId, Decoder, Definition, Delivery, Element, ElementType, Exchange, FieldId, FieldType,
     Host, HostOptions, Id, InputSpec, KindDecl, KindId, LinkDecl, LinkTo, Mode, Observation,
-    Observed, Op, Pause, Ref, Request, Schema, SeqId, Source, Span, Status, Subscription, Tick,
-    Value, Window, field, name, seq,
+    Observed, Op, Pause, Ref, Request, Schema, SeqId, Source, SourceError, Span, Status,
+    Subscription, Tick, Value, Window, field, name, seq,
 };
 use std::{
     collections::VecDeque,
@@ -99,7 +99,7 @@ impl Source for Nothing {
         from: Tick,
         upto: Tick,
         cancel: &AtomicBool,
-    ) -> Result<Option<Window>, String> {
+    ) -> Result<Option<Window>, SourceError> {
         if cancel.load(Relaxed) {
             return Ok(None);
         }
@@ -240,7 +240,7 @@ impl Source for Line {
         from: Tick,
         upto: Tick,
         cancel: &AtomicBool,
-    ) -> Result<Option<Window>, String> {
+    ) -> Result<Option<Window>, SourceError> {
         if cancel.load(Relaxed) {
             return Ok(None);
         }

@@ -7,4 +7,13 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+escapement-tickwave-view = { version = "0.1.0", path = "../view", default-features = false, optional = true }
 thiserror = "2.0.21"
+
+[features]
+default = ["wire", "live"]
+# A wire analysis's input read from a recording through the view's cursors. A decoder alone, as
+# one built for an external runtime would be, needs only the contract.
+wire = ["dep:escapement-tickwave-view"]
+# Wire input from a recording a writer in this process is still writing.
+live = ["wire", "escapement-tickwave-view/live"]

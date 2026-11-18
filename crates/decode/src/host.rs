@@ -112,14 +112,30 @@ impl Reply {
 
 /// Where a wire analysis's input comes from. The host calls it outside the decoder's turn.
 pub trait Source: Send {
-    /// The observations in `from..upto`. None where `cancel` stopped the read: the source is left
-    /// as it was.
+    /// The observations in `from..upto`, or up to where a live recording is settled. None where
+    /// `cancel` stopped the read: the source is left as it was.
     fn window(
         &mut self,
         from: Tick,
         upto: Tick,
         cancel: &AtomicBool,
-    ) -> Result<Option<Window>, String>;
+    ) -> Result<Option<Window>, SourceError>;
+}
+
+/// Why a source could not read a window: the recording's error, kept whole.
+#[derive(Clone, Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct SourceError(Arc<dyn std::error::Error + Send + Sync>);
+
+impl SourceError {
+    pub fn new(e: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self(Arc::new(e))
+    }
+
+    /// The error the source met.
+    pub fn inner(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+        &*self.0
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1389,8 +1405,9 @@ impl Host {
                 self.cancelled_reads += 1;
                 Ok(None)
             }
-            Err(why) => {
+            Err(e) => {
                 self.io.push_front((a, id, req));
+                let why = e.to_string();
                 Err(self.refuse(Refusal::Read { run: id.run, why }))
             }
         }

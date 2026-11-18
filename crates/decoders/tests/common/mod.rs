@@ -3,7 +3,7 @@
 
 #![allow(dead_code)]
 
-use escapement_tickwave_decode::{Observed, Source, Span, Tick, Window};
+use escapement_tickwave_decode::{Observed, Source, SourceError, Span, Tick, Window};
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
 /// One line: its level from tick 0, its edges, and its gaps.
@@ -44,7 +44,7 @@ impl Source for Wires {
         from: Tick,
         upto: Tick,
         cancel: &AtomicBool,
-    ) -> Result<Option<Window>, String> {
+    ) -> Result<Option<Window>, SourceError> {
         if cancel.load(Relaxed) {
             return Ok(None);
         }

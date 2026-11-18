@@ -1459,6 +1459,7 @@ dependencies = [
 name = "escapement-tickwave-decode"
 version = "0.1.0"
 dependencies = [
+ "escapement-tickwave-view",
  "thiserror 2.0.21",
 ]
 
@@ -1467,6 +1468,8 @@ name = "escapement-tickwave-decoders"
 version = "0.1.0"
 dependencies = [
  "escapement-tickwave-decode",
+ "escapement-tickwave-format",
+ "escapement-tickwave-view",
  "thiserror 2.0.21",
 ]
 
