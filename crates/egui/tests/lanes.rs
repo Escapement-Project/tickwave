@@ -312,3 +312,63 @@ fn a_long_or_open_item_from_far_before_the_window_still_draws_beside_the_short_o
     );
     assert_eq!(whole, 2, "the long and the open one span the window");
 }
+
+#[test]
+fn a_density_over_items_either_side_of_zero_is_built_and_drawn() {
+    let mut store = Store::with_keep(vec![Span {
+        start: Tick::MIN,
+        end: Tick::MAX,
+    }]);
+    let mut n = 0;
+    for start in (-100_000..100_000).step_by(20) {
+        let id = Id::new(KindId(0), start);
+        let ops = [
+            Op::Open {
+                id,
+                parent: None,
+                start,
+            },
+            Op::Close {
+                id,
+                end: start + 10,
+                status: Status::Complete,
+            },
+        ];
+        store.apply_batch(&ops, 8).unwrap();
+        n += 1;
+    }
+    let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
+    let density = Density::of(store.items.values(), &map, |_| false);
+    assert_eq!(density.items(), n);
+    // Zoomed out across zero, as density bins.
+    let shown = Shown::new(-100_000..100_000, 0.0..500.0);
+    let (labels, palette) = (
+        Labels::default(),
+        Palette::from_visuals(&egui::Visuals::default()),
+    );
+    let schema = Schema::new(vec![KindDecl::new("a")]);
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(600.0, 200.0),
+        )),
+        ..egui::RawInput::default()
+    };
+    let mut out = egui::Context::default().run_ui(input, |ui| {
+        ui.add(
+            Track::new(
+                &shown,
+                "t",
+                &schema,
+                &store.items,
+                &density,
+                &labels,
+                &palette,
+                map,
+            )
+            .settled(Tick::MAX),
+        );
+    });
+    out.textures_delta.clear();
+    assert!(!out.shapes.is_empty());
+}

@@ -293,6 +293,10 @@ impl Density {
         while let Some(l) = levels.last().filter(|l| l.counts.len() > 1) {
             let first = l.first >> 1;
             let len = ((l.first + l.counts.len() as i64 - 1) >> 1) - first + 1;
+            // The buckets either side of zero never join under an arithmetic shift.
+            if len as usize >= l.counts.len() {
+                break;
+            }
             let mut next = Level {
                 shift: l.shift + 1,
                 first,
