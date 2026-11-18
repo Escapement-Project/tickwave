@@ -151,7 +151,7 @@ pub trait Source: Send {
 /// Why a source could not read a window: the recording's error, kept whole, which `source()`
 /// gives.
 #[derive(Clone, Debug, thiserror::Error)]
-#[error("a source could not read its window: {0}")]
+#[error("a source could not read its window")]
 pub struct SourceError(#[source] Arc<dyn std::error::Error + Send + Sync>);
 
 impl SourceError {

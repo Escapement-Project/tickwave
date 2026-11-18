@@ -2025,7 +2025,10 @@ fn a_source_error_keeps_the_recordings_error_as_its_source() {
     let e = escapement_tickwave_decode::SourceError::new(inner);
     let source = e.source().map(|s| s.to_string());
     assert_eq!(source.as_deref(), Some("the file is cut off"));
-    assert!(e.to_string().contains("the file is cut off"));
+    assert!(
+        !e.to_string().contains("cut off"),
+        "a reporter walking the chain shows the recording's error once"
+    );
 }
 
 /// A source with nothing on it and `.0` its ports, true where one has a channel.
