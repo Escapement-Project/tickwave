@@ -36,6 +36,9 @@ pub enum Refused {
     EndBeforeStart,
     #[error("a value past its bounds")]
     ValueTooLong,
+    /// Bits past a bit string's length, in its last byte, are set: equal strings would differ.
+    #[error("a bit string's padding is set")]
+    Padding,
     #[error("more than {MAX_LINKS} links")]
     TooManyLinks,
     /// A child starting before its parent.
@@ -468,6 +471,12 @@ impl Store {
                     {
                         return Err(Refused::ValueTooLong);
                     }
+                    // Lowest bit first: the last byte's bits past the length are padding.
+                    Value::Bits { bytes, bits }
+                        if bits % 8 != 0 && bytes.last().is_some_and(|b| b >> (bits % 8) != 0) =>
+                    {
+                        return Err(Refused::Padding);
+                    }
                     Value::Text(t) if t.len() > MAX_TEXT => return Err(Refused::ValueTooLong),
                     _ => {}
                 }
@@ -701,6 +710,34 @@ mod tests {
             store.items.contains_key(&item(60)),
             "open, it could still meet the span"
         );
+    }
+
+    #[test]
+    fn a_bit_strings_padding_must_be_clear() {
+        let id = Id::new(KindId(0), 0);
+        let set = |bytes: Vec<u8>, bits| {
+            let mut store = Store::default();
+            let ops = [
+                Op::Open {
+                    id,
+                    parent: None,
+                    start: 0,
+                },
+                Op::Set {
+                    id,
+                    field: crate::FieldId(0),
+                    value: Value::Bits { bytes, bits },
+                    span: None,
+                    driver: None,
+                },
+            ];
+            store.apply_batch(&ops, 8).map_err(|e| e.1)
+        };
+        assert_eq!(set(vec![0x0F], 4), Ok(()));
+        assert_eq!(set(vec![0x1F], 4), Err(Refused::Padding));
+        assert_eq!(set(vec![0xFF, 0x01], 9), Ok(()));
+        assert_eq!(set(vec![0xFF, 0x03], 9), Err(Refused::Padding));
+        assert_eq!(set(vec![0xFF], 8), Ok(()), "a whole byte has none");
     }
 
     #[test]
