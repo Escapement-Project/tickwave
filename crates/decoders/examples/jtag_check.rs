@@ -1,9 +1,10 @@
 //! JTAG over a recording's TCK, TMS, TDI and TDO, checked against what IEEE 1149.1 guarantees
 //! where TDO is recorded: every IR scan captures a value whose two lowest bits are 01, and a DR
 //! scan after Test-Logic-Reset, before any IR scan, shifts out IDCODE (bit 0 high) or BYPASS (one
-//! low bit). A checker stacked on JTAG reads its completed items; nothing is kept, so memory
-//! follows the decoders' state, not the capture. `--rows` keeps each item's span, to check that
-//! the items fit the rows and lanes JTAG's schema declares.
+//! low bit). A checker stacked on JTAG reads its completed items, keeping each IR scan's capture
+//! to the end, and a second reads its paths' states for zero-bit scans: the IR scans of the switch
+//! from cJTAG to JTAG at a connect are counted apart, since no TAP captured them. `--rows` keeps
+//! each item's span, to check that the items fit the rows and lanes JTAG's schema declares.
 //!
 //! `cargo run --release -p escapement-tickwave-decoders --example jtag_check -- REC [--tdo-at-rise | --tdo-at-fall] [--rows]`
 //!
@@ -12,10 +13,8 @@
 #[path = "check/mod.rs"]
 mod check;
 
-use check::{Checker, Seen};
-use escapement_tickwave_decode::{
-    Definition, Host, InputSpec, Mode, Schema, Subscription, name, wire::WireSource,
-};
+use check::Seen;
+use escapement_tickwave_decode::{Host, InputSpec, name, wire::WireSource};
 use escapement_tickwave_decoders::jtag;
 use escapement_tickwave_view::{Cache, Recording};
 use std::sync::{Arc, Mutex};
@@ -56,18 +55,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         spans: rows.then(Vec::new),
         ..Seen::default()
     }));
-    let s2 = seen.clone();
-    h.add(
-        name("check"),
-        Arc::new(Definition::new("check", 1, Schema::new(vec![]))),
-        InputSpec::Upstream(
-            Subscription::new(j, Mode::Completed)
-                .with_kinds(["state", "path", "ir-scan", "dr-scan"]),
-        ),
-        Box::new(move |_, _| Box::new(Checker(s2.clone()))),
-        &[],
-        vec![],
-    )?;
+    check::stack(&mut h, j, &seen)?;
+    check::watch_switch(&mut h, j, &seen)?;
     let start = std::time::Instant::now();
     h.run_until(|_| false)?;
     let seconds = start.elapsed().as_secs_f64();

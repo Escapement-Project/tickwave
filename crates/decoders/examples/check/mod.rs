@@ -6,7 +6,8 @@
 pub mod rows;
 
 use escapement_tickwave_decode::{
-    AnalysisId, Decoder, Delivery, Exchange, Host, KindId, Pause, Schema, Status, Tick, Value,
+    AnalysisId, Decoder, Definition, Delivery, Exchange, Host, InputSpec, KindId, Mode, Op, Pause,
+    Schema, Status, Subscription, Tick, Value, name,
 };
 use escapement_tickwave_decoders::jtag;
 use escapement_tickwave_view::Recording;
@@ -20,6 +21,17 @@ pub struct Seen {
     pub ir: u64,
     pub ir_failed: u64,
     pub ir_unread: u64,
+    /// IR scans of the switch from cJTAG to JTAG, whose captures are no TAP's: the one just
+    /// before two zero-bit scans, while nothing drives TDO yet, and the one closing the command
+    /// window those open, which the adapter's 1-bit stage reads (TI's SWCU185, §6.2.2).
+    pub ir_switch: u64,
+    /// Every IR scan, counted by `settle` once the zero-bit scans are all in.
+    pub irs: Vec<IrSeen>,
+    /// Where each zero-bit scan passes Capture-DR, from `ZeroBits`, where `watch_switch` added
+    /// it: on JTAG's four wires alone, since on cJTAG's two a command window carries no switch.
+    pub zero_bit: Vec<Tick>,
+    pub switch_watched: bool,
+    pub settled: bool,
     pub dr: u64,
     pub incomplete: u64,
     pub lengths: BTreeMap<(bool, u64), u64>,
@@ -68,6 +80,178 @@ pub struct Failure {
 
 /// The most failures `Seen` lists.
 const LISTED: usize = 64;
+
+/// An IR scan as `Seen` keeps it until it is counted: its place, span and length, the bits it
+/// captured where TDO gave them, and where the first DR scan after it starts.
+#[derive(Debug)]
+pub struct IrSeen {
+    pub index: u64,
+    pub start: Tick,
+    pub end: Tick,
+    pub length: u64,
+    pub captured: Option<Vec<bool>>,
+    pub first_dr: Option<Tick>,
+}
+
+const CAPTURE_DR: u8 = 3;
+const EXIT1_DR: u8 = 5;
+
+impl Seen {
+    /// Counts the IR scans by their captures, the switch's apart. Two zero-bit scans open a
+    /// command window and the next IR scan closes it; the IR scan before them opens the switch
+    /// where no DR scan came between.
+    pub fn settle(&mut self) {
+        if std::mem::replace(&mut self.settled, true) {
+            return;
+        }
+        self.zero_bit.sort_unstable();
+        let irs = std::mem::take(&mut self.irs);
+        let mut switch = vec![false; irs.len()];
+        for (i, ir) in irs.iter().enumerate() {
+            let next = irs.get(i + 1).map_or(Tick::MAX, |n| n.start);
+            let from = self.zero_bit.partition_point(|&z| z < ir.end);
+            let to = self.zero_bit.partition_point(|&z| z < next);
+            if to - from < 2 {
+                continue;
+            }
+            if let Some(closes) = switch.get_mut(i + 1) {
+                *closes = true;
+            }
+            let second = self.zero_bit[from + 1];
+            if ir.first_dr.is_none_or(|d| d > second) {
+                switch[i] = true;
+            }
+        }
+        for (ir, switch) in irs.into_iter().zip(switch) {
+            self.count(ir, switch);
+        }
+    }
+
+    fn count(&mut self, ir: IrSeen, switch: bool) {
+        if switch {
+            self.ir_switch += 1;
+            return;
+        }
+        let Some(captured) = ir.captured else {
+            self.ir_unread += 1;
+            self.unread.push((ir.start, ir.end));
+            return;
+        };
+        let ok = captured[..2] == [true, false];
+        if !ok {
+            self.ir_failed += 1;
+            if self.failures.len() < LISTED {
+                self.failures.push(Failure {
+                    index: ir.index,
+                    start: ir.start,
+                    end: ir.end,
+                    length: ir.length,
+                    captured,
+                });
+            }
+        }
+        self.ir_spans.push((ir.start, ir.end, ok));
+    }
+}
+
+/// Stacks the checker on JTAG analysis `j`, counting into `seen`.
+pub fn stack(
+    h: &mut Host,
+    j: AnalysisId,
+    seen: &Arc<Mutex<Seen>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let s = seen.clone();
+    h.add(
+        name("check"),
+        Arc::new(Definition::new("check", 1, Schema::new(vec![]))),
+        InputSpec::Upstream(
+            Subscription::new(j, Mode::Completed)
+                .with_kinds(["state", "path", "ir-scan", "dr-scan"]),
+        ),
+        Box::new(move |_, _| Box::new(Checker(s.clone()))),
+        &[],
+        vec![],
+    )?;
+    Ok(())
+}
+
+/// Stacks the watcher of zero-bit scans on JTAG analysis `j`, so `seen` counts the IR scans of
+/// the switch from cJTAG to JTAG apart.
+pub fn watch_switch(
+    h: &mut Host,
+    j: AnalysisId,
+    seen: &Arc<Mutex<Seen>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    seen.lock().unwrap().switch_watched = true;
+    let s = seen.clone();
+    h.add(
+        name("zero-bit"),
+        Arc::new(Definition::new("zero-bit", 1, Schema::new(vec![]))),
+        InputSpec::Upstream(
+            Subscription::new(j, Mode::Pieces)
+                .with_kinds(["path"])
+                .with_sequences(["via"]),
+        ),
+        Box::new(move |_, _| {
+            Box::new(ZeroBits {
+                seen: s.clone(),
+                last: None,
+                to: None,
+            })
+        }),
+        &[],
+        vec![],
+    )?;
+    Ok(())
+}
+
+/// Finds the zero-bit scans, Capture-DR straight to Exit1-DR, in JTAG's paths piece by piece: a
+/// completed path carries no states. A path ends where its `to`, a held state or, for one cut at
+/// its length, the next, takes over.
+pub struct ZeroBits {
+    seen: Arc<Mutex<Seen>>,
+    last: Option<u8>,
+    to: Option<u8>,
+}
+
+impl Decoder for ZeroBits {
+    fn turn(&mut self, ex: &mut Exchange<'_>) -> Pause {
+        let mut s = self.seen.lock().unwrap();
+        while let Some(d) = ex.receive() {
+            match d {
+                Delivery::Piece { piece, .. } => match piece.op() {
+                    Op::Set { field, value, .. } if *field == jtag::TO => {
+                        self.to = match value {
+                            Value::Name(n) => u8::try_from(*n).ok(),
+                            _ => None,
+                        };
+                    }
+                    Op::Extend { elements, .. } => {
+                        for e in elements {
+                            if self.last == Some(CAPTURE_DR) && e.value == EXIT1_DR {
+                                s.zero_bit.push(e.cell.start);
+                            }
+                            self.last = Some(e.value);
+                        }
+                    }
+                    Op::Close { .. } => self.last = self.to.take(),
+                    _ => {}
+                },
+                Delivery::Lost { span, .. } => {
+                    self.last = None;
+                    ex.lost(span.start, span.end);
+                }
+                Delivery::Frontier { start, .. } => ex.frontier(start),
+                Delivery::End { end, .. } => {
+                    ex.finish(end);
+                    return Pause::Finished;
+                }
+                _ => {}
+            }
+        }
+        if ex.more() { Pause::Work } else { Pause::Input }
+    }
+}
 
 pub struct Checker(pub Arc<Mutex<Seen>>);
 
@@ -125,33 +309,21 @@ impl Decoder for Checker {
                                 (unpacked(b, n).iter().enumerate())
                                     .fold(0u64, |v, (k, &x)| v | u64::from(x) << k)
                             });
-                            let end = item.end;
-                            match tdo {
-                                Some((b, n)) if n >= 2 => {
-                                    let ok = b.first().is_some_and(|x| x & 3 == 1);
-                                    if !ok {
-                                        s.ir_failed += 1;
-                                        if s.failures.len() < LISTED {
-                                            let f = Failure {
-                                                index: s.ir - 1,
-                                                start: item.start,
-                                                end,
-                                                length,
-                                                captured: unpacked(b, n),
-                                            };
-                                            s.failures.push(f);
-                                        }
-                                    }
-                                    s.ir_spans.push((item.start, end, ok));
-                                }
-                                _ => {
-                                    s.ir_unread += 1;
-                                    s.unread.push((item.start, end));
-                                }
-                            }
+                            let ir = IrSeen {
+                                index: s.ir - 1,
+                                start: item.start,
+                                end: item.end,
+                                length,
+                                captured: tdo.filter(|&(_, n)| n >= 2).map(|(b, n)| unpacked(b, n)),
+                                first_dr: None,
+                            };
+                            s.irs.push(ir);
                         }
                         jtag::DR_SCAN => {
                             s.dr += 1;
+                            if let Some(ir) = s.irs.last_mut() {
+                                ir.first_dr.get_or_insert(item.start);
+                            }
                             *s.lengths.entry((false, length)).or_default() += 1;
                             if let (32, Some((b, 32))) = (length, tdo) {
                                 let mut w = [0u8; 4];
@@ -248,7 +420,8 @@ pub fn report(
 ) {
     let tb = rec.timebase();
     let capture = rec.length() as f64 * tb.den() as f64 / tb.num() as f64;
-    let s = seen.lock().unwrap();
+    let mut s = seen.lock().unwrap();
+    s.settle();
     let c = h.store(j).counts;
     println!(
         "{label}; states {} paths {} ir {} dr {} incomplete {}; lost {}; ops {} elements {} peak_open {}",
@@ -262,12 +435,16 @@ pub fn report(
         c.elements,
         c.peak_open
     );
+    let switch = match s.switch_watched {
+        true => format!(", {} in the switch from cJTAG to JTAG", s.ir_switch),
+        false => String::new(),
+    };
     println!(
-        "IR capture ending 01: {} of {} ({} failed, {} without TDO value)",
-        s.ir - s.ir_failed - s.ir_unread,
+        "IR capture ending 01: {} of {} ({} failed, {} without TDO value{switch})",
+        s.ir - s.ir_failed - s.ir_unread - s.ir_switch,
         s.ir,
         s.ir_failed,
-        s.ir_unread
+        s.ir_unread,
     );
     let ids: Vec<String> = (s.idcodes.iter())
         .map(|(k, n)| format!("0x{k:08X} x{n}"))

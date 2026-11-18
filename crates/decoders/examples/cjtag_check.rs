@@ -8,7 +8,7 @@
 #[path = "check/mod.rs"]
 mod check;
 
-use check::{Checker, Seen};
+use check::Seen;
 use escapement_tickwave_decode::{
     Decoder, Definition, Delivery, Exchange, Host, InputSpec, KindId, Mode, Pause, Schema, Status,
     Subscription, Tick, name, wire::WireSource,
@@ -113,18 +113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         spans: rows.then(Vec::new),
         ..Seen::default()
     }));
-    let s2 = seen.clone();
-    h.add(
-        name("check"),
-        Arc::new(Definition::new("check", 1, Schema::new(vec![]))),
-        InputSpec::Upstream(
-            Subscription::new(j, Mode::Completed)
-                .with_kinds(["state", "path", "ir-scan", "dr-scan"]),
-        ),
-        Box::new(move |_, _| Box::new(Checker(s2.clone()))),
-        &[],
-        vec![],
-    )?;
+    check::stack(&mut h, j, &seen)?;
     let start = std::time::Instant::now();
     h.run_until(|_| false)?;
     let seconds = start.elapsed().as_secs_f64();
