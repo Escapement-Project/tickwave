@@ -365,7 +365,7 @@ fn frame_times() {
             )),
             ..egui::RawInput::default()
         };
-        let mut frame = || {
+        let frame = || {
             ctx.run_ui(input(), |ui| {
                 for d in &decoded {
                     ui.add(
