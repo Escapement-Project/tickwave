@@ -6,7 +6,10 @@
 //! the AP and its register bank. Over SWD an AP read's data arrives in the next AP read or RDBUFF
 //! read, so an AP read stays open until then; over JTAG-DP each read carries its own, which the
 //! setting `reads` says ("posted" or "own"). MEM-AP reads ADIv5's completed AP accesses: TAR and CSW
-//! writes, then DRW accesses at the address TAR holds, auto-incremented as CSW says.
+//! writes, then DRW accesses at the address TAR holds, auto-incremented as CSW says, singly or
+//! packed (C2.2.2, C2.2.7). A memory access's value is DRW's word, each byte in the lane its
+//! address gives (table C2-3), so an access narrower than a word, or a packed one starting off a
+//! word boundary, has its bytes where its addresses put them.
 //!
 //! Each AP's class comes from its IDR reads (ADIv5.2 C1.3.2), and an AP access carries the class
 //! known when it was made; an IDR read carries the class its own value gives. A register's name
@@ -692,9 +695,12 @@ pub const SCS_NAMES: [&str; 9] = [
 pub const AP_UNKNOWN: Reason = Reason(0);
 pub const NO_TAR: Reason = Reason(1);
 pub const PAST_1K: Reason = Reason(2);
-pub const PACKED: Reason = Reason(3);
+pub const PACKED_WORD: Reason = Reason(3);
 pub const NO_CSW: Reason = Reason(4);
 pub const LOST_TAR: Reason = Reason(5);
+pub const PACKED_WIDE: Reason = Reason(6);
+pub const WIDE: Reason = Reason(7);
+pub const CSW_RESERVED: Reason = Reason(8);
 pub const MEM_NEEDS_SELECT: Need = Need(0);
 pub const NEEDS_TAR: Need = Need(1);
 pub const MEM_GAP_CUT: Cause = Cause(0);
@@ -745,9 +751,13 @@ pub fn mem_schema() -> Schema {
         "AP register unknown, so memory accesses cannot be told apart",
         "no TAR write decoded before this access",
         "auto-increment past a 1 KiB boundary is implementation defined",
-        "packed auto-increment is not decoded",
+        "packed word accesses increment only on a MEM-AP that takes packed transfers, which a CSW \
+         write does not show",
         "CSW unknown, so the auto-increment is unknown",
         "the TAR value is lost in a recording gap",
+        "packed transfers wider than a word are unpredictable",
+        "the auto-increment over a wide access's several DRW accesses is not decoded",
+        "CSW holds a reserved AddrInc or Size, so the auto-increment is unknown",
     ])
     .with_needs(["SELECT", "TAR"])
     .with_causes([GAP_CUT_TEXT])
@@ -819,13 +829,37 @@ impl Access {
     }
 }
 
+/// How far a DRW access moves TAR under CSW `csw`, `read` back from the MEM-AP or as written.
+fn increment(csw: u32, read: bool) -> Result<u32, Reason> {
+    match (csw >> 4 & 3, csw & 7) {
+        (0b00, _) => Ok(0),
+        (0b11, _) | (_, 0b110 | 0b111) => Err(CSW_RESERVED),
+        (0b01, size @ 0b000..=0b010) => Ok(1 << size),
+        (0b01, _) => Err(WIDE),
+        // Packed: a word's bytes in accesses of the size, so four.
+        (0b10, 0b000 | 0b001) => Ok(4),
+        // A MEM-AP that takes only words takes packed for off, and a read of CSW says so.
+        (0b10, 0b010) if read => Ok(4),
+        (0b10, 0b010) => Err(PACKED_WORD),
+        _ => Err(PACKED_WIDE),
+    }
+}
+
+/// An AP's CSW as MEM-AP last saw it.
+#[derive(Clone, Copy, Debug)]
+struct Csw {
+    value: u32,
+    from: Id,
+    /// Read back from the MEM-AP, so what it took rather than what a write asked for.
+    read: bool,
+}
+
 /// MEM-AP over completed AP accesses. An access closed incomplete carries no data and is
 /// skipped, as is one to an AP ADIv5 knows is of another class. An access completed later starts
-/// no earlier than ADIv5's settlement frontier, so that
-/// is its start frontier.
+/// no earlier than ADIv5's settlement frontier, so that is its start frontier.
 #[derive(Clone, Debug)]
 pub struct Mem {
-    csw: HashMap<u8, (u32, Id)>,
+    csw: HashMap<u8, Csw>,
     tar: HashMap<u8, (Result<u32, Reason>, Ref)>,
     /// Why an AP's TAR is not in `tar`: nothing decoded yet, or a recording gap.
     no_tar: Reason,
@@ -889,7 +923,12 @@ impl Mem {
         match reg {
             0x00 => {
                 if let Some((v, _)) = a.value {
-                    self.csw.insert(ap, (v, a.id));
+                    let csw = Csw {
+                        value: v,
+                        from: a.id,
+                        read: !a.write,
+                    };
+                    self.csw.insert(ap, csw);
                 }
             }
             0x04 => {
@@ -930,23 +969,19 @@ impl Mem {
         if let Some((_, src)) = &tar {
             out.link(id, ADDRESS_FROM, *src);
         }
-        if let Some((_, src)) = self.csw.get(&ap) {
-            out.link(id, INCREMENT_FROM, Ref::Upstream(*src));
+        if let Some(csw) = self.csw.get(&ap) {
+            out.link(id, INCREMENT_FROM, Ref::Upstream(csw.from));
         }
         out.close(id, a.span.end, Status::Complete);
         let next = match (tar.map(|t| t.0), self.csw.get(&ap)) {
-            (Some(Ok(t)), Some((csw, _))) => match (csw >> 4) & 3 {
-                0 => Ok(t),
-                1 => {
-                    let n = t.wrapping_add(1 << (csw & 7));
-                    if (n ^ t) & !0x3FF != 0 {
-                        Err(PAST_1K)
-                    } else {
-                        Ok(n)
-                    }
+            (Some(Ok(t)), Some(csw)) => increment(csw.value, csw.read).and_then(|step| {
+                let n = t.wrapping_add(step);
+                if (n ^ t) & !0x3FF != 0 {
+                    Err(PAST_1K)
+                } else {
+                    Ok(n)
                 }
-                _ => Err(PACKED),
-            },
+            }),
             (Some(Ok(_)), None) => Err(NO_CSW),
             (Some(Err(e)), _) => Err(e),
             (None, _) => return,
@@ -988,7 +1023,7 @@ impl Decoder for Mem {
     }
 
     fn heap_bytes(&self) -> usize {
-        crate::held::<(u8, (u32, Id))>(self.csw.capacity())
+        crate::held::<(u8, Csw)>(self.csw.capacity())
             + crate::held::<(u8, (Result<u32, Reason>, Ref))>(self.tar.capacity())
     }
 }

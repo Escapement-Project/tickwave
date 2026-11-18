@@ -554,6 +554,84 @@ fn mem_ap_does_not_increment_past_a_1_kib_boundary() {
     );
 }
 
+/// MEM-AP's addresses for `ts`'s memory writes.
+fn write_addresses(ts: &[T]) -> Vec<Option<Value>> {
+    let (b, _) = bits(ts);
+    let (mut h, [_, _, m]) = host(wires(&b, P), 100, None);
+    run(&mut h);
+    (of(&h, m, adiv5::MEM_WRITE).iter())
+        .map(|i| value(i, adiv5::ADDRESS))
+        .collect()
+}
+
+/// Two DRW writes after a CSW write of `csw` and a TAR write of `tar`.
+fn two_writes(csw: u32, tar: u32) -> Vec<T> {
+    vec![
+        dp_write(0x8, 0x0000_0000),
+        ap_write(0x0, csw),
+        ap_write(0x4, tar),
+        ap_write(0xC, 1),
+        ap_write(0xC, 2),
+    ]
+}
+
+fn at(a: u64) -> Option<Value> {
+    Some(Value::Word { value: a, bits: 32 })
+}
+
+fn no_address(reason: escapement_tickwave_decode::Reason) -> Option<Value> {
+    Some(Value::Unknown {
+        reason,
+        needs: Some(adiv5::NEEDS_TAR),
+    })
+}
+
+#[test]
+fn mem_ap_increments_as_csw_says_singly_or_packed() {
+    // CSW's AddrInc (bits 5:4) and Size (bits 2:0), and the second write's address.
+    let cases = [
+        (0x02, at(0x2000_0000)),
+        (0x10, at(0x2000_0001)),
+        (0x11, at(0x2000_0002)),
+        (0x12, at(0x2000_0004)),
+        (0x13, no_address(adiv5::WIDE)),
+        (0x20, at(0x2000_0004)),
+        (0x21, at(0x2000_0004)),
+        (0x22, no_address(adiv5::PACKED_WORD)),
+        (0x23, no_address(adiv5::PACKED_WIDE)),
+        (0x32, no_address(adiv5::CSW_RESERVED)),
+        (0x16, no_address(adiv5::CSW_RESERVED)),
+    ];
+    for (csw, want) in cases {
+        let got = write_addresses(&two_writes(0x2300_0000 | csw, 0x2000_0000));
+        assert_eq!(got, [at(0x2000_0000), want], "CSW 0x{csw:02X}");
+    }
+    let packed = |tar| write_addresses(&two_writes(0x2300_0020, tar))[1].clone();
+    assert_eq!(
+        packed(0x2000_03FA),
+        at(0x2000_03FE),
+        "from off a word boundary"
+    );
+    assert_eq!(packed(0x2000_03FE), no_address(adiv5::PAST_1K));
+}
+
+#[test]
+fn a_csw_read_shows_whether_the_mem_ap_took_packed_word_accesses() {
+    // A MEM-AP that takes only words reads AddrInc back as off.
+    for (held, second) in [
+        (0x2300_0022, at(0x2000_0004)),
+        (0x2300_0002, at(0x2000_0000)),
+    ] {
+        let mut ts = two_writes(0x2300_0022, 0x2000_0000);
+        ts.splice(2..2, [ap_read(0x0, 0), dp_read(0xC, held)]);
+        assert_eq!(
+            write_addresses(&ts),
+            [at(0x2000_0000), second],
+            "CSW read back as 0x{held:08X}"
+        );
+    }
+}
+
 #[test]
 fn mem_ap_forgets_tar_across_a_gap() {
     let ts = vec![
