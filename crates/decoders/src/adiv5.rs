@@ -513,6 +513,10 @@ impl Decoder for Adi {
     fn save(&self) -> Option<Box<dyn Decoder>> {
         Some(Box::new(self.clone()))
     }
+
+    fn heap_bytes(&self) -> usize {
+        crate::held::<(Id, Partial)>(self.building.capacity())
+    }
 }
 
 // ---- MEM-AP ------------------------------------------------------------------------------------
@@ -813,5 +817,10 @@ impl Decoder for Mem {
 
     fn save(&self) -> Option<Box<dyn Decoder>> {
         Some(Box::new(self.clone()))
+    }
+
+    fn heap_bytes(&self) -> usize {
+        crate::held::<(u8, (u32, Id))>(self.csw.capacity())
+            + crate::held::<(u8, (Result<u32, Reason>, Ref))>(self.tar.capacity())
     }
 }

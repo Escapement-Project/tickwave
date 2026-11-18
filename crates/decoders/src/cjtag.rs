@@ -927,6 +927,16 @@ impl Decoder for Cjtag {
     fn save(&self) -> Option<Box<dyn Decoder>> {
         Some(Box::new(self.clone()))
     }
+
+    fn heap_bytes(&self) -> usize {
+        let oscan = self.oscan.as_ref().map_or(0, |o| {
+            crate::held::<Tick>(o.toggles.capacity())
+                + crate::held::<Slot>(o.slots.capacity())
+                + crate::held::<Ev>(o.events.capacity())
+                + crate::held::<Feed>(o.clocks.capacity())
+        });
+        oscan + crate::held::<Change>(self.changes.capacity()) + crate::window_bytes(&self.held)
+    }
 }
 
 // ---- JTAG on cJTAG -----------------------------------------------------------------------------
@@ -1133,5 +1143,9 @@ impl Decoder for JtagOnCjtag {
 
     fn save(&self) -> Option<Box<dyn Decoder>> {
         Some(Box::new(self.clone()))
+    }
+
+    fn heap_bytes(&self) -> usize {
+        self.tap.heap_bytes()
     }
 }

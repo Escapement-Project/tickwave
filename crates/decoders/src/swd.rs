@@ -655,4 +655,15 @@ impl Decoder for Swd {
     fn save(&self) -> Option<Box<dyn Decoder>> {
         Some(Box::new(self.clone()))
     }
+
+    fn heap_bytes(&self) -> usize {
+        let r = &self.recogniser;
+        crate::held::<Bit>(r.bits.capacity())
+            + crate::held::<Transfer>(r.out.capacity())
+            + crate::held::<Tick>(self.track.cells.capacity())
+            + crate::held::<Element>(self.track.elements.capacity())
+            + crate::held::<(Tick, bool)>(self.ring.capacity())
+            + crate::held::<Tick>(self.held.0.capacity())
+            + crate::held::<bool>(self.held.1.capacity())
+    }
 }

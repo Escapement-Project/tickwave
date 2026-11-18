@@ -262,6 +262,17 @@ pub struct Tap {
 }
 
 impl Tap {
+    /// The bytes its path and the scan under way hold.
+    pub fn heap_bytes(&self) -> usize {
+        let scan = self.scan.as_ref().map_or(0, |s| {
+            crate::held::<Element>(s.tdi.capacity() + s.tdo.capacity())
+                + crate::held::<bool>(s.head_tdi.capacity() + s.head_tdo.capacity())
+        });
+        crate::held::<Element>(self.path.capacity()) + scan
+    }
+}
+
+impl Tap {
     /// The TAP from `start`, where its state is not known. `begin` opens that state's item.
     pub fn new(start: Tick, has_tdo: bool) -> Self {
         Self {
@@ -817,5 +828,9 @@ impl Decoder for Jtag {
 
     fn save(&self) -> Option<Box<dyn Decoder>> {
         Some(Box::new(self.clone()))
+    }
+
+    fn heap_bytes(&self) -> usize {
+        self.tap.heap_bytes() + crate::window_bytes(&self.held)
     }
 }
