@@ -208,6 +208,9 @@ pub struct KindDecl {
     pub row: usize,
     /// Its labels, fullest first: a view shows the first that fits an item, else none.
     pub labels: Vec<Label>,
+    /// The field whose value reads as text, a byte as a word of 8 bits or bytes as bits: a view
+    /// joins an analysis's text into lines, each character from its item.
+    pub text: Option<FieldId>,
 }
 
 /// What an analysis may emit.
@@ -434,6 +437,7 @@ impl KindDecl {
             lanes: 1,
             row: 0,
             labels: vec![],
+            text: None,
         }
     }
 
@@ -469,6 +473,11 @@ impl KindDecl {
 
     pub fn with_labels(mut self, labels: Vec<Label>) -> Self {
         self.labels = labels;
+        self
+    }
+
+    pub fn with_text(mut self, field: FieldId) -> Self {
+        self.text = Some(field);
         self
     }
 }
@@ -580,6 +589,8 @@ pub enum SchemaError {
     SettingDefault(Name),
     #[error("kind {0}: a label shows a field it does not declare")]
     LabelField(Name),
+    #[error("kind {0}: its text is not a field of 8-bit words or of bits it declares")]
+    TextField(Name),
 }
 
 /// An operation its analysis's schema does not allow.
@@ -799,6 +810,12 @@ impl Schema {
                         }
                         LabelPiece::Field(_) => {}
                     }
+                }
+            }
+            if let Some(f) = k.text {
+                match k.fields.get(usize::from(f.0)).map(|d| &d.ty) {
+                    Some(FieldType::Word { bits: 8 } | FieldType::Bits { .. }) => {}
+                    _ => return Err(SchemaError::TextField(k.name.clone())),
                 }
             }
             // A sequence may share its name with a field: a part and its bits.

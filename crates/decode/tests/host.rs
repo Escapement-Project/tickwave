@@ -2306,3 +2306,39 @@ fn a_label_that_shows_a_field_its_kind_does_not_declare_is_refused() {
         Err(BindError::Schema(SchemaError::TooMany { .. }))
     ));
 }
+
+#[test]
+fn a_kind_reads_as_text_from_a_field_of_bytes_it_declares() {
+    let schema = |ty: FieldType, text: u16| {
+        Schema::new(vec![
+            KindDecl::new("a")
+                .with_fields(vec![field("data", ty)])
+                .with_text(FieldId(text)),
+        ])
+    };
+    let add = |schema: Schema| {
+        Host::default().add(
+            name("a"),
+            Arc::new(Definition::new("a", 1, schema).with_ports(["line"])),
+            InputSpec::Wire {
+                source: Box::new(Nothing::default()),
+                local: None,
+            },
+            Box::new(|_, _| Box::new(Swallow)),
+            &[],
+            all(),
+        )
+    };
+    assert!(add(schema(FieldType::Word { bits: 8 }, 0)).is_ok());
+    assert!(add(schema(FieldType::Bits { max: 64 }, 0)).is_ok());
+    for (ty, at) in [
+        (FieldType::Word { bits: 16 }, 0),
+        (FieldType::Bool, 0),
+        (FieldType::Word { bits: 8 }, 1),
+    ] {
+        assert!(matches!(
+            add(schema(ty, at)),
+            Err(BindError::Schema(SchemaError::TextField(k))) if k == "a"
+        ));
+    }
+}
