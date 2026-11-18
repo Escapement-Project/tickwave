@@ -80,7 +80,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let items = (h.store(wc).items.len(), h.store(wj).items.len());
         println!(
             "  window {at_s:5.1} s: restored {:.2} ms of input before it; drawn by {drawn:.1} ms, settled by {settled:.1} ms; items cJTAG {}, JTAG {}; the forward pass at {:.3} s",
-            d.restored.map_or(f64::NAN, |t| (w.start - t) as f64 / per_s * 1e3),
+            d.restored
+                .map_or(f64::NAN, |t| (w.start - t) as f64 / per_s * 1e3),
             items.0,
             items.1,
             h.consumed(c) as f64 / per_s,
