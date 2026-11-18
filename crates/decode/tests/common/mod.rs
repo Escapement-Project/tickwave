@@ -4,9 +4,10 @@
 #![allow(dead_code)]
 
 use escapement_tickwave_decode::{
-    CONTRACT, Decoder, Definition, ElementType, Exchange, FieldId, FieldType, Id, InputSpec,
-    KindDecl, KindId, LinkDecl, LinkTo, Mode, Observed, Op, Pause, Request, Schema, SeqId, Source,
-    Span, Status, Subscription, Tick, Value, Window, field, name, seq,
+    AnalysisId, Decoder, Definition, Delivery, Element, ElementType, Exchange, FieldId, FieldType,
+    Host, HostOptions, Id, InputSpec, KindDecl, KindId, LinkDecl, LinkTo, Mode, Observation,
+    Observed, Op, Pause, Ref, Request, Schema, SeqId, Source, Span, Status, Subscription, Tick,
+    Value, Window, field, name, seq,
 };
 use std::{
     collections::VecDeque,
@@ -25,46 +26,30 @@ pub const B: FieldId = FieldId(3);
 pub const BITS: SeqId = SeqId(0);
 
 pub fn toy_schema() -> Schema {
-    Schema {
-        kinds: vec![
-            KindDecl {
-                name: name("frame"),
-                parents: vec![],
-                fields: vec![
-                    field("v", FieldType::Word { bits: 8 }),
-                    field("n", FieldType::Name(vec![name("a"), name("b")])),
-                    field("p", FieldType::Phase),
-                    field("b", FieldType::Bits { max: 16 }),
-                ],
-                sequences: vec![seq("bits", ElementType::Bit)],
-                links: vec![LinkDecl {
-                    role: name("next"),
-                    to: vec![LinkTo::Own(name("frame"))],
-                }],
-            },
-            KindDecl {
-                name: name("child"),
-                parents: vec![name("frame")],
-                fields: vec![],
-                sequences: vec![],
-                links: vec![],
-            },
-        ],
-        roles: vec![name("probe")],
-        reasons: vec![name("lost")],
-        needs: vec![name("SELECT")],
-        causes: vec![name("cut")],
-        open_at_most: 4,
-    }
+    Schema::new(vec![
+        KindDecl::new("frame")
+            .with_fields(vec![
+                field("v", FieldType::Word { bits: 8 }),
+                field("n", FieldType::Name(vec![name("a"), name("b")])),
+                field("p", FieldType::Phase),
+                field("b", FieldType::Bits { max: 16 }),
+            ])
+            .with_sequences(vec![seq("bits", ElementType::Bit)])
+            .with_links(vec![LinkDecl::new(
+                "next",
+                vec![LinkTo::Own(name("frame"))],
+            )]),
+        KindDecl::new("child").with_parents(["frame"]),
+    ])
+    .with_roles(["probe"])
+    .with_reasons(["lost"])
+    .with_needs(["SELECT"])
+    .with_causes(["cut"])
+    .with_open_at_most(4)
 }
 
 pub fn toy() -> Arc<Definition> {
-    Arc::new(Definition {
-        name: name("toy"),
-        version: 1,
-        contract: CONTRACT,
-        schema: toy_schema(),
-    })
+    Arc::new(Definition::new("toy", 1, toy_schema()).with_ports(["line"]))
 }
 
 pub fn all() -> Vec<Span> {
@@ -119,12 +104,7 @@ impl Source for Nothing {
             return Ok(None);
         }
         self.0.fetch_add(1, Relaxed);
-        Ok(Some(Window {
-            from,
-            upto,
-            events: vec![],
-            end: None,
-        }))
+        Ok(Some(Window::new(from, upto)))
     }
 }
 
@@ -178,7 +158,7 @@ impl Decoder for Script {
                 }
                 Act::Drain => {
                     while let Some(d) = ex.receive() {
-                        if let escapement_tickwave_decode::Delivery::Lost { span, .. } = d {
+                        if let Delivery::Lost { span, .. } = d {
                             ex.lost(span.start, span.end);
                         }
                     }
@@ -212,49 +192,27 @@ pub const FIRST: escapement_tickwave_decode::LinkId = escapement_tickwave_decode
 pub const CUT: escapement_tickwave_decode::Cause = escapement_tickwave_decode::Cause(0);
 
 pub fn pulses_schema() -> Schema {
-    Schema {
-        kinds: vec![KindDecl {
-            name: name("pulse"),
-            parents: vec![],
-            fields: vec![field("width", FieldType::Word { bits: 32 })],
-            sequences: vec![seq("levels", ElementType::Bit)],
-            links: vec![],
-        }],
-        roles: vec![],
-        reasons: vec![],
-        needs: vec![],
-        causes: vec![name("a gap cuts it")],
-        open_at_most: 1,
-    }
+    Schema::new(vec![
+        KindDecl::new("pulse")
+            .with_fields(vec![field("width", FieldType::Word { bits: 32 })])
+            .with_sequences(vec![seq("levels", ElementType::Bit)]),
+    ])
+    .with_causes(["a gap cuts it"])
 }
 
 pub fn pairs_schema() -> Schema {
-    Schema {
-        kinds: vec![KindDecl {
-            name: name("pair"),
-            parents: vec![],
-            fields: vec![field("width", FieldType::Word { bits: 32 })],
-            sequences: vec![],
-            links: vec![LinkDecl {
-                role: name("first"),
-                to: vec![LinkTo::Upstream(name("pulse"))],
-            }],
-        }],
-        roles: vec![],
-        reasons: vec![],
-        needs: vec![],
-        causes: vec![],
-        open_at_most: 1,
-    }
+    Schema::new(vec![
+        KindDecl::new("pair")
+            .with_fields(vec![field("width", FieldType::Word { bits: 32 })])
+            .with_links(vec![LinkDecl::new(
+                "first",
+                vec![LinkTo::Upstream(name("pulse"))],
+            )]),
+    ])
 }
 
 pub fn definition(n: &'static str, schema: Schema) -> Arc<Definition> {
-    Arc::new(Definition {
-        name: name(n),
-        version: 1,
-        contract: CONTRACT,
-        schema,
-    })
+    Arc::new(Definition::new(n, 1, schema).with_ports(["line"]))
 }
 
 /// A line's edges and gaps, served in windows.
@@ -315,12 +273,10 @@ impl Source for Line {
                 _ => Observed::Unknown { at, port: 0 },
             });
         }
-        Ok(Some(Window {
-            from,
-            upto,
-            events,
-            end: (self.end < upto).then_some(self.end),
-        }))
+        let mut w = Window::new(from, upto);
+        w.events = events;
+        w.end = (self.end < upto).then_some(self.end);
+        Ok(Some(w))
     }
 }
 
@@ -393,11 +349,7 @@ impl Decoder for Pulses {
                             start: at,
                             end: at + 1,
                         };
-                        let el = escapement_tickwave_decode::Element {
-                            value: u8::from(level),
-                            at: escapement_tickwave_decode::Observation::Wire(at),
-                            cell,
-                        };
+                        let el = Element::new(u8::from(level), Observation::Wire(at), cell);
                         ex.out.extend(id, LEVELS, self.levels, &[el]);
                         self.levels += 1;
                     }
@@ -414,6 +366,7 @@ impl Decoder for Pulses {
                     }
                     self.level = Some(level);
                 }
+                _ => {}
             }
         }
         self.at = w.upto;
@@ -446,7 +399,7 @@ impl Decoder for Pairs {
     fn turn(&mut self, ex: &mut Exchange<'_>) -> Pause {
         while let Some(d) = ex.receive() {
             match d {
-                escapement_tickwave_decode::Delivery::Item { item, .. } => {
+                Delivery::Item { item, .. } => {
                     if item.status != Status::Complete {
                         self.first = None;
                         continue;
@@ -462,28 +415,24 @@ impl Decoder for Pairs {
                             ex.out.open(id, None, start);
                             let value = (w + width).min(u64::from(u32::MAX));
                             ex.out.set(id, WIDTH, Value::Word { value, bits: 32 });
-                            ex.out.link(
-                                id,
-                                FIRST,
-                                escapement_tickwave_decode::Ref::Upstream(first),
-                            );
+                            ex.out.link(id, FIRST, Ref::Upstream(first));
                             ex.out.close(id, item.end, Status::Complete);
                         }
                     }
                 }
-                escapement_tickwave_decode::Delivery::Lost { span, .. } => {
+                Delivery::Lost { span, .. } => {
                     self.first = None;
                     ex.lost(span.start, span.end);
                 }
-                escapement_tickwave_decode::Delivery::Frontier { start, .. } => {
+                Delivery::Frontier { start, .. } => {
                     let f = self.first.map_or(start, |(_, s, _)| s.min(start));
                     ex.frontier(f);
                 }
-                escapement_tickwave_decode::Delivery::End { end, .. } => {
+                Delivery::End { end, .. } => {
                     ex.finish(end);
                     return Pause::Finished;
                 }
-                escapement_tickwave_decode::Delivery::Piece { .. } => {}
+                _ => {}
             }
         }
         if ex.more() { Pause::Work } else { Pause::Input }
@@ -499,9 +448,9 @@ pub fn pulses_host(
     line: Line,
     step: Tick,
     local: Option<Tick>,
-    options: escapement_tickwave_decode::HostOptions,
-) -> (escapement_tickwave_decode::Host, [usize; 2]) {
-    let mut h = escapement_tickwave_decode::Host::new(options);
+    options: HostOptions,
+) -> (Host, [AnalysisId; 2]) {
+    let mut h = Host::new(options);
     let p = h
         .add(
             name("pulses"),
@@ -518,12 +467,7 @@ pub fn pulses_host(
         .add(
             name("pairs"),
             definition("pairs", pairs_schema()),
-            InputSpec::Upstream(Subscription {
-                upstream: p,
-                kinds: vec![name("pulse")],
-                mode: Mode::Completed,
-                sequences: vec![],
-            }),
+            InputSpec::Upstream(Subscription::new(p, Mode::Completed).with_kinds(["pulse"])),
             Box::new(|_| Box::new(Pairs::default())),
             all(),
         )
@@ -550,6 +494,6 @@ pub fn line(n: i64, width: Tick, period: Tick, gaps: Vec<Span>) -> Line {
     }
 }
 
-pub fn run_all(h: &mut escapement_tickwave_decode::Host) {
+pub fn run_all(h: &mut Host) {
     h.run_until(|_| false).unwrap();
 }

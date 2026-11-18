@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, HashMap};
 
 /// Why an operation breaks its item's lifecycle.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum Refused {
     #[error("the item was opened before")]
     Reopened,
@@ -63,6 +64,7 @@ struct Open {
 }
 
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Field {
     pub field: FieldId,
     pub value: Value,
@@ -71,6 +73,7 @@ pub struct Field {
 }
 
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Item {
     pub id: Id,
     pub parent: Option<Id>,
@@ -96,6 +99,7 @@ impl Item {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Counts {
     pub ops: u64,
     pub opens: u64,

@@ -22,9 +22,9 @@ mod schema;
 mod store;
 
 pub use host::{
-    Batch, BindError, Checkpoint, CheckpointError, Completed, Decoder, Delivery, Exchange, Factory,
-    Host, HostOptions, InputSpec, LogEntry, Mode, Observed, Pause, Refusal, Reply, Request,
-    RequestId, RunId, Source, Subscription, Turn, Window,
+    AnalysisId, Batch, BindError, Checkpoint, CheckpointError, Completed, Decoder, Delivery,
+    Exchange, Factory, Host, HostOptions, InputSpec, LogEntry, Mode, Observed, Pause, Refusal,
+    Reply, Request, RequestId, RunId, Source, Subscription, Turn, Window,
 };
 pub use output::{
     Cause, Element, FieldId, Id, KindId, LinkId, MAX_BITS, MAX_CHUNK, MAX_FIELDS, MAX_LINKS,

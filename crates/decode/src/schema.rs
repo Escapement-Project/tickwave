@@ -34,6 +34,7 @@ impl fmt::Display for Contract {
 
 /// A decoder as the host adds it.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Definition {
     /// The decoder's name, which a recipe names.
     pub name: Name,
@@ -42,10 +43,14 @@ pub struct Definition {
     pub version: u32,
     /// The decoder contract it targets.
     pub contract: Contract,
+    /// The wire ports it reads, by name, for a decoder that reads the wire: a window's port
+    /// numbers index this list, and a binding names a channel for each.
+    pub ports: Vec<Name>,
     pub schema: Schema,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FieldType {
     /// A spanned part with no value, such as a turnaround.
     Phase,
@@ -63,6 +68,7 @@ pub enum FieldType {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ElementType {
     Bit,
     /// An index into a declared list of at most 256 names, such as TAP states.
@@ -70,12 +76,14 @@ pub enum ElementType {
 }
 
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct FieldDecl {
     pub name: Name,
     pub ty: FieldType,
 }
 
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct SeqDecl {
     pub name: Name,
     pub element: ElementType,
@@ -84,18 +92,21 @@ pub struct SeqDecl {
 /// A kind a link may point to, by name: one of this analysis's, or of the analysis it is stacked
 /// on.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LinkTo {
     Own(Name),
     Upstream(Name),
 }
 
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct LinkDecl {
     pub role: Name,
     pub to: Vec<LinkTo>,
 }
 
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct KindDecl {
     pub name: Name,
     pub parents: Vec<Name>,
@@ -106,6 +117,7 @@ pub struct KindDecl {
 
 /// What an analysis may emit.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Schema {
     pub kinds: Vec<KindDecl>,
     /// Driver roles, in phase 7d's sense; a spanned field names one.
@@ -119,6 +131,132 @@ pub struct Schema {
     /// The most items the analysis holds open at once, its declared bound on protocol state. The
     /// host refuses a batch that leaves more open.
     pub open_at_most: usize,
+}
+
+fn names<N: Into<Name>>(list: impl IntoIterator<Item = N>) -> Vec<Name> {
+    list.into_iter().map(Into::into).collect()
+}
+
+impl Definition {
+    /// A decoder of the host's own contract, with no wire ports.
+    pub fn new(name: impl Into<Name>, version: u32, schema: Schema) -> Self {
+        Self {
+            name: name.into(),
+            version,
+            contract: CONTRACT,
+            ports: vec![],
+            schema,
+        }
+    }
+
+    pub fn with_contract(mut self, contract: Contract) -> Self {
+        self.contract = contract;
+        self
+    }
+
+    pub fn with_ports<N: Into<Name>>(mut self, ports: impl IntoIterator<Item = N>) -> Self {
+        self.ports = names(ports);
+        self
+    }
+}
+
+impl Schema {
+    /// A schema of these kinds, with no roles, reasons, needs or causes, holding one item open.
+    pub fn new(kinds: Vec<KindDecl>) -> Self {
+        Self {
+            kinds,
+            roles: vec![],
+            reasons: vec![],
+            needs: vec![],
+            causes: vec![],
+            open_at_most: 1,
+        }
+    }
+
+    pub fn with_roles<N: Into<Name>>(mut self, roles: impl IntoIterator<Item = N>) -> Self {
+        self.roles = names(roles);
+        self
+    }
+
+    pub fn with_reasons<N: Into<Name>>(mut self, reasons: impl IntoIterator<Item = N>) -> Self {
+        self.reasons = names(reasons);
+        self
+    }
+
+    pub fn with_needs<N: Into<Name>>(mut self, needs: impl IntoIterator<Item = N>) -> Self {
+        self.needs = names(needs);
+        self
+    }
+
+    pub fn with_causes<N: Into<Name>>(mut self, causes: impl IntoIterator<Item = N>) -> Self {
+        self.causes = names(causes);
+        self
+    }
+
+    pub fn with_open_at_most(mut self, n: usize) -> Self {
+        self.open_at_most = n;
+        self
+    }
+}
+
+impl KindDecl {
+    /// A kind with no parents, fields, sequences or links.
+    pub fn new(name: impl Into<Name>) -> Self {
+        Self {
+            name: name.into(),
+            parents: vec![],
+            fields: vec![],
+            sequences: vec![],
+            links: vec![],
+        }
+    }
+
+    pub fn with_parents<N: Into<Name>>(mut self, parents: impl IntoIterator<Item = N>) -> Self {
+        self.parents = names(parents);
+        self
+    }
+
+    pub fn with_fields(mut self, fields: Vec<FieldDecl>) -> Self {
+        self.fields = fields;
+        self
+    }
+
+    pub fn with_sequences(mut self, sequences: Vec<SeqDecl>) -> Self {
+        self.sequences = sequences;
+        self
+    }
+
+    pub fn with_links(mut self, links: Vec<LinkDecl>) -> Self {
+        self.links = links;
+        self
+    }
+}
+
+impl FieldDecl {
+    pub fn new(name: impl Into<Name>, ty: FieldType) -> Self {
+        Self {
+            name: name.into(),
+            ty,
+        }
+    }
+}
+
+impl SeqDecl {
+    pub fn new(name: impl Into<Name>, element: ElementType) -> Self {
+        Self {
+            name: name.into(),
+            element,
+        }
+    }
+}
+
+impl LinkDecl {
+    pub fn new(role: impl Into<Name>, to: Vec<LinkTo>) -> Self {
+        Self {
+            role: role.into(),
+            to,
+        }
+    }
 }
 
 pub const fn name(s: &'static str) -> Name {
@@ -149,6 +287,7 @@ pub const MAX_NAME: usize = 64;
 
 /// A schema that cannot be loaded.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum SchemaError {
     #[error("kind {kind}: {name} is declared twice")]
     Duplicate { kind: Name, name: Name },
@@ -170,6 +309,7 @@ pub enum SchemaError {
 
 /// An operation its analysis's schema does not allow.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum Mismatch {
     #[error("no kind {0:?}")]
     Kind(KindId),

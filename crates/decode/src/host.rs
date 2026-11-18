@@ -15,11 +15,21 @@ use std::{
     },
 };
 
+/// An analysis of a host, as `Host::add` numbers it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AnalysisId(pub u16);
+
+impl AnalysisId {
+    fn index(self) -> usize {
+        usize::from(self.0)
+    }
+}
+
 /// One execution of an analysis. Replacing the run makes a new generation; nothing from an older
 /// generation is admitted afterwards.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RunId {
-    pub analysis: u16,
+    pub analysis: AnalysisId,
     pub generation: u64,
 }
 
@@ -34,9 +44,11 @@ pub struct RequestId {
 /// timeline; observations of different ports at one tick are adjacent, in no order a decoder may
 /// rely on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Observed {
-    /// Port `port`'s level where the window starts; None where it is not known there. Each port's
-    /// comes first in the window, whether or not the source read from before it.
+    /// Port `port`'s level just before the window's first tick, before anything at that tick;
+    /// None where it is not known. Each port's comes first in the window, whether or not the
+    /// source read from before it.
     Start { port: u8, level: Option<bool> },
     /// Port `port` changed to `level` at `at`.
     Edge { at: Tick, port: u8, level: bool },
@@ -60,6 +72,7 @@ impl Observed {
 
 /// The observations in `from..upto`. `end` is set where the recording ends inside the window.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct Window {
     pub from: Tick,
     pub upto: Tick,
@@ -67,14 +80,34 @@ pub struct Window {
     pub end: Option<Tick>,
 }
 
+impl Window {
+    /// An empty window over `from..upto`.
+    pub fn new(from: Tick, upto: Tick) -> Self {
+        Self {
+            from,
+            upto,
+            events: vec![],
+            end: None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Request {
     Window { from: Tick, upto: Tick },
 }
 
+#[non_exhaustive]
 pub struct Reply {
     pub id: RequestId,
     pub window: Window,
+}
+
+impl Reply {
+    pub fn new(id: RequestId, window: Window) -> Self {
+        Self { id, window }
+    }
 }
 
 /// Where a wire analysis's input comes from. The host calls it outside the decoder's turn.
@@ -90,6 +123,7 @@ pub trait Source: Send {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Mode {
     /// Every operation on a subscribed item, as its batch commits.
     Pieces,
@@ -100,12 +134,34 @@ pub enum Mode {
 /// A stacked analysis's input: kinds of an upstream analysis, by name, delivered in one mode. A
 /// pieces subscription names the sequences it reads; others are not delivered.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Subscription {
-    /// The upstream analysis, as `Host::add` numbered it.
-    pub upstream: usize,
+    pub upstream: AnalysisId,
     pub kinds: Vec<Name>,
     pub mode: Mode,
     pub sequences: Vec<Name>,
+}
+
+impl Subscription {
+    /// No kinds and no sequences yet.
+    pub fn new(upstream: AnalysisId, mode: Mode) -> Self {
+        Self {
+            upstream,
+            kinds: vec![],
+            mode,
+            sequences: vec![],
+        }
+    }
+
+    pub fn with_kinds<N: Into<Name>>(mut self, kinds: impl IntoIterator<Item = N>) -> Self {
+        self.kinds = kinds.into_iter().map(Into::into).collect();
+        self
+    }
+
+    pub fn with_sequences<N: Into<Name>>(mut self, sequences: impl IntoIterator<Item = N>) -> Self {
+        self.sequences = sequences.into_iter().map(Into::into).collect();
+        self
+    }
 }
 
 /// A subscription's names resolved against its upstream's schema.
@@ -118,6 +174,7 @@ struct Resolution {
 
 /// An item as a completed subscription receives it.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Completed {
     pub id: Id,
     pub parent: Option<Id>,
@@ -143,6 +200,7 @@ impl Completed {
 }
 
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum Delivery {
     Piece {
         from: RunId,
@@ -197,6 +255,7 @@ impl Delivery {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Pause {
     /// Waiting for a reply or a delivery.
     Input,
@@ -404,6 +463,7 @@ impl Turn {
 pub type Factory = Box<dyn Fn(Option<Tick>) -> Box<dyn Decoder> + Send + Sync>;
 
 /// Output a run submits after a turn.
+#[non_exhaustive]
 pub struct Batch {
     pub run: RunId,
     pub seq: u64,
@@ -413,8 +473,22 @@ pub struct Batch {
     pub lost: Vec<(usize, Span)>,
 }
 
+impl Batch {
+    /// Ops with no frontier and no lost input.
+    pub fn new(run: RunId, seq: u64, ops: Vec<Op>) -> Self {
+        Self {
+            run,
+            seq,
+            ops,
+            frontier: None,
+            lost: vec![],
+        }
+    }
+}
+
 /// Why the host did not admit something.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum Refusal {
     /// A batch or turn from a run that is no longer current.
     #[error("run {got:?} is no longer current: {current:?} is")]
@@ -478,6 +552,7 @@ pub enum Refusal {
 
 /// Why a checkpoint cannot be taken or restored.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum CheckpointError {
     /// A decoder in the cut cannot copy its state.
     #[error("{0} cannot copy its state")]
@@ -513,12 +588,14 @@ struct Snapshot {
 
 /// A checkpoint of a wire analysis and every analysis stacked on it, taken between turns, so that
 /// each stacked state matches exactly the upstream output delivered to it.
+#[non_exhaustive]
 pub struct Checkpoint {
     pub runs: Vec<RunId>,
     snaps: Vec<Snapshot>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum BindError {
     #[error("decoder {decoder} targets contract {wants}; this host runs {runs}")]
     Contract {
@@ -532,8 +609,10 @@ pub enum BindError {
     DuplicateAnalysis(Name),
     #[error("more analyses than a run id numbers")]
     TooManyAnalyses,
-    #[error("no analysis {0} to stack on")]
-    NoAnalysis(usize),
+    #[error("more wire ports than a window numbers")]
+    TooManyPorts,
+    #[error("no analysis {0:?} to stack on")]
+    NoAnalysis(AnalysisId),
     #[error("{upstream} has no kind {kind}")]
     UnknownKind { upstream: Name, kind: Name },
     #[error("no subscribed kind has a sequence {0}")]
@@ -545,6 +624,7 @@ pub enum BindError {
 
 /// One line of the host's record, for tests and the trace.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum LogEntry {
     Admitted {
         order: u64,
@@ -574,6 +654,7 @@ pub enum LogEntry {
     },
 }
 
+#[non_exhaustive]
 pub enum InputSpec {
     Wire {
         source: Box<dyn Source>,
@@ -589,6 +670,7 @@ enum Input {
 
 /// What a host allows and keeps. Each bound refuses rather than grows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct HostOptions {
     /// Deliveries one turn may take.
     pub turn_deliveries: usize,
@@ -656,7 +738,7 @@ struct Run {
     interrupt: Arc<AtomicBool>,
 }
 
-struct Analysis {
+struct Slot {
     name: Name,
     def: Arc<Definition>,
     resolved: Resolved,
@@ -669,7 +751,7 @@ struct Analysis {
 
 pub struct Host {
     options: HostOptions,
-    analyses: Vec<Analysis>,
+    analyses: Vec<Slot>,
     io: VecDeque<(usize, RequestId, Request)>,
     log: VecDeque<LogEntry>,
     order: u64,
@@ -746,13 +828,16 @@ impl Host {
         input: InputSpec,
         factory: Factory,
         keep: Vec<Span>,
-    ) -> Result<usize, BindError> {
+    ) -> Result<AnalysisId, BindError> {
         if !CONTRACT.runs(def.contract) {
             return Err(BindError::Contract {
                 decoder: def.name.clone(),
                 wants: def.contract,
                 runs: CONTRACT,
             });
+        }
+        if def.ports.len() > usize::from(u8::MAX) + 1 {
+            return Err(BindError::TooManyPorts);
         }
         if self.analyses.iter().any(|a| a.name == name) {
             return Err(BindError::DuplicateAnalysis(name));
@@ -768,8 +853,8 @@ impl Host {
                 (Input::Wire(source), local, None, r)
             }
             InputSpec::Upstream(sub) => {
-                let up = sub.upstream;
-                let ua = self.analyses.get(up).ok_or(BindError::NoAnalysis(up))?;
+                let up = sub.upstream.index();
+                let ua = (self.analyses.get(up)).ok_or(BindError::NoAnalysis(sub.upstream))?;
                 let us = &ua.def.schema;
                 let r = def
                     .schema
@@ -809,7 +894,7 @@ impl Host {
             }
         };
         let id = RunId {
-            analysis,
+            analysis: AnalysisId(analysis),
             generation: 1,
         };
         let run = Run::new(
@@ -819,7 +904,7 @@ impl Host {
             Store::with_keep(keep.clone()),
             bound,
         );
-        self.analyses.push(Analysis {
+        self.analyses.push(Slot {
             name,
             def,
             resolved,
@@ -829,24 +914,28 @@ impl Host {
             downstream: vec![],
             run,
         });
-        Ok(index)
+        Ok(AnalysisId(analysis))
     }
 
-    pub fn index(&self, name: &str) -> Option<usize> {
-        self.analyses.iter().position(|a| a.name == name)
+    pub fn index(&self, name: &str) -> Option<AnalysisId> {
+        let a = self.analyses.iter().position(|a| a.name == name)?;
+        Some(AnalysisId(u16::try_from(a).ok()?))
     }
 
-    pub fn name(&self, a: usize) -> &str {
+    pub fn name(&self, a: AnalysisId) -> &str {
+        let a = a.index();
         &self.analyses[a].name
     }
 
-    pub fn definition(&self, a: usize) -> &Definition {
+    pub fn definition(&self, a: AnalysisId) -> &Definition {
+        let a = a.index();
         &self.analyses[a].def
     }
 
     /// An item's semantic id as text, as a citation names it: the analysis, the kind and the
     /// anchor, and the discriminator after a dot where there is one.
-    pub fn id_text(&self, a: usize, id: &Id) -> String {
+    pub fn id_text(&self, a: AnalysisId, id: &Id) -> String {
+        let a = a.index();
         let an = &self.analyses[a];
         let kind = an.def.schema.kind(id.kind).map_or("?", |k| &k.name);
         match id.disc {
@@ -855,29 +944,35 @@ impl Host {
         }
     }
 
-    pub fn run_id(&self, a: usize) -> RunId {
+    pub fn run_id(&self, a: AnalysisId) -> RunId {
+        let a = a.index();
         self.analyses[a].run.id
     }
 
-    pub fn bound(&self, a: usize) -> Option<RunId> {
+    pub fn bound(&self, a: AnalysisId) -> Option<RunId> {
+        let a = a.index();
         self.analyses[a].run.bound
     }
 
-    pub fn store(&self, a: usize) -> &Store {
+    pub fn store(&self, a: AnalysisId) -> &Store {
+        let a = a.index();
         &self.analyses[a].run.store
     }
 
     /// How far the run's decoder has taken its wire input.
-    pub fn consumed(&self, a: usize) -> Tick {
+    pub fn consumed(&self, a: AnalysisId) -> Tick {
+        let a = a.index();
         self.analyses[a].run.consumed
     }
 
-    pub fn finished(&self, a: usize) -> Option<Tick> {
+    pub fn finished(&self, a: AnalysisId) -> Option<Tick> {
+        let a = a.index();
         self.analyses[a].run.finished
     }
 
     /// Whether the analyses stacked on `a` have nothing waiting.
-    pub fn quiet_below(&self, a: usize) -> bool {
+    pub fn quiet_below(&self, a: AnalysisId) -> bool {
+        let a = a.index();
         let mut stack = self.analyses[a].downstream.clone();
         while let Some(d) = stack.pop() {
             let r = &self.analyses[d].run;
@@ -895,39 +990,46 @@ impl Host {
     }
 
     /// No item analysis `a`'s run emits from now on starts before this.
-    pub fn start_frontier(&self, a: usize) -> Tick {
+    pub fn start_frontier(&self, a: AnalysisId) -> Tick {
+        let a = a.index();
         self.analyses[a].run.frontier
     }
 
     /// Nothing analysis `a`'s run has emitted before this will change: the view's decoded
     /// coverage.
-    pub fn settled(&self, a: usize) -> Tick {
+    pub fn settled(&self, a: AnalysisId) -> Tick {
+        let a = a.index();
         self.analyses[a].run.settled
     }
 
     /// The most closed ids the run has held to refuse a repeated open.
-    pub fn peak_recent(&self, a: usize) -> usize {
+    pub fn peak_recent(&self, a: AnalysisId) -> usize {
+        let a = a.index();
         self.analyses[a].run.peak_recent
     }
 
     /// The flag that stops analysis `a`'s current run's read or turn in progress: another thread
     /// raises it, and the host lowers it once acted on.
-    pub fn interrupt(&self, a: usize) -> Arc<AtomicBool> {
+    pub fn interrupt(&self, a: AnalysisId) -> Arc<AtomicBool> {
+        let a = a.index();
         self.analyses[a].run.interrupt.clone()
     }
 
     /// The stretches analysis `a`'s run has declared its input lost over that are not yet settled
     /// or meet a kept span, adjacent ones joined.
-    pub fn lost(&self, a: usize) -> &[Span] {
+    pub fn lost(&self, a: AnalysisId) -> &[Span] {
+        let a = a.index();
         &self.analyses[a].run.lost
     }
 
     /// How many losses analysis `a`'s run has declared.
-    pub fn lost_total(&self, a: usize) -> u64 {
+    pub fn lost_total(&self, a: AnalysisId) -> u64 {
+        let a = a.index();
         self.analyses[a].run.lost_total
     }
 
-    pub fn outstanding(&self, a: usize) -> Option<RequestId> {
+    pub fn outstanding(&self, a: AnalysisId) -> Option<RequestId> {
+        let a = a.index();
         self.analyses[a].run.outstanding.map(|o| o.0)
     }
 
@@ -938,7 +1040,7 @@ impl Host {
     }
 
     fn admit(&mut self, b: Batch) -> Result<(), Refusal> {
-        let a = usize::from(b.run.analysis);
+        let a = b.run.analysis.index();
         let recent_at_most = self.options.recent_at_most;
         let Some(an) = self.analyses.get_mut(a) else {
             return Err(Refusal::StaleRun {
@@ -1232,7 +1334,7 @@ impl Host {
     }
 
     /// Queues a delivery for analysis `to`, if its run is bound to the delivery's upstream run.
-    pub fn deliver(&mut self, to: usize, d: Delivery) -> Result<(), Refusal> {
+    fn deliver(&mut self, to: usize, d: Delivery) -> Result<(), Refusal> {
         let r = &mut self.analyses[to].run;
         if Some(d.from()) != r.bound {
             let why = Refusal::StaleDelivery {
@@ -1296,7 +1398,7 @@ impl Host {
 
     /// Admits a reply if it answers the current run's outstanding request; it is consumed once.
     pub fn reply(&mut self, reply: Reply) -> Result<(), Refusal> {
-        let a = usize::from(reply.id.run.analysis);
+        let a = reply.id.run.analysis.index();
         let outstanding = self.analyses.get(a).and_then(|an| an.run.outstanding);
         match outstanding {
             Some((id, _)) if id == reply.id => {
@@ -1317,14 +1419,22 @@ impl Host {
     }
 
     /// Runs one turn of analysis `a`'s decoder and admits what it produced.
-    pub fn turn(&mut self, a: usize) -> Result<Pause, Refusal> {
-        let mut t = self.begin_turn(a)?;
+    pub fn turn(&mut self, a: AnalysisId) -> Result<Pause, Refusal> {
+        self.turn_at(a.index())
+    }
+
+    fn turn_at(&mut self, a: usize) -> Result<Pause, Refusal> {
+        let mut t = self.begin_turn_at(a)?;
         t.run();
         self.end_turn(t)
     }
 
     /// Takes analysis `a`'s decoder out for a turn, with its ready reply and queued deliveries.
-    pub fn begin_turn(&mut self, a: usize) -> Result<Turn, Refusal> {
+    pub fn begin_turn(&mut self, a: AnalysisId) -> Result<Turn, Refusal> {
+        self.begin_turn_at(a.index())
+    }
+
+    fn begin_turn_at(&mut self, a: usize) -> Result<Turn, Refusal> {
         let r = &mut self.analyses[a].run;
         if r.out {
             let why = Refusal::TurnUnderWay(r.id);
@@ -1459,15 +1569,22 @@ impl Host {
                 Err(e) => return Err(e),
             }
         }
-        if let Some(a) = (0..self.analyses.len()).rev().find(|&a| self.runnable(a)) {
-            self.turn(a)?;
+        if let Some(a) = (0..self.analyses.len())
+            .rev()
+            .find(|&a| self.runnable_at(a))
+        {
+            self.turn_at(a)?;
             return Ok(true);
         }
         Ok(read)
     }
 
     /// Whether analysis `a` has something to do and room downstream to put it.
-    pub fn runnable(&self, a: usize) -> bool {
+    pub fn runnable(&self, a: AnalysisId) -> bool {
+        self.runnable_at(a.index())
+    }
+
+    fn runnable_at(&self, a: usize) -> bool {
         let r = &self.analyses[a].run;
         let blocked = (self.analyses[a].downstream.iter())
             .any(|&d| self.analyses[d].run.inbox.len() > self.options.inbox_at_most);
@@ -1495,7 +1612,8 @@ impl Host {
     /// beginning), and every run stacked on it with a new generation bound to its replaced
     /// upstream. Their output, queued input and outstanding requests are dropped; a reply or
     /// batch for an old generation is refused when it arrives. Returns the retired runs.
-    pub fn replace(&mut self, a: usize, local: Option<Tick>) -> Vec<RunId> {
+    pub fn replace(&mut self, a: AnalysisId, local: Option<Tick>) -> Vec<RunId> {
+        let a = a.index();
         let mut retired = vec![];
         let mut queue = VecDeque::from([(a, local)]);
         let mut seen = HashSet::new();
@@ -1541,7 +1659,8 @@ impl Host {
     /// Checkpoints wire analysis `a` and everything stacked on it, between turns: decoder states,
     /// stores with their open items and sequence counts, queued deliveries, items being
     /// assembled, and frontiers. Outstanding requests are not kept: a restored decoder asks again.
-    pub fn checkpoint(&self, a: usize) -> Result<Checkpoint, CheckpointError> {
+    pub fn checkpoint(&self, a: AnalysisId) -> Result<Checkpoint, CheckpointError> {
+        let a = a.index();
         if !matches!(self.analyses[a].input, Input::Wire(_)) {
             return Err(CheckpointError::NotARoot(self.analyses[a].name.clone()));
         }

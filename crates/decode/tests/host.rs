@@ -4,15 +4,15 @@ mod common;
 
 use common::*;
 use escapement_tickwave_decode::{
-    Batch, BindError, CONTRACT, Cause, CheckpointError, Contract, Decoder, Definition, Element,
-    ElementType, Exchange, FieldDecl, FieldId, FieldType, Host, HostOptions, Id, InputSpec,
-    KindDecl, KindId, LinkDecl, LinkId, LinkTo, LogEntry, Mismatch, Mode, Need, Observation, Op,
-    Pause, Reason, Ref, Refusal, Refused, Reply, Role, Schema, SeqDecl, SeqId, Span, Status,
-    Subscription, Tick, Value, field, name,
+    AnalysisId, Batch, BindError, CONTRACT, Cause, CheckpointError, Contract, Decoder, Definition,
+    Element, ElementType, Exchange, FieldDecl, FieldId, FieldType, Host, HostOptions, Id,
+    InputSpec, KindDecl, KindId, LinkDecl, LinkId, LinkTo, LogEntry, Mismatch, Mode, Name, Need,
+    Observation, Op, Pause, Reason, Ref, Refusal, Refused, Reply, Role, Schema, SeqDecl, SeqId,
+    Span, Status, Subscription, Tick, Value, field, name,
 };
 use std::sync::{Arc, atomic::Ordering::Relaxed};
 
-fn toy_host(turns: Vec<Vec<Act>>, options: HostOptions) -> (Host, usize) {
+fn toy_host(turns: Vec<Vec<Act>>, options: HostOptions) -> (Host, AnalysisId) {
     let mut h = Host::new(options);
     let a = h
         .add(
@@ -29,25 +29,20 @@ fn toy_host(turns: Vec<Vec<Act>>, options: HostOptions) -> (Host, usize) {
     (h, a)
 }
 
-fn batch(h: &Host, a: usize, seq: u64, ops: Vec<Op>) -> Batch {
-    Batch {
-        run: h.run_id(a),
-        seq,
-        ops,
-        frontier: None,
-        lost: vec![],
-    }
+fn batch(h: &Host, a: AnalysisId, seq: u64, ops: Vec<Op>) -> Batch {
+    Batch::new(h.run_id(a), seq, ops)
+}
+
+fn options(f: impl FnOnce(&mut HostOptions)) -> HostOptions {
+    let mut o = HostOptions::default();
+    f(&mut o);
+    o
 }
 
 #[test]
 fn a_decoder_for_a_contract_the_host_does_not_run_is_refused_when_added() {
     let mut h = Host::default();
-    let with = |contract| {
-        Arc::new(Definition {
-            contract,
-            ..(*toy()).clone()
-        })
-    };
+    let with = |contract| Arc::new((*toy()).clone().with_contract(contract));
     let add = |h: &mut Host, n: &'static str, def| {
         h.add(
             name(n),
@@ -82,7 +77,7 @@ fn a_decoder_for_a_contract_the_host_does_not_run_is_refused_when_added() {
     ));
     assert_eq!(
         add(&mut h, "c", with(CONTRACT)).unwrap(),
-        0,
+        AnalysisId(0),
         "a decoder of the host's own contract is added"
     );
     let message = add(&mut h, "d", with(newer)).unwrap_err().to_string();
@@ -94,23 +89,18 @@ fn a_decoder_for_a_contract_the_host_does_not_run_is_refused_when_added() {
 
 #[test]
 fn a_schema_and_its_subscriptions_are_checked_when_added() {
-    let kind = |name_: &'static str, parents, fields, links| KindDecl {
-        name: name(name_),
-        parents,
-        fields,
-        sequences: vec![],
-        links,
+    let kind = |name_: &'static str, parents: Vec<Name>, fields, links| {
+        KindDecl::new(name_)
+            .with_parents(parents)
+            .with_fields(fields)
+            .with_links(links)
     };
-    let schema = |kinds: Vec<KindDecl>| Schema {
-        kinds,
-        ..toy_schema()
+    let schema = |kinds: Vec<KindDecl>| {
+        let mut s = toy_schema();
+        s.kinds = kinds;
+        s
     };
-    let to = |l: LinkTo| {
-        vec![LinkDecl {
-            role: name("l"),
-            to: vec![l],
-        }]
-    };
+    let to = |l: LinkTo| vec![LinkDecl::new("l", vec![l])];
     let refused = [
         (
             schema(vec![
@@ -163,20 +153,13 @@ fn a_schema_and_its_subscriptions_are_checked_when_added() {
             schema(vec![kind("", vec![], vec![], vec![])]),
             "name is empty",
         ),
-        (
-            Schema {
-                open_at_most: 0,
-                ..toy_schema()
-            },
-            "open-item bound",
-        ),
+        (toy_schema().with_open_at_most(0), "open-item bound"),
     ];
     for (k, (s, why)) in refused.into_iter().enumerate() {
         let mut h = Host::default();
-        let def = Arc::new(Definition {
-            schema: s,
-            ..(*toy()).clone()
-        });
+        let mut def = (*toy()).clone();
+        def.schema = s;
+        let def = Arc::new(def);
         let got = h.add(
             name("toy"),
             def,
@@ -197,12 +180,11 @@ fn a_schema_and_its_subscriptions_are_checked_when_added() {
             h.add(
                 name(n),
                 definition("pairs", pairs_schema()),
-                InputSpec::Upstream(Subscription {
-                    upstream: p,
-                    kinds: kinds.into_iter().map(name).collect(),
-                    mode,
-                    sequences: sequences.into_iter().map(name).collect(),
-                }),
+                InputSpec::Upstream(
+                    Subscription::new(p, mode)
+                        .with_kinds(kinds)
+                        .with_sequences(sequences),
+                ),
                 Box::new(|_| Box::new(Pairs::default())),
                 all(),
             )
@@ -227,16 +209,11 @@ fn a_schema_and_its_subscriptions_are_checked_when_added() {
     let missing = h.add(
         name("y"),
         definition("pairs", pairs_schema()),
-        InputSpec::Upstream(Subscription {
-            upstream: 9,
-            kinds: vec![],
-            mode: Mode::Completed,
-            sequences: vec![],
-        }),
+        InputSpec::Upstream(Subscription::new(AnalysisId(9), Mode::Completed)),
         Box::new(|_| Box::new(Pairs::default())),
         all(),
     );
-    assert_eq!(missing.unwrap_err(), BindError::NoAnalysis(9));
+    assert_eq!(missing.unwrap_err(), BindError::NoAnalysis(AnalysisId(9)));
 }
 
 #[test]
@@ -244,11 +221,7 @@ fn every_operation_is_checked_and_a_batch_commits_whole() {
     let (mut h, a) = toy_host(vec![], HostOptions::default());
     let f = frame(10);
     h.submit(batch(&h, a, 0, vec![open(f, 10)])).unwrap();
-    let el = |value| Element {
-        value,
-        at: Observation::Wire(12),
-        cell: Span { start: 11, end: 13 },
-    };
+    let el = |value| Element::new(value, Observation::Wire(12), Span { start: 11, end: 13 });
     let span = Some(Span { start: 10, end: 12 });
     let word = |value, bits| Value::Word { value, bits };
     let refused = [
@@ -577,14 +550,12 @@ fn a_batch_past_the_declared_open_bound_is_refused_where_it_passes_it() {
 
 #[test]
 fn frontiers_bound_new_starts_and_retire_closed_ids() {
-    let options = HostOptions {
-        recent_at_most: 3,
-        ..HostOptions::default()
-    };
+    let options = options(|o| o.recent_at_most = 3);
     let (mut h, a) = toy_host(vec![], options);
-    let at = |h: &Host, seq, ops, frontier| Batch {
-        frontier: Some(frontier),
-        ..batch(h, a, seq, ops)
+    let at = |h: &Host, seq, ops, frontier| {
+        let mut b = batch(h, a, seq, ops);
+        b.frontier = Some(frontier);
+        b
     };
     assert_eq!(
         h.submit(at(&h, 0, vec![], 5)),
@@ -676,10 +647,7 @@ fn replies_carry_their_run_and_are_taken_once() {
     assert_ne!(id.run, first.run);
     let reply = h.take_io().unwrap().unwrap();
     h.reply(reply).unwrap();
-    let again = Reply {
-        id,
-        window: Default::default(),
-    };
+    let again = Reply::new(id, Default::default());
     assert!(
         matches!(h.reply(again), Err(Refusal::StaleReply { .. })),
         "a reply is consumed once"
@@ -728,10 +696,7 @@ fn lost_input_is_checked_joined_and_delivered_at_its_place() {
         ],
         vec![Act::Emit(close(frame(30), 31)), Act::Frontier(40)],
     ];
-    let mut h = Host::new(HostOptions {
-        log: Some(1 << 10),
-        ..HostOptions::default()
-    });
+    let mut h = Host::new(options(|o| o.log = Some(1 << 10)));
     let a = h
         .add(
             name("toy"),
@@ -748,19 +713,15 @@ fn lost_input_is_checked_joined_and_delivered_at_its_place() {
         .add(
             name("sink"),
             definition("sink", toy_schema()),
-            InputSpec::Upstream(Subscription {
-                upstream: a,
-                kinds: vec![name("frame")],
-                mode: Mode::Pieces,
-                sequences: vec![],
-            }),
+            InputSpec::Upstream(Subscription::new(a, Mode::Pieces).with_kinds(vec![name("frame")])),
             Box::new(|_| Box::new(script(vec![]))),
             all(),
         )
         .unwrap();
-    let lost = |h: &Host, seq, lost: Vec<(usize, Span)>| Batch {
-        lost,
-        ..batch(h, a, seq, vec![])
+    let lost = |h: &Host, seq, lost: Vec<(usize, Span)>| {
+        let mut b = batch(h, a, seq, vec![]);
+        b.lost = lost;
+        b
     };
     assert_eq!(
         h.submit(lost(&h, 0, vec![(0, Span { start: 0, end: 5 })])),
@@ -875,12 +836,9 @@ fn a_stacked_analysis_receives_each_loss_in_its_place_and_must_declare_it() {
         .add(
             name("pairs"),
             definition("pairs", pairs_schema()),
-            InputSpec::Upstream(Subscription {
-                upstream: p,
-                kinds: vec![name("pulse")],
-                mode: Mode::Completed,
-                sequences: vec![],
-            }),
+            InputSpec::Upstream(
+                Subscription::new(p, Mode::Completed).with_kinds(vec![name("pulse")]),
+            ),
             Box::new(|_| Box::new(Swallow)),
             all(),
         )
@@ -897,21 +855,17 @@ fn a_stacked_analysis_receives_each_loss_in_its_place_and_must_declare_it() {
 
 #[test]
 fn completed_items_and_pieces_reach_stacked_analyses_as_subscribed() {
-    let options = HostOptions {
-        log: Some(1 << 12),
-        ..HostOptions::default()
-    };
+    let options = options(|o| o.log = Some(1 << 12));
     let (mut h, [p, q]) = pulses_host(line(6, 3, 20, vec![]), 35, None, options);
     let subscribe = |h: &mut Host, n: &'static str, sequences: Vec<&'static str>| {
         h.add(
             name(n),
             definition(n, toy_schema()),
-            InputSpec::Upstream(Subscription {
-                upstream: p,
-                kinds: vec![name("pulse")],
-                mode: Mode::Pieces,
-                sequences: sequences.into_iter().map(name).collect(),
-            }),
+            InputSpec::Upstream(
+                Subscription::new(p, Mode::Pieces)
+                    .with_kinds(vec![name("pulse")])
+                    .with_sequences(sequences),
+            ),
             Box::new(|_| Box::new(Swallow)),
             all(),
         )
@@ -929,7 +883,7 @@ fn completed_items_and_pieces_reach_stacked_analyses_as_subscribed() {
         Value::Word { value: 6, bits: 32 }
     );
     assert_eq!(h.finished(q), Some(130));
-    let got = |a: usize| -> String {
+    let got = |a: AnalysisId| -> String {
         let run = h.run_id(a);
         h.log()
             .filter_map(|e| match e {
@@ -1074,10 +1028,7 @@ fn deliveries_that_arrive_during_a_turn_queue_behind_those_it_left() {
         run_all(&mut h);
         h.store(q).counts
     };
-    let options = HostOptions {
-        turn_deliveries: 1,
-        ..HostOptions::default()
-    };
+    let options = options(|o| o.turn_deliveries = 1);
     let (mut h, [p, q]) = pulses_host(line(8, 3, 20, vec![]), 30, None, options);
     let pump = |h: &mut Host| {
         if let Some(r) = h.take_io().unwrap() {
@@ -1108,10 +1059,7 @@ fn the_log_is_off_by_default_and_bounded_when_on() {
         assert_eq!(h.log().count(), 0);
         h.admitted
     };
-    let options = HostOptions {
-        log: Some(16),
-        ..HostOptions::default()
-    };
+    let options = options(|o| o.log = Some(16));
     let (mut h, _) = pulses_host(line(40, 3, 20, vec![]), 30, None, options);
     run_all(&mut h);
     assert_eq!(h.admitted, quiet);
@@ -1121,37 +1069,21 @@ fn the_log_is_off_by_default_and_bounded_when_on() {
 
 #[test]
 fn a_definition_from_data_runs_as_a_static_one_does() {
-    let owned = Schema {
-        kinds: vec![KindDecl {
-            name: "pulse".to_string().into(),
-            parents: vec![],
-            fields: vec![FieldDecl {
-                name: "width".to_string().into(),
-                ty: FieldType::Word { bits: 32 },
-            }],
-            sequences: vec![SeqDecl {
-                name: "levels".to_string().into(),
-                element: ElementType::Bit,
-            }],
-            links: vec![],
-        }],
-        roles: vec![],
-        reasons: vec![],
-        needs: vec![],
-        causes: vec!["a gap cuts it".to_string().into()],
-        open_at_most: 1,
-    };
+    let owned = Schema::new(vec![
+        KindDecl::new("pulse".to_string())
+            .with_fields(vec![FieldDecl::new(
+                "width".to_string(),
+                FieldType::Word { bits: 32 },
+            )])
+            .with_sequences(vec![SeqDecl::new("levels".to_string(), ElementType::Bit)]),
+    ])
+    .with_causes(vec!["a gap cuts it".to_string()]);
     let run = |schema: Schema| {
         let mut h = Host::default();
         let p = h
             .add(
                 name("pulses"),
-                Arc::new(Definition {
-                    name: name("pulses"),
-                    version: 1,
-                    contract: CONTRACT,
-                    schema,
-                }),
+                Arc::new(Definition::new("pulses", 1, schema).with_ports(["line"])),
                 InputSpec::Wire {
                     source: Box::new(line(10, 3, 20, vec![Span { start: 70, end: 90 }])),
                     local: None,
@@ -1211,12 +1143,7 @@ fn a_decoder_that_leaves_its_deliveries_waits_for_new_input_instead_of_spinning(
     h.add(
         name("idle"),
         definition("idle", toy_schema()),
-        InputSpec::Upstream(Subscription {
-            upstream: p,
-            kinds: vec![name("pulse")],
-            mode: Mode::Completed,
-            sequences: vec![],
-        }),
+        InputSpec::Upstream(Subscription::new(p, Mode::Completed).with_kinds(vec![name("pulse")])),
         Box::new(move |_| Box::new(Idle(count.clone()))),
         all(),
     )

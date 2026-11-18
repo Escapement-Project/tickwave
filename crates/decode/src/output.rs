@@ -67,6 +67,7 @@ impl Id {
 
 /// An item of this analysis, or of the analysis it is stacked on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Ref {
     Own(Id),
     Upstream(Id),
@@ -79,6 +80,7 @@ pub struct Span {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Value {
     /// A spanned part that carries no value, such as a turnaround.
     Phase,
@@ -105,6 +107,7 @@ pub enum Value {
 /// The input an element was decoded from: the wire observation that sampled it, or for a decoder
 /// stacked on another, the upstream element, so a view can follow it down to the wire.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Observation {
     Wire(Tick),
     Upstream { id: Id, seq: SeqId, index: u32 },
@@ -113,19 +116,28 @@ pub enum Observation {
 /// One member of a sequence: its value, the observation that defines it, and the cell a view
 /// draws for it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct Element {
     pub value: u8,
     pub at: Observation,
     pub cell: Span,
 }
 
+impl Element {
+    pub const fn new(value: u8, at: Observation, cell: Span) -> Self {
+        Self { value, at, cell }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Status {
     Complete,
     Incomplete(Cause),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Op {
     Open {
         id: Id,
@@ -193,6 +205,7 @@ pub const MAX_TEXT: usize = 256;
 
 /// A turn's output as the decoder writes it.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct Out {
     pub ops: Vec<Op>,
 }
