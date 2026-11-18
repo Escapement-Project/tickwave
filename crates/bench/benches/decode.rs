@@ -3,6 +3,8 @@
 //!
 //! - `swd_session`: SWD, ADIv5 and MEM-AP over 2,000 transfers through the host, from windows already
 //!   built: the per-transfer path from framing to admission and delivery.
+//! - `cjtag_session`: cJTAG with JTAG stacked on it over an OScan1 session of about 2,700 Scan
+//!   Packets: per-bit framing, packets and the TAP engine stacked by pieces.
 //! - `track_frame`: one egui frame of an SWD track over those transfers, zoomed in on six of them with
 //!   labels and parts, on half of one with its bits, and zoomed out on all of them as density
 //!   bins.
@@ -13,7 +15,7 @@ use egui::{Pos2, RawInput, Rect, vec2};
 use escapement_tickwave_decode::{
     Host, InputSpec, Observed, Schema, Source, SourceError, Span, Store, Tick, Window, name,
 };
-use escapement_tickwave_decoders::{adiv5, swd};
+use escapement_tickwave_decoders::{adiv5, cjtag, swd};
 use escapement_tickwave_egui::track::{Density, Labels, Template, Track, condition};
 use escapement_tickwave_egui::{Palette, Shown};
 use escapement_tickwave_view::format::mapping::Mapping;
@@ -70,6 +72,18 @@ struct Wires {
 }
 
 impl Wires {
+    /// Lines from their edges: each low before its first.
+    fn of(lines: [Vec<Tick>; 2], end: Tick) -> Self {
+        let mut events = vec![];
+        for (port, edges) in lines.iter().enumerate() {
+            for (k, &at) in edges.iter().enumerate() {
+                events.push((at, port as u8, k % 2 == 0));
+            }
+        }
+        events.sort();
+        Self { events, end }
+    }
+
     fn new() -> Self {
         let mut events = vec![];
         let mut level = false;
@@ -128,6 +142,148 @@ impl Source for Wires {
         }
         Ok(Some(w))
     }
+}
+
+/// TCKC and TMSC at 20 MHz with 1 ns ticks, as the cJTAG tests build them: TMSC changes with TCKC
+/// low, and an escape toggles it with TCKC high.
+struct Gen {
+    t: Tick,
+    line: bool,
+    edges: [Vec<Tick>; 2],
+}
+
+impl Gen {
+    fn line_to(&mut self, v: bool) {
+        if self.line != v {
+            self.edges[1].push(self.t);
+            self.line = v;
+        }
+    }
+
+    fn bit(&mut self, value: bool, toggles: usize) {
+        self.t += 10;
+        self.line_to(value);
+        self.t += 15;
+        self.edges[0].push(self.t);
+        for _ in 0..toggles {
+            self.t += 2;
+            let v = !self.line;
+            self.line_to(v);
+        }
+        self.t += 25 - 2 * toggles as Tick;
+        self.edges[0].push(self.t);
+    }
+
+    fn tms(&mut self, seq: &[u8]) {
+        for &b in seq {
+            self.bit(b == 1, 0);
+        }
+    }
+
+    fn oscan1(&mut self, tms: bool, tdi: bool, tdo: bool) {
+        self.bit(!tdi, 0);
+        self.bit(tms, 0);
+        self.bit(tdo, 0);
+    }
+
+    fn check(&mut self) {
+        for _ in 0..4 {
+            self.bit(false, 0);
+        }
+    }
+}
+
+/// A DR scan from Run-Test/Idle shifting `n` bits, back to Run-Test/Idle; zero-bit for 0.
+fn dr_scan(n: u32) -> Vec<u8> {
+    if n == 0 {
+        return vec![1, 0, 1, 1, 0];
+    }
+    let mut v = vec![1, 0, 0];
+    v.extend(std::iter::repeat_n(0, n as usize - 1));
+    v.extend([1, 1, 0]);
+    v
+}
+
+fn command(opcode: u8, operand: u8) -> Vec<u8> {
+    let mut v = dr_scan(u32::from(opcode));
+    v.extend(dr_scan(u32::from(operand)));
+    v
+}
+
+/// The probe's activation into OScan1, then JTAG clocks as Scan Packets: IR and DR scans of a
+/// 36-bit width, as the project's captures hold, about 2,700 packets in all.
+fn oscan1() -> Wires {
+    let mut g = Gen {
+        t: 1_000,
+        line: false,
+        edges: Default::default(),
+    };
+    g.bit(true, 10);
+    let mut jscan = vec![1, 1, 1, 1, 1, 0];
+    jscan.extend([1, 0, 1, 1, 0, 1, 0, 1, 1, 0]);
+    jscan.extend(dr_scan(1));
+    jscan.extend(command(1, 1));
+    jscan.extend(command(3, 9));
+    g.tms(&jscan);
+    g.check();
+    for (opcode, operand) in [(0, 4), (7, 0), (0, 1)] {
+        for b in command(opcode, operand) {
+            g.oscan1(b == 1, false, true);
+        }
+        g.oscan1(false, false, true);
+        g.check();
+    }
+    for &b in &[1u8, 1, 1, 1, 1, 0] {
+        g.oscan1(b == 1, true, true);
+    }
+    for k in 0..60u64 {
+        for &b in &[1u8, 0, 0] {
+            g.oscan1(b == 1, true, true);
+        }
+        for i in 0..36 {
+            let v = (k * 2_654_435_761) >> (i % 32) & 1 == 1;
+            g.oscan1(i == 35, v, !v);
+        }
+        for &b in &[1u8, 0, 0, 0] {
+            g.oscan1(b == 1, true, true);
+        }
+    }
+    let end = g.t + 100;
+    Wires::of(g.edges, end)
+}
+
+/// cJTAG and JTAG over it, counting their items only.
+fn cjtag_host(_: ()) -> Host {
+    let mut h = Host::default();
+    let c = h
+        .add(
+            name("cjtag"),
+            cjtag::definition(),
+            InputSpec::Wire {
+                source: Box::new(oscan1()),
+                local: None,
+            },
+            cjtag::Cjtag::factory(true, 1 << 16),
+            vec![],
+        )
+        .unwrap();
+    h.add(
+        name("jtag"),
+        cjtag::jtag_definition(),
+        InputSpec::Upstream(cjtag::jtag_subscription(c)),
+        cjtag::JtagOnCjtag::factory(),
+        vec![],
+    )
+    .unwrap();
+    h
+}
+
+#[library_benchmark]
+#[bench::counted(args = ((),), setup = cjtag_host)]
+fn cjtag_session(mut h: Host) -> Host {
+    h.run_until(|_| false).unwrap();
+    black_box(&h);
+    h
 }
 
 fn all() -> Vec<Span> {
@@ -285,7 +441,10 @@ fn track_frame(mut d: Drawn) -> Drawn {
     d
 }
 
-library_benchmark_group!(name = decode, benchmarks = [swd_session, track_frame]);
+library_benchmark_group!(
+    name = decode,
+    benchmarks = [swd_session, cjtag_session, track_frame]
+);
 
 main!(
     config = LibraryBenchmarkConfig::default()
