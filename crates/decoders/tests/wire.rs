@@ -4,7 +4,7 @@ mod common;
 
 use common::*;
 use escapement_tickwave_decode::{
-    Counts, Host, InputSpec, Source, Span, Tick, name, wire::WireSource,
+    Counts, Host, HostOptions, InputSpec, Source, Span, Tick, name, wire::WireSource,
 };
 use escapement_tickwave_decoders::{adiv5, swd};
 use escapement_tickwave_format::{
@@ -13,7 +13,10 @@ use escapement_tickwave_format::{
     writer::{Finish, WriteOptions, Writer},
 };
 use escapement_tickwave_view::{Cache, Recording};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::{Arc, atomic::AtomicBool},
+};
 
 const P: Tick = 10;
 
@@ -70,7 +73,11 @@ fn all() -> Vec<Span> {
 }
 
 fn decoded(source: Box<dyn Source>, window: Tick) -> [Counts; 3] {
-    let mut h = Host::default();
+    decoded_with(HostOptions::default(), source, window)
+}
+
+fn decoded_with(options: HostOptions, source: Box<dyn Source>, window: Tick) -> [Counts; 3] {
+    let mut h = Host::new(options);
     let s = (h.add(
         name("swd"),
         swd::definition(),
@@ -128,4 +135,48 @@ fn swd_through_the_wire_source_matches_the_wires_served_directly() {
             "windows of {window}"
         );
     }
+    let mut reads = HostOptions::default();
+    reads.window_ticks = 3;
+    let source = WireSource::new(rec.clone(), vec![0, 1]).unwrap();
+    assert_eq!(
+        decoded_with(reads, Box::new(source), 1 << 20),
+        want,
+        "reads of 3 ticks"
+    );
+}
+
+#[test]
+fn a_read_holds_at_most_its_bound_of_ticks_and_the_next_carries_on_from_it() {
+    let ts = vec![dp_read(0x0, 0x0BC1_1477), ap_read(0xC, 0x1111_1111)];
+    let (b, _) = bits(&ts);
+    let w = wires(&b, P);
+    let rec = Arc::new(Recording::open(Arc::new(recording(&w)), Cache::new(8 << 20)).unwrap());
+    let never = AtomicBool::new(false);
+    let observed = |w: escapement_tickwave_decode::Window| -> Vec<_> {
+        w.events.into_iter().filter(|e| e.at().is_some()).collect()
+    };
+    let mut whole = WireSource::new(rec.clone(), vec![0, 1]).unwrap();
+    let want = observed(
+        whole
+            .window(0, Tick::MAX, usize::MAX, &never)
+            .unwrap()
+            .unwrap(),
+    );
+    let mut source = WireSource::new(rec, vec![0, 1]).unwrap();
+    let (mut from, mut got) = (0, vec![]);
+    loop {
+        let r = source.window(from, Tick::MAX, 3, &never).unwrap().unwrap();
+        let ticks: BTreeSet<Tick> = r.events.iter().filter_map(|e| e.at()).collect();
+        assert!(ticks.len() <= 3, "{} ticks from {from}", ticks.len());
+        assert!(ticks.iter().all(|&t| from <= t && t < r.upto));
+        let (upto, end) = (r.upto, r.end);
+        got.extend(observed(r));
+        if end.is_some() {
+            break;
+        }
+        assert!(upto > from, "a read moves on");
+        from = upto;
+    }
+    assert_eq!(got, want);
+    assert_eq!(source.seeks, 1, "each read carries on from the last");
 }

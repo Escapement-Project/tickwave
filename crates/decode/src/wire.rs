@@ -117,6 +117,7 @@ impl Source for WireSource {
         &mut self,
         from: Tick,
         upto: Tick,
+        most: usize,
         cancel: &AtomicBool,
     ) -> Result<Option<Window>, SourceError> {
         let rec = &*self.recording;
@@ -147,13 +148,12 @@ impl Source for WireSource {
             });
         }
         self.groups.clear();
-        let b = merge.next_in(
-            rec,
-            Until::Source(limit),
-            &Budget::LARGE,
-            cancel,
-            &mut self.groups,
-        );
+        // A group is a tick's observations.
+        let budget = Budget {
+            items: most.max(1),
+            block_bytes: u32::MAX,
+        };
+        let b = merge.next_in(rec, Until::Source(limit), &budget, cancel, &mut self.groups);
         let Some(b) = read(b)? else {
             return Ok(None);
         };
@@ -176,12 +176,13 @@ impl Source for WireSource {
                 });
             }
         }
-        // A live recording settled short of the window: the window ends where it is.
+        // Past the budget, or a live recording settled short of the window: the window ends
+        // where it stopped, and the input's end only where the window reaches it.
         if b.reached < limit {
             w.upto = b.reached.max(from);
         }
         self.at = w.upto;
-        w.end = self.end.filter(|&e| e < upto);
+        w.end = self.end.filter(|&e| e < w.upto);
         Ok(Some(w))
     }
 }

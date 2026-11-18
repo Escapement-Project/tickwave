@@ -4,8 +4,8 @@ mod common;
 
 use common::*;
 use escapement_tickwave_decode::{
-    AnalysisId, Counts, FieldId, Host, InputSpec, Item, KindId, Ref, Span, Status, Tick, Value,
-    name,
+    AnalysisId, Counts, FieldId, Host, HostOptions, InputSpec, Item, KindId, Ref, Span, Status,
+    Tick, Value, name,
 };
 use escapement_tickwave_decoders::{adiv5, swd};
 
@@ -19,7 +19,16 @@ fn all() -> Vec<Span> {
 }
 
 fn host(w: Wires, window: Tick, local: Option<Tick>) -> (Host, [AnalysisId; 3]) {
-    let mut h = Host::default();
+    host_with(HostOptions::default(), w, window, local)
+}
+
+fn host_with(
+    options: HostOptions,
+    w: Wires,
+    window: Tick,
+    local: Option<Tick>,
+) -> (Host, [AnalysisId; 3]) {
+    let mut h = Host::new(options);
     let s = h
         .add(
             name("swd"),
@@ -58,9 +67,20 @@ fn run(h: &mut Host) {
 }
 
 fn decoded(w: Wires, window: Tick) -> [Counts; 3] {
-    let (mut h, a) = host(w, window, None);
+    decoded_with(HostOptions::default(), w, window)
+}
+
+fn decoded_with(options: HostOptions, w: Wires, window: Tick) -> [Counts; 3] {
+    let (mut h, a) = host_with(options, w, window, None);
     run(&mut h);
     a.map(|a| h.store(a).counts)
+}
+
+/// Host options that bound each read to `ticks` ticks of observations.
+fn reads_of(ticks: usize) -> HostOptions {
+    let mut o = HostOptions::default();
+    o.window_ticks = ticks;
+    o
 }
 
 fn of(h: &Host, a: AnalysisId, kind: KindId) -> Vec<Item> {
@@ -173,6 +193,10 @@ fn window_size_does_not_change_the_output() {
     let want = decoded(wires(&b, P), 1 << 20);
     for window in [1, 7, 64, 333, 5000] {
         assert_eq!(decoded(wires(&b, P), window), want, "windows of {window}");
+    }
+    for ticks in [1, 2, 5, 64] {
+        let got = decoded_with(reads_of(ticks), wires(&b, P), 1 << 20);
+        assert_eq!(got, want, "reads of {ticks} ticks");
     }
 }
 

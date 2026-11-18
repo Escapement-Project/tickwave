@@ -131,7 +131,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let read = Instant::now();
                 let stop = std::sync::atomic::AtomicBool::new(false);
                 let n = cold
-                    .window(w.start, w.start + ticks(1e-3), &stop)?
+                    .window(w.start, w.start + ticks(1e-3), usize::MAX, &stop)?
                     .map_or(0, |w| w.events.len());
                 let read = read.elapsed().as_secs_f64() * 1e3;
                 println!(

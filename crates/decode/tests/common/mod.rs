@@ -98,6 +98,7 @@ impl Source for Nothing {
         &mut self,
         from: Tick,
         upto: Tick,
+        _: usize,
         cancel: &AtomicBool,
     ) -> Result<Option<Window>, SourceError> {
         if cancel.load(Relaxed) {
@@ -238,7 +239,8 @@ impl Source for Line {
     fn window(
         &mut self,
         from: Tick,
-        upto: Tick,
+        mut upto: Tick,
+        most: usize,
         cancel: &AtomicBool,
     ) -> Result<Option<Window>, SourceError> {
         if cancel.load(Relaxed) {
@@ -266,6 +268,10 @@ impl Source for Line {
             points.push((self.end, 0, None));
         }
         points.sort();
+        if let Some(t) = cut_at(&points, |p| p.0, most) {
+            points.retain(|p| p.0 < t);
+            upto = t;
+        }
         for (at, what, level) in points {
             events.push(match (what, level) {
                 (1, Some(level)) => Observed::Edge { at, port: 0, level },
@@ -282,6 +288,22 @@ impl Source for Line {
     fn fork(&self) -> Option<Box<dyn Source>> {
         Some(Box::new(self.clone()))
     }
+}
+
+/// Where a window of `points`, sorted by tick, ends to hold at most `most` ticks of them and at
+/// least one: at the first tick past them, or None where all fit.
+pub fn cut_at<T>(points: &[T], tick: impl Fn(&T) -> Tick, most: usize) -> Option<Tick> {
+    let (mut ticks, mut last) = (0, None);
+    for t in points.iter().map(tick) {
+        if last != Some(t) {
+            if ticks == most.max(1) {
+                return Some(t);
+            }
+            ticks += 1;
+            last = Some(t);
+        }
+    }
+    None
 }
 
 /// Each high pulse as an item with its width and its levels, one window of `step` ticks a turn.

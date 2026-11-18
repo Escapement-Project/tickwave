@@ -5,8 +5,8 @@ mod common;
 
 use common::*;
 use escapement_tickwave_decode::{
-    AnalysisId, Counts, Decoder, Exchange, Host, InputSpec, Item, KindId, Observation, Observed,
-    Out, Pause, Request, Span, Status, Tick, Value, Window, name,
+    AnalysisId, Counts, Decoder, Exchange, Host, HostOptions, InputSpec, Item, KindId, Observation,
+    Observed, Out, Pause, Request, Span, Status, Tick, Value, Window, name,
 };
 use escapement_tickwave_decoders::{
     cjtag::{self, Change, Cjtag, Feed, JtagOnCjtag, Lines, Oscan},
@@ -206,7 +206,17 @@ fn synth() -> Wires {
 // ---- Running it ---------------------------------------------------------------------------------
 
 fn host(w: Wires, window: Tick, local: Option<Tick>, qualified: bool) -> (Host, [AnalysisId; 2]) {
-    let mut h = Host::default();
+    host_with(HostOptions::default(), w, window, local, qualified)
+}
+
+fn host_with(
+    options: HostOptions,
+    w: Wires,
+    window: Tick,
+    local: Option<Tick>,
+    qualified: bool,
+) -> (Host, [AnalysisId; 2]) {
+    let mut h = Host::new(options);
     let c = h
         .add(
             name("cjtag"),
@@ -232,7 +242,11 @@ fn host(w: Wires, window: Tick, local: Option<Tick>, qualified: bool) -> (Host, 
 }
 
 fn run(w: Wires, window: Tick) -> (Host, [AnalysisId; 2]) {
-    let (mut h, a) = host(w, window, None, true);
+    run_with(HostOptions::default(), w, window)
+}
+
+fn run_with(options: HostOptions, w: Wires, window: Tick) -> (Host, [AnalysisId; 2]) {
+    let (mut h, a) = host_with(options, w, window, None, true);
     h.run_until(|_| false).unwrap();
     assert!(a.iter().all(|&x| h.finished(x).is_some()));
     (h, a)
@@ -433,6 +447,25 @@ fn long_scan(h: &Host, j: AnalysisId, after: Tick) -> Item {
 }
 
 // ---- Tests --------------------------------------------------------------------------------------
+
+/// Host options that bound each read to `ticks` ticks of observations.
+fn reads_of(ticks: usize) -> HostOptions {
+    let mut o = HostOptions::default();
+    o.window_ticks = ticks;
+    o
+}
+
+#[test]
+fn reads_bounded_to_a_few_ticks_do_not_change_the_output() {
+    for w in [synth(), gapped().0] {
+        let (h, a) = run(w.clone(), 1 << 40);
+        let want = everything(&h, a);
+        for ticks in [1, 2, 5, 64] {
+            let (h, a) = run_with(reads_of(ticks), w.clone(), 1 << 40);
+            assert_eq!(everything(&h, a), want, "reads of {ticks} ticks");
+        }
+    }
+}
 
 #[test]
 fn the_activation_and_the_packets_decode() {

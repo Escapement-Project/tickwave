@@ -4,8 +4,8 @@ mod common;
 
 use common::*;
 use escapement_tickwave_decode::{
-    AnalysisId, CheckpointError, Counts, Element, Host, InputSpec, Item, KindId, Span, Status,
-    Tick, Value, name,
+    AnalysisId, CheckpointError, Counts, Element, Host, HostOptions, InputSpec, Item, KindId, Span,
+    Status, Tick, Value, name,
 };
 use escapement_tickwave_decoders::jtag;
 use std::sync::atomic::Ordering::Relaxed;
@@ -228,7 +228,17 @@ fn session(z: Sizes) -> (Session, Info) {
 }
 
 fn host(w: Wires, window: Tick, local: Option<Tick>, has_tdo: bool) -> (Host, AnalysisId) {
-    let mut h = Host::default();
+    host_with(HostOptions::default(), w, window, local, has_tdo)
+}
+
+fn host_with(
+    options: HostOptions,
+    w: Wires,
+    window: Tick,
+    local: Option<Tick>,
+    has_tdo: bool,
+) -> (Host, AnalysisId) {
+    let mut h = Host::new(options);
     let j = h
         .add(
             name("jtag"),
@@ -245,7 +255,18 @@ fn host(w: Wires, window: Tick, local: Option<Tick>, has_tdo: bool) -> (Host, An
 }
 
 fn decoded(w: Wires, window: Tick) -> Counts {
-    let (mut h, j) = host(w, window, None, true);
+    decoded_with(HostOptions::default(), w, window)
+}
+
+/// Host options that bound each read to `ticks` ticks of observations.
+fn reads_of(ticks: usize) -> HostOptions {
+    let mut o = HostOptions::default();
+    o.window_ticks = ticks;
+    o
+}
+
+fn decoded_with(options: HostOptions, w: Wires, window: Tick) -> Counts {
+    let (mut h, j) = host_with(options, w, window, None, true);
     h.run_until(|_| false).unwrap();
     assert!(h.finished(j).is_some());
     h.store(j).counts
@@ -380,9 +401,15 @@ fn window_size_does_not_change_the_output() {
     for window in [1, 7, 64, 333, 5000] {
         assert_eq!(decoded(s.wires(), window), want, "windows of {window}");
     }
+    for ticks in [1, 2, 5, 64] {
+        let got = decoded_with(reads_of(ticks), s.wires(), 1 << 40);
+        assert_eq!(got, want, "reads of {ticks} ticks");
+    }
     let (s, _) = session(FULL);
     let want = decoded(s.wires(), 1 << 40);
     assert_eq!(decoded(s.wires(), 4999), want, "the full session");
+    let got = decoded_with(reads_of(100), s.wires(), 1 << 40);
+    assert_eq!(got, want, "the full session in reads of 100 ticks");
 }
 
 #[test]

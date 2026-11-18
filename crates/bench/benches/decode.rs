@@ -106,6 +106,7 @@ impl Source for Wires {
         &mut self,
         from: Tick,
         upto: Tick,
+        _: usize,
         _: &AtomicBool,
     ) -> Result<Option<Window>, SourceError> {
         let mut w = Window::new(from, upto);

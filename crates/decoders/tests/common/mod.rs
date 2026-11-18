@@ -46,6 +46,7 @@ impl Source for Wires {
         &mut self,
         from: Tick,
         upto: Tick,
+        most: usize,
         cancel: &AtomicBool,
     ) -> Result<Option<Window>, SourceError> {
         if cancel.load(Relaxed) {
@@ -85,6 +86,10 @@ impl Source for Wires {
         } else {
             points.sort_by_key(|&(at, port, what, _)| (at, port, what));
         }
+        if let Some(t) = cut_at(&points, |p| p.0, most) {
+            points.retain(|p| p.0 < t);
+            w.upto = t;
+        }
         for (at, port, what, level) in points {
             w.events.push(match (what, level) {
                 (0, Some(level)) => Observed::Known { at, port, level },
@@ -92,12 +97,28 @@ impl Source for Wires {
                 _ => Observed::Unknown { at, port },
             });
         }
-        w.end = (self.end < upto).then_some(self.end);
+        w.end = (self.end < w.upto).then_some(self.end);
         Ok(Some(w))
     }
     fn fork(&self) -> Option<Box<dyn Source>> {
         Some(Box::new(self.clone()))
     }
+}
+
+/// Where a window of `points`, sorted by tick, ends to hold at most `most` ticks of them and at
+/// least one: at the first tick past them, or None where all fit.
+pub fn cut_at<T>(points: &[T], tick: impl Fn(&T) -> Tick, most: usize) -> Option<Tick> {
+    let (mut ticks, mut last) = (0, None);
+    for t in points.iter().map(tick) {
+        if last != Some(t) {
+            if ticks == most.max(1) {
+                return Some(t);
+            }
+            ticks += 1;
+            last = Some(t);
+        }
+    }
+    None
 }
 
 /// An SWD transfer to encode.

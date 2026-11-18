@@ -1418,6 +1418,32 @@ fn an_item_ending_past_a_checkpoints_input_is_kept_by_a_window_restored_from_it(
 }
 
 #[test]
+fn a_read_past_the_hosts_bound_ends_early_and_the_output_is_the_same() {
+    let gaps = vec![Span {
+        start: 300,
+        end: 420,
+    }];
+    let decoded = |options: HostOptions| {
+        let (mut h, [p, q]) = pulses_host(line(80, 3, 20, gaps.clone()), 1 << 20, None, options);
+        run_all(&mut h);
+        (
+            h.store(p).counts,
+            h.store(q).counts,
+            h.lost(p).to_vec(),
+            h.lost(q).to_vec(),
+        )
+    };
+    let want = decoded(HostOptions::default());
+    for ticks in [1, 2, 3, 50] {
+        assert_eq!(
+            decoded(options(|o| o.window_ticks = ticks)),
+            want,
+            "reads of {ticks} ticks"
+        );
+    }
+}
+
+#[test]
 fn two_live_window_chains_each_read_their_own_window() {
     let (mut all, [ap, aq]) =
         pulses_host(line(80, 3, 20, vec![]), 15, None, HostOptions::default());

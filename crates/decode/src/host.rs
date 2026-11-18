@@ -116,12 +116,15 @@ impl Reply {
 
 /// Where a wire analysis's input comes from. The host calls it outside the decoder's turn.
 pub trait Source: Send {
-    /// The observations in `from..upto`, or up to where a live recording is settled. None where
-    /// `cancel` stopped the read: the source is left as it was.
+    /// The observations in `from..upto`, or up to where a live recording is settled, at most
+    /// `most` ticks of them besides each port's start: past that, the window ends at the next
+    /// tick with observations, holding at least one tick's. None where `cancel` stopped the read:
+    /// the source is left as it was.
     fn window(
         &mut self,
         from: Tick,
         upto: Tick,
+        most: usize,
         cancel: &AtomicBool,
     ) -> Result<Option<Window>, SourceError>;
 
@@ -905,6 +908,9 @@ pub struct HostOptions {
     /// The turns window chains take in a row, while the forward chain also has work, before the
     /// forward chain takes one: windows come first, and the forward pass still moves.
     pub window_turns: usize,
+    /// The most ticks with observations one read gives a decoder, whatever window it asked for:
+    /// the source ends the window early where they stop.
+    pub window_ticks: usize,
 }
 
 impl Default for HostOptions {
@@ -916,6 +922,7 @@ impl Default for HostOptions {
             recent_at_most: 1 << 16,
             open_at_most: 1 << 16,
             window_turns: 4,
+            window_ticks: 1 << 17,
         }
     }
 }
@@ -1799,7 +1806,8 @@ impl Host {
             return Ok(None);
         };
         let Request::Window { from, upto } = req;
-        match source.window(from, upto, &interrupt) {
+        let most = self.options.window_ticks;
+        match source.window(from, upto, most, &interrupt) {
             Ok(Some(window)) => Ok(Some(Reply { id, window })),
             Ok(None) => {
                 interrupt.store(false, Relaxed);
