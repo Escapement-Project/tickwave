@@ -21,6 +21,15 @@ pub enum PortCursor {
 }
 
 impl PortCursor {
+    /// Whether it was made from `rec`.
+    fn reads(&self, rec: &Recording) -> bool {
+        let made = match self {
+            PortCursor::Digital(c) => c.revision(),
+            PortCursor::Analog(c) => c.revision(),
+        };
+        made.same_recording(rec.revision)
+    }
+
     pub fn next_in(
         &mut self,
         rec: &Recording,
@@ -298,6 +307,10 @@ impl Merge {
         if matches!(until, Until::Source(_)) && !self.shared() {
             return Err(Error::Timeline);
         }
+        // Its ports' pending observations are the recording's they were made from.
+        if !self.ports.iter().all(|p| p.cursor.reads(rec)) {
+            return Err(Error::OtherRecording);
+        }
         let mark = out.mark();
         self.begin(until);
         match self.run(rec, until, None, budget, cancel, out) {
@@ -328,6 +341,9 @@ impl Merge {
         cancel: &AtomicBool,
         out: &mut Groups,
     ) -> Result<bool, Error> {
+        if !self.ports.iter().all(|p| p.cursor.reads(rec)) {
+            return Err(Error::OtherRecording);
+        }
         let mark = out.mark();
         let until = Until::Axis(t.floor().saturating_add(1));
         self.begin(until);

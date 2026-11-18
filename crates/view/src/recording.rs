@@ -82,6 +82,10 @@ pub enum Error {
         at: i64,
         settled: i64,
     },
+    /// A cursor was given another recording than the one it was made from, a copy of it
+    /// included.
+    #[error("a cursor reads only the recording it was made from")]
+    OtherRecording,
     /// A merge bounded on a source's timeline whose ports aren't all on that one source.
     #[error("a bound on a source's timeline needs every port on that source")]
     Timeline,
@@ -401,6 +405,11 @@ static NEVER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new
 static RECORDINGS: AtomicU64 = AtomicU64::new(0);
 
 impl Revision {
+    /// Whether `other` is a revision of the same recording.
+    pub(crate) fn same_recording(self, other: Revision) -> bool {
+        self.recording == other.recording
+    }
+
     fn new() -> Self {
         Self {
             recording: RECORDINGS.fetch_add(1, Ordering::Relaxed),

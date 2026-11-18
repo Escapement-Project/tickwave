@@ -299,6 +299,11 @@ impl DigitalCursor {
         self.channel
     }
 
+    /// The revision of the recording it was made from that it last read.
+    pub(crate) fn revision(&self) -> crate::recording::Revision {
+        self.pos.revision
+    }
+
     /// The channel's source, by its index among the recording's sources.
     pub fn source(&self) -> u32 {
         self.source
@@ -396,6 +401,9 @@ impl DigitalCursor {
         let offset = self.map.offset();
         let limit = until.cap(settled, offset);
         let mut p = self.pos.clone();
+        if !p.revision.same_recording(rec.revision) {
+            return Err(Error::OtherRecording);
+        }
         if p.revision != rec.revision {
             if let Some(h) = p.held.take() {
                 p.from = h.start;

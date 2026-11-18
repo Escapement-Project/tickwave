@@ -210,6 +210,35 @@ fn the_cursor_matches_the_view_reader_on_tickwaves_captures() {
     assert!(compared > 70_000, "{compared} edges");
 }
 
+#[test]
+fn a_cursor_reads_only_the_recording_it_was_made_from() {
+    let file = common::fixture("identify-swd.tickwave");
+    let (a, b) = (view(&file), view(&file));
+    let mut cur = DigitalCursor::seek(&a, 0, 0, &Budget::LARGE, &NEVER).unwrap();
+    let mut out = vec![];
+    let other = cur.next(&b, a.length(), &Budget::LARGE, &NEVER, &mut out);
+    assert!(
+        matches!(other, Err(Error::OtherRecording)),
+        "the same bytes opened again are another recording"
+    );
+    assert!(out.is_empty());
+    assert!(
+        cur.next(&a, a.length(), &budget(16), &NEVER, &mut out)
+            .is_ok()
+    );
+    let cursors = (0..2)
+        .map(|c| DigitalCursor::seek(&a, c, 0, &Budget::LARGE, &NEVER).unwrap())
+        .collect();
+    let mut merge = Merge::new(cursors);
+    let mut groups = Groups::new();
+    assert!(
+        (merge.next(&a, a.length(), &budget(4), &NEVER, &mut groups)).is_ok_and(|b| b.taken == 4)
+    );
+    // The next group is pending already: no cursor reads to catch it.
+    let other = merge.next(&b, a.length(), &budget(1), &NEVER, &mut groups);
+    assert!(matches!(other, Err(Error::OtherRecording)), "nor a merge");
+}
+
 /// Edges at varied spacing with pulses two edges wide at one source tick, a gap, and a source
 /// stretched by 1/2, so pairs of source ticks share an axis tick, in blocks of 128 bytes.
 fn dense() -> (Vec<u8>, i64) {

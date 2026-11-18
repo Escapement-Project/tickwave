@@ -7,8 +7,8 @@
 //! breaks in list pages are read a page at a time. `Merge` puts several channels' observations
 //! in one exact order.
 //!
-//! A cursor borrows its recording for each call, and reads the recording it was made from, as a
-//! cache serves one file: given another, what it reports is unreliable. On a live recording it
+//! A cursor borrows its recording for each call, and reads only the recording it was made from:
+//! given another, a call returns `Error::OtherRecording`. On a live recording it
 //! carries on across `Recording::update` and reports only what is settled: nothing its writer
 //! can still add comes before it. A writer can report a gap after the tick it starts at, and the
 //! samples lost before a run once the run starts, so that can lag the channel's promise.
