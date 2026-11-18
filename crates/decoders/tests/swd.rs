@@ -28,7 +28,7 @@ fn host(w: Wires, window: Tick, local: Option<Tick>) -> (Host, [AnalysisId; 3]) 
                 source: Box::new(w),
                 local,
             },
-            swd::Swd::factory(window),
+            swd::Swd::factory(window, 1).unwrap(),
             all(),
         )
         .unwrap();
@@ -414,4 +414,87 @@ fn mem_ap_forgets_tar_across_a_gap() {
             needs: Some(adiv5::NEEDS_TAR),
         })
     );
+}
+
+/// `bits` with a turnaround of `trn` cycles.
+fn bits_turnaround(transfers: &[T], trn: usize) -> Vec<bool> {
+    let mut out = vec![false; 8];
+    for t in transfers {
+        let a2 = t.addr & 4 != 0;
+        let a3 = t.addr & 8 != 0;
+        let parity = t.ap ^ t.read ^ a2 ^ a3;
+        out.extend([true, t.ap, t.read, a2, a3, parity, false, true]);
+        out.extend(vec![true; trn]);
+        out.extend((0..3).map(|k| t.ack >> k & 1 != 0));
+        if t.ack == 1 {
+            if !t.read {
+                out.extend(vec![true; trn]);
+            }
+            out.extend((0..32).map(|k| t.data >> k & 1 != 0));
+            out.push(t.data.count_ones() % 2 == 1);
+            if t.read {
+                out.extend(vec![true; trn]);
+            }
+        } else {
+            out.extend(vec![true; trn]);
+        }
+        out.extend([false, false]);
+    }
+    out.extend([false; 8]);
+    out
+}
+
+#[test]
+fn the_turnaround_is_a_setting_of_one_to_four_cycles() {
+    let ts = session();
+    for trn in 1..=4u8 {
+        let b = bits_turnaround(&ts, usize::from(trn));
+        let mut h = Host::default();
+        let s = h
+            .add(
+                name("swd"),
+                swd::definition(),
+                InputSpec::Wire {
+                    source: Box::new(wires(&b, P)),
+                    local: None,
+                },
+                swd::Swd::factory(64, trn).unwrap(),
+                all(),
+            )
+            .unwrap();
+        run(&mut h);
+        let got = of(&h, s, swd::TRANSFER);
+        assert_eq!(got.len(), ts.len(), "turnaround {trn}");
+        let data: Vec<_> = got.iter().map(|i| word(i, swd::DATA)).collect();
+        let want: Vec<_> = (ts.iter())
+            .map(|t| (t.ack == 1).then_some(u64::from(t.data)))
+            .collect();
+        assert_eq!(data, want, "turnaround {trn}");
+        let trn2 = got[1].field(swd::TRN2).and_then(|f| f.span).unwrap();
+        let cells = (trn2.end - trn2.start) / P;
+        assert_eq!(
+            cells,
+            Tick::from(trn),
+            "a write's second turnaround spans its cycles"
+        );
+        let data = got[1].field(swd::DATA).and_then(|f| f.span).unwrap();
+        assert_eq!(
+            data.start, trn2.end,
+            "a write's data follows its second turnaround"
+        );
+        let bits = got[1].seq(swd::DATA_BITS);
+        assert_eq!(bits.first().map(|e| e.cell.start), Some(data.start));
+        let read = got[0].field(swd::TRN2).and_then(|f| f.span).unwrap();
+        let parity = got[0].field(swd::PARITY).and_then(|f| f.span).unwrap();
+        assert_eq!(
+            read.start, parity.end,
+            "a read's second turnaround follows its parity"
+        );
+    }
+    for bad in [0, 5] {
+        assert_eq!(
+            swd::Swd::factory(64, bad).err(),
+            Some(swd::Setting::Turnaround(bad))
+        );
+    }
 }

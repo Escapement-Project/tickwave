@@ -8,3 +8,4 @@ publish.workspace = true
 
 [dependencies]
 escapement-tickwave-decode = { version = "0.1.0", path = "../decode" }
+thiserror = "2.0.21"

@@ -5,6 +5,10 @@
 //! the line resets and JTAG-to-SWD selection sequences, which are masked. Recognition looks a
 //! bounded number of rises ahead, so a transfer is emitted once the rises after it are held, or at
 //! a gap or the end of input, where what the lookahead holds is framed before the rest is dropped.
+//!
+//! The turnaround is a setting, one to four cycles as DLCR sets it. Not decoded: the data phase
+//! that follows a WAIT or FAULT acknowledge when ORUNDETECT is set, which is framed as a transfer
+//! without data, its data cycles left to the search for the next request.
 
 use escapement_tickwave_decode::{
     Decoder, Definition, Element, ElementType, Exchange, FieldId, FieldType, Id, KindDecl, KindId,
@@ -95,13 +99,31 @@ pub struct Transfer {
     pub ack: u8,
     pub word: Option<u32>,
     pub parity: Option<bool>,
+    /// Its turnaround, in cycles.
+    pub turnaround: usize,
 }
 
 impl Transfer {
     /// The rises it spans: an OK transfer carries a data phase.
     pub fn rises(&self) -> usize {
-        if self.ack == 1 { 46 } else { 13 }
+        rises(self.ack, self.turnaround)
     }
+}
+
+fn rises(ack: u8, turnaround: usize) -> usize {
+    if ack == 1 {
+        44 + 2 * turnaround
+    } else {
+        11 + 2 * turnaround
+    }
+}
+
+/// A setting a decoder cannot run with.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum Setting {
+    #[error("a turnaround of {0} cycles: SWD's is 1 to 4")]
+    Turnaround(u8),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -113,9 +135,10 @@ struct Bit {
     masked: bool,
 }
 
-/// Transfers framed from bits sampled at the clock's rises, one turnaround cycle.
-#[derive(Clone, Debug, Default)]
+/// Transfers framed from bits sampled at the clock's rises.
+#[derive(Clone, Debug)]
 pub struct Recogniser {
+    turnaround: usize,
     bits: VecDeque<Bit>,
     high: u8,
     after: usize,
@@ -134,9 +157,22 @@ const MASKED: [(u128, usize, usize, usize, bool); 4] = [
     (0xE79E, 16, 0, 0, true),
 ];
 
-const TURNAROUND: usize = 1;
-
 impl Recogniser {
+    /// A recogniser for a turnaround of `cycles`, 1 to 4.
+    pub fn new(cycles: u8) -> Result<Self, Setting> {
+        if !(1..=4).contains(&cycles) {
+            return Err(Setting::Turnaround(cycles));
+        }
+        Ok(Self {
+            turnaround: usize::from(cycles),
+            bits: VecDeque::new(),
+            high: 0,
+            after: 0,
+            out: VecDeque::new(),
+            masks: [0; 4],
+        })
+    }
+
     /// A gap in the input: what the lookahead holds is framed as at the end of input, then the
     /// rest is dropped. A transfer the gap cuts is lost with it.
     pub fn gap(&mut self) {
@@ -201,7 +237,8 @@ impl Recogniser {
             if !flush && self.bits.len() < HELD {
                 return;
             }
-            let ack_at = 8 + TURNAROUND;
+            let trn = self.turnaround;
+            let ack_at = 8 + trn;
             let header = ack_at + 3;
             if self.bits.len() < header {
                 if flush {
@@ -221,11 +258,7 @@ impl Recogniser {
                 continue;
             }
             let ack = (0..3).fold(0, |v, k| v | (u8::from(b[ack_at + k].value) << k));
-            let needed = if ack == 1 {
-                44 + 2 * TURNAROUND
-            } else {
-                11 + 2 * TURNAROUND
-            };
+            let needed = rises(ack, trn);
             if b.len() < needed {
                 if flush {
                     self.bits.pop_front();
@@ -234,7 +267,7 @@ impl Recogniser {
                 return;
             }
             let read = b[2].value;
-            let data_at = header + if read { 0 } else { TURNAROUND };
+            let data_at = header + if read { 0 } else { trn };
             let word = (ack == 1)
                 .then(|| (0..32).fold(0u32, |v, k| v | (u32::from(b[data_at + k].value) << k)));
             let parity = word.map(|word| (word.count_ones() % 2 == 1) == b[data_at + 32].value);
@@ -246,6 +279,7 @@ impl Recogniser {
                 ack,
                 word,
                 parity,
+                turnaround: trn,
             });
             self.bits.drain(..needed);
             if !flush {
@@ -318,7 +352,15 @@ impl Track {
         let word = |value, bits| Value::Word { value, bits };
         out.part(id, REQUEST, word(request, 8), span(0, 8), Some(PROBE));
         out.extend(id, REQUEST_BITS, 0, &els(0, 8));
-        out.part(id, TRN, Value::Phase, span(8, 9), Some(NEITHER));
+        let tr = t.turnaround;
+        let ack_at = 8 + tr;
+        // The second turnaround, before a write's data or after a read's parity.
+        let trn2 = if t.ack == 1 && t.read {
+            44 + tr
+        } else {
+            ack_at + 3
+        };
+        out.part(id, TRN, Value::Phase, span(8, ack_at), Some(NEITHER));
         let ack = match t.ack {
             1 => 0,
             2 => 1,
@@ -326,13 +368,22 @@ impl Track {
             7 => 3,
             _ => 4,
         };
-        out.part(id, ACK, Value::Name(ack), span(9, 12), Some(TARGET));
-        out.extend(id, ACK_BITS, 0, &els(9, 12));
+        out.part(
+            id,
+            ACK,
+            Value::Name(ack),
+            span(ack_at, ack_at + 3),
+            Some(TARGET),
+        );
+        out.extend(id, ACK_BITS, 0, &els(ack_at, ack_at + 3));
+        let turn2 = |out: &mut Out| {
+            out.part(id, TRN2, Value::Phase, span(trn2, trn2 + tr), Some(NEITHER));
+        };
         if let (1, Some(w)) = (t.ack, t.word) {
-            let at = if t.read { 12 } else { 13 };
+            let at = if t.read { ack_at + 3 } else { ack_at + 3 + tr };
             let driver = Some(if t.read { TARGET } else { PROBE });
             if !t.read {
-                out.part(id, TRN2, Value::Phase, span(12, 13), Some(NEITHER));
+                turn2(out);
             }
             let data = word(u64::from(w), 32);
             out.part(id, DATA, data, span(at, at + 32), driver);
@@ -341,10 +392,10 @@ impl Track {
             out.part(id, PARITY, Value::Bool(ok), span(at + 32, at + 33), driver);
             out.extend(id, PARITY_BITS, 0, &els(at + 32, at + 33));
             if t.read {
-                out.part(id, TRN2, Value::Phase, span(45, 46), Some(NEITHER));
+                turn2(out);
             }
         } else {
-            out.part(id, TRN2, Value::Phase, span(12, 13), Some(NEITHER));
+            turn2(out);
         }
         if let Some((wait, req)) = self.last_wait.take()
             && u64::from(req) == request
@@ -382,10 +433,12 @@ pub struct Swd {
 }
 
 impl Swd {
-    pub fn new(local: Option<Tick>, window: Tick) -> Self {
+    /// SWD from `local` (None: the recording's start), in windows of `window` ticks, with a
+    /// turnaround of `turnaround` cycles.
+    pub fn new(local: Option<Tick>, window: Tick, turnaround: u8) -> Result<Self, Setting> {
         let at = local.unwrap_or(0);
-        Self {
-            recogniser: Recogniser::default(),
+        Ok(Self {
+            recogniser: Recogniser::new(turnaround)?,
             track: Track::default(),
             ring: VecDeque::new(),
             next: at,
@@ -396,11 +449,23 @@ impl Swd {
             data: None,
             data_before: None,
             gap: None,
-        }
+        })
     }
 
-    pub fn factory(window: Tick) -> escapement_tickwave_decode::Factory {
-        Box::new(move |local| Box::new(Self::new(local, window)))
+    /// Makes runs of SWD, the setting checked once here.
+    pub fn factory(
+        window: Tick,
+        turnaround: u8,
+    ) -> Result<escapement_tickwave_decode::Factory, Setting> {
+        let proto = Self::new(None, window, turnaround)?;
+        Ok(Box::new(move |local| {
+            let at = local.unwrap_or(0);
+            Box::new(Self {
+                next: at,
+                floor: at,
+                ..proto.clone()
+            })
+        }))
     }
 
     pub fn masks(&self) -> [u64; 4] {

@@ -1467,6 +1467,7 @@ name = "escapement-tickwave-decoders"
 version = "0.1.0"
 dependencies = [
  "escapement-tickwave-decode",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
