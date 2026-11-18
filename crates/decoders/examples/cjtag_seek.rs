@@ -89,11 +89,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         check::peak_rss_kb() / 1024
     );
     println!(
-        "kept every {every_ms} ms of input or {events} observations within {budget_mib} MiB: {} checkpoints, {:.2} MiB, {:.0} KiB each, widest gap {:.2} ms, first {:.3} s, latest {:.3} s",
+        "kept every {every_ms} ms of input or {events} observations within {budget_mib} MiB: {} checkpoints, {:.2} MiB, {:.0} KiB each, widest gaps {:.2} ms and {} observations, first {:.3} s, latest {:.3} s",
         kept.count,
         kept.bytes as f64 / 1048576.0,
         kept.bytes as f64 / kept.count.max(1) as f64 / 1024.0,
         kept.widest as f64 / per_s * 1e3,
+        kept.widest_observed,
         kept.first.unwrap_or(0) as f64 / per_s,
         kept.latest.unwrap_or(0) as f64 / per_s,
     );

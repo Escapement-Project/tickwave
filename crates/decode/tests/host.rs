@@ -1444,6 +1444,45 @@ fn kept_checkpoints_can_be_spaced_by_the_observations_taken() {
 }
 
 #[test]
+fn checkpoints_spaced_by_observations_are_evicted_by_observations() {
+    // Sparse pulses, then ten times the edges in under half the ticks: checkpoints spaced by
+    // observations crowd together in ticks where the edges do.
+    let (mut edges, mut at) = (vec![], 10);
+    for period in [100; 50].into_iter().chain([4; 500]) {
+        edges.extend([at, at + 2]);
+        at += period;
+    }
+    let host = |keeping: Keeping| {
+        let line = common::Line {
+            initial: false,
+            edges: edges.clone(),
+            gaps: vec![],
+            end: at,
+        };
+        let (mut h, [p, _]) = pulses_host(line, 15, None, HostOptions::default());
+        h.keep_checkpoints(p, keeping).unwrap();
+        run_all(&mut h);
+        (h.kept(p).unwrap(), h.observed(p))
+    };
+    let keeping = |budget| Keeping::new(Tick::MAX, budget).with_events(20);
+    let (all, observed) = host(keeping(usize::MAX));
+    assert!(all.count > 40, "{all:?}");
+
+    // Room for about ten, as checkpoints differ in size: no gap holds twice the observations of
+    // an even spread.
+    let one = all.bytes / all.count;
+    let budget = one * 10 + one / 2;
+    let (few, _) = host(keeping(budget));
+    assert!(
+        (9..=11).contains(&few.count) && few.bytes <= budget,
+        "{few:?}"
+    );
+    assert_eq!((few.first, few.latest), (all.first, all.latest));
+    let even = observed / (few.count as u64 - 1);
+    assert!(few.widest_observed < 2 * even, "{few:?} against {even}");
+}
+
+#[test]
 fn a_window_chain_beside_the_forward_pass_re_derives_its_span_and_leaves_the_pass_unchanged() {
     let keeping = Keeping::new(50, usize::MAX);
     let alone = {

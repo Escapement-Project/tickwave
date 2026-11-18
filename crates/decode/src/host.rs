@@ -699,8 +699,9 @@ struct Snapshot {
 #[non_exhaustive]
 pub struct Checkpoint {
     pub runs: Vec<RunId>,
-    /// How far the wire analysis had taken its input.
+    /// How far the wire analysis had taken its input, and how many observations that was.
     pub consumed: Tick,
+    pub observed: u64,
     /// Each analysis in it, upstream first: its name, decoder, decoder version, what it reads and
     /// its decoder's settings. A restore requires the host to hold the same there.
     chain: Vec<Link>,
@@ -777,21 +778,21 @@ struct Keeper {
 
 impl Keeper {
     /// Drops checkpoints until the rest fit the budget. Each time the one dropped is the one
-    /// whose loss leaves the shortest stretch between its neighbours to replay; the first and
-    /// the latest stay while there are others.
+    /// whose loss leaves the shortest stretch between its neighbours to replay, in observations
+    /// where `events` is set and in ticks otherwise; the first and the latest stay while there
+    /// are others.
     fn fit(&mut self) {
+        let stretch = |a: &Checkpoint, b: &Checkpoint| match self.keeping.events {
+            Some(_) => b.observed.saturating_sub(a.observed),
+            None => b.consumed.saturating_sub(a.consumed).unsigned_abs(),
+        };
         while self.bytes > self.keeping.budget && !self.held.is_empty() {
             let n = self.held.len();
             let at = if n <= 2 {
                 0
             } else {
                 (1..n - 1)
-                    .min_by_key(|&k| {
-                        self.held[k + 1]
-                            .0
-                            .consumed
-                            .saturating_sub(self.held[k - 1].0.consumed)
-                    })
+                    .min_by_key(|&k| stretch(&self.held[k - 1].0, &self.held[k + 1].0))
                     .unwrap_or(0)
             };
             let (_, b) = self.held.remove(at);
@@ -817,10 +818,11 @@ pub struct Kept {
     pub count: usize,
     pub bytes: usize,
     /// The input consumed at the first and the latest, and the longest stretch between two
-    /// neighbours.
+    /// neighbours, in ticks and in observations.
     pub first: Option<Tick>,
     pub latest: Option<Tick>,
     pub widest: Tick,
+    pub widest_observed: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -2237,6 +2239,7 @@ impl Host {
         Ok(Checkpoint {
             runs: snaps.iter().map(|s| s.taken).collect(),
             consumed: self.analyses[a].run.consumed,
+            observed: self.analyses[a].run.observed,
             chain: self.chain(a),
             snaps,
         })
@@ -2295,15 +2298,17 @@ impl Host {
     /// The checkpoints kept for wire analysis `a`, if it has a keeping.
     pub fn kept(&self, a: AnalysisId) -> Option<Kept> {
         let k = self.keepers.iter().find(|k| k.root == a)?;
-        let at: Vec<Tick> = k.held.iter().map(|(c, _)| c.consumed).collect();
+        let held = || k.held.iter().map(|(c, _)| c);
+        let pairs = || held().zip(held().skip(1));
         Some(Kept {
-            count: at.len(),
+            count: k.held.len(),
             bytes: k.bytes,
-            first: at.first().copied(),
-            latest: at.last().copied(),
-            widest: at
-                .windows(2)
-                .map(|w| w[1].saturating_sub(w[0]))
+            first: k.held.first().map(|(c, _)| c.consumed),
+            latest: k.held.last().map(|(c, _)| c.consumed),
+            widest: (pairs().map(|(a, b)| b.consumed.saturating_sub(a.consumed)))
+                .max()
+                .unwrap_or(0),
+            widest_observed: (pairs().map(|(a, b)| b.observed.saturating_sub(a.observed)))
                 .max()
                 .unwrap_or(0),
         })
