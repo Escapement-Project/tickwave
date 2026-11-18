@@ -202,8 +202,6 @@ td.dim, th.dim { color: var(--ink-2); }
 
 footer { border-top: 1px solid var(--hair); }
 footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 16px; padding-top: 14px; padding-bottom: 18px; color: var(--ink-2); font-size: 14px; }
-/* The line under the project's name and statement takes a row of its own. */
-footer .wrap p { flex: 1 0 100%; max-width: none; margin: 6px 0 0; font-size: 13px; }
 
 @media (min-width: 2000px) {
   .wrap { max-width: 1720px; }

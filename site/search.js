@@ -242,7 +242,7 @@
       return;
     }
     if (!index) {
-      count.textContent = "Loading the docs' index…";
+      count.textContent = "Loading the search index…";
       load().then(show, () => {
         if (field.value.trim()) count.textContent = "The search index didn't load. Type again to retry.";
       });
