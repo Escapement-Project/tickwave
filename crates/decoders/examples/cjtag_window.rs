@@ -9,7 +9,8 @@
 //! sharing turns as `HostOptions::window_turns` says.
 //!
 //! `cargo run --release -p escapement-tickwave-decoders --example cjtag_window -- REC [PAUSE_S]
-//! [EVENTS] [RUNNING] [WINDOW_TURNS]`
+//! [EVENTS] [RUNNING] [WINDOW_TURNS]`; RUNNING 2 instead asks for a window at 25 s while the
+//! forward pass is at 5 s, ahead of it.
 
 #[path = "check/mod.rs"]
 mod check;
@@ -34,7 +35,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nth(1)
         .ok_or("usage: cjtag_window REC [PAUSE_S] [EVENTS]")?;
     let (pause_s, events) = (arg(2, 28.0), arg(3, 50_000.0) as u64);
-    let running = arg(4, 0.0) != 0.0;
+    let running = arg(4, 0.0) == 1.0;
+    let ahead = arg(4, 0.0) == 2.0;
     let mut options = HostOptions::default();
     options.window_turns = arg(5, 4.0) as usize;
     let file = std::fs::File::open(&path)?;
@@ -67,6 +69,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     h.keep_checkpoints(c, Keeping::new(ticks(1.0), 64 << 20).with_events(events))?;
     let pause = ticks(pause_s);
     let start = Instant::now();
+    if ahead {
+        // A window at 25 s asked for while the forward pass is at 5 s.
+        h.run_until(|h| h.consumed(c) >= ticks(5.0))?;
+        let w = Span {
+            start: ticks(25.0),
+            end: ticks(25.0 + 1e-3),
+        };
+        let asked = Instant::now();
+        let d = h.derive(c, w)?;
+        let (wc, wj) = (d.chain[0].1, d.chain[1].1);
+        h.run_until(|h| h.consumed(wc) >= w.end && h.quiet_below(wc))?;
+        let drawn = asked.elapsed().as_secs_f64() * 1e3;
+        h.run_until(|h| h.settled(wj) >= w.end)?;
+        let settled = asked.elapsed().as_secs_f64() * 1e3;
+        let unknown = |a| {
+            let items = &h.store(a).items;
+            let n = (items.values())
+                .filter(|i| {
+                    i.status
+                        .is_some_and(|s| s != escapement_tickwave_decode::Status::Complete)
+                        || (i.fields.iter()).any(|f| {
+                            matches!(f.value, escapement_tickwave_decode::Value::Unknown { .. })
+                        })
+                })
+                .count();
+            (items.len(), n)
+        };
+        let (cn, cu) = unknown(wc);
+        let (jn, ju) = unknown(wj);
+        println!(
+            "window at 25 s, the forward pass at {:.3} s: provisional {}; drawn by {drawn:.1} ms, settled by {settled:.1} ms; cJTAG {cn} items, {cu} incomplete or with an unknown field; JTAG {jn} items, {ju}",
+            h.consumed(c) as f64 / per_s,
+            d.provisional,
+        );
+        return Ok(());
+    }
     if running {
         let capture = rec.length() as f64 / per_s;
         let mut times = vec![];
