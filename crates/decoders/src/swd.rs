@@ -140,6 +140,8 @@ struct Bit {
 pub struct Recogniser {
     turnaround: usize,
     bits: VecDeque<Bit>,
+    /// The last 128 bits pushed, the newest in the top bit.
+    recent: u128,
     high: u8,
     after: usize,
     out: VecDeque<Transfer>,
@@ -166,6 +168,7 @@ impl Recogniser {
         Ok(Self {
             turnaround: usize::from(cycles),
             bits: VecDeque::new(),
+            recent: 0,
             high: 0,
             after: 0,
             out: VecDeque::new(),
@@ -198,8 +201,10 @@ impl Recogniser {
             prior_run,
             masked,
         });
+        self.recent = (self.recent >> 1) | (u128::from(value) << 127);
         let n = self.bits.len();
         for (kind, (pattern, len, before, after, reset)) in MASKED.into_iter().enumerate() {
+            // The deque holds the latest pushes, so where it holds `len` they are `recent`'s top.
             if n < len {
                 continue;
             }
@@ -207,7 +212,9 @@ impl Recogniser {
             if reset && self.bits[start].prior_run < 50 {
                 continue;
             }
-            if (0..len).all(|i| self.bits[start + i].value == ((pattern >> i) & 1 != 0)) {
+            let last = self.recent >> (128 - len);
+            let mask = u128::MAX >> (128 - len);
+            if last & mask == pattern {
                 self.masks[kind] += 1;
                 for b in self.bits.range_mut(start.saturating_sub(before)..n) {
                     b.masked = true;
