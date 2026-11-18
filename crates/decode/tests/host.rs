@@ -1117,7 +1117,7 @@ fn an_interrupted_read_stays_outstanding_with_its_source_unmoved() {
     let id = h.outstanding(a).unwrap();
     h.interrupt(a).store(true, Relaxed);
     assert!(h.take_io().unwrap().is_none());
-    assert_eq!(h.cancelled_reads, 1);
+    assert_eq!(h.stats().cancelled_reads, 1);
     assert!(
         !h.interrupt(a).load(Relaxed),
         "the host lowers it once acted on"
@@ -1150,7 +1150,7 @@ fn a_turn_whose_run_is_replaced_meanwhile_is_refused_whole() {
         })
     );
     assert_eq!(h.store(a).counts.ops, 0);
-    assert_eq!(h.stale, 1);
+    assert_eq!(h.stats().stale, 1);
 }
 
 #[test]
@@ -1189,14 +1189,14 @@ fn the_log_is_off_by_default_and_bounded_when_on() {
         let (mut h, _) = pulses_host(line(40, 3, 20, vec![]), 30, None, HostOptions::default());
         run_all(&mut h);
         assert_eq!(h.log().count(), 0);
-        h.admitted
+        h.stats().admitted
     };
     let options = options(|o| o.log = Some(16));
     let (mut h, _) = pulses_host(line(40, 3, 20, vec![]), 30, None, options);
     run_all(&mut h);
-    assert_eq!(h.admitted, quiet);
+    assert_eq!(h.stats().admitted, quiet);
     assert_eq!(h.log().count(), 16);
-    assert!(h.log_dropped > 0);
+    assert!(h.stats().log_dropped > 0);
 }
 
 #[test]

@@ -53,6 +53,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let seconds = start.elapsed().as_secs_f64();
     canon::print(&h, &[(s, None), (a, Some(s)), (m, Some(a))]);
     println!("seconds {seconds:.2}");
-    println!("largest batch: {} operations", h.peak_batch);
+    println!("largest batch: {} operations", h.stats().peak_batch);
     Ok(())
 }

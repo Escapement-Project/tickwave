@@ -35,8 +35,8 @@ pub struct WireSource {
     /// Where the first channel to finish ends, on the timeline; None while live.
     end: Option<Tick>,
     groups: Groups,
-    pub seeks: u64,
-    pub reads: u64,
+    seeks: u64,
+    reads: u64,
 }
 
 impl WireSource {
@@ -75,6 +75,16 @@ impl WireSource {
     /// Where its input ends, for a finished recording.
     pub fn end(&self) -> Option<Tick> {
         self.end
+    }
+
+    /// How many reads have not carried on from the last, so that its cursors sought.
+    pub fn seeks(&self) -> u64 {
+        self.seeks
+    }
+
+    /// How many reads it has done.
+    pub fn reads(&self) -> u64 {
+        self.reads
     }
 }
 

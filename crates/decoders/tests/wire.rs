@@ -178,5 +178,5 @@ fn a_read_holds_at_most_its_bound_of_ticks_and_the_next_carries_on_from_it() {
         from = upto;
     }
     assert_eq!(got, want);
-    assert_eq!(source.seeks, 1, "each read carries on from the last");
+    assert_eq!(source.seeks(), 1, "each read carries on from the last");
 }

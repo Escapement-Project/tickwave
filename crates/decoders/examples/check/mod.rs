@@ -216,5 +216,5 @@ pub fn report(
         capture / seconds,
         peak_rss_kb() / 1024
     );
-    println!("largest batch: {} operations", h.peak_batch);
+    println!("largest batch: {} operations", h.stats().peak_batch);
 }

@@ -1062,20 +1062,33 @@ impl<'a> RunView<'a> {
     }
 }
 
+/// What a host has done so far, for reports and tests.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Stats {
+    /// Batches admitted.
+    pub admitted: u64,
+    /// Deliveries queued for stacked analyses.
+    pub delivered: u64,
+    /// Replies, batches and deliveries refused as from a run replaced or retired.
+    pub stale: u64,
+    /// The most deliveries one inbox held.
+    pub peak_inbox: usize,
+    /// The most operations a batch admitted held.
+    pub peak_batch: usize,
+    /// Reads an interrupt stopped.
+    pub cancelled_reads: u64,
+    /// Log entries dropped past its bound.
+    pub log_dropped: u64,
+}
+
 pub struct Host {
     options: HostOptions,
     analyses: Vec<Slot>,
     io: VecDeque<(usize, RequestId, Request)>,
     log: VecDeque<LogEntry>,
     order: u64,
-    pub admitted: u64,
-    pub delivered: u64,
-    pub stale: u64,
-    pub peak_inbox: usize,
-    /// The most operations a batch admitted held.
-    pub peak_batch: usize,
-    pub cancelled_reads: u64,
-    pub log_dropped: u64,
+    stats: Stats,
     keepers: Vec<Keeper>,
     chains: Vec<Chain>,
     /// Window turns taken in a row while the forward chain waited.
@@ -1099,13 +1112,7 @@ impl Host {
             io: VecDeque::new(),
             log: VecDeque::new(),
             order: 0,
-            admitted: 0,
-            delivered: 0,
-            stale: 0,
-            peak_inbox: 0,
-            peak_batch: 0,
-            cancelled_reads: 0,
-            log_dropped: 0,
+            stats: Stats::default(),
             keepers: vec![],
             chains: vec![],
             window_streak: 0,
@@ -1164,18 +1171,22 @@ impl Host {
         self.options
     }
 
+    pub fn stats(&self) -> Stats {
+        self.stats
+    }
+
     fn note(&mut self, entry: impl FnOnce(u64) -> LogEntry) {
         self.order += 1;
         let Some(most) = self.options.log else {
             return;
         };
         if most == 0 {
-            self.log_dropped += 1;
+            self.stats.log_dropped += 1;
             return;
         }
         if self.log.len() >= most {
             self.log.pop_front();
-            self.log_dropped += 1;
+            self.stats.log_dropped += 1;
         }
         self.log.push_back(entry(self.order));
     }
@@ -1185,7 +1196,7 @@ impl Host {
             why,
             Refusal::StaleRun { .. } | Refusal::StaleReply { .. } | Refusal::StaleDelivery { .. }
         ) {
-            self.stale += 1;
+            self.stats.stale += 1;
         }
         let w = why.clone();
         self.note(|order| LogEntry::Refused { order, why: w });
@@ -1591,8 +1602,8 @@ impl Host {
         run.lost
             .retain(|l| l.end > settled || keep.iter().any(|k| l.start < k.end && k.start < l.end));
         let after = (run.frontier, run.settled);
-        self.admitted += 1;
-        self.peak_batch = self.peak_batch.max(b.ops.len());
+        self.stats.admitted += 1;
+        self.stats.peak_batch = self.stats.peak_batch.max(b.ops.len());
         if self.options.log.is_some() {
             let summary = b.ops.iter().map(|op| (op.letter(), *op.id())).collect();
             let (run, batch) = (b.run, b.seq);
@@ -1811,8 +1822,8 @@ impl Host {
         r.inbox.push_back(d);
         r.fresh = true;
         let depth = r.inbox.len();
-        self.peak_inbox = self.peak_inbox.max(depth);
-        self.delivered += 1;
+        self.stats.peak_inbox = self.stats.peak_inbox.max(depth);
+        self.stats.delivered += 1;
         if self.options.log.is_some() {
             self.note(|order| LogEntry::Delivered {
                 order,
@@ -1853,7 +1864,7 @@ impl Host {
             Ok(None) => {
                 interrupt.store(false, Relaxed);
                 self.io.push_front((a, id, req));
-                self.cancelled_reads += 1;
+                self.stats.cancelled_reads += 1;
                 Ok(None)
             }
             Err(e) => {
