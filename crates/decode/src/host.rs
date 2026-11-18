@@ -1948,6 +1948,16 @@ impl Host {
             return Err(self.refuse(Refusal::LossNotDeclared { run: id, span }));
         }
         let moved = frontier.is_some_and(|f| f != r.frontier);
+        // Passed before its batch, the store drops an item the batch closes inside the input its
+        // chain has taken, unless kept, and holds one that ends past it for a checkpoint.
+        // Finished, the run takes no more.
+        let to = match end {
+            Some(_) => Tick::MAX,
+            None => self.chain_consumed(id),
+        };
+        if let Some(r) = self.run_of_mut(id) {
+            r.store.pass(to);
+        }
         if !out.ops.is_empty() || moved || !lost.is_empty() {
             self.submit(Batch {
                 run: id,
@@ -1977,15 +1987,6 @@ impl Host {
                 id: rid,
                 request: req,
             });
-        }
-        // Closed items ending past the input its chain has taken are held for a checkpoint;
-        // finished, it takes no more.
-        let to = match end {
-            Some(_) => Tick::MAX,
-            None => self.chain_consumed(id),
-        };
-        if let Some(r) = self.run_of_mut(id) {
-            r.store.pass(to);
         }
         if let Some(end) = end {
             let Some(r) = self.run_of_mut(id) else {
