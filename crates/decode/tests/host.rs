@@ -1301,6 +1301,55 @@ fn a_window_chain_beside_the_forward_pass_re_derives_its_span_and_leaves_the_pas
 }
 
 #[test]
+fn a_window_keeps_an_item_open_across_its_checkpoint_when_the_forward_pass_kept_nothing() {
+    let (mut all, [ap, aq]) =
+        pulses_host(line(80, 3, 20, vec![]), 15, None, HostOptions::default());
+    run_all(&mut all);
+    // A checkpoint every tick, so that the nearest one falls inside a pulse, open from its rise to
+    // its fall.
+    let (mut h, [p, q]) = pulses_host(line(80, 3, 20, vec![]), 15, None, HostOptions::default());
+    h.set_keep(p, vec![]);
+    h.set_keep(q, vec![]);
+    h.keep_checkpoints(p, Keeping::new(1, usize::MAX)).unwrap();
+    run_all(&mut h);
+    assert!(
+        h.store(q).items.is_empty(),
+        "the forward pass keeps nothing closed"
+    );
+    for start in [695, 700, 705, 711, 712] {
+        let window = Span {
+            start,
+            end: start + 60,
+        };
+        let meets = |i: &escapement_tickwave_decode::Item| {
+            i.start < window.end && i.end.is_none_or(|e| e > window.start)
+        };
+        let span =
+            |items: &std::collections::BTreeMap<Id, escapement_tickwave_decode::Item>| -> Vec<_> {
+                (items.iter())
+                    .filter(|(_, i)| meets(i))
+                    .map(|(id, i)| (*id, i.end, i.fields.len()))
+                    .collect()
+            };
+        let w = h.derive(p, window).unwrap();
+        let (wp, wq) = (w.chain[0].1, w.chain[1].1);
+        h.run_until(|h| h.settled(wq) >= window.end).unwrap();
+        for (a, x) in [(ap, wp), (aq, wq)] {
+            let want = span(&all.store(a).items);
+            assert_eq!(span(&h.store(x).items), want, "the window at {start}");
+        }
+        if start == 711 {
+            let pulses = span(&all.store(ap).items);
+            assert!(
+                pulses.iter().any(|(id, ..)| id.anchor < start),
+                "a pulse open at {start}"
+            );
+        }
+        h.retire(wp);
+    }
+}
+
+#[test]
 fn window_size_does_not_change_the_output() {
     let gaps = vec![
         Span {

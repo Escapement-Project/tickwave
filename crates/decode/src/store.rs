@@ -310,7 +310,9 @@ impl Staged<'_> {
     }
 }
 
-/// Checks ops and keeps whole items only where they meet a retained span.
+/// Checks ops and keeps items: every open one, its fields and links, so that a checkpoint carries
+/// what a later window needs of it, and once closed only those that meet a retained span. An item
+/// keeps the elements whose cells meet a retained span.
 #[derive(Clone, Debug, Default)]
 pub struct Store {
     open: HashMap<Id, Open>,
@@ -534,8 +536,9 @@ impl Store {
         match op {
             Op::Open { id, parent, start } => {
                 c.opens += 1;
-                // Kept while it could still meet a span; dropped at its close if it does not.
-                if self.keep.iter().any(|s| *start < s.end) {
+                // Held while open, whatever the spans: a checkpoint taken now carries it, and a
+                // window restored from that checkpoint keeps it if it meets the window.
+                {
                     self.items.insert(
                         *id,
                         Item {
@@ -576,10 +579,18 @@ impl Store {
             } => {
                 c.extends += 1;
                 c.elements += elements.len() as u64;
+                let keep = &self.keep;
                 if let Some(item) = self.items.get_mut(id) {
+                    let kept = (elements.iter())
+                        .filter(|e| keep.iter().any(|s| meets(e.cell.start, e.cell.end, s)));
                     match item.seqs.iter_mut().find(|(s, _)| s == seq) {
-                        Some((_, v)) => v.extend_from_slice(elements),
-                        None => item.seqs.push((*seq, elements.clone())),
+                        Some((_, v)) => v.extend(kept.copied()),
+                        None => {
+                            let v: Vec<Element> = kept.copied().collect();
+                            if !v.is_empty() {
+                                item.seqs.push((*seq, v));
+                            }
+                        }
                     }
                 }
             }
@@ -660,6 +671,53 @@ mod tests {
         assert!(
             store.items.contains_key(&item(60)),
             "open, it could still meet the span"
+        );
+    }
+
+    #[test]
+    fn an_item_open_at_a_checkpoint_is_kept_by_a_window_restored_from_it() {
+        let id = Id::new(KindId(0), 100);
+        let mut forward = Store::with_keep(vec![]);
+        forward
+            .apply_batch(
+                &[Op::Open {
+                    id,
+                    parent: None,
+                    start: 100,
+                }],
+                8,
+            )
+            .unwrap();
+        let mut window = forward.clone();
+        window.keep = vec![Span {
+            start: 150,
+            end: 200,
+        }];
+        let set = Op::Set {
+            id,
+            field: crate::FieldId(0),
+            value: Value::Bool(true),
+            span: None,
+            driver: None,
+        };
+        let close = Op::Close {
+            id,
+            end: 160,
+            status: Status::Complete,
+        };
+        window
+            .apply_batch(&[set.clone(), close.clone()], 8)
+            .unwrap();
+        assert!(
+            window
+                .items
+                .get(&id)
+                .is_some_and(|i| i.end == Some(160) && i.fields.len() == 1)
+        );
+        forward.apply_batch(&[set, close], 8).unwrap();
+        assert!(
+            forward.items.is_empty(),
+            "closed, it meets no span of the forward pass"
         );
     }
 }
