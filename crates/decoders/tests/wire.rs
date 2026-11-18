@@ -180,3 +180,18 @@ fn a_read_holds_at_most_its_bound_of_ticks_and_the_next_carries_on_from_it() {
     assert_eq!(got, want);
     assert_eq!(source.seeks(), 1, "each read carries on from the last");
 }
+
+#[test]
+fn a_checkpoint_key_follows_the_recordings_content_not_its_length() {
+    let (b, _) = bits(&[dp_read(0x0, 0x0BC1_1477)]);
+    let (c, _) = bits(&[dp_read(0x0, 0x2BA0_1477)]);
+    let (wb, wc) = (wires(&b, P), wires(&c, P));
+    assert_eq!(wb.end, wc.end, "the same length and timebase");
+    let open = |w: &Wires| {
+        let file = recording(w);
+        let rec = Arc::new(Recording::open(Arc::new(file), Cache::new(8 << 20)).unwrap());
+        WireSource::new(rec, vec![0, 1]).unwrap().binding()
+    };
+    assert_ne!(open(&wb), open(&wc), "other content");
+    assert_eq!(open(&wb), open(&wb), "the same file opened again");
+}

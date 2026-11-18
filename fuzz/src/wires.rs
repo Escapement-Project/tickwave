@@ -139,6 +139,11 @@ impl Source for Wires {
         w.end = (self.end < w.upto).then_some(self.end);
         Ok(Some(w))
     }
+
+    fn binding(&self) -> u64 {
+        let edges = (self.lines.iter()).flat_map(|l| l.edges.iter().map(|&e| e as u64));
+        escapement_tickwave_decode::fold([self.end as u64].into_iter().chain(edges))
+    }
 }
 
 /// Where a window of `points`, sorted by tick, ends to hold at most `most` ticks of them and at

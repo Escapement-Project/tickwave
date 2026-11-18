@@ -1879,6 +1879,18 @@ impl Recording {
             .map_err(|e| Error::Annotations(e.clone()))
     }
 
+    /// What identifies a finished file's data, which a recompressed or compacted copy keeps; None
+    /// while it is being written.
+    pub fn content_id(&self) -> Option<escapement_tickwave_format::header::ContentId> {
+        self.finished().map(|f| f.footer().header.content_id)
+    }
+
+    /// Its number in this process, which no other recording shares, the same file opened again
+    /// included.
+    pub fn identity(&self) -> u64 {
+        self.revision.recording
+    }
+
     /// The store of a finished file; None for a live recording.
     pub(crate) fn finished(&self) -> Option<&Finished> {
         match &self.store {

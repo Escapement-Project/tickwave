@@ -110,17 +110,16 @@ impl Source for WireSource {
         }))
     }
 
-    /// The recording's length and timebase stand in for its identity, which the format does not
-    /// give yet.
+    /// A finished recording's content id, which a recompressed or compacted copy keeps, and the
+    /// channels; a live one's identity in this process, since what it holds is still growing.
     fn binding(&self) -> u64 {
         let rec = &*self.recording;
-        let tb = rec.timebase();
-        let words = [rec.length() as u64, tb.num(), tb.den()];
-        crate::fold(
-            words
-                .into_iter()
-                .chain(self.channels.iter().map(|&c| c as u64)),
-        )
+        let id: Vec<u64> = match rec.content_id() {
+            Some(c) => c.as_bytes().iter().map(|&b| u64::from(b)).collect(),
+            None => vec![u64::MAX, rec.identity()],
+        };
+        let channels = self.channels.iter().map(|&c| c as u64);
+        crate::fold(id.into_iter().chain(channels))
     }
 
     fn window(

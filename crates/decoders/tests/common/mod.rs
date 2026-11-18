@@ -100,6 +100,10 @@ impl Source for Wires {
         w.end = (self.end < w.upto).then_some(self.end);
         Ok(Some(w))
     }
+    fn binding(&self) -> u64 {
+        let edges = (self.lines.iter()).flat_map(|l| l.edges.iter().map(|&e| e as u64));
+        escapement_tickwave_decode::fold([self.end as u64].into_iter().chain(edges))
+    }
     fn fork(&self) -> Option<Box<dyn Source>> {
         Some(Box::new(self.clone()))
     }

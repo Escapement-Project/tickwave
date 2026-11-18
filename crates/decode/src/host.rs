@@ -130,11 +130,9 @@ pub trait Source: Send {
     ) -> Result<Option<Window>, SourceError>;
 
     /// What the source reads, its recording and channels, as a value that differs where they
-    /// differ, which checkpoints are keyed by. A source that can be bound to other input must
-    /// give one, or a checkpoint can restore onto other input.
-    fn binding(&self) -> u64 {
-        0
-    }
+    /// differ, which checkpoints are keyed by: a checkpoint restores only onto a source that
+    /// gives the same.
+    fn binding(&self) -> u64;
 
     /// A second source over the same input, reading on its own, for a window re-derived beside
     /// the forward pass. None where it cannot be had.

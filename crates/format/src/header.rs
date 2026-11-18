@@ -1534,6 +1534,10 @@ impl ContentId {
     pub fn new(digest: blake3::Hash) -> Self {
         Self(digest)
     }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        self.0.as_bytes()
+    }
 }
 
 impl FromStr for ContentId {

@@ -143,6 +143,10 @@ impl Source for Wires {
         }
         Ok(Some(w))
     }
+
+    fn binding(&self) -> u64 {
+        escapement_tickwave_decode::fold([self.end as u64, self.events.len() as u64])
+    }
 }
 
 /// TCKC and TMSC at 20 MHz with 1 ns ticks, as the cJTAG tests build them: TMSC changes with TCKC

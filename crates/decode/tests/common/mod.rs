@@ -107,6 +107,10 @@ impl Source for Nothing {
         self.0.fetch_add(1, Relaxed);
         Ok(Some(Window::new(from, upto)))
     }
+
+    fn binding(&self) -> u64 {
+        0
+    }
 }
 
 /// What a scripted decoder does in a turn.
@@ -283,6 +287,11 @@ impl Source for Line {
         w.events = events;
         w.end = (self.end < upto).then_some(self.end);
         Ok(Some(w))
+    }
+
+    fn binding(&self) -> u64 {
+        let edges = self.edges.iter().map(|&e| e as u64);
+        escapement_tickwave_decode::fold([self.end as u64].into_iter().chain(edges))
     }
 
     fn fork(&self) -> Option<Box<dyn Source>> {

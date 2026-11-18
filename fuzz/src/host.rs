@@ -371,6 +371,10 @@ impl Source for Ticks {
         Ok(Some(w))
     }
 
+    fn binding(&self) -> u64 {
+        escapement_tickwave_decode::fold([self.every as u64, self.end as u64])
+    }
+
     fn fork(&self) -> Option<Box<dyn Source>> {
         Some(Box::new(self.clone()))
     }
