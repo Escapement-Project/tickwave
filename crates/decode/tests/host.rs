@@ -1391,6 +1391,53 @@ fn retired_window_chains_give_their_slots_back() {
 }
 
 #[test]
+fn the_forward_pass_takes_a_turn_after_a_run_of_window_turns() {
+    let alone = {
+        let (mut h, [p, q]) =
+            pulses_host(line(80, 3, 20, vec![]), 15, None, HostOptions::default());
+        run_all(&mut h);
+        (h.store(p).counts, h.store(q).counts)
+    };
+    let run = |window_turns| {
+        let opts = options(|o| o.window_turns = window_turns);
+        let (mut h, [p, q]) = pulses_host(line(80, 3, 20, vec![]), 15, None, opts);
+        h.keep_checkpoints(p, Keeping::new(50, usize::MAX)).unwrap();
+        while h.consumed(p) < 1200 {
+            h.step().unwrap();
+        }
+        let before = h.consumed(p);
+        let window = Span {
+            start: 300,
+            end: 700,
+        };
+        let w = h.derive(p, window).unwrap();
+        let (wp, wq) = (w.chain[0].1, w.chain[1].1);
+        h.run_until(|h| h.settled(wq) >= window.end).unwrap();
+        let moved = h.consumed(p) - before;
+        let items: Vec<_> = (h.store(wq).items.iter())
+            .map(|(id, i)| (*id, i.end, i.fields.len()))
+            .collect();
+        h.retire(wp);
+        run_all(&mut h);
+        (moved, items, (h.store(p).counts, h.store(q).counts))
+    };
+    let (strict, strict_items, strict_end) = run(usize::MAX);
+    let (shared, shared_items, shared_end) = run(2);
+    assert_eq!(strict, 0, "windows only, the forward pass waits");
+    assert!(shared > 0, "it moves while the window runs");
+    assert!(strict_items.len() > 3);
+    assert_eq!(
+        shared_items, strict_items,
+        "the window's output whichever way"
+    );
+    assert_eq!(strict_end, alone);
+    assert_eq!(
+        shared_end, alone,
+        "the forward pass's output as without the window"
+    );
+}
+
+#[test]
 fn window_size_does_not_change_the_output() {
     let gaps = vec![
         Span {

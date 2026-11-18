@@ -899,6 +899,9 @@ pub struct HostOptions {
     pub recent_at_most: usize,
     /// The largest open-item bound a schema may declare.
     pub open_at_most: usize,
+    /// The turns window chains take in a row, while the forward chain also has work, before the
+    /// forward chain takes one: windows come first, and the forward pass still moves.
+    pub window_turns: usize,
 }
 
 impl Default for HostOptions {
@@ -909,6 +912,7 @@ impl Default for HostOptions {
             log: None,
             recent_at_most: 1 << 16,
             open_at_most: 1 << 16,
+            window_turns: 4,
         }
     }
 }
@@ -987,6 +991,8 @@ pub struct Host {
     pub cancelled_reads: u64,
     pub log_dropped: u64,
     keepers: Vec<Keeper>,
+    /// Window turns taken in a row while the forward chain waited.
+    window_streak: usize,
     /// The run generation the next window chain takes, so that no two chains, even in reused
     /// slots, share a run id.
     window_generation: u64,
@@ -1013,6 +1019,7 @@ impl Host {
             cancelled_reads: 0,
             log_dropped: 0,
             keepers: vec![],
+            window_streak: 0,
             window_generation: 1,
         }
     }
@@ -1818,10 +1825,25 @@ impl Host {
                 Err(e) => return Err(e),
             }
         }
-        if let Some(a) = (0..self.analyses.len())
-            .rev()
-            .find(|&a| self.runnable_at(a))
-        {
+        // The last runnable analysis of each kind: stacked ones before what feeds them.
+        let last = |window: bool| {
+            (0..self.analyses.len())
+                .rev()
+                .find(|&a| self.analyses[a].window == window && self.runnable_at(a))
+        };
+        let next = match (last(true), last(false)) {
+            (Some(w), Some(_)) if self.window_streak < self.options.window_turns => {
+                self.window_streak += 1;
+                Some(w)
+            }
+            (Some(w), None) => Some(w),
+            (_, Some(f)) => {
+                self.window_streak = 0;
+                Some(f)
+            }
+            (None, None) => None,
+        };
+        if let Some(a) = next {
             self.turn_at(a)?;
             self.take_due();
             return Ok(true);
