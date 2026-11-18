@@ -308,3 +308,74 @@ fn shots() {
     }
     let _ = decoded;
 }
+
+/// One frame of the SWD and ADIv5 tracks at each zoom, timed on this machine: the median of 101
+/// frames, printed. A calibration for the instruction counts in crates/bench, not a gate.
+#[test]
+#[ignore = "prints wall-clock frame times"]
+fn frame_times() {
+    use escapement_tickwave_egui::{Palette, Shown};
+    let (decoded, map, _) = decode(&fixture());
+    let transfers: Vec<(Tick, Tick)> = (decoded[0].store.items.values())
+        .map(|i| (i.start, i.end.unwrap()))
+        .collect();
+    let axis = |t: Tick| map.axis_saturating(t);
+    let mid = transfers.len() / 2;
+    let (first, last) = (transfers[0].0, transfers[transfers.len() - 1].1);
+    let half = (transfers[mid].1 - transfers[mid].0) / 2;
+    let zooms = [
+        ("whole", axis(first)..axis(last)),
+        (
+            "transfers",
+            axis(transfers[mid].0)..axis(transfers[mid + 6].1),
+        ),
+        (
+            "bits",
+            axis(transfers[mid].0)..axis(transfers[mid].0 + half),
+        ),
+    ];
+    let palette = Palette::from_visuals(&egui::Visuals::default());
+    for (name, window) in zooms {
+        let ctx = egui::Context::default();
+        let shown = Shown::new(window, 100.0..2000.0);
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(2000.0, 200.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        let mut frame = || {
+            ctx.run_ui(input(), |ui| {
+                for d in &decoded {
+                    ui.add(
+                        Track::new(
+                            &shown,
+                            d.name,
+                            &d.schema,
+                            &d.store.items,
+                            &d.density,
+                            &d.labels,
+                            &palette,
+                            map,
+                        )
+                        .parts(d.parts)
+                        .lanes(d.lanes),
+                    );
+                }
+            })
+        };
+        for _ in 0..5 {
+            frame();
+        }
+        let mut times: Vec<f64> = (0..101)
+            .map(|_| {
+                let t = std::time::Instant::now();
+                std::hint::black_box(frame());
+                t.elapsed().as_secs_f64() * 1e6
+            })
+            .collect();
+        times.sort_by(f64::total_cmp);
+        println!("{name}: median {:.0} us a frame", times[50]);
+    }
+}
