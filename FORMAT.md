@@ -432,9 +432,11 @@ known. The header says where they are. A sidecar annotation can say why one happ
 
 A digital channel's gaps are a list of `[from, to, level]`, in its source's ticks. The level is not
 known at source ticks `from..to`. From `to` on it is `level`, a boolean, until the next edge. No
-edge lies in `from..=to`. The gaps go in time order: `start ≤ from < to < end`, where `start` is
-the channel's start (see Header), and each gap's `from` lies past the `to` before it. A channel
-with a gap from its start has an `initial` of false, since its level there is not known.
+edge lies in `from..=to`. An edge at `to` would leave the level there ambiguous, so a writer folds
+it into `level`. An edge at `from` means the level there is known, so the gap starts after it. The
+gaps go in time order: `start ≤ from < to < end`, where `start` is the channel's start (see Header),
+and each gap's `from` lies past the `to` before it. A channel with a gap from its start has an
+`initial` of false, since its level there is not known.
 
 An analog channel's breaks are a list of `[index, tick, lost]` or `[index, tick, lost, phase]`:
 sample `index` starts a new run, at source tick `tick` plus `phase / D`, and the instrument lost

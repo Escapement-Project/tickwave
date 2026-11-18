@@ -79,6 +79,9 @@ What a host does for a viewer of a recording its writer is still writing:
 - **The finish.** After the writer's finish, `reopen`. A snapshot given after that is one taken
   before the finish, and is dropped. `release` can come before the finish: a `reopen` then finds
   the file unfinished, returns `Error::Unfinished`, and the viewer carries on live.
+- **A copy over the file.** To replace the finished file with a compacted copy, write the copy
+  beside it while the viewer reads the original, then `release`, rename the copy over the file,
+  and `reopen`. Windows refuses the rename while the viewer holds the file.
 
 ## The view the host keeps
 
