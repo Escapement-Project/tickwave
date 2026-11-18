@@ -14,11 +14,10 @@ use egui::{Align2, Rect, Response, Sense, Shape, Stroke, Ui, Widget, pos2, vec2}
 use escapement_tickwave_decode::{
     Element, FieldId, FieldType, Id, Item, KindId, Schema, Span, Status, Tick, Value,
 };
-use escapement_tickwave_view::Paint;
 use escapement_tickwave_view::format::annotations::Role;
 use escapement_tickwave_view::format::mapping::Mapping;
 
-use crate::graph::Shown;
+use crate::graph::{Driven, Shown};
 use crate::palette::Palette;
 
 /// A row's height, as a lane's.
@@ -119,23 +118,20 @@ pub fn condition(item: &Item) -> bool {
         || (item.fields.iter()).any(|f| matches!(f.value, Value::Unknown { .. }))
 }
 
-/// The most items whose parts a window paints a wire with: past it, at a zoom where parts are
-/// under a pixel, the wire keeps its own look.
-const PAINTED_AT_MOST: u64 = 4096;
-
-/// Paint for `channels` from the parts of the items in `window` (axis ticks), by the role that
-/// drives each: what a graph's `decoded_paint` takes to draw a wire by who drives it. Empty
-/// where the window holds more items than `PAINTED_AT_MOST`.
+/// The parts of the items in `window` (axis ticks), each by the role that drives it, its index
+/// in the schema's roles as `decoder_roles` gives them: what a graph's `decoded_paint` takes to
+/// draw a wire by who drives it. Empty where a track `width` points wide draws the window as
+/// density, since its parts are then under a pixel.
 pub fn driver_paints(
     schema: &Schema,
     items: &std::collections::BTreeMap<Id, Item>,
     density: &Density,
     map: &Mapping,
     window: &std::ops::Range<i64>,
-    channels: &[String],
-) -> Vec<Paint> {
+    width: f32,
+) -> Vec<Driven> {
     let mut out = Vec::new();
-    if density.count(window.start, window.end, 0.0).0 > PAINTED_AT_MOST {
+    if density.crowded(window, width) {
         return out;
     }
     let axis = |t: Tick| map.axis_saturating(t);
@@ -144,19 +140,14 @@ pub fn driver_paints(
             let (Some(span), Some(d)) = (f.span, f.driver) else {
                 continue;
             };
-            let Some(role) = schema.roles.get(usize::from(d.0)) else {
+            if usize::from(d.0) >= schema.roles.len() {
                 continue;
-            };
+            }
             let span = axis(span.start)..axis(span.end);
             if span.end <= window.start || span.start >= window.end {
                 continue;
             }
-            out.push(Paint {
-                arrival: 0,
-                role: role.to_string(),
-                span,
-                channels: channels.to_vec(),
-            });
+            out.push(Driven { role: d.0, span });
         }
     }
     out
@@ -324,6 +315,14 @@ impl Density {
     /// How many items it counts.
     pub fn items(&self) -> u64 {
         self.items
+    }
+
+    /// Whether `window` (axis ticks) over `width` points is too crowded to draw items apart: the
+    /// longest a few points wide, or more of them than the width shows apart.
+    fn crowded(&self, window: &std::ops::Range<i64>, width: f32) -> bool {
+        let per = (window.end - window.start) as f64 / f64::from(width);
+        let (count, _) = self.count(window.start, window.end, 0.0);
+        (self.longest as f64 / per) < f64::from(CROWDED) || count as f32 * CROWDED > width
     }
 
     /// The items of `items` (the store it was built over) that meet `window` (axis ticks), in id
@@ -557,9 +556,7 @@ impl Widget for Track<'_> {
         }
         // Crowded where the longest item is a few points wide, or where the window holds more
         // items than its columns could show apart.
-        let (count, _) = self.density.count(w.start, w.end, 0.0);
-        let longest = self.density.longest as f64 / s.per;
-        let crowded = longest < f64::from(CROWDED) || count as f32 * CROWDED > plot.width();
+        let crowded = self.density.crowded(w, plot.width());
         let lanes: Vec<Rect> = (0..self.lanes).map(row).collect();
         if crowded {
             self.density_bins(&s, lanes[0], &mut shapes);

@@ -455,6 +455,12 @@ pub struct Host {
     pub motion: bool,
     /// What the graph's response said it drew, through `Graph::shown`.
     pub shown: Option<crate::Shown>,
+    /// Paint from decoded output, the channels it paints and the decoder's roles.
+    pub decoded: (
+        Vec<crate::Driven>,
+        Vec<String>,
+        Vec<escapement_tickwave_view::format::annotations::Role>,
+    ),
 }
 
 pub fn harness(state: ViewState) -> Harness<'static, Host> {
@@ -480,6 +486,7 @@ pub fn harness_at(state: ViewState, pixels_per_point: f32) -> Harness<'static, H
         now: None,
         motion: false,
         shown: None,
+        decoded: Default::default(),
     };
     Harness::builder()
         .with_size(egui::vec2(1080.0, 700.0))
@@ -501,6 +508,7 @@ pub fn harness_at(state: ViewState, pixels_per_point: f32) -> Harness<'static, H
                     .extras(host.extras)
                     .now(host.now)
                     .motion(host.motion)
+                    .decoded_paint(&host.decoded.0, &host.decoded.1, &host.decoded.2)
                     .id_salt(SALT);
                 if host.strip {
                     graph = graph.height(ui.available_height() - STRIP - 8.0);

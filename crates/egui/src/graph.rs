@@ -12,7 +12,7 @@ use escapement_tickwave_view::format::annotations::Role;
 use escapement_tickwave_view::format::model::Ratio;
 use escapement_tickwave_view::readouts::{MINUS, NBSP, format_interval};
 use escapement_tickwave_view::scale::{ValueRange, move_range, scale_limits, zoom_range};
-use escapement_tickwave_view::{MarkerCursor, MarkerQuery, Paint, Resolution};
+use escapement_tickwave_view::{MarkerCursor, MarkerQuery, Resolution};
 
 use crate::draw::{self, Trace};
 use crate::palette::Palette;
@@ -81,8 +81,24 @@ pub struct Graph<'a> {
     motion: bool,
     /// A gesture this frame zoomed the window.
     zoomed: bool,
-    /// Paint from decoded output, and the roles its decoders declare.
-    decoded: (&'a [Paint], &'a [Role]),
+    decoded: Decoded<'a>,
+}
+
+/// A stretch of a wire painted by the role that drives it, from decoded output: the role by its
+/// index in the roles handed with it, and the span in axis ticks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Driven {
+    pub role: u16,
+    pub span: Range<i64>,
+}
+
+/// Paint from decoded output: its stretches, the channels they paint (empty: every one), and the
+/// roles their indices name.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Decoded<'a> {
+    pub paints: &'a [Driven],
+    pub channels: &'a [String],
+    pub roles: &'a [Role],
 }
 
 impl<'a> Graph<'a> {
@@ -107,7 +123,7 @@ impl<'a> Graph<'a> {
             id_salt: IdSalt::new("tickwave graph"),
             motion: true,
             zoomed: false,
-            decoded: (&[], &[]),
+            decoded: Decoded::default(),
         }
     }
 
@@ -134,12 +150,22 @@ impl<'a> Graph<'a> {
         self
     }
 
-    /// Paint from decoded output over the window, with the roles its decoders declare: a part
-    /// of a wire painted by who drives it. A role the sidecar declares keeps the sidecar's look,
-    /// and a decoder's role it does not declare is added after the sidecar's. Paint the sidecar
-    /// gives draws over decoded paint.
-    pub fn decoded_paint(mut self, paints: &'a [Paint], roles: &'a [Role]) -> Self {
-        self.decoded = (paints, roles);
+    /// Paint from decoded output over the window, on `channels` (empty: every one), with the
+    /// roles its decoders declare, which a paint's role indexes: a part of a wire painted by who
+    /// drives it. A role the sidecar declares keeps the sidecar's look, and a decoder's role it
+    /// does not declare is added after the sidecar's. Paint the sidecar gives draws over decoded
+    /// paint.
+    pub fn decoded_paint(
+        mut self,
+        paints: &'a [Driven],
+        channels: &'a [String],
+        roles: &'a [Role],
+    ) -> Self {
+        self.decoded = Decoded {
+            paints,
+            channels,
+            roles,
+        };
         self
     }
 
@@ -792,20 +818,15 @@ impl Widget for Graph<'_> {
             let wanted = self.request(columns, &facts);
             self.ask(wanted, &view.window, held.as_ref());
         }
-        let held_paints = held.as_ref().map_or(&[][..], |h| &h.answer.markers.paints);
-        let (paints, roles): (Cow<[Paint]>, Cow<[Role]>) = match self.decoded {
-            ([], []) => (Cow::Borrowed(held_paints), Cow::Borrowed(&facts.roles[..])),
-            (decoded, declared) => {
-                let roles = (facts.roles.iter().cloned())
-                    .chain(
-                        (declared.iter())
-                            .filter(|r| !facts.roles.iter().any(|d| d.name == r.name))
-                            .cloned(),
-                    )
-                    .collect();
-                let paints = decoded.iter().chain(held_paints).cloned().collect();
-                (Cow::Owned(paints), Cow::Owned(roles))
-            }
+        let paints = held.as_ref().map_or(&[][..], |h| &h.answer.markers.paints);
+        let declared = self.decoded.roles;
+        let roles: Cow<[Role]> = if declared.is_empty() {
+            Cow::Borrowed(&facts.roles[..])
+        } else {
+            let extra = declared
+                .iter()
+                .filter(|r| !facts.roles.iter().any(|d| d.name == r.name));
+            Cow::Owned(facts.roles.iter().chain(extra).cloned().collect())
         };
         draw::graph(
             ui,
@@ -822,7 +843,8 @@ impl Widget for Graph<'_> {
                 selection: self.state.selection.as_ref(),
                 ink: self.palette.trace_colour(facts.stored.as_ref()),
                 roles: &roles,
-                paints: &paints,
+                paints,
+                decoded: self.decoded,
                 pixels_per_point: ui.pixels_per_point(),
                 live,
             },

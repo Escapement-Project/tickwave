@@ -9,6 +9,8 @@
 //!   labels and parts, on half of one with its bits, and zoomed out on all of them as density
 //!   bins; and of the cJTAG track over its session, zoomed in on six Scan Packets, inside the
 //!   control level that spans them all.
+//! - `driver_paint`: the paint by driving role a graph takes from the SWD track's parts each
+//!   frame, over 2,000 points: zoomed out on all the transfers, on 600 of them, and on six.
 use std::hint::black_box;
 use std::sync::atomic::AtomicBool;
 
@@ -17,7 +19,7 @@ use escapement_tickwave_decode::{
     Host, InputSpec, Observed, Schema, Source, SourceError, Span, Store, Tick, Window, name,
 };
 use escapement_tickwave_decoders::{adiv5, cjtag, swd};
-use escapement_tickwave_egui::track::{Density, Labels, Template, Track, condition};
+use escapement_tickwave_egui::track::{Density, Labels, Template, Track, condition, driver_paints};
 use escapement_tickwave_egui::{Palette, Shown};
 use escapement_tickwave_view::format::mapping::Mapping;
 use escapement_tickwave_view::format::model::Ratio;
@@ -482,9 +484,37 @@ fn track_frame(mut d: Drawn) -> Drawn {
     d
 }
 
+/// What a graph is handed each frame: the parts driving the wire over `d`'s window.
+fn paint(d: &Drawn) -> usize {
+    let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
+    let paints = driver_paints(
+        &d.schema,
+        &d.store.items,
+        &d.density,
+        &map,
+        &d.shown.window,
+        d.shown.plot.end - d.shown.plot.start,
+    );
+    paints.len()
+}
+
+/// 600 transfers from the session's start.
+fn six_hundred() -> Drawn {
+    drawn(0..10 + 600 * 48 * PERIOD)
+}
+
+#[library_benchmark]
+#[bench::zoomed_out(setup = zoomed_out)]
+#[bench::six_hundred(setup = six_hundred)]
+#[bench::zoomed_in(setup = zoomed_in)]
+fn driver_paint(d: Drawn) -> Drawn {
+    black_box(paint(&d));
+    d
+}
+
 library_benchmark_group!(
     name = decode,
-    benchmarks = [swd_session, cjtag_session, track_frame]
+    benchmarks = [swd_session, cjtag_session, track_frame, driver_paint]
 );
 
 main!(

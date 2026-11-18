@@ -565,3 +565,41 @@ fn a_dash_whose_period_is_under_a_device_pixel_draws_solid() {
     );
     assert!(near(along[0], span), "{along:?} against {span:?}");
 }
+
+#[test]
+fn decoded_paint_draws_its_channel_by_the_role_it_names_under_the_sidecars_paint() {
+    let body = format!("{ROLES}{}", paint("n", 3.0, 5.0, "DIO3", "neither"));
+    let mut h = shown(&body, |_| {});
+    let role = |name: &str| escapement_tickwave_view::format::annotations::Role {
+        name: name.into(),
+        label: name.into(),
+        colour: None,
+        weight: 0.0,
+        dash: None,
+    };
+    h.state_mut().decoded = (
+        vec![crate::Driven {
+            role: 1,
+            span: 2 * SECOND..4 * SECOND,
+        }],
+        vec!["DIO3".into()],
+        vec![role("target"), role("probe")],
+    );
+    for _ in 0..4 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let lanes = drawn(&h).layout.lanes;
+    let green = runs(&shows(&h, GREEN, lanes[3]), 0.0);
+    let probe = (x_of(&h, 2 * SECOND), x_of(&h, 3 * SECOND));
+    assert_eq!(green.len(), 1, "{green:?}");
+    assert!(
+        near(green[0], probe),
+        "the sidecar's paint over it from 3 s: {green:?}"
+    );
+    assert!(!shows(&h, BLUE, lanes[3]).is_empty(), "the sidecar's own");
+    assert!(
+        shows(&h, GREEN, lanes[2]).is_empty(),
+        "only the channel it paints"
+    );
+}

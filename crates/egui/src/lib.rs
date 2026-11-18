@@ -22,7 +22,7 @@ mod viewer;
 mod tests;
 
 pub use escapement_tickwave_view as view;
-pub use graph::{Extras, Graph, Shown};
+pub use graph::{Driven, Extras, Graph, Shown};
 pub use palette::Palette;
 pub use state::{ViewState, Window, Y};
 pub use strip::Strip;

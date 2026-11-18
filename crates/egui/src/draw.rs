@@ -14,7 +14,7 @@ use escapement_tickwave_view::scale::{ValueRange, range_marks};
 use escapement_tickwave_view::shade::{self, Look};
 use escapement_tickwave_view::{AnalogColumns, Cut, Drawn, Marker, Paint, Point, StripAnswer};
 
-use crate::graph::{LABEL_TOP, Layout, View, fitted};
+use crate::graph::{Decoded, LABEL_TOP, Layout, View, fitted};
 use crate::palette::Palette;
 use crate::viewer::{Facts, Held};
 
@@ -239,9 +239,11 @@ pub(crate) struct Frame<'a> {
     pub selection: Option<&'a Range<i64>>,
     /// The trace's colour: the palette's, else the recording's stored one, else ink.
     pub ink: Color32,
-    /// The paint roles the sidecar declares, in order, and the paints over the answer's span.
+    /// The paint roles the sidecar declares, in order, then the decoders' it does not, and the
+    /// sidecar's paints over the answer's span.
     pub roles: &'a [Role],
     pub paints: &'a [Paint],
+    pub decoded: Decoded<'a>,
     pub pixels_per_point: f32,
     /// Where the Live toggle sits, which the axis's labels keep clear of.
     pub live: Option<Rect>,
@@ -632,10 +634,16 @@ fn stretches(f: &Frame, c: usize, rect: Rect) -> Vec<(Rect, Pen)> {
     };
     let ppp = f.pixels_per_point;
     let column = |t: i64| ((f.view.x(t as f64) - rect.left()) * ppp).round() as i64;
-    let spans: Vec<(i64, i64, &str)> = (f.paints.iter())
+    let d = f.decoded;
+    let painted = d.channels.is_empty() || d.channels.iter().any(|n| n == name);
+    let decoded = (d.paints.iter().filter(|_| painted)).filter_map(|q| {
+        let role = d.roles.get(usize::from(q.role))?;
+        Some((column(q.span.start), column(q.span.end), role.name.as_str()))
+    });
+    let sidecar = (f.paints.iter())
         .filter(|q| q.channels.is_empty() || q.channels.iter().any(|n| n == name))
-        .map(|q| (column(q.span.start), column(q.span.end), q.role.as_str()))
-        .collect();
+        .map(|q| (column(q.span.start), column(q.span.end), q.role.as_str()));
+    let spans: Vec<(i64, i64, &str)> = decoded.chain(sidecar).collect();
     let cut = roles::stretches(&spans, f.roles, 0, (rect.width() * ppp).round() as i64);
     if cut.iter().all(|s| s.role.is_none()) {
         return vec![(rect, plain)];

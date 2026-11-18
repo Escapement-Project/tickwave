@@ -412,7 +412,7 @@ fn harness(window: Window, case: Case) -> Harness<'static, Host2> {
                     &first.density,
                     &host.map,
                     &s.window,
-                    &host.painted,
+                    s.plot.end - s.plot.start,
                 )
             });
             let roles = decoder_roles(&first.schema);
@@ -420,7 +420,7 @@ fn harness(window: Window, case: Case) -> Harness<'static, Host2> {
                 Graph::lanes_only(viewer, &mut host.state, &host.face.palette)
                     .motion(false)
                     .lanes(&host.lanes)
-                    .decoded_paint(&paints, &roles),
+                    .decoded_paint(&paints, &host.painted, &roles),
             );
             host.heights.clear();
             let Some(shown) = Graph::shown(&response) else {

@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use escapement_tickwave_decode::{Id, KindDecl, KindId, Op, Schema, Span, Status, Store, Tick};
 use escapement_tickwave_decoders::{adiv5, cjtag, jtag, swd};
-use escapement_tickwave_egui::track::{Density, Labels, Track};
+use escapement_tickwave_egui::track::{Density, Labels, Track, driver_paints};
 use escapement_tickwave_egui::{Palette, Shown};
 use escapement_tickwave_view::format::mapping::Mapping;
 use escapement_tickwave_view::format::model::Ratio;
@@ -371,4 +371,59 @@ fn a_density_over_items_either_side_of_zero_is_built_and_drawn() {
     });
     out.textures_delta.clear();
     assert!(!out.shapes.is_empty());
+}
+
+#[test]
+fn a_wire_is_painted_by_its_parts_only_where_the_track_draws_their_items_apart() {
+    // An item every 100 ticks, each with a part driven by the probe over its first half.
+    let schema = Schema::new(vec![KindDecl::new("a").with_fields(vec![
+        escapement_tickwave_decode::field("p", escapement_tickwave_decode::FieldType::Phase),
+    ])])
+    .with_roles(["probe"]);
+    let mut store = Store::with_keep(vec![Span {
+        start: Tick::MIN,
+        end: Tick::MAX,
+    }]);
+    for start in (0..100_000).step_by(100) {
+        let id = Id::new(KindId(0), start);
+        let ops = [
+            Op::Open {
+                id,
+                parent: None,
+                start,
+            },
+            Op::Set {
+                id,
+                field: escapement_tickwave_decode::FieldId(0),
+                value: escapement_tickwave_decode::Value::Phase,
+                span: Some(Span {
+                    start,
+                    end: start + 50,
+                }),
+                driver: Some(escapement_tickwave_decode::Role(0)),
+            },
+            Op::Close {
+                id,
+                end: start + 100,
+                status: Status::Complete,
+            },
+        ];
+        store.apply_batch(&ops, 8).unwrap();
+    }
+    let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
+    let density = Density::of(store.items.values(), &map, |_| false);
+    let paints = |window: std::ops::Range<i64>, width: f32| {
+        driver_paints(&schema, &store.items, &density, &map, &window, width)
+    };
+    let few = paints(10_000..20_000, 1000.0);
+    assert_eq!(few.len(), 100, "a hundred items, ten points each");
+    assert!(
+        few.iter()
+            .all(|p| p.role == 0 && p.span.end - p.span.start == 50)
+    );
+    assert!(
+        paints(0..100_000, 1000.0).is_empty(),
+        "a point an item: density"
+    );
+    assert_eq!(paints(0..100_000, 4000.0).len(), 1000, "four points each");
 }
