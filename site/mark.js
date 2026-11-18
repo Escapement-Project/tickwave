@@ -1,7 +1,8 @@
 // The marks in motion, on every plate that carries one: an element with data-mark="verge" holding
 // design/marks/verge.svg, or data-mark="tickwave" holding design/marks/tickwave.svg. A mark plays
-// once when its plate is first wholly in view below the header, and again when the pointer or a tap
-// reaches it. Both reach the project's step, hold there and return, in the same times.
+// once when its plate is first wholly in view below the header, once any mark the page plays first
+// is still, and again when the pointer or a tap reaches it. Both reach the project's step, hold
+// there and return, in the same times.
 //
 // Verge's, in tickwave's grammar of a capture taken again: the V dims to grey as a floor and stems
 // grow under it; a beam sweeps the plate, and as it reaches each sample the grey one fades and a new
@@ -158,8 +159,12 @@
     const play = players[plate.dataset.mark];
     if (!play) continue;
     plate.addEventListener("pointerenter", () => play(plate));
-    // The header can cover the plate, so it plays once wholly in view below it.
-    new IntersectionObserver((seen, io) => { if (seen.some((s) => s.isIntersecting)) { io.disconnect(); setTimeout(() => play(plate), 200); } },
-      { threshold: 1, rootMargin: `-${header}px 0px 0px 0px` }).observe(plate);
+    // The header can cover the plate, so it plays once wholly in view below it, after any mark the
+    // page plays first (window.marksWait, the landing's hero).
+    new IntersectionObserver((seen, io) => {
+      if (!seen.some((s) => s.isIntersecting)) return;
+      io.disconnect();
+      Promise.resolve(window.marksWait).then(() => setTimeout(() => play(plate), 200));
+    }, { threshold: 1, rootMargin: `-${header}px 0px 0px 0px` }).observe(plate);
   }
 })();

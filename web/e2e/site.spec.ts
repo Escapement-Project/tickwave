@@ -69,7 +69,7 @@ test.describe("the project's header", () => {
     expect(await page.evaluate(() => document.documentElement.dataset.face)).toBe("night");
   });
 
-  test("on a phone, the header scrolls away, and comes back on the way up without moving the page", async ({ page }) => {
+  test("on a phone, the header scrolls away, and comes back on the reader's way up without moving the page", async ({ page }) => {
     await page.setViewportSize({ width: 360, height: 700 });
     await page.goto(`${SITE}docs/format.html`);
     const places = page.getByRole("navigation", { name: "Escapement Project" });
@@ -80,7 +80,13 @@ test.describe("the project's header", () => {
     const start = await at();
     await to(1200);
     await expect.poll(async () => (await at()).bottom).toBeLessThanOrEqual(0);
+    // A scroll up the reader did not make, as the browser's own to hold a section in place, leaves it
+    // away; the reader's own brings it back.
     await to(1000);
+    await page.waitForTimeout(200);
+    expect((await at()).bottom).toBeLessThanOrEqual(0);
+    await page.mouse.move(180, 400);
+    await page.mouse.wheel(0, -200);
     await expect.poll(async () => (await at()).top).toBe(0);
     await expect(places.getByRole("link", { name: "Docs" })).toBeVisible();
     expect((await at()).main).toBeCloseTo(start.main, 2);

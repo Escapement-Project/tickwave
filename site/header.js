@@ -58,7 +58,14 @@
   // up, and leaves again on the way down. Once it is out of sight it waits fixed above the window,
   // and the page keeps its place with padding the size of the header; back at the top of the page it
   // is in the flow again. A jump, as to a link in the page, sends it away.
-  let flow = 0, last = scrollY, moves = 0;
+  //
+  // Only the reader's own scrolling brings it back. The browser scrolls by itself too: to the section
+  // an address names, and again to hold that section in place when the header leaves the flow,
+  // which reads as a short scroll up. So a scroll up counts once the reader has acted since the page
+  // opened or last jumped.
+  let flow = 0, last = scrollY, moves = 0, acted = false;
+  for (const type of ["wheel", "touchmove", "keydown", "pointerdown"]) addEventListener(type, () => { acted = true; }, { capture: true, passive: true });
+  addEventListener("hashchange", () => { acted = false; });
   const has = (name) => root.classList.contains(name);
   const away = (to) => {
     if (to) {
@@ -89,7 +96,7 @@
       root.classList.remove("header-back");
       last = scrollY;
     } else if (Math.abs(moved) > 6) {
-      if (moved < 0) root.classList.add("header-back");
+      if (moved < 0) { if (acted) root.classList.add("header-back"); }
       else if (!header.contains(document.activeElement)) root.classList.remove("header-back");
       last = scrollY;
     }
@@ -235,8 +242,8 @@
       };
       // Move `sig` from `from` to its end at `v` units a ms: from rest over the first `start` units,
       // to rest over the last ramp, each at a constant rate, so the speed never jumps. Then the
-      // mark's own edge, and the ruler fades and goes with its clip.
-      const run = (sig, from, start, v) => {
+      // mark's own edge, and the ruler fades and goes with its clip. `done` once the mark is still.
+      const run = (sig, from, start, v, done) => {
         const D = sig.end - from, T = Math.min(t.ramp, D), A = Math.min(start, D - T);
         const ta = (2 * A) / v, tc = (D - A - T) / v, tt = (2 * T) / v, total = ta + tc + tt;
         const at = (ms) => {
@@ -246,7 +253,7 @@
           return D - T + v * k - (v / (2 * tt)) * k ** 2;
         };
         stop = animate(total, (k) => draw(sig, from + (k >= 1 ? D : at(k * total))), () => {
-          stop = null; rest();
+          stop = null; rest(); done?.();
           fadeTo(0, t["fade-out"] * 1000, () => { raisedPath.removeAttribute("d"); lowerPath.removeAttribute("d"); unclip(); });
         });
       };
@@ -254,7 +261,13 @@
       return {
         // Lock's first frame, held until it plays: the low run alone, with the ruler.
         ready() { if (begin()) first(lock(t, m)); },
-        arrive() { if (!begin()) return; const sig = lock(t, m); first(sig); run(sig, t.riser, 0, t.speed / 1000); },
+        // Lock, settled once the mark is still, or at once where it does not play.
+        arrive() {
+          if (!begin()) return Promise.resolve();
+          const sig = lock(t, m);
+          first(sig);
+          return new Promise((done) => run(sig, t.riser, 0, t.speed / 1000, done));
+        },
         // From the mark on: its last low, a high as long (so the first frame is the mark), one dense
         // run so the levels carry on, then a new chirp, ending on the mark again.
         again() {

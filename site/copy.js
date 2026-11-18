@@ -2,7 +2,7 @@
 // a command) and a code block in a doc. Each gets a Copy button; a click on the command copies too,
 // unless the reader is selecting part of it. The button says what happened for a moment, and a
 // status line tells a screen reader. Where the clipboard refuses, the command is selected instead,
-// for the reader to copy. The landing page's script copies its console through window.copyCommand.
+// for the reader to copy.
 (() => {
   const status = Object.assign(document.createElement("p"), { className: "sr-only" });
   status.setAttribute("role", "status");
@@ -22,8 +22,10 @@
     try {
       await navigator.clipboard.writeText(text);
     } catch {
+      const code = box.querySelector("code") ?? box, prompt = code.querySelector(':scope > [aria-hidden="true"]');
       const range = document.createRange();
-      range.selectNodeContents(box.querySelector("code") ?? box);
+      range.selectNodeContents(code);
+      if (prompt) range.setStartAfter(prompt);
       getSelection().removeAllRanges();
       getSelection().addRange(range);
       said = "Selected";
@@ -74,8 +76,6 @@
       b.removeEventListener("transitionend", settle);
     });
   }
-  window.copyCommand = copy;
-
   const boxes = [...document.querySelectorAll(".console")];
   // A doc's code block scrolls sideways, so its button sits on a wrapper that does not. A block
   // marked text is a program's output, not something to type: Zola marks it data-lang (as output,

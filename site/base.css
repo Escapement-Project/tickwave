@@ -5,7 +5,9 @@
 :root { --gutter: clamp(16px, 4vw, 48px); }
 * { box-sizing: border-box; }
 html, body { margin: 0; background: var(--page); color: var(--ink); }
-body { font: 400 17px/1.6 var(--font-text); }
+/* The footer sits at the window's foot on a page shorter than the window. */
+body { font: 400 17px/1.6 var(--font-text); min-height: 100dvh; display: flex; flex-direction: column; }
+main { flex: 1 0 auto; }
 a { color: inherit; }
 .nb { white-space: nowrap; }
 a:focus-visible, button:focus-visible, [tabindex]:focus-visible { outline: var(--focus-width) solid var(--ink); outline-offset: 3px; }
@@ -56,6 +58,8 @@ header nav .product > a[aria-current="page"]::after, header nav .product > a + a
 .skip { position: absolute; left: -9999px; top: 0; }
 .skip:focus { left: 12px; top: 12px; z-index: 11; background: var(--raised); padding: 6px 10px; border-radius: 6px; }
 .switch { grid-area: face; display: flex; align-items: center; background: none; border: 0; padding: 4px 0; cursor: pointer; }
+/* face.js turns the face; without scripts the switch would do nothing. */
+html:not(.js) .switch { visibility: hidden; }
 .switch .track { position: relative; display: block; width: 46px; height: 26px; border-radius: 999px; border: 1.5px solid var(--rule); }
 .switch .thumb { position: absolute; top: 2px; left: 2px; width: 19px; height: 19px; border-radius: 50%; background: var(--ink); color: var(--page); overflow: hidden; }
 /* The thumb is a window onto a disc with the sun on one half and the moon on the other, as on a
@@ -144,7 +148,7 @@ ol.steps h3::before { content: counter(step); font: var(--figures-weight) 15px/1
 /* After .console p, which it ties with: a console in a step takes the step's size. */
 .steps p { font-size: 15px; }
 .after { margin: 28px 0 0; font-size: 15px; color: var(--ink-2); }
-.after code { font: 500 .88em var(--font-code); font-stretch: var(--code-stretch); }
+.after code { font: 500 .88em var(--font-code); font-stretch: var(--code-stretch); white-space: nowrap; }
 .after a { color: var(--ink); }
 /* A product's docs on its main page: a row a group, what it is for beside it, leading to the group
    on the docs' index. */
@@ -172,9 +176,10 @@ figcaption b { color: var(--ink); font-weight: 600; }
 .chart g.dim .end { visibility: hidden; }
 .chart circle.pt { stroke: var(--surface); }
 .chart circle.hollow { fill: var(--surface); }
-/* A number in the text that points at its evidence in the figure and the table. */
-.ref { text-decoration: underline dotted var(--ink-2); text-decoration-thickness: 1.5px; text-underline-offset: .22em; }
-.ref:hover, .ref:focus-visible { text-decoration-style: solid; text-decoration-color: var(--ink); }
+/* A number in the text that points at its evidence in the figure and the table. Only a script links
+   them, so only then is it underlined. */
+.js .ref { text-decoration: underline dotted var(--ink-2); text-decoration-thickness: 1.5px; text-underline-offset: .22em; }
+.js .ref:hover, .js .ref:focus-visible { text-decoration-style: solid; text-decoration-color: var(--ink); }
 .tip { position: absolute; z-index: 1; pointer-events: none; background: var(--page); border: 1px solid var(--hair); border-radius: 8px; padding: 6px 10px; font-size: 13px; line-height: 1.45; white-space: nowrap; box-shadow: 0 2px 8px rgba(0,0,0,.12); }
 .tip b { font-weight: 600; }
 .tip i { display: inline-block; width: 10px; height: 2px; vertical-align: middle; margin-right: 6px; }
@@ -197,6 +202,8 @@ td.dim, th.dim { color: var(--ink-2); }
 
 footer { border-top: 1px solid var(--hair); }
 footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 16px; padding-top: 14px; padding-bottom: 18px; color: var(--ink-2); font-size: 14px; }
+/* The line under the project's name and statement takes a row of its own. */
+footer .wrap p { flex: 1 0 100%; max-width: none; margin: 6px 0 0; font-size: 13px; }
 
 @media (min-width: 2000px) {
   .wrap { max-width: 1720px; }
@@ -276,4 +283,8 @@ article.doc .codeblock { margin: 0 0 16px; }
 article.doc .codeblock pre { margin: 0; }
 article.doc .codeblock .copy { top: 8px; right: 10px; opacity: 0; transition: opacity .15s, color .18s, background-color .18s, border-color .18s, width .2s cubic-bezier(.3, 0, .2, 1); }
 article.doc .codeblock:hover .copy, article.doc .codeblock .copy:focus-visible, article.doc .codeblock.copied .copy { opacity: 1; }
-@media (hover: none) { article.doc .codeblock .copy { opacity: 1; } }
+/* Without hover the button stays, so the code starts below it rather than under it. */
+@media (hover: none) {
+  article.doc .codeblock .copy { opacity: 1; }
+  article.doc .codeblock pre { padding-top: 40px; }
+}

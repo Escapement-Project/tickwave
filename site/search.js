@@ -27,10 +27,11 @@
     .catch((e) => { loading = null; throw e; });
 
   // A word typed matches where a word in the text starts, so "capture" finds "captures", and a
-  // plural typed finds its singular. Words under two characters are left out.
+  // plural typed finds its singular. A hyphen or a slash parts words as a space does, so
+  // "under-range" finds "under range" too. Words under two characters are left out.
   const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const stem = (w) => (w.length > 3 && w.endsWith("s") && !w.endsWith("ss") ? w.slice(0, -1) : w);
-  const words = (q) => [...new Set(q.toLowerCase().split(/\s+/).filter((w) => w.length > 1 && /[\p{L}\p{N}]/u.test(w)))].slice(0, 8);
+  const words = (q) => [...new Set(q.toLowerCase().split(/[\s\-\/]+/).filter((w) => w.length > 1 && /[\p{L}\p{N}]/u.test(w)))].slice(0, 8);
   const start = "(?<![\\p{L}\\p{N}])";
   const hits = (re, s) => { re.lastIndex = 0; let n = 0; while (re.exec(s) && n < 20) n++; return n; };
   // Every word typed, each to the end of the word it starts, for marking.

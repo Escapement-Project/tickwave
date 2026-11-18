@@ -1,6 +1,9 @@
 /* tickwave's site, after tokens.css and base.css, which give it the page, type, header, column and
    footer. Colours, type and interaction come from the design system's tokens. */
 body { overflow-wrap: break-word; }
+/* main is the column here (.wrap), and base.css lays the body out as a flex column: without a
+   width, the column's auto margins would shrink it to its content. */
+main.wrap { width: 100%; }
 a:hover { text-decoration-thickness: 2px; }
 :focus-visible { outline: var(--focus-width) solid var(--ink); outline-offset: 3px; }
 code, pre { font-family: var(--font-code); font-stretch: var(--code-stretch); font-weight: var(--code-weight); font-size: .82em; }
