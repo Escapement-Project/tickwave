@@ -118,7 +118,8 @@ pub struct Counts {
     pub digest: u64,
 }
 
-/// FNV-1a, 64 bits: a digest that stays the same across builds and platforms.
+/// FNV-1a over bytes, and its step over whole words: a digest that stays the same across builds
+/// and platforms.
 struct Fnv(u64);
 
 impl Fnv {
@@ -128,11 +129,12 @@ impl Fnv {
             self.0 = self.0.wrapping_mul(0x100_0000_01b3);
         }
     }
+    /// A whole word in one step, rotated after the multiply so its high bits reach the low ones.
     fn u64(&mut self, v: u64) {
-        self.bytes(&v.to_le_bytes());
+        self.0 = (self.0 ^ v).wrapping_mul(0x100_0000_01b3).rotate_left(29);
     }
     fn i64(&mut self, v: i64) {
-        self.bytes(&v.to_le_bytes());
+        self.u64(v as u64);
     }
     fn id(&mut self, id: &Id) {
         self.i64(id.anchor);
