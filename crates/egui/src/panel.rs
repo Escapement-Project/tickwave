@@ -69,6 +69,16 @@ impl<'a> Panel<'a> {
         format_interval(ticks, self.timebase, self.map.m())
     }
 
+    /// `to` against `from`, signed: "+40 ns".
+    fn offset(&self, from: Tick, to: Tick) -> String {
+        let ticks = self.map.axis_saturating(to) - self.map.axis_saturating(from);
+        let sign = if ticks < 0 { "" } else { "+" };
+        format!(
+            "{sign}{}",
+            format_interval(ticks, self.timebase, self.map.m())
+        )
+    }
+
     fn text(&self, t: impl Into<String>) -> RichText {
         RichText::new(t)
             .font(self.palette.labels.clone())
@@ -220,8 +230,10 @@ impl<'a> Panel<'a> {
                             .map_or_else(|| "?".to_owned(), |v| v.to_string()),
                         _ => e.value.to_string(),
                     };
-                    let at = match e.at {
-                        Observation::Wire(t) => self.time(t),
+                    // From the part's start, which the line above gives in full.
+                    let at = match (e.at, f.span) {
+                        (Observation::Wire(t), Some(span)) => self.offset(span.start, t),
+                        (Observation::Wire(t), None) => self.time(t),
                         _ => "from upstream".to_owned(),
                     };
                     ui.label(self.quiet(n.to_string()));

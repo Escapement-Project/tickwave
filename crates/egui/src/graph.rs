@@ -8,6 +8,7 @@ use egui::{
     AsIdSalt, CursorIcon, IdSalt, PointerButton, Rect, Response, Sense, Stroke, StrokeKind, Ui,
     Vec2, Widget, WidgetInfo, pos2, vec2,
 };
+use escapement_tickwave_view::columns::Grid;
 use escapement_tickwave_view::format::annotations::Role;
 use escapement_tickwave_view::format::model::Ratio;
 use escapement_tickwave_view::readouts::{MINUS, NBSP, format_interval};
@@ -92,13 +93,14 @@ pub struct Driven {
     pub span: Range<i64>,
 }
 
-/// Paint from decoded output: its stretches, the channels they paint (empty: every one), and the
-/// roles their indices name.
+/// Paint from decoded output: its stretches, the channels they paint (empty: every one), the
+/// roles their indices name, and whether they come from a provisional window.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Decoded<'a> {
     pub paints: &'a [Driven],
     pub channels: &'a [String],
     pub roles: &'a [Role],
+    pub provisional: bool,
 }
 
 impl<'a> Graph<'a> {
@@ -161,11 +163,17 @@ impl<'a> Graph<'a> {
         channels: &'a [String],
         roles: &'a [Role],
     ) -> Self {
-        self.decoded = Decoded {
-            paints,
-            channels,
-            roles,
-        };
+        self.decoded.paints = paints;
+        self.decoded.channels = channels;
+        self.decoded.roles = roles;
+        self
+    }
+
+    /// The decoded paint comes from a window decoded ahead of the forward pass, as a track's
+    /// `provisional` says of its items: it draws at the palette's `pale`, dashed where its role's
+    /// look has no dash of its own. Paint the sidecar gives keeps its look.
+    pub fn decoded_provisional(mut self, provisional: bool) -> Self {
+        self.decoded.provisional = provisional;
         self
     }
 
@@ -267,6 +275,9 @@ pub struct Shown {
     /// Low, then high, in the trace's unit. A graph of lanes alone draws no value range: this is
     /// the one a trace would start from.
     pub y: (f64, f64),
+    /// The columns the lanes were drawn in, from the answer held; none before one has come. A
+    /// track bins its density in them, so a bin lies under the column it counts.
+    pub grid: Option<Grid>,
     #[cfg(test)]
     pub(crate) layout: Layout,
 }
@@ -279,6 +290,7 @@ impl Shown {
             window,
             plot,
             y: (0.0, 1.0),
+            grid: None,
             #[cfg(test)]
             layout: Layout {
                 rect: Rect::NOTHING,
@@ -857,6 +869,7 @@ impl Widget for Graph<'_> {
         }
         memory.shown = Some(Shown {
             y,
+            grid: held.as_ref().map(|h| h.answer.grid),
             window: view.window.clone(),
             plot: layout.plot.left()..layout.plot.right(),
             #[cfg(test)]

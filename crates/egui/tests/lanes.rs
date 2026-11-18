@@ -434,6 +434,16 @@ fn shapes_of(
     window: std::ops::Range<i64>,
     provisional: bool,
 ) -> Vec<egui::Shape> {
+    shapes_on(items, window, provisional, None)
+}
+
+/// As `shapes_of`, under a graph whose lanes were drawn in `grid`'s columns.
+fn shapes_on(
+    items: &[(u16, Tick, Tick)],
+    window: std::ops::Range<i64>,
+    provisional: bool,
+    grid: Option<escapement_tickwave_view::columns::Grid>,
+) -> Vec<egui::Shape> {
     let schema = Schema::new(vec![KindDecl::new("a")]);
     let mut store = Store::with_keep(vec![Span {
         start: Tick::MIN,
@@ -455,7 +465,8 @@ fn shapes_of(
         ];
         store.apply_batch(&ops, 8).unwrap();
     }
-    let shown = Shown::new(window, 0.0..500.0);
+    let mut shown = Shown::new(window, 0.0..500.0);
+    shown.grid = grid;
     let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
     let density = Density::of(&store.items, &map, |_| false);
     let (labels, palette) = (
@@ -496,6 +507,39 @@ fn shapes_of(
         flat(c.shape, &mut all);
     }
     all
+}
+
+/// Zoomed out, the density's bins lie in the lanes' columns where the graph drew them, here a
+/// third of a point off the plot's own; without them, in the plot's points.
+#[test]
+fn a_crowded_tracks_bins_lie_in_the_lanes_columns() {
+    use escapement_tickwave_view::columns::Grid;
+    let items: Vec<(u16, Tick, Tick)> = (0..5000).map(|k| (0, 2 * k, 2 * k + 1)).collect();
+    // Each bin's left edge, past the first, which the plot's edge clips.
+    let lefts = |grid: Option<Grid>| -> Vec<f32> {
+        let shapes = shapes_on(&items, 0..10_000, false, grid);
+        let mut xs: Vec<f32> = (shapes.iter())
+            .filter_map(|s| match s {
+                egui::Shape::Rect(r) if r.stroke.width == 0.0 => Some(r.rect.left()),
+                _ => None,
+            })
+            .collect();
+        xs.sort_by(f32::total_cmp);
+        xs.split_off(1)
+    };
+    let own = lefts(None);
+    assert!(own.len() > 400, "{}", own.len());
+    assert!(own.iter().all(|x| (x - x.round()).abs() < 1e-3), "{own:?}");
+    let lanes = lefts(Some(Grid {
+        x0: 7.0,
+        per: 20.0,
+        count: 1500,
+    }));
+    assert!(lanes.len() > 400, "{}", lanes.len());
+    assert!(
+        lanes.iter().all(|x| (x - x.floor() - 0.35).abs() < 1e-3),
+        "{lanes:?}"
+    );
 }
 
 #[test]

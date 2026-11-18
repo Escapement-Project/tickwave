@@ -456,6 +456,8 @@ pub struct Host {
     pub motion: bool,
     /// What the graph's response said it drew, through `Graph::shown`.
     pub shown: Option<crate::Shown>,
+    /// Whether the decoded paint comes from a provisional window.
+    pub provisional: bool,
     /// Paint from decoded output, the channels it paints and the decoder's roles.
     pub decoded: (
         Vec<crate::Driven>,
@@ -488,6 +490,7 @@ pub fn harness_at(state: ViewState, pixels_per_point: f32) -> Harness<'static, H
         motion: false,
         shown: None,
         decoded: Default::default(),
+        provisional: false,
     };
     Harness::builder()
         .with_size(egui::vec2(1080.0, 700.0))
@@ -510,6 +513,7 @@ pub fn harness_at(state: ViewState, pixels_per_point: f32) -> Harness<'static, H
                     .now(host.now)
                     .motion(host.motion)
                     .decoded_paint(&host.decoded.0, &host.decoded.1, &host.decoded.2)
+                    .decoded_provisional(host.provisional)
                     .id_salt(SALT);
                 if host.strip {
                     graph = graph.height(ui.available_height() - STRIP - 8.0);

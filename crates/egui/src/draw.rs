@@ -9,7 +9,7 @@ use escapement_tickwave_view::columns::{DigitalColumns, Grid, State};
 use escapement_tickwave_view::format::annotations::Role;
 use escapement_tickwave_view::format::model::Ratio;
 use escapement_tickwave_view::readouts::format_marks;
-use escapement_tickwave_view::roles::{self, Dash, LookColour};
+use escapement_tickwave_view::roles::{self, Dash, LookColour, Stretch};
 use escapement_tickwave_view::scale::{ValueRange, range_marks};
 use escapement_tickwave_view::shade::{self, Look};
 use escapement_tickwave_view::{AnalogColumns, Cut, Drawn, Marker, Paint, Point, StripAnswer};
@@ -617,10 +617,45 @@ fn role_pen(f: &Frame, name: &str) -> Option<Pen> {
     })
 }
 
+/// A provisional window's dash and the gap after it, in points: a track's outlines of its items,
+/// and the decoded paint from them.
+pub(crate) const PROVISIONAL_DASH: [f32; 2] = [3.0, 2.0];
+
+/// `top` over `under`, two cuts of the same columns: each column takes `top`'s role where it has
+/// one, else `under`'s, marked true where `under`'s role draws it. Neighbours alike are one
+/// stretch.
+fn over(top: &[Stretch], under: &[Stretch]) -> Vec<(Stretch, bool)> {
+    let mut out: Vec<(Stretch, bool)> = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    while let (Some(t), Some(u)) = (top.get(i), under.get(j)) {
+        let (px0, px1) = (t.px0.max(u.px0), t.px1.min(u.px1));
+        let (role, from_under) = match t.role {
+            Some(r) => (Some(r), false),
+            None => (u.role, u.role.is_some()),
+        };
+        if px1 > px0 {
+            match out.last_mut() {
+                Some((last, was)) if last.role == role && *was == from_under && last.px1 == px0 => {
+                    last.px1 = px1;
+                }
+                _ => out.push((Stretch { px0, px1, role }, from_under)),
+            }
+        }
+        if t.px1 <= px1 {
+            i += 1;
+        }
+        if u.px1 <= px1 {
+            j += 1;
+        }
+    }
+    out
+}
+
 /// Row `rect` of channel `c` cut where the role painting it changes (`roles::stretches`), each
-/// stretch the part of `rect` it covers and its pen: the latest paint in sidecar order with a
-/// declared role draws a column, and the trace's own pen the rest. `rect` alone, in the trace's
-/// pen, where nothing paints it.
+/// stretch the part of `rect` it covers and its pen: the latest paint with a declared role draws a
+/// column, the sidecar's over decoded paint, and the trace's own pen the rest. Decoded paint from
+/// a provisional window draws pale and dashed. `rect` alone, in the trace's pen, where nothing
+/// paints it.
 fn stretches(f: &Frame, c: usize, rect: Rect) -> Vec<(Rect, Pen)> {
     let p = f.palette;
     let plain = Pen {
@@ -636,25 +671,35 @@ fn stretches(f: &Frame, c: usize, rect: Rect) -> Vec<(Rect, Pen)> {
     let column = |t: i64| ((f.view.x(t as f64) - rect.left()) * ppp).round() as i64;
     let d = f.decoded;
     let painted = d.channels.is_empty() || d.channels.iter().any(|n| n == name);
-    let decoded = (d.paints.iter().filter(|_| painted)).filter_map(|q| {
-        let role = d.roles.get(usize::from(q.role))?;
-        Some((column(q.span.start), column(q.span.end), role.name.as_str()))
-    });
-    let sidecar = (f.paints.iter())
+    let decoded: Vec<(i64, i64, &str)> = (d.paints.iter().filter(|_| painted))
+        .filter_map(|q| {
+            let role = d.roles.get(usize::from(q.role))?;
+            Some((column(q.span.start), column(q.span.end), role.name.as_str()))
+        })
+        .collect();
+    let sidecar: Vec<(i64, i64, &str)> = (f.paints.iter())
         .filter(|q| q.channels.is_empty() || q.channels.iter().any(|n| n == name))
-        .map(|q| (column(q.span.start), column(q.span.end), q.role.as_str()));
-    let spans: Vec<(i64, i64, &str)> = decoded.chain(sidecar).collect();
-    let cut = roles::stretches(&spans, f.roles, 0, (rect.width() * ppp).round() as i64);
-    if cut.iter().all(|s| s.role.is_none()) {
+        .map(|q| (column(q.span.start), column(q.span.end), q.role.as_str()))
+        .collect();
+    let w = (rect.width() * ppp).round() as i64;
+    let cut = over(
+        &roles::stretches(&sidecar, f.roles, 0, w),
+        &roles::stretches(&decoded, f.roles, 0, w),
+    );
+    if cut.iter().all(|(s, _)| s.role.is_none()) {
         return vec![(rect, plain)];
     }
     cut.into_iter()
-        .map(|s| {
+        .map(|(s, under)| {
             let x = |px: i64| rect.left() + px as f32 / ppp;
             let clip = Rect::from_x_y_ranges(x(s.px0)..=x(s.px1), rect.y_range());
-            let pen = (s.role)
+            let mut pen = (s.role)
                 .and_then(|r| role_pen(f, &f.roles[r].name))
                 .unwrap_or_else(|| plain.clone());
+            if under && d.provisional {
+                pen.colour = pen.colour.gamma_multiply(p.pale);
+                pen.dash.get_or_insert_with(|| PROVISIONAL_DASH.to_vec());
+            }
             (clip, pen)
         })
         .collect()
@@ -1450,8 +1495,72 @@ pub(crate) fn strip_axis(ui: &Ui, rect: Rect, extent: &Range<i64>, timebase: Rat
 mod tests {
     use egui::epaint::{PathShape, TessellationOptions, Tessellator};
     use egui::{Color32, Mesh, Pos2, Rect, Stroke, pos2};
+    use escapement_tickwave_view::format::annotations::Role;
+    use escapement_tickwave_view::roles::{self, Stretch};
 
-    use super::{reach, within};
+    use super::{over, reach, within};
+
+    /// The sidecar's paint cut over decoded paint cut apart is the one cut of both in sidecar
+    /// order, as the lanes drew them before decoded paint could be provisional; and a stretch is
+    /// marked decoded exactly where no sidecar paint draws it.
+    #[test]
+    fn the_sidecars_paint_over_decoded_paint_cuts_as_both_in_sidecar_order() {
+        let role = |name: &str| Role {
+            name: name.into(),
+            label: name.into(),
+            colour: None,
+            weight: 0.0,
+            dash: None,
+        };
+        let declared = [role("a"), role("b"), role("c")];
+        let mut rng = 0x5eed_u64;
+        let mut next = |n: u64| {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng % n
+        };
+        let at = |cut: &[Stretch], px: i64| {
+            cut.iter()
+                .find(|s| s.px0 <= px && px < s.px1)
+                .and_then(|s| s.role)
+        };
+        for _ in 0..2000 {
+            let mut spans = |n: u64| -> Vec<(i64, i64, &str)> {
+                (0..next(n))
+                    .map(|_| {
+                        let a = next(110) as i64 - 5;
+                        let b = a + next(40) as i64;
+                        (a, b, ["a", "b", "c", "z"][next(4) as usize])
+                    })
+                    .collect()
+            };
+            let (decoded, sidecar) = (spans(6), spans(4));
+            let both: Vec<_> = decoded.iter().chain(&sidecar).copied().collect();
+            let want = roles::stretches(&both, &declared, 0, 100);
+            let top = roles::stretches(&sidecar, &declared, 0, 100);
+            let got = over(&top, &roles::stretches(&decoded, &declared, 0, 100));
+            let mut joined: Vec<Stretch> = Vec::new();
+            for &(s, under) in &got {
+                assert_eq!(
+                    under,
+                    s.role.is_some() && at(&top, s.px0).is_none(),
+                    "{got:?}"
+                );
+                match joined.last_mut() {
+                    Some(last) if last.role == s.role && last.px1 == s.px0 => last.px1 = s.px1,
+                    _ => joined.push(s),
+                }
+            }
+            assert_eq!(joined, want, "{decoded:?} under {sidecar:?}");
+            // Neighbours meet, and differ in role or in whose paint it is.
+            let alike = |w: &[(Stretch, bool)]| (w[0].0.role, w[0].1) == (w[1].0.role, w[1].1);
+            assert!(
+                got.windows(2)
+                    .all(|w| w[0].0.px1 == w[1].0.px0 && !alike(w))
+            );
+        }
+    }
 
     /// The alpha `mesh` covers `p` with, where its triangles that hold `p` overlap the most.
     fn cover(mesh: &Mesh, p: Pos2) -> f32 {

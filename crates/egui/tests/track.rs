@@ -390,7 +390,8 @@ fn draw(ui: &mut egui::Ui, host: &mut Host2) {
         Graph::lanes_only(viewer, &mut host.state, &host.face.palette)
             .motion(false)
             .lanes(&host.lanes)
-            .decoded_paint(&paints, &host.painted, &roles),
+            .decoded_paint(&paints, &host.painted, &roles)
+            .decoded_provisional(host.provisional),
     );
     host.heights.clear();
     let Some(shown) = Graph::shown(&response) else {
@@ -951,6 +952,8 @@ fn the_panel_shows_a_selected_transfer_in_full_and_an_access_with_its_links() {
     h.run();
     assert_eq!(h.query_all_by_label_contains(" for ").count(), 2);
     h.get_by_label("driven by target");
+    // Each bit at its time from the part's start, which the line above gives in full.
+    assert_eq!(h.query_all_by_label_contains("+").count(), 32);
     assert_eq!(
         h.query_all_by_label("31").count(),
         1,

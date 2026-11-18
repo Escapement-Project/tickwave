@@ -13,6 +13,7 @@ use escapement_tickwave_decode::{
     Element, FieldId, FieldType, Id, Item, KindId, Label, LabelPiece, Schema, Span, Status, Tick,
     Value,
 };
+use escapement_tickwave_view::columns::Grid;
 use escapement_tickwave_view::format::annotations::Role;
 use escapement_tickwave_view::format::mapping::Mapping;
 use std::collections::BTreeMap;
@@ -23,8 +24,8 @@ use crate::palette::Palette;
 /// A row's height, as a lane's.
 pub const ROW: f32 = 24.0;
 /// A provisional item's dashed outline: its dashes and the gaps between them, in points.
-const DASH: f32 = 3.0;
-const GAP: f32 = 2.0;
+const DASH: f32 = crate::draw::PROVISIONAL_DASH[0];
+const GAP: f32 = crate::draw::PROVISIONAL_DASH[1];
 /// Items narrower than this, on average, are drawn as density.
 const CROWDED: f32 = 3.0;
 /// A sequence's elements get their values once a cell is this wide.
@@ -619,13 +620,21 @@ impl Density {
     /// Items starting in `[from, to)` and how many are conditions, at the coarsest level whose
     /// buckets are no wider than `per`; with `per` 0, the finest.
     fn count(&self, from: i64, to: i64, per: f64) -> (u64, u64) {
-        let Some(at) = (0..self.levels.len())
+        self.level(per)
+            .map_or((0, 0), |at| self.count_at(at, from, to))
+    }
+
+    /// The coarsest level whose buckets are no wider than `per`, else the finest; none before a
+    /// level is built. It depends on the scale alone, so a frame chooses it once.
+    fn level(&self, per: f64) -> Option<usize> {
+        (0..self.levels.len())
             .rev()
             .find(|&k| ((1u128 << self.levels[k].shift) as f64) <= per)
             .or((!self.levels.is_empty()).then_some(0))
-        else {
-            return (0, 0);
-        };
+    }
+
+    /// As `count`, at level `at`.
+    fn count_at(&self, at: usize, from: i64, to: i64) -> (u64, u64) {
         let shift = self.levels[at].shift;
         // Buckets `a..b` of that level, by their index from zero. A level's bucket is the sum of
         // two of the level below's, so each level takes the odd one at either end, and the rest
@@ -875,7 +884,8 @@ impl Widget for Track<'_> {
         let lanes: Vec<Rect> = (0..self.lanes).map(row).collect();
         let drawn = shapes.len();
         if crowded {
-            self.density_bins(&s, lanes[0], &mut shapes);
+            let grid = bin_columns(self.shown, &s, ui.pixels_per_point());
+            self.density_bins(&s, grid, lanes[0], &mut shapes);
         } else {
             let parts = self.parts.then(|| row(self.lanes));
             clicked = self.items(ui, &s, &lanes, parts, click, &mut shapes);
@@ -912,21 +922,46 @@ impl Widget for Track<'_> {
     }
 }
 
+/// The columns a density bins in, those meeting `shown`'s window: the lanes' where the graph drew
+/// them at this scale, so a bin lies under the column it counts; else a point wide from the
+/// window's start. An answer for another scale is drawn stretched until the next comes, and its
+/// columns would bin too coarsely or too finely.
+fn bin_columns(shown: &Shown, s: &Scale, pixels_per_point: f32) -> Grid {
+    let w = &shown.window;
+    let pixel = s.per / f64::from(pixels_per_point);
+    let (x0, per) = match shown.grid {
+        Some(g) if (0.5..=2.0).contains(&(g.per / pixel)) => (g.x0, g.per),
+        _ => (s.from, s.per),
+    };
+    let first = ((w.start as f64 - x0) / per).floor();
+    let last = ((w.end as f64 - x0) / per).ceil();
+    Grid {
+        x0: x0 + first * per,
+        per,
+        count: (last - first).max(0.0) as usize,
+    }
+}
+
 impl Track<'_> {
-    /// Each pixel column's count of items starting in it, as a bar whose height grows with the
-    /// count's logarithm, and a mark at the top where any is a condition.
-    fn density_bins(&self, s: &Scale, row: Rect, shapes: &mut Vec<Shape>) {
+    /// Each of `grid`'s columns' count of items starting in it, as a bar whose height grows with
+    /// the count's logarithm, and a mark at the top where any is a condition.
+    fn density_bins(&self, s: &Scale, grid: Grid, row: Rect, shapes: &mut Vec<Shape>) {
         let p = self.palette;
-        let columns = (s.right - s.left).ceil() as usize;
-        let per = s.per;
-        let mut bins = Vec::with_capacity(columns);
+        let Some(level) = self.density.level(grid.per) else {
+            return;
+        };
+        let mut bins = Vec::with_capacity(grid.count);
         let mut most = 1u64;
-        for k in 0..columns {
-            let a = (s.from + k as f64 * per).floor() as i64;
-            let b = ((s.from + (k + 1) as f64 * per).floor() as i64).max(a + 1);
-            let (c, m) = self.density.count(a, b, per);
+        for k in 0..grid.count {
+            let (x0, x1) = (
+                grid.x0 + k as f64 * grid.per,
+                grid.x0 + (k + 1) as f64 * grid.per,
+            );
+            let a = x0.floor() as i64;
+            let b = (x1.floor() as i64).max(a + 1);
+            let (c, m) = self.density.count_at(level, a, b);
             most = most.max(c);
-            bins.push((a, b, c, m));
+            bins.push((x0, x1, a, b, c, m));
         }
         let scale = (most as f32 + 1.0).log2();
         let lost = |a: i64, b: i64| {
@@ -938,11 +973,12 @@ impl Track<'_> {
                 la < b && a < lb
             })
         };
-        for (k, &(a, b, c, m)) in bins.iter().enumerate() {
+        for &(x0, x1, a, b, c, m) in &bins {
             if c == 0 {
                 continue;
             }
-            let x = s.left + k as f32;
+            let x = s.x(x0).max(s.left);
+            let x1 = s.x(x1).min(s.right).max(x);
             let h = ((c as f32 + 1.0).log2() / scale * (row.height() - 2.0 * PAD)).max(1.0);
             let ink = match lost(a, b) {
                 true => p.ink_2.gamma_multiply(p.pale),
@@ -951,14 +987,14 @@ impl Track<'_> {
             shapes.push(Shape::rect_filled(
                 Rect::from_min_max(
                     pos2(x, row.bottom() - PAD - h),
-                    pos2(x + 1.0, row.bottom() - PAD),
+                    pos2(x1, row.bottom() - PAD),
                 ),
                 0.0,
                 ink,
             ));
             if m > 0 {
                 shapes.push(Shape::rect_filled(
-                    Rect::from_min_max(pos2(x, row.top()), pos2(x + 1.0, row.top() + PAD)),
+                    Rect::from_min_max(pos2(x, row.top()), pos2(x1, row.top() + PAD)),
                     0.0,
                     p.attention_ink,
                 ));
@@ -1164,6 +1200,39 @@ fn provisional(decoded: Vec<Shape>, pale: f32, out: &mut Vec<Shape>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A density bins in the lanes' columns where the graph drew them at this scale, across the
+    /// whole window though the answer held covers less; at another scale, or with none, in the
+    /// plot's points from the window's start.
+    #[test]
+    fn a_density_bins_in_the_lanes_columns_drawn_at_its_scale_else_in_points() {
+        let s = Scale {
+            from: 1000.0,
+            per: 10.0,
+            left: 0.0,
+            right: 100.0,
+        };
+        let mut shown = Shown::new(1000..2000, 0.0..100.0);
+        let grid = |x0: f64, per: f64, count: usize| Grid { x0, per, count };
+        let points = grid(1000.0, 10.0, 100);
+        assert_eq!(bin_columns(&shown, &s, 1.0), points);
+        // The lanes' columns, 5 ticks off the window's start and drawn over part of it.
+        let lanes = |per: f64| Some(grid(1005.0, per, 20));
+        shown.grid = lanes(10.0);
+        assert_eq!(bin_columns(&shown, &s, 1.0), grid(995.0, 10.0, 101));
+        // At two pixels a point, columns half a point wide.
+        shown.grid = lanes(5.0);
+        assert_eq!(bin_columns(&shown, &s, 2.0), grid(1000.0, 5.0, 200));
+        // Half and twice a pixel, a scale's rounding, still the lanes'.
+        assert_eq!(bin_columns(&shown, &s, 1.0), grid(1000.0, 5.0, 200));
+        shown.grid = lanes(20.0);
+        assert_eq!(bin_columns(&shown, &s, 1.0), grid(985.0, 20.0, 51));
+        // An answer for a scale further off: points.
+        for per in [4.9, 20.5, 80.0] {
+            shown.grid = lanes(per);
+            assert_eq!(bin_columns(&shown, &s, 1.0), points, "{per}");
+        }
+    }
 
     /// `count` summed bucket by bucket at the level it picks.
     fn flat(d: &Density, from: i64, to: i64, per: f64) -> (u64, u64) {

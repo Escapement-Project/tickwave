@@ -24,6 +24,15 @@ fn the_host_reads_the_window_and_value_range_drawn_and_fixes_y_where_it_is() {
     let own = drawn(&h);
     assert_eq!((read.window.clone(), read.y), (own.window.clone(), own.y));
     assert_eq!(read.window, 2 * SECOND..4 * SECOND);
+    // The columns the lanes were drawn in: the window's width over the plot's pixels, from a
+    // window's width before it.
+    let grid = read.grid.expect("an answer drawn");
+    let columns = (own.layout.plot.width() * h.ctx.pixels_per_point()).round() as f64;
+    assert!(
+        (grid.per * columns - (2 * SECOND) as f64).abs() < 1.0,
+        "{grid:?}"
+    );
+    assert!((grid.x0 - 0.0).abs() < 1.0, "{grid:?}");
     assert_eq!(h.state().state.y, Y::Fit);
     // Fit off in place: the range drawn, fixed, draws the same.
     h.state_mut().state.y = Y::Fixed {

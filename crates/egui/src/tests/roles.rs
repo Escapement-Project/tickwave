@@ -566,6 +566,52 @@ fn a_dash_whose_period_is_under_a_device_pixel_draws_solid() {
     assert!(near(along[0], span), "{along:?} against {span:?}");
 }
 
+/// Decoded paint from a provisional window draws pale and dashed, as the track marks the window's
+/// items; the sidecar's paint over it keeps its look.
+#[test]
+fn provisional_decoded_paint_draws_pale_and_dashed_under_the_sidecars_paint() {
+    let body = format!("{ROLES}{}", paint("n", 3.0, 5.0, "DIO3", "neither"));
+    let mut h = shown(&body, |_| {});
+    let role = |name: &str| escapement_tickwave_view::format::annotations::Role {
+        name: name.into(),
+        label: name.into(),
+        colour: None,
+        weight: 0.0,
+        dash: None,
+    };
+    h.state_mut().decoded = (
+        vec![crate::Driven {
+            role: 1,
+            span: SECOND..3 * SECOND,
+        }],
+        vec!["DIO3".into()],
+        vec![role("target"), role("probe")],
+    );
+    h.state_mut().provisional = true;
+    for _ in 0..4 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let lane = drawn(&h).layout.lanes[3];
+    assert!(shows(&h, GREEN, lane).is_empty(), "not at full strength");
+    let pale = GREEN.gamma_multiply(palette().pale);
+    let seen: Vec<Rect> = seen_if(&h, |c| c == pale, lane)
+        .into_iter()
+        .map(|(_, r)| r)
+        .collect();
+    let dashes = runs(&seen, 0.0);
+    let span = (x_of(&h, SECOND), x_of(&h, 3 * SECOND));
+    assert!(dashes.len() > 10, "dashed: {dashes:?}");
+    assert!(
+        near((dashes[0].0, dashes[dashes.len() - 1].1), span),
+        "{dashes:?} against {span:?}"
+    );
+    assert!(
+        !shows(&h, BLUE, lane).is_empty(),
+        "the sidecar's own, at full strength"
+    );
+}
+
 #[test]
 fn decoded_paint_draws_its_channel_by_the_role_it_names_under_the_sidecars_paint() {
     let body = format!("{ROLES}{}", paint("n", 3.0, 5.0, "DIO3", "neither"));
