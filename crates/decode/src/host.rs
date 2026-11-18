@@ -26,8 +26,9 @@ impl AnalysisId {
     }
 }
 
-/// One execution of an analysis. Replacing the run makes a new generation; nothing from an older
-/// generation is admitted afterwards.
+/// One execution of an analysis: its forward run, or its run in a window chain. Each run of a host
+/// takes a generation no other run has had; nothing from a run replaced or retired is admitted
+/// afterwards.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RunId {
     pub analysis: AnalysisId,
@@ -427,20 +428,6 @@ pub trait Decoder: Send {
     }
 }
 
-/// Stands in for a retired window chain's source, which never reads again.
-struct Drained;
-
-impl Source for Drained {
-    fn window(
-        &mut self,
-        from: Tick,
-        upto: Tick,
-        _: &AtomicBool,
-    ) -> Result<Option<Window>, SourceError> {
-        Ok(Some(Window::new(from, upto)))
-    }
-}
-
 /// Stands in for a decoder whose turn is under way. The host never runs it: `begin_turn` refuses
 /// a second turn while one is out.
 struct Taken;
@@ -646,17 +633,30 @@ pub enum CheckpointError {
     /// A window chain needs a second source over the wire analysis's input.
     #[error("{0}'s source cannot be forked for a window")]
     CannotFork(Name),
-    /// A window chain needs analyses of its own, past what a run id numbers.
-    #[error("no room for a window chain's analyses")]
-    NoRoom,
 }
 
-/// A window chain derived beside the forward pass: each analysis of the forward chain with the
-/// window's own, and the input consumed at the checkpoint it was restored from, if any.
+/// A window chain `derive` made: a run of its wire analysis and of each analysis stacked on it,
+/// sharing one run generation. `Host::window_run` reads its runs until `Host::retire`, and none
+/// after, so a handle kept past its chain reads nothing rather than another window's items.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct WindowId {
+    root: AnalysisId,
+    generation: u64,
+}
+
+impl WindowId {
+    /// The wire analysis it was derived from.
+    pub fn root(self) -> AnalysisId {
+        self.root
+    }
+}
+
+/// A window chain derived beside the forward pass, and the input consumed at the checkpoint it
+/// was restored from, if any.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Derived {
-    pub chain: Vec<(AnalysisId, AnalysisId)>,
+    pub window: WindowId,
     pub restored: Option<Tick>,
     /// Started locally at the window's start, ahead of the forward pass: its decoders begin
     /// without context, which their unknowns say. Derive it again once the pass is past it.
@@ -975,10 +975,72 @@ struct Slot {
     /// What it reads, and its decoder's settings, as checkpoints are keyed by them.
     binding: u64,
     settings: u64,
-    /// Part of a window chain, and retired from it once its window is done.
-    window: bool,
-    retired: bool,
+    /// The forward run, and its runs in live window chains.
     run: Run,
+    windows: Vec<Run>,
+}
+
+/// A live window chain's fork of its wire analysis's source.
+struct Chain {
+    id: WindowId,
+    source: Box<dyn Source>,
+}
+
+/// One run of an analysis, as `Host::window_run` finds it.
+pub struct RunView<'a> {
+    host: &'a Host,
+    slot: usize,
+    run: &'a Run,
+}
+
+impl<'a> RunView<'a> {
+    pub fn id(&self) -> RunId {
+        self.run.id
+    }
+
+    pub fn store(&self) -> &'a Store {
+        &self.run.store
+    }
+
+    /// How far its decoder has taken its wire input.
+    pub fn consumed(&self) -> Tick {
+        self.run.consumed
+    }
+
+    pub fn finished(&self) -> Option<Tick> {
+        self.run.finished
+    }
+
+    /// No item it emits from now on starts before this.
+    pub fn start_frontier(&self) -> Tick {
+        self.run.frontier
+    }
+
+    /// Nothing it has emitted before this will change.
+    pub fn settled(&self) -> Tick {
+        self.run.settled
+    }
+
+    /// The stretches it has declared its input lost over that are not yet settled or meet a kept
+    /// span, adjacent ones joined.
+    pub fn lost(&self) -> &'a [Span] {
+        &self.run.lost
+    }
+
+    /// The flag that stops its read or turn in progress.
+    pub fn interrupt(&self) -> Arc<AtomicBool> {
+        self.run.interrupt.clone()
+    }
+
+    /// Whether it has something to do and room downstream to put it.
+    pub fn runnable(&self) -> bool {
+        self.host.runnable_run(self.slot, self.run)
+    }
+
+    /// Whether the runs stacked on it have nothing waiting.
+    pub fn quiet_below(&self) -> bool {
+        self.host.quiet_below_run(self.slot, self.run.id)
+    }
 }
 
 pub struct Host {
@@ -994,11 +1056,12 @@ pub struct Host {
     pub cancelled_reads: u64,
     pub log_dropped: u64,
     keepers: Vec<Keeper>,
+    chains: Vec<Chain>,
     /// Window turns taken in a row while the forward chain waited.
     window_streak: usize,
-    /// The run generation the next window chain takes, so that no two chains, even in reused
-    /// slots, share a run id.
-    window_generation: u64,
+    /// The last run generation taken. Every run takes the next, so no two runs share an id, a
+    /// forward run and a window run of one analysis included.
+    generation: u64,
 }
 
 impl Default for Host {
@@ -1022,9 +1085,39 @@ impl Host {
             cancelled_reads: 0,
             log_dropped: 0,
             keepers: vec![],
+            chains: vec![],
             window_streak: 0,
-            window_generation: 1,
+            generation: 0,
         }
+    }
+
+    /// A run generation no run has had.
+    fn fresh(&mut self) -> u64 {
+        self.generation = self.generation.saturating_add(1);
+        self.generation
+    }
+
+    /// Run `id`, while it is current: its analysis's forward run or one of its window runs.
+    fn run_of(&self, id: RunId) -> Option<&Run> {
+        let an = self.analyses.get(id.analysis.index())?;
+        std::iter::once(&an.run)
+            .chain(&an.windows)
+            .find(|r| r.id == id)
+    }
+
+    fn run_of_mut(&mut self, id: RunId) -> Option<&mut Run> {
+        let an = self.analyses.get_mut(id.analysis.index())?;
+        std::iter::once(&mut an.run)
+            .chain(&mut an.windows)
+            .find(|r| r.id == id)
+    }
+
+    /// Analysis `d`'s run bound to upstream run `up`.
+    fn bound_to(&self, d: usize, up: RunId) -> Option<&Run> {
+        let an = &self.analyses[d];
+        std::iter::once(&an.run)
+            .chain(&an.windows)
+            .find(|r| r.bound == Some(up))
     }
 
     pub fn options(&self) -> HostOptions {
@@ -1138,7 +1231,7 @@ impl Host {
         };
         let id = RunId {
             analysis: AnalysisId(analysis),
-            generation: 1,
+            generation: self.fresh(),
         };
         let decoder = factory(local);
         let settings = decoder.settings();
@@ -1153,9 +1246,8 @@ impl Host {
             downstream: vec![],
             binding,
             settings,
-            window: false,
-            retired: false,
             run,
+            windows: vec![],
         });
         Ok(AnalysisId(analysis))
     }
@@ -1221,15 +1313,40 @@ impl Host {
     /// Whether the analyses stacked on `a` have nothing waiting.
     pub fn quiet_below(&self, a: AnalysisId) -> bool {
         let a = a.index();
-        let mut stack = self.analyses[a].downstream.clone();
-        while let Some(d) = stack.pop() {
-            let r = &self.analyses[d].run;
+        self.quiet_below_run(a, self.analyses[a].run.id)
+    }
+
+    /// Whether the runs stacked on run `id` of analysis `a` have nothing waiting.
+    fn quiet_below_run(&self, a: usize, id: RunId) -> bool {
+        let mut stack: Vec<(usize, RunId)> = (self.analyses[a].downstream.iter())
+            .map(|&d| (d, id))
+            .collect();
+        while let Some((d, up)) = stack.pop() {
+            let Some(r) = self.bound_to(d, up) else {
+                continue;
+            };
             if !r.inbox.is_empty() || r.more {
                 return false;
             }
-            stack.extend(self.analyses[d].downstream.iter().copied());
+            stack.extend(self.analyses[d].downstream.iter().map(|&e| (e, r.id)));
         }
         true
+    }
+
+    /// Analysis `a`'s run in window chain `w`: None once the chain is retired, or where `a` is not
+    /// in it.
+    pub fn window_run(&self, w: WindowId, a: AnalysisId) -> Option<RunView<'_>> {
+        let slot = a.index();
+        let an = self.analyses.get(slot)?;
+        let run = an
+            .windows
+            .iter()
+            .find(|r| r.id.generation == w.generation)?;
+        Some(RunView {
+            host: self,
+            slot,
+            run,
+        })
     }
 
     /// The host's record, oldest first, where `HostOptions::log` keeps one.
@@ -1296,27 +1413,37 @@ impl Host {
                 current: b.run,
             });
         };
-        if b.run != an.run.id {
+        let current = an.run.id;
+        let Slot {
+            def,
+            resolved,
+            input,
+            run: forward,
+            windows,
+            ..
+        } = an;
+        let Some(run) = std::iter::once(forward)
+            .chain(windows.iter_mut())
+            .find(|r| r.id == b.run)
+        else {
             return Err(Refusal::StaleRun {
                 got: b.run,
-                current: an.run.id,
+                current,
             });
-        }
-        if b.seq != an.run.next_batch {
+        };
+        if b.seq != run.next_batch {
             return Err(Refusal::BatchOrder {
-                expected: an.run.next_batch,
+                expected: run.next_batch,
                 got: b.seq,
             });
         }
         for (k, op) in b.ops.iter().enumerate() {
-            an.def
-                .schema
-                .check(&an.resolved, op)
+            def.schema
+                .check(resolved, op)
                 .map_err(|why| Refusal::Schema { op: k, why })?;
         }
-        let wire = matches!(an.input, Input::Wire(_));
-        let at_most = an.def.schema.open_at_most;
-        let run = &mut an.run;
+        let wire = matches!(input, Input::Wire(_));
+        let at_most = def.schema.open_at_most;
         if let Some(got) = b.frontier {
             if got < run.frontier {
                 return Err(Refusal::FrontierBack {
@@ -1429,7 +1556,7 @@ impl Host {
                 ops: summary,
             });
         }
-        self.fan_out(a, b.seq, b.ops, &b.lost)?;
+        self.fan_out(a, b.run, b.seq, b.ops, &b.lost)?;
         if after != before {
             let from = b.run;
             for d in self.analyses[a].downstream.clone() {
@@ -1446,14 +1573,15 @@ impl Host {
         Ok(())
     }
 
+    /// Hands run `from` of analysis `a`'s admitted batch to the runs stacked on it.
     fn fan_out(
         &mut self,
         a: usize,
+        from: RunId,
         batch: u64,
         ops: Vec<Op>,
         lost: &[(usize, Span)],
     ) -> Result<(), Refusal> {
-        let from = self.analyses[a].run.id;
         let subs: Vec<(usize, Resolution)> = self.analyses[a]
             .downstream
             .iter()
@@ -1476,6 +1604,10 @@ impl Host {
             (ops, None)
         };
         let ops: &[Op] = shared.as_deref().unwrap_or(&owned);
+        // Admitted a moment ago, so the run is current.
+        let mut asm = (self.run_of_mut(from))
+            .map(|r| std::mem::take(&mut r.assembling))
+            .unwrap_or_default();
         let mut out = vec![];
         let mut losses = lost.iter().peekable();
         let mut lose = |at: usize, out: &mut Vec<(usize, Delivery)>| {
@@ -1508,7 +1640,6 @@ impl Host {
             if !assemble.contains(&id.kind) {
                 continue;
             }
-            let asm = &mut self.analyses[a].run.assembling;
             // The store admitted every op, so an item being assembled is open.
             match op {
                 Op::Open { id, parent, start } => {
@@ -1580,22 +1711,29 @@ impl Host {
             }
         }
         lose(ops.len(), &mut out);
+        if let Some(r) = self.run_of_mut(from) {
+            r.assembling = asm;
+        }
         for (d, delivery) in out {
             self.deliver(d, delivery)?;
         }
         Ok(())
     }
 
-    /// Queues a delivery for analysis `to`, if its run is bound to the delivery's upstream run.
+    /// Queues a delivery for analysis `to`'s run bound to the delivery's upstream run.
     fn deliver(&mut self, to: usize, d: Delivery) -> Result<(), Refusal> {
-        let r = &mut self.analyses[to].run;
-        if Some(d.from()) != r.bound {
+        let from = d.from();
+        let an = &mut self.analyses[to];
+        let Some(r) = std::iter::once(&mut an.run)
+            .chain(&mut an.windows)
+            .find(|r| r.bound == Some(from))
+        else {
             let why = Refusal::StaleDelivery {
-                from: d.from(),
-                bound: r.bound,
+                from,
+                bound: an.run.bound,
             };
             return Err(self.refuse(why));
-        }
+        };
         let to_run = r.id;
         let what = match &d {
             Delivery::Piece { piece, .. } => (piece.op().letter(), Some(*piece.op().id())),
@@ -1604,7 +1742,6 @@ impl Host {
             Delivery::Lost { .. } => ('G', None),
             Delivery::End { .. } => ('E', None),
         };
-        let from = d.from();
         r.inbox.push_back(d);
         r.fresh = true;
         let depth = r.inbox.len();
@@ -1628,9 +1765,19 @@ impl Host {
         let Some((a, id, req)) = self.io.pop_front() else {
             return Ok(None);
         };
-        let interrupt = self.analyses[a].run.interrupt.clone();
-        let Input::Wire(source) = &mut self.analyses[a].input else {
+        // A window run reads its chain's fork; the forward run, current or replaced, the source.
+        let chain = (self.chains.iter()).position(|c| c.id.generation == id.run.generation);
+        let interrupt = match chain {
+            Some(_) => self.run_of(id.run).map(|r| r.interrupt.clone()),
+            None => Some(self.analyses[a].run.interrupt.clone()),
+        };
+        let source = match (chain, &mut self.analyses[a].input) {
+            (Some(k), _) => &mut self.chains[k].source,
+            (None, Input::Wire(source)) => source,
             // Only wire analyses request.
+            (None, Input::Upstream { .. }) => return Ok(None),
+        };
+        let Some(interrupt) = interrupt else {
             return Ok(None);
         };
         let Request::Window { from, upto } = req;
@@ -1652,11 +1799,9 @@ impl Host {
 
     /// Admits a reply if it answers the current run's outstanding request; it is consumed once.
     pub fn reply(&mut self, reply: Reply) -> Result<(), Refusal> {
-        let a = reply.id.run.analysis.index();
-        let outstanding = self.analyses.get(a).and_then(|an| an.run.outstanding);
-        match outstanding {
-            Some((id, _)) if id == reply.id => {
-                let r = &mut self.analyses[a].run;
+        let outstanding = self.run_of(reply.id.run).and_then(|r| r.outstanding);
+        match (outstanding, self.run_of_mut(reply.id.run)) {
+            (Some((id, _)), Some(r)) if id == reply.id => {
                 r.outstanding = None;
                 let mut window = reply.window;
                 // A decoder closes what it holds at the end, and nothing it holds starts before
@@ -1666,34 +1811,40 @@ impl Host {
                 r.fresh = true;
                 Ok(())
             }
-            other => {
+            _ => {
                 let why = Refusal::StaleReply {
                     got: reply.id,
-                    outstanding: other.map(|o| o.0),
+                    outstanding: outstanding.map(|o| o.0),
                 };
                 Err(self.refuse(why))
             }
         }
     }
 
-    /// Runs one turn of analysis `a`'s decoder and admits what it produced.
+    /// Runs one turn of analysis `a`'s forward decoder and admits what it produced.
     pub fn turn(&mut self, a: AnalysisId) -> Result<Pause, Refusal> {
-        self.turn_at(a.index())
+        self.turn_run(self.analyses[a.index()].run.id)
     }
 
-    fn turn_at(&mut self, a: usize) -> Result<Pause, Refusal> {
-        let mut t = self.begin_turn_at(a)?;
+    fn turn_run(&mut self, id: RunId) -> Result<Pause, Refusal> {
+        let mut t = self.begin_turn_run(id)?;
         t.run();
         self.end_turn(t)
     }
 
-    /// Takes analysis `a`'s decoder out for a turn, with its ready reply and queued deliveries.
+    /// Takes analysis `a`'s forward decoder out for a turn, with its ready reply and queued
+    /// deliveries.
     pub fn begin_turn(&mut self, a: AnalysisId) -> Result<Turn, Refusal> {
-        self.begin_turn_at(a.index())
+        self.begin_turn_run(self.analyses[a.index()].run.id)
     }
 
-    fn begin_turn_at(&mut self, a: usize) -> Result<Turn, Refusal> {
-        let r = &mut self.analyses[a].run;
+    fn begin_turn_run(&mut self, id: RunId) -> Result<Turn, Refusal> {
+        let a = id.analysis.index();
+        let budget = self.options.turn_deliveries;
+        let Some(r) = self.run_of_mut(id) else {
+            let current = self.analyses[a].run.id;
+            return Err(self.refuse(Refusal::StaleRun { got: id, current }));
+        };
         if r.out {
             let why = Refusal::TurnUnderWay(r.id);
             return Err(self.refuse(why));
@@ -1707,7 +1858,7 @@ impl Host {
             decoder: std::mem::replace(&mut r.decoder, Box::new(Taken)),
             reply: r.ready.take(),
             inbox: std::mem::take(&mut r.inbox),
-            budget: self.options.turn_deliveries,
+            budget,
             interrupt: r.interrupt.clone(),
             done: None,
         })
@@ -1718,14 +1869,13 @@ impl Host {
     pub fn end_turn(&mut self, mut t: Turn) -> Result<Pause, Refusal> {
         let a = t.a;
         let current = self.analyses[a].run.id;
-        if t.run != current {
+        let Some(r) = self.run_of_mut(t.run) else {
             let why = Refusal::StaleRun {
                 got: t.run,
                 current,
             };
             return Err(self.refuse(why));
-        }
-        let r = &mut self.analyses[a].run;
+        };
         r.decoder = t.decoder;
         r.out = false;
         // Deliveries the turn did not take come before any that arrived meanwhile.
@@ -1782,7 +1932,10 @@ impl Host {
             })?;
         }
         if let Some(req) = request {
-            let r = &mut self.analyses[a].run;
+            // Found above, and admitting its batch removes no run.
+            let Some(r) = self.run_of_mut(id) else {
+                return Ok(pause);
+            };
             if let Some((outstanding, _)) = r.outstanding {
                 return Err(self.refuse(Refusal::RequestOutstanding { outstanding }));
             }
@@ -1800,11 +1953,14 @@ impl Host {
             });
         }
         if let Some(end) = end {
-            let open = self.analyses[a].run.store.open_count();
+            let Some(r) = self.run_of_mut(id) else {
+                return Ok(pause);
+            };
+            let open = r.store.open_count();
             if open > 0 {
                 return Err(self.refuse(Refusal::LeftOpen { run: id, open }));
             }
-            self.analyses[a].run.finished = Some(end);
+            r.finished = Some(end);
             for d in self.analyses[a].downstream.clone() {
                 self.deliver(d, Delivery::End { from: id, end })?;
             }
@@ -1828,13 +1984,18 @@ impl Host {
                 Err(e) => return Err(e),
             }
         }
-        // The last runnable analysis of each kind: stacked ones before what feeds them.
-        let last = |window: bool| {
-            (0..self.analyses.len())
-                .rev()
-                .find(|&a| self.analyses[a].window == window && self.runnable_at(a))
-        };
-        let next = match (last(true), last(false)) {
+        // The newest window chain's runs before older ones', and each chain's last runnable
+        // analysis: stacked ones before what feeds them.
+        let window = (0..self.analyses.len())
+            .flat_map(|a| (self.analyses[a].windows.iter()).map(move |r| (a, r)))
+            .filter(|&(a, r)| self.runnable_run(a, r))
+            .max_by_key(|&(a, r)| (r.id.generation, a))
+            .map(|(_, r)| r.id);
+        let forward = (0..self.analyses.len())
+            .rev()
+            .find(|&a| self.runnable_run(a, &self.analyses[a].run))
+            .map(|a| self.analyses[a].run.id);
+        let next = match (window, forward) {
             (Some(w), Some(_)) if self.window_streak < self.options.window_turns => {
                 self.window_streak += 1;
                 Some(w)
@@ -1846,25 +2007,26 @@ impl Host {
             }
             (None, None) => None,
         };
-        if let Some(a) = next {
-            self.turn_at(a)?;
+        if let Some(id) = next {
+            self.turn_run(id)?;
             self.take_due();
             return Ok(true);
         }
         Ok(read)
     }
 
-    /// Whether analysis `a` has something to do and room downstream to put it.
+    /// Whether analysis `a`'s forward run has something to do and room downstream to put it.
     pub fn runnable(&self, a: AnalysisId) -> bool {
-        self.runnable_at(a.index())
+        let a = a.index();
+        self.runnable_run(a, &self.analyses[a].run)
     }
 
-    fn runnable_at(&self, a: usize) -> bool {
-        let r = &self.analyses[a].run;
-        let blocked = (self.analyses[a].downstream.iter())
-            .any(|&d| self.analyses[d].run.inbox.len() > self.options.inbox_at_most);
-        let live = !self.analyses[a].retired;
-        live && r.finished.is_none() && !r.out && (!r.started || r.fresh || r.more) && !blocked
+    fn runnable_run(&self, a: usize, r: &Run) -> bool {
+        let blocked = (self.analyses[a].downstream.iter()).any(|&d| {
+            self.bound_to(d, r.id)
+                .is_some_and(|b| b.inbox.len() > self.options.inbox_at_most)
+        });
+        r.finished.is_none() && !r.out && (!r.started || r.fresh || r.more) && !blocked
     }
 
     /// Steps until `stop` holds or nothing can run.
@@ -1875,13 +2037,6 @@ impl Host {
             }
         }
         Ok(())
-    }
-
-    fn next_generation(old: RunId) -> RunId {
-        RunId {
-            analysis: old.analysis,
-            generation: old.generation.saturating_add(1),
-        }
     }
 
     /// Replaces analysis `a`'s run with a new generation starting at `local` (None: the
@@ -1901,9 +2056,13 @@ impl Host {
                 Input::Upstream { index, .. } => Some(self.analyses[*index].run.id),
                 Input::Wire(_) => None,
             };
+            let generation = self.fresh();
             let an = &mut self.analyses[x];
             let old = an.run.id;
-            let id = Self::next_generation(old);
+            let id = RunId {
+                analysis: old.analysis,
+                generation,
+            };
             let decoder = (an.factory)(local);
             an.run = Run::new(id, local, decoder, Store::with_keep(an.keep.clone()), bound);
             retired.push(old);
@@ -2103,11 +2262,11 @@ impl Host {
     }
 
     /// Re-derives `window` of wire analysis `a` and everything stacked on it beside their forward
-    /// runs, which carry on as they were: a chain of analyses of its own, restored from the
-    /// latest kept checkpoint at or before the window's start or from the beginning, reading a
-    /// fork of the source and keeping the window. A window the forward pass has not reached
-    /// starts locally at its start instead, provisional. It runs before the forward chain, being added
-    /// after it, until `retire`.
+    /// runs, which carry on as they were: a window chain, a run of each analysis of its own,
+    /// restored from the latest kept checkpoint at or before the window's start or from the
+    /// beginning, reading a fork of the source and keeping the window. A window the forward pass
+    /// has not reached starts locally at its start instead, provisional. Its runs take turns
+    /// before the forward chain's, the newest chain's first, until `retire`.
     pub fn derive(&mut self, a: AnalysisId, window: Span) -> Result<Derived, CheckpointError> {
         let root = a.index();
         let name = self.analyses[root].name.clone();
@@ -2116,16 +2275,7 @@ impl Host {
         };
         let source = source.fork().ok_or(CheckpointError::CannotFork(name))?;
         let order = self.below(root);
-        // Retired chains at the end give their slots back.
-        while self.analyses.last().is_some_and(|an| an.retired) {
-            self.analyses.pop();
-        }
-        let base = self.analyses.len();
-        let generation = self.window_generation;
-        self.window_generation = generation.checked_add(1).ok_or(CheckpointError::NoRoom)?;
-        if u16::try_from(base + order.len()).is_err() {
-            return Err(CheckpointError::NoRoom);
-        }
+        let generation = self.fresh();
         // Ahead of the forward pass, no checkpoint holds the context: start there without it.
         let r = &self.analyses[root].run;
         let provisional = r.finished.is_none() && window.start > r.consumed;
@@ -2152,9 +2302,8 @@ impl Host {
             decoders.push(decoder);
         }
         let restored = kept.map(|cut| cut.consumed);
-        let place = |x: usize| base + order.iter().position(|&o| o == x).unwrap_or(0);
         let id = |x: usize| RunId {
-            analysis: AnalysisId(place(x) as u16),
+            analysis: AnalysisId(x as u16),
             generation,
         };
         let renamed: HashMap<RunId, RunId> = match kept {
@@ -2163,22 +2312,12 @@ impl Host {
                 .collect(),
             None => HashMap::default(),
         };
-        let mut slots = Vec::with_capacity(order.len());
-        let mut source = Some(source);
+        let mut runs = Vec::with_capacity(order.len());
         for (k, (&x, decoder)) in order.iter().zip(decoders).enumerate() {
             let an = &self.analyses[x];
-            let (input, bound) = match &an.input {
-                Input::Upstream { index, sub } => (
-                    Input::Upstream {
-                        index: place(*index),
-                        sub: sub.clone(),
-                    },
-                    Some(id(*index)),
-                ),
-                Input::Wire(_) => (
-                    Input::Wire(source.take().ok_or(CheckpointError::NoRoom)?),
-                    None,
-                ),
+            let bound = match &an.input {
+                Input::Upstream { index, .. } => Some(id(*index)),
+                Input::Wire(_) => None,
             };
             let run = match kept {
                 Some(cut) => {
@@ -2192,54 +2331,36 @@ impl Host {
                     bound,
                 ),
             };
-            slots.push(Slot {
-                name: format!("{}@{}", an.name, base).into(),
-                def: an.def.clone(),
-                resolved: an.resolved.clone(),
-                input,
-                factory: an.factory.clone(),
-                keep: vec![window],
-                downstream: an.downstream.iter().map(|&d| place(d)).collect(),
-                binding: an.binding,
-                settings: an.settings,
-                window: true,
-                retired: false,
-                run,
-            });
+            runs.push((x, run));
         }
-        self.analyses.extend(slots);
-        let chain = (order.iter())
-            .map(|&x| (AnalysisId(x as u16), AnalysisId(place(x) as u16)))
-            .collect();
+        for (x, run) in runs {
+            self.analyses[x].windows.push(run);
+        }
+        let window = WindowId {
+            root: a,
+            generation,
+        };
+        self.chains.push(Chain { id: window, source });
         Ok(Derived {
-            chain,
+            window,
             restored,
             provisional,
         })
     }
 
-    /// Retires the window chain whose wire analysis is `a`: its runs never run again, and their
-    /// decoders, stores, queues, reads and forked source are dropped; the next `derive` takes
-    /// back retired slots at the end of the host's analyses. A forward analysis is left as it is.
-    pub fn retire(&mut self, a: AnalysisId) {
-        let root = a.index();
-        if !self.analyses.get(root).is_some_and(|an| an.window) {
+    /// Retires window chain `w`: its runs never run again, and their decoders, stores, queues,
+    /// reads and forked source are dropped. `window_run` finds none of them afterwards. A chain
+    /// retired already is left as it is.
+    pub fn retire(&mut self, w: WindowId) {
+        let Some(k) = self.chains.iter().position(|c| c.id == w) else {
             return;
+        };
+        self.chains.swap_remove(k);
+        for x in self.below(w.root.index()) {
+            (self.analyses[x].windows).retain(|r| r.id.generation != w.generation);
         }
-        let chain = self.below(root);
-        for &x in &chain {
-            let an = &mut self.analyses[x];
-            an.retired = true;
-            an.run.decoder = Box::new(Taken);
-            if let Input::Wire(source) = &mut an.input {
-                *source = Box::new(Drained);
-            }
-            an.run.store = Store::default();
-            an.run.inbox.clear();
-            an.run.ready = None;
-            an.run.outstanding = None;
-        }
-        self.io.retain(|(x, _, _)| !chain.contains(x));
+        self.io
+            .retain(|(_, id, _)| id.run.generation != w.generation);
     }
 
     /// Restores a checkpoint as new generations of its runs, each bound to its restored upstream.
@@ -2275,9 +2396,13 @@ impl Host {
                 Input::Upstream { index, .. } => Some(self.analyses[*index].run.id),
                 Input::Wire(_) => None,
             };
+            let generation = self.fresh();
             let an = &mut self.analyses[x];
             let old = an.run.id;
-            let id = Self::next_generation(old);
+            let id = RunId {
+                analysis: old.analysis,
+                generation,
+            };
             renamed.insert(snap.taken, id);
             an.run = Run::restored(snap, id, decoder, bound, an.keep.clone(), &renamed);
             retired.push(old);

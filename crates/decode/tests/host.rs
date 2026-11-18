@@ -7,8 +7,9 @@ use escapement_tickwave_decode::{
     AnalysisId, Batch, BindError, CONTRACT, Cause, CheckpointError, Contract, Decoder, Definition,
     Element, ElementType, Exchange, FieldDecl, FieldId, FieldType, Host, HostOptions, Id,
     InputSpec, Keeping, KindDecl, KindId, LinkDecl, LinkId, LinkTo, LogEntry, Mismatch, Mode, Name,
-    Need, Observation, Op, Pause, Reason, Ref, Refusal, Refused, Reply, Role, Schema, SchemaError,
-    Seek, SeqDecl, SeqId, Span, Status, Subscription, Tick, Value, field, name,
+    Need, Observation, Op, Pause, Reason, Ref, Refusal, Refused, Reply, Role, RunView, Schema,
+    SchemaError, Seek, SeqDecl, SeqId, Span, Status, Subscription, Tick, Value, WindowId, field,
+    name,
 };
 use std::sync::{Arc, atomic::Ordering::Relaxed};
 
@@ -37,6 +38,11 @@ fn options(f: impl FnOnce(&mut HostOptions)) -> HostOptions {
     let mut o = HostOptions::default();
     f(&mut o);
     o
+}
+
+/// Analysis `a`'s run in window chain `w`, which is live.
+fn win(h: &Host, w: WindowId, a: AnalysisId) -> RunView<'_> {
+    h.window_run(w, a).unwrap()
 }
 
 #[test]
@@ -1267,16 +1273,15 @@ fn a_window_chain_beside_the_forward_pass_re_derives_its_span_and_leaves_the_pas
         end: 800,
     };
     let w = h.derive(p, window).unwrap();
-    assert_eq!(w.chain.len(), 2);
-    let [(fp, wp), (fq, wq)] = [w.chain[0], w.chain[1]];
-    assert_eq!((fp, fq), (p, q));
+    assert_eq!(w.window.root(), p);
     assert!(
         w.restored
             .is_some_and(|t| t <= window.start && window.start - t < 50 + 15)
     );
-    assert_ne!(h.run_id(wp), h.run_id(p), "a run of its own");
-    assert!(h.runnable(wp), "the window chain runs first");
-    h.run_until(|h| h.consumed(wp) >= window.end && h.quiet_below(wp))
+    let id = w.window;
+    assert_ne!(win(&h, id, p).id(), h.run_id(p), "a run of its own");
+    assert!(win(&h, id, p).runnable(), "the window chain runs first");
+    h.run_until(|h| win(h, id, p).consumed() >= window.end && win(h, id, p).quiet_below())
         .unwrap();
     assert!(
         h.finished(p).is_none(),
@@ -1295,12 +1300,12 @@ fn a_window_chain_beside_the_forward_pass_re_derives_its_span_and_leaves_the_pas
     let want = span(&alone.2);
     assert!(!want.is_empty());
     assert_eq!(
-        span(&h.store(wq).items),
+        span(&win(&h, id, q).store().items),
         want,
         "the window's items are the forward pass's"
     );
-    h.retire(wp);
-    assert!(!h.runnable(wp) && !h.runnable(wq));
+    h.retire(id);
+    assert!(h.window_run(id, p).is_none() && h.window_run(id, q).is_none());
     run_all(&mut h);
     assert_eq!(
         (
@@ -1345,12 +1350,13 @@ fn a_window_keeps_an_item_open_across_its_checkpoint_when_the_forward_pass_kept_
                     .map(|(id, i)| (*id, i.end, i.fields.len()))
                     .collect()
             };
-        let w = h.derive(p, window).unwrap();
-        let (wp, wq) = (w.chain[0].1, w.chain[1].1);
-        h.run_until(|h| h.settled(wq) >= window.end).unwrap();
-        for (a, x) in [(ap, wp), (aq, wq)] {
+        let w = h.derive(p, window).unwrap().window;
+        h.run_until(|h| h.window_run(w, q).unwrap().settled() >= window.end)
+            .unwrap();
+        for (a, x) in [(ap, p), (aq, q)] {
             let want = span(&all.store(a).items);
-            assert_eq!(span(&h.store(x).items), want, "the window at {start}");
+            let got = span(&h.window_run(w, x).unwrap().store().items);
+            assert_eq!(got, want, "the window at {start}");
         }
         if start == 711 {
             let pulses = span(&all.store(ap).items);
@@ -1359,12 +1365,63 @@ fn a_window_keeps_an_item_open_across_its_checkpoint_when_the_forward_pass_kept_
                 "a pulse open at {start}"
             );
         }
-        h.retire(wp);
+        h.retire(w);
     }
 }
 
 #[test]
-fn retired_window_chains_give_their_slots_back() {
+fn two_live_window_chains_each_read_their_own_window() {
+    let (mut all, [ap, aq]) =
+        pulses_host(line(80, 3, 20, vec![]), 15, None, HostOptions::default());
+    run_all(&mut all);
+    let (mut h, [p, q]) = pulses_host(line(80, 3, 20, vec![]), 15, None, HostOptions::default());
+    h.keep_checkpoints(p, Keeping::new(50, usize::MAX)).unwrap();
+    run_all(&mut h);
+    let windows = [(300, 360), (900, 960)].map(|(start, end)| Span { start, end });
+    let span = |items: &std::collections::BTreeMap<Id, escapement_tickwave_decode::Item>,
+                w: Span|
+     -> Vec<_> {
+        (items.iter())
+            .filter(|(_, i)| i.start < w.end && i.end.is_none_or(|e| e > w.start))
+            .map(|(id, i)| (*id, i.end, i.fields.len()))
+            .collect()
+    };
+    let [a, b] = windows.map(|w| h.derive(p, w).unwrap().window);
+    h.run_until(|h| {
+        win(h, a, q).settled() >= windows[0].end && win(h, b, q).settled() >= windows[1].end
+    })
+    .unwrap();
+    for (w, window) in [(a, windows[0]), (b, windows[1])] {
+        for (f, x) in [(ap, p), (aq, q)] {
+            let want = span(&all.store(f).items, window);
+            assert!(!want.is_empty());
+            assert_eq!(span(&win(&h, w, x).store().items, window), want);
+        }
+    }
+    h.retire(a);
+    assert!(
+        h.window_run(a, q).is_none(),
+        "the retired chain reads nothing"
+    );
+    assert_eq!(
+        span(&win(&h, b, q).store().items, windows[1]),
+        span(&all.store(aq).items, windows[1]),
+        "the other chain is untouched"
+    );
+    // A third chain while the second is live: neither handle reads the other's runs.
+    let c = h.derive(p, windows[0]).unwrap().window;
+    h.run_until(|h| win(h, c, q).settled() >= windows[0].end)
+        .unwrap();
+    assert!(h.window_run(a, q).is_none());
+    assert_ne!(win(&h, b, q).id(), win(&h, c, q).id());
+    assert_eq!(
+        span(&win(&h, c, q).store().items, windows[0]),
+        span(&all.store(aq).items, windows[0])
+    );
+}
+
+#[test]
+fn retired_window_chains_leave_nothing_behind() {
     let (mut h, [p, q]) = pulses_host(line(80, 3, 20, vec![]), 15, None, HostOptions::default());
     h.keep_checkpoints(p, Keeping::new(50, usize::MAX)).unwrap();
     run_all(&mut h);
@@ -1377,8 +1434,9 @@ fn retired_window_chains_give_their_slots_back() {
             },
         )
         .unwrap();
-    let mut runs = vec![h.run_id(first.chain[0].1)];
-    h.retire(first.chain[0].1);
+    let first = first.window;
+    let mut runs = vec![h.window_run(first, p).unwrap().id()];
+    h.retire(first);
     for k in 0..300 {
         let start = 100 + (k * 7) % 1200;
         let w = h
@@ -1389,12 +1447,16 @@ fn retired_window_chains_give_their_slots_back() {
                     end: start + 50,
                 },
             )
+            .unwrap()
+            .window;
+        assert!(
+            h.window_run(first, q).is_none(),
+            "a retired chain's handle reads nothing, window {k}"
+        );
+        runs.push(h.window_run(w, p).unwrap().id());
+        h.run_until(|h| h.window_run(w, q).unwrap().settled() >= start + 50)
             .unwrap();
-        assert_eq!(w.chain, first.chain, "the same slots, window {k}");
-        runs.push(h.run_id(w.chain[0].1));
-        h.run_until(|h| h.settled(w.chain[1].1) >= start + 50)
-            .unwrap();
-        h.retire(w.chain[0].1);
+        h.retire(w);
     }
     let distinct: std::collections::HashSet<_> = runs.iter().copied().collect();
     assert_eq!(distinct.len(), 301, "no two chains share a run id");
@@ -1424,14 +1486,14 @@ fn the_forward_pass_takes_a_turn_after_a_run_of_window_turns() {
             start: 300,
             end: 700,
         };
-        let w = h.derive(p, window).unwrap();
-        let (wp, wq) = (w.chain[0].1, w.chain[1].1);
-        h.run_until(|h| h.settled(wq) >= window.end).unwrap();
+        let w = h.derive(p, window).unwrap().window;
+        h.run_until(|h| h.window_run(w, q).unwrap().settled() >= window.end)
+            .unwrap();
         let moved = h.consumed(p) - before;
-        let items: Vec<_> = (h.store(wq).items.iter())
+        let items: Vec<_> = (h.window_run(w, q).unwrap().store().items.iter())
             .map(|(id, i)| (*id, i.end, i.fields.len()))
             .collect();
-        h.retire(wp);
+        h.retire(w);
         run_all(&mut h);
         (moved, items, (h.store(p).counts, h.store(q).counts))
     };
@@ -1473,26 +1535,31 @@ fn a_window_ahead_of_the_forward_pass_is_provisional_until_the_pass_reaches_it()
         };
     let ahead = h.derive(p, window).unwrap();
     assert!(ahead.provisional && ahead.restored.is_none());
-    let (wp, wq) = (ahead.chain[0].1, ahead.chain[1].1);
-    assert_eq!(h.consumed(wp), window.start, "it starts at the window");
-    h.run_until(|h| h.settled(wq) >= window.end).unwrap();
+    let w = ahead.window;
+    assert_eq!(
+        win(&h, w, p).consumed(),
+        window.start,
+        "it starts at the window"
+    );
+    h.run_until(|h| win(h, w, q).settled() >= window.end)
+        .unwrap();
     assert!(
         h.consumed(p) < window.start,
         "the forward pass has not reached it"
     );
-    assert!(!h.store(wp).items.is_empty());
-    h.retire(wp);
+    assert!(!win(&h, w, p).store().items.is_empty());
+    h.retire(w);
     h.run_until(|h| h.consumed(p) >= window.end).unwrap();
     let again = h.derive(p, window).unwrap();
     assert!(!again.provisional && again.restored.is_some());
-    let (_, wq) = (again.chain[0].1, again.chain[1].1);
-    h.run_until(|h| h.settled(wq) >= window.end).unwrap();
+    let w = again.window;
+    h.run_until(|h| win(h, w, q).settled() >= window.end)
+        .unwrap();
     assert_eq!(
-        span(&h.store(wq).items),
+        span(&win(&h, w, q).store().items),
         span(&all.store(aq).items),
         "exact once the pass is past"
     );
-    let _ = q;
 }
 
 #[test]

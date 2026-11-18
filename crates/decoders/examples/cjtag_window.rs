@@ -16,12 +16,18 @@
 mod check;
 
 use escapement_tickwave_decode::{
-    Host, HostOptions, InputSpec, Keeping, Span, Tick, name, wire::WireSource,
+    AnalysisId, Host, HostOptions, InputSpec, Keeping, RunView, Span, Tick, WindowId, name,
+    wire::WireSource,
 };
 use escapement_tickwave_decoders::cjtag;
 use escapement_tickwave_view::{Cache, Recording};
 use std::sync::Arc;
 use std::time::Instant;
+
+/// Analysis `a`'s run in window chain `w`, which is live.
+fn win(h: &Host, w: WindowId, a: AnalysisId) -> RunView<'_> {
+    h.window_run(w, a).expect("the chain is live")
+}
 
 fn arg(n: usize, default: f64) -> f64 {
     std::env::args()
@@ -78,13 +84,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let asked = Instant::now();
         let d = h.derive(c, w)?;
-        let (wc, wj) = (d.chain[0].1, d.chain[1].1);
-        h.run_until(|h| h.consumed(wc) >= w.end && h.quiet_below(wc))?;
+        let id = d.window;
+        h.run_until(|h| win(h, id, c).consumed() >= w.end && win(h, id, c).quiet_below())?;
         let drawn = asked.elapsed().as_secs_f64() * 1e3;
-        h.run_until(|h| h.settled(wj) >= w.end)?;
+        h.run_until(|h| win(h, id, j).settled() >= w.end)?;
         let settled = asked.elapsed().as_secs_f64() * 1e3;
         let unknown = |a| {
-            let items = &h.store(a).items;
+            let items = &win(&h, id, a).store().items;
             let n = (items.values())
                 .filter(|i| {
                     i.status
@@ -96,8 +102,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .count();
             (items.len(), n)
         };
-        let (cn, cu) = unknown(wc);
-        let (jn, ju) = unknown(wj);
+        let (cn, cu) = unknown(c);
+        let (jn, ju) = unknown(j);
         println!(
             "window at 25 s, the forward pass at {:.3} s: provisional {}; drawn by {drawn:.1} ms, settled by {settled:.1} ms; cJTAG {cn} items, {cu} incomplete or with an unknown field; JTAG {jn} items, {ju}",
             h.consumed(c) as f64 / per_s,
@@ -122,10 +128,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let from = h.consumed(c);
             let asked = Instant::now();
             let d = h.derive(c, w)?;
-            let (wc, wj) = (d.chain[0].1, d.chain[1].1);
-            h.run_until(|h| h.consumed(wc) >= w.end && h.quiet_below(wc))?;
+            let id = d.window;
+            h.run_until(|h| win(h, id, c).consumed() >= w.end && win(h, id, c).quiet_below())?;
             let drawn = asked.elapsed().as_secs_f64() * 1e3;
-            h.run_until(|h| h.settled(wj) >= w.end)?;
+            h.run_until(|h| win(h, id, j).settled() >= w.end)?;
             let settled = asked.elapsed().as_secs_f64() * 1e3;
             println!(
                 "  window {:6.3} s: drawn by {drawn:.1} ms, settled by {settled:.1} ms; the forward pass moved {:.2} ms of input meanwhile",
@@ -133,7 +139,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 (h.consumed(c) - from) as f64 / per_s * 1e3,
             );
             times.push((drawn, settled));
-            h.retire(wc);
+            h.retire(id);
             next = h.consumed(c) + ticks(1.0);
         }
         h.run_until(|_| false)?;
@@ -174,12 +180,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let asked = Instant::now();
         let d = h.derive(c, w)?;
-        let (wc, wj) = (d.chain[0].1, d.chain[1].1);
-        h.run_until(|h| h.consumed(wc) >= w.end && h.quiet_below(wc))?;
+        let id = d.window;
+        h.run_until(|h| win(h, id, c).consumed() >= w.end && win(h, id, c).quiet_below())?;
         let drawn = asked.elapsed().as_secs_f64() * 1e3;
-        h.run_until(|h| h.settled(wj) >= w.end)?;
+        h.run_until(|h| win(h, id, j).settled() >= w.end)?;
         let settled = asked.elapsed().as_secs_f64() * 1e3;
-        let items = (h.store(wc).items.len(), h.store(wj).items.len());
+        let items = (
+            win(&h, id, c).store().items.len(),
+            win(&h, id, j).store().items.len(),
+        );
         println!(
             "  window {at_s:5.1} s: restored {:.2} ms of input before it; drawn by {drawn:.1} ms, settled by {settled:.1} ms; items cJTAG {}, JTAG {}; the forward pass at {:.3} s",
             d.restored
@@ -188,7 +197,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             items.1,
             h.consumed(c) as f64 / per_s,
         );
-        h.retire(wc);
+        h.retire(id);
         drawn_all.push(drawn);
     }
     drawn_all.sort_by(f64::total_cmp);

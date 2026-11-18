@@ -210,19 +210,22 @@ fn a_window_ahead_of_the_forward_pass_says_what_it_cannot_know() {
     };
     let d = h.derive(a[0], window).unwrap();
     assert!(d.provisional);
-    let (wa, wm) = (d.chain[1].1, d.chain[2].1);
-    h.run_until(|h| h.settled(wm) >= window.end || h.finished(wm).is_some())
-        .unwrap();
-    let unknown = |a: AnalysisId| {
-        (h.store(a).items.values())
+    let w = d.window;
+    let mem = |h: &Host| {
+        let r = h.window_run(w, a[2]).unwrap();
+        r.settled() >= window.end || r.finished().is_some()
+    };
+    h.run_until(mem).unwrap();
+    let unknown = |x: AnalysisId| {
+        (h.window_run(w, x).unwrap().store().items.values())
             .filter(|i| {
                 (i.fields.iter())
                     .any(|f| matches!(f.value, escapement_tickwave_decode::Value::Unknown { .. }))
             })
             .count()
     };
-    assert!(unknown(wa) > 0, "ADIv5 says SELECT is unknown");
-    assert!(unknown(wm) > 0, "MEM-AP says the AP is unknown");
+    assert!(unknown(a[1]) > 0, "ADIv5 says SELECT is unknown");
+    assert!(unknown(a[2]) > 0, "MEM-AP says the AP is unknown");
 }
 
 /// The fuzz targets' first finding: every stack, started locally past the end of its input, closed
