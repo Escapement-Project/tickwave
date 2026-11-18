@@ -363,21 +363,48 @@ impl Density {
     /// Items starting in `[from, to)` and how many are conditions, at the coarsest level whose
     /// buckets are no wider than `per`; with `per` 0, the finest.
     fn count(&self, from: i64, to: i64, per: f64) -> (u64, u64) {
-        let Some(l) = (self.levels.iter())
+        let Some(at) = (0..self.levels.len())
             .rev()
-            .find(|l| ((1u128 << l.shift) as f64) <= per)
-            .or(self.levels.first())
+            .find(|&k| ((1u128 << self.levels[k].shift) as f64) <= per)
+            .or((!self.levels.is_empty()).then_some(0))
         else {
             return (0, 0);
         };
-        let a = ((from >> l.shift) - l.first).max(0) as usize;
-        let b = (((to - 1) >> l.shift) - l.first + 1).max(0) as usize;
-        let b = b.min(l.counts.len());
-        if a >= b {
-            return (0, 0);
+        let shift = self.levels[at].shift;
+        // Buckets `a..b` of that level, by their index from zero. A level's bucket is the sum of
+        // two of the level below's, so each level takes the odd one at either end, and the rest
+        // the level above holds.
+        let (mut a, mut b) = (from >> shift, ((to - 1) >> shift) + 1);
+        let (mut c, mut m) = (0u64, 0u64);
+        for (k, l) in self.levels[at..].iter().enumerate() {
+            (a, b) = (a.max(l.first), b.min(l.first + l.counts.len() as i64));
+            if a >= b {
+                break;
+            }
+            let i = |j: i64| (j - l.first) as usize;
+            if at + k + 1 == self.levels.len() {
+                c += l.counts[i(a)..i(b)]
+                    .iter()
+                    .map(|&x| u64::from(x))
+                    .sum::<u64>();
+                m += l.marked[i(a)..i(b)]
+                    .iter()
+                    .map(|&x| u64::from(x))
+                    .sum::<u64>();
+                break;
+            }
+            if a & 1 == 1 {
+                c += u64::from(l.counts[i(a)]);
+                m += u64::from(l.marked[i(a)]);
+                a += 1;
+            }
+            if b & 1 == 1 {
+                b -= 1;
+                c += u64::from(l.counts[i(b)]);
+                m += u64::from(l.marked[i(b)]);
+            }
+            (a, b) = (a >> 1, b >> 1);
         }
-        let c = l.counts[a..b].iter().map(|&x| u64::from(x)).sum();
-        let m = l.marked[a..b].iter().map(|&x| u64::from(x)).sum();
         (c, m)
     }
 }
@@ -779,6 +806,85 @@ impl Track<'_> {
                     shapes.push(Shape::galley(at, galley, p.ink_2));
                     break;
                 }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `count` summed bucket by bucket at the level it picks.
+    fn flat(d: &Density, from: i64, to: i64, per: f64) -> (u64, u64) {
+        let Some(l) = (d.levels.iter())
+            .rev()
+            .find(|l| ((1u128 << l.shift) as f64) <= per)
+            .or(d.levels.first())
+        else {
+            return (0, 0);
+        };
+        let a = ((from >> l.shift) - l.first).max(0) as usize;
+        let b = ((((to - 1) >> l.shift) - l.first + 1).max(0) as usize).min(l.counts.len());
+        if a >= b {
+            return (0, 0);
+        }
+        let c = l.counts[a..b].iter().map(|&x| u64::from(x)).sum();
+        let m = l.marked[a..b].iter().map(|&x| u64::from(x)).sum();
+        (c, m)
+    }
+
+    #[test]
+    fn a_count_through_the_levels_is_the_sum_of_its_buckets() {
+        let mut rng = 0x5eed_u64;
+        let mut next = |n: u64| {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng % n
+        };
+        let map = Mapping::new(
+            0,
+            0,
+            escapement_tickwave_view::format::model::Ratio::integer(1).unwrap(),
+        );
+        for origin in [0i64, -3_000_000, -1_500_017] {
+            let all = Span {
+                start: Tick::MIN,
+                end: Tick::MAX,
+            };
+            let mut store = escapement_tickwave_decode::Store::with_keep(vec![all]);
+            for _ in 0..5_000 {
+                let start = origin + next(4_000_000) as i64;
+                let id = Id::new(KindId(next(2) as u16), start);
+                if store.items.contains_key(&id) {
+                    continue;
+                }
+                let status = match next(5) {
+                    0 => Status::Incomplete(escapement_tickwave_decode::Cause(0)),
+                    _ => Status::Complete,
+                };
+                let end = start + 1 + next(1000) as i64;
+                let ops = [
+                    escapement_tickwave_decode::Op::Open {
+                        id,
+                        parent: None,
+                        start,
+                    },
+                    escapement_tickwave_decode::Op::Close { id, end, status },
+                ];
+                store.apply_batch(&ops, 8).unwrap();
+            }
+            let d = Density::of(store.items.values(), &map, condition);
+            for _ in 0..400 {
+                let from = origin - 100_000 + next(4_200_000) as i64;
+                let to = from + 1 + next(4_000_000) as i64;
+                let per = [0.0, 1.0, 37.0, 4096.0, 1e9][next(5) as usize];
+                assert_eq!(
+                    d.count(from, to, per),
+                    flat(&d, from, to, per),
+                    "{from}..{to} at {per}"
+                );
             }
         }
     }
