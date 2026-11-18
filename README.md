@@ -24,7 +24,7 @@ computer.
 | `web` | the custom elements, the chart, the converter's worker, and the build of the site |
 | `site` | the site's pages: an overview, a viewer that also converts, and the docs |
 | `bench` | the decode benchmark: the WASM decoder against JavaScript ones, on real recordings |
-| `fuzz` | a fuzz target for each reader and for the writer, in a workspace of its own |
+| `fuzz` | a fuzz target for each reader, for the writer and for each reference decoder, in a workspace of its own |
 
 ## Documents
 

@@ -21,6 +21,8 @@ fuzz = ["dep:libfuzzer-sys"]
 [dependencies]
 arbitrary = { version = "1.5.0", features = ["derive"] }
 blake3 = "1.8.7"
+escapement-tickwave-decode = { version = "0.1.0", path = "../crates/decode" }
+escapement-tickwave-decoders = { version = "0.1.0", path = "../crates/decoders" }
 escapement-tickwave-format = { version = "0.1.0", path = "../crates/format", features = ["edit"] }
 escapement-tickwave-import = { version = "0.1.0", path = "../crates/import" }
 escapement-tickwave-view = { version = "0.1.0", path = "../crates/view" }
@@ -166,6 +168,30 @@ required-features = ["fuzz"]
 [[bin]]
 name = "writer"
 path = "fuzz_targets/writer.rs"
+test = false
+doc = false
+bench = false
+required-features = ["fuzz"]
+
+[[bin]]
+name = "decode_swd"
+path = "fuzz_targets/decode_swd.rs"
+test = false
+doc = false
+bench = false
+required-features = ["fuzz"]
+
+[[bin]]
+name = "decode_jtag"
+path = "fuzz_targets/decode_jtag.rs"
+test = false
+doc = false
+bench = false
+required-features = ["fuzz"]
+
+[[bin]]
+name = "decode_cjtag"
+path = "fuzz_targets/decode_cjtag.rs"
 test = false
 doc = false
 bench = false

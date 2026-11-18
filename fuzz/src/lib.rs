@@ -35,6 +35,8 @@
 //! kind's limit, the limit, or one past it, as the body's first byte picks: a block's and an
 //! annotation part's 4 MiB, a bundle's 64 MiB.
 
+pub mod wires;
+
 use std::collections::HashMap;
 use std::io::Read;
 
