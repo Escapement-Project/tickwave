@@ -666,4 +666,8 @@ impl Decoder for Swd {
             + crate::held::<Tick>(self.held.0.capacity())
             + crate::held::<bool>(self.held.1.capacity())
     }
+
+    fn settings(&self) -> u64 {
+        self.recogniser.turnaround as u64
+    }
 }

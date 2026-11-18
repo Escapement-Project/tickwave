@@ -39,3 +39,10 @@ pub use schema::{
     MAX_ROLES, MAX_SEQUENCES, Mismatch, Name, Schema, SchemaError, SeqDecl, field, name, seq,
 };
 pub use store::{Counts, Field, Item, Refused, Store};
+
+/// Words folded into one value that differs where they do, for keys compared within one build.
+pub fn fold(words: impl IntoIterator<Item = u64>) -> u64 {
+    words.into_iter().fold(0xcbf2_9ce4_8422_2325, |h, w| {
+        (h ^ w).wrapping_mul(0x100_0000_01b3).rotate_left(29)
+    })
+}

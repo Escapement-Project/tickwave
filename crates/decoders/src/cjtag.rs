@@ -937,6 +937,10 @@ impl Decoder for Cjtag {
         });
         oscan + crate::held::<Change>(self.changes.capacity()) + crate::window_bytes(&self.held)
     }
+
+    fn settings(&self) -> u64 {
+        u64::from(self.qualified)
+    }
 }
 
 // ---- JTAG on cJTAG -----------------------------------------------------------------------------

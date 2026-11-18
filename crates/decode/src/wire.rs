@@ -87,6 +87,19 @@ fn read<T>(r: Result<T, Error>) -> Result<Option<T>, SourceError> {
 }
 
 impl Source for WireSource {
+    /// The recording's length and timebase stand in for its identity, which the format does not
+    /// give yet.
+    fn binding(&self) -> u64 {
+        let rec = &*self.recording;
+        let tb = rec.timebase();
+        let words = [rec.length() as u64, tb.num(), tb.den()];
+        crate::fold(
+            words
+                .into_iter()
+                .chain(self.channels.iter().map(|&c| c as u64)),
+        )
+    }
+
     fn window(
         &mut self,
         from: Tick,

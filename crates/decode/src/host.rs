@@ -121,6 +121,13 @@ pub trait Source: Send {
         upto: Tick,
         cancel: &AtomicBool,
     ) -> Result<Option<Window>, SourceError>;
+
+    /// What the source reads, its recording and channels, as a value that differs where they
+    /// differ, which checkpoints are keyed by. A source that can be bound to other input must
+    /// give one, or a checkpoint can restore onto other input.
+    fn binding(&self) -> u64 {
+        0
+    }
 }
 
 /// Why a source could not read a window: the recording's error, kept whole, which `source()`
@@ -188,6 +195,16 @@ struct Resolution {
     kinds: Vec<KindId>,
     mode: Mode,
     sequences: Vec<(KindId, SeqId)>,
+}
+
+impl Resolution {
+    /// The subscription to analysis `up`, as a value that differs where it does.
+    fn digest(&self, up: usize) -> u64 {
+        let words = (self.kinds.iter().map(|k| u64::from(k.0)))
+            .chain([u64::MAX, self.mode as u64, up as u64])
+            .chain((self.sequences.iter()).map(|(k, s)| u64::from(k.0) << 16 | u64::from(s.0)));
+        crate::fold(words)
+    }
 }
 
 /// An item as a completed subscription receives it.
@@ -391,6 +408,13 @@ pub trait Decoder: Send {
     /// About how many bytes of state the decoder holds outside itself, which a checkpoint keeper
     /// counts against its budget.
     fn heap_bytes(&self) -> usize {
+        0
+    }
+
+    /// The settings it was made with, as a value that differs wherever they would change its
+    /// output, which checkpoints are keyed by. A decoder with settings must give one, or a
+    /// checkpoint can restore it under other settings.
+    fn settings(&self) -> u64 {
         0
     }
 }
@@ -627,10 +651,9 @@ pub struct Checkpoint {
     pub runs: Vec<RunId>,
     /// How far the wire analysis had taken its input.
     pub consumed: Tick,
-    /// Each analysis in it, upstream first: its name, decoder and decoder version. A restore
-    /// requires the host to hold the same there. Its source is the host's for that analysis,
-    /// which the host never swaps, so the consumed position is the rest of the key.
-    chain: Vec<(Name, Name, u32)>,
+    /// Each analysis in it, upstream first: its name, decoder, decoder version, what it reads and
+    /// its decoder's settings. A restore requires the host to hold the same there.
+    chain: Vec<Link>,
     snaps: Vec<Snapshot>,
 }
 
@@ -652,6 +675,16 @@ impl Checkpoint {
             })
             .sum()
     }
+}
+
+/// One analysis of a checkpoint's chain, as its key holds it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Link {
+    name: Name,
+    decoder: Name,
+    version: u32,
+    binding: u64,
+    settings: u64,
 }
 
 /// How a host keeps checkpoints of a wire analysis and everything stacked on it as its input
@@ -878,6 +911,9 @@ struct Slot {
     factory: Factory,
     keep: Vec<Span>,
     downstream: Vec<usize>,
+    /// What it reads, and its decoder's settings, as checkpoints are keyed by them.
+    binding: u64,
+    settings: u64,
     run: Run,
 }
 
@@ -978,13 +1014,14 @@ impl Host {
         }
         let index = self.analyses.len();
         let analysis = u16::try_from(index).map_err(|_| BindError::TooManyAnalyses)?;
-        let (input, local, bound, resolved) = match input {
+        let (input, local, bound, resolved, binding) = match input {
             InputSpec::Wire { source, local } => {
                 let r = def
                     .schema
                     .resolve(None, self.options.open_at_most)
                     .map_err(BindError::Schema)?;
-                (Input::Wire(source), local, None, r)
+                let binding = source.binding();
+                (Input::Wire(source), local, None, r, binding)
             }
             InputSpec::Upstream(sub) => {
                 let up = sub.upstream.index();
@@ -1023,21 +1060,18 @@ impl Host {
                     sequences,
                 };
                 let (local, bound) = (ua.run.local, Some(ua.run.id));
+                let binding = sub.digest(up);
                 self.analyses[up].downstream.push(index);
-                (Input::Upstream { index: up, sub }, local, bound, r)
+                (Input::Upstream { index: up, sub }, local, bound, r, binding)
             }
         };
         let id = RunId {
             analysis: AnalysisId(analysis),
             generation: 1,
         };
-        let run = Run::new(
-            id,
-            local,
-            factory(local),
-            Store::with_keep(keep.clone()),
-            bound,
-        );
+        let decoder = factory(local);
+        let settings = decoder.settings();
+        let run = Run::new(id, local, decoder, Store::with_keep(keep.clone()), bound);
         self.analyses.push(Slot {
             name,
             def,
@@ -1046,6 +1080,8 @@ impl Host {
             factory,
             keep,
             downstream: vec![],
+            binding,
+            settings,
             run,
         });
         Ok(AnalysisId(analysis))
@@ -1841,12 +1877,19 @@ impl Host {
         })
     }
 
-    /// Analysis `a` and every analysis stacked on it, upstream first: name, decoder, version.
-    fn chain(&self, a: usize) -> Vec<(Name, Name, u32)> {
+    /// Analysis `a` and every analysis stacked on it, upstream first, as a checkpoint's key
+    /// holds them.
+    fn chain(&self, a: usize) -> Vec<Link> {
         (self.below(a).into_iter())
             .map(|x| {
                 let an = &self.analyses[x];
-                (an.name.clone(), an.def.name.clone(), an.def.version)
+                Link {
+                    name: an.name.clone(),
+                    decoder: an.def.name.clone(),
+                    version: an.def.version,
+                    binding: an.binding,
+                    settings: an.settings,
+                }
             })
             .collect()
     }

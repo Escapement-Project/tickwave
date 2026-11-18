@@ -833,4 +833,8 @@ impl Decoder for Jtag {
     fn heap_bytes(&self) -> usize {
         self.tap.heap_bytes() + crate::window_bytes(&self.held)
     }
+
+    fn settings(&self) -> u64 {
+        u64::from(self.has_tdo) | u64::from(self.tdo_at_fall) << 1
+    }
 }

@@ -4,7 +4,8 @@ mod common;
 
 use common::*;
 use escapement_tickwave_decode::{
-    AnalysisId, Counts, Element, Host, InputSpec, Item, KindId, Span, Status, Tick, Value, name,
+    AnalysisId, CheckpointError, Counts, Element, Host, InputSpec, Item, KindId, Span, Status,
+    Tick, Value, name,
 };
 use escapement_tickwave_decoders::jtag;
 use std::sync::atomic::Ordering::Relaxed;
@@ -381,6 +382,37 @@ fn window_size_does_not_change_the_output() {
     let (s, _) = session(FULL);
     let want = decoded(s.wires(), 1 << 40);
     assert_eq!(decoded(s.wires(), 4999), want, "the full session");
+}
+
+#[test]
+fn a_checkpoint_restores_only_under_the_settings_it_was_taken_with() {
+    let (s, _) = session(SMALL);
+    let make = |w: Wires, at_fall: bool| {
+        let mut h = Host::default();
+        let j = h
+            .add(
+                name("jtag"),
+                jtag::definition(),
+                InputSpec::Wire {
+                    source: Box::new(w),
+                    local: None,
+                },
+                jtag::Jtag::factory_with(true, 64, at_fall),
+                all(),
+            )
+            .unwrap();
+        (h, j)
+    };
+    let (mut h, j) = make(s.wires(), false);
+    while h.consumed(j) < 500 {
+        h.step().unwrap();
+    }
+    let cut = h.checkpoint(j).unwrap();
+    assert!(make(s.wires(), false).0.restore(&cut).is_ok());
+    assert!(matches!(
+        make(s.wires(), true).0.restore(&cut),
+        Err(CheckpointError::Incompatible)
+    ));
 }
 
 /// The session with the edge that starts clock `k` on line `port` moved to the clock's rise, and
