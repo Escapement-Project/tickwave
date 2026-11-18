@@ -8,6 +8,7 @@ pub mod axis;
 mod bytes;
 mod cache;
 pub mod columns;
+pub mod cursor;
 mod js;
 mod markers;
 pub mod probe;
