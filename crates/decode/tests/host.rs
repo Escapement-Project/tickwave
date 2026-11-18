@@ -824,6 +824,70 @@ fn a_batch_past_the_bound_is_refused() {
 }
 
 #[test]
+fn a_batch_counts_its_losses_against_the_bound() {
+    let losses: Vec<Act> = (0..100).map(|t| Act::Lost(2 * t, 2 * t + 1)).collect();
+    let turns = vec![
+        vec![Act::Request(0, 1000)],
+        [vec![Act::TakeReply], losses].concat(),
+    ];
+    let mut h = Host::new(options(|o| o.batch_ops = 4));
+    let a = h
+        .add(
+            name("toy"),
+            toy(),
+            InputSpec::Wire {
+                source: Box::new(Nothing::default()),
+                local: None,
+            },
+            Box::new(move |_| Box::new(script(turns.clone()))),
+            all(),
+        )
+        .unwrap();
+    h.turn(a).unwrap();
+    let reply = h.take_io().unwrap().unwrap();
+    h.reply(reply).unwrap();
+    assert_eq!(
+        h.turn(a),
+        Err(Refusal::TooManyOps {
+            got: 100,
+            at_most: 4
+        }),
+        "each loss is a delivery to every analysis stacked on it"
+    );
+}
+
+#[test]
+fn a_run_whose_frontier_stays_holds_no_more_losses_than_the_bound() {
+    let mut turns = vec![vec![Act::Request(0, 1000)], vec![Act::TakeReply]];
+    turns.extend((0..10).map(|t| vec![Act::Lost(2 * t, 2 * t + 1)]));
+    let mut h = Host::new(options(|o| o.recent_at_most = 5));
+    let a = h
+        .add(
+            name("toy"),
+            toy(),
+            InputSpec::Wire {
+                source: Box::new(Nothing::default()),
+                local: None,
+            },
+            Box::new(move |_| Box::new(script(turns.clone()))),
+            vec![],
+        )
+        .unwrap();
+    h.turn(a).unwrap();
+    let reply = h.take_io().unwrap().unwrap();
+    h.reply(reply).unwrap();
+    let got: Vec<_> = (0..7).map(|_| h.turn(a)).collect();
+    assert!(got[..6].iter().all(Result::is_ok), "{got:?}");
+    assert_eq!(
+        got[6],
+        Err(Refusal::TooManyLost {
+            held: 6,
+            at_most: 5
+        })
+    );
+}
+
+#[test]
 fn pieces_of_a_batch_longer_than_a_chunk_arrive_whole_and_in_order() {
     let (mut h, a, sink, got) = toy_and_sink(HostOptions::default());
     let at: Vec<Tick> = (0..400).map(|k| 10 * k).collect();

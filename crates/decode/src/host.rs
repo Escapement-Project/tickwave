@@ -604,8 +604,11 @@ pub enum Refusal {
     /// More closed ids held than the host allows: a run whose start frontier does not move on.
     #[error("{held} closed ids held, past the host's {at_most}")]
     TooManyRecent { held: usize, at_most: usize },
-    /// More operations in one batch than the host allows.
-    #[error("{got} operations in a batch, past the host's {at_most}")]
+    /// More losses held unsettled than the host allows: a run whose frontiers do not move on.
+    #[error("{held} losses held unsettled, past the host's {at_most}")]
+    TooManyLost { held: usize, at_most: usize },
+    /// More operations and losses in one batch than the host allows.
+    #[error("{got} operations and losses in a batch, past the host's {at_most}")]
     TooManyOps { got: usize, at_most: usize },
     /// Lost input that is empty, out of the batch's op order, or not after the run's last.
     #[error("lost input {got:?}, out of order after {was}")]
@@ -911,7 +914,8 @@ pub struct HostOptions {
     pub inbox_at_most: usize,
     /// The host's record, off where None, else the most entries it keeps, the oldest dropped.
     pub log: Option<usize>,
-    /// The most closed ids a run holds to refuse a repeated open; past it, its batch is refused.
+    /// The most closed ids a run holds to refuse a repeated open, and the most losses it holds
+    /// unsettled; past either, its batch is refused.
     pub recent_at_most: usize,
     /// The largest open-item bound a schema may declare.
     pub open_at_most: usize,
@@ -921,7 +925,8 @@ pub struct HostOptions {
     /// The most ticks with observations one read gives a decoder, whatever window it asked for:
     /// the source ends the window early where they stop.
     pub window_ticks: usize,
-    /// The most operations one batch holds.
+    /// The most operations and losses one batch holds: each is a delivery to every analysis
+    /// stacked on it.
     pub batch_ops: usize,
 }
 
@@ -1461,9 +1466,10 @@ impl Host {
     fn admit(&mut self, b: Batch) -> Result<(), Refusal> {
         let a = b.run.analysis.index();
         let recent_at_most = self.options.recent_at_most;
-        if b.ops.len() > self.options.batch_ops {
+        let size = b.ops.len() + b.lost.len();
+        if size > self.options.batch_ops {
             return Err(Refusal::TooManyOps {
-                got: b.ops.len(),
+                got: size,
                 at_most: self.options.batch_ops,
             });
         }
@@ -1571,6 +1577,17 @@ impl Host {
         if held > recent_at_most {
             return Err(Refusal::TooManyRecent {
                 held,
+                at_most: recent_at_most,
+            });
+        }
+        // Losses are held until settled. Counted before the batch settles any, at most.
+        let unsettled = (run.lost.iter().rev())
+            .take_while(|l| l.end > run.settled)
+            .count()
+            + b.lost.len();
+        if unsettled > recent_at_most {
+            return Err(Refusal::TooManyLost {
+                held: unsettled,
                 at_most: recent_at_most,
             });
         }
