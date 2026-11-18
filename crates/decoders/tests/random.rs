@@ -6,7 +6,7 @@ mod common;
 
 use common::*;
 use escapement_tickwave_decode::{AnalysisId, Host, InputSpec, Span, Status, Tick, name};
-use escapement_tickwave_decoders::{adiv5, cjtag, jtag, swd};
+use escapement_tickwave_decoders::{adiv5, cjtag, jtag, jtagdp, swd};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 const CASES: u64 = 2000;
@@ -333,6 +333,9 @@ fn jtag_never_panics_and_never_breaks_a_rule() {
             jtag::TdoEdge::Fall,
             jtag::TdoEdge::IrCapture,
         ][r.usize(..3)];
+        // Short chains, which random IR scans fit now and then; with a 4-bit TAP nearest TDO,
+        // JTAG-DP and ADIv5 stacked on it.
+        let chain: &[u8] = [&[][..], &[1], &[2, 1], &[1, 1, 1], &[4], &[4, 1]][r.usize(..6)];
         let mut h = Host::default();
         let j = h
             .add(
@@ -350,11 +353,34 @@ fn jtag_never_panics_and_never_breaks_a_rule() {
                     local,
                 },
                 jtag::Jtag::factory(window),
-                &[jtag::tdo_edge(edge)],
+                &[jtag::tdo_edge(edge), jtag::chain(chain)],
                 all(),
             )
             .unwrap();
-        (h, vec![j])
+        if chain.first() != Some(&4) {
+            return (h, vec![j]);
+        }
+        let dp = h
+            .add(
+                name("jtag-dp"),
+                jtagdp::definition(),
+                InputSpec::Upstream(jtagdp::subscription(j)),
+                jtagdp::JtagDp::factory(),
+                &[],
+                all(),
+            )
+            .unwrap();
+        let adi = h
+            .add(
+                name("adiv5"),
+                adiv5::adi_definition(),
+                InputSpec::Upstream(adiv5::adi_subscription(dp)),
+                adiv5::Adi::factory(),
+                &[adiv5::reads(true)],
+                all(),
+            )
+            .unwrap();
+        (h, vec![j, dp, adi])
     });
     assert!(reached.items[0] > 0, "{reached:?}");
 }

@@ -232,10 +232,21 @@ pub fn definition() -> Arc<Definition> {
     )
 }
 
-/// JTAG as it stacks on cJTAG: JTAG's name, version and schema, reading no wire.
+/// JTAG as it stacks on cJTAG: JTAG's name, version and schema, reading no wire, and its chain
+/// setting (`jtag::chain`), since a cJTAG adapter's chain is cut as a four-wire one is.
 pub fn jtag_definition() -> Arc<Definition> {
-    Arc::new(Definition::new("jtag", 1, jtag::schema()))
+    Arc::new(
+        Definition::new("jtag", 1, jtag::schema()).with_settings(vec![SettingDecl::list(
+            "chain",
+            1..=jtag::IR_AT_MOST,
+            jtag::CHAIN_AT_MOST,
+            vec![],
+        )]),
+    )
 }
+
+/// JTAG on cJTAG's chain setting: each TAP's IR length, the TAP nearest TDO first.
+pub const JTAG_CHAIN: SettingId = SettingId(0);
 
 /// What JTAG reads of cJTAG: the Standard Protocol's TMS bits and the Scan Packets, as pieces. A
 /// packet's TMS or nTDI element says where its clock was sampled.
@@ -1044,7 +1055,15 @@ impl JtagOnCjtag {
     }
 
     pub fn factory() -> Factory {
-        Box::new(|_, local| Box::new(Self::new(local)))
+        Box::new(|b, local| {
+            let mut j = Self::new(local);
+            // Bound, each length is from 1 to `jtag::IR_AT_MOST`.
+            let chain = (b.list(JTAG_CHAIN).unwrap_or(&[]).iter())
+                .map(|&l| l as u8)
+                .collect();
+            j.tap = j.tap.chain(chain);
+            Box::new(j)
+        })
     }
 
     fn piece(&mut self, op: &Op, out: &mut Out) {

@@ -1,10 +1,11 @@
-//! ADIv5 register accesses stacked on SWD transfers, and MEM-AP memory accesses stacked on those:
-//! enough of each to show stacking by pieces and by completed items, context carried across
-//! transfers, and values unknown for a stated reason.
+//! ADIv5 register accesses stacked on SWD's or JTAG-DP's transfers, and MEM-AP memory accesses
+//! stacked on those: enough of each to show stacking by pieces and by completed items, context
+//! carried across transfers, and values unknown for a stated reason.
 //!
-//! ADIv5 reads SWD's transfers as pieces, typed fields only. A SELECT write sets the DP bank and
-//! the AP and its register bank; an AP read's data arrives in the next AP read or RDBUFF read,
-//! so an AP read stays open until then. MEM-AP reads ADIv5's completed AP accesses: TAR and CSW
+//! ADIv5 reads its transfers as pieces, typed fields only. A SELECT write sets the DP bank and
+//! the AP and its register bank. Over SWD an AP read's data arrives in the next AP read or RDBUFF
+//! read, so an AP read stays open until then; over JTAG-DP each read carries its own, which the
+//! setting `reads` says ("posted" or "own"). MEM-AP reads ADIv5's completed AP accesses: TAR and CSW
 //! writes, then DRW accesses at the address TAR holds, auto-incremented as CSW says.
 //!
 //! Every AP is taken for a MEM-AP: its registers at 0x00 to 0x1C take a MEM-AP's names, CSW to
@@ -14,7 +15,8 @@ use crate::swd;
 use escapement_tickwave_decode::{
     AnalysisId, Cause, Completed, Decoder, Definition, Delivery, Exchange, Factory, FieldId,
     FieldType, Id, KindDecl, KindId, Label, LinkDecl, LinkId, LinkTo, Mode, Need, Op, Out, Pause,
-    Reason, Ref, Schema, Span, Status, Subscription, Tick, Value, field, name,
+    Reason, Ref, Schema, Setting, SettingDecl, SettingId, Span, Status, Subscription, Tick, Value,
+    field, name,
 };
 use foldhash::HashMap;
 use std::sync::Arc;
@@ -166,8 +168,24 @@ pub fn adi_schema() -> Schema {
     .with_open_at_most(3)
 }
 
+/// Whether a read's data arrives in a later transfer, as SWD posts AP reads, or in its own, as
+/// JTAG-DP's transfers carry it: the names of the setting `reads`.
+pub const READS: SettingId = SettingId(0);
+pub const READS_NAMES: [&str; 2] = ["posted", "own"];
+
 pub fn adi_definition() -> Arc<Definition> {
-    Arc::new(Definition::new("adiv5", 1, adi_schema()))
+    Arc::new(
+        Definition::new("adiv5", 1, adi_schema()).with_settings(vec![SettingDecl::choice(
+            "reads",
+            READS_NAMES,
+            0,
+        )]),
+    )
+}
+
+/// ADIv5's reads setting, as a binding gives it: each read carrying its own data, or posted.
+pub fn reads(own: bool) -> (&'static str, Setting) {
+    ("reads", Setting::Name(name(READS_NAMES[usize::from(own)])))
 }
 
 /// What ADIv5 subscribes to of SWD.
@@ -269,6 +287,8 @@ pub struct Adi {
     started: bool,
     building: HashMap<Id, Partial>,
     up: Option<Tick>,
+    /// Each read carries its own data, as JTAG-DP's do.
+    own_reads: bool,
 }
 
 impl Adi {
@@ -282,11 +302,16 @@ impl Adi {
             started: false,
             building: HashMap::default(),
             up: None,
+            own_reads: false,
         }
     }
 
     pub fn factory() -> Factory {
-        Box::new(|_, local| Box::new(Self::new(local)))
+        Box::new(|b, local| {
+            let mut adi = Self::new(local);
+            adi.own_reads = b.choice(READS) == Some(1);
+            Box::new(adi)
+        })
     }
 
     /// A decode that starts without earlier context opens a context item where it starts.
@@ -411,7 +436,11 @@ impl Adi {
         fields(out, id);
         out.link(id, R_REQUEST, Ref::Upstream(c.id));
         self.context_link(id, R_CONTEXT, out);
-        self.pending = Some(Pending { id });
+        if self.own_reads {
+            self.complete(Pending { id }, c, out);
+        } else {
+            self.pending = Some(Pending { id });
+        }
     }
 
     fn finish(&mut self, end: Tick, out: &mut Out) {
@@ -471,7 +500,8 @@ impl Adi {
                     return;
                 };
                 let data = p.data.map(|(w, span)| {
-                    let v = if p.parity == Some(true) {
+                    // A transfer with no parity, as JTAG-DP's, has none to fail.
+                    let v = if p.parity != Some(false) {
                         word(w, 32)
                     } else {
                         Value::Unknown {

@@ -13,10 +13,10 @@
 //! search for the next request.
 
 use escapement_tickwave_decode::{
-    Cause, Decoder, Definition, Element, ElementType, Exchange, Factory, FieldId, FieldType, Id,
-    KindDecl, KindId, Label, LinkDecl, LinkId, LinkTo, Observation, Observed, Out, Pause, Ref,
-    Request, Role, Schema, SeqId, Setting, SettingDecl, SettingId, Span, Status, Tick, Value,
-    field, name, seq,
+    Cause, Decoder, Definition, Element, ElementType, Exchange, Factory, FieldDecl, FieldId,
+    FieldType, Id, KindDecl, KindId, Label, LinkDecl, LinkId, LinkTo, Observation, Observed, Out,
+    Pause, Ref, Request, Role, Schema, SeqId, Setting, SettingDecl, SettingId, Span, Status, Tick,
+    Value, field, name, seq,
 };
 use std::{collections::VecDeque, sync::Arc};
 
@@ -61,21 +61,46 @@ pub const ACKS: [&str; 5] = ["OK", "WAIT", "FAULT", "no response", "invalid"];
 /// the capture, closed incomplete so it shows rather than going missing.
 pub const DROPPED: Cause = Cause(0);
 
+/// A transfer's fields, in the order `PORT` to `PARITY` index them: a decoder whose transfers ADIv5
+/// reads as it reads SWD's declares these.
+pub fn transfer_fields() -> Vec<FieldDecl> {
+    vec![
+        field("port", FieldType::Name(vec![name("AP"), name("DP")])),
+        field("dir", FieldType::Name(vec![name("read"), name("write")])),
+        field("a", FieldType::Word { bits: 4 }),
+        field("request", FieldType::Word { bits: 8 }),
+        field("trn", FieldType::Phase),
+        field("ack", FieldType::Name(ACKS.map(name).to_vec())),
+        field("trn2", FieldType::Phase),
+        field("data", FieldType::Word { bits: 32 }),
+        field("parity", FieldType::Name(vec![name("ok"), name("bad")])).with_short("P"),
+    ]
+}
+
+/// A transfer's labels, fullest first.
+pub fn transfer_labels() -> Vec<Label> {
+    let head = || {
+        Label::default()
+            .field(DIR)
+            .text(" ")
+            .field(PORT)
+            .text(" ")
+            .field(A)
+            .text(" ")
+            .field(ACK)
+    };
+    vec![
+        head().text(" ").field(DATA),
+        head(),
+        Label::default().field(PORT),
+    ]
+}
+
 pub fn schema() -> Schema {
     let bit = || ElementType::Bit;
     Schema::new(vec![
         KindDecl::new("transfer")
-            .with_fields(vec![
-                field("port", FieldType::Name(vec![name("AP"), name("DP")])),
-                field("dir", FieldType::Name(vec![name("read"), name("write")])),
-                field("a", FieldType::Word { bits: 4 }),
-                field("request", FieldType::Word { bits: 8 }),
-                field("trn", FieldType::Phase),
-                field("ack", FieldType::Name(ACKS.map(name).to_vec())),
-                field("trn2", FieldType::Phase),
-                field("data", FieldType::Word { bits: 32 }),
-                field("parity", FieldType::Name(vec![name("ok"), name("bad")])).with_short("P"),
-            ])
+            .with_fields(transfer_fields())
             .with_sequences(vec![
                 seq("request", bit()),
                 seq("ack", bit()),
@@ -86,23 +111,7 @@ pub fn schema() -> Schema {
                 "retry of",
                 vec![LinkTo::Own(name("transfer"))],
             )])
-            .with_labels({
-                let head = || {
-                    Label::default()
-                        .field(DIR)
-                        .text(" ")
-                        .field(PORT)
-                        .text(" ")
-                        .field(A)
-                        .text(" ")
-                        .field(ACK)
-                };
-                vec![
-                    head().text(" ").field(DATA),
-                    head(),
-                    Label::default().field(PORT),
-                ]
-            }),
+            .with_labels(transfer_labels()),
     ])
     .with_roles(["probe", "target", "neither"])
     .with_causes(["the decoder no longer held the clock rises the transfer spans"])

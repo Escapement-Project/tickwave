@@ -31,6 +31,9 @@ pub struct Seen {
     /// it: on JTAG's four wires alone, since on cJTAG's two a command window carries no switch.
     pub zero_bit: Vec<Tick>,
     pub switch_watched: bool,
+    /// Where a chain is set: each TAP's parts by kind and place, and the scans not cut, by why.
+    pub parts: BTreeMap<(&'static str, u64), u64>,
+    pub unsplit: BTreeMap<u16, u64>,
     pub settled: bool,
     pub dr: u64,
     pub incomplete: u64,
@@ -164,10 +167,14 @@ pub fn stack(
     h.add(
         name("check"),
         Arc::new(Definition::new("check", 1, Schema::new(vec![]))),
-        InputSpec::Upstream(
-            Subscription::new(j, Mode::Completed)
-                .with_kinds(["state", "path", "ir-scan", "dr-scan"]),
-        ),
+        InputSpec::Upstream(Subscription::new(j, Mode::Completed).with_kinds([
+            "state",
+            "path",
+            "ir-scan",
+            "dr-scan",
+            "instruction",
+            "data",
+        ])),
         Box::new(move |_, _| Box::new(Checker(s.clone()))),
         &[],
         vec![],
@@ -286,7 +293,24 @@ impl Decoder for Checker {
                     if item.status != Status::Complete && item.id.kind != jtag::STATE {
                         s.incomplete += 1;
                     }
+                    if let Some(Value::Unknown { reason, .. }) =
+                        item.field(jtag::SPLIT).map(|f| &f.value)
+                    {
+                        *s.unsplit.entry(reason.0).or_default() += 1;
+                    }
                     match item.id.kind {
+                        jtag::INSTRUCTION | jtag::DATA => {
+                            let tap = match item.field(jtag::TAP_INDEX).map(|f| &f.value) {
+                                Some(Value::Word { value, .. }) => *value,
+                                _ => u64::MAX,
+                            };
+                            let kind = if item.id.kind == jtag::DATA {
+                                "DR"
+                            } else {
+                                "IR"
+                            };
+                            *s.parts.entry((kind, tap)).or_default() += 1;
+                        }
                         jtag::STATE => {
                             s.states += 1;
                             let v = item.field(jtag::TAP_STATE).map(|f| &f.value);
@@ -504,6 +528,32 @@ pub fn report(
         println!("IR scans' TCK period, passing: {}", periods(rec, c, ok));
         println!("IR scans' TCK period, failing: {}", periods(rec, c, failed));
     }
+    if !s.parts.is_empty() || !s.unsplit.is_empty() {
+        let parts: Vec<String> = (s.parts.iter())
+            .map(|((k, tap), n)| format!("TAP {tap} {k} x{n}"))
+            .collect();
+        let schema = &h.definition(j).schema;
+        let why: Vec<String> = (s.unsplit.iter())
+            .map(|(r, n)| {
+                format!(
+                    "{} x{n}",
+                    schema
+                        .reasons
+                        .get(usize::from(*r))
+                        .map_or("?", |p| p.as_ref())
+                )
+            })
+            .collect();
+        println!("chain parts: {}", parts.join(", "));
+        println!(
+            "not cut: {}",
+            if why.is_empty() {
+                "none".into()
+            } else {
+                why.join("; ")
+            }
+        );
+    }
     let mut lengths: Vec<_> = s.lengths.iter().collect();
     lengths.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
     let top: Vec<String> = (lengths.iter().take(8))
@@ -519,4 +569,186 @@ pub fn report(
         peak_rss_kb() / 1024
     );
     println!("largest batch: {} operations", h.stats().peak_batch);
+}
+
+/// Completed items counted by a key made of each, and the statuses they closed with.
+pub type Keyed = Arc<Mutex<BTreeMap<String, u64>>>;
+
+/// Counts each completed item of a subscription under the key `key` makes of it.
+pub struct Tally {
+    pub counts: Keyed,
+    pub key: fn(&escapement_tickwave_decode::Completed) -> String,
+}
+
+impl Decoder for Tally {
+    fn turn(&mut self, ex: &mut Exchange<'_>) -> Pause {
+        let mut c = self.counts.lock().unwrap();
+        while let Some(d) = ex.receive() {
+            match d {
+                Delivery::Item { item, .. } => {
+                    let status = match item.status {
+                        Status::Complete => "",
+                        _ => " (incomplete)",
+                    };
+                    *c.entry(format!("{}{status}", (self.key)(&item)))
+                        .or_default() += 1;
+                }
+                Delivery::Lost { span, .. } => ex.lost(span.start, span.end),
+                Delivery::Frontier { start, .. } => ex.frontier(start),
+                Delivery::End { end, .. } => {
+                    ex.finish(end);
+                    return Pause::Finished;
+                }
+                _ => {}
+            }
+        }
+        if ex.more() { Pause::Work } else { Pause::Input }
+    }
+}
+
+/// Stacks a tally of `kinds` of analysis `a`, keyed by `key`.
+pub fn tally(
+    h: &mut Host,
+    a: AnalysisId,
+    label: &'static str,
+    kinds: &[&'static str],
+    key: fn(&escapement_tickwave_decode::Completed) -> String,
+) -> Result<Keyed, Box<dyn std::error::Error>> {
+    let counts: Keyed = Arc::default();
+    let c = counts.clone();
+    h.add(
+        name(label),
+        Arc::new(Definition::new(label, 1, Schema::new(vec![]))),
+        InputSpec::Upstream(Subscription::new(a, Mode::Completed).with_kinds(kinds.to_vec())),
+        Box::new(move |_, _| {
+            Box::new(Tally {
+                counts: c.clone(),
+                key,
+            })
+        }),
+        &[],
+        vec![],
+    )?;
+    Ok(counts)
+}
+
+/// A tally's lines, most first, `most` of them.
+pub fn tally_lines(counts: &Keyed, most: usize) -> Vec<String> {
+    let c = counts.lock().unwrap();
+    let mut v: Vec<_> = c.iter().collect();
+    v.sort_by_key(|(k, n)| (std::cmp::Reverse(**n), (*k).clone()));
+    v.into_iter()
+        .take(most)
+        .map(|(k, n)| format!("{k} x{n}"))
+        .collect()
+}
+
+/// The chain (`--chain 4,6`) and the DP's TAP in it (`--dp 0`) the command line gives.
+pub fn chain_args() -> (Vec<u8>, Option<i64>) {
+    let args: Vec<String> = std::env::args().collect();
+    let after = |flag: &str| (args.iter().position(|a| a == flag)).and_then(|k| args.get(k + 1));
+    let chain = after("--chain")
+        .map(|c| c.split(',').filter_map(|l| l.parse().ok()).collect())
+        .unwrap_or_default();
+    (chain, after("--dp").and_then(|t| t.parse().ok()))
+}
+
+/// JTAG-DP on TAP `tap` of JTAG analysis `j`'s chain and ADIv5 on it, each tallied.
+pub fn stack_dp(
+    h: &mut Host,
+    j: AnalysisId,
+    tap: i64,
+) -> Result<Vec<(&'static str, Keyed)>, Box<dyn std::error::Error>> {
+    let mut tallies = vec![];
+    use escapement_tickwave_decode::{Completed, Setting, Value};
+    use escapement_tickwave_decoders::{adiv5, jtagdp, swd};
+    let dp = h.add(
+        name("jtag-dp"),
+        jtagdp::definition(),
+        InputSpec::Upstream(jtagdp::subscription(j)),
+        jtagdp::JtagDp::factory(),
+        &[("tap", Setting::Int(tap))],
+        vec![],
+    )?;
+    let adi = h.add(
+        name("adiv5"),
+        adiv5::adi_definition(),
+        InputSpec::Upstream(adiv5::adi_subscription(dp)),
+        adiv5::Adi::factory(),
+        &[adiv5::reads(true)],
+        vec![],
+    )?;
+    fn n(i: &Completed, f: escapement_tickwave_decode::FieldId) -> Option<u64> {
+        match i.field(f).map(|f| &f.value) {
+            Some(Value::Word { value, .. }) => Some(*value),
+            Some(Value::Name(n)) => Some(u64::from(*n)),
+            _ => None,
+        }
+    }
+    let transfer = |i: &Completed| -> String {
+        if i.id.kind == jtagdp::IDCODE {
+            return format!("IDCODE 0x{:08X}", n(i, jtagdp::IDCODE_VALUE).unwrap_or(0));
+        }
+        let pick = |v: Option<u64>, names: &[&str]| {
+            v.and_then(|v| names.get(v as usize).copied())
+                .unwrap_or("?")
+                .to_owned()
+        };
+        format!(
+            "{} {} 0x{:X} {}",
+            pick(n(i, swd::DIR), &["read", "write"]),
+            pick(n(i, swd::PORT), &["AP", "DP"]),
+            n(i, swd::A).unwrap_or(0),
+            pick(n(i, swd::ACK), &swd::ACKS)
+        )
+    };
+    let access = |i: &Completed| -> String {
+        match i.id.kind {
+            adiv5::DP_READ | adiv5::DP_WRITE => {
+                let reg = n(i, adiv5::DP_REG)
+                    .and_then(|r| adiv5::DP_NAMES.get(r as usize).copied())
+                    .unwrap_or("?");
+                // DPIDR's and CTRL/STAT's reads with their values: they name the DP and its
+                // power state, a check that each read has its own result.
+                let value = match (reg, n(i, adiv5::DP_VALUE), i.id.kind) {
+                    ("DPIDR" | "CTRL/STAT", Some(v), adiv5::DP_READ) => format!(" 0x{v:08X}"),
+                    _ => String::new(),
+                };
+                let dir = if i.id.kind == adiv5::DP_READ {
+                    "read"
+                } else {
+                    "write"
+                };
+                format!("DP {dir} {reg}{value}")
+            }
+            k => {
+                let reg = n(i, adiv5::AP_REG).unwrap_or(0xFFFF);
+                // IDR's value too: it names the AP's class.
+                let value = match (reg, n(i, adiv5::AP_VALUE)) {
+                    (0xFC, Some(v)) => format!(" 0x{v:08X}"),
+                    _ => String::new(),
+                };
+                format!(
+                    "AP {} {} 0x{reg:02X}{value}",
+                    n(i, adiv5::AP).map_or("?".into(), |a| a.to_string()),
+                    if k == adiv5::AP_READ { "read" } else { "write" },
+                )
+            }
+        }
+    };
+    tallies.push((
+        "JTAG-DP",
+        tally(h, dp, "dp-tally", &["transfer", "idcode"], transfer)?,
+    ));
+    tallies.push((
+        "ADIv5",
+        tally(
+            h,
+            adi,
+            "adi-tally",
+            &["dp-read", "dp-write", "ap-read", "ap-write"],
+            access,
+        )?,
+    ));
+    Ok(tallies)
 }

@@ -6,7 +6,10 @@
 //! from cJTAG to JTAG at a connect are counted apart, since no TAP captured them. `--rows` keeps
 //! each item's span, to check that the items fit the rows and lanes JTAG's schema declares.
 //!
-//! `cargo run --release -p escapement-tickwave-decoders --example jtag_check -- REC [--tdo-at-rise | --tdo-at-fall] [--rows]`
+//! `cargo run --release -p escapement-tickwave-decoders --example jtag_check -- REC [--tdo-at-rise | --tdo-at-fall] [--rows] [--chain 4,6]`
+//!
+//! `--chain` gives each TAP's IR length, nearest TDO first, and counts each TAP's parts of the
+//! scans and the scans not cut, by why.
 //!
 //! TDO is read where the IR captures read unless a flag fixes the edge.
 
@@ -24,6 +27,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nth(1)
         .ok_or("usage: jtag_check REC [--tdo-at-rise | --tdo-at-fall] [--rows]")?;
     let rows = std::env::args().any(|a| a == "--rows");
+    // `--chain 4,6`: each TAP's IR length, nearest TDO first; `--dp 0`: JTAG-DP on that TAP.
+    let (chain, dp_tap) = check::chain_args();
     let flag = |f: &str| std::env::args().any(|a| a == f);
     let edge = match (flag("--tdo-at-rise"), flag("--tdo-at-fall")) {
         (true, _) => jtag::TdoEdge::Rise,
@@ -48,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             local: None,
         },
         jtag::Jtag::factory(50_000),
-        &[jtag::tdo_edge(edge)],
+        &[jtag::tdo_edge(edge), jtag::chain(&chain)],
         vec![],
     )?;
     let seen = Arc::new(Mutex::new(Seen {
@@ -57,6 +62,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }));
     check::stack(&mut h, j, &seen)?;
     check::watch_switch(&mut h, j, &seen)?;
+    // `--dp TAP`: JTAG-DP on that TAP of the chain, ADIv5 on it, each tallied.
+    let tallies = match dp_tap {
+        Some(tap) => check::stack_dp(&mut h, j, tap)?,
+        None => vec![],
+    };
     let start = std::time::Instant::now();
     h.run_until(|_| false)?;
     let seconds = start.elapsed().as_secs_f64();
@@ -71,5 +81,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let tck = rec.channel("TCK");
     check::report(&h, j, &seen, &rec, tck, &label, seconds);
+    for (what, t) in &tallies {
+        println!("{what}: {}", check::tally_lines(t, 20).join(", "));
+    }
     Ok(())
 }

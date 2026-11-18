@@ -11,6 +11,16 @@
 //! TDO is an optional port: bound without it, a scan's TDO is unknown. Where TDO is read, at TCK's
 //! rise, at the fall after it, or at whichever of them the IR scans' captures read, is a setting,
 //! `tdo_edge`.
+//!
+//! A chain of several TAPs is cut into each TAP's part where the setting `chain` gives each TAP's
+//! IR length, the TAP nearest TDO first. An IR scan as long as the chain's IRs has an
+//! `instruction` child for each TAP, the bits shifted in being its new instruction. A DR scan has
+//! a `data` child for the one TAP whose instruction is not BYPASS (all ones) where every other's
+//! is, its DR being the scan less a bit for each TAP in BYPASS; the TAPs nearer TDO shift their
+//! bits out first. A scan that can't be cut says why in its `split` field: an IR scan of another
+//! length shifts some other chain, as a chain whose TAPs a router adds or removes does, and no
+//! TAP's instruction is then known until an IR scan of the chain's length; nor is it from the
+//! start, after lost input or after Test-Logic-Reset, which loads IDCODE or BYPASS.
 
 use escapement_tickwave_decode::{
     Cause, Decoder, Definition, Element, ElementType, Exchange, Factory, FieldId, FieldType, Id,
@@ -18,6 +28,7 @@ use escapement_tickwave_decode::{
     Schema, SeqId, Setting, SettingDecl, SettingId, Span, Status, Tick, Value, Window, field, name,
     seq,
 };
+use std::ops::Range;
 use std::sync::Arc;
 
 pub const TCK: u8 = 0;
@@ -45,12 +56,26 @@ pub const TDO_HEAD: FieldId = FieldId(3);
 pub const LENGTH: FieldId = FieldId(4);
 pub const TDI_BITS: SeqId = SeqId(0);
 pub const TDO_BITS: SeqId = SeqId(1);
+/// Why a scan isn't cut into its TAPs' parts, where the chain is set.
+pub const SPLIT: FieldId = FieldId(5);
+/// A TAP's part of a scan, its instruction or its data.
+pub const INSTRUCTION: KindId = KindId(4);
+pub const DATA: KindId = KindId(5);
+/// A part's fields: its TAP's place in the chain from TDO, its length and its bits.
+pub const TAP_INDEX: FieldId = FieldId(0);
+pub const PART_LENGTH: FieldId = FieldId(1);
+pub const PART_TDI: FieldId = FieldId(2);
+pub const PART_TDO: FieldId = FieldId(3);
 
 pub const NO_TDO: Reason = Reason(0);
 pub const TWO_WIRE: Reason = Reason(1);
 pub const MID_SESSION: Reason = Reason(2);
 pub const LOST_STATE: Reason = Reason(3);
 pub const NO_STATE_BEFORE: Reason = Reason(4);
+pub const SPLIT_LENGTH: Reason = Reason(5);
+pub const SPLIT_BYPASS: Reason = Reason(6);
+pub const SPLIT_UNKNOWN: Reason = Reason(7);
+pub const SPLIT_LONG: Reason = Reason(8);
 pub const NEEDS_TDO: Need = Need(0);
 
 pub const GAP_CUT: Cause = Cause(0);
@@ -110,6 +135,7 @@ pub fn schema() -> Schema {
                 field("tdi_head", FieldType::Bits { max: 128 }),
                 field("tdo_head", FieldType::Bits { max: 128 }),
                 field("length", FieldType::Word { bits: 32 }),
+                field("split", FieldType::Bool),
             ])
             .with_sequences(vec![
                 seq("tdi", ElementType::Bit),
@@ -117,6 +143,29 @@ pub fn schema() -> Schema {
             ])
             .with_labels(vec![
                 Label::default().text(head).text(" ").field(TDI_HEAD),
+                Label::default().text(head),
+            ])
+    };
+    // A TAP's part of a scan lies within the scan, in a row under the states.
+    let part = |kind: &'static str, head: &'static str, parent: &'static str| {
+        KindDecl::new(kind)
+            .with_row(2)
+            .with_parents([parent])
+            .with_fields(vec![
+                field("tap", FieldType::Word { bits: 8 }),
+                field("length", FieldType::Word { bits: 32 }),
+                field("tdi", FieldType::Bits { max: MAX_BITS }),
+                field("tdo", FieldType::Bits { max: MAX_BITS }),
+            ])
+            .with_labels(vec![
+                Label::default()
+                    .text("TAP ")
+                    .field(TAP_INDEX)
+                    .text(" ")
+                    .text(head)
+                    .text(" ")
+                    .field(PART_TDI),
+                Label::default().text(head).text(" ").field(PART_TDI),
                 Label::default().text(head),
             ])
     };
@@ -143,6 +192,8 @@ pub fn schema() -> Schema {
             ]),
         scan("ir-scan", "IR"),
         scan("dr-scan", "DR"),
+        part("instruction", "IR", "ir-scan"),
+        part("data", "DR", "dr-scan"),
     ])
     .with_reasons([
         "the recording has no TDO channel",
@@ -150,17 +201,26 @@ pub fn schema() -> Schema {
         "the recording starts mid-session, before anything forces Test-Logic-Reset",
         "the TAP state is lost in a recording gap",
         "no state was decoded before it",
+        "its length differs from the chain's",
+        "more than one TAP is out of BYPASS, so no TAP's DR length is known",
+        "a TAP's instruction is not known: none since the start, lost input, Test-Logic-Reset or an IR scan of another chain",
+        "its TAP's part runs past the bits a scan keeps",
     ])
     .with_needs(["a TDO channel"])
     .with_causes([
         "a recording gap interrupts the scan",
         "the recording ends mid-scan",
     ])
-    .with_open_at_most(2)
+    .with_open_at_most(3)
 }
 
 /// Where TDO is read: `TdoEdge`'s choices, by their names.
 pub const TDO_EDGE: SettingId = SettingId(0);
+/// Each TAP's IR length, the TAP nearest TDO first; none, the default, leaves scans whole.
+pub const CHAIN: SettingId = SettingId(1);
+/// The most TAPs a chain names, and the longest IR: together no more bits than a scan keeps.
+pub const CHAIN_AT_MOST: usize = 8;
+pub const IR_AT_MOST: i64 = 32;
 
 /// The edge of TCK each clock's TDO is read at.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -200,6 +260,14 @@ impl TdoEdge {
 /// IR scans in a row that read only at the other edge before `TdoEdge::IrCapture` moves to it.
 pub const MOVED_BY: u8 = 2;
 
+/// The chain setting, as a binding gives it: each TAP's IR length, the TAP nearest TDO first.
+pub fn chain(lengths: &[u8]) -> (&'static str, Setting) {
+    (
+        "chain",
+        Setting::List(lengths.iter().map(|&l| i64::from(l)).collect()),
+    )
+}
+
 /// The TDO edge setting, as a binding gives it.
 pub fn tdo_edge(edge: TdoEdge) -> (&'static str, Setting) {
     let n = match edge {
@@ -215,7 +283,10 @@ pub fn definition() -> Arc<Definition> {
         Definition::new("jtag", 1, schema())
             .with_ports(["TCK", "TMS", "TDI"])
             .with_optional_ports(["TDO"])
-            .with_settings(vec![SettingDecl::choice("tdo_edge", TdoEdge::NAMES, 2)]),
+            .with_settings(vec![
+                SettingDecl::choice("tdo_edge", TdoEdge::NAMES, 2),
+                SettingDecl::list("chain", 1..=IR_AT_MOST, CHAIN_AT_MOST, vec![]),
+            ]),
     )
 }
 
@@ -317,6 +388,8 @@ struct Scan {
     /// An IR scan's TDO bits read at the other edge until it is counted, where the IR captures
     /// move the edge (`Tap::follow_capture`).
     other: Option<Vec<(bool, Observation)>>,
+    /// The first `MAX_BITS` bits' cells, where the chain is set, for its TAPs' parts.
+    cells: Option<Vec<Span>>,
 }
 
 /// The current state, None while ambiguous, from the rise that entered it, and its item once
@@ -350,6 +423,10 @@ pub struct Tap {
     lost: Reason,
     edge: TdoEdge,
     reading: Reading,
+    /// Each TAP's IR length, the TAP nearest TDO first; empty, scans aren't cut.
+    chain: Vec<u8>,
+    /// Each TAP's instruction as the last IR scan of the chain shifted it in, None where not known.
+    instructions: Vec<Option<Vec<bool>>>,
 }
 
 /// Where a `Tap` reads TDO: as its edge fixes it, or as the IR captures last moved it.
@@ -367,8 +444,12 @@ impl Tap {
             crate::held::<Element>(s.tdi.capacity() + s.tdo.capacity())
                 + crate::held::<bool>(s.head_tdi.capacity() + s.head_tdo.capacity())
                 + crate::held::<(bool, Observation)>(s.other.as_ref().map_or(0, Vec::capacity))
+                + crate::held::<Span>(s.cells.as_ref().map_or(0, Vec::capacity))
         });
-        crate::held::<Element>(self.path.capacity()) + scan
+        let instructions = (self.instructions.iter().flatten())
+            .map(|i| crate::held::<bool>(i.capacity()))
+            .sum::<usize>();
+        crate::held::<Element>(self.path.capacity()) + scan + instructions
     }
 }
 
@@ -393,7 +474,16 @@ impl Tap {
                 at_fall: false,
                 votes: 0,
             },
+            chain: vec![],
+            instructions: vec![],
         }
+    }
+
+    /// Scans cut into the parts of the TAPs whose IR lengths `chain` gives, nearest TDO first.
+    pub fn chain(mut self, chain: Vec<u8>) -> Self {
+        self.instructions = vec![None; chain.len()];
+        self.chain = chain;
+        self
     }
 
     /// TDO read at `edge`, where a clock gives TDO at its fall as well as at its rise.
@@ -422,6 +512,10 @@ impl Tap {
         if let Some(sc) = &self.scan {
             for e in sc.tdi.first().into_iter().chain(sc.tdo.first()) {
                 f = f.min(e.cell.start);
+            }
+            // Its TAPs' parts open as it closes, from its first bit.
+            if let Some(first) = sc.cells.as_ref().and_then(|c| c.first()) {
+                f = f.min(first.start);
             }
         }
         f
@@ -515,7 +609,98 @@ impl Tap {
                 out.set(sc.id, TDO_VALUE, pack(&sc.head_tdo));
             }
         }
+        if !self.chain.is_empty() {
+            let split = match (status, sc.id.kind == IR_SCAN) {
+                (Status::Complete, true) => self.split_ir(&sc, out),
+                (Status::Complete, false) => self.split_dr(&sc, out),
+                // A scan cut short updates no register, and its cause says why it is whole.
+                _ => Ok(()),
+            };
+            if let Err(reason) = split {
+                out.set(sc.id, SPLIT, unknown(reason));
+            }
+        }
         out.close(sc.id, end.max(sc.latest), status);
+    }
+
+    /// An IR scan of the chain's length cut into each TAP's instruction, which each TAP holds
+    /// from then. One of another length shifts another chain: no instruction is known after it.
+    fn split_ir(&mut self, sc: &Scan, out: &mut Out) -> Result<(), Reason> {
+        let total: usize = self.chain.iter().map(|&l| usize::from(l)).sum();
+        if sc.n as usize != total || !sc.tdi_known {
+            self.instructions.fill(None);
+            return Err(if sc.tdi_known {
+                SPLIT_LENGTH
+            } else {
+                SPLIT_UNKNOWN
+            });
+        }
+        let mut at = 0;
+        for (k, &len) in self.chain.iter().enumerate() {
+            let bits = at..at + usize::from(len);
+            self.part(sc, INSTRUCTION, k, bits.clone(), out);
+            self.instructions[k] = Some(sc.head_tdi[bits.clone()].to_vec());
+            at = bits.end;
+        }
+        Ok(())
+    }
+
+    /// A DR scan's part for the one TAP out of BYPASS, where every other is in it: each TAP in
+    /// BYPASS holds one bit, and those nearer TDO shift theirs first.
+    fn split_dr(&self, sc: &Scan, out: &mut Out) -> Result<(), Reason> {
+        let mut out_of_bypass = None;
+        for (k, i) in self.instructions.iter().enumerate() {
+            let i = i.as_ref().ok_or(SPLIT_UNKNOWN)?;
+            if i.iter().all(|&b| b) {
+                continue;
+            }
+            if out_of_bypass.replace(k).is_some() {
+                return Err(SPLIT_BYPASS);
+            }
+        }
+        let Some(k) = out_of_bypass else {
+            return Ok(());
+        };
+        let bypass = self.chain.len() - 1;
+        let n = sc.n as usize;
+        if n <= bypass {
+            return Err(SPLIT_LENGTH);
+        }
+        let bits = k..k + n - bypass;
+        if bits.end > sc.head_tdi.len() {
+            return Err(SPLIT_LONG);
+        }
+        self.part(sc, DATA, k, bits, out);
+        Ok(())
+    }
+
+    /// TAP `tap`'s part of scan `sc`, bits `bits` of it, as a child of the scan.
+    fn part(&self, sc: &Scan, kind: KindId, tap: usize, bits: Range<usize>, out: &mut Out) {
+        let cells = sc.cells.as_deref().unwrap_or(&[]);
+        let (Some(first), Some(last)) = (cells.get(bits.start), cells.get(bits.end - 1)) else {
+            return;
+        };
+        let id = Id::new(kind, first.start);
+        out.open(id, Some(sc.id), first.start);
+        let word = |value: usize, bits: u8| Value::Word {
+            value: value as u64,
+            bits,
+        };
+        out.set(id, TAP_INDEX, word(tap, 8));
+        out.set(id, PART_LENGTH, word(bits.len(), 32));
+        if sc.tdi_known {
+            out.set(id, PART_TDI, pack(&sc.head_tdi[bits.clone()]));
+        }
+        let tdo = match (self.has_tdo, sc.tdo_known) {
+            (false, _) => Value::Unknown {
+                reason: NO_TDO,
+                needs: Some(NEEDS_TDO),
+            },
+            (true, false) => unknown(TWO_WIRE),
+            (true, true) => pack(&sc.head_tdo[bits]),
+        };
+        out.set(id, PART_TDO, tdo);
+        out.close(id, last.end, Status::Complete);
     }
 
     fn open_scan(&mut self, ir: bool, c: &Clocked, out: &mut Out) {
@@ -547,6 +732,7 @@ impl Tap {
             tdi_known,
             tdo_known,
             other: (ir && tdo_known && self.edge == TdoEdge::IrCapture).then(Vec::new),
+            cells: (!self.chain.is_empty()).then(Vec::new),
         });
     }
 
@@ -566,6 +752,9 @@ impl Tap {
         if sc.head_tdi.len() < MAX_BITS as usize {
             sc.head_tdi.push(c.tdi.unwrap_or(false));
             sc.head_tdo.push(tdo.is_some_and(|(v, _)| v));
+            if let Some(cells) = &mut sc.cells {
+                cells.push(c.cell);
+            }
         }
         sc.n = sc.n.saturating_add(1);
         sc.latest = sc.latest.max(c.cell.end);
@@ -651,6 +840,9 @@ impl Tap {
             }
         }
         self.set = after;
+        if single(after) == Some(RESET) {
+            self.instructions.fill(None);
+        }
         if matches!(single(after), Some(UPDATE_DR | UPDATE_IR)) {
             self.close_scan(c.rise, Status::Complete, out);
         }
@@ -664,6 +856,7 @@ impl Tap {
         self.end_run(from, out);
         self.set = ALL;
         self.lost = LOST_STATE;
+        self.instructions.fill(None);
         self.run = Run {
             state: None,
             start: to,
@@ -756,7 +949,13 @@ impl Jtag {
     pub fn factory(window: Tick) -> Factory {
         Box::new(move |b, local| {
             let edge = TdoEdge::chosen(b.choice(TDO_EDGE));
-            Box::new(Self::new(local, b.port(TDO), window).tdo_edge(edge))
+            // Bound, each length is from 1 to `IR_AT_MOST`.
+            let chain = (b.list(CHAIN).unwrap_or(&[]).iter())
+                .map(|&l| l as u8)
+                .collect();
+            let mut jtag = Self::new(local, b.port(TDO), window).tdo_edge(edge);
+            jtag.tap = jtag.tap.chain(chain);
+            Box::new(jtag)
         })
     }
 

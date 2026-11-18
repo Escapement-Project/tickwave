@@ -52,8 +52,8 @@ fn a_tracks_height_follows_the_rows_and_lanes_its_schema_declares() {
     assert_eq!(height(&rows, false), 3.0 * one, "rows add up");
     assert_eq!(
         height(&jtag::schema(), false),
-        2.0 * one,
-        "scans, then states"
+        3.0 * one,
+        "scans, then states, then the TAPs' parts of a chain's scans"
     );
     assert_eq!(
         height(&cjtag::schema(), false),

@@ -800,3 +800,318 @@ fn a_tms_cycle_of_one_clock_states_is_cut_into_bounded_paths() {
     assert!(paths.iter().sum::<usize>() >= 300, "{paths:?}");
     assert!(h.store(j).counts.peak_open <= 2);
 }
+
+fn with_chain(w: Wires, chain: &[u8]) -> (Host, AnalysisId) {
+    let mut h = Host::default();
+    let j = h
+        .add(
+            name("jtag"),
+            jtag::definition(),
+            InputSpec::Wire {
+                source: Box::new(w),
+                local: None,
+            },
+            jtag::Jtag::factory(64),
+            &[jtag::chain(chain)],
+            all(),
+        )
+        .unwrap();
+    h.run_until(|_| false).unwrap();
+    (h, j)
+}
+
+fn bits_value(v: u64, n: u32) -> Option<Value> {
+    Some(Value::Bits {
+        bytes: v.to_le_bytes()[..n.div_ceil(8) as usize].to_vec(),
+        bits: n,
+    })
+}
+
+/// A DAP's 4-bit TAP nearest TDO and a 6-bit one nearest TDI, as TI's ICEPick and its DAP: each
+/// IR scan of the chain's 10 bits is cut into each TAP's instruction, and each DR scan into the
+/// part of the one TAP out of BYPASS, the TAPs nearer TDO shifting their bypass bits first. A
+/// scan that can't be cut says why.
+#[test]
+fn a_chains_scans_are_cut_into_each_taps_part_or_say_why_not() {
+    let mut s = Session::new(5_000, 100);
+    s.tms(&[1, 1, 1, 1, 1, 0]);
+    let ir = |s: &mut Session, tdi: u64, n: usize, tdo: u64| {
+        s.tms(&[1, 1, 0, 0]);
+        s.shift(&bits(tdi, n), &bits(tdo, n), None, None);
+        s.tms(&[1, 0]);
+    };
+    let dr = |s: &mut Session, tdi: u64, n: usize, tdo: u64| {
+        s.tms(&[1, 0, 0]);
+        s.shift(&bits(tdi, n), &bits(tdo, n), None, None);
+        s.tms(&[1, 0]);
+    };
+    // ICEPick alone: another chain.
+    ir(&mut s, 0x3F, 6, 0b000001);
+    dr(&mut s, 0, 1, 0);
+    // The chain: the DAP's IDCODE and ICEPick's BYPASS, both captures ending in 01.
+    ir(&mut s, 0x3FE, 10, 0b00_0001 << 4 | 0b0001);
+    dr(&mut s, 0, 33, u64::from(IDCODE));
+    // Both out of BYPASS: the DAP's DPACC and ICEPick's ROUTER.
+    ir(&mut s, 0b00_0010 << 4 | 0b1010, 10, 0b00_0001 << 4 | 0b0001);
+    dr(&mut s, 0, 36, 0);
+    // Both in BYPASS: nothing to cut out.
+    ir(&mut s, 0x3FF, 10, 0b00_0001 << 4 | 0b0001);
+    dr(&mut s, 0, 2, 0);
+    // ICEPick alone out of BYPASS: the DAP's bypass bit comes out first.
+    ir(&mut s, 0b00_0010 << 4 | 0b1111, 10, 0b00_0001 << 4 | 0b0001);
+    dr(&mut s, 0, 33, 0x1_0020_0086 << 1);
+    // Test-Logic-Reset loads IDCODE or BYPASS: no instruction is known.
+    s.tms(&[1, 1, 1, 1, 1, 0]);
+    dr(&mut s, 0, 33, 0);
+    s.end = s.t + 20;
+    let (h, j) = with_chain(s.wires(), &[4, 6]);
+    let scans = of(&h, j, &SCANS);
+    let split = |i: &Item| match value(i, jtag::SPLIT) {
+        Some(Value::Unknown { reason, .. }) => Some(reason),
+        _ => None,
+    };
+    assert_eq!(
+        scans.iter().map(split).collect::<Vec<_>>(),
+        [
+            Some(jtag::SPLIT_LENGTH),
+            Some(jtag::SPLIT_UNKNOWN),
+            None,
+            None,
+            None,
+            Some(jtag::SPLIT_BYPASS),
+            None,
+            None,
+            None,
+            None,
+            Some(jtag::SPLIT_UNKNOWN),
+        ]
+    );
+    let parts = of(&h, j, &[jtag::INSTRUCTION, jtag::DATA]);
+    let part = |i: &Item| {
+        let w = |f| match value(i, f) {
+            Some(Value::Word { value, .. }) => value,
+            v => panic!("{v:?}"),
+        };
+        (i.id.kind, w(jtag::TAP_INDEX), w(jtag::PART_LENGTH))
+    };
+    let (ins, data) = (jtag::INSTRUCTION, jtag::DATA);
+    assert_eq!(
+        parts.iter().map(part).collect::<Vec<_>>(),
+        [
+            (ins, 0, 4),
+            (ins, 1, 6),
+            (data, 0, 32),
+            (ins, 0, 4),
+            (ins, 1, 6),
+            (ins, 0, 4),
+            (ins, 1, 6),
+            (ins, 0, 4),
+            (ins, 1, 6),
+            (data, 1, 32),
+        ]
+    );
+    // Each part's bits, and its scan as its parent.
+    let tdi = |i: &Item| value(i, jtag::PART_TDI);
+    let tdo = |i: &Item| value(i, jtag::PART_TDO);
+    assert_eq!(
+        (tdi(&parts[0]), tdo(&parts[0])),
+        (bits_value(0xE, 4), bits_value(1, 4))
+    );
+    assert_eq!(
+        (tdi(&parts[1]), tdo(&parts[1])),
+        (bits_value(0x3F, 6), bits_value(1, 6))
+    );
+    assert_eq!(tdo(&parts[2]), bits_value(IDCODE.into(), 32));
+    assert_eq!(tdo(&parts[9]), bits_value(0x1_0020_0086 & 0xFFFF_FFFF, 32));
+    assert_eq!(parts[2].parent, Some(scans[3].id));
+    assert!(parts[2].start >= scans[3].start && parts[2].end <= scans[3].end);
+    assert!(
+        parts[9].start > scans[9].start,
+        "after the DAP's bypass bit"
+    );
+}
+
+/// Without a chain, scans are whole and say nothing of a split.
+#[test]
+fn without_a_chain_no_scan_is_cut() {
+    let (s, _) = ir_and_idcode(3);
+    let (h, j) = with_chain(s.wires(), &[]);
+    assert!(of(&h, j, &[jtag::INSTRUCTION, jtag::DATA]).is_empty());
+    assert!(
+        of(&h, j, &SCANS)
+            .iter()
+            .all(|i| value(i, jtag::SPLIT).is_none())
+    );
+}
+
+/// One DPACC or APACC scan of the chain above: the DAP's 35 bits, RnW, A[3:2] and the data, with
+/// ICEPick's bypass bit after them; the DAP's capture, ACK then a result, and the bypass bit's.
+fn access(s: &mut Session, read: bool, a: u64, data: u64, ack: u64, result: u64) {
+    let tdi = u64::from(read) | (a >> 2) << 1 | data << 3;
+    let tdo = ack | result << 3;
+    s.tms(&[1, 0, 0]);
+    s.shift(&bits(tdi, 36), &bits(tdo, 36), None, None);
+    s.tms(&[1, 0]);
+}
+
+/// The DAP's instruction, ICEPick's BYPASS beside it.
+fn dap_ir(s: &mut Session, ir: u64) {
+    s.tms(&[1, 1, 0, 0]);
+    s.shift(
+        &bits(ir | 0x3F << 4, 10),
+        &bits(0b00_0001 << 4 | 0b0001, 10),
+        None,
+        None,
+    );
+    s.tms(&[1, 0]);
+}
+
+/// JTAG-DP over the DAP's parts of a chain's scans, and ADIv5 over JTAG-DP taking each read's
+/// data from its own transfer: an AP read's result comes back in the next scan, a WAIT scan's
+/// request is ignored and returns nothing, and a read the recording ends before has no result.
+#[test]
+fn jtag_dp_reads_the_daps_parts_of_a_chain_as_transfers_adiv5_reads() {
+    use escapement_tickwave_decoders::{adiv5, jtagdp};
+    let mut s = Session::new(5_000, 100);
+    s.tms(&[1, 1, 1, 1, 1, 0]);
+    dap_ir(&mut s, 0xE);
+    dr_scan(&mut s, 33, u64::from(IDCODE));
+    dap_ir(&mut s, 0xA);
+    access(&mut s, false, 0x8, 0xF0, 0b010, 0);
+    dap_ir(&mut s, 0xB);
+    access(&mut s, true, 0xC, 0, 0b010, 0);
+    dap_ir(&mut s, 0xA);
+    access(&mut s, true, 0xC, 0, 0b010, 0x2477_0011);
+    access(&mut s, true, 0x4, 0, 0b001, 0xDEAD);
+    access(&mut s, true, 0x4, 0, 0b010, 0);
+    access(&mut s, true, 0xC, 0, 0b010, 0xF000_0040);
+    s.end = s.t + 20;
+    let mut h = Host::default();
+    let j = h
+        .add(
+            name("jtag"),
+            jtag::definition(),
+            InputSpec::Wire {
+                source: Box::new(s.wires()),
+                local: None,
+            },
+            jtag::Jtag::factory(64),
+            &[jtag::chain(&[4, 6])],
+            all(),
+        )
+        .unwrap();
+    let dp = h
+        .add(
+            name("dp"),
+            jtagdp::definition(),
+            InputSpec::Upstream(jtagdp::subscription(j)),
+            jtagdp::JtagDp::factory(),
+            &[],
+            all(),
+        )
+        .unwrap();
+    let adi = h
+        .add(
+            name("adi"),
+            adiv5::adi_definition(),
+            InputSpec::Upstream(adiv5::adi_subscription(dp)),
+            adiv5::Adi::factory(),
+            &[adiv5::reads(true)],
+            all(),
+        )
+        .unwrap();
+    h.run_until(|_| false).unwrap();
+    let w = |i: &Item, f| match value(i, f) {
+        Some(Value::Word { value, .. }) => Some(value),
+        Some(Value::Name(n)) => Some(u64::from(n)),
+        _ => None,
+    };
+    let ids = of(&h, dp, &[jtagdp::IDCODE]);
+    assert_eq!(w(&ids[0], jtagdp::IDCODE_VALUE), Some(u64::from(IDCODE)));
+    use escapement_tickwave_decoders::swd;
+    let transfers: Vec<_> = (of(&h, dp, &[jtagdp::TRANSFER]).iter())
+        .map(|t| {
+            (
+                w(t, swd::PORT),
+                w(t, swd::DIR),
+                w(t, swd::A),
+                w(t, swd::ACK),
+                w(t, swd::DATA),
+                t.status,
+            )
+        })
+        .collect();
+    let (dp_, ap, r, wr) = (Some(1), Some(0), Some(0), Some(1));
+    let (ok, wait) = (Some(0), Some(1));
+    let done = Some(Status::Complete);
+    assert_eq!(
+        transfers,
+        [
+            (dp_, wr, Some(0x8), ok, Some(0xF0), done),
+            (ap, r, Some(0xC), ok, Some(0x2477_0011), done),
+            (dp_, r, Some(0xC), ok, Some(0), done),
+            (dp_, r, Some(0x4), wait, None, done),
+            (dp_, r, Some(0x4), ok, Some(0xF000_0040), done),
+            (
+                dp_,
+                r,
+                Some(0xC),
+                ok,
+                None,
+                Some(Status::Incomplete(jtagdp::ENDS_UNREAD))
+            ),
+        ]
+    );
+    // ADIv5: SELECT, then the AP read of IDR with its own data, RDBUFF and CTRL/STAT reads.
+    let reads = of(&h, adi, &[adiv5::AP_READ]);
+    assert_eq!(reads.len(), 1);
+    assert_eq!(w(&reads[0], adiv5::AP_REG), Some(0xFC));
+    assert_eq!(w(&reads[0], adiv5::AP_VALUE), Some(0x2477_0011));
+    assert_eq!(reads[0].status, Some(Status::Complete));
+    let dp_reads = of(&h, adi, &[adiv5::DP_READ]);
+    let names: Vec<_> = dp_reads.iter().map(|d| w(d, adiv5::DP_REG)).collect();
+    assert_eq!(&names[..2], [Some(4), Some(6)], "RDBUFF, CTRL/STAT");
+    assert_eq!(w(&dp_reads[1], adiv5::DP_VALUE), Some(0xF000_0040));
+}
+
+fn dr_scan(s: &mut Session, n: usize, tdo: u64) {
+    s.tms(&[1, 0, 0]);
+    s.shift(&bits(0, n), &bits(tdo, n), None, None);
+    s.tms(&[1, 0]);
+}
+
+/// An IR scan of another chain forgets what each TAP held, and a TAP's part longer than the bits
+/// a scan emits at once still opens at its first bit.
+#[test]
+fn another_chains_ir_scan_forgets_the_instructions_and_a_long_part_opens_at_its_first_bit() {
+    let mut s = Session::new(5_000, 100);
+    s.tms(&[1, 1, 1, 1, 1, 0]);
+    dap_ir(&mut s, 0xA);
+    let long = s.t;
+    s.tms(&[1, 0, 0]);
+    s.shift(&[false; 101], &[false; 101], None, None);
+    s.tms(&[1, 0]);
+    // ICEPick alone, then a DR scan: no instruction known.
+    s.tms(&[1, 1, 0, 0]);
+    s.shift(&bits(0x3F, 6), &bits(1, 6), None, None);
+    s.tms(&[1, 0]);
+    dr_scan(&mut s, 36, 0);
+    s.end = s.t + 20;
+    let (h, j) = with_chain(s.wires(), &[4, 6]);
+    let parts = of(&h, j, &[jtag::DATA]);
+    assert_eq!(parts.len(), 1);
+    assert_eq!(
+        value(&parts[0], jtag::PART_LENGTH),
+        Some(Value::Word {
+            value: 100,
+            bits: 32
+        })
+    );
+    // Its first bit's clock starts a TMS clock and the two to Shift-DR after the scan's start.
+    assert_eq!(parts[0].start, long + 3 * 100);
+    let dr = of(&h, j, &[jtag::DR_SCAN]);
+    assert!(matches!(
+        value(&dr[1], jtag::SPLIT),
+        Some(Value::Unknown { reason, .. }) if reason == jtag::SPLIT_UNKNOWN
+    ));
+}

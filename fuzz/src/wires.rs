@@ -6,7 +6,7 @@ use arbitrary::Arbitrary;
 use escapement_tickwave_decode::{
     AnalysisId, Host, InputSpec, Observed, Source, SourceError, Span, Tick, Window, name,
 };
-use escapement_tickwave_decoders::{adiv5, cjtag, jtag, swd};
+use escapement_tickwave_decoders::{adiv5, cjtag, jtag, jtagdp, swd};
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
 /// One line: its level from tick 0, the steps between its edges, and its gaps, each an offset
@@ -251,8 +251,13 @@ pub fn swd(c: &Case) {
     run(h, s);
 }
 
+/// Chains a JTAG case is cut by: none, one TAP, a few short ones, and two with a 4-bit TAP
+/// nearest TDO, which JTAG-DP and ADIv5 are stacked on.
+const CHAINS: [&[u8]; 6] = [&[], &[1], &[2, 1], &[1, 1, 1], &[4], &[4, 1]];
+
 pub fn jtag(c: &Case) {
     let has_tdo = c.setting & 1 != 0;
+    let chain = CHAINS[usize::from(c.setting >> 4) % CHAINS.len()];
     let (source, window, local) = wires(c, 4, (!has_tdo).then_some(jtag::TDO));
     let mut h = Host::default();
     let j = h
@@ -261,13 +266,38 @@ pub fn jtag(c: &Case) {
             jtag::definition(),
             InputSpec::Wire { source, local },
             jtag::Jtag::factory(window),
-            &[jtag::tdo_edge(
-                [jtag::TdoEdge::Rise, jtag::TdoEdge::Fall, jtag::TdoEdge::IrCapture]
-                    [usize::from(c.setting >> 1) % 3],
-            )],
+            &[
+                jtag::tdo_edge(
+                    [jtag::TdoEdge::Rise, jtag::TdoEdge::Fall, jtag::TdoEdge::IrCapture]
+                        [usize::from(c.setting >> 1) % 3],
+                ),
+                // Short chains, which random IR scans fit now and then.
+                jtag::chain(chain),
+            ],
             all(),
         )
         .unwrap();
+    if chain.first() == Some(&4) {
+        let dp = h
+            .add(
+                name("jtag-dp"),
+                jtagdp::definition(),
+                InputSpec::Upstream(jtagdp::subscription(j)),
+                jtagdp::JtagDp::factory(),
+                &[],
+                all(),
+            )
+            .unwrap();
+        h.add(
+            name("adiv5"),
+            adiv5::adi_definition(),
+            InputSpec::Upstream(adiv5::adi_subscription(dp)),
+            adiv5::Adi::factory(),
+            &[adiv5::reads(true)],
+            all(),
+        )
+        .unwrap();
+    }
     run(h, j);
 }
 

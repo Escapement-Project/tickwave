@@ -84,12 +84,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &[cjtag::assume_qualified(true)],
         vec![],
     )?;
+    let (chain, dp_tap) = check::chain_args();
+    let jtag_chain = (
+        "chain",
+        escapement_tickwave_decode::Setting::List(chain.iter().map(|&l| i64::from(l)).collect()),
+    );
     let j = h.add(
         name("jtag"),
         cjtag::jtag_definition(),
         InputSpec::Upstream(cjtag::jtag_subscription(c)),
         cjtag::JtagOnCjtag::factory(),
-        &[],
+        &[jtag_chain],
         vec![],
     )?;
     let kinds = Arc::new(Mutex::new((
@@ -114,6 +119,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Seen::default()
     }));
     check::stack(&mut h, j, &seen)?;
+    let tallies = match dp_tap {
+        Some(tap) => check::stack_dp(&mut h, j, tap)?,
+        None => vec![],
+    };
     let start = std::time::Instant::now();
     h.run_until(|_| false)?;
     let seconds = start.elapsed().as_secs_f64();
@@ -155,6 +164,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("cjtag {}", check::rows_line(&schema, spans));
     }
     check::report(&h, j, &seen, &rec, None, "JTAG on cJTAG", seconds);
+    for (what, t) in &tallies {
+        println!("{what}: {}", check::tally_lines(t, 20).join(", "));
+    }
     // Each IR scan with no TDO value, against the JScan stretches: where a session runs in the
     // Standard Protocol, before a command activates OScan, TDO is not on the wire.
     let s = seen.lock().unwrap();
