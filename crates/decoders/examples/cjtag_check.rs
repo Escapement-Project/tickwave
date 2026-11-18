@@ -18,12 +18,13 @@ use escapement_tickwave_view::{Cache, Recording};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-/// Items by kind, and those closed incomplete by cause, each by its schema index; and with
-/// `--rows`, each item's kind and span.
+/// Items by kind, and those closed incomplete by cause, each by its schema index; with
+/// `--rows`, each item's kind and span; and every JScan stretch's span.
 type Tally = (
     BTreeMap<u16, u64>,
     BTreeMap<u16, u64>,
     Option<Vec<(KindId, Tick, Tick)>>,
+    Vec<(Tick, Tick)>,
 );
 
 /// Counts cJTAG's completed items by kind, and those closed incomplete by cause.
@@ -41,6 +42,9 @@ impl Decoder for Kinds {
                     }
                     if let Some(spans) = &mut k.2 {
                         spans.push((item.id.kind, item.start, item.end));
+                    }
+                    if item.id.kind == cjtag::JSCAN {
+                        k.3.push((item.start, item.end));
                     }
                 }
                 Delivery::Lost { span, .. } => ex.lost(span.start, span.end),
@@ -92,6 +96,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         BTreeMap::new(),
         BTreeMap::new(),
         rows.then(Vec::new),
+        Vec::new(),
     )));
     let k2 = kinds.clone();
     let schema = h.definition(c).schema.clone();
@@ -160,6 +165,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(spans) = &k.2 {
         println!("cjtag {}", check::rows_line(&schema, spans));
     }
-    check::report(&h, j, &seen, &rec, "JTAG on cJTAG", seconds);
+    check::report(&h, j, &seen, &rec, None, "JTAG on cJTAG", seconds);
+    // Each IR scan with no TDO value, against the JScan stretches: where a session runs in the
+    // Standard Protocol, before a command activates OScan, TDO is not on the wire.
+    let s = seen.lock().unwrap();
+    let inside = |&(a, b): &(Tick, Tick)| k.3.iter().any(|&(c, d)| c <= a && b <= d);
+    let n = s.unread.iter().filter(|x| inside(x)).count();
+    println!(
+        "IR scans with no TDO value inside a JScan stretch: {n} of {}",
+        s.unread.len()
+    );
     Ok(())
 }

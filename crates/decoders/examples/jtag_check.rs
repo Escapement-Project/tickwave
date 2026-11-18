@@ -96,6 +96,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             " at TCK's rise"
         }
     );
-    check::report(&h, j, &seen, &rec, &label, seconds);
+    let tck = rec.channel("TCK");
+    check::report(&h, j, &seen, &rec, tck, &label, seconds);
     Ok(())
 }
