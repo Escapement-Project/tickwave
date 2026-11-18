@@ -1167,3 +1167,83 @@ fn read_as_lists_what_reads_it_and_a_link_selects_what_it_names() {
     h.run();
     assert_eq!(h.state().selected, Some((0, transfer.id)));
 }
+
+#[test]
+fn the_list_shows_an_analysis_as_rows_filters_them_and_selects_one() {
+    use egui_kittest::kittest::Queryable;
+    use escapement_tickwave_egui::panel::Tab;
+    let (decoded, map, _) = decode(&fixture());
+    let timebase = open(&fixture()).timebase();
+    let time = |i: &escapement_tickwave_decode::Item| {
+        format!(
+            "{}  ",
+            format_interval(map.axis_saturating(i.start), timebase, map.m())
+        )
+    };
+    let t = transfers(&decoded);
+    let mut h = panel(&decoded, 0, t[0], map, &fixture());
+    h.get_by_label("List").click();
+    h.run();
+    assert_eq!(h.state().tab, Tab::List);
+    h.get_by_label_contains(&time(t[1]));
+    h.get_by_label_contains(&time(t[3])).click();
+    h.run();
+    assert_eq!(h.state().selected, Some((0, t[3].id)));
+    h.get_by_label_contains(&time(t[2])).hover();
+    h.run();
+    let span = Span {
+        start: t[2].start,
+        end: t[2].end.unwrap(),
+    };
+    assert_eq!(h.state().lit, Some(span));
+    // A selection far down scrolls the list to it.
+    let last = *t.last().unwrap();
+    assert!(h.query_by_label_contains(&time(last)).is_none());
+    h.state_mut().selected = Some((0, last.id));
+    h.run();
+    let row = h.get_by_label_contains(&time(last)).rect();
+    // Once there, the list scrolls as the reader scrolls it.
+    h.event(egui::Event::PointerMoved(row.center()));
+    h.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, 2000.0),
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
+        modifiers: Default::default(),
+    });
+    h.run_steps(60);
+    assert!(h.query_by_label_contains(&time(last)).is_none());
+
+    // ADIv5's rows, then without its DP writes, then only those holding a condition.
+    h.get_by_label(decoded[1].name).click();
+    h.run();
+    assert_eq!(h.state().listed, Some(1));
+    let items: Vec<_> = decoded[1].store.items.values().collect();
+    let write = *(items.iter())
+        .find(|i| i.id.kind == adiv5::DP_WRITE)
+        .unwrap();
+    h.get_by_label_contains(&time(write));
+    h.get_by_label("dp-write").click();
+    h.run();
+    assert!(h.query_by_label_contains(&time(write)).is_none());
+    let marked = (items.iter()).find(|i| escapement_tickwave_egui::track::condition(i));
+    let plain = (items.iter())
+        .find(|i| i.id.kind != adiv5::DP_WRITE && !escapement_tickwave_egui::track::condition(i))
+        .unwrap();
+    h.get_by_label_contains(&time(plain));
+    h.get_by_label("conditions only").click();
+    h.run();
+    assert!(h.query_by_label_contains(&time(plain)).is_none());
+    let marked = marked.expect("an ADIv5 item holding a condition");
+    h.get_by_label_contains(&time(marked));
+    h.get_by_label("Selected").click();
+    h.run();
+    assert_eq!(h.state().tab, Tab::Selected);
+
+    // With nothing chosen, the list is the selected item's analysis, with its kinds to filter.
+    let mut h = panel(&decoded, 1, write, map, &fixture());
+    h.state_mut().tab = Tab::List;
+    h.run();
+    h.get_by_label("dp-write");
+    h.get_by_label_contains(&time(write));
+}

@@ -9,23 +9,29 @@
 //! analyses stacked on its own that read it ("read as"). Above it, fixed where they are pressed,
 //! previous and next step to the items of its kind before and after it. Pointing at a section,
 //! the heading or a reader lights its span, which the host passes to its tracks and graph.
+//!
+//! The List tab shows one analysis's items as rows, in time order: each its start, its label and,
+//! where it holds a condition, a mark. Kinds can be left out, or every item but those holding a
+//! condition. A row the pointer rests on lights its span, and a click selects it. When the
+//! selection changes the list scrolls to it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound::{Excluded, Unbounded};
 
 use egui::{
-    Align, Button, CollapsingHeader, Grid, Layout, Rect, Response, RichText, ScrollArea, Sense, Ui,
-    UiBuilder, Widget, pos2, vec2,
+    Align, Align2, Button, CollapsingHeader, Grid, Layout, Rect, Response, RichText, Role,
+    ScrollArea, Sense, Stroke, StrokeKind, Ui, UiBuilder, Widget, WidgetInfo, pos2, vec2,
 };
 use escapement_tickwave_decode::{
-    ElementType, Id, Item, LinkId, Observation, Ref, Schema, Span, Status, Tick, Value, citation,
+    ElementType, Id, Item, KindId, LinkId, Observation, Ref, Schema, Span, Status, Tick, Value,
+    citation,
 };
 use escapement_tickwave_view::format::mapping::Mapping;
 use escapement_tickwave_view::format::model::Ratio;
 use escapement_tickwave_view::readouts::format_interval;
 
 use crate::palette::Palette;
-use crate::track::{Labels, heading, value_text};
+use crate::track::{Labels, condition, heading, value_text};
 
 /// The most elements a part's section lists; the rest are counted.
 const ELEMENTS_AT_MOST: usize = 64;
@@ -33,6 +39,8 @@ const ELEMENTS_AT_MOST: usize = 64;
 const READERS_AT_MOST: usize = 32;
 /// The collapse control's size, and the height of the row it heads.
 const CONTROL: f32 = 24.0;
+/// A list row's height.
+const ROW: f32 = 18.0;
 
 /// One analysis as the panel reads it: its name, its schema, the labels its track draws it with,
 /// its items as its store keeps them, and the analysis it is stacked on, by its index among the
@@ -45,19 +53,47 @@ pub struct Analysis<'a> {
     pub reads: Option<usize>,
 }
 
+/// The panel's tabs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Tab {
+    /// The selected item, in full.
+    #[default]
+    Selected,
+    /// One analysis's items as rows.
+    List,
+}
+
 /// What the panel shows and keeps between frames. Its host owns it, as it owns a graph's
 /// `ViewState`: it passes the selection to its tracks, sets it from `Track::clicked`, and passes
 /// `lit` to its tracks and graph.
 #[derive(Clone, Debug, Default)]
 pub struct PanelState {
-    /// The item selected, by the index of its analysis. The panel's previous, next, link and
-    /// "read as" controls set it too.
+    /// The item selected, by the index of its analysis. The panel's previous, next, link,
+    /// "read as" and list controls set it too.
     pub selected: Option<(usize, Id)>,
+    pub tab: Tab,
+    /// The analysis the List tab shows, by index; None for the selected item's, else the first.
+    pub listed: Option<usize>,
     /// Collapsed to its control, by the reader.
     pub collapsed: bool,
     /// What the pointer rests on in the panel this frame: its span on the items' timeline.
     pub lit: Option<Span>,
     found: Option<Found>,
+    /// The kinds the List tab leaves out, by analysis.
+    hidden: BTreeSet<(usize, KindId)>,
+    /// The List tab shows only items holding a condition.
+    conditions: bool,
+    rows: Option<Rows>,
+    /// The selection the List tab last scrolled to.
+    scrolled: Option<(usize, Id)>,
+}
+
+/// The ids a List tab shows, in order, kept while its analysis, its store's size and its filter
+/// hold.
+#[derive(Clone, Debug)]
+struct Rows {
+    key: (usize, usize, Vec<KindId>, bool),
+    ids: Vec<Id>,
 }
 
 /// The selected item's neighbours of its kind and the items that read it, kept while the
@@ -196,6 +232,170 @@ impl<'a> Panel<'a> {
         };
         self.state.found = Some(f.clone());
         f
+    }
+
+    /// The ids analysis `a`'s List tab shows, found again only where its store or filter changed.
+    fn rows(&mut self, a: usize) -> Rows {
+        let items = self.analyses[a].items;
+        let hidden: Vec<KindId> = (self.state.hidden.iter())
+            .filter(|(b, _)| *b == a)
+            .map(|&(_, k)| k)
+            .collect();
+        let key = (a, items.len(), hidden, self.state.conditions);
+        if let Some(r) = self.state.rows.take()
+            && r.key == key
+        {
+            return r;
+        }
+        let ids = (items.values())
+            .filter(|i| !key.2.contains(&i.id.kind))
+            .filter(|i| !key.3 || condition(i))
+            .map(|i| i.id)
+            .collect();
+        Rows { key, ids }
+    }
+
+    fn list_tab(&mut self, ui: &mut Ui, lit: &mut Option<Span>, go: &mut Option<(usize, Id)>) {
+        let Some(last) = self.analyses.len().checked_sub(1) else {
+            ui.label(self.quiet("No analysis to list."));
+            return;
+        };
+        let listed = (self.state.listed)
+            .or(self.state.selected.map(|(a, _)| a))
+            .unwrap_or(0)
+            .min(last);
+        if self.analyses.len() > 1 {
+            ui.horizontal_wrapped(|ui| {
+                for (k, a) in self.analyses.iter().enumerate() {
+                    if ui
+                        .selectable_label(k == listed, self.text(a.name))
+                        .clicked()
+                    {
+                        self.state.listed = Some(k);
+                    }
+                }
+            });
+        }
+        let schema = self.analyses[listed].schema;
+        ui.horizontal_wrapped(|ui| {
+            for (k, decl) in schema.kinds.iter().enumerate() {
+                let kind = (listed, KindId(k as u16));
+                let shown = !self.state.hidden.contains(&kind);
+                if (ui.selectable_label(shown, self.quiet(decl.name.to_string()))).clicked() {
+                    if shown {
+                        self.state.hidden.insert(kind);
+                    } else {
+                        self.state.hidden.remove(&kind);
+                    }
+                }
+            }
+            let only = self.state.conditions;
+            if (ui.selectable_label(only, self.quiet("conditions only"))).clicked() {
+                self.state.conditions = !only;
+            }
+        });
+        ui.separator();
+        let rows = self.rows(listed);
+        if rows.ids.is_empty() {
+            ui.label(self.quiet("No items here."));
+            self.state.rows = Some(rows);
+            return;
+        }
+        let gap = ui.spacing().item_spacing.y;
+        let mut scroll = (ScrollArea::vertical())
+            .auto_shrink(false)
+            .id_salt(("panel list", listed));
+        // A new selection scrolls the list to it, near the middle.
+        if self.state.selected != self.state.scrolled {
+            if let Some((a, id)) = self.state.selected
+                && a == listed
+                && let Ok(k) = rows.ids.binary_search(&id)
+            {
+                // Within the list's extent, so the area has no overscroll to spring back from.
+                let view = ui.available_height();
+                let most = (rows.ids.len() as f32 * (ROW + gap) - gap - view).max(0.0);
+                let at = k as f32 * (ROW + gap) - view / 2.0;
+                scroll = scroll.vertical_scroll_offset(at.clamp(0.0, most));
+            }
+            self.state.scrolled = self.state.selected;
+        }
+        // The times' column, as wide as a time with the most figures.
+        let widest = ui.painter().layout_no_wrap(
+            self.time(Tick::MAX / 2),
+            self.palette.figures.clone(),
+            self.palette.ink,
+        );
+        let label_at = widest.size().x + 12.0;
+        let selected = self.state.selected;
+        scroll.show_rows(ui, ROW, rows.ids.len(), |ui, range| {
+            for id in &rows.ids[range] {
+                let Some(item) = self.analyses[listed].items.get(id) else {
+                    continue;
+                };
+                let on = selected == Some((listed, *id));
+                self.row(ui, listed, item, label_at, on, lit, go);
+            }
+        });
+        self.state.rows = Some(rows);
+    }
+
+    /// One list row: the item's start, its label, and a mark where it holds a condition.
+    #[expect(clippy::too_many_arguments, reason = "each is the row's own")]
+    fn row(
+        &self,
+        ui: &mut Ui,
+        a: usize,
+        item: &Item,
+        label_at: f32,
+        selected: bool,
+        lit: &mut Option<Span>,
+        go: &mut Option<(usize, Id)>,
+    ) {
+        let p = self.palette;
+        let an = &self.analyses[a];
+        let (rect, response) =
+            ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::click());
+        let time = self.time(item.start);
+        let label = heading(an.schema, an.labels, item);
+        let marked = condition(item);
+        let named = format!("{time}  {label}");
+        response.widget_info(|| WidgetInfo::labeled(Role::Button, true, &named));
+        let painter = ui.painter_at(rect);
+        if response.hovered() {
+            painter.rect_filled(rect, 0.0, p.wash);
+            *lit = Some(Span {
+                start: item.start,
+                end: item.end.unwrap_or(item.start),
+            });
+        }
+        if selected {
+            let ring = Stroke::new(1.0, p.ink);
+            painter.rect_stroke(rect, 2.0, ring, StrokeKind::Inside);
+        }
+        let y = rect.center().y;
+        let at = |x: f32| pos2(x, y);
+        let (figures, labels) = (p.figures.clone(), p.labels.clone());
+        painter.text(
+            at(rect.left() + 4.0),
+            Align2::LEFT_CENTER,
+            time,
+            figures,
+            p.ink_2,
+        );
+        painter.text(
+            at(rect.left() + label_at),
+            Align2::LEFT_CENTER,
+            label,
+            labels.clone(),
+            p.ink,
+        );
+        if marked {
+            let right = at(rect.right() - 4.0);
+            painter.text(right, Align2::RIGHT_CENTER, "!", labels, p.attention_ink);
+        }
+        if response.clicked() {
+            *go = Some((a, item.id));
+        }
     }
 
     fn selected_tab(&mut self, ui: &mut Ui, lit: &mut Option<Span>, go: &mut Option<(usize, Id)>) {
@@ -486,13 +686,34 @@ impl Widget for Panel<'_> {
         let mut lit = None;
         let mut go = None;
         if !self.state.collapsed {
+            // The tabs, left of the control.
+            let tabs = Rect::from_min_max(
+                rect.left_top(),
+                pos2(control.left() - 4.0, control.bottom()),
+            );
+            let row = UiBuilder::new()
+                .max_rect(tabs)
+                .layout(Layout::left_to_right(Align::Center));
+            ui.scope_builder(row, |ui| {
+                for (tab, name) in [(Tab::Selected, "Selected"), (Tab::List, "List")] {
+                    if ui
+                        .selectable_label(self.state.tab == tab, self.text(name))
+                        .clicked()
+                    {
+                        self.state.tab = tab;
+                    }
+                }
+            });
             let body = Rect::from_min_max(pos2(rect.left(), control.bottom()), rect.right_bottom());
             let builder = UiBuilder::new()
                 .max_rect(body)
                 .layout(Layout::top_down(Align::Min));
             ui.scope_builder(builder, |ui| {
                 ui.set_width(body.width());
-                self.selected_tab(ui, &mut lit, &mut go);
+                match self.state.tab {
+                    Tab::Selected => self.selected_tab(ui, &mut lit, &mut go),
+                    Tab::List => self.list_tab(ui, &mut lit, &mut go),
+                }
             });
         }
         self.state.lit = lit;
