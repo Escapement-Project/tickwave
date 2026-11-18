@@ -303,6 +303,23 @@ impl<'a> Panel<'a> {
             .color(self.palette.ink_2)
     }
 
+    /// A choice that is on or off, without hue as the project's interaction is: on, its text in
+    /// ink and underlined; off, in the quieter ink.
+    fn toggle(&self, ui: &mut Ui, on: bool, text: &str) -> Response {
+        let words = if on {
+            self.text(text)
+        } else {
+            self.quiet(text)
+        };
+        let r = ui.add(Button::new(words).frame(false));
+        if on {
+            let under = [r.rect.left_bottom(), r.rect.right_bottom()];
+            ui.painter()
+                .line_segment(under, Stroke::new(1.5, self.palette.ink));
+        }
+        r
+    }
+
     fn figures(&self, t: impl Into<String>) -> RichText {
         RichText::new(t)
             .font(self.palette.figures.clone())
@@ -377,10 +394,7 @@ impl<'a> Panel<'a> {
         if self.analyses.len() > 1 {
             ui.horizontal_wrapped(|ui| {
                 for (k, a) in self.analyses.iter().enumerate() {
-                    if ui
-                        .selectable_label(k == listed, self.text(a.name))
-                        .clicked()
-                    {
+                    if self.toggle(ui, k == listed, a.name).clicked() {
                         self.state.listed = Some(k);
                     }
                 }
@@ -391,7 +405,7 @@ impl<'a> Panel<'a> {
             for (k, decl) in schema.kinds.iter().enumerate() {
                 let kind = (listed, KindId(k as u16));
                 let shown = !self.state.hidden.contains(&kind);
-                if (ui.selectable_label(shown, self.quiet(decl.name.to_string()))).clicked() {
+                if self.toggle(ui, shown, &decl.name).clicked() {
                     if shown {
                         self.state.hidden.insert(kind);
                     } else {
@@ -400,7 +414,7 @@ impl<'a> Panel<'a> {
                 }
             }
             let only = self.state.conditions;
-            if (ui.selectable_label(only, self.quiet("conditions only"))).clicked() {
+            if self.toggle(ui, only, "conditions only").clicked() {
                 self.state.conditions = !only;
             }
         });
@@ -543,8 +557,10 @@ impl<'a> Panel<'a> {
         if texted.len() > 1 {
             ui.horizontal_wrapped(|ui| {
                 for &k in &texted {
-                    let name = self.text(self.analyses[k].name);
-                    if ui.selectable_label(k == chosen, name).clicked() {
+                    if self
+                        .toggle(ui, k == chosen, self.analyses[k].name)
+                        .clicked()
+                    {
                         self.state.texted = Some(k);
                     }
                 }
@@ -935,10 +951,7 @@ impl Widget for Panel<'_> {
                     (Tab::Text, "Text"),
                 ];
                 for (tab, name) in tabs {
-                    if ui
-                        .selectable_label(self.state.tab == tab, self.text(name))
-                        .clicked()
-                    {
+                    if self.toggle(ui, self.state.tab == tab, name).clicked() {
                         self.state.tab = tab;
                     }
                 }
