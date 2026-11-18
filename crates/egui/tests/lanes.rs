@@ -178,3 +178,137 @@ fn kinds_in_different_rows_do_not_compete_for_lanes() {
         "kind 1 in the row under kind 0's: {b2:?}"
     );
 }
+
+#[test]
+fn lost_input_shades_the_spans_the_window_meets_and_no_others() {
+    let lost = [
+        (-500, -400),
+        (-100, 50),
+        (200, 300),
+        (900, 1100),
+        (1200, 1300),
+    ]
+    .map(|(start, end)| Span { start, end });
+    let items = BTreeMap::new();
+    let shown = Shown::new(0..1000, 0.0..500.0);
+    let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
+    let density = Density::of(items.values(), &map, |_| false);
+    let labels = Labels::default();
+    let palette = Palette::from_visuals(&egui::Visuals::default());
+    let schema = Schema::new(vec![KindDecl::new("a")]);
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(600.0, 200.0),
+        )),
+        ..egui::RawInput::default()
+    };
+    let mut out = egui::Context::default().run_ui(input, |ui| {
+        ui.add(
+            Track::new(
+                &shown, "t", &schema, &items, &density, &labels, &palette, map,
+            )
+            .settled(Tick::MAX)
+            .lost(&lost),
+        );
+    });
+    out.textures_delta.clear();
+    let fill = palette.attention_fill.gamma_multiply(palette.shade);
+    let mut shaded = vec![];
+    fn walk(s: &egui::Shape, fill: egui::Color32, out: &mut Vec<egui::Rect>) {
+        match s {
+            egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, fill, out)),
+            egui::Shape::Rect(r) if r.fill == fill => out.push(r.rect),
+            _ => {}
+        }
+    }
+    for c in &out.shapes {
+        walk(&c.shape, fill, &mut shaded);
+    }
+    assert_eq!(shaded.len(), 3, "{shaded:?}");
+    assert!(shaded.windows(2).all(|w| w[0].right() < w[1].left()));
+}
+
+#[test]
+fn a_long_or_open_item_from_far_before_the_window_still_draws_beside_the_short_ones() {
+    // A long item and an open one across thousands of short ones, each in its own row.
+    let schema = Schema::new(vec![
+        KindDecl::new("long"),
+        KindDecl::new("open").with_row(1),
+        KindDecl::new("short").with_row(2),
+    ]);
+    let mut store = Store::with_keep(vec![Span {
+        start: Tick::MIN,
+        end: Tick::MAX,
+    }]);
+    let mut ops = vec![];
+    let open = |id, start| Op::Open {
+        id,
+        parent: None,
+        start,
+    };
+    let close = |id, end| Op::Close {
+        id,
+        end,
+        status: Status::Complete,
+    };
+    let long = Id::new(KindId(0), 0);
+    ops.extend([open(long, 0), close(long, 200_000)]);
+    ops.push(open(Id::new(KindId(1), 50_000), 50_000));
+    let mut short = 0;
+    for start in (10..200_000).step_by(20) {
+        let id = Id::new(KindId(2), start);
+        ops.extend([open(id, start), close(id, start + 15)]);
+        short += usize::from(start < 101_000 && start + 15 >= 100_000);
+    }
+    for chunk in ops.chunks(1024) {
+        store.apply_batch(chunk, 8).unwrap();
+    }
+    let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
+    let density = Density::of(store.items.values(), &map, |_| false);
+    let labels = Labels::default();
+    let palette = Palette::from_visuals(&egui::Visuals::default());
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(5000.0, 200.0),
+        )),
+        ..egui::RawInput::default()
+    };
+    let shown = Shown::new(100_000..101_000, 0.0..5000.0);
+    let mut out = egui::Context::default().run_ui(input, |ui| {
+        ui.add(
+            Track::new(
+                &shown,
+                "t",
+                &schema,
+                &store.items,
+                &density,
+                &labels,
+                &palette,
+                map,
+            )
+            .settled(Tick::MAX),
+        );
+    });
+    out.textures_delta.clear();
+    let mut boxes = vec![];
+    fn walk(s: &egui::Shape, out: &mut Vec<egui::Rect>) {
+        match s {
+            egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+            egui::Shape::Rect(r) if r.stroke.width > 0.0 => out.push(r.rect),
+            _ => {}
+        }
+    }
+    for c in &out.shapes {
+        walk(&c.shape, &mut boxes);
+    }
+    let width = boxes.iter().map(|r| r.width()).fold(0.0, f32::max);
+    let whole = boxes.iter().filter(|r| r.width() >= width - 1.0).count();
+    assert_eq!(
+        boxes.len(),
+        short + 2,
+        "every short item meeting it, and both"
+    );
+    assert_eq!(whole, 2, "the long and the open one span the window");
+}

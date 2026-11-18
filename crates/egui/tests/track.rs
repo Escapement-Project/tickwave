@@ -684,3 +684,75 @@ fn frame_times() {
         println!("{name}: median {:.0} us a frame", times[50]);
     }
 }
+
+/// One frame of the cJTAG and JTAG tracks over a real recording, zoomed in on six Scan Packets
+/// and on one, inside the control level open across them: the median of 101 frames, printed.
+/// `TICKWAVE_SHOTS_CJTAG` names the recording, decoded 10^9 ticks past its first scan format.
+#[test]
+#[ignore = "prints wall-clock frame times"]
+fn cjtag_frame_times() {
+    use escapement_tickwave_egui::{Palette, Shown};
+    let Some(rec) = std::env::var_os("TICKWAVE_SHOTS_CJTAG").map(PathBuf::from) else {
+        return;
+    };
+    let case = cjtag_case(&rec, 1_000_000_000);
+    let axis = |t: Tick| case.map.axis_saturating(t);
+    let packets: Vec<(Tick, Tick)> = (case.decoded[0].store.items.values())
+        .filter(|i| i.id.kind == cjtag::PACKET)
+        .filter_map(|i| Some((i.start, i.end?)))
+        .collect();
+    let n = packets.len();
+    let held: u64 = case.decoded.iter().map(|d| d.density.items()).sum();
+    println!("{n} packets, {held} items in the stores");
+    let zooms = [
+        (
+            "six packets",
+            axis(packets[n - 7].0)..axis(packets[n - 2].1),
+        ),
+        ("one packet", axis(packets[n - 2].0)..axis(packets[n - 2].1)),
+    ];
+    let palette = Palette::from_visuals(&egui::Visuals::default());
+    for (name, window) in zooms {
+        let ctx = egui::Context::default();
+        let shown = Shown::new(window, 100.0..2000.0);
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(2000.0, 300.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        let frame = || {
+            ctx.run_ui(input(), |ui| {
+                for d in &case.decoded {
+                    ui.add(
+                        Track::new(
+                            &shown,
+                            d.name,
+                            &d.schema,
+                            &d.store.items,
+                            &d.density,
+                            &d.labels,
+                            &palette,
+                            case.map,
+                        )
+                        .settled(Tick::MAX)
+                        .parts(d.parts),
+                    );
+                }
+            })
+        };
+        for _ in 0..5 {
+            frame();
+        }
+        let mut times: Vec<f64> = (0..101)
+            .map(|_| {
+                let t = std::time::Instant::now();
+                std::hint::black_box(frame());
+                t.elapsed().as_secs_f64() * 1e6
+            })
+            .collect();
+        times.sort_by(f64::total_cmp);
+        println!("{name}: median {:.0} us a frame", times[50]);
+    }
+}

@@ -7,7 +7,8 @@
 //!   Packets: per-bit framing, packets and the TAP engine stacked by pieces.
 //! - `track_frame`: one egui frame of an SWD track over those transfers, zoomed in on six of them with
 //!   labels and parts, on half of one with its bits, and zoomed out on all of them as density
-//!   bins.
+//!   bins; and of the cJTAG track over its session, zoomed in on six Scan Packets, inside the
+//!   control level that spans them all.
 use std::hint::black_box;
 use std::sync::atomic::AtomicBool;
 
@@ -263,6 +264,11 @@ fn oscan1() -> Wires {
 
 /// cJTAG and JTAG over it, counting their items only.
 fn cjtag_host(_: ()) -> Host {
+    cjtag_keeping(vec![])
+}
+
+/// cJTAG and JTAG over it, their stores keeping whole items in `keep`.
+fn cjtag_keeping(keep: Vec<Span>) -> Host {
     let mut h = Host::default();
     let c = h
         .add(
@@ -274,7 +280,7 @@ fn cjtag_host(_: ()) -> Host {
             },
             cjtag::Cjtag::factory(1 << 16),
             &[cjtag::assume_qualified(true)],
-            vec![],
+            keep.clone(),
         )
         .unwrap();
     h.add(
@@ -283,7 +289,7 @@ fn cjtag_host(_: ()) -> Host {
         InputSpec::Upstream(cjtag::jtag_subscription(c)),
         cjtag::JtagOnCjtag::factory(),
         &[],
-        vec![],
+        keep,
     )
     .unwrap();
     h
@@ -358,6 +364,7 @@ fn swd_session(mut h: Host) -> Host {
 
 /// What a host keeps to draw a track.
 struct Drawn {
+    name: &'static str,
     ctx: egui::Context,
     palette: Palette,
     schema: Schema,
@@ -370,10 +377,6 @@ struct Drawn {
 fn drawn(window: std::ops::Range<i64>) -> Drawn {
     let mut h = host(all());
     h.run_until(|_| false).unwrap();
-    let a = h.index("swd").unwrap();
-    let store = h.store(a).clone();
-    let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
-    let density = Density::of(store.items.values(), &map, condition);
     let labels = Labels::default().kind(
         swd::TRANSFER,
         vec![
@@ -390,15 +393,30 @@ fn drawn(window: std::ops::Range<i64>) -> Drawn {
             Template::default().field(swd::PORT),
         ],
     );
-    let ctx = egui::Context::default();
+    track(&h, "swd", "SWD", labels, window)
+}
+
+/// Analysis `analysis`'s track as `name`, its store holding every item, over `window`.
+fn track(
+    h: &Host,
+    analysis: &str,
+    name: &'static str,
+    labels: Labels,
+    window: std::ops::Range<i64>,
+) -> Drawn {
+    let a = h.index(analysis).unwrap();
+    let store = h.store(a).clone();
+    let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
+    let density = Density::of(store.items.values(), &map, condition);
     let mut d = Drawn {
+        name,
         palette: Palette::from_visuals(&egui::Visuals::default()),
         schema: h.definition(a).schema.clone(),
         store,
         density,
         labels,
         shown: Shown::new(window, 100.0..2000.0),
-        ctx,
+        ctx: egui::Context::default(),
     };
     // Fonts and their glyphs laid out once, as a host's frames after its first.
     for _ in 0..3 {
@@ -417,7 +435,7 @@ fn frame(d: &mut Drawn) -> egui::FullOutput {
         ui.add(
             Track::new(
                 &d.shown,
-                "SWD",
+                d.name,
                 &d.schema,
                 &d.store.items,
                 &d.density,
@@ -446,10 +464,19 @@ fn zoomed_out() -> Drawn {
     drawn(0..10 + TRANSFERS as Tick * 48 * PERIOD)
 }
 
+/// Six Scan Packets from the cJTAG session's middle, each 150 ticks.
+fn cjtag_in() -> Drawn {
+    let mut h = cjtag_keeping(all());
+    h.run_until(|_| false).unwrap();
+    let mid = oscan1().end / 2;
+    track(&h, "cjtag", "cJTAG", Labels::default(), mid..mid + 6 * 150)
+}
+
 #[library_benchmark]
 #[bench::bits(setup = bits_in)]
 #[bench::zoomed_in(setup = zoomed_in)]
 #[bench::zoomed_out(setup = zoomed_out)]
+#[bench::cjtag_in(setup = cjtag_in)]
 fn track_frame(mut d: Drawn) -> Drawn {
     black_box(frame(&mut d));
     d

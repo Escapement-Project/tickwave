@@ -139,13 +139,7 @@ pub fn driver_paints(
         return out;
     }
     let axis = |t: Tick| map.axis_saturating(t);
-    let lookback = density.longest.saturating_add(1);
-    let lo = Id::new(KindId(0), window.start.saturating_sub(lookback));
-    for item in items.range(lo..).map(|(_, i)| i) {
-        let start = axis(item.start);
-        if start >= window.end.saturating_add(lookback) {
-            break;
-        }
+    for item in density.meeting(items, map, window, Tick::MAX) {
         for f in &item.fields {
             let (Some(span), Some(d)) = (f.span, f.driver) else {
                 continue;
@@ -197,13 +191,27 @@ struct Level {
 #[derive(Clone, Debug, Default)]
 pub struct Density {
     levels: Vec<Level>,
-    /// The longest item, in axis ticks, for finding the items a window meets.
+    /// The longest closed item, in axis ticks.
     longest: i64,
     items: u64,
+    /// Where a window finds its items: those shorter than `2^(long - 1)` ticks start at most
+    /// `reach` before it, and the rest, open ones among them, are held in `held` by id with
+    /// their spans, so a few long items do not make every window walk back as far as they reach.
+    long: u32,
+    reach: i64,
+    held: Vec<(Id, i64, Option<i64>)>,
 }
 
 /// The most buckets the finest level holds; coarser levels halve it.
 const FINEST: usize = 1 << 20;
+
+/// The most items a density holds apart as long.
+const LONG_AT_MOST: u64 = 1 << 16;
+
+/// An item's length class: lengths from `2^(k-1)` up to `2^k` are class `k`.
+fn class(len: i64) -> u32 {
+    64 - len.max(0).leading_zeros()
+}
 
 impl Density {
     /// The ladder of `items`, placed on the axis by `map`, with `marked` saying which are
@@ -215,17 +223,42 @@ impl Density {
     ) -> Self {
         let axis = |t: Tick| map.axis_saturating(t);
         let (mut lo, mut hi, mut longest, mut n) = (i64::MAX, i64::MIN, 0, 0u64);
+        let (mut classes, mut open) = ([0u64; 65], 0u64);
         for i in items.clone() {
-            let (s, e) = (axis(i.start), axis(i.end.unwrap_or(i.start)));
+            let s = axis(i.start);
             lo = lo.min(s);
             hi = hi.max(s);
-            longest = longest.max(e.saturating_sub(s));
+            match i.end {
+                Some(e) => {
+                    let len = axis(e).saturating_sub(s);
+                    longest = longest.max(len);
+                    classes[class(len) as usize] += 1;
+                }
+                None => open += 1,
+            }
             n += 1;
         }
         if n == 0 {
             return Self::default();
         }
         let span = (hi.saturating_sub(lo) as u128).max(1);
+        // The class from which items are held apart: the one that makes a window's walk least,
+        // about the items starting within reach of it plus every long one.
+        let per_tick = n as f64 / span as f64;
+        let (mut long, mut least, mut above) = (65u32, f64::INFINITY, open);
+        for k in (0..=65u32).rev() {
+            if k < 65 {
+                above += classes[k as usize];
+            }
+            if above > LONG_AT_MOST {
+                break;
+            }
+            let reach = if k == 0 { 0.0 } else { 2f64.powi(k as i32 - 1) };
+            let cost = per_tick * 2.0 * reach + above as f64;
+            if cost < least {
+                (long, least) = (k, cost);
+            }
+        }
         let mut shift = 0u8;
         while (span >> shift) as usize >= FINEST {
             shift += 1;
@@ -238,8 +271,15 @@ impl Density {
             counts: vec![0; len],
             marked: vec![0; len],
         };
+        let (mut reach, mut held) = (0, vec![]);
         for i in items {
-            let k = ((axis(i.start) >> shift) - first) as usize;
+            let start = axis(i.start);
+            let end = i.end.map(axis);
+            match end.map(|e| e.saturating_sub(start)) {
+                Some(len) if class(len) < long => reach = reach.max(len),
+                _ => held.push((i.id, start, end)),
+            }
+            let k = ((start >> shift) - first) as usize;
             if let Some(c) = level.counts.get_mut(k) {
                 *c = c.saturating_add(1);
             }
@@ -266,16 +306,55 @@ impl Density {
             }
             levels.push(next);
         }
+        held.sort_unstable_by_key(|h| h.0);
         Self {
             levels,
             longest,
             items: n,
+            long,
+            reach,
+            held,
         }
     }
 
     /// How many items it counts.
     pub fn items(&self) -> u64 {
         self.items
+    }
+
+    /// The items of `items` (the store it was built over) that meet `window` (axis ticks), in id
+    /// order, an open one reaching `settled`.
+    fn meeting<'a>(
+        &'a self,
+        items: &'a std::collections::BTreeMap<Id, Item>,
+        map: &'a Mapping,
+        window: &'a std::ops::Range<i64>,
+        settled: Tick,
+    ) -> impl Iterator<Item = &'a Item> + 'a {
+        let axis = |t: Tick| map.axis_saturating(t);
+        let meets = move |start: i64, end: Option<i64>| {
+            start < window.end && end.unwrap_or(axis(settled)) >= window.start
+        };
+        // An item's anchor lies at or after its start and within it.
+        let lo = Id::new(
+            KindId(0),
+            window.start.saturating_sub(self.reach.saturating_add(1)),
+        );
+        let short = (items.range(lo..).map(|(_, i)| i))
+            .take_while(move |i| axis(i.start) < window.end.saturating_add(self.reach))
+            .filter(move |i| {
+                let start = axis(i.start);
+                let end = i.end.map(axis);
+                let short = end.is_some_and(|e| class(e.saturating_sub(start)) < self.long);
+                short && meets(start, end)
+            });
+        let long = (self.held.iter())
+            .filter(move |&&(_, start, end)| meets(start, end))
+            .filter_map(|(id, _, _)| items.get(id));
+        Merge {
+            a: short.peekable(),
+            b: long.peekable(),
+        }
     }
 
     /// Items starting in `[from, to)` and how many are conditions, at the coarsest level whose
@@ -297,6 +376,24 @@ impl Density {
         let c = l.counts[a..b].iter().map(|&x| u64::from(x)).sum();
         let m = l.marked[a..b].iter().map(|&x| u64::from(x)).sum();
         (c, m)
+    }
+}
+
+/// Two iterators of items in id order, merged in id order.
+struct Merge<A: Iterator, B: Iterator> {
+    a: std::iter::Peekable<A>,
+    b: std::iter::Peekable<B>,
+}
+
+impl<'a, A: Iterator<Item = &'a Item>, B: Iterator<Item = &'a Item>> Iterator for Merge<A, B> {
+    type Item = &'a Item;
+
+    fn next(&mut self) -> Option<&'a Item> {
+        match (self.a.peek(), self.b.peek()) {
+            (Some(x), Some(y)) if y.id < x.id => self.b.next(),
+            (Some(_), _) => self.a.next(),
+            (None, _) => self.b.next(),
+        }
     }
 }
 
@@ -356,7 +453,8 @@ impl<'a> Track<'a> {
         self
     }
 
-    /// Where the analysis's input was lost, on its timeline.
+    /// Where the analysis's input was lost, on its timeline, in order and apart, as a host holds
+    /// them.
     pub fn lost(mut self, lost: &'a [Span]) -> Self {
         self.lost = lost;
         self
@@ -465,11 +563,13 @@ impl Widget for Track<'_> {
             let parts = self.parts.then(|| row(self.lanes));
             self.items(ui, &s, &lanes, parts, &mut shapes);
         }
-        // Lost input, across every row, as the waveform shades its lost time.
-        for l in self.lost {
+        // Lost input, across every row, as the waveform shades its lost time: only the spans the
+        // window meets.
+        let first = self.lost.partition_point(|l| axis(l.end) <= w.start);
+        for l in &self.lost[first..] {
             let (a, b) = (axis(l.start), axis(l.end));
-            if b <= w.start || a >= w.end {
-                continue;
+            if a >= w.end {
+                break;
             }
             let x0 = s.x(a as f64).max(plot.left());
             let x1 = s.x(b as f64).min(plot.right()).max(x0 + 1.0);
@@ -552,21 +652,12 @@ impl Track<'_> {
         let w = &self.shown.window;
         let axis = |t: Tick| self.map.axis_saturating(t) as f64;
         let pointer = ui.input(|i| i.pointer.hover_pos());
-        // An item's anchor lies at or after its start: those that start in the window, and
-        // those before it as long as the longest.
-        let lookback = self.density.longest.saturating_add(1);
-        let lo = Id::new(KindId(0), w.start.saturating_sub(lookback));
         // Where each lane's last item ends, in points.
         let mut ends = vec![f32::NEG_INFINITY; lanes.len()];
-        for item in self.items.range(lo..).map(|(_, i)| i) {
+        let meeting = self.density.meeting(self.items, &self.map, w, self.settled);
+        for item in meeting {
             let start = axis(item.start);
-            if start >= w.end as f64 + lookback as f64 {
-                break;
-            }
             let end = axis(item.end.unwrap_or(self.settled));
-            if end < w.start as f64 || start >= w.end as f64 {
-                continue;
-            }
             let (x0, x1) = (s.x(start).max(s.left), s.x(end).min(s.right));
             let x1 = x1.max(x0 + 1.0);
             let row = (self.rows.get(usize::from(item.id.kind.0))).map_or(0..1, Clone::clone);
