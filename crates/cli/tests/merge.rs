@@ -18,6 +18,16 @@ fn tickwave(args: &[&std::ffi::OsStr]) -> (bool, String, String) {
 #[test]
 fn two_fixtures_merge_verify_and_describe_their_sources() {
     let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../web/fixtures");
+    // identify-swd's sidecar includes the SWD decoder's annotations, which web/scripts/generate.ts
+    // writes rather than commits: without them there is nothing of identify-swd's to carry.
+    let generated = fixtures.join("identify-swd.swd.jsonl");
+    if !generated.exists() {
+        eprintln!(
+            "skipped: {} is missing; run `npm run generate` in web/ first",
+            generated.display()
+        );
+        return;
+    }
     let (swd, energy) = (
         fixtures.join("identify-swd.tickwave"),
         fixtures.join("energy.tickwave"),
