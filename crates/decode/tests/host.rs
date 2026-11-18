@@ -1209,6 +1209,25 @@ fn kept_checkpoints_spread_within_their_budget_and_a_seek_replays_from_the_neare
 }
 
 #[test]
+fn kept_checkpoints_can_be_spaced_by_the_observations_taken() {
+    let kept = |keeping: Keeping| {
+        let (mut h, [p, _]) =
+            pulses_host(line(60, 3, 20, vec![]), 15, None, HostOptions::default());
+        h.keep_checkpoints(p, keeping).unwrap();
+        run_all(&mut h);
+        (h.kept(p).unwrap().count as u64, h.observed(p))
+    };
+    let (by_ticks, observed) = kept(Keeping::new(Tick::MAX, usize::MAX));
+    assert_eq!(by_ticks, 1, "only the first, ticks alone never due again");
+    assert!(observed >= 100, "{observed}");
+    let (by_events, _) = kept(Keeping::new(Tick::MAX, usize::MAX).with_events(10));
+    assert!(
+        by_events + 2 >= observed / 10 && by_events <= observed / 10 + 1,
+        "{by_events} for {observed} observations"
+    );
+}
+
+#[test]
 fn window_size_does_not_change_the_output() {
     let gaps = vec![
         Span {

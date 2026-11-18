@@ -310,7 +310,7 @@ pub struct Exchange<'a> {
     pub run: RunId,
     pub out: Out,
     reply: Option<Window>,
-    taken: Option<Tick>,
+    taken: Option<(Tick, u64)>,
     inbox: &'a mut VecDeque<Delivery>,
     budget: usize,
     request: Option<Request>,
@@ -336,7 +336,7 @@ impl Exchange<'_> {
     /// the window's end.
     pub fn reply(&mut self) -> Option<Window> {
         let w = self.reply.take()?;
-        self.taken = Some(w.upto);
+        self.taken = Some((w.upto, w.events.len() as u64));
         Some(w)
     }
 
@@ -448,7 +448,7 @@ struct Done {
     /// Deliveries remain that the budget kept from the decoder.
     more: bool,
     out: Out,
-    taken: Option<Tick>,
+    taken: Option<(Tick, u64)>,
     request: Option<Request>,
     twice: bool,
     end: Option<Tick>,
@@ -637,6 +637,7 @@ struct Snapshot {
     settled: Tick,
     input: Tick,
     consumed: Tick,
+    observed: u64,
     finished: Option<Tick>,
     lost: Vec<Span>,
     lost_end: Tick,
@@ -688,17 +689,30 @@ struct Link {
 }
 
 /// How a host keeps checkpoints of a wire analysis and everything stacked on it as its input
-/// advances: one each time it has taken `every` more ticks, at most `budget` bytes of them.
+/// advances: one each time it has taken `every` more ticks, or sooner where `events` is set,
+/// each time it has taken that many more observations, at most `budget` bytes of them. Replay
+/// costs about the same per observation, so spacing by observations makes every replay about
+/// the same work where the input's density varies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Keeping {
     pub every: Tick,
+    pub events: Option<u64>,
     pub budget: usize,
 }
 
 impl Keeping {
     pub fn new(every: Tick, budget: usize) -> Self {
-        Self { every, budget }
+        Self {
+            every,
+            events: None,
+            budget,
+        }
+    }
+
+    pub fn with_events(mut self, events: u64) -> Self {
+        self.events = Some(events);
+        self
     }
 }
 
@@ -707,6 +721,7 @@ struct Keeper {
     root: AnalysisId,
     keeping: Keeping,
     next: Tick,
+    next_events: u64,
     held: Vec<(Checkpoint, usize)>,
     bytes: usize,
 }
@@ -883,6 +898,8 @@ struct Run {
     fresh: bool,
     finished: Option<Tick>,
     consumed: Tick,
+    /// How many observations its decoder has taken from the wire.
+    observed: u64,
     /// The start frontier this run declared last, and the settlement frontier derived from it.
     frontier: Tick,
     settled: Tick,
@@ -1127,6 +1144,11 @@ impl Host {
     pub fn store(&self, a: AnalysisId) -> &Store {
         let a = a.index();
         &self.analyses[a].run.store
+    }
+
+    /// How many observations the run's decoder has taken from the wire.
+    pub fn observed(&self, a: AnalysisId) -> u64 {
+        self.analyses[a.index()].run.observed
     }
 
     /// How far the run's decoder has taken its wire input.
@@ -1672,8 +1694,9 @@ impl Host {
         r.more = pause == Pause::Work || (pause == Pause::Input && more);
         // What arrived during the turn is new to the decoder.
         r.fresh |= r.ready.is_some();
-        if let Some(t) = taken {
+        if let Some((t, n)) = taken {
             r.consumed = t;
+            r.observed += n;
         }
         if let Some(u) = upstream {
             r.input = u;
@@ -1862,6 +1885,7 @@ impl Host {
                 settled: r.settled,
                 input: r.input,
                 consumed: r.consumed,
+                observed: r.observed,
                 finished: r.finished,
                 lost: r.lost.clone(),
                 lost_end: r.lost_end,
@@ -1896,8 +1920,8 @@ impl Host {
 
     /// Keeps checkpoints of wire analysis `a` and everything stacked on it as its input
     /// advances, as `keeping` says, replacing any keeping set before. Each is taken between
-    /// turns, once the wire analysis has taken `every` ticks past the input of the last one
-    /// taken, so a replay after a seek takes none.
+    /// turns, once the wire analysis has taken `every` ticks or `events` observations past the
+    /// last one taken, so a replay after a seek takes none.
     pub fn keep_checkpoints(
         &mut self,
         a: AnalysisId,
@@ -1912,6 +1936,7 @@ impl Host {
             root: a,
             keeping,
             next: Tick::MIN,
+            next_events: 0,
             held: vec![],
             bytes: 0,
         });
@@ -1950,13 +1975,16 @@ impl Host {
             let none_yet = r.consumed == r.local.unwrap_or(Tick::MIN);
             // `next` only moves on, so a replay after a seek takes none. Waiting until everything
             // stacked on it has taken its deliveries keeps them out of the checkpoint.
-            if r.out || none_yet || r.consumed < keeper.next || !self.quiet_below(keeper.root) {
+            let due = r.consumed >= keeper.next
+                || (keeper.keeping.events).is_some_and(|_| r.observed >= keeper.next_events);
+            if r.out || none_yet || !due || !self.quiet_below(keeper.root) {
                 continue;
             }
-            let consumed = r.consumed;
+            let (consumed, observed) = (r.consumed, r.observed);
             let cut = self.checkpoint(keeper.root);
             let keeper = &mut self.keepers[k];
             keeper.next = consumed.saturating_add(keeper.keeping.every);
+            keeper.next_events = observed.saturating_add(keeper.keeping.events.unwrap_or(0));
             // A decoder that cannot copy its state is replayed from the start instead.
             if let Ok(mut cut) = cut {
                 // Closed items are output, not state: a seek re-derives what it keeps.
@@ -2053,6 +2081,7 @@ impl Host {
             run.settled = snap.settled;
             run.input = snap.input;
             run.consumed = snap.consumed;
+            run.observed = snap.observed;
             run.finished = snap.finished;
             run.lost = snap.lost.clone();
             run.lost_end = snap.lost_end;
@@ -2097,6 +2126,7 @@ impl Run {
             fresh: false,
             finished: None,
             consumed: local.unwrap_or(Tick::MIN),
+            observed: 0,
             frontier: Tick::MIN,
             settled: Tick::MIN,
             input: Tick::MIN,
