@@ -17,11 +17,11 @@ use std::time::Duration;
 
 use egui_kittest::Harness;
 use escapement_tickwave_decode::{
-    Host, InputSpec, Schema, Span, Store, Tick, name, wire::WireSource,
+    Host, InputSpec, Schema, Span, Store, Tick, Value, name, wire::WireSource,
 };
-use escapement_tickwave_decoders::{adiv5, swd};
+use escapement_tickwave_decoders::{adiv5, cjtag, swd};
 use escapement_tickwave_egui::track::{
-    Density, Labels, Template, Track, condition, decoder_roles, driver_paints,
+    Density, Labels, Template, Track, condition, decoder_roles, driver_paints, value_text,
 };
 use escapement_tickwave_egui::{Graph, ViewState, Viewer, Window};
 use escapement_tickwave_view::cursor::timeline_map;
@@ -279,6 +279,26 @@ fn a_tracks_rows_are_reserved_before_anything_is_decoded() {
         full[0], full[1],
         "SWD's parts row and ADIv5's second lane are reserved"
     );
+}
+
+#[test]
+fn a_bool_reads_as_a_bit_and_a_check_by_its_name() {
+    let tms = value_text(
+        &cjtag::schema(),
+        cjtag::PACKET,
+        cjtag::PACKET_TMS,
+        &Value::Bool(true),
+    );
+    let tdo = value_text(
+        &cjtag::schema(),
+        cjtag::PACKET,
+        cjtag::PACKET_TDO,
+        &Value::Bool(false),
+    );
+    assert_eq!((tms.as_str(), tdo.as_str()), ("1", "0"));
+    let parity = |n| value_text(&swd::schema(), swd::TRANSFER, swd::PARITY, &Value::Name(n));
+    assert_eq!(parity(swd::PARITY_OK), "ok");
+    assert_eq!(parity(swd::PARITY_BAD), "bad");
 }
 
 #[test]

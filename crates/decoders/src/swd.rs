@@ -49,6 +49,9 @@ pub const DP: u16 = 1;
 /// `DIR`'s names.
 pub const READ: u16 = 0;
 pub const WRITE: u16 = 1;
+/// `PARITY`'s names: whether the data's parity bit matched it.
+pub const PARITY_OK: u16 = 0;
+pub const PARITY_BAD: u16 = 1;
 /// `ACK`'s names, in this order.
 pub const ACKS: [&str; 5] = ["OK", "WAIT", "FAULT", "no response", "invalid"];
 
@@ -65,7 +68,7 @@ pub fn schema() -> Schema {
                 field("ack", FieldType::Name(ACKS.map(name).to_vec())),
                 field("trn2", FieldType::Phase),
                 field("data", FieldType::Word { bits: 32 }),
-                field("parity", FieldType::Bool),
+                field("parity", FieldType::Name(vec![name("ok"), name("bad")])),
             ])
             .with_sequences(vec![
                 seq("request", bit()),
@@ -403,8 +406,12 @@ impl Track {
             let data = word(u64::from(w), 32);
             out.part(id, DATA, data, span(at, at + 32), driver);
             bits(out, id, DATA_BITS, at, at + 32);
-            let ok = t.parity == Some(true);
-            out.part(id, PARITY, Value::Bool(ok), span(at + 32, at + 33), driver);
+            let ok = if t.parity == Some(true) {
+                PARITY_OK
+            } else {
+                PARITY_BAD
+            };
+            out.part(id, PARITY, Value::Name(ok), span(at + 32, at + 33), driver);
             bits(out, id, PARITY_BITS, at + 32, at + 33);
             if t.read {
                 turn2(out);

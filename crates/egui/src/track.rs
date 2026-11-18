@@ -74,7 +74,7 @@ impl Labels {
 }
 
 /// A field's value as a label shows it: a word in hex as wide as its bits, a name by its
-/// declared name, an unknown one as a question mark.
+/// declared name, a bool as 1 or 0, an unknown one as a question mark.
 pub fn value_text(schema: &Schema, kind: KindId, field: FieldId, value: &Value) -> String {
     let decl = schema
         .kind(kind)
@@ -90,8 +90,7 @@ pub fn value_text(schema: &Schema, kind: KindId, field: FieldId, value: &Value) 
                 .map_or_else(|| "?".into(), |s| s.to_string()),
             _ => "?".into(),
         },
-        Value::Bool(true) => "ok".into(),
-        Value::Bool(false) => "bad".into(),
+        Value::Bool(b) => u8::from(*b).to_string(),
         Value::Text(t) => t.clone(),
         Value::Bits { bytes, .. } => bytes.iter().rev().map(|b| format!("{b:02X}")).collect(),
         Value::Phase => String::new(),

@@ -449,7 +449,7 @@ impl Adi {
                             p.data = Some((value, span));
                         }
                     }
-                    (swd::PARITY, &Value::Bool(ok)) => p.parity = Some(ok),
+                    (swd::PARITY, &Value::Name(n)) => p.parity = Some(n == swd::PARITY_OK),
                     _ => {}
                 }
             }

@@ -126,7 +126,7 @@ fn transfers_decode_as_encoded() {
         assert_eq!(named(i, swd::ACK), Some(ack));
         if t.ack == 1 {
             assert_eq!(word(i, swd::DATA), Some(u64::from(t.data)));
-            assert_eq!(value(i, swd::PARITY), Some(Value::Bool(true)));
+            assert_eq!(value(i, swd::PARITY), Some(Value::Name(swd::PARITY_OK)));
             assert_eq!(i.seq(swd::DATA_BITS).len(), 32);
         }
         assert_eq!(i.status, Some(Status::Complete));
