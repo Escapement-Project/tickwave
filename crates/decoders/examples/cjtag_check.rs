@@ -17,8 +17,11 @@ use escapement_tickwave_view::{Cache, Recording};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+/// Items by kind, and those closed incomplete by cause, each by its schema index.
+type Tally = (BTreeMap<u16, u64>, BTreeMap<u16, u64>);
+
 /// Counts cJTAG's completed items by kind, and those closed incomplete by cause.
-struct Kinds(Arc<Mutex<(BTreeMap<u16, u64>, BTreeMap<u16, u64>)>>);
+struct Kinds(Arc<Mutex<Tally>>);
 
 impl Decoder for Kinds {
     fn turn(&mut self, ex: &mut Exchange<'_>) -> Pause {
