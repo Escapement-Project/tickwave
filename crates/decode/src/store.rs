@@ -534,11 +534,8 @@ impl Store {
         match op {
             Op::Open { id, parent, start } => {
                 c.opens += 1;
-                if self
-                    .keep
-                    .iter()
-                    .any(|s| s.start <= *start && *start < s.end)
-                {
+                // Kept while it could still meet a span; dropped at its close if it does not.
+                if self.keep.iter().any(|s| *start < s.end) {
                     self.items.insert(
                         *id,
                         Item {
@@ -600,8 +597,69 @@ impl Store {
                 if let Some(item) = self.items.get_mut(id) {
                     item.end = Some(*end);
                     item.status = Some(*status);
+                    if !self.keep.iter().any(|s| meets(item.start, *end, s)) {
+                        self.items.remove(id);
+                    }
                 }
             }
         }
+    }
+}
+
+/// Whether an item over `start..end` meets span `s`. An item of no length meets a span it lies in.
+fn meets(start: Tick, end: Tick, s: &Span) -> bool {
+    start < s.end && s.start < end.max(start.saturating_add(1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::output::KindId;
+
+    #[test]
+    fn an_item_is_kept_where_it_meets_a_kept_span_wherever_it_starts() {
+        let span = Span {
+            start: 100,
+            end: 200,
+        };
+        let mut store = Store::with_keep(vec![span]);
+        let item = |anchor| Id::new(KindId(0), anchor);
+        let ops = |anchor: Tick, end: Tick| {
+            [
+                Op::Open {
+                    id: item(anchor),
+                    parent: None,
+                    start: anchor,
+                },
+                Op::Close {
+                    id: item(anchor),
+                    end,
+                    status: Status::Complete,
+                },
+            ]
+        };
+        for (start, end) in [
+            (50, 120),
+            (150, 160),
+            (180, 250),
+            (20, 300),
+            (40, 90),
+            (200, 210),
+            (170, 170),
+        ] {
+            store.apply_batch(&ops(start, end), 8).unwrap();
+        }
+        let kept: Vec<Tick> = store.items.keys().map(|id| id.anchor).collect();
+        assert_eq!(kept, [20, 50, 150, 170, 180]);
+        let open = Op::Open {
+            id: item(60),
+            parent: None,
+            start: 60,
+        };
+        store.apply_batch(&[open], 8).unwrap();
+        assert!(
+            store.items.contains_key(&item(60)),
+            "open, it could still meet the span"
+        );
     }
 }
