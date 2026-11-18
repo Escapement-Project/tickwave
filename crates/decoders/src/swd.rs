@@ -6,9 +6,11 @@
 //! bounded number of rises ahead, so a transfer is emitted once the rises after it are held, or at
 //! a gap or the end of input, where what the lookahead holds is framed before the rest is dropped.
 //!
-//! The turnaround is a setting, `turnaround`, one to four cycles as DLCR sets it. Not decoded: the data phase
-//! that follows a WAIT or FAULT acknowledge when ORUNDETECT is set, which is framed as a transfer
-//! without data, its data cycles left to the search for the next request.
+//! The turnaround is a setting, `turnaround`, one to four cycles as DLCR sets it, fixed for the
+//! run: a DLCR write that changes it is not followed, and the transfers after it are framed with
+//! the turnaround set. Not decoded: the data phase that follows a WAIT or FAULT acknowledge when
+//! ORUNDETECT is set, which is framed as a transfer without data, its data cycles left to the
+//! search for the next request.
 
 use escapement_tickwave_decode::{
     Cause, Decoder, Definition, Element, ElementType, Exchange, Factory, FieldId, FieldType, Id,
