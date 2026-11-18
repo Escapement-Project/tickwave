@@ -918,6 +918,22 @@ fn panel<'a>(
     map: Mapping,
     path: &Path,
 ) -> Harness<'a, PanelState> {
+    placed(decoded, k, item, map, path, None)
+}
+
+/// The height of the stand-in for a plot above a panel under it.
+const PLOT: f32 = 300.0;
+
+/// As `panel`; with `under`, a 400-point-wide window whose top `PLOT` points stand in for a plot
+/// and whose panel lies under it, that many points tall.
+fn placed<'a>(
+    decoded: &'a [Decoded],
+    k: usize,
+    item: &'a escapement_tickwave_decode::Item,
+    map: Mapping,
+    path: &Path,
+    under: Option<f32>,
+) -> Harness<'a, PanelState> {
     let timebase = open(path).timebase();
     let palette = escapement_tickwave_egui::Palette::from_visuals(&egui::Visuals::default());
     // The item as given, an open one in place of its closed self.
@@ -946,11 +962,20 @@ fn panel<'a>(
                         reads: j.checked_sub(1),
                     })
                     .collect();
-                // Against the right edge, as a host beside its plot puts it.
-                let right = egui::Layout::right_to_left(egui::Align::Min);
-                ui.with_layout(right, |ui| {
-                    ui.add(Panel::new(&palette, state, &analyses, 360.0, timebase, map));
-                });
+                let panel = Panel::new(&palette, state, &analyses, 360.0, timebase, map);
+                match under {
+                    Some(h) => {
+                        let plot = egui::vec2(ui.available_width(), PLOT);
+                        ui.allocate_exact_size(plot, egui::Sense::hover());
+                        ui.add(panel.under(h));
+                        ui.label("after the panel");
+                    }
+                    None => {
+                        // Against the right edge, as a host beside its plot puts it.
+                        let right = egui::Layout::right_to_left(egui::Align::Min);
+                        ui.with_layout(right, |ui| ui.add(panel));
+                    }
+                }
             },
             state,
         );
@@ -1409,4 +1434,61 @@ fn the_text_tab_joins_an_analysis_bytes_into_lines_each_character_from_its_item(
     h.state_mut().tab = Tab::Text;
     h.run();
     h.get_by_label("No analysis here reads as text.");
+}
+
+#[test]
+fn a_narrow_panel_sits_under_the_plot_and_scrolls_inside() {
+    use egui_kittest::kittest::Queryable;
+    use escapement_tickwave_egui::panel::Tab;
+    assert!(Panel::fits_beside(1280.0, 360.0));
+    assert!(!Panel::fits_beside(600.0, 360.0));
+    let (decoded, map, _) = decode(&fixture());
+    let t = transfers(&decoded);
+    let height = 200.0;
+    let mut h = placed(&decoded, 0, t[0], map, &fixture(), Some(height));
+    // The whole width under the plot, its control at the top right.
+    let at = h.get_by_label("\u{21e5}").rect();
+    // The window's right edge, inside the harness's 8-point margin.
+    assert_eq!(at.right(), 400.0 - 8.0);
+    assert!(
+        at.top() >= PLOT && at.top() < PLOT + 20.0,
+        "just under the plot: {at:?}"
+    );
+    // The list scrolls inside the height: its rows end above the panel's foot.
+    h.state_mut().tab = Tab::List;
+    h.run();
+    let foot = at.top() + height;
+    let rows: Vec<egui::Rect> = (t.iter())
+        .filter_map(|i| {
+            let time = format_interval(
+                map.axis_saturating(i.start),
+                open(&fixture()).timebase(),
+                map.m(),
+            );
+            h.query_by_label_contains(&format!("{time}  "))
+                .map(|n| n.rect())
+        })
+        .collect();
+    assert!(
+        !rows.is_empty() && rows.len() < t.len(),
+        "{} rows",
+        rows.len()
+    );
+    // What comes after the panel starts at its foot, however long the list.
+    let after = h.get_by_label("after the panel").rect().top();
+    assert!(
+        after >= foot && after < foot + 10.0,
+        "{after} after a foot at {foot}"
+    );
+    // Collapsed, it keeps its control's row, the control where it was.
+    h.get_by_label("\u{21e5}").click();
+    h.run();
+    assert_eq!(Panel::reserved_height(h.state(), height), Panel::COLLAPSED);
+    assert_eq!(h.get_by_label("\u{21e4}").rect(), at);
+    let after = h.get_by_label("after the panel").rect().top();
+    let row = at.top() + Panel::COLLAPSED;
+    assert!(
+        after >= row && after < row + 10.0,
+        "{after} after the control's row"
+    );
 }

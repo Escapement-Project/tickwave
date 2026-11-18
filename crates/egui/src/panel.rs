@@ -1,6 +1,8 @@
 //! The side panel: the item the reader selected on a track, in full. Its host gives it a fixed
 //! width and reserves it while a decode track shows, so selecting an item never narrows the plot
-//! under the reader; with nothing selected it holds a note. Its collapse control sits at the top
+//! under the reader; with nothing selected it holds a note. Where the plot would be left
+//! narrower than `Panel::PLOT_AT_LEAST`, the host puts the panel under the plot instead, at a
+//! height it reserves, and the panel scrolls inside it. Its collapse control sits at the top
 //! right, where it stays open or collapsed.
 //!
 //! An item shows its fullest label, its time and duration, its status and its citation; then its
@@ -208,13 +210,18 @@ pub struct Panel<'a> {
     state: &'a mut PanelState,
     analyses: &'a [Analysis<'a>],
     width: f32,
+    /// Under the plot, this many points tall; else beside it.
+    under: Option<f32>,
     timebase: Ratio,
     map: Mapping,
 }
 
 impl<'a> Panel<'a> {
-    /// The width a collapsed panel keeps: its control's.
+    /// The width a collapsed panel keeps beside the plot, and the height it keeps under it: its
+    /// control's.
     pub const COLLAPSED: f32 = CONTROL;
+    /// The least width a plot keeps beside an open panel, in points.
+    pub const PLOT_AT_LEAST: f32 = 480.0;
 
     /// `map` places the analyses' ticks on the recording's axis, whose ticks are `timebase`'s.
     pub fn new(
@@ -230,9 +237,29 @@ impl<'a> Panel<'a> {
             state,
             analyses,
             width,
+            under: None,
             timebase,
             map,
         }
+    }
+
+    /// Whether a panel `width` wide fits beside a plot in `available` points; if not, a host puts
+    /// it under the plot with `under`.
+    pub fn fits_beside(available: f32, width: f32) -> bool {
+        available >= width + Self::PLOT_AT_LEAST
+    }
+
+    /// The panel under the plot: the whole width, `height` points tall when open and its control's
+    /// row collapsed. Its tabs scroll inside it.
+    pub fn under(mut self, height: f32) -> Self {
+        self.under = Some(height);
+        self
+    }
+
+    /// The height a host reserves under its plot for a panel `height` tall when open, as `state`
+    /// has it.
+    pub fn reserved_height(state: &PanelState, height: f32) -> f32 {
+        Self::reserved(state, height)
     }
 
     /// The width a host reserves for a panel `width` wide when open, as `state` has it.
@@ -868,9 +895,14 @@ impl<'a> Panel<'a> {
 
 impl Widget for Panel<'_> {
     fn ui(mut self, ui: &mut Ui) -> Response {
-        let width = Self::reserved(self.state, self.width);
-        let (rect, response) =
-            ui.allocate_exact_size(vec2(width, ui.available_height()), Sense::hover());
+        let size = match self.under {
+            Some(h) => vec2(ui.available_width(), Self::reserved_height(self.state, h)),
+            None => vec2(
+                Self::reserved(self.state, self.width),
+                ui.available_height(),
+            ),
+        };
+        let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
         // The control at the top right, where it stays open or collapsed.
         let control = Rect::from_min_size(
             pos2(rect.right() - CONTROL, rect.top()),
