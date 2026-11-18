@@ -1438,6 +1438,50 @@ fn the_forward_pass_takes_a_turn_after_a_run_of_window_turns() {
 }
 
 #[test]
+fn a_window_ahead_of_the_forward_pass_is_provisional_until_the_pass_reaches_it() {
+    let (mut all, [_, aq]) = pulses_host(line(80, 3, 20, vec![]), 15, None, HostOptions::default());
+    run_all(&mut all);
+    let (mut h, [p, q]) = pulses_host(line(80, 3, 20, vec![]), 15, None, HostOptions::default());
+    h.keep_checkpoints(p, Keeping::new(50, usize::MAX)).unwrap();
+    while h.consumed(p) < 300 {
+        h.step().unwrap();
+    }
+    let window = Span {
+        start: 1000,
+        end: 1100,
+    };
+    let span =
+        |items: &std::collections::BTreeMap<Id, escapement_tickwave_decode::Item>| -> Vec<_> {
+            (items.iter())
+                .filter(|(_, i)| i.start < window.end && i.end.is_none_or(|e| e > window.start))
+                .map(|(id, i)| (*id, i.end, i.fields.len()))
+                .collect()
+        };
+    let ahead = h.derive(p, window).unwrap();
+    assert!(ahead.provisional && ahead.restored.is_none());
+    let (wp, wq) = (ahead.chain[0].1, ahead.chain[1].1);
+    assert_eq!(h.consumed(wp), window.start, "it starts at the window");
+    h.run_until(|h| h.settled(wq) >= window.end).unwrap();
+    assert!(
+        h.consumed(p) < window.start,
+        "the forward pass has not reached it"
+    );
+    assert!(!h.store(wp).items.is_empty());
+    h.retire(wp);
+    h.run_until(|h| h.consumed(p) >= window.end).unwrap();
+    let again = h.derive(p, window).unwrap();
+    assert!(!again.provisional && again.restored.is_some());
+    let (_, wq) = (again.chain[0].1, again.chain[1].1);
+    h.run_until(|h| h.settled(wq) >= window.end).unwrap();
+    assert_eq!(
+        span(&h.store(wq).items),
+        span(&all.store(aq).items),
+        "exact once the pass is past"
+    );
+    let _ = q;
+}
+
+#[test]
 fn window_size_does_not_change_the_output() {
     let gaps = vec![
         Span {

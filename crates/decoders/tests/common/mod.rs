@@ -92,6 +92,9 @@ impl Source for Wires {
         w.end = (self.end < upto).then_some(self.end);
         Ok(Some(w))
     }
+    fn fork(&self) -> Option<Box<dyn Source>> {
+        Some(Box::new(self.clone()))
+    }
 }
 
 /// An SWD transfer to encode.

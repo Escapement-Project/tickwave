@@ -658,6 +658,9 @@ pub enum CheckpointError {
 pub struct Derived {
     pub chain: Vec<(AnalysisId, AnalysisId)>,
     pub restored: Option<Tick>,
+    /// Started locally at the window's start, ahead of the forward pass: its decoders begin
+    /// without context, which their unknowns say. Derive it again once the pass is past it.
+    pub provisional: bool,
 }
 
 /// One run's state in a checkpoint.
@@ -2102,7 +2105,8 @@ impl Host {
     /// Re-derives `window` of wire analysis `a` and everything stacked on it beside their forward
     /// runs, which carry on as they were: a chain of analyses of its own, restored from the
     /// latest kept checkpoint at or before the window's start or from the beginning, reading a
-    /// fork of the source and keeping the window. It runs before the forward chain, being added
+    /// fork of the source and keeping the window. A window the forward pass has not reached
+    /// starts locally at its start instead, provisional. It runs before the forward chain, being added
     /// after it, until `retire`.
     pub fn derive(&mut self, a: AnalysisId, window: Span) -> Result<Derived, CheckpointError> {
         let root = a.index();
@@ -2122,7 +2126,13 @@ impl Host {
         if u16::try_from(base + order.len()).is_err() {
             return Err(CheckpointError::NoRoom);
         }
-        let kept = (self.keepers.iter().position(|k| k.root == a))
+        // Ahead of the forward pass, no checkpoint holds the context: start there without it.
+        let r = &self.analyses[root].run;
+        let provisional = r.finished.is_none() && window.start > r.consumed;
+        let local = provisional.then_some(window.start);
+        let kept = (!provisional)
+            .then(|| self.keepers.iter().position(|k| k.root == a))
+            .flatten()
             .map(|k| &self.keepers[k].held)
             .and_then(|held| {
                 let at = held.partition_point(|(c, _)| c.consumed <= window.start);
@@ -2137,7 +2147,7 @@ impl Host {
             let decoder = match kept {
                 Some(cut) => (cut.snaps[k].decoder.save())
                     .ok_or_else(|| CheckpointError::Unsupported(an.name.clone()))?,
-                None => (an.factory)(an.run.local),
+                None => (an.factory)(local.or(an.run.local)),
             };
             decoders.push(decoder);
         }
@@ -2176,7 +2186,7 @@ impl Host {
                 }
                 None => Run::new(
                     id(x),
-                    an.run.local,
+                    local.or(an.run.local),
                     decoder,
                     Store::with_keep(vec![window]),
                     bound,
@@ -2201,7 +2211,11 @@ impl Host {
         let chain = (order.iter())
             .map(|&x| (AnalysisId(x as u16), AnalysisId(place(x) as u16)))
             .collect();
-        Ok(Derived { chain, restored })
+        Ok(Derived {
+            chain,
+            restored,
+            provisional,
+        })
     }
 
     /// Retires the window chain whose wire analysis is `a`: its runs never run again, and their
