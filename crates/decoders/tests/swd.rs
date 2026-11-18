@@ -28,6 +28,17 @@ fn host_with(
     window: Tick,
     local: Option<Tick>,
 ) -> (Host, [AnalysisId; 3]) {
+    host_adi(options, w, window, local, &[])
+}
+
+/// SWD, ADIv5 bound with `adi` and MEM-AP.
+fn host_adi(
+    options: HostOptions,
+    w: Wires,
+    window: Tick,
+    local: Option<Tick>,
+    adi: &[(&str, escapement_tickwave_decode::Setting)],
+) -> (Host, [AnalysisId; 3]) {
     let mut h = Host::new(options);
     let s = h
         .add(
@@ -48,7 +59,7 @@ fn host_with(
             adiv5::adi_definition(),
             InputSpec::Upstream(adiv5::adi_subscription(s)),
             adiv5::Adi::factory(),
-            &[],
+            adi,
             all(),
         )
         .unwrap();
@@ -268,6 +279,60 @@ fn ap_registers_are_named_by_the_class_an_idr_read_gives() {
         got,
         [(Some(0x2000_0000), Some(3))],
         "MEM-AP skips the JTAG-AP, and an AP not yet identified writes at no TAR"
+    );
+}
+
+#[test]
+fn the_idr_setting_identifies_aps_from_the_start_until_an_idr_read() {
+    let ts = vec![
+        dp_write(0x8, 0x0000_0000),
+        ap_write(0x4, 0x2000_0000),
+        ap_write(0xC, 0x0000_0001),
+        dp_write(0x8, 0x0100_0000),
+        ap_write(0x4, 0x0000_0001),
+        ap_write(0xC, 0x0000_0002),
+        dp_write(0x8, 0x0200_0000),
+        ap_write(0x0, 0x0000_0000),
+        // AP 1's own IDR read: a MEM-AP after all.
+        dp_write(0x8, 0x0100_00F0),
+        ap_read(0xC, 0),
+        dp_read(0xC, IDR),
+        dp_write(0x8, 0x0100_0000),
+        ap_write(0x4, 0x2000_0010),
+    ];
+    let (b, _) = bits(&ts);
+    let idr = adiv5::idr(&[IDR.into(), JTAG_AP_IDR.into(), adiv5::IDR_NOT_GIVEN]);
+    let (mut h, [_, a, m]) = host_adi(HostOptions::default(), wires(&b, P), 100, None, &[idr]);
+    run(&mut h);
+    let class = |n| Some(Value::Name(n));
+    let got: Vec<_> = (of(&h, a, adiv5::AP_WRITE).iter())
+        .map(|i| (named(i, adiv5::AP_NAME), value(i, adiv5::AP_CLASS)))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (Some(1), class(adiv5::MEM_AP)),
+            (Some(3), class(adiv5::MEM_AP)),
+            (Some(11), class(adiv5::JTAG_AP)),
+            (None, class(adiv5::JTAG_AP)),
+            (
+                None,
+                Some(Value::Unknown {
+                    reason: adiv5::NO_IDR,
+                    needs: Some(adiv5::NEEDS_IDR),
+                })
+            ),
+            (Some(1), class(adiv5::MEM_AP)),
+        ],
+        "AP 0 a MEM-AP and AP 1 a JTAG-AP from the start, AP 2 left out, then AP 1's IDR read"
+    );
+    let mem: Vec<_> = (of(&h, m, adiv5::MEM_WRITE).iter())
+        .map(|i| (word(i, adiv5::ADDRESS), word(i, adiv5::MEM_VALUE)))
+        .collect();
+    assert_eq!(
+        mem,
+        [(Some(0x2000_0000), Some(1))],
+        "MEM-AP skips AP 1 as a JTAG-AP"
     );
 }
 

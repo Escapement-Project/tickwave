@@ -14,8 +14,10 @@
 //! Each AP's class comes from its IDR reads (ADIv5.2 C1.3.2), and an AP access carries the class
 //! known when it was made; an IDR read carries the class its own value gives. A register's name
 //! follows the class: IDR for any AP, the only register every AP has (C1.3.1); a MEM-AP's and a
-//! JTAG-AP's registers once an IDR read shows the AP is one. MEM-AP skips an AP known to be of
-//! another class and takes one not yet identified for a MEM-AP.
+//! JTAG-AP's registers once an IDR read shows the AP is one. The setting `idr` gives APs' IDRs
+//! from the start, for a recording that begins after the debugger read them; a later IDR read
+//! takes over. MEM-AP skips an AP known to be of another class and takes one not yet identified
+//! for a MEM-AP.
 
 use crate::swd;
 use escapement_tickwave_decode::{
@@ -202,20 +204,28 @@ pub fn adi_schema() -> Schema {
 /// JTAG-DP's transfers carry it: the names of the setting `reads`.
 pub const READS: SettingId = SettingId(0);
 pub const READS_NAMES: [&str; 2] = ["posted", "own"];
+/// Each AP's IDR from the start, AP 0 first, `IDR_NOT_GIVEN` for an AP left out. Empty, the
+/// default, gives none.
+pub const IDR: SettingId = SettingId(1);
+pub const IDR_NOT_GIVEN: i64 = -1;
 
 pub fn adi_definition() -> Arc<Definition> {
     Arc::new(
-        Definition::new("adiv5", 1, adi_schema()).with_settings(vec![SettingDecl::choice(
-            "reads",
-            READS_NAMES,
-            0,
-        )]),
+        Definition::new("adiv5", 1, adi_schema()).with_settings(vec![
+            SettingDecl::choice("reads", READS_NAMES, 0),
+            SettingDecl::list("idr", IDR_NOT_GIVEN..=0xFFFF_FFFF, 256, vec![]),
+        ]),
     )
 }
 
 /// ADIv5's reads setting, as a binding gives it: each read carrying its own data, or posted.
 pub fn reads(own: bool) -> (&'static str, Setting) {
     ("reads", Setting::Name(name(READS_NAMES[usize::from(own)])))
+}
+
+/// ADIv5's IDR setting, as a binding gives it: each AP's IDR from the start, AP 0 first.
+pub fn idr(by_ap: &[i64]) -> (&'static str, Setting) {
+    ("idr", Setting::List(by_ap.to_vec()))
 }
 
 /// What ADIv5 subscribes to of SWD.
@@ -353,8 +363,9 @@ pub struct Adi {
     up: Option<Tick>,
     /// Each read carries its own data, as JTAG-DP's do.
     own_reads: bool,
-    /// Each AP's class from its last IDR read with a known value, or why it has none. An AP's
-    /// IDR is read-only and fixed, so a recording gap forgets SELECT but not these.
+    /// Each AP's class from its last IDR read with a known value, else from the `idr` setting, or
+    /// why it has none. An AP's IDR is read-only and fixed, so a recording gap forgets SELECT but
+    /// not these.
     classes: HashMap<u8, Result<u16, Reason>>,
 }
 
@@ -378,6 +389,12 @@ impl Adi {
         Box::new(|b, local| {
             let mut adi = Self::new(local);
             adi.own_reads = b.choice(READS) == Some(1);
+            // Bound, each entry is a 32-bit IDR or `IDR_NOT_GIVEN`, and there are at most 256.
+            for (ap, &v) in b.list(IDR).unwrap_or(&[]).iter().enumerate() {
+                if v != IDR_NOT_GIVEN {
+                    adi.classes.insert(ap as u8, ap_class(v as u32));
+                }
+            }
             Box::new(adi)
         })
     }
