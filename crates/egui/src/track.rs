@@ -707,6 +707,7 @@ pub struct Track<'a> {
     parts: bool,
     provisional: bool,
     selected: Option<Id>,
+    lit: Option<Span>,
     /// The lanes its rows take together, and each kind's range of them.
     lanes: usize,
     rows: Vec<std::ops::Range<usize>>,
@@ -741,6 +742,7 @@ impl<'a> Track<'a> {
             parts: false,
             provisional: false,
             selected: None,
+            lit: None,
             lanes,
             rows,
         }
@@ -769,6 +771,13 @@ impl<'a> Track<'a> {
     /// `Track::clicked`.
     pub fn selected(mut self, id: Option<Id>) -> Self {
         self.selected = id;
+        self
+    }
+
+    /// A span the reader points at elsewhere, on the analysis's timeline (`PanelState::lit`):
+    /// washed across every row as the pointer's wash is, edged with hairlines.
+    pub fn lit(mut self, span: Option<Span>) -> Self {
+        self.lit = span;
         self
     }
 
@@ -916,9 +925,31 @@ impl Widget for Track<'_> {
                 p.attention_fill.gamma_multiply(p.shade),
             ));
         }
+        if let Some(l) = self.lit {
+            let (a, b) = (axis(l.start), axis(l.end));
+            if a < w.end && b >= w.start {
+                lit(&s, plot, a, b, p, &mut shapes);
+            }
+        }
         painter.extend(shapes);
         ui.data_mut(|d| d.insert_temp(response.id, clicked));
         response
+    }
+}
+
+/// A lit span from axis tick `a` to `b`: the pointer's wash, edged with hairlines so it reads
+/// apart from a selection's.
+fn lit(s: &Scale, plot: Rect, a: i64, b: i64, p: &Palette, shapes: &mut Vec<Shape>) {
+    let x0 = s.x(a as f64).clamp(plot.left(), plot.right());
+    let x1 = s.x(b as f64).clamp(plot.left(), plot.right()).max(x0 + 1.0);
+    let band = Rect::from_min_max(pos2(x0, plot.top()), pos2(x1, plot.bottom()));
+    shapes.push(Shape::rect_filled(band, 0.0, p.wash));
+    let edge = Stroke::new(1.0, p.ink_2);
+    for x in [x0, x1] {
+        shapes.push(Shape::line_segment(
+            [pos2(x, plot.top()), pos2(x, plot.bottom())],
+            edge,
+        ));
     }
 }
 

@@ -458,6 +458,8 @@ pub struct Host {
     pub shown: Option<crate::Shown>,
     /// Whether the decoded paint comes from a provisional window.
     pub provisional: bool,
+    /// A span lit from elsewhere, in axis ticks.
+    pub lit: Option<std::ops::Range<i64>>,
     /// Paint from decoded output, the channels it paints and the decoder's roles.
     pub decoded: (
         Vec<crate::Driven>,
@@ -491,6 +493,7 @@ pub fn harness_at(state: ViewState, pixels_per_point: f32) -> Harness<'static, H
         shown: None,
         decoded: Default::default(),
         provisional: false,
+        lit: None,
     };
     Harness::builder()
         .with_size(egui::vec2(1080.0, 700.0))
@@ -514,6 +517,7 @@ pub fn harness_at(state: ViewState, pixels_per_point: f32) -> Harness<'static, H
                     .motion(host.motion)
                     .decoded_paint(&host.decoded.0, &host.decoded.1, &host.decoded.2)
                     .decoded_provisional(host.provisional)
+                    .lit(host.lit.clone())
                     .id_salt(SALT);
                 if host.strip {
                     graph = graph.height(ui.available_height() - STRIP - 8.0);

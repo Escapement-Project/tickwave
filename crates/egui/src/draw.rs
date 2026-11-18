@@ -237,6 +237,8 @@ pub(crate) struct Frame<'a> {
     pub trace: Option<&'a Trace<'a>>,
     pub lanes: &'a [usize],
     pub selection: Option<&'a Range<i64>>,
+    /// A span pointed at elsewhere, washed and edged.
+    pub lit: Option<&'a Range<i64>>,
     /// The trace's colour: the palette's, else the recording's stored one, else ink.
     pub ink: Color32,
     /// The paint roles the sidecar declares, in order, then the decoders' it does not, and the
@@ -817,6 +819,22 @@ pub(crate) fn graph(ui: &Ui, f: &Frame) {
             0.0,
             p.wash,
         );
+    }
+    if let Some(s) = f.lit
+        && let Some((a, b)) = f.across(s.start as f64, s.end as f64, px)
+    {
+        let b = b.max(a + 1.0);
+        painter.rect_filled(
+            Rect::from_min_max(pos2(a, field.top()), pos2(b, field.bottom())),
+            0.0,
+            p.wash,
+        );
+        for x in [a, b] {
+            painter.line_segment(
+                [pos2(x, field.top()), pos2(x, field.bottom())],
+                Stroke::new(1.0, p.ink_2),
+            );
+        }
     }
     {
         let _span = tracing::debug_span!("markers").entered();

@@ -83,6 +83,7 @@ pub struct Graph<'a> {
     /// A gesture this frame zoomed the window.
     zoomed: bool,
     decoded: Decoded<'a>,
+    lit: Option<Range<i64>>,
 }
 
 /// A stretch of a wire painted by the role that drives it, from decoded output: the role by its
@@ -126,6 +127,7 @@ impl<'a> Graph<'a> {
             motion: true,
             zoomed: false,
             decoded: Decoded::default(),
+            lit: None,
         }
     }
 
@@ -211,6 +213,14 @@ impl<'a> Graph<'a> {
 
     /// Whether a zoom step eases the window drawn to where it goes; on by default. Off, it jumps,
     /// for a host whose reader asked for reduced motion.
+    /// A span the reader points at elsewhere, in axis ticks: a side panel's section, say
+    /// (`PanelState::lit`). Washed as the pointer's wash is and edged with hairlines, so it reads
+    /// apart from the selection.
+    pub fn lit(mut self, span: Option<Range<i64>>) -> Self {
+        self.lit = span;
+        self
+    }
+
     pub fn motion(mut self, on: bool) -> Self {
         self.motion = on;
         self
@@ -853,6 +863,7 @@ impl Widget for Graph<'_> {
                 trace: trace.as_ref(),
                 lanes: self.lanes,
                 selection: self.state.selection.as_ref(),
+                lit: self.lit.as_ref(),
                 ink: self.palette.trace_colour(facts.stored.as_ref()),
                 roles: &roles,
                 paints,

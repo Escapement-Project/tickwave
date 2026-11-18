@@ -434,7 +434,7 @@ fn shapes_of(
     window: std::ops::Range<i64>,
     provisional: bool,
 ) -> Vec<egui::Shape> {
-    shapes_on(items, window, provisional, None)
+    shapes_on(items, window, provisional, None, None)
 }
 
 /// As `shapes_of`, under a graph whose lanes were drawn in `grid`'s columns.
@@ -443,6 +443,7 @@ fn shapes_on(
     window: std::ops::Range<i64>,
     provisional: bool,
     grid: Option<escapement_tickwave_view::columns::Grid>,
+    lit: Option<Span>,
 ) -> Vec<egui::Shape> {
     let schema = Schema::new(vec![KindDecl::new("a")]);
     let mut store = Store::with_keep(vec![Span {
@@ -492,7 +493,8 @@ fn shapes_on(
                 &palette,
                 map,
             )
-            .provisional(provisional),
+            .provisional(provisional)
+            .lit(lit),
         );
     });
     out.textures_delta.clear();
@@ -517,7 +519,7 @@ fn a_crowded_tracks_bins_lie_in_the_lanes_columns() {
     let items: Vec<(u16, Tick, Tick)> = (0..5000).map(|k| (0, 2 * k, 2 * k + 1)).collect();
     // Each bin's left edge, past the first, which the plot's edge clips.
     let lefts = |grid: Option<Grid>| -> Vec<f32> {
-        let shapes = shapes_on(&items, 0..10_000, false, grid);
+        let shapes = shapes_on(&items, 0..10_000, false, grid, None);
         let mut xs: Vec<f32> = (shapes.iter())
             .filter_map(|s| match s {
                 egui::Shape::Rect(r) if r.stroke.width == 0.0 => Some(r.rect.left()),
@@ -776,4 +778,52 @@ fn a_click_selects_the_item_under_it_and_the_selected_one_is_outlined_in_ink() {
     assert_eq!(none, None, "a click between items selects nothing");
     let (_, outlined) = click(egui::pos2(350.0, row), Some(second));
     assert_eq!(outlined, vec![1.0, 2.0], "the selected one heavier");
+}
+
+/// A span lit from elsewhere washes the track between two hairlines at its ends, over every row.
+#[test]
+fn a_lit_span_washes_the_track_between_hairlines() {
+    let palette = Palette::from_visuals(&egui::Visuals::default());
+    let items = [(0, 100, 200), (0, 400, 500)];
+    let lit = Span {
+        start: 400,
+        end: 500,
+    };
+    let washes = |shapes: &[egui::Shape]| -> Vec<egui::Rect> {
+        (shapes.iter())
+            .filter_map(|s| match s {
+                egui::Shape::Rect(r) if r.fill == palette.wash => Some(r.rect),
+                _ => None,
+            })
+            .collect()
+    };
+    let lines = |shapes: &[egui::Shape]| -> Vec<f32> {
+        (shapes.iter())
+            .filter_map(|s| match s {
+                egui::Shape::LineSegment { points, stroke } if stroke.color == palette.ink_2 => {
+                    Some(points[0].x)
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let plain = shapes_on(&items, 0..1000, false, None, None);
+    let shapes = shapes_on(&items, 0..1000, false, None, Some(lit));
+    assert_eq!(washes(&shapes).len(), washes(&plain).len() + 1);
+    let band = *washes(&shapes).last().unwrap();
+    // The plot is 500 points for 1000 ticks.
+    assert_eq!((band.left(), band.right()), (200.0, 250.0));
+    let mut edges = lines(&shapes);
+    for x in lines(&plain) {
+        let k = edges.iter().position(|&e| e == x).unwrap();
+        edges.remove(k);
+    }
+    assert_eq!(edges, [200.0, 250.0]);
+    // Off the window, nothing.
+    let past = Span {
+        start: 2000,
+        end: 3000,
+    };
+    let off = shapes_on(&items, 0..1000, false, None, Some(past));
+    assert_eq!(washes(&off).len(), washes(&plain).len());
 }

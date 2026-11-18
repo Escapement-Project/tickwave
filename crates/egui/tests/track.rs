@@ -22,7 +22,7 @@ use escapement_tickwave_decode::{
     AnalysisId, Host, Id, InputSpec, Ref, Schema, Span, Store, Tick, Value, name, wire::WireSource,
 };
 use escapement_tickwave_decoders::{adiv5, cjtag, jtag, swd};
-use escapement_tickwave_egui::panel::{Panel, Selected};
+use escapement_tickwave_egui::panel::{Analysis, Panel, PanelState};
 use escapement_tickwave_egui::track::{
     Density, Labels, Track, condition, decoder_roles, driver_paints, value_text,
 };
@@ -282,8 +282,21 @@ struct Host2 {
     heights: Vec<f32>,
     /// The window the graph drew last, for painting SWDIO by who drives it.
     shown: Option<escapement_tickwave_egui::Shown>,
-    selected: Option<(usize, Id)>,
+    panel: PanelState,
     timebase: Ratio,
+}
+
+/// The analyses as a panel reads them, each stacked on the one before it.
+fn analyses(decoded: &[Decoded]) -> Vec<Analysis<'_>> {
+    (decoded.iter().enumerate())
+        .map(|(k, d)| Analysis {
+            name: d.name,
+            schema: &d.schema,
+            labels: &d.labels,
+            items: &d.store.items,
+            reads: k.checked_sub(1),
+        })
+        .collect()
 }
 
 /// A face whose levels are in `--series-verge`, as a page naming the series draws them.
@@ -324,40 +337,36 @@ fn harness(window: Window, case: Case) -> Harness<'static, Host2> {
         settled: Tick::MAX,
         heights: vec![],
         shown: None,
-        selected,
+        panel: {
+            let mut p = PanelState::default();
+            p.selected = selected;
+            p
+        },
         timebase,
     };
     let mut h = Harness::builder().with_size(size).wgpu().build_ui_state(
         |ui, host: &mut Host2| {
             ui.painter()
                 .rect_filled(ui.ctx().content_rect(), 0.0, host.face.page);
-            if host.selected.is_none() {
+            if host.panel.selected.is_none() {
                 draw(ui, host);
                 return;
             }
             ui.horizontal_top(|ui| {
+                let reserved = Panel::reserved(&host.panel, PANEL);
                 ui.vertical(|ui| {
-                    ui.set_width(ui.available_width() - PANEL - ui.spacing().item_spacing.x);
+                    ui.set_width(ui.available_width() - reserved - ui.spacing().item_spacing.x);
                     draw(ui, host);
                 });
-                let selected = host.selected.and_then(|(k, id)| {
-                    let d = &host.decoded[k];
-                    let item = d.store.items.get(&id)?;
-                    let upstream = k
-                        .checked_sub(1)
-                        .map(|u| (host.decoded[u].name, &host.decoded[u].schema));
-                    Some(Selected {
-                        analysis: d.name,
-                        schema: &d.schema,
-                        labels: &d.labels,
-                        item,
-                        upstream,
-                    })
-                });
-                ui.add(
-                    Panel::new(&host.face.palette, PANEL, host.timebase, host.map)
-                        .selected(selected),
-                );
+                let analyses = analyses(&host.decoded);
+                ui.add(Panel::new(
+                    &host.face.palette,
+                    &mut host.panel,
+                    &analyses,
+                    PANEL,
+                    host.timebase,
+                    host.map,
+                ));
             });
         },
         host,
@@ -386,8 +395,11 @@ fn draw(ui: &mut egui::Ui, host: &mut Host2) {
         )
     });
     let roles = decoder_roles(&first.schema);
+    let lit = (host.panel.lit)
+        .map(|l| host.map.axis_saturating(l.start)..host.map.axis_saturating(l.end));
     let response = ui.add(
         Graph::lanes_only(viewer, &mut host.state, &host.face.palette)
+            .lit(lit)
             .motion(false)
             .lanes(&host.lanes)
             .decoded_paint(&paints, &host.painted, &roles)
@@ -399,7 +411,11 @@ fn draw(ui: &mut egui::Ui, host: &mut Host2) {
     };
     host.shown = Some(shown.clone());
     for (k, d) in host.decoded.iter().enumerate() {
-        let selected = host.selected.filter(|(s, _)| *s == k).map(|(_, id)| id);
+        let selected = host
+            .panel
+            .selected
+            .filter(|(s, _)| *s == k)
+            .map(|(_, id)| id);
         let r = ui.add(
             Track::new(
                 &shown,
@@ -414,10 +430,11 @@ fn draw(ui: &mut egui::Ui, host: &mut Host2) {
             .settled(host.settled)
             .provisional(host.provisional)
             .parts(d.parts)
-            .selected(selected),
+            .selected(selected)
+            .lit(host.panel.lit),
         );
         if let Some(id) = Track::clicked(&r) {
-            host.selected = Some((k, id));
+            host.panel.selected = Some((k, id));
         }
         host.heights.push(r.rect.height());
     }
@@ -892,32 +909,51 @@ fn cjtag_frame_times() {
     }
 }
 
-/// A panel showing `item`, of the analysis `decoded[k]`, stacked on `decoded[k - 1]`.
+/// A panel showing `item` as an item of the analysis `decoded[k]`, each analysis stacked on the
+/// one before it. The panel's state is the harness's.
 fn panel<'a>(
     decoded: &'a [Decoded],
     k: usize,
     item: &'a escapement_tickwave_decode::Item,
     map: Mapping,
     path: &Path,
-) -> Harness<'a> {
+) -> Harness<'a, PanelState> {
     let timebase = open(path).timebase();
     let palette = escapement_tickwave_egui::Palette::from_visuals(&egui::Visuals::default());
-    let d = &decoded[k];
-    let upstream = k
-        .checked_sub(1)
-        .map(|u| (decoded[u].name, &decoded[u].schema));
+    // The item as given, an open one in place of its closed self.
+    let items: Vec<std::collections::BTreeMap<Id, escapement_tickwave_decode::Item>> =
+        (decoded.iter().enumerate())
+            .map(|(j, d)| {
+                let mut items = d.store.items.clone();
+                if j == k {
+                    items.insert(item.id, item.clone());
+                }
+                items
+            })
+            .collect();
+    let mut state = PanelState::default();
+    state.selected = Some((k, item.id));
     let mut h = Harness::builder()
         .with_size(egui::vec2(400.0, 900.0))
-        .build_ui(move |ui| {
-            let selected = Selected {
-                analysis: d.name,
-                schema: &d.schema,
-                labels: &d.labels,
-                item,
-                upstream,
-            };
-            ui.add(Panel::new(&palette, 360.0, timebase, map).selected(Some(selected)));
-        });
+        .build_ui_state(
+            move |ui, state: &mut PanelState| {
+                let analyses: Vec<Analysis> = (decoded.iter().zip(&items).enumerate())
+                    .map(|(j, (d, items))| Analysis {
+                        name: d.name,
+                        schema: &d.schema,
+                        labels: &d.labels,
+                        items,
+                        reads: j.checked_sub(1),
+                    })
+                    .collect();
+                // Against the right edge, as a host beside its plot puts it.
+                let right = egui::Layout::right_to_left(egui::Align::Min);
+                ui.with_layout(right, |ui| {
+                    ui.add(Panel::new(&palette, state, &analyses, 360.0, timebase, map));
+                });
+            },
+            state,
+        );
     h.run();
     h
 }
@@ -1006,4 +1042,128 @@ fn an_open_item_closing_moves_nothing_in_the_panel() {
         at
     };
     assert_eq!(places(&still_open, "open"), places(closed, "complete"));
+}
+
+fn transfers(decoded: &[Decoded]) -> Vec<&escapement_tickwave_decode::Item> {
+    (decoded[0].store.items.values())
+        .filter(|i| i.id.kind == swd::TRANSFER)
+        .collect()
+}
+
+#[test]
+fn previous_and_next_step_through_its_kind_and_stay_where_pressed() {
+    use egui_kittest::kittest::Queryable;
+    let (decoded, map, _) = decode(&fixture());
+    let t = transfers(&decoded);
+    let mut h = panel(&decoded, 0, t[1], map, &fixture());
+    let next = "next transfer \u{25b8}";
+    let previous = "\u{25c2} previous transfer";
+    let at = h.get_by_label(next).rect();
+    h.get_by_label(next).click();
+    h.run();
+    assert_eq!(h.state().selected, Some((0, t[2].id)));
+    assert_eq!(h.get_by_label(next).rect(), at, "it stays where pressed");
+    for want in [t[1], t[0], t[0]] {
+        h.get_by_label(previous).click();
+        h.run();
+        assert_eq!(
+            h.state().selected,
+            Some((0, want.id)),
+            "none before the first"
+        );
+    }
+    // ADIv5's kinds interleave: next steps over the others to a DP write's next.
+    let writes: Vec<Id> = (decoded[1].store.items.keys())
+        .filter(|id| id.kind == adiv5::DP_WRITE)
+        .copied()
+        .collect();
+    let between = (decoded[1].store.items.keys())
+        .any(|id| id.kind != adiv5::DP_WRITE && writes[0] < *id && *id < writes[1]);
+    assert!(between, "another kind lies between the first two DP writes");
+    let first = &decoded[1].store.items[&writes[0]];
+    let mut h = panel(&decoded, 1, first, map, &fixture());
+    h.get_by_label("next dp-write \u{25b8}").click();
+    h.run();
+    assert_eq!(h.state().selected, Some((1, writes[1])));
+}
+
+#[test]
+fn the_collapse_control_stays_where_it_is_pressed() {
+    use egui_kittest::kittest::Queryable;
+    let (decoded, map, _) = decode(&fixture());
+    let t = transfers(&decoded);
+    let mut h = panel(&decoded, 0, t[0], map, &fixture());
+    let at = h.get_by_label("\u{21e5}").rect();
+    h.get_by_label("\u{21e5}").click();
+    h.run();
+    assert!(h.state().collapsed);
+    assert_eq!(Panel::reserved(h.state(), 360.0), Panel::COLLAPSED);
+    assert_eq!(h.get_by_label("\u{21e4}").rect(), at);
+    assert!(
+        h.query_by_label("complete").is_none(),
+        "collapsed to its control"
+    );
+    h.get_by_label("\u{21e4}").click();
+    h.run();
+    assert!(!h.state().collapsed);
+    h.get_by_label("complete");
+}
+
+#[test]
+fn pointing_at_a_section_or_the_heading_lights_its_span() {
+    use egui_kittest::kittest::Queryable;
+    let (decoded, map, _) = decode(&fixture());
+    let transfer = (decoded[0].store.items.values())
+        .find(|i| i.field(swd::DATA).is_some())
+        .unwrap();
+    let mut h = panel(&decoded, 0, transfer, map, &fixture());
+    assert_eq!(h.state().lit, None);
+    h.get_by_label_contains("data  0x").hover();
+    h.run();
+    assert_eq!(h.state().lit, transfer.field(swd::DATA).unwrap().span);
+    let fullest = [swd::DIR, swd::PORT, swd::A, swd::ACK, swd::DATA]
+        .map(|f| {
+            let v = &transfer.field(f).unwrap().value;
+            value_text(&decoded[0].schema, transfer.id.kind, f, v)
+        })
+        .join(" ");
+    h.get_by_label(&fullest).hover();
+    h.run();
+    let whole = Span {
+        start: transfer.start,
+        end: transfer.end.unwrap(),
+    };
+    assert_eq!(h.state().lit, Some(whole));
+}
+
+#[test]
+fn read_as_lists_what_reads_it_and_a_link_selects_what_it_names() {
+    use egui_kittest::kittest::Queryable;
+    let (decoded, map, _) = decode(&fixture());
+    let reads = |t: &escapement_tickwave_decode::Item| -> Vec<Id> {
+        (decoded[1].store.items.values())
+            .filter(|i| (i.links.iter()).any(|(_, r)| *r == Ref::Upstream(t.id)))
+            .map(|i| i.id)
+            .collect()
+    };
+    // A transfer a DP read reads, and nothing else.
+    let transfer = (transfers(&decoded).into_iter())
+        .find(|t| {
+            let r = reads(t);
+            r.len() == 1 && r[0].kind == adiv5::DP_READ
+        })
+        .unwrap();
+    let reader = reads(transfer)[0];
+    let mut h = panel(&decoded, 0, transfer, map, &fixture());
+    assert_eq!(h.query_all_by_label_contains("read as ").count(), 1);
+    h.get_by_label_contains("read as ").click();
+    h.run();
+    h.get_by_label("select it").click();
+    h.run();
+    assert_eq!(h.state().selected, Some((1, reader)));
+    // The DP read's link to its transfer, in SWD below, selects the transfer again.
+    h.get_by_label(&format!("SWD/transfer/{}", transfer.id.anchor))
+        .click();
+    h.run();
+    assert_eq!(h.state().selected, Some((0, transfer.id)));
 }
