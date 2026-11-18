@@ -552,6 +552,7 @@ fn a_transfer_whose_rises_are_not_held_closes_incomplete_rather_than_going_missi
         word: Some(0x0BC1_1477),
         parity: Some(true),
         turnaround: 1,
+        data_phase: true,
     };
     let mut track = swd::Track::default();
     let mut out = escapement_tickwave_decode::Out::default();
@@ -575,4 +576,158 @@ fn a_transfer_whose_rises_are_not_held_closes_incomplete_rather_than_going_missi
         ],
         "fewer rises held than a transfer spans"
     );
+}
+
+/// `transfers` onto `out` with a turnaround of `trn` cycles, a WAIT or FAULT carrying a data
+/// phase where `orun` (ADIv5.2, B4.2.6): a read's 33 cycles undriven, here alternating.
+fn link_bits(out: &mut Vec<bool>, transfers: &[T], trn: usize, orun: bool) {
+    for t in transfers {
+        let a2 = t.addr & 4 != 0;
+        let a3 = t.addr & 8 != 0;
+        let parity = t.ap ^ t.read ^ a2 ^ a3;
+        out.extend([true, t.ap, t.read, a2, a3, parity, false, true]);
+        out.extend(vec![true; trn]);
+        out.extend((0..3).map(|k| t.ack >> k & 1 != 0));
+        if t.ack == 1 || orun {
+            if !t.read {
+                out.extend(vec![true; trn]);
+            }
+            if t.ack == 1 || !t.read {
+                out.extend((0..32).map(|k| t.data >> k & 1 != 0));
+                out.push(t.data.count_ones() % 2 == 1);
+            } else {
+                out.extend((0..33).map(|k| k % 2 == 0));
+            }
+            if t.read {
+                out.extend(vec![true; trn]);
+            }
+        } else {
+            out.extend(vec![true; trn]);
+        }
+        out.extend([false, false]);
+    }
+}
+
+fn swd_of(b: &[bool], settings: &[(&str, escapement_tickwave_decode::Setting)]) -> Vec<Item> {
+    let mut h = Host::default();
+    let s = h
+        .add(
+            name("swd"),
+            swd::definition(),
+            InputSpec::Wire {
+                source: Box::new(wires(b, P)),
+                local: None,
+            },
+            swd::Swd::factory(64),
+            settings,
+            all(),
+        )
+        .unwrap();
+    run(&mut h);
+    of(&h, s, swd::TRANSFER)
+}
+
+/// Each transfer's first turnaround, in cycles.
+fn turnarounds(ts: &[Item]) -> Vec<Tick> {
+    (ts.iter())
+        .map(|t| {
+            t.field(swd::TRN)
+                .and_then(|f| f.span)
+                .map_or(0, |s| (s.end - s.start) / P)
+        })
+        .collect()
+}
+
+/// A DLCR write sets the turnaround of the transfers after it, under SELECT's bank 1; a line
+/// reset sets it back to one cycle.
+#[test]
+fn a_dlcr_write_sets_the_turnaround_and_a_line_reset_sets_it_back() {
+    let wait = T {
+        ack: 2,
+        ..ap_read(0xC, 0)
+    };
+    let mut b = vec![false; 8];
+    // Bank 1, then DLCR: two cycles, its bit 0 set as CTRL/STAT's ORUNDETECT would be.
+    link_bits(
+        &mut b,
+        &[dp_write(0x8, 1), dp_write(0x4, 1 << 8 | 1)],
+        1,
+        false,
+    );
+    link_bits(
+        &mut b,
+        &[dp_read(0x0, DPIDR), wait, ap_read(0xC, IDR)],
+        2,
+        false,
+    );
+    b.extend([true; 60]);
+    b.extend([false; 2]);
+    link_bits(&mut b, &[dp_read(0x0, DPIDR)], 1, false);
+    // Still bank 1: a DLCR write whose data's parity fails changes nothing.
+    let mut bad = vec![];
+    link_bits(&mut bad, &[dp_write(0x4, 3 << 8)], 1, false);
+    bad[8 + 1 + 3 + 1 + 32] ^= true;
+    b.extend(bad);
+    link_bits(&mut b, &[dp_read(0x0, DPIDR)], 1, false);
+    b.extend([false; 8]);
+    let ts = swd_of(&b, &[]);
+    assert_eq!(turnarounds(&ts), [1, 1, 2, 2, 2, 1, 1, 1]);
+    let data: Vec<_> = ts.iter().map(|t| word(t, swd::DATA)).collect();
+    let (dpidr, idr) = (Some(u64::from(DPIDR)), Some(u64::from(IDR)));
+    assert_eq!(
+        data,
+        [
+            Some(1),
+            Some(0x101),
+            dpidr,
+            None,
+            idr,
+            dpidr,
+            Some(0x300),
+            dpidr
+        ]
+    );
+}
+
+/// With CTRL/STAT.ORUNDETECT written under bank 0, or set at the start, a WAIT or FAULT keeps an
+/// OK transfer's timing: a read's data cycles undriven, a write's data the target ignores.
+#[test]
+fn with_orundetect_a_wait_or_fault_carries_a_data_phase() {
+    let wait = T {
+        ack: 2,
+        ..ap_read(0xC, 0)
+    };
+    let fault = T {
+        ack: 4,
+        ..ap_write(0x4, 0x1234)
+    };
+    let after = [wait, fault, dp_read(0x4, 0xF000_0001)];
+    let mut b = vec![false; 8];
+    link_bits(&mut b, &[dp_write(0x8, 0), dp_write(0x4, 1)], 1, false);
+    link_bits(&mut b, &after, 1, true);
+    b.extend([false; 8]);
+    let ts = swd_of(&b, &[]);
+    assert_eq!(ts.len(), 5);
+    let undriven = Some(Value::Unknown {
+        reason: swd::UNDRIVEN,
+        needs: None,
+    });
+    assert_eq!(value(&ts[2], swd::DATA), undriven);
+    // The read's second turnaround follows its 33 undriven cycles.
+    let span = |t: &Item, f| t.field(f).and_then(|f| f.span).unwrap();
+    assert_eq!(span(&ts[2], swd::TRN2).start, span(&ts[2], swd::DATA).end);
+    assert_eq!(
+        span(&ts[2], swd::DATA).end - span(&ts[2], swd::DATA).start,
+        33 * P
+    );
+    assert_eq!(word(&ts[3], swd::DATA), Some(0x1234));
+    assert_eq!(word(&ts[4], swd::DATA), Some(0xF000_0001));
+    // Set at the start instead, without the writes.
+    let mut b = vec![false; 8];
+    link_bits(&mut b, &after, 1, true);
+    b.extend([false; 8]);
+    let ts = swd_of(&b, &[swd::orundetect(true)]);
+    assert_eq!(ts.len(), 3);
+    assert_eq!(value(&ts[0], swd::DATA), undriven);
+    assert_eq!(word(&ts[2], swd::DATA), Some(0xF000_0001));
 }

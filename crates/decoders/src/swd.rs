@@ -6,17 +6,20 @@
 //! bounded number of rises ahead, so a transfer is emitted once the rises after it are held, or at
 //! a gap or the end of input, where what the lookahead holds is framed before the rest is dropped.
 //!
-//! The turnaround is a setting, `turnaround`, one to four cycles as DLCR sets it, fixed for the
-//! run: a DLCR write that changes it is not followed, and the transfers after it are framed with
-//! the turnaround set. Not decoded: the data phase that follows a WAIT or FAULT acknowledge when
-//! ORUNDETECT is set, which is framed as a transfer without data, its data cycles left to the
-//! search for the next request.
+//! The DP's link state is followed from its own writes (ADIv5.2, B2.2 and B4.2): SELECT's
+//! DPBANKSEL (bits 3:0), then at DP address 0x4 under bank 0 CTRL/STAT's ORUNDETECT (bit 0) and
+//! under bank 1 DLCR's TURNROUND (bits 9:8, one to four cycles), each from the transfer after the
+//! write. A line reset sets the turnaround back to one cycle. With ORUNDETECT set, a WAIT or FAULT
+//! keeps an OK transfer's timing (B4.2.6): a read's 33 data cycles are undriven, then a
+//! turnaround; a write's turnaround, then 33 the host drives and the target ignores. Until a
+//! SELECT write the bank is not known, and a write at 0x4 then changes neither. The settings
+//! `turnaround` and `orundetect` give the state at the start.
 
 use escapement_tickwave_decode::{
     Cause, Decoder, Definition, Element, ElementType, Exchange, Factory, FieldDecl, FieldId,
     FieldType, Id, KindDecl, KindId, Label, LinkDecl, LinkId, LinkTo, Observation, Observed, Out,
-    Pause, Ref, Request, Role, Schema, SeqId, Setting, SettingDecl, SettingId, Span, Status, Tick,
-    Value, field, name, seq,
+    Pause, Reason, Ref, Request, Role, Schema, SeqId, Setting, SettingDecl, SettingId, Span,
+    Status, Tick, Value, field, name, seq,
 };
 use std::{collections::VecDeque, sync::Arc};
 
@@ -114,11 +117,21 @@ pub fn schema() -> Schema {
             .with_labels(transfer_labels()),
     ])
     .with_roles(["probe", "target", "neither"])
+    .with_reasons(["with overrun detection on, nothing drives a WAIT or FAULT read's data cycles"])
     .with_causes(["the decoder no longer held the clock rises the transfer spans"])
 }
 
-/// The turnaround, in cycles.
+/// The turnaround at the start, in cycles.
 pub const TURNAROUND: SettingId = SettingId(0);
+/// CTRL/STAT.ORUNDETECT at the start.
+pub const ORUNDETECT: SettingId = SettingId(1);
+/// A WAIT or FAULT read's undriven data cycles.
+pub const UNDRIVEN: Reason = Reason(0);
+
+/// The ORUNDETECT setting, as a binding gives it: overrun detection on at the start.
+pub fn orundetect(on: bool) -> (&'static str, Setting) {
+    ("orundetect", Setting::Flag(on))
+}
 
 /// The turnaround setting, as a binding gives it.
 pub fn turnaround(cycles: u8) -> (&'static str, Setting) {
@@ -129,7 +142,10 @@ pub fn definition() -> Arc<Definition> {
     Arc::new(
         Definition::new("swd", 1, schema())
             .with_ports(["SWCLK", "SWDIO"])
-            .with_settings(vec![SettingDecl::int("turnaround", 1..=4, 1)]),
+            .with_settings(vec![
+                SettingDecl::int("turnaround", 1..=4, 1),
+                SettingDecl::flag("orundetect", false),
+            ]),
     )
 }
 
@@ -149,17 +165,20 @@ pub struct Transfer {
     pub parity: Option<bool>,
     /// Its turnaround, in cycles.
     pub turnaround: usize,
+    /// Whether it carries a data phase: an OK one does, and a WAIT or FAULT one with ORUNDETECT
+    /// set.
+    pub data_phase: bool,
 }
 
 impl Transfer {
-    /// The rises it spans: an OK transfer carries a data phase.
+    /// The rises it spans.
     pub fn rises(&self) -> usize {
-        rises(self.ack, self.turnaround)
+        rises(self.data_phase, self.turnaround)
     }
 }
 
-fn rises(ack: u8, turnaround: usize) -> usize {
-    if ack == 1 {
+fn rises(data_phase: bool, turnaround: usize) -> usize {
+    if data_phase {
         44 + 2 * turnaround
     } else {
         11 + 2 * turnaround
@@ -187,6 +206,10 @@ struct Bit {
 #[derive(Clone, Debug)]
 pub struct Recogniser {
     turnaround: usize,
+    /// CTRL/STAT.ORUNDETECT, as the last write to it left it.
+    orundetect: bool,
+    /// SELECT.DPBANKSEL, as the last SELECT write left it; None before one.
+    bank: Option<u8>,
     bits: VecDeque<Bit>,
     /// The last 128 bits pushed, the newest in the top bit.
     recent: u128,
@@ -219,12 +242,41 @@ impl Recogniser {
     fn of(cycles: u8) -> Self {
         Self {
             turnaround: usize::from(cycles),
+            orundetect: false,
+            bank: None,
             bits: VecDeque::new(),
             recent: 0,
             high: 0,
             after: 0,
             out: VecDeque::new(),
             masks: [0; 4],
+        }
+    }
+
+    /// ORUNDETECT set or clear at the start.
+    pub fn orundetect(mut self, on: bool) -> Self {
+        self.orundetect = on;
+        self
+    }
+
+    /// A bit the search for a request passes over: one of a line reset's ones, where it is,
+    /// sets the turnaround back to one cycle (DLCR.TURNROUND resets to 0b00).
+    fn passed(&mut self, b: Option<Bit>) {
+        if b.is_some_and(|b| b.run >= 50) {
+            self.turnaround = 1;
+        }
+    }
+
+    /// The DP's link state after OK transfer `t`, a DP write whose data's parity held, wrote it.
+    fn follow(&mut self, t: &Transfer) {
+        let (1, false, false, Some(w), Some(true)) = (t.ack, t.ap, t.read, t.word, t.parity) else {
+            return;
+        };
+        match (t.address, self.bank) {
+            (0x8, _) => self.bank = Some((w & 0xF) as u8),
+            (0x4, Some(0)) => self.orundetect = w & 1 == 1,
+            (0x4, Some(1)) => self.turnaround = ((w >> 8) & 3) as usize + 1,
+            _ => {}
         }
     }
 
@@ -313,24 +365,28 @@ impl Recogniser {
                 && (0..8).all(|i| b[i].run < 50)
                 && (0..header).all(|i| !b[i].masked);
             if !valid {
-                self.bits.pop_front();
+                let b = self.bits.pop_front();
+                self.passed(b);
                 continue;
             }
             let ack = (0..3).fold(0, |v, k| v | (u8::from(b[ack_at + k].value) << k));
-            let needed = rises(ack, trn);
+            let data_phase = ack == 1 || (self.orundetect && matches!(ack, 2 | 4));
+            let needed = rises(data_phase, trn);
             if b.len() < needed {
                 if flush {
-                    self.bits.pop_front();
+                    let b = self.bits.pop_front();
+                    self.passed(b);
                     continue;
                 }
                 return;
             }
             let read = b[2].value;
             let data_at = header + if read { 0 } else { trn };
-            let word = (ack == 1)
+            // A WAIT or FAULT read's data cycles are undriven, so they hold no word.
+            let word = (ack == 1 || (data_phase && !read))
                 .then(|| (0..32).fold(0u32, |v, k| v | (u32::from(b[data_at + k].value) << k)));
             let parity = word.map(|word| (word.count_ones() % 2 == 1) == b[data_at + 32].value);
-            self.out.push_back(Transfer {
+            let t = Transfer {
                 anchor: b[0].at,
                 ap: b[1].value,
                 read,
@@ -339,7 +395,10 @@ impl Recogniser {
                 word,
                 parity,
                 turnaround: trn,
-            });
+                data_phase,
+            };
+            self.follow(&t);
+            self.out.push_back(t);
             self.bits.drain(..needed);
             if !flush {
                 return;
@@ -423,7 +482,7 @@ impl Track {
         let tr = t.turnaround;
         let ack_at = 8 + tr;
         // The second turnaround, before a write's data or after a read's parity.
-        let trn2 = if t.ack == 1 && t.read {
+        let trn2 = if t.data_phase && t.read {
             44 + tr
         } else {
             ack_at + 3
@@ -447,22 +506,34 @@ impl Track {
         let turn2 = |out: &mut Out| {
             out.part(id, TRN2, Value::Phase, span(trn2, trn2 + tr), Some(NEITHER));
         };
-        if let (1, Some(w)) = (t.ack, t.word) {
+        if t.data_phase {
             let at = if t.read { ack_at + 3 } else { ack_at + 3 + tr };
-            let driver = Some(if t.read { TARGET } else { PROBE });
             if !t.read {
                 turn2(out);
             }
-            let data = word(u64::from(w), 32);
-            out.part(id, DATA, data, span(at, at + 32), driver);
-            bits(out, id, DATA_BITS, at, at + 32);
-            let ok = if t.parity == Some(true) {
-                PARITY_OK
-            } else {
-                PARITY_BAD
-            };
-            out.part(id, PARITY, Value::Name(ok), span(at + 32, at + 33), driver);
-            bits(out, id, PARITY_BITS, at + 32, at + 33);
+            match t.word {
+                Some(w) => {
+                    let driver = Some(if t.read { TARGET } else { PROBE });
+                    let data = word(u64::from(w), 32);
+                    out.part(id, DATA, data, span(at, at + 32), driver);
+                    bits(out, id, DATA_BITS, at, at + 32);
+                    let ok = if t.parity == Some(true) {
+                        PARITY_OK
+                    } else {
+                        PARITY_BAD
+                    };
+                    out.part(id, PARITY, Value::Name(ok), span(at + 32, at + 33), driver);
+                    bits(out, id, PARITY_BITS, at + 32, at + 33);
+                }
+                // A WAIT or FAULT read under ORUNDETECT: 33 cycles nobody drives.
+                None => {
+                    let undriven = Value::Unknown {
+                        reason: UNDRIVEN,
+                        needs: None,
+                    };
+                    out.part(id, DATA, undriven, span(at, at + 33), Some(NEITHER));
+                }
+            }
             if t.read {
                 turn2(out);
             }
@@ -547,7 +618,12 @@ impl Swd {
         Box::new(move |b, local| {
             // The host checked the turnaround against its declaration, 1 to 4.
             let cycles = b.int(TURNAROUND).map_or(1, |t| t.clamp(1, 4) as u8);
-            Box::new(Self::with(local, window, Recogniser::of(cycles)))
+            let orun = b.flag(ORUNDETECT).unwrap_or(false);
+            Box::new(Self::with(
+                local,
+                window,
+                Recogniser::of(cycles).orundetect(orun),
+            ))
         })
     }
 

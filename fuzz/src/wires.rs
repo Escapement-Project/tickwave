@@ -225,7 +225,10 @@ pub fn swd(c: &Case) {
             swd::definition(),
             InputSpec::Wire { source, local },
             swd::Swd::factory(window),
-            &[swd::turnaround(c.setting % 4 + 1)],
+            &[
+                swd::turnaround(c.setting % 4 + 1),
+                swd::orundetect(c.setting & 4 != 0),
+            ],
             all(),
         )
         .unwrap();

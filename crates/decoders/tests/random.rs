@@ -157,6 +157,7 @@ fn swd_stack(
     window: Tick,
     local: Option<Tick>,
     turnaround: u8,
+    orundetect: bool,
 ) -> (Host, Vec<AnalysisId>) {
     let mut h = Host::default();
     let s = h
@@ -168,7 +169,7 @@ fn swd_stack(
                 local,
             },
             swd::Swd::factory(window),
-            &[swd::turnaround(turnaround)],
+            &[swd::turnaround(turnaround), swd::orundetect(orundetect)],
             all(),
         )
         .unwrap();
@@ -206,7 +207,7 @@ fn a_window_ahead_of_the_forward_pass_says_what_it_cannot_know() {
         dp_read(0xC, 0x1111_1111),
     ];
     let (b, starts) = bits(&ts);
-    let (mut h, a) = swd_stack(wires(&b, 10), 64, None, 1);
+    let (mut h, a) = swd_stack(wires(&b, 10), 64, None, 1, false);
     h.keep_checkpoints(
         a[0],
         escapement_tickwave_decode::Keeping::new(50, usize::MAX),
@@ -246,7 +247,7 @@ fn a_local_start_past_the_end_of_the_input_finishes_cleanly() {
         end: 1,
         reversed: false,
     };
-    let (h, a) = swd_stack(empty(2), 10_074, Some(9_735), 1);
+    let (h, a) = swd_stack(empty(2), 10_074, Some(9_735), 1, false);
     let mut hosts = vec![(h, a[0])];
     let mut h = Host::default();
     let j = h
@@ -316,7 +317,7 @@ fn swd_with_adiv5_and_mem_ap_never_panics_and_never_breaks_a_rule() {
             perturb(r, wires(&bits, period))
         };
         let (window, local) = reading(r, &w);
-        swd_stack(w, window, local, r.u8(1..=4))
+        swd_stack(w, window, local, r.u8(1..=4), r.bool())
     });
     assert!(reached.items.iter().all(|&n| n > 0), "{reached:?}");
 }
