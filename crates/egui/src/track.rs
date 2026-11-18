@@ -751,7 +751,7 @@ impl Track<'_> {
                 .and_then(|name| p.roles.get(name.as_ref()))
                 .and_then(|look| look.colour);
             if let Some(c) = role {
-                shapes.push(Shape::rect_filled(r, 0.0, c.gamma_multiply(0.18)));
+                shapes.push(Shape::rect_filled(r, 0.0, c.gamma_multiply(p.part)));
             }
             shapes.push(Shape::rect_stroke(r, 1.0, rule, egui::StrokeKind::Inside));
             // The sequence named as the field holds its bits.

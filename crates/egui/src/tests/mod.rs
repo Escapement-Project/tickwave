@@ -421,6 +421,7 @@ pub fn palette() -> Palette {
         pale: 0.35,
         fill: 0.45,
         shade: 0.2,
+        part: 0.18,
         // The width the lanes' geometry in these tests is worked for.
         line_weight: 1.0,
     }
