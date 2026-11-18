@@ -387,6 +387,12 @@ pub trait Decoder: Send {
     fn save(&self) -> Option<Box<dyn Decoder>> {
         None
     }
+
+    /// About how many bytes of state the decoder holds outside itself, which a checkpoint keeper
+    /// counts against its budget.
+    fn heap_bytes(&self) -> usize {
+        0
+    }
 }
 
 /// Stands in for a decoder whose turn is under way. The host never runs it: `begin_turn` refuses
@@ -587,6 +593,10 @@ pub enum CheckpointError {
     /// The checkpoint was taken of other analyses than this host holds.
     #[error("the checkpoint names an analysis this host does not hold")]
     Foreign,
+    /// The analyses it was taken of are not the ones this host now holds there: another decoder,
+    /// version or stacking.
+    #[error("the checkpoint was taken of other decoders than this host now holds")]
+    Incompatible,
 }
 
 /// One run's state in a checkpoint.
@@ -615,7 +625,105 @@ struct Snapshot {
 #[non_exhaustive]
 pub struct Checkpoint {
     pub runs: Vec<RunId>,
+    /// How far the wire analysis had taken its input.
+    pub consumed: Tick,
+    /// Each analysis in it, upstream first: its name, decoder and decoder version. A restore
+    /// requires the host to hold the same there. Its source is the host's for that analysis,
+    /// which the host never swaps, so the consumed position is the rest of the key.
+    chain: Vec<(Name, Name, u32)>,
     snaps: Vec<Snapshot>,
+}
+
+impl Checkpoint {
+    /// About how many bytes it holds: decoder states, stores and queued deliveries. An estimate
+    /// for a budget, not an exact figure.
+    pub fn bytes(&self) -> usize {
+        use std::mem::size_of;
+        (self.snaps.iter())
+            .map(|s| {
+                size_of::<Snapshot>()
+                    + std::mem::size_of_val(&*s.decoder)
+                    + s.decoder.heap_bytes()
+                    + s.store.bytes()
+                    + s.inbox.len() * size_of::<Delivery>()
+                    + s.assembling.len() * (size_of::<(Id, Completed)>() + 256)
+                    + s.recent.len() * 2 * size_of::<(Tick, Id)>()
+                    + s.lost.capacity() * size_of::<Span>()
+            })
+            .sum()
+    }
+}
+
+/// How a host keeps checkpoints of a wire analysis and everything stacked on it as its input
+/// advances: one each time it has taken `every` more ticks, at most `budget` bytes of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Keeping {
+    pub every: Tick,
+    pub budget: usize,
+}
+
+impl Keeping {
+    pub fn new(every: Tick, budget: usize) -> Self {
+        Self { every, budget }
+    }
+}
+
+/// The checkpoints kept for one wire analysis, by input consumed.
+struct Keeper {
+    root: AnalysisId,
+    keeping: Keeping,
+    next: Tick,
+    held: Vec<(Checkpoint, usize)>,
+    bytes: usize,
+}
+
+impl Keeper {
+    /// Drops checkpoints until the rest fit the budget. Each time the one dropped is the one
+    /// whose loss leaves the shortest stretch between its neighbours to replay; the first and
+    /// the latest stay while there are others.
+    fn fit(&mut self) {
+        while self.bytes > self.keeping.budget && !self.held.is_empty() {
+            let n = self.held.len();
+            let at = if n <= 2 {
+                0
+            } else {
+                (1..n - 1)
+                    .min_by_key(|&k| {
+                        self.held[k + 1]
+                            .0
+                            .consumed
+                            .saturating_sub(self.held[k - 1].0.consumed)
+                    })
+                    .unwrap_or(0)
+            };
+            let (_, b) = self.held.remove(at);
+            self.bytes -= b;
+        }
+    }
+}
+
+/// What a seek restored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Seek {
+    /// The checkpoint that had taken its input to here.
+    Restored(Tick),
+    /// No checkpoint at or before the tick: the chain starts again from the beginning.
+    FromStart,
+}
+
+/// The checkpoints a host keeps for one wire analysis.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Kept {
+    pub count: usize,
+    pub bytes: usize,
+    /// The input consumed at the first and the latest, and the longest stretch between two
+    /// neighbours.
+    pub first: Option<Tick>,
+    pub latest: Option<Tick>,
+    pub widest: Tick,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -785,6 +893,7 @@ pub struct Host {
     pub peak_inbox: usize,
     pub cancelled_reads: u64,
     pub log_dropped: u64,
+    keepers: Vec<Keeper>,
 }
 
 impl Default for Host {
@@ -807,6 +916,7 @@ impl Host {
             peak_inbox: 0,
             cancelled_reads: 0,
             log_dropped: 0,
+            keepers: vec![],
         }
     }
 
@@ -1604,6 +1714,7 @@ impl Host {
             .find(|&a| self.runnable_at(a))
         {
             self.turn_at(a)?;
+            self.take_due();
             return Ok(true);
         }
         Ok(read)
@@ -1724,8 +1835,107 @@ impl Host {
         }
         Ok(Checkpoint {
             runs: snaps.iter().map(|s| s.taken).collect(),
+            consumed: self.analyses[a].run.consumed,
+            chain: self.chain(a),
             snaps,
         })
+    }
+
+    /// Analysis `a` and every analysis stacked on it, upstream first: name, decoder, version.
+    fn chain(&self, a: usize) -> Vec<(Name, Name, u32)> {
+        (self.below(a).into_iter())
+            .map(|x| {
+                let an = &self.analyses[x];
+                (an.name.clone(), an.def.name.clone(), an.def.version)
+            })
+            .collect()
+    }
+
+    /// Keeps checkpoints of wire analysis `a` and everything stacked on it as its input
+    /// advances, as `keeping` says, replacing any keeping set before. Each is taken between
+    /// turns, once the wire analysis has taken `every` ticks past the input of the last one
+    /// taken, so a replay after a seek takes none.
+    pub fn keep_checkpoints(
+        &mut self,
+        a: AnalysisId,
+        keeping: Keeping,
+    ) -> Result<(), CheckpointError> {
+        let an = &self.analyses[a.index()];
+        if !matches!(an.input, Input::Wire(_)) {
+            return Err(CheckpointError::NotARoot(an.name.clone()));
+        }
+        self.keepers.retain(|k| k.root != a);
+        self.keepers.push(Keeper {
+            root: a,
+            keeping,
+            next: Tick::MIN,
+            held: vec![],
+            bytes: 0,
+        });
+        Ok(())
+    }
+
+    /// The checkpoints kept for wire analysis `a`, if it has a keeping.
+    pub fn kept(&self, a: AnalysisId) -> Option<Kept> {
+        let k = self.keepers.iter().find(|k| k.root == a)?;
+        let at: Vec<Tick> = k.held.iter().map(|(c, _)| c.consumed).collect();
+        Some(Kept {
+            count: at.len(),
+            bytes: k.bytes,
+            first: at.first().copied(),
+            latest: at.last().copied(),
+            widest: at
+                .windows(2)
+                .map(|w| w[1].saturating_sub(w[0]))
+                .max()
+                .unwrap_or(0),
+        })
+    }
+
+    fn take_due(&mut self) {
+        for k in 0..self.keepers.len() {
+            let keeper = &self.keepers[k];
+            let r = &self.analyses[keeper.root.index()].run;
+            let none_yet = r.consumed == r.local.unwrap_or(Tick::MIN);
+            // `next` only moves on, so a replay after a seek takes none.
+            if r.out || none_yet || r.consumed < keeper.next {
+                continue;
+            }
+            let consumed = r.consumed;
+            let cut = self.checkpoint(keeper.root);
+            let keeper = &mut self.keepers[k];
+            keeper.next = consumed.saturating_add(keeper.keeping.every);
+            // A decoder that cannot copy its state is replayed from the start instead.
+            if let Ok(cut) = cut {
+                let b = cut.bytes();
+                keeper.bytes += b;
+                keeper.held.push((cut, b));
+                keeper.fit();
+            }
+        }
+    }
+
+    /// Restores the latest checkpoint kept for wire analysis `a` that had taken its input no
+    /// further than `t`, or replaces its chain from the beginning where there is none. Running
+    /// the host then replays from there. The runs replaced include a forward pass under way: to
+    /// carry it on, seek again to the latest checkpoint.
+    pub fn seek(&mut self, a: AnalysisId, t: Tick) -> Result<Seek, CheckpointError> {
+        let Some(k) = self.keepers.iter().position(|k| k.root == a) else {
+            self.replace(a, None);
+            return Ok(Seek::FromStart);
+        };
+        let at = self.keepers[k]
+            .held
+            .partition_point(|(c, _)| c.consumed <= t);
+        if at == 0 {
+            self.replace(a, None);
+            return Ok(Seek::FromStart);
+        }
+        let held = std::mem::take(&mut self.keepers[k].held);
+        let restored = self.restore(&held[at - 1].0);
+        let consumed = held[at - 1].0.consumed;
+        self.keepers[k].held = held;
+        restored.map(|_| Seek::Restored(consumed))
     }
 
     /// Restores a checkpoint as new generations of its runs, each bound to its restored upstream.
@@ -1733,6 +1943,13 @@ impl Host {
     /// deliveries are refused. A checkpoint can be restored more than once. Returns the retired
     /// runs; refused, nothing changes.
     pub fn restore(&mut self, cut: &Checkpoint) -> Result<Vec<RunId>, CheckpointError> {
+        let root = cut.snaps.first().map_or(0, |s| s.analysis);
+        if root >= self.analyses.len() {
+            return Err(CheckpointError::Foreign);
+        }
+        if self.chain(root) != cut.chain {
+            return Err(CheckpointError::Incompatible);
+        }
         let mut decoders = vec![];
         for snap in &cut.snaps {
             let an = self

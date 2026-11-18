@@ -343,6 +343,27 @@ impl Store {
     /// batch leaves them so far before any is recorded. The whole batch is refused, at the op that
     /// does it, if it ever holds more than `at_most` items open. Returns the index of the first
     /// refused op.
+    /// About how many bytes the store holds, for a checkpoint budget: its open items, and its
+    /// kept items with their fields, elements and links. An estimate, not an exact figure.
+    pub fn bytes(&self) -> usize {
+        use std::mem::size_of;
+        let open = self.open.capacity() * (size_of::<Id>() + size_of::<Open>());
+        let items: usize = (self.items.values())
+            .map(|i| {
+                let seqs: usize = (i.seqs.iter())
+                    .map(|(_, e)| {
+                        size_of::<(SeqId, Vec<Element>)>() + e.capacity() * size_of::<Element>()
+                    })
+                    .sum();
+                size_of::<(Id, Item)>()
+                    + i.fields.capacity() * size_of::<Field>()
+                    + i.links.capacity() * size_of::<(LinkId, Ref)>()
+                    + seqs
+            })
+            .sum();
+        size_of::<Self>() + open + items + self.keep.capacity() * size_of::<Span>()
+    }
+
     pub fn apply_batch(&mut self, ops: &[Op], at_most: usize) -> Result<(), (usize, Refused)> {
         self.batch = self.batch.wrapping_add(1);
         self.undo.clear();

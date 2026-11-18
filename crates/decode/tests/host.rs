@@ -6,9 +6,9 @@ use common::*;
 use escapement_tickwave_decode::{
     AnalysisId, Batch, BindError, CONTRACT, Cause, CheckpointError, Contract, Decoder, Definition,
     Element, ElementType, Exchange, FieldDecl, FieldId, FieldType, Host, HostOptions, Id,
-    InputSpec, KindDecl, KindId, LinkDecl, LinkId, LinkTo, LogEntry, Mismatch, Mode, Name, Need,
-    Observation, Op, Pause, Reason, Ref, Refusal, Refused, Reply, Role, Schema, SchemaError,
-    SeqDecl, SeqId, Span, Status, Subscription, Tick, Value, field, name,
+    InputSpec, Keeping, KindDecl, KindId, LinkDecl, LinkId, LinkTo, LogEntry, Mismatch, Mode, Name,
+    Need, Observation, Op, Pause, Reason, Ref, Refusal, Refused, Reply, Role, Schema, SchemaError,
+    Seek, SeqDecl, SeqId, Span, Status, Subscription, Tick, Value, field, name,
 };
 use std::sync::{Arc, atomic::Ordering::Relaxed};
 
@@ -1098,6 +1098,76 @@ fn a_definition_from_data_runs_as_a_static_one_does() {
     let (a, b) = (run(owned), run(pulses_schema()));
     assert_eq!(a, b);
     assert!(a.ops > 0 && a.incomplete == 0);
+}
+
+#[test]
+fn kept_checkpoints_spread_within_their_budget_and_a_seek_replays_from_the_nearest() {
+    let run = || {
+        let (mut h, [p, q]) =
+            pulses_host(line(60, 3, 20, vec![]), 15, None, HostOptions::default());
+        (
+            h.keep_checkpoints(p, Keeping::new(50, usize::MAX)).unwrap(),
+            (h, p, q),
+        )
+            .1
+    };
+    let (mut h, p, q) = run();
+    run_all(&mut h);
+    let full = (h.store(p).counts, h.store(q).counts, h.store(q).items.len());
+    let all = h.kept(p).unwrap();
+    assert!(all.count > 10, "{all:?}");
+    assert!(
+        all.widest >= 50 && all.widest < 50 + 15,
+        "spaced by the keeping: {all:?}"
+    );
+    assert!(matches!(
+        h.keep_checkpoints(q, Keeping::new(50, 0)),
+        Err(CheckpointError::NotARoot(_))
+    ));
+
+    let Seek::Restored(at) = h.seek(p, 700).unwrap() else {
+        panic!("a checkpoint at or before 700 is held");
+    };
+    assert!(at <= 700 && 700 - at < all.widest, "the nearest: {at}");
+    assert!(h.consumed(p) == at);
+    run_all(&mut h);
+    assert_eq!(
+        (h.store(p).counts, h.store(q).counts, h.store(q).items.len()),
+        full,
+        "a replay from the nearest ends where the forward pass did"
+    );
+    assert_eq!(h.kept(p).unwrap(), all, "a replay takes no checkpoints");
+    assert_eq!(h.seek(p, Tick::MIN).unwrap(), Seek::FromStart);
+    run_all(&mut h);
+    assert_eq!(
+        (h.store(p).counts, h.store(q).counts, h.store(q).items.len()),
+        full
+    );
+
+    // Room for about three: the first and the latest stay, and the gaps stay even.
+    let (mut h, p, _) = run();
+    run_all(&mut h);
+    let one = h.kept(p).unwrap().bytes / all.count;
+    let (mut small, sp, _) = run();
+    small
+        .keep_checkpoints(sp, Keeping::new(50, one * 3 + one / 2))
+        .unwrap();
+    run_all(&mut small);
+    let few = small.kept(sp).unwrap();
+    assert!(few.count <= 3 && few.bytes <= one * 3 + one / 2, "{few:?}");
+    assert_eq!((few.first, few.latest), (all.first, all.latest));
+    assert!(
+        few.widest < (all.latest.unwrap() - all.first.unwrap()) * 3 / 4,
+        "{few:?}"
+    );
+
+    // A checkpoint restores only onto the decoders it was taken of.
+    let cut = h.checkpoint(p).unwrap();
+    let (mut other, _) = toy_host(vec![], HostOptions::default());
+    assert!(matches!(
+        other.restore(&cut),
+        Err(CheckpointError::Incompatible)
+    ));
 }
 
 #[test]
