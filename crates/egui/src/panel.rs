@@ -14,6 +14,13 @@
 //! where it holds a condition, a mark. Kinds can be left out, or every item but those holding a
 //! condition. A row the pointer rests on lights its span, and a click selects it. When the
 //! selection changes the list scrolls to it.
+//!
+//! The Text tab joins the bytes of an analysis whose schema declares a kind's text
+//! into lines, each after its start: a line ends at a newline, shown as `\n` with a carriage
+//! return before it dropped, or wraps at `LINE_AT_MOST` characters. Any other byte that is not
+//! printable shows as an escape, `\r` or `\x15`, and a value the decoder could not know as ·:
+//! characters a host's fonts all hold. The character under the pointer lights its item's span,
+//! and a click selects that item.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound::{Excluded, Unbounded};
@@ -41,6 +48,8 @@ const READERS_AT_MOST: usize = 32;
 const CONTROL: f32 = 24.0;
 /// A list row's height.
 const ROW: f32 = 18.0;
+/// The most characters a line of text holds before it wraps.
+pub const LINE_AT_MOST: usize = 120;
 
 /// One analysis as the panel reads it: its name, its schema, the labels its track draws it with,
 /// its items as its store keeps them, and the analysis it is stacked on, by its index among the
@@ -61,6 +70,8 @@ pub enum Tab {
     Selected,
     /// One analysis's items as rows.
     List,
+    /// One analysis's text, joined into lines.
+    Text,
 }
 
 /// What the panel shows and keeps between frames. Its host owns it, as it owns a graph's
@@ -74,6 +85,9 @@ pub struct PanelState {
     pub tab: Tab,
     /// The analysis the List tab shows, by index; None for the selected item's, else the first.
     pub listed: Option<usize>,
+    /// The analysis the Text tab shows, by index; None for the selected item's where it reads as
+    /// text, else the first that does.
+    pub texted: Option<usize>,
     /// Collapsed to its control, by the reader.
     pub collapsed: bool,
     /// What the pointer rests on in the panel this frame: its span on the items' timeline.
@@ -86,6 +100,75 @@ pub struct PanelState {
     rows: Option<Rows>,
     /// The selection the List tab last scrolled to.
     scrolled: Option<(usize, Id)>,
+    lines: Option<Lines>,
+}
+
+/// A line of text: where it starts, and each character with the item it came from.
+#[derive(Clone, Debug)]
+struct Line {
+    start: Tick,
+    text: String,
+    from: Vec<Id>,
+}
+
+/// The lines a Text tab shows, kept while its analysis and its store's size hold.
+#[derive(Clone, Debug)]
+struct Lines {
+    key: (usize, usize),
+    lines: Vec<Line>,
+}
+
+/// An analysis's text, each byte from the item whose declared text field holds it, joined into
+/// lines.
+fn lines_of(schema: &Schema, items: &BTreeMap<Id, Item>) -> Vec<Line> {
+    let text: Vec<(KindId, escapement_tickwave_decode::FieldId)> =
+        (schema.kinds.iter().enumerate())
+            .filter_map(|(k, d)| Some((KindId(k as u16), d.text?)))
+            .collect();
+    // Each byte, or None for a value not known, with its item and its start.
+    let mut bytes: Vec<(Option<u8>, Id, Tick)> = Vec::new();
+    for item in items.values() {
+        let Some(&(_, f)) = text.iter().find(|(k, _)| *k == item.id.kind) else {
+            continue;
+        };
+        match item.field(f).map(|x| &x.value) {
+            Some(&Value::Word { value, .. }) => {
+                bytes.push((Some(value as u8), item.id, item.start))
+            }
+            Some(Value::Bits { bytes: b, bits }) => {
+                let whole = (*bits as usize / 8).min(b.len());
+                bytes.extend(b[..whole].iter().map(|&x| (Some(x), item.id, item.start)));
+            }
+            Some(Value::Unknown { .. }) => bytes.push((None, item.id, item.start)),
+            _ => {}
+        }
+    }
+    let mut lines = Vec::new();
+    let mut line: Option<Line> = None;
+    for (k, &(b, id, start)) in bytes.iter().enumerate() {
+        let shown = match b {
+            Some(b'\r') if bytes.get(k + 1).is_some_and(|n| n.0 == Some(b'\n')) => continue,
+            Some(b'\n') => "\\n".to_owned(),
+            Some(b'\r') => "\\r".to_owned(),
+            Some(c @ 0x20..=0x7e) => char::from(c).to_string(),
+            Some(c) => format!("\\x{c:02x}"),
+            None => "\u{b7}".to_owned(),
+        };
+        let l = line.get_or_insert_with(|| Line {
+            start,
+            text: String::new(),
+            from: Vec::new(),
+        });
+        for c in shown.chars() {
+            l.text.push(c);
+            l.from.push(id);
+        }
+        if b == Some(b'\n') || l.from.len() >= LINE_AT_MOST {
+            lines.extend(line.take());
+        }
+    }
+    lines.extend(line);
+    lines
 }
 
 /// The ids a List tab shows, in order, kept while its analysis, its store's size and its filter
@@ -319,13 +402,7 @@ impl<'a> Panel<'a> {
             }
             self.state.scrolled = self.state.selected;
         }
-        // The times' column, as wide as a time with the most figures.
-        let widest = ui.painter().layout_no_wrap(
-            self.time(Tick::MAX / 2),
-            self.palette.figures.clone(),
-            self.palette.ink,
-        );
-        let label_at = widest.size().x + 12.0;
+        let label_at = self.label_at(ui);
         let selected = self.state.selected;
         scroll.show_rows(ui, ROW, rows.ids.len(), |ui, range| {
             for id in &rows.ids[range] {
@@ -396,6 +473,131 @@ impl<'a> Panel<'a> {
         if response.clicked() {
             *go = Some((a, item.id));
         }
+    }
+
+    /// The lines analysis `a`'s Text tab shows, joined again only where its store changed.
+    fn lines(&mut self, a: usize) -> Lines {
+        let an = &self.analyses[a];
+        let key = (a, an.items.len());
+        if let Some(l) = self.state.lines.take()
+            && l.key == key
+        {
+            return l;
+        }
+        Lines {
+            key,
+            lines: lines_of(an.schema, an.items),
+        }
+    }
+
+    /// Where a row's text starts: past a time with the most figures.
+    fn label_at(&self, ui: &Ui) -> f32 {
+        let widest = ui.painter().layout_no_wrap(
+            self.time(Tick::MAX / 2),
+            self.palette.figures.clone(),
+            self.palette.ink,
+        );
+        widest.size().x + 12.0
+    }
+
+    fn text_tab(&mut self, ui: &mut Ui, lit: &mut Option<Span>, go: &mut Option<(usize, Id)>) {
+        let texted: Vec<usize> = (self.analyses.iter().enumerate())
+            .filter(|(_, a)| a.schema.kinds.iter().any(|k| k.text.is_some()))
+            .map(|(k, _)| k)
+            .collect();
+        let Some(&first) = texted.first() else {
+            ui.label(self.quiet("No analysis here reads as text."));
+            return;
+        };
+        let held = |k: &usize| texted.contains(k);
+        let chosen = (self.state.texted.filter(held))
+            .or(self.state.selected.map(|(a, _)| a).filter(held))
+            .unwrap_or(first);
+        if texted.len() > 1 {
+            ui.horizontal_wrapped(|ui| {
+                for &k in &texted {
+                    let name = self.text(self.analyses[k].name);
+                    if ui.selectable_label(k == chosen, name).clicked() {
+                        self.state.texted = Some(k);
+                    }
+                }
+            });
+            ui.separator();
+        }
+        let lines = self.lines(chosen);
+        if lines.lines.is_empty() {
+            ui.label(self.quiet("No text decoded here yet."));
+            self.state.lines = Some(lines);
+            return;
+        }
+        let label_at = self.label_at(ui);
+        (ScrollArea::vertical())
+            .auto_shrink(false)
+            .id_salt(("panel text", chosen))
+            .show_rows(ui, ROW, lines.lines.len(), |ui, range| {
+                for line in &lines.lines[range] {
+                    self.text_row(ui, chosen, line, label_at, lit, go);
+                }
+            });
+        self.state.lines = Some(lines);
+    }
+
+    /// One line of text after its start: the character under the pointer lights its item's
+    /// span, and a click selects that item.
+    fn text_row(
+        &self,
+        ui: &mut Ui,
+        a: usize,
+        line: &Line,
+        label_at: f32,
+        lit: &mut Option<Span>,
+        go: &mut Option<(usize, Id)>,
+    ) {
+        let p = self.palette;
+        let (rect, response) =
+            ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::click());
+        let time = self.time(line.start);
+        let named = format!("{time}  {}", line.text);
+        response.widget_info(|| WidgetInfo::labeled(Role::Button, true, &named));
+        let painter = ui.painter_at(rect);
+        let y = rect.center().y;
+        painter.text(
+            pos2(rect.left() + 4.0, y),
+            Align2::LEFT_CENTER,
+            time,
+            p.figures.clone(),
+            p.ink_2,
+        );
+        let galley = painter.layout_no_wrap(line.text.clone(), p.figures.clone(), p.ink);
+        let origin = pos2(rect.left() + label_at, y - galley.size().y / 2.0);
+        let under = response.hover_pos().and_then(|q| {
+            let placed = galley.rows.first()?;
+            let x = q.x - origin.x - placed.pos.x;
+            let k = (placed.row.glyphs.iter()).position(|g| {
+                let r = g.logical_rect();
+                r.left() <= x && x < r.right()
+            })?;
+            let cell = placed.row.glyphs[k]
+                .logical_rect()
+                .translate(origin.to_vec2() + placed.pos.to_vec2());
+            Some((k, cell))
+        });
+        if let Some((k, cell)) = under
+            && let Some(item) = line
+                .from
+                .get(k)
+                .and_then(|id| self.analyses[a].items.get(id))
+        {
+            painter.rect_filled(cell, 0.0, p.wash);
+            *lit = Some(Span {
+                start: item.start,
+                end: item.end.unwrap_or(item.start),
+            });
+            if response.clicked() {
+                *go = Some((a, item.id));
+            }
+        }
+        painter.galley(origin, galley, p.ink);
     }
 
     fn selected_tab(&mut self, ui: &mut Ui, lit: &mut Option<Span>, go: &mut Option<(usize, Id)>) {
@@ -695,7 +897,12 @@ impl Widget for Panel<'_> {
                 .max_rect(tabs)
                 .layout(Layout::left_to_right(Align::Center));
             ui.scope_builder(row, |ui| {
-                for (tab, name) in [(Tab::Selected, "Selected"), (Tab::List, "List")] {
+                let tabs = [
+                    (Tab::Selected, "Selected"),
+                    (Tab::List, "List"),
+                    (Tab::Text, "Text"),
+                ];
+                for (tab, name) in tabs {
                     if ui
                         .selectable_label(self.state.tab == tab, self.text(name))
                         .clicked()
@@ -713,6 +920,7 @@ impl Widget for Panel<'_> {
                 match self.state.tab {
                     Tab::Selected => self.selected_tab(ui, &mut lit, &mut go),
                     Tab::List => self.list_tab(ui, &mut lit, &mut go),
+                    Tab::Text => self.text_tab(ui, &mut lit, &mut go),
                 }
             });
         }

@@ -1247,3 +1247,166 @@ fn the_list_shows_an_analysis_as_rows_filters_them_and_selects_one() {
     h.get_by_label("dp-write");
     h.get_by_label_contains(&time(write));
 }
+
+/// An analysis of one byte an item, its kind's text the byte, `None` a byte it could not know:
+/// each byte 1000 ticks after the one before.
+fn bytes_decoded(bytes: &[Option<u8>]) -> Decoded {
+    let values = (bytes.iter())
+        .map(|b| match b {
+            Some(b) => Value::Word {
+                value: u64::from(*b),
+                bits: 8,
+            },
+            None => Value::Unknown {
+                reason: escapement_tickwave_decode::Reason(0),
+                needs: None,
+            },
+        })
+        .collect();
+    text_decoded(
+        "bytes",
+        escapement_tickwave_decode::FieldType::Word { bits: 8 },
+        values,
+    )
+}
+
+/// An analysis named `name` of one item a value, its kind's text a field of type `ty`: each
+/// item 1000 ticks after the one before.
+fn text_decoded(
+    name: &'static str,
+    ty: escapement_tickwave_decode::FieldType,
+    values: Vec<Value>,
+) -> Decoded {
+    use escapement_tickwave_decode::{FieldId, KindDecl, KindId, Op, Status, field};
+    let schema = Schema::new(vec![
+        KindDecl::new("byte")
+            .with_fields(vec![field("data", ty)])
+            .with_text(FieldId(0)),
+    ])
+    .with_reasons(["a framing error"]);
+    let mut store = Store::with_keep(all());
+    for (k, value) in values.into_iter().enumerate() {
+        let start = 1000 * (k as Tick + 1);
+        let id = Id::new(KindId(0), start);
+        let ops = [
+            Op::Open {
+                id,
+                parent: None,
+                start,
+            },
+            Op::Set {
+                id,
+                field: FieldId(0),
+                value,
+                span: None,
+                driver: None,
+            },
+            Op::Close {
+                id,
+                end: start + 800,
+                status: Status::Complete,
+            },
+        ];
+        store.apply_batch(&ops, 8).unwrap();
+    }
+    let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
+    let density = Density::of(&store.items, &map, condition);
+    Decoded {
+        name,
+        schema,
+        store,
+        density,
+        labels: Labels::default(),
+        parts: false,
+    }
+}
+
+#[test]
+fn the_text_tab_joins_an_analysis_bytes_into_lines_each_character_from_its_item() {
+    use egui_kittest::kittest::Queryable;
+    use escapement_tickwave_egui::panel::Tab;
+    let text: Vec<Option<u8>> = (b"hi\r\nok\n".iter().map(|&b| Some(b)))
+        .chain([None, Some(b'z'), Some(0x15)])
+        .collect();
+    let decoded = vec![bytes_decoded(&text)];
+    let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
+    let items: Vec<_> = decoded[0].store.items.values().cloned().collect();
+    let mut h = panel(&decoded, 0, &items[0], map, &fixture());
+    h.get_by_label("Text").click();
+    h.run();
+    assert_eq!(h.state().tab, Tab::Text);
+    h.get_by_label_contains("  hi\\n");
+    let ok = h.get_by_label_contains("  ok\\n").rect();
+    h.get_by_label_contains("  \u{b7}z\\x15");
+    // Across "ok\n", the pointer lights each character's byte in turn; a click selects one.
+    let span = |i: &escapement_tickwave_decode::Item| Span {
+        start: i.start,
+        end: i.end.unwrap(),
+    };
+    let mut seen = vec![];
+    let mut x = ok.left();
+    while x < ok.right() {
+        h.event(egui::Event::PointerMoved(egui::pos2(x, ok.center().y)));
+        h.run();
+        if let Some(l) = h.state().lit
+            && seen.last() != Some(&l)
+        {
+            seen.push(l);
+        }
+        x += 1.0;
+    }
+    assert_eq!(seen, [span(&items[4]), span(&items[5]), span(&items[6])]);
+    // Back onto the "k", then a click.
+    let mut x = ok.left();
+    while h.state().lit != Some(span(&items[5])) {
+        h.event(egui::Event::PointerMoved(egui::pos2(x, ok.center().y)));
+        h.run();
+        x += 1.0;
+    }
+    let at = egui::pos2(x - 1.0, ok.center().y);
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        });
+    }
+    h.run();
+    assert_eq!(h.state().selected, Some((0, items[5].id)));
+
+    // A second analysis, of frames whose text is two bytes each, chosen by name: a lone carriage
+    // return escaped, and a line without a newline wrapping.
+    let frames = |b: &[u8]| Value::Bits {
+        bytes: b.to_vec(),
+        bits: 8 * b.len() as u32,
+    };
+    let long = [b'a'; escapement_tickwave_egui::panel::LINE_AT_MOST + 2];
+    let mut values = vec![frames(b"x\r"), frames(b"y\n")];
+    values.extend(long.chunks(2).map(frames));
+    let ty = escapement_tickwave_decode::FieldType::Bits { max: 16 };
+    let decoded = vec![bytes_decoded(&text), text_decoded("frames", ty, values)];
+    let mut h = panel(&decoded, 0, &items[0], map, &fixture());
+    h.state_mut().tab = Tab::Text;
+    h.run();
+    h.get_by_label_contains("  hi\\n");
+    h.get_by_label("frames").click();
+    h.run();
+    assert_eq!(h.state().texted, Some(1));
+    h.get_by_label_contains("  x\\ry\\n");
+    let wrapped = "a".repeat(escapement_tickwave_egui::panel::LINE_AT_MOST);
+    assert!(
+        h.query_by_label_contains(&format!("  {wrapped}a"))
+            .is_none()
+    );
+    h.get_by_label_contains(&format!("  {wrapped}"));
+    assert!(h.query_by_label_contains("  hi\\n").is_none());
+
+    // With no analysis declaring text, a note.
+    let (swd, map, _) = decode(&fixture());
+    let t = transfers(&swd);
+    let mut h = panel(&swd, 0, t[0], map, &fixture());
+    h.state_mut().tab = Tab::Text;
+    h.run();
+    h.get_by_label("No analysis here reads as text.");
+}
