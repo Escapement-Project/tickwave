@@ -977,8 +977,8 @@ impl JtagOnCjtag {
         Box::new(|local| Box::new(Self::new(local)))
     }
 
-    fn piece(&mut self, op: Op, out: &mut Out) {
-        match op {
+    fn piece(&mut self, op: &Op, out: &mut Out) {
+        match *op {
             Op::Open { id, start, .. } if id.kind == PACKET => {
                 self.packet = Some(PacketSoFar {
                     id,
@@ -1012,7 +1012,7 @@ impl JtagOnCjtag {
                 id,
                 seq,
                 offset,
-                elements,
+                ref elements,
             } if id.kind == JSCAN && seq == JSCAN_TMS => {
                 for (k, e) in elements.iter().enumerate() {
                     let Some(rise) = wire_tick(e) else {
@@ -1039,7 +1039,10 @@ impl JtagOnCjtag {
                 }
             }
             Op::Extend {
-                id, seq, elements, ..
+                id,
+                seq,
+                ref elements,
+                ..
             } => {
                 let Some(p) = self.packet.as_mut().filter(|p| p.id == id) else {
                     return;
@@ -1098,7 +1101,7 @@ impl Decoder for JtagOnCjtag {
         }
         while let Some(d) = ex.receive() {
             match d {
-                Delivery::Piece { op, .. } => self.piece(op, &mut ex.out),
+                Delivery::Piece { piece, .. } => self.piece(piece.op(), &mut ex.out),
                 Delivery::Lost { span, .. } => {
                     self.packet = None;
                     self.tap.gap(span.start, span.end, &mut ex.out);

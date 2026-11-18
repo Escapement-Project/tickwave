@@ -217,13 +217,26 @@ impl Completed {
     }
 }
 
+/// One operation of an upstream batch. Every analysis it is delivered to shares the batch.
+#[derive(Clone, Debug)]
+pub struct Piece {
+    ops: Arc<[Op]>,
+    index: usize,
+}
+
+impl Piece {
+    pub fn op(&self) -> &Op {
+        &self.ops[self.index]
+    }
+}
+
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum Delivery {
     Piece {
         from: RunId,
         batch: u64,
-        op: Op,
+        piece: Piece,
     },
     Item {
         from: RunId,
@@ -238,16 +251,9 @@ pub enum Delivery {
         settled: Tick,
     },
     /// The upstream run's input was lost over `span`, at this place among its output.
-    Lost {
-        from: RunId,
-        batch: u64,
-        span: Span,
-    },
+    Lost { from: RunId, batch: u64, span: Span },
     /// The upstream run has finished: everything it emitted has been delivered.
-    End {
-        from: RunId,
-        end: Tick,
-    },
+    End { from: RunId, end: Tick },
 }
 
 impl Delivery {
@@ -1199,7 +1205,7 @@ impl Host {
                 ops: summary,
             });
         }
-        self.fan_out(a, b.seq, &b.ops, &b.lost)?;
+        self.fan_out(a, b.seq, b.ops, &b.lost)?;
         if after != before {
             let from = b.run;
             for d in self.analyses[a].downstream.clone() {
@@ -1220,7 +1226,7 @@ impl Host {
         &mut self,
         a: usize,
         batch: u64,
-        ops: &[Op],
+        ops: Vec<Op>,
         lost: &[(usize, Span)],
     ) -> Result<(), Refusal> {
         let from = self.analyses[a].run.id;
@@ -1240,6 +1246,12 @@ impl Host {
             .filter(|(_, s)| s.mode == Mode::Completed)
             .flat_map(|(_, s)| s.kinds.iter().copied())
             .collect();
+        let (owned, shared) = if subs.iter().any(|(_, s)| s.mode == Mode::Pieces) {
+            (vec![], Some(Arc::<[Op]>::from(ops)))
+        } else {
+            (ops, None)
+        };
+        let ops: &[Op] = shared.as_deref().unwrap_or(&owned);
         let mut out = vec![];
         let mut losses = lost.iter().peekable();
         let mut lose = |at: usize, out: &mut Vec<(usize, Delivery)>| {
@@ -1261,14 +1273,13 @@ impl Host {
                 {
                     continue;
                 }
-                out.push((
-                    *d,
-                    Delivery::Piece {
-                        from,
-                        batch,
-                        op: op.clone(),
-                    },
-                ));
+                if let Some(ops) = &shared {
+                    let piece = Piece {
+                        ops: ops.clone(),
+                        index: k,
+                    };
+                    out.push((*d, Delivery::Piece { from, batch, piece }));
+                }
             }
             if !assemble.contains(&id.kind) {
                 continue;
@@ -1363,7 +1374,7 @@ impl Host {
         }
         let to_run = r.id;
         let what = match &d {
-            Delivery::Piece { op, .. } => (op.letter(), Some(*op.id())),
+            Delivery::Piece { piece, .. } => (piece.op().letter(), Some(*piece.op().id())),
             Delivery::Item { item, .. } => ('I', Some(item.id)),
             Delivery::Frontier { .. } => ('F', None),
             Delivery::Lost { .. } => ('G', None),

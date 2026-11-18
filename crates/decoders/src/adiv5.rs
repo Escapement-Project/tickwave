@@ -414,8 +414,8 @@ impl Adi {
         out.close(p.id, c.end, Status::Complete);
     }
 
-    fn piece(&mut self, op: Op, out: &mut Out) {
-        match op {
+    fn piece(&mut self, op: &Op, out: &mut Out) {
+        match *op {
             Op::Open { id, start, .. } => {
                 self.building.insert(
                     id,
@@ -428,7 +428,7 @@ impl Adi {
             Op::Set {
                 id,
                 field,
-                value,
+                ref value,
                 span,
                 ..
             } => {
@@ -436,18 +436,18 @@ impl Adi {
                     return;
                 };
                 match (field, value) {
-                    (swd::PORT, Value::Name(n)) => p.ap = n == swd::AP,
-                    (swd::DIR, Value::Name(n)) => p.read = n == swd::READ,
-                    (swd::A, Value::Word { value, .. }) => p.addr = value as u8,
-                    (swd::ACK, Value::Name(n)) => {
+                    (swd::PORT, &Value::Name(n)) => p.ap = n == swd::AP,
+                    (swd::DIR, &Value::Name(n)) => p.read = n == swd::READ,
+                    (swd::A, &Value::Word { value, .. }) => p.addr = value as u8,
+                    (swd::ACK, &Value::Name(n)) => {
                         p.ack = [1, 2, 4, 7, 0].get(usize::from(n)).copied().unwrap_or(0);
                     }
-                    (swd::DATA, Value::Word { value, .. }) => {
+                    (swd::DATA, &Value::Word { value, .. }) => {
                         if let Some(span) = span {
                             p.data = Some((value, span));
                         }
                     }
-                    (swd::PARITY, Value::Bool(ok)) => p.parity = Some(ok),
+                    (swd::PARITY, &Value::Bool(ok)) => p.parity = Some(ok),
                     _ => {}
                 }
             }
@@ -488,7 +488,7 @@ impl Decoder for Adi {
         self.start(&mut ex.out);
         while let Some(d) = ex.receive() {
             match d {
-                Delivery::Piece { op, .. } => self.piece(op, &mut ex.out),
+                Delivery::Piece { piece, .. } => self.piece(piece.op(), &mut ex.out),
                 Delivery::Frontier { start, .. } => self.up = Some(start),
                 Delivery::End { end, .. } => {
                     self.finish(end, &mut ex.out);

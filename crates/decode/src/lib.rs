@@ -25,8 +25,8 @@ pub mod wire;
 
 pub use host::{
     AnalysisId, Batch, BindError, Checkpoint, CheckpointError, Completed, Decoder, Delivery,
-    Exchange, Factory, Host, HostOptions, InputSpec, LogEntry, Mode, Observed, Pause, Refusal,
-    Reply, Request, RequestId, RunId, Source, SourceError, Subscription, Turn, Window,
+    Exchange, Factory, Host, HostOptions, InputSpec, LogEntry, Mode, Observed, Pause, Piece,
+    Refusal, Reply, Request, RequestId, RunId, Source, SourceError, Subscription, Turn, Window,
 };
 pub use output::{
     Cause, Element, FieldId, Id, KindId, LinkId, MAX_BITS, MAX_CHUNK, MAX_FIELDS, MAX_LINKS,
