@@ -18,7 +18,7 @@ fn a_tracks_height_follows_the_rows_and_lanes_its_schema_declares() {
     let shown = Shown::new(0..1000, 0.0..500.0);
     let items = BTreeMap::new();
     let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
-    let density = Density::of(items.values(), &map, |_| false);
+    let density = Density::of(&items, &map, |_| false);
     let labels = Labels::default();
     let palette = Palette::from_visuals(&egui::Visuals::default());
     let height = |schema: &Schema, parts: bool| {
@@ -93,7 +93,7 @@ fn boxes(schema: &Schema, items: &[(u16, Tick, Tick)]) -> (Vec<egui::Rect>, usiz
     }
     let shown = Shown::new(0..1000, 0.0..500.0);
     let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
-    let density = Density::of(store.items.values(), &map, |_| false);
+    let density = Density::of(&store.items, &map, |_| false);
     let labels = Labels::default();
     let palette = Palette::from_visuals(&egui::Visuals::default());
     let ctx = egui::Context::default();
@@ -192,7 +192,7 @@ fn lost_input_shades_the_spans_the_window_meets_and_no_others() {
     let items = BTreeMap::new();
     let shown = Shown::new(0..1000, 0.0..500.0);
     let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
-    let density = Density::of(items.values(), &map, |_| false);
+    let density = Density::of(&items, &map, |_| false);
     let labels = Labels::default();
     let palette = Palette::from_visuals(&egui::Visuals::default());
     let schema = Schema::new(vec![KindDecl::new("a")]);
@@ -265,7 +265,7 @@ fn a_long_or_open_item_from_far_before_the_window_still_draws_beside_the_short_o
         store.apply_batch(chunk, 8).unwrap();
     }
     let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
-    let density = Density::of(store.items.values(), &map, |_| false);
+    let density = Density::of(&store.items, &map, |_| false);
     let labels = Labels::default();
     let palette = Palette::from_visuals(&egui::Visuals::default());
     let input = egui::RawInput {
@@ -338,7 +338,7 @@ fn a_density_over_items_either_side_of_zero_is_built_and_drawn() {
         n += 1;
     }
     let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
-    let density = Density::of(store.items.values(), &map, |_| false);
+    let density = Density::of(&store.items, &map, |_| false);
     assert_eq!(density.items(), n);
     // Zoomed out across zero, as density bins.
     let shown = Shown::new(-100_000..100_000, 0.0..500.0);
@@ -411,7 +411,7 @@ fn a_wire_is_painted_by_its_parts_only_where_the_track_draws_their_items_apart()
         store.apply_batch(&ops, 8).unwrap();
     }
     let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
-    let density = Density::of(store.items.values(), &map, |_| false);
+    let density = Density::of(&store.items, &map, |_| false);
     let paints = |window: std::ops::Range<i64>, width: f32| {
         driver_paints(&schema, &store.items, &density, &map, &window, width)
     };
@@ -457,7 +457,7 @@ fn shapes_of(
     }
     let shown = Shown::new(window, 0.0..500.0);
     let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
-    let density = Density::of(store.items.values(), &map, |_| false);
+    let density = Density::of(&store.items, &map, |_| false);
     let (labels, palette) = (
         Labels::default(),
         Palette::from_visuals(&egui::Visuals::default()),
@@ -572,7 +572,7 @@ fn texts(labels: Labels, part: (Tick, Tick)) -> Vec<String> {
     store.apply_batch(&ops, 8).unwrap();
     let shown = Shown::new(0..1000, 0.0..500.0);
     let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
-    let density = Density::of(store.items.values(), &map, |_| false);
+    let density = Density::of(&store.items, &map, |_| false);
     let palette = Palette::from_visuals(&egui::Visuals::default());
     let input = egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(
@@ -661,7 +661,7 @@ fn click(at: egui::Pos2, selected: Option<Id>) -> (Option<Id>, Vec<f32>) {
     }
     let shown = Shown::new(0..1000, 0.0..500.0);
     let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
-    let density = Density::of(store.items.values(), &map, |_| false);
+    let density = Density::of(&store.items, &map, |_| false);
     let (labels, palette) = (
         Labels::default(),
         Palette::from_visuals(&egui::Visuals::default()),

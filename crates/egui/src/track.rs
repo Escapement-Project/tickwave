@@ -15,6 +15,7 @@ use escapement_tickwave_decode::{
 };
 use escapement_tickwave_view::format::annotations::Role;
 use escapement_tickwave_view::format::mapping::Mapping;
+use std::collections::BTreeMap;
 
 use crate::graph::{Driven, Shown};
 use crate::palette::Palette;
@@ -179,23 +180,85 @@ struct Level {
     marked: Vec<u32>,
 }
 
+impl Level {
+    /// Widens the level to hold buckets `lo..=hi`.
+    fn cover(&mut self, lo: i64, hi: i64) {
+        if lo < self.first {
+            let n = (self.first - lo) as usize;
+            self.counts.splice(0..0, std::iter::repeat_n(0, n));
+            self.marked.splice(0..0, std::iter::repeat_n(0, n));
+            self.first = lo;
+        }
+        let len = (hi - self.first + 1) as usize;
+        if len > self.counts.len() {
+            self.counts.resize(len, 0);
+            self.marked.resize(len, 0);
+        }
+    }
+
+    /// The level above it: each bucket the sum of two of its own.
+    fn above(&self) -> Self {
+        let first = self.first >> 1;
+        let len = ((self.first + self.counts.len() as i64 - 1) >> 1) - first + 1;
+        let mut next = Self {
+            shift: self.shift + 1,
+            first,
+            counts: vec![0; len as usize],
+            marked: vec![0; len as usize],
+        };
+        for (k, (&c, &m)) in self.counts.iter().zip(&self.marked).enumerate() {
+            let j = (((self.first + k as i64) >> 1) - first) as usize;
+            next.counts[j] = next.counts[j].saturating_add(c);
+            next.marked[j] = next.marked[j].saturating_add(m);
+        }
+        next
+    }
+}
+
+/// An item a density holds apart, with its span on the axis: a long one, or one open when it was
+/// counted. `marked` says whether it was counted as a condition.
+#[derive(Clone, Copy, Debug)]
+struct Held {
+    id: Id,
+    start: i64,
+    end: Option<i64>,
+    marked: bool,
+}
+
+/// Which items, by anchor, a density has counted.
+#[derive(Clone, Copy, Debug, Default)]
+enum Counted {
+    #[default]
+    None,
+    Before(Tick),
+    All,
+}
+
 /// How many items start where, on the axis, at a ladder of bucket sizes: what a zoomed-out
-/// track draws. Built once over a store, it costs nothing per frame past the columns drawn.
-#[derive(Clone, Debug, Default)]
+/// track draws. It grows with its store (`grow`), counting each item once, so a frame costs
+/// nothing past the columns drawn and a snapshot only what it added.
+#[derive(Clone, Debug)]
 pub struct Density {
     levels: Vec<Level>,
+    /// The first and last start counted, on the axis.
+    lo: i64,
+    hi: i64,
     /// The longest closed item, in axis ticks.
     longest: i64,
     items: u64,
-    /// Where a window finds its items: those shorter than `2^(long - 1)` ticks start at most
-    /// `reach` before it, and the rest, open ones among them, are held in `held` by id with
-    /// their spans, so a few long items do not make every window walk back as far as they reach.
+    /// Where a window finds its items: closed ones shorter than `2^(long - 1)` ticks start at
+    /// most `reach` before it, and the rest are held in `held`, in id order, so a few long items
+    /// do not make every window walk back as far as they reach. `long` only rises: lowering it
+    /// would need the spans of short items, which are not kept.
     long: u32,
     reach: i64,
-    held: Vec<(Id, i64, Option<i64>)>,
+    held: Vec<Held>,
+    /// Closed items counted, by length class: what `long` is chosen from.
+    classes: [u64; 65],
+    counted: Counted,
 }
 
-/// The most buckets the finest level holds; coarser levels halve it.
+/// The most buckets the finest level holds.
 const FINEST: usize = 1 << 20;
 
 /// The most items a density holds apart as long.
@@ -206,111 +269,288 @@ fn class(len: i64) -> u32 {
     64 - len.max(0).leading_zeros()
 }
 
+/// The class from which items are held apart: the one that makes a window's walk least, about the
+/// items starting within reach of it plus every held one, with `classes` closed and `open` open
+/// over `span` axis ticks.
+fn pick_long(classes: &[u64; 65], open: u64, span: u128) -> u32 {
+    let n = classes.iter().sum::<u64>() + open;
+    let per_tick = n as f64 / span.max(1) as f64;
+    let (mut long, mut least, mut above) = (65u32, f64::INFINITY, open);
+    for k in (0..=65u32).rev() {
+        if k < 65 {
+            above += classes[k as usize];
+        }
+        if above > LONG_AT_MOST {
+            break;
+        }
+        let reach = if k == 0 { 0.0 } else { 2f64.powi(k as i32 - 1) };
+        let cost = per_tick * 2.0 * reach + above as f64;
+        if cost < least {
+            (long, least) = (k, cost);
+        }
+    }
+    long
+}
+
+impl Default for Density {
+    fn default() -> Self {
+        Self {
+            levels: vec![],
+            lo: 0,
+            hi: 0,
+            longest: 0,
+            items: 0,
+            long: 0,
+            reach: 0,
+            held: vec![],
+            classes: [0; 65],
+            counted: Counted::None,
+        }
+    }
+}
+
 impl Density {
     /// The ladder of `items`, placed on the axis by `map`, with `marked` saying which are
-    /// conditions.
-    pub fn of<'a>(
-        items: impl Iterator<Item = &'a Item> + Clone,
+    /// conditions. It counts every item there, so `grow` only settles those still open.
+    pub fn of(items: &BTreeMap<Id, Item>, map: &Mapping, marked: impl Fn(&Item) -> bool) -> Self {
+        let mut d = Self::default();
+        d.take(items, map, &marked, std::ops::Bound::Unbounded);
+        d
+    }
+
+    /// Counts the items of `items`, the store it grows with, that it has not counted and whose
+    /// anchors lie before `frontier`, and settles those it counted open that have closed since.
+    /// `frontier` is the host's start frontier for the analysis: no item starts before it from
+    /// then on, and an item's anchor lies at or after its start, so every item anchored before it
+    /// is in the store already. One that has left the store uncounted, as an unkept closed item
+    /// does, is not counted.
+    pub fn grow(
+        &mut self,
+        items: &BTreeMap<Id, Item>,
         map: &Mapping,
         marked: impl Fn(&Item) -> bool,
-    ) -> Self {
+        frontier: Tick,
+    ) {
+        self.take(items, map, &marked, std::ops::Bound::Excluded(frontier));
+    }
+
+    fn take(
+        &mut self,
+        items: &BTreeMap<Id, Item>,
+        map: &Mapping,
+        marked: &dyn Fn(&Item) -> bool,
+        upto: std::ops::Bound<Tick>,
+    ) {
+        use std::ops::Bound;
         let axis = |t: Tick| map.axis_saturating(t);
-        let (mut lo, mut hi, mut longest, mut n) = (i64::MAX, i64::MIN, 0, 0u64);
-        let (mut classes, mut open) = ([0u64; 65], 0u64);
-        for i in items.clone() {
-            let s = axis(i.start);
-            lo = lo.min(s);
-            hi = hi.max(s);
+        self.settle(items, &axis, marked);
+        let from = match self.counted {
+            Counted::None => Bound::Unbounded,
+            Counted::Before(t) => Bound::Included(Id::new(KindId(0), t)),
+            Counted::All => return,
+        };
+        let to = match upto {
+            Bound::Excluded(t) => Bound::Excluded(Id::new(KindId(0), t)),
+            _ => Bound::Unbounded,
+        };
+        if let (Bound::Included(a), Bound::Excluded(b)) = (from, to)
+            && b <= a
+        {
+            return;
+        }
+        let new = || items.range((from, to)).map(|(_, i)| i);
+        // The cut between short and long, over what is counted and what comes now.
+        let (mut classes, mut open) = (self.classes, self.open());
+        let (mut lo, mut hi) = (self.lo, self.hi);
+        let mut any = self.items > 0;
+        for i in new() {
+            let start = axis(i.start);
+            (lo, hi) = if any {
+                (lo.min(start), hi.max(start))
+            } else {
+                (start, start)
+            };
+            any = true;
             match i.end {
-                Some(e) => {
-                    let len = axis(e).saturating_sub(s);
-                    longest = longest.max(len);
-                    classes[class(len) as usize] += 1;
-                }
+                Some(e) => classes[class(axis(e).saturating_sub(start)) as usize] += 1,
                 None => open += 1,
             }
-            n += 1;
         }
-        if n == 0 {
-            return Self::default();
-        }
-        let span = (hi.saturating_sub(lo) as u128).max(1);
-        // The class from which items are held apart: the one that makes a window's walk least,
-        // about the items starting within reach of it plus every long one.
-        let per_tick = n as f64 / span as f64;
-        let (mut long, mut least, mut above) = (65u32, f64::INFINITY, open);
-        for k in (0..=65u32).rev() {
-            if k < 65 {
-                above += classes[k as usize];
+        if any {
+            let span = hi.saturating_sub(lo) as u128;
+            self.raise_long(pick_long(&classes, open, span));
+            (self.lo, self.hi) = (lo, hi);
+            self.widen();
+            // Counted at the finest level, then carried up over the buckets they touched.
+            let (mut a, mut b) = (i64::MAX, i64::MIN);
+            for i in new() {
+                let at = self.add(i, &axis, marked);
+                (a, b) = (a.min(at), b.max(at));
             }
-            if above > LONG_AT_MOST {
-                break;
-            }
-            let reach = if k == 0 { 0.0 } else { 2f64.powi(k as i32 - 1) };
-            let cost = per_tick * 2.0 * reach + above as f64;
-            if cost < least {
-                (long, least) = (k, cost);
+            if a <= b {
+                self.carry(a, b);
             }
         }
-        let mut shift = 0u8;
-        while (span >> shift) as usize >= FINEST {
-            shift += 1;
-        }
-        let first = lo >> shift;
-        let len = ((hi >> shift) - first + 1) as usize;
-        let mut level = Level {
-            shift,
-            first,
-            counts: vec![0; len],
-            marked: vec![0; len],
+        self.counted = match upto {
+            Bound::Excluded(t) => Counted::Before(t),
+            _ => Counted::All,
         };
-        let (mut reach, mut held) = (0, vec![]);
-        for i in items {
-            let start = axis(i.start);
-            let end = i.end.map(axis);
-            match end.map(|e| e.saturating_sub(start)) {
-                Some(len) if class(len) < long => reach = reach.max(len),
-                _ => held.push((i.id, start, end)),
+    }
+
+    /// How many held items are open.
+    fn open(&self) -> u64 {
+        self.held.iter().filter(|h| h.end.is_none()).count() as u64
+    }
+
+    /// Holds items apart from class `long` up, where that is higher than now.
+    fn raise_long(&mut self, long: u32) {
+        if long <= self.long {
+            return;
+        }
+        self.long = long;
+        let mut reach = self.reach;
+        self.held.retain(|h| match h.end {
+            Some(e) if class(e.saturating_sub(h.start)) < long => {
+                reach = reach.max(e.saturating_sub(h.start));
+                false
             }
-            let k = ((start >> shift) - first) as usize;
-            if let Some(c) = level.counts.get_mut(k) {
-                *c = c.saturating_add(1);
+            _ => true,
+        });
+        self.reach = reach;
+    }
+
+    /// Counts item `i` at the finest level, which `widen` has made hold it, and returns its
+    /// bucket there; the levels above owe a `carry`.
+    fn add(
+        &mut self,
+        i: &Item,
+        axis: &impl Fn(Tick) -> i64,
+        marked: &dyn Fn(&Item) -> bool,
+    ) -> i64 {
+        let start = axis(i.start);
+        let m = marked(i);
+        self.items += 1;
+        let l = &mut self.levels[0];
+        let at = start >> l.shift;
+        let k = (at - l.first) as usize;
+        if let (Some(c), Some(n)) = (l.counts.get_mut(k), l.marked.get_mut(k)) {
+            *c = c.saturating_add(1);
+            *n = n.saturating_add(u32::from(m));
+        }
+        let held = Held {
+            id: i.id,
+            start,
+            end: None,
+            marked: m,
+        };
+        match i.end {
+            Some(e) => self.closed(held, axis(e)),
+            None => self.held.push(held),
+        }
+        at
+    }
+
+    /// Item `h`, counted, closed at `end`: held if long, else within reach.
+    fn closed(&mut self, h: Held, end: i64) {
+        let len = end.saturating_sub(h.start);
+        self.longest = self.longest.max(len);
+        self.classes[class(len) as usize] += 1;
+        if class(len) < self.long {
+            self.reach = self.reach.max(len);
+        } else {
+            self.held.push(Held {
+                end: Some(end),
+                ..h
+            });
+        }
+    }
+
+    /// Settles the items it counted open that have closed since: their lengths, and whether they
+    /// closed as conditions. One gone from the store closed unkept, its end unknown.
+    fn settle(
+        &mut self,
+        items: &BTreeMap<Id, Item>,
+        axis: &impl Fn(Tick) -> i64,
+        marked: &dyn Fn(&Item) -> bool,
+    ) {
+        let open: Vec<Held> = (self.held.iter())
+            .filter(|h| h.end.is_none())
+            .copied()
+            .collect();
+        for h in open {
+            let item = items.get(&h.id);
+            if item.is_some_and(|i| i.end.is_none()) {
+                continue;
             }
-            if marked(i)
-                && let Some(c) = level.marked.get_mut(k)
-            {
-                *c = c.saturating_add(1);
+            self.held.retain(|x| x.id != h.id);
+            let Some(i) = item else { continue };
+            if !h.marked && marked(i) {
+                self.mark(h.start, 1);
+            }
+            if let Some(e) = i.end {
+                self.closed(h, axis(e));
             }
         }
-        let mut levels = vec![level];
-        while let Some(l) = levels.last().filter(|l| l.counts.len() > 1) {
-            let first = l.first >> 1;
-            let len = ((l.first + l.counts.len() as i64 - 1) >> 1) - first + 1;
-            // The buckets either side of zero never join under an arithmetic shift.
-            if len as usize >= l.counts.len() {
-                break;
-            }
-            let mut next = Level {
-                shift: l.shift + 1,
-                first,
-                counts: vec![0; len as usize],
-                marked: vec![0; len as usize],
+        self.held.sort_unstable_by_key(|h| h.id);
+    }
+
+    /// Widens the ladder to the starts counted, `lo..=hi`: coarser levels on top until one holds
+    /// them in two buckets, and the finest dropped while it would hold more than `FINEST`.
+    fn widen(&mut self) {
+        let (lo, hi) = (self.lo, self.hi);
+        let need = |l: &Level| (hi >> l.shift) - (lo >> l.shift) + 1;
+        if self.levels.is_empty() {
+            self.levels.push(Level {
+                shift: 0,
+                first: lo,
+                counts: vec![0],
+                marked: vec![0],
+            });
+        }
+        while let Some(top) = self.levels.last().filter(|l| need(l) > 2) {
+            let next = top.above();
+            self.levels.push(next);
+        }
+        while self.levels.len() > 1 && need(&self.levels[0]) > FINEST as i64 {
+            self.levels.remove(0);
+        }
+        for l in &mut self.levels {
+            l.cover(lo >> l.shift, hi >> l.shift);
+        }
+    }
+
+    /// Sums the finest level's buckets `a..=b`, changed since, into the levels above.
+    fn carry(&mut self, mut a: i64, mut b: i64) {
+        for k in 1..self.levels.len() {
+            (a, b) = (a >> 1, b >> 1);
+            let (below, above) = self.levels.split_at_mut(k);
+            let (from, to) = (&below[k - 1], &mut above[0]);
+            let at = |j: i64| {
+                let i = usize::try_from(j - from.first).ok()?;
+                Some((*from.counts.get(i)?, *from.marked.get(i)?))
             };
-            for (k, (&c, &m)) in l.counts.iter().zip(&l.marked).enumerate() {
-                let j = (((l.first + k as i64) >> 1) - first) as usize;
-                next.counts[j] = next.counts[j].saturating_add(c);
-                next.marked[j] = next.marked[j].saturating_add(m);
+            for j in a..=b {
+                let (c, m) = [at(2 * j), at(2 * j + 1)]
+                    .into_iter()
+                    .flatten()
+                    .fold((0u32, 0u32), |(c, m), (x, y)| {
+                        (c.saturating_add(x), m.saturating_add(y))
+                    });
+                let i = (j - to.first) as usize;
+                if let (Some(x), Some(y)) = (to.counts.get_mut(i), to.marked.get_mut(i)) {
+                    (*x, *y) = (c, m);
+                }
             }
-            levels.push(next);
         }
-        held.sort_unstable_by_key(|h| h.0);
-        Self {
-            levels,
-            longest,
-            items: n,
-            long,
-            reach,
-            held,
+    }
+
+    /// Adds `marked` conditions to every level at `at`, a start already counted.
+    fn mark(&mut self, at: i64, marked: u32) {
+        for l in &mut self.levels {
+            let k = ((at >> l.shift) - l.first) as usize;
+            if let Some(m) = l.marked.get_mut(k) {
+                *m = m.saturating_add(marked);
+            }
         }
     }
 
@@ -327,11 +567,11 @@ impl Density {
         (self.longest as f64 / per) < f64::from(CROWDED) || count as f32 * CROWDED > width
     }
 
-    /// The items of `items` (the store it was built over) that meet `window` (axis ticks), in id
+    /// The items of `items` (the store it grows with) that meet `window` (axis ticks), in id
     /// order, an open one reaching `settled`.
     fn meeting<'a>(
         &'a self,
-        items: &'a std::collections::BTreeMap<Id, Item>,
+        items: &'a BTreeMap<Id, Item>,
         map: &'a Mapping,
         window: &'a std::ops::Range<i64>,
         settled: Tick,
@@ -340,12 +580,18 @@ impl Density {
         let meets = move |start: i64, end: Option<i64>| {
             start < window.end && end.unwrap_or(axis(settled)) >= window.start
         };
+        let counted = move |id: &Id| match self.counted {
+            Counted::None => false,
+            Counted::Before(t) => id.anchor < t,
+            Counted::All => true,
+        };
         // An item's anchor lies at or after its start and within it.
         let lo = Id::new(
             KindId(0),
             window.start.saturating_sub(self.reach.saturating_add(1)),
         );
         let short = (items.range(lo..).map(|(_, i)| i))
+            .take_while(move |i| counted(&i.id))
             .take_while(move |i| axis(i.start) < window.end.saturating_add(self.reach))
             .filter(move |i| {
                 let start = axis(i.start);
@@ -353,11 +599,19 @@ impl Density {
                 let short = end.is_some_and(|e| class(e.saturating_sub(start)) < self.long);
                 short && meets(start, end)
             });
+        // Items not yet counted, past where it has grown to: few, so each is tried.
+        let tail = match self.counted {
+            Counted::None => Some(items.range(..)),
+            Counted::Before(t) => Some(items.range(Id::new(KindId(0), t)..)),
+            Counted::All => None,
+        };
+        let tail = (tail.into_iter().flatten().map(|(_, i)| i))
+            .filter(move |i| meets(axis(i.start), i.end.map(axis)));
         let long = (self.held.iter())
-            .filter(move |&&(_, start, end)| meets(start, end))
-            .filter_map(|(id, _, _)| items.get(id));
+            .filter(move |h| meets(h.start, h.end))
+            .filter_map(|h| items.get(&h.id));
         Merge {
-            a: short.peekable(),
+            a: short.chain(tail).peekable(),
             b: long.peekable(),
         }
     }
@@ -930,6 +1184,268 @@ mod tests {
         (c, m)
     }
 
+    /// Items starting in time order, some long and some closing incomplete, opened and closed in
+    /// batches as a forward pass would, with a density grown after each to the start frontier.
+    /// The store keeps `keep`. Each snapshot is the density, the store's items and the frontier.
+    #[expect(clippy::type_complexity, reason = "a test's tuple")]
+    fn grown(
+        seed: u64,
+        keep: Span,
+    ) -> (
+        escapement_tickwave_decode::Store,
+        Density,
+        Vec<(Density, BTreeMap<Id, Item>, Tick)>,
+    ) {
+        use escapement_tickwave_decode::{Cause, Op, Store};
+        let mut rng = seed;
+        let mut next = |n: u64| {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng % n
+        };
+        let map = Mapping::new(
+            0,
+            0,
+            escapement_tickwave_view::format::model::Ratio::integer(1).unwrap(),
+        );
+        // (start, end, incomplete, anchor), by start; one in five anchored inside it.
+        let mut items = vec![];
+        let mut t = -2_000_000i64;
+        for _ in 0..4_000 {
+            t += 1 + next(1_000) as i64;
+            let len = match next(50) {
+                0 => 200_000 + next(2_000_000) as i64,
+                _ => 1 + next(800) as i64,
+            };
+            let anchor = if next(5) == 0 {
+                t + next(len as u64) as i64
+            } else {
+                t
+            };
+            items.push((t, t + len, next(7) == 0, anchor));
+        }
+        // The first long and anchored near its end, so it is counted after items starting later.
+        if let Some(first) = items.first_mut() {
+            *first = (first.0, first.0 + 1_000_000, false, first.0 + 999_000);
+        }
+        let mut store = Store::with_keep(vec![keep]);
+        let mut d = Density::default();
+        let mut snapshots = vec![];
+        let (mut opened, mut closed) = (0, vec![false; items.len()]);
+        while opened < items.len() || closed.iter().any(|c| !c) {
+            // Open up to the next few starts, then close everything ending before the last.
+            let upto = (opened + 1 + next(60) as usize).min(items.len());
+            let now = items.get(upto).map_or(i64::MAX, |i| i.0);
+            let mut ops = vec![];
+            for (k, &(start, _, _, anchor)) in items.iter().enumerate().take(upto).skip(opened) {
+                let id = Id::new(KindId((k % 3) as u16), anchor);
+                ops.push(Op::Open {
+                    id,
+                    parent: None,
+                    start,
+                });
+            }
+            opened = upto;
+            for (k, &(_, end, bad, anchor)) in items.iter().enumerate().take(opened) {
+                if !closed[k] && end <= now {
+                    let id = Id::new(KindId((k % 3) as u16), anchor);
+                    let status = if bad {
+                        Status::Incomplete(Cause(0))
+                    } else {
+                        Status::Complete
+                    };
+                    ops.push(Op::Close { id, end, status });
+                    closed[k] = true;
+                }
+            }
+            store.apply_batch(&ops, 1 << 20).unwrap();
+            // A host's frontier can lag where the items are: no new one starts before it. At no
+            // lag, the next item is anchored at the frontier itself.
+            let lag = if next(3) == 0 { 0 } else { next(5_000) as i64 };
+            let frontier = now.saturating_sub(lag);
+            d.grow(&store.items, &map, condition, frontier);
+            snapshots.push((d.clone(), store.items.clone(), frontier));
+        }
+        (store, d, snapshots)
+    }
+
+    fn all() -> Span {
+        Span {
+            start: Tick::MIN,
+            end: Tick::MAX,
+        }
+    }
+
+    #[test]
+    fn a_density_grown_with_its_store_counts_as_one_built_at_the_end() {
+        let map = Mapping::new(
+            0,
+            0,
+            escapement_tickwave_view::format::model::Ratio::integer(1).unwrap(),
+        );
+        let (store, grown, _) = grown(0x5eed, all());
+        let built = Density::of(&store.items, &map, condition);
+        assert_eq!(grown.items(), built.items());
+        assert_eq!(grown.items(), store.items.len() as u64);
+        assert_eq!(grown.longest, built.longest);
+        // The long items, 200,000 ticks and more, held apart; the short ones within reach.
+        assert!(grown.reach <= 800, "{}", grown.reach);
+        let long = (store.items.values())
+            .filter(|i| i.end.unwrap() - i.start >= 200_000)
+            .count();
+        assert_eq!(grown.held.len(), long);
+        let mut rng = 0x1234_u64;
+        let mut next = |n: u64| {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng % n
+        };
+        for _ in 0..400 {
+            let from = -2_100_000 + next(4_500_000) as i64;
+            let to = from + 1 + next(3_000_000) as i64;
+            let per = [0.0, 1.0, 37.0, 4096.0, 1e9][next(5) as usize];
+            assert_eq!(grown.count(from, to, per), built.count(from, to, per));
+            let w = from..to;
+            let ids = |d: &Density| -> Vec<Id> {
+                d.meeting(&store.items, &map, &w, Tick::MAX)
+                    .map(|i| i.id)
+                    .collect()
+            };
+            assert_eq!(ids(&grown), ids(&built), "{w:?}");
+        }
+    }
+
+    #[test]
+    fn a_growing_density_finds_every_item_and_counts_every_counted_one_at_each_snapshot() {
+        let map = Mapping::new(
+            0,
+            0,
+            escapement_tickwave_view::format::model::Ratio::integer(1).unwrap(),
+        );
+        let (_, _, snapshots) = grown(0xfeed, all());
+        let mut rng = 0x77_u64;
+        let mut next = |n: u64| {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng % n
+        };
+        assert!(snapshots.len() > 50);
+        for (d, items, frontier) in snapshots.iter().step_by(5) {
+            let levels = &d.levels;
+            assert!(levels[0].counts.len() <= FINEST && levels.last().unwrap().counts.len() <= 2);
+            assert!(levels.windows(2).all(|l| l[1].shift == l[0].shift + 1));
+            // Counted: the items anchored before the frontier, as a density built over them.
+            let counted: BTreeMap<Id, Item> = (items.iter())
+                .filter(|(id, _)| id.anchor < *frontier)
+                .map(|(id, i)| (*id, i.clone()))
+                .collect();
+            let built = Density::of(&counted, &map, condition);
+            assert_eq!(d.items(), built.items());
+            for _ in 0..40 {
+                let from = -2_100_000 + next(4_500_000) as i64;
+                let w = from..from + 1 + next(400_000) as i64;
+                let per = [0.0, 1.0, 37.0, 4096.0, 1e9][next(5) as usize];
+                assert_eq!(
+                    d.count(w.start, w.end, per),
+                    built.count(w.start, w.end, per)
+                );
+                // And at the finest level, against the counted items' starts bucket by bucket.
+                let s = d.levels[0].shift;
+                let (a, b) = (w.start >> s, (w.end - 1) >> s);
+                let inside = (counted.values()).filter(|i| (a..=b).contains(&(i.start >> s)));
+                let marked = inside.clone().filter(|i| condition(i)).count() as u64;
+                assert_eq!(
+                    d.count(w.start, w.end, 0.0),
+                    (inside.count() as u64, marked)
+                );
+                // Found: every item the window meets, an open one reaching past it.
+                let want: Vec<Id> = (items.values())
+                    .filter(|i| i.start < w.end && i.end.unwrap_or(Tick::MAX) >= w.start)
+                    .map(|i| i.id)
+                    .collect();
+                let got: Vec<Id> = (d.meeting(items, &map, &w, Tick::MAX))
+                    .map(|i| i.id)
+                    .collect();
+                assert_eq!(got, want, "{w:?} at {frontier}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_growing_density_over_a_store_that_keeps_a_span_finds_only_what_it_keeps() {
+        let map = Mapping::new(
+            0,
+            0,
+            escapement_tickwave_view::format::model::Ratio::integer(1).unwrap(),
+        );
+        let keep = Span {
+            start: -500_000,
+            end: 500_000,
+        };
+        let (store, d, _) = grown(0xabcd, keep);
+        let w = -3_000_000..3_000_000;
+        let found: Vec<Id> = (d.meeting(&store.items, &map, &w, Tick::MAX))
+            .map(|i| i.id)
+            .collect();
+        let kept: Vec<Id> = store.items.keys().copied().collect();
+        assert_eq!(found, kept);
+    }
+
+    #[test]
+    fn the_cut_between_short_and_long_rises_as_long_items_become_common() {
+        use escapement_tickwave_decode::{Op, Store};
+        let map = Mapping::new(
+            0,
+            0,
+            escapement_tickwave_view::format::model::Ratio::integer(1).unwrap(),
+        );
+        let mut store = Store::with_keep(vec![all()]);
+        let put = |store: &mut Store, k: i64, len: i64| {
+            let (id, start) = (Id::new(KindId(0), k * 100), k * 100);
+            let ops = [
+                Op::Open {
+                    id,
+                    parent: None,
+                    start,
+                },
+                Op::Close {
+                    id,
+                    end: start + len,
+                    status: Status::Complete,
+                },
+            ];
+            store.apply_batch(&ops, 8).unwrap();
+        };
+        // A few items 3,000 ticks long among short ones: held apart.
+        for k in 0..25 {
+            put(&mut store, k, if k % 5 == 0 { 3_000 } else { 1 + k % 10 });
+        }
+        let mut d = Density::default();
+        d.grow(&store.items, &map, condition, 2_500);
+        let long = d.long;
+        assert_eq!(d.held.len(), 5);
+        // Then two thousand more of them: holding them all apart would cost more than reaching.
+        for k in 25..2_025 {
+            put(&mut store, k, 3_000);
+        }
+        d.grow(&store.items, &map, condition, Tick::MAX);
+        assert!(d.long > long && d.held.is_empty() && d.reach >= 3_000);
+        for from in (-5_000..210_000).step_by(1_700) {
+            let w = from..from + 900;
+            let want: Vec<Id> = (store.items.values())
+                .filter(|i| i.start < w.end && i.end.unwrap() >= w.start)
+                .map(|i| i.id)
+                .collect();
+            let got: Vec<Id> = (d.meeting(&store.items, &map, &w, Tick::MAX))
+                .map(|i| i.id)
+                .collect();
+            assert_eq!(got, want, "{w:?}");
+        }
+    }
+
     #[test]
     fn a_count_through_the_levels_is_the_sum_of_its_buckets() {
         let mut rng = 0x5eed_u64;
@@ -971,7 +1487,7 @@ mod tests {
                 ];
                 store.apply_batch(&ops, 8).unwrap();
             }
-            let d = Density::of(store.items.values(), &map, condition);
+            let d = Density::of(&store.items, &map, condition);
             for _ in 0..400 {
                 let from = origin - 100_000 + next(4_200_000) as i64;
                 let to = from + 1 + next(4_000_000) as i64;

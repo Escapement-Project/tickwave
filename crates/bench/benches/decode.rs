@@ -393,7 +393,7 @@ fn track(
     let a = h.index(analysis).unwrap();
     let store = h.store(a).clone();
     let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
-    let density = Density::of(store.items.values(), &map, condition);
+    let density = Density::of(&store.items, &map, condition);
     let mut d = Drawn {
         name,
         palette: Palette::from_visuals(&egui::Visuals::default()),

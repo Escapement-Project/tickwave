@@ -92,7 +92,7 @@ fn decoded(
     parts: bool,
 ) -> Decoded {
     let store = h.store(a).clone();
-    let density = Density::of(store.items.values(), map, condition);
+    let density = Density::of(&store.items, map, condition);
     Decoded {
         name,
         schema: h.definition(a).schema.clone(),
