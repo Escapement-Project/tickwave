@@ -283,7 +283,7 @@ pub const MAX_LINK_TARGETS: usize = 16;
 pub const MAX_ROLES: usize = 64;
 pub const MAX_LIST: usize = 256;
 pub const MAX_FIELD_NAMES: usize = 4096;
-pub const MAX_NAME: usize = 64;
+pub const MAX_NAME: usize = 128;
 
 /// A schema that cannot be loaded.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
