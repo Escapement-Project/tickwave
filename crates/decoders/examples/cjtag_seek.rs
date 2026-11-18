@@ -58,7 +58,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             source: Box::new(WireSource::new(rec.clone(), lines.clone())?),
             local: None,
         },
-        cjtag::Cjtag::factory(true, 1_000_000),
+        cjtag::Cjtag::factory(1_000_000),
+        &[cjtag::assume_qualified(true)],
         vec![],
     )?;
     let j = h.add(
@@ -66,6 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cjtag::jtag_definition(),
         InputSpec::Upstream(cjtag::jtag_subscription(c)),
         cjtag::JtagOnCjtag::factory(),
+        &[],
         vec![],
     )?;
     let keeping = Keeping::new(every, budget);

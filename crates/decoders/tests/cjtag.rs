@@ -225,7 +225,8 @@ fn host_with(
                 source: Box::new(w),
                 local,
             },
-            Cjtag::factory(qualified, window),
+            Cjtag::factory(window),
+            &[cjtag::assume_qualified(qualified)],
             all(),
         )
         .unwrap();
@@ -235,6 +236,7 @@ fn host_with(
             cjtag::jtag_definition(),
             InputSpec::Upstream(cjtag::jtag_subscription(c)),
             JtagOnCjtag::factory(),
+            &[],
             all(),
         )
         .unwrap();
@@ -388,12 +390,16 @@ fn direct(w: Wires) -> Counts {
     let d = h
         .add(
             name("direct"),
-            cjtag::jtag_definition(),
+            std::sync::Arc::new(
+                (*cjtag::jtag_definition())
+                    .clone()
+                    .with_ports(["TCKC", "TMSC"]),
+            ),
             InputSpec::Wire {
                 source: Box::new(w),
                 local: None,
             },
-            Box::new(|_| {
+            Box::new(|_, _| {
                 Box::new(Direct {
                     lines: None,
                     oscan: None,
@@ -404,6 +410,7 @@ fn direct(w: Wires) -> Counts {
                     first: [None; 2],
                 })
             }),
+            &[],
             all(),
         )
         .unwrap();

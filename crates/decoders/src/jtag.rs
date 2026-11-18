@@ -7,11 +7,14 @@
 //! after lost input, until TMS forces it. A scan's bits are emitted in chunks as they shift; its
 //! first 128 bits are a field once it passes them, and the whole of a scan of at most 256 bits
 //! once it closes.
+//!
+//! TDO is an optional port: bound without it, a scan's TDO is unknown. Where TDO is sampled, at
+//! TCK's rise or the fall after it, is a setting, `tdo_edge`.
 
 use escapement_tickwave_decode::{
     Cause, Decoder, Definition, Element, ElementType, Exchange, Factory, FieldId, FieldType, Id,
     KindDecl, KindId, MAX_BITS, Need, Observation, Observed, Out, Pause, Reason, Request, Schema,
-    SeqId, Span, Status, Tick, Value, Window, field, name, seq,
+    SeqId, Setting, SettingDecl, SettingId, Span, Status, Tick, Value, Window, field, name, seq,
 };
 use std::sync::Arc;
 
@@ -145,8 +148,22 @@ pub fn schema() -> Schema {
     .with_open_at_most(2)
 }
 
+/// Where TDO is sampled: at TCK's rise, or at the fall after it.
+pub const TDO_EDGE: SettingId = SettingId(0);
+
+/// The TDO edge setting, as a binding gives it.
+pub fn tdo_edge(at_fall: bool) -> (&'static str, Setting) {
+    let edge = if at_fall { "fall" } else { "rise" };
+    ("tdo_edge", Setting::Name(name(edge)))
+}
+
 pub fn definition() -> Arc<Definition> {
-    Arc::new(Definition::new("jtag", 1, schema()).with_ports(["TCK", "TMS", "TDI", "TDO"]))
+    Arc::new(
+        Definition::new("jtag", 1, schema())
+            .with_ports(["TCK", "TMS", "TDI"])
+            .with_optional_ports(["TDO"])
+            .with_settings(vec![SettingDecl::choice("tdo_edge", ["rise", "fall"], 0)]),
+    )
 }
 
 /// The states possible after one TCK rise with `tms`, from a set of possible states.
@@ -602,13 +619,13 @@ impl Jtag {
         self
     }
 
-    pub fn factory(has_tdo: bool, window: Tick) -> Factory {
-        Self::factory_with(has_tdo, window, false)
-    }
-
-    /// `factory`, with TDO sampled at TCK's fall where `tdo_at_fall`.
-    pub fn factory_with(has_tdo: bool, window: Tick, tdo_at_fall: bool) -> Factory {
-        Box::new(move |local| Box::new(Self::new(local, has_tdo, window).tdo_at_fall(tdo_at_fall)))
+    /// Makes runs of JTAG in windows of `window` ticks, reading TDO where it has a channel, at the
+    /// edge bound.
+    pub fn factory(window: Tick) -> Factory {
+        Box::new(move |b, local| {
+            let at_fall = b.choice(TDO_EDGE) == Some(1);
+            Box::new(Self::new(local, b.port(TDO), window).tdo_at_fall(at_fall))
+        })
     }
 
     fn port(&self, port: u8) -> Option<usize> {
@@ -837,10 +854,6 @@ impl Decoder for Jtag {
     fn heap_bytes(&self) -> usize {
         self.tap.heap_bytes() + crate::window_bytes(&self.held)
     }
-
-    fn settings(&self) -> u64 {
-        u64::from(self.has_tdo) | u64::from(self.tdo_at_fall) << 1
-    }
 }
 
 /// The TCK edge TDO is sampled at, as `choose_tdo_edge` read it from the wire.
@@ -912,7 +925,8 @@ pub fn choose_tdo_edge(
                 source: source(),
                 local: None,
             },
-            Jtag::factory_with(true, window, at_fall),
+            Jtag::factory(window),
+            &[tdo_edge(at_fall)],
             vec![],
         )?;
         let seen = Arc::new(std::sync::Mutex::new((0u32, 0u32)));
@@ -921,7 +935,8 @@ pub fn choose_tdo_edge(
             name("captures"),
             Arc::new(Definition::new("ir-captures", 1, Schema::new(vec![]))),
             InputSpec::Upstream(Subscription::new(j, Mode::Completed).with_kinds(["ir-scan"])),
-            Box::new(move |_| Box::new(IrCaptures(s.clone(), k))),
+            Box::new(move |_, _| Box::new(IrCaptures(s.clone(), k))),
+            &[],
             vec![],
         )?;
         let read = || seen.lock().map_or((0, 0), |n| *n);

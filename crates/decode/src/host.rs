@@ -4,7 +4,10 @@
 
 use crate::{
     output::{Id, KindId, Op, Out, Ref, SeqId, Span, Status, Tick},
-    schema::{CONTRACT, Contract, Definition, Mismatch, Name, Resolved, SchemaError},
+    schema::{
+        CONTRACT, Contract, Definition, Mismatch, Name, Resolved, SchemaError, Setting, SettingId,
+        SettingType,
+    },
     store::{Field, Refused, Store},
 };
 use foldhash::{HashMap, HashSet};
@@ -133,6 +136,10 @@ pub trait Source: Send {
     /// differ, which checkpoints are keyed by: a checkpoint restores only onto a source that
     /// gives the same.
     fn binding(&self) -> u64;
+
+    /// Which of the decoder's ports it has a channel for, one entry for each port the definition
+    /// declares.
+    fn ports(&self) -> Vec<bool>;
 
     /// A second source over the same input, reading on its own, for a window re-derived beside
     /// the forward pass. None where it cannot be had.
@@ -422,13 +429,6 @@ pub trait Decoder: Send {
     fn heap_bytes(&self) -> usize {
         0
     }
-
-    /// The settings it was made with, as a value that differs wherever they would change its
-    /// output, which checkpoints are keyed by. A decoder with settings must give one, or a
-    /// checkpoint can restore it under other settings.
-    fn settings(&self) -> u64 {
-        0
-    }
 }
 
 /// Stands in for a decoder whose turn is under way. The host never runs it: `begin_turn` refuses
@@ -524,9 +524,89 @@ impl Turn {
     }
 }
 
-/// Makes a decoder for a run. `local` is where a run starts without earlier context; None starts
-/// it at the recording's beginning.
-pub type Factory = Box<dyn Fn(Option<Tick>) -> Box<dyn Decoder> + Send + Sync>;
+/// Makes a decoder for a run, with the settings and ports its analysis was bound with. `local` is
+/// where a run starts without earlier context; None starts it at the recording's beginning.
+pub type Factory = Box<dyn Fn(&Bound, Option<Tick>) -> Box<dyn Decoder> + Send + Sync>;
+
+/// What an analysis was bound with: each setting's value, checked against its definition, and
+/// which of its ports have a channel. A decoder reading its own settings by their index gets the
+/// type it declared, so None means it asked for another.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Bound {
+    settings: Vec<Held>,
+    ports: Vec<bool>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Held {
+    Flag(bool),
+    Int(i64),
+    Choice(usize),
+}
+
+impl Bound {
+    /// Binds `given` to `def`'s settings by name, each one left out at its default.
+    fn new(
+        def: &Definition,
+        given: &[(&str, Setting)],
+        ports: Vec<bool>,
+    ) -> Result<Self, BindError> {
+        for (k, (n, _)) in given.iter().enumerate() {
+            if !def.settings.iter().any(|d| d.name == *n) {
+                return Err(BindError::UnknownSetting(Name::Owned((*n).to_owned())));
+            }
+            if given[..k].iter().any(|(m, _)| m == n) {
+                return Err(BindError::SettingTwice(Name::Owned((*n).to_owned())));
+            }
+        }
+        let mut settings = Vec::with_capacity(def.settings.len());
+        for d in &def.settings {
+            let value = given.iter().find(|(n, _)| d.name == *n).map(|(_, v)| v);
+            let held = match (&d.ty, value) {
+                (&SettingType::Flag { default }, None) => Some(Held::Flag(default)),
+                (&SettingType::Int { default, .. }, None) => Some(Held::Int(default)),
+                (&SettingType::Choice { default, .. }, None) => Some(Held::Choice(default)),
+                (SettingType::Flag { .. }, Some(&Setting::Flag(f))) => Some(Held::Flag(f)),
+                (&SettingType::Int { min, max, .. }, Some(&Setting::Int(i))) => {
+                    (min..=max).contains(&i).then_some(Held::Int(i))
+                }
+                (SettingType::Choice { names, .. }, Some(Setting::Name(n))) => {
+                    names.iter().position(|c| c == n).map(Held::Choice)
+                }
+                _ => None,
+            };
+            settings.push(held.ok_or_else(|| BindError::SettingValue(d.name.clone()))?);
+        }
+        Ok(Self { settings, ports })
+    }
+
+    pub fn flag(&self, s: SettingId) -> Option<bool> {
+        match self.settings.get(usize::from(s.0))? {
+            &Held::Flag(f) => Some(f),
+            _ => None,
+        }
+    }
+
+    pub fn int(&self, s: SettingId) -> Option<i64> {
+        match self.settings.get(usize::from(s.0))? {
+            &Held::Int(i) => Some(i),
+            _ => None,
+        }
+    }
+
+    /// The index of the name setting `s` holds, in its declaration's names.
+    pub fn choice(&self, s: SettingId) -> Option<usize> {
+        match self.settings.get(usize::from(s.0))? {
+            &Held::Choice(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    /// Whether port `p` has a channel. A stacked analysis has none.
+    pub fn port(&self, p: u8) -> bool {
+        self.ports.get(usize::from(p)).copied().unwrap_or(false)
+    }
+}
 
 /// Output a run submits after a turn.
 #[non_exhaustive]
@@ -735,7 +815,7 @@ struct Link {
     decoder: Name,
     version: u32,
     binding: u64,
-    settings: u64,
+    bound: Bound,
 }
 
 /// How a host keeps checkpoints of a wire analysis and everything stacked on it as its input
@@ -851,6 +931,16 @@ pub enum BindError {
     /// A completed subscription cannot carry sequences: they have no bound.
     #[error("a completed subscription cannot carry sequence {0}")]
     SequenceInCompleted(Name),
+    #[error("the decoder declares no setting {0}")]
+    UnknownSetting(Name),
+    #[error("setting {0} is given twice")]
+    SettingTwice(Name),
+    #[error("setting {0} does not take that value")]
+    SettingValue(Name),
+    #[error("the source has {given} ports; the decoder declares {declared}")]
+    Ports { declared: usize, given: usize },
+    #[error("port {0} needs a channel")]
+    Unbound(Name),
 }
 
 /// One line of the host's record, for tests and the trace.
@@ -997,9 +1087,9 @@ struct Slot {
     factory: Arc<Factory>,
     keep: Vec<Span>,
     downstream: Vec<usize>,
-    /// What it reads, and its decoder's settings, as checkpoints are keyed by them.
+    /// What it reads, and what it was bound with, as checkpoints are keyed by them.
     binding: u64,
-    settings: u64,
+    bound: Bound,
     /// The forward run, and its runs in live window chains.
     run: Run,
     windows: Vec<Run>,
@@ -1212,14 +1302,17 @@ impl Host {
     }
 
     /// Adds analysis `name` after those it reads from, and creates its first run, which starts on
-    /// the next step. `keep` is where the run's store retains whole items. A decoder that targets
-    /// a contract this host does not run is refused here.
+    /// the next step. `settings` gives its decoder's settings by name, each one left out at its
+    /// default, and `keep` is where the run's store retains whole items. A decoder that targets a
+    /// contract this host does not run is refused here, as is a setting it does not take or a
+    /// required port with no channel.
     pub fn add(
         &mut self,
         name: Name,
         def: Arc<Definition>,
         input: InputSpec,
         factory: Factory,
+        settings: &[(&str, Setting)],
         keep: Vec<Span>,
     ) -> Result<AnalysisId, BindError> {
         if !CONTRACT.runs(def.contract) {
@@ -1232,19 +1325,31 @@ impl Host {
         if def.ports.len() > usize::from(u8::MAX) + 1 {
             return Err(BindError::TooManyPorts);
         }
+        def.check().map_err(BindError::Schema)?;
         if self.analyses.iter().any(|a| a.name == name) {
             return Err(BindError::DuplicateAnalysis(name));
         }
         let index = self.analyses.len();
         let analysis = u16::try_from(index).map_err(|_| BindError::TooManyAnalyses)?;
-        let (input, local, bound, resolved, binding) = match input {
+        let (input, local, bound, resolved, binding, ports) = match input {
             InputSpec::Wire { source, local } => {
                 let r = def
                     .schema
                     .resolve(None, self.options.open_at_most)
                     .map_err(BindError::Schema)?;
+                let ports = source.ports();
+                if ports.len() != def.ports.len() {
+                    return Err(BindError::Ports {
+                        declared: def.ports.len(),
+                        given: ports.len(),
+                    });
+                }
+                let unbound = (def.ports.iter().zip(&ports)).find(|&(p, &b)| !b && !p.optional);
+                if let Some((p, _)) = unbound {
+                    return Err(BindError::Unbound(p.name.clone()));
+                }
                 let binding = source.binding();
-                (Input::Wire(source), local, None, r, binding)
+                (Input::Wire(source), local, None, r, binding, ports)
             }
             InputSpec::Upstream(sub) => {
                 let up = sub.upstream.index();
@@ -1285,15 +1390,22 @@ impl Host {
                 let (local, bound) = (ua.run.local, Some(ua.run.id));
                 let binding = sub.digest(up);
                 self.analyses[up].downstream.push(index);
-                (Input::Upstream { index: up, sub }, local, bound, r, binding)
+                (
+                    Input::Upstream { index: up, sub },
+                    local,
+                    bound,
+                    r,
+                    binding,
+                    vec![],
+                )
             }
         };
+        let with = Bound::new(&def, settings, ports)?;
         let id = RunId {
             analysis: AnalysisId(analysis),
             generation: self.fresh(),
         };
-        let decoder = factory(local);
-        let settings = decoder.settings();
+        let decoder = factory(&with, local);
         let run = Run::new(id, local, decoder, Store::with_keep(keep.clone()), bound);
         self.analyses.push(Slot {
             name,
@@ -1304,7 +1416,7 @@ impl Host {
             keep,
             downstream: vec![],
             binding,
-            settings,
+            bound: with,
             run,
             windows: vec![],
         });
@@ -2171,7 +2283,7 @@ impl Host {
                 analysis: old.analysis,
                 generation,
             };
-            let decoder = (an.factory)(local);
+            let decoder = (an.factory)(&an.bound, local);
             an.run = Run::new(id, local, decoder, Store::with_keep(an.keep.clone()), bound);
             retired.push(old);
             queue.extend(an.downstream.iter().map(|&d| (d, local)));
@@ -2256,7 +2368,7 @@ impl Host {
                     decoder: an.def.name.clone(),
                     version: an.def.version,
                     binding: an.binding,
-                    settings: an.settings,
+                    bound: an.bound.clone(),
                 }
             })
             .collect()
@@ -2409,7 +2521,7 @@ impl Host {
             let decoder = match kept {
                 Some(cut) => (cut.snaps[k].decoder.save())
                     .ok_or_else(|| CheckpointError::Unsupported(an.name.clone()))?,
-                None => (an.factory)(local.or(an.run.local)),
+                None => (an.factory)(&an.bound, local.or(an.run.local)),
             };
             decoders.push(decoder);
         }

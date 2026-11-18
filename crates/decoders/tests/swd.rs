@@ -4,8 +4,8 @@ mod common;
 
 use common::*;
 use escapement_tickwave_decode::{
-    AnalysisId, Counts, FieldId, Host, HostOptions, InputSpec, Item, KindId, Ref, Span, Status,
-    Tick, Value, name,
+    AnalysisId, BindError, Counts, FieldId, Host, HostOptions, InputSpec, Item, KindId, Ref, Span,
+    Status, Tick, Value, name,
 };
 use escapement_tickwave_decoders::{adiv5, swd};
 
@@ -37,7 +37,8 @@ fn host_with(
                 source: Box::new(w),
                 local,
             },
-            swd::Swd::factory(window, 1).unwrap(),
+            swd::Swd::factory(window),
+            &[],
             all(),
         )
         .unwrap();
@@ -47,6 +48,7 @@ fn host_with(
             adiv5::adi_definition(),
             InputSpec::Upstream(adiv5::adi_subscription(s)),
             adiv5::Adi::factory(),
+            &[],
             all(),
         )
         .unwrap();
@@ -56,6 +58,7 @@ fn host_with(
             adiv5::mem_definition(),
             InputSpec::Upstream(adiv5::mem_subscription(a)),
             adiv5::Mem::factory(),
+            &[],
             all(),
         )
         .unwrap();
@@ -485,7 +488,8 @@ fn the_turnaround_is_a_setting_of_one_to_four_cycles() {
                     source: Box::new(wires(&b, P)),
                     local: None,
                 },
-                swd::Swd::factory(64, trn).unwrap(),
+                swd::Swd::factory(64),
+                &[swd::turnaround(trn)],
                 all(),
             )
             .unwrap();
@@ -519,9 +523,20 @@ fn the_turnaround_is_a_setting_of_one_to_four_cycles() {
         );
     }
     for bad in [0, 5] {
+        let refused = Host::default().add(
+            name("swd"),
+            swd::definition(),
+            InputSpec::Wire {
+                source: Box::new(wires(&[], P)),
+                local: None,
+            },
+            swd::Swd::factory(64),
+            &[swd::turnaround(bad)],
+            all(),
+        );
         assert_eq!(
-            swd::Swd::factory(64, bad).err(),
-            Some(swd::Setting::Turnaround(bad))
+            refused.err(),
+            Some(BindError::SettingValue(name("turnaround")))
         );
     }
 }

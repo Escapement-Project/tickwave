@@ -7,6 +7,9 @@
 //! Activation is followed by command, as the project's probe does it. What is not decoded
 //! (selection escapes, CR scan contents, ready and delay elements, transport packets) ends what
 //! it interrupts, incomplete, with that as the cause; framing resumes at the next reset escape.
+//!
+//! Whether the target drives the TDO elements is not yet read from the wire. A setting,
+//! `assume_qualified`, assumes it; off, their driver is unknown, for a reason.
 
 mod tap7;
 
@@ -14,8 +17,8 @@ use crate::jtag::{self, Clocked, Inputs, Tap};
 use escapement_tickwave_decode::{
     AnalysisId, Cause, Decoder, Definition, Delivery, Element, ElementType, Exchange, Factory,
     FieldId, FieldType, Id, KindDecl, KindId, Mode, Observation, Observed, Op, Out, Pause, Reason,
-    Request, Role, Schema, SeqId, Span, Status, Subscription, Tick, Value, Window, field, name,
-    seq,
+    Request, Role, Schema, SeqId, Setting, SettingDecl, SettingId, Span, Status, Subscription,
+    Tick, Value, Window, field, name, seq,
 };
 use std::sync::Arc;
 use tap7::{Driver, Escape, Ev, MNEMONICS, Tap7, format_name};
@@ -183,8 +186,20 @@ pub fn schema() -> Schema {
     .with_open_at_most(3)
 }
 
+/// Whether the target is assumed to drive the TDO elements, before the wire shows it is coupled.
+pub const ASSUME_QUALIFIED: SettingId = SettingId(0);
+
+/// The qualification setting, as a binding gives it.
+pub fn assume_qualified(on: bool) -> (&'static str, Setting) {
+    ("assume_qualified", Setting::Flag(on))
+}
+
 pub fn definition() -> Arc<Definition> {
-    Arc::new(Definition::new("cjtag", 1, schema()).with_ports(["TCKC", "TMSC"]))
+    Arc::new(
+        Definition::new("cjtag", 1, schema())
+            .with_ports(["TCKC", "TMSC"])
+            .with_settings(vec![SettingDecl::flag("assume_qualified", false)]),
+    )
 }
 
 /// JTAG as it stacks on cJTAG: JTAG's name, version and schema, reading no wire.
@@ -763,7 +778,8 @@ impl Oscan {
 
 /// cJTAG under the host: TCKC and TMSC in windows of `window` ticks. A stretch where either line
 /// is unknown is lost input, declared after the ops that close what it cuts short. `qualified`
-/// assumes the target drives the TDO elements; without it their driver is unknown, for a reason.
+/// assumes the target drives the TDO elements (the `assume_qualified` setting); without it their
+/// driver is unknown, for a reason.
 #[derive(Clone, Debug)]
 pub struct Cjtag {
     /// Made from the first window's start levels.
@@ -793,8 +809,12 @@ impl Cjtag {
         }
     }
 
-    pub fn factory(qualified: bool, window: Tick) -> Factory {
-        Box::new(move |local| Box::new(Self::new(local, qualified, window)))
+    /// Makes runs of cJTAG in windows of `window` ticks, qualified as bound.
+    pub fn factory(window: Tick) -> Factory {
+        Box::new(move |b, local| {
+            let qualified = b.flag(ASSUME_QUALIFIED).unwrap_or(false);
+            Box::new(Self::new(local, qualified, window))
+        })
     }
 
     fn lines(&mut self, from: Tick) -> &mut Lines {
@@ -945,10 +965,6 @@ impl Decoder for Cjtag {
         });
         oscan + crate::held::<Change>(self.changes.capacity()) + crate::window_bytes(&self.held)
     }
-
-    fn settings(&self) -> u64 {
-        u64::from(self.qualified)
-    }
 }
 
 // ---- JTAG on cJTAG -----------------------------------------------------------------------------
@@ -996,7 +1012,7 @@ impl JtagOnCjtag {
     }
 
     pub fn factory() -> Factory {
-        Box::new(|local| Box::new(Self::new(local)))
+        Box::new(|_, local| Box::new(Self::new(local)))
     }
 
     fn piece(&mut self, op: &Op, out: &mut Out) {

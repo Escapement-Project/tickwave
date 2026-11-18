@@ -6,14 +6,14 @@
 //! bounded number of rises ahead, so a transfer is emitted once the rises after it are held, or at
 //! a gap or the end of input, where what the lookahead holds is framed before the rest is dropped.
 //!
-//! The turnaround is a setting, one to four cycles as DLCR sets it. Not decoded: the data phase
+//! The turnaround is a setting, `turnaround`, one to four cycles as DLCR sets it. Not decoded: the data phase
 //! that follows a WAIT or FAULT acknowledge when ORUNDETECT is set, which is framed as a transfer
 //! without data, its data cycles left to the search for the next request.
 
 use escapement_tickwave_decode::{
-    Decoder, Definition, Element, ElementType, Exchange, FieldId, FieldType, Id, KindDecl, KindId,
-    LinkDecl, LinkId, LinkTo, Observation, Observed, Out, Pause, Ref, Request, Role, Schema, SeqId,
-    Span, Status, Tick, Value, field, name, seq,
+    Decoder, Definition, Element, ElementType, Exchange, Factory, FieldId, FieldType, Id, KindDecl,
+    KindId, LinkDecl, LinkId, LinkTo, Observation, Observed, Out, Pause, Ref, Request, Role,
+    Schema, SeqId, Setting, SettingDecl, SettingId, Span, Status, Tick, Value, field, name, seq,
 };
 use std::{collections::VecDeque, sync::Arc};
 
@@ -84,8 +84,20 @@ pub fn schema() -> Schema {
     .with_roles(["probe", "target", "neither"])
 }
 
+/// The turnaround, in cycles.
+pub const TURNAROUND: SettingId = SettingId(0);
+
+/// The turnaround setting, as a binding gives it.
+pub fn turnaround(cycles: u8) -> (&'static str, Setting) {
+    ("turnaround", Setting::Int(cycles.into()))
+}
+
 pub fn definition() -> Arc<Definition> {
-    Arc::new(Definition::new("swd", 1, schema()).with_ports(["SWCLK", "SWDIO"]))
+    Arc::new(
+        Definition::new("swd", 1, schema())
+            .with_ports(["SWCLK", "SWDIO"])
+            .with_settings(vec![SettingDecl::int("turnaround", 1..=4, 1)]),
+    )
 }
 
 /// Rises the recogniser holds past a candidate before framing it, and the most it holds.
@@ -124,7 +136,7 @@ fn rises(ack: u8, turnaround: usize) -> usize {
 /// A setting a decoder cannot run with.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
-pub enum Setting {
+pub enum BadSetting {
     #[error("a turnaround of {0} cycles: SWD's is 1 to 4")]
     Turnaround(u8),
 }
@@ -164,11 +176,15 @@ const MASKED: [(u128, usize, usize, usize, bool); 4] = [
 
 impl Recogniser {
     /// A recogniser for a turnaround of `cycles`, 1 to 4.
-    pub fn new(cycles: u8) -> Result<Self, Setting> {
+    pub fn new(cycles: u8) -> Result<Self, BadSetting> {
         if !(1..=4).contains(&cycles) {
-            return Err(Setting::Turnaround(cycles));
+            return Err(BadSetting::Turnaround(cycles));
         }
-        Ok(Self {
+        Ok(Self::of(cycles))
+    }
+
+    fn of(cycles: u8) -> Self {
+        Self {
             turnaround: usize::from(cycles),
             bits: VecDeque::new(),
             recent: 0,
@@ -176,7 +192,7 @@ impl Recogniser {
             after: 0,
             out: VecDeque::new(),
             masks: [0; 4],
-        })
+        }
     }
 
     /// A gap in the input: what the lookahead holds is framed as at the end of input, then the
@@ -461,10 +477,14 @@ pub struct Swd {
 impl Swd {
     /// SWD from `local` (None: the recording's start), in windows of `window` ticks, with a
     /// turnaround of `turnaround` cycles.
-    pub fn new(local: Option<Tick>, window: Tick, turnaround: u8) -> Result<Self, Setting> {
+    pub fn new(local: Option<Tick>, window: Tick, turnaround: u8) -> Result<Self, BadSetting> {
+        Ok(Self::with(local, window, Recogniser::new(turnaround)?))
+    }
+
+    fn with(local: Option<Tick>, window: Tick, recogniser: Recogniser) -> Self {
         let at = local.unwrap_or(0);
-        Ok(Self {
-            recogniser: Recogniser::new(turnaround)?,
+        Self {
+            recogniser,
             track: Track::default(),
             ring: VecDeque::new(),
             next: at,
@@ -476,23 +496,16 @@ impl Swd {
             data_before: None,
             gap: None,
             held: (Vec::new(), Vec::new()),
-        })
+        }
     }
 
-    /// Makes runs of SWD, the setting checked once here.
-    pub fn factory(
-        window: Tick,
-        turnaround: u8,
-    ) -> Result<escapement_tickwave_decode::Factory, Setting> {
-        let proto = Self::new(None, window, turnaround)?;
-        Ok(Box::new(move |local| {
-            let at = local.unwrap_or(0);
-            Box::new(Self {
-                next: at,
-                floor: at,
-                ..proto.clone()
-            })
-        }))
+    /// Makes runs of SWD in windows of `window` ticks, with the turnaround bound.
+    pub fn factory(window: Tick) -> Factory {
+        Box::new(move |b, local| {
+            // The host checked the turnaround against its declaration, 1 to 4.
+            let cycles = b.int(TURNAROUND).map_or(1, |t| t.clamp(1, 4) as u8);
+            Box::new(Self::with(local, window, Recogniser::of(cycles)))
+        })
     }
 
     pub fn masks(&self) -> [u64; 4] {
@@ -672,9 +685,5 @@ impl Decoder for Swd {
             + crate::held::<(Tick, bool)>(self.ring.capacity())
             + crate::held::<Tick>(self.held.0.capacity())
             + crate::held::<bool>(self.held.1.capacity())
-    }
-
-    fn settings(&self) -> u64 {
-        self.recogniser.turnaround as u64
     }
 }

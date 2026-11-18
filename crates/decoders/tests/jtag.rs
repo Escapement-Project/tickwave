@@ -244,10 +244,18 @@ fn host_with(
             name("jtag"),
             jtag::definition(),
             InputSpec::Wire {
-                source: Box::new(w),
+                source: if has_tdo {
+                    Box::new(w)
+                } else {
+                    Box::new(Without {
+                        wires: w,
+                        port: jtag::TDO,
+                    })
+                },
                 local,
             },
-            jtag::Jtag::factory(has_tdo, window),
+            jtag::Jtag::factory(window),
+            &[],
             all(),
         )
         .unwrap();
@@ -425,7 +433,8 @@ fn a_checkpoint_restores_only_under_the_settings_it_was_taken_with() {
                     source: Box::new(w),
                     local: None,
                 },
-                jtag::Jtag::factory_with(true, 64, at_fall),
+                jtag::Jtag::factory(64),
+                &[jtag::tdo_edge(at_fall)],
                 all(),
             )
             .unwrap();

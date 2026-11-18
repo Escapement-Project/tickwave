@@ -43,11 +43,63 @@ pub struct Definition {
     pub version: u32,
     /// The decoder contract it targets.
     pub contract: Contract,
-    /// The wire ports it reads, by name, for a decoder that reads the wire: a window's port
-    /// numbers index this list, and a binding names a channel for each.
-    pub ports: Vec<Name>,
+    /// The wire ports it reads, for a decoder that reads the wire: a window's port numbers index
+    /// this list, and a binding names a channel for each, or leaves out one declared optional.
+    pub ports: Vec<PortDecl>,
+    /// What a binding may set, each with its default. The host hands a run's decoder the values
+    /// it bound, and keys checkpoints on them.
+    pub settings: Vec<SettingDecl>,
     pub schema: Schema,
 }
+
+/// A wire port, by name. A binding may leave out an optional one, and the decoder is told which
+/// ports it has.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PortDecl {
+    pub name: Name,
+    pub optional: bool,
+}
+
+/// A setting, which a recipe gives by name. A binding that leaves it out takes its default.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SettingDecl {
+    pub name: Name,
+    pub ty: SettingType,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SettingType {
+    Flag {
+        default: bool,
+    },
+    /// A whole number from `min` to `max`.
+    Int {
+        min: i64,
+        max: i64,
+        default: i64,
+    },
+    /// One of `names`, given by name; `default` indexes them.
+    Choice {
+        names: Vec<Name>,
+        default: usize,
+    },
+}
+
+/// A setting's value as a binding gives it, as a recipe's TOML holds it: a choice by its name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Setting {
+    Flag(bool),
+    Int(i64),
+    Name(Name),
+}
+
+/// A setting, by its index in the definition's settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SettingId(pub u16);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -151,6 +203,7 @@ impl Definition {
             version,
             contract: CONTRACT,
             ports: vec![],
+            settings: vec![],
             schema,
         }
     }
@@ -160,9 +213,109 @@ impl Definition {
         self
     }
 
+    /// Its ports, each one a binding must give a channel.
     pub fn with_ports<N: Into<Name>>(mut self, ports: impl IntoIterator<Item = N>) -> Self {
-        self.ports = names(ports);
+        self.ports = (names(ports).into_iter())
+            .map(|name| PortDecl {
+                name,
+                optional: false,
+            })
+            .collect();
         self
+    }
+
+    /// Adds ports after those it has, each one a binding may leave out.
+    pub fn with_optional_ports<N: Into<Name>>(
+        mut self,
+        ports: impl IntoIterator<Item = N>,
+    ) -> Self {
+        let optional = names(ports).into_iter().map(|name| PortDecl {
+            name,
+            optional: true,
+        });
+        self.ports.extend(optional);
+        self
+    }
+
+    pub fn with_settings(mut self, settings: Vec<SettingDecl>) -> Self {
+        self.settings = settings;
+        self
+    }
+
+    /// Checks its ports and settings: their names, none twice, and each default among the values
+    /// its setting takes.
+    pub(crate) fn check(&self) -> Result<(), SchemaError> {
+        let mut seen = HashSet::new();
+        for p in &self.ports {
+            named(&p.name)?;
+            if !seen.insert(&p.name) {
+                return Err(SchemaError::DuplicatePort(p.name.clone()));
+            }
+        }
+        at_most(self.settings.len(), MAX_LIST, "settings")?;
+        let mut seen = HashSet::new();
+        for s in &self.settings {
+            named(&s.name)?;
+            if !seen.insert(&s.name) {
+                return Err(SchemaError::DuplicateSetting(s.name.clone()));
+            }
+            let fits = match &s.ty {
+                SettingType::Flag { .. } => true,
+                SettingType::Int { min, max, default } => (min..=max).contains(&default),
+                SettingType::Choice { names, default } => {
+                    at_most(names.len(), MAX_LIST, "choices")?;
+                    let mut choices = HashSet::new();
+                    for n in names {
+                        named(n)?;
+                        if !choices.insert(n) {
+                            return Err(SchemaError::DuplicateChoice {
+                                setting: s.name.clone(),
+                                name: n.clone(),
+                            });
+                        }
+                    }
+                    *default < names.len()
+                }
+            };
+            if !fits {
+                return Err(SchemaError::SettingDefault(s.name.clone()));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl SettingDecl {
+    pub fn flag(name: impl Into<Name>, default: bool) -> Self {
+        Self {
+            name: name.into(),
+            ty: SettingType::Flag { default },
+        }
+    }
+
+    pub fn int(name: impl Into<Name>, range: std::ops::RangeInclusive<i64>, default: i64) -> Self {
+        Self {
+            name: name.into(),
+            ty: SettingType::Int {
+                min: *range.start(),
+                max: *range.end(),
+                default,
+            },
+        }
+    }
+
+    pub fn choice<N: Into<Name>>(
+        name: impl Into<Name>,
+        choices: impl IntoIterator<Item = N>,
+        default: usize,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            ty: SettingType::Choice {
+                names: names(choices),
+                default,
+            },
+        }
     }
 }
 
@@ -337,6 +490,14 @@ pub enum SchemaError {
     RowLanes(usize),
     #[error("role {0} is declared twice")]
     DuplicateRole(Name),
+    #[error("port {0} is declared twice")]
+    DuplicatePort(Name),
+    #[error("setting {0} is declared twice")]
+    DuplicateSetting(Name),
+    #[error("setting {setting}: {name} is declared twice")]
+    DuplicateChoice { setting: Name, name: Name },
+    #[error("setting {0}'s default is not a value it takes")]
+    SettingDefault(Name),
 }
 
 /// An operation its analysis's schema does not allow.

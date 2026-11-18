@@ -4,7 +4,7 @@ mod common;
 
 use common::*;
 use escapement_tickwave_decode::{
-    Counts, Host, HostOptions, InputSpec, Source, Span, Tick, name, wire::WireSource,
+    Counts, Host, HostOptions, InputSpec, Observed, Source, Span, Tick, name, wire::WireSource,
 };
 use escapement_tickwave_decoders::{adiv5, swd};
 use escapement_tickwave_format::{
@@ -85,7 +85,8 @@ fn decoded_with(options: HostOptions, source: Box<dyn Source>, window: Tick) -> 
             source,
             local: None,
         },
-        swd::Swd::factory(window, 1).unwrap(),
+        swd::Swd::factory(window),
+        &[],
         all(),
     ))
     .unwrap();
@@ -94,6 +95,7 @@ fn decoded_with(options: HostOptions, source: Box<dyn Source>, window: Tick) -> 
         adiv5::adi_definition(),
         InputSpec::Upstream(adiv5::adi_subscription(s)),
         adiv5::Adi::factory(),
+        &[],
         all(),
     ))
     .unwrap();
@@ -102,6 +104,7 @@ fn decoded_with(options: HostOptions, source: Box<dyn Source>, window: Tick) -> 
         adiv5::mem_definition(),
         InputSpec::Upstream(adiv5::mem_subscription(a)),
         adiv5::Mem::factory(),
+        &[],
         all(),
     ))
     .unwrap();
@@ -194,4 +197,31 @@ fn a_checkpoint_key_follows_the_recordings_content_not_its_length() {
     };
     assert_ne!(open(&wb), open(&wc), "other content");
     assert_eq!(open(&wb), open(&wb), "the same file opened again");
+}
+
+#[test]
+fn a_port_left_out_is_not_read_and_the_others_keep_their_numbers() {
+    let (b, _) = bits(&[dp_read(0x0, 0x0BC1_1477)]);
+    let w = wires(&b, P);
+    let rec = Arc::new(Recording::open(Arc::new(recording(&w)), Cache::new(8 << 20)).unwrap());
+    let never = AtomicBool::new(false);
+    let read = |ports: Vec<Option<usize>>| {
+        let mut s = WireSource::with_ports(rec.clone(), ports).unwrap();
+        let w = s.window(0, Tick::MAX, usize::MAX, &never).unwrap().unwrap();
+        (s.ports(), s.binding(), w.events)
+    };
+    let port = |e: &Observed| match *e {
+        Observed::Start { port, .. }
+        | Observed::Edge { port, .. }
+        | Observed::Known { port, .. }
+        | Observed::Unknown { port, .. } => port,
+        _ => u8::MAX,
+    };
+    let (both, key, all) = read(vec![Some(0), Some(1)]);
+    let (bound, without, only) = read(vec![None, Some(1)]);
+    assert_eq!((both, bound), (vec![true, true], vec![false, true]));
+    let data: Vec<_> = all.iter().filter(|e| port(e) == 1).copied().collect();
+    assert!(data.len() > 2, "SWDIO changes");
+    assert_eq!(only, data, "port 1's observations, still numbered 1");
+    assert_ne!(key, without, "a port left out is another binding");
 }

@@ -24,7 +24,7 @@ mod store;
 pub mod wire;
 
 pub use host::{
-    AnalysisId, Batch, BindError, Checkpoint, CheckpointError, Completed, Decoder, Delivery,
+    AnalysisId, Batch, BindError, Bound, Checkpoint, CheckpointError, Completed, Decoder, Delivery,
     Derived, Exchange, Factory, Host, HostOptions, InputSpec, Keeping, Kept, LogEntry, Mode,
     Observed, PIECE_CHUNK, Pause, Piece, Refusal, Reply, Request, RequestId, RunId, RunView, Seek,
     Source, SourceError, Stats, Subscription, Turn, Window, WindowId,
@@ -36,8 +36,8 @@ pub use output::{
 pub use schema::{
     CONTRACT, Contract, Definition, ElementType, FieldDecl, FieldType, KindDecl, LinkDecl, LinkTo,
     MAX_FIELD_NAMES, MAX_KINDS, MAX_LANES, MAX_LINK_ROLES, MAX_LINK_TARGETS, MAX_LIST, MAX_NAME,
-    MAX_PHRASE, MAX_ROLES, MAX_SEQUENCES, Mismatch, Name, Schema, SchemaError, SeqDecl, field,
-    name, seq,
+    MAX_PHRASE, MAX_ROLES, MAX_SEQUENCES, Mismatch, Name, PortDecl, Schema, SchemaError, SeqDecl,
+    Setting, SettingDecl, SettingId, SettingType, field, name, seq,
 };
 pub use store::{Counts, Field, Item, Refused, Store};
 

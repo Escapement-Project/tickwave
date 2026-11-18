@@ -34,14 +34,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rec = Arc::new(Recording::open(Arc::new(file), Cache::new(64 << 20))?);
     let mut lines = vec![];
     for n in ["TCK", "TMS", "TDI"] {
-        lines.push(rec.channel(n).ok_or(format!("no {n}"))?);
+        lines.push(Some(rec.channel(n).ok_or(format!("no {n}"))?));
     }
     let tdo = rec.channel("TDO");
-    lines.extend(tdo);
+    lines.push(tdo);
     if from_wire && tdo.is_some() {
         let probe = std::time::Instant::now();
         let choice = jtag::choose_tdo_edge(
-            || Box::new(WireSource::new(rec.clone(), lines.clone()).expect("bound above")),
+            || Box::new(WireSource::with_ports(rec.clone(), lines.clone()).expect("bound above")),
             50_000,
             probe_scans,
         )?;
@@ -55,7 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         at_fall = choice.at_fall;
     }
-    let source = WireSource::new(rec.clone(), lines)?;
+    let source = WireSource::with_ports(rec.clone(), lines)?;
     let mut h = Host::default();
     let j = h.add(
         name("jtag"),
@@ -64,7 +64,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             source: Box::new(source),
             local: None,
         },
-        jtag::Jtag::factory_with(tdo.is_some(), 50_000, at_fall),
+        jtag::Jtag::factory(50_000),
+        &[jtag::tdo_edge(at_fall)],
         vec![],
     )?;
     let seen = Arc::new(Mutex::new(Seen {
@@ -79,7 +80,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Subscription::new(j, Mode::Completed)
                 .with_kinds(["state", "path", "ir-scan", "dr-scan"]),
         ),
-        Box::new(move |_| Box::new(Checker(s2.clone()))),
+        Box::new(move |_, _| Box::new(Checker(s2.clone()))),
+        &[],
         vec![],
     )?;
     let start = std::time::Instant::now();

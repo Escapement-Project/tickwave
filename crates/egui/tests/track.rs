@@ -127,7 +127,8 @@ fn jtag_case(path: &Path) -> Case {
     let tdo = rec.channel("TDO");
     lanes.extend(tdo);
     let map = timeline_map(&rec, lanes[0]).unwrap();
-    let source = WireSource::new(rec.clone(), lanes.clone()).unwrap();
+    let ports = (lanes[..3].iter().copied().map(Some)).chain([tdo]);
+    let source = WireSource::with_ports(rec.clone(), ports.collect()).unwrap();
     let mut h = Host::default();
     let j = h
         .add(
@@ -137,7 +138,8 @@ fn jtag_case(path: &Path) -> Case {
                 source: Box::new(source),
                 local: None,
             },
-            jtag::Jtag::factory(tdo.is_some(), 50_000),
+            jtag::Jtag::factory(50_000),
+            &[],
             all(),
         )
         .unwrap();
@@ -168,7 +170,8 @@ fn cjtag_case(path: &Path, ahead: Tick) -> Case {
                 source: Box::new(source),
                 local: None,
             },
-            cjtag::Cjtag::factory(true, 1_000_000),
+            cjtag::Cjtag::factory(1_000_000),
+            &[cjtag::assume_qualified(true)],
             all(),
         )
         .unwrap();
@@ -178,6 +181,7 @@ fn cjtag_case(path: &Path, ahead: Tick) -> Case {
             cjtag::jtag_definition(),
             InputSpec::Upstream(cjtag::jtag_subscription(c)),
             cjtag::JtagOnCjtag::factory(),
+            &[],
             all(),
         )
         .unwrap();
@@ -276,7 +280,8 @@ fn decode(path: &Path) -> (Vec<Decoded>, Mapping, [usize; 2]) {
                 source: Box::new(source),
                 local: None,
             },
-            swd::Swd::factory(1 << 16, 1).unwrap(),
+            swd::Swd::factory(1 << 16),
+            &[],
             all(),
         )
         .unwrap();
@@ -286,6 +291,7 @@ fn decode(path: &Path) -> (Vec<Decoded>, Mapping, [usize; 2]) {
             adiv5::adi_definition(),
             InputSpec::Upstream(adiv5::adi_subscription(s)),
             adiv5::Adi::factory(),
+            &[],
             all(),
         )
         .unwrap();

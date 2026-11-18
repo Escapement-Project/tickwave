@@ -31,7 +31,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             source: Box::new(source),
             local: None,
         },
-        swd::Swd::factory(100_000, 1)?,
+        swd::Swd::factory(100_000),
+        &[],
         all.clone(),
     )?;
     let a = h.add(
@@ -39,6 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         adiv5::adi_definition(),
         InputSpec::Upstream(adiv5::adi_subscription(s)),
         adiv5::Adi::factory(),
+        &[],
         all.clone(),
     )?;
     let m = h.add(
@@ -46,6 +48,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         adiv5::mem_definition(),
         InputSpec::Upstream(adiv5::mem_subscription(a)),
         adiv5::Mem::factory(),
+        &[],
         all,
     )?;
     let start = std::time::Instant::now();

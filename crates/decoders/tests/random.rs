@@ -161,7 +161,8 @@ fn swd_stack(
                 source: Box::new(w),
                 local,
             },
-            swd::Swd::factory(window, turnaround).unwrap(),
+            swd::Swd::factory(window),
+            &[swd::turnaround(turnaround)],
             all(),
         )
         .unwrap();
@@ -171,6 +172,7 @@ fn swd_stack(
             adiv5::adi_definition(),
             InputSpec::Upstream(adiv5::adi_subscription(s)),
             adiv5::Adi::factory(),
+            &[],
             all(),
         )
         .unwrap();
@@ -180,6 +182,7 @@ fn swd_stack(
             adiv5::mem_definition(),
             InputSpec::Upstream(adiv5::mem_subscription(a)),
             adiv5::Mem::factory(),
+            &[],
             all(),
         )
         .unwrap();
@@ -232,12 +235,12 @@ fn a_window_ahead_of_the_forward_pass_says_what_it_cannot_know() {
 /// what it held at the input's end, before it started.
 #[test]
 fn a_local_start_past_the_end_of_the_input_finishes_cleanly() {
-    let empty = || Wires {
-        lines: vec![Line::default(); 4],
+    let empty = |ports| Wires {
+        lines: vec![Line::default(); ports],
         end: 1,
         reversed: false,
     };
-    let (h, a) = swd_stack(empty(), 10_074, Some(9_735), 1);
+    let (h, a) = swd_stack(empty(2), 10_074, Some(9_735), 1);
     let mut hosts = vec![(h, a[0])];
     let mut h = Host::default();
     let j = h
@@ -245,10 +248,11 @@ fn a_local_start_past_the_end_of_the_input_finishes_cleanly() {
             name("jtag"),
             jtag::definition(),
             InputSpec::Wire {
-                source: Box::new(empty()),
+                source: Box::new(empty(4)),
                 local: Some(1_279),
             },
-            jtag::Jtag::factory(true, 1_150),
+            jtag::Jtag::factory(1_150),
+            &[],
             all(),
         )
         .unwrap();
@@ -259,10 +263,11 @@ fn a_local_start_past_the_end_of_the_input_finishes_cleanly() {
             name("cjtag"),
             cjtag::definition(),
             InputSpec::Wire {
-                source: Box::new(empty()),
+                source: Box::new(empty(2)),
                 local: Some(65_535),
             },
-            cjtag::Cjtag::factory(false, 65_535),
+            cjtag::Cjtag::factory(65_535),
+            &[],
             all(),
         )
         .unwrap();
@@ -271,6 +276,7 @@ fn a_local_start_past_the_end_of_the_input_finishes_cleanly() {
         cjtag::jtag_definition(),
         InputSpec::Upstream(cjtag::jtag_subscription(c)),
         cjtag::JtagOnCjtag::factory(),
+        &[],
         all(),
     )
     .unwrap();
@@ -315,16 +321,25 @@ fn jtag_never_panics_and_never_breaks_a_rule() {
         let w = clocked(r, 3);
         let w = if r.bool() { perturb(r, w) } else { w };
         let (window, local) = reading(r, &w);
+        let (has_tdo, at_fall) = (r.bool(), r.bool());
         let mut h = Host::default();
         let j = h
             .add(
                 name("jtag"),
                 jtag::definition(),
                 InputSpec::Wire {
-                    source: Box::new(w),
+                    source: if has_tdo {
+                        Box::new(w)
+                    } else {
+                        Box::new(Without {
+                            wires: w,
+                            port: jtag::TDO,
+                        })
+                    },
                     local,
                 },
-                jtag::Jtag::factory_with(r.bool(), window, r.bool()),
+                jtag::Jtag::factory(window),
+                &[jtag::tdo_edge(at_fall)],
                 all(),
             )
             .unwrap();
@@ -348,7 +363,8 @@ fn cjtag_with_jtag_over_it_never_panics_and_never_breaks_a_rule() {
                     source: Box::new(w),
                     local,
                 },
-                cjtag::Cjtag::factory(r.bool(), window),
+                cjtag::Cjtag::factory(window),
+                &[cjtag::assume_qualified(r.bool())],
                 all(),
             )
             .unwrap();
@@ -360,6 +376,7 @@ fn cjtag_with_jtag_over_it_never_panics_and_never_breaks_a_rule() {
                     cjtag::jtag_definition(),
                     InputSpec::Upstream(cjtag::jtag_subscription(c)),
                     cjtag::JtagOnCjtag::factory(),
+                    &[],
                     all(),
                 )
                 .unwrap();

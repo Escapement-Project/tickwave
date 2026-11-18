@@ -4,12 +4,12 @@ mod common;
 
 use common::*;
 use escapement_tickwave_decode::{
-    AnalysisId, Batch, BindError, CONTRACT, Cause, CheckpointError, Contract, Decoder, Definition,
-    Delivery, Element, ElementType, Exchange, FieldDecl, FieldId, FieldType, Host, HostOptions, Id,
-    InputSpec, Keeping, KindDecl, KindId, LinkDecl, LinkId, LinkTo, LogEntry, Mismatch, Mode, Name,
-    Need, Observation, Op, Pause, Reason, Ref, Refusal, Refused, Reply, Role, RunView, Schema,
-    SchemaError, Seek, SeqDecl, SeqId, Span, Status, Subscription, Tick, Value, WindowId, field,
-    name, seq,
+    AnalysisId, Batch, BindError, Bound, CONTRACT, Cause, CheckpointError, Contract, Decoder,
+    Definition, Delivery, Element, ElementType, Exchange, FieldDecl, FieldId, FieldType, Host,
+    HostOptions, Id, InputSpec, Keeping, KindDecl, KindId, LinkDecl, LinkId, LinkTo, LogEntry,
+    Mismatch, Mode, Name, Need, Observation, Op, Pause, Reason, Ref, Refusal, Refused, Reply, Role,
+    RunView, Schema, SchemaError, Seek, SeqDecl, SeqId, Setting, SettingDecl, SettingId, Source,
+    SourceError, Span, Status, Subscription, Tick, Value, Window, WindowId, field, name, seq,
 };
 use std::sync::{Arc, Mutex, atomic::Ordering::Relaxed};
 
@@ -23,7 +23,8 @@ fn toy_host(turns: Vec<Vec<Act>>, options: HostOptions) -> (Host, AnalysisId) {
                 source: Box::new(Nothing::default()),
                 local: None,
             },
-            Box::new(move |_| Box::new(script(turns.clone()))),
+            Box::new(move |_, _| Box::new(script(turns.clone()))),
+            &[],
             all(),
         )
         .unwrap();
@@ -57,7 +58,8 @@ fn a_decoder_for_a_contract_the_host_does_not_run_is_refused_when_added() {
                 source: Box::new(Nothing::default()),
                 local: None,
             },
-            Box::new(|_| Box::new(script(vec![]))),
+            Box::new(|_, _| Box::new(script(vec![]))),
+            &[],
             all(),
         )
     };
@@ -228,7 +230,8 @@ fn a_schema_and_its_subscriptions_are_checked_when_added() {
                 source: Box::new(Nothing::default()),
                 local: None,
             },
-            Box::new(|_| Box::new(script(vec![]))),
+            Box::new(|_, _| Box::new(script(vec![]))),
+            &[],
             all(),
         );
         let message = got.err().map(|e| e.to_string()).unwrap_or_default();
@@ -246,7 +249,8 @@ fn a_schema_and_its_subscriptions_are_checked_when_added() {
                         .with_kinds(kinds)
                         .with_sequences(sequences),
                 ),
-                Box::new(|_| Box::new(Pairs::default())),
+                Box::new(|_, _| Box::new(Pairs::default())),
+                &[],
                 all(),
             )
         };
@@ -281,7 +285,8 @@ fn a_schema_and_its_subscriptions_are_checked_when_added() {
                 n.into(),
                 toy(),
                 input,
-                Box::new(|_| Box::new(Swallow)),
+                Box::new(|_, _| Box::new(Swallow)),
+                &[],
                 all(),
             )
         })
@@ -292,7 +297,8 @@ fn a_schema_and_its_subscriptions_are_checked_when_added() {
         name("y"),
         definition("pairs", pairs_schema()),
         InputSpec::Upstream(Subscription::new(foreign, Mode::Completed)),
-        Box::new(|_| Box::new(Pairs::default())),
+        Box::new(|_, _| Box::new(Pairs::default())),
+        &[],
         all(),
     );
     assert_eq!(missing.unwrap_err(), BindError::NoAnalysis(foreign));
@@ -795,7 +801,8 @@ fn toy_and_sink(options: HostOptions) -> (Host, AnalysisId, AnalysisId, Arc<Mute
                 source: Box::new(Nothing::default()),
                 local: None,
             },
-            Box::new(|_| Box::new(script(vec![]))),
+            Box::new(|_, _| Box::new(script(vec![]))),
+            &[],
             all(),
         )
         .unwrap();
@@ -806,7 +813,8 @@ fn toy_and_sink(options: HostOptions) -> (Host, AnalysisId, AnalysisId, Arc<Mute
             name("sink"),
             definition("sink", toy_schema()),
             InputSpec::Upstream(Subscription::new(a, Mode::Pieces).with_kinds(vec![name("frame")])),
-            Box::new(move |_| Box::new(Record(g.clone()))),
+            Box::new(move |_, _| Box::new(Record(g.clone()))),
+            &[],
             all(),
         )
         .unwrap();
@@ -839,7 +847,8 @@ fn a_batch_counts_its_losses_against_the_bound() {
                 source: Box::new(Nothing::default()),
                 local: None,
             },
-            Box::new(move |_| Box::new(script(turns.clone()))),
+            Box::new(move |_, _| Box::new(script(turns.clone()))),
+            &[],
             all(),
         )
         .unwrap();
@@ -869,7 +878,8 @@ fn a_run_whose_frontier_stays_holds_no_more_losses_than_the_bound() {
                 source: Box::new(Nothing::default()),
                 local: None,
             },
-            Box::new(move |_| Box::new(script(turns.clone()))),
+            Box::new(move |_, _| Box::new(script(turns.clone()))),
+            &[],
             vec![],
         )
         .unwrap();
@@ -921,7 +931,8 @@ fn lost_input_is_checked_joined_and_delivered_at_its_place() {
                 source: Box::new(Nothing::default()),
                 local: None,
             },
-            Box::new(move |_| Box::new(script(turns.clone()))),
+            Box::new(move |_, _| Box::new(script(turns.clone()))),
+            &[],
             vec![Span { start: 0, end: 15 }],
         )
         .unwrap();
@@ -930,7 +941,8 @@ fn lost_input_is_checked_joined_and_delivered_at_its_place() {
             name("sink"),
             definition("sink", toy_schema()),
             InputSpec::Upstream(Subscription::new(a, Mode::Pieces).with_kinds(vec![name("frame")])),
-            Box::new(|_| Box::new(script(vec![]))),
+            Box::new(|_, _| Box::new(script(vec![]))),
+            &[],
             all(),
         )
         .unwrap();
@@ -1008,7 +1020,8 @@ fn lost_input_is_checked_joined_and_delivered_at_its_place() {
                 source: Box::new(Nothing::default()),
                 local: None,
             },
-            Box::new(move |_| Box::new(script(turns.clone()))),
+            Box::new(move |_, _| Box::new(script(turns.clone()))),
+            &[],
             vec![],
         )
         .unwrap();
@@ -1044,7 +1057,8 @@ fn a_stacked_analysis_receives_each_loss_in_its_place_and_must_declare_it() {
                 source: Box::new(line(20, 3, 20, vec![gap])),
                 local: None,
             },
-            Box::new(|local| Box::new(Pulses::new(local, 50))),
+            Box::new(|_, local| Box::new(Pulses::new(local, 50))),
+            &[],
             all(),
         )
         .unwrap();
@@ -1055,7 +1069,8 @@ fn a_stacked_analysis_receives_each_loss_in_its_place_and_must_declare_it() {
             InputSpec::Upstream(
                 Subscription::new(p, Mode::Completed).with_kinds(vec![name("pulse")]),
             ),
-            Box::new(|_| Box::new(Swallow)),
+            Box::new(|_, _| Box::new(Swallow)),
+            &[],
             all(),
         )
         .unwrap();
@@ -1082,7 +1097,8 @@ fn completed_items_and_pieces_reach_stacked_analyses_as_subscribed() {
                     .with_kinds(vec![name("pulse")])
                     .with_sequences(sequences),
             ),
-            Box::new(|_| Box::new(Swallow)),
+            Box::new(|_, _| Box::new(Swallow)),
+            &[],
             all(),
         )
         .unwrap()
@@ -1165,7 +1181,8 @@ fn a_checkpoint_needs_a_root_and_decoders_that_save_and_restores_as_new_generati
                 source: Box::new(Nothing::default()),
                 local: None,
             },
-            Box::new(|_| Box::new(Plain)),
+            Box::new(|_, _| Box::new(Plain)),
+            &[],
             all(),
         )
         .unwrap();
@@ -1188,12 +1205,13 @@ fn an_interrupted_read_stays_outstanding_with_its_source_unmoved() {
                 source: Box::new(reads),
                 local: None,
             },
-            Box::new(|_| {
+            Box::new(|_, _| {
                 Box::new(script(vec![
                     vec![Act::Request(0, 10)],
                     vec![Act::TakeReply],
                 ]))
             }),
+            &[],
             all(),
         )
         .unwrap();
@@ -1304,7 +1322,8 @@ fn a_definition_from_data_runs_as_a_static_one_does() {
                     source: Box::new(line(10, 3, 20, vec![Span { start: 70, end: 90 }])),
                     local: None,
                 },
-                Box::new(|local| Box::new(Pulses::new(local, 25))),
+                Box::new(|_, local| Box::new(Pulses::new(local, 25))),
+                &[],
                 all(),
             )
             .unwrap();
@@ -1884,7 +1903,8 @@ fn a_kind_declares_between_one_and_eight_lanes() {
                 source: Box::new(Nothing::default()),
                 local: None,
             },
-            Box::new(|_| Box::new(Swallow)),
+            Box::new(|_, _| Box::new(Swallow)),
+            &[],
             all(),
         )
         .map(|_| ())
@@ -1945,7 +1965,8 @@ fn a_decoder_that_leaves_its_deliveries_waits_for_new_input_instead_of_spinning(
         name("idle"),
         definition("idle", toy_schema()),
         InputSpec::Upstream(Subscription::new(p, Mode::Completed).with_kinds(vec![name("pulse")])),
-        Box::new(move |_| Box::new(Idle(count.clone()))),
+        Box::new(move |_, _| Box::new(Idle(count.clone()))),
+        &[],
         all(),
     )
     .unwrap();
@@ -1979,7 +2000,8 @@ fn names_and_phrases_have_bounds_of_their_own() {
                     source: Box::new(Nothing::default()),
                     local: None,
                 },
-                Box::new(|_| Box::new(script(vec![]))),
+                Box::new(|_, _| Box::new(script(vec![]))),
+                &[],
                 all(),
             )
             .err()
@@ -2004,4 +2026,206 @@ fn a_source_error_keeps_the_recordings_error_as_its_source() {
     let source = e.source().map(|s| s.to_string());
     assert_eq!(source.as_deref(), Some("the file is cut off"));
     assert!(e.to_string().contains("the file is cut off"));
+}
+
+/// A source with nothing on it and `.0` its ports, true where one has a channel.
+struct Ports(Vec<bool>);
+
+impl Source for Ports {
+    fn window(
+        &mut self,
+        from: Tick,
+        upto: Tick,
+        _: usize,
+        _: &std::sync::atomic::AtomicBool,
+    ) -> Result<Option<Window>, SourceError> {
+        Ok(Some(Window::new(from, upto)))
+    }
+
+    fn binding(&self) -> u64 {
+        0
+    }
+
+    fn ports(&self) -> Vec<bool> {
+        self.0.clone()
+    }
+}
+
+fn configured(settings: Vec<SettingDecl>) -> Arc<Definition> {
+    Arc::new(
+        Definition::new("set", 1, pulses_schema())
+            .with_ports(["clock"])
+            .with_optional_ports(["data"])
+            .with_settings(settings),
+    )
+}
+
+fn three() -> Vec<SettingDecl> {
+    vec![
+        SettingDecl::int("cycles", 1..=4, 1),
+        SettingDecl::choice("edge", ["rise", "fall"], 0),
+        SettingDecl::flag("assume", true),
+    ]
+}
+
+/// The bound a decoder of `def` is made with, given `settings` on a source of `ports`.
+fn bound(
+    def: Arc<Definition>,
+    ports: Vec<bool>,
+    settings: &[(&str, Setting)],
+) -> Result<Bound, BindError> {
+    let seen = Arc::new(Mutex::new(None));
+    let s = seen.clone();
+    Host::default().add(
+        name("set"),
+        def,
+        InputSpec::Wire {
+            source: Box::new(Ports(ports)),
+            local: None,
+        },
+        Box::new(move |b, _| {
+            *s.lock().unwrap() = Some(b.clone());
+            Box::new(Swallow)
+        }),
+        settings,
+        all(),
+    )?;
+    Ok(seen.lock().unwrap().take().expect("the decoder was made"))
+}
+
+#[test]
+fn a_decoder_is_made_with_the_settings_given_by_name_and_the_rest_at_their_defaults() {
+    let (cycles, edge, assume) = (SettingId(0), SettingId(1), SettingId(2));
+    let given = [
+        ("edge", Setting::Name(name("fall"))),
+        ("cycles", Setting::Int(3)),
+    ];
+    let b = bound(configured(three()), vec![true, true], &given).unwrap();
+    assert_eq!(
+        (b.int(cycles), b.choice(edge), b.flag(assume)),
+        (Some(3), Some(1), Some(true))
+    );
+    assert_eq!(
+        (b.flag(cycles), b.int(edge), b.int(SettingId(3))),
+        (None, None, None)
+    );
+    assert!(b.port(0) && b.port(1) && !b.port(2));
+    let b = bound(configured(three()), vec![true, true], &[]).unwrap();
+    assert_eq!((b.int(cycles), b.choice(edge)), (Some(1), Some(0)));
+
+    let refused = |given: &[(&str, Setting)]| bound(configured(three()), vec![true, true], given);
+    let value = |n: &'static str| Err(BindError::SettingValue(name(n)));
+    assert_eq!(refused(&[("cycles", Setting::Int(5))]), value("cycles"));
+    assert_eq!(refused(&[("cycles", Setting::Flag(true))]), value("cycles"));
+    assert_eq!(
+        refused(&[("edge", Setting::Name(name("both")))]),
+        value("edge")
+    );
+    assert_eq!(
+        refused(&[("speed", Setting::Int(1))]),
+        Err(BindError::UnknownSetting(name("speed")))
+    );
+    assert_eq!(
+        refused(&[
+            ("assume", Setting::Flag(false)),
+            ("assume", Setting::Flag(true))
+        ]),
+        Err(BindError::SettingTwice(name("assume")))
+    );
+}
+
+#[test]
+fn a_binding_may_leave_out_an_optional_port_and_no_other() {
+    let b = bound(configured(vec![]), vec![true, false], &[]).unwrap();
+    assert!(b.port(0) && !b.port(1));
+    assert_eq!(
+        bound(configured(vec![]), vec![false, true], &[]),
+        Err(BindError::Unbound(name("clock")))
+    );
+    assert_eq!(
+        bound(configured(vec![]), vec![true], &[]),
+        Err(BindError::Ports {
+            declared: 2,
+            given: 1
+        })
+    );
+}
+
+#[test]
+fn a_definition_whose_settings_or_ports_clash_is_refused() {
+    let refused = |settings: Vec<SettingDecl>| bound(configured(settings), vec![true, true], &[]);
+    let schema = |e| Err(BindError::Schema(e));
+    assert_eq!(
+        refused(vec![SettingDecl::int("n", 1..=4, 0)]),
+        schema(SchemaError::SettingDefault(name("n")))
+    );
+    assert_eq!(
+        refused(vec![SettingDecl::choice("n", ["a", "b"], 2)]),
+        schema(SchemaError::SettingDefault(name("n")))
+    );
+    assert_eq!(
+        refused(vec![SettingDecl::choice("n", Vec::<Name>::new(), 0)]),
+        schema(SchemaError::SettingDefault(name("n")))
+    );
+    assert_eq!(
+        refused(vec![SettingDecl::choice("n", ["a", "a"], 0)]),
+        schema(SchemaError::DuplicateChoice {
+            setting: name("n"),
+            name: name("a")
+        })
+    );
+    assert_eq!(
+        refused(vec![
+            SettingDecl::flag("n", false),
+            SettingDecl::flag("n", true)
+        ]),
+        schema(SchemaError::DuplicateSetting(name("n")))
+    );
+    assert_eq!(
+        refused(vec![SettingDecl::flag("", false)]),
+        schema(SchemaError::BadName)
+    );
+    let twice = Arc::new(
+        Definition::new("set", 1, pulses_schema())
+            .with_ports(["clock"])
+            .with_optional_ports(["clock"]),
+    );
+    assert_eq!(
+        bound(twice, vec![true, true], &[]),
+        schema(SchemaError::DuplicatePort(name("clock")))
+    );
+}
+
+#[test]
+fn a_checkpoint_restores_only_where_the_settings_are_the_same() {
+    let host = |cycles: i64| {
+        let def = Arc::new(
+            Definition::new("pulses", 1, pulses_schema())
+                .with_ports(["line"])
+                .with_settings(vec![SettingDecl::int("cycles", 1..=4, 1)]),
+        );
+        let mut h = Host::default();
+        let p = h
+            .add(
+                name("pulses"),
+                def,
+                InputSpec::Wire {
+                    source: Box::new(line(20, 3, 20, vec![])),
+                    local: None,
+                },
+                Box::new(|_, local| Box::new(Pulses::new(local, 15))),
+                &[("cycles", Setting::Int(cycles))],
+                all(),
+            )
+            .unwrap();
+        (h, p)
+    };
+    let (mut h, p) = host(2);
+    h.run_until(|h| h.consumed(p) >= 100).unwrap();
+    let cut = h.checkpoint(p).unwrap();
+    assert!(host(2).0.restore(&cut).is_ok());
+    assert!(matches!(
+        host(3).0.restore(&cut),
+        Err(CheckpointError::Incompatible)
+    ));
 }

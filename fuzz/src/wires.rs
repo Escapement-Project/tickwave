@@ -73,11 +73,13 @@ impl Line {
     }
 }
 
-/// The lines as a source, its observations at one tick in port order or in reverse.
+/// The lines as a source, its observations at one tick in port order or in reverse, and the line
+/// of port `without` not read.
 struct Wires {
     lines: Vec<Line>,
     end: Tick,
     reversed: bool,
+    without: Option<u8>,
 }
 
 impl Source for Wires {
@@ -95,6 +97,9 @@ impl Source for Wires {
         let mut points = vec![];
         for (port, line) in self.lines.iter().enumerate() {
             let port = port as u8;
+            if self.without == Some(port) {
+                continue;
+            }
             w.events.push(Observed::Start {
                 port,
                 level: line.level_at(from - 1).filter(|_| from - 1 < self.end),
@@ -144,6 +149,12 @@ impl Source for Wires {
         let edges = (self.lines.iter()).flat_map(|l| l.edges.iter().map(|&e| e as u64));
         escapement_tickwave_decode::fold([self.end as u64].into_iter().chain(edges))
     }
+
+    fn ports(&self) -> Vec<bool> {
+        (0..self.lines.len())
+            .map(|p| self.without != Some(p as u8))
+            .collect()
+    }
 }
 
 /// Where a window of `points`, sorted by tick, ends to hold at most `most` ticks of them and at
@@ -170,7 +181,7 @@ fn all() -> Vec<Span> {
 }
 
 /// The case's wires for `ports` lines, with the window and local start it asks for.
-fn wires(c: &Case, ports: usize) -> (Box<Wires>, Tick, Option<Tick>) {
+fn wires(c: &Case, ports: usize, without: Option<u8>) -> (Box<Wires>, Tick, Option<Tick>) {
     let mut lines: Vec<Line> = c.lines.iter().take(ports).map(Line::from).collect();
     while lines.len() < ports {
         lines.push(Line {
@@ -189,6 +200,7 @@ fn wires(c: &Case, ports: usize) -> (Box<Wires>, Tick, Option<Tick>) {
         lines,
         end,
         reversed: c.reversed,
+        without,
     };
     (Box::new(w), window, c.local.map(Tick::from))
 }
@@ -205,17 +217,15 @@ fn run(mut h: Host, root: AnalysisId) {
 }
 
 pub fn swd(c: &Case) {
-    let (source, window, local) = wires(c, 2);
+    let (source, window, local) = wires(c, 2, None);
     let mut h = Host::default();
-    let Ok(factory) = swd::Swd::factory(window, c.setting % 4 + 1) else {
-        return;
-    };
     let s = h
         .add(
             name("swd"),
             swd::definition(),
             InputSpec::Wire { source, local },
-            factory,
+            swd::Swd::factory(window),
+            &[swd::turnaround(c.setting % 4 + 1)],
             all(),
         )
         .unwrap();
@@ -225,6 +235,7 @@ pub fn swd(c: &Case) {
             adiv5::adi_definition(),
             InputSpec::Upstream(adiv5::adi_subscription(s)),
             adiv5::Adi::factory(),
+            &[],
             all(),
         )
         .unwrap();
@@ -233,6 +244,7 @@ pub fn swd(c: &Case) {
         adiv5::mem_definition(),
         InputSpec::Upstream(adiv5::mem_subscription(a)),
         adiv5::Mem::factory(),
+        &[],
         all(),
     )
     .unwrap();
@@ -240,14 +252,16 @@ pub fn swd(c: &Case) {
 }
 
 pub fn jtag(c: &Case) {
-    let (source, window, local) = wires(c, 4);
+    let has_tdo = c.setting & 1 != 0;
+    let (source, window, local) = wires(c, 4, (!has_tdo).then_some(jtag::TDO));
     let mut h = Host::default();
     let j = h
         .add(
             name("jtag"),
             jtag::definition(),
             InputSpec::Wire { source, local },
-            jtag::Jtag::factory_with(c.setting & 1 != 0, window, c.setting & 2 != 0),
+            jtag::Jtag::factory(window),
+            &[jtag::tdo_edge(c.setting & 2 != 0)],
             all(),
         )
         .unwrap();
@@ -255,14 +269,15 @@ pub fn jtag(c: &Case) {
 }
 
 pub fn cjtag(c: &Case) {
-    let (source, window, local) = wires(c, 2);
+    let (source, window, local) = wires(c, 2, None);
     let mut h = Host::default();
     let k = h
         .add(
             name("cjtag"),
             cjtag::definition(),
             InputSpec::Wire { source, local },
-            cjtag::Cjtag::factory(c.setting & 1 != 0, window),
+            cjtag::Cjtag::factory(window),
+            &[cjtag::assume_qualified(c.setting & 1 != 0)],
             all(),
         )
         .unwrap();
@@ -271,6 +286,7 @@ pub fn cjtag(c: &Case) {
         cjtag::jtag_definition(),
         InputSpec::Upstream(cjtag::jtag_subscription(k)),
         cjtag::JtagOnCjtag::factory(),
+        &[],
         all(),
     )
     .unwrap();

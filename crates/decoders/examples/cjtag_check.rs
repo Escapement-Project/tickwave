@@ -76,7 +76,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             source: Box::new(source),
             local: None,
         },
-        cjtag::Cjtag::factory(true, 1_000_000),
+        cjtag::Cjtag::factory(1_000_000),
+        &[cjtag::assume_qualified(true)],
         vec![],
     )?;
     let j = h.add(
@@ -84,6 +85,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cjtag::jtag_definition(),
         InputSpec::Upstream(cjtag::jtag_subscription(c)),
         cjtag::JtagOnCjtag::factory(),
+        &[],
         vec![],
     )?;
     let kinds = Arc::new(Mutex::new((
@@ -98,7 +100,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         name("kinds"),
         Arc::new(Definition::new("kinds", 1, Schema::new(vec![]))),
         InputSpec::Upstream(Subscription::new(c, Mode::Completed).with_kinds(all)),
-        Box::new(move |_| Box::new(Kinds(k2.clone()))),
+        Box::new(move |_, _| Box::new(Kinds(k2.clone()))),
+        &[],
         vec![],
     )?;
     let seen = Arc::new(Mutex::new(Seen {
@@ -113,7 +116,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Subscription::new(j, Mode::Completed)
                 .with_kinds(["state", "path", "ir-scan", "dr-scan"]),
         ),
-        Box::new(move |_| Box::new(Checker(s2.clone()))),
+        Box::new(move |_, _| Box::new(Checker(s2.clone()))),
+        &[],
         vec![],
     )?;
     let start = std::time::Instant::now();

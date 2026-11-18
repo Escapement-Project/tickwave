@@ -273,7 +273,7 @@ impl Adi {
     }
 
     pub fn factory() -> Factory {
-        Box::new(|local| Box::new(Self::new(local)))
+        Box::new(|_, local| Box::new(Self::new(local)))
     }
 
     /// A decode that starts without earlier context opens a context item where it starts.
@@ -684,7 +684,7 @@ impl Default for Mem {
 
 impl Mem {
     pub fn factory() -> Factory {
-        Box::new(|_| Box::new(Self::default()))
+        Box::new(|_, _| Box::new(Self::default()))
     }
 
     fn finish(&mut self, end: Tick, out: &mut Out) {

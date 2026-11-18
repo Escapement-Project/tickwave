@@ -28,7 +28,10 @@ pub enum BindWire {
 /// Channels of one source as a wire analysis's ports, in port order.
 pub struct WireSource {
     recording: Arc<Recording>,
+    /// Each port's channel, None for a port left out; then the channels read, and each one's port.
+    ports: Vec<Option<usize>>,
     channels: Vec<usize>,
+    numbers: Vec<u8>,
     merge: Option<Merge>,
     /// Where the merge stands: a window that starts elsewhere seeks.
     at: Tick,
@@ -40,10 +43,22 @@ pub struct WireSource {
 }
 
 impl WireSource {
+    /// A channel for every port.
     pub fn new(recording: Arc<Recording>, channels: Vec<usize>) -> Result<Self, BindWire> {
-        if channels.len() > usize::from(u8::MAX) + 1 {
+        Self::with_ports(recording, channels.into_iter().map(Some).collect())
+    }
+
+    /// Each port's channel, None for an optional port left out.
+    pub fn with_ports(
+        recording: Arc<Recording>,
+        ports: Vec<Option<usize>>,
+    ) -> Result<Self, BindWire> {
+        if ports.len() > usize::from(u8::MAX) + 1 {
             return Err(BindWire::TooMany);
         }
+        let (numbers, channels): (Vec<u8>, Vec<usize>) = (ports.iter().enumerate())
+            .filter_map(|(p, c)| Some((p as u8, (*c)?)))
+            .unzip();
         let never = AtomicBool::new(false);
         let mut end: Option<Tick> = None;
         let mut first: Option<(usize, u32)> = None;
@@ -62,7 +77,9 @@ impl WireSource {
         }
         Ok(Self {
             recording,
+            ports,
             channels,
+            numbers,
             merge: None,
             at: Tick::MIN,
             end,
@@ -100,7 +117,9 @@ impl Source for WireSource {
     fn fork(&self) -> Option<Box<dyn Source>> {
         Some(Box::new(Self {
             recording: self.recording.clone(),
+            ports: self.ports.clone(),
             channels: self.channels.clone(),
+            numbers: self.numbers.clone(),
             merge: None,
             at: Tick::MIN,
             end: self.end,
@@ -118,8 +137,12 @@ impl Source for WireSource {
             Some(c) => c.as_bytes().iter().map(|&b| u64::from(b)).collect(),
             None => vec![u64::MAX, rec.identity()],
         };
-        let channels = self.channels.iter().map(|&c| c as u64);
-        crate::fold(id.into_iter().chain(channels))
+        let ports = self.ports.iter().map(|c| c.map_or(u64::MAX, |c| c as u64));
+        crate::fold(id.into_iter().chain(ports))
+    }
+
+    fn ports(&self) -> Vec<bool> {
+        self.ports.iter().map(Option::is_some).collect()
     }
 
     fn window(
@@ -149,12 +172,9 @@ impl Source for WireSource {
         // Nothing after the first channel's end: the analysis's input ends there.
         let limit = self.end.map_or(upto, |e| upto.min(e.saturating_add(1)));
         let mut w = Window::new(from, upto);
-        for p in 0..merge.ports() {
+        for (p, &port) in self.numbers.iter().enumerate().take(merge.ports()) {
             let level = merge.level(p);
-            w.events.push(Observed::Start {
-                port: p as u8,
-                level,
-            });
+            w.events.push(Observed::Start { port, level });
         }
         self.groups.clear();
         // A group is a tick's observations.
@@ -171,8 +191,10 @@ impl Source for WireSource {
             let Some(at) = merge.timeline(&g) else {
                 continue;
             };
-            for &(port, seen) in g.seen {
-                let port = port as u8;
+            for &(p, seen) in g.seen {
+                let Some(&port) = self.numbers.get(p) else {
+                    continue;
+                };
                 w.events.push(match seen {
                     Seen::Edge(e) => Observed::Edge {
                         at,

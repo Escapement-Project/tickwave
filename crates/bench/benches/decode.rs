@@ -147,6 +147,10 @@ impl Source for Wires {
     fn binding(&self) -> u64 {
         escapement_tickwave_decode::fold([self.end as u64, self.events.len() as u64])
     }
+
+    fn ports(&self) -> Vec<bool> {
+        vec![true; 2]
+    }
 }
 
 /// TCKC and TMSC at 20 MHz with 1 ns ticks, as the cJTAG tests build them: TMSC changes with TCKC
@@ -268,7 +272,8 @@ fn cjtag_host(_: ()) -> Host {
                 source: Box::new(oscan1()),
                 local: None,
             },
-            cjtag::Cjtag::factory(true, 1 << 16),
+            cjtag::Cjtag::factory(1 << 16),
+            &[cjtag::assume_qualified(true)],
             vec![],
         )
         .unwrap();
@@ -277,6 +282,7 @@ fn cjtag_host(_: ()) -> Host {
         cjtag::jtag_definition(),
         InputSpec::Upstream(cjtag::jtag_subscription(c)),
         cjtag::JtagOnCjtag::factory(),
+        &[],
         vec![],
     )
     .unwrap();
@@ -309,7 +315,8 @@ fn host(keep: Vec<Span>) -> Host {
                 source: Box::new(Wires::new()),
                 local: None,
             },
-            swd::Swd::factory(4096, 1).unwrap(),
+            swd::Swd::factory(4096),
+            &[],
             keep.clone(),
         )
         .unwrap();
@@ -319,6 +326,7 @@ fn host(keep: Vec<Span>) -> Host {
             adiv5::adi_definition(),
             InputSpec::Upstream(adiv5::adi_subscription(s)),
             adiv5::Adi::factory(),
+            &[],
             keep.clone(),
         )
         .unwrap();
@@ -327,6 +335,7 @@ fn host(keep: Vec<Span>) -> Host {
         adiv5::mem_definition(),
         InputSpec::Upstream(adiv5::mem_subscription(a)),
         adiv5::Mem::factory(),
+        &[],
         keep,
     )
     .unwrap();

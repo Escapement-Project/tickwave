@@ -111,6 +111,10 @@ impl Source for Nothing {
     fn binding(&self) -> u64 {
         0
     }
+
+    fn ports(&self) -> Vec<bool> {
+        vec![true]
+    }
 }
 
 /// What a scripted decoder does in a turn.
@@ -292,6 +296,10 @@ impl Source for Line {
     fn binding(&self) -> u64 {
         let edges = self.edges.iter().map(|&e| e as u64);
         escapement_tickwave_decode::fold([self.end as u64].into_iter().chain(edges))
+    }
+
+    fn ports(&self) -> Vec<bool> {
+        vec![true]
     }
 
     fn fork(&self) -> Option<Box<dyn Source>> {
@@ -508,11 +516,12 @@ pub fn pulses_host_tail(
                 source: Box::new(line),
                 local,
             },
-            Box::new(move |local| {
+            Box::new(move |_, local| {
                 let mut p = Pulses::new(local, step);
                 p.tail = tail;
                 Box::new(p)
             }),
+            &[],
             all(),
         )
         .unwrap();
@@ -521,7 +530,8 @@ pub fn pulses_host_tail(
             name("pairs"),
             definition("pairs", pairs_schema()),
             InputSpec::Upstream(Subscription::new(p, Mode::Completed).with_kinds(["pulse"])),
-            Box::new(|_| Box::new(Pairs::default())),
+            Box::new(|_, _| Box::new(Pairs::default())),
+            &[],
             all(),
         )
         .unwrap();

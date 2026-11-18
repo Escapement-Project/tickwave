@@ -17,11 +17,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rec = Arc::new(Recording::open(Arc::new(file), Cache::new(64 << 20))?);
     let mut lines = vec![];
     for n in ["TCK", "TMS", "TDI"] {
-        lines.push(rec.channel(n).ok_or(format!("no {n}"))?);
+        lines.push(Some(rec.channel(n).ok_or(format!("no {n}"))?));
     }
     let tdo = rec.channel("TDO");
-    lines.extend(tdo);
-    let source = WireSource::new(rec.clone(), lines)?;
+    lines.push(tdo);
+    let source = WireSource::with_ports(rec.clone(), lines)?;
     let all = vec![Span {
         start: Tick::MIN,
         end: Tick::MAX,
@@ -34,7 +34,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             source: Box::new(source),
             local: None,
         },
-        jtag::Jtag::factory(tdo.is_some(), 50_000),
+        jtag::Jtag::factory(50_000),
+        &[],
         all,
     )?;
     let start = std::time::Instant::now();

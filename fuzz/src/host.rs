@@ -6,11 +6,11 @@
 
 use arbitrary::Arbitrary;
 use escapement_tickwave_decode::{
-    AnalysisId, Cause, Decoder, Definition, Delivery, Element, ElementType, Exchange, FieldId,
-    FieldType, Host, HostOptions, Id, InputSpec, Keeping, KindDecl, KindId, LinkDecl, LinkId,
-    LinkTo, Mode, Need, Observation, Observed, Pause, Reason, Ref, Request, Role, Schema, SeqId,
-    Source, SourceError, Span, Status, Subscription, Tick, Turn, Value, Window, WindowId, field,
-    name, seq,
+    AnalysisId, Bound, Cause, Decoder, Definition, Delivery, Element, ElementType, Exchange,
+    FieldId, FieldType, Host, HostOptions, Id, InputSpec, Keeping, KindDecl, KindId, LinkDecl,
+    LinkId, LinkTo, Mode, Need, Observation, Observed, Pause, Reason, Ref, Request, Role, Schema,
+    SeqId, Source, SourceError, Span, Status, Subscription, Tick, Turn, Value, Window, WindowId,
+    field, name, seq,
 };
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -375,6 +375,10 @@ impl Source for Ticks {
         escapement_tickwave_decode::fold([self.every as u64, self.end as u64])
     }
 
+    fn ports(&self) -> Vec<bool> {
+        vec![true]
+    }
+
     fn fork(&self) -> Option<Box<dyn Source>> {
         Some(Box::new(self.clone()))
     }
@@ -460,8 +464,9 @@ pub fn reach(case: &HostCase) -> (escapement_tickwave_decode::Stats, usize) {
         end: Tick::from(case.end),
     };
     let (script, repeat) = (case.wire.clone(), case.repeat);
-    let factory =
-        move |local| Box::new(Played::new(script.clone(), repeat, local)) as Box<dyn Decoder>;
+    let factory = move |_: &Bound, local| {
+        Box::new(Played::new(script.clone(), repeat, local)) as Box<dyn Decoder>
+    };
     let input = InputSpec::Wire {
         source: Box::new(source),
         local: None,
@@ -471,6 +476,7 @@ pub fn reach(case: &HostCase) -> (escapement_tickwave_decode::Stats, usize) {
         definition(false),
         input,
         Box::new(factory),
+        &[],
         vec![],
     ) else {
         return (h.stats(), 0);
@@ -479,8 +485,9 @@ pub fn reach(case: &HostCase) -> (escapement_tickwave_decode::Stats, usize) {
     let mut analyses = vec![wire];
     if let Some((pieces, script)) = &case.stacked {
         let script = script.clone();
-        let factory =
-            move |local| Box::new(Played::new(script.clone(), repeat, local)) as Box<dyn Decoder>;
+        let factory = move |_: &Bound, local| {
+            Box::new(Played::new(script.clone(), repeat, local)) as Box<dyn Decoder>
+        };
         let sub = match pieces {
             true => Subscription::new(wire, Mode::Pieces)
                 .with_kinds(["a", "b"])
@@ -493,6 +500,7 @@ pub fn reach(case: &HostCase) -> (escapement_tickwave_decode::Stats, usize) {
             definition(true),
             input,
             Box::new(factory),
+            &[],
             vec![],
         ) {
             analyses.push(s);

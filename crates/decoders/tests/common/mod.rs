@@ -104,6 +104,52 @@ impl Source for Wires {
         let edges = (self.lines.iter()).flat_map(|l| l.edges.iter().map(|&e| e as u64));
         escapement_tickwave_decode::fold([self.end as u64].into_iter().chain(edges))
     }
+    fn ports(&self) -> Vec<bool> {
+        vec![true; self.lines.len()]
+    }
+    fn fork(&self) -> Option<Box<dyn Source>> {
+        Some(Box::new(self.clone()))
+    }
+}
+
+/// `wires` with port `port` left without a channel: its line is not read.
+#[derive(Clone, Debug)]
+pub struct Without {
+    pub wires: Wires,
+    pub port: u8,
+}
+
+impl Source for Without {
+    fn window(
+        &mut self,
+        from: Tick,
+        upto: Tick,
+        most: usize,
+        cancel: &AtomicBool,
+    ) -> Result<Option<Window>, SourceError> {
+        let Some(mut w) = self.wires.window(from, upto, most, cancel)? else {
+            return Ok(None);
+        };
+        w.events.retain(|e| {
+            let (Observed::Start { port, .. }
+            | Observed::Edge { port, .. }
+            | Observed::Known { port, .. }
+            | Observed::Unknown { port, .. }) = *e
+            else {
+                return true;
+            };
+            port != self.port
+        });
+        Ok(Some(w))
+    }
+    fn binding(&self) -> u64 {
+        escapement_tickwave_decode::fold([self.wires.binding(), u64::from(self.port)])
+    }
+    fn ports(&self) -> Vec<bool> {
+        (0..self.wires.lines.len())
+            .map(|p| p != usize::from(self.port))
+            .collect()
+    }
     fn fork(&self) -> Option<Box<dyn Source>> {
         Some(Box::new(self.clone()))
     }
