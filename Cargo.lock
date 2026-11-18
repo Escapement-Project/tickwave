@@ -1481,6 +1481,8 @@ dependencies = [
  "eframe",
  "egui",
  "egui_kittest",
+ "escapement-tickwave-decode",
+ "escapement-tickwave-decoders",
  "escapement-tickwave-format",
  "escapement-tickwave-view",
  "serde_json",

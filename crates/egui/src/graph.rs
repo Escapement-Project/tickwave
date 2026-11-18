@@ -221,6 +221,9 @@ impl View {
 #[non_exhaustive]
 pub struct Shown {
     pub window: Range<i64>,
+    /// Where the plot lies across the graph, in points: a track drawn under the graph on its
+    /// time axis lines up with it.
+    pub plot: Range<f32>,
     /// Low, then high, in the trace's unit. A graph of lanes alone draws no value range: this is
     /// the one a trace would start from.
     pub y: (f64, f64),
@@ -782,6 +785,7 @@ impl Widget for Graph<'_> {
         memory.shown = Some(Shown {
             y,
             window: view.window.clone(),
+            plot: layout.plot.left()..layout.plot.right(),
             #[cfg(test)]
             layout,
         });

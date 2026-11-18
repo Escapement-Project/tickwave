@@ -14,6 +14,8 @@ mod graph;
 mod palette;
 mod state;
 mod strip;
+#[cfg(feature = "decode")]
+pub mod track;
 mod viewer;
 
 #[cfg(test)]
