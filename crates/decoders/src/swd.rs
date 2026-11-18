@@ -308,6 +308,9 @@ pub struct Track {
     last_wait: Option<(Id, u8)>,
     /// Transfers whose first cell `start_bound` moved later than the mirrored half-period.
     pub clamped: u64,
+    /// A transfer's cell bounds and a part's elements, kept to reuse.
+    cells: Vec<Tick>,
+    elements: Vec<Element>,
 }
 
 impl Track {
@@ -329,7 +332,9 @@ impl Track {
             return;
         }
         let p = &rises[..n];
-        let mut c = vec![0; n + 1];
+        let mut c = std::mem::take(&mut self.cells);
+        c.clear();
+        c.resize(n + 1, 0);
         for j in 1..n {
             c[j] = p[j - 1] + (p[j] - p[j - 1]) / 2;
         }
@@ -344,10 +349,13 @@ impl Track {
             start: c[a],
             end: c[b],
         };
-        let els = |a: usize, b: usize| -> Vec<Element> {
-            (a..b)
-                .map(|j| Element::new(u8::from(levels[j]), Observation::Wire(p[j]), span(j, j + 1)))
-                .collect()
+        let mut buf = std::mem::take(&mut self.elements);
+        let mut bits = |out: &mut Out, id: Id, seq: SeqId, a: usize, b: usize| {
+            buf.clear();
+            buf.extend((a..b).map(|j| {
+                Element::new(u8::from(levels[j]), Observation::Wire(p[j]), span(j, j + 1))
+            }));
+            out.extend(id, seq, 0, &buf);
         };
         let request = (0..8).fold(0u64, |v, j| v | (u64::from(levels[j]) << j));
         let id = Id::new(TRANSFER, t.anchor);
@@ -358,7 +366,7 @@ impl Track {
         out.set(id, A, Value::Word { value: a, bits: 4 });
         let word = |value, bits| Value::Word { value, bits };
         out.part(id, REQUEST, word(request, 8), span(0, 8), Some(PROBE));
-        out.extend(id, REQUEST_BITS, 0, &els(0, 8));
+        bits(out, id, REQUEST_BITS, 0, 8);
         let tr = t.turnaround;
         let ack_at = 8 + tr;
         // The second turnaround, before a write's data or after a read's parity.
@@ -382,7 +390,7 @@ impl Track {
             span(ack_at, ack_at + 3),
             Some(TARGET),
         );
-        out.extend(id, ACK_BITS, 0, &els(ack_at, ack_at + 3));
+        bits(out, id, ACK_BITS, ack_at, ack_at + 3);
         let turn2 = |out: &mut Out| {
             out.part(id, TRN2, Value::Phase, span(trn2, trn2 + tr), Some(NEITHER));
         };
@@ -394,10 +402,10 @@ impl Track {
             }
             let data = word(u64::from(w), 32);
             out.part(id, DATA, data, span(at, at + 32), driver);
-            out.extend(id, DATA_BITS, 0, &els(at, at + 32));
+            bits(out, id, DATA_BITS, at, at + 32);
             let ok = t.parity == Some(true);
             out.part(id, PARITY, Value::Bool(ok), span(at + 32, at + 33), driver);
-            out.extend(id, PARITY_BITS, 0, &els(at + 32, at + 33));
+            bits(out, id, PARITY_BITS, at + 32, at + 33);
             if t.read {
                 turn2(out);
             }
@@ -413,6 +421,8 @@ impl Track {
             self.last_wait = Some((id, request as u8));
         }
         out.close(id, c[n], Status::Complete);
+        self.elements = buf;
+        self.cells = c;
     }
 }
 
@@ -437,6 +447,8 @@ pub struct Swd {
     data_before: Option<(Tick, Option<bool>)>,
     /// Where input became unknown, while it is.
     gap: Option<Tick>,
+    /// A framed transfer's rises and levels, kept to reuse.
+    held: (Vec<Tick>, Vec<bool>),
 }
 
 impl Swd {
@@ -456,6 +468,7 @@ impl Swd {
             data: None,
             data_before: None,
             gap: None,
+            held: (Vec::new(), Vec::new()),
         })
     }
 
@@ -499,13 +512,16 @@ impl Swd {
                 continue;
             }
             let n = t.rises();
-            let (rises, levels): (Vec<Tick>, Vec<bool>) = self
-                .ring
-                .range(k..(k + n).min(self.ring.len()))
-                .copied()
-                .unzip();
+            let (mut rises, mut levels) = std::mem::take(&mut self.held);
+            rises.clear();
+            levels.clear();
+            for &(at, level) in self.ring.range(k..(k + n).min(self.ring.len())) {
+                rises.push(at);
+                levels.push(level);
+            }
             let prev = k.checked_sub(1).map(|j| self.ring[j].0);
             self.track.emit(&t, prev, self.floor, &rises, &levels, out);
+            self.held = (rises, levels);
         }
     }
 
