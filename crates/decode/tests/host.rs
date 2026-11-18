@@ -9,7 +9,7 @@ use escapement_tickwave_decode::{
     InputSpec, Keeping, KindDecl, KindId, LinkDecl, LinkId, LinkTo, LogEntry, Mismatch, Mode, Name,
     Need, Observation, Op, Pause, Reason, Ref, Refusal, Refused, Reply, Role, RunView, Schema,
     SchemaError, Seek, SeqDecl, SeqId, Span, Status, Subscription, Tick, Value, WindowId, field,
-    name,
+    name, seq,
 };
 use std::sync::{Arc, Mutex, atomic::Ordering::Relaxed};
 
@@ -160,6 +160,48 @@ fn a_schema_and_its_subscriptions_are_checked_when_added() {
             "name is empty",
         ),
         (toy_schema().with_open_at_most(0), "open-item bound"),
+        (
+            schema(vec![kind(
+                "k",
+                vec![],
+                vec![field("w", FieldType::Name(vec![name("a"), name("")]))],
+                vec![],
+            )]),
+            "name is empty",
+        ),
+        (
+            schema(vec![kind(
+                "k",
+                vec![],
+                vec![field("w", FieldType::Name(vec![name("a"), name("a")]))],
+                vec![],
+            )]),
+            "kind k: a is declared twice",
+        ),
+        (
+            schema(vec![KindDecl::new("k").with_sequences(vec![seq(
+                "s",
+                ElementType::Name((0..=256).map(|n| Name::from(n.to_string())).collect()),
+            )])]),
+            "kind k: s is past the host's bounds",
+        ),
+        (
+            schema(vec![
+                KindDecl::new("k").with_sequences(vec![seq("s", ElementType::Name(vec![]))]),
+            ]),
+            "kind k: s declares no names",
+        ),
+        (
+            schema(vec![KindDecl::new("k").with_sequences(vec![seq(
+                "s",
+                ElementType::Name(vec![name("x"); 2]),
+            )])]),
+            "kind k: x is declared twice",
+        ),
+        (
+            toy_schema().with_roles(["probe", "target", "probe"]),
+            "role probe is declared twice",
+        ),
         (
             Schema::new(vec![
                 KindDecl::new("a"),

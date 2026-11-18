@@ -335,6 +335,8 @@ pub enum SchemaError {
     Row { kind: Name, row: usize },
     #[error("its rows take {0} lanes together, more than {MAX_LANES}")]
     RowLanes(usize),
+    #[error("role {0} is declared twice")]
+    DuplicateRole(Name),
 }
 
 /// An operation its analysis's schema does not allow.
@@ -373,6 +375,29 @@ pub enum Mismatch {
 fn named(n: &Name) -> Result<(), SchemaError> {
     if n.is_empty() || n.len() > MAX_NAME {
         return Err(SchemaError::BadName);
+    }
+    Ok(())
+}
+
+/// Checks the names a value or element of kind `kind`'s `name` indexes: some, at most `most`,
+/// each a name, none twice, since a recipe or citation matches them by name.
+fn name_list(list: &[Name], most: usize, kind: &Name, name: &Name) -> Result<(), SchemaError> {
+    let err = |e: fn(Name, Name) -> SchemaError| e(kind.clone(), name.clone());
+    if list.is_empty() {
+        return Err(err(|kind, name| SchemaError::EmptyNames { kind, name }));
+    }
+    if list.len() > most {
+        return Err(err(|kind, name| SchemaError::OverBound { kind, name }));
+    }
+    let mut seen = HashSet::new();
+    for n in list {
+        named(n)?;
+        if !seen.insert(n) {
+            return Err(SchemaError::Duplicate {
+                kind: kind.clone(),
+                name: n.clone(),
+            });
+        }
     }
     Ok(())
 }
@@ -445,8 +470,12 @@ impl Schema {
         if self.open_at_most == 0 || self.open_at_most > open_most {
             return Err(SchemaError::OpenBound(self.open_at_most));
         }
+        let mut roles = HashSet::new();
         for n in self.roles.iter() {
             named(n)?;
+            if !roles.insert(n) {
+                return Err(SchemaError::DuplicateRole(n.clone()));
+            }
         }
         for n in self.reasons.iter().chain(&self.needs).chain(&self.causes) {
             if n.is_empty() || n.len() > MAX_PHRASE {
@@ -489,10 +518,6 @@ impl Schema {
                 kind: k.name.clone(),
                 name: name.clone(),
             };
-            let empty = |name: &Name| SchemaError::EmptyNames {
-                kind: k.name.clone(),
-                name: name.clone(),
-            };
             at_most(k.fields.len(), crate::MAX_FIELDS, "fields")?;
             at_most(k.sequences.len(), MAX_SEQUENCES, "sequences")?;
             at_most(k.links.len(), MAX_LINK_ROLES, "link roles")?;
@@ -504,10 +529,7 @@ impl Schema {
                     return Err(dup(&f.name));
                 }
                 match &f.ty {
-                    FieldType::Name(list) if list.is_empty() => return Err(empty(&f.name)),
-                    FieldType::Name(list) if list.len() > MAX_FIELD_NAMES => {
-                        return Err(over(&f.name));
-                    }
+                    FieldType::Name(list) => name_list(list, MAX_FIELD_NAMES, &k.name, &f.name)?,
                     FieldType::Word { bits } if *bits == 0 || *bits > 64 => {
                         return Err(over(&f.name));
                     }
@@ -527,10 +549,8 @@ impl Schema {
                 if !seqs.insert(&s.name) {
                     return Err(dup(&s.name));
                 }
-                if let ElementType::Name(list) = &s.element
-                    && (list.is_empty() || list.len() > MAX_LIST)
-                {
-                    return Err(empty(&s.name));
+                if let ElementType::Name(list) = &s.element {
+                    name_list(list, MAX_LIST, &k.name, &s.name)?;
                 }
             }
             let mut parents = vec![];
