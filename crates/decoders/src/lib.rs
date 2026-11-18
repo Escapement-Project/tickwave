@@ -3,4 +3,5 @@
 //! it, JTAG, and cJTAG.
 
 pub mod adiv5;
+pub mod jtag;
 pub mod swd;
