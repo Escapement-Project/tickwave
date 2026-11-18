@@ -105,49 +105,86 @@ pub struct PanelState {
     lines: Option<Lines>,
 }
 
-/// A line of text: where it starts, and each character with the item it came from.
+/// What a store held when a cache was built from it: its size and its last id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Held {
+    len: usize,
+    last: Option<Id>,
+}
+
+impl Held {
+    fn of(items: &BTreeMap<Id, Item>) -> Self {
+        Self {
+            len: items.len(),
+            last: items.keys().next_back().copied(),
+        }
+    }
+}
+
+/// The items a store gained since it was `held`, where every one came after its last id, as a
+/// growing decode's do; None where one came in before it, which takes a full pass.
+fn appended(items: &BTreeMap<Id, Item>, held: Held) -> Option<impl Iterator<Item = &Item> + Clone> {
+    let new = match held.last {
+        Some(last) => items.range((Excluded(last), Unbounded)),
+        None => items.range(..),
+    };
+    (held.len + new.clone().count() == items.len()).then(|| new.map(|(_, i)| i))
+}
+
+/// A line of text: where it starts, the item and the byte in it its first character came from,
+/// and each character with its item.
 #[derive(Clone, Debug)]
 struct Line {
     start: Tick,
+    at: (Id, usize),
     text: String,
     from: Vec<Id>,
 }
 
-/// The lines a Text tab shows, kept while its analysis and its store's size hold.
+/// The lines a Text tab shows, kept while its analysis holds; a store that grows past its last
+/// id joins its last line again with what it gained.
 #[derive(Clone, Debug)]
 struct Lines {
-    key: (usize, usize),
+    analysis: usize,
+    held: Held,
     lines: Vec<Line>,
 }
 
-/// An analysis's text, each byte from the item whose declared text field holds it, joined into
-/// lines.
-fn lines_of(schema: &Schema, items: &BTreeMap<Id, Item>) -> Vec<Line> {
+/// The text of `items`, each byte from the item whose declared text field holds it, joined into
+/// lines, past the first `skip` bytes of the first item.
+fn lines_of<'a>(schema: &Schema, items: impl Iterator<Item = &'a Item>, skip: usize) -> Vec<Line> {
     let text: Vec<(KindId, escapement_tickwave_decode::FieldId)> =
         (schema.kinds.iter().enumerate())
             .filter_map(|(k, d)| Some((KindId(k as u16), d.text?)))
             .collect();
-    // Each byte, or None for a value not known, with its item and its start.
-    let mut bytes: Vec<(Option<u8>, Id, Tick)> = Vec::new();
-    for item in items.values() {
+    // Each byte, or None for a value not known, with its item, its place in it and its start.
+    let mut bytes: Vec<(Option<u8>, Id, usize, Tick)> = Vec::new();
+    let mut skip = Some(skip);
+    for item in items {
         let Some(&(_, f)) = text.iter().find(|(k, _)| *k == item.id.kind) else {
             continue;
         };
-        match item.field(f).map(|x| &x.value) {
-            Some(&Value::Word { value, .. }) => {
-                bytes.push((Some(value as u8), item.id, item.start))
+        let from = skip.take().unwrap_or(0);
+        let mut put = |n: usize, b: Option<u8>| {
+            if n >= from {
+                bytes.push((b, item.id, n, item.start));
             }
+        };
+        match item.field(f).map(|x| &x.value) {
+            Some(&Value::Word { value, .. }) => put(0, Some(value as u8)),
             Some(Value::Bits { bytes: b, bits }) => {
                 let whole = (*bits as usize / 8).min(b.len());
-                bytes.extend(b[..whole].iter().map(|&x| (Some(x), item.id, item.start)));
+                for (n, &x) in b[..whole].iter().enumerate() {
+                    put(n, Some(x));
+                }
             }
-            Some(Value::Unknown { .. }) => bytes.push((None, item.id, item.start)),
+            Some(Value::Unknown { .. }) => put(0, None),
             _ => {}
         }
     }
     let mut lines = Vec::new();
     let mut line: Option<Line> = None;
-    for (k, &(b, id, start)) in bytes.iter().enumerate() {
+    for (k, &(b, id, n, start)) in bytes.iter().enumerate() {
         let shown = match b {
             Some(b'\r') if bytes.get(k + 1).is_some_and(|n| n.0 == Some(b'\n')) => continue,
             Some(b'\n') => "\\n".to_owned(),
@@ -158,6 +195,7 @@ fn lines_of(schema: &Schema, items: &BTreeMap<Id, Item>) -> Vec<Line> {
         };
         let l = line.get_or_insert_with(|| Line {
             start,
+            at: (id, n),
             text: String::new(),
             from: Vec::new(),
         });
@@ -173,20 +211,21 @@ fn lines_of(schema: &Schema, items: &BTreeMap<Id, Item>) -> Vec<Line> {
     lines
 }
 
-/// The ids a List tab shows, in order, kept while its analysis, its store's size and its filter
-/// hold.
+/// The ids a List tab shows, in order, kept while its analysis and its filter hold; a store that
+/// grows past its last id adds what it gained.
 #[derive(Clone, Debug)]
 struct Rows {
-    key: (usize, usize, Vec<KindId>, bool),
+    key: (usize, Vec<KindId>, bool),
+    held: Held,
     ids: Vec<Id>,
 }
 
 /// The selected item's neighbours of its kind and the items that read it, kept while the
-/// selection and every store's size hold: a store that grows may hold new ones.
+/// selection holds: a store that grows past its last id may add a reader or a next.
 #[derive(Clone, Debug)]
 struct Found {
     selected: (usize, Id),
-    sizes: Vec<usize>,
+    held: Vec<Held>,
     previous: Option<Id>,
     next: Option<Id>,
     /// Each reader's analysis, id, and the link by which it reads the selected item.
@@ -326,16 +365,39 @@ impl<'a> Panel<'a> {
             .color(self.palette.ink)
     }
 
-    /// The neighbours and readers of `selected`, found again only where it or a store changed.
+    /// The neighbours and readers of `selected`: found once for a selection, then only among
+    /// the items a store gains past its last id, else again in full.
     fn found(&mut self, selected: (usize, Id)) -> Found {
-        let sizes: Vec<usize> = self.analyses.iter().map(|a| a.items.len()).collect();
-        if let Some(f) = &self.state.found
-            && f.selected == selected
-            && f.sizes == sizes
-        {
-            return f.clone();
-        }
         let (a, id) = selected;
+        let held: Vec<Held> = self.analyses.iter().map(|an| Held::of(an.items)).collect();
+        if let Some(mut f) = self.state.found.take()
+            && f.selected == selected
+        {
+            if f.held == held {
+                return f;
+            }
+            let gained: Option<Vec<_>> = (self.analyses.iter().zip(&f.held))
+                .map(|(an, &h)| appended(an.items, h))
+                .collect();
+            if let Some(gained) = gained {
+                for (b, new) in gained.into_iter().enumerate() {
+                    if b == a && f.next.is_none() {
+                        f.next = (new.clone().map(|i| i.id)).find(|k| k.kind == id.kind);
+                    }
+                    if self.analyses[b].reads == Some(a) {
+                        for item in new {
+                            for &(link, r) in &item.links {
+                                if r == Ref::Upstream(id) {
+                                    f.readers.push((b, item.id, link));
+                                }
+                            }
+                        }
+                    }
+                }
+                f.held = held;
+                return f;
+            }
+        }
         let (previous, next) = neighbours(self.analyses[a].items, id);
         let mut readers = Vec::new();
         for (b, reader) in self.analyses.iter().enumerate() {
@@ -350,36 +412,39 @@ impl<'a> Panel<'a> {
                 }
             }
         }
-        let f = Found {
+        Found {
             selected,
-            sizes,
+            held,
             previous,
             next,
             readers,
-        };
-        self.state.found = Some(f.clone());
-        f
+        }
     }
 
-    /// The ids analysis `a`'s List tab shows, found again only where its store or filter changed.
+    /// The ids analysis `a`'s List tab shows: found again in full where its filter changed, else
+    /// added from what its store gained past its last id.
     fn rows(&mut self, a: usize) -> Rows {
         let items = self.analyses[a].items;
         let hidden: Vec<KindId> = (self.state.hidden.iter())
             .filter(|(b, _)| *b == a)
             .map(|&(_, k)| k)
             .collect();
-        let key = (a, items.len(), hidden, self.state.conditions);
-        if let Some(r) = self.state.rows.take()
+        let key = (a, hidden, self.state.conditions);
+        let shown = |i: &Item| !key.1.contains(&i.id.kind) && (!key.2 || condition(i));
+        if let Some(mut r) = self.state.rows.take()
             && r.key == key
+            && let Some(new) = appended(items, r.held)
         {
+            r.ids.extend(new.filter(|i| shown(i)).map(|i| i.id));
+            r.held = Held::of(items);
             return r;
         }
-        let ids = (items.values())
-            .filter(|i| !key.2.contains(&i.id.kind))
-            .filter(|i| !key.3 || condition(i))
-            .map(|i| i.id)
-            .collect();
-        Rows { key, ids }
+        let ids = items.values().filter(|i| shown(i)).map(|i| i.id).collect();
+        Rows {
+            held: Held::of(items),
+            key,
+            ids,
+        }
     }
 
     fn list_tab(&mut self, ui: &mut Ui, lit: &mut Option<Span>, go: &mut Option<(usize, Id)>) {
@@ -516,18 +581,34 @@ impl<'a> Panel<'a> {
         }
     }
 
-    /// The lines analysis `a`'s Text tab shows, joined again only where its store changed.
+    /// The lines analysis `a`'s Text tab shows. Where its store gained items past its last id,
+    /// the last line is joined again from where it starts, with them, so a carriage return or a
+    /// wrap at its end comes out as a full pass gives; else joined in full.
     fn lines(&mut self, a: usize) -> Lines {
         let an = &self.analyses[a];
-        let key = (a, an.items.len());
-        if let Some(l) = self.state.lines.take()
-            && l.key == key
+        let now = Held::of(an.items);
+        if let Some(mut l) = self.state.lines.take()
+            && l.analysis == a
+            && appended(an.items, l.held).is_some()
         {
+            if l.held != now {
+                let more = match l.lines.pop() {
+                    Some(last) => {
+                        let (id, skip) = last.at;
+                        let rest = an.items.range(id..).map(|(_, i)| i);
+                        lines_of(an.schema, rest, skip)
+                    }
+                    None => lines_of(an.schema, an.items.values(), 0),
+                };
+                l.lines.extend(more);
+                l.held = now;
+            }
             return l;
         }
         Lines {
-            key,
-            lines: lines_of(an.schema, an.items),
+            analysis: a,
+            held: now,
+            lines: lines_of(an.schema, an.items.values(), 0),
         }
     }
 
@@ -677,6 +758,7 @@ impl<'a> Panel<'a> {
             .auto_shrink(false)
             .id_salt("panel selected")
             .show(ui, |ui| self.show(ui, a, item, &f, lit, go));
+        self.state.found = Some(f);
     }
 
     fn show(

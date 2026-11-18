@@ -1492,3 +1492,235 @@ fn a_narrow_panel_sits_under_the_plot_and_scrolls_inside() {
         "{after} after the control's row"
     );
 }
+
+/// What the side panel costs over a million items: the first frame, which finds a selection's
+/// readers, its rows or its lines, and the frames after it, which keep them. Run with
+/// `--ignored --nocapture`.
+#[test]
+#[ignore = "a measurement"]
+fn panel_frame_times() {
+    use escapement_tickwave_egui::panel::Tab;
+    const N: usize = 1_000_000;
+    let values: Vec<Option<u8>> = (0..N).map(|k| Some(b'a' + (k % 26) as u8)).collect();
+    let mut a = bytes_decoded(&values);
+    a.name = "upstream";
+    let mut b = bytes_decoded(&values);
+    b.name = "downstream";
+    let decoded = vec![a, b];
+    let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
+    let middle = decoded[0].store.items.values().nth(N / 2).unwrap().clone();
+    for tab in [Tab::Selected, Tab::List, Tab::Text] {
+        let mut h = panel(&decoded, 0, &middle, map, &fixture());
+        h.state_mut().tab = tab;
+        // A new selection: its readers, rows or lines found again.
+        let mut first = vec![];
+        for k in 0..5 {
+            let other = decoded[0]
+                .store
+                .items
+                .values()
+                .nth(N / 2 + k + 1)
+                .unwrap()
+                .id;
+            h.state_mut().selected = Some((0, other));
+            if tab != Tab::Selected {
+                h.state_mut().listed = Some(k % 2);
+                h.state_mut().texted = Some(k % 2);
+            }
+            let t = std::time::Instant::now();
+            h.step();
+            first.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+        let mut kept = vec![];
+        for _ in 0..50 {
+            let t = std::time::Instant::now();
+            h.step();
+            kept.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+        first.sort_by(f64::total_cmp);
+        kept.sort_by(f64::total_cmp);
+        println!(
+            "{tab:?}: a new selection {:.1} ms (median of 5), a frame after {:.2} ms (median of 50)",
+            first[2], kept[25]
+        );
+    }
+    // A store that grows a thousand items a frame, as a live decode's does.
+    for tab in [Tab::Selected, Tab::List, Tab::Text] {
+        let decoded = vec![bytes_decoded(&values), bytes_decoded(&values)];
+        let last = *decoded[0].store.items.keys().next_back().unwrap();
+        let mut h = growing(decoded, (0, last), tab);
+        let mut at = 1000 * (N as Tick + 1);
+        let mut grown = vec![];
+        for _ in 0..30 {
+            for _ in 0..1000 {
+                at += 1000;
+                push(&mut h.state_mut().decoded[0], at, byte(b'q'), None);
+                push(&mut h.state_mut().decoded[1], at, byte(b'q'), None);
+            }
+            let t = std::time::Instant::now();
+            h.step();
+            grown.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+        grown.sort_by(f64::total_cmp);
+        println!(
+            "{tab:?}: a frame after a thousand items appended {:.2} ms (median of 30)",
+            grown[15]
+        );
+    }
+}
+
+/// Analyses a test grows between frames, and the panel over them.
+struct Grown {
+    decoded: Vec<Decoded>,
+    panel: PanelState,
+}
+
+fn growing(
+    decoded: Vec<Decoded>,
+    selected: (usize, Id),
+    tab: escapement_tickwave_egui::panel::Tab,
+) -> Harness<'static, Grown> {
+    let timebase = open(&fixture()).timebase();
+    let palette = escapement_tickwave_egui::Palette::from_visuals(&egui::Visuals::default());
+    let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
+    let mut panel = PanelState::default();
+    panel.selected = Some(selected);
+    panel.tab = tab;
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(400.0, 900.0))
+        .build_ui_state(
+            move |ui, g: &mut Grown| {
+                let Grown { decoded, panel } = g;
+                let analyses = analyses(decoded);
+                let right = egui::Layout::right_to_left(egui::Align::Min);
+                ui.with_layout(right, |ui| {
+                    ui.add(Panel::new(&palette, panel, &analyses, 360.0, timebase, map));
+                });
+            },
+            Grown { decoded, panel },
+        );
+    h.run();
+    h
+}
+
+/// Adds an item of kind 0 at `start` to `d`'s store: its field 0 `value`, its link 0 to `of`
+/// upstream.
+fn push(d: &mut Decoded, start: Tick, value: Option<Value>, of: Option<Id>) -> Id {
+    use escapement_tickwave_decode::{FieldId, KindId, LinkId, Op, Status};
+    let id = Id::new(KindId(0), start);
+    let mut ops = vec![Op::Open {
+        id,
+        parent: None,
+        start,
+    }];
+    if let Some(value) = value {
+        ops.push(Op::Set {
+            id,
+            field: FieldId(0),
+            value,
+            span: None,
+            driver: None,
+        });
+    }
+    if let Some(o) = of {
+        ops.push(Op::Link {
+            id,
+            link: LinkId(0),
+            other: Ref::Upstream(o),
+        });
+    }
+    ops.push(Op::Close {
+        id,
+        end: start + 800,
+        status: Status::Complete,
+    });
+    d.store.apply_batch(&ops, 8).unwrap();
+    id
+}
+
+fn byte(b: u8) -> Option<Value> {
+    Some(Value::Word {
+        value: u64::from(b),
+        bits: 8,
+    })
+}
+
+#[test]
+fn the_panel_takes_in_what_a_growing_store_gains() {
+    use egui_kittest::kittest::Queryable;
+    use escapement_tickwave_decode::{KindDecl, LinkDecl, LinkTo};
+    use escapement_tickwave_egui::panel::Tab;
+    // Text: a carriage return waits for what follows it.
+    let decoded = vec![bytes_decoded(&[Some(b'x'), Some(b'\r')])];
+    let first = *decoded[0].store.items.keys().next().unwrap();
+    let mut h = growing(decoded, (0, first), Tab::Text);
+    h.get_by_label_contains("  x\\r");
+    push(&mut h.state_mut().decoded[0], 3000, byte(b'\n'), None);
+    h.run();
+    h.get_by_label_contains("  x\\n");
+    assert!(h.query_by_label_contains("  x\\r").is_none());
+    push(&mut h.state_mut().decoded[0], 4000, byte(b'y'), None);
+    h.run();
+    h.get_by_label_contains("  y");
+    // An item before the others takes a full pass.
+    push(&mut h.state_mut().decoded[0], 500, byte(b'w'), None);
+    h.run();
+    h.get_by_label_contains("  wx\\n");
+    // The list adds a row for an item appended.
+    h.state_mut().panel.tab = Tab::List;
+    h.run();
+    let rows = |h: &Harness<'_, Grown>| h.query_all_by_label_contains("  byte").count();
+    let before = rows(&h);
+    push(&mut h.state_mut().decoded[0], 5000, byte(b'z'), None);
+    h.run();
+    assert_eq!(rows(&h), before + 1);
+
+    // A line that starts inside a frame of several bytes is joined again from that byte.
+    let frame = |b: &[u8]| Value::Bits {
+        bytes: b.to_vec(),
+        bits: 8 * b.len() as u32,
+    };
+    let ty = escapement_tickwave_decode::FieldType::Bits { max: 16 };
+    let decoded = vec![text_decoded("frames", ty, vec![frame(b"ab\ncd")])];
+    let first = *decoded[0].store.items.keys().next().unwrap();
+    let mut h = growing(decoded, (0, first), Tab::Text);
+    h.get_by_label_contains("  cd");
+    push(&mut h.state_mut().decoded[0], 3000, Some(frame(b"e")), None);
+    h.run();
+    h.get_by_label_contains("  ab\\n");
+    h.get_by_label_contains("  cde");
+    assert_eq!(h.query_all_by_label_contains("ab\\n").count(), 1);
+
+    // A reader appended downstream, and a next of the selected item's kind.
+    let readers = Schema::new(vec![KindDecl::new("reader").with_links(vec![
+        LinkDecl::new("of", vec![LinkTo::Upstream(name("byte"))]),
+    ])]);
+    let store = Store::with_keep(all());
+    let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
+    let reader = Decoded {
+        name: "readers",
+        schema: readers,
+        density: Density::of(&store.items, &map, condition),
+        store,
+        labels: Labels::default(),
+        parts: false,
+    };
+    let decoded = vec![bytes_decoded(&[Some(b'a'), Some(b'b')]), reader];
+    let last = *decoded[0].store.items.keys().next_back().unwrap();
+    let mut h = growing(decoded, (0, last), Tab::Selected);
+    assert!(h.query_by_label_contains("read as ").is_none());
+    h.get_by_label("next byte \u{25b8}").click();
+    h.run();
+    assert_eq!(
+        h.state().panel.selected,
+        Some((0, last)),
+        "none after the last"
+    );
+    push(&mut h.state_mut().decoded[1], 2500, None, Some(last));
+    let next = push(&mut h.state_mut().decoded[0], 3000, byte(b'c'), None);
+    h.run();
+    h.get_by_label_contains("read as ");
+    h.get_by_label("next byte \u{25b8}").click();
+    h.run();
+    assert_eq!(h.state().panel.selected, Some((0, next)));
+}
