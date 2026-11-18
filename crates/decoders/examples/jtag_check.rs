@@ -20,8 +20,14 @@ use std::sync::{Arc, Mutex};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = std::env::args()
         .nth(1)
-        .ok_or("usage: jtag_check REC [--tdo-at-fall]")?;
-    let at_fall = std::env::args().any(|a| a == "--tdo-at-fall");
+        .ok_or("usage: jtag_check REC [--tdo-at-fall | --tdo-from-wire]")?;
+    let mut at_fall = std::env::args().any(|a| a == "--tdo-at-fall");
+    let from_wire = std::env::args().any(|a| a == "--tdo-from-wire");
+    // How many IR scans the probe decodes each way.
+    let probe_scans: u32 = std::env::var("TDO_PROBE_SCANS")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(64);
     let file = std::fs::File::open(&path)?;
     let rec = Arc::new(Recording::open(Arc::new(file), Cache::new(64 << 20))?);
     let mut lines = vec![];
@@ -30,6 +36,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let tdo = rec.channel("TDO");
     lines.extend(tdo);
+    if from_wire && tdo.is_some() {
+        let probe = std::time::Instant::now();
+        let choice = jtag::choose_tdo_edge(
+            || Box::new(WireSource::new(rec.clone(), lines.clone()).expect("bound above")),
+            50_000,
+            probe_scans,
+        )?;
+        println!(
+            "TDO edge from the wire: {} (of the first {} IR scans, {} capture 01 at the rise, {} at the fall), in {:.2} s",
+            if choice.at_fall { "fall" } else { "rise" },
+            choice.scans,
+            choice.rise,
+            choice.fall,
+            probe.elapsed().as_secs_f64()
+        );
+        at_fall = choice.at_fall;
+    }
     let source = WireSource::new(rec.clone(), lines)?;
     let mut h = Host::default();
     let j = h.add(

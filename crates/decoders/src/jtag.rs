@@ -838,3 +838,99 @@ impl Decoder for Jtag {
         u64::from(self.has_tdo) | u64::from(self.tdo_at_fall) << 1
     }
 }
+
+/// The TCK edge TDO is sampled at, as `choose_tdo_edge` read it from the wire.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct EdgeChoice {
+    /// Whether TDO is sampled at TCK's fall after each rise.
+    pub at_fall: bool,
+    /// Of the first `scans` IR scans decoded each way, how many captured TDO ending in binary 01
+    /// sampled at the rise, and at the fall.
+    pub rise: u32,
+    pub fall: u32,
+    pub scans: u32,
+}
+
+/// Counts the first so many IR scans it receives, and those whose captured TDO ends in binary 01.
+struct IrCaptures(Arc<std::sync::Mutex<(u32, u32)>>, u32);
+
+impl Decoder for IrCaptures {
+    fn turn(&mut self, ex: &mut Exchange<'_>) -> Pause {
+        use escapement_tickwave_decode::Delivery;
+        while let Some(d) = ex.receive() {
+            match d {
+                Delivery::Item { item, .. } if item.id.kind == IR_SCAN => {
+                    let ok = matches!(
+                        item.field(TDO_VALUE).map(|f| &f.value),
+                        Some(Value::Bits { bytes, .. }) if bytes.first().is_some_and(|b| b & 3 == 1)
+                    );
+                    if let Ok(mut n) = self.0.lock()
+                        && n.0 < self.1
+                    {
+                        n.0 += 1;
+                        n.1 += u32::from(ok);
+                    }
+                }
+                Delivery::Lost { span, .. } => ex.lost(span.start, span.end),
+                Delivery::Frontier { start, .. } => ex.frontier(start),
+                Delivery::End { end, .. } => {
+                    ex.finish(end);
+                    return Pause::Finished;
+                }
+                _ => {}
+            }
+        }
+        if ex.more() { Pause::Work } else { Pause::Input }
+    }
+}
+
+/// Decodes the first `k` IR scans of the wires `source` gives twice, TDO sampled at TCK's rise
+/// and at its fall, and picks the edge whose IR captures end in binary 01, as IEEE 1149.1 has
+/// every IR capture do. A tie goes to the rise. A host labels the choice as read from the wire,
+/// and a setting given by hand overrides it. The first `k` decide, so where the edge that reads
+/// TDO depends on the TCK rate and the rate changes later in the capture, they may not tell.
+pub fn choose_tdo_edge(
+    source: impl Fn() -> Box<dyn escapement_tickwave_decode::Source>,
+    window: Tick,
+    k: u32,
+) -> Result<EdgeChoice, escapement_tickwave_decode::BindError> {
+    use escapement_tickwave_decode::{Host, InputSpec, Mode, Subscription};
+    // Each edge in a host of its own, stopped at its kth IR scan: in one host, one chain would
+    // run to the end before the other began.
+    let mut counted = [(0u32, 0u32); 2];
+    for (slot, at_fall) in counted.iter_mut().zip([false, true]) {
+        let mut h = Host::default();
+        let j = h.add(
+            name("jtag"),
+            definition(),
+            InputSpec::Wire {
+                source: source(),
+                local: None,
+            },
+            Jtag::factory_with(true, window, at_fall),
+            vec![],
+        )?;
+        let seen = Arc::new(std::sync::Mutex::new((0u32, 0u32)));
+        let s = seen.clone();
+        h.add(
+            name("captures"),
+            Arc::new(Definition::new("ir-captures", 1, Schema::new(vec![]))),
+            InputSpec::Upstream(Subscription::new(j, Mode::Completed).with_kinds(["ir-scan"])),
+            Box::new(move |_| Box::new(IrCaptures(s.clone(), k))),
+            vec![],
+        )?;
+        let read = || seen.lock().map_or((0, 0), |n| *n);
+        // A refusal stops the probe where it is; what it counted so far still decides.
+        let _ = h.run_until(|_| read().0 >= k);
+        *slot = read();
+    }
+    let [(rs, rise), (fs, fall)] = counted;
+    let scans = rs.min(fs);
+    Ok(EdgeChoice {
+        at_fall: fall > rise,
+        rise,
+        fall,
+        scans,
+    })
+}

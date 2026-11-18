@@ -415,6 +415,26 @@ fn a_checkpoint_restores_only_under_the_settings_it_was_taken_with() {
     ));
 }
 
+#[test]
+fn the_tdo_edge_is_read_from_the_ir_captures() {
+    let (s, _) = session(SMALL);
+    // TDO settled through each clock: both edges read every IR capture, and a tie keeps the rise.
+    let both = jtag::choose_tdo_edge(|| Box::new(s.wires()), 64, 8).unwrap();
+    assert!(both.scans > 0 && both.rise == both.scans && both.fall == both.scans);
+    assert!(!both.at_fall);
+    // TDO changing just after each rise, as a target with a long output delay drives it: only the
+    // fall reads the captures.
+    let mut late = s.wires();
+    for e in &mut late.lines[3].edges {
+        *e += s.period / 2 + 1;
+    }
+    let fall = jtag::choose_tdo_edge(|| Box::new(late.clone()), 64, 8).unwrap();
+    assert!(
+        fall.at_fall && fall.fall == fall.scans && fall.rise < fall.scans,
+        "{fall:?}"
+    );
+}
+
 /// The session with the edge that starts clock `k` on line `port` moved to the clock's rise, and
 /// the session as it would be had that line held its level through clock `k`.
 fn moved_and_held(s: &Session, k: usize, port: usize) -> (Wires, Wires) {
