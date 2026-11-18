@@ -5,7 +5,9 @@
 //! follows the decoders' state, not the capture. `--rows` keeps each item's span, to check that
 //! the items fit the rows and lanes JTAG's schema declares.
 //!
-//! `cargo run --release -p escapement-tickwave-decoders --example jtag_check -- REC [--tdo-at-fall] [--rows]`
+//! `cargo run --release -p escapement-tickwave-decoders --example jtag_check -- REC [--tdo-at-rise | --tdo-at-fall] [--rows]`
+//!
+//! TDO is read where the IR captures read unless a flag fixes the edge.
 
 #[path = "check/mod.rs"]
 mod check;
@@ -21,15 +23,14 @@ use std::sync::{Arc, Mutex};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = std::env::args()
         .nth(1)
-        .ok_or("usage: jtag_check REC [--tdo-at-fall | --tdo-from-wire] [--rows]")?;
+        .ok_or("usage: jtag_check REC [--tdo-at-rise | --tdo-at-fall] [--rows]")?;
     let rows = std::env::args().any(|a| a == "--rows");
-    let mut at_fall = std::env::args().any(|a| a == "--tdo-at-fall");
-    let from_wire = std::env::args().any(|a| a == "--tdo-from-wire");
-    // How many IR scans the probe decodes each way.
-    let probe_scans: u32 = std::env::var("TDO_PROBE_SCANS")
-        .ok()
-        .and_then(|n| n.parse().ok())
-        .unwrap_or(64);
+    let flag = |f: &str| std::env::args().any(|a| a == f);
+    let edge = match (flag("--tdo-at-rise"), flag("--tdo-at-fall")) {
+        (true, _) => jtag::TdoEdge::Rise,
+        (_, true) => jtag::TdoEdge::Fall,
+        _ => jtag::TdoEdge::IrCapture,
+    };
     let file = std::fs::File::open(&path)?;
     let rec = Arc::new(Recording::open(Arc::new(file), Cache::new(64 << 20))?);
     let mut lines = vec![];
@@ -38,23 +39,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let tdo = rec.channel("TDO");
     lines.push(tdo);
-    if from_wire && tdo.is_some() {
-        let probe = std::time::Instant::now();
-        let choice = jtag::choose_tdo_edge(
-            || Box::new(WireSource::with_ports(rec.clone(), lines.clone()).expect("bound above")),
-            50_000,
-            probe_scans,
-        )?;
-        println!(
-            "TDO edge from the wire: {} (of the first {} IR scans, {} capture 01 at the rise, {} at the fall), in {:.2} s",
-            if choice.at_fall { "fall" } else { "rise" },
-            choice.scans,
-            choice.rise,
-            choice.fall,
-            probe.elapsed().as_secs_f64()
-        );
-        at_fall = choice.at_fall;
-    }
     let source = WireSource::with_ports(rec.clone(), lines)?;
     let mut h = Host::default();
     let j = h.add(
@@ -65,7 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             local: None,
         },
         jtag::Jtag::factory(50_000),
-        &[jtag::tdo_edge(at_fall)],
+        &[jtag::tdo_edge(edge)],
         vec![],
     )?;
     let seen = Arc::new(Mutex::new(Seen {
@@ -90,10 +74,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let label = format!(
         "TDO {}{}",
         tdo.is_some(),
-        if at_fall {
-            " at TCK's fall"
-        } else {
-            " at TCK's rise"
+        match edge {
+            jtag::TdoEdge::Rise => " at TCK's rise",
+            jtag::TdoEdge::Fall => " at TCK's fall",
+            _ => " where the IR captures read",
         }
     );
     let tck = rec.channel("TCK");

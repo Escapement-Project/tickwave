@@ -8,8 +8,9 @@
 //! first 128 bits are a field once it passes them, and the whole of a scan of at most 256 bits
 //! once it closes.
 //!
-//! TDO is an optional port: bound without it, a scan's TDO is unknown. Where TDO is sampled, at
-//! TCK's rise or the fall after it, is a setting, `tdo_edge`.
+//! TDO is an optional port: bound without it, a scan's TDO is unknown. Where TDO is read, at TCK's
+//! rise, at the fall after it, or at whichever of them the IR scans' captures read, is a setting,
+//! `tdo_edge`.
 
 use escapement_tickwave_decode::{
     Cause, Decoder, Definition, Element, ElementType, Exchange, Factory, FieldId, FieldType, Id,
@@ -158,13 +159,55 @@ pub fn schema() -> Schema {
     .with_open_at_most(2)
 }
 
-/// Where TDO is sampled: at TCK's rise, or at the fall after it.
+/// Where TDO is read: `TdoEdge`'s choices, by their names.
 pub const TDO_EDGE: SettingId = SettingId(0);
 
+/// The edge of TCK each clock's TDO is read at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TdoEdge {
+    /// At the rise, where IEEE 1149.1 has the probe sample it.
+    Rise,
+    /// At the fall after the rise: a target at a high TCK rate can drive TDO late, and a recording
+    /// then shows TDO changing near the rise. A clock with no fall after it, at a gap or the end,
+    /// keeps the level at its rise.
+    Fall,
+    /// At the fall, moved by the IR captures. The fall reads TDO wherever its delay after the fall
+    /// that drives it is under one TCK period, and the rise only where it is under half of one, so
+    /// a faster TCK cannot make the rise right where the fall is wrong. The fall reads the next
+    /// bit instead where TDO is recorded changing at or just before that fall, as skew between a
+    /// probe's channels can show it. Either way TDO then changes only between a rise and the
+    /// fall after it, and the rise reads each value one clock after the fall does. An IR scan
+    /// whose bits show that, and whose first two read 1 then 0, as every IR capture's do, only at
+    /// the other edge, counts toward moving the edge there; `MOVED_BY` of them in a row move it, for the
+    /// last and every scan after. One alone does not: an IR scan can shift out a TDO no TAP
+    /// drives, as a probe's switch from cJTAG to JTAG does.
+    IrCapture,
+}
+
+impl TdoEdge {
+    const NAMES: [&'static str; 3] = ["rise", "fall", "ir-capture"];
+
+    /// The edge a binding's choice names: its index into `NAMES`.
+    fn chosen(index: Option<usize>) -> Self {
+        match index {
+            Some(0) => Self::Rise,
+            Some(1) => Self::Fall,
+            _ => Self::IrCapture,
+        }
+    }
+}
+
+/// IR scans in a row that read only at the other edge before `TdoEdge::IrCapture` moves to it.
+pub const MOVED_BY: u8 = 2;
+
 /// The TDO edge setting, as a binding gives it.
-pub fn tdo_edge(at_fall: bool) -> (&'static str, Setting) {
-    let edge = if at_fall { "fall" } else { "rise" };
-    ("tdo_edge", Setting::Name(name(edge)))
+pub fn tdo_edge(edge: TdoEdge) -> (&'static str, Setting) {
+    let n = match edge {
+        TdoEdge::Rise => 0,
+        TdoEdge::Fall => 1,
+        TdoEdge::IrCapture => 2,
+    };
+    ("tdo_edge", Setting::Name(name(TdoEdge::NAMES[n])))
 }
 
 pub fn definition() -> Arc<Definition> {
@@ -172,7 +215,7 @@ pub fn definition() -> Arc<Definition> {
         Definition::new("jtag", 1, schema())
             .with_ports(["TCK", "TMS", "TDI"])
             .with_optional_ports(["TDO"])
-            .with_settings(vec![SettingDecl::choice("tdo_edge", ["rise", "fall"], 0)]),
+            .with_settings(vec![SettingDecl::choice("tdo_edge", TdoEdge::NAMES, 2)]),
     )
 }
 
@@ -215,6 +258,9 @@ pub struct Clocked {
     /// None where the clock carries no TDI: cJTAG's Standard Protocol on two wires.
     pub tdi: Option<bool>,
     pub tdo: Option<bool>,
+    /// TDO read again at the fall after the rise, and where; None where the wire gives no such
+    /// fall, or where the values come from upstream.
+    pub tdo_fall: Option<(Tick, bool)>,
     /// The upstream elements the values were decoded from; None where they are the wire's levels
     /// at `rise`.
     pub from: Option<Inputs>,
@@ -236,6 +282,15 @@ impl Clocked {
     }
     fn tdo_at(&self) -> Observation {
         (self.from.and_then(|f| f.tdo)).unwrap_or(Observation::Wire(self.rise))
+    }
+
+    /// TDO and where it was read: at the fall after the rise where `fall` and there is one, else
+    /// at the rise or upstream.
+    fn tdo_read(&self, fall: bool) -> Option<(bool, Observation)> {
+        match (fall, self.tdo_fall) {
+            (true, Some((at, v))) => Some((v, Observation::Wire(at))),
+            _ => self.tdo.map(|v| (v, self.tdo_at())),
+        }
     }
 }
 
@@ -259,6 +314,9 @@ struct Scan {
     /// Whether the scan's clocks carry TDI and TDO, taken from its first clock.
     tdi_known: bool,
     tdo_known: bool,
+    /// An IR scan's TDO bits read at the other edge until it is counted, where the IR captures
+    /// move the edge (`Tap::follow_capture`).
+    other: Option<Vec<(bool, Observation)>>,
 }
 
 /// The current state, None while ambiguous, from the rise that entered it, and its item once
@@ -290,6 +348,16 @@ pub struct Tap {
     has_tdo: bool,
     /// Why the state is unknown when it is.
     lost: Reason,
+    edge: TdoEdge,
+    reading: Reading,
+}
+
+/// Where a `Tap` reads TDO: as its edge fixes it, or as the IR captures last moved it.
+#[derive(Clone, Copy, Debug)]
+struct Reading {
+    at_fall: bool,
+    /// IR scans in a row that read only at the other edge.
+    votes: u8,
 }
 
 impl Tap {
@@ -298,6 +366,7 @@ impl Tap {
         let scan = self.scan.as_ref().map_or(0, |s| {
             crate::held::<Element>(s.tdi.capacity() + s.tdo.capacity())
                 + crate::held::<bool>(s.head_tdi.capacity() + s.head_tdo.capacity())
+                + crate::held::<(bool, Observation)>(s.other.as_ref().map_or(0, Vec::capacity))
         });
         crate::held::<Element>(self.path.capacity()) + scan
     }
@@ -319,7 +388,19 @@ impl Tap {
             scan: None,
             has_tdo,
             lost: MID_SESSION,
+            edge: TdoEdge::Rise,
+            reading: Reading {
+                at_fall: false,
+                votes: 0,
+            },
         }
+    }
+
+    /// TDO read at `edge`, where a clock gives TDO at its fall as well as at its rise.
+    pub fn tdo_edge(mut self, edge: TdoEdge) -> Self {
+        self.edge = edge;
+        self.reading.at_fall = edge != TdoEdge::Rise;
+        self
     }
 
     /// Opens the unknown state's item at the start. Called once, before any clock.
@@ -405,7 +486,8 @@ impl Tap {
         }
     }
 
-    fn flush(sc: &mut Scan, out: &mut Out) {
+    fn flush(sc: &mut Scan, reading: &mut Reading, out: &mut Out) {
+        Self::follow_capture(sc, reading);
         if !sc.tdi.is_empty() {
             let at = sc.tdi_n.saturating_sub(sc.tdi.len() as u32);
             out.extend(sc.id, TDI_BITS, at, &sc.tdi);
@@ -422,7 +504,7 @@ impl Tap {
         let Some(mut sc) = self.scan.take() else {
             return;
         };
-        Self::flush(&mut sc, out);
+        Self::flush(&mut sc, &mut self.reading, out);
         let n = u64::from(sc.n);
         out.set(sc.id, LENGTH, Value::Word { value: n, bits: 32 });
         if sc.n <= MAX_BITS {
@@ -464,21 +546,26 @@ impl Tap {
             head_tdo: vec![],
             tdi_known,
             tdo_known,
+            other: (ir && tdo_known && self.edge == TdoEdge::IrCapture).then(Vec::new),
         });
     }
 
-    fn shift(sc: &mut Scan, c: &Clocked, out: &mut Out) {
+    fn shift(sc: &mut Scan, c: &Clocked, reading: &mut Reading, out: &mut Out) {
         if let (Some(v), true) = (c.tdi, sc.tdi_known) {
             sc.tdi.push(Element::new(u8::from(v), c.tdi_at(), c.cell));
             sc.tdi_n = sc.tdi_n.saturating_add(1);
         }
-        if let (Some(v), true) = (c.tdo, sc.tdo_known) {
-            sc.tdo.push(Element::new(u8::from(v), c.tdo_at(), c.cell));
+        let tdo = c.tdo_read(reading.at_fall);
+        if let (Some((v, at)), true) = (tdo, sc.tdo_known) {
+            sc.tdo.push(Element::new(u8::from(v), at, c.cell));
             sc.tdo_n = sc.tdo_n.saturating_add(1);
+            if let (Some(other), Some(o)) = (&mut sc.other, c.tdo_read(!reading.at_fall)) {
+                other.push(o);
+            }
         }
         if sc.head_tdi.len() < MAX_BITS as usize {
             sc.head_tdi.push(c.tdi.unwrap_or(false));
-            sc.head_tdo.push(c.tdo.unwrap_or(false));
+            sc.head_tdo.push(tdo.is_some_and(|(v, _)| v));
         }
         sc.n = sc.n.saturating_add(1);
         sc.latest = sc.latest.max(c.cell.end);
@@ -491,8 +578,46 @@ impl Tap {
             }
         }
         if sc.tdi.len() >= CHUNK || sc.tdo.len() >= CHUNK {
-            Self::flush(sc, out);
+            Self::flush(sc, reading, out);
         }
+    }
+
+    /// Counts an IR scan whose held bits show it read at the wrong edge (`TdoEdge::IrCapture`),
+    /// and at `MOVED_BY` in a row moves the edge and reads its bits there; any other IR scan
+    /// starts the count again. Called before the scan's first bits are emitted.
+    fn follow_capture(sc: &mut Scan, reading: &mut Reading) {
+        let Some(other) = sc.other.take() else {
+            return;
+        };
+        let here: Vec<bool> = sc.tdo.iter().map(|e| e.value == 1).collect();
+        let there: Vec<bool> = other.iter().map(|&(v, _)| v).collect();
+        let reads = |v: &[bool]| v.len() >= 2 && v[0] && !v[1];
+        let (rise, fall) = if reading.at_fall {
+            (&there, &here)
+        } else {
+            (&here, &there)
+        };
+        // `there` reading 1 then 0 holds at least two bits, so both do past the length check.
+        let wrong = !reads(&here)
+            && reads(&there)
+            && rise.len() == fall.len()
+            && rise[1..] == fall[..fall.len() - 1];
+        reading.votes = if wrong {
+            reading.votes.saturating_add(1)
+        } else {
+            0
+        };
+        if reading.votes < MOVED_BY {
+            return;
+        }
+        for ((e, (v, at)), h) in sc.tdo.iter_mut().zip(other).zip(&mut sc.head_tdo) {
+            *e = Element::new(u8::from(v), at, e.cell);
+            *h = v;
+        }
+        *reading = Reading {
+            at_fall: !reading.at_fall,
+            votes: 0,
+        };
     }
 
     pub fn clock(&mut self, c: &Clocked, out: &mut Out) {
@@ -502,7 +627,7 @@ impl Tap {
                 self.open_scan(s == SHIFT_IR, c, out);
             }
             if let Some(sc) = self.scan.as_mut() {
-                Self::shift(sc, c, out);
+                Self::shift(sc, c, &mut self.reading, out);
             }
         }
         let after = step(before, c.tms);
@@ -564,10 +689,12 @@ struct Rise {
     tms: bool,
     tdi: bool,
     tdo: Option<bool>,
+    tdo_fall: Option<(Tick, bool)>,
 }
 
-/// JTAG under the host: TCK, TMS, TDI and TDO in windows of `window` ticks. TMS, TDI and TDO are
-/// sampled at each TCK rise: a change at the rise's own tick counts after it. Without TDO, port 3
+/// JTAG under the host: TCK, TMS, TDI and TDO in windows of `window` ticks. TMS and TDI are sampled
+/// at each TCK rise, and TDO at the edge `tdo_edge` gives: a change at an edge's own tick counts
+/// after it. Without TDO, port 3
 /// is not read and TDO values are unknown. A stretch where a line it reads is unknown is lost
 /// input.
 ///
@@ -596,8 +723,6 @@ pub struct Jtag {
     gap: Option<Tick>,
     /// A window an interrupted turn left part read, and the next observation in it.
     held: Option<(Window, usize)>,
-    /// Whether TDO is sampled at the fall after each rise rather than at the rise.
-    tdo_at_fall: bool,
 }
 
 impl Jtag {
@@ -617,15 +742,12 @@ impl Jtag {
             bound: at,
             gap: None,
             held: None,
-            tdo_at_fall: false,
         }
     }
 
-    /// TDO sampled at the fall after each rise: a probe at a high TCK rate can read TDO late, and
-    /// a recording of it then shows TDO changing near the rise. A clock with no fall after it, at
-    /// a gap or the end, keeps the level at its rise.
-    pub fn tdo_at_fall(mut self, on: bool) -> Self {
-        self.tdo_at_fall = on;
+    /// TDO read at `edge`; at the rise by default.
+    pub fn tdo_edge(mut self, edge: TdoEdge) -> Self {
+        self.tap = self.tap.tdo_edge(edge);
         self
     }
 
@@ -633,8 +755,8 @@ impl Jtag {
     /// edge bound.
     pub fn factory(window: Tick) -> Factory {
         Box::new(move |b, local| {
-            let at_fall = b.choice(TDO_EDGE) == Some(1);
-            Box::new(Self::new(local, b.port(TDO), window).tdo_at_fall(at_fall))
+            let edge = TdoEdge::chosen(b.choice(TDO_EDGE));
+            Box::new(Self::new(local, b.port(TDO), window).tdo_edge(edge))
         })
     }
 
@@ -690,6 +812,7 @@ impl Jtag {
             tms: r.tms,
             tdi: Some(r.tdi),
             tdo: r.tdo,
+            tdo_fall: r.tdo_fall,
             from: None,
         };
         self.tap.clock(&c, out);
@@ -713,6 +836,7 @@ impl Jtag {
             tms,
             tdi,
             tdo,
+            tdo_fall: None,
         });
     }
 
@@ -720,8 +844,8 @@ impl Jtag {
         self.fall = Some(at);
         self.bound = self.bound.max(at);
         if let Some(mut r) = self.rise.take() {
-            if self.tdo_at_fall && self.has_tdo {
-                r.tdo = self.sampled(TDO, at).or(r.tdo);
+            if self.has_tdo {
+                r.tdo_fall = self.sampled(TDO, at).map(|v| (at, v));
             }
             self.emit(r, Some(at), None, out);
         }
@@ -864,115 +988,4 @@ impl Decoder for Jtag {
     fn heap_bytes(&self) -> usize {
         self.tap.heap_bytes() + crate::window_bytes(&self.held)
     }
-}
-
-/// The TCK edge TDO is sampled at, as `choose_tdo_edge` read it from the wire.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct EdgeChoice {
-    /// Whether TDO is sampled at TCK's fall after each rise.
-    pub at_fall: bool,
-    /// Of the first `scans` IR scans decoded each way, how many captured TDO ending in binary 01
-    /// sampled at the rise, and at the fall.
-    pub rise: u32,
-    pub fall: u32,
-    pub scans: u32,
-}
-
-/// Of the first so many IR scans it receives, whether each one's captured TDO ends in binary 01.
-struct IrCaptures(Arc<std::sync::Mutex<Vec<bool>>>, u32);
-
-impl Decoder for IrCaptures {
-    fn turn(&mut self, ex: &mut Exchange<'_>) -> Pause {
-        use escapement_tickwave_decode::Delivery;
-        while let Some(d) = ex.receive() {
-            match d {
-                Delivery::Item { item, .. } if item.id.kind == IR_SCAN => {
-                    let ok = matches!(
-                        item.field(TDO_VALUE).map(|f| &f.value),
-                        Some(Value::Bits { bytes, .. }) if bytes.first().is_some_and(|b| b & 3 == 1)
-                    );
-                    if let Ok(mut seen) = self.0.lock()
-                        && seen.len() < self.1 as usize
-                    {
-                        seen.push(ok);
-                    }
-                }
-                Delivery::Lost { span, .. } => ex.lost(span.start, span.end),
-                Delivery::Frontier { start, .. } => ex.frontier(start),
-                Delivery::End { end, .. } => {
-                    ex.finish(end);
-                    return Pause::Finished;
-                }
-                _ => {}
-            }
-        }
-        if ex.more() { Pause::Work } else { Pause::Input }
-    }
-}
-
-/// Why the TDO edge could not be read from the wire: the probe's analyses could not be bound, or
-/// the host refused a batch of the probe's decode, a fault in the decoder.
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum ProbeError {
-    #[error(transparent)]
-    Bind(#[from] escapement_tickwave_decode::BindError),
-    #[error("the host refused the probe's decode")]
-    Refused(#[source] escapement_tickwave_decode::Refusal),
-}
-
-/// Decodes the first `k` IR scans of the wires `source` gives twice, TDO sampled at TCK's rise
-/// and at its fall, and picks the edge whose IR captures end in binary 01, as IEEE 1149.1 has
-/// every IR capture do, over as many scans as both decodes reached. A tie goes to the rise. A
-/// host labels the choice as read from the wire, and a setting given by hand overrides it. The
-/// first `k` decide, so where the edge that reads TDO depends on the TCK rate and the rate
-/// changes later in the capture, they may not tell.
-pub fn choose_tdo_edge(
-    source: impl Fn() -> Box<dyn escapement_tickwave_decode::Source>,
-    window: Tick,
-    k: u32,
-) -> Result<EdgeChoice, ProbeError> {
-    use escapement_tickwave_decode::{Host, InputSpec, Mode, Subscription};
-    // Each edge in a host of its own, stopped at its kth IR scan: in one host, one chain would
-    // run to the end before the other began.
-    let mut captured = [vec![], vec![]];
-    for (slot, at_fall) in captured.iter_mut().zip([false, true]) {
-        let mut h = Host::default();
-        let j = h.add(
-            name("jtag"),
-            definition(),
-            InputSpec::Wire {
-                source: source(),
-                local: None,
-            },
-            Jtag::factory(window),
-            &[tdo_edge(at_fall)],
-            vec![],
-        )?;
-        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let s = seen.clone();
-        h.add(
-            name("captures"),
-            Arc::new(Definition::new("ir-captures", 1, Schema::new(vec![]))),
-            InputSpec::Upstream(Subscription::new(j, Mode::Completed).with_kinds(["ir-scan"])),
-            Box::new(move |_, _| Box::new(IrCaptures(s.clone(), k))),
-            &[],
-            vec![],
-        )?;
-        let read = || seen.lock().map_or(0, |n| n.len());
-        h.run_until(|_| read() >= k as usize)
-            .map_err(ProbeError::Refused)?;
-        *slot = seen.lock().map(|n| n.clone()).unwrap_or_default();
-    }
-    // Each edge over the same first scans: a decode whose input ends sooner reaches fewer.
-    let scans = captured[0].len().min(captured[1].len());
-    let ok = |c: &[bool]| c[..scans].iter().filter(|&&x| x).count() as u32;
-    let (rise, fall, scans) = (ok(&captured[0]), ok(&captured[1]), scans as u32);
-    Ok(EdgeChoice {
-        at_fall: fall > rise,
-        rise,
-        fall,
-        scans,
-    })
 }

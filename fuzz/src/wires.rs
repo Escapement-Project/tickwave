@@ -261,7 +261,10 @@ pub fn jtag(c: &Case) {
             jtag::definition(),
             InputSpec::Wire { source, local },
             jtag::Jtag::factory(window),
-            &[jtag::tdo_edge(c.setting & 2 != 0)],
+            &[jtag::tdo_edge(
+                [jtag::TdoEdge::Rise, jtag::TdoEdge::Fall, jtag::TdoEdge::IrCapture]
+                    [usize::from(c.setting >> 1) % 3],
+            )],
             all(),
         )
         .unwrap();

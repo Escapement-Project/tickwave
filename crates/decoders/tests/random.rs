@@ -327,7 +327,12 @@ fn jtag_never_panics_and_never_breaks_a_rule() {
         let w = clocked(r, 3);
         let w = if r.bool() { perturb(r, w) } else { w };
         let (window, local) = reading(r, &w);
-        let (has_tdo, at_fall) = (r.bool(), r.bool());
+        let has_tdo = r.bool();
+        let edge = [
+            jtag::TdoEdge::Rise,
+            jtag::TdoEdge::Fall,
+            jtag::TdoEdge::IrCapture,
+        ][r.usize(..3)];
         let mut h = Host::default();
         let j = h
             .add(
@@ -345,7 +350,7 @@ fn jtag_never_panics_and_never_breaks_a_rule() {
                     local,
                 },
                 jtag::Jtag::factory(window),
-                &[jtag::tdo_edge(at_fall)],
+                &[jtag::tdo_edge(edge)],
                 all(),
             )
             .unwrap();

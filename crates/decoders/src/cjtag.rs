@@ -611,6 +611,7 @@ impl Oscan {
                     tms,
                     tdi: None,
                     tdo: None,
+                    tdo_fall: None,
                     from: Some(Inputs {
                         tms: tms_at,
                         tdi: None,
@@ -793,6 +794,7 @@ impl Oscan {
             tms,
             tdi,
             tdo,
+            tdo_fall: None,
             from: Some(Inputs {
                 tms: up(tms_seq),
                 tdi: tdi.map(|_| up(NTDI_BITS)),
@@ -1097,6 +1099,7 @@ impl JtagOnCjtag {
                         tms: e.value == 1,
                         tdi: None,
                         tdo: None,
+                        tdo_fall: None,
                         from: Some(Inputs {
                             tms,
                             tdi: None,
@@ -1149,6 +1152,7 @@ impl JtagOnCjtag {
                     tms,
                     tdi: p.tdi,
                     tdo: p.tdo,
+                    tdo_fall: None,
                     from: Some(Inputs {
                         tms: up(tms_seq),
                         tdi: p.tdi.map(|_| up(NTDI_BITS)),

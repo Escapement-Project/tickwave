@@ -4,10 +4,10 @@ mod common;
 
 use common::*;
 use escapement_tickwave_decode::{
-    AnalysisId, CheckpointError, Counts, Element, Host, HostOptions, InputSpec, Item, KindId, Span,
-    Status, Tick, Value, name,
+    AnalysisId, CheckpointError, Counts, Element, Host, HostOptions, InputSpec, Item, KindId,
+    Observation, Span, Status, Tick, Value, name,
 };
-use escapement_tickwave_decoders::jtag;
+use escapement_tickwave_decoders::jtag::{self, TdoEdge};
 use std::sync::atomic::Ordering::Relaxed;
 
 fn all() -> Vec<Span> {
@@ -423,7 +423,7 @@ fn window_size_does_not_change_the_output() {
 #[test]
 fn a_checkpoint_restores_only_under_the_settings_it_was_taken_with() {
     let (s, _) = session(SMALL);
-    let make = |w: Wires, at_fall: bool| {
+    let make = |w: Wires, edge: TdoEdge| {
         let mut h = Host::default();
         let j = h
             .add(
@@ -434,42 +434,165 @@ fn a_checkpoint_restores_only_under_the_settings_it_was_taken_with() {
                     local: None,
                 },
                 jtag::Jtag::factory(64),
-                &[jtag::tdo_edge(at_fall)],
+                &[jtag::tdo_edge(edge)],
                 all(),
             )
             .unwrap();
         (h, j)
     };
-    let (mut h, j) = make(s.wires(), false);
+    let (mut h, j) = make(s.wires(), TdoEdge::Rise);
     while h.consumed(j) < 500 {
         h.step().unwrap();
     }
     let cut = h.checkpoint(j).unwrap();
-    assert!(make(s.wires(), false).0.restore(&cut).is_ok());
+    assert!(make(s.wires(), TdoEdge::Rise).0.restore(&cut).is_ok());
     assert!(matches!(
-        make(s.wires(), true).0.restore(&cut),
+        make(s.wires(), TdoEdge::Fall).0.restore(&cut),
         Err(CheckpointError::Incompatible)
     ));
 }
 
+/// The session decoded with TDO read at `edge`.
+fn with_edge(w: Wires, edge: TdoEdge) -> (Host, AnalysisId) {
+    let mut h = Host::default();
+    let j = h
+        .add(
+            name("jtag"),
+            jtag::definition(),
+            InputSpec::Wire {
+                source: Box::new(w),
+                local: None,
+            },
+            jtag::Jtag::factory(64),
+            &[jtag::tdo_edge(edge)],
+            all(),
+        )
+        .unwrap();
+    h.run_until(|_| false).unwrap();
+    (h, j)
+}
+
+/// Each IR scan's captured TDO: whether it ends in binary 01.
+fn captures(h: &Host, j: AnalysisId) -> Vec<bool> {
+    (of(h, j, &[jtag::IR_SCAN]).iter())
+        .map(|i| matches!(value(i, jtag::TDO_VALUE), Some(Value::Bits { bytes, .. }) if bytes[0] & 3 == 1))
+        .collect()
+}
+
 #[test]
-fn the_tdo_edge_is_read_from_the_ir_captures() {
+fn where_both_edges_read_tdo_the_ir_captures_keep_the_fall() {
     let (s, _) = session(SMALL);
-    // TDO settled through each clock: both edges read every IR capture, and a tie keeps the rise.
-    let both = jtag::choose_tdo_edge(|| Box::new(s.wires()), 64, 8).unwrap();
-    assert!(both.scans > 0 && both.rise == both.scans && both.fall == both.scans);
-    assert!(!both.at_fall);
-    // TDO changing just after each rise, as a target with a long output delay drives it: only the
-    // fall reads the captures.
-    let mut late = s.wires();
-    for e in &mut late.lines[3].edges {
-        *e += s.period / 2 + 1;
+    // TDO settled through each clock, changing at each fall: both edges read it.
+    let fall = with_edge(s.wires(), TdoEdge::Fall);
+    let follow = with_edge(s.wires(), TdoEdge::IrCapture);
+    let items = |(h, j): &(Host, AnalysisId)| format!("{:?}", h.store(*j).items);
+    assert_eq!(items(&follow), items(&fall));
+}
+
+/// From Run-Test/Idle, `n` IR scans each followed by an IDCODE read, and where each starts.
+fn ir_and_idcode(n: usize) -> (Session, Vec<Tick>) {
+    let mut s = Session::new(5_000, 100);
+    s.tms(&[1, 1, 1, 1, 1, 0]);
+    let mut starts = vec![];
+    for _ in 0..n {
+        starts.push(s.t);
+        s.tms(&[1, 1, 0, 0]);
+        s.shift(&bits(0b1110, 4), &bits(0b0001, 4), None, None);
+        s.tms(&[1, 0, 1, 0, 0]);
+        s.shift(&bits(0, 32), &bits(IDCODE.into(), 32), None, None);
+        s.tms(&[1, 0, 0, 0]);
     }
-    let fall = jtag::choose_tdo_edge(|| Box::new(late.clone()), 64, 8).unwrap();
-    assert!(
-        fall.at_fall && fall.fall == fall.scans && fall.rise < fall.scans,
-        "{fall:?}"
+    s.end = s.t + 20;
+    (s, starts)
+}
+
+/// The session's wires with TDO's edges in pair `k` moved by `by(k)`.
+fn tdo_moved(s: &Session, starts: &[Tick], by: impl Fn(usize) -> Tick) -> Wires {
+    let mut w = s.wires();
+    for e in &mut w.lines[3].edges {
+        *e += by(starts.partition_point(|&t| t <= *e).saturating_sub(1));
+    }
+    w
+}
+
+/// Each IR scan's capture, whether it ends in 01, and each IDCODE read, whether it reads IDCODE.
+fn reads(h: &Host, j: AnalysisId) -> Vec<(bool, bool)> {
+    let idcode = Some(Value::Bits {
+        bytes: IDCODE.to_le_bytes().to_vec(),
+        bits: 32,
+    });
+    let dr = of(h, j, &[jtag::DR_SCAN]);
+    (captures(h, j).into_iter().zip(dr))
+        .map(|(ir, dr)| (ir, value(&dr, jtag::TDO_VALUE) == idcode))
+        .collect()
+}
+
+#[test]
+fn two_ir_captures_in_a_row_read_only_at_the_other_edge_move_it_there() {
+    let (s, starts) = ir_and_idcode(6);
+    // TDO changing just before each fall in the first three pairs, so only the rise reads it; then
+    // just after each rise, as a target with a long output delay drives it, so only the fall does.
+    let w = tdo_moved(&s, &starts, |k| if k < 3 { -1 } else { s.period / 2 + 1 });
+    let (h, j) = with_edge(w.clone(), TdoEdge::Rise);
+    assert_eq!(
+        reads(&h, j),
+        [[(true, true); 3], [(false, false); 3]].concat()
     );
+    let (h, j) = with_edge(w.clone(), TdoEdge::Fall);
+    assert_eq!(
+        reads(&h, j),
+        [[(false, false); 3], [(true, true); 3]].concat()
+    );
+    // From the fall, the second IR scan read only at the rise moves the edge there, and the second
+    // read only at the fall moves it back; the first of each is read where the edge was.
+    let (h, j) = with_edge(w.clone(), TdoEdge::IrCapture);
+    let moved = [(false, false), (true, true), (true, true)];
+    assert_eq!(reads(&h, j), [moved; 2].concat());
+    // And so does a binding that leaves the edge to its default.
+    let (mut d, dj) = host(w, 64, None, true);
+    d.run_until(|_| false).unwrap();
+    assert_eq!(reads(&d, dj), [moved; 2].concat());
+    // Each bit is placed at the edge it was read at, a moving scan's own bits too.
+    let ir = of(&h, j, &[jtag::IR_SCAN]);
+    let at =
+        |i: &Item| -> Vec<Observation> { i.seq(jtag::TDO_BITS).iter().map(|e| e.at).collect() };
+    let shifts = |k: usize, fall: bool| -> Vec<Observation> {
+        let first = (s.clocks.iter()).position(|c| c.0 >= ir[k].start).unwrap();
+        (first..first + 4)
+            .map(|c| Observation::Wire(s.rise(c) + if fall { s.period / 2 } else { 0 }))
+            .collect()
+    };
+    assert_eq!(at(&ir[0]), shifts(0, true));
+    assert_eq!(at(&ir[1]), shifts(1, false));
+    assert_eq!(at(&ir[3]), shifts(3, false));
+    assert_eq!(at(&ir[4]), shifts(4, true));
+}
+
+#[test]
+fn an_ir_capture_read_only_at_the_other_edge_does_not_move_it_alone_or_unshifted() {
+    let (s, starts) = ir_and_idcode(6);
+    let same = |w: Wires| {
+        let (h, j) = with_edge(w.clone(), TdoEdge::Fall);
+        let want = reads(&h, j);
+        let (h, j) = with_edge(w, TdoEdge::IrCapture);
+        assert_eq!(reads(&h, j), want);
+        want
+    };
+    // The second and fourth pairs' TDO changes just before each fall, as a TDO no TAP drives can:
+    // each is read only at the rise, but the pair between them is read at the fall.
+    let w = tdo_moved(&s, &starts, |k| if k == 1 || k == 3 { -1 } else { 0 });
+    assert_eq!(same(w)[1], (false, false));
+    // The second and third IR scans read 1 then 0 at the rise and 1 then 1 at the fall, the
+    // second bit's TDO pulsing high across its fall: read only at the rise, but not one place
+    // later than at the fall.
+    let mut w = s.wires();
+    for k in [1, 2] {
+        let first = (s.clocks.iter()).position(|c| c.0 >= starts[k]).unwrap() + 4;
+        let fall = s.rise(first + 1) + s.period / 2;
+        w.lines[3].edges.extend([fall - 10, fall + 10]);
+    }
+    w.lines[3].edges.sort_unstable();
+    assert!(!same(w)[1].0, "its capture is read at the fall");
 }
 
 /// The session with the edge that starts clock `k` on line `port` moved to the clock's rise, and
@@ -496,12 +619,17 @@ fn a_change_at_a_rise_counts_after_it_in_either_order() {
             .unwrap()
     };
     let tms = (k0..).find(|&k| s.clocks[k].1[0]).unwrap();
+    // TDO read at the rise, as TMS and TDI are.
+    let at_rise = |w: Wires| {
+        let (h, j) = with_edge(w, TdoEdge::Rise);
+        h.store(j).counts
+    };
     for (port, k) in [(2, differs(2)), (3, differs(3)), (1, tms)] {
         let (mut moved, held) = moved_and_held(&s, k, port);
-        let want = decoded(held, 100);
-        assert_eq!(decoded(moved.clone(), 100), want, "port {port}");
+        let want = at_rise(held);
+        assert_eq!(at_rise(moved.clone()), want, "port {port}");
         moved.reversed = true;
-        assert_eq!(decoded(moved, 100), want, "port {port}, reversed");
+        assert_eq!(at_rise(moved), want, "port {port}, reversed");
     }
 }
 
@@ -671,44 +799,4 @@ fn a_tms_cycle_of_one_clock_states_is_cut_into_bounded_paths() {
     assert!(paths.iter().all(|&n| n <= jtag::PATH_AT_MOST), "{paths:?}");
     assert!(paths.iter().sum::<usize>() >= 300, "{paths:?}");
     assert!(h.store(j).counts.peak_open <= 2);
-}
-
-/// Wires that cannot be read from `.1` on.
-struct Cut(Wires, Tick);
-
-impl escapement_tickwave_decode::Source for Cut {
-    fn window(
-        &mut self,
-        from: Tick,
-        upto: Tick,
-        most: usize,
-        cancel: &std::sync::atomic::AtomicBool,
-    ) -> Result<Option<escapement_tickwave_decode::Window>, escapement_tickwave_decode::SourceError>
-    {
-        if from >= self.1 {
-            let cut = std::io::Error::other("the recording is cut off");
-            return Err(escapement_tickwave_decode::SourceError::new(cut));
-        }
-        self.0.window(from, upto, most, cancel)
-    }
-
-    fn binding(&self) -> u64 {
-        self.0.binding()
-    }
-
-    fn ports(&self) -> Vec<bool> {
-        self.0.ports()
-    }
-}
-
-#[test]
-fn a_tdo_edge_probe_that_cannot_read_its_wires_says_so_rather_than_deciding_on_part() {
-    let (s, _) = session(SMALL);
-    let w = s.wires();
-    let cut = w.end / 3;
-    let choice = jtag::choose_tdo_edge(|| Box::new(Cut(w.clone(), cut)), 64, 1_000);
-    assert!(
-        matches!(choice, Err(jtag::ProbeError::Refused(_))),
-        "{choice:?}"
-    );
 }
