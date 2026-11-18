@@ -154,6 +154,20 @@ fn a_schema_and_its_subscriptions_are_checked_when_added() {
             "name is empty",
         ),
         (toy_schema().with_open_at_most(0), "open-item bound"),
+        (
+            Schema::new(vec![
+                KindDecl::new("a"),
+                KindDecl::new("b").with_row(escapement_tickwave_decode::MAX_LANES),
+            ]),
+            "row 8, not below 8",
+        ),
+        (
+            Schema::new(vec![
+                KindDecl::new("a").with_lanes(8),
+                KindDecl::new("b").with_row(1),
+            ]),
+            "take 9 lanes together",
+        ),
     ];
     for (k, (s, why)) in refused.into_iter().enumerate() {
         let mut h = Host::default();

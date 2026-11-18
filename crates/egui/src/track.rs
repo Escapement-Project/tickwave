@@ -1,12 +1,12 @@
 //! A decode track: one analysis's items drawn under a graph, on the graph's time axis.
 //!
-//! Its rows are reserved from the first frame and keep their height: the items' row, and where
-//! asked for, a row of their parts and bits. Zoomed out, where items would crowd, it draws how
-//! many start in each pixel column from a `Density` ladder instead, so a frame's work follows the
-//! columns on screen, not the capture. Conditions (an item closed incomplete, a value unknown,
-//! anything the host marks) show at every zoom. Lost input is shaded as the waveform's lost time
-//! is, input not decoded yet is hatched, and decoded input with nothing in it is left bare, so
-//! the three differ without hue.
+//! Its rows are reserved from the first frame and keep their height: the rows its schema's kinds
+//! declare, each with its lanes, and where asked for, a row of their parts and bits. Zoomed out,
+//! where items would crowd, it draws how many start in each pixel column from a `Density` ladder
+//! instead, so a frame's work follows the columns on screen, not the capture. Conditions (an item
+//! closed incomplete, a value unknown, anything the host marks) show at every zoom. Lost input is
+//! shaded as the waveform's lost time is, input not decoded yet is hatched, and decoded input with
+//! nothing in it is left bare, so the three differ without hue.
 
 use std::borrow::Cow;
 
@@ -313,7 +313,9 @@ pub struct Track<'a> {
     settled: Tick,
     lost: &'a [Span],
     parts: bool,
+    /// The lanes its rows take together, and each kind's range of them.
     lanes: usize,
+    rows: Vec<std::ops::Range<usize>>,
 }
 
 impl<'a> Track<'a> {
@@ -330,6 +332,7 @@ impl<'a> Track<'a> {
         palette: &'a Palette,
         map: Mapping,
     ) -> Self {
+        let (lanes, rows) = schema.layout();
         Self {
             shown,
             name,
@@ -342,9 +345,8 @@ impl<'a> Track<'a> {
             settled: Tick::MAX,
             lost: &[],
             parts: false,
-            lanes: schema
-                .lanes()
-                .clamp(1, escapement_tickwave_decode::MAX_LANES),
+            lanes,
+            rows,
         }
     }
 
@@ -366,13 +368,14 @@ impl<'a> Track<'a> {
         self
     }
 
-    /// The height it takes: a row for each lane its schema declares, and one for the parts where
-    /// they are drawn. An item past that many at once draws as an overflow mark.
+    /// The height it takes: a lane's for each lane its schema's rows take, and a row for the parts
+    /// where they are drawn. An item past its row's lanes at once draws as an overflow mark.
     pub fn height(&self) -> f32 {
-        self.rows() as f32 * ROW
+        self.strips() as f32 * ROW
     }
 
-    fn rows(&self) -> usize {
+    /// Its lanes, and the parts row where it has one.
+    fn strips(&self) -> usize {
         self.lanes + usize::from(self.parts)
     }
 }
@@ -395,7 +398,7 @@ impl Widget for Track<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
         let _span = tracing::debug_span!("track", name = self.name).entered();
         let p = self.palette;
-        let height = self.rows() as f32 * ROW;
+        let height = self.height();
         let (rect, response) =
             ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
         let plot = Rect::from_min_max(
@@ -566,9 +569,11 @@ impl Track<'_> {
             }
             let (x0, x1) = (s.x(start).max(s.left), s.x(end).min(s.right));
             let x1 = x1.max(x0 + 1.0);
-            let Some(lane) = ends.iter().position(|&e| e <= x0) else {
-                // Every lane busy: an overflow mark over the first, never a box over another.
-                let top = lanes[0].top();
+            let row = (self.rows.get(usize::from(item.id.kind.0))).map_or(0..1, Clone::clone);
+            let Some(lane) = row.clone().find(|&l| ends[l] <= x0) else {
+                // Every lane of its row busy: an overflow mark over the first, never a box over
+                // another.
+                let top = lanes[row.start].top();
                 shapes.push(Shape::line_segment(
                     [pos2(x0, top), pos2(x0, top + PAD)],
                     Stroke::new(1.0, p.attention_ink),

@@ -111,9 +111,13 @@ pub fn schema() -> Schema {
                 seq("tdo", ElementType::Bit),
             ])
     };
+    // A scan spans the states it shifts in, so the states draw in a row under the scans.
     Schema::new(vec![
-        KindDecl::new("state").with_fields(vec![field("state", state())]),
+        KindDecl::new("state")
+            .with_row(1)
+            .with_fields(vec![field("state", state())]),
         KindDecl::new("path")
+            .with_row(1)
             .with_fields(vec![
                 field("from", state()),
                 field("to", state()),

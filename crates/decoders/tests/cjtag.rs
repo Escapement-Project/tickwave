@@ -437,6 +437,8 @@ fn long_scan(h: &Host, j: AnalysisId, after: Tick) -> Item {
 #[test]
 fn the_activation_and_the_packets_decode() {
     let (h, [c, j]) = run(synth(), 1000);
+    fits_its_rows(&h, c);
+    fits_its_rows(&h, j);
     let esc = of(&h, c, &[cjtag::ESCAPE]);
     assert_eq!(esc.len(), 1);
     assert_eq!(
@@ -591,6 +593,8 @@ fn lost_input_reaches_jtag_and_is_declared_again() {
         let (h, [c, j]) = run(w.clone(), window);
         assert_eq!(h.store(j).counts, want, "window {window}");
         assert_eq!((h.lost(c), h.lost(j)), (&[lost][..], &[lost][..]));
+        fits_its_rows(&h, c);
+        fits_its_rows(&h, j);
     }
     let (h, [c, j]) = run(w.clone(), 1000);
     let cut = (of(&h, j, &[jtag::DR_SCAN]).into_iter())

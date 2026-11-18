@@ -1,24 +1,30 @@
 //! cJTAG over a recording's TCKC and TMSC with JTAG stacked on it, JTAG checked as `jtag_check`
 //! checks it, and cJTAG's counts printed to compare with another implementation's. Nothing is
-//! kept.
+//! kept, unless `--rows` asks to check that both analyses' items fit the rows and lanes their
+//! schemas declare, which keeps each item's span.
 //!
-//! `cargo run --release -p escapement-tickwave-decoders --example cjtag_check -- REC`
+//! `cargo run --release -p escapement-tickwave-decoders --example cjtag_check -- REC [--rows]`
 
 #[path = "check/mod.rs"]
 mod check;
 
 use check::{Checker, Seen};
 use escapement_tickwave_decode::{
-    Decoder, Definition, Delivery, Exchange, Host, InputSpec, Mode, Pause, Schema, Status,
-    Subscription, name, wire::WireSource,
+    Decoder, Definition, Delivery, Exchange, Host, InputSpec, KindId, Mode, Pause, Schema, Status,
+    Subscription, Tick, name, wire::WireSource,
 };
 use escapement_tickwave_decoders::cjtag;
 use escapement_tickwave_view::{Cache, Recording};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-/// Items by kind, and those closed incomplete by cause, each by its schema index.
-type Tally = (BTreeMap<u16, u64>, BTreeMap<u16, u64>);
+/// Items by kind, and those closed incomplete by cause, each by its schema index; and with
+/// `--rows`, each item's kind and span.
+type Tally = (
+    BTreeMap<u16, u64>,
+    BTreeMap<u16, u64>,
+    Option<Vec<(KindId, Tick, Tick)>>,
+);
 
 /// Counts cJTAG's completed items by kind, and those closed incomplete by cause.
 struct Kinds(Arc<Mutex<Tally>>);
@@ -32,6 +38,9 @@ impl Decoder for Kinds {
                     *k.0.entry(item.id.kind.0).or_default() += 1;
                     if let Status::Incomplete(c) = item.status {
                         *k.1.entry(c.0).or_default() += 1;
+                    }
+                    if let Some(spans) = &mut k.2 {
+                        spans.push((item.id.kind, item.start, item.end));
                     }
                 }
                 Delivery::Lost { span, .. } => ex.lost(span.start, span.end),
@@ -48,7 +57,10 @@ impl Decoder for Kinds {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let path = std::env::args().nth(1).ok_or("usage: cjtag_check REC")?;
+    let path = std::env::args()
+        .nth(1)
+        .ok_or("usage: cjtag_check REC [--rows]")?;
+    let rows = std::env::args().any(|a| a == "--rows");
     let file = std::fs::File::open(&path)?;
     let rec = Arc::new(Recording::open(Arc::new(file), Cache::new(64 << 20))?);
     let lines = vec![
@@ -74,7 +86,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cjtag::JtagOnCjtag::factory(),
         vec![],
     )?;
-    let kinds = Arc::new(Mutex::new((BTreeMap::new(), BTreeMap::new())));
+    let kinds = Arc::new(Mutex::new((
+        BTreeMap::new(),
+        BTreeMap::new(),
+        rows.then(Vec::new),
+    )));
     let k2 = kinds.clone();
     let schema = h.definition(c).schema.clone();
     let all: Vec<String> = schema.kinds.iter().map(|k| k.name.to_string()).collect();
@@ -85,7 +101,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Box::new(move |_| Box::new(Kinds(k2.clone()))),
         vec![],
     )?;
-    let seen = Arc::new(Mutex::new(Seen::default()));
+    let seen = Arc::new(Mutex::new(Seen {
+        spans: rows.then(Vec::new),
+        ..Seen::default()
+    }));
     let s2 = seen.clone();
     h.add(
         name("check"),
@@ -134,6 +153,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             causes.join("; ")
         }
     );
+    if let Some(spans) = &k.2 {
+        println!("cjtag {}", check::rows_line(&schema, spans));
+    }
     check::report(&h, j, &seen, &rec, "JTAG on cJTAG", seconds);
     Ok(())
 }

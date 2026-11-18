@@ -112,8 +112,11 @@ fn session() -> Vec<T> {
 fn transfers_decode_as_encoded() {
     let ts = session();
     let (b, _) = bits(&ts);
-    let (mut h, [s, a, _]) = host(wires(&b, P), 100, None);
+    let (mut h, [s, a, m]) = host(wires(&b, P), 100, None);
     run(&mut h);
+    for x in [s, a, m] {
+        fits_its_rows(&h, x);
+    }
     let got = of(&h, s, swd::TRANSFER);
     assert_eq!(got.len(), ts.len());
     for (i, t) in got.iter().zip(&ts) {

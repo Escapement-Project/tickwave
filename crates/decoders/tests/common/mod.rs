@@ -3,7 +3,10 @@
 
 #![allow(dead_code)]
 
-use escapement_tickwave_decode::{Observed, Source, SourceError, Span, Tick, Window};
+#[path = "../../examples/check/rows.rs"]
+mod rows;
+
+use escapement_tickwave_decode::{Host, Observed, Source, SourceError, Span, Tick, Window};
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
 /// One line: its level from tick 0, its edges, and its gaps.
@@ -204,4 +207,14 @@ pub fn wires(bits: &[bool], period: Tick) -> Wires {
 /// The tick of bit `k`'s rise.
 pub fn rise(k: usize, period: Tick) -> Tick {
     10 + k as Tick * period + period / 2
+}
+
+/// Asserts that every row of analysis `a`'s items holds no more at once than its lanes.
+pub fn fits_its_rows(h: &Host, a: escapement_tickwave_decode::AnalysisId) {
+    let schema = &h.definition(a).schema;
+    let items = h.store(a).items.values();
+    let spans = items.map(|i| (i.id.kind, i.start, i.end.unwrap_or(i.start)));
+    for (row, (most, lanes)) in rows::most_at_once(schema, spans).into_iter().enumerate() {
+        assert!(most <= lanes, "row {row}: {most} at once in {lanes} lanes");
+    }
 }

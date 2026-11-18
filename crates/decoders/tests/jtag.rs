@@ -292,6 +292,7 @@ fn the_session_decodes_its_scans_states_and_paths() {
     let (mut h, j) = host(s.wires(), 50_000, None, true);
     h.run_until(|_| false).unwrap();
     assert_eq!(h.finished(j), Some(s.end));
+    fits_its_rows(&h, j);
     let scans = of(&h, j, &SCANS);
     let got: Vec<_> = (scans.iter())
         .map(|i| (i.id.kind, value(i, jtag::LENGTH), i.status))
@@ -474,6 +475,7 @@ fn a_gap_is_lost_input_that_cuts_the_scan_and_the_state() {
     let (mut h, j) = host(s.wires(), 64, None, true);
     h.run_until(|_| false).unwrap();
     assert_eq!(h.lost(j), &[info.gap]);
+    fits_its_rows(&h, j);
     let scans = of(&h, j, &SCANS);
     let cut = scans
         .iter()

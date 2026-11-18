@@ -1,5 +1,7 @@
 //! Decode tracks under a graph of SWCLK and SWDIO, on tickwave's own SWD capture: SWD and ADIv5
 //! decoded through the wire source, drawn zoomed out, at the transfers' scale and at the bits'.
+//! The shots add JTAG on tickwave's own JTAG capture, and cJTAG with JTAG on it where
+//! `TICKWAVE_SHOTS_CJTAG` names a recording of TCKC and TMSC.
 //!
 //!     TICKWAVE_SHOTS=DIR cargo test -p escapement-tickwave-egui --features decode --test track \
 //!         -- --ignored
@@ -17,9 +19,9 @@ use std::time::Duration;
 
 use egui_kittest::Harness;
 use escapement_tickwave_decode::{
-    Host, InputSpec, Schema, Span, Store, Tick, Value, name, wire::WireSource,
+    AnalysisId, Host, InputSpec, Schema, Span, Store, Tick, Value, name, wire::WireSource,
 };
-use escapement_tickwave_decoders::{adiv5, cjtag, swd};
+use escapement_tickwave_decoders::{adiv5, cjtag, jtag, swd};
 use escapement_tickwave_egui::track::{
     Density, Labels, Template, Track, condition, decoder_roles, driver_paints, value_text,
 };
@@ -30,6 +32,222 @@ use escapement_tickwave_view::{Cache, Recording};
 
 fn fixture() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../web/fixtures/identify-swd.tickwave")
+}
+
+fn jtag_fixture() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../web/fixtures/identify-jtag.tickwave")
+}
+
+fn all() -> Vec<Span> {
+    vec![Span {
+        start: Tick::MIN,
+        end: Tick::MAX,
+    }]
+}
+
+fn open(path: &Path) -> Arc<Recording> {
+    let file = std::fs::File::open(path).unwrap();
+    Arc::new(Recording::open(Arc::new(file), Cache::new(16 << 20)).unwrap())
+}
+
+/// A label template from text and fields.
+fn t(pieces: &[Result<&'static str, escapement_tickwave_decode::FieldId>]) -> Template {
+    pieces.iter().fold(Template::default(), |t, p| match p {
+        Ok(text) => t.text(*text),
+        Err(f) => t.field(*f),
+    })
+}
+
+/// A recording, the lanes its graph shows, and the analyses drawn under it.
+struct Case {
+    path: PathBuf,
+    lanes: Vec<usize>,
+    decoded: Vec<Decoded>,
+    map: Mapping,
+    /// The channels the first analysis's parts paint by who drives them.
+    painted: Vec<String>,
+    size: egui::Vec2,
+}
+
+fn swd_case() -> Case {
+    let (decoded, map, lanes) = decode(&fixture());
+    Case {
+        path: fixture(),
+        lanes: lanes.to_vec(),
+        decoded,
+        map,
+        painted: vec!["SWDIO".into()],
+        size: SIZE,
+    }
+}
+
+fn jtag_labels() -> Labels {
+    let scan =
+        |head: &'static str| vec![t(&[Ok(head), Ok(" "), Err(jtag::TDI_HEAD)]), t(&[Ok(head)])];
+    Labels::default()
+        .kind(jtag::STATE, vec![t(&[Err(jtag::TAP_STATE)])])
+        .kind(
+            jtag::PATH,
+            vec![
+                t(&[Err(jtag::FROM), Ok(" to "), Err(jtag::TO)]),
+                t(&[Err(jtag::TO)]),
+            ],
+        )
+        .kind(jtag::IR_SCAN, scan("IR"))
+        .kind(jtag::DR_SCAN, scan("DR"))
+}
+
+/// One analysis's store as a track draws it.
+fn decoded(
+    h: &Host,
+    a: AnalysisId,
+    name: &'static str,
+    labels: Labels,
+    map: &Mapping,
+    parts: bool,
+) -> Decoded {
+    let store = h.store(a).clone();
+    let density = Density::of(store.items.values(), map, condition);
+    Decoded {
+        name,
+        schema: h.definition(a).schema.clone(),
+        store,
+        density,
+        labels,
+        parts,
+    }
+}
+
+/// JTAG over TCK, TMS, TDI and, where recorded, TDO.
+fn jtag_case(path: &Path) -> Case {
+    let rec = open(path);
+    let mut lanes: Vec<usize> = ["TCK", "TMS", "TDI"]
+        .map(|n| rec.channel(n).unwrap())
+        .to_vec();
+    let tdo = rec.channel("TDO");
+    lanes.extend(tdo);
+    let map = timeline_map(&rec, lanes[0]).unwrap();
+    let source = WireSource::new(rec.clone(), lanes.clone()).unwrap();
+    let mut h = Host::default();
+    let j = h
+        .add(
+            name("JTAG"),
+            jtag::definition(),
+            InputSpec::Wire {
+                source: Box::new(source),
+                local: None,
+            },
+            jtag::Jtag::factory(tdo.is_some(), 50_000),
+            all(),
+        )
+        .unwrap();
+    h.run_until(|_| false).unwrap();
+    Case {
+        path: path.to_path_buf(),
+        lanes,
+        decoded: vec![decoded(&h, j, "JTAG", jtag_labels(), &map, false)],
+        map,
+        painted: vec![],
+        size: SIZE,
+    }
+}
+
+/// cJTAG over TCKC and TMSC with JTAG on it, decoded until `ahead` ticks past the first scan
+/// format, so a long recording keeps its first activation's items only.
+fn cjtag_case(path: &Path, ahead: Tick) -> Case {
+    let rec = open(path);
+    let lanes = vec![rec.channel("TCKC").unwrap(), rec.channel("TMSC").unwrap()];
+    let map = timeline_map(&rec, lanes[0]).unwrap();
+    let source = WireSource::new(rec.clone(), lanes.clone()).unwrap();
+    let mut h = Host::default();
+    let c = h
+        .add(
+            name("cJTAG"),
+            cjtag::definition(),
+            InputSpec::Wire {
+                source: Box::new(source),
+                local: None,
+            },
+            cjtag::Cjtag::factory(true, 1_000_000),
+            all(),
+        )
+        .unwrap();
+    let j = h
+        .add(
+            name("JTAG"),
+            cjtag::jtag_definition(),
+            InputSpec::Upstream(cjtag::jtag_subscription(c)),
+            cjtag::JtagOnCjtag::factory(),
+            all(),
+        )
+        .unwrap();
+    let mut until: Tick = 0;
+    let format = loop {
+        until += 1_000_000;
+        h.run_until(|h| h.settled(j) >= until).unwrap();
+        let first = (h.store(c).items.values()).find(|i| i.id.kind == cjtag::FORMAT);
+        if let Some(i) = first {
+            break i.start;
+        }
+        assert!(h.finished(c).is_none(), "no scan format in the recording");
+    };
+    h.run_until(|h| h.settled(j) >= format + ahead).unwrap();
+    let labels = Labels::default()
+        .kind(
+            cjtag::ESCAPE,
+            vec![
+                t(&[Err(cjtag::MEANING), Ok(" escape")]),
+                t(&[Err(cjtag::MEANING)]),
+            ],
+        )
+        .kind(
+            cjtag::JSCAN,
+            vec![t(&[Err(cjtag::PROTOCOL)]), t(&[Ok("JScan")])],
+        )
+        .kind(
+            cjtag::LEVEL,
+            vec![
+                t(&[Ok("control level "), Err(cjtag::CONTROL_LEVEL)]),
+                t(&[Ok("CL "), Err(cjtag::CONTROL_LEVEL)]),
+            ],
+        )
+        .kind(
+            cjtag::CHECK,
+            vec![
+                t(&[Ok("check "), Err(cjtag::RESULT)]),
+                t(&[Err(cjtag::RESULT)]),
+            ],
+        )
+        .kind(
+            cjtag::COMMAND,
+            vec![
+                t(&[Err(cjtag::OPCODE), Ok(" "), Err(cjtag::OPERAND)]),
+                t(&[Err(cjtag::OPCODE)]),
+            ],
+        )
+        .kind(
+            cjtag::FORMAT,
+            vec![
+                t(&[
+                    Err(cjtag::SCAN_FORMAT),
+                    Ok(", sampled at "),
+                    Err(cjtag::SAMPLING),
+                ]),
+                t(&[Err(cjtag::SCAN_FORMAT)]),
+            ],
+        )
+        .kind(cjtag::PACKET, vec![t(&[Err(cjtag::PACKET_FORMAT)])]);
+    Case {
+        path: path.to_path_buf(),
+        lanes,
+        decoded: vec![
+            decoded(&h, c, "cJTAG", labels, &map, true),
+            decoded(&h, j, "JTAG", jtag_labels(), &map, false),
+        ],
+        map,
+        painted: vec!["TMSC".into()],
+        size: egui::vec2(1280.0, 480.0),
+    }
 }
 
 /// One analysis as a track draws it.
@@ -49,10 +267,6 @@ fn decode(path: &Path) -> (Vec<Decoded>, Mapping, [usize; 2]) {
     let lanes = [rec.channel("SWCLK").unwrap(), rec.channel("SWDIO").unwrap()];
     let map = timeline_map(&rec, lanes[0]).unwrap();
     let source = WireSource::new(rec.clone(), lanes.to_vec()).unwrap();
-    let all = vec![Span {
-        start: Tick::MIN,
-        end: Tick::MAX,
-    }];
     let mut h = Host::default();
     let s = h
         .add(
@@ -63,7 +277,7 @@ fn decode(path: &Path) -> (Vec<Decoded>, Mapping, [usize; 2]) {
                 local: None,
             },
             swd::Swd::factory(1 << 16, 1).unwrap(),
-            all.clone(),
+            all(),
         )
         .unwrap();
     let a = h
@@ -72,16 +286,10 @@ fn decode(path: &Path) -> (Vec<Decoded>, Mapping, [usize; 2]) {
             adiv5::adi_definition(),
             InputSpec::Upstream(adiv5::adi_subscription(s)),
             adiv5::Adi::factory(),
-            all,
+            all(),
         )
         .unwrap();
     h.run_until(|_| false).unwrap();
-    let t = |pieces: &[Result<&'static str, escapement_tickwave_decode::FieldId>]| {
-        pieces.iter().fold(Template::default(), |t, p| match p {
-            Ok(text) => t.text(*text),
-            Err(f) => t.field(*f),
-        })
-    };
     let swd_labels = Labels::default().kind(
         swd::TRANSFER,
         vec![
@@ -126,23 +334,11 @@ fn decode(path: &Path) -> (Vec<Decoded>, Mapping, [usize; 2]) {
         .kind(adiv5::DP_WRITE, dp)
         .kind(adiv5::AP_READ, ap.clone())
         .kind(adiv5::AP_WRITE, ap);
-    let mut out = vec![];
     // The lanes each level draws in come from its schema: ADIv5's AP reads may overlap.
-    for (x, n, labels, parts) in [
-        (s, "SWD", swd_labels, true),
-        (a, "ADIv5", adi_labels, false),
-    ] {
-        let store = h.store(x).clone();
-        let density = Density::of(store.items.values(), &map, condition);
-        out.push(Decoded {
-            name: n,
-            schema: h.definition(x).schema.clone(),
-            store,
-            density,
-            labels,
-            parts,
-        });
-    }
+    let out = vec![
+        decoded(&h, s, "SWD", swd_labels, &map, true),
+        decoded(&h, a, "ADIv5", adi_labels, &map, false),
+    ];
     (out, map, lanes)
 }
 
@@ -153,6 +349,7 @@ struct Host2 {
     lanes: Vec<usize>,
     decoded: Vec<Decoded>,
     map: Mapping,
+    painted: Vec<String>,
     /// Where decoding has reached, for drawing a run under way.
     settled: Tick,
     heights: Vec<f32>,
@@ -169,12 +366,15 @@ fn series_face(night: bool) -> tokens::Face {
 
 const SIZE: egui::Vec2 = egui::vec2(1280.0, 360.0);
 
-fn harness(
-    window: Window,
-    decoded: Vec<Decoded>,
-    map: Mapping,
-    lanes: Vec<usize>,
-) -> Harness<'static, Host2> {
+fn harness(window: Window, case: Case) -> Harness<'static, Host2> {
+    let Case {
+        path,
+        lanes,
+        decoded,
+        map,
+        painted,
+        size,
+    } = case;
     let face = series_face(false);
     let host = Host2 {
         viewer: None,
@@ -187,28 +387,29 @@ fn harness(
         lanes,
         decoded,
         map,
+        painted,
         settled: Tick::MAX,
         heights: vec![],
         shown: None,
     };
-    let mut h = Harness::builder().with_size(SIZE).wgpu().build_ui_state(
+    let mut h = Harness::builder().with_size(size).wgpu().build_ui_state(
         |ui, host: &mut Host2| {
             let Some(viewer) = &host.viewer else { return };
             ui.painter()
                 .rect_filled(ui.ctx().content_rect(), 0.0, host.face.page);
-            // SWDIO painted by who drives each part of the transfers on screen.
-            let swd = &host.decoded[0];
+            // The data line painted by who drives each part of the items on screen.
+            let first = &host.decoded[0];
             let paints = host.shown.as_ref().map_or(vec![], |s| {
                 driver_paints(
-                    &swd.schema,
-                    &swd.store.items,
-                    &swd.density,
+                    &first.schema,
+                    &first.store.items,
+                    &first.density,
                     &host.map,
                     &s.window,
-                    &["SWDIO".to_string()],
+                    &host.painted,
                 )
             });
-            let roles = decoder_roles(&swd.schema);
+            let roles = decoder_roles(&first.schema);
             let response = ui.add(
                 Graph::lanes_only(viewer, &mut host.state, &host.face.palette)
                     .motion(false)
@@ -240,7 +441,7 @@ fn harness(
         },
         host,
     );
-    let viewer = Viewer::open(&h.ctx, &fixture()).unwrap();
+    let viewer = Viewer::open(&h.ctx, &path).unwrap();
     h.state_mut().viewer = Some(viewer);
     h
 }
@@ -264,9 +465,9 @@ fn settle(h: &mut Harness<'_, Host2>) {
 
 #[test]
 fn a_tracks_rows_are_reserved_before_anything_is_decoded() {
-    let (decoded, map, lanes) = decode(&fixture());
-    let first = decoded[0].store.items.values().next().unwrap().start;
-    let mut h = harness(ViewState::default().window, decoded, map, lanes.to_vec());
+    let case = swd_case();
+    let first = case.decoded[0].store.items.values().next().unwrap().start;
+    let mut h = harness(ViewState::default().window, case);
     settle(&mut h);
     let full = h.state().heights.clone();
     // The same tracks with nothing decoded yet past the first transfer's start.
@@ -308,11 +509,11 @@ fn shots() {
         return;
     };
     std::fs::create_dir_all(&dir).unwrap();
-    let (decoded, map, lanes) = decode(&fixture());
-    let transfers: Vec<(Tick, Tick)> = (decoded[0].store.items.values())
+    let case = swd_case();
+    let transfers: Vec<(Tick, Tick)> = (case.decoded[0].store.items.values())
         .map(|i| (i.start, i.end.unwrap()))
         .collect();
-    let axis = |t: Tick| map.axis_saturating(t);
+    let axis = |t: Tick| case.map.axis_saturating(t);
     let mid = transfers.len() / 2;
     let views = [
         ("track-whole", ViewState::default().window),
@@ -328,8 +529,71 @@ fn shots() {
             ),
         ),
     ];
+    shoot(&dir, swd_case, &views);
+
+    // JTAG: an IR scan and the DR scan after it, with the states they shift in.
+    let case = jtag_case(&jtag_fixture());
+    let axis = |t: Tick| case.map.axis_saturating(t);
+    let items = &case.decoded[0].store.items;
+    let ir = (items.values())
+        .find(|i| i.id.kind == jtag::IR_SCAN)
+        .unwrap();
+    let dr = (items.values())
+        .find(|i| i.id.kind == jtag::DR_SCAN && i.start > ir.start)
+        .unwrap();
+    let (a, b) = (ir.start, dr.end.unwrap());
+    let views = [
+        ("jtag-whole", ViewState::default().window),
+        (
+            "jtag-scans",
+            Window::At(axis(a - (b - a) / 8)..axis(b + (b - a) / 8)),
+        ),
+        (
+            "jtag-ir",
+            Window::At(axis(ir.start - 2_000)..axis(ir.end.unwrap() + 2_000)),
+        ),
+    ];
+    shoot(&dir, || jtag_case(&jtag_fixture()), &views);
+
+    // cJTAG: the first activation, its control level and the Scan Packets after it.
+    let Some(rec) = std::env::var_os("TICKWAVE_SHOTS_CJTAG").map(PathBuf::from) else {
+        return;
+    };
+    const AHEAD: Tick = 2_000_000;
+    let case = cjtag_case(&rec, AHEAD);
+    let axis = |t: Tick| case.map.axis_saturating(t);
+    let items = &case.decoded[0].store.items;
+    let first = |k| (items.values()).find(|i| i.id.kind == k).unwrap();
+    let (escape, level, format) = (
+        first(cjtag::ESCAPE),
+        first(cjtag::LEVEL),
+        first(cjtag::FORMAT),
+    );
+    let packets: Vec<_> = (items.values())
+        .filter(|i| i.id.kind == cjtag::PACKET && i.start >= format.start)
+        .take(12)
+        .collect();
+    let views = [
+        (
+            "cjtag-activation",
+            Window::At(axis(escape.start)..axis(packets[0].start)),
+        ),
+        (
+            "cjtag-level",
+            Window::At(axis(level.start)..axis(level.end.unwrap())),
+        ),
+        (
+            "cjtag-packets",
+            Window::At(axis(packets[0].start)..axis(packets[11].end.unwrap())),
+        ),
+    ];
+    shoot(&dir, || cjtag_case(&rec, AHEAD), &views);
+}
+
+/// Each view of the case `make` builds, in the day and the night face.
+fn shoot(dir: &Path, make: impl Fn() -> Case, views: &[(&str, Window)]) {
     for (name, window) in views {
-        let mut h = harness(window, decode(&fixture()).0, map, lanes.to_vec());
+        let mut h = harness(window.clone(), make());
         settle(&mut h);
         for night in [false, true] {
             h.state_mut().face = series_face(night);
@@ -343,7 +607,6 @@ fn shots() {
                 .unwrap();
         }
     }
-    let _ = decoded;
 }
 
 /// One frame of the SWD and ADIv5 tracks at each zoom, timed on this machine: the median of 101

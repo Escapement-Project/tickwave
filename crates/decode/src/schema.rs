@@ -115,6 +115,10 @@ pub struct KindDecl {
     pub links: Vec<LinkDecl>,
     /// How many of its items may overlap, each drawn in a lane of its own, 1 to `MAX_LANES`.
     pub lanes: usize,
+    /// The row its items draw in, below `MAX_LANES`. A track stacks its rows in order of their
+    /// numbers, each as many lanes high as its kinds' most, and only kinds of one row share
+    /// lanes. A child kind goes in a row under its parents', since its items lie inside theirs.
+    pub row: usize,
 }
 
 /// What an analysis may emit.
@@ -211,11 +215,17 @@ impl KindDecl {
             sequences: vec![],
             links: vec![],
             lanes: 1,
+            row: 0,
         }
     }
 
     pub fn with_lanes(mut self, lanes: usize) -> Self {
         self.lanes = lanes;
+        self
+    }
+
+    pub fn with_row(mut self, row: usize) -> Self {
+        self.row = row;
         self
     }
 
@@ -286,7 +296,7 @@ pub const fn seq(name: &'static str, element: ElementType) -> SeqDecl {
 /// Bounds on a schema, so one handed over as data cannot make the host's checks unbounded.
 pub const MAX_KINDS: usize = 256;
 pub const MAX_SEQUENCES: usize = 16;
-/// The most lanes a kind may declare.
+/// The most lanes a kind may declare, and the most a schema's rows may take together.
 pub const MAX_LANES: usize = 8;
 pub const MAX_LINK_ROLES: usize = 16;
 pub const MAX_LINK_TARGETS: usize = 16;
@@ -321,6 +331,10 @@ pub enum SchemaError {
     OpenBound(usize),
     #[error("kind {kind}: {lanes} lanes, not between 1 and {MAX_LANES}")]
     Lanes { kind: Name, lanes: usize },
+    #[error("kind {kind}: row {row}, not below {MAX_LANES}")]
+    Row { kind: Name, row: usize },
+    #[error("its rows take {0} lanes together, more than {MAX_LANES}")]
+    RowLanes(usize),
 }
 
 /// An operation its analysis's schema does not allow.
@@ -384,9 +398,30 @@ impl Schema {
         self.kinds.get(usize::from(k.0))
     }
 
-    /// The most lanes any of its kinds declares: the rows its items draw in.
-    pub fn lanes(&self) -> usize {
-        self.kinds.iter().map(|k| k.lanes).max().unwrap_or(1).max(1)
+    /// Where its kinds' items draw: the lanes its rows take together, and the range of them each
+    /// kind's row takes, by kind. A row is as many lanes as the most any of its kinds declares.
+    pub fn layout(&self) -> (usize, Vec<std::ops::Range<usize>>) {
+        let lanes = |k: &KindDecl| k.lanes.clamp(1, MAX_LANES);
+        let mut rows: Vec<(usize, usize)> = vec![];
+        for k in &self.kinds {
+            match rows.iter_mut().find(|(r, _)| *r == k.row) {
+                Some((_, n)) => *n = (*n).max(lanes(k)),
+                None => rows.push((k.row, lanes(k))),
+            }
+        }
+        rows.sort_unstable();
+        let mut at = 0;
+        let mut starts = Vec::with_capacity(rows.len());
+        for (row, n) in rows {
+            starts.push((row, at..at + n));
+            at += n;
+        }
+        let of = |k: &KindDecl| {
+            (starts.iter())
+                .find(|(r, _)| *r == k.row)
+                .map_or(0..1, |(_, l)| l.clone())
+        };
+        (at.max(1), self.kinds.iter().map(of).collect())
     }
 
     pub fn kind_id(&self, name: &str) -> Option<KindId> {
@@ -427,12 +462,22 @@ impl Schema {
                     lanes: k.lanes,
                 });
             }
+            if k.row >= MAX_LANES {
+                return Err(SchemaError::Row {
+                    kind: k.name.clone(),
+                    row: k.row,
+                });
+            }
             if !kinds.insert(&k.name) {
                 return Err(SchemaError::Duplicate {
                     kind: k.name.clone(),
                     name: k.name.clone(),
                 });
             }
+        }
+        let (lanes, _) = self.layout();
+        if lanes > MAX_LANES {
+            return Err(SchemaError::RowLanes(lanes));
         }
         let mut out = Resolved::default();
         for k in self.kinds.iter() {

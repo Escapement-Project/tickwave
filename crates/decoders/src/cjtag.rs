@@ -113,25 +113,32 @@ pub fn schema() -> Schema {
     let bit = || ElementType::Bit;
     let text = |max| FieldType::Text { max };
     let names = |list: &[&'static str]| FieldType::Name(list.iter().map(|&n| name(n)).collect());
+    // Rows, top to bottom: the scan format in force, the control level, what lies inside a level,
+    // and the bits on the wire (escapes, Standard Protocol TMS bits and Scan Packets), which every
+    // row above spans.
     Schema::new(vec![
         KindDecl::new("escape")
+            .with_row(3)
             .with_fields(vec![
                 field("toggles", FieldType::Word { bits: 8 }),
                 field("meaning", names(&MEANINGS)),
             ])
             .with_sequences(vec![seq("toggles", bit())]),
         KindDecl::new("jscan")
+            .with_row(3)
             .with_fields(vec![field("protocol", names(&["Standard (JScan)"]))])
             .with_sequences(vec![seq("tms", bit())]),
-        KindDecl::new("level").with_fields(vec![
+        KindDecl::new("level").with_row(1).with_fields(vec![
             field("level", FieldType::Word { bits: 3 }),
             field("use", names(&LEVEL_USES)),
         ]),
         KindDecl::new("check")
+            .with_row(2)
             .with_parents(["level"])
             .with_fields(vec![field("result", names(&RESULTS))])
             .with_sequences(vec![seq("bits", bit())]),
         KindDecl::new("command")
+            .with_row(2)
             .with_parents(["level"])
             .with_fields(vec![
                 field("opcode", names(&opcodes())),
@@ -144,6 +151,7 @@ pub fn schema() -> Schema {
             field("sampling", names(&["TCKC rise", "TCKC fall"])),
         ]),
         KindDecl::new("packet")
+            .with_row(3)
             .with_fields(vec![
                 field("format", text(16)),
                 field("ntdi", FieldType::Bool),

@@ -2,9 +2,10 @@
 //! where TDO is recorded: every IR scan captures a value whose two lowest bits are 01, and a DR
 //! scan after Test-Logic-Reset, before any IR scan, shifts out IDCODE (bit 0 high) or BYPASS (one
 //! low bit). A checker stacked on JTAG reads its completed items; nothing is kept, so memory
-//! follows the decoders' state, not the capture.
+//! follows the decoders' state, not the capture. `--rows` keeps each item's span, to check that
+//! the items fit the rows and lanes JTAG's schema declares.
 //!
-//! `cargo run --release -p escapement-tickwave-decoders --example jtag_check -- REC [--tdo-at-fall]`
+//! `cargo run --release -p escapement-tickwave-decoders --example jtag_check -- REC [--tdo-at-fall] [--rows]`
 
 #[path = "check/mod.rs"]
 mod check;
@@ -20,7 +21,8 @@ use std::sync::{Arc, Mutex};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = std::env::args()
         .nth(1)
-        .ok_or("usage: jtag_check REC [--tdo-at-fall | --tdo-from-wire]")?;
+        .ok_or("usage: jtag_check REC [--tdo-at-fall | --tdo-from-wire] [--rows]")?;
+    let rows = std::env::args().any(|a| a == "--rows");
     let mut at_fall = std::env::args().any(|a| a == "--tdo-at-fall");
     let from_wire = std::env::args().any(|a| a == "--tdo-from-wire");
     // How many IR scans the probe decodes each way.
@@ -65,7 +67,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         jtag::Jtag::factory_with(tdo.is_some(), 50_000, at_fall),
         vec![],
     )?;
-    let seen = Arc::new(Mutex::new(Seen::default()));
+    let seen = Arc::new(Mutex::new(Seen {
+        spans: rows.then(Vec::new),
+        ..Seen::default()
+    }));
     let s2 = seen.clone();
     h.add(
         name("check"),

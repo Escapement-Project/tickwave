@@ -3,8 +3,10 @@
 
 #![allow(dead_code)]
 
+pub mod rows;
+
 use escapement_tickwave_decode::{
-    AnalysisId, Decoder, Delivery, Exchange, Host, Pause, Status, Value,
+    AnalysisId, Decoder, Delivery, Exchange, Host, KindId, Pause, Schema, Status, Tick, Value,
 };
 use escapement_tickwave_decoders::jtag;
 use escapement_tickwave_view::Recording;
@@ -26,6 +28,23 @@ pub struct Seen {
     pub after_reset: bool,
     /// The TDO shifted out by 32-bit DR scans, which an IDCODE instruction selects.
     pub dr32: BTreeMap<u32, u64>,
+    /// Each item's kind and span, kept only where `--rows` asks for the rows check.
+    pub spans: Option<Vec<(KindId, Tick, Tick)>>,
+}
+
+/// The rows check's line: for each row of `schema`, top first, the most of `spans` at once
+/// against the row's lanes.
+pub fn rows_line(schema: &Schema, spans: &[(KindId, Tick, Tick)]) -> String {
+    let rows = rows::most_at_once(schema, spans.iter().copied());
+    let each: Vec<String> = (rows.iter())
+        .map(|(most, lanes)| format!("{most} of {lanes}"))
+        .collect();
+    let fits = rows.iter().all(|(most, lanes)| most <= lanes);
+    format!(
+        "rows, most at once of their lanes: {} ({})",
+        each.join(", "),
+        if fits { "fits" } else { "DOES NOT FIT" }
+    )
 }
 
 pub struct Checker(pub Arc<Mutex<Seen>>);
@@ -43,6 +62,9 @@ impl Decoder for Checker {
         while let Some(d) = ex.receive() {
             match d {
                 Delivery::Item { item, .. } => {
+                    if let Some(spans) = &mut s.spans {
+                        spans.push((item.id.kind, item.start, item.end));
+                    }
                     let length = match item.field(jtag::LENGTH).map(|f| &f.value) {
                         Some(Value::Word { value, .. }) => *value,
                         _ => 0,
@@ -186,6 +208,9 @@ pub fn report(
         .map(|((ir, l), n)| format!("{}{l} x{n}", if *ir { "IR " } else { "DR " }))
         .collect();
     println!("scan lengths: {}", top.join(", "));
+    if let Some(spans) = &s.spans {
+        println!("JTAG {}", rows_line(&h.definition(j).schema, spans));
+    }
     println!(
         "decoded in {seconds:.2} s for {capture:.2} s of capture ({:.2}x real time); peak RSS {} MiB",
         capture / seconds,
