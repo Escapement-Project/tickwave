@@ -126,6 +126,7 @@ pub fn adi_schema() -> Schema {
                 LinkDecl::new("context", vec![dp_write()]),
             ],
         ),
+        // An AP read stays open until its data comes back, in the next read: two may overlap.
         ap(
             "ap-read",
             vec![
@@ -133,7 +134,8 @@ pub fn adi_schema() -> Schema {
                 LinkDecl::new("data", vec![transfer()]),
                 LinkDecl::new("context", vec![dp_write()]),
             ],
-        ),
+        )
+        .with_lanes(2),
     ])
     .with_reasons([
         "DP bank unknown: no SELECT write decoded before this access",

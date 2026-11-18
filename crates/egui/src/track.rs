@@ -343,7 +343,9 @@ impl<'a> Track<'a> {
             settled: Tick::MAX,
             lost: &[],
             parts: false,
-            lanes: 1,
+            lanes: schema
+                .lanes()
+                .clamp(1, escapement_tickwave_decode::MAX_LANES),
         }
     }
 
@@ -365,11 +367,10 @@ impl<'a> Track<'a> {
         self
     }
 
-    /// How many items may overlap, each in a row of its own; one past that draws as an overflow
-    /// mark. The analysis declares it, as the schema's lanes will.
-    pub fn lanes(mut self, n: usize) -> Self {
-        self.lanes = n.clamp(1, 8);
-        self
+    /// The height it takes: a row for each lane its schema declares, and one for the parts where
+    /// they are drawn. An item past that many at once draws as an overflow mark.
+    pub fn height(&self) -> f32 {
+        self.rows() as f32 * ROW
     }
 
     fn rows(&self) -> usize {

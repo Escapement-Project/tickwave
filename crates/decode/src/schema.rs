@@ -113,6 +113,8 @@ pub struct KindDecl {
     pub fields: Vec<FieldDecl>,
     pub sequences: Vec<SeqDecl>,
     pub links: Vec<LinkDecl>,
+    /// How many of its items may overlap, each drawn in a lane of its own, 1 to `MAX_LANES`.
+    pub lanes: usize,
 }
 
 /// What an analysis may emit.
@@ -208,7 +210,13 @@ impl KindDecl {
             fields: vec![],
             sequences: vec![],
             links: vec![],
+            lanes: 1,
         }
+    }
+
+    pub fn with_lanes(mut self, lanes: usize) -> Self {
+        self.lanes = lanes;
+        self
     }
 
     pub fn with_parents<N: Into<Name>>(mut self, parents: impl IntoIterator<Item = N>) -> Self {
@@ -278,6 +286,8 @@ pub const fn seq(name: &'static str, element: ElementType) -> SeqDecl {
 /// Bounds on a schema, so one handed over as data cannot make the host's checks unbounded.
 pub const MAX_KINDS: usize = 256;
 pub const MAX_SEQUENCES: usize = 16;
+/// The most lanes a kind may declare.
+pub const MAX_LANES: usize = 8;
 pub const MAX_LINK_ROLES: usize = 16;
 pub const MAX_LINK_TARGETS: usize = 16;
 pub const MAX_ROLES: usize = 64;
@@ -309,6 +319,8 @@ pub enum SchemaError {
     UnknownLinkTarget { kind: Name, role: Name, to: Name },
     #[error("the open-item bound {0} is not between 1 and the host's")]
     OpenBound(usize),
+    #[error("kind {kind}: {lanes} lanes, not between 1 and {MAX_LANES}")]
+    Lanes { kind: Name, lanes: usize },
 }
 
 /// An operation its analysis's schema does not allow.
@@ -372,6 +384,11 @@ impl Schema {
         self.kinds.get(usize::from(k.0))
     }
 
+    /// The most lanes any of its kinds declares: the rows its items draw in.
+    pub fn lanes(&self) -> usize {
+        self.kinds.iter().map(|k| k.lanes).max().unwrap_or(1).max(1)
+    }
+
     pub fn kind_id(&self, name: &str) -> Option<KindId> {
         let k = self.kinds.iter().position(|k| k.name == name)?;
         Some(KindId(u16::try_from(k).ok()?))
@@ -404,6 +421,12 @@ impl Schema {
         let mut kinds = HashSet::new();
         for k in self.kinds.iter() {
             named(&k.name)?;
+            if k.lanes == 0 || k.lanes > MAX_LANES {
+                return Err(SchemaError::Lanes {
+                    kind: k.name.clone(),
+                    lanes: k.lanes,
+                });
+            }
             if !kinds.insert(&k.name) {
                 return Err(SchemaError::Duplicate {
                     kind: k.name.clone(),

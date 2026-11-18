@@ -40,7 +40,6 @@ struct Decoded {
     density: Density,
     labels: Labels,
     parts: bool,
-    lanes: usize,
 }
 
 /// SWD and ADIv5 over the recording's SWCLK and SWDIO, every item kept.
@@ -128,10 +127,10 @@ fn decode(path: &Path) -> (Vec<Decoded>, Mapping, [usize; 2]) {
         .kind(adiv5::AP_READ, ap.clone())
         .kind(adiv5::AP_WRITE, ap);
     let mut out = vec![];
-    // An AP read stays open until its data comes back, in the next read: two may overlap.
-    for (x, n, labels, parts, lanes) in [
-        (s, "SWD", swd_labels, true, 1),
-        (a, "ADIv5", adi_labels, false, 2),
+    // The lanes each level draws in come from its schema: ADIv5's AP reads may overlap.
+    for (x, n, labels, parts) in [
+        (s, "SWD", swd_labels, true),
+        (a, "ADIv5", adi_labels, false),
     ] {
         let store = h.store(x).clone();
         let density = Density::of(store.items.values(), &map, condition);
@@ -142,7 +141,6 @@ fn decode(path: &Path) -> (Vec<Decoded>, Mapping, [usize; 2]) {
             density,
             labels,
             parts,
-            lanes,
         });
     }
     (out, map, lanes)
@@ -235,8 +233,7 @@ fn harness(
                         host.map,
                     )
                     .settled(host.settled)
-                    .parts(d.parts)
-                    .lanes(d.lanes),
+                    .parts(d.parts),
                 );
                 host.heights.push(r.rect.height());
             }
@@ -379,8 +376,7 @@ fn frame_times() {
                             &palette,
                             map,
                         )
-                        .parts(d.parts)
-                        .lanes(d.lanes),
+                        .parts(d.parts),
                     );
                 }
             })

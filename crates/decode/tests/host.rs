@@ -1482,6 +1482,36 @@ fn a_window_ahead_of_the_forward_pass_is_provisional_until_the_pass_reaches_it()
 }
 
 #[test]
+fn a_kind_declares_between_one_and_eight_lanes() {
+    let add = |lanes| {
+        let mut schema = toy_schema();
+        schema.kinds[0] = schema.kinds[0].clone().with_lanes(lanes);
+        let mut h = Host::default();
+        h.add(
+            name("toy"),
+            definition("toy", schema),
+            InputSpec::Wire {
+                source: Box::new(Nothing::default()),
+                local: None,
+            },
+            Box::new(|_| Box::new(Swallow)),
+            all(),
+        )
+        .map(|_| ())
+    };
+    assert!(add(1).is_ok() && add(escapement_tickwave_decode::MAX_LANES).is_ok());
+    for lanes in [0, escapement_tickwave_decode::MAX_LANES + 1] {
+        assert!(
+            matches!(
+                add(lanes),
+                Err(BindError::Schema(SchemaError::Lanes { .. }))
+            ),
+            "{lanes} lanes"
+        );
+    }
+}
+
+#[test]
 fn window_size_does_not_change_the_output() {
     let gaps = vec![
         Span {
