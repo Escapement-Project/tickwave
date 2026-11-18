@@ -246,7 +246,8 @@ impl Completed {
     }
 }
 
-/// One operation of an upstream batch. Every analysis it is delivered to shares the batch.
+/// One operation of an upstream batch. Every analysis it is delivered to shares the chunk of the
+/// batch that holds it, `PIECE_CHUNK` operations at most.
 #[derive(Clone, Debug)]
 pub struct Piece {
     ops: Arc<[Op]>,
@@ -602,6 +603,9 @@ pub enum Refusal {
     /// More closed ids held than the host allows: a run whose start frontier does not move on.
     #[error("{held} closed ids held, past the host's {at_most}")]
     TooManyRecent { held: usize, at_most: usize },
+    /// More operations in one batch than the host allows.
+    #[error("{got} operations in a batch, past the host's {at_most}")]
+    TooManyOps { got: usize, at_most: usize },
     /// Lost input that is empty, out of the batch's op order, or not after the run's last.
     #[error("lost input {got:?}, out of order after {was}")]
     LossOrder { was: Tick, got: Span },
@@ -891,13 +895,18 @@ enum Input {
     Upstream { index: usize, sub: Resolution },
 }
 
+/// The most operations of its batch a piece keeps alive: fan-out shares a batch in chunks this
+/// long.
+pub const PIECE_CHUNK: usize = 256;
+
 /// What a host allows and keeps. Each bound refuses rather than grows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct HostOptions {
     /// Deliveries one turn may take.
     pub turn_deliveries: usize,
-    /// The most a stacked analysis's inbox holds before its upstream waits.
+    /// The most a stacked analysis's inbox holds before its upstream waits. A queued piece keeps
+    /// at most `PIECE_CHUNK` operations of its batch alive.
     pub inbox_at_most: usize,
     /// The host's record, off where None, else the most entries it keeps, the oldest dropped.
     pub log: Option<usize>,
@@ -911,6 +920,8 @@ pub struct HostOptions {
     /// The most ticks with observations one read gives a decoder, whatever window it asked for:
     /// the source ends the window early where they stop.
     pub window_ticks: usize,
+    /// The most operations one batch holds.
+    pub batch_ops: usize,
 }
 
 impl Default for HostOptions {
@@ -923,6 +934,7 @@ impl Default for HostOptions {
             open_at_most: 1 << 16,
             window_turns: 4,
             window_ticks: 1 << 17,
+            batch_ops: 1 << 20,
         }
     }
 }
@@ -1060,6 +1072,8 @@ pub struct Host {
     pub delivered: u64,
     pub stale: u64,
     pub peak_inbox: usize,
+    /// The most operations a batch admitted held.
+    pub peak_batch: usize,
     pub cancelled_reads: u64,
     pub log_dropped: u64,
     keepers: Vec<Keeper>,
@@ -1089,6 +1103,7 @@ impl Host {
             delivered: 0,
             stale: 0,
             peak_inbox: 0,
+            peak_batch: 0,
             cancelled_reads: 0,
             log_dropped: 0,
             keepers: vec![],
@@ -1432,6 +1447,12 @@ impl Host {
     fn admit(&mut self, b: Batch) -> Result<(), Refusal> {
         let a = b.run.analysis.index();
         let recent_at_most = self.options.recent_at_most;
+        if b.ops.len() > self.options.batch_ops {
+            return Err(Refusal::TooManyOps {
+                got: b.ops.len(),
+                at_most: self.options.batch_ops,
+            });
+        }
         let Some(an) = self.analyses.get_mut(a) else {
             return Err(Refusal::StaleRun {
                 got: b.run,
@@ -1571,6 +1592,7 @@ impl Host {
             .retain(|l| l.end > settled || keep.iter().any(|k| l.start < k.end && k.start < l.end));
         let after = (run.frontier, run.settled);
         self.admitted += 1;
+        self.peak_batch = self.peak_batch.max(b.ops.len());
         if self.options.log.is_some() {
             let summary = b.ops.iter().map(|op| (op.letter(), *op.id())).collect();
             let (run, batch) = (b.run, b.seq);
@@ -1623,12 +1645,27 @@ impl Host {
             .filter(|(_, s)| s.mode == Mode::Completed)
             .flat_map(|(_, s)| s.kinds.iter().copied())
             .collect();
-        let (owned, shared) = if subs.iter().any(|(_, s)| s.mode == Mode::Pieces) {
-            (vec![], Some(Arc::<[Op]>::from(ops)))
-        } else {
-            (ops, None)
+        // Pieces share their batch in chunks, so a queued piece keeps only its chunk alive.
+        let (owned, chunks) = match subs.iter().any(|(_, s)| s.mode == Mode::Pieces) {
+            false => (ops, vec![]),
+            true if ops.len() <= PIECE_CHUNK => (vec![], vec![Arc::<[Op]>::from(ops)]),
+            true => {
+                // Split off the end, so each split copies one chunk.
+                let mut ops = ops;
+                let mut chunks = Vec::with_capacity(ops.len().div_ceil(PIECE_CHUNK));
+                while ops.len() > PIECE_CHUNK {
+                    let last = (ops.len() - 1) / PIECE_CHUNK * PIECE_CHUNK;
+                    chunks.push(Arc::<[Op]>::from(ops.split_off(last)));
+                }
+                chunks.push(Arc::from(ops));
+                chunks.reverse();
+                (vec![], chunks)
+            }
         };
-        let ops: &[Op] = shared.as_deref().unwrap_or(&owned);
+        let plain = (!owned.is_empty()).then_some((&owned[..], None));
+        let slices = plain
+            .into_iter()
+            .chain(chunks.iter().map(|c| (&c[..], Some(c))));
         // Admitted a moment ago, so the run is current.
         let mut asm = (self.run_of_mut(from))
             .map(|r| std::mem::take(&mut r.assembling))
@@ -1642,100 +1679,104 @@ impl Host {
                 }
             }
         };
-        for (k, op) in ops.iter().enumerate() {
-            lose(k, &mut out);
-            let id = *op.id();
-            for (d, sub) in &subs {
-                if sub.mode != Mode::Pieces || !sub.kinds.contains(&id.kind) {
-                    continue;
-                }
-                if let Op::Extend { seq, .. } = op
-                    && !sub.sequences.contains(&(id.kind, *seq))
-                {
-                    continue;
-                }
-                if let Some(ops) = &shared {
-                    let piece = Piece {
-                        ops: ops.clone(),
-                        index: k,
-                    };
-                    out.push((*d, Delivery::Piece { from, batch, piece }));
-                }
-            }
-            if !assemble.contains(&id.kind) {
-                continue;
-            }
-            // The store admitted every op, so an item being assembled is open.
-            match op {
-                Op::Open { id, parent, start } => {
-                    asm.insert(
-                        *id,
-                        Completed {
-                            id: *id,
-                            parent: *parent,
-                            start: *start,
-                            end: *start,
-                            status: Status::Complete,
-                            fields: vec![],
-                            links: vec![],
-                            lengths: vec![],
-                        },
-                    );
-                }
-                Op::Set {
-                    id,
-                    field,
-                    value,
-                    span,
-                    driver,
-                } => {
-                    if let Some(c) = asm.get_mut(id) {
-                        c.fields.push(Field {
-                            field: *field,
-                            value: value.clone(),
-                            span: *span,
-                            driver: *driver,
-                        });
-                    }
-                }
-                Op::Extend {
-                    id, seq, elements, ..
-                } => {
-                    if let Some(c) = asm.get_mut(id) {
-                        let n = elements.len() as u32;
-                        match c.lengths.iter_mut().find(|(s, _)| s == seq) {
-                            Some((_, len)) => *len = len.saturating_add(n),
-                            None => c.lengths.push((*seq, n)),
-                        }
-                    }
-                }
-                Op::Link { id, link, other } => {
-                    if let Some(c) = asm.get_mut(id) {
-                        c.links.push((*link, *other));
-                    }
-                }
-                Op::Close { id, end, status } => {
-                    let Some(mut c) = asm.remove(id) else {
+        let mut base = 0;
+        for (slice, chunk) in slices {
+            for (index, op) in slice.iter().enumerate() {
+                lose(base + index, &mut out);
+                let id = *op.id();
+                for (d, sub) in &subs {
+                    if sub.mode != Mode::Pieces || !sub.kinds.contains(&id.kind) {
                         continue;
-                    };
-                    c.end = *end;
-                    c.status = *status;
-                    for (d, sub) in &subs {
-                        if sub.mode == Mode::Completed && sub.kinds.contains(&id.kind) {
-                            out.push((
-                                *d,
-                                Delivery::Item {
-                                    from,
-                                    batch,
-                                    item: c.clone(),
-                                },
-                            ));
+                    }
+                    if let Op::Extend { seq, .. } = op
+                        && !sub.sequences.contains(&(id.kind, *seq))
+                    {
+                        continue;
+                    }
+                    if let Some(ops) = chunk {
+                        let piece = Piece {
+                            ops: ops.clone(),
+                            index,
+                        };
+                        out.push((*d, Delivery::Piece { from, batch, piece }));
+                    }
+                }
+                if !assemble.contains(&id.kind) {
+                    continue;
+                }
+                // The store admitted every op, so an item being assembled is open.
+                match op {
+                    Op::Open { id, parent, start } => {
+                        asm.insert(
+                            *id,
+                            Completed {
+                                id: *id,
+                                parent: *parent,
+                                start: *start,
+                                end: *start,
+                                status: Status::Complete,
+                                fields: vec![],
+                                links: vec![],
+                                lengths: vec![],
+                            },
+                        );
+                    }
+                    Op::Set {
+                        id,
+                        field,
+                        value,
+                        span,
+                        driver,
+                    } => {
+                        if let Some(c) = asm.get_mut(id) {
+                            c.fields.push(Field {
+                                field: *field,
+                                value: value.clone(),
+                                span: *span,
+                                driver: *driver,
+                            });
+                        }
+                    }
+                    Op::Extend {
+                        id, seq, elements, ..
+                    } => {
+                        if let Some(c) = asm.get_mut(id) {
+                            let n = elements.len() as u32;
+                            match c.lengths.iter_mut().find(|(s, _)| s == seq) {
+                                Some((_, len)) => *len = len.saturating_add(n),
+                                None => c.lengths.push((*seq, n)),
+                            }
+                        }
+                    }
+                    Op::Link { id, link, other } => {
+                        if let Some(c) = asm.get_mut(id) {
+                            c.links.push((*link, *other));
+                        }
+                    }
+                    Op::Close { id, end, status } => {
+                        let Some(mut c) = asm.remove(id) else {
+                            continue;
+                        };
+                        c.end = *end;
+                        c.status = *status;
+                        for (d, sub) in &subs {
+                            if sub.mode == Mode::Completed && sub.kinds.contains(&id.kind) {
+                                out.push((
+                                    *d,
+                                    Delivery::Item {
+                                        from,
+                                        batch,
+                                        item: c.clone(),
+                                    },
+                                ));
+                            }
                         }
                     }
                 }
             }
+            base += slice.len();
         }
-        lose(ops.len(), &mut out);
+        lose(base, &mut out);
         if let Some(r) = self.run_of_mut(from) {
             r.assembling = asm;
         }

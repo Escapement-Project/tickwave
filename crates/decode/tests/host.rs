@@ -5,13 +5,13 @@ mod common;
 use common::*;
 use escapement_tickwave_decode::{
     AnalysisId, Batch, BindError, CONTRACT, Cause, CheckpointError, Contract, Decoder, Definition,
-    Element, ElementType, Exchange, FieldDecl, FieldId, FieldType, Host, HostOptions, Id,
+    Delivery, Element, ElementType, Exchange, FieldDecl, FieldId, FieldType, Host, HostOptions, Id,
     InputSpec, Keeping, KindDecl, KindId, LinkDecl, LinkId, LinkTo, LogEntry, Mismatch, Mode, Name,
     Need, Observation, Op, Pause, Reason, Ref, Refusal, Refused, Reply, Role, RunView, Schema,
     SchemaError, Seek, SeqDecl, SeqId, Span, Status, Subscription, Tick, Value, WindowId, field,
     name,
 };
-use std::sync::{Arc, atomic::Ordering::Relaxed};
+use std::sync::{Arc, Mutex, atomic::Ordering::Relaxed};
 
 fn toy_host(turns: Vec<Vec<Act>>, options: HostOptions) -> (Host, AnalysisId) {
     let mut h = Host::new(options);
@@ -702,6 +702,76 @@ fn a_decoder_that_breaks_the_rules_is_refused_never_a_panic() {
     assert!(h.checkpoint(a).is_err(), "nor is it checkpointed");
     assert_eq!(h.end_turn(t), Ok(Pause::Input), "a turn handed back unrun");
     assert!(h.begin_turn(a).is_ok());
+}
+
+/// Every frame open and closed in turn, one at each tick of `at`.
+fn frames(at: &[Tick]) -> Vec<Op> {
+    (at.iter())
+        .flat_map(|&t| [open(frame(t), t), close(frame(t), t + 1)])
+        .collect()
+}
+
+/// The toy decoder on a wire, and a sink on its frames' pieces that records each piece's op.
+fn toy_and_sink(options: HostOptions) -> (Host, AnalysisId, AnalysisId, Arc<Mutex<Vec<Op>>>) {
+    struct Record(Arc<Mutex<Vec<Op>>>);
+    impl Decoder for Record {
+        fn turn(&mut self, ex: &mut Exchange<'_>) -> Pause {
+            while let Some(d) = ex.receive() {
+                if let Delivery::Piece { piece, .. } = d {
+                    self.0.lock().unwrap().push(piece.op().clone());
+                }
+            }
+            if ex.more() { Pause::Work } else { Pause::Input }
+        }
+    }
+    let mut h = Host::new(options);
+    let a = h
+        .add(
+            name("toy"),
+            toy(),
+            InputSpec::Wire {
+                source: Box::new(Nothing::default()),
+                local: None,
+            },
+            Box::new(|_| Box::new(script(vec![]))),
+            all(),
+        )
+        .unwrap();
+    let got = Arc::new(Mutex::new(vec![]));
+    let g = got.clone();
+    let sink = h
+        .add(
+            name("sink"),
+            definition("sink", toy_schema()),
+            InputSpec::Upstream(Subscription::new(a, Mode::Pieces).with_kinds(vec![name("frame")])),
+            Box::new(move |_| Box::new(Record(g.clone()))),
+            all(),
+        )
+        .unwrap();
+    (h, a, sink, got)
+}
+
+#[test]
+fn a_batch_past_the_bound_is_refused() {
+    let (mut h, a, _, _) = toy_and_sink(options(|o| o.batch_ops = 4));
+    assert_eq!(
+        h.submit(batch(&h, a, 0, frames(&[10, 20, 30]))),
+        Err(Refusal::TooManyOps { got: 6, at_most: 4 })
+    );
+    assert!(h.submit(batch(&h, a, 0, frames(&[10, 20]))).is_ok());
+}
+
+#[test]
+fn pieces_of_a_batch_longer_than_a_chunk_arrive_whole_and_in_order() {
+    let (mut h, a, sink, got) = toy_and_sink(HostOptions::default());
+    let at: Vec<Tick> = (0..400).map(|k| 10 * k).collect();
+    let ops = frames(&at);
+    assert!(ops.len() > 3 * escapement_tickwave_decode::PIECE_CHUNK);
+    h.submit(batch(&h, a, 0, ops.clone())).unwrap();
+    while h.runnable(sink) {
+        h.turn(sink).unwrap();
+    }
+    assert_eq!(*got.lock().unwrap(), ops);
 }
 
 #[test]
