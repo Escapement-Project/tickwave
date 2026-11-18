@@ -4,9 +4,12 @@
 //! Scan Packet that advances the TAP, each value naming the cJTAG element it came from.
 //!
 //! A bit is TMSC's level when TCKC falls, and its TMSC edges while TCKC is high make an escape.
-//! Activation is followed by command, as the project's probe does it. What is not decoded
-//! (selection escapes, CR scan contents, ready and delay elements, transport packets) ends what
-//! it interrupts, incomplete, with that as the cause; framing resumes at the next reset escape.
+//! Activation is followed by command, as the project's probe does it, or by a Selection Sequence,
+//! and Offline stretches after a deselection are marked. A three-part command's CR scan is named by
+//! its command and operand (table 9-4), with its TDI and TDO bits and the register value they
+//! carry, where the Advanced Protocol puts them on TMSC. What is not decoded (ready and delay
+//! elements, transport packets, other scan formats) ends what it interrupts, incomplete, with that
+//! as the cause; framing resumes at the next reset or selection escape.
 //!
 //! Whether the target drives the TDO elements is not yet read from the wire. A setting,
 //! `assume_qualified`, assumes it; off, their driver is unknown, for a reason.
@@ -21,7 +24,7 @@ use escapement_tickwave_decode::{
     Subscription, Tick, Value, Window, field, name, seq,
 };
 use std::sync::Arc;
-use tap7::{Driver, Escape, Ev, MNEMONICS, Tap7, format_name};
+use tap7::{Cr, Driver, Escape, Ev, MNEMONICS, Outcome, Response, Selection, Tap7, format_name};
 
 pub const TCKC: u8 = 0;
 pub const TMSC: u8 = 1;
@@ -33,11 +36,17 @@ pub const CHECK: KindId = KindId(3);
 pub const COMMAND: KindId = KindId(4);
 pub const FORMAT: KindId = KindId(5);
 pub const PACKET: KindId = KindId(6);
+pub const SELECTION: KindId = KindId(7);
+pub const OFFLINE: KindId = KindId(8);
+pub const CR_SCAN: KindId = KindId(9);
 
-/// `ESCAPE`'s fields and sequence.
+/// `ESCAPE`'s fields and sequences: in the Standard Protocol a selection or deselection escape's
+/// bit is a TMS bit.
 pub const TOGGLES: FieldId = FieldId(0);
 pub const MEANING: FieldId = FieldId(1);
+pub const RESPONSE: FieldId = FieldId(2);
 pub const TOGGLE_BITS: SeqId = SeqId(0);
+pub const ESCAPE_TMS: SeqId = SeqId(1);
 /// `JSCAN`'s field and sequence.
 pub const PROTOCOL: FieldId = FieldId(0);
 pub const JSCAN_TMS: SeqId = SeqId(0);
@@ -68,24 +77,112 @@ pub const NTDI_BITS: SeqId = SeqId(0);
 pub const TMS_BITS: SeqId = SeqId(1);
 pub const PAD_BITS: SeqId = SeqId(2);
 pub const TDO_BITS: SeqId = SeqId(3);
+/// `SELECTION`'s fields and sequence.
+pub const BRANCH: FieldId = FieldId(0);
+pub const PARKING: FieldId = FieldId(1);
+pub const PROTECT: FieldId = FieldId(2);
+pub const FORM: FieldId = FieldId(3);
+pub const SELECTED_FORMAT: FieldId = FieldId(4);
+pub const READY: FieldId = FieldId(5);
+pub const DELAY: FieldId = FieldId(6);
+pub const TRANSPORT_STATES: FieldId = FieldId(7);
+pub const OUTCOME: FieldId = FieldId(8);
+pub const SELECTION_BITS: SeqId = SeqId(0);
+/// `OFFLINE`'s field.
+pub const OFFLINE_BY: FieldId = FieldId(0);
+/// `CR_SCAN`'s fields.
+pub const REGISTER: FieldId = FieldId(0);
+pub const CR_LENGTH: FieldId = FieldId(1);
+pub const CR_TDI: FieldId = FieldId(2);
+pub const CR_TDO: FieldId = FieldId(3);
+pub const CR_VALUE: FieldId = FieldId(4);
+pub const CR_MEANING: FieldId = FieldId(5);
 
 pub const PROBE: Role = Role(0);
 pub const TARGET: Role = Role(1);
 
 pub const UNQUALIFIED: Reason = Reason(0);
+pub const PROTECTED: Reason = Reason(1);
+pub const NOT_ON_TMSC: Reason = Reason(2);
 
 pub const GAP_CUT: Cause = Cause(0);
 pub const NEEDS_TAP: Cause = Cause(1);
 pub const LEVEL_ENDS: Cause = Cause(2);
-pub const SELECTION: Cause = Cause(3);
+pub const INTERRUPTED: Cause = Cause(3);
 pub const FORMAT_UNFRAMED: Cause = Cause(4);
 pub const READY_DELAY: Cause = Cause(5);
 pub const TRANSPORT: Cause = Cause(6);
 
 /// `MEANING`'s names.
 pub const MEANINGS: [&str; 4] = ["reset", "selection", "deselection", "custom"];
+/// `RESPONSE`'s names.
+pub const RESPONSES: [&str; 3] = ["taken", "not qualified, ignored", "offline, ignored"];
 /// `RESULT`'s names.
 pub const RESULTS: [&str; 2] = ["reset", "continue"];
+/// `BRANCH`'s names: what the Online Activation Code selects (table 11-1).
+pub const BRANCHES: [&str; 9] = [
+    "every TAP.7 topology",
+    "TAP.7 Series",
+    "TAP.7 Star-4",
+    "TAP.7 Star-2",
+    "reserved TAP.7",
+    "SlimBus",
+    "USB",
+    "Arm",
+    "reserved technology",
+];
+/// `PARKING`'s names: the TAPC state the Extension Code requires (table 11-2).
+pub const PARKING_STATES: [&str; 4] = [
+    "Run-Test/Idle or Test-Logic-Reset",
+    "Select-DR-Scan",
+    "Pause-IR",
+    "Pause-DR",
+];
+/// `OUTCOME`'s names.
+pub const OUTCOMES: [&str; 3] = [
+    "candidate",
+    "another technology selected",
+    "parked in another state",
+];
+/// `OFFLINE_BY`'s names.
+pub const OFFLINE_BYS: [&str; 3] = [
+    "a deselection escape",
+    "a selection of another technology",
+    "a selection needing another parking state",
+];
+/// `REGISTER`'s names: what a CR scan reaches (table 9-4).
+pub const REGISTERS: [&str; 19] = [
+    "SGC",
+    "CGM",
+    "CNFG0[0]",
+    "CNFG0[1]",
+    "CNFG0[2]",
+    "CNFG0[3]",
+    "FRESETR",
+    "Series detect",
+    "reserved bit",
+    "private bit",
+    "RDBACK0",
+    "RDBACK1",
+    "CNFG0",
+    "CNFG1",
+    "CNFG2",
+    "CNFG3",
+    "reserved string",
+    "private string",
+    "AT reference",
+];
+
+/// `BRANCH`'s name for an Online Activation Code: OAC[1:0] the technology, OAC[3:2] the branch.
+fn branch(oac: u8) -> u16 {
+    let (tech, topology) = (u16::from(oac & 3), u16::from(oac >> 2 & 3));
+    match (tech, topology) {
+        (0, _) => topology,
+        (1, _) => 4,
+        (2, 0..=2) => 5 + topology,
+        _ => 8,
+    }
+}
 /// What a control level is for (5.3.3.3.2): control level 0 and 7's, then 1, 2, 3, 4 and 5, 6.
 pub const LEVEL_USES: [&str; 6] = [
     "the debug and test system's",
@@ -95,6 +192,40 @@ pub const LEVEL_USES: [&str; 6] = [
     "custom scan paths",
     "forcing offline",
 ];
+
+/// What a CR scan reaches (table 9-4): its `REGISTERS` name; whether its value is what the target
+/// shifts out (TDO) or what the probe shifts in (TDI), where table 9-4 says; and its width.
+fn reached(opcode: u8, operand: u8) -> (u16, Option<bool>, usize) {
+    match (opcode, operand) {
+        (8, 0 | 1 | 7) => (u16::from(operand), Some(false), 1),
+        (8, 2..=6) => (u16::from(operand), Some(true), 1),
+        (8, 8..=15) => (8, Some(true), 1),
+        (8, _) => (9, None, 1),
+        (9, 0..=5) => (10 + u16::from(operand), Some(true), 32),
+        (9, 6 | 7) => (16, Some(true), 32),
+        (9, _) => (17, None, 32),
+        // CIDA's AT reference: TDI in a directed allocation, TDO's wired AND otherwise (9.9.3).
+        (_, s) => (18, Some(s & 16 != 0), 36),
+    }
+}
+
+/// CNFG0's class and revision (table 9-15), from its first eight bits.
+fn cnfg0(bits: &[bool]) -> Option<String> {
+    let n = |from: usize| {
+        (from..from + 4)
+            .rev()
+            .fold(0u8, |v, k| v << 1 | u8::from(bits[k]))
+    };
+    if bits.len() < 8 {
+        return None;
+    }
+    let class = match n(0) {
+        0 | 15 => "TAP.1 or T0".to_string(),
+        c @ 1..=5 => format!("T{c}"),
+        _ => "reserved".to_string(),
+    };
+    Some(format!("class {class}, revision {}", n(4)))
+}
 
 fn level_use(level: u8) -> u16 {
     match level {
@@ -125,8 +256,9 @@ pub fn schema() -> Schema {
             .with_fields(vec![
                 field("toggles", FieldType::Word { bits: 8 }),
                 field("meaning", names(&MEANINGS)),
+                field("response", names(&RESPONSES)),
             ])
-            .with_sequences(vec![seq("toggles", bit())])
+            .with_sequences(vec![seq("toggles", bit()), seq("tms", bit())])
             .with_labels(vec![
                 Label::default().field(MEANING).text(" escape"),
                 Label::default().field(MEANING),
@@ -201,14 +333,65 @@ pub fn schema() -> Schema {
                 seq("tdo", bit()),
             ])
             .with_labels(vec![Label::default().field(PACKET_FORMAT)]),
+        KindDecl::new("selection")
+            .with_row(3)
+            .with_fields(vec![
+                field("branch", names(&BRANCHES)),
+                field("parking state", names(&PARKING_STATES)),
+                field("protect", FieldType::Bool),
+                field("form", names(&["long", "short"])),
+                field("format", text(16)),
+                field("RDYC", FieldType::Word { bits: 2 }),
+                field("DLYC", FieldType::Word { bits: 2 }),
+                field("TPST", FieldType::Word { bits: 5 }),
+                field("outcome", names(&OUTCOMES)),
+            ])
+            .with_sequences(vec![seq("bits", bit())])
+            .with_labels(vec![
+                Label::default().text("selection: ").field(OUTCOME),
+                Label::default().text("selection"),
+            ]),
+        KindDecl::new("offline")
+            .with_fields(vec![field("by", names(&OFFLINE_BYS))])
+            .with_labels(vec![Label::default().text("offline")]),
+        KindDecl::new("cr-scan")
+            .with_row(2)
+            .with_parents(["level"])
+            .with_fields(vec![
+                field("register", names(&REGISTERS)),
+                field("length", FieldType::Word { bits: 32 }),
+                field(
+                    "tdi",
+                    FieldType::Bits {
+                        max: tap7::CR_KEPT as u32,
+                    },
+                ),
+                field(
+                    "tdo",
+                    FieldType::Bits {
+                        max: tap7::CR_KEPT as u32,
+                    },
+                ),
+                field("value", FieldType::Bits { max: 36 }),
+                field("meaning", text(64)),
+            ])
+            .with_labels(vec![
+                Label::default().field(REGISTER).text(" ").field(CR_VALUE),
+                Label::default().field(REGISTER),
+            ]),
     ])
     .with_roles(["probe", "target"])
-    .with_reasons(["the target's coupling is not established, so its drive of TDO is not assumed"])
+    .with_reasons([
+        "the target's coupling is not established, so its drive of TDO is not assumed",
+        "drive conflict protection keeps the target from driving until it alone is a group \
+         member, which is not followed",
+        "in the Standard Protocol, TDI and TDO are not on TMSC",
+    ])
     .with_causes([
         "a recording gap interrupts it",
         "the TAP state is needed to frame scan packets",
         "the control level ends first",
-        "selection and deselection escapes are not decoded here",
+        "an escape interrupts it",
         "a scan format this decoder does not frame",
         "ready or delay elements change the framing",
         "transport packets change the framing",
@@ -248,11 +431,12 @@ pub fn jtag_definition() -> Arc<Definition> {
 /// JTAG on cJTAG's chain setting: each TAP's IR length, the TAP nearest TDO first.
 pub const JTAG_CHAIN: SettingId = SettingId(0);
 
-/// What JTAG reads of cJTAG: the Standard Protocol's TMS bits and the Scan Packets, as pieces. A
+/// What JTAG reads of cJTAG: the Standard Protocol's TMS bits, an escape's among them, and the Scan
+/// Packets, as pieces. A
 /// packet's TMS or nTDI element says where its clock was sampled.
 pub fn jtag_subscription(cjtag: AnalysisId) -> Subscription {
     Subscription::new(cjtag, Mode::Pieces)
-        .with_kinds(["jscan", "packet"])
+        .with_kinds(["jscan", "escape", "packet"])
         .with_sequences(["tms", "ntdi"])
 }
 
@@ -436,6 +620,8 @@ pub struct Oscan {
     slots: Vec<Slot>,
     jscan: Option<(Id, u32)>,
     check: Option<(Id, u32)>,
+    selection: Option<(Id, u32)>,
+    offline: Option<Id>,
     level: Option<Id>,
     format: Option<(Id, u8)>,
     /// The starts of the last two DR scans: a command's two parts.
@@ -463,6 +649,8 @@ impl Oscan {
             slots: Vec::with_capacity(3),
             jscan: None,
             check: None,
+            selection: None,
+            offline: None,
             level: None,
             format: None,
             dr_begins: [start; 2],
@@ -494,6 +682,12 @@ impl Oscan {
     fn close_all(&mut self, at: Tick, status: Status, out: &mut Out) {
         self.close_jscan(at, out);
         if let Some((id, _)) = self.check.take() {
+            out.close(id, at, status);
+        }
+        if let Some((id, _)) = self.selection.take() {
+            out.close(id, at, status);
+        }
+        if let Some(id) = self.offline.take() {
             out.close(id, at, status);
         }
         if let Some(id) = self.level.take() {
@@ -575,13 +769,28 @@ impl Oscan {
 
     fn handle(&mut self, ev: Ev, t: Tick, rise: Tick, at: Tick, cell: Span, out: &mut Out) {
         match ev {
-            Ev::Escape(kind) => {
-                let start = if self.rise_seen {
+            Ev::Escape {
+                kind,
+                response,
+                tms,
+            } => {
+                // An escape carrying a TMS bit takes that bit's whole cell.
+                let start = if tms.is_some() {
+                    cell.start
+                } else if self.rise_seen {
                     rise
                 } else {
                     self.toggles.first().copied().unwrap_or(rise)
                 };
-                self.close_all(start, Status::Complete, out);
+                match response {
+                    Some(Response::Unqualified | Response::Offline) => self.close_jscan(start, out),
+                    _ => {
+                        if let Some((id, _)) = self.selection.take() {
+                            out.close(id, start, Status::Incomplete(INTERRUPTED));
+                        }
+                        self.close_all(start, Status::Complete, out);
+                    }
+                }
                 let id = Id::new(ESCAPE, start);
                 out.open(id, None, start);
                 let n = self.toggles.len() as u64;
@@ -593,12 +802,56 @@ impl Oscan {
                     Escape::Custom => 3,
                 };
                 out.set(id, MEANING, Value::Name(meaning));
+                if let Some(r) = response {
+                    let n = match r {
+                        Response::Taken => 0,
+                        Response::Unqualified => 1,
+                        Response::Offline => 2,
+                    };
+                    out.set(id, RESPONSE, Value::Name(n));
+                }
                 let toggles: Vec<Element> = (self.toggles.iter().enumerate())
                     .map(|(k, &at)| Self::element(k % 2 == 1, at, Span { start: at, end: at }))
                     .collect();
                 out.extend(id, TOGGLE_BITS, 0, &toggles);
+                if let Some(tms) = tms {
+                    out.extend(id, ESCAPE_TMS, 0, &[Self::element(tms, at, cell)]);
+                    self.clocks.push(Feed::Clock(Clocked {
+                        rise: at,
+                        cell,
+                        tms,
+                        tdi: None,
+                        tdo: None,
+                        tdo_fall: None,
+                        from: Some(Inputs {
+                            tms: Observation::Upstream {
+                                id,
+                                seq: ESCAPE_TMS,
+                                index: 0,
+                            },
+                            tdi: None,
+                            tdo: None,
+                        }),
+                    }));
+                }
                 out.close(id, t, Status::Complete);
             }
+            Ev::SelectionBit(v) => {
+                self.close_jscan(cell.start, out);
+                let (id, n) = match self.selection {
+                    Some(s) => s,
+                    None => {
+                        let id = Id::new(SELECTION, cell.start);
+                        out.open(id, None, cell.start);
+                        (id, 0)
+                    }
+                };
+                out.extend(id, SELECTION_BITS, n, &[Self::element(v, at, cell)]);
+                self.selection = Some((id, n.saturating_add(1)));
+            }
+            Ev::Selection(sel) => self.selection(&sel, t, out),
+            Ev::Offline => self.offline(t, 0, out),
+            Ev::CrScan(cr) => self.cr_scan(&cr, t, out),
             Ev::Standard { tms } => {
                 let (id, n) = match self.jscan {
                     Some(j) => j,
@@ -727,6 +980,85 @@ impl Oscan {
         }
     }
 
+    fn offline(&mut self, at: Tick, by: u16, out: &mut Out) {
+        if self.offline.is_none() {
+            let id = Id::new(OFFLINE, at);
+            out.open(id, None, at);
+            out.set(id, OFFLINE_BY, Value::Name(by));
+            self.offline = Some(id);
+        }
+    }
+
+    fn selection(&mut self, sel: &Selection, t: Tick, out: &mut Out) {
+        let Some((id, _)) = self.selection.take() else {
+            return;
+        };
+        let word = |value: u32, bits| Value::Word {
+            value: value.into(),
+            bits,
+        };
+        out.set(id, BRANCH, Value::Name(branch(sel.oac)));
+        if let Some(ec) = sel.ec {
+            out.set(id, PARKING, Value::Name(u16::from(ec & 3)));
+            out.set(id, PROTECT, Value::Bool(ec & 4 != 0));
+            out.set(id, FORM, Value::Name(u16::from(ec >> 3 & 1)));
+        }
+        if let Some(r) = sel.registers {
+            out.set(id, READY, word(r >> 15 & 3, 2));
+            out.set(id, DELAY, word(r >> 17 & 3, 2));
+            out.set(id, TRANSPORT_STATES, word(r >> 10 & 31, 5));
+        }
+        let outcome = match sel.outcome {
+            Outcome::Candidate { format } => {
+                out.set(id, SELECTED_FORMAT, Value::Text(format_name(format)));
+                0
+            }
+            Outcome::OtherTechnology => 1,
+            Outcome::StateDiffers => 2,
+        };
+        out.set(id, OUTCOME, Value::Name(outcome));
+        out.close(id, t, Status::Complete);
+        if outcome != 0 {
+            self.offline(t, outcome, out);
+        }
+    }
+
+    fn cr_scan(&mut self, cr: &Cr, t: Tick, out: &mut Out) {
+        let start = self.dr_begins[1];
+        let id = Id::new(CR_SCAN, start);
+        out.open(id, self.level, start);
+        let (register, read, width) = reached(cr.opcode, cr.operand);
+        out.set(id, REGISTER, Value::Name(register));
+        let length = Value::Word {
+            value: cr.shifts.into(),
+            bits: 32,
+        };
+        out.set(id, CR_LENGTH, length);
+        if cr.on_wire {
+            out.set(id, CR_TDI, jtag::pack(&cr.tdi));
+            out.set(id, CR_TDO, jtag::pack(&cr.tdo));
+            if let Some(read) = read {
+                let bits = if read { &cr.tdo } else { &cr.tdi };
+                let value = &bits[..bits.len().min(width)];
+                out.set(id, CR_VALUE, jtag::pack(value));
+                if let Some(m) = (register == 12).then(|| cnfg0(value)).flatten() {
+                    out.set(id, CR_MEANING, Value::Text(m));
+                }
+            }
+        } else {
+            let why = || Value::Unknown {
+                reason: NOT_ON_TMSC,
+                needs: None,
+            };
+            out.set(id, CR_TDI, why());
+            out.set(id, CR_TDO, why());
+            if read.is_some() {
+                out.set(id, CR_VALUE, why());
+            }
+        }
+        out.close(id, t, Status::Complete);
+    }
+
     fn packet(
         &mut self,
         tdi: Option<bool>,
@@ -753,17 +1085,18 @@ impl Oscan {
         out.open(id, None, first.cell.start);
         out.set(id, PACKET_FORMAT, Value::Text(format_name(first.format)));
         let mut tms_slot = None;
+        let protected = self.tap.protected();
         for (k, (slot, &(f, s))) in self.slots.iter().zip(parts).enumerate() {
             let driver = match slot.driver {
                 Driver::Host => Some(PROBE),
-                Driver::Target if self.qualified => Some(TARGET),
+                Driver::Target if self.qualified && !protected => Some(TARGET),
                 Driver::Target | Driver::Padding => None,
             };
             out.part(id, f, Value::Bool(slot.value), slot.cell, driver);
             out.extend(id, s, 0, &[Self::element(slot.value, slot.at, slot.cell)]);
-            if slot.driver == Driver::Target && !self.qualified {
+            if slot.driver == Driver::Target && (protected || !self.qualified) {
                 let why = Value::Unknown {
-                    reason: UNQUALIFIED,
+                    reason: if protected { PROTECTED } else { UNQUALIFIED },
                     needs: None,
                 };
                 out.set(id, DRIVER, why);
@@ -1102,7 +1435,9 @@ impl JtagOnCjtag {
                 seq,
                 offset,
                 ref elements,
-            } if id.kind == JSCAN && seq == JSCAN_TMS => {
+            } if (id.kind == JSCAN && seq == JSCAN_TMS)
+                || (id.kind == ESCAPE && seq == ESCAPE_TMS) =>
+            {
                 for (k, e) in elements.iter().enumerate() {
                     let Some(rise) = wire_tick(e) else {
                         continue;

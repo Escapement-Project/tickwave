@@ -11,7 +11,7 @@ mod check;
 use check::Seen;
 use escapement_tickwave_decode::{
     Decoder, Definition, Delivery, Exchange, Host, InputSpec, KindId, Mode, Pause, Schema, Status,
-    Subscription, Tick, name, wire::WireSource,
+    Subscription, Tick, Value, name, wire::WireSource,
 };
 use escapement_tickwave_decoders::cjtag;
 use escapement_tickwave_view::{Cache, Recording};
@@ -19,13 +19,40 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 /// Items by kind, and those closed incomplete by cause, each by its schema index; with
-/// `--rows`, each item's kind and span; and every JScan stretch's span.
+/// `--rows`, each item's kind and span; every JScan stretch's span; and the CR scans by register,
+/// value and meaning.
 type Tally = (
     BTreeMap<u16, u64>,
     BTreeMap<u16, u64>,
     Option<Vec<(KindId, Tick, Tick)>>,
     Vec<(Tick, Tick)>,
+    BTreeMap<String, u64>,
 );
+
+/// A CR scan as the tally counts it: its register, its value in hex, and what it means.
+fn cr_line(item: &escapement_tickwave_decode::Completed) -> String {
+    let field = |f| item.field(f).map(|f| &f.value);
+    let register = match field(cjtag::REGISTER) {
+        Some(Value::Name(n)) => cjtag::REGISTERS
+            .get(usize::from(*n))
+            .copied()
+            .unwrap_or("?"),
+        _ => "?",
+    };
+    let value = match field(cjtag::CR_VALUE) {
+        Some(Value::Bits { bytes, .. }) => {
+            let hex: String = bytes.iter().rev().map(|b| format!("{b:02X}")).collect();
+            format!("0x{hex}")
+        }
+        Some(Value::Unknown { .. }) => "unknown".into(),
+        _ => "none".into(),
+    };
+    let meaning = match field(cjtag::CR_MEANING) {
+        Some(Value::Text(t)) => format!(" ({t})"),
+        _ => String::new(),
+    };
+    format!("{register} {value}{meaning}")
+}
 
 /// Counts cJTAG's completed items by kind, and those closed incomplete by cause.
 struct Kinds(Arc<Mutex<Tally>>);
@@ -45,6 +72,9 @@ impl Decoder for Kinds {
                     }
                     if item.id.kind == cjtag::JSCAN {
                         k.3.push((item.start, item.end));
+                    }
+                    if item.id.kind == cjtag::CR_SCAN {
+                        *k.4.entry(cr_line(&item)).or_default() += 1;
                     }
                 }
                 Delivery::Lost { span, .. } => ex.lost(span.start, span.end),
@@ -102,6 +132,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         BTreeMap::new(),
         rows.then(Vec::new),
         Vec::new(),
+        BTreeMap::new(),
     )));
     let k2 = kinds.clone();
     let schema = h.definition(c).schema.clone();
@@ -163,6 +194,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(spans) = &k.2 {
         println!("cjtag {}", check::rows_line(&schema, spans));
     }
+    let crs: Vec<String> = (k.4.iter()).map(|(l, n)| format!("{l} x{n}")).collect();
+    println!(
+        "cjtag CR scans: {}",
+        if crs.is_empty() {
+            "none".to_string()
+        } else {
+            crs.join(", ")
+        }
+    );
     check::report(&h, j, &seen, &rec, None, "JTAG on cJTAG", seconds);
     for (what, t) in &tallies {
         println!("{what}: {}", check::tally_lines(t, 20).join(", "));

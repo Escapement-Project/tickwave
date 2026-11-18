@@ -302,7 +302,7 @@ pub(crate) fn single(set: u16) -> Option<u8> {
     (set.count_ones() == 1).then(|| set.trailing_zeros() as u8)
 }
 
-fn pack(bits: &[bool]) -> Value {
+pub(crate) fn pack(bits: &[bool]) -> Value {
     let bytes = bits
         .chunks(8)
         .map(|c| (c.iter().enumerate()).fold(0u8, |b, (k, &v)| b | u8::from(v) << k))
