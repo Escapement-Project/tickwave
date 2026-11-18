@@ -1194,3 +1194,13 @@ fn names_and_phrases_have_bounds_of_their_own() {
     s.roles = vec![long(65).into()];
     assert_eq!(add(s), Some(BindError::Schema(SchemaError::BadName)));
 }
+
+#[test]
+fn a_source_error_keeps_the_recordings_error_as_its_source() {
+    use std::error::Error;
+    let inner = std::io::Error::other("the file is cut off");
+    let e = escapement_tickwave_decode::SourceError::new(inner);
+    let source = e.source().map(|s| s.to_string());
+    assert_eq!(source.as_deref(), Some("the file is cut off"));
+    assert!(e.to_string().contains("the file is cut off"));
+}

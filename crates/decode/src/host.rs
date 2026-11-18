@@ -122,10 +122,11 @@ pub trait Source: Send {
     ) -> Result<Option<Window>, SourceError>;
 }
 
-/// Why a source could not read a window: the recording's error, kept whole.
+/// Why a source could not read a window: the recording's error, kept whole, which `source()`
+/// gives.
 #[derive(Clone, Debug, thiserror::Error)]
-#[error("{0}")]
-pub struct SourceError(Arc<dyn std::error::Error + Send + Sync>);
+#[error("a source could not read its window: {0}")]
+pub struct SourceError(#[source] Arc<dyn std::error::Error + Send + Sync>);
 
 impl SourceError {
     pub fn new(e: impl std::error::Error + Send + Sync + 'static) -> Self {
