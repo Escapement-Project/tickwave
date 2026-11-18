@@ -1350,6 +1350,47 @@ fn a_window_keeps_an_item_open_across_its_checkpoint_when_the_forward_pass_kept_
 }
 
 #[test]
+fn retired_window_chains_give_their_slots_back() {
+    let (mut h, [p, q]) = pulses_host(line(80, 3, 20, vec![]), 15, None, HostOptions::default());
+    h.keep_checkpoints(p, Keeping::new(50, usize::MAX)).unwrap();
+    run_all(&mut h);
+    let first = h
+        .derive(
+            p,
+            Span {
+                start: 300,
+                end: 400,
+            },
+        )
+        .unwrap();
+    let mut runs = vec![h.run_id(first.chain[0].1)];
+    h.retire(first.chain[0].1);
+    for k in 0..300 {
+        let start = 100 + (k * 7) % 1200;
+        let w = h
+            .derive(
+                p,
+                Span {
+                    start,
+                    end: start + 50,
+                },
+            )
+            .unwrap();
+        assert_eq!(w.chain, first.chain, "the same slots, window {k}");
+        runs.push(h.run_id(w.chain[0].1));
+        h.run_until(|h| h.settled(w.chain[1].1) >= start + 50)
+            .unwrap();
+        h.retire(w.chain[0].1);
+    }
+    let distinct: std::collections::HashSet<_> = runs.iter().copied().collect();
+    assert_eq!(distinct.len(), 301, "no two chains share a run id");
+    assert!(
+        !h.store(q).items.is_empty(),
+        "the forward chain is untouched"
+    );
+}
+
+#[test]
 fn window_size_does_not_change_the_output() {
     let gaps = vec![
         Span {

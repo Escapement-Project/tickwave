@@ -427,6 +427,20 @@ pub trait Decoder: Send {
     }
 }
 
+/// Stands in for a retired window chain's source, which never reads again.
+struct Drained;
+
+impl Source for Drained {
+    fn window(
+        &mut self,
+        from: Tick,
+        upto: Tick,
+        _: &AtomicBool,
+    ) -> Result<Option<Window>, SourceError> {
+        Ok(Some(Window::new(from, upto)))
+    }
+}
+
 /// Stands in for a decoder whose turn is under way. The host never runs it: `begin_turn` refuses
 /// a second turn while one is out.
 struct Taken;
@@ -973,6 +987,9 @@ pub struct Host {
     pub cancelled_reads: u64,
     pub log_dropped: u64,
     keepers: Vec<Keeper>,
+    /// The run generation the next window chain takes, so that no two chains, even in reused
+    /// slots, share a run id.
+    window_generation: u64,
 }
 
 impl Default for Host {
@@ -996,6 +1013,7 @@ impl Host {
             cancelled_reads: 0,
             log_dropped: 0,
             keepers: vec![],
+            window_generation: 1,
         }
     }
 
@@ -2072,7 +2090,13 @@ impl Host {
         };
         let source = source.fork().ok_or(CheckpointError::CannotFork(name))?;
         let order = self.below(root);
+        // Retired chains at the end give their slots back.
+        while self.analyses.last().is_some_and(|an| an.retired) {
+            self.analyses.pop();
+        }
         let base = self.analyses.len();
+        let generation = self.window_generation;
+        self.window_generation = generation.checked_add(1).ok_or(CheckpointError::NoRoom)?;
         if u16::try_from(base + order.len()).is_err() {
             return Err(CheckpointError::NoRoom);
         }
@@ -2099,7 +2123,7 @@ impl Host {
         let place = |x: usize| base + order.iter().position(|&o| o == x).unwrap_or(0);
         let id = |x: usize| RunId {
             analysis: AnalysisId(place(x) as u16),
-            generation: 1,
+            generation,
         };
         let renamed: HashMap<RunId, RunId> = match kept {
             Some(cut) => (cut.snaps.iter())
@@ -2159,7 +2183,8 @@ impl Host {
     }
 
     /// Retires the window chain whose wire analysis is `a`: its runs never run again, and their
-    /// stores, queues and reads are dropped. A forward analysis is left as it is.
+    /// decoders, stores, queues, reads and forked source are dropped; the next `derive` takes
+    /// back retired slots at the end of the host's analyses. A forward analysis is left as it is.
     pub fn retire(&mut self, a: AnalysisId) {
         let root = a.index();
         if !self.analyses.get(root).is_some_and(|an| an.window) {
@@ -2169,6 +2194,10 @@ impl Host {
         for &x in &chain {
             let an = &mut self.analyses[x];
             an.retired = true;
+            an.run.decoder = Box::new(Taken);
+            if let Input::Wire(source) = &mut an.input {
+                *source = Box::new(Drained);
+            }
             an.run.store = Store::default();
             an.run.inbox.clear();
             an.run.ready = None;
