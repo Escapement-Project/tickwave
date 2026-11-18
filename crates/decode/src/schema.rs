@@ -283,7 +283,9 @@ pub const MAX_LINK_TARGETS: usize = 16;
 pub const MAX_ROLES: usize = 64;
 pub const MAX_LIST: usize = 256;
 pub const MAX_FIELD_NAMES: usize = 4096;
-pub const MAX_NAME: usize = 128;
+pub const MAX_NAME: usize = 64;
+/// The longest reason, need or cause: display text a reader is shown, not an identifier.
+pub const MAX_PHRASE: usize = crate::MAX_TEXT;
 
 /// A schema that cannot be loaded.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -301,6 +303,8 @@ pub enum SchemaError {
     TooMany { what: &'static str },
     #[error("a name is empty or longer than {MAX_NAME} bytes")]
     BadName,
+    #[error("a reason, need or cause is empty or longer than {MAX_PHRASE} bytes")]
+    BadPhrase,
     #[error("kind {kind}: link {role} points to no kind {to}")]
     UnknownLinkTarget { kind: Name, role: Name, to: Name },
     #[error("the open-item bound {0} is not between 1 and the host's")]
@@ -389,11 +393,13 @@ impl Schema {
         if self.open_at_most == 0 || self.open_at_most > open_most {
             return Err(SchemaError::OpenBound(self.open_at_most));
         }
-        for n in self.roles.iter().chain(&self.reasons).chain(&self.needs) {
+        for n in self.roles.iter() {
             named(n)?;
         }
-        for n in self.causes.iter() {
-            named(n)?;
+        for n in self.reasons.iter().chain(&self.needs).chain(&self.causes) {
+            if n.is_empty() || n.len() > MAX_PHRASE {
+                return Err(SchemaError::BadPhrase);
+            }
         }
         let mut kinds = HashSet::new();
         for k in self.kinds.iter() {

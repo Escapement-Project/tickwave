@@ -7,8 +7,8 @@ use escapement_tickwave_decode::{
     AnalysisId, Batch, BindError, CONTRACT, Cause, CheckpointError, Contract, Decoder, Definition,
     Element, ElementType, Exchange, FieldDecl, FieldId, FieldType, Host, HostOptions, Id,
     InputSpec, KindDecl, KindId, LinkDecl, LinkId, LinkTo, LogEntry, Mismatch, Mode, Name, Need,
-    Observation, Op, Pause, Reason, Ref, Refusal, Refused, Reply, Role, Schema, SeqDecl, SeqId,
-    Span, Status, Subscription, Tick, Value, field, name,
+    Observation, Op, Pause, Reason, Ref, Refusal, Refused, Reply, Role, Schema, SchemaError,
+    SeqDecl, SeqId, Span, Status, Subscription, Tick, Value, field, name,
 };
 use std::sync::{Arc, atomic::Ordering::Relaxed};
 
@@ -1163,4 +1163,34 @@ fn a_decoder_that_leaves_its_deliveries_waits_for_new_input_instead_of_spinning(
         "one turn per arrival, not per step: {} turns",
         turns.load(Relaxed)
     );
+}
+
+#[test]
+fn names_and_phrases_have_bounds_of_their_own() {
+    let add = |schema: Schema| {
+        let mut def = (*toy()).clone();
+        def.schema = schema;
+        Host::default()
+            .add(
+                name("toy"),
+                Arc::new(def),
+                InputSpec::Wire {
+                    source: Box::new(Nothing::default()),
+                    local: None,
+                },
+                Box::new(|_| Box::new(script(vec![]))),
+                all(),
+            )
+            .err()
+    };
+    let long = |n: usize| "x".repeat(n);
+    let mut s = toy_schema();
+    s.reasons = vec![long(200).into()];
+    assert_eq!(add(s), None, "a reason is a sentence");
+    let mut s = toy_schema();
+    s.causes = vec![long(257).into()];
+    assert_eq!(add(s), Some(BindError::Schema(SchemaError::BadPhrase)));
+    let mut s = toy_schema();
+    s.roles = vec![long(65).into()];
+    assert_eq!(add(s), Some(BindError::Schema(SchemaError::BadName)));
 }
