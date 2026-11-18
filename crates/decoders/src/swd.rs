@@ -11,9 +11,10 @@
 //! without data, its data cycles left to the search for the next request.
 
 use escapement_tickwave_decode::{
-    Decoder, Definition, Element, ElementType, Exchange, Factory, FieldId, FieldType, Id, KindDecl,
-    KindId, LinkDecl, LinkId, LinkTo, Observation, Observed, Out, Pause, Ref, Request, Role,
-    Schema, SeqId, Setting, SettingDecl, SettingId, Span, Status, Tick, Value, field, name, seq,
+    Cause, Decoder, Definition, Element, ElementType, Exchange, Factory, FieldId, FieldType, Id,
+    KindDecl, KindId, LinkDecl, LinkId, LinkTo, Observation, Observed, Out, Pause, Ref, Request,
+    Role, Schema, SeqId, Setting, SettingDecl, SettingId, Span, Status, Tick, Value, field, name,
+    seq,
 };
 use std::{collections::VecDeque, sync::Arc};
 
@@ -54,6 +55,9 @@ pub const PARITY_OK: u16 = 0;
 pub const PARITY_BAD: u16 = 1;
 /// `ACK`'s names, in this order.
 pub const ACKS: [&str; 5] = ["OK", "WAIT", "FAULT", "no response", "invalid"];
+/// A transfer framed whose rises the decoder no longer held: a fault in the decoder, never in
+/// the capture, closed incomplete so it shows rather than going missing.
+pub const DROPPED: Cause = Cause(0);
 
 pub fn schema() -> Schema {
     let bit = || ElementType::Bit;
@@ -82,6 +86,7 @@ pub fn schema() -> Schema {
             )]),
     ])
     .with_roles(["probe", "target", "neither"])
+    .with_causes(["the decoder no longer held the clock rises the transfer spans"])
 }
 
 /// The turnaround, in cycles.
@@ -348,6 +353,7 @@ impl Track {
     ) {
         let n = t.rises();
         if rises.len() < n || levels.len() < n {
+            self.dropped(t.anchor, out);
             return;
         }
         let p = &rises[..n];
@@ -447,6 +453,15 @@ impl Track {
         self.elements = buf;
         self.cells = c;
     }
+
+    /// Closes the transfer framed at `anchor` incomplete, its rises no longer held: it breaks
+    /// any retry chain it was in.
+    pub fn dropped(&mut self, anchor: Tick, out: &mut Out) {
+        self.last_wait = None;
+        let id = Id::new(TRANSFER, anchor);
+        out.open(id, None, anchor);
+        out.close(id, anchor + 1, Status::Incomplete(DROPPED));
+    }
 }
 
 /// SWD under the host: SWCLK and SWDIO in windows of `window` ticks, a window a turn. SWDIO is
@@ -528,7 +543,7 @@ impl Swd {
         while let Some(t) = self.recogniser.poll() {
             let k = self.ring.partition_point(|&(at, _)| at < t.anchor);
             if self.ring.get(k).map(|r| r.0) != Some(t.anchor) {
-                // Only a held rise anchors a transfer.
+                self.track.dropped(t.anchor, out);
                 continue;
             }
             let n = t.rises();

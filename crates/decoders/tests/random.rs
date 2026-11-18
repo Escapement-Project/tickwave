@@ -5,7 +5,7 @@
 mod common;
 
 use common::*;
-use escapement_tickwave_decode::{AnalysisId, Host, InputSpec, Span, Tick, name};
+use escapement_tickwave_decode::{AnalysisId, Host, InputSpec, Span, Status, Tick, name};
 use escapement_tickwave_decoders::{adiv5, cjtag, jtag, swd};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -125,10 +125,16 @@ fn cases(seed: u64, build: impl Fn(&mut fastrand::Rng) -> (Host, Vec<AnalysisId>
                     && lost.iter().all(|l| l.start < l.end),
                 "seed {seed}, case {case}: lost input out of order: {lost:?}"
             );
+            let swd = h.definition(a).name == "swd";
             for i in h.store(a).items.values() {
                 assert!(
                     i.end.is_none_or(|e| e >= i.start),
                     "seed {seed}, case {case}: {:?} ends before it starts",
+                    i.id
+                );
+                assert!(
+                    !(swd && i.status == Some(Status::Incomplete(swd::DROPPED))),
+                    "seed {seed}, case {case}: SWD no longer held the rises of {:?}",
                     i.id
                 );
             }

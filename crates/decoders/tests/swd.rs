@@ -540,3 +540,39 @@ fn the_turnaround_is_a_setting_of_one_to_four_cycles() {
         );
     }
 }
+
+#[test]
+fn a_transfer_whose_rises_are_not_held_closes_incomplete_rather_than_going_missing() {
+    let t = swd::Transfer {
+        anchor: 1_000,
+        ap: false,
+        read: true,
+        address: 0,
+        ack: 1,
+        word: Some(0x0BC1_1477),
+        parity: Some(true),
+        turnaround: 1,
+    };
+    let mut track = swd::Track::default();
+    let mut out = escapement_tickwave_decode::Out::default();
+    let rises: Vec<Tick> = (0..10).map(|k| 1_000 + k * P).collect();
+    let levels = vec![false; rises.len()];
+    track.emit(&t, None, 0, &rises, &levels, &mut out);
+    let id = escapement_tickwave_decode::Id::new(swd::TRANSFER, 1_000);
+    assert_eq!(
+        out.ops,
+        vec![
+            escapement_tickwave_decode::Op::Open {
+                id,
+                parent: None,
+                start: 1_000
+            },
+            escapement_tickwave_decode::Op::Close {
+                id,
+                end: 1_001,
+                status: Status::Incomplete(swd::DROPPED)
+            },
+        ],
+        "fewer rises held than a transfer spans"
+    );
+}

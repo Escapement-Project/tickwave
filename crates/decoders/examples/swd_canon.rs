@@ -7,7 +7,7 @@
 #[path = "canon/mod.rs"]
 mod canon;
 
-use escapement_tickwave_decode::{Host, InputSpec, Span, Tick, name, wire::WireSource};
+use escapement_tickwave_decode::{Host, InputSpec, Span, Status, Tick, name, wire::WireSource};
 use escapement_tickwave_decoders::{adiv5, swd};
 use escapement_tickwave_view::{Cache, Recording};
 use std::sync::Arc;
@@ -55,6 +55,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     h.run_until(|_| false)?;
     let seconds = start.elapsed().as_secs_f64();
     canon::print(&h, &[(s, None), (a, Some(s)), (m, Some(a))]);
+    let dropped = (h.store(s).items.values())
+        .filter(|i| i.status == Some(Status::Incomplete(swd::DROPPED)))
+        .count();
+    println!("transfers whose rises SWD no longer held: {dropped}");
+    if dropped > 0 {
+        return Err("SWD dropped transfers".into());
+    }
     println!("seconds {seconds:.2}");
     println!("largest batch: {} operations", h.stats().peak_batch);
     Ok(())
