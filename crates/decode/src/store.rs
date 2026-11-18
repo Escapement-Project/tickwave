@@ -5,7 +5,8 @@ use crate::output::{
     Element, FieldId, Id, LinkId, MAX_BITS, MAX_CHUNK, MAX_FIELDS, MAX_LINKS, MAX_TEXT, Op, Ref,
     Role, SeqId, Span, Status, Tick, Value,
 };
-use std::collections::{BTreeMap, HashMap};
+use foldhash::HashMap;
+use std::collections::BTreeMap;
 
 /// Why an operation breaks its item's lifecycle.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -324,7 +325,7 @@ impl Store {
     pub fn apply_batch(&mut self, ops: &[Op], at_most: usize) -> Result<(), (usize, Refused)> {
         let mut staged = Staged {
             base: &self.open,
-            changed: HashMap::new(),
+            changed: HashMap::default(),
             open: self.open.len(),
         };
         let mut peak = staged.open;

@@ -7,8 +7,9 @@ use crate::{
     schema::{CONTRACT, Contract, Definition, Mismatch, Name, Resolved, SchemaError},
     store::{Field, Refused, Store},
 };
+use foldhash::{HashMap, HashSet};
 use std::{
-    collections::{BTreeSet, HashMap, HashSet, VecDeque},
+    collections::{BTreeSet, VecDeque},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering::Relaxed},
@@ -1113,7 +1114,7 @@ impl Host {
             }
             (was, place) = (got.end, k);
         }
-        let mut closing = HashSet::new();
+        let mut closing = HashSet::default();
         for (k, op) in b.ops.iter().enumerate() {
             let at = match op {
                 Op::Open { id, start, .. } => {
@@ -1634,7 +1635,7 @@ impl Host {
         let a = a.index();
         let mut retired = vec![];
         let mut queue = VecDeque::from([(a, local)]);
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         while let Some((x, local)) = queue.pop_front() {
             if !seen.insert(x) {
                 continue;
@@ -1734,7 +1735,7 @@ impl Host {
             decoders.push(decoder);
         }
         let mut retired = vec![];
-        let mut renamed: HashMap<RunId, RunId> = HashMap::new();
+        let mut renamed: HashMap<RunId, RunId> = HashMap::default();
         for (snap, decoder) in cut.snaps.iter().zip(decoders) {
             let x = snap.analysis;
             let bound = match &self.analyses[x].input {
@@ -1800,7 +1801,7 @@ impl Run {
             ready: None,
             inbox: VecDeque::new(),
             bound,
-            assembling: HashMap::new(),
+            assembling: HashMap::default(),
             started: false,
             more: false,
             fresh: false,
