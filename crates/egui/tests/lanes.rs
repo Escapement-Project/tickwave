@@ -529,3 +529,107 @@ fn a_provisional_windows_items_draw_pale_with_dashed_outlines() {
     assert_eq!(dense(false), 0);
     assert!(dense(true) > 20, "{}", dense(true));
 }
+
+/// The texts a track over one item of kind `a`, its field `parity` set to `ok` over `part`, draws
+/// with `labels`, its parts row shown.
+fn texts(labels: Labels, part: (Tick, Tick)) -> Vec<String> {
+    use escapement_tickwave_decode::{FieldDecl, FieldId, FieldType, Label, Value};
+    let schema = Schema::new(vec![
+        KindDecl::new("a")
+            .with_fields(vec![
+                FieldDecl::new("parity", FieldType::Name(vec!["ok".into(), "bad".into()]))
+                    .with_short("P"),
+            ])
+            .with_labels(vec![Label::default().text("parity ").field(FieldId(0))]),
+    ]);
+    let mut store = Store::with_keep(vec![Span {
+        start: Tick::MIN,
+        end: Tick::MAX,
+    }]);
+    let id = Id::new(KindId(0), 100);
+    let ops = [
+        Op::Open {
+            id,
+            parent: None,
+            start: 100,
+        },
+        Op::Set {
+            id,
+            field: FieldId(0),
+            value: Value::Name(0),
+            span: Some(Span {
+                start: part.0,
+                end: part.1,
+            }),
+            driver: None,
+        },
+        Op::Close {
+            id,
+            end: 900,
+            status: Status::Complete,
+        },
+    ];
+    store.apply_batch(&ops, 8).unwrap();
+    let shown = Shown::new(0..1000, 0.0..500.0);
+    let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
+    let density = Density::of(store.items.values(), &map, |_| false);
+    let palette = Palette::from_visuals(&egui::Visuals::default());
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(600.0, 200.0),
+        )),
+        ..egui::RawInput::default()
+    };
+    let mut out = egui::Context::default().run_ui(input, |ui| {
+        ui.add(
+            Track::new(
+                &shown,
+                "t",
+                &schema,
+                &store.items,
+                &density,
+                &labels,
+                &palette,
+                map,
+            )
+            .parts(true),
+        );
+    });
+    out.textures_delta.clear();
+    fn walk(s: &egui::Shape, out: &mut Vec<String>) {
+        match s {
+            egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+            egui::Shape::Text(t) => out.push(t.galley.text().to_owned()),
+            _ => {}
+        }
+    }
+    let mut all = vec![];
+    for c in &out.shapes {
+        walk(&c.shape, &mut all);
+    }
+    all
+}
+
+#[test]
+fn a_track_shows_its_schemas_labels_unless_the_host_gives_its_own() {
+    use escapement_tickwave_decode::Label;
+    let wide = (200, 800);
+    assert!(texts(Labels::default(), wide).contains(&"parity ok".to_owned()));
+    let host = Labels::default().kind(KindId(0), vec![Label::default().text("host's")]);
+    let drawn = texts(host, wide);
+    assert!(drawn.contains(&"host's".to_owned()), "{drawn:?}");
+    assert!(!drawn.contains(&"parity ok".to_owned()));
+}
+
+#[test]
+fn a_part_too_narrow_for_its_fields_name_shows_the_short_name_it_declares() {
+    // 16 points: too narrow for "ok", "parity" or "par", room for "P".
+    let drawn = texts(Labels::default(), (200, 232));
+    assert!(drawn.contains(&"P".to_owned()), "{drawn:?}");
+    assert!(
+        !drawn
+            .iter()
+            .any(|t| t == "par" || t == "parity" || t == "ok")
+    );
+}

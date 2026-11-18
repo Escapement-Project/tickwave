@@ -34,10 +34,11 @@ pub use output::{
     MAX_TEXT, Need, Observation, Op, Out, Reason, Ref, Role, SeqId, Span, Status, Tick, Value,
 };
 pub use schema::{
-    CONTRACT, Contract, Definition, ElementType, FieldDecl, FieldType, KindDecl, LinkDecl, LinkTo,
-    MAX_FIELD_NAMES, MAX_KINDS, MAX_LANES, MAX_LINK_ROLES, MAX_LINK_TARGETS, MAX_LIST, MAX_NAME,
-    MAX_PHRASE, MAX_ROLES, MAX_SEQUENCES, Mismatch, Name, PortDecl, Schema, SchemaError, SeqDecl,
-    Setting, SettingDecl, SettingId, SettingType, field, name, seq,
+    CONTRACT, Contract, Definition, ElementType, FieldDecl, FieldType, KindDecl, Label, LabelPiece,
+    LinkDecl, LinkTo, MAX_FIELD_NAMES, MAX_KINDS, MAX_LABEL_PIECES, MAX_LABELS, MAX_LANES,
+    MAX_LINK_ROLES, MAX_LINK_TARGETS, MAX_LIST, MAX_NAME, MAX_PHRASE, MAX_ROLES, MAX_SEQUENCES,
+    Mismatch, Name, PortDecl, Schema, SchemaError, SeqDecl, Setting, SettingDecl, SettingId,
+    SettingType, field, name, seq,
 };
 pub use store::{Counts, Field, Item, Refused, Store};
 

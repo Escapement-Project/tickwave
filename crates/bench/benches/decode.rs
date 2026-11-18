@@ -19,7 +19,7 @@ use escapement_tickwave_decode::{
     Host, InputSpec, Observed, Schema, Source, SourceError, Span, Store, Tick, Window, name,
 };
 use escapement_tickwave_decoders::{adiv5, cjtag, swd};
-use escapement_tickwave_egui::track::{Density, Labels, Template, Track, condition, driver_paints};
+use escapement_tickwave_egui::track::{Density, Labels, Track, condition, driver_paints};
 use escapement_tickwave_egui::{Palette, Shown};
 use escapement_tickwave_view::format::mapping::Mapping;
 use escapement_tickwave_view::format::model::Ratio;
@@ -379,23 +379,7 @@ struct Drawn {
 fn drawn(window: std::ops::Range<i64>) -> Drawn {
     let mut h = host(all());
     h.run_until(|_| false).unwrap();
-    let labels = Labels::default().kind(
-        swd::TRANSFER,
-        vec![
-            Template::default()
-                .field(swd::DIR)
-                .text(" ")
-                .field(swd::PORT)
-                .text(" ")
-                .field(swd::A)
-                .text(" ")
-                .field(swd::ACK)
-                .text(" ")
-                .field(swd::DATA),
-            Template::default().field(swd::PORT),
-        ],
-    );
-    track(&h, "swd", "SWD", labels, window)
+    track(&h, "swd", "SWD", Labels::default(), window)
 }
 
 /// Analysis `analysis`'s track as `name`, its store holding every item, over `window`.

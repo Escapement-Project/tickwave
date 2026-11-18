@@ -13,8 +13,9 @@
 
 use escapement_tickwave_decode::{
     Cause, Decoder, Definition, Element, ElementType, Exchange, Factory, FieldId, FieldType, Id,
-    KindDecl, KindId, MAX_BITS, Need, Observation, Observed, Out, Pause, Reason, Request, Schema,
-    SeqId, Setting, SettingDecl, SettingId, Span, Status, Tick, Value, Window, field, name, seq,
+    KindDecl, KindId, Label, MAX_BITS, Need, Observation, Observed, Out, Pause, Reason, Request,
+    Schema, SeqId, Setting, SettingDecl, SettingId, Span, Status, Tick, Value, Window, field, name,
+    seq,
 };
 use std::sync::Arc;
 
@@ -100,7 +101,7 @@ const ALL: u16 = 0xFFFF;
 
 pub fn schema() -> Schema {
     let state = || FieldType::Name(STATES.map(name).to_vec());
-    let scan = |kind: &'static str| {
+    let scan = |kind: &'static str, head: &'static str| {
         KindDecl::new(kind)
             .with_fields(vec![
                 field("tdi", FieldType::Bits { max: MAX_BITS }),
@@ -113,12 +114,17 @@ pub fn schema() -> Schema {
                 seq("tdi", ElementType::Bit),
                 seq("tdo", ElementType::Bit),
             ])
+            .with_labels(vec![
+                Label::default().text(head).text(" ").field(TDI_HEAD),
+                Label::default().text(head),
+            ])
     };
     // A scan spans the states it shifts in, so the states draw in a row under the scans.
     Schema::new(vec![
         KindDecl::new("state")
             .with_row(1)
-            .with_fields(vec![field("state", state())]),
+            .with_fields(vec![field("state", state())])
+            .with_labels(vec![Label::default().field(TAP_STATE)]),
         KindDecl::new("path")
             .with_row(1)
             .with_fields(vec![
@@ -129,9 +135,13 @@ pub fn schema() -> Schema {
             .with_sequences(vec![seq(
                 "via",
                 ElementType::Name(STATES.map(name).to_vec()),
-            )]),
-        scan("ir-scan"),
-        scan("dr-scan"),
+            )])
+            .with_labels(vec![
+                Label::default().field(FROM).text(" to ").field(TO),
+                Label::default().field(TO),
+            ]),
+        scan("ir-scan", "IR"),
+        scan("dr-scan", "DR"),
     ])
     .with_reasons([
         "the recording has no TDO channel",

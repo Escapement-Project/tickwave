@@ -8,11 +8,10 @@
 //! shaded as the waveform's lost time is, input not decoded yet is hatched, and decoded input with
 //! nothing in it is left bare, so the three differ without hue.
 
-use std::borrow::Cow;
-
 use egui::{Align2, Rect, Response, Sense, Shape, Stroke, Ui, Widget, pos2, vec2};
 use escapement_tickwave_decode::{
-    Element, FieldId, FieldType, Id, Item, KindId, Schema, Span, Status, Tick, Value,
+    Element, FieldId, FieldType, Id, Item, KindId, Label, LabelPiece, Schema, Span, Status, Tick,
+    Value,
 };
 use escapement_tickwave_view::format::annotations::Role;
 use escapement_tickwave_view::format::mapping::Mapping;
@@ -32,46 +31,24 @@ const BIT: f32 = 9.0;
 const PAD: f32 = 3.0;
 const HATCH: f32 = 6.0;
 
-/// One piece of a label: text, or a field's value as the item holds it.
-#[derive(Clone, Debug)]
-#[non_exhaustive]
-pub enum Piece {
-    Text(Cow<'static, str>),
-    Field(FieldId),
-}
-
-/// A label over an item's typed values. A piece whose field the item does not hold is left out.
-#[derive(Clone, Debug, Default)]
-pub struct Template(pub Vec<Piece>);
-
-impl Template {
-    pub fn text(mut self, t: impl Into<Cow<'static, str>>) -> Self {
-        self.0.push(Piece::Text(t.into()));
-        self
-    }
-
-    pub fn field(mut self, f: FieldId) -> Self {
-        self.0.push(Piece::Field(f));
-        self
-    }
-}
-
-/// Each kind's labels, fullest first: a track draws the first that fits its item, else none.
+/// Labels a host gives over those the schema declares, by kind, fullest first: a track draws the
+/// first that fits its item, else none.
 #[derive(Clone, Debug, Default)]
 pub struct Labels {
-    by_kind: Vec<(KindId, Vec<Template>)>,
+    by_kind: Vec<(KindId, Vec<Label>)>,
 }
 
 impl Labels {
-    pub fn kind(mut self, kind: KindId, templates: Vec<Template>) -> Self {
-        self.by_kind.push((kind, templates));
+    /// `kind`'s labels in place of its schema's.
+    pub fn kind(mut self, kind: KindId, labels: Vec<Label>) -> Self {
+        self.by_kind.push((kind, labels));
         self
     }
 
-    fn of(&self, kind: KindId) -> &[Template] {
+    fn of(&self, kind: KindId) -> Option<&[Label]> {
         (self.by_kind.iter())
             .find(|(k, _)| *k == kind)
-            .map_or(&[], |(_, t)| t.as_slice())
+            .map(|(_, l)| l.as_slice())
     }
 }
 
@@ -100,16 +77,18 @@ pub fn value_text(schema: &Schema, kind: KindId, field: FieldId, value: &Value) 
     }
 }
 
-fn label(schema: &Schema, item: &Item, t: &Template) -> String {
+fn label(schema: &Schema, item: &Item, t: &Label) -> String {
     let mut out = String::new();
     for p in &t.0 {
         match p {
-            Piece::Text(s) => out.push_str(s),
-            Piece::Field(f) => {
+            LabelPiece::Text(s) => out.push_str(s),
+            LabelPiece::Field(f) => {
                 if let Some(x) = item.field(*f) {
                     out.push_str(&value_text(schema, item.id.kind, *f, &x.value));
                 }
             }
+            // A piece newer than this view: left out.
+            _ => {}
         }
     }
     out.trim().to_string()
@@ -734,7 +713,8 @@ impl Track<'_> {
             let stroke = Stroke::new(1.0, if marked { p.attention_ink } else { p.ink_2 });
             shapes.push(Shape::rect_stroke(r, 2.0, stroke, egui::StrokeKind::Inside));
             let room = r.width() - 2.0 * PAD;
-            for t in self.labels.of(item.id.kind) {
+            let declared = (self.schema.kind(item.id.kind)).map_or(&[][..], |k| &k.labels[..]);
+            for t in self.labels.of(item.id.kind).unwrap_or(declared) {
                 let text = label(self.schema, item, t);
                 if text.is_empty() {
                     continue;
@@ -813,11 +793,13 @@ impl Track<'_> {
                 }
                 continue;
             }
-            // Its value where that fits, else its field's name, else the name's first three
-            // letters, else nothing.
+            // Its value where that fits, else its field's name, else the short name its field
+            // declares or the name's first three letters, else nothing.
             let value = value_text(self.schema, item.id.kind, f.field, &f.value);
             let field = name.map_or(String::new(), |n| n.to_string());
-            let short: String = field.chars().take(3).collect();
+            let decl = kind.and_then(|k| k.fields.get(usize::from(f.field.0)));
+            let short = (decl.and_then(|d| d.short.as_ref()))
+                .map_or_else(|| field.chars().take(3).collect(), |s| s.to_string());
             for text in [value, field, short] {
                 if text.is_empty() {
                     continue;

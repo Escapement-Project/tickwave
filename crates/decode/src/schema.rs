@@ -3,7 +3,7 @@
 //! loaded at run time hands one over owned. The host checks it when the decoder is added, then
 //! every operation against it.
 
-use crate::output::{Id, KindId, Op, Ref, Status, Value};
+use crate::output::{FieldId, Id, KindId, Op, Ref, Status, Value};
 use std::{borrow::Cow, collections::HashSet, fmt};
 
 pub type Name = Cow<'static, str>;
@@ -132,6 +132,33 @@ pub enum ElementType {
 pub struct FieldDecl {
     pub name: Name,
     pub ty: FieldType,
+    /// What a part too narrow for the field's name shows; None for the name's first three
+    /// letters.
+    pub short: Option<Name>,
+}
+
+/// A piece of a label: text, or one of the item's fields, by its index in its kind's fields.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LabelPiece {
+    Text(Name),
+    Field(FieldId),
+}
+
+/// A label over an item's typed values. A field the item does not hold is left out.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Label(pub Vec<LabelPiece>);
+
+impl Label {
+    pub fn text(mut self, t: impl Into<Name>) -> Self {
+        self.0.push(LabelPiece::Text(t.into()));
+        self
+    }
+
+    pub fn field(mut self, f: FieldId) -> Self {
+        self.0.push(LabelPiece::Field(f));
+        self
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -171,6 +198,8 @@ pub struct KindDecl {
     /// numbers, each as many lanes high as its kinds' most, and only kinds of one row share
     /// lanes. A child kind goes in a row under its parents', since its items lie inside theirs.
     pub row: usize,
+    /// Its labels, fullest first: a view shows the first that fits an item, else none.
+    pub labels: Vec<Label>,
 }
 
 /// What an analysis may emit.
@@ -369,6 +398,7 @@ impl KindDecl {
             links: vec![],
             lanes: 1,
             row: 0,
+            labels: vec![],
         }
     }
 
@@ -401,6 +431,11 @@ impl KindDecl {
         self.links = links;
         self
     }
+
+    pub fn with_labels(mut self, labels: Vec<Label>) -> Self {
+        self.labels = labels;
+        self
+    }
 }
 
 impl FieldDecl {
@@ -408,7 +443,13 @@ impl FieldDecl {
         Self {
             name: name.into(),
             ty,
+            short: None,
         }
+    }
+
+    pub fn with_short(mut self, short: impl Into<Name>) -> Self {
+        self.short = Some(short.into());
+        self
     }
 }
 
@@ -437,6 +478,7 @@ pub const fn field(name: &'static str, ty: FieldType) -> FieldDecl {
     FieldDecl {
         name: Cow::Borrowed(name),
         ty,
+        short: None,
     }
 }
 pub const fn seq(name: &'static str, element: ElementType) -> SeqDecl {
@@ -455,6 +497,9 @@ pub const MAX_LINK_ROLES: usize = 16;
 pub const MAX_LINK_TARGETS: usize = 16;
 pub const MAX_ROLES: usize = 64;
 pub const MAX_LIST: usize = 256;
+/// The most labels a kind declares, and the most pieces in one.
+pub const MAX_LABELS: usize = 8;
+pub const MAX_LABEL_PIECES: usize = 32;
 pub const MAX_FIELD_NAMES: usize = 4096;
 pub const MAX_NAME: usize = 64;
 /// The longest reason, need or cause: display text a reader is shown, not an identifier.
@@ -498,6 +543,8 @@ pub enum SchemaError {
     DuplicateChoice { setting: Name, name: Name },
     #[error("setting {0}'s default is not a value it takes")]
     SettingDefault(Name),
+    #[error("kind {0}: a label shows a field it does not declare")]
+    LabelField(Name),
 }
 
 /// An operation its analysis's schema does not allow.
@@ -686,6 +733,9 @@ impl Schema {
             let mut names = HashSet::new();
             for f in k.fields.iter() {
                 named(&f.name)?;
+                if let Some(short) = &f.short {
+                    named(short)?;
+                }
                 if !names.insert(&f.name) {
                     return Err(dup(&f.name));
                 }
@@ -701,6 +751,19 @@ impl Schema {
                         return Err(over(&f.name));
                     }
                     _ => {}
+                }
+            }
+            at_most(k.labels.len(), MAX_LABELS, "labels")?;
+            for l in &k.labels {
+                at_most(l.0.len(), MAX_LABEL_PIECES, "label pieces")?;
+                for piece in &l.0 {
+                    match piece {
+                        LabelPiece::Text(t) => named(t)?,
+                        LabelPiece::Field(f) if usize::from(f.0) >= k.fields.len() => {
+                            return Err(SchemaError::LabelField(k.name.clone()));
+                        }
+                        LabelPiece::Field(_) => {}
+                    }
                 }
             }
             // A sequence may share its name with a field: a part and its bits.

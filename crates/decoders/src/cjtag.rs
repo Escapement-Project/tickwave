@@ -16,9 +16,9 @@ mod tap7;
 use crate::jtag::{self, Clocked, Inputs, Tap};
 use escapement_tickwave_decode::{
     AnalysisId, Cause, Decoder, Definition, Delivery, Element, ElementType, Exchange, Factory,
-    FieldId, FieldType, Id, KindDecl, KindId, Mode, Observation, Observed, Op, Out, Pause, Reason,
-    Request, Role, Schema, SeqId, Setting, SettingDecl, SettingId, Span, Status, Subscription,
-    Tick, Value, Window, field, name, seq,
+    FieldId, FieldType, Id, KindDecl, KindId, Label, Mode, Observation, Observed, Op, Out, Pause,
+    Reason, Request, Role, Schema, SeqId, Setting, SettingDecl, SettingId, Span, Status,
+    Subscription, Tick, Value, Window, field, name, seq,
 };
 use std::sync::Arc;
 use tap7::{Driver, Escape, Ev, MNEMONICS, Tap7, format_name};
@@ -126,20 +126,38 @@ pub fn schema() -> Schema {
                 field("toggles", FieldType::Word { bits: 8 }),
                 field("meaning", names(&MEANINGS)),
             ])
-            .with_sequences(vec![seq("toggles", bit())]),
+            .with_sequences(vec![seq("toggles", bit())])
+            .with_labels(vec![
+                Label::default().field(MEANING).text(" escape"),
+                Label::default().field(MEANING),
+            ]),
         KindDecl::new("jscan")
             .with_row(3)
             .with_fields(vec![field("protocol", names(&["Standard (JScan)"]))])
-            .with_sequences(vec![seq("tms", bit())]),
-        KindDecl::new("level").with_row(1).with_fields(vec![
-            field("level", FieldType::Word { bits: 3 }),
-            field("use", names(&LEVEL_USES)),
-        ]),
+            .with_sequences(vec![seq("tms", bit())])
+            .with_labels(vec![
+                Label::default().field(PROTOCOL),
+                Label::default().text("JScan"),
+            ]),
+        KindDecl::new("level")
+            .with_row(1)
+            .with_fields(vec![
+                field("level", FieldType::Word { bits: 3 }),
+                field("use", names(&LEVEL_USES)),
+            ])
+            .with_labels(vec![
+                Label::default().text("control level ").field(CONTROL_LEVEL),
+                Label::default().text("CL ").field(CONTROL_LEVEL),
+            ]),
         KindDecl::new("check")
             .with_row(2)
             .with_parents(["level"])
             .with_fields(vec![field("result", names(&RESULTS))])
-            .with_sequences(vec![seq("bits", bit())]),
+            .with_sequences(vec![seq("bits", bit())])
+            .with_labels(vec![
+                Label::default().text("check ").field(RESULT),
+                Label::default().field(RESULT),
+            ]),
         KindDecl::new("command")
             .with_row(2)
             .with_parents(["level"])
@@ -148,16 +166,27 @@ pub fn schema() -> Schema {
                 field("operand", FieldType::Word { bits: 5 }),
                 field("effect", text(64)),
                 field("shifts", text(32)),
+            ])
+            .with_labels(vec![
+                Label::default().field(OPCODE).text(" ").field(OPERAND),
+                Label::default().field(OPCODE),
             ]),
-        KindDecl::new("format").with_fields(vec![
-            field("format", text(16)),
-            field("sampling", names(&["TCKC rise", "TCKC fall"])),
-        ]),
+        KindDecl::new("format")
+            .with_fields(vec![
+                field("format", text(16)),
+                field("sampling", names(&["TCKC rise", "TCKC fall"])),
+            ])
+            .with_labels(vec![
+                (Label::default().field(SCAN_FORMAT))
+                    .text(", sampled at ")
+                    .field(SAMPLING),
+                Label::default().field(SCAN_FORMAT),
+            ]),
         KindDecl::new("packet")
             .with_row(3)
             .with_fields(vec![
                 field("format", text(16)),
-                field("ntdi", FieldType::Bool),
+                field("ntdi", FieldType::Bool).with_short("n"),
                 field("tms", FieldType::Bool),
                 field("pad", FieldType::Bool),
                 field("tdo", FieldType::Bool),
@@ -170,7 +199,8 @@ pub fn schema() -> Schema {
                 seq("tms", bit()),
                 seq("pad", bit()),
                 seq("tdo", bit()),
-            ]),
+            ])
+            .with_labels(vec![Label::default().field(PACKET_FORMAT)]),
     ])
     .with_roles(["probe", "target"])
     .with_reasons(["the target's coupling is not established, so its drive of TDO is not assumed"])

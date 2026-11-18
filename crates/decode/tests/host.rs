@@ -2232,3 +2232,46 @@ fn a_checkpoint_restores_only_where_the_settings_are_the_same() {
         Err(CheckpointError::Incompatible)
     ));
 }
+
+#[test]
+fn a_label_that_shows_a_field_its_kind_does_not_declare_is_refused() {
+    let schema = |labels: Vec<escapement_tickwave_decode::Label>| {
+        Schema::new(vec![
+            KindDecl::new("a")
+                .with_fields(vec![
+                    field("n", FieldType::Word { bits: 8 }).with_short("N"),
+                ])
+                .with_labels(labels),
+        ])
+    };
+    let add = |schema: Schema| {
+        Host::default().add(
+            name("a"),
+            Arc::new(Definition::new("a", 1, schema).with_ports(["line"])),
+            InputSpec::Wire {
+                source: Box::new(Nothing::default()),
+                local: None,
+            },
+            Box::new(|_, _| Box::new(Swallow)),
+            &[],
+            all(),
+        )
+    };
+    let label = escapement_tickwave_decode::Label::default;
+    assert!(add(schema(vec![label().text("n ").field(FieldId(0))])).is_ok());
+    assert!(matches!(
+        add(schema(vec![label().field(FieldId(1))])),
+        Err(BindError::Schema(SchemaError::LabelField(k))) if k == "a"
+    ));
+    assert!(matches!(
+        add(schema(vec![label().text("")])),
+        Err(BindError::Schema(SchemaError::BadName))
+    ));
+    assert!(matches!(
+        add(schema(vec![
+            label();
+            escapement_tickwave_decode::MAX_LABELS + 1
+        ])),
+        Err(BindError::Schema(SchemaError::TooMany { .. }))
+    ));
+}

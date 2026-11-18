@@ -23,7 +23,7 @@ use escapement_tickwave_decode::{
 };
 use escapement_tickwave_decoders::{adiv5, cjtag, jtag, swd};
 use escapement_tickwave_egui::track::{
-    Density, Labels, Template, Track, condition, decoder_roles, driver_paints, value_text,
+    Density, Labels, Track, condition, decoder_roles, driver_paints, value_text,
 };
 use escapement_tickwave_egui::{Graph, ViewState, Viewer, Window};
 use escapement_tickwave_view::cursor::timeline_map;
@@ -50,14 +50,6 @@ fn open(path: &Path) -> Arc<Recording> {
     Arc::new(Recording::open(Arc::new(file), Cache::new(16 << 20)).unwrap())
 }
 
-/// A label template from text and fields.
-fn t(pieces: &[Result<&'static str, escapement_tickwave_decode::FieldId>]) -> Template {
-    pieces.iter().fold(Template::default(), |t, p| match p {
-        Ok(text) => t.text(*text),
-        Err(f) => t.field(*f),
-    })
-}
-
 /// A recording, the lanes its graph shows, and the analyses drawn under it.
 struct Case {
     path: PathBuf,
@@ -82,22 +74,6 @@ fn swd_case() -> Case {
         size: SIZE,
         provisional: false,
     }
-}
-
-fn jtag_labels() -> Labels {
-    let scan =
-        |head: &'static str| vec![t(&[Ok(head), Ok(" "), Err(jtag::TDI_HEAD)]), t(&[Ok(head)])];
-    Labels::default()
-        .kind(jtag::STATE, vec![t(&[Err(jtag::TAP_STATE)])])
-        .kind(
-            jtag::PATH,
-            vec![
-                t(&[Err(jtag::FROM), Ok(" to "), Err(jtag::TO)]),
-                t(&[Err(jtag::TO)]),
-            ],
-        )
-        .kind(jtag::IR_SCAN, scan("IR"))
-        .kind(jtag::DR_SCAN, scan("DR"))
 }
 
 /// One analysis's store as a track draws it.
@@ -150,7 +126,7 @@ fn jtag_case(path: &Path) -> Case {
     Case {
         path: path.to_path_buf(),
         lanes,
-        decoded: vec![decoded(&h, j, "JTAG", jtag_labels(), &map, false)],
+        decoded: vec![decoded(&h, j, "JTAG", Labels::default(), &map, false)],
         map,
         painted: vec![],
         size: SIZE,
@@ -200,57 +176,13 @@ fn cjtag_case(path: &Path, ahead: Tick) -> Case {
         assert!(h.finished(c).is_none(), "no scan format in the recording");
     };
     h.run_until(|h| h.settled(j) >= format + ahead).unwrap();
-    let labels = Labels::default()
-        .kind(
-            cjtag::ESCAPE,
-            vec![
-                t(&[Err(cjtag::MEANING), Ok(" escape")]),
-                t(&[Err(cjtag::MEANING)]),
-            ],
-        )
-        .kind(
-            cjtag::JSCAN,
-            vec![t(&[Err(cjtag::PROTOCOL)]), t(&[Ok("JScan")])],
-        )
-        .kind(
-            cjtag::LEVEL,
-            vec![
-                t(&[Ok("control level "), Err(cjtag::CONTROL_LEVEL)]),
-                t(&[Ok("CL "), Err(cjtag::CONTROL_LEVEL)]),
-            ],
-        )
-        .kind(
-            cjtag::CHECK,
-            vec![
-                t(&[Ok("check "), Err(cjtag::RESULT)]),
-                t(&[Err(cjtag::RESULT)]),
-            ],
-        )
-        .kind(
-            cjtag::COMMAND,
-            vec![
-                t(&[Err(cjtag::OPCODE), Ok(" "), Err(cjtag::OPERAND)]),
-                t(&[Err(cjtag::OPCODE)]),
-            ],
-        )
-        .kind(
-            cjtag::FORMAT,
-            vec![
-                t(&[
-                    Err(cjtag::SCAN_FORMAT),
-                    Ok(", sampled at "),
-                    Err(cjtag::SAMPLING),
-                ]),
-                t(&[Err(cjtag::SCAN_FORMAT)]),
-            ],
-        )
-        .kind(cjtag::PACKET, vec![t(&[Err(cjtag::PACKET_FORMAT)])]);
+    let labels = Labels::default();
     Case {
         path: path.to_path_buf(),
         lanes,
         decoded: vec![
             decoded(&h, c, "cJTAG", labels, &map, true),
-            decoded(&h, j, "JTAG", jtag_labels(), &map, false),
+            decoded(&h, j, "JTAG", Labels::default(), &map, false),
         ],
         map,
         painted: vec!["TMSC".into()],
@@ -317,64 +249,13 @@ fn decode_with(path: &Path, mem: bool) -> (Vec<Decoded>, Mapping, [usize; 2]) {
         .unwrap()
     });
     h.run_until(|_| false).unwrap();
-    let swd_labels = Labels::default().kind(
-        swd::TRANSFER,
-        vec![
-            t(&[
-                Err(swd::DIR),
-                Ok(" "),
-                Err(swd::PORT),
-                Ok(" "),
-                Err(swd::A),
-                Ok(" "),
-                Err(swd::ACK),
-                Ok(" "),
-                Err(swd::DATA),
-            ]),
-            t(&[
-                Err(swd::DIR),
-                Ok(" "),
-                Err(swd::PORT),
-                Ok(" "),
-                Err(swd::A),
-                Ok(" "),
-                Err(swd::ACK),
-            ]),
-            t(&[Err(swd::PORT)]),
-        ],
-    );
-    let dp = vec![
-        t(&[Err(adiv5::DP_REG), Ok(" "), Err(adiv5::DP_VALUE)]),
-        t(&[Err(adiv5::DP_REG)]),
-    ];
-    let ap = vec![
-        t(&[
-            Ok("AP "),
-            Err(adiv5::AP_NAME),
-            Ok(" "),
-            Err(adiv5::AP_VALUE),
-        ]),
-        t(&[Err(adiv5::AP_NAME)]),
-    ];
-    let adi_labels = Labels::default()
-        .kind(adiv5::DP_READ, dp.clone())
-        .kind(adiv5::DP_WRITE, dp)
-        .kind(adiv5::AP_READ, ap.clone())
-        .kind(adiv5::AP_WRITE, ap);
     // The lanes each level draws in come from its schema: ADIv5's AP reads may overlap.
     let mut out = vec![
-        decoded(&h, s, "SWD", swd_labels, &map, true),
-        decoded(&h, a, "ADIv5", adi_labels, &map, false),
+        decoded(&h, s, "SWD", Labels::default(), &map, true),
+        decoded(&h, a, "ADIv5", Labels::default(), &map, false),
     ];
     if let Some(m) = m {
-        let access = vec![
-            t(&[Err(adiv5::MEM_NAME), Ok(" "), Err(adiv5::MEM_VALUE)]),
-            t(&[Err(adiv5::MEM_NAME)]),
-        ];
-        let mem_labels = Labels::default()
-            .kind(adiv5::MEM_READ, access.clone())
-            .kind(adiv5::MEM_WRITE, access);
-        out.push(decoded(&h, m, "MEM-AP", mem_labels, &map, false));
+        out.push(decoded(&h, m, "MEM-AP", Labels::default(), &map, false));
     }
     (out, map, lanes)
 }

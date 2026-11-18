@@ -13,8 +13,8 @@
 use crate::swd;
 use escapement_tickwave_decode::{
     AnalysisId, Cause, Completed, Decoder, Definition, Delivery, Exchange, Factory, FieldId,
-    FieldType, Id, KindDecl, KindId, LinkDecl, LinkId, LinkTo, Mode, Need, Op, Out, Pause, Reason,
-    Ref, Schema, Span, Status, Subscription, Tick, Value, field, name,
+    FieldType, Id, KindDecl, KindId, Label, LinkDecl, LinkId, LinkTo, Mode, Need, Op, Out, Pause,
+    Reason, Ref, Schema, Span, Status, Subscription, Tick, Value, field, name,
 };
 use foldhash::HashMap;
 use std::sync::Arc;
@@ -104,6 +104,10 @@ pub fn adi_schema() -> Schema {
                 LinkDecl::new("transfer", vec![transfer()]),
                 LinkDecl::new("context", vec![dp_write()]),
             ])
+            .with_labels(vec![
+                Label::default().field(DP_REG).text(" ").field(DP_VALUE),
+                Label::default().field(DP_REG),
+            ])
     };
     let ap = |kind: &'static str, links| {
         KindDecl::new(kind)
@@ -115,6 +119,12 @@ pub fn adi_schema() -> Schema {
                 field("value", w(32)),
             ])
             .with_links(links)
+            .with_labels(vec![
+                (Label::default().text("AP ").field(AP_NAME))
+                    .text(" ")
+                    .field(AP_VALUE),
+                Label::default().field(AP_NAME),
+            ])
     };
     Schema::new(vec![
         KindDecl::new("context")
@@ -580,6 +590,13 @@ pub fn mem_schema() -> Schema {
                     ],
                 ),
                 LinkDecl::new("increment from", access()),
+            ])
+            .with_labels(vec![
+                (Label::default().field(ADDRESS).text(" ").field(MEM_NAME))
+                    .text(" ")
+                    .field(MEM_VALUE),
+                Label::default().field(MEM_NAME).text(" ").field(MEM_VALUE),
+                Label::default().field(MEM_NAME),
             ])
     };
     Schema::new(vec![
