@@ -1,0 +1,10 @@
+[package]
+name = "escapement-tickwave-decode"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror = "2.0.21"

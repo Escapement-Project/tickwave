@@ -1,0 +1,478 @@
+//! What a decoder declares: its name and versions, and the schema its output keeps to. A schema is
+//! data: a decoder built into tickwave declares one statically through borrowed names, and one
+//! loaded at run time hands one over owned. The host checks it when the decoder is added, then
+//! every operation against it.
+
+use crate::output::{Id, KindId, Op, Ref, Status, Value};
+use std::{borrow::Cow, collections::HashSet, fmt};
+
+pub type Name = Cow<'static, str>;
+
+/// A version of the decoder contract. A host whose contract is `M.h` runs a decoder that targets
+/// `M.m` for every `m <= h`: a minor version only adds to what a decoder may use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Contract {
+    pub major: u16,
+    pub minor: u16,
+}
+
+/// The contract this host implements.
+pub const CONTRACT: Contract = Contract { major: 1, minor: 0 };
+
+impl Contract {
+    /// Whether a host of this contract runs a decoder that targets `wanted`.
+    pub fn runs(self, wanted: Contract) -> bool {
+        wanted.major == self.major && wanted.minor <= self.minor
+    }
+}
+
+impl fmt::Display for Contract {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}", self.major, self.minor)
+    }
+}
+
+/// A decoder as the host adds it.
+#[derive(Clone, Debug)]
+pub struct Definition {
+    /// The decoder's name, which a recipe names.
+    pub name: Name,
+    /// Its major version, which is its output schema's: kinds and fields keep their meaning within
+    /// it.
+    pub version: u32,
+    /// The decoder contract it targets.
+    pub contract: Contract,
+    pub schema: Schema,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FieldType {
+    /// A spanned part with no value, such as a turnaround.
+    Phase,
+    Bool,
+    Word {
+        bits: u8,
+    },
+    Name(Vec<Name>),
+    Text {
+        max: usize,
+    },
+    Bits {
+        max: u32,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ElementType {
+    Bit,
+    /// An index into a declared list of at most 256 names, such as TAP states.
+    Name(Vec<Name>),
+}
+
+#[derive(Clone, Debug)]
+pub struct FieldDecl {
+    pub name: Name,
+    pub ty: FieldType,
+}
+
+#[derive(Clone, Debug)]
+pub struct SeqDecl {
+    pub name: Name,
+    pub element: ElementType,
+}
+
+/// A kind a link may point to, by name: one of this analysis's, or of the analysis it is stacked
+/// on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LinkTo {
+    Own(Name),
+    Upstream(Name),
+}
+
+#[derive(Clone, Debug)]
+pub struct LinkDecl {
+    pub role: Name,
+    pub to: Vec<LinkTo>,
+}
+
+#[derive(Clone, Debug)]
+pub struct KindDecl {
+    pub name: Name,
+    pub parents: Vec<Name>,
+    pub fields: Vec<FieldDecl>,
+    pub sequences: Vec<SeqDecl>,
+    pub links: Vec<LinkDecl>,
+}
+
+/// What an analysis may emit.
+#[derive(Clone, Debug)]
+pub struct Schema {
+    pub kinds: Vec<KindDecl>,
+    /// Driver roles, in phase 7d's sense; a spanned field names one.
+    pub roles: Vec<Name>,
+    /// Why a value may be unknown.
+    pub reasons: Vec<Name>,
+    /// What an unknown value may need to be known.
+    pub needs: Vec<Name>,
+    /// Why an item may close incomplete.
+    pub causes: Vec<Name>,
+    /// The most items the analysis holds open at once, its declared bound on protocol state. The
+    /// host refuses a batch that leaves more open.
+    pub open_at_most: usize,
+}
+
+pub const fn name(s: &'static str) -> Name {
+    Cow::Borrowed(s)
+}
+pub const fn field(name: &'static str, ty: FieldType) -> FieldDecl {
+    FieldDecl {
+        name: Cow::Borrowed(name),
+        ty,
+    }
+}
+pub const fn seq(name: &'static str, element: ElementType) -> SeqDecl {
+    SeqDecl {
+        name: Cow::Borrowed(name),
+        element,
+    }
+}
+
+/// Bounds on a schema, so one handed over as data cannot make the host's checks unbounded.
+pub const MAX_KINDS: usize = 256;
+pub const MAX_SEQUENCES: usize = 16;
+pub const MAX_LINK_ROLES: usize = 16;
+pub const MAX_LINK_TARGETS: usize = 16;
+pub const MAX_ROLES: usize = 64;
+pub const MAX_LIST: usize = 256;
+pub const MAX_FIELD_NAMES: usize = 4096;
+pub const MAX_NAME: usize = 64;
+
+/// A schema that cannot be loaded.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum SchemaError {
+    #[error("kind {kind}: {name} is declared twice")]
+    Duplicate { kind: Name, name: Name },
+    #[error("kind {kind}: no kind {parent} to be its parent")]
+    UnknownParent { kind: Name, parent: Name },
+    #[error("kind {kind}: {name} declares no names")]
+    EmptyNames { kind: Name, name: Name },
+    #[error("kind {kind}: {name} is past the host's bounds")]
+    OverBound { kind: Name, name: Name },
+    #[error("too many {what}")]
+    TooMany { what: &'static str },
+    #[error("a name is empty or longer than {MAX_NAME} bytes")]
+    BadName,
+    #[error("kind {kind}: link {role} points to no kind {to}")]
+    UnknownLinkTarget { kind: Name, role: Name, to: Name },
+    #[error("the open-item bound {0} is not between 1 and the host's")]
+    OpenBound(usize),
+}
+
+/// An operation its analysis's schema does not allow.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum Mismatch {
+    #[error("no kind {0:?}")]
+    Kind(KindId),
+    #[error("{kind:?} cannot have a {parent:?} for parent")]
+    Parent { kind: KindId, parent: KindId },
+    #[error("{kind:?} has no field {field}")]
+    Field { kind: KindId, field: u16 },
+    #[error("{kind:?}'s field {field} does not take that value")]
+    Type { kind: KindId, field: u16 },
+    #[error("{kind:?} has no sequence {seq}")]
+    Sequence { kind: KindId, seq: u16 },
+    #[error("{kind:?}'s sequence {seq} has no element {value}")]
+    Element { kind: KindId, seq: u16, value: u8 },
+    #[error("no role {0}")]
+    Role(u16),
+    #[error("no reason {0}")]
+    Reason(u16),
+    #[error("no need {0}")]
+    Need(u16),
+    #[error("no cause {0}")]
+    Cause(u16),
+    #[error("{kind:?} has no link {link}")]
+    Link { kind: KindId, link: u16 },
+    #[error("{kind:?}'s link {link} cannot point to {to:?}")]
+    LinkTarget { kind: KindId, link: u16, to: Ref },
+    /// A phase, and any value with a driver, needs a span.
+    #[error("{kind:?}'s field {field} needs a span")]
+    Unspanned { kind: KindId, field: u16 },
+}
+
+fn named(n: &Name) -> Result<(), SchemaError> {
+    if n.is_empty() || n.len() > MAX_NAME {
+        return Err(SchemaError::BadName);
+    }
+    Ok(())
+}
+
+fn at_most(len: usize, most: usize, what: &'static str) -> Result<(), SchemaError> {
+    if len > most {
+        return Err(SchemaError::TooMany { what });
+    }
+    Ok(())
+}
+
+/// A schema's names resolved to indices, for checking operations without comparing strings.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Resolved {
+    /// Each kind's allowed parents.
+    parents: Vec<Vec<KindId>>,
+    /// Each kind's link roles, each with the kinds it may point to: (upstream, kind).
+    links: Vec<Vec<Vec<(bool, KindId)>>>,
+}
+
+impl Schema {
+    pub fn kind(&self, k: KindId) -> Option<&KindDecl> {
+        self.kinds.get(usize::from(k.0))
+    }
+
+    pub fn kind_id(&self, name: &str) -> Option<KindId> {
+        let k = self.kinds.iter().position(|k| k.name == name)?;
+        Some(KindId(u16::try_from(k).ok()?))
+    }
+
+    /// Checks the schema on its own: unique names, bounds within the host's, and parents and links
+    /// to its own kinds that resolve. `upstream` resolves links to the analysis it is stacked on;
+    /// `open_most` is the host's bound on open items.
+    pub(crate) fn resolve(
+        &self,
+        upstream: Option<&Schema>,
+        open_most: usize,
+    ) -> Result<Resolved, SchemaError> {
+        at_most(self.kinds.len(), MAX_KINDS, "kinds")?;
+        at_most(self.roles.len(), MAX_ROLES, "roles")?;
+        at_most(self.reasons.len(), MAX_LIST, "reasons")?;
+        at_most(self.needs.len(), MAX_LIST, "needs")?;
+        at_most(self.causes.len(), MAX_LIST, "causes")?;
+        if self.open_at_most == 0 || self.open_at_most > open_most {
+            return Err(SchemaError::OpenBound(self.open_at_most));
+        }
+        for n in self.roles.iter().chain(&self.reasons).chain(&self.needs) {
+            named(n)?;
+        }
+        for n in self.causes.iter() {
+            named(n)?;
+        }
+        let mut kinds = HashSet::new();
+        for k in self.kinds.iter() {
+            named(&k.name)?;
+            if !kinds.insert(&k.name) {
+                return Err(SchemaError::Duplicate {
+                    kind: k.name.clone(),
+                    name: k.name.clone(),
+                });
+            }
+        }
+        let mut out = Resolved::default();
+        for k in self.kinds.iter() {
+            let dup = |name: &Name| SchemaError::Duplicate {
+                kind: k.name.clone(),
+                name: name.clone(),
+            };
+            let over = |name: &Name| SchemaError::OverBound {
+                kind: k.name.clone(),
+                name: name.clone(),
+            };
+            let empty = |name: &Name| SchemaError::EmptyNames {
+                kind: k.name.clone(),
+                name: name.clone(),
+            };
+            at_most(k.fields.len(), crate::MAX_FIELDS, "fields")?;
+            at_most(k.sequences.len(), MAX_SEQUENCES, "sequences")?;
+            at_most(k.links.len(), MAX_LINK_ROLES, "link roles")?;
+            at_most(k.parents.len(), MAX_KINDS, "parents")?;
+            let mut names = HashSet::new();
+            for f in k.fields.iter() {
+                named(&f.name)?;
+                if !names.insert(&f.name) {
+                    return Err(dup(&f.name));
+                }
+                match &f.ty {
+                    FieldType::Name(list) if list.is_empty() => return Err(empty(&f.name)),
+                    FieldType::Name(list) if list.len() > MAX_FIELD_NAMES => {
+                        return Err(over(&f.name));
+                    }
+                    FieldType::Word { bits } if *bits == 0 || *bits > 64 => {
+                        return Err(over(&f.name));
+                    }
+                    FieldType::Text { max } if *max > crate::MAX_TEXT => {
+                        return Err(over(&f.name));
+                    }
+                    FieldType::Bits { max } if *max > crate::MAX_BITS => {
+                        return Err(over(&f.name));
+                    }
+                    _ => {}
+                }
+            }
+            // A sequence may share its name with a field: a part and its bits.
+            let mut seqs = HashSet::new();
+            for s in k.sequences.iter() {
+                named(&s.name)?;
+                if !seqs.insert(&s.name) {
+                    return Err(dup(&s.name));
+                }
+                if let ElementType::Name(list) = &s.element
+                    && (list.is_empty() || list.len() > MAX_LIST)
+                {
+                    return Err(empty(&s.name));
+                }
+            }
+            let mut parents = vec![];
+            for p in k.parents.iter() {
+                let id = self.kind_id(p).ok_or_else(|| SchemaError::UnknownParent {
+                    kind: k.name.clone(),
+                    parent: p.clone(),
+                })?;
+                parents.push(id);
+            }
+            let mut roles = HashSet::new();
+            let mut links = vec![];
+            for l in k.links.iter() {
+                named(&l.role)?;
+                if !roles.insert(&l.role) {
+                    return Err(dup(&l.role));
+                }
+                at_most(l.to.len(), MAX_LINK_TARGETS, "link targets")?;
+                let mut to = vec![];
+                for t in l.to.iter() {
+                    let (up, kind) = match t {
+                        LinkTo::Own(n) => (false, self.kind_id(n).ok_or(n)),
+                        LinkTo::Upstream(n) => (true, upstream.and_then(|u| u.kind_id(n)).ok_or(n)),
+                    };
+                    let kind = kind.map_err(|n| SchemaError::UnknownLinkTarget {
+                        kind: k.name.clone(),
+                        role: l.role.clone(),
+                        to: n.clone(),
+                    })?;
+                    to.push((up, kind));
+                }
+                links.push(to);
+            }
+            out.parents.push(parents);
+            out.links.push(links);
+        }
+        Ok(out)
+    }
+
+    fn check_value(kind: &KindDecl, field: u16, value: &Value) -> bool {
+        let Some(f) = kind.fields.get(usize::from(field)) else {
+            return false;
+        };
+        match (value, &f.ty) {
+            (Value::Unknown { .. }, _) => true,
+            (Value::Phase, FieldType::Phase) | (Value::Bool(_), FieldType::Bool) => true,
+            (Value::Word { value, bits }, FieldType::Word { bits: b }) => {
+                *bits == *b && (*b >= 64 || value >> b == 0)
+            }
+            (Value::Name(n), FieldType::Name(list)) => usize::from(*n) < list.len(),
+            (Value::Text(t), FieldType::Text { max }) => t.len() <= *max,
+            (Value::Bits { bits, .. }, FieldType::Bits { max }) => bits <= max,
+            _ => false,
+        }
+    }
+
+    /// Checks one operation against the schema. It needs nothing but the operation: the kind
+    /// travels in the item's id.
+    pub(crate) fn check(&self, r: &Resolved, op: &Op) -> Result<(), Mismatch> {
+        let id: &Id = op.id();
+        let k = id.kind;
+        let kind = self.kind(k).ok_or(Mismatch::Kind(k))?;
+        let ki = usize::from(k.0);
+        match op {
+            Op::Open { parent, .. } => {
+                if let Some(p) = parent
+                    && !r.parents.get(ki).is_some_and(|ps| ps.contains(&p.kind))
+                {
+                    return Err(Mismatch::Parent {
+                        kind: k,
+                        parent: p.kind,
+                    });
+                }
+            }
+            Op::Set {
+                field,
+                value,
+                span,
+                driver,
+                ..
+            } => {
+                let f = field.0;
+                if usize::from(f) >= kind.fields.len() {
+                    return Err(Mismatch::Field { kind: k, field: f });
+                }
+                if !Self::check_value(kind, f, value) {
+                    return Err(Mismatch::Type { kind: k, field: f });
+                }
+                if let Value::Unknown { reason, needs } = value {
+                    if usize::from(reason.0) >= self.reasons.len() {
+                        return Err(Mismatch::Reason(reason.0));
+                    }
+                    if let Some(n) = needs
+                        && usize::from(n.0) >= self.needs.len()
+                    {
+                        return Err(Mismatch::Need(n.0));
+                    }
+                }
+                if (matches!(value, Value::Phase) || driver.is_some()) && span.is_none() {
+                    return Err(Mismatch::Unspanned { kind: k, field: f });
+                }
+                if let Some(role) = driver
+                    && usize::from(role.0) >= self.roles.len()
+                {
+                    return Err(Mismatch::Role(role.0));
+                }
+            }
+            Op::Extend { seq, elements, .. } => {
+                let s = kind
+                    .sequences
+                    .get(usize::from(seq.0))
+                    .ok_or(Mismatch::Sequence {
+                        kind: k,
+                        seq: seq.0,
+                    })?;
+                let most = match &s.element {
+                    ElementType::Bit => 1,
+                    ElementType::Name(list) => list.len().saturating_sub(1),
+                };
+                if let Some(e) = elements.iter().find(|e| usize::from(e.value) > most) {
+                    return Err(Mismatch::Element {
+                        kind: k,
+                        seq: seq.0,
+                        value: e.value,
+                    });
+                }
+            }
+            Op::Link { link, other, .. } => {
+                let to = r
+                    .links
+                    .get(ki)
+                    .and_then(|ls| ls.get(usize::from(link.0)))
+                    .ok_or(Mismatch::Link {
+                        kind: k,
+                        link: link.0,
+                    })?;
+                let target = match other {
+                    Ref::Own(o) => (false, o.kind),
+                    Ref::Upstream(o) => (true, o.kind),
+                };
+                if !to.contains(&target) {
+                    return Err(Mismatch::LinkTarget {
+                        kind: k,
+                        link: link.0,
+                        to: *other,
+                    });
+                }
+            }
+            Op::Close { status, .. } => {
+                if let Status::Incomplete(c) = status
+                    && usize::from(c.0) >= self.causes.len()
+                {
+                    return Err(Mismatch::Cause(c.0));
+                }
+            }
+        }
+        Ok(())
+    }
+}
