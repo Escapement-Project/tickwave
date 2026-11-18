@@ -19,15 +19,18 @@ use std::time::Duration;
 
 use egui_kittest::Harness;
 use escapement_tickwave_decode::{
-    AnalysisId, Host, InputSpec, Schema, Span, Store, Tick, Value, name, wire::WireSource,
+    AnalysisId, Host, Id, InputSpec, Ref, Schema, Span, Store, Tick, Value, name, wire::WireSource,
 };
 use escapement_tickwave_decoders::{adiv5, cjtag, jtag, swd};
+use escapement_tickwave_egui::panel::{Panel, Selected};
 use escapement_tickwave_egui::track::{
     Density, Labels, Track, condition, decoder_roles, driver_paints, value_text,
 };
 use escapement_tickwave_egui::{Graph, ViewState, Viewer, Window};
 use escapement_tickwave_view::cursor::timeline_map;
 use escapement_tickwave_view::format::mapping::Mapping;
+use escapement_tickwave_view::format::model::Ratio;
+use escapement_tickwave_view::readouts::format_interval;
 use escapement_tickwave_view::{Cache, Recording};
 
 fn fixture() -> PathBuf {
@@ -61,6 +64,8 @@ struct Case {
     size: egui::Vec2,
     /// Drawn as a provisional window's.
     provisional: bool,
+    /// The item selected, by the index of its analysis, and shown in a side panel.
+    selected: Option<(usize, Id)>,
 }
 
 fn swd_case() -> Case {
@@ -73,6 +78,7 @@ fn swd_case() -> Case {
         painted: vec!["SWDIO".into()],
         size: SIZE,
         provisional: false,
+        selected: None,
     }
 }
 
@@ -131,6 +137,7 @@ fn jtag_case(path: &Path) -> Case {
         painted: vec![],
         size: SIZE,
         provisional: false,
+        selected: None,
     }
 }
 
@@ -188,6 +195,7 @@ fn cjtag_case(path: &Path, ahead: Tick) -> Case {
         painted: vec!["TMSC".into()],
         size: egui::vec2(1280.0, 480.0),
         provisional: false,
+        selected: None,
     }
 }
 
@@ -274,6 +282,8 @@ struct Host2 {
     heights: Vec<f32>,
     /// The window the graph drew last, for painting SWDIO by who drives it.
     shown: Option<escapement_tickwave_egui::Shown>,
+    selected: Option<(usize, Id)>,
+    timebase: Ratio,
 }
 
 /// A face whose levels are in `--series-verge`, as a page naming the series draws them.
@@ -294,8 +304,10 @@ fn harness(window: Window, case: Case) -> Harness<'static, Host2> {
         painted,
         size,
         provisional,
+        selected,
     } = case;
     let face = series_face(false);
+    let timebase = open(&path).timebase();
     let host = Host2 {
         viewer: None,
         state: {
@@ -312,60 +324,102 @@ fn harness(window: Window, case: Case) -> Harness<'static, Host2> {
         settled: Tick::MAX,
         heights: vec![],
         shown: None,
+        selected,
+        timebase,
     };
     let mut h = Harness::builder().with_size(size).wgpu().build_ui_state(
         |ui, host: &mut Host2| {
-            let Some(viewer) = &host.viewer else { return };
             ui.painter()
                 .rect_filled(ui.ctx().content_rect(), 0.0, host.face.page);
-            // The data line painted by who drives each part of the items on screen.
-            let first = &host.decoded[0];
-            let paints = host.shown.as_ref().map_or(vec![], |s| {
-                driver_paints(
-                    &first.schema,
-                    &first.store.items,
-                    &first.density,
-                    &host.map,
-                    &s.window,
-                    s.plot.end - s.plot.start,
-                )
-            });
-            let roles = decoder_roles(&first.schema);
-            let response = ui.add(
-                Graph::lanes_only(viewer, &mut host.state, &host.face.palette)
-                    .motion(false)
-                    .lanes(&host.lanes)
-                    .decoded_paint(&paints, &host.painted, &roles),
-            );
-            host.heights.clear();
-            let Some(shown) = Graph::shown(&response) else {
+            if host.selected.is_none() {
+                draw(ui, host);
                 return;
-            };
-            host.shown = Some(shown.clone());
-            for d in &host.decoded {
-                let r = ui.add(
-                    Track::new(
-                        &shown,
-                        d.name,
-                        &d.schema,
-                        &d.store.items,
-                        &d.density,
-                        &d.labels,
-                        &host.face.palette,
-                        host.map,
-                    )
-                    .settled(host.settled)
-                    .provisional(host.provisional)
-                    .parts(d.parts),
-                );
-                host.heights.push(r.rect.height());
             }
+            ui.horizontal_top(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(ui.available_width() - PANEL - ui.spacing().item_spacing.x);
+                    draw(ui, host);
+                });
+                let selected = host.selected.and_then(|(k, id)| {
+                    let d = &host.decoded[k];
+                    let item = d.store.items.get(&id)?;
+                    let upstream = k
+                        .checked_sub(1)
+                        .map(|u| (host.decoded[u].name, &host.decoded[u].schema));
+                    Some(Selected {
+                        analysis: d.name,
+                        schema: &d.schema,
+                        labels: &d.labels,
+                        item,
+                        upstream,
+                    })
+                });
+                ui.add(
+                    Panel::new(&host.face.palette, PANEL, host.timebase, host.map)
+                        .selected(selected),
+                );
+            });
         },
         host,
     );
     let viewer = Viewer::open(&h.ctx, &path).unwrap();
     h.state_mut().viewer = Some(viewer);
     h
+}
+
+/// The width of the side panel.
+const PANEL: f32 = 360.0;
+
+/// The graph and the tracks under it; a click on a track selects the item under it.
+fn draw(ui: &mut egui::Ui, host: &mut Host2) {
+    let Some(viewer) = &host.viewer else { return };
+    // The data line painted by who drives each part of the items on screen.
+    let first = &host.decoded[0];
+    let paints = host.shown.as_ref().map_or(vec![], |s| {
+        driver_paints(
+            &first.schema,
+            &first.store.items,
+            &first.density,
+            &host.map,
+            &s.window,
+            s.plot.end - s.plot.start,
+        )
+    });
+    let roles = decoder_roles(&first.schema);
+    let response = ui.add(
+        Graph::lanes_only(viewer, &mut host.state, &host.face.palette)
+            .motion(false)
+            .lanes(&host.lanes)
+            .decoded_paint(&paints, &host.painted, &roles),
+    );
+    host.heights.clear();
+    let Some(shown) = Graph::shown(&response) else {
+        return;
+    };
+    host.shown = Some(shown.clone());
+    for (k, d) in host.decoded.iter().enumerate() {
+        let selected = host.selected.filter(|(s, _)| *s == k).map(|(_, id)| id);
+        let r = ui.add(
+            Track::new(
+                &shown,
+                d.name,
+                &d.schema,
+                &d.store.items,
+                &d.density,
+                &d.labels,
+                &host.face.palette,
+                host.map,
+            )
+            .settled(host.settled)
+            .provisional(host.provisional)
+            .parts(d.parts)
+            .selected(selected),
+        );
+        if let Some(id) = Track::clicked(&r) {
+            host.selected = Some((k, id));
+        }
+        host.heights.push(r.rect.height());
+    }
 }
 
 fn settle(h: &mut Harness<'_, Host2>) {
@@ -466,6 +520,33 @@ fn shots() {
         ],
     );
 
+    // A transfer selected, beside the graph, with its acknowledgement opened; then the ADIv5
+    // access it carries.
+    let case = swd_case();
+    let ids: Vec<Id> = case.decoded[0].store.items.keys().copied().collect();
+    let transfer = ids[mid + 2];
+    let access = (case.decoded[1].store.items.values())
+        .find(|i| (i.links.iter()).any(|(_, r)| *r == Ref::Upstream(transfer)))
+        .map(|i| i.id);
+    let panel = |selected| {
+        move || Case {
+            selected: Some(selected),
+            size: egui::vec2(1280.0, 420.0),
+            ..swd_case()
+        }
+    };
+    shoot_opened(
+        &dir,
+        panel((0, transfer)),
+        &[("panel-transfer", views[1].1.clone())],
+        &["ack  OK"],
+    );
+    shoot(
+        &dir,
+        panel((1, access.unwrap())),
+        &[("panel-access", views[1].1.clone())],
+    );
+
     // JTAG: an IR scan and the DR scan after it, with the states they shift in.
     let case = jtag_case(&jtag_fixture());
     let axis = |t: Tick| case.map.axis_saturating(t);
@@ -527,9 +608,21 @@ fn shots() {
 
 /// Each view of the case `make` builds, in the day and the night face.
 fn shoot(dir: &Path, make: impl Fn() -> Case, views: &[(&str, Window)]) {
+    shoot_opened(dir, make, views, &[]);
+}
+
+/// `shoot`, with the panel's sections titled `opened` open.
+fn shoot_opened(dir: &Path, make: impl Fn() -> Case, views: &[(&str, Window)], opened: &[&str]) {
+    use egui_kittest::kittest::Queryable;
     for (name, window) in views {
         let mut h = harness(window.clone(), make());
         settle(&mut h);
+        for title in opened {
+            h.get_by_label(title).click();
+            h.step();
+            h.step();
+        }
+        h.event(egui::Event::PointerGone);
         for night in [false, true] {
             h.state_mut().face = series_face(night);
             h.ctx.set_visuals(tokens::visuals(&h.state().face));
@@ -796,4 +889,118 @@ fn cjtag_frame_times() {
         times.sort_by(f64::total_cmp);
         println!("{name}: median {:.0} us a frame", times[50]);
     }
+}
+
+/// A panel showing `item`, of the analysis `decoded[k]`, stacked on `decoded[k - 1]`.
+fn panel<'a>(
+    decoded: &'a [Decoded],
+    k: usize,
+    item: &'a escapement_tickwave_decode::Item,
+    map: Mapping,
+    path: &Path,
+) -> Harness<'a> {
+    let timebase = open(path).timebase();
+    let palette = escapement_tickwave_egui::Palette::from_visuals(&egui::Visuals::default());
+    let d = &decoded[k];
+    let upstream = k
+        .checked_sub(1)
+        .map(|u| (decoded[u].name, &decoded[u].schema));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(400.0, 900.0))
+        .build_ui(move |ui| {
+            let selected = Selected {
+                analysis: d.name,
+                schema: &d.schema,
+                labels: &d.labels,
+                item,
+                upstream,
+            };
+            ui.add(Panel::new(&palette, 360.0, timebase, map).selected(Some(selected)));
+        });
+    h.run();
+    h
+}
+
+#[test]
+fn the_panel_shows_a_selected_transfer_in_full_and_an_access_with_its_links() {
+    use egui_kittest::kittest::Queryable;
+    let (decoded, map, _) = decode(&fixture());
+    let transfer = (decoded[0].store.items.values())
+        .find(|i| i.field(swd::DATA).is_some())
+        .unwrap();
+    let mut h = panel(&decoded, 0, transfer, map, &fixture());
+    // Its fullest label: direction, port, address, acknowledgement and data.
+    let text = |f| {
+        let v = &transfer.field(f).unwrap().value;
+        value_text(&decoded[0].schema, transfer.id.kind, f, v)
+    };
+    let fullest = [swd::DIR, swd::PORT, swd::A, swd::ACK, swd::DATA]
+        .map(text)
+        .join(" ");
+    h.get_by_label(&fullest);
+    h.get_by_label(&format!("SWD/transfer/{}", transfer.id.anchor));
+    h.get_by_label_contains(" for ");
+    h.get_by_label("complete");
+    h.get_by_label("port");
+    h.get_by_label("dir");
+    h.get_by_label_contains("request  0x");
+    h.get_by_label("trn");
+    // A part opens to its span, who drives it and its bits, each at its time.
+    assert!(h.query_by_label_contains("driven by").is_none());
+    h.get_by_label_contains("data  0x").click();
+    h.run();
+    assert_eq!(h.query_all_by_label_contains(" for ").count(), 2);
+    h.get_by_label("driven by target");
+    assert_eq!(
+        h.query_all_by_label("31").count(),
+        1,
+        "32 data bits, numbered"
+    );
+    assert!(h.query_by_label("32").is_none());
+    // ADIv5 over it: an access, what it links to in SWD below, and the values it could not know.
+    let access = (decoded[1].store.items.values())
+        .find(|i| !i.links.is_empty())
+        .unwrap();
+    let h = panel(&decoded, 1, access, map, &fixture());
+    h.get_by_label(&format!(
+        "ADIv5/{}",
+        escapement_tickwave_decode::citation(decoded[1].name, &decoded[1].schema, &access.id)
+            .split_once('/')
+            .unwrap()
+            .1
+    ));
+    h.get_by_label_contains("SWD/transfer/");
+    // JTAG on its own capture: the values a scan could not know, one sentence for each reason.
+    let jtag = jtag_case(&jtag_fixture());
+    let scan = (jtag.decoded[0].store.items.values())
+        .find(|i| (i.fields.iter()).any(|f| matches!(f.value, Value::Unknown { .. })))
+        .unwrap();
+    let h = panel(&jtag.decoded, 0, scan, jtag.map, &jtag_fixture());
+    h.get_by_label_contains(" unknown: ");
+    // Its one label is the state it could not know, so it is headed by its kind.
+    h.get_by_label("state");
+}
+
+#[test]
+fn an_open_item_closing_moves_nothing_in_the_panel() {
+    use egui_kittest::kittest::Queryable;
+    let (decoded, map, _) = decode(&fixture());
+    let closed = (decoded[0].store.items.values())
+        .find(|i| i.field(swd::DATA).is_some())
+        .unwrap();
+    let mut still_open = closed.clone();
+    (still_open.end, still_open.status) = (None, None);
+    let cite = format!("SWD/transfer/{}", closed.id.anchor);
+    let timebase = open(&fixture()).timebase();
+    let start = format_interval(map.axis_saturating(closed.start), timebase, map.m());
+    // The status a label of its own, and the start, the citation and the fields where they were.
+    let places = |item, status: &str| {
+        let h = panel(&decoded, 0, item, map, &fixture());
+        let mut at = vec![h.get_by_label(status).rect().min];
+        at.extend(
+            [&start[..], &cite, "port", "data  0x"].map(|l| h.get_by_label_contains(l).rect().min),
+        );
+        at
+    };
+    assert_eq!(places(&still_open, "open"), places(closed, "complete"));
 }

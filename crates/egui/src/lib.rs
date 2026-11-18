@@ -12,6 +12,8 @@
 mod draw;
 mod graph;
 mod palette;
+#[cfg(feature = "decode")]
+pub mod panel;
 mod state;
 mod strip;
 #[cfg(feature = "decode")]

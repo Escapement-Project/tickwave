@@ -94,6 +94,26 @@ fn label(schema: &Schema, item: &Item, t: &Label) -> String {
     out.trim().to_string()
 }
 
+/// The fullest label, from `labels` else the item's kind, that is not empty and holds no value the
+/// item could not know; else its kind's name.
+pub(crate) fn heading(schema: &Schema, labels: &Labels, item: &Item) -> String {
+    let kind = schema.kind(item.id.kind);
+    let declared = kind.map_or(&[][..], |k| &k.labels[..]);
+    let known = |t: &&Label| {
+        !(t.0.iter()).any(|p| match p {
+            LabelPiece::Field(f) => item
+                .field(*f)
+                .is_some_and(|x| matches!(x.value, Value::Unknown { .. })),
+            _ => false,
+        })
+    };
+    (labels.of(item.id.kind).unwrap_or(declared).iter())
+        .filter(known)
+        .map(|t| label(schema, item, t))
+        .find(|t| !t.is_empty())
+        .unwrap_or_else(|| kind.map_or_else(|| "?".into(), |k| k.name.to_string()))
+}
+
 /// Whether an item is a condition: closed incomplete, or holding a value it could not know.
 pub fn condition(item: &Item) -> bool {
     matches!(item.status, Some(Status::Incomplete(_)))

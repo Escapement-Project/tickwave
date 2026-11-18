@@ -524,6 +524,16 @@ impl Turn {
     }
 }
 
+/// An item's semantic id as text, as a citation names it: its analysis, its kind's name as
+/// `schema` declares it and its anchor, and its discriminator after a dot where it has one.
+pub fn citation(analysis: &str, schema: &crate::Schema, id: &Id) -> String {
+    let kind = schema.kind(id.kind).map_or("?", |k| &k.name);
+    match id.disc {
+        0 => format!("{analysis}/{kind}/{}", id.anchor),
+        d => format!("{analysis}/{kind}/{}.{d}", id.anchor),
+    }
+}
+
 /// Makes a decoder for a run, with the settings and ports its analysis was bound with. `local` is
 /// where a run starts without earlier context; None starts it at the recording's beginning.
 pub type Factory = Box<dyn Fn(&Bound, Option<Tick>) -> Box<dyn Decoder> + Send + Sync>;
@@ -1438,16 +1448,10 @@ impl Host {
         &self.analyses[a].def
     }
 
-    /// An item's semantic id as text, as a citation names it: the analysis, the kind and the
-    /// anchor, and the discriminator after a dot where there is one.
+    /// Item `id` of analysis `a` as a citation names it (`citation`).
     pub fn id_text(&self, a: AnalysisId, id: &Id) -> String {
-        let a = a.index();
-        let an = &self.analyses[a];
-        let kind = an.def.schema.kind(id.kind).map_or("?", |k| &k.name);
-        match id.disc {
-            0 => format!("{}/{kind}/{}", an.name, id.anchor),
-            d => format!("{}/{kind}/{}.{d}", an.name, id.anchor),
-        }
+        let an = &self.analyses[a.index()];
+        citation(&an.name, &an.def.schema, id)
     }
 
     pub fn run_id(&self, a: AnalysisId) -> RunId {
