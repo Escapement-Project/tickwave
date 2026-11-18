@@ -594,7 +594,8 @@ fn tdo_has_a_driver_only_where_qualification_is_assumed() {
 #[test]
 fn hosted_cjtag_feeds_jtag_as_the_direct_run_does() {
     let want = direct(synth());
-    let cjtag = run(synth(), 1 << 40).0.store(AnalysisId(0)).counts;
+    let (h, [c, _]) = run(synth(), 1 << 40);
+    let cjtag = h.store(c).counts;
     for window in [1, 7, 1000, 1 << 40] {
         let (h, [c, j]) = run(synth(), window);
         assert_eq!(h.store(j).counts, want, "window {window}");

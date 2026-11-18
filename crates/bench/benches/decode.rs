@@ -357,7 +357,7 @@ struct Drawn {
 fn drawn(window: std::ops::Range<i64>) -> Drawn {
     let mut h = host(all());
     h.run_until(|_| false).unwrap();
-    let a = escapement_tickwave_decode::AnalysisId(0);
+    let a = h.index("swd").unwrap();
     let store = h.store(a).clone();
     let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
     let density = Density::of(store.items.values(), &map, condition);

@@ -16,9 +16,10 @@ use std::{
     },
 };
 
-/// An analysis of a host, as `Host::add` numbers it.
+/// An analysis of a host, as `Host::add` or `Host::index` gives it. A host's methods panic on one
+/// another host gave that it does not hold.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct AnalysisId(pub u16);
+pub struct AnalysisId(u16);
 
 impl AnalysisId {
     fn index(self) -> usize {
@@ -1082,6 +1083,8 @@ pub struct Stats {
     pub log_dropped: u64,
 }
 
+/// Analyses, their runs and the schedule between them. Every method that takes an `AnalysisId`
+/// panics where the id is not one of this host's.
 pub struct Host {
     options: HostOptions,
     analyses: Vec<Slot>,

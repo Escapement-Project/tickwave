@@ -81,9 +81,8 @@ fn a_decoder_for_a_contract_the_host_does_not_run_is_refused_when_added() {
         add(&mut h, "b", with(other)),
         Err(BindError::Contract { .. })
     ));
-    assert_eq!(
-        add(&mut h, "c", with(CONTRACT)).unwrap(),
-        AnalysisId(0),
+    assert!(
+        add(&mut h, "c", with(CONTRACT)).is_ok(),
         "a decoder of the host's own contract is added"
     );
     let message = add(&mut h, "d", with(newer)).unwrap_err().to_string();
@@ -268,14 +267,35 @@ fn a_schema_and_its_subscriptions_are_checked_when_added() {
         Err(BindError::DuplicateAnalysis(_))
     ));
     assert!(sub(vec!["pulse"], Mode::Pieces, vec!["levels"], "x").is_ok());
+    // An id from a host with more analyses than this one.
+    let mut other = Host::default();
+    let ids: Vec<AnalysisId> = (0..10)
+        .map(|k| {
+            let n = format!("t{k}");
+            let source = Box::new(Nothing::default());
+            let input = InputSpec::Wire {
+                source,
+                local: None,
+            };
+            other.add(
+                n.into(),
+                toy(),
+                input,
+                Box::new(|_| Box::new(Swallow)),
+                all(),
+            )
+        })
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let foreign = ids[9];
     let missing = h.add(
         name("y"),
         definition("pairs", pairs_schema()),
-        InputSpec::Upstream(Subscription::new(AnalysisId(9), Mode::Completed)),
+        InputSpec::Upstream(Subscription::new(foreign, Mode::Completed)),
         Box::new(|_| Box::new(Pairs::default())),
         all(),
     );
-    assert_eq!(missing.unwrap_err(), BindError::NoAnalysis(AnalysisId(9)));
+    assert_eq!(missing.unwrap_err(), BindError::NoAnalysis(foreign));
 }
 
 #[test]
