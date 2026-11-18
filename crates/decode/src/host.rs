@@ -1948,8 +1948,9 @@ impl Host {
             let keeper = &self.keepers[k];
             let r = &self.analyses[keeper.root.index()].run;
             let none_yet = r.consumed == r.local.unwrap_or(Tick::MIN);
-            // `next` only moves on, so a replay after a seek takes none.
-            if r.out || none_yet || r.consumed < keeper.next {
+            // `next` only moves on, so a replay after a seek takes none. Waiting until everything
+            // stacked on it has taken its deliveries keeps them out of the checkpoint.
+            if r.out || none_yet || r.consumed < keeper.next || !self.quiet_below(keeper.root) {
                 continue;
             }
             let consumed = r.consumed;
