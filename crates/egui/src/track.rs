@@ -22,6 +22,9 @@ use crate::palette::Palette;
 
 /// A row's height, as a lane's.
 pub const ROW: f32 = 24.0;
+/// A provisional item's dashed outline: its dashes and the gaps between them, in points.
+const DASH: f32 = 3.0;
+const GAP: f32 = 2.0;
 /// Items narrower than this, on average, are drawn as density.
 const CROWDED: f32 = 3.0;
 /// A sequence's elements get their values once a cell is this wide.
@@ -440,6 +443,7 @@ pub struct Track<'a> {
     settled: Tick,
     lost: &'a [Span],
     parts: bool,
+    provisional: bool,
     /// The lanes its rows take together, and each kind's range of them.
     lanes: usize,
     rows: Vec<std::ops::Range<usize>>,
@@ -472,6 +476,7 @@ impl<'a> Track<'a> {
             settled: Tick::MAX,
             lost: &[],
             parts: false,
+            provisional: false,
             lanes,
             rows,
         }
@@ -493,6 +498,14 @@ impl<'a> Track<'a> {
     /// Whether a second row draws each item's spanned fields and their elements.
     pub fn parts(mut self, on: bool) -> Self {
         self.parts = on;
+        self
+    }
+
+    /// Whether the items are a provisional window's, decoded from a local start without earlier
+    /// context (`Derived::provisional`). They draw at the palette's `pale` opacity, outlines
+    /// dashed, and density over a dashed baseline: unlike input not decoded yet, which hatches.
+    pub fn provisional(mut self, on: bool) -> Self {
+        self.provisional = on;
         self
     }
 
@@ -585,11 +598,22 @@ impl Widget for Track<'_> {
         // items than its columns could show apart.
         let crowded = self.density.crowded(w, plot.width());
         let lanes: Vec<Rect> = (0..self.lanes).map(row).collect();
+        let drawn = shapes.len();
         if crowded {
             self.density_bins(&s, lanes[0], &mut shapes);
         } else {
             let parts = self.parts.then(|| row(self.lanes));
             self.items(ui, &s, &lanes, parts, &mut shapes);
+        }
+        if self.provisional {
+            let decoded = shapes.split_off(drawn);
+            provisional(decoded, p.pale, &mut shapes);
+            if crowded {
+                let y = lanes[0].bottom() - PAD / 2.0;
+                let line = [pos2(plot.left(), y), pos2(plot.right(), y)];
+                let stroke = Stroke::new(1.0, p.ink_2.gamma_multiply(p.pale));
+                shapes.extend(Shape::dashed_line(&line, stroke, DASH, GAP));
+            }
         }
         // Lost input, across every row, as the waveform shades its lost time: only the spans the
         // window meets.
@@ -807,6 +831,42 @@ impl Track<'_> {
                     break;
                 }
             }
+        }
+    }
+}
+
+/// `decoded`, a track's items or density, into `out` as a provisional window's: each outline
+/// dashed, and every colour at opacity `pale`.
+fn provisional(decoded: Vec<Shape>, pale: f32, out: &mut Vec<Shape>) {
+    for shape in decoded {
+        match shape {
+            Shape::Rect(r) => {
+                let fill = r.fill.gamma_multiply(pale);
+                if fill.a() > 0 {
+                    out.push(Shape::rect_filled(r.rect, r.corner_radius, fill));
+                }
+                if r.stroke.width > 0.0 {
+                    let q = r.rect;
+                    let path = [
+                        q.left_top(),
+                        q.right_top(),
+                        q.right_bottom(),
+                        q.left_bottom(),
+                        q.left_top(),
+                    ];
+                    let stroke = Stroke::new(r.stroke.width, r.stroke.color.gamma_multiply(pale));
+                    out.extend(Shape::dashed_line(&path, stroke, DASH, GAP));
+                }
+            }
+            Shape::LineSegment { points, stroke } => {
+                let stroke = Stroke::new(stroke.width, stroke.color.gamma_multiply(pale));
+                out.push(Shape::line_segment(points, stroke));
+            }
+            Shape::Text(mut t) => {
+                t.opacity_factor *= pale;
+                out.push(Shape::Text(t));
+            }
+            other => out.push(other),
         }
     }
 }

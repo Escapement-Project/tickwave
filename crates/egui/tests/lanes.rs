@@ -427,3 +427,105 @@ fn a_wire_is_painted_by_its_parts_only_where_the_track_draws_their_items_apart()
     );
     assert_eq!(paints(0..100_000, 4000.0).len(), 1000, "four points each");
 }
+
+/// Every shape a track of `items` (kind, start, end) draws over `window`, provisional or not.
+fn shapes_of(
+    items: &[(u16, Tick, Tick)],
+    window: std::ops::Range<i64>,
+    provisional: bool,
+) -> Vec<egui::Shape> {
+    let schema = Schema::new(vec![KindDecl::new("a")]);
+    let mut store = Store::with_keep(vec![Span {
+        start: Tick::MIN,
+        end: Tick::MAX,
+    }]);
+    for &(kind, start, end) in items {
+        let id = Id::new(KindId(kind), start);
+        let ops = [
+            Op::Open {
+                id,
+                parent: None,
+                start,
+            },
+            Op::Close {
+                id,
+                end,
+                status: Status::Complete,
+            },
+        ];
+        store.apply_batch(&ops, 8).unwrap();
+    }
+    let shown = Shown::new(window, 0.0..500.0);
+    let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
+    let density = Density::of(store.items.values(), &map, |_| false);
+    let (labels, palette) = (
+        Labels::default(),
+        Palette::from_visuals(&egui::Visuals::default()),
+    );
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(600.0, 200.0),
+        )),
+        ..egui::RawInput::default()
+    };
+    let mut out = egui::Context::default().run_ui(input, |ui| {
+        ui.add(
+            Track::new(
+                &shown,
+                "t",
+                &schema,
+                &store.items,
+                &density,
+                &labels,
+                &palette,
+                map,
+            )
+            .provisional(provisional),
+        );
+    });
+    out.textures_delta.clear();
+    fn flat(s: egui::Shape, out: &mut Vec<egui::Shape>) {
+        match s {
+            egui::Shape::Vec(v) => v.into_iter().for_each(|s| flat(s, out)),
+            s => out.push(s),
+        }
+    }
+    let mut all = vec![];
+    for c in out.shapes {
+        flat(c.shape, &mut all);
+    }
+    all
+}
+
+#[test]
+fn a_provisional_windows_items_draw_pale_with_dashed_outlines() {
+    let items = [(0, 100, 300), (0, 400, 600)];
+    let outlined = |shapes: &[egui::Shape]| {
+        (shapes.iter())
+            .filter(|s| matches!(s, egui::Shape::Rect(r) if r.stroke.width > 0.0))
+            .count()
+    };
+    let dashes = |shapes: &[egui::Shape]| -> Vec<egui::Color32> {
+        (shapes.iter())
+            .filter_map(|s| match s {
+                egui::Shape::LineSegment { stroke, .. } => Some(stroke.color),
+                _ => None,
+            })
+            .collect()
+    };
+    let plain = shapes_of(&items, 0..1000, false);
+    assert_eq!((outlined(&plain), dashes(&plain).len()), (2, 0));
+    let pale = shapes_of(&items, 0..1000, true);
+    let d = dashes(&pale);
+    assert_eq!(outlined(&pale), 0, "no solid outline");
+    assert!(d.len() > 20, "two outlines in dashes: {}", d.len());
+    let ink = Palette::from_visuals(&egui::Visuals::default()).ink_2;
+    assert!(d.iter().all(|c| c.a() < ink.a()), "at a lower opacity");
+
+    // Zoomed out to density, a dashed baseline under the bins.
+    let many: Vec<_> = (0..2_000).map(|k| (0, k * 10, k * 10 + 5)).collect();
+    let dense = |provisional| dashes(&shapes_of(&many, 0..20_000, provisional)).len();
+    assert_eq!(dense(false), 0);
+    assert!(dense(true) > 20, "{}", dense(true));
+}
