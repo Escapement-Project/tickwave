@@ -59,9 +59,11 @@ struct Open {
     /// The fields set, one bit each.
     fields: u32,
     latest: Tick,
-    /// Each sequence's next offset.
-    next: Vec<(SeqId, u32)>,
+    /// Each sequence's next offset, by its index in the kind's sequences.
+    next: [u32; crate::MAX_SEQUENCES],
     links: usize,
+    /// The batch that last backed it up, so a batch backs an item up once.
+    stamp: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -254,41 +256,55 @@ impl Fnv {
     }
 }
 
-/// The open items a batch has changed so far, over the store's: a batch is checked against them
-/// before any op is recorded, without copying every open item.
+/// The open items as a batch changes them, in place: each item it touches is backed up once into
+/// `undo` first, so a refused batch is put back without copying every open item.
 struct Staged<'a> {
-    base: &'a HashMap<Id, Open>,
-    /// An item the batch changed, or None where it closed one.
-    changed: HashMap<Id, Option<Open>>,
-    open: usize,
+    open: &'a mut HashMap<Id, Open>,
+    undo: &'a mut Vec<(Id, Option<Open>)>,
+    batch: u64,
 }
 
 impl Staged<'_> {
+    fn len(&self) -> usize {
+        self.open.len()
+    }
+
     fn contains(&self, id: &Id) -> bool {
-        match self.changed.get(id) {
-            Some(o) => o.is_some(),
-            None => self.base.contains_key(id),
-        }
+        self.open.contains_key(id)
     }
 
     fn get_mut(&mut self, id: &Id) -> Option<&mut Open> {
-        if !self.changed.contains_key(id) {
-            let o = self.base.get(id)?.clone();
-            self.changed.insert(*id, Some(o));
+        let o = self.open.get_mut(id)?;
+        if o.stamp != self.batch {
+            self.undo.push((*id, Some(o.clone())));
+            o.stamp = self.batch;
         }
-        self.changed.get_mut(id)?.as_mut()
+        Some(o)
     }
 
-    fn insert(&mut self, id: Id, o: Open) {
-        self.changed.insert(id, Some(o));
-        self.open += 1;
+    fn insert(&mut self, id: Id, mut o: Open) {
+        o.stamp = self.batch;
+        self.undo.push((id, None));
+        self.open.insert(id, o);
     }
 
     fn remove(&mut self, id: &Id) -> Option<Open> {
-        let o = self.get_mut(id)?.clone();
-        self.changed.insert(*id, None);
-        self.open -= 1;
-        Some(o)
+        self.get_mut(id)?;
+        self.open.remove(id)
+    }
+
+    /// Puts back what the batch changed.
+    fn rollback(&mut self) {
+        while let Some((id, was)) = self.undo.pop() {
+            match was {
+                Some(o) => {
+                    self.open.insert(id, o);
+                }
+                None => {
+                    self.open.remove(&id);
+                }
+            }
+        }
     }
 }
 
@@ -299,6 +315,9 @@ pub struct Store {
     pub items: BTreeMap<Id, Item>,
     pub keep: Vec<Span>,
     pub counts: Counts,
+    /// What the batch under way changed, to put back if it is refused.
+    undo: Vec<(Id, Option<Open>)>,
+    batch: u64,
 }
 
 impl Store {
@@ -323,30 +342,30 @@ impl Store {
     /// does it, if it ever holds more than `at_most` items open. Returns the index of the first
     /// refused op.
     pub fn apply_batch(&mut self, ops: &[Op], at_most: usize) -> Result<(), (usize, Refused)> {
+        self.batch = self.batch.wrapping_add(1);
+        self.undo.clear();
         let mut staged = Staged {
-            base: &self.open,
-            changed: HashMap::default(),
-            open: self.open.len(),
+            open: &mut self.open,
+            undo: &mut self.undo,
+            batch: self.batch,
         };
-        let mut peak = staged.open;
+        let mut peak = staged.len();
         for (k, op) in ops.iter().enumerate() {
-            Self::check(&mut staged, &self.items, op).map_err(|why| (k, why))?;
-            if staged.open > at_most {
-                let open = staged.open;
-                return Err((k, Refused::TooManyOpen { open, at_most }));
+            let refused = match Self::check(&mut staged, &self.items, op) {
+                Err(why) => Some(why),
+                Ok(()) if staged.len() > at_most => Some(Refused::TooManyOpen {
+                    open: staged.len(),
+                    at_most,
+                }),
+                Ok(()) => None,
+            };
+            if let Some(why) = refused {
+                staged.rollback();
+                return Err((k, why));
             }
-            peak = peak.max(staged.open);
+            peak = peak.max(staged.len());
         }
-        for (id, o) in staged.changed {
-            match o {
-                Some(o) => {
-                    self.open.insert(id, o);
-                }
-                None => {
-                    self.open.remove(&id);
-                }
-            }
-        }
+        self.undo.clear();
         for op in ops {
             self.record(op);
         }
@@ -375,8 +394,9 @@ impl Store {
                         children: 0,
                         fields: 0,
                         latest: *start,
-                        next: vec![],
+                        next: [0; crate::MAX_SEQUENCES],
                         links: 0,
+                        stamp: 0,
                     },
                 );
             }
@@ -425,14 +445,11 @@ impl Store {
                 if elements.len() > MAX_CHUNK {
                     return Err(Refused::ChunkTooLong);
                 }
-                let at = match o.next.iter().position(|(s, _)| s == seq) {
-                    Some(k) => k,
-                    None => {
-                        o.next.push((*seq, 0));
-                        o.next.len() - 1
-                    }
-                };
-                let next = o.next[at].1;
+                let slot = o
+                    .next
+                    .get_mut(usize::from(seq.0))
+                    .ok_or(Refused::SequenceTooLong)?;
+                let next = *slot;
                 if *offset != next {
                     return Err(Refused::OffsetGap {
                         expected: next,
@@ -448,9 +465,12 @@ impl Store {
                     }
                     o.latest = o.latest.max(e.cell.end);
                 }
-                o.next[at].1 = next
+                let after = next
                     .checked_add(elements.len() as u32)
                     .ok_or(Refused::SequenceTooLong)?;
+                if let Some(slot) = o.next.get_mut(usize::from(seq.0)) {
+                    *slot = after;
+                }
             }
             Op::Link { id, .. } => {
                 let o = staged.get_mut(id).ok_or(Refused::NotOpen)?;
