@@ -5,10 +5,10 @@
 //!   built: the per-transfer path from framing to admission and delivery.
 //! - `cjtag_session`: cJTAG with JTAG stacked on it over an OScan1 session of about 2,700 Scan
 //!   Packets: per-bit framing, packets and the TAP engine stacked by pieces.
-//! - `track_frame`: one egui frame of an SWD track over those transfers, zoomed in on six of them with
-//!   labels and parts, on half of one with its bits, and zoomed out on all of them as density
-//!   bins; and of the cJTAG track over its session, zoomed in on six Scan Packets, inside the
-//!   control level that spans them all.
+//! - `track_frame`: one egui frame, its shapes built and tessellated, of an SWD track over those
+//!   transfers, zoomed in on six of them with labels and parts, on half of one with its bits, and
+//!   zoomed out on all of them as density bins; and of the cJTAG track over its session, zoomed in
+//!   on six Scan Packets, inside the control level that spans them all.
 //! - `driver_paint`: the paint by driving role a graph takes from the SWD track's parts each
 //!   frame, over 2,000 points: zoomed out on all the transfers, on 600 of them, and on six.
 use std::hint::black_box;
@@ -422,7 +422,8 @@ fn track(
     };
     // Fonts and their glyphs laid out once, as a host's frames after its first.
     for _ in 0..3 {
-        frame(&mut d);
+        let out = frame(&mut d);
+        d.ctx.tessellate(out.shapes, out.pixels_per_point);
     }
     d
 }
@@ -480,7 +481,8 @@ fn cjtag_in() -> Drawn {
 #[bench::zoomed_out(setup = zoomed_out)]
 #[bench::cjtag_in(setup = cjtag_in)]
 fn track_frame(mut d: Drawn) -> Drawn {
-    black_box(frame(&mut d));
+    let out = frame(&mut d);
+    black_box(d.ctx.tessellate(out.shapes, out.pixels_per_point));
     d
 }
 

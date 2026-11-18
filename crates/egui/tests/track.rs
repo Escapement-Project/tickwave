@@ -266,6 +266,11 @@ struct Decoded {
 
 /// SWD and ADIv5 over the recording's SWCLK and SWDIO, every item kept.
 fn decode(path: &Path) -> (Vec<Decoded>, Mapping, [usize; 2]) {
+    decode_with(path, false)
+}
+
+/// `decode`, and MEM-AP over ADIv5 where `mem`.
+fn decode_with(path: &Path, mem: bool) -> (Vec<Decoded>, Mapping, [usize; 2]) {
     let file = std::fs::File::open(path).unwrap();
     let rec = Arc::new(Recording::open(Arc::new(file), Cache::new(16 << 20)).unwrap());
     let lanes = [rec.channel("SWCLK").unwrap(), rec.channel("SWDIO").unwrap()];
@@ -295,6 +300,17 @@ fn decode(path: &Path) -> (Vec<Decoded>, Mapping, [usize; 2]) {
             all(),
         )
         .unwrap();
+    let m = mem.then(|| {
+        h.add(
+            name("MEM-AP"),
+            adiv5::mem_definition(),
+            InputSpec::Upstream(adiv5::mem_subscription(a)),
+            adiv5::Mem::factory(),
+            &[],
+            all(),
+        )
+        .unwrap()
+    });
     h.run_until(|_| false).unwrap();
     let swd_labels = Labels::default().kind(
         swd::TRANSFER,
@@ -341,10 +357,20 @@ fn decode(path: &Path) -> (Vec<Decoded>, Mapping, [usize; 2]) {
         .kind(adiv5::AP_READ, ap.clone())
         .kind(adiv5::AP_WRITE, ap);
     // The lanes each level draws in come from its schema: ADIv5's AP reads may overlap.
-    let out = vec![
+    let mut out = vec![
         decoded(&h, s, "SWD", swd_labels, &map, true),
         decoded(&h, a, "ADIv5", adi_labels, &map, false),
     ];
+    if let Some(m) = m {
+        let access = vec![
+            t(&[Err(adiv5::MEM_NAME), Ok(" "), Err(adiv5::MEM_VALUE)]),
+            t(&[Err(adiv5::MEM_NAME)]),
+        ];
+        let mem_labels = Labels::default()
+            .kind(adiv5::MEM_READ, access.clone())
+            .kind(adiv5::MEM_WRITE, access);
+        out.push(decoded(&h, m, "MEM-AP", mem_labels, &map, false));
+    }
     (out, map, lanes)
 }
 
@@ -615,8 +641,9 @@ fn shoot(dir: &Path, make: impl Fn() -> Case, views: &[(&str, Window)]) {
     }
 }
 
-/// One frame of the SWD and ADIv5 tracks at each zoom, timed on this machine: the median of 101
-/// frames, printed. A calibration for the instruction counts in crates/bench, not a gate.
+/// One frame of the SWD and ADIv5 tracks at each zoom, its shapes built and tessellated, timed on
+/// this machine: the median of 101 frames, printed. A calibration for the instruction counts in
+/// crates/bench, not a gate.
 #[test]
 #[ignore = "prints wall-clock frame times"]
 fn frame_times() {
@@ -676,7 +703,117 @@ fn frame_times() {
         let mut times: Vec<f64> = (0..101)
             .map(|_| {
                 let t = std::time::Instant::now();
-                std::hint::black_box(frame());
+                let out = frame();
+                std::hint::black_box(ctx.tessellate(out.shapes, out.pixels_per_point));
+                t.elapsed().as_secs_f64() * 1e6
+            })
+            .collect();
+        times.sort_by(f64::total_cmp);
+        println!("{name}: median {:.0} us a frame", times[50]);
+    }
+}
+
+/// One whole frame as a host draws it: the graph of SWCLK and SWDIO, SWDIO painted by who drives
+/// it, and the SWD, ADIv5 and MEM-AP tracks under it, its shapes built and tessellated, at each
+/// zoom, its answer landed: the median of 101 frames, printed. A frame's time on this machine,
+/// against the ×4 target of 16.7 ms and the unrelaxed 4.17 ms.
+#[test]
+#[ignore = "prints wall-clock frame times"]
+fn graph_frame_times() {
+    let (decoded, map, lanes) = decode_with(&fixture(), true);
+    let transfers: Vec<(Tick, Tick)> = (decoded[0].store.items.values())
+        .map(|i| (i.start, i.end.unwrap()))
+        .collect();
+    let axis = |t: Tick| map.axis_saturating(t);
+    let mid = transfers.len() / 2;
+    let (first, last) = (transfers[0].0, transfers[transfers.len() - 1].1);
+    let half = (transfers[mid].1 - transfers[mid].0) / 2;
+    let zooms = [
+        ("whole", axis(first)..axis(last)),
+        (
+            "transfers",
+            axis(transfers[mid].0)..axis(transfers[mid + 6].1),
+        ),
+        (
+            "bits",
+            axis(transfers[mid].0)..axis(transfers[mid].0 + half),
+        ),
+    ];
+    let face = series_face(false);
+    let painted = vec!["SWDIO".to_owned()];
+    let roles = decoder_roles(&decoded[0].schema);
+    for (name, window) in zooms {
+        let ctx = egui::Context::default();
+        let viewer = Viewer::open(&ctx, &fixture()).unwrap();
+        let mut state = ViewState::default();
+        state.window = Window::At(window.clone());
+        let mut shown: Option<escapement_tickwave_egui::Shown> = None;
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, SIZE)),
+            ..egui::RawInput::default()
+        };
+        let mut frame = |state: &mut ViewState| {
+            ctx.run_ui(input(), |ui| {
+                let first = &decoded[0];
+                let paints = shown.as_ref().map_or(vec![], |s| {
+                    driver_paints(
+                        &first.schema,
+                        &first.store.items,
+                        &first.density,
+                        &map,
+                        &s.window,
+                        s.plot.end - s.plot.start,
+                    )
+                });
+                let response = ui.add(
+                    Graph::lanes_only(&viewer, state, &face.palette)
+                        .motion(false)
+                        .lanes(&lanes)
+                        .decoded_paint(&paints, &painted, &roles),
+                );
+                let Some(s) = Graph::shown(&response) else {
+                    return;
+                };
+                for d in &decoded {
+                    ui.add(
+                        Track::new(
+                            &s,
+                            d.name,
+                            &d.schema,
+                            &d.store.items,
+                            &d.density,
+                            &d.labels,
+                            &face.palette,
+                            map,
+                        )
+                        .settled(Tick::MAX)
+                        .parts(d.parts),
+                    );
+                }
+                shown = Some(s.clone());
+            })
+        };
+        let mut landed = false;
+        for _ in 0..2000 {
+            frame(&mut state);
+            if let Some(a) = viewer.answer()
+                && a.window == state.window.resolve(a.extent.as_ref(), None)
+                && !viewer.busy()
+            {
+                landed = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(landed, "no answer for {name}");
+        for _ in 0..5 {
+            frame(&mut state);
+        }
+        let mut times: Vec<f64> = (0..101)
+            .map(|_| {
+                let t = std::time::Instant::now();
+                let out = frame(&mut state);
+                std::hint::black_box(ctx.tessellate(out.shapes, out.pixels_per_point));
                 t.elapsed().as_secs_f64() * 1e6
             })
             .collect();
@@ -748,7 +885,8 @@ fn cjtag_frame_times() {
         let mut times: Vec<f64> = (0..101)
             .map(|_| {
                 let t = std::time::Instant::now();
-                std::hint::black_box(frame());
+                let out = frame();
+                std::hint::black_box(ctx.tessellate(out.shapes, out.pixels_per_point));
                 t.elapsed().as_secs_f64() * 1e6
             })
             .collect();
