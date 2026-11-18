@@ -4,13 +4,19 @@
 //! retired. The forward pass then runs to the end, and its counts are printed to compare with a
 //! run that derived nothing.
 //!
+//! With RUNNING set, the forward pass is not stopped: after every second of input it takes, a
+//! window three seconds behind it is asked for and derived while the forward pass carries on,
+//! sharing turns as `HostOptions::window_turns` says.
+//!
 //! `cargo run --release -p escapement-tickwave-decoders --example cjtag_window -- REC [PAUSE_S]
-//! [EVENTS]`
+//! [EVENTS] [RUNNING] [WINDOW_TURNS]`
 
 #[path = "check/mod.rs"]
 mod check;
 
-use escapement_tickwave_decode::{Host, InputSpec, Keeping, Span, Tick, name, wire::WireSource};
+use escapement_tickwave_decode::{
+    Host, HostOptions, InputSpec, Keeping, Span, Tick, name, wire::WireSource,
+};
 use escapement_tickwave_decoders::cjtag;
 use escapement_tickwave_view::{Cache, Recording};
 use std::sync::Arc;
@@ -28,6 +34,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nth(1)
         .ok_or("usage: cjtag_window REC [PAUSE_S] [EVENTS]")?;
     let (pause_s, events) = (arg(2, 28.0), arg(3, 50_000.0) as u64);
+    let running = arg(4, 0.0) != 0.0;
+    let mut options = HostOptions::default();
+    options.window_turns = arg(5, 4.0) as usize;
     let file = std::fs::File::open(&path)?;
     let rec = Arc::new(Recording::open(Arc::new(file), Cache::new(64 << 20))?);
     let tb = rec.timebase();
@@ -37,7 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         rec.channel("TCKC").ok_or("no TCKC")?,
         rec.channel("TMSC").ok_or("no TMSC")?,
     ];
-    let mut h = Host::default();
+    let mut h = Host::new(options);
     let c = h.add(
         name("cjtag"),
         cjtag::definition(),
@@ -58,7 +67,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     h.keep_checkpoints(c, Keeping::new(ticks(1.0), 64 << 20).with_events(events))?;
     let pause = ticks(pause_s);
     let start = Instant::now();
-    h.run_until(|h| h.consumed(c) >= pause)?;
+    if running {
+        let capture = rec.length() as f64 / per_s;
+        let mut times = vec![];
+        let mut next = ticks(4.0);
+        while h.finished(c).is_none() {
+            h.run_until(|h| h.consumed(c) >= next || h.finished(c).is_some())?;
+            if h.finished(c).is_some() {
+                break;
+            }
+            let at = h.consumed(c) - ticks(3.0);
+            let w = Span {
+                start: at,
+                end: at + ticks(1e-3),
+            };
+            let from = h.consumed(c);
+            let asked = Instant::now();
+            let d = h.derive(c, w)?;
+            let (wc, wj) = (d.chain[0].1, d.chain[1].1);
+            h.run_until(|h| h.consumed(wc) >= w.end && h.quiet_below(wc))?;
+            let drawn = asked.elapsed().as_secs_f64() * 1e3;
+            h.run_until(|h| h.settled(wj) >= w.end)?;
+            let settled = asked.elapsed().as_secs_f64() * 1e3;
+            println!(
+                "  window {:6.3} s: drawn by {drawn:.1} ms, settled by {settled:.1} ms; the forward pass moved {:.2} ms of input meanwhile",
+                at as f64 / per_s,
+                (h.consumed(c) - from) as f64 / per_s * 1e3,
+            );
+            times.push((drawn, settled));
+            h.retire(wc);
+            next = h.consumed(c) + ticks(1.0);
+        }
+        h.run_until(|_| false)?;
+        let total = start.elapsed().as_secs_f64();
+        let q = |v: &mut Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            (v[v.len() / 2], v[v.len() * 9 / 10], v[v.len() - 1])
+        };
+        let mut drawn: Vec<f64> = times.iter().map(|t| t.0).collect();
+        let mut settled: Vec<f64> = times.iter().map(|t| t.1).collect();
+        println!(
+            "{} windows: drawn median {:.1} / 90th {:.1} / worst {:.1} ms; settled {:.1} / {:.1} / {:.1} ms",
+            times.len(),
+            q(&mut drawn).0,
+            q(&mut drawn).1,
+            q(&mut drawn).2,
+            q(&mut settled).0,
+            q(&mut settled).1,
+            q(&mut settled).2,
+        );
+        println!(
+            "forward pass with the windows: {total:.2} s for {capture:.2} s of capture ({:.2}x real time), window_turns {}",
+            capture / total,
+            options.window_turns
+        );
+    }
+    h.run_until(|h| h.consumed(c) >= pause || h.finished(c).is_some())?;
     println!(
         "forward pass paused at {:.3} s of input after {:.2} s",
         h.consumed(c) as f64 / per_s,
