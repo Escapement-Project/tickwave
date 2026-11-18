@@ -14,6 +14,8 @@ use egui::{Align2, Rect, Response, Sense, Shape, Stroke, Ui, Widget, pos2, vec2}
 use escapement_tickwave_decode::{
     Element, FieldId, FieldType, Id, Item, KindId, Schema, Span, Status, Tick, Value,
 };
+use escapement_tickwave_view::Paint;
+use escapement_tickwave_view::format::annotations::Role;
 use escapement_tickwave_view::format::mapping::Mapping;
 
 use crate::graph::Shown;
@@ -116,6 +118,69 @@ fn label(schema: &Schema, item: &Item, t: &Template) -> String {
 pub fn condition(item: &Item) -> bool {
     matches!(item.status, Some(Status::Incomplete(_)))
         || (item.fields.iter()).any(|f| matches!(f.value, Value::Unknown { .. }))
+}
+
+/// The most items whose parts a window paints a wire with: past it, at a zoom where parts are
+/// under a pixel, the wire keeps its own look.
+const PAINTED_AT_MOST: u64 = 4096;
+
+/// Paint for `channels` from the parts of the items in `window` (axis ticks), by the role that
+/// drives each: what a graph's `decoded_paint` takes to draw a wire by who drives it. Empty
+/// where the window holds more items than `PAINTED_AT_MOST`.
+pub fn driver_paints(
+    schema: &Schema,
+    items: &std::collections::BTreeMap<Id, Item>,
+    density: &Density,
+    map: &Mapping,
+    window: &std::ops::Range<i64>,
+    channels: &[String],
+) -> Vec<Paint> {
+    let mut out = Vec::new();
+    if density.count(window.start, window.end, 0.0).0 > PAINTED_AT_MOST {
+        return out;
+    }
+    let axis = |t: Tick| map.axis_saturating(t);
+    let lookback = density.longest.saturating_add(1);
+    let lo = Id::new(KindId(0), window.start.saturating_sub(lookback));
+    for item in items.range(lo..).map(|(_, i)| i) {
+        let start = axis(item.start);
+        if start >= window.end.saturating_add(lookback) {
+            break;
+        }
+        for f in &item.fields {
+            let (Some(span), Some(d)) = (f.span, f.driver) else {
+                continue;
+            };
+            let Some(role) = schema.roles.get(usize::from(d.0)) else {
+                continue;
+            };
+            let span = axis(span.start)..axis(span.end);
+            if span.end <= window.start || span.start >= window.end {
+                continue;
+            }
+            out.push(Paint {
+                arrival: 0,
+                role: role.to_string(),
+                span,
+                channels: channels.to_vec(),
+            });
+        }
+    }
+    out
+}
+
+/// The roles a decoder declares, as a graph takes them: named, labelled with their names, with
+/// no look of their own, so the host's or the sidecar's look for the name draws them.
+pub fn decoder_roles(schema: &Schema) -> Vec<Role> {
+    (schema.roles.iter())
+        .map(|r| Role {
+            name: r.to_string(),
+            label: r.to_string(),
+            colour: None,
+            weight: 0.0,
+            dash: None,
+        })
+        .collect()
 }
 
 /// One level of a density ladder: counts of items starting in each bucket of `2^shift` axis
@@ -564,7 +629,7 @@ impl Track<'_> {
             if let Some(c) = role {
                 shapes.push(Shape::rect_filled(r, 0.0, c.gamma_multiply(0.18)));
             }
-            shapes.push(Shape::line_segment([r.left_top(), r.left_bottom()], rule));
+            shapes.push(Shape::rect_stroke(r, 1.0, rule, egui::StrokeKind::Inside));
             // The sequence named as the field holds its bits.
             let name = kind.and_then(|k| k.fields.get(usize::from(f.field.0)).map(|d| &d.name));
             let seq = kind.and_then(|k| {
@@ -600,16 +665,23 @@ impl Track<'_> {
                 }
                 continue;
             }
-            let text = value_text(self.schema, item.id.kind, f.field, &f.value);
-            if text.is_empty() {
-                continue;
-            }
-            let galley = ui
-                .painter()
-                .layout_no_wrap(text, p.figures.clone(), p.ink_2);
-            if galley.size().x <= r.width() - 2.0 * PAD {
-                let at = pos2(r.left() + PAD, r.center().y - galley.size().y / 2.0);
-                shapes.push(Shape::galley(at, galley, p.ink_2));
+            // Its value where that fits, else its field's name, else the name's first three
+            // letters, else nothing.
+            let value = value_text(self.schema, item.id.kind, f.field, &f.value);
+            let field = name.map_or(String::new(), |n| n.to_string());
+            let short: String = field.chars().take(3).collect();
+            for text in [value, field, short] {
+                if text.is_empty() {
+                    continue;
+                }
+                let galley = ui
+                    .painter()
+                    .layout_no_wrap(text, p.figures.clone(), p.ink_2);
+                if galley.size().x <= r.width() - 2.0 * PAD {
+                    let at = pos2(r.left() + PAD, r.center().y - galley.size().y / 2.0);
+                    shapes.push(Shape::galley(at, galley, p.ink_2));
+                    break;
+                }
             }
         }
     }

@@ -20,7 +20,9 @@ use escapement_tickwave_decode::{
     Host, InputSpec, Schema, Span, Store, Tick, name, wire::WireSource,
 };
 use escapement_tickwave_decoders::{adiv5, swd};
-use escapement_tickwave_egui::track::{Density, Labels, Template, Track, condition};
+use escapement_tickwave_egui::track::{
+    Density, Labels, Template, Track, condition, decoder_roles, driver_paints,
+};
 use escapement_tickwave_egui::{Graph, ViewState, Viewer, Window};
 use escapement_tickwave_view::cursor::timeline_map;
 use escapement_tickwave_view::format::mapping::Mapping;
@@ -156,6 +158,8 @@ struct Host2 {
     /// Where decoding has reached, for drawing a run under way.
     settled: Tick,
     heights: Vec<f32>,
+    /// The window the graph drew last, for painting SWDIO by who drives it.
+    shown: Option<escapement_tickwave_egui::Shown>,
 }
 
 /// A face whose levels are in `--series-verge`, as a page naming the series draws them.
@@ -187,21 +191,37 @@ fn harness(
         map,
         settled: Tick::MAX,
         heights: vec![],
+        shown: None,
     };
     let mut h = Harness::builder().with_size(SIZE).wgpu().build_ui_state(
         |ui, host: &mut Host2| {
             let Some(viewer) = &host.viewer else { return };
             ui.painter()
                 .rect_filled(ui.ctx().content_rect(), 0.0, host.face.page);
+            // SWDIO painted by who drives each part of the transfers on screen.
+            let swd = &host.decoded[0];
+            let paints = host.shown.as_ref().map_or(vec![], |s| {
+                driver_paints(
+                    &swd.schema,
+                    &swd.store.items,
+                    &swd.density,
+                    &host.map,
+                    &s.window,
+                    &["SWDIO".to_string()],
+                )
+            });
+            let roles = decoder_roles(&swd.schema);
             let response = ui.add(
                 Graph::lanes_only(viewer, &mut host.state, &host.face.palette)
                     .motion(false)
-                    .lanes(&host.lanes),
+                    .lanes(&host.lanes)
+                    .decoded_paint(&paints, &roles),
             );
             host.heights.clear();
             let Some(shown) = Graph::shown(&response) else {
                 return;
             };
+            host.shown = Some(shown.clone());
             for d in &host.decoded {
                 let r = ui.add(
                     Track::new(

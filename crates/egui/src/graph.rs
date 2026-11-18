@@ -1,16 +1,18 @@
 //! The graph: one analog trace, or none, DIO lanes under it on the same time axis, markers, the
 //! selection, and the gestures that move them.
 
+use std::borrow::Cow;
 use std::ops::Range;
 
 use egui::{
     AsIdSalt, CursorIcon, IdSalt, PointerButton, Rect, Response, Sense, Stroke, StrokeKind, Ui,
     Vec2, Widget, WidgetInfo, pos2, vec2,
 };
+use escapement_tickwave_view::format::annotations::Role;
 use escapement_tickwave_view::format::model::Ratio;
 use escapement_tickwave_view::readouts::{MINUS, NBSP, format_interval};
 use escapement_tickwave_view::scale::{ValueRange, move_range, scale_limits, zoom_range};
-use escapement_tickwave_view::{MarkerCursor, MarkerQuery, Resolution};
+use escapement_tickwave_view::{MarkerCursor, MarkerQuery, Paint, Resolution};
 
 use crate::draw::{self, Trace};
 use crate::palette::Palette;
@@ -79,6 +81,8 @@ pub struct Graph<'a> {
     motion: bool,
     /// A gesture this frame zoomed the window.
     zoomed: bool,
+    /// Paint from decoded output, and the roles its decoders declare.
+    decoded: (&'a [Paint], &'a [Role]),
 }
 
 impl<'a> Graph<'a> {
@@ -103,6 +107,7 @@ impl<'a> Graph<'a> {
             id_salt: IdSalt::new("tickwave graph"),
             motion: true,
             zoomed: false,
+            decoded: (&[], &[]),
         }
     }
 
@@ -126,6 +131,15 @@ impl<'a> Graph<'a> {
     /// Digital channels, a lane each under the trace, in this order.
     pub fn lanes(mut self, lanes: &'a [usize]) -> Self {
         self.lanes = lanes;
+        self
+    }
+
+    /// Paint from decoded output over the window, with the roles its decoders declare: a part
+    /// of a wire painted by who drives it. A role the sidecar declares keeps the sidecar's look,
+    /// and a decoder's role it does not declare is added after the sidecar's. Paint the sidecar
+    /// gives draws over decoded paint.
+    pub fn decoded_paint(mut self, paints: &'a [Paint], roles: &'a [Role]) -> Self {
+        self.decoded = (paints, roles);
         self
     }
 
@@ -778,6 +792,21 @@ impl Widget for Graph<'_> {
             let wanted = self.request(columns, &facts);
             self.ask(wanted, &view.window, held.as_ref());
         }
+        let held_paints = held.as_ref().map_or(&[][..], |h| &h.answer.markers.paints);
+        let (paints, roles): (Cow<[Paint]>, Cow<[Role]>) = match self.decoded {
+            ([], []) => (Cow::Borrowed(held_paints), Cow::Borrowed(&facts.roles[..])),
+            (decoded, declared) => {
+                let roles = (facts.roles.iter().cloned())
+                    .chain(
+                        (declared.iter())
+                            .filter(|r| !facts.roles.iter().any(|d| d.name == r.name))
+                            .cloned(),
+                    )
+                    .collect();
+                let paints = decoded.iter().chain(held_paints).cloned().collect();
+                (Cow::Owned(paints), Cow::Owned(roles))
+            }
+        };
         draw::graph(
             ui,
             &draw::Frame {
@@ -792,8 +821,8 @@ impl Widget for Graph<'_> {
                 lanes: self.lanes,
                 selection: self.state.selection.as_ref(),
                 ink: self.palette.trace_colour(facts.stored.as_ref()),
-                roles: &facts.roles,
-                paints: held.as_ref().map_or(&[][..], |h| &h.answer.markers.paints),
+                roles: &roles,
+                paints: &paints,
                 pixels_per_point: ui.pixels_per_point(),
                 live,
             },
