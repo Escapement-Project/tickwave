@@ -1228,6 +1228,79 @@ fn kept_checkpoints_can_be_spaced_by_the_observations_taken() {
 }
 
 #[test]
+fn a_window_chain_beside_the_forward_pass_re_derives_its_span_and_leaves_the_pass_unchanged() {
+    let keeping = Keeping::new(50, usize::MAX);
+    let alone = {
+        let (mut h, [p, q]) =
+            pulses_host(line(80, 3, 20, vec![]), 15, None, HostOptions::default());
+        h.keep_checkpoints(p, keeping).unwrap();
+        run_all(&mut h);
+        (
+            h.store(p).counts,
+            h.store(q).counts,
+            h.store(q).items.clone(),
+            h.kept(p).unwrap(),
+        )
+    };
+    let (mut h, [p, q]) = pulses_host(line(80, 3, 20, vec![]), 15, None, HostOptions::default());
+    h.keep_checkpoints(p, keeping).unwrap();
+    while h.consumed(p) < 1200 {
+        h.step().unwrap();
+    }
+    assert!(h.finished(p).is_none(), "the forward pass is under way");
+    let window = Span {
+        start: 700,
+        end: 800,
+    };
+    let w = h.derive(p, window).unwrap();
+    assert_eq!(w.chain.len(), 2);
+    let [(fp, wp), (fq, wq)] = [w.chain[0], w.chain[1]];
+    assert_eq!((fp, fq), (p, q));
+    assert!(
+        w.restored
+            .is_some_and(|t| t <= window.start && window.start - t < 50 + 15)
+    );
+    assert_ne!(h.run_id(wp), h.run_id(p), "a run of its own");
+    assert!(h.runnable(wp), "the window chain runs first");
+    h.run_until(|h| h.consumed(wp) >= window.end && h.quiet_below(wp))
+        .unwrap();
+    assert!(
+        h.finished(p).is_none(),
+        "the forward pass waits behind the window"
+    );
+    let meets = |i: &escapement_tickwave_decode::Item| {
+        i.start < window.end && i.end.is_none_or(|e| e > window.start)
+    };
+    let span =
+        |items: &std::collections::BTreeMap<Id, escapement_tickwave_decode::Item>| -> Vec<_> {
+            (items.iter())
+                .filter(|(_, i)| meets(i))
+                .map(|(id, i)| (*id, i.end))
+                .collect()
+        };
+    let want = span(&alone.2);
+    assert!(!want.is_empty());
+    assert_eq!(
+        span(&h.store(wq).items),
+        want,
+        "the window's items are the forward pass's"
+    );
+    h.retire(wp);
+    assert!(!h.runnable(wp) && !h.runnable(wq));
+    run_all(&mut h);
+    assert_eq!(
+        (
+            h.store(p).counts,
+            h.store(q).counts,
+            h.store(q).items.len(),
+            h.kept(p).unwrap()
+        ),
+        (alone.0, alone.1, alone.2.len(), alone.3),
+        "the forward pass's output and checkpoints as without the window"
+    );
+}
+
+#[test]
 fn window_size_does_not_change_the_output() {
     let gaps = vec![
         Span {

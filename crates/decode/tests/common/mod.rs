@@ -278,6 +278,10 @@ impl Source for Line {
         w.end = (self.end < upto).then_some(self.end);
         Ok(Some(w))
     }
+
+    fn fork(&self) -> Option<Box<dyn Source>> {
+        Some(Box::new(self.clone()))
+    }
 }
 
 /// Each high pulse as an item with its width and its levels, one window of `step` ticks a turn.

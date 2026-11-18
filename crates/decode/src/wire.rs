@@ -87,6 +87,19 @@ fn read<T>(r: Result<T, Error>) -> Result<Option<T>, SourceError> {
 }
 
 impl Source for WireSource {
+    fn fork(&self) -> Option<Box<dyn Source>> {
+        Some(Box::new(Self {
+            recording: self.recording.clone(),
+            channels: self.channels.clone(),
+            merge: None,
+            at: Tick::MIN,
+            end: self.end,
+            groups: self.groups.clone(),
+            seeks: 0,
+            reads: 0,
+        }))
+    }
+
     /// The recording's length and timebase stand in for its identity, which the format does not
     /// give yet.
     fn binding(&self) -> u64 {

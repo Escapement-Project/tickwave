@@ -130,6 +130,12 @@ pub trait Source: Send {
     fn binding(&self) -> u64 {
         0
     }
+
+    /// A second source over the same input, reading on its own, for a window re-derived beside
+    /// the forward pass. None where it cannot be had.
+    fn fork(&self) -> Option<Box<dyn Source>> {
+        None
+    }
 }
 
 /// Why a source could not read a window: the recording's error, kept whole, which `source()`
@@ -623,6 +629,21 @@ pub enum CheckpointError {
     /// version or stacking.
     #[error("the checkpoint was taken of other decoders than this host now holds")]
     Incompatible,
+    /// A window chain needs a second source over the wire analysis's input.
+    #[error("{0}'s source cannot be forked for a window")]
+    CannotFork(Name),
+    /// A window chain needs analyses of its own, past what a run id numbers.
+    #[error("no room for a window chain's analyses")]
+    NoRoom,
+}
+
+/// A window chain derived beside the forward pass: each analysis of the forward chain with the
+/// window's own, and the input consumed at the checkpoint it was restored from, if any.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Derived {
+    pub chain: Vec<(AnalysisId, AnalysisId)>,
+    pub restored: Option<Tick>,
 }
 
 /// One run's state in a checkpoint.
@@ -927,12 +948,15 @@ struct Slot {
     def: Arc<Definition>,
     resolved: Resolved,
     input: Input,
-    factory: Factory,
+    factory: Arc<Factory>,
     keep: Vec<Span>,
     downstream: Vec<usize>,
     /// What it reads, and its decoder's settings, as checkpoints are keyed by them.
     binding: u64,
     settings: u64,
+    /// Part of a window chain, and retired from it once its window is done.
+    window: bool,
+    retired: bool,
     run: Run,
 }
 
@@ -1096,11 +1120,13 @@ impl Host {
             def,
             resolved,
             input,
-            factory,
+            factory: Arc::new(factory),
             keep,
             downstream: vec![],
             binding,
             settings,
+            window: false,
+            retired: false,
             run,
         });
         Ok(AnalysisId(analysis))
@@ -1794,7 +1820,8 @@ impl Host {
         let r = &self.analyses[a].run;
         let blocked = (self.analyses[a].downstream.iter())
             .any(|&d| self.analyses[d].run.inbox.len() > self.options.inbox_at_most);
-        r.finished.is_none() && !r.out && (!r.started || r.fresh || r.more) && !blocked
+        let live = !self.analyses[a].retired;
+        live && r.finished.is_none() && !r.out && (!r.started || r.fresh || r.more) && !blocked
     }
 
     /// Steps until `stop` holds or nothing can run.
@@ -2032,6 +2059,124 @@ impl Host {
         restored.map(|_| Seek::Restored(consumed))
     }
 
+    /// Re-derives `window` of wire analysis `a` and everything stacked on it beside their forward
+    /// runs, which carry on as they were: a chain of analyses of its own, restored from the
+    /// latest kept checkpoint at or before the window's start or from the beginning, reading a
+    /// fork of the source and keeping the window. It runs before the forward chain, being added
+    /// after it, until `retire`.
+    pub fn derive(&mut self, a: AnalysisId, window: Span) -> Result<Derived, CheckpointError> {
+        let root = a.index();
+        let name = self.analyses[root].name.clone();
+        let Input::Wire(source) = &self.analyses[root].input else {
+            return Err(CheckpointError::NotARoot(name));
+        };
+        let source = source.fork().ok_or(CheckpointError::CannotFork(name))?;
+        let order = self.below(root);
+        let base = self.analyses.len();
+        if u16::try_from(base + order.len()).is_err() {
+            return Err(CheckpointError::NoRoom);
+        }
+        let kept = (self.keepers.iter().position(|k| k.root == a))
+            .map(|k| &self.keepers[k].held)
+            .and_then(|held| {
+                let at = held.partition_point(|(c, _)| c.consumed <= window.start);
+                at.checked_sub(1).map(|at| &held[at].0)
+            });
+        if kept.is_some_and(|cut| cut.chain != self.chain(root)) {
+            return Err(CheckpointError::Incompatible);
+        }
+        let mut decoders = Vec::with_capacity(order.len());
+        for (k, &x) in order.iter().enumerate() {
+            let an = &self.analyses[x];
+            let decoder = match kept {
+                Some(cut) => (cut.snaps[k].decoder.save())
+                    .ok_or_else(|| CheckpointError::Unsupported(an.name.clone()))?,
+                None => (an.factory)(an.run.local),
+            };
+            decoders.push(decoder);
+        }
+        let restored = kept.map(|cut| cut.consumed);
+        let place = |x: usize| base + order.iter().position(|&o| o == x).unwrap_or(0);
+        let id = |x: usize| RunId {
+            analysis: AnalysisId(place(x) as u16),
+            generation: 1,
+        };
+        let renamed: HashMap<RunId, RunId> = match kept {
+            Some(cut) => (cut.snaps.iter())
+                .map(|s| (s.taken, id(s.analysis)))
+                .collect(),
+            None => HashMap::default(),
+        };
+        let mut slots = Vec::with_capacity(order.len());
+        let mut source = Some(source);
+        for (k, (&x, decoder)) in order.iter().zip(decoders).enumerate() {
+            let an = &self.analyses[x];
+            let (input, bound) = match &an.input {
+                Input::Upstream { index, sub } => (
+                    Input::Upstream {
+                        index: place(*index),
+                        sub: sub.clone(),
+                    },
+                    Some(id(*index)),
+                ),
+                Input::Wire(_) => (
+                    Input::Wire(source.take().ok_or(CheckpointError::NoRoom)?),
+                    None,
+                ),
+            };
+            let run = match kept {
+                Some(cut) => {
+                    Run::restored(&cut.snaps[k], id(x), decoder, bound, vec![window], &renamed)
+                }
+                None => Run::new(
+                    id(x),
+                    an.run.local,
+                    decoder,
+                    Store::with_keep(vec![window]),
+                    bound,
+                ),
+            };
+            slots.push(Slot {
+                name: format!("{}@{}", an.name, base).into(),
+                def: an.def.clone(),
+                resolved: an.resolved.clone(),
+                input,
+                factory: an.factory.clone(),
+                keep: vec![window],
+                downstream: an.downstream.iter().map(|&d| place(d)).collect(),
+                binding: an.binding,
+                settings: an.settings,
+                window: true,
+                retired: false,
+                run,
+            });
+        }
+        self.analyses.extend(slots);
+        let chain = (order.iter())
+            .map(|&x| (AnalysisId(x as u16), AnalysisId(place(x) as u16)))
+            .collect();
+        Ok(Derived { chain, restored })
+    }
+
+    /// Retires the window chain whose wire analysis is `a`: its runs never run again, and their
+    /// stores, queues and reads are dropped. A forward analysis is left as it is.
+    pub fn retire(&mut self, a: AnalysisId) {
+        let root = a.index();
+        if !self.analyses.get(root).is_some_and(|an| an.window) {
+            return;
+        }
+        let chain = self.below(root);
+        for &x in &chain {
+            let an = &mut self.analyses[x];
+            an.retired = true;
+            an.run.store = Store::default();
+            an.run.inbox.clear();
+            an.run.ready = None;
+            an.run.outstanding = None;
+        }
+        self.io.retain(|(x, _, _)| !chain.contains(x));
+    }
+
     /// Restores a checkpoint as new generations of its runs, each bound to its restored upstream.
     /// The runs it replaces are retired as by `replace`: their late replies, batches and
     /// deliveries are refused. A checkpoint can be restored more than once. Each restored store
@@ -2069,32 +2214,7 @@ impl Host {
             let old = an.run.id;
             let id = Self::next_generation(old);
             renamed.insert(snap.taken, id);
-            let mut run = Run::new(id, snap.local, decoder, snap.store.clone(), bound);
-            run.store.keep = an.keep.clone();
-            run.inbox = snap
-                .inbox
-                .iter()
-                .cloned()
-                .map(|mut d| {
-                    let from = d.source_mut();
-                    *from = renamed.get(from).copied().unwrap_or(*from);
-                    d
-                })
-                .collect();
-            run.assembling = snap.assembling.clone();
-            run.recent = snap.recent.clone();
-            run.frontier = snap.frontier;
-            run.settled = snap.settled;
-            run.input = snap.input;
-            run.consumed = snap.consumed;
-            run.observed = snap.observed;
-            run.finished = snap.finished;
-            run.lost = snap.lost.clone();
-            run.lost_end = snap.lost_end;
-            run.lost_total = snap.lost_total;
-            run.lost_input = snap.lost_input;
-            run.fresh = !run.inbox.is_empty();
-            an.run = run;
+            an.run = Run::restored(snap, id, decoder, bound, an.keep.clone(), &renamed);
             retired.push(old);
             self.note(|order| LogEntry::Replaced {
                 order,
@@ -2107,6 +2227,41 @@ impl Host {
 }
 
 impl Run {
+    /// Snapshot `snap` as run `id`, bound to `bound`, keeping `keep`, its queued deliveries
+    /// renamed to the runs that replace their senders.
+    fn restored(
+        snap: &Snapshot,
+        id: RunId,
+        decoder: Box<dyn Decoder>,
+        bound: Option<RunId>,
+        keep: Vec<Span>,
+        renamed: &HashMap<RunId, RunId>,
+    ) -> Self {
+        let mut run = Run::new(id, snap.local, decoder, snap.store.clone(), bound);
+        run.store.keep = keep;
+        run.inbox = (snap.inbox.iter().cloned())
+            .map(|mut d| {
+                let from = d.source_mut();
+                *from = renamed.get(from).copied().unwrap_or(*from);
+                d
+            })
+            .collect();
+        run.assembling = snap.assembling.clone();
+        run.recent = snap.recent.clone();
+        run.frontier = snap.frontier;
+        run.settled = snap.settled;
+        run.input = snap.input;
+        run.consumed = snap.consumed;
+        run.observed = snap.observed;
+        run.finished = snap.finished;
+        run.lost = snap.lost.clone();
+        run.lost_end = snap.lost_end;
+        run.lost_total = snap.lost_total;
+        run.lost_input = snap.lost_input;
+        run.fresh = !run.inbox.is_empty();
+        run
+    }
+
     fn new(
         id: RunId,
         local: Option<Tick>,
