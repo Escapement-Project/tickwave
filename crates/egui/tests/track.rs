@@ -67,6 +67,8 @@ struct Case {
     /// The channels the first analysis's parts paint by who drives them.
     painted: Vec<String>,
     size: egui::Vec2,
+    /// Drawn as a provisional window's.
+    provisional: bool,
 }
 
 fn swd_case() -> Case {
@@ -78,6 +80,7 @@ fn swd_case() -> Case {
         map,
         painted: vec!["SWDIO".into()],
         size: SIZE,
+        provisional: false,
     }
 }
 
@@ -151,6 +154,7 @@ fn jtag_case(path: &Path) -> Case {
         map,
         painted: vec![],
         size: SIZE,
+        provisional: false,
     }
 }
 
@@ -251,6 +255,7 @@ fn cjtag_case(path: &Path, ahead: Tick) -> Case {
         map,
         painted: vec!["TMSC".into()],
         size: egui::vec2(1280.0, 480.0),
+        provisional: false,
     }
 }
 
@@ -382,6 +387,7 @@ struct Host2 {
     decoded: Vec<Decoded>,
     map: Mapping,
     painted: Vec<String>,
+    provisional: bool,
     /// Where decoding has reached, for drawing a run under way.
     settled: Tick,
     heights: Vec<f32>,
@@ -406,6 +412,7 @@ fn harness(window: Window, case: Case) -> Harness<'static, Host2> {
         map,
         painted,
         size,
+        provisional,
     } = case;
     let face = series_face(false);
     let host = Host2 {
@@ -420,6 +427,7 @@ fn harness(window: Window, case: Case) -> Harness<'static, Host2> {
         decoded,
         map,
         painted,
+        provisional,
         settled: Tick::MAX,
         heights: vec![],
         shown: None,
@@ -466,6 +474,7 @@ fn harness(window: Window, case: Case) -> Harness<'static, Host2> {
                         host.map,
                     )
                     .settled(host.settled)
+                    .provisional(host.provisional)
                     .parts(d.parts),
                 );
                 host.heights.push(r.rect.height());
@@ -562,6 +571,19 @@ fn shots() {
         ),
     ];
     shoot(&dir, swd_case, &views);
+    // The same as a provisional window's: decoded from a local start without earlier context.
+    let provisional = || Case {
+        provisional: true,
+        ..swd_case()
+    };
+    shoot(
+        &dir,
+        provisional,
+        &[
+            ("track-provisional-whole", views[0].1.clone()),
+            ("track-provisional-transfers", views[1].1.clone()),
+        ],
+    );
 
     // JTAG: an IR scan and the DR scan after it, with the states they shift in.
     let case = jtag_case(&jtag_fixture());
