@@ -869,8 +869,8 @@ pub struct EdgeChoice {
     pub scans: u32,
 }
 
-/// Counts the first so many IR scans it receives, and those whose captured TDO ends in binary 01.
-struct IrCaptures(Arc<std::sync::Mutex<(u32, u32)>>, u32);
+/// Of the first so many IR scans it receives, whether each one's captured TDO ends in binary 01.
+struct IrCaptures(Arc<std::sync::Mutex<Vec<bool>>>, u32);
 
 impl Decoder for IrCaptures {
     fn turn(&mut self, ex: &mut Exchange<'_>) -> Pause {
@@ -882,11 +882,10 @@ impl Decoder for IrCaptures {
                         item.field(TDO_VALUE).map(|f| &f.value),
                         Some(Value::Bits { bytes, .. }) if bytes.first().is_some_and(|b| b & 3 == 1)
                     );
-                    if let Ok(mut n) = self.0.lock()
-                        && n.0 < self.1
+                    if let Ok(mut seen) = self.0.lock()
+                        && seen.len() < self.1 as usize
                     {
-                        n.0 += 1;
-                        n.1 += u32::from(ok);
+                        seen.push(ok);
                     }
                 }
                 Delivery::Lost { span, .. } => ex.lost(span.start, span.end),
@@ -902,21 +901,33 @@ impl Decoder for IrCaptures {
     }
 }
 
+/// Why the TDO edge could not be read from the wire: the probe's analyses could not be bound, or
+/// the host refused a batch of the probe's decode, a fault in the decoder.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ProbeError {
+    #[error(transparent)]
+    Bind(#[from] escapement_tickwave_decode::BindError),
+    #[error("the host refused the probe's decode")]
+    Refused(#[source] escapement_tickwave_decode::Refusal),
+}
+
 /// Decodes the first `k` IR scans of the wires `source` gives twice, TDO sampled at TCK's rise
 /// and at its fall, and picks the edge whose IR captures end in binary 01, as IEEE 1149.1 has
-/// every IR capture do. A tie goes to the rise. A host labels the choice as read from the wire,
-/// and a setting given by hand overrides it. The first `k` decide, so where the edge that reads
-/// TDO depends on the TCK rate and the rate changes later in the capture, they may not tell.
+/// every IR capture do, over as many scans as both decodes reached. A tie goes to the rise. A
+/// host labels the choice as read from the wire, and a setting given by hand overrides it. The
+/// first `k` decide, so where the edge that reads TDO depends on the TCK rate and the rate
+/// changes later in the capture, they may not tell.
 pub fn choose_tdo_edge(
     source: impl Fn() -> Box<dyn escapement_tickwave_decode::Source>,
     window: Tick,
     k: u32,
-) -> Result<EdgeChoice, escapement_tickwave_decode::BindError> {
+) -> Result<EdgeChoice, ProbeError> {
     use escapement_tickwave_decode::{Host, InputSpec, Mode, Subscription};
     // Each edge in a host of its own, stopped at its kth IR scan: in one host, one chain would
     // run to the end before the other began.
-    let mut counted = [(0u32, 0u32); 2];
-    for (slot, at_fall) in counted.iter_mut().zip([false, true]) {
+    let mut captured = [vec![], vec![]];
+    for (slot, at_fall) in captured.iter_mut().zip([false, true]) {
         let mut h = Host::default();
         let j = h.add(
             name("jtag"),
@@ -929,7 +940,7 @@ pub fn choose_tdo_edge(
             &[tdo_edge(at_fall)],
             vec![],
         )?;
-        let seen = Arc::new(std::sync::Mutex::new((0u32, 0u32)));
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
         let s = seen.clone();
         h.add(
             name("captures"),
@@ -939,13 +950,15 @@ pub fn choose_tdo_edge(
             &[],
             vec![],
         )?;
-        let read = || seen.lock().map_or((0, 0), |n| *n);
-        // A refusal stops the probe where it is; what it counted so far still decides.
-        let _ = h.run_until(|_| read().0 >= k);
-        *slot = read();
+        let read = || seen.lock().map_or(0, |n| n.len());
+        h.run_until(|_| read() >= k as usize)
+            .map_err(ProbeError::Refused)?;
+        *slot = seen.lock().map(|n| n.clone()).unwrap_or_default();
     }
-    let [(rs, rise), (fs, fall)] = counted;
-    let scans = rs.min(fs);
+    // Each edge over the same first scans: a decode whose input ends sooner reaches fewer.
+    let scans = captured[0].len().min(captured[1].len());
+    let ok = |c: &[bool]| c[..scans].iter().filter(|&&x| x).count() as u32;
+    let (rise, fall, scans) = (ok(&captured[0]), ok(&captured[1]), scans as u32);
     Ok(EdgeChoice {
         at_fall: fall > rise,
         rise,

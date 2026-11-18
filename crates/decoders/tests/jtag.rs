@@ -672,3 +672,43 @@ fn a_tms_cycle_of_one_clock_states_is_cut_into_bounded_paths() {
     assert!(paths.iter().sum::<usize>() >= 300, "{paths:?}");
     assert!(h.store(j).counts.peak_open <= 2);
 }
+
+/// Wires that cannot be read from `.1` on.
+struct Cut(Wires, Tick);
+
+impl escapement_tickwave_decode::Source for Cut {
+    fn window(
+        &mut self,
+        from: Tick,
+        upto: Tick,
+        most: usize,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<Option<escapement_tickwave_decode::Window>, escapement_tickwave_decode::SourceError>
+    {
+        if from >= self.1 {
+            let cut = std::io::Error::other("the recording is cut off");
+            return Err(escapement_tickwave_decode::SourceError::new(cut));
+        }
+        self.0.window(from, upto, most, cancel)
+    }
+
+    fn binding(&self) -> u64 {
+        self.0.binding()
+    }
+
+    fn ports(&self) -> Vec<bool> {
+        self.0.ports()
+    }
+}
+
+#[test]
+fn a_tdo_edge_probe_that_cannot_read_its_wires_says_so_rather_than_deciding_on_part() {
+    let (s, _) = session(SMALL);
+    let w = s.wires();
+    let cut = w.end / 3;
+    let choice = jtag::choose_tdo_edge(|| Box::new(Cut(w.clone(), cut)), 64, 1_000);
+    assert!(
+        matches!(choice, Err(jtag::ProbeError::Refused(_))),
+        "{choice:?}"
+    );
+}
