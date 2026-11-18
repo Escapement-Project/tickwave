@@ -1370,6 +1370,54 @@ fn a_window_keeps_an_item_open_across_its_checkpoint_when_the_forward_pass_kept_
 }
 
 #[test]
+fn an_item_ending_past_a_checkpoints_input_is_kept_by_a_window_restored_from_it() {
+    // Pulses fall at 13 past every 20 and end 5 later: the one falling at 73, read up to 75,
+    // ends at 78, past the input the checkpoint at 75 had taken.
+    let host = || pulses_host_tail(line(80, 3, 20, vec![]), 15, None, HostOptions::default(), 5);
+    let (mut all, [ap, aq]) = host();
+    run_all(&mut all);
+    let (mut h, [p, q]) = host();
+    h.set_keep(p, vec![]);
+    h.set_keep(q, vec![]);
+    h.keep_checkpoints(p, Keeping::new(1, usize::MAX)).unwrap();
+    run_all(&mut h);
+    let span = |items: &std::collections::BTreeMap<Id, escapement_tickwave_decode::Item>,
+                w: Span|
+     -> Vec<_> {
+        (items.iter())
+            .filter(|(_, i)| i.start < w.end && i.end.is_none_or(|e| e > w.start))
+            .map(|(id, i)| (*id, i.end, i.fields.len()))
+            .collect()
+    };
+    for start in 60..100 {
+        let window = Span {
+            start,
+            end: start + 40,
+        };
+        let w = h.derive(p, window).unwrap();
+        if start == 76 {
+            assert_eq!(w.restored, Some(75));
+        }
+        let w = w.window;
+        h.run_until(|h| win(h, w, q).settled() >= window.end)
+            .unwrap();
+        for (f, x) in [(ap, p), (aq, q)] {
+            let want = span(&all.store(f).items, window);
+            assert_eq!(
+                span(&win(&h, w, x).store().items, window),
+                want,
+                "the window at {start}"
+            );
+        }
+        h.retire(w);
+    }
+    assert!(
+        h.store(p).items.is_empty() && h.store(q).items.is_empty(),
+        "finished, the forward pass holds nothing past its spans"
+    );
+}
+
+#[test]
 fn two_live_window_chains_each_read_their_own_window() {
     let (mut all, [ap, aq]) =
         pulses_host(line(80, 3, 20, vec![]), 15, None, HostOptions::default());

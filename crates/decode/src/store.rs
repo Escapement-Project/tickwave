@@ -6,7 +6,7 @@ use crate::output::{
     Role, SeqId, Span, Status, Tick, Value,
 };
 use foldhash::HashMap;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Why an operation breaks its item's lifecycle.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -311,14 +311,20 @@ impl Staged<'_> {
 }
 
 /// Checks ops and keeps items: every open one, its fields and links, so that a checkpoint carries
-/// what a later window needs of it, and once closed only those that meet a retained span. An item
-/// keeps the elements whose cells meet a retained span.
+/// what a later window needs of it, and once closed those that meet a retained span, and in a
+/// host's store those that end past where the host has passed it. An item keeps the elements
+/// whose cells meet a retained span.
 #[derive(Clone, Debug, Default)]
 pub struct Store {
     open: HashMap<Id, Open>,
     pub items: BTreeMap<Id, Item>,
     pub keep: Vec<Span>,
     pub counts: Counts,
+    /// Closed items that meet no retained span, by end, held until `pass` goes past their ends: a
+    /// checkpoint taken meanwhile needs an item that ends past the input it had consumed.
+    ahead: BTreeSet<(Tick, Id)>,
+    /// Where `pass` last went. Until a host passes the store, such an item is dropped at once.
+    passed: Option<Tick>,
     /// What the batch under way changed, to put back if it is refused.
     undo: Vec<(Id, Option<Open>)>,
     batch: u64,
@@ -360,6 +366,22 @@ impl Store {
             })
             .sum();
         size_of::<Self>() + open + items + self.keep.capacity() * size_of::<Span>()
+    }
+
+    /// Drops the closed items held past the retained spans whose ends are at or before `to`, and
+    /// holds those that close from now on until a pass goes past their ends.
+    pub(crate) fn pass(&mut self, to: Tick) {
+        self.passed = Some(to);
+        while let Some(&(end, id)) = self.ahead.first() {
+            if end > to {
+                break;
+            }
+            self.ahead.pop_first();
+            let keep = &self.keep;
+            if (self.items.get(&id)).is_some_and(|i| !keep.iter().any(|s| meets(i.start, end, s))) {
+                self.items.remove(&id);
+            }
+        }
     }
 
     /// Applies a batch whole or not at all. Every op is checked against the open items as the
@@ -609,7 +631,14 @@ impl Store {
                     item.end = Some(*end);
                     item.status = Some(*status);
                     if !self.keep.iter().any(|s| meets(item.start, *end, s)) {
-                        self.items.remove(id);
+                        match self.passed {
+                            Some(p) if *end > p => {
+                                self.ahead.insert((*end, *id));
+                            }
+                            _ => {
+                                self.items.remove(id);
+                            }
+                        }
                     }
                 }
             }
@@ -678,6 +707,7 @@ mod tests {
     fn an_item_open_at_a_checkpoint_is_kept_by_a_window_restored_from_it() {
         let id = Id::new(KindId(0), 100);
         let mut forward = Store::with_keep(vec![]);
+        forward.pass(Tick::MIN);
         forward
             .apply_batch(
                 &[Op::Open {
@@ -715,6 +745,12 @@ mod tests {
                 .is_some_and(|i| i.end == Some(160) && i.fields.len() == 1)
         );
         forward.apply_batch(&[set, close], 8).unwrap();
+        forward.pass(159);
+        assert!(
+            forward.items.contains_key(&id),
+            "held until the input passes its end"
+        );
+        forward.pass(160);
         assert!(
             forward.items.is_empty(),
             "closed, it meets no span of the forward pass"

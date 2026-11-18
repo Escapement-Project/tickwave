@@ -289,6 +289,8 @@ impl Source for Line {
 pub struct Pulses {
     pub at: Tick,
     pub step: Tick,
+    /// How far past its fall a pulse ends, as SWD's last cell lies past its last rise.
+    pub tail: Tick,
     pub level: Option<bool>,
     pub open: Option<Id>,
     pub levels: u32,
@@ -300,6 +302,7 @@ impl Pulses {
         Self {
             at: local.unwrap_or(0),
             step,
+            tail: 0,
             level: None,
             open: None,
             levels: 0,
@@ -346,7 +349,7 @@ impl Decoder for Pulses {
                                 bits: 32,
                             },
                         );
-                        ex.out.close(id, at, Status::Complete);
+                        ex.out.close(id, at + self.tail, Status::Complete);
                     }
                     if let Some(id) = self.open {
                         let cell = Span {
@@ -454,6 +457,17 @@ pub fn pulses_host(
     local: Option<Tick>,
     options: HostOptions,
 ) -> (Host, [AnalysisId; 2]) {
+    pulses_host_tail(line, step, local, options, 0)
+}
+
+/// As `pulses_host`, each pulse ending `tail` past its fall.
+pub fn pulses_host_tail(
+    line: Line,
+    step: Tick,
+    local: Option<Tick>,
+    options: HostOptions,
+    tail: Tick,
+) -> (Host, [AnalysisId; 2]) {
     let mut h = Host::new(options);
     let p = h
         .add(
@@ -463,7 +477,11 @@ pub fn pulses_host(
                 source: Box::new(line),
                 local,
             },
-            Box::new(move |local| Box::new(Pulses::new(local, step))),
+            Box::new(move |local| {
+                let mut p = Pulses::new(local, step);
+                p.tail = tail;
+                Box::new(p)
+            }),
             all(),
         )
         .unwrap();

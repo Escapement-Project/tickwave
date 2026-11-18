@@ -1112,6 +1112,24 @@ impl Host {
             .find(|r| r.id == id)
     }
 
+    /// How far run `id`'s chain has taken its wire input: its wire analysis's run of the same
+    /// chain, forward or window.
+    fn chain_consumed(&self, id: RunId) -> Tick {
+        let mut a = id.analysis.index();
+        while let Input::Upstream { index, .. } = &self.analyses[a].input {
+            a = *index;
+        }
+        let an = &self.analyses[a];
+        let forward = self.analyses[id.analysis.index()].run.id == id;
+        std::iter::once(&an.run)
+            .chain(&an.windows)
+            .find(|r| match forward {
+                true => r.id == an.run.id,
+                false => r.id.generation == id.generation,
+            })
+            .map_or(Tick::MIN, |r| r.consumed)
+    }
+
     /// Analysis `d`'s run bound to upstream run `up`.
     fn bound_to(&self, d: usize, up: RunId) -> Option<&Run> {
         let an = &self.analyses[d];
@@ -1952,6 +1970,15 @@ impl Host {
                 request: req,
             });
         }
+        // Closed items ending past the input its chain has taken are held for a checkpoint;
+        // finished, it takes no more.
+        let to = match end {
+            Some(_) => Tick::MAX,
+            None => self.chain_consumed(id),
+        };
+        if let Some(r) = self.run_of_mut(id) {
+            r.store.pass(to);
+        }
         if let Some(end) = end {
             let Some(r) = self.run_of_mut(id) else {
                 return Ok(pause);
@@ -2222,9 +2249,10 @@ impl Host {
             keeper.next_events = observed.saturating_add(keeper.keeping.events.unwrap_or(0));
             // A decoder that cannot copy its state is replayed from the start instead.
             if let Ok(mut cut) = cut {
-                // Closed items are output, not state: a seek re-derives what it keeps.
+                // Closed items are output, not state: a seek re-derives what it keeps, except
+                // those ending past the input taken, which a span starting there meets.
                 for s in &mut cut.snaps {
-                    s.store.items.retain(|_, i| i.end.is_none());
+                    (s.store.items).retain(|_, i| i.end.is_none_or(|e| e > consumed));
                 }
                 let b = cut.bytes();
                 keeper.bytes += b;
@@ -2236,12 +2264,12 @@ impl Host {
 
     /// Restores the latest checkpoint kept for wire analysis `a` that had taken its input no
     /// further than `t`, or replaces its chain from the beginning where there is none. Running
-    /// the host then replays from there. A kept checkpoint holds no closed items, so the stores
-    /// afterwards hold the items still open at it and what the replay keeps. `t` is the start of
-    /// the span to re-derive: an item that closed before the checkpoint ended at or before the
-    /// input it had consumed, so with that at or before `t` the span loses nothing, but a later
-    /// checkpoint would leave out what closed between `t` and it. The runs replaced include a forward pass under way: to
-    /// carry it on, seek again to the latest checkpoint.
+    /// the host then replays from there. A kept checkpoint holds the items still open at it and
+    /// those closed that end past the input it had taken, so the stores afterwards hold those and
+    /// what the replay keeps. `t` is the start of the span to re-derive: every item that meets it
+    /// is open at the checkpoint, ends past its input, or is emitted by the replay, but a later
+    /// checkpoint would leave out what closed between `t` and it. The runs replaced include a
+    /// forward pass under way: to carry it on, seek again to the latest checkpoint.
     pub fn seek(&mut self, a: AnalysisId, t: Tick) -> Result<Seek, CheckpointError> {
         let Some(k) = self.keepers.iter().position(|k| k.root == a) else {
             self.replace(a, None);
@@ -2456,9 +2484,11 @@ impl Run {
         id: RunId,
         local: Option<Tick>,
         decoder: Box<dyn Decoder>,
-        store: Store,
+        mut store: Store,
         bound: Option<RunId>,
     ) -> Self {
+        // Held for checkpoints from the start; each turn passes it as its chain's input moves on.
+        store.pass(Tick::MIN);
         Self {
             id,
             local,
