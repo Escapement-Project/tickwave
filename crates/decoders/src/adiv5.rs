@@ -8,8 +8,11 @@
 //! setting `reads` says ("posted" or "own"). MEM-AP reads ADIv5's completed AP accesses: TAR and CSW
 //! writes, then DRW accesses at the address TAR holds, auto-incremented as CSW says.
 //!
-//! Every AP is taken for a MEM-AP: its registers at 0x00 to 0x1C take a MEM-AP's names, CSW to
-//! BD3, whatever the AP's class, though a JTAG-AP or another class has other registers there.
+//! Each AP's class comes from its IDR reads (ADIv5.2 C1.3.2), and an AP access carries the class
+//! known when it was made; an IDR read carries the class its own value gives. A register's name
+//! follows the class: IDR for any AP, the only register every AP has (C1.3.1); a MEM-AP's and a
+//! JTAG-AP's registers once an IDR read shows the AP is one. MEM-AP skips an AP known to be of
+//! another class and takes one not yet identified for a MEM-AP.
 
 use crate::swd;
 use escapement_tickwave_decode::{
@@ -43,6 +46,7 @@ pub const AP_REG: FieldId = FieldId(1);
 pub const AP_NAME: FieldId = FieldId(2);
 pub const AP_A: FieldId = FieldId(3);
 pub const AP_VALUE: FieldId = FieldId(4);
+pub const AP_CLASS: FieldId = FieldId(5);
 /// An AP write's links.
 pub const W_TRANSFER: LinkId = LinkId(0);
 pub const W_CONTEXT: LinkId = LinkId(1);
@@ -65,7 +69,7 @@ pub const DP_NAMES: [&str; 12] = [
     "EVENTSTAT",
     "reserved",
 ];
-pub const AP_NAMES: [&str; 11] = [
+pub const AP_NAMES: [&str; 17] = [
     "CSW",
     "TAR",
     "TAR[63:32]",
@@ -77,14 +81,34 @@ pub const AP_NAMES: [&str; 11] = [
     "CFG",
     "BASE",
     "IDR",
+    "PSEL",
+    "PSTA",
+    "BRFIFO1",
+    "BRFIFO2",
+    "BRFIFO3",
+    "BRFIFO4",
 ];
+
+/// An AP's class, as its IDR gives it: by its index in `CLASS_NAMES`. `ABSENT` is an IDR of zero,
+/// no AP present; `OTHER` a class this decoder names no registers of.
+pub const CLASS_NAMES: [&str; 5] = ["MEM-AP", "JTAG-AP", "COM-AP", "other", "absent"];
+pub const MEM_AP: u16 = 0;
+pub const JTAG_AP: u16 = 1;
+pub const COM_AP: u16 = 2;
+pub const OTHER: u16 = 3;
+pub const ABSENT: u16 = 4;
+/// Arm's JEP106 code as IDR.DESIGNER holds it: continuation 4, identity 0x3B.
+const ARM: u32 = 0x23B;
 
 pub const BANK_UNKNOWN: Reason = Reason(0);
 pub const NO_SELECT: Reason = Reason(1);
 pub const PARITY_FAILED: Reason = Reason(2);
 pub const LOST_SELECT: Reason = Reason(3);
 pub const LOST_BANK: Reason = Reason(4);
+pub const NO_IDR: Reason = Reason(5);
+pub const UNIDENTIFIABLE: Reason = Reason(6);
 pub const NEEDS_SELECT: Need = Need(0);
+pub const NEEDS_IDR: Need = Need(1);
 
 pub const NEVER_READ: Cause = Cause(0);
 pub const ENDS_UNREAD: Cause = Cause(1);
@@ -119,6 +143,7 @@ pub fn adi_schema() -> Schema {
                 field("name", FieldType::Name(AP_NAMES.map(name).to_vec())),
                 field("a", w(4)),
                 field("value", w(32)),
+                field("class", FieldType::Name(CLASS_NAMES.map(name).to_vec())),
             ])
             .with_links(links)
             .with_labels(vec![
@@ -158,8 +183,10 @@ pub fn adi_schema() -> Schema {
         "data parity failed",
         "the SELECT value is lost in a recording gap",
         "DP bank unknown: the SELECT value is lost in a recording gap",
+        "no IDR read of this AP decoded before this access",
+        "the AP's IDR sets reserved bits, so the AP is unidentifiable",
     ])
-    .with_needs(["SELECT"])
+    .with_needs(["SELECT", "IDR"])
     .with_causes([
         "result never read back",
         "the recording ends before the result is read back",
@@ -227,20 +254,52 @@ pub fn dp_name(read: bool, addr: u8, bank: Option<u32>) -> Value {
     Value::Name(n)
 }
 
-/// An AP register's name, by its index in `AP_NAMES`, as a MEM-AP's.
-pub fn ap_name(reg: u32) -> Option<u16> {
-    Some(match reg {
-        0x00 => 0,
-        0x04 => 1,
-        0x08 => 2,
-        0x0C => 3,
-        0x10 => 4,
-        0x14 => 5,
-        0x18 => 6,
-        0x1C => 7,
-        0xF4 => 8,
-        0xF8 => 9,
-        0xFC => 10,
+/// An AP's class from its IDR (C1.3.2, table C1-3), by its index in `CLASS_NAMES`, or why it has
+/// none.
+pub fn ap_class(idr: u32) -> Result<u16, Reason> {
+    let designer = idr >> 17 & 0x7FF;
+    let (variant, ty) = (idr >> 4 & 0xF, idr & 0xF);
+    // A designer of zero is an early Arm DAP, whose CLASS reads as zero whatever the AP is.
+    let arm = designer == ARM || designer == 0;
+    Ok(match idr >> 13 & 0xF {
+        _ if idr == 0 => ABSENT,
+        _ if idr >> 8 & 0x1F != 0 => return Err(UNIDENTIFIABLE),
+        0b1000 => MEM_AP,
+        0b0001 => COM_AP,
+        0b0000 if arm && ty == 0 && variant != 0 => JTAG_AP,
+        0b0000 if designer == 0 && matches!(ty, 0x1 | 0x2 | 0x4..=0x8) => MEM_AP,
+        _ => OTHER,
+    })
+}
+
+/// An AP register's name, by its index in `AP_NAMES`, for an AP of `class` (None where it is not
+/// known): IDR for any AP, the others by the class's register map (C2.6, table C3-10).
+pub fn ap_name(class: Option<u16>, reg: u32) -> Option<u16> {
+    Some(match (class, reg) {
+        (_, 0xFC) => 10,
+        (Some(MEM_AP), _) => match reg {
+            0x00 => 0,
+            0x04 => 1,
+            0x08 => 2,
+            0x0C => 3,
+            0x10 => 4,
+            0x14 => 5,
+            0x18 => 6,
+            0x1C => 7,
+            0xF4 => 8,
+            0xF8 => 9,
+            _ => return None,
+        },
+        (Some(JTAG_AP), _) => match reg {
+            0x00 => 0,
+            0x04 => 11,
+            0x08 => 12,
+            0x10 => 13,
+            0x14 => 14,
+            0x18 => 15,
+            0x1C => 16,
+            _ => return None,
+        },
         _ => return None,
     })
 }
@@ -262,6 +321,8 @@ pub struct Closed {
 #[derive(Clone, Copy, Debug)]
 struct Pending {
     id: Id,
+    /// The AP an IDR read identifies, whose class the read takes from its own value.
+    idr: Option<u8>,
 }
 
 /// What ADIv5 needs of an SWD transfer, gathered from its pieces.
@@ -289,6 +350,9 @@ pub struct Adi {
     up: Option<Tick>,
     /// Each read carries its own data, as JTAG-DP's do.
     own_reads: bool,
+    /// Each AP's class from its last IDR read with a known value, or why it has none. An AP's
+    /// IDR is read-only and fixed, so a recording gap forgets SELECT but not these.
+    classes: HashMap<u8, Result<u16, Reason>>,
 }
 
 impl Adi {
@@ -303,6 +367,7 @@ impl Adi {
             building: HashMap::default(),
             up: None,
             own_reads: false,
+            classes: HashMap::default(),
         }
     }
 
@@ -331,7 +396,7 @@ impl Adi {
     /// unknown from `to` until a SELECT write, in a context item there.
     fn gap(&mut self, from: Tick, to: Tick, out: &mut Out) {
         if let Some(p) = self.pending.take() {
-            out.close(p.id, from, Status::Incomplete(GAP_CUT));
+            self.unread(p, from, GAP_CUT, out);
         }
         if let Some(ctx) = self.context.take() {
             out.close(ctx, from, Status::Incomplete(GAP_CUT));
@@ -342,6 +407,29 @@ impl Adi {
         out.open(id, None, to);
         out.set(id, SELECT, unknown(LOST_SELECT));
         self.context = Some(id);
+    }
+
+    /// AP `ap`'s class as an access to it carries it.
+    fn class(&self, ap: u8) -> Value {
+        match self.classes.get(&ap) {
+            Some(&Ok(n)) => Value::Name(n),
+            Some(&Err(reason)) => Value::Unknown {
+                reason,
+                needs: None,
+            },
+            None => Value::Unknown {
+                reason: NO_IDR,
+                needs: Some(NEEDS_IDR),
+            },
+        }
+    }
+
+    /// A read closed before its data came back: an IDR read takes the class known before it.
+    fn unread(&self, p: Pending, at: Tick, cause: Cause, out: &mut Out) {
+        if let Some(ap) = p.idr {
+            out.set(p.id, AP_CLASS, self.class(ap));
+        }
+        out.close(p.id, at, Status::Incomplete(cause));
     }
 
     fn context_link(&self, id: Id, link: LinkId, out: &mut Out) {
@@ -407,17 +495,27 @@ impl Adi {
             .as_ref()
             .map(|(s, _)| ((s >> 4) & 0xF) * 16 + u32::from(c.addr));
         let why = self.unknown;
+        let class = ap.map_or(unknown(why), |a| self.class(a));
+        let named = match class {
+            Value::Name(n) => Some(n),
+            _ => None,
+        };
+        // An IDR read's class comes with its value.
+        let idr = ap.filter(|_| c.read && reg == Some(0xFC));
         let fields = |out: &mut Out, id: Id| {
             out.set(id, AP, ap.map_or(unknown(why), |a| word(a.into(), 8)));
             out.set(id, AP_REG, reg.map_or(unknown(why), |r| word(r.into(), 8)));
-            if let Some(n) = reg.and_then(ap_name) {
+            if let Some(n) = reg.and_then(|r| ap_name(named, r)) {
                 out.set(id, AP_NAME, Value::Name(n));
             }
             out.set(id, AP_A, word(c.addr.into(), 4));
+            if idr.is_none() {
+                out.set(id, AP_CLASS, class);
+            }
         };
         if !c.read {
             if let Some(p) = self.pending.take() {
-                out.close(p.id, c.start, Status::Incomplete(NEVER_READ));
+                self.unread(p, c.start, NEVER_READ, out);
             }
             let id = Id::new(AP_WRITE, c.id.anchor);
             out.open(id, None, c.start);
@@ -436,16 +534,17 @@ impl Adi {
         fields(out, id);
         out.link(id, R_REQUEST, Ref::Upstream(c.id));
         self.context_link(id, R_CONTEXT, out);
+        let p = Pending { id, idr };
         if self.own_reads {
-            self.complete(Pending { id }, c, out);
+            self.complete(p, c, out);
         } else {
-            self.pending = Some(Pending { id });
+            self.pending = Some(p);
         }
     }
 
     fn finish(&mut self, end: Tick, out: &mut Out) {
         if let Some(p) = self.pending.take() {
-            out.close(p.id, end, Status::Incomplete(ENDS_UNREAD));
+            self.unread(p, end, ENDS_UNREAD, out);
         }
         if let Some(ctx) = self.context.take() {
             out.close(ctx, end, Status::Complete);
@@ -453,7 +552,13 @@ impl Adi {
     }
 
     fn complete(&mut self, p: Pending, c: &Closed, out: &mut Out) {
-        Self::value(out, p.id, AP_VALUE, c);
+        let v = Self::value(out, p.id, AP_VALUE, c);
+        if let Some(ap) = p.idr {
+            if let Some((idr, _)) = v {
+                self.classes.insert(ap, ap_class(idr));
+            }
+            out.set(p.id, AP_CLASS, self.class(ap));
+        }
         out.link(p.id, R_DATA, Ref::Upstream(c.id));
         out.close(p.id, c.end, Status::Complete);
     }
@@ -561,6 +666,7 @@ impl Decoder for Adi {
 
     fn heap_bytes(&self) -> usize {
         crate::held::<(Id, Partial)>(self.building.capacity())
+            + crate::held::<(u8, Result<u16, Reason>)>(self.classes.capacity())
     }
 }
 
@@ -681,6 +787,8 @@ pub struct Access {
     pub ap: Option<u8>,
     pub reg: Option<u32>,
     pub value: Option<(u32, Span)>,
+    /// The AP's class, where ADIv5 knows it.
+    pub class: Option<u16>,
 }
 
 impl Access {
@@ -703,12 +811,17 @@ impl Access {
             ap: word(AP).map(|v| v as u8),
             reg: word(AP_REG).map(|v| v as u32),
             value,
+            class: match item.field(AP_CLASS).map(|f| &f.value) {
+                Some(&Value::Name(n)) => Some(n),
+                _ => None,
+            },
         }
     }
 }
 
 /// MEM-AP over completed AP accesses. An access closed incomplete carries no data and is
-/// skipped. An access completed later starts no earlier than ADIv5's settlement frontier, so that
+/// skipped, as is one to an AP ADIv5 knows is of another class. An access completed later starts
+/// no earlier than ADIv5's settlement frontier, so that
 /// is its start frontier.
 #[derive(Clone, Debug)]
 pub struct Mem {
@@ -769,6 +882,9 @@ impl Mem {
         };
         if let Some(ctx) = self.context.take() {
             out.close(ctx, a.span.start, Status::Complete);
+        }
+        if a.class.is_some_and(|c| c != MEM_AP) {
+            return;
         }
         match reg {
             0x00 => {

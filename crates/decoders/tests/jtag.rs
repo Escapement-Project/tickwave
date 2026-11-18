@@ -1067,6 +1067,10 @@ fn jtag_dp_reads_the_daps_parts_of_a_chain_as_transfers_adiv5_reads() {
     assert_eq!(reads.len(), 1);
     assert_eq!(w(&reads[0], adiv5::AP_REG), Some(0xFC));
     assert_eq!(w(&reads[0], adiv5::AP_VALUE), Some(0x2477_0011));
+    assert_eq!(
+        value(&reads[0], adiv5::AP_CLASS),
+        Some(Value::Name(adiv5::MEM_AP))
+    );
     assert_eq!(reads[0].status, Some(Status::Complete));
     let dp_reads = of(&h, adi, &[adiv5::DP_READ]);
     let names: Vec<_> = dp_reads.iter().map(|d| w(d, adiv5::DP_REG)).collect();

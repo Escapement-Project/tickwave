@@ -728,8 +728,11 @@ pub fn stack_dp(
                     (0xFC, Some(v)) => format!(" 0x{v:08X}"),
                     _ => String::new(),
                 };
+                let class = n(i, adiv5::AP_CLASS)
+                    .and_then(|c| adiv5::CLASS_NAMES.get(c as usize).copied())
+                    .unwrap_or("unidentified");
                 format!(
-                    "AP {} {} 0x{reg:02X}{value}",
+                    "AP {} {} 0x{reg:02X}{value} {class}",
                     n(i, adiv5::AP).map_or("?".into(), |a| a.to_string()),
                     if k == adiv5::AP_READ { "read" } else { "write" },
                 )

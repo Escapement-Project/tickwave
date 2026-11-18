@@ -184,10 +184,140 @@ fn transfers_decode_as_encoded() {
         ]
     );
     assert_eq!(
+        named(idr, adiv5::AP_CLASS),
+        Some(adiv5::MEM_AP),
+        "its own IDR"
+    );
+    assert_eq!(
         reads[1].status,
         Some(Status::Incomplete(adiv5::ENDS_UNREAD)),
         "the last read is never read back"
     );
+    assert_eq!(
+        named(&reads[1], adiv5::AP_CLASS),
+        Some(adiv5::MEM_AP),
+        "an IDR read never read back has the class known before it"
+    );
+}
+
+/// An Arm JTAG-AP's IDR: revision 2, Arm, no class, variant 1, type 0.
+const JTAG_AP_IDR: u32 = 0x2476_0010;
+
+#[test]
+fn ap_registers_are_named_by_the_class_an_idr_read_gives() {
+    let ts = vec![
+        dp_write(0x8, 0x0000_0000),
+        ap_write(0x4, 0x0000_0001),
+        dp_write(0x8, 0x0000_00F0),
+        ap_read(0xC, 0),
+        dp_read(0xC, JTAG_AP_IDR),
+        dp_write(0x8, 0x0000_0000),
+        ap_write(0x4, 0x0000_0001),
+        ap_write(0xC, 0x0000_0002),
+        dp_write(0x8, 0x0100_00F0),
+        ap_read(0xC, 0),
+        dp_read(0xC, IDR),
+        dp_write(0x8, 0x0100_0000),
+        ap_write(0x4, 0x2000_0000),
+        ap_write(0xC, 0x0000_0003),
+        dp_write(0x8, 0x0200_00F0),
+        ap_read(0xC, 0),
+        dp_read(0xC, 0x2477_0111),
+    ];
+    let (b, _) = bits(&ts);
+    let (mut h, [_, a, m]) = host(wires(&b, P), 100, None);
+    run(&mut h);
+    let writes = of(&h, a, adiv5::AP_WRITE);
+    let got: Vec<_> = (writes.iter())
+        .map(|i| (named(i, adiv5::AP_NAME), value(i, adiv5::AP_CLASS)))
+        .collect();
+    let class = |n| Some(Value::Name(n));
+    assert_eq!(
+        got,
+        [
+            (
+                None,
+                Some(Value::Unknown {
+                    reason: adiv5::NO_IDR,
+                    needs: Some(adiv5::NEEDS_IDR),
+                })
+            ),
+            (Some(11), class(adiv5::JTAG_AP)),
+            (None, class(adiv5::JTAG_AP)),
+            (Some(1), class(adiv5::MEM_AP)),
+            (Some(3), class(adiv5::MEM_AP)),
+        ],
+        "PSEL, a JTAG-AP's reserved 0x0C, then a MEM-AP's TAR and DRW"
+    );
+    let reads = of(&h, a, adiv5::AP_READ);
+    let classes: Vec<_> = reads.iter().map(|i| value(i, adiv5::AP_CLASS)).collect();
+    let unidentifiable = Some(Value::Unknown {
+        reason: adiv5::UNIDENTIFIABLE,
+        needs: None,
+    });
+    assert_eq!(
+        classes,
+        [class(adiv5::JTAG_AP), class(adiv5::MEM_AP), unidentifiable],
+        "an IDR with reserved bits set leaves AP 2 unidentifiable"
+    );
+    let mem = of(&h, m, adiv5::MEM_WRITE);
+    let got: Vec<_> = (mem.iter())
+        .map(|i| (word(i, adiv5::ADDRESS), word(i, adiv5::MEM_VALUE)))
+        .collect();
+    assert_eq!(
+        got,
+        [(Some(0x2000_0000), Some(3))],
+        "MEM-AP skips the JTAG-AP, and an AP not yet identified writes at no TAR"
+    );
+}
+
+#[test]
+fn an_aps_class_outlasts_a_gap() {
+    let ts = vec![
+        dp_write(0x8, 0x0000_00F0),
+        ap_read(0xC, 0),
+        dp_read(0xC, JTAG_AP_IDR),
+        dp_write(0x8, 0x0000_0000),
+        dp_write(0x8, 0x0000_0000),
+        ap_write(0x4, 0x0000_0001),
+    ];
+    let (b, starts) = bits(&ts);
+    // Through the first SELECT write after the IDR comes back.
+    let gap = Span {
+        start: rise(starts[3] + 20, P),
+        end: rise(starts[4] - 1, P),
+    };
+    let mut w = wires(&b, P);
+    w.lines[1].gaps.push(gap);
+    let (mut h, [_, a, _]) = host(w, 64, None);
+    run(&mut h);
+    let writes = of(&h, a, adiv5::AP_WRITE);
+    assert_eq!(writes.len(), 1);
+    assert_eq!(named(&writes[0], adiv5::AP_CLASS), Some(adiv5::JTAG_AP));
+    assert_eq!(named(&writes[0], adiv5::AP_NAME), Some(11), "PSEL");
+}
+
+#[test]
+fn an_idr_gives_the_class_table_c1_3_does() {
+    let cases = [
+        (0x0000_0000, Ok(adiv5::ABSENT)),
+        (IDR, Ok(adiv5::MEM_AP)),
+        (0x8477_0001, Ok(adiv5::MEM_AP)),
+        (JTAG_AP_IDR, Ok(adiv5::JTAG_AP)),
+        (0x2476_2000, Ok(adiv5::COM_AP)),
+        // Arm, no class, but variant zero: not a JTAG-AP.
+        (0x2476_0000, Ok(adiv5::OTHER)),
+        // Another designer's AP of no class.
+        (0x002E_0010, Ok(adiv5::OTHER)),
+        // An early Arm DAP: no designer, CLASS reads as zero, TYPE says AHB or JTAG.
+        (0x0000_0001, Ok(adiv5::MEM_AP)),
+        (0x0000_0010, Ok(adiv5::JTAG_AP)),
+        // Reserved bits 12:8 set.
+        (0x2477_0111, Err(adiv5::UNIDENTIFIABLE)),
+    ];
+    for (idr, want) in cases {
+        assert_eq!(adiv5::ap_class(idr), want, "IDR 0x{idr:08X}");
+    }
 }
 
 #[test]
@@ -357,6 +487,14 @@ fn a_local_start_says_what_it_cannot_know_yet() {
         value(write, adiv5::AP),
         Some(Value::Unknown { .. })
     ));
+    assert_eq!(
+        value(write, adiv5::AP_CLASS),
+        Some(Value::Unknown {
+            reason: adiv5::NO_SELECT,
+            needs: Some(adiv5::NEEDS_SELECT),
+        }),
+        "no AP, so no class"
+    );
     let mem = of(&h, m, adiv5::MEM_CONTEXT);
     assert_eq!(mem.len(), 1, "MEM-AP says the AP register is unknown");
     assert_eq!(
