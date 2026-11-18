@@ -1409,6 +1409,8 @@ name = "escapement-tickwave-bench"
 version = "0.0.0"
 dependencies = [
  "egui",
+ "escapement-tickwave-decode",
+ "escapement-tickwave-decoders",
  "escapement-tickwave-egui",
  "escapement-tickwave-format",
  "escapement-tickwave-view",

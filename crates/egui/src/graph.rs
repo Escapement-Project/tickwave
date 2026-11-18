@@ -231,6 +231,28 @@ pub struct Shown {
     pub(crate) layout: Layout,
 }
 
+impl Shown {
+    /// What a graph would have drawn over `window` across `plot`, for a host that draws a track
+    /// without a graph above it, a bench for one.
+    pub fn new(window: Range<i64>, plot: Range<f32>) -> Self {
+        Self {
+            window,
+            plot,
+            y: (0.0, 1.0),
+            #[cfg(test)]
+            layout: Layout {
+                rect: Rect::NOTHING,
+                gutter: Rect::NOTHING,
+                plot: Rect::NOTHING,
+                lanes: Vec::new(),
+                axis: Rect::NOTHING,
+                label_row: 0.0,
+                key: None,
+            },
+        }
+    }
+}
+
 /// A zoom step under way: the window drawn eases from `from` to the window the graph set.
 #[derive(Clone, Debug)]
 struct Ease {
