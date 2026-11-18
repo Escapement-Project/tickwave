@@ -1463,6 +1463,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "escapement-tickwave-decoders"
+version = "0.1.0"
+dependencies = [
+ "escapement-tickwave-decode",
+]
+
+[[package]]
 name = "escapement-tickwave-egui"
 version = "0.1.1"
 dependencies = [
