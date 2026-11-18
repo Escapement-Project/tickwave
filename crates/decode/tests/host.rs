@@ -1150,6 +1150,32 @@ fn kept_checkpoints_spread_within_their_budget_and_a_seek_replays_from_the_neare
         "a kept checkpoint holds no closed items"
     );
     assert_eq!(h.kept(p).unwrap(), all, "a replay takes no checkpoints");
+
+    // A window starting just before a checkpoint is re-derived from the one before it.
+    let window = Span {
+        start: at - 1,
+        end: at + 100,
+    };
+    let meets = |i: &escapement_tickwave_decode::Item| {
+        i.start < window.end && i.end.is_none_or(|e| e > window.start)
+    };
+    h.set_keep(q, vec![window]);
+    let Seek::Restored(before) = h.seek(p, window.start).unwrap() else {
+        panic!("a checkpoint before {at} is held");
+    };
+    assert!(before < at);
+    run_all(&mut h);
+    let got: Vec<_> = (h.store(q).items.iter())
+        .filter(|(_, i)| meets(i))
+        .map(|(id, i)| (*id, i.end))
+        .collect();
+    let want: Vec<_> = (forward.iter())
+        .filter(|(_, i)| meets(i))
+        .map(|(id, i)| (*id, i.end))
+        .collect();
+    assert!(!want.is_empty());
+    assert_eq!(got, want, "the window's items are the forward pass's");
+    h.set_keep(q, common::all());
     assert_eq!(h.seek(p, Tick::MIN).unwrap(), Seek::FromStart);
     run_all(&mut h);
     assert_eq!(

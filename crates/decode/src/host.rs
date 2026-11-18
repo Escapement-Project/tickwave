@@ -1930,7 +1930,10 @@ impl Host {
     /// Restores the latest checkpoint kept for wire analysis `a` that had taken its input no
     /// further than `t`, or replaces its chain from the beginning where there is none. Running
     /// the host then replays from there. A kept checkpoint holds no closed items, so the stores
-    /// afterwards hold the items still open at it and what the replay keeps. The runs replaced include a forward pass under way: to
+    /// afterwards hold the items still open at it and what the replay keeps. `t` is the start of
+    /// the span to re-derive: an item that closed before the checkpoint ended at or before the
+    /// input it had consumed, so with that at or before `t` the span loses nothing, but a later
+    /// checkpoint would leave out what closed between `t` and it. The runs replaced include a forward pass under way: to
     /// carry it on, seek again to the latest checkpoint.
     pub fn seek(&mut self, a: AnalysisId, t: Tick) -> Result<Seek, CheckpointError> {
         let Some(k) = self.keepers.iter().position(|k| k.root == a) else {
