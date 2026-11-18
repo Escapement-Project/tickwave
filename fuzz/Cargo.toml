@@ -196,3 +196,11 @@ test = false
 doc = false
 bench = false
 required-features = ["fuzz"]
+
+[[bin]]
+name = "host"
+path = "fuzz_targets/host.rs"
+test = false
+doc = false
+bench = false
+required-features = ["fuzz"]
