@@ -1875,6 +1875,14 @@ impl Host {
         Ok(())
     }
 
+    /// Sets the spans analysis `a` keeps whole items in, for its run under way from its next
+    /// batch, and for every run that replaces it, a restored one included.
+    pub fn set_keep(&mut self, a: AnalysisId, keep: Vec<Span>) {
+        let an = &mut self.analyses[a.index()];
+        an.run.store.keep = keep.clone();
+        an.keep = keep;
+    }
+
     /// The checkpoints kept for wire analysis `a`, if it has a keeping.
     pub fn kept(&self, a: AnalysisId) -> Option<Kept> {
         let k = self.keepers.iter().find(|k| k.root == a)?;
@@ -1906,7 +1914,11 @@ impl Host {
             let keeper = &mut self.keepers[k];
             keeper.next = consumed.saturating_add(keeper.keeping.every);
             // A decoder that cannot copy its state is replayed from the start instead.
-            if let Ok(cut) = cut {
+            if let Ok(mut cut) = cut {
+                // Closed items are output, not state: a seek re-derives what it keeps.
+                for s in &mut cut.snaps {
+                    s.store.items.retain(|_, i| i.end.is_none());
+                }
                 let b = cut.bytes();
                 keeper.bytes += b;
                 keeper.held.push((cut, b));
@@ -1917,7 +1929,8 @@ impl Host {
 
     /// Restores the latest checkpoint kept for wire analysis `a` that had taken its input no
     /// further than `t`, or replaces its chain from the beginning where there is none. Running
-    /// the host then replays from there. The runs replaced include a forward pass under way: to
+    /// the host then replays from there. A kept checkpoint holds no closed items, so the stores
+    /// afterwards hold the items still open at it and what the replay keeps. The runs replaced include a forward pass under way: to
     /// carry it on, seek again to the latest checkpoint.
     pub fn seek(&mut self, a: AnalysisId, t: Tick) -> Result<Seek, CheckpointError> {
         let Some(k) = self.keepers.iter().position(|k| k.root == a) else {
@@ -1940,8 +1953,9 @@ impl Host {
 
     /// Restores a checkpoint as new generations of its runs, each bound to its restored upstream.
     /// The runs it replaces are retired as by `replace`: their late replies, batches and
-    /// deliveries are refused. A checkpoint can be restored more than once. Returns the retired
-    /// runs; refused, nothing changes.
+    /// deliveries are refused. A checkpoint can be restored more than once. Each restored store
+    /// keeps items where its analysis keeps them now. Returns the retired runs; refused, nothing
+    /// changes.
     pub fn restore(&mut self, cut: &Checkpoint) -> Result<Vec<RunId>, CheckpointError> {
         let root = cut.snaps.first().map_or(0, |s| s.analysis);
         if root >= self.analyses.len() {
@@ -1975,6 +1989,7 @@ impl Host {
             let id = Self::next_generation(old);
             renamed.insert(snap.taken, id);
             let mut run = Run::new(id, snap.local, decoder, snap.store.clone(), bound);
+            run.store.keep = an.keep.clone();
             run.inbox = snap
                 .inbox
                 .iter()

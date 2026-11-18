@@ -1114,6 +1114,7 @@ fn kept_checkpoints_spread_within_their_budget_and_a_seek_replays_from_the_neare
     let (mut h, p, q) = run();
     run_all(&mut h);
     let full = (h.store(p).counts, h.store(q).counts, h.store(q).items.len());
+    let forward = h.store(q).items.clone();
     let all = h.kept(p).unwrap();
     assert!(all.count > 10, "{all:?}");
     assert!(
@@ -1132,9 +1133,21 @@ fn kept_checkpoints_spread_within_their_budget_and_a_seek_replays_from_the_neare
     assert!(h.consumed(p) == at);
     run_all(&mut h);
     assert_eq!(
-        (h.store(p).counts, h.store(q).counts, h.store(q).items.len()),
-        full,
+        (h.store(p).counts, h.store(q).counts),
+        (full.0, full.1),
         "a replay from the nearest ends where the forward pass did"
+    );
+    let replayed = &h.store(q).items;
+    assert!(replayed.keys().all(|id| forward.contains_key(id)));
+    assert!(
+        (forward.iter())
+            .filter(|(_, i)| i.start >= at)
+            .all(|(id, i)| replayed.get(id).is_some_and(|r| r.end == i.end)),
+        "everything from the checkpoint on is kept again"
+    );
+    assert!(
+        replayed.len() < forward.len(),
+        "a kept checkpoint holds no closed items"
     );
     assert_eq!(h.kept(p).unwrap(), all, "a replay takes no checkpoints");
     assert_eq!(h.seek(p, Tick::MIN).unwrap(), Seek::FromStart);
@@ -1144,22 +1157,21 @@ fn kept_checkpoints_spread_within_their_budget_and_a_seek_replays_from_the_neare
         full
     );
 
-    // Room for about three: the first and the latest stay, and the gaps stay even.
+    // Room for ten: the first and the latest stay, and no gap is twice an even spread's.
     let (mut h, p, _) = run();
     run_all(&mut h);
     let one = h.kept(p).unwrap().bytes / all.count;
     let (mut small, sp, _) = run();
+    let budget = one * 10 + one / 2;
     small
-        .keep_checkpoints(sp, Keeping::new(50, one * 3 + one / 2))
+        .keep_checkpoints(sp, Keeping::new(50, budget))
         .unwrap();
     run_all(&mut small);
     let few = small.kept(sp).unwrap();
-    assert!(few.count <= 3 && few.bytes <= one * 3 + one / 2, "{few:?}");
+    assert!(few.count == 10 && few.bytes <= budget, "{few:?}");
     assert_eq!((few.first, few.latest), (all.first, all.latest));
-    assert!(
-        few.widest < (all.latest.unwrap() - all.first.unwrap()) * 3 / 4,
-        "{few:?}"
-    );
+    let even = (all.latest.unwrap() - all.first.unwrap()) / 9;
+    assert!(few.widest < 2 * even, "{few:?} against {even}");
 
     // A checkpoint restores only onto the decoders it was taken of.
     let cut = h.checkpoint(p).unwrap();
