@@ -633,3 +633,103 @@ fn a_part_too_narrow_for_its_fields_name_shows_the_short_name_it_declares() {
             .any(|t| t == "par" || t == "parity" || t == "ok")
     );
 }
+
+/// What a click at `at` on a track of two items selects, and the outlines it then draws with
+/// `selected`: the id clicked, and each outlined box's stroke width.
+fn click(at: egui::Pos2, selected: Option<Id>) -> (Option<Id>, Vec<f32>) {
+    let items = [(0, 100, 300), (0, 400, 600)];
+    let schema = Schema::new(vec![KindDecl::new("a")]);
+    let mut store = Store::with_keep(vec![Span {
+        start: Tick::MIN,
+        end: Tick::MAX,
+    }]);
+    for &(kind, start, end) in &items {
+        let id = Id::new(KindId(kind), start);
+        let ops = [
+            Op::Open {
+                id,
+                parent: None,
+                start,
+            },
+            Op::Close {
+                id,
+                end,
+                status: Status::Complete,
+            },
+        ];
+        store.apply_batch(&ops, 8).unwrap();
+    }
+    let shown = Shown::new(0..1000, 0.0..500.0);
+    let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
+    let density = Density::of(store.items.values(), &map, |_| false);
+    let (labels, palette) = (
+        Labels::default(),
+        Palette::from_visuals(&egui::Visuals::default()),
+    );
+    let ctx = egui::Context::default();
+    let mut clicked = None;
+    let mut widths = vec![];
+    let press = |pressed| egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    for events in [
+        vec![egui::Event::PointerMoved(at)],
+        vec![press(true)],
+        vec![press(false)],
+    ] {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(600.0, 200.0),
+            )),
+            events,
+            ..egui::RawInput::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| {
+            let r = ui.add(
+                Track::new(
+                    &shown,
+                    "t",
+                    &schema,
+                    &store.items,
+                    &density,
+                    &labels,
+                    &palette,
+                    map,
+                )
+                .selected(selected),
+            );
+            clicked = clicked.or(Track::clicked(&r));
+        });
+        out.textures_delta.clear();
+        widths.clear();
+        fn walk(s: &egui::Shape, out: &mut Vec<f32>) {
+            match s {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                egui::Shape::Rect(r) if r.stroke.width > 0.0 => out.push(r.stroke.width),
+                _ => {}
+            }
+        }
+        for c in &out.shapes {
+            walk(&c.shape, &mut widths);
+        }
+    }
+    (clicked, widths)
+}
+
+#[test]
+fn a_click_selects_the_item_under_it_and_the_selected_one_is_outlined_in_ink() {
+    // The plot runs from x 0 to 500 over ticks 0 to 1000: the second item is at x 200 to 300.
+    let row = 12.0;
+    let second = Id::new(KindId(0), 400);
+    let (got, plain) = click(egui::pos2(250.0, row), None);
+    assert_eq!(got, Some(second));
+    assert_eq!(plain, vec![1.0, 1.0]);
+    let (none, _) = click(egui::pos2(350.0, row), None);
+    assert_eq!(none, None, "a click between items selects nothing");
+    let (_, outlined) = click(egui::pos2(350.0, row), Some(second));
+    assert_eq!(outlined, vec![1.0, 2.0], "the selected one heavier");
+}

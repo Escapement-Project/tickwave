@@ -423,6 +423,7 @@ pub struct Track<'a> {
     lost: &'a [Span],
     parts: bool,
     provisional: bool,
+    selected: Option<Id>,
     /// The lanes its rows take together, and each kind's range of them.
     lanes: usize,
     rows: Vec<std::ops::Range<usize>>,
@@ -456,6 +457,7 @@ impl<'a> Track<'a> {
             lost: &[],
             parts: false,
             provisional: false,
+            selected: None,
             lanes,
             rows,
         }
@@ -478,6 +480,21 @@ impl<'a> Track<'a> {
     pub fn parts(mut self, on: bool) -> Self {
         self.parts = on;
         self
+    }
+
+    /// The item the reader selected, outlined in ink as the focus is. The host keeps it, from
+    /// `Track::clicked`.
+    pub fn selected(mut self, id: Option<Id>) -> Self {
+        self.selected = id;
+        self
+    }
+
+    /// The item a click on the track with `response` landed on this frame, if one did.
+    pub fn clicked(response: &Response) -> Option<Id> {
+        response
+            .ctx
+            .data(|d| d.get_temp::<Option<Id>>(response.id))
+            .flatten()
     }
 
     /// Whether the items are a provisional window's, decoded from a local start without earlier
@@ -520,7 +537,12 @@ impl Widget for Track<'_> {
         let p = self.palette;
         let height = self.height();
         let (rect, response) =
-            ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
+            ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click());
+        let click = response
+            .clicked()
+            .then(|| response.interact_pointer_pos())
+            .flatten();
+        let mut clicked = None;
         let plot = Rect::from_min_max(
             pos2(self.shown.plot.start.max(rect.left()), rect.top()),
             pos2(self.shown.plot.end.min(rect.right()), rect.bottom()),
@@ -582,7 +604,7 @@ impl Widget for Track<'_> {
             self.density_bins(&s, lanes[0], &mut shapes);
         } else {
             let parts = self.parts.then(|| row(self.lanes));
-            self.items(ui, &s, &lanes, parts, &mut shapes);
+            clicked = self.items(ui, &s, &lanes, parts, click, &mut shapes);
         }
         if self.provisional {
             let decoded = shapes.split_off(drawn);
@@ -611,6 +633,7 @@ impl Widget for Track<'_> {
             ));
         }
         painter.extend(shapes);
+        ui.data_mut(|d| d.insert_temp(response.id, clicked));
         response
     }
 }
@@ -671,14 +694,17 @@ impl Track<'_> {
 
     /// The items the window meets: boxes with the fullest label that fits, conditions outlined
     /// in the attention ink, and in the parts row their spanned fields and elements.
+    /// The item drawn under `click`, a point clicked this frame, if any.
     fn items(
         &self,
         ui: &Ui,
         s: &Scale,
         lanes: &[Rect],
         parts: Option<Rect>,
+        click: Option<egui::Pos2>,
         shapes: &mut Vec<Shape>,
-    ) {
+    ) -> Option<Id> {
+        let mut clicked = None;
         let p = self.palette;
         let w = &self.shown.window;
         let axis = |t: Tick| self.map.axis_saturating(t) as f64;
@@ -709,8 +735,15 @@ impl Track<'_> {
             if hovered {
                 shapes.push(Shape::rect_filled(r, 2.0, p.wash));
             }
+            if click.is_some_and(|q| r.contains(q)) {
+                clicked = Some(item.id);
+            }
             let marked = condition(item);
-            let stroke = Stroke::new(1.0, if marked { p.attention_ink } else { p.ink_2 });
+            let stroke = match (self.selected == Some(item.id), marked) {
+                (true, _) => Stroke::new(2.0, p.ink),
+                (false, true) => Stroke::new(1.0, p.attention_ink),
+                (false, false) => Stroke::new(1.0, p.ink_2),
+            };
             shapes.push(Shape::rect_stroke(r, 2.0, stroke, egui::StrokeKind::Inside));
             let room = r.width() - 2.0 * PAD;
             let declared = (self.schema.kind(item.id.kind)).map_or(&[][..], |k| &k.labels[..]);
@@ -730,6 +763,7 @@ impl Track<'_> {
                 self.parts_of(ui, s, item, prow, shapes);
             }
         }
+        clicked
     }
 
     /// An item's spanned fields, each its stretch with its value where it fits; where its
