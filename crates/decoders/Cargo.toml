@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 escapement-tickwave-decode = { version = "0.1.0", path = "../decode" }
+foldhash = "0.2.0"
 thiserror = "2.0.21"
 
 [dev-dependencies]

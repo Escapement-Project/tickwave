@@ -13,7 +13,8 @@ use escapement_tickwave_decode::{
     FieldType, Id, KindDecl, KindId, LinkDecl, LinkId, LinkTo, Mode, Need, Op, Out, Pause, Reason,
     Ref, Schema, Span, Status, Subscription, Tick, Value, field, name,
 };
-use std::{collections::HashMap, sync::Arc};
+use foldhash::HashMap;
+use std::sync::Arc;
 
 // ---- ADIv5 -------------------------------------------------------------------------------------
 
@@ -264,7 +265,7 @@ impl Adi {
             context: None,
             local,
             started: false,
-            building: HashMap::new(),
+            building: HashMap::default(),
             up: None,
         }
     }
@@ -666,8 +667,8 @@ pub struct Mem {
 impl Default for Mem {
     fn default() -> Self {
         Self {
-            csw: HashMap::new(),
-            tar: HashMap::new(),
+            csw: HashMap::default(),
+            tar: HashMap::default(),
             no_tar: NO_TAR,
             context: None,
             up: None,
