@@ -6,6 +6,9 @@
 //! the AP and its register bank; an AP read's data arrives in the next AP read or RDBUFF read,
 //! so an AP read stays open until then. MEM-AP reads ADIv5's completed AP accesses: TAR and CSW
 //! writes, then DRW accesses at the address TAR holds, auto-incremented as CSW says.
+//!
+//! Every AP is taken for a MEM-AP: its registers at 0x00 to 0x1C take a MEM-AP's names, CSW to
+//! BD3, whatever the AP's class, though a JTAG-AP or another class has other registers there.
 
 use crate::swd;
 use escapement_tickwave_decode::{
@@ -196,7 +199,7 @@ pub fn dp_name(read: bool, addr: u8, bank: Option<u32>) -> Value {
     Value::Name(n)
 }
 
-/// An AP register's name, by its index in `AP_NAMES`.
+/// An AP register's name, by its index in `AP_NAMES`, as a MEM-AP's.
 pub fn ap_name(reg: u32) -> Option<u16> {
     Some(match reg {
         0x00 => 0,
