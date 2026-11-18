@@ -14,3 +14,4 @@ thiserror = "2.0.21"
 [dev-dependencies]
 escapement-tickwave-format = { version = "0.1.0", path = "../format" }
 escapement-tickwave-view = { version = "0.1.0", path = "../view" }
+fastrand = "2.5.0"

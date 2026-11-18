@@ -1473,6 +1473,7 @@ dependencies = [
  "escapement-tickwave-decode",
  "escapement-tickwave-format",
  "escapement-tickwave-view",
+ "fastrand",
  "foldhash 0.2.0",
  "thiserror 2.0.21",
 ]
