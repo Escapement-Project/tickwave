@@ -554,6 +554,8 @@ pub struct Jtag {
     gap: Option<Tick>,
     /// A window an interrupted turn left part read, and the next observation in it.
     held: Option<(Window, usize)>,
+    /// Whether TDO is sampled at the fall after each rise rather than at the rise.
+    tdo_at_fall: bool,
 }
 
 impl Jtag {
@@ -573,11 +575,25 @@ impl Jtag {
             bound: at,
             gap: None,
             held: None,
+            tdo_at_fall: false,
         }
     }
 
+    /// TDO sampled at the fall after each rise: a probe at a high TCK rate can read TDO late, and
+    /// a recording of it then shows TDO changing near the rise. A clock with no fall after it, at
+    /// a gap or the end, keeps the level at its rise.
+    pub fn tdo_at_fall(mut self, on: bool) -> Self {
+        self.tdo_at_fall = on;
+        self
+    }
+
     pub fn factory(has_tdo: bool, window: Tick) -> Factory {
-        Box::new(move |local| Box::new(Self::new(local, has_tdo, window)))
+        Self::factory_with(has_tdo, window, false)
+    }
+
+    /// `factory`, with TDO sampled at TCK's fall where `tdo_at_fall`.
+    pub fn factory_with(has_tdo: bool, window: Tick, tdo_at_fall: bool) -> Factory {
+        Box::new(move |local| Box::new(Self::new(local, has_tdo, window).tdo_at_fall(tdo_at_fall)))
     }
 
     fn port(&self, port: u8) -> Option<usize> {
@@ -661,7 +677,10 @@ impl Jtag {
     fn on_fall(&mut self, at: Tick, out: &mut Out) {
         self.fall = Some(at);
         self.bound = self.bound.max(at);
-        if let Some(r) = self.rise.take() {
+        if let Some(mut r) = self.rise.take() {
+            if self.tdo_at_fall && self.has_tdo {
+                r.tdo = self.sampled(TDO, at).or(r.tdo);
+            }
             self.emit(r, Some(at), None, out);
         }
     }

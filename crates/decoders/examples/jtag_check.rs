@@ -4,7 +4,7 @@
 //! low bit). A checker stacked on JTAG reads its completed items; nothing is kept, so memory
 //! follows the decoders' state, not the capture.
 //!
-//! `cargo run --release -p escapement-tickwave-decoders --example jtag_check -- REC`
+//! `cargo run --release -p escapement-tickwave-decoders --example jtag_check -- REC [--tdo-at-fall]`
 
 use escapement_tickwave_decode::{
     Decoder, Definition, Delivery, Exchange, Host, InputSpec, Mode, Pause, Schema, Status,
@@ -135,7 +135,10 @@ fn peak_rss_kb() -> u64 {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let path = std::env::args().nth(1).ok_or("usage: jtag_check REC")?;
+    let path = std::env::args()
+        .nth(1)
+        .ok_or("usage: jtag_check REC [--tdo-at-fall]")?;
+    let at_fall = std::env::args().any(|a| a == "--tdo-at-fall");
     let file = std::fs::File::open(&path)?;
     let rec = Arc::new(Recording::open(Arc::new(file), Cache::new(64 << 20))?);
     let mut lines = vec![];
@@ -153,7 +156,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             source: Box::new(source),
             local: None,
         },
-        jtag::Jtag::factory(tdo.is_some(), 50_000),
+        jtag::Jtag::factory_with(tdo.is_some(), 50_000, at_fall),
         vec![],
     )?;
     let seen = Arc::new(Mutex::new(Seen::default()));
@@ -176,8 +179,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let s = seen.lock().unwrap();
     let c = h.store(j).counts;
     println!(
-        "TDO {}; states {} paths {} ir {} dr {} incomplete {}; lost {}; ops {} elements {} peak_open {}",
+        "TDO {}{}; states {} paths {} ir {} dr {} incomplete {}; lost {}; ops {} elements {} peak_open {}",
         tdo.is_some(),
+        if at_fall {
+            " at TCK's fall"
+        } else {
+            " at TCK's rise"
+        },
         s.states,
         s.paths,
         s.ir,
