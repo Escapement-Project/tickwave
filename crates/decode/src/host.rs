@@ -71,7 +71,9 @@ impl Observed {
     }
 }
 
-/// The observations in `from..upto`. `end` is set where the recording ends inside the window.
+/// The observations in `from..upto`. `end` is set where the recording ends inside the window, or
+/// before it: the host makes an end before `from` the window's start, since that is where the
+/// input of a run that starts there ends.
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct Window {
@@ -1602,7 +1604,11 @@ impl Host {
             Some((id, _)) if id == reply.id => {
                 let r = &mut self.analyses[a].run;
                 r.outstanding = None;
-                r.ready = Some(reply.window);
+                let mut window = reply.window;
+                // A decoder closes what it holds at the end, and nothing it holds starts before
+                // the window, so an end before it would close items before they start.
+                window.end = window.end.map(|e| e.max(window.from));
+                r.ready = Some(window);
                 r.fresh = true;
                 Ok(())
             }

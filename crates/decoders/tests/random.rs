@@ -90,7 +90,7 @@ fn reading(r: &mut fastrand::Rng, w: &Wires) -> (Tick, Option<Tick>) {
         2 => r.i64(1..=2000),
         _ => 1 << 40,
     };
-    let local = (r.u8(..) < 40).then(|| r.i64(0..=w.end.max(1)));
+    let local = (r.u8(..) < 40).then(|| r.i64(0..=w.end.max(1) + 100));
     (window, local)
 }
 
@@ -184,6 +184,59 @@ fn swd_stack(
         )
         .unwrap();
     (h, vec![s, a, m])
+}
+
+/// The fuzz targets' first finding: every stack, started locally past the end of its input, closed
+/// what it held at the input's end, before it started.
+#[test]
+fn a_local_start_past_the_end_of_the_input_finishes_cleanly() {
+    let empty = || Wires {
+        lines: vec![Line::default(); 4],
+        end: 1,
+        reversed: false,
+    };
+    let (h, a) = swd_stack(empty(), 10_074, Some(9_735), 1);
+    let mut hosts = vec![(h, a[0])];
+    let mut h = Host::default();
+    let j = h
+        .add(
+            name("jtag"),
+            jtag::definition(),
+            InputSpec::Wire {
+                source: Box::new(empty()),
+                local: Some(1_279),
+            },
+            jtag::Jtag::factory(true, 1_150),
+            all(),
+        )
+        .unwrap();
+    hosts.push((h, j));
+    let mut h = Host::default();
+    let c = h
+        .add(
+            name("cjtag"),
+            cjtag::definition(),
+            InputSpec::Wire {
+                source: Box::new(empty()),
+                local: Some(65_535),
+            },
+            cjtag::Cjtag::factory(false, 65_535),
+            all(),
+        )
+        .unwrap();
+    h.add(
+        name("jtag"),
+        cjtag::jtag_definition(),
+        InputSpec::Upstream(cjtag::jtag_subscription(c)),
+        cjtag::JtagOnCjtag::factory(),
+        all(),
+    )
+    .unwrap();
+    hosts.push((h, c));
+    for (mut h, root) in hosts {
+        h.run_until(|_| false).unwrap();
+        assert!(h.finished(root).is_some());
+    }
 }
 
 #[test]
