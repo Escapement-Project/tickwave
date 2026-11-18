@@ -63,7 +63,7 @@ export async function loadHead(src: string): Promise<Omit<Loaded, "annotations">
  * `annotations`; else the file at `annotations`; else the bundled one, as far as it is read: those
  * of its annotations ticks `span` meet, with any read before, or every one where `span` is null.
  * Problems are in `errors`, and so is each annotation left out for naming a channel this version
- * can't read.
+ * can't read; what a later minor version holds that this reader leaves out is in `notes`.
  */
 export async function loadAnnotations(recording: URL, annotations: string | null, text: string | null, span: readonly [number, number] | null = null): Promise<Resolved> {
   try {
@@ -79,21 +79,24 @@ export async function readAnnotations(recording: URL, annotations: string | null
   let list: Annotation[];
   let declared: Declared = NONE_DECLARED;
   const errors: string[] = [];
+  let notes: readonly string[] = [];
   let partial = false;
   const at = annotations ? absolute(annotations) : null;
   if (text !== null || at) {
     const sidecar = text !== null ? await annotationsFromText(text, at, recording) : await annotationsFor(at!, recording);
     list = sidecar.annotations;
     declared = sidecar;
+    notes = sidecar.notes ?? [];
   } else {
     const read = await bundledIn(recording, span);
     list = read?.annotations ?? [];
     declared = read?.declared ?? NONE_DECLARED;
     errors.push(...(read?.problems ?? []));
+    notes = read?.notes ?? [];
     partial = read !== null && !read.complete;
   }
   list = readable(list, (await infoFor(recording)).channels, errors);
-  return indexAnnotations(list, errors, partial, { roles: declared.roles, view: declared.view });
+  return indexAnnotations(list, errors, partial, { roles: declared.roles, view: declared.view }, notes);
 }
 
 export abstract class TickwaveElement extends HTMLElement {
@@ -103,6 +106,7 @@ export abstract class TickwaveElement extends HTMLElement {
   #unsubscribe: (() => void)[] = [];
   #queued = false;
   #reportedErrors = new Set<string>();
+  #notes = new Set<string>();
   #waiting: string | null = null;
 
   constructor(css: string, html: string) {
@@ -203,10 +207,20 @@ export abstract class TickwaveElement extends HTMLElement {
     this.#showNotice();
   }
 
-  /** Forgets the problems reported so far: a notice is about the recording or sidecar it came
-   * from, and a new one starts without it. */
+  /** Says something the reader should know that is not a problem, once: in the console, and in the
+   * notice where no problem is. */
+  protected note(message: string): void {
+    if (this.#notes.has(message)) return;
+    this.#notes.add(message);
+    console.info(`<${this.localName}${this.id ? ` id="${this.id}"` : ""}>: ${message}`);
+    this.#showNotice();
+  }
+
+  /** Forgets the problems and notes reported so far: a notice is about the recording or sidecar it
+   * came from, and a new one starts without it. */
   protected clearProblems(): void {
     this.#reportedErrors.clear();
+    this.#notes.clear();
     this.#showNotice();
   }
 
@@ -215,7 +229,13 @@ export abstract class TickwaveElement extends HTMLElement {
     if (this.#reportedErrors.delete(message)) this.#showNotice();
   }
 
-  /** Says a read has run `ms` and is still going, or with null that none is. A problem comes first. */
+  /** As `forgetProblem`, for a note. */
+  protected forgetNote(message: string): void {
+    if (this.#notes.delete(message)) this.#showNotice();
+  }
+
+  /** Says a read has run `ms` and is still going, or with null that none is. A problem or a note
+   * comes first. */
   protected waiting(ms: number | null): void {
     this.#waiting = ms === null ? null : `Still loading after ${ms / 1000} s.`;
     this.#showNotice();
@@ -225,13 +245,15 @@ export abstract class TickwaveElement extends HTMLElement {
     const notice = this.root.querySelector(".notice") as HTMLElement | null;
     if (!notice) return;
     const problems = [...this.#reportedErrors].flatMap((m) => m.split("\n")).filter(Boolean);
-    notice.hidden = problems.length === 0 && this.#waiting === null;
+    const shown = problems.length > 0 ? problems : [...this.#notes];
+    const word = problems.length > 0 ? "problem" : "note";
+    notice.hidden = shown.length === 0 && this.#waiting === null;
     notice.textContent =
-      problems.length === 0
+      shown.length === 0
         ? (this.#waiting ?? "")
-        : problems.length === 1
-          ? problems[0]
-          : `${problems[0]} (and ${problems.length - 1} more ${problems.length === 2 ? "problem" : "problems"}; see the console)`;
+        : shown.length === 1
+          ? shown[0]
+          : `${shown[0]} (and ${shown.length - 1} more ${shown.length === 2 ? word : `${word}s`}; see the console)`;
   }
 
   protected emit(name: string, detail: unknown): void {

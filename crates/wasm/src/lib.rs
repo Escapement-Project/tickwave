@@ -333,6 +333,7 @@ impl Recording {
         // Resolving checked the roles and the view, so neither has a problem left.
         let out = Sidecar {
             annotations: &resolved,
+            notes: annotations::notes_json(hand, &included),
             roles: annotations::roles_json(hand, &included).0,
             view: annotations::view_json(hand, header).ok().flatten(),
         };
@@ -1021,6 +1022,7 @@ impl Recording {
                 .map(|&(name, kept)| Kept { name, kept })
                 .collect(),
             problems: &apart.problems,
+            notes: annotations::notes_json(hand, &included),
             roles,
             view,
         };
@@ -1092,6 +1094,8 @@ struct Apart<'a> {
     annotations: Vec<Placed<'a>>,
     files: Vec<Kept<'a>>,
     problems: &'a [String],
+    /// What a later minor version holds that this reader leaves out: not problems.
+    notes: Vec<String>,
     roles: Vec<Role>,
     view: Option<View>,
 }
@@ -1101,6 +1105,8 @@ struct Apart<'a> {
 #[derive(Serialize)]
 struct Sidecar<'a> {
     annotations: &'a [Annotation],
+    /// As `Apart`'s.
+    notes: Vec<String>,
     roles: Vec<Role>,
     view: Option<View>,
 }

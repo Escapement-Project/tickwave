@@ -363,6 +363,7 @@ impl Recording {
         let mut left_out = read.joined;
         left_out.extend(read.broken);
         left_out.extend(apart.problems);
+        left_out.extend(annotations::notes(hand, &included));
         let mut list = hand_markers(apart.annotations);
         list.extend(read.markers.iter().map(|&(cursor, a)| Marker {
             cursor,

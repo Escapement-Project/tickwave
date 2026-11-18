@@ -28,6 +28,9 @@ export interface Sidecar extends Declared {
   readonly annotations: Annotation[];
   /** The names its hand-written file includes, in its order, where a reader gives them. */
   readonly files?: readonly string[];
+  /** What a sidecar of a later minor version holds that this reader leaves out (ANNOTATIONS.md,
+   * "Versions"): not problems, since the rest reads as the file means it. */
+  readonly notes?: readonly string[];
 }
 
 /** What a measure reads from a channel's edges in a span (ANNOTATIONS.md, "Measures"). */
@@ -88,6 +91,9 @@ export interface Resolved {
   /** Generated annotations a hand-written one stands in for; drawn once, as the hand-written one. */
   readonly named: ReadonlySet<string>;
   readonly errors: readonly string[];
+  /** What a sidecar of a later minor version holds that this reader leaves out (ANNOTATIONS.md,
+   * "Versions"): not problems, since the rest reads as the file means it. */
+  readonly notes: readonly string[];
   /** A bundled sidecar read a range at a time, with some of its annotations still to read: a
    * hand-written `ref`, and the bundle's own problems, wait for every one. */
   readonly partial: boolean;
@@ -110,13 +116,13 @@ export function readable(list: Annotation[], channels: readonly Channel[], error
 }
 
 /** Indexes a resolved list. An alias's `ref` names the generated annotation it stands in for. */
-export function indexAnnotations(list: readonly Annotation[], errors: readonly string[] = [], partial = false, declared: Declared = NONE_DECLARED): Resolved {
+export function indexAnnotations(list: readonly Annotation[], errors: readonly string[] = [], partial = false, declared: Declared = NONE_DECLARED, notes: readonly string[] = []): Resolved {
   const byId = new Map<string, Annotation>();
   for (const a of list) if (!byId.has(a.id)) byId.set(a.id, a);
   const named = new Set<string>();
   for (const a of list) if (a.ref !== null) named.add(a.ref);
   const byTime = [...list].sort((a, b) => a.start - b.start || (b.end ?? b.start) - (a.end ?? a.start));
-  return { list, byTime, byId, named, errors, partial, declared };
+  return { list, byTime, byId, named, errors, notes, partial, declared };
 }
 
 /** What the Rust resolver says a sidecar declares, as the page holds it. */

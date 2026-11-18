@@ -11,6 +11,9 @@ export interface BundledRead {
   readonly annotations: Annotation[];
   /** What reading them left out, and why. */
   readonly problems: readonly string[];
+  /** What a sidecar of a later minor version holds that this reader leaves out (ANNOTATIONS.md,
+   * "Versions"): not problems, since the rest reads as the file means it. */
+  readonly notes?: readonly string[];
   /** Whether every one is read. */
   readonly complete: boolean;
   /** The roles and the stored view the bundle declares, whole before any part is read; none
@@ -157,7 +160,7 @@ export async function bundledIn(recording: URL, span: readonly [number, number] 
   const loader = await loaderFor(recording);
   if (loader.bundledIn) return loader.bundledIn(recording, await sourceFor(recording), span);
   const whole = await bundledFor(recording);
-  return whole && { annotations: whole.annotations, problems: [], complete: true, declared: whole };
+  return whole && { annotations: whole.annotations, problems: [], notes: whole.notes, complete: true, declared: whole };
 }
 
 /** A span no annotation part meets: a read of a bundled sidecar's annotations for it reads the

@@ -235,6 +235,9 @@ export interface AnnotationsRead {
   readonly list: CoreAnnotation[];
   /** What reading them left out, and why. */
   readonly problems: string[];
+  /** What a sidecar of a later minor version holds that this reader leaves out (ANNOTATIONS.md,
+   * "Versions"): not problems, since the rest reads as the file means it. */
+  readonly notes: string[];
   /** Whether every part is read: until then a hand-written `ref` and the bundle's own problems
    * wait, since a ref resolves only once every part is read. */
   readonly complete: boolean;
@@ -1264,12 +1267,13 @@ export class Opened {
     const apart = JSON.parse(this.#rec.resolveBundled(b.hand, b.names, b.texts, JSON.stringify(targets))) as {
       annotations: { place: number; annotation: CoreAnnotation }[];
       problems: string[];
+      notes: string[];
       roles: Role[];
       view: StoredView | null;
     };
     if (complete) problems.push(...apart.problems);
     const hand = apart.annotations.sort((x, y) => x.place - y.place).map((h) => h.annotation);
-    return { list: [...hand, ...generated.map((g) => g.a)], problems, complete, roles: apart.roles, view: apart.view };
+    return { list: [...hand, ...generated.map((g) => g.a)], problems, notes: apart.notes, complete, roles: apart.roles, view: apart.view };
   }
 
   /** Resolves a sidecar (the hand-written file as JSON, and the files it includes) against this recording. */

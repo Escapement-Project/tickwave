@@ -217,8 +217,9 @@ export class TickwaveView extends TickwaveElement {
   #keyShown: { roles: string; palette: Palette } | null = null;
   /** Counts the texts handed in: one handed in later makes an earlier one's annotations stale. */
   #textSeq = 0;
-  /** The sidecar's problems last reported, forgotten when another sidecar replaces it. */
+  /** The sidecar's problems and notes last reported, forgotten when another sidecar replaces it. */
   #sidecarProblems: string[] = [];
+  #sidecarNotes: string[] = [];
   /** The recording as loaded. `#loaded` is it moved by its offsets while the view shapes it. */
   #asLoaded: Loaded | null = null;
   #shaping = false;
@@ -487,14 +488,17 @@ export class TickwaveView extends TickwaveElement {
     this.#plot.emptyLane = annotations.errors.length === 0 ? EMPTY_LANE : null;
     this.#loaded = { ...l, annotations };
     if (this.#asLoaded) this.#asLoaded = { ...this.#asLoaded, annotations };
-    this.#reportSidecar(annotations.errors);
+    this.#reportSidecar(annotations);
     this.#apply();
   }
 
-  #reportSidecar(errors: readonly string[]): void {
+  #reportSidecar({ errors, notes }: Resolved): void {
     for (const m of this.#sidecarProblems) this.forgetProblem(m);
+    for (const m of this.#sidecarNotes) this.forgetNote(m);
     this.#sidecarProblems = [...errors];
+    this.#sidecarNotes = [...notes];
     for (const e of errors) this.fail(named("TickwaveSidecarError", e));
+    for (const n of notes) this.note(n);
   }
 
   protected override get storedColour(): Colour | null {
@@ -589,7 +593,7 @@ export class TickwaveView extends TickwaveElement {
             if (this.#asLoaded) this.#asLoaded = { ...this.#asLoaded, annotations: list };
             this.#apply();
           }
-          this.#reportSidecar(list.errors);
+          this.#reportSidecar(list);
           if (this.#annotationsText !== text) void this.#reannotate();
           // The view may have moved past the span read while it was read.
           else this.#readMore();
@@ -1847,7 +1851,7 @@ export class TickwaveView extends TickwaveElement {
     this.#plot.emptyLane = annotations.errors.length === 0 ? EMPTY_LANE : null;
     this.#loaded = { ...now, annotations };
     if (this.#asLoaded) this.#asLoaded = { ...this.#asLoaded, annotations };
-    this.#reportSidecar(annotations.errors);
+    this.#reportSidecar(annotations);
     this.#apply();
     this.#plot.focus = focus !== null && annotations.byId.has(focus) ? focus : null;
     this.#stepIndex = at === undefined ? -1 : this.#ofKind().findIndex((a) => a.id === at);

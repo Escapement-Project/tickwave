@@ -1,5 +1,6 @@
 use escapement_tickwave_format::annotations::{
-    Included, resolve, resolve_apart, resolve_apart_json, resolve_json,
+    Included, generator_source, notes, notes_json, resolve, resolve_apart, resolve_apart_json,
+    resolve_json, roles,
 };
 use escapement_tickwave_format::header::{
     AnalogCoding, ChannelHeader, ChannelKind, Header, SourceFormat, SourceHeader,
@@ -601,4 +602,127 @@ fn a_hand_written_file_resolved_apart_reads_the_same_from_its_json() {
         "{:#?}",
         bad.problems
     );
+}
+
+/// A hand-written file and a generator's head of a later minor version than this reader knows,
+/// each with a table and a key it doesn't: what this reader does know reads as it would.
+fn later(minor: &str) -> (String, String) {
+    let hand = HAND.replace(
+        "format = \"tickwave-annotations/1\"",
+        &format!("format = \"tickwave-annotations/1.{minor}\""),
+    ) + "\n[[decode]]\nanalysis = \"swd\"\nbinding = { clock = \"SWCLK\" }\n";
+    let generated = GENERATED.replacen(
+        "{\"format\": \"tickwave-annotations/1\", ",
+        &format!("{{\"format\": \"tickwave-annotations/1.{minor}\", \"schema\": 3, "),
+        1,
+    );
+    (hand, generated)
+}
+
+#[test]
+fn a_later_minor_version_reads_as_this_one_without_what_it_adds() {
+    let want = resolve(HAND, &included(GENERATED), &header(), Some("rec.tickwave")).unwrap();
+    let (hand, generated) = later("1");
+    let got = resolve(
+        &hand,
+        &included(&generated),
+        &header(),
+        Some("rec.tickwave"),
+    )
+    .unwrap();
+    assert_eq!(got, want);
+    let json = serde_json::to_string(&toml::from_str::<toml::Value>(&hand).unwrap()).unwrap();
+    let got = resolve_json(
+        &json,
+        &included(&generated),
+        &header(),
+        Some("rec.tickwave"),
+    )
+    .unwrap();
+    assert_eq!(got, want);
+    // As a recording's bundle is read: the generated annotations and the roles stay too.
+    let none = |_: &str| None;
+    let apart = resolve_apart(&hand, &included(&generated), &header(), &none);
+    assert_eq!(
+        apart,
+        resolve_apart(HAND, &included(GENERATED), &header(), &none)
+    );
+    assert_eq!(apart.files, [("rec.wire_swd.jsonl", true)]);
+    assert_eq!(
+        resolve_apart_json(&json, &included(&generated), &header(), &none),
+        apart
+    );
+    let (roles, problems) = roles(&hand, &included(&generated));
+    assert!(problems.is_empty(), "{problems:#?}");
+    assert_eq!(roles, roles_of(HAND));
+}
+
+fn roles_of(hand: &str) -> Vec<escapement_tickwave_format::annotations::Role> {
+    let (roles, problems) = roles(hand, &included(GENERATED));
+    assert!(problems.is_empty(), "{problems:#?}");
+    roles
+}
+
+/// What a reader leaves out of a later minor version it names, file by file. A file of a version it
+/// knows, or of a later one holding nothing new, gets no note.
+#[test]
+fn what_this_reader_leaves_out_of_a_later_minor_version_is_noted() {
+    let (hand, generated) = later("1");
+    let want = [
+        "the TOML file: \"tickwave-annotations/1.1\" is newer than this reader, which leaves out decode",
+        "rec.wire_swd.jsonl: \"tickwave-annotations/1.1\" is newer than this reader, which leaves out schema",
+    ];
+    assert_eq!(notes(&hand, &included(&generated)), want);
+    let json = serde_json::to_string(&toml::from_str::<toml::Value>(&hand).unwrap()).unwrap();
+    assert_eq!(notes_json(&json, &included(&generated)), want);
+    let bare = HAND.replace(
+        "format = \"tickwave-annotations/1\"",
+        "format = \"tickwave-annotations/1.1\"",
+    );
+    assert!(notes(&bare, &included(GENERATED)).is_empty());
+    let (hand, generated) = later("0");
+    assert!(notes(&hand, &included(&generated)).is_empty());
+    assert!(notes(HAND, &included(GENERATED)).is_empty());
+}
+
+/// A key this reader doesn't know, in a file of a version it knows, is still a mistake.
+#[test]
+fn an_unknown_key_at_this_minor_version_is_refused() {
+    let (hand, generated) = later("0");
+    assert_problem(&problems(&hand, GENERATED), "unknown field `decode`");
+    assert_problem(&problems(HAND, &generated), "unknown field `schema`");
+    let bare = HAND.to_string() + "\n[[decode]]\nanalysis = \"swd\"\n";
+    assert_problem(&problems(&bare, GENERATED), "unknown field `decode`");
+}
+
+#[test]
+fn another_major_version_or_a_malformed_minor_is_another_format() {
+    for format in [
+        "2",
+        "2.1",
+        "1.",
+        "1.x",
+        "1.-1",
+        "1.+1",
+        "1.1.1",
+        "10",
+        "1.99999999999",
+    ] {
+        let hand = HAND.replace(
+            "format = \"tickwave-annotations/1\"",
+            &format!("format = \"tickwave-annotations/{format}\""),
+        );
+        assert_problem(&problems(&hand, GENERATED), "the TOML file's format is");
+    }
+}
+
+/// A merge carries a generator's file by the name its head gives, from a later minor version too,
+/// and never from another format.
+#[test]
+fn a_generator_file_is_named_by_its_head_of_this_major_version_only() {
+    let (_, later) = later("1");
+    assert_eq!(generator_source(&later).as_deref(), Some("wire_swd"));
+    assert_eq!(generator_source(GENERATED).as_deref(), Some("wire_swd"));
+    let other = GENERATED.replacen("tickwave-annotations/1", "tickwave-annotations/2", 1);
+    assert_eq!(generator_source(&other), None);
 }

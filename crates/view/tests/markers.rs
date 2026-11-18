@@ -559,3 +559,47 @@ fn with_header(file: &[u8], header: &Header) -> Vec<u8> {
     escapement_tickwave_format::record::write_footer(&mut out, 0, &new);
     out
 }
+
+/// A bundled sidecar of a later minor version gives the markers this version reads of it, and
+/// names what it holds that this version doesn't know with what was left out (ANNOTATIONS.md,
+/// "Versions").
+#[test]
+fn a_later_minor_version_gives_the_same_markers_and_names_what_it_left_out() {
+    let plain = written(100_000, &[], Some(BTreeMap::new()));
+    let footer = Footer::parse_file(&plain).unwrap();
+    let id = footer.header.content_id;
+    let bundled = |format: &str, extra: &str| {
+        let files = BTreeMap::from([
+            (
+                "rec.annotations.toml".to_owned(),
+                format!(
+                    "format = \"{format}\"\nrecording_id = \"{id}\"\ninclude = [\"rec.b.jsonl\"]\n\
+                     [[annotation]]\nid = \"h\"\nstart = 30\n{extra}"
+                ),
+            ),
+            (
+                "rec.b.jsonl".to_owned(),
+                generator_file("beta", None, id, &[line("x/0", 10)]),
+            ),
+        ]);
+        let file = escapement_tickwave_format::bundle::bundle(&plain, &footer, files, 3).unwrap();
+        let rec = Recording::open(Arc::new(file), Cache::new(1 << 20)).unwrap();
+        rec.load_markers().unwrap();
+        rec
+    };
+    let known = bundled("tickwave-annotations/1", "");
+    let later = bundled(
+        "tickwave-annotations/1.1",
+        "[[decode]]\nid = \"swd\"\ndecoder = \"swd\"\n",
+    );
+    assert_eq!(within(&later, 0..100_000), within(&known, 0..100_000));
+    assert_eq!(within(&later, 0..100_000).len(), 2);
+    assert!(known.markers_left_out().is_empty());
+    assert_eq!(
+        later.markers_left_out(),
+        [
+            "the TOML file: \"tickwave-annotations/1.1\" is newer than this reader, which leaves \
+             out decode"
+        ]
+    );
+}

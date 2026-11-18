@@ -146,8 +146,11 @@ files it includes, relative to its URL, and resolves them with the Rust core. Wi
 attribute, a recording with a bundled sidecar uses that, read from the file when a view first asks
 for it. A view draws before its annotations come, with room kept for their lane. Once they have
 come, a lane with none on the channels shown says so. A sidecar's problems go to the console and to
-a short notice in the element, and the recording still draws. A notice goes with its cause: a new
-recording or sidecar starts without the last one's.
+a short notice in the element, and the recording still draws. A sidecar of a later minor version
+than this reader knows (ANNOTATIONS.md, "Versions") reads as far as this reader can, and what it
+leaves out goes to the console and to the notice too, without a `tickwave-error`. A notice shows a
+problem before a note. A notice goes with its cause: a new recording or sidecar starts without the
+last one's.
 
 Resolved annotations keep sidecar order: the hand-written file's, then each included file's. The
 order says which kind a view steps through first. The lane and the stepping sort by time

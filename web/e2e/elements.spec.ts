@@ -2,6 +2,8 @@
 // before the footer has arrived, a load that fails, and the focus as views open and close. On
 // e2e/pages/view.html, one view of identify-swd.tickwave and a reference to it.
 
+import { readFileSync } from "node:fs";
+
 import { test, expect, type Locator, type Page } from "@playwright/test";
 
 const VIEW = "/e2e/pages/view.html";
@@ -98,6 +100,52 @@ test("a view showing some of a recording's channels goes only as far as they end
   await view.locator(".plot").focus();
   await page.keyboard.press("Home");
   await expect.poll(shown).toEqual({ start: 0, end: 50_000 });
+});
+
+test("a sidecar of a later minor version draws as this one, and its notice says what was left out without an error", async ({ page }) => {
+  const later = readFileSync("fixtures/identify-swd.annotations.toml", "utf8").replace('format = "tickwave-annotations/1"', 'format = "tickwave-annotations/1.1"');
+  await page.route("**/fixtures/later.annotations.toml", (route) => route.fulfill({ contentType: "text/plain", body: `${later}\n[[decode]]\nid = "swd"\n` }));
+  const said: string[] = [];
+  page.on("console", (m) => {
+    if (m.text().startsWith('<tickwave-view id="v">')) said.push(`${m.type()} ${m.text()}`);
+  });
+  await page.addInitScript(() => document.addEventListener("tickwave-error", (e) => ((window as unknown as { errors: string[] }).errors ??= []).push((e as CustomEvent<{ message: string }>).detail.message)));
+  await page.goto(`${VIEW}?open&annotations=fixtures/identify-swd.annotations.toml`);
+  const view = page.locator("#v");
+  const withLane = await drawn(view);
+  await expect(notice(view)).toBeHidden();
+  await view.evaluate((v) => v.setAttribute("annotations", "../../fixtures/later.annotations.toml"));
+  const note = 'the TOML file: "tickwave-annotations/1.1" is newer than this reader, which leaves out decode';
+  await expect(notice(view)).toHaveText(note, { timeout: 20_000 });
+  expect(await drawn(view)).toBe(withLane);
+  // Its hand-written and generated annotations are there: showing one that isn't would be a problem.
+  for (const id of ["dpidr-read", "swd/wait/379065159"]) await view.evaluate((v, id) => (v as unknown as { show(id: string): Promise<void> }).show(id), id);
+  await expect(notice(view)).toHaveText(note);
+  expect(said).toEqual([`info <tickwave-view id="v">: ${note}`]);
+  expect(await page.evaluate(() => (window as unknown as { errors?: string[] }).errors ?? [])).toEqual([]);
+  // Back to a sidecar of this version: the note goes with the one it was about.
+  await view.evaluate((v, s) => v.setAttribute("annotations", s), SIDECAR);
+  await expect(notice(view)).toBeHidden({ timeout: 20_000 });
+});
+
+test("a bundled sidecar of a later minor version draws as this one, and a view's and an inset's notice say what was left out", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("console", (m) => {
+    if (m.type() === "warning") errors.push(m.text());
+  });
+  const note = 'the TOML file: "tickwave-annotations/1.1" is newer than this reader, which leaves out decode';
+  await page.goto(`${VIEW}?open&src=fixtures/later.bundle.tickwave`);
+  const view = page.locator("#v");
+  await expect(notice(view)).toHaveText(note, { timeout: 20_000 });
+  await view.evaluate((v) => (v as unknown as { show(id: string): Promise<void> }).show("dpidr-read"));
+  await expect(notice(view)).toHaveText(note);
+  await page.goto("/e2e/pages/inset.html?src=fixtures/later.bundle.tickwave&annotation=dpidr-read");
+  const inset = page.locator("#i");
+  await expect(inset.locator('[part="notice"]')).toHaveText(note, { timeout: 20_000 });
+  // Another recording, its sidecar of this version: the note goes with the one it was about.
+  await inset.evaluate((i) => i.setAttribute("src", "../../fixtures/identify-swd.bundle.tickwave"));
+  await expect(inset.locator('[part="notice"]')).toBeHidden({ timeout: 20_000 });
+  expect(errors).toEqual([]);
 });
 
 test("a failed load is tried again, and a new recording's view drops the old notice", async ({ page }, info) => {

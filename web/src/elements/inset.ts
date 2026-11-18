@@ -279,6 +279,7 @@ export class TickwaveInset extends TickwaveElement {
             if (this.#loadKey !== key) return;
             this.#loaded = l;
             for (const e of l.annotations.errors) this.fail(named("TickwaveSidecarError", e));
+            for (const n of l.annotations.notes) this.note(n);
             this.#show();
           },
           (e) => {

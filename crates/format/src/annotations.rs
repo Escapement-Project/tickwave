@@ -20,6 +20,138 @@ pub use view::View;
 
 pub const FORMAT: &str = "tickwave-annotations/1";
 
+/// The latest minor version of `FORMAT` this reader knows. A file that names a later one,
+/// `tickwave-annotations/1.<minor>`, may hold top-level keys this reader doesn't, which it leaves
+/// out (ANNOTATIONS.md, "Versions").
+const MINOR: u32 = 0;
+
+/// The minor version a format names, `FORMAT` itself being minor 0: None for any other format.
+fn minor(format: &str) -> Option<u32> {
+    let rest = format.strip_prefix(FORMAT)?;
+    if rest.is_empty() {
+        return Some(0);
+    }
+    let digits = rest.strip_prefix('.')?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// A file's `format` alone, read before the file is.
+#[derive(Deserialize)]
+struct FormatOnly {
+    format: Option<String>,
+}
+
+fn newer(format: Option<FormatOnly>) -> bool {
+    format
+        .and_then(|f| f.format)
+        .and_then(|f| minor(&f))
+        .is_some_and(|m| m > MINOR)
+}
+
+const HAND_KEYS: [&str; 7] = [
+    "format",
+    "recording",
+    "recording_id",
+    "include",
+    "role",
+    "view",
+    "annotation",
+];
+const HEAD_KEYS: [&str; 5] = ["format", "source", "version", "recording_id", "role"];
+
+/// The hand-written file, from its TOML. A file of a later minor version has its top-level keys
+/// this reader doesn't know left out first; any other is parsed as it stands, so an unknown key in
+/// it is an error.
+#[cfg(feature = "toml")]
+fn hand_toml(hand: &str) -> Result<HandFile, toml::de::Error> {
+    if newer(toml::from_str(hand).ok()) {
+        let mut table: toml::Table = toml::from_str(hand)?;
+        table.retain(|k, _| HAND_KEYS.contains(&k));
+        return toml::Value::Table(table).try_into();
+    }
+    toml::from_str(hand)
+}
+
+/// As `hand_toml`, from the JSON a page made of the TOML.
+fn hand_json(hand: &str) -> serde_json::Result<HandFile> {
+    known_json(hand, &HAND_KEYS)
+}
+
+/// A generator file's first line, as `hand_toml` reads the hand-written file.
+fn head_json(first: &str) -> serde_json::Result<GeneratorHead> {
+    known_json(first, &HEAD_KEYS)
+}
+
+fn known_json<T: serde::de::DeserializeOwned>(text: &str, keys: &[&str]) -> serde_json::Result<T> {
+    if newer(json(text).ok()) {
+        let mut map: serde_json::Map<String, serde_json::Value> = json(text)?;
+        map.retain(|k, _| keys.contains(&k.as_str()));
+        return serde_json::from_value(serde_json::Value::Object(map));
+    }
+    json(text)
+}
+
+/// What a reader leaves out of a sidecar of a later minor version than it knows: a note for the
+/// hand-written file, and for each generator file's first line, that holds top-level keys it
+/// doesn't know, naming them (ANNOTATIONS.md, "Versions"). They are not problems: the rest reads
+/// as the file means it.
+#[cfg(feature = "toml")]
+pub fn notes(hand: &str, included: &[Included<'_>]) -> Vec<String> {
+    let table: Option<toml::Table> = toml::from_str(hand).ok();
+    let hand = table.and_then(|t| {
+        let format = t.get("format").and_then(toml::Value::as_str);
+        left_out(
+            "the TOML file",
+            format,
+            t.keys().map(String::as_str),
+            &HAND_KEYS,
+        )
+    });
+    hand.into_iter().chain(head_notes(included)).collect()
+}
+
+/// As `notes`, with the hand-written file's TOML already parsed and written out as JSON.
+pub fn notes_json(hand: &str, included: &[Included<'_>]) -> Vec<String> {
+    json_note("the TOML file", hand, &HAND_KEYS)
+        .into_iter()
+        .chain(head_notes(included))
+        .collect()
+}
+
+fn head_notes<'i>(included: &'i [Included<'_>]) -> impl Iterator<Item = String> + 'i {
+    included.iter().filter_map(|inc| {
+        let first = inc.text.lines().find(|l| !l.trim().is_empty())?;
+        json_note(inc.name, first, &HEAD_KEYS)
+    })
+}
+
+fn json_note(what: &str, text: &str, known: &[&str]) -> Option<String> {
+    let map: serde_json::Map<String, serde_json::Value> = json(text).ok()?;
+    let format = map.get("format").and_then(serde_json::Value::as_str);
+    left_out(what, format, map.keys().map(String::as_str), known)
+}
+
+/// The note for a file of a later minor version than this reader knows whose top-level `keys`
+/// include some outside `known`; None for any other file.
+fn left_out<'k>(
+    what: &str,
+    format: Option<&str>,
+    keys: impl Iterator<Item = &'k str>,
+    known: &[&str],
+) -> Option<String> {
+    let format = format.filter(|f| minor(f).is_some_and(|m| m > MINOR))?;
+    let unknown: Vec<&str> = keys.filter(|k| !known.contains(k)).collect();
+    (!unknown.is_empty()).then(|| {
+        format!(
+            "{what}: {format:?} is newer than this reader, which leaves out {}",
+            unknown.join(", ")
+        )
+    })
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Measure {
@@ -53,6 +185,8 @@ struct Entry {
     values: Option<BTreeMap<String, String>>,
 }
 
+/// Its keys are `HAND_KEYS`: a key added here goes there too, or a file of a later minor version
+/// loses it.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HandFile {
@@ -70,6 +204,7 @@ struct HandFile {
     annotation: Vec<Entry>,
 }
 
+/// Its keys are `HEAD_KEYS`, as `HandFile`'s are `HAND_KEYS`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GeneratorHead {
@@ -346,8 +481,8 @@ fn check_id(id: &str, generated: bool) -> Option<String> {
 /// merge carries, where a hand-written file's annotations stay behind.
 pub fn generator_source(text: &str) -> Option<String> {
     let first = text.lines().find(|l| !l.trim().is_empty())?;
-    let head: GeneratorHead = json(first).ok()?;
-    (head.format == FORMAT).then_some(head.source)
+    let head = head_json(first).ok()?;
+    minor(&head.format).map(|_| head.source)
 }
 
 /// The role tables a generator's file declares in its first line, unchecked; none where that
@@ -355,7 +490,7 @@ pub fn generator_source(text: &str) -> Option<String> {
 pub fn generator_roles(text: &str) -> Vec<serde_json::Value> {
     text.lines()
         .find(|l| !l.trim().is_empty())
-        .and_then(|first| json::<GeneratorHead>(first).ok())
+        .and_then(|first| head_json(first).ok())
         .map(|head| head.role)
         .unwrap_or_default()
 }
@@ -389,7 +524,7 @@ pub fn hand_written_count(hand: &str) -> Option<usize> {
 /// of each name, in sidecar order, and every problem with them, as `resolve` reports them.
 #[cfg(feature = "toml")]
 pub fn roles(hand: &str, included: &[Included<'_>]) -> (Vec<Role>, Vec<String>) {
-    match toml::from_str::<HandFile>(hand) {
+    match hand_toml(hand) {
         Ok(file) => declared_in(&file, included),
         Err(e) => (Vec::new(), vec![format!("the TOML file: {e}")]),
     }
@@ -397,7 +532,7 @@ pub fn roles(hand: &str, included: &[Included<'_>]) -> (Vec<Role>, Vec<String>) 
 
 /// As `roles`, with the hand-written file's TOML already parsed and written out as JSON.
 pub fn roles_json(hand: &str, included: &[Included<'_>]) -> (Vec<Role>, Vec<String>) {
-    match json::<HandFile>(hand) {
+    match hand_json(hand) {
         Ok(file) => declared_in(&file, included),
         Err(e) => (Vec::new(), vec![format!("the TOML file: {e}")]),
     }
@@ -408,7 +543,7 @@ pub fn roles_json(hand: &str, included: &[Included<'_>]) -> (Vec<Role>, Vec<Stri
 /// as `resolve` reports them.
 #[cfg(feature = "toml")]
 pub fn view(hand: &str, header: &Header) -> Result<Option<View>, Vec<String>> {
-    match toml::from_str::<HandFile>(hand) {
+    match hand_toml(hand) {
         Ok(file) => file
             .view
             .as_ref()
@@ -420,7 +555,7 @@ pub fn view(hand: &str, header: &Header) -> Result<Option<View>, Vec<String>> {
 
 /// As `view`, with the hand-written file's TOML already parsed and written out as JSON.
 pub fn view_json(hand: &str, header: &Header) -> Result<Option<View>, Vec<String>> {
-    match json::<HandFile>(hand) {
+    match hand_json(hand) {
         Ok(file) => file
             .view
             .as_ref()
@@ -437,7 +572,7 @@ fn declared_in(file: &HandFile, included: &[Included<'_>]) -> (Vec<Role>, Vec<St
         .into_iter()
         .filter_map(|inc| {
             let first = inc.text.lines().find(|l| !l.trim().is_empty())?;
-            Some((inc.name, json::<GeneratorHead>(first).ok()?.role))
+            Some((inc.name, head_json(first).ok()?.role))
         })
         .collect();
     roles::declared(
@@ -456,7 +591,7 @@ pub fn resolve(
     header: &Header,
     recording_file: Option<&str>,
 ) -> Result<Vec<Annotation>, Vec<String>> {
-    match toml::from_str(hand) {
+    match hand_toml(hand) {
         Ok(file) => resolve_file(file, included, header, recording_file),
         Err(e) => Err(vec![format!("the TOML file: {e}")]),
     }
@@ -475,7 +610,7 @@ pub fn resolve_json(
     header: &Header,
     recording_file: Option<&str>,
 ) -> Result<Vec<Annotation>, Vec<String>> {
-    match json(hand) {
+    match hand_json(hand) {
         Ok(file) => resolve_file(file, included, header, recording_file),
         // The position is in the JSON the page made from the TOML, not in any file its author has.
         Err(e) => {
@@ -680,7 +815,7 @@ pub fn resolve_apart<'a>(
     header: &Header,
     targets: Targets<'_>,
 ) -> Apart<'a> {
-    match toml::from_str(hand) {
+    match hand_toml(hand) {
         Ok(file) => apart(file, included, header, targets),
         Err(e) => Apart {
             problems: vec![format!("the TOML file: {e}")],
@@ -696,7 +831,7 @@ pub fn resolve_apart_json<'a>(
     header: &Header,
     targets: Targets<'_>,
 ) -> Apart<'a> {
-    match json(hand) {
+    match hand_json(hand) {
         Ok(file) => apart(file, included, header, targets),
         Err(e) => {
             // The position is in the JSON the page made from the TOML, as in `resolve_json`.
@@ -780,7 +915,7 @@ pub fn resolve_lenient(
     header: &Header,
     recording_file: Option<&str>,
 ) -> Resolved {
-    match toml::from_str(hand) {
+    match hand_toml(hand) {
         Ok(file) => {
             let found = find(file, included, header, recording_file, None);
             let (kept, left_out) = found.kept();
@@ -811,7 +946,7 @@ fn find<'a>(
     elsewhere: Option<Targets<'_>>,
 ) -> Found<'a> {
     let mut problems: Vec<(Owner<'a>, String)> = Vec::new();
-    if file.format != FORMAT {
+    if minor(&file.format).is_none() {
         problems.push((
             Owner::Sidecar,
             format!(
@@ -887,14 +1022,14 @@ fn find<'a>(
             problems.push((whole, format!("{}: empty", inc.name)));
             continue;
         };
-        let head: GeneratorHead = match json(first) {
+        let head = match head_json(first) {
             Ok(head) => head,
             Err(e) => {
                 problems.push((whole, format!("{}, line {}: {e}", inc.name, first_n + 1)));
                 continue;
             }
         };
-        if head.format != FORMAT {
+        if minor(&head.format).is_none() {
             problems.push((
                 whole,
                 format!("{}: format {:?}, not {FORMAT:?}", inc.name, head.format),

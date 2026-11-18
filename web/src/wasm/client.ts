@@ -185,7 +185,7 @@ export class WasmSource implements Source {
    * whole. */
   async bundled(): Promise<Sidecar | null> {
     const read = await this.bundledIn(null);
-    return read && { annotations: read.annotations, ...(read.declared ?? NONE_DECLARED) };
+    return read && { annotations: read.annotations, ...(read.declared ?? NONE_DECLARED), notes: read.notes };
   }
 
   /** A local file's sidecar files when it came with them, whole; else the recording's bundled
@@ -200,17 +200,17 @@ export class WasmSource implements Source {
       const [text, ...texts] = await Promise.all([hand[0].text(), ...rest.map((f) => f.text())]);
       const json = await call<string>({ op: "resolve", key: this.#key, hand: text, names: rest.map((f) => f.name), texts, recordingFile: this.fileName });
       const whole = sidecarFromCore(json);
-      return { annotations: whole.annotations, problems: [], complete: true, declared: whole };
+      return { annotations: whole.annotations, problems: [], notes: whole.notes, complete: true, declared: whole };
     }
     const read = await call<AnnotationsRead | null>({ op: "bundled", key: this.#key, span });
-    return read && { annotations: read.list.map(fromCore), problems: read.problems, complete: read.complete, declared: declaredFromCore(read.roles, read.view) };
+    return read && { annotations: read.list.map(fromCore), problems: read.problems, notes: read.notes, complete: read.complete, declared: declaredFromCore(read.roles, read.view) };
   }
 }
 
 /** A sidecar as the decoder resolves it whole (`Recording.resolveAnnotations`). */
 function sidecarFromCore(json: string): Sidecar {
-  const s = JSON.parse(json) as { annotations: CoreAnnotation[]; roles: Role[]; view: StoredView | null };
-  return { annotations: s.annotations.map(fromCore), ...declaredFromCore(s.roles, s.view) };
+  const s = JSON.parse(json) as { annotations: CoreAnnotation[]; notes: string[]; roles: Role[]; view: StoredView | null };
+  return { annotations: s.annotations.map(fromCore), notes: s.notes, ...declaredFromCore(s.roles, s.view) };
 }
 
 function abortOf(signal: AbortSignal): Promise<never> {

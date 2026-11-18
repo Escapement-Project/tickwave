@@ -227,8 +227,8 @@ only to an annotation the reader keeps.
 exits non-zero if there was any. A page's build runs it, so a decoder rerun that drops an annotation
 the prose cites breaks the build instead of the page. It checks that:
 
-- both files declare format `tickwave-annotations/1`, and their `recording_id` matches the
-  recording;
+- both files declare format `tickwave-annotations/1`, or a later minor version of it (see
+  Versions), and their `recording_id` matches the recording;
 - `recording`, if given, names the recording's file;
 - every included file is named without a directory, is provided, and every provided file is
   included;
@@ -243,6 +243,17 @@ the prose cites breaks the build instead of the page. It checks that:
   differently in two, and no file declares more than 64 roles, nor the files between them;
 - every `paint` names a declared role;
 - a `[view]` table holds to the rules above.
+
+## Versions
+
+A file's `format` names its version: `tickwave-annotations/1` is version 1, minor version 0, and
+`tickwave-annotations/1.<n>` is minor version `n`. A minor version adds top-level keys, to the
+hand-written file or to a generator's first line, that a reader of an earlier one can leave out and
+still read everything else as the file means it. A reader leaves out the top-level keys it doesn't
+know in a file of a later minor version than it knows, says which in a note that is not a problem,
+and reads the rest as it would. In a file of
+its own minor version or an earlier one, a key it doesn't know is an error, as everywhere else in
+these files. Any other version is another format, which `check` refuses.
 
 ## Bundling
 

@@ -645,6 +645,19 @@ test("the cache: an evicted page or block is read again", async () => {
   setCacheBytes(192 << 20);
 });
 
+test("a sidecar of a later minor version resolves as this one, with a note of what was left out", async () => {
+  const r = await openTickwave("fixtures/identify-swd.tickwave");
+  const toml = readFileSync(at("fixtures/identify-swd.annotations.toml"), "utf8");
+  const jsonl = execFileSync(process.execPath, ["scripts/swd-annotations.ts", "fixtures/identify-swd.tickwave"], { encoding: "utf8" });
+  const resolve = (toml: string) =>
+    JSON.parse(r.resolveAnnotations(handJson(toml, "hand.toml").json, ["identify-swd.swd.jsonl"], [jsonl], "identify-swd.tickwave")) as { annotations: unknown[]; notes: string[] };
+  const known = resolve(toml);
+  const later = resolve(toml.replace('format = "tickwave-annotations/1"', 'format = "tickwave-annotations/1.1"') + '\n[[decode]]\nid = "swd"\n');
+  assert.deepEqual(later.annotations, known.annotations);
+  assert.deepEqual(known.notes, []);
+  assert.deepEqual(later.notes, ['the TOML file: "tickwave-annotations/1.1" is newer than this reader, which leaves out decode']);
+});
+
 test("the sidecar resolves through the Rust core, and its problems come back", async () => {
   const r = await openTickwave("fixtures/identify-swd.tickwave");
   const hand = handJson(readFileSync(at("fixtures/identify-swd.annotations.toml"), "utf8"), "identify-swd.annotations.toml").json;

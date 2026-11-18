@@ -1810,8 +1810,9 @@ impl Recording {
     /// The annotations reading a finished file's markers left out, each with why: one that breaks
     /// a rule of ANNOTATIONS.md, one past the length, a second of an id its generator gave
     /// already (FORMAT.md, "Annotations"), or one naming a channel this version can't read
-    /// ("Unavailable channels"). The rest are its markers. Reads every marker; empty where they
-    /// don't read.
+    /// ("Unavailable channels"), and what a sidecar of a later minor version holds that this
+    /// version doesn't know (ANNOTATIONS.md, "Versions"). The rest are its markers. Reads every
+    /// marker; empty where they don't read.
     pub fn markers_left_out(&self) -> &[String] {
         self.read_markers().map_or(&[], |m| &m.left_out)
     }
