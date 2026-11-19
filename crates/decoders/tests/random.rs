@@ -402,7 +402,7 @@ fn cjtag_with_jtag_over_it_never_panics_and_never_breaks_a_rule() {
                     local,
                 },
                 cjtag::Cjtag::factory(window),
-                &[cjtag::assume_qualified(r.bool())],
+                &[cjtag::assume_qualified(r.bool()), cjtag::start_up(r.bool())],
                 all(),
             )
             .unwrap();

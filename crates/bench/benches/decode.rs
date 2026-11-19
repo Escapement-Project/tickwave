@@ -245,7 +245,9 @@ fn oscan1() -> Wires {
         g.oscan1(false, false, true);
         g.check();
     }
-    for &b in &[1u8, 1, 1, 1, 1, 0] {
+    // From Run-Test/Idle, where the activation leaves the TAPC: in the Advanced Protocol,
+    // Test-Logic-Reset would bring back the Standard Protocol.
+    for &b in &[0u8, 0] {
         g.oscan1(b == 1, true, true);
     }
     for k in 0..60u64 {

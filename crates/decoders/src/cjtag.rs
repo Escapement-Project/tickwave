@@ -4,12 +4,19 @@
 //! Scan Packet that advances the TAP, each value naming the cJTAG element it came from.
 //!
 //! A bit is TMSC's level when TCKC falls, and its TMSC edges while TCKC is high make an escape.
-//! Activation is followed by command, as the project's probe does it, or by a Selection Sequence,
-//! and Offline stretches after a deselection are marked. A three-part command's CR scan is named by
-//! its command and operand (table 9-4), with its TDI and TDO bits and the register value they
-//! carry, where the Advanced Protocol puts them on TMSC. What is not decoded (ready and delay
-//! elements, transport packets, other scan formats) ends what it interrupts, incomplete, with that
-//! as the cause; framing resumes at the next reset or selection escape.
+//! Activation is followed by command, as the project's probe does it, or by a Selection Sequence
+//! after a selection escape or a Selection Alert. A controller Offline at start-up (the `start_up`
+//! setting, until a CNFG0 read's DAS bit says) waits for one after each reset escape. Offline
+//! stretches after a deselection escape or a Deselection Alert are marked. Test-Logic-Reset brings
+//! back the default scan format and the Standard Protocol (table 11-8).
+//!
+//! A three-part command's CR scan is named by its command and operand (table 9-4), with its TDI and
+//! TDO bits and the register value they carry, where the Advanced Protocol puts them on TMSC; where
+//! CGM sends it to the EPU bypass bit instead, it is named so. Those scan formats are Star-2
+//! operation (13.1), so a string has no other controllers' bits around it (table 9-11 with m and n
+//! zero). What is not decoded (ready and delay elements, transport packets, other scan formats)
+//! ends what it interrupts, incomplete, with that as the cause; framing resumes at the next reset
+//! or selection escape.
 //!
 //! Whether the target drives the TDO elements is not yet read from the wire. A setting,
 //! `assume_qualified`, assumes it; off, their driver is unknown, for a reason.
@@ -24,7 +31,10 @@ use escapement_tickwave_decode::{
     Subscription, Tick, Value, Window, field, name, seq,
 };
 use std::sync::Arc;
-use tap7::{Cr, Driver, Escape, Ev, MNEMONICS, Outcome, Response, Selection, Tap7, format_name};
+use tap7::{
+    Cr, Driver, Escape, Ev, MNEMONICS, Offline, Outcome, Path, Response, Selection, Tap7,
+    format_name,
+};
 
 pub const TCKC: u8 = 0;
 pub const TMSC: u8 = 1;
@@ -39,6 +49,7 @@ pub const PACKET: KindId = KindId(6);
 pub const SELECTION: KindId = KindId(7);
 pub const OFFLINE: KindId = KindId(8);
 pub const CR_SCAN: KindId = KindId(9);
+pub const ALERT: KindId = KindId(10);
 
 /// `ESCAPE`'s fields and sequences: in the Standard Protocol a selection or deselection escape's
 /// bit is a TMS bit.
@@ -97,6 +108,8 @@ pub const CR_TDI: FieldId = FieldId(2);
 pub const CR_TDO: FieldId = FieldId(3);
 pub const CR_VALUE: FieldId = FieldId(4);
 pub const CR_MEANING: FieldId = FieldId(5);
+/// `ALERT`'s field: which alert, by its index in `ALERTS`.
+pub const ALERT_IS: FieldId = FieldId(0);
 
 pub const PROBE: Role = Role(0);
 pub const TARGET: Role = Role(1);
@@ -104,6 +117,8 @@ pub const TARGET: Role = Role(1);
 pub const UNQUALIFIED: Reason = Reason(0);
 pub const PROTECTED: Reason = Reason(1);
 pub const NOT_ON_TMSC: Reason = Reason(2);
+pub const CGM_UNKNOWN: Reason = Reason(3);
+pub const SREDGE_UNKNOWN: Reason = Reason(4);
 
 pub const GAP_CUT: Cause = Cause(0);
 pub const NEEDS_TAP: Cause = Cause(1);
@@ -145,13 +160,18 @@ pub const OUTCOMES: [&str; 3] = [
     "parked in another state",
 ];
 /// `OFFLINE_BY`'s names.
-pub const OFFLINE_BYS: [&str; 3] = [
+pub const OFFLINE_BYS: [&str; 5] = [
     "a deselection escape",
     "a selection of another technology",
     "a selection needing another parking state",
+    "a Deselection Alert",
+    "a reset, offline at start-up",
 ];
-/// `REGISTER`'s names: what a CR scan reaches (table 9-4).
-pub const REGISTERS: [&str; 19] = [
+/// `ALERT_IS`'s names.
+pub const ALERTS: [&str; 2] = ["Selection", "Deselection"];
+/// `REGISTER`'s names: what a CR scan reaches (table 9-4), and the EPU bypass bit where CGM is 0
+/// (table 9-10).
+pub const REGISTERS: [&str; 20] = [
     "SGC",
     "CGM",
     "CNFG0[0]",
@@ -171,7 +191,9 @@ pub const REGISTERS: [&str; 19] = [
     "reserved string",
     "private string",
     "AT reference",
+    "EPU bypass",
 ];
+const BYPASS: u16 = 19;
 
 /// `BRANCH`'s name for an Online Activation Code: OAC[1:0] the technology, OAC[3:2] the branch.
 fn branch(oac: u8) -> u16 {
@@ -379,6 +401,13 @@ pub fn schema() -> Schema {
                 Label::default().field(REGISTER).text(" ").field(CR_VALUE),
                 Label::default().field(REGISTER),
             ]),
+        // On the top row with the Offline stretches alerts begin and end.
+        KindDecl::new("alert")
+            .with_fields(vec![field("alert", names(&ALERTS))])
+            .with_labels(vec![
+                Label::default().field(ALERT_IS).text(" Alert"),
+                Label::default().text("alert"),
+            ]),
     ])
     .with_roles(["probe", "target"])
     .with_reasons([
@@ -386,6 +415,8 @@ pub fn schema() -> Schema {
         "drive conflict protection keeps the target from driving until it alone is a group \
          member, which is not followed",
         "in the Standard Protocol, TDI and TDO are not on TMSC",
+        "CGM unknown, so the scan may reach the EPU bypass bit instead",
+        "SREDGE unknown: no reset decoded, or stored conditionally while CGM was unknown",
     ])
     .with_causes([
         "a recording gap interrupts it",
@@ -407,11 +438,27 @@ pub fn assume_qualified(on: bool) -> (&'static str, Setting) {
     ("assume_qualified", Setting::Flag(on))
 }
 
+/// Whether a reset leaves the controller Online or Offline (11.4.1.5): the names of the setting
+/// `start_up`.
+pub const START_UP: SettingId = SettingId(1);
+pub const START_UPS: [&str; 2] = ["online", "offline"];
+
+/// The start-up setting, as a binding gives it.
+pub fn start_up(offline: bool) -> (&'static str, Setting) {
+    (
+        "start_up",
+        Setting::Name(name(START_UPS[usize::from(offline)])),
+    )
+}
+
 pub fn definition() -> Arc<Definition> {
     Arc::new(
         Definition::new("cjtag", 1, schema())
             .with_ports(["TCKC", "TMSC"])
-            .with_settings(vec![SettingDecl::flag("assume_qualified", false)]),
+            .with_settings(vec![
+                SettingDecl::flag("assume_qualified", false),
+                SettingDecl::choice("start_up", START_UPS, 0),
+            ]),
     )
 }
 
@@ -624,6 +671,8 @@ pub struct Oscan {
     offline: Option<Id>,
     level: Option<Id>,
     format: Option<(Id, u8)>,
+    /// Where a Selection Alert being matched started: its item opens there once it completes.
+    alert_from: Option<Tick>,
     /// The starts of the last two DR scans: a command's two parts.
     dr_begins: [Tick; 2],
     /// One phase's events, kept to reuse.
@@ -653,17 +702,28 @@ impl Oscan {
             offline: None,
             level: None,
             format: None,
+            alert_from: None,
             dr_begins: [start; 2],
             events: vec![],
             clocks: vec![],
         }
     }
 
+    /// A controller that comes up Offline after a reset escape when `offline`.
+    pub fn with_start_up(mut self, offline: bool) -> Self {
+        self.tap = Tap7::new(offline);
+        self
+    }
+
     /// The earliest a new item, part or element can start: the next bit's cell, from the last fall
-    /// or where the lines became known; a Scan Packet's elements already framed; and a control
-    /// level or command whose DR scans have begun. An escape starts at a rise, after the last fall.
+    /// or where the lines became known; a Scan Packet's elements already framed; a control level or
+    /// command whose DR scans have begun; and a Selection Alert being matched. An escape starts at
+    /// a rise, after the last fall.
     pub fn start_frontier(&self) -> Tick {
         let mut f = self.last_fall.unwrap_or(self.floor);
+        if let Some(a) = self.alert_from {
+            f = f.min(a);
+        }
         if let Some(s) = self.slots.first() {
             f = f.min(s.cell.start);
         }
@@ -708,6 +768,7 @@ impl Oscan {
                 line,
             } => {
                 self.tap.gap();
+                self.alert_from = None;
                 self.close_all(from, Status::Incomplete(GAP_CUT), out);
                 self.toggles.clear();
                 self.high_since = clock.then_some(to);
@@ -747,6 +808,11 @@ impl Oscan {
                         self.handle(ev, t, rise, at, cell, out);
                     }
                     self.events = events;
+                    self.alert_from = match self.tap.alert_matched() {
+                        0 => None,
+                        1 => Some(cell.start),
+                        _ => self.alert_from,
+                    };
                     self.last_fall = Some(t);
                 }
                 self.clock = level;
@@ -850,7 +916,33 @@ impl Oscan {
                 self.selection = Some((id, n.saturating_add(1)));
             }
             Ev::Selection(sel) => self.selection(&sel, t, out),
-            Ev::Offline => self.offline(t, 0, out),
+            Ev::Offline(by) => {
+                let by = match by {
+                    Offline::Deselection => 0,
+                    Offline::Alert => 3,
+                    Offline::StartUp => 4,
+                };
+                self.offline(t, by, out);
+            }
+            Ev::Alert { selection } => {
+                // A Selection Alert spans its bits; a Deselection Alert, the bit that parks the
+                // TAPC, whose TMS is already in a JScan stretch that ends with it.
+                let start = match self.alert_from {
+                    Some(a) if selection => a,
+                    _ => cell.start,
+                };
+                self.close_jscan(t, out);
+                self.close_all(start, Status::Complete, out);
+                let id = Id::new(ALERT, start);
+                out.open(id, None, start);
+                out.set(id, ALERT_IS, Value::Name(u16::from(!selection)));
+                out.close(id, t, Status::Complete);
+            }
+            Ev::DefaultFormat => {
+                if let Some((id, _)) = self.format.take() {
+                    out.close(id, t, Status::Complete);
+                }
+            }
             Ev::CrScan(cr) => self.cr_scan(&cr, t, out),
             Ev::Standard { tms } => {
                 let (id, n) = match self.jscan {
@@ -912,8 +1004,14 @@ impl Oscan {
                 let id = Id::new(FORMAT, t);
                 out.open(id, None, t);
                 out.set(id, SCAN_FORMAT, Value::Text(format_name(f)));
-                let sampling = if self.tap.sampled_at_rise() { 0 } else { 1 };
-                out.set(id, SAMPLING, Value::Name(sampling));
+                let sampling = match self.tap.sampling() {
+                    Some(rise) => Value::Name(if rise { 0 } else { 1 }),
+                    None => Value::Unknown {
+                        reason: SREDGE_UNKNOWN,
+                        needs: None,
+                    },
+                };
+                out.set(id, SAMPLING, sampling);
                 self.format = Some((id, f));
             }
             Ev::DrBegin => self.dr_begins = [self.dr_begins[1], cell.start],
@@ -1027,8 +1125,21 @@ impl Oscan {
         let start = self.dr_begins[1];
         let id = Id::new(CR_SCAN, start);
         out.open(id, self.level, start);
-        let (register, read, width) = reached(cr.opcode, cr.operand);
-        out.set(id, REGISTER, Value::Name(register));
+        let (register, read, width) = match cr.path {
+            Path::Register => reached(cr.opcode, cr.operand),
+            // The bypass bit holds no register value.
+            Path::Bypass | Path::Unknown => (BYPASS, None, 1),
+        };
+        let cgm_unknown = || Value::Unknown {
+            reason: CGM_UNKNOWN,
+            needs: None,
+        };
+        if cr.path == Path::Unknown {
+            out.set(id, REGISTER, cgm_unknown());
+            out.set(id, CR_VALUE, cgm_unknown());
+        } else {
+            out.set(id, REGISTER, Value::Name(register));
+        }
         let length = Value::Word {
             value: cr.shifts.into(),
             bits: 32,
@@ -1163,6 +1274,8 @@ pub struct Cjtag {
     /// Made once both lines are known.
     oscan: Option<Oscan>,
     qualified: bool,
+    /// Offline at start-up, as bound.
+    offline_start: bool,
     next: Tick,
     window: Tick,
     first: [Option<bool>; 2],
@@ -1177,6 +1290,7 @@ impl Cjtag {
             lines: None,
             oscan: None,
             qualified,
+            offline_start: false,
             next: local.unwrap_or(0),
             window: window.max(1),
             first: [None; 2],
@@ -1185,19 +1299,22 @@ impl Cjtag {
         }
     }
 
-    /// Makes runs of cJTAG in windows of `window` ticks, qualified as bound.
+    /// Makes runs of cJTAG in windows of `window` ticks, qualified and started up as bound.
     pub fn factory(window: Tick) -> Factory {
         Box::new(move |b, local| {
             let qualified = b.flag(ASSUME_QUALIFIED).unwrap_or(false);
-            Box::new(Self::new(local, qualified, window))
+            let mut c = Self::new(local, qualified, window);
+            c.offline_start = b.choice(START_UP) == Some(1);
+            Box::new(c)
         })
     }
 
     fn lines(&mut self, from: Tick) -> &mut Lines {
-        let (first, qualified) = (self.first, self.qualified);
+        let (first, qualified, offline) = (self.first, self.qualified, self.offline_start);
         self.lines.get_or_insert_with(|| {
             if let [Some(clock), Some(line)] = first {
-                self.oscan = Some(Oscan::new(from, clock, line, qualified));
+                let o = Oscan::new(from, clock, line, qualified).with_start_up(offline);
+                self.oscan = Some(o);
             }
             Lines::new(from, first)
         })
@@ -1223,7 +1340,8 @@ impl Cjtag {
                     },
                     None,
                 ) => {
-                    self.oscan = Some(Oscan::new(to, clock, line, self.qualified));
+                    let o = Oscan::new(to, clock, line, self.qualified);
+                    self.oscan = Some(o.with_start_up(self.offline_start));
                     if from < to {
                         ex.lost(from, to);
                     }

@@ -127,8 +127,9 @@ impl Gen {
 const IDCODE: u32 = 0x4BA0_0477;
 const DR_TEXT: &[u8; 32] = b"tickwave over cJTAG, OScan1 sel.";
 
-/// The JTAG clocks of one session: reset, IDCODE through IR and DR, a 256-bit DR scan of text, and
-/// idle clocks.
+/// The JTAG clocks of one session from Run-Test/Idle, where the activation leaves the TAPC: IDCODE
+/// through IR and DR, a 256-bit DR scan of text, and idle clocks. No Test-Logic-Reset: in the
+/// Advanced Protocol it brings back the Standard Protocol (table 11-8).
 fn session_clocks() -> Vec<(bool, bool, bool)> {
     let mut clocks = vec![];
     let tms = |c: &mut Vec<(bool, bool, bool)>, seq: &[u8]| {
@@ -143,7 +144,7 @@ fn session_clocks() -> Vec<(bool, bool, bool)> {
     let text: Vec<bool> = (DR_TEXT.iter())
         .flat_map(|b| (0..8).map(move |k| b >> k & 1 == 1))
         .collect();
-    tms(&mut clocks, &[1, 1, 1, 1, 1, 0, 0]);
+    tms(&mut clocks, &[0, 0]);
     tms(&mut clocks, &[1, 1, 0, 0]);
     shift(&mut clocks, &bits(0b1110, 4), &bits(0b0001, 4));
     tms(&mut clocks, &[1, 0, 1, 0, 0]);
@@ -1117,6 +1118,8 @@ fn a_cr_scan_is_named_by_its_command_and_carries_its_register() {
     let mut g = Gen::new();
     g.activate_oscan1();
     g.oscan1(&enter_command_level());
+    // MCM for controller zero, as the project's probe sends it: CGM 1 opens the String Path.
+    g.oscan1_command(6, 0);
     g.oscan1_command(9, 2);
     g.oscan1_cr(0, cnfg0, 32);
     g.oscan1_command(8, 1);
@@ -1166,6 +1169,7 @@ fn a_cr_scan_in_the_standard_protocol_has_no_data_on_tmsc() {
     let mut g = Gen::new();
     g.reset_to_idle();
     g.jscan(&enter_command_level());
+    g.jscan(&command(6, 0));
     g.jscan(&command(9, 2));
     g.jscan(&dr_scan(32));
     let (h, [c, _]) = decode(&g, true);
@@ -1184,4 +1188,393 @@ fn a_cr_scan_in_the_standard_protocol_has_no_data_on_tmsc() {
     for f in [cjtag::CR_TDI, cjtag::CR_TDO, cjtag::CR_VALUE] {
         assert_eq!(value(cr, f), why);
     }
+}
+
+// ---- The remaining limits: CGM, SUSPEND, alerts, start-up, Test-Logic-Reset -------------------
+
+impl Gen {
+    /// A Selection Alert: `ones` 1s, its 128 bits from the start bit, four padding bits (10.5.1).
+    fn selection_alert(&mut self, ones: usize, wrong_bit: Option<u32>) {
+        self.bits(0xFF, ones);
+        let alert: u128 = 0x19BC_0EA2_E3DD_AFE9_8685_2D95_6209_F392;
+        for k in 0..128 {
+            self.bit((alert >> k & 1 == 1) != (wrong_bit == Some(k)), 0);
+        }
+        self.bits(0, 4);
+    }
+
+    /// A Selection Sequence's short form with no escape before it, and its Check Packet.
+    fn sequence(&mut self, oac: u32, ec: u32) {
+        self.bits(oac, 4);
+        self.bits(ec, 4);
+        self.check();
+    }
+}
+
+/// Decodes with cJTAG's `start_up` setting offline.
+fn decode_offline_start(g: &Gen) -> (Host, [AnalysisId; 2]) {
+    let mut h = Host::new(HostOptions::default());
+    let c = h
+        .add(
+            name("cjtag"),
+            cjtag::definition(),
+            InputSpec::Wire {
+                source: Box::new(g.wires()),
+                local: None,
+            },
+            Cjtag::factory(1000),
+            &[cjtag::assume_qualified(true), cjtag::start_up(true)],
+            all(),
+        )
+        .unwrap();
+    let j = h
+        .add(
+            name("jtag"),
+            cjtag::jtag_definition(),
+            InputSpec::Upstream(cjtag::jtag_subscription(c)),
+            JtagOnCjtag::factory(),
+            &[],
+            all(),
+        )
+        .unwrap();
+    h.run_until(|_| false).unwrap();
+    for &x in &[c, j] {
+        fits_its_rows(&h, x);
+    }
+    (h, [c, j])
+}
+
+/// Each CR scan's register, and whether it carries a value.
+fn registers(h: &Host, c: AnalysisId) -> Vec<(Option<Value>, bool)> {
+    (of(h, c, &[cjtag::CR_SCAN]).iter())
+        .map(|i| {
+            (
+                value(i, cjtag::REGISTER),
+                value(i, cjtag::CR_VALUE).is_some(),
+            )
+        })
+        .collect()
+}
+
+fn reg(n: u16) -> Option<Value> {
+    Some(Value::Name(n))
+}
+
+#[test]
+fn an_scns_or_private_scnb_scan_reaches_the_bypass_bit_until_cgm_is_set() {
+    let cnfg0 = 0x03C0_0714;
+    let mut g = Gen::new();
+    g.activate_oscan1();
+    g.oscan1(&enter_command_level());
+    // After a reset CGM is 0 (9.4.1.7): SCNS and a private SCNB reach the bypass bit, and a public
+    // SCNB bit needs no CGM (table 9-10).
+    g.oscan1_command(9, 2);
+    g.oscan1_cr(0, 0, 32);
+    g.oscan1_command(8, 16);
+    g.oscan1_cr(1, 0, 1);
+    g.oscan1_command(8, 2);
+    g.oscan1_cr(0, 1, 1);
+    // Until a CIDD, MCM for another controller does nothing; for controller zero it sets CGM.
+    g.oscan1_command(6, 5);
+    g.oscan1_command(9, 2);
+    g.oscan1_cr(0, 0, 32);
+    g.oscan1_command(6, 0);
+    g.oscan1_command(9, 2);
+    g.oscan1_cr(0, cnfg0, 32);
+    let (h, [c, _]) = decode(&g, true);
+    assert_eq!(
+        registers(&h, c),
+        [
+            (reg(19), false),
+            (reg(19), false),
+            (reg(2), true),
+            (reg(19), false),
+            (reg(12), true),
+        ]
+    );
+}
+
+#[test]
+fn cgm_follows_the_controller_id_and_is_unknown_where_the_id_is() {
+    let mut g = Gen::new();
+    g.activate_oscan1();
+    g.oscan1(&enter_command_level());
+    // STMC sets CGM; every ID de-allocated, MCM clears it.
+    g.oscan1_command(0, 0b00111);
+    g.oscan1_command(9, 2);
+    g.oscan1_cr(0, 0, 32);
+    g.oscan1_command(11, 0x10);
+    g.oscan1_command(6, 0);
+    g.oscan1_command(9, 2);
+    g.oscan1_cr(0, 0, 32);
+    // After a CIDA nothing on TMSC says which controller took the ID, so an MCM that leaves
+    // others alone leaves CGM unknown, and the scan's register with it.
+    g.oscan1_command(10, 0x13);
+    g.oscan1_cr(0, 0, 36);
+    g.oscan1_command(6, 0x13);
+    g.oscan1_command(9, 2);
+    g.oscan1_cr(0, 0, 32);
+    // SCNB's public CGM bit stores it again.
+    g.oscan1_command(8, 1);
+    g.oscan1_cr(1, 0, 1);
+    g.oscan1_command(9, 2);
+    g.oscan1_cr(0, 0, 32);
+    let (h, [c, _]) = decode(&g, true);
+    let unknown = Some(Value::Unknown {
+        reason: cjtag::CGM_UNKNOWN,
+        needs: None,
+    });
+    let regs = registers(&h, c);
+    assert_eq!(
+        regs,
+        [
+            (reg(12), true),
+            (reg(19), false),
+            (reg(18), true),
+            (unknown, true),
+            (reg(1), true),
+            (reg(12), true),
+        ]
+    );
+    let cr = &of(&h, c, &[cjtag::CR_SCAN])[3];
+    assert_eq!(
+        value(cr, cjtag::CR_VALUE),
+        Some(Value::Unknown {
+            reason: cjtag::CGM_UNKNOWN,
+            needs: None
+        })
+    );
+}
+
+#[test]
+fn suspend_stops_control_levels_and_qualifies_escapes_until_eight_zero_bit_scans() {
+    // SUSPEND ends the level, and no level locks while it holds; the eighth zero-bit scan ends it.
+    let mut g = Gen::new();
+    g.reset_to_idle();
+    g.jscan(&enter_command_level());
+    g.jscan(&command(0, 2));
+    g.jscan(&enter_command_level());
+    g.jscan(&[1, 1, 1, 1, 1, 0]);
+    g.jscan(&enter_command_level());
+    g.jscan(&command(0, 2));
+    g.jscan(&ZBS.repeat(8));
+    g.jscan(&enter_command_level());
+    let (h, [c, _]) = decode(&g, true);
+    let levels = of(&h, c, &[cjtag::LEVEL]);
+    assert_eq!(
+        levels.len(),
+        3,
+        "the first, after Test-Logic-Reset, after eight scans"
+    );
+    let suspend = &of(&h, c, &[cjtag::COMMAND])[0];
+    assert_eq!(levels[0].end, suspend.end, "SUSPEND ends its level");
+
+    // Suspended, the System Path is in use whatever the zero-bit scans: a deselection is taken.
+    let mut g = Gen::new();
+    g.reset_to_idle();
+    g.jscan(&enter_command_level());
+    g.jscan(&command(0, 2));
+    g.jscan(&ZBS.repeat(2));
+    g.bit(false, 4);
+    let (h, [c, _]) = decode(&g, true);
+    let deselection = &of(&h, c, &[cjtag::ESCAPE])[1];
+    assert_eq!(name_of(deselection, cjtag::RESPONSE), Some(0));
+    assert_eq!(of(&h, c, &[cjtag::OFFLINE]).len(), 1);
+}
+
+#[test]
+fn a_selection_alert_while_offline_starts_a_selection_sequence() {
+    // Seven 1s are too few to start the detector; one bit wrong is no alert.
+    for (ones, wrong) in [(8, None), (8, Some(37)), (7, None)] {
+        let mut g = Gen::new();
+        g.reset_to_idle();
+        g.bit(false, 4);
+        g.selection_alert(ones, wrong);
+        g.sequence(0b1100, 0b1000);
+        for &(m, i, o) in &session_clocks() {
+            g.clock_oscan1(m, i, o);
+        }
+        let (h, [c, j]) = decode(&g, true);
+        let alerts = of(&h, c, &[cjtag::ALERT]);
+        if (ones, wrong) != (8, None) {
+            assert!(alerts.is_empty(), "{ones} 1s, bit {wrong:?} wrong");
+            assert!(of(&h, c, &[cjtag::SELECTION]).is_empty());
+            continue;
+        }
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(name_of(&alerts[0], cjtag::ALERT_IS), Some(0));
+        let sel = &of(&h, c, &[cjtag::SELECTION])[0];
+        assert_eq!(
+            alerts[0].end,
+            Some(sel.start),
+            "the alert and its padding, then the sequence"
+        );
+        assert_eq!(name_of(sel, cjtag::OUTCOME), Some(0));
+        let offline = &of(&h, c, &[cjtag::OFFLINE])[0];
+        assert_eq!(offline.end, Some(alerts[0].start));
+        assert!(idcode_read(&h, j));
+    }
+}
+
+#[test]
+fn control_level_six_then_run_test_idle_is_a_deselection_alert() {
+    // One period in Run-Test/Idle parks the TAPC in Select-DR-Scan; more, in Run-Test/Idle (10.6.1).
+    for (after, ec, outcome) in [(0, 0b1000, 0), (1, 0b1001, 0), (1, 0b1000, 2)] {
+        let mut g = Gen::new();
+        g.activate_oscan1();
+        let mut level6 = ZBS.repeat(6);
+        level6.extend(dr_scan(1));
+        g.oscan1(&level6);
+        g.oscan1(&[after]);
+        g.oscan1(&[0, 0]);
+        g.select(0b1100, ec, None);
+        let (h, [c, _]) = decode(&g, true);
+        let alerts = of(&h, c, &[cjtag::ALERT]);
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(name_of(&alerts[0], cjtag::ALERT_IS), Some(1));
+        let by: Vec<_> = (of(&h, c, &[cjtag::OFFLINE]).iter())
+            .map(|o| name_of(o, cjtag::OFFLINE_BY))
+            .collect();
+        let expected = if outcome == 0 {
+            vec![Some(3)]
+        } else {
+            vec![Some(3), Some(2)]
+        };
+        assert_eq!(by, expected);
+        let sel = &of(&h, c, &[cjtag::SELECTION])[0];
+        assert_eq!(
+            name_of(sel, cjtag::OUTCOME),
+            Some(outcome),
+            "parked after {after}"
+        );
+        let level = &of(&h, c, &[cjtag::LEVEL])[1];
+        assert_eq!(
+            level.end,
+            Some(alerts[0].start),
+            "the level ends where the alert begins"
+        );
+    }
+
+    // A CNFG0 read whose DSEL_ALERTS is 0, and SEL_ALERTS 1: level six then Run-Test/Idle leaves it
+    // Online.
+    let mut g = Gen::new();
+    g.activate_oscan1();
+    g.oscan1(&enter_command_level());
+    g.oscan1_command(6, 0);
+    g.oscan1_command(9, 2);
+    g.oscan1_cr(0, 0x43C0_0714, 32);
+    g.oscan1_command(0, 1);
+    let mut level6 = ZBS.repeat(6);
+    level6.extend(dr_scan(1));
+    g.oscan1(&level6);
+    g.oscan1(&[1, 0, 0]);
+    let (h, [c, _]) = decode(&g, true);
+    assert!(of(&h, c, &[cjtag::ALERT, cjtag::OFFLINE]).is_empty());
+}
+
+#[test]
+fn offline_at_start_up_a_selection_needs_its_preamble() {
+    // 30 alternating bits qualify the selection; 20 do not, nor do 30 with an escape among them.
+    for (alternating, escape_at) in [(30, None), (20, None), (30, Some(12))] {
+        let mut g = Gen::new();
+        g.bit(true, 10);
+        g.bits(0, 10);
+        g.bit(false, 6);
+        for k in 0..alternating {
+            g.bit(k % 2 == 0, if escape_at == Some(k) { 2 } else { 0 });
+        }
+        g.select(0b1100, 0b1000, None);
+        for &(m, i, o) in &session_clocks() {
+            g.clock_oscan1(m, i, o);
+        }
+        let (h, [c, j]) = decode_offline_start(&g);
+        let responses: Vec<_> = (of(&h, c, &[cjtag::ESCAPE]).iter())
+            .map(|e| name_of(e, cjtag::RESPONSE))
+            .collect();
+        let offline = of(&h, c, &[cjtag::OFFLINE]);
+        assert_eq!(name_of(&offline[0], cjtag::OFFLINE_BY), Some(4));
+        if (alternating, escape_at) != (30, None) {
+            assert_eq!(
+                responses,
+                [None, Some(1), Some(1)],
+                "no preamble, no selection"
+            );
+            assert!(of(&h, c, &[cjtag::SELECTION]).is_empty());
+            continue;
+        }
+        assert_eq!(responses, [None, Some(1), Some(0)]);
+        let sel = &of(&h, c, &[cjtag::SELECTION])[0];
+        assert_eq!(
+            name_of(sel, cjtag::OUTCOME),
+            Some(0),
+            "the TAPC is in Run-Test/Idle"
+        );
+        // JTAG learns the TAP state from TMS bits, and the controller moved its TAPC with none.
+        assert_eq!(of(&h, c, &[cjtag::PACKET]).len(), session_clocks().len());
+        assert!(!idcode_read(&h, j));
+    }
+
+    // A CNFG0 read whose DAS bit is 1 says the controller starts Offline, setting or not.
+    let mut g = Gen::new();
+    g.activate_oscan1();
+    g.oscan1(&enter_command_level());
+    g.oscan1_command(6, 0);
+    g.oscan1_command(9, 2);
+    g.oscan1_cr(0, 0x03C8_0714, 32);
+    g.bit(true, 10);
+    g.bits(0, 10);
+    let (h, [c, _]) = decode(&g, true);
+    let by: Vec<_> = (of(&h, c, &[cjtag::OFFLINE]).iter())
+        .map(|o| name_of(o, cjtag::OFFLINE_BY))
+        .collect();
+    assert_eq!(by, [Some(4)]);
+
+    // A Selection Alert works at start-up too.
+    let mut g = Gen::new();
+    g.bit(true, 10);
+    g.selection_alert(8, None);
+    g.sequence(0b1100, 0b1000);
+    let (h, [c, _]) = decode_offline_start(&g);
+    assert_eq!(of(&h, c, &[cjtag::ALERT]).len(), 1);
+    assert_eq!(
+        name_of(&of(&h, c, &[cjtag::SELECTION])[0], cjtag::OUTCOME),
+        Some(0)
+    );
+}
+
+#[test]
+fn test_logic_reset_brings_back_the_standard_protocol() {
+    let mut g = Gen::new();
+    g.activate_oscan1();
+    g.oscan1(&[1, 1, 1]);
+    g.jscan(&[0, 1, 0]);
+    let (h, [c, _]) = decode(&g, true);
+    let format = &of(&h, c, &[cjtag::FORMAT])[0];
+    let packets = of(&h, c, &[cjtag::PACKET]);
+    assert_eq!(
+        format.end,
+        packets.last().unwrap().end,
+        "OScan1 to the packet entering it"
+    );
+    let tms: usize = (of(&h, c, &[cjtag::JSCAN]).iter())
+        .filter(|i| i.start >= format.end.unwrap())
+        .map(|i| i.seq(cjtag::JSCAN_TMS).len())
+        .sum();
+    assert_eq!(tms, 3);
+}
+
+#[test]
+fn a_format_from_a_selection_without_a_reset_does_not_know_its_sampling_edge() {
+    let mut g = Gen::new();
+    g.select(0b1100, 0b1000, None);
+    g.oscan1(&[0, 0]);
+    let (h, [c, _]) = decode(&g, true);
+    let format = &of(&h, c, &[cjtag::FORMAT])[0];
+    assert_eq!(
+        value(format, cjtag::SAMPLING),
+        Some(Value::Unknown {
+            reason: cjtag::SREDGE_UNKNOWN,
+            needs: None
+        })
+    );
 }

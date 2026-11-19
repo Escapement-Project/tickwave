@@ -14,8 +14,18 @@
 //! While the controller is not known to be Online, a selection escape starts a sequence and a
 //! deselection places it Offline, as a debug and test system uses them only where qualified.
 //!
-//! Not decoded: ready and delay elements, transport packets, SScan and MScan, and the SUSPEND and
-//! scan selection directive state that also qualify escapes. Each is reported when met. A bit is
+//! SUSPEND (17.5) stops control levels being made and puts the System Path in use, so escapes
+//! qualify, until the eighth zero-bit scan in a row, Test-Logic-Reset or a selection test. CGM and
+//! SGC follow the commands that store them and the controller ID they are addressed by (9.4.1.7,
+//! table 9-4), so an SCNS or private SCNB scan reaches its register only where CGM is 1, else the
+//! EPU bypass bit (table 9-10). A Selection Alert (10.5) while the controller is not known to be
+//! Online starts a Selection Sequence; a Deselection Alert, control level six then Run-Test/Idle
+//! (10.6), places it Offline unless a CNFG0 read says it has none. A controller Offline at start-up
+//! (11.9.7), as the `start_up` setting or a CNFG0 read's DAS bit says, comes up Offline after a
+//! reset escape and takes a selection escape only after its alternating preamble.
+//!
+//! Not decoded: ready and delay elements, transport packets, SScan and MScan, and the scan
+//! selection directive state that also qualifies escapes. Each is reported when met. A bit is
 //! TMSC's level before TCKC falls whichever edge the target samples at; the two agree while TMSC
 //! moves only with TCKC low.
 
@@ -34,6 +44,10 @@ const SELECT_IR: u8 = 9;
 const SHIFT_IR: u8 = 11;
 const PAUSE_IR: u8 = 13;
 const ALL: u16 = 0xFFFF;
+/// The Selection Alert, first bit (the start bit, 0) in bit 0 (10.5.1.2).
+const SELECTION_ALERT: u128 = 0x19BC_0EA2_E3DD_AFE9_8685_2D95_6209_F392;
+/// The alert's 128 bits, then the four padding bits before its Selection Sequence.
+const ALERT_BITS: u8 = 128 + 4;
 /// The most of a CR scan's TDI and TDO bits kept.
 pub const CR_KEPT: usize = 256;
 
@@ -74,6 +88,27 @@ pub enum Response {
     Offline,
 }
 
+/// What placed the controller Offline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Offline {
+    Deselection,
+    /// A Deselection Alert (10.6).
+    Alert,
+    /// A reset with the Offline-at-Start-up option (11.9.7).
+    StartUp,
+}
+
+/// What a three-part command's CR scan reaches (tables 9-9 and 9-10).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Path {
+    /// The register its command and operand name.
+    Register,
+    /// The EPU bypass bit: CGM is 0.
+    Bypass,
+    /// CGM is not known.
+    Unknown,
+}
+
 /// Why a Selection Sequence left the controller Offline, or the scan format the Check Packet after
 /// it places the controller Online in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,6 +139,7 @@ pub struct Selection {
 pub struct Cr {
     pub opcode: u8,
     pub operand: u8,
+    pub path: Path,
     pub shifts: u32,
     pub on_wire: bool,
     pub tdi: Vec<bool>,
@@ -142,8 +178,12 @@ pub enum Ev {
     /// One bit of a Selection Sequence, then the sequence once its fields are known.
     SelectionBit(bool),
     Selection(Selection),
-    /// A deselection escape placed the controller Offline.
-    Offline,
+    /// The controller went Offline.
+    Offline(Offline),
+    /// A Selection Alert, once its padding bits are in, or a Deselection Alert where it is taken.
+    Alert {
+        selection: bool,
+    },
     CrScan(Cr),
     /// A Standard Protocol bit: TMS.
     Standard {
@@ -175,6 +215,8 @@ pub enum Ev {
     Command(Command),
     /// A scan format takes effect.
     Format(u8),
+    /// Test-Logic-Reset brings back the default scan format, whose Standard Protocol follows.
+    DefaultFormat,
     /// Framing needs a TAPC state that is not known.
     NeedContext,
     Unsupported(Cause),
@@ -187,6 +229,8 @@ enum Protocol {
     Unknown,
     /// Deselected: the bits are another controller's, until a selection or reset escape.
     Offline,
+    /// Offline at start-up (11.9.7): a selection escape needs its preamble.
+    StartUp,
     /// A Selection Sequence's bits so far, the first in bit 0.
     Selection {
         bits: u32,
@@ -202,6 +246,25 @@ enum Protocol {
         post: bool,
         reset: bool,
     },
+}
+
+/// The controller's ID (9.4.1.7, table 9-4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Cid {
+    /// After a reset: zero, valid, and selection commands naming another ID do nothing, until a
+    /// CIDD.
+    Reset,
+    Valid(u8),
+    Invalid,
+    Unknown,
+}
+
+/// The Selection Alert detector: consecutive 1s before a start bit, then how many of the alert's
+/// bits have matched.
+#[derive(Clone, Copy, Debug, Default)]
+struct Alert {
+    ones: u8,
+    matched: u8,
 }
 
 #[derive(Clone, Debug)]
@@ -221,11 +284,28 @@ pub struct Tap7 {
     /// A stored format, taking effect after the Check Packet.
     stored: Option<u8>,
     inhibited: bool,
-    /// SREDGE: in the Control and Advanced Protocols the target samples TMSC at TCKC's rise; zero,
-    /// as after a reset, at its fall (23.4.1.4.4).
-    sredge: bool,
-    /// CGM, which conditional stores depend on.
-    cgm: bool,
+    /// SREDGE, where known: in the Control and Advanced Protocols the target samples TMSC at
+    /// TCKC's rise; zero, as after a reset, at its fall (23.4.1.4.4).
+    sredge: Option<bool>,
+    /// CGM, where known: conditional stores and the CR scans of SCNS and private SCNB depend on it.
+    cgm: Option<bool>,
+    /// SGC, where known.
+    sgc: Option<bool>,
+    cid: Cid,
+    /// SUSPEND (17.5).
+    suspend: bool,
+    /// Whether a reset leaves the controller Offline: the `start_up` setting until a CNFG0 read's
+    /// DAS bit says.
+    offline_start: bool,
+    /// Whether the controller takes Deselection Alerts, where a CNFG0 read says.
+    dsel_alerts: Option<bool>,
+    /// Control level six reached Run-Test/Idle: the next bit's TAPC state is where a Deselection
+    /// Alert parks it (10.6).
+    parking: bool,
+    alert: Alert,
+    /// Offline at start-up: the last bits, the latest in bit 0, and how many since an escape.
+    history: u32,
+    since_escape: u8,
     slot: usize,
     values: [bool; 3],
     eot: bool,
@@ -250,8 +330,17 @@ impl Default for Tap7 {
             spcp: false,
             stored: None,
             inhibited: false,
-            sredge: false,
-            cgm: false,
+            sredge: None,
+            cgm: None,
+            sgc: None,
+            cid: Cid::Unknown,
+            suspend: false,
+            offline_start: false,
+            dsel_alerts: None,
+            parking: false,
+            alert: Alert::default(),
+            history: 0,
+            since_escape: 0,
             slot: 0,
             values: [false; 3],
             eot: false,
@@ -263,8 +352,21 @@ impl Default for Tap7 {
 }
 
 impl Tap7 {
+    /// A controller that comes up Offline after a reset when `offline_start`.
+    pub fn new(offline_start: bool) -> Self {
+        Self {
+            offline_start,
+            ..Self::default()
+        }
+    }
+
     fn tap(&self) -> Option<u8> {
         jtag::single(self.tap)
+    }
+
+    /// How many bits of a Selection Alert have matched, its padding included: 1 at its start bit.
+    pub fn alert_matched(&self) -> u8 {
+        self.alert.matched
     }
 
     /// Whether a Selection Sequence turned drive conflict protection on.
@@ -274,7 +376,15 @@ impl Tap7 {
 
     /// Whether the target samples the next bit at TCKC's rise; otherwise at its fall.
     pub fn sampled_at_rise(&self) -> bool {
-        matches!(self.protocol, Protocol::Standard) || self.sredge
+        self.sampling() == Some(true)
+    }
+
+    /// Whether the target samples at TCKC's rise, or None where SREDGE is not known.
+    pub fn sampling(&self) -> Option<bool> {
+        match self.protocol {
+            Protocol::Standard => Some(true),
+            _ => self.sredge,
+        }
     }
 
     /// Which DR scan a control level or command still to come would start at, if one has begun:
@@ -286,7 +396,7 @@ impl Tap7 {
         let scanning = self.shifts.is_some();
         match (self.level, self.part) {
             // A nonzero DR scan after zero-bit ones locks a control level, from its own start.
-            (None, _) if self.zbs > 0 && scanning => Some(0),
+            (None, _) if self.zbs > 0 && scanning && !self.suspend => Some(0),
             // A command runs from its first DR scan's start to its second's end.
             (Some(2), 0) if scanning => Some(0),
             (Some(2), 1) => Some(usize::from(scanning)),
@@ -296,17 +406,48 @@ impl Tap7 {
         }
     }
 
-    /// A recording gap: nothing about the controller is known after it.
+    /// A recording gap: nothing about the controller's state is known after it; what CNFG0 says
+    /// of it stays.
     pub fn gap(&mut self) {
-        *self = Self::default();
-    }
-
-    fn reset(&mut self) {
         *self = Self {
-            protocol: Protocol::Standard,
-            tap: 1 << TLR,
+            offline_start: self.offline_start,
+            dsel_alerts: self.dsel_alerts,
             ..Self::default()
         };
+    }
+
+    /// A reset escape (Type-3): Online in the Standard Protocol, or Offline at start-up with the
+    /// TAPC moved to Run-Test/Idle (11.9.7.2 b); the registers as table 9-2 gives them.
+    fn reset(&mut self, out: &mut Vec<Ev>) {
+        let start_up = self.offline_start;
+        *self = Self {
+            protocol: if start_up {
+                Protocol::StartUp
+            } else {
+                Protocol::Standard
+            },
+            tap: 1 << if start_up { RTI } else { TLR },
+            offline_start: start_up,
+            dsel_alerts: self.dsel_alerts,
+            ..Self::default()
+        };
+        self.registers_reset();
+        if start_up {
+            out.push(Ev::Offline(Offline::StartUp));
+        }
+    }
+
+    /// The registers a Type-0 to Type-4 reset sets (table 9-2): CGM and SREDGE 0, controller ID
+    /// zero, SUSPEND and ZBSINH 0; SGC its default, which only an Offline-at-Start-up option gives
+    /// (table 10-7).
+    fn registers_reset(&mut self) {
+        self.sredge = Some(false);
+        self.cgm = Some(false);
+        self.sgc = self.offline_start.then_some(false);
+        self.cid = Cid::Reset;
+        self.suspend = false;
+        self.inhibited = false;
+        self.stored = None;
     }
 
     fn exit_level(&mut self, out: &mut Vec<Ev>) {
@@ -326,6 +467,17 @@ impl Tap7 {
 
     /// One TCKC high phase: TMSC's level before TCKC fell, and how many TMSC edges it held.
     pub fn phase(&mut self, value: bool, edges: usize, out: &mut Vec<Ev>) {
+        let custom = edges >= 2;
+        // Offline at start-up, a selection escape counts only after its preamble (11.9.7.2 c).
+        let preamble = self.protocol == Protocol::StartUp && self.preamble();
+        if self.protocol == Protocol::StartUp {
+            self.history = self.history << 1 | u32::from(value);
+            self.since_escape = if custom {
+                0
+            } else {
+                self.since_escape.saturating_add(1)
+            };
+        }
         match Escape::of(edges) {
             Some(Escape::Reset) => {
                 out.push(Ev::Escape {
@@ -333,19 +485,20 @@ impl Tap7 {
                     response: None,
                     tms: None,
                 });
-                self.reset();
+                self.reset(out);
                 return;
             }
             Some(kind @ (Escape::Selection | Escape::Deselection)) => {
-                if self.escape(kind, value, out) {
+                if self.escape(kind, value, preamble, out) {
                     return;
                 }
             }
             Some(Escape::Custom) | None => {}
         }
-        let custom = edges >= 2;
         match self.protocol {
-            Protocol::Unknown | Protocol::Offline => {}
+            Protocol::Unknown | Protocol::Offline | Protocol::StartUp => {
+                self.alert_bit(value, custom, out);
+            }
             Protocol::Selection { bits, count } => self.selection_bit(bits, count, value, out),
             Protocol::Standard => {
                 out.push(Ev::Standard { tms: value });
@@ -362,7 +515,7 @@ impl Tap7 {
                 if post {
                     out.push(Ev::CheckEnd { reset });
                     if reset {
-                        self.reset();
+                        self.reset(out);
                     } else {
                         // A JScan format brings the Standard Protocol (table 11-8).
                         self.protocol = if then < 4 {
@@ -399,12 +552,17 @@ impl Tap7 {
 
     /// A selection or deselection escape. Returns whether it is taken, or shown as ignored; if
     /// not, its bit is data, as the controller takes it.
-    fn escape(&mut self, kind: Escape, value: bool, out: &mut Vec<Ev>) -> bool {
-        let system_path = self.level.is_none() && self.zbs == 0;
+    fn escape(&mut self, kind: Escape, value: bool, preamble: bool, out: &mut Vec<Ev>) -> bool {
+        // SUSPEND keeps the System Path in use whatever the zero-bit scan count (11.6.1.1).
+        let system_path = self.level.is_none() && (self.zbs == 0 || self.suspend);
+        let start_up = self.protocol == Protocol::StartUp;
         let response = match self.protocol {
             Protocol::Standard | Protocol::Advanced(_) if !system_path => Response::Unqualified,
             Protocol::Advanced(_) if self.slot != 0 => Response::Unqualified,
-            Protocol::Offline if kind == Escape::Deselection => Response::Offline,
+            Protocol::Offline | Protocol::StartUp if kind == Escape::Deselection => {
+                Response::Offline
+            }
+            Protocol::StartUp if !preamble => Response::Unqualified,
             // A Check Packet or a Selection Sequence answers only a selection escape.
             Protocol::Check { .. } | Protocol::Selection { .. } if kind == Escape::Deselection => {
                 Response::Unqualified
@@ -412,9 +570,9 @@ impl Tap7 {
             _ => Response::Taken,
         };
         let standard = self.protocol == Protocol::Standard;
-        // Only the Standard Protocol shows an escape it ignores: elsewhere the bit is a Scan
-        // Packet's, Check Packet's or Selection Sequence's like any other.
-        if response == Response::Unqualified && !standard {
+        // Only the Standard Protocol and start-up show an escape they ignore: elsewhere the bit is a
+        // Scan Packet's, Check Packet's or Selection Sequence's like any other.
+        if response == Response::Unqualified && !standard && !start_up {
             return false;
         }
         out.push(Ev::Escape {
@@ -430,14 +588,54 @@ impl Tap7 {
         }
         self.slot = 0;
         self.eot = false;
+        self.alert = Alert::default();
         self.protocol = match kind {
             Escape::Deselection => {
-                out.push(Ev::Offline);
+                out.push(Ev::Offline(Offline::Deselection));
                 Protocol::Offline
             }
             _ => Protocol::Selection { bits: 0, count: 0 },
         };
         true
+    }
+
+    /// Offline at start-up: whether the 28 bits before the one just past alternate, with no
+    /// escape among the last 28 (11.9.7.2 c).
+    fn preamble(&self) -> bool {
+        let run = self.history >> 1 & ((1 << 28) - 1);
+        self.since_escape >= 28 && (run ^ run >> 1) & ((1 << 27) - 1) == (1 << 27) - 1
+    }
+
+    /// One bit while the controller is not known to be Online: a Selection Alert is at least eight
+    /// 1s, its 128 bits from the 0 start bit, then four padding bits; a Selection Sequence follows
+    /// (10.5).
+    fn alert_bit(&mut self, value: bool, escape: bool, out: &mut Vec<Ev>) {
+        let a = &mut self.alert;
+        if escape {
+            *a = Alert::default();
+        } else if a.matched > 0 {
+            let k = u32::from(a.matched);
+            if k >= 128 || value == (SELECTION_ALERT >> k & 1 == 1) {
+                a.matched += 1;
+            } else {
+                // The alert holds no eight 1s in a row, so a mismatch is never a new start.
+                *a = Alert {
+                    ones: u8::from(value),
+                    matched: 0,
+                };
+            }
+        } else if value {
+            a.ones = a.ones.saturating_add(1);
+        } else if a.ones >= 8 {
+            a.matched = 1;
+        } else {
+            a.ones = 0;
+        }
+        if self.alert.matched == ALERT_BITS {
+            self.alert = Alert::default();
+            out.push(Ev::Alert { selection: true });
+            self.protocol = Protocol::Selection { bits: 0, count: 0 };
+        }
     }
 
     /// A Standard Protocol TMS bit.
@@ -541,6 +739,10 @@ impl Tap7 {
             tap: parked,
             sredge: self.sredge,
             cgm: self.cgm,
+            sgc: self.sgc,
+            cid: self.cid,
+            offline_start: self.offline_start,
+            dsel_alerts: self.dsel_alerts,
             protected: ec & 4 != 0,
             ..Self::default()
         };
@@ -650,6 +852,14 @@ impl Tap7 {
         let before = self.tap();
         self.tap = jtag::step(self.tap, tms);
         let after = self.tap();
+        if std::mem::take(&mut self.parking) {
+            // The Deselection Alert parks the TAPC where this bit takes it (10.6.1).
+            out.push(Ev::Alert { selection: false });
+            self.exit_level(out);
+            self.protocol = Protocol::Offline;
+            out.push(Ev::Offline(Offline::Alert));
+            return false;
+        }
         let mut writes = false;
         match (before, after) {
             (Some(SELECT_DR), Some(CAPTURE_DR)) => {
@@ -681,9 +891,19 @@ impl Tap7 {
         }
         if after == Some(SELECT_IR) || after == Some(TLR) {
             self.exit_level(out);
-            if after == Some(TLR) {
-                self.inhibited = false;
+        }
+        if after == Some(TLR) && before != Some(TLR) {
+            // A Type-4 reset: the registers as table 9-2 gives them, and the default scan format,
+            // whose Standard Protocol the Advanced Protocol gives way to (table 11-8).
+            self.registers_reset();
+            self.spcp = false;
+            if let Protocol::Advanced(_) = self.protocol {
+                self.protocol = Protocol::Standard;
+                out.push(Ev::DefaultFormat);
             }
+        }
+        if self.level == Some(6) && after == Some(RTI) && before != Some(RTI) {
+            self.parking = self.dsel_alerts != Some(false);
         }
         writes
     }
@@ -693,8 +913,13 @@ impl Tap7 {
             return false;
         }
         match self.level {
+            // The eighth zero-bit scan in a row ends SUSPEND (17.5.2 d).
+            None if shifts == 0 && self.suspend && self.zbs == 7 => {
+                self.suspend = false;
+                self.zbs = 0;
+            }
             None if shifts == 0 => self.zbs = (self.zbs + 1).min(7),
-            None if self.zbs > 0 => {
+            None if self.zbs > 0 && !self.suspend => {
                 self.level = Some(self.zbs);
                 self.part = 0;
                 out.push(Ev::Level(self.zbs));
@@ -710,18 +935,27 @@ impl Tap7 {
                     // SCNB, SCNS and CIDA bring a CR scan (table 9-3); CIDD does not.
                     let three = (8..=10).contains(&c.opcode);
                     self.part = if three { 2 } else { 0 };
+                    // SCNS and a private SCNB reach their path only where CGM is 1 (table 9-10).
+                    let path = match (c.opcode, self.cgm) {
+                        (8, _) if c.operand < 16 => Path::Register,
+                        (8 | 9, Some(true)) | (10, _) => Path::Register,
+                        (8 | 9, Some(false)) => Path::Bypass,
+                        _ => Path::Unknown,
+                    };
                     self.cr = three.then(|| Cr {
                         opcode: c.opcode,
                         operand: c.operand,
+                        path,
                         shifts: 0,
                         on_wire: true,
                         tdi: vec![],
                         tdo: vec![],
                     });
-                    let (writes, ecl) = (c.writes, c.opcode == 0 && c.operand == 1);
+                    let writes = c.writes;
+                    // ECL and SUSPEND end the level after the command inside it (17.5.1.2).
+                    let ends = c.opcode == 0 && matches!(c.operand, 1 | 2);
                     out.push(Ev::Command(c));
-                    // The command is inside its control level; ECL ends the level after it.
-                    if ecl {
+                    if ends {
                         self.exit_level(out);
                     }
                     return writes;
@@ -729,6 +963,7 @@ impl Tap7 {
                 _ => {
                     self.part = 0;
                     if let Some(cr) = self.cr.take() {
+                        self.cr_stores(&cr);
                         out.push(Ev::CrScan(cr));
                     }
                 }
@@ -736,6 +971,44 @@ impl Tap7 {
             Some(_) => {}
         }
         false
+    }
+
+    /// What a CR scan stores: SCNB's public SGC and CGM bits take the last TDI bit (table 9-4); a
+    /// CNFG0 read says whether the controller starts Offline and takes Deselection Alerts
+    /// (table 9-15).
+    fn cr_stores(&mut self, cr: &Cr) {
+        if cr.path != Path::Register || cr.shifts == 0 {
+            return;
+        }
+        // The last bit shifted, where it was kept and on TMSC.
+        let whole = cr.on_wire && cr.tdi.len() == cr.shifts as usize;
+        let last = cr.tdi.last().copied().filter(|_| whole);
+        match (cr.opcode, cr.operand) {
+            (8, 0) => self.sgc = last,
+            (8, 1) => self.cgm = last,
+            (9, 2) if cr.on_wire && cr.tdo.len() >= 32 => {
+                self.offline_start = cr.tdo[19];
+                self.dsel_alerts = Some(cr.tdo[31]);
+            }
+            _ => {}
+        }
+    }
+
+    /// CGM or SGC after MCM or MSC with `m` and controller ID `cid`, `now` before (table 9-4): an
+    /// invalid ID clears it, a matching one sets it, another clears it with `m` 0 and leaves it
+    /// with `m` 1. After a reset, until a CIDD, only ID zero acts (9.4.1.7).
+    fn member(&self, m: bool, cid: u8, now: Option<bool>) -> Option<bool> {
+        match self.cid {
+            Cid::Invalid => Some(false),
+            Cid::Reset if cid == 0 => Some(true),
+            Cid::Reset => now,
+            Cid::Valid(c) if c == cid => Some(true),
+            Cid::Valid(_) if m => now,
+            Cid::Valid(_) => Some(false),
+            // Set if addressed, else cleared or left: known only where both agree.
+            Cid::Unknown if m && now == Some(true) => now,
+            Cid::Unknown => None,
+        }
     }
 
     fn command(&mut self, cp1: u32, cp2: u32, out: &mut Vec<Ev>) -> Command {
@@ -753,14 +1026,20 @@ impl Tap7 {
                     "no operation".into()
                 }
                 (0, 0, 1) => "exit the control level (ECL)".into(),
-                (0, 1, 0) => "suspend the control levels (SUSPEND)".into(),
+                (0, 1, 0) => {
+                    self.suspend = true;
+                    "suspend the control levels (SUSPEND)".into()
+                }
                 (0, 1, 1) => {
                     self.inhibited = true;
                     "inhibit zero-bit scans (ZBSINH)".into()
                 }
-                (1, 0, v) => format!("Scan Group Candidate SGC = {v}"),
+                (1, 0, v) => {
+                    self.sgc = Some(v == 1);
+                    format!("Scan Group Candidate SGC = {v}")
+                }
                 (1, 1, v) => {
-                    self.cgm = v == 1;
+                    self.cgm = Some(v == 1);
                     format!("Conditional Group Member CGM = {v}")
                 }
                 (2, _, _) | (3, _, _) => {
@@ -776,8 +1055,14 @@ impl Tap7 {
             1 => {
                 let (c, bit, v) = (operand >> 4, (operand >> 1) & 7, operand & 1);
                 let name = ["SREDGE", "FRESET", "TRESET"].get(bit as usize).copied();
-                if bit == 0 && (c == 0 || self.cgm) {
-                    self.sredge = v == 1;
+                if bit == 0 {
+                    // A conditional store acts only where CGM is 1.
+                    self.sredge = match (c, self.cgm) {
+                        (0, _) | (_, Some(true)) => Some(v == 1),
+                        (_, Some(false)) => self.sredge,
+                        (_, None) if self.sredge == Some(v == 1) => self.sredge,
+                        (_, None) => None,
+                    };
                 }
                 format!(
                     "{} = {v}{}",
@@ -798,19 +1083,35 @@ impl Tap7 {
             }
             5 => format!("test mode {operand:#07b}"),
             6 => {
-                // A reset leaves controller ID zero valid (9.4.1.7); the probes here address it.
-                if operand & 15 == 0 {
-                    self.cgm = true;
-                }
+                self.cgm = self.member(operand & 16 != 0, operand & 15, self.cgm);
                 format!("Conditional Group Member for controller {}", operand & 15)
             }
-            7 => format!("Scan Group Candidate: controller {}", operand & 15),
+            7 => {
+                self.sgc = self.member(operand & 16 != 0, operand & 15, self.sgc);
+                format!("Scan Group Candidate: controller {}", operand & 15)
+            }
             8..=10 => {
+                // CIDA gives an ID to a controller without one, but which wins is not on TMSC.
+                if opcode == 10 && matches!(self.cid, Cid::Invalid | Cid::Unknown) {
+                    self.cid = Cid::Unknown;
+                }
                 let m = MNEMONICS.get(usize::from(opcode)).copied().unwrap_or("?");
                 format!("{m} with a CR scan")
             }
-            11 if operand & 16 != 0 => "de-allocate every controller ID".into(),
-            11 => format!("de-allocate controller ID {}", operand & 15),
+            11 if operand & 16 != 0 => {
+                self.cid = Cid::Invalid;
+                "de-allocate every controller ID".into()
+            }
+            11 => {
+                let cid = operand & 15;
+                self.cid = match self.cid {
+                    Cid::Reset | Cid::Valid(0) if cid == 0 => Cid::Invalid,
+                    Cid::Reset => Cid::Valid(0),
+                    Cid::Valid(c) if c == cid => Cid::Invalid,
+                    other => other,
+                };
+                format!("de-allocate controller ID {cid}")
+            }
             12..=15 => "private command".into(),
             _ => "reserved".into(),
         };

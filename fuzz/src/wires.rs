@@ -313,7 +313,10 @@ pub fn cjtag(c: &Case) {
             cjtag::definition(),
             InputSpec::Wire { source, local },
             cjtag::Cjtag::factory(window),
-            &[cjtag::assume_qualified(c.setting & 1 != 0)],
+            &[
+                cjtag::assume_qualified(c.setting & 1 != 0),
+                cjtag::start_up(c.setting & 2 != 0),
+            ],
             all(),
         )
         .unwrap();
