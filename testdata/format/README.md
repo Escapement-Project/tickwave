@@ -2,7 +2,9 @@
 
 Cases another implementation of FORMAT.md can check itself against. The Rust crates check
 themselves against the same files: `crates/format/tests/vectors.rs` reads all four, and
-`crates/import/tests/shape.rs` reads the cuts in `places.json`.
+`crates/import/tests/shape.rs` reads the cuts in `places.json`. The invalid recordings aren't
+kept here: `crates/format/tests/rules.rs` builds them and writes them on demand (see the last
+section).
 
 | File | What it holds | FORMAT.md |
 | --- | --- | --- |
@@ -57,7 +59,39 @@ the latest end.
 ## content-ids.json
 
 A recording of two `int` channels and a derived one, described in `recording`, written as each of
-`variants` says: the derived channel's operation and operands, the zstd level and block size, and
-a re-cut at another level and block size. The ids in `same` are equal and their files differ; the
-ids in `different` differ. Unlike the other files, the ids are not worked by hand, since a reader
-can't work a hash by hand: they pin this implementation's content ids as of FORMAT.md's v1.
+`variants` says. What `recording` leaves out: both channels' `unit` is `"V"` and their `source_name`
+their name in lower case; each has one run from tick 0, with no phase and no losses; the one source
+is `{"format": "vectors", "files": [], "timebase": [1000, 1], "origin": 0}`; the recording states no
+title, meta or `requires`, and `overview_shift` 4. The variants give the derived channel's operation
+and operands, the zstd level and block size, and a re-cut at another level and block size. The ids
+in `same` are equal and their files differ; the ids in `different` differ. Unlike the other files,
+the ids are not worked by hand, since a reader can't work a hash by hand: they pin this
+implementation's content ids as of FORMAT.md's v1.
+
+## Invalid recordings
+
+Recordings that each break one rule a reader refuses by, written into an empty directory with
+
+```
+TICKWAVE_INVALID_VECTORS=<dir> cargo test -p escapement-tickwave-format --test rules -- --ignored write_the_invalid_vectors
+```
+
+`base.tickwave`, `live.tickwave`, `left-out.tickwave` and `plain-live.tickwave` are the valid
+recordings the cases are cut from: the first as the encoder writes a whole recording, the second
+as the writer writes one while recording, the third as the writer writes one that stops inside a
+loss, its last gap record left out of the header, and the fourth a recording of one digital
+channel with no gap.
+
+`invalid.json`'s `cases` gives each case's `file`, the FORMAT.md `rule` it breaks, and the
+`mode`: the reading that has to refuse it.
+
+- `footer`: a reader with random access before it draws, reading the trailer, the footer, the
+  header, the top index, every page and every strip.
+- `random`: the same, decoding every block and overview block the index places, and reading the
+  annotations through their parts and the bundle.
+- `in-order`: a reader in order, from the first record to the trailer.
+- `verify`: the full check.
+
+Its `taken` lists files a later minor version may write, cut from `plain-live.tickwave`, which
+every reading of this version takes. Each gives its `file`, the `rule` that says so, and the
+channels it reads as `unavailable`, by their place among the channels.
