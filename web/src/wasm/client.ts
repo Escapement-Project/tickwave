@@ -23,21 +23,34 @@ const pending = new Map<number, { resolve(v: unknown): void; reject(e: unknown):
 
 /**
  * A browser starts a worker only from the page's own origin. When this module came from another
- * one, as from a release's directory on tickwave's site, the worker is a module of the page's own
- * that imports the real one, which that server must send with CORS. The real one finds its WASM
- * beside itself, by its own URL. The module's blob URL is never revoked: not every engine is known
- * to keep it for a worker that is still starting.
+ * one, as from a release's directory on tickwave's site, the worker is a script of the page's own
+ * that imports the real one, which that server must send with CORS. The script is a classic one:
+ * on a page opened from disk, Chromium refuses a module worker made from a blob. It holds every
+ * message that comes before the import has run, kept from any handler the real one sets meanwhile,
+ * then hands them on in order. An import that fails is thrown again outside its promise, so the
+ * page's `error` handler hears of it. The real one finds its WASM beside itself, by its own URL.
+ * The script's blob URL is never revoked: not every engine is known to keep it for a worker that
+ * is still starting.
  */
-function startWorker(options: WorkerOptions): Worker {
+function startWorker(name: string): Worker {
   const url = new URL("./tickwave-worker.js", import.meta.url);
-  if (url.origin === location.origin) return new Worker(url, options);
-  const shim = URL.createObjectURL(new Blob([`import ${JSON.stringify(url.href)};`], { type: "text/javascript" }));
-  return new Worker(shim, options);
+  if (url.origin === location.origin) return new Worker(url, { type: "module", name });
+  const script = `const held = [];
+const hold = (e) => (e.stopImmediatePropagation(), held.push(e));
+self.addEventListener("message", hold);
+import(${JSON.stringify(url.href)}).then(
+  () => {
+    self.removeEventListener("message", hold);
+    for (const e of held) self.dispatchEvent(new MessageEvent("message", { data: e.data, ports: e.ports }));
+  },
+  (e) => setTimeout(() => { throw e; }),
+);`;
+  return new Worker(URL.createObjectURL(new Blob([script], { type: "text/javascript" })), { name });
 }
 
 function start(): Worker {
   if (worker) return worker;
-  const w = startWorker({ type: "module", name: "tickwave" });
+  const w = startWorker("tickwave");
   w.onmessage = (e: MessageEvent<Reply>) => {
     const r = e.data;
     const p = pending.get(r.id);

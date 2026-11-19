@@ -218,14 +218,15 @@ Include one module, and the three elements are defined:
 recording, it loads `tickwave-worker.js` and `tickwave.wasm` from beside itself, so keep the three
 files together. They can be on another site, such as a release's directory on tickwave's site.
 That site has to send them with `Access-Control-Allow-Origin`, as GitHub Pages does. The worker
-then starts from a small module the page makes, which imports `tickwave-worker.js` from that site.
+then starts from a small script the page makes, which imports `tickwave-worker.js` from that site.
+A page opened from disk can load them from a site this way, and its recordings too, by their full
+URLs.
 
 A page with a Content-Security-Policy has to allow `'unsafe-inline'` in `style-src`, for the
 styles in the elements' shadow roots. The decoder needs `'wasm-unsafe-eval'` in `script-src` of
 the policy its worker runs under. On the files' own site, that is the policy sent with
 `tickwave-worker.js`, if there is one. When the files are on another site, it is the page's
-policy, which then also has to allow `blob:` and that site in `worker-src`, and that site in
-`connect-src`.
+policy, which then also has to allow `blob:` in `worker-src`, and that site in `connect-src`.
 
 Recordings are fetched by byte range: the footer first, then only the channels and the span a view
 shows. A server that ignores ranges still works, as long as it sends the whole file. A recording on
