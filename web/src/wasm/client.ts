@@ -25,17 +25,14 @@ const pending = new Map<number, { resolve(v: unknown): void; reject(e: unknown):
  * A browser starts a worker only from the page's own origin. When this module came from another
  * one, as from a release's directory on tickwave's site, the worker is a module of the page's own
  * that imports the real one, which that server must send with CORS. The real one finds its WASM
- * beside itself, by its own URL.
+ * beside itself, by its own URL. The module's blob URL is never revoked: not every engine is known
+ * to keep it for a worker that is still starting.
  */
 function startWorker(options: WorkerOptions): Worker {
   const url = new URL("./tickwave-worker.js", import.meta.url);
   if (url.origin === location.origin) return new Worker(url, options);
   const shim = URL.createObjectURL(new Blob([`import ${JSON.stringify(url.href)};`], { type: "text/javascript" }));
-  try {
-    return new Worker(shim, options);
-  } finally {
-    URL.revokeObjectURL(shim);
-  }
+  return new Worker(shim, options);
 }
 
 function start(): Worker {
