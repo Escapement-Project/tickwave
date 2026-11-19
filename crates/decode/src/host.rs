@@ -277,7 +277,7 @@ pub enum Delivery {
     Item {
         from: RunId,
         batch: u64,
-        item: Completed,
+        item: Box<Completed>,
     },
     /// The upstream run's frontiers after a batch: no new item starts before `start`, and nothing
     /// before `settled` changes.
@@ -1923,17 +1923,26 @@ impl Host {
                         };
                         c.end = *end;
                         c.status = *status;
-                        for (d, sub) in &subs {
-                            if sub.mode == Mode::Completed && sub.kinds.contains(&id.kind) {
-                                out.push((
-                                    *d,
-                                    Delivery::Item {
-                                        from,
-                                        batch,
-                                        item: c.clone(),
-                                    },
-                                ));
+                        let mut to = (subs.iter())
+                            .filter(|(_, s)| {
+                                s.mode == Mode::Completed && s.kinds.contains(&id.kind)
+                            })
+                            .map(|&(d, _)| d);
+                        // The last subscriber takes the item itself.
+                        if let Some(mut d) = to.next() {
+                            for next in to {
+                                let item = Box::new(c.clone());
+                                out.push((d, Delivery::Item { from, batch, item }));
+                                d = next;
                             }
+                            out.push((
+                                d,
+                                Delivery::Item {
+                                    from,
+                                    batch,
+                                    item: Box::new(c),
+                                },
+                            ));
                         }
                     }
                 }
