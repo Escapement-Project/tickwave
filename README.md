@@ -37,6 +37,34 @@ computer.
 - `site/docs/converter.md`: building and using the converter.
 - `bench/README.md` and `bench/RESULTS.md`: how the benchmark runs, and what it found.
 
+## Using a release
+
+### The elements
+
+Each release puts the elements' files on tickwave's site, in a directory named after its version:
+`https://escapement-project.github.io/tickwave/v0.1.0/`. A published directory never changes, and
+its `SHA256SUMS` lists each file's SHA-256 digest. A page on any site loads the elements from
+there:
+
+```html
+<link rel="stylesheet" href="https://escapement-project.github.io/tickwave/v0.1.0/tickwave.css">
+<script type="module" src="https://escapement-project.github.io/tickwave/v0.1.0/tickwave.js"></script>
+```
+
+To serve them from the page's own host instead, copy the whole directory. `web/README.md` covers
+the elements themselves, and what a page with a Content-Security-Policy allows.
+
+### The Rust crates
+
+The crates aren't on crates.io. Depend on them by git, at a release's tag:
+
+```toml
+[dependencies]
+escapement-tickwave-format = { git = "https://github.com/Escapement-Project/tickwave", tag = "v0.1.0" }
+```
+
+`escapement-tickwave-view` and `escapement-tickwave-egui` come the same way.
+
 ## Building and testing
 
 The Rust crates need a current Rust toolchain and a C compiler, for libzstd. The wasm32 build takes
