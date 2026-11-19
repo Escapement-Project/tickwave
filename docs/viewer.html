@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Viewer – tickwave – Escapement Project</title>
+<meta name="description" content="Opening and sharing a recording, moving and zooming, reading its channels, cursors and annotations.">
+<script>
+// .js, as on the project's other pages, for a shared rule that needs a script to run; and a face
+// chosen on an earlier visit, applied before the first paint. The project's sites share the key.
+document.documentElement.classList.add("js"); try { const f = localStorage.getItem("face"); if (f === "day" || f === "night") document.documentElement.dataset.face = f; } catch {}
+</script>
+<link rel="preload" href="../fonts/saira-expanded.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="../fonts/hanken-grotesk.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="icon" href="../favicon-tickwave.ico">
+<link rel="stylesheet" href="../tokens.css">
+<link rel="stylesheet" href="../base.css">
+<link rel="stylesheet" href="../tickwave.css">
+<link rel="stylesheet" href="../site.css">
+<link rel="stylesheet" href="../doc.css">
+<script type="module" src="../site.js"></script>
+</head>
+<body class="doc-page">
+<a class="skip" href="#main">Skip to the content</a>
+<header data-published="https://escapement-project.github.io">
+  <div class="wrap">
+    <a class="brand" href="https://escapement-project.github.io/" data-page="landing"><svg aria-hidden="true" fill="currentColor" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path fill-rule="evenodd" d="M32,3 A29,29 0 1,0 32.01,3 Z M32,9 A23,23 0 1,0 32.01,9 Z"/><path d="M9.796,38 H29 V20 H51.621 A23,23 0 0,1 54.204,26 H35 V44 H12.379 A23,23 0 0,1 9.796,38 Z"/></svg><span class="name">Escapement Project</span></a>
+    <nav id="places" aria-label="Escapement Project"><a href="https://escapement-project.github.io/verge/" data-page="verge">Verge</a><span class="product"><a href="../index.html" data-page="tickwave" aria-current="true">tickwave</a><a href="../open.html" data-page="tickwave/open">Open</a><a href="../docs/index.html" data-page="tickwave/docs" aria-current="true">Docs</a></span><a href="https://escapement-project.github.io/#source">Source</a></nav>
+    <button class="switch" id="faces" type="button" role="switch" aria-checked="false" aria-label="Night face"><span class="track"><span class="thumb"><svg class="wheel" viewBox="0 0 40 40" aria-hidden="true"><g transform="translate(14 3) scale(.75)"><circle cx="8" cy="8" r="3.2" fill="currentColor"/><path d="M8 1.2v1.6M8 13.2v1.6M1.2 8h1.6M13.2 8h1.6M3.2 3.2l1.1 1.1M11.7 11.7l1.1 1.1M3.2 12.8l1.1-1.1M11.7 4.3l1.1-1.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></g><g transform="rotate(180 20 20) translate(14 3) scale(.75)"><path d="M10.8 1.8a6.3 6.3 0 1 0 3.4 10.6A5.2 5.2 0 0 1 10.8 1.8z" fill="currentColor"/></g></svg></span></span></button>
+  </div>
+</header>
+<main id="main" class="wrap">
+<div class="doc-wrap">
+<button class="doc-bar" type="button" aria-expanded="false" aria-controls="doc-rail"><span class="label">Contents</span><span class="where">The viewer</span></button>
+<div class="doc-rail" id="doc-rail">
+<search class="find" data-index="search.json">
+<input id="find" type="search" role="combobox" aria-label="Search tickwave's docs" aria-autocomplete="list" aria-expanded="false" aria-controls="found" placeholder="Search the docs" autocomplete="off" spellcheck="false" enterkeyhint="search">
+<kbd class="key" aria-hidden="true">/</kbd>
+<button class="clear" type="button" aria-label="Clear the search" hidden></button>
+<p class="count" role="status"></p>
+</search>
+<div class="doc-list"><nav class="doc-nav" aria-label="tickwave's docs">
+<details class="group" open><summary>Using it</summary><ul>
+<li><a href="viewer.html" aria-current="page">Viewer</a><ul class="toc"><li><a href="#opening-a-recording">Opening a recording</a></li><li><a href="#sharing-a-capture-on-github">Sharing a capture on GitHub</a></li><li><a href="#moving-and-zooming">Moving and zooming</a></li><li><a href="#reading-a-channel">Reading a channel</a></li><li><a href="#where-edges-crowd">Where edges crowd</a></li><li><a href="#row-heights">Row heights</a></li><li><a href="#an-analog-channels-scale">An analog channel's scale</a></li><li><a href="#cursors-and-spans">Cursors and spans</a></li><li><a href="#annotations">Annotations</a></li><li><a href="#editing-annotations">Editing annotations</a></li></ul></li>
+<li><a href="converter.html">Converter</a></li>
+</ul></details>
+<details class="group"><summary>In your page</summary><ul>
+<li><a href="elements.html">Elements</a></li>
+<li><a href="charts.html">Charts</a></li>
+</ul></details>
+<details class="group"><summary>The files</summary><ul>
+<li><a href="format.html">Format</a></li>
+<li><a href="annotations.html">Sidecar</a></li>
+</ul></details>
+</nav>
+<div class="found" id="found" role="listbox" aria-label="Sections found" hidden></div></div></div>
+<article class="doc"><h1 id="the-viewer" tabindex="-1">The viewer</h1>
+<p>The viewer shows a tickwave recording. Each channel has a row, all on one time axis. A digital
+channel is drawn from its edges, and an analog channel from its samples. The same view opens on
+<a href="../open.html">the Open page</a> and wherever a page cites a recording, as
+<a href="../index.html#page">tickwave's main page</a> does.</p>
+<h2 id="opening-a-recording" tabindex="-1">Opening a recording<a class="anchor" href="#opening-a-recording" aria-label="Link to this section">#</a></h2>
+<p>Give the Open page a recording's address, and its sidecar's if it has one. The page's address then
+names both, as <code><span class="word">?src=</span></code> and <code><span class="word">?annotations=</span></code>, so a link to it opens the same recording. With
+<code><span class="word">?annotation=</span></code> as well, it opens at that annotation. <code><span class="word">?window=</span></code> gives a span to show, as two tick
+counts, such as <code>?window=377113809+377124212</code>. A zoomed-in figure links to the span it shows this
+way. A recording on
+another site opens only if that site lets other sites read its files: its server has to answer with
+an <code>Access-Control-Allow-Origin</code> header (CORS).</p>
+<p>Or open files from this computer: a <code><span class="word">.tickwave</span></code> recording, with its sidecar's <code><span class="word">.toml</span></code> and <code><span class="word">.jsonl</span></code>
+files if it has them. They stay in your browser, and nothing is uploaded. A link can't share them.
+A capture converts on the Open page first, where its channels can be moved and trimmed:
+<a href="converter.html#converting-in-a-browser">the converter's doc</a> says how. There, another capture or
+recording can join the one shown, to merge them on one time axis, each recording lined up with the
+others by hand. A reading in a merged recording keeps to the tick of the recording its channel came
+from, and a span between two recordings' channels to the coarser of their ticks.</p>
+<p>A <code><span class="word">.zip</span></code> of these files opens as the files would. The folders inside it don't matter, but two files
+with one name do: the page refuses those, since either could be the one meant. With several
+recordings in it, the page lists them to open one at a time, each with the sidecar named after it.
+The page reads files a zip stores as they are or deflated, as common zip tools write them.</p>
+<p>Under the view, the recording's details give its title, length and channels, the time one tick
+stands for, its size, what it was converted from, and its content id.</p>
+<p>A recording's sidecar can store how a view of it starts: which channels it shows, in what order,
+the span it opens at, and the trace's colour. The view starts that way wherever the page says
+nothing else. Bundled into the recording, the sidecar goes with it, so a recording downloaded from
+a page opens here as the page showed it.</p>
+<p>A view on a page may offer Download beside Open, and Annotations where it has a sidecar. Download
+saves the recording as the page serves it, its bundled sidecar with it. Annotations opens a list
+of the sidecar's files: the hand-written file, then each file it includes. Each link saves one
+file under its own name.</p>
+<p>A recording can hold a channel this viewer can't read, such as one a newer tool wrote in a way
+this version doesn't know. Its row keeps its place and says it is unavailable, and nothing of it
+is drawn. Annotations that name it are left out, and a note under the view says which.</p>
+<h2 id="sharing-a-capture-on-github" tabindex="-1">Sharing a capture on GitHub<a class="anchor" href="#sharing-a-capture-on-github" aria-label="Link to this section">#</a></h2>
+<p>A capture attached to a GitHub issue or discussion opens in any browser, a phone's included, with
+nothing to install. GitHub takes attachments of up to 25 MB, in a list of formats that leaves out
+<code><span class="word">.tickwave</span></code>. So zip the recording first, with its sidecar's files if it has them. A capture to
+convert can go in the zip instead: a Saleae export's folder, or a <code><span class="word">.sr</span></code> or <code><span class="word">.vcd</span></code> file.</p>
+<p>GitHub doesn't let other sites read its attachments, so the Open page can't fetch one. Give the
+attachment's address to the page as a recording's address, and the page shows two steps instead:
+download the zip, then choose it. The page's address is then the link to post beside the
+attachment. It is <a href="../open.html">the Open page</a> with <code><span class="word">?src=</span></code> and the attachment's address, such as
+<code>open.html?src=https://github.com/user-attachments/files/123/capture.zip</code>.</p>
+<p>A reader who follows the link downloads the zip and chooses it on the page; on a phone, from its
+downloads. If the browser unzips the download itself, choose the <code><span class="word">.tickwave</span></code> file inside. The page
+takes only GitHub's own attachment addresses this way. An attachment in a private repository needs
+a GitHub sign-in to download, so share captures in a public one.</p>
+<h2 id="moving-and-zooming" tabindex="-1">Moving and zooming<a class="anchor" href="#moving-and-zooming" aria-label="Link to this section">#</a></h2>
+<p>Hold Ctrl (Cmd on a Mac) and turn the wheel to zoom about the pointer, or pinch on a trackpad or a
+touch screen. The plain wheel scrolls the page. Drag, swipe sideways or hold Shift with the wheel to
+move along the capture. A zoom step eases into place over about 150 ms. Where the system is set to
+reduce motion, it jumps there instead, and so it does where the view takes longer to draw than a
+frame at 60 Hz.</p>
+<p>With the view focused, the left and right arrow keys move it, an eighth of the span shown at a
+time, or half with Shift. Each move glides into place as a zoom step does, and a key held down
+glides on. The up and down arrows, or plus and minus, zoom in and out. Home and the Fit button
+show the whole capture, and every analog channel's whole range. Escape clears the cursors and the
+selection.</p>
+<h2 id="reading-a-channel" tabindex="-1">Reading a channel<a class="anchor" href="#reading-a-channel" aria-label="Link to this section">#</a></h2>
+<p>Point at a row to read it there. An analog channel gives the sample's value, or the smallest and
+largest value where one pixel covers several samples.</p>
+<p>On a digital channel, two spans mark the pulse under the pointer: its width, between its edges, and
+its period, to the next edge the same way. A label gives the pulse's duty, its frequency and
+1/width. That is the width as a rate: one UART bit's gives the baud rate. Once the row is tall
+enough, the width and the period sit on their spans; until then the label gives them too.</p>
+<p>The label sits on the edge of the rows away from the row you point at, so it never covers the wave
+you are reading.</p>
+<p>Where one pixel holds several edges, the label gives how many there are in the time the pixel
+covers, and how much of that time the channel was high, then asks you to zoom in. Zoomed far out,
+the view reads these from the recording's overview. It keeps each stretch's edge count to within
+about 19 %, and its time high to the nearest fourteenth. There the label gives
+the range those allow, such as &quot;1,024 to 1,217 edges&quot; and &quot;high 32.1 to 39.3 %&quot;. A stretch with
+edges and almost no time high reads &quot;high under 3.6 %&quot;: the edges show the channel did go high.</p>
+<p>A long pulse can end far past what the view has read, as on a quiet line seen close up. The label
+then says it is measuring. Keep the pointer within the pulse and it goes on; once measured, the
+pulse reads at once anywhere along it.</p>
+<p>Where the instrument lost data, the row is shaded: where a digital channel's level was not known,
+and where an analog channel lost samples, between two runs of samples, before its first or after
+its last. The trace breaks there. Where the instrument only paused, the trace breaks and nothing
+is shaded.</p>
+<h2 id="where-edges-crowd" tabindex="-1">Where edges crowd<a class="anchor" href="#where-edges-crowd" aria-label="Link to this section">#</a></h2>
+<p>Zoomed out, a digital channel's edges come closer together than a pixel. There the row shades the
+band between its two levels instead of drawing each edge. How dark the shade is says how fast the
+channel switches, in edges a second. The scale is the same at every zoom and in every recording:
+faint at one edge a second or fewer, 60 % of the line's ink at 100 million and above, and darker
+by the same step for every tenfold rise between. Two captures of the same activity look alike side
+by side. Even the busiest band stays lighter than the line, so a crowded stretch reads as a fill.</p>
+<p>Each level's line shades with the band, by the share of the time the channel spent at that level
+over the few pixels around it. The level it spent most time at takes the band's shade; the other
+takes a part of it, in proportion. An even clock's two lines both take the band's shade; a line
+high three quarters of the time has its high line at the band's shade and its low line at a third
+of it. Wherever the stretch holds an edge, the fainter line shows at least a fifth of the band's
+shade, so a rare excursion stays visible. Outside a busy stretch a held level's line is solid, so
+it steps from solid to the band's shade where a stretch begins. A short pause between two busy
+stretches keeps its gap, and its line takes the band's shade.</p>
+<p>An edge that stands apart is a line across the band. So is a short pulse or burst that stands
+apart: edges too close together to show apart, spanning too little to fill a stretch, draw as one
+line at their middle, whatever pixel they fall in. A flag raised for a few microseconds in an
+hour reads as a solid line at every zoom, and so does each of several flags raised close
+together. Where other edges come near each other without crowding into one pixel, each line fades
+towards the shade a stretch of them would take, so neighbouring edges and a crowded stretch read
+alike.</p>
+<p>Zoomed in on a burst far busier than the rest of a long capture, the row goes on shading it until
+the view is narrow enough to hold its edges.</p>
+<h2 id="row-heights" tabindex="-1">Row heights<a class="anchor" href="#row-heights" aria-label="Link to this section">#</a></h2>
+<p>Drag a row's lower edge in the names column to make the row taller or shorter. With that edge
+focused, the up and down arrows do it too, with Shift for bigger steps. Home and End give the row
+its least and greatest height, and Enter or a double click its default.</p>
+<h2 id="an-analog-channels-scale" tabindex="-1">An analog channel's scale<a class="anchor" href="#an-analog-channels-scale" aria-label="Link to this section">#</a></h2>
+<p>An analog row's scale, the values at its left, zooms and moves on its own. Hold Ctrl (Cmd on a Mac)
+and turn the wheel over the scale to zoom its values about the pointer, or pinch it with two fingers
+on a touch screen. Drag the scale up or down to move its values. A double click fits it to the values
+in view. It zooms in no further than four steps of the instrument's resolution.</p>
+<p>The view waits for every analog channel's overall range before it draws, so the scales and the
+channel names beside them are in place from the first frame. A recording gives the range with the
+first data the view loads. In a merge preview at the fastest recording's rate, a channel whose ticks
+don't fall on whole ticks of that rate has no range at first: its row shows the channel's name
+alone until the view has shown all of the channel, and then its scale.</p>
+<p>Once the values are zoomed in, a drag over the row's traces with a mouse or a pen moves them up and
+down as well as along the capture. On a touch screen, a finger moving up or down there scrolls the
+page, so move the values with a finger on the scale.</p>
+<p>With the scale focused, the up and down arrows move it, with Shift for bigger steps, and plus and
+minus zoom it. Enter fits it to the values in view, and Home shows its whole range.</p>
+<h2 id="cursors-and-spans" tabindex="-1">Cursors and spans<a class="anchor" href="#cursors-and-spans" aria-label="Link to this section">#</a></h2>
+<p>A click places cursor A, and the next click cursor B. With the view focused, Enter places them at
+the middle of the view. A cursor snaps to an edge within a few pixels on the row clicked.</p>
+<p>The readout under the view gives both cursors' times and the interval between them. It gives each
+analog channel's value at each cursor, and each digital channel's pulse at cursor A.</p>
+<p>Drag along the time axis to select a span. The readout gives its length and counts each channel's
+edges in it. For one channel it measures the clock: how many periods there are, their least,
+median and greatest, and the running clock. That is the clock's rate and period with the pauses
+left out. A span with more than 2,097,152 different periods, far more than a clock has, gets no
+median, and its running clock is the mean of every period, the pauses with them. The readout says
+so.</p>
+<h2 id="annotations" tabindex="-1">Annotations<a class="anchor" href="#annotations" aria-label="Link to this section">#</a></h2>
+<p>A recording can come with annotations, from its sidecar: named spans and points, shown above the
+channels. Click an annotation's label to show its span.</p>
+<p>The menu beside the zoom buttons steps through one kind of annotation, such as every WAIT a target
+answered. It starts at the kind of the annotation the view opened at, or else the kind of the
+sidecar's first one.</p>
+<p>An annotation can paint its channels in a role, such as who drives a line: the probe, the target,
+or neither. The line takes the role's colour, weight and dash over the annotation's span. The
+sidecar declares its roles, each with a label and a look of its own, which a page can restyle. A
+key beside the zoom buttons lists every role, as its lines are drawn.</p>
+<h2 id="editing-annotations" tabindex="-1">Editing annotations<a class="anchor" href="#editing-annotations" aria-label="Link to this section">#</a></h2>
+<p>On the Open page, Edit annotations opens the sidecar's hand-written file for editing. A recording
+without a sidecar starts one.</p>
+<p>To add an annotation, drag along the time axis to select a span, or click to place cursor A, and
+press New annotation. It covers the selection, or it is a point at cursor A. Give it a label, and
+its id follows the label until you type one of your own. A page cites it by its id.</p>
+<p>Choose an annotation from the list under the form, or click its label in the view, to change it or
+delete it. The arrows beside it move it up or down the list. Order matters: the view steps through
+the kind of the first annotation.</p>
+<p>A decoder writes its own annotations, and rewrites them each time it runs, so they can be read here
+but not changed. Name it adds a hand-written annotation that refers to one, for a page to cite by a
+name of your own. It takes the decoder's span and channels, and any field you leave empty.</p>
+<p>Paint offers the roles the sidecar declares. A paint must name one of them: declare a new role in
+the sidecar's file first.</p>
+<p>A change that would break one of the sidecar's checks is refused, and the form says why. The editor
+changes only what you change: the file keeps its comments, its order and its layout.</p>
+<p>On this site, Download the sidecar saves the file to your downloads. When
+<a href="converter.html#opening-a-recording"><code><span class="word">tickwave</span> <span class="word">open</span></code></a> shows the recording, Save the sidecar writes
+it back beside the recording instead.</p>
+<p class="doc-source">From <a href="https://github.com/Escapement-Project/tickwave/blob/HEAD/site/docs/viewer.md">tickwave</a>, where changes to this page go.</p></article>
+</div>
+</main>
+<footer><div class="wrap"><span>Escapement Project</span><span>The Escapement Project is not affiliated with NXP or any other probe vendor. MCU-Link and LinkServer are NXP's names for its products.</span><span class="licence">tickwave is free software under the MIT or Apache-2.0 licence.</span></div></footer>
+<script src="../face.js" defer></script>
+<script src="../header.js" defer></script>
+<script src="../copy.js" defer></script>
+<script src="../doc.js" defer></script>
+<script src="../search.js" defer></script>
+<script src="../mark.js" defer></script>
+</body>
+</html>

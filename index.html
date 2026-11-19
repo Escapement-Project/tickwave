@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tickwave – Escapement Project</title>
+<meta name="description" content="A web viewer for mixed-signal captures, with a converter and elements that cite a capture in a page's text.">
+<script>
+// .js, as on the project's other pages, for a shared rule that needs a script to run; and a face
+// chosen on an earlier visit, applied before the first paint. The project's sites share the key.
+document.documentElement.classList.add("js"); try { const f = localStorage.getItem("face"); if (f === "day" || f === "night") document.documentElement.dataset.face = f; } catch {}
+</script>
+<link rel="preload" href="fonts/saira-expanded.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/hanken-grotesk.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="icon" href="favicon-tickwave.ico">
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="base.css">
+<link rel="stylesheet" href="tickwave.css">
+<link rel="stylesheet" href="site.css">
+<link rel="stylesheet" href="doc.css">
+<script type="module" src="site.js"></script>
+</head>
+<body class="overview">
+<a class="skip" href="#main">Skip to the content</a>
+<header data-published="https://escapement-project.github.io">
+  <div class="wrap">
+    <a class="brand" href="https://escapement-project.github.io/" data-page="landing"><svg aria-hidden="true" fill="currentColor" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path fill-rule="evenodd" d="M32,3 A29,29 0 1,0 32.01,3 Z M32,9 A23,23 0 1,0 32.01,9 Z"/><path d="M9.796,38 H29 V20 H51.621 A23,23 0 0,1 54.204,26 H35 V44 H12.379 A23,23 0 0,1 9.796,38 Z"/></svg><span class="name">Escapement Project</span></a>
+    <nav id="places" aria-label="Escapement Project"><a href="https://escapement-project.github.io/verge/" data-page="verge">Verge</a><span class="product"><a href="index.html" data-page="tickwave" aria-current="page">tickwave</a><a href="open.html" data-page="tickwave/open">Open</a><a href="docs/index.html" data-page="tickwave/docs">Docs</a></span><a href="https://escapement-project.github.io/#source">Source</a></nav>
+    <button class="switch" id="faces" type="button" role="switch" aria-checked="false" aria-label="Night face"><span class="track"><span class="thumb"><svg class="wheel" viewBox="0 0 40 40" aria-hidden="true"><g transform="translate(14 3) scale(.75)"><circle cx="8" cy="8" r="3.2" fill="currentColor"/><path d="M8 1.2v1.6M8 13.2v1.6M1.2 8h1.6M13.2 8h1.6M3.2 3.2l1.1 1.1M11.7 11.7l1.1 1.1M3.2 12.8l1.1-1.1M11.7 4.3l1.1-1.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></g><g transform="rotate(180 20 20) translate(14 3) scale(.75)"><path d="M10.8 1.8a6.3 6.3 0 1 0 3.4 10.6A5.2 5.2 0 0 1 10.8 1.8z" fill="currentColor"/></g></svg></span></span></button>
+  </div>
+</header>
+<main id="main">
+<div class="wrap product-head">
+  <div class="product-id">
+    <div class="plate" data-mark="tickwave"><svg width="66" height="66" aria-hidden="true" fill="currentColor" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><!-- tickwave's mark: a wave on its ticks. The wave and the ticks under its edges take the icon's ink; the other ticks (class line) its line colour. --><rect x="2" y="31.25" width="14.75" height="5.5"/><rect x="11.25" y="7.25" width="5.5" height="29.5"/><rect x="11.25" y="7.25" width="17.5" height="5.5"/><rect x="23.25" y="7.25" width="5.5" height="29.5"/><rect x="23.25" y="31.25" width="17.5" height="5.5"/><rect x="35.25" y="7.25" width="5.5" height="29.5"/><rect x="35.25" y="7.25" width="17.5" height="5.5"/><rect x="47.25" y="7.25" width="5.5" height="29.5"/><rect x="47.25" y="31.25" width="14.75" height="5.5"/><rect x="0.75" y="49" width="2.5" height="7" class="line"/><rect x="6.75" y="49" width="2.5" height="7" class="line"/><rect x="12.75" y="44" width="2.5" height="12"/><rect x="18.75" y="49" width="2.5" height="7" class="line"/><rect x="24.75" y="44" width="2.5" height="12"/><rect x="30.75" y="49" width="2.5" height="7" class="line"/><rect x="36.75" y="44" width="2.5" height="12"/><rect x="42.75" y="49" width="2.5" height="7" class="line"/><rect x="48.75" y="44" width="2.5" height="12"/><rect x="54.75" y="49" width="2.5" height="7" class="line"/><rect x="60.75" y="49" width="2.5" height="7" class="line"/></svg></div>
+    <div>
+      <h1>tickwave</h1>
+      <p class="sub">Web viewer for mixed-signal captures</p>
+    </div>
+  </div>
+  <div class="two">
+    <div>
+      <p class="lede">tickwave shows a logic or mixed-signal capture inside a web page, beside the text that cites it.</p>
+      <p>It draws digital channels from their edges and analog channels from their samples, on one time axis. A phrase in the text can name a stretch of the capture: point at it to see that stretch, or click it to open the whole capture there. The Escapement Project's pages show their bench's recordings with it.</p>
+      <p class="ways"><a href="open.html">Open a recording</a><a href="#page">See it in a page</a><a href="docs/index.html">All docs</a></p>
+      <p class="status">In development. tickwave publishes with the project's first release.</p>
+    </div>
+    <div class="product-figure">
+      <figure>
+        <tickwave-inset src="fixtures/identify-swd.tickwave" annotations="fixtures/identify-swd.annotations.toml" annotation="dpidr-read" channels="SWCLK SWDIO" href="open.html"></tickwave-inset>
+        <noscript><p class="quiet">The figure needs JavaScript. Its recording is <a href="fixtures/identify-swd.tickwave" download>identify-swd.tickwave</a>, with its sidecar <a href="fixtures/identify-swd.annotations.toml" download>identify-swd.annotations.toml</a>.</p></noscript>
+        <figcaption>A debug probe's first read over SWD. The probe drives the request; the target drives the acknowledge and the data. The clock rate under the trace comes from the capture's own edges.<span class="needs-script"> Point at a part to read it. Zoom in with Ctrl or Cmd and the wheel, or a pinch, and drag to move along. Click to open the capture there.</span></figcaption>
+      </figure>
+      <p><a href="open.html?src=fixtures/identify-swd.tickwave&amp;annotations=fixtures/identify-swd.annotations.toml">Open the whole capture</a></p>
+    </div>
+  </div>
+</div>
+
+<section id="reading">
+  <div class="wrap">
+    <div class="head"><h2><a href="docs/viewer.html">Reading a capture</a></h2><p class="kicker">Zoom, measure and place cursors, on one time axis</p></div>
+    <ul class="steps">
+      <li><h3>Move and zoom</h3><p>Ctrl or Cmd with the wheel, or a pinch, zooms about the pointer. A drag or a sideways swipe moves along the capture. Over an analog channel's scale, the same zooms and moves its values.</p></li>
+      <li><h3>Read a pulse</h3><p>Point at a digital channel for the pulse's width, period, duty and frequency, or at an analog channel for its value.</p></li>
+      <li><h3>Cursors and spans</h3><p>Two clicks place cursors and give the interval between them. A drag selects a span and measures a channel's clock in it.</p></li>
+      <li><h3>Annotations</h3><p>A sidecar names spans and points, shown above the channels. Step through one kind of them, such as every WAIT.</p></li>
+    </ul>
+    <p class="after">Try them on this capture of an SWD bus, from a mixed-signal analyser's two analog inputs at a billion samples a second. The analyser read each sample as an integer code, and the recording stores those codes. One code step is about 2.5 mV, so a readout stops at the millivolt.</p>
+    <noscript><p class="quiet">The view needs JavaScript. Its recording is <a href="fixtures/swd50-cut.tickwave" download>swd50-cut.tickwave</a>.</p></noscript>
+    <tickwave-view id="analog" src="fixtures/swd50-cut.tickwave" channels="SWCLK SWDIO" window="0 ns 10 us" open></tickwave-view>
+  </div>
+</section>
+
+<section id="convert">
+  <div class="wrap">
+    <div class="head"><h2><a href="docs/converter.html">Convert</a></h2><p class="kicker">From a Saleae Logic 2 export, a sigrok session or a VCD file</p></div>
+    <ol class="steps">
+      <li><h3>Get the converter</h3><div class="console"><code><span aria-hidden="true">$</span>cargo build <i>--release</i> <i>-p escapement-tickwave-cli</i></code><p>From tickwave's repository, with a current Rust toolchain. Or convert on <a href="open.html">the Open page</a>, in your browser, on the same code.</p></div></li>
+      <li><h3>Convert</h3><div class="console"><code><span aria-hidden="true">$</span>tickwave convert <i>sigrok session.sr</i> <i>-o session.tickwave</i></code><p>A Saleae export and a VCD file convert the same way. It checks what it wrote against the capture, edge by edge.</p></div></li>
+      <li><h3>Describe</h3><div class="console"><code><span aria-hidden="true">$</span>tickwave info <i>session.tickwave</i></code><p>The recording's length and resolution, its channels and their edges.</p></div></li>
+    </ol>
+    <p class="after">Each time is counted in the capture's own ticks, so a recording never shows more resolution than its source had. <a href="docs/converter.html">The converter's doc</a> has every option.</p>
+  </div>
+</section>
+
+<section id="page">
+  <div class="wrap">
+    <div class="head"><h2><a href="docs/elements.html">In your page</a></h2><p class="kicker">A capture cited the way a page cites a figure</p></div>
+    <p class="needs-script">Each underlined phrase below names a stretch of a real capture. Point at one, or reach it with Tab, to see that stretch. Click it to open the whole capture there.</p>
+    <p>A logic analyser recorded a debug probe opening an SWD session, at a billion samples a second, so one tick is one nanosecond. The probe starts with a <tickwave-ref for="capture" annotation="line-reset">line reset</tickwave-ref>: it holds SWDIO high for 51 clocks. Then it sends the <tickwave-ref for="capture" annotation="jtag-to-swd">JTAG-to-SWD select sequence</tickwave-ref> and resets the line again.</p>
+    <p>Its first transfer <tickwave-ref for="capture" annotation="dpidr-read">reads the debug port's ID register</tickwave-ref>. The probe drives the <tickwave-ref for="capture" annotation="dpidr-request">request</tickwave-ref>. The target drives the <tickwave-ref for="capture" annotation="dpidr-ack">acknowledge</tickwave-ref> and the data. Later on, the target <tickwave-ref for="capture" annotation="first-wait">answers WAIT</tickwave-ref> to a read it isn't ready for.</p>
+    <p class="needs-script">Here is the whole capture, closed. It says what it holds before any of its data downloads.</p>
+    <noscript><p class="quiet">The capture needs JavaScript. Its recording is <a href="fixtures/identify-swd.tickwave" download>identify-swd.tickwave</a>, with its sidecar <a href="fixtures/identify-swd.annotations.toml" download>identify-swd.annotations.toml</a>.</p></noscript>
+    <tickwave-view id="capture" src="fixtures/identify-swd.tickwave" annotations="fixtures/identify-swd.annotations.toml"><span slot="title">identify-swd.tickwave</span><span slot="facts">524 ms; 2 channels: SWCLK, SWDIO; 4.6 KiB</span></tickwave-view>
+    <h3 class="how">How this page does it</h3>
+    <div class="two">
+      <div>
+        <p>The page includes one script, and a stylesheet that lays out the closed capture before the script has loaded. The capture and its sidecar of annotations sit beside them as files.</p>
+        <pre><code>&lt;script type="module" src="tickwave.js"&gt;
+&lt;/script&gt;
+&lt;link rel="stylesheet" href="tickwave.css"&gt;
+
+&lt;p&gt;Its first transfer
+  &lt;tickwave-ref for="capture"
+    annotation="dpidr-read"&gt;reads
+  the ID register&lt;/tickwave-ref&gt;.&lt;/p&gt;
+
+&lt;tickwave-view id="capture"
+  src="identify-swd.tickwave"
+  annotations="identify-swd.annotations.toml"&gt;
+  &lt;span slot="title"&gt;identify-swd.tickwave&lt;/span&gt;
+  &lt;span slot="facts"&gt;524 ms; 2 channels:
+    SWCLK, SWDIO; 4.6 KiB&lt;/span&gt;
+&lt;/tickwave-view&gt;</code></pre>
+        <p>The sidecar is a short TOML file. This entry names a transfer an SWD decoder found, and asks for the clock's rate over it:</p>
+        <pre><code>[[annotation]]
+id = "dpidr-read"
+ref = "swd/read/377094557"
+label = "Reading the debug port's ID register"
+measure = { channel = "SWCLK", what = "rate" }</code></pre>
+      </div>
+      <dl class="specs elements">
+        <div><dt><code>tickwave-view</code></dt><dd>A whole recording, shown as its title and a summary until the reader opens it.</dd></div>
+        <div><dt><code>tickwave-inset</code></dt><dd>One annotation's span, magnified, with a reading under it. Point at a part to read it.</dd></div>
+        <div><dt><code>tickwave-ref</code></dt><dd>A phrase that cites an annotation. Pointing at it opens an inset.</dd></div>
+        <div><dt><code>tickwave-chart</code></dt><dd>Measurements against a setting. A point can open the recording behind it.</dd></div>
+      </dl>
+    </div>
+    <p class="after">A reference loads nothing until it scrolls into view. Then it fetches the recording's head and the sidecar, and the data for a stretch arrives when someone points at it. <a href="docs/annotations.html">The sidecar's doc</a> lists its fields.</p>
+  </div>
+</section>
+
+<section id="docs">
+  <div class="wrap">
+    <div class="head"><h2><a href="docs/index.html">Docs</a></h2><p class="kicker">Written beside the code, in <a href="https://github.com/Escapement-Project/tickwave">tickwave's repository</a></p></div>
+    <dl class="doc-rows"><div><dt><a href="docs/index.html#using-it">Using it</a></dt><dd>Reading a recording in the viewer, and converting a capture into one, in the browser or on the command line.</dd></div><div><dt><a href="docs/index.html#in-your-page">In your page</a></dt><dd>The elements that put a capture in a page's text, and the charts that draw measurements.</dd></div><div><dt><a href="docs/index.html#the-files">The files</a></dt><dd>The recording format, and the sidecar of annotations that sits beside a recording.</dd></div></dl>
+  </div>
+</section>
+<script id="tickwave-mark" type="application/json">{"wait":0.1,"zoom":0.46,"hold":0.6,"end":1.62,"ease":3,"edge":38,"scale":3,"thirds":[1.6,2.4],"wave":{"width":5.5,"run":[2.0,62.0],"hi":7.25,"lo":31.25,"edges":[14.0,26.0,38.0,50.0],"low_first":true},"ticks":{"first":2.0,"step":6.0,"width":2.5,"major":[44.0,12.0],"minor":[49.0,7.0]}}</script>
+
+</main>
+<footer><div class="wrap"><span>Escapement Project</span><span>The Escapement Project is not affiliated with NXP or any other probe vendor. MCU-Link and LinkServer are NXP's names for its products.</span><span class="licence">tickwave is free software under the MIT or Apache-2.0 licence.</span></div></footer>
+<script src="face.js" defer></script>
+<script src="header.js" defer></script>
+<script src="copy.js" defer></script>
+<script src="doc.js" defer></script>
+<script src="search.js" defer></script>
+<script src="mark.js" defer></script>
+</body>
+</html>

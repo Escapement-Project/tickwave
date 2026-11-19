@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Open – tickwave – Escapement Project</title>
+<meta name="description" content="Open a logic or mixed-signal recording in your browser, or convert a Saleae Logic 2, sigrok or VCD capture and open it.">
+<script>
+// .js, as on the project's other pages, for a shared rule that needs a script to run; and a face
+// chosen on an earlier visit, applied before the first paint. The project's sites share the key.
+document.documentElement.classList.add("js"); try { const f = localStorage.getItem("face"); if (f === "day" || f === "night") document.documentElement.dataset.face = f; } catch {}
+</script>
+<link rel="preload" href="fonts/saira-expanded.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/hanken-grotesk.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="icon" href="favicon-tickwave.ico">
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="base.css">
+<link rel="stylesheet" href="tickwave.css">
+<link rel="stylesheet" href="site.css">
+<link rel="stylesheet" href="doc.css">
+<script type="module" src="site.js"></script>
+</head>
+<body class="viewer">
+<a class="skip" href="#main">Skip to the content</a>
+<header data-published="https://escapement-project.github.io">
+  <div class="wrap">
+    <a class="brand" href="https://escapement-project.github.io/" data-page="landing"><svg aria-hidden="true" fill="currentColor" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path fill-rule="evenodd" d="M32,3 A29,29 0 1,0 32.01,3 Z M32,9 A23,23 0 1,0 32.01,9 Z"/><path d="M9.796,38 H29 V20 H51.621 A23,23 0 0,1 54.204,26 H35 V44 H12.379 A23,23 0 0,1 9.796,38 Z"/></svg><span class="name">Escapement Project</span></a>
+    <nav id="places" aria-label="Escapement Project"><a href="https://escapement-project.github.io/verge/" data-page="verge">Verge</a><span class="product"><a href="index.html" data-page="tickwave" aria-current="true">tickwave</a><a href="open.html" data-page="tickwave/open" aria-current="page">Open</a><a href="docs/index.html" data-page="tickwave/docs">Docs</a></span><a href="https://escapement-project.github.io/#source">Source</a></nav>
+    <button class="switch" id="faces" type="button" role="switch" aria-checked="false" aria-label="Night face"><span class="track"><span class="thumb"><svg class="wheel" viewBox="0 0 40 40" aria-hidden="true"><g transform="translate(14 3) scale(.75)"><circle cx="8" cy="8" r="3.2" fill="currentColor"/><path d="M8 1.2v1.6M8 13.2v1.6M1.2 8h1.6M13.2 8h1.6M3.2 3.2l1.1 1.1M11.7 11.7l1.1 1.1M3.2 12.8l1.1-1.1M11.7 4.3l1.1-1.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></g><g transform="rotate(180 20 20) translate(14 3) scale(.75)"><path d="M10.8 1.8a6.3 6.3 0 1 0 3.4 10.6A5.2 5.2 0 0 1 10.8 1.8z" fill="currentColor"/></g></svg></span></span></button>
+  </div>
+</header>
+<main id="main" class="wrap">
+<h1>Open a recording</h1>
+<p class="lede">The viewer shows a <code>.tickwave</code> recording from its address, or from files on this computer. A capture from Saleae Logic 2, sigrok or a VCD file converts here first.</p>
+<p>The converter runs in your browser, on the same code as <a href="docs/converter.html">the command-line converter</a>: the same capture and settings give the same file. <a href="docs/viewer.html">The viewer's doc</a> says how to move, zoom and measure in a recording.</p>
+
+<script>
+// Served by `tickwave open`: the recording it names, without the forms to open another or a link
+// to share, which last only as long as that command runs. Set before they are drawn.
+if (new URLSearchParams(location.search).has("local")) document.documentElement.classList.add("local");
+</script>
+<details id="opener" class="opener" open>
+<summary>Open another recording</summary>
+<div class="open">
+  <form id="by-url" class="by-url">
+    <label for="src">The recording's address</label>
+    <input id="src" name="src" type="text" inputmode="url" spellcheck="false" placeholder="https://example.org/capture.tickwave" required>
+    <label for="annotations">Its sidecar's address, if it has one</label>
+    <input id="annotations" name="annotations" type="text" inputmode="url" spellcheck="false" placeholder="https://example.org/capture.annotations.toml">
+    <button class="primary" type="submit">Open</button>
+  </form>
+  <div id="drop" class="drop">
+    <p>Or open files from this computer: a <code>.tickwave</code> recording, with its sidecar's <code>.toml</code> and <code>.jsonl</code> files if it has them. Or convert a capture: a Saleae export's folder, or a sigrok <code>.sr</code> or <code>.vcd</code> file. A <code>.zip</code> of any of these opens too.</p>
+    <p class="choose"><label class="button">Choose files<input id="files" type="file" multiple></label> <label class="button">Choose a folder<input id="folder" type="file" webkitdirectory></label></p>
+    <p class="quiet">You can drop them here too. They stay in your browser. Nothing is uploaded.</p>
+  </div>
+</div>
+<p class="quiet">To try it, open <a href="?src=fixtures/identify-swd.tickwave&amp;annotations=fixtures/identify-swd.annotations.toml">a debug probe starting an SWD session</a>, or <a href="?src=fixtures/swd50-cut.tickwave">an SWD bus on a mixed-signal analyser's analog inputs</a>.</p>
+</details>
+
+<section id="attached" class="attached" aria-labelledby="attached-title" hidden>
+  <h2 id="attached-title">Open <span id="attached-name"></span></h2>
+  <p>It's attached on GitHub, and GitHub doesn't let other sites read attachments. So it opens in two steps:</p>
+  <ol>
+    <li><a id="attached-link" class="button">Download it from GitHub</a></li>
+    <li><label class="button">Choose the file you downloaded<input id="attached-file" type="file" multiple></label></li>
+  </ol>
+  <p class="quiet">It opens in your browser, and nothing is uploaded. If your browser unzipped it, choose the <code>.tickwave</code> file inside.</p>
+  <p id="attached-share" class="share"></p>
+</section>
+
+<fieldset id="pick" class="pick" hidden>
+  <legend id="pick-title"></legend>
+  <div id="pick-list"></div>
+</fieldset>
+
+<div id="problem" class="problem" role="alert" hidden></div>
+
+
+<section id="running" class="running" aria-live="polite" hidden>
+  <p><span id="pass"></span> <span id="count" class="quiet"></span></p>
+  <progress id="bar"></progress>
+  <p><button id="cancel" type="button" class="button">Cancel</button></p>
+</section>
+
+<section id="stage" class="stage" aria-label="The recording" hidden>
+  <p id="saving" hidden><button id="save" type="button" class="button primary"></button> <button id="reshape" type="button" class="button" hidden>Shape again</button> <span id="took" class="quiet"></span></p>
+  <p id="found" class="quiet" hidden></p>
+  <p class="editing"><button id="edit" type="button" class="button" aria-controls="editor" aria-expanded="false"><span class="swap"><span>Edit annotations</span><span class="off">Stop editing</span></span></button> <span id="edit-state" class="quiet" aria-live="polite"></span></p>
+  <div id="view"></div>
+  <p id="adding" class="adding" hidden><label class="button">Add a capture or recording<input id="add-files" type="file" multiple></label> <label class="button">Add an export's folder<input id="add-folder" type="file" webkitdirectory></label> <span class="quiet">to merge with this one, on one time axis. You can drop them on the recording too.</span></p>
+  <form id="settings" class="settings" hidden>
+    <h2 id="source"></h2>
+    <p id="source-facts" class="quiet"></p>
+    <div class="table"><table class="channels">
+      <thead><tr><th scope="col">Take</th><th id="from-col" scope="col">In the capture</th><th scope="col">Name</th><th scope="col">Unit</th><th scope="col">Moved by</th><th scope="col">Keep from</th><th scope="col">Keep to</th></tr></thead>
+      <tbody id="channels"></tbody>
+    </table></div>
+    <p id="merge-note" class="quiet" hidden>Each recording heads its own rows. Drag its grip, by its name, sideways to move the whole recording in time and line it up with the others: an edge of it lands on another's edge when they come within a few pixels, and anywhere with Alt held. Its Aligned by field takes the time too. A channel's own grip moves only that channel, and keeps it among its recording's rows. Times here are each recording's own, such as <code>-40 ns</code>. A recording's generated annotations come with it; annotations written by hand don't, as their times are the recording's own.</p>
+    <p id="shape-note" class="quiet">Drag a row's grip in the view sideways to move the channel in time, or up and down to change its place; drag the bars at its data's ends to trim it. Times here are the capture's, such as <code>-40 ns</code> or <code>1.2 ms</code>.</p>
+    <p><button id="trim-all" type="button" class="button">Trim every channel to the selection</button></p>
+    <div id="skipped" class="quiet" hidden></div>
+    <div id="rate-row" hidden>
+      <p><label for="rate">Sample rate</label><br><input id="rate" name="rate" type="text" spellcheck="false" size="12" placeholder="from the edges" aria-describedby="rate-note"></p>
+      <p id="rate-note" class="quiet">This export doesn't record its digital channels' sample rate. Leave it empty to infer it from the edges, or give the rate the capture ran at, such as 50M.</p>
+    </div>
+    <p><label for="title">Title</label><br><input id="title" name="title" type="text" spellcheck="false"></p>
+    <details>
+      <summary>Encoding</summary>
+      <p><label for="level">zstd level</label><br><input id="level" name="level" type="number" min="1" max="22" value="19" required></p>
+      <p><label for="block">Block size, in KiB</label><br><input id="block" name="block" type="number" min="1" max="65536" value="1024" required></p>
+      <p id="codes-row"><label><input id="codes" name="codes" type="checkbox" checked> Store analog values as exact integer codes where some reproduce them</label></p>
+      <p><label for="meta">Metadata, one <code>key = value</code> a line</label><br><textarea id="meta" name="meta" rows="3" spellcheck="false" placeholder="probe = verge"></textarea></p>
+    </details>
+  </form>
+  <section id="editor" class="editor" aria-labelledby="editor-title" hidden>
+    <h2 id="editor-title">Annotations</h2>
+    <p class="editor-save"><button id="sidecar-save" type="button" class="button"></button> <span id="sidecar-name" class="quiet"></span></p>
+    <p><button id="note-new" type="button" class="button">New annotation</button> <span class="quiet">over the selection, or at cursor A</span></p>
+    <div id="editor-problem" class="problem" role="alert" hidden></div>
+    <form id="note" class="note">
+      <h3 id="note-title"></h3>
+      <div class="fields">
+        <p><label for="note-label">Label</label><input id="note-label" type="text" spellcheck="true"></p>
+        <p><label for="note-id">Id</label><input id="note-id" type="text" spellcheck="false" autocomplete="off" aria-describedby="note-id-note"><span id="note-id-note" class="quiet">What a page cites it by: no spaces or <code>/</code>.</span></p>
+        <p><label for="note-kind">Kind</label><input id="note-kind" type="text" spellcheck="false" list="note-kinds" autocomplete="off"><datalist id="note-kinds"></datalist></p>
+        <p class="span-fields"><span><label for="note-start">Start</label><input id="note-start" type="text" spellcheck="false" autocomplete="off"></span> <span><label for="note-end">End</label><input id="note-end" type="text" spellcheck="false" autocomplete="off" placeholder="none: a point"></span> <button id="note-take" type="button" class="button">Take the selection</button></p>
+        <fieldset id="note-channels-box"><legend>Channels</legend><span id="note-channels" class="channel-ticks"></span><span class="quiet">None ticked: every channel.</span></fieldset>
+        <p><label for="note-text">Text</label><textarea id="note-text" rows="3" spellcheck="true"></textarea></p>
+        <p class="pair"><span><label for="note-paint">Paint</label><input id="note-paint" type="text" spellcheck="false" list="note-paints" autocomplete="off" placeholder="none"><datalist id="note-paints"></datalist></span>
+          <span><label for="note-what">Measure</label><select id="note-what"><option value="">none</option><option value="rate">rate</option><option value="period">period</option><option value="duration">duration</option></select></span>
+          <span><label for="note-measure">of</label><select id="note-measure"></select></span></p>
+      </div>
+      <p class="note-actions"><button id="note-apply" type="submit" class="button primary"><span class="swap"><span>Add</span><span class="off">Apply</span></span></button> <button id="note-delete" type="button" class="button">Delete</button> <button id="note-name" type="button" class="button">Name it</button></p>
+      <p id="note-about" class="quiet about"><span data-about="none">Choose one below, or make a new one over the selection or at cursor A.</span><span data-about="generated" class="off">A decoder wrote this one, and rewrites its file on each run, so it isn't changed here. Name it to give it a name of your own for a page to cite, with a label and text of your own.</span><span data-about="alias" class="off">It takes the span and channels of the annotation it names, and any field left empty.</span><span data-about="own" class="off"></span></p>
+      <div id="note-problem" class="problem" role="alert" hidden></div>
+    </form>
+    <ol id="notes" class="notes" aria-label="The sidecar's annotations, in its order"></ol>
+  </section>
+  <details class="details">
+    <summary>Recording details</summary>
+    <dl id="facts" class="facts"></dl>
+  </details>
+  <p id="share" class="share"></p>
+</section>
+
+</main>
+<footer><div class="wrap"><span>Escapement Project</span><span>The Escapement Project is not affiliated with NXP or any other probe vendor. MCU-Link and LinkServer are NXP's names for its products.</span><span class="licence">tickwave is free software under the MIT or Apache-2.0 licence.</span></div></footer>
+<script src="face.js" defer></script>
+<script src="header.js" defer></script>
+<script src="copy.js" defer></script>
+<script src="doc.js" defer></script>
+<script src="search.js" defer></script>
+<script src="mark.js" defer></script>
+</body>
+</html>

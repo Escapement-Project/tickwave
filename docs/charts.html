@@ -1,0 +1,482 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Charts – tickwave – Escapement Project</title>
+<meta name="description" content="tickwave's charts: measurements drawn against a setting, and their data.">
+<script>
+// .js, as on the project's other pages, for a shared rule that needs a script to run; and a face
+// chosen on an earlier visit, applied before the first paint. The project's sites share the key.
+document.documentElement.classList.add("js"); try { const f = localStorage.getItem("face"); if (f === "day" || f === "night") document.documentElement.dataset.face = f; } catch {}
+</script>
+<link rel="preload" href="../fonts/saira-expanded.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="../fonts/hanken-grotesk.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="icon" href="../favicon-tickwave.ico">
+<link rel="stylesheet" href="../tokens.css">
+<link rel="stylesheet" href="../base.css">
+<link rel="stylesheet" href="../tickwave.css">
+<link rel="stylesheet" href="../site.css">
+<link rel="stylesheet" href="../doc.css">
+<script type="module" src="../site.js"></script>
+</head>
+<body class="doc-page">
+<a class="skip" href="#main">Skip to the content</a>
+<header data-published="https://escapement-project.github.io">
+  <div class="wrap">
+    <a class="brand" href="https://escapement-project.github.io/" data-page="landing"><svg aria-hidden="true" fill="currentColor" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path fill-rule="evenodd" d="M32,3 A29,29 0 1,0 32.01,3 Z M32,9 A23,23 0 1,0 32.01,9 Z"/><path d="M9.796,38 H29 V20 H51.621 A23,23 0 0,1 54.204,26 H35 V44 H12.379 A23,23 0 0,1 9.796,38 Z"/></svg><span class="name">Escapement Project</span></a>
+    <nav id="places" aria-label="Escapement Project"><a href="https://escapement-project.github.io/verge/" data-page="verge">Verge</a><span class="product"><a href="../index.html" data-page="tickwave" aria-current="true">tickwave</a><a href="../open.html" data-page="tickwave/open">Open</a><a href="../docs/index.html" data-page="tickwave/docs" aria-current="true">Docs</a></span><a href="https://escapement-project.github.io/#source">Source</a></nav>
+    <button class="switch" id="faces" type="button" role="switch" aria-checked="false" aria-label="Night face"><span class="track"><span class="thumb"><svg class="wheel" viewBox="0 0 40 40" aria-hidden="true"><g transform="translate(14 3) scale(.75)"><circle cx="8" cy="8" r="3.2" fill="currentColor"/><path d="M8 1.2v1.6M8 13.2v1.6M1.2 8h1.6M13.2 8h1.6M3.2 3.2l1.1 1.1M11.7 11.7l1.1 1.1M3.2 12.8l1.1-1.1M11.7 4.3l1.1-1.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></g><g transform="rotate(180 20 20) translate(14 3) scale(.75)"><path d="M10.8 1.8a6.3 6.3 0 1 0 3.4 10.6A5.2 5.2 0 0 1 10.8 1.8z" fill="currentColor"/></g></svg></span></span></button>
+  </div>
+</header>
+<main id="main" class="wrap">
+<div class="doc-wrap">
+<button class="doc-bar" type="button" aria-expanded="false" aria-controls="doc-rail"><span class="label">Contents</span><span class="where">tickwave charts</span></button>
+<div class="doc-rail" id="doc-rail">
+<search class="find" data-index="search.json">
+<input id="find" type="search" role="combobox" aria-label="Search tickwave's docs" aria-autocomplete="list" aria-expanded="false" aria-controls="found" placeholder="Search the docs" autocomplete="off" spellcheck="false" enterkeyhint="search">
+<kbd class="key" aria-hidden="true">/</kbd>
+<button class="clear" type="button" aria-label="Clear the search" hidden></button>
+<p class="count" role="status"></p>
+</search>
+<div class="doc-list"><nav class="doc-nav" aria-label="tickwave's docs">
+<details class="group"><summary>Using it</summary><ul>
+<li><a href="viewer.html">Viewer</a></li>
+<li><a href="converter.html">Converter</a></li>
+</ul></details>
+<details class="group" open><summary>In your page</summary><ul>
+<li><a href="elements.html">Elements</a></li>
+<li><a href="charts.html" aria-current="page">Charts</a><ul class="toc"><li><a href="#what-a-chart-is">What a chart is</a></li><li><a href="#loading">Loading</a></li><li><a href="#drawing">Drawing</a></li><li><a href="#the-data-tickwave-chart1">The data: <code><span class="word">tickwave-chart/1</span></code></a><ul><li><a href="#the-axes">The axes</a></li><li><a href="#a-series">A series</a></li><li><a href="#a-point">A point</a></li><li><a href="#a-limit">A limit</a></li></ul></li><li><a href="#the-element">The element</a><ul><li><a href="#attributes">Attributes</a></li><li><a href="#properties-methods-and-events">Properties, methods and events</a></li><li><a href="#reading-a-chart">Reading a chart</a></li><li><a href="#evidence">Evidence</a></li><li><a href="#motion">Motion</a></li><li><a href="#accessibility">Accessibility</a></li><li><a href="#styling">Styling</a></li></ul></li><li><a href="#where-a-charts-figures-come-from">Where a chart's figures come from</a></li></ul></li>
+</ul></details>
+<details class="group"><summary>The files</summary><ul>
+<li><a href="format.html">Format</a></li>
+<li><a href="annotations.html">Sidecar</a></li>
+</ul></details>
+</nav>
+<div class="found" id="found" role="listbox" aria-label="Sections found" hidden></div></div></div>
+<article class="doc"><h1 id="tickwave-charts" tabindex="-1">tickwave charts</h1>
+<p><code><span class="word">&lt;tickwave-chart&gt;</span></code> draws measurements against a setting, such as throughput against the clock
+asked for. This document specifies the element and its data, <code><span class="word">tickwave-chart/1</span></code>.</p>
+<p>Status: draft, with the recording format.</p>
+<h2 id="what-a-chart-is" tabindex="-1">What a chart is<a class="anchor" href="#what-a-chart-is" aria-label="Link to this section">#</a></h2>
+<p>Each series is a line through its points. A point can name the wire recording behind it: pointing
+at the point opens an inset of that recording, as <code><span class="word">&lt;tickwave-ref&gt;</span></code> does for a phrase in the text.</p>
+<p>The x values are a short list of settings, the same for every series. The y values are
+measurements. A chart is not a capture: it has no time axis, no zoom and no decoder.</p>
+<h2 id="loading" tabindex="-1">Loading<a class="anchor" href="#loading" aria-label="Link to this section">#</a></h2>
+<p><code><span class="word">tickwave-chart.js</span></code> is its own module. It is published beside <code><span class="word">tickwave.js</span></code> in each version's
+directory (<code><span class="word">/tickwave/v&lt;semver&gt;/</span></code>), so one version covers every file:</p>
+<pre><code class="language-html"><span style="color:var(--code-operator)">&lt;</span><span style="color:var(--code-function)">script</span> <span style="color:var(--code-type)">type</span><span style="color:var(--code-operator)">=</span><span style="color:var(--code-string)">"module"</span> <span style="color:var(--code-type)">src</span><span style="color:var(--code-operator)">=</span><span style="color:var(--code-string)">"tickwave-chart.js"</span><span style="color:var(--code-operator)">&gt;</span>&lt;<span style="color:var(--code-operator)">/</span><span style="color:var(--code-function)">script</span><span style="color:var(--code-operator)">&gt;</span>
+</code></pre>
+<p>A page without charts never loads it. A chart loads nothing else until a reader points at a point
+that names a recording. Then it imports <code><span class="word">tickwave.js</span></code> from beside itself, and the inset loads the
+worker and the WASM module as it does on any page. A page that has already loaded the elements
+keeps its own.</p>
+<p>A chart in the page's markup takes no room until the module defines it, and its data comes after
+that. To keep the page still through both, link <code><span class="word">tickwave.css</span></code>, published beside the modules, and
+state the chart's room in CSS:</p>
+<pre><code class="language-html"><span style="color:var(--code-operator)">&lt;</span><span style="color:var(--code-function)">link</span> <span style="color:var(--code-type)">rel</span><span style="color:var(--code-operator)">=</span><span style="color:var(--code-string)">"stylesheet"</span> <span style="color:var(--code-type)">href</span><span style="color:var(--code-operator)">=</span><span style="color:var(--code-string)">"tickwave.css"</span><span style="color:var(--code-operator)">&gt;</span>
+<span style="color:var(--code-operator)">&lt;</span><span style="color:var(--code-function)">style</span><span style="color:var(--code-operator)">&gt;</span>
+<span style="color:var(--ink-2)">#</span><span style="color:var(--code-type)">throughput</span> <span style="color:var(--ink-2)">{</span> <span style="color:var(--code-function)">--tickwave-chart-height</span><span style="color:var(--code-operator)">:</span> <span style="color:var(--code-number)">250</span><span style="color:var(--code-keyword)">px</span><span style="color:var(--ink-2)">;</span> <span style="color:var(--code-function)">--tickwave-chart-readout-lines</span><span style="color:var(--code-operator)">:</span> <span style="color:var(--code-number)">3</span><span style="color:var(--ink-2)">;</span> <span style="color:var(--ink-2)">}</span>
+&lt;<span style="color:var(--code-operator)">/</span><span style="color:var(--code-function)">style</span><span style="color:var(--code-operator)">&gt;</span>
+<span style="color:var(--code-operator)">&lt;</span><span style="color:var(--code-function)">tickwave-chart</span> <span style="color:var(--code-type)">id</span><span style="color:var(--code-operator)">=</span><span style="color:var(--code-string)">"throughput"</span> <span style="color:var(--code-type)">src</span><span style="color:var(--code-operator)">=</span><span style="color:var(--code-string)">"throughput.chart.json"</span> <span style="color:var(--code-type)">readout</span><span style="color:var(--code-operator)">=</span><span style="color:var(--code-string)">"below"</span><span style="color:var(--code-operator)">&gt;&lt;/</span><span style="color:var(--code-function)">tickwave-chart</span><span style="color:var(--code-operator)">&gt;</span>
+</code></pre>
+<p><code><span class="word">tickwave.css</span></code> reserves the plot's height and, for a readout below, its lines, until the chart is
+defined. The chart then holds the same room until its data arrives. A legend above the plot comes
+with the data, since its rows depend on the series and the width.</p>
+<h2 id="drawing" tabindex="-1">Drawing<a class="anchor" href="#drawing" aria-label="Link to this section">#</a></h2>
+<p>The chart draws SVG into its own children, not into a shadow root. Firefox's reader view keeps an
+element's SVG children and drops any shadow root, clonable or not (Firefox 160).</p>
+<p>The SVG reads the same in reader view, in a feed, or on a page without its CSS:</p>
+<ul>
+<li>Data colours come from the page's tokens when the chart draws, and go into the SVG as
+presentation attributes. Each also has a style that refers to its token, so where the page's CSS
+applies, the colours follow the face without a redraw. Reader view clears the style and keeps
+the attributes.</li>
+<li>Text, grid, axes and neutral marks are <code><span class="word">currentColor</span></code>.</li>
+<li>Fonts are presentation attributes, since reader view's sanitizer clears <code><span class="word">style</span></code>.</li>
+<li>Nothing refers to an id (<code><span class="word">url(#id)</span></code>), since reader view sets a <code><span class="word">&lt;base&gt;</span></code>. So the entry sweep cuts
+the lines where it has reached, rather than clipping them.</li>
+</ul>
+<p>The chart draws at its box's width in CSS pixels, not into a fixed <code><span class="word">viewBox</span></code> that scales. Text
+stays at its CSS size at any width, and the chart redraws when its box changes width.</p>
+<p>d3-scale places the points on both axes. The x axis labels the settings themselves, from
+<code><span class="word">x.values</span></code>. It leaves out a label that would sit within 22 px of the one before it: a tick at a
+value nobody measured would mislead. The y axis takes d3's ticks, in steps of 1, 2 or 5 times a
+power of ten, unless the data fixes them. The plot's left margin makes room for the widest y label
+and for the unit above them.</p>
+<h2 id="the-data-tickwave-chart1" tabindex="-1">The data: <code><span class="word">tickwave-chart/1</span></code><a class="anchor" href="#the-data-tickwave-chart1" aria-label="Link to this section">#</a></h2>
+<p>A chart reads one JSON object, from a URL (<code><span class="word">src</span></code>) or from the page (<code><span class="word">data</span></code>). Every value is a
+decimal string, as whatever measured it wrote it. <code><span class="word">&quot;81.0&quot;</span></code> keeps its last digit, where a JSON
+number would lose it. A readout shows a value with exactly the digits it came with, and groups the
+whole part's thousands with commas: <code><span class="word">&quot;1238.6&quot;</span></code> reads &quot;1,238.6&quot;.</p>
+<p>The landing page's Figure 1, cut to three clocks:</p>
+<pre><code class="language-json"><span style="color:var(--ink-2)">{</span>
+  <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">format</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--code-string)">"tickwave-chart/1"</span><span style="color:var(--ink-2)">,</span>
+  <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">source</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--code-string)">"mculink-bench results/throughput/2026-11-04: SWD, probe-rs 4 KiB writes, the median of two runs"</span><span style="color:var(--ink-2)">,</span>
+  <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">x</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--ink-2)">{</span> <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">name</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--code-string)">"SWD clock asked for"</span><span style="color:var(--ink-2)">,</span> <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">unit</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--code-string)">"MHz"</span><span style="color:var(--ink-2)">,</span> <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">scale</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--code-string)">"log"</span><span style="color:var(--ink-2)">,</span> <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">values</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--ink-2)">[</span><span style="color:var(--code-string)">"20"</span><span style="color:var(--ink-2)">,</span> <span style="color:var(--code-string)">"30"</span><span style="color:var(--ink-2)">,</span> <span style="color:var(--code-string)">"50"</span><span style="color:var(--ink-2)">]</span> <span style="color:var(--ink-2)">},</span>
+  <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">y</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--ink-2)">{</span> <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">name</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--code-string)">"4 KiB writes"</span><span style="color:var(--ink-2)">,</span> <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">unit</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--code-string)">"KiB/s"</span><span style="color:var(--ink-2)">,</span> <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">scale</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--code-string)">"linear"</span><span style="color:var(--ink-2)">,</span> <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">max</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--code-string)">"2500"</span><span style="color:var(--ink-2)">,</span> <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">step</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--code-string)">"500"</span> <span style="color:var(--ink-2)">},</span>
+  <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">series</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--ink-2)">[</span>
+    <span style="color:var(--ink-2)">{</span>
+      <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">id</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--code-string)">"clang"</span><span style="color:var(--ink-2)">,</span> <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">name</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--code-string)">"Verge, Clang build"</span><span style="color:var(--ink-2)">,</span> <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">short</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--code-string)">"Verge"</span><span style="color:var(--ink-2)">,</span>
+      <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">colour</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--code-string)">"verge"</span><span style="color:var(--ink-2)">,</span> <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">pattern</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--code-string)">"solid"</span><span style="color:var(--ink-2)">,</span> <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">marker</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--code-string)">"circle"</span><span style="color:var(--ink-2)">,</span>
+      <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">points</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--ink-2)">[{</span> <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">value</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--code-string)">"1238.6"</span> <span style="color:var(--ink-2)">},</span> <span style="color:var(--ink-2)">{</span> <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">value</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--code-string)">"1779.8"</span> <span style="color:var(--ink-2)">},</span> <span style="color:var(--ink-2)">{</span> <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">value</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--code-string)">"2257.8"</span> <span style="color:var(--ink-2)">}]</span>
+    <span style="color:var(--ink-2)">},</span>
+    <span style="color:var(--ink-2)">{</span>
+      <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">id</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--code-string)">"stock"</span><span style="color:var(--ink-2)">,</span> <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">name</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--code-string)">"NXP's firmware V3.174"</span><span style="color:var(--ink-2)">,</span> <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">short</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--code-string)">"NXP"</span><span style="color:var(--ink-2)">,</span>
+      <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">colour</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--code-string)">"nxp"</span><span style="color:var(--ink-2)">,</span> <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">pattern</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--code-string)">"solid"</span><span style="color:var(--ink-2)">,</span> <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">marker</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--code-string)">"circle"</span><span style="color:var(--ink-2)">,</span>
+      <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">points</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--ink-2)">[</span>
+        <span style="color:var(--ink-2)">{</span> <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">value</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--code-string)">"666.7"</span> <span style="color:var(--ink-2)">},</span>
+        <span style="color:var(--ink-2)">{</span> <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">failed</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--code-number)">true</span> <span style="color:var(--ink-2)">},</span>
+        <span style="color:var(--ink-2)">{</span> <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">partial</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--ink-2)">{</span> <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">failed</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--code-number)">1</span><span style="color:var(--ink-2)">,</span> <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">of</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--code-number)">2</span><span style="color:var(--ink-2)">,</span> <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">value</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--code-string)">"744.6"</span> <span style="color:var(--ink-2)">},</span> <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">verdict</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--code-string)">"wrong"</span> <span style="color:var(--ink-2)">}</span>
+      <span style="color:var(--ink-2)">]</span>
+    <span style="color:var(--ink-2)">}</span>
+  <span style="color:var(--ink-2)">],</span>
+  <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">limits</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--ink-2)">[{</span> <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">x</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--code-string)">"20"</span><span style="color:var(--ink-2)">,</span> <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">series</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--code-string)">"stock"</span><span style="color:var(--ink-2)">,</span> <span style="color:var(--ink-2)">"</span><span style="color:var(--code-function)">label</span><span style="color:var(--ink-2)">"</span><span style="color:var(--ink-2)">:</span> <span style="color:var(--code-string)">"NXP's firmware reads right up to 20 MHz"</span> <span style="color:var(--ink-2)">}]</span>
+<span style="color:var(--ink-2)">}</span>
+</code></pre>
+<h3 id="the-axes" tabindex="-1">The axes<a class="anchor" href="#the-axes" aria-label="Link to this section">#</a></h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Means</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code><span class="word">x.values</span></code></td>
+<td>the settings, ascending. Every series has one point for each</td>
+</tr>
+<tr>
+<td><code><span class="word">x.min</span></code>, <code><span class="word">x.max</span></code></td>
+<td>the axis' ends, where it reaches past the first and last settings: <code><span class="word">&quot;0.8&quot;</span></code> and <code><span class="word">&quot;62.5&quot;</span></code> keep points at 1 and 50 MHz off the plot's edges</td>
+</tr>
+<tr>
+<td><code><span class="word">x.name</span></code>, <code><span class="word">x.unit</span></code>, <code><span class="word">y.name</span></code>, <code><span class="word">y.unit</span></code></td>
+<td>the axes' names. A unit is written once, at its axis</td>
+</tr>
+<tr>
+<td><code><span class="word">x.scale</span></code>, <code><span class="word">y.scale</span></code></td>
+<td><code><span class="word">linear</span></code> or <code><span class="word">log</span></code></td>
+</tr>
+<tr>
+<td><code><span class="word">y.max</span></code>, <code><span class="word">y.step</span></code></td>
+<td>a fixed top and tick step. Without them, the chart picks both from the data</td>
+</tr>
+<tr>
+<td><code><span class="word">reference</span></code></td>
+<td><code><span class="word">&quot;y=x&quot;</span></code> draws the diagonal, named &quot;as asked&quot; in the legend</td>
+</tr>
+</tbody>
+</table>
+<h3 id="a-series" tabindex="-1">A series<a class="anchor" href="#a-series" aria-label="Link to this section">#</a></h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Means</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code><span class="word">id</span></code></td>
+<td>names the series in attributes, events and other charts: letters, digits, <code><span class="word">.</span></code>, <code><span class="word">_</span></code> and <code><span class="word">-</span></code></td>
+</tr>
+<tr>
+<td><code><span class="word">name</span></code></td>
+<td>in the legend and in a readout below the plot</td>
+</tr>
+<tr>
+<td><code><span class="word">short</span></code></td>
+<td>in the end label, a fail mark (&quot;GCC failed&quot;), a tooltip readout, and a readout below where <code><span class="word">name</span></code> does not fit</td>
+</tr>
+<tr>
+<td><code><span class="word">colour</span></code></td>
+<td>a series token: <code><span class="word">verge</span></code> draws in <code><span class="word">--series-verge</span></code></td>
+</tr>
+<tr>
+<td><code><span class="word">pattern</span></code></td>
+<td><code><span class="word">solid</span></code>, <code><span class="word">second-build</span></code>, <code><span class="word">reference</span></code> or <code><span class="word">capture-second</span></code>: the design system's line patterns</td>
+</tr>
+<tr>
+<td><code><span class="word">marker</span></code></td>
+<td><code><span class="word">circle</span></code>, <code><span class="word">square</span></code>, <code><span class="word">diamond</span></code>, <code><span class="word">triangle-up</span></code> or <code><span class="word">triangle-down</span></code></td>
+</tr>
+<tr>
+<td><code><span class="word">capture</span></code></td>
+<td>a run under energy capture: the line takes <code><span class="word">--capture-width</span></code> and <code><span class="word">--capture-opacity</span></code></td>
+</tr>
+<tr>
+<td><code><span class="word">hidden</span></code></td>
+<td>drawn only once the page shows it</td>
+</tr>
+<tr>
+<td><code><span class="word">fails</span></code></td>
+<td><code><span class="word">&quot;mark&quot;</span></code>: a failure takes a mark at the axis (&quot;GCC failed&quot;). Without it, a failure shows only as the break in the line and in the readout</td>
+</tr>
+</tbody>
+</table>
+<h3 id="a-point" tabindex="-1">A point<a class="anchor" href="#a-point" aria-label="Link to this section">#</a></h3>
+<p>A point is <code><span class="word">null</span></code> where the series has no figure and nothing to say about it. A line joins only
+neighbouring settings that both have a value, and breaks at any other. A segment across a setting
+would read as a figure there, whether the run failed, partly failed or never happened.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Means</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code><span class="word">value</span></code></td>
+<td>the figure, or absent where none was measured</td>
+</tr>
+<tr>
+<td><code><span class="word">verdict</span></code></td>
+<td><code><span class="word">wrong</span></code> where the firmware reads wrong at this setting: the segment into the point takes <code><span class="word">--dash-misread</span></code>, and the point is hollow</td>
+</tr>
+<tr>
+<td><code><span class="word">failed</span></code></td>
+<td>the run failed here: the line breaks, the readout says &quot;failed&quot;, and a fail mark shows if the series marks its failures</td>
+</tr>
+<tr>
+<td><code><span class="word">partial</span></code></td>
+<td><code><span class="word">{</span> <span class="word">&quot;failed&quot;:</span> <span class="word">1,</span> <span class="word">&quot;of&quot;:</span> <span class="word">2,</span> <span class="word">&quot;value&quot;:</span> <span class="word">&quot;1180.5&quot;</span> <span class="word">}</span></code>: some runs failed, and the others gave this figure. The point has no <code><span class="word">value</span></code>. The line breaks, a fail mark shows if the series marks its failures, and the readout gives this figure</td>
+</tr>
+<tr>
+<td><code><span class="word">range</span></code></td>
+<td><code><span class="word">[&quot;1230.1&quot;,</span> <span class="word">&quot;1247.0&quot;]</span></code>: the spread across runs, in the readout</td>
+</tr>
+<tr>
+<td><code><span class="word">ring</span></code></td>
+<td>a ring around the point</td>
+</tr>
+<tr>
+<td><code><span class="word">note</span></code></td>
+<td>a few words the readout adds after the figure: &quot;18.4 MHz, the read failed partway&quot;</td>
+</tr>
+<tr>
+<td><code><span class="word">evidence</span></code></td>
+<td><code><span class="word">{</span> <span class="word">&quot;recording&quot;:</span> <span class="word">&quot;...&quot;,</span> <span class="word">&quot;annotations&quot;:</span> <span class="word">&quot;...&quot;,</span> <span class="word">&quot;annotation&quot;:</span> <span class="word">&quot;...&quot;</span> <span class="word">}</span></code>: the recording, its sidecar, and the annotation that shows this point. URLs are relative to the chart's file, or to the page for data set through <code><span class="word">data</span></code>. A failed or partial point's recording opens from its fail mark, so only in a series that marks its failures</td>
+</tr>
+</tbody>
+</table>
+<h3 id="a-limit" tabindex="-1">A limit<a class="anchor" href="#a-limit" aria-label="Link to this section">#</a></h3>
+<p>A vertical line at an x, dashed, with its <code><span class="word">label</span></code> in the legend. With <code><span class="word">series</span></code>, the line grows from
+that series' point during the entry sweep.</p>
+<h2 id="the-element" tabindex="-1">The element<a class="anchor" href="#the-element" aria-label="Link to this section">#</a></h2>
+<h3 id="attributes" tabindex="-1">Attributes<a class="anchor" href="#attributes" aria-label="Link to this section">#</a></h3>
+<table>
+<thead>
+<tr>
+<th>Attribute</th>
+<th>Means</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code><span class="word">src</span></code></td>
+<td>the chart's data</td>
+</tr>
+<tr>
+<td><code><span class="word">show</span></code></td>
+<td>the series to draw, by id. Without it, every series not <code><span class="word">hidden</span></code></td>
+</tr>
+<tr>
+<td><code><span class="word">selected</span></code></td>
+<td>an x selected from the start. With it, a selection stays until another replaces it. Without it, the selection follows the pointer and clears</td>
+</tr>
+<tr>
+<td><code><span class="word">group</span></code></td>
+<td>charts with the same group share their selected x</td>
+</tr>
+<tr>
+<td><code><span class="word">highlight</span></code></td>
+<td>points to ring, as <code><span class="word">series@x</span></code>, and <code><span class="word">limits</span></code> to strengthen the limit lines as their legend entry does: <code><span class="word">&quot;clang@50</span> <span class="word">stock@20</span> <span class="word">limits&quot;</span></code>. A claim in the prose sets it</td>
+</tr>
+<tr>
+<td><code><span class="word">readout</span></code></td>
+<td><code><span class="word">tooltip</span></code>, beside the selected x, or <code><span class="word">below</span></code>, a row under the plot</td>
+</tr>
+<tr>
+<td><code><span class="word">legend</span></code></td>
+<td><code><span class="word">above</span></code> draws a legend over the plot. Without it, the page has its own key</td>
+</tr>
+<tr>
+<td><code><span class="word">end-labels</span></code></td>
+<td>names each line at its last point, with its <code><span class="word">short</span></code>. Labels that would overlap move apart, and the plot leaves room for the widest</td>
+</tr>
+<tr>
+<td><code><span class="word">table</span></code></td>
+<td>the id of the page's table that gives the chart as text</td>
+</tr>
+<tr>
+<td><code><span class="word">height</span></code></td>
+<td>the plot's height in CSS pixels. <code>--tickwave-chart-height</code> wins over it</td>
+</tr>
+<tr>
+<td><code><span class="word">sweep</span></code></td>
+<td><code><span class="word">off</span></code> draws at once</td>
+</tr>
+</tbody>
+</table>
+<h3 id="properties-methods-and-events" tabindex="-1">Properties, methods and events<a class="anchor" href="#properties-methods-and-events" aria-label="Link to this section">#</a></h3>
+<table>
+<thead>
+<tr>
+<th>Property or method</th>
+<th>Does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code><span class="word">data</span></code></td>
+<td>the chart's data as an object. Setting it redraws: a page that slices a larger table sets each slice here. The reader's picked x stays picked where the new data has it. Reading it gives the parsed data, not the object set, so a page that skips unchanged data keeps track of what it set</td>
+</tr>
+<tr>
+<td><code><span class="word">pick(x,</span> <span class="word">series)</span></code></td>
+<td>selects an x, a series or both, as a reader's pick does, and moves the group with it. It fires no event. <code><span class="word">pick()</span></code> clears</td>
+</tr>
+<tr>
+<td><code><span class="word">settled()</span></code></td>
+<td>resolves once the chart has drawn, its sweep included</td>
+</tr>
+<tr>
+<td><code><span class="word">reserved</span></code></td>
+<td>the room the chart took at its first layout with data, <code><span class="word">{height,</span> <span class="word">lines,</span> <span class="word">matches}</span></code>: the plot's height in CSS pixels, the readout's lines (null for a tooltip), and whether the page's properties reserved it. Null before</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Event</th>
+<th>When, and its <code><span class="word">detail</span></code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code><span class="word">tickwave-pick</span></code></td>
+<td>the reader picks an x or a series: <code><span class="word">{x,</span> <span class="word">series}</span></code>, either null when cleared</td>
+</tr>
+<tr>
+<td><code><span class="word">tickwave-evidence</span></code></td>
+<td>the reader opens a point's recording: <code><span class="word">{x,</span> <span class="word">series,</span> <span class="word">recording,</span> <span class="word">annotations,</span> <span class="word">annotation}</span></code>, the URLs absolute. Cancelable (see Evidence)</td>
+</tr>
+<tr>
+<td><code><span class="word">tickwave-reserved</span></code></td>
+<td>the chart has laid out its first data and compared its room with the page's properties: the <code><span class="word">reserved</span></code> value</td>
+</tr>
+<tr>
+<td><code><span class="word">tickwave-ready</span></code></td>
+<td>the chart has first drawn: <code><span class="word">{height}</span></code></td>
+</tr>
+<tr>
+<td><code><span class="word">tickwave-error</span></code></td>
+<td>the data did not load or does not parse: <code><span class="word">{message,</span> <span class="word">error}</span></code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="reading-a-chart" tabindex="-1">Reading a chart<a class="anchor" href="#reading-a-chart" aria-label="Link to this section">#</a></h3>
+<p>A reader picks an x by pointing at the plot or tapping it. The nearest x is picked: each x owns the
+band between the midpoints to its neighbours. The chart takes focus, and the arrow keys step through
+the x values. Escape clears, and so does a tap outside the chart. A mouse leaving the plot clears,
+and a finger lifting does not. With <code><span class="word">selected</span></code>, nothing clears.</p>
+<p>A reader picks a series from the legend or from its end label. The other series fade to 20 %. A
+page picks one with <code><span class="word">pick</span></code>, for a table column or a key.</p>
+<p>The readout gives the picked x and each shown series' figure there, with the series' swatch: its
+line and marker as drawn. A figure takes its range in brackets, its partial runs, its note and its
+verdict, such as &quot;failed in 1 of 2 runs (744.6 KiB/s in the other), reads wrong&quot;. As a tooltip,
+the readout sits beside the picked x, or to its left near the plot's right edge. It sits at the
+plot's top, or lower where that hides less of the lines. A long line wraps.</p>
+<p>A readout below the plot holds a line for the x and one for each shown series, whether or not an x
+is picked, so a pick moves nothing under it. Before the data, it holds the lines
+<code>--tickwave-chart-readout-lines</code> states, or else those for the series <code><span class="word">show</span></code> names. Each line stays
+one line. A series whose name does not fit beside its figures, at the chart's width, takes its
+<code><span class="word">short</span></code> for every x, and a name that still does not fit ends in an ellipsis. A figure is never cut.
+The full name stays in the line's text for a screen reader, and shows when the pointer rests on it.</p>
+<p>On a chart too narrow for some setting's readout to fit beside it, as on a phone, the tooltip
+floats off the chart for every setting. It sits below the chart at the picked x, or above it where
+the window has no room below. There it covers the page around the chart, and none of the chart.</p>
+<h3 id="evidence" tabindex="-1">Evidence<a class="anchor" href="#evidence" aria-label="Link to this section">#</a></h3>
+<p>A point that names a recording behaves as <code><span class="word">&lt;tickwave-ref&gt;</span></code> does. An inset of its annotation opens
+in a popover when a mouse rests within 12 px of the point for 150 ms, when a finger taps it, or
+when the keys reach its setting. The popover opens below the chart, or above it when there is no
+room below, across the point's x. Nothing on the page moves, and the popover covers none of the
+chart, nor a floating readout: the picked x's rule joins it to the point. Its first line names the series, and the inset
+draws the probe's lines in the series' colour. A failure's mark opens its point's recording the
+same way.</p>
+<p>A mouse only passing over the plot opens nothing, so it loads nothing. Where points lie on one
+another, the picked series' point opens, or else the first series' in the data. The keys open the
+picked series' point at that setting, or else the first there that names a recording.</p>
+<p>A click or Enter fires <code><span class="word">tickwave-evidence</span></code>. A page can cancel it and take over. On a touch screen,
+the tap is the click. Unless the page cancels the event, the chart opens the page's
+<code><span class="word">&lt;tickwave-view&gt;</span></code> of the same recording at the annotation. With no such view, the popover stays
+open, and the event is all that happens.</p>
+<p>The page decides what a point leads to, through the data it writes. A chart never guesses a
+recording from a setting.</p>
+<h3 id="motion" tabindex="-1">Motion<a class="anchor" href="#motion" aria-label="Link to this section">#</a></h3>
+<p>A chart sweeps in once, when 60 % of it first shows, or 60 % of the window for a chart taller than
+the window. The lines draw from the first x to the last over 750 ms, easing out. A limit grows from
+its series' point as the sweep crosses it. The end labels then appear a whole character at a time
+over 200 ms. A reader who prefers reduced motion, a printed page, and a chart that already has a
+highlight get the end state at once, and a highlight set while the sweep plays ends it. A face change
+does not redraw the chart, and a redraw for a resize or new data never plays the sweep again.</p>
+<h3 id="accessibility" tabindex="-1">Accessibility<a class="anchor" href="#accessibility" aria-label="Link to this section">#</a></h3>
+<p>The plot is a focusable <code><span class="word">role=&quot;group&quot;</span></code> with <code>aria-roledescription=&quot;chart&quot;</code>, as the view's plot is a
+&quot;capture&quot;. The page's caption names it, and its <code><span class="word">table</span></code> describes it. Each x is a stop for the
+arrow keys, announced as &quot;20 MHz&quot;. The readout is a polite live region inside the group. When a
+shown point names a recording, the description adds one sentence: &quot;Enter opens the recording
+behind the picked point.&quot;</p>
+<p>An image role would not do: its children are presentational, so the readout might never be
+announced. The tests check the tree in Chromium; Firefox's tree was checked by hand. A page with no
+table has the readout as the chart's only text form.</p>
+<h3 id="styling" tabindex="-1">Styling<a class="anchor" href="#styling" aria-label="Link to this section">#</a></h3>
+<p>The chart reads the tokens the other elements read (<code><span class="word">--ink</span></code>, <code><span class="word">--ink-2</span></code>, <code><span class="word">--surface</span></code>, <code><span class="word">--hair</span></code>,
+<code><span class="word">--wash</span></code>, <code><span class="word">--series-*</span></code>, <code><span class="word">--font-text</span></code>, <code><span class="word">--font-figures</span></code>), and the line patterns <code><span class="word">--dash-*</span></code>,
+<code><span class="word">--capture-width</span></code> and <code><span class="word">--capture-opacity</span></code>. Interaction is hue-free, as on the view: an ink focus
+ring and an ink wash under the pointer.</p>
+<p>Two properties set the chart's room, and <code><span class="word">tickwave.css</span></code> reads them too:</p>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Sets</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--tickwave-chart-height</code></td>
+<td>the plot's height, any length. Without it, the <code><span class="word">height</span></code> attribute's, else 330 px</td>
+</tr>
+<tr>
+<td><code>--tickwave-chart-readout-lines</code></td>
+<td>the lines a readout below holds before the data: one for the x, and one a series</td>
+</tr>
+</tbody>
+</table>
+<p>At its first layout with data, the chart warns in the console where the room it took is not the
+room the page reserved: where the <code><span class="word">height</span></code> attribute and <code>--tickwave-chart-height</code> differ, or the
+readout holds other lines than <code>--tickwave-chart-readout-lines</code> states, or its tallest x takes more
+height than those lines, as a page's rule for the readout can make it. Later data, and the series
+a reader shows, change the readout without a warning. A page script that sets new data can set the
+property beside it.</p>
+<h2 id="where-a-charts-figures-come-from" tabindex="-1">Where a chart's figures come from<a class="anchor" href="#where-a-charts-figures-come-from" aria-label="Link to this section">#</a></h2>
+<p>A chart reads only chart data. The wire-clock charts plot figures that the decoders write into
+their session annotations as <code><span class="word">values</span></code> (ANNOTATIONS.md): <code><span class="word">asked</span></code>, <code><span class="word">read_data</span></code>, <code><span class="word">write_data</span></code> and
+<code><span class="word">request</span></code>. mculink-bench's <code><span class="word">extract.py</span></code> reads the sidecars and writes the chart's data, with each
+point's evidence. So the page keeps the choice of what a point leads to.</p>
+<p class="doc-source">From <a href="https://github.com/Escapement-Project/tickwave/blob/HEAD/CHARTS.md">tickwave</a>, where changes to this page go.</p></article>
+</div>
+</main>
+<footer><div class="wrap"><span>Escapement Project</span><span>The Escapement Project is not affiliated with NXP or any other probe vendor. MCU-Link and LinkServer are NXP's names for its products.</span><span class="licence">tickwave is free software under the MIT or Apache-2.0 licence.</span></div></footer>
+<script src="../face.js" defer></script>
+<script src="../header.js" defer></script>
+<script src="../copy.js" defer></script>
+<script src="../doc.js" defer></script>
+<script src="../search.js" defer></script>
+<script src="../mark.js" defer></script>
+</body>
+</html>

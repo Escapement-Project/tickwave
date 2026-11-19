@@ -1,0 +1,730 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Elements – tickwave – Escapement Project</title>
+<meta name="description" content="tickwave's elements: attributes, methods, events, parts and custom properties.">
+<script>
+// .js, as on the project's other pages, for a shared rule that needs a script to run; and a face
+// chosen on an earlier visit, applied before the first paint. The project's sites share the key.
+document.documentElement.classList.add("js"); try { const f = localStorage.getItem("face"); if (f === "day" || f === "night") document.documentElement.dataset.face = f; } catch {}
+</script>
+<link rel="preload" href="../fonts/saira-expanded.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="../fonts/hanken-grotesk.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="icon" href="../favicon-tickwave.ico">
+<link rel="stylesheet" href="../tokens.css">
+<link rel="stylesheet" href="../base.css">
+<link rel="stylesheet" href="../tickwave.css">
+<link rel="stylesheet" href="../site.css">
+<link rel="stylesheet" href="../doc.css">
+<script type="module" src="../site.js"></script>
+</head>
+<body class="doc-page">
+<a class="skip" href="#main">Skip to the content</a>
+<header data-published="https://escapement-project.github.io">
+  <div class="wrap">
+    <a class="brand" href="https://escapement-project.github.io/" data-page="landing"><svg aria-hidden="true" fill="currentColor" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path fill-rule="evenodd" d="M32,3 A29,29 0 1,0 32.01,3 Z M32,9 A23,23 0 1,0 32.01,9 Z"/><path d="M9.796,38 H29 V20 H51.621 A23,23 0 0,1 54.204,26 H35 V44 H12.379 A23,23 0 0,1 9.796,38 Z"/></svg><span class="name">Escapement Project</span></a>
+    <nav id="places" aria-label="Escapement Project"><a href="https://escapement-project.github.io/verge/" data-page="verge">Verge</a><span class="product"><a href="../index.html" data-page="tickwave" aria-current="true">tickwave</a><a href="../open.html" data-page="tickwave/open">Open</a><a href="../docs/index.html" data-page="tickwave/docs" aria-current="true">Docs</a></span><a href="https://escapement-project.github.io/#source">Source</a></nav>
+    <button class="switch" id="faces" type="button" role="switch" aria-checked="false" aria-label="Night face"><span class="track"><span class="thumb"><svg class="wheel" viewBox="0 0 40 40" aria-hidden="true"><g transform="translate(14 3) scale(.75)"><circle cx="8" cy="8" r="3.2" fill="currentColor"/><path d="M8 1.2v1.6M8 13.2v1.6M1.2 8h1.6M13.2 8h1.6M3.2 3.2l1.1 1.1M11.7 11.7l1.1 1.1M3.2 12.8l1.1-1.1M11.7 4.3l1.1-1.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></g><g transform="rotate(180 20 20) translate(14 3) scale(.75)"><path d="M10.8 1.8a6.3 6.3 0 1 0 3.4 10.6A5.2 5.2 0 0 1 10.8 1.8z" fill="currentColor"/></g></svg></span></span></button>
+  </div>
+</header>
+<main id="main" class="wrap">
+<div class="doc-wrap">
+<button class="doc-bar" type="button" aria-expanded="false" aria-controls="doc-rail"><span class="label">Contents</span><span class="where">The elements</span></button>
+<div class="doc-rail" id="doc-rail">
+<search class="find" data-index="search.json">
+<input id="find" type="search" role="combobox" aria-label="Search tickwave's docs" aria-autocomplete="list" aria-expanded="false" aria-controls="found" placeholder="Search the docs" autocomplete="off" spellcheck="false" enterkeyhint="search">
+<kbd class="key" aria-hidden="true">/</kbd>
+<button class="clear" type="button" aria-label="Clear the search" hidden></button>
+<p class="count" role="status"></p>
+</search>
+<div class="doc-list"><nav class="doc-nav" aria-label="tickwave's docs">
+<details class="group"><summary>Using it</summary><ul>
+<li><a href="viewer.html">Viewer</a></li>
+<li><a href="converter.html">Converter</a></li>
+</ul></details>
+<details class="group" open><summary>In your page</summary><ul>
+<li><a href="elements.html" aria-current="page">Elements</a><ul class="toc"><li><a href="#loading">Loading</a></li><li><a href="#tickwave-view"><code><span class="word">&lt;tickwave-view&gt;</span></code></a></li><li><a href="#tickwave-inset"><code><span class="word">&lt;tickwave-inset&gt;</span></code></a></li><li><a href="#tickwave-ref"><code><span class="word">&lt;tickwave-ref&gt;</span></code></a></li><li><a href="#tickwave-chart"><code><span class="word">&lt;tickwave-chart&gt;</span></code></a></li><li><a href="#styling">Styling</a></li><li><a href="#from-the-module">From the module</a></li></ul></li>
+<li><a href="charts.html">Charts</a></li>
+</ul></details>
+<details class="group"><summary>The files</summary><ul>
+<li><a href="format.html">Format</a></li>
+<li><a href="annotations.html">Sidecar</a></li>
+</ul></details>
+</nav>
+<div class="found" id="found" role="listbox" aria-label="Sections found" hidden></div></div></div>
+<article class="doc"><h1 id="the-elements" tabindex="-1">The elements</h1>
+<p>tickwave puts a capture into a web page with three custom elements. <code><span class="word">&lt;tickwave-view&gt;</span></code> shows a whole
+recording. <code><span class="word">&lt;tickwave-inset&gt;</span></code> shows one annotated stretch of it, magnified. <code><span class="word">&lt;tickwave-ref&gt;</span></code> turns a
+phrase in the text into a reference: pointing at it opens an inset beside the text. A fourth,
+<code><span class="word">&lt;tickwave-chart&gt;</span></code>, in a module of its own, draws measurements against a setting.</p>
+<h2 id="loading" tabindex="-1">Loading<a class="anchor" href="#loading" aria-label="Link to this section">#</a></h2>
+<p>Include one module, and the three elements are defined:</p>
+<pre><code class="language-html"><span style="color:var(--code-operator)">&lt;</span><span style="color:var(--code-function)">script</span> <span style="color:var(--code-type)">type</span><span style="color:var(--code-operator)">=</span><span style="color:var(--code-string)">"module"</span> <span style="color:var(--code-type)">src</span><span style="color:var(--code-operator)">=</span><span style="color:var(--code-string)">"tickwave.js"</span><span style="color:var(--code-operator)">&gt;</span>&lt;<span style="color:var(--code-operator)">/</span><span style="color:var(--code-function)">script</span><span style="color:var(--code-operator)">&gt;</span>
+</code></pre>
+<p><code><span class="word">tickwave.js</span></code> reads recordings through a decoder in a worker. The first time a page needs a
+recording, it loads <code><span class="word">tickwave-worker.js</span></code> and <code><span class="word">tickwave.wasm</span></code> from beside itself, so keep the three
+files together. They can be on another site, such as a release's directory on tickwave's site.
+That site has to send them with <code>Access-Control-Allow-Origin</code>, as GitHub Pages does. The worker
+then starts from a small module the page makes, which imports <code><span class="word">tickwave-worker.js</span></code> from that site.</p>
+<p>A page with a Content-Security-Policy has to allow <code><span class="word">'unsafe-inline'</span></code> in <code><span class="word">style-src</span></code>, for the
+styles in the elements' shadow roots. The decoder needs <code><span class="word">'wasm-unsafe-eval'</span></code> in <code><span class="word">script-src</span></code> of
+the policy its worker runs under. On the files' own site, that is the policy sent with
+<code><span class="word">tickwave-worker.js</span></code>, if there is one. When the files are on another site, it is the page's
+policy, which then also has to allow <code><span class="word">blob:</span></code> and that site in <code><span class="word">worker-src</span></code>, and that site in
+<code><span class="word">connect-src</span></code>.</p>
+<p>Recordings are fetched by byte range: the footer first, then only the channels and the span a view
+shows. A server that ignores ranges still works, as long as it sends the whole file. A recording on
+another site needs that site to allow the reads: <code>Access-Control-Allow-Origin</code>, and
+<code>Access-Control-Expose-Headers: <span class="word">Content-Range</span></code>, so the decoder can see which bytes came back.
+GitHub Pages sends the first and not the second, so a recording kept there shows only on a page of
+the same site.</p>
+<p>A page that shows a closed view can write the view's title and facts into it. The view then lays
+out before <code><span class="word">tickwave.js</span></code> has loaded, and keeps its height once it has:</p>
+<pre><code class="language-html"><span style="color:var(--code-operator)">&lt;</span><span style="color:var(--code-function)">link</span> <span style="color:var(--code-type)">rel</span><span style="color:var(--code-operator)">=</span><span style="color:var(--code-string)">"stylesheet"</span> <span style="color:var(--code-type)">href</span><span style="color:var(--code-operator)">=</span><span style="color:var(--code-string)">"tickwave.css"</span><span style="color:var(--code-operator)">&gt;</span>
+<span style="color:var(--code-operator)">&lt;</span><span style="color:var(--code-function)">tickwave-view</span> <span style="color:var(--code-type)">src</span><span style="color:var(--code-operator)">=</span><span style="color:var(--code-string)">"reads.tickwave"</span><span style="color:var(--code-operator)">&gt;</span>
+  <span style="color:var(--code-operator)">&lt;</span><span style="color:var(--code-function)">span</span> <span style="color:var(--code-type)">slot</span><span style="color:var(--code-operator)">=</span><span style="color:var(--code-string)">"title"</span><span style="color:var(--code-operator)">&gt;</span>SWD reads<span style="color:var(--code-operator)">&lt;/</span><span style="color:var(--code-function)">span</span><span style="color:var(--code-operator)">&gt;</span>
+  <span style="color:var(--code-operator)">&lt;</span><span style="color:var(--code-function)">span</span> <span style="color:var(--code-type)">slot</span><span style="color:var(--code-operator)">=</span><span style="color:var(--code-string)">"facts"</span><span style="color:var(--code-operator)">&gt;</span>524 ms; 2 channels: SWCLK, SWDIO; 4.7 KiB<span style="color:var(--code-operator)">&lt;/</span><span style="color:var(--code-function)">span</span><span style="color:var(--code-operator)">&gt;</span>
+<span style="color:var(--code-operator)">&lt;/</span><span style="color:var(--code-function)">tickwave-view</span><span style="color:var(--code-operator)">&gt;</span>
+</code></pre>
+<p><code><span class="word">tickwave.css</span></code> lays out a view that is not defined yet the way the view lays out its summary, from
+the two spans, with an empty cell where the button goes, and where the download links go too on a
+view with <code><span class="word">download</span></code>. Without scripts, that is what the reader sees. Put nothing else inside the
+view. The sheet's rules carry no specificity, so any rule of the page's wins. So leave the view's
+<code><span class="word">display</span></code> alone: the sheet sets its own.</p>
+<h2 id="tickwave-view" tabindex="-1"><code><span class="word">&lt;tickwave-view&gt;</span></code><a class="anchor" href="#tickwave-view" aria-label="Link to this section">#</a></h2>
+<p>A whole recording. Closed, it shows the recording's title and, under it, the recording's length to
+three significant figures, its channels and its size, with an Open button beside them. A view of
+some of the channels names those out of the recording's, &quot;2 of 3 channels: TCKC, TMSC&quot;, and gives
+the length they span. Once it scrolls into view, it fetches the recording's footer and, where the
+page names no channels, the stored view a sidecar or a bundle may give; nothing else. Open, all of
+that stays, and the button reads Close. Below it come the time axis, one row a channel, the
+annotations above the rows, and a readout under the rows. The button keeps the focus, and names its
+recording to a screen reader.</p>
+<p>A page can write the title and the facts itself, as spans with <code><span class="word">slot=&quot;title&quot;</span></code> and <code><span class="word">slot=&quot;facts&quot;</span></code>
+(see Loading). The view shows the page's text in place of its own. Once the footer is in, it compares
+the two, taking any run of spaces as one, and warns in the console of each that differs. Where the
+page names no channels and the recording has a sidecar, named or bundled, the facts count the
+channels its stored view names. So the view reads that first, and only then fills in its own
+facts, compares and sends its summary. A sidecar that doesn't read leaves the facts on every
+channel. <code><span class="word">summary</span></code> and the <code><span class="word">tickwave-summary</span></code> event say that it has compared, so a page's check can
+tell a match from a view whose footer never came.</p>
+<table>
+<thead>
+<tr>
+<th>Attribute</th>
+<th>Means</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code><span class="word">src</span></code></td>
+<td>the recording's URL</td>
+</tr>
+<tr>
+<td><code><span class="word">annotations</span></code></td>
+<td>its sidecar's TOML file. Without it, a recording with a bundled sidecar shows that</td>
+</tr>
+<tr>
+<td><code><span class="word">channels</span></code></td>
+<td>the channels to show, by name, in order. Without it, those the sidecar's stored view names (ANNOTATIONS.md, &quot;The stored view&quot;), or else all of them. The view then goes as far as the furthest of them ends</td>
+</tr>
+<tr>
+<td><code><span class="word">window</span></code></td>
+<td>what an open view shows first: two times (<code><span class="word">&quot;317.8</span> <span class="word">ms</span> <span class="word">318.0</span> <span class="word">ms&quot;</span></code>), or an annotation's id. Without it, the stored view's span, or else the whole capture</td>
+</tr>
+<tr>
+<td><code><span class="word">open</span></code></td>
+<td>open the view</td>
+</tr>
+<tr>
+<td><code><span class="word">series</span></code></td>
+<td>a series name, such as <code><span class="word">verge</span></code>: the traces take <code><span class="word">--series-verge</span></code>. Without it, or where the page doesn't set that, the stored view's colour on the page's face, or else ink</td>
+</tr>
+<tr>
+<td><code><span class="word">download</span></code></td>
+<td>a link in the summary that downloads the recording and, with <code><span class="word">annotations</span></code>, a button that lists its sidecar's files to download (below)</td>
+</tr>
+<tr>
+<td><code><span class="word">shaping</span></code></td>
+<td>shape the recording, as the Open page's converter does: a grip at each row's name moves its channel in time (sideways) or among the rows (up or down), and bars at its data's ends trim it. A move up or down rewrites <code><span class="word">channels</span></code>. A group's head has a grip that moves the whole group in time (see <code><span class="word">groups</span></code>). A derived channel has no grip or bars: it moves and trims with its first operand. Without it, there are no grips or bars, and no room kept for them</td>
+</tr>
+</tbody>
+</table>
+<p>Times in attributes are a decimal with a unit (<code><span class="word">s</span></code>, <code><span class="word">ms</span></code>, <code><span class="word">us</span></code>, <code><span class="word">ns</span></code>, <code><span class="word">ps</span></code>), or a whole number of
+ticks.</p>
+<p>A sidecar's stored view applies once its sidecar is in: the view opens on the recording's footer,
+then shows the stored channels and span. A bundled recording opened with no <code><span class="word">annotations</span></code>,
+<code><span class="word">channels</span></code> or <code><span class="word">window</span></code> reads its bundle first and draws its first frame in the stored view, so a
+downloaded file looks as its page showed it.</p>
+<p>With <code><span class="word">download</span></code>, &quot;Download&quot; and, where the view has <code><span class="word">annotations</span></code>, &quot;Annotations&quot; sit beside Open,
+in its look. Download is a link that saves the recording as served, so a bundled file carries its
+sidecar. Annotations is a button that opens a list over the page, under the button: a link to each
+file of the sidecar, the hand-written file first, then each file it includes, in its order, each
+under its own name. Pressed again, or with Escape, the list closes, and the focus going anywhere
+else closes it too. The list takes the focus at its first link, and Escape gives it back to the
+button. Each is named for its recording to a screen reader, as Open is: &quot;Download SWD reads&quot;,
+&quot;Download the annotations of SWD reads&quot;, and in the list &quot;Download swd.jsonl, from the annotations
+of SWD reads&quot;.</p>
+<p>Nothing is fetched until a link is clicked, with one exception. The list reads the hand-written
+file for the files it includes when it first opens, unless the view has read the sidecar already.
+Where that file doesn't read, the list offers it alone and says why. A browser takes a link's file
+name only for a file on the page's own site: one on another site downloads under the name its
+server gives it, or opens in the tab. A local file the page registered downloads under its own
+name, and lists the sidecar files it was registered with, under theirs. A merge preview, which no
+file holds, has no links.</p>
+<p>The reader zooms with Ctrl or Cmd and the wheel, a trackpad pinch, or two fingers. The plain wheel
+scrolls the page, and the view says how to zoom. Shift with the wheel, a sideways swipe, a drag or
+the left and right arrow keys move along the capture: an arrow an eighth of the span shown, or half
+of it with Shift. With the view focused, the up and down arrows or plus and minus zoom in and out.
+Home and Fit show the whole capture, or all of the channels the view shows, with each analog
+channel's whole range, and Escape clears the cursors and the selection.
+A zoom step, and an arrow key's move, eases into place over about 150 ms, and the rows read for
+where it goes at once. A key pressed during an ease goes on from where the last one was going, and
+the view eases there from where it is drawn, so a held arrow key glides. A reader who prefers
+reduced motion sees each step jump there. So does any reader while the view's last three draws
+each took longer than a frame at 60 Hz, and an ease under way then ends. A drag, a swipe and the
+wheel move the view at once, and so do Home, Fit and stepping to an annotation. A window the page
+sets ends an ease there, unless it is the window the ease is going to.</p>
+<p>Over an analog row's scale, Ctrl or Cmd with the wheel, or two fingers, zoom its values about the
+pointer instead, a drag moves them, and a double click fits them to the values in view. A scale takes
+the focus: up and down move it, plus and minus zoom it, Enter fits it and Home shows its whole range.
+Once a row's values are zoomed in, a drag over its traces with a mouse or a pen moves them too, as
+well as along the capture.</p>
+<p>An analog row's whole range is the least and greatest value in its channel's coarsest overview,
+which are those of all its samples; the row reads that overview first. The plot draws nothing until
+every analog row's overview has landed, come back empty or failed, so the names column, which the
+scales' labels widen, is in place from the first frame. When the channels shown change, it keeps
+its last frame until the new rows' overviews are in. A channel with no overview, as in a merge
+preview whose recording's ticks don't fall on whole merged ticks, shows its name alone, with no
+scale, until the view has read all of it; its range then widens the names column.</p>
+<p>A mouse over a row reads it at the pointer. An analog channel gives the value of the sample
+there in a label, or the smallest and largest value where one pixel covers several samples. On a
+digital channel, two spans mark the pulse there: one between its edges for its width, and one over
+its period to the next edge the same way. A label under the pulse gives its duty, its frequency
+and 1/width, the width's reciprocal as a rate (one UART bit's gives the
+baud rate). The width and the period sit on their spans once the row is tall enough for them.
+Until then the label gives them too, with the pulse's level. A pulse's edges can lie far past what
+the row has read, as on a quiet line zoomed in close. Once the pointer rests, the view finds them
+through the overview and reads just those. Moving within the pulse lets the search go on, and once
+found, the pulse reads at once anywhere in it. Where one pixel holds several edges, the label asks for
+a closer look. The label keeps to the edge of the rows away from the row it reads, so it never
+covers the wave there. In a plot too short for it, it runs past the plot's edge.</p>
+<p>Each row's lower edge, in the names column, is a handle that sets the row's height. Drag it, or
+focus it and press the up and down arrows (Shift for bigger steps). Home and End give the row its
+least and greatest height, and Enter or a double click its default. The view grows and shrinks
+with its rows. Another recording starts every row at its default height.</p>
+<p>A click places cursor A, and the next click cursor B; with the view focused, Enter places them at
+the middle of the view. A click's cursor snaps to an edge within 6 pixels on the row clicked. The
+readout gives both times, the interval between them, and each analog channel's value at each.
+That value is the last sample at or before the cursor, to the digit one code step carries. It also
+gives each digital channel's pulse at cursor A, with the figures the pointer gives.</p>
+<p>A drag along the time axis selects a span. The readout gives its length and each channel's edges
+in it. For one channel it gives the periods' count, minimum, median and maximum, and the running
+clock. The running clock is the mean of the periods inside Tukey's fences, as the sidecar's
+measures define it: it keeps a clock's jitter and quantisation, and drops pauses. The figures come
+from a count of each distinct period, so their memory grows with how many different periods the
+span holds, not with how many periods. Past 2,097,152 distinct periods, far more than a clock's,
+the count, minimum and maximum stay exact, the median is null (the readout shows a dash in its
+place), and the running clock is the mean of every period, the pauses included. The note says so.
+<code><span class="word">tickwave-select</span></code>'s <code><span class="word">periods</span></code> carries the same figures.</p>
+<p>A menu beside the zoom buttons steps through one kind of annotation, &quot;3 of 16&quot;. It starts with the
+kind of the annotation the view opened at, else the kind of the sidecar's first annotation.
+Clicking an annotation's label shows its span.</p>
+<p>An annotation's <code><span class="word">paint</span></code> draws its channels over its span in its role's look (ANNOTATIONS.md,
+&quot;Roles&quot;). Between the zoom buttons and the menu, a key lists every role the sidecar declares, in
+its order: each its label and a short line drawn as the role's lines are. It is the recording's
+key, not the window's: it changes when the roles or the page's colours do, not as the reader moves.
+It keeps to one line, cut where the toolbar runs out of room.</p>
+<table>
+<thead>
+<tr>
+<th>Method or property</th>
+<th>Does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code><span class="word">show(id,</span> <span class="word">span?)</span></code></td>
+<td>opens the view at an annotation, over <code><span class="word">span</span></code> (<code><span class="word">{start,</span> <span class="word">end}</span></code> in ticks) if one is given. Resolves once it has drawn</td>
+</tr>
+<tr>
+<td><code><span class="word">reveal(id,</span> <span class="word">span?)</span></code></td>
+<td><code><span class="word">show(id,</span> <span class="word">span)</span></code>, then brings the view into sight and puts the focus on its plot, as a reference, an inset or a chart's point does</td>
+</tr>
+<tr>
+<td><code><span class="word">focus()</span></code></td>
+<td>puts the focus on the plot, or on the Open button while the view is closed</td>
+</tr>
+<tr>
+<td><code><span class="word">setWindow(start,</span> <span class="word">end)</span></code></td>
+<td>shows a span: ticks, or times such as <code><span class="word">&quot;317.8</span> <span class="word">ms&quot;</span></code>. Called before the footer arrives, it shows the span once it has</td>
+</tr>
+<tr>
+<td><code><span class="word">settled()</span></code></td>
+<td>resolves once the view has drawn everything it shows</td>
+</tr>
+<tr>
+<td><code><span class="word">tickAt(clientX)</span></code></td>
+<td>the tick under a point in the window, or null before the view has drawn</td>
+</tr>
+<tr>
+<td><code><span class="word">open</span></code></td>
+<td>whether the view is open; setting it opens or closes it</td>
+</tr>
+<tr>
+<td><code><span class="word">window</span></code></td>
+<td>where the view is going, <code><span class="word">{start,</span> <span class="word">end}</span></code> in ticks: the span shown, or while a zoom step eases, the span it eases to</td>
+</tr>
+<tr>
+<td><code><span class="word">cursors</span></code></td>
+<td>cursors A and B, <code><span class="word">{a,</span> <span class="word">b}</span></code> in ticks; null where one is not placed</td>
+</tr>
+<tr>
+<td><code><span class="word">selection</span></code></td>
+<td>the selected span, <code><span class="word">{start,</span> <span class="word">end}</span></code> in ticks, or null</td>
+</tr>
+<tr>
+<td><code><span class="word">shaping</span></code></td>
+<td>the attribute, as a boolean</td>
+</tr>
+<tr>
+<td><code><span class="word">shape</span></code></td>
+<td>each channel's shape, by its name: <code><span class="word">offset</span></code>, the ticks it is moved by, and <code><span class="word">keep</span></code>, the part of its own data kept (<code><span class="word">{from,</span> <span class="word">to}</span></code> in its ticks before the move), or null for all of it. A group's alignment is not in the offset. Setting it moves and trims the channels it names. Nothing changes the recording</td>
+</tr>
+<tr>
+<td><code><span class="word">groups</span></code></td>
+<td>channels that belong together, such as the recordings of a merge: <code><span class="word">[{name,</span> <span class="word">channels}]</span></code>, the channels by name. Each group's rows sit under a head row with its name. While the view shapes, a channel's grip moves its row only among its own group's rows</td>
+</tr>
+<tr>
+<td><code><span class="word">aligns</span></code></td>
+<td>each group's alignment, by its name: the ticks all its channels are moved by, later when positive, on top of each channel's own offset. Setting it moves the groups it names</td>
+</tr>
+<tr>
+<td><code><span class="word">annotationsText</span></code></td>
+<td>the sidecar's hand-written file as text, in place of the file at <code><span class="word">annotations</span></code>, whose includes it still reads. The view redraws the annotations and keeps its place, cursors and selection. While it is set, the annotation lane shows even with nothing in it, so the first annotation added moves nothing. Null goes back to the file</td>
+</tr>
+<tr>
+<td><code><span class="word">summary</span></code></td>
+<td>the recording's own <code><span class="word">title</span></code> and <code><span class="word">facts</span></code>, the facts as one line, and <code><span class="word">matches</span></code>: whether the text the page slotted matches them. Null until the footer is in, and any stored view the facts wait on (above)</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Event</th>
+<th>When, and its <code><span class="word">detail</span></code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code><span class="word">tickwave-open</span></code></td>
+<td>the view opens: <code><span class="word">{src}</span></code></td>
+</tr>
+<tr>
+<td><code><span class="word">tickwave-window</span></code></td>
+<td>the span shown changes: <code><span class="word">{start,</span> <span class="word">end}</span></code></td>
+</tr>
+<tr>
+<td><code><span class="word">tickwave-select</span></code></td>
+<td>a span is selected: its <code><span class="word">start</span></code>, <code><span class="word">end</span></code>, <code><span class="word">duration</span></code>, <code><span class="word">edges</span></code> by channel, and <code><span class="word">periods</span></code> for the measured channel</td>
+</tr>
+<tr>
+<td><code><span class="word">tickwave-cursor</span></code></td>
+<td>a cursor is placed or cleared: <code><span class="word">{a,</span> <span class="word">b}</span></code> in ticks, and <code><span class="word">{aTime,</span> <span class="word">bTime}</span></code>, each a time at the recording's resolution as text; null where a cursor is not placed</td>
+</tr>
+<tr>
+<td><code><span class="word">tickwave-annotation</span></code></td>
+<td>an annotation's label is clicked: <code><span class="word">{id}</span></code></td>
+</tr>
+<tr>
+<td><code><span class="word">tickwave-shape</span></code></td>
+<td>the reader moves, trims or reorders a channel, or moves a group: <code><span class="word">{shape,</span> <span class="word">aligns,</span> <span class="word">channels,</span> <span class="word">change,</span> <span class="word">channel}</span></code>: the whole <code><span class="word">shape</span></code> and <code><span class="word">aligns</span></code>, the rows' names in order, what changed (<code><span class="word">&quot;move&quot;</span></code>, <code><span class="word">&quot;trim&quot;</span></code>, <code><span class="word">&quot;order&quot;</span></code> or <code><span class="word">&quot;align&quot;</span></code>), and the channel's name, or <code><span class="word">group</span></code> and its name for <code><span class="word">&quot;align&quot;</span></code></td>
+</tr>
+<tr>
+<td><code><span class="word">tickwave-ready</span></code></td>
+<td>the view has first drawn: <code><span class="word">{height}</span></code></td>
+</tr>
+<tr>
+<td><code><span class="word">tickwave-summary</span></code></td>
+<td>the view has the footer, and any stored view the facts wait on, and has compared the page's title and facts with it: the <code><span class="word">summary</span></code>. Again if the page slots other text</td>
+</tr>
+<tr>
+<td><code><span class="word">tickwave-error</span></code></td>
+<td>something failed: <code><span class="word">{message,</span> <span class="word">error}</span></code>. The view also shows it, and logs it to the console</td>
+</tr>
+</tbody>
+</table>
+<h2 id="tickwave-inset" tabindex="-1"><code><span class="word">&lt;tickwave-inset&gt;</span></code><a class="anchor" href="#tickwave-inset" aria-label="Link to this section">#</a></h2>
+<p>One annotation's span, magnified, with the annotation's label and text above it. The annotations
+inside the span show as notes, and an annotation's <code><span class="word">paint</span></code> draws a line in its role's look where
+the role drives it.
+An inset sweeps in from the left when it appears. Shown again within 800 ms of hiding, it doesn't
+sweep again. A reader who prefers reduced motion sees it drawn at once.</p>
+<table>
+<thead>
+<tr>
+<th>Attribute</th>
+<th>Means</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code><span class="word">src</span></code>, <code><span class="word">annotations</span></code>, <code><span class="word">channels</span></code>, <code><span class="word">series</span></code></td>
+<td>as for <code><span class="word">&lt;tickwave-view&gt;</span></code></td>
+</tr>
+<tr>
+<td><code><span class="word">annotation</span></code></td>
+<td>the annotation to show, by id. Set it to switch</td>
+</tr>
+<tr>
+<td><code><span class="word">pad</span></code></td>
+<td>room either side of the span: a share of it (<code><span class="word">&quot;10%&quot;</span></code>, <code><span class="word">6%</span></code> by default) or a time</td>
+</tr>
+<tr>
+<td><code><span class="word">scale</span></code></td>
+<td>a fixed time scale, such as <code><span class="word">&quot;50</span> <span class="word">ns/px&quot;</span></code>, so insets side by side compare</td>
+</tr>
+<tr>
+<td><code><span class="word">sweep</span></code></td>
+<td><code><span class="word">off</span></code> to draw at once</td>
+</tr>
+<tr>
+<td><code><span class="word">for</span></code></td>
+<td>the id of a <code><span class="word">&lt;tickwave-view&gt;</span></code> to open at a note</td>
+</tr>
+<tr>
+<td><code><span class="word">href</span></code></td>
+<td>a page to open the recording on at a note, such as tickwave's Open page</td>
+</tr>
+</tbody>
+</table>
+<p>An annotation's <code><span class="word">measure</span></code> puts a reading under the trace, taken from the channel's own edges:</p>
+<ul>
+<li><code><span class="word">rate</span></code> or <code><span class="word">period</span></code>: the running clock over the span. The note says how many periods it used,
+such as &quot;mean of 31 of 32 periods&quot;.</li>
+<li><code><span class="word">duration</span></code>: the time from the channel's first edge in the span to its last.</li>
+</ul>
+<p>A reading shows only the digits its ticks support. The key to the roles' lines sits on a line of
+its own, under the reading: the roles painted within the annotation's span on the inset's
+channels, in the order the sidecar declares them, each its label and a short line in its look.</p>
+<p>A reader can point at the inset. Pointing at a note lights its span, and the line under the trace
+gives the note's label, its length and who drives it, in place of the measure. That names a note
+too narrow to label. Pointing at a trace reads the pulse there, as the view's label does: its level
+and width, where it starts in the span, then its period, frequency and duty, as many of them as
+fit on the line. On an analog channel it reads the value. Moving away puts the measure back.</p>
+<p>A reader can zoom in within the inset's span, as close as the view goes. Ctrl or Cmd with the
+wheel, a trackpad pinch, or two fingers zoom it. Zoomed in, a drag with the mouse or a finger moves
+along the span, as do Shift with the wheel and a sideways swipe. A drag opens nothing. The inset
+zooms out as far as its span and moves no further than its ends. A zoom step eases as the view's
+does.
+Where one pixel holds several edges, the line says how to zoom in. Shown again after 800 ms, or at
+another annotation, the inset shows its whole span.</p>
+<p>The inset is one Tab stop, named by its label. The up and down arrow keys zoom in and out, about
+the lit note or else the middle. The left and right arrows move along the span. Shift with left or
+right steps through the notes, and a screen reader says each. Zoomed in, the span moves to take in
+the note stepped to. Escape lights none. On a touch screen, a tap lights a note or reads a pulse.</p>
+<p>With <code><span class="word">for</span></code> or <code><span class="word">href</span></code>, the inset opens the recording at a note. A click on a note, Enter on the
+note the keys lit, or a second tap on a lit note opens it there. A click elsewhere on the plot
+opens it at the inset's own annotation. Zoomed in, the recording opens over the span the inset
+shows. <code><span class="word">for</span></code> opens a view on the page, and wins where it names one. Otherwise <code><span class="word">href</span></code> makes the
+inset a link to that page: tickwave's Open page, or any page that reads the same parameters. The
+inset sets <code><span class="word">src</span></code>, <code><span class="word">annotations</span></code> and <code><span class="word">annotation</span></code> in the page's query, and <code><span class="word">window</span></code> while zoomed in:
+the span shown, in whole ticks. It keeps the page's other parameters. While the whole span shows,
+it drops any <code><span class="word">window</span></code> the address had. A recording on the same site goes in by its path, and
+another site's whole. As a link, the inset opens a new tab on a middle click or a Ctrl or Cmd
+click, and shows its address on hover.</p>
+<p>An inset the pointer passes through, as in a chart's popover, where <code><span class="word">pointer-events</span></code> is <code><span class="word">none</span></code>,
+does none of this. Inside a popover the inset is no Tab stop, and the element that opened it keeps
+the focus. A reference passes its arrow keys to <code><span class="word">arrowKey(event)</span></code>, which answers them as the
+inset's own and says whether it did. It reads the lit note from <code><span class="word">lit</span></code> and the zoomed span from
+<code><span class="word">zoomed</span></code> only while its popover is open, and lights none with <code><span class="word">clear()</span></code> as the popover closes.</p>
+<p>An inset takes its final height once its recording's footer and sidecar are in. The line under the
+trace is held from then, where the annotation asks for a measure or a reader can point at the
+inset, so neither the data's arrival nor the pointer moves anything below it. Before then it has
+no label and no rows to size by. A page that wants nothing to move at all gives the inset its height, as
+tickwave's main page does for the figure beside its name. <code><span class="word">settled()</span></code> and the <code><span class="word">tickwave-ready</span></code>
+event (<code><span class="word">{annotation,</span> <span class="word">height}</span></code>) work as on the view, so a page can lay itself out around an inset's
+final height. <code><span class="word">sweeping</span></code> says whether the sweep is playing. <code><span class="word">window</span></code> gives the span shown,
+<code><span class="word">{start,</span> <span class="word">end}</span></code> in ticks, and <code><span class="word">zoomed</span></code> the span the reader has zoomed to, or null while the whole
+span shows, as it does again when the inset is shown after 800 ms hidden. While a zoom step eases,
+<code><span class="word">window</span></code> gives the span drawn on the way and <code><span class="word">zoomed</span></code> where it is going.</p>
+<h2 id="tickwave-ref" tabindex="-1"><code><span class="word">&lt;tickwave-ref&gt;</span></code><a class="anchor" href="#tickwave-ref" aria-label="Link to this section">#</a></h2>
+<p>A phrase that cites an annotation. Pointing at it, or reaching it with Tab, opens an inset in a
+popover beside the text, so nothing on the page moves. The pointer can move into the popover to
+read the inset, and has 300 ms to cross between the text and the popover. Moving the pointer or
+the focus away, or Escape, closes the popover. With the focus on the reference, the arrow keys
+work the inset as they do an inset with the focus. A click, Enter or Space opens its view at the
+note the pointer or the keys lit, or else at the annotation, and over the span the reader zoomed the
+popover to. With the popover closed, as after Escape, the view opens at the annotation's own span.
+A screen reader cannot reach into the drawn inset, so the annotation's label and text describe the
+reference itself.</p>
+<table>
+<thead>
+<tr>
+<th>Attribute</th>
+<th>Means</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code><span class="word">annotation</span></code></td>
+<td>the annotation it cites</td>
+</tr>
+<tr>
+<td><code><span class="word">for</span></code></td>
+<td>the id of a <code><span class="word">&lt;tickwave-view&gt;</span></code> to share a recording with. The reference takes its <code><span class="word">src</span></code>, <code><span class="word">annotations</span></code>, <code><span class="word">channels</span></code> and <code><span class="word">series</span></code></td>
+</tr>
+<tr>
+<td><code><span class="word">src</span></code>, <code><span class="word">annotations</span></code>, <code><span class="word">series</span></code></td>
+<td>the recording, sidecar and series, for a reference without a view</td>
+</tr>
+</tbody>
+</table>
+<p>A reference fetches nothing until it scrolls into view. Then it fetches the recording's footer and
+the sidecar, and the inset fetches the data when it opens.</p>
+<h2 id="tickwave-chart" tabindex="-1"><code><span class="word">&lt;tickwave-chart&gt;</span></code><a class="anchor" href="#tickwave-chart" aria-label="Link to this section">#</a></h2>
+<p>Measurements against a setting, such as throughput against the clock asked for: a line through
+each series' points. It is its own module, <code><span class="word">tickwave-chart.js</span></code>, and loads nothing else:</p>
+<pre><code class="language-html"><span style="color:var(--code-operator)">&lt;</span><span style="color:var(--code-function)">script</span> <span style="color:var(--code-type)">type</span><span style="color:var(--code-operator)">=</span><span style="color:var(--code-string)">"module"</span> <span style="color:var(--code-type)">src</span><span style="color:var(--code-operator)">=</span><span style="color:var(--code-string)">"tickwave-chart.js"</span><span style="color:var(--code-operator)">&gt;</span>&lt;<span style="color:var(--code-operator)">/</span><span style="color:var(--code-function)">script</span><span style="color:var(--code-operator)">&gt;</span>
+
+<span style="color:var(--code-operator)">&lt;</span><span style="color:var(--code-function)">figure</span><span style="color:var(--code-operator)">&gt;</span>
+  <span style="color:var(--code-operator)">&lt;</span><span style="color:var(--code-function)">tickwave-chart</span> <span style="color:var(--code-type)">src</span><span style="color:var(--code-operator)">=</span><span style="color:var(--code-string)">"figure1.chart.json"</span> <span style="color:var(--code-type)">legend</span><span style="color:var(--code-operator)">=</span><span style="color:var(--code-string)">"above"</span> <span style="color:var(--code-type)">end-labels</span> <span style="color:var(--code-type)">table</span><span style="color:var(--code-operator)">=</span><span style="color:var(--code-string)">"table-1"</span><span style="color:var(--code-operator)">&gt;&lt;/</span><span style="color:var(--code-function)">tickwave-chart</span><span style="color:var(--code-operator)">&gt;</span>
+  <span style="color:var(--code-operator)">&lt;</span><span style="color:var(--code-function)">figcaption</span><span style="color:var(--code-operator)">&gt;</span>Figure 1. 4 KiB writes against the SWD clock asked for.<span style="color:var(--code-operator)">&lt;/</span><span style="color:var(--code-function)">figcaption</span><span style="color:var(--code-operator)">&gt;</span>
+<span style="color:var(--code-operator)">&lt;/</span><span style="color:var(--code-function)">figure</span><span style="color:var(--code-operator)">&gt;</span>
+</code></pre>
+<p>The chart draws SVG into its own children, not a shadow root, and writes its colours as
+attributes. So Firefox's reader view, and a page without its CSS, still show the figure. Its
+caption names it, and the table it names describes it. A reader picks a setting by pointing at it,
+tapping it or stepping to it with the arrow keys, and picks a series from the legend or a line's
+end label. A point can name a recording and one of its annotations. Pointing at it opens an inset
+of that annotation, and a click opens the page's view of the recording there. Only then does the
+chart load <code><span class="word">tickwave.js</span></code>, from beside itself.</p>
+<p><code><span class="word">CHARTS.md</span></code>, at the repository's root, specifies the data format, <code><span class="word">tickwave-chart/1</span></code>, and every
+attribute, property and event. <code><span class="word">tickwave.css</span></code> reserves a chart's room before the module defines it,
+from <code>--tickwave-chart-height</code> and <code>--tickwave-chart-readout-lines</code>, as it lays out a closed view. Besides the properties below, the chart reads the line patterns
+(<code><span class="word">--dash-second-build</span></code>, <code><span class="word">--dash-reference</span></code>, <code><span class="word">--dash-capture-second</span></code>, <code><span class="word">--dash-misread</span></code>),
+<code><span class="word">--capture-width</span></code>, <code><span class="word">--capture-opacity</span></code> and <code><span class="word">--fault-ink</span></code>.</p>
+<h2 id="styling" tabindex="-1">Styling<a class="anchor" href="#styling" aria-label="Link to this section">#</a></h2>
+<p>The elements draw in the page's own colours and fonts. They read the page's CSS custom properties
+and fall back to system colours on a page without them:</p>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Draws</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code><span class="word">--ink</span></code>, <code><span class="word">--ink-2</span></code></td>
+<td>text, traces, cursors; secondary text</td>
+</tr>
+<tr>
+<td><code><span class="word">--page</span></code>, <code><span class="word">--surface</span></code>, <code><span class="word">--raised</span></code></td>
+<td>the backgrounds under the elements and their controls</td>
+</tr>
+<tr>
+<td><code><span class="word">--hair</span></code>, <code><span class="word">--rule</span></code></td>
+<td>dividers; control outlines</td>
+</tr>
+<tr>
+<td><code><span class="word">--wash</span></code></td>
+<td>what the pointer is on</td>
+</tr>
+<tr>
+<td><code><span class="word">--attention-ink</span></code></td>
+<td>a notice of a problem</td>
+</tr>
+<tr>
+<td><code><span class="word">--series-&lt;name&gt;</span></code></td>
+<td>the traces, with <code><span class="word">series=&quot;&lt;name&gt;&quot;</span></code>. Where the page doesn't set it, the recording's stored colour</td>
+</tr>
+<tr>
+<td><code><span class="word">--tickwave-role-&lt;name&gt;</span></code></td>
+<td>the lines paint role <code><span class="word">&lt;name&gt;</span></code> draws, over the colour its declaration gives (ANNOTATIONS.md, &quot;Roles&quot;)</td>
+</tr>
+<tr>
+<td><code>--tickwave-role-&lt;name&gt;-weight</code></td>
+<td>CSS pixels the role's lines add to the line weight, from 0 to 4, with or without <code><span class="word">px</span></code></td>
+</tr>
+<tr>
+<td><code>--tickwave-role-&lt;name&gt;-dash</code></td>
+<td>the role's dash and gap lengths, in line widths, as its declaration gives them: numbers apart by spaces or commas, in pairs, together at least 1. <code><span class="word">none</span></code> draws a dashed role solid</td>
+</tr>
+<tr>
+<td><code><span class="word">--tickwave-line-weight</span></code></td>
+<td>the traces' lines in a view and an inset: an analog trace, and a digital row's levels and edges. A number of CSS pixels, with or without <code><span class="word">px</span></code>; 1.5 where it is unset or not a positive number. A role's weight adds to it. Rules, axes, the selection and markers stay a pixel wide. The chart doesn't read it</td>
+</tr>
+<tr>
+<td><code><span class="word">--font-text</span></code>, <code><span class="word">--font-figures</span></code></td>
+<td>labels; the readouts' figures</td>
+</tr>
+</tbody>
+</table>
+<p>A digital row reads at most 2,097,152 edges for a view, the view's and a view's width either side.
+Where the overview it holds can't rule more out, it counts them from the recording's index first.
+Where those hold more, as a burst far busier than the rest of a long capture can, the row draws its
+finest overview level, each bucket across the columns it spans, until the view narrows enough.</p>
+<p>While a zoom's finer data loads, a row draws the coarser data it has. Where that data shows a
+change it cannot yet place, the row draws it in the trace's colour, faded. A read still going
+after 5 s puts &quot;Still loading&quot; in the element's notice until it lands. A read that fails puts
+&quot;Data did not load&quot; there, with the cause, and the stretch stays faded. The row asks again when
+the view next redraws, 3 s or more later, and the notice goes once the read lands.</p>
+<p>Each field of a role's look comes from the page's property where it sets one, then from the role's
+declaration. A colour neither gives comes from the role's place in the order of declarations: the
+first role in the trace's colour, the rest in ink. A dash neither gives is a solid line. A role's
+value that doesn't read, such as a weight of 5, is left to the declaration. The elements follow a
+change of face as it happens: a <code><span class="word">data-face</span></code>, a class or a style on <code><span class="word">&lt;html&gt;</span></code> that changes the tokens,
+or the system's preference. A change there that leaves the tokens alone, such as a header marking
+the page scrolled, redraws nothing. A declared colour takes the face's: the day colour while the
+page is lighter than its ink, the night colour while it is darker.</p>
+<p>The elements take a new face in the frame after it changes. A view's and an inset's panels and
+text follow the page's CSS, and their canvas redraws in that frame. A chart's colours follow the
+page's CSS without a redraw.</p>
+<p>Each element exposes its pieces to <code><span class="word">::part()</span></code>. On the view: <code><span class="word">summary</span></code>, <code><span class="word">title</span></code>, <code><span class="word">facts</span></code>,
+<code><span class="word">open-button</span></code> (Open, or Close while the view is open), <code><span class="word">download-button</span></code> (Download and
+Annotations), <code>annotations-download-button</code> (Annotations), <code>annotations-download-list</code> (the list it
+opens), <code>annotations-download-link</code> (each link in the list), <code>annotations-download-note</code> (why the
+list holds the hand-written file alone), <code><span class="word">viewer</span></code>, <code><span class="word">toolbar</span></code>, <code><span class="word">key</span></code>, <code><span class="word">plot</span></code>, <code><span class="word">hint</span></code>, <code><span class="word">reading</span></code> (the
+label at the pointer), <code><span class="word">row-handle</span></code>, <code><span class="word">readout</span></code>, <code><span class="word">steps</span></code>, <code><span class="word">notice</span></code> and <code><span class="word">button</span></code> (each button, and
+the Download link).
+Inside <code><span class="word">facts</span></code>, each fact is a <code><span class="word">fact</span></code> and also <code><span class="word">fact-length</span></code>, <code><span class="word">fact-channels</span></code> or <code><span class="word">fact-size</span></code>, with
+a <code><span class="word">fact-separator</span></code> (&quot;; &quot;) between two. On the inset: <code><span class="word">inset</span></code>, <code><span class="word">label</span></code>, <code><span class="word">text</span></code>, <code><span class="word">frame</span></code>, <code><span class="word">canvas</span></code>,
+<code><span class="word">plot</span></code> (over the canvas, what the pointer and the keys reach), <code><span class="word">foot</span></code>, <code><span class="word">measure</span></code>, <code><span class="word">reading</span></code> (what
+the pointer or the keys lit), <code><span class="word">key</span></code> and <code><span class="word">notice</span></code>. On the reference: <code><span class="word">popover</span></code>.
+A part an element hides stays hidden, whatever <code><span class="word">display</span></code> a page's rule gives it. A page's slotted
+spans sit inside <code><span class="word">title</span></code> and <code><span class="word">facts</span></code>, and take the page's own rules.</p>
+<p>A page sets the view's summary through these properties, set on the view or above it. <code><span class="word">tickwave.css</span></code>
+reads them too, which <code><span class="word">::part()</span></code> cannot reach, so a view styled this way keeps its height when it
+is defined:</p>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Sets</th>
+<th>Without it</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--tickwave-summary-padding</code></td>
+<td>the summary's padding</td>
+<td><code><span class="word">8px</span> <span class="word">10px</span> <span class="word">8px</span> <span class="word">14px</span></code></td>
+</tr>
+<tr>
+<td><code><span class="word">--tickwave-summary-gap</span></code></td>
+<td>the gap between its rows, and between the text and the button</td>
+<td><code><span class="word">2px</span> <span class="word">12px</span></code></td>
+</tr>
+<tr>
+<td><code>--tickwave-summary-border-width</code></td>
+<td>its border's widths</td>
+<td><code><span class="word">1px</span></code></td>
+</tr>
+<tr>
+<td><code>--tickwave-summary-border-color</code></td>
+<td>its border's colour</td>
+<td><code><span class="word">var(--hair)</span></code></td>
+</tr>
+<tr>
+<td><code>--tickwave-summary-background</code></td>
+<td>its background</td>
+<td><code><span class="word">var(--surface)</span></code></td>
+</tr>
+<tr>
+<td><code>--tickwave-summary-radius</code></td>
+<td>its corners' radius</td>
+<td><code><span class="word">10px</span></code></td>
+</tr>
+<tr>
+<td><code><span class="word">--tickwave-title-size</span></code></td>
+<td>the title's font size</td>
+<td>the view's</td>
+</tr>
+<tr>
+<td><code><span class="word">--tickwave-facts-size</span></code></td>
+<td>the facts' font size</td>
+<td><code><span class="word">13px</span></code></td>
+</tr>
+<tr>
+<td><code>--tickwave-open-button-size</code></td>
+<td>the Open button's font size</td>
+<td><code><span class="word">13px</span></code></td>
+</tr>
+<tr>
+<td><code>--tickwave-open-button-padding</code></td>
+<td>its padding</td>
+<td><code><span class="word">3px</span> <span class="word">9px</span></code></td>
+</tr>
+<tr>
+<td><code>--tickwave-open-button-height</code></td>
+<td>its least height</td>
+<td><code><span class="word">26px</span></code></td>
+</tr>
+</tbody>
+</table>
+<p>The title and the facts take the view's <code><span class="word">font-size</span></code> and <code><span class="word">line-height</span></code>. The title is weight 600 and
+breaks anywhere it must; a page that changes that, or the facts' colour, styles its own spans.</p>
+<p>Nothing moves under the reader. A readout's figures are tabular, and an inset's reading sets a
+pulse's level as wide as &quot;high&quot; either way, so what follows it holds still as the pointer crosses
+edges. A line of a readout, or of an inset's foot, is as tall from the first as once its figures
+come: a selection's counts and periods show &quot;…&quot; in the figures' font, and the periods' menu, while
+they are worked out. The label at a view's pointer keeps off the row it reads. An inset takes its
+final height once its footer and sidecar are in, so the data arriving moves nothing below it. A
+control stays where the reader pressed it. One that opens or switches something undoes it when
+pressed again: a view's Open button reads Close while the view is open, and is as wide either way.</p>
+<h2 id="from-the-module" tabindex="-1">From the module<a class="anchor" href="#from-the-module" aria-label="Link to this section">#</a></h2>
+<p><code><span class="word">tickwave.js</span></code> also exports these functions:</p>
+<table>
+<thead>
+<tr>
+<th>Function</th>
+<th>Does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code><span class="word">registerFile(file,</span> <span class="word">sidecar)</span></code></td>
+<td>makes a local <code><span class="word">File</span></code> a <code><span class="word">src</span></code>. The sidecar's <code><span class="word">.toml</span></code> and <code><span class="word">.jsonl</span></code> files can come with it</td>
+</tr>
+<tr>
+<td><code><span class="word">registerLoader(loader)</span></code></td>
+<td>reads recordings at the URLs <code><span class="word">loader.accepts</span></code>, asked before the loaders registered earlier</td>
+</tr>
+<tr>
+<td><code><span class="word">recordingInfo(src)</span></code></td>
+<td>what a recording holds, from its footer: title, length, channels, size, content id</td>
+</tr>
+<tr>
+<td><code><span class="word">previewMerge(inputs)</span></code></td>
+<td>several recordings on one time axis, as <code><span class="word">tickwave</span> <span class="word">merge</span></code> would put them: <code><span class="word">inputs</span></code> is <code><span class="word">[{src,</span> <span class="word">stem}]</span></code>, each with its file's name without the extension. Resolves to <code><span class="word">{src,</span> <span class="word">merged}</span></code>: a <code><span class="word">src</span></code> a view draws, and the preview, whose <code><span class="word">mergedInfo</span></code> gives each channel's name (a later recording's clashing name takes its stem, as <code><span class="word">stem/name</span></code>), <code><span class="word">origin(channel)</span></code> the recording it comes from, and <code><span class="word">ratios</span></code> the merged ticks in one of each recording's, as <code><span class="word">{num,</span> <span class="word">den}</span></code>. The preview ticks at the least common multiple of the recordings' rates, or at the fastest of them where the multiple has a term past 2^53, as <code><span class="word">tickwave</span> <span class="word">merge</span></code> does. Every recording starts at tick 0; a view moves them with <code><span class="word">aligns</span></code></td>
+</tr>
+<tr>
+<td><code><span class="word">resolveSidecar(src,</span> <span class="word">text,</span> <span class="word">annotations)</span></code></td>
+<td>the annotations of a sidecar whose hand-written file is <code><span class="word">text</span></code>, checked against the recording as <code><span class="word">tickwave</span> <span class="word">annotations</span> <span class="word">check</span></code> checks them. Its includes are read beside <code><span class="word">annotations</span></code>, the sidecar's address, or from the files registered with the recording when that is null. Rejects with every problem, one a line</td>
+</tr>
+<tr>
+<td><code><span class="word">readSidecar(src,</span> <span class="word">text,</span> <span class="word">annotations)</span></code></td>
+<td>as <code><span class="word">resolveSidecar</span></code>, resolving to <code><span class="word">{annotations,</span> <span class="word">roles,</span> <span class="word">view}</span></code>: the annotations, the roles the sidecar declares in their order, and its stored view, in ticks, or null</td>
+</tr>
+<tr>
+<td><code><span class="word">configure({firstRead,</span> <span class="word">maxDecodedBytes,</span> <span class="word">cacheBytes})</span></code></td>
+<td>the size of the first read, from a recording's end, 32 KiB by default; the most the decoder takes from one block, overview block or strip, 64 MiB, past which it refuses the recording; and the size of the cache of decoded blocks and index pages, 192 MiB</td>
+</tr>
+</tbody>
+</table>
+<p class="doc-source">From <a href="https://github.com/Escapement-Project/tickwave/blob/HEAD/web/README.md#the-elements">tickwave</a>, where changes to this page go.</p></article>
+</div>
+</main>
+<footer><div class="wrap"><span>Escapement Project</span><span>The Escapement Project is not affiliated with NXP or any other probe vendor. MCU-Link and LinkServer are NXP's names for its products.</span><span class="licence">tickwave is free software under the MIT or Apache-2.0 licence.</span></div></footer>
+<script src="../face.js" defer></script>
+<script src="../header.js" defer></script>
+<script src="../copy.js" defer></script>
+<script src="../doc.js" defer></script>
+<script src="../search.js" defer></script>
+<script src="../mark.js" defer></script>
+</body>
+</html>

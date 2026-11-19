@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sidecar – tickwave – Escapement Project</title>
+<meta name="description" content="Annotations beside a recording: the hand-written file, a generator's, their fields and measures.">
+<script>
+// .js, as on the project's other pages, for a shared rule that needs a script to run; and a face
+// chosen on an earlier visit, applied before the first paint. The project's sites share the key.
+document.documentElement.classList.add("js"); try { const f = localStorage.getItem("face"); if (f === "day" || f === "night") document.documentElement.dataset.face = f; } catch {}
+</script>
+<link rel="preload" href="../fonts/saira-expanded.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="../fonts/hanken-grotesk.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="icon" href="../favicon-tickwave.ico">
+<link rel="stylesheet" href="../tokens.css">
+<link rel="stylesheet" href="../base.css">
+<link rel="stylesheet" href="../tickwave.css">
+<link rel="stylesheet" href="../site.css">
+<link rel="stylesheet" href="../doc.css">
+<script type="module" src="../site.js"></script>
+</head>
+<body class="doc-page">
+<a class="skip" href="#main">Skip to the content</a>
+<header data-published="https://escapement-project.github.io">
+  <div class="wrap">
+    <a class="brand" href="https://escapement-project.github.io/" data-page="landing"><svg aria-hidden="true" fill="currentColor" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path fill-rule="evenodd" d="M32,3 A29,29 0 1,0 32.01,3 Z M32,9 A23,23 0 1,0 32.01,9 Z"/><path d="M9.796,38 H29 V20 H51.621 A23,23 0 0,1 54.204,26 H35 V44 H12.379 A23,23 0 0,1 9.796,38 Z"/></svg><span class="name">Escapement Project</span></a>
+    <nav id="places" aria-label="Escapement Project"><a href="https://escapement-project.github.io/verge/" data-page="verge">Verge</a><span class="product"><a href="../index.html" data-page="tickwave" aria-current="true">tickwave</a><a href="../open.html" data-page="tickwave/open">Open</a><a href="../docs/index.html" data-page="tickwave/docs" aria-current="true">Docs</a></span><a href="https://escapement-project.github.io/#source">Source</a></nav>
+    <button class="switch" id="faces" type="button" role="switch" aria-checked="false" aria-label="Night face"><span class="track"><span class="thumb"><svg class="wheel" viewBox="0 0 40 40" aria-hidden="true"><g transform="translate(14 3) scale(.75)"><circle cx="8" cy="8" r="3.2" fill="currentColor"/><path d="M8 1.2v1.6M8 13.2v1.6M1.2 8h1.6M13.2 8h1.6M3.2 3.2l1.1 1.1M11.7 11.7l1.1 1.1M3.2 12.8l1.1-1.1M11.7 4.3l1.1-1.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></g><g transform="rotate(180 20 20) translate(14 3) scale(.75)"><path d="M10.8 1.8a6.3 6.3 0 1 0 3.4 10.6A5.2 5.2 0 0 1 10.8 1.8z" fill="currentColor"/></g></svg></span></span></button>
+  </div>
+</header>
+<main id="main" class="wrap">
+<div class="doc-wrap">
+<button class="doc-bar" type="button" aria-expanded="false" aria-controls="doc-rail"><span class="label">Contents</span><span class="where">tickwave sidecar annotations, version 1</span></button>
+<div class="doc-rail" id="doc-rail">
+<search class="find" data-index="search.json">
+<input id="find" type="search" role="combobox" aria-label="Search tickwave's docs" aria-autocomplete="list" aria-expanded="false" aria-controls="found" placeholder="Search the docs" autocomplete="off" spellcheck="false" enterkeyhint="search">
+<kbd class="key" aria-hidden="true">/</kbd>
+<button class="clear" type="button" aria-label="Clear the search" hidden></button>
+<p class="count" role="status"></p>
+</search>
+<div class="doc-list"><nav class="doc-nav" aria-label="tickwave's docs">
+<details class="group"><summary>Using it</summary><ul>
+<li><a href="viewer.html">Viewer</a></li>
+<li><a href="converter.html">Converter</a></li>
+</ul></details>
+<details class="group"><summary>In your page</summary><ul>
+<li><a href="elements.html">Elements</a></li>
+<li><a href="charts.html">Charts</a></li>
+</ul></details>
+<details class="group" open><summary>The files</summary><ul>
+<li><a href="format.html">Format</a></li>
+<li><a href="annotations.html" aria-current="page">Sidecar</a><ul class="toc"><li><a href="#files">Files</a></li><li><a href="#the-hand-written-file">The hand-written file</a></li><li><a href="#a-generators-file">A generator's file</a></li><li><a href="#fields">Fields</a></li><li><a href="#roles">Roles</a></li><li><a href="#the-stored-view">The stored view</a></li><li><a href="#measures">Measures</a></li><li><a href="#values">Values</a></li><li><a href="#times">Times</a></li><li><a href="#ids-stay-stable">Ids stay stable</a></li><li><a href="#order">Order</a></li><li><a href="#resolved-annotations">Resolved annotations</a></li><li><a href="#checks">Checks</a></li><li><a href="#versions">Versions</a></li><li><a href="#bundling">Bundling</a></li><li><a href="#merging">Merging</a></li></ul></li>
+</ul></details>
+</nav>
+<div class="found" id="found" role="listbox" aria-label="Sections found" hidden></div></div></div>
+<article class="doc"><h1 id="tickwave-sidecar-annotations-version-1" tabindex="-1">tickwave sidecar annotations, version 1</h1>
+<p>Annotations mark spans and points on a recording: a transfer, an acknowledge, a misread, a
+stretched clock period. They live beside the recording in text files, so they diff, take hand
+edits, and regenerate without touching the capture. Page text cites an annotation by its id.</p>
+<p>Status: draft, with the recording format.</p>
+<h2 id="files" tabindex="-1">Files<a class="anchor" href="#files" aria-label="Link to this section">#</a></h2>
+<p>A recording <code><span class="word">rec.tickwave</span></code> has one hand-written TOML file, <code><span class="word">rec.annotations.toml</span></code>. A program that
+generates annotations, such as a protocol decoder, writes its own JSON Lines file, which the TOML
+file includes: <code><span class="word">rec.wire_swd.jsonl</span></code>. An included file sits beside the hand-written one and is named
+on its own, without a directory. A generator rewrites its file whole on each run. It may start
+the hand-written file when there is none, and never writes it after that. From then on only
+tickwave's editor edits it, and it keeps the file's comments, order and layout, so a rerun cannot
+touch a hand edit. A script that re-pins a sidecar to a reconverted recording may rewrite
+<code><span class="word">recording_id</span></code>, and nothing else.</p>
+<p>A generator runs after the recording is converted. It reads the recording's id from
+<code><span class="word">tickwave</span> <span class="word">info</span> <span class="word">--json</span></code> (<code><span class="word">header.content_id</span></code>).</p>
+<h2 id="the-hand-written-file" tabindex="-1">The hand-written file<a class="anchor" href="#the-hand-written-file" aria-label="Link to this section">#</a></h2>
+<pre><code class="language-toml">format <span style="color:var(--code-operator)">=</span> <span style="color:var(--code-string)">"tickwave-annotations/1"</span>
+recording <span style="color:var(--code-operator)">=</span> <span style="color:var(--code-string)">"rec.tickwave"</span>               <span style="color:var(--ink-2)"># optional; checked against the file name when known</span>
+recording_id <span style="color:var(--code-operator)">=</span> <span style="color:var(--code-string)">"blake3:4f2a…"</span>            <span style="color:var(--ink-2)"># the recording's content id</span>
+include <span style="color:var(--code-operator)">=</span> <span style="color:var(--ink-2)">[</span><span style="color:var(--code-string)">"rec.wire_swd.jsonl"</span><span style="color:var(--ink-2)">]</span>         <span style="color:var(--ink-2)"># generator files, beside this one</span>
+
+<span style="color:var(--ink-2)">[[</span>annotation<span style="color:var(--ink-2)">]]</span>
+id <span style="color:var(--code-operator)">=</span> <span style="color:var(--code-string)">"read-ack-check"</span>
+start <span style="color:var(--code-operator)">=</span> <span style="color:var(--code-string)">"317.85882 ms"</span>
+end <span style="color:var(--code-operator)">=</span> <span style="color:var(--code-string)">"317.85891 ms"</span>
+channels <span style="color:var(--code-operator)">=</span> <span style="color:var(--ink-2)">[</span><span style="color:var(--code-string)">"SWCLK"</span><span style="color:var(--ink-2)">,</span> <span style="color:var(--code-string)">"SWDIO"</span><span style="color:var(--ink-2)">]</span>
+label <span style="color:var(--code-operator)">=</span> <span style="color:var(--code-string)">"The 12-cycle period before read data"</span>
+kind <span style="color:var(--code-operator)">=</span> <span style="color:var(--code-string)">"period"</span>
+measure <span style="color:var(--code-operator)">=</span> <span style="color:var(--ink-2)">{</span> channel <span style="color:var(--code-operator)">=</span> <span style="color:var(--code-string)">"SWCLK"</span><span style="color:var(--ink-2)">,</span> what <span style="color:var(--code-operator)">=</span> <span style="color:var(--code-string)">"rate"</span> <span style="color:var(--ink-2)">}</span>
+
+<span style="color:var(--ink-2)">[[</span>annotation<span style="color:var(--ink-2)">]]</span>
+id <span style="color:var(--code-operator)">=</span> <span style="color:var(--code-string)">"first-misread"</span>
+ref <span style="color:var(--code-operator)">=</span> <span style="color:var(--code-string)">"wire_swd/misread/412093311"</span>
+label <span style="color:var(--code-operator)">=</span> <span style="color:var(--code-string)">"NXP's firmware misreads at 25 MHz"</span>
+</code></pre>
+<h2 id="a-generators-file" tabindex="-1">A generator's file<a class="anchor" href="#a-generators-file" aria-label="Link to this section">#</a></h2>
+<p>The first line names the generator. Each later line is one annotation. Blank lines are skipped.</p>
+<pre><code>{&quot;format&quot;: &quot;tickwave-annotations/1&quot;, &quot;source&quot;: &quot;wire_swd&quot;, &quot;version&quot;: &quot;9f3c2e1&quot;, &quot;recording_id&quot;: &quot;blake3:4f2a…&quot;}
+{&quot;id&quot;: &quot;misread/412093311&quot;, &quot;kind&quot;: &quot;misread&quot;, &quot;start&quot;: 412093311, &quot;end&quot;: 412094105, &quot;channels&quot;: [&quot;SWDIO&quot;], &quot;label&quot;: &quot;parity wrong&quot;}
+</code></pre>
+<p><code><span class="word">source</span></code> is the generator's name. It is not empty and holds no whitespace, <code><span class="word">/</span></code> or <code><span class="word">\</span></code>: tickwave
+names the generator's file after it, <code><span class="word">rec.&lt;source&gt;.jsonl</span></code>, beside the recording. <code><span class="word">version</span></code> is
+optional: the generator's own commit or hash, for provenance. <code><span class="word">role</span></code> is optional too: the paint
+roles the generator's lines paint with, each a table as the hand-written file's <code><span class="word">[[role]]</span></code> gives
+one (below).</p>
+<pre><code>{&quot;format&quot;: &quot;tickwave-annotations/1&quot;, &quot;source&quot;: &quot;wire_swd&quot;, &quot;recording_id&quot;: &quot;blake3:4f2a…&quot;, &quot;role&quot;: [{&quot;name&quot;: &quot;probe&quot;, &quot;label&quot;: &quot;probe drives&quot;}, {&quot;name&quot;: &quot;target&quot;, &quot;label&quot;: &quot;target drives&quot;, &quot;weight&quot;: 1}]}
+</code></pre>
+<h2 id="fields" tabindex="-1">Fields<a class="anchor" href="#fields" aria-label="Link to this section">#</a></h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code><span class="word">id</span></code></td>
+<td>Hand-written: any name without whitespace or <code><span class="word">/</span></code>. Generated: the full id is <code><span class="word">&lt;source&gt;/&lt;id&gt;</span></code>.</td>
+</tr>
+<tr>
+<td><code><span class="word">start</span></code>, <code><span class="word">end</span></code></td>
+<td>Times. <code><span class="word">end</span></code> is absent for a point.</td>
+</tr>
+<tr>
+<td><code><span class="word">channels</span></code></td>
+<td>Channel names. Absent or empty means every channel.</td>
+</tr>
+<tr>
+<td><code><span class="word">label</span></code></td>
+<td>Short text shown with the annotation.</td>
+</tr>
+<tr>
+<td><code><span class="word">kind</span></code></td>
+<td>A free word (<code><span class="word">transfer</span></code>, <code><span class="word">misread</span></code>, <code><span class="word">stall</span></code>). Styling and filtering key on it.</td>
+</tr>
+<tr>
+<td><code><span class="word">text</span></code></td>
+<td>Longer text, shown in an inset's caption.</td>
+</tr>
+<tr>
+<td><code><span class="word">paint</span></code></td>
+<td>A role the sidecar declares (below), such as <code><span class="word">probe</span></code>: the annotation's channels draw over its span in the role's look.</td>
+</tr>
+<tr>
+<td><code><span class="word">measure</span></code></td>
+<td><code><span class="word">{channel,</span> <span class="word">what}</span></code>: the inset shows a measure taken from the channel's edges inside the span (below). The channel must be digital, and the annotation a span.</td>
+</tr>
+<tr>
+<td><code><span class="word">values</span></code></td>
+<td>Figures the annotation states, by name, each a decimal and its unit (below).</td>
+</tr>
+<tr>
+<td><code><span class="word">ref</span></code></td>
+<td>Hand-written only: the full id of a generated annotation. This one takes its span and channels, and any field it leaves out.</td>
+</tr>
+</tbody>
+</table>
+<p>A file may hold no other fields, <code><span class="word">measure</span></code>'s included: a misspelt one is an error, not ignored. A
+key stated twice in any object of an annotation, its <code><span class="word">measure</span></code> and <code><span class="word">values</span></code> included, is an error
+too, whatever the file's version. A later minor version can add fields (see Versions).</p>
+<h2 id="roles" tabindex="-1">Roles<a class="anchor" href="#roles" aria-label="Link to this section">#</a></h2>
+<p>A paint role says who drives a line, or anything else a page colours a stretch of a channel by.
+The sidecar declares each role it paints with: the hand-written file in <code><span class="word">[[role]]</span></code> tables, and a
+generator in its file's first line, as <code><span class="word">role</span></code>.</p>
+<pre><code class="language-toml"><span style="color:var(--ink-2)">[[</span>role<span style="color:var(--ink-2)">]]</span>
+name <span style="color:var(--code-operator)">=</span> <span style="color:var(--code-string)">"neither"</span>
+label <span style="color:var(--code-operator)">=</span> <span style="color:var(--code-string)">"neither drives"</span>
+colour <span style="color:var(--code-operator)">=</span> <span style="color:var(--ink-2)">[</span><span style="color:var(--code-string)">"#8a8a8a"</span><span style="color:var(--ink-2)">,</span> <span style="color:var(--code-string)">"#5c5c5c"</span><span style="color:var(--ink-2)">]</span>
+dash <span style="color:var(--code-operator)">=</span> <span style="color:var(--ink-2)">[</span><span style="color:var(--code-number)">2</span><span style="color:var(--ink-2)">,</span> <span style="color:var(--code-number)">1</span><span style="color:var(--ink-2)">]</span>
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code><span class="word">name</span></code></td>
+<td>What a <code><span class="word">paint</span></code> names. Lower-case letters, digits and <code><span class="word">_</span></code>, starting with a letter, at most 32 bytes.</td>
+</tr>
+<tr>
+<td><code><span class="word">label</span></code></td>
+<td>What a key and a readout say for the role, at most 200 bytes. The name where it is left out.</td>
+</tr>
+<tr>
+<td><code><span class="word">colour</span></code></td>
+<td><code><span class="word">&quot;#rrggbb&quot;</span></code> for both faces, or a <code><span class="word">[day,</span> <span class="word">night]</span></code> pair of them.</td>
+</tr>
+<tr>
+<td><code><span class="word">weight</span></code></td>
+<td>CSS pixels added to the trace's line weight, from 0 to 4. 0 where it is left out.</td>
+</tr>
+<tr>
+<td><code><span class="word">dash</span></code></td>
+<td>The role's dash and gap lengths, in pairs: at most 8 numbers, each from 0 to 64, together at least 1. Each is a number of the role's line widths, its weight included. A solid line where it is left out.</td>
+</tr>
+</tbody>
+</table>
+<p>A role takes no other field. A file declares at most 64 roles, and so do a sidecar's files
+between them. A file that declares more is one problem, and its roles past the 64th are not read.</p>
+<p>A <code><span class="word">paint</span></code> names a declared role. The check reports one that names no declared role, once for each
+name, where it is first used. A reader that shows such a sidecar keeps the annotation, draws its
+channels as if it painted nothing, and keys nothing for it.</p>
+<p>Roles keep the order they are declared in: the hand-written file's, then each generator's, in the
+order <code><span class="word">include</span></code> lists the files. One name may be declared in several files, alike: each field is
+compared once its default is filled in, a label left out being the name, a weight left out 0, and
+one colour being the pair of it. A colour or a dash left out equals only one left out. A name
+declared differently in two files is a problem. A name declared alike again keeps the place it
+first took. A file that declares one name twice is a problem.</p>
+<p>Each field of a role's look comes from the first of these that gives it:</p>
+<ol>
+<li>The host: the page's <code><span class="word">--tickwave-role-&lt;name&gt;</span></code>, <code><span class="word">-weight</span></code> and <code><span class="word">-dash</span></code> (web/README.md, &quot;Styling&quot;),
+or an egui host's <code><span class="word">Palette::roles</span></code>. A host's weight or dash outside the bounds a declaration's
+is held to is left to the declaration, and a host can make a dashed role solid.</li>
+<li>The role's declaration.</li>
+<li>For the colour alone, the role's place in the order of declarations: the first role takes the
+trace's colour, and the rest ink. A role neither gives a dash is solid.</li>
+</ol>
+<p>A declared colour takes the host's face: its day colour by day, its night colour by night.</p>
+<p>Where several annotations paint a channel at a tick, the latest in sidecar order draws it. A dash
+runs on along a painted stretch from where the stretch starts, across the line's edges, and
+starts again after a gap in the data.</p>
+<p>The roles travel with the recording when it is bundled, in the hand-written file and the
+generators' first lines. A recording that a writer finishes bundles each generator's roles in its
+file's first line. One repaired after it was cut off before it finished keeps none of them: the
+writer holds them until it finishes. Nor does a recording read from a writer's snapshot as it is
+written have them.</p>
+<h2 id="the-stored-view" tabindex="-1">The stored view<a class="anchor" href="#the-stored-view" aria-label="Link to this section">#</a></h2>
+<p>The hand-written file may store how a view of the recording starts, in a <code><span class="word">[view]</span></code> table. A page or
+a host that says how to show the recording wins over it.</p>
+<pre><code class="language-toml"><span style="color:var(--ink-2)">[</span>view<span style="color:var(--ink-2)">]</span>
+channels <span style="color:var(--code-operator)">=</span> <span style="color:var(--ink-2)">[</span><span style="color:var(--code-string)">"SWDIO"</span><span style="color:var(--ink-2)">,</span> <span style="color:var(--code-string)">"SWCLK"</span><span style="color:var(--ink-2)">]</span>
+start <span style="color:var(--code-operator)">=</span> <span style="color:var(--code-string)">"377.09 ms"</span>
+end <span style="color:var(--code-operator)">=</span> <span style="color:var(--code-string)">"377.25 ms"</span>
+colour <span style="color:var(--code-operator)">=</span> <span style="color:var(--ink-2)">[</span><span style="color:var(--code-string)">"#d9480f"</span><span style="color:var(--ink-2)">,</span> <span style="color:var(--code-string)">"#ff8a50"</span><span style="color:var(--ink-2)">]</span>
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code><span class="word">channels</span></code></td>
+<td>The channels a view shows, in this order. Every channel where it is left out.</td>
+</tr>
+<tr>
+<td><code><span class="word">start</span></code>, <code><span class="word">end</span></code></td>
+<td>The span a view shows first: times, as annotations' are. The capture's start and end where they are left out.</td>
+</tr>
+<tr>
+<td><code><span class="word">colour</span></code></td>
+<td>The trace's colour, <code><span class="word">&quot;#rrggbb&quot;</span></code> or a <code><span class="word">[day,</span> <span class="word">night]</span></code> pair, under the page's <code><span class="word">series</span></code> colour. Ink where it is left out.</td>
+</tr>
+</tbody>
+</table>
+<p>Each channel is the recording's, and named once; <code><span class="word">channels</span></code> lists one at least. The span lies in
+the capture and ends after it starts. The table takes no other field.</p>
+<h2 id="measures" tabindex="-1">Measures<a class="anchor" href="#measures" aria-label="Link to this section">#</a></h2>
+<p><code><span class="word">measure</span></code> takes the channel's edges at ticks in <code><span class="word">[start,</span> <span class="word">end)</span></code>: an edge at <code><span class="word">end</span></code> is outside. It
+shows no more digits than its ticks carry. A span meant to measure from one edge to another starts
+at the first edge's tick and ends one tick past the last.</p>
+<ul>
+<li><code><span class="word">rate</span></code> and <code><span class="word">period</span></code>: the running clock. Its periods run from one rising edge to the next, so a
+span needs at least two rising edges. Sort the span's n periods as p[0..n). Take
+Q1 = p[⌊(n − 1)/4⌋], Q3 = p[⌈3(n − 1)/4⌉], and IQR = Q3 − Q1, but at least one tick. Keep the
+periods within [Q1 − 1.5 IQR, Q3 + 1.5 IQR]: Tukey's fences. The measure is the mean of the
+kept periods, as a rate or a period, and the inset says how many it kept (&quot;mean of 31 of 32
+periods&quot;). The fences keep a clock's edge jitter and its quantisation, such as 26 and 27 ns for
+a 26.67 ns clock. They drop pauses, and a long period that occurs in fewer than a quarter of
+the periods, such as a slow acknowledge check or a stretched cycle.</li>
+<li><code><span class="word">duration</span></code>: the time from the channel's first edge in the span to its last, of either
+polarity. A span needs at least two edges.</li>
+</ul>
+<h2 id="values" tabindex="-1">Values<a class="anchor" href="#values" aria-label="Link to this section">#</a></h2>
+<p><code><span class="word">values</span></code> holds the figures an annotation states, for a page's charts and tables to read. A decoder
+that measures a session writes them beside its label:</p>
+<pre><code class="language-toml"><span style="color:var(--ink-2)">[[</span>annotation<span style="color:var(--ink-2)">]]</span>
+id <span style="color:var(--code-operator)">=</span> <span style="color:var(--code-string)">"session-50"</span>
+ref <span style="color:var(--code-operator)">=</span> <span style="color:var(--code-string)">"wire_swd/session/377858886"</span>
+values <span style="color:var(--code-operator)">=</span> <span style="color:var(--ink-2)">{</span> asked <span style="color:var(--code-operator)">=</span> <span style="color:var(--code-string)">"50 MHz"</span><span style="color:var(--ink-2)">,</span> read_data <span style="color:var(--code-operator)">=</span> <span style="color:var(--code-string)">"37.5 MHz"</span><span style="color:var(--ink-2)">,</span> write_data <span style="color:var(--code-operator)">=</span> <span style="color:var(--code-string)">"49.9 MHz"</span> <span style="color:var(--ink-2)">}</span>
+</code></pre>
+<p>In a generator's file the same is <code><span class="word">&quot;values&quot;:</span> <span class="word">{&quot;asked&quot;:</span> <span class="word">&quot;50</span> <span class="word">MHz&quot;,</span> <span class="word">...}</span></code>. A name is lower-case
+letters, digits and <code><span class="word">_</span></code>, starting with a letter. A value is a decimal, then one space and a unit
+where it has one: a count, such as a marker's number, has none. It is a string, so <code><span class="word">&quot;81.0</span> <span class="word">KiB/s&quot;</span></code>
+keeps its last digit. tickwave never converts or rounds a value. A page compares units as text, so
+micro is always <code><span class="word">µ</span></code> (U+00B5 MICRO SIGN), as in times, and never the Greek letter mu (U+03BC).</p>
+<h2 id="times" tabindex="-1">Times<a class="anchor" href="#times" aria-label="Link to this section">#</a></h2>
+<p>A time is either a whole number of ticks from the capture's start, as a JSON integer (digits with an
+optional <code><span class="word">-</span></code>, no fraction or exponent, so not <code><span class="word">12.0</span></code>), or a string holding a decimal and a unit. The
+decimal is digits with at most one <code><span class="word">.</span></code> among them and at least one digit, such as <code><span class="word">12</span></code>, <code><span class="word">12.5</span></code>, <code><span class="word">.5</span></code>
+or <code><span class="word">12.</span></code>, with an optional <code><span class="word">-</span></code> or <code><span class="word">+</span></code> before it. The unit is <code><span class="word">s</span></code>, <code><span class="word">ms</span></code>, <code><span class="word">us</span></code>, <code><span class="word">µs</span></code>, <code><span class="word">ns</span></code> or <code><span class="word">ps</span></code>,
+after the decimal with or without whitespace between, and whitespace around the whole is ignored,
+whitespace being any character Unicode's <code><span class="word">White_Space</span></code> property holds: <code><span class="word">&quot;12</span> <span class="word">ms&quot;</span></code>, <code><span class="word">&quot;12ms&quot;</span></code> and
+<code><span class="word">&quot;</span> <span class="word">0.012</span> <span class="word">s</span> <span class="word">&quot;</span></code> are one time. An exponent, digits grouped with spaces, or a decimal without a unit is
+an error. A decimal converts to ticks exactly, without floating point, and rounds to the nearest
+tick, halves away from zero. A time still lies in <code><span class="word">0..2^53</span></code> ticks once converted.</p>
+<h2 id="ids-stay-stable" tabindex="-1">Ids stay stable<a class="anchor" href="#ids-stay-stable" aria-label="Link to this section">#</a></h2>
+<p>Page text cites ids, so they must survive a decoder's rerun. A generator derives each id from the
+recording, not from the run: its kind and start tick, as <code><span class="word">misread/412093311</span></code>, not a counter. A
+hand-written <code><span class="word">ref</span></code> gives a generated annotation a name that reads well in prose.</p>
+<h2 id="order" tabindex="-1">Order<a class="anchor" href="#order" aria-label="Link to this section">#</a></h2>
+<p>Annotations keep sidecar order: the hand-written file's, in its order, then each included file's,
+in the order <code><span class="word">include</span></code> lists the files, line by line. Order carries meaning: a view steps through
+the kind of the first annotation unless it was opened at another, so an author lists first an
+annotation of the kind a page steps through.</p>
+<h2 id="resolved-annotations" tabindex="-1">Resolved annotations<a class="anchor" href="#resolved-annotations" aria-label="Link to this section">#</a></h2>
+<p><code><span class="word">tickwave</span> <span class="word">annotations</span> <span class="word">check</span> <span class="word">--json</span></code> prints the annotations resolved, in sidecar order, and the
+browser's decoder hands the page the same. Each has its full id, <code><span class="word">source</span></code> (the generator's name;
+null for a hand-written one), <code><span class="word">start</span></code> and <code><span class="word">end</span></code> in ticks, and the fields above. An alias keeps
+<code><span class="word">ref</span></code>, the full id of the generated annotation it names, so a page can tell the two apart. A reader
+that leaves out a generated annotation leaves out an alias of it too, and says so: a <code><span class="word">ref</span></code> resolves
+only to an annotation the reader keeps.</p>
+<h2 id="checks" tabindex="-1">Checks<a class="anchor" href="#checks" aria-label="Link to this section">#</a></h2>
+<p><code><span class="word">tickwave</span> <span class="word">annotations</span> <span class="word">check</span> <span class="word">rec.tickwave</span> <span class="word">rec.annotations.toml</span></code> reports every problem it finds, then
+exits non-zero if there was any. A page's build runs it, so a decoder rerun that drops an annotation
+the prose cites breaks the build instead of the page. It checks that:</p>
+<ul>
+<li>both files declare format <code><span class="word">tickwave-annotations/1</span></code>, or a later minor version of it (see
+Versions), and their <code><span class="word">recording_id</span></code> matches the recording;</li>
+<li><code><span class="word">recording</span></code>, if given, names the recording's file;</li>
+<li>every included file is named without a directory, is provided, and every provided file is
+included;</li>
+<li>each generator's name is one the rule above allows;</li>
+<li>ids are unique, hand-written ids hold no <code><span class="word">/</span></code>, and every <code><span class="word">ref</span></code> names a generated annotation;</li>
+<li>every channel exists, a point and a span's <code><span class="word">start</span></code> lie in <code><span class="word">0..length</span></code>, and a span's <code><span class="word">end</span></code> is
+not before its <code><span class="word">start</span></code> and not past <code><span class="word">length</span></code>;</li>
+<li>every <code><span class="word">measure</span></code> names a digital channel, or one of a kind this version doesn't know, which may
+have edges; a known measure; and sits on a span;</li>
+<li>every value is a decimal, with one space and a unit where it has one, under a name of lower-case
+letters, digits and <code><span class="word">_</span></code>;</li>
+<li>each role declaration holds to the rules above, no name is declared twice in a file or
+differently in two, and no file declares more than 64 roles, nor the files between them;</li>
+<li>every <code><span class="word">paint</span></code> names a declared role;</li>
+<li>a <code><span class="word">[view]</span></code> table holds to the rules above.</li>
+</ul>
+<h2 id="versions" tabindex="-1">Versions<a class="anchor" href="#versions" aria-label="Link to this section">#</a></h2>
+<p>A file's <code><span class="word">format</span></code> names its version: <code><span class="word">tickwave-annotations/1</span></code> is version 1, minor version 0, and
+<code>tickwave-annotations/1.&lt;n&gt;</code> is minor version <code><span class="word">n</span></code>. A minor version adds what a reader of an earlier
+one can leave out and still read everything else as the file means it: top-level keys of the
+hand-written file or of a generator's first line, fields of an annotation, of a role, of <code><span class="word">measure</span></code>
+and of the <code><span class="word">[view]</span></code> table, and values of <code><span class="word">measure</span></code>'s <code><span class="word">what</span></code>. In a file of a later minor version
+than it knows, a reader leaves out each such key it doesn't know, and each <code><span class="word">measure</span></code> whose <code><span class="word">what</span></code>
+it doesn't know, says which in a note that is not a problem, and keeps the annotation, role or view
+they were in. In a file of its own minor version or an earlier one, a key it doesn't know is an
+error, as everywhere else in these files. Any other version is another format, which <code><span class="word">check</span></code>
+refuses.</p>
+<p>A tool that writes these files again carries what it doesn't know rather than leaving it out. A
+re-cut and repair carry an annotation's keys and <code><span class="word">measure</span></code>s they don't know, whatever its file's
+version, and name them, since a generator's first line, which says its version, may reach them
+after its annotations do (FORMAT.md, &quot;Annotations&quot;). Repair writes a first line of its own version
+for a generator whose first line was lost with the cut, so a reader of that version then counts
+the keys it carried as errors. A merge reads each generator's first line before its lines, and
+carries what it doesn't know only from a file of a later minor version than its own. Each still
+leaves out, and names, a line that breaks a rule on a key it knows.</p>
+<h2 id="bundling" tabindex="-1">Bundling<a class="anchor" href="#bundling" aria-label="Link to this section">#</a></h2>
+<p><code><span class="word">tickwave</span> <span class="word">bundle</span> <span class="word">rec.tickwave</span> <span class="word">rec.annotations.toml</span> <span class="word">-o</span> <span class="word">shared.tickwave</span></code> checks the sidecar, then
+writes a copy of the recording with the sidecar's files in it, for a single-file share: the
+hand-written file and each generator file's first line in its annotation bundle, and each generator
+file's other lines in annotation parts (FORMAT.md, &quot;Annotations&quot;). The content id stays the same.
+The roles and the stored view are in the bundle, so a reader has them before it reads any part.</p>
+<h2 id="merging" tabindex="-1">Merging<a class="anchor" href="#merging" aria-label="Link to this section">#</a></h2>
+<p><code><span class="word">tickwave</span> <span class="word">merge</span></code> carries each input's generated annotations into the merged recording: the generator
+files it holds, joined from its annotation bundle and annotation parts, or, where it has none, those
+its sidecar beside it includes.
+They are bundled again under the merged recording's id. Each time moves with its input as its
+input's sources do (FORMAT.md, &quot;Sources&quot;): a time <code><span class="word">x</span></code> of the input's lies at the input's move plus
+<code><span class="word">floor(x</span> <span class="word">×</span> <span class="word">s</span> <span class="word">×</span> <span class="word">R</span> <span class="word">/</span> <span class="word">R_input)</span></code> on the merged recording's axis, <code><span class="word">s</span></code> the input's stretch and
+<code><span class="word">R</span> <span class="word">/</span> <span class="word">R_input</span></code> the merged rate over the input's, and is written in its ticks. Inputs go in the order
+given. A generator whose name an earlier input's generator took is renamed <code><span class="word">&lt;stem&gt;-&lt;name&gt;</span></code>, where
+<code><span class="word">&lt;stem&gt;</span></code> is the input's file name without its extension, with any whitespace written as <code><span class="word">_</span></code>. A
+second clash takes <code><span class="word">&lt;stem&gt;-2-&lt;name&gt;</span></code>, and so on. The full ids of its annotations change with it, and
+so does the <code><span class="word">source</span></code> its file's first line names, so a tool that looks for its own generator's file
+by name finds only the first input's.</p>
+<p>An annotation whose times move outside the merged recording is left out: a span that ends at or
+before its start, or anything that starts at or past its end. A span that reaches over either end
+is cut there. A line that doesn't read is left out too, and so is one that breaks a rule above for a
+generator's line. The merge counts each of these.</p>
+<p>Channel names in <code><span class="word">channels</span></code> and <code><span class="word">measure</span></code> follow the names the merge gives. A channel the merge
+leaves out is dropped from <code><span class="word">channels</span></code>, and an annotation left with none is left out. A <code><span class="word">measure</span></code>
+on a channel left out is dropped. An annotation without <code><span class="word">channels</span></code>, or with an empty list, which
+meant every channel of its recording, names that input's channels.</p>
+<p>Each carried generator's file keeps its first line as it was: its version, <code><span class="word">version</span></code>, the roles it
+declares and any other key, but for <code><span class="word">source</span></code>, renamed as above, and <code><span class="word">recording_id</span></code>, the merged
+recording's. Two inputs whose
+generators declare one name differently, or a declaration that breaks a rule above, stop the merge:
+the merged sidecar would fail its check.</p>
+<p>A hand-written file's annotations are not carried, since their times are the input's. The merge
+says how many it left out. Its roles and its stored view are not carried either.</p>
+<p class="doc-source">From <a href="https://github.com/Escapement-Project/tickwave/blob/HEAD/ANNOTATIONS.md">tickwave</a>, where changes to this page go.</p></article>
+</div>
+</main>
+<footer><div class="wrap"><span>Escapement Project</span><span>The Escapement Project is not affiliated with NXP or any other probe vendor. MCU-Link and LinkServer are NXP's names for its products.</span><span class="licence">tickwave is free software under the MIT or Apache-2.0 licence.</span></div></footer>
+<script src="../face.js" defer></script>
+<script src="../header.js" defer></script>
+<script src="../copy.js" defer></script>
+<script src="../doc.js" defer></script>
+<script src="../search.js" defer></script>
+<script src="../mark.js" defer></script>
+</body>
+</html>

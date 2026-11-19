@@ -1,0 +1,169 @@
+/* tickwave's site, after tokens.css and base.css, which give it the page, type, header, column and
+   footer. Colours, type and interaction come from the design system's tokens. */
+body { overflow-wrap: break-word; }
+/* main is the column here (.wrap), and base.css lays the body out as a flex column: without a
+   width, the column's auto margins would shrink it to its content. */
+main.wrap { width: 100%; }
+a:hover { text-decoration-thickness: 2px; }
+:focus-visible { outline: var(--focus-width) solid var(--ink); outline-offset: 3px; }
+code, pre { font-family: var(--font-code); font-stretch: var(--code-stretch); font-weight: var(--code-weight); font-size: .82em; }
+code { overflow-wrap: anywhere; }
+pre { background: var(--surface); border-radius: 8px; padding: 12px 14px; overflow-x: auto; line-height: 1.5; }
+pre code { font-size: 1em; overflow-wrap: normal; }
+
+/* Room under the header and above the footer, as the project's pages leave; .wrap's padding would
+   otherwise win. The docs' frame and index keep their own, as on the project's docs. */
+main.wrap { padding-top: 32px; padding-bottom: 56px; }
+main.wrap:has(> .doc-wrap, > .docs-index) { padding-top: 0; padding-bottom: 0; }
+/* tickwave's licence, a row of its own under the project's footer. */
+footer .licence { flex-basis: 100%; }
+/* Prose pages: headings in the flow of the text, where the project's sections set them apart. The
+   overview's sections are the project's, so it keeps base.css's. */
+:where(main.wrap) h2 { margin: 40px 0 10px; }
+:where(main.wrap) h3 { font-size: 18px; font-weight: 600; margin: 28px 0 8px; }
+:where(main.wrap) h4 { font-size: 16px; font-weight: 600; margin: 22px 0 6px; }
+:where(main.wrap) :is(p, ul, ol, dl) { max-width: 40em; }
+:where(main.wrap) li { margin: 4px 0; }
+.quiet { color: var(--ink-2); font-size: 15px; }
+
+/* The viewer. */
+.open { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 18px; margin: 18px 0 10px; }
+.by-url, .drop { background: var(--surface); border-radius: 10px; padding: 16px; }
+.by-url { display: grid; gap: 6px; align-content: start; }
+.by-url label { font-size: 14px; color: var(--ink-2); }
+.by-url input { font: inherit; font-size: 15px; color: var(--ink); background: var(--raised); border: 1px solid var(--rule); border-radius: 6px; padding: 6px 9px; margin-bottom: 6px; width: 100%; }
+button.primary, .button { font: inherit; font-size: 15px; color: var(--ink); background: transparent; border: 1.5px solid var(--rule); border-radius: 6px; padding: 5px 14px; cursor: pointer; justify-self: start; display: inline-block; }
+button.primary:hover, .button:hover { background: var(--wash); }
+.button:focus-within { outline: var(--focus-width) solid var(--ink); outline-offset: 3px; }
+.button input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.drop p { margin: 0 0 10px; }
+.drop.over, .attached.over { outline: 2px dashed var(--ink); outline-offset: -6px; background: var(--wash); }
+/* A GitHub attachment's two steps, on a surface as the forms are. */
+.attached { background: var(--surface); border-radius: 10px; padding: 16px; margin: 18px 0; max-width: 46em; }
+.attached h2 { margin: 0 0 10px; overflow-wrap: anywhere; }
+.attached p { margin: 0 0 10px; }
+.attached ol { margin: 0 0 10px; padding-left: 22px; }
+.attached li { margin: 10px 0; }
+/* The recordings a zip or a folder holds, to open one at a time. */
+.pick { border: 0; padding: 0; margin: 18px 0; min-width: 0; }
+.pick legend { padding: 0; margin-bottom: 6px; }
+.pick label { display: block; margin: 4px 0; overflow-wrap: anywhere; }
+.pick input { accent-color: var(--ink); }
+.problem { border-left: 3px solid var(--attention-ink); padding: 6px 14px; margin: 18px 0; max-width: 46em; }
+.problem p { margin: 0 0 6px; }
+.problem ul { margin: 4px 0 0; padding-left: 20px; font-size: 15px; }
+/* The forms that open a recording fold away once one is shown; until then they are simply there. */
+.opener:not(.folds) > summary { display: none; }
+.opener > summary, .details > summary { cursor: pointer; font-size: 15px; color: var(--ink-2); margin: 14px 0 6px; }
+.opener > summary:hover, .details > summary:hover { color: var(--ink); }
+.local .opener, .local .share { display: none; }
+/* A recording's provenance, closed under its view. */
+.details { margin: 10px 0 0; }
+.details .facts { margin-top: 8px; }
+/* The opened recording is a region of the page, not one of the project's ruled sections. */
+.stage { margin-top: 22px; border-top: 0; padding: 0; }
+.facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 18px; max-width: none; font-size: 15px; margin: 0 0 16px; }
+.facts dt { color: var(--ink-2); }
+.facts dd { margin: 0; overflow-wrap: anywhere; }
+.share { color: var(--ink-2); font-size: 14px; overflow-wrap: anywhere; }
+
+/* The overview: the inset beside the head on a surface, as the project's figures are; the elements
+   by name beside their markup. */
+/* The inset is the same height at every width: the figure's caption says what the annotation's text
+   would. Its surface is that height from the first paint, and it draws inside it, so nothing below
+   it moves as it loads. */
+.product-figure figure { margin-bottom: 14px; }
+.product-figure tickwave-inset { display: block; }
+.js .product-figure tickwave-inset { height: 154.8px; overflow: clip; background: var(--surface); border-radius: 14px; padding: 10px 8px 6px; }
+.product-figure tickwave-inset::part(text) { display: none; }
+/* The reading points are four, so they take a row of four where the steps would take three. */
+@media (min-width: 861px) { #reading .steps { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+/* The elements' names in one column, as wide as the longest; on a phone, each over what it is. */
+.elements { display: grid; grid-template-columns: max-content minmax(0, 1fr); column-gap: 18px; }
+.elements > div { grid-column: 1 / -1; grid-template-columns: subgrid; gap: 0; column-gap: inherit; }
+.elements dt code { font-size: .88em; white-space: nowrap; }
+@media (max-width: 520px) {
+  .elements { grid-template-columns: minmax(0, 1fr); }
+  .elements > div { gap: 2px; }
+}
+
+/* What only a script makes true goes unsaid without one (the head's script sets .js). */
+html:not(.js) .needs-script { display: none; }
+tickwave-view { margin: 12px 0; }
+/* The overview cites a capture whose probe it does not name: probe-driven lines in secondary ink,
+   the target's in ink, and no series hue. */
+.overview { --tickwave-role-probe: var(--ink-2); }
+/* How the overview's section does what it shows: a step down from the section's heading. */
+#page .how { font-size: 17px; font-weight: 600; margin: 32px 0 12px; }
+
+/* The converter. */
+.drop .choose { display: flex; flex-wrap: wrap; gap: 10px; }
+.settings h2 { margin-top: 28px; }
+.settings input[type="text"], .settings input[type="number"], .settings textarea { font: inherit; font-size: 15px; color: var(--ink); background: var(--raised); border: 1px solid var(--rule); border-radius: 6px; padding: 4px 8px; max-width: 100%; box-sizing: border-box; }
+.settings #title, .settings textarea { width: min(100%, 32em); }
+.settings input[type="number"] { width: 7em; }
+.settings label { font-size: 15px; }
+.settings details { margin: 0 0 14px; }
+.settings summary { cursor: pointer; font-size: 15px; }
+.channels td { vertical-align: middle; }
+.channels td:nth-child(3) input { width: 14em; }
+.channels td:nth-child(4) input { width: 4.5em; }
+/* On a phone the name takes the room the row leaves, so the table fits without scrolling. */
+@media (max-width: 520px) {
+  .channels { width: 100%; }
+  .channels td:nth-child(3) { width: 100%; }
+  .channels td:nth-child(3) input { width: 100%; min-width: 5em; }
+}
+.channels td:first-child, .channels th:first-child { text-align: center; }
+/* A merge's recording heads its rows: its name, its alignment and Remove, across the table. */
+.channels tr.input th { text-align: left; padding-top: 14px; overflow-wrap: anywhere; }
+.channels tr.input .quiet, .channels tr.input label { font-weight: 400; }
+.channels tr.input label { margin-left: 10px; white-space: nowrap; }
+.channels tr.input .align { width: 9em; margin-left: 4px; }
+.channels tr.input .button { margin-left: 10px; font-size: 14px; padding: 2px 10px; }
+.adding { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 12px 0 0; }
+.stage.over { outline: 2px dashed var(--ink); outline-offset: 4px; }
+.running progress { width: min(100%, 32em); height: 10px; accent-color: var(--ink); }
+.result { margin-top: 22px; }
+
+/* The annotation editor. A button whose word changes is as wide as its widest word. */
+.swap { display: inline-grid; }
+.swap > span { grid-area: 1 / 1; }
+.swap > .off, .about > .off { visibility: hidden; }
+/* The form's note is as tall as its longest, so the list under it stays put. */
+.about { display: grid; }
+.about > span { grid-area: 1 / 1; }
+.editing { margin: 14px 0 0; }
+.editor { margin: 18px 0 0; }
+.editor h2 { margin-top: 0; }
+.editor h3 { margin-top: 0; }
+.editor-save { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; }
+.note { background: var(--surface); border-radius: 10px; padding: 14px 16px; margin: 12px 0 16px; max-width: 46em; }
+.note .fields { display: grid; gap: 10px; }
+.note .fields p, .note fieldset { margin: 0; }
+.note label, .note legend { display: block; font-size: 14px; color: var(--ink-2); margin-bottom: 3px; }
+.note input[type="text"], .note textarea, .note select { font: inherit; font-size: 15px; color: var(--ink); background: var(--raised); border: 1px solid var(--rule); border-radius: 6px; padding: 4px 8px; max-width: 100%; box-sizing: border-box; }
+.note #note-label, .note textarea { width: min(100%, 36em); }
+.note #note-id, .note #note-kind { width: min(100%, 20em); }
+.note #note-id-note { display: block; font-size: 14px; margin-top: 3px; }
+.note .span-fields, .note .pair { display: flex; flex-wrap: wrap; align-items: end; gap: 8px 14px; }
+.note .span-fields input { width: 11em; font-family: var(--font-figures); font-variant-numeric: tabular-nums; }
+.note fieldset { border: 0; padding: 0; }
+.note .channel-ticks { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-bottom: 4px; }
+.note .channel-ticks label { display: inline-flex; gap: 6px; align-items: baseline; color: var(--ink); font-size: 15px; margin: 0; }
+.note fieldset > .quiet { font-size: 14px; }
+.note .problem { margin: 12px 0 0; }
+.note-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 0; }
+/* A decoder can write hundreds: the list scrolls in a box of its own, and the details under it stay near. */
+.notes { list-style: none; padding: 2px; margin: 0; max-width: 46em; display: grid; gap: 2px; max-height: min(60vh, 32em); overflow-y: auto; }
+.notes li { display: flex; align-items: center; gap: 6px; }
+.notes .pick { flex: 1 1 auto; min-width: 0; text-align: left; font: inherit; font-size: 15px; color: var(--ink); background: transparent; border: 0; border-radius: 6px; padding: 4px 8px; cursor: pointer; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px; }
+.notes .pick:hover, .notes .pick[aria-current="true"] { background: var(--wash); }
+.notes .pick .what { overflow-wrap: anywhere; }
+.notes .pick .when { font-family: var(--font-figures); font-variant-numeric: tabular-nums; color: var(--ink-2); font-size: 14px; }
+.notes .pick .from { grid-column: 1 / -1; color: var(--ink-2); font-size: 14px; }
+.notes .move { font: inherit; font-size: 14px; color: var(--ink); background: transparent; border: 1px solid var(--rule); border-radius: 6px; width: 2em; padding: 2px 0; cursor: pointer; }
+.notes .move:hover { background: var(--wash); }
+.notes .move:disabled { visibility: hidden; }
+.button:disabled, .button:disabled:hover { opacity: .45; cursor: default; background: transparent; }
+#note-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

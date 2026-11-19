@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Converter – tickwave – Escapement Project</title>
+<meta name="description" content="Building tickwave's converter, and converting, describing, verifying and bundling recordings.">
+<script>
+// .js, as on the project's other pages, for a shared rule that needs a script to run; and a face
+// chosen on an earlier visit, applied before the first paint. The project's sites share the key.
+document.documentElement.classList.add("js"); try { const f = localStorage.getItem("face"); if (f === "day" || f === "night") document.documentElement.dataset.face = f; } catch {}
+</script>
+<link rel="preload" href="../fonts/saira-expanded.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="../fonts/hanken-grotesk.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="icon" href="../favicon-tickwave.ico">
+<link rel="stylesheet" href="../tokens.css">
+<link rel="stylesheet" href="../base.css">
+<link rel="stylesheet" href="../tickwave.css">
+<link rel="stylesheet" href="../site.css">
+<link rel="stylesheet" href="../doc.css">
+<script type="module" src="../site.js"></script>
+</head>
+<body class="doc-page">
+<a class="skip" href="#main">Skip to the content</a>
+<header data-published="https://escapement-project.github.io">
+  <div class="wrap">
+    <a class="brand" href="https://escapement-project.github.io/" data-page="landing"><svg aria-hidden="true" fill="currentColor" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path fill-rule="evenodd" d="M32,3 A29,29 0 1,0 32.01,3 Z M32,9 A23,23 0 1,0 32.01,9 Z"/><path d="M9.796,38 H29 V20 H51.621 A23,23 0 0,1 54.204,26 H35 V44 H12.379 A23,23 0 0,1 9.796,38 Z"/></svg><span class="name">Escapement Project</span></a>
+    <nav id="places" aria-label="Escapement Project"><a href="https://escapement-project.github.io/verge/" data-page="verge">Verge</a><span class="product"><a href="../index.html" data-page="tickwave" aria-current="true">tickwave</a><a href="../open.html" data-page="tickwave/open">Open</a><a href="../docs/index.html" data-page="tickwave/docs" aria-current="true">Docs</a></span><a href="https://escapement-project.github.io/#source">Source</a></nav>
+    <button class="switch" id="faces" type="button" role="switch" aria-checked="false" aria-label="Night face"><span class="track"><span class="thumb"><svg class="wheel" viewBox="0 0 40 40" aria-hidden="true"><g transform="translate(14 3) scale(.75)"><circle cx="8" cy="8" r="3.2" fill="currentColor"/><path d="M8 1.2v1.6M8 13.2v1.6M1.2 8h1.6M13.2 8h1.6M3.2 3.2l1.1 1.1M11.7 11.7l1.1 1.1M3.2 12.8l1.1-1.1M11.7 4.3l1.1-1.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></g><g transform="rotate(180 20 20) translate(14 3) scale(.75)"><path d="M10.8 1.8a6.3 6.3 0 1 0 3.4 10.6A5.2 5.2 0 0 1 10.8 1.8z" fill="currentColor"/></g></svg></span></span></button>
+  </div>
+</header>
+<main id="main" class="wrap">
+<div class="doc-wrap">
+<button class="doc-bar" type="button" aria-expanded="false" aria-controls="doc-rail"><span class="label">Contents</span><span class="where">The converter</span></button>
+<div class="doc-rail" id="doc-rail">
+<search class="find" data-index="search.json">
+<input id="find" type="search" role="combobox" aria-label="Search tickwave's docs" aria-autocomplete="list" aria-expanded="false" aria-controls="found" placeholder="Search the docs" autocomplete="off" spellcheck="false" enterkeyhint="search">
+<kbd class="key" aria-hidden="true">/</kbd>
+<button class="clear" type="button" aria-label="Clear the search" hidden></button>
+<p class="count" role="status"></p>
+</search>
+<div class="doc-list"><nav class="doc-nav" aria-label="tickwave's docs">
+<details class="group" open><summary>Using it</summary><ul>
+<li><a href="viewer.html">Viewer</a></li>
+<li><a href="converter.html" aria-current="page">Converter</a><ul class="toc"><li><a href="#building-it">Building it</a></li><li><a href="#converting-a-capture">Converting a capture</a><ul><li><a href="#from-a-saleae-export">From a Saleae export</a></li><li><a href="#from-a-sigrok-session">From a sigrok session</a></li><li><a href="#from-a-vcd-file">From a VCD file</a></li><li><a href="#analog-channels">Analog channels</a></li><li><a href="#moving-and-trimming-channels">Moving and trimming channels</a></li><li><a href="#options-every-conversion-takes">Options every conversion takes</a></li></ul></li><li><a href="#converting-in-a-browser">Converting in a browser</a></li><li><a href="#merging-recordings">Merging recordings</a></li><li><a href="#describing-a-recording">Describing a recording</a></li><li><a href="#opening-a-recording">Opening a recording</a></li><li><a href="#checking-a-recording-against-its-capture">Checking a recording against its capture</a></li><li><a href="#checking-a-sidecar">Checking a sidecar</a></li><li><a href="#bundling-a-sidecar-into-its-recording">Bundling a sidecar into its recording</a></li><li><a href="#repairing-a-recording">Repairing a recording</a></li><li><a href="#re-cutting-a-recording">Re-cutting a recording</a></li></ul></li>
+</ul></details>
+<details class="group"><summary>In your page</summary><ul>
+<li><a href="elements.html">Elements</a></li>
+<li><a href="charts.html">Charts</a></li>
+</ul></details>
+<details class="group"><summary>The files</summary><ul>
+<li><a href="format.html">Format</a></li>
+<li><a href="annotations.html">Sidecar</a></li>
+</ul></details>
+</nav>
+<div class="found" id="found" role="listbox" aria-label="Sections found" hidden></div></div></div>
+<article class="doc"><h1 id="the-converter" tabindex="-1">The converter</h1>
+<p><code><span class="word">tickwave</span></code> is a command-line program. It converts captures into tickwave recordings, describes a recording, opens one in your browser, checks one against the capture it came from, checks and bundles a recording's sidecar of annotations, finishes a recording that was cut off before its end, and re-cuts a recording that a recorder flushed often into blocks of the usual size. <a href="../open.html">The Open page</a> runs the same conversion in a browser.</p>
+<h2 id="building-it" tabindex="-1">Building it<a class="anchor" href="#building-it" aria-label="Link to this section">#</a></h2>
+<p>You need a current Rust toolchain, a C compiler and a checkout of tickwave's repository. From the repository's root:</p>
+<pre><code class="language-sh"><span style="color:var(--code-function)">cargo</span> <span style="color:var(--code-string)">build</span> <span style="color:var(--code-string)">--release</span> <span style="color:var(--code-string)">-p</span> <span style="color:var(--code-string)">escapement-tickwave-cli</span>
+</code></pre>
+<p>The program is then <code>target/release/tickwave</code>. <code><span class="word">tickwave</span> <span class="word">help</span></code>, and <code><span class="word">--help</span></code> after any command, list its options.</p>
+<p>To open recordings in your browser, the program carries the viewer. Build the web pages first, as the repository's README says, then:</p>
+<pre><code class="language-sh"><span style="color:var(--code-function)">cargo</span> <span style="color:var(--code-string)">build</span> <span style="color:var(--code-string)">--release</span> <span style="color:var(--code-string)">-p</span> <span style="color:var(--code-string)">escapement-tickwave-cli</span> <span style="color:var(--code-string)">--features</span> <span style="color:var(--code-string)">viewer</span>
+</code></pre>
+<p>Without the viewer, <code><span class="word">tickwave</span> <span class="word">open</span></code> and <code><span class="word">--open</span></code> refuse, and say how to build it.</p>
+<h2 id="converting-a-capture" tabindex="-1">Converting a capture<a class="anchor" href="#converting-a-capture" aria-label="Link to this section">#</a></h2>
+<p><code><span class="word">tickwave</span> <span class="word">convert</span></code> reads three kinds of capture:</p>
+<ul>
+<li><code><span class="word">saleae</span></code>: Saleae Logic 2's binary export, version 0 or 1, a directory with one file a channel.</li>
+<li><code><span class="word">sigrok</span></code>: a sigrok session file (<code><span class="word">.sr</span></code>), as PulseView, sigrok-cli and verge write them.</li>
+<li><code><span class="word">vcd</span></code>: a value change dump (<code><span class="word">.vcd</span></code>). It takes one-bit signals and lists the rest as skipped.</li>
+</ul>
+<p>The converter doesn't read Logic 2's own <code><span class="word">.sal</span></code> files, because Saleae doesn't document that format and may change it. Export the capture from Logic 2 first: click Options at the bottom right, then Export Raw Data, and choose the binary format.</p>
+<p>The converter writes the recording beside its destination first. Then it decodes what it wrote and compares it with the capture, edge by edge and sample by sample. Only a recording that matches takes its place, and if they differ, nothing is left behind.</p>
+<p>Every edge in a recording lies on a whole tick from the capture's start, and one tick is the source's resolution. A Saleae export's times become ticks by <code><span class="word">round((t</span> <span class="word">−</span> <span class="word">begin)</span> <span class="word">×</span> <span class="word">rate)</span></code>. The converter refuses an export with an edge more than 0.01 of a tick off that grid, rather than move it. An analog file whose begin sits off that grid keeps the offset as its samples' phase, to a thousandth of a sample, so each sample keeps its place between two ticks. The converter refuses an analog file that begins before the digital channels.</p>
+<h3 id="from-a-saleae-export" tabindex="-1">From a Saleae export<a class="anchor" href="#from-a-saleae-export" aria-label="Link to this section">#</a></h3>
+<p>Name each channel you want with <code><span class="word">--channel</span></code>, as the export's file name without <code><span class="word">.bin</span></code>, then the channel's name. Channels you don't name stay out.</p>
+<pre><code class="language-sh"><span style="color:var(--code-function)">tickwave</span> <span style="color:var(--code-string)">convert</span> <span style="color:var(--code-string)">saleae</span> <span style="color:var(--code-string)">identify-swd/</span> <span style="color:var(--code-string)">--channel</span> <span style="color:var(--code-string)">digital_3_0=SWCLK</span> <span style="color:var(--code-string)">--channel</span> <span style="color:var(--code-string)">digital_3_1=SWDIO</span> <span style="color:var(--code-escape)">\</span>
+    <span style="color:var(--code-string)">--title</span> <span style="color:var(--code-string)">identify-swd</span> <span style="color:var(--code-string)">-o</span> <span style="color:var(--code-string)">identify-swd.tickwave</span>
+</code></pre>
+<p>It reports the file it wrote, its size, its blocks and its content id:</p>
+<pre><code class="language-text">identify-swd.tickwave: 0.00 MB, 2 blocks, blake3:63773d56fb3420735c864932f8d2441acd6f31a51b557e073bf27755a0534697 in 0.0 s
+</code></pre>
+<p>Logic 8, Logic Pro 8 and Logic Pro 16 write version 0 of the export, and its digital files don't record the sample rate. If you name an analog channel, the converter takes the rate its file records. Otherwise it infers the rate from the edges of every digital file in the export, named or not. It takes the lowest rate that divides 1 GHz and puts every edge on its grid, each on a tick of its own. With many edges, that is the capture's rate. With only a few, it can come out lower, and the recording then claims coarser timing than the capture had, never finer. An export with no edges has no rate to infer.</p>
+<p>Give the rate with <code><span class="word">--rate</span></code>, in hertz with an optional k, M or G, such as <code><span class="word">--rate</span> <span class="word">50M</span></code>. The converter refuses a rate that puts an edge off its grid. It can't catch a rate higher than the capture's, though: the recording would then claim finer timing than the capture had. The recording says whether its rate was inferred or given.</p>
+<h3 id="from-a-sigrok-session" tabindex="-1">From a sigrok session<a class="anchor" href="#from-a-sigrok-session" aria-label="Link to this section">#</a></h3>
+<pre><code class="language-sh"><span style="color:var(--code-function)">tickwave</span> <span style="color:var(--code-string)">convert</span> <span style="color:var(--code-string)">sigrok</span> <span style="color:var(--code-string)">session.sr</span> <span style="color:var(--code-string)">-o</span> <span style="color:var(--code-string)">session.tickwave</span>
+</code></pre>
+<p>Without <code><span class="word">--channel</span></code>, every enabled channel goes in under its own name. With it, only the channels you name go in, as <code><span class="word">--channel</span> <span class="word">&lt;probe</span> <span class="word">name&gt;=&lt;name&gt;</span></code>.</p>
+<h3 id="from-a-vcd-file" tabindex="-1">From a VCD file<a class="anchor" href="#from-a-vcd-file" aria-label="Link to this section">#</a></h3>
+<pre><code class="language-sh"><span style="color:var(--code-function)">tickwave</span> <span style="color:var(--code-string)">convert</span> <span style="color:var(--code-string)">vcd</span> <span style="color:var(--code-string)">dump.vcd</span> <span style="color:var(--code-string)">-o</span> <span style="color:var(--code-string)">dump.tickwave</span> <span style="color:var(--code-string)">--channel</span> <span style="color:var(--code-string)">top.dut.clk=CLK</span>
+</code></pre>
+<p>Without <code><span class="word">--channel</span></code>, every one-bit signal goes in, named by its scope path. With it, name each signal by its scope path.</p>
+<h3 id="analog-channels" tabindex="-1">Analog channels<a class="anchor" href="#analog-channels" aria-label="Link to this section">#</a></h3>
+<p>Where a capture's analog values are the instrument's integer codes, the converter stores the codes and the scale that turns them back into values. It checks that every sample comes back exactly first. Otherwise it stores the values as 32-bit floats, and <code><span class="word">--no-codes</span></code> asks for floats anyway. A readout shows a coded value to the digit one code step carries.</p>
+<p>If the source doesn't state a channel's unit, give it with <code><span class="word">--unit</span> <span class="word">&lt;name&gt;=&lt;unit&gt;</span></code>, such as <code><span class="word">--unit</span> <span class="word">A0=V</span></code>.</p>
+<h3 id="moving-and-trimming-channels" tabindex="-1">Moving and trimming channels<a class="anchor" href="#moving-and-trimming-channels" aria-label="Link to this section">#</a></h3>
+<p><code><span class="word">--offset</span> <span class="word">&lt;name&gt;=&lt;time&gt;</span></code> moves a channel along the time axis, later when the time is positive: <code><span class="word">--offset</span> <span class="word">SWDIO=-40ns</span></code> moves SWDIO 40 ns earlier. It corrects a known delay in a channel's path, such as a longer probe lead. The time has to be a whole number of the capture's ticks.</p>
+<p><code><span class="word">--keep</span> <span class="word">&lt;name&gt;=&lt;from&gt;..&lt;to&gt;</span></code> keeps only that part of a channel, in the capture's time before any move: <code><span class="word">--keep</span> <span class="word">SWCLK=1.2ms..9.8ms</span></code>. Leave out either end to keep from the channel's start or to its end.</p>
+<p><code><span class="word">&lt;name&gt;</span></code> is the name the channel takes in the recording, and a time is ticks or a decimal with a unit, as a sidecar writes it. The recording says how far each channel was moved and, for every channel, where it holds the capture's data, so neither a move nor a cut is taken for what the instrument recorded. A recording with a channel moved or trimmed starts where its earliest kept data does. An analog channel's cut moves forward to the next sample that keeps every sample on its tick.</p>
+<h3 id="options-every-conversion-takes" tabindex="-1">Options every conversion takes<a class="anchor" href="#options-every-conversion-takes" aria-label="Link to this section">#</a></h3>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code><span class="word">-o</span></code>, <code><span class="word">--output</span> <span class="word">&lt;file&gt;</span></code></td>
+<td>where to write the recording</td>
+</tr>
+<tr>
+<td><code><span class="word">--title</span> <span class="word">&lt;text&gt;</span></code></td>
+<td>the recording's title, which a view shows; without one, a view shows the file's name</td>
+</tr>
+<tr>
+<td><code><span class="word">--meta</span> <span class="word">&lt;key&gt;=&lt;value&gt;</span></code></td>
+<td>free metadata, such as <code><span class="word">--meta</span> <span class="word">probe=verge</span></code>, as often as you like</td>
+</tr>
+<tr>
+<td><code><span class="word">--offset</span> <span class="word">&lt;name&gt;=&lt;time&gt;</span></code></td>
+<td>move a channel, later when the time is positive (above)</td>
+</tr>
+<tr>
+<td><code><span class="word">--keep</span> <span class="word">&lt;name&gt;=&lt;from&gt;..&lt;to&gt;</span></code></td>
+<td>keep only that part of a channel (above)</td>
+</tr>
+<tr>
+<td><code><span class="word">--level</span> <span class="word">&lt;n&gt;</span></code></td>
+<td>the zstd compression level, 19 by default</td>
+</tr>
+<tr>
+<td><code><span class="word">--block-kib</span> <span class="word">&lt;n&gt;</span></code></td>
+<td>how much decoded data each of a channel's blocks aims to hold, 1024 KiB by default and at most 65,536</td>
+</tr>
+<tr>
+<td><code><span class="word">--open</span></code></td>
+<td>open the recording in your browser once it's written, as <a href="#opening-a-recording"><code><span class="word">tickwave</span> <span class="word">open</span></code></a> does</td>
+</tr>
+</tbody>
+</table>
+<p>A block holds one channel's edges or samples over one stretch of time, and it is the smallest piece of a channel's data a viewer fetches. Smaller blocks mean less waiting for a narrow view of a long capture, and a larger file.</p>
+<p>Every command that reads a recording takes <code><span class="word">--max-decoded-mib</span> <span class="word">&lt;n&gt;</span></code>: the most it decodes from one block, 64 MiB by default. A recording that needs more is refused, as a page's viewer refuses it unless the page sets a larger limit. A block at the largest <code><span class="word">--block-kib</span></code> stays under the default.</p>
+<h2 id="converting-in-a-browser" tabindex="-1">Converting in a browser<a class="anchor" href="#converting-in-a-browser" aria-label="Link to this section">#</a></h2>
+<p><a href="../open.html">The Open page</a> converts a capture without installing anything. Choose a Saleae export's folder, or a <code><span class="word">.sr</span></code> or <code><span class="word">.vcd</span></code> file, or a <code><span class="word">.zip</span></code> holding one, or drop it on the page. It converts at once, every channel under the capture's own name, and shows it in a view.</p>
+<p>Under the view, the page lists the capture's channels, with the options a command line takes: the channels to take and their names, units, a title, metadata, the zstd level, the block size, <code><span class="word">--no-codes</span></code>, and for a version 0 Saleae export, <code><span class="word">--rate</span></code>. Leave the rate empty to infer it, as the command line does without <code><span class="word">--rate</span></code>.</p>
+<p>In the view, a grip at the left of each row's name moves its channel. Drag it sideways to move the channel in time, as <code><span class="word">--offset</span></code> does, or up or down to change its row. Zoomed in far enough to show edges, a channel dragged to within a few pixels of another row's edge puts its own nearest edge on it; hold Alt to move it freely. The bars at the ends of a channel's data trim it, as <code><span class="word">--keep</span></code> does, and the part left out fades. Trim every channel to the selection keeps the part of each channel you selected. With a grip or a bar focused, the arrow keys move it. The list shows each channel's move and trim, and takes them typed too, as times such as <code><span class="word">-40</span> <span class="word">ns</span></code>. A move takes the channel's trim with it, so moving and trimming can come in either order. The view always shows all of the capture, so a trim can be undone.</p>
+<p>Save keeps the recording. With nothing changed, that is the capture as converted. Otherwise Save converts the capture again with the list's settings first. The recording saved then opens, and its annotations can be edited. Shape again goes back to the capture, with the settings as they were.</p>
+<p>For a Saleae export, it first checks that every edge sits on the sample grid, in order. Then it goes through the capture twice: once to look for exact integer codes in each analog channel, and once to encode.</p>
+<p>The page runs the converter's own code, compiled to WebAssembly, so the same capture and settings give the same file, byte for byte. It stores channels in the order it lists them, which for a Saleae export is by file name, numbers in order, until you move one. A command line that names the same channels in that order, with the same moves and trims, makes the same file.</p>
+<p>Under the view, Add a capture or recording takes another to merge with the one shown, as <a href="#merging-recordings"><code><span class="word">tickwave</span> <span class="word">merge</span></code></a> does. Drop it on the view, or choose it: a <code><span class="word">.tickwave</span></code> recording with its sidecar's files, a capture, which converts whole first, or a <code><span class="word">.zip</span></code> of either. The view then shows them all on one time axis, each recording's rows under its name. Drag the grip by a recording's name sideways to move the whole recording in time, as <code><span class="word">--align</span></code> does, and line it up with the others. An edge of it lands on another recording's edge within a few pixels; hold Alt to move it freely. The list gives each recording a head with its alignment, which takes a time typed too, and Remove. A channel's own grip and bars work as for one capture. Save merges the recordings with the list's settings and opens the result.</p>
+<p>The capture stays in the browser. The page reads a Saleae export a slice at a time, so the export can be larger than the 4 GiB WebAssembly gives the converter. A sigrok or VCD file is read whole, and the recording is built in memory, so these have to fit. The page converts on one thread, where the command line uses every core, so a large capture takes longer.</p>
+<h2 id="merging-recordings" tabindex="-1">Merging recordings<a class="anchor" href="#merging-recordings" aria-label="Link to this section">#</a></h2>
+<pre><code class="language-sh"><span style="color:var(--code-function)">tickwave</span> <span style="color:var(--code-string)">merge</span> <span style="color:var(--code-string)">analyser.tickwave</span> <span style="color:var(--code-string)">probe.tickwave</span> <span style="color:var(--code-string)">-o</span> <span style="color:var(--code-string)">both.tickwave</span>
+</code></pre>
+<p>This puts several recordings on one time axis, such as a logic analyser's beside a probe's own stream from the same target. A capture goes through <code><span class="word">tickwave</span> <span class="word">convert</span></code> first. Every channel of every recording goes in, in order, under its own name. A channel whose name an earlier recording took is named after its file as well: <code><span class="word">probe/CLK</span></code>.</p>
+<p>The merged recording ticks at the least common multiple of the recordings' tick rates: 500 MHz and 96 MHz merge at 12 GHz, a tick of 83 ps. Where that rate would need a number past 2^53, it ticks at the fastest recording's rate instead. Each channel keeps its own instrument's ticks, and the merged recording states where each instrument's ticks lie on its time axis. Nothing is resampled: every edge and sample keeps its time. A reading still keeps to the tick of the recording it reads, so it never shows more digits than that recording carries.</p>
+<p>The recordings share no clock: none of the captures tickwave reads records the time of day it started. So each recording starts at the merged recording's start. <code><span class="word">--align</span> <span class="word">&lt;n&gt;=&lt;time&gt;</span></code> moves recording <code><span class="word">n</span></code>, counting from 1, later when the time is positive, to line it up with the others, on an edge both instruments saw, say. The time is a decimal with a unit, or a whole number of the merged recording's ticks. Those ticks are at the merged rate the merge picks, so a time with a unit says the same thing whichever rate that is. The merged recording states an alignment as a claim, as it does a move.</p>
+<p>Instruments' clocks drift apart. At 20 ppm, an alignment by one edge stays within one tick of a 96 MHz clock for about half a millisecond either side of the edge, and within 10 µs for about half a second. <code><span class="word">--stretch</span> <span class="word">&lt;n&gt;=&lt;ratio&gt;</span></code> lengthens recording <code><span class="word">n</span></code>'s ticks to make up for it, as a ratio such as <code><span class="word">1001/1000</span></code> or a change such as <code><span class="word">+20ppm</span></code>. A stretch above 1 says the recording's clock ran slow. The merged recording states the stretch on the recording's sources, as a claim. What a stretch leaves is the clocks' wander.</p>
+<p>Two marks give both at once: <code><span class="word">--align</span> <span class="word">&lt;n&gt;=&lt;x&gt;@&lt;y&gt;,&lt;x&gt;@&lt;y&gt;</span></code>. Each mark is an event both instruments saw, <code><span class="word">x</span></code> its time in recording <code><span class="word">n</span></code>'s own time and <code><span class="word">y</span></code> its time on the merged recording's axis, both with a unit. For a recording left unaligned, the axis time is that recording's own time. The first mark gives the alignment, and the time between the two gives the stretch. <code><span class="word">--align</span> 2=1s@1.0016s,9s@9.0024s</code> puts the probe's own 1 s at 1.0016 s and its 9 s at 9.0024 s: a stretch of 1.0001, and its tick 0 1.5 ms in. The stretch is out by each mark's error over the time between them, so take the marks far apart. The merge takes the simplest ratio within that error, with each <code><span class="word">x</span></code> good to one tick of recording <code><span class="word">n</span></code>'s coarsest instrument and each <code><span class="word">y</span></code> to one merged tick.</p>
+<p>A mark has to be an event the instruments can't confuse with another. A periodic signal, such as a 100 Hz marker, lines up equally well at every whole number of its periods: an alignment on one of its edges can be off by a period, and nothing in the recording says so. Align on an aperiodic mark, such as a burst, a reset or a single pulse, and use the periodic signal to measure the drift.</p>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code><span class="word">--channel</span> <span class="word">&lt;n&gt;:&lt;name&gt;[=&lt;new&gt;]</span></code></td>
+<td>take channel <code><span class="word">&lt;name&gt;</span></code> of recording <code><span class="word">n</span></code>, named <code><span class="word">&lt;new&gt;</span></code> if given. A recording with no <code><span class="word">--channel</span></code> gives every channel</td>
+</tr>
+<tr>
+<td><code><span class="word">--align</span> <span class="word">&lt;n&gt;=&lt;time&gt;</span></code></td>
+<td>move recording <code><span class="word">n</span></code>, later when the time is positive</td>
+</tr>
+<tr>
+<td><code><span class="word">--align</span> <span class="word">&lt;n&gt;=&lt;x&gt;@&lt;y&gt;,&lt;x&gt;@&lt;y&gt;</span></code></td>
+<td>place recording <code><span class="word">n</span></code> by two marks, which give its alignment and its stretch</td>
+</tr>
+<tr>
+<td><code><span class="word">--stretch</span> <span class="word">&lt;n&gt;=&lt;ratio&gt;</span></code></td>
+<td>lengthen recording <code><span class="word">n</span></code>'s ticks by a ratio <code><span class="word">a/b</span></code> or a change such as <code><span class="word">+20ppm</span></code></td>
+</tr>
+<tr>
+<td><code><span class="word">--offset</span> <span class="word">&lt;name&gt;=&lt;time&gt;</span></code></td>
+<td>move a channel, later when the time is positive, by a whole number of its own instrument's ticks</td>
+</tr>
+<tr>
+<td><code><span class="word">--keep</span> <span class="word">&lt;name&gt;=&lt;from&gt;..&lt;to&gt;</span></code></td>
+<td>keep only that part of a channel, in its own recording's time before any move</td>
+</tr>
+<tr>
+<td><code><span class="word">--unit</span> <span class="word">&lt;name&gt;=&lt;unit&gt;</span></code></td>
+<td>an analog channel's unit</td>
+</tr>
+</tbody>
+</table>
+<p><code><span class="word">&lt;name&gt;</span></code> is the name the channel takes in the merged recording. <code><span class="word">-o</span></code>, <code><span class="word">--title</span></code>, <code><span class="word">--meta</span></code>, <code><span class="word">--level</span></code>, <code><span class="word">--block-kib</span></code> and <code><span class="word">--open</span></code> work as they do for a conversion. Each recording's own title and metadata stay with its sources, where <code><span class="word">tickwave</span> <span class="word">info</span></code> and the Open page's details list them.</p>
+<p>A recording's generated annotations come with it, from its decoders' files, bundled or in a sidecar beside it. Their times move with the recording, and <a href="https://github.com/Escapement-Project/tickwave/blob/main/ANNOTATIONS.md#merging">ANNOTATIONS.md</a> says how their names follow the merge's. Annotations written by hand don't come, since their times are the recording's own, and <code><span class="word">merge</span></code> says how many it left out. A derived channel, such as power from a current and a voltage, comes while both its channels do, moved and trimmed alike.</p>
+<p>A channel's move is in its own instrument's ticks, since that is where its edges and samples sit: a whole number of them, or a time with a unit within a hundredth of one.</p>
+<p><a href="#checking-a-recording-against-its-capture"><code><span class="word">tickwave</span> <span class="word">verify</span></code></a> checks a merged recording against the recordings it merged. It goes by what the merged recording states, not by the options it was given.</p>
+<h2 id="describing-a-recording" tabindex="-1">Describing a recording<a class="anchor" href="#describing-a-recording" aria-label="Link to this section">#</a></h2>
+<pre><code class="language-sh"><span style="color:var(--code-function)">tickwave</span> <span style="color:var(--code-string)">info</span> <span style="color:var(--code-string)">identify-swd.tickwave</span>
+</code></pre>
+<pre><code class="language-text">identify-swd
+0.523583100 s at 1000000000/1 ticks a second, 2 channels, blake3:63773d56fb3420735c864932f8d2441acd6f31a51b557e073bf27755a0534697
+  source 0: saleae-binary-1 at 1000000000/1 ticks a second, its tick 0 at 0: digital_3_0.bin, digital_3_1.bin
+  SWCLK        digital, 15286 edges, starts 1, known to 0.523583070 s (digital_3_0)
+  SWDIO        digital, 1874 edges, starts 1, known to 0.523583100 s (digital_3_1)
+0.005 MB: footer 867 bytes, 2 blocks of 1424-1727 bytes, median 1727
+  SWCLK        overview strip at 2^21
+  SWDIO        overview strip at 2^24
+</code></pre>
+<p>Times are in seconds to one tick, here a nanosecond: never more digits than the recording carries. Each channel has an overview of its own: levels of buckets of 2^n ticks, which a view draws from when it is zoomed out, from finer ones in the file to the strip in the footer. <code><span class="word">--json</span></code> prints the header and the block statistics as JSON, for a script. <code><span class="word">info</span></code> reads the recording's footer, at its end, and its index a page at a time, so it holds little however large the recording.</p>
+<p>For a merged recording, <code><span class="word">info</span></code> lists each instrument's source, with how many of the merged recording's ticks one of its ticks lasts and any stretch. Where two instruments may have recorded the same periodic signal, such as a marker line, it says that <code><span class="word">--drift</span></code> measures the drift between their clocks. <code><span class="word">tickwave</span> <span class="word">info</span> <span class="word">--drift</span></code> decodes the whole recording for it. Here an analyser at 1 GHz and a probe at 100 MHz both recorded a 10 ms marker, and the probe's clock ran 1,000 ppm fast, so it measured each period as 10.01 ms:</p>
+<pre><code class="language-sh"><span style="color:var(--code-function)">tickwave</span> <span style="color:var(--code-string)">info</span> <span style="color:var(--code-string)">--drift</span> <span style="color:var(--code-string)">both.tickwave</span>
+</code></pre>
+<pre><code class="language-text">9.029020000 s at 1000000000/1 ticks a second, 2 channels, blake3:e2e5f04029d12cbef8ed7a63f6bee934e2492c79266ca42adf1a4f2bb4b13c78
+  source 0: vcd at 1000000000/1 ticks a second, its tick 0 at 0: analyser.vcd
+  source 1: vcd at 100000000/1 ticks a second (10 of the recording's ticks each), its tick 0 at 0: probe.vcd
+  analyser.MARK digital, 1800 edges, starts 0, known to 9.020000000 s (analyser.MARK, source 0)
+  probe.MARK   digital, 1800 edges, starts 0, known to 9.029020000 s (probe.MARK, source 1)
+0.002 MB: footer 1033 bytes, 2 blocks of 46-76 bytes, median 76
+  analyser.MARK overview strip at 2^28
+  probe.MARK   overview strip at 2^28
+drift: analyser.MARK (source 0) against probe.MARK (source 1): +1000.0 ± 0.0 ppm, the stretch source 0 would take to tick as source 1 does; periods 10.000000 ms and 10.010000 ms over 900 and 900 rises, 0.6 µs and 1.7 µs rms off a straight line
+</code></pre>
+<p>It fits each such channel's rising edges to a line. A missed pulse counts as a period with no rise in it, not as one period twice as long. It compares two channels from different instruments whose periods agree within 1 %, and reads only channels of at most 2^20 edges. Their periods' ratio is the drift, as the stretch that would make the first instrument tick as the second does. A recording already stretched shows what the stretch leaves. The rms is each channel's wander about its line.</p>
+<h2 id="opening-a-recording" tabindex="-1">Opening a recording<a class="anchor" href="#opening-a-recording" aria-label="Link to this section">#</a></h2>
+<pre><code class="language-sh"><span style="color:var(--code-function)">tickwave</span> <span style="color:var(--code-string)">open</span> <span style="color:var(--code-string)">identify-swd.tickwave</span>
+</code></pre>
+<pre><code class="language-text">identify-swd.tickwave: with its sidecar identify-swd.annotations.toml, 695 annotations
+http://127.0.0.1:38343/open.html?src=bc6452795da2010a0ba21af9322bc366/identify-swd.tickwave&amp;annotations=bc6452795da2010a0ba21af9322bc366/identify-swd.annotations.toml&amp;save=bc6452795da2010a0ba21af9322bc366/identify-swd.annotations.toml&amp;local
+serving the viewer until Ctrl-C
+</code></pre>
+<p>This shows the recording in your browser, on <a href="../open.html">the Open page</a>, with its sidecar's annotations. A page can't read a file from your disk, so <code><span class="word">tickwave</span> <span class="word">open</span></code> serves the recording and the viewer itself. It serves them to your own computer only, at 127.0.0.1, and from your disk it serves only the recording, its sidecar and the files the sidecar includes. The viewer reads the recording as you move through it, so it keeps serving until you stop it with Ctrl-C.</p>
+<p>It takes the sidecar beside the recording by its name: <code>identify-swd.annotations.toml</code> for <code><span class="word">identify-swd.tickwave</span></code>. <code><span class="word">--annotations</span> <span class="word">&lt;file&gt;</span></code> names another. It checks the sidecar first and lists any problems, and the viewer then shows the recording without its annotations. A recording cut off before its end is refused, and <code><span class="word">tickwave</span> <span class="word">repair</span></code> finishes it.</p>
+<p>It prints the viewer's address and starts your browser on it. <code><span class="word">--no-browser</span></code> only prints the address, for a browser you start yourself. <code><span class="word">--port</span> <span class="word">&lt;n&gt;</span></code> serves on that port, where otherwise the system chooses one.</p>
+<p>The page can <a href="viewer.html#editing-annotations">edit the sidecar's annotations</a> and save the file back beside the recording. A recording with no sidecar gets one on the first save: <code>identify-swd.annotations.toml</code> for <code><span class="word">identify-swd.tickwave</span></code>. The page won't save over a sidecar that changed on disk after the page read it, or over one with problems.</p>
+<p>A conversion opens its recording the same way with <code><span class="word">--open</span></code>, once the recording is written. <code><span class="word">--port</span></code> and <code><span class="word">--no-browser</span></code> go with it:</p>
+<pre><code class="language-sh"><span style="color:var(--code-function)">tickwave</span> <span style="color:var(--code-string)">convert</span> <span style="color:var(--code-string)">sigrok</span> <span style="color:var(--code-string)">capture.sr</span> <span style="color:var(--code-string)">-o</span> <span style="color:var(--code-string)">capture.tickwave</span> <span style="color:var(--code-string)">--open</span>
+</code></pre>
+<h2 id="checking-a-recording-against-its-capture" tabindex="-1">Checking a recording against its capture<a class="anchor" href="#checking-a-recording-against-its-capture" aria-label="Link to this section">#</a></h2>
+<pre><code class="language-sh"><span style="color:var(--code-function)">tickwave</span> <span style="color:var(--code-string)">verify</span> <span style="color:var(--code-string)">identify-swd.tickwave</span> <span style="color:var(--code-string)">--against</span> <span style="color:var(--code-string)">identify-swd/</span>
+</code></pre>
+<p>It decodes the recording and compares it with the capture again, edge by edge and sample by sample, and says whether they match:</p>
+<pre><code class="language-text">identify-swd.tickwave: matches identify-swd/
+</code></pre>
+<p>For a Saleae export, <code><span class="word">--against</span></code> takes its directory. A recording from a version 0 export is checked at the rate it was made at.</p>
+<p>A recording with a channel moved or trimmed is checked through its moves and cuts, as the recording states them.</p>
+<p>A merged recording takes <code><span class="word">--against</span></code> once for each recording merged into it, in the merge's order. Each is the recording's capture, or the <code><span class="word">.tickwave</span></code> recording itself where there is no capture to import, such as a probe's own stream:</p>
+<pre><code class="language-sh"><span style="color:var(--code-function)">tickwave</span> <span style="color:var(--code-string)">verify</span> <span style="color:var(--code-string)">both.tickwave</span> <span style="color:var(--code-string)">--against</span> <span style="color:var(--code-string)">analyser/</span> <span style="color:var(--code-string)">--against</span> <span style="color:var(--code-string)">probe.tickwave</span>
+</code></pre>
+<p>It first checks that each one's sources are the ones the merged recording names in that place, and says so if two are swapped. Once the recording matches, it reports the drift between its instruments, as <code><span class="word">info</span> <span class="word">--drift</span></code> does.</p>
+<h2 id="checking-a-sidecar" tabindex="-1">Checking a sidecar<a class="anchor" href="#checking-a-sidecar" aria-label="Link to this section">#</a></h2>
+<p>A recording's annotations live beside it, in a sidecar: one hand-written TOML file, and the JSON Lines files of any programs that generated annotations. <a href="annotations.html">The sidecar</a> describes them. <code><span class="word">tickwave</span> <span class="word">annotations</span> <span class="word">check</span></code> checks a sidecar against its recording: its ids, its refs, its included files, its channels, its times and the recording id it names.</p>
+<pre><code class="language-sh"><span style="color:var(--code-function)">tickwave</span> <span style="color:var(--code-string)">annotations</span> <span style="color:var(--code-string)">check</span> <span style="color:var(--code-string)">identify-swd.tickwave</span> <span style="color:var(--code-string)">identify-swd.annotations.toml</span>
+</code></pre>
+<pre><code class="language-text">identify-swd.annotations.toml: 695 annotations, 8 hand-written and 687 generated, all check
+</code></pre>
+<p>It reads the included files from beside the TOML file, and refuses an included name with a directory in it. If it finds a problem, it lists every one and exits with a non-zero status, so a page's build stops instead of publishing a broken reference:</p>
+<pre><code class="language-text">identify-swd.annotations.toml: annotation 1: ref &quot;swd/wait/1&quot; does not resolve
+Error: 1 problem
+</code></pre>
+<p><code><span class="word">--json</span></code> prints the annotations as resolved: times in ticks, refs followed, in the sidecar's order.</p>
+<h2 id="bundling-a-sidecar-into-its-recording" tabindex="-1">Bundling a sidecar into its recording<a class="anchor" href="#bundling-a-sidecar-into-its-recording" aria-label="Link to this section">#</a></h2>
+<pre><code class="language-sh"><span style="color:var(--code-function)">tickwave</span> <span style="color:var(--code-string)">bundle</span> <span style="color:var(--code-string)">identify-swd.tickwave</span> <span style="color:var(--code-string)">identify-swd.annotations.toml</span> <span style="color:var(--code-string)">-o</span> <span style="color:var(--code-string)">identify-swd.bundle.tickwave</span>
+</code></pre>
+<p>This writes a copy of the recording with the sidecar's files inside, so one file carries both. It checks the sidecar first. The copy's content id is the recording's: a bundle holds the same capture. A view of a bundled recording shows its annotations when the page names no sidecar.</p>
+<h2 id="repairing-a-recording" tabindex="-1">Repairing a recording<a class="anchor" href="#repairing-a-recording" aria-label="Link to this section">#</a></h2>
+<p>A recorder writes a recording as it captures, and the file ends with an index of what it holds. A crash, a power cut or a full disk can stop the file before its index, and a viewer then can't open it. <code><span class="word">tickwave</span> <span class="word">repair</span></code> finishes such a file:</p>
+<pre><code class="language-sh"><span style="color:var(--code-function)">tickwave</span> <span style="color:var(--code-string)">repair</span> <span style="color:var(--code-string)">identify-swd.cut.tickwave</span> <span style="color:var(--code-string)">-o</span> <span style="color:var(--code-string)">identify-swd.tickwave</span>
+</code></pre>
+<pre><code class="language-text">identify-swd.tickwave: 2929 of 3000 bytes kept, 8 blocks to 0.388970979 s, blake3:3a720b983b1a833de4c025cc9565f15ab5c5c8fa7cf2d7b02dec3902525da876
+</code></pre>
+<p>A recorder that flushes notes, after each flush, the time up to which every channel's data is in the file. Where the file holds such a note, repair keeps every channel to the latest one. Otherwise it keeps each channel's blocks up to its last whole one, and the capture ends where the latest of those ends. Either way what came after was lost with the rest of the file. It then writes the index and the footer, and writes the copy to <code><span class="word">-o</span></code>. If the recorder generated annotations, each generator's file goes beside the copy, as <code>&lt;name&gt;.&lt;generator&gt;.jsonl</code>. A finished recording is refused, since there is nothing to repair. So is one with a channel moved or trimmed: convert it again from its capture.</p>
+<p>Now and then a recording can't be finished as it stands: a loss the recorder was reporting when it stopped leaves a record that a finished file can't hold. Repair then re-cuts the recording instead, as <code><span class="word">tickwave</span> <span class="word">recut</span></code> does below, and says so. The copy holds the same content either way.</p>
+<h2 id="re-cutting-a-recording" tabindex="-1">Re-cutting a recording<a class="anchor" href="#re-cutting-a-recording" aria-label="Link to this section">#</a></h2>
+<p>A recorder that flushes often, as a live capture does so that a crash loses little, closes each channel's block at every flush. At a low data rate those blocks are small, and each costs the same few dozen bytes of framing and index, so the file comes out larger than its data. <code><span class="word">tickwave</span> <span class="word">recut</span></code> writes it again with blocks of the usual size. The repository's <code>web/fixtures/energy.tickwave</code> is laid out this way: a synthetic recording of five channels over 30 ms, its current and voltage in six short blocks each, as a recorder flushing every 5 ms leaves them:</p>
+<pre><code class="language-sh"><span style="color:var(--code-function)">tickwave</span> <span style="color:var(--code-string)">recut</span> <span style="color:var(--code-string)">energy.tickwave</span> <span style="color:var(--code-string)">-o</span> <span style="color:var(--code-string)">energy.recut.tickwave</span>
+</code></pre>
+<pre><code class="language-text">energy.recut.tickwave: 0.01 MB from 0.02 MB, 5 blocks, blake3:d9a38a24d16a4cdb984ed2a901f89973b02a8c44d80cf3a5deed33b489148326 in 0.0 s
+</code></pre>
+<p><code><span class="word">tickwave</span> <span class="word">info</span></code> counts 24 blocks of 13 to 360 bytes in the original and 5 of 21 to 530 bytes in the copy, 18 KB against 14 KB.</p>
+<p>The copy holds the same content, with the same content id, and is checked before it is written. <code><span class="word">--block-kib</span></code> and <code><span class="word">--level</span></code> work as they do for a conversion. A recording cut off before its end is finished as <code><span class="word">repair</span></code> would finish it, and each annotation generator's file goes beside the copy.</p>
+<p class="doc-source">From <a href="https://github.com/Escapement-Project/tickwave/blob/HEAD/site/docs/converter.md">tickwave</a>, where changes to this page go.</p></article>
+</div>
+</main>
+<footer><div class="wrap"><span>Escapement Project</span><span>The Escapement Project is not affiliated with NXP or any other probe vendor. MCU-Link and LinkServer are NXP's names for its products.</span><span class="licence">tickwave is free software under the MIT or Apache-2.0 licence.</span></div></footer>
+<script src="../face.js" defer></script>
+<script src="../header.js" defer></script>
+<script src="../copy.js" defer></script>
+<script src="../doc.js" defer></script>
+<script src="../search.js" defer></script>
+<script src="../mark.js" defer></script>
+</body>
+</html>
