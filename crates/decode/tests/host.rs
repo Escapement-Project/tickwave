@@ -2047,6 +2047,13 @@ fn names_and_phrases_have_bounds_of_their_own() {
     let mut s = toy_schema();
     s.roles = vec![long(65).into()];
     assert_eq!(add(s), Some(BindError::Schema(SchemaError::BadName)));
+    assert_eq!(
+        add(toy_schema().with_rows(["scans", ""])),
+        Some(BindError::Schema(SchemaError::BadName))
+    );
+    let rows = toy_schema().with_rows(vec!["row"; escapement_tickwave_decode::MAX_LANES + 1]);
+    let too_many = SchemaError::TooMany { what: "row names" };
+    assert_eq!(add(rows), Some(BindError::Schema(too_many)));
 }
 
 #[test]

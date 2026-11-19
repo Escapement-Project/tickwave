@@ -334,6 +334,9 @@ pub struct Schema {
     /// The most items the analysis holds open at once, its declared bound on protocol state. The
     /// host refuses a batch that leaves more open.
     pub open_at_most: usize,
+    /// Its rows' names, row 0's first, which a view shows beside each row; a row past them has
+    /// none.
+    pub rows: Vec<Name>,
 }
 
 fn names<N: Into<Name>>(list: impl IntoIterator<Item = N>) -> Vec<Name> {
@@ -586,6 +589,7 @@ impl Schema {
             needs: vec![],
             causes: vec![],
             open_at_most: 1,
+            rows: vec![],
         }
     }
 
@@ -611,6 +615,11 @@ impl Schema {
 
     pub fn with_open_at_most(mut self, n: usize) -> Self {
         self.open_at_most = n;
+        self
+    }
+
+    pub fn with_rows<N: Into<Name>>(mut self, rows: impl IntoIterator<Item = N>) -> Self {
+        self.rows = names(rows);
         self
     }
 }
@@ -940,6 +949,10 @@ impl Schema {
         }
         for n in self.reasons.iter().chain(&self.needs).chain(&self.causes) {
             phrase(Some(n))?;
+        }
+        at_most(self.rows.len(), MAX_LANES, "row names")?;
+        for n in &self.rows {
+            named(n)?;
         }
         let mut kinds = HashSet::new();
         for k in self.kinds.iter() {

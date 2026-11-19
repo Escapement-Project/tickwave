@@ -208,6 +208,7 @@ pub fn schema() -> Schema {
         "its TAP's part runs past the bits a scan keeps",
     ])
     .with_needs(["a TDO channel"])
+    .with_rows(["scans", "states", "TAPs"])
     .with_causes([
         "a recording gap interrupts the scan",
         "the recording ends mid-scan",
