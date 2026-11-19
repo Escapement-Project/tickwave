@@ -15,14 +15,13 @@ import { FIXTURE_FORMAT, FIXTURE_MAGIC, type FixtureChannel, type FixtureHeader 
 
 const web = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
+// The captures are not in this repository: --exports names the folder of Saleae exports, one
+// folder per capture, and --energy verge's energy CSV.
 const { values, positionals } = parseArgs({
   allowPositionals: true,
   options: {
-    exports: { type: "string", default: "" },
-    energy: {
-      type: "string",
-      default: "",
-    },
+    exports: { type: "string" },
+    energy: { type: "string" },
   },
 });
 
@@ -248,7 +247,11 @@ function energy() {
 const wanted = new Set(positionals);
 for (const spec of SALEAE) {
   if (wanted.size > 0 && !wanted.has(spec.name)) continue;
-  if (!existsSync(join(values.exports!, spec.name))) {
+  if (!values.exports) {
+    console.log(`${spec.name}: no --exports folder, skipped`);
+    continue;
+  }
+  if (!existsSync(join(values.exports, spec.name))) {
     console.log(`${spec.name}: no export at ${values.exports}, skipped`);
     continue;
   }
@@ -256,7 +259,8 @@ for (const spec of SALEAE) {
   saleae(spec);
 }
 if (wanted.size === 0 || wanted.has(ENERGY.name)) {
-  if (existsSync(values.energy!)) {
+  if (!values.energy) console.log(`${ENERGY.name}: no --energy CSV, skipped`);
+  else if (existsSync(values.energy)) {
     console.log(ENERGY.name);
     energy();
   } else console.log(`${ENERGY.name}: no CSV at ${values.energy}, skipped`);

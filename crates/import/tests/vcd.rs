@@ -240,13 +240,13 @@ fn refuses_malformed_dumps() {
 }
 
 /// sigrok-cli's VCD of each of verge's exports, read here, against the `.sr` read by the sigrok
-/// reader, edge for edge. Their rates are decades, so a VCD tick is a sample.
+/// reader, edge for edge. Their rates are decades, so a VCD tick is a sample. The exports are
+/// outside the repository: `TICKWAVE_MARKER_EVIDENCE` names a folder whose `hardware-final`,
+/// `hardware`, `hardware-gui` and `shots` hold them.
 #[test]
 #[ignore = "reads exports outside the repository and runs sigrok-cli"]
 fn verge_exports_through_sigrok_cli_vcd() {
-    let root = std::path::PathBuf::from(
-        std::env::var_os("TICKWAVE_MARKER_EVIDENCE").expect("TICKWAVE_MARKER_EVIDENCE is unset"),
-    );
+    let root = common::outside("TICKWAVE_MARKER_EVIDENCE");
     let mut files = Vec::new();
     for dir in ["hardware-final", "hardware", "hardware-gui", "shots"] {
         for entry in std::fs::read_dir(root.join(dir)).unwrap() {

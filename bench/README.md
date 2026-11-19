@@ -54,16 +54,16 @@ decodes with libzstd, so `ruzstd-full`, `ruzstd` and `ruzstd#2` decode with libz
 - Node 24 or later, which runs the TypeScript scripts directly, and npm.
 - The converted recordings, which are not in this repository: the six `RESULTS.md` lists, as
   `<name>.1024.tickwave`, and `identify-swd.tickwave`, a small recording the correctness checks also
-  cover. `reference.sh` reads them from the directory `CONVERTED` names. `scripts/serve.ts` reads
-  them from its own `CONVERTED` constant. Both default to a path on the machine the results come
-  from, so set the variable and edit the constant.
+  cover. `reference.sh` and `scripts/serve.ts` read them from the folder the `CONVERTED`
+  environment variable names, and refuse to start without it. So do `run.ts`, `smoke.ts` and
+  `cold-check.ts`, which start the server.
 
 ## Rerun everything
 
 From `bench/`:
 
 ```sh
-export CONVERTED=/path/to/converted   # and the same path in scripts/serve.ts
+export CONVERTED=/path/to/converted
 ./build.sh          # both escapement-tickwave-wasm builds, the libzstd and probe builds, the native tool, the bundles
 ./reference.sh      # native hashes of every block and overview block, and the corrupted blocks
 node scripts/run.ts # every measure in both browsers

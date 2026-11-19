@@ -430,13 +430,13 @@ fn sigrok_cli_bits(path: &std::path::Path) -> Vec<(String, Vec<bool>)> {
         .collect()
 }
 
-/// verge's larger exports, against sigrok-cli and against the CSV beside each.
+/// verge's larger exports, against sigrok-cli and against the CSV beside each. They are outside
+/// the repository: `TICKWAVE_MARKER_EVIDENCE` names a folder whose `hardware-final`, `hardware`,
+/// `hardware-gui` and `shots` hold them.
 #[test]
 #[ignore = "reads exports outside the repository and runs sigrok-cli"]
 fn verge_exports() {
-    let root = std::path::PathBuf::from(
-        std::env::var_os("TICKWAVE_MARKER_EVIDENCE").expect("TICKWAVE_MARKER_EVIDENCE is unset"),
-    );
+    let root = common::outside("TICKWAVE_MARKER_EVIDENCE");
     let mut files = Vec::new();
     for dir in ["hardware-final", "hardware", "hardware-gui", "shots"] {
         for entry in std::fs::read_dir(root.join(dir)).unwrap() {

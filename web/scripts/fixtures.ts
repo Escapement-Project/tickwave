@@ -25,7 +25,7 @@ const { values } = parseArgs({
   options: {
     exports: { type: "string" },
     energy: { type: "string" },
-    converted: { type: "string", default: "" },
+    converted: { type: "string" },
   },
 });
 const node = (...args: string[]) => execFileSync(process.execPath, args, { cwd: web, encoding: "utf8", maxBuffer: 1 << 30 });
@@ -35,9 +35,10 @@ process.stdout.write(
   node("scripts/extract-fixtures.ts", ...(values.exports ? ["--exports", values.exports] : []), ...(values.energy ? ["--energy", values.energy] : [])),
 );
 
-// The converted recordings the stress sections can switch to.
+// The converted recordings the stress sections can switch to, from the folder --converted names.
 const CONVERTED = ["gcc-swd-reads", "stock-reads", "gcc-swd-matrix-capture100000", "session50"];
-for (const name of CONVERTED) {
+if (!values.converted) console.log("no --converted folder: the stress sections' converted recordings aren't linked");
+for (const name of values.converted ? CONVERTED : []) {
   const target = join(values.converted!, `${name}.1024.tickwave`);
   const link = local(`${name}.tickwave`);
   if (existsSync(link) || lstatSync(link, { throwIfNoEntry: false })) rmSync(link);

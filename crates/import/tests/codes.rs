@@ -135,13 +135,12 @@ fn verge_milliamps_have_no_codes() {
     }
 }
 
-/// verge's larger sigrok exports, outside the repository.
+/// verge's larger sigrok exports, outside the repository: `TICKWAVE_MARKER_EVIDENCE` names a folder
+/// whose `hardware-final`, `hardware`, `hardware-gui` and `shots` hold `.sr` files.
 #[test]
 #[ignore = "reads exports outside the repository"]
 fn verge_exports() {
-    let root = std::path::PathBuf::from(
-        std::env::var_os("TICKWAVE_MARKER_EVIDENCE").expect("TICKWAVE_MARKER_EVIDENCE is unset"),
-    );
+    let root = common::outside("TICKWAVE_MARKER_EVIDENCE");
     for dir in ["hardware-final", "hardware", "hardware-gui", "shots"] {
         let mut files: Vec<_> = std::fs::read_dir(root.join(dir))
             .unwrap()
@@ -207,26 +206,27 @@ fn saleae_analog(path: &Path) -> (u64, impl Iterator<Item = f32>) {
     (count, values)
 }
 
-/// The MSO's analog exports. Every sample is checked twice: once through the distinct values
-/// inside `recover_codes`, once here by encoding and decoding it again.
+/// The MSO's analog exports, outside the repository: `TICKWAVE_MSO_RUNS` names a folder holding the
+/// runs `swd50/trigger0`, `swd50long/trigger0` and `steady50-direct`, and `TICKWAVE_SESSION50`
+/// session50's export, each folder holding `analog_0.bin` and `analog_1.bin`. Every sample is
+/// checked twice: once through the distinct values inside `recover_codes`, once here by encoding
+/// and decoding it again.
 #[test]
 #[ignore = "reads exports outside the repository, up to 400 MB each"]
 fn mso_exports() {
-    let root = std::path::PathBuf::from(
-        std::env::var_os("TICKWAVE_MSO_EXPORTS").expect("TICKWAVE_MSO_EXPORTS is unset"),
-    );
+    let mso = common::outside("TICKWAVE_MSO_RUNS");
     let runs = [
-        "swd50/trigger0",
-        "swd50long/trigger0",
-        "steady50-direct",
-        "session50",
+        ("swd50/trigger0", mso.join("swd50/trigger0")),
+        ("swd50long/trigger0", mso.join("swd50long/trigger0")),
+        ("steady50-direct", mso.join("steady50-direct")),
+        ("session50", common::outside("TICKWAVE_SESSION50")),
     ];
     let multi = MultiProgress::new();
     let files = multi.add(ProgressBar::new(runs.len() as u64 * 2));
     files.set_style(ProgressStyle::with_template("{bar:30} {pos}/{len} files").unwrap());
-    for run in runs {
+    for (run, dir) in &runs {
         for file in ["analog_0.bin", "analog_1.bin"] {
-            let path = root.join(run).join(file);
+            let path = dir.join(file);
             let (count, values) = saleae_analog(&path);
             let bar = multi.add(ProgressBar::new(count * 2));
             bar.set_style(

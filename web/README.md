@@ -16,7 +16,7 @@ and `crates/convert-wasm/build.sh`. Then, from `web/`:
 npm install
 npx playwright install chromium firefox   # once, for the browser tests
 node scripts/vendor.ts                    # tokens.css and fonts for the dev page, into dev/vendor/
-node scripts/fixtures.ts                  # the local fixtures, from the project's exports (optional)
+node scripts/fixtures.ts --exports DIR --energy CSV --converted DIR   # the local fixtures (optional)
 npm run dev                               # http://127.0.0.1:8123/dev/
 ```
 
@@ -35,8 +35,10 @@ HTTP Range, on 8125 it ignores it. It logs every request, a worker's included, s
 what was fetched.
 
 The stress cases and the screenshots need the ignored `fixtures-local/`, which
-`scripts/fixtures.ts` writes from the Escapement Project's captures, outside this repository. Tests
-that need it skip without it.
+`scripts/fixtures.ts` writes from the Escapement Project's captures, outside this repository:
+`--exports` names the folder of Saleae exports, one folder per capture, `--energy` verge's energy
+CSV and `--converted` the folder of converted recordings. It skips what it isn't given, and says
+so. Tests that need it skip without it.
 
 ## The site
 

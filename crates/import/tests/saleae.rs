@@ -1,3 +1,5 @@
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -425,13 +427,12 @@ fn refuses_a_truncated_analog_file() {
     assert!(matches!(err, Error::Length { .. }), "{err}");
 }
 
-/// The whole of session50 (800 MB), when its export is on this machine.
+/// The whole of session50 (800 MB), a Saleae export outside the repository: `TICKWAVE_SESSION50`
+/// names its folder, which holds `digital_4_0.bin`, `analog_0.bin` and `analog_1.bin`.
 #[test]
 #[ignore]
 fn reads_session50() {
-    let dir = std::path::PathBuf::from(
-        std::env::var_os("TICKWAVE_SESSION50").expect("TICKWAVE_SESSION50 is unset"),
-    );
+    let dir = common::outside("TICKWAVE_SESSION50");
     let names: Vec<_> = [
         ("digital_4_0", "NRST"),
         ("analog_0", "SWCLK"),
@@ -735,14 +736,13 @@ fn parses_rates() {
     }
 }
 
-/// The version 0 exports in the project's notes, captured at 50 MS/s, when they are on this
-/// machine.
+/// Version 0 exports captured at 50 MS/s, outside the repository: `TICKWAVE_SALEAE_V0` names a
+/// folder holding `oscan5/ground`, of `digital_0.bin` to `digital_3.bin`, and `dio/coupling-1` and
+/// `dio/loop-1`, each of `digital_4.bin` to `digital_7.bin`.
 #[test]
 #[ignore]
-fn infers_50_mhz_for_the_notes_v0_exports() {
-    let root = std::path::PathBuf::from(
-        std::env::var_os("TICKWAVE_SALEAE_V0").expect("TICKWAVE_SALEAE_V0 is unset"),
-    );
+fn infers_50_mhz_for_version_0_exports() {
+    let root = common::outside("TICKWAVE_SALEAE_V0");
     for (dir, channels) in [
         ("oscan5/ground", 0..4),
         ("dio/coupling-1", 4..8),

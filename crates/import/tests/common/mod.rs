@@ -4,6 +4,15 @@ use std::path::PathBuf;
 
 use escapement_tickwave_format::model::{ChannelData, Ratio, Recording, Samples};
 
+/// The folder the environment variable `var` names: data outside the repository, which an ignored
+/// test reads. Unset, the test can't run, and says which variable to set.
+pub fn outside(var: &str) -> PathBuf {
+    match std::env::var_os(var) {
+        Some(dir) => PathBuf::from(dir),
+        None => panic!("{var} is unset: set it to the folder this test reads, as its doc says"),
+    }
+}
+
 pub fn testdata(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../testdata/import")
