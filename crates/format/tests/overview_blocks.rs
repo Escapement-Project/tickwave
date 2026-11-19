@@ -447,6 +447,81 @@ fn verify_refuses_overview_blocks_that_differ_from_the_content() {
     ));
 }
 
+/// FORMAT.md, "Overview": an empty bucket of an `int` channel holds the largest and the smallest
+/// number its bytes hold. A reader parses any minimum above its maximum as empty, so verify holds
+/// the strip to the content's bytes, as it does each overview block.
+#[test]
+fn verify_refuses_a_strip_whose_empty_bucket_holds_other_bytes() {
+    use escapement_tickwave_format::header::IntCoding;
+    // Ten 8-bit codes from tick 0, in the first of 63 buckets of 16 ticks; the strip is that
+    // level: 63 minimums of a byte, 63 maximums, then 63 sums.
+    let recording = || {
+        let timebase = Ratio::integer(1000).unwrap();
+        Recording {
+            timebase,
+            length: 1000,
+            channels: vec![Channel {
+                name: "V".into(),
+                source_name: "v".into(),
+                source: 0,
+                data: ChannelData::Analog(Analog {
+                    unit: "V".into(),
+                    first: 0,
+                    period: Ratio::ONE,
+                    count: 10,
+                    breaks: Vec::new(),
+                    significant: None,
+                    samples: Samples::U64(IntCoding::new(8, false), Box::new(0..10)),
+                    lost_before: 0,
+                    lost_after: 0,
+                    phase: None,
+                }),
+                shaping: Default::default(),
+            }],
+            derived: Vec::new(),
+            sources: vec![Source::new(SourceFormat::Other("t".into()), timebase)],
+        }
+    };
+    let file = encode(recording(), &{
+        let mut o = Options::default();
+        o.overview_shift = Some(4);
+        o
+    })
+    .unwrap();
+    verify(&file[..], recording()).unwrap();
+    let footer = Footer::parse_file(&file).unwrap();
+    let mut raw = footer
+        .strip_bytes(0, escapement_tickwave_format::decode::inflate)
+        .unwrap();
+    assert_eq!(raw.len(), 63 * (1 + 1 + 16));
+    // Bucket 1's maximum, 0 as written: 1 is still below its minimum, 255.
+    assert_eq!((raw[1], raw[63 + 1]), (255, 0));
+    raw[63 + 1] = 1;
+    let frame = escapement_tickwave_format::compress::compress(&raw, 3).unwrap();
+    // The footer again with that strip: the channel's strip length is the top index's bytes 12 to
+    // 16, after the bundle's place, and its strip ends the footer.
+    let t = file.len() - 24;
+    let at = u64::from_le_bytes(file[t..t + 8].try_into().unwrap()) as usize;
+    let len = u32::from_le_bytes(file[t + 8..t + 12].try_into().unwrap()) as usize;
+    let payload = &file[at + 5..at + len - 8];
+    let header_len = u32::from_le_bytes(payload[..4].try_into().unwrap()) as usize;
+    let top = 8 + header_len;
+    let index_len = u32::from_le_bytes(payload[4..8].try_into().unwrap()) as usize;
+    let mut edited = payload[..top + index_len].to_vec();
+    edited[top + 12..top + 16].copy_from_slice(&(frame.len() as u32).to_le_bytes());
+    edited.extend_from_slice(&frame);
+    let mut changed = file[..at].to_vec();
+    record::write_footer(&mut changed, 0, &edited);
+    // A reader takes it: the strip parses as the one written.
+    let read = Footer::parse_file(&changed).unwrap();
+    assert_eq!(read.strip(0).unwrap(), footer.strip(0).unwrap());
+    let err = verify(&changed[..], recording()).unwrap_err().to_string();
+    assert_eq!(
+        err,
+        "channel 0: the footer's strip differs from the content"
+    );
+}
+
 #[test]
 fn a_header_listing_other_overview_levels_is_refused() {
     let file = file();
@@ -484,13 +559,19 @@ fn a_header_listing_other_overview_levels_is_refused() {
         );
     }
     // A row more than the level's one page holds: the top index lists one page either way, but
-    // the page says how many it holds.
+    // its entry gives the length of five rows of 20 bytes, not six, which is refused before the
+    // page is fetched.
     let mut h = head.header.clone();
     h.channels[0].overview_blocks[0].rows = 6;
     let bad = common::with_header(&file, &h);
     Footer::parse_file(&bad).unwrap();
     let err = Index::of_file(&bad).expect_err("refused");
-    assert!(err.to_string().contains("its head differs"), "{err}");
+    assert!(
+        err.to_string().contains(
+            "page 0 at depth 0 of its overview level 2^12 is 132 bytes, where its entries take 152"
+        ),
+        "{err}"
+    );
     // A row more than one page holds, which takes a second page: the top index lists one.
     h.channels[0].overview_blocks[0].rows = 4097;
     h.channels[0].overview_blocks[0].blocks = 4097;

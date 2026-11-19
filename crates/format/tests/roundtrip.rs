@@ -226,6 +226,50 @@ fn codes_round_trip_exactly() {
     verify(&file[..], recording(EDGES_A.to_vec(), exact)).unwrap();
 }
 
+/// A codes coding's scale reads back as the f64 written, whatever its digits: serde_json parses a
+/// number to the nearest f64 only with `float_roundtrip`, and without it this 17-digit scale
+/// reads as the f64 one below it, which turns code 48991 into another f32.
+#[test]
+fn a_codes_scale_reads_back_as_the_f64_written() {
+    use escapement_tickwave_format::header::{DeclaredKind, code_value};
+    use escapement_tickwave_format::reader::{Event, Reader};
+    let scale = f64::from_bits(0x3eec_70e0_1139_1be5);
+    assert_eq!(
+        serde_json::to_string(&scale).unwrap(),
+        "0.000013561686990416373"
+    );
+    let coding = AnalogCoding::Codes {
+        bits: 16,
+        scale,
+        offset: 0.0,
+    };
+    assert_ne!(
+        code_value(48991, scale, 0.0),
+        code_value(48991, f64::from_bits(0x3eec_70e0_1139_1be4), 0.0)
+    );
+    let values: Vec<f32> = [0, 1, 48991, 65535]
+        .into_iter()
+        .cycle()
+        .take(1000)
+        .map(|c| code_value(c, scale, 0.0))
+        .collect();
+    let options = {
+        let mut o = small_blocks();
+        o.analog = vec![None, None, Some(coding)];
+        o
+    };
+    let file = encode(recording(EDGES_A.to_vec(), values.clone()), &options).unwrap();
+    let footer = Footer::parse_file(&file).unwrap();
+    assert_eq!(footer.header.channels[2].coding(), Some(coding));
+    let mut r = Reader::default();
+    r.feed(&file);
+    let Some(Event::Declaration(d)) = r.next_event().unwrap() else {
+        panic!("the declaration first")
+    };
+    assert!(matches!(d.channels[2].data, DeclaredKind::Analog { coding: c, .. } if c == coding));
+    verify(&file[..], recording(EDGES_A.to_vec(), values)).unwrap();
+}
+
 #[test]
 fn refuses_a_value_codes_cannot_hold() {
     let coding = AnalogCoding::Codes {

@@ -1366,11 +1366,12 @@ fn more_than_4096_channels_are_refused() {
 }
 
 /// FORMAT.md, "Index": a page's length is what its count gives, checked before the page is
-/// fetched.
+/// fetched, by a reader that walks to a span and by one that reads every page.
 #[test]
 fn a_page_whose_length_differs_from_its_shape_is_refused_before_it_is_fetched() {
     use escapement_tickwave_format::index::{Entry, Table, TableIndex};
     use std::ops::ControlFlow;
+    // 32 bytes of framing and head, then the entries: one page of 5 rows of 28 bytes.
     let entry = Entry {
         first: 0,
         number: 0,
@@ -1387,6 +1388,29 @@ fn a_page_whose_length_differs_from_its_shape_is_refused_before_it_is_fetched() 
         err.contains("is 173 bytes, where its entries take 172"),
         "{err}"
     );
+    let err = t.read_all(&mut fetch).unwrap_err().to_string();
+    assert!(
+        err.contains("page 0 at depth 0 of its blocks is 173 bytes, where its entries take 172"),
+        "{err}"
+    );
+    // 18 pages, more than the top index's 16: a directory listing them, of 18 entries of 28
+    // bytes.
+    let directory = Entry {
+        length: 32 + 28 * 18 + 1,
+        ..entry
+    };
+    let t = TableIndex::finished(0, Table::Blocks, 17 * 4096 + 5, 1, vec![directory]);
+    for err in [
+        t.read_all(&mut fetch).unwrap_err().to_string(),
+        t.pages(0, &mut fetch).unwrap_err().to_string(),
+    ] {
+        assert!(
+            err.contains(
+                "page 0 at depth 1 of its blocks is 537 bytes, where its entries take 536"
+            ),
+            "{err}"
+        );
+    }
 }
 
 /// FORMAT.md, "Derived channels": a derived channel's operands share their breaks. The in-order
@@ -1592,6 +1616,108 @@ fn repair_and_recut_refuse_a_declaration_they_cant_write_again() {
         assert!(
             err.contains("which this version doesn't define"),
             "recut, {what}: {err}"
+        );
+    }
+}
+
+/// Verify reads every channel, so it refuses a recording that holds one this version can't read,
+/// a stored channel or a derived one, as repair does, where it once panicked taking the derived
+/// channel's operands.
+#[test]
+fn verify_refuses_a_channel_it_cant_read() {
+    use escapement_tickwave_format::model::{
+        Analog, Channel, ChannelData, Recording, Samples, Source,
+    };
+    use escapement_tickwave_format::verify::verify;
+    let coding = || int(16, false, (1, 1000));
+    let d = declaration(
+        vec![
+            analog("V", coding(), Ratio::ONE, None),
+            analog("I", coding(), Ratio::ONE, None),
+        ],
+        vec![Derived::multiply("P", "W", "I", "V")],
+    );
+    let mut w = Writer::new(d.clone(), options()).unwrap();
+    for c in 0..2 {
+        w.run(c, 0, 0).unwrap();
+    }
+    for i in 0..4u64 {
+        w.sample(0, i).unwrap();
+        w.sample(1, i + 1).unwrap();
+    }
+    let file = finished(w, 8, 0);
+    let source = |derived: Vec<Derived>| Recording {
+        timebase: d.timebase,
+        length: 8,
+        channels: ["V", "I"]
+            .into_iter()
+            .zip([0u64, 1])
+            .map(|(name, first)| Channel {
+                name: name.into(),
+                source_name: name.to_lowercase(),
+                source: 0,
+                data: ChannelData::Analog(Analog {
+                    unit: "V".into(),
+                    first: 0,
+                    period: Ratio::ONE,
+                    count: 4,
+                    breaks: Vec::new(),
+                    significant: None,
+                    samples: match coding() {
+                        AnalogCoding::Int(int) => Samples::U64(int, Box::new(first..first + 4)),
+                        _ => unreachable!(),
+                    },
+                    lost_before: 0,
+                    lost_after: 0,
+                    phase: None,
+                }),
+                shaping: Default::default(),
+            })
+            .collect(),
+        derived,
+        sources: vec![Source::new(SourceFormat::Other("t".into()), d.timebase)],
+    };
+    verify(&file[..], source(d.derived.clone())).unwrap();
+    let with = |edit: fn(&mut Derived)| {
+        let mut p = d.derived.clone();
+        edit(&mut p[0]);
+        p
+    };
+    type Edit = fn(&mut serde_json::Value);
+    let edits: [(&str, Edit, Vec<Derived>, &str); 4] = [
+        (
+            "requires",
+            |v| v["channels"][0]["requires"] = serde_json::json!(["frobs"]),
+            d.derived.clone(),
+            "V",
+        ),
+        (
+            "codec",
+            |v| v["channels"][1]["codec"] = "delta".into(),
+            d.derived.clone(),
+            "I",
+        ),
+        (
+            "op",
+            |v| v["derived"][0]["op"] = "integrate".into(),
+            with(|p| p.op = Op::Other("integrate".into())),
+            "P",
+        ),
+        (
+            "derived requires",
+            |v| v["derived"][0]["requires"] = serde_json::json!(["frobs"]),
+            with(|p| p.requires = vec!["frobs".into()]),
+            "P",
+        ),
+    ];
+    for (what, edit, derived, name) in edits {
+        let err = verify(&with_declaration(&file, edit)[..], source(derived))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            format!("channel {name} is unavailable to this version, which can't check it"),
+            "{what}"
         );
     }
 }

@@ -9,6 +9,7 @@ use escapement_tickwave_format::header::AnalogCoding;
 use escapement_tickwave_format::model::{
     Analog, Channel, ChannelData, Digital, Ratio, Recording, Samples, Source, SourceFormat,
 };
+use escapement_tickwave_format::reader::{Ending, Reader};
 use zstd::zstd_safe::CParameter;
 
 mod common;
@@ -453,6 +454,95 @@ fn a_header_integer_past_2_pow_53_is_refused() {
     assert!(err.to_string().contains("past 2^53"), "{err}");
 }
 
+/// `significant` parses as an integer of any size a u64 holds, and a channel states at most 17,
+/// the digits an f64 holds: a reader refuses more by what it is, and so does the writer.
+#[test]
+fn significant_past_17_is_refused_whatever_its_size() {
+    use escapement_tickwave_format::header::{Declaration, DeclaredKind, Derived, SourceHeader};
+    use escapement_tickwave_format::writer::{WriteOptions, Writer};
+    let (mut rec, options) = analog(None, vec![1.0; 10]);
+    let ChannelData::Analog(v) = &mut rec.channels[1].data else {
+        unreachable!()
+    };
+    v.significant = Some(10);
+    let file = encode(rec, &options).unwrap();
+    let stating = |n: &str| {
+        let edited = common::with_header_text(&file, |h| {
+            assert_eq!(h.matches(r#""significant":10"#).count(), 1);
+            h.replace(r#""significant":10"#, &format!(r#""significant":{n}"#))
+        });
+        Footer::parse_file(&edited).map(|f| f.header)
+    };
+    let header = stating("17").unwrap();
+    assert!(matches!(
+        header.channels[1].data,
+        escapement_tickwave_format::header::ChannelKind::Analog {
+            significant: Some(17),
+            ..
+        }
+    ));
+    for n in ["256", "18446744073709551615", "18"] {
+        let err = stating(n).unwrap_err().to_string();
+        assert!(
+            err.contains(&format!(
+                "{n} significant figures; a channel states at most 17"
+            )),
+            "{n}: {err}"
+        );
+    }
+    // Past what a u64 holds the JSON number is no integer serde_json reads, and past 2^53.
+    let err = stating("18446744073709551616").unwrap_err().to_string();
+    assert!(err.contains("floating point"), "{err}");
+    // The writer refuses what a reader would, of a channel and of a derived channel.
+    let timebase = Ratio::integer(1000).unwrap();
+    let declaration = |channel: Option<u8>, derived: Option<u8>| Declaration {
+        timebase,
+        channels: ["I", "V"]
+            .into_iter()
+            .map(|name| escapement_tickwave_format::header::DeclaredChannel {
+                name: name.into(),
+                source_name: name.to_lowercase(),
+                source: 0,
+                data: DeclaredKind::Analog {
+                    unit: "V".into(),
+                    period: Ratio::ONE,
+                    coding: AnalogCoding::F32,
+                    significant: channel,
+                    phase: None,
+                },
+                shaping: Default::default(),
+                overview_shift: None,
+                codec: None,
+                requires: Vec::new(),
+            })
+            .collect(),
+        derived: vec![Derived {
+            significant: derived,
+            ..Derived::multiply("P", "W", "I", "V")
+        }],
+        sources: vec![SourceHeader::new(SourceFormat::Other("t".into()), timebase)],
+        title: None,
+        meta: Default::default(),
+        overview_shift: 4,
+        requires: Vec::new(),
+    };
+    let refused = |d| match Writer::new(d, WriteOptions::default()) {
+        Ok(_) => panic!("taken"),
+        Err(e) => e.to_string(),
+    };
+    assert!(Writer::new(declaration(Some(17), Some(17)), WriteOptions::default()).is_ok());
+    let err = refused(declaration(Some(18), None));
+    assert!(
+        err.contains("channel I states 18 significant figures; it states at most 17"),
+        "{err}"
+    );
+    let err = refused(declaration(None, Some(18)));
+    assert!(
+        err.contains("derived channel P states 18 significant figures; it states at most 17"),
+        "{err}"
+    );
+}
+
 #[test]
 fn an_index_that_moves_samples_out_of_their_block_is_refused() {
     let (rec, mut options) = analog(None, (0..10).map(|i| i as f32).collect());
@@ -559,6 +649,22 @@ fn an_item_at_the_length_or_the_end_is_refused() {
         err.to_string()
             .contains("an edge lies outside its channel's start and end"),
         "{err}"
+    );
+    // The in-order reader decodes C's block before the footer gives the end, and holds its last
+    // edge to it there.
+    let in_order = |file: &[u8]| {
+        let mut r = Reader::default();
+        r.feed(file);
+        while r.next_event()?.is_some() {}
+        r.end()
+    };
+    let (mut rec, options) = analog(None, vec![0.0; 11]);
+    rec.channels.truncate(1);
+    let whole = encode(rec, &options).unwrap();
+    assert_eq!(in_order(&whole).unwrap(), Ending::Complete);
+    assert_eq!(
+        in_order(&file).unwrap_err().to_string(),
+        "channel 0: an edge at source tick 1000000000 lies at or past the footer's end, 1000000000"
     );
 }
 

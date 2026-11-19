@@ -63,12 +63,18 @@ pub fn rows_edited(file: &[u8], c: usize, edit: impl FnOnce(&mut [BlockRow])) ->
 
 /// `file` with its footer's header replaced by `header`, the top index and the strips kept.
 pub fn with_header(file: &[u8], header: &escapement_tickwave_format::header::Header) -> Vec<u8> {
+    with_header_text(file, |_| serde_json::to_string(header).unwrap())
+}
+
+/// `file` with its footer's header's JSON text edited, to any length, the top index and the
+/// strips kept.
+pub fn with_header_text(file: &[u8], edit: impl FnOnce(&str) -> String) -> Vec<u8> {
     let t = file.len() - 24;
     let at = u64::from_le_bytes(file[t..t + 8].try_into().unwrap()) as usize;
     let len = u32::from_le_bytes(file[t + 8..t + 12].try_into().unwrap()) as usize;
     let payload = &file[at + 5..at + len - 8];
     let header_len = u32::from_le_bytes(payload[..4].try_into().unwrap()) as usize;
-    let json = serde_json::to_vec(header).unwrap();
+    let json = edit(std::str::from_utf8(&payload[8..8 + header_len]).unwrap()).into_bytes();
     let mut new = Vec::new();
     new.extend_from_slice(&(json.len() as u32).to_le_bytes());
     new.extend_from_slice(&payload[4..8]);

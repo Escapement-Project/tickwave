@@ -9,8 +9,8 @@ use std::ops::Range;
 use crate::codec::get_uleb;
 use crate::header::{
     AnalogCoding, BlockRow, ChannelHeader, ChannelKind, Declaration, DeclaredChannel, DeclaredKind,
-    Header, JSON_SAFE, Kept, LEVEL_BIT, MAGIC, MAJOR, OverviewLevel, OverviewRow, PREAMBLE_LEN,
-    TRAILER_LEN, Trailer,
+    Header, JSON_SAFE, Kept, LEVEL_BIT, MAGIC, MAJOR, MAX_SIGNIFICANT, OverviewLevel, OverviewRow,
+    PREAMBLE_LEN, TRAILER_LEN, Trailer,
 };
 use crate::index::{Entry, Located, PAGE, Page, TOP, Table, TableIndex, depth_of, pages_at};
 use crate::mapping::Mapping;
@@ -404,6 +404,12 @@ pub(crate) fn check_declaration(d: &Declaration) -> Result<(), DecodeError> {
                 "channel {name} states 0 significant figures; it states at least 1"
             )));
         }
+        if let Some(n) = significant.filter(|&n| n > MAX_SIGNIFICANT) {
+            return Err(corrupt(format!(
+                "channel {name} states {n} significant figures; it states at most \
+                 {MAX_SIGNIFICANT}"
+            )));
+        }
         if !terms(*period) {
             return Err(corrupt(format!("channel {name}'s period is past 2^53")));
         }
@@ -480,6 +486,12 @@ pub(crate) fn check_declaration(d: &Declaration) -> Result<(), DecodeError> {
         if derived.significant == Some(0) {
             return Err(corrupt(format!(
                 "derived channel {name} states 0 significant figures; it states at least 1"
+            )));
+        }
+        if let Some(n) = derived.significant.filter(|&n| n > MAX_SIGNIFICANT) {
+            return Err(corrupt(format!(
+                "derived channel {name} states {n} significant figures; it states at most \
+                 {MAX_SIGNIFICANT}"
             )));
         }
         // Checked of every derived channel, whether or not this version computes it.
@@ -1536,15 +1548,27 @@ impl Footer {
         o: usize,
         inflate: impl Fn(&[u8], usize) -> Result<Vec<u8>, DecodeError>,
     ) -> Result<Level, DecodeError> {
+        let raw = self.strip_bytes(o, inflate)?;
+        let c = &self.channels[o];
+        let n = overview::buckets(self.header.length, c.strip_shift);
+        Level::parse(&raw, c.strip_shift, n, c.column)
+            .ok_or_else(|| corrupt(format!("channel {o}'s strip does not parse")))
+    }
+
+    /// Overview channel `o`'s strip as its frame decodes, before `strip` parses it: parsing
+    /// takes any minimum above its maximum as an empty bucket, where the format gives one set
+    /// of bytes.
+    pub fn strip_bytes(
+        &self,
+        o: usize,
+        inflate: impl Fn(&[u8], usize) -> Result<Vec<u8>, DecodeError>,
+    ) -> Result<Vec<u8>, DecodeError> {
         let c = self
             .channels
             .get(o)
             .ok_or_else(|| corrupt(format!("no channel {o}")))?;
         self.check_available(o)?;
-        let raw = inflate(&self.strips[c.strip.clone()], c.strip_decoded as usize)?;
-        let n = overview::buckets(self.header.length, c.strip_shift);
-        Level::parse(&raw, c.strip_shift, n, c.column)
-            .ok_or_else(|| corrupt(format!("channel {o}'s strip does not parse")))
+        inflate(&self.strips[c.strip.clone()], c.strip_decoded as usize)
     }
 
     /// Channel `c`'s gaps, inline or once read; None for an analog channel, or one whose gaps

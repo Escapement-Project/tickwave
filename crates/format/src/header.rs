@@ -29,6 +29,20 @@ pub const LEVEL_BIT: u32 = 1 << 31;
 /// Every integer in the header stays below this, so a JavaScript reader parses it exactly.
 pub const JSON_SAFE: u64 = 1 << 53;
 
+/// The most significant figures a channel states: the digits an f64 holds.
+pub const MAX_SIGNIFICANT: u8 = 17;
+
+/// A `significant` read as an integer of any size a u64 holds, so a value past
+/// `MAX_SIGNIFICANT` is refused for what it is rather than for its type.
+fn significant<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u8>, D::Error> {
+    match Option::<u64>::deserialize(d)? {
+        Some(n) if n > u64::from(MAX_SIGNIFICANT) => Err(serde::de::Error::custom(format!(
+            "{n} significant figures; a channel states at most {MAX_SIGNIFICANT}"
+        ))),
+        n => Ok(n.map(|n| n as u8)),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Preamble {
     pub major: u16,
@@ -202,7 +216,11 @@ pub struct Derived {
     /// An operation's further terms; none for the operations this version defines.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub params: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "significant",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub significant: Option<u8>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requires: Vec<String>,
@@ -259,7 +277,11 @@ pub struct DerivedHeader {
     pub operands: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub params: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "significant",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub significant: Option<u8>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requires: Vec<String>,
@@ -695,6 +717,7 @@ struct RawChannel {
     breaks: Option<Vec<Break>>,
     break_count: Option<u64>,
     coding: Option<RawCoding>,
+    #[serde(default, deserialize_with = "significant")]
     significant: Option<u8>,
     lost_before: Option<u64>,
     lost_after: Option<u64>,

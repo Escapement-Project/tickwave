@@ -566,6 +566,7 @@ impl TableIndex {
         let mut out = Vec::new();
         if d + 1 < self.levels.len() {
             for (j, dir) in self.pages(depth + 1, fetch)?.into_iter().enumerate() {
+                self.check_len(depth + 1, j as u64, &dir)?;
                 let bytes = fetch(dir.offset, dir.length)?;
                 let page = self.parse_page(depth + 1, j as u64, &dir, &bytes)?;
                 match page {
@@ -587,6 +588,7 @@ impl TableIndex {
     ) -> Result<Vec<Page>, E> {
         let mut out = Vec::new();
         for (j, e) in self.pages(0, fetch)?.into_iter().enumerate() {
+            self.check_len(0, j as u64, &e)?;
             let bytes = fetch(e.offset, e.length)?;
             out.push(self.parse_page(0, j as u64, &e, &bytes)?);
         }
@@ -702,18 +704,7 @@ impl TableIndex {
                 return Ok(ControlFlow::Continue(()));
             }
         }
-        // The shape gives the page's length, which is checked before anything is fetched.
-        let want = self.page_len(depth, j);
-        if u64::from(entry.length) != want {
-            return Err(crate::decode::corrupt(format!(
-                "channel {}: page {j} at depth {depth} of its {} is {} bytes, where its entries \
-                 take {want}",
-                self.channel,
-                table_name(self.table),
-                entry.length
-            ))
-            .into());
-        }
+        self.check_len(depth, j, &entry)?;
         if depth == 0 {
             let at = Located {
                 j,
@@ -737,6 +728,27 @@ impl TableIndex {
             }
         }
         Ok(ControlFlow::Continue(()))
+    }
+
+    /// Refuses `entry`, which lists page `j` at `depth`, where its length isn't the one the
+    /// table's shape gives: checked before the page is fetched.
+    fn check_len(
+        &self,
+        depth: u8,
+        j: u64,
+        entry: &Entry,
+    ) -> Result<(), crate::decode::DecodeError> {
+        let want = self.page_len(depth, j);
+        if u64::from(entry.length) != want {
+            return Err(crate::decode::corrupt(format!(
+                "channel {}: page {j} at depth {depth} of its {} is {} bytes, where its entries \
+                 take {want}",
+                self.channel,
+                table_name(self.table),
+                entry.length
+            )));
+        }
+        Ok(())
     }
 
     /// The length page `j` at `depth` of the table's shape has as a record, its framing
@@ -1113,13 +1125,20 @@ mod tests {
             .collect();
         assert_eq!(rows.len() as u64, n);
         assert!(rows.iter().enumerate().all(|(i, r)| r.start == i as i64));
-        // The same table read as one of a count it isn't: the last page's count is wrong.
+        // The same table read as one of a count it isn't: the last page's entry is longer than
+        // that count gives it, which is refused before the page is fetched.
         let wrong = TableIndex {
             rows: n - 1,
             ..index.clone()
         };
         let err = wrong.read_all(&mut fetch).unwrap_err().to_string();
-        assert!(err.contains("its head differs"), "{err}");
+        assert!(
+            // 32 bytes of framing and head, and 28 a row: five rows against four.
+            err.contains(
+                "page 17 at depth 0 of its blocks is 172 bytes, where its entries take 144"
+            ),
+            "{err}"
+        );
         // As another channel's.
         let other = TableIndex {
             channel: 4,

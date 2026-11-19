@@ -357,6 +357,16 @@ pub fn verify_limited(
                         )));
                     }
                 }
+                if let Some(o) = (0..d.channels.len() + d.derived.len()).find(|&o| !d.available(o))
+                {
+                    let name = match d.channels.get(o) {
+                        Some(c) => &c.name,
+                        None => &d.derived[o - d.channels.len()].name,
+                    };
+                    return Err(mismatch(format!(
+                        "channel {name} is unavailable to this version, which can't check it"
+                    )));
+                }
                 let columns = overview::columns(&d.channels, &d.derived);
                 let ladders = columns
                     .iter()
@@ -388,6 +398,11 @@ pub fn verify_limited(
                 let Want::Digital { gaps, next_gap, .. } = &mut wants[c] else {
                     unreachable!("the reader checks a gap's channel")
                 };
+                // Past the source's list, a gap the header leaves out: it is not content, and the
+                // reader holds it to the end at the footer.
+                if *next_gap == gaps.len() {
+                    continue;
+                }
                 if gaps.get(*next_gap) != Some(&gap) {
                     return Err(mismatch(format!("channel {}: a gap differs", names[c].0)));
                 }
@@ -415,11 +430,16 @@ pub fn verify_limited(
                     first,
                     breaks,
                     lost_before,
+                    count,
                     ..
                 } = &wants[c]
                 else {
                     unreachable!("the reader checks a run's channel")
                 };
+                // A run at or past the count, which the header leaves out.
+                if run.index >= *count {
+                    continue;
+                }
                 let fits = if run.index == 0 {
                     let declared = grids[c].map_or(0, |g| g.phase());
                     run.tick == *first && run.lost == *lost_before && run.phase == declared
@@ -599,8 +619,8 @@ pub fn verify_limited(
         .take()
         .ok_or_else(|| mismatch("the blocks don't reach the length"))?;
     for (o, strip) in strips.iter().enumerate() {
-        let got = footer.strip(o)?;
-        if got.to_bytes(ov.columns[o]) != strip.to_bytes(ov.columns[o]) {
+        let got = footer.strip_bytes(o, |frame, len| inflate_limited(frame, len, max))?;
+        if got != strip.to_bytes(ov.columns[o]) {
             return Err(mismatch(format!(
                 "channel {o}: the footer's strip differs from the content"
             )));

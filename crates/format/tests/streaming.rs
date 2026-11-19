@@ -13,7 +13,7 @@ use escapement_tickwave_format::model::{
     Analog, Break, Channel, ChannelData, Digital, Gap, Ratio, Recording, Samples, Source,
 };
 use escapement_tickwave_format::overview::DigitalBucket;
-use escapement_tickwave_format::reader::{Ending, Reader};
+use escapement_tickwave_format::reader::{Ending, Event, Reader};
 use escapement_tickwave_format::record::{self, Kind};
 use escapement_tickwave_format::repair::repair;
 use escapement_tickwave_format::verify::verify;
@@ -887,6 +887,170 @@ fn verify_refuses_a_gap_or_a_block_past_the_source_s_length() {
             "channel A: a block ends at tick 20, past the source's length, 10"
         );
     }
+}
+
+/// FORMAT.md, "Gap and run records": the header leaves out a gap whose `to` is not below its
+/// channel's end and a run at or past its channel's count, though their records are in the file.
+/// Verify compares the source with the header's lists and takes such records as left out: a
+/// recorder that stops inside a loss writes one, and repair writes both again. A gap past the
+/// list that the header should have listed is still refused, by the reader's check at the footer.
+#[test]
+fn verify_takes_the_gap_and_run_records_the_header_leaves_out() {
+    let source = |length: i64, end: i64, gaps: Vec<Gap>, values: Vec<f32>| Recording {
+        timebase: Ratio::integer(96_000_000).unwrap(),
+        length,
+        channels: vec![
+            Channel {
+                name: "A".into(),
+                source_name: "dio0".into(),
+                source: 0,
+                data: ChannelData::Digital(Digital {
+                    initial: false,
+                    end,
+                    count: 1,
+                    edges: Box::new([5].into_iter()),
+                    gaps,
+                }),
+                shaping: Default::default(),
+            },
+            Channel {
+                name: "V".into(),
+                source_name: "v".into(),
+                source: 0,
+                data: ChannelData::Analog(Analog {
+                    unit: "V".into(),
+                    first: 0,
+                    period: Ratio::integer(10).unwrap(),
+                    count: values.len() as u64,
+                    breaks: Vec::new(),
+                    significant: None,
+                    samples: Samples::F32(Box::new(values.into_iter())),
+                    lost_before: 0,
+                    lost_after: 0,
+                    phase: None,
+                }),
+                shaping: Default::default(),
+            },
+        ],
+        derived: Vec::new(),
+        sources: vec![Source::new(
+            SourceFormat::Other("test".into()),
+            Ratio::integer(96_000_000).unwrap(),
+        )],
+    };
+    let a = |h: &escapement_tickwave_format::header::Header| match &h.channels[0].data {
+        ChannelKind::Digital { end, gaps, .. } => (*end, gaps.clone()),
+        _ => unreachable!(),
+    };
+    let v_count = |h: &escapement_tickwave_format::header::Header| match &h.channels[1].data {
+        ChannelKind::Analog { count, .. } => *count,
+        _ => unreachable!(),
+    };
+    let values: Vec<f32> = (0..10).map(|i| i as f32).collect();
+    let started = || {
+        let mut w = Writer::new(declaration(), options()).unwrap();
+        w.edge(0, 5).unwrap();
+        w.run(1, 0, 0).unwrap();
+        w
+    };
+
+    // Finished inside a loss that runs past the length: A ends at the gap's `from`.
+    let mut w = started();
+    for &v in &values {
+        w.sample(1, v).unwrap();
+    }
+    w.gap(
+        0,
+        Gap {
+            from: 90,
+            to: 200,
+            level: true,
+        },
+    )
+    .unwrap();
+    let mut file = w.take_output();
+    let f = w.finish(100, &[100], Finish::default()).unwrap();
+    file.extend(f.tail);
+    assert_eq!(a(&f.header), (90, Vec::new()));
+    verify(&file[..], source(100, 90, Vec::new(), values.clone())).unwrap();
+
+    // Cut off after a gap that began before the flush and a run whose sample came after it:
+    // repair finishes at the flush, A ending at the gap's `from` and V before the run.
+    let mut w = started();
+    for &v in &values[..5] {
+        w.sample(1, v).unwrap();
+    }
+    w.flush(50).unwrap();
+    w.gap(
+        0,
+        Gap {
+            from: 40,
+            to: 70,
+            level: true,
+        },
+    )
+    .unwrap();
+    w.run(1, 60, 0).unwrap();
+    w.sample(1, 5.0f32).unwrap();
+    w.flush(55).unwrap();
+    let cut = w.take_output();
+    let r = repair(&cut, 3).unwrap();
+    let mut fixed = cut[..r.keep as usize].to_vec();
+    fixed.extend_from_slice(&r.tail);
+    assert_eq!(
+        (r.header.length, a(&r.header), v_count(&r.header)),
+        (55, (40, Vec::new()), 5)
+    );
+    // The copy holds the gap record, and the run at 0 and the one past the count.
+    let mut reader = Reader::default();
+    reader.feed(&fixed);
+    let (mut gaps, mut runs) = (0, 0);
+    while let Some(e) = reader.next_event().unwrap() {
+        match e {
+            Event::Gap { .. } => gaps += 1,
+            Event::Run { .. } => runs += 1,
+            _ => {}
+        }
+    }
+    assert_eq!((gaps, runs), (1, 2));
+    verify(&fixed[..], source(55, 40, Vec::new(), values[..5].to_vec())).unwrap();
+
+    // A gap inside the channel's end that the header doesn't list: it is no gap left out. The
+    // header states the content id of the same content without it.
+    let ended = |gap: Option<Gap>| {
+        let mut w = started();
+        for &v in &values {
+            w.sample(1, v).unwrap();
+        }
+        if let Some(gap) = gap {
+            w.gap(0, gap).unwrap();
+        }
+        let mut file = w.take_output();
+        let f = w.finish(100, &[100], Finish::default()).unwrap();
+        file.extend(f.tail);
+        (file, f.header)
+    };
+    let inside = Gap {
+        from: 90,
+        to: 95,
+        level: true,
+    };
+    let (file, header) = ended(Some(inside));
+    assert_eq!(a(&header), (100, vec![inside]));
+    let mut h = header.clone();
+    if let ChannelKind::Digital { gaps, .. } = &mut h.channels[0].data {
+        gaps.clear();
+    }
+    h.content_id = ended(None).1.content_id;
+    assert_ne!(h.content_id, header.content_id);
+    let unlisted = common::with_header(&file, &h);
+    let err = verify(&unlisted[..], source(100, 100, Vec::new(), values.clone()))
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        err,
+        "channel 0: the footer's gaps or runs differs from what was read"
+    );
 }
 
 /// A generator's name names its file, `<stem>.<source>.jsonl` beside the recording, which repair

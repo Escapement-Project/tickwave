@@ -965,6 +965,22 @@ impl Reader {
             if self.next_start[c] != h.length || self.blocks[c].table.count() != ch.blocks {
                 return Err(differs(c, "blocks"));
             }
+            // The blocks were decoded before the footer gave the end, which every edge lies
+            // before.
+            if let (
+                Channel::Digital {
+                    edges, last_edge, ..
+                },
+                ChannelKind::Digital { end, .. },
+            ) = (&self.channels[c], &ch.data)
+                && *edges > 0
+                && *last_edge >= *end
+            {
+                return Err(corrupt(format!(
+                    "channel {c}: an edge at source tick {last_edge} lies at or past the footer's \
+                     end, {end}"
+                )));
+            }
             let top = self.blocks[c].top(0)?;
             if top != footer.channels[c].blocks.as_ref().map(top_of) {
                 return Err(differs(c, "block index"));
