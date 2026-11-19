@@ -25,8 +25,8 @@
 use crate::cjtag::JtagOnCjtag;
 use escapement_tickwave_decode::{
     Cause, Decoder, Definition, Element, ElementType, Exchange, Factory, FieldId, FieldType, Id,
-    InputDecl, KindDecl, KindId, Label, MAX_BITS, Mode, Need, Observation, Observed, Out, Pause,
-    Reason, Request, Schema, SeqId, Setting, SettingDecl, SettingId, Span, Status, Tick,
+    InputDecl, InputId, KindDecl, KindId, Label, MAX_BITS, Mode, Need, Observation, Observed, Out,
+    Pause, Reason, Request, Schema, SeqId, Setting, SettingDecl, SettingId, Span, Status, Tick,
     UpstreamDecl, Value, Window, field, name, seq,
 };
 use std::ops::Range;
@@ -216,8 +216,8 @@ pub fn schema() -> Schema {
 }
 
 /// JTAG's inputs: the wire, and cJTAG's output.
-pub const FROM_WIRE: usize = 0;
-pub const FROM_CJTAG: usize = 1;
+pub const FROM_WIRE: InputId = InputId(0);
+pub const FROM_CJTAG: InputId = InputId(1);
 
 /// Where TDO is read: `TdoEdge`'s choices, by their names.
 pub const TDO_EDGE: SettingId = SettingId(0);

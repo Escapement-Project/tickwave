@@ -28,8 +28,9 @@
 use crate::swd;
 use escapement_tickwave_decode::{
     Cause, Completed, Decoder, Definition, Delivery, Exchange, Factory, FieldId, FieldType, Id,
-    KindDecl, KindId, Label, LinkDecl, LinkId, LinkTo, Mode, Need, Op, Out, Pause, Reason, Ref,
-    Schema, Setting, SettingDecl, SettingId, Span, Status, Tick, UpstreamDecl, Value, field, name,
+    InputId, KindDecl, KindId, Label, LinkDecl, LinkId, LinkTo, Mode, Need, Op, Out, Pause, Reason,
+    Ref, Schema, Setting, SettingDecl, SettingId, Span, Status, Tick, UpstreamDecl, Value, field,
+    name,
 };
 use foldhash::HashMap;
 use std::sync::Arc;
@@ -207,8 +208,8 @@ pub fn adi_schema() -> Schema {
 
 /// ADIv5's inputs: SWD's transfers, whose AP reads are posted, and JTAG-DP's, each read carrying
 /// its own data.
-pub const FROM_SWD: usize = 0;
-pub const FROM_JTAG_DP: usize = 1;
+pub const FROM_SWD: InputId = InputId(0);
+pub const FROM_JTAG_DP: InputId = InputId(1);
 /// Each AP's IDR from the start, AP 0 first, `IDR_NOT_GIVEN` for an AP left out. Empty, the
 /// default, gives none.
 pub const IDR: SettingId = SettingId(0);

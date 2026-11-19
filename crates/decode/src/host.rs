@@ -5,8 +5,8 @@
 use crate::{
     output::{Id, KindId, Op, Out, Ref, SeqId, Span, Status, Tick},
     schema::{
-        CONTRACT, Contract, Definition, Mismatch, Name, Resolved, SchemaError, Setting, SettingId,
-        SettingType,
+        CONTRACT, Contract, Definition, InputId, Mismatch, Name, Resolved, SchemaError, Setting,
+        SettingId, SettingType,
     },
     store::{Field, Refused, Store},
 };
@@ -512,7 +512,7 @@ pub type Factory = Box<dyn Fn(&Bound, Option<Tick>) -> Box<dyn Decoder> + Send +
 pub struct Bound {
     settings: Vec<Held>,
     ports: Vec<bool>,
-    input: usize,
+    input: InputId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -529,7 +529,7 @@ impl Bound {
         def: &Definition,
         given: &[(&str, Setting)],
         ports: Vec<bool>,
-        input: usize,
+        input: InputId,
     ) -> Result<Self, BindError> {
         for (k, (n, _)) in given.iter().enumerate() {
             let Some(d) = def.settings.iter().find(|d| d.name == *n) else {
@@ -575,8 +575,8 @@ impl Bound {
         })
     }
 
-    /// The input the binding picked, by its index in the definition's inputs.
-    pub fn input(&self) -> usize {
+    /// The input the binding picked.
+    pub fn input(&self) -> InputId {
         self.input
     }
 

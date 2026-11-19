@@ -131,9 +131,9 @@ pub struct PortDecl {
 pub struct SettingDecl {
     pub name: Name,
     pub ty: SettingType,
-    /// The inputs it applies to, by their index in the definition's inputs; every input where
-    /// empty. A binding to another input that gives it is refused.
-    pub inputs: Vec<usize>,
+    /// The inputs it applies to; every input where empty. A binding to another input that gives it
+    /// is refused.
+    pub inputs: Vec<InputId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -175,6 +175,10 @@ pub enum Setting {
 /// A setting, by its index in the definition's settings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SettingId(pub u16);
+
+/// An input, by its index in the definition's inputs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct InputId(pub u16);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -358,10 +362,10 @@ impl Definition {
 
     /// The input an analysis of definition `upstream` binds to: the first that names it, else the
     /// first that takes any.
-    pub fn upstream_input(&self, upstream: &str) -> Option<(usize, &UpstreamDecl)> {
+    pub fn upstream_input(&self, upstream: &str) -> Option<(InputId, &UpstreamDecl)> {
         let ups = || {
             (self.inputs.iter().enumerate()).filter_map(|(k, i)| match i {
-                InputDecl::Upstream(u) => Some((k, u)),
+                InputDecl::Upstream(u) => Some((InputId(u16::try_from(k).ok()?), u)),
                 InputDecl::Wire => None,
             })
         };
@@ -369,9 +373,10 @@ impl Definition {
             .or_else(|| ups().find(|(_, u)| u.from.is_empty()))
     }
 
-    /// The index of its wire input, if it takes the wire.
-    pub fn wire_input(&self) -> Option<usize> {
-        self.inputs.iter().position(|i| *i == InputDecl::Wire)
+    /// Its wire input, if it takes the wire.
+    pub fn wire_input(&self) -> Option<InputId> {
+        let k = self.inputs.iter().position(|i| *i == InputDecl::Wire)?;
+        Some(InputId(u16::try_from(k).ok()?))
     }
 
     /// Checks its inputs, ports and settings: their names, none twice, no upstream two inputs
@@ -423,7 +428,10 @@ impl Definition {
                 return Err(SchemaError::DuplicateSetting(s.name.clone()));
             }
             at_most(s.inputs.len(), MAX_LIST, "inputs a setting applies to")?;
-            if s.inputs.iter().any(|&i| i >= self.inputs.len()) {
+            if s.inputs
+                .iter()
+                .any(|i| usize::from(i.0) >= self.inputs.len())
+            {
                 return Err(SchemaError::SettingInput(s.name.clone()));
             }
             let fits = match &s.ty {
@@ -462,14 +470,13 @@ impl Definition {
 }
 
 impl SettingDecl {
-    /// Applies only to these inputs, by their index in the definition's inputs.
-    pub fn for_inputs(mut self, inputs: impl IntoIterator<Item = usize>) -> Self {
+    /// Applies only to these inputs.
+    pub fn for_inputs(mut self, inputs: impl IntoIterator<Item = InputId>) -> Self {
         self.inputs = inputs.into_iter().collect();
         self
     }
 
-    /// Whether it applies to the input of index `input`.
-    pub fn applies_to(&self, input: usize) -> bool {
+    pub fn applies_to(&self, input: InputId) -> bool {
         self.inputs.is_empty() || self.inputs.contains(&input)
     }
 

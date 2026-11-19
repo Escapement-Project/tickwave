@@ -35,11 +35,11 @@ pub use output::{
     Value,
 };
 pub use schema::{
-    CONTRACT, Contract, Definition, ElementType, FieldDecl, FieldType, InputDecl, KindDecl, Label,
-    LabelPiece, LinkDecl, LinkTo, MAX_FIELD_NAMES, MAX_KINDS, MAX_LABEL_PIECES, MAX_LABELS,
-    MAX_LANES, MAX_LINK_ROLES, MAX_LINK_TARGETS, MAX_LIST, MAX_NAME, MAX_PHRASE, MAX_ROLES,
-    MAX_SEQUENCES, Mismatch, Name, PortDecl, Schema, SchemaError, SeqDecl, Setting, SettingDecl,
-    SettingId, SettingType, UpstreamDecl, field, name, seq,
+    CONTRACT, Contract, Definition, ElementType, FieldDecl, FieldType, InputDecl, InputId,
+    KindDecl, Label, LabelPiece, LinkDecl, LinkTo, MAX_FIELD_NAMES, MAX_KINDS, MAX_LABEL_PIECES,
+    MAX_LABELS, MAX_LANES, MAX_LINK_ROLES, MAX_LINK_TARGETS, MAX_LIST, MAX_NAME, MAX_PHRASE,
+    MAX_ROLES, MAX_SEQUENCES, Mismatch, Name, PortDecl, Schema, SchemaError, SeqDecl, Setting,
+    SettingDecl, SettingId, SettingType, UpstreamDecl, field, name, seq,
 };
 pub use store::{CHANGES_AT_MOST, Counts, Field, Item, Refused, Revision, Store};
 

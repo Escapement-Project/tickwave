@@ -6,9 +6,9 @@ use common::*;
 use escapement_tickwave_decode::{
     AnalysisId, Batch, BindError, Bound, CONTRACT, Cause, CheckpointError, Contract, Decoder,
     Definition, Delivery, Element, ElementType, Exchange, FieldDecl, FieldId, FieldType, Host,
-    HostOptions, Id, InputDecl, InputSpec, Keeping, KindDecl, KindId, LinkDecl, LinkId, LinkTo,
-    LogEntry, Mismatch, Mode, Name, Need, Observation, Op, Pause, Reason, Ref, Refusal, Refused,
-    Reply, Role, RunView, Schema, SchemaError, Seek, SeqDecl, SeqId, Setting, SettingDecl,
+    HostOptions, Id, InputDecl, InputId, InputSpec, Keeping, KindDecl, KindId, LinkDecl, LinkId,
+    LinkTo, LogEntry, Mismatch, Mode, Name, Need, Observation, Op, Pause, Reason, Ref, Refusal,
+    Refused, Reply, Role, RunView, Schema, SchemaError, Seek, SeqDecl, SeqId, Setting, SettingDecl,
     SettingId, Source, SourceError, Span, Status, Tick, UpstreamDecl, Value, Window, WindowId,
     field, name, seq,
 };
@@ -2251,7 +2251,7 @@ fn a_definition_whose_settings_or_ports_clash_is_refused() {
         schema(SchemaError::BadName)
     );
     assert_eq!(
-        refused(vec![SettingDecl::flag("n", false).for_inputs([1])]),
+        refused(vec![SettingDecl::flag("n", false).for_inputs([InputId(1)])]),
         schema(SchemaError::SettingInput(name("n")))
     );
     let twice = Arc::new(
@@ -2337,7 +2337,7 @@ fn an_upstream_binds_to_the_input_naming_its_definition_and_the_decoder_is_told_
     .unwrap();
     // With none naming it, the first taking any.
     add("b", vec![named("other", "jtag"), any()]).unwrap();
-    assert_eq!(*picked.lock().unwrap(), vec![3, 1]);
+    assert_eq!(*picked.lock().unwrap(), vec![InputId(3), InputId(1)]);
     assert_eq!(
         add("c", vec![InputDecl::Wire, named("other", "jtag")]).unwrap_err(),
         BindError::NotAnInput {
@@ -2397,7 +2397,9 @@ fn a_setting_for_some_inputs_is_refused_on_the_others() {
                     .with_kinds(["pulse"])
                     .into(),
             ])
-            .with_settings(vec![SettingDecl::flag("edge", false).for_inputs([0])]),
+            .with_settings(vec![
+                SettingDecl::flag("edge", false).for_inputs([InputId(0)]),
+            ]),
     );
     let mut add = |n: &'static str, settings: &[(&str, Setting)]| {
         h.add(
