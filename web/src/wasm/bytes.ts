@@ -33,20 +33,32 @@ const END_CAP = 1 << 20;
  * 200 instead of 206 has sent the whole file: it is kept, and every later read is served from it.
  * The bytes read from the file's end are kept too, so a block inside the first read is not
  * fetched again.
+ *
+ * A file on another origin is read from its start first (`bytes=0-`), for its size. There, the
+ * browser sends a read from the end only after a preflight, which GitHub Pages refuses. And the
+ * browser hides `Content-Range` unless the server exposes it, while `Content-Length` is always
+ * readable.
  */
 export class HttpBytes implements Bytes {
   readonly name: string;
   readonly #url: string;
   readonly #fetch: Fetch;
+  readonly #otherOrigin: boolean;
   #whole: Uint8Array | null = null;
   #end: Uint8Array = new Uint8Array(0);
   /** Where `#end` starts in the file, once a tail is read. */
   #endFrom = Infinity;
+  /** The file's size, once a tail is read: an answer without a readable `Content-Range` is
+   * checked by its length against it. */
+  #size: number | undefined;
 
-  constructor(url: string, fetchFn: Fetch = (u, i) => fetch(u, i)) {
+  /** `origin` is the one reading, `globalThis.origin` by default; without one, the file is
+   * taken as the reader's own. */
+  constructor(url: string, fetchFn: Fetch = (u, i) => fetch(u, i), origin: string | undefined = globalThis.origin) {
     this.#url = url;
     this.name = decodeURIComponent(new URL(url).pathname.split("/").pop() ?? url);
     this.#fetch = fetchFn;
+    this.#otherOrigin = origin !== undefined && new URL(url).origin !== origin;
   }
 
   async #get(range: string, signal?: AbortSignal, allow416 = false): Promise<Response> {
@@ -71,6 +83,7 @@ export class HttpBytes implements Bytes {
 
   async tail(n: number, signal?: AbortSignal): Promise<Tail> {
     if (this.#whole) return { bytes: this.#whole.subarray(Math.max(0, this.#whole.length - n)), size: this.#whole.length };
+    if (this.#otherOrigin) return this.#tailFromStart(n, signal);
     const res = await this.#get(`bytes=-${n}`, signal, true);
     if (res.status === 200) {
       this.#whole = new Uint8Array(await res.arrayBuffer());
@@ -81,18 +94,54 @@ export class HttpBytes implements Bytes {
     if (res.status === 416) {
       const size = /^bytes \*\/(\d+)$/.exec(res.headers.get("content-range") ?? "");
       if (!size) throw named("TickwaveHttpError", `${this.name}: HTTP 416`);
-      if (size[1] === "0") return { bytes: new Uint8Array(0), size: 0 };
-      const bytes = await this.read(0, Number(size[1]), signal);
+      this.#size = Number(size[1]);
+      if (this.#size === 0) return { bytes: new Uint8Array(0), size: 0 };
+      const bytes = await this.read(0, this.#size, signal);
       if (!this.#whole) [this.#end, this.#endFrom] = [bytes, 0];
-      return { bytes, size: Number(size[1]) };
+      return { bytes, size: this.#size };
     }
     const range = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(res.headers.get("content-range") ?? "");
     if (!range) throw new Error(`${this.name}: the server's answer to a read from the end says no range`);
     const bytes = new Uint8Array(await res.arrayBuffer());
     const [from, size] = [Number(range[1]), Number(range[3])];
     if (from + bytes.length !== size) throw new Error(`${this.name}: asked for the last ${n} bytes, got ${range[0]}`);
+    this.#size = size;
     this.#end = bytes;
     this.#endFrom = from;
+    return { bytes, size };
+  }
+
+  /** The tail of a file on another origin: its size from a read from its start, whose body is
+   * kept when it is the whole tail, then its end by an explicit range. */
+  async #tailFromStart(n: number, signal?: AbortSignal): Promise<Tail> {
+    // Stopped by an abort: Firefox goes on downloading a body that is only cancelled.
+    const stop = new AbortController();
+    const res = await this.#get("bytes=0-", signal ? AbortSignal.any([signal, stop.signal]) : stop.signal, true);
+    if (res.status === 200) {
+      this.#whole = new Uint8Array(await res.arrayBuffer());
+      return this.tail(n, signal);
+    }
+    // A read from the start is unsatisfiable only when the file is empty.
+    if (res.status === 416) {
+      this.#size = 0;
+      return { bytes: new Uint8Array(0), size: 0 };
+    }
+    const range = res.headers.get("content-range");
+    const said = range !== null ? /^bytes 0-\d+\/(\d+)$/.exec(range)?.[1] : res.headers.get("content-length");
+    if (!said || !/^\d+$/.test(said)) {
+      stop.abort();
+      throw new Error(`${this.name}: the server's answer to a read from the start says no size`);
+    }
+    const size = (this.#size = Number(said));
+    if (size <= n) {
+      const bytes = new Uint8Array(await res.arrayBuffer());
+      if (bytes.length !== size) throw new Error(`${this.name}: asked for its ${size} bytes, got ${bytes.length}`);
+      [this.#end, this.#endFrom] = [bytes, 0];
+      return { bytes, size };
+    }
+    stop.abort();
+    const bytes = await this.read(size - n, size, signal);
+    [this.#end, this.#endFrom] = [bytes, size - n];
     return { bytes, size };
   }
 
@@ -108,6 +157,10 @@ export class HttpBytes implements Bytes {
     const range = /^bytes (\d+)-\d+\//.exec(res.headers.get("content-range") ?? "");
     if (range && Number(range[1]) !== from) throw new Error(`${this.name}: asked for bytes from ${from}, got ${range[1]}`);
     const bytes = new Uint8Array(await res.arrayBuffer());
+    // Where the answer starts can't be seen: its length is checked instead.
+    if (!range && (this.#size === undefined ? bytes.length > to - from : bytes.length !== Math.max(0, Math.min(to, this.#size) - from))) {
+      throw new Error(`${this.name}: asked for bytes ${from} to ${to}, got ${bytes.length}`);
+    }
     // The rest of a footer the first read did not hold: it joins what is kept from the end.
     if (from + bytes.length === this.#endFrom && bytes.length + this.#end.length <= END_CAP) {
       this.#end = join(bytes, this.#end);

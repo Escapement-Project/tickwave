@@ -428,25 +428,34 @@ test("overview blocks: a finer level read by range, each channel's own, as the T
   ]);
 });
 
-/** A server over a file, honouring Range or not, and recording what it was asked. */
-function server(file: Uint8Array, opts: { ranges: boolean; encoding?: string; shift?: number }) {
+/** A server over a file, honouring Range or not, and recording what it was asked. `other` serves
+ * it as GitHub Pages does to a page on another origin: a read from the end needs a preflight,
+ * which it refuses, and `Content-Range` is hidden; `short` drops each ranged answer's last byte. */
+function server(file: Uint8Array, opts: { ranges: boolean; encoding?: string; shift?: number; other?: boolean; short?: boolean; noLength?: boolean }) {
   const name = file === ONE ? "identify-swd.tickwave" : "identify-swd.4k.tickwave";
   const log: string[] = [];
+  let aborted = 0;
   const fetchFn: Fetch = async (_url, init) => {
     const range = new Headers(init.headers).get("range");
     log.push(range ?? "whole");
-    const m = /^bytes=(\d+)-(\d+)$/.exec(range ?? "");
+    init.signal?.addEventListener("abort", () => void aborted++);
+    const m = /^bytes=(\d+)-(\d*)$/.exec(range ?? "");
     const end = /^bytes=-(\d+)$/.exec(range ?? "");
+    if (opts.other && end) throw new TypeError("Failed to fetch");
     if (!opts.ranges || !(m || end)) return new Response(file.slice(), { status: 200 });
     // A suffix longer than the file: 416 and its size, as GitHub Pages answers it.
     if (end && Number(end[1]) > file.length) return new Response(null, { status: 416, headers: { "content-range": `bytes */${file.length}` } });
+    if (m && Number(m[1]) >= file.length) return new Response(null, { status: 416, ...(!opts.other && { headers: { "content-range": `bytes */${file.length}` } }) });
     const from = m ? Number(m[1]) + (opts.shift ?? 0) : file.length - Number(end![1]);
-    const to = m ? Math.min(Number(m[2]) + 1, file.length) : file.length;
-    const headers: Record<string, string> = { "content-range": `bytes ${from}-${to - 1}/${file.length}` };
+    const to = m && m[2] ? Math.min(Number(m[2]) + 1, file.length) : file.length;
+    const body = file.slice(from, opts.short ? to - 1 : to);
+    const headers: Record<string, string> = opts.other ? {} : { "content-range": `bytes ${from}-${to - 1}/${file.length}` };
+    if (!opts.noLength) headers["content-length"] = String(to - from);
     if (opts.encoding) headers["content-encoding"] = opts.encoding;
-    return new Response(file.slice(from, to), { status: 206, headers });
+    return new Response(body, { status: 206, headers });
   };
-  return { log, bytes: new HttpBytes(`https://example.org/r/${name}`, fetchFn) };
+  const bytes = new HttpBytes(`https://example.org/r/${name}`, fetchFn, opts.other ? "https://page.example" : undefined);
+  return { log, bytes, aborted: () => aborted };
 }
 
 test("HTTP: the end first, a channel's page and blocks by range, adjacent blocks in one request, nothing fetched twice", async () => {
@@ -488,6 +497,43 @@ test("HTTP: a compressed range, or the wrong range, is refused", async () => {
   const shifted = server(NINE, { ranges: true, shift: 7 });
   const { footer } = layout(NINE);
   await assert.rejects(Opened.open(wasm(), shifted.bytes, 512), new RegExp(`asked for bytes from ${footer}, got ${footer + 7}`));
+});
+
+test("HTTP, another origin: the size from a read from the start, aborted once its headers are in, then the end and blocks by explicit ranges", async () => {
+  const s = server(NINE, { ranges: true, other: true });
+  const { footer, page, blocks } = layout(NINE, 0);
+  const r = await Opened.open(wasm(), s.bytes, 512);
+  assert.deepEqual(s.log, ["bytes=0-", `bytes=${NINE.length - 512}-${NINE.length - 1}`, `bytes=${footer}-${NINE.length - 512 - 1}`]);
+  assert.equal(s.aborted(), 1);
+  assert.equal((await r.edges(0, 0, r.info.length)).ticks.length, 15286);
+  assert.deepEqual(s.log.slice(3), [`bytes=${page[0]}-${page[1] - 1}`, `bytes=${blocks[0][0]}-${blocks[blocks.length - 1][1] - 1}`]);
+});
+
+test("HTTP, another origin: a file no longer than the first read is read once from its start, and not again for its block", async () => {
+  const s = server(ONE, { ranges: true, other: true });
+  const r = await Opened.open(wasm(), s.bytes);
+  assert.equal((await r.edges(0, 0, r.info.length)).ticks.length, 15286);
+  assert.deepEqual(s.log, ["bytes=0-"]);
+  assert.equal(s.aborted(), 0);
+});
+
+test("HTTP, another origin: a server that ignores Range sends the whole file once", async () => {
+  const s = server(NINE, { ranges: false, other: true });
+  const r = await Opened.open(wasm(), s.bytes, 1024);
+  assert.equal((await r.edges(0, 0, r.info.length)).ticks.length, 15286);
+  assert.deepEqual(s.log, ["bytes=0-"]);
+});
+
+test("HTTP, another origin: an answer of the wrong length, or one with no size, is refused", async () => {
+  await assert.rejects(Opened.open(wasm(), server(NINE, { ranges: true, other: true, short: true }).bytes, 512), new RegExp(`asked for bytes ${NINE.length - 512} to ${NINE.length}, got 511`));
+  await assert.rejects(server(ONE, { ranges: true, other: true, short: true }).bytes.tail(FIRST_READ), new RegExp(`asked for its ${ONE.length} bytes, got ${ONE.length - 1}`));
+  const unsized = server(NINE, { ranges: true, other: true, noLength: true });
+  await assert.rejects(Opened.open(wasm(), unsized.bytes, 512), /read from the start says no size/);
+  assert.equal(unsized.aborted(), 1);
+});
+
+test("HTTP, another origin: an empty file is read as empty", async () => {
+  assert.deepEqual(await server(new Uint8Array(0), { ranges: true, other: true }).bytes.tail(512), { bytes: new Uint8Array(0), size: 0 });
 });
 
 /** Bytes whose reads wait until released, and honour their signal meanwhile. */

@@ -1,8 +1,8 @@
 // The browser tests' static server: web/ on three ports, one that honours Range (8124), one that
-// ignores it and always sends the whole file (8125), and another site that honours Range and sends
-// Access-Control-Allow-Origin: *, as GitHub Pages does (8126). It logs every request, a worker's
-// included, so a test can see what was fetched: GET /__log?tag=X lists the requests whose URL
-// holds X.
+// ignores it and always sends the whole file (8125), and another site that serves as GitHub Pages
+// does (8126): it honours Range, sends Access-Control-Allow-Origin: * and exposes no other header,
+// and answers a preflight 405. It logs every request, a worker's included, so a test can see what
+// was fetched: GET /__log?tag=X lists the requests whose URL holds X.
 // A request URL with `after=N` makes every Range read past the Nth for its tag wait `stall`
 // milliseconds, then fail with status `fail` or be answered; with `until=M`, only the reads up to
 // the Mth. /named/<path>/<name> serves web/<path> under another name: a recording without a title
@@ -38,6 +38,11 @@ function serve(port: number, acceptRanges: boolean, cors = false): void {
     res.on("finish", () => (entry.status = res.statusCode));
     res.setHeader("cache-control", "no-store");
     if (cors) res.setHeader("access-control-allow-origin", "*");
+    if (cors && req.method === "OPTIONS") {
+      res.statusCode = 405;
+      res.end();
+      return;
+    }
     const named = /^\/named(\/.+)\/[^/]+$/.exec(url.pathname);
     const path = decodeURIComponent(named ? named[1] : url.pathname);
     const answer = () =>

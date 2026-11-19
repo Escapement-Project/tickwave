@@ -229,10 +229,9 @@ policy, which then also has to allow `blob:` and that site in `worker-src`, and 
 
 Recordings are fetched by byte range: the footer first, then only the channels and the span a view
 shows. A server that ignores ranges still works, as long as it sends the whole file. A recording on
-another site needs that site to allow the reads: `Access-Control-Allow-Origin`, and
-`Access-Control-Expose-Headers: Content-Range`, so the decoder can see which bytes came back.
-GitHub Pages sends the first and not the second, so a recording kept there shows only on a page of
-the same site.
+another site needs that site to send `Access-Control-Allow-Origin`, as GitHub Pages does. The
+decoder then asks for the whole file and stops the read once the answer gives the file's size. So
+a recording larger than the first read, 32 KiB by default, takes one more request to open.
 
 A page that shows a closed view can write the view's title and facts into it. The view then lays
 out before `tickwave.js` has loaded, and keeps its height once it has:

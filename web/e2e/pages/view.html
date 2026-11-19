@@ -5,6 +5,7 @@
 <title>One view, set up by the query</title>
 <!--
   ?src=   the recording, relative to web/ (default fixtures/identify-swd.tickwave)
+  ?site=  the origin the recording is read from, in place of this page's own
   ?tag=   appended to the recording's URL, so the server's log can tell this page's requests apart
   ?annotations=  a sidecar, relative to web/
   ?open   open the view; otherwise it stays collapsed
@@ -21,7 +22,7 @@ import { configure } from "../../dist/tickwave.js";
 const q = new URLSearchParams(location.search);
 if (q.get("firstRead")) configure({ firstRead: Number(q.get("firstRead")) });
 const served = new URLSearchParams([...q].filter(([k]) => ["tag", "after", "until", "fail", "stall"].includes(k)));
-const src = `../../${q.get("src") ?? "fixtures/identify-swd.tickwave"}${served.size > 0 ? `?${served}` : ""}`;
+const src = `${q.get("site") ? `${q.get("site")}/` : "../../"}${q.get("src") ?? "fixtures/identify-swd.tickwave"}${served.size > 0 ? `?${served}` : ""}`;
 const view = document.createElement("tickwave-view");
 view.id = "v";
 view.setAttribute("src", src);
