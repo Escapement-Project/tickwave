@@ -2035,3 +2035,38 @@ fn a_command_in_a_jscan_format_a_selection_brings_holds_an_item_open_on_every_ro
     assert_eq!(commands.len(), 1);
     assert!(commands[0].start > formats[0].start);
 }
+
+#[test]
+fn the_scan_format_row_shows_a_jscan_format_stfmt_stores_and_ends_at_test_logic_reset() {
+    // A JScan format STFMT stores takes effect at the command's Update-DR, with no Check Packet.
+    let mut g = Gen::new();
+    g.reset_to_idle();
+    g.jscan(&enter_command_level());
+    g.jscan(&command(3, 3));
+    g.jscan(&[0, 0]);
+    let (h, [c, _]) = decode(&g, true);
+    let formats = of(&h, c, &[cjtag::FORMAT]);
+    assert_eq!(formats.len(), 1);
+    assert_eq!(
+        value(&formats[0], cjtag::SCAN_FORMAT),
+        Some(Value::Text("JScan3".into()))
+    );
+    let command = &of(&h, c, &[cjtag::COMMAND])[0];
+    assert!(formats[0].start >= command.end.unwrap());
+
+    // Test-Logic-Reset sets the default scan format (table 9-2), whatever brought the last one.
+    let mut g = Gen::new();
+    g.reset_to_idle();
+    g.bit(false, 4);
+    g.select(0b0000, 0b1000, None);
+    g.jscan(&[1, 1, 1, 1, 1, 0, 0]);
+    let (h, [c, _]) = decode(&g, true);
+    let formats = of(&h, c, &[cjtag::FORMAT]);
+    assert_eq!(formats.len(), 1);
+    let tms: Vec<_> = (of(&h, c, &[cjtag::JSCAN]).iter())
+        .filter(|i| i.start >= formats[0].start)
+        .flat_map(|i| i.seq(cjtag::JSCAN_TMS).to_vec())
+        .collect();
+    assert_eq!(tms.len(), 7);
+    assert!(formats[0].end.unwrap() <= tms[5].cell.start, "{formats:?}");
+}

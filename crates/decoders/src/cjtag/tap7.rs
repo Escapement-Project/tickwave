@@ -821,6 +821,7 @@ impl Tap7 {
         if leaving_update && let Some(f) = self.stored.take() {
             if f < 4 {
                 self.jscan = Some(f);
+                out.push(Ev::Format(f));
                 return;
             }
             self.protocol = Protocol::Check {
@@ -1286,8 +1287,8 @@ impl Tap7 {
             self.spcp = false;
             if let Protocol::Advanced(_) = self.protocol {
                 self.protocol = Protocol::Standard;
-                out.push(Ev::DefaultFormat);
             }
+            out.push(Ev::DefaultFormat);
         }
         if self.level == Some(6) && after == Some(RTI) && before != Some(RTI) {
             self.parking = self.dsel_alerts != Some(false);
