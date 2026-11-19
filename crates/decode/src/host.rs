@@ -532,8 +532,11 @@ impl Bound {
         input: usize,
     ) -> Result<Self, BindError> {
         for (k, (n, _)) in given.iter().enumerate() {
-            if !def.settings.iter().any(|d| d.name == *n) {
+            let Some(d) = def.settings.iter().find(|d| d.name == *n) else {
                 return Err(BindError::UnknownSetting(Name::Owned((*n).to_owned())));
+            };
+            if !d.applies_to(input) {
+                return Err(BindError::NotForInput(d.name.clone()));
             }
             if given[..k].iter().any(|(m, _)| m == n) {
                 return Err(BindError::SettingTwice(Name::Owned((*n).to_owned())));
@@ -942,6 +945,8 @@ pub enum BindError {
     SequenceInCompleted(Name),
     #[error("the decoder declares no setting {0}")]
     UnknownSetting(Name),
+    #[error("setting {0} does not apply to the input bound")]
+    NotForInput(Name),
     #[error("setting {0} is given twice")]
     SettingTwice(Name),
     #[error("setting {0} does not take that value")]

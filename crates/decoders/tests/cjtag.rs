@@ -759,7 +759,8 @@ fn hosted_cjtag_feeds_jtag_as_the_direct_run_does() {
 }
 
 /// JTAG on cJTAG cuts its scans by the chain setting as on the wire: with one TAP of a 4-bit IR,
-/// the session's two IR scans each have an instruction, and its two DR scans their data.
+/// the session's two IR scans each have an instruction, and its two DR scans their data. Where TDO
+/// is read is the wire's setting only.
 #[test]
 fn the_chain_setting_cuts_jtags_scans_on_cjtag() {
     let mut h = Host::default();
@@ -786,6 +787,20 @@ fn the_chain_setting_cuts_jtags_scans_on_cjtag() {
             all(),
         )
         .unwrap();
+    let edge = h.add(
+        name("edge"),
+        jtag::definition(),
+        InputSpec::Upstream(c),
+        jtag::Jtag::factory(1 << 16),
+        &[jtag::tdo_edge(jtag::TdoEdge::Fall)],
+        all(),
+    );
+    assert_eq!(
+        edge.err(),
+        Some(escapement_tickwave_decode::BindError::NotForInput(name(
+            "tdo_edge"
+        )))
+    );
     h.run_until(|_| false).unwrap();
     assert_eq!(of(&h, j, &[jtag::INSTRUCTION]).len(), 2);
     assert_eq!(of(&h, j, &[jtag::DATA]).len(), 2);

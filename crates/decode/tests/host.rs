@@ -2250,6 +2250,10 @@ fn a_definition_whose_settings_or_ports_clash_is_refused() {
         refused(vec![SettingDecl::flag("", false)]),
         schema(SchemaError::BadName)
     );
+    assert_eq!(
+        refused(vec![SettingDecl::flag("n", false).for_inputs([1])]),
+        schema(SchemaError::SettingInput(name("n")))
+    );
     let twice = Arc::new(
         Definition::new("set", 1, pulses_schema())
             .with_ports(["clock"])
@@ -2380,6 +2384,43 @@ fn a_refused_stacked_binding_leaves_its_upstream_as_it_was() {
     );
     h.run_until(|_| false).unwrap();
     assert!(h.finished(p).is_some() && h.finished(q).is_some());
+}
+
+#[test]
+fn a_setting_for_some_inputs_is_refused_on_the_others() {
+    let (mut h, [p, _]) = pulses_host(line(1, 2, 10, vec![]), 100, None, HostOptions::default());
+    let def = Arc::new(
+        Definition::new("set", 1, pulses_schema())
+            .with_inputs([
+                InputDecl::Wire,
+                UpstreamDecl::new("in", Mode::Completed)
+                    .with_kinds(["pulse"])
+                    .into(),
+            ])
+            .with_settings(vec![SettingDecl::flag("edge", false).for_inputs([0])]),
+    );
+    let mut add = |n: &'static str, settings: &[(&str, Setting)]| {
+        h.add(
+            name(n),
+            def.clone(),
+            InputSpec::Upstream(p),
+            Box::new(|_, _| Box::new(Swallow)),
+            settings,
+            all(),
+        )
+    };
+    let edge = [("edge", Setting::Flag(true))];
+    assert_eq!(
+        add("given", &edge).unwrap_err(),
+        BindError::NotForInput(name("edge"))
+    );
+    add("bare", &[]).unwrap();
+    assert_eq!(
+        bound(def.clone(), vec![], &edge)
+            .unwrap()
+            .flag(SettingId(0)),
+        Some(true)
+    );
 }
 
 #[test]

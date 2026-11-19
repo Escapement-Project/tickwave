@@ -131,6 +131,9 @@ pub struct PortDecl {
 pub struct SettingDecl {
     pub name: Name,
     pub ty: SettingType,
+    /// The inputs it applies to, by their index in the definition's inputs; every input where
+    /// empty. A binding to another input that gives it is refused.
+    pub inputs: Vec<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -419,6 +422,10 @@ impl Definition {
             if !seen.insert(&s.name) {
                 return Err(SchemaError::DuplicateSetting(s.name.clone()));
             }
+            at_most(s.inputs.len(), MAX_LIST, "inputs a setting applies to")?;
+            if s.inputs.iter().any(|&i| i >= self.inputs.len()) {
+                return Err(SchemaError::SettingInput(s.name.clone()));
+            }
             let fits = match &s.ty {
                 SettingType::Flag { .. } => true,
                 SettingType::Int { min, max, default } => (min..=max).contains(&default),
@@ -455,9 +462,21 @@ impl Definition {
 }
 
 impl SettingDecl {
+    /// Applies only to these inputs, by their index in the definition's inputs.
+    pub fn for_inputs(mut self, inputs: impl IntoIterator<Item = usize>) -> Self {
+        self.inputs = inputs.into_iter().collect();
+        self
+    }
+
+    /// Whether it applies to the input of index `input`.
+    pub fn applies_to(&self, input: usize) -> bool {
+        self.inputs.is_empty() || self.inputs.contains(&input)
+    }
+
     pub fn flag(name: impl Into<Name>, default: bool) -> Self {
         Self {
             name: name.into(),
+            inputs: vec![],
             ty: SettingType::Flag { default },
         }
     }
@@ -465,6 +484,7 @@ impl SettingDecl {
     pub fn int(name: impl Into<Name>, range: std::ops::RangeInclusive<i64>, default: i64) -> Self {
         Self {
             name: name.into(),
+            inputs: vec![],
             ty: SettingType::Int {
                 min: *range.start(),
                 max: *range.end(),
@@ -482,6 +502,7 @@ impl SettingDecl {
     ) -> Self {
         Self {
             name: name.into(),
+            inputs: vec![],
             ty: SettingType::List {
                 min: *range.start(),
                 max: *range.end(),
@@ -498,6 +519,7 @@ impl SettingDecl {
     ) -> Self {
         Self {
             name: name.into(),
+            inputs: vec![],
             ty: SettingType::Choice {
                 names: names(choices),
                 default,
@@ -711,6 +733,8 @@ pub enum SchemaError {
     WireTwice,
     #[error("setting {0} is declared twice")]
     DuplicateSetting(Name),
+    #[error("setting {0} applies to an input the definition does not declare")]
+    SettingInput(Name),
     #[error("setting {setting}: {name} is declared twice")]
     DuplicateChoice { setting: Name, name: Name },
     #[error("setting {0}'s default is not a value it takes")]

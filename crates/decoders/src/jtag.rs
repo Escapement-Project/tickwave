@@ -299,7 +299,7 @@ pub fn definition() -> Arc<Definition> {
                     .into(),
             ])
             .with_settings(vec![
-                SettingDecl::choice("tdo_edge", TdoEdge::NAMES, 2),
+                SettingDecl::choice("tdo_edge", TdoEdge::NAMES, 2).for_inputs([FROM_WIRE]),
                 SettingDecl::list("chain", 1..=IR_AT_MOST, CHAIN_AT_MOST, vec![]),
             ]),
     )
