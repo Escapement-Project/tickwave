@@ -24,6 +24,13 @@
 //! (11.9.7), as the `start_up` setting or a CNFG0 read's DAS bit says, comes up Offline after a
 //! reset escape and takes a selection escape only after its alternating preamble.
 //!
+//! The controller's counts of Scan Group Candidates and Potential Scan Group Members (13.8.5) and
+//! its Idle Group Membership (13.8.4.2.1) follow the commands and SSDs that change them, as the
+//! controller keeps them, and give each TDO element's driver (14.8): the target, alone or jointly;
+//! no one, in a Control Path DR scan other than an SCNB or SCNS CR scan or control levels four and
+//! five; or not known where this controller is not the one member its count allows, or where the
+//! counts are not known.
+//!
 //! Scan Selection Directives (20.10) are followed where they are on TMSC, in OScan1 and OScan5:
 //! their SSD state, one TCK late, qualifies escapes (11.6.2), and in Run-Test/Idle they store SGC.
 //! In JScan3 they are TDI data off TMSC, so with SSDE set the SSD state is unknown there, and an
@@ -92,6 +99,39 @@ pub enum Response {
     /// A deselection escape while Offline: ignored.
     Offline,
     /// The SSD state that decides it is not known.
+    Unknown,
+}
+
+/// A count of group members as the controller keeps it (tables 13-3, 13-4, 13-18): none, at
+/// most one, or possibly more.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Count {
+    None,
+    One,
+    Many,
+}
+
+/// One more member: a selection that adds to those already made (table 13-5).
+fn add(count: Option<Count>) -> Option<Count> {
+    count.map(|c| {
+        if c == Count::None {
+            Count::One
+        } else {
+            Count::Many
+        }
+    })
+}
+
+/// Who drives a TDO element (14.8).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Drive {
+    /// The target: this controller alone, or every controller jointly with a 1.
+    Target,
+    /// No controller: a Control Path DR scan whose TDO is inhibited (table 14-4).
+    NoOne,
+    /// This controller is not the one member its count allows: another may drive it, or none.
+    Inhibited,
+    /// The counts that decide it are not known.
     Unknown,
 }
 
@@ -231,6 +271,8 @@ pub enum Ev {
         tms: bool,
         tdo: Option<bool>,
         advance: bool,
+        /// Who drives its TDO element.
+        drive: Drive,
     },
     CheckBit(bool),
     /// The Check Packet ends; `reset` for the directive that resets (two ones).
@@ -382,15 +424,19 @@ pub struct Tap7 {
     ssd: Option<Ssd>,
     ssd_late: Option<Ssd>,
     ssd_run: Option<SsdRun>,
-    /// The Standard Protocol is in JScan3, where SSDs are TDI data off TMSC.
-    jscan3: bool,
+    /// The Standard Protocol's JScan format where known: in JScan3 SSDs are TDI data off TMSC.
+    jscan: Option<u8>,
+    /// The counts of Scan Group Candidates and of Potential Scan Group Members last TCK, and
+    /// whether the STL is an Idle Group Member, where known. (The count of Conditional Group
+    /// Members only chooses between this controller driving alone and every one jointly, both the
+    /// target, so it is not kept.)
+    sgcc: Option<Count>,
+    psgmcl: Option<Count>,
+    idle: Option<bool>,
     slot: usize,
     values: [bool; 3],
     eot: bool,
     previous_shift: bool,
-    /// Drive conflict protection, from a Selection Sequence's PROTECT bit (table 11-3): the target
-    /// drives only once it alone is a group member, which is not followed.
-    protected: bool,
     /// The CR scan a three-part command brings, from the command's end to its Update-DR.
     cr: Option<Cr>,
 }
@@ -423,12 +469,14 @@ impl Default for Tap7 {
             ssd: None,
             ssd_late: None,
             ssd_run: None,
-            jscan3: false,
+            jscan: None,
+            sgcc: None,
+            psgmcl: None,
+            idle: None,
             slot: 0,
             values: [false; 3],
             eot: false,
             previous_shift: false,
-            protected: false,
             cr: None,
         }
     }
@@ -450,11 +498,6 @@ impl Tap7 {
     /// How many bits of a Selection Alert have matched, its padding included: 1 at its start bit.
     pub fn alert_matched(&self) -> u8 {
         self.alert.matched
-    }
-
-    /// Whether a Selection Sequence turned drive conflict protection on.
-    pub fn protected(&self) -> bool {
-        self.protected
     }
 
     /// Whether the target samples the next bit at TCKC's rise; otherwise at its fall.
@@ -535,8 +578,12 @@ impl Tap7 {
         self.ssde = Some(false);
         self.ssd = Some(Ssd::SelectAll);
         self.ssd_run = None;
-        // The default scan format is JScan0 or JScan1 (table 10-7).
-        self.jscan3 = false;
+        // The default scan format: JScan1 Offline at start-up, else JScan0 or JScan1 (table 10-7).
+        self.jscan = self.offline_start.then_some(1);
+        // A reset makes many candidates and potential members (tables 13-5, 13-6).
+        self.sgcc = Some(Count::Many);
+        self.psgmcl = Some(Count::Many);
+        self.idle = None;
     }
 
     fn exit_level(&mut self, out: &mut Vec<Ev>) {
@@ -557,6 +604,9 @@ impl Tap7 {
         self.cgm = None;
         self.sgc = None;
         self.cid = Cid::Unknown;
+        self.sgcc = None;
+        self.psgmcl = None;
+        self.idle = None;
         self.ssde = None;
         self.ssd = None;
         self.ssd_late = None;
@@ -616,7 +666,7 @@ impl Tap7 {
                         self.reset(out);
                     } else {
                         // A JScan format brings the Standard Protocol (table 11-8).
-                        self.jscan3 = then == 3;
+                        self.jscan = Some(then);
                         self.protocol = if then < 4 {
                             Protocol::Standard
                         } else {
@@ -753,10 +803,10 @@ impl Tap7 {
 
     /// A Standard Protocol TMS bit.
     fn standard(&mut self, value: bool, out: &mut Vec<Ev>) {
-        self.ssd_late = self.ssd;
         let state = self.tap();
+        self.tick(state);
         // In JScan3 an SSD is TDI data, off TMSC: one may start wherever it could.
-        if self.jscan3
+        if self.jscan == Some(3)
             && self.ssde != Some(false)
             && !value
             && state.is_some_and(|s| matches!(s, RTI | PAUSE_IR | PAUSE_DR))
@@ -770,7 +820,7 @@ impl Tap7 {
         // of the command's Update-DR (21.7.1; 4.3.2.4). A JScan one takes effect there.
         if leaving_update && let Some(f) = self.stored.take() {
             if f < 4 {
-                self.jscan3 = f == 3;
+                self.jscan = Some(f);
                 return;
             }
             self.protocol = Protocol::Check {
@@ -784,9 +834,89 @@ impl Tap7 {
     }
 
     /// Whether the System Path is in use for SSDs: no control level, and a zero-bit count of at
-    /// most one unless ZBSINH or SUSPEND (figure 20-9).
+    /// most one unless ZBSINH or SUSPEND (figure 20-9). The Control Path is in use otherwise.
     fn ssd_path(&self) -> bool {
         self.level.is_none() && (self.inhibited || self.suspend || self.zbs <= 1)
+    }
+
+    /// Whether a JScan0 to JScan2 format is in use, where commands count members without
+    /// regard to what they store (table 13-5).
+    fn jscan02(&self) -> bool {
+        self.protocol == Protocol::Standard && self.jscan != Some(3)
+    }
+
+    /// The start of one TCK with the TAPC in `state`: the Delayed SSD State follows, and in
+    /// Run-Test/Idle with no Pause-xR Group Members the Idle Group Membership and the potential
+    /// members' count are taken (13.8.4.2.1, table 13-6).
+    fn tick(&mut self, state: Option<u8>) {
+        self.ssd_late = self.ssd;
+        if state != Some(RTI) {
+            return;
+        }
+        match self.ssd_late {
+            Some(Ssd::SelectAll) => {
+                let control = !self.ssd_path();
+                self.psgmcl = if control {
+                    Some(Count::None)
+                } else {
+                    self.sgcc
+                };
+                // An Idle Group Candidate: on the Control Path, in JScan1, or SGC 0 outside
+                // JScan0.
+                self.idle = match (control, self.protocol, self.jscan) {
+                    (true, _, _) => Some(true),
+                    (_, Protocol::Standard, Some(1)) => Some(true),
+                    (_, Protocol::Standard, Some(0)) => Some(false),
+                    (_, Protocol::Standard, None) => None,
+                    _ => self.sgc.map(|s| !s),
+                };
+            }
+            Some(_) => {}
+            None => {
+                self.psgmcl = None;
+                self.idle = None;
+            }
+        }
+    }
+
+    /// Who drives the TDO element of a Scan Packet sent with the TAPC in `state` (tables 14-2,
+    /// 14-3, 14-4). Outside the Shift states every controller drives a 1.
+    fn tdo_drive(&self, state: u8) -> Drive {
+        if !self.ssd_path() {
+            if state != SHIFT_DR {
+                return Drive::Target;
+            }
+            // An SCNB or SCNS CR scan, or levels four and five: the only Conditional Group Member
+            // drives, or every one jointly; another DR scan, none (MScan's CIDA voting is not
+            // framed here).
+            let cr = self.part == 2 && self.cr.as_ref().is_some_and(|c| c.opcode != 10);
+            return if cr || matches!(self.level, Some(4 | 5)) {
+                Drive::Target
+            } else {
+                Drive::NoOne
+            };
+        }
+        if state != SHIFT_DR && state != SHIFT_IR {
+            return Drive::Target;
+        }
+        // A Potential Scan Group Member: not an Idle Group Member, and not a Pause-xR one.
+        let potential = match (self.idle, self.ssd_late) {
+            (Some(true), _) => Some(false),
+            (
+                _,
+                Some(
+                    Ssd::DeselectedIr | Ssd::DeselectedDr | Ssd::NotSelectedIr | Ssd::NotSelectedDr,
+                ),
+            ) => Some(false),
+            (Some(false), Some(_)) => Some(true),
+            _ => None,
+        };
+        match (self.psgmcl, potential) {
+            (Some(Count::None | Count::Many), _) => Drive::Target,
+            (Some(Count::One), Some(true)) => Drive::Target,
+            (Some(Count::One), Some(false)) => Drive::Inhibited,
+            _ => Drive::Unknown,
+        }
     }
 
     /// One TCK's TDI and TMS for Scan Selection Directives, the TAPC in `state`, in a format that
@@ -868,6 +998,11 @@ impl Tap7 {
             }),
         };
         if run.state == RTI {
+            self.sgcc = match kind {
+                SsdKind::DeselectAll => Some(Count::None),
+                SsdKind::SelectAll => Some(Count::Many),
+                _ => add(self.sgcc),
+            };
             self.sgc = match (kind, matched) {
                 (SsdKind::DeselectAll, _) => Some(false),
                 (SsdKind::SelectAll, _) | (_, Some(true)) => Some(true),
@@ -976,7 +1111,18 @@ impl Tap7 {
             ssde: self.ssde,
             ssd: self.ssd,
             ssd_late: self.ssd_late,
-            protected: ec & 4 != 0,
+            idle: self.idle,
+            // Drive conflict protection makes the counts many (table 11-3; tables 13-5, 13-6).
+            sgcc: if ec & 4 != 0 {
+                Some(Count::Many)
+            } else {
+                self.sgcc
+            },
+            psgmcl: if ec & 4 != 0 {
+                Some(Count::Many)
+            } else {
+                self.psgmcl
+            },
             ..Self::default()
         };
     }
@@ -1045,11 +1191,13 @@ impl Tap7 {
         };
         let tdi = (!short_nonshift).then_some(!self.values[0]);
         let tdo = (!short_nonshift).then(|| self.values.get(length - 1).copied().unwrap_or(false));
+        let drive = self.tap().map_or(Drive::Unknown, |s| self.tdo_drive(s));
         out.push(Ev::Packet {
             tdi,
             tms,
             tdo,
             advance,
+            drive,
         });
         self.slot = 0;
         self.eot = false;
@@ -1066,7 +1214,7 @@ impl Tap7 {
             return;
         }
         self.previous_shift = shifting;
-        self.ssd_late = self.ssd;
+        self.tick(self.tap());
         if let (Some(state), Some(tdi)) = (self.tap(), tdi)
             && matches!(format, 9 | 13)
         {
@@ -1222,8 +1370,18 @@ impl Tap7 {
         // The last bit shifted, where it was kept and on TMSC.
         let whole = cr.on_wire && cr.tdi.len() == cr.shifts as usize;
         let last = cr.tdi.last().copied().filter(|_| whole);
+        // Outside JScan0 to JScan2 a 0 makes none and a 1 many; inside, any value many
+        // (table 13-5).
+        let count = match last {
+            _ if self.jscan02() => Some(Count::Many),
+            Some(v) => Some(if v { Count::Many } else { Count::None }),
+            None => None,
+        };
         match (cr.opcode, cr.operand) {
-            (8, 0) => self.sgc = last,
+            (8, 0) => {
+                self.sgc = last;
+                self.sgcc = count;
+            }
             (8, 1) => self.cgm = last,
             (9, 2) if cr.on_wire && cr.tdo.len() >= 32 => {
                 self.offline_start = cr.tdo[19];
@@ -1247,6 +1405,18 @@ impl Tap7 {
             // Set if addressed, else cleared or left: known only where both agree.
             Cid::Unknown if m && now == Some(true) => now,
             Cid::Unknown => None,
+        }
+    }
+
+    /// The candidates' count after MSC with `m` (table 13-5): in JScan0 to JScan2 many; else one
+    /// that selects one, or one more that adds to the selection.
+    fn counted(&self, m: bool, count: Option<Count>) -> Option<Count> {
+        if self.jscan02() {
+            Some(Count::Many)
+        } else if m {
+            add(count)
+        } else {
+            Some(Count::One)
         }
     }
 
@@ -1275,6 +1445,7 @@ impl Tap7 {
                 }
                 (1, 0, v) => {
                     self.sgc = Some(v == 1);
+                    self.sgcc = Some(if v == 1 { Count::Many } else { Count::None });
                     format!("Scan Group Candidate SGC = {v}")
                 }
                 (1, 1, v) => {
@@ -1330,7 +1501,9 @@ impl Tap7 {
                 format!("Conditional Group Member for controller {}", operand & 15)
             }
             7 => {
-                self.sgc = self.member(operand & 16 != 0, operand & 15, self.sgc);
+                let m = operand & 16 != 0;
+                self.sgc = self.member(m, operand & 15, self.sgc);
+                self.sgcc = self.counted(m, self.sgcc);
                 format!("Scan Group Candidate: controller {}", operand & 15)
             }
             8..=10 => {

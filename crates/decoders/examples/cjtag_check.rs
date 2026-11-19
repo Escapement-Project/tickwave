@@ -1,5 +1,6 @@
 //! cJTAG over a recording's TCKC and TMSC with JTAG stacked on it, JTAG checked as `jtag_check`
-//! checks it, and cJTAG's counts printed to compare with another implementation's. Nothing is
+//! checks it, and cJTAG's counts printed to compare with another implementation's, with each Scan
+//! Packet's TDO driver as the drive policy gives it, nothing assumed. Nothing is
 //! kept, unless `--rows` asks to check that both analyses' items fit the rows and lanes their
 //! schemas declare, which keeps each item's span.
 //!
@@ -19,15 +20,33 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 /// Items by kind, and those closed incomplete by cause, each by its schema index; with
-/// `--rows`, each item's kind and span; every JScan stretch's span; and the CR scans by register,
-/// value and meaning.
+/// `--rows`, each item's kind and span; every JScan stretch's span; the CR scans by register,
+/// value and meaning; and the Scan Packets' TDO drivers.
 type Tally = (
     BTreeMap<u16, u64>,
     BTreeMap<u16, u64>,
     Option<Vec<(KindId, Tick, Tick)>>,
     Vec<(Tick, Tick)>,
     BTreeMap<String, u64>,
+    BTreeMap<String, u64>,
 );
+
+/// A Scan Packet's TDO driver, where it has a TDO element: the target, no one, or why it is not
+/// known.
+fn tdo_driver(item: &escapement_tickwave_decode::Completed, schema: &Schema) -> Option<String> {
+    let tdo = item.field(cjtag::PACKET_TDO)?;
+    if tdo.driver == Some(cjtag::TARGET) {
+        return Some("target".into());
+    }
+    Some(match item.field(cjtag::DRIVER).map(|f| &f.value) {
+        Some(Value::Name(2)) => "no one".into(),
+        Some(Value::Unknown { reason, .. }) => {
+            let why = schema.reasons.get(usize::from(reason.0));
+            format!("unknown ({})", why.map_or("?", |r| r))
+        }
+        _ => "?".into(),
+    })
+}
 
 /// A CR scan as the tally counts it: its register, its value in hex, and what it means.
 fn cr_line(item: &escapement_tickwave_decode::Completed) -> String {
@@ -55,7 +74,7 @@ fn cr_line(item: &escapement_tickwave_decode::Completed) -> String {
 }
 
 /// Counts cJTAG's completed items by kind, and those closed incomplete by cause.
-struct Kinds(Arc<Mutex<Tally>>);
+struct Kinds(Arc<Mutex<Tally>>, Schema);
 
 impl Decoder for Kinds {
     fn turn(&mut self, ex: &mut Exchange<'_>) -> Pause {
@@ -75,6 +94,11 @@ impl Decoder for Kinds {
                     }
                     if item.id.kind == cjtag::CR_SCAN {
                         *k.4.entry(cr_line(&item)).or_default() += 1;
+                    }
+                    if item.id.kind == cjtag::PACKET
+                        && let Some(d) = tdo_driver(&item, &self.1)
+                    {
+                        *k.5.entry(d).or_default() += 1;
                     }
                 }
                 Delivery::Lost { span, .. } => ex.lost(span.start, span.end),
@@ -111,7 +135,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             local: None,
         },
         cjtag::Cjtag::factory(1_000_000),
-        &[cjtag::assume_qualified(true)],
+        &[cjtag::assume_qualified(false)],
         vec![],
     )?;
     let (chain, dp_tap) = check::chain_args();
@@ -133,15 +157,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         rows.then(Vec::new),
         Vec::new(),
         BTreeMap::new(),
+        BTreeMap::new(),
     )));
     let k2 = kinds.clone();
     let schema = h.definition(c).schema.clone();
+    let s2 = schema.clone();
     let all: Vec<String> = schema.kinds.iter().map(|k| k.name.to_string()).collect();
     h.add(
         name("kinds"),
         Arc::new(Definition::new("kinds", 1, Schema::new(vec![]))),
         InputSpec::Upstream(Subscription::new(c, Mode::Completed).with_kinds(all)),
-        Box::new(move |_, _| Box::new(Kinds(k2.clone()))),
+        Box::new(move |_, _| Box::new(Kinds(k2.clone(), s2.clone()))),
         &[],
         vec![],
     )?;
@@ -203,6 +229,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             crs.join(", ")
         }
     );
+    let drivers: Vec<String> = (k.5.iter()).map(|(d, n)| format!("{d} x{n}")).collect();
+    println!("cjtag TDO drivers: {}", drivers.join(", "));
     check::report(&h, j, &seen, &rec, None, "JTAG on cJTAG", seconds);
     for (what, t) in &tallies {
         println!("{what}: {}", check::tally_lines(t, 20).join(", "));

@@ -577,26 +577,172 @@ fn a_jtag_bit_names_the_cjtag_element_it_came_from() {
     ));
 }
 
+/// Each Scan Packet's TDO driver: its role, and the driver field where one is set.
+fn drivers(
+    h: &Host,
+    c: AnalysisId,
+) -> Vec<(Option<escapement_tickwave_decode::Role>, Option<Value>)> {
+    (of(h, c, &[cjtag::PACKET]).iter())
+        .filter_map(|p| {
+            let f = p.field(cjtag::PACKET_TDO)?;
+            Some((f.driver, value(p, cjtag::DRIVER)))
+        })
+        .collect()
+}
+
 #[test]
-fn tdo_has_a_driver_only_where_qualification_is_assumed() {
-    let driver = |qualified| {
+fn after_a_reset_the_counts_say_who_drives_tdo_whatever_the_setting() {
+    // The activation: SGC 0, then MSC for controller zero selects one, this one, so in the Shift
+    // states it drives alone, and elsewhere every controller drives a 1.
+    for qualified in [true, false] {
         let (mut h, [c, _]) = host(synth(), 1000, None, qualified);
         h.run_until(|_| false).unwrap();
-        let p = &of(&h, c, &[cjtag::PACKET])[0];
-        let f = p.field(cjtag::PACKET_TDO).unwrap();
-        (f.driver, value(p, cjtag::DRIVER))
+        let after = of(&h, c, &[cjtag::PACKET]).len() - session_clocks().len();
+        let session = &drivers(&h, c)[after..];
+        assert!(
+            session.iter().all(|d| *d == (Some(cjtag::TARGET), None)),
+            "{qualified}"
+        );
+    }
+}
+
+#[test]
+fn a_control_path_dr_scan_s_tdo_is_driven_by_no_one_but_a_cr_scan_s_is() {
+    let mut g = Gen::new();
+    g.activate_oscan1();
+    g.oscan1(&enter_command_level());
+    g.oscan1_command(6, 0);
+    let before = {
+        let (h, [c, _]) = decode(&g, false);
+        of(&h, c, &[cjtag::PACKET]).len()
     };
-    assert_eq!(driver(true), (Some(cjtag::TARGET), None));
-    assert_eq!(
-        driver(false),
-        (
-            None,
-            Some(Value::Unknown {
-                reason: cjtag::UNQUALIFIED,
-                needs: None
-            })
-        )
+    g.oscan1_command(9, 2);
+    g.oscan1_cr(0, 0x03C0_0714, 32);
+    let (h, [c, _]) = decode(&g, false);
+    let packets = of(&h, c, &[cjtag::PACKET]);
+    let no_one = Some(Value::Name(2));
+    // SCNS's command parts: each DR scan's Shift-DR packets, none driven.
+    let command = &packets[before..before + command(9, 2).len()];
+    assert!(command.iter().any(|p| value(p, cjtag::DRIVER) == no_one));
+    // Its CR scan: every packet driven by the target.
+    let cr = of(&h, c, &[cjtag::CR_SCAN]);
+    let in_cr: Vec<_> = (packets.iter())
+        .filter(|p| p.start >= cr[0].start && p.end <= cr[0].end)
+        .collect();
+    assert!(in_cr.len() >= 32);
+    assert!(
+        in_cr
+            .iter()
+            .all(|p| p.field(cjtag::PACKET_TDO).unwrap().driver == Some(cjtag::TARGET))
     );
+}
+
+#[test]
+fn a_controller_not_the_one_candidate_does_not_drive_tdo_in_a_shift_state() {
+    // SGC 0, then MSC for controller 5, which after a reset does nothing to this one but still
+    // counts one candidate: in the Shift states this controller is inhibited. MSC adding a
+    // candidate makes many, and every controller drives a 1.
+    // Without MSC, SGC 0 alone counts no candidate, and every controller drives a 1.
+    for (msc, adds, want) in [
+        (
+            true,
+            false,
+            Some(Value::Unknown {
+                reason: cjtag::INHIBITED,
+                needs: None,
+            }),
+        ),
+        (true, true, None),
+        (false, false, None),
+    ] {
+        let mut g = Gen::new();
+        g.activate_oscan1();
+        g.oscan1(&enter_command_level());
+        g.oscan1_command(0, 0b00100);
+        if msc {
+            g.oscan1_command(7, 5);
+        }
+        if adds {
+            g.oscan1_command(7, 0x10 | 6);
+        }
+        g.oscan1_command(0, 1);
+        g.oscan1(&[0, 1, 0, 0]);
+        for k in 0..8 {
+            g.clock_oscan1(k == 7, false, true);
+        }
+        g.oscan1(&[1, 0]);
+        let (h, [c, _]) = decode(&g, true);
+        let shift = &drivers(&h, c);
+        let last: Vec<_> = shift[shift.len() - 10..shift.len() - 2].to_vec();
+        assert!(
+            last.iter().all(|d| d.1 == want),
+            "msc {msc} adds {adds}: {last:?}"
+        );
+    }
+
+    // A reset counts many candidates, until MSC selects one: with this controller's SGC its
+    // default, not known, whether it is that one is not known either.
+    for (msc, want) in [
+        (false, None),
+        (
+            true,
+            Some(Value::Unknown {
+                reason: cjtag::COUNTS_UNKNOWN,
+                needs: None,
+            }),
+        ),
+    ] {
+        let mut g = Gen::new();
+        g.bit(true, 10);
+        let mut jscan = vec![1, 1, 1, 1, 1, 0];
+        jscan.extend(enter_command_level());
+        jscan.extend(command(3, 9));
+        g.jscan(&jscan);
+        g.check();
+        if msc {
+            g.oscan1_command(7, 5);
+        }
+        g.oscan1_command(0, 1);
+        g.oscan1(&[0, 1, 0, 0]);
+        for k in 0..8 {
+            g.clock_oscan1(k == 7, false, true);
+        }
+        g.oscan1(&[1, 0]);
+        let (h, [c, _]) = decode(&g, false);
+        let shift = &drivers(&h, c);
+        let last: Vec<_> = shift[shift.len() - 10..shift.len() - 2].to_vec();
+        assert!(last.iter().all(|d| d.1 == want), "msc {msc}: {last:?}");
+    }
+}
+
+#[test]
+fn without_a_reset_the_counts_are_unknown_and_the_setting_decides() {
+    for (qualified, want) in [
+        (true, (Some(cjtag::TARGET), None)),
+        (
+            false,
+            (
+                None,
+                Some(Value::Unknown {
+                    reason: cjtag::COUNTS_UNKNOWN,
+                    needs: None,
+                }),
+            ),
+        ),
+    ] {
+        let mut g = Gen::new();
+        g.select(0b1100, 0b1011, None);
+        g.oscan1(&[1, 1, 0]);
+        for &(m, i, o) in &session_clocks() {
+            g.clock_oscan1(m, i, o);
+        }
+        let (h, [c, _]) = decode(&g, qualified);
+        let all = drivers(&h, c);
+        // In the Shift states; elsewhere every controller drives a 1, counts or not.
+        assert!(all.contains(&want), "{qualified}");
+        let unknown = all.iter().filter(|d| d.1.is_some()).count();
+        assert_eq!(unknown > 0, !qualified, "{qualified}");
+    }
 }
 
 #[test]
@@ -968,7 +1114,7 @@ fn a_deselection_parks_the_controller_offline_and_a_selection_brings_oscan1_back
 }
 
 #[test]
-fn a_long_selection_loads_the_scan_format_and_protection_withholds_the_target_drive() {
+fn a_long_selection_loads_the_scan_format_and_protection_makes_every_count_many() {
     let mut g = Gen::new();
     g.reset_to_idle();
     // Online in the Standard Protocol: a qualified selection escape, its bit a TMS 0. Long form,
@@ -977,7 +1123,7 @@ fn a_long_selection_loads_the_scan_format_and_protection_withholds_the_target_dr
     for &(m, i, o) in &session_clocks() {
         g.clock_oscan1(m, i, o);
     }
-    let (h, [c, j]) = decode(&g, true);
+    let (h, [c, j]) = decode(&g, false);
     let sel = &of(&h, c, &[cjtag::SELECTION])[0];
     assert_eq!(name_of(sel, cjtag::FORM), Some(0), "long");
     assert_eq!(value(sel, cjtag::PROTECT), Some(Value::Bool(true)));
@@ -986,14 +1132,12 @@ fn a_long_selection_loads_the_scan_format_and_protection_withholds_the_target_dr
         assert!(matches!(value(sel, f), Some(Value::Word { value: 0, .. })));
     }
     assert!(of(&h, c, &[cjtag::OFFLINE]).is_empty());
-    let p = &of(&h, c, &[cjtag::PACKET])[0];
-    assert_eq!(p.field(cjtag::PACKET_TDO).unwrap().driver, None);
-    assert_eq!(
-        value(p, cjtag::DRIVER),
-        Some(Value::Unknown {
-            reason: cjtag::PROTECTED,
-            needs: None
-        })
+    // Drive conflict protection makes every count many: every controller drives a 1, in the
+    // Shift states too.
+    assert!(
+        drivers(&h, c)
+            .iter()
+            .all(|d| *d == (Some(cjtag::TARGET), None))
     );
     assert!(idcode_read(&h, j));
 
@@ -1837,4 +1981,36 @@ fn framing_lost_leaves_cgm_unknown_until_a_reset() {
     let crs = of(&h, c, &[cjtag::CR_SCAN]);
     assert_eq!(crs.len(), 2);
     assert!(crs.iter().all(|cr| value(cr, cjtag::REGISTER) == unknown));
+}
+
+#[test]
+fn drive_protection_makes_the_counts_many_before_run_test_idle_takes_them_again() {
+    // One candidate counted and this controller idle: in Shift-DR it would not drive. A protected
+    // selection parked in Pause-DR, then straight to Shift-DR: many potential members, so every
+    // controller drives a 1.
+    let mut g = Gen::new();
+    g.activate_oscan1();
+    g.oscan1(&enter_command_level());
+    g.oscan1_command(0, 0b00100);
+    g.oscan1_command(7, 5);
+    g.oscan1_command(0, 1);
+    for _ in 0..2 {
+        g.clock_oscan1(false, true, true);
+    }
+    g.oscan1(&[1, 0, 1, 0]);
+    g.select(0b1100, 0b1111, None);
+    g.oscan1(&[1, 0]);
+    for k in 0..8 {
+        g.clock_oscan1(k == 7, false, true);
+    }
+    g.oscan1(&[1, 0]);
+    let (h, [c, _]) = decode(&g, false);
+    let sel = &of(&h, c, &[cjtag::SELECTION])[0];
+    assert_eq!(name_of(sel, cjtag::OUTCOME), Some(0));
+    let shift = &drivers(&h, c);
+    let last: Vec<_> = shift[shift.len() - 10..shift.len() - 2].to_vec();
+    assert!(
+        last.iter().all(|d| *d == (Some(cjtag::TARGET), None)),
+        "{last:?}"
+    );
 }

@@ -18,8 +18,10 @@
 //! ends what it interrupts, incomplete, with that as the cause; framing resumes at the next reset
 //! or selection escape.
 //!
-//! Whether the target drives the TDO elements is not yet read from the wire. A setting,
-//! `assume_qualified`, assumes it; off, their driver is unknown, for a reason.
+//! Who drives each TDO element follows the TDO Bit Drive Policy (14.8), from the group counts the
+//! controller keeps of the commands and SSDs it sees: the target, no one, or unknown, for a reason.
+//! Until a reset or Test-Logic-Reset makes those counts known, the setting `assume_qualified`
+//! assumes the target drives.
 
 mod tap7;
 
@@ -32,8 +34,8 @@ use escapement_tickwave_decode::{
 };
 use std::sync::Arc;
 use tap7::{
-    Cr, Driver, Escape, Ev, MNEMONICS, Offline, Outcome, Path, Response, Selection, Ssd, SsdKind,
-    Tap7, format_name,
+    Cr, Drive, Driver, Escape, Ev, MNEMONICS, Offline, Outcome, Path, Response, Selection, Ssd,
+    SsdKind, Tap7, format_name,
 };
 
 pub const TCKC: u8 = 0;
@@ -121,8 +123,8 @@ pub const SSD_STATE: FieldId = FieldId(4);
 pub const PROBE: Role = Role(0);
 pub const TARGET: Role = Role(1);
 
-pub const UNQUALIFIED: Reason = Reason(0);
-pub const PROTECTED: Reason = Reason(1);
+pub const COUNTS_UNKNOWN: Reason = Reason(0);
+pub const INHIBITED: Reason = Reason(1);
 pub const NOT_ON_TMSC: Reason = Reason(2);
 pub const CGM_UNKNOWN: Reason = Reason(3);
 pub const SREDGE_UNKNOWN: Reason = Reason(4);
@@ -379,7 +381,7 @@ pub fn schema() -> Schema {
                 field("tdo", FieldType::Bool),
                 field("tdi", FieldType::Bool),
                 field("advance", FieldType::Bool),
-                field("driver", names(&["probe", "target"])),
+                field("driver", names(&["probe", "target", "no one"])),
             ])
             .with_sequences(vec![
                 seq("ntdi", bit()),
@@ -461,9 +463,8 @@ pub fn schema() -> Schema {
     ])
     .with_roles(["probe", "target"])
     .with_reasons([
-        "the target's coupling is not established, so its drive of TDO is not assumed",
-        "drive conflict protection keeps the target from driving until it alone is a group \
-         member, which is not followed",
+        "the controller's group counts are not known, so its drive of TDO is not either",
+        "this controller is not the one member its count allows: another may drive it, or none",
         "in the Standard Protocol, TDI and TDO are not on TMSC",
         "CGM unknown, so the scan may reach the EPU bypass bit instead",
         "SREDGE unknown: no reset decoded, or stored conditionally while CGM was unknown",
@@ -482,7 +483,8 @@ pub fn schema() -> Schema {
     .with_open_at_most(3)
 }
 
-/// Whether the target is assumed to drive the TDO elements, before the wire shows it is coupled.
+/// Whether the target is assumed to drive the TDO elements where the controller's group counts
+/// are not known: from the start, or after a gap or lost framing, until a reset.
 pub const ASSUME_QUALIFIED: SettingId = SettingId(0);
 
 /// The qualification setting, as a binding gives it.
@@ -1184,7 +1186,8 @@ impl Oscan {
                 tms,
                 tdo,
                 advance,
-            } => self.packet(tdi, tms, tdo, advance, out),
+                drive,
+            } => self.packet(tdi, tms, tdo, advance, drive, out),
             Ev::NeedContext => self.close_all(t, Status::Incomplete(NEEDS_TAP), out),
             Ev::Unsupported(why) => self.close_all(t, Status::Incomplete(why), out),
         }
@@ -1288,6 +1291,7 @@ impl Oscan {
         tms: bool,
         tdo: Option<bool>,
         advance: bool,
+        drive: Drive,
         out: &mut Out,
     ) {
         let (Some(first), Some(last)) = (self.slots.first().copied(), self.slots.last().copied())
@@ -1311,21 +1315,30 @@ impl Oscan {
         self.packet_to = last.cell.end;
         out.set(id, PACKET_FORMAT, Value::Text(format_name(first.format)));
         let mut tms_slot = None;
-        let protected = self.tap.protected();
+        // Where the counts are not known, the setting decides.
+        let drive = match drive {
+            Drive::Unknown if self.qualified => Drive::Target,
+            d => d,
+        };
         for (k, (slot, &(f, s))) in self.slots.iter().zip(parts).enumerate() {
             let driver = match slot.driver {
                 Driver::Host => Some(PROBE),
-                Driver::Target if self.qualified && !protected => Some(TARGET),
+                Driver::Target if drive == Drive::Target => Some(TARGET),
                 Driver::Target | Driver::Padding => None,
             };
             out.part(id, f, Value::Bool(slot.value), slot.cell, driver);
             out.extend(id, s, 0, &[Self::element(slot.value, slot.at, slot.cell)]);
-            if slot.driver == Driver::Target && (protected || !self.qualified) {
-                let why = Value::Unknown {
-                    reason: if protected { PROTECTED } else { UNQUALIFIED },
+            if slot.driver == Driver::Target {
+                let why = |reason| Value::Unknown {
+                    reason,
                     needs: None,
                 };
-                out.set(id, DRIVER, why);
+                match drive {
+                    Drive::Target => {}
+                    Drive::NoOne => out.set(id, DRIVER, Value::Name(2)),
+                    Drive::Inhibited => out.set(id, DRIVER, why(INHIBITED)),
+                    Drive::Unknown => out.set(id, DRIVER, why(COUNTS_UNKNOWN)),
+                }
             }
             if f == PACKET_TMS {
                 tms_slot = Some(k);
