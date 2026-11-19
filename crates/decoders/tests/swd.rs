@@ -117,6 +117,24 @@ fn word(i: &Item, f: FieldId) -> Option<u64> {
     }
 }
 
+/// A memory access's value, its bytes read as a little-endian number, where it is known.
+fn mem(i: &Item) -> Option<u64> {
+    match value(i, adiv5::MEM_VALUE)? {
+        Value::Bits { bytes, .. } => {
+            Some(bytes.iter().rev().fold(0, |n, &b| n << 8 | u64::from(b)))
+        }
+        _ => None,
+    }
+}
+
+/// A memory access's value as its bytes, lowest address first, and its width in bits.
+fn mem_bytes(i: &Item) -> Option<(Vec<u8>, u32)> {
+    match value(i, adiv5::MEM_VALUE)? {
+        Value::Bits { bytes, bits } => Some((bytes, bits)),
+        _ => None,
+    }
+}
+
 fn named(i: &Item, f: FieldId) -> Option<u16> {
     match value(i, f)? {
         Value::Name(n) => Some(n),
@@ -271,13 +289,12 @@ fn ap_registers_are_named_by_the_class_an_idr_read_gives() {
         [class(adiv5::JTAG_AP), class(adiv5::MEM_AP), unidentifiable],
         "an IDR with reserved bits set leaves AP 2 unidentifiable"
     );
-    let mem = of(&h, m, adiv5::MEM_WRITE);
-    let got: Vec<_> = (mem.iter())
-        .map(|i| (word(i, adiv5::ADDRESS), word(i, adiv5::MEM_VALUE)))
+    let got: Vec<_> = (of(&h, m, adiv5::MEM_WRITE).iter())
+        .map(|i| word(i, adiv5::ADDRESS))
         .collect();
     assert_eq!(
         got,
-        [(Some(0x2000_0000), Some(3))],
+        [Some(0x2000_0000)],
         "MEM-AP skips the JTAG-AP, and an AP not yet identified writes at no TAR"
     );
 }
@@ -327,13 +344,9 @@ fn the_idr_setting_identifies_aps_from_the_start_until_an_idr_read() {
         "AP 0 a MEM-AP and AP 1 a JTAG-AP from the start, AP 2 left out, then AP 1's IDR read"
     );
     let mem: Vec<_> = (of(&h, m, adiv5::MEM_WRITE).iter())
-        .map(|i| (word(i, adiv5::ADDRESS), word(i, adiv5::MEM_VALUE)))
+        .map(|i| word(i, adiv5::ADDRESS))
         .collect();
-    assert_eq!(
-        mem,
-        [(Some(0x2000_0000), Some(1))],
-        "MEM-AP skips AP 1 as a JTAG-AP"
-    );
+    assert_eq!(mem, [Some(0x2000_0000)], "MEM-AP skips AP 1 as a JTAG-AP");
 }
 
 #[test]
@@ -476,7 +489,7 @@ fn mem_ap_follows_tar_and_csw_through_posted_reads() {
     let (csw, tar) = (writes[0].id, writes[1].id);
     let reads = of(&h, m, adiv5::MEM_READ);
     let got: Vec<_> = (reads.iter())
-        .map(|i| (word(i, adiv5::ADDRESS), word(i, adiv5::MEM_VALUE)))
+        .map(|i| (word(i, adiv5::ADDRESS), mem(i)))
         .collect();
     assert_eq!(
         got,
@@ -502,7 +515,7 @@ fn mem_ap_follows_tar_and_csw_through_posted_reads() {
     );
     let w = of(&h, m, adiv5::MEM_WRITE);
     assert_eq!(word(&w[0], adiv5::ADDRESS), Some(0x2000_0008));
-    assert_eq!(word(&w[0], adiv5::MEM_VALUE), Some(0x3333_3333));
+    assert_eq!(mem(&w[0]), Some(0x3333_3333));
 }
 
 #[test]
@@ -659,7 +672,6 @@ fn mem_ap_increments_as_csw_says_singly_or_packed() {
         (0x10, at(0x2000_0001)),
         (0x11, at(0x2000_0002)),
         (0x12, at(0x2000_0004)),
-        (0x13, no_address(adiv5::WIDE)),
         (0x20, at(0x2000_0004)),
         (0x21, at(0x2000_0004)),
         (0x22, no_address(adiv5::PACKED_WORD)),
@@ -724,6 +736,343 @@ fn mem_ap_forgets_tar_across_a_gap() {
             reason: adiv5::LOST_TAR,
             needs: Some(adiv5::NEEDS_TAR),
         })
+    );
+}
+
+/// MEM-AP's memory accesses for `ts`, reads and writes in order.
+fn accesses(ts: &[T]) -> Vec<Item> {
+    let (b, _) = bits(ts);
+    let (mut h, [_, _, m]) = host(wires(&b, P), 100, None);
+    run(&mut h);
+    let mut all = of(&h, m, adiv5::MEM_READ);
+    all.extend(of(&h, m, adiv5::MEM_WRITE));
+    all.sort_by_key(|i| i.start);
+    all
+}
+
+/// SELECT AP 0 bank 0, CSW `csw` and TAR `tar`, then `then`.
+fn at_csw(csw: u32, tar: u32, then: &[T]) -> Vec<T> {
+    let mut ts = vec![
+        dp_write(0x8, 0x0000_0000),
+        ap_write(0x0, 0x2300_0000 | csw),
+        ap_write(0x4, tar),
+    ];
+    ts.extend_from_slice(then);
+    ts
+}
+
+fn why(reason: escapement_tickwave_decode::Reason) -> Option<Value> {
+    Some(Value::Unknown {
+        reason,
+        needs: None,
+    })
+}
+
+#[test]
+fn a_narrow_access_takes_the_byte_lanes_its_address_gives() {
+    // Table C2-3: a byte at TAR[1:0], a halfword at TAR[1]; little-endian lanes.
+    let drw = 0xAABB_CCDD;
+    let cases = [
+        (0x10, 0x2000_0001, Some((vec![0xCC], 8))),
+        (0x10, 0x2000_0003, Some((vec![0xAA], 8))),
+        (0x11, 0x2000_0002, Some((vec![0xBB, 0xAA], 16))),
+        (0x11, 0x2000_0000, Some((vec![0xDD, 0xCC], 16))),
+        (0x12, 0x2000_0000, Some((vec![0xDD, 0xCC, 0xBB, 0xAA], 32))),
+        // Packed bytes and halfwords: a word's worth, from TAR up, each in its address's lane.
+        (0x20, 0x2000_0002, Some((vec![0xBB, 0xAA, 0xDD, 0xCC], 32))),
+        (0x21, 0x2000_0002, Some((vec![0xBB, 0xAA, 0xDD, 0xCC], 32))),
+        (0x22, 0x2000_0000, Some((vec![0xDD, 0xCC, 0xBB, 0xAA], 32))),
+    ];
+    for (csw, tar, want) in cases {
+        let got = accesses(&at_csw(csw, tar, &[ap_write(0xC, drw)]));
+        assert_eq!(got.len(), 1);
+        assert_eq!(mem_bytes(&got[0]), want, "CSW 0x{csw:02X} at 0x{tar:08X}");
+    }
+}
+
+#[test]
+fn an_access_off_its_alignment_or_a_1_kib_boundary_has_no_value() {
+    let cases = [
+        (0x11, 0x2000_0001, adiv5::UNALIGNED),
+        (0x12, 0x2000_0002, adiv5::UNALIGNED),
+        (0x21, 0x2000_0003, adiv5::UNALIGNED),
+        (0x20, 0x2000_03FE, adiv5::PAST_1K),
+    ];
+    for (csw, tar, reason) in cases {
+        let got = accesses(&at_csw(csw, tar, &[ap_write(0xC, 1)]));
+        assert_eq!(
+            value(&got[0], adiv5::MEM_VALUE),
+            why(reason),
+            "CSW 0x{csw:02X} at 0x{tar:08X}"
+        );
+        assert_eq!(word(&got[0], adiv5::ADDRESS), Some(tar.into()));
+    }
+}
+
+#[test]
+fn without_csw_the_size_is_unknown_and_without_tar_a_narrow_lane_is() {
+    let ts = [
+        dp_write(0x8, 0x0000_0000),
+        ap_write(0x4, 0x2000_0000),
+        ap_write(0xC, 1),
+    ];
+    let got = accesses(&ts);
+    assert_eq!(
+        value(&got[0], adiv5::MEM_VALUE),
+        Some(Value::Unknown {
+            reason: adiv5::NO_CSW,
+            needs: Some(adiv5::NEEDS_CSW),
+        })
+    );
+    let no_tar = |csw: u32| {
+        let ts = [
+            dp_write(0x8, 0x0000_0000),
+            ap_write(0x0, 0x2300_0000 | csw),
+            ap_write(0xC, 0x1122_3344),
+        ];
+        accesses(&ts)[0].clone()
+    };
+    assert_eq!(
+        mem(&no_tar(0x12)),
+        Some(0x1122_3344),
+        "a word's lanes need no address"
+    );
+    assert_eq!(
+        value(&no_tar(0x10), adiv5::MEM_VALUE),
+        Some(Value::Unknown {
+            reason: adiv5::NO_TAR,
+            needs: Some(adiv5::NEEDS_TAR),
+        })
+    );
+}
+
+#[test]
+fn a_wide_access_is_one_memory_access_over_its_drw_words() {
+    // Table C2-20: 64, 128 and 256 bits in 2, 4 and 8 DRW accesses, least significant word
+    // first; TAR moves by the whole size after the last.
+    for (csw, words) in [(0x13u32, 2u32), (0x14, 4), (0x15, 8)] {
+        let mut drw: Vec<T> = (0..2 * words)
+            .map(|k| ap_write(0xC, 0x1000_0000 + k))
+            .collect();
+        drw.push(ap_write(0x0, 0x2300_0002));
+        drw.push(ap_write(0xC, 0xAAAA_AAAA));
+        let got = accesses(&at_csw(csw, 0x2000_0000, &drw));
+        assert_eq!(got.len(), 3, "CSW 0x{csw:02X}");
+        let size = 4 * words;
+        let want = |first: u32| -> Vec<u8> {
+            (first..first + words)
+                .flat_map(|k| (0x1000_0000 + k).to_le_bytes())
+                .collect()
+        };
+        assert_eq!(mem_bytes(&got[0]), Some((want(0), 32 * words)));
+        assert_eq!(mem_bytes(&got[1]), Some((want(words), 32 * words)));
+        let addresses: Vec<_> = got.iter().map(|i| word(i, adiv5::ADDRESS)).collect();
+        let base = 0x2000_0000u64;
+        assert_eq!(
+            addresses,
+            [
+                Some(base),
+                Some(base + u64::from(size)),
+                Some(base + 2 * u64::from(size))
+            ],
+            "CSW 0x{csw:02X}"
+        );
+        let access = got[0]
+            .links
+            .iter()
+            .filter(|(l, _)| *l == adiv5::ACCESS_LINK)
+            .count();
+        assert_eq!(
+            access, words as usize,
+            "one access link for each DRW access"
+        );
+        assert!(got.iter().all(|i| i.status == Some(Status::Complete)));
+    }
+    // Auto-increment off: both doublewords at TAR.
+    let drw: Vec<T> = (0..4).map(|k| ap_write(0xC, k)).collect();
+    let got = accesses(&at_csw(0x03, 0x2000_0008, &drw));
+    let addresses: Vec<_> = got.iter().map(|i| word(i, adiv5::ADDRESS)).collect();
+    assert_eq!(addresses, [Some(0x2000_0008), Some(0x2000_0008)]);
+}
+
+#[test]
+fn a_wide_read_takes_its_words_from_posted_reads() {
+    let then = [
+        ap_read(0xC, 0),
+        ap_read(0xC, 0x1111_1111),
+        dp_read(0xC, 0x2222_2222),
+    ];
+    let got = accesses(&at_csw(0x13, 0x2000_0000, &then));
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].id.kind, adiv5::MEM_READ);
+    assert_eq!(mem(&got[0]), Some(0x2222_2222_1111_1111));
+}
+
+#[test]
+fn a_wide_access_cut_short_says_why_and_what_tar_is_after_it() {
+    // A CSW access ends the sequence: a written one makes no memory access, and TAR after it is
+    // unknown where it increments.
+    for (csw, after) in [(0x13, no_address(adiv5::WIDE_CUT)), (0x03, at(0x2000_0000))] {
+        let then = [
+            ap_write(0xC, 1),
+            ap_write(0x0, 0x2300_0002),
+            ap_write(0xC, 2),
+        ];
+        let got = accesses(&at_csw(csw, 0x2000_0000, &then));
+        assert_eq!(got[0].status, Some(Status::Incomplete(adiv5::CSW_ENDS)));
+        assert_eq!(value(&got[1], adiv5::ADDRESS), after, "CSW 0x{csw:02X}");
+        assert_eq!(mem(&got[1]), Some(2));
+    }
+    // Any other register, or the other direction, is unpredictable: the access that interrupts
+    // is dropped, and TAR is unknown until written again.
+    for interrupt in [ap_write(0x4, 0x2000_0100), ap_read(0xC, 0)] {
+        let then = [
+            ap_write(0xC, 1),
+            interrupt,
+            dp_read(0xC, 0),
+            ap_write(0x0, 0x2300_0012),
+            ap_write(0xC, 2),
+            ap_write(0x4, 0x2000_0200),
+            ap_write(0xC, 3),
+        ];
+        let got = accesses(&at_csw(0x13, 0x2000_0000, &then));
+        assert_eq!(got.len(), 3, "{interrupt:?}");
+        assert_eq!(got[0].status, Some(Status::Incomplete(adiv5::INTERRUPTED)));
+        assert_eq!(
+            value(&got[1], adiv5::ADDRESS),
+            no_address(adiv5::UNPREDICTABLE)
+        );
+        assert_eq!(value(&got[2], adiv5::ADDRESS), at(0x2000_0200));
+    }
+    // The recording ends first.
+    let got = accesses(&at_csw(0x14, 0x2000_0000, &[ap_write(0xC, 1)]));
+    assert_eq!(got[0].status, Some(Status::Incomplete(adiv5::MEM_ENDS)));
+}
+
+#[test]
+fn a_gap_cuts_a_wide_access_short() {
+    let ts = at_csw(0x13, 0x2000_0000, &[ap_write(0xC, 1), ap_write(0xC, 2)]);
+    let (b, starts) = bits(&ts);
+    let gap = Span {
+        start: rise(starts[3] + 50, P),
+        end: rise(starts[4] - 1, P),
+    };
+    let mut w = wires(&b, P);
+    w.lines[1].gaps.push(gap);
+    let (mut h, [_, _, m]) = host(w, 64, None);
+    run(&mut h);
+    let got = of(&h, m, adiv5::MEM_WRITE);
+    assert_eq!(got[0].status, Some(Status::Incomplete(adiv5::MEM_GAP_CUT)));
+}
+
+#[test]
+fn banked_data_accesses_reach_tars_16_byte_block_and_leave_tar() {
+    // AP register bank 1 holds BD0 to BD3.
+    let then = [
+        dp_write(0x8, 0x0000_0010),
+        ap_read(0x0, 0),
+        dp_read(0xC, 0x1111_1111),
+        ap_write(0xC, 0x2222_2222),
+        dp_write(0x8, 0x0000_0000),
+        ap_write(0xC, 0x3333_3333),
+    ];
+    let got = accesses(&at_csw(0x12, 0x2000_0014, &then));
+    let seen: Vec<_> = got
+        .iter()
+        .map(|i| (word(i, adiv5::ADDRESS), mem(i)))
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            (Some(0x2000_0010), Some(0x1111_1111)),
+            (Some(0x2000_001C), Some(0x2222_2222)),
+            (Some(0x2000_0014), Some(0x3333_3333)),
+        ],
+        "BD0 and BD3 in TAR's block, then DRW at TAR, unmoved"
+    );
+    assert!(
+        got[0]
+            .links
+            .iter()
+            .all(|(l, _)| *l != adiv5::INCREMENT_FROM)
+    );
+}
+
+#[test]
+fn a_doubleword_through_banked_data_takes_a_register_pair() {
+    // Table C2-11: BD2 then BD3 make the doubleword at the block's + 8.
+    let then = [
+        dp_write(0x8, 0x0000_0010),
+        ap_write(0x8, 0x1111_1111),
+        ap_write(0xC, 0x2222_2222),
+    ];
+    let got = accesses(&at_csw(0x13, 0x2000_0004, &then));
+    assert_eq!(got.len(), 1);
+    assert_eq!(word(&got[0], adiv5::ADDRESS), Some(0x2000_0008));
+    assert_eq!(mem(&got[0]), Some(0x2222_2222_1111_1111));
+    // The pair's second register first, or a size other than word or doubleword: unpredictable.
+    let bank1 = |reg| [dp_write(0x8, 0x0000_0010), ap_write(reg, 1)];
+    let got = accesses(&at_csw(0x13, 0x2000_0000, &bank1(0x4)));
+    assert_eq!(value(&got[0], adiv5::MEM_VALUE), why(adiv5::BD_ORDER));
+    let got = accesses(&at_csw(0x10, 0x2000_0000, &bank1(0x0)));
+    assert_eq!(value(&got[0], adiv5::MEM_VALUE), why(adiv5::BD_SIZE));
+}
+
+#[test]
+fn a_read_never_read_back_still_moves_tar() {
+    // The AP write ends the posted read before RDBUFF returns its data.
+    let then = [ap_read(0xC, 0), ap_write(0xC, 2)];
+    let got = accesses(&at_csw(0x12, 0x2000_0000, &then));
+    assert_eq!(value(&got[0], adiv5::MEM_VALUE), why(adiv5::UNREAD));
+    assert_eq!(word(&got[1], adiv5::ADDRESS), Some(0x2000_0004));
+    // A wide read whose last word never comes back: made, its value unknown, TAR moved.
+    let then = [
+        ap_read(0xC, 0),
+        ap_read(0xC, 0x1111_1111),
+        ap_write(0x4, 0x2000_0000),
+        ap_write(0x0, 0x2300_0003),
+        ap_write(0xC, 2),
+    ];
+    let got = accesses(&at_csw(0x13, 0x2000_0000, &then));
+    assert_eq!(got[0].status, Some(Status::Complete));
+    assert_eq!(value(&got[0], adiv5::MEM_VALUE), why(adiv5::UNREAD));
+}
+
+#[test]
+fn a_parity_failure_drops_a_write_and_leaves_a_reads_value_unknown() {
+    let then = [
+        ap_write(0xC, 1),
+        ap_read(0xC, 0),
+        dp_read(0xC, 2),
+        ap_write(0xC, 3),
+    ];
+    let ts = at_csw(0x12, 0x2000_0000, &then);
+    let (mut b, starts) = bits(&ts);
+    // Each data phase's parity bit: request 8, turnaround 1, ack 3, then a write's turnaround.
+    b[starts[3] + 8 + 1 + 3 + 1 + 32] ^= true;
+    b[starts[5] + 8 + 1 + 3 + 32] ^= true;
+    let (mut h, [_, _, m]) = host(wires(&b, P), 100, None);
+    run(&mut h);
+    let mut got = of(&h, m, adiv5::MEM_READ);
+    got.extend(of(&h, m, adiv5::MEM_WRITE));
+    got.sort_by_key(|i| i.start);
+    let seen: Vec<_> = got
+        .iter()
+        .map(|i| (word(i, adiv5::ADDRESS), value(i, adiv5::MEM_VALUE)))
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            (Some(0x2000_0000), why(adiv5::MEM_PARITY)),
+            (
+                Some(0x2000_0004),
+                Some(Value::Bits {
+                    bytes: vec![3, 0, 0, 0],
+                    bits: 32
+                })
+            ),
+        ],
+        "the dropped write moves nothing; the read does"
     );
 }
 

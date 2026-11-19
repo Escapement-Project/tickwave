@@ -5,11 +5,7 @@
 //! ADIv5 reads its transfers as pieces, typed fields only. A SELECT write sets the DP bank and
 //! the AP and its register bank. Over SWD an AP read's data arrives in the next AP read or RDBUFF
 //! read, so an AP read stays open until then; over JTAG-DP each read carries its own, which the
-//! setting `reads` says ("posted" or "own"). MEM-AP reads ADIv5's completed AP accesses: TAR and CSW
-//! writes, then DRW accesses at the address TAR holds, auto-incremented as CSW says, singly or
-//! packed (C2.2.2, C2.2.7). A memory access's value is DRW's word, each byte in the lane its
-//! address gives (table C2-3), so an access narrower than a word, or a packed one starting off a
-//! word boundary, has its bytes where its addresses put them.
+//! setting `reads` says ("posted" or "own").
 //!
 //! Each AP's class comes from its IDR reads (ADIv5.2 C1.3.2), and an AP access carries the class
 //! known when it was made; an IDR read carries the class its own value gives. A register's name
@@ -18,6 +14,16 @@
 //! from the start, for a recording that begins after the debugger read them; a later IDR read
 //! takes over. MEM-AP skips an AP known to be of another class and takes one not yet identified
 //! for a MEM-AP.
+
+//!
+//! MEM-AP reads ADIv5's AP accesses: TAR and CSW, then DRW and banked data accesses. A DRW access
+//! is at the address TAR holds, auto-incremented as CSW says, singly or packed (C2.2.2, C2.2.7).
+//! A banked data access is in TAR's 16-byte block and leaves TAR as it is (C2.6.2). A memory
+//! access's value is the bytes it moved, lowest address first, each from the byte lane its address
+//! gives (table C2-3). A wide access, of 64 to 256 bits, is one memory access over its several DRW
+//! or banked data accesses, least significant word first (table C2-20). After the last, TAR has
+//! moved by its size. A read whose result never came back still made its access and moved TAR. A
+//! CSW write is taken as the MEM-AP took it, until a CSW read shows otherwise.
 
 use crate::swd;
 use escapement_tickwave_decode::{
@@ -716,11 +722,21 @@ pub const PACKED_WORD: Reason = Reason(3);
 pub const NO_CSW: Reason = Reason(4);
 pub const LOST_TAR: Reason = Reason(5);
 pub const PACKED_WIDE: Reason = Reason(6);
-pub const WIDE: Reason = Reason(7);
+pub const WIDE_CUT: Reason = Reason(7);
 pub const CSW_RESERVED: Reason = Reason(8);
+pub const UNALIGNED: Reason = Reason(9);
+pub const UNPREDICTABLE: Reason = Reason(10);
+pub const BD_SIZE: Reason = Reason(11);
+pub const BD_ORDER: Reason = Reason(12);
+pub const UNREAD: Reason = Reason(13);
+pub const MEM_PARITY: Reason = Reason(14);
 pub const MEM_NEEDS_SELECT: Need = Need(0);
 pub const NEEDS_TAR: Need = Need(1);
+pub const NEEDS_CSW: Need = Need(2);
 pub const MEM_GAP_CUT: Cause = Cause(0);
+pub const CSW_ENDS: Cause = Cause(1);
+pub const INTERRUPTED: Cause = Cause(2);
+pub const MEM_ENDS: Cause = Cause(3);
 
 pub fn mem_schema() -> Schema {
     let w = |bits| FieldType::Word { bits };
@@ -735,7 +751,7 @@ pub fn mem_schema() -> Schema {
             .with_fields(vec![
                 field("address", w(32)),
                 field("name", FieldType::Name(SCS_NAMES.map(name).to_vec())),
-                field("value", w(32)),
+                field("value", FieldType::Bits { max: 256 }),
             ])
             .with_links(vec![
                 LinkDecl::new("access", access()),
@@ -770,14 +786,28 @@ pub fn mem_schema() -> Schema {
         "auto-increment past a 1 KiB boundary is implementation defined",
         "packed word accesses increment only on a MEM-AP that takes packed transfers, which a CSW \
          write does not show",
-        "CSW unknown, so the auto-increment is unknown",
+        "CSW unknown, so the access size and auto-increment are unknown",
         "the TAR value is lost in a recording gap",
         "packed transfers wider than a word are unpredictable",
-        "the auto-increment over a wide access's several DRW accesses is not decoded",
-        "CSW holds a reserved AddrInc or Size, so the auto-increment is unknown",
+        "a wide access cut short leaves TAR unknown",
+        "CSW holds a reserved AddrInc or Size, so the access is unknown",
+        "an access not aligned to its size is implementation defined",
+        "another register access in the middle of a wide access is unpredictable",
+        "banked data accesses other than word or doubleword are unpredictable",
+        "a doubleword's banked data access that starts with its pair's second register is \
+         unpredictable",
+        "the AP read closed before its result came back",
+        "data parity failed",
     ])
-    .with_needs(["SELECT", "TAR"])
-    .with_causes([GAP_CUT_TEXT])
+    .with_needs(["SELECT", "TAR", "CSW"])
+    .with_causes([
+        GAP_CUT_TEXT,
+        "a CSW access ends it before its last word, and a write ended so makes no memory access",
+        "another register access interrupts it, which is unpredictable",
+        "the recording ends before its last word",
+    ])
+    // A wide access stays open over its words, at most one on each AP, and the context item.
+    .with_open_at_most(257)
 }
 
 pub fn mem_definition() -> Arc<Definition> {
@@ -816,6 +846,9 @@ pub struct Access {
     pub value: Option<(u32, Span)>,
     /// The AP's class, where ADIv5 knows it.
     pub class: Option<u16>,
+    /// The value's parity failed: for a write, the target ignores it; for a read, the access was
+    /// made but its value is unknown.
+    pub parity_failed: bool,
 }
 
 impl Access {
@@ -842,17 +875,34 @@ impl Access {
                 Some(&Value::Name(n)) => Some(n),
                 _ => None,
             },
+            parity_failed: matches!(
+                item.field(AP_VALUE).map(|f| &f.value),
+                Some(Value::Unknown {
+                    reason: PARITY_FAILED,
+                    ..
+                })
+            ),
+        }
+    }
+
+    /// The access's data, or why it is unknown.
+    fn data(&self) -> Result<(u32, Span), Reason> {
+        match self.value {
+            Some(v) => Ok(v),
+            None if self.parity_failed => Err(MEM_PARITY),
+            // A read closed incomplete: made, but its result never came back.
+            None => Err(UNREAD),
         }
     }
 }
 
-/// How far a DRW access moves TAR under CSW `csw`, `read` back from the MEM-AP or as written.
+/// How far a DRW access moves TAR under CSW `csw`, `read` back from the MEM-AP or as written. A
+/// wide access moves it once, after its last DRW access.
 fn increment(csw: u32, read: bool) -> Result<u32, Reason> {
     match (csw >> 4 & 3, csw & 7) {
         (0b00, _) => Ok(0),
         (0b11, _) | (_, 0b110 | 0b111) => Err(CSW_RESERVED),
-        (0b01, size @ 0b000..=0b010) => Ok(1 << size),
-        (0b01, _) => Err(WIDE),
+        (0b01, size) => Ok(1 << size),
         // Packed: a word's bytes in accesses of the size, so four.
         (0b10, 0b000 | 0b001) => Ok(4),
         // A MEM-AP that takes only words takes packed for off, and a read of CSW says so.
@@ -860,6 +910,21 @@ fn increment(csw: u32, read: bool) -> Result<u32, Reason> {
         (0b10, 0b010) => Err(PACKED_WORD),
         _ => Err(PACKED_WIDE),
     }
+}
+
+/// The bytes one DRW or banked data word moved, lowest address first: `n` bytes from address
+/// `from`, each from the byte lane its address gives (table C2-3, C2.2.7).
+fn lanes(word: u32, from: u32, n: u32) -> Value {
+    Value::Bits {
+        bytes: (0..n)
+            .map(|k| (word >> (8 * (from.wrapping_add(k) & 3))) as u8)
+            .collect(),
+        bits: 8 * n,
+    }
+}
+
+fn unknown_value(reason: Reason, needs: Option<Need>) -> Value {
+    Value::Unknown { reason, needs }
 }
 
 /// An AP's CSW as MEM-AP last saw it.
@@ -871,15 +936,35 @@ struct Csw {
     read: bool,
 }
 
-/// MEM-AP over completed AP accesses. An access closed incomplete carries no data and is
-/// skipped, as is one to an AP ADIv5 knows is of another class. An access completed later starts
-/// no earlier than ADIv5's settlement frontier, so that is its start frontier.
+/// An AP's TAR as MEM-AP knows it, and the item it came from.
+type Tar = (Result<u32, Reason>, Ref);
+
+/// A memory access wider than a word, open over the DRW or banked data accesses it takes, the
+/// least significant word first (table C2-20, C2.6.2.2).
+#[derive(Clone, Debug)]
+struct Wide {
+    id: Id,
+    write: bool,
+    /// The register the next word goes through: DRW, or the pair's second banked data register.
+    next: u32,
+    /// Each word and its span, or why it is unknown.
+    words: Vec<Result<(u32, Span), Reason>>,
+    need: usize,
+    /// TAR at the first word, for a DRW access; a banked data access leaves TAR as it is.
+    tar: Option<Tar>,
+    csw: Csw,
+}
+
+/// MEM-AP over completed AP accesses. An access to an AP ADIv5 knows is of another class is
+/// skipped. An access completed later starts no earlier than ADIv5's settlement frontier, so that
+/// is its start frontier.
 #[derive(Clone, Debug)]
 pub struct Mem {
     csw: HashMap<u8, Csw>,
-    tar: HashMap<u8, (Result<u32, Reason>, Ref)>,
+    tar: HashMap<u8, Tar>,
     /// Why an AP's TAR is not in `tar`: nothing decoded yet, or a recording gap.
     no_tar: Reason,
+    wide: HashMap<u8, Wide>,
     context: Option<Id>,
     up: Option<Tick>,
 }
@@ -890,6 +975,7 @@ impl Default for Mem {
             csw: HashMap::default(),
             tar: HashMap::default(),
             no_tar: NO_TAR,
+            wide: HashMap::default(),
             context: None,
             up: None,
         }
@@ -902,6 +988,9 @@ impl Mem {
     }
 
     fn finish(&mut self, end: Tick, out: &mut Out) {
+        for (_, w) in self.wide.drain() {
+            out.close(w.id, end, Status::Incomplete(MEM_ENDS));
+        }
         if let Some(ctx) = self.context.take() {
             out.close(ctx, end, Status::Complete);
         }
@@ -909,6 +998,9 @@ impl Mem {
 
     /// Input lost from `from`: every AP's TAR and CSW are unknown after it.
     fn gap(&mut self, from: Tick, out: &mut Out) {
+        for (_, w) in self.wide.drain() {
+            out.close(w.id, from, Status::Incomplete(MEM_GAP_CUT));
+        }
         if let Some(ctx) = self.context.take() {
             out.close(ctx, from, Status::Incomplete(MEM_GAP_CUT));
         }
@@ -934,8 +1026,28 @@ impl Mem {
         if let Some(ctx) = self.context.take() {
             out.close(ctx, a.span.start, Status::Complete);
         }
-        if a.class.is_some_and(|c| c != MEM_AP) {
+        // A write whose data fails parity is dropped, and WDATAERR set (B4.2.8.3).
+        if a.class.is_some_and(|c| c != MEM_AP) || a.write && a.value.is_none() {
             return;
+        }
+        if let Some(w) = self.wide.remove(&ap) {
+            if reg == w.next && a.write == w.write {
+                return self.word(ap, w, a, out);
+            }
+            let cause = if reg == 0x00 { CSW_ENDS } else { INTERRUPTED };
+            out.close(w.id, a.span.start, Status::Incomplete(cause));
+            if cause == INTERRUPTED {
+                // The access that interrupts it, and TAR after it, are unpredictable.
+                let at = (Err(UNPREDICTABLE), Ref::Upstream(a.id));
+                self.tar.insert(ap, at);
+                return;
+            }
+            if w.next == 0x0C
+                && matches!(w.tar, Some((Ok(_), _)))
+                && increment(w.csw.value, w.csw.read) != Ok(0)
+            {
+                self.tar.insert(ap, (Err(WIDE_CUT), Ref::Own(w.id)));
+            }
         }
         match reg {
             0x00 => {
@@ -953,44 +1065,104 @@ impl Mem {
                     self.tar.insert(ap, (Ok(v), Ref::Upstream(a.id)));
                 }
             }
-            0x0C => self.drw(ap, a, out),
+            0x0C | 0x10..=0x1C => self.memory(ap, reg, a, out),
             _ => {}
         }
     }
 
-    fn drw(&mut self, ap: u8, a: &Access, out: &mut Out) {
-        let Some((v, span)) = a.value else { return };
-        let kind = if a.write { MEM_WRITE } else { MEM_READ };
-        let id = Id::new(kind, a.id.anchor);
-        out.open(id, None, a.span.start);
+    /// The address a DRW or banked data access to `reg` reaches with TAR at `tar`. A doubleword
+    /// starts at its pair's first register's (table C2-11).
+    fn address(&self, reg: u32, tar: Option<&Tar>) -> Result<u32, Reason> {
+        let t = match tar {
+            Some((t, _)) => *t,
+            None => Err(self.no_tar),
+        }?;
+        Ok(match reg {
+            0x0C => t,
+            _ => (t & !0xF) + (reg - 0x10),
+        })
+    }
+
+    /// A DRW or banked data access: a memory access, or the first word of a wide one.
+    fn memory(&mut self, ap: u8, reg: u32, a: &Access, out: &mut Out) {
+        let drw = reg == 0x0C;
+        let csw = self.csw.get(&ap).copied();
         let tar = self.tar.get(&ap).copied();
-        let address = match &tar {
-            Some((Ok(t), _)) => word((*t).into(), 32),
-            Some((Err(why), _)) => Value::Unknown {
-                reason: *why,
-                needs: Some(NEEDS_TAR),
-            },
-            None => Value::Unknown {
-                reason: self.no_tar,
-                needs: Some(NEEDS_TAR),
-            },
+        let size = csw.map(|c| c.value & 7);
+        let packed = csw.is_some_and(|c| c.value >> 4 & 3 == 0b10);
+        let wide = match size {
+            Some(s @ 3..=5) if drw && !packed => Some(1 << (s - 2)),
+            Some(3) if !drw && reg & 4 == 0 => Some(2),
+            _ => None,
         };
-        out.set(id, ADDRESS, address);
-        if let Some((Ok(t), _)) = &tar
-            && let Some(n) = scs_name(*t)
-        {
+        let address = self.address(reg, tar.as_ref());
+        let id = Id::new(if a.write { MEM_WRITE } else { MEM_READ }, a.id.anchor);
+        out.open(id, None, a.span.start);
+        out.set(
+            id,
+            ADDRESS,
+            address.map_or_else(
+                |why| unknown_value(why, Some(NEEDS_TAR)),
+                |t| word(t.into(), 32),
+            ),
+        );
+        if let Some(n) = address.ok().and_then(scs_name) {
             out.set(id, MEM_NAME, Value::Name(n));
         }
-        out.part(id, MEM_VALUE, word(v.into(), 32), span, None);
         out.link(id, ACCESS_LINK, Ref::Upstream(a.id));
         if let Some((_, src)) = &tar {
             out.link(id, ADDRESS_FROM, *src);
         }
-        if let Some(csw) = self.csw.get(&ap) {
-            out.link(id, INCREMENT_FROM, Ref::Upstream(csw.from));
+        if drw && let Some(c) = &csw {
+            out.link(id, INCREMENT_FROM, Ref::Upstream(c.from));
+        }
+        if let (Some(need), Some(c)) = (wide, csw) {
+            let w = Wide {
+                id,
+                write: a.write,
+                next: reg,
+                words: Vec::with_capacity(need),
+                need,
+                tar: drw.then_some(tar).flatten(),
+                csw: c,
+            };
+            return self.word(ap, w, a, out);
+        }
+        let value = match (size, a.data()) {
+            (_, Err(why)) => unknown_value(why, None),
+            (None, _) => unknown_value(NO_CSW, Some(NEEDS_CSW)),
+            (Some(6 | 7), _) => unknown_value(CSW_RESERVED, None),
+            (Some(3..=5), _) if drw => unknown_value(PACKED_WIDE, None),
+            (Some(3), _) => unknown_value(BD_ORDER, None),
+            (Some(s), _) if !drw && s != 2 => unknown_value(BD_SIZE, None),
+            (Some(s), Ok((v, _))) => {
+                let (each, n) = (1 << s, if packed { 4 } else { 1 << s });
+                match address {
+                    Ok(t) if t % each != 0 => unknown_value(UNALIGNED, None),
+                    // A packed access whose later bytes are past a 1 KiB boundary.
+                    Ok(t) if (t ^ t.wrapping_add(n - 1)) & !0x3FF != 0 => {
+                        unknown_value(PAST_1K, None)
+                    }
+                    Ok(t) => lanes(v, t, n),
+                    // TAR unknown: a word's bytes in lane order, as an aligned access holds them.
+                    Err(_) if s == 2 => lanes(v, 0, 4),
+                    Err(why) => unknown_value(why, Some(NEEDS_TAR)),
+                }
+            }
+        };
+        match a.value {
+            Some((_, span)) => out.part(id, MEM_VALUE, value, span, None),
+            None => out.set(id, MEM_VALUE, value),
         }
         out.close(id, a.span.end, Status::Complete);
-        let next = match (tar.map(|t| t.0), self.csw.get(&ap)) {
+        if drw {
+            self.moved(ap, tar, csw, id);
+        }
+    }
+
+    /// TAR after a DRW access, or after a wide one's last word.
+    fn moved(&mut self, ap: u8, tar: Option<Tar>, csw: Option<Csw>, id: Id) {
+        let next = match (tar.map(|t| t.0), csw) {
             (Some(Ok(t)), Some(csw)) => increment(csw.value, csw.read).and_then(|step| {
                 let n = t.wrapping_add(step);
                 if (n ^ t) & !0x3FF != 0 {
@@ -1005,17 +1177,45 @@ impl Mem {
         };
         self.tar.insert(ap, (next, Ref::Own(id)));
     }
+
+    /// One word of the wide access `w`; its last closes it.
+    fn word(&mut self, ap: u8, mut w: Wide, a: &Access, out: &mut Out) {
+        if !w.words.is_empty() {
+            out.link(w.id, ACCESS_LINK, Ref::Upstream(a.id));
+        }
+        w.words.push(a.data());
+        if w.words.len() < w.need {
+            if w.next != 0x0C {
+                w.next += 4;
+            }
+            self.wide.insert(ap, w);
+            return;
+        }
+        let words: Result<Vec<_>, _> = w.words.iter().copied().collect();
+        match words {
+            Ok(words) => {
+                let span = Span {
+                    start: words[0].1.start,
+                    end: words[words.len() - 1].1.end,
+                };
+                let bytes = words.iter().flat_map(|(x, _)| x.to_le_bytes()).collect();
+                let bits = 32 * w.need as u32;
+                out.part(w.id, MEM_VALUE, Value::Bits { bytes, bits }, span, None);
+            }
+            Err(why) => out.set(w.id, MEM_VALUE, unknown_value(why, None)),
+        }
+        out.close(w.id, a.span.end, Status::Complete);
+        if let Some(tar) = w.tar {
+            self.moved(ap, Some(tar), Some(w.csw), w.id);
+        }
+    }
 }
 
 impl Decoder for Mem {
     fn turn(&mut self, ex: &mut Exchange<'_>) -> Pause {
         while let Some(d) = ex.receive() {
             match d {
-                Delivery::Item { item, .. } => {
-                    if item.status == Status::Complete {
-                        self.consume(&Access::of(&item), &mut ex.out);
-                    }
-                }
+                Delivery::Item { item, .. } => self.consume(&Access::of(&item), &mut ex.out),
                 Delivery::Frontier { settled, .. } => self.up = Some(settled),
                 Delivery::End { end, .. } => {
                     self.finish(end, &mut ex.out);
@@ -1030,7 +1230,11 @@ impl Decoder for Mem {
             }
         }
         if let Some(up) = self.up {
-            ex.frontier(up);
+            // A wide access's value is set at its last word and spans back to its first.
+            let held = (self.wide.values())
+                .filter_map(|w| Some(w.words.first()?.ok()?.1.start))
+                .min();
+            ex.frontier(held.map_or(up, |h| h.min(up)));
         }
         Pause::Input
     }
@@ -1041,6 +1245,10 @@ impl Decoder for Mem {
 
     fn heap_bytes(&self) -> usize {
         crate::held::<(u8, Csw)>(self.csw.capacity())
-            + crate::held::<(u8, (Result<u32, Reason>, Ref))>(self.tar.capacity())
+            + crate::held::<(u8, Tar)>(self.tar.capacity())
+            + crate::held::<(u8, Wide)>(self.wide.capacity())
+            + (self.wide.values())
+                .map(|w| w.words.capacity() * size_of::<Result<(u32, Span), Reason>>())
+                .sum::<usize>()
     }
 }
