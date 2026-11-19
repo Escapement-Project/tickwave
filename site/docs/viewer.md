@@ -75,7 +75,8 @@ With the view focused, the left and right arrow keys move it, an eighth of the s
 time, or half with Shift. Each move glides into place as a zoom step does, and a key held down
 glides on. The up and down arrows, or plus and minus, zoom in and out. Home and the Fit button
 show the whole capture, and every analog channel's whole range. Escape clears the cursors and the
-selection.
+selection. A key held with Alt, Ctrl or Cmd is left to the browser, so Alt with an arrow still goes
+back or forward.
 
 ## Reading a channel
 

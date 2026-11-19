@@ -3,6 +3,7 @@
 
 import { autoUpdate, computePosition, flip, offset, shift } from "@floating-ui/dom";
 import { escapeHtml } from "../escape.ts";
+import { browserKey } from "../keys.ts";
 import { onFaceChange, onFontsLoaded, reducedMotion } from "../face.ts";
 import { normalise } from "../palette.ts";
 import { parseChart, type ChartData, type Evidence, type Pattern, type Series } from "./data.ts";
@@ -907,7 +908,7 @@ export class TickwaveChart extends HTMLElement {
   }
 
   #key(e: KeyboardEvent): void {
-    if (!this.#data || e.target !== this) return;
+    if (!this.#data || e.target !== this || browserKey(e)) return;
     const n = this.#data.x.values.length;
     const i = this.#x;
     let next: number | null | undefined;

@@ -14,6 +14,7 @@ import { clampRange, fitRange, moveRange, scaleLimits, zoomRange, type ScaleLimi
 import { channelSampleTick, channelStart, inChannel, isAbort, named, readingStep, sampleAtOrBefore, spanned, type RecordingInfo } from "../source.ts";
 import { parseTime, toTicks, type TimeSpec } from "../time.ts";
 import { DRAG_PX, TickwaveElement, loadAnnotations, loadHead, readAnnotations, zoomKey, type Loaded } from "./base.ts";
+import { browserKey } from "../keys.ts";
 import { ShapedSource } from "../shaped-source.ts";
 import { isMergePreview } from "../merge-preview.ts";
 import { isRegistered, registeredName, registeredSidecar } from "../wasm/client.ts";
@@ -1229,7 +1230,7 @@ export class TickwaveView extends TickwaveElement {
     g.addEventListener("pointercancel", end);
     g.addEventListener("keydown", (e) => {
       const s = this.#shaped;
-      if (!s) return;
+      if (!s || browserKey(e)) return;
       const at = this.#plot.tracks.findIndex((t) => t.index === i);
       let change: "move" | "order";
       if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
@@ -1284,7 +1285,7 @@ export class TickwaveView extends TickwaveElement {
     g.addEventListener("pointerup", end);
     g.addEventListener("pointercancel", end);
     g.addEventListener("keydown", (e) => {
-      if (!this.#shaped || (e.key !== "ArrowLeft" && e.key !== "ArrowRight")) return;
+      if (!this.#shaped || browserKey(e) || (e.key !== "ArrowLeft" && e.key !== "ArrowRight")) return;
       e.preventDefault();
       e.stopPropagation();
       this.#moveGroup(name, (this.#aligns.get(name) ?? 0) + (e.key === "ArrowLeft" ? -1 : 1) * this.#keyStep(e.shiftKey));
@@ -1341,7 +1342,7 @@ export class TickwaveView extends TickwaveElement {
     h.addEventListener("pointercancel", end);
     h.addEventListener("keydown", (e) => {
       const c = this.#asLoaded?.info.channels[i];
-      if (!c) return;
+      if (!c || browserKey(e)) return;
       if (e.key === "ArrowLeft") set(ownEnd() - this.#keyStep(e.shiftKey));
       else if (e.key === "ArrowRight") set(ownEnd() + this.#keyStep(e.shiftKey));
       else if (e.key === "Home" && side === "start") set(channelStart(c));
@@ -1414,7 +1415,7 @@ export class TickwaveView extends TickwaveElement {
     });
     h.addEventListener("keydown", (e) => {
       const r = this.#plot.layout?.rows[row];
-      if (!r) return;
+      if (!r || browserKey(e)) return;
       const [min, max] = ROW_LIMITS[r.track.channel.kind];
       const step = ROW_STEP[e.shiftKey ? 1 : 0];
       let to: number | null;
@@ -1557,7 +1558,7 @@ export class TickwaveView extends TickwaveElement {
     s.addEventListener("keydown", (e) => {
       const r = rowOf();
       const lim = this.#limits(row);
-      if (!r?.range || !lim) return;
+      if (!r?.range || !lim || browserKey(e)) return;
       const span = r.range.hi - r.range.lo;
       const mid = (r.range.lo + r.range.hi) / 2;
       // Up moves the trace up, as a drag up does: the values shown move down.
@@ -2014,6 +2015,7 @@ export class TickwaveView extends TickwaveElement {
       { passive: false },
     );
     box.addEventListener("keydown", (e) => {
+      if (browserKey(e)) return;
       const span = this.#plot.target.end - this.#plot.target.start;
       switch (e.key) {
         case "ArrowLeft":

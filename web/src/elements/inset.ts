@@ -14,6 +14,7 @@ import { channelIndices, EASE_MS, Plot } from "../render/plot.ts";
 import { roleLook, swatch, type Colour } from "../roles.ts";
 import { isAbort, named, readingStep, type RecordingInfo } from "../source.ts";
 import { secondsValue, toTicks } from "../time.ts";
+import { browserKey } from "../keys.ts";
 import { DRAG_PX, TickwaveElement, loadAnnotations, loadHead, readAnnotations, zoomKey, type Loaded } from "./base.ts";
 import type { TickwaveView } from "./view.ts";
 
@@ -867,7 +868,7 @@ export class TickwaveInset extends TickwaveElement {
    * the span, and Shift with left or right steps through the notes. True if it answered.
    */
   arrowKey(e: KeyboardEvent): boolean {
-    if (e.altKey || e.ctrlKey || e.metaKey) return false;
+    if (browserKey(e)) return false;
     const { start, end } = this.#plot.target;
     if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
       const dir = e.key === "ArrowRight" ? 1 : -1;

@@ -204,7 +204,9 @@ same captures converted to `.tickwave`, linked into `fixtures-local/` by `script
 tickwave puts a capture into a web page with three custom elements. `<tickwave-view>` shows a whole
 recording. `<tickwave-inset>` shows one annotated stretch of it, magnified. `<tickwave-ref>` turns a
 phrase in the text into a reference: pointing at it opens an inset beside the text. A fourth,
-`<tickwave-chart>`, in a module of its own, draws measurements against a setting.
+`<tickwave-chart>`, in a module of its own, draws measurements against a setting. None of them
+answers a key held with Alt, Ctrl or Cmd: those are the browser's, such as Alt with an arrow to go
+back or forward.
 
 ### Loading
 
