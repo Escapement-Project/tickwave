@@ -177,7 +177,7 @@ fn swd_stack(
         .add(
             name("adi"),
             adiv5::adi_definition(),
-            InputSpec::Upstream(adiv5::adi_subscription(s)),
+            InputSpec::Upstream(s),
             adiv5::Adi::factory(),
             &[],
             all(),
@@ -187,7 +187,7 @@ fn swd_stack(
         .add(
             name("mem"),
             adiv5::mem_definition(),
-            InputSpec::Upstream(adiv5::mem_subscription(a)),
+            InputSpec::Upstream(a),
             adiv5::Mem::factory(),
             &[],
             all(),
@@ -281,7 +281,7 @@ fn a_local_start_past_the_end_of_the_input_finishes_cleanly() {
     h.add(
         name("jtag"),
         cjtag::jtag_definition(),
-        InputSpec::Upstream(cjtag::jtag_subscription(c)),
+        InputSpec::Upstream(c),
         cjtag::JtagOnCjtag::factory(),
         &[],
         all(),
@@ -365,7 +365,7 @@ fn jtag_never_panics_and_never_breaks_a_rule() {
             .add(
                 name("jtag-dp"),
                 jtagdp::definition(),
-                InputSpec::Upstream(jtagdp::subscription(j)),
+                InputSpec::Upstream(j),
                 jtagdp::JtagDp::factory(),
                 &[],
                 all(),
@@ -375,7 +375,7 @@ fn jtag_never_panics_and_never_breaks_a_rule() {
             .add(
                 name("adiv5"),
                 adiv5::adi_definition(),
-                InputSpec::Upstream(adiv5::adi_subscription(dp)),
+                InputSpec::Upstream(dp),
                 adiv5::Adi::factory(),
                 &[adiv5::reads(true)],
                 all(),
@@ -412,7 +412,7 @@ fn cjtag_with_jtag_over_it_never_panics_and_never_breaks_a_rule() {
                 .add(
                     name("jtag"),
                     cjtag::jtag_definition(),
-                    InputSpec::Upstream(cjtag::jtag_subscription(c)),
+                    InputSpec::Upstream(c),
                     cjtag::JtagOnCjtag::factory(),
                     &[],
                     all(),

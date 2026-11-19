@@ -69,7 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let j = h.add(
         name("jtag"),
         cjtag::jtag_definition(),
-        InputSpec::Upstream(cjtag::jtag_subscription(c)),
+        InputSpec::Upstream(c),
         cjtag::JtagOnCjtag::factory(),
         &[],
         vec![],

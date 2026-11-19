@@ -236,7 +236,7 @@ pub fn swd(c: &Case) {
         .add(
             name("adi"),
             adiv5::adi_definition(),
-            InputSpec::Upstream(adiv5::adi_subscription(s)),
+            InputSpec::Upstream(s),
             adiv5::Adi::factory(),
             &[],
             all(),
@@ -245,7 +245,7 @@ pub fn swd(c: &Case) {
     h.add(
         name("mem"),
         adiv5::mem_definition(),
-        InputSpec::Upstream(adiv5::mem_subscription(a)),
+        InputSpec::Upstream(a),
         adiv5::Mem::factory(),
         &[],
         all(),
@@ -285,7 +285,7 @@ pub fn jtag(c: &Case) {
             .add(
                 name("jtag-dp"),
                 jtagdp::definition(),
-                InputSpec::Upstream(jtagdp::subscription(j)),
+                InputSpec::Upstream(j),
                 jtagdp::JtagDp::factory(),
                 &[],
                 all(),
@@ -294,7 +294,7 @@ pub fn jtag(c: &Case) {
         h.add(
             name("adiv5"),
             adiv5::adi_definition(),
-            InputSpec::Upstream(adiv5::adi_subscription(dp)),
+            InputSpec::Upstream(dp),
             adiv5::Adi::factory(),
             &[adiv5::reads(true)],
             all(),
@@ -323,7 +323,7 @@ pub fn cjtag(c: &Case) {
     h.add(
         name("jtag"),
         cjtag::jtag_definition(),
-        InputSpec::Upstream(cjtag::jtag_subscription(k)),
+        InputSpec::Upstream(k),
         cjtag::JtagOnCjtag::factory(),
         &[],
         all(),

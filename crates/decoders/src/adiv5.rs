@@ -27,10 +27,9 @@
 
 use crate::swd;
 use escapement_tickwave_decode::{
-    AnalysisId, Cause, Completed, Decoder, Definition, Delivery, Exchange, Factory, FieldId,
-    FieldType, Id, KindDecl, KindId, Label, LinkDecl, LinkId, LinkTo, Mode, Need, Op, Out, Pause,
-    Reason, Ref, Schema, Setting, SettingDecl, SettingId, Span, Status, Subscription, Tick, Value,
-    field, name,
+    Cause, Completed, Decoder, Definition, Delivery, Exchange, Factory, FieldId, FieldType, Id,
+    KindDecl, KindId, Label, LinkDecl, LinkId, LinkTo, Mode, Need, Op, Out, Pause, Reason, Ref,
+    Schema, Setting, SettingDecl, SettingId, Span, Status, Tick, UpstreamDecl, Value, field, name,
 };
 use foldhash::HashMap;
 use std::sync::Arc;
@@ -217,10 +216,14 @@ pub const IDR_NOT_GIVEN: i64 = -1;
 
 pub fn adi_definition() -> Arc<Definition> {
     Arc::new(
-        Definition::new("adiv5", 1, adi_schema()).with_settings(vec![
-            SettingDecl::choice("reads", READS_NAMES, 0),
-            SettingDecl::list("idr", IDR_NOT_GIVEN..=0xFFFF_FFFF, 256, vec![]),
-        ]),
+        Definition::new("adiv5", 1, adi_schema())
+            .with_inputs([UpstreamDecl::new("transfers", Mode::Pieces)
+                .from(["swd", "jtag-dp"])
+                .with_kinds(["transfer"])])
+            .with_settings(vec![
+                SettingDecl::choice("reads", READS_NAMES, 0),
+                SettingDecl::list("idr", IDR_NOT_GIVEN..=0xFFFF_FFFF, 256, vec![]),
+            ]),
     )
 }
 
@@ -232,11 +235,6 @@ pub fn reads(own: bool) -> (&'static str, Setting) {
 /// ADIv5's IDR setting, as a binding gives it: each AP's IDR from the start, AP 0 first.
 pub fn idr(by_ap: &[i64]) -> (&'static str, Setting) {
     ("idr", Setting::List(by_ap.to_vec()))
-}
-
-/// What ADIv5 subscribes to of SWD.
-pub fn adi_subscription(swd: AnalysisId) -> Subscription {
-    Subscription::new(swd, Mode::Pieces).with_kinds(["transfer"])
 }
 
 fn unknown(reason: Reason) -> Value {
@@ -811,12 +809,14 @@ pub fn mem_schema() -> Schema {
 }
 
 pub fn mem_definition() -> Arc<Definition> {
-    Arc::new(Definition::new("mem-ap", 1, mem_schema()))
-}
-
-/// What MEM-AP subscribes to of ADIv5.
-pub fn mem_subscription(adi: AnalysisId) -> Subscription {
-    Subscription::new(adi, Mode::Completed).with_kinds(["ap-read", "ap-write"])
+    Arc::new(
+        Definition::new("mem-ap", 1, mem_schema()).with_inputs([UpstreamDecl::new(
+            "accesses",
+            Mode::Completed,
+        )
+        .from(["adiv5"])
+        .with_kinds(["ap-read", "ap-write"])]),
+    )
 }
 
 /// A System Control Space register's name, by its index in `SCS_NAMES`.

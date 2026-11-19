@@ -166,7 +166,7 @@ fn cjtag_case(path: &Path, ahead: Tick) -> Case {
         .add(
             name("JTAG"),
             cjtag::jtag_definition(),
-            InputSpec::Upstream(cjtag::jtag_subscription(c)),
+            InputSpec::Upstream(c),
             cjtag::JtagOnCjtag::factory(),
             &[],
             all(),
@@ -239,7 +239,7 @@ fn decode_with(path: &Path, mem: bool) -> (Vec<Decoded>, Mapping, [usize; 2]) {
         .add(
             name("ADIv5"),
             adiv5::adi_definition(),
-            InputSpec::Upstream(adiv5::adi_subscription(s)),
+            InputSpec::Upstream(s),
             adiv5::Adi::factory(),
             &[],
             all(),
@@ -249,7 +249,7 @@ fn decode_with(path: &Path, mem: bool) -> (Vec<Decoded>, Mapping, [usize; 2]) {
         h.add(
             name("MEM-AP"),
             adiv5::mem_definition(),
-            InputSpec::Upstream(adiv5::mem_subscription(a)),
+            InputSpec::Upstream(a),
             adiv5::Mem::factory(),
             &[],
             all(),

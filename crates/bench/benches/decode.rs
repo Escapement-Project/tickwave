@@ -290,7 +290,7 @@ fn cjtag_keeping(keep: Vec<Span>) -> Host {
     h.add(
         name("jtag"),
         cjtag::jtag_definition(),
-        InputSpec::Upstream(cjtag::jtag_subscription(c)),
+        InputSpec::Upstream(c),
         cjtag::JtagOnCjtag::factory(),
         &[],
         keep,
@@ -334,7 +334,7 @@ fn host(keep: Vec<Span>) -> Host {
         .add(
             name("adi"),
             adiv5::adi_definition(),
-            InputSpec::Upstream(adiv5::adi_subscription(s)),
+            InputSpec::Upstream(s),
             adiv5::Adi::factory(),
             &[],
             keep.clone(),
@@ -343,7 +343,7 @@ fn host(keep: Vec<Span>) -> Host {
     h.add(
         name("mem"),
         adiv5::mem_definition(),
-        InputSpec::Upstream(adiv5::mem_subscription(a)),
+        InputSpec::Upstream(a),
         adiv5::Mem::factory(),
         &[],
         keep,

@@ -3,6 +3,7 @@
 //! loaded at run time hands one over owned. The host checks it when the decoder is added, then
 //! every operation against it.
 
+use crate::Mode;
 use crate::output::{FieldId, Id, KindId, Op, Ref, Status, Value};
 use std::{borrow::Cow, collections::HashSet, fmt};
 
@@ -43,13 +44,76 @@ pub struct Definition {
     pub version: u32,
     /// The decoder contract it targets.
     pub contract: Contract,
-    /// The wire ports it reads, for a decoder that reads the wire: a window's port numbers index
-    /// this list, and a binding names a channel for each, or leaves out one declared optional.
+    /// The inputs it takes, each a binding may pick: the wire, or another analysis's output. The
+    /// decoder's factory is told which one its binding picked (`Bound::input`).
+    pub inputs: Vec<InputDecl>,
+    /// The wire ports it reads through its wire input: a window's port numbers index this list,
+    /// and a binding names a channel for each, or leaves out one declared optional.
     pub ports: Vec<PortDecl>,
     /// What a binding may set, each with its default. The host hands a run's decoder the values
     /// it bound, and keys checkpoints on them.
     pub settings: Vec<SettingDecl>,
     pub schema: Schema,
+}
+
+/// An input a decoder takes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum InputDecl {
+    /// The wire, through the definition's ports.
+    Wire,
+    /// Another analysis's output.
+    Upstream(UpstreamDecl),
+}
+
+/// Another analysis's output as an input: the analyses that may give it, by their definition's
+/// name, and the kinds it reads of them, delivered in one mode. A pieces input names the
+/// sequences it reads; others are not delivered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct UpstreamDecl {
+    /// The input's name, which a recipe binds an analysis to.
+    pub port: Name,
+    /// The definitions whose analyses it takes; any analysis's where empty.
+    pub from: Vec<Name>,
+    pub kinds: Vec<Name>,
+    pub mode: Mode,
+    pub sequences: Vec<Name>,
+}
+
+impl UpstreamDecl {
+    /// An input named `port` taking any analysis's output in `mode`, no kinds yet.
+    pub fn new(port: impl Into<Name>, mode: Mode) -> Self {
+        Self {
+            port: port.into(),
+            from: vec![],
+            kinds: vec![],
+            mode,
+            sequences: vec![],
+        }
+    }
+
+    /// Takes only analyses of these definitions.
+    pub fn from<N: Into<Name>>(mut self, definitions: impl IntoIterator<Item = N>) -> Self {
+        self.from = names(definitions);
+        self
+    }
+
+    pub fn with_kinds<N: Into<Name>>(mut self, kinds: impl IntoIterator<Item = N>) -> Self {
+        self.kinds = names(kinds);
+        self
+    }
+
+    pub fn with_sequences<N: Into<Name>>(mut self, sequences: impl IntoIterator<Item = N>) -> Self {
+        self.sequences = names(sequences);
+        self
+    }
+}
+
+impl From<UpstreamDecl> for InputDecl {
+    fn from(u: UpstreamDecl) -> Self {
+        InputDecl::Upstream(u)
+    }
 }
 
 /// A wire port, by name. A binding may leave out an optional one, and the decoder is told which
@@ -236,12 +300,13 @@ fn names<N: Into<Name>>(list: impl IntoIterator<Item = N>) -> Vec<Name> {
 }
 
 impl Definition {
-    /// A decoder of the host's own contract, with no wire ports.
+    /// A decoder of the host's own contract that reads the wire, with no ports yet.
     pub fn new(name: impl Into<Name>, version: u32, schema: Schema) -> Self {
         Self {
             name: name.into(),
             version,
             contract: CONTRACT,
+            inputs: vec![InputDecl::Wire],
             ports: vec![],
             settings: vec![],
             schema,
@@ -282,9 +347,58 @@ impl Definition {
         self
     }
 
+    /// Its inputs, in place of the wire alone.
+    pub fn with_inputs<I: Into<InputDecl>>(mut self, inputs: impl IntoIterator<Item = I>) -> Self {
+        self.inputs = inputs.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// The input an analysis of definition `upstream` binds to: the first that names it, else the
+    /// first that takes any.
+    pub fn upstream_input(&self, upstream: &str) -> Option<(usize, &UpstreamDecl)> {
+        let ups = || {
+            (self.inputs.iter().enumerate()).filter_map(|(k, i)| match i {
+                InputDecl::Upstream(u) => Some((k, u)),
+                InputDecl::Wire => None,
+            })
+        };
+        (ups().find(|(_, u)| u.from.iter().any(|f| f == upstream)))
+            .or_else(|| ups().find(|(_, u)| u.from.is_empty()))
+    }
+
+    /// The index of its wire input, if it takes the wire.
+    pub fn wire_input(&self) -> Option<usize> {
+        self.inputs.iter().position(|i| *i == InputDecl::Wire)
+    }
+
     /// Checks its ports and settings: their names, none twice, and each default among the values
     /// its setting takes.
     pub(crate) fn check(&self) -> Result<(), SchemaError> {
+        at_most(self.inputs.len(), MAX_LIST, "inputs")?;
+        if self.inputs.is_empty() {
+            return Err(SchemaError::NoInputs);
+        }
+        let mut wires = 0;
+        let mut seen = HashSet::new();
+        for i in &self.inputs {
+            let InputDecl::Upstream(u) = i else {
+                wires += 1;
+                continue;
+            };
+            named(&u.port)?;
+            if !seen.insert(&u.port) {
+                return Err(SchemaError::DuplicateInput(u.port.clone()));
+            }
+            at_most(u.from.len(), MAX_LIST, "definitions an input takes")?;
+            at_most(u.kinds.len(), MAX_LIST, "kinds an input reads")?;
+            at_most(u.sequences.len(), MAX_LIST, "sequences an input reads")?;
+            for n in u.from.iter().chain(&u.kinds).chain(&u.sequences) {
+                named(n)?;
+            }
+        }
+        if wires > 1 {
+            return Err(SchemaError::WireTwice);
+        }
         let mut seen = HashSet::new();
         for p in &self.ports {
             named(&p.name)?;
@@ -581,6 +695,12 @@ pub enum SchemaError {
     DuplicateRole(Name),
     #[error("port {0} is declared twice")]
     DuplicatePort(Name),
+    #[error("it declares no inputs")]
+    NoInputs,
+    #[error("input {0} is declared twice")]
+    DuplicateInput(Name),
+    #[error("the wire input is declared twice")]
+    WireTwice,
     #[error("setting {0} is declared twice")]
     DuplicateSetting(Name),
     #[error("setting {setting}: {name} is declared twice")]

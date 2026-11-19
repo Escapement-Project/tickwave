@@ -12,7 +12,7 @@ mod check;
 use check::Seen;
 use escapement_tickwave_decode::{
     Decoder, Definition, Delivery, Exchange, Host, InputSpec, KindId, Mode, Pause, Schema, Status,
-    Subscription, Tick, Value, name, wire::WireSource,
+    Tick, UpstreamDecl, Value, name, wire::WireSource,
 };
 use escapement_tickwave_decoders::cjtag;
 use escapement_tickwave_view::{Cache, Recording};
@@ -146,7 +146,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let j = h.add(
         name("jtag"),
         cjtag::jtag_definition(),
-        InputSpec::Upstream(cjtag::jtag_subscription(c)),
+        InputSpec::Upstream(c),
         cjtag::JtagOnCjtag::factory(),
         &[jtag_chain],
         vec![],
@@ -165,8 +165,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let all: Vec<String> = schema.kinds.iter().map(|k| k.name.to_string()).collect();
     h.add(
         name("kinds"),
-        Arc::new(Definition::new("kinds", 1, Schema::new(vec![]))),
-        InputSpec::Upstream(Subscription::new(c, Mode::Completed).with_kinds(all)),
+        Arc::new(
+            Definition::new("kinds", 1, Schema::new(vec![])).with_inputs([UpstreamDecl::new(
+                "items",
+                Mode::Completed,
+            )
+            .with_kinds(all)]),
+        ),
+        InputSpec::Upstream(c),
         Box::new(move |_, _| Box::new(Kinds(k2.clone(), s2.clone()))),
         &[],
         vec![],

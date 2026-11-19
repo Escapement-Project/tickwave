@@ -15,9 +15,9 @@
 
 use crate::{jtag, swd};
 use escapement_tickwave_decode::{
-    AnalysisId, Cause, Completed, Decoder, Definition, Delivery, Exchange, Factory, FieldId,
-    FieldType, Id, KindDecl, KindId, Label, Mode, Out, Pause, Reason, Schema, SettingDecl,
-    SettingId, Span, Status, Subscription, Tick, Value, field,
+    Cause, Completed, Decoder, Definition, Delivery, Exchange, Factory, FieldId, FieldType, Id,
+    KindDecl, KindId, Label, Mode, Out, Pause, Reason, Schema, SettingDecl, SettingId, Span,
+    Status, Tick, UpstreamDecl, Value, field,
 };
 use std::sync::Arc;
 
@@ -65,17 +65,12 @@ pub fn schema() -> Schema {
 
 pub fn definition() -> Arc<Definition> {
     Arc::new(
-        Definition::new("jtag-dp", 1, schema()).with_settings(vec![SettingDecl::int(
-            "tap",
-            0..=7,
-            0,
-        )]),
+        Definition::new("jtag-dp", 1, schema())
+            .with_inputs([UpstreamDecl::new("scans", Mode::Completed)
+                .from(["jtag"])
+                .with_kinds(["instruction", "data"])])
+            .with_settings(vec![SettingDecl::int("tap", 0..=7, 0)]),
     )
-}
-
-/// What JTAG-DP subscribes to of JTAG.
-pub fn subscription(jtag: AnalysisId) -> Subscription {
-    Subscription::new(jtag, Mode::Completed).with_kinds(["instruction", "data"])
 }
 
 /// A TAP part's bits, first shifted first, where they are known.

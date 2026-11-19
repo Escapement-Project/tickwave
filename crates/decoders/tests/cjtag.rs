@@ -5,8 +5,8 @@ mod common;
 
 use common::*;
 use escapement_tickwave_decode::{
-    AnalysisId, Counts, Decoder, Exchange, Host, HostOptions, InputSpec, Item, KindId, Observation,
-    Observed, Out, Pause, Request, Span, Status, Tick, Value, Window, name,
+    AnalysisId, Counts, Decoder, Exchange, Host, HostOptions, InputDecl, InputSpec, Item, KindId,
+    Observation, Observed, Out, Pause, Request, Span, Status, Tick, Value, Window, name,
 };
 use escapement_tickwave_decoders::{
     cjtag::{self, Change, Cjtag, Feed, JtagOnCjtag, Lines, Oscan},
@@ -235,7 +235,7 @@ fn host_with(
         .add(
             name("jtag"),
             cjtag::jtag_definition(),
-            InputSpec::Upstream(cjtag::jtag_subscription(c)),
+            InputSpec::Upstream(c),
             JtagOnCjtag::factory(),
             &[],
             all(),
@@ -394,6 +394,7 @@ fn direct(w: Wires) -> Counts {
             std::sync::Arc::new(
                 (*cjtag::jtag_definition())
                     .clone()
+                    .with_inputs([InputDecl::Wire])
                     .with_ports(["TCKC", "TMSC"]),
             ),
             InputSpec::Wire {
@@ -1375,7 +1376,7 @@ fn decode_offline_start(g: &Gen) -> (Host, [AnalysisId; 2]) {
         .add(
             name("jtag"),
             cjtag::jtag_definition(),
-            InputSpec::Upstream(cjtag::jtag_subscription(c)),
+            InputSpec::Upstream(c),
             JtagOnCjtag::factory(),
             &[],
             all(),

@@ -9,7 +9,7 @@ use escapement_tickwave_decode::{
     AnalysisId, Bound, Cause, Decoder, Definition, Delivery, Element, ElementType, Exchange,
     FieldId, FieldType, Host, HostOptions, Id, InputSpec, Keeping, KindDecl, KindId, LinkDecl,
     LinkId, LinkTo, Mode, Need, Observation, Observed, Pause, Reason, Ref, Request, Role, Schema,
-    SeqId, Source, SourceError, Span, Status, Subscription, Tick, Turn, Value, Window, WindowId,
+    SeqId, Source, SourceError, Span, Status, Tick, Turn, UpstreamDecl, Value, Window, WindowId,
     field, name, seq,
 };
 use std::collections::VecDeque;
@@ -414,8 +414,8 @@ pub struct HostCase {
     pub control: Vec<Control>,
 }
 
-fn definition(stacked: bool) -> Arc<Definition> {
-    Arc::new(Definition::new(if stacked { "s" } else { "w" }, 1, schema(stacked)).with_ports(["l"]))
+fn definition() -> Arc<Definition> {
+    Arc::new(Definition::new("w", 1, schema(false)).with_ports(["l"]))
 }
 
 /// The bounds the host promises, after anything: no run holds more items open than the schema
@@ -473,7 +473,7 @@ pub fn reach(case: &HostCase) -> (escapement_tickwave_decode::Stats, usize) {
     };
     let Ok(wire) = h.add(
         name("w"),
-        definition(false),
+        definition(),
         input,
         Box::new(factory),
         &[],
@@ -488,17 +488,17 @@ pub fn reach(case: &HostCase) -> (escapement_tickwave_decode::Stats, usize) {
         let factory = move |_: &Bound, local| {
             Box::new(Played::new(script.clone(), repeat, local)) as Box<dyn Decoder>
         };
-        let sub = match pieces {
-            true => Subscription::new(wire, Mode::Pieces)
+        let up = match pieces {
+            true => UpstreamDecl::new("in", Mode::Pieces)
                 .with_kinds(["a", "b"])
                 .with_sequences(["bits"]),
-            false => Subscription::new(wire, Mode::Completed).with_kinds(["a", "b"]),
+            false => UpstreamDecl::new("in", Mode::Completed).with_kinds(["a", "b"]),
         };
-        let input = InputSpec::Upstream(sub);
+        let def = Definition::new("s", 1, schema(true)).with_inputs([up]);
         if let Ok(s) = h.add(
             name("s"),
-            definition(true),
-            input,
+            Arc::new(def),
+            InputSpec::Upstream(wire),
             Box::new(factory),
             &[],
             vec![],

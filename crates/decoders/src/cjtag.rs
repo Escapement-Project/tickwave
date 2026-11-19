@@ -27,10 +27,10 @@ mod tap7;
 
 use crate::jtag::{self, Clocked, Inputs, Tap};
 use escapement_tickwave_decode::{
-    AnalysisId, Cause, Decoder, Definition, Delivery, Element, ElementType, Exchange, Factory,
-    FieldId, FieldType, Id, KindDecl, KindId, Label, Mode, Observation, Observed, Op, Out, Pause,
-    Reason, Request, Role, Schema, SeqId, Setting, SettingDecl, SettingId, Span, Status,
-    Subscription, Tick, Value, Window, field, name, seq,
+    Cause, Decoder, Definition, Delivery, Element, ElementType, Exchange, Factory, FieldId,
+    FieldType, Id, KindDecl, KindId, Label, Mode, Observation, Observed, Op, Out, Pause, Reason,
+    Request, Role, Schema, SeqId, Setting, SettingDecl, SettingId, Span, Status, Tick,
+    UpstreamDecl, Value, Window, field, name, seq,
 };
 use std::sync::Arc;
 use tap7::{
@@ -521,26 +521,24 @@ pub fn definition() -> Arc<Definition> {
 /// setting (`jtag::chain`), since a cJTAG adapter's chain is cut as a four-wire one is.
 pub fn jtag_definition() -> Arc<Definition> {
     Arc::new(
-        Definition::new("jtag", 1, jtag::schema()).with_settings(vec![SettingDecl::list(
-            "chain",
-            1..=jtag::IR_AT_MOST,
-            jtag::CHAIN_AT_MOST,
-            vec![],
-        )]),
+        Definition::new("jtag", 1, jtag::schema())
+            // The Standard Protocol's TMS bits, an escape's among them, and the Scan Packets, as
+            // pieces: a packet's TMS or nTDI element says where its clock was sampled.
+            .with_inputs([UpstreamDecl::new("clocks", Mode::Pieces)
+                .from(["cjtag"])
+                .with_kinds(["jscan", "escape", "packet"])
+                .with_sequences(["tms", "ntdi"])])
+            .with_settings(vec![SettingDecl::list(
+                "chain",
+                1..=jtag::IR_AT_MOST,
+                jtag::CHAIN_AT_MOST,
+                vec![],
+            )]),
     )
 }
 
 /// JTAG on cJTAG's chain setting: each TAP's IR length, the TAP nearest TDO first.
 pub const JTAG_CHAIN: SettingId = SettingId(0);
-
-/// What JTAG reads of cJTAG: the Standard Protocol's TMS bits, an escape's among them, and the Scan
-/// Packets, as pieces. A
-/// packet's TMS or nTDI element says where its clock was sampled.
-pub fn jtag_subscription(cjtag: AnalysisId) -> Subscription {
-    Subscription::new(cjtag, Mode::Pieces)
-        .with_kinds(["jscan", "escape", "packet"])
-        .with_sequences(["tms", "ntdi"])
-}
 
 // ---- The lines -------------------------------------------------------------------------------
 
@@ -1620,7 +1618,7 @@ fn wire_tick(e: &Element) -> Option<Tick> {
     }
 }
 
-/// JTAG reading cJTAG's output (`jtag_subscription`): a clock per Standard Protocol TMS bit and per
+/// JTAG reading cJTAG's output (`jtag_definition`'s input): a clock per Standard Protocol TMS bit and per
 /// Scan Packet that advances the TAP, each value naming the cJTAG element it came from. Lost input
 /// is a gap, declared again for JTAG's own subscribers.
 #[derive(Clone, Debug)]

@@ -6,8 +6,8 @@
 use escapement_tickwave_decode::{
     AnalysisId, Decoder, Definition, Delivery, Element, ElementType, Exchange, FieldId, FieldType,
     Host, HostOptions, Id, InputSpec, KindDecl, KindId, LinkDecl, LinkTo, Mode, Observation,
-    Observed, Op, Pause, Ref, Request, Schema, SeqId, Source, SourceError, Span, Status,
-    Subscription, Tick, Value, Window, field, name, seq,
+    Observed, Op, Pause, Ref, Request, Schema, SeqId, Source, SourceError, Span, Status, Tick,
+    UpstreamDecl, Value, Window, field, name, seq,
 };
 use std::{
     collections::VecDeque,
@@ -222,6 +222,11 @@ pub fn pairs_schema() -> Schema {
 
 pub fn definition(n: &'static str, schema: Schema) -> Arc<Definition> {
     Arc::new(Definition::new(n, 1, schema).with_ports(["line"]))
+}
+
+/// A definition that reads another analysis's output through `input`.
+pub fn stacked(n: &'static str, schema: Schema, input: UpstreamDecl) -> Arc<Definition> {
+    Arc::new(Definition::new(n, 1, schema).with_inputs([input]))
 }
 
 /// A line's edges and gaps, served in windows.
@@ -528,8 +533,12 @@ pub fn pulses_host_tail(
     let q = h
         .add(
             name("pairs"),
-            definition("pairs", pairs_schema()),
-            InputSpec::Upstream(Subscription::new(p, Mode::Completed).with_kinds(["pulse"])),
+            stacked(
+                "pairs",
+                pairs_schema(),
+                UpstreamDecl::new("in", Mode::Completed).with_kinds(["pulse"]),
+            ),
+            InputSpec::Upstream(p),
             Box::new(|_, _| Box::new(Pairs::default())),
             &[],
             all(),

@@ -1004,7 +1004,7 @@ fn jtag_dp_reads_the_daps_parts_of_a_chain_as_transfers_adiv5_reads() {
         .add(
             name("dp"),
             jtagdp::definition(),
-            InputSpec::Upstream(jtagdp::subscription(j)),
+            InputSpec::Upstream(j),
             jtagdp::JtagDp::factory(),
             &[],
             all(),
@@ -1014,7 +1014,7 @@ fn jtag_dp_reads_the_daps_parts_of_a_chain_as_transfers_adiv5_reads() {
         .add(
             name("adi"),
             adiv5::adi_definition(),
-            InputSpec::Upstream(adiv5::adi_subscription(dp)),
+            InputSpec::Upstream(dp),
             adiv5::Adi::factory(),
             &[adiv5::reads(true)],
             all(),

@@ -6,10 +6,11 @@ use common::*;
 use escapement_tickwave_decode::{
     AnalysisId, Batch, BindError, Bound, CONTRACT, Cause, CheckpointError, Contract, Decoder,
     Definition, Delivery, Element, ElementType, Exchange, FieldDecl, FieldId, FieldType, Host,
-    HostOptions, Id, InputSpec, Keeping, KindDecl, KindId, LinkDecl, LinkId, LinkTo, LogEntry,
-    Mismatch, Mode, Name, Need, Observation, Op, Pause, Reason, Ref, Refusal, Refused, Reply, Role,
-    RunView, Schema, SchemaError, Seek, SeqDecl, SeqId, Setting, SettingDecl, SettingId, Source,
-    SourceError, Span, Status, Subscription, Tick, Value, Window, WindowId, field, name, seq,
+    HostOptions, Id, InputDecl, InputSpec, Keeping, KindDecl, KindId, LinkDecl, LinkId, LinkTo,
+    LogEntry, Mismatch, Mode, Name, Need, Observation, Op, Pause, Reason, Ref, Refusal, Refused,
+    Reply, Role, RunView, Schema, SchemaError, Seek, SeqDecl, SeqId, Setting, SettingDecl,
+    SettingId, Source, SourceError, Span, Status, Tick, UpstreamDecl, Value, Window, WindowId,
+    field, name, seq,
 };
 use std::sync::{Arc, Mutex, atomic::Ordering::Relaxed};
 
@@ -95,7 +96,7 @@ fn a_decoder_for_a_contract_the_host_does_not_run_is_refused_when_added() {
 }
 
 #[test]
-fn a_schema_and_its_subscriptions_are_checked_when_added() {
+fn a_schema_and_its_inputs_are_checked_when_added() {
     let kind = |name_: &'static str, parents: Vec<Name>, fields, links| {
         KindDecl::new(name_)
             .with_parents(parents)
@@ -243,12 +244,14 @@ fn a_schema_and_its_subscriptions_are_checked_when_added() {
         |kinds: Vec<&'static str>, mode, sequences: Vec<&'static str>, n: &'static str| {
             h.add(
                 name(n),
-                definition("pairs", pairs_schema()),
-                InputSpec::Upstream(
-                    Subscription::new(p, mode)
+                stacked(
+                    "pairs",
+                    pairs_schema(),
+                    UpstreamDecl::new("in", mode)
                         .with_kinds(kinds)
                         .with_sequences(sequences),
                 ),
+                InputSpec::Upstream(p),
                 Box::new(|_, _| Box::new(Pairs::default())),
                 &[],
                 all(),
@@ -295,8 +298,12 @@ fn a_schema_and_its_subscriptions_are_checked_when_added() {
     let foreign = ids[9];
     let missing = h.add(
         name("y"),
-        definition("pairs", pairs_schema()),
-        InputSpec::Upstream(Subscription::new(foreign, Mode::Completed)),
+        stacked(
+            "pairs",
+            pairs_schema(),
+            UpstreamDecl::new("in", Mode::Completed),
+        ),
+        InputSpec::Upstream(foreign),
         Box::new(|_, _| Box::new(Pairs::default())),
         &[],
         all(),
@@ -811,8 +818,12 @@ fn toy_and_sink(options: HostOptions) -> (Host, AnalysisId, AnalysisId, Arc<Mute
     let sink = h
         .add(
             name("sink"),
-            definition("sink", toy_schema()),
-            InputSpec::Upstream(Subscription::new(a, Mode::Pieces).with_kinds(vec![name("frame")])),
+            stacked(
+                "sink",
+                toy_schema(),
+                UpstreamDecl::new("in", Mode::Pieces).with_kinds(["frame"]),
+            ),
+            InputSpec::Upstream(a),
             Box::new(move |_, _| Box::new(Record(g.clone()))),
             &[],
             all(),
@@ -939,8 +950,12 @@ fn lost_input_is_checked_joined_and_delivered_at_its_place() {
     let sink = h
         .add(
             name("sink"),
-            definition("sink", toy_schema()),
-            InputSpec::Upstream(Subscription::new(a, Mode::Pieces).with_kinds(vec![name("frame")])),
+            stacked(
+                "sink",
+                toy_schema(),
+                UpstreamDecl::new("in", Mode::Pieces).with_kinds(["frame"]),
+            ),
+            InputSpec::Upstream(a),
             Box::new(|_, _| Box::new(script(vec![]))),
             &[],
             all(),
@@ -1065,10 +1080,12 @@ fn a_stacked_analysis_receives_each_loss_in_its_place_and_must_declare_it() {
     let q = h
         .add(
             name("pairs"),
-            definition("pairs", pairs_schema()),
-            InputSpec::Upstream(
-                Subscription::new(p, Mode::Completed).with_kinds(vec![name("pulse")]),
+            stacked(
+                "pairs",
+                pairs_schema(),
+                UpstreamDecl::new("in", Mode::Completed).with_kinds(["pulse"]),
             ),
+            InputSpec::Upstream(p),
             Box::new(|_, _| Box::new(Swallow)),
             &[],
             all(),
@@ -1091,12 +1108,14 @@ fn completed_items_and_pieces_reach_stacked_analyses_as_subscribed() {
     let subscribe = |h: &mut Host, n: &'static str, sequences: Vec<&'static str>| {
         h.add(
             name(n),
-            definition(n, toy_schema()),
-            InputSpec::Upstream(
-                Subscription::new(p, Mode::Pieces)
-                    .with_kinds(vec![name("pulse")])
+            stacked(
+                n,
+                toy_schema(),
+                UpstreamDecl::new("in", Mode::Pieces)
+                    .with_kinds(["pulse"])
                     .with_sequences(sequences),
             ),
+            InputSpec::Upstream(p),
             Box::new(|_, _| Box::new(Swallow)),
             &[],
             all(),
@@ -1971,8 +1990,12 @@ fn a_decoder_that_leaves_its_deliveries_waits_for_new_input_instead_of_spinning(
     let count = turns.clone();
     h.add(
         name("idle"),
-        definition("idle", toy_schema()),
-        InputSpec::Upstream(Subscription::new(p, Mode::Completed).with_kinds(vec![name("pulse")])),
+        stacked(
+            "idle",
+            toy_schema(),
+            UpstreamDecl::new("in", Mode::Completed).with_kinds(["pulse"]),
+        ),
+        InputSpec::Upstream(p),
         Box::new(move |_, _| Box::new(Idle(count.clone()))),
         &[],
         all(),
@@ -2236,6 +2259,87 @@ fn a_definition_whose_settings_or_ports_clash_is_refused() {
         bound(twice, vec![true, true], &[]),
         schema(SchemaError::DuplicatePort(name("clock")))
     );
+    let inputs = |inputs: Vec<InputDecl>| {
+        let def = Definition::new("set", 1, pulses_schema()).with_ports(["clock", "data"]);
+        bound(Arc::new(def.with_inputs(inputs)), vec![true, true], &[])
+    };
+    let up = |port| InputDecl::Upstream(UpstreamDecl::new(port, Mode::Completed));
+    assert_eq!(inputs(vec![]), schema(SchemaError::NoInputs));
+    assert_eq!(
+        inputs(vec![InputDecl::Wire, InputDecl::Wire]),
+        schema(SchemaError::WireTwice)
+    );
+    assert_eq!(
+        inputs(vec![InputDecl::Wire, up("in"), up("in")]),
+        schema(SchemaError::DuplicateInput(name("in")))
+    );
+    assert_eq!(inputs(vec![up("")]), schema(SchemaError::BadName));
+}
+
+#[test]
+fn an_upstream_binds_to_the_input_naming_its_definition_and_the_decoder_is_told_which() {
+    let (mut h, [p, _]) = pulses_host(line(1, 2, 10, vec![]), 100, None, HostOptions::default());
+    let picked = Arc::new(Mutex::new(vec![]));
+    let mut add = |n: &'static str, inputs: Vec<InputDecl>| {
+        let def = Definition::new("pairs", 1, pairs_schema()).with_inputs(inputs);
+        let got = picked.clone();
+        let factory: escapement_tickwave_decode::Factory = Box::new(move |b: &Bound, _| {
+            got.lock().unwrap().push(b.input());
+            Box::new(Swallow)
+        });
+        h.add(
+            name(n),
+            Arc::new(def),
+            InputSpec::Upstream(p),
+            factory,
+            &[],
+            all(),
+        )
+    };
+    let named = |port: &'static str, from: &'static str| {
+        InputDecl::Upstream(
+            UpstreamDecl::new(port, Mode::Completed)
+                .from([from])
+                .with_kinds(["pulse"]),
+        )
+    };
+    let any =
+        || InputDecl::Upstream(UpstreamDecl::new("any", Mode::Completed).with_kinds(["pulse"]));
+    // The input naming "pulses" wins over one taking any, wherever each sits.
+    add(
+        "a",
+        vec![
+            InputDecl::Wire,
+            any(),
+            named("other", "jtag"),
+            named("in", "pulses"),
+        ],
+    )
+    .unwrap();
+    // With none naming it, the first taking any.
+    add("b", vec![named("other", "jtag"), any()]).unwrap();
+    assert_eq!(*picked.lock().unwrap(), vec![3, 1]);
+    assert_eq!(
+        add("c", vec![InputDecl::Wire, named("other", "jtag")]).unwrap_err(),
+        BindError::NotAnInput {
+            upstream: name("pulses"),
+            definition: name("pulses")
+        }
+    );
+    // A wire binding of a decoder that only stacks.
+    let stacked_only = Definition::new("pairs", 1, pairs_schema()).with_inputs([any()]);
+    let wire = h.add(
+        name("d"),
+        Arc::new(stacked_only),
+        InputSpec::Wire {
+            source: Box::new(Nothing::default()),
+            local: None,
+        },
+        Box::new(|_, _| Box::new(Swallow)),
+        &[],
+        all(),
+    );
+    assert_eq!(wire.unwrap_err(), BindError::NoWireInput);
 }
 
 #[test]

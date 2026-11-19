@@ -7,7 +7,7 @@ pub mod rows;
 
 use escapement_tickwave_decode::{
     AnalysisId, Decoder, Definition, Delivery, Exchange, Host, InputSpec, KindId, Mode, Op, Pause,
-    Schema, Status, Subscription, Tick, Value, name,
+    Schema, Status, Tick, UpstreamDecl, Value, name,
 };
 use escapement_tickwave_decoders::jtag;
 use escapement_tickwave_view::Recording;
@@ -166,15 +166,14 @@ pub fn stack(
     let s = seen.clone();
     h.add(
         name("check"),
-        Arc::new(Definition::new("check", 1, Schema::new(vec![]))),
-        InputSpec::Upstream(Subscription::new(j, Mode::Completed).with_kinds([
-            "state",
-            "path",
-            "ir-scan",
-            "dr-scan",
-            "instruction",
-            "data",
-        ])),
+        Arc::new(
+            Definition::new("check", 1, Schema::new(vec![])).with_inputs([UpstreamDecl::new(
+                "items",
+                Mode::Completed,
+            )
+            .with_kinds(["state", "path", "ir-scan", "dr-scan", "instruction", "data"])]),
+        ),
+        InputSpec::Upstream(j),
         Box::new(move |_, _| Box::new(Checker(s.clone()))),
         &[],
         vec![],
@@ -193,12 +192,15 @@ pub fn watch_switch(
     let s = seen.clone();
     h.add(
         name("zero-bit"),
-        Arc::new(Definition::new("zero-bit", 1, Schema::new(vec![]))),
-        InputSpec::Upstream(
-            Subscription::new(j, Mode::Pieces)
-                .with_kinds(["path"])
-                .with_sequences(["via"]),
+        Arc::new(
+            Definition::new("zero-bit", 1, Schema::new(vec![])).with_inputs([UpstreamDecl::new(
+                "paths",
+                Mode::Pieces,
+            )
+            .with_kinds(["path"])
+            .with_sequences(["via"])]),
         ),
+        InputSpec::Upstream(j),
         Box::new(move |_, _| {
             Box::new(ZeroBits {
                 seen: s.clone(),
@@ -574,7 +576,7 @@ pub fn report(
 /// Completed items counted by a key made of each, and the statuses they closed with.
 pub type Keyed = Arc<Mutex<BTreeMap<String, u64>>>;
 
-/// Counts each completed item of a subscription under the key `key` makes of it.
+/// Counts each completed item of its input under the key `key` makes of it.
 pub struct Tally {
     pub counts: Keyed,
     pub key: fn(&escapement_tickwave_decode::Completed) -> String,
@@ -618,8 +620,14 @@ pub fn tally(
     let c = counts.clone();
     h.add(
         name(label),
-        Arc::new(Definition::new(label, 1, Schema::new(vec![]))),
-        InputSpec::Upstream(Subscription::new(a, Mode::Completed).with_kinds(kinds.to_vec())),
+        Arc::new(
+            Definition::new(label, 1, Schema::new(vec![])).with_inputs([UpstreamDecl::new(
+                "items",
+                Mode::Completed,
+            )
+            .with_kinds(kinds.to_vec())]),
+        ),
+        InputSpec::Upstream(a),
         Box::new(move |_, _| {
             Box::new(Tally {
                 counts: c.clone(),
@@ -665,7 +673,7 @@ pub fn stack_dp(
     let dp = h.add(
         name("jtag-dp"),
         jtagdp::definition(),
-        InputSpec::Upstream(jtagdp::subscription(j)),
+        InputSpec::Upstream(j),
         jtagdp::JtagDp::factory(),
         &[("tap", Setting::Int(tap))],
         vec![],
@@ -673,7 +681,7 @@ pub fn stack_dp(
     let adi = h.add(
         name("adiv5"),
         adiv5::adi_definition(),
-        InputSpec::Upstream(adiv5::adi_subscription(dp)),
+        InputSpec::Upstream(dp),
         adiv5::Adi::factory(),
         &[adiv5::reads(true)],
         vec![],

@@ -174,40 +174,7 @@ pub enum Mode {
     Completed,
 }
 
-/// A stacked analysis's input: kinds of an upstream analysis, by name, delivered in one mode. A
-/// pieces subscription names the sequences it reads; others are not delivered.
-#[derive(Clone, Debug)]
-#[non_exhaustive]
-pub struct Subscription {
-    pub upstream: AnalysisId,
-    pub kinds: Vec<Name>,
-    pub mode: Mode,
-    pub sequences: Vec<Name>,
-}
-
-impl Subscription {
-    /// No kinds and no sequences yet.
-    pub fn new(upstream: AnalysisId, mode: Mode) -> Self {
-        Self {
-            upstream,
-            kinds: vec![],
-            mode,
-            sequences: vec![],
-        }
-    }
-
-    pub fn with_kinds<N: Into<Name>>(mut self, kinds: impl IntoIterator<Item = N>) -> Self {
-        self.kinds = kinds.into_iter().map(Into::into).collect();
-        self
-    }
-
-    pub fn with_sequences<N: Into<Name>>(mut self, sequences: impl IntoIterator<Item = N>) -> Self {
-        self.sequences = sequences.into_iter().map(Into::into).collect();
-        self
-    }
-}
-
-/// A subscription's names resolved against its upstream's schema.
+/// An upstream input's names resolved against its upstream's schema.
 #[derive(Clone, Debug)]
 struct Resolution {
     kinds: Vec<KindId>,
@@ -225,7 +192,7 @@ impl Resolution {
     }
 }
 
-/// An item as a completed subscription receives it.
+/// An item as a completed input receives it.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Completed {
@@ -545,6 +512,7 @@ pub type Factory = Box<dyn Fn(&Bound, Option<Tick>) -> Box<dyn Decoder> + Send +
 pub struct Bound {
     settings: Vec<Held>,
     ports: Vec<bool>,
+    input: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -561,6 +529,7 @@ impl Bound {
         def: &Definition,
         given: &[(&str, Setting)],
         ports: Vec<bool>,
+        input: usize,
     ) -> Result<Self, BindError> {
         for (k, (n, _)) in given.iter().enumerate() {
             if !def.settings.iter().any(|d| d.name == *n) {
@@ -596,7 +565,16 @@ impl Bound {
             };
             settings.push(held.ok_or_else(|| BindError::SettingValue(d.name.clone()))?);
         }
-        Ok(Self { settings, ports })
+        Ok(Self {
+            settings,
+            ports,
+            input,
+        })
+    }
+
+    /// The input the binding picked, by its index in the definition's inputs.
+    pub fn input(&self) -> usize {
+        self.input
     }
 
     pub fn flag(&self, s: SettingId) -> Option<bool> {
@@ -951,12 +929,16 @@ pub enum BindError {
     TooManyPorts,
     #[error("no analysis {0:?} to stack on")]
     NoAnalysis(AnalysisId),
+    #[error("it takes no wire input")]
+    NoWireInput,
+    #[error("no input takes {upstream}, an analysis of {definition}")]
+    NotAnInput { upstream: Name, definition: Name },
     #[error("{upstream} has no kind {kind}")]
     UnknownKind { upstream: Name, kind: Name },
     #[error("no subscribed kind has a sequence {0}")]
     UnknownSequence(Name),
-    /// A completed subscription cannot carry sequences: they have no bound.
-    #[error("a completed subscription cannot carry sequence {0}")]
+    /// A completed input cannot carry sequences: they have no bound.
+    #[error("a completed input cannot carry sequence {0}")]
     SequenceInCompleted(Name),
     #[error("the decoder declares no setting {0}")]
     UnknownSetting(Name),
@@ -1008,7 +990,9 @@ pub enum InputSpec {
         source: Box<dyn Source>,
         local: Option<Tick>,
     },
-    Upstream(Subscription),
+    /// Another analysis's output, read through the definition's input that takes it
+    /// (`Definition::upstream_input`).
+    Upstream(AnalysisId),
 }
 
 enum Input {
@@ -1358,8 +1342,9 @@ impl Host {
         }
         let index = self.analyses.len();
         let analysis = u16::try_from(index).map_err(|_| BindError::TooManyAnalyses)?;
-        let (input, local, bound, resolved, binding, ports) = match input {
+        let (input, local, bound, resolved, binding, ports, picked) = match input {
             InputSpec::Wire { source, local } => {
+                let picked = def.wire_input().ok_or(BindError::NoWireInput)?;
                 let r = def
                     .schema
                     .resolve(None, self.options.open_at_most)
@@ -1376,11 +1361,17 @@ impl Host {
                     return Err(BindError::Unbound(p.name.clone()));
                 }
                 let binding = source.binding();
-                (Input::Wire(source), local, None, r, binding, ports)
+                (Input::Wire(source), local, None, r, binding, ports, picked)
             }
-            InputSpec::Upstream(sub) => {
-                let up = sub.upstream.index();
-                let ua = (self.analyses.get(up)).ok_or(BindError::NoAnalysis(sub.upstream))?;
+            InputSpec::Upstream(upstream) => {
+                let up = upstream.index();
+                let ua = (self.analyses.get(up)).ok_or(BindError::NoAnalysis(upstream))?;
+                let (picked, sub) =
+                    def.upstream_input(&ua.def.name)
+                        .ok_or_else(|| BindError::NotAnInput {
+                            upstream: ua.name.clone(),
+                            definition: ua.def.name.clone(),
+                        })?;
                 let us = &ua.def.schema;
                 let r = def
                     .schema
@@ -1424,10 +1415,11 @@ impl Host {
                     r,
                     binding,
                     vec![],
+                    picked,
                 )
             }
         };
-        let with = Bound::new(&def, settings, ports)?;
+        let with = Bound::new(&def, settings, ports, picked)?;
         let id = RunId {
             analysis: AnalysisId(analysis),
             generation: self.fresh(),

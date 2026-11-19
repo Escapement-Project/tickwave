@@ -57,7 +57,7 @@ fn host_adi(
         .add(
             name("adi"),
             adiv5::adi_definition(),
-            InputSpec::Upstream(adiv5::adi_subscription(s)),
+            InputSpec::Upstream(s),
             adiv5::Adi::factory(),
             adi,
             all(),
@@ -67,7 +67,7 @@ fn host_adi(
         .add(
             name("mem"),
             adiv5::mem_definition(),
-            InputSpec::Upstream(adiv5::mem_subscription(a)),
+            InputSpec::Upstream(a),
             adiv5::Mem::factory(),
             &[],
             all(),
