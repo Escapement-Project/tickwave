@@ -101,12 +101,19 @@ still being written (see Reading in order, and Repairing a cut-off file).
 | 8 | u16 | major version, 1 |
 | 10 | u16 | minor version, 0 |
 
-A minor version adds header fields that older readers ignore, and record kinds from 128 up, which
-they skip. It adds only what an older reader can leave out and still read everything else as the
-writer meant: a field whose absence changes nothing else's meaning, a record nothing else depends
-on. A change to how existing data reads goes behind a feature name in `requires` (see Header), which
-a reader that doesn't know the name refuses, for the recording or for one channel. Any other change
-is a major version: it changes the layout, and a reader refuses a major version it does not know.
+A minor version adds header fields that older readers ignore, and optional records (see Records),
+which they skip. It adds only what an older reader can leave out and still read everything else as
+the writer meant: a field whose absence changes nothing else's meaning, a record nothing else
+depends on. What it adds is never content: a reader of an earlier minor version computes the content
+id without it (see Content id). A change to how existing data reads goes behind a feature name in
+`requires` (see Header), which a reader that doesn't know the name refuses, for the recording or for
+one channel. Any other change is a major version: it changes the layout, and a reader refuses a
+major version it does not know.
+
+A tool that writes a recording again from one it reads, as re-cutting, repair, merging and bundling
+do, writes only what its own version defines. So it refuses an input of a later minor version than
+its own, and one holding an optional record of a kind it doesn't know: it would leave out what that
+version adds while the content id stayed the same. It drops every auxiliary record.
 
 ### Records
 
@@ -136,9 +143,21 @@ The declaration is the first record, and only the first. The footer is the last,
 follows it. The rules below say where the others go.
 
 Kind 0 is never a record, so a tail of zeros, which a power cut can leave, stops a reader. A reader
-refuses a record of a kind it does not know from 1 to 127, kind 9 included, and skips one from 128
-to 255 anywhere after the declaration. A file whose first record is not the declaration is refused,
-whatever that record's kind.
+refuses a record of a kind it does not know from 1 to 127, kind 9 included. Kinds from 128 up are
+for later versions, and a reader skips one it doesn't know:
+
+- **128 to 191, optional records:** what a later minor version adds. A tool that writes the
+  recording again refuses one it doesn't know (see Preamble).
+- **192 to 255, auxiliary records:** only what can be computed again from the rest of the file,
+  such as a cache or an index. An auxiliary record is not content: no content id covers it, and a
+  full check doesn't check it. A reader that knows its kind and finds it doesn't fit the file
+  ignores it rather than refusing the file. A tool that writes the recording again drops it. A
+  writer may add one without raising the minor version. The header's `auxiliary` says where a
+  later version's auxiliary records are, for a reader with random access.
+
+A record from 128 up goes after the declaration and before the annotation bundle, or before the
+footer in a file without one. A file whose first record is not the declaration is refused, whatever
+that record's kind.
 
 ### Trailer
 
@@ -168,13 +187,17 @@ gaps, an analog channel's `first`, `count`, breaks and losses, and every channel
 `overview_blocks`. A writer that does not know a level at the channel's start (see Header) declares
 it false and starts the channel with a gap from its start.
 
-The footer's header holds the same values. It may add keys to a source's `extra`, for what the
-source states only at its end, such as a probe's totals.
+The footer's header holds the same values for every field this version defines. It may add keys to
+a source's `extra`, for what the source states only at its end, such as a probe's totals. A
+declaration doesn't state `auxiliary`. A reader reads a declaration that states `length`,
+`content_id`, `annotation_parts` or what only the end settles as if it didn't.
 
 ## Header
 
 The footer's header is UTF-8 JSON. Every integer in it is below 2^53, so a JavaScript reader
-parses it exactly.
+parses it exactly. No object in it names a key twice, at any depth, `meta` and `extra` included,
+since a parser that keeps the last would read another value than one that keeps the first. The
+same holds for the declaration. A reader refuses either where an object does.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
@@ -185,10 +208,11 @@ parses it exactly.
 | `sources` | array | where the channels came from, one entry a source (see Sources) |
 | `title` | string, optional | |
 | `meta` | object of strings, optional | free keys, such as `probe` or `firmware` |
-| `content_id` | string | `blake3:` and the 64 hex digits of the content's digest (below) |
+| `content_id` | string | `blake3:` and the 64 lower-case hex digits of the content's digest (below) |
 | `overview_shift` | integer | the finest overview level's shift of a channel that states none (see Overview) |
 | `requires` | array of strings, optional | features a reader must understand to read the recording at all |
 | `annotation_parts` | integer, optional | the number of annotation parts, at least 1, absent where there are none (see Annotations) |
+| `auxiliary` | object, optional | where a later version's auxiliary records are (see Records); this version defines no key in it |
 
 A channel entry has `name`, `source_name` (the source's own name for it), `source` (its source's
 index in `sources`) and `kind`, and `offset`, `offset_kind` and `kept` where it states them (see
@@ -196,7 +220,7 @@ Moved and trimmed channels). It can state `overview_shift`, its finest overview 
 has `blocks`, the number of its blocks, and `overview_blocks` where any of its overview levels go
 in overview blocks: one `{"shift": s, "blocks": b, "rows": r}` a level, finest first, with `b` the
 level's overview blocks and `r` its index rows (see Overview and Index). An analog channel can
-state `significant`, an integer of at least 1: its readings carry at most that many significant
+state `significant`, an integer from 1 to 17: its readings carry at most that many significant
 figures, as an instrument whose step changes with its range does.
 
 `requires` names features a later version adds that change how data reads. This version defines
@@ -217,13 +241,24 @@ reader that doesn't know it still parses the entry.
   one channel before another), `edges` (the count), and its gaps where the level was not known for
   a while (see Gaps, below). A channel's start is its kept span's `from` (see Moved and trimmed
   channels). In a recording that states no kept span it is the source tick at the axis's tick 0,
-  `−origin`. An `end` at the channel's start says the level is never known. Such a channel has no
-  edges and no gaps, and its `initial` is its declaration's, which says nothing of the level.
+  `−origin`. An `end` at the channel's start says the level is never known. Such a channel states
+  0 edges and no gaps, and its `initial` is its declaration's, which says nothing of the level. A
+  reader refuses one that states others before it reads a block.
 - `"analog"`: `unit` (empty when the source states none), `first` (the tick its first run starts
   at, 0 when there is no sample), `phase` (`[num, den]`, with `num` from 1 to `den − 1`, absent
   when 0),
   `period` (source ticks from one sample to the next, `[num, den]`), `count`, its breaks where the
   samples stopped for a while and its losses at either end (see Gaps), and `coding` (see Codings).
+
+A channel's `kind` can be one a later version defines. A reader shows a channel of a kind it doesn't
+know as unavailable, as it does one whose `requires` it doesn't know. Such an entry has `name`,
+`source_name`, `source`, `kind`, `blocks` and `overview_blocks`, as every channel's does, and the
+`overview_shift` and `requires` its version gives it. A reader reads only those, and checks them,
+its source and its levels; it never parses the entry's other keys, whatever their type. Its tables
+in the top index are its blocks and its overview levels, in that order. Its block records keep the
+head Blocks gives, and a reader places them without decoding them. It has no gap or run record, and
+a reader refuses one that names it. Any other record or table of the channel is of a kind from 128
+up.
 
 An analog channel's samples come in runs, `period` apart, each run starting a fraction of a tick,
 its phase, after a whole tick. A channel without breaks has one run, and its sample `i` sits at
@@ -270,7 +305,8 @@ An entry has:
 
 - `format`: `saleae-binary-0`, `saleae-binary-1`, `sigrok-sr` or `vcd` for a capture tickwave
   converts, or the name a recorder gives its own stream. A reader keeps a name it doesn't know.
-- `files`: names, no directories. A recorder's own stream reads no file, and lists none.
+- `files`: an array of names, no directories. A recorder's own stream reads no file, and lists
+  none: `[]`.
 - `timebase`: the source's tick rate, `[num, den]`. It can be any exact ratio: a recorder that
   measured its clock against a reference states the rate it measured. One of its ticks lasts `m`
   axis ticks (see Times).
@@ -293,7 +329,8 @@ An entry has:
   from a merge already keeps those of its own recording.
 - Optionally `instrument`, `software`, `begin_s` (the source's own time at its tick 0, in seconds),
   `trigger_s` (the trigger's time in the same seconds), `rate`, `extra` (anything else the source
-  states) and `converter`. `rate` is there when the source doesn't record its sample rate:
+  states) and `converter`. `begin_s` and `trigger_s` are numbers, `extra` an object of strings, and
+  the others strings. `rate` is there when the source doesn't record its sample rate:
   `inferred` when the converter took the lowest rate on whose grid every edge sits, `given` when
   the rate was given to it.
 
@@ -320,8 +357,9 @@ An analog channel's `coding` says how its samples are stored:
   rounded once, so every reader gets the same float. Without an offset, and with `code × num` below
   2^53, that float is the one nearest the value. In JavaScript, `(code * num) / den + onum / oden`.
   A coding without an `offset` adds nothing.
-- `{"type": "codes", "bits": b, "scale": s, "offset": o}`, with `b` in `1..=16`: a smaller store for
-  an f32 source. A sample's value is `code × s` in f64, then `o +` that in f64, then rounded to f32:
+- `{"type": "codes", "bits": b, "scale": s, "offset": o}`, with `b` in `1..=16` and `s` and `o`
+  JSON numbers, each read as the f64 nearest it: a smaller store for an f32 source. A sample's
+  value is `code × s` in f64, then `o +` that in f64, then rounded to f32:
   two separately rounded f64 operations, never a fused multiply-add, which can round to a different
   f32. In JavaScript, `Math.fround(o + code * s)`. A converter picks this coding only after
   checking that every sample reproduces its source value bit for bit.
@@ -334,7 +372,8 @@ stated, whichever is coarser.
 
 A derived channel is computed from two analog channels, so a reader draws it without the recording
 storing its samples. `derived` holds one entry each: `{"name": n, "unit": u, "op": o, "operands":
-[a, b]}`, where `a` and `b` name analog channels, in order, and `o` is the operation. No two
+[a, b]}`, where `a` and `b` name analog channels, in order, and may name one twice, and `o` is the
+operation. `unit` is empty where the entry states none. No two
 channels or derived channels share a name, and a reader refuses a header where any do. Its operands
 come from one source, and share `first`, `phase`, `period`, `count`, `breaks`, their losses at
 either end and their move, the channel's `offset` (0 where a channel states none), so its sample i
@@ -349,7 +388,8 @@ This version defines two operations:
   codings state no `offset`, their `bits` sum to at most 64, and the magnitudes of their scales'
   numerators multiply to below 2^53 and so do their denominators, sample i is
   the integer product of their codes, signed if either is, with `scale` the product of their
-  scales, exactly. Otherwise it is `f64(a_i) × f64(b_i)`, rounded once.
+  scales, exactly: their numerators' product over their denominators' product, not reduced, which
+  its f64 follows. Otherwise it is `f64(a_i) × f64(b_i)`, rounded once.
 - `"subtract"`, `a_i − b_i`, of their values, as a differential probe's two inputs give one signal.
   For two `int` channels, let `s` be the greatest common divisor of their scales' magnitudes, as
   ratios: `gcd(|p| × v, |u| × q) / (q × v)` for scales `p/q` and `u/v` in lowest terms, itself in
@@ -485,8 +525,8 @@ rationals: with a stretch or a grid finer than a tick, its sums pass 128 bits.
 A list of at most 64 entries is in the header: a digital channel's `gaps` and an analog channel's
 `breaks`, each an array of the entries above. A longer list is in list pages (see Index), and the
 header states its length instead, as `gap_count` or `break_count`. A channel with no gap or break
-states neither. A reader refuses a list in the header of more than 64 entries, and a `gap_count` or
-`break_count` of 64 or fewer.
+states neither, or states an empty list. A reader refuses a list in the header of more than 64
+entries, and a `gap_count` or `break_count` of 64 or fewer.
 
 ## Blocks
 
@@ -605,11 +645,12 @@ Gaps says a run may not, and one whose `index` is below the samples the channel'
 before it hold.
 
 The header's gaps and breaks are these records, in the order they came, but for the ones left out.
-A gap whose `to` is not below its channel's `end` is left out of the header, and the channel's
-`end` becomes the gap's `from` if that comes sooner. Its `to` may lie anywhere past the `end`, the
-length's tick or past it included: a recorder that stops inside a loss reports the loss up to
-where it stopped. A gap from the channel's start then leaves its `end` at its start: the level is
-never known. A run whose `index` is not below its channel's `count` is left out too.
+A gap whose `to` maps at or past the length is left out of the header, and the channel's `end`
+becomes the gap's `from` if that comes sooner: a recorder that stops inside a loss reports the loss
+up to where it stopped. A gap from the channel's start then leaves its `end` at its start: the
+level is never known. Every other gap is listed, and ends before its channel's `end`: a reader
+refuses a gap record whose `to` is at or past its channel's `end` and maps before the length. A run
+whose `index` is not below its channel's `count` is left out too.
 
 So a writer can't know that a channel's last gap or run is listed until another comes, the gap's
 block closes or the run's first sample comes, or it finishes. One that hashes the lists as they
@@ -732,18 +773,24 @@ generator's name in UTF-8, as a generator file's first line gives it, and `a` is
 file ([ANNOTATIONS.md](ANNOTATIONS.md)): a UTF-8 JSON object, ending with a newline and holding no
 other. Its times are axis ticks in `0..2^53`. A reader refuses a record whose `s` is not a name
 ANNOTATIONS.md allows a generator, since the source's file is named after it, and one whose `a`
-holds a newline before its end or is not a JSON object. tickwave's writer refuses, at the call, an
-annotation whose fields, ticks or channels break ANNOTATIONS.md's rules for a line, and writes the
-rest as compact JSON. Its length aside, which the writer learns only when it finishes, each
-annotation it takes resolves. Another writer may write a line that breaks those rules. A re-cutter
-leaves such a line out wherever it lies, and repair among the records it writes again after its cut;
-each names what it leaves out. A record before repair's cut stays where it is, since the part after
-it covers it. Annotations keep no order with the channels' items.
+holds a newline before its end, is not a JSON object, or states a key twice. It refuses, too, a
+record that the row of the part covering it couldn't state: one whose line has no `start`, a time
+that doesn't convert to a whole tick in `0..2^53`, or an `end` before its `start`. tickwave's writer
+refuses, at the call, an annotation whose fields, ticks or channels break ANNOTATIONS.md's rules for
+a line, and writes the rest as compact JSON. Its length aside, which the writer learns only when it
+finishes, each annotation it takes resolves. Another writer may write a line that breaks
+ANNOTATIONS.md's other rules. A re-cutter, repair and a merge leave out a line that breaks a rule on
+a key they know, naming it: a re-cutter wherever it lies, repair among the records it writes again
+after its cut. A key they don't know they carry, and name, since a later minor version of
+ANNOTATIONS.md may define it: a record's line comes before its generator's first line, which states
+that version and arrives with the bundle. A record before repair's cut stays where it is, since the
+part after it covers it. Annotations keep no order with the channels' items.
 
 Annotation records let a live recorder keep what it generates as safely as its data. The footer
 does not index them. A file that holds them ends with them bundled, in annotation parts and an
 annotation bundle record, so a live recording stays one file, and a reader with random access reads
-them from there.
+them from there. A reader in order refuses a footer that comes after an annotation record no part
+covers, since a reader with random access would never see it.
 
 An annotation part holds a run of one generator's lines. Its record's payload is a u32, the decoded
 length, then one zstd frame that decodes to a u16, the length of `s`, then `s`, the generator's
@@ -754,23 +801,24 @@ between, the part holds lines of its own. A re-cutter and `tickwave bundle` writ
 annotations that way, as parts and no annotation records, since a finished file needs none. A reader
 in order checks each part that covers records against them. A reader refuses a part with no line,
 and one with a line that has no `start` or a time that doesn't convert to ticks, since its row
-couldn't state the span. Repair and re-cutting take a
+couldn't state the span, or that states a key twice. Repair and re-cutting take a
 generator's annotations from its parts and from its records after its last part, never from a record
 a part covers, so no annotation comes out twice. The annotation parts table (see Index) gives each
 part's place and the span its annotations cover, so a reader fetches only the parts a view reaches,
 and a long recording's annotations load as its data does.
 
 A writer writes a generator's part once the lines since its last part reach a size it picks, after
-the record whose line takes them there. At the finish it writes each generator's rest as a part,
-the generators in the order of their first annotations. A re-cutter writes parts that stand alone
-the same way, as it reads the lines, and carries its input's bundle. A writer that bundles a
-sidecar's files given whole, as `tickwave bundle` does, splits each generator file's lines into
-parts in the file's order, and writes them at its finish, the generators in the order the
-hand-written file includes their files.
+the record whose line takes them there. At the finish it writes each generator's rest as a part, the
+generators in the order of their first annotations. A re-cutter writes parts that stand alone the
+same way, as it reads the lines, and carries its input's bundle. A writer that bundles a sidecar's
+files given whole, as `tickwave bundle` does, refuses a generator file the hand-written file doesn't
+include, splits each generator file's lines into parts in the file's order, and writes them at its
+finish, the generators in the order the hand-written file includes their files.
 
 The annotation bundle record holds the sidecar's files without the parts' lines. Its payload is a
 u32, the decoded length, then one zstd frame of UTF-8 JSON: an object of strings, each file's name
-and text, where a generator file's text is its first line alone, with its newline. The whole
+and text, where a generator file's text is its first line alone, with its newline, and that line
+states no key twice. A reader refuses a bundle whose generator file is anything else. The whole
 generator file is that line, then the lines of every part whose generator is its own, in the order
 of the parts' rows. A live recording's hand-written file holds no annotation of its own, includes
 the generator files in the order of their generators' first annotations, and may hold a `[view]`
@@ -807,6 +855,10 @@ holds one page a level at a time.
 | a digital channel's gaps, past 64 | gaps | `gap_count` |
 | an analog channel's breaks, past 64 | breaks | `break_count` |
 | the recording's annotation parts | part rows | `annotation_parts` |
+
+The top index lists only these tables. A table a later version adds keeps its pages in records of
+kinds from 128 up, and states where its top pages lie in a header field of that version. A reader in
+order refuses an index page or list page that no table's entries give.
 
 A block row, 28 bytes:
 
@@ -983,6 +1035,12 @@ data alone gives.
 `significant`, `overview_shift`, `codec`, `requires`, and a source's fields other than the four
 flag 4 adds are not part of the content: they describe it, say how a file stores it, or follow from
 it. A source's `timebase` follows from its `m`, its `stretch` and the recording's `timebase`.
+Neither are `auxiliary`, auxiliary records, nor anything a later minor version adds: a reader of an
+earlier minor version computes the id without them, and a full check and re-cutting compare that id
+with the header's. A later version that makes something content puts it behind `requires`.
+
+The header writes the id as `blake3:` and 64 lower-case hex digits, one spelling, as a sidecar
+compares it as text. A reader refuses any other.
 
 ## Limits
 
@@ -1000,8 +1058,9 @@ any of them, as an error it reports, before it fetches or allocates for the part
 - A record of a kind this version defines is no longer than its kind holds. A gap record's payload
   is 21 bytes, a run record's 32 and a known-through record's 8, exactly. A block, overview block,
   annotation part or bundle record holds its fields and a frame within the bound below. A page is
-  what its count gives. The declaration is at most 64 MiB, as the header is. A reader refuses a
-  record whose `n` passes that before it reads the payload. A record of a kind from 128 up can be
+  what its count gives. The declaration is at most 64 MiB, as the header is. A reader stops at a
+  record whose `n` passes that before it reads the payload, as at one whose check doesn't match
+  (see In order): what follows a crash can be any bytes. A record of a kind from 128 up can be
   any length: a reader that skips one hashes it as it reads, without holding it.
 - The footer record is at most 256 MiB, its header at most 64 MiB of it. A recording within the
   other limits needs less: its top index and strips come to under 48 KiB a channel.
@@ -1039,7 +1098,10 @@ A writer:
   block with other bytes settles, or at the finish.
 - Writes each table's pages as they fill (see Index).
 - At the end, closes every channel's last block at the length, then writes a known-through record
-  at the length if it has written any (so a file cut off inside its end repairs to itself), each
+  at the length if it has written any (so a file cut off inside its end repairs to itself, but for
+  what only the finish states: a source's extras at its end, losses after an analog channel's last
+  sample, the generators' roles and a stored view; a loss after the last sample is content, so
+  without it the repaired copy has another content id), each
   overview level's last block and its open run, each generator's last annotation part, every
   table's last pages, the annotation parts table's included, then the annotation bundle where it
   took any annotation or was given a stored view, the footer and the trailer.
@@ -1064,7 +1126,9 @@ operands are partners: they close their blocks together, at one tick. So a produ
 channel ahead of what it has promised, as a probe's samples come ahead of the pin edges that lie
 among them. Without a promise, a block closes only at a flush or the finish. Promises and flushes
 go forward: each is at or after the one before, so every block a writer closes before a flush ends
-at or before the flush's tick, which repair relies on. The encoder, which takes items in axis order
+at or before the flush's tick, which repair relies on. A promise to one channel can close its block
+ahead of the others, so the writer refuses a flush at a tick before the end of any block it has
+closed. The encoder, which takes items in axis order
 across channels, promises with each item, so its blocks close as they reach the target, and a
 sparse channel's one block at the finish.
 
@@ -1145,14 +1209,23 @@ annotations until after the first draw.
 ### Unavailable channels
 
 A channel is unavailable to a reader when its `requires` names a feature the reader doesn't know,
-its `codec` is one it doesn't know, or, for a derived channel, its `op` is one it doesn't know or an
-operand is unavailable. The reader still opens the recording. It keeps the channel's place and name,
-so every other channel keeps its number, and shows the channel as unavailable rather than leaving it
-out. It skips the channel's blocks, overview and strip; the top index still says where they are, so
-it reads past them, and it doesn't check the size of a strip whose layout it can't know. It leaves
-out every annotation that names an unavailable channel in `channels` or `measure`, even one that
-names other channels too, and says which annotations it left out and why. An annotation without
-`channels` names no channel, and stays.
+its `kind` or its `codec` is one it doesn't know, or, for a derived channel, its `op` is one it
+doesn't know or an operand is unavailable. The reader still opens the recording. It keeps the
+channel's place and name, so every other channel keeps its number, and shows the channel as
+unavailable rather than leaving it out. It skips the channel's blocks, overview and strip; the top
+index still says where they are, so it reads past them, and it doesn't check the size of a strip
+whose layout it can't know. It holds the channel's rows and lists to their layout alone, not to the
+limits, since a later version can raise a limit for its own channels, and it fetches and decodes
+none of the frames they place. It leaves out every annotation that names an unavailable channel in
+`channels` or `measure`, even one that names other channels too, and says which annotations it left
+out and why. An annotation whose `channels` is absent or empty names no channel by name, and stays.
+
+A reader holds the rest of an unavailable channel's entry, where its kind is one it knows, to this
+version's rules all the same, its mapping into `0..length` included (see Header). So a feature that
+changes how a source's ticks map to the axis goes in the `requires` of every channel of that source,
+and states an `origin` and a `stretch` that place each channel's kept span and `end` inside the axis
+by this version's rule too. A full check, which compares every item with what the file states, can't
+check a channel it can't read, so it refuses a recording that has one and says which.
 
 ### In order
 
@@ -1163,8 +1236,10 @@ whose contents follow from the records it reads; tickwave's reader checks each a
 and refuses one that differs by a byte from what the records before it give. A part that stands
 alone, and the annotation bundle, follow from no record: the bundle holds the hand-written file and
 each generator file's first line. The reader refuses each record that breaks a rule this document
-gives for records in order. It stops at the first record that runs past the end of the file or whose
-check does not match, and keeps every record before it. After the footer record come exactly the
+gives for records in order. It stops at the first record that runs past the end of the file, whose
+`n` passes its kind's limit, or whose check does not match, and keeps every record before it. A file
+that stops before its trailer is cut off, not finished: a full check refuses it, and repair can
+finish it. After the footer record come exactly the
 trailer's 24 bytes.
 
 A viewer reading a file that is still being written meets a last record cut off where the writer
@@ -1181,24 +1256,25 @@ A cut-off file is repaired by appending what a finished file has after its last 
 2. Where they hold a known-through record, cut the file just after the latest one: every channel is
    then known to its tick, and none holds more. Keep the annotation records that came after it, to
    write again after the cut. An annotation part after the cut that covers records goes, and its
-   lines come back from the records; one that stands alone is kept, to write again. Keep, too, each
-   gap record after the cut whose `from` maps before the known-through tick, to write again: a loss
-   the recorder had begun to report then ends its channel at that `from` (see Gap and run
-   records), rather than being lost with the cut. A record only a finish writes goes wherever it
-   lies, since a file cut there was cut inside its finish and step 7 writes it again: a table's
-   last page, one of fewer than 4,096 entries, and the annotation bundle. Where they hold none,
-   each channel keeps its blocks to its last whole one, except that a derived channel's operands
-   keep only the samples both hold: cut the file just after the last record at which every derived
-   channel's operands hold as many samples, and keep the annotation records and parts after the
-   cut as above.
+   lines come back from the records; one that stands alone is kept, to write again. Note, too, each
+   gap record after the cut whose `from` maps before the known-through tick: a loss the recorder had
+   begun to report then ends its channel at that `from` (step 4), rather than being lost with the
+   cut. It is written again only where its `to` maps at or past the length (step 3), as a gap the
+   header leaves out (see Gap and run records); otherwise only its `from` stays. A record only a
+   finish writes goes wherever it lies, since a file cut there was cut inside its finish and step 7
+   writes it again: a table's last page, one of fewer than 4,096 entries, and the annotation bundle.
+   Where they hold none, each channel keeps its blocks to its last whole one, except that a derived
+   channel's operands keep only the samples both hold: cut the file just after the last record at
+   which every derived channel's operands hold as many samples, and keep the annotation records and
+   parts after the cut as above.
 3. The length is the later of that known-through tick (or, with none, the latest end of any kept
    block, 0 with no block) and one past the latest start among the annotations kept, so what a
    recorder marked after its last data survives, and a recording of marks alone too. Each channel
    whose last kept block ends before the length gets an empty block from there, or from tick 0, to
    the length.
 4. Every digital channel's `end` is the source tick at the latest known-through tick, or, with
-   none, at its own last kept block's end, or its start with no block, before the gap rule, which
-   the gap records kept in step 2 may then apply. A file that can be repaired states no kept span,
+   none, at its own last kept block's end, or its start with no block, or the `from` of a gap
+   noted in step 2 where that comes sooner. A file that can be repaired states no kept span,
    so its one source maps by `T = k + origin`, and that tick is the axis tick minus `origin`. No
    analog channel states a loss after its last sample.
 5. Count each channel's edges and samples from its blocks' words, and take its gaps and runs from
@@ -1218,6 +1294,12 @@ A cut-off file is repaired by appending what a finished file has after its last 
 A repaired file holds what a writer that had finished right after the records repair keeps, with
 the same length, would have written, and so has its content id.
 
+A gap record among the records step 2 keeps is not written again but stays where it lies. Where one
+reaches its channel's `end` (step 4) while its `to` maps before the length (step 3), the header
+can't leave the gap out (see Gap and run records), and repair can't take the record out of what it
+keeps. Such a file is not repaired, but re-cut (see Re-cutting): the copy then holds the same
+content without the record.
+
 A file whose channels state `kept`, because a channel is moved or cut, the recording merges several
 sources, or its source states a stretch other than 1, is not repaired. Its declaration states each
 channel's kept span before any data, to the end of the whole capture, so a footer at an earlier
@@ -1229,8 +1311,10 @@ A file whose blocks a recorder closed early, at flushes, can be written again wi
 usual size, and a repaired file too. A re-cutter reads the records in order and writes the same
 declaration, then every channel's items, and the gaps and runs its header lists, in the same order,
 and finishes with the same length, ends, losses, extras and annotations. It writes the annotations
-as parts that stand alone, with no annotation records (see Annotations). It may give
-the channels other overview shifts than the input declares, such as the ones the rule gives each
-channel's own items; a finished input's header says enough to work them out. It computes the
-overview again. The new file has the same content id. A cut-off file re-cuts as repair would finish
-it.
+as parts that stand alone, with no annotation records (see Annotations). It may give the channels
+other overview shifts than the input declares, such as the ones the rule gives each channel's own
+items; a finished input's header says enough to work them out. It computes the overview again. The
+new file has the same content id. A cut-off file re-cuts as repair would finish it, and so does one
+repair refuses for a gap record it keeps: a re-cutter leaves out every gap record that reaches its
+channel's `end` while its `to` maps before the length, wherever it lies, and ends the channel at the
+earliest such gap's `from`.

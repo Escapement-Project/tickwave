@@ -286,6 +286,8 @@ identify-swd.tickwave: 2929 of 3000 bytes kept, 8 blocks to 0.388970979 s, blake
 
 A recorder that flushes notes, after each flush, the time up to which every channel's data is in the file. Where the file holds such a note, repair keeps every channel to the latest one. Otherwise it keeps each channel's blocks up to its last whole one, and the capture ends where the latest of those ends. Either way what came after was lost with the rest of the file. It then writes the index and the footer, and writes the copy to `-o`. If the recorder generated annotations, each generator's file goes beside the copy, as `<name>.<generator>.jsonl`. A finished recording is refused, since there is nothing to repair. So is one with a channel moved or trimmed: convert it again from its capture.
 
+Now and then a recording can't be finished as it stands: a loss the recorder was reporting when it stopped leaves a record that a finished file can't hold. Repair then re-cuts the recording instead, as `tickwave recut` does below, and says so. The copy holds the same content either way.
+
 ## Re-cutting a recording
 
 A recorder that flushes often, as a live capture does so that a crash loses little, closes each channel's block at every flush. At a low data rate those blocks are small, and each costs the same few dozen bytes of framing and index, so the file comes out larger than its data. `tickwave recut` writes it again with blocks of the usual size. The repository's `web/fixtures/energy.tickwave` is laid out this way: a synthetic recording of five channels over 30 ms, its current and voltage in six short blocks each, as a recorder flushing every 5 ms leaves them:

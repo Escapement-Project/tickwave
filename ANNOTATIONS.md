@@ -68,7 +68,7 @@ one (below).
 | --- | --- |
 | `id` | Hand-written: any name without whitespace or `/`. Generated: the full id is `<source>/<id>`. |
 | `start`, `end` | Times. `end` is absent for a point. |
-| `channels` | Channel names. Absent means every channel. |
+| `channels` | Channel names. Absent or empty means every channel. |
 | `label` | Short text shown with the annotation. |
 | `kind` | A free word (`transfer`, `misread`, `stall`). Styling and filtering key on it. |
 | `text` | Longer text, shown in an inset's caption. |
@@ -77,7 +77,9 @@ one (below).
 | `values` | Figures the annotation states, by name, each a decimal and its unit (below). |
 | `ref` | Hand-written only: the full id of a generated annotation. This one takes its span and channels, and any field it leaves out. |
 
-A file may hold no other fields, `measure`'s included: a misspelt one is an error, not ignored.
+A file may hold no other fields, `measure`'s included: a misspelt one is an error, not ignored. A
+field stated twice in one annotation is an error too. A later minor version can add fields (see
+Versions).
 
 ## Roles
 
@@ -195,9 +197,14 @@ micro is always `µ` (U+00B5 MICRO SIGN), as in times, and never the Greek lette
 
 ## Times
 
-A time is either a whole number of ticks from the capture's start, or a decimal with a unit: `s`,
-`ms`, `us` (or `µs`), `ns`, `ps`. A decimal converts to ticks exactly, without floating point, and
-rounds to the nearest tick, halves away from zero.
+A time is either a whole number of ticks from the capture's start, or a string holding a decimal and
+a unit. The decimal is digits with at most one `.` among them and at least one digit, such as
+`12`, `12.5`, `.5` or `12.`, with an optional `-` or `+` before it. The unit is `s`, `ms`, `us`,
+`µs`, `ns` or `ps`, after the decimal with or without whitespace between, and whitespace around the
+whole is ignored: `"12 ms"`, `"12ms"` and `" 0.012 s "` are one time. An exponent, digits grouped
+with spaces, or a decimal without a unit is an error. A decimal converts to ticks exactly, without
+floating point, and rounds to the nearest tick, halves away from zero. A time still lies in
+`0..2^53` ticks once converted.
 
 ## Ids stay stable
 
@@ -236,7 +243,8 @@ the prose cites breaks the build instead of the page. It checks that:
 - ids are unique, hand-written ids hold no `/`, and every `ref` names a generated annotation;
 - every channel exists, a point and a span's `start` lie in `0..length`, and a span's `end` is
   not before its `start` and not past `length`;
-- every `measure` names a digital channel, a known measure, and sits on a span;
+- every `measure` names a digital channel, or one of a kind this version doesn't know, which may
+  have edges; a known measure; and sits on a span;
 - every value is a decimal, with one space and a unit where it has one, under a name of lower-case
   letters, digits and `_`;
 - each role declaration holds to the rules above, no name is declared twice in a file or
@@ -247,13 +255,24 @@ the prose cites breaks the build instead of the page. It checks that:
 ## Versions
 
 A file's `format` names its version: `tickwave-annotations/1` is version 1, minor version 0, and
-`tickwave-annotations/1.<n>` is minor version `n`. A minor version adds top-level keys, to the
-hand-written file or to a generator's first line, that a reader of an earlier one can leave out and
-still read everything else as the file means it. A reader leaves out the top-level keys it doesn't
-know in a file of a later minor version than it knows, says which in a note that is not a problem,
-and reads the rest as it would. In a file of
-its own minor version or an earlier one, a key it doesn't know is an error, as everywhere else in
-these files. Any other version is another format, which `check` refuses.
+`tickwave-annotations/1.<n>` is minor version `n`. A minor version adds what a reader of an earlier
+one can leave out and still read everything else as the file means it: top-level keys of the
+hand-written file or of a generator's first line, fields of an annotation, of a role, of `measure`
+and of the `[view]` table, and values of `measure`'s `what`. In a file of a later minor version
+than it knows, a reader leaves out each such key it doesn't know, and each `measure` whose `what`
+it doesn't know, says which in a note that is not a problem, and keeps the annotation, role or view
+they were in. In a file of its own minor version or an earlier one, a key it doesn't know is an
+error, as everywhere else in these files. Any other version is another format, which `check`
+refuses.
+
+A tool that writes these files again carries what it doesn't know rather than leaving it out. A
+re-cut and repair carry an annotation's keys and `measure`s they don't know, whatever its file's
+version, and name them, since a generator's first line, which says its version, may reach them
+after its annotations do (FORMAT.md, "Annotations"). Repair writes a first line of its own version
+for a generator whose first line was lost with the cut, so a reader of that version then counts
+the keys it carried as errors. A merge reads each generator's first line before its lines, and
+carries what it doesn't know only from a file of a later minor version than its own. Each still
+leaves out, and names, a line that breaks a rule on a key it knows.
 
 ## Bundling
 
@@ -285,10 +304,12 @@ generator's line. The merge counts each of these.
 
 Channel names in `channels` and `measure` follow the names the merge gives. A channel the merge
 leaves out is dropped from `channels`, and an annotation left with none is left out. A `measure`
-on a channel left out is dropped. An annotation without `channels`, which meant every channel of
-its recording, names that input's channels.
+on a channel left out is dropped. An annotation without `channels`, or with an empty list, which
+meant every channel of its recording, names that input's channels.
 
-Each carried generator's file keeps the roles its first line declares. Two inputs whose
+Each carried generator's file keeps its first line as it was: its version, `version`, the roles it
+declares and any other key, but for `source`, renamed as above, and `recording_id`, the merged
+recording's. Two inputs whose
 generators declare one name differently, or a declaration that breaks a rule above, stop the merge:
 the merged sidecar would fail its check.
 
