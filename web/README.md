@@ -221,9 +221,11 @@ That site has to send them with `Access-Control-Allow-Origin`, as GitHub Pages d
 then starts from a small module the page makes, which imports `tickwave-worker.js` from that site.
 
 A page with a Content-Security-Policy has to allow `'unsafe-inline'` in `style-src`, for the
-styles in the elements' shadow roots. When the files are on another site, the worker runs under the
-page's policy too. The policy then also has to allow `blob:` and that site in `worker-src`, that
-site in `connect-src`, and `'wasm-unsafe-eval'` in `script-src`.
+styles in the elements' shadow roots. The decoder needs `'wasm-unsafe-eval'` in `script-src` of
+the policy its worker runs under. On the files' own site, that is the policy sent with
+`tickwave-worker.js`, if there is one. When the files are on another site, it is the page's
+policy, which then also has to allow `blob:` and that site in `worker-src`, and that site in
+`connect-src`.
 
 Recordings are fetched by byte range: the footer first, then only the channels and the span a view
 shows. A server that ignores ranges still works, as long as it sends the whole file. A recording on
