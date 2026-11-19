@@ -5,6 +5,16 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Elements – tickwave – Escapement Project</title>
 <meta name="description" content="tickwave's elements: attributes, methods, events, parts and custom properties.">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Escapement Project">
+<meta property="og:title" content="Elements – tickwave – Escapement Project">
+<meta property="og:description" content="tickwave's elements: attributes, methods, events, parts and custom properties.">
+<meta property="og:url" content="https://escapement-project.github.io/tickwave/docs/elements.html">
+<meta property="og:image" content="https://escapement-project.github.io/tickwave/card-tickwave.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Escapement Project. tickwave. A web viewer for mixed-signal captures, built to sit inside a page.">
+<meta name="twitter:card" content="summary_large_image">
 <script>
 // .js, as on the project's other pages, for a shared rule that needs a script to run; and a face
 // chosen on an earlier visit, applied before the first paint. The project's sites share the key.
@@ -25,7 +35,7 @@ document.documentElement.classList.add("js"); try { const f = localStorage.getIt
 <header data-published="https://escapement-project.github.io">
   <div class="wrap">
     <a class="brand" href="https://escapement-project.github.io/" data-page="landing"><svg aria-hidden="true" fill="currentColor" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path fill-rule="evenodd" d="M32,3 A29,29 0 1,0 32.01,3 Z M32,9 A23,23 0 1,0 32.01,9 Z"/><path d="M9.796,38 H29 V20 H51.621 A23,23 0 0,1 54.204,26 H35 V44 H12.379 A23,23 0 0,1 9.796,38 Z"/></svg><span class="name">Escapement Project</span></a>
-    <nav id="places" aria-label="Escapement Project"><a href="https://escapement-project.github.io/verge/" data-page="verge">Verge</a><span class="product"><a href="../index.html" data-page="tickwave" aria-current="true">tickwave</a><a href="../open.html" data-page="tickwave/open">Open</a><a href="../docs/index.html" data-page="tickwave/docs" aria-current="true">Docs</a></span><a href="https://escapement-project.github.io/#source">Source</a></nav>
+    <nav id="places" aria-label="Escapement Project"><a href="https://escapement-project.github.io/verge/" data-page="verge">Verge</a><span class="product"><a href="../index.html" data-page="tickwave" aria-current="true">tickwave</a><a href="../open.html" data-page="tickwave/open">Open</a><a href="../docs/index.html" data-page="tickwave/docs" aria-label="tickwave docs" aria-current="true">Docs</a></span><a href="https://escapement-project.github.io/#source">Source</a></nav>
     <button class="switch" id="faces" type="button" role="switch" aria-checked="false" aria-label="Night face"><span class="track"><span class="thumb"><svg class="wheel" viewBox="0 0 40 40" aria-hidden="true"><g transform="translate(14 3) scale(.75)"><circle cx="8" cy="8" r="3.2" fill="currentColor"/><path d="M8 1.2v1.6M8 13.2v1.6M1.2 8h1.6M13.2 8h1.6M3.2 3.2l1.1 1.1M11.7 11.7l1.1 1.1M3.2 12.8l1.1-1.1M11.7 4.3l1.1-1.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></g><g transform="rotate(180 20 20) translate(14 3) scale(.75)"><path d="M10.8 1.8a6.3 6.3 0 1 0 3.4 10.6A5.2 5.2 0 0 1 10.8 1.8z" fill="currentColor"/></g></svg></span></span></button>
   </div>
 </header>
@@ -58,7 +68,9 @@ document.documentElement.classList.add("js"); try { const f = localStorage.getIt
 <p>tickwave puts a capture into a web page with three custom elements. <code><span class="word">&lt;tickwave-view&gt;</span></code> shows a whole
 recording. <code><span class="word">&lt;tickwave-inset&gt;</span></code> shows one annotated stretch of it, magnified. <code><span class="word">&lt;tickwave-ref&gt;</span></code> turns a
 phrase in the text into a reference: pointing at it opens an inset beside the text. A fourth,
-<code><span class="word">&lt;tickwave-chart&gt;</span></code>, in a module of its own, draws measurements against a setting.</p>
+<code><span class="word">&lt;tickwave-chart&gt;</span></code>, in a module of its own, draws measurements against a setting. None of them
+answers a key held with Alt, Ctrl or Cmd: those are the browser's, such as Alt with an arrow to go
+back or forward.</p>
 <h2 id="loading" tabindex="-1">Loading<a class="anchor" href="#loading" aria-label="Link to this section">#</a></h2>
 <p>Include one module, and the three elements are defined:</p>
 <pre><code class="language-html"><span style="color:var(--code-operator)">&lt;</span><span style="color:var(--code-function)">script</span> <span style="color:var(--code-type)">type</span><span style="color:var(--code-operator)">=</span><span style="color:var(--code-string)">"module"</span> <span style="color:var(--code-type)">src</span><span style="color:var(--code-operator)">=</span><span style="color:var(--code-string)">"tickwave.js"</span><span style="color:var(--code-operator)">&gt;</span>&lt;<span style="color:var(--code-operator)">/</span><span style="color:var(--code-function)">script</span><span style="color:var(--code-operator)">&gt;</span>
@@ -67,19 +79,19 @@ phrase in the text into a reference: pointing at it opens an inset beside the te
 recording, it loads <code><span class="word">tickwave-worker.js</span></code> and <code><span class="word">tickwave.wasm</span></code> from beside itself, so keep the three
 files together. They can be on another site, such as a release's directory on tickwave's site.
 That site has to send them with <code>Access-Control-Allow-Origin</code>, as GitHub Pages does. The worker
-then starts from a small module the page makes, which imports <code><span class="word">tickwave-worker.js</span></code> from that site.</p>
+then starts from a small script the page makes, which imports <code><span class="word">tickwave-worker.js</span></code> from that site.
+A page opened from disk can load them from a site this way, and its recordings too, by their full
+URLs.</p>
 <p>A page with a Content-Security-Policy has to allow <code><span class="word">'unsafe-inline'</span></code> in <code><span class="word">style-src</span></code>, for the
 styles in the elements' shadow roots. The decoder needs <code><span class="word">'wasm-unsafe-eval'</span></code> in <code><span class="word">script-src</span></code> of
 the policy its worker runs under. On the files' own site, that is the policy sent with
 <code><span class="word">tickwave-worker.js</span></code>, if there is one. When the files are on another site, it is the page's
-policy, which then also has to allow <code><span class="word">blob:</span></code> and that site in <code><span class="word">worker-src</span></code>, and that site in
-<code><span class="word">connect-src</span></code>.</p>
+policy, which then also has to allow <code><span class="word">blob:</span></code> in <code><span class="word">worker-src</span></code>, and that site in <code><span class="word">connect-src</span></code>.</p>
 <p>Recordings are fetched by byte range: the footer first, then only the channels and the span a view
 shows. A server that ignores ranges still works, as long as it sends the whole file. A recording on
-another site needs that site to allow the reads: <code>Access-Control-Allow-Origin</code>, and
-<code>Access-Control-Expose-Headers: <span class="word">Content-Range</span></code>, so the decoder can see which bytes came back.
-GitHub Pages sends the first and not the second, so a recording kept there shows only on a page of
-the same site.</p>
+another site needs that site to send <code>Access-Control-Allow-Origin</code>, as GitHub Pages does. The
+decoder then asks for the whole file and stops the read once the answer gives the file's size. So
+a recording larger than the first read, 32 KiB by default, takes one more request to open.</p>
 <p>A page that shows a closed view can write the view's title and facts into it. The view then lays
 out before <code><span class="word">tickwave.js</span></code> has loaded, and keeps its height once it has:</p>
 <pre><code class="language-html"><span style="color:var(--code-operator)">&lt;</span><span style="color:var(--code-function)">link</span> <span style="color:var(--code-type)">rel</span><span style="color:var(--code-operator)">=</span><span style="color:var(--code-string)">"stylesheet"</span> <span style="color:var(--code-type)">href</span><span style="color:var(--code-operator)">=</span><span style="color:var(--code-string)">"tickwave.css"</span><span style="color:var(--code-operator)">&gt;</span>
@@ -436,6 +448,9 @@ the span shown, in whole ticks. It keeps the page's other parameters. While the 
 it drops any <code><span class="word">window</span></code> the address had. A recording on the same site goes in by its path, and
 another site's whole. As a link, the inset opens a new tab on a middle click or a Ctrl or Cmd
 click, and shows its address on hover.</p>
+<p>Such an inset marks where it opens, with a small &quot;Opens here&quot; over the plot that moves nothing. It
+sits on the note lit by the pointer, a tap or the keys. With the keys' focus on the inset and no
+note lit, it sits at the start of the span shown, where Enter opens.</p>
 <p>An inset the pointer passes through, as in a chart's popover, where <code><span class="word">pointer-events</span></code> is <code><span class="word">none</span></code>,
 does none of this. Inside a popover the inset is no Tab stop, and the element that opened it keeps
 the focus. A reference passes its arrow keys to <code><span class="word">arrowKey(event)</span></code>, which answers them as the

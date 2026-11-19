@@ -58,15 +58,17 @@
       if (phrase && (s.tl.includes(phrase) || s.hl.includes(phrase))) score += 6;
       out.push({ s, score });
     }
-    // By doc, the doc with the best section first; within a doc, its best sections in page order.
+    // By doc: a doc whose title holds more of the words first, so a search for a topic leads with
+    // the doc about it, then the doc with the best section. Within a doc, its best sections in page
+    // order.
     const docs = new Map();
     for (const r of out) {
-      const g = docs.get(r.s.doc) || { doc: r.s.doc, best: 0, all: [] };
+      const g = docs.get(r.s.doc) || { doc: r.s.doc, best: 0, all: [], named: res.filter((re) => hits(re, r.s.doc.low)).length };
       g.best = Math.max(g.best, r.score);
       g.all.push(r);
       docs.set(r.s.doc, g);
     }
-    const groups = [...docs.values()].sort((a, b) => b.best - a.best);
+    const groups = [...docs.values()].sort((a, b) => b.named - a.named || b.best - a.best);
     for (const g of groups) {
       g.top = new Set([...g.all].sort((a, b) => b.score - a.score).slice(0, SHOWN).map((r) => r.s));
       g.all.sort((a, b) => a.s.n - b.s.n);

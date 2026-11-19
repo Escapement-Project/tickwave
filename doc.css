@@ -39,6 +39,11 @@ article.doc pre code { font-size: 1em; }
    breaks anywhere. */
 article.doc :not(pre) > code { overflow-wrap: anywhere; }
 article.doc :not(pre) > code .word { white-space: nowrap; }
+/* A column narrower than the longest .word, about 13.6em of the article's text at 22 characters, as
+   at a large text size: the words break too, rather than widen the page. The query's em is the
+   article's own, so it follows the text size. */
+article.doc { container-type: inline-size; }
+@container (max-width: 14em) { article.doc :not(pre) > code .word { white-space: normal; } }
 /* A table keeps its columns and scrolls inside the column rather than the page sideways. */
 article.doc table { display: block; width: max-content; max-width: 100%; overflow-x: auto; margin: 0 0 18px; }
 /* A doc's figure keeps its text legible: drawn for the reading column, it shrinks to four fifths at
