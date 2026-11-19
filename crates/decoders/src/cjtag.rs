@@ -1439,14 +1439,21 @@ impl Cjtag {
     }
 
     fn lines(&mut self, from: Tick) -> &mut Lines {
-        let (first, qualified, offline) = (self.first, self.qualified, self.offline_start);
-        self.lines.get_or_insert_with(|| {
-            if let [Some(clock), Some(line)] = first {
-                let o = Oscan::new(from, clock, line, qualified).with_start_up(offline);
-                self.oscan = Some(o);
-            }
-            Lines::new(from, first)
-        })
+        match self.lines {
+            Some(ref mut lines) => lines,
+            None => self.start(from),
+        }
+    }
+
+    /// The lines from the first window's start, and the session if both levels are known there.
+    #[cold]
+    fn start(&mut self, from: Tick) -> &mut Lines {
+        let first = self.first;
+        if let [Some(clock), Some(line)] = first {
+            let o = Oscan::new(from, clock, line, self.qualified).with_start_up(self.offline_start);
+            self.oscan = Some(o);
+        }
+        self.lines.insert(Lines::new(from, first))
     }
 
     /// Applies the lines' changes so far.
