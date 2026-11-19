@@ -280,9 +280,9 @@ fn a_local_start_past_the_end_of_the_input_finishes_cleanly() {
         .unwrap();
     h.add(
         name("jtag"),
-        cjtag::jtag_definition(),
+        jtag::definition(),
         InputSpec::Upstream(c),
-        cjtag::JtagOnCjtag::factory(),
+        jtag::Jtag::factory(1 << 16),
         &[],
         all(),
     )
@@ -411,9 +411,9 @@ fn cjtag_with_jtag_over_it_never_panics_and_never_breaks_a_rule() {
             let j = h
                 .add(
                     name("jtag"),
-                    cjtag::jtag_definition(),
+                    jtag::definition(),
                     InputSpec::Upstream(c),
-                    cjtag::JtagOnCjtag::factory(),
+                    jtag::Jtag::factory(1 << 16),
                     &[],
                     all(),
                 )

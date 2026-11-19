@@ -28,9 +28,9 @@ mod tap7;
 use crate::jtag::{self, Clocked, Inputs, Tap};
 use escapement_tickwave_decode::{
     Cause, Decoder, Definition, Delivery, Element, ElementType, Exchange, Factory, FieldId,
-    FieldType, Id, KindDecl, KindId, Label, Mode, Observation, Observed, Op, Out, Pause, Reason,
-    Request, Role, Schema, SeqId, Setting, SettingDecl, SettingId, Span, Status, Tick,
-    UpstreamDecl, Value, Window, field, name, seq,
+    FieldType, Id, KindDecl, KindId, Label, Observation, Observed, Op, Out, Pause, Reason, Request,
+    Role, Schema, SeqId, Setting, SettingDecl, SettingId, Span, Status, Tick, Value, Window, field,
+    name, seq,
 };
 use std::sync::Arc;
 use tap7::{
@@ -516,29 +516,6 @@ pub fn definition() -> Arc<Definition> {
             ]),
     )
 }
-
-/// JTAG as it stacks on cJTAG: JTAG's name, version and schema, reading no wire, and its chain
-/// setting (`jtag::chain`), since a cJTAG adapter's chain is cut as a four-wire one is.
-pub fn jtag_definition() -> Arc<Definition> {
-    Arc::new(
-        Definition::new("jtag", 1, jtag::schema())
-            // The Standard Protocol's TMS bits, an escape's among them, and the Scan Packets, as
-            // pieces: a packet's TMS or nTDI element says where its clock was sampled.
-            .with_inputs([UpstreamDecl::new("clocks", Mode::Pieces)
-                .from(["cjtag"])
-                .with_kinds(["jscan", "escape", "packet"])
-                .with_sequences(["tms", "ntdi"])])
-            .with_settings(vec![SettingDecl::list(
-                "chain",
-                1..=jtag::IR_AT_MOST,
-                jtag::CHAIN_AT_MOST,
-                vec![],
-            )]),
-    )
-}
-
-/// JTAG on cJTAG's chain setting: each TAP's IR length, the TAP nearest TDO first.
-pub const JTAG_CHAIN: SettingId = SettingId(0);
 
 // ---- The lines -------------------------------------------------------------------------------
 
@@ -1618,9 +1595,10 @@ fn wire_tick(e: &Element) -> Option<Tick> {
     }
 }
 
-/// JTAG reading cJTAG's output (`jtag_definition`'s input): a clock per Standard Protocol TMS bit and per
-/// Scan Packet that advances the TAP, each value naming the cJTAG element it came from. Lost input
-/// is a gap, declared again for JTAG's own subscribers.
+/// JTAG reading cJTAG's output (`jtag::definition`'s input `clocks`): a clock per Standard Protocol
+/// TMS bit and per Scan Packet that advances the TAP, each value naming the cJTAG element it came
+/// from. Lost input is a gap, declared again for JTAG's own subscribers. `jtag::Jtag::factory`
+/// makes it, with the chain setting, since a cJTAG adapter's chain is cut as a four-wire one is.
 #[derive(Clone, Debug)]
 pub struct JtagOnCjtag {
     tap: Tap,
@@ -1630,25 +1608,14 @@ pub struct JtagOnCjtag {
 }
 
 impl JtagOnCjtag {
-    pub fn new(local: Option<Tick>) -> Self {
+    /// From `local`, or the start, with each TAP's IR length, the TAP nearest TDO first.
+    pub fn new(local: Option<Tick>, chain: Vec<u8>) -> Self {
         Self {
-            tap: Tap::new(local.unwrap_or(0), true),
+            tap: Tap::new(local.unwrap_or(0), true).chain(chain),
             started: false,
             packet: None,
             up: None,
         }
-    }
-
-    pub fn factory() -> Factory {
-        Box::new(|b, local| {
-            let mut j = Self::new(local);
-            // Bound, each length is from 1 to `jtag::IR_AT_MOST`.
-            let chain = (b.list(JTAG_CHAIN).unwrap_or(&[]).iter())
-                .map(|&l| l as u8)
-                .collect();
-            j.tap = j.tap.chain(chain);
-            Box::new(j)
-        })
     }
 
     fn piece(&mut self, op: &Op, out: &mut Out) {

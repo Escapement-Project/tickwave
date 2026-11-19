@@ -165,9 +165,9 @@ fn cjtag_case(path: &Path, ahead: Tick) -> Case {
     let j = h
         .add(
             name("JTAG"),
-            cjtag::jtag_definition(),
+            jtag::definition(),
             InputSpec::Upstream(c),
-            cjtag::JtagOnCjtag::factory(),
+            jtag::Jtag::factory(1 << 16),
             &[],
             all(),
         )

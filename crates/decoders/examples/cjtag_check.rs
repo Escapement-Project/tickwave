@@ -14,7 +14,7 @@ use escapement_tickwave_decode::{
     Decoder, Definition, Delivery, Exchange, Host, InputSpec, KindId, Mode, Pause, Schema, Status,
     Tick, UpstreamDecl, Value, name, wire::WireSource,
 };
-use escapement_tickwave_decoders::cjtag;
+use escapement_tickwave_decoders::{cjtag, jtag};
 use escapement_tickwave_view::{Cache, Recording};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -145,9 +145,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let j = h.add(
         name("jtag"),
-        cjtag::jtag_definition(),
+        jtag::definition(),
         InputSpec::Upstream(c),
-        cjtag::JtagOnCjtag::factory(),
+        jtag::Jtag::factory(1 << 16),
         &[jtag_chain],
         vec![],
     )?;

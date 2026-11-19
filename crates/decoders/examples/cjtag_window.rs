@@ -19,7 +19,7 @@ use escapement_tickwave_decode::{
     AnalysisId, Host, HostOptions, InputSpec, Keeping, RunView, Span, Tick, WindowId, name,
     wire::WireSource,
 };
-use escapement_tickwave_decoders::cjtag;
+use escapement_tickwave_decoders::{cjtag, jtag};
 use escapement_tickwave_view::{Cache, Recording};
 use std::sync::Arc;
 use std::time::Instant;
@@ -68,9 +68,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let j = h.add(
         name("jtag"),
-        cjtag::jtag_definition(),
+        jtag::definition(),
         InputSpec::Upstream(c),
-        cjtag::JtagOnCjtag::factory(),
+        jtag::Jtag::factory(1 << 16),
         &[],
         vec![],
     )?;

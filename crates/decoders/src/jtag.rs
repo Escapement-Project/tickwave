@@ -8,9 +8,9 @@
 //! first 128 bits are a field once it passes them, and the whole of a scan of at most 256 bits
 //! once it closes.
 //!
-//! TDO is an optional port: bound without it, a scan's TDO is unknown. Where TDO is read, at TCK's
-//! rise, at the fall after it, or at whichever of them the IR scans' captures read, is a setting,
-//! `tdo_edge`.
+//! JTAG reads the wire, or cJTAG's output as its input `clocks` (see `cjtag`). TDO is an optional
+//! port: bound without it, a scan's TDO is unknown. Where TDO is read, at TCK's rise, at the fall
+//! after it, or at whichever of them the IR scans' captures read, is a setting, `tdo_edge`.
 //!
 //! A chain of several TAPs is cut into each TAP's part where the setting `chain` gives each TAP's
 //! IR length, the TAP nearest TDO first. An IR scan as long as the chain's IRs has an
@@ -22,11 +22,12 @@
 //! TAP's instruction is then known until an IR scan of the chain's length; nor is it from the
 //! start, after lost input or after Test-Logic-Reset, which loads IDCODE or BYPASS.
 
+use crate::cjtag::JtagOnCjtag;
 use escapement_tickwave_decode::{
     Cause, Decoder, Definition, Element, ElementType, Exchange, Factory, FieldId, FieldType, Id,
-    KindDecl, KindId, Label, MAX_BITS, Need, Observation, Observed, Out, Pause, Reason, Request,
-    Schema, SeqId, Setting, SettingDecl, SettingId, Span, Status, Tick, Value, Window, field, name,
-    seq,
+    InputDecl, KindDecl, KindId, Label, MAX_BITS, Mode, Need, Observation, Observed, Out, Pause,
+    Reason, Request, Schema, SeqId, Setting, SettingDecl, SettingId, Span, Status, Tick,
+    UpstreamDecl, Value, Window, field, name, seq,
 };
 use std::ops::Range;
 use std::sync::Arc;
@@ -214,6 +215,10 @@ pub fn schema() -> Schema {
     .with_open_at_most(3)
 }
 
+/// JTAG's inputs: the wire, and cJTAG's output.
+pub const FROM_WIRE: usize = 0;
+pub const FROM_CJTAG: usize = 1;
+
 /// Where TDO is read: `TdoEdge`'s choices, by their names.
 pub const TDO_EDGE: SettingId = SettingId(0);
 /// Each TAP's IR length, the TAP nearest TDO first; none, the default, leaves scans whole.
@@ -283,6 +288,16 @@ pub fn definition() -> Arc<Definition> {
         Definition::new("jtag", 1, schema())
             .with_ports(["TCK", "TMS", "TDI"])
             .with_optional_ports(["TDO"])
+            .with_inputs([
+                InputDecl::Wire,
+                // The Standard Protocol's TMS bits, an escape's among them, and the Scan Packets,
+                // as pieces: a packet's TMS or nTDI element says where its clock was sampled.
+                UpstreamDecl::new("clocks", Mode::Pieces)
+                    .from(["cjtag"])
+                    .with_kinds(["jscan", "escape", "packet"])
+                    .with_sequences(["tms", "ntdi"])
+                    .into(),
+            ])
             .with_settings(vec![
                 SettingDecl::choice("tdo_edge", TdoEdge::NAMES, 2),
                 SettingDecl::list("chain", 1..=IR_AT_MOST, CHAIN_AT_MOST, vec![]),
@@ -944,15 +959,18 @@ impl Jtag {
         self
     }
 
-    /// Makes runs of JTAG in windows of `window` ticks, reading TDO where it has a channel, at the
-    /// edge bound.
+    /// Makes runs of JTAG: on the wire in windows of `window` ticks, reading TDO where it has a
+    /// channel, at the edge bound; on cJTAG from its clocks.
     pub fn factory(window: Tick) -> Factory {
         Box::new(move |b, local| {
-            let edge = TdoEdge::chosen(b.choice(TDO_EDGE));
             // Bound, each length is from 1 to `IR_AT_MOST`.
             let chain = (b.list(CHAIN).unwrap_or(&[]).iter())
                 .map(|&l| l as u8)
                 .collect();
+            if b.input() == FROM_CJTAG {
+                return Box::new(JtagOnCjtag::new(local, chain));
+            }
+            let edge = TdoEdge::chosen(b.choice(TDO_EDGE));
             let mut jtag = Self::new(local, b.port(TDO), window).tdo_edge(edge);
             jtag.tap = jtag.tap.chain(chain);
             Box::new(jtag)

@@ -322,9 +322,9 @@ pub fn cjtag(c: &Case) {
         .unwrap();
     h.add(
         name("jtag"),
-        cjtag::jtag_definition(),
+        jtag::definition(),
         InputSpec::Upstream(k),
-        cjtag::JtagOnCjtag::factory(),
+        jtag::Jtag::factory(1 << 16),
         &[],
         all(),
     )

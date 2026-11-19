@@ -9,7 +9,7 @@ use escapement_tickwave_decode::{
     Observation, Observed, Out, Pause, Request, Span, Status, Tick, Value, Window, name,
 };
 use escapement_tickwave_decoders::{
-    cjtag::{self, Change, Cjtag, Feed, JtagOnCjtag, Lines, Oscan},
+    cjtag::{self, Change, Cjtag, Feed, Lines, Oscan},
     jtag::{self, Tap},
 };
 use std::sync::atomic::Ordering::Relaxed;
@@ -234,9 +234,9 @@ fn host_with(
     let j = h
         .add(
             name("jtag"),
-            cjtag::jtag_definition(),
+            jtag::definition(),
             InputSpec::Upstream(c),
-            JtagOnCjtag::factory(),
+            jtag::Jtag::factory(1 << 16),
             &[],
             all(),
         )
@@ -392,7 +392,7 @@ fn direct(w: Wires) -> Counts {
         .add(
             name("direct"),
             std::sync::Arc::new(
-                (*cjtag::jtag_definition())
+                (*jtag::definition())
                     .clone()
                     .with_inputs([InputDecl::Wire])
                     .with_ports(["TCKC", "TMSC"]),
@@ -756,6 +756,39 @@ fn hosted_cjtag_feeds_jtag_as_the_direct_run_does() {
         assert_eq!(h.store(j).counts, want, "window {window}");
         assert_eq!(h.store(c).counts, cjtag, "window {window}");
     }
+}
+
+/// JTAG on cJTAG cuts its scans by the chain setting as on the wire: with one TAP of a 4-bit IR,
+/// the session's two IR scans each have an instruction, and its two DR scans their data.
+#[test]
+fn the_chain_setting_cuts_jtags_scans_on_cjtag() {
+    let mut h = Host::default();
+    let c = h
+        .add(
+            name("cjtag"),
+            cjtag::definition(),
+            InputSpec::Wire {
+                source: Box::new(synth()),
+                local: None,
+            },
+            Cjtag::factory(1000),
+            &[cjtag::assume_qualified(true)],
+            all(),
+        )
+        .unwrap();
+    let j = h
+        .add(
+            name("jtag"),
+            jtag::definition(),
+            InputSpec::Upstream(c),
+            jtag::Jtag::factory(1 << 16),
+            &[jtag::chain(&[4])],
+            all(),
+        )
+        .unwrap();
+    h.run_until(|_| false).unwrap();
+    assert_eq!(of(&h, j, &[jtag::INSTRUCTION]).len(), 2);
+    assert_eq!(of(&h, j, &[jtag::DATA]).len(), 2);
 }
 
 /// The session twice, with TCKC lost for 400 ticks in the middle of the first one's 256-bit DR
@@ -1375,9 +1408,9 @@ fn decode_offline_start(g: &Gen) -> (Host, [AnalysisId; 2]) {
     let j = h
         .add(
             name("jtag"),
-            cjtag::jtag_definition(),
+            jtag::definition(),
             InputSpec::Upstream(c),
-            JtagOnCjtag::factory(),
+            jtag::Jtag::factory(1 << 16),
             &[],
             all(),
         )

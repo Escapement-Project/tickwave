@@ -18,7 +18,7 @@ use egui::{Pos2, RawInput, Rect, vec2};
 use escapement_tickwave_decode::{
     Host, InputSpec, Observed, Schema, Source, SourceError, Span, Store, Tick, Window, name,
 };
-use escapement_tickwave_decoders::{adiv5, cjtag, swd};
+use escapement_tickwave_decoders::{adiv5, cjtag, jtag, swd};
 use escapement_tickwave_egui::track::{Density, Labels, Track, condition, driver_paints};
 use escapement_tickwave_egui::{Palette, Shown};
 use escapement_tickwave_view::format::mapping::Mapping;
@@ -289,9 +289,9 @@ fn cjtag_keeping(keep: Vec<Span>) -> Host {
         .unwrap();
     h.add(
         name("jtag"),
-        cjtag::jtag_definition(),
+        jtag::definition(),
         InputSpec::Upstream(c),
-        cjtag::JtagOnCjtag::factory(),
+        jtag::Jtag::factory(1 << 16),
         &[],
         keep,
     )
