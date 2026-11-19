@@ -248,6 +248,20 @@ pub struct FieldDecl {
     /// What a part too narrow for the field's name shows; None for the name's first three
     /// letters.
     pub short: Option<Name>,
+    /// How a view writes a word's or a bit string's value; None for hex.
+    pub notation: Option<Notation>,
+}
+
+/// How a view writes a word's or a bit string's value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Notation {
+    /// Hex digits, as many as the bits take.
+    Hex,
+    /// A word in decimal, as a length, a count or an index reads.
+    Decimal,
+    /// A binary digit for each bit.
+    Binary,
 }
 
 /// A piece of a label: text, or one of the item's fields, by its index in its kind's fields.
@@ -687,11 +701,17 @@ impl FieldDecl {
             name: name.into(),
             ty,
             short: None,
+            notation: None,
         }
     }
 
     pub fn with_short(mut self, short: impl Into<Name>) -> Self {
         self.short = Some(short.into());
+        self
+    }
+
+    pub fn in_notation(mut self, notation: Notation) -> Self {
+        self.notation = Some(notation);
         self
     }
 }
@@ -722,6 +742,7 @@ pub const fn field(name: &'static str, ty: FieldType) -> FieldDecl {
         name: Cow::Borrowed(name),
         ty,
         short: None,
+        notation: None,
     }
 }
 pub const fn seq(name: &'static str, element: ElementType) -> SeqDecl {
@@ -788,6 +809,8 @@ pub enum SchemaError {
     AnyTwice,
     #[error("the wire input is declared twice")]
     WireTwice,
+    #[error("kind {kind}: field {field}'s notation does not write its type")]
+    Notation { kind: Name, field: Name },
     #[error("setting {0} is declared twice")]
     DuplicateSetting(Name),
     #[error("setting {0} applies to an input the definition does not declare")]
@@ -1002,6 +1025,17 @@ impl Schema {
                 }
                 if !names.insert(&f.name) {
                     return Err(dup(&f.name));
+                }
+                let written = match (f.notation, &f.ty) {
+                    (None, _) => true,
+                    (Some(Notation::Decimal), ty) => matches!(ty, FieldType::Word { .. }),
+                    (Some(_), ty) => matches!(ty, FieldType::Word { .. } | FieldType::Bits { .. }),
+                };
+                if !written {
+                    return Err(SchemaError::Notation {
+                        kind: k.name.clone(),
+                        field: f.name.clone(),
+                    });
                 }
                 match &f.ty {
                     FieldType::Name(list) => name_list(list, MAX_FIELD_NAMES, &k.name, &f.name)?,

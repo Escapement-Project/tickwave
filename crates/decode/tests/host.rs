@@ -7,10 +7,10 @@ use escapement_tickwave_decode::{
     AnalysisId, Batch, BindError, Bound, CONTRACT, Cause, CheckpointError, Contract, Decoder,
     Definition, Delivery, Element, ElementType, Exchange, FieldDecl, FieldId, FieldType, Host,
     HostOptions, Id, InputDecl, InputId, InputSpec, Keeping, KindDecl, KindId, LinkDecl, LinkId,
-    LinkTo, LogEntry, MAX_PHRASE, Mismatch, Mode, Name, Need, Observation, Op, Pause, PortDecl,
-    Reason, Ref, Refusal, Refused, Reply, Role, RunView, Schema, SchemaError, Seek, SeqDecl, SeqId,
-    Setting, SettingDecl, SettingId, Source, SourceError, Span, Status, Tick, UpstreamDecl, Value,
-    Window, WindowId, field, name, seq,
+    LinkTo, LogEntry, MAX_PHRASE, Mismatch, Mode, Name, Need, Notation, Observation, Op, Pause,
+    PortDecl, Reason, Ref, Refusal, Refused, Reply, Role, RunView, Schema, SchemaError, Seek,
+    SeqDecl, SeqId, Setting, SettingDecl, SettingId, Source, SourceError, Span, Status, Tick,
+    UpstreamDecl, Value, Window, WindowId, field, name, seq,
 };
 use std::sync::{Arc, Mutex, atomic::Ordering::Relaxed};
 
@@ -2054,6 +2054,28 @@ fn names_and_phrases_have_bounds_of_their_own() {
     let rows = toy_schema().with_rows(vec!["row"; escapement_tickwave_decode::MAX_LANES + 1]);
     let too_many = SchemaError::TooMany { what: "row names" };
     assert_eq!(add(rows), Some(BindError::Schema(too_many)));
+}
+
+#[test]
+fn a_fields_notation_writes_its_type() {
+    let add = |f: FieldDecl| {
+        let kinds = vec![KindDecl::new("k").with_fields(vec![f])];
+        let def = Definition::new("set", 1, Schema::new(kinds));
+        bound(Arc::new(def), vec![], &[]).err()
+    };
+    let refused = |f| {
+        Some(BindError::Schema(SchemaError::Notation {
+            kind: name("k"),
+            field: name(f),
+        }))
+    };
+    let word = FieldDecl::new("w", FieldType::Word { bits: 8 });
+    let bits = FieldDecl::new("b", FieldType::Bits { max: 8 });
+    assert_eq!(add(word.clone().in_notation(Notation::Decimal)), None);
+    assert_eq!(add(bits.clone().in_notation(Notation::Binary)), None);
+    assert_eq!(add(bits.in_notation(Notation::Decimal)), refused("b"));
+    let flag = FieldDecl::new("n", FieldType::Bool).in_notation(Notation::Hex);
+    assert_eq!(add(flag), refused("n"));
 }
 
 #[test]

@@ -28,9 +28,9 @@ mod tap7;
 use crate::jtag::{self, Clocked, Inputs, Tap};
 use escapement_tickwave_decode::{
     Cause, Decoder, Definition, Delivery, Element, ElementType, Exchange, Factory, FieldId,
-    FieldType, Id, KindDecl, KindId, Label, Observation, Observed, Op, Out, Pause, PortDecl,
-    Reason, Request, Role, Schema, SeqId, Setting, SettingDecl, SettingId, Span, Status, Tick,
-    Value, Window, field, name, seq,
+    FieldType, Id, KindDecl, KindId, Label, Notation, Observation, Observed, Op, Out, Pause,
+    PortDecl, Reason, Request, Role, Schema, SeqId, Setting, SettingDecl, SettingId, Span, Status,
+    Tick, Value, Window, field, name, seq,
 };
 use std::sync::Arc;
 use tap7::{
@@ -311,7 +311,7 @@ pub fn schema() -> Schema {
         KindDecl::new("escape")
             .with_row(3)
             .with_fields(vec![
-                field("toggles", FieldType::Word { bits: 8 }),
+                field("toggles", FieldType::Word { bits: 8 }).in_notation(Notation::Decimal),
                 field("meaning", names(&MEANINGS)),
                 field("response", names(&RESPONSES)),
             ])
@@ -331,7 +331,7 @@ pub fn schema() -> Schema {
         KindDecl::new("level")
             .with_row(1)
             .with_fields(vec![
-                field("level", FieldType::Word { bits: 3 }),
+                field("level", FieldType::Word { bits: 3 }).in_notation(Notation::Decimal),
                 field("use", names(&LEVEL_USES)),
             ])
             .with_labels(vec![
@@ -352,7 +352,7 @@ pub fn schema() -> Schema {
             .with_parents(["level"])
             .with_fields(vec![
                 field("opcode", names(&opcodes())),
-                field("operand", FieldType::Word { bits: 5 }),
+                field("operand", FieldType::Word { bits: 5 }).in_notation(Notation::Decimal),
                 field("effect", text(64)),
                 field("shifts", text(32)),
             ])
@@ -398,8 +398,8 @@ pub fn schema() -> Schema {
                 field("protect", FieldType::Bool),
                 field("form", names(&["long", "short"])),
                 field("format", text(16)),
-                field("RDYC", FieldType::Word { bits: 2 }),
-                field("DLYC", FieldType::Word { bits: 2 }),
+                field("RDYC", FieldType::Word { bits: 2 }).in_notation(Notation::Decimal),
+                field("DLYC", FieldType::Word { bits: 2 }).in_notation(Notation::Decimal),
                 field("TPST", FieldType::Word { bits: 5 }),
                 field("outcome", names(&OUTCOMES)),
             ])
@@ -416,7 +416,7 @@ pub fn schema() -> Schema {
             .with_parents(["level"])
             .with_fields(vec![
                 field("register", names(&REGISTERS)),
-                field("length", FieldType::Word { bits: 32 }),
+                field("length", FieldType::Word { bits: 32 }).in_notation(Notation::Decimal),
                 field(
                     "tdi",
                     FieldType::Bits {

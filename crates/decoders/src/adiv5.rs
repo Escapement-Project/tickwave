@@ -28,9 +28,9 @@
 use crate::swd;
 use escapement_tickwave_decode::{
     Cause, Completed, Decoder, Definition, Delivery, Exchange, Factory, FieldId, FieldType, Id,
-    InputId, KindDecl, KindId, Label, LinkDecl, LinkId, LinkTo, Mode, Need, Op, Out, Pause, Reason,
-    Ref, Schema, Setting, SettingDecl, SettingId, Span, Status, Tick, UpstreamDecl, Value, field,
-    name,
+    InputId, KindDecl, KindId, Label, LinkDecl, LinkId, LinkTo, Mode, Need, Notation, Op, Out,
+    Pause, Reason, Ref, Schema, Setting, SettingDecl, SettingId, Span, Status, Tick, UpstreamDecl,
+    Value, field, name,
 };
 use foldhash::HashMap;
 use std::sync::Arc;
@@ -149,7 +149,7 @@ pub fn adi_schema() -> Schema {
     let ap = |kind: &'static str, links| {
         KindDecl::new(kind)
             .with_fields(vec![
-                field("ap", w(8)),
+                field("ap", w(8)).in_notation(Notation::Decimal),
                 field("reg", w(8)),
                 field("name", FieldType::Name(AP_NAMES.map(name).to_vec())),
                 field("a", w(4)),

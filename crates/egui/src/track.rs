@@ -10,8 +10,8 @@
 
 use egui::{Align2, Rect, Response, Sense, Shape, Stroke, Ui, Widget, pos2, vec2};
 use escapement_tickwave_decode::{
-    Element, FieldId, FieldType, Id, Item, KindId, Label, LabelPiece, Schema, Span, Status, Tick,
-    Value,
+    Element, FieldId, FieldType, Id, Item, KindId, Label, LabelPiece, Notation, Schema, Span,
+    Status, Tick, Value,
 };
 use escapement_tickwave_view::columns::Grid;
 use escapement_tickwave_view::format::annotations::Role;
@@ -60,11 +60,16 @@ pub fn value_text(schema: &Schema, kind: KindId, field: FieldId, value: &Value) 
     let decl = schema
         .kind(kind)
         .and_then(|k| k.fields.get(usize::from(field.0)));
+    let notation = decl.and_then(|d| d.notation).unwrap_or(Notation::Hex);
     match value {
-        Value::Word { value, bits } => {
-            let digits = usize::from(bits.div_ceil(4)).max(1);
-            format!("0x{value:0digits$X}")
-        }
+        Value::Word { value, bits } => match notation {
+            Notation::Decimal => value.to_string(),
+            Notation::Binary => format!("0b{value:0width$b}", width = usize::from(*bits).max(1)),
+            _ => {
+                let digits = usize::from(bits.div_ceil(4)).max(1);
+                format!("0x{value:0digits$X}")
+            }
+        },
         Value::Name(n) => match decl.map(|d| &d.ty) {
             Some(FieldType::Name(list)) => list
                 .get(usize::from(*n))
@@ -73,6 +78,11 @@ pub fn value_text(schema: &Schema, kind: KindId, field: FieldId, value: &Value) 
         },
         Value::Bool(b) => u8::from(*b).to_string(),
         Value::Text(t) => t.clone(),
+        Value::Bits { bytes, bits } if notation == Notation::Binary => (0..*bits as usize)
+            .rev()
+            .map(|k| bytes.get(k / 8).is_some_and(|b| b >> (k % 8) & 1 == 1))
+            .map(|bit| if bit { '1' } else { '0' })
+            .collect(),
         Value::Bits { bytes, .. } => bytes.iter().rev().map(|b| format!("{b:02X}")).collect(),
         Value::Phase => String::new(),
         _ => "?".into(),

@@ -25,9 +25,9 @@
 use crate::cjtag::JtagOnCjtag;
 use escapement_tickwave_decode::{
     Cause, Decoder, Definition, Element, ElementType, Exchange, Factory, FieldId, FieldType, Id,
-    InputDecl, InputId, KindDecl, KindId, Label, MAX_BITS, Mode, Need, Observation, Observed, Out,
-    Pause, PortDecl, Reason, Request, Schema, SeqId, Setting, SettingDecl, SettingId, Span, Status,
-    Tick, UpstreamDecl, Value, Window, field, name, seq,
+    InputDecl, InputId, KindDecl, KindId, Label, MAX_BITS, Mode, Need, Notation, Observation,
+    Observed, Out, Pause, PortDecl, Reason, Request, Schema, SeqId, Setting, SettingDecl,
+    SettingId, Span, Status, Tick, UpstreamDecl, Value, Window, field, name, seq,
 };
 use std::ops::Range;
 use std::sync::Arc;
@@ -135,7 +135,7 @@ pub fn schema() -> Schema {
                 field("tdo", FieldType::Bits { max: MAX_BITS }),
                 field("tdi_head", FieldType::Bits { max: 128 }),
                 field("tdo_head", FieldType::Bits { max: 128 }),
-                field("length", FieldType::Word { bits: 32 }),
+                field("length", FieldType::Word { bits: 32 }).in_notation(Notation::Decimal),
                 field("split", FieldType::Bool),
             ])
             .with_sequences(vec![
@@ -153,8 +153,8 @@ pub fn schema() -> Schema {
             .with_row(2)
             .with_parents([parent])
             .with_fields(vec![
-                field("tap", FieldType::Word { bits: 8 }),
-                field("length", FieldType::Word { bits: 32 }),
+                field("tap", FieldType::Word { bits: 8 }).in_notation(Notation::Decimal),
+                field("length", FieldType::Word { bits: 32 }).in_notation(Notation::Decimal),
                 field("tdi", FieldType::Bits { max: MAX_BITS }),
                 field("tdo", FieldType::Bits { max: MAX_BITS }),
             ])
@@ -181,7 +181,7 @@ pub fn schema() -> Schema {
             .with_fields(vec![
                 field("from", state()),
                 field("to", state()),
-                field("clocks", FieldType::Word { bits: 32 }),
+                field("clocks", FieldType::Word { bits: 32 }).in_notation(Notation::Decimal),
             ])
             .with_sequences(vec![seq(
                 "via",

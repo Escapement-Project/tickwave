@@ -497,6 +497,37 @@ fn a_bool_reads_as_a_bit_and_a_check_by_its_name() {
 }
 
 #[test]
+fn a_value_reads_in_its_fields_notation() {
+    use escapement_tickwave_decode::{
+        FieldDecl, FieldId, FieldType, KindDecl, KindId, Notation, Schema,
+    };
+    let schema = Schema::new(vec![KindDecl::new("k").with_fields(vec![
+        FieldDecl::new("address", FieldType::Word { bits: 12 }),
+        FieldDecl::new("length", FieldType::Word { bits: 32 }).in_notation(Notation::Decimal),
+        FieldDecl::new("mask", FieldType::Word { bits: 4 }).in_notation(Notation::Binary),
+        FieldDecl::new("bits", FieldType::Bits { max: 16 }).in_notation(Notation::Binary),
+        FieldDecl::new("bytes", FieldType::Bits { max: 16 }),
+    ])]);
+    let text = |f, v: &Value| value_text(&schema, KindId(0), FieldId(f), v);
+    let word = |value, bits| Value::Word { value, bits };
+    let bits = Value::Bits {
+        bytes: vec![0b0000_0110, 0b1].into(),
+        bits: 9,
+    };
+    assert_eq!(text(0, &word(0x2A, 12)), "0x02A");
+    assert_eq!(text(1, &word(256, 32)), "256");
+    assert_eq!(text(2, &word(0b0101, 4)), "0b0101");
+    assert_eq!(
+        text(3, &bits),
+        "100000110",
+        "the last bit first, as hex puts it"
+    );
+    assert_eq!(text(4, &bits), "0106");
+    let length = value_text(&jtag::schema(), jtag::IR_SCAN, jtag::LENGTH, &word(4, 32));
+    assert_eq!(length, "4", "a scan's length in decimal");
+}
+
+#[test]
 #[ignore = "writes pictures where TICKWAVE_SHOTS says"]
 fn shots() {
     let Some(dir) = std::env::var_os("TICKWAVE_SHOTS").map(PathBuf::from) else {
