@@ -1440,7 +1440,7 @@ fn the_text_tab_joins_an_analysis_bytes_into_lines_each_character_from_its_item(
     // A second analysis, of frames whose text is two bytes each, chosen by name: a lone carriage
     // return escaped, and a line without a newline wrapping.
     let frames = |b: &[u8]| Value::Bits {
-        bytes: b.to_vec(),
+        bytes: b.to_vec().into(),
         bits: 8 * b.len() as u32,
     };
     let long = [b'a'; escapement_tickwave_egui::panel::LINE_AT_MOST + 2];
@@ -1758,7 +1758,7 @@ fn the_panel_takes_in_what_a_growing_store_gains() {
 
     // A line that starts inside a frame of several bytes is joined again from that byte.
     let frame = |b: &[u8]| Value::Bits {
-        bytes: b.to_vec(),
+        bytes: b.to_vec().into(),
         bits: 8 * b.len() as u32,
     };
     let ty = escapement_tickwave_decode::FieldType::Bits { max: 16 };

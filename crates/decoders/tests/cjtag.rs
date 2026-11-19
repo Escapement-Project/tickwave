@@ -542,7 +542,7 @@ fn the_activation_and_the_packets_decode() {
     assert_eq!(
         value(&idcode, jtag::TDO_VALUE),
         Some(Value::Bits {
-            bytes: IDCODE.to_le_bytes().to_vec(),
+            bytes: IDCODE.to_le_bytes().to_vec().into(),
             bits: 32
         })
     );
@@ -1047,7 +1047,7 @@ fn name_of(i: &Item, f: escapement_tickwave_decode::FieldId) -> Option<u16> {
 
 fn idcode_read(h: &Host, j: AnalysisId) -> bool {
     let want = Value::Bits {
-        bytes: IDCODE.to_le_bytes().to_vec(),
+        bytes: IDCODE.to_le_bytes().to_vec().into(),
         bits: 32,
     };
     (of(h, j, &[jtag::DR_SCAN]).iter()).any(|i| value(i, jtag::TDO_VALUE) == Some(want.clone()))
@@ -1275,7 +1275,7 @@ fn a_cr_scan_is_named_by_its_command_and_carries_its_register() {
     let crs = of(&h, c, &[cjtag::CR_SCAN]);
     assert_eq!(crs.len(), 2);
     let bits = |v: u64, n: u32| Value::Bits {
-        bytes: v.to_le_bytes()[..n.div_ceil(8) as usize].to_vec(),
+        bytes: v.to_le_bytes()[..n.div_ceil(8) as usize].to_vec().into(),
         bits: n,
     };
     assert_eq!(name_of(&crs[0], cjtag::REGISTER), Some(12), "CNFG0");

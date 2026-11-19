@@ -130,7 +130,7 @@ fn mem(i: &Item) -> Option<u64> {
 /// A memory access's value as its bytes, lowest address first, and its width in bits.
 fn mem_bytes(i: &Item) -> Option<(Vec<u8>, u32)> {
     match value(i, adiv5::MEM_VALUE)? {
-        Value::Bits { bytes, bits } => Some((bytes, bits)),
+        Value::Bits { bytes, bits } => Some((bytes.to_vec(), bits)),
         _ => None,
     }
 }
@@ -1067,7 +1067,7 @@ fn a_parity_failure_drops_a_write_and_leaves_a_reads_value_unknown() {
             (
                 Some(0x2000_0004),
                 Some(Value::Bits {
-                    bytes: vec![3, 0, 0, 0],
+                    bytes: vec![3, 0, 0, 0].into(),
                     bits: 32
                 })
             ),

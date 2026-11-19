@@ -350,7 +350,7 @@ fn the_session_decodes_its_scans_states_and_paths() {
     assert_eq!(
         value(&scans[1], jtag::TDO_VALUE),
         Some(Value::Bits {
-            bytes: IDCODE.to_le_bytes().to_vec(),
+            bytes: IDCODE.to_le_bytes().to_vec().into(),
             bits: 32
         })
     );
@@ -361,7 +361,7 @@ fn the_session_decodes_its_scans_states_and_paths() {
     assert_eq!(
         value(long, jtag::TDI_HEAD),
         Some(Value::Bits {
-            bytes: info.payload_tdi[..16].to_vec(),
+            bytes: info.payload_tdi[..16].to_vec().into(),
             bits: 128
         })
     );
@@ -518,7 +518,7 @@ fn tdo_moved(s: &Session, starts: &[Tick], by: impl Fn(usize) -> Tick) -> Wires 
 /// Each IR scan's capture, whether it ends in 01, and each IDCODE read, whether it reads IDCODE.
 fn reads(h: &Host, j: AnalysisId) -> Vec<(bool, bool)> {
     let idcode = Some(Value::Bits {
-        bytes: IDCODE.to_le_bytes().to_vec(),
+        bytes: IDCODE.to_le_bytes().to_vec().into(),
         bits: 32,
     });
     let dr = of(h, j, &[jtag::DR_SCAN]);
@@ -693,7 +693,7 @@ fn without_tdo_a_scan_says_why_its_tdo_is_unknown() {
     assert_eq!(
         value(&scans[1], jtag::TDI_VALUE),
         Some(Value::Bits {
-            bytes: vec![0; 4],
+            bytes: vec![0; 4].into(),
             bits: 32
         })
     );
@@ -822,7 +822,7 @@ fn with_chain(w: Wires, chain: &[u8]) -> (Host, AnalysisId) {
 
 fn bits_value(v: u64, n: u32) -> Option<Value> {
     Some(Value::Bits {
-        bytes: v.to_le_bytes()[..n.div_ceil(8) as usize].to_vec(),
+        bytes: v.to_le_bytes()[..n.div_ceil(8) as usize].to_vec().into(),
         bits: n,
     })
 }

@@ -2,6 +2,8 @@
 //! their index in the decoder's schema, so an operation carries no strings of the schema's and an
 //! id stays small and `Copy`.
 
+use smallvec::SmallVec;
+
 /// A position on the analysis's timeline: its source's ticks, moved by the channel's offset.
 pub type Tick = i64;
 
@@ -95,13 +97,57 @@ pub enum Value {
     Text(String),
     /// A bounded bit string, the first shifted bit in the lowest bit of `bytes[0]`.
     Bits {
-        bytes: Vec<u8>,
+        bytes: BitBytes,
         bits: u32,
     },
     Unknown {
         reason: Reason,
         needs: Option<Need>,
     },
+}
+
+/// A bit string's bytes: up to 16 inline, so a short value is made, cloned and dropped without
+/// allocating.
+#[derive(Default, PartialEq, Eq, Hash)]
+pub struct BitBytes(SmallVec<[u8; 16]>);
+
+impl Clone for BitBytes {
+    // SmallVec's own clone extends byte by byte.
+    fn clone(&self) -> Self {
+        Self(SmallVec::from_slice(&self.0))
+    }
+}
+
+impl std::ops::Deref for BitBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for BitBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.as_slice().fmt(f)
+    }
+}
+
+impl From<&[u8]> for BitBytes {
+    fn from(bytes: &[u8]) -> Self {
+        Self(SmallVec::from_slice(bytes))
+    }
+}
+
+impl From<Vec<u8>> for BitBytes {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self(SmallVec::from_vec(bytes))
+    }
+}
+
+impl FromIterator<u8> for BitBytes {
+    fn from_iter<I: IntoIterator<Item = u8>>(bytes: I) -> Self {
+        Self(bytes.into_iter().collect())
+    }
 }
 
 /// The input an element was decoded from: the wire observation that sampled it, or for a decoder

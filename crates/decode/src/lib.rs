@@ -30,8 +30,9 @@ pub use host::{
     Source, SourceError, Stats, Subscription, Turn, Window, WindowId, citation,
 };
 pub use output::{
-    Cause, Element, FieldId, Id, KindId, LinkId, MAX_BITS, MAX_CHUNK, MAX_FIELDS, MAX_LINKS,
-    MAX_TEXT, Need, Observation, Op, Out, Reason, Ref, Role, SeqId, Span, Status, Tick, Value,
+    BitBytes, Cause, Element, FieldId, Id, KindId, LinkId, MAX_BITS, MAX_CHUNK, MAX_FIELDS,
+    MAX_LINKS, MAX_TEXT, Need, Observation, Op, Out, Reason, Ref, Role, SeqId, Span, Status, Tick,
+    Value,
 };
 pub use schema::{
     CONTRACT, Contract, Definition, ElementType, FieldDecl, FieldType, KindDecl, Label, LabelPiece,

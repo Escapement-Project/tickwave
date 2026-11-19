@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 escapement-tickwave-view = { version = "0.1.0", path = "../view", default-features = false, optional = true }
 foldhash = "0.2.0"
+smallvec = { version = "1.16.6", features = ["union"] }
 thiserror = "2.0.21"
 
 [features]

@@ -561,7 +561,7 @@ fn every_operation_is_checked_and_a_batch_commits_whole() {
                 f,
                 B,
                 Value::Bits {
-                    bytes: vec![0; 2],
+                    bytes: vec![0; 2].into(),
                     bits: 4,
                 },
             )],

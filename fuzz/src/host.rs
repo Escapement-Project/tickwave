@@ -40,7 +40,7 @@ impl Val {
             Val::Name(n) => Value::Name(*n),
             Val::Text(t) => Value::Text(t.clone()),
             Val::Bits(bytes, bits) => Value::Bits {
-                bytes: bytes.clone(),
+                bytes: bytes.as_slice().into(),
                 bits: *bits,
             },
             Val::Unknown(reason, needs) => Value::Unknown {

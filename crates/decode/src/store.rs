@@ -841,7 +841,10 @@ mod tests {
                 Op::Set {
                     id,
                     field: crate::FieldId(0),
-                    value: Value::Bits { bytes, bits },
+                    value: Value::Bits {
+                        bytes: bytes.into(),
+                        bits,
+                    },
                     span: None,
                     driver: None,
                 },

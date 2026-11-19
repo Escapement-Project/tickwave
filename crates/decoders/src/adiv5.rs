@@ -915,10 +915,11 @@ fn increment(csw: u32, read: bool) -> Result<u32, Reason> {
 /// The bytes one DRW or banked data word moved, lowest address first: `n` bytes from address
 /// `from`, each from the byte lane its address gives (table C2-3, C2.2.7).
 fn lanes(word: u32, from: u32, n: u32) -> Value {
+    let bytes = std::array::from_fn::<u8, 4, _>(|k| {
+        (word >> (8 * (from.wrapping_add(k as u32) & 3))) as u8
+    });
     Value::Bits {
-        bytes: (0..n)
-            .map(|k| (word >> (8 * (from.wrapping_add(k) & 3))) as u8)
-            .collect(),
+        bytes: bytes[..n.min(4) as usize].into(),
         bits: 8 * n,
     }
 }

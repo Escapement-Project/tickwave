@@ -579,7 +579,7 @@ mod tests {
             },
             (4..=5, 0) => {
                 let n = rng.below(4) as usize;
-                let bytes: Vec<u8> = (0..n)
+                let bytes = (0..n)
                     .map(|_| [b'\r', b'\n', b'q', 0x15][rng.below(4) as usize])
                     .collect();
                 Op::Set {
