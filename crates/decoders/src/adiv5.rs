@@ -4,8 +4,8 @@
 //!
 //! ADIv5 reads its transfers as pieces, typed fields only. A SELECT write sets the DP bank and
 //! the AP and its register bank. Over SWD an AP read's data arrives in the next AP read or RDBUFF
-//! read, so an AP read stays open until then; over JTAG-DP each read carries its own, which the
-//! setting `reads` says ("posted" or "own").
+//! read, so an AP read stays open until then; over JTAG-DP each read carries its own. ADIv5 takes
+//! either as its input `transfers`, and knows which from the input it is bound to.
 //!
 //! Each AP's class comes from its IDR reads (ADIv5.2 C1.3.2), and an AP access carries the class
 //! known when it was made; an IDR read carries the class its own value gives. A register's name
@@ -205,31 +205,30 @@ pub fn adi_schema() -> Schema {
     .with_open_at_most(3)
 }
 
-/// Whether a read's data arrives in a later transfer, as SWD posts AP reads, or in its own, as
-/// JTAG-DP's transfers carry it: the names of the setting `reads`.
-pub const READS: SettingId = SettingId(0);
-pub const READS_NAMES: [&str; 2] = ["posted", "own"];
+/// ADIv5's inputs: SWD's transfers, whose AP reads are posted, and JTAG-DP's, each read carrying
+/// its own data.
+pub const FROM_SWD: usize = 0;
+pub const FROM_JTAG_DP: usize = 1;
 /// Each AP's IDR from the start, AP 0 first, `IDR_NOT_GIVEN` for an AP left out. Empty, the
 /// default, gives none.
-pub const IDR: SettingId = SettingId(1);
+pub const IDR: SettingId = SettingId(0);
 pub const IDR_NOT_GIVEN: i64 = -1;
 
 pub fn adi_definition() -> Arc<Definition> {
     Arc::new(
         Definition::new("adiv5", 1, adi_schema())
-            .with_inputs([UpstreamDecl::new("transfers", Mode::Pieces)
-                .from(["swd", "jtag-dp"])
-                .with_kinds(["transfer"])])
-            .with_settings(vec![
-                SettingDecl::choice("reads", READS_NAMES, 0),
-                SettingDecl::list("idr", IDR_NOT_GIVEN..=0xFFFF_FFFF, 256, vec![]),
-            ]),
+            .with_inputs(["swd", "jtag-dp"].map(|from| {
+                UpstreamDecl::new("transfers", Mode::Pieces)
+                    .from([from])
+                    .with_kinds(["transfer"])
+            }))
+            .with_settings(vec![SettingDecl::list(
+                "idr",
+                IDR_NOT_GIVEN..=0xFFFF_FFFF,
+                256,
+                vec![],
+            )]),
     )
-}
-
-/// ADIv5's reads setting, as a binding gives it: each read carrying its own data, or posted.
-pub fn reads(own: bool) -> (&'static str, Setting) {
-    ("reads", Setting::Name(name(READS_NAMES[usize::from(own)])))
 }
 
 /// ADIv5's IDR setting, as a binding gives it: each AP's IDR from the start, AP 0 first.
@@ -392,7 +391,7 @@ impl Adi {
     pub fn factory() -> Factory {
         Box::new(|b, local| {
             let mut adi = Self::new(local);
-            adi.own_reads = b.choice(READS) == Some(1);
+            adi.own_reads = b.input() == FROM_JTAG_DP;
             // Bound, each entry is a 32-bit IDR or `IDR_NOT_GIVEN`, and there are at most 256.
             for (ap, &v) in b.list(IDR).unwrap_or(&[]).iter().enumerate() {
                 if v != IDR_NOT_GIVEN {

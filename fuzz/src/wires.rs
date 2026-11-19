@@ -296,7 +296,7 @@ pub fn jtag(c: &Case) {
             adiv5::adi_definition(),
             InputSpec::Upstream(dp),
             adiv5::Adi::factory(),
-            &[adiv5::reads(true)],
+            &[],
             all(),
         )
         .unwrap();

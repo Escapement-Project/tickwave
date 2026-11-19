@@ -683,7 +683,7 @@ pub fn stack_dp(
         adiv5::adi_definition(),
         InputSpec::Upstream(dp),
         adiv5::Adi::factory(),
-        &[adiv5::reads(true)],
+        &[],
         vec![],
     )?;
     fn n(i: &Completed, f: escapement_tickwave_decode::FieldId) -> Option<u64> {

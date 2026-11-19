@@ -377,7 +377,7 @@ fn jtag_never_panics_and_never_breaks_a_rule() {
                 adiv5::adi_definition(),
                 InputSpec::Upstream(dp),
                 adiv5::Adi::factory(),
-                &[adiv5::reads(true)],
+                &[],
                 all(),
             )
             .unwrap();

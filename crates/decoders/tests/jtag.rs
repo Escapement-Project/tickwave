@@ -1016,7 +1016,7 @@ fn jtag_dp_reads_the_daps_parts_of_a_chain_as_transfers_adiv5_reads() {
             adiv5::adi_definition(),
             InputSpec::Upstream(dp),
             adiv5::Adi::factory(),
-            &[adiv5::reads(true)],
+            &[],
             all(),
         )
         .unwrap();
@@ -1076,6 +1076,45 @@ fn jtag_dp_reads_the_daps_parts_of_a_chain_as_transfers_adiv5_reads() {
     let names: Vec<_> = dp_reads.iter().map(|d| w(d, adiv5::DP_REG)).collect();
     assert_eq!(&names[..2], [Some(4), Some(6)], "RDBUFF, CTRL/STAT");
     assert_eq!(w(&dp_reads[1], adiv5::DP_VALUE), Some(0xF000_0040));
+}
+
+/// ADIv5 takes SWD's or JTAG-DP's transfers; JTAG's scans are neither.
+#[test]
+fn adiv5_is_refused_on_jtag_without_jtag_dp() {
+    use escapement_tickwave_decode::BindError;
+    use escapement_tickwave_decoders::adiv5;
+    let mut s = Session::new(5_000, 100);
+    s.tms(&[1, 1, 1, 1, 1, 0]);
+    s.end = s.t + 20;
+    let mut h = Host::default();
+    let j = h
+        .add(
+            name("jtag"),
+            jtag::definition(),
+            InputSpec::Wire {
+                source: Box::new(s.wires()),
+                local: None,
+            },
+            jtag::Jtag::factory(64),
+            &[],
+            all(),
+        )
+        .unwrap();
+    let adi = h.add(
+        name("adi"),
+        adiv5::adi_definition(),
+        InputSpec::Upstream(j),
+        adiv5::Adi::factory(),
+        &[],
+        all(),
+    );
+    assert_eq!(
+        adi.err(),
+        Some(BindError::NotAnInput {
+            upstream: name("jtag"),
+            definition: name("jtag"),
+        })
+    );
 }
 
 fn dr_scan(s: &mut Session, n: usize, tdo: u64) {
