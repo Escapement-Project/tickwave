@@ -1418,7 +1418,7 @@ dependencies = [
 
 [[package]]
 name = "escapement-tickwave-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -1446,7 +1446,7 @@ dependencies = [
 
 [[package]]
 name = "escapement-tickwave-convert-wasm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "escapement-tickwave-format",
  "escapement-tickwave-import",
@@ -1457,7 +1457,7 @@ dependencies = [
 
 [[package]]
 name = "escapement-tickwave-egui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "eframe",
@@ -1474,7 +1474,7 @@ dependencies = [
 
 [[package]]
 name = "escapement-tickwave-format"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "rayon",
@@ -1488,7 +1488,7 @@ dependencies = [
 
 [[package]]
 name = "escapement-tickwave-import"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "csv",
  "escapement-tickwave-format",
@@ -1505,7 +1505,7 @@ dependencies = [
 
 [[package]]
 name = "escapement-tickwave-view"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "escapement-tickwave-format",
@@ -1524,7 +1524,7 @@ dependencies = [
 
 [[package]]
 name = "escapement-tickwave-wasm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "escapement-tickwave-format",
  "js-sys",

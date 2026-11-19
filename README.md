@@ -42,13 +42,13 @@ computer.
 ### The elements
 
 Each release puts the elements' files on tickwave's site, in a directory named after its version:
-`https://escapement-project.github.io/tickwave/v0.1.0/`. A published directory never changes, and
+`https://escapement-project.github.io/tickwave/v0.1.1/`. A published directory never changes, and
 its `SHA256SUMS` lists each file's SHA-256 digest. A page on any site loads the elements from
 there:
 
 ```html
-<link rel="stylesheet" href="https://escapement-project.github.io/tickwave/v0.1.0/tickwave.css">
-<script type="module" src="https://escapement-project.github.io/tickwave/v0.1.0/tickwave.js"></script>
+<link rel="stylesheet" href="https://escapement-project.github.io/tickwave/v0.1.1/tickwave.css">
+<script type="module" src="https://escapement-project.github.io/tickwave/v0.1.1/tickwave.js"></script>
 ```
 
 To serve them from the page's own host instead, copy the whole directory. `web/README.md` covers
@@ -60,7 +60,7 @@ The crates aren't on crates.io. Depend on them by git, at a release's tag:
 
 ```toml
 [dependencies]
-escapement-tickwave-format = { git = "https://github.com/Escapement-Project/tickwave", tag = "v0.1.0" }
+escapement-tickwave-format = { git = "https://github.com/Escapement-Project/tickwave", tag = "v0.1.1" }
 ```
 
 `escapement-tickwave-view` and `escapement-tickwave-egui` come the same way.

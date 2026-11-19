@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.1.1
 
 A recording on another site opens when that site sends `Access-Control-Allow-Origin`, as GitHub
 Pages does.

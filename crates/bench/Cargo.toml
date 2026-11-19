@@ -7,7 +7,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-escapement-tickwave-format = { version = "0.1.0", path = "../format" }
+escapement-tickwave-format = { version = "0.1.1", path = "../format" }
 serde_json = "1.0.154"
 
 [dev-dependencies]
