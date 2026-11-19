@@ -1578,3 +1578,263 @@ fn a_format_from_a_selection_without_a_reset_does_not_know_its_sampling_edge() {
         })
     );
 }
+
+// ---- Scan Selection Directives ------------------------------------------------------------------
+
+/// An SSD's directive and payload, first bit first (table 20-14).
+fn ssd_bits(directive: [u8; 3], payload: u64, n: usize) -> Vec<u8> {
+    let mut v = directive.to_vec();
+    v.extend((0..n).map(|k| (payload >> k & 1) as u8));
+    v
+}
+const DA: [u8; 3] = [0, 0, 0];
+const SA: [u8; 3] = [0, 0, 1];
+const SOC: [u8; 3] = [0, 1, 0];
+const SOT: [u8; 3] = [0, 1, 1];
+
+impl Gen {
+    /// OScan1 activation, then SSDE = 1 at control level two, back in Run-Test/Idle.
+    fn ssde_on(&mut self) {
+        self.activate_oscan1();
+        self.oscan1(&enter_command_level());
+        self.oscan1_command(0, 0b10001);
+        self.oscan1_command(0, 1);
+    }
+
+    /// SSD bits as TDI with TMS 0, then the bit after them, TDI 1 and TMS `exit`.
+    fn ssd(&mut self, bits: &[u8], exit: bool) {
+        for &b in bits {
+            self.clock_oscan1(false, b == 1, true);
+        }
+        self.clock_oscan1(exit, true, true);
+    }
+}
+
+/// Each SSD's directive, outcome and SSD state after it.
+fn ssds(h: &Host, c: AnalysisId) -> Vec<(Option<u16>, Option<u16>, Option<Value>)> {
+    (of(h, c, &[cjtag::SSD]).iter())
+        .map(|i| {
+            (
+                name_of(i, cjtag::DIRECTIVE),
+                name_of(i, cjtag::SSD_OUTCOME),
+                value(i, cjtag::SSD_STATE),
+            )
+        })
+        .collect()
+}
+
+fn ssd_state(n: u16) -> Option<Value> {
+    Some(Value::Name(n))
+}
+
+#[test]
+fn ssds_in_run_test_idle_and_pause_dr_set_the_ssd_state() {
+    // SSDE 0, as after a reset: TDI 0 bits in Run-Test/Idle are no SSD.
+    let mut g = Gen::new();
+    g.activate_oscan1();
+    g.ssd(&DA, false);
+    let (h, [c, _]) = decode(&g, true);
+    assert!(of(&h, c, &[cjtag::SSD]).is_empty());
+
+    // In Run-Test/Idle any SSD leaves Select All; in Pause-DR, Deselect All leaves SSD_DA_DR and
+    // Select All brings SSD_SA back. An SSD's item spans its own bits.
+    let mut g = Gen::new();
+    g.ssde_on();
+    g.ssd(&DA, false);
+    g.ssd(&SA, false);
+    g.oscan1(&[1, 0, 1, 0]);
+    g.ssd(&DA, false);
+    g.ssd(&SA, false);
+    let (h, [c, _]) = decode(&g, true);
+    assert_eq!(
+        ssds(&h, c),
+        [
+            (Some(0), Some(0), ssd_state(0)),
+            (Some(1), Some(0), ssd_state(0)),
+            (Some(0), Some(0), ssd_state(2)),
+            (Some(1), Some(0), ssd_state(0)),
+        ]
+    );
+    let items = of(&h, c, &[cjtag::SSD]);
+    let packets = of(&h, c, &[cjtag::PACKET]);
+    let first = packets
+        .iter()
+        .position(|p| p.start == items[0].start)
+        .unwrap();
+    assert_eq!(items[0].end, packets[first + 2].end, "three bits");
+}
+
+#[test]
+fn an_ssd_in_pause_dr_decides_whether_an_escape_counts() {
+    // Deselect All in Pause-DR: a deselection escape once the Delayed SSD State has it, a TCK
+    // after, is not qualified, so it is the packet's bit; after Select All it is taken.
+    for (then, offline) in [(DA, false), (SA, true)] {
+        let mut g = Gen::new();
+        g.ssde_on();
+        g.oscan1(&[1, 0, 1, 0]);
+        g.ssd(&then, false);
+        // TDI 1: a TDI 0 here would start another SSD.
+        g.clock_oscan1(false, true, true);
+        g.bit(false, 4);
+        g.bit(false, 0);
+        g.bit(true, 0);
+        let (h, [c, _]) = decode(&g, true);
+        assert_eq!(of(&h, c, &[cjtag::OFFLINE]).len(), usize::from(offline));
+    }
+}
+
+#[test]
+fn a_select_one_ssd_compares_the_controller_id() {
+    // After a reset the controller ID is zero: a CID of 0 selects it, 5 does not; a TCA is never
+    // known to match, so the SSD state after it is unknown, and an escape it decides ends the
+    // framing.
+    for (bits, state) in [
+        (ssd_bits(SOC, 0, 4), ssd_state(5)),
+        (ssd_bits(SOC, 5, 4), ssd_state(3)),
+        (
+            ssd_bits(SOT, 0x1_2345_6789, 35),
+            Some(Value::Unknown {
+                reason: cjtag::SSD_STATE_UNKNOWN,
+                needs: None,
+            }),
+        ),
+    ] {
+        let mut g = Gen::new();
+        g.ssde_on();
+        g.oscan1(&[1, 1, 0, 1, 0]);
+        g.ssd(&bits, false);
+        g.clock_oscan1(false, true, true);
+        g.bit(false, 4);
+        g.oscan1(&[0, 0]);
+        let (h, [c, _]) = decode(&g, true);
+        let got = ssds(&h, c);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].2, state);
+        let ssd = &of(&h, c, &[cjtag::SSD])[0];
+        let payload = if bits[1] == 1 && bits[2] == 1 {
+            value(ssd, cjtag::SSD_TCA)
+        } else {
+            value(ssd, cjtag::SSD_CID)
+        };
+        let want = (bits[3..].iter().enumerate()).fold(0u64, |v, (k, &b)| v | u64::from(b) << k);
+        assert!(matches!(payload, Some(Value::Word { value, .. }) if value == want));
+        if state
+            .as_ref()
+            .is_some_and(|s| matches!(s, Value::Unknown { .. }))
+        {
+            let escape = &of(&h, c, &[cjtag::ESCAPE])[1];
+            assert_eq!(name_of(escape, cjtag::RESPONSE), Some(3));
+            let cut = of(&h, c, &[cjtag::FORMAT]);
+            assert_eq!(
+                cut.last().unwrap().status,
+                Some(Status::Incomplete(cjtag::SSD_UNKNOWN))
+            );
+        }
+    }
+}
+
+#[test]
+fn an_ssd_is_aborted_by_tms_1_and_permitted_by_the_delayed_state() {
+    // TMS 1 in its bits, or in the one after them: aborted, no effect.
+    let mut g = Gen::new();
+    g.ssde_on();
+    g.oscan1(&[1, 0, 1, 0]);
+    g.clock_oscan1(false, false, true);
+    g.clock_oscan1(true, false, true);
+    g.oscan1(&[1, 0]);
+    g.ssd(&DA, true);
+    let (h, [c, _]) = decode(&g, true);
+    let got: Vec<_> = ssds(&h, c).iter().map(|s| s.1).collect();
+    assert_eq!(got, [Some(1), Some(1)]);
+
+    // After Deselect All in Pause-DR, an SSD in Run-Test/Idle is not processed (table 20-16).
+    let mut g = Gen::new();
+    g.ssde_on();
+    g.oscan1(&[1, 0, 1, 0]);
+    g.ssd(&DA, false);
+    g.oscan1(&[1, 1, 0]);
+    g.ssd(&SA, false);
+    let (h, [c, _]) = decode(&g, true);
+    assert_eq!(of(&h, c, &[cjtag::SSD]).len(), 1);
+}
+
+#[test]
+fn an_executed_ssd_zeroes_the_zero_bit_count() {
+    // One zero-bit scan, an SSD, one more, then a shifting scan: control level one, not two.
+    for (with_ssd, level) in [(true, 1), (false, 2)] {
+        let mut g = Gen::new();
+        g.ssde_on();
+        g.oscan1(&ZBS);
+        if with_ssd {
+            g.ssd(&SA, false);
+        }
+        g.oscan1(&ZBS);
+        g.oscan1(&dr_scan(1));
+        let (h, [c, _]) = decode(&g, true);
+        let levels = of(&h, c, &[cjtag::LEVEL]);
+        let last = levels.last().unwrap();
+        assert!(matches!(
+            value(last, cjtag::CONTROL_LEVEL),
+            Some(Value::Word { value, .. }) if value == level
+        ));
+    }
+}
+
+#[test]
+fn in_jscan3_with_ssde_set_an_escape_s_qualification_is_unknown() {
+    let mut g = Gen::new();
+    g.reset_to_idle();
+    g.jscan(&enter_command_level());
+    g.jscan(&command(3, 3));
+    g.jscan(&command(0, 0b10001));
+    g.jscan(&command(0, 1));
+    g.jscan(&[0, 0]);
+    g.bit(false, 4);
+    g.jscan(&[0, 1, 1]);
+    let (h, [c, _]) = decode(&g, true);
+    let escape = &of(&h, c, &[cjtag::ESCAPE])[1];
+    assert_eq!(name_of(escape, cjtag::RESPONSE), Some(3));
+    assert!(of(&h, c, &[cjtag::OFFLINE]).is_empty());
+
+    // In JScan2 SSDs are not detected (table 23-10): the same escape is taken.
+    let mut g = Gen::new();
+    g.reset_to_idle();
+    g.jscan(&enter_command_level());
+    g.jscan(&command(3, 2));
+    g.jscan(&command(0, 0b10001));
+    g.jscan(&command(0, 1));
+    g.jscan(&[0, 0]);
+    g.bit(false, 4);
+    let (h, [c, _]) = decode(&g, true);
+    assert_eq!(of(&h, c, &[cjtag::OFFLINE]).len(), 1);
+}
+
+#[test]
+fn framing_lost_leaves_cgm_unknown_until_a_reset() {
+    // CGM set, then OScan3, which is not framed: commands may pass unseen, so after the selection
+    // that frames it again, an SCNS scan's register is unknown.
+    let mut g = Gen::new();
+    g.activate_oscan1();
+    g.oscan1(&enter_command_level());
+    g.oscan1_command(6, 0);
+    g.oscan1_command(3, 11);
+    g.oscan1(&[0, 0, 0]);
+    // Parked in Pause-DR, a single state, then to Run-Test/Idle.
+    g.select(0b1100, 0b1011, None);
+    g.oscan1(&[1, 1, 0]);
+    g.oscan1(&enter_command_level());
+    g.oscan1_command(9, 2);
+    g.oscan1_cr(0, 0, 32);
+    // Nor is the controller ID known, so an MCM for ID zero leaves CGM unknown too.
+    g.oscan1_command(6, 0);
+    g.oscan1_command(9, 2);
+    g.oscan1_cr(0, 0, 32);
+    let (h, [c, _]) = decode(&g, true);
+    let unknown = Some(Value::Unknown {
+        reason: cjtag::CGM_UNKNOWN,
+        needs: None,
+    });
+    let crs = of(&h, c, &[cjtag::CR_SCAN]);
+    assert_eq!(crs.len(), 2);
+    assert!(crs.iter().all(|cr| value(cr, cjtag::REGISTER) == unknown));
+}

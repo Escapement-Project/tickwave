@@ -24,12 +24,17 @@
 //! (11.9.7), as the `start_up` setting or a CNFG0 read's DAS bit says, comes up Offline after a
 //! reset escape and takes a selection escape only after its alternating preamble.
 //!
-//! Not decoded: ready and delay elements, transport packets, SScan and MScan, and the scan
-//! selection directive state that also qualifies escapes. Each is reported when met. A bit is
+//! Scan Selection Directives (20.10) are followed where they are on TMSC, in OScan1 and OScan5:
+//! their SSD state, one TCK late, qualifies escapes (11.6.2), and in Run-Test/Idle they store SGC.
+//! In JScan3 they are TDI data off TMSC, so with SSDE set the SSD state is unknown there, and an
+//! escape whose qualification it decides ends the framing.
+//!
+//! Not decoded: ready and delay elements, transport packets, SScan and MScan. Each is reported
+//! when met. A bit is
 //! TMSC's level before TCKC falls whichever edge the target samples at; the two agree while TMSC
 //! moves only with TCKC low.
 
-use super::{FORMAT_UNFRAMED, READY_DELAY, TRANSPORT};
+use super::{FORMAT_UNFRAMED, READY_DELAY, SSD_UNKNOWN, TRANSPORT};
 use crate::jtag;
 use escapement_tickwave_decode::Cause;
 
@@ -86,6 +91,31 @@ pub enum Response {
     Unqualified,
     /// A deselection escape while Offline: ignored.
     Offline,
+    /// The SSD state that decides it is not known.
+    Unknown,
+}
+
+/// A Scan Selection Directive (table 20-14).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SsdKind {
+    DeselectAll,
+    SelectAll,
+    /// Select one by its controller ID.
+    SelectCid,
+    /// Select one by its TAP.7 Controller Address.
+    SelectTca,
+}
+
+/// The SSD state (table 20-13): who may be a Pause-xR Group Member after the last SSD.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ssd {
+    SelectAll,
+    DeselectedIr,
+    DeselectedDr,
+    NotSelectedIr,
+    NotSelectedDr,
+    SelectedIr,
+    SelectedDr,
 }
 
 /// What placed the controller Offline.
@@ -217,6 +247,16 @@ pub enum Ev {
     Format(u8),
     /// Test-Logic-Reset brings back the default scan format, whose Standard Protocol follows.
     DefaultFormat,
+    /// A Scan Selection Directive's start bit.
+    SsdStart,
+    /// A Scan Selection Directive ends: executed, with the SSD state after it where known, or
+    /// aborted; its kind once its directive bits are in, and its payload.
+    Ssd {
+        kind: Option<SsdKind>,
+        payload: Option<u64>,
+        executed: bool,
+        state: Option<Ssd>,
+    },
     /// Framing needs a TAPC state that is not known.
     NeedContext,
     Unsupported(Cause),
@@ -257,6 +297,36 @@ enum Cid {
     Valid(u8),
     Invalid,
     Unknown,
+}
+
+/// A Scan Selection Directive under way: the TAPC state it is sent in, and its TDI bits so far,
+/// the first in bit 0.
+#[derive(Clone, Copy, Debug)]
+struct SsdRun {
+    state: u8,
+    bits: u64,
+    count: u8,
+}
+
+impl SsdRun {
+    fn kind(&self) -> Option<SsdKind> {
+        (self.count >= 3).then_some(match (self.bits >> 1 & 1, self.bits >> 2 & 1) {
+            (0, 0) => SsdKind::DeselectAll,
+            (0, _) => SsdKind::SelectAll,
+            (_, 0) => SsdKind::SelectCid,
+            _ => SsdKind::SelectTca,
+        })
+    }
+
+    /// Its size in bits, directive and payload (table 20-14), once the directive is in.
+    fn size(&self) -> u8 {
+        match self.kind() {
+            None => 3,
+            Some(SsdKind::DeselectAll | SsdKind::SelectAll) => 3,
+            Some(SsdKind::SelectCid) => 7,
+            Some(SsdKind::SelectTca) => 38,
+        }
+    }
 }
 
 /// The Selection Alert detector: consecutive 1s before a start bit, then how many of the alert's
@@ -306,6 +376,14 @@ pub struct Tap7 {
     /// Offline at start-up: the last bits, the latest in bit 0, and how many since an escape.
     history: u32,
     since_escape: u8,
+    /// SSDE, where known: whether Scan Selection Directives are processed.
+    ssde: Option<bool>,
+    /// The SSD state where known, and the same one TCK late (the Delayed SSD State).
+    ssd: Option<Ssd>,
+    ssd_late: Option<Ssd>,
+    ssd_run: Option<SsdRun>,
+    /// The Standard Protocol is in JScan3, where SSDs are TDI data off TMSC.
+    jscan3: bool,
     slot: usize,
     values: [bool; 3],
     eot: bool,
@@ -341,6 +419,11 @@ impl Default for Tap7 {
             alert: Alert::default(),
             history: 0,
             since_escape: 0,
+            ssde: None,
+            ssd: None,
+            ssd_late: None,
+            ssd_run: None,
+            jscan3: false,
             slot: 0,
             values: [false; 3],
             eot: false,
@@ -448,6 +531,12 @@ impl Tap7 {
         self.suspend = false;
         self.inhibited = false;
         self.stored = None;
+        // The SSD state starts at Select All (rule 20.10.2 o), SSDE at 0.
+        self.ssde = Some(false);
+        self.ssd = Some(Ssd::SelectAll);
+        self.ssd_run = None;
+        // The default scan format is JScan0 or JScan1 (table 10-7).
+        self.jscan3 = false;
     }
 
     fn exit_level(&mut self, out: &mut Vec<Ev>) {
@@ -459,10 +548,19 @@ impl Tap7 {
         self.cr = None;
     }
 
-    /// Framing is lost: nothing about the protocol or the TAPC is known until an escape.
+    /// Framing is lost: nothing about the protocol or the TAPC is known until an escape, and the
+    /// registers commands store may change unseen.
     fn lose(&mut self) {
         self.protocol = Protocol::Unknown;
         self.tap = ALL;
+        self.sredge = None;
+        self.cgm = None;
+        self.sgc = None;
+        self.cid = Cid::Unknown;
+        self.ssde = None;
+        self.ssd = None;
+        self.ssd_late = None;
+        self.ssd_run = None;
     }
 
     /// One TCKC high phase: TMSC's level before TCKC fell, and how many TMSC edges it held.
@@ -518,6 +616,7 @@ impl Tap7 {
                         self.reset(out);
                     } else {
                         // A JScan format brings the Standard Protocol (table 11-8).
+                        self.jscan3 = then == 3;
                         self.protocol = if then < 4 {
                             Protocol::Standard
                         } else {
@@ -559,6 +658,15 @@ impl Tap7 {
         let response = match self.protocol {
             Protocol::Standard | Protocol::Advanced(_) if !system_path => Response::Unqualified,
             Protocol::Advanced(_) if self.slot != 0 => Response::Unqualified,
+            // Only with the Delayed SSD State Select All and no SSD under way (11.6.2 b).
+            Protocol::Standard | Protocol::Advanced(_) if self.ssd_run.is_some() => {
+                Response::Unqualified
+            }
+            Protocol::Standard | Protocol::Advanced(_) => match self.ssd_late {
+                Some(Ssd::SelectAll) => Response::Taken,
+                Some(_) => Response::Unqualified,
+                None => Response::Unknown,
+            },
             Protocol::Offline | Protocol::StartUp if kind == Escape::Deselection => {
                 Response::Offline
             }
@@ -571,7 +679,8 @@ impl Tap7 {
         };
         let standard = self.protocol == Protocol::Standard;
         // Only the Standard Protocol and start-up show an escape they ignore: elsewhere the bit is a
-        // Scan Packet's, Check Packet's or Selection Sequence's like any other.
+        // Scan Packet's, Check Packet's or Selection Sequence's like any other. One whose response is
+        // unknown is shown wherever it is.
         if response == Response::Unqualified && !standard && !start_up {
             return false;
         }
@@ -582,6 +691,10 @@ impl Tap7 {
         });
         if standard {
             self.standard(value, out);
+        }
+        if response == Response::Unknown {
+            out.push(Ev::Unsupported(SSD_UNKNOWN));
+            self.lose();
         }
         if response != Response::Taken {
             return true;
@@ -640,15 +753,26 @@ impl Tap7 {
 
     /// A Standard Protocol TMS bit.
     fn standard(&mut self, value: bool, out: &mut Vec<Ev>) {
-        let leaving_update = self.tap() == Some(UPDATE_DR);
+        self.ssd_late = self.ssd;
+        let state = self.tap();
+        // In JScan3 an SSD is TDI data, off TMSC: one may start wherever it could.
+        if self.jscan3
+            && self.ssde != Some(false)
+            && !value
+            && state.is_some_and(|s| matches!(s, RTI | PAUSE_IR | PAUSE_DR))
+            && self.ssd_path()
+        {
+            self.ssd = None;
+        }
+        let leaving_update = state == Some(UPDATE_DR);
         self.advance(value, None, out);
         // A non-JScan format stored in the Standard Protocol: a Check Packet follows the TMS bit
-        // of the command's Update-DR (21.7.1; 4.3.2.4). A JScan one changes nothing this decoder
-        // frames.
-        if leaving_update
-            && let Some(f) = self.stored.take()
-            && f >= 4
-        {
+        // of the command's Update-DR (21.7.1; 4.3.2.4). A JScan one takes effect there.
+        if leaving_update && let Some(f) = self.stored.take() {
+            if f < 4 {
+                self.jscan3 = f == 3;
+                return;
+            }
             self.protocol = Protocol::Check {
                 then: f,
                 preamble: false,
@@ -657,6 +781,112 @@ impl Tap7 {
                 reset: false,
             };
         }
+    }
+
+    /// Whether the System Path is in use for SSDs: no control level, and a zero-bit count of at
+    /// most one unless ZBSINH or SUSPEND (figure 20-9).
+    fn ssd_path(&self) -> bool {
+        self.level.is_none() && (self.inhibited || self.suspend || self.zbs <= 1)
+    }
+
+    /// One TCK's TDI and TMS for Scan Selection Directives, the TAPC in `state`, in a format that
+    /// carries them (table 23-10): start, continue, execute or abort one (20.10.2 e to l).
+    fn ssd_bit(&mut self, state: u8, tdi: bool, tms: bool, out: &mut Vec<Ev>) {
+        if let Some(mut run) = self.ssd_run.take() {
+            // TMS 1 in any of its bits, or in the one after them, aborts it.
+            if tms {
+                out.push(Ev::Ssd {
+                    kind: run.kind(),
+                    payload: None,
+                    executed: false,
+                    state: self.ssd,
+                });
+                return;
+            }
+            if run.count < run.size() {
+                run.bits |= u64::from(tdi) << run.count;
+                run.count += 1;
+                self.ssd_run = Some(run);
+                return;
+            }
+            self.ssd_execute(run, out);
+        }
+        let supporting = matches!(state, RTI | PAUSE_IR | PAUSE_DR);
+        if !supporting || tms || tdi || !self.ssd_path() {
+            return;
+        }
+        // Processing is permitted by the Delayed SSD State (table 20-16).
+        let permitted = match (self.ssd_late, state) {
+            (Some(Ssd::SelectAll), _) => Some(true),
+            (Some(Ssd::DeselectedIr | Ssd::NotSelectedIr | Ssd::SelectedIr), PAUSE_IR) => {
+                Some(true)
+            }
+            (Some(Ssd::DeselectedDr | Ssd::NotSelectedDr | Ssd::SelectedDr), PAUSE_DR) => {
+                Some(true)
+            }
+            (Some(_), _) => Some(false),
+            (None, _) => None,
+        };
+        match (self.ssde, permitted) {
+            (Some(true), Some(true)) => {
+                self.ssd_run = Some(SsdRun {
+                    state,
+                    bits: 0,
+                    count: 1,
+                });
+                out.push(Ev::SsdStart);
+            }
+            (Some(false), _) | (_, Some(false)) => {}
+            // One may start here, unseen.
+            _ => self.ssd = None,
+        }
+    }
+
+    /// An SSD whose bits and the TCK after them held TMS 0: its SSD state and SGC (tables 20-15,
+    /// 20-17), and an unlocked zero-bit count zeroed (20.10.1.7).
+    fn ssd_execute(&mut self, run: SsdRun, out: &mut Vec<Ev>) {
+        let Some(kind) = run.kind() else { return };
+        let payload = run.bits >> 3;
+        // A CID is known where the controller's is; a TCA, its own 35-bit address, never.
+        let matched = match (kind, self.cid) {
+            (SsdKind::SelectCid, Cid::Reset) => Some(payload == 0),
+            (SsdKind::SelectCid, Cid::Valid(c)) => Some(payload == u64::from(c)),
+            (SsdKind::SelectCid, Cid::Invalid) => Some(false),
+            _ => None,
+        };
+        let ir = run.state == PAUSE_IR;
+        let state = match kind {
+            _ if run.state == RTI => Some(Ssd::SelectAll),
+            SsdKind::SelectAll => Some(Ssd::SelectAll),
+            SsdKind::DeselectAll if ir => Some(Ssd::DeselectedIr),
+            SsdKind::DeselectAll => Some(Ssd::DeselectedDr),
+            _ => matched.map(|m| match (m, ir) {
+                (true, true) => Ssd::SelectedIr,
+                (true, false) => Ssd::SelectedDr,
+                (false, true) => Ssd::NotSelectedIr,
+                (false, false) => Ssd::NotSelectedDr,
+            }),
+        };
+        if run.state == RTI {
+            self.sgc = match (kind, matched) {
+                (SsdKind::DeselectAll, _) => Some(false),
+                (SsdKind::SelectAll, _) | (_, Some(true)) => Some(true),
+                (_, Some(false)) => self.sgc,
+                // Set if addressed, else left: known only where it is already set.
+                (_, None) => self.sgc.filter(|&s| s),
+            };
+        }
+        if self.level.is_none() {
+            self.zbs = 0;
+        }
+        self.ssd = state;
+        let payload = matches!(kind, SsdKind::SelectCid | SsdKind::SelectTca).then_some(payload);
+        out.push(Ev::Ssd {
+            kind: Some(kind),
+            payload,
+            executed: true,
+            state,
+        });
     }
 
     /// One bit of a Selection Sequence (11.7): the Online Activation Code, the Extension Code,
@@ -743,6 +973,9 @@ impl Tap7 {
             cid: self.cid,
             offline_start: self.offline_start,
             dsel_alerts: self.dsel_alerts,
+            ssde: self.ssde,
+            ssd: self.ssd,
+            ssd_late: self.ssd_late,
             protected: ec & 4 != 0,
             ..Self::default()
         };
@@ -833,6 +1066,12 @@ impl Tap7 {
             return;
         }
         self.previous_shift = shifting;
+        self.ssd_late = self.ssd;
+        if let (Some(state), Some(tdi)) = (self.tap(), tdi)
+            && matches!(format, 9 | 13)
+        {
+            self.ssd_bit(state, tdi, tms, out);
+        }
         let leaving_update = self.tap() == Some(UPDATE_DR);
         let writes = self.advance(tms, Some((tdi, tdo)), out);
         if leaving_update && writes {
@@ -1041,6 +1280,10 @@ impl Tap7 {
                 (1, 1, v) => {
                     self.cgm = Some(v == 1);
                     format!("Conditional Group Member CGM = {v}")
+                }
+                (4, 0, v) => {
+                    self.ssde = Some(v == 1);
+                    format!("Scan Selection Directives enabled SSDE = {v}")
                 }
                 (2, _, _) | (3, _, _) => {
                     let what = if b == 2 { "RDYC" } else { "DLYC" };

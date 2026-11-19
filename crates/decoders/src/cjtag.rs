@@ -32,8 +32,8 @@ use escapement_tickwave_decode::{
 };
 use std::sync::Arc;
 use tap7::{
-    Cr, Driver, Escape, Ev, MNEMONICS, Offline, Outcome, Path, Response, Selection, Tap7,
-    format_name,
+    Cr, Driver, Escape, Ev, MNEMONICS, Offline, Outcome, Path, Response, Selection, Ssd, SsdKind,
+    Tap7, format_name,
 };
 
 pub const TCKC: u8 = 0;
@@ -50,6 +50,7 @@ pub const SELECTION: KindId = KindId(7);
 pub const OFFLINE: KindId = KindId(8);
 pub const CR_SCAN: KindId = KindId(9);
 pub const ALERT: KindId = KindId(10);
+pub const SSD: KindId = KindId(11);
 
 /// `ESCAPE`'s fields and sequences: in the Standard Protocol a selection or deselection escape's
 /// bit is a TMS bit.
@@ -110,6 +111,12 @@ pub const CR_VALUE: FieldId = FieldId(4);
 pub const CR_MEANING: FieldId = FieldId(5);
 /// `ALERT`'s field: which alert, by its index in `ALERTS`.
 pub const ALERT_IS: FieldId = FieldId(0);
+/// `SSD`'s fields.
+pub const DIRECTIVE: FieldId = FieldId(0);
+pub const SSD_CID: FieldId = FieldId(1);
+pub const SSD_TCA: FieldId = FieldId(2);
+pub const SSD_OUTCOME: FieldId = FieldId(3);
+pub const SSD_STATE: FieldId = FieldId(4);
 
 pub const PROBE: Role = Role(0);
 pub const TARGET: Role = Role(1);
@@ -119,6 +126,7 @@ pub const PROTECTED: Reason = Reason(1);
 pub const NOT_ON_TMSC: Reason = Reason(2);
 pub const CGM_UNKNOWN: Reason = Reason(3);
 pub const SREDGE_UNKNOWN: Reason = Reason(4);
+pub const SSD_STATE_UNKNOWN: Reason = Reason(5);
 
 pub const GAP_CUT: Cause = Cause(0);
 pub const NEEDS_TAP: Cause = Cause(1);
@@ -127,11 +135,17 @@ pub const INTERRUPTED: Cause = Cause(3);
 pub const FORMAT_UNFRAMED: Cause = Cause(4);
 pub const READY_DELAY: Cause = Cause(5);
 pub const TRANSPORT: Cause = Cause(6);
+pub const SSD_UNKNOWN: Cause = Cause(7);
 
 /// `MEANING`'s names.
 pub const MEANINGS: [&str; 4] = ["reset", "selection", "deselection", "custom"];
 /// `RESPONSE`'s names.
-pub const RESPONSES: [&str; 3] = ["taken", "not qualified, ignored", "offline, ignored"];
+pub const RESPONSES: [&str; 4] = [
+    "taken",
+    "not qualified, ignored",
+    "offline, ignored",
+    "qualification unknown",
+];
 /// `RESULT`'s names.
 pub const RESULTS: [&str; 2] = ["reset", "continue"];
 /// `BRANCH`'s names: what the Online Activation Code selects (table 11-1).
@@ -169,6 +183,25 @@ pub const OFFLINE_BYS: [&str; 5] = [
 ];
 /// `ALERT_IS`'s names.
 pub const ALERTS: [&str; 2] = ["Selection", "Deselection"];
+/// `DIRECTIVE`'s names (table 20-14).
+pub const DIRECTIVES: [&str; 4] = [
+    "Deselect All",
+    "Select All",
+    "Select One by CID",
+    "Select One by TCA",
+];
+/// `SSD_OUTCOME`'s names.
+pub const SSD_OUTCOMES: [&str; 2] = ["executed", "aborted"];
+/// `SSD_STATE`'s names (table 20-13).
+pub const SSD_STATES: [&str; 7] = [
+    "SSD_SA",
+    "SSD_DA_IR",
+    "SSD_DA_DR",
+    "SSD_NS_IR",
+    "SSD_NS_DR",
+    "SSD_IS_IR",
+    "SSD_IS_DR",
+];
 /// `REGISTER`'s names: what a CR scan reaches (table 9-4), and the EPU bypass bit where CGM is 0
 /// (table 9-10).
 pub const REGISTERS: [&str; 20] = [
@@ -408,6 +441,23 @@ pub fn schema() -> Schema {
                 Label::default().field(ALERT_IS).text(" Alert"),
                 Label::default().text("alert"),
             ]),
+        KindDecl::new("ssd")
+            .with_row(2)
+            .with_fields(vec![
+                field("directive", names(&DIRECTIVES)),
+                field("CID", FieldType::Word { bits: 4 }),
+                field("TCA", FieldType::Word { bits: 35 }),
+                field("outcome", names(&SSD_OUTCOMES)),
+                field("SSD state", names(&SSD_STATES)),
+            ])
+            .with_labels(vec![
+                Label::default()
+                    .field(DIRECTIVE)
+                    .text(" ")
+                    .field(SSD_OUTCOME),
+                Label::default().field(DIRECTIVE),
+                Label::default().text("SSD"),
+            ]),
     ])
     .with_roles(["probe", "target"])
     .with_reasons([
@@ -417,6 +467,7 @@ pub fn schema() -> Schema {
         "in the Standard Protocol, TDI and TDO are not on TMSC",
         "CGM unknown, so the scan may reach the EPU bypass bit instead",
         "SREDGE unknown: no reset decoded, or stored conditionally while CGM was unknown",
+        "the SSD state is unknown: no reset decoded, a selection by TCA, or SSDs off TMSC",
     ])
     .with_causes([
         "a recording gap interrupts it",
@@ -426,6 +477,7 @@ pub fn schema() -> Schema {
         "a scan format this decoder does not frame",
         "ready or delay elements change the framing",
         "transport packets change the framing",
+        "an escape whose qualification the unknown SSD state decides",
     ])
     .with_open_at_most(3)
 }
@@ -673,6 +725,12 @@ pub struct Oscan {
     format: Option<(Id, u8)>,
     /// Where a Selection Alert being matched started: its item opens there once it completes.
     alert_from: Option<Tick>,
+    /// Where the last Scan Packet started, where the one before it ended, and where an SSD under
+    /// way started.
+    packet_from: Tick,
+    before_to: Tick,
+    packet_to: Tick,
+    ssd_from: Option<Tick>,
     /// The starts of the last two DR scans: a command's two parts.
     dr_begins: [Tick; 2],
     /// One phase's events, kept to reuse.
@@ -703,6 +761,10 @@ impl Oscan {
             level: None,
             format: None,
             alert_from: None,
+            packet_from: start,
+            before_to: start,
+            packet_to: start,
+            ssd_from: None,
             dr_begins: [start; 2],
             events: vec![],
             clocks: vec![],
@@ -723,6 +785,9 @@ impl Oscan {
         let mut f = self.last_fall.unwrap_or(self.floor);
         if let Some(a) = self.alert_from {
             f = f.min(a);
+        }
+        if let Some(s) = self.ssd_from {
+            f = f.min(s);
         }
         if let Some(s) = self.slots.first() {
             f = f.min(s.cell.start);
@@ -769,6 +834,7 @@ impl Oscan {
             } => {
                 self.tap.gap();
                 self.alert_from = None;
+                self.ssd_from = None;
                 self.close_all(from, Status::Incomplete(GAP_CUT), out);
                 self.toggles.clear();
                 self.high_since = clock.then_some(to);
@@ -849,7 +915,9 @@ impl Oscan {
                     self.toggles.first().copied().unwrap_or(rise)
                 };
                 match response {
-                    Some(Response::Unqualified | Response::Offline) => self.close_jscan(start, out),
+                    Some(Response::Unqualified | Response::Offline | Response::Unknown) => {
+                        self.close_jscan(start, out)
+                    }
                     _ => {
                         if let Some((id, _)) = self.selection.take() {
                             out.close(id, start, Status::Incomplete(INTERRUPTED));
@@ -873,6 +941,7 @@ impl Oscan {
                         Response::Taken => 0,
                         Response::Unqualified => 1,
                         Response::Offline => 2,
+                        Response::Unknown => 3,
                     };
                     out.set(id, RESPONSE, Value::Name(n));
                 }
@@ -937,6 +1006,49 @@ impl Oscan {
                 out.open(id, None, start);
                 out.set(id, ALERT_IS, Value::Name(u16::from(!selection)));
                 out.close(id, t, Status::Complete);
+            }
+            Ev::SsdStart => self.ssd_from = Some(self.packet_from),
+            Ev::Ssd {
+                kind,
+                payload,
+                executed,
+                state,
+            } => {
+                // Its own bits: the packet that executes or aborts it may start the next.
+                let start = self.ssd_from.take().unwrap_or(self.packet_from);
+                let end = self.before_to.max(start);
+                let id = Id::new(SSD, start);
+                out.open(id, None, start);
+                if let Some(k) = kind {
+                    let (n, field, bits) = match k {
+                        SsdKind::DeselectAll => (0, None, 0),
+                        SsdKind::SelectAll => (1, None, 0),
+                        SsdKind::SelectCid => (2, Some(SSD_CID), 4),
+                        SsdKind::SelectTca => (3, Some(SSD_TCA), 35),
+                    };
+                    out.set(id, DIRECTIVE, Value::Name(n));
+                    if let (Some(f), Some(value)) = (field, payload) {
+                        out.set(id, f, Value::Word { value, bits });
+                    }
+                }
+                out.set(id, SSD_OUTCOME, Value::Name(u16::from(!executed)));
+                let state = match state {
+                    Some(s) => Value::Name(match s {
+                        Ssd::SelectAll => 0,
+                        Ssd::DeselectedIr => 1,
+                        Ssd::DeselectedDr => 2,
+                        Ssd::NotSelectedIr => 3,
+                        Ssd::NotSelectedDr => 4,
+                        Ssd::SelectedIr => 5,
+                        Ssd::SelectedDr => 6,
+                    }),
+                    None => Value::Unknown {
+                        reason: SSD_STATE_UNKNOWN,
+                        needs: None,
+                    },
+                };
+                out.set(id, SSD_STATE, state);
+                out.close(id, end, Status::Complete);
             }
             Ev::DefaultFormat => {
                 if let Some((id, _)) = self.format.take() {
@@ -1194,6 +1306,9 @@ impl Oscan {
         };
         let id = Id::new(PACKET, first.at);
         out.open(id, None, first.cell.start);
+        self.packet_from = first.cell.start;
+        self.before_to = self.packet_to;
+        self.packet_to = last.cell.end;
         out.set(id, PACKET_FORMAT, Value::Text(format_name(first.format)));
         let mut tms_slot = None;
         let protected = self.tap.protected();
