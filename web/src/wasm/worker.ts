@@ -8,6 +8,8 @@ import { Opened, setCacheBytes, type WasmApi } from "./opened.ts";
 import { FIRST_READ, type Request, type Reply } from "./protocol.ts";
 
 let api: Promise<WasmApi> | null = null;
+// By import.meta.url, never self.location: a page on another origin runs this module from a blob
+// of its own (client.ts), so self.location is that blob.
 const loadApi = () =>
   (api ??= init({ module_or_path: new URL("./tickwave.wasm", import.meta.url) }).then(() => ({ footerStart, Recording })));
 

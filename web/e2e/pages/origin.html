@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>The elements loaded from a folder that may be on another site</title>
+<!--
+  ?from= the folder holding tickwave.js and tickwave.css, on this origin or another. The recording
+  and its sidecar are the page's own.
+-->
+<script type="module">
+const from = new URL(new URLSearchParams(location.search).get("from"), location.href);
+const css = document.createElement("link");
+css.rel = "stylesheet";
+css.href = new URL("tickwave.css", from).href;
+document.head.append(css);
+await import(new URL("tickwave.js", from).href);
+</script>
+</head>
+<body>
+<tickwave-inset id="i" src="../../fixtures/identify-swd.tickwave" annotations="../../fixtures/identify-swd.annotations.toml" annotation="dpidr-read" sweep="off" style="max-width: 440px"></tickwave-inset>
+<tickwave-view id="v" src="../../fixtures/identify-swd.tickwave"></tickwave-view>
+</body>
+</html>

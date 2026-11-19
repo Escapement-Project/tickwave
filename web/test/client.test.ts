@@ -14,6 +14,8 @@ class StandIn {
   }
 }
 (globalThis as { Worker?: unknown }).Worker = StandIn;
+// A page of the module's own origin, so the worker starts from its own URL.
+(globalThis as { location?: unknown }).location = { origin: new URL(import.meta.url).origin };
 const { WasmSource } = await import("../src/wasm/client.ts");
 
 /** Each message posted since `from`, as its requests' op and channel. */

@@ -216,9 +216,20 @@ Include one module, and the three elements are defined:
 
 `tickwave.js` reads recordings through a decoder in a worker. The first time a page needs a
 recording, it loads `tickwave-worker.js` and `tickwave.wasm` from beside itself, so keep the three
-files together. Recordings are fetched by byte range: the footer first, then only the channels
-and the span a view shows. A server that ignores ranges still works, as long as it sends the
-whole file.
+files together. They can be on another site, as a release's directory on tickwave's site is, if
+that site sends them with `Access-Control-Allow-Origin`, as GitHub Pages does. The worker then
+starts from a small module the page makes, which imports `tickwave-worker.js` from that site.
+
+A page with a Content-Security-Policy allows what the elements use: `'wasm-unsafe-eval'` in
+`script-src` for the decoder, and `'unsafe-inline'` in `style-src` for the styles in their shadow
+roots. When the files are on another site, it also allows `blob:` and that site in `worker-src`.
+
+Recordings are fetched by byte range: the footer first, then only the channels and the span a view
+shows. A server that ignores ranges still works, as long as it sends the whole file. A recording on
+another site needs that site to allow the reads: `Access-Control-Allow-Origin`, and
+`Access-Control-Expose-Headers: Content-Range`, so the decoder can see which bytes came back.
+GitHub Pages sends the first and not the second, so a recording kept there shows only on a page of
+the same site.
 
 A page that shows a closed view can write the view's title and facts into it. The view then lays
 out before `tickwave.js` has loaded, and keeps its height once it has:
