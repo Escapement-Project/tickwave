@@ -72,7 +72,7 @@ pub enum InputDecl {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct UpstreamDecl {
-    /// The input's name, which a recipe binds an analysis to.
+    /// The input's name, which a recipe binds an analysis to. Alternatives may share one.
     pub port: Name,
     /// The definitions whose analyses it takes; any analysis's where empty.
     pub from: Vec<Name>,
@@ -371,33 +371,39 @@ impl Definition {
         self.inputs.iter().position(|i| *i == InputDecl::Wire)
     }
 
-    /// Checks its ports and settings: their names, none twice, and each default among the values
-    /// its setting takes.
+    /// Checks its inputs, ports and settings: their names, none twice, no upstream two inputs
+    /// take, and each default among the values its setting takes.
     pub(crate) fn check(&self) -> Result<(), SchemaError> {
         at_most(self.inputs.len(), MAX_LIST, "inputs")?;
         if self.inputs.is_empty() {
             return Err(SchemaError::NoInputs);
         }
-        let mut wires = 0;
-        let mut seen = HashSet::new();
+        // Alternatives may share a port name, so that one binding reads whichever upstream it is
+        // given; but a definition two inputs take would leave the second unreachable.
+        let (mut wires, mut any) = (0, 0);
+        let mut taken = HashSet::new();
         for i in &self.inputs {
             let InputDecl::Upstream(u) = i else {
                 wires += 1;
                 continue;
             };
             named(&u.port)?;
-            if !seen.insert(&u.port) {
-                return Err(SchemaError::DuplicateInput(u.port.clone()));
-            }
             at_most(u.from.len(), MAX_LIST, "definitions an input takes")?;
             at_most(u.kinds.len(), MAX_LIST, "kinds an input reads")?;
             at_most(u.sequences.len(), MAX_LIST, "sequences an input reads")?;
             for n in u.from.iter().chain(&u.kinds).chain(&u.sequences) {
                 named(n)?;
             }
+            any += usize::from(u.from.is_empty());
+            if let Some(f) = u.from.iter().find(|f| !taken.insert(*f)) {
+                return Err(SchemaError::TakenTwice(f.clone()));
+            }
         }
         if wires > 1 {
             return Err(SchemaError::WireTwice);
+        }
+        if any > 1 {
+            return Err(SchemaError::AnyTwice);
         }
         let mut seen = HashSet::new();
         for p in &self.ports {
@@ -697,8 +703,10 @@ pub enum SchemaError {
     DuplicatePort(Name),
     #[error("it declares no inputs")]
     NoInputs,
-    #[error("input {0} is declared twice")]
-    DuplicateInput(Name),
+    #[error("two inputs take {0}")]
+    TakenTwice(Name),
+    #[error("two inputs take any analysis")]
+    AnyTwice,
     #[error("the wire input is declared twice")]
     WireTwice,
     #[error("setting {0} is declared twice")]

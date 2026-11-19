@@ -2270,9 +2270,24 @@ fn a_definition_whose_settings_or_ports_clash_is_refused() {
         schema(SchemaError::WireTwice)
     );
     assert_eq!(
-        inputs(vec![InputDecl::Wire, up("in"), up("in")]),
-        schema(SchemaError::DuplicateInput(name("in")))
+        inputs(vec![InputDecl::Wire, up("in"), up("other")]),
+        schema(SchemaError::AnyTwice)
     );
+    let from = |port, f: &'static str| {
+        InputDecl::Upstream(UpstreamDecl::new(port, Mode::Completed).from([f]))
+    };
+    assert_eq!(
+        inputs(vec![from("in", "swd"), from("other", "swd")]),
+        schema(SchemaError::TakenTwice(name("swd")))
+    );
+    // One port name over several upstreams, each its own alternative.
+    let alternatives = vec![
+        InputDecl::Wire,
+        from("in", "swd"),
+        from("in", "jtag-dp"),
+        up("in"),
+    ];
+    assert!(inputs(alternatives).is_ok());
     assert_eq!(inputs(vec![up("")]), schema(SchemaError::BadName));
 }
 
