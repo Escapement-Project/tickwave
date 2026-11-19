@@ -22,8 +22,7 @@ pages=$3
 [[ $version =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || die "$version is not X.Y.Z"
 dir=v$version
 
-# The files a page embeds from v<version>/. The Escapement Project's CI pins the first five by
-# sha256.
+# The files a page embeds from v<version>/.
 files=(tickwave.js tickwave-worker.js tickwave.wasm tickwave-chart.js tickwave.css
   tickwave-convert-worker.js tickwave-convert.wasm)
 for f in "${files[@]}"; do
