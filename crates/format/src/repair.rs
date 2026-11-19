@@ -4,9 +4,9 @@
 //! operands hold as many samples, and before the first record only a finish writes; the records
 //! before the cut stay as they are.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
-use crate::annotations::Lines;
+use crate::annotations::{Carried, Lines, carried_notes};
 use crate::compress::compress;
 use crate::decode::{
     BlockChannel, DecodeError, MAX_DECODED, check_header, corrupt, gaps_ending_in, inflate_limited,
@@ -23,10 +23,10 @@ use crate::model::{Break, Gap};
 use crate::overview::{self, Column, Ladder, Level, Pair, Settled};
 use crate::parts::{Part, PartRow, placed_span};
 use crate::reader::{Ending, Event, Reader};
-use crate::record::{self, BlockHead, Kind, OverviewHead};
+use crate::record::{self, BlockHead, Kind, OverviewHead, Rewrite};
 use crate::writer::{
     Bundle, Bundling, ChannelTops, OVERVIEW_BLOCK_LEVEL, Pending, WriteError, bundle_payload,
-    bundled_files, footer_payload, write_part_record,
+    bundled_files, footer_payload, generator_head, write_part_record,
 };
 
 /// A cut-off file's length: the later of `end`, the latest known-through tick or, with none,
@@ -60,6 +60,9 @@ fn finish_only(event: &Event) -> bool {
 }
 
 pub use crate::decode::HOLD;
+
+/// What repair does, for a refusal's words.
+const DOING: &str = "repairing";
 
 /// The overview blocks a ladder settles at a step, as a writer does.
 const SETTLE_STEP: usize = 16;
@@ -127,6 +130,16 @@ pub enum RepairError {
         end: i64,
         length: i64,
     },
+    /// An auxiliary record lies before the cut, in the bytes repair keeps, and a tool that writes
+    /// a recording again drops every one (FORMAT.md, "Records"). Re-cut the file instead
+    /// (`Recutter`), which writes it again without the record.
+    #[error(
+        "an auxiliary record, of kind {kind}, lies at byte {at}, before the cut, which repair \
+         keeps: re-cut the file instead"
+    )]
+    AuxiliaryKept { kind: u8, at: u64 },
+    #[error(transparent)]
+    Rewrite(#[from] Rewrite),
     #[error(transparent)]
     Write(#[from] WriteError),
 }
@@ -142,6 +155,10 @@ pub struct Repaired {
     /// generator's line, each as its generator and the rule: repair leaves them out of what it
     /// writes again and of the length the marks set.
     pub left_out: Vec<String>,
+    /// For each generator whose lines written again held a key or a `measure` this version
+    /// doesn't know, which a later minor version may add, a note naming what repair carried, as
+    /// `Recutter::carried` gives them.
+    pub carried: Vec<String>,
 }
 
 /// The records of a file read in order that a repair or a re-cut may still drop: those after its
@@ -333,6 +350,11 @@ struct State {
 
 impl State {
     fn new(d: Declaration) -> Result<Self, String> {
+        if let Some(o) = (0..d.channels.len() + d.derived.len()).find(|&o| !d.available(o)) {
+            return Err(format!(
+                "channel {o} is unavailable to this version, which can't write it again"
+            ));
+        }
         let mut chans = Vec::with_capacity(d.channels.len());
         for (c, channel) in d.channels.iter().enumerate() {
             let (Some(hasher), Some(map), Some(start)) =
@@ -363,13 +385,14 @@ impl State {
                         runs: Vec::new(),
                         list: Follow::new(c, Table::Breaks, false),
                     },
+                    // Unavailable, which was refused above.
+                    DeclaredKind::Other { .. } => {
+                        return Err(format!(
+                            "channel {c} is unavailable to this version, which can't write it again"
+                        ));
+                    }
                 },
             });
-        }
-        if let Some(o) = (0..d.channels.len() + d.derived.len()).find(|&o| !d.available(o)) {
-            return Err(format!(
-                "channel {o} is unavailable to this version, which can't write it again"
-            ));
         }
         let columns = overview::columns(&d.channels, &d.derived);
         let ochans = columns
@@ -560,6 +583,8 @@ pub struct Repairer {
     /// Held to the declaration's channels once it is read.
     lines: Option<Lines>,
     left_out: Vec<String>,
+    /// What the lines written again held that this version doesn't know, by generator.
+    carried: BTreeMap<String, Carried>,
     bundle: Option<Bundle>,
     /// A record that does not hold together: a derived channel's operands that don't pair.
     error: Option<RepairError>,
@@ -570,6 +595,8 @@ pub struct Repairer {
     /// from there on, which go as those after the cut do.
     finishing: Option<u64>,
     after: Vec<(u64, Event)>,
+    /// The first auxiliary record before the cut: where it lies, and its kind.
+    auxiliary: Option<(u64, u8)>,
 }
 
 impl Repairer {
@@ -584,12 +611,14 @@ impl Repairer {
             latest_annotation: None,
             lines: None,
             left_out: Vec::new(),
+            carried: BTreeMap::new(),
             bundle: None,
             error: None,
             generators: Vec::new(),
             parts: Follow::new(0, Table::Parts, false),
             finishing: None,
             after: Vec::new(),
+            auxiliary: None,
         }
     }
 
@@ -612,8 +641,12 @@ impl Repairer {
         while let Some(event) = self.reader.next_event()? {
             let at = self.reader.record_at();
             if let Event::Declaration(d) = &event {
+                let minor = self.reader.minor().expect("the preamble comes first");
+                if let Some(why) = Rewrite::of_minor(minor, DOING) {
+                    return Err(why.into());
+                }
                 self.hold = Some(Hold::new(d));
-                self.lines = Some(Lines::declared(d));
+                self.lines = Some(Lines::declared(d).carrying());
                 match State::new((**d).clone()) {
                     Ok(state) => self.state = Some(state),
                     Err(e) => {
@@ -621,6 +654,11 @@ impl Repairer {
                     }
                 }
                 continue;
+            }
+            if let Event::Skipped { kind } = event
+                && let Some(why) = Rewrite::of_kind(kind, DOING)
+            {
+                return Err(why.into());
             }
             if self.finishing.is_none() && finish_only(&event) {
                 self.finishing = Some(at);
@@ -888,11 +926,14 @@ impl Repairer {
                 }
             }
             Event::Footer(_) => return Err(RepairError::Finished),
+            // An optional record was refused as it came.
+            Event::Skipped { kind } => {
+                self.auxiliary.get_or_insert((at, kind));
+            }
             Event::Declaration(_)
             | Event::Annotation(_)
             | Event::Part { .. }
-            | Event::Bundle(_)
-            | Event::Skipped { .. } => {}
+            | Event::Bundle(_) => {}
         }
         Ok(())
     }
@@ -906,6 +947,9 @@ impl Repairer {
         let d = state.declaration.clone();
         if let Some(c) = d.channels.iter().find(|c| !c.shaping.is_whole()) {
             return Err(RepairError::Shaped(c.name.clone()));
+        }
+        if let Some((at, kind)) = self.auxiliary {
+            return Err(RepairError::AuxiliaryKept { kind, at });
         }
         let mut dropped = self.hold.take().map(Hold::dropped).unwrap_or_default();
         let keep = dropped
@@ -924,9 +968,17 @@ impl Repairer {
                     let checked = self
                         .lines
                         .as_mut()
-                        .map_or(Ok(()), |l| l.take_line(&a.source, &a.line));
+                        .map_or(Ok(Carried::new()), |l| l.take_line(&a.source, &a.line));
                     match checked {
-                        Ok(()) => again.push(Again::Annotation(a)),
+                        Ok(carried) => {
+                            if !carried.is_empty() {
+                                self.carried
+                                    .entry(a.source.clone())
+                                    .or_default()
+                                    .extend(carried);
+                            }
+                            again.push(Again::Annotation(a));
+                        }
                         Err(why) => self
                             .left_out
                             .push(format!("generator {:?}: {why}", a.source)),
@@ -1325,6 +1377,7 @@ impl Repairer {
                 let parts = self.parts.table.count();
                 (parts > 0).then_some(parts)
             },
+            auxiliary: None,
         };
         check_header(&header)?;
         let files = match bundling {
@@ -1333,7 +1386,10 @@ impl Repairer {
                 bundled_files(
                     &stem,
                     header.content_id,
-                    self.generators.iter().map(|g| (g.source.as_str(), &[][..])),
+                    self.generators.iter().map(|g| {
+                        let head = generator_head(&g.source, None, header.content_id, &[]);
+                        (g.source.as_str(), head)
+                    }),
                     None,
                 )
             }),
@@ -1382,6 +1438,7 @@ impl Repairer {
             tail,
             header,
             left_out: self.left_out,
+            carried: carried_notes(&self.carried),
         })
     }
 }

@@ -7,6 +7,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// A role's keys.
+pub(crate) const KEYS: [&str; 5] = ["name", "label", "colour", "weight", "dash"];
+
 /// The most roles one file declares, and the most a sidecar's files declare between them.
 pub const ROLES_AT_MOST: usize = 64;
 /// The longest role name, in bytes.
@@ -117,10 +120,7 @@ fn role(v: &Value, file: &str, place: usize) -> Result<Role, String> {
     if let Some(problem) = check_name(&name) {
         return Err(format!("{file}: {problem}"));
     }
-    if let Some(key) = fields
-        .keys()
-        .find(|k| !["name", "label", "colour", "weight", "dash"].contains(&k.as_str()))
-    {
+    if let Some(key) = fields.keys().find(|k| !KEYS.contains(&k.as_str())) {
         return Err(who(format!(
             "unknown field {key:?}; a role takes name, label, colour, weight and dash"
         )));

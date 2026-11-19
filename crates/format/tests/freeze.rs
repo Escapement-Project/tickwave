@@ -366,6 +366,203 @@ fn an_unknown_feature_codec_or_operation_makes_a_channel_unavailable() {
     assert!(err.contains("states 0 annotation parts"), "{err}");
 }
 
+/// The channels `an_unknown_feature_codec_or_operation_makes_a_channel_unavailable` reads, V and I
+/// analog and P = I × V, with D digital from high with `edges` edges and no gap, in blocks of
+/// `block_bytes`, and a title a declaration's edit can trade characters with.
+fn three_channels(edges: i64, block_bytes: usize) -> Vec<u8> {
+    let mut d = declaration(
+        vec![
+            analog("V", int(16, false, (1, 1000)), Ratio::ONE, None),
+            analog("I", int(16, false, (1, 1000)), Ratio::ONE, None),
+            digital("D", true),
+        ],
+        vec![Derived::multiply("P", "W", "I", "V")],
+    );
+    d.title = Some("x".repeat(200));
+    let options = WriteOptions {
+        block_bytes,
+        promise_with_items: true,
+        ..options()
+    };
+    let mut w = Writer::new(d, options).unwrap();
+    for c in 0..2 {
+        w.run(c, 0, 0).unwrap();
+    }
+    // In time order, as each item promises its channels to its end.
+    for i in 0..4u64 {
+        if i == 2 {
+            w.edge(2, 2).unwrap();
+        }
+        w.sample(0, i).unwrap();
+        w.sample(1, i + 1).unwrap();
+    }
+    for k in 2..=edges {
+        w.edge(2, 2 * k).unwrap();
+    }
+    finished(w, 2 * edges + 8, 1)
+}
+
+/// A fetch that counts what it is asked for.
+fn counted<'a>(
+    file: &'a [u8],
+    asked: &'a std::cell::RefCell<Vec<u64>>,
+) -> impl FnMut(u64, u32) -> Result<Vec<u8>, DecodeError> + 'a {
+    move |offset, len| {
+        asked.borrow_mut().push(offset);
+        from_memory(file)(offset, len)
+    }
+}
+
+/// FORMAT.md, "Unavailable channels": a channel of a kind this version doesn't know is kept in
+/// place and unavailable, not refused. Of its entry only `name`, `source_name`, `source`, `kind`,
+/// `blocks`, `overview_blocks` and `requires` are read, so a field the kind it knows of that name
+/// takes is not held to that kind's type. Its block records are placed in order and never decoded,
+/// and nothing of its index is fetched.
+#[test]
+fn a_kind_this_version_doesnt_know_makes_a_channel_unavailable() {
+    // D's blocks take two index pages, so their entries' weights, which only its kind gives,
+    // reach the second page's head.
+    let file = three_channels(12_000, 1);
+    let events = |c: &mut serde_json::Value| {
+        let c = c.as_object_mut().unwrap();
+        c.insert("kind".into(), "events".into());
+        for key in ["initial", "end", "edges"] {
+            c.remove(key);
+        }
+        c.insert("edges".into(), "many".into());
+        c.insert("frames".into(), serde_json::json!([{"at": "soon"}]));
+    };
+    let edited = common::with_declaration(&file, |d| events(&mut d["channels"][2]));
+    let edited = common::with_header_text(&edited, |text| {
+        let mut h: serde_json::Value = serde_json::from_str(text).unwrap();
+        events(&mut h["channels"][2]);
+        h.to_string()
+    });
+    let footer = Footer::parse_file(&edited).unwrap();
+    assert!(footer.channels[2].blocks.as_ref().unwrap().levels[0].len() > 1);
+    assert_eq!(
+        footer.header.channels[2].data,
+        ChannelKind::Other {
+            kind: "events".into()
+        }
+    );
+    assert_eq!(
+        (0..4).map(|o| footer.available(o)).collect::<Vec<_>>(),
+        [true, true, false, true]
+    );
+    assert_eq!(
+        footer.check_available(2).unwrap_err().to_string(),
+        "channel D is unavailable to this reader: it is of kind events, which this version \
+         doesn't know"
+    );
+    // At random: its index is never fetched, and the rest reads.
+    let asked = std::cell::RefCell::new(Vec::new());
+    let index = Index::read(footer.clone(), counted(&edited, &asked)).unwrap();
+    let pages: Vec<u64> = footer.channels[2]
+        .blocks
+        .iter()
+        .chain(footer.channels[2].levels.iter().map(|(_, t)| t))
+        .flat_map(|t| t.levels[0].iter().map(|e| e.offset))
+        .collect();
+    assert!(pages.len() > 1, "{pages:?}");
+    assert!(
+        asked.borrow().iter().all(|o| !pages.contains(o)),
+        "{pages:?}"
+    );
+    assert!(index.blocks[2].is_empty());
+    index.block_in(&edited, 0, 0).unwrap();
+    assert!(
+        footer
+            .block_refs(2, |_, _| -> Result<Vec<u8>, DecodeError> {
+                panic!("fetched")
+            })
+            .unwrap_err()
+            .to_string()
+            .contains("it is of kind events")
+    );
+    // In order: its block is placed, not decoded, and the footer agrees with what came.
+    let (events, ending) = read_in_order(&edited).unwrap();
+    assert_eq!(ending, Ending::Complete);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::UnreadBlock(h) if h.channel == 2))
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::Block(b) if b.head.channel == 2))
+    );
+    // A bundle would write the footer again with only what every kind has: it refuses.
+    let refused = escapement_tickwave_format::bundle::bundle(&edited, &footer, BTreeMap::new(), 3)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refused.contains(
+            "channel D is of kind events, which this version doesn't know: bundling would drop \
+             what its entry holds"
+        ),
+        "{refused}"
+    );
+    // A kind that is not text is no kind.
+    let bad = common::with_header_text(&edited, |text| {
+        text.replace(r#""kind":"events""#, r#""kind":7"#)
+    });
+    let refused = Footer::parse_file(&bad).unwrap_err().to_string();
+    assert!(
+        refused.contains("integer `7`, expected a string"),
+        "{refused}"
+    );
+}
+
+/// FORMAT.md, "Unavailable channels": an unavailable channel's rows and inline lists are held to
+/// their layout alone, not to the limits a later version may raise for it. A row stating more
+/// than a block may decode, and 65 gaps inline, leave the recording read with the channel
+/// unavailable.
+#[test]
+fn an_unavailable_channels_rows_and_lists_are_held_to_their_layout_alone() {
+    let file = three_channels(1, options().block_bytes);
+    let requiring = |c: usize, feature: &'static str| {
+        move |text: &str| {
+            let mut h: serde_json::Value = serde_json::from_str(text).unwrap();
+            h["channels"][c]["requires"] = serde_json::json!([feature]);
+            h.to_string()
+        }
+    };
+    // V's first block's row says it decodes to 8 MiB.
+    let big = common::rows_edited(&file, 0, |rows| rows[0].decoded_length = 8 << 20);
+    let refused = Index::of_file(&big).unwrap_err().to_string();
+    assert!(refused.contains("past the format's limits"), "{refused}");
+    let big = common::with_header_text(&big, requiring(0, "big-blocks"));
+    let index = Index::of_file(&big).unwrap();
+    assert!(!index.footer.available(0) && !index.footer.available(3));
+    assert!(index.blocks[0].is_empty());
+    index.block_in(&big, 1, 0).unwrap();
+    // D states 65 gaps inline, one past what a header holds.
+    let gaps: Vec<(i64, i64, bool)> = (0..65).map(|k| (k * 2 - 200, k * 2 - 199, false)).collect();
+    let long = |text: &str| {
+        let mut h: serde_json::Value = serde_json::from_str(text).unwrap();
+        h["channels"][2]["gaps"] = serde_json::json!(gaps);
+        h.to_string()
+    };
+    let refused = Footer::parse_file(&common::with_header_text(&file, long))
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("65 gaps inline"), "{refused}");
+    let listed = common::with_header_text(
+        &common::with_header_text(&file, long),
+        requiring(2, "long-lists"),
+    );
+    let index = Index::of_file(&listed).unwrap();
+    assert!(!index.footer.available(2));
+    assert!(index.blocks[2].is_empty());
+    // Its layout still holds: a gap is three terms.
+    let bent = common::with_header_text(&listed, |text| {
+        text.replace("[-200,-199,false]", "[-200,-199]")
+    });
+    assert!(Footer::parse_file(&bent).is_err());
+}
+
 /// A break reads and writes as three terms with a phase of 0, and as four with another.
 #[test]
 fn a_break_states_its_phase_where_it_has_one() {

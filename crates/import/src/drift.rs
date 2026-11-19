@@ -130,13 +130,16 @@ pub fn drifts(header: &Header, rises: &[Option<Vec<i64>>]) -> Vec<Drift> {
     out
 }
 
-/// The digital channels the drift would read: 3 to `MAX_EDGES` edges each, from at least two
-/// sources. None where there are none such.
+/// The digital channels the drift would read: available, of 3 to `MAX_EDGES` edges each, from
+/// at least two sources. None where there are none such.
 fn wanted(header: &Header) -> Option<Vec<bool>> {
     let wanted: Vec<bool> = header
         .channels
         .iter()
-        .map(|c| matches!(c.data, ChannelKind::Digital { edges, .. } if (3..=MAX_EDGES).contains(&edges)))
+        .map(|c| {
+            c.available()
+                && matches!(c.data, ChannelKind::Digital { edges, .. } if (3..=MAX_EDGES).contains(&edges))
+        })
         .collect();
     let mut sources = header
         .channels

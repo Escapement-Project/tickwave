@@ -51,6 +51,55 @@ pub fn skippable(kind: u8) -> bool {
     kind >= 128
 }
 
+/// Kinds 128 to 191: optional records, which a reader skips and a tool that writes a recording
+/// again refuses, as it would drop them.
+pub fn optional(kind: u8) -> bool {
+    (128..192).contains(&kind)
+}
+
+/// Kinds 192 to 255: auxiliary records, which hold only what the rest of the file gives again. A
+/// reader skips them, and a tool that writes a recording again drops them.
+pub fn auxiliary(kind: u8) -> bool {
+    kind >= 192
+}
+
+/// Why a tool that writes a recording again, `doing` it ("re-cutting"), refuses one it reads: it
+/// would drop what the recording holds.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum Rewrite {
+    #[error(
+        "the file is format 1.{minor}, newer than this tool's 1.{}: {doing} would drop what it adds",
+        crate::header::MINOR
+    )]
+    Newer { minor: u16, doing: &'static str },
+    #[error(
+        "the file holds an optional record of kind {kind}, which this version doesn't know: \
+         {doing} would drop it"
+    )]
+    Optional { kind: u8, doing: &'static str },
+    #[error(
+        "channel {channel} is of kind {kind}, which this version doesn't know: {doing} would drop \
+         what its entry holds"
+    )]
+    Kind {
+        channel: String,
+        kind: String,
+        doing: &'static str,
+    },
+}
+
+impl Rewrite {
+    /// The refusal for a recording of minor version `minor`, where it is later than this one's.
+    pub fn of_minor(minor: u16, doing: &'static str) -> Option<Self> {
+        (minor > crate::header::MINOR).then_some(Self::Newer { minor, doing })
+    }
+
+    /// The refusal for a record of `kind`, where it is an optional one: this version knows none.
+    pub fn of_kind(kind: u8, doing: &'static str) -> Option<Self> {
+        optional(kind).then_some(Self::Optional { kind, doing })
+    }
+}
+
 /// The most bytes a block decodes to (FORMAT.md, "Limits").
 pub const MAX_BLOCK: usize = 1 << 22;
 /// The most an overview block decodes to: 4,096 buckets of at most 32 bytes.

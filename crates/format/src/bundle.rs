@@ -3,16 +3,17 @@
 //! each generator file's other lines in annotation parts that stand alone, in the order the
 //! hand-written file includes them (ANNOTATIONS.md, "Bundling"). Where the file's parts all follow
 //! its data, as a bundle's do, the records before them stay where they are and the footer is
-//! written again; otherwise the copy is written again through a `Recutter`.
+//! written again; otherwise, or where those records hold an auxiliary one, which a copy drops,
+//! the copy is written again through a `Recutter`.
 
 use std::collections::BTreeMap;
 
 use crate::compress::compress;
 use crate::decode::{DecodeError, Footer, corrupt};
-use crate::header::MINOR;
+use crate::header::ChannelKind;
 use crate::index::{Table, TableWriter};
 use crate::parts::PartRow;
-use crate::record::{self, Kind};
+use crate::record::{self, Kind, Rewrite};
 use crate::recut::{RecutError, Recutter};
 use crate::writer::{Bundle, Bundling, WriteOptions, place_dues, write_part_record};
 
@@ -54,12 +55,27 @@ pub fn bundled_tail<E: From<DecodeError>>(
 ) -> Result<Tail, E> {
     // The footer is written again from what this version reads; a later minor version's fields
     // would be lost while the file still claimed them.
-    if footer.trailer.minor > MINOR {
-        return Err(corrupt(format!(
-            "the file is format 1.{}, newer than this tool's 1.{MINOR}: bundling would drop what it adds",
-            footer.trailer.minor
-        ))
-        .into());
+    if let Some(why) = Rewrite::of_minor(footer.trailer.minor, "bundling") {
+        return Err(corrupt(why.to_string()).into());
+    }
+    // Of a channel of another kind, the footer holds only what every kind has.
+    if let Some((channel, kind)) = footer.header.channels.iter().find_map(|c| match &c.data {
+        ChannelKind::Other { kind } => Some((c.name.clone(), kind.clone())),
+        _ => None,
+    }) {
+        let why = Rewrite::Kind {
+            channel,
+            kind,
+            doing: "bundling",
+        };
+        return Err(corrupt(why.to_string()).into());
+    }
+    let later = footer.records_from_128(&mut fetch)?;
+    if let Some(why) = later
+        .iter()
+        .find_map(|&(_, kind)| Rewrite::of_kind(kind, "bundling"))
+    {
+        return Err(corrupt(why.to_string()).into());
     }
     let payload = match record::next(record, record.len()) {
         record::Next::Record { kind, payload, len }
@@ -116,6 +132,10 @@ pub fn bundled_tail<E: From<DecodeError>>(
             return Ok(Tail::Recut(annotations));
         }
         keep = keep.min(first);
+    }
+    // Every record from 128 up left is an auxiliary one, which a copy holds none of.
+    if later.iter().any(|&(at, _)| at < keep) {
+        return Ok(Tail::Recut(annotations));
     }
     let timebase = footer.header.timebase;
     let Bundling::Files { files, parts } =

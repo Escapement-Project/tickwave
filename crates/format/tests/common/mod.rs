@@ -119,3 +119,49 @@ pub fn generated(file: &[u8]) -> std::collections::BTreeMap<String, Vec<String>>
     }
     out
 }
+
+/// `file`'s declaration's JSON, and its length.
+pub fn declaration(file: &[u8]) -> (serde_json::Value, usize) {
+    let at = escapement_tickwave_format::header::PREAMBLE_LEN;
+    assert_eq!(
+        file[at],
+        escapement_tickwave_format::record::Kind::Declaration as u8
+    );
+    let len = u32::from_le_bytes(file[at + 1..at + 5].try_into().unwrap()) as usize;
+    (
+        serde_json::from_slice(&file[at + 5..at + 5 + len]).unwrap(),
+        len,
+    )
+}
+
+/// `file` with its declaration's JSON edited through `edit` and written again at its own length,
+/// so that every offset stays right: the declaration's `title`, which must be long enough, takes
+/// up the difference, and the footer's header takes the title it gives.
+pub fn with_declaration(file: &[u8], edit: impl FnOnce(&mut serde_json::Value)) -> Vec<u8> {
+    let at = escapement_tickwave_format::header::PREAMBLE_LEN;
+    let (mut d, len) = declaration(file);
+    edit(&mut d);
+    let title = d["title"]
+        .as_str()
+        .expect("a title to take up the difference")
+        .len();
+    let others = serde_json::to_vec(&d).unwrap().len() - title;
+    d["title"] = "x"
+        .repeat(len.checked_sub(others).expect("a title long enough"))
+        .into();
+    let json = serde_json::to_vec(&d).unwrap();
+    assert_eq!(json.len(), len);
+    let mut record = Vec::new();
+    escapement_tickwave_format::record::write(
+        &mut record,
+        escapement_tickwave_format::record::Kind::Declaration,
+        &[&json],
+    );
+    let mut out = file.to_vec();
+    out[at..at + record.len()].copy_from_slice(&record);
+    with_header_text(&out, |text| {
+        let mut h: serde_json::Value = serde_json::from_str(text).unwrap();
+        h["title"] = d["title"].clone();
+        h.to_string()
+    })
+}

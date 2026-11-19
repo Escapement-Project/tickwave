@@ -5,9 +5,11 @@
 // - fixtures/identify-swd.swd.jsonl: the SWD decoder's annotations of the committed recording,
 //   carrying its recording_id, which the committed TOML sidecar includes.
 // - fixtures/identify-swd.bundle.tickwave: the recording with its sidecar bundled in,
-//   fixtures/roles.bundle.tickwave with roles.annotations.toml's, and fixtures/later.bundle.tickwave
+//   fixtures/roles.bundle.tickwave with roles.annotations.toml's, fixtures/later.bundle.tickwave
 //   with its sidecar as a later minor version would write it, a table this version doesn't know
-//   added, where the converter (target/release/tickwave) has been built.
+//   added, and fixtures/later-lines.bundle.tickwave with its generator's file as one would write
+//   it, a key this version doesn't know in every line, where the converter
+//   (target/release/tickwave) has been built.
 
 import { execFileSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -22,7 +24,7 @@ run(process.execPath, ["scripts/swd-annotations.ts", "fixtures/identify-swd.tick
 console.log("fixtures/identify-swd.swd.jsonl");
 
 const cli = resolve(web, "../target/release/tickwave");
-for (const f of ["identify-swd", "roles", "later"]) rmSync(resolve(web, `fixtures/${f}.bundle.tickwave`), { force: true });
+for (const f of ["identify-swd", "roles", "later", "later-lines"]) rmSync(resolve(web, `fixtures/${f}.bundle.tickwave`), { force: true });
 if (!existsSync(cli)) console.log(`no ${cli}: the bundle test will skip`);
 else {
   // A converter older than the sidecar's fields refuses it; that skips the bundle test, loudly,
@@ -39,8 +41,17 @@ else {
     writeFileSync(resolve(later, "identify-swd.annotations.toml"), `${toml}\n[[decode]]\nid = "swd"\n`);
     copyFileSync(resolve(web, "fixtures/identify-swd.swd.jsonl"), resolve(later, "identify-swd.swd.jsonl"));
     run(cli, ["bundle", "fixtures/identify-swd.tickwave", resolve(later, "identify-swd.annotations.toml"), "-o", "fixtures/later.bundle.tickwave"]);
-    rmSync(later, { recursive: true });
     console.log("fixtures/later.bundle.tickwave");
+    const [head, ...lines] = readFileSync(resolve(web, "fixtures/identify-swd.swd.jsonl"), "utf8")
+      .split("\n")
+      .filter((l) => l.trim() !== "")
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    const jsonl = [{ ...head, format: "tickwave-annotations/1.1" }, ...lines.map((l) => ({ ...l, confidence: "0.9" }))];
+    copyFileSync(resolve(web, "fixtures/identify-swd.annotations.toml"), resolve(later, "identify-swd.annotations.toml"));
+    writeFileSync(resolve(later, "identify-swd.swd.jsonl"), jsonl.map((l) => `${JSON.stringify(l)}\n`).join(""));
+    run(cli, ["bundle", "fixtures/identify-swd.tickwave", resolve(later, "identify-swd.annotations.toml"), "-o", "fixtures/later-lines.bundle.tickwave"]);
+    rmSync(later, { recursive: true });
+    console.log("fixtures/later-lines.bundle.tickwave");
   } catch {
     console.log(`${cli} refused the sidecar (see above): the bundle test will skip`);
   }

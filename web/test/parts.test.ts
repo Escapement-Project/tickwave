@@ -5,7 +5,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { MemoryBytes } from "../src/wasm/bytes.ts";
 import { handJson } from "../src/wasm/hand.ts";
 import { Opened } from "../src/wasm/opened.ts";
@@ -69,3 +69,21 @@ test("a recording that bundles none reads nothing for its annotations", async ()
   assert.equal(await r.annotations(null), null);
   assert.equal(one.reads.length, reads);
 });
+
+test(
+  "a bundled generator's file of a later minor version keeps every line, without what this version doesn't know, and a note says what was left out",
+  { skip: !existsSync(at("fixtures/later-lines.bundle.tickwave")) && "needs target/release/tickwave: scripts/generate.ts bundles with it" },
+  async () => {
+    const read = async (path: string) => {
+      const file = new Uint8Array(readFileSync(at(path)));
+      return (await (await Opened.open(wasm(), new MemoryBytes(file, path))).annotations(null))!;
+    };
+    const known = await read("fixtures/identify-swd.bundle.tickwave");
+    const later = await read("fixtures/later-lines.bundle.tickwave");
+    assert.ok(known.list.length > 600);
+    assert.deepEqual(later.list, known.list);
+    assert.deepEqual(later.problems, known.problems);
+    assert.deepEqual(known.notes, []);
+    assert.deepEqual(later.notes, ['identify-swd.swd.jsonl: "tickwave-annotations/1.1" is newer than this reader, which leaves out annotation.confidence']);
+  },
+);

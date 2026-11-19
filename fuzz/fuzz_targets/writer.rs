@@ -345,7 +345,8 @@ fuzz_target!(|p: Plan| {
                         run: None,
                         count: 0,
                     }),
-                    DeclaredKind::Digital { .. } => None,
+                    // A writer takes neither: `declaration` makes no channel of another kind.
+                    DeclaredKind::Digital { .. } | DeclaredKind::Other { .. } => None,
                 },
             })
         })

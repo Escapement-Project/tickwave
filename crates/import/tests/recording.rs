@@ -117,7 +117,7 @@ fn a_recording_converts_again_to_the_same_content() {
                 .iter()
                 .map(|c| match c.data {
                     ChannelKind::Analog { coding, .. } => Some(coding),
-                    ChannelKind::Digital { .. } => None,
+                    ChannelKind::Digital { .. } | ChannelKind::Other { .. } => None,
                 })
                 .collect::<Vec<_>>()
         };

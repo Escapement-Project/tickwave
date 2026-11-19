@@ -1347,11 +1347,70 @@ fn an_annotation_source_that_can_t_name_a_file_on_its_own_is_refused() {
     }
 }
 
-/// Annotation records whose lines break a rule ANNOTATIONS.md gives a generator's line, as a
-/// writer other than tickwave's, or one from before it held lines to them, leaves them: repair
-/// and recut leave each out and name it, the rest resolve bundled, and a line left out sets no
-/// length. An id given twice is the reader's to drop: the bundle's sidecar keeps the first. A
-/// recut of the repaired file, finished, keeps its content id.
+/// ANNOTATIONS.md, "Versions": a line may hold a key or a `measure` a later minor version adds,
+/// and its generator's file's first line, which says so, comes only with the bundle. Repair and
+/// recut carry such a line whole and name what they carried; a line breaking a rule on a key they
+/// know they still leave out.
+#[test]
+fn repair_and_recut_carry_and_name_what_a_later_minor_version_may_add() {
+    use escapement_tickwave_format::recut::Recutter;
+    use escapement_tickwave_format::repair::Repairer;
+    use escapement_tickwave_format::writer::Bundle;
+    let mut w = Writer::new(declaration(), options()).unwrap();
+    w.edge(0, 1).unwrap();
+    w.flush(2).unwrap();
+    let mut cut = w.take_output();
+    let carried = [
+        r#"{"id":"m/1","start":1,"confidence":"0.9"}"#,
+        r#"{"id":"m/2","start":1,"end":2,"measure":{"channel":"A","what":"skew","window":3}}"#,
+    ];
+    for line in carried
+        .iter()
+        .chain([&r#"{"id":"m/3","start":1,"channels":["nope"]}"#])
+    {
+        let a = record::Annotation {
+            source: "gen".into(),
+            line: (*line).into(),
+        };
+        record::write(&mut cut, Kind::Annotation, &[&a.to_payload()]);
+    }
+    let named = [
+        "generator \"gen\": carried what this version doesn't know, annotation.confidence, \
+         annotation.measure.what \"skew\", annotation.measure.window",
+    ];
+    let left = |left: &[String]| {
+        assert_eq!(left.len(), 1, "{left:?}");
+        assert!(
+            left[0].contains("annotation \"m/3\": no channel \"nope\""),
+            "{left:?}"
+        );
+    };
+    let bundled = || Bundle::Generated { stem: "rec".into() };
+    let mut r = Repairer::new(3);
+    r.bundle(bundled());
+    r.feed(&cut).unwrap();
+    let repaired = r.finish().unwrap();
+    assert_eq!(repaired.carried, named);
+    left(&repaired.left_out);
+    let mut whole = cut[..repaired.keep as usize].to_vec();
+    whole.extend_from_slice(&repaired.tail);
+    assert_eq!(common::each_generated(&whole)["gen"], carried);
+
+    let mut rc = Recutter::new(options());
+    rc.bundle(bundled());
+    rc.feed(&cut).unwrap();
+    assert_eq!(rc.carried(), named);
+    left(rc.left_out());
+    let mut out = rc.take_output();
+    out.extend_from_slice(&rc.finish().unwrap().tail);
+    assert_eq!(common::each_generated(&out)["gen"], carried);
+}
+
+/// Annotation records whose lines break a rule ANNOTATIONS.md gives a generator's line on a key
+/// this version knows, as a writer other than tickwave's, or one from before it held lines to
+/// them, leaves them: repair and recut leave each out and name it, the rest resolve bundled, and
+/// a line left out sets no length. An id given twice is the reader's to drop: the bundle's
+/// sidecar keeps the first. A recut of the repaired file, finished, keeps its content id.
 #[test]
 fn repair_and_recut_leave_out_an_annotation_its_bundle_would_not_resolve() {
     use escapement_tickwave_format::annotations::{Included, resolve};
@@ -1364,7 +1423,7 @@ fn repair_and_recut_leave_out_an_annotation_its_bundle_would_not_resolve() {
     let mut cut = w.take_output();
     for line in [
         r#"{"id": "m/1", "start": 1}"#,
-        r#"{"id": "m/2", "start": 1, "colour": "red"}"#,
+        r#"{"id": "m/2", "start": 1, "channels": ["nope"]}"#,
         r#"{"start": 900}"#,
         r#"{"id": "m/1", "start": 1}"#,
     ] {
@@ -1376,7 +1435,7 @@ fn repair_and_recut_leave_out_an_annotation_its_bundle_would_not_resolve() {
     }
     let left_as_wanted = |left: &[String]| {
         let want = [
-            "generator \"gen\": annotation \"m/2\": unknown field `colour`",
+            "generator \"gen\": annotation \"m/2\": no channel \"nope\"",
             "generator \"gen\": annotation with no id: missing field `id`",
         ];
         assert_eq!(left.len(), want.len(), "{left:?}");

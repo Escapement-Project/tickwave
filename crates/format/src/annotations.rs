@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::header::{ChannelKind, ContentId, Declaration, DeclaredKind, Header};
 use crate::model::Ratio;
@@ -21,8 +22,9 @@ pub use view::View;
 pub const FORMAT: &str = "tickwave-annotations/1";
 
 /// The latest minor version of `FORMAT` this reader knows. A file that names a later one,
-/// `tickwave-annotations/1.<minor>`, may hold top-level keys this reader doesn't, which it leaves
-/// out (ANNOTATIONS.md, "Versions").
+/// `tickwave-annotations/1.<minor>`, may hold keys this reader doesn't, at its top level, in an
+/// annotation, a role, a `measure` or `[view]`, and `measure`s of a `what` it doesn't know, which
+/// it leaves out (ANNOTATIONS.md, "Versions").
 const MINOR: u32 = 0;
 
 /// The minor version a format names, `FORMAT` itself being minor 0: None for any other format.
@@ -61,18 +63,79 @@ const HAND_KEYS: [&str; 7] = [
     "annotation",
 ];
 const HEAD_KEYS: [&str; 5] = ["format", "source", "version", "recording_id", "role"];
+/// An annotation's keys, which `Entry` takes, and its `measure`'s, which `Measure` takes.
+const ENTRY_KEYS: [&str; 11] = [
+    "id", "ref", "start", "end", "channels", "label", "kind", "text", "paint", "measure", "values",
+];
+const MEASURE_KEYS: [&str; 2] = ["channel", "what"];
 
-/// The hand-written file, from its TOML. A file of a later minor version has its top-level keys
-/// this reader doesn't know left out first; any other is parsed as it stands, so an unknown key in
-/// it is an error.
-#[cfg(feature = "toml")]
-fn hand_toml(hand: &str) -> Result<HandFile, toml::de::Error> {
-    if newer(toml::from_str(hand).ok()) {
-        let mut table: toml::Table = toml::from_str(hand)?;
-        table.retain(|k, _| HAND_KEYS.contains(&k));
-        return toml::Value::Table(table).try_into();
+type Map = serde_json::Map<String, Value>;
+
+/// What a reader leaves out of a file of a later minor version than it knows (ANNOTATIONS.md,
+/// "Versions"), each named in `left` by where it sits: the top-level keys outside `top`, and the
+/// keys it doesn't know of each annotation, role and `[view]` the file holds.
+fn known_file(file: &mut Map, top: &[&str], left: &mut BTreeSet<String>) {
+    file.retain(|k, _| known(top, k, "", left));
+    if let Some(Value::Array(list)) = file.get_mut("annotation") {
+        for a in list.iter_mut().filter_map(Value::as_object_mut) {
+            known_entry(a, left);
+        }
     }
-    toml::from_str(hand)
+    if let Some(Value::Array(list)) = file.get_mut("role") {
+        for r in list.iter_mut().filter_map(Value::as_object_mut) {
+            r.retain(|k, _| known(&roles::KEYS, k, "role.", left));
+        }
+    }
+    if let Some(Value::Object(v)) = file.get_mut("view") {
+        v.retain(|k, _| known(&view::KEYS, k, "view.", left));
+    }
+}
+
+/// As `known_file`, for one annotation's fields: and its `measure` where that names a `what` this
+/// reader doesn't know.
+fn known_entry(fields: &mut Map, left: &mut BTreeSet<String>) {
+    fields.retain(|k, _| known(&ENTRY_KEYS, k, "annotation.", left));
+    let Some(Value::Object(m)) = fields.get_mut("measure") else {
+        return;
+    };
+    m.retain(|k, _| known(&MEASURE_KEYS, k, "annotation.measure.", left));
+    if let Some(Value::String(what)) = m.get("what")
+        && serde_json::from_value::<MeasureKind>(Value::String(what.clone())).is_err()
+    {
+        left.insert(format!("annotation.measure.what {what:?}"));
+        fields.remove("measure");
+    }
+}
+
+/// Whether `key` is among `keys`; where not, it is named in `left` after `at`.
+fn known(keys: &[&str], key: &str, at: &str, left: &mut BTreeSet<String>) -> bool {
+    keys.contains(&key) || {
+        left.insert(format!("{at}{key}"));
+        false
+    }
+}
+
+/// The hand-written file, from its TOML. A file of a later minor version has what this reader
+/// doesn't know left out first (`known_file`); any other is parsed as it stands, so an unknown key
+/// in it is an error.
+#[cfg(feature = "toml")]
+fn hand_toml(hand: &str) -> Result<HandFile, String> {
+    if newer(toml::from_str(hand).ok()) {
+        let mut file = toml_map(toml::from_str(hand).map_err(|e| e.to_string())?)?;
+        known_file(&mut file, &HAND_KEYS, &mut BTreeSet::new());
+        return serde_json::from_value(Value::Object(file)).map_err(|e| e.to_string());
+    }
+    toml::from_str(hand).map_err(|e| e.to_string())
+}
+
+/// A TOML table as the JSON a page makes of it.
+#[cfg(feature = "toml")]
+fn toml_map(table: toml::Table) -> Result<Map, String> {
+    match serde_json::to_value(table) {
+        Ok(Value::Object(map)) => Ok(map),
+        Ok(_) => Err("not a table".into()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// As `hand_toml`, from the JSON a page made of the TOML.
@@ -87,35 +150,31 @@ fn head_json(first: &str) -> serde_json::Result<GeneratorHead> {
 
 fn known_json<T: serde::de::DeserializeOwned>(text: &str, keys: &[&str]) -> serde_json::Result<T> {
     if newer(json(text).ok()) {
-        let mut map: serde_json::Map<String, serde_json::Value> = json(text)?;
-        map.retain(|k, _| keys.contains(&k.as_str()));
-        return serde_json::from_value(serde_json::Value::Object(map));
+        let mut map: Map = json(text)?;
+        known_file(&mut map, keys, &mut BTreeSet::new());
+        return serde_json::from_value(Value::Object(map));
     }
     json(text)
 }
 
 /// What a reader leaves out of a sidecar of a later minor version than it knows: a note for the
-/// hand-written file, and for each generator file's first line, that holds top-level keys it
-/// doesn't know, naming them (ANNOTATIONS.md, "Versions"). They are not problems: the rest reads
-/// as the file means it.
+/// hand-written file, and for each generator file, its first line and the lines `included` gives,
+/// that holds what it doesn't know, naming each (ANNOTATIONS.md, "Versions"). They are not
+/// problems: the rest reads as the file means it.
 #[cfg(feature = "toml")]
 pub fn notes(hand: &str, included: &[Included<'_>]) -> Vec<String> {
     let table: Option<toml::Table> = toml::from_str(hand).ok();
-    let hand = table.and_then(|t| {
-        let format = t.get("format").and_then(toml::Value::as_str);
-        left_out(
-            "the TOML file",
-            format,
-            t.keys().map(String::as_str),
-            &HAND_KEYS,
-        )
-    });
+    let hand = table
+        .and_then(|t| toml_map(t).ok())
+        .and_then(|file| file_note("the TOML file", file, &HAND_KEYS));
     hand.into_iter().chain(head_notes(included)).collect()
 }
 
 /// As `notes`, with the hand-written file's TOML already parsed and written out as JSON.
 pub fn notes_json(hand: &str, included: &[Included<'_>]) -> Vec<String> {
-    json_note("the TOML file", hand, &HAND_KEYS)
+    json(hand)
+        .ok()
+        .and_then(|file| file_note("the TOML file", file, &HAND_KEYS))
         .into_iter()
         .chain(head_notes(included))
         .collect()
@@ -123,31 +182,61 @@ pub fn notes_json(hand: &str, included: &[Included<'_>]) -> Vec<String> {
 
 fn head_notes<'i>(included: &'i [Included<'_>]) -> impl Iterator<Item = String> + 'i {
     included.iter().filter_map(|inc| {
-        let first = inc.text.lines().find(|l| !l.trim().is_empty())?;
-        json_note(inc.name, first, &HEAD_KEYS)
+        let mut lines = inc.text.lines().filter(|l| !l.trim().is_empty());
+        let mut head: Map = json(lines.next()?).ok()?;
+        let format = later(&head)?;
+        let mut left = BTreeSet::new();
+        known_file(&mut head, &HEAD_KEYS, &mut left);
+        for line in lines {
+            if let Ok(mut fields) = json::<Map>(line) {
+                known_entry(&mut fields, &mut left);
+            }
+        }
+        note(inc.name, &format, &left)
     })
 }
 
-fn json_note(what: &str, text: &str, known: &[&str]) -> Option<String> {
-    let map: serde_json::Map<String, serde_json::Value> = json(text).ok()?;
-    let format = map.get("format").and_then(serde_json::Value::as_str);
-    left_out(what, format, map.keys().map(String::as_str), known)
+/// The note for `file`, the hand-written file or a generator file's first line, where it is of
+/// a later minor version and holds what `known_file` leaves out.
+fn file_note(what: &str, mut file: Map, top: &[&str]) -> Option<String> {
+    let format = later(&file)?;
+    let mut left = BTreeSet::new();
+    known_file(&mut file, top, &mut left);
+    note(what, &format, &left)
 }
 
-/// The note for a file of a later minor version than this reader knows whose top-level `keys`
-/// include some outside `known`; None for any other file.
-fn left_out<'k>(
-    what: &str,
-    format: Option<&str>,
-    keys: impl Iterator<Item = &'k str>,
-    known: &[&str],
-) -> Option<String> {
-    let format = format.filter(|f| minor(f).is_some_and(|m| m > MINOR))?;
-    let unknown: Vec<&str> = keys.filter(|k| !known.contains(k)).collect();
-    (!unknown.is_empty()).then(|| {
+/// The note for the lines of generator file `name`, `text` the file or its first line alone, where
+/// they held what `resolve_line` left out of them: `left`, as it names each. None where they held
+/// nothing it left out.
+pub fn lines_note(name: &str, text: &str, left: &BTreeSet<String>) -> Option<String> {
+    let head = text.lines().find(|l| !l.trim().is_empty())?;
+    let format = later(&json(head).ok()?)?;
+    note(name, &format, left)
+}
+
+/// The format a file's top level names, where it is a later minor version than this reader's.
+fn later(file: &Map) -> Option<String> {
+    let format = file.get("format")?.as_str()?;
+    minor(format)
+        .is_some_and(|m| m > MINOR)
+        .then(|| format.to_owned())
+}
+
+/// Whether a generator file's first line names a later minor version than this reader's, so that
+/// its lines are read as `resolve_line` reads one with `later` set.
+pub fn later_generator(text: &str) -> bool {
+    text.lines()
+        .find(|l| !l.trim().is_empty())
+        .and_then(|first| json::<Map>(first).ok())
+        .is_some_and(|head| later(&head).is_some())
+}
+
+fn note(what: &str, format: &str, left: &BTreeSet<String>) -> Option<String> {
+    (!left.is_empty()).then(|| {
+        let left: Vec<&str> = left.iter().map(String::as_str).collect();
         format!(
             "{what}: {format:?} is newer than this reader, which leaves out {}",
-            unknown.join(", ")
+            left.join(", ")
         )
     })
 }
@@ -305,14 +394,15 @@ const GENERATED_REF: &str = "only hand-written annotations take a ref";
 
 /// The problems with where an annotation lies: its ticks against the recording's length, where
 /// that is known, and its channels and measure against the recording's. `digital` says whether a
-/// channel of that name is digital, None where there is none.
+/// channel of that name is digital, None where there is none, and Some(None) for a kind this
+/// version doesn't know, which a measure is not held to.
 fn place_problems(
     start: i64,
     end: Option<i64>,
     channels: &[String],
     measure: Option<&Measure>,
     length: Option<i64>,
-    digital: impl Fn(&str) -> Option<bool>,
+    digital: impl Fn(&str) -> Option<Option<bool>>,
 ) -> Vec<String> {
     let mut problems = Vec::new();
     let last = end.unwrap_or(start);
@@ -335,11 +425,11 @@ fn place_problems(
     if let Some(m) = measure {
         match digital(&m.channel) {
             None => problems.push(format!("measure: no channel {:?}", m.channel)),
-            Some(false) => problems.push(format!(
+            Some(Some(false)) => problems.push(format!(
                 "measure: {:?} is analog; measures are taken from edges",
                 m.channel
             )),
-            Some(true) => {}
+            Some(Some(true) | None) => {}
         }
         if end.is_none() {
             problems.push("measure needs a span, not a point".to_owned());
@@ -356,12 +446,35 @@ fn place_problems(
 pub struct Lines {
     /// Each channel's name, and whether it is digital.
     channels: BTreeMap<String, bool>,
+    /// Whether a key or a `measure` this version doesn't know is carried rather than refused.
+    carry: bool,
+}
+
+/// The keys and `measure`s a line held that this version doesn't know, which `Lines::carrying`
+/// takes, each named as `known_entry` names it.
+pub type Carried = BTreeSet<String>;
+
+/// A note for each generator whose lines a tool carried what this version doesn't know of, naming
+/// what it carried: `carried` by generator.
+pub fn carried_notes(carried: &BTreeMap<String, Carried>) -> Vec<String> {
+    carried
+        .iter()
+        .filter(|(_, keys)| !keys.is_empty())
+        .map(|(source, keys)| {
+            let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+            format!(
+                "generator {source:?}: carried what this version doesn't know, {}",
+                keys.join(", ")
+            )
+        })
+        .collect()
 }
 
 impl Lines {
     pub fn new(channels: impl IntoIterator<Item = (String, bool)>) -> Self {
         Self {
             channels: channels.into_iter().collect(),
+            carry: false,
         }
     }
 
@@ -373,8 +486,18 @@ impl Lines {
         }))
     }
 
+    /// Lines a tool carries from a recording it writes again (FORMAT.md, "Annotations"), which
+    /// may come from a later minor version whose first line it hasn't read: a key or a `measure`
+    /// this version doesn't know is carried and named, and the rest held to the rules.
+    pub fn carrying(self) -> Self {
+        Self {
+            carry: true,
+            ..self
+        }
+    }
+
     /// As `take`, for a line as its file's text gives it.
-    pub fn take_line(&mut self, source: &str, line: &str) -> Result<(), String> {
+    pub fn take_line(&mut self, source: &str, line: &str) -> Result<Carried, String> {
         match serde_json::from_str(line) {
             Ok(fields) => self.take(source, &fields),
             Err(e) => Err(format!("annotation with no id: {e}")),
@@ -388,21 +511,23 @@ impl Lines {
         source: &str,
         line: &str,
         timebase: Ratio,
-    ) -> Result<(), String> {
+    ) -> Result<Carried, String> {
         match serde_json::from_str(line) {
-            Ok(fields) => self.check(source, &fields, Some(timebase)),
+            Ok(fields) => self.check(source, &fields, Some(timebase), self.carry),
             Err(e) => Err(format!("annotation with no id: {e}")),
         }
     }
 
     /// Takes generator `source`'s `line`, or says why it can't stand: `annotation "<id>": ...`,
-    /// or `annotation with no id: ...`.
-    pub fn take(
-        &mut self,
-        source: &str,
-        line: &serde_json::Map<String, serde_json::Value>,
-    ) -> Result<(), String> {
-        self.check(source, line, None)
+    /// or `annotation with no id: ...`. What it carries is none unless these are `carrying`.
+    pub fn take(&mut self, source: &str, line: &Map) -> Result<Carried, String> {
+        self.check(source, line, None, self.carry)
+    }
+
+    /// `take`, carrying what this version doesn't know whether these are `carrying` or not: for a
+    /// line of a generator's file whose first line names a later minor version.
+    pub fn take_carried(&mut self, source: &str, line: &Map) -> Result<Carried, String> {
+        self.check(source, line, None, true)
     }
 
     /// `take`, with times in ticks alone where `timebase` is None, or also as decimals with a
@@ -410,9 +535,10 @@ impl Lines {
     fn check(
         &mut self,
         source: &str,
-        line: &serde_json::Map<String, serde_json::Value>,
+        line: &Map,
         timebase: Option<Ratio>,
-    ) -> Result<(), String> {
+        carry: bool,
+    ) -> Result<Carried, String> {
         let who = match line.get("id").and_then(|id| id.as_str()) {
             Some(id) => format!("annotation {id:?}"),
             None => "annotation with no id".to_owned(),
@@ -421,7 +547,12 @@ impl Lines {
         if let Some(problem) = check_source(source) {
             return refused(&problem);
         }
-        let entry: Entry = match serde_json::from_value(serde_json::Value::Object(line.clone())) {
+        let mut carried = Carried::new();
+        let mut known = line.clone();
+        if carry {
+            known_entry(&mut known, &mut carried);
+        }
+        let entry: Entry = match serde_json::from_value(Value::Object(known)) {
             Ok(entry) => entry,
             Err(e) => return refused(&e.to_string()),
         };
@@ -453,13 +584,29 @@ impl Lines {
             entry.channels.as_deref().unwrap_or_default(),
             entry.measure.as_ref(),
             None,
-            |c| self.channels.get(c).copied(),
+            |c| self.channels.get(c).map(|&d| Some(d)),
         ));
         if !problems.is_empty() {
             return refused(&problems.join("; "));
         }
-        Ok(())
+        Ok(carried)
     }
+}
+
+/// Each of `header`'s channels by name, as `place_problems` takes them.
+fn edges_of(header: &Header) -> BTreeMap<&str, Option<bool>> {
+    header
+        .channels
+        .iter()
+        .map(|c| {
+            let digital = match c.data {
+                ChannelKind::Digital { .. } => Some(true),
+                ChannelKind::Analog { .. } => Some(false),
+                ChannelKind::Other { .. } => None,
+            };
+            (c.name.as_str(), digital)
+        })
+        .collect()
 }
 
 fn check_id(id: &str, generated: bool) -> Option<String> {
@@ -483,6 +630,13 @@ pub fn generator_source(text: &str) -> Option<String> {
     let first = text.lines().find(|l| !l.trim().is_empty())?;
     let head = head_json(first).ok()?;
     minor(&head.format).map(|_| head.source)
+}
+
+/// A generator file's first line's keys, as it gives them; None where it is no generator's file.
+/// A merge carries them (ANNOTATIONS.md, "Merging").
+pub fn generator_head_keys(text: &str) -> Option<Map> {
+    generator_source(text)?;
+    json(text.lines().find(|l| !l.trim().is_empty())?).ok()
 }
 
 /// The role tables a generator's file declares in its first line, unchecked; none where that
@@ -740,9 +894,17 @@ pub struct Resolved {
 /// One line of generator `source`'s file resolved alone, as `resolve` resolves it: its fields,
 /// times and place held to the recording's `header`, or every rule it breaks. What only the whole
 /// sidecar says, an id given twice or a `ref`, it can't check: a reader that reads a few parts
-/// of a recording's annotations resolves their lines this way.
-pub fn resolve_line(source: &str, line: &str, header: &Header) -> Result<Annotation, Vec<String>> {
-    let entry: Entry = json(line).map_err(|e| vec![e.to_string()])?;
+/// of a recording's annotations resolves their lines this way. `later` says the generator's
+/// file's first line names a later minor version (`later_generator`): what this version doesn't
+/// know is then left out of the line, and named beside the annotation, as `lines_note` takes it.
+pub fn resolve_line(
+    source: &str,
+    line: &str,
+    header: &Header,
+    later: bool,
+) -> Result<(Annotation, BTreeSet<String>), Vec<String>> {
+    let mut left = BTreeSet::new();
+    let entry = entry(line, later, &mut left).map_err(|e| vec![e.to_string()])?;
     let mut problems = field_problems(&entry, true);
     if entry.target.is_some() {
         problems.push(GENERATED_REF.to_owned());
@@ -765,16 +927,7 @@ pub fn resolve_line(source: &str, line: &str, header: &Header) -> Result<Annotat
         )]);
     }
     let end = end.map(|e| e.min(header.length));
-    let channels: BTreeMap<&str, bool> = header
-        .channels
-        .iter()
-        .map(|c| {
-            (
-                c.name.as_str(),
-                matches!(c.data, ChannelKind::Digital { .. }),
-            )
-        })
-        .collect();
+    let channels = edges_of(header);
     let a = Annotation {
         id: format!("{source}/{}", entry.id),
         source: Some(source.to_owned()),
@@ -798,10 +951,21 @@ pub fn resolve_line(source: &str, line: &str, header: &Header) -> Result<Annotat
         |c| channels.get(c).copied(),
     ));
     if problems.is_empty() {
-        Ok(a)
+        Ok((a, left))
     } else {
         Err(problems)
     }
+}
+
+/// One annotation's fields from its JSON text: of a file of a later minor version, `later`, with
+/// what `known_entry` leaves out left out first, and named in `left`.
+fn entry(line: &str, later: bool, left: &mut BTreeSet<String>) -> serde_json::Result<Entry> {
+    if later {
+        let mut fields: Map = json(line)?;
+        known_entry(&mut fields, left);
+        return serde_json::from_value(Value::Object(fields));
+    }
+    json(line)
 }
 
 /// A sidecar resolved apart from its generator files' lines, as a reader that reads those from a
@@ -1047,8 +1211,9 @@ fn find<'a>(
         if let Some(problem) = check_source(&head.source) {
             problems.push((whole, format!("{}: {problem}", inc.name)));
         }
+        let later = minor(&head.format).is_some_and(|m| m > MINOR);
         for (n, line) in lines {
-            match json::<Entry>(line) {
+            match entry(line, later, &mut BTreeSet::new()) {
                 Ok(entry) => {
                     entries.push((Some(head.source.clone()), entry, At::Line(inc.name, n + 1)))
                 }
@@ -1061,16 +1226,7 @@ fn find<'a>(
         }
     }
 
-    let channels: BTreeMap<&str, bool> = header
-        .channels
-        .iter()
-        .map(|c| {
-            (
-                c.name.as_str(),
-                matches!(c.data, ChannelKind::Digital { .. }),
-            )
-        })
-        .collect();
+    let channels = edges_of(header);
     let mut seen = BTreeSet::new();
     // (position in sidecar order, where it came from, annotation)
     let mut plain = Vec::with_capacity(entries.len());
@@ -1234,6 +1390,31 @@ mod tests {
 
     fn text(s: &str) -> Time {
         Time::Text(s.into())
+    }
+
+    /// The fields a struct that denies unknown ones takes, as serde lists them refusing one.
+    fn fields_of<T: serde::de::DeserializeOwned>() -> Vec<String> {
+        let err = serde_json::from_str::<T>(r#"{"?":0}"#)
+            .err()
+            .unwrap()
+            .to_string();
+        // "expected `a` or `b`", or "expected one of `a`, `b`, `c`".
+        let listed = err.split("expected ").nth(1).unwrap();
+        let listed = listed.split(" at line").next().unwrap();
+        listed
+            .trim_start_matches("one of ")
+            .split(", ")
+            .flat_map(|f| f.split(" or "))
+            .map(|f| f.trim_matches('`').to_owned())
+            .collect()
+    }
+
+    /// What a reader keeps of a later minor version's annotation is what `Entry` and `Measure`
+    /// take: a field added to either and not to its list would be left out of such a file.
+    #[test]
+    fn the_keys_a_later_version_keeps_are_the_fields_this_one_reads() {
+        assert_eq!(fields_of::<Entry>(), ENTRY_KEYS);
+        assert_eq!(fields_of::<Measure>(), MEASURE_KEYS);
     }
 
     #[test]

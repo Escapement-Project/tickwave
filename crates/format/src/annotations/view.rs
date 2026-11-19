@@ -9,6 +9,9 @@ use super::roles::{Colour, colour_field};
 use crate::header::Header;
 use crate::times::{Time, ticks};
 
+/// The `[view]` table's keys.
+pub(crate) const KEYS: [&str; 4] = ["channels", "start", "end", "colour"];
+
 /// The `[view]` table, held to the recording: its times in ticks.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct View {
@@ -28,10 +31,7 @@ pub(crate) fn view(v: &Value, header: &Header) -> Result<View, Vec<String>> {
         return Err(vec!["view: not a table".into()]);
     };
     let mut problems = Vec::new();
-    if let Some(key) = fields
-        .keys()
-        .find(|k| !["channels", "start", "end", "colour"].contains(&k.as_str()))
-    {
+    if let Some(key) = fields.keys().find(|k| !KEYS.contains(&k.as_str())) {
         problems.push(format!(
             "view: unknown field {key:?}; a view takes channels, start, end and colour"
         ));

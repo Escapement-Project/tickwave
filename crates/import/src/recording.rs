@@ -8,10 +8,13 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use escapement_tickwave_format::decode::{BlockChannel, BlockRef, DecodeError, Footer};
-use escapement_tickwave_format::header::{AnalogCoding, ChannelKind, Header};
+use escapement_tickwave_format::header::{
+    AnalogCoding, ChannelKind, Header, PREAMBLE_LEN, Preamble,
+};
 use escapement_tickwave_format::model::{
     Analog, Channel, ChannelData, Digital, Recording, Samples, Source,
 };
+use escapement_tickwave_format::record::Rewrite;
 use escapement_tickwave_format::samples::Values;
 
 use crate::input::Input;
@@ -76,6 +79,9 @@ impl Check {
 /// and no block.
 pub fn open(input: Arc<dyn Input>) -> Result<Opened, Error> {
     let mut footer = footer(&*input)?;
+    for c in 0..footer.header.channels.len() {
+        footer.check_available(c)?;
+    }
     footer.load_lists(fetch(&*input))?;
     // The sidecar's files whole: the bundle holds each generator file's first line, its parts
     // the rest.
@@ -141,6 +147,7 @@ pub fn open(input: Arc<dyn Input>) -> Result<Opened, Error> {
                     lost_before: *lost_before,
                     lost_after: *lost_after,
                 }),
+                ChannelKind::Other { .. } => unreachable!("an unavailable channel is refused"),
             },
         })
         .collect();
@@ -215,6 +222,23 @@ fn samples(blocks: &Arc<Blocks>, c: usize, coding: AnalogCoding) -> Samples {
             })),
         ),
     }
+}
+
+/// Why a tool `doing` what it does ("merging") can't write the recording `input` holds again: a
+/// minor version, in its preamble or its trailer, later than this version's, or an optional record
+/// (`Rewrite`). None where it can; its auxiliary records it drops.
+pub fn rewrite_check(input: &dyn Input, doing: &'static str) -> Result<Option<Rewrite>, Error> {
+    let footer = footer(input)?;
+    let mut preamble = [0; PREAMBLE_LEN];
+    input.read_at(0, &mut preamble);
+    let minor = Preamble::parse(&preamble).map_or(0, |p| p.minor);
+    if let Some(why) = Rewrite::of_minor(minor.max(footer.trailer.minor), doing) {
+        return Ok(Some(why));
+    }
+    Ok(footer
+        .records_from_128(fetch(input))?
+        .into_iter()
+        .find_map(|(_, kind)| Rewrite::of_kind(kind, doing)))
 }
 
 /// The footer of the recording `input` holds, read from its end.

@@ -442,6 +442,7 @@ impl Snapshot {
                 coding: *coding,
                 first_index,
             },
+            DeclaredKind::Other { .. } => unreachable!("a writer takes no channel of another kind"),
         }
     }
 

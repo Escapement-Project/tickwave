@@ -897,22 +897,22 @@ fn view_table(v: &View) -> serde_json::Value {
 }
 
 /// The files a bundle holds for a recording `<stem>.tickwave` with `id` whose generators are
-/// `sources`, each with the roles it declares, in the order of their first annotations: each
+/// `sources`, each with its file's first line, in the order of their first annotations: each
 /// one's file, its first line alone, and a hand-written file that includes them in that order,
 /// holds `view` as its `[view]` where there is one, and holds no annotation of its own.
 pub(crate) fn bundled_files<'a>(
     stem: &str,
     id: ContentId,
-    sources: impl IntoIterator<Item = (&'a str, &'a [serde_json::Value])>,
+    sources: impl IntoIterator<Item = (&'a str, String)>,
     view: Option<&View>,
 ) -> BTreeMap<String, String> {
     // A JSON string is a TOML basic string: serde_json escapes nothing TOML lacks.
     let quoted = |s: &str| serde_json::to_string(s).expect("a string serialises");
     let mut files = BTreeMap::new();
     let mut include = Vec::new();
-    for (source, roles) in sources {
+    for (source, head) in sources {
         let name = format!("{stem}.{source}.jsonl");
-        files.insert(name.clone(), generator_head(source, None, id, roles) + "\n");
+        files.insert(name.clone(), head + "\n");
         include.push(quoted(&name));
     }
     let mut hand = format!(
@@ -968,6 +968,40 @@ pub fn generator_head(
         json(source),
         json(&recording_id.to_string())
     )
+}
+
+/// A carried generator file's first line (`Writer::head`): `keys` as they stand, with `source` and
+/// `recording_id` given, in the order ANNOTATIONS.md shows a first line's keys, the others after.
+fn carried_head(
+    source: &str,
+    recording_id: ContentId,
+    keys: &serde_json::Map<String, serde_json::Value>,
+) -> String {
+    let given = [
+        ("source", serde_json::Value::from(source)),
+        ("recording_id", recording_id.to_string().into()),
+    ];
+    let value = |k: &str| {
+        given
+            .iter()
+            .find(|(g, _)| *g == k)
+            .map(|(_, v)| v)
+            .or_else(|| keys.get(k))
+    };
+    let shown = ["format", "source", "version", "recording_id", "role"];
+    let rest = keys
+        .keys()
+        .map(String::as_str)
+        .filter(|k| !shown.contains(k));
+    let fields: Vec<String> = shown
+        .into_iter()
+        .chain(rest)
+        .filter_map(|k| {
+            let key = serde_json::to_string(k).expect("a string serialises");
+            Some(format!("{key}:{}", value(k)?))
+        })
+        .collect();
+    format!("{{{}}}", fields.join(","))
 }
 
 /// The annotation bundle record's payload for `files`, compressed at `level`.
@@ -1098,6 +1132,8 @@ pub struct Writer {
     generators: Vec<Pending>,
     /// The roles each generator declares in its file's first line, by its name (`roles`).
     roles: BTreeMap<String, Vec<serde_json::Value>>,
+    /// Each carried generator's file's first line's keys, by its name (`head`).
+    heads: BTreeMap<String, serde_json::Map<String, serde_json::Value>>,
     /// Whether it wrote an annotation record, which a bundle of given files can't hold.
     took_records: bool,
     parts: TableWriter<PartRow>,
@@ -1120,10 +1156,10 @@ impl Writer {
             ))
         };
         if let Some(c) = declaration.channels.iter().find(|c| !c.available()) {
-            return Err(unknown(format!(
-                "channel {} states a feature or codec",
-                c.name
-            )));
+            return Err(unknown(match &c.data {
+                DeclaredKind::Other { kind } => format!("channel {} is of kind {kind}", c.name),
+                _ => format!("channel {} states a feature or codec", c.name),
+            }));
         }
         if let Some(d) = (0..declaration.derived.len())
             .find(|&d| !declaration.available(declaration.channels.len() + d))
@@ -1168,6 +1204,9 @@ impl Writer {
                     open: Vec::new(),
                     list: TableWriter::new(c as u32, Table::Breaks, false),
                 }),
+                DeclaredKind::Other { .. } => {
+                    unreachable!("an unavailable channel is refused above")
+                }
             };
             let digital = matches!(data, Data::Digital(_));
             chans.push(Chan {
@@ -1237,6 +1276,7 @@ impl Writer {
             lines,
             generators: Vec::new(),
             roles: BTreeMap::new(),
+            heads: BTreeMap::new(),
             took_records: false,
             parts: TableWriter::new(0, Table::Parts, false),
             failed: None,
@@ -1929,6 +1969,15 @@ impl Writer {
         self.roles.insert(source.to_owned(), roles);
     }
 
+    /// Generator `source`'s file's first line as another recording's bundle gives it, for the
+    /// bundle the writer makes of its own annotations, which carries it (ANNOTATIONS.md,
+    /// "Merging"): its keys as they stand, `format`, `version` and `role` among them, with
+    /// `source` and `recording_id` the writer's own. It takes the place of the generator's
+    /// `roles`, and is held to the schema by whatever resolves the bundle.
+    pub fn head(&mut self, source: &str, keys: serde_json::Map<String, serde_json::Value>) {
+        self.heads.insert(source.to_owned(), keys);
+    }
+
     /// One generated annotation, from generator `source`. Its times are axis ticks. Its record
     /// goes out at once; its generator's lines go in a part once they reach `PART_TARGET` bytes,
     /// after its record, and before a line that would take them past 4 MiB.
@@ -1942,6 +1991,30 @@ impl Writer {
         self.lines
             .take(source, &annotation)
             .map_err(WriteError::Annotation)?;
+        self.annotation_record(source, annotation)
+    }
+
+    /// As `annotation`, for a line carried from another recording's generator file, as a merge
+    /// carries one (ANNOTATIONS.md, "Merging"): a key or a `measure` this version doesn't know,
+    /// which a later minor version may add, is carried rather than refused.
+    pub fn carried_annotation(
+        &mut self,
+        source: &str,
+        annotation: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), WriteError> {
+        self.check_failed()?;
+        self.lines
+            .take_carried(source, &annotation)
+            .map_err(WriteError::Annotation)?;
+        self.annotation_record(source, annotation)
+    }
+
+    /// `annotation`'s record and line, once the line is taken.
+    fn annotation_record(
+        &mut self,
+        source: &str,
+        annotation: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), WriteError> {
         let line = serde_json::to_string(&annotation).expect("a map serialises");
         let span = placed_span(&line, self.declaration.timebase)
             .map_err(|e| WriteError::Annotation(format!("generator {source:?}: {e}")))?;
@@ -3089,6 +3162,7 @@ impl Writer {
             overview_shift: self.declaration.overview_shift,
             requires: Vec::new(),
             annotation_parts: (self.parts.count() > 0).then_some(self.parts.count()),
+            auxiliary: None,
         };
         // The reader's own rules, so the writer never writes a header the reader refuses.
         crate::decode::check_header(&header).map_err(|e| WriteError::Header(e.to_string()))?;
@@ -3100,8 +3174,15 @@ impl Writer {
                     &stem,
                     header.content_id,
                     self.generators.iter().map(|g| {
-                        let roles = self.roles.get(&g.source).map_or(&[][..], Vec::as_slice);
-                        (g.source.as_str(), roles)
+                        let head = match self.heads.get(&g.source) {
+                            Some(keys) => carried_head(&g.source, header.content_id, keys),
+                            None => {
+                                let roles =
+                                    self.roles.get(&g.source).map_or(&[][..], Vec::as_slice);
+                                generator_head(&g.source, None, header.content_id, roles)
+                            }
+                        };
+                        (g.source.as_str(), head)
                     }),
                     view.as_ref(),
                 );

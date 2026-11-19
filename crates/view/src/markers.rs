@@ -2,7 +2,7 @@
 //! with a cursor that names one in that order. A finished file's are read a range at a time, from
 //! the annotation parts the range meets, until something asks for all of them.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -96,6 +96,9 @@ pub(crate) struct FileAnnotations {
     /// Each generator's file's rank in the sidecar's order, from 1, by the generator's name;
     /// None where the file's first line breaks a rule, which leaves out every line of it.
     ranks: BTreeMap<String, Option<usize>>,
+    /// The name of each generator's file whose first line names a later minor version, by the
+    /// generator's name: its lines are read as `annotations::resolve_line` reads a later one's.
+    later: BTreeMap<String, String>,
     /// The hand-written file's annotations in order, those but its refs and those naming a
     /// channel this version can't read.
     plain: Vec<Marker>,
@@ -116,11 +119,14 @@ enum PartLine {
         id: Option<String>,
         /// The annotation, or each rule it breaks.
         annotation: Result<Box<Annotation>, String>,
+        /// What a later minor version's line held that was left out of it.
+        left: BTreeSet<String>,
     },
 }
 
 impl PartMarkers {
-    fn of(part: Part, header: &Header) -> Self {
+    /// `later` says its generator's file names a later minor version.
+    fn of(part: Part, header: &Header, later: bool) -> Self {
         let length = header.length;
         let lines = part
             .lines()
@@ -137,11 +143,17 @@ impl PartMarkers {
                         "{name}: starts at or past the length, {length}"
                     ));
                 }
-                PartLine::Read {
-                    annotation: annotations::resolve_line(&part.source, line, header)
-                        .map(Box::new)
-                        .map_err(|problems| format!("{name}: {}", problems.join("; "))),
-                    id,
+                match annotations::resolve_line(&part.source, line, header, later) {
+                    Ok((a, left)) => PartLine::Read {
+                        annotation: Ok(Box::new(a)),
+                        id,
+                        left,
+                    },
+                    Err(problems) => PartLine::Read {
+                        annotation: Err(format!("{name}: {}", problems.join("; "))),
+                        id,
+                        left: BTreeSet::new(),
+                    },
                 }
             })
             .collect();
@@ -166,6 +178,9 @@ struct Parts<'a> {
     joined: Vec<String>,
     /// Each line left out for a rule it breaks, in the order of the lines.
     broken: Vec<String>,
+    /// What was left out of the lines kept of a later minor version's generator file, by the
+    /// generator's name.
+    noted: BTreeMap<&'a str, BTreeSet<String>>,
 }
 
 /// The markers of `m`, sorted, that start in `interval`, after `after` where it is given, at most
@@ -318,7 +333,7 @@ impl Recording {
             .plain
             .partition_point(|m| m.cursor.tick < interval.end)
             .max(lo);
-        let parts = self.read_parts(&footer, &rows)?;
+        let parts = self.read_parts(file, &footer, &rows)?;
         let read = kept_lines(file, &parts)?;
         let mut list: Vec<(MarkerCursor, &Annotation)> = file.plain[lo..hi]
             .iter()
@@ -344,7 +359,7 @@ impl Recording {
         let rows = footer.parts_meeting_at(i64::MIN..i64::MAX, |offset, len| {
             self.parts_page(offset, len)
         })?;
-        let parts = self.read_parts(&footer, &rows)?;
+        let parts = self.read_parts(file, &footer, &rows)?;
         let read = kept_lines(file, &parts)?;
         // Read whole, a bundle's hand-written file is there: `read_file_annotations` refuses a
         // bundle without one. A file with no bundle has no part either, since `kept_lines`
@@ -364,6 +379,10 @@ impl Recording {
         left_out.extend(read.broken);
         left_out.extend(apart.problems);
         left_out.extend(annotations::notes(hand, &included));
+        left_out.extend(read.noted.iter().filter_map(|(source, left)| {
+            let name = file.later.get(*source)?;
+            annotations::lines_note(name, file.files.get(name)?, left)
+        }));
         let mut list = hand_markers(apart.annotations);
         list.extend(read.markers.iter().map(|&(cursor, a)| Marker {
             cursor,
@@ -445,7 +464,7 @@ impl Recording {
             let footer = f.footer();
             let rows = footer
                 .parts_meeting_at(interval.clone(), |offset, len| self.parts_page(offset, len))?;
-            let parts = self.read_parts(&footer, &rows)?;
+            let parts = self.read_parts(file, &footer, &rows)?;
             let read = kept_lines(file, &parts)?;
             file.plain
                 .iter()
@@ -507,6 +526,15 @@ impl Recording {
             return Ok(FileAnnotations::default());
         };
         let by_source = parts::generator_files(&files)?;
+        let later = by_source
+            .iter()
+            .filter(|(_, name)| {
+                files
+                    .get(name.as_str())
+                    .is_some_and(|text| annotations::later_generator(text))
+            })
+            .map(|(source, name)| (source.clone(), name.clone()))
+            .collect();
         let (hand, included) = hand_and_included(&files)?;
         // A ref resolves once every part is read.
         let apart = annotations::resolve_apart(hand, &included, &footer.header, &|_| None);
@@ -530,6 +558,7 @@ impl Recording {
         Ok(FileAnnotations {
             files,
             ranks,
+            later,
             plain,
         })
     }
@@ -537,20 +566,28 @@ impl Recording {
     /// The parts at `rows`, each with its row, in the order of the rows.
     fn read_parts(
         &self,
+        file: &FileAnnotations,
         footer: &Footer,
         rows: &[(u64, PartRow)],
     ) -> Result<Vec<(u64, Arc<PartMarkers>)>, Error> {
         rows.iter()
-            .map(|(at, row)| Ok((*at, self.part(footer, row)?)))
+            .map(|(at, row)| Ok((*at, self.part(file, footer, row)?)))
             .collect()
     }
 
     /// The part at `row`, read and resolved the first time, then from the cache.
-    fn part(&self, footer: &Footer, row: &PartRow) -> Result<Arc<PartMarkers>, Error> {
+    fn part(
+        &self,
+        file: &FileAnnotations,
+        footer: &Footer,
+        row: &PartRow,
+    ) -> Result<Arc<PartMarkers>, Error> {
         let entry = self.cache.get_or_make(Key::Part(row.offset), || {
             let _span = tracing::debug_span!("read annotation part", offset = row.offset).entered();
             let frame = read(&*self.bytes, row.offset, row.length as usize)?;
-            let part = PartMarkers::of(footer.decode_part(row, &frame)?, &footer.header);
+            let part = footer.decode_part(row, &frame)?;
+            let later = file.later.contains_key(&part.source);
+            let part = PartMarkers::of(part, &footer.header, later);
             let size = part.size(row.decoded_length);
             Ok::<_, Error>((Entry::Part(Arc::new(part)), size))
         })?;
@@ -630,12 +667,16 @@ fn kept_lines<'a>(
             .into());
         };
         for (n, line) in part.lines.iter().enumerate() {
-            let (id, annotation) = match line {
+            let (id, annotation, left) = match line {
                 PartLine::Past(why) => {
                     out.joined.push(why.clone());
                     continue;
                 }
-                PartLine::Read { id, annotation } => (id, annotation),
+                PartLine::Read {
+                    id,
+                    annotation,
+                    left,
+                } => (id, annotation, left),
             };
             if let Some(id) = id
                 && !ids.insert((&part.source, id))
@@ -651,13 +692,21 @@ fn kept_lines<'a>(
                 continue;
             };
             match annotation {
-                Ok(a) => out.markers.push((
-                    MarkerCursor {
-                        tick: a.start,
-                        arrival: arrival(rank, *at, n),
-                    },
-                    a,
-                )),
+                Ok(a) => {
+                    if !left.is_empty() {
+                        out.noted
+                            .entry(&part.source)
+                            .or_default()
+                            .extend(left.iter().cloned());
+                    }
+                    out.markers.push((
+                        MarkerCursor {
+                            tick: a.start,
+                            arrival: arrival(rank, *at, n),
+                        },
+                        a,
+                    ));
+                }
                 Err(why) => out.broken.push(why.clone()),
             }
         }

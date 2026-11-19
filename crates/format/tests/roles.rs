@@ -463,6 +463,7 @@ mod common {
             content_id: super::ID.parse().unwrap(),
             overview_shift: 12,
             annotation_parts: None,
+            auxiliary: None,
             requires: Vec::new(),
         }
     }

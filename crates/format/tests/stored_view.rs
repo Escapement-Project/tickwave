@@ -49,6 +49,7 @@ fn header() -> Header {
         content_id: ID.parse().unwrap(),
         overview_shift: 12,
         annotation_parts: None,
+        auxiliary: None,
         requires: Vec::new(),
     }
 }

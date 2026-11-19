@@ -1152,13 +1152,14 @@ pub struct LadderEnd {
     pub settled: Vec<Settled>,
 }
 
-/// Each channel's column, then each derived channel's, as a declaration has them. An unavailable
-/// derived channel's layout isn't known: it takes a digital column, which nothing reads.
+/// Each channel's column, then each derived channel's, as a declaration has them. The layout of a
+/// channel of a kind this version doesn't know, or of an unavailable derived channel, isn't known:
+/// it takes a digital column, which nothing reads.
 pub fn columns(channels: &[DeclaredChannel], derived: &[Derived]) -> Vec<Column> {
     let mut out: Vec<Column> = channels
         .iter()
         .map(|c| match &c.data {
-            DeclaredKind::Digital { .. } => Column::Digital,
+            DeclaredKind::Digital { .. } | DeclaredKind::Other { .. } => Column::Digital,
             DeclaredKind::Analog { coding, .. } => Column::of_coding(*coding),
         })
         .collect();

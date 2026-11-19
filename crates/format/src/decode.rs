@@ -551,7 +551,7 @@ pub(crate) fn check_declaration(d: &Declaration) -> Result<(), DecodeError> {
         }
         let grid = |c: &DeclaredChannel| match &c.data {
             DeclaredKind::Analog { period, phase, .. } => Some((*period, *phase)),
-            DeclaredKind::Digital { .. } => None,
+            DeclaredKind::Digital { .. } | DeclaredKind::Other { .. } => None,
         };
         let moved = |c: &DeclaredChannel| c.shaping.offset.as_ref().map_or(0, |o| o.ticks);
         if a.source != b.source || grid(a) != grid(b) || moved(a) != moved(b) {
@@ -813,6 +813,8 @@ pub(crate) fn check_header(h: &Header) -> Result<(), DecodeError> {
                     check_gaps(name, gaps, start, *end, *initial, &map, length)?;
                 }
             }
+            // A kind this version doesn't know: its entry is checked no further.
+            ChannelKind::Other { .. } => {}
             ChannelKind::Analog {
                 first,
                 period,
@@ -953,7 +955,7 @@ pub(crate) fn check_header(h: &Header) -> Result<(), DecodeError> {
                         *lost_before,
                         *lost_after,
                     )),
-                    ChannelKind::Digital { .. } => None,
+                    ChannelKind::Digital { .. } | ChannelKind::Other { .. } => None,
                 })
         };
         if extent(&d.operands[0]) != extent(&d.operands[1]) {
@@ -1006,6 +1008,7 @@ fn check_shaping(c: &ChannelHeader, run: Break) -> Result<(), DecodeError> {
                 )));
             }
         }
+        ChannelKind::Other { .. } => {}
     }
     Ok(())
 }
@@ -1518,6 +1521,10 @@ impl Footer {
                     lists.push(break_count.is_none().then(|| List::Breaks(breaks.clone())));
                     ends.push(Vec::new());
                 }
+                ChannelKind::Other { .. } => {
+                    lists.push(None);
+                    ends.push(Vec::new());
+                }
             }
         }
         Ok(Self {
@@ -1552,7 +1559,16 @@ impl Footer {
             return Ok(());
         }
         let name = match self.header.channels.get(o) {
-            Some(c) => c.name.clone(),
+            Some(c) => {
+                if let ChannelKind::Other { kind } = &c.data {
+                    return Err(corrupt(format!(
+                        "channel {} is unavailable to this reader: it is of kind {kind}, which \
+                         this version doesn't know",
+                        c.name
+                    )));
+                }
+                c.name.clone()
+            }
             None => self
                 .header
                 .derived
@@ -1565,11 +1581,11 @@ impl Footer {
         )))
     }
 
-    /// Analog channel `c`'s grid; None for a digital channel, or no such channel.
+    /// Analog channel `c`'s grid; None for any other channel, or no such channel.
     pub fn grid(&self, c: usize) -> Option<Grid> {
         match &self.header.channels.get(c)?.data {
             ChannelKind::Analog { period, phase, .. } => Grid::new(*period, *phase),
-            ChannelKind::Digital { .. } => None,
+            ChannelKind::Digital { .. } | ChannelKind::Other { .. } => None,
         }
     }
 
@@ -1629,19 +1645,22 @@ impl Footer {
         self.lists.get(c).is_some_and(Option::is_some)
     }
 
-    /// Reads every channel's list that is in pages, through `fetch`.
+    /// Reads every list in pages of a channel this version can read, through `fetch`.
     pub fn load_lists<E: From<DecodeError>>(
         &mut self,
         mut fetch: impl FnMut(u64, u32) -> Result<Vec<u8>, E>,
     ) -> Result<(), E> {
         for c in 0..self.header.channels.len() {
-            self.load_list(c, &mut fetch)?;
+            if self.available(c) {
+                self.load_list(c, &mut fetch)?;
+            }
         }
         Ok(())
     }
 
     /// Reads channel `c`'s gaps or breaks from its list pages, through `fetch`, and checks them
-    /// against its header. Nothing to read for a list in the header.
+    /// against its header. Nothing to read for a list in the header. An unavailable channel's
+    /// pages are not this version's to read, and are never fetched.
     pub fn load_list<E: From<DecodeError>>(
         &mut self,
         c: usize,
@@ -1650,6 +1669,7 @@ impl Footer {
         if self.list_known(c) {
             return Ok(());
         }
+        self.check_available(c)?;
         let Some(table) = self.channels.get(c).and_then(|ch| ch.list.clone()) else {
             return Err(corrupt(format!("no channel {c}")).into());
         };
@@ -1732,13 +1752,18 @@ impl Footer {
                 }
                 List::Breaks(breaks)
             }
+            // Unavailable, which `check_available` refused.
+            ChannelKind::Other { kind } => {
+                return Err(corrupt(format!("channel {name} is of kind {kind}")).into());
+            }
         };
         self.lists[c] = Some(list);
         Ok(())
     }
 
     /// Channel `c`'s blocks, every page of its index read through `fetch`, each checked against
-    /// the header: they tile `0..length` in order and hold the items it counts.
+    /// the header: they tile `0..length` in order and hold the items it counts. An unavailable
+    /// channel's pages are not this version's to read, and are never fetched.
     pub fn block_refs<E: From<DecodeError>>(
         &self,
         c: usize,
@@ -1749,6 +1774,7 @@ impl Footer {
             .channels
             .get(c)
             .ok_or_else(|| corrupt(format!("no channel {c}")))?;
+        self.check_available(c)?;
         let table = self.channels[c]
             .blocks
             .as_ref()
@@ -1775,6 +1801,7 @@ impl Footer {
         let promised = match ch.data {
             ChannelKind::Digital { edges, .. } => edges,
             ChannelKind::Analog { count, .. } => count,
+            ChannelKind::Other { .. } => 0,
         };
         if rows.len() as u64 != ch.blocks || items != promised {
             return Err(corrupt(format!(
@@ -1811,7 +1838,8 @@ impl Footer {
     /// are checked as `block_refs` checks them against the channel's gaps or breaks: `list`
     /// where it is given, which must hold every one the page's ticks need (see `List`), else the
     /// footer's where it holds them. One thing goes unchecked: the level a page's last block
-    /// leaves, which only the next page's first block states.
+    /// leaves, which only the next page's first block states. An unavailable channel's pages are
+    /// refused.
     pub fn block_page(
         &self,
         c: usize,
@@ -1824,6 +1852,7 @@ impl Footer {
             .channels
             .get(c)
             .ok_or_else(|| corrupt(format!("no channel {c}")))?;
+        self.check_available(c)?;
         let Page::Blocks { number, rows } = page else {
             return Err(corrupt(format!(
                 "channel {c}: a block page holds no blocks"
@@ -1834,6 +1863,7 @@ impl Footer {
         let promised = match ch.data {
             ChannelKind::Digital { edges, .. } => edges,
             ChannelKind::Analog { count, .. } => count,
+            ChannelKind::Other { .. } => 0,
         };
         let (end, items_to) = at.next.unwrap_or((self.header.length, promised));
         let mut out = Vec::with_capacity(rows.len());
@@ -1866,13 +1896,15 @@ impl Footer {
     /// before it, the last against where the next page starts, the first page's first against
     /// the channel's start, and the last page's last run against the capture's end. So a reader
     /// can take a list a page at a time. Not checked: that a derived channel's operands' pages
-    /// agree, which `load_list` checks of their whole lists.
+    /// agree, which `load_list` checks of their whole lists. An unavailable channel's pages are
+    /// refused.
     pub fn list_page(&self, c: usize, at: &Located, page: &Page) -> Result<List, DecodeError> {
         let ch = self
             .header
             .channels
             .get(c)
             .ok_or_else(|| corrupt(format!("no channel {c}")))?;
+        self.check_available(c)?;
         let name = &ch.name;
         let map = self.maps[c];
         let length = self.header.length;
@@ -2066,12 +2098,15 @@ impl Footer {
                     self.samples_inside(c, b, breaks)?;
                 }
             }
+            // Unavailable, which returned above.
+            ChannelKind::Other { .. } => {}
         }
         Ok(())
     }
 
     /// Overview channel `o`'s level `li` (of `channels[o].levels`), every page of its index read
-    /// through `fetch`: each row with the first block it stands for.
+    /// through `fetch`: each row with the first block it stands for. An unavailable channel's
+    /// are never fetched.
     pub fn level_refs<E: From<DecodeError>>(
         &self,
         o: usize,
@@ -2082,6 +2117,7 @@ impl Footer {
             .channels
             .get(o)
             .ok_or_else(|| corrupt(format!("no channel {o}")))?;
+        self.check_available(o)?;
         let (level, table) = ch
             .levels
             .get(li)
@@ -2126,7 +2162,8 @@ impl Footer {
 
     /// Overview channel `o`'s level `li`'s rows on the page `at` locates in its table, `page` that
     /// page: each with the first block it stands for, checked as `level_refs` checks them,
-    /// against where the next page starts or, for the last page, the level's blocks.
+    /// against where the next page starts or, for the last page, the level's blocks. An
+    /// unavailable channel's pages are refused.
     pub fn level_page(
         &self,
         o: usize,
@@ -2138,6 +2175,7 @@ impl Footer {
             .channels
             .get(o)
             .ok_or_else(|| corrupt(format!("no channel {o}")))?;
+        self.check_available(o)?;
         let (level, _) = ch
             .levels
             .get(li)
@@ -2351,6 +2389,10 @@ impl Footer {
                 coding: *coding,
                 first_index: b.first_index,
             },
+            // Unavailable, which `check_available` refused.
+            ChannelKind::Other { kind } => {
+                return Err(corrupt(format!("channel {} is of kind {kind}", ch.name)));
+            }
         };
         let bad = |what: String| {
             corrupt(format!(
@@ -2381,6 +2423,33 @@ impl Footer {
             end: b.end,
             data,
         })
+    }
+
+    /// Each record of a kind from 128 up before the footer, as where it starts and its kind: the
+    /// records walked by their framing alone, through `fetch`, as a tool that writes the
+    /// recording again must know of them and a reader at random never meets them.
+    pub fn records_from_128<E: From<DecodeError>>(
+        &self,
+        mut fetch: impl FnMut(u64, u32) -> Result<Vec<u8>, E>,
+    ) -> Result<Vec<(u64, u8)>, E> {
+        let end = self.trailer.footer_offset;
+        let mut at = PREAMBLE_LEN as u64;
+        let mut out = Vec::new();
+        while at < end {
+            let head = fetch(at, record::PAYLOAD_AT as u32)?;
+            let Ok(&[kind, a, b, c, d]) = <&[u8; 5]>::try_from(head.as_slice()) else {
+                return Err(corrupt("a record's framing is cut short").into());
+            };
+            let n = u32::from_le_bytes([a, b, c, d]);
+            if record::skippable(kind) {
+                out.push((at, kind));
+            }
+            at = at
+                .checked_add(u64::from(n) + record::FRAMING as u64)
+                .filter(|&next| next <= end)
+                .ok_or_else(|| corrupt(format!("the record at byte {at} runs past the footer")))?;
+        }
+        Ok(out)
     }
 
     /// The annotation bundle's files, its record read through `fetch`; None without one.
@@ -2434,7 +2503,7 @@ impl Footer {
             ChannelKind::Analog { first, .. } => {
                 Some(self.grid(c)?.sample_place(*first, self.breaks(c)?, index))
             }
-            ChannelKind::Digital { .. } => None,
+            ChannelKind::Digital { .. } | ChannelKind::Other { .. } => None,
         }
     }
 }
@@ -2451,20 +2520,25 @@ pub struct Index {
 }
 
 impl Index {
-    /// `footer`'s file's index, its pages read through `fetch`.
+    /// `footer`'s file's index, its pages read through `fetch`. An unavailable channel's are not
+    /// fetched: its blocks and levels are none here.
     pub fn read<E: From<DecodeError>>(
         mut footer: Footer,
         mut fetch: impl FnMut(u64, u32) -> Result<Vec<u8>, E>,
     ) -> Result<Self, E> {
         footer.load_lists(&mut fetch)?;
         let blocks = (0..footer.header.channels.len())
-            .map(|c| footer.block_refs(c, &mut fetch))
+            .map(|c| match footer.available(c) {
+                true => footer.block_refs(c, &mut fetch),
+                false => Ok(Vec::new()),
+            })
             .collect::<Result<Vec<_>, E>>()?;
         let levels = (0..footer.channels.len())
-            .map(|o| {
-                (0..footer.channels[o].levels.len())
+            .map(|o| match footer.available(o) {
+                true => (0..footer.channels[o].levels.len())
                     .map(|li| footer.level_refs(o, li, &mut fetch))
-                    .collect::<Result<Vec<_>, E>>()
+                    .collect::<Result<Vec<_>, E>>(),
+                false => Ok(Vec::new()),
             })
             .collect::<Result<Vec<_>, E>>()?;
         Ok(Self {
@@ -2741,6 +2815,7 @@ mod tests {
             overview_shift: 12,
             annotation_parts: None,
             requires: Vec::new(),
+            auxiliary: None,
         }
     }
 

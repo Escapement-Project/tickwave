@@ -158,8 +158,9 @@ enum Command {
     },
     /// Finish a recording cut off before its footer, by a crash, a power cut or a full disk: a
     /// copy with every whole record and a footer for them. Each annotation generator's file goes
-    /// beside the copy, as `<name>.<source>.jsonl`. Where a loss's record before the cut can't
-    /// stay in the copy, the recording is re-cut instead, as `recut` does.
+    /// beside the copy, as `<name>.<source>.jsonl`. Where a record before the cut can't stay in
+    /// the copy, a loss's the header can't leave out or an auxiliary one, the recording is re-cut
+    /// instead, as `recut` does.
     Repair {
         file: PathBuf,
         #[arg(short, long)]
@@ -861,11 +862,15 @@ impl Sizes {
     }
 
     /// Every channel's blocks a page at a time, each page checked as a whole index read is and
-    /// dropped once counted, so a recording of any length is described in bounded memory.
+    /// dropped once counted, so a recording of any length is described in bounded memory. An
+    /// unavailable channel's are not read.
     fn read(footer: &Footer, input: &dyn escapement_tickwave_import::input::Input) -> Result<Self> {
         let mut sizes = Self::new(footer);
         let mut fetch = escapement_tickwave_import::recording::fetch(input);
         for (c, ch) in footer.channels.iter().enumerate() {
+            if !footer.available(c) {
+                continue;
+            }
             if let Some(table) = &ch.blocks {
                 table.visit(&mut fetch, |at, page| {
                     for b in footer.block_page(c, &at, &page, None)? {
@@ -1105,6 +1110,13 @@ fn write_info(
                     unavailable(i)
                 )?
             }
+            ChannelKind::Other { kind } => writeln!(
+                out,
+                "  {:<12} {kind} ({}{from}){}",
+                c.name,
+                c.source_name,
+                unavailable(i)
+            )?,
         }
     }
     for (k, d) in h.derived.iter().enumerate() {
@@ -1264,7 +1276,7 @@ fn capture(h: &Header, source: usize, against: &Path) -> Result<Recording> {
         .filter(|c| c.source as usize == source)
         .filter_map(|c| match &c.data {
             ChannelKind::Analog { unit, .. } => Some((c.name.clone(), unit.clone())),
-            ChannelKind::Digital { .. } => None,
+            ChannelKind::Digital { .. } | ChannelKind::Other { .. } => None,
         })
         .collect();
     Ok(set_units(recording, &units)?)
@@ -1605,12 +1617,10 @@ fn repair_file(file: &Path, output: &Path, level: i32) -> Result<()> {
              so it isn't repaired: make it again from its sources",
             file.display()
         ),
-        Err(RepairError::GapRecordKept {
-            channel, from, to, ..
-        }) => {
+        Err(e) if let Some(why) = recut_instead(&e) => {
             // Repair keeps the bytes before the cut; a re-cut writes them again without the
             // record.
-            let (finished, left_out) = recut_into(
+            let (finished, lines) = recut_into(
                 file,
                 output,
                 WriteOptions {
@@ -1620,10 +1630,9 @@ fn repair_file(file: &Path, output: &Path, level: i32) -> Result<()> {
                 },
             )?;
             write_generated(output)?;
-            warn_left_out(&left_out);
+            lines.report();
             info!(
-                "{}: re-cut, as the record of channel {channel}'s gap from {from} to {to} lies \
-                 before the cut and the header can't leave the gap out; {} blocks to {}, {}",
+                "{}: re-cut, as {why}; {} blocks to {}, {}",
                 output.display(),
                 blocks(&finished.header),
                 seconds(finished.header.length, &finished.header),
@@ -1637,7 +1646,11 @@ fn repair_file(file: &Path, output: &Path, level: i32) -> Result<()> {
         copy_then(&mut opened, repaired.keep, &repaired.tail, out)
     })?;
     write_generated(output)?;
-    warn_left_out(&repaired.left_out);
+    Lines {
+        left_out: repaired.left_out,
+        carried: repaired.carried,
+    }
+    .report();
     info!(
         "{}: {} of {} bytes kept, {} blocks to {}, {}",
         output.display(),
@@ -1650,10 +1663,38 @@ fn repair_file(file: &Path, output: &Path, level: i32) -> Result<()> {
     Ok(())
 }
 
-/// The annotation lines repair or recut left out, as they would not resolve.
-fn warn_left_out(left_out: &[String]) {
-    for why in left_out {
-        warn!("left out an annotation that would not resolve: {why}");
+/// Why repair can't keep the bytes before the cut, which a re-cut writes again: a record there
+/// that a copy can't hold. None for any other refusal.
+fn recut_instead(e: &RepairError) -> Option<String> {
+    match e {
+        RepairError::GapRecordKept {
+            channel, from, to, ..
+        } => Some(format!(
+            "the record of channel {channel}'s gap from {from} to {to} lies before the cut and \
+             the header can't leave the gap out"
+        )),
+        RepairError::AuxiliaryKept { kind, .. } => Some(format!(
+            "an auxiliary record, of kind {kind}, lies before the cut, and a copy holds none"
+        )),
+        _ => None,
+    }
+}
+
+/// What repair or a re-cut says of the annotation lines it wrote again: each it left out, as it
+/// would not resolve, and, by generator, what it carried that this version doesn't know.
+struct Lines {
+    left_out: Vec<String>,
+    carried: Vec<String>,
+}
+
+impl Lines {
+    fn report(&self) {
+        for why in &self.left_out {
+            warn!("left out an annotation that would not resolve: {why}");
+        }
+        for what in &self.carried {
+            info!("{what}");
+        }
     }
 }
 
@@ -1742,8 +1783,8 @@ fn recut_file(input: &Path, output: &Path, options: WriteOptions) -> Result<()> 
         .with_context(|| format!("reading {}", input.display()))?
         .len();
     let started = Instant::now();
-    let (finished, left_out) = recut_into(input, output, options)?;
-    warn_left_out(&left_out);
+    let (finished, lines) = recut_into(input, output, options)?;
+    lines.report();
     info!(
         "{}: {:.2} MB from {:.2} MB, {} blocks, {} in {:.1} s",
         output.display(),
@@ -1756,20 +1797,16 @@ fn recut_file(input: &Path, output: &Path, options: WriteOptions) -> Result<()> 
     Ok(())
 }
 
-/// `input` re-cut into `output`, and read back: what it finished at, and the annotation lines it
-/// left out as they would not resolve.
-fn recut_into(
-    input: &Path,
-    output: &Path,
-    options: WriteOptions,
-) -> Result<(Finished, Vec<String>)> {
+/// `input` re-cut into `output`, and read back: what it finished at, and what it says of the
+/// annotation lines it wrote again.
+fn recut_into(input: &Path, output: &Path, options: WriteOptions) -> Result<(Finished, Lines)> {
     let mut opened =
         fs::File::open(input).with_context(|| format!("reading {}", input.display()))?;
     let mut recutter = Recutter::new(options);
     recutter.bundle(Bundle::Generated {
         stem: stem_of(output),
     });
-    let (finished, left_out) = write_atomically(output, |out| {
+    let (finished, lines) = write_atomically(output, |out| {
         let mut chunk = vec![0; 1 << 20];
         loop {
             let n = opened.read(&mut chunk)?;
@@ -1784,7 +1821,10 @@ fn recut_into(
             recutter.consume(written);
         }
         // What the last `consume` compressed waits in the output, and the finish's tail holds it.
-        let left_out = recutter.left_out().to_vec();
+        let lines = Lines {
+            left_out: recutter.left_out().to_vec(),
+            carried: recutter.carried(),
+        };
         let finished = match recutter.finish() {
             Ok(finished) => finished,
             Err(RecutError::Shaped(_)) => bail!(
@@ -1795,7 +1835,7 @@ fn recut_into(
             Err(e) => return Err(e).with_context(|| format!("re-cutting {}", input.display())),
         };
         out.write_all(&finished.tail)?;
-        Ok((finished, left_out))
+        Ok((finished, lines))
     })?;
     let check = match read_footer(output) {
         Ok((_, _, check)) => check,
@@ -1808,7 +1848,7 @@ fn recut_into(
         let _ = fs::remove_file(output);
         bail!("the copy does not read back with its content id");
     }
-    Ok((finished, left_out))
+    Ok((finished, lines))
 }
 
 /// A file's name, as the viewer is given it.
@@ -1984,6 +2024,7 @@ mod tests {
                 .unwrap(),
             overview_shift: 12,
             annotation_parts: None,
+            auxiliary: None,
             requires: Vec::new(),
         }
     }
@@ -2457,6 +2498,33 @@ mod tests {
             "{out}"
         );
         assert!(!out.contains("--drift"), "{out}");
+        // A channel this version can't read is no candidate: its list isn't read, nor its blocks.
+        let mut header = Footer::parse_file(&input.bytes).unwrap().header;
+        header.channels[1].requires = vec!["frobs".into()];
+        let t = input.bytes.len() - 24;
+        let at = u64::from_le_bytes(input.bytes[t..t + 8].try_into().unwrap()) as usize;
+        let n = u32::from_le_bytes(input.bytes[t + 8..t + 12].try_into().unwrap()) as usize;
+        let payload = &input.bytes[at + 5..at + n - 8];
+        let header_len = u32::from_le_bytes(payload[..4].try_into().unwrap()) as usize;
+        let json = serde_json::to_vec(&header).unwrap();
+        let mut new = (json.len() as u32).to_le_bytes().to_vec();
+        new.extend_from_slice(&payload[4..8]);
+        new.extend_from_slice(&json);
+        new.extend_from_slice(&payload[8 + header_len..]);
+        let mut edited = input.bytes[..at].to_vec();
+        escapement_tickwave_format::record::write_footer(&mut edited, 0, &new);
+        let input = Counted {
+            bytes: edited,
+            reads: Default::default(),
+        };
+        let len = input.bytes.len() as u64;
+        for drift in [false, true] {
+            let mut out = Vec::new();
+            let head = Footer::parse_file(&input.bytes).unwrap();
+            write_info(&mut out, head, len, false, &input, drift).unwrap();
+            let out = String::from_utf8(out).unwrap();
+            assert!(!out.contains("drift"), "{out}");
+        }
     }
 
     /// The median, least and greatest of lengths below and above the counted ones, against the
@@ -2613,6 +2681,137 @@ mod tests {
         assert!(s["timebase"].is_array() && s.get("origin").is_some(), "{s}");
         let c = &h["channels"][0];
         assert!(c["name"].is_string() && c["source"].is_number(), "{c}");
+    }
+
+    /// `info` on channels this version can't read: one of a kind it doesn't know, and one whose
+    /// row states more than a block may decode, which a later version may allow. Each is named
+    /// as such, and nothing of its index is read, a page at a time or whole.
+    #[test]
+    fn info_reads_nothing_of_an_unavailable_channels_index() {
+        use escapement_tickwave_format::header::{
+            AnalogCoding, BlockRow, Declaration, DeclaredChannel, DeclaredKind,
+        };
+        use escapement_tickwave_format::model::Ratio;
+        use escapement_tickwave_format::record::{self, Kind};
+        use escapement_tickwave_format::writer::{Finish, WriteOptions, Writer};
+        let channel = |name: &str, data| DeclaredChannel {
+            name: name.into(),
+            source_name: name.to_lowercase(),
+            source: 0,
+            data,
+            shaping: Default::default(),
+            overview_shift: None,
+            codec: None,
+            requires: Vec::new(),
+        };
+        let analog = DeclaredKind::Analog {
+            unit: "V".into(),
+            period: Ratio::integer(1).unwrap(),
+            coding: AnalogCoding::F32,
+            significant: None,
+            phase: None,
+        };
+        let tb = Ratio::integer(1000).unwrap();
+        let d = Declaration {
+            timebase: tb,
+            channels: vec![
+                channel("V", analog.clone()),
+                channel("I", analog),
+                channel("D", DeclaredKind::Digital { initial: false }),
+            ],
+            derived: Vec::new(),
+            sources: vec![SourceHeader::new(SourceFormat::Other("t".into()), tb)],
+            title: None,
+            meta: Default::default(),
+            overview_shift: 4,
+            requires: Vec::new(),
+        };
+        let mut w = Writer::new(d, WriteOptions::default()).unwrap();
+        for c in 0..2 {
+            w.run(c, 0, 0).unwrap();
+        }
+        for i in 0..10 {
+            w.sample(0, i as f32).unwrap();
+            w.sample(1, i as f32).unwrap();
+        }
+        w.edge(2, 3).unwrap();
+        let mut file = w.take_output();
+        file.extend(w.finish(20, &[20], Finish::default()).unwrap().tail);
+        // I's first row says its block decodes to 8 MiB.
+        let footer = Footer::parse_file(&file).unwrap();
+        let entry = footer.channels[1].blocks.as_ref().unwrap().levels[0][0];
+        let (at, len) = (entry.offset as usize, entry.length as usize);
+        let payload = file[at + 5..at + len - 8].to_vec();
+        let head = escapement_tickwave_format::index::PAGE_HEAD;
+        let mut edited = payload[..head].to_vec();
+        for r in payload[head..].as_chunks::<{ BlockRow::SIZE }>().0 {
+            let mut row = BlockRow::parse(r);
+            row.decoded_length = 8 << 20;
+            row.write(&mut edited);
+        }
+        let mut page = Vec::new();
+        record::write(&mut page, Kind::IndexPage, &[&edited]);
+        file[at..at + len].copy_from_slice(&page);
+        let pages: Vec<u64> = [1, 2]
+            .iter()
+            .flat_map(|&o| {
+                let ch = &footer.channels[o];
+                ch.blocks
+                    .iter()
+                    .chain(ch.levels.iter().map(|(_, t)| t))
+                    .flat_map(|t| t.levels[0].iter().map(|e| e.offset))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        // I requires a feature that allows it; D is of a kind this version doesn't know.
+        let mut header: serde_json::Value = serde_json::to_value(&footer.header).unwrap();
+        header["channels"][1]["requires"] = serde_json::json!(["big-blocks"]);
+        header["channels"][2]["kind"] = "events".into();
+        let t = file.len() - 24;
+        let at = u64::from_le_bytes(file[t..t + 8].try_into().unwrap()) as usize;
+        let len = u32::from_le_bytes(file[t + 8..t + 12].try_into().unwrap()) as usize;
+        let payload = &file[at + 5..at + len - 8];
+        let header_len = u32::from_le_bytes(payload[..4].try_into().unwrap()) as usize;
+        let json = serde_json::to_vec(&header).unwrap();
+        let mut new = (json.len() as u32).to_le_bytes().to_vec();
+        new.extend_from_slice(&payload[4..8]);
+        new.extend_from_slice(&json);
+        new.extend_from_slice(&payload[8 + header_len..]);
+        let mut edited = file[..at].to_vec();
+        record::write_footer(&mut edited, 0, &new);
+        let input = Counted {
+            bytes: edited,
+            reads: Default::default(),
+        };
+        let len = input.bytes.len() as u64;
+        for drift in [false, true] {
+            input.reads.lock().unwrap().clear();
+            let mut out = Vec::new();
+            let head = Footer::parse_file(&input.bytes).unwrap();
+            write_info(&mut out, head, len, false, &input, drift).unwrap();
+            let out = String::from_utf8(out).unwrap();
+            let line = |name: &str| {
+                out.lines()
+                    .find(|l| l.trim_start().starts_with(&format!("{name} ")))
+                    .unwrap_or_else(|| panic!("{name}: {out}"))
+                    .to_owned()
+            };
+            assert!(
+                line("I").contains("; channel I is unavailable to this reader"),
+                "{out}"
+            );
+            assert!(
+                line("D").contains(
+                    "events (d); channel D is unavailable to this reader: it is of kind events"
+                ),
+                "{out}"
+            );
+            let reads = input.reads.lock().unwrap();
+            assert!(
+                !reads.iter().any(|r| pages.contains(&r.start)),
+                "drift {drift}: an unavailable channel's index page was read"
+            );
+        }
     }
 
     /// A channel's 70,000 blocks, in 18 pages under a directory, and its overview level's rows

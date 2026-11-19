@@ -108,7 +108,7 @@ fn write(
         .iter()
         .map(|c| match &c.data {
             DeclaredKind::Analog { period, .. } => Some(period.num() as i64),
-            DeclaredKind::Digital { .. } => None,
+            DeclaredKind::Digital { .. } | DeclaredKind::Other { .. } => None,
         })
         .collect();
     let digital = periods.iter().filter(|p| p.is_none()).count();
@@ -252,6 +252,7 @@ fn recording(file: &[u8]) -> Recording {
                         phase: None,
                     })
                 }
+                ChannelKind::Other { .. } => unreachable!("a channel of a kind it knows"),
             },
         })
         .collect();
@@ -1114,6 +1115,7 @@ fn repair_finishes_a_file_known_through_a_tick_with_no_block() {
                             lost_before: 0,
                             lost_after: 0,
                         }),
+                        DeclaredKind::Other { .. } => unreachable!("a channel of a kind it knows"),
                     },
                 })
                 .collect(),

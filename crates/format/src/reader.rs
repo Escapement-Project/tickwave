@@ -128,6 +128,10 @@ struct Follow<R: Row> {
     backlog: VecDeque<R>,
     /// Its last pages have begun: no entry comes after.
     finishing: bool,
+    /// The table of a channel of a kind this version doesn't know, whose entries it can't weigh:
+    /// its entries are counted, and its pages taken as they come (FORMAT.md, "Unavailable
+    /// channels").
+    unchecked: bool,
 }
 
 impl<R: Row> Follow<R> {
@@ -138,12 +142,25 @@ impl<R: Row> Follow<R> {
             due: None,
             backlog: VecDeque::new(),
             finishing: false,
+            unchecked: false,
+        }
+    }
+
+    /// `new`, for a table this version follows no further than its entries' count.
+    fn unchecked(channel: u32, table: Table) -> Self {
+        Self {
+            unchecked: true,
+            ..Self::new(channel, table, false)
         }
     }
 
     /// The next entry, which waits behind a page due. Past what a page holds behind it, or after
     /// the last pages have begun, it is refused.
     fn push(&mut self, row: R) -> Result<(), DecodeError> {
+        if self.unchecked {
+            let _ = self.table.push(row);
+            return Ok(());
+        }
         if self.finishing || self.backlog.len() >= crate::index::PAGE {
             return Err(corrupt(format!(
                 "channel {}'s {}: an entry comes where a page is due",
@@ -175,6 +192,9 @@ impl<R: Row> Follow<R> {
     /// The page record `record`, at `at`, of this table: the one due, or the next of its last
     /// pages.
     fn page(&mut self, record: &[u8], at: u64, inline: u64) -> Result<(), DecodeError> {
+        if self.unchecked {
+            return Ok(());
+        }
         let due = match self.due.take() {
             Some(due) => due,
             None => {
@@ -241,6 +261,9 @@ enum Channel {
         map: Mapping,
         list: Follow<Break>,
     },
+    /// Of a kind this version doesn't know: its blocks are placed and not read, and it has no
+    /// gap or run.
+    Other,
 }
 
 /// A source tick's place on the axis, where both lie in `0..2^53`.
@@ -379,6 +402,11 @@ impl Reader {
         self.next_start.get(c).copied()
     }
 
+    /// The file's minor version, once the preamble is read.
+    pub fn minor(&self) -> Option<u16> {
+        self.preamble.map(|p| p.minor)
+    }
+
     /// The latest known-through record's tick.
     pub fn known_through(&self) -> Option<i64> {
         self.known
@@ -392,6 +420,7 @@ impl Reader {
     pub fn mapping(&self, c: usize) -> Option<Mapping> {
         match self.channels.get(c)? {
             Channel::Digital { map, .. } | Channel::Analog { map, .. } => Some(*map),
+            Channel::Other => None,
         }
     }
 
@@ -415,7 +444,7 @@ impl Reader {
                 let first = runs.first().filter(|r| r.index == 0)?;
                 Some((*grid, grid.sample_place(first.tick, &runs[1..], index)))
             }
-            Channel::Digital { .. } => None,
+            Channel::Digital { .. } | Channel::Other => None,
         }
     }
 
@@ -639,7 +668,10 @@ impl Reader {
                 let mut blocks = Vec::with_capacity(d.channels.len());
                 for (c, (channel, map)) in d.channels.iter().zip(maps).enumerate() {
                     let digital = matches!(channel.data, DeclaredKind::Digital { .. });
-                    blocks.push(Follow::new(c as u32, Table::Blocks, digital));
+                    blocks.push(match channel.data {
+                        DeclaredKind::Other { .. } => Follow::unchecked(c as u32, Table::Blocks),
+                        _ => Follow::new(c as u32, Table::Blocks, digital),
+                    });
                     channels.push(match &channel.data {
                         DeclaredKind::Digital { initial } => {
                             let start = d.start(c).ok_or_else(unmapped)?;
@@ -662,6 +694,7 @@ impl Reader {
                             map,
                             list: Follow::new(c as u32, Table::Breaks, false),
                         },
+                        DeclaredKind::Other { .. } => Channel::Other,
                     });
                 }
                 let overview_channels = d.channels.len() + d.derived.len();
@@ -704,7 +737,9 @@ impl Reader {
                     ..
                 } = &mut self.channels[c]
                 else {
-                    return Err(corrupt("a gap on an analog channel"));
+                    return Err(corrupt(format!(
+                        "channel {c}: a gap on a channel not digital"
+                    )));
                 };
                 let after = gaps.last().map_or(*last_edge, |g| g.to.max(*last_edge));
                 let first = gaps.is_empty() && *edges == 0;
@@ -741,7 +776,9 @@ impl Reader {
                     ..
                 } = &mut self.channels[c]
                 else {
-                    return Err(corrupt("a run on a digital channel"));
+                    return Err(corrupt(format!(
+                        "channel {c}: a run on a channel not analog"
+                    )));
                 };
                 let grid = *grid;
                 let in_order = match runs.last() {
@@ -1024,9 +1061,11 @@ impl Reader {
                     g.from, g.to, h.length
                 )));
             }
-            let top = self.blocks[c].top(0)?;
-            if top != footer.channels[c].blocks.as_ref().map(top_of) {
-                return Err(differs(c, "block index"));
+            if !self.blocks[c].unchecked {
+                let top = self.blocks[c].top(0)?;
+                if top != footer.channels[c].blocks.as_ref().map(top_of) {
+                    return Err(differs(c, "block index"));
+                }
             }
             let fits = match (&mut self.channels[c], &ch.data) {
                 // A gap left out of the header reaches its channel's end, which is then at its
@@ -1086,6 +1125,7 @@ impl Reader {
                     let stated = footer.channels[c].list.as_ref().map(top_of);
                     *next_index == *count && runs_fit && top == stated
                 }
+                (Channel::Other, ChannelKind::Other { .. }) => true,
                 _ => false,
             };
             if !fits {
@@ -1151,6 +1191,7 @@ impl Reader {
                     *next_index += u64::from(head.word);
                     list_runs(runs, from, *next_index, list)?;
                 }
+                Channel::Other => {}
             }
             self.placed_block(head, frame, record_at)?;
             return Ok(Err(head));
@@ -1172,6 +1213,8 @@ impl Reader {
                 coding: *coding,
                 first_index: *next_index,
             },
+            // Unavailable, which returned above.
+            Channel::Other => return Err(corrupt(format!("channel {c}: a block of another kind"))),
         };
         let data = decode_section(&raw, &section, head.word, head.start, head.end)
             .map_err(|e| placed(e, || format!("channel {c}, the block at {}", head.start)))?;
@@ -1387,7 +1430,7 @@ impl Reader {
             Channel::Analog {
                 runs, next_index, ..
             } => Some((runs, *next_index)),
-            Channel::Digital { .. } => None,
+            Channel::Digital { .. } | Channel::Other => None,
         }
     }
 

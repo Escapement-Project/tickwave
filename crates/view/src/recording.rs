@@ -772,6 +772,7 @@ fn stored_place(footer: &Footer, i: usize) -> Place {
             Rule::Coding(*coding),
             map,
         ),
+        HeaderKind::Other { .. } => unavailable_info(footer, i).1,
     }
 }
 
@@ -906,6 +907,8 @@ fn header_channels(footer: &Footer, products: &[Option<(usize, usize, Product)>]
                 significant,
                 ..
             } => analog_info(&c.name, unit, *coding, *significant),
+            // Unavailable, which went on above.
+            HeaderKind::Other { .. } => unavailable_info(footer, i).0,
         });
         built.places.push(stored_place(footer, i));
     }
@@ -1166,6 +1169,9 @@ impl Recording {
                         Rule::Coding(*coding),
                         map,
                     ));
+                }
+                DeclaredKind::Other { .. } => {
+                    unreachable!("a writer takes no channel of another kind")
                 }
             }
         }

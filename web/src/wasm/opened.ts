@@ -210,10 +210,12 @@ interface PartLine {
   readonly past?: boolean;
 }
 
-/** An annotation part, read, each of its lines resolved alone. */
+/** An annotation part, read, each of its lines resolved alone, and a note naming what a later
+ * minor version's lines held that this reader left out of them. */
 interface PartRead extends Sized {
   readonly source: string;
   readonly lines: readonly PartLine[];
+  readonly note?: string;
 }
 
 /** The annotation bundle as reading annotations a range at a time needs it. */
@@ -1224,7 +1226,7 @@ export class Opened {
         key: `${this.#id} a${r[0]}`,
         from: r[1],
         to: r[1] + r[2],
-        make: (frame: Uint8Array): PartRead => ({ ...(JSON.parse(this.#rec.partAnnotations(r, frame)) as Omit<PartRead, "size">), size: 64 + 2 * r[3] }),
+        make: (frame: Uint8Array): PartRead => ({ ...(JSON.parse(this.#rec.partAnnotations(r, frame, b.names, b.texts)) as Omit<PartRead, "size">), size: 64 + 2 * r[3] }),
       })),
       signal,
     );
@@ -1235,12 +1237,14 @@ export class Opened {
   /** The annotations of the bundle and the parts read so far. */
   #gathered(b: BundleRead): AnnotationsRead {
     const problems: string[] = [];
+    const notes = new Set<string>();
     const generated: { order: [number, number, number]; a: CoreAnnotation }[] = [];
     const claimed = new Set<string>();
     for (const row of [...this.#parts.keys()].sort((x, y) => x - y)) {
       const part = this.#parts.get(row)!;
       const rank = b.ranks.get(part.source);
       if (rank === undefined) throw new Error(`${this.#name}: an annotation part of generator ${JSON.stringify(part.source)}, which has no file in the bundle`);
+      if (part.note !== undefined && rank !== null) notes.add(part.note);
       part.lines.forEach((line, n) => {
         if (line.past) {
           problems.push(line.left!);
@@ -1273,7 +1277,7 @@ export class Opened {
     };
     if (complete) problems.push(...apart.problems);
     const hand = apart.annotations.sort((x, y) => x.place - y.place).map((h) => h.annotation);
-    return { list: [...hand, ...generated.map((g) => g.a)], problems, notes: apart.notes, complete, roles: apart.roles, view: apart.view };
+    return { list: [...hand, ...generated.map((g) => g.a)], problems, notes: [...apart.notes, ...notes], complete, roles: apart.roles, view: apart.view };
   }
 
   /** Resolves a sidecar (the hand-written file as JSON, and the files it includes) against this recording. */

@@ -61,6 +61,13 @@ pub struct Options {
     /// The paint roles each generator declares, by its name, for its file's first line in the
     /// bundle (`Writer::roles`).
     pub roles: Vec<(String, Vec<serde_json::Value>)>,
+    /// Whether `annotations` are carried from other recordings' files, as a merge carries them:
+    /// a key or a `measure` this version doesn't know is then carried, not refused
+    /// (`Writer::carried_annotation`).
+    pub carried: bool,
+    /// Each carried generator's file's first line's keys, by its name, for its file's first line
+    /// in the bundle in place of its roles (`Writer::head`).
+    pub heads: Vec<(String, serde_json::Map<String, serde_json::Value>)>,
     /// How to bundle the annotations (`Finish::bundle`).
     pub bundle: Option<Bundle>,
 }
@@ -82,6 +89,8 @@ impl Default for Options {
             overview_shift: None,
             annotations: Vec::new(),
             roles: Vec::new(),
+            carried: false,
+            heads: Vec::new(),
             bundle: None,
         }
     }
@@ -309,8 +318,14 @@ pub fn encode_to(
     for (source, roles) in &options.roles {
         writer.roles(source, roles.clone());
     }
+    for (source, keys) in &options.heads {
+        writer.head(source, keys.clone());
+    }
     for (source, annotation) in &options.annotations {
-        writer.annotation(source, annotation.clone())?;
+        match options.carried {
+            true => writer.carried_annotation(source, annotation.clone())?,
+            false => writer.annotation(source, annotation.clone())?,
+        }
     }
     drain(&mut writer, &mut out)?;
     loop {
@@ -434,6 +449,7 @@ pub fn spacing(
             let span = maps[c].axis(end)?.checked_sub(maps[c].axis(start)?)?;
             Spacing::of_edges(u64::try_from(span).ok()?.max(1), count)
         }
+        DeclaredKind::Other { .. } => None,
     }
 }
 

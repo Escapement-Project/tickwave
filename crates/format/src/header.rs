@@ -14,6 +14,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 
 use crate::mapping::Mapping;
 use crate::model::{Break, Gap, Ratio};
@@ -376,6 +377,9 @@ pub enum DeclaredKind {
         #[serde(skip_serializing_if = "Option::is_none")]
         phase: Option<Ratio>,
     },
+    /// A kind a later version defines, as `ChannelKind::Other`.
+    #[serde(untagged)]
+    Other { kind: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -401,6 +405,38 @@ pub struct Header {
     /// The number of annotation parts, at least 1; None where there are none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub annotation_parts: Option<u64>,
+    /// Where it is stated: where a later version's auxiliary records are. Not content, and never
+    /// written, so a tool that writes a recording again drops it.
+    #[serde(default, skip_serializing)]
+    pub auxiliary: Option<Auxiliary>,
+}
+
+/// A header's `auxiliary` object: what a later version says of its auxiliary records. This
+/// version defines no key of it, and a reader leaves out every key it holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Auxiliary;
+
+impl<'de> Deserialize<'de> for Auxiliary {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Object;
+        impl<'de> serde::de::Visitor<'de> for Object {
+            type Value = Auxiliary;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("an object")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Auxiliary, A::Error> {
+                while map
+                    .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
+                    .is_some()
+                {}
+                Ok(Auxiliary)
+            }
+        }
+        d.deserialize_map(Object)
+    }
 }
 
 /// One level of a channel's overview that goes in overview blocks: its shift, its blocks of 4,096
@@ -480,6 +516,10 @@ pub enum ChannelKind {
         #[serde(skip_serializing_if = "is_zero")]
         lost_after: u64,
     },
+    /// A kind a later version defines, which this one reads as unavailable (FORMAT.md,
+    /// "Unavailable channels"): of its entry it keeps only what every kind has.
+    #[serde(untagged)]
+    Other { kind: String },
 }
 
 fn is_zero(v: &u64) -> bool {
@@ -501,6 +541,7 @@ impl ChannelKind {
                 break_count,
                 ..
             } => break_count.unwrap_or(breaks.len() as u64),
+            Self::Other { .. } => 0,
         }
     }
 
@@ -509,6 +550,7 @@ impl ChannelKind {
         match self {
             Self::Digital { gap_count, .. } => gap_count.is_some(),
             Self::Analog { break_count, .. } => break_count.is_some(),
+            Self::Other { .. } => false,
         }
     }
 }
@@ -696,47 +738,90 @@ impl AnalogCoding {
 }
 
 /// A channel as the JSON holds it, in the header or the declaration, every kind's fields inline
-/// and optional. Deriving
-/// `Deserialize` for the flattened, internally tagged form instead makes serde buffer each channel
-/// before parsing it, which costs the browser's decoder a large share of its size.
+/// and optional. Deriving `Deserialize` for the flattened, internally tagged form instead makes
+/// serde buffer each channel before parsing it, which costs the browser's decoder a large share
+/// of its size. The fields of a kind are kept as their JSON text and read once `kind` says the
+/// channel is of a kind this version knows: of any other, a reader checks only the fields every
+/// kind has (FORMAT.md, "Unavailable channels").
 #[derive(Deserialize)]
 struct RawChannel {
     name: String,
     source_name: String,
     source: u32,
-    kind: RawKind,
-    initial: Option<bool>,
-    end: Option<i64>,
-    edges: Option<u64>,
-    gaps: Option<Vec<Gap>>,
-    gap_count: Option<u64>,
-    unit: Option<String>,
-    first: Option<i64>,
-    period: Option<Ratio>,
-    count: Option<u64>,
-    breaks: Option<Vec<Break>>,
-    break_count: Option<u64>,
-    coding: Option<RawCoding>,
-    #[serde(default, deserialize_with = "significant")]
-    significant: Option<u8>,
-    lost_before: Option<u64>,
-    lost_after: Option<u64>,
-    offset: Option<i64>,
-    offset_kind: Option<String>,
-    kept: Option<Kept>,
+    kind: String,
     overview_shift: Option<u8>,
     blocks: Option<u64>,
     overview_blocks: Option<Vec<OverviewLevel>>,
-    phase: Option<Ratio>,
     requires: Option<Vec<String>>,
-    codec: Option<String>,
+    initial: Option<Box<RawValue>>,
+    end: Option<Box<RawValue>>,
+    edges: Option<Box<RawValue>>,
+    gaps: Option<Box<RawValue>>,
+    gap_count: Option<Box<RawValue>>,
+    unit: Option<Box<RawValue>>,
+    first: Option<Box<RawValue>>,
+    period: Option<Box<RawValue>>,
+    count: Option<Box<RawValue>>,
+    breaks: Option<Box<RawValue>>,
+    break_count: Option<Box<RawValue>>,
+    coding: Option<Box<RawValue>>,
+    significant: Option<Box<RawValue>>,
+    lost_before: Option<Box<RawValue>>,
+    lost_after: Option<Box<RawValue>>,
+    offset: Option<Box<RawValue>>,
+    offset_kind: Option<Box<RawValue>>,
+    kept: Option<Box<RawValue>>,
+    phase: Option<Box<RawValue>>,
+    codec: Option<Box<RawValue>>,
+}
+
+/// A channel's kind, of those this version knows or not.
+enum RawKind {
+    Digital,
+    Analog,
+    Other(String),
 }
 
 impl RawChannel {
+    fn kind(&self) -> RawKind {
+        match self.kind.as_str() {
+            "digital" => RawKind::Digital,
+            "analog" => RawKind::Analog,
+            other => RawKind::Other(other.to_owned()),
+        }
+    }
+
+    /// Field `field`, from its JSON text, as its type. Read as bytes, as the header is, so the
+    /// WASM module carries one of serde_json's readers rather than two.
+    fn typed<T: serde::de::DeserializeOwned>(
+        &self,
+        field: &str,
+        raw: &Option<Box<RawValue>>,
+    ) -> Result<Option<T>, String> {
+        raw.as_ref()
+            .map(|r| {
+                serde_json::from_slice(r.get().as_bytes())
+                    .map_err(|e| format!("channel {}'s `{field}`: {e}", self.name))
+            })
+            .transpose()
+    }
+
+    fn significant(&self) -> Result<Option<u8>, String> {
+        self.significant.as_ref().map_or(Ok(None), |r| {
+            significant(&mut serde_json::Deserializer::from_slice(
+                r.get().as_bytes(),
+            ))
+            .map_err(|e| format!("channel {}'s `significant`: {e}", self.name))
+        })
+    }
+
     /// The channel's move and cut. An offset comes with its kind, which the content id pins with
     /// it, so a reader refuses either without the other.
-    fn shaping(&mut self) -> Result<Shaping, String> {
-        let offset = match (self.offset.take(), self.offset_kind.take()) {
+    fn shaping(&self) -> Result<Shaping, String> {
+        let offset = match (
+            self.typed::<i64>("offset", &self.offset)?,
+            self.typed::<String>("offset_kind", &self.offset_kind)?,
+        ) {
             (Some(ticks), Some(kind)) => Some(Offset { ticks, kind }),
             (None, None) => None,
             (Some(_), None) => {
@@ -754,16 +839,32 @@ impl RawChannel {
         };
         Ok(Shaping {
             offset,
-            kept: self.kept,
+            kept: self.typed("kept", &self.kept)?,
         })
     }
-}
 
-#[derive(Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum RawKind {
-    Digital,
-    Analog,
+    /// Whether the channel states what makes it unavailable to this version: a feature, a codec
+    /// or a kind it doesn't know.
+    fn unavailable(&self) -> bool {
+        self.requires.as_ref().is_some_and(|r| !r.is_empty())
+            || self.codec.is_some()
+            || matches!(self.kind(), RawKind::Other(_))
+    }
+
+    /// Its gaps or breaks (`what`), inline or as a count (`count`), as `list` holds them.
+    fn list<T: serde::de::DeserializeOwned>(
+        &self,
+        (what, inline): (&str, &Option<Box<RawValue>>),
+        (count, paged): (&str, &Option<Box<RawValue>>),
+    ) -> Result<(Vec<T>, Option<u64>), String> {
+        list(
+            &self.name,
+            self.typed(what, inline)?,
+            self.typed(count, paged)?,
+            what,
+            !self.unavailable(),
+        )
+    }
 }
 
 #[derive(Deserialize)]
@@ -869,22 +970,24 @@ impl RawCoding {
 }
 
 /// A list stated inline or as a count of paged entries, never both: an inline list holds at most
-/// `INLINE_LIST` entries, a paged one more, and a list of none states neither.
+/// `INLINE_LIST` entries, a paged one more, and a list of none states neither. An unavailable
+/// channel's (`limited` false) is held to its layout alone: a later version may hold more inline.
 fn list<T>(
     name: &str,
     inline: Option<Vec<T>>,
     paged: Option<u64>,
     what: &str,
+    limited: bool,
 ) -> Result<(Vec<T>, Option<u64>), String> {
     match (inline, paged) {
         (Some(_), Some(_)) => Err(format!(
             "channel {name} states its {what} both inline and as a count"
         )),
-        (Some(v), None) if v.len() > INLINE_LIST => Err(format!(
+        (Some(v), None) if limited && v.len() > INLINE_LIST => Err(format!(
             "channel {name} states {} {what} inline, more than the {INLINE_LIST} a header holds",
             v.len()
         )),
-        (None, Some(n)) if n <= INLINE_LIST as u64 => Err(format!(
+        (None, Some(n)) if limited && n <= INLINE_LIST as u64 => Err(format!(
             "channel {name} states {n} {what} in list pages, which a header holds inline"
         )),
         (inline, paged) => Ok((inline.unwrap_or_default(), paged)),
@@ -904,47 +1007,65 @@ fn loss(name: &str, value: Option<u64>, what: &str) -> Result<u64, String> {
 impl TryFrom<RawChannel> for ChannelHeader {
     type Error = String;
 
-    fn try_from(mut raw: RawChannel) -> Result<Self, String> {
-        let shaping = raw.shaping()?;
-        let data = match raw.kind {
+    fn try_from(raw: RawChannel) -> Result<Self, String> {
+        let name = &raw.name;
+        let (data, shaping) = match raw.kind() {
             RawKind::Digital => {
-                let (gaps, gap_count) = list(&raw.name, raw.gaps, raw.gap_count, "gaps")?;
-                ChannelKind::Digital {
-                    initial: need(raw.initial, "initial")?,
-                    end: need(raw.end, "end")?,
-                    edges: need(raw.edges, "edges")?,
+                let (gaps, gap_count) =
+                    raw.list(("gaps", &raw.gaps), ("gap_count", &raw.gap_count))?;
+                let data = ChannelKind::Digital {
+                    initial: need(raw.typed("initial", &raw.initial)?, "initial")?,
+                    end: need(raw.typed("end", &raw.end)?, "end")?,
+                    edges: need(raw.typed("edges", &raw.edges)?, "edges")?,
                     gaps,
                     gap_count,
-                }
+                };
+                (data, raw.shaping()?)
             }
             RawKind::Analog => {
-                let (breaks, break_count) = list(&raw.name, raw.breaks, raw.break_count, "breaks")?;
-                ChannelKind::Analog {
-                    unit: need(raw.unit, "unit")?,
-                    first: need(raw.first, "first")?,
-                    period: need(raw.period, "period")?,
-                    count: need(raw.count, "count")?,
+                let (breaks, break_count) =
+                    raw.list(("breaks", &raw.breaks), ("break_count", &raw.break_count))?;
+                let data = ChannelKind::Analog {
+                    unit: need(raw.typed("unit", &raw.unit)?, "unit")?,
+                    first: need(raw.typed("first", &raw.first)?, "first")?,
+                    period: need(raw.typed("period", &raw.period)?, "period")?,
+                    count: need(raw.typed("count", &raw.count)?, "count")?,
                     breaks,
                     break_count,
-                    coding: need(raw.coding, "coding")?.coding()?,
-                    significant: raw.significant,
-                    phase: raw.phase,
-                    lost_before: loss(&raw.name, raw.lost_before, "lost_before")?,
-                    lost_after: loss(&raw.name, raw.lost_after, "lost_after")?,
-                }
+                    coding: need(raw.typed::<RawCoding>("coding", &raw.coding)?, "coding")?
+                        .coding()?,
+                    significant: raw.significant()?,
+                    phase: raw.typed("phase", &raw.phase)?,
+                    lost_before: loss(
+                        name,
+                        raw.typed("lost_before", &raw.lost_before)?,
+                        "lost_before",
+                    )?,
+                    lost_after: loss(
+                        name,
+                        raw.typed("lost_after", &raw.lost_after)?,
+                        "lost_after",
+                    )?,
+                };
+                (data, raw.shaping()?)
             }
+            RawKind::Other(kind) => (ChannelKind::Other { kind }, Shaping::default()),
+        };
+        let codec = match data {
+            ChannelKind::Other { .. } => None,
+            _ => raw.typed("codec", &raw.codec)?,
         };
         Ok(Self {
-            name: raw.name,
-            source_name: raw.source_name,
-            source: raw.source,
             data,
             shaping,
             overview_shift: raw.overview_shift,
             blocks: need(raw.blocks, "blocks")?,
             overview_blocks: raw.overview_blocks.unwrap_or_default(),
             requires: raw.requires.unwrap_or_default(),
-            codec: raw.codec,
+            codec,
+            name: raw.name,
+            source_name: raw.source_name,
+            source: raw.source,
         })
     }
 }
@@ -952,29 +1073,40 @@ impl TryFrom<RawChannel> for ChannelHeader {
 impl TryFrom<RawChannel> for DeclaredChannel {
     type Error = String;
 
-    fn try_from(mut raw: RawChannel) -> Result<Self, String> {
-        let shaping = raw.shaping()?;
-        let data = match raw.kind {
-            RawKind::Digital => DeclaredKind::Digital {
-                initial: need(raw.initial, "initial")?,
-            },
-            RawKind::Analog => DeclaredKind::Analog {
-                unit: need(raw.unit, "unit")?,
-                period: need(raw.period, "period")?,
-                coding: need(raw.coding, "coding")?.coding()?,
-                significant: raw.significant,
-                phase: raw.phase,
-            },
+    fn try_from(raw: RawChannel) -> Result<Self, String> {
+        let (data, shaping) = match raw.kind() {
+            RawKind::Digital => (
+                DeclaredKind::Digital {
+                    initial: need(raw.typed("initial", &raw.initial)?, "initial")?,
+                },
+                raw.shaping()?,
+            ),
+            RawKind::Analog => (
+                DeclaredKind::Analog {
+                    unit: need(raw.typed("unit", &raw.unit)?, "unit")?,
+                    period: need(raw.typed("period", &raw.period)?, "period")?,
+                    coding: need(raw.typed::<RawCoding>("coding", &raw.coding)?, "coding")?
+                        .coding()?,
+                    significant: raw.significant()?,
+                    phase: raw.typed("phase", &raw.phase)?,
+                },
+                raw.shaping()?,
+            ),
+            RawKind::Other(kind) => (DeclaredKind::Other { kind }, Shaping::default()),
+        };
+        let codec = match data {
+            DeclaredKind::Other { .. } => None,
+            _ => raw.typed("codec", &raw.codec)?,
         };
         Ok(Self {
-            name: raw.name,
-            source_name: raw.source_name,
-            source: raw.source,
             data,
             shaping,
             overview_shift: raw.overview_shift,
             requires: raw.requires.unwrap_or_default(),
-            codec: raw.codec,
+            codec,
+            name: raw.name,
+            source_name: raw.source_name,
+            source: raw.source,
         })
     }
 }
@@ -1002,6 +1134,7 @@ impl ChannelHeader {
                     significant: *significant,
                     phase: *phase,
                 },
+                ChannelKind::Other { kind } => DeclaredKind::Other { kind: kind.clone() },
             },
             shaping: self.shaping.clone(),
             overview_shift: self.overview_shift,
@@ -1010,40 +1143,46 @@ impl ChannelHeader {
         }
     }
 
-    /// Whether this version can read the channel: it states no `requires` and no `codec`.
+    /// Whether this version can read the channel: it states no `requires` and no `codec`, and
+    /// is of a kind it knows.
     pub fn available(&self) -> bool {
-        self.requires.is_empty() && self.codec.is_none()
+        self.requires.is_empty()
+            && self.codec.is_none()
+            && !matches!(self.data, ChannelKind::Other { .. })
     }
 
-    /// The analog channel's coding; None for a digital one.
+    /// The analog channel's coding; None for any other.
     pub fn coding(&self) -> Option<AnalogCoding> {
         match &self.data {
             ChannelKind::Analog { coding, .. } => Some(*coding),
-            ChannelKind::Digital { .. } => None,
+            ChannelKind::Digital { .. } | ChannelKind::Other { .. } => None,
         }
     }
 }
 
 impl DeclaredChannel {
-    /// The analog channel's coding; None for a digital one.
+    /// The analog channel's coding; None for any other.
     pub fn coding(&self) -> Option<AnalogCoding> {
         match &self.data {
             DeclaredKind::Analog { coding, .. } => Some(*coding),
-            DeclaredKind::Digital { .. } => None,
+            DeclaredKind::Digital { .. } | DeclaredKind::Other { .. } => None,
         }
     }
 
-    /// The analog channel's grid; None for a digital one, or one whose grid passes 2^16.
+    /// The analog channel's grid; None for any other, or one whose grid passes 2^16.
     pub fn grid(&self) -> Option<crate::model::Grid> {
         match &self.data {
             DeclaredKind::Analog { period, phase, .. } => crate::model::Grid::new(*period, *phase),
-            DeclaredKind::Digital { .. } => None,
+            DeclaredKind::Digital { .. } | DeclaredKind::Other { .. } => None,
         }
     }
 
-    /// Whether this version can read the channel: it states no `requires` and no `codec`.
+    /// Whether this version can read the channel: it states no `requires` and no `codec`, and
+    /// is of a kind it knows.
     pub fn available(&self) -> bool {
-        self.requires.is_empty() && self.codec.is_none()
+        self.requires.is_empty()
+            && self.codec.is_none()
+            && !matches!(self.data, DeclaredKind::Other { .. })
     }
 }
 
@@ -1128,8 +1267,9 @@ impl Declaration {
         )
     }
 
-    /// Whether this version can read overview channel `o`: a channel that states no `requires`
-    /// or `codec`, or a derived channel whose operation it knows over channels it can read.
+    /// Whether this version can read overview channel `o`: a channel of a kind it knows that
+    /// states no `requires` or `codec`, or a derived channel whose operation it knows over
+    /// channels it can read.
     pub fn available(&self, o: usize) -> bool {
         available_of(
             &self
@@ -1757,10 +1897,7 @@ mod tests {
                 ),
                 "missing field `offset`",
             ),
-            (
-                format!(r#"{{{named},"kind":"logic"}}"#),
-                "unknown variant `logic`",
-            ),
+            (format!(r#"{{{named},"kind":3}}"#), "expected a string"),
             (
                 format!(r#"{{{named},{analog},"coding":{{"type":"int","bits":12}}}}"#),
                 "missing field `signed`",
@@ -1811,5 +1948,15 @@ mod tests {
             let err = parse(&json).unwrap_err().to_string();
             assert!(err.contains(problem), "{json}: {err}");
         }
+        // A kind this version doesn't know reads, its own fields unchecked, as unavailable.
+        let json = format!(r#"{{{named},"kind":"logic","initial":"high","edges":[3]}}"#);
+        let c = parse(&json).unwrap();
+        assert_eq!(
+            c.data,
+            ChannelKind::Other {
+                kind: "logic".into()
+            }
+        );
+        assert!(!c.available());
     }
 }

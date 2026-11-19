@@ -145,8 +145,9 @@ impl ChannelHasher {
         Self::from(hasher)
     }
 
-    /// The hasher for channel `c` of a checked declaration; None for no such channel, or one
-    /// whose source has no `m`, which a checked declaration has neither of.
+    /// The hasher for channel `c` of a checked declaration; None for no such channel, one whose
+    /// source has no `m`, which a checked declaration has neither of, or one of a kind this
+    /// version doesn't know.
     pub fn declared(d: &Declaration, c: usize) -> Option<Self> {
         let channel = d.channels.get(c)?;
         let placed = Placed::of(d, c)?;
@@ -169,6 +170,7 @@ impl ChannelHasher {
                 &channel.shaping,
                 placed,
             ),
+            DeclaredKind::Other { .. } => return None,
         })
     }
 

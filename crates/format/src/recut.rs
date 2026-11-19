@@ -5,13 +5,14 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use crate::annotations::Lines;
+use crate::annotations::{Carried, Lines, carried_notes};
 use crate::decode::{BlockChannel, DecodeError, Footer, parse_bundle};
 use crate::encode::spacing;
 use crate::header::{ChannelKind, ContentId, Declaration, Header};
 use crate::mapping;
 use crate::model::{Break, Gap};
 use crate::reader::{Ending, Event, ReadBlock, Reader};
+use crate::record::Rewrite;
 use crate::repair::{HOLD, Hold, latest_start, repaired_length};
 use crate::writer::{Bundle, Finish, Finished, WriteError, WriteOptions, Writer};
 
@@ -43,7 +44,12 @@ pub enum RecutError {
     HeldBack(usize),
     #[error("the input's items give content id {got}, but its footer says {stated}")]
     ContentId { stated: ContentId, got: ContentId },
+    #[error(transparent)]
+    Rewrite(#[from] Rewrite),
 }
+
+/// What a re-cut does, for a refusal's words.
+const DOING: &str = "re-cutting";
 
 /// Each channel's finest overview shift by the rule tickwave's writers follow (FORMAT.md,
 /// "Overview"): about 64 of its items in a bucket, from what a finished recording's header says
@@ -59,6 +65,7 @@ pub fn shifts_for(header: &Header) -> Vec<u8> {
         .map(|c| match c.data {
             ChannelKind::Digital { edges, end, .. } => (edges, end),
             ChannelKind::Analog { count, .. } => (count, 0),
+            ChannelKind::Other { .. } => (0, 0),
         })
         .collect();
     (0..header.channels.len())
@@ -103,6 +110,8 @@ pub struct Recutter {
     blocks: bool,
     known_through: Option<i64>,
     left_out: Vec<String>,
+    /// What the lines carried held that this version doesn't know, by generator.
+    carried: BTreeMap<String, Carried>,
     bundle: Option<Bundle>,
 }
 
@@ -127,6 +136,7 @@ impl Recutter {
             blocks: false,
             known_through: None,
             left_out: Vec::new(),
+            carried: BTreeMap::new(),
             bundle: None,
         }
     }
@@ -143,6 +153,14 @@ impl Recutter {
     /// gives them. The recut leaves them out.
     pub fn left_out(&self) -> &[String] {
         &self.left_out
+    }
+
+    /// For each generator whose lines held a key or a `measure` this version doesn't know, which
+    /// a later minor version may add, a note naming what the recut carried (ANNOTATIONS.md,
+    /// "Versions"): the line's generator file's first line, which says, comes only with the
+    /// bundle.
+    pub fn carried(&self) -> Vec<String> {
+        carried_notes(&self.carried)
     }
 
     /// Bundles a cut-off input's annotations into the output, as the writer would have, as
@@ -183,7 +201,18 @@ impl Recutter {
         while let Some(event) = self.reader.next_event()? {
             let at = self.reader.record_at();
             if let Event::Declaration(d) = event {
+                let minor = self.reader.minor().expect("the preamble comes first");
+                if let Some(why) = Rewrite::of_minor(minor, DOING) {
+                    return Err(why.into());
+                }
                 self.declare(*d)?;
+                continue;
+            }
+            // An auxiliary record goes, as the writer gives none; an optional one can't.
+            if let Event::Skipped { kind } = event {
+                if let Some(why) = Rewrite::of_kind(kind, DOING) {
+                    return Err(why.into());
+                }
                 continue;
             }
             // Annotations keep no order with the items, and every one stands wherever a cut
@@ -217,7 +246,7 @@ impl Recutter {
         // here takes its derived channels.
         let writer = Writer::new(d.clone(), self.options.clone())?;
         self.hold = Some(Hold::new(&d));
-        self.checks = Some(Lines::declared(&d));
+        self.checks = Some(Lines::declared(&d).carrying());
         self.gaps = vec![VecDeque::new(); d.channels.len()];
         self.runs = vec![VecDeque::new(); d.channels.len()];
         self.known = vec![0; d.channels.len()];
@@ -282,7 +311,7 @@ impl Recutter {
                 let checked = self
                     .checks
                     .as_mut()
-                    .map_or(Ok(()), |l| l.take_line(&a.source, &a.line));
+                    .map_or(Ok(Carried::new()), |l| l.take_line(&a.source, &a.line));
                 self.carry(&a.source, &a.line, checked)?;
             }
             // A part that covers records holds their lines, which went on with the records.
@@ -290,10 +319,9 @@ impl Recutter {
             Event::Part { part, .. } => {
                 let timebase = self.writer().declaration().timebase;
                 for line in part.lines() {
-                    let checked = self
-                        .checks
-                        .as_mut()
-                        .map_or(Ok(()), |l| l.take_file_line(&part.source, line, timebase));
+                    let checked = self.checks.as_mut().map_or(Ok(Carried::new()), |l| {
+                        l.take_file_line(&part.source, line, timebase)
+                    });
                     self.carry(&part.source, line, checked)?;
                 }
             }
@@ -311,19 +339,28 @@ impl Recutter {
 
     /// Generator `source`'s `line` to the writer, for a part that stands alone, where `checked`
     /// says it keeps the rules ANNOTATIONS.md gives a line, and where the writer takes it; one
-    /// that doesn't is named in `left_out`.
+    /// that doesn't is named in `left_out`. What `checked` carried is noted.
     fn carry(
         &mut self,
         source: &str,
         line: &str,
-        checked: Result<(), String>,
+        checked: Result<Carried, String>,
     ) -> Result<(), RecutError> {
         let taken = match checked {
-            Ok(()) => self.writer().standalone_line(source, line),
+            Ok(carried) => self
+                .writer()
+                .standalone_line(source, line)
+                .map(|()| carried),
             Err(why) => Err(WriteError::Annotation(why)),
         };
         match taken {
-            Ok(()) => {
+            Ok(carried) => {
+                if !carried.is_empty() {
+                    self.carried
+                        .entry(source.to_owned())
+                        .or_default()
+                        .extend(carried);
+                }
                 self.annotations = true;
                 self.latest_annotation = latest_start(self.latest_annotation, line);
                 Ok(())
@@ -429,7 +466,7 @@ impl Recutter {
                     .iter()
                     .filter_map(|c| match c.data {
                         ChannelKind::Digital { end, .. } => Some(end),
-                        ChannelKind::Analog { .. } => None,
+                        ChannelKind::Analog { .. } | ChannelKind::Other { .. } => None,
                     })
                     .collect();
                 let lost_after: BTreeMap<usize, u64> = h

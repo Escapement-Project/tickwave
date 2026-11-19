@@ -32,6 +32,11 @@ pub enum Error {
     Settings { given: usize, inputs: usize },
     #[error(transparent)]
     Read(#[from] crate::recording::Error),
+    #[error("{stem}: {why}")]
+    Rewrite {
+        stem: String,
+        why: escapement_tickwave_format::record::Rewrite,
+    },
     #[error("reading {0}: {1}")]
     Io(String, std::io::Error),
     #[error("the inputs tick {rates}: their least common multiple is past 2^53")]
@@ -157,6 +162,8 @@ pub enum Error {
         input: usize,
         moves: ((i128, i128), (i128, i128)),
     },
+    #[error("channel {name} is of kind {kind}, which this version doesn't know")]
+    UnknownKind { name: String, kind: String },
     #[error("channel {name}: input {input} has no channel {source_name:?} of its source {index}")]
     NoInputChannel {
         name: String,
@@ -212,6 +219,10 @@ impl Input {
         input: Arc<dyn crate::input::Input>,
         stem: impl Into<String>,
     ) -> Result<Self, Error> {
+        let stem = stem.into();
+        if let Some(why) = crate::recording::rewrite_check(&*input, "merging")? {
+            return Err(Error::Rewrite { stem, why });
+        }
         let Opened {
             header,
             bundled,
@@ -228,7 +239,7 @@ impl Input {
         }
         Ok(Self {
             recording,
-            stem: stem.into(),
+            stem,
             bundled,
             codings: header.channels.iter().map(|c| c.coding()).collect(),
             check,
@@ -328,6 +339,15 @@ pub enum Note {
         count: usize,
         why: &'static str,
     },
+    /// Generated annotations carried with keys or `measure`s this version doesn't know, which a
+    /// later minor version of their generator's file may add, each named as
+    /// `annotations::Lines::carrying` names it.
+    KeysCarried {
+        input: usize,
+        stem: String,
+        generator: String,
+        keys: Vec<String>,
+    },
 }
 
 impl Note {
@@ -335,7 +355,9 @@ impl Note {
     pub fn warns(&self) -> bool {
         !matches!(
             self,
-            Note::GeneratorRenamed { .. } | Note::AnnotationsCarried { .. }
+            Note::GeneratorRenamed { .. }
+                | Note::AnnotationsCarried { .. }
+                | Note::KeysCarried { .. }
         )
     }
 }
@@ -380,6 +402,17 @@ impl std::fmt::Display for Note {
                 f,
                 "input {input} ({stem}): {count} generated annotation{} left out: {why}",
                 if *count == 1 { "" } else { "s" }
+            ),
+            Note::KeysCarried {
+                input,
+                stem,
+                generator,
+                keys,
+            } => write!(
+                f,
+                "input {input} ({stem}): generator {generator}'s annotations carried what this \
+                 version doesn't know, {}",
+                keys.join(", ")
             ),
         }
     }
@@ -1529,14 +1562,23 @@ type Annotations = Vec<(String, serde_json::Map<String, serde_json::Value>)>;
 /// the merge, with the file as a problem names it.
 type Roles = Vec<(String, String, Vec<serde_json::Value>)>;
 
+/// Each carried generator's file's first line's keys, by the generator's name in the merge.
+type Heads = Vec<(String, serde_json::Map<String, serde_json::Value>)>;
+
 /// Each input's generated annotations, carried: times mapped, generators renamed apart, channels
-/// renamed and dropped, and the roles their files declare. Hand-written annotations are counted,
-/// not carried, nor the roles and view their file declares.
-fn carried(inputs: &[Input], layout: &Layout, notes: &mut Vec<Note>) -> (Annotations, Roles) {
+/// renamed and dropped, and the roles their files declare, and their files' first lines. Hand-written
+/// annotations are counted, not carried, nor the roles and view their file declares.
+fn carried(
+    inputs: &[Input],
+    layout: &Layout,
+    notes: &mut Vec<Note>,
+) -> (Annotations, Roles, Heads) {
     let mut out = Vec::new();
     let mut roles = Vec::new();
+    let mut heads = Vec::new();
     let mut generators: BTreeSet<String> = BTreeSet::new();
     // The writer refuses a line that would not resolve: such a line is left out here instead.
+    // What a later minor version adds to a line of its file is carried, and named.
     let mut lines = annotations::Lines::new(layout.channels.iter().map(|c| {
         let data = &inputs[c.input].recording.channels[c.channel].data;
         (c.name.clone(), matches!(data, ChannelData::Digital(_)))
@@ -1591,6 +1633,11 @@ fn carried(inputs: &[Input], layout: &Layout, notes: &mut Vec<Note>) -> (Annotat
                 format!("input {number} ({}): {file}", input.stem),
                 annotations::generator_roles(text),
             ));
+            if let Some(keys) = annotations::generator_head_keys(text) {
+                heads.push((name.clone(), keys));
+            }
+            let later = annotations::later_generator(text);
+            let mut keys = annotations::Carried::new();
             if name != source {
                 notes.push(Note::GeneratorRenamed {
                     input: number,
@@ -1671,11 +1718,26 @@ fn carried(inputs: &[Input], layout: &Layout, notes: &mut Vec<Note>) -> (Annotat
                         }
                     }
                 }
-                if lines.take(&name, &a).is_err() {
-                    broken += 1;
-                    continue;
+                let taken = match later {
+                    true => lines.take_carried(&name, &a),
+                    false => lines.take(&name, &a),
+                };
+                match taken {
+                    Ok(carried) => keys.extend(carried),
+                    Err(_) => {
+                        broken += 1;
+                        continue;
+                    }
                 }
                 out.push((name.clone(), a));
+            }
+            if !keys.is_empty() {
+                notes.push(Note::KeysCarried {
+                    input: number,
+                    stem: input.stem.clone(),
+                    generator: name,
+                    keys: keys.into_iter().collect(),
+                });
             }
         }
         if out.len() > carried_before {
@@ -1705,7 +1767,7 @@ fn carried(inputs: &[Input], layout: &Layout, notes: &mut Vec<Note>) -> (Annotat
             }
         }
     }
-    (out, roles)
+    (out, roles, heads)
 }
 
 /// Merges what `open` gives into `out`, from its start. It decodes only the channels it takes.
@@ -1719,7 +1781,7 @@ pub fn merge<F: Write + Seek>(
 ) -> Result<Merged, Error> {
     let inputs = open()?;
     let (mut layout, mut notes) = plan(&inputs, settings)?;
-    let (annotations, roles) = carried(&inputs, &layout, &mut notes);
+    let (annotations, roles, heads) = carried(&inputs, &layout, &mut notes);
     // One name declared differently by two inputs' generators would leave the merged sidecar
     // refused by every reader.
     let problems =
@@ -1727,11 +1789,6 @@ pub fn merge<F: Write + Seek>(
     if !problems.is_empty() {
         return Err(Error::Roles(problems.join("; ")));
     }
-    let roles: Vec<(String, Vec<serde_json::Value>)> = roles
-        .into_iter()
-        .filter(|(_, _, r)| !r.is_empty())
-        .map(|(name, _, r)| (name, r))
-        .collect();
     // A cut digital channel's edges kept are counted before the declaration is written.
     if layout.channels.iter().any(|c| c.cut && c.samples.is_none()) {
         count_cut_edges(&mut layout, open()?)?;
@@ -1763,7 +1820,8 @@ pub fn merge<F: Write + Seek>(
             stem: settings.stem.clone(),
         });
         o.annotations = annotations;
-        o.roles = roles;
+        o.carried = true;
+        o.heads = heads;
         o
     };
     let recording = apply(&layout, inputs.into_iter().map(|i| i.recording).collect());
@@ -1957,6 +2015,12 @@ pub fn expected(header: &Header, against: Vec<Recording>) -> Result<Recording, E
         let (unit, edges) = match &c.data {
             ChannelKind::Analog { unit, .. } => (Some(unit.clone()), None),
             ChannelKind::Digital { edges, .. } => (None, Some(*edges)),
+            ChannelKind::Other { kind } => {
+                return Err(Error::UnknownKind {
+                    name: c.name.clone(),
+                    kind: kind.clone(),
+                });
+            }
         };
         // A digital input channel takes its count from the header, which states none for one it
         // calls analog.

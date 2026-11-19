@@ -7,14 +7,18 @@
 use std::sync::Arc;
 
 use escapement_tickwave_format::encode::{Bundle, Options, encode};
-use escapement_tickwave_import::recording::read_bundled;
+use escapement_tickwave_import::recording::{read_bundled, rewrite_check};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let [input, output, shift] = args.as_slice() else {
         return Err("usage: reshift IN OUT SHIFT".into());
     };
-    let (header, bundled, recording) = read_bundled(Arc::new(std::fs::read(input)?))?;
+    let input: Arc<dyn escapement_tickwave_import::input::Input> = Arc::new(std::fs::read(input)?);
+    if let Some(why) = rewrite_check(&*input, "reshifting")? {
+        return Err(why.into());
+    }
+    let (header, bundled, recording) = read_bundled(input)?;
     let out = encode(recording, &{
         let mut o = Options::default();
         o.title = header.title.clone();

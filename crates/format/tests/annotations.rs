@@ -1,6 +1,6 @@
 use escapement_tickwave_format::annotations::{
-    Included, generator_source, notes, notes_json, resolve, resolve_apart, resolve_apart_json,
-    resolve_json, roles,
+    Included, MeasureKind, generator_source, later_generator, lines_note, notes, notes_json,
+    resolve, resolve_apart, resolve_apart_json, resolve_json, resolve_line, roles, view,
 };
 use escapement_tickwave_format::header::{
     AnalogCoding, ChannelHeader, ChannelKind, Header, SourceFormat, SourceHeader,
@@ -85,6 +85,7 @@ fn header() -> Header {
         content_id: ID.parse().unwrap(),
         overview_shift: 12,
         annotation_parts: None,
+        auxiliary: None,
         requires: Vec::new(),
     }
 }
@@ -683,6 +684,189 @@ fn what_this_reader_leaves_out_of_a_later_minor_version_is_noted() {
     let (hand, generated) = later("0");
     assert!(notes(&hand, &included(&generated)).is_empty());
     assert!(notes(HAND, &included(GENERATED)).is_empty());
+}
+
+/// `later`, with keys this reader doesn't know inside the files too: of an annotation, of a
+/// `measure`, of a role and of `[view]`, and a `measure` of a `what` it doesn't know, in the
+/// hand-written file and in the generator's file, its first line and its lines.
+fn later_inside(minor: &str) -> (String, String) {
+    let (hand, generated) = later(minor);
+    let hand =
+        hand.replace(
+            r#"measure = { channel = "SWCLK", what = "rate" }"#,
+            r#"measure = { channel = "SWCLK", what = "rate", window = 3 }"#,
+        )
+        .replace(
+            "values = { rate = \"26.7 MHz\" }\n",
+            "values = { rate = \"26.7 MHz\" }\nconfidence = 0.9\n",
+        ) + "\n[[annotation]]\nid = \"duty\"\nstart = 1000\nend = 2000\n\
+           measure = { channel = \"SWCLK\", what = \"duty\" }\n\
+           \n[[role]]\nname = \"probe\"\nglow = 2\n\n[view]\nzoom = 3\n";
+    let generated = generated
+        .replace(
+            r#""role": [{"name": "target"}]"#,
+            r#""role": [{"name": "target", "shade": 1}]"#,
+        )
+        .replace(
+            r#""label": "parity wrong","#,
+            r#""label": "parity wrong", "confidence": "0.9","#,
+        )
+        .replace(
+            r#""paint": "target"}"#,
+            r#""paint": "target", "measure": {"channel": "SWDIO", "what": "skew"}}"#,
+        );
+    (hand, generated)
+}
+
+/// ANNOTATIONS.md, "Versions": a later minor version may add keys of an annotation, a role,
+/// `measure` and `[view]`, and values of `measure`'s `what`. A reader leaves each out, notes it
+/// rather than calling it a problem, and keeps the annotation, role or view; at its own minor
+/// version each is a problem, as an unknown top-level key is.
+#[test]
+fn a_later_minor_versions_keys_inside_the_files_are_left_out_and_noted() {
+    let (hand, generated) = later_inside("1");
+    let got = resolve(
+        &hand,
+        &included(&generated),
+        &header(),
+        Some("rec.tickwave"),
+    )
+    .unwrap();
+    let ids: Vec<&str> = got.iter().map(|a| a.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [
+            "read-ack-check",
+            "first-misread",
+            "duty",
+            "wire_swd/misread/412000",
+            "wire_swd/drive/400000"
+        ]
+    );
+    let measure = |id: &str| {
+        let a = got.iter().find(|a| a.id == id).unwrap();
+        a.measure.as_ref().map(|m| (m.channel.as_str(), m.what))
+    };
+    assert_eq!(
+        measure("read-ack-check"),
+        Some(("SWCLK", MeasureKind::Rate))
+    );
+    assert_eq!(measure("duty"), None);
+    assert_eq!(measure("wire_swd/drive/400000"), None);
+    let json = serde_json::to_string(&toml::from_str::<toml::Value>(&hand).unwrap()).unwrap();
+    assert_eq!(
+        resolve_json(
+            &json,
+            &included(&generated),
+            &header(),
+            Some("rec.tickwave")
+        )
+        .unwrap(),
+        got
+    );
+    let (declared, refused) = roles(&hand, &included(&generated));
+    assert!(refused.is_empty(), "{refused:#?}");
+    let names: Vec<&str> = declared.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, ["probe", "target"]);
+    assert_eq!(view(&hand, &header()), Ok(Some(Default::default())));
+    let want = [
+        "the TOML file: \"tickwave-annotations/1.1\" is newer than this reader, which leaves out \
+         annotation.confidence, annotation.measure.what \"duty\", annotation.measure.window, \
+         decode, role.glow, view.zoom",
+        "rec.wire_swd.jsonl: \"tickwave-annotations/1.1\" is newer than this reader, which leaves \
+         out annotation.confidence, annotation.measure.what \"skew\", role.shade, schema",
+    ];
+    assert_eq!(notes(&hand, &included(&generated)), want);
+    assert_eq!(notes_json(&json, &included(&generated)), want);
+    // A line read apart from its file, as a part's: its file's first line says how.
+    assert!(later_generator(&generated));
+    let line = generated.lines().nth(1).unwrap();
+    let (a, left) = resolve_line("wire_swd", line, &header(), true).unwrap();
+    assert_eq!(a.id, "wire_swd/misread/412000");
+    assert_eq!(left, ["annotation.confidence".to_owned()].into());
+    assert_eq!(
+        lines_note("rec.wire_swd.jsonl", &generated, &left).as_deref(),
+        Some(
+            "rec.wire_swd.jsonl: \"tickwave-annotations/1.1\" is newer than this reader, which \
+             leaves out annotation.confidence"
+        )
+    );
+    let err = resolve_line("wire_swd", line, &header(), false).unwrap_err();
+    assert!(err[0].contains("unknown field `confidence`"), "{err:?}");
+
+    // At this minor version, each is a problem.
+    let (hand, generated) = later_inside("0");
+    assert!(!later_generator(&generated));
+    assert!(notes(&hand, &included(&generated)).is_empty());
+    for (from, to, needle) in [
+        (
+            "values = { rate = \"26.7 MHz\" }",
+            "values = { rate = \"26.7 MHz\" }\nconfidence = 0.9",
+            "unknown field `confidence`",
+        ),
+        (
+            "what = \"rate\" }",
+            "what = \"rate\", window = 3 }",
+            "unknown field `window`",
+        ),
+        (
+            "what = \"rate\"",
+            "what = \"duty\"",
+            "unknown variant `duty`",
+        ),
+        (
+            "include = [\"rec.wire_swd.jsonl\"]",
+            "include = [\"rec.wire_swd.jsonl\"]\nrole = [{ name = \"probe\", glow = 2 }]",
+            "role \"probe\": unknown field \"glow\"",
+        ),
+        (
+            "include = [\"rec.wire_swd.jsonl\"]",
+            "include = [\"rec.wire_swd.jsonl\"]\nview = { zoom = 3 }",
+            "view: unknown field \"zoom\"",
+        ),
+    ] {
+        assert!(HAND.contains(from), "{from}");
+        assert_problem(&problems(&HAND.replace(from, to), GENERATED), needle);
+    }
+    for (from, to, needle) in [
+        (
+            r#""label": "parity wrong","#,
+            r#""label": "parity wrong", "confidence": "0.9","#,
+            "unknown field `confidence`",
+        ),
+        (
+            r#""paint": "target"}"#,
+            r#""paint": "target", "measure": {"channel": "SWDIO", "what": "skew"}}"#,
+            "unknown variant `skew`",
+        ),
+        (
+            r#""role": [{"name": "target"}]"#,
+            r#""role": [{"name": "target", "shade": 1}]"#,
+            "role \"target\": unknown field \"shade\"",
+        ),
+    ] {
+        assert!(GENERATED.contains(from), "{from}");
+        assert_problem(&problems(HAND, &GENERATED.replace(from, to)), needle);
+    }
+}
+
+/// FORMAT.md, "Unavailable channels": a channel of a kind this version doesn't know may have
+/// edges in the version that defines it, so a measure on it is not held to be on a digital
+/// channel. The channel stays one an annotation can name.
+#[test]
+fn a_measure_on_a_channel_of_a_kind_this_version_doesnt_know_is_not_refused() {
+    let mut h = header();
+    h.channels[0].data = ChannelKind::Other {
+        kind: "events".into(),
+    };
+    let got = resolve(HAND, &included(GENERATED), &h, Some("rec.tickwave")).unwrap();
+    assert_eq!(got[0].measure.as_ref().unwrap().channel, "SWCLK");
+    // An analog channel's is refused, as ever.
+    let hand = HAND.replace(r#"channel = "SWCLK", what"#, r#"channel = "V", what"#);
+    assert_problem(
+        &problems(&hand, GENERATED),
+        "measure: \"V\" is analog; measures are taken from edges",
+    );
 }
 
 /// A key this reader doesn't know, in a file of a version it knows, is still a mistake.

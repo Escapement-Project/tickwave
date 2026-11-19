@@ -276,6 +276,63 @@ fn sidecar(hand: &str, b: usize, extra: &[String], a: &[String]) -> Sidecar {
     Sidecar { file, rows }
 }
 
+/// ANNOTATIONS.md, "Versions": a bundled generator's file whose first line names a later minor
+/// version reads with what this version doesn't know left out of its lines, each line kept, and a
+/// note naming what was left out; the same lines under a first line of this version break a rule
+/// and are left out, each named.
+#[test]
+fn a_later_minor_versions_lines_read_without_what_this_version_doesnt_know() {
+    let plain = written(100_000, &[], Some(BTreeMap::new()));
+    let footer = Footer::parse_file(&plain).unwrap();
+    let id = footer.header.content_id;
+    let lines = [
+        r#"{"id":"x/0","start":10,"confidence":"0.9"}"#,
+        r#"{"id":"x/1","start":20,"end":30,"measure":{"channel":"V","what":"skew"}}"#,
+    ];
+    let bundled = |minor: &str| {
+        let head = format!(
+            r#"{{"format":"tickwave-annotations/1{minor}","source":"beta","recording_id":"{id}"}}"#
+        );
+        let files = BTreeMap::from([
+            (
+                "rec.annotations.toml".to_owned(),
+                format!(
+                    "format = \"tickwave-annotations/1\"\nrecording_id = \"{id}\"\ninclude = \
+                     [\"rec.b.jsonl\"]\n"
+                ),
+            ),
+            (
+                "rec.b.jsonl".to_owned(),
+                format!("{head}\n{}\n", lines.join("\n")),
+            ),
+        ]);
+        let file = escapement_tickwave_format::bundle::bundle(&plain, &footer, files, 3).unwrap();
+        let rec = Recording::open(Arc::new(file), Cache::new(64 << 20)).unwrap();
+        rec.load_markers().unwrap();
+        let ids: Vec<String> = rec
+            .markers(0..100_000, None, 10)
+            .entries
+            .into_iter()
+            .map(|m| m.annotation.id)
+            .collect();
+        (ids, rec.markers_left_out().to_vec())
+    };
+    let (ids, left) = bundled(".1");
+    assert_eq!(ids, ["beta/x/0", "beta/x/1"]);
+    assert_eq!(
+        left,
+        [
+            "rec.b.jsonl: \"tickwave-annotations/1.1\" is newer than this reader, which leaves out \
+          annotation.confidence, annotation.measure.what \"skew\""
+        ]
+    );
+    let (ids, left) = bundled("");
+    assert!(ids.is_empty(), "{ids:?}");
+    assert_eq!(left.len(), 2, "{left:?}");
+    assert!(left[0].contains("unknown field `confidence`"), "{left:?}");
+    assert!(left[1].contains("unknown variant `skew`"), "{left:?}");
+}
+
 /// A hand-written `ref` shows once every part is read, and so does what makes the second of an
 /// id left out: a range that reads the part with the second and not the one with the first shows
 /// it (FORMAT.md, "Annotations"). The order within a tick is the sidecar's: the hand-written

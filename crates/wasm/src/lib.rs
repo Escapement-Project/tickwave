@@ -160,19 +160,25 @@ impl Recording {
 
     /// The index pages and directories still to hand in through `addIndexPage`, as byte ranges
     /// `[offset, end, offset, end, ...]`; empty once the index is read. A directory's pages come
-    /// in a later call, once it is in. Throws on an index that does not read.
+    /// in a later call, once it is in. None of an unavailable channel's is asked for. Throws on
+    /// an index that does not read.
     #[wasm_bindgen(js_name = indexRanges)]
     pub fn index_ranges(&mut self) -> Result<Vec<f64>, JsError> {
         let Read::Footer(footer) = &self.read else {
             return Ok(Vec::new());
         };
         let mut missing = Vec::new();
-        let tables = footer.channels.iter().flat_map(|ch| {
-            ch.blocks
-                .iter()
-                .chain(ch.levels.iter().map(|(_, t)| t))
-                .chain(ch.list.iter())
-        });
+        let tables = footer
+            .channels
+            .iter()
+            .enumerate()
+            .filter(|&(o, _)| footer.available(o))
+            .flat_map(|(_, ch)| {
+                ch.blocks
+                    .iter()
+                    .chain(ch.levels.iter().map(|(_, t)| t))
+                    .chain(ch.list.iter())
+            });
         for table in tables {
             each_page(table, &self.pages, &mut missing);
         }
@@ -218,7 +224,9 @@ impl Recording {
     }
 
     fn refs(&self, c: usize) -> Result<&[BlockRef], JsError> {
-        Ok(self.index()?.blocks.get(c).ok_or_else(|| no_channel(c))?)
+        let blocks = self.index()?.blocks.get(c).ok_or_else(|| no_channel(c))?;
+        self.footer().check_available(c).map_err(js)?;
+        Ok(blocks)
     }
 
     /// Channel `c`'s blocks.
@@ -363,6 +371,7 @@ impl Recording {
     }
 
     fn rows(&self, o: usize, li: usize) -> Result<&[LevelRef], JsError> {
+        self.footer().check_available(o).map_err(js)?;
         self.index()?
             .levels
             .get(o)
@@ -635,6 +644,7 @@ impl Recording {
             .get(c)
             .and_then(|ch| ch.blocks.clone())
             .ok_or_else(|| no_channel(c))?;
+        self.footer().check_available(c).map_err(js)?;
         let from = start.floor() as i64;
         let to = (end.ceil() as i64).max(from.saturating_add(1));
         self.locate(&table, from..to)
@@ -659,6 +669,7 @@ impl Recording {
             .ok_or_else(|| {
                 JsError::new(&format!("channel {o} has no overview level {li} in blocks"))
             })?;
+        self.footer().check_available(o).map_err(js)?;
         let from = k0.floor() as i64;
         self.locate(&table, from..(k1.ceil() as i64).max(from.saturating_add(1)))
     }
@@ -675,6 +686,7 @@ impl Recording {
             .get(c)
             .and_then(|ch| ch.list.clone())
             .ok_or_else(|| JsError::new(&format!("channel {c} has no list in pages")))?;
+        self.footer().check_available(c).map_err(js)?;
         let from = k0.floor() as i64;
         let pages = self.locate(&table, from..(k1.ceil() as i64).max(from.saturating_add(1)))?;
         let first = table.levels.last().and_then(|l| l.first()).map(|e| e.first);
@@ -927,16 +939,30 @@ impl Recording {
     }
 
     /// The annotation part at `row` (six numbers, as `partPage` gives it), from exactly its
-    /// frame's bytes, each line resolved alone (FORMAT.md, "Annotations"). JSON: its generator,
-    /// `source`, and its `lines`, each with its `id` where it reads, and either its `annotation`
-    /// or why it is `left` out. One that starts at or past the length is `past` it too, and
-    /// claims no id.
+    /// frame's bytes, each line resolved alone (FORMAT.md, "Annotations"). `names` and `texts`
+    /// are the bundle's generator files, as `resolveBundled` takes them: a part of a generator
+    /// whose file's first line names a later minor version has what this version doesn't know
+    /// left out of its lines (ANNOTATIONS.md, "Versions"). JSON: its generator, `source`, and its
+    /// `lines`, each with its `id` where it reads, and either its `annotation` or why it is `left`
+    /// out. One that starts at or past the length is `past` it too, and claims no id. And a
+    /// `note`, where something was left out of the lines kept, naming each: not a problem.
     #[cfg(feature = "annotations")]
     #[wasm_bindgen(js_name = partAnnotations)]
-    pub fn part_annotations(&self, row: &[f64], frame: &[u8]) -> Result<String, JsError> {
+    pub fn part_annotations(
+        &self,
+        row: &[f64],
+        frame: &[u8],
+        names: Vec<String>,
+        texts: Vec<String>,
+    ) -> Result<String, JsError> {
         let footer = self.footer();
         let part = footer.decode_part(&part_row(row)?, frame).map_err(js)?;
         let header = &footer.header;
+        let file = names.iter().zip(&texts).find(|(_, text)| {
+            annotations::generator_source(text).as_deref() == Some(part.source.as_str())
+        });
+        let later = file.is_some_and(|(_, text)| annotations::later_generator(text));
+        let mut left_out = std::collections::BTreeSet::new();
         let lines: Vec<PartLine> = part
             .lines()
             .map(|line| {
@@ -953,12 +979,15 @@ impl Recording {
                         ..PartLine::default()
                     };
                 }
-                match annotations::resolve_line(&part.source, line, header) {
-                    Ok(a) => PartLine {
-                        id,
-                        annotation: Some(a),
-                        ..PartLine::default()
-                    },
+                match annotations::resolve_line(&part.source, line, header, later) {
+                    Ok((a, left)) => {
+                        left_out.extend(left);
+                        PartLine {
+                            id,
+                            annotation: Some(a),
+                            ..PartLine::default()
+                        }
+                    }
                     Err(problems) => PartLine {
                         id,
                         left: Some(format!("{name}: {}", problems.join("; "))),
@@ -967,9 +996,11 @@ impl Recording {
                 }
             })
             .collect();
+        let note = file.and_then(|(name, text)| annotations::lines_note(name, text, &left_out));
         let out = PartOut {
             source: &part.source,
             lines,
+            note,
         };
         Ok(serde_json::to_string(&out).expect("a part serialises"))
     }
@@ -1085,6 +1116,8 @@ struct PartLine {
 struct PartOut<'a> {
     source: &'a str,
     lines: Vec<PartLine>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<String>,
 }
 
 /// `resolveBundled`'s answer.

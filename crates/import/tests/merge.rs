@@ -1113,6 +1113,35 @@ fn ticks_past_2_53_on_the_way_to_the_merged_recording_are_refused() {
     );
 }
 
+/// A merged recording's header naming a channel of a kind this version doesn't know, as a later
+/// version may write, is refused when checked against its inputs: what the channel holds can't
+/// follow from them as this version reads them.
+#[test]
+fn a_channel_of_a_kind_this_version_doesnt_know_is_refused_against_the_inputs() {
+    let (a, b) = (file(analyser()), file(probe()));
+    let (out, _) = run(
+        &[(a.clone(), "analyser", None), (b.clone(), "probe", None)],
+        &settings(vec![]),
+    )
+    .unwrap();
+    let mut h = Footer::parse_file(&out).unwrap().header;
+    let against = || {
+        [&a, &b]
+            .iter()
+            .map(|f| read(Arc::new((*f).clone())).unwrap().1)
+            .collect()
+    };
+    expected(&h, against()).unwrap();
+    let name = h.channels[0].name.clone();
+    h.channels[0].data = ChannelKind::Other {
+        kind: "events".into(),
+    };
+    assert_eq!(
+        expected(&h, against()).err().unwrap().to_string(),
+        format!("channel {name} is of kind events, which this version doesn't know")
+    );
+}
+
 /// A sidecar bundled as a recorder bundles it: generator `dec`'s annotations, at the input's
 /// ticks, as the writer writes them, then `text_lines` (a time with a unit, say), and `hand`, more
 /// of the hand-written file.
@@ -2425,6 +2454,59 @@ fn a_bundled_line_breaking_a_rule_is_left_out_of_a_merge() {
         ),
         "{notes:?}"
     );
+}
+
+/// ANNOTATIONS.md, "Versions" and "Merging": a generator's file of a later minor version comes
+/// over whole. Its first line keeps its format, its `version` and the keys this version doesn't
+/// know, with the merge's `source` and `recording_id`; its lines keep a key or a `measure` this
+/// version doesn't know, which the merge names. The merged sidecar resolves as the input's does.
+/// At this minor version such a line breaks a rule and is left out
+/// (`a_bundled_line_breaking_a_rule_is_left_out_of_a_merge`).
+#[test]
+fn a_later_minor_versions_generator_file_comes_over_whole() {
+    let bytes = file(analyser());
+    let footer = Footer::parse_file(&bytes).unwrap();
+    let id = footer.header.content_id;
+    let head = |id: &dyn std::fmt::Display| {
+        format!(
+            r#"{{"format":"tickwave-annotations/1.1","source":"dec","version":"9f3c2e1","recording_id":"{id}","role":[{{"name":"probe","shade":1}}],"palette":"warm"}}"#
+        )
+    };
+    let lines = [
+        r#"{"id":"a/100","start":100,"channels":["CLK"],"confidence":"0.9"}"#,
+        r#"{"id":"a/200","start":200,"end":300,"measure":{"channel":"CLK","what":"skew"}}"#,
+    ];
+    let mut files = sidecar_of(id, &[], &[], None);
+    files.insert(
+        "in.dec.jsonl".into(),
+        format!("{}\n{}\n", head(&id), lines.join("\n")),
+    );
+    let a = escapement_tickwave_format::bundle::bundle(&bytes, &footer, files, 3).unwrap();
+    let (out, merged) = run(
+        &[(a, "analyser", None), (file(probe()), "probe", None)],
+        &settings(vec![]),
+    )
+    .unwrap();
+    let h = Footer::parse_file(&out).unwrap().header;
+    let files = bundled(&out).unwrap();
+    let text = &files["merged.dec.jsonl"];
+    let mut got = text.lines();
+    assert_eq!(got.next(), Some(head(&h.content_id).as_str()));
+    let got: Vec<serde_json::Value> = got.map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(got.len(), 2);
+    assert_eq!(got[0]["confidence"], "0.9");
+    assert_eq!(got[1]["measure"]["what"], "skew");
+    let notes: Vec<String> = merged.notes.iter().map(|n| n.to_string()).collect();
+    assert!(
+        notes.contains(
+            &"input 1 (analyser): generator dec's annotations carried what this version doesn't \
+              know, annotation.confidence, annotation.measure.what \"skew\""
+                .to_owned()
+        ),
+        "{notes:?}"
+    );
+    let ids: Vec<String> = resolved_in(&out, &h).into_iter().map(|r| r.0).collect();
+    assert_eq!(ids, ["dec/a/100", "dec/a/200"]);
 }
 
 /// The passes a conversion or a merge starts, in order.
