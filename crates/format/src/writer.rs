@@ -629,10 +629,6 @@ pub struct Finish {
     /// that took any, or is given a `view`, bundles them whatever this says, its files named
     /// after `DEFAULT_STEM` where it is None.
     pub bundle: Option<Bundle>,
-    /// Take a gap that reaches a digital channel's end as ending what is known at its `from`,
-    /// even where the gap ends inside the recording, as repair does for a file cut off. Otherwise
-    /// such a gap is refused, as most likely a caller's mistake.
-    pub drop_gaps_past_end: bool,
     /// Samples the instrument lost after an analog channel's last, by channel index.
     pub lost_after: BTreeMap<usize, u64>,
     /// The stored view (ANNOTATIONS.md, "The stored view"): the `[view]` table of the hand-written
@@ -652,7 +648,8 @@ pub enum Bundle {
     Generated { stem: String },
     /// These files, for a writer that took no annotation of its own: each generator file the
     /// hand-written file includes goes in parts that stand alone, in its order, its first line in
-    /// the bundle, and every other file in the bundle whole.
+    /// the bundle, and every other file in the bundle whole. A generator file it doesn't include
+    /// is refused.
     Files(BTreeMap<String, String>),
 }
 
@@ -828,8 +825,19 @@ impl Bundling {
                         )));
                     }
                 }
+                // ANNOTATIONS.md, "Checks": every provided file is included.
+                let included = included_generators(&files);
+                if let Some(name) = files.iter().find_map(|(name, text)| {
+                    (crate::annotations::generator_source(text).is_some()
+                        && !included.contains(name))
+                    .then_some(name)
+                }) {
+                    return Err(WriteError::Bundle(format!(
+                        "{name}: provided but not included"
+                    )));
+                }
                 let mut parts = Vec::new();
-                for name in included_generators(&files) {
+                for name in included {
                     let text = files.get_mut(&name).expect("an included file");
                     let source = crate::annotations::generator_source(text)
                         .expect("an included generator file");
@@ -2833,13 +2841,13 @@ impl Writer {
             }
             // A waiting gap that reaches the end is left out: the level is not known from its
             // `from` on. A flush past a gap's end closes its block, so the overview never takes
-            // the end of a gap still waiting.
+            // the end of a gap still waiting. Its record is written, so its `to` must map at or
+            // past the length (FORMAT.md, "Gap and run records").
             let mut kept = d.gap_count as usize;
             if let Some((i, &(g, to))) =
                 d.pending.iter().enumerate().find(|(_, (g, _))| g.to >= end)
             {
-                let inside = to < length;
-                if inside && !finish.drop_gaps_past_end {
+                if to < length {
                     return Err(WriteError::GapPastEnd {
                         channel: name,
                         to: g.to,
@@ -3278,15 +3286,19 @@ mod tests {
     #[test]
     fn standalone_lines_go_with_given_files_that_name_their_generators() {
         let line = r#"{"id":"g/1","start":1}"#;
+        let id = "blake3:00ff000000000000000000000000000000000000000000000000000000000000";
         let files = |source: &str| {
-            let id: ContentId =
-                "blake3:00ff000000000000000000000000000000000000000000000000000000000000"
-                    .parse()
-                    .unwrap();
-            BTreeMap::from([(
-                "rec.g.jsonl".to_owned(),
-                generator_file(source, None, id, &[]),
-            )])
+            let hand = format!(
+                "format = \"tickwave-annotations/1\"\nrecording_id = \"{id}\"\n\
+                 include = [\"rec.g.jsonl\"]\n"
+            );
+            BTreeMap::from([
+                ("rec.annotations.toml".to_owned(), hand),
+                (
+                    "rec.g.jsonl".to_owned(),
+                    generator_file(source, None, id.parse().unwrap(), &[]),
+                ),
+            ])
         };
         let finish = |files| Finish {
             bundle: Some(Bundle::Files(files)),
@@ -3307,6 +3319,18 @@ mod tests {
             .unwrap();
         match w.finish(10, &[10], finish(files("g"))) {
             Err(WriteError::Bundle(e)) => assert!(e.ends_with("of its own"), "{e}"),
+            other => panic!("{other:?}"),
+        }
+        // ANNOTATIONS.md, "Checks": every provided file is included.
+        let mut given = files("g");
+        given.insert(
+            "rec.h.jsonl".into(),
+            generator_file("h", None, id.parse().unwrap(), &[line.into()]),
+        );
+        let mut w = writer();
+        w.standalone_line("g", line).unwrap();
+        match w.finish(10, &[10], finish(given)) {
+            Err(WriteError::Bundle(e)) => assert_eq!(e, "rec.h.jsonl: provided but not included"),
             other => panic!("{other:?}"),
         }
     }

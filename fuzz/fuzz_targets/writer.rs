@@ -135,7 +135,8 @@ struct Plan {
     length: Tick,
     ends: Vec<Tick>,
     bundle: u8,
-    drop_gaps: bool,
+    /// Once the finish's `drop_gaps_past_end`, kept so the corpus's inputs decode as they did.
+    _drop_gaps: bool,
     extra: Option<(u8, String)>,
     // Added after the corpus was made, and last, so that its inputs decode as they did up to
     // `extra`.
@@ -594,7 +595,6 @@ fuzz_target!(|p: Plan| {
                 "format = 1".into(),
             )]))),
         },
-        drop_gaps_past_end: p.drop_gaps,
         lost_after: p
             .lost_after
             .iter()

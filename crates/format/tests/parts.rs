@@ -905,10 +905,10 @@ fn an_annotation_record_a_parts_row_cant_hold_is_refused() {
     }
 }
 
-/// FORMAT.md, "Annotations": the bundle holds a generator's file's first line alone, its lines
-/// being in its parts, and that line names each key once, as the header does. A reader refuses a
-/// bundle otherwise, in order and at random: here the bundle record replaced, the footer's place
-/// for it and the trailer moved with it.
+/// FORMAT.md, "Annotations": the bundle holds a generator's file's first line alone, with its
+/// newline, its lines being in its parts, and that line names each key once, as the header does.
+/// A reader refuses a bundle otherwise, in order and at random: here the bundle record replaced,
+/// the footer's place for it and the trailer moved with it.
 #[test]
 fn a_bundled_generator_file_is_its_first_line_alone_naming_each_key_once() {
     let mut w = Writer::new(declaration(), options()).unwrap();
@@ -965,6 +965,10 @@ fn a_bundled_generator_file_is_its_first_line_alone_naming_each_key_once() {
         )),
         "the annotation bundle's \"rec.a.jsonl\" holds more than its generator's first line"
     );
+    assert_eq!(
+        refused(&with("rec.a.jsonl", head.trim_end().to_owned())),
+        "the annotation bundle's \"rec.a.jsonl\": its first line lacks its newline"
+    );
     let twice = head.replacen('}', ",\"source\":\"a\"}", 1);
     assert_eq!(
         refused(&with("rec.a.jsonl", twice.clone())),
@@ -986,6 +990,23 @@ fn a_bundled_generator_file_is_its_first_line_alone_naming_each_key_once() {
         Err(e) => panic!("{e}"),
         Ok(_) => panic!("bundled"),
     }
+    // A generator file given whole without a newline after its first line goes in the bundle
+    // with one.
+    let mut given = files.clone();
+    given.insert("rec.a.jsonl".into(), head.trim_end().to_owned());
+    let mut w = Writer::new(declaration(), options()).unwrap();
+    let mut written = w.take_output();
+    let finish = Finish {
+        bundle: Some(Bundle::Files(given)),
+        ..Finish::default()
+    };
+    written.extend(w.finish(10, &[10], finish).unwrap().tail);
+    let bundled = Footer::parse_file(&written)
+        .unwrap()
+        .read_bundle(from_memory(&written))
+        .unwrap()
+        .unwrap();
+    assert_eq!(bundled["rec.a.jsonl"], head);
 }
 
 fn repaired(cut: &[u8]) -> Vec<u8> {
@@ -1162,21 +1183,19 @@ fn testdata(name: &str) -> Vec<u8> {
 /// known-through record.
 #[test]
 fn the_repair_crash_files_repair_and_read_back_or_are_refused() {
-    for name in ["kept-last-pages.tickwave"] {
-        let file = testdata(name);
-        for piece in [7, file.len()] {
-            let mut r = Repairer::new(1);
-            r.bundle(Bundle::Generated { stem: "r".into() });
-            for chunk in file.chunks(piece) {
-                r.feed(chunk).unwrap();
-            }
-            let repaired = r.finish().unwrap();
-            let out = [&file[..repaired.keep as usize], &repaired.tail].concat();
-            let footer = Footer::parse_file(&out).unwrap_or_else(|e| panic!("{name}: {e}"));
-            assert_eq!(footer.header.content_id, repaired.header.content_id);
-            let (_, ending) = read_in_order(&out).unwrap_or_else(|e| panic!("{name}: {e}"));
-            assert_eq!(ending, Ending::Complete);
+    let file = testdata("kept-last-pages.tickwave");
+    for piece in [7, file.len()] {
+        let mut r = Repairer::new(1);
+        r.bundle(Bundle::Generated { stem: "r".into() });
+        for chunk in file.chunks(piece) {
+            r.feed(chunk).unwrap();
         }
+        let repaired = r.finish().unwrap();
+        let out = [&file[..repaired.keep as usize], &repaired.tail].concat();
+        let footer = Footer::parse_file(&out).unwrap();
+        assert_eq!(footer.header.content_id, repaired.header.content_id);
+        let (_, ending) = read_in_order(&out).unwrap();
+        assert_eq!(ending, Ending::Complete);
     }
     // Its bundle decodes to a JSON object, then the bytes of a footer: a reader in order refuses
     // the bundle, as one at random does.

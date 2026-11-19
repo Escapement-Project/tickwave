@@ -577,16 +577,7 @@ fn the_content_id_takes_each_list_as_a_digest_and_each_derived_channel_after_the
     }
     let mut file = w.take_output();
     // D's end at 30 leaves out the gap from 12, whose block is still open: D is known to 12.
-    let f = w
-        .finish(
-            30,
-            &[30],
-            Finish {
-                drop_gaps_past_end: true,
-                ..Finish::default()
-            },
-        )
-        .unwrap();
+    let f = w.finish(30, &[30], Finish::default()).unwrap();
     file.extend(&f.tail);
     let ChannelKind::Digital { end, gaps, .. } = &f.header.channels[0].data else {
         panic!()
@@ -718,14 +709,7 @@ fn a_gap_once_hashed_stays_in_the_header() {
     .unwrap();
     w.edge(0, 45).unwrap();
     w.flush(50).unwrap();
-    let err = w.finish(
-        60,
-        &[30],
-        Finish {
-            drop_gaps_past_end: true,
-            ..Finish::default()
-        },
-    );
+    let err = w.finish(60, &[30], Finish::default());
     assert!(matches!(
         err,
         Err(WriteError::EndLeavesOutGap {
@@ -748,19 +732,13 @@ fn a_gap_once_hashed_stays_in_the_header() {
     )
     .unwrap();
     w.flush(50).unwrap();
-    let err = w.finish(
-        60,
-        &[15],
-        Finish {
-            drop_gaps_past_end: true,
-            ..Finish::default()
-        },
-    );
+    let err = w.finish(60, &[15], Finish::default());
     assert!(
         matches!(err, Err(WriteError::EndLeavesOutGap { .. })),
         "{err:?}"
     );
-    // Its block still open, and nothing settled past it, the end leaves it out.
+    // Its block still open, and nothing settled past it, the end leaves it out: at a length its
+    // `to` reaches.
     let mut w = Writer::new(d(), options()).unwrap();
     w.gap(
         0,
@@ -772,22 +750,13 @@ fn a_gap_once_hashed_stays_in_the_header() {
     )
     .unwrap();
     w.flush(15).unwrap();
-    let f = w
-        .finish(
-            60,
-            &[18],
-            Finish {
-                drop_gaps_past_end: true,
-                ..Finish::default()
-            },
-        )
-        .unwrap();
+    let f = w.finish(20, &[18], Finish::default()).unwrap();
     let ChannelKind::Digital { end, gaps, .. } = &f.header.channels[0].data else {
         panic!()
     };
     assert_eq!((*end, gaps.len()), (10, 0));
-    // Without `drop_gaps_past_end`, a gap left out whose end lies inside the recording is refused,
-    // as a caller's mistake.
+    // A gap left out whose end lies inside the recording is refused: its record is in the file,
+    // and the header leaves out only a gap whose `to` maps at or past the length.
     let mut w = Writer::new(d(), options()).unwrap();
     w.gap(
         0,

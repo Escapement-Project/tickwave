@@ -609,7 +609,6 @@ fn finish_takes_what_the_source_states_at_its_end() {
             Finish {
                 extra: vec![extra.clone()],
                 bundle: None,
-                drop_gaps_past_end: false,
                 lost_after: Default::default(),
                 view: None,
             },
@@ -1101,10 +1100,11 @@ fn verify_takes_the_gap_and_run_records_the_header_leaves_out() {
 
 /// FORMAT.md, "Gap and run records": a gap that reaches its channel's end is left out of the
 /// header only where its `to` maps at or past the length. The in-order reader refuses a gap
-/// record left out whose `to` maps inside it, as `drop_gaps_past_end` writes one.
+/// record left out whose `to` maps inside it: here the header of a file that lists the gap edited
+/// to leave it out.
 #[test]
 fn a_gap_left_out_ends_at_or_past_the_length() {
-    let written = |length: i64| {
+    let written = |length: i64, end: i64| {
         let mut w = Writer::new(declaration(), options()).unwrap();
         w.gap(
             0,
@@ -1117,22 +1117,9 @@ fn a_gap_left_out_ends_at_or_past_the_length() {
         .unwrap();
         w.flush(15).unwrap();
         let mut file = w.take_output();
-        let f = w
-            .finish(
-                length,
-                &[18],
-                Finish {
-                    drop_gaps_past_end: true,
-                    ..Finish::default()
-                },
-            )
-            .unwrap();
+        let f = w.finish(length, &[end], Finish::default()).unwrap();
         file.extend(f.tail);
-        let ChannelKind::Digital { end, gaps, .. } = &f.header.channels[0].data else {
-            unreachable!()
-        };
-        assert_eq!((*end, gaps.len()), (10, 0));
-        file
+        (file, f.header)
     };
     let in_order = |file: &[u8]| {
         let mut r = Reader::default();
@@ -1140,9 +1127,22 @@ fn a_gap_left_out_ends_at_or_past_the_length() {
         while r.next_event()?.is_some() {}
         r.end()
     };
-    assert_eq!(in_order(&written(20)).unwrap(), Ending::Complete);
+    let (file, header) = written(20, 18);
+    let ChannelKind::Digital { end, gaps, .. } = &header.channels[0].data else {
+        unreachable!()
+    };
+    assert_eq!((*end, gaps.len()), (10, 0));
+    assert_eq!(in_order(&file).unwrap(), Ending::Complete);
+    let (file, mut header) = written(60, 60);
+    let ChannelKind::Digital { end, gaps, .. } = &mut header.channels[0].data else {
+        unreachable!()
+    };
+    assert_eq!(gaps.len(), 1);
+    (*end, *gaps) = (10, Vec::new());
     assert_eq!(
-        in_order(&written(60)).unwrap_err().to_string(),
+        in_order(&common::with_header(&file, &header))
+            .unwrap_err()
+            .to_string(),
         "channel 0: the gap from 10 to 20 reaches past the end, 10, and ends inside the length, 60"
     );
 }
@@ -1217,6 +1217,89 @@ fn repair_writes_a_gap_left_out_again_only_where_it_ends_at_or_past_the_length()
             );
             assert_eq!(gaps, 70 + u32::from(again), "{what}, mark at {mark}");
         }
+    }
+}
+
+/// A gap record before the cut that reaches its channel's end, where the length repair finishes
+/// at passes its `to`: the header can't leave the gap out, and repair keeps the bytes before the
+/// cut, so it refuses the file, naming the gap. Recut writes the file again without the record,
+/// the channel ending at the gap's `from` or before, and its copy reads in order. In the first,
+/// an annotation after the cut sets the length; in the second there is no known-through record,
+/// and V's block reaches past the gap's end.
+#[test]
+fn repair_refuses_a_gap_record_it_keeps_that_the_header_cant_leave_out_and_recut_drops_it() {
+    use escapement_tickwave_format::recut::Recutter;
+    use escapement_tickwave_format::repair::RepairError;
+    let gap = |from, to| Gap {
+        from,
+        to,
+        level: true,
+    };
+    let mut w = Writer::new(declaration(), options()).unwrap();
+    w.edge(0, 5).unwrap();
+    w.flush(50).unwrap();
+    w.gap(0, gap(40, 70)).unwrap();
+    w.flush(55).unwrap();
+    let serde_json::Value::Object(m) = serde_json::json!({"id": "m", "start": 80}) else {
+        unreachable!()
+    };
+    w.annotation("g", m).unwrap();
+    let marked = w.take_output();
+    let mut w = Writer::new(
+        declaration(),
+        WriteOptions {
+            block_bytes: 1,
+            ..options()
+        },
+    )
+    .unwrap();
+    w.run(1, 0, 0).unwrap();
+    for i in 0..10 {
+        w.sample(1, i as f32).unwrap();
+    }
+    w.promise_channel(1, 100).unwrap();
+    w.edge(0, 3).unwrap();
+    w.promise_channel(0, 50).unwrap();
+    w.gap(0, gap(60, 80)).unwrap();
+    let unflushed = w.take_output();
+    for (what, cut, g, length, end) in [
+        ("marked", marked, gap(40, 70), 81, 40),
+        ("unflushed", unflushed, gap(60, 80), 100, 50),
+    ] {
+        match repair(&cut, 3) {
+            Err(RepairError::GapRecordKept {
+                channel,
+                from,
+                to,
+                end: e,
+                length: l,
+            }) => assert_eq!(
+                (channel.as_str(), from, to, e, l),
+                ("A", g.from, g.to, end, length),
+                "{what}"
+            ),
+            Err(e) => panic!("{what}: {e}"),
+            Ok(_) => panic!("{what}: repaired"),
+        }
+        let mut r = Recutter::new(options());
+        r.feed(&cut).unwrap();
+        let mut copy = r.take_output();
+        let f = r.finish().unwrap();
+        copy.extend(f.tail);
+        let ChannelKind::Digital { end: e, gaps, .. } = &f.header.channels[0].data else {
+            unreachable!()
+        };
+        assert_eq!(
+            (f.header.length, *e, gaps.len()),
+            (length, end, 0),
+            "{what}"
+        );
+        let mut reader = Reader::default();
+        reader.feed(&copy);
+        while let Some(e) = reader.next_event().unwrap() {
+            assert!(!matches!(e, Event::Gap { .. }), "{what}: a gap record");
+        }
+        assert_eq!(reader.end().unwrap(), Ending::Complete, "{what}");
     }
 }
 

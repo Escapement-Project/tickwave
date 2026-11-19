@@ -128,8 +128,8 @@ pub fn inflate_limited(frame: &[u8], len: usize, max: usize) -> Result<Vec<u8>, 
 }
 
 /// The annotation bundle record's files: a u32 decoded length, then one zstd frame of a JSON
-/// object of strings. A generator's file that holds more than its first line, or whose first line
-/// names a key twice, is refused.
+/// object of strings. A generator's file that is not its first line and its newline, or whose
+/// first line names a key twice, is refused.
 pub fn parse_bundle(
     payload: &[u8],
     inflate: impl Fn(&[u8], usize) -> Result<Vec<u8>, DecodeError>,
@@ -140,12 +140,17 @@ pub fn parse_bundle(
     let raw = inflate(frame, u32::from_le_bytes(*len) as usize)?;
     let files: BTreeMap<String, String> =
         serde_json::from_slice(&raw).map_err(|e| corrupt(format!("the annotation bundle: {e}")))?;
-    // A generator's file holds its first line alone: its lines are in its parts.
+    // A generator's file holds its first line alone, with its newline: its lines are in its
+    // parts.
     for (name, text) in &files {
         if crate::parts::head_source(text).is_none() {
             continue;
         }
-        let (first, rest) = text.split_once('\n').unwrap_or((text, ""));
+        let Some((first, rest)) = text.split_once('\n') else {
+            return Err(corrupt(format!(
+                "the annotation bundle's {name:?}: its first line lacks its newline"
+            )));
+        };
         if !rest.is_empty() {
             return Err(corrupt(format!(
                 "the annotation bundle's {name:?} holds more than its generator's first line"
@@ -1348,7 +1353,13 @@ impl Footer {
                  header holds"
             )));
         }
-        let header: Header = serde_json::from_slice(&payload[record::FOOTER_HEAD_LEN..header_end])?;
+        let json = &payload[record::FOOTER_HEAD_LEN..header_end];
+        if let Some(key) = crate::parts::key_twice(json) {
+            return Err(corrupt(format!(
+                "the footer's header names key {key:?} twice"
+            )));
+        }
+        let header: Header = serde_json::from_slice(json)?;
         check_header(&header)?;
         let declaration = header.declaration();
         let columns = overview::columns(&declaration.channels, &declaration.derived);

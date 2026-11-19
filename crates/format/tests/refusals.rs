@@ -454,6 +454,69 @@ fn a_header_integer_past_2_pow_53_is_refused() {
     assert!(err.to_string().contains("past 2^53"), "{err}");
 }
 
+/// FORMAT.md, "Header": the header and the declaration name each key once in every object, a map
+/// of free keys such as `meta` included, as an annotation line does. A reader refuses either
+/// otherwise, whichever key it is.
+#[test]
+fn a_key_named_twice_anywhere_in_the_header_or_the_declaration_is_refused() {
+    use escapement_tickwave_format::header::PREAMBLE_LEN;
+    use escapement_tickwave_format::reader::Event;
+    use escapement_tickwave_format::record::{self, Kind};
+    let (rec, mut options) = analog(None, vec![1.0; 10]);
+    options.meta = [("probe".to_owned(), "x".to_owned())].into();
+    let file = encode(rec, &options).unwrap();
+    Footer::parse_file(&file).unwrap();
+    let twice = [
+        (
+            r#""meta":{"probe":"x"}"#,
+            r#""meta":{"probe":"x","probe":"y"}"#,
+            "probe",
+        ),
+        (
+            r#""length":1000000001"#,
+            r#""length":1000000001,"length":1000000001"#,
+            "length",
+        ),
+        (r#""name":"C""#, r#""name":"C","name":"C""#, "name"),
+        (r#""origin":0"#, r#""origin":0,"origin":0"#, "origin"),
+    ];
+    for (from, to, key) in twice {
+        let edited = common::with_header_text(&file, |h| {
+            assert!(h.contains(from), "{from}");
+            h.replacen(from, to, 1)
+        });
+        assert_eq!(
+            Footer::parse_file(&edited).unwrap_err().to_string(),
+            format!("the footer's header names key {key:?} twice"),
+            "{to}"
+        );
+    }
+    // The declaration, its record framed again; what follows it no longer matters.
+    let at = PREAMBLE_LEN;
+    let len = u32::from_le_bytes(file[at + 1..at + 5].try_into().unwrap()) as usize;
+    let json = std::str::from_utf8(&file[at + 5..at + 5 + len]).unwrap();
+    for (from, to, key) in [twice[0], twice[2]] {
+        let mut edited = file[..at].to_vec();
+        record::write(
+            &mut edited,
+            Kind::Declaration,
+            &[json.replacen(from, to, 1).as_bytes()],
+        );
+        edited.extend_from_slice(&file[at + 5 + len + record::CHECK_LEN..]);
+        let mut r = Reader::default();
+        r.feed(&edited);
+        let err = r.next_event().unwrap_err().to_string();
+        assert_eq!(
+            err,
+            format!("the declaration names key {key:?} twice"),
+            "{to}"
+        );
+    }
+    let mut r = Reader::default();
+    r.feed(&file);
+    assert!(matches!(r.next_event(), Ok(Some(Event::Declaration(_)))));
+}
+
 /// `significant` parses as an integer of any size a u64 holds, and a channel states at most 17,
 /// the digits an f64 holds: a reader refuses more by what it is, and so does the writer.
 #[test]

@@ -628,6 +628,9 @@ impl Reader {
         };
         Ok(Some(match kind {
             Kind::Declaration => {
+                if let Some(key) = crate::parts::key_twice(payload) {
+                    return Err(corrupt(format!("the declaration names key {key:?} twice")));
+                }
                 let d: Declaration = serde_json::from_slice(payload)?;
                 check_declaration(&d)?;
                 let unmapped = || corrupt("a channel has no mapping to the axis");

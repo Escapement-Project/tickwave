@@ -111,6 +111,22 @@ pub enum RepairError {
          it isn't repaired: make it again from its sources"
     )]
     Shaped(String),
+    /// A gap record in the bytes repair keeps reaches its channel's end and ends inside the
+    /// length repair finishes at: the header can't leave it out, and repair can't take the
+    /// record out of the bytes it keeps. Re-cut the file instead (`Recutter`), which writes it
+    /// again without the record.
+    #[error(
+        "channel {channel}: the gap from {from} to {to} reaches past the end, {end}, and ends \
+         inside the length, {length}, and its record lies before the cut, which repair keeps: \
+         re-cut the file instead"
+    )]
+    GapRecordKept {
+        channel: String,
+        from: i64,
+        to: i64,
+        end: i64,
+        length: i64,
+    },
     #[error(transparent)]
     Write(#[from] WriteError),
 }
@@ -931,6 +947,15 @@ impl Repairer {
                 _ => {}
             }
         }
+        // Each digital channel's gap records in the bytes kept, before those after the cut join.
+        let kept_records: Vec<usize> = state
+            .chans
+            .iter()
+            .map(|ch| match &ch.data {
+                Data::Digital { gaps, .. } => gaps.len(),
+                Data::Analog { .. } => 0,
+            })
+            .collect();
         for a in &again {
             match a {
                 Again::Annotation(a) => {
@@ -991,6 +1016,41 @@ impl Repairer {
                 (None, _) => ch.map.first_at(ch.next_start).max(ch.start),
             })
             .collect();
+        // The gaps each channel's end keeps: those that end before it.
+        let kept_gaps: Vec<usize> = state
+            .chans
+            .iter()
+            .zip(&known_to)
+            .map(|(ch, &last)| match &ch.data {
+                Data::Digital { gaps, .. } => {
+                    gaps.iter().position(|g| g.to >= last).unwrap_or(gaps.len())
+                }
+                Data::Analog { .. } => 0,
+            })
+            .collect();
+        // A gap the end leaves out whose `to` maps before the length can't stay in the file
+        // (FORMAT.md, "Gap and run records"), and one in the bytes kept can't go.
+        for (c, ch) in state.chans.iter().enumerate() {
+            let Data::Digital { gaps, .. } = &ch.data else {
+                continue;
+            };
+            let Some(first_out) = gaps.get(kept_gaps[c]) else {
+                continue;
+            };
+            let kept_out = gaps.get(kept_gaps[c]..kept_records[c]).unwrap_or_default();
+            if let Some(g) = kept_out
+                .iter()
+                .find(|g| ch.map.axis(g.to).is_some_and(|t| t < length))
+            {
+                return Err(RepairError::GapRecordKept {
+                    channel: d.channels[c].name.clone(),
+                    from: g.from,
+                    to: g.to,
+                    end: first_out.from.min(known_to[c]),
+                    length,
+                });
+            }
+        }
         let mut tail = Vec::new();
         // What the content settled and the file lacks, as a writer's queue would hold it.
         state.write_expected(&mut tail, keep)?;
@@ -1023,18 +1083,6 @@ impl Repairer {
                 }
             }
         }
-        // The gaps each channel's end keeps: those that end before it.
-        let kept_gaps: Vec<usize> = state
-            .chans
-            .iter()
-            .zip(&known_to)
-            .map(|(ch, &last)| match &ch.data {
-                Data::Digital { gaps, .. } => {
-                    gaps.iter().position(|g| g.to >= last).unwrap_or(gaps.len())
-                }
-                Data::Analog { .. } => 0,
-            })
-            .collect();
         for (c, &kept) in kept_gaps.iter().enumerate() {
             if let Data::Digital { listed, gaps, .. } = &state.chans[c].data
                 && *listed > kept

@@ -23,7 +23,9 @@ use escapement_tickwave_format::recut::{RecutError, Recutter};
 use escapement_tickwave_format::repair::{RepairError, Repairer};
 use escapement_tickwave_format::samples::coding_name;
 use escapement_tickwave_format::verify::verify_limited;
-use escapement_tickwave_format::writer::{Bundle, Compression, WriteOptions, generator_file};
+use escapement_tickwave_format::writer::{
+    Bundle, Compression, Finished, WriteOptions, generator_file,
+};
 use escapement_tickwave_import::convert::{
     self, Keep, Pass, Progress, Settings, Step, counted, select, set_units,
 };
@@ -156,7 +158,8 @@ enum Command {
     },
     /// Finish a recording cut off before its footer, by a crash, a power cut or a full disk: a
     /// copy with every whole record and a footer for them. Each annotation generator's file goes
-    /// beside the copy, as `<name>.<source>.jsonl`.
+    /// beside the copy, as `<name>.<source>.jsonl`. Where a loss's record before the cut can't
+    /// stay in the copy, the recording is re-cut instead, as `recut` does.
     Repair {
         file: PathBuf,
         #[arg(short, long)]
@@ -1602,6 +1605,32 @@ fn repair_file(file: &Path, output: &Path, level: i32) -> Result<()> {
              so it isn't repaired: make it again from its sources",
             file.display()
         ),
+        Err(RepairError::GapRecordKept {
+            channel, from, to, ..
+        }) => {
+            // Repair keeps the bytes before the cut; a re-cut writes them again without the
+            // record.
+            let (finished, left_out) = recut_into(
+                file,
+                output,
+                WriteOptions {
+                    level,
+                    compression: Compression::Offload,
+                    ..WriteOptions::default()
+                },
+            )?;
+            write_generated(output)?;
+            warn_left_out(&left_out);
+            info!(
+                "{}: re-cut, as the record of channel {channel}'s gap from {from} to {to} lies \
+                 before the cut and the header can't leave the gap out; {} blocks to {}, {}",
+                output.display(),
+                blocks(&finished.header),
+                seconds(finished.header.length, &finished.header),
+                finished.header.content_id
+            );
+            return Ok(());
+        }
         Err(e) => return Err(e).with_context(|| format!("repairing {}", file.display())),
     };
     write_atomically(output, |out| {
@@ -1709,10 +1738,33 @@ struct Generated {
 }
 
 fn recut_file(input: &Path, output: &Path, options: WriteOptions) -> Result<()> {
+    let len = fs::metadata(input)
+        .with_context(|| format!("reading {}", input.display()))?
+        .len();
+    let started = Instant::now();
+    let (finished, left_out) = recut_into(input, output, options)?;
+    warn_left_out(&left_out);
+    info!(
+        "{}: {:.2} MB from {:.2} MB, {} blocks, {} in {:.1} s",
+        output.display(),
+        fs::metadata(output)?.len() as f64 / 1e6,
+        len as f64 / 1e6,
+        blocks(&finished.header),
+        finished.header.content_id,
+        started.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+/// `input` re-cut into `output`, and read back: what it finished at, and the annotation lines it
+/// left out as they would not resolve.
+fn recut_into(
+    input: &Path,
+    output: &Path,
+    options: WriteOptions,
+) -> Result<(Finished, Vec<String>)> {
     let mut opened =
         fs::File::open(input).with_context(|| format!("reading {}", input.display()))?;
-    let len = opened.metadata()?.len();
-    let started = Instant::now();
     let mut recutter = Recutter::new(options);
     recutter.bundle(Bundle::Generated {
         stem: stem_of(output),
@@ -1756,17 +1808,7 @@ fn recut_file(input: &Path, output: &Path, options: WriteOptions) -> Result<()> 
         let _ = fs::remove_file(output);
         bail!("the copy does not read back with its content id");
     }
-    warn_left_out(&left_out);
-    info!(
-        "{}: {:.2} MB from {:.2} MB, {} blocks, {} in {:.1} s",
-        output.display(),
-        fs::metadata(output)?.len() as f64 / 1e6,
-        len as f64 / 1e6,
-        blocks(&finished.header),
-        finished.header.content_id,
-        started.elapsed().as_secs_f64()
-    );
-    Ok(())
+    Ok((finished, left_out))
 }
 
 /// A file's name, as the viewer is given it.
@@ -3020,6 +3062,38 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The energy fixture cut halfway: DIO0's loss record lies before the cut, and an annotation
+    /// after it takes the length past the loss's end, so repair can't keep the record. `repair`
+    /// re-cuts the file instead, to the content `recut` gives, and the copy reads in order.
+    #[test]
+    fn repair_re_cuts_a_file_whose_gap_record_before_the_cut_cant_stay() {
+        use escapement_tickwave_format::decode::Footer;
+        use escapement_tickwave_format::reader::{Ending, Reader};
+        let dir = tempfile::tempdir().unwrap();
+        let energy = fs::read(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../web/fixtures/energy.tickwave"),
+        )
+        .unwrap();
+        let at = Footer::parse_file(&energy).unwrap().trailer.footer_offset as usize / 2;
+        assert!(matches!(
+            escapement_tickwave_format::repair::repair(&energy[..at], 3),
+            Err(RepairError::GapRecordKept { .. })
+        ));
+        let input = dir.path().join("cut.tickwave");
+        fs::write(&input, &energy[..at]).unwrap();
+        let output = dir.path().join("rec.tickwave");
+        repair_file(&input, &output, 3).unwrap();
+        let recut = dir.path().join("recut.tickwave");
+        recut_file(&input, &recut, WriteOptions::default()).unwrap();
+        let id = |p: &Path| read_footer(p).unwrap().2.header.content_id;
+        assert_eq!(id(&output), id(&recut));
+        let mut r = Reader::default();
+        r.feed(&fs::read(&output).unwrap());
+        while r.next_event().unwrap().is_some() {}
+        assert_eq!(r.end().unwrap(), Ending::Complete);
+        assert!(dir.path().join("rec.verge.jsonl").is_file());
     }
 
     /// A cut-off file whose annotation record names the generator `x/../../escaped`, beside a

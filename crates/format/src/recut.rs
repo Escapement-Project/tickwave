@@ -462,7 +462,6 @@ impl Recutter {
                 let finish = Finish {
                     extra,
                     bundle,
-                    drop_gaps_past_end: true,
                     lost_after,
                     view: None,
                 };
@@ -500,48 +499,53 @@ impl Recutter {
                 }
                 // The records held back after the cut go, but for a gap record whose `from`
                 // maps before the latest known-through tick: a loss the recorder had begun to
-                // report ends its channel there, as repair has it. Its `to` maps past that tick,
-                // so the header leaves it out, and its record goes again only where that `to`
-                // maps at or past the length.
-                let mut cut = vec![i64::MAX; d.channels.len()];
+                // report ends its channel there, as repair has it.
                 let held = self.hold.take().map(Hold::dropped).unwrap_or_default();
                 if let Some(k) = self.known_through {
                     for (_, event) in held {
-                        let Event::Gap { channel, gap } = event else {
-                            continue;
-                        };
-                        let axis = |tick| d.mapping(channel).and_then(|m| m.axis(tick));
-                        if axis(gap.from).is_some_and(|t| t < k) {
-                            if axis(gap.to).is_some_and(|t| t < length) {
-                                cut[channel] = cut[channel].min(gap.from);
-                            } else {
-                                self.gaps[channel].push_back(gap);
-                            }
+                        if let Event::Gap { channel, gap } = event
+                            && d.mapping(channel)
+                                .and_then(|m| m.axis(gap.from))
+                                .is_some_and(|t| t < k)
+                        {
+                            self.gaps[channel].push_back(gap);
                         }
                     }
                 }
-                for (c, gaps) in self.gaps.iter_mut().enumerate() {
-                    for g in gaps.drain(..) {
-                        writer.gap(c, g)?;
+                // Each digital channel is known as repair has it.
+                let known = |c: usize| {
+                    let map = d.mapping(c).unwrap_or(mapping::Mapping::IDENTITY);
+                    let start = d.start(c).unwrap_or(0);
+                    match self.known_through {
+                        Some(k) => map.first_at(k).max(start),
+                        None if self.known[c] == 0 => start,
+                        None => map.first_at(self.known[c]).max(start),
+                    }
+                };
+                // A gap that reaches its channel's end ends the channel at its `from`, and the
+                // header leaves it out; its record goes again only where its `to` maps at or past
+                // the length (FORMAT.md, "Gap and run records"), wherever it lay in the input.
+                let mut cut = vec![i64::MAX; d.channels.len()];
+                for c in 0..self.gaps.len() {
+                    let end = known(c);
+                    for g in std::mem::take(&mut self.gaps[c]) {
+                        let inside = d
+                            .mapping(c)
+                            .and_then(|m| m.axis(g.to))
+                            .is_some_and(|t| t < length);
+                        if g.to >= end && inside {
+                            cut[c] = cut[c].min(g.from);
+                        } else {
+                            writer.gap(c, g)?;
+                        }
                     }
                 }
-                // Each digital channel's end as repair has it.
                 let ends: Vec<i64> = (0..d.channels.len())
                     .filter(|&c| d.channels[c].coding().is_none())
-                    .map(|c| {
-                        let map = d.mapping(c).unwrap_or(mapping::Mapping::IDENTITY);
-                        let start = d.start(c).unwrap_or(0);
-                        let known = match self.known_through {
-                            Some(k) => map.first_at(k).max(start),
-                            None if self.known[c] == 0 => start,
-                            None => map.first_at(self.known[c]).max(start),
-                        };
-                        known.min(cut[c])
-                    })
+                    .map(|c| known(c).min(cut[c]))
                     .collect();
                 let finish = Finish {
                     bundle: sidecar.or(self.bundle),
-                    drop_gaps_past_end: true,
                     ..Finish::default()
                 };
                 Ok(writer.finish(length, &ends, finish)?)

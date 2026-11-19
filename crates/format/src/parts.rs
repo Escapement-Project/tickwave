@@ -298,16 +298,27 @@ impl<'de> Deserialize<'de> for AnyValue {
     }
 }
 
+/// A JSON object, and the first key an object in it names twice.
+struct Object(AnyValue);
+
+impl<'de> Deserialize<'de> for Object {
+    fn deserialize<D: de::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        d.deserialize_map(Any).map(Object)
+    }
+}
+
 /// An annotation line, which is one JSON object: Err where it is none, and the first key an
 /// object in it names twice, which a reader refuses as it refuses one in the header.
 pub(crate) fn line_object(line: &str) -> Result<Option<String>, serde_json::Error> {
-    struct Object(AnyValue);
-    impl<'de> Deserialize<'de> for Object {
-        fn deserialize<D: de::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-            d.deserialize_map(Any).map(Object)
-        }
-    }
     serde_json::from_str::<Object>(line).map(|Object(AnyValue(twice))| twice)
+}
+
+/// The first key an object in `json` names twice, where `json` is a JSON object: a header or a
+/// declaration, whose parse reports any other fault.
+pub(crate) fn key_twice(json: &[u8]) -> Option<String> {
+    serde_json::from_slice::<Object>(json)
+        .ok()
+        .and_then(|Object(AnyValue(twice))| twice)
 }
 
 /// The sidecar's files whole, as `Footer::read_sidecar` joins them, and what it left out.

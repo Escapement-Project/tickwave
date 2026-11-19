@@ -11,8 +11,9 @@ use escapement_tickwave_format::header::{
 };
 use escapement_tickwave_format::model::{Break, Gap, Ratio, Sample};
 use escapement_tickwave_format::overview::{BLOCK_BUCKETS, Level};
+use escapement_tickwave_format::reader::{Ending, Reader};
 use escapement_tickwave_format::recut::{RecutError, Recutter, shifts_for};
-use escapement_tickwave_format::repair::repair;
+use escapement_tickwave_format::repair::{RepairError, repair};
 use escapement_tickwave_format::samples::Values;
 use escapement_tickwave_format::snapshot::Snapshot;
 use escapement_tickwave_format::writer::{Compression, Finish, Finished, WriteOptions, Writer};
@@ -243,8 +244,23 @@ fn a_cut_off_file_recut_gives_what_repair_gives() {
     let footer_at = Footer::parse_file(&file).unwrap().trailer.footer_offset as usize;
     for at in [footer_at / 3, footer_at / 2, footer_at - 5, footer_at + 9] {
         let cut = &file[..at];
-        let repaired = repair(cut, 3).unwrap_or_else(|e| panic!("cut at {at}: {e}"));
         let (out, _) = recut(cut, 4096, options(1 << 20)).unwrap();
+        let repaired = match repair(cut, 3) {
+            // Halfway, DIO0's loss from 960,000 to 1,008,000 began before the latest
+            // known-through tick, and its record lies before the cut, while an annotation after
+            // the cut takes the length past the loss's end. The header can't leave the gap out,
+            // nor repair take its record out of the bytes it keeps; recut writes the file again
+            // without it.
+            Err(RepairError::GapRecordKept { channel, to, .. }) if at == footer_at / 2 => {
+                assert_eq!((channel.as_str(), to), ("DIO0", 1_008_000));
+                let mut r = Reader::default();
+                r.feed(&out);
+                while r.next_event().unwrap().is_some() {}
+                assert_eq!(r.end().unwrap(), Ending::Complete);
+                continue;
+            }
+            repaired => repaired.unwrap_or_else(|e| panic!("cut at {at}: {e}")),
+        };
         let head = Footer::parse_file(&out).unwrap();
         assert_eq!(
             head.header.content_id, repaired.header.content_id,

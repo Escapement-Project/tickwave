@@ -210,7 +210,6 @@ fn main() {
                 bundle: Some(Bundle::Generated {
                     stem: "energy".into(),
                 }),
-                drop_gaps_past_end: false,
                 lost_after: Default::default(),
                 view: None,
             },

@@ -1264,7 +1264,6 @@ fn a_writer_bundles_its_annotations_with_a_sidecar_that_checks() {
             Finish {
                 extra: vec![],
                 bundle: Some(Bundle::Generated { stem: "cap".into() }),
-                drop_gaps_past_end: false,
                 lost_after: Default::default(),
                 view: None,
             },

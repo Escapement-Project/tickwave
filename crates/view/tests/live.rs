@@ -236,7 +236,6 @@ fn a_live_recording_reads_as_the_same_file_finished_where_it_ends() {
             finished_file.extend(f.take_output());
             let finish = Finish {
                 bundle: Some(Bundle::Generated { stem: "rec".into() }),
-                drop_gaps_past_end: true,
                 ..Finish::default()
             };
             finished_file.extend(f.finish(length, &[length], finish).unwrap().tail);
