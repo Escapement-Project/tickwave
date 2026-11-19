@@ -2357,6 +2357,31 @@ fn an_upstream_binds_to_the_input_naming_its_definition_and_the_decoder_is_told_
     assert_eq!(wire.unwrap_err(), BindError::NoWireInput);
 }
 
+/// A stacked binding refused for its settings leaves the host as it was, and the host runs on.
+#[test]
+fn a_refused_stacked_binding_leaves_its_upstream_as_it_was() {
+    let (mut h, [p, q]) = pulses_host(line(1, 2, 10, vec![]), 100, None, HostOptions::default());
+    let def = Definition::new("set", 1, pulses_schema()).with_inputs([UpstreamDecl::new(
+        "in",
+        Mode::Completed,
+    )
+    .with_kinds(["pulse"])]);
+    let refused = h.add(
+        name("stacked"),
+        Arc::new(def),
+        InputSpec::Upstream(p),
+        Box::new(|_, _| Box::new(Swallow)),
+        &[("none", Setting::Flag(true))],
+        all(),
+    );
+    assert_eq!(
+        refused.unwrap_err(),
+        BindError::UnknownSetting(name("none"))
+    );
+    h.run_until(|_| false).unwrap();
+    assert!(h.finished(p).is_some() && h.finished(q).is_some());
+}
+
 #[test]
 fn a_checkpoint_restores_only_where_the_settings_are_the_same() {
     let host = |cycles: i64| {

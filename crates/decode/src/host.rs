@@ -1407,7 +1407,6 @@ impl Host {
                 };
                 let (local, bound) = (ua.run.local, Some(ua.run.id));
                 let binding = sub.digest(up);
-                self.analyses[up].downstream.push(index);
                 (
                     Input::Upstream { index: up, sub },
                     local,
@@ -1420,6 +1419,10 @@ impl Host {
             }
         };
         let with = Bound::new(&def, settings, ports, picked)?;
+        // Only once nothing can refuse it, so that a refused binding leaves its upstream as it was.
+        if let Input::Upstream { index: up, .. } = input {
+            self.analyses[up].downstream.push(index);
+        }
         let id = RunId {
             analysis: AnalysisId(analysis),
             generation: self.fresh(),
