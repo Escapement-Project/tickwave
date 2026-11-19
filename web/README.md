@@ -471,6 +471,10 @@ it drops any `window` the address had. A recording on the same site goes in by i
 another site's whole. As a link, the inset opens a new tab on a middle click or a Ctrl or Cmd
 click, and shows its address on hover.
 
+Such an inset marks where it opens, with a small "Opens here" over the plot that moves nothing. It
+sits on the note lit by the pointer, a tap or the keys. With the keys' focus on the inset and no
+note lit, it sits at the start of the span shown, where Enter opens.
+
 An inset the pointer passes through, as in a chart's popover, where `pointer-events` is `none`,
 does none of this. Inside a popover the inset is no Tab stop, and the element that opened it keeps
 the focus. A reference passes its arrow keys to `arrowKey(event)`, which answers them as the

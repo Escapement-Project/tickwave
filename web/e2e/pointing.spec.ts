@@ -41,6 +41,9 @@ async function at(inset: Locator, fx: number, y: number): Promise<{ x: number; y
   return { x: b.x + b.width * fx, y: b.y + y };
 }
 
+/** A point on the notes' lane, at fraction `fx` of the canvas's width. */
+const onLane = (inset: Locator, fx: number) => at(inset, fx, 10);
+
 /** Moves the pointer along the notes' lane, and returns each distinct reading on the way. */
 async function sweepLane(page: Page, inset: Locator): Promise<string[][]> {
   const seen: string[][] = [];
@@ -139,6 +142,57 @@ test("with href, the inset links to that page at the lit note, or its own annota
   const view = page.locator("#view tickwave-view");
   await expect.poll(() => view.evaluate((v) => (v as HTMLElement & { window: { start: number } | null }).window?.start ?? null), { timeout: 20_000 }).toBe(377102308);
   expect(new URL(page.url()).searchParams.get("annotation")).toBe("dpidr-ack");
+});
+
+test("an inset that opens somewhere marks where: on the note the pointer or the keys light, else with the keys' focus at the span shown, and it moves nothing", async ({ page }) => {
+  const inset = await drawn(page, `&href=${encodeURIComponent("/dist/site/open.html")}`);
+  const cue = inset.locator(".opens-at");
+  const canvas = (await inset.locator("canvas").boundingBox())!;
+  const height = (await inset.boundingBox())!.height;
+  const left = async () => {
+    const b = (await cue.boundingBox())!;
+    expect(b.x).toBeGreaterThanOrEqual(canvas.x);
+    expect(b.x + b.width).toBeLessThanOrEqual(canvas.x + canvas.width + 0.5);
+    expect(b.y + b.height).toBeLessThanOrEqual(canvas.y + canvas.height + 0.5);
+    return b.x;
+  };
+  await expect(cue).toBeHidden();
+  // The pointer along the notes: the mark sits on each one lit, and moves on with it.
+  const at: Record<string, number> = {};
+  for (let fx = 0.15; fx < 0.98 && !(at.request && at.ack); fx += 0.01) {
+    const p = await onLane(inset, fx);
+    await page.mouse.move(p.x, p.y);
+    const r = await reading(inset);
+    if (r?.[0] === REQUEST[0] && !at.request) at.request = await left();
+    if (r?.[0] === ACK[0] && !at.ack) at.ack = await left();
+  }
+  expect(at.request).toBeDefined();
+  expect(at.ack).toBeGreaterThan(at.request);
+  await expect(cue).toHaveText("Opens here");
+  await page.mouse.move(0, 0);
+  await expect(cue).toBeHidden();
+  // The keys' focus with no note lit: the span shown, from its start. A note stepped to: there.
+  await page.keyboard.press("Tab");
+  await expect(cue).toBeVisible();
+  const whole = await left();
+  expect(whole).toBeLessThan(at.request);
+  await page.keyboard.press("Shift+ArrowRight");
+  expect(await reading(inset)).toEqual(REQUEST);
+  expect(Math.abs((await left()) - at.request)).toBeLessThan(1);
+  await page.keyboard.press("Escape");
+  expect(await left()).toBe(whole);
+  await page.keyboard.press("Shift+Tab");
+  await expect(cue).toBeHidden();
+  expect((await inset.boundingBox())!.height).toBe(height);
+});
+
+test("an inset that opens nothing marks nothing", async ({ page }) => {
+  const inset = await drawn(page);
+  await sweepLane(page, inset);
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("Shift+ArrowRight");
+  expect(await reading(inset)).toEqual(REQUEST);
+  await expect(inset.locator(".opens-at")).toBeHidden();
 });
 
 test("with for, a click on a note opens the page's view at it, and for wins over href", async ({ page }) => {

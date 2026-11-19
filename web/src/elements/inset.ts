@@ -32,6 +32,11 @@ canvas { display: block; }
 .hit:focus-visible { outline: var(--focus-width, 2px) solid var(--ink, CanvasText); outline-offset: 2px; }
 .hit.opens { cursor: pointer; }
 .hit.panning { cursor: grabbing; }
+/* Where a click or Enter opens the recording: on the lit note's span, or with the keys' focus and
+   no note lit, at the start of the span shown. Over the plot, so it moves nothing. */
+.opens-at { position: absolute; pointer-events: none; padding: 1px 4px; border: 1px solid var(--hair, GrayText);
+  border-radius: 3px; background: var(--page, Canvas); color: var(--ink, CanvasText); font-size: 11px; line-height: 1.3;
+  white-space: nowrap; }
 .foot { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 2px 14px;
   margin: 2px 4px 0; font-size: 12px; color: var(--ink-2, GrayText); }
 .foot:empty { display: none; }
@@ -58,7 +63,7 @@ canvas { display: block; }
 `;
 
 const HTML = `<figure part="inset"><figcaption part="label"></figcaption><p class="text" part="text" hidden></p>
-<div class="frame" part="frame"><canvas part="canvas" aria-hidden="true"></canvas><a class="hit" part="plot" hidden></a></div>
+<div class="frame" part="frame"><canvas part="canvas" aria-hidden="true"></canvas><a class="hit" part="plot" hidden></a><span class="opens-at" part="opens-at" aria-hidden="true" hidden>Opens here</span></div>
 <div class="foot" part="foot"><span class="line" hidden><span class="strut figures" aria-hidden="true">\u200b</span><span class="measure figures" part="measure" hidden></span><span class="reading" part="reading" aria-hidden="true"></span></span><span class="key" part="key"></span></div>
 <span class="said" aria-live="polite"></span>
 <div class="notice" part="notice" role="status" hidden></div></figure>`;
@@ -79,6 +84,7 @@ export class TickwaveInset extends TickwaveElement {
   readonly #key: HTMLElement;
   readonly #frame: HTMLElement;
   readonly #hit: HTMLAnchorElement;
+  readonly #opensAt: HTMLElement;
   readonly #line: HTMLElement;
   readonly #reading: HTMLElement;
   readonly #said: HTMLElement;
@@ -151,7 +157,11 @@ export class TickwaveInset extends TickwaveElement {
     this.#reading = this.root.querySelector(".reading")!;
     this.#said = this.root.querySelector(".said")!;
     this.#prober = new Prober(this.#plot, () => this.#loaded, (r) => this.#probed(r));
-    this.#plot.onDraw = () => this.#prober.probeIfMoved();
+    this.#opensAt = this.root.querySelector(".opens-at")!;
+    this.#plot.onDraw = () => {
+      this.#prober.probeIfMoved();
+      this.#mark();
+    };
     const hit = this.#hit;
     // A link's own drag would carry its address away instead.
     hit.draggable = false;
@@ -190,6 +200,8 @@ export class TickwaveInset extends TickwaveElement {
     });
     hit.addEventListener("click", (e) => this.#clicked(e));
     hit.addEventListener("keydown", (e) => this.#keyed(e));
+    hit.addEventListener("focus", () => this.#mark());
+    hit.addEventListener("blur", () => this.#mark());
     hit.addEventListener("wheel", (e) => this.#wheeled(e), { passive: false });
     this.#resize = new ResizeObserver(() => this.#sized());
     this.#intersect = new IntersectionObserver((seen) => {
@@ -753,6 +765,26 @@ export class TickwaveInset extends TickwaveElement {
     );
   }
 
+  /** Marks where a click or Enter opens the recording, on an inset that opens one: the lit note,
+   * or with the keys' focus on the inset and no note lit, the span shown. */
+  #mark(): void {
+    const cue = this.#opensAt;
+    const l = this.#plot.layout;
+    const note = this.#lit ? this.#loaded?.annotations.byId.get(this.#lit) : undefined;
+    const focused = this.#hit.matches(":focus-visible");
+    const opens = this.#hit.classList.contains("opens") && !this.#hit.hidden;
+    const last = l?.rows.at(-1);
+    const x = !l ? NaN : note ? Math.max(l.plotLeft, this.#plot.xAt(note.start)) : l.plotLeft;
+    if (!l || !last || !opens || (!note && !focused) || !(x < l.plotRight)) {
+      cue.hidden = true;
+      return;
+    }
+    cue.hidden = false;
+    // On the last row, clear of the notes' labels above the traces.
+    cue.style.left = `${Math.max(l.plotLeft, Math.min(x, l.plotRight - cue.offsetWidth))}px`;
+    cue.style.top = `${last.top + last.height - cue.offsetHeight - 2}px`;
+  }
+
   /** A pointer's place in the plot's coordinates. */
   #local(e: PointerEvent | WheelEvent): { x: number; y: number } {
     const box = this.#plot.canvas.getBoundingClientRect();
@@ -795,6 +827,7 @@ export class TickwaveInset extends TickwaveElement {
     if (this.#lit === id && !said) return;
     this.#lit = id;
     this.#renderHit();
+    this.#mark();
     const a = id ? this.#loaded?.annotations.byId.get(id) : undefined;
     if (!a || !this.#loaded) {
       this.#read(null);
