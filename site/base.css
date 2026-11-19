@@ -104,7 +104,8 @@ p { margin: 0 0 14px; max-width: 36em; }
 .specs > div { display: grid; grid-template-columns: 7em minmax(0, 1fr); gap: 12px; padding: 10px 0; border-top: 1px solid var(--hair); }
 .specs > div:last-child { border-bottom: 1px solid var(--hair); }
 .specs dt { color: var(--ink-2); }
-.specs dd { margin: 0; }
+/* A value too long for its column, a serial or a hash at a large text size, breaks inside it. */
+.specs dd { margin: 0; overflow-wrap: anywhere; }
 
 /* A product's main page opens with its head: the mark on a plate beside the product's name, the
    lede with the ways in under it, and a figure in the column beside them. A plate shows a mark in
@@ -129,11 +130,12 @@ p { margin: 0 0 14px; max-width: 36em; }
 .product-figure { border-left: 1px solid var(--hair); padding-left: var(--gutter); }
 .product-figure p { font-size: 15px; color: var(--ink-2); text-wrap: pretty; }
 .product-figure p:last-child { color: var(--ink); font-weight: 600; margin: 0; }
-/* A command. It breaks only between its arguments, and a wrapped line hangs past the prompt: an ink
-   $ centred in a square of lume, its width and gap the hanging indent. The
+/* A command. It breaks only between its arguments, and an argument wider than the line, as at a
+   large text size, scrolls inside the command rather than the page sideways. A wrapped line hangs
+   past the prompt: an ink $ centred in a square of lume, its width and gap the hanging indent. The
    command is a copy target (copy.js), its Copy button in the corner. */
 .console { position: relative; background: var(--surface); border-radius: 10px; padding: 12px 16px; }
-.console code { display: block; font: 500 14px/1.5 var(--font-code); font-stretch: var(--code-stretch); padding-left: 1.9em; text-indent: -1.9em; }
+.console code { display: block; overflow: auto hidden; font: 500 14px/1.5 var(--font-code); font-stretch: var(--code-stretch); padding-left: 1.9em; text-indent: -1.9em; }
 .console code > span { display: inline-block; width: 1.4em; height: 1.4em; line-height: 1.4em; margin-right: .5em; text-indent: 0; text-align: center; vertical-align: middle; border-radius: 3px; background: var(--lume); color: var(--on-lume); }
 .console code i { font-style: normal; white-space: nowrap; }
 .console p { margin: 4px 0 0; font-size: 14px; line-height: 1.45; color: var(--ink-2); max-width: none; }
@@ -184,6 +186,8 @@ figcaption b { color: var(--ink); font-weight: 600; }
 .tip b { font-weight: 600; }
 .tip i { display: inline-block; width: 10px; height: 2px; vertical-align: middle; margin-right: 6px; }
 table { width: 100%; border-collapse: collapse; font-size: 15px; font-variant-numeric: tabular-nums; }
+/* Around a table that can outgrow its column at a large text size: it scrolls there, not the page. */
+.scroll-x { max-width: 100%; overflow-x: auto; }
 /* Figures and every heading over them share a right edge; only the clock column reads from the
    left. Headings sit on the header's bottom line. The misread marker hangs in the padding, so no
    figure moves for it. */
@@ -227,7 +231,9 @@ footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; g
   :root { --header-returns: 1; }
   header { position: static; }
   html { scroll-padding-top: 8px; }
-  header .wrap { grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: 34px auto; grid-template-areas: "brand face" "nav nav"; row-gap: 10px; padding-top: 12px; padding-bottom: 10px; }
+  header .wrap { grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: minmax(34px, auto) auto; grid-template-areas: "brand face" "nav nav"; row-gap: 10px; padding-top: 12px; padding-bottom: 10px; }
+  /* At a large text size the name wraps, its row growing, rather than run under the switch. */
+  .brand { white-space: normal; }
   /* The places wrap rather than widen the page on the narrowest phones, a wrapped line clear of
      the rule under a product's group. */
   header nav { justify-self: start; flex-wrap: wrap; gap: 12px 14px; font-size: 14px; }

@@ -36,9 +36,11 @@ test.describe("the project's header", () => {
     await expect(link("tickwave")).toHaveAttribute("href", "../index.html");
     // A doc sits inside tickwave and its docs.
     await expect(link("tickwave")).toHaveAttribute("aria-current", "true");
-    await expect(link("Docs")).toHaveAttribute("aria-current", "true");
+    // Docs shows as "Docs", and its accessible name says whose.
+    await expect(link("tickwave docs")).toHaveText("Docs");
+    await expect(link("tickwave docs")).toHaveAttribute("aria-current", "true");
     await expect(places.locator("[aria-current]")).toHaveCount(2);
-    expect(await segment("Docs")).toBe("3px");
+    expect(await segment("tickwave docs")).toBe("3px");
     expect(await segment("tickwave")).not.toBe("3px");
     // The overview is tickwave's main page: the name is the page.
     await page.goto(`${SITE}index.html`);
@@ -50,7 +52,7 @@ test.describe("the project's header", () => {
     await expect(link("tickwave")).toHaveAttribute("aria-current", "true");
     expect(await segment("Open")).toBe("3px");
     await page.goto(`${SITE}docs/index.html`);
-    await expect(link("Docs")).toHaveAttribute("aria-current", "page");
+    await expect(link("tickwave docs")).toHaveAttribute("aria-current", "page");
     await expect(page.locator("footer")).toContainText("tickwave is free software under the MIT or Apache-2.0 licence.");
   });
 
@@ -441,7 +443,7 @@ test("each page is titled by its name, tickwave's and the project's", async ({ p
   }
 });
 
-test("each page names itself to a link preview, by its title, its description and its published address", async ({ request, baseURL }) => {
+test("each page names itself to a link preview, by its title, its description, its published address and the card", async ({ request, baseURL }) => {
   for (const [path, url] of [
     ["index.html", "https://escapement-project.github.io/tickwave/"],
     ["open.html", "https://escapement-project.github.io/tickwave/open.html"],
@@ -455,8 +457,16 @@ test("each page names itself to a link preview, by its title, its description an
     expect(meta("property", "og:description")?.length, path).toBeGreaterThan(20);
     expect(meta("property", "og:url"), path).toBe(url);
     expect(meta("property", "og:site_name"), path).toBe("Escapement Project");
-    expect(meta("name", "twitter:card"), path).toBe("summary");
+    expect(meta("property", "og:image"), path).toBe("https://escapement-project.github.io/tickwave/card-tickwave.png");
+    expect([meta("property", "og:image:width"), meta("property", "og:image:height")], path).toEqual(["1200", "630"]);
+    expect(meta("property", "og:image:alt"), path).toMatch(/^Escapement Project\. tickwave\. /);
+    expect(meta("name", "twitter:card"), path).toBe("summary_large_image");
   }
+  // The card is published beside the pages, as a PNG of the size the tags give.
+  const card = await request.get(new URL(`${SITE}card-tickwave.png`, baseURL).href);
+  expect(card.ok()).toBe(true);
+  const png = await card.body();
+  expect([png.readUInt32BE(16), png.readUInt32BE(20)]).toEqual([1200, 630]);
 });
 
 test("a doc's headings link to themselves from h2 down, and its source line names the file it comes from", async ({ page, request }) => {

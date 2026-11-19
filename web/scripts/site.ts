@@ -45,7 +45,7 @@ await esbuild.build({
 });
 
 // The design system's files, as copied into site/, and the site's own styles.
-for (const f of ["tokens.css", "base.css", "doc.css", "face.js", "header.js", "copy.js", "doc.js", "search.js", "mark.js", "favicon-tickwave.ico", "site.css"]) copyFileSync(join(site, f), join(out, f));
+for (const f of ["tokens.css", "base.css", "doc.css", "face.js", "header.js", "copy.js", "doc.js", "search.js", "mark.js", "favicon-tickwave.ico", "card-tickwave.png", "site.css"]) copyFileSync(join(site, f), join(out, f));
 cpSync(join(site, "fonts"), join(out, "fonts"), { recursive: true });
 
 // The overview's and the viewer's examples: committed fixtures, and the SWD annotations made from one.
@@ -88,10 +88,11 @@ md.renderer.rules.code_inline = (tokens, i, _options, _env, self) => {
 };
 
 /** tickwave's group in the header: its main page under its name, then its other pages. */
-const GROUP: { href: string; name: string; page: string }[] = [
+const GROUP: { href: string; name: string; page: string; label?: string }[] = [
   { href: "index.html", name: "tickwave", page: "tickwave" },
   { href: "open.html", name: "Open", page: "tickwave/open" },
-  { href: "docs/index.html", name: "Docs", page: "tickwave/docs" },
+  // Docs shows as "Docs" and names the product to a screen reader (the site's design/README.md).
+  { href: "docs/index.html", name: "Docs", page: "tickwave/docs", label: "tickwave docs" },
 ];
 
 // The elements: web/README.md's own section, its headings one level up. One source, no copy.
@@ -211,9 +212,9 @@ const shared = shaped("header.html", [["{{mark}}", 1], ["{{base}}", 0], [TICKWAV
  */
 function header(path: string, root: string): string {
   const within = (href: string) => href.endsWith("/index.html") && path.startsWith(href.slice(0, -"index.html".length));
-  const group = GROUP.map(({ href, name, page }, i) => {
+  const group = GROUP.map(({ href, name, page, label }, i) => {
     const at = href === path ? "page" : i === 0 || within(href) ? "true" : null;
-    return `<a href="${root}${href}" data-page="${page}"${at ? ` aria-current="${at}"` : ""}>${name}</a>`;
+    return `<a href="${root}${href}" data-page="${page}"${label ? ` aria-label="${label}"` : ""}${at ? ` aria-current="${at}"` : ""}>${name}</a>`;
   }).join("");
   return shared.replace(TICKWAVE, () => `<span class="product">${group}</span>`).replaceAll("{{base}}", PUBLISHED);
 }
@@ -235,6 +236,9 @@ function page(path: string, opts: { title: string; description: string; kind: st
       // Where the page is published, which a link preview names.
       case "url":
         return esc(`${PUBLISHED}/tickwave/${path === "index.html" ? "" : path}`);
+      // The link preview's card, which the site's design/build.py draws.
+      case "card":
+        return esc(`${PUBLISHED}/tickwave/card-tickwave.png`);
       case "root":
         return root;
       case "header":
