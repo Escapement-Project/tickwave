@@ -18,7 +18,7 @@ use crate::index::{Due, PageHead, Row, Table, TableWriter};
 use crate::mapping::Mapping;
 use crate::model::{Break, Gap, Grid};
 use crate::overview;
-use crate::parts::{Part, PartRow};
+use crate::parts::{Part, PartRow, placed_span};
 use crate::record::{
     self, BlockHead, Kind, MAX_BUNDLE, MAX_GENERATORS, MAX_PART, Next, OverviewHead,
 };
@@ -843,6 +843,18 @@ impl Reader {
             Kind::Annotation => {
                 let a = record::Annotation::parse(payload)
                     .map_err(|e| corrupt(format!("an annotation record: {e}")))?;
+                // The part that covers it states its span in a row.
+                let timebase = self
+                    .declaration
+                    .as_ref()
+                    .expect("records follow the declaration")
+                    .timebase;
+                placed_span(&a.line, timebase).map_err(|e| {
+                    corrupt(format!(
+                        "an annotation record of generator {:?}, which a part can't hold: {e}",
+                        a.source
+                    ))
+                })?;
                 let covering = self.generator(&a.source)?;
                 covering.hasher.update(a.line.as_bytes());
                 covering.hasher.update(b"\n");
@@ -948,6 +960,18 @@ impl Reader {
                 "the footer's annotation bundle differs from the one read",
             ));
         }
+        // A reader with random access finds annotations through the parts alone.
+        if let Some(source) = self
+            .generators
+            .iter()
+            .filter(|(_, c)| c.records > 0)
+            .map(|(source, _)| source)
+            .min()
+        {
+            return Err(corrupt(format!(
+                "generator {source:?}: no part covers its annotation records after its last part"
+            )));
+        }
         let parts_top = self.parts.top(0)?;
         if h.annotation_parts.unwrap_or(0) != self.parts.table.count()
             || parts_top != footer.parts.as_ref().map(top_of)
@@ -979,6 +1003,22 @@ impl Reader {
                 return Err(corrupt(format!(
                     "channel {c}: an edge at source tick {last_edge} lies at or past the footer's \
                      end, {end}"
+                )));
+            }
+            // A gap that reaches the end is left out of the header only where its `to` maps at or
+            // past the length. Gaps come in order, so those that reach the end come last.
+            if let (Channel::Digital { gaps, map, .. }, ChannelKind::Digital { end, .. }) =
+                (&self.channels[c], &ch.data)
+                && let Some(g) = gaps
+                    .iter()
+                    .rev()
+                    .take_while(|g| g.to >= *end)
+                    .find(|g| map.axis(g.to).is_some_and(|t| t < h.length))
+            {
+                return Err(corrupt(format!(
+                    "channel {c}: the gap from {} to {} reaches past the end, {end}, and ends \
+                     inside the length, {}",
+                    g.from, g.to, h.length
                 )));
             }
             let top = self.blocks[c].top(0)?;
@@ -1320,12 +1360,9 @@ impl Reader {
         })
     }
 
-    /// The annotation bundle's files hold one for each generator whose parts were read
-    /// (FORMAT.md, "Annotations").
+    /// The annotation bundle's files, each generator's its first line alone (`parse_bundle`),
+    /// hold one for each generator whose parts were read (FORMAT.md, "Annotations").
     fn bundle_generators(&self, payload: &[u8]) -> Result<(), DecodeError> {
-        if self.part_sources.is_empty() {
-            return Ok(());
-        }
         let files = crate::decode::parse_bundle(payload, |frame, len| {
             inflate_limited(frame, len, self.max.min(MAX_BUNDLE))
         })?;

@@ -396,8 +396,8 @@ impl Annotation {
     }
 
     /// A record's payload, or why a reader refuses it: a generator name ANNOTATIONS.md doesn't
-    /// allow, or a line that holds a newline before its end, lacks its newline, or is not a JSON
-    /// object.
+    /// allow, or a line that holds a newline before its end, lacks its newline, is not a JSON
+    /// object, or names a key twice in an object.
     pub fn parse(payload: &[u8]) -> Result<Self, String> {
         let (source, line) = named(payload)?;
         let line = line
@@ -407,8 +407,10 @@ impl Annotation {
             return Err("its line holds a newline before its end".into());
         }
         let line = std::str::from_utf8(line).map_err(|_| "its line is not UTF-8".to_owned())?;
-        if serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(line).is_err() {
-            return Err("its line is not a JSON object".into());
+        match crate::parts::line_object(line) {
+            Err(_) => return Err("its line is not a JSON object".into()),
+            Ok(Some(key)) => return Err(format!("its line names key {key:?} twice")),
+            Ok(None) => {}
         }
         Ok(Self {
             source,

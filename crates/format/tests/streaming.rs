@@ -318,6 +318,52 @@ fn a_late_gap_or_an_edge_in_a_gap_is_refused() {
     ));
 }
 
+/// FORMAT.md, "Known-through records": every block record before one ends at or before its tick.
+/// A channel's own promise can close a block past the latest promise to all, so the writer
+/// refuses a flush behind that block at the call, and takes one at its end: the file then reads
+/// in order and repairs.
+#[test]
+fn a_flush_behind_a_block_a_channels_promise_closed_is_refused() {
+    let mut w = Writer::new(
+        declaration(),
+        WriteOptions {
+            block_bytes: 1,
+            ..options()
+        },
+    )
+    .unwrap();
+    w.edge(0, 10).unwrap();
+    w.edge(0, 20).unwrap();
+    w.promise_channel(0, 1000).unwrap();
+    let err = w.flush(500).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            WriteError::FlushBehindBlock {
+                before: 500,
+                end: 1000,
+                ..
+            }
+        ),
+        "{err}"
+    );
+    assert_eq!(
+        err.to_string(),
+        "A: a flush at tick 500 comes before the end of the block its promise closed, at 1000"
+    );
+    w.flush(1000).unwrap();
+    let file = w.take_output();
+    let (_, ending) = events(&file, file.len());
+    assert_eq!(
+        ending,
+        Ending::CutOff {
+            at: file.len() as u64
+        }
+    );
+    let r = repair(&file, 3).unwrap();
+    assert_eq!(r.header.length, 1000);
+}
+
 #[test]
 fn every_cut_reads_up_to_its_last_whole_record() {
     let (file, _, _) = written(&session(), usize::MAX);
@@ -1051,6 +1097,127 @@ fn verify_takes_the_gap_and_run_records_the_header_leaves_out() {
         err,
         "channel 0: the footer's gaps or runs differs from what was read"
     );
+}
+
+/// FORMAT.md, "Gap and run records": a gap that reaches its channel's end is left out of the
+/// header only where its `to` maps at or past the length. The in-order reader refuses a gap
+/// record left out whose `to` maps inside it, as `drop_gaps_past_end` writes one.
+#[test]
+fn a_gap_left_out_ends_at_or_past_the_length() {
+    let written = |length: i64| {
+        let mut w = Writer::new(declaration(), options()).unwrap();
+        w.gap(
+            0,
+            Gap {
+                from: 10,
+                to: 20,
+                level: true,
+            },
+        )
+        .unwrap();
+        w.flush(15).unwrap();
+        let mut file = w.take_output();
+        let f = w
+            .finish(
+                length,
+                &[18],
+                Finish {
+                    drop_gaps_past_end: true,
+                    ..Finish::default()
+                },
+            )
+            .unwrap();
+        file.extend(f.tail);
+        let ChannelKind::Digital { end, gaps, .. } = &f.header.channels[0].data else {
+            unreachable!()
+        };
+        assert_eq!((*end, gaps.len()), (10, 0));
+        file
+    };
+    let in_order = |file: &[u8]| {
+        let mut r = Reader::default();
+        r.feed(file);
+        while r.next_event()?.is_some() {}
+        r.end()
+    };
+    assert_eq!(in_order(&written(20)).unwrap(), Ending::Complete);
+    assert_eq!(
+        in_order(&written(60)).unwrap_err().to_string(),
+        "channel 0: the gap from 10 to 20 reaches past the end, 10, and ends inside the length, 60"
+    );
+}
+
+/// A file cut off after a gap record whose loss began before its latest known-through tick, and
+/// an annotation after it. Where the annotation sets a length past the gap's `to`, repair ends the
+/// channel at the gap's `from` and doesn't write the gap record again, so its copy reads in order,
+/// the gap list in pages included; where the length stops at or before the `to`, it writes the
+/// record again. Recut finishes the cut file as repair does.
+#[test]
+fn repair_writes_a_gap_left_out_again_only_where_it_ends_at_or_past_the_length() {
+    use escapement_tickwave_format::recut::Recutter;
+    let cut = |mark: i64| {
+        let mut w = Writer::new(declaration(), options()).unwrap();
+        // Seventy gaps listed: more than a header holds, so the list goes in pages.
+        for i in 0..70 {
+            w.gap(
+                0,
+                Gap {
+                    from: 10 * i + 1,
+                    to: 10 * i + 2,
+                    level: false,
+                },
+            )
+            .unwrap();
+        }
+        w.flush(1000).unwrap();
+        w.gap(
+            0,
+            Gap {
+                from: 990,
+                to: 1100,
+                level: true,
+            },
+        )
+        .unwrap();
+        let serde_json::Value::Object(m) = serde_json::json!({"id": "m", "start": mark}) else {
+            unreachable!()
+        };
+        w.annotation("g", m).unwrap();
+        w.take_output()
+    };
+    for (mark, length, again) in [(1200, 1201, false), (1050, 1051, true)] {
+        let file = cut(mark);
+        let r = repair(&file, 3).unwrap();
+        let mut fixed = file[..r.keep as usize].to_vec();
+        fixed.extend_from_slice(&r.tail);
+        let ChannelKind::Digital { end, gap_count, .. } = &r.header.channels[0].data else {
+            unreachable!()
+        };
+        assert_eq!((r.header.length, *end, *gap_count), (length, 990, Some(70)));
+        let mut recut = Recutter::new(options());
+        recut.feed(&file).unwrap();
+        let mut copy = recut.take_output();
+        let finished = recut.finish().unwrap();
+        copy.extend(finished.tail);
+        assert_eq!(
+            finished.header.content_id, r.header.content_id,
+            "mark at {mark}"
+        );
+        for (what, bytes) in [("repaired", &fixed), ("recut", &copy)] {
+            let mut reader = Reader::default();
+            reader.feed(bytes);
+            let mut gaps = 0;
+            while let Some(e) = reader.next_event().unwrap() {
+                gaps += u32::from(matches!(e, Event::Gap { .. }));
+            }
+            assert_eq!(
+                reader.end().unwrap(),
+                Ending::Complete,
+                "{what}, mark at {mark}"
+            );
+            assert_eq!(gaps, 70 + u32::from(again), "{what}, mark at {mark}");
+        }
+    }
 }
 
 /// A generator's name names its file, `<stem>.<source>.jsonl` beside the recording, which repair

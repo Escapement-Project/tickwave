@@ -484,28 +484,6 @@ impl Recutter {
                 {
                     return Err(RecutError::Shaped(c.name.clone()));
                 }
-                // The records held back after the cut go, but for a gap record whose `from`
-                // maps before the latest known-through tick: a loss the recorder had begun to
-                // report ends its channel there, as repair has it.
-                let held = self.hold.take().map(Hold::dropped).unwrap_or_default();
-                if let Some(k) = self.known_through {
-                    for (_, event) in held {
-                        if let Event::Gap { channel, gap } = event
-                            && writer
-                                .declaration()
-                                .mapping(channel)
-                                .and_then(|m| m.axis(gap.from))
-                                .is_some_and(|t| t < k)
-                        {
-                            self.gaps[channel].push_back(gap);
-                        }
-                    }
-                }
-                for (c, gaps) in self.gaps.iter_mut().enumerate() {
-                    for g in gaps.drain(..) {
-                        writer.gap(c, g)?;
-                    }
-                }
                 // FORMAT.md's repair step 1. With none of the three the length below comes to 0,
                 // which refuses the file too.
                 if !self.blocks && self.known_through.is_none() && !self.annotations {
@@ -520,17 +498,45 @@ impl Recutter {
                 if length < 1 {
                     return Err(RecutError::Nothing);
                 }
+                // The records held back after the cut go, but for a gap record whose `from`
+                // maps before the latest known-through tick: a loss the recorder had begun to
+                // report ends its channel there, as repair has it. Its `to` maps past that tick,
+                // so the header leaves it out, and its record goes again only where that `to`
+                // maps at or past the length.
+                let mut cut = vec![i64::MAX; d.channels.len()];
+                let held = self.hold.take().map(Hold::dropped).unwrap_or_default();
+                if let Some(k) = self.known_through {
+                    for (_, event) in held {
+                        let Event::Gap { channel, gap } = event else {
+                            continue;
+                        };
+                        let axis = |tick| d.mapping(channel).and_then(|m| m.axis(tick));
+                        if axis(gap.from).is_some_and(|t| t < k) {
+                            if axis(gap.to).is_some_and(|t| t < length) {
+                                cut[channel] = cut[channel].min(gap.from);
+                            } else {
+                                self.gaps[channel].push_back(gap);
+                            }
+                        }
+                    }
+                }
+                for (c, gaps) in self.gaps.iter_mut().enumerate() {
+                    for g in gaps.drain(..) {
+                        writer.gap(c, g)?;
+                    }
+                }
                 // Each digital channel's end as repair has it.
                 let ends: Vec<i64> = (0..d.channels.len())
                     .filter(|&c| d.channels[c].coding().is_none())
                     .map(|c| {
                         let map = d.mapping(c).unwrap_or(mapping::Mapping::IDENTITY);
                         let start = d.start(c).unwrap_or(0);
-                        match self.known_through {
+                        let known = match self.known_through {
                             Some(k) => map.first_at(k).max(start),
                             None if self.known[c] == 0 => start,
                             None => map.first_at(self.known[c]).max(start),
-                        }
+                        };
+                        known.min(cut[c])
                     })
                     .collect();
                 let finish = Finish {

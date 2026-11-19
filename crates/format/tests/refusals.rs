@@ -600,6 +600,18 @@ fn a_channel_never_known_keeps_its_declared_initial_level() {
             n.data
         );
         escapement_tickwave_format::verify::verify(&file[..], never(initial).0).unwrap();
+        // FORMAT.md, "Header": such a channel has no edges, which the header's check holds it to.
+        let err = Footer::parse_file(&patched(
+            &file,
+            r#""end":0,"edges":0"#,
+            r#""end":0,"edges":3"#,
+        ))
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            err,
+            "channel N ends at its start, so it holds no edge, but states 3"
+        );
     }
 }
 

@@ -128,7 +128,8 @@ pub fn inflate_limited(frame: &[u8], len: usize, max: usize) -> Result<Vec<u8>, 
 }
 
 /// The annotation bundle record's files: a u32 decoded length, then one zstd frame of a JSON
-/// object of strings.
+/// object of strings. A generator's file that holds more than its first line, or whose first line
+/// names a key twice, is refused.
 pub fn parse_bundle(
     payload: &[u8],
     inflate: impl Fn(&[u8], usize) -> Result<Vec<u8>, DecodeError>,
@@ -137,7 +138,26 @@ pub fn parse_bundle(
         .split_first_chunk::<4>()
         .ok_or_else(|| corrupt("the annotation bundle is too short for its length"))?;
     let raw = inflate(frame, u32::from_le_bytes(*len) as usize)?;
-    Ok(serde_json::from_slice(&raw)?)
+    let files: BTreeMap<String, String> =
+        serde_json::from_slice(&raw).map_err(|e| corrupt(format!("the annotation bundle: {e}")))?;
+    // A generator's file holds its first line alone: its lines are in its parts.
+    for (name, text) in &files {
+        if crate::parts::head_source(text).is_none() {
+            continue;
+        }
+        let (first, rest) = text.split_once('\n').unwrap_or((text, ""));
+        if !rest.is_empty() {
+            return Err(corrupt(format!(
+                "the annotation bundle's {name:?} holds more than its generator's first line"
+            )));
+        }
+        if let Ok(Some(key)) = crate::parts::line_object(first) {
+            return Err(corrupt(format!(
+                "the annotation bundle's {name:?}: its first line names key {key:?} twice"
+            )));
+        }
+    }
+    Ok(files)
 }
 
 #[derive(Debug, PartialEq)]
@@ -775,6 +795,11 @@ pub(crate) fn check_header(h: &Header) -> Result<(), DecodeError> {
                 }
                 if *end < start || !maps_up_to(&map, *end, length) {
                     return Err(corrupt(format!("channel {name} ends outside the capture")));
+                }
+                if *end == start && *edges > 0 {
+                    return Err(corrupt(format!(
+                        "channel {name} ends at its start, so it holds no edge, but states {edges}"
+                    )));
                 }
                 if !safe(*edges) {
                     return Err(corrupt(format!("channel {name}'s edge count is past 2^53")));

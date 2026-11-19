@@ -149,6 +149,15 @@ pub enum WriteError {
     },
     #[error("a flush at tick {before} comes before the latest promise or flush, at {last}")]
     Flush { before: i64, last: i64 },
+    #[error(
+        "{channel}: a flush at tick {before} comes before the end of the block its promise closed, \
+         at {end}"
+    )]
+    FlushBehindBlock {
+        channel: String,
+        before: i64,
+        end: i64,
+    },
     #[error("a block of {0} items or bytes, more than its index word or length holds")]
     BlockTooLarge(usize),
     #[error(
@@ -809,6 +818,16 @@ impl Bundling {
                 ))
             }
             Some(Bundle::Files(mut files)) => {
+                for (name, text) in &files {
+                    let first = text.lines().next().unwrap_or_default();
+                    if crate::parts::head_source(text).is_some()
+                        && let Ok(Some(key)) = crate::parts::line_object(first)
+                    {
+                        return Err(WriteError::Bundle(format!(
+                            "{name:?}: its first line names key {key:?} twice"
+                        )));
+                    }
+                }
                 let mut parts = Vec::new();
                 for name in included_generators(&files) {
                     let text = files.get_mut(&name).expect("an included file");
@@ -1996,6 +2015,17 @@ impl Writer {
             return Err(WriteError::Flush {
                 before,
                 last: self.promise,
+            });
+        }
+        // Its known-through record says every block before it ends by its tick (FORMAT.md,
+        // "Known-through records"), and a channel's own promise can have closed one past it.
+        if let Some(c) = (0..self.chans.len()).max_by_key(|&c| self.chans[c].start)
+            && self.chans[c].start > before
+        {
+            return Err(WriteError::FlushBehindBlock {
+                channel: self.name(c),
+                before,
+                end: self.chans[c].start,
             });
         }
         self.promise(before)?;

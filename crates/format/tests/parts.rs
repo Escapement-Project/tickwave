@@ -265,6 +265,14 @@ fn a_record_or_part_that_is_not_lines_of_json_objects_is_refused() {
             "its line holds a newline before its end",
         ),
         (named("[1]\n"), "its line is not a JSON object"),
+        (
+            named("{\"id\":\"a\",\"start\":1,\"id\":\"b\"}\n"),
+            "its line names key \"id\" twice",
+        ),
+        (
+            named("{\"start\":1,\"measure\":{\"what\":\"a\",\"what\":\"b\"}}\n"),
+            "its line names key \"what\" twice",
+        ),
         (vec![9, 0, b'g'], "too short for its generator's name"),
     ] {
         assert_eq!(
@@ -278,6 +286,10 @@ fn a_record_or_part_that_is_not_lines_of_json_objects_is_refused() {
         ("{\"id\":\"x\"}\n", "line 1: no start"),
         ("{\"start\":\"1 parsec\"}\n", "line 1: start: "),
         ("not json\n", "line 1: not a JSON object"),
+        (
+            "{\"start\":1}\n{\"id\":\"a\",\"start\":2,\"id\":\"b\"}\n",
+            "line 2: names key \"id\" twice",
+        ),
     ] {
         let err = refused(part_record("gen", lines));
         assert!(
@@ -309,8 +321,9 @@ fn span_from_values(line: &str, timebase: Ratio) -> Result<(i64, i64), String> {
 }
 
 /// A part's row states its lines' span, so a reader reads each line's start and end as a JSON
-/// object of any values would hold them: the last of a key's, every value parsed whole, and why a
-/// time is refused in `Time`'s words.
+/// object of any values would hold them: every value parsed whole, and why a time is refused in
+/// `Time`'s words. A key named twice in any object of the line is refused, where such an object
+/// would take the last.
 #[test]
 fn a_lines_span_reads_as_a_map_of_json_values_would() {
     let deep = format!(
@@ -332,8 +345,6 @@ fn a_lines_span_reads_as_a_map_of_json_values_would() {
         r#"{"start":18446744073709551615}"#,
         r#"{"start":1e3}"#,
         r#"{"start":1,"end":null}"#,
-        r#"{"start":"bad","start":3}"#,
-        r#"{"start":3,"start":"bad"}"#,
         r#"{"start":4}"#,
         r#"{"start":1,"x":1e999}"#,
         r#"{"start":1,"x":[1e999]}"#,
@@ -364,8 +375,20 @@ fn a_lines_span_reads_as_a_map_of_json_values_would() {
             "{line}"
         );
     }
-    // Not vacuous: six lines read, and the refusals worded twelve ways.
-    assert_eq!((read, why.len()), (6, 12), "{why:#?}");
+    // Not vacuous: five lines read, and the refusals worded eleven ways.
+    assert_eq!((read, why.len()), (5, 11), "{why:#?}");
+    for (line, key) in [
+        (r#"{"start":"bad","start":3}"#, "start"),
+        (r#"{"start":3,"start":"bad"}"#, "start"),
+        (r#"{"start":1,"x":{"y":1,"y":2}}"#, "y"),
+        (r#"{"start":1,"x":[{"y":1},{"y":2,"y":3}]}"#, "y"),
+    ] {
+        assert_eq!(
+            escapement_tickwave_format::parts::line_span(line, timebase),
+            Err(format!("names key {key:?} twice")),
+            "{line}"
+        );
+    }
 }
 
 /// FORMAT.md, "tickwave's writer": a generator's part goes out once its lines since its last part
@@ -788,6 +811,183 @@ fn a_recording_has_at_most_256_generators() {
     );
 }
 
+/// FORMAT.md, "Annotations": a part covers each annotation record, and a reader with random
+/// access finds annotations through the parts alone. A reader in order refuses a footer after
+/// a record no part covers: here one inserted before the bundle, the footer's place for the
+/// bundle and the trailer moved with it.
+#[test]
+fn a_record_no_part_covers_is_refused_at_the_footer() {
+    let mut w = Writer::new(declaration(), options()).unwrap();
+    w.annotation("a", mark("a/1", 1, None)).unwrap();
+    let file = finished(w, 10);
+    read_in_order(&file).unwrap();
+    let (bundle_at, _, _) = records(&file)
+        .into_iter()
+        .find(|(_, kind, _)| *kind == Kind::Bundle as u8)
+        .unwrap();
+    let at = bundle_at as usize;
+    let extra = annotation_record("a", r#"{"id":"a/2","start":2}"#);
+    let footer = Footer::parse_file(&file).unwrap();
+    let footer_at = footer.trailer.footer_offset as usize;
+    let mut payload = file[footer_at + 5..file.len() - 24 - 8].to_vec();
+    let header_len = u32::from_le_bytes(payload[..4].try_into().unwrap()) as usize;
+    let top = 8 + header_len;
+    let moved = u64::from_le_bytes(payload[top..top + 8].try_into().unwrap()) + extra.len() as u64;
+    payload[top..top + 8].copy_from_slice(&moved.to_le_bytes());
+    let mut uncovered = file[..at].to_vec();
+    uncovered.extend(&extra);
+    uncovered.extend(&file[at..footer_at]);
+    record::write_footer(&mut uncovered, 0, &payload);
+    // At random the file reads, without the record.
+    Footer::parse_file(&uncovered).unwrap();
+    assert_eq!(
+        read_in_order(&uncovered).unwrap_err().to_string(),
+        "generator \"a\": no part covers its annotation records after its last part"
+    );
+}
+
+/// FORMAT.md, "Annotations": the part that covers an annotation record states its span in a row,
+/// so the in-order reader refuses a record a row couldn't hold: no start, a time that is no tick
+/// in 0 to 2^53 as parts convert it, or an end before its start. Repair then meets none before
+/// its cut, and one after its cut stops repair as any record the reader refuses does.
+#[test]
+fn an_annotation_record_a_parts_row_cant_hold_is_refused() {
+    let read = |line: &str| {
+        let mut f = opening();
+        f.extend(annotation_record("gen", line));
+        read_in_order(&f).map(|(_, ending)| ending)
+    };
+    assert!(matches!(
+        read(r#"{"id":"x","start":"0.5 us","end":3}"#),
+        Ok(Ending::CutOff { .. })
+    ));
+    for (line, want) in [
+        (r#"{"id":"x"}"#, "no start"),
+        (r#"{"id":"x","start":"1 parsec"}"#, "start: "),
+        (
+            r#"{"id":"x","start":-5}"#,
+            "ticks -5 to -5 lie outside 0 to 2^53, or end before they start",
+        ),
+        (
+            r#"{"id":"x","start":9007199254740992}"#,
+            "ticks 9007199254740992 to 9007199254740992 lie outside 0 to 2^53",
+        ),
+        (
+            r#"{"id":"x","start":5,"end":3}"#,
+            "ticks 5 to 3 lie outside 0 to 2^53, or end before they start",
+        ),
+    ] {
+        let err = read(line).unwrap_err().to_string();
+        assert!(
+            err.starts_with(&format!(
+                "an annotation record of generator \"gen\", which a part can't hold: {want}"
+            )),
+            "{line}: {err}"
+        );
+    }
+    // Before and after a cut at a known-through record.
+    let mut w = Writer::new(declaration(), options()).unwrap();
+    w.edge(0, 5).unwrap();
+    w.flush(50).unwrap();
+    let flushed = w.take_output();
+    let bad = annotation_record("gen", r#"{"id":"x"}"#);
+    let before = [&opening()[..], &bad, &flushed[opening().len()..]].concat();
+    let after = [&flushed[..], &bad].concat();
+    for (what, cut) in [("before", before), ("after", after)] {
+        let mut r = Repairer::new(3);
+        let err = r.feed(&cut).unwrap_err().to_string();
+        assert!(
+            err.contains(
+                "an annotation record of generator \"gen\", which a part can't hold: no start"
+            ),
+            "{what}: {err}"
+        );
+    }
+}
+
+/// FORMAT.md, "Annotations": the bundle holds a generator's file's first line alone, its lines
+/// being in its parts, and that line names each key once, as the header does. A reader refuses a
+/// bundle otherwise, in order and at random: here the bundle record replaced, the footer's place
+/// for it and the trailer moved with it.
+#[test]
+fn a_bundled_generator_file_is_its_first_line_alone_naming_each_key_once() {
+    let mut w = Writer::new(declaration(), options()).unwrap();
+    w.annotation("a", mark("a/1", 1, None)).unwrap();
+    let file = finished(w, 10);
+    let footer = Footer::parse_file(&file).unwrap();
+    let files = footer.read_bundle(from_memory(&file)).unwrap().unwrap();
+    let head = files["rec.a.jsonl"].clone();
+    assert!(head.ends_with('\n') && head.lines().count() == 1, "{head}");
+    let (bundle_at, _) = footer.bundle.unwrap();
+    let with = |name: &str, text: String| {
+        let mut files = files.clone();
+        files.insert(name.into(), text);
+        let raw = serde_json::to_vec(&files).unwrap();
+        let mut bundle = Vec::new();
+        record::write(
+            &mut bundle,
+            Kind::Bundle,
+            &[
+                &(raw.len() as u32).to_le_bytes(),
+                &compress(&raw, 3).unwrap(),
+            ],
+        );
+        let footer_at = footer.trailer.footer_offset as usize;
+        let mut payload = file[footer_at + 5..file.len() - 24 - 8].to_vec();
+        let header_len = u32::from_le_bytes(payload[..4].try_into().unwrap()) as usize;
+        let top = 8 + header_len;
+        payload[top + 8..top + 12].copy_from_slice(&(bundle.len() as u32).to_le_bytes());
+        let mut out = file[..bundle_at as usize].to_vec();
+        out.extend(&bundle);
+        record::write_footer(&mut out, 0, &payload);
+        out
+    };
+    let refused = |bytes: &[u8]| {
+        let random = Footer::parse_file(bytes)
+            .unwrap()
+            .read_sidecar(from_memory(bytes))
+            .unwrap_err()
+            .to_string();
+        let in_order = read_in_order(bytes).unwrap_err().to_string();
+        assert_eq!(random, in_order);
+        in_order
+    };
+    let same = with("rec.a.jsonl", head.clone());
+    read_in_order(&same).unwrap();
+    Footer::parse_file(&same)
+        .unwrap()
+        .read_sidecar(from_memory(&same))
+        .unwrap();
+    assert_eq!(
+        refused(&with(
+            "rec.a.jsonl",
+            format!("{head}{{\"id\":\"a/2\",\"start\":2}}\n")
+        )),
+        "the annotation bundle's \"rec.a.jsonl\" holds more than its generator's first line"
+    );
+    let twice = head.replacen('}', ",\"source\":\"a\"}", 1);
+    assert_eq!(
+        refused(&with("rec.a.jsonl", twice.clone())),
+        "the annotation bundle's \"rec.a.jsonl\": its first line names key \"source\" twice"
+    );
+    // The writer refuses to bundle such a first line.
+    let mut given = files.clone();
+    given.insert("rec.a.jsonl".into(), twice);
+    let w = Writer::new(declaration(), options()).unwrap();
+    let finish = Finish {
+        bundle: Some(Bundle::Files(given)),
+        ..Finish::default()
+    };
+    match w.finish(10, &[10], finish) {
+        Err(WriteError::Bundle(e)) => assert_eq!(
+            e,
+            "\"rec.a.jsonl\": its first line names key \"source\" twice"
+        ),
+        Err(e) => panic!("{e}"),
+        Ok(_) => panic!("bundled"),
+    }
+}
+
 fn repaired(cut: &[u8]) -> Vec<u8> {
     let mut r = Repairer::new(3);
     r.bundle(Bundle::Generated { stem: "rec".into() });
@@ -957,11 +1157,12 @@ fn testdata(name: &str) -> Vec<u8> {
     std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
-/// The repair crashes the fuzzer found (testdata/repair/README.md): two repair now and read back,
-/// in pieces as the target fed them and whole; the third is refused at its known-through record.
+/// The repair crashes the fuzzer found (testdata/repair/README.md): one repairs now and reads
+/// back, in pieces as the target fed them and whole; one is refused at its bundle, and one at its
+/// known-through record.
 #[test]
 fn the_repair_crash_files_repair_and_read_back_or_are_refused() {
-    for name in ["kept-last-pages.tickwave", "bundle-before-the-cut.tickwave"] {
+    for name in ["kept-last-pages.tickwave"] {
         let file = testdata(name);
         for piece in [7, file.len()] {
             let mut r = Repairer::new(1);
@@ -977,6 +1178,14 @@ fn the_repair_crash_files_repair_and_read_back_or_are_refused() {
             assert_eq!(ending, Ending::Complete);
         }
     }
+    // Its bundle decodes to a JSON object, then the bytes of a footer: a reader in order refuses
+    // the bundle, as one at random does.
+    let file = testdata("bundle-before-the-cut.tickwave");
+    let err = Repairer::new(1).feed(&file).unwrap_err().to_string();
+    assert!(
+        err.starts_with("the annotation bundle: trailing characters"),
+        "{err}"
+    );
     let file = testdata("known-through-before-a-block-end.tickwave");
     let mut r = Repairer::new(1);
     assert_eq!(

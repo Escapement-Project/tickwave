@@ -1400,10 +1400,14 @@ impl FromStr for ContentId {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, String> {
+        // One spelling: `from_hex` takes upper case too.
         s.strip_prefix("blake3:")
+            .filter(|hex| hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
             .and_then(|hex| blake3::Hash::from_hex(hex).ok())
             .map(Self)
-            .ok_or_else(|| format!("{s:?} is not a content id: blake3: and 64 hex digits"))
+            .ok_or_else(|| {
+                format!("{s:?} is not a content id: blake3: and 64 lower-case hex digits")
+            })
     }
 }
 
@@ -1565,6 +1569,7 @@ mod tests {
             hex.clone(),
             format!("sha256:{hex}"),
             format!("blake3:{}", "zz".repeat(32)),
+            format!("blake3:{}", "0F".repeat(32)),
         ] {
             assert!(bad.parse::<ContentId>().is_err(), "{bad}");
         }

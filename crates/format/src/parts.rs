@@ -124,6 +124,9 @@ pub fn placed_span(line: &str, timebase: Ratio) -> Result<(i64, i64), String> {
 /// One generator line's start and end in ticks, a point's end at its start.
 pub fn line_span(line: &str, timebase: Ratio) -> Result<(i64, i64), String> {
     let fields: SpanFields = serde_json::from_str(line).map_err(|_| "not a JSON object")?;
+    if let Some(key) = fields.twice {
+        return Err(format!("names key {key:?} twice"));
+    }
     let time = |key: &str, field: Option<Result<Time, String>>| {
         field
             .map(|t| {
@@ -144,6 +147,8 @@ pub fn line_span(line: &str, timebase: Ratio) -> Result<(i64, i64), String> {
 struct SpanFields {
     start: Option<Result<Time, String>>,
     end: Option<Result<Time, String>>,
+    /// The first key an object in the line names twice.
+    twice: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for SpanFields {
@@ -156,13 +161,20 @@ impl<'de> Deserialize<'de> for SpanFields {
             }
             fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<SpanFields, A::Error> {
                 let mut out = SpanFields::default();
+                let mut keys = BTreeSet::new();
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "start" => out.start = Some(map.next_value::<TimeField>()?.0),
                         "end" => out.end = Some(map.next_value::<TimeField>()?.0),
                         _ => {
-                            map.next_value::<AnyValue>()?;
+                            let AnyValue(inner) = map.next_value()?;
+                            out.twice = out.twice.or(inner);
                         }
+                    }
+                    if keys.contains(&key) {
+                        out.twice.get_or_insert(key);
+                    } else {
+                        keys.insert(key);
                     }
                 }
                 Ok(out)
@@ -227,47 +239,75 @@ impl<'de> Deserialize<'de> for TimeField {
     }
 }
 
-/// Any JSON value, parsed whole and dropped. Not `IgnoredAny`: serde_json skips that without
-/// checking a number's range, where a `serde_json::Value` refuses one past an f64's.
-struct AnyValue;
+/// Any JSON value, parsed whole and dropped, and the first key an object in it names twice,
+/// which a `serde_json::Value` would take the last of. Not `IgnoredAny`: serde_json skips that
+/// without checking a number's range, where a `serde_json::Value` refuses one past an f64's.
+struct AnyValue(Option<String>);
+
+/// `AnyValue`'s visitor.
+struct Any;
+
+impl<'de> de::Visitor<'de> for Any {
+    type Value = AnyValue;
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a JSON value")
+    }
+    fn visit_bool<E>(self, _: bool) -> Result<AnyValue, E> {
+        Ok(AnyValue(None))
+    }
+    fn visit_i64<E>(self, _: i64) -> Result<AnyValue, E> {
+        Ok(AnyValue(None))
+    }
+    fn visit_u64<E>(self, _: u64) -> Result<AnyValue, E> {
+        Ok(AnyValue(None))
+    }
+    fn visit_f64<E>(self, _: f64) -> Result<AnyValue, E> {
+        Ok(AnyValue(None))
+    }
+    fn visit_str<E>(self, _: &str) -> Result<AnyValue, E> {
+        Ok(AnyValue(None))
+    }
+    fn visit_unit<E>(self) -> Result<AnyValue, E> {
+        Ok(AnyValue(None))
+    }
+    fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<AnyValue, A::Error> {
+        let mut twice = None;
+        while let Some(AnyValue(inner)) = seq.next_element()? {
+            twice = twice.or(inner);
+        }
+        Ok(AnyValue(twice))
+    }
+    fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<AnyValue, A::Error> {
+        let mut keys = BTreeSet::new();
+        let mut twice = None;
+        while let Some((key, AnyValue(inner))) = map.next_entry::<String, AnyValue>()? {
+            if keys.contains(&key) {
+                twice.get_or_insert(key);
+            } else {
+                keys.insert(key);
+            }
+            twice = twice.or(inner);
+        }
+        Ok(AnyValue(twice))
+    }
+}
 
 impl<'de> Deserialize<'de> for AnyValue {
     fn deserialize<D: de::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct Any;
-        impl<'de> de::Visitor<'de> for Any {
-            type Value = AnyValue;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("a JSON value")
-            }
-            fn visit_bool<E>(self, _: bool) -> Result<AnyValue, E> {
-                Ok(AnyValue)
-            }
-            fn visit_i64<E>(self, _: i64) -> Result<AnyValue, E> {
-                Ok(AnyValue)
-            }
-            fn visit_u64<E>(self, _: u64) -> Result<AnyValue, E> {
-                Ok(AnyValue)
-            }
-            fn visit_f64<E>(self, _: f64) -> Result<AnyValue, E> {
-                Ok(AnyValue)
-            }
-            fn visit_str<E>(self, _: &str) -> Result<AnyValue, E> {
-                Ok(AnyValue)
-            }
-            fn visit_unit<E>(self) -> Result<AnyValue, E> {
-                Ok(AnyValue)
-            }
-            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<AnyValue, A::Error> {
-                while seq.next_element::<AnyValue>()?.is_some() {}
-                Ok(AnyValue)
-            }
-            fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<AnyValue, A::Error> {
-                while map.next_entry::<String, AnyValue>()?.is_some() {}
-                Ok(AnyValue)
-            }
-        }
         d.deserialize_any(Any)
     }
+}
+
+/// An annotation line, which is one JSON object: Err where it is none, and the first key an
+/// object in it names twice, which a reader refuses as it refuses one in the header.
+pub(crate) fn line_object(line: &str) -> Result<Option<String>, serde_json::Error> {
+    struct Object(AnyValue);
+    impl<'de> Deserialize<'de> for Object {
+        fn deserialize<D: de::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            d.deserialize_map(Any).map(Object)
+        }
+    }
+    serde_json::from_str::<Object>(line).map(|Object(AnyValue(twice))| twice)
 }
 
 /// The sidecar's files whole, as `Footer::read_sidecar` joins them, and what it left out.

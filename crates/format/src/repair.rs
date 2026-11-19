@@ -980,6 +980,17 @@ impl Repairer {
         }
         let records = !generators.is_empty();
         let bundling = Bundling::of(self.bundle.take(), &generators, records, d.timebase)?;
+        // Each digital channel is known to the source tick at the latest known-through tick, or,
+        // with none, at its own last block's end, or its start with no block.
+        let known_to: Vec<i64> = state
+            .chans
+            .iter()
+            .map(|ch| match (state.known, ch.blocks_count) {
+                (Some(k), _) => ch.map.first_at(k).max(ch.start),
+                (None, 0) => ch.start,
+                (None, _) => ch.map.first_at(ch.next_start).max(ch.start),
+            })
+            .collect();
         let mut tail = Vec::new();
         // What the content settled and the file lacks, as a writer's queue would hold it.
         state.write_expected(&mut tail, keep)?;
@@ -1001,21 +1012,17 @@ impl Repairer {
                     self.parts.finish_due(&mut tail, keep);
                 }
                 Again::Gap(c, gap) => {
-                    record::write(&mut tail, Kind::Gap, &[&record::gap_bytes(c as u32, gap)]);
+                    // A gap that reaches the channel's end ends it at its `from` either way, and
+                    // its record stays only where its `to` maps at or past the length (FORMAT.md,
+                    // "Gap and run records").
+                    let inside = gap.to >= known_to[c]
+                        && state.chans[c].map.axis(gap.to).is_some_and(|t| t < length);
+                    if !inside {
+                        record::write(&mut tail, Kind::Gap, &[&record::gap_bytes(c as u32, gap)]);
+                    }
                 }
             }
         }
-        // Each digital channel is known to the source tick at the latest known-through tick, or,
-        // with none, at its own last block's end, or its start with no block.
-        let known_to: Vec<i64> = state
-            .chans
-            .iter()
-            .map(|ch| match (state.known, ch.blocks_count) {
-                (Some(k), _) => ch.map.first_at(k).max(ch.start),
-                (None, 0) => ch.start,
-                (None, _) => ch.map.first_at(ch.next_start).max(ch.start),
-            })
-            .collect();
         // The gaps each channel's end keeps: those that end before it.
         let kept_gaps: Vec<usize> = state
             .chans
