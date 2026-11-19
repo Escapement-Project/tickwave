@@ -1650,6 +1650,11 @@ fn carried(
                     unread += 1;
                     continue;
                 };
+                // A parse into a map keeps the last of a key named twice.
+                if annotations::key_named_twice(line).is_some() {
+                    broken += 1;
+                    continue;
+                }
                 // In i128: a time far past the merged recording's end is left out below, not
                 // wrapped round into it.
                 let mapped = |key: &str, a: &serde_json::Map<String, serde_json::Value>| {

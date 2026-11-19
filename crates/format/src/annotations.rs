@@ -145,7 +145,23 @@ fn hand_json(hand: &str) -> serde_json::Result<HandFile> {
 
 /// A generator file's first line, as `hand_toml` reads the hand-written file.
 fn head_json(first: &str) -> serde_json::Result<GeneratorHead> {
+    once(first)?;
     known_json(first, &HEAD_KEYS)
+}
+
+/// Refuses a line of a generator's file in which an object names a key twice, whatever the
+/// version, `values` included (FORMAT.md, "Annotations"): a parse into a map keeps the last.
+fn once(line: &str) -> serde_json::Result<()> {
+    match key_named_twice(line) {
+        Some(key) => Err(serde::de::Error::custom(format!("names key {key:?} twice"))),
+        None => Ok(()),
+    }
+}
+
+/// The first key an object in `line` names twice; None for none, or for a line that isn't JSON,
+/// whose parse says so.
+pub fn key_named_twice(line: &str) -> Option<String> {
+    crate::parts::line_object(line).ok().flatten()
 }
 
 fn known_json<T: serde::de::DeserializeOwned>(text: &str, keys: &[&str]) -> serde_json::Result<T> {
@@ -498,7 +514,7 @@ impl Lines {
 
     /// As `take`, for a line as its file's text gives it.
     pub fn take_line(&mut self, source: &str, line: &str) -> Result<Carried, String> {
-        match serde_json::from_str(line) {
+        match once(line).and_then(|()| serde_json::from_str(line)) {
             Ok(fields) => self.take(source, &fields),
             Err(e) => Err(format!("annotation with no id: {e}")),
         }
@@ -512,7 +528,7 @@ impl Lines {
         line: &str,
         timebase: Ratio,
     ) -> Result<Carried, String> {
-        match serde_json::from_str(line) {
+        match once(line).and_then(|()| serde_json::from_str(line)) {
             Ok(fields) => self.check(source, &fields, Some(timebase), self.carry),
             Err(e) => Err(format!("annotation with no id: {e}")),
         }
@@ -960,6 +976,7 @@ pub fn resolve_line(
 /// One annotation's fields from its JSON text: of a file of a later minor version, `later`, with
 /// what `known_entry` leaves out left out first, and named in `left`.
 fn entry(line: &str, later: bool, left: &mut BTreeSet<String>) -> serde_json::Result<Entry> {
+    once(line)?;
     if later {
         let mut fields: Map = json(line)?;
         known_entry(&mut fields, left);

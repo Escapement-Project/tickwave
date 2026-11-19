@@ -565,7 +565,7 @@ pub fn verify_limited(
                     }
                 }
             }
-            Event::UnreadBlock(_) => {
+            Event::UnreadBlock(_) | Event::UnreadOverviewBlock(_) => {
                 return Err(mismatch("a block of a channel this version can't read"));
             }
             Event::OverviewBlock { head, frame, .. } => {

@@ -1049,7 +1049,7 @@ impl TryFrom<RawChannel> for ChannelHeader {
                 };
                 (data, raw.shaping()?)
             }
-            RawKind::Other(kind) => (ChannelKind::Other { kind }, Shaping::default()),
+            RawKind::Other(kind) => (ChannelKind::Other { kind }, raw.shaping()?),
         };
         let codec = match data {
             ChannelKind::Other { .. } => None,
@@ -1092,7 +1092,7 @@ impl TryFrom<RawChannel> for DeclaredChannel {
                 },
                 raw.shaping()?,
             ),
-            RawKind::Other(kind) => (DeclaredKind::Other { kind }, Shaping::default()),
+            RawKind::Other(kind) => (DeclaredKind::Other { kind }, raw.shaping()?),
         };
         let codec = match data {
             DeclaredKind::Other { .. } => None,

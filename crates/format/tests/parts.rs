@@ -239,8 +239,9 @@ fn a_part_with_no_record_of_its_generator_before_it_stands_alone() {
 }
 
 /// FORMAT.md, "Annotations": a reader refuses a record whose line holds a newline before its
-/// end, has none at its end, or is not a JSON object, and a part whose lines aren't whole lines
-/// of JSON objects with a start, since its row couldn't state their span.
+/// end, has none at its end, or is not a JSON object, or whose times aren't JSON integers, and a
+/// part whose lines aren't whole lines of JSON objects with a start, since its row couldn't state
+/// their span, or that holds a line ending before it starts, as a record may not.
 #[test]
 fn a_record_or_part_that_is_not_lines_of_json_objects_is_refused() {
     let refused = |record: Vec<u8>| {
@@ -290,6 +291,10 @@ fn a_record_or_part_that_is_not_lines_of_json_objects_is_refused() {
             "{\"start\":1}\n{\"id\":\"a\",\"start\":2,\"id\":\"b\"}\n",
             "line 2: names key \"id\" twice",
         ),
+        (
+            "{\"start\":1}\n{\"id\":\"a\",\"start\":5,\"end\":4}\n",
+            "line 2: ends at 4, before it starts at 5",
+        ),
     ] {
         let err = refused(part_record("gen", lines));
         assert!(
@@ -297,6 +302,47 @@ fn a_record_or_part_that_is_not_lines_of_json_objects_is_refused() {
             "{lines:?}: {err}"
         );
     }
+    // A record's times are axis ticks, as tickwave's writer writes them; a part's may be decimals
+    // with a unit.
+    for start in ["\"1 ms\"", "\"0.5 ns\""] {
+        let line = format!("{{\"id\":\"a\",\"start\":{start}}}");
+        assert_eq!(
+            refused(annotation_record("gen", &line)),
+            "an annotation record of generator \"gen\": start: not a whole tick count: a \
+             record's times are axis ticks"
+        );
+        let mut f = opening();
+        f.extend(part_record("gen", &format!("{line}\n")));
+        read_in_order(&f).unwrap();
+    }
+    let line = "{\"id\":\"a\",\"start\":1,\"end\":\"1 ms\"}";
+    assert!(
+        refused(annotation_record("gen", line))
+            .ends_with("end: not a whole tick count: a record's times are axis ticks")
+    );
+    // At random, a part is held to what it is in order.
+    let mut w = Writer::new(declaration(), options()).unwrap();
+    let mut file = w.take_output();
+    file.extend(w.finish(10, &[10], Finish::default()).unwrap().tail);
+    let footer = Footer::parse_file(&file).unwrap();
+    let part = Part {
+        source: "gen".into(),
+        lines: "{\"id\":\"a\",\"start\":5,\"end\":4}\n".into(),
+    };
+    let raw = part.to_raw();
+    let frame = compress(&raw, 3).unwrap();
+    let row = PartRow {
+        offset: 0,
+        length: frame.len() as u32,
+        decoded_length: raw.len() as u32,
+        start: 4,
+        end: 5,
+    };
+    let err = footer.decode_part(&row, &frame).unwrap_err().to_string();
+    assert!(
+        err.ends_with("line 1: ends at 4, before it starts at 5"),
+        "{err}"
+    );
 }
 
 /// `line_span` as it read a line before it stopped building `serde_json::Value`s: the line as a
@@ -848,8 +894,10 @@ fn a_record_no_part_covers_is_refused_at_the_footer() {
 
 /// FORMAT.md, "Annotations": the part that covers an annotation record states its span in a row,
 /// so the in-order reader refuses a record a row couldn't hold: no start, a time that is no tick
-/// in 0 to 2^53 as parts convert it, or an end before its start. Repair then meets none before
-/// its cut, and one after its cut stops repair as any record the reader refuses does.
+/// in 0 to 2^53 as parts convert it, or an end before its start. A record's times are JSON
+/// integers, axis ticks, so it refuses one with a unit too, which a part may hold. Repair then
+/// meets none before its cut, and one after its cut stops repair as any record the reader
+/// refuses does.
 #[test]
 fn an_annotation_record_a_parts_row_cant_hold_is_refused() {
     let read = |line: &str| {
@@ -858,9 +906,16 @@ fn an_annotation_record_a_parts_row_cant_hold_is_refused() {
         read_in_order(&f).map(|(_, ending)| ending)
     };
     assert!(matches!(
-        read(r#"{"id":"x","start":"0.5 us","end":3}"#),
+        read(r#"{"id":"x","start":1,"end":3}"#),
         Ok(Ending::CutOff { .. })
     ));
+    assert_eq!(
+        read(r#"{"id":"x","start":"0.5 us","end":3}"#)
+            .unwrap_err()
+            .to_string(),
+        "an annotation record of generator \"gen\": start: not a whole tick count: a record's \
+         times are axis ticks"
+    );
     for (line, want) in [
         (r#"{"id":"x"}"#, "no start"),
         (r#"{"id":"x","start":"1 parsec"}"#, "start: "),
@@ -919,10 +974,7 @@ fn a_bundled_generator_file_is_its_first_line_alone_naming_each_key_once() {
     let head = files["rec.a.jsonl"].clone();
     assert!(head.ends_with('\n') && head.lines().count() == 1, "{head}");
     let (bundle_at, _) = footer.bundle.unwrap();
-    let with = |name: &str, text: String| {
-        let mut files = files.clone();
-        files.insert(name.into(), text);
-        let raw = serde_json::to_vec(&files).unwrap();
+    let with_raw = |raw: Vec<u8>| {
         let mut bundle = Vec::new();
         record::write(
             &mut bundle,
@@ -941,6 +993,11 @@ fn a_bundled_generator_file_is_its_first_line_alone_naming_each_key_once() {
         out.extend(&bundle);
         record::write_footer(&mut out, 0, &payload);
         out
+    };
+    let with = |name: &str, text: String| {
+        let mut files = files.clone();
+        files.insert(name.into(), text);
+        with_raw(serde_json::to_vec(&files).unwrap())
     };
     let refused = |bytes: &[u8]| {
         let random = Footer::parse_file(bytes)
@@ -973,6 +1030,17 @@ fn a_bundled_generator_file_is_its_first_line_alone_naming_each_key_once() {
     assert_eq!(
         refused(&with("rec.a.jsonl", twice.clone())),
         "the annotation bundle's \"rec.a.jsonl\": its first line names key \"source\" twice"
+    );
+    // The bundle's object names each file once: a second of a name is not taken over the first.
+    let raw = serde_json::to_string(&files).unwrap();
+    let again = format!(
+        "{{\"rec.a.jsonl\":{},{}",
+        serde_json::to_string(&head).unwrap(),
+        &raw[1..]
+    );
+    assert_eq!(
+        refused(&with_raw(again.into_bytes())),
+        "the annotation bundle names file \"rec.a.jsonl\" twice"
     );
     // The writer refuses to bundle such a first line.
     let mut given = files.clone();

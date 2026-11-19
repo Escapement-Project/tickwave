@@ -456,7 +456,7 @@ fn a_header_integer_past_2_pow_53_is_refused() {
 
 /// FORMAT.md, "Header": the header and the declaration name each key once in every object, a map
 /// of free keys such as `meta` included, as an annotation line does. A reader refuses either
-/// otherwise, whichever key it is.
+/// otherwise, whichever key it is, and either holding JSON it can't parse whole.
 #[test]
 fn a_key_named_twice_anywhere_in_the_header_or_the_declaration_is_refused() {
     use escapement_tickwave_format::header::PREAMBLE_LEN;
@@ -515,6 +515,31 @@ fn a_key_named_twice_anywhere_in_the_header_or_the_declaration_is_refused() {
     let mut r = Reader::default();
     r.feed(&file);
     assert!(matches!(r.next_event(), Ok(Some(Event::Declaration(_)))));
+    // A number past an f64's range, in a key no reader knows, which the typed parse skips: the
+    // scan for repeated keys can't read the JSON whole, so neither is refused for less.
+    let (from, to) = (
+        r#""meta":{"probe":"x"}"#,
+        r#""zz":1e400,"meta":{"probe":"x"}"#,
+    );
+    let edited = common::with_header_text(&file, |h| h.replacen(from, to, 1));
+    let err = Footer::parse_file(&edited).unwrap_err().to_string();
+    assert!(
+        err.starts_with("the footer's header doesn't parse whole: number out of range"),
+        "{err}"
+    );
+    let mut edited = file[..at].to_vec();
+    record::write(
+        &mut edited,
+        Kind::Declaration,
+        &[json.replacen(from, to, 1).as_bytes()],
+    );
+    let mut r = Reader::default();
+    r.feed(&edited);
+    let err = r.next_event().unwrap_err().to_string();
+    assert!(
+        err.starts_with("the declaration doesn't parse whole: number out of range"),
+        "{err}"
+    );
 }
 
 /// `significant` parses as an integer of any size a u64 holds, and a channel states at most 17,

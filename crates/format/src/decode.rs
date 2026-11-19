@@ -128,8 +128,8 @@ pub fn inflate_limited(frame: &[u8], len: usize, max: usize) -> Result<Vec<u8>, 
 }
 
 /// The annotation bundle record's files: a u32 decoded length, then one zstd frame of a JSON
-/// object of strings. A generator's file that is not its first line and its newline, or whose
-/// first line names a key twice, is refused.
+/// object of strings. One naming a file twice is refused, and so is a generator's file that is
+/// not its first line and its newline, or whose first line names a key twice.
 pub fn parse_bundle(
     payload: &[u8],
     inflate: impl Fn(&[u8], usize) -> Result<Vec<u8>, DecodeError>,
@@ -140,6 +140,11 @@ pub fn parse_bundle(
     let raw = inflate(frame, u32::from_le_bytes(*len) as usize)?;
     let files: BTreeMap<String, String> =
         serde_json::from_slice(&raw).map_err(|e| corrupt(format!("the annotation bundle: {e}")))?;
+    if let Ok(Some(name)) = crate::parts::key_twice(&raw) {
+        return Err(corrupt(format!(
+            "the annotation bundle names file {name:?} twice"
+        )));
+    }
     // A generator's file holds its first line alone, with its newline: its lines are in its
     // parts.
     for (name, text) in &files {
@@ -1357,12 +1362,18 @@ impl Footer {
             )));
         }
         let json = &payload[record::FOOTER_HEAD_LEN..header_end];
-        if let Some(key) = crate::parts::key_twice(json) {
+        let scan = crate::parts::key_twice(json);
+        if let Ok(Some(key)) = &scan {
             return Err(corrupt(format!(
                 "the footer's header names key {key:?} twice"
             )));
         }
         let header: Header = serde_json::from_slice(json)?;
+        if let Err(e) = scan {
+            return Err(corrupt(format!(
+                "the footer's header doesn't parse whole: {e}"
+            )));
+        }
         check_header(&header)?;
         let declaration = header.declaration();
         let columns = overview::columns(&declaration.channels, &declaration.derived);
@@ -1428,7 +1439,7 @@ impl Footer {
             let ladder = overview::ladder(header.length, finest);
             let strip_shift = *ladder.last().expect("a ladder has a strip");
             let available = header.available(o);
-            // An unavailable channel's strip has a layout this version can't know.
+            // An unavailable channel's strip has a layout and limits this version can't know.
             let want = column.decoded_len(overview::buckets(header.length, strip_shift));
             if available && u64::from(decoded) != want {
                 return Err(corrupt(format!(
@@ -1436,8 +1447,10 @@ impl Footer {
                     overview::buckets(header.length, strip_shift)
                 )));
             }
-            if decoded as usize > record::MAX_STRIP
-                || frame_len as usize > compress_bound(decoded as usize)
+            // An unavailable channel's is held to the footer's own bounds alone, below.
+            if available
+                && (decoded as usize > record::MAX_STRIP
+                    || frame_len as usize > compress_bound(decoded as usize))
             {
                 return Err(corrupt(format!(
                     "channel {o}'s strip is {frame_len} bytes for {decoded}, past the format's \

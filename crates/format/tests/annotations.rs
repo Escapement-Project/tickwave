@@ -869,6 +869,46 @@ fn a_measure_on_a_channel_of_a_kind_this_version_doesnt_know_is_not_refused() {
     );
 }
 
+/// FORMAT.md, "Annotations": an object in a generator's line, or in its file's first line, names
+/// each key once, `values` included, whatever the file's minor version. A parse into a map would
+/// keep the last, so every reader refuses such a line.
+#[test]
+fn a_key_named_twice_in_a_generators_line_is_refused_whatever_the_version() {
+    let line = r#"{"id": "misread/412000", "kind": "misread", "start": 412000, "end": 412900, "channels": ["SWDIO"], "label": "parity wrong", "values": {"read_data": "24.9 MHz", "asked": "25 MHz"}}"#;
+    assert!(GENERATED.contains(line));
+    for minor in ["", ".1"] {
+        let generated = GENERATED.replacen(
+            "tickwave-annotations/1\"",
+            &format!("tickwave-annotations/1{minor}\""),
+            1,
+        );
+        for (twice, key) in [
+            (r#""label": "parity wrong""#, "label"),
+            (r#""asked": "25 MHz""#, "asked"),
+        ] {
+            let bad = generated.replacen(twice, &format!("{twice}, {twice}"), 1);
+            assert_ne!(bad, generated);
+            assert_problem(
+                &problems(HAND, &bad),
+                &format!("rec.wire_swd.jsonl, line 2: names key \"{key}\" twice"),
+            );
+            let read = bad.lines().nth(1).unwrap();
+            let err = resolve_line("wire_swd", read, &header(), !minor.is_empty()).unwrap_err();
+            assert_eq!(err, [format!("names key \"{key}\" twice")], "{minor}");
+        }
+        // Its first line.
+        let bad = generated.replacen(
+            r#""source": "wire_swd""#,
+            r#""source": "wire_swd", "source": "x""#,
+            1,
+        );
+        assert_problem(
+            &problems(HAND, &bad),
+            "rec.wire_swd.jsonl, line 1: names key \"source\" twice",
+        );
+    }
+}
+
 /// A key this reader doesn't know, in a file of a version it knows, is still a mistake.
 #[test]
 fn an_unknown_key_at_this_minor_version_is_refused() {

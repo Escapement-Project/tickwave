@@ -493,6 +493,14 @@ fn a_kind_this_version_doesnt_know_makes_a_channel_unavailable() {
             .iter()
             .any(|e| matches!(e, Event::Block(b) if b.head.channel == 2))
     );
+    // Its pages are held to their layout: a row that places its block elsewhere is refused in
+    // order. What only its kind gives, the items each page's entry counts, isn't held.
+    let moved = common::rows_edited(&edited, 2, |rows| rows[0].offset += 1);
+    let refused = read_in_order(&moved).unwrap_err().to_string();
+    assert_eq!(
+        refused,
+        "a page of channel 2's blocks differs from the one the records before it give"
+    );
     // A bundle would write the footer again with only what every kind has: it refuses.
     let refused = escapement_tickwave_format::bundle::bundle(&edited, &footer, BTreeMap::new(), 3)
         .unwrap_err()
@@ -512,6 +520,228 @@ fn a_kind_this_version_doesnt_know_makes_a_channel_unavailable() {
     assert!(
         refused.contains("integer `7`, expected a string"),
         "{refused}"
+    );
+}
+
+/// FORMAT.md, "Unavailable channels": a channel's `offset`, `offset_kind` and `kept` are what every
+/// channel's entry has, whatever its kind. In a recording whose channels state kept spans, one of
+/// a kind this version doesn't know still states its own, so the rules for kept spans hold and
+/// the recording reads with the channel unavailable; its shaping is held to them as any
+/// channel's is.
+#[test]
+fn a_kind_this_version_doesnt_know_keeps_its_span_as_every_channel_does() {
+    let mut d = declaration(vec![digital("A", false), digital("B", false)], vec![]);
+    d.title = Some("x".repeat(100));
+    for ch in &mut d.channels {
+        ch.shaping.kept = Some(Kept { from: 0, to: 100 });
+    }
+    let mut w = Writer::new(d, options()).unwrap();
+    w.edge(0, 20).unwrap();
+    w.edge(1, 30).unwrap();
+    let file = finished(w, 100, 2);
+    let kind = |c: &mut serde_json::Value| c["kind"] = "bus_abc".into();
+    let edited = common::with_declaration(&file, |d| kind(&mut d["channels"][1]));
+    let edited = common::with_header_text(&edited, |text| {
+        let mut h: serde_json::Value = serde_json::from_str(text).unwrap();
+        kind(&mut h["channels"][1]);
+        h.to_string()
+    });
+    let footer = Footer::parse_file(&edited).unwrap();
+    assert_eq!((footer.available(0), footer.available(1)), (true, false));
+    assert_eq!(
+        footer.header.channels[1].shaping.kept,
+        Some(Kept { from: 0, to: 100 })
+    );
+    Index::of_file(&edited).unwrap();
+    let (_, ending) = read_in_order(&edited).unwrap();
+    assert_eq!(ending, Ending::Complete);
+    // Its shaping is held to what every channel's is.
+    for (edit, problem) in [
+        (
+            r#""kept":"garbage""#,
+            "channel B's `kept`: invalid type: string \"garbage\"",
+        ),
+        (
+            r#""kept":[0,100],"offset":5"#,
+            "channel B states an offset without an offset_kind",
+        ),
+    ] {
+        let bad = common::with_header_text(&edited, |text| {
+            let at = text.rfind(r#""kept":[0,100]"#).unwrap();
+            format!(
+                "{}{edit}{}",
+                &text[..at],
+                &text[at + r#""kept":[0,100]"#.len()..]
+            )
+        });
+        let refused = Footer::parse_file(&bad).unwrap_err().to_string();
+        assert!(refused.contains(problem), "{refused}");
+    }
+}
+
+/// FORMAT.md, "Unavailable channels": a later version can raise a limit for its own channels, so
+/// a reader in order takes a block record of a channel it can't read, and an overview block
+/// record of an overview channel it can't read, at any length a record holds. It reads the
+/// channel from the payload's head, then hashes the rest as it comes, holding none of it, and
+/// places the block. A record of a channel it reads past its kind's length stops it, as before.
+#[test]
+fn a_record_of_an_unavailable_channel_is_taken_at_any_length_in_order() {
+    let declaration = br#"{"timebase":[1000,1],"channels":[{"name":"A","source_name":"a","source":0,"kind":"digital","initial":false},{"name":"B","source_name":"b","source":0,"kind":"digital","initial":false,"requires":["x"]}],"sources":[{"format":"t","files":[],"timebase":[1000,1],"origin":0}],"overview_shift":4}"#;
+    let empty = compress(&[], 3).unwrap();
+    let block = |channel: u32, frame: &[u8], len: usize| {
+        let head = BlockHead {
+            channel,
+            start: 0,
+            end: 50,
+            word: 0,
+            decoded_length: 0,
+        };
+        let mut payload = head.to_bytes().to_vec();
+        payload.extend_from_slice(frame);
+        payload.resize(len.max(payload.len()), 0x5a);
+        let mut out = Vec::new();
+        record::write(&mut out, Kind::Block, &[&payload]);
+        out
+    };
+    let overview_block = |channel: u32, len: usize| {
+        let head = record::OverviewHead {
+            channel,
+            shift: 4,
+            k: 0,
+            n: 1,
+        };
+        let mut payload = head.to_bytes().to_vec();
+        payload.extend_from_slice(&compress(&[0; 64], 3).unwrap());
+        payload.resize(len, 0x5a);
+        let mut out = Vec::new();
+        record::write(&mut out, Kind::OverviewBlock, &[&payload]);
+        out
+    };
+    let block_past = BlockHead::LEN + record::compress_bound(record::MAX_BLOCK) + 1;
+    let overview_past =
+        record::OverviewHead::LEN + record::compress_bound(record::MAX_OVERVIEW_BLOCK) + 1;
+    let file = |records: &[Vec<u8>]| {
+        let mut out = escapement_tickwave_format::header::Preamble::CURRENT
+            .to_bytes()
+            .to_vec();
+        record::write(&mut out, Kind::Declaration, &[declaration]);
+        let first = out.len();
+        for r in records {
+            out.extend_from_slice(r);
+        }
+        let mut known = Vec::new();
+        record::write(&mut known, Kind::KnownThrough, &[&50i64.to_le_bytes()]);
+        out.extend(known);
+        (out, first as u64)
+    };
+    let (taken, _) = file(&[
+        block(1, &[], block_past),
+        overview_block(1, overview_past),
+        block(0, &empty, 0),
+    ]);
+    let mut r = Reader::default();
+    r.feed(&taken);
+    let mut seen = Vec::new();
+    while let Some(e) = r.next_event().unwrap() {
+        seen.push(match e {
+            Event::UnreadBlock(h) => format!("unread block {}", h.channel),
+            Event::UnreadOverviewBlock(h) => format!("unread overview block {}", h.channel),
+            Event::Block(b) => format!("block {}", b.head.channel),
+            Event::KnownThrough { tick } => format!("known through {tick}"),
+            _ => continue,
+        });
+    }
+    assert_eq!(
+        seen,
+        [
+            "unread block 1",
+            "unread overview block 1",
+            "block 0",
+            "known through 50"
+        ]
+    );
+    assert_eq!(
+        r.end().unwrap(),
+        Ending::CutOff {
+            at: taken.len() as u64
+        }
+    );
+    // A's, which this version reads, past its kind's length: the reader stops there.
+    let (stopped, at) = file(&[block(0, &empty, block_past)]);
+    let mut r = Reader::default();
+    r.feed(&stopped);
+    while r.next_event().unwrap().is_some() {}
+    assert_eq!(r.end().unwrap(), Ending::CutOff { at });
+}
+
+/// FORMAT.md, "Unavailable channels": a reader at random holds an unavailable channel's strip to
+/// the footer's own bounds alone, since a later version can lay out wider buckets: a strip of more
+/// than a strip of this version decodes to reads, and is never decoded.
+#[test]
+fn an_unavailable_channels_strip_is_held_to_the_footers_bounds_alone() {
+    let mut w = Writer::new(
+        declaration(vec![digital("A", false), digital("B", false)], vec![]),
+        options(),
+    )
+    .unwrap();
+    w.edge(0, 2).unwrap();
+    w.edge(1, 3).unwrap();
+    let file = finished(w, 8, 2);
+    let footer = Footer::parse_file(&file).unwrap();
+    // The footer's payload: its lengths, the header, the top index, then the strips. Here the top
+    // index is the bundle's place, then each channel's strip lengths and its one-page blocks
+    // table.
+    let at = footer.trailer.footer_offset as usize;
+    let payload = &file[at + 5..file.len() - 24 - 8];
+    let header_len = u32::from_le_bytes(payload[..4].try_into().unwrap()) as usize;
+    let index_len = u32::from_le_bytes(payload[4..8].try_into().unwrap()) as usize;
+    let top = 8 + header_len;
+    let entry = |c: usize| top + 12 + c * (8 + 2 + 28);
+    let lengths = |p: &[u8], c: usize| {
+        let e = entry(c);
+        (
+            u32::from_le_bytes(p[e..e + 4].try_into().unwrap()) as usize,
+            u32::from_le_bytes(p[e + 4..e + 8].try_into().unwrap()),
+        )
+    };
+    for (c, ch) in footer.channels.iter().enumerate() {
+        assert_eq!(lengths(payload, c), ch.strip_size());
+    }
+    let with_strip = |decoded: usize, frame: &[u8]| {
+        let mut p = payload[..top + index_len].to_vec();
+        let e = entry(1);
+        p[e..e + 4].copy_from_slice(&(frame.len() as u32).to_le_bytes());
+        p[e + 4..e + 8].copy_from_slice(&(decoded as u32).to_le_bytes());
+        p.extend_from_slice(&payload[top + index_len..][..lengths(payload, 0).0]);
+        p.extend_from_slice(frame);
+        let header = String::from_utf8(p[8..8 + header_len].to_vec()).unwrap();
+        let mut out = file[..at].to_vec();
+        record::write_footer(&mut out, 0, &p);
+        common::with_header_text(&out, |_| {
+            header.replacen(r#""name":"B","#, r#""name":"B","requires":["x"],"#, 1)
+        })
+    };
+    let wide = record::MAX_STRIP + 1;
+    let frame = compress(&vec![0; wide], 3).unwrap();
+    let read = Footer::parse_file(&with_strip(wide, &frame)).unwrap();
+    assert!(read.available(0) && !read.available(1));
+    assert_eq!(read.channels[1].strip_size(), (frame.len(), wide as u32));
+    read.strip(0).unwrap();
+    assert!(
+        read.strip(1)
+            .unwrap_err()
+            .to_string()
+            .contains("unavailable")
+    );
+    // B's, were it readable, would be held to its layout and its limits.
+    let refused = Footer::parse_file(&common::with_header_text(&with_strip(wide, &frame), |h| {
+        h.replacen(r#""requires":["x"],"#, "", 1)
+    }))
+    .unwrap_err()
+    .to_string();
+    assert_eq!(
+        refused,
+        "channel 1's strip decodes to 32769 bytes, where its 1 buckets take 2"
     );
 }
 

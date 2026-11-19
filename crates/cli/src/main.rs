@@ -1617,6 +1617,17 @@ fn repair_file(file: &Path, output: &Path, level: i32) -> Result<()> {
              so it isn't repaired: make it again from its sources",
             file.display()
         ),
+        Err(RepairError::Damaged { at }) => {
+            let random = match read_footer(file) {
+                Ok(_) => "It reads at random, as `tickwave info` and the viewer read it",
+                Err(_) => "It doesn't read at random either",
+            };
+            bail!(
+                "{} is finished, its footer and trailer whole, but its records stop at byte {at}: \
+                 it is damaged, not cut off, so it isn't repaired. {random}",
+                file.display()
+            )
+        }
         Err(e) if let Some(why) = recut_instead(&e) => {
             // Repair keeps the bytes before the cut; a re-cut writes them again without the
             // record.

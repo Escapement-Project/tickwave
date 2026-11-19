@@ -13,7 +13,7 @@ use crate::mapping;
 use crate::model::{Break, Gap};
 use crate::reader::{Ending, Event, ReadBlock, Reader};
 use crate::record::Rewrite;
-use crate::repair::{HOLD, Hold, latest_start, repaired_length};
+use crate::repair::{HOLD, Hold, Tail, latest_start, repaired_length};
 use crate::writer::{Bundle, Finish, Finished, WriteError, WriteOptions, Writer};
 
 #[derive(Debug, thiserror::Error)]
@@ -44,6 +44,11 @@ pub enum RecutError {
     HeldBack(usize),
     #[error("the input's items give content id {got}, but its footer says {stated}")]
     ContentId { stated: ContentId, got: ContentId },
+    #[error(
+        "the input is finished, its footer and trailer whole, but its records stop at byte {at}: \
+         it is damaged, not cut off"
+    )]
+    Damaged { at: u64 },
     #[error(transparent)]
     Rewrite(#[from] Rewrite),
 }
@@ -113,6 +118,8 @@ pub struct Recutter {
     /// What the lines carried held that this version doesn't know, by generator.
     carried: BTreeMap<String, Carried>,
     bundle: Option<Bundle>,
+    /// Whether the input ends as a finished one does.
+    tail: Tail,
 }
 
 impl Recutter {
@@ -138,6 +145,7 @@ impl Recutter {
             left_out: Vec::new(),
             carried: BTreeMap::new(),
             bundle: None,
+            tail: Tail::default(),
         }
     }
 
@@ -197,6 +205,7 @@ impl Recutter {
 
     /// The input's next bytes, from its start.
     pub fn feed(&mut self, bytes: &[u8]) -> Result<(), RecutError> {
+        self.tail.feed(bytes);
         self.reader.feed(bytes);
         while let Some(event) = self.reader.next_event()? {
             let at = self.reader.record_at();
@@ -286,7 +295,7 @@ impl Recutter {
             Event::Gap { channel, gap } => self.gaps[channel].push_back(gap),
             Event::Run { channel, run } => self.runs[channel].push_back(run),
             Event::Block(block) => self.block(block)?,
-            Event::UnreadBlock(_) => {
+            Event::UnreadBlock(_) | Event::UnreadOverviewBlock(_) => {
                 return Err(crate::decode::corrupt(
                     "a block of a channel this version can't read, so it can't write again",
                 )
@@ -448,6 +457,12 @@ impl Recutter {
     /// finishes as repair would finish it.
     pub fn finish(mut self) -> Result<Finished, RecutError> {
         let ending = self.reader.end()?;
+        // Finishing a file whose records stop before its whole footer would drop what follows.
+        if let Ending::CutOff { at } = &ending
+            && self.tail.finished()
+        {
+            return Err(RecutError::Damaged { at: *at });
+        }
         let mut writer = self.writer.take().ok_or(RecutError::NoDeclaration)?;
         let sidecar = self.sidecar.take().map(Bundle::Files);
         match (ending, self.footer) {

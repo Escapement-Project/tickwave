@@ -55,6 +55,11 @@ impl Entry {
             length: u32::from_le_bytes(bytes[24..28].try_into().unwrap()),
         }
     }
+
+    /// Whether `other` lists the same page from the same place: alike but for `number`.
+    pub fn same_page(&self, other: &Self) -> bool {
+        (self.first, self.offset, self.length) == (other.first, other.offset, other.length)
+    }
 }
 
 /// Which table a page belongs to: its code in a page's head, and an overview level's shift.

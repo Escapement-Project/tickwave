@@ -2456,6 +2456,41 @@ fn a_bundled_line_breaking_a_rule_is_left_out_of_a_merge() {
     );
 }
 
+/// A line of a sidecar beside an input whose object names a key twice, `values` included: a parse
+/// into a map would keep the last, so the merge leaves the line out and says so.
+#[test]
+fn a_line_naming_a_key_twice_is_left_out_of_a_merge() {
+    use serde_json::json;
+    let bytes = file(analyser());
+    let id = Footer::parse_file(&bytes).unwrap().header.content_id;
+    let sidecar = sidecar_of(
+        id,
+        &[json!({"id": "a/100", "start": 100})],
+        &[r#"{"id": "twice", "start": 10, "values": {"n": "1", "n": "2"}}"#],
+        None,
+    );
+    let (out, merged) = run(
+        &[
+            (bytes, "analyser", Some(sidecar)),
+            (file(probe()), "probe", None),
+        ],
+        &settings(vec![]),
+    )
+    .unwrap();
+    let h = Footer::parse_file(&out).unwrap().header;
+    let ids: Vec<String> = resolved_in(&out, &h).into_iter().map(|r| r.0).collect();
+    assert_eq!(ids, ["dec/a/100"]);
+    let notes: Vec<String> = merged.notes.iter().map(|n| n.to_string()).collect();
+    assert!(
+        notes.contains(
+            &"input 1 (analyser): 1 generated annotation left out: they break a rule \
+              ANNOTATIONS.md gives a generator's line"
+                .to_owned()
+        ),
+        "{notes:?}"
+    );
+}
+
 /// ANNOTATIONS.md, "Versions" and "Merging": a generator's file of a later minor version comes
 /// over whole. Its first line keeps its format, its `version` and the keys this version doesn't
 /// know, with the merge's `source` and `recording_id`; its lines keep a key or a `measure` this

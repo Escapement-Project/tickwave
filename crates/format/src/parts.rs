@@ -97,12 +97,19 @@ impl Part {
 
     /// The span its annotations cover, as its row states it: the earliest start and the latest
     /// end, a point ending where it starts. Each line's times are ticks, or decimals with a unit
-    /// at `timebase`. Err where a line is not a JSON object with a start.
+    /// at `timebase`. Err where a line is not a JSON object with a start, or ends before it
+    /// starts, as an annotation record may not.
     pub fn span(&self, timebase: Ratio) -> Result<(i64, i64), String> {
         let mut span: Option<(i64, i64)> = None;
         for (n, line) in self.lines().enumerate() {
             let (start, end) =
                 line_span(line, timebase).map_err(|e| format!("line {}: {e}", n + 1))?;
+            if end < start {
+                return Err(format!(
+                    "line {}: ends at {end}, before it starts at {start}",
+                    n + 1
+                ));
+            }
             span = Some(span.map_or((start, end), |(s, e)| (s.min(start), e.max(end))));
         }
         span.ok_or_else(|| "it holds no line".into())
@@ -121,8 +128,20 @@ pub fn placed_span(line: &str, timebase: Ratio) -> Result<(i64, i64), String> {
     Ok((start, end))
 }
 
+/// An annotation record's line's start and end, as `line_span` gives a line's, where each is a
+/// JSON integer, axis ticks, as tickwave's writer writes a record's (FORMAT.md, "Annotations"). A
+/// time with a unit is a generator file's, not a record's.
+pub fn record_span(line: &str) -> Result<(i64, i64), String> {
+    span_of(line, None)
+}
+
 /// One generator line's start and end in ticks, a point's end at its start.
 pub fn line_span(line: &str, timebase: Ratio) -> Result<(i64, i64), String> {
+    span_of(line, Some(timebase))
+}
+
+/// `line_span`, with times in ticks alone where `timebase` is None.
+fn span_of(line: &str, timebase: Option<Ratio>) -> Result<(i64, i64), String> {
     let fields: SpanFields = serde_json::from_str(line).map_err(|_| "not a JSON object")?;
     if let Some(key) = fields.twice {
         return Err(format!("names key {key:?} twice"));
@@ -130,8 +149,16 @@ pub fn line_span(line: &str, timebase: Ratio) -> Result<(i64, i64), String> {
     let time = |key: &str, field: Option<Result<Time, String>>| {
         field
             .map(|t| {
-                t.and_then(|t| ticks(&t, timebase))
-                    .map_err(|e| format!("{key}: {e}"))
+                t.and_then(|t| match timebase {
+                    Some(timebase) => ticks(&t, timebase),
+                    None => match t {
+                        Time::Ticks(t) => Ok(t),
+                        Time::Text(_) => Err("not a whole tick count: a record's times are axis \
+                                              ticks"
+                            .to_owned()),
+                    },
+                })
+                .map_err(|e| format!("{key}: {e}"))
             })
             .transpose()
     };
@@ -313,12 +340,11 @@ pub(crate) fn line_object(line: &str) -> Result<Option<String>, serde_json::Erro
     serde_json::from_str::<Object>(line).map(|Object(AnyValue(twice))| twice)
 }
 
-/// The first key an object in `json` names twice, where `json` is a JSON object: a header or a
-/// declaration, whose parse reports any other fault.
-pub(crate) fn key_twice(json: &[u8]) -> Option<String> {
-    serde_json::from_slice::<Object>(json)
-        .ok()
-        .and_then(|Object(AnyValue(twice))| twice)
+/// The first key an object in `json` names twice, where `json` is a JSON object: a header, a
+/// declaration or a bundle's object of files. Err where it doesn't parse whole, a number past an
+/// f64's range included, which the typed parse of an unknown key would skip.
+pub(crate) fn key_twice(json: &[u8]) -> Result<Option<String>, serde_json::Error> {
+    serde_json::from_slice::<Object>(json).map(|Object(AnyValue(twice))| twice)
 }
 
 /// The sidecar's files whole, as `Footer::read_sidecar` joins them, and what it left out.

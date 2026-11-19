@@ -40,6 +40,9 @@ pub enum Event {
     /// A block of a channel this version can't read (FORMAT.md, "Unavailable channels"): placed
     /// in its channel's order, not decoded.
     UnreadBlock(BlockHead),
+    /// An overview block of an overview channel this version can't read, in a record longer than
+    /// an overview block of this version: placed in its level's order, its frame not held.
+    UnreadOverviewBlock(OverviewHead),
     Gap {
         channel: usize,
         gap: Gap,
@@ -106,6 +109,9 @@ enum Phase {
         left: u64,
         check: Vec<u8>,
         start: u64,
+        /// For a block or overview block record of a channel this version can't read, longer
+        /// than its kind's records of this version: the payload's head, which places it.
+        head: Option<Vec<u8>>,
     },
     /// The footer was read; the trailer follows. The footer record started at `footer_at`.
     Trailer {
@@ -129,9 +135,9 @@ struct Follow<R: Row> {
     /// Its last pages have begun: no entry comes after.
     finishing: bool,
     /// The table of a channel of a kind this version doesn't know, whose entries it can't weigh:
-    /// its entries are counted, and its pages taken as they come (FORMAT.md, "Unavailable
-    /// channels").
-    unchecked: bool,
+    /// its pages are held to their layout, and only what a page's entry in a directory or the top
+    /// index counts goes unchecked (FORMAT.md, "Unavailable channels").
+    unweighed: bool,
 }
 
 impl<R: Row> Follow<R> {
@@ -142,14 +148,14 @@ impl<R: Row> Follow<R> {
             due: None,
             backlog: VecDeque::new(),
             finishing: false,
-            unchecked: false,
+            unweighed: false,
         }
     }
 
-    /// `new`, for a table this version follows no further than its entries' count.
-    fn unchecked(channel: u32, table: Table) -> Self {
+    /// `new`, for a table whose entries this version can't weigh.
+    fn unweighed(channel: u32, table: Table) -> Self {
         Self {
-            unchecked: true,
+            unweighed: true,
             ..Self::new(channel, table, false)
         }
     }
@@ -157,10 +163,6 @@ impl<R: Row> Follow<R> {
     /// The next entry, which waits behind a page due. Past what a page holds behind it, or after
     /// the last pages have begun, it is refused.
     fn push(&mut self, row: R) -> Result<(), DecodeError> {
-        if self.unchecked {
-            let _ = self.table.push(row);
-            return Ok(());
-        }
         if self.finishing || self.backlog.len() >= crate::index::PAGE {
             return Err(corrupt(format!(
                 "channel {}'s {}: an entry comes where a page is due",
@@ -192,9 +194,6 @@ impl<R: Row> Follow<R> {
     /// The page record `record`, at `at`, of this table: the one due, or the next of its last
     /// pages.
     fn page(&mut self, record: &[u8], at: u64, inline: u64) -> Result<(), DecodeError> {
-        if self.unchecked {
-            return Ok(());
-        }
         let due = match self.due.take() {
             Some(due) => due,
             None => {
@@ -206,7 +205,7 @@ impl<R: Row> Follow<R> {
                 due
             }
         };
-        if due.record != record {
+        if due.record != record && !(self.unweighed && same_but_counts(&due.record, record)) {
             return Err(corrupt(format!(
                 "a page of channel {}'s {} differs from the one the records before it give",
                 self.channel,
@@ -484,6 +483,7 @@ impl Reader {
                         mut left,
                         mut check,
                         start,
+                        head,
                     } = std::mem::replace(&mut self.phase, Phase::Stopped)
                     else {
                         unreachable!()
@@ -502,6 +502,7 @@ impl Reader {
                             left,
                             check,
                             start,
+                            head,
                         };
                         continue;
                     }
@@ -511,7 +512,11 @@ impl Reader {
                         return Ok(None);
                     }
                     self.phase = Phase::Records;
-                    return Ok(Some(Event::Skipped { kind }));
+                    let Some(head) = head else {
+                        return Ok(Some(Event::Skipped { kind }));
+                    };
+                    let n = self.position() - start - record::FRAMING as u64;
+                    return self.unread_record(kind, &head, n, start).map(Some);
                 }
                 Phase::Trailer { footer_at, .. } => {
                     if rest.len() < TRAILER_LEN {
@@ -569,6 +574,7 @@ impl Reader {
                                 left: n + record::CHECK_LEN as u64,
                                 check: Vec::new(),
                                 start,
+                                head: None,
                             };
                             continue;
                         }
@@ -578,6 +584,30 @@ impl Reader {
                                 self.position(),
                                 self.max
                             )));
+                        }
+                        // A block or overview block record of a channel this version can't
+                        // read, past its kind's length here: a later version's limit for its
+                        // channel. Hashed as it comes, its head held.
+                        Next::Oversized { kind, n } if self.unread_kind(kind, rest).is_some() => {
+                            let Some(Some(held)) = self.unread_kind(kind, rest) else {
+                                // Its head is still to come.
+                                return Ok(None);
+                            };
+                            let mut hasher = blake3::Hasher::new();
+                            hasher.update(&rest[..5]);
+                            let head = rest[5..5 + held].to_vec();
+                            let start = self.position();
+                            self.record_at = start;
+                            self.pos += 5;
+                            self.phase = Phase::Skipping {
+                                kind,
+                                hasher: Box::new(hasher),
+                                left: n + record::CHECK_LEN as u64,
+                                check: Vec::new(),
+                                start,
+                                head: Some(head),
+                            };
+                            continue;
                         }
                         // Not a whole record of its kind: the file is cut off where it starts.
                         Next::Oversized { .. } => {
@@ -657,10 +687,14 @@ impl Reader {
         };
         Ok(Some(match kind {
             Kind::Declaration => {
-                if let Some(key) = crate::parts::key_twice(payload) {
+                let scan = crate::parts::key_twice(payload);
+                if let Ok(Some(key)) = &scan {
                     return Err(corrupt(format!("the declaration names key {key:?} twice")));
                 }
                 let d: Declaration = serde_json::from_slice(payload)?;
+                if let Err(e) = scan {
+                    return Err(corrupt(format!("the declaration doesn't parse whole: {e}")));
+                }
                 check_declaration(&d)?;
                 let unmapped = || corrupt("a channel has no mapping to the axis");
                 let maps = d.mappings().ok_or_else(unmapped)?;
@@ -669,7 +703,7 @@ impl Reader {
                 for (c, (channel, map)) in d.channels.iter().zip(maps).enumerate() {
                     let digital = matches!(channel.data, DeclaredKind::Digital { .. });
                     blocks.push(match channel.data {
-                        DeclaredKind::Other { .. } => Follow::unchecked(c as u32, Table::Blocks),
+                        DeclaredKind::Other { .. } => Follow::unweighed(c as u32, Table::Blocks),
                         _ => Follow::new(c as u32, Table::Blocks, digital),
                     });
                     channels.push(match &channel.data {
@@ -832,39 +866,7 @@ impl Reader {
             Kind::OverviewBlock => {
                 let (head, frame) = OverviewHead::parse(payload)
                     .ok_or_else(|| corrupt("an overview block record's size"))?;
-                let o = head.channel as usize;
-                let levels = self
-                    .levels
-                    .get_mut(o)
-                    .ok_or_else(|| corrupt("an overview block names a channel past the last"))?;
-                let on_ladder = head.shift >= levels.finest
-                    && head.shift <= overview::MAX_SHIFT
-                    && (head.shift - levels.finest).is_multiple_of(overview::STEP);
-                let (k, follow) = levels
-                    .by_shift
-                    .entry(head.shift)
-                    .or_insert_with(|| (0, Follow::new(o as u32, Table::Level(head.shift), false)));
-                if !on_ladder || head.k != *k || head.n == 0 {
-                    return Err(corrupt(format!(
-                        "channel {o}: an overview block of level 2^{} at block {} is out of place",
-                        head.shift, head.k
-                    )));
-                }
-                *k += u64::from(head.n);
-                let frame_offset = record_at + (record::PAYLOAD_AT + OverviewHead::LEN) as u64;
-                // A level's last block may hold fewer buckets, which only the length says: the
-                // row takes the size the frame states, which the footer's rows are held to.
-                let decoded = zstd::zstd_safe::get_frame_content_size(frame)
-                    .ok()
-                    .flatten()
-                    .and_then(|n| u32::try_from(n).ok())
-                    .ok_or_else(|| corrupt("an overview block's frame does not state its size"))?;
-                follow.push(OverviewRow {
-                    offset: frame_offset,
-                    length: frame.len() as u32,
-                    decoded_length: decoded,
-                    n: head.n,
-                })?;
+                let frame_offset = self.overview_block(head, frame, frame.len(), record_at)?;
                 Event::OverviewBlock {
                     head,
                     frame_offset,
@@ -892,6 +894,12 @@ impl Reader {
                 placed_span(&a.line, timebase).map_err(|e| {
                     corrupt(format!(
                         "an annotation record of generator {:?}, which a part can't hold: {e}",
+                        a.source
+                    ))
+                })?;
+                crate::parts::record_span(&a.line).map_err(|e| {
+                    corrupt(format!(
+                        "an annotation record of generator {:?}: {e}",
                         a.source
                     ))
                 })?;
@@ -1061,11 +1069,16 @@ impl Reader {
                     g.from, g.to, h.length
                 )));
             }
-            if !self.blocks[c].unchecked {
-                let top = self.blocks[c].top(0)?;
-                if top != footer.channels[c].blocks.as_ref().map(top_of) {
-                    return Err(differs(c, "block index"));
+            let top = self.blocks[c].top(0)?;
+            let stated = footer.channels[c].blocks.as_ref().map(top_of);
+            let same = match (&top, &stated) {
+                (Some((d, a)), Some((e, b))) if self.blocks[c].unweighed => {
+                    d == e && a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.same_page(b))
                 }
+                _ => top == stated,
+            };
+            if !same {
+                return Err(differs(c, "block index"));
             }
             let fits = match (&mut self.channels[c], &ch.data) {
                 // A gap left out of the header reaches its channel's end, which is then at its
@@ -1161,39 +1174,9 @@ impl Reader {
     ) -> Result<Result<ReadBlock, BlockHead>, DecodeError> {
         let (head, frame) =
             BlockHead::parse(payload).ok_or_else(|| corrupt("a block record's size"))?;
-        let c = head.channel as usize;
-        if c >= self.channels.len() {
-            return Err(corrupt(format!("a block names channel {c}, past the last")));
-        }
-        if head.start != self.next_start[c] || head.end <= head.start {
-            return Err(corrupt(format!(
-                "channel {c}: a block from {} to {} is out of place",
-                head.start, head.end
-            )));
-        }
+        let c = self.block_place(&head)?;
         if !self.available[c] {
-            // Its layout is not this version's: the block is placed, and not decoded. Its word
-            // still counts an analog channel's samples, and its ticks end gaps.
-            match &mut self.channels[c] {
-                Channel::Digital { pending, list, .. } => {
-                    while let Some(&(g, _)) = pending.front().filter(|&&(_, t)| t < head.end) {
-                        pending.pop_front();
-                        list.push(g)?;
-                    }
-                }
-                Channel::Analog {
-                    next_index,
-                    runs,
-                    list,
-                    ..
-                } => {
-                    let from = *next_index;
-                    *next_index += u64::from(head.word);
-                    list_runs(runs, from, *next_index, list)?;
-                }
-                Channel::Other => {}
-            }
-            self.placed_block(head, frame, record_at)?;
+            self.unread_block(head, frame.len(), record_at)?;
             return Ok(Err(head));
         }
         let raw = inflate_limited(
@@ -1303,7 +1286,7 @@ impl Reader {
             }
             _ => unreachable!("sections follow the channels"),
         }
-        let frame_offset = self.placed_block(head, frame, record_at)?;
+        let frame_offset = self.placed_block(head, frame.len(), record_at)?;
         Ok(Ok(ReadBlock {
             frame_offset,
             frame_len: frame.len() as u32,
@@ -1312,12 +1295,156 @@ impl Reader {
         }))
     }
 
+    /// The channel a block record's head names, where the block comes next in its channel.
+    fn block_place(&self, head: &BlockHead) -> Result<usize, DecodeError> {
+        let c = head.channel as usize;
+        if c >= self.channels.len() {
+            return Err(corrupt(format!("a block names channel {c}, past the last")));
+        }
+        if head.start != self.next_start[c] || head.end <= head.start {
+            return Err(corrupt(format!(
+                "channel {c}: a block from {} to {} is out of place",
+                head.start, head.end
+            )));
+        }
+        Ok(c)
+    }
+
+    /// A block of a channel this version can't read, with a frame of `frame_len` bytes: its layout
+    /// is not this version's, so the block is placed, and not decoded. Its word still counts an
+    /// analog channel's samples, and its ticks end gaps.
+    fn unread_block(
+        &mut self,
+        head: BlockHead,
+        frame_len: usize,
+        record_at: u64,
+    ) -> Result<(), DecodeError> {
+        match &mut self.channels[head.channel as usize] {
+            Channel::Digital { pending, list, .. } => {
+                while let Some(&(g, _)) = pending.front().filter(|&&(_, t)| t < head.end) {
+                    pending.pop_front();
+                    list.push(g)?;
+                }
+            }
+            Channel::Analog {
+                next_index,
+                runs,
+                list,
+                ..
+            } => {
+                let from = *next_index;
+                *next_index += u64::from(head.word);
+                list_runs(runs, from, *next_index, list)?;
+            }
+            Channel::Other => {}
+        }
+        self.placed_block(head, frame_len, record_at)?;
+        Ok(())
+    }
+
+    /// An overview block record's head and its frame of `frame_len` bytes, `frame_head` its first
+    /// bytes or more, placed in its level's order: its row. Its frame's offset.
+    fn overview_block(
+        &mut self,
+        head: OverviewHead,
+        frame_head: &[u8],
+        frame_len: usize,
+        record_at: u64,
+    ) -> Result<u64, DecodeError> {
+        let o = head.channel as usize;
+        let levels = self
+            .levels
+            .get_mut(o)
+            .ok_or_else(|| corrupt("an overview block names a channel past the last"))?;
+        let on_ladder = head.shift >= levels.finest
+            && head.shift <= overview::MAX_SHIFT
+            && (head.shift - levels.finest).is_multiple_of(overview::STEP);
+        let (k, follow) = levels
+            .by_shift
+            .entry(head.shift)
+            .or_insert_with(|| (0, Follow::new(o as u32, Table::Level(head.shift), false)));
+        if !on_ladder || head.k != *k || head.n == 0 {
+            return Err(corrupt(format!(
+                "channel {o}: an overview block of level 2^{} at block {} is out of place",
+                head.shift, head.k
+            )));
+        }
+        *k += u64::from(head.n);
+        let frame_offset = record_at + (record::PAYLOAD_AT + OverviewHead::LEN) as u64;
+        // A level's last block may hold fewer buckets, which only the length says: the row takes
+        // the size the frame states, which the footer's rows are held to.
+        let decoded = zstd::zstd_safe::get_frame_content_size(frame_head)
+            .ok()
+            .flatten()
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or_else(|| corrupt("an overview block's frame does not state its size"))?;
+        follow.push(OverviewRow {
+            offset: frame_offset,
+            length: frame_len as u32,
+            decoded_length: decoded,
+            n: head.n,
+        })?;
+        Ok(frame_offset)
+    }
+
+    /// For a block or overview block record longer than its kind's records of this version
+    /// (`Next::Oversized`), of a channel this version can't read: `Some(Some(n))`, its payload's
+    /// first `n` bytes place it, or `Some(None)` while those bytes are still to come. None for any
+    /// other record, at which a reader stops.
+    fn unread_kind(&self, kind: u8, rest: &[u8]) -> Option<Option<usize>> {
+        let d = self.declaration.as_ref()?;
+        let held = match Kind::from_byte(kind)? {
+            Kind::Block => BlockHead::LEN,
+            // And as much of the frame as states its size.
+            Kind::OverviewBlock => OverviewHead::LEN + ZSTD_FRAME_HEAD,
+            _ => return None,
+        };
+        let Some(c) = rest.get(record::PAYLOAD_AT..record::PAYLOAD_AT + 4) else {
+            return Some(None);
+        };
+        let c = u32::from_le_bytes(c.try_into().expect("four bytes")) as usize;
+        let unavailable = match kind == Kind::Block as u8 {
+            true => self.available.get(c) == Some(&false),
+            false => c < self.levels.len() && !d.available(c),
+        };
+        unavailable.then(|| (rest.len() >= record::PAYLOAD_AT + held).then_some(held))
+    }
+
+    /// An `unread_kind` record of `n` bytes, which started at `record_at`, once its check is
+    /// read: placed by its payload's first bytes, `head`.
+    fn unread_record(
+        &mut self,
+        kind: u8,
+        head: &[u8],
+        n: u64,
+        record_at: u64,
+    ) -> Result<Event, DecodeError> {
+        if self.bundle.is_some() {
+            return Err(corrupt(
+                "a record comes between the annotation bundle and the footer",
+            ));
+        }
+        let n = n as usize;
+        if kind == Kind::Block as u8 {
+            let (head, _) =
+                BlockHead::parse(head).ok_or_else(|| corrupt("a block record's size"))?;
+            self.block_place(&head)?;
+            self.unread_block(head, n - BlockHead::LEN, record_at)?;
+            Ok(Event::UnreadBlock(head))
+        } else {
+            let (head, frame_head) = OverviewHead::parse(head)
+                .ok_or_else(|| corrupt("an overview block record's size"))?;
+            self.overview_block(head, frame_head, n - OverviewHead::LEN, record_at)?;
+            Ok(Event::UnreadOverviewBlock(head))
+        }
+    }
+
     /// A block record placed: its channel's next start, the latest block end, and its row. Its
     /// frame's offset.
     fn placed_block(
         &mut self,
         head: BlockHead,
-        frame: &[u8],
+        frame_len: usize,
         record_at: u64,
     ) -> Result<u64, DecodeError> {
         let c = head.channel as usize;
@@ -1327,13 +1454,17 @@ impl Reader {
         self.blocks[c].push(BlockRow {
             start: head.start,
             offset: frame_offset,
-            length: frame.len() as u32,
+            length: frame_len as u32,
             decoded_length: head.decoded_length,
             word: head.word,
         })?;
         Ok(frame_offset)
     }
 }
+
+/// The most a zstd frame's header takes (`ZSTD_FRAMEHEADERSIZE_MAX`): what states its decoded
+/// size.
+const ZSTD_FRAME_HEAD: usize = 18;
 
 impl Reader {
     /// Generator `source`'s records since its last part, met for the first time or not. Past
@@ -1490,6 +1621,30 @@ fn list_runs(
         list.push(*r)?;
     }
     Ok(())
+}
+
+/// Whether two directory page records are alike but for what each entry counts, which only a
+/// table's entries' weights give. A data page counts nothing, so it is alike only as itself.
+fn same_but_counts(a: &[u8], b: &[u8]) -> bool {
+    use crate::index::{Entry, PageHead};
+    fn payload(r: &[u8]) -> Option<&[u8]> {
+        r.get(record::PAYLOAD_AT..r.len().checked_sub(record::CHECK_LEN)?)
+    }
+    let (Some(pa), Some(pb)) = (payload(a), payload(b)) else {
+        return false;
+    };
+    let (Some((ha, ea)), Some((hb, eb))) = (PageHead::parse(pa), PageHead::parse(pb)) else {
+        return false;
+    };
+    a[0] == b[0]
+        && ha == hb
+        && ha.depth > 0
+        && ea.len() == eb.len()
+        && ea.len().is_multiple_of(Entry::SIZE)
+        && ea
+            .chunks(Entry::SIZE)
+            .zip(eb.chunks(Entry::SIZE))
+            .all(|(x, y)| Entry::parse(x).same_page(&Entry::parse(y)))
 }
 
 /// A finished table's depth and top-index entries.

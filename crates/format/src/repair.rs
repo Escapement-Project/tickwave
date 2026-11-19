@@ -15,7 +15,7 @@ use crate::decode::{
 use crate::hash::{self, ChannelHasher};
 use crate::header::{
     BlockRow, ChannelHeader, ChannelKind, Declaration, DeclaredKind, DerivedHeader, Header,
-    INLINE_LIST, LEVEL_BIT, OverviewLevel, OverviewRow,
+    INLINE_LIST, LEVEL_BIT, MAJOR, OverviewLevel, OverviewRow, TRAILER_LEN, Trailer,
 };
 use crate::index::{Due, Row, Table, TableWriter};
 use crate::mapping::Mapping;
@@ -60,6 +60,34 @@ fn finish_only(event: &Event) -> bool {
 }
 
 pub use crate::decode::HOLD;
+
+/// The bytes of a file fed so far, and the last `TRAILER_LEN` of them: whether a file a reader in
+/// order found cut off ends as a finished one does, so that it is damaged rather than cut off.
+#[derive(Debug, Default)]
+pub(crate) struct Tail {
+    fed: u64,
+    last: Vec<u8>,
+}
+
+impl Tail {
+    pub(crate) fn feed(&mut self, bytes: &[u8]) {
+        self.fed += bytes.len() as u64;
+        self.last
+            .extend_from_slice(&bytes[bytes.len().saturating_sub(TRAILER_LEN)..]);
+        self.last
+            .drain(..self.last.len().saturating_sub(TRAILER_LEN));
+    }
+
+    /// Whether the bytes end with a trailer of this major version whose footer ends where the
+    /// trailer starts.
+    pub(crate) fn finished(&self) -> bool {
+        Trailer::parse(&self.last).is_some_and(|t| {
+            t.major == MAJOR
+                && t.footer_offset.checked_add(u64::from(t.footer_len))
+                    == self.fed.checked_sub(TRAILER_LEN as u64)
+        })
+    }
+}
 
 /// What repair does, for a refusal's words.
 const DOING: &str = "repairing";
@@ -138,6 +166,14 @@ pub enum RepairError {
          keeps: re-cut the file instead"
     )]
     AuxiliaryKept { kind: u8, at: u64 },
+    /// The file ends with a trailer of this major version whose footer ends where it starts, as
+    /// a finished file does, yet its records stop before its footer: it is finished and damaged,
+    /// not cut off, and finishing it again would drop what follows.
+    #[error(
+        "the file is finished, its footer and trailer whole, but its records stop at byte {at}: \
+         it is damaged, not cut off"
+    )]
+    Damaged { at: u64 },
     #[error(transparent)]
     Rewrite(#[from] Rewrite),
     #[error(transparent)]
@@ -597,6 +633,8 @@ pub struct Repairer {
     after: Vec<(u64, Event)>,
     /// The first auxiliary record before the cut: where it lies, and its kind.
     auxiliary: Option<(u64, u8)>,
+    /// Whether the file ends as a finished one does.
+    tail: Tail,
 }
 
 impl Repairer {
@@ -619,6 +657,7 @@ impl Repairer {
             finishing: None,
             after: Vec::new(),
             auxiliary: None,
+            tail: Tail::default(),
         }
     }
 
@@ -637,6 +676,7 @@ impl Repairer {
 
     /// The file's next bytes, from its start.
     pub fn feed(&mut self, bytes: &[u8]) -> Result<(), RepairError> {
+        self.tail.feed(bytes);
         self.reader.feed(bytes);
         while let Some(event) = self.reader.next_event()? {
             let at = self.reader.record_at();
@@ -773,7 +813,7 @@ impl Repairer {
                     runs.push(run);
                 }
             }
-            Event::UnreadBlock(_) => {
+            Event::UnreadBlock(_) | Event::UnreadOverviewBlock(_) => {
                 return Err(corrupt("a block of a channel this version can't read").into());
             }
             Event::KnownThrough { tick } => {
@@ -943,6 +983,9 @@ impl Repairer {
         let Ending::CutOff { at: end_at } = self.reader.end()? else {
             return Err(RepairError::Finished);
         };
+        if self.tail.finished() {
+            return Err(RepairError::Damaged { at: end_at });
+        }
         let mut state = self.state.take().ok_or(RepairError::NoDeclaration)?;
         let d = state.declaration.clone();
         if let Some(c) = d.channels.iter().find(|c| !c.shaping.is_whole()) {

@@ -1347,6 +1347,53 @@ fn an_annotation_source_that_can_t_name_a_file_on_its_own_is_refused() {
     }
 }
 
+/// A file whose footer and trailer are whole, but one of whose records doesn't check, is finished
+/// and damaged, not cut off: a reader in order stops at the record, and repair and re-cutting
+/// refuse it, naming where its records stop, rather than finishing it there and dropping what
+/// follows. Cut before its trailer, the same file is repaired.
+#[test]
+fn repair_refuses_a_finished_file_whose_records_stop_early() {
+    use escapement_tickwave_format::repair::RepairError;
+    let mut w = Writer::new(declaration(), options()).unwrap();
+    for i in 0..40 {
+        w.edge(0, 3 * i + 1).unwrap();
+        if i % 10 == 9 {
+            w.flush(3 * i + 2).unwrap();
+        }
+    }
+    let mut file = w.take_output();
+    file.extend(w.finish(130, &[130], Finish::default()).unwrap().tail);
+    let mut blocks = Vec::new();
+    let mut r = Reader::default();
+    r.feed(&file);
+    while let Some(e) = r.next_event().unwrap() {
+        if let Event::Block(_) = e {
+            blocks.push(r.record_at());
+        }
+    }
+    let second = blocks[1] as usize;
+    let n = u32::from_le_bytes(file[second + 1..second + 5].try_into().unwrap()) as usize;
+    let mut damaged = file.clone();
+    damaged[second + 5 + n - 1] ^= 1;
+    match repair(&damaged, 3) {
+        Err(RepairError::Damaged { at }) => assert_eq!(at, second as u64),
+        other => panic!("{:?}", other.map(|r| r.keep)),
+    }
+    // Re-cutting finishes a cut-off file as repair would, so it refuses this one too.
+    let mut rc = escapement_tickwave_format::recut::Recutter::new(options());
+    rc.feed(&damaged).unwrap();
+    match rc.finish() {
+        Err(escapement_tickwave_format::recut::RecutError::Damaged { at }) => {
+            assert_eq!(at, second as u64)
+        }
+        Err(e) => panic!("{e}"),
+        Ok(_) => panic!("re-cut"),
+    }
+    assert!(matches!(repair(&file, 3), Err(RepairError::Finished)));
+    let cut = &damaged[..damaged.len() - 1];
+    assert_eq!(repair(cut, 3).unwrap().keep, second as u64);
+}
+
 /// ANNOTATIONS.md, "Versions": a line may hold a key or a `measure` a later minor version adds,
 /// and its generator's file's first line, which says so, comes only with the bundle. Repair and
 /// recut carry such a line whole and name what they carried; a line breaking a rule on a key they
