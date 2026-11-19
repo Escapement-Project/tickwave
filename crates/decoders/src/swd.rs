@@ -307,7 +307,7 @@ impl Recogniser {
         });
         self.recent = (self.recent >> 1) | (u128::from(value) << 127);
         let n = self.bits.len();
-        for (kind, (pattern, len, before, after, reset)) in MASKED.into_iter().enumerate() {
+        for (kind, &(pattern, len, before, after, reset)) in MASKED.iter().enumerate() {
             // The deque holds the latest pushes, so where it holds `len` they are `recent`'s top.
             if n < len {
                 continue;
