@@ -78,8 +78,8 @@ one (below).
 | `ref` | Hand-written only: the full id of a generated annotation. This one takes its span and channels, and any field it leaves out. |
 
 A file may hold no other fields, `measure`'s included: a misspelt one is an error, not ignored. A
-field stated twice in one annotation is an error too. A later minor version can add fields (see
-Versions).
+key stated twice in any object of an annotation, its `measure` and `values` included, is an error
+too, whatever the file's version. A later minor version can add fields (see Versions).
 
 ## Roles
 
@@ -197,14 +197,15 @@ micro is always `µ` (U+00B5 MICRO SIGN), as in times, and never the Greek lette
 
 ## Times
 
-A time is either a whole number of ticks from the capture's start, or a string holding a decimal and
-a unit. The decimal is digits with at most one `.` among them and at least one digit, such as
-`12`, `12.5`, `.5` or `12.`, with an optional `-` or `+` before it. The unit is `s`, `ms`, `us`,
-`µs`, `ns` or `ps`, after the decimal with or without whitespace between, and whitespace around the
-whole is ignored: `"12 ms"`, `"12ms"` and `" 0.012 s "` are one time. An exponent, digits grouped
-with spaces, or a decimal without a unit is an error. A decimal converts to ticks exactly, without
-floating point, and rounds to the nearest tick, halves away from zero. A time still lies in
-`0..2^53` ticks once converted.
+A time is either a whole number of ticks from the capture's start, as a JSON integer (digits with an
+optional `-`, no fraction or exponent, so not `12.0`), or a string holding a decimal and a unit. The
+decimal is digits with at most one `.` among them and at least one digit, such as `12`, `12.5`, `.5`
+or `12.`, with an optional `-` or `+` before it. The unit is `s`, `ms`, `us`, `µs`, `ns` or `ps`,
+after the decimal with or without whitespace between, and whitespace around the whole is ignored,
+whitespace being any character Unicode's `White_Space` property holds: `"12 ms"`, `"12ms"` and
+`" 0.012 s "` are one time. An exponent, digits grouped with spaces, or a decimal without a unit is
+an error. A decimal converts to ticks exactly, without floating point, and rounds to the nearest
+tick, halves away from zero. A time still lies in `0..2^53` ticks once converted.
 
 ## Ids stay stable
 
