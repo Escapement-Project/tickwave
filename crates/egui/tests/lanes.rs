@@ -93,7 +93,7 @@ fn boxes(schema: &Schema, items: &[(u16, Tick, Tick)]) -> (Vec<egui::Rect>, usiz
     }
     let shown = Shown::new(0..1000, 0.0..500.0);
     let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
-    let density = Density::of(&store.items, &map, |_| false);
+    let density = Density::of(store.items(), &map, |_| false);
     let labels = Labels::default();
     let palette = Palette::from_visuals(&egui::Visuals::default());
     let ctx = egui::Context::default();
@@ -110,7 +110,7 @@ fn boxes(schema: &Schema, items: &[(u16, Tick, Tick)]) -> (Vec<egui::Rect>, usiz
             &shown,
             "t",
             schema,
-            &store.items,
+            store.items(),
             &density,
             &labels,
             &palette,
@@ -265,7 +265,7 @@ fn a_long_or_open_item_from_far_before_the_window_still_draws_beside_the_short_o
         store.apply_batch(chunk, 8).unwrap();
     }
     let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
-    let density = Density::of(&store.items, &map, |_| false);
+    let density = Density::of(store.items(), &map, |_| false);
     let labels = Labels::default();
     let palette = Palette::from_visuals(&egui::Visuals::default());
     let input = egui::RawInput {
@@ -282,7 +282,7 @@ fn a_long_or_open_item_from_far_before_the_window_still_draws_beside_the_short_o
                 &shown,
                 "t",
                 &schema,
-                &store.items,
+                store.items(),
                 &density,
                 &labels,
                 &palette,
@@ -338,7 +338,7 @@ fn a_density_over_items_either_side_of_zero_is_built_and_drawn() {
         n += 1;
     }
     let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
-    let density = Density::of(&store.items, &map, |_| false);
+    let density = Density::of(store.items(), &map, |_| false);
     assert_eq!(density.items(), n);
     // Zoomed out across zero, as density bins.
     let shown = Shown::new(-100_000..100_000, 0.0..500.0);
@@ -360,7 +360,7 @@ fn a_density_over_items_either_side_of_zero_is_built_and_drawn() {
                 &shown,
                 "t",
                 &schema,
-                &store.items,
+                store.items(),
                 &density,
                 &labels,
                 &palette,
@@ -411,9 +411,9 @@ fn a_wire_is_painted_by_its_parts_only_where_the_track_draws_their_items_apart()
         store.apply_batch(&ops, 8).unwrap();
     }
     let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
-    let density = Density::of(&store.items, &map, |_| false);
+    let density = Density::of(store.items(), &map, |_| false);
     let paints = |window: std::ops::Range<i64>, width: f32| {
-        driver_paints(&schema, &store.items, &density, &map, &window, width)
+        driver_paints(&schema, store.items(), &density, &map, &window, width)
     };
     let few = paints(10_000..20_000, 1000.0);
     assert_eq!(few.len(), 100, "a hundred items, ten points each");
@@ -469,7 +469,7 @@ fn shapes_on(
     let mut shown = Shown::new(window, 0.0..500.0);
     shown.grid = grid;
     let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
-    let density = Density::of(&store.items, &map, |_| false);
+    let density = Density::of(store.items(), &map, |_| false);
     let (labels, palette) = (
         Labels::default(),
         Palette::from_visuals(&egui::Visuals::default()),
@@ -487,7 +487,7 @@ fn shapes_on(
                 &shown,
                 "t",
                 &schema,
-                &store.items,
+                store.items(),
                 &density,
                 &labels,
                 &palette,
@@ -618,7 +618,7 @@ fn texts(labels: Labels, part: (Tick, Tick)) -> Vec<String> {
     store.apply_batch(&ops, 8).unwrap();
     let shown = Shown::new(0..1000, 0.0..500.0);
     let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
-    let density = Density::of(&store.items, &map, |_| false);
+    let density = Density::of(store.items(), &map, |_| false);
     let palette = Palette::from_visuals(&egui::Visuals::default());
     let input = egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(
@@ -633,7 +633,7 @@ fn texts(labels: Labels, part: (Tick, Tick)) -> Vec<String> {
                 &shown,
                 "t",
                 &schema,
-                &store.items,
+                store.items(),
                 &density,
                 &labels,
                 &palette,
@@ -707,7 +707,7 @@ fn click(at: egui::Pos2, selected: Option<Id>) -> (Option<Id>, Vec<f32>) {
     }
     let shown = Shown::new(0..1000, 0.0..500.0);
     let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
-    let density = Density::of(&store.items, &map, |_| false);
+    let density = Density::of(store.items(), &map, |_| false);
     let (labels, palette) = (
         Labels::default(),
         Palette::from_visuals(&egui::Visuals::default()),
@@ -740,7 +740,7 @@ fn click(at: egui::Pos2, selected: Option<Id>) -> (Option<Id>, Vec<f32>) {
                     &shown,
                     "t",
                     &schema,
-                    &store.items,
+                    store.items(),
                     &density,
                     &labels,
                     &palette,

@@ -92,7 +92,7 @@ fn decoded(
     parts: bool,
 ) -> Decoded {
     let store = h.store(a).clone();
-    let density = Density::of(&store.items, map, condition);
+    let density = Density::of(store.items(), map, condition);
     Decoded {
         name,
         schema: h.definition(a).schema.clone(),
@@ -176,7 +176,7 @@ fn cjtag_case(path: &Path, ahead: Tick) -> Case {
     let format = loop {
         until += 1_000_000;
         h.run_until(|h| h.settled(j) >= until).unwrap();
-        let first = (h.store(c).items.values()).find(|i| i.id.kind == cjtag::FORMAT);
+        let first = (h.store(c).items().values()).find(|i| i.id.kind == cjtag::FORMAT);
         if let Some(i) = first {
             break i.start;
         }
@@ -293,7 +293,7 @@ fn analyses(decoded: &[Decoded]) -> Vec<Analysis<'_>> {
             name: d.name,
             schema: &d.schema,
             labels: &d.labels,
-            items: &d.store.items,
+            items: d.store.items(),
             reads: k.checked_sub(1),
         })
         .collect()
@@ -387,7 +387,7 @@ fn draw(ui: &mut egui::Ui, host: &mut Host2) {
     let paints = host.shown.as_ref().map_or(vec![], |s| {
         driver_paints(
             &first.schema,
-            &first.store.items,
+            first.store.items(),
             &first.density,
             &host.map,
             &s.window,
@@ -421,7 +421,7 @@ fn draw(ui: &mut egui::Ui, host: &mut Host2) {
                 &shown,
                 d.name,
                 &d.schema,
-                &d.store.items,
+                d.store.items(),
                 &d.density,
                 &d.labels,
                 &host.face.palette,
@@ -460,7 +460,7 @@ fn settle(h: &mut Harness<'_, Host2>) {
 #[test]
 fn a_tracks_rows_are_reserved_before_anything_is_decoded() {
     let case = swd_case();
-    let first = case.decoded[0].store.items.values().next().unwrap().start;
+    let first = case.decoded[0].store.items().values().next().unwrap().start;
     let mut h = harness(ViewState::default().window, case);
     settle(&mut h);
     let full = h.state().heights.clone();
@@ -504,7 +504,7 @@ fn shots() {
     };
     std::fs::create_dir_all(&dir).unwrap();
     let case = swd_case();
-    let transfers: Vec<(Tick, Tick)> = (case.decoded[0].store.items.values())
+    let transfers: Vec<(Tick, Tick)> = (case.decoded[0].store.items().values())
         .map(|i| (i.start, i.end.unwrap()))
         .collect();
     let axis = |t: Tick| case.map.axis_saturating(t);
@@ -541,9 +541,9 @@ fn shots() {
     // A transfer selected, beside the graph, with its acknowledgement opened; then the ADIv5
     // access it carries.
     let case = swd_case();
-    let ids: Vec<Id> = case.decoded[0].store.items.keys().copied().collect();
+    let ids: Vec<Id> = case.decoded[0].store.items().keys().copied().collect();
     let transfer = ids[mid + 2];
-    let access = (case.decoded[1].store.items.values())
+    let access = (case.decoded[1].store.items().values())
         .find(|i| (i.links.iter()).any(|(_, r)| *r == Ref::Upstream(transfer)))
         .map(|i| i.id);
     let panel = |selected| {
@@ -568,7 +568,7 @@ fn shots() {
     // JTAG: an IR scan and the DR scan after it, with the states they shift in.
     let case = jtag_case(&jtag_fixture());
     let axis = |t: Tick| case.map.axis_saturating(t);
-    let items = &case.decoded[0].store.items;
+    let items = &case.decoded[0].store.items();
     let ir = (items.values())
         .find(|i| i.id.kind == jtag::IR_SCAN)
         .unwrap();
@@ -596,7 +596,7 @@ fn shots() {
     const AHEAD: Tick = 2_000_000;
     let case = cjtag_case(&rec, AHEAD);
     let axis = |t: Tick| case.map.axis_saturating(t);
-    let items = &case.decoded[0].store.items;
+    let items = &case.decoded[0].store.items();
     let first = |k| (items.values()).find(|i| i.id.kind == k).unwrap();
     let (escape, level, format) = (
         first(cjtag::ESCAPE),
@@ -663,7 +663,7 @@ fn shoot_opened(dir: &Path, make: impl Fn() -> Case, views: &[(&str, Window)], o
 fn frame_times() {
     use escapement_tickwave_egui::{Palette, Shown};
     let (decoded, map, _) = decode(&fixture());
-    let transfers: Vec<(Tick, Tick)> = (decoded[0].store.items.values())
+    let transfers: Vec<(Tick, Tick)> = (decoded[0].store.items().values())
         .map(|i| (i.start, i.end.unwrap()))
         .collect();
     let axis = |t: Tick| map.axis_saturating(t);
@@ -700,7 +700,7 @@ fn frame_times() {
                             &shown,
                             d.name,
                             &d.schema,
-                            &d.store.items,
+                            d.store.items(),
                             &d.density,
                             &d.labels,
                             &palette,
@@ -735,7 +735,7 @@ fn frame_times() {
 #[ignore = "prints wall-clock frame times"]
 fn graph_frame_times() {
     let (decoded, map, lanes) = decode_with(&fixture(), true);
-    let transfers: Vec<(Tick, Tick)> = (decoded[0].store.items.values())
+    let transfers: Vec<(Tick, Tick)> = (decoded[0].store.items().values())
         .map(|i| (i.start, i.end.unwrap()))
         .collect();
     let axis = |t: Tick| map.axis_saturating(t);
@@ -772,7 +772,7 @@ fn graph_frame_times() {
                 let paints = shown.as_ref().map_or(vec![], |s| {
                     driver_paints(
                         &first.schema,
-                        &first.store.items,
+                        first.store.items(),
                         &first.density,
                         &map,
                         &s.window,
@@ -794,7 +794,7 @@ fn graph_frame_times() {
                             &s,
                             d.name,
                             &d.schema,
-                            &d.store.items,
+                            d.store.items(),
                             &d.density,
                             &d.labels,
                             &face.palette,
@@ -848,7 +848,7 @@ fn cjtag_frame_times() {
     };
     let case = cjtag_case(&rec, 1_000_000_000);
     let axis = |t: Tick| case.map.axis_saturating(t);
-    let packets: Vec<(Tick, Tick)> = (case.decoded[0].store.items.values())
+    let packets: Vec<(Tick, Tick)> = (case.decoded[0].store.items().values())
         .filter(|i| i.id.kind == cjtag::PACKET)
         .filter_map(|i| Some((i.start, i.end?)))
         .collect();
@@ -881,7 +881,7 @@ fn cjtag_frame_times() {
                             &shown,
                             d.name,
                             &d.schema,
-                            &d.store.items,
+                            d.store.items(),
                             &d.density,
                             &d.labels,
                             &palette,
@@ -940,7 +940,7 @@ fn placed<'a>(
     let items: Vec<std::collections::BTreeMap<Id, escapement_tickwave_decode::Item>> =
         (decoded.iter().enumerate())
             .map(|(j, d)| {
-                let mut items = d.store.items.clone();
+                let mut items = d.store.items().clone();
                 if j == k {
                     items.insert(item.id, item.clone());
                 }
@@ -987,7 +987,7 @@ fn placed<'a>(
 fn the_panel_shows_a_selected_transfer_in_full_and_an_access_with_its_links() {
     use egui_kittest::kittest::Queryable;
     let (decoded, map, _) = decode(&fixture());
-    let transfer = (decoded[0].store.items.values())
+    let transfer = (decoded[0].store.items().values())
         .find(|i| i.field(swd::DATA).is_some())
         .unwrap();
     let mut h = panel(&decoded, 0, transfer, map, &fixture());
@@ -1022,7 +1022,7 @@ fn the_panel_shows_a_selected_transfer_in_full_and_an_access_with_its_links() {
     );
     assert!(h.query_by_label("32").is_none());
     // ADIv5 over it: an access, what it links to in SWD below, and the values it could not know.
-    let access = (decoded[1].store.items.values())
+    let access = (decoded[1].store.items().values())
         .find(|i| !i.links.is_empty())
         .unwrap();
     let h = panel(&decoded, 1, access, map, &fixture());
@@ -1036,7 +1036,7 @@ fn the_panel_shows_a_selected_transfer_in_full_and_an_access_with_its_links() {
     h.get_by_label_contains("SWD/transfer/");
     // JTAG on its own capture: the values a scan could not know, one sentence for each reason.
     let jtag = jtag_case(&jtag_fixture());
-    let scan = (jtag.decoded[0].store.items.values())
+    let scan = (jtag.decoded[0].store.items().values())
         .find(|i| (i.fields.iter()).any(|f| matches!(f.value, Value::Unknown { .. })))
         .unwrap();
     let h = panel(&jtag.decoded, 0, scan, jtag.map, &jtag_fixture());
@@ -1049,7 +1049,7 @@ fn the_panel_shows_a_selected_transfer_in_full_and_an_access_with_its_links() {
 fn an_open_item_closing_moves_nothing_in_the_panel() {
     use egui_kittest::kittest::Queryable;
     let (decoded, map, _) = decode(&fixture());
-    let closed = (decoded[0].store.items.values())
+    let closed = (decoded[0].store.items().values())
         .find(|i| i.field(swd::DATA).is_some())
         .unwrap();
     let mut still_open = closed.clone();
@@ -1070,7 +1070,7 @@ fn an_open_item_closing_moves_nothing_in_the_panel() {
 }
 
 fn transfers(decoded: &[Decoded]) -> Vec<&escapement_tickwave_decode::Item> {
-    (decoded[0].store.items.values())
+    (decoded[0].store.items().values())
         .filter(|i| i.id.kind == swd::TRANSFER)
         .collect()
 }
@@ -1098,14 +1098,14 @@ fn previous_and_next_step_through_its_kind_and_stay_where_pressed() {
         );
     }
     // ADIv5's kinds interleave: next steps over the others to a DP write's next.
-    let writes: Vec<Id> = (decoded[1].store.items.keys())
+    let writes: Vec<Id> = (decoded[1].store.items().keys())
         .filter(|id| id.kind == adiv5::DP_WRITE)
         .copied()
         .collect();
-    let between = (decoded[1].store.items.keys())
+    let between = (decoded[1].store.items().keys())
         .any(|id| id.kind != adiv5::DP_WRITE && writes[0] < *id && *id < writes[1]);
     assert!(between, "another kind lies between the first two DP writes");
-    let first = &decoded[1].store.items[&writes[0]];
+    let first = &decoded[1].store.items()[&writes[0]];
     let mut h = panel(&decoded, 1, first, map, &fixture());
     h.get_by_label("next dp-write \u{25b8}").click();
     h.run();
@@ -1138,7 +1138,7 @@ fn the_collapse_control_stays_where_it_is_pressed() {
 fn pointing_at_a_section_or_the_heading_lights_its_span() {
     use egui_kittest::kittest::Queryable;
     let (decoded, map, _) = decode(&fixture());
-    let transfer = (decoded[0].store.items.values())
+    let transfer = (decoded[0].store.items().values())
         .find(|i| i.field(swd::DATA).is_some())
         .unwrap();
     let mut h = panel(&decoded, 0, transfer, map, &fixture());
@@ -1166,7 +1166,7 @@ fn read_as_lists_what_reads_it_and_a_link_selects_what_it_names() {
     use egui_kittest::kittest::Queryable;
     let (decoded, map, _) = decode(&fixture());
     let reads = |t: &escapement_tickwave_decode::Item| -> Vec<Id> {
-        (decoded[1].store.items.values())
+        (decoded[1].store.items().values())
             .filter(|i| (i.links.iter()).any(|(_, r)| *r == Ref::Upstream(t.id)))
             .map(|i| i.id)
             .collect()
@@ -1243,7 +1243,7 @@ fn the_list_shows_an_analysis_as_rows_filters_them_and_selects_one() {
     h.get_by_label(decoded[1].name).click();
     h.run();
     assert_eq!(h.state().listed, Some(1));
-    let items: Vec<_> = decoded[1].store.items.values().collect();
+    let items: Vec<_> = decoded[1].store.items().values().collect();
     let write = *(items.iter())
         .find(|i| i.id.kind == adiv5::DP_WRITE)
         .unwrap();
@@ -1335,7 +1335,7 @@ fn text_decoded(
         store.apply_batch(&ops, 8).unwrap();
     }
     let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
-    let density = Density::of(&store.items, &map, condition);
+    let density = Density::of(store.items(), &map, condition);
     Decoded {
         name,
         schema,
@@ -1355,7 +1355,7 @@ fn the_text_tab_joins_an_analysis_bytes_into_lines_each_character_from_its_item(
         .collect();
     let decoded = vec![bytes_decoded(&text)];
     let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
-    let items: Vec<_> = decoded[0].store.items.values().cloned().collect();
+    let items: Vec<_> = decoded[0].store.items().values().cloned().collect();
     let mut h = panel(&decoded, 0, &items[0], map, &fixture());
     h.get_by_label("Text").click();
     h.run();
@@ -1508,7 +1508,13 @@ fn panel_frame_times() {
     b.name = "downstream";
     let decoded = vec![a, b];
     let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
-    let middle = decoded[0].store.items.values().nth(N / 2).unwrap().clone();
+    let middle = decoded[0]
+        .store
+        .items()
+        .values()
+        .nth(N / 2)
+        .unwrap()
+        .clone();
     for tab in [Tab::Selected, Tab::List, Tab::Text] {
         let mut h = panel(&decoded, 0, &middle, map, &fixture());
         h.state_mut().tab = tab;
@@ -1517,7 +1523,7 @@ fn panel_frame_times() {
         for k in 0..5 {
             let other = decoded[0]
                 .store
-                .items
+                .items()
                 .values()
                 .nth(N / 2 + k + 1)
                 .unwrap()
@@ -1547,7 +1553,7 @@ fn panel_frame_times() {
     // A store that grows a thousand items a frame, as a live decode's does.
     for tab in [Tab::Selected, Tab::List, Tab::Text] {
         let decoded = vec![bytes_decoded(&values), bytes_decoded(&values)];
-        let last = *decoded[0].store.items.keys().next_back().unwrap();
+        let last = *decoded[0].store.items().keys().next_back().unwrap();
         let mut h = growing(decoded, (0, last), tab);
         let mut at = 1000 * (N as Tick + 1);
         let mut grown = vec![];
@@ -1652,7 +1658,7 @@ fn the_panel_takes_in_what_a_growing_store_gains() {
     use escapement_tickwave_egui::panel::Tab;
     // Text: a carriage return waits for what follows it.
     let decoded = vec![bytes_decoded(&[Some(b'x'), Some(b'\r')])];
-    let first = *decoded[0].store.items.keys().next().unwrap();
+    let first = *decoded[0].store.items().keys().next().unwrap();
     let mut h = growing(decoded, (0, first), Tab::Text);
     h.get_by_label_contains("  x\\r");
     push(&mut h.state_mut().decoded[0], 3000, byte(b'\n'), None);
@@ -1682,7 +1688,7 @@ fn the_panel_takes_in_what_a_growing_store_gains() {
     };
     let ty = escapement_tickwave_decode::FieldType::Bits { max: 16 };
     let decoded = vec![text_decoded("frames", ty, vec![frame(b"ab\ncd")])];
-    let first = *decoded[0].store.items.keys().next().unwrap();
+    let first = *decoded[0].store.items().keys().next().unwrap();
     let mut h = growing(decoded, (0, first), Tab::Text);
     h.get_by_label_contains("  cd");
     push(&mut h.state_mut().decoded[0], 3000, Some(frame(b"e")), None);
@@ -1700,13 +1706,13 @@ fn the_panel_takes_in_what_a_growing_store_gains() {
     let reader = Decoded {
         name: "readers",
         schema: readers,
-        density: Density::of(&store.items, &map, condition),
+        density: Density::of(store.items(), &map, condition),
         store,
         labels: Labels::default(),
         parts: false,
     };
     let decoded = vec![bytes_decoded(&[Some(b'a'), Some(b'b')]), reader];
-    let last = *decoded[0].store.items.keys().next_back().unwrap();
+    let last = *decoded[0].store.items().keys().next_back().unwrap();
     let mut h = growing(decoded, (0, last), Tab::Selected);
     assert!(h.query_by_label_contains("read as ").is_none());
     h.get_by_label("next byte \u{25b8}").click();

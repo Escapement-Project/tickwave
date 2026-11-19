@@ -276,7 +276,7 @@ fn swd_items(source: Box<dyn Source>) -> (String, Vec<Span>) {
     .unwrap();
     h.run_until(|_| false).unwrap();
     assert!(h.finished(s).is_some());
-    (format!("{:?}", h.store(s).items), h.lost(s).to_vec())
+    (format!("{:?}", h.store(s).items()), h.lost(s).to_vec())
 }
 
 fn session() -> Wires {

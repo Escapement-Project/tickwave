@@ -169,7 +169,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         h.run_until(|h| h.settled(j) >= window.end)?;
         let landed = asked.elapsed().as_secs_f64();
         let ids = |a| -> Vec<_> {
-            (h.store(a).items.iter())
+            (h.store(a).items().iter())
                 .map(|(id, i)| (*id, i.end))
                 .collect()
         };

@@ -98,7 +98,7 @@ fn reads_of(ticks: usize) -> HostOptions {
 }
 
 fn of(h: &Host, a: AnalysisId, kind: KindId) -> Vec<Item> {
-    let mut items: Vec<Item> = (h.store(a).items.values())
+    let mut items: Vec<Item> = (h.store(a).items().values())
         .filter(|i| i.id.kind == kind)
         .cloned()
         .collect();

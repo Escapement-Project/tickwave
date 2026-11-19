@@ -144,7 +144,7 @@ pub fn print(h: &Host, analyses: &[(AnalysisId, Option<AnalysisId>)]) {
             up: u.map(|u| (h.name(u), h.definition(u))),
         };
         let store = h.store(x);
-        let mut lines: Vec<(Tick, String, u32, String)> = (store.items.values())
+        let mut lines: Vec<(Tick, String, u32, String)> = (store.items().values())
             .map(|i| {
                 let kind = names.def.schema.kind(i.id.kind).map_or("?", |k| &k.name);
                 (i.id.anchor, kind.to_string(), i.id.disc, names.render(i))

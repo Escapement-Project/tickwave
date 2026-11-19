@@ -92,7 +92,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         h.run_until(|h| win(h, id, j).settled() >= w.end)?;
         let settled = asked.elapsed().as_secs_f64() * 1e3;
         let unknown = |a| {
-            let items = &win(&h, id, a).store().items;
+            let items = &win(&h, id, a).store().items();
             let n = (items.values())
                 .filter(|i| {
                     i.status
@@ -188,8 +188,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         h.run_until(|h| win(h, id, j).settled() >= w.end)?;
         let settled = asked.elapsed().as_secs_f64() * 1e3;
         let items = (
-            win(&h, id, c).store().items.len(),
-            win(&h, id, j).store().items.len(),
+            win(&h, id, c).store().items().len(),
+            win(&h, id, j).store().items().len(),
         );
         println!(
             "  window {at_s:5.1} s: restored {:.2} ms of input before it; drawn by {drawn:.1} ms, settled by {settled:.1} ms; items cJTAG {}, JTAG {}; the forward pass at {:.3} s",

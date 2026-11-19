@@ -1364,8 +1364,8 @@ mod tests {
             // lag, the next item is anchored at the frontier itself.
             let lag = if next(3) == 0 { 0 } else { next(5_000) as i64 };
             let frontier = now.saturating_sub(lag);
-            d.grow(&store.items, &map, condition, frontier);
-            snapshots.push((d.clone(), store.items.clone(), frontier));
+            d.grow(store.items(), &map, condition, frontier);
+            snapshots.push((d.clone(), store.items().clone(), frontier));
         }
         (store, d, snapshots)
     }
@@ -1385,13 +1385,13 @@ mod tests {
             escapement_tickwave_view::format::model::Ratio::integer(1).unwrap(),
         );
         let (store, grown, _) = grown(0x5eed, all());
-        let built = Density::of(&store.items, &map, condition);
+        let built = Density::of(store.items(), &map, condition);
         assert_eq!(grown.items(), built.items());
-        assert_eq!(grown.items(), store.items.len() as u64);
+        assert_eq!(grown.items(), store.items().len() as u64);
         assert_eq!(grown.longest, built.longest);
         // The long items, 200,000 ticks and more, held apart; the short ones within reach.
         assert!(grown.reach <= 800, "{}", grown.reach);
-        let long = (store.items.values())
+        let long = (store.items().values())
             .filter(|i| i.end.unwrap() - i.start >= 200_000)
             .count();
         assert_eq!(grown.held.len(), long);
@@ -1409,7 +1409,7 @@ mod tests {
             assert_eq!(grown.count(from, to, per), built.count(from, to, per));
             let w = from..to;
             let ids = |d: &Density| -> Vec<Id> {
-                d.meeting(&store.items, &map, &w, Tick::MAX)
+                d.meeting(store.items(), &map, &w, Tick::MAX)
                     .map(|i| i.id)
                     .collect()
             };
@@ -1487,10 +1487,10 @@ mod tests {
         };
         let (store, d, _) = grown(0xabcd, keep);
         let w = -3_000_000..3_000_000;
-        let found: Vec<Id> = (d.meeting(&store.items, &map, &w, Tick::MAX))
+        let found: Vec<Id> = (d.meeting(store.items(), &map, &w, Tick::MAX))
             .map(|i| i.id)
             .collect();
-        let kept: Vec<Id> = store.items.keys().copied().collect();
+        let kept: Vec<Id> = store.items().keys().copied().collect();
         assert_eq!(found, kept);
     }
 
@@ -1524,22 +1524,22 @@ mod tests {
             put(&mut store, k, if k % 5 == 0 { 3_000 } else { 1 + k % 10 });
         }
         let mut d = Density::default();
-        d.grow(&store.items, &map, condition, 2_500);
+        d.grow(store.items(), &map, condition, 2_500);
         let long = d.long;
         assert_eq!(d.held.len(), 5);
         // Then two thousand more of them: holding them all apart would cost more than reaching.
         for k in 25..2_025 {
             put(&mut store, k, 3_000);
         }
-        d.grow(&store.items, &map, condition, Tick::MAX);
+        d.grow(store.items(), &map, condition, Tick::MAX);
         assert!(d.long > long && d.held.is_empty() && d.reach >= 3_000);
         for from in (-5_000..210_000).step_by(1_700) {
             let w = from..from + 900;
-            let want: Vec<Id> = (store.items.values())
+            let want: Vec<Id> = (store.items().values())
                 .filter(|i| i.start < w.end && i.end.unwrap() >= w.start)
                 .map(|i| i.id)
                 .collect();
-            let got: Vec<Id> = (d.meeting(&store.items, &map, &w, Tick::MAX))
+            let got: Vec<Id> = (d.meeting(store.items(), &map, &w, Tick::MAX))
                 .map(|i| i.id)
                 .collect();
             assert_eq!(got, want, "{w:?}");
@@ -1569,7 +1569,7 @@ mod tests {
             for _ in 0..5_000 {
                 let start = origin + next(4_000_000) as i64;
                 let id = Id::new(KindId(next(2) as u16), start);
-                if store.items.contains_key(&id) {
+                if store.items().contains_key(&id) {
                     continue;
                 }
                 let status = match next(5) {
@@ -1587,7 +1587,7 @@ mod tests {
                 ];
                 store.apply_batch(&ops, 8).unwrap();
             }
-            let d = Density::of(&store.items, &map, condition);
+            let d = Density::of(store.items(), &map, condition);
             for _ in 0..400 {
                 let from = origin - 100_000 + next(4_200_000) as i64;
                 let to = from + 1 + next(4_000_000) as i64;

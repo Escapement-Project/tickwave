@@ -420,7 +420,7 @@ fn direct(w: Wires) -> Counts {
 }
 
 fn of(h: &Host, a: AnalysisId, kinds: &[KindId]) -> Vec<Item> {
-    let mut items: Vec<Item> = (h.store(a).items.values())
+    let mut items: Vec<Item> = (h.store(a).items().values())
         .filter(|i| kinds.contains(&i.id.kind))
         .cloned()
         .collect();
@@ -560,7 +560,7 @@ fn a_jtag_bit_names_the_cjtag_element_it_came_from() {
             panic!("bit {k} names no upstream element");
         };
         assert_eq!((id.kind, seq, index), (cjtag::PACKET, cjtag::NTDI_BITS, 0));
-        let packet = &h.store(c).items[&id];
+        let packet = &h.store(c).items()[&id];
         let ntdi = packet.seq(cjtag::NTDI_BITS)[0];
         assert_eq!(ntdi.value, 1 - e.value, "nTDI is TDI inverted");
         assert!(matches!(ntdi.at, Observation::Wire(_)));

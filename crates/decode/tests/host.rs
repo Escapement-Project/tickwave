@@ -474,7 +474,7 @@ fn every_operation_is_checked_and_a_batch_commits_whole() {
         assert_eq!(got, Err(Refusal::Schema { op: 1, why }), "case {k}");
     }
     assert!(
-        h.store(a).items[&f].fields.is_empty(),
+        h.store(a).items()[&f].fields.is_empty(),
         "a refused batch commits nothing"
     );
 
@@ -609,7 +609,7 @@ fn every_operation_is_checked_and_a_batch_commits_whole() {
         close(f, 19),
     ];
     h.submit(batch(&h, a, 1, ops)).unwrap();
-    let item = &h.store(a).items[&f];
+    let item = &h.store(a).items()[&f];
     assert_eq!((item.end, item.seq(BITS).len()), (Some(19), 2));
     assert_eq!(h.id_text(a, &f), "toy/frame/10");
     assert_eq!(h.id_text(a, &Id { disc: 2, ..child }), "toy/child/12.2");
@@ -1039,7 +1039,7 @@ fn a_stacked_analysis_receives_each_loss_in_its_place_and_must_declare_it() {
     run_all(&mut h);
     assert_eq!(h.lost(p), &[gap]);
     assert_eq!(h.lost(q), &[gap], "the stacked analysis declared it again");
-    let pairs = &h.store(q).items;
+    let pairs = &h.store(q).items();
     assert!(
         pairs
             .values()
@@ -1108,7 +1108,7 @@ fn completed_items_and_pieces_reach_stacked_analyses_as_subscribed() {
     run_all(&mut h);
     assert_eq!(h.store(p).counts.closes, 6);
     assert_eq!(h.store(q).counts.closes, 3, "three pairs");
-    let pair = h.store(q).items.values().next().unwrap();
+    let pair = h.store(q).items().values().next().unwrap();
     assert_eq!(pair.links, vec![(FIRST, Ref::Upstream(Id::new(PULSE, 10)))]);
     assert_eq!(
         pair.field(WIDTH).unwrap().value,
@@ -1348,8 +1348,12 @@ fn kept_checkpoints_spread_within_their_budget_and_a_seek_replays_from_the_neare
     };
     let (mut h, p, q) = run();
     run_all(&mut h);
-    let full = (h.store(p).counts, h.store(q).counts, h.store(q).items.len());
-    let forward = h.store(q).items.clone();
+    let full = (
+        h.store(p).counts,
+        h.store(q).counts,
+        h.store(q).items().len(),
+    );
+    let forward = h.store(q).items().clone();
     let all = h.kept(p).unwrap();
     assert!(all.count > 10, "{all:?}");
     assert!(
@@ -1372,7 +1376,7 @@ fn kept_checkpoints_spread_within_their_budget_and_a_seek_replays_from_the_neare
         (full.0, full.1),
         "a replay from the nearest ends where the forward pass did"
     );
-    let replayed = &h.store(q).items;
+    let replayed = &h.store(q).items();
     assert!(replayed.keys().all(|id| forward.contains_key(id)));
     assert!(
         (forward.iter())
@@ -1400,7 +1404,7 @@ fn kept_checkpoints_spread_within_their_budget_and_a_seek_replays_from_the_neare
     };
     assert!(before < at);
     run_all(&mut h);
-    let got: Vec<_> = (h.store(q).items.iter())
+    let got: Vec<_> = (h.store(q).items().iter())
         .filter(|(_, i)| meets(i))
         .map(|(id, i)| (*id, i.end))
         .collect();
@@ -1414,7 +1418,11 @@ fn kept_checkpoints_spread_within_their_budget_and_a_seek_replays_from_the_neare
     assert_eq!(h.seek(p, Tick::MIN).unwrap(), Seek::FromStart);
     run_all(&mut h);
     assert_eq!(
-        (h.store(p).counts, h.store(q).counts, h.store(q).items.len()),
+        (
+            h.store(p).counts,
+            h.store(q).counts,
+            h.store(q).items().len()
+        ),
         full
     );
 
@@ -1512,7 +1520,7 @@ fn a_window_chain_beside_the_forward_pass_re_derives_its_span_and_leaves_the_pas
         (
             h.store(p).counts,
             h.store(q).counts,
-            h.store(q).items.clone(),
+            h.store(q).items().clone(),
             h.kept(p).unwrap(),
         )
     };
@@ -1554,7 +1562,7 @@ fn a_window_chain_beside_the_forward_pass_re_derives_its_span_and_leaves_the_pas
     let want = span(&alone.2);
     assert!(!want.is_empty());
     assert_eq!(
-        span(&win(&h, id, q).store().items),
+        span(win(&h, id, q).store().items()),
         want,
         "the window's items are the forward pass's"
     );
@@ -1565,7 +1573,7 @@ fn a_window_chain_beside_the_forward_pass_re_derives_its_span_and_leaves_the_pas
         (
             h.store(p).counts,
             h.store(q).counts,
-            h.store(q).items.len(),
+            h.store(q).items().len(),
             h.kept(p).unwrap()
         ),
         (alone.0, alone.1, alone.2.len(), alone.3),
@@ -1586,7 +1594,7 @@ fn a_window_keeps_an_item_open_across_its_checkpoint_when_the_forward_pass_kept_
     h.keep_checkpoints(p, Keeping::new(1, usize::MAX)).unwrap();
     run_all(&mut h);
     assert!(
-        h.store(q).items.is_empty(),
+        h.store(q).items().is_empty(),
         "the forward pass keeps nothing closed"
     );
     for start in [695, 700, 705, 711, 712] {
@@ -1608,12 +1616,12 @@ fn a_window_keeps_an_item_open_across_its_checkpoint_when_the_forward_pass_kept_
         h.run_until(|h| h.window_run(w, q).unwrap().settled() >= window.end)
             .unwrap();
         for (a, x) in [(ap, p), (aq, q)] {
-            let want = span(&all.store(a).items);
-            let got = span(&h.window_run(w, x).unwrap().store().items);
+            let want = span(all.store(a).items());
+            let got = span(h.window_run(w, x).unwrap().store().items());
             assert_eq!(got, want, "the window at {start}");
         }
         if start == 711 {
-            let pulses = span(&all.store(ap).items);
+            let pulses = span(all.store(ap).items());
             assert!(
                 pulses.iter().any(|(id, ..)| id.anchor < start),
                 "a pulse open at {start}"
@@ -1656,9 +1664,9 @@ fn an_item_ending_past_a_checkpoints_input_is_kept_by_a_window_restored_from_it(
         h.run_until(|h| win(h, w, q).settled() >= window.end)
             .unwrap();
         for (f, x) in [(ap, p), (aq, q)] {
-            let want = span(&all.store(f).items, window);
+            let want = span(all.store(f).items(), window);
             assert_eq!(
-                span(&win(&h, w, x).store().items, window),
+                span(win(&h, w, x).store().items(), window),
                 want,
                 "the window at {start}"
             );
@@ -1666,7 +1674,7 @@ fn an_item_ending_past_a_checkpoints_input_is_kept_by_a_window_restored_from_it(
         h.retire(w);
     }
     assert!(
-        h.store(p).items.is_empty() && h.store(q).items.is_empty(),
+        h.store(p).items().is_empty() && h.store(q).items().is_empty(),
         "finished, the forward pass holds nothing past its spans"
     );
 }
@@ -1721,9 +1729,9 @@ fn two_live_window_chains_each_read_their_own_window() {
     .unwrap();
     for (w, window) in [(a, windows[0]), (b, windows[1])] {
         for (f, x) in [(ap, p), (aq, q)] {
-            let want = span(&all.store(f).items, window);
+            let want = span(all.store(f).items(), window);
             assert!(!want.is_empty());
-            assert_eq!(span(&win(&h, w, x).store().items, window), want);
+            assert_eq!(span(win(&h, w, x).store().items(), window), want);
         }
     }
     h.retire(a);
@@ -1732,8 +1740,8 @@ fn two_live_window_chains_each_read_their_own_window() {
         "the retired chain reads nothing"
     );
     assert_eq!(
-        span(&win(&h, b, q).store().items, windows[1]),
-        span(&all.store(aq).items, windows[1]),
+        span(win(&h, b, q).store().items(), windows[1]),
+        span(all.store(aq).items(), windows[1]),
         "the other chain is untouched"
     );
     // A third chain while the second is live: neither handle reads the other's runs.
@@ -1743,8 +1751,8 @@ fn two_live_window_chains_each_read_their_own_window() {
     assert!(h.window_run(a, q).is_none());
     assert_ne!(win(&h, b, q).id(), win(&h, c, q).id());
     assert_eq!(
-        span(&win(&h, c, q).store().items, windows[0]),
-        span(&all.store(aq).items, windows[0])
+        span(win(&h, c, q).store().items(), windows[0]),
+        span(all.store(aq).items(), windows[0])
     );
 }
 
@@ -1789,7 +1797,7 @@ fn retired_window_chains_leave_nothing_behind() {
     let distinct: std::collections::HashSet<_> = runs.iter().copied().collect();
     assert_eq!(distinct.len(), 301, "no two chains share a run id");
     assert!(
-        !h.store(q).items.is_empty(),
+        !h.store(q).items().is_empty(),
         "the forward chain is untouched"
     );
 }
@@ -1818,7 +1826,7 @@ fn the_forward_pass_takes_a_turn_after_a_run_of_window_turns() {
         h.run_until(|h| h.window_run(w, q).unwrap().settled() >= window.end)
             .unwrap();
         let moved = h.consumed(p) - before;
-        let items: Vec<_> = (h.window_run(w, q).unwrap().store().items.iter())
+        let items: Vec<_> = (h.window_run(w, q).unwrap().store().items().iter())
             .map(|(id, i)| (*id, i.end, i.fields.len()))
             .collect();
         h.retire(w);
@@ -1875,7 +1883,7 @@ fn a_window_ahead_of_the_forward_pass_is_provisional_until_the_pass_reaches_it()
         h.consumed(p) < window.start,
         "the forward pass has not reached it"
     );
-    assert!(!win(&h, w, p).store().items.is_empty());
+    assert!(!win(&h, w, p).store().items().is_empty());
     h.retire(w);
     h.run_until(|h| h.consumed(p) >= window.end).unwrap();
     let again = h.derive(p, window).unwrap();
@@ -1884,8 +1892,8 @@ fn a_window_ahead_of_the_forward_pass_is_provisional_until_the_pass_reaches_it()
     h.run_until(|h| win(h, w, q).settled() >= window.end)
         .unwrap();
     assert_eq!(
-        span(&win(&h, w, q).store().items),
-        span(&all.store(aq).items),
+        span(win(&h, w, q).store().items()),
+        span(all.store(aq).items()),
         "exact once the pass is past"
     );
 }

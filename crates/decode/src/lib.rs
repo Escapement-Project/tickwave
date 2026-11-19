@@ -40,7 +40,7 @@ pub use schema::{
     Mismatch, Name, PortDecl, Schema, SchemaError, SeqDecl, Setting, SettingDecl, SettingId,
     SettingType, field, name, seq,
 };
-pub use store::{Counts, Field, Item, Refused, Store};
+pub use store::{CHANGES_AT_MOST, Counts, Field, Item, Refused, Revision, Store};
 
 /// Words folded into one value that differs where they do, for keys compared within one build.
 pub fn fold(words: impl IntoIterator<Item = u64>) -> u64 {

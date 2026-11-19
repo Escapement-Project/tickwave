@@ -2469,7 +2469,7 @@ impl Host {
                 // Closed items are output, not state: a seek re-derives what it keeps, except
                 // those ending past the input taken, which a span starting there meets.
                 for s in &mut cut.snaps {
-                    (s.store.items).retain(|_, i| i.end.is_none_or(|e| e > consumed));
+                    s.store.retain(|i| i.end.is_none_or(|e| e > consumed));
                 }
                 let b = cut.bytes();
                 keeper.bytes += b;

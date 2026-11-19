@@ -393,7 +393,7 @@ fn track(
     let a = h.index(analysis).unwrap();
     let store = h.store(a).clone();
     let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
-    let density = Density::of(&store.items, &map, condition);
+    let density = Density::of(store.items(), &map, condition);
     let mut d = Drawn {
         name,
         palette: Palette::from_visuals(&egui::Visuals::default()),
@@ -424,7 +424,7 @@ fn frame(d: &mut Drawn) -> egui::FullOutput {
                 &d.shown,
                 d.name,
                 &d.schema,
-                &d.store.items,
+                d.store.items(),
                 &d.density,
                 &d.labels,
                 &d.palette,
@@ -475,7 +475,7 @@ fn paint(d: &Drawn) -> usize {
     let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
     let paints = driver_paints(
         &d.schema,
-        &d.store.items,
+        d.store.items(),
         &d.density,
         &map,
         &d.shown.window,

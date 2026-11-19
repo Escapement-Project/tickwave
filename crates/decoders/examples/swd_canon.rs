@@ -55,7 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     h.run_until(|_| false)?;
     let seconds = start.elapsed().as_secs_f64();
     canon::print(&h, &[(s, None), (a, Some(s)), (m, Some(a))]);
-    let dropped = (h.store(s).items.values())
+    let dropped = (h.store(s).items().values())
         .filter(|i| i.status == Some(Status::Incomplete(swd::DROPPED)))
         .count();
     println!("transfers whose rises SWD no longer held: {dropped}");

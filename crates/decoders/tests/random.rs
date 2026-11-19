@@ -126,7 +126,7 @@ fn cases(seed: u64, build: impl Fn(&mut fastrand::Rng) -> (Host, Vec<AnalysisId>
                 "seed {seed}, case {case}: lost input out of order: {lost:?}"
             );
             let swd = h.definition(a).name == "swd";
-            for i in h.store(a).items.values() {
+            for i in h.store(a).items().values() {
                 assert!(
                     i.end.is_none_or(|e| e >= i.start),
                     "seed {seed}, case {case}: {:?} ends before it starts",
@@ -227,7 +227,7 @@ fn a_window_ahead_of_the_forward_pass_says_what_it_cannot_know() {
     };
     h.run_until(mem).unwrap();
     let unknown = |x: AnalysisId| {
-        (h.window_run(w, x).unwrap().store().items.values())
+        (h.window_run(w, x).unwrap().store().items().values())
             .filter(|i| {
                 (i.fields.iter())
                     .any(|f| matches!(f.value, escapement_tickwave_decode::Value::Unknown { .. }))

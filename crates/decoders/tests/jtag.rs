@@ -281,7 +281,7 @@ fn decoded_with(options: HostOptions, w: Wires, window: Tick) -> Counts {
 }
 
 fn of(h: &Host, a: AnalysisId, kinds: &[KindId]) -> Vec<Item> {
-    let mut items: Vec<Item> = (h.store(a).items.values())
+    let mut items: Vec<Item> = (h.store(a).items().values())
         .filter(|i| kinds.contains(&i.id.kind))
         .cloned()
         .collect();
@@ -485,7 +485,7 @@ fn where_both_edges_read_tdo_the_ir_captures_keep_the_fall() {
     // TDO settled through each clock, changing at each fall: both edges read it.
     let fall = with_edge(s.wires(), TdoEdge::Fall);
     let follow = with_edge(s.wires(), TdoEdge::IrCapture);
-    let items = |(h, j): &(Host, AnalysisId)| format!("{:?}", h.store(*j).items);
+    let items = |(h, j): &(Host, AnalysisId)| format!("{:?}", h.store(*j).items());
     assert_eq!(items(&follow), items(&fall));
 }
 

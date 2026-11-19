@@ -1,5 +1,7 @@
 //! One analysis's output as the host admits it: the open items, checked op by op against their
-//! lifecycle, and whole items kept only where they meet a span a view asked for.
+//! lifecycle, and whole items kept only where they meet a span a view asked for. A store logs
+//! which items each change touched, so a view that keeps its own reading of them (an index, the
+//! rows of a list) takes in only what changed.
 
 use crate::output::{
     Element, FieldId, Id, LinkId, MAX_BITS, MAX_CHUNK, MAX_FIELDS, MAX_LINKS, MAX_TEXT, Op, Ref,
@@ -7,6 +9,7 @@ use crate::output::{
 };
 use foldhash::HashMap;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Why an operation breaks its item's lifecycle.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -313,6 +316,77 @@ impl Staged<'_> {
     }
 }
 
+/// The most ids a store's change log holds. A reader further behind than this reads the items
+/// again in full.
+pub const CHANGES_AT_MOST: usize = 1 << 18;
+
+/// How far a store's changes had gone when a reader last took them in. Only the store it came
+/// from answers it: another store, a clone included, has changes of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Revision {
+    store: u64,
+    at: u64,
+}
+
+static STORES: AtomicU64 = AtomicU64::new(0);
+
+/// The ids a store's changes touched, oldest first, and the store's identity. A clone starts a
+/// log of its own under a new identity: a checkpoint's copy, restored, is a store no reader has
+/// read.
+#[derive(Debug)]
+struct Log {
+    store: u64,
+    ids: Vec<Id>,
+    /// The revision before `ids[0]`.
+    from: u64,
+    /// Where the batch under way logged its first id, so an item that several of its ops touch
+    /// one after another is logged once. No reader looks in during a batch.
+    batch: usize,
+}
+
+impl Default for Log {
+    fn default() -> Self {
+        Self {
+            store: STORES.fetch_add(1, Ordering::Relaxed),
+            ids: Vec::new(),
+            from: 0,
+            batch: 0,
+        }
+    }
+}
+
+impl Clone for Log {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl Log {
+    fn revision(&self) -> Revision {
+        Revision {
+            store: self.store,
+            at: self.from + self.ids.len() as u64,
+        }
+    }
+
+    fn start_batch(&mut self) {
+        self.batch = self.ids.len();
+    }
+
+    fn touch(&mut self, id: Id) {
+        if self.ids.len() > self.batch && self.ids.last() == Some(&id) {
+            return;
+        }
+        self.ids.push(id);
+        if self.ids.len() > CHANGES_AT_MOST {
+            let half = CHANGES_AT_MOST / 2;
+            self.ids.drain(..half);
+            self.from += half as u64;
+            self.batch = self.batch.saturating_sub(half);
+        }
+    }
+}
+
 /// Checks ops and keeps items: every open one, its fields and links, so that a checkpoint carries
 /// what a later window needs of it, and once closed those that meet a retained span, and in a
 /// host's store those that end past where the host has passed it. An item keeps the elements
@@ -320,7 +394,8 @@ impl Staged<'_> {
 #[derive(Clone, Debug, Default)]
 pub struct Store {
     open: HashMap<Id, Open>,
-    pub items: BTreeMap<Id, Item>,
+    items: BTreeMap<Id, Item>,
+    log: Log,
     pub keep: Vec<Span>,
     pub counts: Counts,
     /// Closed items that meet no retained span, by end, held until `pass` goes past their ends: a
@@ -339,6 +414,41 @@ impl Store {
             keep,
             ..Self::default()
         }
+    }
+
+    /// Every item held: those open, and those closed that it keeps.
+    pub fn items(&self) -> &BTreeMap<Id, Item> {
+        &self.items
+    }
+
+    /// How far its changes have gone, for a reader to ask `changed_since` later.
+    pub fn revision(&self) -> Revision {
+        self.log.revision()
+    }
+
+    /// The ids of the items changed since `since`, oldest first: opened, given a field, elements
+    /// or a link, closed, or dropped. An id comes once for each batch that touched it, or more.
+    /// Read each in `items`: one not there was dropped. None where `since` is another store's, or
+    /// further back than the log holds (`CHANGES_AT_MOST`): read the items again in full.
+    pub fn changed_since(&self, since: Revision) -> Option<&[Id]> {
+        if since.store != self.log.store || since.at < self.log.from {
+            return None;
+        }
+        let k = usize::try_from(since.at - self.log.from).ok()?;
+        self.log.ids.get(k..)
+    }
+
+    /// Keeps only the items `keep` holds to, logging each one dropped.
+    pub(crate) fn retain(&mut self, mut keep: impl FnMut(&Item) -> bool) {
+        self.log.start_batch();
+        let log = &mut self.log;
+        self.items.retain(|id, i| {
+            let kept = keep(i);
+            if !kept {
+                log.touch(*id);
+            }
+            kept
+        });
     }
 
     pub fn open_count(&self) -> usize {
@@ -368,13 +478,15 @@ impl Store {
                     + seqs
             })
             .sum();
-        size_of::<Self>() + open + items + self.keep.capacity() * size_of::<Span>()
+        let log = self.log.ids.capacity() * size_of::<Id>();
+        size_of::<Self>() + open + items + log + self.keep.capacity() * size_of::<Span>()
     }
 
     /// Drops the closed items held past the retained spans whose ends are at or before `to`, and
     /// holds those that close from now on until a pass goes past their ends.
     pub(crate) fn pass(&mut self, to: Tick) {
         self.passed = Some(to);
+        self.log.start_batch();
         while let Some(&(end, id)) = self.ahead.first() {
             if end > to {
                 break;
@@ -383,6 +495,7 @@ impl Store {
             let keep = &self.keep;
             if (self.items.get(&id)).is_some_and(|i| !keep.iter().any(|s| meets(i.start, end, s))) {
                 self.items.remove(&id);
+                self.log.touch(id);
             }
         }
     }
@@ -416,6 +529,7 @@ impl Store {
             peak = peak.max(staged.len());
         }
         self.undo.clear();
+        self.log.start_batch();
         for op in ops {
             self.record(op);
         }
@@ -557,8 +671,9 @@ impl Store {
         Ok(())
     }
 
-    /// Records a checked op: counts it, and keeps it where its item is retained.
+    /// Records a checked op: counts it, keeps it where its item is retained, and logs its item.
     fn record(&mut self, op: &Op) {
+        self.log.touch(*op.id());
         let c = &mut self.counts;
         c.ops += 1;
         let mut h = Fnv(c.digest ^ 0xcbf2_9ce4_8422_2325);
@@ -792,5 +907,143 @@ mod tests {
             forward.items.is_empty(),
             "closed, it meets no span of the forward pass"
         );
+    }
+
+    fn open(id: Id) -> Op {
+        Op::Open {
+            id,
+            parent: None,
+            start: id.anchor,
+        }
+    }
+
+    fn close(id: Id, end: Tick) -> Op {
+        Op::Close {
+            id,
+            end,
+            status: Status::Complete,
+        }
+    }
+
+    fn changed(store: &Store, since: Revision) -> Vec<Tick> {
+        let ids = store.changed_since(since).expect("the log reaches back");
+        ids.iter().map(|i| i.anchor).collect()
+    }
+
+    #[test]
+    fn a_store_logs_each_item_a_batch_touches_and_each_it_drops() {
+        let id = |anchor| Id::new(KindId(0), anchor);
+        let mut store = Store::with_keep(vec![Span {
+            start: 100,
+            end: 200,
+        }]);
+        let before = store.revision();
+        assert_eq!(changed(&store, before), Vec::<Tick>::new());
+        let set = Op::Set {
+            id: id(150),
+            field: FieldId(0),
+            value: Value::Bool(true),
+            span: None,
+            driver: None,
+        };
+        // Kept; then closed outside every kept span, and dropped at its close.
+        let ops = [
+            open(id(150)),
+            set,
+            close(id(150), 160),
+            open(id(300)),
+            close(id(300), 310),
+        ];
+        store.apply_batch(&ops, 8).unwrap();
+        assert_eq!(
+            changed(&store, before),
+            [150, 300],
+            "once each, though touched by several ops"
+        );
+        assert!(!store.items().contains_key(&id(300)));
+        // Ops on two items interleaved log each again.
+        let r = store.revision();
+        let link = |at, other| Op::Link {
+            id: id(at),
+            link: LinkId(0),
+            other: Ref::Own(id(other)),
+        };
+        store
+            .apply_batch(&[open(id(170)), open(id(180)), link(170, 150)], 8)
+            .unwrap();
+        assert_eq!(changed(&store, r), [170, 180, 170]);
+        // A refused batch changes nothing, so it logs nothing.
+        let r = store.revision();
+        store.apply_batch(&[close(id(150), 400)], 8).unwrap_err();
+        assert_eq!(store.revision(), r);
+        // Held for a checkpoint past where the host has passed it, then dropped by a later pass.
+        store.pass(0);
+        let r = store.revision();
+        store
+            .apply_batch(&[open(id(400)), close(id(400), 410)], 8)
+            .unwrap();
+        assert!(store.items().contains_key(&id(400)));
+        assert_eq!(changed(&store, r), [400]);
+        let r = store.revision();
+        store.pass(500);
+        assert!(!store.items().contains_key(&id(400)));
+        assert_eq!(changed(&store, r), [400]);
+        // A pass that drops nothing logs nothing; nor does dropping with nothing to drop.
+        let r = store.revision();
+        store.pass(600);
+        store.retain(|_| true);
+        assert_eq!(store.revision(), r);
+        // What `retain` drops is logged.
+        store
+            .apply_batch(&[close(id(170), 175), close(id(180), 185)], 8)
+            .unwrap();
+        let r = store.revision();
+        store.retain(|i| i.id != id(170) && i.id != id(150));
+        assert_eq!(changed(&store, r), [150, 170]);
+    }
+
+    #[test]
+    fn a_revision_is_answered_only_by_its_own_store() {
+        let id = |anchor| Id::new(KindId(0), anchor);
+        let mut store = Store::with_keep(vec![Span {
+            start: 0,
+            end: Tick::MAX,
+        }]);
+        store.apply_batch(&[open(id(1))], 8).unwrap();
+        let read = store.revision();
+        let mut copy = store.clone();
+        assert_eq!(copy.items().len(), 1, "a clone holds the same items");
+        assert!(
+            copy.changed_since(read).is_none(),
+            "a clone is another store"
+        );
+        assert_eq!(copy.changed_since(copy.revision()), Some(&[][..]));
+        copy.apply_batch(&[open(id(2))], 8).unwrap();
+        assert!(store.changed_since(copy.revision()).is_none());
+        assert!(Store::default().changed_since(read).is_none());
+        assert_eq!(changed(&store, read), Vec::<Tick>::new());
+    }
+
+    #[test]
+    fn a_reader_further_back_than_the_log_holds_reads_the_items_again() {
+        let id = |anchor| Id::new(KindId(0), anchor);
+        let mut store = Store::with_keep(vec![Span {
+            start: 0,
+            end: Tick::MAX,
+        }]);
+        let first = store.revision();
+        let n = CHANGES_AT_MOST as Tick + 1;
+        let ops: Vec<Op> = (0..n)
+            .flat_map(|k| [open(id(k)), close(id(k), k)])
+            .collect();
+        store.apply_batch(&ops, 8).unwrap();
+        assert!(store.changed_since(first).is_none());
+        let r = store.revision();
+        store
+            .apply_batch(&[open(id(n)), close(id(n), n)], 8)
+            .unwrap();
+        assert_eq!(changed(&store, r), [n]);
+        let logged = store.log.ids.len();
+        assert!(logged <= CHANGES_AT_MOST, "{logged} ids logged");
     }
 }
