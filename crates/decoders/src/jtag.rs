@@ -26,8 +26,8 @@ use crate::cjtag::JtagOnCjtag;
 use escapement_tickwave_decode::{
     Cause, Decoder, Definition, Element, ElementType, Exchange, Factory, FieldId, FieldType, Id,
     InputDecl, InputId, KindDecl, KindId, Label, MAX_BITS, Mode, Need, Observation, Observed, Out,
-    Pause, Reason, Request, Schema, SeqId, Setting, SettingDecl, SettingId, Span, Status, Tick,
-    UpstreamDecl, Value, Window, field, name, seq,
+    Pause, PortDecl, Reason, Request, Schema, SeqId, Setting, SettingDecl, SettingId, Span, Status,
+    Tick, UpstreamDecl, Value, Window, field, name, seq,
 };
 use std::ops::Range;
 use std::sync::Arc;
@@ -286,8 +286,14 @@ pub fn tdo_edge(edge: TdoEdge) -> (&'static str, Setting) {
 pub fn definition() -> Arc<Definition> {
     Arc::new(
         Definition::new("jtag", 1, schema())
-            .with_ports(["TCK", "TMS", "TDI"])
-            .with_optional_ports(["TDO"])
+            .with_ports([
+                PortDecl::new("TCK")
+                    .about("The test clock. The TAP reads TMS and TDI at its rise."),
+                PortDecl::new("TMS").about("Test mode select, which moves the TAP between states."),
+                PortDecl::new("TDI").about("The data shifted into the chain."),
+            ])
+            .with_optional_ports([PortDecl::new("TDO")
+                .about("The data shifted out of the chain. Without it, a scan's TDO is unknown.")])
             .with_inputs([
                 InputDecl::Wire,
                 // The Standard Protocol's TMS bits, an escape's among them, and the Scan Packets,
@@ -296,11 +302,20 @@ pub fn definition() -> Arc<Definition> {
                     .from(["cjtag"])
                     .with_kinds(["jscan", "escape", "packet"])
                     .with_sequences(["tms", "ntdi"])
+                    .about("cJTAG's TMS bits and Scan Packets, a JTAG clock each.")
                     .into(),
             ])
             .with_settings(vec![
-                SettingDecl::choice("tdo_edge", TdoEdge::NAMES, 2).for_inputs([FROM_WIRE]),
-                SettingDecl::list("chain", 1..=IR_AT_MOST, CHAIN_AT_MOST, vec![]),
+                SettingDecl::choice("tdo_edge", TdoEdge::NAMES, 2)
+                    .for_inputs([FROM_WIRE])
+                    .about(
+                        "The TCK edge TDO is read at: the rise, the fall after it, or whichever \
+                         the IR scans' captures show.",
+                    ),
+                SettingDecl::list("chain", 1..=IR_AT_MOST, CHAIN_AT_MOST, vec![]).about(
+                    "Each TAP's IR length, the TAP nearest TDO first, to cut each scan into its \
+                     TAPs' parts.",
+                ),
             ]),
     )
 }

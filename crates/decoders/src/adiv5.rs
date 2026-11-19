@@ -218,17 +218,22 @@ pub const IDR_NOT_GIVEN: i64 = -1;
 pub fn adi_definition() -> Arc<Definition> {
     Arc::new(
         Definition::new("adiv5", 1, adi_schema())
-            .with_inputs(["swd", "jtag-dp"].map(|from| {
+            .with_inputs([
+                ("swd", "SWD's transfers, an AP read's data arriving in the next AP or RDBUFF read."),
+                ("jtag-dp", "JTAG-DP's transfers, each read carrying its own data."),
+            ]
+            .map(|(from, about)| {
                 UpstreamDecl::new("transfers", Mode::Pieces)
                     .from([from])
                     .with_kinds(["transfer"])
+                    .about(about)
             }))
-            .with_settings(vec![SettingDecl::list(
-                "idr",
-                IDR_NOT_GIVEN..=0xFFFF_FFFF,
-                256,
-                vec![],
-            )]),
+            .with_settings(vec![
+                SettingDecl::list("idr", IDR_NOT_GIVEN..=0xFFFF_FFFF, 256, vec![]).about(
+                    "Each AP's IDR where the recording starts, AP 0 first, until an IDR read \
+                     gives it.",
+                ),
+            ]),
     )
 }
 
@@ -815,7 +820,8 @@ pub fn mem_definition() -> Arc<Definition> {
             Mode::Completed,
         )
         .from(["adiv5"])
-        .with_kinds(["ap-read", "ap-write"])]),
+        .with_kinds(["ap-read", "ap-write"])
+        .about("ADIv5's AP reads and writes.")]),
     )
 }
 

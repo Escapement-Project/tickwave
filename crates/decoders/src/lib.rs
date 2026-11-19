@@ -19,3 +19,35 @@ pub(crate) fn window_bytes(w: &Option<(escapement_tickwave_decode::Window, usize
         held::<escapement_tickwave_decode::Observed>(w.events.capacity())
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use escapement_tickwave_decode::InputDecl;
+
+    /// A form that binds a decoder says what each of its ports, settings and upstream inputs is.
+    #[test]
+    fn every_port_setting_and_input_says_what_it_is() {
+        let defs = [
+            swd::definition(),
+            jtag::definition(),
+            cjtag::definition(),
+            jtagdp::definition(),
+            adiv5::adi_definition(),
+            adiv5::mem_definition(),
+        ];
+        for d in defs {
+            for p in &d.ports {
+                assert!(p.about.is_some(), "{} port {}", d.name, p.name);
+            }
+            for s in &d.settings {
+                assert!(s.about.is_some(), "{} setting {}", d.name, s.name);
+            }
+            for i in &d.inputs {
+                if let InputDecl::Upstream(u) = i {
+                    assert!(u.about.is_some(), "{} input {}", d.name, u.port);
+                }
+            }
+        }
+    }
+}

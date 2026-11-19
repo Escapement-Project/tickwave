@@ -28,9 +28,9 @@ mod tap7;
 use crate::jtag::{self, Clocked, Inputs, Tap};
 use escapement_tickwave_decode::{
     Cause, Decoder, Definition, Delivery, Element, ElementType, Exchange, Factory, FieldId,
-    FieldType, Id, KindDecl, KindId, Label, Observation, Observed, Op, Out, Pause, Reason, Request,
-    Role, Schema, SeqId, Setting, SettingDecl, SettingId, Span, Status, Tick, Value, Window, field,
-    name, seq,
+    FieldType, Id, KindDecl, KindId, Label, Observation, Observed, Op, Out, Pause, PortDecl,
+    Reason, Request, Role, Schema, SeqId, Setting, SettingDecl, SettingId, Span, Status, Tick,
+    Value, Window, field, name, seq,
 };
 use std::sync::Arc;
 use tap7::{
@@ -509,10 +509,20 @@ pub fn start_up(offline: bool) -> (&'static str, Setting) {
 pub fn definition() -> Arc<Definition> {
     Arc::new(
         Definition::new("cjtag", 1, schema())
-            .with_ports(["TCKC", "TMSC"])
+            .with_ports([
+                PortDecl::new("TCKC").about("The clock. A bit is TMSC's level at its fall."),
+                PortDecl::new("TMSC").about(
+                    "The data line, carrying TMS, TDI and TDO in turn, and the escapes on its \
+                     edges while TCKC is high.",
+                ),
+            ])
             .with_settings(vec![
-                SettingDecl::flag("assume_qualified", false),
-                SettingDecl::choice("start_up", START_UPS, 0),
+                SettingDecl::flag("assume_qualified", false).about(
+                    "Whether the target is taken to drive TDO where the controller's counts are \
+                     not known, until a reset makes them known.",
+                ),
+                SettingDecl::choice("start_up", START_UPS, 0)
+                    .about("Whether a reset leaves the controller online or offline."),
             ]),
     )
 }

@@ -7,10 +7,10 @@ use escapement_tickwave_decode::{
     AnalysisId, Batch, BindError, Bound, CONTRACT, Cause, CheckpointError, Contract, Decoder,
     Definition, Delivery, Element, ElementType, Exchange, FieldDecl, FieldId, FieldType, Host,
     HostOptions, Id, InputDecl, InputId, InputSpec, Keeping, KindDecl, KindId, LinkDecl, LinkId,
-    LinkTo, LogEntry, Mismatch, Mode, Name, Need, Observation, Op, Pause, Reason, Ref, Refusal,
-    Refused, Reply, Role, RunView, Schema, SchemaError, Seek, SeqDecl, SeqId, Setting, SettingDecl,
-    SettingId, Source, SourceError, Span, Status, Tick, UpstreamDecl, Value, Window, WindowId,
-    field, name, seq,
+    LinkTo, LogEntry, MAX_PHRASE, Mismatch, Mode, Name, Need, Observation, Op, Pause, PortDecl,
+    Reason, Ref, Refusal, Refused, Reply, Role, RunView, Schema, SchemaError, Seek, SeqDecl, SeqId,
+    Setting, SettingDecl, SettingId, Source, SourceError, Span, Status, Tick, UpstreamDecl, Value,
+    Window, WindowId, field, name, seq,
 };
 use std::sync::{Arc, Mutex, atomic::Ordering::Relaxed};
 
@@ -2254,6 +2254,16 @@ fn a_definition_whose_settings_or_ports_clash_is_refused() {
         refused(vec![SettingDecl::flag("n", false).for_inputs([InputId(1)])]),
         schema(SchemaError::SettingInput(name("n")))
     );
+    assert_eq!(
+        refused(vec![SettingDecl::flag("n", false).about("")]),
+        schema(SchemaError::BadPhrase)
+    );
+    let port =
+        Definition::new("set", 1, pulses_schema()).with_ports([PortDecl::new("p").about("")]);
+    assert_eq!(
+        bound(Arc::new(port), vec![true], &[]),
+        schema(SchemaError::BadPhrase)
+    );
     let twice = Arc::new(
         Definition::new("set", 1, pulses_schema())
             .with_ports(["clock"])
@@ -2293,6 +2303,11 @@ fn a_definition_whose_settings_or_ports_clash_is_refused() {
     ];
     assert!(inputs(alternatives).is_ok());
     assert_eq!(inputs(vec![up("")]), schema(SchemaError::BadName));
+    let about = UpstreamDecl::new("in", Mode::Completed).about("x".repeat(MAX_PHRASE + 1));
+    assert_eq!(
+        inputs(vec![InputDecl::Wire, about.into()]),
+        schema(SchemaError::BadPhrase)
+    );
 }
 
 #[test]

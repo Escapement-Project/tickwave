@@ -68,8 +68,11 @@ pub fn definition() -> Arc<Definition> {
         Definition::new("jtag-dp", 1, schema())
             .with_inputs([UpstreamDecl::new("scans", Mode::Completed)
                 .from(["jtag"])
-                .with_kinds(["instruction", "data"])])
-            .with_settings(vec![SettingDecl::int("tap", 0..=7, 0)]),
+                .with_kinds(["instruction", "data"])
+                .about("JTAG's instructions and data, cut by its chain setting.")])
+            .with_settings(vec![SettingDecl::int("tap", 0..=7, 0).about(
+                "The DP's place in JTAG's chain, counting from the TAP nearest TDO.",
+            )]),
     )
 }
 

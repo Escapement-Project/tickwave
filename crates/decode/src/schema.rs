@@ -79,6 +79,8 @@ pub struct UpstreamDecl {
     pub kinds: Vec<Name>,
     pub mode: Mode,
     pub sequences: Vec<Name>,
+    /// A sentence saying what it is, for a form that binds it.
+    pub about: Option<Name>,
 }
 
 impl UpstreamDecl {
@@ -90,6 +92,7 @@ impl UpstreamDecl {
             kinds: vec![],
             mode,
             sequences: vec![],
+            about: None,
         }
     }
 
@@ -108,6 +111,11 @@ impl UpstreamDecl {
         self.sequences = names(sequences);
         self
     }
+
+    pub fn about(mut self, about: impl Into<Name>) -> Self {
+        self.about = Some(about.into());
+        self
+    }
 }
 
 impl From<UpstreamDecl> for InputDecl {
@@ -123,6 +131,30 @@ impl From<UpstreamDecl> for InputDecl {
 pub struct PortDecl {
     pub name: Name,
     pub optional: bool,
+    /// A sentence saying what it is, for a form that binds it.
+    pub about: Option<Name>,
+}
+
+impl PortDecl {
+    /// A port a binding must give a channel.
+    pub fn new(name: impl Into<Name>) -> Self {
+        Self {
+            name: name.into(),
+            optional: false,
+            about: None,
+        }
+    }
+
+    pub fn about(mut self, about: impl Into<Name>) -> Self {
+        self.about = Some(about.into());
+        self
+    }
+}
+
+impl From<&'static str> for PortDecl {
+    fn from(name: &'static str) -> Self {
+        Self::new(name)
+    }
 }
 
 /// A setting, which a recipe gives by name. A binding that leaves it out takes its default.
@@ -134,6 +166,8 @@ pub struct SettingDecl {
     /// The inputs it applies to; every input where empty. A binding to another input that gives it
     /// is refused.
     pub inputs: Vec<InputId>,
+    /// A sentence saying what it is, for a form that binds it.
+    pub about: Option<Name>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -326,24 +360,19 @@ impl Definition {
     }
 
     /// Its ports, each one a binding must give a channel.
-    pub fn with_ports<N: Into<Name>>(mut self, ports: impl IntoIterator<Item = N>) -> Self {
-        self.ports = (names(ports).into_iter())
-            .map(|name| PortDecl {
-                name,
-                optional: false,
-            })
-            .collect();
+    pub fn with_ports<P: Into<PortDecl>>(mut self, ports: impl IntoIterator<Item = P>) -> Self {
+        self.ports = ports.into_iter().map(Into::into).collect();
         self
     }
 
     /// Adds ports after those it has, each one a binding may leave out.
-    pub fn with_optional_ports<N: Into<Name>>(
+    pub fn with_optional_ports<P: Into<PortDecl>>(
         mut self,
-        ports: impl IntoIterator<Item = N>,
+        ports: impl IntoIterator<Item = P>,
     ) -> Self {
-        let optional = names(ports).into_iter().map(|name| PortDecl {
-            name,
+        let optional = ports.into_iter().map(|p| PortDecl {
             optional: true,
+            ..p.into()
         });
         self.ports.extend(optional);
         self
@@ -396,6 +425,7 @@ impl Definition {
                 continue;
             };
             named(&u.port)?;
+            phrase(u.about.as_ref())?;
             at_most(u.from.len(), MAX_LIST, "definitions an input takes")?;
             at_most(u.kinds.len(), MAX_LIST, "kinds an input reads")?;
             at_most(u.sequences.len(), MAX_LIST, "sequences an input reads")?;
@@ -416,6 +446,7 @@ impl Definition {
         let mut seen = HashSet::new();
         for p in &self.ports {
             named(&p.name)?;
+            phrase(p.about.as_ref())?;
             if !seen.insert(&p.name) {
                 return Err(SchemaError::DuplicatePort(p.name.clone()));
             }
@@ -424,6 +455,7 @@ impl Definition {
         let mut seen = HashSet::new();
         for s in &self.settings {
             named(&s.name)?;
+            phrase(s.about.as_ref())?;
             if !seen.insert(&s.name) {
                 return Err(SchemaError::DuplicateSetting(s.name.clone()));
             }
@@ -476,6 +508,11 @@ impl SettingDecl {
         self
     }
 
+    pub fn about(mut self, about: impl Into<Name>) -> Self {
+        self.about = Some(about.into());
+        self
+    }
+
     pub fn applies_to(&self, input: InputId) -> bool {
         self.inputs.is_empty() || self.inputs.contains(&input)
     }
@@ -484,6 +521,7 @@ impl SettingDecl {
         Self {
             name: name.into(),
             inputs: vec![],
+            about: None,
             ty: SettingType::Flag { default },
         }
     }
@@ -492,6 +530,7 @@ impl SettingDecl {
         Self {
             name: name.into(),
             inputs: vec![],
+            about: None,
             ty: SettingType::Int {
                 min: *range.start(),
                 max: *range.end(),
@@ -510,6 +549,7 @@ impl SettingDecl {
         Self {
             name: name.into(),
             inputs: vec![],
+            about: None,
             ty: SettingType::List {
                 min: *range.start(),
                 max: *range.end(),
@@ -527,6 +567,7 @@ impl SettingDecl {
         Self {
             name: name.into(),
             inputs: vec![],
+            about: None,
             ty: SettingType::Choice {
                 names: names(choices),
                 default,
@@ -714,7 +755,7 @@ pub enum SchemaError {
     TooMany { what: &'static str },
     #[error("a name is empty or longer than {MAX_NAME} bytes")]
     BadName,
-    #[error("a reason, need or cause is empty or longer than {MAX_PHRASE} bytes")]
+    #[error("a reason, need, cause or sentence is empty or longer than {MAX_PHRASE} bytes")]
     BadPhrase,
     #[error("kind {kind}: link {role} points to no kind {to}")]
     UnknownLinkTarget { kind: Name, role: Name, to: Name },
@@ -783,6 +824,13 @@ pub enum Mismatch {
     /// A phase, and any value with a driver, needs a span.
     #[error("{kind:?}'s field {field} needs a span")]
     Unspanned { kind: KindId, field: u16 },
+}
+
+fn phrase(n: Option<&Name>) -> Result<(), SchemaError> {
+    match n {
+        Some(n) if n.is_empty() || n.len() > MAX_PHRASE => Err(SchemaError::BadPhrase),
+        _ => Ok(()),
+    }
 }
 
 fn named(n: &Name) -> Result<(), SchemaError> {
@@ -891,9 +939,7 @@ impl Schema {
             }
         }
         for n in self.reasons.iter().chain(&self.needs).chain(&self.causes) {
-            if n.is_empty() || n.len() > MAX_PHRASE {
-                return Err(SchemaError::BadPhrase);
-            }
+            phrase(Some(n))?;
         }
         let mut kinds = HashSet::new();
         for k in self.kinds.iter() {

@@ -18,8 +18,8 @@
 use escapement_tickwave_decode::{
     Cause, Decoder, Definition, Element, ElementType, Exchange, Factory, FieldDecl, FieldId,
     FieldType, Id, KindDecl, KindId, Label, LinkDecl, LinkId, LinkTo, Observation, Observed, Out,
-    Pause, Reason, Ref, Request, Role, Schema, SeqId, Setting, SettingDecl, SettingId, Span,
-    Status, Tick, Value, field, name, seq,
+    Pause, PortDecl, Reason, Ref, Request, Role, Schema, SeqId, Setting, SettingDecl, SettingId,
+    Span, Status, Tick, Value, field, name, seq,
 };
 use std::{collections::VecDeque, sync::Arc};
 
@@ -141,10 +141,20 @@ pub fn turnaround(cycles: u8) -> (&'static str, Setting) {
 pub fn definition() -> Arc<Definition> {
     Arc::new(
         Definition::new("swd", 1, schema())
-            .with_ports(["SWCLK", "SWDIO"])
+            .with_ports([
+                PortDecl::new("SWCLK").about("The clock. SWDIO is read at each of its rises."),
+                PortDecl::new("SWDIO")
+                    .about("The data line, which the probe and the target take turns to drive."),
+            ])
             .with_settings(vec![
-                SettingDecl::int("turnaround", 1..=4, 1),
-                SettingDecl::flag("orundetect", false),
+                SettingDecl::int("turnaround", 1..=4, 1).about(
+                    "The turnaround in cycles where the recording starts, until a DLCR write or \
+                     a line reset changes it.",
+                ),
+                SettingDecl::flag("orundetect", false).about(
+                    "Whether overrun detection is on where the recording starts, until a \
+                     CTRL/STAT write changes it.",
+                ),
             ]),
     )
 }
