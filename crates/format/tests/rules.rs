@@ -798,6 +798,22 @@ fn annotation_record(file: &[u8], n: usize, name: &str, line: &str) -> Vec<u8> {
     )
 }
 
+/// `file` with its bundle's JSON edited as text, which a map can't hold: a file named twice.
+fn bundle_text_edited(file: &[u8], edit: impl FnOnce(&str) -> String) -> Vec<u8> {
+    let mut len = 0;
+    let out = repayloaded(file, nth(file, Kind::Bundle, 0), |p| {
+        let raw = zstd::bulk::decompress(&p[4..], 1 << 22).unwrap();
+        let raw = edit(std::str::from_utf8(&raw).unwrap()).into_bytes();
+        p.clear();
+        p.extend_from_slice(&(raw.len() as u32).to_le_bytes());
+        p.extend_from_slice(&escapement_tickwave_format::compress::compress(&raw, 3).unwrap());
+        len = p.len() + record::FRAMING;
+    });
+    refooted(&out, |f| {
+        f.top[8..12].copy_from_slice(&(len as u32).to_le_bytes())
+    })
+}
+
 /// `file` with its bundle's files edited, the bundle record framed again and the footer's slot
 /// for it restated.
 fn bundle_edited(file: &[u8], edit: impl FnOnce(&mut BTreeMap<String, String>)) -> Vec<u8> {
@@ -974,7 +990,7 @@ fn cases(b: &[u8]) -> Vec<Case> {
         "FR10-gap-record-oversized",
         InOrder,
         "cut off",
-        "Limits: a gap record's payload is 21 bytes exactly; a reader refuses a record whose `n` passes that before it reads the payload",
+        "Limits: a gap record's payload is 21 bytes exactly; a reader stops at a record whose `n` passes that before it reads the payload, so the file is cut off there",
         repayloaded(b, nth(b, Kind::Gap, 0), |p| p.push(0)),
     ));
 
@@ -1689,7 +1705,7 @@ fn cases(b: &[u8]) -> Vec<Case> {
         "RO13-run-record-oversized",
         InOrder,
         "cut off",
-        "Limits: a run record's payload is 32 bytes exactly",
+        "Limits: a run record's payload is 32 bytes exactly; a reader stops at a record whose `n` passes that before it reads the payload, so the file is cut off there",
         repayloaded(b, nth(b, Kind::Run, 0), |p| p.push(0)),
     ));
     out.push(case(
@@ -1746,6 +1762,13 @@ fn cases(b: &[u8]) -> Vec<Case> {
         annotation_record(b, 0, "gen", r#"{"id":"mark/150"}"#),
     ));
     out.push(case(
+        "AN05-record-time-with-unit",
+        InOrder,
+        "whole tick",
+        "Annotations: a record's times are axis ticks, JSON integers; a reader refuses a `start` or `end` that is not one",
+        annotation_record(b, 0, "gen", r#"{"id":"mark/150","start":"150 us"}"#),
+    ));
+    out.push(case(
         "AN05-record-end-before-start",
         InOrder,
         "can't hold",
@@ -1770,6 +1793,18 @@ fn cases(b: &[u8]) -> Vec<Case> {
         }),
     ));
     out.push(case(
+        "AN07-bundle-names-a-file-twice",
+        Random,
+        "names file",
+        "Annotations: the bundle's object names each file once; a reader refuses one naming a file twice",
+        bundle_text_edited(b, |raw| {
+            let files: BTreeMap<String, String> = serde_json::from_str(raw).unwrap();
+            let (name, text) = files.iter().find(|(name, _)| name.ends_with(".jsonl")).unwrap();
+            let pair = format!("{}:{}", json!(name), json!(text));
+            format!("{{{pair},{}", &raw[1..])
+        }),
+    ));
+    out.push(case(
         "AN07-bundled-generator-file-without-newline",
         Random,
         "lacks its newline",
@@ -1778,6 +1813,13 @@ fn cases(b: &[u8]) -> Vec<Case> {
             let (_, text) = files.iter_mut().find(|(name, _)| name.ends_with(".jsonl")).unwrap();
             text.pop();
         }),
+    ));
+    out.push(case(
+        "HD33-header-number-past-f64",
+        Footer,
+        "parse whole",
+        "Header: every number in the header fits an f64",
+        header_text_edited(b, |h| h.replacen('{', r#"{"zz":1e400,"#, 1)),
     ));
     out.push(case(
         "HD32-header-key-twice",
@@ -1933,6 +1975,34 @@ fn plain_live() -> Vec<u8> {
     file
 }
 
+/// The live recording's D beside a second channel E, both kept from tick 0 to 500, as a merged or
+/// cut recording's channels are.
+fn kept_live() -> Vec<u8> {
+    use escapement_tickwave_format::header::Kept;
+    use escapement_tickwave_format::writer::{Finish, WriteOptions, Writer};
+    let mut d = live_declaration();
+    let mut e = d.channels[0].clone();
+    e.name = "E".into();
+    e.source_name = "e".into();
+    d.channels.push(e);
+    for ch in &mut d.channels {
+        ch.shaping.kept = Some(Kept { from: 0, to: 500 });
+    }
+    let options = WriteOptions {
+        level: 3,
+        ..WriteOptions::default()
+    };
+    let mut w = Writer::new(d, options).unwrap();
+    for t in [10, 20, 30] {
+        w.edge(0, t).unwrap();
+        w.edge(1, t + 5).unwrap();
+    }
+    w.flush(100).unwrap();
+    let mut file = w.take_output();
+    file.extend(w.finish(500, &[500, 500], Finish::default()).unwrap().tail);
+    file
+}
+
 /// A file a later minor version may write, which every reader of this one takes: the rule that
 /// says so, and the channels it reads as unavailable.
 struct Later {
@@ -1976,6 +2046,17 @@ fn later_files(p: &[u8]) -> Vec<Later> {
             rule: "Records: a reader skips an optional record, of a kind from 128 to 191",
             file: inserted(p, footer_at, &framed(130, b"later")),
             unavailable: vec![],
+        },
+        Later {
+            id: "LV05-unknown-kind-among-kept-spans",
+            rule: "Unavailable channels: a channel of a `kind` this version doesn't know states its `offset`, `offset_kind` and `kept` as every channel does, so the kept rules hold with it among the channels",
+            file: {
+                let k = kept_live();
+                reheadered(&redeclared(&k, |d| events(channel(d, "E"))), |h| {
+                    events(channel(h, "E"))
+                })
+            },
+            unavailable: vec![1],
         },
         Later {
             id: "LV04-unknown-channel-kind",

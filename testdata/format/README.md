@@ -82,8 +82,10 @@ as the writer writes one while recording, the third as the writer writes one tha
 loss, its last gap record left out of the header, and the fourth a recording of one digital
 channel with no gap.
 
-`invalid.json`'s `cases` gives each case's `file`, the FORMAT.md `rule` it breaks, and the
-`mode`: the reading that has to refuse it.
+`invalid.json`'s `cases` gives each case's `file`, the FORMAT.md `rule` it breaks, and the `mode`:
+the reading that has to refuse it. A few cases can't help breaking a second rule too: a part holds
+its records' lines exactly, so a record broken in its line (AN02-key-twice, AN05) also differs from
+the part that covers it, which a reader in order meets after the record.
 
 - `footer`: a reader with random access before it draws, reading the trailer, the footer, the
   header, the top index, every page and every strip.
@@ -92,6 +94,8 @@ channel with no gap.
 - `in-order`: a reader in order, from the first record to the trailer.
 - `verify`: the full check.
 
-Its `taken` lists files a later minor version may write, cut from `plain-live.tickwave`, which
-every reading of this version takes. Each gives its `file`, the `rule` that says so, and the
-channels it reads as `unavailable`, by their place among the channels.
+`invalid.json`'s `taken` lists files a later minor version may write, cut from
+`plain-live.tickwave`, which the `footer`, `random` and `in-order` readings of this version take.
+The full check takes them too, but for one with a channel it can't read, which it refuses. Each
+gives its `file`, the `rule` that says so, and the channels it reads as `unavailable`, by their
+place among the channels.
