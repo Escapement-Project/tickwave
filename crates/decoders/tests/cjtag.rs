@@ -2014,3 +2014,24 @@ fn drive_protection_makes_the_counts_many_before_run_test_idle_takes_them_again(
         "{last:?}"
     );
 }
+
+#[test]
+fn a_command_in_a_jscan_format_a_selection_brings_holds_an_item_open_on_every_row() {
+    // The scan format, the control level, the command and the stretch of TMS bits it is sent in.
+    let mut g = Gen::new();
+    g.reset_to_idle();
+    g.bit(false, 4);
+    g.select(0b0000, 0b1000, None);
+    g.jscan(&enter_command_level());
+    g.jscan(&command(0, 1));
+    g.jscan(&[0, 0]);
+    let (h, [c, _]) = decode(&g, true);
+    let formats = of(&h, c, &[cjtag::FORMAT]);
+    assert_eq!(
+        value(&formats[0], cjtag::SCAN_FORMAT),
+        Some(Value::Text("JScan2".into()))
+    );
+    let commands = of(&h, c, &[cjtag::COMMAND]);
+    assert_eq!(commands.len(), 1);
+    assert!(commands[0].start > formats[0].start);
+}

@@ -480,7 +480,8 @@ pub fn schema() -> Schema {
         "transport packets change the framing",
         "an escape whose qualification the unknown SSD state decides",
     ])
-    .with_open_at_most(3)
+    // One on each row: a row's items never overlap.
+    .with_open_at_most(4)
 }
 
 /// Whether the target is assumed to drive the TDO elements where the controller's group counts
