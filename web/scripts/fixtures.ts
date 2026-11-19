@@ -3,8 +3,9 @@
 //   node scripts/fixtures.ts [--exports DIR] [--energy CSV] [--converted DIR]
 //
 // - <name>.tickwavefx: cut from the Saleae exports and verge's energy CSV (extract-fixtures.ts).
-// - <name>.tickwave: a link to the tickwave session's converted recording, where one exists, so the
-//   dev page can draw its stress sections through the WASM decoder (dev/?stress=tickwave).
+// - <name>.tickwave: a link to its converted recording in the --converted folder, where one
+//   exists, so the dev page can draw its stress sections through the WASM decoder
+//   (dev/?stress=tickwave).
 // - <name>.swd.jsonl: the SWD decoder's annotations, from the .tickwave where there is one (then
 //   with its recording_id), else from the .tickwavefx. Long captures keep only the rare kinds and
 //   everything up to a tick: a full decode is the scale of a decoded track, not a sidecar.

@@ -1,4 +1,4 @@
-// The machine's CPU busy fraction, sampled each second from /proc/stat. Other sessions build on this
+// The machine's CPU busy fraction, sampled each second from /proc/stat. Other builds may share the
 // machine, so each timed unit waits for a quiet second first and records how busy the machine was
 // while it ran.
 //   node scripts/cpu.ts      waits for a load average below 2 for five minutes, then for three quiet
@@ -33,9 +33,9 @@ export function busyBetween(from: number, to: number): number {
 }
 
 /**
- * Resolves once three seconds in a row have a busy fraction below `limit` (0.1 is about three of
- * this machine's 32 threads). By default it waits as long as that takes, saying so every 10
- * minutes; a finite `maxMs` gives up after that long and says so.
+ * Resolves once three seconds in a row have a busy fraction below `limit`. By default it waits as
+ * long as that takes, saying so every 10 minutes; a finite `maxMs` gives up after that long and
+ * says so.
  */
 export async function quiet(limit = 0.1, maxMs = Infinity, say: (s: string) => void = console.error): Promise<number> {
   const start = Date.now();

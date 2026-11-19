@@ -790,7 +790,7 @@ fn extended_as(got: &Answer, held: &Answer, want: &Answer, at: &str) {
 
 #[test]
 fn a_heartbeat_moves_a_digital_recording_on_to_its_promise() {
-    // verge-probe's dio_stream (seed 3, every line, a block a message) as the peer saw it: edges
+    // verge-probe's dio_stream (seed 3, every line, a block a message) as verge read it: edges
     // to a flush at 76,032,366; a heartbeat's flush at 90,740,577 with nothing new before it;
     // then a loss on DIO2 reported once it has ended, from before the heartbeat.
     let (edges, beat) = (76_032_366, 90_740_577);

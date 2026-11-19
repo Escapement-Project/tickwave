@@ -1,7 +1,7 @@
 // An inset keeps one height whatever its foot shows (AGENTS.md, "Nothing moves under the
 // reader"): with nothing in the line, a reading at the pointer, a measure, and the key. The foot's
 // figures are in a font of their own, which the page picks: here one whose line is taller than
-// the text's, as the user's page had, so a line that held only the text's font would grow.
+// the text's, as a host page's may be, so a line that held only the text's font would grow.
 
 import { test, expect, type Page } from "@playwright/test";
 

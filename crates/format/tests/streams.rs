@@ -453,8 +453,8 @@ fn items(file: &[u8]) -> (Vec<Vec<i64>>, Vec<Vec<u64>>) {
     (edges, samples)
 }
 
-/// The peer's case: a live capture with a long pause and flushes through it, cut at every record
-/// boundary and inside records. Repair and the Recutter recover a prefix of what was written,
+/// A live capture with a long pause and flushes through it, cut at every record boundary and
+/// inside records. Repair and the Recutter recover a prefix of what was written,
 /// cut at the latest known-through record, V and I as long as each other.
 #[test]
 fn a_live_capture_with_a_long_pause_cut_anywhere_recovers_to_a_prefix() {

@@ -64,7 +64,7 @@
       ]
     },
     {
-      "name": "Tukey's fences: the Escapement session's 50 MHz request keeps all seven periods",
+      "name": "Tukey's fences: a 50 MHz SWD request keeps all seven periods",
       "rows": [
         {"fn":"period_stats","args":{"level":0,"ticks":[1000,1009,1019,1030,1041,1049,1058,1069,1080,1090,1100,1109,1119,1130,1141]},"expect":{"used":7,"runs":1,"span":141},"then":[{"fn":"format_clock_rate","args":{"timebase":[1000000000,1]},"expect":"49.6\u00a0MHz"}],"note":"Periods 19, 22, 17, 22, 20, 19, 22 ns (wire_swd/request/380567191 in gcc-swd-reads), each high for half its period, from tick 1000. Sorted 17 19 19 20 22 22 22: Q1 = p[1] = 19, Q3 = p[5] = 22, IQR 3, fences [14.5, 26.5]. All seven, one run of 141 ticks: 7 / 141 ns = 49.645 MHz, uncertain by 1/141 of it, 352 kHz: 49.6 MHz. The one-tick window keeps 20, 19, 19 in two runs, 58 ticks, and reads 52 MHz."}
       ]

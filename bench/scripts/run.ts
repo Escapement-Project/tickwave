@@ -71,7 +71,7 @@ function launch(name: Name, prefs = true): Promise<Browser> {
   return name === "firefox" ? firefox.launch({ firefoxUserPrefs: prefs ? FIREFOX_PREFS : {} }) : chromium.launch();
 }
 
-// Other agents build in this tree, so a measure may share the CPU; the load average says when.
+// A measure may share the CPU with other builds, so each saves the load average at its start and end.
 const loadAtStart = new Map<string, number[]>();
 const mark = (name: string) => loadAtStart.set(name, loadavg());
 function save(name: string, data: any) {
