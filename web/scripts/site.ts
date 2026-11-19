@@ -8,8 +8,8 @@ import * as esbuild from "esbuild";
 import MarkdownIt from "markdown-it";
 import anchor from "markdown-it-anchor";
 import { execFileSync } from "node:child_process";
-import { copyFileSync, cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { codeHighlighter } from "./highlight.ts";
 
@@ -156,6 +156,27 @@ const DOCS: { href: string; group: string; name: string; markdown: string; descr
   },
 ];
 
+/** The page each document published whole is at, by its file in the repository. */
+const PAGE_OF = new Map(DOCS.filter((d) => !d.source.includes("#")).map((d) => [d.source, d.href]));
+
+// A link between the repository's documents is written for GitHub, relative to its document's file.
+// On the site it goes to the page the other document is published as, or to the file on GitHub
+// where it is not published; a link to one of the site's own pages stays as it is.
+const linkOpen = md.renderer.rules.link_open ?? ((tokens, i, options, _env, self) => self.renderToken(tokens, i, options));
+md.renderer.rules.link_open = (tokens, i, options, env, self) => {
+  const href = tokens[i].attrGet("href");
+  const source = (env as { source?: string } | undefined)?.source;
+  if (typeof href === "string" && source && !/^([a-z][a-z0-9+.-]*:|#|\/)/i.test(href)) {
+    const [path, hash] = href.split(/#(.*)/s);
+    const file = posix.normalize(posix.join(posix.dirname(source), path));
+    const fragment = hash === undefined ? "" : `#${hash}`;
+    const page = PAGE_OF.get(file);
+    if (page) tokens[i].attrSet("href", posix.relative("docs", page) + fragment);
+    else if (!file.startsWith("..") && existsSync(join(repo, file))) tokens[i].attrSet("href", `${REPOSITORY}/blob/HEAD/${file}${fragment}`);
+  }
+  return linkOpen(tokens, i, options, env, self);
+};
+
 /** A page's title: its name, tickwave's unless it is tickwave's main page, then the project's. */
 const titled = (name: string | null) => [name, "tickwave", "Escapement Project"].filter(Boolean).join(" \u2013 ");
 
@@ -211,6 +232,9 @@ function page(path: string, opts: { title: string; description: string; kind: st
         return esc(opts.title);
       case "description":
         return esc(opts.description);
+      // Where the page is published, which a link preview names.
+      case "url":
+        return esc(`${PUBLISHED}/tickwave/${path === "index.html" ? "" : path}`);
       case "root":
         return root;
       case "header":
@@ -326,7 +350,7 @@ const FOUND = `<div class="found" id="found" role="listbox" aria-label="Sections
  */
 function doc(d: (typeof DOCS)[number]): { id: string; heading: string | null; text: string }[] {
   const title = /^# (.*)$/m.exec(d.markdown)?.[1].replace(/`/g, "") ?? d.name;
-  const env = {};
+  const env = { source: d.source.split("#")[0] };
   const tokens = md.parse(d.markdown, env);
   const body = md.renderer.render(tokens, md.options, env);
   const docs = GROUPS.map((g) => {

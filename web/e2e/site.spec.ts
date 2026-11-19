@@ -223,6 +223,9 @@ test("the overview: tickwave on its plate, the ways on, a capture beside them, a
   const inset = page.locator(".product-figure tickwave-inset");
   await expect(inset.locator("figcaption")).toHaveText("Reading the debug port's ID register");
   await expect(inset.locator(".measure")).toHaveText("SWCLK 999.93 kHz mean of 45 periods");
+  // Each example has a way into the viewer beside it.
+  await expect(page.locator(".product-figure p a")).toHaveAttribute("href", "open.html?src=fixtures/identify-swd.tickwave&annotations=fixtures/identify-swd.annotations.toml");
+  await expect(page.locator("#analog + p a")).toHaveAttribute("href", "open.html?src=fixtures/swd50-cut.tickwave");
   // Each section's heading leads to its doc, and the docs' rows are their groups on the docs' index.
   const heads = page.locator("section .head h2 a");
   await expect(heads).toHaveText(["Reading a capture", "Convert", "In your page", "Docs"]);
@@ -438,6 +441,24 @@ test("each page is titled by its name, tickwave's and the project's", async ({ p
   }
 });
 
+test("each page names itself to a link preview, by its title, its description and its published address", async ({ request, baseURL }) => {
+  for (const [path, url] of [
+    ["index.html", "https://escapement-project.github.io/tickwave/"],
+    ["open.html", "https://escapement-project.github.io/tickwave/open.html"],
+    ["docs/format.html", "https://escapement-project.github.io/tickwave/docs/format.html"],
+  ]) {
+    const html = await (await request.get(new URL(`${SITE}${path}`, baseURL).href)).text();
+    const meta = (attr: string, key: string) => new RegExp(`<meta ${attr}="${key}" content="([^"]*)">`).exec(html)?.[1];
+    const title = /<title>([^<]*)<\/title>/.exec(html)?.[1];
+    expect(meta("property", "og:title"), path).toBe(title);
+    expect(meta("property", "og:description"), path).toBe(meta("name", "description"));
+    expect(meta("property", "og:description")?.length, path).toBeGreaterThan(20);
+    expect(meta("property", "og:url"), path).toBe(url);
+    expect(meta("property", "og:site_name"), path).toBe("Escapement Project");
+    expect(meta("name", "twitter:card"), path).toBe("summary");
+  }
+});
+
 test("a doc's headings link to themselves from h2 down, and its source line names the file it comes from", async ({ page, request }) => {
   await page.goto(`${SITE}docs/format.html`);
   await expect(page.locator(".doc h1 .anchor")).toHaveCount(0);
@@ -611,9 +632,14 @@ test("every internal link resolves, fragments included", async ({ request, baseU
         }
       }
       const pageUrl = target.href.split("#")[0].split("?")[0];
-      if (!seen.has(pageUrl) && pageUrl.endsWith(".html")) {
+      if (!seen.has(pageUrl)) {
         seen.add(pageUrl);
-        queue.push(pageUrl);
+        if (pageUrl.endsWith(".html")) queue.push(pageUrl);
+        else {
+          // Anything else a page links to, a file or a document's source, must be there too.
+          const r = await request.get(pageUrl);
+          if (!r.ok()) failures.push(`${url}: ${href}: HTTP ${r.status()}`);
+        }
       }
       if (target.hash) {
         let body = pages.get(pageUrl);

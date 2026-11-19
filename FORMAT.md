@@ -775,7 +775,7 @@ levels keep no order among themselves: a writer may settle one channel's levels 
 
 An annotation record's payload is a u16, the length of `s`, then `s`, then `a`. `s` is the
 generator's name in UTF-8, as a generator file's first line gives it, and `a` is one line of that
-file ([ANNOTATIONS.md](ANNOTATIONS.md)): a UTF-8 JSON object, ending with a newline and holding no
+file ([ANNOTATIONS.md](ANNOTATIONS.md#a-generators-file)): a UTF-8 JSON object, ending with a newline and holding no
 other. Its times are axis ticks in `0..2^53`, JSON integers, as a writer writes them: a time with a
 unit, as a hand-written file may give one, is not. A reader refuses a record whose `s` is not a name
 ANNOTATIONS.md allows a generator, since the source's file is named after it, and one whose `a`
