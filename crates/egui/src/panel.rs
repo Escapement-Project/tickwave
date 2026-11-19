@@ -23,17 +23,24 @@
 //! printable shows as an escape, `\r` or `\x15`, and a value the decoder could not know as ·:
 //! characters a host's fonts all hold. The character under the pointer lights its item's span,
 //! and a click selects that item.
+//!
+//! The panel keeps its own reading of each analysis's store, and its tabs draw from that, so a
+//! selection, a filter or another analysis chosen costs a few lookups, however many items the
+//! store holds. Each frame it takes in what the store's change log says changed. A store it has
+//! not read, or one whose log no longer reaches back to where it read, it reads `READ_AT_MOST`
+//! ids a frame, shared between the analyses. Until it has read a store through, its List and
+//! Text tabs say so in place of their rows, an item's previous waits until the reading has
+//! passed it, and the Selected tab says what it shows may be missing.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::ops::Bound::{Excluded, Unbounded};
 
 use egui::{
     Align, Align2, Button, CollapsingHeader, Grid, Layout, Rect, Response, RichText, Role,
     ScrollArea, Sense, Stroke, StrokeKind, Ui, UiBuilder, Widget, WidgetInfo, pos2, vec2,
 };
 use escapement_tickwave_decode::{
-    ElementType, Id, Item, KindId, LinkId, Observation, Ref, Schema, Span, Status, Tick, Value,
-    citation,
+    ElementType, Id, Item, KindId, LinkId, Observation, Ref, Schema, Span, Status, Store, Tick,
+    Value, citation,
 };
 use escapement_tickwave_view::format::mapping::Mapping;
 use escapement_tickwave_view::format::model::Ratio;
@@ -41,6 +48,11 @@ use escapement_tickwave_view::readouts::format_interval;
 
 use crate::palette::Palette;
 use crate::track::{Labels, condition, heading, value_text};
+
+mod index;
+
+pub use index::READ_AT_MOST;
+use index::{Index, Line};
 
 /// The most elements a part's section lists; the rest are counted.
 const ELEMENTS_AT_MOST: usize = 64;
@@ -54,13 +66,13 @@ const ROW: f32 = 18.0;
 pub const LINE_AT_MOST: usize = 120;
 
 /// One analysis as the panel reads it: its name, its schema, the labels its track draws it with,
-/// its items as its store keeps them, and the analysis it is stacked on, by its index among the
-/// panel's.
+/// its store, and the analysis it is stacked on, by its index among the panel's. An analysis keeps
+/// its place among them: the panel's reading of the store at a place is kept between frames.
 pub struct Analysis<'a> {
     pub name: &'a str,
     pub schema: &'a Schema,
     pub labels: &'a Labels,
-    pub items: &'a BTreeMap<Id, Item>,
+    pub store: &'a Store,
     pub reads: Option<usize>,
 }
 
@@ -94,153 +106,29 @@ pub struct PanelState {
     pub collapsed: bool,
     /// What the pointer rests on in the panel this frame: its span on the items' timeline.
     pub lit: Option<Span>,
-    found: Option<Found>,
     /// The kinds the List tab leaves out, by analysis.
     hidden: BTreeSet<(usize, KindId)>,
     /// The List tab shows only items holding a condition.
     conditions: bool,
-    rows: Option<Rows>,
     /// The selection the List tab last scrolled to.
     scrolled: Option<(usize, Id)>,
-    lines: Option<Lines>,
+    /// Each analysis's store as the panel has read it, by its place.
+    indexes: Vec<Index>,
+    /// The frame it last read them in: a frame of several passes reads once.
+    read_at: Option<u64>,
 }
 
-/// What a store held when a cache was built from it: its size and its last id.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Held {
-    len: usize,
-    last: Option<Id>,
-}
-
-impl Held {
-    fn of(items: &BTreeMap<Id, Item>) -> Self {
-        Self {
-            len: items.len(),
-            last: items.keys().next_back().copied(),
-        }
-    }
-}
-
-/// The items a store gained since it was `held`, where every one came after its last id, as a
-/// growing decode's do; None where one came in before it, which takes a full pass.
-fn appended(items: &BTreeMap<Id, Item>, held: Held) -> Option<impl Iterator<Item = &Item> + Clone> {
-    let new = match held.last {
-        Some(last) => items.range((Excluded(last), Unbounded)),
-        None => items.range(..),
-    };
-    (held.len + new.clone().count() == items.len()).then(|| new.map(|(_, i)| i))
-}
-
-/// A line of text: where it starts, the item and the byte in it its first character came from,
-/// and each character with its item.
-#[derive(Clone, Debug)]
-struct Line {
-    start: Tick,
-    at: (Id, usize),
-    text: String,
-    from: Vec<Id>,
-}
-
-/// The lines a Text tab shows, kept while its analysis holds; a store that grows past its last
-/// id joins its last line again with what it gained.
-#[derive(Clone, Debug)]
-struct Lines {
-    analysis: usize,
-    held: Held,
-    lines: Vec<Line>,
-}
-
-/// The text of `items`, each byte from the item whose declared text field holds it, joined into
-/// lines, past the first `skip` bytes of the first item.
-fn lines_of<'a>(schema: &Schema, items: impl Iterator<Item = &'a Item>, skip: usize) -> Vec<Line> {
-    let text: Vec<(KindId, escapement_tickwave_decode::FieldId)> =
-        (schema.kinds.iter().enumerate())
-            .filter_map(|(k, d)| Some((KindId(k as u16), d.text?)))
-            .collect();
-    // Each byte, or None for a value not known, with its item, its place in it and its start.
-    let mut bytes: Vec<(Option<u8>, Id, usize, Tick)> = Vec::new();
-    let mut skip = Some(skip);
-    for item in items {
-        let Some(&(_, f)) = text.iter().find(|(k, _)| *k == item.id.kind) else {
-            continue;
-        };
-        let from = skip.take().unwrap_or(0);
-        let mut put = |n: usize, b: Option<u8>| {
-            if n >= from {
-                bytes.push((b, item.id, n, item.start));
-            }
-        };
-        match item.field(f).map(|x| &x.value) {
-            Some(&Value::Word { value, .. }) => put(0, Some(value as u8)),
-            Some(Value::Bits { bytes: b, bits }) => {
-                let whole = (*bits as usize / 8).min(b.len());
-                for (n, &x) in b[..whole].iter().enumerate() {
-                    put(n, Some(x));
-                }
-            }
-            Some(Value::Unknown { .. }) => put(0, None),
-            _ => {}
-        }
-    }
-    let mut lines = Vec::new();
-    let mut line: Option<Line> = None;
-    for (k, &(b, id, n, start)) in bytes.iter().enumerate() {
-        let shown = match b {
-            Some(b'\r') if bytes.get(k + 1).is_some_and(|n| n.0 == Some(b'\n')) => continue,
-            Some(b'\n') => "\\n".to_owned(),
-            Some(b'\r') => "\\r".to_owned(),
-            Some(c @ 0x20..=0x7e) => char::from(c).to_string(),
-            Some(c) => format!("\\x{c:02x}"),
-            None => "\u{b7}".to_owned(),
-        };
-        let l = line.get_or_insert_with(|| Line {
-            start,
-            at: (id, n),
-            text: String::new(),
-            from: Vec::new(),
-        });
-        for c in shown.chars() {
-            l.text.push(c);
-            l.from.push(id);
-        }
-        if b == Some(b'\n') || l.from.len() >= LINE_AT_MOST {
-            lines.extend(line.take());
-        }
-    }
-    lines.extend(line);
-    lines
-}
-
-/// The ids a List tab shows, in order, kept while its analysis and its filter hold; a store that
-/// grows past its last id adds what it gained.
-#[derive(Clone, Debug)]
-struct Rows {
-    key: (usize, Vec<KindId>, bool),
-    held: Held,
-    ids: Vec<Id>,
-}
-
-/// The selected item's neighbours of its kind and the items that read it, kept while the
-/// selection holds: a store that grows past its last id may add a reader or a next.
-#[derive(Clone, Debug)]
+/// What the Selected tab shows around the selected item, found in the indexes each frame.
 struct Found {
-    selected: (usize, Id),
-    held: Vec<Held>,
     previous: Option<Id>,
     next: Option<Id>,
-    /// Each reader's analysis, id, and the link by which it reads the selected item.
+    /// The first `READERS_AT_MOST` items that read it: each one's analysis, id, and the link by
+    /// which it reads it.
     readers: Vec<(usize, Id, LinkId)>,
-}
-
-/// The items of `id`'s kind just before and after it. Ids order by anchor first, so these are
-/// the nearest in time.
-fn neighbours(items: &BTreeMap<Id, Item>, id: Id) -> (Option<Id>, Option<Id>) {
-    let same = |k: &&Id| k.kind == id.kind;
-    let previous = items.range(..id).map(|(k, _)| k).rev().find(same);
-    let next = (items.range((Excluded(id), Unbounded)))
-        .map(|(k, _)| k)
-        .find(same);
-    (previous.copied(), next.copied())
+    /// How many read it in all.
+    read_by: usize,
+    /// An index these come from is still reading its store: some may be missing.
+    reading: bool,
 }
 
 /// The side panel, `width` points wide when open.
@@ -365,86 +253,60 @@ impl<'a> Panel<'a> {
             .color(self.palette.ink)
     }
 
-    /// The neighbours and readers of `selected`: found once for a selection, then only among
-    /// the items a store gains past its last id, else again in full.
-    fn found(&mut self, selected: (usize, Id)) -> Found {
-        let (a, id) = selected;
-        let held: Vec<Held> = self.analyses.iter().map(|an| Held::of(an.items)).collect();
-        if let Some(mut f) = self.state.found.take()
-            && f.selected == selected
-        {
-            if f.held == held {
-                return f;
+    /// Takes in what each analysis's store changed, then reads on where an index is behind, all
+    /// of them `READ_AT_MOST` ids a frame at most. While one is behind, the panel asks for another
+    /// frame.
+    fn read(&mut self, ctx: &egui::Context) {
+        let frame = ctx.cumulative_frame_nr();
+        if self.state.read_at == Some(frame) {
+            return;
+        }
+        self.state.read_at = Some(frame);
+        let n = self.analyses.len();
+        self.state.indexes.resize_with(n, Index::default);
+        // An equal share each, then what those with less to read left to those still behind.
+        let mut left = READ_AT_MOST;
+        let share = (left / n.max(1)).max(1);
+        for (index, an) in self.state.indexes.iter_mut().zip(self.analyses) {
+            left -= index.step(an.store, an.schema, an.reads.is_some(), share.min(left));
+        }
+        for (index, an) in self.state.indexes.iter_mut().zip(self.analyses) {
+            if left == 0 {
+                break;
             }
-            let gained: Option<Vec<_>> = (self.analyses.iter().zip(&f.held))
-                .map(|(an, &h)| appended(an.items, h))
-                .collect();
-            if let Some(gained) = gained {
-                for (b, new) in gained.into_iter().enumerate() {
-                    if b == a && f.next.is_none() {
-                        f.next = (new.clone().map(|i| i.id)).find(|k| k.kind == id.kind);
-                    }
-                    if self.analyses[b].reads == Some(a) {
-                        for item in new {
-                            for &(link, r) in &item.links {
-                                if r == Ref::Upstream(id) {
-                                    f.readers.push((b, item.id, link));
-                                }
-                            }
-                        }
-                    }
-                }
-                f.held = held;
-                return f;
+            if !index.current() {
+                left -= index.step(an.store, an.schema, an.reads.is_some(), left);
             }
         }
-        let (previous, next) = neighbours(self.analyses[a].items, id);
-        let mut readers = Vec::new();
+        if self.state.indexes.iter().any(|i| !i.current()) {
+            ctx.request_repaint();
+        }
+    }
+
+    /// The neighbours of `selected` and the items that read it.
+    fn found(&self, (a, id): (usize, Id)) -> Found {
+        let indexes = &self.state.indexes;
+        let (previous, next) = indexes[a].neighbours(id);
+        let mut found = Found {
+            previous,
+            next,
+            readers: Vec::new(),
+            read_by: 0,
+            reading: !indexes[a].current(),
+        };
         for (b, reader) in self.analyses.iter().enumerate() {
             if reader.reads != Some(a) {
                 continue;
             }
-            for item in reader.items.values() {
-                for &(link, r) in &item.links {
-                    if r == Ref::Upstream(id) {
-                        readers.push((b, item.id, link));
-                    }
+            found.reading |= !indexes[b].current();
+            for (r, link) in indexes[b].readers_of(id) {
+                found.read_by += 1;
+                if found.readers.len() < READERS_AT_MOST {
+                    found.readers.push((b, r, link));
                 }
             }
         }
-        Found {
-            selected,
-            held,
-            previous,
-            next,
-            readers,
-        }
-    }
-
-    /// The ids analysis `a`'s List tab shows: found again in full where its filter changed, else
-    /// added from what its store gained past its last id.
-    fn rows(&mut self, a: usize) -> Rows {
-        let items = self.analyses[a].items;
-        let hidden: Vec<KindId> = (self.state.hidden.iter())
-            .filter(|(b, _)| *b == a)
-            .map(|&(_, k)| k)
-            .collect();
-        let key = (a, hidden, self.state.conditions);
-        let shown = |i: &Item| !key.1.contains(&i.id.kind) && (!key.2 || condition(i));
-        if let Some(mut r) = self.state.rows.take()
-            && r.key == key
-            && let Some(new) = appended(items, r.held)
-        {
-            r.ids.extend(new.filter(|i| shown(i)).map(|i| i.id));
-            r.held = Held::of(items);
-            return r;
-        }
-        let ids = items.values().filter(|i| shown(i)).map(|i| i.id).collect();
-        Rows {
-            held: Held::of(items),
-            key,
-            ids,
-        }
+        found
     }
 
     fn list_tab(&mut self, ui: &mut Ui, lit: &mut Option<Span>, go: &mut Option<(usize, Id)>) {
@@ -484,10 +346,20 @@ impl<'a> Panel<'a> {
             }
         });
         ui.separator();
-        let rows = self.rows(listed);
-        if rows.ids.is_empty() {
+        let hidden: Vec<KindId> = (self.state.hidden.iter())
+            .filter(|(b, _)| *b == listed)
+            .map(|&(_, k)| k)
+            .collect();
+        let index = &self.state.indexes[listed];
+        // Rows only once its store is read through, so none come in above those shown.
+        if !index.read() {
+            ui.label(self.quiet("Still reading the decode."));
+            return;
+        }
+        let shown = index.shown(&hidden, self.state.conditions);
+        let total = shown.len();
+        if total == 0 {
             ui.label(self.quiet("No items here."));
-            self.state.rows = Some(rows);
             return;
         }
         let gap = ui.spacing().item_spacing.y;
@@ -498,11 +370,11 @@ impl<'a> Panel<'a> {
         if self.state.selected != self.state.scrolled {
             if let Some((a, id)) = self.state.selected
                 && a == listed
-                && let Ok(k) = rows.ids.binary_search(&id)
+                && let Some(k) = shown.row(id)
             {
                 // Within the list's extent, so the area has no overscroll to spring back from.
                 let view = ui.available_height();
-                let most = (rows.ids.len() as f32 * (ROW + gap) - gap - view).max(0.0);
+                let most = (total as f32 * (ROW + gap) - gap - view).max(0.0);
                 let at = k as f32 * (ROW + gap) - view / 2.0;
                 scroll = scroll.vertical_scroll_offset(at.clamp(0.0, most));
             }
@@ -510,16 +382,16 @@ impl<'a> Panel<'a> {
         }
         let label_at = self.label_at(ui);
         let selected = self.state.selected;
-        scroll.show_rows(ui, ROW, rows.ids.len(), |ui, range| {
-            for id in &rows.ids[range] {
-                let Some(item) = self.analyses[listed].items.get(id) else {
+        let store = self.analyses[listed].store;
+        scroll.show_rows(ui, ROW, total, |ui, range| {
+            for id in shown.rows(range) {
+                let Some(item) = store.items().get(&id) else {
                     continue;
                 };
-                let on = selected == Some((listed, *id));
+                let on = selected == Some((listed, id));
                 self.row(ui, listed, item, label_at, on, lit, go);
             }
         });
-        self.state.rows = Some(rows);
     }
 
     /// One list row: the item's start, its label, and a mark where it holds a condition.
@@ -581,37 +453,6 @@ impl<'a> Panel<'a> {
         }
     }
 
-    /// The lines analysis `a`'s Text tab shows. Where its store gained items past its last id,
-    /// the last line is joined again from where it starts, with them, so a carriage return or a
-    /// wrap at its end comes out as a full pass gives; else joined in full.
-    fn lines(&mut self, a: usize) -> Lines {
-        let an = &self.analyses[a];
-        let now = Held::of(an.items);
-        if let Some(mut l) = self.state.lines.take()
-            && l.analysis == a
-            && appended(an.items, l.held).is_some()
-        {
-            if l.held != now {
-                let more = match l.lines.pop() {
-                    Some(last) => {
-                        let (id, skip) = last.at;
-                        let rest = an.items.range(id..).map(|(_, i)| i);
-                        lines_of(an.schema, rest, skip)
-                    }
-                    None => lines_of(an.schema, an.items.values(), 0),
-                };
-                l.lines.extend(more);
-                l.held = now;
-            }
-            return l;
-        }
-        Lines {
-            analysis: a,
-            held: now,
-            lines: lines_of(an.schema, an.items.values(), 0),
-        }
-    }
-
     /// Where a row's text starts: past a time with the most figures.
     fn label_at(&self, ui: &Ui) -> f32 {
         let widest = ui.painter().layout_no_wrap(
@@ -648,22 +489,24 @@ impl<'a> Panel<'a> {
             });
             ui.separator();
         }
-        let lines = self.lines(chosen);
-        if lines.lines.is_empty() {
+        let index = &self.state.indexes[chosen];
+        if !index.read() {
+            ui.label(self.quiet("Still reading the decode."));
+            return;
+        }
+        if index.lines.is_empty() {
             ui.label(self.quiet("No text decoded here yet."));
-            self.state.lines = Some(lines);
             return;
         }
         let label_at = self.label_at(ui);
         (ScrollArea::vertical())
             .auto_shrink(false)
             .id_salt(("panel text", chosen))
-            .show_rows(ui, ROW, lines.lines.len(), |ui, range| {
-                for line in &lines.lines[range] {
+            .show_rows(ui, ROW, index.lines.len(), |ui, range| {
+                for line in &index.lines[range] {
                     self.text_row(ui, chosen, line, label_at, lit, go);
                 }
             });
-        self.state.lines = Some(lines);
     }
 
     /// One line of text after its start: the character under the pointer lights its item's
@@ -710,7 +553,7 @@ impl<'a> Panel<'a> {
             && let Some(item) = line
                 .from
                 .get(k)
-                .and_then(|id| self.analyses[a].items.get(id))
+                .and_then(|id| self.analyses[a].store.items().get(id))
         {
             painter.rect_filled(cell, 0.0, p.wash);
             *lit = Some(Span {
@@ -726,7 +569,7 @@ impl<'a> Panel<'a> {
 
     fn selected_tab(&mut self, ui: &mut Ui, lit: &mut Option<Span>, go: &mut Option<(usize, Id)>) {
         let found = self.state.selected.and_then(|(a, id)| {
-            let item = self.analyses.get(a)?.items.get(&id)?;
+            let item = self.analyses.get(a)?.store.items().get(&id)?;
             Some((a, item))
         });
         let Some((a, item)) = found else {
@@ -758,7 +601,6 @@ impl<'a> Panel<'a> {
             .auto_shrink(false)
             .id_salt("panel selected")
             .show(ui, |ui| self.show(ui, a, item, &f, lit, go));
-        self.state.found = Some(f);
     }
 
     fn show(
@@ -864,8 +706,9 @@ impl<'a> Panel<'a> {
                         };
                         ui.label(self.quiet(role.to_string()));
                         // A link to an item the panel holds selects it.
-                        let held = target
-                            .and_then(|(b, id)| Some((b, self.analyses.get(b)?.items.get(&id)?)));
+                        let held = target.and_then(|(b, id)| {
+                            Some((b, self.analyses.get(b)?.store.items().get(&id)?))
+                        });
                         let link =
                             ui.add(egui::Label::new(self.figures(to)).sense(if held.is_some() {
                                 Sense::click()
@@ -886,8 +729,8 @@ impl<'a> Panel<'a> {
         }
         if !found.readers.is_empty() {
             ui.add_space(6.0);
-            for &(b, id, link) in found.readers.iter().take(READERS_AT_MOST) {
-                let Some(reader) = self.analyses[b].items.get(&id) else {
+            for &(b, id, link) in &found.readers {
+                let Some(reader) = self.analyses[b].store.items().get(&id) else {
                     continue;
                 };
                 let rb = &self.analyses[b];
@@ -911,10 +754,17 @@ impl<'a> Panel<'a> {
                     *lit = Some(span(reader));
                 }
             }
-            if found.readers.len() > READERS_AT_MOST {
-                let more = found.readers.len() - READERS_AT_MOST;
+            if found.read_by > found.readers.len() {
+                let more = found.read_by - found.readers.len();
                 ui.label(self.quiet(format!("and {more} more that read it")));
             }
+        }
+        // Last, so it moves nothing when it goes.
+        if found.reading {
+            ui.add_space(6.0);
+            ui.label(
+                self.quiet("Still reading the decode: its neighbours and readers may be missing."),
+            );
         }
     }
 
@@ -993,6 +843,7 @@ impl<'a> Panel<'a> {
 
 impl Widget for Panel<'_> {
     fn ui(mut self, ui: &mut Ui) -> Response {
+        self.read(ui.ctx());
         let size = match self.under {
             Some(h) => vec2(ui.available_width(), Self::reserved_height(self.state, h)),
             None => vec2(

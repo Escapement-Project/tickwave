@@ -293,7 +293,7 @@ fn analyses(decoded: &[Decoded]) -> Vec<Analysis<'_>> {
             name: d.name,
             schema: &d.schema,
             labels: &d.labels,
-            items: d.store.items(),
+            store: &d.store,
             reads: k.checked_sub(1),
         })
         .collect()
@@ -924,6 +924,47 @@ fn panel<'a>(
 /// The height of the stand-in for a plot above a panel under it.
 const PLOT: f32 = 300.0;
 
+/// The frames a panel test lets the panel read its stores in: a million items each, at
+/// `READ_AT_MOST` ids a frame shared between two analyses.
+const READ_FRAMES: u64 = 4096;
+
+/// A store holding `items` as given, each replayed through its ops: an open one left open.
+fn replayed<'a>(items: impl IntoIterator<Item = &'a escapement_tickwave_decode::Item>) -> Store {
+    use escapement_tickwave_decode::{MAX_CHUNK, Op};
+    let mut store = Store::with_keep(all());
+    for i in items {
+        let id = i.id;
+        let mut ops = vec![Op::Open {
+            id,
+            parent: None,
+            start: i.start,
+        }];
+        ops.extend(i.fields.iter().map(|f| Op::Set {
+            id,
+            field: f.field,
+            value: f.value.clone(),
+            span: f.span,
+            driver: f.driver,
+        }));
+        for (seq, elements) in &i.seqs {
+            for (n, chunk) in elements.chunks(MAX_CHUNK).enumerate() {
+                ops.push(Op::Extend {
+                    id,
+                    seq: *seq,
+                    offset: (n * MAX_CHUNK) as u32,
+                    elements: chunk.to_vec(),
+                });
+            }
+        }
+        ops.extend((i.links.iter()).map(|&(link, other)| Op::Link { id, link, other }));
+        if let (Some(end), Some(status)) = (i.end, i.status) {
+            ops.push(Op::Close { id, end, status });
+        }
+        store.apply_batch(&ops, usize::MAX).unwrap();
+    }
+    store
+}
+
 /// As `panel`; with `under`, a 400-point-wide window whose top `PLOT` points stand in for a plot
 /// and whose panel lies under it, that many points tall.
 fn placed<'a>(
@@ -937,28 +978,24 @@ fn placed<'a>(
     let timebase = open(path).timebase();
     let palette = escapement_tickwave_egui::Palette::from_visuals(&egui::Visuals::default());
     // The item as given, an open one in place of its closed self.
-    let items: Vec<std::collections::BTreeMap<Id, escapement_tickwave_decode::Item>> =
-        (decoded.iter().enumerate())
-            .map(|(j, d)| {
-                let mut items = d.store.items().clone();
-                if j == k {
-                    items.insert(item.id, item.clone());
-                }
-                items
-            })
-            .collect();
+    let held = (decoded[k].store.items().get(&item.id)).is_some_and(|i| std::ptr::eq(i, item));
+    let replaced = (!held).then(|| {
+        let others = (decoded[k].store.items().values()).filter(|i| i.id != item.id);
+        replayed(others.chain([item]))
+    });
     let mut state = PanelState::default();
     state.selected = Some((k, item.id));
     let mut h = Harness::builder()
         .with_size(egui::vec2(400.0, 900.0))
+        .with_max_steps(READ_FRAMES)
         .build_ui_state(
             move |ui, state: &mut PanelState| {
-                let analyses: Vec<Analysis> = (decoded.iter().zip(&items).enumerate())
-                    .map(|(j, (d, items))| Analysis {
+                let analyses: Vec<Analysis> = (decoded.iter().enumerate())
+                    .map(|(j, d)| Analysis {
                         name: d.name,
                         schema: &d.schema,
                         labels: &d.labels,
-                        items,
+                        store: replaced.as_ref().filter(|_| j == k).unwrap_or(&d.store),
                         reads: j.checked_sub(1),
                     })
                     .collect();
@@ -1493,12 +1530,14 @@ fn a_narrow_panel_sits_under_the_plot_and_scrolls_inside() {
     );
 }
 
-/// What the side panel costs over a million items: the first frame, which finds a selection's
-/// readers, its rows or its lines, and the frames after it, which keep them. Run with
+/// What the side panel costs over a million items in each of two analyses. A fresh panel reads
+/// its stores a slice a frame. After that a new selection, a new analysis listed or texted, a
+/// filter, and stores gaining a thousand items a frame each cost what changed. Run with
 /// `--ignored --nocapture`.
 #[test]
 #[ignore = "a measurement"]
 fn panel_frame_times() {
+    use egui_kittest::kittest::Queryable;
     use escapement_tickwave_egui::panel::Tab;
     const N: usize = 1_000_000;
     let values: Vec<Option<u8>> = (0..N).map(|k| Some(b'a' + (k % 26) as u8)).collect();
@@ -1508,49 +1547,87 @@ fn panel_frame_times() {
     b.name = "downstream";
     let decoded = vec![a, b];
     let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
-    let middle = decoded[0]
-        .store
-        .items()
-        .values()
-        .nth(N / 2)
-        .unwrap()
-        .clone();
+    let ids: Vec<Id> = decoded[0].store.items().keys().copied().collect();
+    let middle = &decoded[0].store.items()[&ids[N / 2]];
+    let median = |mut v: Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        v[v.len() / 2]
+    };
+    let timed = |step: &mut dyn FnMut()| {
+        let t = std::time::Instant::now();
+        step();
+        t.elapsed().as_secs_f64() * 1e3
+    };
     for tab in [Tab::Selected, Tab::List, Tab::Text] {
-        let mut h = panel(&decoded, 0, &middle, map, &fixture());
+        let mut h = panel(&decoded, 0, middle, map, &fixture());
         h.state_mut().tab = tab;
-        // A new selection: its readers, rows or lines found again.
-        let mut first = vec![];
-        for k in 0..5 {
-            let other = decoded[0]
-                .store
-                .items()
-                .values()
-                .nth(N / 2 + k + 1)
-                .unwrap()
-                .id;
-            h.state_mut().selected = Some((0, other));
+        h.run();
+        // A new selection, and in the List and Text tabs the other analysis chosen.
+        let mut chosen = vec![];
+        for k in 0..20 {
+            h.state_mut().selected = Some((0, ids[N / 2 + k + 1]));
             if tab != Tab::Selected {
                 h.state_mut().listed = Some(k % 2);
                 h.state_mut().texted = Some(k % 2);
             }
-            let t = std::time::Instant::now();
-            h.step();
-            first.push(t.elapsed().as_secs_f64() * 1e3);
+            chosen.push(timed(&mut || h.step()));
         }
         let mut kept = vec![];
         for _ in 0..50 {
-            let t = std::time::Instant::now();
-            h.step();
-            kept.push(t.elapsed().as_secs_f64() * 1e3);
+            kept.push(timed(&mut || h.step()));
         }
-        first.sort_by(f64::total_cmp);
-        kept.sort_by(f64::total_cmp);
         println!(
-            "{tab:?}: a new selection {:.1} ms (median of 5), a frame after {:.2} ms (median of 50)",
-            first[2], kept[25]
+            "{tab:?}: a new selection {:.2} ms (median of 20), a frame after {:.2} ms (median of 50)",
+            median(chosen),
+            median(kept)
         );
+        if tab == Tab::List {
+            // A kind left out and put back, and conditions only and all again.
+            let mut filtered = vec![];
+            for _ in 0..10 {
+                for label in ["byte", "conditions only"] {
+                    h.get_by_label(label).click();
+                    filtered.push(timed(&mut || h.step()));
+                    h.step();
+                }
+            }
+            println!(
+                "List: a new filter {:.2} ms (median of 20)",
+                median(filtered)
+            );
+        }
     }
-    // A store that grows a thousand items a frame, as a live decode's does.
+    // A fresh panel reading both stores.
+    let mut state = PanelState::default();
+    state.selected = Some((0, middle.id));
+    let timebase = open(&fixture()).timebase();
+    let palette = escapement_tickwave_egui::Palette::from_visuals(&egui::Visuals::default());
+    // Built, the harness runs two frames, timed together.
+    let t = std::time::Instant::now();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(400.0, 900.0))
+        .with_max_steps(1)
+        .build_ui_state(
+            |ui, state: &mut PanelState| {
+                let analyses = analyses(&decoded);
+                ui.add(Panel::new(&palette, state, &analyses, 360.0, timebase, map));
+            },
+            state,
+        );
+    let built = t.elapsed().as_secs_f64() * 1e3;
+    let mut reading = vec![];
+    while reading.is_empty() || h.query_by_label_contains("Still reading").is_some() {
+        reading.push(timed(&mut || h.step()));
+    }
+    let frames = reading.len() + 2;
+    let slowest = reading.iter().copied().fold(0.0, f64::max);
+    println!(
+        "Reading two stores of a million items: {frames} frames; past the first two ({built:.2} ms together), {:.2} ms a frame (median), {slowest:.2} ms the slowest, {:.0} ms in all",
+        median(reading.clone()),
+        built + reading.iter().sum::<f64>()
+    );
+    drop(h);
+    // Stores that grow a thousand items a frame, as a live decode's do.
     for tab in [Tab::Selected, Tab::List, Tab::Text] {
         let decoded = vec![bytes_decoded(&values), bytes_decoded(&values)];
         let last = *decoded[0].store.items().keys().next_back().unwrap();
@@ -1563,14 +1640,11 @@ fn panel_frame_times() {
                 push(&mut h.state_mut().decoded[0], at, byte(b'q'), None);
                 push(&mut h.state_mut().decoded[1], at, byte(b'q'), None);
             }
-            let t = std::time::Instant::now();
-            h.step();
-            grown.push(t.elapsed().as_secs_f64() * 1e3);
+            grown.push(timed(&mut || h.step()));
         }
-        grown.sort_by(f64::total_cmp);
         println!(
             "{tab:?}: a frame after a thousand items appended {:.2} ms (median of 30)",
-            grown[15]
+            median(grown)
         );
     }
 }
@@ -1594,6 +1668,7 @@ fn growing(
     panel.tab = tab;
     let mut h = Harness::builder()
         .with_size(egui::vec2(400.0, 900.0))
+        .with_max_steps(READ_FRAMES)
         .build_ui_state(
             move |ui, g: &mut Grown| {
                 let Grown { decoded, panel } = g;
@@ -1729,4 +1804,159 @@ fn the_panel_takes_in_what_a_growing_store_gains() {
     h.get_by_label("next byte \u{25b8}").click();
     h.run();
     assert_eq!(h.state().panel.selected, Some((0, next)));
+}
+
+#[test]
+fn a_reader_linked_in_a_later_batch_reads_the_selected_item() {
+    use egui_kittest::kittest::Queryable;
+    use escapement_tickwave_decode::{KindDecl, KindId, LinkDecl, LinkId, LinkTo, Op, Status};
+    use escapement_tickwave_egui::panel::Tab;
+    let readers = Schema::new(vec![KindDecl::new("reader").with_links(vec![
+        LinkDecl::new("of", vec![LinkTo::Upstream(name("byte"))]),
+    ])]);
+    let store = Store::with_keep(all());
+    let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
+    let reader = Decoded {
+        name: "readers",
+        schema: readers,
+        density: Density::of(store.items(), &map, condition),
+        store,
+        labels: Labels::default(),
+        parts: false,
+    };
+    let mut decoded = vec![bytes_decoded(&[Some(b'a'), Some(b'b')]), reader];
+    let last = *decoded[0].store.items().keys().next_back().unwrap();
+    let rid = Id::new(KindId(0), 2500);
+    let open = Op::Open {
+        id: rid,
+        parent: None,
+        start: 2500,
+    };
+    decoded[1].store.apply_batch(&[open], 8).unwrap();
+    let mut h = growing(decoded, (0, last), Tab::Selected);
+    assert!(h.query_by_label_contains("read as ").is_none());
+    let later = [
+        Op::Link {
+            id: rid,
+            link: LinkId(0),
+            other: Ref::Upstream(last),
+        },
+        Op::Close {
+            id: rid,
+            end: 3300,
+            status: Status::Complete,
+        },
+    ];
+    h.state_mut().decoded[1]
+        .store
+        .apply_batch(&later, 8)
+        .unwrap();
+    h.run();
+    h.get_by_label_contains("read as ");
+}
+
+#[test]
+fn the_panel_lets_go_of_what_its_store_drops() {
+    use egui_kittest::kittest::Queryable;
+    use escapement_tickwave_decode::{FieldId, KindId, Op, Span, Status};
+    use escapement_tickwave_egui::panel::Tab;
+    let mut d = bytes_decoded(&[Some(b'a'), Some(b'b')]);
+    d.store.keep = vec![Span {
+        start: 0,
+        end: 2500,
+    }];
+    let first = *d.store.items().keys().next().unwrap();
+    let mut h = growing(vec![d], (0, first), Tab::Text);
+    h.get_by_label_contains("  ab");
+    // Open past the kept span, the store holds it; closed there, it drops it.
+    let id = Id::new(KindId(0), 3000);
+    let open = [
+        Op::Open {
+            id,
+            parent: None,
+            start: 3000,
+        },
+        Op::Set {
+            id,
+            field: FieldId(0),
+            value: byte(b'z').unwrap(),
+            span: None,
+            driver: None,
+        },
+    ];
+    h.state_mut().decoded[0]
+        .store
+        .apply_batch(&open, 8)
+        .unwrap();
+    h.run();
+    h.get_by_label_contains("  abz");
+    h.state_mut().panel.tab = Tab::List;
+    h.run();
+    let rows = |h: &Harness<'_, Grown>| h.query_all_by_label_contains("  byte").count();
+    assert_eq!(rows(&h), 3);
+    let close = Op::Close {
+        id,
+        end: 3800,
+        status: Status::Complete,
+    };
+    h.state_mut().decoded[0]
+        .store
+        .apply_batch(&[close], 8)
+        .unwrap();
+    assert!(!h.state().decoded[0].store.items().contains_key(&id));
+    h.run();
+    assert_eq!(rows(&h), 2);
+    h.state_mut().panel.tab = Tab::Text;
+    h.run();
+    h.get_by_label_contains("  ab");
+    assert!(h.query_by_label_contains("abz").is_none());
+}
+
+#[test]
+fn a_panel_reads_a_large_store_a_slice_a_frame() {
+    use egui_kittest::kittest::Queryable;
+    use escapement_tickwave_egui::panel::READ_AT_MOST;
+    let n = 10 * READ_AT_MOST;
+    let values: Vec<Option<u8>> = (0..n).map(|k| Some(b'a' + (k % 26) as u8)).collect();
+    let decoded = vec![bytes_decoded(&values)];
+    let ids: Vec<Id> = decoded[0].store.items().keys().copied().collect();
+    let last = *ids.last().unwrap();
+    let mut state = PanelState::default();
+    state.selected = Some((0, last));
+    let timebase = open(&fixture()).timebase();
+    let palette = escapement_tickwave_egui::Palette::from_visuals(&egui::Visuals::default());
+    let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
+    // Built, the harness runs three frames: the first, and two more as it waits to settle.
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(400.0, 900.0))
+        .with_max_steps(1)
+        .build_ui_state(
+            |ui, state: &mut PanelState| {
+                let analyses = analyses(&decoded);
+                ui.add(Panel::new(&palette, state, &analyses, 360.0, timebase, map));
+            },
+            state,
+        );
+    h.get_by_label_contains("Still reading the decode");
+    // The last item's neighbour is not read yet, so there is none to step to; a click takes two
+    // frames.
+    h.get_by_label("\u{25c2} previous byte").click();
+    h.step();
+    h.step();
+    assert_eq!(h.state().selected, Some((0, last)));
+    // The List shows no rows until its store is read through.
+    h.state_mut().tab = escapement_tickwave_egui::panel::Tab::List;
+    h.step();
+    h.get_by_label("Still reading the decode.");
+    assert_eq!(h.query_all_by_label_contains("  byte").count(), 0);
+    while h.query_by_label_contains("Still reading").is_some() {
+        h.step();
+    }
+    assert_eq!(h.ctx.cumulative_frame_nr(), 10, "a slice a frame");
+    assert!(h.query_all_by_label_contains("  byte").count() > 10);
+    h.state_mut().tab = escapement_tickwave_egui::panel::Tab::Selected;
+    h.step();
+    h.get_by_label("\u{25c2} previous byte").click();
+    h.run_steps(3);
+    assert_eq!(h.state().selected, Some((0, ids[n - 2])));
 }
