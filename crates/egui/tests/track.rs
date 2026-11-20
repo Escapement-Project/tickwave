@@ -1317,6 +1317,11 @@ fn the_list_shows_an_analysis_as_rows_filters_them_and_selects_one() {
     h.run();
     assert_eq!(h.state().tab, Tab::List);
     h.get_by_label_contains(&time(t[1]));
+    // SWD's one kind goes unsaid.
+    assert!(
+        h.query_by_label_contains(&format!("{}transfer  ", time(t[1])))
+            .is_none()
+    );
     h.get_by_label_contains(&time(t[3])).click();
     h.run();
     assert_eq!(h.state().selected, Some((0, t[3].id)));
@@ -1376,7 +1381,17 @@ fn the_list_shows_an_analysis_as_rows_filters_them_and_selects_one() {
     h.state_mut().tab = Tab::List;
     h.run();
     h.get_by_label("dp-write");
+    // Each row says its kind while more than one is shown.
+    h.get_by_label_contains(&format!("{}dp-write  ", time(write)));
+    for other in ["context", "dp-read", "ap-write", "ap-read"] {
+        h.get_by_label(other).click();
+        h.run();
+    }
     h.get_by_label_contains(&time(write));
+    assert!(
+        h.query_by_label_contains(&format!("{}dp-write  ", time(write)))
+            .is_none()
+    );
 }
 
 /// An analysis of one byte an item, its kind's text the byte, `None` a byte it could not know:

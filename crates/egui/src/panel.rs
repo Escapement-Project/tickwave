@@ -12,10 +12,10 @@
 //! previous and next step to the items of its kind before and after it. Pointing at a section,
 //! the heading or a reader lights its span, which the host passes to its tracks and graph.
 //!
-//! The List tab shows one analysis's items as rows, in time order: each its start, its label and,
-//! where it holds a condition, a mark. Kinds can be left out, or every item but those holding a
-//! condition. A row the pointer rests on lights its span, and a click selects it. When the
-//! selection changes the list scrolls to it.
+//! The List tab shows one analysis's items as rows, in time order: each its start, its kind while
+//! more than one kind is shown, its label and, where it holds a condition, a mark. Kinds can be
+//! left out, or every item but those holding a condition. A row the pointer rests on lights its
+//! span, and a click selects it. When the selection changes the list scrolls to it.
 //!
 //! The Text tab joins the bytes of an analysis whose schema declares a kind's text
 //! into lines, each after its start: a line ends at a newline, shown as `\n` with a carriage
@@ -74,6 +74,13 @@ pub struct Analysis<'a> {
     pub labels: &'a Labels,
     pub store: &'a Store,
     pub reads: Option<usize>,
+}
+
+/// Where a list row's columns start, from its left: the kind's where it has one, and the label's.
+#[derive(Clone, Copy)]
+struct Columns {
+    kind: Option<f32>,
+    label: f32,
 }
 
 /// The panel's tabs.
@@ -380,7 +387,19 @@ impl<'a> Panel<'a> {
             }
             self.state.scrolled = self.state.selected;
         }
-        let label_at = self.label_at(ui);
+        // With more than one kind shown, a column of kind names between the time and the label, as
+        // wide as the schema's widest so it stays put as kinds are shown and left out.
+        let mut at = Columns {
+            kind: None,
+            label: self.label_at(ui),
+        };
+        if schema.kinds.len().saturating_sub(hidden.len()) > 1 {
+            let widest = (schema.kinds.iter())
+                .map(|k| self.width(ui, k.name.to_string()))
+                .fold(0.0, f32::max);
+            at.kind = Some(at.label);
+            at.label += widest + 12.0;
+        }
         let selected = self.state.selected;
         let store = self.analyses[listed].store;
         scroll.show_rows(ui, ROW, total, |ui, range| {
@@ -389,19 +408,20 @@ impl<'a> Panel<'a> {
                     continue;
                 };
                 let on = selected == Some((listed, id));
-                self.row(ui, listed, item, label_at, on, lit, go);
+                self.row(ui, listed, item, at, on, lit, go);
             }
         });
     }
 
-    /// One list row: the item's start, its label, and a mark where it holds a condition.
+    /// One list row: the item's start, its kind where `at` has a column for it, its label, and a
+    /// mark where it holds a condition.
     #[expect(clippy::too_many_arguments, reason = "each is the row's own")]
     fn row(
         &self,
         ui: &mut Ui,
         a: usize,
         item: &Item,
-        label_at: f32,
+        at: Columns,
         selected: bool,
         lit: &mut Option<Span>,
         go: &mut Option<(usize, Id)>,
@@ -412,8 +432,14 @@ impl<'a> Panel<'a> {
             ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::click());
         let time = self.time(item.start);
         let label = heading(an.schema, an.labels, item);
+        let kind = (at.kind)
+            .and_then(|_| an.schema.kind(item.id.kind))
+            .map(|k| k.name.to_string());
         let marked = condition(item);
-        let named = format!("{time}  {label}");
+        let named = match &kind {
+            Some(k) => format!("{time}  {k}  {label}"),
+            None => format!("{time}  {label}"),
+        };
         response.widget_info(|| WidgetInfo::labeled(Role::Button, true, &named));
         let painter = ui.painter_at(rect);
         if response.hovered() {
@@ -428,29 +454,32 @@ impl<'a> Panel<'a> {
             painter.rect_stroke(rect, 2.0, ring, StrokeKind::Inside);
         }
         let y = rect.center().y;
-        let at = |x: f32| pos2(x, y);
+        let x = |dx: f32| pos2(rect.left() + dx, y);
         let (figures, labels) = (p.figures.clone(), p.labels.clone());
+        painter.text(x(4.0), Align2::LEFT_CENTER, time, figures, p.ink_2);
+        if let (Some(k), Some(dx)) = (kind, at.kind) {
+            painter.text(x(dx), Align2::LEFT_CENTER, k, labels.clone(), p.ink_2);
+        }
         painter.text(
-            at(rect.left() + 4.0),
-            Align2::LEFT_CENTER,
-            time,
-            figures,
-            p.ink_2,
-        );
-        painter.text(
-            at(rect.left() + label_at),
+            x(at.label),
             Align2::LEFT_CENTER,
             label,
             labels.clone(),
             p.ink,
         );
         if marked {
-            let right = at(rect.right() - 4.0);
+            let right = pos2(rect.right() - 4.0, y);
             painter.text(right, Align2::RIGHT_CENTER, "!", labels, p.attention_ink);
         }
         if response.clicked() {
             *go = Some((a, item.id));
         }
+    }
+
+    fn width(&self, ui: &Ui, text: String) -> f32 {
+        let galley =
+            (ui.painter()).layout_no_wrap(text, self.palette.labels.clone(), self.palette.ink);
+        galley.size().x
     }
 
     /// Where a row's text starts: past a time with the most figures.
