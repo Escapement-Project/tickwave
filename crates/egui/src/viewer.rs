@@ -614,11 +614,14 @@ impl Viewer {
         slot.pending.is_some() || slot.running.is_some()
     }
 
-    /// A request is waiting or runs, not a snapshot's follow-up: what the graph waits on before
-    /// it asks again, so a pan doesn't cancel its own queries.
-    pub(crate) fn asking(&self) -> bool {
+    /// What `held` gives, and whether a request is waiting or runs, not a snapshot's follow-up:
+    /// what the graph waits on before it asks again, so a pan doesn't cancel its own queries.
+    /// Read under one lock: read apart, an answer landing between them leaves a frame with the
+    /// answer before it and nothing under way, and it asks again for what has just landed.
+    pub(crate) fn held_asking(&self) -> (Option<Held>, bool) {
         let slot = self.shared.slot();
-        slot.pending.is_some() || (slot.running.is_some() && !slot.following)
+        let asking = slot.pending.is_some() || (slot.running.is_some() && !slot.following);
+        (slot.held.clone().or_else(|| slot.sketch.clone()), asking)
     }
 
     /// The graph's now, each frame, which a snapshot's follow-up ends a followed window at. It

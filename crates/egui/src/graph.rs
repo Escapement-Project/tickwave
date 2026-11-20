@@ -755,8 +755,8 @@ impl Graph<'_> {
     /// window at the now it is given every frame. A change of the channels drawn asks at once;
     /// anything else waits for a request under way, so a pan draws its answers as they come
     /// rather than cancelling each one, and cancels a snapshot's follow-up, which the next
-    /// snapshot runs again.
-    fn ask(&self, wanted: Request, window: &Range<i64>, held: Option<&Held>) {
+    /// snapshot runs again. `held` and `asking` are what `Viewer::held_asking` read together.
+    fn ask(&self, wanted: Request, window: &Range<i64>, held: Option<&Held>, asking: bool) {
         #[cfg(feature = "live")]
         self.viewer.set_now(wanted.now);
         let sent = self.viewer.sent();
@@ -776,7 +776,7 @@ impl Graph<'_> {
             && held.is_some_and(|h| {
                 window.start < h.answer.around.start || window.end > h.answer.around.end
             });
-        if structural || (!self.viewer.asking() && (changed || left)) {
+        if structural || (!asking && (changed || left)) {
             self.viewer.request(wanted);
         }
     }
@@ -787,7 +787,7 @@ impl Widget for Graph<'_> {
         let _span = tracing::debug_span!("graph").entered();
         let id = ui.make_persistent_id(self.id_salt);
         let facts = self.viewer.facts();
-        let held: Option<Held> = self.viewer.held();
+        let (held, asking) = self.viewer.held_asking();
         let layout = self.layout(ui, &facts);
         let mut response = ui.interact(layout.rect, id, Sense::click_and_drag());
         let value_axis = match self.trace {
@@ -859,7 +859,7 @@ impl Widget for Graph<'_> {
                 .round()
                 .max(1.0) as u32;
             let wanted = self.request(columns, &facts);
-            self.ask(wanted, &view.window, held.as_ref());
+            self.ask(wanted, &view.window, held.as_ref(), asking);
         }
         let paints = held.as_ref().map_or(&[][..], |h| &h.answer.markers.paints);
         let declared = self.decoded.roles;
