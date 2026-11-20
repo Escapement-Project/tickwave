@@ -1115,6 +1115,9 @@ struct Slot {
 struct Chain {
     id: WindowId,
     source: Box<dyn Source>,
+    window: Span,
+    /// The analyses it runs, by slot.
+    slots: Vec<usize>,
 }
 
 /// One run of an analysis, as `Host::window_run` finds it.
@@ -1163,9 +1166,10 @@ impl<'a> RunView<'a> {
         self.run.interrupt.clone()
     }
 
-    /// Whether it has something to do and room downstream to put it.
+    /// Whether it has something to do and room downstream to put it, and, in a window chain,
+    /// the window has not settled yet.
     pub fn runnable(&self) -> bool {
-        self.host.runnable_run(self.slot, self.run)
+        self.host.runnable_run(self.slot, self.run) && !self.host.window_done(self.run.id)
     }
 
     /// Whether the runs stacked on it have nothing waiting.
@@ -2235,10 +2239,10 @@ impl Host {
             }
         }
         // The newest window chain's runs before older ones', and each chain's last runnable
-        // analysis: stacked ones before what feeds them.
+        // analysis: stacked ones before what feeds them. A chain whose window has settled is done.
         let window = (0..self.analyses.len())
             .flat_map(|a| (self.analyses[a].windows.iter()).map(move |r| (a, r)))
-            .filter(|&(a, r)| self.runnable_run(a, r))
+            .filter(|&(a, r)| self.runnable_run(a, r) && !self.window_done(r.id))
             .max_by_key(|&(a, r)| (r.id.generation, a))
             .map(|(_, r)| r.id);
         let forward = (0..self.analyses.len())
@@ -2520,7 +2524,8 @@ impl Host {
     /// restored from the latest kept checkpoint at or before the window's start or from the
     /// beginning, reading a fork of the source and keeping the window. A window the forward pass
     /// has not reached starts locally at its start instead, provisional. Its runs take turns
-    /// before the forward chain's, the newest chain's first, until `retire`.
+    /// before the forward chain's, the newest chain's first, until every one of them has settled
+    /// past the window's end or finished. Their stores are read until `retire`.
     pub fn derive(&mut self, a: AnalysisId, window: Span) -> Result<Derived, CheckpointError> {
         let root = a.index();
         let name = self.analyses[root].name.clone();
@@ -2590,15 +2595,34 @@ impl Host {
         for (x, run) in runs {
             self.analyses[x].windows.push(run);
         }
+        let window_span = window;
         let window = WindowId {
             root: a,
             generation,
         };
-        self.chains.push(Chain { id: window, source });
+        self.chains.push(Chain {
+            id: window,
+            source,
+            window: window_span,
+            slots: order,
+        });
         Ok(Derived {
             window,
             restored,
             provisional,
+        })
+    }
+
+    /// Whether `run` is in a window chain every run of which has settled past its window's end or
+    /// finished, so that none takes another turn.
+    fn window_done(&self, run: RunId) -> bool {
+        let Some(c) = (self.chains.iter()).find(|c| c.id.generation == run.generation) else {
+            return false;
+        };
+        (c.slots.iter()).all(|&x| {
+            (self.analyses[x].windows.iter())
+                .filter(|r| r.id.generation == run.generation)
+                .all(|r| r.finished.is_some() || r.settled >= c.window.end)
         })
     }
 

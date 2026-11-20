@@ -1528,6 +1528,46 @@ fn checkpoints_spaced_by_observations_are_evicted_by_observations() {
     assert!(few.widest_observed < 2 * even, "{few:?} against {even}");
 }
 
+/// A window chain decodes its window and stops: it takes no turn once every run in it has settled
+/// past the window's end, and its stores stay readable until it is retired.
+#[test]
+fn a_window_chain_stops_once_its_window_has_settled() {
+    let (mut h, [p, q]) = pulses_host(line(80, 3, 20, vec![]), 15, None, HostOptions::default());
+    h.keep_checkpoints(p, Keeping::new(50, usize::MAX)).unwrap();
+    run_all(&mut h);
+    let end = h.consumed(p);
+    let window = Span {
+        start: 700,
+        end: 800,
+    };
+    let id = h.derive(p, window).unwrap().window;
+    run_all(&mut h);
+    let (wp, wq) = (win(&h, id, p), win(&h, id, q));
+    assert!(wp.settled() >= window.end && wq.settled() >= window.end);
+    assert!(
+        wp.consumed() < end - 100,
+        "it stopped short of the end: {} of {end}",
+        wp.consumed()
+    );
+    assert!(!wp.runnable() && !wq.runnable());
+    let meets = |i: &escapement_tickwave_decode::Item| {
+        i.start < window.end && i.end.is_none_or(|e| e > window.start)
+    };
+    let ids = |items: &std::collections::BTreeMap<Id, escapement_tickwave_decode::Item>| {
+        (items.iter())
+            .filter(|(_, i)| meets(i))
+            .map(|(id, i)| (*id, i.end))
+            .collect::<Vec<_>>()
+    };
+    let want = ids(h.store(q).items());
+    assert!(!want.is_empty());
+    assert_eq!(
+        ids(wq.store().items()),
+        want,
+        "the window's items, complete"
+    );
+}
+
 #[test]
 fn a_window_chain_beside_the_forward_pass_re_derives_its_span_and_leaves_the_pass_unchanged() {
     let keeping = Keeping::new(50, usize::MAX);
