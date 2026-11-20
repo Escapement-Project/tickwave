@@ -222,6 +222,51 @@ thread's are `sketch job`, `query job` and `snapshot`, around the view core's ow
 `query`, and `extend` where a snapshot's answer extends the one held, followed by `query` where
 it can't.
 
+## Decoding
+
+With the `decode` feature, a graph draws protocol decoders' items as tracks under it, one track an
+analysis, on the graph's time axis. `escapement-tickwave-decode` runs the decoders, and
+`escapement-tickwave-decoders` holds the reference ones and their registry.
+
+`Decode::start` takes a recipe, the registry to bind it through, and a function that opens the
+recording. It returns at once: a worker opens the recording, binds the recipe and runs the forward
+pass. `Decode::progress` says where that stands, or why the recipe didn't bind. The pass keeps no
+items. It tallies each analysis's items as they close, and a track draws that tally zoomed out,
+as how many items start in each column. Zoomed in, the window on screen and a width either side
+are decoded again from the nearest checkpoint before them, and the tracks and the panel read
+those items. A window the pass hasn't reached yet is decoded from its own start, and draws pale
+with dashed outlines until the pass gets there. Checkpoints take at most 64 MiB, unless
+`DecodeOptions` says otherwise.
+
+`Graph::decoded` draws a graph with a decode's tracks under it, from a `DecodeState` the host
+keeps as it keeps the `ViewState`. `DecodedGraph::panel` places the side panel beside the plot,
+or under it where the plot would be left too narrow. `Decode::release` and `Decode::reopen` let
+go of the file and open it again, as the viewer's do.
+
+A track keeps its rows' height from the first frame. Its gutter names the analysis and each row.
+Lost input is shaded as the graph shades lost time, input not decoded yet is hatched, and decoded
+input with nothing in it is left bare. An item closed incomplete, or holding a value the decoder
+couldn't know, is marked at every zoom. The pointer resting on a box shows its fullest label,
+start and length, and a click selects it, outlined in ink.
+
+The side panel has four tabs:
+
+- **Selected**: the selected item in full: its label, time, duration and status, its fields, its
+  spanned fields as sections that open to their bits, the values it couldn't know and why, its
+  links, and the items stacked on it that read it. Previous and next step through its kind, and
+  an item off screen comes into view, keeping the window's span. Its citation, or the tab as
+  text, copies to the clipboard.
+- **List**: an analysis's items as rows in time order, filtered by kind or to those holding a
+  condition. A click selects one.
+- **Text**: the bytes of an analysis whose schema declares a kind's text, joined into lines.
+- **Decoders**: each analysis under the one it reads, with its inputs, its settings as controls,
+  and how far its pass has come. A setting changed decodes that analysis's chain again, and the
+  window on screen at once, provisional until the pass reaches it. Below them, a decoder can be
+  added: one reading the recording's channels, bound to a channel per port, one reading an
+  analysis already there, or a preset stack. An analysis can be removed, with what reads it.
+
+`Decode::recipe` gives the recipe as the reader has changed it, for a host that saves it.
+
 ## The demo
 
 ```sh
@@ -240,6 +285,14 @@ window shows them. `--trace FILE` writes every span as a Chrome trace, for Perfe
 chrome://tracing, and `--quit-after S` closes the window S seconds after its first frame. For
 measuring a frame, `--window FROM..TO` opens at a window, in seconds, and `--repaint` draws every
 frame though nothing changes.
+
+`--recipe FILE` decodes the recording as the file's `[[decode]]` tables say, with the side panel
+beside the plot. `--decode` opens it with nothing decoded yet, the Decoders tab open to add some.
+The decoders' recipes are in `crates/decoders/recipes/`:
+
+```sh
+cargo run --release -p escapement-tickwave-egui --features decode --example demo -- capture.tickwave --recipe crates/decoders/recipes/swd.toml
+```
 
 `tests/shots.rs` renders the graph and the strip to PNG files through egui_kittest's wgpu
 renderer, in both faces: set `TICKWAVE_SHOTS` to a folder and run it with `--ignored`.

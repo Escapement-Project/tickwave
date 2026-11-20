@@ -99,6 +99,25 @@ buckets where it can. While a recording is
 being written, a channel's overview reaches no further than its settled buckets, so the samples
 after them are counted one by one.
 
+## Cursors
+
+A protocol decoder reads a recording through `cursor`. A digital channel's cursor gives its edges,
+and where its level becomes known or unknown. An analog channel's gives its samples, where its
+runs start, and the samples lost. Each comes in source order, with its source tick and its place
+among the channel's items, a batch at a time up to a bound. A cursor resumes from that place, so
+two edges at one tick of the axis are neither lost nor repeated.
+
+`Merge` puts several channels' observations in one exact order, whatever their sources' mappings:
+it orders them by exact time on the axis, not by rounded ticks. Observations from different
+channels at the same exact time come out as one group, in no order; a decoder that needs an order
+states its own rule. Timer queries sample the channels at an exact time.
+
+Cursors read through the recording's own reads and cache, so a block a decoder reads is one the
+graph can draw from, and a channel's gaps or breaks in list pages are read a page at a time. A
+cursor reads only the recording it was made from; given another, a call returns
+`Error::OtherRecording`. On a live recording, a cursor carries on across `Recording::update` and
+reports only what is settled: nothing the writer can still add comes before what it has reported.
+
 ## Modules
 
 | Module | Ports | Holds |
