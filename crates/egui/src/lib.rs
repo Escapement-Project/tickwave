@@ -9,6 +9,8 @@
 //! `build query`, `axes`, `trace`, `lane`, `markers` and `tessellate`, and `strip`. The query
 //! thread's are `sketch job`, `query job` and `snapshot`, around the view core's own.
 
+#[cfg(feature = "decode")]
+mod decode;
 mod draw;
 mod graph;
 mod palette;
@@ -23,6 +25,11 @@ mod viewer;
 #[cfg(test)]
 mod tests;
 
+#[cfg(feature = "decode")]
+pub use decode::{
+    BindFailure, Decode, DecodeOptions, DecodeState, DecodedGraph, Decoding, Place, Progress,
+    Reached, Tracked, UNDER, WINDOW_ITEMS_AT_MOST,
+};
 pub use escapement_tickwave_view as view;
 pub use graph::{Driven, Extras, Graph, Shown};
 pub use palette::Palette;

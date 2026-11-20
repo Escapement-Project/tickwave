@@ -1,6 +1,8 @@
 //! The graph's behaviour, held through egui_kittest: recordings laid out as verge's energy
 //! captures are, a host that keeps a `ViewState`, and readers of what a frame painted.
 
+#[cfg(feature = "decode")]
+mod decode;
 mod ease;
 mod fallback;
 mod graph;

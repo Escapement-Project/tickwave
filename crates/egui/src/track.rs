@@ -132,6 +132,12 @@ pub fn condition(item: &Item) -> bool {
         || (item.fields.iter()).any(|f| matches!(f.value, Value::Unknown { .. }))
 }
 
+/// The height a track of `schema` takes, its parts row with `parts`: `Track::height` before there
+/// is a track.
+pub(crate) fn track_height(schema: &Schema, parts: bool) -> f32 {
+    (schema.layout().0 + usize::from(parts)) as f32 * ROW
+}
+
 /// `condition`, of an item as it closed.
 pub fn closed_condition(c: &Closed) -> bool {
     matches!(c.status, Status::Incomplete(_)) || c.unknown
@@ -616,7 +622,7 @@ impl Density {
 
     /// Whether `window` (axis ticks) over `width` points is too crowded to draw items apart: the
     /// longest a few points wide, or more of them than the width shows apart.
-    fn crowded(&self, window: &std::ops::Range<i64>, width: f32) -> bool {
+    pub(crate) fn crowded(&self, window: &std::ops::Range<i64>, width: f32) -> bool {
         let per = (window.end - window.start) as f64 / f64::from(width);
         let (count, _) = self.count(window.start, window.end, 0.0);
         (self.longest as f64 / per) < f64::from(CROWDED) || count as f32 * CROWDED > width
@@ -673,7 +679,7 @@ impl Density {
 
     /// Items starting in `[from, to)` and how many are conditions, at the coarsest level whose
     /// buckets are no wider than `per`; with `per` 0, the finest.
-    fn count(&self, from: i64, to: i64, per: f64) -> (u64, u64) {
+    pub(crate) fn count(&self, from: i64, to: i64, per: f64) -> (u64, u64) {
         self.level(per)
             .map_or((0, 0), |at| self.count_at(at, from, to))
     }

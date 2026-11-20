@@ -171,6 +171,11 @@ impl<'a> Graph<'a> {
         self
     }
 
+    /// The viewer and palette it draws with, for a widget that wraps it.
+    pub(crate) fn borrows(&self) -> (&'a Viewer, &'a Palette) {
+        (self.viewer, self.palette)
+    }
+
     /// The decoded paint comes from a window decoded ahead of the forward pass, as a track's
     /// `provisional` says of its items: it draws at the palette's `pale`, dashed where its role's
     /// look has no dash of its own. Paint the sidecar gives keeps its look.
