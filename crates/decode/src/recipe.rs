@@ -97,12 +97,19 @@ pub struct Preset {
     pub recipe: Recipe,
 }
 
-/// About 100 µs of `recording`'s input, in ticks: a wire decoder's window that keeps one step of
-/// a host well under a millisecond.
+/// About 100 µs of `recording`'s input, in its axis's ticks: a wire decoder's window that keeps
+/// one step of a host well under a millisecond. A decoder reads as many of its own source's ticks
+/// as span the same time.
 pub fn window(recording: &Recording) -> Tick {
     let tb = recording.timebase();
     let per_s = tb.num() as f64 / tb.den() as f64;
     ((per_s * 1e-4) as Tick).max(1)
+}
+
+/// `window` axis ticks as ticks of the timeline `map` places on the axis, at least one.
+fn on_timeline(window: Tick, map: &Mapping) -> Tick {
+    let from = map.first_at(map.origin());
+    (map.first_at(map.origin().saturating_add(window)) - from).max(1)
 }
 
 /// The analyses to run over a recording, each a `[[decode]]` table.
@@ -548,7 +555,7 @@ impl Analysis {
                 Name::Owned(self.id.clone()),
                 def,
                 input,
-                entry.factory(window),
+                entry.factory(on_timeline(window, &map)),
                 &settings,
                 keep.to_vec(),
             )
@@ -687,5 +694,17 @@ inputs = { TCK = "TCK" }
             pairs(&[("TMS", "TMS")]),
             "TCK and TDO left without a channel the recording has"
         );
+    }
+
+    /// A source that ticks once every five of the axis's reads a fifth as many ticks for the same
+    /// time, wherever it is aligned.
+    #[test]
+    fn a_window_spans_the_same_time_on_a_slower_source() {
+        use escapement_tickwave_view::format::model::Ratio;
+        let m = |n| Ratio::integer(n).unwrap();
+        assert_eq!(on_timeline(1000, &Mapping::new(0, 0, m(1))), 1000);
+        assert_eq!(on_timeline(1000, &Mapping::new(0, 0, m(5))), 200);
+        assert_eq!(on_timeline(1000, &Mapping::new(700, -30, m(3))), 334);
+        assert_eq!(on_timeline(1, &Mapping::new(0, 0, m(5))), 1);
     }
 }
