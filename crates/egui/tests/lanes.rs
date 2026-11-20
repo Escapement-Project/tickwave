@@ -903,3 +903,75 @@ fn a_tracks_gutter_holds_its_name_and_each_rows_name_beside_the_row() {
     assert_eq!(texts.len(), 1, "{texts:?}");
     assert!(texts[0].1.right() < plot && plot - texts[0].1.right() < 12.0);
 }
+
+#[test]
+fn a_label_naming_a_field_the_item_lacks_gives_way_to_the_next() {
+    use escapement_tickwave_decode::{FieldDecl, FieldId, FieldType, Label};
+    let schema = Schema::new(vec![
+        KindDecl::new("a")
+            .with_fields(vec![FieldDecl::new("value", FieldType::Word { bits: 8 })])
+            .with_labels(vec![
+                Label::default()
+                    .text("read ")
+                    .field(FieldId(0))
+                    .text(" done"),
+                Label::default().text("read"),
+            ]),
+    ]);
+    let mut store = Store::with_keep(vec![Span {
+        start: Tick::MIN,
+        end: Tick::MAX,
+    }]);
+    let id = Id::new(KindId(0), 100);
+    let ops = [
+        Op::Open {
+            id,
+            parent: None,
+            start: 100,
+        },
+        Op::Close {
+            id,
+            end: 900,
+            status: Status::Complete,
+        },
+    ];
+    store.apply_batch(&ops, 8).unwrap();
+    let shown = Shown::new(0..1000, 0.0..500.0);
+    let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
+    let density = Density::of(store.items(), &map, |_| false);
+    let palette = Palette::from_visuals(&egui::Visuals::default());
+    let labels = Labels::default();
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(600.0, 200.0),
+        )),
+        ..egui::RawInput::default()
+    };
+    let mut out = egui::Context::default().run_ui(input, |ui| {
+        ui.add(Track::new(
+            &shown,
+            "t",
+            &schema,
+            store.items(),
+            &density,
+            &labels,
+            &palette,
+            map,
+        ));
+    });
+    out.textures_delta.clear();
+    fn walk(s: &egui::Shape, out: &mut Vec<String>) {
+        match s {
+            egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+            egui::Shape::Text(t) => out.push(t.galley.text().to_owned()),
+            _ => {}
+        }
+    }
+    let mut drawn = vec![];
+    for c in &out.shapes {
+        walk(&c.shape, &mut drawn);
+    }
+    assert!(drawn.contains(&"read".to_owned()), "{drawn:?}");
+    assert!(!drawn.iter().any(|t| t.contains("done")), "{drawn:?}");
+}

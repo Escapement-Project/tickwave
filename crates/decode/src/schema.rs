@@ -272,7 +272,8 @@ pub enum LabelPiece {
     Field(FieldId),
 }
 
-/// A label over an item's typed values. A field the item does not hold is left out.
+/// A label over an item's typed values. It applies only to an item holding every field it names: a
+/// kind's labels end with one that names fewer, or none, for items that hold less.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Label(pub Vec<LabelPiece>);
 
@@ -325,7 +326,8 @@ pub struct KindDecl {
     /// numbers, each as many lanes high as its kinds' most, and only kinds of one row share
     /// lanes. A child kind goes in a row under its parents', since its items lie inside theirs.
     pub row: usize,
-    /// Its labels, fullest first: a view shows the first that fits an item, else none.
+    /// Its labels, fullest first: a view shows the first that applies to an item and fits it, else
+    /// none.
     pub labels: Vec<Label>,
     /// The field whose value reads as text, a byte as a word of 8 bits or bytes as bits: a view
     /// joins an analysis's text into lines, each character from its item.

@@ -38,7 +38,7 @@ const GUTTER_PAD: f32 = 6.0;
 const NAME_GAP: f32 = 12.0;
 
 /// Labels a host gives over those the schema declares, by kind, fullest first: a track draws the
-/// first that fits its item, else none.
+/// first that applies to its item and fits it, else none.
 #[derive(Clone, Debug, Default)]
 pub struct Labels {
     by_kind: Vec<(KindId, Vec<Label>)>,
@@ -110,11 +110,27 @@ fn label(schema: &Schema, item: &Item, t: &Label) -> String {
     out.trim().to_string()
 }
 
-/// The fullest label, from `labels` else the item's kind, that is not empty and holds no value the
-/// item could not know; else its kind's name.
+/// The labels that apply to `item`, fullest first: `labels`' for its kind, else its schema's, each
+/// only where the item holds every field it names.
+fn applying<'s>(
+    schema: &'s Schema,
+    labels: &'s Labels,
+    item: &'s Item,
+) -> impl Iterator<Item = &'s Label> {
+    let declared = schema.kind(item.id.kind).map_or(&[][..], |k| &k.labels[..]);
+    let held = |t: &&Label| {
+        (t.0.iter()).all(|p| match p {
+            LabelPiece::Field(f) => item.field(*f).is_some(),
+            _ => true,
+        })
+    };
+    (labels.of(item.id.kind).unwrap_or(declared).iter()).filter(held)
+}
+
+/// The fullest label that applies to the item, is not empty and holds no value the item could not
+/// know; else its kind's name.
 pub(crate) fn heading(schema: &Schema, labels: &Labels, item: &Item) -> String {
     let kind = schema.kind(item.id.kind);
-    let declared = kind.map_or(&[][..], |k| &k.labels[..]);
     let known = |t: &&Label| {
         !(t.0.iter()).any(|p| match p {
             LabelPiece::Field(f) => item
@@ -123,7 +139,7 @@ pub(crate) fn heading(schema: &Schema, labels: &Labels, item: &Item) -> String {
             _ => false,
         })
     };
-    (labels.of(item.id.kind).unwrap_or(declared).iter())
+    applying(schema, labels, item)
         .filter(known)
         .map(|t| label(schema, item, t))
         .find(|t| !t.is_empty())
@@ -1186,8 +1202,7 @@ impl Track<'_> {
             };
             shapes.push(Shape::rect_stroke(r, 2.0, stroke, egui::StrokeKind::Inside));
             let room = r.width() - 2.0 * PAD;
-            let declared = (self.schema.kind(item.id.kind)).map_or(&[][..], |k| &k.labels[..]);
-            for t in self.labels.of(item.id.kind).unwrap_or(declared) {
+            for t in applying(self.schema, self.labels, item) {
                 let text = label(self.schema, item, t);
                 if text.is_empty() {
                     continue;
