@@ -288,6 +288,7 @@ pub enum Pause {
     Input,
     /// More to do with input already held; call again.
     Work,
+    /// Done: the decoder called `Exchange::finish`.
     Finished,
 }
 
@@ -426,6 +427,8 @@ struct Done {
     pause: Pause,
     /// Deliveries remain that the budget kept from the decoder.
     more: bool,
+    /// The reply the decoder did not take, which waits for its next turn.
+    reply: Option<Window>,
     out: Out,
     taken: Option<(Tick, u64)>,
     request: Option<Request>,
@@ -459,20 +462,26 @@ impl Turn {
         let pause = self.decoder.turn(&mut ex);
         let more = ex.exhausted && ex.more();
         let Exchange {
+            run: _,
             out,
+            reply,
             taken,
+            inbox: _,
+            budget: _,
             request,
             twice,
+            exhausted: _,
             end,
             frontier,
             upstream,
             lost,
             received,
-            ..
+            interrupt: _,
         } = ex;
         self.done = Some(Done {
             pause,
             more,
+            reply,
             out,
             taken,
             request,
@@ -671,6 +680,12 @@ pub enum Refusal {
     /// A turn that made two requests.
     #[error("run {0:?} made two requests in one turn")]
     RequestTwice(RunId),
+    /// A turn that returned `Pause::Finished` without saying where its input ended.
+    #[error("run {0:?} returned Finished without finishing")]
+    FinishedWithoutEnd(RunId),
+    /// A turn that returned `Pause::Input`, waiting, with the reply it was offered untaken.
+    #[error("run {0:?} waits for input with its reply untaken")]
+    ReplyLeft(RunId),
     /// A turn begun while the run's last is still out.
     #[error("run {0:?} has a turn under way")]
     TurnUnderWay(RunId),
@@ -2152,6 +2167,7 @@ impl Host {
         let Some(Done {
             pause,
             more,
+            reply,
             out,
             taken,
             request,
@@ -2169,8 +2185,13 @@ impl Host {
             return Ok(Pause::Input);
         };
         r.more = pause == Pause::Work || (pause == Pause::Input && more);
-        // What arrived during the turn is new to the decoder.
+        // What arrived during the turn is new to the decoder. A reply it was offered and did not
+        // take is not, and waits for a turn it runs for another reason.
         r.fresh |= r.ready.is_some();
+        let left = reply.is_some();
+        if left {
+            r.ready = reply;
+        }
         if let Some((t, n)) = taken {
             r.consumed = t;
             r.observed += n;
@@ -2184,6 +2205,12 @@ impl Host {
         let (id, seq) = (r.id, r.next_batch);
         if twice {
             return Err(self.refuse(Refusal::RequestTwice(id)));
+        }
+        if pause == Pause::Finished && end.is_none() {
+            return Err(self.refuse(Refusal::FinishedWithoutEnd(id)));
+        }
+        if pause == Pause::Input && left && !more {
+            return Err(self.refuse(Refusal::ReplyLeft(id)));
         }
         if let Some(&span) = received.iter().find(|s| !lost.iter().any(|l| l.1 == **s)) {
             return Err(self.refuse(Refusal::LossNotDeclared { run: id, span }));

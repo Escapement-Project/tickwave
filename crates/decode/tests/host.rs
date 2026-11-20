@@ -1252,6 +1252,44 @@ fn an_interrupted_read_stays_outstanding_with_its_source_unmoved() {
 }
 
 #[test]
+fn a_reply_a_turn_leaves_waits_for_the_decoders_next_turn() {
+    // It asks, then works on what it holds for a turn while the reply waits, then takes it.
+    let turns = vec![vec![Act::Request(0, 10)], vec![], vec![Act::TakeReply]];
+    let (mut h, a) = toy_host(turns, HostOptions::default());
+    for _ in 0..3 {
+        h.step().unwrap();
+    }
+    assert_eq!(h.consumed(a), 10);
+}
+
+/// Returns `Finished` without saying where its input ended.
+struct Quits;
+
+impl Decoder for Quits {
+    fn turn(&mut self, _: &mut Exchange<'_>) -> Pause {
+        Pause::Finished
+    }
+}
+
+#[test]
+fn a_turn_that_would_leave_its_run_waiting_on_nothing_is_refused() {
+    let mut h = Host::new(HostOptions::default());
+    let input = InputSpec::Wire {
+        source: Box::new(Nothing::default()),
+        local: None,
+    };
+    let quits = Box::new(|_: &Bound, _| Box::new(Quits) as Box<dyn Decoder>);
+    let a = h.add(name("q"), toy(), input, quits, &[], all()).unwrap();
+    assert_eq!(h.step(), Err(Refusal::FinishedWithoutEnd(h.run_id(a))));
+
+    // Waiting for input with the reply it was offered untaken.
+    let turns = vec![vec![Act::Request(0, 10)], vec![]];
+    let (mut h, a) = toy_host(turns, HostOptions::default());
+    h.step().unwrap();
+    assert_eq!(h.step(), Err(Refusal::ReplyLeft(h.run_id(a))));
+}
+
+#[test]
 fn a_turn_whose_run_is_replaced_meanwhile_is_refused_whole() {
     let turns = vec![vec![
         Act::Emit(open(frame(0), 0)),
