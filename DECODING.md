@@ -161,7 +161,7 @@ gantt
     axisFormat  
     todayMarker off
     section Forward pass
-    Decoded so far                         : active, pass, 2000-01-01, 60d
+    Decoded so far                         : pass, 2000-01-01, 60d
     Not decoded yet                        : done, rest, after pass, 40d
     section Checkpoints
     Checkpoint                             : milestone, c1, 2000-01-16, 0d
@@ -169,9 +169,9 @@ gantt
     Checkpoint                             : milestone, c3, 2000-02-15, 0d
     section A window behind the pass
     Replayed from the checkpoint before it : done, replay, 2000-01-31, 8d
-    The window's items, exact              : active, wa, after replay, 10d
+    The window's items, exact              : wa, after replay, 10d
     section A window ahead of it
-    The window's items, provisional        : wb, 2000-03-16, 10d
+    The window's items, provisional        : done, wb, 2000-03-16, 10d
 ```
 
 A checkpoint restores only onto the chain it was taken of: the same decoders, at the same versions
