@@ -917,7 +917,7 @@ impl Keeper {
 pub enum Seek {
     /// The checkpoint that had taken its input to here.
     Restored(Tick),
-    /// No checkpoint at or before the tick: the chain starts again from the beginning.
+    /// No checkpoint at or before the tick: the chain starts again where its forward run did.
     FromStart,
 }
 
@@ -2374,12 +2374,31 @@ impl Host {
         Ok(())
     }
 
-    /// Replaces analysis `a`'s run with a new generation starting at `local` (None: the
+    /// Replaces wire analysis `a`'s run with a new generation starting at `local` (None: the
     /// beginning), and every run stacked on it with a new generation bound to its replaced
     /// upstream. Their output, queued input and outstanding requests are dropped; a reply or
-    /// batch for an old generation is refused when it arrives. Returns the retired runs.
-    pub fn replace(&mut self, a: AnalysisId, local: Option<Tick>) -> Vec<RunId> {
-        let a = a.index();
+    /// batch for an old generation is refused when it arrives. Returns the retired runs. A
+    /// stacked analysis is refused: a new run of it would take its upstream's output only from
+    /// then on.
+    pub fn replace(
+        &mut self,
+        a: AnalysisId,
+        local: Option<Tick>,
+    ) -> Result<Vec<RunId>, CheckpointError> {
+        self.root(a)?;
+        Ok(self.replace_chain(a.index(), local))
+    }
+
+    /// The wire analysis `a`, or why it is not one.
+    fn root(&self, a: AnalysisId) -> Result<usize, CheckpointError> {
+        let an = &self.analyses[a.index()];
+        match an.input {
+            Input::Wire(_) => Ok(a.index()),
+            Input::Upstream { .. } => Err(CheckpointError::NotARoot(an.name.clone())),
+        }
+    }
+
+    fn replace_chain(&mut self, a: usize, local: Option<Tick>) -> Vec<RunId> {
         let mut retired = vec![];
         let mut queue = VecDeque::from([(a, local)]);
         let mut seen = HashSet::default();
@@ -2447,7 +2466,7 @@ impl Host {
             self.retire(w);
         }
         let local = self.analyses[root].run.local;
-        self.replace(AnalysisId(root as u16), local)
+        self.replace_chain(root, local)
     }
 
     /// Analysis `a` and every analysis stacked on it, upstream first.
@@ -2634,7 +2653,8 @@ impl Host {
     }
 
     /// Restores the latest checkpoint kept for wire analysis `a` that had taken its input no
-    /// further than `t`, or replaces its chain from the beginning where there is none. Running
+    /// further than `t`, or replaces its chain from where its forward run started where there is
+    /// none. Running
     /// the host then replays from there. A kept checkpoint holds the items still open at it and
     /// those closed that end past the input it had taken, so the stores afterwards hold those and
     /// what the replay keeps. `t` is the start of the span to re-derive: every item that meets it
@@ -2642,15 +2662,17 @@ impl Host {
     /// checkpoint would leave out what closed between `t` and it. The runs replaced include a
     /// forward pass under way: to carry it on, seek again to the latest checkpoint.
     pub fn seek(&mut self, a: AnalysisId, t: Tick) -> Result<Seek, CheckpointError> {
+        let root = self.root(a)?;
+        let local = self.analyses[root].run.local;
         let Some(k) = self.keepers.iter().position(|k| k.root == a) else {
-            self.replace(a, None);
+            self.replace_chain(root, local);
             return Ok(Seek::FromStart);
         };
         let at = self.keepers[k]
             .held
             .partition_point(|(c, _)| c.consumed <= t);
         if at == 0 {
-            self.replace(a, None);
+            self.replace_chain(root, local);
             return Ok(Seek::FromStart);
         }
         let held = std::mem::take(&mut self.keepers[k].held);

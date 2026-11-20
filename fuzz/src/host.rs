@@ -543,7 +543,7 @@ pub fn reach(case: &HostCase) -> (escapement_tickwave_decode::Stats, usize) {
                 let _ = h.seek(wire, Tick::from(*t));
             }
             Control::Replace(local) => {
-                h.replace(wire, local.map(Tick::from));
+                let _ = h.replace(wire, local.map(Tick::from));
             }
             Control::Interrupt => h.interrupt(wire).store(true, Relaxed),
             Control::Hold => {

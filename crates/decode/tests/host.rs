@@ -728,7 +728,7 @@ fn replies_carry_their_run_and_are_taken_once() {
     h.step().unwrap();
     let first = h.outstanding(a).unwrap();
     let reply = h.take_io().unwrap().unwrap();
-    h.replace(a, None);
+    h.replace(a, None).unwrap();
     assert_eq!(
         h.reply(reply),
         Err(Refusal::StaleReply {
@@ -1387,7 +1387,7 @@ fn a_turn_whose_run_is_replaced_meanwhile_is_refused_whole() {
     t.run();
     assert_eq!(t.emitted(), 2);
     let old = h.run_id(a);
-    h.replace(a, None);
+    h.replace(a, None).unwrap();
     assert_eq!(
         h.end_turn(t),
         Err(Refusal::StaleRun {
@@ -2908,6 +2908,40 @@ fn pulses_alone(line: Line) -> (Host, AnalysisId) {
         )
         .unwrap();
     (h, p)
+}
+
+/// A stacked run takes its upstream's output as it comes, so only a wire analysis's chain is
+/// sought or replaced; with no checkpoint, it starts again where its forward run did.
+#[test]
+fn only_a_wire_analysis_is_sought_or_replaced() {
+    let (mut h, [p, q]) = offset_host(line(40, 3, 20, vec![]));
+    run_all(&mut h);
+    assert!(matches!(h.seek(q, 100), Err(CheckpointError::NotARoot(_))));
+    assert!(matches!(
+        h.replace(q, None),
+        Err(CheckpointError::NotARoot(_))
+    ));
+    assert!(h.replace(p, None).is_ok());
+
+    let mut h = Host::default();
+    let input = InputSpec::Wire {
+        source: Box::new(line(40, 3, 20, vec![])),
+        local: Some(500),
+    };
+    let pulses = Box::new(|_: &Bound, local| Box::new(Pulses::new(local, 15)) as Box<dyn Decoder>);
+    let p = h
+        .add(
+            name("pulses"),
+            definition("pulses", pulses_schema()),
+            input,
+            pulses,
+            &[],
+            all(),
+        )
+        .unwrap();
+    run_all(&mut h);
+    assert_eq!(h.seek(p, 0), Ok(Seek::FromStart));
+    assert_eq!(h.consumed(p), 500);
 }
 
 /// Each item's id and width, in id order.
