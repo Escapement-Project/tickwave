@@ -8,15 +8,15 @@ publish.workspace = true
 
 [dependencies]
 egui = { version = "0.37.0", default-features = false }
-escapement-tickwave-decode = { version = "0.1.0", path = "../decode", default-features = false, optional = true }
+escapement-tickwave-decode = { version = "0.1.1", path = "../decode", default-features = false, optional = true }
 escapement-tickwave-view = { version = "0.1.1", path = "../view", default-features = false }
 indexset = { version = "0.18.0", optional = true }
 tracing = "0.1.44"
 
 [dev-dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
-escapement-tickwave-decode = { version = "0.1.0", path = "../decode" }
-escapement-tickwave-decoders = { version = "0.1.0", path = "../decoders", features = ["recipe"] }
+escapement-tickwave-decode = { version = "0.1.1", path = "../decode" }
+escapement-tickwave-decoders = { version = "0.1.1", path = "../decoders", features = ["recipe"] }
 eframe = "0.37.0"
 egui = { version = "0.37.0", features = ["default_fonts"] }
 egui_kittest = { version = "0.37.0", features = ["wgpu", "snapshot"] }

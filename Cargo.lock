@@ -1459,7 +1459,7 @@ dependencies = [
 
 [[package]]
 name = "escapement-tickwave-decode"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "escapement-tickwave-view",
  "foldhash 0.2.0",
@@ -1470,7 +1470,7 @@ dependencies = [
 
 [[package]]
 name = "escapement-tickwave-decoders"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "escapement-tickwave-decode",
  "escapement-tickwave-format",
