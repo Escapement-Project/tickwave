@@ -1264,11 +1264,7 @@ impl Host {
     /// How far run `id`'s chain has taken its wire input: its wire analysis's run of the same
     /// chain, forward or window.
     fn chain_consumed(&self, id: RunId) -> Tick {
-        let mut a = id.analysis.index();
-        while let Input::Upstream { index, .. } = &self.analyses[a].input {
-            a = *index;
-        }
-        let an = &self.analyses[a];
+        let an = &self.analyses[self.root_of(id.analysis.index())];
         let forward = self.analyses[id.analysis.index()].run.id == id;
         std::iter::once(&an.run)
             .chain(&an.windows)
@@ -1277,6 +1273,14 @@ impl Host {
                 false => r.id.generation == id.generation,
             })
             .map_or(Tick::MIN, |r| r.consumed)
+    }
+
+    /// The wire analysis under analysis `a`, by slot.
+    fn root_of(&self, mut a: usize) -> usize {
+        while let Input::Upstream { index, .. } = &self.analyses[a].input {
+            a = *index;
+        }
+        a
     }
 
     /// Analysis `d`'s run bound to upstream run `up`.
@@ -1327,7 +1331,9 @@ impl Host {
     /// the next step. `settings` gives its decoder's settings by name, each one left out at its
     /// default, and `keep` is where the run's store retains whole items. A decoder that targets a
     /// contract this host does not run is refused here, as is a setting it does not take or a
-    /// required port with no channel.
+    /// required port with no channel. Stacked on a chain that has run, or has checkpoints or
+    /// window chains, it decodes the chain again, as `rebind` does: its upstream's output so far
+    /// would not reach it.
     pub fn add(
         &mut self,
         name: Name,
@@ -1454,6 +1460,15 @@ impl Host {
             windows: vec![],
             tally: false,
         });
+        // A run stacked on one under way would miss what it emitted already.
+        if let Input::Upstream { index: up, .. } = &self.analyses[index].input {
+            let root = self.root_of(*up);
+            let kept = (self.keepers.iter()).any(|k| k.root.index() == root && !k.held.is_empty());
+            let windows = self.chains.iter().any(|c| c.id.root.index() == root);
+            if self.analyses[root].run.started || kept || windows {
+                self.restart(root);
+            }
+        }
         Ok(AnalysisId(analysis))
     }
 
@@ -1486,6 +1501,11 @@ impl Host {
     pub fn bound(&self, a: AnalysisId) -> Option<RunId> {
         let a = a.index();
         self.analyses[a].run.bound
+    }
+
+    /// What analysis `a` is bound with: its settings' values, its ports and the input it took.
+    pub fn settings(&self, a: AnalysisId) -> &Bound {
+        &self.analyses[a.index()].bound
     }
 
     pub fn store(&self, a: AnalysisId) -> &Store {
@@ -2332,6 +2352,44 @@ impl Host {
             });
         }
         retired
+    }
+
+    /// Binds analysis `a` with `settings` in place of those it was bound with, each left out at
+    /// its default and checked as `add` checks them, and decodes its chain again: the wire
+    /// analysis under it and everything stacked there start new runs where their forward runs
+    /// started, as `replace` starts them. A stacked run takes its input from its upstream's
+    /// output as it comes, so the upstream starts again too. The chain's checkpoints, keyed on the
+    /// old settings, are dropped, and its window chains retired. Refused, nothing changes.
+    /// Returns the retired forward runs.
+    pub fn rebind(
+        &mut self,
+        a: AnalysisId,
+        settings: &[(&str, Setting)],
+    ) -> Result<Vec<RunId>, BindError> {
+        let an = &self.analyses[a.index()];
+        let with = Bound::new(&an.def, settings, an.bound.ports.clone(), an.bound.input)?;
+        self.analyses[a.index()].bound = with;
+        Ok(self.restart(self.root_of(a.index())))
+    }
+
+    /// Decodes wire analysis `root`'s chain again from where its forward run started, as a
+    /// change to the chain needs: its checkpoints dropped, its window chains retired.
+    fn restart(&mut self, root: usize) -> Vec<RunId> {
+        for k in &mut self.keepers {
+            if k.root.index() == root {
+                (k.held, k.bytes) = (vec![], 0);
+                (k.next, k.next_events) = (Tick::MIN, 0);
+            }
+        }
+        let windows: Vec<WindowId> = (self.chains.iter())
+            .filter(|c| c.id.root.index() == root)
+            .map(|c| c.id)
+            .collect();
+        for w in windows {
+            self.retire(w);
+        }
+        let local = self.analyses[root].run.local;
+        self.replace(AnalysisId(root as u16), local)
     }
 
     /// Analysis `a` and every analysis stacked on it, upstream first.

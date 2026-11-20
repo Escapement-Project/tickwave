@@ -444,6 +444,8 @@ impl Decoder for Pulses {
 #[derive(Clone, Default)]
 pub struct Pairs {
     pub first: Option<(Id, Tick, u64)>,
+    /// Added to each pair's width, as a setting may ask.
+    pub add: u64,
 }
 
 impl Decoder for Pairs {
@@ -464,7 +466,7 @@ impl Decoder for Pairs {
                         Some((first, start, w)) => {
                             let id = Id::new(PAIR, first.anchor);
                             ex.out.open(id, None, start);
-                            let value = (w + width).min(u64::from(u32::MAX));
+                            let value = (w + width + self.add).min(u64::from(u32::MAX));
                             ex.out.set(id, WIDTH, Value::Word { value, bits: 32 });
                             ex.out.link(id, FIRST, Ref::Upstream(first));
                             ex.out.close(id, item.end, Status::Complete);

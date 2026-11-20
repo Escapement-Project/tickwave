@@ -2731,3 +2731,179 @@ fn a_kind_reads_as_text_from_a_field_of_bytes_it_declares() {
         ));
     }
 }
+
+/// Pulses on `line`, and pairs stacked on them (`pairs_on`).
+fn offset_host(line: Line) -> (Host, [AnalysisId; 2]) {
+    let (mut h, p) = pulses_alone(line);
+    let q = pairs_on(&mut h, p);
+    (h, [p, q])
+}
+
+/// Pairs stacked on `p`, their widths grown by their `add` setting.
+fn pairs_on(h: &mut Host, p: AnalysisId) -> AnalysisId {
+    let def = Arc::new(
+        Definition::new("pairs", 1, pairs_schema())
+            .with_inputs([UpstreamDecl::new("in", Mode::Completed).with_kinds(["pulse"])])
+            .with_settings(vec![SettingDecl::int("add", 0..=100, 0)]),
+    );
+    h.add(
+        name("pairs"),
+        def,
+        InputSpec::Upstream(p),
+        Box::new(|b, _| {
+            let add = b.int(SettingId(0)).and_then(|a| u64::try_from(a).ok());
+            Box::new(Pairs {
+                add: add.unwrap_or(0),
+                ..Pairs::default()
+            })
+        }),
+        &[],
+        all(),
+    )
+    .unwrap()
+}
+
+fn pulses_alone(line: Line) -> (Host, AnalysisId) {
+    let mut h = Host::default();
+    let p = h
+        .add(
+            name("pulses"),
+            definition("pulses", pulses_schema()),
+            InputSpec::Wire {
+                source: Box::new(line),
+                local: None,
+            },
+            Box::new(|_, local| Box::new(Pulses::new(local, 15))),
+            &[],
+            all(),
+        )
+        .unwrap();
+    (h, p)
+}
+
+/// Each item's id and width, in id order.
+fn widths(store: &escapement_tickwave_decode::Store) -> Vec<(Id, u64)> {
+    (store.items().values())
+        .map(|i| match i.field(WIDTH).map(|f| &f.value) {
+            Some(&Value::Word { value, .. }) => (i.id, value),
+            _ => (i.id, u64::MAX),
+        })
+        .collect()
+}
+
+/// A setting changed on a stacked analysis decodes its chain again from the start, the wire
+/// analysis under it too: the stacked run takes its upstream's output only as it comes. What was
+/// kept or derived under the old settings goes.
+#[test]
+fn a_rebound_analysis_decodes_its_chain_again_with_its_new_settings() {
+    let (mut h, [p, q]) = offset_host(line(40, 3, 20, vec![]));
+    h.keep_checkpoints(p, Keeping::new(50, usize::MAX)).unwrap();
+    run_all(&mut h);
+    let before = widths(h.store(q));
+    assert!(before.len() > 10);
+    assert!(h.kept(p).unwrap().count > 0);
+    let window = Span {
+        start: 300,
+        end: 400,
+    };
+    let w = h.derive(p, window).unwrap().window;
+    run_all(&mut h);
+    let (rp, rq) = (h.run_id(p), h.run_id(q));
+    assert_eq!(h.rebind(q, &[("add", Setting::Int(5))]).unwrap(), [rp, rq]);
+    assert_eq!(h.settings(q).int(SettingId(0)), Some(5));
+    assert!(h.run_id(p) != rp && h.run_id(q) != rq);
+    assert!(
+        h.window_run(w, q).is_none(),
+        "its window chains are retired"
+    );
+    assert_eq!(h.kept(p).unwrap().count, 0, "its checkpoints are dropped");
+    assert!(h.store(q).items().is_empty());
+    run_all(&mut h);
+    let grown: Vec<_> = before.iter().map(|&(id, w)| (id, w + 5)).collect();
+    assert_eq!(widths(h.store(q)), grown);
+    assert!(h.kept(p).unwrap().count > 0, "kept again as the pass goes");
+    let w = h.derive(p, window).unwrap();
+    assert!(
+        w.restored.is_some(),
+        "from a checkpoint under the new settings"
+    );
+    run_all(&mut h);
+    let derived = widths(h.window_run(w.window, q).unwrap().store());
+    assert!(!derived.is_empty() && derived.iter().all(|x| grown.contains(x)));
+}
+
+#[test]
+fn a_refused_rebinding_changes_nothing() {
+    let (mut h, [p, q]) = offset_host(line(40, 3, 20, vec![]));
+    h.keep_checkpoints(p, Keeping::new(50, usize::MAX)).unwrap();
+    run_all(&mut h);
+    let w = h
+        .derive(
+            p,
+            Span {
+                start: 300,
+                end: 400,
+            },
+        )
+        .unwrap()
+        .window;
+    let (rp, rq, kept) = (h.run_id(p), h.run_id(q), h.kept(p).unwrap().count);
+    assert_eq!(
+        h.rebind(q, &[("add", Setting::Int(101))]),
+        Err(BindError::SettingValue(name("add")))
+    );
+    assert_eq!(
+        h.rebind(q, &[("more", Setting::Int(1))]),
+        Err(BindError::UnknownSetting(name("more")))
+    );
+    assert_eq!(
+        h.rebind(q, &[("add", Setting::Flag(true))]),
+        Err(BindError::SettingValue(name("add")))
+    );
+    assert_eq!((h.run_id(p), h.run_id(q)), (rp, rq));
+    assert_eq!(h.settings(q).int(SettingId(0)), Some(0));
+    assert_eq!(h.kept(p).unwrap().count, kept);
+    assert!(h.window_run(w, q).is_some());
+}
+
+/// An analysis stacked on a chain that has decoded gets everything from the start, the chain
+/// decoding again; on one that has not run, nothing restarts.
+#[test]
+fn an_analysis_added_on_a_chain_under_way_decodes_it_from_the_start() {
+    let line = || line(40, 3, 20, vec![]);
+    let (mut whole, [_, wq]) = offset_host(line());
+    run_all(&mut whole);
+    let want = widths(whole.store(wq));
+
+    let (mut h, p) = pulses_alone(line());
+    h.keep_checkpoints(p, Keeping::new(50, usize::MAX)).unwrap();
+    run_all(&mut h);
+    let window = Span {
+        start: 300,
+        end: 400,
+    };
+    let w = h.derive(p, window).unwrap().window;
+    let rp = h.run_id(p);
+    let q = pairs_on(&mut h, p);
+    assert_ne!(h.run_id(p), rp, "the chain decodes again");
+    assert!(h.window_run(w, p).is_none());
+    assert_eq!(h.kept(p).unwrap().count, 0);
+    run_all(&mut h);
+    assert_eq!(widths(h.store(q)), want);
+    let w = h
+        .derive(p, window)
+        .expect("checkpoints of the chain as it is");
+    run_all(&mut h);
+    assert!(
+        !h.window_run(w.window, q)
+            .unwrap()
+            .store()
+            .items()
+            .is_empty()
+    );
+
+    let (mut h, p) = pulses_alone(line());
+    let rp = h.run_id(p);
+    pairs_on(&mut h, p);
+    assert_eq!(h.run_id(p), rp, "nothing had run");
+}
