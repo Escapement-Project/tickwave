@@ -499,9 +499,10 @@ fn pace(next: &mut Instant) {
 /// tessellated) timed at 60 Hz while the forward pass runs and once it has finished, at four
 /// zooms: the whole recording, a few transfers, a transfer's bits, and the widest window from the
 /// middle whose first track still draws boxes. That last is timed again with the pointer resting
-/// on a box, its hover text shown. Run it under `taskset -c 0` for one core, the worker and the
-/// query thread then sharing it with the frames. With `TICKWAVE_DECODE_REC` and
-/// `TICKWAVE_DECODE_RECIPE` set, on that recording and recipe file; else on the SWD fixture.
+/// on a box, its hover text shown, and a few transfers with the panel at its Decoders tab. Run it
+/// under `taskset -c 0` for one core, the worker and the query thread then sharing it with the
+/// frames. With `TICKWAVE_DECODE_REC` and `TICKWAVE_DECODE_RECIPE` set, on that recording and
+/// recipe file; else on the SWD fixture.
 ///
 ///     TICKWAVE_DECODE_REC=REC TICKWAVE_DECODE_RECIPE=crates/decoders/recipes/swd.toml \
 ///         taskset -c 0 cargo test --release -p escapement-tickwave-egui --features decode --lib \
@@ -645,6 +646,17 @@ fn frame_times() {
                 pace(&mut next);
             }
         }
+        // The panel at its Decoders tab, after the pass: its forms' share of a frame.
+        let mut tabbed = vec![];
+        if name == "transfers" {
+            decoded.panel.tab = crate::panel::Tab::Decoders;
+            let mut next = Instant::now();
+            for _ in 0..120 {
+                tabbed.push(frame(vec![], &mut state, &mut decoded).0);
+                pace(&mut next);
+            }
+            decoded.panel.tab = crate::panel::Tab::Selected;
+        }
         drop(decode);
         // The same graph alone, nothing decoded: the decode's own share of a frame.
         let mut plain = vec![];
@@ -668,6 +680,9 @@ fn frame_times() {
                 "  pointer on a box:   {} (hover text in {shown} frames)",
                 quantiles(&mut pointed)
             );
+        }
+        if !tabbed.is_empty() {
+            println!("  Decoders tab open:  {}", quantiles(&mut tabbed));
         }
         println!("  the graph alone:    {}", quantiles(&mut plain));
     }
@@ -1261,4 +1276,110 @@ fn a_window_ahead_of_a_pass_after_a_change_derives_on_the_count_before_it() {
         r.chains[0].pending.is_none(),
         "without it, the window waits for the pass"
     );
+}
+
+/// A setting changed while a window of a few transfers shows, on a recording decoded through: the
+/// time from the change to the window drawn with the new pass's items (derived ahead of the pass,
+/// provisional), to it drawn exact once the pass is past it, and to the pass's end. The change
+/// rebinds the first analysis with the settings it has, so every round decodes the same. Run as
+/// `frame_times` is: TICKWAVE_DECODE_REC and TICKWAVE_DECODE_RECIPE name a recording and its
+/// recipe, the fixture and SWD where unset.
+#[test]
+#[ignore = "timing: run alone, under taskset"]
+fn rebind_latency() {
+    let real = Real::open();
+    let whole = 0..real.length;
+    cpu_cap();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1920.0, 600.0))
+        .build_ui_state(
+            |ui, v: &mut Stepped| {
+                let palette = palette();
+                v.ready = ready(v);
+                let r = ui.add(
+                    Graph::lanes_only(&v.viewer, &mut v.state, &palette)
+                        .lanes(&v.lanes)
+                        .decoded(&v.decode, &mut v.decoded)
+                        .panel(Place::Beside(360.0)),
+                );
+                v.drawn = Graph::shown(&r).map(|s| (s, 0.0));
+            },
+            {
+                let ctx = egui::Context::default();
+                Stepped {
+                    viewer: Viewer::open(&ctx, &real.path).unwrap(),
+                    state: ViewState {
+                        window: Window::At(whole.clone()),
+                        ..ViewState::default()
+                    },
+                    decode: real.start(&ctx),
+                    decoded: DecodeState::default(),
+                    lanes: real.lanes.clone(),
+                    drawn: None,
+                    ready: false,
+                }
+            },
+        );
+    let mut next = Instant::now();
+    let t = Instant::now();
+    while !finished(&h.state().decode) {
+        assert!(t.elapsed() < Duration::from_secs(300), "the pass finished");
+        h.step();
+        pace(&mut next);
+    }
+    let from = {
+        let g = h.state().decode.lock();
+        let Phase::Running(r) = &g.phase else {
+            unreachable!("decoding");
+        };
+        first_after(&r.lanes[0].tally, real.length / 2, real.length).expect("an item")
+    };
+    let window = from..from + real.us(400.0);
+    h.state_mut().state.window = Window::At(window.clone());
+    while !h.state().ready {
+        assert!(
+            t.elapsed() < Duration::from_secs(300),
+            "settled at the start"
+        );
+        h.step();
+        pace(&mut next);
+    }
+    let settings = h.state().decode.recipe().analyses[0].settings.clone();
+    let exact = |h: &Harness<'_, Stepped>| {
+        let g = h.state().decode.lock();
+        matches!(&g.phase, Phase::Running(r) if r.chains[0].drawn.as_ref().is_some_and(|c| !c.provisional))
+    };
+    let (mut shown, mut settled, mut replayed) = (vec![], vec![], vec![]);
+    for _ in 0..3 {
+        {
+            let mut g = h.state().decode.lock();
+            let Phase::Running(r) = &mut g.phase else {
+                unreachable!("decoding");
+            };
+            r.rebind(0, &settings).unwrap();
+        }
+        h.state().decode.wake();
+        let t = Instant::now();
+        let (mut first, mut whole) = (None, None);
+        loop {
+            h.step();
+            if first.is_none() && h.state().ready {
+                first = Some(t.elapsed());
+            }
+            if whole.is_none() && h.state().ready && exact(&h) {
+                whole = Some(t.elapsed());
+            }
+            if first.is_some() && whole.is_some() && finished(&h.state().decode) {
+                break;
+            }
+            assert!(t.elapsed() < Duration::from_secs(300), "decoded again");
+            pace(&mut next);
+        }
+        shown.extend(first);
+        settled.extend(whole);
+        replayed.push(t.elapsed());
+    }
+    println!("to items in the window: {}", quantiles(&mut shown));
+    println!("to the window exact:    {}", quantiles(&mut settled));
+    println!("to the pass's end:      {}", quantiles(&mut replayed));
 }
