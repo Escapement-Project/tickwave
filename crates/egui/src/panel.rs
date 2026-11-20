@@ -5,12 +5,13 @@
 //! height it reserves, and the panel scrolls inside it. Its collapse control sits at the top
 //! right, where it stays open or collapsed.
 //!
-//! An item shows its fullest label, its time and duration, its status and its citation; then its
-//! unspanned fields flat, its spanned fields as sections that open to their span and bits, the
-//! values it could not know as one sentence for each reason, its links, and the items in the
-//! analyses stacked on its own that read it ("read as"). Above it, fixed where they are pressed,
-//! previous and next step to the items of its kind before and after it. Pointing at a section,
-//! the heading or a reader lights its span, which the host passes to its tracks and graph.
+//! An item shows its fullest label, its time and duration, its status and its citation, with
+//! controls that copy the citation, or what the tab shows as text; then its unspanned fields flat,
+//! its spanned fields as sections that open to their span and bits, the values it could not know as
+//! one sentence for each reason, its links, and the items in the analyses stacked on its own that
+//! read it ("read as"). Above it, fixed where they are pressed, previous and next step to the items
+//! of its kind before and after it. Pointing at a section, the heading or a reader lights its span,
+//! which the host passes to its tracks and graph.
 //!
 //! The List tab shows one analysis's items as rows, in time order: each its start, its kind while
 //! more than one kind is shown, its label and, where it holds a condition, a mark. Kinds can be
@@ -643,7 +644,6 @@ impl<'a> Panel<'a> {
     ) {
         let an = &self.analyses[a];
         let schema = an.schema;
-        let kind = schema.kind(item.id.kind);
         let span = |i: &Item| Span {
             start: i.start,
             end: i.end.unwrap_or(i.start),
@@ -655,58 +655,35 @@ impl<'a> Panel<'a> {
         if head.hovered() {
             *lit = Some(span(item));
         }
-        let status = match item.status {
-            Some(Status::Complete) => "complete".to_owned(),
-            Some(Status::Incomplete(c)) => {
-                let why = schema.causes.get(usize::from(c.0)).map_or("?", |w| w);
-                format!("incomplete: {why}")
-            }
-            _ => "open".to_owned(),
-        };
         // The status on a line of its own, so an open item closing moves nothing after it.
         ui.label(self.figures(self.when(item.start, item.end)));
-        ui.label(self.text(status));
-        ui.label(self.quiet(citation(an.name, schema, &item.id)));
+        ui.label(self.text(status(schema, item)));
+        let cite = citation(an.name, schema, &item.id);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(self.quiet(cite.clone()));
+            let copy = ui.add(Button::new(self.quiet("copy")).frame(false));
+            if copy.on_hover_text("Copy the citation").clicked() {
+                ui.ctx().copy_text(cite.clone());
+            }
+            let all = ui.add(Button::new(self.quiet("copy item")).frame(false));
+            if all.on_hover_text("Copy this tab as text").clicked() {
+                ui.ctx().copy_text(self.as_text(a, item, found));
+            }
+        });
         ui.add_space(6.0);
 
-        let name = |f: &escapement_tickwave_decode::Field| {
-            kind.and_then(|k| k.fields.get(usize::from(f.field.0)))
-                .map_or_else(|| "?".to_owned(), |d| d.name.to_string())
-        };
-        // Values it could not know, by their reason and need, each named once in a sentence.
-        let mut unknown: BTreeMap<(u16, Option<u16>), Vec<String>> = BTreeMap::new();
-        for f in &item.fields {
-            if let Value::Unknown { reason, needs } = f.value {
-                unknown
-                    .entry((reason.0, needs.map(|n| n.0)))
-                    .or_default()
-                    .push(name(f));
-            }
-        }
         self.flat(ui, schema, item, ("panel fields", item.id));
         for f in item.fields.iter().filter(|f| f.span.is_some()) {
-            let field = name(f);
-            let value = match f.value {
-                Value::Unknown { .. } => "?".to_owned(),
-                _ => value_text(schema, item.id.kind, f.field, &f.value),
-            };
-            let title = match value.as_str() {
-                "" => self.figures(field.clone()),
-                v => self.figures(format!("{field}  {v}")),
-            };
-            let section = CollapsingHeader::new(title)
+            let field = field_name(schema, item, f);
+            let section = CollapsingHeader::new(self.figures(part_title(schema, item, f)))
                 .id_salt(("panel part", item.id, f.field.0))
                 .show(ui, |ui| self.part(ui, schema, item, f, &field));
             if section.header_response.hovered() {
                 *lit = f.span;
             }
         }
-        for ((reason, needs), fields) in &unknown {
-            let why = schema.reasons.get(usize::from(*reason)).map_or("?", |w| w);
-            let need = needs
-                .and_then(|n| schema.needs.get(usize::from(n)))
-                .map_or(String::new(), |n| format!("; needs {n}"));
-            ui.label(self.quiet(format!("{} unknown: {why}{need}", fields.join(", "))));
+        for sentence in unknowns(schema, item) {
+            ui.label(self.quiet(sentence));
         }
         if !item.links.is_empty() {
             ui.add_space(6.0);
@@ -714,17 +691,8 @@ impl<'a> Panel<'a> {
                 .num_columns(2)
                 .show(ui, |ui| {
                     for (l, r) in &item.links {
-                        let role = (kind.and_then(|k| k.links.get(usize::from(l.0))))
-                            .map_or("?", |d| &d.role);
-                        let (to, target) = match (r, an.reads) {
-                            (Ref::Own(id), _) => (citation(an.name, schema, id), Some((a, *id))),
-                            (Ref::Upstream(id), Some(u)) => {
-                                let up = &self.analyses[u];
-                                (citation(up.name, up.schema, id), Some((u, *id)))
-                            }
-                            (Ref::Upstream(id), None) => (format!("upstream {}", id.anchor), None),
-                            _ => ("?".to_owned(), None),
-                        };
+                        let role = link_role(schema, item, *l);
+                        let (to, target) = self.link_to(a, r);
                         ui.label(self.quiet(role.to_string()));
                         // A link to an item the panel holds selects it.
                         let held = target.and_then(|(b, id)| {
@@ -755,14 +723,7 @@ impl<'a> Panel<'a> {
                     continue;
                 };
                 let rb = &self.analyses[b];
-                let role = (rb.schema.kind(id.kind))
-                    .and_then(|k| k.links.get(usize::from(link.0)))
-                    .map_or("?", |d| &d.role);
-                let title = self.text(format!(
-                    "read as {}  ({}, its {role})",
-                    heading(rb.schema, rb.labels, reader),
-                    rb.name
-                ));
+                let title = self.text(self.reader_title(b, reader, link));
                 let section = CollapsingHeader::new(title)
                     .id_salt(("panel reader", item.id, b, id))
                     .show(ui, |ui| {
@@ -775,9 +736,8 @@ impl<'a> Panel<'a> {
                     *lit = Some(span(reader));
                 }
             }
-            if found.read_by > found.readers.len() {
-                let more = found.read_by - found.readers.len();
-                ui.label(self.quiet(format!("and {more} more that read it")));
+            if let Some(more) = more_readers(found) {
+                ui.label(self.quiet(more));
             }
         }
         // Last, so it moves nothing when it goes.
@@ -791,19 +751,71 @@ impl<'a> Panel<'a> {
 
     /// An item's fields without a span and with a value, as name and value.
     fn flat(&self, ui: &mut Ui, schema: &Schema, item: &Item, salt: (&str, Id)) {
-        let kind = schema.kind(item.id.kind);
         Grid::new(salt).num_columns(2).show(ui, |ui| {
-            for f in item.fields.iter().filter(|f| f.span.is_none()) {
-                if matches!(f.value, Value::Unknown { .. }) {
-                    continue;
-                }
-                let name = (kind.and_then(|k| k.fields.get(usize::from(f.field.0))))
-                    .map_or_else(|| "?".to_owned(), |d| d.name.to_string());
+            for (name, value) in flat_fields(schema, item) {
                 ui.label(self.quiet(name));
-                ui.label(self.figures(value_text(schema, item.id.kind, f.field, &f.value)));
+                ui.label(self.figures(value));
                 ui.end_row();
             }
         });
+    }
+
+    /// Where a link of an item of analysis `a` goes: its citation, and the item it names by its
+    /// analysis where the panel has that analysis.
+    fn link_to(&self, a: usize, r: &Ref) -> (String, Option<(usize, Id)>) {
+        let an = &self.analyses[a];
+        match (r, an.reads) {
+            (Ref::Own(id), _) => (citation(an.name, an.schema, id), Some((a, *id))),
+            (Ref::Upstream(id), Some(u)) => {
+                let up = &self.analyses[u];
+                (citation(up.name, up.schema, id), Some((u, *id)))
+            }
+            (Ref::Upstream(id), None) => (format!("upstream {}", id.anchor), None),
+            _ => ("?".to_owned(), None),
+        }
+    }
+
+    /// An item of analysis `b` that reads the selected one by its link `link`: "read as AP read
+    /// DRW 0x...  (ADIv5, its request)".
+    fn reader_title(&self, b: usize, reader: &Item, link: LinkId) -> String {
+        let rb = &self.analyses[b];
+        format!(
+            "read as {}  ({}, its {})",
+            heading(rb.schema, rb.labels, reader),
+            rb.name,
+            link_role(rb.schema, reader, link)
+        )
+    }
+
+    /// What the Selected tab shows of `item`, an item of analysis `a`, as lines of text: what its
+    /// sections hold when closed, and none of their bits.
+    fn as_text(&self, a: usize, item: &Item, found: &Found) -> String {
+        let an = &self.analyses[a];
+        let schema = an.schema;
+        let mut lines = vec![
+            heading(schema, an.labels, item),
+            self.when(item.start, item.end),
+            status(schema, item),
+            citation(an.name, schema, &item.id),
+        ];
+        lines.extend((flat_fields(schema, item).into_iter()).map(|(n, v)| format!("{n}  {v}")));
+        let parts = item.fields.iter().filter(|f| f.span.is_some());
+        lines.extend(parts.map(|f| part_title(schema, item, f)));
+        lines.extend(unknowns(schema, item));
+        for (l, r) in &item.links {
+            lines.push(format!(
+                "{}  {}",
+                link_role(schema, item, *l),
+                self.link_to(a, r).0
+            ));
+        }
+        for &(b, id, link) in &found.readers {
+            if let Some(reader) = self.analyses[b].store.items().get(&id) {
+                lines.push(self.reader_title(b, reader, link));
+            }
+        }
+        lines.extend(more_readers(found));
+        lines.join("\n")
     }
 
     /// A spanned field's section: its span, who drives it, and its sequence's elements where it
@@ -855,6 +867,81 @@ impl<'a> Panel<'a> {
             ui.label(self.quiet(format!("and {} more", elements.len() - ELEMENTS_AT_MOST)));
         }
     }
+}
+
+/// An item's status: complete, incomplete and why, or open.
+fn status(schema: &Schema, item: &Item) -> String {
+    match item.status {
+        Some(Status::Complete) => "complete".to_owned(),
+        Some(Status::Incomplete(c)) => {
+            let why = schema.causes.get(usize::from(c.0)).map_or("?", |w| w);
+            format!("incomplete: {why}")
+        }
+        _ => "open".to_owned(),
+    }
+}
+
+fn field_name(schema: &Schema, item: &Item, f: &escapement_tickwave_decode::Field) -> String {
+    (schema.kind(item.id.kind))
+        .and_then(|k| k.fields.get(usize::from(f.field.0)))
+        .map_or_else(|| "?".to_owned(), |d| d.name.to_string())
+}
+
+/// An item's fields without a span and with a value known, as name and value.
+fn flat_fields(schema: &Schema, item: &Item) -> Vec<(String, String)> {
+    (item.fields.iter())
+        .filter(|f| f.span.is_none() && !matches!(f.value, Value::Unknown { .. }))
+        .map(|f| {
+            let value = value_text(schema, item.id.kind, f.field, &f.value);
+            (field_name(schema, item, f), value)
+        })
+        .collect()
+}
+
+/// A spanned field's section heading: its name and its value, "?" where it is not known.
+fn part_title(schema: &Schema, item: &Item, f: &escapement_tickwave_decode::Field) -> String {
+    let field = field_name(schema, item, f);
+    let value = match f.value {
+        Value::Unknown { .. } => "?".to_owned(),
+        _ => value_text(schema, item.id.kind, f.field, &f.value),
+    };
+    match value.as_str() {
+        "" => field,
+        v => format!("{field}  {v}"),
+    }
+}
+
+/// The values an item could not know, one sentence for each reason and need, naming the fields
+/// it holds for.
+fn unknowns(schema: &Schema, item: &Item) -> Vec<String> {
+    let mut by: BTreeMap<(u16, Option<u16>), Vec<String>> = BTreeMap::new();
+    for f in &item.fields {
+        if let Value::Unknown { reason, needs } = f.value {
+            let key = (reason.0, needs.map(|n| n.0));
+            by.entry(key).or_default().push(field_name(schema, item, f));
+        }
+    }
+    (by.into_iter())
+        .map(|((reason, needs), fields)| {
+            let why = schema.reasons.get(usize::from(reason)).map_or("?", |w| w);
+            let need = needs
+                .and_then(|n| schema.needs.get(usize::from(n)))
+                .map_or(String::new(), |n| format!("; needs {n}"));
+            format!("{} unknown: {why}{need}", fields.join(", "))
+        })
+        .collect()
+}
+
+fn link_role<'s>(schema: &'s Schema, item: &Item, link: LinkId) -> &'s str {
+    (schema.kind(item.id.kind))
+        .and_then(|k| k.links.get(usize::from(link.0)))
+        .map_or("?", |d| &d.role)
+}
+
+/// How many more items read the selected one than the tab lists, where it lists fewer.
+fn more_readers(found: &Found) -> Option<String> {
+    let more = found.read_by.checked_sub(found.readers.len())?;
+    (more > 0).then(|| format!("and {more} more that read it"))
 }
 
 impl Widget for Panel<'_> {

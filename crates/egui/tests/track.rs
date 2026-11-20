@@ -1152,6 +1152,42 @@ fn an_access_says_whether_it_reads_or_writes() {
     );
 }
 
+/// The Selected tab copies the item's citation, and what it shows as text, to the clipboard.
+#[test]
+fn the_selected_items_citation_and_text_copy() {
+    use egui_kittest::kittest::Queryable;
+    let (decoded, map, _) = decode(&fixture());
+    let access = (decoded[1].store.items().values())
+        .find(|i| !i.links.is_empty() && i.end.is_some())
+        .unwrap();
+    let mut h = panel(&decoded, 1, access, map, &fixture());
+    let copied = |h: &Harness<'_, PanelState>| {
+        (h.output().platform_output.commands.iter()).find_map(|c| match c {
+            egui::OutputCommand::CopyText(t) => Some(t.clone()),
+            _ => None,
+        })
+    };
+    let cite =
+        escapement_tickwave_decode::citation(decoded[1].name, &decoded[1].schema, &access.id);
+    h.get_by_label("copy").click();
+    h.step();
+    assert_eq!(copied(&h).as_ref(), Some(&cite));
+    h.get_by_label("copy item").click();
+    h.step();
+    let text = copied(&h).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    // Its heading, time, status and citation, then its fields and links as the tab shows them.
+    assert!(lines[1].contains(" for "), "{text}");
+    assert_eq!(&lines[2..4], ["complete", cite.as_str()], "{text}");
+    for (l, r) in &access.links {
+        let role = &decoded[1].schema.kind(access.id.kind).unwrap().links[usize::from(l.0)].role;
+        let Ref::Upstream(id) = r else { continue };
+        let to = escapement_tickwave_decode::citation(decoded[0].name, &decoded[0].schema, id);
+        assert!(lines.contains(&format!("{role}  {to}").as_str()), "{text}");
+    }
+    assert!(lines.iter().any(|l| l.starts_with("reg  ")), "{text}");
+}
+
 #[test]
 fn an_open_item_closing_moves_nothing_in_the_panel() {
     use egui_kittest::kittest::Queryable;
