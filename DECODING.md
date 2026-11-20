@@ -159,10 +159,24 @@ provisional: they say what they cannot know, and the view marks them. Once the p
 window, deriving it again gives the exact items.
 
 ```mermaid
-flowchart LR
-    start(["Recording's start"]) --> c1["Checkpoint"] --> c2["Checkpoint"] --> c3["Checkpoint"] --> pass["Forward pass,<br/>here"] -.-> later(["Not decoded yet"])
-    c2 -. "restored" .-> wa["Window chain<br/>for a window after c2:<br/>exact"]
-    later -. "local start" .-> wb["Window chain<br/>for a window ahead:<br/>provisional"]
+%%{init: {"gantt": {"leftPadding": 190, "fontSize": 13, "sectionFontSize": 13}}}%%
+gantt
+    title One chain along the recording's time
+    dateFormat YYYY-MM-DD
+    axisFormat  
+    todayMarker off
+    section Forward pass
+    Decoded so far                         : active, pass, 2000-01-01, 60d
+    Not decoded yet                        : done, rest, after pass, 40d
+    section Checkpoints
+    Checkpoint                             : milestone, c1, 2000-01-16, 0d
+    Checkpoint                             : milestone, c2, 2000-01-31, 0d
+    Checkpoint                             : milestone, c3, 2000-02-15, 0d
+    section A window behind the pass
+    Replayed from the checkpoint before it : done, replay, 2000-01-31, 8d
+    The window's items, exact              : active, wa, after replay, 10d
+    section A window ahead of it
+    The window's items, provisional        : wb, 2000-03-16, 10d
 ```
 
 A checkpoint restores only onto the chain it was taken of: the same decoders, at the same versions
