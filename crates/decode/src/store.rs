@@ -844,6 +844,7 @@ mod tests {
             (40, 90),
             (200, 210),
             (170, 170),
+            (70, 100),
         ] {
             store.apply_batch(&ops(start, end), 8).unwrap();
         }
@@ -1069,6 +1070,17 @@ mod tests {
             end: Tick::MAX,
         }]);
         let first = store.revision();
+        // As many as the log holds: a reader from before them still reads only what changed.
+        let mut full = Store::with_keep(vec![Span {
+            start: 0,
+            end: Tick::MAX,
+        }]);
+        let before = full.revision();
+        let ops: Vec<Op> = (0..CHANGES_AT_MOST as Tick)
+            .flat_map(|k| [open(id(k)), close(id(k), k)])
+            .collect();
+        full.apply_batch(&ops, 8).unwrap();
+        assert!(full.changed_since(before).is_some());
         let n = CHANGES_AT_MOST as Tick + 1;
         let ops: Vec<Op> = (0..n)
             .flat_map(|k| [open(id(k)), close(id(k), k)])

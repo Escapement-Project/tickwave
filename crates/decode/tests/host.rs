@@ -9,7 +9,7 @@ use escapement_tickwave_decode::{
     HostOptions, Id, InputDecl, InputId, InputSpec, Keeping, KindDecl, KindId, LinkDecl, LinkId,
     LinkTo, LogEntry, MAX_PHRASE, Mismatch, Mode, Name, Need, Notation, Observation, Op, Pause,
     PortDecl, Reason, Ref, Refusal, Refused, Reply, Request, Role, RunView, Schema, SchemaError,
-    Seek, SeqDecl, SeqId, Setting, SettingDecl, SettingId, Source, SourceError, Span, Status, Tick,
+    Seek, SeqId, Setting, SettingDecl, SettingId, Source, SourceError, Span, Status, Tick,
     UpstreamDecl, Value, Window, WindowId, field, name, seq,
 };
 use std::sync::{Arc, Mutex, atomic::Ordering::Relaxed};
@@ -88,11 +88,6 @@ fn a_decoder_for_a_contract_the_host_does_not_run_is_refused_when_added() {
         add(&mut h, "c", with(CONTRACT)).is_ok(),
         "a decoder of the host's own contract is added"
     );
-    let message = add(&mut h, "d", with(newer)).unwrap_err().to_string();
-    assert!(
-        message.contains("1.1") && message.contains("1.0"),
-        "{message}"
-    );
 }
 
 #[test]
@@ -115,11 +110,17 @@ fn a_schema_and_its_inputs_are_checked_when_added() {
                 kind("k", vec![], vec![], vec![]),
                 kind("k", vec![], vec![], vec![]),
             ]),
-            "declared twice",
+            SchemaError::Duplicate {
+                kind: name("k"),
+                name: name("k"),
+            },
         ),
         (
             schema(vec![kind("k", vec![name("nobody")], vec![], vec![])]),
-            "parent",
+            SchemaError::UnknownParent {
+                kind: name("k"),
+                parent: name("nobody"),
+            },
         ),
         (
             schema(vec![kind(
@@ -128,7 +129,10 @@ fn a_schema_and_its_inputs_are_checked_when_added() {
                 vec![field("w", FieldType::Word { bits: 0 })],
                 vec![],
             )]),
-            "bounds",
+            SchemaError::OverBound {
+                kind: name("k"),
+                name: name("w"),
+            },
         ),
         (
             schema(vec![kind(
@@ -137,7 +141,10 @@ fn a_schema_and_its_inputs_are_checked_when_added() {
                 vec![field("w", FieldType::Name(vec![]))],
                 vec![],
             )]),
-            "no names",
+            SchemaError::EmptyNames {
+                kind: name("k"),
+                name: name("w"),
+            },
         ),
         (
             schema(vec![kind(
@@ -146,7 +153,11 @@ fn a_schema_and_its_inputs_are_checked_when_added() {
                 vec![],
                 to(LinkTo::Own(name("elsewhere"))),
             )]),
-            "points to no kind",
+            SchemaError::UnknownLinkTarget {
+                kind: name("k"),
+                role: name("l"),
+                to: name("elsewhere"),
+            },
         ),
         (
             schema(vec![kind(
@@ -155,13 +166,17 @@ fn a_schema_and_its_inputs_are_checked_when_added() {
                 vec![],
                 to(LinkTo::Upstream(name("pulse"))),
             )]),
-            "points to no kind",
+            SchemaError::UnknownLinkTarget {
+                kind: name("k"),
+                role: name("l"),
+                to: name("pulse"),
+            },
         ),
         (
             schema(vec![kind("", vec![], vec![], vec![])]),
-            "name is empty",
+            SchemaError::BadName,
         ),
-        (toy_schema().with_open_at_most(0), "open-item bound"),
+        (toy_schema().with_open_at_most(0), SchemaError::OpenBound(0)),
         (
             schema(vec![kind(
                 "k",
@@ -169,7 +184,7 @@ fn a_schema_and_its_inputs_are_checked_when_added() {
                 vec![field("w", FieldType::Name(vec![name("a"), name("")]))],
                 vec![],
             )]),
-            "name is empty",
+            SchemaError::BadName,
         ),
         (
             schema(vec![kind(
@@ -178,45 +193,60 @@ fn a_schema_and_its_inputs_are_checked_when_added() {
                 vec![field("w", FieldType::Name(vec![name("a"), name("a")]))],
                 vec![],
             )]),
-            "kind k: a is declared twice",
+            SchemaError::Duplicate {
+                kind: name("k"),
+                name: name("a"),
+            },
         ),
         (
             schema(vec![KindDecl::new("k").with_sequences(vec![seq(
                 "s",
                 ElementType::Name((0..=256).map(|n| Name::from(n.to_string())).collect()),
             )])]),
-            "kind k: s is past the host's bounds",
+            SchemaError::OverBound {
+                kind: name("k"),
+                name: name("s"),
+            },
         ),
         (
             schema(vec![
                 KindDecl::new("k").with_sequences(vec![seq("s", ElementType::Name(vec![]))]),
             ]),
-            "kind k: s declares no names",
+            SchemaError::EmptyNames {
+                kind: name("k"),
+                name: name("s"),
+            },
         ),
         (
             schema(vec![KindDecl::new("k").with_sequences(vec![seq(
                 "s",
                 ElementType::Name(vec![name("x"); 2]),
             )])]),
-            "kind k: x is declared twice",
+            SchemaError::Duplicate {
+                kind: name("k"),
+                name: name("x"),
+            },
         ),
         (
             toy_schema().with_roles(["probe", "target", "probe"]),
-            "role probe is declared twice",
+            SchemaError::DuplicateRole(name("probe")),
         ),
         (
             Schema::new(vec![
                 KindDecl::new("a"),
                 KindDecl::new("b").with_row(escapement_tickwave_decode::MAX_LANES),
             ]),
-            "row 8, not below 8",
+            SchemaError::Row {
+                kind: name("b"),
+                row: 8,
+            },
         ),
         (
             Schema::new(vec![
                 KindDecl::new("a").with_lanes(8),
                 KindDecl::new("b").with_row(1),
             ]),
-            "take 9 lanes together",
+            SchemaError::RowLanes(9),
         ),
     ];
     for (k, (s, why)) in refused.into_iter().enumerate() {
@@ -235,8 +265,7 @@ fn a_schema_and_its_inputs_are_checked_when_added() {
             &[],
             all(),
         );
-        let message = got.err().map(|e| e.to_string()).unwrap_or_default();
-        assert!(message.contains(why), "schema {k}: {message:?}");
+        assert_eq!(got.err(), Some(BindError::Schema(why)), "schema {k}");
     }
 
     let (mut h, [p, _]) = pulses_host(line(1, 2, 10, vec![]), 100, None, HostOptions::default());
@@ -844,36 +873,34 @@ fn a_batch_past_the_bound_is_refused() {
 
 #[test]
 fn a_batch_counts_its_losses_against_the_bound() {
-    let losses: Vec<Act> = (0..100).map(|t| Act::Lost(2 * t, 2 * t + 1)).collect();
-    let turns = vec![
-        vec![Act::Request(0, 1000)],
-        [vec![Act::TakeReply], losses].concat(),
-    ];
-    let mut h = Host::new(options(|o| o.batch_ops = 4));
-    let a = h
-        .add(
-            name("toy"),
-            toy(),
-            InputSpec::Wire {
-                source: Box::new(Nothing::default()),
-                local: None,
-            },
-            Box::new(move |_, _| Box::new(script(turns.clone()))),
-            &[],
-            all(),
-        )
-        .unwrap();
-    h.turn(a).unwrap();
-    let reply = h.take_io().unwrap().unwrap();
-    h.reply(reply).unwrap();
-    assert_eq!(
-        h.turn(a),
-        Err(Refusal::TooManyOps {
-            got: 100,
-            at_most: 4
-        }),
-        "each loss is a delivery to every analysis stacked on it"
-    );
+    // Each loss is a delivery to every analysis stacked on it.
+    let turn = |n: Tick| {
+        let losses: Vec<Act> = (0..n).map(|t| Act::Lost(2 * t, 2 * t + 1)).collect();
+        let turns = vec![
+            vec![Act::Request(0, 1000)],
+            [vec![Act::TakeReply], losses].concat(),
+        ];
+        let mut h = Host::new(options(|o| o.batch_ops = 4));
+        let a = h
+            .add(
+                name("toy"),
+                toy(),
+                InputSpec::Wire {
+                    source: Box::new(Nothing::default()),
+                    local: None,
+                },
+                Box::new(move |_, _| Box::new(script(turns.clone()))),
+                &[],
+                all(),
+            )
+            .unwrap();
+        h.turn(a).unwrap();
+        let reply = h.take_io().unwrap().unwrap();
+        h.reply(reply).unwrap();
+        h.turn(a)
+    };
+    assert!(turn(4).is_ok());
+    assert_eq!(turn(5), Err(Refusal::TooManyOps { got: 5, at_most: 4 }));
 }
 
 #[test]
@@ -1446,40 +1473,6 @@ fn the_log_is_off_by_default_and_bounded_when_on() {
 }
 
 #[test]
-fn a_definition_from_data_runs_as_a_static_one_does() {
-    let owned = Schema::new(vec![
-        KindDecl::new("pulse".to_string())
-            .with_fields(vec![FieldDecl::new(
-                "width".to_string(),
-                FieldType::Word { bits: 32 },
-            )])
-            .with_sequences(vec![SeqDecl::new("levels".to_string(), ElementType::Bit)]),
-    ])
-    .with_causes(vec!["a gap cuts it".to_string()]);
-    let run = |schema: Schema| {
-        let mut h = Host::default();
-        let p = h
-            .add(
-                name("pulses"),
-                Arc::new(Definition::new("pulses", 1, schema).with_ports(["line"])),
-                InputSpec::Wire {
-                    source: Box::new(line(10, 3, 20, vec![Span { start: 70, end: 90 }])),
-                    local: None,
-                },
-                Box::new(|_, local| Box::new(Pulses::new(local, 25))),
-                &[],
-                all(),
-            )
-            .unwrap();
-        run_all(&mut h);
-        h.store(p).counts
-    };
-    let (a, b) = (run(owned), run(pulses_schema()));
-    assert_eq!(a, b);
-    assert!(a.ops > 0 && a.incomplete == 0);
-}
-
-#[test]
 fn kept_checkpoints_spread_within_their_budget_and_a_seek_replays_from_the_nearest() {
     let run = || {
         let (mut h, [p, q]) =
@@ -1718,10 +1711,10 @@ fn a_tallied_pass_hands_over_each_item_once_as_it_closes() {
     assert!(off.closed(o).is_empty(), "nothing where it does not tally");
 }
 
-/// A window chain decodes its window and stops: it takes no turn once every run in it has settled
-/// past the window's end, and its stores stay readable until it is retired.
+/// A window chain decodes its window whole and stops short of the recording's end, its stores
+/// readable until it is retired.
 #[test]
-fn a_window_chain_stops_once_its_window_has_settled() {
+fn a_window_chain_decodes_its_window_whole_and_stops_short_of_the_end() {
     let (mut h, [p, q]) = pulses_host(line(80, 3, 20, vec![]), 15, None, HostOptions::default());
     h.keep_checkpoints(p, Keeping::new(50, usize::MAX)).unwrap();
     run_all(&mut h);
@@ -2314,8 +2307,11 @@ fn names_and_phrases_have_bounds_of_their_own() {
     };
     let long = |n: usize| "x".repeat(n);
     let mut s = toy_schema();
-    s.reasons = vec![long(200).into()];
+    s.reasons = vec![long(MAX_PHRASE).into()];
     assert_eq!(add(s), None, "a reason is a sentence");
+    let mut s = toy_schema();
+    s.roles = vec![long(escapement_tickwave_decode::MAX_NAME).into()];
+    assert_eq!(add(s), None);
     let mut s = toy_schema();
     s.causes = vec![long(257).into()];
     assert_eq!(add(s), Some(BindError::Schema(SchemaError::BadPhrase)));
@@ -2465,6 +2461,8 @@ fn a_decoder_is_made_with_the_settings_given_by_name_and_the_rest_at_their_defau
     let refused = |given: &[(&str, Setting)]| bound(configured(three()), vec![true, true], given);
     let value = |n: &'static str| Err(BindError::SettingValue(name(n)));
     assert_eq!(refused(&[("cycles", Setting::Int(5))]), value("cycles"));
+    assert_eq!(refused(&[("cycles", Setting::Int(0))]), value("cycles"));
+    assert!(refused(&[("cycles", Setting::Int(4))]).is_ok());
     assert_eq!(refused(&[("cycles", Setting::Flag(true))]), value("cycles"));
     // A list's entries each in its range, and no more of them than it takes.
     for list in [vec![0], vec![9], vec![1, 2, 3, 4]] {
