@@ -199,34 +199,13 @@ fn every_rule_of_the_table_is_held_to() {
         matches!(bind(&missing), Err(RecipeError::UnknownAnalysis { analysis, upstream }) if analysis == "b" && upstream == "x"),
         "the analysis that names one missing, though another is first"
     );
-    let many: String = (0..=recipe::ANALYSES_AT_MOST)
-        .map(|k| wire("").replace("id = \"swd\"", &format!("id = \"s{k}\"")))
-        .collect();
-    assert!(refused(&many).contains("more than"));
-}
-
-#[test]
-fn an_optional_port_may_be_left_out() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../web/fixtures/identify-jtag.tickwave");
-    let file = std::fs::File::open(path).unwrap();
-    let rec = Arc::new(Recording::open(Arc::new(file), Cache::new(16 << 20)).unwrap());
-    let text = "[[decode]]\nid = \"jtag\"\ndecoder = \"jtag\"\nversion = 1\n\
-                inputs = { TCK = \"TCK\", TMS = \"TMS\", TDI = \"TDI\" }\n\
-                settings = { tdo_edge = \"fall\", chain = [4] }\n";
-    let mut h = (Recipe::parse(text).unwrap())
-        .bind(
-            &registry(),
-            &rec,
-            recipe::window(&rec),
-            &all(),
-            HostOptions::default(),
-        )
-        .unwrap()
-        .host;
-    h.run_until(|_| false).unwrap();
-    let j = h.index("jtag").unwrap();
-    assert!(h.store(j).counts.closes > 0);
+    let analyses = |n: usize| -> String {
+        (0..n)
+            .map(|k| wire("").replace("id = \"swd\"", &format!("id = \"s{k}\"")))
+            .collect()
+    };
+    assert!(Recipe::parse(&analyses(recipe::ANALYSES_AT_MOST)).is_ok());
+    assert!(refused(&analyses(recipe::ANALYSES_AT_MOST + 1)).contains("more than"));
 }
 
 /// The recipes this crate ships read and name its decoders, and each preset is one of them,

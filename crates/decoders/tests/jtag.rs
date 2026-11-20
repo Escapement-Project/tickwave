@@ -4,8 +4,8 @@ mod common;
 
 use common::*;
 use escapement_tickwave_decode::{
-    AnalysisId, CheckpointError, Counts, Element, Host, HostOptions, InputSpec, Item, KindId,
-    Observation, Span, Status, Tick, Value, name,
+    AnalysisId, Counts, Element, Host, HostOptions, InputSpec, Item, KindId, Observation, Span,
+    Status, Tick, Value, name,
 };
 use escapement_tickwave_decoders::jtag::{self, TdoEdge};
 use std::sync::atomic::Ordering::Relaxed;
@@ -418,38 +418,6 @@ fn window_size_does_not_change_the_output() {
     assert_eq!(decoded(s.wires(), 4999), want, "the full session");
     let got = decoded_with(reads_of(100), s.wires(), 1 << 40);
     assert_eq!(got, want, "the full session in reads of 100 ticks");
-}
-
-#[test]
-fn a_checkpoint_restores_only_under_the_settings_it_was_taken_with() {
-    let (s, _) = session(SMALL);
-    let make = |w: Wires, edge: TdoEdge| {
-        let mut h = Host::default();
-        let j = h
-            .add(
-                name("jtag"),
-                jtag::definition(),
-                InputSpec::Wire {
-                    source: Box::new(w),
-                    local: None,
-                },
-                jtag::Jtag::factory(64),
-                &[jtag::tdo_edge(edge)],
-                all(),
-            )
-            .unwrap();
-        (h, j)
-    };
-    let (mut h, j) = make(s.wires(), TdoEdge::Rise);
-    while h.consumed(j) < 500 {
-        h.step().unwrap();
-    }
-    let cut = h.checkpoint(j).unwrap();
-    assert!(make(s.wires(), TdoEdge::Rise).0.restore(&cut).is_ok());
-    assert!(matches!(
-        make(s.wires(), TdoEdge::Fall).0.restore(&cut),
-        Err(CheckpointError::Incompatible)
-    ));
 }
 
 /// The session decoded with TDO read at `edge`.

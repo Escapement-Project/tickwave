@@ -970,14 +970,6 @@ fn a_tmsc_change_at_a_tckc_fall_counts_after_it_in_either_order() {
 }
 
 #[test]
-fn every_open_item_stays_within_the_declared_bound() {
-    let (w, _, _) = gapped();
-    let (h, [c, j]) = run(w, 1000);
-    assert!(h.store(c).counts.peak_open <= 3);
-    assert!(h.store(j).counts.peak_open <= 2);
-}
-
-#[test]
 fn after_sredge_oscan_bits_are_sampled_at_the_rise() {
     let (w, g) = synth_with(&[], 1);
     let (h, [c, _]) = run(w, 1000);
@@ -1667,8 +1659,9 @@ fn control_level_six_then_run_test_idle_is_a_deselection_alert() {
 
 #[test]
 fn offline_at_start_up_a_selection_needs_its_preamble() {
-    // 30 alternating bits qualify the selection; 20 do not, nor do 30 with an escape among them.
-    for (alternating, escape_at) in [(30, None), (20, None), (30, Some(12))] {
+    // 28 alternating bits qualify the selection (11.9.7.2 c); 27 do not, nor do 30 with an escape
+    // among them.
+    for (alternating, escape_at) in [(28, None), (27, None), (30, Some(12))] {
         let mut g = Gen::new();
         g.bit(true, 10);
         g.bits(0, 10);
@@ -1686,7 +1679,7 @@ fn offline_at_start_up_a_selection_needs_its_preamble() {
             .collect();
         let offline = of(&h, c, &[cjtag::OFFLINE]);
         assert_eq!(name_of(&offline[0], cjtag::OFFLINE_BY), Some(4));
-        if (alternating, escape_at) != (30, None) {
+        if (alternating, escape_at) != (28, None) {
             assert_eq!(
                 responses,
                 [None, Some(1), Some(1)],

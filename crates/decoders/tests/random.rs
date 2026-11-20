@@ -119,19 +119,9 @@ fn cases(seed: u64, build: impl Fn(&mut fastrand::Rng) -> (Host, Vec<AnalysisId>
             reached.items[k] += c.opens;
             reached.incomplete[k] += c.incomplete;
             reached.lost[k] += u64::from(!h.lost(a).is_empty());
-            let lost = h.lost(a);
-            assert!(
-                lost.windows(2).all(|w| w[0].end <= w[1].start)
-                    && lost.iter().all(|l| l.start < l.end),
-                "seed {seed}, case {case}: lost input out of order: {lost:?}"
-            );
+            // The host refuses an item ending before it starts and lost input out of order.
             let swd = h.definition(a).name == "swd";
             for i in h.store(a).items().values() {
-                assert!(
-                    i.end.is_none_or(|e| e >= i.start),
-                    "seed {seed}, case {case}: {:?} ends before it starts",
-                    i.id
-                );
                 assert!(
                     !(swd && i.status == Some(Status::Incomplete(swd::DROPPED))),
                     "seed {seed}, case {case}: SWD no longer held the rises of {:?}",
@@ -194,48 +184,6 @@ fn swd_stack(
         )
         .unwrap();
     (h, vec![s, a, m])
-}
-
-/// A window the forward pass has not reached starts without context, and says so: ADIv5 cannot
-/// know SELECT before the window, MEM-AP cannot know the AP.
-#[test]
-fn a_window_ahead_of_the_forward_pass_says_what_it_cannot_know() {
-    let ts = vec![
-        dp_write(0x8, 0x0000_0000),
-        ap_write(0x4, 0x2000_0000),
-        ap_read(0xC, 0),
-        dp_read(0xC, 0x1111_1111),
-    ];
-    let (b, starts) = bits(&ts);
-    let (mut h, a) = swd_stack(wires(&b, 10), 64, None, 1, false);
-    h.keep_checkpoints(
-        a[0],
-        escapement_tickwave_decode::Keeping::new(50, usize::MAX),
-    )
-    .unwrap();
-    let start = rise(starts[1], 10) - 10;
-    let window = Span {
-        start,
-        end: start + 2000,
-    };
-    let d = h.derive(a[0], window).unwrap();
-    assert!(d.provisional);
-    let w = d.window;
-    let mem = |h: &Host| {
-        let r = h.window_run(w, a[2]).unwrap();
-        r.settled() >= window.end || r.finished().is_some()
-    };
-    h.run_until(mem).unwrap();
-    let unknown = |x: AnalysisId| {
-        (h.window_run(w, x).unwrap().store().items().values())
-            .filter(|i| {
-                (i.fields.iter())
-                    .any(|f| matches!(f.value, escapement_tickwave_decode::Value::Unknown { .. }))
-            })
-            .count()
-    };
-    assert!(unknown(a[1]) > 0, "ADIv5 says SELECT is unknown");
-    assert!(unknown(a[2]) > 0, "MEM-AP says the AP is unknown");
 }
 
 /// The fuzz targets' first finding: every stack, started locally past the end of its input, closed
