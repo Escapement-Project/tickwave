@@ -16,7 +16,7 @@ tracing = "0.1.44"
 [dev-dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
 escapement-tickwave-decode = { version = "0.1.0", path = "../decode" }
-escapement-tickwave-decoders = { version = "0.1.0", path = "../decoders" }
+escapement-tickwave-decoders = { version = "0.1.0", path = "../decoders", features = ["recipe"] }
 eframe = "0.37.0"
 egui = { version = "0.37.0", features = ["default_fonts"] }
 egui_kittest = { version = "0.37.0", features = ["wgpu", "snapshot"] }
