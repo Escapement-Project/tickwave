@@ -24,8 +24,8 @@
 
 use crate::{adiv5, cjtag, jtag, jtagdp, swd};
 use escapement_tickwave_decode::{
-    BindError, Definition, Factory, Host, HostOptions, InputDecl, InputSpec, Name, Setting, Span,
-    Tick,
+    AnalysisId, BindError, Definition, Factory, Host, HostOptions, InputDecl, InputSpec, Name,
+    Setting, Span, Tick,
     wire::{BindWire, WireSource},
 };
 use escapement_tickwave_view::Recording;
@@ -107,6 +107,24 @@ pub struct Analysis {
     /// Each port it binds, by the definition's name for it.
     pub inputs: Vec<(String, Input)>,
     pub settings: Vec<(String, Setting)>,
+}
+
+/// A recipe bound over a recording: the host, and what a view draws of each analysis.
+pub struct Binding {
+    pub host: Host,
+    /// Each analysis, in the order the host holds them.
+    pub analyses: Vec<Bound>,
+}
+
+/// An analysis as a recipe bound it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Bound {
+    pub id: AnalysisId,
+    /// Its track's name: the recipe's label, else the decoder's name.
+    pub label: String,
+    /// The channel whose source's timeline its items are on: its wire analysis's first port given
+    /// a channel.
+    pub timeline: usize,
 }
 
 /// What a port reads.
@@ -204,9 +222,10 @@ impl Recipe {
         window: Tick,
         keep: &[Span],
         options: HostOptions,
-    ) -> Result<Host, RecipeError> {
+    ) -> Result<Binding, RecipeError> {
         let mut h = Host::new(options);
-        let mut bound = HashMap::default();
+        let mut bound: HashMap<&str, Bound> = HashMap::default();
+        let mut analyses = Vec::with_capacity(self.analyses.len());
         let mut left: Vec<&Analysis> = self.analyses.iter().collect();
         while !left.is_empty() {
             let ready = left.iter().position(|a| {
@@ -232,10 +251,11 @@ impl Recipe {
                 });
             };
             let a = left.remove(k);
-            let id = a.bind(&mut h, recording, &bound, window, keep)?;
-            bound.insert(a.id.as_str(), id);
+            let b = a.bind(&mut h, recording, &bound, window, keep)?;
+            analyses.push(b.clone());
+            bound.insert(a.id.as_str(), b);
         }
-        Ok(h)
+        Ok(Binding { host: h, analyses })
     }
 }
 
@@ -316,10 +336,10 @@ impl Analysis {
         &self,
         h: &mut Host,
         recording: &Arc<Recording>,
-        bound: &HashMap<&str, escapement_tickwave_decode::AnalysisId>,
+        bound: &HashMap<&str, Bound>,
         window: Tick,
         keep: &[Span],
-    ) -> Result<escapement_tickwave_decode::AnalysisId, RecipeError> {
+    ) -> Result<Bound, RecipeError> {
         let analysis = || self.id.clone();
         let entry =
             find(&self.decoder, self.version).ok_or_else(|| RecipeError::UnknownDecoder {
@@ -339,7 +359,7 @@ impl Analysis {
                 Input::Channel(_) => None,
             })
             .collect();
-        let input = match upstreams[..] {
+        let (input, timeline) = match upstreams[..] {
             [] => {
                 for (port, _) in &self.inputs {
                     if !def.ports.iter().any(|p| p.name == port.as_str()) {
@@ -365,6 +385,8 @@ impl Analysis {
                         }
                     });
                 }
+                // A wire source refuses a binding of no channel at all.
+                let timeline = ports.iter().flatten().copied().next().unwrap_or(0);
                 let source =
                     WireSource::with_ports(recording.clone(), ports).map_err(|source| {
                         RecipeError::Wire {
@@ -372,10 +394,11 @@ impl Analysis {
                             source,
                         }
                     })?;
-                InputSpec::Wire {
+                let wire = InputSpec::Wire {
                     source: Box::new(source),
                     local: None,
-                }
+                };
+                (wire, timeline)
             }
             [(port, up)] if self.inputs.len() == 1 => {
                 let declared = (def.inputs.iter())
@@ -383,7 +406,8 @@ impl Analysis {
                 if !declared {
                     return Err(unknown_port(port));
                 }
-                InputSpec::Upstream(bound[up.as_str()])
+                let up = &bound[up.as_str()];
+                (InputSpec::Upstream(up.id), up.timeline)
             }
             _ => {
                 return Err(RecipeError::OneUpstream {
@@ -394,17 +418,24 @@ impl Analysis {
         let settings: Vec<(&str, Setting)> = (self.settings.iter())
             .map(|(n, s)| (n.as_str(), s.clone()))
             .collect();
-        h.add(
-            Name::Owned(self.id.clone()),
-            def,
-            input,
-            entry.factory(window),
-            &settings,
-            keep.to_vec(),
-        )
-        .map_err(|source| RecipeError::Bind {
-            analysis: analysis(),
-            source,
+        let label = (self.label.clone()).unwrap_or_else(|| def.name.to_string());
+        let id = h
+            .add(
+                Name::Owned(self.id.clone()),
+                def,
+                input,
+                entry.factory(window),
+                &settings,
+                keep.to_vec(),
+            )
+            .map_err(|source| RecipeError::Bind {
+                analysis: analysis(),
+                source,
+            })?;
+        Ok(Bound {
+            id,
+            label,
+            timeline,
         })
     }
 }

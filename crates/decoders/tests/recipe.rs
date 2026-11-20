@@ -58,12 +58,31 @@ fn a_recipe_binds_what_code_binds_by_hand() {
         r.analyses[2].inputs,
         [("transfers".to_owned(), Input::Analysis("swd".to_owned()))]
     );
-    let mut h = r
+    let bound = r
         .bind(&rec, window, &all(), HostOptions::default())
         .unwrap();
+    let clock = rec.channel("SWCLK").unwrap();
+    let names: Vec<_> = (bound.analyses.iter())
+        .map(|a| {
+            (
+                bound.host.name(a.id).to_owned(),
+                a.label.as_str(),
+                a.timeline,
+            )
+        })
+        .collect();
+    assert_eq!(
+        names,
+        [
+            ("swd".to_owned(), "SWD", clock),
+            ("adi".to_owned(), "adiv5", clock),
+            ("mem".to_owned(), "mem-ap", clock),
+        ],
+        "in the order bound, each upstream first; on the wire analysis's first channel's timeline"
+    );
+    let mut h = bound.host;
     h.run_until(|_| false).unwrap();
     let mut by_hand = Host::default();
-    let clock = rec.channel("SWCLK").unwrap();
     let data = rec.channel("SWDIO").unwrap();
     let s = by_hand
         .add(
@@ -110,7 +129,9 @@ fn a_recipe_binds_what_code_binds_by_hand() {
 fn every_rule_of_the_table_is_held_to() {
     let rec = fixture();
     let bind = |text: &str| -> Result<Host, RecipeError> {
-        Recipe::parse(text)?.bind(&rec, 100_000, &[], HostOptions::default())
+        Ok(Recipe::parse(text)?
+            .bind(&rec, 100_000, &[], HostOptions::default())?
+            .host)
     };
     let wire = |extra: &str| {
         format!(
@@ -194,7 +215,8 @@ fn an_optional_port_may_be_left_out() {
                 settings = { tdo_edge = \"fall\", chain = [4] }\n";
     let mut h = (Recipe::parse(text).unwrap())
         .bind(&rec, recipe::window(&rec), &all(), HostOptions::default())
-        .unwrap();
+        .unwrap()
+        .host;
     h.run_until(|_| false).unwrap();
     let j = h.index("jtag").unwrap();
     assert!(h.store(j).counts.closes > 0);
