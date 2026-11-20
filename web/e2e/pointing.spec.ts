@@ -613,6 +613,8 @@ test("a reference opens its view over the span its popover is zoomed to; a drag 
   await ref.scrollIntoViewIfNeeded();
   await ref.focus();
   await expect(inset.locator(".measure")).toHaveText(/kHz/, { timeout: 20_000 });
+  // The popover's first frame shows the whole span: keys pressed before it would be undone by it.
+  await inset.evaluate((e) => (e as HTMLElement & { settled(): Promise<void> }).settled());
   await page.keyboard.press("ArrowUp");
   await page.keyboard.press("ArrowUp");
   expect(await inset.evaluate((e) => (e as HTMLElement & { zoomed: object | null }).zoomed)).not.toBeNull();
