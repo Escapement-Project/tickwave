@@ -34,6 +34,8 @@ computer.
   from its end, in order, or repairs one cut off.
 - `ANNOTATIONS.md`: the sidecar annotations that sit beside a recording.
 - `CHARTS.md`: `<tickwave-chart>` and its data.
+- `DECODING.md`: protocol decoding: how a decoder runs in the host, what the host checks, and how
+  a view gets a window's items.
 - `web/README.md`: the elements, how they read recordings, and how to run the web build and tests.
 - `testdata/view/README.md`: the cases the web's view modules and `crates/view` share.
 - `site/docs/converter.md`: building and using the converter.

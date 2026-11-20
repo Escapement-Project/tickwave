@@ -2,7 +2,8 @@
 
 The contract a protocol decoder is written against, and the host that runs decoders over a
 recording. The reference decoders in `escapement-tickwave-decoders` use the contract alone, as a
-decoder loaded at run time would.
+decoder loaded at run time would. `DECODING.md`, at the repository's root, describes how an
+analysis runs, with diagrams.
 
 ## A decoder
 
