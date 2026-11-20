@@ -734,10 +734,11 @@ impl Density {
             Counted::Before(t) => id.anchor < t,
             Counted::All => true,
         };
-        // An item's anchor lies at or after its start and within it.
+        // An item's anchor lies at or after its start and within it, on its timeline: the first
+        // that can meet the window starts `reach` before it on the axis.
         let lo = Id::new(
             KindId(0),
-            window.start.saturating_sub(self.reach.saturating_add(1)),
+            map.first_at(window.start.saturating_sub(self.reach.saturating_add(1))),
         );
         let short = (items.range(lo..).map(|(_, i)| i))
             .take_while(move |i| counted(&i.id))
@@ -1847,6 +1848,53 @@ mod tests {
                 .map(|i| i.id)
                 .collect();
             assert_eq!(got, want, "{w:?}");
+        }
+    }
+
+    /// On a timeline that is not the axis, as an aligned source's or one slower than the axis's,
+    /// a window finds every item it meets on the axis.
+    #[test]
+    fn a_density_finds_what_a_window_meets_on_a_timeline_that_is_not_the_axis() {
+        use escapement_tickwave_decode::{Op, Store};
+        use escapement_tickwave_view::format::model::Ratio;
+        let mut store = Store::with_keep(vec![all()]);
+        for k in 0..1_000 {
+            let (id, start) = (Id::new(KindId(0), k * 100), k * 100);
+            let ops = [
+                Op::Open {
+                    id,
+                    parent: None,
+                    start,
+                },
+                Op::Close {
+                    id,
+                    end: start + 40,
+                    status: Status::Complete,
+                },
+            ];
+            store.apply_batch(&ops, 8).unwrap();
+        }
+        let m = |n| Ratio::integer(n).unwrap();
+        for map in [
+            Mapping::new(1_000_000, 0, m(1)),
+            Mapping::new(0, 0, m(2)),
+            Mapping::new(-300, 50, m(3)),
+        ] {
+            let mut d = Density::default();
+            d.grow(store.items(), &map, condition, Tick::MAX);
+            let axis = |t| map.axis_saturating(t);
+            for at in (0..100_000).step_by(7_919) {
+                let w = axis(at)..axis(at) + 500;
+                let want: Vec<Id> = (store.items().values())
+                    .filter(|i| axis(i.start) < w.end && axis(i.end.unwrap()) >= w.start)
+                    .map(|i| i.id)
+                    .collect();
+                let got: Vec<Id> = (d.meeting(store.items(), &map, &w, Tick::MAX))
+                    .map(|i| i.id)
+                    .collect();
+                assert!(!want.is_empty());
+                assert_eq!(got, want, "{w:?}");
+            }
         }
     }
 
