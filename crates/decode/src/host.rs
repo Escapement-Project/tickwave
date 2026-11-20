@@ -2203,8 +2203,9 @@ impl Host {
         if left {
             r.ready = reply;
         }
+        // A decoder may read earlier input again; what it has taken stays the furthest it has read.
         if let Some((t, n)) = taken {
-            r.consumed = t;
+            r.consumed = r.consumed.max(t);
             r.observed += n;
         }
         if let Some(u) = upstream {

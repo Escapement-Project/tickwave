@@ -1349,6 +1349,21 @@ fn a_turn_runs_once() {
 }
 
 #[test]
+fn reading_earlier_input_again_does_not_move_the_input_taken_back() {
+    let turns = vec![
+        vec![Act::Request(0, 1000)],
+        vec![Act::TakeReply, Act::Request(0, 10)],
+        vec![Act::TakeReply, Act::Frontier(1000)],
+    ];
+    let (mut h, a) = toy_host(turns, HostOptions::default());
+    for _ in 0..3 {
+        h.step().unwrap();
+    }
+    assert_eq!(h.consumed(a), 1000);
+    assert_eq!(h.start_frontier(a), 1000);
+}
+
+#[test]
 fn a_turn_whose_run_is_replaced_meanwhile_is_refused_whole() {
     let turns = vec![vec![
         Act::Emit(open(frame(0), 0)),
