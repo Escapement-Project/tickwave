@@ -94,6 +94,19 @@ pub struct Closed {
     pub unknown: bool,
 }
 
+impl Closed {
+    /// What `item` closed as; None while it is open.
+    pub fn of(item: &Item) -> Option<Self> {
+        Some(Self {
+            id: item.id,
+            start: item.start,
+            end: item.end?,
+            status: item.status?,
+            unknown: (item.fields.iter()).any(|f| matches!(f.value, Value::Unknown { .. })),
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Item {
@@ -772,14 +785,7 @@ impl Store {
                     item.end = Some(*end);
                     item.status = Some(*status);
                     if let Some(tally) = &mut self.tally {
-                        tally.push(Closed {
-                            id: *id,
-                            start: item.start,
-                            end: *end,
-                            status: *status,
-                            unknown: (item.fields.iter())
-                                .any(|f| matches!(f.value, Value::Unknown { .. })),
-                        });
+                        tally.extend(Closed::of(item));
                     }
                     if !self.keep.iter().any(|s| meets(item.start, *end, s)) {
                         match self.passed {
