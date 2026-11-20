@@ -544,18 +544,19 @@ pub enum Change {
     },
 }
 
-/// What one line did at one tick: a boundary (known from here at a level, or not known from here)
-/// and an edge's new level.
+/// What one line did at one tick: a boundary (known from here at a level, or not known from here),
+/// and how many edges, the last to `last`. A pulse the source stamped with one time is two.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct LineAt {
     boundary: Option<Option<bool>>,
-    edge: Option<bool>,
+    edges: u32,
+    last: bool,
 }
 
 /// TCKC and TMSC observations, gathered tick by tick into changes. Observations at one tick are
-/// taken in together once a later tick or `flush` comes: boundaries first, then TCKC's edge, then
+/// taken in together once a later tick or `flush` comes: boundaries first, then TCKC's edges, then
 /// TMSC's, so a TMSC change at a TCKC edge's tick belongs to the phase after that edge, whatever
-/// order a window gives them in. While either line is not known, that is one gap, reported once
+/// order a window gives them in. Every edge counts, those at one tick on one line too. While either line is not known, that is one gap, reported once
 /// both are known again.
 #[derive(Clone, Debug)]
 pub struct Lines {
@@ -610,7 +611,8 @@ impl Lines {
                 l.boundary = Some(b);
             }
             if let Some(v) = seen.1 {
-                l.edge = Some(v);
+                l.edges = l.edges.saturating_add(1);
+                l.last = v;
             }
         }
     }
@@ -649,18 +651,19 @@ impl Lines {
             self.gap_from = None;
         }
         for (k, l) in lines.iter().enumerate() {
-            let Some(level) = l.edge else {
-                continue;
-            };
-            self.level[k] = level;
-            if self.gap_from.is_some() {
-                continue;
+            // A line's edges alternate its level, the last to `last`.
+            for n in (0..l.edges).rev() {
+                let level = l.last ^ (n % 2 == 1);
+                self.level[k] = level;
+                if self.gap_from.is_some() {
+                    continue;
+                }
+                out.push(if k == 0 {
+                    Change::Clock(t, level)
+                } else {
+                    Change::Line(t, level)
+                });
             }
-            out.push(if k == 0 {
-                Change::Clock(t, level)
-            } else {
-                Change::Line(t, level)
-            });
         }
     }
 }

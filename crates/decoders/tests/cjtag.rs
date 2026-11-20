@@ -969,6 +969,39 @@ fn a_tmsc_change_at_a_tckc_fall_counts_after_it_in_either_order() {
     );
 }
 
+/// Every edge counts, a pulse stamped with one time too: TMSC rising and falling at one tick, in
+/// TCKC's high phase, is two of an escape's toggles.
+#[test]
+fn edges_at_one_tick_on_one_line_each_count() {
+    use cjtag::{Change, Lines};
+    let mut lines = Lines::new(0, [Some(false), Some(false)]);
+    let mut out = vec![];
+    let edge = |at, port, level| Observed::Edge { at, port, level };
+    for e in [
+        edge(10, cjtag::TMSC, true),
+        edge(10, cjtag::TMSC, false),
+        edge(10, cjtag::TCKC, true),
+        edge(20, cjtag::TMSC, true),
+        edge(20, cjtag::TMSC, false),
+        edge(20, cjtag::TMSC, true),
+    ] {
+        lines.observe(&e, &mut out);
+    }
+    lines.flush(&mut out);
+    assert_eq!(
+        out,
+        [
+            Change::Clock(10, true),
+            Change::Line(10, true),
+            Change::Line(10, false),
+            Change::Line(20, true),
+            Change::Line(20, false),
+            Change::Line(20, true),
+        ]
+    );
+    assert_eq!(lines.levels(), [true, true]);
+}
+
 #[test]
 fn after_sredge_oscan_bits_are_sampled_at_the_rise() {
     let (w, g) = synth_with(&[], 1);
