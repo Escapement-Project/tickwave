@@ -9,7 +9,9 @@
 use crate::graph::{Graph, Shown};
 use crate::palette::Palette;
 use crate::panel::{Analysis as PanelAnalysis, Panel, PanelState};
-use crate::track::{Density, Labels, Track, condition, decoder_roles, driver_paints, track_height};
+use crate::track::{
+    self, Density, Labels, Track, condition, decoder_roles, driver_paints, track_height,
+};
 use egui::{Response, Ui, Widget};
 use escapement_tickwave_decode::{
     AnalysisId, Host, Id, Item, Keeping, RunId, Schema, Span, Store, Tick, WindowId,
@@ -767,15 +769,15 @@ fn tracked(
     painted: Option<&[String]>,
 ) -> Response {
     let (viewer, palette) = graph.borrows();
-    // The decoded paint from the first analysis, on the window drawn last frame.
-    let (mut paints, mut roles) = (vec![], vec![]);
-    if let (Some(_), Some(s)) = (painted, &state.shown) {
-        let g = decode.lock();
-        if let Phase::Running(r) = &g.phase
-            && !r.lanes.is_empty()
-        {
+    let (mut paints, mut roles, mut gutter) = (vec![], vec![], 0.0f32);
+    let g = decode.lock();
+    if let Phase::Running(r) = &g.phase {
+        for lane in &r.lanes {
+            gutter = gutter.max(track::gutter(ui, palette, &lane.name, &lane.schema));
+        }
+        // The decoded paint from the first analysis, on the window drawn last frame.
+        if let (Some(_), Some(s), Some(lane)) = (painted, &state.shown, r.lanes.first()) {
             let src = r.source(0, &s.window);
-            let lane = &r.lanes[0];
             paints = driver_paints(
                 &lane.schema,
                 src.items,
@@ -787,10 +789,12 @@ fn tracked(
             roles = decoder_roles(&lane.schema);
         }
     }
+    drop(g);
     let graph = match painted {
         Some(channels) => graph.decoded_paint(&paints, channels, &roles),
         None => graph,
-    };
+    }
+    .gutter(gutter);
     let response = ui.add(graph);
     let Some(shown) = Graph::shown(&response) else {
         return response;

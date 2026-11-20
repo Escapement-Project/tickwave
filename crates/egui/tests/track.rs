@@ -24,7 +24,7 @@ use escapement_tickwave_decode::{
 use escapement_tickwave_decoders::{adiv5, cjtag, jtag, swd};
 use escapement_tickwave_egui::panel::{Analysis, Panel, PanelState};
 use escapement_tickwave_egui::track::{
-    Density, Labels, Track, condition, decoder_roles, driver_paints, value_text,
+    self, Density, Labels, Track, condition, decoder_roles, driver_paints, value_text,
 };
 use escapement_tickwave_egui::{Graph, ViewState, Viewer, Window};
 use escapement_tickwave_view::cursor::timeline_map;
@@ -397,8 +397,12 @@ fn draw(ui: &mut egui::Ui, host: &mut Host2) {
     let roles = decoder_roles(&first.schema);
     let lit = (host.panel.lit)
         .map(|l| host.map.axis_saturating(l.start)..host.map.axis_saturating(l.end));
+    let gutter = (host.decoded.iter())
+        .map(|d| track::gutter(ui, &host.face.palette, d.name, &d.schema))
+        .fold(0.0, f32::max);
     let response = ui.add(
         Graph::lanes_only(viewer, &mut host.state, &host.face.palette)
+            .gutter(gutter)
             .lit(lit)
             .motion(false)
             .lanes(&host.lanes)

@@ -84,6 +84,7 @@ pub struct Graph<'a> {
     zoomed: bool,
     decoded: Decoded<'a>,
     lit: Option<Range<i64>>,
+    gutter: f32,
 }
 
 /// A stretch of a wire painted by the role that drives it, from decoded output: the role by its
@@ -128,6 +129,7 @@ impl<'a> Graph<'a> {
             zoomed: false,
             decoded: Decoded::default(),
             lit: None,
+            gutter: 0.0,
         }
     }
 
@@ -217,8 +219,6 @@ impl<'a> Graph<'a> {
         self
     }
 
-    /// Whether a zoom step eases the window drawn to where it goes; on by default. Off, it jumps,
-    /// for a host whose reader asked for reduced motion.
     /// A span the reader points at elsewhere, in axis ticks: a side panel's section, say
     /// (`PanelState::lit`). Washed as the pointer's wash is and edged with hairlines, so it reads
     /// apart from the selection.
@@ -227,8 +227,17 @@ impl<'a> Graph<'a> {
         self
     }
 
+    /// Whether a zoom step eases the window drawn to where it goes; on by default. Off, it jumps,
+    /// for a host whose reader asked for reduced motion.
     pub fn motion(mut self, on: bool) -> Self {
         self.motion = on;
+        self
+    }
+
+    /// The gutter left of the plot at least `width` points wide: room for the names of tracks
+    /// drawn under it, which `track::gutter` measures.
+    pub fn gutter(mut self, width: f32) -> Self {
+        self.gutter = width;
         self
     }
 }
@@ -406,7 +415,7 @@ impl Graph<'_> {
                 gutter = gutter.max(measure(info.name.clone(), &p.labels));
             }
         }
-        let gutter = (gutter + 12.0).ceil().max(40.0);
+        let gutter = (gutter + 12.0).ceil().max(40.0).max(self.gutter);
         let label_row = (ui.fonts_mut(|f| f.row_height(&p.labels)) + 2.0).ceil();
         let lanes = self.lanes.len() as f32 * LANE_HEIGHT;
         let key = match facts.roles.is_empty() {

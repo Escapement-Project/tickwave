@@ -35,6 +35,16 @@ version = 1
 inputs = { transfers = { analysis = "swd" } }
 "#;
 
+/// `SWD` with a name wider than the graph's own gutter.
+const LONG: &str = r#"
+[[decode]]
+id = "swd"
+decoder = "swd"
+version = 1
+label = "SWD on the debug port"
+inputs = { SWCLK = "SWCLK", SWDIO = "SWDIO" }
+"#;
+
 fn open() -> Arc<Recording> {
     let file = std::fs::File::open(fixture()).unwrap();
     Arc::new(Recording::open(Arc::new(file), Cache::new(16 << 20)).unwrap())
@@ -229,8 +239,9 @@ struct View {
     decoded: DecodeState,
     lanes: Vec<usize>,
     place: Place,
-    /// `Graph::shown` read the decoded graph's response last frame.
-    shown: bool,
+    /// What `Graph::shown` read from the decoded graph's response last frame: the gutter it drew,
+    /// and the widest its tracks' names take.
+    shown: Option<(f32, f32)>,
 }
 
 /// The decoded graph draws the tracks under the graph, answers `Graph::shown`, and lays out the
@@ -260,7 +271,13 @@ fn the_decoded_graph_draws_its_tracks_under_the_graph() {
                             .decoded(&v.decode, &mut v.decoded)
                             .panel(place),
                     );
-                    v.shown = Graph::shown(&r).is_some();
+                    let names = match &v.decode.lock().phase {
+                        Phase::Running(run) => (run.lanes.iter())
+                            .map(|l| crate::track::gutter(ui, &palette, &l.name, &l.schema))
+                            .fold(0.0, f32::max),
+                        _ => 0.0,
+                    };
+                    v.shown = Graph::shown(&r).map(|s| (s.plot.start - r.rect.left(), names));
                 },
                 {
                     let ctx = egui::Context::default();
@@ -270,11 +287,11 @@ fn the_decoded_graph_draws_its_tracks_under_the_graph() {
                             window: Window::At(first - 20_000..first + 80_000),
                             ..ViewState::default()
                         },
-                        decode: Decode::start(&ctx, DecodeOptions::default(), bind(SWD)),
+                        decode: Decode::start(&ctx, DecodeOptions::default(), bind(LONG)),
                         decoded: DecodeState::default(),
                         lanes: lanes.clone(),
                         place,
-                        shown: false,
+                        shown: None,
                     }
                 },
             );
@@ -292,9 +309,10 @@ fn the_decoded_graph_draws_its_tracks_under_the_graph() {
             std::thread::sleep(Duration::from_millis(2));
         }
         h.run_steps(3);
+        let (gutter, names) = (h.state().shown).expect("Graph::shown reads its response");
         assert!(
-            h.state().shown,
-            "Graph::shown reads the decoded graph's response"
+            names > 60.0 && gutter >= names,
+            "the gutter holds the tracks' names: {gutter} for {names}"
         );
         assert!(h.state().decode.tracks_height(&h.state().decoded) > 0.0);
     }
@@ -332,7 +350,7 @@ fn shots() {
                         .decoded(&v.decode, &mut v.decoded)
                         .panel(place),
                 );
-                v.shown = Graph::shown(&r).is_some();
+                v.shown = Graph::shown(&r).map(|s| (s.plot.start - r.rect.left(), 0.0));
             },
             View {
                 viewer: Viewer::open(&ctx, &fixture()).unwrap(),
@@ -344,7 +362,7 @@ fn shots() {
                 decoded: DecodeState::default(),
                 lanes,
                 place: Place::Beside(360.0),
-                shown: false,
+                shown: None,
             },
         );
     let t = Instant::now();

@@ -1,12 +1,13 @@
 //! A decode track: one analysis's items drawn under a graph, on the graph's time axis.
 //!
 //! Its rows are reserved from the first frame and keep their height: the rows its schema's kinds
-//! declare, each with its lanes, and where asked for, a row of their parts and bits. Zoomed out,
-//! where items would crowd, it draws how many start in each pixel column from a `Density` ladder
-//! instead, so a frame's work follows the columns on screen, not the capture. Conditions (an item
-//! closed incomplete, a value unknown, anything the host marks) show at every zoom. Lost input is
-//! shaded as the waveform's lost time is, input not decoded yet is hatched, and decoded input with
-//! nothing in it is left bare, so the three differ without hue.
+//! declare, each with its lanes, and where asked for, a row of their parts and bits. The gutter
+//! holds the analysis's name and the name the schema gives each row. Zoomed out, where items would
+//! crowd, it draws how many start in each pixel column from a `Density` ladder instead, so a
+//! frame's work follows the columns on screen, not the capture. Conditions (an item closed
+//! incomplete, a value unknown, anything the host marks) show at every zoom. Lost input is shaded
+//! as the waveform's lost time is, input not decoded yet is hatched, and decoded input with nothing
+//! in it is left bare, so the three differ without hue.
 
 use egui::{Align2, Rect, Response, Sense, Shape, Stroke, Ui, Widget, pos2, vec2};
 use escapement_tickwave_decode::{
@@ -32,6 +33,9 @@ const CROWDED: f32 = 3.0;
 const BIT: f32 = 9.0;
 const PAD: f32 = 3.0;
 const HATCH: f32 = 6.0;
+/// Room in the gutter at either side of its names, and between a track's name and its rows'.
+const GUTTER_PAD: f32 = 6.0;
+const NAME_GAP: f32 = 12.0;
 
 /// Labels a host gives over those the schema declares, by kind, fullest first: a track draws the
 /// first that fits its item, else none.
@@ -136,6 +140,32 @@ pub fn condition(item: &Item) -> bool {
 /// is a track.
 pub(crate) fn track_height(schema: &Schema, parts: bool) -> f32 {
     (schema.layout().0 + usize::from(parts)) as f32 * ROW
+}
+
+/// Each row its schema names, by the first lane it takes, in lane order.
+fn named_rows<'s>(schema: &'s Schema, rows: &[std::ops::Range<usize>]) -> Vec<(usize, &'s str)> {
+    let mut named: Vec<(usize, &str)> = (schema.kinds.iter().zip(rows))
+        .filter_map(|(k, lanes)| Some((lanes.start, schema.rows.get(k.row)?.as_ref())))
+        .collect();
+    named.sort_unstable();
+    named.dedup();
+    named
+}
+
+/// The gutter a track of `schema` named `name` takes: its name at the left, then its rows'
+/// names. A host drawing tracks under a graph passes the widest to `Graph::gutter`.
+pub fn gutter(ui: &Ui, palette: &Palette, name: &str, schema: &Schema) -> f32 {
+    let measure = |t: String| {
+        let galley = ui
+            .painter()
+            .layout_no_wrap(t, palette.labels.clone(), palette.ink);
+        galley.size().x
+    };
+    let (_, rows) = schema.layout();
+    let widest = (named_rows(schema, &rows).into_iter())
+        .map(|(_, n)| measure(n.to_owned()) + NAME_GAP)
+        .fold(0.0, f32::max);
+    (2.0 * GUTTER_PAD + measure(name.to_owned()) + widest).ceil()
 }
 
 /// `condition`, of an item as it closed.
@@ -906,14 +936,23 @@ impl Widget for Track<'_> {
                 vec2(plot.width(), ROW),
             )
         };
-        // The name in the gutter, as a lane's.
+        // The analysis's name at the gutter's left, and each named row's beside it, as a lane's.
         painter.text(
-            pos2(plot.left() - 6.0, row(0).center().y),
-            Align2::RIGHT_CENTER,
+            pos2(rect.left() + GUTTER_PAD, row(0).center().y),
+            Align2::LEFT_CENTER,
             self.name,
             p.labels.clone(),
-            p.ink_2,
+            p.ink,
         );
+        for (lane, name) in named_rows(self.schema, &self.rows) {
+            painter.text(
+                pos2(plot.left() - GUTTER_PAD, row(lane).center().y),
+                Align2::RIGHT_CENTER,
+                name,
+                p.labels.clone(),
+                p.ink_2,
+            );
+        }
         let w = &self.shown.window;
         if plot.width() < 1.0 || w.end <= w.start {
             return response;

@@ -827,3 +827,79 @@ fn a_lit_span_washes_the_track_between_hairlines() {
     let off = shapes_on(&items, 0..1000, false, None, Some(past));
     assert_eq!(washes(&off).len(), washes(&plain).len());
 }
+
+/// The texts a track named `name` of `schema` draws in its gutter, each with where it lies, over
+/// a plot starting where `track::gutter` says the gutter ends; and that point.
+fn gutter_texts(name: &str, schema: &Schema) -> (f32, Vec<(String, egui::Rect)>) {
+    let items = BTreeMap::new();
+    let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
+    let density = Density::of(&items, &map, |_| false);
+    let (labels, palette) = (
+        Labels::default(),
+        Palette::from_visuals(&egui::Visuals::default()),
+    );
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(700.0, 200.0),
+        )),
+        ..egui::RawInput::default()
+    };
+    let mut plot = 0.0;
+    let mut out = egui::Context::default().run_ui(input, |ui| {
+        let left = ui.max_rect().left();
+        plot = left + escapement_tickwave_egui::track::gutter(ui, &palette, name, schema);
+        let shown = Shown::new(0..1000, plot..700.0);
+        ui.add(Track::new(
+            &shown, name, schema, &items, &density, &labels, &palette, map,
+        ));
+    });
+    out.textures_delta.clear();
+    fn walk(s: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {
+        match s {
+            egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+            egui::Shape::Text(t) => {
+                let laid = t.galley.rect.translate(t.pos.to_vec2());
+                out.push((t.galley.text().to_owned(), laid));
+            }
+            _ => {}
+        }
+    }
+    let mut all = vec![];
+    for c in &out.shapes {
+        walk(&c.shape, &mut all);
+    }
+    (plot, all)
+}
+
+#[test]
+fn a_tracks_gutter_holds_its_name_and_each_rows_name_beside_the_row() {
+    use escapement_tickwave_egui::track::ROW;
+    let (plot, texts) = gutter_texts("JTAG", &jtag::schema());
+    let at = |t: &str| {
+        (texts.iter())
+            .find(|(s, _)| s == t)
+            .map(|(_, r)| *r)
+            .unwrap_or_else(|| panic!("{t} not drawn: {texts:?}"))
+    };
+    let name = at("JTAG");
+    let top = name.center().y - ROW / 2.0;
+    for (lane, row) in ["scans", "states", "TAPs"].into_iter().enumerate() {
+        let r = at(row);
+        assert!(
+            r.right() <= plot,
+            "{row} ends before the plot: {r:?}, {plot}"
+        );
+        let centre = top + (lane as f32 + 0.5) * ROW;
+        assert!(
+            (r.center().y - centre).abs() < 1.0,
+            "{row} beside lane {lane}"
+        );
+        assert!(name.right() < r.left(), "the name clear of {row}");
+    }
+    assert_eq!(texts.len(), 4, "{texts:?}");
+    // A schema that names no rows: the name alone, and the gutter only as wide as it.
+    let (plot, texts) = gutter_texts("SWD", &swd::definition().schema);
+    assert_eq!(texts.len(), 1, "{texts:?}");
+    assert!(texts[0].1.right() < plot && plot - texts[0].1.right() < 12.0);
+}
