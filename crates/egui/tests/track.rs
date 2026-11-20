@@ -743,12 +743,13 @@ fn frame_times() {
             })
         };
         for _ in 0..5 {
-            frame();
+            frame().textures_delta.clear();
         }
         let mut times: Vec<f64> = (0..101)
             .map(|_| {
                 let t = std::time::Instant::now();
-                let out = frame();
+                let mut out = frame();
+                out.textures_delta.clear();
                 std::hint::black_box(ctx.tessellate(out.shapes, out.pixels_per_point));
                 t.elapsed().as_secs_f64() * 1e6
             })
@@ -840,7 +841,7 @@ fn graph_frame_times() {
         };
         let mut landed = false;
         for _ in 0..2000 {
-            frame(&mut state);
+            frame(&mut state).textures_delta.clear();
             if let Some(a) = viewer.answer()
                 && a.window == state.window.resolve(a.extent.as_ref(), None)
                 && !viewer.busy()
@@ -852,12 +853,13 @@ fn graph_frame_times() {
         }
         assert!(landed, "no answer for {name}");
         for _ in 0..5 {
-            frame(&mut state);
+            frame(&mut state).textures_delta.clear();
         }
         let mut times: Vec<f64> = (0..101)
             .map(|_| {
                 let t = std::time::Instant::now();
-                let out = frame(&mut state);
+                let mut out = frame(&mut state);
+                out.textures_delta.clear();
                 std::hint::black_box(ctx.tessellate(out.shapes, out.pixels_per_point));
                 t.elapsed().as_secs_f64() * 1e6
             })
@@ -925,12 +927,13 @@ fn cjtag_frame_times() {
             })
         };
         for _ in 0..5 {
-            frame();
+            frame().textures_delta.clear();
         }
         let mut times: Vec<f64> = (0..101)
             .map(|_| {
                 let t = std::time::Instant::now();
-                let out = frame();
+                let mut out = frame();
+                out.textures_delta.clear();
                 std::hint::black_box(ctx.tessellate(out.shapes, out.pixels_per_point));
                 t.elapsed().as_secs_f64() * 1e6
             })
