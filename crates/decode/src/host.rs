@@ -8,7 +8,7 @@ use crate::{
         CONTRACT, Contract, Definition, InputId, Mismatch, Name, Resolved, SchemaError, Setting,
         SettingId, SettingType,
     },
-    store::{Field, Refused, Store},
+    store::{Closed, Field, Refused, Store},
 };
 use foldhash::{HashMap, HashSet};
 use std::{
@@ -1109,6 +1109,8 @@ struct Slot {
     /// The forward run, and its runs in live window chains.
     run: Run,
     windows: Vec<Run>,
+    /// Whether its forward runs record each item as it closes (`Host::tally`).
+    tally: bool,
 }
 
 /// A live window chain's fork of its wire analysis's source.
@@ -1450,6 +1452,7 @@ impl Host {
             bound: with,
             run,
             windows: vec![],
+            tally: false,
         });
         Ok(AnalysisId(analysis))
     }
@@ -2319,6 +2322,7 @@ impl Host {
             };
             let decoder = (an.factory)(&an.bound, local);
             an.run = Run::new(id, local, decoder, Store::with_keep(an.keep.clone()), bound);
+            an.run.store.tally = an.tally.then(Vec::new);
             retired.push(old);
             queue.extend(an.downstream.iter().map(|&d| (d, local)));
             self.note(|order| LogEntry::Replaced {
@@ -2365,7 +2369,11 @@ impl Host {
                 analysis: x,
                 taken: r.id,
                 decoder,
-                store: r.store.clone(),
+                store: {
+                    let mut store = r.store.clone();
+                    store.tally = None;
+                    store
+                },
                 inbox: r.inbox.clone(),
                 assembling: r.assembling.clone(),
                 recent: r.recent.clone(),
@@ -2431,6 +2439,23 @@ impl Host {
             bytes: 0,
         });
         Ok(())
+    }
+
+    /// Makes analysis `a`'s forward run record each item as it closes, kept or not, for `closed`
+    /// to hand over: what a view counts of a pass that keeps no items. Every forward run that
+    /// replaces it records too, from its own start, so a count kept of them starts again when
+    /// `run_id(a)` changes. Window chains record nothing. What is recorded is held until `closed`
+    /// takes it.
+    pub fn tally(&mut self, a: AnalysisId) {
+        let an = &mut self.analyses[a.index()];
+        an.tally = true;
+        an.run.store.tally.get_or_insert_with(Vec::new);
+    }
+
+    /// The items analysis `a`'s forward run recorded as they closed since the last call, in the
+    /// order they closed; none where it does not tally.
+    pub fn closed(&mut self, a: AnalysisId) -> Vec<Closed> {
+        (self.analyses[a.index()].run.store.tally.as_mut()).map_or_else(Vec::new, std::mem::take)
     }
 
     /// Sets the spans analysis `a` keeps whole items in, for its run under way from its next
@@ -2693,6 +2718,7 @@ impl Host {
             };
             renamed.insert(snap.taken, id);
             an.run = Run::restored(snap, id, decoder, bound, an.keep.clone(), &renamed);
+            an.run.store.tally = an.tally.then(Vec::new);
             retired.push(old);
             self.note(|order| LogEntry::Replaced {
                 order,

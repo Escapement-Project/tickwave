@@ -1528,6 +1528,71 @@ fn checkpoints_spaced_by_observations_are_evicted_by_observations() {
     assert!(few.widest_observed < 2 * even, "{few:?} against {even}");
 }
 
+/// A pass that keeps nothing still says what it decoded: tallied, each item comes once as it
+/// closes, as a pass keeping everything holds it. Window chains and checkpoints record nothing,
+/// and a run that replaces the forward one records from its own start.
+#[test]
+fn a_tallied_pass_hands_over_each_item_once_as_it_closes() {
+    let input = || line(80, 3, 20, vec![]);
+    let (mut all, [ap, aq]) = pulses_host(input(), 15, None, HostOptions::default());
+    run_all(&mut all);
+    let want = |a| -> Vec<_> {
+        (all.store(a).items().values())
+            .map(|i| (i.id, i.start, i.end, i.status))
+            .collect()
+    };
+    let (want_p, want_q) = (want(ap), want(aq));
+    let (mut h, [p, q]) = pulses_host(input(), 15, None, HostOptions::default());
+    for a in [p, q] {
+        h.set_keep(a, vec![]);
+    }
+    h.keep_checkpoints(p, Keeping::new(50, usize::MAX)).unwrap();
+    h.tally(p);
+    h.tally(q);
+    let (mut got_p, mut got_q) = (vec![], vec![]);
+    while h.step().unwrap() {
+        got_p.extend(h.closed(p));
+        got_q.extend(h.closed(q));
+    }
+    assert!(h.store(q).items().is_empty(), "nothing kept");
+    let seen = |got: &[escapement_tickwave_decode::Closed]| {
+        let mut v: Vec<_> = (got.iter())
+            .map(|c| (c.id, c.start, Some(c.end), Some(c.status)))
+            .collect();
+        v.sort_by_key(|x| x.0);
+        v
+    };
+    assert_eq!(seen(&got_p), want_p);
+    assert_eq!(seen(&got_q), want_q);
+    assert!(got_p.iter().all(|c| !c.unknown));
+    let window = Span {
+        start: 700,
+        end: 800,
+    };
+    let w = h.derive(p, window).unwrap().window;
+    run_all(&mut h);
+    assert!(!win(&h, w, q).store().items().is_empty());
+    assert!(
+        h.closed(p).is_empty() && h.closed(q).is_empty(),
+        "the window records nothing"
+    );
+    let before = h.run_id(p);
+    h.seek(p, 700).unwrap();
+    assert_ne!(h.run_id(p), before);
+    run_all(&mut h);
+    let again = h.closed(q);
+    assert!(
+        !again.is_empty() && again.len() < want_q.len(),
+        "from the checkpoint on"
+    );
+    assert_eq!(h.seek(p, Tick::MIN).unwrap(), Seek::FromStart);
+    run_all(&mut h);
+    assert_eq!(seen(&h.closed(q)), want_q, "from the start, all again");
+    let (mut off, [o, _]) = pulses_host(input(), 15, None, HostOptions::default());
+    run_all(&mut off);
+    assert!(off.closed(o).is_empty(), "nothing where it does not tally");
+}
+
 /// A window chain decodes its window and stops: it takes no turn once every run in it has settled
 /// past the window's end, and its stores stay readable until it is retired.
 #[test]

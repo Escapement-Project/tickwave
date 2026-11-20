@@ -81,6 +81,19 @@ pub struct Field {
     pub driver: Option<Role>,
 }
 
+/// An item as it closed: what a view counts of a forward pass that keeps no items
+/// (`Host::tally`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Closed {
+    pub id: Id,
+    pub start: Tick,
+    pub end: Tick,
+    pub status: Status,
+    /// Whether a field of it holds a value it could not know.
+    pub unknown: bool,
+}
+
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Item {
@@ -406,6 +419,8 @@ pub struct Store {
     /// What the batch under way changed, to put back if it is refused.
     undo: Vec<(Id, Option<Open>)>,
     batch: u64,
+    /// Each item as it closed, where the host tallies the run, until the host hands them over.
+    pub(crate) tally: Option<Vec<Closed>>,
 }
 
 impl Store {
@@ -460,8 +475,9 @@ impl Store {
         self.open.values().map(|o| o.start).min()
     }
 
-    /// About how many bytes the store holds, for a checkpoint budget: its open items, and its
-    /// kept items with their fields, elements and links. An estimate, not an exact figure.
+    /// About how many bytes the store holds, for a checkpoint budget: its open items, its kept
+    /// items with their fields, elements and links, and what it has tallied. An estimate, not an
+    /// exact figure.
     pub fn bytes(&self) -> usize {
         use std::mem::size_of;
         let open = self.open.capacity() * (size_of::<Id>() + size_of::<Open>());
@@ -479,7 +495,8 @@ impl Store {
             })
             .sum();
         let log = self.log.ids.capacity() * size_of::<Id>();
-        size_of::<Self>() + open + items + log + self.keep.capacity() * size_of::<Span>()
+        let tally = (self.tally.as_ref()).map_or(0, |t| t.capacity() * size_of::<Closed>());
+        size_of::<Self>() + open + items + log + tally + self.keep.capacity() * size_of::<Span>()
     }
 
     /// Drops the closed items held past the retained spans whose ends are at or before `to`, and
@@ -754,6 +771,16 @@ impl Store {
                 if let Some(item) = self.items.get_mut(id) {
                     item.end = Some(*end);
                     item.status = Some(*status);
+                    if let Some(tally) = &mut self.tally {
+                        tally.push(Closed {
+                            id: *id,
+                            start: item.start,
+                            end: *end,
+                            status: *status,
+                            unknown: (item.fields.iter())
+                                .any(|f| matches!(f.value, Value::Unknown { .. })),
+                        });
+                    }
                     if !self.keep.iter().any(|s| meets(item.start, *end, s)) {
                         match self.passed {
                             Some(p) if *end > p => {

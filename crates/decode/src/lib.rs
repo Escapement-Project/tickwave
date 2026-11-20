@@ -41,7 +41,7 @@ pub use schema::{
     MAX_ROLES, MAX_SEQUENCES, Mismatch, Name, Notation, PortDecl, Schema, SchemaError, SeqDecl,
     Setting, SettingDecl, SettingId, SettingType, UpstreamDecl, field, name, seq,
 };
-pub use store::{CHANGES_AT_MOST, Counts, Field, Item, Refused, Revision, Store};
+pub use store::{CHANGES_AT_MOST, Closed, Counts, Field, Item, Refused, Revision, Store};
 
 /// Words folded into one value that differs where they do, for keys compared within one build.
 pub fn fold(words: impl IntoIterator<Item = u64>) -> u64 {
