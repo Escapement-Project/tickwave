@@ -1094,6 +1094,8 @@ struct Run {
     /// Input arrived since the decoder's last turn: a reply or a delivery.
     fresh: bool,
     finished: Option<Tick>,
+    /// The host refused one of its turns, so it runs no more.
+    refused: bool,
     consumed: Tick,
     /// How many observations its decoder has taken from the wire.
     observed: u64,
@@ -2157,8 +2159,21 @@ impl Host {
     }
 
     /// Admits a turn that has run, if its run is still current: its output and frontier, its
-    /// request, and its end. A turn from a run replaced meanwhile is refused whole.
-    pub fn end_turn(&mut self, mut t: Turn) -> Result<Pause, Refusal> {
+    /// request, and its end. A turn from a run replaced meanwhile is refused whole. A run whose
+    /// turn is refused runs no more: what it holds may be partly updated, and its next batch
+    /// would be admitted over the hole.
+    pub fn end_turn(&mut self, t: Turn) -> Result<Pause, Refusal> {
+        let run = t.run;
+        let ended = self.admit_turn(t);
+        if ended.is_err()
+            && let Some(r) = self.run_of_mut(run)
+        {
+            r.refused = true;
+        }
+        ended
+    }
+
+    fn admit_turn(&mut self, mut t: Turn) -> Result<Pause, Refusal> {
         let a = t.a;
         let current = self.analyses[a].run.id;
         let Some(r) = self.run_of_mut(t.run) else {
@@ -2342,7 +2357,11 @@ impl Host {
             self.bound_to(d, r.id)
                 .is_some_and(|b| b.inbox.len() > self.options.inbox_at_most)
         });
-        r.finished.is_none() && !r.out && (!r.started || r.fresh || r.more) && !blocked
+        r.finished.is_none()
+            && !r.refused
+            && !r.out
+            && (!r.started || r.fresh || r.more)
+            && !blocked
     }
 
     /// Steps until `stop` holds or nothing can run.
@@ -2882,6 +2901,7 @@ impl Run {
             more: false,
             fresh: false,
             finished: None,
+            refused: false,
             consumed: local.unwrap_or(Tick::MIN),
             observed: 0,
             frontier: Tick::MIN,

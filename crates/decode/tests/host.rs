@@ -1364,6 +1364,19 @@ fn reading_earlier_input_again_does_not_move_the_input_taken_back() {
 }
 
 #[test]
+fn a_run_whose_turn_is_refused_runs_no_more() {
+    // A close of an item never opened, with more to do after it.
+    let turns = vec![
+        vec![Act::Emit(close(frame(0), 1))],
+        vec![Act::Request(0, 10)],
+    ];
+    let (mut h, a) = toy_host(turns, HostOptions::default());
+    assert!(h.step().is_err());
+    assert!(!h.runnable(a));
+    assert_eq!(h.step(), Ok(false));
+}
+
+#[test]
 fn a_turn_whose_run_is_replaced_meanwhile_is_refused_whole() {
     let turns = vec![vec![
         Act::Emit(open(frame(0), 0)),
