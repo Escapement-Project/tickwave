@@ -131,7 +131,9 @@ pub fn adi_schema() -> Schema {
     let w = |bits| FieldType::Word { bits };
     let transfer = || LinkTo::Upstream(name("transfer"));
     let dp_write = || LinkTo::Own(name("dp-write"));
-    let dp = |kind: &'static str| {
+    // Each access says whether it reads or writes: "DP read CTRL/STAT 0x...", "AP write DRW 0x...".
+    let dp = |kind: &'static str, verb: &'static str| {
+        let head = || Label::default().text("DP ").text(verb).text(" ");
         KindDecl::new(kind)
             .with_fields(vec![
                 field("reg", FieldType::Name(DP_NAMES.map(name).to_vec())),
@@ -142,11 +144,14 @@ pub fn adi_schema() -> Schema {
                 LinkDecl::new("context", vec![dp_write()]),
             ])
             .with_labels(vec![
-                Label::default().field(DP_REG).text(" ").field(DP_VALUE),
+                head().field(DP_REG).text(" ").field(DP_VALUE),
+                head().field(DP_REG),
                 Label::default().field(DP_REG),
             ])
     };
-    let ap = |kind: &'static str, links| {
+    // A register without a name, on an AP whose class is not known, by its address.
+    let ap = |kind: &'static str, verb: &'static str, links| {
+        let head = || Label::default().text("AP ").text(verb).text(" ");
         KindDecl::new(kind)
             .with_fields(vec![
                 field("ap", w(8)).in_notation(Notation::Decimal),
@@ -158,20 +163,22 @@ pub fn adi_schema() -> Schema {
             ])
             .with_links(links)
             .with_labels(vec![
-                (Label::default().text("AP ").field(AP_NAME))
-                    .text(" ")
-                    .field(AP_VALUE),
+                head().field(AP_NAME).text(" ").field(AP_VALUE),
+                head().field(AP_REG).text(" ").field(AP_VALUE),
+                head().field(AP_NAME),
                 Label::default().field(AP_NAME),
+                Label::default().text("AP ").text(verb),
             ])
     };
     Schema::new(vec![
         KindDecl::new("context")
             .with_fields(vec![field("select", w(32))])
             .with_links(vec![LinkDecl::new("resolved by", vec![dp_write()])]),
-        dp("dp-read"),
-        dp("dp-write"),
+        dp("dp-read", "read"),
+        dp("dp-write", "write"),
         ap(
             "ap-write",
+            "write",
             vec![
                 LinkDecl::new("transfer", vec![transfer()]),
                 LinkDecl::new("context", vec![dp_write()]),
@@ -180,6 +187,7 @@ pub fn adi_schema() -> Schema {
         // An AP read stays open until its data comes back, in the next read: two may overlap.
         ap(
             "ap-read",
+            "read",
             vec![
                 LinkDecl::new("request", vec![transfer()]),
                 LinkDecl::new("data", vec![transfer()]),
@@ -749,7 +757,9 @@ pub fn mem_schema() -> Schema {
             LinkTo::Upstream(name("ap-write")),
         ]
     };
-    let mem = |kind: &'static str| {
+    // "read 0xE000EDF0 DHCSR = 0x...", or without a register's name, "write 0x20000040 = 0x...".
+    let mem = |kind: &'static str, verb: &'static str| {
+        let head = || Label::default().text(verb).text(" ");
         KindDecl::new(kind)
             .with_fields(vec![
                 field("address", w(32)),
@@ -770,18 +780,20 @@ pub fn mem_schema() -> Schema {
                 LinkDecl::new("increment from", access()),
             ])
             .with_labels(vec![
-                (Label::default().field(ADDRESS).text(" ").field(MEM_NAME))
-                    .text(" ")
+                (head().field(ADDRESS).text(" ").field(MEM_NAME))
+                    .text(" = ")
                     .field(MEM_VALUE),
-                Label::default().field(MEM_NAME).text(" ").field(MEM_VALUE),
-                Label::default().field(MEM_NAME),
+                head().field(ADDRESS).text(" = ").field(MEM_VALUE),
+                head().field(MEM_NAME),
+                head().field(ADDRESS),
+                Label::default().text(verb),
             ])
     };
     Schema::new(vec![
         KindDecl::new("context")
             .with_fields(vec![field("access", FieldType::Name(vec![name("DRW")]))]),
-        mem("mem-read"),
-        mem("mem-write"),
+        mem("mem-read", "read"),
+        mem("mem-write", "write"),
     ])
     .with_reasons([
         "AP register unknown, so memory accesses cannot be told apart",

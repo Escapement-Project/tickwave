@@ -1120,6 +1120,37 @@ fn the_panel_shows_a_selected_transfer_in_full_and_an_access_with_its_links() {
     h.get_by_label("state");
 }
 
+/// An access's heading says whether it reads or writes, where the fixture holds one of its kind
+/// with every value known.
+#[test]
+fn an_access_says_whether_it_reads_or_writes() {
+    use egui_kittest::kittest::Queryable;
+    let (decoded, map, _) = decode_with(&fixture(), true);
+    let cases = [
+        (1, adiv5::DP_READ, "DP read "),
+        (1, adiv5::DP_WRITE, "DP write "),
+        (1, adiv5::AP_READ, "AP read "),
+        (1, adiv5::AP_WRITE, "AP write "),
+        (2, adiv5::MEM_READ, "read 0x"),
+        (2, adiv5::MEM_WRITE, "write 0x"),
+    ];
+    let mut seen = 0;
+    for (k, kind, head) in cases {
+        let Some(item) = (decoded[k].store.items().values())
+            .find(|i| i.id.kind == kind && i.end.is_some() && !condition(i))
+        else {
+            continue;
+        };
+        seen += 1;
+        // Only its heading holds the words: a link reads "ADIv5/ap-read/..." and a reader "read as".
+        panel(&decoded, k, item, map, &fixture()).get_by_label_contains(head);
+    }
+    assert!(
+        seen >= 4,
+        "the fixture holds reads and writes of each layer"
+    );
+}
+
 #[test]
 fn an_open_item_closing_moves_nothing_in_the_panel() {
     use egui_kittest::kittest::Queryable;
