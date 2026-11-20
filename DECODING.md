@@ -27,17 +27,12 @@ store, which the views read.
 
 ```mermaid
 flowchart LR
-    rec[("Recording")] --> cursors["Cursors<br/>(crates/view)"]
-    cursors --> source["Wire source"]
+    rec[("Recording")] --> source["Wire source"] -- "observations" --> host
     subgraph host ["Host"]
-        source -- "windows of observations" --> swd["SWD<br/>wire analysis"]
-        swd -- "operations, checked" --> s1[("Store")]
-        s1 -- "items, as they close" --> adi["ADIv5<br/>stacked analysis"]
-        adi -- "operations, checked" --> s2[("Store")]
-        s2 -- "items, as they close" --> mem["MEM-AP<br/>stacked analysis"]
-        mem -- "operations, checked" --> s3[("Store")]
+        direction TB
+        swd["SWD<br/>wire analysis"] -- "items" --> adi["ADIv5<br/>stacked analysis"] -- "items" --> mem["MEM-AP<br/>stacked analysis"]
     end
-    s1 & s2 & s3 --> views["Tracks and side panel<br/>(crates/egui)"]
+    host -. "items" .-> views["Tracks and<br/>side panel"]
 ```
 
 The wire source reads the recording through the view core's exact cursors. They keep each edge's own
