@@ -25,6 +25,11 @@
 //! characters a host's fonts all hold. The character under the pointer lights its item's span,
 //! and a click selects that item.
 //!
+//! The Decoders tab, where a decode view gives the panel its analyses as bound (`stack`), shows
+//! each analysis under the one it reads, with its inputs, its settings as controls and how far its
+//! pass has come, and what can be added: a decoder reading the recording's channels, one reading
+//! an analysis there, or a preset stack. Its host acts on what the reader changes there.
+//!
 //! The panel keeps its own reading of each analysis's store, and its tabs draw from that, so a
 //! selection, a filter or another analysis chosen costs a few lookups, however many items the
 //! store holds. Each frame it takes in what the store's change log says changed. A store it has
@@ -51,9 +56,12 @@ use crate::palette::Palette;
 use crate::track::{self, Labels, condition, heading, value_text};
 
 mod index;
+mod stack;
 
 pub use index::READ_AT_MOST;
 use index::{Index, Line};
+use stack::StackState;
+pub(crate) use stack::{Change, Configured, Stack};
 
 /// The most elements a part's section lists; the rest are counted.
 const ELEMENTS_AT_MOST: usize = 64;
@@ -94,6 +102,8 @@ pub enum Tab {
     List,
     /// One analysis's text, joined into lines.
     Text,
+    /// The analyses as bound, their settings, and what can be added.
+    Decoders,
 }
 
 /// What the panel shows and keeps between frames. Its host owns it, as it owns a graph's
@@ -124,6 +134,21 @@ pub struct PanelState {
     indexes: Vec<Index>,
     /// The frame it last read them in: a frame of several passes reads once.
     read_at: Option<u64>,
+    /// What the Decoders tab keeps between frames.
+    stack: StackState,
+}
+
+impl PanelState {
+    /// Lets go of what it read of each analysis and what it selected: for analyses bound anew,
+    /// whose places no longer hold the same ones.
+    pub(crate) fn forget(&mut self) {
+        *self = PanelState {
+            tab: self.tab,
+            collapsed: self.collapsed,
+            stack: std::mem::take(&mut self.stack),
+            ..PanelState::default()
+        };
+    }
 }
 
 /// What the Selected tab shows around the selected item, found in the indexes each frame.
@@ -149,6 +174,8 @@ pub struct Panel<'a> {
     under: Option<f32>,
     timebase: Ratio,
     map: Mapping,
+    /// The analyses as bound, for the Decoders tab.
+    stack: Option<Stack<'a>>,
 }
 
 impl<'a> Panel<'a> {
@@ -175,7 +202,14 @@ impl<'a> Panel<'a> {
             under: None,
             timebase,
             map,
+            stack: None,
         }
+    }
+
+    /// The analyses as bound, which the Decoders tab shows and changes.
+    pub(crate) fn stack(mut self, stack: Stack<'a>) -> Self {
+        self.stack = Some(stack);
+        self
     }
 
     /// Whether a panel `width` wide fits beside a plot in `available` points; if not, a host puts
@@ -995,8 +1029,13 @@ impl Widget for Panel<'_> {
                     (Tab::Selected, "Selected"),
                     (Tab::List, "List"),
                     (Tab::Text, "Text"),
+                    (Tab::Decoders, "Decoders"),
                 ];
-                for (tab, name) in tabs {
+                let stacked = self.stack.is_some();
+                for (tab, name) in tabs
+                    .into_iter()
+                    .filter(|(t, _)| stacked || *t != Tab::Decoders)
+                {
                     if self.toggle(ui, self.state.tab == tab, name).clicked() {
                         self.state.tab = tab;
                     }
@@ -1012,6 +1051,7 @@ impl Widget for Panel<'_> {
                     Tab::Selected => self.selected_tab(ui, &mut lit, &mut go),
                     Tab::List => self.list_tab(ui, &mut lit, &mut go),
                     Tab::Text => self.text_tab(ui, &mut lit, &mut go),
+                    Tab::Decoders => self.decoders_tab(ui),
                 }
             });
         }

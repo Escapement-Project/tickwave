@@ -3,15 +3,14 @@
 //! graph, on tickwave's own SWD capture.
 
 use super::palette;
-use crate::decode::{
-    Decode, DecodeOptions, DecodeState, Decoding, Phase, Place, Progress, Tracked,
-};
+use crate::decode::{Asked, Decode, DecodeOptions, DecodeState, Phase, Place, Progress};
 use crate::{Graph, ViewState, Viewer, Window};
 use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
 use escapement_tickwave_decode::recipe::{self, Recipe};
 use escapement_tickwave_decode::{Host, HostOptions, Span, Tick};
+use escapement_tickwave_decode::{Setting, SettingId};
 use escapement_tickwave_decoders::recipe::registry;
-use escapement_tickwave_view::cursor::timeline_map;
 use escapement_tickwave_view::{Cache, Recording};
 use std::ops::Range;
 use std::path::PathBuf;
@@ -52,45 +51,35 @@ fn open() -> Arc<Recording> {
     Arc::new(Recording::open(Arc::new(file), Cache::new(16 << 20)).unwrap())
 }
 
-/// Binds `recipe` over the fixture, as a host's bind function does.
-fn bind(recipe: &'static str) -> impl Fn() -> Result<Decoding, crate::BindFailure> + Send + Sync {
-    binding(recipe, &[])
-}
-
 /// Every item, kept.
 const ALL: &[Span] = &[Span {
     start: Tick::MIN,
     end: Tick::MAX,
 }];
 
-/// As `bind`, each analysis bound to keep `keep`.
-fn binding(
-    recipe: &'static str,
-    keep: &'static [Span],
-) -> impl Fn() -> Result<Decoding, crate::BindFailure> + Send + Sync {
+/// Opens the recording at `path`, as a host's open function does.
+fn opening(
+    path: PathBuf,
+) -> impl Fn() -> Result<Arc<Recording>, crate::BindFailure> + Send + Sync + 'static {
     move || {
-        let rec = open();
-        let b = Recipe::parse(recipe)?.bind(
-            &registry(),
-            &rec,
-            recipe::window(&rec),
-            keep,
-            HostOptions::default(),
-        )?;
-        let mut analyses = vec![];
-        for a in b.analyses {
-            let map = timeline_map(&rec, a.timeline)?;
-            analyses.push(Tracked {
-                id: a.id,
-                name: a.label,
-                map,
-            });
-        }
-        Ok(Decoding {
-            host: b.host,
-            analyses,
-        })
+        let file = std::fs::File::open(&path)?;
+        Ok(Arc::new(Recording::open(
+            Arc::new(file),
+            Cache::new(64 << 20),
+        )?))
     }
+}
+
+/// A decode of `recipe` over the fixture, through this crate's tests' registry.
+fn decoding(ctx: &egui::Context, recipe: &str) -> Decode {
+    let recipe = Recipe::parse(recipe).unwrap();
+    Decode::start(
+        ctx,
+        DecodeOptions::default(),
+        registry(),
+        recipe,
+        opening(fixture()),
+    )
 }
 
 fn until(what: &str, done: impl Fn() -> bool) {
@@ -125,8 +114,7 @@ fn kept() -> Host {
 #[test]
 fn a_decode_binds_on_its_worker_and_tallies_what_its_pass_keeps_none_of() {
     let ctx = egui::Context::default();
-    // Bound to keep everything: the decode's forward pass keeps nothing whatever the binding says.
-    let d = Decode::start(&ctx, DecodeOptions::default(), binding(SWD, ALL));
+    let d = decoding(&ctx, SWD);
     until("the pass finishes", || finished(&d));
     let all = kept();
     let g = d.lock();
@@ -154,7 +142,7 @@ fn a_decode_binds_on_its_worker_and_tallies_what_its_pass_keeps_none_of() {
 #[test]
 fn a_window_few_enough_items_to_draw_apart_is_derived_and_a_crowded_one_is_not() {
     let ctx = egui::Context::default();
-    let d = Decode::start(&ctx, DecodeOptions::default(), bind(SWD));
+    let d = decoding(&ctx, SWD);
     until("the pass finishes", || finished(&d));
     let all = kept();
     let swd = all.index("swd").unwrap();
@@ -218,7 +206,7 @@ fn a_window_few_enough_items_to_draw_apart_is_derived_and_a_crowded_one_is_not()
 #[test]
 fn a_released_decode_lets_go_and_a_reopened_one_starts_again() {
     let ctx = egui::Context::default();
-    let d = Decode::start(&ctx, DecodeOptions::default(), bind(SWD));
+    let d = decoding(&ctx, SWD);
     until("the pass finishes", || finished(&d));
     d.release();
     assert_eq!(d.progress(), Progress::Released);
@@ -229,10 +217,9 @@ fn a_released_decode_lets_go_and_a_reopened_one_starts_again() {
 #[test]
 fn a_bind_that_fails_shows_in_progress() {
     let ctx = egui::Context::default();
-    let d = Decode::start(
+    let d = decoding(
         &ctx,
-        DecodeOptions::default(),
-        bind("[[decode]]\nid = \"x\"\ndecoder = \"none\"\nversion = 1\n"),
+        "[[decode]]\nid = \"x\"\ndecoder = \"none\"\nversion = 1\n",
     );
     until("refused", || matches!(d.progress(), Progress::Refused(_)));
     let Progress::Refused(why) = d.progress() else {
@@ -296,7 +283,7 @@ fn the_decoded_graph_draws_its_tracks_under_the_graph() {
                             window: Window::At(first - 20_000..first + 80_000),
                             ..ViewState::default()
                         },
-                        decode: Decode::start(&ctx, DecodeOptions::default(), bind(LONG)),
+                        decode: decoding(&ctx, LONG),
                         decoded: DecodeState::default(),
                         lanes: lanes.clone(),
                         place,
@@ -328,7 +315,7 @@ fn the_decoded_graph_draws_its_tracks_under_the_graph() {
 }
 
 /// Pictures of the decoded graph: SWD and ADIv5 under SWCLK and SWDIO, zoomed in to the first
-/// transfer, the panel beside them showing it selected.
+/// transfer, the panel beside them showing it selected, then its Decoders tab.
 ///
 ///     TICKWAVE_SHOTS=DIR cargo test -p escapement-tickwave-egui --features decode --lib \
 ///         tests::decode::shots -- --ignored
@@ -367,7 +354,7 @@ fn shots() {
                     window: Window::At(start - 5_000..start + 45_000),
                     ..ViewState::default()
                 },
-                decode: Decode::start(&ctx, DecodeOptions::default(), bind(SWD)),
+                decode: decoding(&ctx, SWD),
                 decoded: DecodeState::default(),
                 lanes,
                 place: Place::Beside(360.0),
@@ -407,6 +394,12 @@ fn shots() {
         .unwrap()
         .save(dir.join("decoded-swd.png"))
         .unwrap();
+    h.state_mut().decoded.panel.tab = crate::panel::Tab::Decoders;
+    h.run_steps(4);
+    h.render()
+        .unwrap()
+        .save(dir.join("decoders-tab.png"))
+        .unwrap();
 }
 
 /// The recording and recipe `TICKWAVE_DECODE_REC` and `TICKWAVE_DECODE_RECIPE` name, else the
@@ -417,7 +410,7 @@ struct Real {
     lanes: Vec<usize>,
     length: i64,
     per_us: f64,
-    bind: Arc<dyn Fn() -> Result<Decoding, crate::BindFailure> + Send + Sync>,
+    recipe: &'static str,
 }
 
 impl Real {
@@ -436,43 +429,19 @@ impl Real {
                 recipe::Input::Analysis(_) => None,
             })
             .collect();
-        let bind_path = path.clone();
-        let bind = move || -> Result<Decoding, crate::BindFailure> {
-            let file = std::fs::File::open(&bind_path)?;
-            let rec = Arc::new(Recording::open(Arc::new(file), Cache::new(64 << 20))?);
-            let b = Recipe::parse(recipe)?.bind(
-                &registry(),
-                &rec,
-                recipe::window(&rec),
-                &[],
-                HostOptions::default(),
-            )?;
-            let mut analyses = vec![];
-            for a in b.analyses {
-                let map = timeline_map(&rec, a.timeline)?;
-                analyses.push(Tracked {
-                    id: a.id,
-                    name: a.label,
-                    map,
-                });
-            }
-            Ok(Decoding {
-                host: b.host,
-                analyses,
-            })
-        };
         Self {
             path,
             lanes,
             length: rec.length(),
             per_us: rec.timebase().num() as f64 / rec.timebase().den() as f64 / 1e6,
-            bind: Arc::new(bind),
+            recipe,
         }
     }
 
     fn start(&self, ctx: &egui::Context) -> Decode {
-        let bind = Arc::clone(&self.bind);
-        Decode::start(ctx, DecodeOptions::default(), move || bind())
+        let recipe = Recipe::parse(self.recipe).unwrap();
+        let open = opening(self.path.clone());
+        Decode::start(ctx, DecodeOptions::default(), registry(), recipe, open)
     }
 
     fn us(&self, n: f64) -> i64 {
@@ -712,7 +681,7 @@ fn frame_times() {
 #[test]
 #[ignore = "prints wall-clock latencies"]
 fn step_latency() {
-    use egui_kittest::kittest::{NodeT as _, Queryable};
+    use egui_kittest::kittest::NodeT as _;
     let real = Real::open();
     let whole = 0..real.length;
     cpu_cap();
@@ -937,7 +906,7 @@ fn a_panel_step_brings_its_item_into_view_and_a_track_click_moves_nothing() {
                         window: Window::At(window.clone()),
                         ..ViewState::default()
                     },
-                    decode: Decode::start(&ctx, DecodeOptions::default(), bind(SWD)),
+                    decode: decoding(&ctx, SWD),
                     decoded: DecodeState::default(),
                     lanes,
                     drawn: None,
@@ -1035,5 +1004,261 @@ fn an_item_out_of_view_is_brought_into_it() {
         bring(&window, 500..2500),
         Some(0..3000),
         "longer, across it"
+    );
+}
+
+/// A decode under a graph with the panel beside it, its Decoders tab open: a setting changed
+/// there decodes its chain again, and the recipe keeps what changed.
+struct Configuring {
+    viewer: Viewer,
+    state: ViewState,
+    decode: Decode,
+    decoded: DecodeState,
+    lanes: Vec<usize>,
+}
+
+fn configuring(recipe: &str, window: Range<i64>) -> Harness<'static, Configuring> {
+    let rec = open();
+    let lanes = vec![rec.channel("SWCLK").unwrap(), rec.channel("SWDIO").unwrap()];
+    let ctx = egui::Context::default();
+    Harness::builder()
+        .with_size(egui::vec2(1400.0, 900.0))
+        .build_ui_state(
+            |ui, v: &mut Configuring| {
+                let palette = palette();
+                ui.add(
+                    Graph::lanes_only(&v.viewer, &mut v.state, &palette)
+                        .lanes(&v.lanes)
+                        .decoded(&v.decode, &mut v.decoded)
+                        .panel(Place::Beside(480.0)),
+                );
+            },
+            Configuring {
+                viewer: Viewer::open(&ctx, &fixture()).unwrap(),
+                state: ViewState {
+                    window: Window::At(window),
+                    ..ViewState::default()
+                },
+                decode: decoding(&ctx, recipe),
+                decoded: DecodeState::default(),
+                lanes,
+            },
+        )
+}
+
+/// Steps `h` until `done` holds of its decode, for at most 20 s.
+fn stepped(h: &mut Harness<'_, Configuring>, what: &str, done: impl Fn(&Decode) -> bool) {
+    let t = Instant::now();
+    loop {
+        h.step();
+        if done(&h.state().decode) {
+            return;
+        }
+        assert!(t.elapsed() < Duration::from_secs(20), "{what}");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// Each lane's name, and the items its forward pass has counted.
+fn counted(d: &Decode) -> Vec<(String, u64)> {
+    match &d.lock().phase {
+        Phase::Running(r) => (r.lanes.iter())
+            .map(|l| (l.name.clone(), l.tally.items()))
+            .collect(),
+        _ => vec![],
+    }
+}
+
+#[test]
+fn a_setting_changed_in_the_decoders_tab_decodes_its_chain_again() {
+    let all = kept();
+    let first = (all.store(all.index("swd").unwrap()).items().values())
+        .next()
+        .unwrap()
+        .start;
+    let mut h = configuring(SWD, first - 5_000..first + 45_000);
+    stepped(&mut h, "decoded", finished);
+    let before = counted(&h.state().decode);
+    assert!(before.iter().all(|(_, n)| *n > 0), "{before:?}");
+    let runs = |d: &Decode| match &d.lock().phase {
+        Phase::Running(r) => r.lanes.iter().map(|l| r.host.run_id(l.id)).collect(),
+        _ => vec![],
+    };
+    let old = runs(&h.state().decode);
+    h.get_by_label("Decoders").click();
+    h.run_steps(2);
+    // SWD's turnaround, a stepper: 1 to 2.
+    h.get_by_label("+").click();
+    h.step();
+    let new = runs(&h.state().decode);
+    assert!(
+        old.iter().zip(&new).all(|(a, b)| a != b),
+        "SWD and ADIv5 decode again"
+    );
+    let recipe = h.state().decode.recipe();
+    assert_eq!(
+        recipe.analyses[0].settings,
+        [("turnaround".to_owned(), Setting::Int(2))]
+    );
+    let bound = |d: &Decode| match &d.lock().phase {
+        Phase::Running(r) => r.host.settings(r.lanes[0].id).int(SettingId(0)),
+        _ => None,
+    };
+    assert_eq!(bound(&h.state().decode), Some(2));
+    stepped(&mut h, "decoded again", finished);
+    h.run_steps(2);
+    let estimates = |d: &Decode| match &d.lock().phase {
+        Phase::Running(r) => r.lanes.iter().filter(|l| l.estimate.is_some()).count(),
+        _ => usize::MAX,
+    };
+    assert_eq!(
+        estimates(&h.state().decode),
+        0,
+        "the count before goes once the pass is done"
+    );
+    // Back to the default: the recipe leaves it out, and the pass counts what it did.
+    h.get_by_label("−").click();
+    h.step();
+    assert_eq!(bound(&h.state().decode), Some(1));
+    assert!(h.state().decode.recipe().analyses[0].settings.is_empty());
+    stepped(&mut h, "decoded as at first", finished);
+    assert_eq!(counted(&h.state().decode), before);
+}
+
+/// From nothing decoded: SWD added with its ports bound by name, ADIv5 stacked on it, the SWD
+/// preset beside them under fresh ids, and ADIv5 removed with what reads it.
+#[test]
+fn decoders_are_added_stacked_and_removed_in_the_decoders_tab() {
+    let mut h = configuring("", 0..1_000_000);
+    stepped(&mut h, "bound", |d| {
+        matches!(d.progress(), Progress::Running(_))
+    });
+    // With nothing decoded, the panel opens at its Decoders tab.
+    h.run_steps(2);
+    h.get_by_label("SWD").click();
+    h.run_steps(2);
+    h.get_by_label("add").click();
+    h.run_steps(2);
+    let recipe = h.state().decode.recipe();
+    assert_eq!(recipe.analyses.len(), 1);
+    assert_eq!(
+        recipe.analyses[0].inputs,
+        [
+            (
+                "SWCLK".to_owned(),
+                recipe::Input::Channel("SWCLK".to_owned())
+            ),
+            (
+                "SWDIO".to_owned(),
+                recipe::Input::Channel("SWDIO".to_owned())
+            ),
+        ],
+        "each port bound to the channel of its name"
+    );
+    h.get_by_label("ADIv5 on SWD").click();
+    h.run_steps(2);
+    h.get_by_label("MEM-AP on ADIv5").click();
+    h.run_steps(2);
+    let ids =
+        |d: &Decode| -> Vec<String> { d.recipe().analyses.iter().map(|a| a.id.clone()).collect() };
+    assert_eq!(ids(&h.state().decode), ["swd", "adiv5", "mem-ap"]);
+    stepped(&mut h, "decoded", finished);
+    let names: Vec<_> = counted(&h.state().decode)
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    assert_eq!(names, ["SWD", "ADIv5", "MEM-AP"]);
+    assert!(counted(&h.state().decode).iter().all(|(_, n)| *n > 0));
+    // The window derived again since, so it draws the analyses added too.
+    stepped(&mut h, "the window drawn with MEM-AP", |d| {
+        matches!(&d.lock().phase, Phase::Running(r) if r.chains[0].drawn.as_ref()
+            .is_some_and(|c| r.host.window_run(c.id, r.lanes[2].id).is_some()))
+    });
+
+    h.get_by_label("SWD, ADIv5, MEM-AP").click();
+    h.run_steps(2);
+    h.get_by_label("add").click();
+    h.run_steps(2);
+    assert_eq!(
+        ids(&h.state().decode),
+        ["swd", "adiv5", "mem-ap", "swd-2", "adi", "mem"]
+    );
+    stepped(&mut h, "the preset decoded", finished);
+
+    // ADIv5's remove control: the first of three, after SWD's.
+    let removes = h.get_all_by_label("remove").collect::<Vec<_>>();
+    assert_eq!(removes.len(), 6);
+    removes[1].click();
+    h.run_steps(2);
+    stepped(&mut h, "bound again", |d| {
+        matches!(d.progress(), Progress::Running(_))
+    });
+    assert_eq!(ids(&h.state().decode), ["swd", "swd-2", "adi", "mem"]);
+}
+
+/// After a setting changes, a window the new pass has not reached derives ahead of it, however
+/// long, where the pass before counted few enough items there: provisional until the pass is
+/// past it.
+#[test]
+fn a_window_ahead_of_a_pass_after_a_change_derives_on_the_count_before_it() {
+    let ctx = egui::Context::default();
+    let d = decoding(&ctx, SWD);
+    until("the pass finishes", || finished(&d));
+    let all = kept();
+    let last = (all.store(all.index("swd").unwrap()).items().values())
+        .last()
+        .unwrap()
+        .start;
+    // A narrow window in ticks, which a slow axis makes seconds long: the rule for a window ahead
+    // of the pass with nothing counted would wait for the pass.
+    let asked = Asked {
+        window: last - 20_000..last + 20_000,
+        width: 1000.0,
+        per_second: 1.0,
+    };
+    let mut g = d.lock();
+    let Phase::Running(r) = &mut g.phase else {
+        panic!("running");
+    };
+    let turnaround = [("turnaround".to_owned(), Setting::Int(1))];
+    let estimated = |r: &crate::decode::Running| -> Vec<u64> {
+        let count = |l: &crate::decode::Lane| l.estimate.as_ref().map_or(0, |e| e.items());
+        r.lanes.iter().map(count).collect()
+    };
+    r.rebind(0, &turnaround).unwrap();
+    assert!(r.lanes.iter().all(|l| l.tally.items() == 0));
+    let full = estimated(r);
+    assert!(full.iter().all(|&n| n > 0), "{full:?}");
+    // Changed again before the new pass finishes: what it counted is cut short.
+    r.rebind(0, &turnaround).unwrap();
+    assert_eq!(estimated(r), full, "the finished pass's count stays");
+    r.ask(&asked).unwrap();
+    let pending = r.chains[0]
+        .pending
+        .as_ref()
+        .expect("derived on the count before");
+    assert!(pending.provisional, "ahead of the pass, without context");
+    let derived = pending.id;
+    // The whole recording over a few points, crowded by the count before: not derived, where the
+    // new pass's empty count would have it.
+    let crowded = Asked {
+        window: 0..open().length(),
+        width: 50.0,
+        per_second: 1.0,
+    };
+    r.ask(&crowded).unwrap();
+    assert_eq!(r.chains[0].pending.as_ref().map(|c| c.id), Some(derived));
+    for l in &mut r.lanes {
+        l.estimate = None;
+    }
+    r.rebind(0, &turnaround).unwrap();
+    assert!(
+        r.lanes.iter().all(|l| l.estimate.is_none()),
+        "no finished pass, no estimate"
+    );
+    r.ask(&asked).unwrap();
+    assert!(
+        r.chains[0].pending.is_none(),
+        "without it, the window waits for the pass"
     );
 }

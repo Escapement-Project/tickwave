@@ -1,5 +1,8 @@
-//! A decode view's analyses: a decode host whose forward pass runs on a worker thread, and what a
-//! view draws of each analysis. `Graph::decoded` draws them under a graph.
+//! A decode view's analyses: a recipe bound over a recording, its host's forward pass running on a
+//! worker thread, and what a view draws of each analysis. `Graph::decoded` draws them under a
+//! graph, and its side panel's Decoders tab changes them: a setting changed decodes the
+//! analysis's chain again, a decoder added joins the host, and one removed binds the recipe again
+//! without it.
 //!
 //! The forward pass keeps no items. Each analysis's tally of what it decoded, counted as items
 //! close, draws zoomed out; zoomed in, the window the graph shows and a width either side of it
@@ -8,17 +11,20 @@
 
 use crate::graph::{Graph, Shown};
 use crate::palette::Palette;
-use crate::panel::{Analysis as PanelAnalysis, Panel, PanelState};
+use crate::panel::{Analysis as PanelAnalysis, Change, Configured, Panel, PanelState, Stack, Tab};
 use crate::state::Window;
 use crate::track::{
     self, Density, Labels, Track, condition, decoder_roles, driver_paints, track_height,
 };
 use egui::{Response, Ui, Widget};
+use escapement_tickwave_decode::recipe::{self, Analysis as Planned, Recipe, Registry};
 use escapement_tickwave_decode::{
-    AnalysisId, Host, Id, Item, Keeping, RunId, Schema, Span, Store, Tick, WindowId,
+    AnalysisId, Host, HostOptions, Id, Item, Keeping, RunId, Schema, Setting, SettingType, Span,
+    Store, Tick, WindowId,
 };
 use escapement_tickwave_view::format::mapping::Mapping;
 use escapement_tickwave_view::format::model::Ratio;
+use escapement_tickwave_view::{ChannelKind, Recording};
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,8 +32,11 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{JoinHandle, Thread};
 use std::time::{Duration, Instant};
 
-/// Why binding failed: a recipe's refusal, the recording's, or the host's.
+/// Why opening the recording failed.
 pub type BindFailure = Box<dyn std::error::Error + Send + Sync>;
+
+/// Opens the recording a decode binds its recipe over, again on `reopen`.
+type Open = dyn Fn() -> Result<Arc<Recording>, BindFailure> + Send + Sync;
 
 /// The most items a window may hold, by the tally's count, for a chain to derive it; a window
 /// with more draws as the tally's density.
@@ -40,27 +49,10 @@ pub const AHEAD_AT_MOST: Duration = Duration::from_millis(10);
 /// The window a view shows, on the axis, over a plot `width` points wide, its ticks
 /// `per_second` a second.
 #[derive(Clone, Debug)]
-struct Asked {
-    window: Range<i64>,
-    width: f32,
-    per_second: f64,
-}
-
-/// What a bind function gives `Decode`: a bound host, and how a view draws each analysis.
-pub struct Decoding {
-    pub host: Host,
-    /// The analyses the view draws, in the order of their tracks.
-    pub analyses: Vec<Tracked>,
-}
-
-/// An analysis as a view draws it.
-pub struct Tracked {
-    pub id: AnalysisId,
-    /// Its track's name.
-    pub name: String,
-    /// Its timeline on the recording's axis: its channel's, as `view::cursor::timeline_map` gives
-    /// it.
-    pub map: Mapping,
+pub(crate) struct Asked {
+    pub(crate) window: Range<i64>,
+    pub(crate) width: f32,
+    pub(crate) per_second: f64,
 }
 
 /// How `Decode` runs. `Default`: a 64 MiB checkpoint budget, and a repaint at most every 100 ms
@@ -105,11 +97,12 @@ pub struct Reached {
     pub finished: Option<Tick>,
 }
 
-/// A recording's analyses, decoded on a worker thread. Send and Sync: a host keeps it beside its
-/// `Viewer`, and may call `release` and `reopen` from another thread.
+/// A recording's analyses, as a recipe names them, decoded on a worker thread. Send and Sync: a
+/// host keeps it beside its `Viewer`, and may call `release` and `reopen` from another thread.
 pub struct Decode {
     shared: Arc<Shared>,
-    bind: Arc<dyn Fn() -> Result<Decoding, BindFailure> + Send + Sync>,
+    open: Arc<Open>,
+    registry: Arc<Registry>,
     ctx: egui::Context,
     options: DecodeOptions,
     worker: Mutex<Option<(JoinHandle<()>, Thread)>>,
@@ -128,6 +121,10 @@ pub(crate) struct Inner {
     pub(crate) phase: Phase,
     /// The window last asked for, kept across a reopen.
     shown: Option<Asked>,
+    /// The analyses as the reader has them, which a reopen binds.
+    recipe: Recipe,
+    /// Why the last change the Decoders tab asked for was refused.
+    refused: Option<String>,
 }
 
 pub(crate) enum Phase {
@@ -142,6 +139,12 @@ pub(crate) struct Running {
     pub(crate) lanes: Vec<Lane>,
     /// Each wire analysis's window chains, by the lane of its wire analysis.
     pub(crate) chains: Vec<Chains>,
+    recording: Arc<Recording>,
+    /// A wire decoder's window of input, in ticks.
+    window: Tick,
+    /// The recording's digital channels, by name: what a wire port can read.
+    channels: Vec<String>,
+    budget: usize,
 }
 
 /// An analysis as the view draws it.
@@ -155,9 +158,25 @@ pub(crate) struct Lane {
     pub(crate) tally: Density,
     /// The forward run the tally counts; a run that replaces it counts afresh.
     run: RunId,
+    /// What the last finished run before a setting changed counted, while the new one has not
+    /// finished: where items lie, for deciding which windows to derive ahead of the pass.
+    pub(crate) estimate: Option<Density>,
+    /// The channel whose source's timeline its items are on.
+    timeline: usize,
     /// The lane of the analysis it is stacked on, and of the wire analysis under it all.
     pub(crate) reads: Option<usize>,
     pub(crate) root: usize,
+}
+
+impl Lane {
+    /// What its pass counted, or, where the pass has not `counted` what is asked about, what the
+    /// pass before a setting changed counted, while that is kept.
+    fn counting(&self, counted: bool) -> &Density {
+        match (counted, &self.estimate) {
+            (false, Some(e)) => e,
+            _ => &self.tally,
+        }
+    }
 }
 
 /// A wire analysis's window chains: the one drawn, and the one being derived to replace it.
@@ -178,25 +197,30 @@ pub(crate) struct Chain {
 }
 
 impl Decode {
-    /// Starts a worker that calls `bind` and runs the forward pass of the host it gives, and
-    /// returns at once. `bind` opens the recording and binds its analyses; a refusal shows in
-    /// `progress`. `reopen` calls it again.
+    /// Starts a worker that opens the recording with `open`, binds `recipe` over it through
+    /// `registry`, and runs the forward pass, and returns at once. A refusal shows in `progress`.
+    /// `reopen` opens and binds again, the recipe as the reader has changed it.
     pub fn start(
         ctx: &egui::Context,
         options: DecodeOptions,
-        bind: impl Fn() -> Result<Decoding, BindFailure> + Send + Sync + 'static,
+        registry: Registry,
+        recipe: Recipe,
+        open: impl Fn() -> Result<Arc<Recording>, BindFailure> + Send + Sync + 'static,
     ) -> Self {
         let d = Self {
             shared: Arc::new(Shared {
                 inner: Mutex::new(Inner {
                     phase: Phase::Binding,
                     shown: None,
+                    recipe,
+                    refused: None,
                 }),
                 wants: AtomicBool::new(false),
                 stop: AtomicBool::new(false),
                 asked: Mutex::new(None),
             }),
-            bind: Arc::new(bind),
+            open: Arc::new(open),
+            registry: Arc::new(registry),
             ctx: ctx.clone(),
             options,
             worker: Mutex::new(None),
@@ -206,14 +230,20 @@ impl Decode {
     }
 
     /// Runs a worker; with a host bound already, from it, else binding first.
-    fn spawn(&self, bound: Option<Decoding>) {
+    fn spawn(&self, bound: Option<Running>) {
         let shared = Arc::clone(&self.shared);
-        let bind = Arc::clone(&self.bind);
+        let (open, registry) = (Arc::clone(&self.open), Arc::clone(&self.registry));
         let (ctx, options) = (self.ctx.clone(), self.options.clone());
         shared.stop.store(false, Ordering::Release);
         let handle = std::thread::Builder::new()
             .name("tickwave decode".into())
-            .spawn(move || work(&shared, &*bind, bound, &ctx, &options))
+            .spawn(move || {
+                let bind = || {
+                    let recipe = lock(&shared).recipe.clone();
+                    Running::bind(&*open, &registry, &recipe, &options)
+                };
+                work(&shared, bound.map_or_else(bind, Ok), &ctx, &options);
+            })
             .expect("the decode worker starts");
         let thread = handle.thread().clone();
         *self.lock_worker() = Some((handle, thread));
@@ -240,19 +270,42 @@ impl Decode {
         self.lock().phase = Phase::Released;
     }
 
-    /// Binds again, on the calling thread, and starts the pass from the beginning.
+    /// Opens the recording and binds the recipe again, on the calling thread, and starts the
+    /// pass from the beginning.
     pub fn reopen(&self) -> Result<(), BindFailure> {
         self.stop();
-        match (self.bind)() {
+        let recipe = self.lock().recipe.clone();
+        match Running::bind(&*self.open, &self.registry, &recipe, &self.options) {
             Ok(bound) => {
                 self.lock().phase = Phase::Binding;
                 self.spawn(Some(bound));
                 Ok(())
             }
-            Err(e) => {
-                self.lock().phase = Phase::Refused(e.to_string());
-                Err(e)
+            Err(why) => {
+                self.lock().phase = Phase::Refused(why.clone());
+                Err(why.into())
             }
+        }
+    }
+
+    /// The recipe as the reader has it: the one started with, as the Decoders tab changed it.
+    pub fn recipe(&self) -> Recipe {
+        self.lock().recipe.clone()
+    }
+
+    /// Binds `recipe` in place of the one bound, on the worker, from the beginning.
+    fn rebuild(&self, recipe: Recipe) {
+        self.stop();
+        let mut g = self.lock();
+        (g.phase, g.recipe, g.refused) = (Phase::Binding, recipe, None);
+        drop(g);
+        self.spawn(None);
+    }
+
+    /// Wakes the worker, parked where it had nothing to run.
+    pub(crate) fn wake(&self) {
+        if let Some((_, thread)) = self.lock_worker().as_ref() {
+            thread.unpark();
         }
     }
 
@@ -297,9 +350,7 @@ impl Decode {
             per_second,
         });
         drop(asked);
-        if let Some((_, thread)) = self.lock_worker().as_ref() {
-            thread.unpark();
-        }
+        self.wake();
     }
 
     /// The analyses as the view draws them, the worker kept off them until the guard drops.
@@ -332,24 +383,16 @@ impl std::ops::DerefMut for InnerGuard<'_> {
     }
 }
 
-/// The worker: binds where it has no host, then steps it until stopped, taking in the window the
-/// view asks for and what the forward pass tallied after each step. It parks while nothing runs.
+/// The worker: runs the host `bound` gave, or shows why there is none, stepping it until stopped,
+/// taking in the window the view asks for and what the forward pass tallied after each step. It
+/// parks while nothing runs.
 fn work(
     shared: &Shared,
-    bind: &(dyn Fn() -> Result<Decoding, BindFailure> + Send + Sync),
-    bound: Option<Decoding>,
+    bound: Result<Running, String>,
     ctx: &egui::Context,
     options: &DecodeOptions,
 ) {
-    let bound = match bound.map_or_else(bind, Ok) {
-        Ok(b) => b,
-        Err(e) => {
-            lock(shared).phase = Phase::Refused(e.to_string());
-            ctx.request_repaint();
-            return;
-        }
-    };
-    let running = match Running::new(bound, options) {
+    let running = match bound {
         Ok(r) => r,
         Err(why) => {
             lock(shared).phase = Phase::Refused(why);
@@ -417,57 +460,144 @@ fn lock(shared: &Shared) -> MutexGuard<'_, Inner> {
 }
 
 impl Running {
-    fn new(bound: Decoding, options: &DecodeOptions) -> Result<Self, String> {
-        let Decoding { mut host, analyses } = bound;
-        let slot = |id: AnalysisId| analyses.iter().position(|t| t.id == id);
-        let mut lanes = Vec::with_capacity(analyses.len());
-        for t in &analyses {
-            let reads = host.bound(t.id).map(|r| r.analysis);
-            let reads = match reads {
-                Some(up) => Some(slot(up).ok_or("an analysis reads one the view does not draw")?),
-                None => None,
-            };
-            lanes.push(Lane {
-                id: t.id,
-                name: t.name.clone(),
-                map: t.map,
-                schema: host.definition(t.id).schema.clone(),
-                labels: Labels::default(),
-                tally: Density::default(),
-                run: host.run_id(t.id),
-                reads,
-                root: 0,
-            });
+    /// Opens the recording and binds `recipe` over it.
+    fn bind(
+        open: &Open,
+        registry: &Registry,
+        recipe: &Recipe,
+        options: &DecodeOptions,
+    ) -> Result<Self, String> {
+        let recording = open().map_err(|e| e.to_string())?;
+        let window = recipe::window(&recording);
+        let b = (recipe.bind(registry, &recording, window, &[], HostOptions::default()))
+            .map_err(|e| e.to_string())?;
+        let channels = (recording.channels().iter())
+            .filter(|c| matches!(c.kind, ChannelKind::Digital))
+            .map(|c| c.name.clone())
+            .collect();
+        let mut r = Self {
+            host: b.host,
+            lanes: Vec::with_capacity(b.analyses.len()),
+            chains: vec![],
+            recording,
+            window,
+            channels,
+            budget: options.checkpoint_budget,
+        };
+        for a in b.analyses {
+            r.lane(a)?;
         }
-        for k in 0..lanes.len() {
-            let mut root = k;
-            while let Some(up) = lanes[root].reads {
-                root = up;
+        Ok(r)
+    }
+
+    /// Draws analysis `a`, as the recipe bound it, in a lane of its own after the others: its
+    /// forward pass keeps no items and tallies them, and a wire analysis keeps checkpoints.
+    fn lane(&mut self, a: recipe::Bound) -> Result<(), String> {
+        let reads = match self.host.bound(a.id) {
+            Some(up) => Some(
+                (self.lanes.iter().position(|l| l.id == up.analysis))
+                    .ok_or("an analysis reads one the view does not draw")?,
+            ),
+            None => None,
+        };
+        let mut root = self.lanes.len();
+        if let Some(up) = reads {
+            root = self.lanes[up].root;
+        }
+        self.host.set_keep(a.id, vec![]);
+        self.host.tally(a.id);
+        if reads.is_none() {
+            let keeping = Keeping::new(Tick::MAX, self.budget).with_events(100_000);
+            (self.host.keep_checkpoints(a.id, keeping)).map_err(|e| e.to_string())?;
+        }
+        self.lanes.push(Lane {
+            id: a.id,
+            name: a.label,
+            map: a.map,
+            schema: self.host.definition(a.id).schema.clone(),
+            labels: Labels::default(),
+            tally: Density::default(),
+            run: self.host.run_id(a.id),
+            estimate: None,
+            timeline: a.timeline,
+            reads,
+            root,
+        });
+        self.chains.push(Chains::default());
+        Ok(())
+    }
+
+    /// Binds the analysis in lane `k` with `settings`: the host decodes its chain again.
+    pub(crate) fn rebind(
+        &mut self,
+        k: usize,
+        settings: &[(String, Setting)],
+    ) -> Result<(), String> {
+        let given: Vec<(&str, Setting)> = (settings.iter())
+            .map(|(n, v)| (n.as_str(), v.clone()))
+            .collect();
+        let root = self.lanes[k].root;
+        let whole = self.host.finished(self.lanes[root].id).is_some();
+        (self.host.rebind(self.lanes[k].id, &given)).map_err(|e| e.to_string())?;
+        self.restarted(root, whole);
+        Ok(())
+    }
+
+    /// Adds `planned`, as the recipe would bind it, in a lane after the others. Stacked on a
+    /// chain that has run, the host decodes the chain again.
+    fn add(&mut self, registry: &Registry, planned: &Planned) -> Result<(), String> {
+        let bound: Vec<recipe::Bound> = (self.lanes.iter())
+            .map(|l| recipe::Bound {
+                id: l.id,
+                label: l.name.clone(),
+                timeline: l.timeline,
+                map: l.map,
+            })
+            .collect();
+        let runs: Vec<RunId> = self.lanes.iter().map(|l| self.host.run_id(l.id)).collect();
+        let whole: Vec<bool> = (self.lanes.iter())
+            .map(|l| self.host.finished(l.id).is_some())
+            .collect();
+        let a = (planned.add(
+            &mut self.host,
+            registry,
+            &self.recording,
+            &bound,
+            self.window,
+            &[],
+        ))
+        .map_err(|e| e.to_string())?;
+        self.lane(a)?;
+        let k = self.lanes.len() - 1;
+        let root = self.lanes[k].root;
+        if let Some(up) = self.lanes[k].reads
+            && self.host.run_id(self.lanes[up].id) != runs[up]
+        {
+            self.restarted(root, whole[root]);
+        }
+        Ok(())
+    }
+
+    /// After the host decoded wire analysis lane `root`'s chain again: its lanes count afresh, and
+    /// its window chains, which the host retired, are gone. Where the pass before had finished,
+    /// `whole`, what it counted is the estimate; a pass cut short counts nothing past where it
+    /// reached, so an estimate from an earlier finished pass stays.
+    fn restarted(&mut self, root: usize, whole: bool) {
+        for l in self.lanes.iter_mut().filter(|l| l.root == root) {
+            let counted = std::mem::take(&mut l.tally);
+            if whole {
+                l.estimate = Some(counted);
             }
-            lanes[k].root = root;
+            l.run = self.host.run_id(l.id);
         }
-        for l in &lanes {
-            host.set_keep(l.id, vec![]);
-            host.tally(l.id);
-            if l.reads.is_none() {
-                let keeping =
-                    Keeping::new(Tick::MAX, options.checkpoint_budget).with_events(100_000);
-                host.keep_checkpoints(l.id, keeping)
-                    .map_err(|e| e.to_string())?;
-            }
-        }
-        let chains = (0..lanes.len()).map(|_| Chains::default()).collect();
-        Ok(Self {
-            host,
-            lanes,
-            chains,
-        })
+        self.chains[root] = Chains::default();
     }
 
     /// Takes in the window the view shows: each wire analysis whose items there are few enough
     /// derives it and a width either side in a chain, unless its chains cover it already. Ahead
-    /// of the forward pass, where the tally has not counted them, only a short one.
-    fn ask(&mut self, asked: &Asked) -> Result<(), String> {
+    /// of the forward pass, where the tally has not counted them, only a short one, unless a pass
+    /// before a setting changed counted them.
+    pub(crate) fn ask(&mut self, asked: &Asked) -> Result<(), String> {
         let (window, width) = (&asked.window, asked.width);
         let w = window.end.saturating_sub(window.start).max(1);
         let wide = window.start.saturating_sub(w)..window.end.saturating_add(w);
@@ -482,10 +612,7 @@ impl Running {
             if covers(&self.chains[root].drawn) || covers(&self.chains[root].pending) {
                 continue;
             }
-            let items: u64 = (self.lanes.iter())
-                .filter(|l| l.root == root)
-                .map(|l| l.tally.count(wide.start, wide.end, 0.0).0)
-                .sum();
+            let lanes = || self.lanes.iter().filter(|l| l.root == root);
             let map = self.lanes[root].map;
             let span = Span {
                 start: map.first_at(wide.start),
@@ -493,8 +620,12 @@ impl Running {
             };
             let counted = self.host.finished(self.lanes[root].id).is_some()
                 || self.host.consumed(self.lanes[root].id) >= span.end;
-            let skip = if counted {
-                let crowded = self.lanes[root].tally.crowded(window, width);
+            let estimated = self.lanes[root].estimate.is_some();
+            let skip = if counted || estimated {
+                let items: u64 = lanes()
+                    .map(|l| l.counting(counted).count(wide.start, wide.end, 0.0).0)
+                    .sum();
+                let crowded = self.lanes[root].counting(counted).crowded(window, width);
                 items > WINDOW_ITEMS_AT_MOST || (crowded && items > 0)
             } else {
                 let seconds = wide.end.saturating_sub(wide.start) as f64 / asked.per_second;
@@ -532,6 +663,15 @@ impl Running {
             }
             let closed = self.host.closed(l.id);
             l.tally.tally(&closed, &l.map);
+        }
+        for k in 0..self.lanes.len() {
+            if self
+                .host
+                .finished(self.lanes[self.lanes[k].root].id)
+                .is_some()
+            {
+                self.lanes[k].estimate = None;
+            }
         }
         let mut swapped = false;
         for root in 0..self.chains.len() {
@@ -771,7 +911,7 @@ impl Running {
                 Some((
                     c,
                     self.host.window_run(c.id, lane.id)?,
-                    c.densities[k].as_ref()?,
+                    c.densities.get(k)?.as_ref()?,
                 ))
             });
         match chain {
@@ -878,7 +1018,8 @@ fn tracked(
     response
 }
 
-/// The side panel over what the tracks drew, `width` wide, beside the plot or `under` it.
+/// The side panel over what the tracks drew, `width` wide, beside the plot or `under` it; then
+/// what a control in it asked for.
 fn panel(
     ui: &mut Ui,
     decode: &Decode,
@@ -888,13 +1029,23 @@ fn panel(
     width: f32,
     under: Option<f32>,
 ) {
-    let g = decode.lock();
-    let Phase::Running(r) = &g.phase else {
+    let mut g = decode.lock();
+    let Inner {
+        phase,
+        recipe,
+        refused,
+        ..
+    } = &mut *g;
+    let Phase::Running(r) = phase else {
         return;
     };
     let Some(window) = state.shown.as_ref().map(|s| s.window.clone()) else {
         return;
     };
+    // With nothing decoded, the only tab with anything to show.
+    if r.lanes.is_empty() {
+        state.panel.tab = Tab::Decoders;
+    }
     let analyses: Vec<_> = (0..r.lanes.len())
         .map(|k| {
             let lane = &r.lanes[k];
@@ -907,8 +1058,38 @@ fn panel(
             }
         })
         .collect();
+    let length = r.recording.length().max(1);
+    let configured = (r.lanes.iter())
+        .map(|l| {
+            let id = r.host.name(l.id);
+            let inputs =
+                (recipe.analyses.iter().find(|a| a.id == id)).map_or(&[][..], |a| &a.inputs);
+            let done = r.host.finished(l.id).is_none().then(|| {
+                let at = l.map.axis_saturating(r.host.settled(l.id)).clamp(0, length);
+                at as f64 / length as f64
+            });
+            Configured {
+                id,
+                inputs,
+                label: &l.name,
+                definition: r.host.definition(l.id),
+                bound: r.host.settings(l.id),
+                reads: l.reads,
+                done,
+                items: l.tally.items(),
+            }
+        })
+        .collect();
+    let mut change = None;
+    let stack = Stack {
+        analyses: configured,
+        registry: &decode.registry,
+        channels: &r.channels,
+        refused: refused.as_deref(),
+        change: &mut change,
+    };
     let map = r.lanes.first().map_or(Mapping::IDENTITY, |l| l.map);
-    let p = Panel::new(palette, &mut state.panel, &analyses, width, timebase, map);
+    let p = Panel::new(palette, &mut state.panel, &analyses, width, timebase, map).stack(stack);
     let response = ui.add(match under {
         Some(h) => p.under(h),
         None => p,
@@ -928,4 +1109,69 @@ fn panel(
         ui.ctx().request_discard("a panel control moved the window");
         ui.ctx().request_repaint();
     }
+    let Some(change) = change else {
+        return;
+    };
+    match change {
+        Change::Settings(k, settings) => match r.rebind(k, &settings) {
+            Ok(()) => {
+                *refused = None;
+                let id = r.host.name(r.lanes[k].id);
+                let def = r.host.definition(r.lanes[k].id);
+                if let Some(a) = recipe.analyses.iter_mut().find(|a| a.id == id) {
+                    a.settings = not_default(def, settings);
+                }
+            }
+            Err(why) => *refused = Some(why),
+        },
+        Change::Add(added) => {
+            let added = added.fresh(|id| recipe.analyses.iter().any(|a| a.id == id));
+            *refused = None;
+            for a in added.analyses {
+                match r.add(&decode.registry, &a) {
+                    Ok(()) => recipe.analyses.push(a),
+                    Err(why) => {
+                        *refused = Some(why);
+                        break;
+                    }
+                }
+            }
+        }
+        Change::Remove(k) => {
+            let without = recipe.without(r.host.name(r.lanes[k].id));
+            drop(g);
+            state.panel.forget();
+            decode.rebuild(without);
+            ui.ctx().request_repaint();
+            return;
+        }
+    }
+    drop(g);
+    decode.wake();
+    ui.ctx().request_repaint();
+}
+
+/// Of `settings`, those not at their default, as a recipe keeps them.
+fn not_default(
+    def: &escapement_tickwave_decode::Definition,
+    settings: Vec<(String, Setting)>,
+) -> Vec<(String, Setting)> {
+    (settings.into_iter())
+        .filter(|(n, v)| {
+            let Some(d) = def.settings.iter().find(|d| d.name == n.as_str()) else {
+                return true;
+            };
+            let default = match &d.ty {
+                SettingType::Flag { default } => Setting::Flag(*default),
+                SettingType::Int { default, .. } => Setting::Int(*default),
+                SettingType::Choice { names, default } => match names.get(*default) {
+                    Some(n) => Setting::Name(n.clone()),
+                    None => return true,
+                },
+                SettingType::List { default, .. } => Setting::List(default.clone()),
+                _ => return true,
+            };
+            *v != default
+        })
+        .collect()
 }

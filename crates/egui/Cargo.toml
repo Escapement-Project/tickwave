@@ -31,7 +31,7 @@ default = ["live"]
 # A view of a recording a writer in this process is still writing, through its `Snapshot`.
 live = ["escapement-tickwave-view/live"]
 # Decode tracks: an analysis's items drawn under a graph.
-decode = ["dep:escapement-tickwave-decode", "dep:indexset"]
+decode = ["dep:escapement-tickwave-decode", "escapement-tickwave-decode/recipe", "dep:indexset"]
 
 [[example]]
 name = "demo"

@@ -15,7 +15,8 @@
 //! `--repaint` draws every frame though nothing changes.
 //!
 //! `--recipe FILE` decodes the recording as the file's `[[decode]]` tables say, through the
-//! reference decoders, and draws the decoded tracks under the graph with the side panel beside it:
+//! reference decoders, and draws the decoded tracks under the graph with the side panel beside it,
+//! whose Decoders tab changes them; `--decode` starts with nothing decoded, to add decoders there:
 //!
 //!     cargo run --release -p escapement-tickwave-egui --features decode --example demo -- \
 //!         web/fixtures/identify-swd.tickwave --recipe crates/decoders/recipes/swd.toml
@@ -29,14 +30,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
-use escapement_tickwave_decode::HostOptions;
-use escapement_tickwave_decode::recipe::{self, Recipe};
+use escapement_tickwave_decode::recipe::Recipe;
 use escapement_tickwave_decoders::recipe::registry;
-use escapement_tickwave_egui::view::cursor::timeline_map;
 use escapement_tickwave_egui::view::{Cache, ChannelKind, Recording};
 use escapement_tickwave_egui::{
-    BindFailure, Decode, DecodeOptions, DecodeState, Decoding, Graph, Place, Strip, Tracked,
-    ViewState, Viewer, Window, Y,
+    BindFailure, Decode, DecodeOptions, DecodeState, Graph, Place, Strip, ViewState, Viewer,
+    Window, Y,
 };
 use tracing::{error, info};
 use tracing_subscriber::Layer;
@@ -74,6 +73,9 @@ struct Args {
     /// Decode the recording as this file's `[[decode]]` tables say.
     #[arg(long, requires = "recording")]
     recipe: Option<PathBuf>,
+    /// Decode the recording, starting with nothing decoded: add decoders in the side panel.
+    #[arg(long, requires = "recording", conflicts_with = "recipe")]
+    decode: bool,
 }
 
 /// `FROM..TO`, in seconds.
@@ -91,33 +93,14 @@ const SPACE: f32 = 8.0;
 /// The side panel's width beside the graph.
 const PANEL: f32 = 360.0;
 
-/// Binds `recipe` over the recording at `path`, as `Decode` asks of its host.
-fn bind(
-    path: PathBuf,
-    recipe: Recipe,
-) -> impl Fn() -> Result<Decoding, BindFailure> + Send + Sync + 'static {
+/// Opens the recording at `path`, as `Decode` asks of its host.
+fn opening(path: PathBuf) -> impl Fn() -> Result<Arc<Recording>, BindFailure> + Send + Sync {
     move || {
         let file = std::fs::File::open(&path)?;
-        let rec = Arc::new(Recording::open(Arc::new(file), Cache::new(64 << 20))?);
-        let b = recipe.bind(
-            &registry(),
-            &rec,
-            recipe::window(&rec),
-            &[],
-            HostOptions::default(),
-        )?;
-        let mut analyses = Vec::with_capacity(b.analyses.len());
-        for a in b.analyses {
-            analyses.push(Tracked {
-                id: a.id,
-                name: a.label,
-                map: timeline_map(&rec, a.timeline)?,
-            });
-        }
-        Ok(Decoding {
-            host: b.host,
-            analyses,
-        })
+        Ok(Arc::new(Recording::open(
+            Arc::new(file),
+            Cache::new(64 << 20),
+        )?))
     }
 }
 
@@ -204,17 +187,20 @@ impl Demo {
             };
             (trace, r.channel("under_range"), lanes)
         });
-        let decode = match (&args.recipe, &args.recording) {
-            (Some(file), Some(path)) => {
+        let recipe = match (&args.recipe, args.decode) {
+            (Some(file), _) => {
                 let text = std::fs::read_to_string(file)
                     .map_err(|e| format!("{}: {e}", file.display()))?;
-                let recipe =
-                    Recipe::parse(&text).map_err(|e| format!("{}: {e}", file.display()))?;
-                let bind = bind(path.clone(), recipe);
-                Some((
-                    Decode::start(ctx, DecodeOptions::default(), bind),
-                    DecodeState::default(),
-                ))
+                Some(Recipe::parse(&text).map_err(|e| format!("{}: {e}", file.display()))?)
+            }
+            (None, true) => Some(Recipe::default()),
+            (None, false) => None,
+        };
+        let decode = match (recipe, &args.recording) {
+            (Some(recipe), Some(path)) => {
+                let open = opening(path.clone());
+                let d = Decode::start(ctx, DecodeOptions::default(), registry(), recipe, open);
+                Some((d, DecodeState::default()))
             }
             _ => None,
         };

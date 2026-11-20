@@ -27,8 +27,8 @@ mod tests;
 
 #[cfg(feature = "decode")]
 pub use decode::{
-    AHEAD_AT_MOST, BindFailure, Decode, DecodeOptions, DecodeState, DecodedGraph, Decoding, Place,
-    Progress, Reached, Tracked, UNDER, WINDOW_ITEMS_AT_MOST,
+    AHEAD_AT_MOST, BindFailure, Decode, DecodeOptions, DecodeState, DecodedGraph, Place, Progress,
+    Reached, UNDER, WINDOW_ITEMS_AT_MOST,
 };
 pub use escapement_tickwave_view as view;
 pub use graph::{Driven, Extras, Graph, Shown};

@@ -28,6 +28,8 @@ use crate::{
     Setting, Span, Tick,
 };
 use escapement_tickwave_view::Recording;
+use escapement_tickwave_view::cursor::timeline_map;
+use escapement_tickwave_view::format::mapping::Mapping;
 use std::sync::Arc;
 
 /// The most analyses a recipe holds.
@@ -135,8 +137,9 @@ pub struct Bound {
     /// Its track's name: the recipe's label, else the registry's.
     pub label: String,
     /// The channel whose source's timeline its items are on: its wire analysis's first port given
-    /// a channel.
+    /// a channel; and that timeline on the recording's axis.
     pub timeline: usize,
+    pub map: Mapping,
 }
 
 /// What a port reads.
@@ -471,7 +474,7 @@ impl Analysis {
                 Input::Channel(_) => None,
             })
             .collect();
-        let (input, timeline) = match upstreams[..] {
+        let (input, timeline, map) = match upstreams[..] {
             [] => {
                 for (port, _) in &self.inputs {
                     if !def.ports.iter().any(|p| p.name == port.as_str()) {
@@ -506,11 +509,15 @@ impl Analysis {
                             source,
                         }
                     })?;
+                let map = timeline_map(recording, timeline).map_err(|e| RecipeError::Wire {
+                    analysis: analysis(),
+                    source: BindWire::Read(e),
+                })?;
                 let wire = InputSpec::Wire {
                     source: Box::new(source),
                     local: None,
                 };
-                (wire, timeline)
+                (wire, timeline, map)
             }
             [(port, up)] if self.inputs.len() == 1 => {
                 let declared = (def.inputs.iter())
@@ -524,7 +531,7 @@ impl Analysis {
                         upstream: up.clone(),
                     }
                 })?;
-                (InputSpec::Upstream(up.id), up.timeline)
+                (InputSpec::Upstream(up.id), up.timeline, up.map)
             }
             _ => {
                 return Err(RecipeError::OneUpstream {
@@ -553,6 +560,7 @@ impl Analysis {
             id,
             label,
             timeline,
+            map,
         })
     }
 }
