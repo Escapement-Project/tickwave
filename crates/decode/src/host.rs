@@ -2549,10 +2549,9 @@ impl Host {
     /// restored from the latest kept checkpoint at or before the window's start or from the
     /// beginning, reading a fork of the source and keeping the window. A window the forward pass
     /// has not reached starts locally at its start instead, provisional. Its runs take turns
-    /// before the forward chain's, the newest chain's first, until every one of them has settled
-    /// past the window's end or finished. The wire analysis stops sooner where it has taken input a
-    /// window's width past the end, leaving open in the chain an item still open across it. Their
-    /// stores are read until `retire`.
+    /// before the forward chain's, the newest chain's first, until none of them will emit an item
+    /// starting before the window's end, or each has finished; an item still open across the end
+    /// stays open in the chain. Their stores are read until `retire`.
     pub fn derive(&mut self, a: AnalysisId, window: Span) -> Result<Derived, CheckpointError> {
         let root = a.index();
         let name = self.analyses[root].name.clone();
@@ -2640,25 +2639,19 @@ impl Host {
         })
     }
 
-    /// Whether `run` is in a window chain that takes no more turns: every run in it has settled
-    /// past the window's end or finished, or `run` is the chain's wire analysis and has taken input
-    /// a window's width past the end.
+    /// Whether `run` is in a window chain that takes no more turns: no run in it will emit an item
+    /// starting before the window's end, or it has finished. An item open across the end stays
+    /// open in the chain, rather than the chain decoding on until it closes, which for a cJTAG scan
+    /// stretch is seconds of input.
     fn window_done(&self, run: RunId) -> bool {
         let Some(c) = (self.chains.iter()).find(|c| c.id.generation == run.generation) else {
             return false;
         };
-        let runs = |x: usize| {
-            (self.analyses[x].windows.iter()).filter(move |r| r.id.generation == run.generation)
-        };
-        let settled = (c.slots.iter())
-            .all(|&x| runs(x).all(|r| r.finished.is_some() || r.settled >= c.window.end));
-        // An item open across the end can stay open for much of a recording, as a cJTAG scan
-        // stretch does, so the wire analysis stops a window's width past the end; what is
-        // stacked on it then drains what it was given and stops for want of input.
-        let width = c.window.end.saturating_sub(c.window.start);
-        let overrun = run.analysis == c.id.root
-            && runs(c.id.root.index()).any(|r| r.consumed >= c.window.end.saturating_add(width));
-        settled || overrun
+        (c.slots.iter()).all(|&x| {
+            (self.analyses[x].windows.iter())
+                .filter(|r| r.id.generation == run.generation)
+                .all(|r| r.finished.is_some() || r.frontier >= c.window.end)
+        })
     }
 
     /// Retires window chain `w`: its runs never run again, and their decoders, stores, queues,

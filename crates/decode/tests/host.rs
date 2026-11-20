@@ -1633,11 +1633,13 @@ fn a_window_chain_stops_once_its_window_has_settled() {
     );
 }
 
-/// A window ending inside an item open for long stops a window's width past its end, rather than
-/// decoding on until the item closes, and leaves the item open in the chain.
+/// A window chain stops once none of its analyses will emit an item starting in the window: here
+/// once the pairs decoder, holding the pulse across the end until the next one comes, emits their
+/// pair. It holds every item that meets the window, as the forward pass does, and stops short of
+/// the recording's end.
 #[test]
-fn a_window_chain_stops_a_width_past_an_item_open_across_its_end() {
-    let (mut h, [p, _]) = pulses_host(
+fn a_window_chain_stops_once_nothing_more_starts_in_its_window() {
+    let (mut h, [p, q]) = pulses_host(
         line(3, 2000, 3000, vec![]),
         15,
         None,
@@ -1651,15 +1653,29 @@ fn a_window_chain_stops_a_width_past_an_item_open_across_its_end() {
     };
     let id = h.derive(p, window).unwrap().window;
     run_all(&mut h);
-    let wp = win(&h, id, p);
-    assert!(!wp.runnable());
+    let (wp, wq) = (win(&h, id, p), win(&h, id, q));
+    assert!(!wp.runnable() && !wq.runnable());
+    assert!(wp.start_frontier() >= window.end && wq.start_frontier() >= window.end);
     assert!(
-        (300..2010).contains(&wp.consumed()),
-        "stopped a width past the end, before the pulse closes at 2010: {}",
+        (5010..9010).contains(&wp.consumed()),
+        "past the pair's close at 5010, short of the end at 9010: {}",
         wp.consumed()
     );
-    let open = (wp.store().items().values()).filter(|i| i.end.is_none());
-    assert_eq!(open.count(), 1, "the pulse across the end, still open");
+    let meets = |i: &&escapement_tickwave_decode::Item| {
+        i.start < window.end && i.end.is_none_or(|e| e > window.start)
+    };
+    for (a, w) in [(p, wp), (q, wq)] {
+        let ids = |items: &std::collections::BTreeMap<Id, escapement_tickwave_decode::Item>| {
+            items
+                .values()
+                .filter(meets)
+                .map(|i| (i.id, i.end))
+                .collect::<Vec<_>>()
+        };
+        let want = ids(h.store(a).items());
+        assert!(!want.is_empty());
+        assert_eq!(ids(w.store().items()), want, "the window's items, complete");
+    }
 }
 
 #[test]
