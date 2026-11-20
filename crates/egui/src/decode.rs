@@ -504,6 +504,26 @@ impl Running {
         }
         let mut swapped = false;
         for root in 0..self.chains.len() {
+            // A window derived ahead of the forward pass, without context, is derived again from a
+            // checkpoint once the pass is past it; it stays drawn until the new one is.
+            let redo = (self.chains[root].drawn.as_ref())
+                .filter(|c| c.provisional && self.chains[root].pending.is_none())
+                .filter(|c| self.host.consumed(self.lanes[root].id) >= c.span.end)
+                .map(|c| (c.span, c.axis.clone()));
+            if let Some((span, axis)) = redo
+                && let Ok(d) = self.host.derive(self.lanes[root].id, span)
+            {
+                let densities = (self.lanes.iter())
+                    .map(|l| (l.root == root).then(Density::default))
+                    .collect();
+                self.chains[root].pending = Some(Chain {
+                    id: d.window,
+                    span,
+                    axis,
+                    provisional: d.provisional,
+                    densities,
+                });
+            }
             // Drawn once no analysis in it will emit an item starting before the window's end: a
             // decoder can hold what it has read past, as SWD's recogniser holds rises ahead.
             let ready = self.chains[root].pending.as_ref().is_some_and(|p| {
@@ -692,7 +712,9 @@ impl Running {
                 items: run.store().items(),
                 store: run.store(),
                 density,
-                settled: run.settled(),
+                // The chain has emitted every item starting before its frontier; one still open
+                // there draws as open, not as input not decoded yet.
+                settled: run.start_frontier(),
                 lost: run.lost(),
                 provisional: c.provisional,
             },

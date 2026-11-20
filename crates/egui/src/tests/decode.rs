@@ -299,3 +299,85 @@ fn the_decoded_graph_draws_its_tracks_under_the_graph() {
         assert!(h.state().decode.tracks_height(&h.state().decoded) > 0.0);
     }
 }
+
+/// Pictures of the decoded graph: SWD and ADIv5 under SWCLK and SWDIO, zoomed in to the first
+/// transfer, the panel beside them showing it selected.
+///
+///     TICKWAVE_SHOTS=DIR cargo test -p escapement-tickwave-egui --features decode --lib \
+///         tests::decode::shots -- --ignored
+#[test]
+#[ignore = "writes pictures where TICKWAVE_SHOTS says"]
+fn shots() {
+    let Some(dir) = std::env::var_os("TICKWAVE_SHOTS").map(PathBuf::from) else {
+        return;
+    };
+    std::fs::create_dir_all(&dir).unwrap();
+    let rec = open();
+    let lanes = vec![rec.channel("SWCLK").unwrap(), rec.channel("SWDIO").unwrap()];
+    let all = kept();
+    let swd = all.store(all.index("swd").unwrap());
+    let first = swd.items().values().next().unwrap();
+    let (start, id) = (first.start, first.id);
+    let ctx = egui::Context::default();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1400.0, 520.0))
+        .wgpu()
+        .build_ui_state(
+            |ui, v: &mut View| {
+                let palette = palette();
+                let place = v.place;
+                let r = ui.add(
+                    Graph::lanes_only(&v.viewer, &mut v.state, &palette)
+                        .lanes(&v.lanes)
+                        .decoded(&v.decode, &mut v.decoded)
+                        .panel(place),
+                );
+                v.shown = Graph::shown(&r).is_some();
+            },
+            View {
+                viewer: Viewer::open(&ctx, &fixture()).unwrap(),
+                state: ViewState {
+                    window: Window::At(start - 5_000..start + 45_000),
+                    ..ViewState::default()
+                },
+                decode: Decode::start(&ctx, DecodeOptions::default(), bind(SWD)),
+                decoded: DecodeState::default(),
+                lanes,
+                place: Place::Beside(360.0),
+                shown: false,
+            },
+        );
+    let t = Instant::now();
+    loop {
+        h.step();
+        let drawn = {
+            let g = h.state().decode.lock();
+            matches!(&g.phase, Phase::Running(r) if r.chains[0].drawn.is_some())
+        };
+        if drawn && finished(&h.state().decode) {
+            break;
+        }
+        assert!(t.elapsed() < Duration::from_secs(20), "drawn");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    // Asked for at the first frame, ahead of the pass: derived again exact once the pass is past.
+    let t = Instant::now();
+    loop {
+        h.step();
+        let exact = {
+            let g = h.state().decode.lock();
+            matches!(&g.phase, Phase::Running(r) if r.chains[0].drawn.as_ref().is_some_and(|c| !c.provisional))
+        };
+        if exact {
+            break;
+        }
+        assert!(t.elapsed() < Duration::from_secs(20), "exact");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    h.state_mut().decoded.panel.selected = Some((0, id));
+    h.run_steps(4);
+    h.render()
+        .unwrap()
+        .save(dir.join("decoded-swd.png"))
+        .unwrap();
+}
