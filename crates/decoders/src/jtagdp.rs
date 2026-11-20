@@ -4,7 +4,7 @@
 //! the setting `tap` names the DP's place in it, nearest TDO first.
 //!
 //! The DP's instruction is 4 bits: ABORT, DPACC, APACC, IDCODE or BYPASS among them. Under DPACC
-//! or APACC a DR scan shifts in 35 bits, RnW then A[3:2] then the data written, and captures 3
+//! or APACC a DR scan shifts in 35 bits, RnW then A\[3:2\] then the data written, and captures 3
 //! bits of ACK then the 32-bit result of the transaction before. OK (0b010, which JTAG-DP also
 //! answers for a fault, kept in CTRL/STAT's sticky flags) says that transaction is done and the
 //! DP takes this scan's request; WAIT (0b001) says it is not, and the DP ignores this request.
