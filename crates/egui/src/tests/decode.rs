@@ -256,6 +256,8 @@ struct View {
     /// What `Graph::shown` read from the decoded graph's response last frame: the gutter it drew,
     /// and the widest its tracks' names take.
     shown: Option<(f32, f32)>,
+    /// The height the decoded graph took last frame, panel included.
+    height: f32,
 }
 
 /// The decoded graph draws the tracks under the graph, answers `Graph::shown`, and lays out the
@@ -272,6 +274,7 @@ fn the_decoded_graph_draws_its_tracks_under_the_graph() {
         .next()
         .unwrap()
         .start;
+    let mut heights = vec![];
     for place in [Place::Nowhere, Place::Under(200.0)] {
         let mut h = Harness::builder()
             .with_size(egui::vec2(1000.0, 600.0))
@@ -292,6 +295,7 @@ fn the_decoded_graph_draws_its_tracks_under_the_graph() {
                         _ => 0.0,
                     };
                     v.shown = Graph::shown(&r).map(|s| (s.plot.start - r.rect.left(), names));
+                    v.height = ui.min_rect().height();
                 },
                 {
                     let ctx = egui::Context::default();
@@ -306,6 +310,7 @@ fn the_decoded_graph_draws_its_tracks_under_the_graph() {
                         lanes: lanes.clone(),
                         place,
                         shown: None,
+                        height: 0.0,
                     }
                 },
             );
@@ -329,7 +334,12 @@ fn the_decoded_graph_draws_its_tracks_under_the_graph() {
             "the gutter holds the tracks' names: {gutter} for {names}"
         );
         assert!(h.state().decode.tracks_height(&h.state().decoded) > 0.0);
+        heights.push(h.state().height);
     }
+    assert!(
+        heights[1] >= heights[0] + 200.0,
+        "the panel under the plot takes its height: {heights:?}"
+    );
 }
 
 /// Pictures of the decoded graph: SWD and ADIv5 under SWCLK and SWDIO, zoomed in to the first
@@ -377,6 +387,7 @@ fn shots() {
                 lanes,
                 place: Place::Beside(360.0),
                 shown: None,
+                height: 0.0,
             },
         );
     let t = Instant::now();

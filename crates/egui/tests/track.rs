@@ -1598,8 +1598,9 @@ fn the_text_tab_joins_an_analysis_bytes_into_lines_each_character_from_its_item(
 fn a_narrow_panel_sits_under_the_plot_and_scrolls_inside() {
     use egui_kittest::kittest::Queryable;
     use escapement_tickwave_egui::panel::Tab;
-    assert!(Panel::fits_beside(1280.0, 360.0));
-    assert!(!Panel::fits_beside(600.0, 360.0));
+    let at_least = 360.0 + Panel::PLOT_AT_LEAST;
+    assert!(Panel::fits_beside(at_least, 360.0));
+    assert!(!Panel::fits_beside(at_least - 1.0, 360.0));
     let (decoded, map, _) = decode(&fixture());
     let t = transfers(&decoded);
     let height = 200.0;
