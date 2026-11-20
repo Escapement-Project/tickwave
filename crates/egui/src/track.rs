@@ -6,8 +6,9 @@
 //! shows its fullest label, start and length. Zoomed out, where items would crowd, it draws how
 //! many start in each pixel column from a `Density` ladder instead, so a frame's work follows the
 //! columns on screen, not the capture. Conditions (an item closed incomplete, a value unknown,
-//! anything the host marks) show at every zoom. Lost input is shaded as the waveform's lost time
-//! is, input not decoded yet is hatched, and decoded input with nothing in it is left bare, so the
+//! anything the host marks) show at every zoom, and so does the selected item, as an ink tick at
+//! its start while the track draws density. Lost input is shaded as the waveform's lost time is,
+//! input not decoded yet is hatched, and decoded input with nothing in it is left bare, so the
 //! three differ without hue.
 
 use egui::{Align2, Rect, Response, Sense, Shape, Stroke, Ui, Widget, pos2, vec2};
@@ -1074,6 +1075,10 @@ impl Widget for Track<'_> {
                 shapes.extend(Shape::dashed_line(&line, stroke, DASH, GAP));
             }
         }
+        // After the decoded shapes, so a provisional window's paling leaves it in ink.
+        if crowded {
+            self.selection_tick(&s, lanes[0], &mut shapes);
+        }
         // Lost input, across every row, as the waveform shades its lost time: only the spans the
         // window meets.
         let first = self.lost.partition_point(|l| axis(l.end) <= w.start);
@@ -1199,6 +1204,25 @@ impl Track<'_> {
                 ));
             }
         }
+    }
+
+    /// The selected item's start, where the window holds it, as an ink tick across the density's
+    /// row, so the selection stays in sight at every zoom. Where the track holds no item of its
+    /// id, at its anchor, which lies at or after its start.
+    fn selection_tick(&self, s: &Scale, row: Rect, shapes: &mut Vec<Shape>) {
+        let Some(id) = self.selected else {
+            return;
+        };
+        let at = self.items.get(&id).map_or(id.anchor, |i| i.start);
+        let t = self.map.axis_saturating(at);
+        if !self.shown.window.contains(&t) {
+            return;
+        }
+        let x = s.x(t as f64);
+        shapes.push(Shape::line_segment(
+            [pos2(x, row.top()), pos2(x, row.bottom())],
+            Stroke::new(2.0, self.palette.ink),
+        ));
     }
 
     /// The items the window meets: boxes with the fullest label that fits, conditions outlined

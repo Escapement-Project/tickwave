@@ -1068,3 +1068,102 @@ fn resting_the_pointer_on_a_box_gives_its_label_start_and_length() {
     h.run_steps(4);
     assert!(!shows(&h, "value 0x2A"));
 }
+
+/// The 2-point line segments a crowded track of 5000 short items draws with `selected`, each its
+/// x and colour: 20 ticks a point, so item k, starting at tick 2k, starts at 0.1 k points. Each is
+/// anchored at its start but item 2000's, anchored a tick after.
+fn selection_ticks(selected: Id, provisional: bool) -> Vec<(f32, egui::Color32)> {
+    let schema = Schema::new(vec![KindDecl::new("a")]);
+    let mut store = Store::with_keep(vec![Span {
+        start: Tick::MIN,
+        end: Tick::MAX,
+    }]);
+    for k in 0..5000 {
+        let (start, end) = (2 * k, 2 * k + 1);
+        let id = Id::new(KindId(0), if k == 2000 { start + 1 } else { start });
+        let ops = [
+            Op::Open {
+                id,
+                parent: None,
+                start,
+            },
+            Op::Close {
+                id,
+                end,
+                status: Status::Complete,
+            },
+        ];
+        store.apply_batch(&ops, 8).unwrap();
+    }
+    let shown = Shown::new(0..10_000, 0.0..500.0);
+    let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
+    let density = Density::of(store.items(), &map, |_| false);
+    let (labels, palette) = (
+        Labels::default(),
+        Palette::from_visuals(&egui::Visuals::default()),
+    );
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(600.0, 200.0),
+        )),
+        ..egui::RawInput::default()
+    };
+    let mut out = egui::Context::default().run_ui(input, |ui| {
+        ui.add(
+            Track::new(
+                &shown,
+                "t",
+                &schema,
+                store.items(),
+                &density,
+                &labels,
+                &palette,
+                map,
+            )
+            .selected(Some(selected))
+            .provisional(provisional),
+        );
+    });
+    out.textures_delta.clear();
+    fn walk(s: &egui::Shape, out: &mut Vec<(f32, egui::Color32)>) {
+        match s {
+            egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+            egui::Shape::LineSegment { points, stroke } if stroke.width == 2.0 => {
+                out.push((points[0].x, stroke.color))
+            }
+            _ => {}
+        }
+    }
+    let mut ticks = vec![];
+    for c in &out.shapes {
+        walk(&c.shape, &mut ticks);
+    }
+    ticks
+}
+
+#[test]
+fn zoomed_out_the_selected_item_keeps_an_ink_tick_at_its_start() {
+    let ink = Palette::from_visuals(&egui::Visuals::default()).ink;
+    let item = Id::new(KindId(0), 2000);
+    assert_eq!(selection_ticks(item, false), [(100.0, ink)]);
+    assert_eq!(
+        selection_ticks(item, true),
+        [(100.0, ink)],
+        "in ink over a provisional window's pale density"
+    );
+    let anchored_after = Id::new(KindId(0), 4001);
+    assert_eq!(
+        selection_ticks(anchored_after, false),
+        [(200.0, ink)],
+        "at its start"
+    );
+    // An item the track does not hold: at its anchor.
+    let held_elsewhere = Id::new(KindId(0), 3001);
+    assert_eq!(selection_ticks(held_elsewhere, false), [(150.05, ink)]);
+    let past = Id::new(KindId(0), 20_000);
+    assert!(
+        selection_ticks(past, false).is_empty(),
+        "none off the window"
+    );
+}
