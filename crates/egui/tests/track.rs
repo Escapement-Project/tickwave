@@ -435,7 +435,8 @@ fn draw(ui: &mut egui::Ui, host: &mut Host2) {
             .provisional(host.provisional)
             .parts(d.parts)
             .selected(selected)
-            .lit(host.panel.lit),
+            .lit(host.panel.lit)
+            .timebase(viewer.recording(|r| r.timebase())),
         );
         if let Some(id) = Track::clicked(&r) {
             host.panel.selected = Some((k, id));

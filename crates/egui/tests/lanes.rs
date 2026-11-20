@@ -975,3 +975,96 @@ fn a_label_naming_a_field_the_item_lacks_gives_way_to_the_next() {
     assert!(drawn.contains(&"read".to_owned()), "{drawn:?}");
     assert!(!drawn.iter().any(|t| t.contains("done")), "{drawn:?}");
 }
+
+/// Resting the pointer on a box shows its fullest label, its start and its length, even where the
+/// box is too narrow for any label.
+#[test]
+fn resting_the_pointer_on_a_box_gives_its_label_start_and_length() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+    use escapement_tickwave_decode::{FieldDecl, FieldId, FieldType, Label, Value};
+    let schema = Schema::new(vec![
+        KindDecl::new("a")
+            .with_fields(vec![FieldDecl::new("value", FieldType::Word { bits: 8 })])
+            .with_labels(vec![
+                Label::default().text("value ").field(FieldId(0)),
+                Label::default().text("v"),
+            ]),
+    ]);
+    let mut store = Store::with_keep(vec![Span {
+        start: Tick::MIN,
+        end: Tick::MAX,
+    }]);
+    // 4 points wide at 2 ticks a point: too narrow for either label.
+    let id = Id::new(KindId(0), 100);
+    let ops = [
+        Op::Open {
+            id,
+            parent: None,
+            start: 100,
+        },
+        Op::Set {
+            id,
+            field: FieldId(0),
+            value: Value::Word {
+                value: 0x2A,
+                bits: 8,
+            },
+            span: None,
+            driver: None,
+        },
+        Op::Close {
+            id,
+            end: 108,
+            status: Status::Complete,
+        },
+    ];
+    store.apply_batch(&ops, 8).unwrap();
+    let shown = Shown::new(0..1000, 0.0..500.0);
+    let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
+    let density = Density::of(store.items(), &map, |_| false);
+    let palette = Palette::from_visuals(&egui::Visuals::default());
+    let labels = Labels::default();
+    // A tick a microsecond.
+    let timebase = Ratio::integer(1_000_000).unwrap();
+    let corner = std::cell::Cell::new(egui::Pos2::ZERO);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(600.0, 200.0))
+        .build_ui(|ui| {
+            ui.ctx().global_style_mut(|s| {
+                s.interaction.tooltip_delay = 0.0;
+                s.interaction.show_tooltips_only_when_still = false;
+            });
+            corner.set(ui.max_rect().left_top());
+            ui.add(
+                Track::new(
+                    &shown,
+                    "t",
+                    &schema,
+                    store.items(),
+                    &density,
+                    &labels,
+                    &palette,
+                    map,
+                )
+                .timebase(timebase),
+            );
+        });
+    h.run();
+    // The plot runs from the ui's left to 500, over ticks 0 to 1000; the box's middle is at 104.
+    let corner = corner.get();
+    let x = corner.x + 104.0 * (500.0 - corner.x) / 1000.0;
+    h.event(egui::Event::PointerMoved(egui::pos2(x, corner.y + 12.0)));
+    h.run_steps(4);
+    // The tooltip and its text both carry it.
+    let shows = |h: &Harness<'_>, t: &str| h.query_all_by_label_contains(t).next().is_some();
+    // Figures and units joined by a no-break space.
+    assert!(shows(&h, "value 0x2A\n100\u{a0}µs for 8\u{a0}µs"));
+    // Away from the box, nothing.
+    h.event(egui::Event::PointerMoved(egui::pos2(
+        300.0,
+        corner.y + 12.0,
+    )));
+    h.run_steps(4);
+    assert!(!shows(&h, "value 0x2A"));
+}

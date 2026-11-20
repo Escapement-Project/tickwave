@@ -828,7 +828,8 @@ fn tracked(
             .parts(lane.reads.is_none())
             .provisional(src.provisional)
             .selected(selected)
-            .lit(state.panel.lit);
+            .lit(state.panel.lit)
+            .timebase(tb);
             let r = ui.add(track);
             if let Some(id) = Track::clicked(&r) {
                 state.panel.selected = Some((k, id));

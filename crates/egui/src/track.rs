@@ -2,12 +2,13 @@
 //!
 //! Its rows are reserved from the first frame and keep their height: the rows its schema's kinds
 //! declare, each with its lanes, and where asked for, a row of their parts and bits. The gutter
-//! holds the analysis's name and the name the schema gives each row. Zoomed out, where items would
-//! crowd, it draws how many start in each pixel column from a `Density` ladder instead, so a
-//! frame's work follows the columns on screen, not the capture. Conditions (an item closed
-//! incomplete, a value unknown, anything the host marks) show at every zoom. Lost input is shaded
-//! as the waveform's lost time is, input not decoded yet is hatched, and decoded input with nothing
-//! in it is left bare, so the three differ without hue.
+//! holds the analysis's name and the name the schema gives each row. The pointer resting on a box
+//! shows its fullest label, start and length. Zoomed out, where items would crowd, it draws how
+//! many start in each pixel column from a `Density` ladder instead, so a frame's work follows the
+//! columns on screen, not the capture. Conditions (an item closed incomplete, a value unknown,
+//! anything the host marks) show at every zoom. Lost input is shaded as the waveform's lost time
+//! is, input not decoded yet is hatched, and decoded input with nothing in it is left bare, so the
+//! three differ without hue.
 
 use egui::{Align2, Rect, Response, Sense, Shape, Stroke, Ui, Widget, pos2, vec2};
 use escapement_tickwave_decode::{
@@ -17,6 +18,8 @@ use escapement_tickwave_decode::{
 use escapement_tickwave_view::columns::Grid;
 use escapement_tickwave_view::format::annotations::Role;
 use escapement_tickwave_view::format::mapping::Mapping;
+use escapement_tickwave_view::format::model::Ratio;
+use escapement_tickwave_view::readouts::format_interval;
 use std::collections::BTreeMap;
 
 use crate::graph::{Driven, Shown};
@@ -130,7 +133,6 @@ fn applying<'s>(
 /// The fullest label that applies to the item, is not empty and holds no value the item could not
 /// know; else its kind's name.
 pub(crate) fn heading(schema: &Schema, labels: &Labels, item: &Item) -> String {
-    let kind = schema.kind(item.id.kind);
     let known = |t: &&Label| {
         !(t.0.iter()).any(|p| match p {
             LabelPiece::Field(f) => item
@@ -143,7 +145,46 @@ pub(crate) fn heading(schema: &Schema, labels: &Labels, item: &Item) -> String {
         .filter(known)
         .map(|t| label(schema, item, t))
         .find(|t| !t.is_empty())
-        .unwrap_or_else(|| kind.map_or_else(|| "?".into(), |k| k.name.to_string()))
+        .unwrap_or_else(|| kind_name(schema, item))
+}
+
+/// The fullest label that applies to the item and is not empty, a value it could not know as a
+/// question mark; else its kind's name.
+fn fullest(schema: &Schema, labels: &Labels, item: &Item) -> String {
+    applying(schema, labels, item)
+        .map(|t| label(schema, item, t))
+        .find(|t| !t.is_empty())
+        .unwrap_or_else(|| kind_name(schema, item))
+}
+
+fn kind_name(schema: &Schema, item: &Item) -> String {
+    schema
+        .kind(item.id.kind)
+        .map_or_else(|| "?".into(), |k| k.name.to_string())
+}
+
+/// A tick of an item's timeline as a time on the recording's axis, `timebase`'s ticks a second,
+/// to the axis's resolution.
+pub(crate) fn time(map: &Mapping, timebase: Ratio, t: Tick) -> String {
+    format_interval(map.axis_saturating(t), timebase, map.m())
+}
+
+/// The axis time from `from` to `to`, two ticks of an item's timeline.
+fn interval(map: &Mapping, timebase: Ratio, from: Tick, to: Tick) -> String {
+    let ticks = map.axis_saturating(to) - map.axis_saturating(from);
+    format_interval(ticks, timebase, map.m())
+}
+
+/// A span's start and length, "1.250 ms for 4.000 µs", or its start alone while it is open.
+pub(crate) fn when(map: &Mapping, timebase: Ratio, start: Tick, end: Option<Tick>) -> String {
+    match end {
+        Some(e) => format!(
+            "{} for {}",
+            time(map, timebase, start),
+            interval(map, timebase, start, e)
+        ),
+        None => time(map, timebase, start),
+    }
 }
 
 /// Whether an item is a condition: closed incomplete, or holding a value it could not know.
@@ -814,6 +855,7 @@ pub struct Track<'a> {
     provisional: bool,
     selected: Option<Id>,
     lit: Option<Span>,
+    timebase: Option<Ratio>,
     /// The lanes its rows take together, and each kind's range of them.
     lanes: usize,
     rows: Vec<std::ops::Range<usize>>,
@@ -849,6 +891,7 @@ impl<'a> Track<'a> {
             provisional: false,
             selected: None,
             lit: None,
+            timebase: None,
             lanes,
             rows,
         }
@@ -884,6 +927,13 @@ impl<'a> Track<'a> {
     /// washed across every row as the pointer's wash is, edged with hairlines.
     pub fn lit(mut self, span: Option<Span>) -> Self {
         self.lit = span;
+        self
+    }
+
+    /// The ticks of the recording's axis a second, for the times its hover text gives. Without it
+    /// the text gives only the item's label.
+    pub fn timebase(mut self, timebase: Ratio) -> Self {
+        self.timebase = Some(timebase);
         self
     }
 
@@ -940,7 +990,7 @@ impl Widget for Track<'_> {
             .clicked()
             .then(|| response.interact_pointer_pos())
             .flatten();
-        let mut clicked = None;
+        let (mut clicked, mut pointed) = (None, None);
         let plot = Rect::from_min_max(
             pos2(self.shown.plot.start.max(rect.left()), rect.top()),
             pos2(self.shown.plot.end.min(rect.right()), rect.bottom()),
@@ -1012,7 +1062,7 @@ impl Widget for Track<'_> {
             self.density_bins(&s, grid, lanes[0], &mut shapes);
         } else {
             let parts = self.parts.then(|| row(self.lanes));
-            clicked = self.items(ui, &s, &lanes, parts, click, &mut shapes);
+            (clicked, pointed) = self.items(ui, &s, &lanes, parts, click, &mut shapes);
         }
         if self.provisional {
             let decoded = shapes.split_off(drawn);
@@ -1048,7 +1098,10 @@ impl Widget for Track<'_> {
         }
         painter.extend(shapes);
         ui.data_mut(|d| d.insert_temp(response.id, clicked));
-        response
+        match pointed {
+            Some(item) => response.on_hover_text_at_pointer(self.hover(item)),
+            None => response,
+        }
     }
 }
 
@@ -1149,8 +1202,8 @@ impl Track<'_> {
     }
 
     /// The items the window meets: boxes with the fullest label that fits, conditions outlined
-    /// in the attention ink, and in the parts row their spanned fields and elements.
-    /// The item drawn under `click`, a point clicked this frame, if any.
+    /// in the attention ink, and in the parts row their spanned fields and elements. The item
+    /// drawn under `click`, a point clicked this frame, if any, and the one under the pointer.
     fn items(
         &self,
         ui: &Ui,
@@ -1159,8 +1212,8 @@ impl Track<'_> {
         parts: Option<Rect>,
         click: Option<egui::Pos2>,
         shapes: &mut Vec<Shape>,
-    ) -> Option<Id> {
-        let mut clicked = None;
+    ) -> (Option<Id>, Option<&Item>) {
+        let (mut clicked, mut pointed) = (None, None);
         let p = self.palette;
         let w = &self.shown.window;
         let axis = |t: Tick| self.map.axis_saturating(t) as f64;
@@ -1187,9 +1240,9 @@ impl Track<'_> {
             ends[lane] = x1;
             let row = lanes[lane];
             let r = Rect::from_min_max(pos2(x0, row.top() + PAD), pos2(x1, row.bottom() - PAD));
-            let hovered = pointer.is_some_and(|q| r.contains(q));
-            if hovered {
+            if pointer.is_some_and(|q| r.contains(q)) {
                 shapes.push(Shape::rect_filled(r, 2.0, p.wash));
+                pointed = Some(item);
             }
             if click.is_some_and(|q| r.contains(q)) {
                 clicked = Some(item.id);
@@ -1218,7 +1271,7 @@ impl Track<'_> {
                 self.parts_of(ui, s, item, prow, shapes);
             }
         }
-        clicked
+        (clicked, pointed)
     }
 
     /// An item's spanned fields, each its stretch with its value where it fits; where its
@@ -1302,6 +1355,17 @@ impl Track<'_> {
                     break;
                 }
             }
+        }
+    }
+}
+
+impl Track<'_> {
+    /// What resting the pointer on `item` shows: its fullest label, then its start and duration.
+    fn hover(&self, item: &Item) -> String {
+        let label = fullest(self.schema, self.labels, item);
+        match self.timebase {
+            Some(tb) => format!("{label}\n{}", when(&self.map, tb, item.start, item.end)),
+            None => label,
         }
     }
 }

@@ -47,7 +47,7 @@ use escapement_tickwave_view::format::model::Ratio;
 use escapement_tickwave_view::readouts::format_interval;
 
 use crate::palette::Palette;
-use crate::track::{Labels, condition, heading, value_text};
+use crate::track::{self, Labels, condition, heading, value_text};
 
 mod index;
 
@@ -207,12 +207,12 @@ impl<'a> Panel<'a> {
 
     /// A tick of the item's timeline as a time on the recording's axis, to the axis's resolution.
     fn time(&self, t: Tick) -> String {
-        format_interval(self.map.axis_saturating(t), self.timebase, self.map.m())
+        track::time(&self.map, self.timebase, t)
     }
 
-    fn interval(&self, from: Tick, to: Tick) -> String {
-        let ticks = self.map.axis_saturating(to) - self.map.axis_saturating(from);
-        format_interval(ticks, self.timebase, self.map.m())
+    /// A span's start and length, or its start alone while it is open.
+    fn when(&self, start: Tick, end: Option<Tick>) -> String {
+        track::when(&self.map, self.timebase, start, end)
     }
 
     /// `to` against `from`, signed: "+40 ns".
@@ -664,15 +664,7 @@ impl<'a> Panel<'a> {
             _ => "open".to_owned(),
         };
         // The status on a line of its own, so an open item closing moves nothing after it.
-        let at = match item.end {
-            Some(e) => format!(
-                "{} for {}",
-                self.time(item.start),
-                self.interval(item.start, e)
-            ),
-            None => self.time(item.start),
-        };
-        ui.label(self.figures(at));
+        ui.label(self.figures(self.when(item.start, item.end)));
         ui.label(self.text(status));
         ui.label(self.quiet(citation(an.name, schema, &item.id)));
         ui.add_space(6.0);
@@ -825,12 +817,7 @@ impl<'a> Panel<'a> {
         field: &str,
     ) {
         if let Some(span) = f.span {
-            let at = format!(
-                "{} for {}",
-                self.time(span.start),
-                self.interval(span.start, span.end)
-            );
-            ui.label(self.figures(at));
+            ui.label(self.figures(self.when(span.start, Some(span.end))));
         }
         if let Some(role) = f.driver.and_then(|d| schema.roles.get(usize::from(d.0))) {
             ui.label(self.quiet(format!("driven by {role}")));
