@@ -18,6 +18,8 @@
 
 mod host;
 mod output;
+#[cfg(feature = "recipe")]
+pub mod recipe;
 mod schema;
 mod store;
 #[cfg(feature = "wire")]

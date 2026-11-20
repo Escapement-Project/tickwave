@@ -8,8 +8,9 @@ use crate::decode::{
 };
 use crate::{Graph, ViewState, Viewer, Window};
 use egui_kittest::Harness;
+use escapement_tickwave_decode::recipe::{self, Recipe};
 use escapement_tickwave_decode::{Host, HostOptions, Span, Tick};
-use escapement_tickwave_decoders::recipe::{self, Recipe};
+use escapement_tickwave_decoders::recipe::registry;
 use escapement_tickwave_view::cursor::timeline_map;
 use escapement_tickwave_view::{Cache, Recording};
 use std::ops::Range;
@@ -70,6 +71,7 @@ fn binding(
     move || {
         let rec = open();
         let b = Recipe::parse(recipe)?.bind(
+            &registry(),
             &rec,
             recipe::window(&rec),
             keep,
@@ -107,7 +109,13 @@ fn finished(d: &Decode) -> bool {
 fn kept() -> Host {
     let rec = open();
     let mut h = (Recipe::parse(SWD).unwrap())
-        .bind(&rec, recipe::window(&rec), ALL, HostOptions::default())
+        .bind(
+            &registry(),
+            &rec,
+            recipe::window(&rec),
+            ALL,
+            HostOptions::default(),
+        )
         .unwrap()
         .host;
     h.run_until(|_| false).unwrap();
@@ -433,6 +441,7 @@ impl Real {
             let file = std::fs::File::open(&bind_path)?;
             let rec = Arc::new(Recording::open(Arc::new(file), Cache::new(64 << 20))?);
             let b = Recipe::parse(recipe)?.bind(
+                &registry(),
                 &rec,
                 recipe::window(&rec),
                 &[],

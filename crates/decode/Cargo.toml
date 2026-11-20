@@ -11,6 +11,7 @@ escapement-tickwave-view = { version = "0.1.0", path = "../view", default-featur
 foldhash = "0.2.0"
 smallvec = { version = "1.16.6", features = ["union"] }
 thiserror = "2.0.21"
+toml = { version = "1.2.1", optional = true }
 
 [features]
 default = ["wire", "live"]
@@ -19,3 +20,6 @@ default = ["wire", "live"]
 wire = ["dep:escapement-tickwave-view"]
 # Wire input from a recording a writer in this process is still writing.
 live = ["wire", "escapement-tickwave-view/live"]
+# Recipes: the analyses to run over a recording, as `[[decode]]` tables name them, bound through a
+# registry of decoders.
+recipe = ["wire", "dep:toml"]

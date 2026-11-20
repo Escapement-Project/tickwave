@@ -1,7 +1,8 @@
 //! tickwave's reference protocol decoders, written against `escapement-tickwave-decode`'s public
 //! contract alone, as a decoder loaded at run time would be: SWD, with ADIv5 and MEM-AP stacked on
 //! it, JTAG, with JTAG-DP stacked on it and ADIv5 on that, and cJTAG. With the `recipe` feature,
-//! `recipe` binds them over a recording as `[[decode]]` tables name them.
+//! `recipe::registry` holds them, for a host binding `[[decode]]` tables, with presets of whole
+//! stacks.
 
 pub mod adiv5;
 pub mod cjtag;

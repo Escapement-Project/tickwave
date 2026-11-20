@@ -30,7 +30,8 @@ use std::sync::Arc;
 
 use clap::Parser;
 use escapement_tickwave_decode::HostOptions;
-use escapement_tickwave_decoders::recipe::{self, Recipe};
+use escapement_tickwave_decode::recipe::{self, Recipe};
+use escapement_tickwave_decoders::recipe::registry;
 use escapement_tickwave_egui::view::cursor::timeline_map;
 use escapement_tickwave_egui::view::{Cache, ChannelKind, Recording};
 use escapement_tickwave_egui::{
@@ -98,7 +99,13 @@ fn bind(
     move || {
         let file = std::fs::File::open(&path)?;
         let rec = Arc::new(Recording::open(Arc::new(file), Cache::new(64 << 20))?);
-        let b = recipe.bind(&rec, recipe::window(&rec), &[], HostOptions::default())?;
+        let b = recipe.bind(
+            &registry(),
+            &rec,
+            recipe::window(&rec),
+            &[],
+            HostOptions::default(),
+        )?;
         let mut analyses = Vec::with_capacity(b.analyses.len());
         for a in b.analyses {
             analyses.push(Tracked {
