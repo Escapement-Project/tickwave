@@ -970,12 +970,15 @@ fn a_panel_step_brings_its_item_into_view_and_a_track_click_moves_nothing() {
         Window::At(window.clone()),
         "a track click"
     );
-    // Next: the fifth transfer, past the window, in the middle of one as wide.
+    // Next: the fifth transfer, past the window, in the middle of one as wide, drawn in the
+    // frame that took the press.
     h.get_by_label("next transfer \u{25b8}").click();
-    h.run_steps(3);
+    h.step();
     let (start5, end5, fifth) = transfers[4];
     assert_eq!(h.state().decoded.panel.selected, Some((0, fifth)));
     let moved = crate::decode::bring(&window, start5..end5).unwrap();
+    assert_eq!(h.state().drawn.as_ref().unwrap().0.window, moved);
+    h.run_steps(2);
     assert_eq!(h.state().state.window, Window::At(moved.clone()));
     assert_eq!(moved.end - moved.start, window.end - window.start);
     // Previous: the fourth, wherever that leaves it.

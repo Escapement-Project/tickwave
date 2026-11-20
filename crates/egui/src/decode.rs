@@ -596,8 +596,8 @@ pub struct DecodeState {
     pub panel: PanelState,
     /// What the graph drew last frame, where this frame's decoded paint comes from.
     shown: Option<Shown>,
-    /// The window a panel control asked for last frame, to bring its item into view: set on the
-    /// graph's view state before the graph draws.
+    /// The window a panel control asked for, to bring its item into view: set on the graph's view
+    /// state before the graph draws again.
     jump: Option<Range<i64>>,
 }
 
@@ -657,10 +657,10 @@ impl<'a> Graph<'a> {
 /// A graph with a recording's decoded tracks under it and, where the host places it, the side
 /// panel: `Graph::decoded`. Its response is the graph's, so `Graph::shown` reads it.
 ///
-/// An item chosen in the panel that the window does not show whole comes into view on the next
-/// frame: the window keeps its span with the item in its middle, or fits an item longer than it
-/// with a quarter of the item's length either side. It jumps there, without easing. A click on a
-/// track selects what the plot already shows, and moves nothing.
+/// An item chosen in the panel that the window does not show whole comes into view in the same
+/// frame, drawn in a second pass: the window keeps its span with the item in its middle, or fits
+/// an item longer than it with a quarter of the item's length either side. It jumps there,
+/// without easing. A click on a track selects what the plot already shows, and moves nothing.
 pub struct DecodedGraph<'a> {
     graph: Graph<'a>,
     decode: &'a Decode,
@@ -913,8 +913,10 @@ fn panel(
         Some(h) => p.under(h),
         None => p,
     });
-    // An item a panel control chose, where the window does not show it whole: the next frame's
-    // window brings it into view.
+    // An item a panel control chose, where the window does not show it whole: the window that
+    // brings it into view, set before the graph draws again. The panel draws after the graph, so
+    // this frame is drawn once more, which sends the new window's queries a frame sooner; a host
+    // that allows egui one pass gets it next frame.
     let chosen = Panel::went(&response).and_then(|(k, id)| {
         let item = analyses.get(k)?.store.items().get(&id)?;
         let map = r.lanes[k].map;
@@ -923,6 +925,7 @@ fn panel(
     });
     if let Some(to) = chosen.and_then(|item| bring(&window, item)) {
         state.jump = Some(to);
+        ui.ctx().request_discard("a panel control moved the window");
         ui.ctx().request_repaint();
     }
 }
