@@ -108,8 +108,8 @@ impl Source for Nothing {
         Ok(Some(Window::new(from, upto)))
     }
 
-    fn binding(&self) -> u64 {
-        0
+    fn binding(&self) -> escapement_tickwave_decode::Binding {
+        escapement_tickwave_decode::Binding::new([])
     }
 
     fn ports(&self) -> Vec<bool> {
@@ -298,9 +298,9 @@ impl Source for Line {
         Ok(Some(w))
     }
 
-    fn binding(&self) -> u64 {
+    fn binding(&self) -> escapement_tickwave_decode::Binding {
         let edges = self.edges.iter().map(|&e| e as u64);
-        escapement_tickwave_decode::fold([self.end as u64].into_iter().chain(edges))
+        escapement_tickwave_decode::Binding::new([self.end as u64].into_iter().chain(edges))
     }
 
     fn ports(&self) -> Vec<bool> {

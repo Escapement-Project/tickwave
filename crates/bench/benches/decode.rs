@@ -147,8 +147,8 @@ impl Source for Wires {
         Ok(Some(w))
     }
 
-    fn binding(&self) -> u64 {
-        escapement_tickwave_decode::fold([self.end as u64, self.events.len() as u64])
+    fn binding(&self) -> escapement_tickwave_decode::Binding {
+        escapement_tickwave_decode::Binding::new([self.end as u64, self.events.len() as u64])
     }
 
     fn ports(&self) -> Vec<bool> {

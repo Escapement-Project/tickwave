@@ -2376,8 +2376,8 @@ impl Source for Ports {
         Ok(Some(Window::new(from, upto)))
     }
 
-    fn binding(&self) -> u64 {
-        0
+    fn binding(&self) -> escapement_tickwave_decode::Binding {
+        escapement_tickwave_decode::Binding::new([])
     }
 
     fn ports(&self) -> Vec<bool> {
@@ -2968,6 +2968,23 @@ fn a_turn_takes_a_delivery_whatever_its_budget_says() {
     }
     assert!(!h.runnable(q));
     assert!(widths(h.store(q)).len() > 10);
+}
+
+/// A checkpoint restores only onto a chain reading the same input as the one it was taken of.
+#[test]
+fn a_checkpoint_restores_only_onto_a_chain_reading_the_same_input() {
+    let (mut h, [p, _]) = offset_host(line(40, 3, 20, vec![]));
+    for _ in 0..20 {
+        h.step().unwrap();
+    }
+    let cut = h.checkpoint(p).unwrap();
+    let (mut same, _) = offset_host(line(40, 3, 20, vec![]));
+    assert!(same.restore(&cut).is_ok());
+    let (mut other, _) = offset_host(line(40, 3, 21, vec![]));
+    assert_eq!(
+        other.restore(&cut).err(),
+        Some(CheckpointError::Incompatible)
+    );
 }
 
 /// Each item's id and width, in id order.

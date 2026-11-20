@@ -132,10 +132,9 @@ pub trait Source: Send {
         cancel: &AtomicBool,
     ) -> Result<Option<Window>, SourceError>;
 
-    /// What the source reads, its recording and channels, as a value that differs where they
-    /// differ, which checkpoints are keyed by: a checkpoint restores only onto a source that
-    /// gives the same.
-    fn binding(&self) -> u64;
+    /// What the source reads, its recording and channels, which checkpoints are keyed by: a
+    /// checkpoint restores only onto a source whose binding is equal to its own.
+    fn binding(&self) -> Binding;
 
     /// Which of the decoder's ports it has a channel for, one entry for each port the definition
     /// declares.
@@ -165,6 +164,22 @@ impl SourceError {
     }
 }
 
+/// What a source reads, as words, which a checkpoint's key holds and compares whole. Two sources
+/// reading different input must give different words, so a part whose length varies needs its
+/// length or a separator before what follows it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Binding(Arc<[u64]>);
+
+impl Binding {
+    pub fn new(words: impl IntoIterator<Item = u64>) -> Self {
+        Self(words.into_iter().collect())
+    }
+
+    pub fn words(&self) -> &[u64] {
+        &self.0
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Mode {
@@ -183,12 +198,13 @@ struct Resolution {
 }
 
 impl Resolution {
-    /// The subscription to analysis `up`, as a value that differs where it does.
-    fn digest(&self, up: usize) -> u64 {
+    /// The subscription to analysis `up`, as a checkpoint's key holds it. A kind's index never
+    /// reaches `u64::MAX`, which ends the kinds.
+    fn binding(&self, up: usize) -> Binding {
         let words = (self.kinds.iter().map(|k| u64::from(k.0)))
             .chain([u64::MAX, self.mode as u64, up as u64])
             .chain((self.sequences.iter()).map(|(k, s)| u64::from(k.0) << 16 | u64::from(s.0)));
-        crate::fold(words)
+        Binding::new(words)
     }
 }
 
@@ -844,7 +860,7 @@ struct Link {
     name: Name,
     decoder: Name,
     version: u32,
-    binding: u64,
+    binding: Binding,
     bound: Bound,
 }
 
@@ -1128,7 +1144,7 @@ struct Slot {
     keep: Vec<Span>,
     downstream: Vec<usize>,
     /// What it reads, and what it was bound with, as checkpoints are keyed by them.
-    binding: u64,
+    binding: Binding,
     bound: Bound,
     /// The forward run, and its runs in live window chains.
     run: Run,
@@ -1447,7 +1463,7 @@ impl Host {
                     sequences,
                 };
                 let (local, bound) = (ua.run.local, Some(ua.run.id));
-                let binding = sub.digest(up);
+                let binding = sub.binding(up);
                 (
                     Input::Upstream { index: up, sub },
                     local,
@@ -2544,7 +2560,7 @@ impl Host {
                     name: an.name.clone(),
                     decoder: an.def.name.clone(),
                     version: an.def.version,
-                    binding: an.binding,
+                    binding: an.binding.clone(),
                     bound: an.bound.clone(),
                 }
             })

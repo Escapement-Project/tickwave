@@ -100,9 +100,14 @@ impl Source for Wires {
         w.end = (self.end < w.upto).then_some(self.end);
         Ok(Some(w))
     }
-    fn binding(&self) -> u64 {
-        let edges = (self.lines.iter()).flat_map(|l| l.edges.iter().map(|&e| e as u64));
-        escapement_tickwave_decode::fold([self.end as u64].into_iter().chain(edges))
+    fn binding(&self) -> escapement_tickwave_decode::Binding {
+        // Each line's edges after their count.
+        let lines = (self.lines.iter()).flat_map(|l| {
+            [l.edges.len() as u64]
+                .into_iter()
+                .chain(l.edges.iter().map(|&e| e as u64))
+        });
+        escapement_tickwave_decode::Binding::new([self.end as u64].into_iter().chain(lines))
     }
     fn ports(&self) -> Vec<bool> {
         vec![true; self.lines.len()]
@@ -142,8 +147,13 @@ impl Source for Without {
         });
         Ok(Some(w))
     }
-    fn binding(&self) -> u64 {
-        escapement_tickwave_decode::fold([self.wires.binding(), u64::from(self.port)])
+    fn binding(&self) -> escapement_tickwave_decode::Binding {
+        let wires = self.wires.binding();
+        escapement_tickwave_decode::Binding::new(
+            [u64::from(self.port)]
+                .into_iter()
+                .chain(wires.words().iter().copied()),
+        )
     }
     fn ports(&self) -> Vec<bool> {
         (0..self.wires.lines.len())

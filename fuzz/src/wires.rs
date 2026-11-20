@@ -145,9 +145,14 @@ impl Source for Wires {
         Ok(Some(w))
     }
 
-    fn binding(&self) -> u64 {
-        let edges = (self.lines.iter()).flat_map(|l| l.edges.iter().map(|&e| e as u64));
-        escapement_tickwave_decode::fold([self.end as u64].into_iter().chain(edges))
+    fn binding(&self) -> escapement_tickwave_decode::Binding {
+        // Each line's edges after their count.
+        let lines = (self.lines.iter()).flat_map(|l| {
+            [l.edges.len() as u64]
+                .into_iter()
+                .chain(l.edges.iter().map(|&e| e as u64))
+        });
+        escapement_tickwave_decode::Binding::new([self.end as u64].into_iter().chain(lines))
     }
 
     fn ports(&self) -> Vec<bool> {
@@ -271,8 +276,11 @@ pub fn jtag(c: &Case) {
             jtag::Jtag::factory(window),
             &[
                 jtag::tdo_edge(
-                    [jtag::TdoEdge::Rise, jtag::TdoEdge::Fall, jtag::TdoEdge::IrCapture]
-                        [usize::from(c.setting >> 1) % 3],
+                    [
+                        jtag::TdoEdge::Rise,
+                        jtag::TdoEdge::Fall,
+                        jtag::TdoEdge::IrCapture,
+                    ][usize::from(c.setting >> 1) % 3],
                 ),
                 // Short chains, which random IR scans fit now and then.
                 jtag::chain(chain),

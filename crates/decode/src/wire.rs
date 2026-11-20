@@ -3,6 +3,7 @@
 //! the recording's cache, so the waveform and a decoder share what either decoded.
 
 use crate::{
+    Binding,
     host::{Observed, Source, SourceError, Window},
     output::Tick,
 };
@@ -137,14 +138,16 @@ impl Source for WireSource {
 
     /// A finished recording's content id, which a recompressed or compacted copy keeps, and the
     /// channels; a live one's identity in this process, since what it holds is still growing.
-    fn binding(&self) -> u64 {
+    fn binding(&self) -> Binding {
         let rec = &*self.recording;
+        // A finished recording by its content's 32 bytes, each below 256; one still being written
+        // by its reader's identity after `u64::MAX`. The ports follow either.
         let id: Vec<u64> = match rec.content_id() {
             Some(c) => c.as_bytes().iter().map(|&b| u64::from(b)).collect(),
             None => vec![u64::MAX, rec.identity()],
         };
         let ports = self.ports.iter().map(|c| c.map_or(u64::MAX, |c| c as u64));
-        crate::fold(id.into_iter().chain(ports))
+        Binding::new(id.into_iter().chain(ports))
     }
 
     fn ports(&self) -> Vec<bool> {
