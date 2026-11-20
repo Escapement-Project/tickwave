@@ -197,6 +197,16 @@ impl<'a> Panel<'a> {
         Self::reserved(state, height)
     }
 
+    /// The item a control in the panel whose response is `response` selected this frame, by the
+    /// index of its analysis: previous, next, a link, a reader's "select it", or a List or Text
+    /// row. A host brings it into view where its plot does not show it; a click on a track, whose
+    /// item the plot shows, moves nothing.
+    pub fn went(response: &Response) -> Option<(usize, Id)> {
+        (response.ctx)
+            .data(|d| d.get_temp::<Option<(usize, Id)>>(response.id))
+            .flatten()
+    }
+
     /// The width a host reserves for a panel `width` wide when open, as `state` has it.
     pub fn reserved(state: &PanelState, width: f32) -> f32 {
         if state.collapsed {
@@ -1010,6 +1020,7 @@ impl Widget for Panel<'_> {
             self.state.selected = Some(to);
             self.state.lit = None;
         }
+        ui.data_mut(|d| d.insert_temp(response.id, go));
         response
     }
 }

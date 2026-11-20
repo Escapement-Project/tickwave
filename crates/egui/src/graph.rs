@@ -179,6 +179,12 @@ impl<'a> Graph<'a> {
         (self.viewer, self.palette)
     }
 
+    /// The host's view state, for a widget that wraps it and moves the window.
+    #[cfg(feature = "decode")]
+    pub(crate) fn state_mut(&mut self) -> &mut ViewState {
+        self.state
+    }
+
     /// The decoded paint comes from a window decoded ahead of the forward pass, as a track's
     /// `provisional` says of its items: it draws at the palette's `pale`, dashed where its role's
     /// look has no dash of its own. Paint the sidecar gives keeps its look.

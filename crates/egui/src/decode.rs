@@ -9,6 +9,7 @@
 use crate::graph::{Graph, Shown};
 use crate::palette::Palette;
 use crate::panel::{Analysis as PanelAnalysis, Panel, PanelState};
+use crate::state::Window;
 use crate::track::{
     self, Density, Labels, Track, condition, decoder_roles, driver_paints, track_height,
 };
@@ -595,6 +596,26 @@ pub struct DecodeState {
     pub panel: PanelState,
     /// What the graph drew last frame, where this frame's decoded paint comes from.
     shown: Option<Shown>,
+    /// The window a panel control asked for last frame, to bring its item into view: set on the
+    /// graph's view state before the graph draws.
+    jump: Option<Range<i64>>,
+}
+
+/// The window that brings an item spanning `item` (axis ticks) into view from `window`: none
+/// where the window shows it whole. Else the window keeps its span and centres the item, and an
+/// item longer than the window fills it with a quarter of its length either side.
+pub(crate) fn bring(window: &Range<i64>, item: Range<i64>) -> Option<Range<i64>> {
+    if window.start <= item.start && item.end <= window.end {
+        return None;
+    }
+    let span = window.end.saturating_sub(window.start);
+    let length = item.end.saturating_sub(item.start);
+    if length <= span {
+        let start = (item.start.saturating_add(length / 2)).saturating_sub(span / 2);
+        return Some(start..start.saturating_add(span));
+    }
+    let pad = length / 4;
+    Some(item.start.saturating_sub(pad)..item.end.saturating_add(pad))
 }
 
 /// Where a decode view puts its side panel.
@@ -627,6 +648,11 @@ impl<'a> Graph<'a> {
 
 /// A graph with a recording's decoded tracks under it and, where the host places it, the side
 /// panel: `Graph::decoded`. Its response is the graph's, so `Graph::shown` reads it.
+///
+/// An item chosen in the panel that the window does not show whole comes into view on the next
+/// frame: the window keeps its span with the item in its middle, or fits an item longer than it
+/// with a quarter of the item's length either side. It jumps there, without easing. A click on a
+/// track selects what the plot already shows, and moves nothing.
 pub struct DecodedGraph<'a> {
     graph: Graph<'a>,
     decode: &'a Decode,
@@ -667,12 +693,15 @@ impl Decode {
 impl Widget for DecodedGraph<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
         let DecodedGraph {
-            graph,
+            mut graph,
             decode,
             state,
             place,
             painted,
         } = self;
+        if let Some(window) = state.jump.take() {
+            graph.state_mut().window = Window::At(window);
+        }
         let (viewer, palette) = graph.borrows();
         let timebase = viewer.recording(|r| r.timebase());
         let place = match place {
@@ -872,8 +901,20 @@ fn panel(
         .collect();
     let map = r.lanes.first().map_or(Mapping::IDENTITY, |l| l.map);
     let p = Panel::new(palette, &mut state.panel, &analyses, width, timebase, map);
-    ui.add(match under {
+    let response = ui.add(match under {
         Some(h) => p.under(h),
         None => p,
     });
+    // An item a panel control chose, where the window does not show it whole: the next frame's
+    // window brings it into view.
+    let chosen = Panel::went(&response).and_then(|(k, id)| {
+        let item = analyses.get(k)?.store.items().get(&id)?;
+        let map = r.lanes[k].map;
+        let end = item.end.unwrap_or(item.start);
+        Some(map.axis_saturating(item.start)..map.axis_saturating(end))
+    });
+    if let Some(to) = chosen.and_then(|item| bring(&window, item)) {
+        state.jump = Some(to);
+        ui.ctx().request_repaint();
+    }
 }

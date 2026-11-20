@@ -546,3 +546,150 @@ fn frame_times() {
         println!("  the graph alone:    {}", quantiles(&mut plain));
     }
 }
+
+/// A panel's choice moves the window only where it does not show the item whole: keeping its
+/// span with the item in the middle, or fitting a longer item with a quarter of it either side.
+#[test]
+fn an_item_out_of_view_is_brought_into_it() {
+    use crate::decode::bring;
+    let window = 1000..2000;
+    assert_eq!(bring(&window, 1200..1300), None, "in view: nothing moves");
+    assert_eq!(bring(&window, 1000..2000), None, "exactly in view");
+    assert_eq!(
+        bring(&window, 2500..2600),
+        Some(2050..3050),
+        "past it: centred"
+    );
+    assert_eq!(
+        bring(&window, 100..200),
+        Some(-350..650),
+        "before it: centred"
+    );
+    assert_eq!(
+        bring(&window, 1900..2100),
+        Some(1500..2500),
+        "half out: centred"
+    );
+    assert_eq!(
+        bring(&window, 5000..5000),
+        Some(4500..5500),
+        "an open item, at its start"
+    );
+    assert_eq!(
+        bring(&window, 3000..7000),
+        Some(2000..8000),
+        "longer than the window: a quarter either side"
+    );
+    assert_eq!(
+        bring(&window, 500..2500),
+        Some(0..3000),
+        "longer, across it"
+    );
+}
+
+/// A decoded graph with its panel beside it, and where it last drew: the graph's `Shown`, and
+/// the top of its first track.
+struct Stepped {
+    viewer: Viewer,
+    state: ViewState,
+    decode: Decode,
+    decoded: DecodeState,
+    lanes: Vec<usize>,
+    drawn: Option<(crate::Shown, f32)>,
+}
+
+/// Previous and next in the panel move the window to an item it does not show whole, keeping its
+/// span; a click on the track selects an item the window cuts off without moving it. (The
+/// fixture's timeline is the axis.)
+#[test]
+fn a_panel_step_brings_its_item_into_view_and_a_track_click_moves_nothing() {
+    use egui_kittest::kittest::Queryable;
+    let rec = open();
+    let lanes = vec![rec.channel("SWCLK").unwrap(), rec.channel("SWDIO").unwrap()];
+    let all = kept();
+    let transfers: Vec<_> = (all.store(all.index("swd").unwrap()).items().values())
+        .filter(|i| i.id.kind == escapement_tickwave_decoders::swd::TRANSFER)
+        .filter_map(|i| Some((i.start, i.end?, i.id)))
+        .collect();
+    let (start, end, cut) = transfers[3];
+    // Ending halfway through the fourth transfer.
+    let window = (start + end) / 2 - 100_000..(start + end) / 2;
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1400.0, 700.0))
+        .build_ui_state(
+            |ui, v: &mut Stepped| {
+                let palette = palette();
+                let r = ui.add(
+                    Graph::lanes_only(&v.viewer, &mut v.state, &palette)
+                        .lanes(&v.lanes)
+                        .motion(false)
+                        .decoded(&v.decode, &mut v.decoded)
+                        .panel(Place::Beside(360.0)),
+                );
+                let top = r.rect.bottom() + ui.spacing().item_spacing.y;
+                v.drawn = Graph::shown(&r).map(|s| (s, top));
+            },
+            {
+                let ctx = egui::Context::default();
+                Stepped {
+                    viewer: Viewer::open(&ctx, &fixture()).unwrap(),
+                    state: ViewState {
+                        window: Window::At(window.clone()),
+                        ..ViewState::default()
+                    },
+                    decode: Decode::start(&ctx, DecodeOptions::default(), bind(SWD)),
+                    decoded: DecodeState::default(),
+                    lanes,
+                    drawn: None,
+                }
+            },
+        );
+    let t = Instant::now();
+    loop {
+        h.step();
+        let drawn = {
+            let g = h.state().decode.lock();
+            matches!(&g.phase, Phase::Running(r) if r.chains[0].drawn.is_some())
+        };
+        if drawn && finished(&h.state().decode) {
+            break;
+        }
+        assert!(t.elapsed() < Duration::from_secs(20), "drawn");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    h.run_steps(3);
+    // A click on the cut-off transfer's box, between its start and the plot's edge.
+    let (shown, top) = h.state().drawn.clone().unwrap();
+    let per = (window.end - window.start) as f32 / (shown.plot.end - shown.plot.start);
+    let x = shown.plot.start + ((start + window.end) / 2 - window.start) as f32 / per;
+    h.event(egui::Event::PointerMoved(egui::pos2(x, top + 12.0)));
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos: egui::pos2(x, top + 12.0),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+    }
+    h.run_steps(3);
+    assert_eq!(h.state().decoded.panel.selected, Some((0, cut)));
+    assert_eq!(
+        h.state().state.window,
+        Window::At(window.clone()),
+        "a track click"
+    );
+    // Next: the fifth transfer, past the window, in the middle of one as wide.
+    h.get_by_label("next transfer \u{25b8}").click();
+    h.run_steps(3);
+    let (start5, end5, fifth) = transfers[4];
+    assert_eq!(h.state().decoded.panel.selected, Some((0, fifth)));
+    let moved = crate::decode::bring(&window, start5..end5).unwrap();
+    assert_eq!(h.state().state.window, Window::At(moved.clone()));
+    assert_eq!(moved.end - moved.start, window.end - window.start);
+    // Previous: the fourth, wherever that leaves it.
+    h.get_by_label("\u{25c2} previous transfer").click();
+    h.run_steps(3);
+    assert_eq!(h.state().decoded.panel.selected, Some((0, cut)));
+    let back = crate::decode::bring(&moved, start..end).unwrap_or(moved);
+    assert_eq!(h.state().state.window, Window::At(back));
+}
