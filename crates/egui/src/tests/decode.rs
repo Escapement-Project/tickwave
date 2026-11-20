@@ -142,7 +142,7 @@ fn a_window_few_enough_items_to_draw_apart_is_derived_and_a_crowded_one_is_not()
     // A window around the first transfer, as the axis gives it: one tick a nanosecond.
     let first = all.store(swd).items().values().next().unwrap().start;
     let window = first - 20_000..first + 80_000;
-    d.show(window.clone(), 800.0);
+    d.show(window.clone(), 800.0, 1e9);
     until("the window is drawn", || {
         let g = d.lock();
         matches!(&g.phase, Phase::Running(r) if r.chains[0].drawn.is_some())
@@ -184,7 +184,7 @@ fn a_window_few_enough_items_to_draw_apart_is_derived_and_a_crowded_one_is_not()
     );
     drop(g);
     // The whole recording at 80 points is too crowded to draw apart: no chain for it.
-    d.show(0..i64::MAX / 4, 80.0);
+    d.show(0..i64::MAX / 4, 80.0, 1e9);
     std::thread::sleep(Duration::from_millis(50));
     let g = d.lock();
     let Phase::Running(r) = &g.phase else {
@@ -380,4 +380,128 @@ fn shots() {
         .unwrap()
         .save(dir.join("decoded-swd.png"))
         .unwrap();
+}
+
+/// Frames of the decoded graph (the graph, its tracks and the panel beside them, laid out and
+/// tessellated) timed at 60 Hz while the forward pass runs and once it has finished, at three
+/// zooms: the whole recording, a few transfers and a transfer's bits. Run it under `taskset -c 0`
+/// for one core, the worker and the query thread then sharing it with the frames. With
+/// `TICKWAVE_DECODE_REC` and `TICKWAVE_DECODE_RECIPE` set, on that recording and recipe file;
+/// else on the SWD fixture.
+///
+///     TICKWAVE_DECODE_REC=REC TICKWAVE_DECODE_RECIPE=crates/decoders/recipes/swd.toml \
+///         taskset -c 0 cargo test --release -p escapement-tickwave-egui --features decode --lib \
+///         tests::decode::frame_times -- --ignored --nocapture
+#[test]
+#[ignore = "prints wall-clock frame times"]
+fn frame_times() {
+    use crate::Palette;
+    let path = std::env::var_os("TICKWAVE_DECODE_REC").map_or_else(fixture, PathBuf::from);
+    let recipe: &'static str = match std::env::var_os("TICKWAVE_DECODE_RECIPE") {
+        Some(f) => Box::leak(std::fs::read_to_string(f).unwrap().into_boxed_str()),
+        None => SWD,
+    };
+    let file = std::fs::File::open(&path).unwrap();
+    let rec = Arc::new(Recording::open(Arc::new(file), Cache::new(64 << 20)).unwrap());
+    let r = Recipe::parse(recipe).unwrap();
+    let first = &r.analyses[0];
+    let lanes: Vec<usize> = (first.inputs.iter())
+        .filter_map(|(_, i)| match i {
+            recipe::Input::Channel(c) => rec.channel(c),
+            recipe::Input::Analysis(_) => None,
+        })
+        .collect();
+    let length = rec.length();
+    let per_us = rec.timebase().num() as f64 / rec.timebase().den() as f64 / 1e6;
+    let us = |n: f64| (n * per_us) as i64;
+    let bind_path = path.clone();
+    let bind = move || -> Result<Decoding, crate::BindFailure> {
+        let file = std::fs::File::open(&bind_path)?;
+        let rec = Arc::new(Recording::open(Arc::new(file), Cache::new(64 << 20))?);
+        let b =
+            Recipe::parse(recipe)?.bind(&rec, recipe::window(&rec), &[], HostOptions::default())?;
+        let mut analyses = vec![];
+        for a in b.analyses {
+            let map = timeline_map(&rec, a.timeline)?;
+            analyses.push(Tracked {
+                id: a.id,
+                name: a.label,
+                map,
+            });
+        }
+        Ok(Decoding {
+            host: b.host,
+            analyses,
+        })
+    };
+    let mid = length / 2;
+    let zooms = [
+        ("whole", 0..length),
+        ("transfers", mid..mid + us(400.0)),
+        ("bits", mid..mid + us(20.0)),
+    ];
+    let palette = Palette::from_visuals(&egui::Visuals::dark());
+    let frame = std::time::Duration::from_nanos(16_666_667);
+    let quantiles = |v: &mut Vec<Duration>| {
+        v.sort_unstable();
+        let at = |q: f64| v[((v.len() - 1) as f64 * q) as usize].as_secs_f64() * 1e3;
+        format!(
+            "n {}  p50 {:.2}  p99 {:.2}  max {:.2} ms",
+            v.len(),
+            at(0.5),
+            at(0.99),
+            at(1.0)
+        )
+    };
+    for (name, window) in zooms {
+        let ctx = egui::Context::default();
+        let viewer = Viewer::open(&ctx, &path).unwrap();
+        let decode = Decode::start(&ctx, DecodeOptions::default(), bind.clone());
+        let mut state = ViewState {
+            window: Window::At(window.clone()),
+            ..ViewState::default()
+        };
+        let mut decoded = DecodeState::default();
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1920.0, 600.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        let (mut running, mut done) = (vec![], vec![]);
+        let started = Instant::now();
+        let mut next = Instant::now();
+        let mut after = 0;
+        while after < 120 && started.elapsed() < Duration::from_secs(300) {
+            let t = Instant::now();
+            let out = ctx.run_ui(input(), |ui| {
+                ui.add(
+                    Graph::lanes_only(&viewer, &mut state, &palette)
+                        .lanes(&lanes)
+                        .decoded(&decode, &mut decoded)
+                        .panel(Place::Beside(360.0)),
+                );
+            });
+            let _ = ctx.tessellate(out.shapes, out.pixels_per_point);
+            let took = t.elapsed();
+            if finished(&decode) {
+                done.push(took);
+                after += 1;
+            } else {
+                running.push(took);
+            }
+            next += frame;
+            match next.checked_duration_since(Instant::now()) {
+                Some(w) => std::thread::sleep(w),
+                None => next = Instant::now(),
+            }
+        }
+        let pass = started.elapsed().as_secs_f64() - after as f64 / 60.0;
+        println!("{name}: pass about {pass:.1} s");
+        if !running.is_empty() {
+            println!("  while the pass runs: {}", quantiles(&mut running));
+        }
+        println!("  after it:           {}", quantiles(&mut done));
+    }
 }

@@ -30,6 +30,19 @@ pub type BindFailure = Box<dyn std::error::Error + Send + Sync>;
 /// with more draws as the tally's density.
 pub const WINDOW_ITEMS_AT_MOST: u64 = 50_000;
 
+/// The longest window a chain derives ahead of the forward pass, from a local start: the tally
+/// cannot say how many items a window it has not reached holds, so a longer one waits for it.
+pub const AHEAD_AT_MOST: Duration = Duration::from_millis(10);
+
+/// The window a view shows, on the axis, over a plot `width` points wide, its ticks
+/// `per_second` a second.
+#[derive(Clone, Debug)]
+struct Asked {
+    window: Range<i64>,
+    width: f32,
+    per_second: f64,
+}
+
 /// What a bind function gives `Decode`: a bound host, and how a view draws each analysis.
 pub struct Decoding {
     pub host: Host,
@@ -104,14 +117,14 @@ struct Shared {
     /// The UI waits for `inner`: the worker leaves it be between steps.
     wants: AtomicBool,
     stop: AtomicBool,
-    /// The window the view shows on the axis and the plot's width, when it changes.
-    asked: Mutex<Option<(Range<i64>, f32)>>,
+    /// The window the view shows, each frame.
+    asked: Mutex<Option<Asked>>,
 }
 
 pub(crate) struct Inner {
     pub(crate) phase: Phase,
     /// The window last asked for, kept across a reopen.
-    shown: Option<(Range<i64>, f32)>,
+    shown: Option<Asked>,
 }
 
 pub(crate) enum Phase {
@@ -271,10 +284,15 @@ impl Decode {
             .sum()
     }
 
-    /// Hands the worker the window the view shows, on the axis, over a plot `width` points wide.
-    pub(crate) fn show(&self, window: Range<i64>, width: f32) {
+    /// Hands the worker the window the view shows, on the axis, over a plot `width` points wide,
+    /// the axis's ticks `per_second` a second.
+    pub(crate) fn show(&self, window: Range<i64>, width: f32, per_second: f64) {
         let mut asked = self.shared.asked.lock().unwrap_or_else(|e| e.into_inner());
-        *asked = Some((window, width));
+        *asked = Some(Asked {
+            window,
+            width,
+            per_second,
+        });
         drop(asked);
         if let Some((_, thread)) = self.lock_worker().as_ref() {
             thread.unpark();
@@ -361,8 +379,8 @@ fn work(
         let Phase::Running(r) = &mut g.phase else {
             return;
         };
-        if let Some((window, width)) = asked
-            && let Err(why) = r.ask(&window, width)
+        if let Some(a) = asked
+            && let Err(why) = r.ask(&a)
         {
             g.phase = Phase::Refused(why);
             ctx.request_repaint();
@@ -444,8 +462,10 @@ impl Running {
     }
 
     /// Takes in the window the view shows: each wire analysis whose items there are few enough
-    /// derives it and a width either side in a chain, unless its chains cover it already.
-    fn ask(&mut self, window: &Range<i64>, width: f32) -> Result<(), String> {
+    /// derives it and a width either side in a chain, unless its chains cover it already. Ahead
+    /// of the forward pass, where the tally has not counted them, only a short one.
+    fn ask(&mut self, asked: &Asked) -> Result<(), String> {
+        let (window, width) = (&asked.window, asked.width);
         let w = window.end.saturating_sub(window.start).max(1);
         let wide = window.start.saturating_sub(w)..window.end.saturating_add(w);
         for root in 0..self.lanes.len() {
@@ -463,15 +483,23 @@ impl Running {
                 .filter(|l| l.root == root)
                 .map(|l| l.tally.count(wide.start, wide.end, 0.0).0)
                 .sum();
-            let crowded = self.lanes[root].tally.crowded(window, width);
-            if items > WINDOW_ITEMS_AT_MOST || (crowded && items > 0) {
-                continue;
-            }
             let map = self.lanes[root].map;
             let span = Span {
                 start: map.first_at(wide.start),
                 end: map.first_at(wide.end),
             };
+            let counted = self.host.finished(self.lanes[root].id).is_some()
+                || self.host.consumed(self.lanes[root].id) >= span.end;
+            let skip = if counted {
+                let crowded = self.lanes[root].tally.crowded(window, width);
+                items > WINDOW_ITEMS_AT_MOST || (crowded && items > 0)
+            } else {
+                let seconds = wide.end.saturating_sub(wide.start) as f64 / asked.per_second;
+                seconds > AHEAD_AT_MOST.as_secs_f64()
+            };
+            if skip {
+                continue;
+            }
             let root_id = self.lanes[root].id;
             let derived = self.host.derive(root_id, span).map_err(|e| e.to_string())?;
             let densities = (self.lanes.iter())
@@ -738,7 +766,7 @@ fn tracked(
     state: &mut DecodeState,
     painted: Option<&[String]>,
 ) -> Response {
-    let (_, palette) = graph.borrows();
+    let (viewer, palette) = graph.borrows();
     // The decoded paint from the first analysis, on the window drawn last frame.
     let (mut paints, mut roles) = (vec![], vec![]);
     if let (Some(_), Some(s)) = (painted, &state.shown) {
@@ -767,7 +795,13 @@ fn tracked(
     let Some(shown) = Graph::shown(&response) else {
         return response;
     };
-    decode.show(shown.window.clone(), shown.plot.end - shown.plot.start);
+    let tb = viewer.recording(|r| r.timebase());
+    let per_second = tb.num() as f64 / tb.den() as f64;
+    decode.show(
+        shown.window.clone(),
+        shown.plot.end - shown.plot.start,
+        per_second,
+    );
     let g = decode.lock();
     if let Phase::Running(r) = &g.phase {
         for (k, lane) in r.lanes.iter().enumerate() {
