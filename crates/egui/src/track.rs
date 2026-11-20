@@ -1242,6 +1242,7 @@ impl Track<'_> {
         let w = &self.shown.window;
         let axis = |t: Tick| self.map.axis_saturating(t) as f64;
         let pointer = ui.input(|i| i.pointer.hover_pos());
+        let least = Least::new(ui);
         // Where each lane's last item ends, in points.
         let mut ends = vec![f32::NEG_INFINITY; lanes.len()];
         let meeting = self.density.meeting(self.items, &self.map, w, self.settled);
@@ -1279,7 +1280,10 @@ impl Track<'_> {
             };
             shapes.push(Shape::rect_stroke(r, 2.0, stroke, egui::StrokeKind::Inside));
             let room = r.width() - 2.0 * PAD;
-            for t in applying(self.schema, self.labels, item) {
+            // A box narrower than any glyph holds no label: none is formatted or laid out.
+            let holds = least.holds(room, &p.labels);
+            let tried = applying(self.schema, self.labels, item).filter(|_| holds);
+            for t in tried {
                 let text = label(self.schema, item, t);
                 if text.is_empty() {
                     continue;
@@ -1292,15 +1296,24 @@ impl Track<'_> {
                 }
             }
             if let Some(prow) = parts {
-                self.parts_of(ui, s, item, prow, shapes);
+                self.parts_of(ui, s, item, prow, &least, shapes);
             }
         }
         (clicked, pointed)
     }
 
     /// An item's spanned fields, each its stretch with its value where it fits; where its
-    /// sequence's cells are wide enough, their elements instead.
-    fn parts_of(&self, ui: &Ui, s: &Scale, item: &Item, row: Rect, shapes: &mut Vec<Shape>) {
+    /// sequence's cells are wide enough, their elements instead. A stretch with less room than
+    /// the figures' narrowest glyph holds no text.
+    fn parts_of(
+        &self,
+        ui: &Ui,
+        s: &Scale,
+        item: &Item,
+        row: Rect,
+        least: &Least<'_>,
+        shapes: &mut Vec<Shape>,
+    ) {
         let p = self.palette;
         let axis = |t: Tick| self.map.axis_saturating(t) as f64;
         let kind = self.schema.kind(item.id.kind);
@@ -1359,6 +1372,9 @@ impl Track<'_> {
                 }
                 continue;
             }
+            if !least.holds(r.width() - 2.0 * PAD, &p.figures) {
+                continue;
+            }
             // Its value where that fits, else its field's name, else the short name its field
             // declares or the name's first three letters, else nothing.
             let value = value_text(self.schema, item.id.kind, f.field, &f.value);
@@ -1392,6 +1408,50 @@ impl Track<'_> {
             None => label,
         }
     }
+}
+
+/// Whether a room holds any text: none is narrower than its font's narrowest glyph. That is
+/// measured for each font at most once a frame, and only for a room narrower than the font's size,
+/// which holds the narrowest glyph of any font.
+struct Least<'u> {
+    ui: &'u Ui,
+    fonts: std::cell::RefCell<Vec<(egui::FontId, f32)>>,
+}
+
+impl<'u> Least<'u> {
+    fn new(ui: &'u Ui) -> Self {
+        Self {
+            ui,
+            fonts: Default::default(),
+        }
+    }
+
+    fn holds(&self, room: f32, font: &egui::FontId) -> bool {
+        if room >= font.size {
+            return true;
+        }
+        let mut fonts = self.fonts.borrow_mut();
+        let least = match fonts.iter().find(|(f, _)| f == font) {
+            Some(&(_, w)) => w,
+            None => {
+                let w = narrowest(self.ui, font);
+                fonts.push((font.clone(), w));
+                w
+            }
+        };
+        room >= least
+    }
+}
+
+/// The width of the narrowest of the glyphs ASCII text is narrowest in, in `font`: a label is
+/// trimmed, so none is narrower.
+fn narrowest(ui: &Ui, font: &egui::FontId) -> f32 {
+    ui.fonts_mut(|f| {
+        ['.', ',', '\'', 'i', 'l', '!', '|', ':']
+            .into_iter()
+            .map(|c| f.glyph_width(font, c))
+            .fold(f32::INFINITY, f32::min)
+    })
 }
 
 /// `decoded`, a track's items or density, into `out` as a provisional window's: each outline

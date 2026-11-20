@@ -1167,3 +1167,81 @@ fn zoomed_out_the_selected_item_keeps_an_ink_tick_at_its_start() {
         "none off the window"
     );
 }
+
+/// A label of one narrow glyph still draws in a box only just wide enough for it, and not in one
+/// a point narrower: a box too narrow for any glyph skips its labels, and no wider one does.
+#[test]
+fn a_label_of_one_narrow_glyph_draws_where_it_fits() {
+    use escapement_tickwave_decode::Label;
+    let palette = Palette::from_visuals(&egui::Visuals::default());
+    let ctx = egui::Context::default();
+    // Lay the fonts out once, then measure the glyph as the track will.
+    ctx.run_ui(egui::RawInput::default(), |_| {})
+        .textures_delta
+        .clear();
+    let glyph = ctx.fonts_mut(|f| f.glyph_width(&palette.labels, '.'));
+    let schema = Schema::new(vec![
+        KindDecl::new("a").with_labels(vec![Label::default().text(".")]),
+    ]);
+    let drawn = |room: f32| {
+        // 2 ticks a point: a box `room` and its padding wide.
+        let ticks = ((room + 6.0) * 2.0).round() as Tick;
+        let mut store = Store::with_keep(vec![Span {
+            start: Tick::MIN,
+            end: Tick::MAX,
+        }]);
+        let id = Id::new(KindId(0), 100);
+        let ops = [
+            Op::Open {
+                id,
+                parent: None,
+                start: 100,
+            },
+            Op::Close {
+                id,
+                end: 100 + ticks,
+                status: Status::Complete,
+            },
+        ];
+        store.apply_batch(&ops, 8).unwrap();
+        let shown = Shown::new(0..1000, 0.0..500.0);
+        let map = Mapping::new(0, 0, Ratio::integer(1).unwrap());
+        let density = Density::of(store.items(), &map, |_| false);
+        let labels = Labels::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(600.0, 200.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| {
+            ui.add(Track::new(
+                &shown,
+                "t",
+                &schema,
+                store.items(),
+                &density,
+                &labels,
+                &palette,
+                map,
+            ));
+        });
+        out.textures_delta.clear();
+        fn walk(s: &egui::Shape, found: &mut bool) {
+            match s {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, found)),
+                egui::Shape::Text(t) => *found |= t.galley.text() == ".",
+                _ => {}
+            }
+        }
+        let mut found = false;
+        for c in &out.shapes {
+            walk(&c.shape, &mut found);
+        }
+        found
+    };
+    assert!(glyph > 1.0, "{glyph}");
+    assert!(drawn(glyph + 0.5), "room for the glyph");
+    assert!(!drawn(glyph - 1.0), "a point short of it");
+}

@@ -461,11 +461,27 @@ fn cjtag_in() -> Drawn {
     track(&h, "cjtag", "cJTAG", Labels::default(), mid..mid + 6 * 150)
 }
 
+/// ADIv5's accesses over the session's first 600 transfers: boxes a few points wide, each
+/// declaring several labels, none of which fits.
+fn adi_crowded() -> Drawn {
+    let mut h = host(all());
+    h.run_until(|_| false).unwrap();
+    track(
+        &h,
+        "adi",
+        "ADIv5",
+        Labels::default(),
+        0..10 + 600 * 48 * PERIOD,
+    )
+}
+
 #[library_benchmark]
 #[bench::bits(setup = bits_in)]
 #[bench::zoomed_in(setup = zoomed_in)]
 #[bench::zoomed_out(setup = zoomed_out)]
 #[bench::cjtag_in(setup = cjtag_in)]
+#[bench::crowded(setup = six_hundred)]
+#[bench::adi_crowded(setup = adi_crowded)]
 fn track_frame(mut d: Drawn) -> Drawn {
     let out = frame(&mut d);
     black_box(d.ctx.tessellate(out.shapes, out.pixels_per_point));
