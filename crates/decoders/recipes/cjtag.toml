@@ -1,0 +1,15 @@
+# cJTAG on a recording's TCKC and TMSC, with JTAG stacked on it.
+
+[[decode]]
+id = "cjtag"
+decoder = "cjtag"
+version = 1
+label = "cJTAG"
+inputs = { TCKC = "TCKC", TMSC = "TMSC" }
+
+[[decode]]
+id = "jtag"
+decoder = "jtag"
+version = 1
+label = "JTAG"
+inputs = { clocks = { analysis = "cjtag" } }

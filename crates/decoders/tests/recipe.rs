@@ -221,3 +221,32 @@ fn an_optional_port_may_be_left_out() {
     let j = h.index("jtag").unwrap();
     assert!(h.store(j).counts.closes > 0);
 }
+
+/// The recipes this crate ships read, and SWD's binds over an SWD capture.
+#[test]
+fn the_shipped_recipes_read() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("recipes");
+    for name in ["swd", "jtag", "cjtag"] {
+        let text = std::fs::read_to_string(dir.join(format!("{name}.toml"))).unwrap();
+        let r = Recipe::parse(&text).unwrap();
+        for a in &r.analyses {
+            assert!(
+                recipe::find(&a.decoder, a.version).is_some(),
+                "{name}: {}",
+                a.decoder
+            );
+        }
+    }
+    let text = std::fs::read_to_string(dir.join("swd.toml")).unwrap();
+    let rec = fixture();
+    let mut h = (Recipe::parse(&text).unwrap())
+        .bind(&rec, recipe::window(&rec), &all(), HostOptions::default())
+        .unwrap()
+        .host;
+    h.run_until(|_| false).unwrap();
+    let mem = h.index("mem").unwrap();
+    assert!(
+        h.store(mem).counts.closes > 0,
+        "MEM-AP decoded the capture's accesses"
+    );
+}

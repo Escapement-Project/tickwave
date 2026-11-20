@@ -1,0 +1,22 @@
+# SWD on a recording's SWCLK and SWDIO, with ADIv5 and MEM-AP stacked on it.
+
+[[decode]]
+id = "swd"
+decoder = "swd"
+version = 1
+label = "SWD"
+inputs = { SWCLK = "SWCLK", SWDIO = "SWDIO" }
+
+[[decode]]
+id = "adi"
+decoder = "adiv5"
+version = 1
+label = "ADIv5"
+inputs = { transfers = { analysis = "swd" } }
+
+[[decode]]
+id = "mem"
+decoder = "mem-ap"
+version = 1
+label = "MEM-AP"
+inputs = { accesses = { analysis = "adi" } }
