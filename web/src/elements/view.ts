@@ -55,6 +55,10 @@ canvas { display: block; }
 .readout .held > .widest { visibility: hidden; }
 .readout label { display: inline-flex; gap: 6px; align-items: baseline; }
 .readout select { min-height: 22px; padding: 1px 4px; font-size: 12px; }
+/* Set as text, so the line it ends grows no taller; the padding widens what a finger can hit. */
+.readout .clear { margin: -6px -4px -6px auto; padding: 6px 4px; border: 0; background: none; font: inherit;
+  color: var(--ink, CanvasText); text-decoration: underline; text-underline-offset: .2em; cursor: pointer; }
+.readout .clear:focus-visible { outline: var(--focus-width, 2px) solid var(--ink, CanvasText); outline-offset: -2px; border-radius: 4px; }
 .steps { display: flex; gap: 4px; align-items: center; }
 .steps .count { min-width: 5.5em; text-align: center; color: var(--ink-2, GrayText); font-size: 13px; }
 /* "or more" while some annotations are still to read: its room kept, so the count stays put. */
@@ -771,7 +775,7 @@ export class TickwaveView extends TickwaveElement {
     this.#renderSummary();
     this.#plotBox.setAttribute(
       "aria-label",
-      `${l.info.title}. Left and right arrows pan, up and down zoom, Home fits the capture; Enter or a click places a cursor, drag on the time axis to select.`,
+      `${l.info.title}. Left and right arrows pan, up and down zoom, Home fits the capture; Enter or a click places a cursor, drag on the time axis to select, Escape clears them.`,
     );
     const { indices, missing } = channelIndices(l.info, this.#channelsShown(l.annotations.declared.view));
     for (const m of missing) this.fail(new Error(`no channel ${m}`));
@@ -2042,11 +2046,7 @@ export class TickwaveView extends TickwaveElement {
           this.#placeCursorAt(Math.round((this.#plot.view.start + this.#plot.view.end) / 2));
           break;
         case "Escape":
-          this.#setCursors(null, null);
-          this.#plot.selection = null;
-          this.#nextCursor = "a";
-          this.#plot.invalidate();
-          void this.#renderReadout();
+          this.#clearMarks();
           break;
         default:
           return;
@@ -2097,6 +2097,15 @@ export class TickwaveView extends TickwaveElement {
       if (best >= 0 && Math.abs(this.#plot.xAt(t[best]) - x) <= SNAP_PX) tick = t[best];
     }
     return tick;
+  }
+
+  /** Removes both cursors and the selection. */
+  #clearMarks(): void {
+    this.#setCursors(null, null);
+    this.#plot.selection = null;
+    this.#nextCursor = "a";
+    this.#plot.invalidate();
+    void this.#renderReadout();
   }
 
   /** Places cursor A, or B after it, at `tick`. */
@@ -2370,6 +2379,17 @@ export class TickwaveView extends TickwaveElement {
       }
     }
     if (seq !== this.#readoutSeq) return;
+    if (a !== null || sel) {
+      const clear = Object.assign(document.createElement("button"), { type: "button", className: "clear", textContent: "Clear" });
+      clear.setAttribute("part", "clear-button");
+      clear.setAttribute("aria-label", "Clear the cursors and the selection");
+      clear.addEventListener("click", () => {
+        this.#clearMarks();
+        // The button goes with what it cleared.
+        this.#plotBox.focus();
+      });
+      lines[0].append(" ", clear);
+    }
     this.#setReadout(lines);
     if (announce && detail) this.emit("tickwave-select", detail);
   }

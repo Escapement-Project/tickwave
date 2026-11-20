@@ -315,7 +315,8 @@ scrolls the page, and the view says how to zoom. Shift with the wheel, a sideway
 the left and right arrow keys move along the capture: an arrow an eighth of the span shown, or half
 of it with Shift. With the view focused, the up and down arrows or plus and minus zoom in and out.
 Home and Fit show the whole capture, or all of the channels the view shows, with each analog
-channel's whole range, and Escape clears the cursors and the selection.
+channel's whole range. Escape clears the cursors and the selection, and so does Clear, at the end
+of the readout's first line while either is placed.
 A zoom step, and an arrow key's move, eases into place over about 150 ms, and the rows read for
 where it goes at once. A key pressed during an ease goes on from where the last one was going, and
 the view eases there from where it is drawn, so a held arrow key glides. A reader who prefers

@@ -168,7 +168,8 @@ A click places cursor A, and the next click cursor B. With the view focused, Ent
 the middle of the view. A cursor snaps to an edge within a few pixels on the row clicked.
 
 The readout under the view gives both cursors' times and the interval between them. It gives each
-analog channel's value at each cursor, and each digital channel's pulse at cursor A.
+analog channel's value at each cursor, and each digital channel's pulse at cursor A. Clear, at the
+end of its first line, removes the cursors and the selection, as Escape does.
 
 Drag along the time axis to select a span. The readout gives its length and counts each channel's
 edges in it. For one channel it measures the clock: how many periods there are, their least,

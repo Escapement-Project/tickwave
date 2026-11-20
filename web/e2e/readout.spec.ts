@@ -95,3 +95,38 @@ test("a second selection's readout, its counts waiting again, keeps the heights 
   expect(new Set(lines.map((l) => JSON.stringify(l))).size, JSON.stringify(lines)).toBe(1);
   expect(new Set(readout).size, JSON.stringify(readout)).toBe(1);
 });
+
+test("Clear, at the end of the readout's first line, removes the cursors and the selection as Escape does, and gives the focus to the plot", async ({ page }) => {
+  const view = await ready(page);
+  const readout = view.locator(".readout");
+  const clear = readout.locator(".clear");
+  await expect(clear).toHaveCount(0);
+  const box = (await view.locator(".plot").boundingBox())!;
+  await page.mouse.click(box.x + box.width * 0.5, box.y + 60);
+  await select(page, view, 0.45, 0.8);
+  await expect(readout).toContainText("Selection");
+  await expect(readout.locator(":scope > .line").first().locator(".clear")).toHaveCount(1);
+  await expect(clear).toHaveCount(1);
+  await clear.click();
+  await expect(readout).toBeEmpty();
+  const marks = await view.evaluate((v) => {
+    const x = v as unknown as { cursors: unknown; selection: unknown };
+    return [x.cursors, x.selection];
+  });
+  expect(marks).toEqual([{ a: null, b: null }, null]);
+  await expect(view.locator(".plot")).toBeFocused();
+});
+
+test("Clear makes the readout's first line no taller", async ({ page }) => {
+  const view = await ready(page);
+  await select(page, view, 0.45, 0.8);
+  await expect(view.locator(".readout .clear")).toHaveCount(1);
+  await expect(view.locator(".readout")).toContainText("median", { timeout: 10_000 });
+  const [withClear, without] = await view.evaluate((v) => {
+    const line = v.shadowRoot!.querySelector(".readout > .line")!;
+    const h = line.getBoundingClientRect().height;
+    line.querySelector(".clear")!.remove();
+    return [h, line.getBoundingClientRect().height];
+  });
+  expect(withClear).toBe(without);
+});

@@ -25,6 +25,8 @@ finger can open it with no note lit, and a chart's figure opened by a tap has on
 series' name. A finger held on a reference or a point that turns into a scroll no longer leaves
 the figure open.
 
+A view's readout has Clear, which removes the cursors and the selection.
+
 ## v0.1.1
 
 A recording on another site opens when that site sends `Access-Control-Allow-Origin`, as GitHub
