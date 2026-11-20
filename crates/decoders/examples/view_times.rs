@@ -220,6 +220,30 @@ fn main() -> Result<(), Error> {
     drop(h);
     println!("pass alone {:.3} s", alone.as_secs_f64());
 
+    // The same, each analysis tallying what it closes, taken after every step as a view does.
+    if std::env::var_os("VIEW_TIMES_TALLY").is_some() {
+        let (mut h, _) = stack(&rec, kind, window)?;
+        let analyses: Vec<AnalysisId> = (0..).map_while(|k| h.index(&format!("{k}"))).collect();
+        let ids: Vec<AnalysisId> = ["swd", "adiv5", "mem-ap", "jtag", "cjtag"]
+            .iter()
+            .filter_map(|n| h.index(n))
+            .chain(analyses)
+            .collect();
+        for &a in &ids {
+            h.tally(a);
+        }
+        let (all, mut records) = (Instant::now(), 0usize);
+        while h.step()? {
+            for &a in &ids {
+                records += h.closed(a).len();
+            }
+        }
+        println!(
+            "pass alone, tallied {:.3} s, {records} records",
+            all.elapsed().as_secs_f64()
+        );
+    }
+
     let (mut h, root) = stack(&rec, kind, window)?;
     h.keep_checkpoints(
         root,
