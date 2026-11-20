@@ -237,10 +237,13 @@ pub fn adi_definition() -> Arc<Definition> {
                     .about(about)
             }))
             .with_settings(vec![
-                SettingDecl::list("idr", IDR_NOT_GIVEN..=0xFFFF_FFFF, 256, vec![]).about(
-                    "Each AP's IDR where the recording starts, AP 0 first, until an IDR read \
-                     gives it.",
-                ),
+                SettingDecl::list("idr", IDR_NOT_GIVEN..=0xFFFF_FFFF, 256, vec![])
+                    .about(
+                        "Each AP's IDR where the recording starts, AP 0 first, until an IDR read \
+                         gives it; -1 for an AP left out.",
+                    )
+                    .notation(Notation::Hex)
+                    .entries("AP"),
             ]),
     )
 }

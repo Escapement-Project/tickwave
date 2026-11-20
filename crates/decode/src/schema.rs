@@ -168,6 +168,10 @@ pub struct SettingDecl {
     pub inputs: Vec<InputId>,
     /// A sentence saying what it is, for a form that binds it.
     pub about: Option<Name>,
+    /// How a form shows a whole number or a list's: decimal where None.
+    pub notation: Option<Notation>,
+    /// What each entry of a list is, a form numbering them from 0: "AP" for "AP 0", "AP 1".
+    pub entries: Option<Name>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -475,6 +479,9 @@ impl Definition {
         for s in &self.settings {
             named(&s.name)?;
             phrase(s.about.as_ref())?;
+            if let Some(e) = &s.entries {
+                named(e)?;
+            }
             if !seen.insert(&s.name) {
                 return Err(SchemaError::DuplicateSetting(s.name.clone()));
             }
@@ -532,30 +539,39 @@ impl SettingDecl {
         self
     }
 
+    pub fn notation(mut self, notation: Notation) -> Self {
+        self.notation = Some(notation);
+        self
+    }
+
+    /// Names each entry of a list: "AP" for "AP 0", "AP 1".
+    pub fn entries(mut self, entries: impl Into<Name>) -> Self {
+        self.entries = Some(entries.into());
+        self
+    }
+
     pub fn applies_to(&self, input: InputId) -> bool {
         self.inputs.is_empty() || self.inputs.contains(&input)
     }
 
-    pub fn flag(name: impl Into<Name>, default: bool) -> Self {
+    fn new(name: impl Into<Name>, ty: SettingType) -> Self {
         Self {
             name: name.into(),
+            ty,
             inputs: vec![],
             about: None,
-            ty: SettingType::Flag { default },
+            notation: None,
+            entries: None,
         }
     }
 
+    pub fn flag(name: impl Into<Name>, default: bool) -> Self {
+        Self::new(name, SettingType::Flag { default })
+    }
+
     pub fn int(name: impl Into<Name>, range: std::ops::RangeInclusive<i64>, default: i64) -> Self {
-        Self {
-            name: name.into(),
-            inputs: vec![],
-            about: None,
-            ty: SettingType::Int {
-                min: *range.start(),
-                max: *range.end(),
-                default,
-            },
-        }
+        let (min, max) = (*range.start(), *range.end());
+        Self::new(name, SettingType::Int { min, max, default })
     }
 
     /// Whole numbers in `range`, at most `at_most` of them; `default` when a binding leaves it out.
@@ -565,17 +581,16 @@ impl SettingDecl {
         at_most: usize,
         default: Vec<i64>,
     ) -> Self {
-        Self {
-            name: name.into(),
-            inputs: vec![],
-            about: None,
-            ty: SettingType::List {
-                min: *range.start(),
-                max: *range.end(),
+        let (min, max) = (*range.start(), *range.end());
+        Self::new(
+            name,
+            SettingType::List {
+                min,
+                max,
                 at_most,
                 default,
             },
-        }
+        )
     }
 
     pub fn choice<N: Into<Name>>(
@@ -583,15 +598,8 @@ impl SettingDecl {
         choices: impl IntoIterator<Item = N>,
         default: usize,
     ) -> Self {
-        Self {
-            name: name.into(),
-            inputs: vec![],
-            about: None,
-            ty: SettingType::Choice {
-                names: names(choices),
-                default,
-            },
-        }
+        let names = names(choices);
+        Self::new(name, SettingType::Choice { names, default })
     }
 }
 

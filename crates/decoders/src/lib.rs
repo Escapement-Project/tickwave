@@ -27,9 +27,10 @@ pub(crate) fn window_bytes(w: &Option<(escapement_tickwave_decode::Window, usize
 #[cfg(test)]
 mod tests {
     use super::*;
-    use escapement_tickwave_decode::InputDecl;
+    use escapement_tickwave_decode::{InputDecl, SettingType};
 
-    /// A form that binds a decoder says what each of its ports, settings and upstream inputs is.
+    /// A form that binds a decoder says what each of its ports, settings and upstream inputs is,
+    /// and names a list setting's entries.
     #[test]
     fn every_port_setting_and_input_says_what_it_is() {
         let defs = [
@@ -46,6 +47,9 @@ mod tests {
             }
             for s in &d.settings {
                 assert!(s.about.is_some(), "{} setting {}", d.name, s.name);
+                if matches!(s.ty, SettingType::List { .. }) {
+                    assert!(s.entries.is_some(), "{} setting {}", d.name, s.name);
+                }
             }
             for i in &d.inputs {
                 if let InputDecl::Upstream(u) = i {

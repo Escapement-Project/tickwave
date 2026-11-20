@@ -2437,6 +2437,10 @@ fn a_definition_whose_settings_or_ports_clash_is_refused() {
         refused(vec![SettingDecl::flag("n", false).about("")]),
         schema(SchemaError::BadPhrase)
     );
+    assert_eq!(
+        refused(vec![SettingDecl::list("n", 0..=1, 4, vec![]).entries("")]),
+        schema(SchemaError::BadName)
+    );
     let port =
         Definition::new("set", 1, pulses_schema()).with_ports([PortDecl::new("p").about("")]);
     assert_eq!(

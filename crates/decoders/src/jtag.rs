@@ -313,10 +313,12 @@ pub fn definition() -> Arc<Definition> {
                         "The TCK edge TDO is read at: the rise, the fall after it, or whichever \
                          the IR scans' captures show.",
                     ),
-                SettingDecl::list("chain", 1..=IR_AT_MOST, CHAIN_AT_MOST, vec![]).about(
-                    "Each TAP's IR length, the TAP nearest TDO first, to cut each scan into its \
-                     TAPs' parts.",
-                ),
+                SettingDecl::list("chain", 1..=IR_AT_MOST, CHAIN_AT_MOST, vec![])
+                    .about(
+                        "Each TAP's IR length, the TAP nearest TDO first, to cut each scan into \
+                         its TAPs' parts.",
+                    )
+                    .entries("TAP"),
             ]),
     )
 }
