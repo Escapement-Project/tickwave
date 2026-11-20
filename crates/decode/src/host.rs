@@ -2258,6 +2258,20 @@ impl Host {
         if let Some(&span) = received.iter().find(|s| !lost.iter().any(|l| l.1 == **s)) {
             return Err(self.refuse(Refusal::LossNotDeclared { run: id, span }));
         }
+        // Refused before anything is admitted, so a refused turn leaves nothing.
+        if request.is_some()
+            && let Some((outstanding, _)) = r.outstanding
+        {
+            return Err(self.refuse(Refusal::RequestOutstanding { outstanding }));
+        }
+        if end.is_some() {
+            let opens = (out.ops.iter()).filter(|op| matches!(op, Op::Open { .. }));
+            let closes = (out.ops.iter()).filter(|op| matches!(op, Op::Close { .. }));
+            let open = (r.store.open_count() + opens.count()).saturating_sub(closes.count());
+            if open > 0 {
+                return Err(self.refuse(Refusal::LeftOpen { run: id, open }));
+            }
+        }
         let moved = frontier.is_some_and(|f| f != r.frontier);
         // Passed before its batch, the store drops an item the batch closes inside the input its
         // chain has taken, unless kept, and holds one that ends past it for a checkpoint.
@@ -2283,9 +2297,6 @@ impl Host {
             let Some(r) = self.run_of_mut(id) else {
                 return Ok(pause);
             };
-            if let Some((outstanding, _)) = r.outstanding {
-                return Err(self.refuse(Refusal::RequestOutstanding { outstanding }));
-            }
             let rid = RequestId {
                 run: id,
                 seq: r.next_request,
@@ -2303,10 +2314,6 @@ impl Host {
             let Some(r) = self.run_of_mut(id) else {
                 return Ok(pause);
             };
-            let open = r.store.open_count();
-            if open > 0 {
-                return Err(self.refuse(Refusal::LeftOpen { run: id, open }));
-            }
             r.finished = Some(end);
             for d in self.analyses[a].downstream.clone() {
                 self.deliver(d, Delivery::End { from: id, end })?;

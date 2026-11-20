@@ -1403,6 +1403,35 @@ fn a_run_whose_turn_is_refused_runs_no_more() {
     assert_eq!(h.step(), Ok(false));
 }
 
+/// A turn refused for what it asks or how it ends leaves none of its output admitted.
+#[test]
+fn a_turn_refused_after_its_output_leaves_none_of_it() {
+    // A second request while the first is out.
+    let turns = vec![
+        vec![Act::Request(0, 10)],
+        vec![
+            Act::Emit(open(frame(0), 0)),
+            Act::Emit(close(frame(0), 1)),
+            Act::Request(10, 20),
+        ],
+    ];
+    let (mut h, a) = toy_host(turns, HostOptions::default());
+    h.turn(a).unwrap();
+    assert!(matches!(h.turn(a), Err(Refusal::RequestOutstanding { .. })));
+    assert!(h.store(a).items().is_empty());
+    // Finished with an item still open.
+    let turns = vec![vec![Act::Emit(open(frame(0), 0)), Act::Finish(10)]];
+    let (mut h, a) = toy_host(turns, HostOptions::default());
+    assert_eq!(
+        h.turn(a),
+        Err(Refusal::LeftOpen {
+            run: h.run_id(a),
+            open: 1
+        })
+    );
+    assert!(h.store(a).items().is_empty());
+}
+
 #[test]
 fn a_turn_whose_run_is_replaced_meanwhile_is_refused_whole() {
     let turns = vec![vec![
