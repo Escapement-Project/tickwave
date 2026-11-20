@@ -8,8 +8,8 @@ use escapement_tickwave_decode::{
     Definition, Delivery, Element, ElementType, Exchange, FieldDecl, FieldId, FieldType, Host,
     HostOptions, Id, InputDecl, InputId, InputSpec, Keeping, KindDecl, KindId, LinkDecl, LinkId,
     LinkTo, LogEntry, MAX_PHRASE, Mismatch, Mode, Name, Need, Notation, Observation, Op, Pause,
-    PortDecl, Reason, Ref, Refusal, Refused, Reply, Role, RunView, Schema, SchemaError, Seek,
-    SeqDecl, SeqId, Setting, SettingDecl, SettingId, Source, SourceError, Span, Status, Tick,
+    PortDecl, Reason, Ref, Refusal, Refused, Reply, Request, Role, RunView, Schema, SchemaError,
+    Seek, SeqDecl, SeqId, Setting, SettingDecl, SettingId, Source, SourceError, Span, Status, Tick,
     UpstreamDecl, Value, Window, WindowId, field, name, seq,
 };
 use std::sync::{Arc, Mutex, atomic::Ordering::Relaxed};
@@ -1287,6 +1287,65 @@ fn a_turn_that_would_leave_its_run_waiting_on_nothing_is_refused() {
     let (mut h, a) = toy_host(turns, HostOptions::default());
     h.step().unwrap();
     assert_eq!(h.step(), Err(Refusal::ReplyLeft(h.run_id(a))));
+}
+
+#[test]
+fn a_turn_handed_back_unrun_leaves_its_run_as_it_was() {
+    let turns = vec![vec![Act::Request(0, 10)], vec![Act::TakeReply]];
+    let (mut h, a) = toy_host(turns, HostOptions::default());
+    // A first turn, taken out and handed back, as a worker stopped before it ran it would.
+    let t = h.begin_turn(a).unwrap();
+    h.end_turn(t).unwrap();
+    assert!(h.runnable(a));
+    for _ in 0..3 {
+        h.step().unwrap();
+    }
+    assert_eq!(h.consumed(a), 10);
+
+    // One whose reply is ready, for a decoder that waits for it.
+    let mut h = Host::new(HostOptions::default());
+    let input = InputSpec::Wire {
+        source: Box::new(Nothing::default()),
+        local: None,
+    };
+    let asks = Box::new(|_: &Bound, _| Box::new(AsksOnce(false)) as Box<dyn Decoder>);
+    let a = h.add(name("a"), toy(), input, asks, &[], all()).unwrap();
+    h.step().unwrap();
+    let reply = h.take_io().unwrap().unwrap();
+    h.reply(reply).unwrap();
+    let t = h.begin_turn(a).unwrap();
+    h.end_turn(t).unwrap();
+    assert!(h.runnable(a));
+    h.step().unwrap();
+    assert_eq!(h.consumed(a), 10);
+}
+
+/// Asks for one window and waits for it.
+struct AsksOnce(bool);
+
+impl Decoder for AsksOnce {
+    fn turn(&mut self, ex: &mut Exchange<'_>) -> Pause {
+        if ex.reply().is_none() && !self.0 {
+            self.0 = true;
+            ex.request(Request::Window { from: 0, upto: 10 });
+        }
+        Pause::Input
+    }
+}
+
+#[test]
+fn a_turn_runs_once() {
+    let turns = vec![
+        vec![Act::Emit(open(frame(0), 0)), Act::Emit(close(frame(0), 1))],
+        vec![],
+    ];
+    let (mut h, a) = toy_host(turns, HostOptions::default());
+    let mut t = h.begin_turn(a).unwrap();
+    t.run();
+    t.run();
+    assert_eq!(t.emitted(), 2);
+    h.end_turn(t).unwrap();
+    assert!(h.store(a).items().contains_key(&frame(0)));
 }
 
 #[test]

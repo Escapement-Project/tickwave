@@ -420,6 +420,9 @@ pub struct Turn {
     inbox: VecDeque<Delivery>,
     budget: usize,
     interrupt: Arc<AtomicBool>,
+    /// The run's `started` and `fresh` before the turn, which a turn handed back unrun restores.
+    started: bool,
+    fresh: bool,
     done: Option<Done>,
 }
 
@@ -441,7 +444,11 @@ struct Done {
 }
 
 impl Turn {
+    /// Runs the decoder's turn, once: a second call does nothing.
     pub fn run(&mut self) {
+        if self.done.is_some() {
+            return;
+        }
         let mut ex = Exchange {
             run: self.run,
             out: Out::default(),
@@ -2131,6 +2138,7 @@ impl Host {
             let why = Refusal::TurnUnderWay(r.id);
             return Err(self.refuse(why));
         }
+        let (started, fresh) = (r.started, r.fresh);
         r.started = true;
         r.out = true;
         r.fresh = false;
@@ -2142,6 +2150,8 @@ impl Host {
             inbox: std::mem::take(&mut r.inbox),
             budget,
             interrupt: r.interrupt.clone(),
+            started,
+            fresh,
             done: None,
         })
     }
@@ -2179,8 +2189,9 @@ impl Host {
             received,
         }) = t.done.take()
         else {
-            // A turn handed back without running: its reply goes back too.
-            r.fresh |= t.reply.is_some() || !r.inbox.is_empty();
+            // A turn handed back without running leaves the run as it was, its reply back too.
+            r.started = t.started;
+            r.fresh |= t.fresh;
             r.ready = t.reply;
             return Ok(Pause::Input);
         };
