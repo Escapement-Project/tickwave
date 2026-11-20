@@ -1,8 +1,9 @@
 // <tickwave-inset>: one annotation's span, magnified, with its label, the annotations inside it as
 // notes, and an optional `measure` readout. It sweeps in left to right once per appearance. A reader
 // can point at a note or a pulse to read it, zoom in and move within the span, step through the notes
-// by keys, and open the recording at a note, over the span zoomed to: in a view on the page (`for`) or
-// on another page (`href`).
+// by keys, and open the recording at a note, over the span zoomed to: in a view on the page (`for`),
+// on another page (`href`), or through the reference whose popover holds it. A click on the
+// plot opens it, and so does the footer's Open, the way a finger opens it.
 
 import { covers, type Annotation, type MeasureKind } from "../annotations.ts";
 import { INSET_ATTRIBUTES, parseChannels, parsePad, parseScale, parseSweep } from "../attributes.ts";
@@ -44,7 +45,7 @@ canvas { display: block; }
    It is held once the annotation asks for a measure or the inset can be pointed at, and the key has
    a line of its own: the inset's height is set when its sidecar arrives, and neither its data nor
    the pointer moves anything. */
-.line { flex: 1 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; }
+.line { flex: 1 1 0; min-width: 0; overflow: hidden; white-space: nowrap; }
 /* The line's box holds the text's font and the figures' at all times, so a measure or a reading
    that brings figures in, in a font of its own, grows nothing. */
 .line::before { content: "\\200b"; }
@@ -59,12 +60,18 @@ canvas { display: block; }
 .level::after { content: "high"; visibility: hidden; }
 .said { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .key { display: flex; gap: 12px; flex-basis: 100%; justify-content: flex-end; }
+/* Opens the recording as a click on the plot does: the way a finger opens it. It sits on the held
+   first line and comes with it, set as text, so the inset grows no taller; the padding widens what a
+   finger can hit. */
+.open { flex: none; margin: -6px -4px; padding: 6px 4px; color: var(--ink, CanvasText); text-decoration: underline;
+  text-underline-offset: .2em; cursor: pointer; white-space: nowrap; }
+.open:focus-visible { outline: var(--focus-width, 2px) solid var(--ink, CanvasText); outline-offset: -2px; border-radius: 4px; }
 .key svg { vertical-align: middle; margin-right: 5px; }
 `;
 
 const HTML = `<figure part="inset"><figcaption part="label"></figcaption><p class="text" part="text" hidden></p>
 <div class="frame" part="frame"><canvas part="canvas" aria-hidden="true"></canvas><a class="hit" part="plot" hidden></a><span class="opens-at" part="opens-at" aria-hidden="true" hidden>Opens here</span></div>
-<div class="foot" part="foot"><span class="line" hidden><span class="strut figures" aria-hidden="true">\u200b</span><span class="measure figures" part="measure" hidden></span><span class="reading" part="reading" aria-hidden="true"></span></span><span class="key" part="key"></span></div>
+<div class="foot" part="foot"><span class="line" hidden><span class="strut figures" aria-hidden="true">\u200b</span><span class="measure figures" part="measure" hidden></span><span class="reading" part="reading" aria-hidden="true"></span></span><a class="open" part="open" tabindex="-1" hidden>Open ›</a><span class="key" part="key"></span></div>
 <span class="said" aria-live="polite"></span>
 <div class="notice" part="notice" role="status" hidden></div></figure>`;
 
@@ -85,6 +92,7 @@ export class TickwaveInset extends TickwaveElement {
   readonly #frame: HTMLElement;
   readonly #hit: HTMLAnchorElement;
   readonly #opensAt: HTMLElement;
+  readonly #open: HTMLAnchorElement;
   readonly #line: HTMLElement;
   readonly #reading: HTMLElement;
   readonly #said: HTMLElement;
@@ -158,6 +166,17 @@ export class TickwaveInset extends TickwaveElement {
     this.#said = this.root.querySelector(".said")!;
     this.#prober = new Prober(this.#plot, () => this.#loaded, (r) => this.#probed(r));
     this.#opensAt = this.root.querySelector(".opens-at")!;
+    this.#open = this.root.querySelector(".open")!;
+    this.#open.draggable = false;
+    this.#open.addEventListener("click", (e) => {
+      // A link goes where its address says; in a reference's popover, the reference opens its view.
+      if (!this.#open.hasAttribute("href") && this.#openView()) e.preventDefault();
+    });
+    // Over it, the plot marks where it opens.
+    this.#open.addEventListener("pointerenter", () => this.#mark());
+    this.#open.addEventListener("pointerleave", () => this.#mark());
+    this.#open.addEventListener("focus", () => this.#mark());
+    this.#open.addEventListener("blur", () => this.#mark());
     this.#plot.onDraw = () => {
       this.#prober.probeIfMoved();
       this.#mark();
@@ -703,6 +722,16 @@ export class TickwaveInset extends TickwaveElement {
     return el?.localName === "tickwave-view" ? (el as TickwaveView) : null;
   }
 
+  /** The reference whose popover holds this inset, if its `for` names a view: it opens that view on
+   * a click the inset doesn't take. */
+  get #opener(): Element | null {
+    const root = this.closest("[popover]")?.getRootNode();
+    const owner = root instanceof ShadowRoot ? root.host : null;
+    if (owner?.localName !== "tickwave-ref") return null;
+    const id = owner.getAttribute("for");
+    return id && document.getElementById(id)?.localName === "tickwave-view" ? owner : null;
+  }
+
   /** The note lit by the pointer or the keys, if any. */
   get lit(): string | null {
     return this.#lit;
@@ -750,7 +779,18 @@ export class TickwaveInset extends TickwaveElement {
     const address = id && !view ? this.#address(id) : null;
     if (address) hit.href = address;
     else hit.removeAttribute("href");
-    hit.classList.toggle("opens", !!address || !!view);
+    const opens = !!address || !!view || this.#opener !== null;
+    hit.classList.toggle("opens", opens);
+    const open = this.#open;
+    open.hidden = hit.hidden || !opens;
+    if (address) {
+      open.href = address;
+      open.removeAttribute("role");
+    } else {
+      open.removeAttribute("href");
+      open.setAttribute("role", "button");
+    }
+    open.setAttribute("aria-label", "Open the recording");
     const popped = this.closest("[popover]") !== null;
     if (popped) hit.setAttribute("tabindex", "-1");
     else if (address) hit.removeAttribute("tabindex");
@@ -765,13 +805,14 @@ export class TickwaveInset extends TickwaveElement {
     );
   }
 
-  /** Marks where a click or Enter opens the recording, on an inset that opens one: the lit note,
-   * or with the keys' focus on the inset and no note lit, the span shown. */
+  /** Marks where a click, Enter or Open opens the recording, on an inset that opens one: the lit
+   * note, or with no note lit, the span shown while the keys' focus is on the inset or the pointer or
+   * focus is on Open. */
   #mark(): void {
     const cue = this.#opensAt;
     const l = this.#plot.layout;
     const note = this.#lit ? this.#loaded?.annotations.byId.get(this.#lit) : undefined;
-    const focused = this.#hit.matches(":focus-visible");
+    const focused = this.#hit.matches(":focus-visible") || this.#open.matches(":hover, :focus-visible");
     const opens = this.#hit.classList.contains("opens") && !this.#hit.hidden;
     const last = l?.rows.at(-1);
     const x = !l ? NaN : note ? Math.max(l.plotLeft, this.#plot.xAt(note.start)) : l.plotLeft;

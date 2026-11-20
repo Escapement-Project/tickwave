@@ -1,7 +1,8 @@
 // <tickwave-ref>: text that cites an annotation. Hover or focus opens a <tickwave-inset> in a popover
 // beside the text, so nothing on the page moves. The arrow keys zoom and move it, and step through its
 // notes; a click or Enter opens the `for` view there, or at the note the pointer or the keys have lit,
-// over the span the reader has zoomed to.
+// over the span the reader has zoomed to. A finger has no hover: a tap on the text opens the popover
+// and the next one closes it, and the inset's Open opens the view.
 
 import { autoUpdate, computePosition, flip, inline, offset, shift } from "@floating-ui/dom";
 import { REF_ATTRIBUTES } from "../attributes.ts";
@@ -39,6 +40,10 @@ export class TickwaveRef extends TickwaveElement {
   #list: readonly { id: string; label: string | null; text: string | null }[] = [];
   /** Some of the bundled annotations are still to read: the annotation cited may be among them. */
   #partial = false;
+  /** The last pointer pressed on the reference was a finger. */
+  #touch = false;
+  /** That finger opened the popover, which was closed before it touched. */
+  #touchOpened = false;
 
   constructor() {
     super(CSS, `<slot></slot><div class="pop" part="popover" popover="manual"></div>`);
@@ -47,9 +52,19 @@ export class TickwaveRef extends TickwaveElement {
       if (seen.some((s) => s.isIntersecting)) this.#prefetch();
     });
     // The popover is inside the reference, so the pointer moving into it enters the reference again.
-    this.addEventListener("pointerenter", () => {
+    // A finger enters as it touches down, before its pointerdown.
+    this.addEventListener("pointerenter", (e) => {
       clearTimeout(this.#closing);
+      this.#touch = e.pointerType === "touch";
+      this.#touchOpened = this.#touch && !this.#pop.matches(":popover-open");
       this.#open();
+    });
+    this.addEventListener("pointerdown", (e) => {
+      this.#touch = e.pointerType === "touch";
+    });
+    // A tap is read from the finger lifting: Firefox sends no click for a tap on slotted text.
+    this.addEventListener("pointerup", (e) => {
+      if (e.pointerType === "touch" && !this.#inPopover(e) && !this.#touchOpened) this.#close();
     });
     // A finger's pointer leaves as it lifts, so only a mouse's leaving closes.
     this.addEventListener("pointerleave", (e) => {
@@ -57,11 +72,17 @@ export class TickwaveRef extends TickwaveElement {
       clearTimeout(this.#closing);
       this.#closing = window.setTimeout(() => this.#close(), GRACE_MS);
     });
+    // A finger held on the text that becomes a scroll has left it. One in the popover scrolls the
+    // page past the inset it is reading, which stays.
+    this.addEventListener("pointercancel", (e) => {
+      if (e.pointerType === "touch" && !this.#inPopover(e)) this.#close();
+    });
     this.addEventListener("focus", () => this.#open());
     this.addEventListener("blur", () => this.#close());
     // A tap in the popover that only lit a note has been answered there.
     this.addEventListener("click", (e) => {
-      if (!e.defaultPrevented) void this.#go();
+      if (e.defaultPrevented || (this.#touch && !this.#inPopover(e))) return;
+      void this.#go();
     });
     this.addEventListener("keydown", (e) => {
       // As a button answers: Enter, and Space, which would otherwise scroll the page.
@@ -91,6 +112,10 @@ export class TickwaveRef extends TickwaveElement {
   #escape = (e: KeyboardEvent) => {
     if (e.key === "Escape") this.#close();
   };
+
+  #inPopover(e: Event): boolean {
+    return e.composedPath().includes(this.#pop);
+  }
 
   /** The view named by `for`, if any. */
   get #view(): TickwaveView | null {

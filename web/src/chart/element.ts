@@ -61,6 +61,12 @@ const CSS = `
   border: 1px solid var(--hair, GrayText); border-radius: 10px; box-shadow: 0 2px 10px rgba(0, 0, 0, .14); overflow: visible;
   pointer-events: none; }
 :where(tickwave-chart) .tw-pop-head { display: flex; align-items: center; margin: 0 4px 4px; font-size: 13px; }
+:where(tickwave-chart) .tw-pop-top { display: flex; align-items: center; gap: 8px; margin: 0 4px 4px; }
+:where(tickwave-chart) .tw-pop-top > .tw-pop-head { flex: 1 1 0; min-width: 0; margin: 0; }
+/* The one part of the popover the pointer reaches. Set as text, so the head's line grows no taller;
+   the padding widens what a finger can hit. */
+:where(tickwave-chart) .tw-pop-open { margin: -6px -4px; padding: 6px 4px; font-size: 12px; color: var(--ink, CanvasText);
+  text-decoration: underline; text-underline-offset: .2em; cursor: pointer; white-space: nowrap; pointer-events: auto; }
 `;
 
 /** The other elements, from the tickwave.js beside this module, the first time a point's evidence
@@ -147,8 +153,9 @@ export class TickwaveChart extends HTMLElement {
   /** The URL evidence is relative to: the data's file, or the page for data set directly. */
   #base = document.baseURI;
   #pop: HTMLDivElement | null = null;
-  /** The popover's first line: the series whose recording it shows. */
+  /** The popover's first line: the series whose recording it shows, and the Open a finger takes. */
   #popHead: HTMLParagraphElement | null = null;
+  #popOpen: HTMLAnchorElement | null = null;
   #inset: HTMLElement | null = null;
   /** The point whose evidence the popover shows, or is loading to show. */
   #pointed: Pointed | null = null;
@@ -168,6 +175,10 @@ export class TickwaveChart extends HTMLElement {
   /** The point the mouse rests on, and the timer that opens it. */
   #resting: Pointed | null = null;
   #dwell = 0;
+  /** The last pointer pressed on the plot was a finger, and it opened the popover of the point it
+   * pressed, which wasn't showing before. */
+  #touch = false;
+  #touchOpened = false;
   /** Says, once, that Enter opens a point's recording; in the description while any point names one. */
   #hint: HTMLSpanElement | null = null;
 
@@ -439,8 +450,20 @@ export class TickwaveChart extends HTMLElement {
     this.#pop = document.createElement("div");
     this.#pop.className = "tw-pop";
     this.#pop.setAttribute("popover", "manual");
-    this.#popHead = this.#pop.appendChild(document.createElement("p"));
+    const top = this.#pop.appendChild(document.createElement("div"));
+    top.className = "tw-pop-top";
+    this.#popHead = top.appendChild(document.createElement("p"));
     this.#popHead.className = "tw-pop-head";
+    this.#popHeadHtml = "";
+    const open = (this.#popOpen = top.appendChild(document.createElement("a")));
+    open.className = "tw-pop-open";
+    open.textContent = "Open ›";
+    open.setAttribute("role", "button");
+    open.setAttribute("aria-label", "Open the recording");
+    open.hidden = true;
+    open.addEventListener("click", () => {
+      if (this.#pointed) void this.#goToEvidence(this.#pointed);
+    });
     this.#inset = null;
     this.replaceChildren(...[this.#legend, this.#svg, this.#readout, this.#notice, this.#probe, this.#hint, this.#pop].filter((e) => e !== null));
     this.#sizePlot();
@@ -842,6 +865,7 @@ export class TickwaveChart extends HTMLElement {
     };
     svg.addEventListener("pointermove", (e) => {
       if (e.pointerType !== "mouse") return;
+      this.#touch = false;
       // An end label names its series while the pointer is on it.
       const label = endOf(e);
       let series = this.#series;
@@ -871,11 +895,25 @@ export class TickwaveChart extends HTMLElement {
       const i = at(e);
       if (i !== null) this.#pick(i, endOf(e) ?? this.#series);
       const pointed = near(e);
+      this.#touch = e.pointerType === "touch";
+      const showing = samePoint(pointed, this.#pointed) && !!this.#pop?.matches(":popover-open");
+      this.#touchOpened = this.#touch && pointed !== null && !showing;
       if (pointed) void this.#openEvidence(pointed);
     });
+    // A finger has no hover: a tap shows a point's recording and the next tap on it closes it. The
+    // popover's Open opens it.
     svg.addEventListener("click", (e) => {
       const pointed = near(e);
-      if (pointed) void this.#goToEvidence(pointed);
+      if (!pointed) return;
+      if (this.#touch) {
+        if (!this.#touchOpened) this.#closeEvidence();
+        return;
+      }
+      void this.#goToEvidence(pointed);
+    });
+    // A finger held on a point that becomes a scroll has left it.
+    svg.addEventListener("pointercancel", (e) => {
+      if (e.pointerType === "touch") this.#closeEvidence();
     });
     svg.addEventListener("pointerleave", (e) => {
       if (e.pointerType !== "mouse") return;
@@ -909,6 +947,7 @@ export class TickwaveChart extends HTMLElement {
 
   #key(e: KeyboardEvent): void {
     if (!this.#data || e.target !== this || browserKey(e)) return;
+    this.#touch = false;
     const n = this.#data.x.values.length;
     const i = this.#x;
     let next: number | null | undefined;
@@ -984,6 +1023,9 @@ export class TickwaveChart extends HTMLElement {
     set("series", pointed.series.series.colour || null);
     const head = `${swatch(pointed.series.series, this.#colour())}${escapeHtml(pointed.series.series.name)}`;
     if (this.#popHead && this.#popHeadHtml !== head) this.#popHead.innerHTML = this.#popHeadHtml = head;
+    // The mouse closes the popover as it leaves the plot for it, and the keys have Enter: only a
+    // finger can reach an Open.
+    if (this.#popOpen) this.#popOpen.hidden = !this.#touch;
     if (!pop.matches(":popover-open")) pop.showPopover();
     this.#stopPosition?.();
     const svg = this.#svg;

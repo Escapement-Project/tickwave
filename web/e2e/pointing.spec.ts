@@ -626,3 +626,121 @@ test("a reference opens its view over the span its popover is zoomed to; a drag 
   await expect.poll(async () => (await viewWindow(view)).start, { timeout: 20_000 }).toBeCloseTo(a.start - pad, 3);
   expect((await viewWindow(view)).end).toBeCloseTo(a.end + pad, 3);
 });
+
+test("an inset that opens somewhere has an Open at the end of its foot's first line, which goes where the plot does and is no Tab stop of its own; one that opens nothing has none", async ({ page }) => {
+  const plain = await drawn(page);
+  await expect(plain.locator(".open")).toBeHidden();
+  const inset = await drawn(page, `&href=${encodeURIComponent("/dist/site/open.html")}`);
+  const open = inset.locator(".open");
+  await expect(open).toBeVisible();
+  const hrefs = () => inset.evaluate((e) => [".hit", ".open"].map((s) => e.shadowRoot!.querySelector(s)!.getAttribute("href")));
+  const [hit, link] = await hrefs();
+  expect(link).toBe(hit);
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("Shift+ArrowRight");
+  await page.keyboard.press("Shift+ArrowRight");
+  const [litHit, litLink] = await hrefs();
+  expect(litLink).toBe(litHit);
+  expect(new URL(litLink!, page.url()).searchParams.get("annotation")).toBe("dpidr-ack");
+  await page.keyboard.press("Tab");
+  await expect(open).not.toBeFocused();
+});
+
+test("on a touch screen, Open opens the view at the note a tap lit", async ({ browser }) => {
+  const context = await browser.newContext({ hasTouch: true });
+  const page = await context.newPage();
+  const inset = await drawn(page, "&for");
+  let ack: { x: number; y: number } | null = null;
+  for (let fx = 0.15; fx < 0.98 && !ack; fx += 0.01) {
+    const p = await at(inset, fx, 10);
+    await page.mouse.move(p.x, p.y);
+    if ((await reading(inset))?.[0] === "ack OK") ack = p;
+  }
+  await page.mouse.move(0, 0);
+  await page.touchscreen.tap(ack!.x, ack!.y);
+  expect(await reading(inset)).toEqual(ACK);
+  const view = page.locator("#v");
+  await expect(view).not.toHaveAttribute("open", "");
+  await inset.locator(".open").tap();
+  await expect(view).toHaveAttribute("open", "");
+  await expect.poll(() => view.evaluate((v) => (v as HTMLElement & { window: { start: number } | null }).window?.start ?? null), { timeout: 20_000 }).toBe(377102308);
+  await context.close();
+});
+
+test("on a touch screen, a tap where no note is opens nothing, and Open then opens the view over the inset's annotation", async ({ browser }) => {
+  const context = await browser.newContext({ hasTouch: true });
+  const page = await context.newPage();
+  const inset = await drawn(page, "&for");
+  const b = (await inset.locator("canvas").boundingBox())!;
+  await page.touchscreen.tap(b.x + b.width / 2, b.y + b.height * 0.75);
+  const view = page.locator("#v");
+  await page.waitForTimeout(300);
+  await expect(view).not.toHaveAttribute("open", "");
+  await inset.locator(".open").tap();
+  await expect(view).toHaveAttribute("open", "");
+  // dpidr-read runs from 377,094,557 to 377,140,560 ticks.
+  await expect
+    .poll(() => view.evaluate((v) => {
+      const w = (v as HTMLElement & { window: { start: number; end: number } | null }).window;
+      return w !== null && w.start <= 377094557 && w.end >= 377140560;
+    }), { timeout: 20_000 })
+    .toBe(true);
+  await context.close();
+});
+
+/** The reference on view.html, its text's left end, and whether its popover is open. */
+async function reference(page: Page, query = "") {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto(`/e2e/pages/view.html?annotations=fixtures/identify-swd.annotations.toml${query}`);
+  const ref = page.locator("tickwave-ref");
+  await ref.scrollIntoViewIfNeeded();
+  const rb = (await ref.boundingBox())!;
+  const shown = () => ref.locator(".pop").evaluate((p) => p.matches(":popover-open"));
+  return { ref, text: { x: rb.x + 4, y: rb.y + rb.height / 2 }, shown };
+}
+
+test("on a touch screen, a tap on a reference shows its figure and opens nothing, the next tap closes it, and the figure's Open opens the view", async ({ browser }) => {
+  const context = await browser.newContext({ hasTouch: true });
+  const page = await context.newPage();
+  const { ref, text, shown } = await reference(page);
+  const view = page.locator("#v");
+  await page.touchscreen.tap(text.x, text.y);
+  await expect.poll(shown).toBe(true);
+  await page.waitForTimeout(300);
+  await expect(view).not.toHaveAttribute("open", "");
+  await page.touchscreen.tap(text.x, text.y);
+  await expect.poll(shown).toBe(false);
+  await page.touchscreen.tap(text.x, text.y);
+  await expect.poll(shown).toBe(true);
+  const inset = ref.locator("tickwave-inset");
+  await expect(inset.locator(".measure")).toHaveText(/kHz/, { timeout: 20_000 });
+  await inset.locator(".open").tap();
+  await expect(view).toHaveAttribute("open", "");
+  await expect.poll(shown).toBe(false);
+  await context.close();
+});
+
+test("on a touch screen, a finger held on a reference that turns into a scroll closes its figure", async ({ browser, browserName }) => {
+  test.skip(browserName !== "chromium", "a touch that scrolls is sent through Chromium's DevTools protocol");
+  const context = await browser.newContext({ hasTouch: true });
+  const page = await context.newPage();
+  const { text, shown } = await reference(page, "&below");
+  const cdp = await context.newCDPSession(page);
+  const touch = (type: "touchStart" | "touchMove" | "touchEnd", touchPoints: { x: number; y: number }[]) => cdp.send("Input.dispatchTouchEvent", { type, touchPoints });
+  await touch("touchStart", [text]);
+  await expect.poll(shown).toBe(true);
+  for (let k = 1; k <= 12; k++) await touch("touchMove", [{ x: text.x, y: text.y + 15 * k }]);
+  await touch("touchEnd", []);
+  await expect.poll(shown).toBe(false);
+  await context.close();
+});
+
+test("over Open, with no note lit, the plot marks where it opens: the span shown", async ({ page }) => {
+  const inset = await drawn(page, "&for");
+  const cue = inset.locator(".opens-at");
+  await expect(cue).toBeHidden();
+  await inset.locator(".open").hover();
+  await expect(cue).toBeVisible();
+  await page.mouse.move(0, 0);
+  await expect(cue).toBeHidden();
+});

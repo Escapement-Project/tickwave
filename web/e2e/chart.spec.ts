@@ -782,6 +782,72 @@ test.describe("evidence", () => {
     await expect(page.locator("#c .tw-pop")).toBeVisible();
   });
 
+  test("a popover the mouse opens has no Open: the mouse closes it on leaving the plot for it", async ({ page }) => {
+    const last = await point(page, 2);
+    await page.mouse.move(last.x, last.y);
+    const pop = page.locator("#c .tw-pop");
+    await expect(pop.locator("tickwave-inset")).toHaveAttribute("annotation", "dpidr-read");
+    await expect(pop.locator(".tw-pop-open")).toBeHidden();
+  });
+
+  test.describe("on a touch screen", () => {
+    test.use({ hasTouch: true });
+
+    test("a tap on a point shows its recording and fires nothing, the next tap on it closes it, and Open fires tickwave-evidence and opens the view", async ({ page }) => {
+      const pop = page.locator("#c .tw-pop");
+      const open = pop.locator(".tw-pop-open");
+      const last = await point(page, 2);
+      await page.touchscreen.tap(last.x, last.y);
+      await expect(pop.locator("tickwave-inset")).toHaveAttribute("annotation", "dpidr-read");
+      await expect(open).toBeVisible();
+      await page.waitForTimeout(300);
+      expect(await evidence(page)).toEqual([]);
+      await page.touchscreen.tap(last.x, last.y);
+      await expect(pop).toBeHidden();
+      await page.touchscreen.tap(last.x, last.y);
+      await expect(open).toBeVisible();
+      await open.tap();
+      expect(await evidence(page)).toEqual([{ x: "3", series: "a", recording: RECORDING, annotations: SIDECAR, annotation: "dpidr-read" }]);
+      await expect(page.locator("#v")).toHaveAttribute("open", "");
+      await expect(pop).toBeHidden();
+    });
+
+    test("a popover the mouse opens after a tap has no Open", async ({ page }) => {
+      const pop = page.locator("#c .tw-pop");
+      const last = await point(page, 2);
+      await page.touchscreen.tap(last.x, last.y);
+      await expect(pop.locator(".tw-pop-open")).toBeVisible();
+      const first = await point(page, 0);
+      await page.mouse.move(first.x, first.y);
+      await expect(pop.locator("tickwave-inset")).toHaveAttribute("annotation", "attach");
+      await expect(pop.locator(".tw-pop-open")).toBeHidden();
+    });
+
+    test("a page that cancels Open's tickwave-evidence takes over", async ({ page }) => {
+      await page.evaluate(() => document.addEventListener("tickwave-evidence", (e) => e.preventDefault(), { once: true }));
+      const pop = page.locator("#c .tw-pop");
+      const last = await point(page, 2);
+      await page.touchscreen.tap(last.x, last.y);
+      await pop.locator(".tw-pop-open").tap();
+      expect(await evidence(page)).toHaveLength(1);
+      await expect(pop).toBeHidden();
+      await expect(page.locator("#v")).not.toHaveAttribute("open", "");
+    });
+
+    test("a finger held on a point that turns into a scroll closes its recording", async ({ page, browserName }) => {
+      test.skip(browserName !== "chromium", "a touch that scrolls is sent through Chromium's DevTools protocol");
+      const pop = page.locator("#c .tw-pop");
+      const last = await point(page, 2);
+      const cdp = await page.context().newCDPSession(page);
+      const touch = (type: "touchStart" | "touchMove" | "touchEnd", touchPoints: { x: number; y: number }[]) => cdp.send("Input.dispatchTouchEvent", { type, touchPoints });
+      await touch("touchStart", [last]);
+      await expect(pop).toBeVisible();
+      for (let k = 1; k <= 12; k++) await touch("touchMove", [{ x: last.x, y: last.y - 15 * k }]);
+      await touch("touchEnd", []);
+      await expect(pop).toBeHidden();
+    });
+  });
+
   test("the keys reach a point's evidence: Escape closes it, Enter opens the view there", async ({ page }) => {
     const pop = page.locator("#c .tw-pop");
     const inset = pop.locator("tickwave-inset");

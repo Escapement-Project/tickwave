@@ -226,8 +226,11 @@ A mouse only passing over the plot opens nothing, so it loads nothing. Where poi
 another, the picked series' point opens, or else the first series' in the data. The keys open the
 picked series' point at that setting, or else the first there that names a recording.
 
-A click or Enter fires `tickwave-evidence`. A page can cancel it and take over. On a touch screen,
-the tap is the click. Unless the page cancels the event, the chart opens the page's
+A click or Enter fires `tickwave-evidence`. A page can cancel it and take over. A finger has no
+hover: on a touch screen, a tap on a point shows its popover and fires nothing, and the next tap
+on the point closes it. The popover then has Open, beside the series' name, which fires the event
+as a click does. A finger held on a point that turns into a scroll closes the popover. Unless the
+page cancels the event, the chart opens the page's
 `<tickwave-view>` of the same recording at the annotation. With no such view, the popover stays
 open, and the event is all that happens.
 

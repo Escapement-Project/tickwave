@@ -19,6 +19,12 @@ recording decoded with `--recipe`.
 `escapement-tickwave-decode` is the contract a protocol decoder is written against, and the host
 that runs decoders. A decoder that breaks the contract is refused, never a panic.
 
+On a phone or tablet, a tap on a reference or a chart's point shows its figure without leaving it,
+and the next tap closes it. A figure that opens a recording has an Open link under its trace, so a
+finger can open it with no note lit, and a chart's figure opened by a tap has one beside the
+series' name. A finger held on a reference or a point that turns into a scroll no longer leaves
+the figure open.
+
 ## v0.1.1
 
 A recording on another site opens when that site sends `Access-Control-Allow-Origin`, as GitHub

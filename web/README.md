@@ -462,7 +462,9 @@ the note stepped to. Escape lights none. On a touch screen, a tap lights a note 
 
 With `for` or `href`, the inset opens the recording at a note. A click on a note, Enter on the
 note the keys lit, or a second tap on a lit note opens it there. A click elsewhere on the plot
-opens it at the inset's own annotation. Zoomed in, the recording opens over the span the inset
+opens it at the inset's own annotation. Open, at the end of the line under the trace, opens it as a
+click on the plot does: at the lit note, or else at the annotation. On a touch screen it is how a
+finger opens the inset with no note lit. Zoomed in, the recording opens over the span the inset
 shows. `for` opens a view on the page, and wins where it names one. Otherwise `href` makes the
 inset a link to that page: tickwave's Open page, or any page that reads the same parameters. The
 inset sets `src`, `annotations` and `annotation` in the page's query, and `window` while zoomed in:
@@ -472,8 +474,8 @@ another site's whole. As a link, the inset opens a new tab on a middle click or 
 click, and shows its address on hover.
 
 Such an inset marks where it opens, with a small "Opens here" over the plot that moves nothing. It
-sits on the note lit by the pointer, a tap or the keys. With the keys' focus on the inset and no
-note lit, it sits at the start of the span shown, where Enter opens.
+sits on the note lit by the pointer, a tap or the keys. With no note lit, it sits at the start of
+the span shown while the keys' focus is on the inset, where Enter opens, or the pointer is on Open.
 
 An inset the pointer passes through, as in a chart's popover, where `pointer-events` is `none`,
 does none of this. Inside a popover the inset is no Tab stop, and the element that opened it keeps
@@ -500,7 +502,11 @@ read the inset, and has 300 ms to cross between the text and the popover. Moving
 the focus away, or Escape, closes the popover. With the focus on the reference, the arrow keys
 work the inset as they do an inset with the focus. A click, Enter or Space opens its view at the
 note the pointer or the keys lit, or else at the annotation, and over the span the reader zoomed the
-popover to. With the popover closed, as after Escape, the view opens at the annotation's own span.
+popover to. With a view to open, the popover's inset has Open, which does the same.
+
+A finger has no hover. On a touch screen, a tap on the phrase opens the popover and nothing else,
+and the next tap on the phrase closes it. The inset's Open opens the view. A finger held on the
+phrase that turns into a scroll closes the popover. With the popover closed, as after Escape, the view opens at the annotation's own span.
 A screen reader cannot reach into the drawn inset, so the annotation's label and text describe the
 reference itself.
 
@@ -532,8 +538,9 @@ attributes. So Firefox's reader view, and a page without its CSS, still show the
 caption names it, and the table it names describes it. A reader picks a setting by pointing at it,
 tapping it or stepping to it with the arrow keys, and picks a series from the legend or a line's
 end label. A point can name a recording and one of its annotations. Pointing at it opens an inset
-of that annotation, and a click opens the page's view of the recording there. Only then does the
-chart load `tickwave.js`, from beside itself.
+of that annotation, and a click opens the page's view of the recording there. On a touch screen, a
+tap shows the inset, and its popover's Open opens the view. Only once an inset opens does the chart
+load `tickwave.js`, from beside itself.
 
 `CHARTS.md`, at the repository's root, specifies the data format, `tickwave-chart/1`, and every
 attribute, property and event. `tickwave.css` reserves a chart's room before the module defines it,

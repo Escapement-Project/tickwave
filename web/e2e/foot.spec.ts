@@ -57,3 +57,22 @@ test("an inset without a measure keeps its boxes as a reading brings figures in,
   expect(await boxes(page)).toEqual(nothing);
   expect(nothing.foot[1]).toBe(withMeasure);
 });
+
+test("in a 288 px panel, as on a 320 px phone, Open shares the foot's first line: the inset is as tall as one that opens nothing, and stays so as the pointer reads a row", async ({ page }) => {
+  const narrow = async (query: string) => {
+    await page.goto(INSET("dpidr-read") + query);
+    await page.locator("#i").evaluate((i, fonts) => i.setAttribute("style", `max-width: 288px; ${fonts}`), FONTS);
+    await expect(page.locator("#i figcaption")).toHaveText(/debug port's ID register/);
+    await page.evaluate(() => document.fonts.ready);
+    await expect(page.locator("#i .measure")).toContainText("SWCLK");
+    await expect(page.locator("#i .key > span")).toHaveCount(2);
+  };
+  await narrow("");
+  await expect(page.locator("#i .open")).toBeHidden();
+  const plain = await boxes(page);
+  await narrow(`&href=${encodeURIComponent("/dist/site/open.html")}`);
+  await expect(page.locator("#i .open")).toBeVisible();
+  expect(await boxes(page)).toEqual(plain);
+  await point(page);
+  expect(await boxes(page)).toEqual(plain);
+});
