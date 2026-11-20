@@ -175,6 +175,9 @@ struct Slot {
     /// Sketches held, for the tests.
     #[cfg(test)]
     sketches: u64,
+    /// The query thread waits with nothing to run, for the tests.
+    #[cfg(test)]
+    idle: bool,
     /// No sketch is made: for the tests of what a viewer holding nothing draws.
     no_sketch: bool,
     /// The file is let go of until `reopen`: the query thread runs nothing.
@@ -429,6 +432,8 @@ impl Viewer {
                 extends: 0,
                 #[cfg(test)]
                 sketches: 0,
+                #[cfg(test)]
+                idle: false,
                 no_sketch: false,
                 released: false,
                 #[cfg(feature = "live")]
@@ -709,6 +714,13 @@ impl Viewer {
         self.shared.slot().running.is_some()
     }
 
+    /// The query thread waits with nothing to run: it runs nothing more until a request, a
+    /// snapshot, a reopen or a release.
+    #[cfg(test)]
+    pub(crate) fn idle(&self) -> bool {
+        self.shared.slot().idle
+    }
+
     /// `release` has let go of the file, its query under way cancelled.
     #[cfg(test)]
     pub(crate) fn released(&self) -> bool {
@@ -799,7 +811,15 @@ fn answer(shared: &Shared) {
                     slot.running = Some(Arc::clone(&job.cancel));
                     break (job, slot.facts.live);
                 }
+                #[cfg(test)]
+                {
+                    slot.idle = true;
+                }
                 slot = shared.wake.wait(slot).unwrap_or_else(|e| e.into_inner());
+                #[cfg(test)]
+                {
+                    slot.idle = false;
+                }
             }
         };
         // Nothing held yet for this recording: a sketch from its coarsest levels first, which a
@@ -923,6 +943,7 @@ mod tests {
             landed: Vec::new(),
             extends: 0,
             sketches: 0,
+            idle: false,
             no_sketch: false,
             released: false,
             #[cfg(feature = "live")]

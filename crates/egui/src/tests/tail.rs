@@ -279,17 +279,19 @@ fn a_request_waiting_when_a_snapshot_is_taken_runs_once() {
     v.request(follow(SECOND));
     until("the first answer", || !v.busy() && v.answer().is_some());
     let runs = v.runs();
-    // One request held at its first read, a newer one waiting, then a snapshot.
+    // One request held at its first read, a newer one waiting, then a snapshot. Running is not
+    // enough: cancelled before its first read, it ends at once, and the newer one can start
+    // before the snapshot is given.
     gate.close();
     v.request(follow(2 * SECOND));
-    until("it runs", || v.started());
+    until("it is held at its first read", || gate.holding() == 1);
     v.request(follow(3 * SECOND));
     v.update(live.write(5000));
     gate.open();
     until("the waiting request's answer", || {
         !v.busy() && span(&v) == Some(3 * SECOND) && extent_end(&v) == Some(5 * SECOND)
     });
-    std::thread::sleep(Duration::from_millis(50));
+    until("nothing left to run", || v.idle());
     assert_eq!(
         v.runs(),
         runs + 2,

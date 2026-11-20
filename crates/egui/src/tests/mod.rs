@@ -19,7 +19,7 @@ use std::io;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use egui::epaint::ClippedShape;
 use egui::{Color32, FontId, IdSalt, Pos2, Rect, Shape, Vec2};
@@ -298,6 +298,8 @@ pub struct Gate {
     fail: AtomicBool,
     /// Microseconds each read takes at least.
     slow: std::sync::atomic::AtomicU64,
+    /// Reads waiting for it to open.
+    holding: std::sync::atomic::AtomicU64,
 }
 
 impl Gate {
@@ -324,6 +326,11 @@ impl Gate {
     pub fn slow(&self, us: u64) {
         self.slow.store(us, Ordering::Relaxed);
     }
+
+    /// Reads waiting for it to open.
+    pub fn holding(&self) -> u64 {
+        self.holding.load(Ordering::Relaxed)
+    }
 }
 
 /// Opens the gate when dropped, so a failing test never leaves the query thread waiting on it.
@@ -347,8 +354,15 @@ impl Bytes for Gated {
 
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
         let mut reads = self.gate.reads.lock().unwrap();
+        let held = *reads == Some(0);
+        if held {
+            self.gate.holding.fetch_add(1, Ordering::Relaxed);
+        }
         while *reads == Some(0) {
             reads = self.gate.turn.wait(reads).unwrap();
+        }
+        if held {
+            self.gate.holding.fetch_sub(1, Ordering::Relaxed);
         }
         if let Some(n) = reads.as_mut() {
             *n -= 1;
@@ -585,10 +599,11 @@ pub fn follows_to(a: &Answer, end: i64) -> bool {
         && (end..end + per as i64).contains(&a.window.end)
 }
 
-/// Steps until the answer held follows the recording to `end`, as `follows_to` has it, then
-/// draws it.
+/// Steps, ten seconds at most, until the answer held follows the recording to `end`, as
+/// `follows_to` has it, then draws it.
 pub fn followed(h: &mut Harness<'_, Host>, end: i64) -> Arc<Answer> {
-    for _ in 0..400 {
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_secs(10) {
         h.step();
         if let Some(a) = viewer(h).answer()
             && follows_to(&a, end)
@@ -602,6 +617,16 @@ pub fn followed(h: &mut Harness<'_, Host>, end: i64) -> Arc<Answer> {
         "no answer following to {end}: {:?}",
         viewer(h).answer().map(|a| (a.window.clone(), a.grid))
     );
+}
+
+/// Steps, ten seconds at most, until `done`.
+pub fn stepped(h: &mut Harness<'_, Host>, what: &str, done: impl Fn(&Harness<'_, Host>) -> bool) {
+    let t = Instant::now();
+    while !done(h) {
+        assert!(t.elapsed() < Duration::from_secs(10), "{what}");
+        h.step();
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 /// Steps until the answer held is for `window`, then draws it.

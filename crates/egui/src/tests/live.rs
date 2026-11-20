@@ -261,13 +261,9 @@ fn a_moving_now_asks_only_once_the_window_leaves_what_the_held_answer_covers() {
     assert!(Arc::ptr_eq(&viewer(&h).answer().unwrap(), &a));
     // A snapshot: the viewer answers again from it, and the graph asks nothing.
     viewer(&h).update(live.write(4500));
-    for _ in 0..400 {
-        h.step();
-        if !Arc::ptr_eq(&viewer(&h).answer().unwrap(), &a) {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(1));
-    }
+    stepped(&mut h, "the snapshot's answer", |h| {
+        !Arc::ptr_eq(&viewer(h).answer().unwrap(), &a)
+    });
     for _ in 0..20 {
         h.step();
         std::thread::sleep(Duration::from_millis(1));
