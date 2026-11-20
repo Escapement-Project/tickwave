@@ -1,7 +1,7 @@
 //! The egui renderer's demo: a recording in a `Graph` with a `Strip` under it.
 //!
-//!     cargo run --release -p escapement-tickwave-egui --example demo -- web/fixtures/energy.tickwave
-//!     cargo run --release -p escapement-tickwave-egui --example demo -- --live 100000
+//!     cargo run --release -p escapement-tickwave-egui --features decode --example demo -- web/fixtures/energy.tickwave
+//!     cargo run --release -p escapement-tickwave-egui --features decode --example demo -- --live 100000
 //!
 //! With `--live N` it records a synthetic capture at N pairs a second, laid out as verge's energy
 //! captures are, and shows it as it is written; with `--seconds S` as well, the recorder
@@ -13,6 +13,14 @@
 //! span as a Chrome trace, for Perfetto or chrome://tracing, and `--quit-after S` closes the
 //! window after S seconds. For measuring, `--window FROM..TO` opens at a window, in seconds, and
 //! `--repaint` draws every frame though nothing changes.
+//!
+//! `--recipe FILE` decodes the recording as the file's `[[decode]]` tables say, through the
+//! reference decoders, and draws the decoded tracks under the graph with the side panel beside it:
+//!
+//!     cargo run --release -p escapement-tickwave-egui --features decode --example demo -- \
+//!         web/fixtures/identify-swd.tickwave --recipe crates/decoders/recipes/swd.toml
+//!
+//! A recording with no analog channel then draws its digital ones as lanes alone.
 
 mod live;
 mod tokens;
@@ -21,8 +29,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
-use escapement_tickwave_egui::view::ChannelKind;
-use escapement_tickwave_egui::{Graph, Strip, ViewState, Viewer, Window, Y};
+use escapement_tickwave_decode::HostOptions;
+use escapement_tickwave_decoders::recipe::{self, Recipe};
+use escapement_tickwave_egui::view::cursor::timeline_map;
+use escapement_tickwave_egui::view::{Cache, ChannelKind, Recording};
+use escapement_tickwave_egui::{
+    BindFailure, Decode, DecodeOptions, DecodeState, Decoding, Graph, Place, Strip, Tracked,
+    ViewState, Viewer, Window, Y,
+};
 use tracing::{error, info};
 use tracing_subscriber::Layer;
 use tracing_subscriber::filter::EnvFilter;
@@ -56,6 +70,9 @@ struct Args {
     /// Draw every frame, though nothing changes, to measure a frame's cost.
     #[arg(long)]
     repaint: bool,
+    /// Decode the recording as this file's `[[decode]]` tables say.
+    #[arg(long, requires = "recording")]
+    recipe: Option<PathBuf>,
 }
 
 /// `FROM..TO`, in seconds.
@@ -70,15 +87,43 @@ const LIVE_SPAN: i64 = 10;
 /// The strip's height, and the room between it and the graph, in points.
 const STRIP: f32 = 64.0;
 const SPACE: f32 = 8.0;
+/// The side panel's width beside the graph.
+const PANEL: f32 = 360.0;
+
+/// Binds `recipe` over the recording at `path`, as `Decode` asks of its host.
+fn bind(
+    path: PathBuf,
+    recipe: Recipe,
+) -> impl Fn() -> Result<Decoding, BindFailure> + Send + Sync + 'static {
+    move || {
+        let file = std::fs::File::open(&path)?;
+        let rec = Arc::new(Recording::open(Arc::new(file), Cache::new(64 << 20))?);
+        let b = recipe.bind(&rec, recipe::window(&rec), &[], HostOptions::default())?;
+        let mut analyses = Vec::with_capacity(b.analyses.len());
+        for a in b.analyses {
+            analyses.push(Tracked {
+                id: a.id,
+                name: a.label,
+                map: timeline_map(&rec, a.timeline)?,
+            });
+        }
+        Ok(Decoding {
+            host: b.host,
+            analyses,
+        })
+    }
+}
 
 struct Demo {
     viewer: Arc<Viewer>,
     state: ViewState,
     faces: [tokens::Face; 2],
     night: bool,
-    trace: usize,
+    /// None draws the lanes alone.
+    trace: Option<usize>,
     flag: Option<usize>,
     lanes: Vec<usize>,
+    decode: Option<(Decode, DecodeState)>,
     /// The window to follow when Follow is pressed.
     follow: Window,
     /// The fixed range Fit Y replaced, for Fit Y pressed again.
@@ -130,20 +175,45 @@ impl Demo {
                 None => r.channel("I").filter(|&i| analog(&&channels[i])),
             }
             .or_else(|| channels.iter().position(|c| analog(&c)));
-            let lanes = match &named {
+            let digital = |c: &escapement_tickwave_egui::view::ChannelInfo| {
+                matches!(c.kind, ChannelKind::Digital)
+            };
+            let lanes: Vec<usize> = match &named {
                 Some(named) => (named.iter().copied())
-                    .filter(|&i| matches!(channels[i].kind, ChannelKind::Digital))
+                    .filter(|&i| digital(&channels[i]))
                     .collect(),
                 None => (channels.iter().enumerate())
-                    .filter(|(_, c)| {
-                        matches!(c.kind, ChannelKind::Digital) && c.name.starts_with("DIO")
-                    })
+                    .filter(|(_, c)| digital(c) && c.name.starts_with("DIO"))
                     .map(|(i, _)| i)
                     .collect(),
             };
+            // A protocol capture names no DIO lanes: its digital channels, in order.
+            let lanes = match lanes.is_empty() && named.is_none() {
+                true => (channels.iter().enumerate())
+                    .filter(|(_, c)| digital(c))
+                    .map(|(i, _)| i)
+                    .collect(),
+                false => lanes,
+            };
             (trace, r.channel("under_range"), lanes)
         });
-        let trace = trace.ok_or("the recording has no analog channel to draw")?;
+        let decode = match (&args.recipe, &args.recording) {
+            (Some(file), Some(path)) => {
+                let text = std::fs::read_to_string(file)
+                    .map_err(|e| format!("{}: {e}", file.display()))?;
+                let recipe =
+                    Recipe::parse(&text).map_err(|e| format!("{}: {e}", file.display()))?;
+                let bind = bind(path.clone(), recipe);
+                Some((
+                    Decode::start(ctx, DecodeOptions::default(), bind),
+                    DecodeState::default(),
+                ))
+            }
+            _ => None,
+        };
+        if trace.is_none() && decode.is_none() {
+            return Err("the recording has no analog channel to draw".into());
+        }
         info!(trace, ?flag, ?lanes, "drawing");
         let stored_span = (stored.as_ref())
             .filter(|v| v.start.is_some() || v.end.is_some())
@@ -172,6 +242,7 @@ impl Demo {
             trace,
             flag,
             lanes,
+            decode,
             follow,
             unfit: None,
             quit_after: args.quit_after,
@@ -241,13 +312,25 @@ impl eframe::App for Demo {
         let now = self.now();
         let face = &self.faces[usize::from(self.night)];
         egui::CentralPanel::default().show(ui, |ui| {
-            let graph = Graph::new(&self.viewer, &mut self.state, &face.palette, self.trace)
-                .flag(self.flag)
-                .lanes(&self.lanes)
-                .include_zero(true)
-                .now(now)
-                .height(ui.available_height() - STRIP - SPACE);
-            ui.add(graph);
+            let tracks = (self.decode.as_ref()).map_or(0.0, |(d, s)| d.tracks_height(s));
+            let height = ui.available_height() - STRIP - SPACE - tracks;
+            let graph = match self.trace {
+                Some(trace) => Graph::new(&self.viewer, &mut self.state, &face.palette, trace),
+                None => Graph::lanes_only(&self.viewer, &mut self.state, &face.palette),
+            }
+            .flag(self.flag)
+            .lanes(&self.lanes)
+            .include_zero(true)
+            .now(now)
+            .height(height);
+            match &mut self.decode {
+                Some((decode, state)) => {
+                    ui.add(graph.decoded(decode, state).panel(Place::Beside(PANEL)));
+                }
+                None => {
+                    ui.add(graph);
+                }
+            }
             ui.add_space(SPACE);
             ui.add(
                 Strip::new(&self.viewer, &mut self.state, &face.palette)

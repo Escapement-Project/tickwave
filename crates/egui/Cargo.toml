@@ -32,3 +32,7 @@ default = ["live"]
 live = ["escapement-tickwave-view/live"]
 # Decode tracks: an analysis's items drawn under a graph.
 decode = ["dep:escapement-tickwave-decode", "dep:indexset"]
+
+[[example]]
+name = "demo"
+required-features = ["decode"]

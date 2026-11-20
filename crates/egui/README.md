@@ -225,8 +225,8 @@ it can't.
 ## The demo
 
 ```sh
-cargo run --release -p escapement-tickwave-egui --example demo -- web/fixtures/energy.tickwave
-cargo run --release -p escapement-tickwave-egui --example demo -- --live 100000
+cargo run --release -p escapement-tickwave-egui --features decode --example demo -- web/fixtures/energy.tickwave
+cargo run --release -p escapement-tickwave-egui --features decode --example demo -- --live 100000
 ```
 
 A recording opens as its stored view says (above), its trace in its stored colour, else ink.

@@ -172,6 +172,7 @@ impl<'a> Graph<'a> {
     }
 
     /// The viewer and palette it draws with, for a widget that wraps it.
+    #[cfg(feature = "decode")]
     pub(crate) fn borrows(&self) -> (&'a Viewer, &'a Palette) {
         (self.viewer, self.palette)
     }

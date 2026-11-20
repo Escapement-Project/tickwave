@@ -84,8 +84,8 @@ cargo build --release -p escapement-tickwave-cli     # the converter, at target/
 The native renderer's demo opens a recording, or records a synthetic one live:
 
 ```sh
-cargo run --release -p escapement-tickwave-egui --example demo -- web/fixtures/energy.tickwave
-cargo run --release -p escapement-tickwave-egui --example demo -- --live 100000
+cargo run --release -p escapement-tickwave-egui --features decode --example demo -- web/fixtures/energy.tickwave
+cargo run --release -p escapement-tickwave-egui --features decode --example demo -- --live 100000
 ```
 
 The browser's decoder and converter also need `wasm-bindgen` and `wasm-opt`:
