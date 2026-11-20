@@ -45,9 +45,12 @@ const WAIT: u64 = 0b001;
 
 pub fn schema() -> Schema {
     Schema::new(vec![
+        // A read stays open across the scan that returns its result, which is the next
+        // transfer's: two lanes.
         KindDecl::new("transfer")
             .with_fields(swd::transfer_fields())
-            .with_labels(swd::transfer_labels()),
+            .with_labels(swd::transfer_labels())
+            .with_lanes(2),
         KindDecl::new("idcode")
             .with_fields(vec![field("idcode", FieldType::Word { bits: 32 })])
             .with_labels(vec![
@@ -168,6 +171,8 @@ impl JtagDp {
     /// A DPACC or APACC scan: it returns the read the DP last took where it answers OK, and
     /// makes this scan's request a transfer.
     fn access(&mut self, at: Id, span: Span, tdi: &[bool], tdo: Option<&[bool]>, out: &mut Out) {
+        // A TDO that is not the scan's length gives neither an ACK nor a result.
+        let tdo = tdo.filter(|b| b.len() == tdi.len());
         let ack = tdo.map(|b| number(b, 0, 3));
         if ack == Some(OK)
             && let (Some((p, _)), Some(tdo)) = (self.pending.take(), tdo)
@@ -248,5 +253,40 @@ impl Decoder for JtagDp {
 
     fn save(&self) -> Option<Box<dyn Decoder>> {
         Some(Box::new(self.clone()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use escapement_tickwave_decode::Op;
+
+    /// A TDO shorter or longer than its scan, which an upstream may give, reads as not known.
+    #[test]
+    fn a_tdo_not_the_scans_length_is_not_known() {
+        let span = Span { start: 0, end: 35 };
+        let tdi = [true; 35];
+        for tdo in [
+            &[][..],
+            &[false, true][..],
+            &[false; 20][..],
+            &[false; 36][..],
+        ] {
+            let mut dp = JtagDp::new(0);
+            dp.ir = Some(DPACC);
+            let mut out = Out::default();
+            // A read the DP takes, then another whose TDO would return it.
+            dp.pending = Some((Id::new(TRANSFER, 0), 0));
+            dp.access(Id::new(TRANSFER, 100), span, &tdi, Some(tdo), &mut out);
+            let ack = out.ops.iter().find_map(|op| match op {
+                Op::Set { field, value, .. } if *field == swd::ACK => Some(value.clone()),
+                _ => None,
+            });
+            assert!(
+                matches!(ack, Some(Value::Unknown { .. })),
+                "{} bits: {ack:?}",
+                tdo.len()
+            );
+        }
     }
 }

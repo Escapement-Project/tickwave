@@ -1030,6 +1030,16 @@ fn jtag_dp_reads_the_daps_parts_of_a_chain_as_transfers_adiv5_reads() {
             ),
         ]
     );
+    // A read open across the next access: two transfers at once, as many as the kind's lanes.
+    let spans: Vec<(Tick, Tick)> = (of(&h, dp, &[jtagdp::TRANSFER]).iter())
+        .map(|t| (t.start, t.end.unwrap()))
+        .collect();
+    let most = (spans.iter())
+        .map(|&(s, _)| spans.iter().filter(|&&(a, b)| a <= s && s < b).count())
+        .max()
+        .unwrap();
+    assert_eq!(most, 2);
+    assert!(jtagdp::schema().kinds[0].lanes >= most);
     // ADIv5: SELECT, then the AP read of IDR with its own data, RDBUFF and CTRL/STAT reads.
     let reads = of(&h, adi, &[adiv5::AP_READ]);
     assert_eq!(reads.len(), 1);
