@@ -10,8 +10,8 @@
 
 use egui::{Align2, Rect, Response, Sense, Shape, Stroke, Ui, Widget, pos2, vec2};
 use escapement_tickwave_decode::{
-    Element, FieldId, FieldType, Id, Item, KindId, Label, LabelPiece, Notation, Schema, Span,
-    Status, Tick, Value,
+    Closed, Element, FieldId, FieldType, Id, Item, KindId, Label, LabelPiece, Notation, Schema,
+    Span, Status, Tick, Value,
 };
 use escapement_tickwave_view::columns::Grid;
 use escapement_tickwave_view::format::annotations::Role;
@@ -130,6 +130,11 @@ pub(crate) fn heading(schema: &Schema, labels: &Labels, item: &Item) -> String {
 pub fn condition(item: &Item) -> bool {
     matches!(item.status, Some(Status::Incomplete(_)))
         || (item.fields.iter()).any(|f| matches!(f.value, Value::Unknown { .. }))
+}
+
+/// `condition`, of an item as it closed.
+pub fn closed_condition(c: &Closed) -> bool {
+    matches!(c.status, Status::Incomplete(_)) || c.unknown
 }
 
 /// The parts of the items in `window` (axis ticks), each by the role that drives it, its index
@@ -408,6 +413,42 @@ impl Density {
         };
     }
 
+    /// Counts the items a forward run tallied as they closed (`Host::tally`), each once: the
+    /// density of a pass that keeps no items, which a zoomed-out track draws. It finds no items in
+    /// a store, so a zoomed-in track takes the density of the store it draws.
+    pub fn tally(&mut self, closed: &[Closed], map: &Mapping) {
+        if closed.is_empty() {
+            return;
+        }
+        let axis = |t: Tick| map.axis_saturating(t);
+        let mut classes = self.classes;
+        let (mut lo, mut hi) = (self.lo, self.hi);
+        let mut any = self.items > 0;
+        for c in closed {
+            let start = axis(c.start);
+            (lo, hi) = if any {
+                (lo.min(start), hi.max(start))
+            } else {
+                (start, start)
+            };
+            any = true;
+            classes[class(axis(c.end).saturating_sub(start)) as usize] += 1;
+        }
+        let span = hi.saturating_sub(lo) as u128;
+        self.raise_long(pick_long(&classes, self.open(), span));
+        (self.lo, self.hi) = (lo, hi);
+        self.widen();
+        let (mut a, mut b) = (i64::MAX, i64::MIN);
+        for c in closed {
+            let (start, end) = (axis(c.start), axis(c.end));
+            let at = self.add_at(c.id, start, Some(end), closed_condition(c));
+            (a, b) = (a.min(at), b.max(at));
+        }
+        self.carry(a, b);
+        self.held.sort_unstable_by_key(|h| h.id);
+        self.counted = Counted::All;
+    }
+
     /// How many held items are open.
     fn open(&self) -> u64 {
         self.held.iter().filter(|h| h.end.is_none()).count() as u64
@@ -438,8 +479,11 @@ impl Density {
         axis: &impl Fn(Tick) -> i64,
         marked: &dyn Fn(&Item) -> bool,
     ) -> i64 {
-        let start = axis(i.start);
-        let m = marked(i);
+        self.add_at(i.id, axis(i.start), i.end.map(axis), marked(i))
+    }
+
+    /// Counts an item starting at `start` (on the axis), closed at `end` or open, as `add` does.
+    fn add_at(&mut self, id: Id, start: i64, end: Option<i64>, m: bool) -> i64 {
         self.items += 1;
         let l = &mut self.levels[0];
         let at = start >> l.shift;
@@ -449,13 +493,13 @@ impl Density {
             *n = n.saturating_add(u32::from(m));
         }
         let held = Held {
-            id: i.id,
+            id,
             start,
             end: None,
             marked: m,
         };
-        match i.end {
-            Some(e) => self.closed(held, axis(e)),
+        match end {
+            Some(e) => self.closed(held, e),
             None => self.held.push(held),
         }
         at
@@ -1385,6 +1429,48 @@ mod tests {
             start: Tick::MIN,
             end: Tick::MAX,
         }
+    }
+
+    /// A density tallied from a pass that keeps nothing, batch by batch in the order items close,
+    /// counts as one built from a store that kept them all.
+    #[test]
+    fn a_tallied_density_counts_as_one_built_from_the_kept_items() {
+        let map = Mapping::new(
+            0,
+            0,
+            escapement_tickwave_view::format::model::Ratio::integer(1).unwrap(),
+        );
+        let (store, _, _) = grown(0x7a11, all());
+        let built = Density::of(store.items(), &map, condition);
+        let mut closed: Vec<Closed> = store.items().values().filter_map(Closed::of).collect();
+        closed.sort_by_key(|c| (c.end, c.id));
+        let mut tallied = Density::default();
+        let mut rng = 0x9e37_u64;
+        let mut next = |n: u64| {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng % n
+        };
+        let mut rest = &closed[..];
+        while !rest.is_empty() {
+            let (batch, more) = rest.split_at((1 + next(90) as usize).min(rest.len()));
+            tallied.tally(batch, &map);
+            rest = more;
+        }
+        assert_eq!(tallied.items(), built.items());
+        assert_eq!(tallied.longest, built.longest);
+        for _ in 0..400 {
+            let from = -2_100_000 + next(4_500_000) as i64;
+            let to = from + 1 + next(3_000_000) as i64;
+            let per = [0.0, 1.0, 37.0, 4096.0, 1e9][next(5) as usize];
+            assert_eq!(tallied.count(from, to, per), built.count(from, to, per));
+            let w = from..to;
+            assert_eq!(tallied.crowded(&w, 800.0), built.crowded(&w, 800.0));
+        }
+        let marked = closed.iter().filter(|c| closed_condition(c)).count() as u64;
+        assert!(marked > 0);
+        assert_eq!(tallied.count(i64::MIN / 2, i64::MAX / 2, 1e18).1, marked);
     }
 
     #[test]
