@@ -3,7 +3,7 @@
 //! graph, on tickwave's own SWD capture.
 
 use super::palette;
-use crate::decode::{Asked, Decode, DecodeOptions, DecodeState, Phase, Place, Progress};
+use crate::decode::{Asked, Decode, DecodeOptions, DecodeState, Phase, Place, Progress, Running};
 use crate::{Graph, ViewState, Viewer, Window};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
@@ -201,6 +201,24 @@ fn a_window_few_enough_items_to_draw_apart_is_derived_and_a_crowded_one_is_not()
         r.chains[0].pending.is_none(),
         "no chain for a crowded window"
     );
+}
+
+/// Where no chain meets the window, the panel reads what the tracks draw: nothing, not the forward
+/// pass's store, which holds the items open at its frontier for a while.
+#[test]
+fn where_no_chain_meets_the_window_the_panel_reads_nothing() {
+    let open = opening(fixture());
+    let recipe = Recipe::parse(SWD).unwrap();
+    let mut r = Running::bind(&open, &registry(), &recipe, &DecodeOptions::default()).unwrap();
+    let far = i64::MAX / 2..i64::MAX / 2 + 1;
+    let mut held = 0;
+    while r.host.step().unwrap() {
+        for k in 0..r.lanes.len() {
+            held += r.host.store(r.lanes[k].id).items().len();
+            assert!(r.source(k, &far).store.items().is_empty());
+        }
+    }
+    assert!(held > 0, "the forward stores held items along the way");
 }
 
 #[test]

@@ -145,6 +145,8 @@ pub(crate) struct Running {
     /// The recording's digital channels, by name: what a wire port can read.
     channels: Vec<String>,
     budget: usize,
+    /// What the panel reads where no chain meets the window, as the tracks draw nothing there.
+    empty: Store,
 }
 
 /// An analysis as the view draws it.
@@ -461,7 +463,7 @@ fn lock(shared: &Shared) -> MutexGuard<'_, Inner> {
 
 impl Running {
     /// Opens the recording and binds `recipe` over it.
-    fn bind(
+    pub(crate) fn bind(
         open: &Open,
         registry: &Registry,
         recipe: &Recipe,
@@ -483,6 +485,7 @@ impl Running {
             window,
             channels,
             budget: options.checkpoint_budget,
+            empty: Store::default(),
         };
         for a in b.analyses {
             r.lane(a)?;
@@ -895,7 +898,7 @@ static NOTHING: BTreeMap<Id, Item> = BTreeMap::new();
 /// the tally's density.
 pub(crate) struct Source<'a> {
     pub(crate) items: &'a BTreeMap<Id, Item>,
-    store: &'a Store,
+    pub(crate) store: &'a Store,
     density: &'a Density,
     settled: Tick,
     lost: &'a [Span],
@@ -927,7 +930,7 @@ impl Running {
             },
             None => Source {
                 items: &NOTHING,
-                store: self.host.store(lane.id),
+                store: &self.empty,
                 density: &lane.tally,
                 settled: self.host.settled(lane.id),
                 lost: self.host.lost(lane.id),
