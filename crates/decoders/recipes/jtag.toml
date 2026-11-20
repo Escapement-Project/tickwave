@@ -1,0 +1,10 @@
+# JTAG on a recording's TCK, TMS, TDI and TDO; leave TDO out where it was not recorded. JTAG-DP
+# and ADIv5 stack on it once `settings = { chain = [...] }` gives each TAP's IR length, the TAP
+# nearest TDO first.
+
+[[decode]]
+id = "jtag"
+decoder = "jtag"
+version = 1
+label = "JTAG"
+inputs = { TCK = "TCK", TMS = "TMS", TDI = "TDI", TDO = "TDO" }

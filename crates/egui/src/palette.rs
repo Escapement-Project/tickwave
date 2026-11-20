@@ -44,6 +44,9 @@ pub struct Palette {
     pub fill: f32,
     /// The opacity of `attention_fill` over lost time.
     pub shade: f32,
+    /// The opacity of a decoded part's fill in the colour of the role driving it, light enough
+    /// that its value's text and its bits stay legible over it.
+    pub part: f32,
     /// The trace's line and the DIO lanes' levels and edges, in points.
     pub line_weight: f32,
 }
@@ -54,8 +57,9 @@ impl Palette {
     /// labels and lane names in the weak text colour, rules mixed from the text colour into the
     /// panel's, the selection and lost time washed with the text colour, the attention colour from
     /// the theme's warning colour; figures and labels in the host's monospace font at 11 points;
-    /// the web's opacities and its line weight, 1.5 points. The trace takes the recording's stored
-    /// colour where it has one, on the theme's face, and the host sets no role's look.
+    /// the web's opacities and its line weight, 1.5 points, and a decoded part's fill at 0.18,
+    /// which the web does not draw. The trace takes the recording's stored colour where it has
+    /// one, on the theme's face, and the host sets no role's look.
     pub fn from_visuals(v: &Visuals) -> Self {
         let ink = v.text_color();
         Self {
@@ -74,6 +78,7 @@ impl Palette {
             pale: 0.35,
             fill: 1.0,
             shade: 0.12,
+            part: 0.18,
             line_weight: 1.5,
         }
     }

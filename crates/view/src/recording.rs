@@ -63,6 +63,32 @@ pub enum Error {
     /// A channel this version can't read (FORMAT.md, "Unavailable channels"), and why.
     #[error("channel {channel} is unavailable to this version: {why}")]
     Unavailable { channel: usize, why: String },
+    /// The block holding a cursor's next observation, channel `channel`'s at axis tick `at`,
+    /// decodes to `block_bytes`, more than the cursor's budget allows. The cursor has not moved:
+    /// it needs a larger budget, not a retry.
+    #[error(
+        "channel {channel}: the block at tick {at} decodes to {block_bytes} bytes, past the budget"
+    )]
+    NeedsBudget {
+        channel: usize,
+        at: i64,
+        block_bytes: u32,
+    },
+    /// A live recording's channel is settled only to axis tick `settled`: its writer can still
+    /// add an observation there, so a cursor can't start at `at`, past it.
+    #[error("channel {channel} is settled to tick {settled}: a cursor can't start at {at}")]
+    Unsettled {
+        channel: usize,
+        at: i64,
+        settled: i64,
+    },
+    /// A cursor was given another recording than the one it was made from, a copy of it
+    /// included.
+    #[error("a cursor reads only the recording it was made from")]
+    OtherRecording,
+    /// A merge bounded on a source's timeline whose ports aren't all on that one source.
+    #[error("a bound on a source's timeline needs every port on that source")]
+    Timeline,
 }
 
 /// What a channel holds.
@@ -262,13 +288,6 @@ impl Place {
 
 /// One channel's block, and where its decoded items come from.
 #[derive(Clone, Copy, Debug)]
-#[cfg_attr(
-    not(feature = "live"),
-    expect(
-        dead_code,
-        reason = "only a live recording's table is searched by its ticks"
-    )
-)]
 pub(crate) struct BlockAt {
     pub start: i64,
     pub end: i64,
@@ -386,6 +405,11 @@ static NEVER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new
 static RECORDINGS: AtomicU64 = AtomicU64::new(0);
 
 impl Revision {
+    /// Whether `other` is a revision of the same recording.
+    pub(crate) fn same_recording(self, other: Revision) -> bool {
+        self.recording == other.recording
+    }
+
     fn new() -> Self {
         Self {
             recording: RECORDINGS.fetch_add(1, Ordering::Relaxed),
@@ -783,6 +807,11 @@ fn stored_place(footer: &Footer, i: usize) -> Place {
 pub(crate) struct Slice {
     pub list: List,
     pub to_end: bool,
+    /// Whether the pages read start at the list's first.
+    pub first: bool,
+    /// The first key and the place of the page after the last read; None where that is the
+    /// list's last.
+    pub next: Option<(i64, u64)>,
 }
 
 /// Stored channel `i` of `footer` from `slice` of its list. A span's place: exact for the ticks
@@ -1850,6 +1879,18 @@ impl Recording {
             .map_err(|e| Error::Annotations(e.clone()))
     }
 
+    /// What identifies a finished file's data, which a recompressed or compacted copy keeps; None
+    /// while it is being written.
+    pub fn content_id(&self) -> Option<escapement_tickwave_format::header::ContentId> {
+        self.finished().map(|f| f.footer().header.content_id)
+    }
+
+    /// Its number in this process, which no other recording shares, the same file opened again
+    /// included.
+    pub fn identity(&self) -> u64 {
+        self.revision.recording
+    }
+
     /// The store of a finished file; None for a live recording.
     pub(crate) fn finished(&self) -> Option<&Finished> {
         match &self.store {
@@ -2132,6 +2173,10 @@ impl Recording {
             pages.push(at);
         }
         let to_end = pages.iter().any(|p| p.next.is_none());
+        let first = lists.first().is_none_or(|(j, _)| *j == 0);
+        let next = pages
+            .last()
+            .and_then(|p| Some((p.next?.0, p.j.checked_add(1)?)));
         // Each page was checked against where the next starts, so they follow on.
         let list = if gaps {
             let mut out: Vec<Gap> = Vec::new();
@@ -2150,11 +2195,16 @@ impl Recording {
             }
             List::Breaks(out)
         };
-        Ok(Slice { list, to_end })
+        Ok(Slice {
+            list,
+            to_end,
+            first,
+            next,
+        })
     }
 
     /// Page `at` of stored channel `c`'s list, read once into the cache and checked.
-    fn list_page(
+    pub(crate) fn list_page(
         &self,
         r: &Reading,
         f: &Finished,

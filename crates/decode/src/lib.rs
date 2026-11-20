@@ -1,0 +1,46 @@
+//! tickwave's protocol decoder contract and its host.
+//!
+//! A decoder is a [`Definition`] (its name, its major version, the contract version it targets and
+//! its [`Schema`]) and a [`Decoder`] that the [`Host`] runs a turn at a time. A turn takes the
+//! input that is ready, a window of wire observations or deliveries from the analysis it is
+//! stacked on, and emits [`Op`]s: items of declared kinds opened, given fields and sequences,
+//! linked and closed. The host checks every operation against the schema and the item lifecycle,
+//! admits a turn's output whole or refuses it whole, keeps whole items only where a view asked for
+//! them, and fans output out to the analyses stacked on it.
+//!
+//! The decoder-facing contract (the definition, the schema, requests and replies, the operations
+//! and the errors a decoder sees) is versioned on its own, apart from how the host schedules,
+//! stores and checkpoints. A host refuses a decoder that targets a contract it does not support
+//! when the decoder is added, never mid-run.
+//!
+//! Every rule a decoder can break comes back as a [`Refusal`] or a [`BindError`], never a panic:
+//! a decoder loaded at run time is untrusted input, as a file is to a reader.
+
+mod host;
+mod output;
+#[cfg(feature = "recipe")]
+pub mod recipe;
+mod schema;
+mod store;
+#[cfg(feature = "wire")]
+pub mod wire;
+
+pub use host::{
+    AnalysisId, Batch, BindError, Binding, Bound, Checkpoint, CheckpointError, Completed, Decoder,
+    Delivery, Derived, Exchange, Factory, Host, HostOptions, InputSpec, Keeping, Kept, LogEntry,
+    Mode, Observed, PIECE_CHUNK, Pause, Piece, Refusal, Reply, Request, RequestId, RunId, RunView,
+    Seek, Source, SourceError, Stats, Turn, Window, WindowId, citation,
+};
+pub use output::{
+    BitBytes, Cause, Element, FieldId, Id, KindId, LinkId, MAX_BITS, MAX_CHUNK, MAX_FIELDS,
+    MAX_LINKS, MAX_TEXT, Need, Observation, Op, Out, Reason, Ref, Role, SeqId, Span, Status, Tick,
+    Value,
+};
+pub use schema::{
+    CONTRACT, Contract, Definition, ElementType, FieldDecl, FieldType, InputDecl, InputId,
+    KindDecl, Label, LabelPiece, LinkDecl, LinkTo, MAX_FIELD_NAMES, MAX_KINDS, MAX_LABEL_PIECES,
+    MAX_LABELS, MAX_LANES, MAX_LINK_ROLES, MAX_LINK_TARGETS, MAX_LIST, MAX_NAME, MAX_PHRASE,
+    MAX_ROLES, MAX_SEQUENCES, Mismatch, Name, Notation, PortDecl, Schema, SchemaError, SeqDecl,
+    Setting, SettingDecl, SettingId, SettingType, UpstreamDecl, field, name, seq,
+};
+pub use store::{CHANGES_AT_MOST, Closed, Counts, Field, Item, Refused, Revision, Store};

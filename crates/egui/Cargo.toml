@@ -8,11 +8,15 @@ publish.workspace = true
 
 [dependencies]
 egui = { version = "0.37.0", default-features = false }
+escapement-tickwave-decode = { version = "0.1.1", path = "../decode", default-features = false, optional = true }
 escapement-tickwave-view = { version = "0.1.1", path = "../view", default-features = false }
+indexset = { version = "0.18.0", optional = true }
 tracing = "0.1.44"
 
 [dev-dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
+escapement-tickwave-decode = { version = "0.1.1", path = "../decode" }
+escapement-tickwave-decoders = { version = "0.1.1", path = "../decoders", features = ["recipe"] }
 eframe = "0.37.0"
 egui = { version = "0.37.0", features = ["default_fonts"] }
 egui_kittest = { version = "0.37.0", features = ["wgpu", "snapshot"] }
@@ -26,3 +30,9 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 default = ["live"]
 # A view of a recording a writer in this process is still writing, through its `Snapshot`.
 live = ["escapement-tickwave-view/live"]
+# Decode tracks: an analysis's items drawn under a graph.
+decode = ["dep:escapement-tickwave-decode", "escapement-tickwave-decode/recipe", "dep:indexset"]
+
+[[example]]
+name = "demo"
+required-features = ["decode"]

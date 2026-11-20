@@ -12,7 +12,9 @@ serde_json = "1.0.154"
 
 [dev-dependencies]
 egui = { version = "0.37.0", features = ["default_fonts"] }
-escapement-tickwave-egui = { path = "../egui" }
+escapement-tickwave-decode = { path = "../decode" }
+escapement-tickwave-decoders = { path = "../decoders" }
+escapement-tickwave-egui = { path = "../egui", features = ["decode"] }
 escapement-tickwave-view = { path = "../view" }
 gungraun = "0.20.0"
 
@@ -30,4 +32,8 @@ harness = false
 
 [[bench]]
 name = "egui"
+harness = false
+
+[[bench]]
+name = "decode"
 harness = false

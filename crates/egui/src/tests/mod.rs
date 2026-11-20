@@ -1,6 +1,8 @@
 //! The graph's behaviour, held through egui_kittest: recordings laid out as verge's energy
 //! captures are, a host that keeps a `ViewState`, and readers of what a frame painted.
 
+#[cfg(feature = "decode")]
+mod decode;
 mod ease;
 mod fallback;
 mod graph;
@@ -421,6 +423,7 @@ pub fn palette() -> Palette {
         pale: 0.35,
         fill: 0.45,
         shade: 0.2,
+        part: 0.18,
         // The width the lanes' geometry in these tests is worked for.
         line_weight: 1.0,
     }
@@ -455,6 +458,16 @@ pub struct Host {
     pub motion: bool,
     /// What the graph's response said it drew, through `Graph::shown`.
     pub shown: Option<crate::Shown>,
+    /// Whether the decoded paint comes from a provisional window.
+    pub provisional: bool,
+    /// A span lit from elsewhere, in axis ticks.
+    pub lit: Option<std::ops::Range<i64>>,
+    /// Paint from decoded output, the channels it paints and the decoder's roles.
+    pub decoded: (
+        Vec<crate::Driven>,
+        Vec<String>,
+        Vec<escapement_tickwave_view::format::annotations::Role>,
+    ),
 }
 
 pub fn harness(state: ViewState) -> Harness<'static, Host> {
@@ -480,6 +493,9 @@ pub fn harness_at(state: ViewState, pixels_per_point: f32) -> Harness<'static, H
         now: None,
         motion: false,
         shown: None,
+        decoded: Default::default(),
+        provisional: false,
+        lit: None,
     };
     Harness::builder()
         .with_size(egui::vec2(1080.0, 700.0))
@@ -501,6 +517,9 @@ pub fn harness_at(state: ViewState, pixels_per_point: f32) -> Harness<'static, H
                     .extras(host.extras)
                     .now(host.now)
                     .motion(host.motion)
+                    .decoded_paint(&host.decoded.0, &host.decoded.1, &host.decoded.2)
+                    .decoded_provisional(host.provisional)
+                    .lit(host.lit.clone())
                     .id_salt(SALT);
                 if host.strip {
                     graph = graph.height(ui.available_height() - STRIP - 8.0);

@@ -1,12 +1,15 @@
 //! The graph: one analog trace, or none, DIO lanes under it on the same time axis, markers, the
 //! selection, and the gestures that move them.
 
+use std::borrow::Cow;
 use std::ops::Range;
 
 use egui::{
     AsIdSalt, CursorIcon, IdSalt, PointerButton, Rect, Response, Sense, Stroke, StrokeKind, Ui,
     Vec2, Widget, WidgetInfo, pos2, vec2,
 };
+use escapement_tickwave_view::columns::Grid;
+use escapement_tickwave_view::format::annotations::Role;
 use escapement_tickwave_view::format::model::Ratio;
 use escapement_tickwave_view::readouts::{MINUS, NBSP, format_interval};
 use escapement_tickwave_view::scale::{ValueRange, move_range, scale_limits, zoom_range};
@@ -79,6 +82,27 @@ pub struct Graph<'a> {
     motion: bool,
     /// A gesture this frame zoomed the window.
     zoomed: bool,
+    decoded: Decoded<'a>,
+    lit: Option<Range<i64>>,
+    gutter: f32,
+}
+
+/// A stretch of a wire painted by the role that drives it, from decoded output: the role by its
+/// index in the roles handed with it, and the span in axis ticks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Driven {
+    pub role: u16,
+    pub span: Range<i64>,
+}
+
+/// Paint from decoded output: its stretches, the channels they paint (empty: every one), the
+/// roles their indices name, and whether they come from a provisional window.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Decoded<'a> {
+    pub paints: &'a [Driven],
+    pub channels: &'a [String],
+    pub roles: &'a [Role],
+    pub provisional: bool,
 }
 
 impl<'a> Graph<'a> {
@@ -103,6 +127,9 @@ impl<'a> Graph<'a> {
             id_salt: IdSalt::new("tickwave graph"),
             motion: true,
             zoomed: false,
+            decoded: Decoded::default(),
+            lit: None,
+            gutter: 0.0,
         }
     }
 
@@ -126,6 +153,43 @@ impl<'a> Graph<'a> {
     /// Digital channels, a lane each under the trace, in this order.
     pub fn lanes(mut self, lanes: &'a [usize]) -> Self {
         self.lanes = lanes;
+        self
+    }
+
+    /// Paint from decoded output over the window, on `channels` (empty: every one), with the
+    /// roles its decoders declare, which a paint's role indexes: a part of a wire painted by who
+    /// drives it. A role the sidecar declares keeps the sidecar's look, and a decoder's role it
+    /// does not declare is added after the sidecar's. Paint the sidecar gives draws over decoded
+    /// paint.
+    pub fn decoded_paint(
+        mut self,
+        paints: &'a [Driven],
+        channels: &'a [String],
+        roles: &'a [Role],
+    ) -> Self {
+        self.decoded.paints = paints;
+        self.decoded.channels = channels;
+        self.decoded.roles = roles;
+        self
+    }
+
+    /// The viewer and palette it draws with, for a widget that wraps it.
+    #[cfg(feature = "decode")]
+    pub(crate) fn borrows(&self) -> (&'a Viewer, &'a Palette) {
+        (self.viewer, self.palette)
+    }
+
+    /// The host's view state, for a widget that wraps it and moves the window.
+    #[cfg(feature = "decode")]
+    pub(crate) fn state_mut(&mut self) -> &mut ViewState {
+        self.state
+    }
+
+    /// The decoded paint comes from a window decoded ahead of the forward pass, as a track's
+    /// `provisional` says of its items: it draws at the palette's `pale`, dashed where its role's
+    /// look has no dash of its own. Paint the sidecar gives keeps its look.
+    pub fn decoded_provisional(mut self, provisional: bool) -> Self {
+        self.decoded.provisional = provisional;
         self
     }
 
@@ -161,10 +225,25 @@ impl<'a> Graph<'a> {
         self
     }
 
+    /// A span the reader points at elsewhere, in axis ticks: a side panel's section, say
+    /// (`PanelState::lit`). Washed as the pointer's wash is and edged with hairlines, so it reads
+    /// apart from the selection.
+    pub fn lit(mut self, span: Option<Range<i64>>) -> Self {
+        self.lit = span;
+        self
+    }
+
     /// Whether a zoom step eases the window drawn to where it goes; on by default. Off, it jumps,
     /// for a host whose reader asked for reduced motion.
     pub fn motion(mut self, on: bool) -> Self {
         self.motion = on;
+        self
+    }
+
+    /// The gutter left of the plot at least `width` points wide: room for the names of tracks
+    /// drawn under it, which `track::gutter` measures.
+    pub fn gutter(mut self, width: f32) -> Self {
+        self.gutter = width;
         self
     }
 }
@@ -221,11 +300,40 @@ impl View {
 #[non_exhaustive]
 pub struct Shown {
     pub window: Range<i64>,
+    /// Where the plot lies across the graph, in points: a track drawn under the graph on its
+    /// time axis lines up with it.
+    pub plot: Range<f32>,
     /// Low, then high, in the trace's unit. A graph of lanes alone draws no value range: this is
     /// the one a trace would start from.
     pub y: (f64, f64),
+    /// The columns the lanes were drawn in, from the answer held; none before one has come. A
+    /// track bins its density in them, so a bin lies under the column it counts.
+    pub grid: Option<Grid>,
     #[cfg(test)]
     pub(crate) layout: Layout,
+}
+
+impl Shown {
+    /// What a graph would have drawn over `window` across `plot`, for a host that draws a track
+    /// without a graph above it, a bench for one.
+    pub fn new(window: Range<i64>, plot: Range<f32>) -> Self {
+        Self {
+            window,
+            plot,
+            y: (0.0, 1.0),
+            grid: None,
+            #[cfg(test)]
+            layout: Layout {
+                rect: Rect::NOTHING,
+                gutter: Rect::NOTHING,
+                plot: Rect::NOTHING,
+                lanes: Vec::new(),
+                axis: Rect::NOTHING,
+                label_row: 0.0,
+                key: None,
+            },
+        }
+    }
 }
 
 /// A zoom step under way: the window drawn eases from `from` to the window the graph set.
@@ -313,7 +421,7 @@ impl Graph<'_> {
                 gutter = gutter.max(measure(info.name.clone(), &p.labels));
             }
         }
-        let gutter = (gutter + 12.0).ceil().max(40.0);
+        let gutter = (gutter + 12.0).ceil().max(40.0).max(self.gutter);
         let label_row = (ui.fonts_mut(|f| f.row_height(&p.labels)) + 2.0).ceil();
         let lanes = self.lanes.len() as f32 * LANE_HEIGHT;
         let key = match facts.roles.is_empty() {
@@ -753,6 +861,16 @@ impl Widget for Graph<'_> {
             let wanted = self.request(columns, &facts);
             self.ask(wanted, &view.window, held.as_ref());
         }
+        let paints = held.as_ref().map_or(&[][..], |h| &h.answer.markers.paints);
+        let declared = self.decoded.roles;
+        let roles: Cow<[Role]> = if declared.is_empty() {
+            Cow::Borrowed(&facts.roles[..])
+        } else {
+            let extra = declared
+                .iter()
+                .filter(|r| !facts.roles.iter().any(|d| d.name == r.name));
+            Cow::Owned(facts.roles.iter().chain(extra).cloned().collect())
+        };
         draw::graph(
             ui,
             &draw::Frame {
@@ -766,9 +884,11 @@ impl Widget for Graph<'_> {
                 trace: trace.as_ref(),
                 lanes: self.lanes,
                 selection: self.state.selection.as_ref(),
+                lit: self.lit.as_ref(),
                 ink: self.palette.trace_colour(facts.stored.as_ref()),
-                roles: &facts.roles,
-                paints: held.as_ref().map_or(&[][..], |h| &h.answer.markers.paints),
+                roles: &roles,
+                paints,
+                decoded: self.decoded,
                 pixels_per_point: ui.pixels_per_point(),
                 live,
             },
@@ -781,7 +901,9 @@ impl Widget for Graph<'_> {
         }
         memory.shown = Some(Shown {
             y,
+            grid: held.as_ref().map(|h| h.answer.grid),
             window: view.window.clone(),
+            plot: layout.plot.left()..layout.plot.right(),
             #[cfg(test)]
             layout,
         });

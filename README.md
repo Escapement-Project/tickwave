@@ -20,11 +20,13 @@ computer.
 | `crates/wasm` | the same decoder compiled to WASM, for the browser |
 | `crates/convert-wasm` | the converter compiled to WASM, for the site's Open page |
 | `crates/view` | the viewer's logic apart from the drawing: a recording opened finished or read while it is written, a view's columns, samples, statistics and markers, and the web's readouts, times, value scale, time axis and point probes |
-| `crates/egui` | the native renderer: a recording drawn with egui through `crates/view`, as a graph of a trace and digital lanes with a strip of the whole recording under it, for verge's desktop app |
+| `crates/egui` | the native renderer: a recording drawn with egui through `crates/view`, as a graph of a trace and digital lanes with a strip of the whole recording under it, for verge's desktop app; with its `decode` feature, protocol decoders' items as tracks under the graph, and a side panel for the one selected |
+| `crates/decode` | the contract a protocol decoder is written against, and the host that runs protocol decoders over a recording, checks what they emit and stacks one on another's output |
+| `crates/decoders` | the reference protocol decoders, written against `crates/decode`'s contract alone: SWD, JTAG and cJTAG, with JTAG-DP, ADIv5 and MEM-AP stacked on them |
 | `web` | the custom elements, the chart, the converter's worker, and the build of the site |
 | `site` | the site's pages: an overview, a viewer that also converts, and the docs |
 | `bench` | the decode benchmark: the WASM decoder against JavaScript ones, on real recordings |
-| `fuzz` | a fuzz target for each reader and for the writer, in a workspace of its own |
+| `fuzz` | a fuzz target for each reader, for the writer, for each stack of reference protocol decoders and for their host, in a workspace of its own |
 
 ## Documents
 
@@ -32,6 +34,8 @@ computer.
   from its end, in order, or repairs one cut off.
 - `ANNOTATIONS.md`: the sidecar annotations that sit beside a recording.
 - `CHARTS.md`: `<tickwave-chart>` and its data.
+- `DECODING.md`: protocol decoding: how a decoder runs in the host, what the host checks, and how
+  a view gets a window's items.
 - `web/README.md`: the elements, how they read recordings, and how to run the web build and tests.
 - `testdata/view/README.md`: the cases the web's view modules and `crates/view` share.
 - `site/docs/converter.md`: building and using the converter.
@@ -75,14 +79,15 @@ cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo build -p escapement-tickwave-view --target wasm32-unknown-unknown --no-default-features
+cargo build -p escapement-tickwave-decode --target wasm32-unknown-unknown --no-default-features
 cargo build --release -p escapement-tickwave-cli     # the converter, at target/release/tickwave
 ```
 
 The native renderer's demo opens a recording, or records a synthetic one live:
 
 ```sh
-cargo run --release -p escapement-tickwave-egui --example demo -- web/fixtures/energy.tickwave
-cargo run --release -p escapement-tickwave-egui --example demo -- --live 100000
+cargo run --release -p escapement-tickwave-egui --features decode --example demo -- web/fixtures/energy.tickwave
+cargo run --release -p escapement-tickwave-egui --features decode --example demo -- --live 100000
 ```
 
 The browser's decoder and converter also need `wasm-bindgen` and `wasm-opt`:
@@ -112,6 +117,16 @@ mkdir -p corpus/reader                                   # libFuzzer adds what i
 cargo +nightly fuzz run reader corpus/reader seeds/reader -- \
     -rss_limit_mb=2048 -malloc_limit_mb=1024 -timeout=10
 cargo run --no-default-features --bin show -- <input>   # the file an input builds, as read
+```
+
+The protocol decoder targets take a structured input too, and have no seeds. `decode_swd`,
+`decode_jtag` and `decode_cjtag` build the lines a stack of reference decoders reads, and `host`
+builds the decoders it runs:
+
+```sh
+mkdir -p corpus/decode_swd
+cargo +nightly fuzz run decode_swd corpus/decode_swd -- \
+    -rss_limit_mb=2048 -malloc_limit_mb=1024 -timeout=10
 ```
 
 The converter carries the viewer for `tickwave open` when it's built after the web build, with the

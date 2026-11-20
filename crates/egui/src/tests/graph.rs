@@ -1078,3 +1078,49 @@ fn a_palette_from_the_hosts_theme_takes_its_colours_and_the_webs_opacities_and_w
         );
     }
 }
+
+#[test]
+fn a_lit_span_washes_the_plot_between_hairlines() {
+    let (mut h, _gate) = showing(fixture().write(), ViewState::default(), true);
+    wait(&mut h);
+    let (wash, hair) = (h.state().palette.wash, h.state().palette.ink_2);
+    let washes = |h: &Harness<'_, Host>| -> Vec<Rect> {
+        (shapes(h).into_iter())
+            .filter_map(|s| match s.shape {
+                Shape::Rect(r) if r.fill == wash => Some(r.rect),
+                _ => None,
+            })
+            .collect()
+    };
+    let upright = |h: &Harness<'_, Host>| -> Vec<f32> {
+        (shapes(h).into_iter())
+            .filter_map(|s| match s.shape {
+                Shape::LineSegment { points, stroke }
+                    if stroke.color == hair && points[0].x == points[1].x =>
+                {
+                    Some(points[0].x)
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let (before, lines) = (washes(&h), upright(&h));
+    h.state_mut().lit = Some(SECOND..2 * SECOND);
+    h.step();
+    h.step();
+    let after = washes(&h);
+    assert_eq!(after.len(), before.len() + 1);
+    let band = *after.iter().find(|r| !before.contains(r)).unwrap();
+    let near = |x: f32, t: i64| (x - x_of(&h, t)).abs() <= 1.0;
+    assert!(
+        near(band.left(), SECOND) && near(band.right(), 2 * SECOND),
+        "{band:?}"
+    );
+    let mut edges = upright(&h);
+    for x in lines {
+        let k = edges.iter().position(|&e| e == x).unwrap();
+        edges.remove(k);
+    }
+    edges.sort_by(f32::total_cmp);
+    assert_eq!(edges, [band.left(), band.right()]);
+}

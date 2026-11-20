@@ -1,0 +1,32 @@
+# JTAG on a recording's TCK, TMS, TDI and TDO, with JTAG-DP, ADIv5 and MEM-AP stacked on it.
+# `chain` gives each TAP's IR length, the TAP nearest TDO first: one Arm debug TAP here, whose IR
+# is 4 bits. A chain with more TAPs needs its own, and JTAG-DP's `tap` the debug TAP's place.
+
+[[decode]]
+id = "jtag"
+decoder = "jtag"
+version = 1
+label = "JTAG"
+inputs = { TCK = "TCK", TMS = "TMS", TDI = "TDI", TDO = "TDO" }
+settings = { chain = [4] }
+
+[[decode]]
+id = "dp"
+decoder = "jtag-dp"
+version = 1
+label = "JTAG-DP"
+inputs = { scans = { analysis = "jtag" } }
+
+[[decode]]
+id = "adi"
+decoder = "adiv5"
+version = 1
+label = "ADIv5"
+inputs = { transfers = { analysis = "dp" } }
+
+[[decode]]
+id = "mem"
+decoder = "mem-ap"
+version = 1
+label = "MEM-AP"
+inputs = { accesses = { analysis = "adi" } }
