@@ -442,6 +442,11 @@ fn frame_times() {
     ];
     let palette = Palette::from_visuals(&egui::Visuals::dark());
     let frame = std::time::Duration::from_nanos(16_666_667);
+    let cap = std::fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq");
+    println!(
+        "CPU clock cap: {} kHz",
+        cap.as_deref().unwrap_or("unknown").trim()
+    );
     let quantiles = |v: &mut Vec<Duration>| {
         v.sort_unstable();
         let at = |q: f64| v[((v.len() - 1) as f64 * q) as usize].as_secs_f64() * 1e3;
@@ -498,10 +503,28 @@ fn frame_times() {
             }
         }
         let pass = started.elapsed().as_secs_f64() - after as f64 / 60.0;
+        drop(decode);
+        // The same graph alone, nothing decoded: the decode's own share of a frame.
+        let mut plain = vec![];
+        let mut next = Instant::now();
+        for _ in 0..120 {
+            let t = Instant::now();
+            let out = ctx.run_ui(input(), |ui| {
+                ui.add(Graph::lanes_only(&viewer, &mut state, &palette).lanes(&lanes));
+            });
+            let _ = ctx.tessellate(out.shapes, out.pixels_per_point);
+            plain.push(t.elapsed());
+            next += frame;
+            match next.checked_duration_since(Instant::now()) {
+                Some(w) => std::thread::sleep(w),
+                None => next = Instant::now(),
+            }
+        }
         println!("{name}: pass about {pass:.1} s");
         if !running.is_empty() {
             println!("  while the pass runs: {}", quantiles(&mut running));
         }
         println!("  after it:           {}", quantiles(&mut done));
+        println!("  the graph alone:    {}", quantiles(&mut plain));
     }
 }
