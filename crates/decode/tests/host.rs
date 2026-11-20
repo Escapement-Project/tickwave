@@ -1568,6 +1568,35 @@ fn a_window_chain_stops_once_its_window_has_settled() {
     );
 }
 
+/// A window ending inside an item open for long stops a window's width past its end, rather than
+/// decoding on until the item closes, and leaves the item open in the chain.
+#[test]
+fn a_window_chain_stops_a_width_past_an_item_open_across_its_end() {
+    let (mut h, [p, _]) = pulses_host(
+        line(3, 2000, 3000, vec![]),
+        15,
+        None,
+        HostOptions::default(),
+    );
+    h.keep_checkpoints(p, Keeping::new(50, usize::MAX)).unwrap();
+    run_all(&mut h);
+    let window = Span {
+        start: 100,
+        end: 200,
+    };
+    let id = h.derive(p, window).unwrap().window;
+    run_all(&mut h);
+    let wp = win(&h, id, p);
+    assert!(!wp.runnable());
+    assert!(
+        (300..2010).contains(&wp.consumed()),
+        "stopped a width past the end, before the pulse closes at 2010: {}",
+        wp.consumed()
+    );
+    let open = (wp.store().items().values()).filter(|i| i.end.is_none());
+    assert_eq!(open.count(), 1, "the pulse across the end, still open");
+}
+
 #[test]
 fn a_window_chain_beside_the_forward_pass_re_derives_its_span_and_leaves_the_pass_unchanged() {
     let keeping = Keeping::new(50, usize::MAX);
