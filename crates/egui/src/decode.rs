@@ -601,6 +601,14 @@ pub struct DecodeState {
     jump: Option<Range<i64>>,
 }
 
+impl DecodeState {
+    /// Whether a panel control's window waits to be set.
+    #[cfg(test)]
+    pub(crate) fn jumping(&self) -> bool {
+        self.jump.is_some()
+    }
+}
+
 /// The window that brings an item spanning `item` (axis ticks) into view from `window`: none
 /// where the window shows it whole. Else the window keeps its span and centres the item, and an
 /// item longer than the window fills it with a quarter of its length either side.
@@ -745,8 +753,8 @@ static NOTHING: BTreeMap<Id, Item> = BTreeMap::new();
 
 /// What a lane draws this frame: the drawn chain's items where it meets the window, else none, over
 /// the tally's density.
-struct Source<'a> {
-    items: &'a BTreeMap<Id, Item>,
+pub(crate) struct Source<'a> {
+    pub(crate) items: &'a BTreeMap<Id, Item>,
     store: &'a Store,
     density: &'a Density,
     settled: Tick,
@@ -755,7 +763,7 @@ struct Source<'a> {
 }
 
 impl Running {
-    fn source(&self, k: usize, window: &Range<i64>) -> Source<'_> {
+    pub(crate) fn source(&self, k: usize, window: &Range<i64>) -> Source<'_> {
         let lane = &self.lanes[k];
         let chain = (self.chains[lane.root].drawn.as_ref())
             .filter(|c| c.axis.start < window.end && window.start < c.axis.end)

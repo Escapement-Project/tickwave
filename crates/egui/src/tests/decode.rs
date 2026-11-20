@@ -12,6 +12,7 @@ use escapement_tickwave_decode::{Host, HostOptions, Span, Tick};
 use escapement_tickwave_decoders::recipe::{self, Recipe};
 use escapement_tickwave_view::cursor::timeline_map;
 use escapement_tickwave_view::{Cache, Recording};
+use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -400,12 +401,129 @@ fn shots() {
         .unwrap();
 }
 
+/// The recording and recipe `TICKWAVE_DECODE_REC` and `TICKWAVE_DECODE_RECIPE` name, else the
+/// SWD fixture: its path, the first analysis's channels, its length, its ticks a microsecond, and
+/// a bind function over it.
+struct Real {
+    path: PathBuf,
+    lanes: Vec<usize>,
+    length: i64,
+    per_us: f64,
+    bind: Arc<dyn Fn() -> Result<Decoding, crate::BindFailure> + Send + Sync>,
+}
+
+impl Real {
+    fn open() -> Self {
+        let path = std::env::var_os("TICKWAVE_DECODE_REC").map_or_else(fixture, PathBuf::from);
+        let recipe: &'static str = match std::env::var_os("TICKWAVE_DECODE_RECIPE") {
+            Some(f) => Box::leak(std::fs::read_to_string(f).unwrap().into_boxed_str()),
+            None => SWD,
+        };
+        let file = std::fs::File::open(&path).unwrap();
+        let rec = Arc::new(Recording::open(Arc::new(file), Cache::new(64 << 20)).unwrap());
+        let r = Recipe::parse(recipe).unwrap();
+        let lanes: Vec<usize> = (r.analyses[0].inputs.iter())
+            .filter_map(|(_, i)| match i {
+                recipe::Input::Channel(c) => rec.channel(c),
+                recipe::Input::Analysis(_) => None,
+            })
+            .collect();
+        let bind_path = path.clone();
+        let bind = move || -> Result<Decoding, crate::BindFailure> {
+            let file = std::fs::File::open(&bind_path)?;
+            let rec = Arc::new(Recording::open(Arc::new(file), Cache::new(64 << 20))?);
+            let b = Recipe::parse(recipe)?.bind(
+                &rec,
+                recipe::window(&rec),
+                &[],
+                HostOptions::default(),
+            )?;
+            let mut analyses = vec![];
+            for a in b.analyses {
+                let map = timeline_map(&rec, a.timeline)?;
+                analyses.push(Tracked {
+                    id: a.id,
+                    name: a.label,
+                    map,
+                });
+            }
+            Ok(Decoding {
+                host: b.host,
+                analyses,
+            })
+        };
+        Self {
+            path,
+            lanes,
+            length: rec.length(),
+            per_us: rec.timebase().num() as f64 / rec.timebase().den() as f64 / 1e6,
+            bind: Arc::new(bind),
+        }
+    }
+
+    fn start(&self, ctx: &egui::Context) -> Decode {
+        let bind = Arc::clone(&self.bind);
+        Decode::start(ctx, DecodeOptions::default(), move || bind())
+    }
+
+    fn us(&self, n: f64) -> i64 {
+        (n * self.per_us) as i64
+    }
+}
+
+fn cpu_cap() {
+    let cap = std::fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq");
+    println!(
+        "CPU clock cap: {} kHz",
+        cap.as_deref().unwrap_or("unknown").trim()
+    );
+}
+
+fn quantiles(v: &mut [Duration]) -> String {
+    v.sort_unstable();
+    let at = |q: f64| v[((v.len() - 1) as f64 * q) as usize].as_secs_f64() * 1e3;
+    format!(
+        "n {}  p50 {:.2}  p99 {:.2}  max {:.2} ms",
+        v.len(),
+        at(0.5),
+        at(0.99),
+        at(1.0)
+    )
+}
+
+/// Where the first item `tally` counted at or after axis tick `from`, before `to`, starts.
+fn first_after(tally: &crate::track::Density, from: i64, to: i64) -> Option<i64> {
+    if tally.count(from, to, 0.0).0 == 0 {
+        return None;
+    }
+    let (mut lo, mut hi) = (from + 1, to);
+    while lo < hi {
+        let m = lo + (hi - lo) / 2;
+        if tally.count(from, m, 0.0).0 > 0 {
+            hi = m;
+        } else {
+            lo = m + 1;
+        }
+    }
+    Some(lo - 1)
+}
+
+/// Sleeps to the next 60 Hz frame after `next`, or starts the count again where a frame overran.
+fn pace(next: &mut Instant) {
+    *next += Duration::from_nanos(16_666_667);
+    match next.checked_duration_since(Instant::now()) {
+        Some(w) => std::thread::sleep(w),
+        None => *next = Instant::now(),
+    }
+}
+
 /// Frames of the decoded graph (the graph, its tracks and the panel beside them, laid out and
-/// tessellated) timed at 60 Hz while the forward pass runs and once it has finished, at three
-/// zooms: the whole recording, a few transfers and a transfer's bits. Run it under `taskset -c 0`
-/// for one core, the worker and the query thread then sharing it with the frames. With
-/// `TICKWAVE_DECODE_REC` and `TICKWAVE_DECODE_RECIPE` set, on that recording and recipe file;
-/// else on the SWD fixture.
+/// tessellated) timed at 60 Hz while the forward pass runs and once it has finished, at four
+/// zooms: the whole recording, a few transfers, a transfer's bits, and the widest window from the
+/// middle whose first track still draws boxes. That last is timed again with the pointer resting
+/// on a box, its hover text shown. Run it under `taskset -c 0` for one core, the worker and the
+/// query thread then sharing it with the frames. With `TICKWAVE_DECODE_REC` and
+/// `TICKWAVE_DECODE_RECIPE` set, on that recording and recipe file; else on the SWD fixture.
 ///
 ///     TICKWAVE_DECODE_REC=REC TICKWAVE_DECODE_RECIPE=crates/decoders/recipes/swd.toml \
 ///         taskset -c 0 cargo test --release -p escapement-tickwave-egui --features decode --lib \
@@ -414,177 +532,347 @@ fn shots() {
 #[ignore = "prints wall-clock frame times"]
 fn frame_times() {
     use crate::Palette;
-    let path = std::env::var_os("TICKWAVE_DECODE_REC").map_or_else(fixture, PathBuf::from);
-    let recipe: &'static str = match std::env::var_os("TICKWAVE_DECODE_RECIPE") {
-        Some(f) => Box::leak(std::fs::read_to_string(f).unwrap().into_boxed_str()),
-        None => SWD,
-    };
-    let file = std::fs::File::open(&path).unwrap();
-    let rec = Arc::new(Recording::open(Arc::new(file), Cache::new(64 << 20)).unwrap());
-    let r = Recipe::parse(recipe).unwrap();
-    let first = &r.analyses[0];
-    let lanes: Vec<usize> = (first.inputs.iter())
-        .filter_map(|(_, i)| match i {
-            recipe::Input::Channel(c) => rec.channel(c),
-            recipe::Input::Analysis(_) => None,
-        })
-        .collect();
-    let length = rec.length();
-    let per_us = rec.timebase().num() as f64 / rec.timebase().den() as f64 / 1e6;
-    let us = |n: f64| (n * per_us) as i64;
-    let bind_path = path.clone();
-    let bind = move || -> Result<Decoding, crate::BindFailure> {
-        let file = std::fs::File::open(&bind_path)?;
-        let rec = Arc::new(Recording::open(Arc::new(file), Cache::new(64 << 20))?);
-        let b =
-            Recipe::parse(recipe)?.bind(&rec, recipe::window(&rec), &[], HostOptions::default())?;
-        let mut analyses = vec![];
-        for a in b.analyses {
-            let map = timeline_map(&rec, a.timeline)?;
-            analyses.push(Tracked {
-                id: a.id,
-                name: a.label,
-                map,
-            });
-        }
-        Ok(Decoding {
-            host: b.host,
-            analyses,
-        })
-    };
-    let mid = length / 2;
-    let zooms = [
+    let real = Real::open();
+    let (length, mid) = (real.length, real.length / 2);
+    let mut zooms = vec![
         ("whole", 0..length),
-        ("transfers", mid..mid + us(400.0)),
-        ("bits", mid..mid + us(20.0)),
+        ("transfers", mid..mid + real.us(400.0)),
+        ("bits", mid..mid + real.us(20.0)),
     ];
     let palette = Palette::from_visuals(&egui::Visuals::dark());
-    let frame = std::time::Duration::from_nanos(16_666_667);
-    let cap = std::fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq");
-    println!(
-        "CPU clock cap: {} kHz",
-        cap.as_deref().unwrap_or("unknown").trim()
-    );
-    let quantiles = |v: &mut Vec<Duration>| {
-        v.sort_unstable();
-        let at = |q: f64| v[((v.len() - 1) as f64 * q) as usize].as_secs_f64() * 1e3;
-        format!(
-            "n {}  p50 {:.2}  p99 {:.2}  max {:.2} ms",
-            v.len(),
-            at(0.5),
-            at(0.99),
-            at(1.0)
-        )
-    };
-    for (name, window) in zooms {
+    cpu_cap();
+    let mut k = 0;
+    while k < zooms.len() {
+        let (name, window) = zooms[k].clone();
+        k += 1;
         let ctx = egui::Context::default();
-        let viewer = Viewer::open(&ctx, &path).unwrap();
-        let decode = Decode::start(&ctx, DecodeOptions::default(), bind.clone());
+        let viewer = Viewer::open(&ctx, &real.path).unwrap();
+        let decode = real.start(&ctx);
         let mut state = ViewState {
             window: Window::At(window.clone()),
             ..ViewState::default()
         };
         let mut decoded = DecodeState::default();
-        let input = || egui::RawInput {
+        let input = |events: Vec<egui::Event>| egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
                 egui::vec2(1920.0, 600.0),
             )),
+            events,
             ..egui::RawInput::default()
+        };
+        // Where the plot lies across the graph, and the top of its first track.
+        let drawn = std::cell::Cell::new((0.0f32, 0.0f32, 0.0f32));
+        let frame = |events: Vec<egui::Event>, state: &mut ViewState, decoded: &mut DecodeState| {
+            let t = Instant::now();
+            let out = ctx.run_ui(input(events), |ui| {
+                let r = ui.add(
+                    Graph::lanes_only(&viewer, state, &palette)
+                        .lanes(&real.lanes)
+                        .decoded(&decode, decoded)
+                        .panel(Place::Beside(360.0)),
+                );
+                if let Some(s) = Graph::shown(&r) {
+                    let top = r.rect.bottom() + ui.spacing().item_spacing.y;
+                    drawn.set((s.plot.start, s.plot.end, top));
+                }
+            });
+            let hover = (out.shapes.iter()).any(|c| match &c.shape {
+                egui::Shape::Text(t) => t.galley.text().contains(" for "),
+                _ => false,
+            });
+            let _ = ctx.tessellate(out.shapes, out.pixels_per_point);
+            (t.elapsed(), hover)
         };
         let (mut running, mut done) = (vec![], vec![]);
         let started = Instant::now();
         let mut next = Instant::now();
         let mut after = 0;
         while after < 120 && started.elapsed() < Duration::from_secs(300) {
-            let t = Instant::now();
-            let out = ctx.run_ui(input(), |ui| {
-                ui.add(
-                    Graph::lanes_only(&viewer, &mut state, &palette)
-                        .lanes(&lanes)
-                        .decoded(&decode, &mut decoded)
-                        .panel(Place::Beside(360.0)),
-                );
-            });
-            let _ = ctx.tessellate(out.shapes, out.pixels_per_point);
-            let took = t.elapsed();
+            let (took, _) = frame(vec![], &mut state, &mut decoded);
             if finished(&decode) {
                 done.push(took);
                 after += 1;
             } else {
                 running.push(took);
             }
-            next += frame;
-            match next.checked_duration_since(Instant::now()) {
-                Some(w) => std::thread::sleep(w),
-                None => next = Instant::now(),
-            }
+            pace(&mut next);
         }
         let pass = started.elapsed().as_secs_f64() - after as f64 / 60.0;
+        // From the whole recording's tally, the widest window from the first item after the
+        // middle that still draws boxes on the first track.
+        if name == "whole" {
+            let (left, right, _) = drawn.get();
+            let width = right - left;
+            let g = decode.lock();
+            if let Phase::Running(r) = &g.phase
+                && let Some(from) = first_after(&r.lanes[0].tally, mid, length)
+            {
+                let tally = &r.lanes[0].tally;
+                let (mut lo, mut hi) = (from + 1, length);
+                while lo < hi {
+                    let m = lo + (hi - lo + 1) / 2;
+                    if tally.crowded(&(from..m), width) {
+                        hi = m - 1;
+                    } else {
+                        lo = m;
+                    }
+                }
+                let (count, _) = tally.count(from, lo, 0.0);
+                println!("crowded: {count} items over {width:.0} points");
+                zooms.push(("crowded", from..lo));
+            }
+        }
+        // The pointer resting on a box of the first track, after the pass: the hover's cost.
+        let mut pointed = vec![];
+        let mut shown = 0;
+        if name == "crowded" {
+            let at = {
+                let g = decode.lock();
+                let Phase::Running(r) = &g.phase else {
+                    unreachable!("decoding");
+                };
+                let src = r.source(0, &window);
+                let map = r.lanes[0].map;
+                // The longest item starting in the window (not in the decoded wings) in a row of
+                // one lane, whose lane is then known.
+                let (_, rows) = r.lanes[0].schema.layout();
+                let lane = |i: &escapement_tickwave_decode::Item| {
+                    let l = rows.get(usize::from(i.id.kind.0))?;
+                    (l.len() == 1).then_some(l.start)
+                };
+                let item = (src.items.values())
+                    .filter(|i| lane(i).is_some() && i.end.is_some())
+                    .filter(|i| window.contains(&map.axis_saturating(i.start)))
+                    .max_by_key(|i| i.end.unwrap() - i.start)
+                    .expect("an item in the window");
+                // The middle of the part the window shows.
+                let a = map.axis_saturating(item.start).max(window.start);
+                let b = map.axis_saturating(item.end.unwrap()).min(window.end);
+                let middle = a + (b - a) / 2;
+                let (left, right, top) = drawn.get();
+                let per = (window.end - window.start) as f32 / (right - left);
+                let row = lane(item).unwrap() as f32;
+                egui::pos2(
+                    left + (middle - window.start) as f32 / per,
+                    top + (row + 0.5) * crate::track::ROW,
+                )
+            };
+            let mut events = vec![egui::Event::PointerMoved(at)];
+            let mut next = Instant::now();
+            for _ in 0..120 {
+                let (took, hover) = frame(std::mem::take(&mut events), &mut state, &mut decoded);
+                pointed.push(took);
+                shown += usize::from(hover);
+                pace(&mut next);
+            }
+        }
         drop(decode);
         // The same graph alone, nothing decoded: the decode's own share of a frame.
         let mut plain = vec![];
         let mut next = Instant::now();
         for _ in 0..120 {
             let t = Instant::now();
-            let out = ctx.run_ui(input(), |ui| {
-                ui.add(Graph::lanes_only(&viewer, &mut state, &palette).lanes(&lanes));
+            let out = ctx.run_ui(input(vec![]), |ui| {
+                ui.add(Graph::lanes_only(&viewer, &mut state, &palette).lanes(&real.lanes));
             });
             let _ = ctx.tessellate(out.shapes, out.pixels_per_point);
             plain.push(t.elapsed());
-            next += frame;
-            match next.checked_duration_since(Instant::now()) {
-                Some(w) => std::thread::sleep(w),
-                None => next = Instant::now(),
-            }
+            pace(&mut next);
         }
         println!("{name}: pass about {pass:.1} s");
         if !running.is_empty() {
             println!("  while the pass runs: {}", quantiles(&mut running));
         }
         println!("  after it:           {}", quantiles(&mut done));
+        if !pointed.is_empty() {
+            println!(
+                "  pointer on a box:   {} (hover text in {shown} frames)",
+                quantiles(&mut pointed)
+            );
+        }
         println!("  the graph alone:    {}", quantiles(&mut plain));
     }
 }
 
-/// A panel's choice moves the window only where it does not show the item whole: keeping its
-/// span with the item in the middle, or fitting a longer item with a quarter of it either side.
+/// Latency from a press of the panel's next to the first frame whose window, graph answer and
+/// decoded window are all the new window's, frames paced at 60 Hz once the pass has finished.
+/// Each press is on the last item starting in a window of a few transfers, so its next lies past
+/// the window's edge. On the recording and recipe `frame_times` takes; run it under
+/// `taskset -c 0` too.
 #[test]
-fn an_item_out_of_view_is_brought_into_it() {
-    use crate::decode::bring;
-    let window = 1000..2000;
-    assert_eq!(bring(&window, 1200..1300), None, "in view: nothing moves");
-    assert_eq!(bring(&window, 1000..2000), None, "exactly in view");
-    assert_eq!(
-        bring(&window, 2500..2600),
-        Some(2050..3050),
-        "past it: centred"
+#[ignore = "prints wall-clock latencies"]
+fn step_latency() {
+    use egui_kittest::kittest::{NodeT as _, Queryable};
+    let real = Real::open();
+    let whole = 0..real.length;
+    cpu_cap();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1920.0, 600.0))
+        .build_ui_state(
+            |ui, v: &mut Stepped| {
+                let palette = palette();
+                v.ready = ready(v);
+                let r = ui.add(
+                    Graph::lanes_only(&v.viewer, &mut v.state, &palette)
+                        .lanes(&v.lanes)
+                        .decoded(&v.decode, &mut v.decoded)
+                        .panel(Place::Beside(360.0)),
+                );
+                v.drawn = Graph::shown(&r).map(|s| (s, 0.0));
+            },
+            {
+                let ctx = egui::Context::default();
+                Stepped {
+                    viewer: Viewer::open(&ctx, &real.path).unwrap(),
+                    state: ViewState {
+                        window: Window::At(whole.clone()),
+                        ..ViewState::default()
+                    },
+                    decode: real.start(&ctx),
+                    decoded: DecodeState::default(),
+                    lanes: real.lanes.clone(),
+                    drawn: None,
+                    ready: false,
+                }
+            },
+        );
+    // Whether the last frame drew `window` settled.
+    let settled = |h: &Harness<'_, Stepped>, window: &Range<i64>| {
+        let v = h.state();
+        v.ready && v.drawn.as_ref().is_some_and(|(s, _)| s.window == *window)
+    };
+    let mut next = Instant::now();
+    let t = Instant::now();
+    while !finished(&h.state().decode) {
+        assert!(t.elapsed() < Duration::from_secs(300), "the pass finished");
+        h.step();
+        pace(&mut next);
+    }
+    // A few transfers, from the first item after the middle.
+    let from = {
+        let g = h.state().decode.lock();
+        let Phase::Running(r) = &g.phase else {
+            unreachable!("decoding");
+        };
+        first_after(&r.lanes[0].tally, real.length / 2, real.length).expect("an item")
+    };
+    let window = from..from + real.us(400.0);
+    h.state_mut().state.window = Window::At(window.clone());
+    while !settled(&h, &window) {
+        assert!(
+            t.elapsed() < Duration::from_secs(300),
+            "settled at the start"
+        );
+        h.step();
+        pace(&mut next);
+    }
+    let (mut took, mut frames, mut stuck) = (vec![], vec![], 0);
+    for _ in 0..30 {
+        // The last item starting in the window: next steps past its edge, into the decoded wing.
+        let Window::At(w) = h.state().state.window.clone() else {
+            unreachable!("a window set by the test or the panel");
+        };
+        let last = {
+            let g = h.state().decode.lock();
+            let Phase::Running(r) = &g.phase else {
+                unreachable!("decoding");
+            };
+            let map = r.lanes[0].map;
+            (r.source(0, &w).items.values())
+                .filter(|i| (w.start..w.end).contains(&map.axis_saturating(i.start)))
+                .max_by_key(|i| i.start)
+                .map(|i| {
+                    (
+                        i.id,
+                        r.lanes[0].schema.kind(i.id.kind).unwrap().name.to_string(),
+                    )
+                })
+        };
+        let Some((id, kind)) = last else {
+            // Nothing decoded starts here: on to the next item after it.
+            let from = {
+                let g = h.state().decode.lock();
+                let Phase::Running(r) = &g.phase else {
+                    unreachable!("decoding");
+                };
+                first_after(&r.lanes[0].tally, w.end, real.length)
+            };
+            let Some(from) = from else { break };
+            let on = from..from + (w.end - w.start);
+            h.state_mut().state.window = Window::At(on.clone());
+            while !settled(&h, &on) {
+                h.step();
+                pace(&mut next);
+            }
+            continue;
+        };
+        h.state_mut().decoded.panel.selected = Some((0, id));
+        h.step();
+        pace(&mut next);
+        let label = format!("next {kind} \u{25b8}");
+        let Some(button) = h
+            .query_by_label(&label)
+            .filter(|b| !b.accesskit_node().is_disabled())
+        else {
+            // Its next lies past the decoded wing; step on from there.
+            stuck += 1;
+            let span = w.end - w.start;
+            let on = Window::At(w.end..w.end + span);
+            h.state_mut().state.window = on;
+            while !matches!(&h.state().state.window, Window::At(x) if settled(&h, x)) {
+                h.step();
+                pace(&mut next);
+            }
+            continue;
+        };
+        button.click();
+        let t = Instant::now();
+        let mut n = 0;
+        loop {
+            h.step();
+            n += 1;
+            let now = h.state().state.window.clone();
+            let Window::At(moved) = &now else {
+                unreachable!("a window set by the panel");
+            };
+            if *moved != w && settled(&h, moved) {
+                took.push(t.elapsed());
+                frames.push(n);
+                break;
+            }
+            assert!(
+                t.elapsed() < Duration::from_secs(10),
+                "settled after a step"
+            );
+            pace(&mut next);
+        }
+        pace(&mut next);
+    }
+    assert!(!took.is_empty(), "a step that moved the window");
+    frames.sort_unstable();
+    println!(
+        "next, to the picture settled: {} (frames: median {}, most {}); {stuck} items had no next decoded",
+        quantiles(&mut took),
+        frames[frames.len() / 2],
+        frames[frames.len() - 1]
     );
-    assert_eq!(
-        bring(&window, 100..200),
-        Some(-350..650),
-        "before it: centred"
-    );
-    assert_eq!(
-        bring(&window, 1900..2100),
-        Some(1500..2500),
-        "half out: centred"
-    );
-    assert_eq!(
-        bring(&window, 5000..5000),
-        Some(4500..5500),
-        "an open item, at its start"
-    );
-    assert_eq!(
-        bring(&window, 3000..7000),
-        Some(2000..8000),
-        "longer than the window: a quarter either side"
-    );
-    assert_eq!(
-        bring(&window, 500..2500),
-        Some(0..3000),
-        "longer, across it"
-    );
+}
+
+/// Whether `v`'s window has its graph answer and its decoded window held, before the window a
+/// panel step asked for is set: a frame starting so draws the settled picture.
+fn ready(v: &Stepped) -> bool {
+    let Window::At(window) = &v.state.window else {
+        return false;
+    };
+    if v.decoded.jumping() {
+        return false;
+    }
+    let answered = (v.viewer.answer()).is_some_and(|a| a.window == *window) && !v.viewer.busy();
+    let g = v.decode.lock();
+    let decoded = matches!(&g.phase, Phase::Running(r) if r.chains[0].drawn.as_ref()
+        .is_some_and(|c| c.axis.start <= window.start && window.end <= c.axis.end));
+    answered && decoded
 }
 
 /// A decoded graph with its panel beside it, and where it last drew: the graph's `Shown`, and
@@ -596,6 +884,9 @@ struct Stepped {
     decoded: DecodeState,
     lanes: Vec<usize>,
     drawn: Option<(crate::Shown, f32)>,
+    /// The last frame began with its window's answer and decoded window both held, so drew the
+    /// settled picture.
+    ready: bool,
 }
 
 /// Previous and next in the panel move the window to an item it does not show whole, keeping its
@@ -641,6 +932,7 @@ fn a_panel_step_brings_its_item_into_view_and_a_track_click_moves_nothing() {
                     decoded: DecodeState::default(),
                     lanes,
                     drawn: None,
+                    ready: false,
                 }
             },
         );
@@ -692,4 +984,44 @@ fn a_panel_step_brings_its_item_into_view_and_a_track_click_moves_nothing() {
     assert_eq!(h.state().decoded.panel.selected, Some((0, cut)));
     let back = crate::decode::bring(&moved, start..end).unwrap_or(moved);
     assert_eq!(h.state().state.window, Window::At(back));
+}
+
+/// A panel's choice moves the window only where it does not show the item whole: keeping its
+/// span with the item in the middle, or fitting a longer item with a quarter of it either side.
+#[test]
+fn an_item_out_of_view_is_brought_into_it() {
+    use crate::decode::bring;
+    let window = 1000..2000;
+    assert_eq!(bring(&window, 1200..1300), None, "in view: nothing moves");
+    assert_eq!(bring(&window, 1000..2000), None, "exactly in view");
+    assert_eq!(
+        bring(&window, 2500..2600),
+        Some(2050..3050),
+        "past it: centred"
+    );
+    assert_eq!(
+        bring(&window, 100..200),
+        Some(-350..650),
+        "before it: centred"
+    );
+    assert_eq!(
+        bring(&window, 1900..2100),
+        Some(1500..2500),
+        "half out: centred"
+    );
+    assert_eq!(
+        bring(&window, 5000..5000),
+        Some(4500..5500),
+        "an open item, at its start"
+    );
+    assert_eq!(
+        bring(&window, 3000..7000),
+        Some(2000..8000),
+        "longer than the window: a quarter either side"
+    );
+    assert_eq!(
+        bring(&window, 500..2500),
+        Some(0..3000),
+        "longer, across it"
+    );
 }
