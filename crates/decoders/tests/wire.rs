@@ -253,6 +253,10 @@ fn a_port_left_out_is_not_read_and_the_others_keep_their_numbers() {
     assert!(data.len() > 2, "SWDIO changes");
     assert_eq!(only, data, "port 1's observations, still numbered 1");
     assert_ne!(key, without, "a port left out is another binding");
+    assert!(matches!(
+        WireSource::with_ports(rec.clone(), vec![None, None]),
+        Err(BindWire::NoChannel)
+    ));
 }
 
 fn open(file: Vec<u8>) -> Arc<Recording> {

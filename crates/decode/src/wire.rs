@@ -23,6 +23,9 @@ pub enum BindWire {
     Sources(usize, usize),
     #[error("more channels than a window numbers ports")]
     TooMany,
+    /// Every port left out: a source with nothing to read never ends.
+    #[error("no port is bound to a channel")]
+    NoChannel,
 }
 
 /// Channels of one source as a wire analysis's ports, in port order.
@@ -59,6 +62,9 @@ impl WireSource {
         let (numbers, channels): (Vec<u8>, Vec<usize>) = (ports.iter().enumerate())
             .filter_map(|(p, c)| Some((p as u8, (*c)?)))
             .unzip();
+        if channels.is_empty() {
+            return Err(BindWire::NoChannel);
+        }
         let never = AtomicBool::new(false);
         let mut end: Option<Tick> = None;
         let mut first: Option<(usize, u32)> = None;

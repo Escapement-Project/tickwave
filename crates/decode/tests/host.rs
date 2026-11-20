@@ -2944,6 +2944,34 @@ fn only_a_wire_analysis_is_sought_or_replaced() {
     assert_eq!(h.consumed(p), 500);
 }
 
+#[test]
+fn a_turn_takes_a_delivery_whatever_its_budget_says() {
+    let mut h = Host::new(options(|o| o.turn_deliveries = 0));
+    let input = InputSpec::Wire {
+        source: Box::new(line(40, 3, 20, vec![])),
+        local: None,
+    };
+    let pulses = Box::new(|_: &Bound, local| Box::new(Pulses::new(local, 15)) as Box<dyn Decoder>);
+    let p = h
+        .add(
+            name("pulses"),
+            definition("pulses", pulses_schema()),
+            input,
+            pulses,
+            &[],
+            all(),
+        )
+        .unwrap();
+    let q = pairs_on(&mut h, p);
+    for _ in 0..100_000 {
+        if !h.step().unwrap() {
+            break;
+        }
+    }
+    assert!(!h.runnable(q));
+    assert!(widths(h.store(q)).len() > 10);
+}
+
 /// Each item's id and width, in id order.
 fn widths(store: &escapement_tickwave_decode::Store) -> Vec<(Id, u64)> {
     (store.items().values())

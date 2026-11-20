@@ -146,7 +146,8 @@ pub struct Counts {
     pub closes: u64,
     pub incomplete: u64,
     pub peak_open: usize,
-    /// Every op so far, in order, hashed: equal digests mean equal output. Stable across builds.
+    /// Every op so far, in order, hashed, to compare two runs' output: different digests mean
+    /// different output. Stable across builds.
     pub digest: u64,
 }
 

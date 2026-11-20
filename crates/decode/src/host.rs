@@ -1035,7 +1035,7 @@ pub const PIECE_CHUNK: usize = 256;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct HostOptions {
-    /// Deliveries one turn may take.
+    /// Deliveries one turn may take; at least one, whatever this says.
     pub turn_deliveries: usize,
     /// The most a stacked analysis's inbox holds before its upstream waits. A queued piece keeps
     /// at most `PIECE_CHUNK` operations of its batch alive.
@@ -2131,7 +2131,7 @@ impl Host {
 
     fn begin_turn_run(&mut self, id: RunId) -> Result<Turn, Refusal> {
         let a = id.analysis.index();
-        let budget = self.options.turn_deliveries;
+        let budget = self.options.turn_deliveries.max(1);
         let Some(r) = self.run_of_mut(id) else {
             let current = self.analyses[a].run.id;
             return Err(self.refuse(Refusal::StaleRun { got: id, current }));
