@@ -191,7 +191,8 @@ scrolls the page, and the view says how to zoom. Shift with the wheel, a sideway
 the left and right arrow keys move along the capture: an arrow an eighth of the span shown, or half
 of it with Shift. With the view focused, the up and down arrows or plus and minus zoom in and out.
 Home and Fit show the whole capture, or all of the channels the view shows, with each analog
-channel's whole range, and Escape clears the cursors and the selection.
+channel's whole range. Escape clears the cursors and the selection, and so does Clear, at the end
+of the readout's first line while either is placed.
 A zoom step, and an arrow key's move, eases into place over about 150 ms, and the rows read for
 where it goes at once. A key pressed during an ease goes on from where the last one was going, and
 the view eases there from where it is drawn, so a held arrow key glides. A reader who prefers
@@ -440,7 +441,9 @@ right steps through the notes, and a screen reader says each. Zoomed in, the spa
 the note stepped to. Escape lights none. On a touch screen, a tap lights a note or reads a pulse.</p>
 <p>With <code><span class="word">for</span></code> or <code><span class="word">href</span></code>, the inset opens the recording at a note. A click on a note, Enter on the
 note the keys lit, or a second tap on a lit note opens it there. A click elsewhere on the plot
-opens it at the inset's own annotation. Zoomed in, the recording opens over the span the inset
+opens it at the inset's own annotation. Open, at the end of the line under the trace, opens it as a
+click on the plot does: at the lit note, or else at the annotation. On a touch screen it is how a
+finger opens the inset with no note lit. Zoomed in, the recording opens over the span the inset
 shows. <code><span class="word">for</span></code> opens a view on the page, and wins where it names one. Otherwise <code><span class="word">href</span></code> makes the
 inset a link to that page: tickwave's Open page, or any page that reads the same parameters. The
 inset sets <code><span class="word">src</span></code>, <code><span class="word">annotations</span></code> and <code><span class="word">annotation</span></code> in the page's query, and <code><span class="word">window</span></code> while zoomed in:
@@ -449,8 +452,8 @@ it drops any <code><span class="word">window</span></code> the address had. A re
 another site's whole. As a link, the inset opens a new tab on a middle click or a Ctrl or Cmd
 click, and shows its address on hover.</p>
 <p>Such an inset marks where it opens, with a small &quot;Opens here&quot; over the plot that moves nothing. It
-sits on the note lit by the pointer, a tap or the keys. With the keys' focus on the inset and no
-note lit, it sits at the start of the span shown, where Enter opens.</p>
+sits on the note lit by the pointer, a tap or the keys. With no note lit, it sits at the start of
+the span shown while the keys' focus is on the inset, where Enter opens, or the pointer is on Open.</p>
 <p>An inset the pointer passes through, as in a chart's popover, where <code><span class="word">pointer-events</span></code> is <code><span class="word">none</span></code>,
 does none of this. Inside a popover the inset is no Tab stop, and the element that opened it keeps
 the focus. A reference passes its arrow keys to <code><span class="word">arrowKey(event)</span></code>, which answers them as the
@@ -473,7 +476,10 @@ read the inset, and has 300 ms to cross between the text and the popover. Moving
 the focus away, or Escape, closes the popover. With the focus on the reference, the arrow keys
 work the inset as they do an inset with the focus. A click, Enter or Space opens its view at the
 note the pointer or the keys lit, or else at the annotation, and over the span the reader zoomed the
-popover to. With the popover closed, as after Escape, the view opens at the annotation's own span.
+popover to. With a view to open, the popover's inset has Open, which does the same.</p>
+<p>A finger has no hover. On a touch screen, a tap on the phrase opens the popover and nothing else,
+and the next tap on the phrase closes it. The inset's Open opens the view. A finger held on the
+phrase that turns into a scroll closes the popover. With the popover closed, as after Escape, the view opens at the annotation's own span.
 A screen reader cannot reach into the drawn inset, so the annotation's label and text describe the
 reference itself.</p>
 <table>
@@ -515,8 +521,9 @@ attributes. So Firefox's reader view, and a page without its CSS, still show the
 caption names it, and the table it names describes it. A reader picks a setting by pointing at it,
 tapping it or stepping to it with the arrow keys, and picks a series from the legend or a line's
 end label. A point can name a recording and one of its annotations. Pointing at it opens an inset
-of that annotation, and a click opens the page's view of the recording there. Only then does the
-chart load <code><span class="word">tickwave.js</span></code>, from beside itself.</p>
+of that annotation, and a click opens the page's view of the recording there. On a touch screen, a
+tap shows the inset, and its popover's Open opens the view. Only once an inset opens does the chart
+load <code><span class="word">tickwave.js</span></code>, from beside itself.</p>
 <p><code><span class="word">CHARTS.md</span></code>, at the repository's root, specifies the data format, <code><span class="word">tickwave-chart/1</span></code>, and every
 attribute, property and event. <code><span class="word">tickwave.css</span></code> reserves a chart's room before the module defines it,
 from <code>--tickwave-chart-height</code> and <code>--tickwave-chart-readout-lines</code>, as it lays out a closed view. Besides the properties below, the chart reads the line patterns
