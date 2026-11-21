@@ -36,9 +36,12 @@ ${SUMMARY_CSS}.viewer { display: flex; flex-direction: column; flex: 1 1 auto; m
   padding: 0 10px 6px 14px; }
 .toolbar .group { display: flex; gap: 4px; align-items: center; }
 /* The roles the sidecar declares, on the toolbar's line between its groups: one line, cut where it
-   runs out of room, so roles arriving with the sidecar move nothing else. */
-.key { display: flex; flex: 1 1 0; min-width: 0; justify-content: flex-end; gap: 12px; overflow: hidden;
+   runs out of room, so roles arriving with the sidecar move nothing else. It sits at the line's end
+   while it fits; the first entry's margin takes only room to spare, so a key too wide is cut at its
+   end and its first roles stay in view. */
+.key { display: flex; flex: 1 1 0; min-width: 0; gap: 12px; overflow: hidden;
   white-space: nowrap; font-size: 13px; color: var(--ink-2, GrayText); }
+.key > :first-child { margin-left: auto; }
 .key svg { vertical-align: middle; margin-right: 5px; }
 .plot { position: relative; flex: 1 1 auto; min-height: 0; touch-action: pan-y; cursor: crosshair; }
 .plot:focus-visible { outline-offset: -2px; border-radius: 4px; }

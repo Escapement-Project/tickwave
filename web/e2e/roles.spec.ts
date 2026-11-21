@@ -45,6 +45,32 @@ test("a sidecar's stored view sets the channels, the span and the trace's colour
   ]);
 });
 
+test("a key too wide for the toolbar is cut at its end, its first role in view beside the buttons; one that fits sits at the line's end", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 800 });
+  await page.goto(`/e2e/pages/view.html?open&annotations=${ROLES}`);
+  const view = page.locator("#v");
+  await ready(view);
+  const key = view.locator(".key");
+  await expect.poll(async () => (await swatches(key)).length).toBe(3);
+  const edges = () =>
+    key.evaluate((k) => {
+      const box = k.getBoundingClientRect();
+      const items = [...k.children].map((c) => c.getBoundingClientRect());
+      const buttons = k.parentElement!.querySelector(".group")!.getBoundingClientRect();
+      // Whichever end it overflows at: scrollWidth counts no overflow past the start.
+      const cut = items.at(-1)!.right - items[0]!.left > box.width + 0.5;
+      return { left: box.left, right: box.right, first: items[0]!.left, last: items.at(-1)!.right, buttons: buttons.right, cut };
+    });
+  const narrow = await edges();
+  expect(narrow.cut, "three roles do not fit beside the buttons at 320 px").toBe(true);
+  expect(narrow.left).toBeGreaterThanOrEqual(narrow.buttons);
+  expect(narrow.first).toBeGreaterThanOrEqual(narrow.left - 0.5);
+  await page.setViewportSize({ width: 1100, height: 800 });
+  await expect.poll(async () => (await edges()).cut).toBe(false);
+  const wide = await edges();
+  expect(Math.abs(wide.last - wide.right)).toBeLessThan(1);
+});
+
 test("the page's attributes and tokens win over the stored view and the declared looks, each on its own", async ({ page }) => {
   const style = encodeURIComponent("--series-verge: rgb(0, 128, 0); --tickwave-role-neither: rgb(0, 0, 255); --tickwave-role-neither-dash: none; --tickwave-role-target-weight: 3");
   await page.goto(`/e2e/pages/view.html?open&annotations=${ROLES}&channels=SWCLK&window=${encodeURIComponent("377.1ms 377.2ms")}&series=verge&style=${style}`);

@@ -27,6 +27,9 @@ the figure open.
 
 A view's readout has Clear, which removes the cursors and the selection.
 
+On a narrow screen, a view's key of roles that doesn't fit on the toolbar is cut at its end, so its
+first roles stay in view beside the zoom buttons.
+
 ## v0.1.1
 
 A recording on another site opens when that site sends `Access-Control-Allow-Origin`, as GitHub
