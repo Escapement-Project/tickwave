@@ -76,6 +76,13 @@ impl Recording {
         from: i64,
         to: i64,
     ) -> Result<Vec<BlockAt>, Error> {
+        #[cfg_attr(
+            not(feature = "live"),
+            expect(
+                clippy::infallible_destructuring_match,
+                reason = "a live store is the other arm"
+            )
+        )]
         let f = match &self.store {
             Store::Finished(f) => f,
             #[cfg(feature = "live")]
