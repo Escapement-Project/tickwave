@@ -190,7 +190,7 @@ checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
 name = "escapement-tickwave-decode"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "escapement-tickwave-view",
  "foldhash",
@@ -200,7 +200,7 @@ dependencies = [
 
 [[package]]
 name = "escapement-tickwave-decoders"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "escapement-tickwave-decode",
  "foldhash",
@@ -209,7 +209,7 @@ dependencies = [
 
 [[package]]
 name = "escapement-tickwave-format"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "blake3",
  "rayon",
@@ -240,7 +240,7 @@ dependencies = [
 
 [[package]]
 name = "escapement-tickwave-import"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "escapement-tickwave-format",
  "flate2",
@@ -255,7 +255,7 @@ dependencies = [
 
 [[package]]
 name = "escapement-tickwave-view"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "escapement-tickwave-format",
  "foldhash",

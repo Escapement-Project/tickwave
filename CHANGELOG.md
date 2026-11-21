@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.1.2
 
 Protocol decoding, in the native renderer. Decoders for SWD, JTAG and cJTAG, with JTAG-DP, ADIv5
 and MEM-AP stacked on them, draw their items as tracks under the graph. Zoomed out, a track shows
