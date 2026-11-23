@@ -1,6 +1,7 @@
-# A release: a tag vX.Y.Z builds the web files and the site, adds them to gh-pages (pages.sh: the
-# files in vX.Y.Z/, which never change once published, and the site at the root for the highest
-# version), then makes the GitHub release with CHANGELOG.md's notes for it.
+# A release: a tag vX.Y.Z runs the test suites (ci.yml), then builds the web files and the site,
+# adds them to gh-pages (pages.sh: the files in vX.Y.Z/, which never change once published, and the
+# site at the root for the highest version), then makes the GitHub release with CHANGELOG.md's
+# notes for it.
 name: release
 
 on:
@@ -15,7 +16,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   release:
+    needs: ci
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -38,17 +43,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # wasm-bindgen's CLI has to match the crate in Cargo.lock; wasm-opt is binaryen's, pinned by
-      # its release's digest.
-      - name: wasm-bindgen and wasm-opt
-        run: |
-          bindgen=$(awk '$0 == "name = \"wasm-bindgen\"" { getline; gsub(/"/, "", $3); print $3; exit }' Cargo.lock)
-          cargo install wasm-bindgen-cli --version "$bindgen" --locked
-          archive=binaryen-version_133-x86_64-linux.tar.gz
-          curl -fsSLo "$RUNNER_TEMP/$archive" "https://github.com/WebAssembly/binaryen/releases/download/version_133/$archive"
-          echo "2dc9c7813f5375db93d96ead4b78222fcc3e2677bbb832297af4797782a37489  $RUNNER_TEMP/$archive" | sha256sum -c
-          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP/binaryen-version_133/bin" >> "$GITHUB_PATH"
+      - uses: ./.github/actions/wasm-tools
 
       - uses: actions/setup-node@v7
         with:

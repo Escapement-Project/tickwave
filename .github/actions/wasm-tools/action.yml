@@ -1,0 +1,18 @@
+# wasm-bindgen's CLI, at the version Cargo.lock has for the crate, and binaryen's wasm-opt, pinned by
+# its release's digest. The browser builds (crates/*/build.sh) need both.
+name: wasm-tools
+description: Installs wasm-bindgen and wasm-opt for the browser builds.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        bindgen=$(awk '$0 == "name = \"wasm-bindgen\"" { getline; gsub(/"/, "", $3); print $3; exit }' Cargo.lock)
+        if [ "$(wasm-bindgen --version 2>/dev/null)" != "wasm-bindgen $bindgen" ]; then
+          cargo install wasm-bindgen-cli --version "$bindgen" --locked
+        fi
+        archive=binaryen-version_133-x86_64-linux.tar.gz
+        curl -fsSLo "$RUNNER_TEMP/$archive" "https://github.com/WebAssembly/binaryen/releases/download/version_133/$archive"
+        echo "2dc9c7813f5375db93d96ead4b78222fcc3e2677bbb832297af4797782a37489  $RUNNER_TEMP/$archive" | sha256sum -c
+        tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP"
+        echo "$RUNNER_TEMP/binaryen-version_133/bin" >> "$GITHUB_PATH"
