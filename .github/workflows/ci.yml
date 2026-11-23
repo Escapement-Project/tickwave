@@ -1,0 +1,149 @@
+# The test suites, on every push to main and every pull request: the Rust workspace, the browser
+# build with its unit and browser tests, and each fuzz target over its seeds. A release runs it
+# first (release.yml). The tests that need web/fixtures-local or web/dev/vendor skip here, and the
+# fuzz targets only replay their seeds.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  rust:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The native renderer's tests draw through wgpu; the runner has no GPU, so lavapipe stands in.
+      - name: A software Vulkan driver
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers
+
+      - run: cargo fmt --check
+
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Features unify across the workspace, so the builds that leave one out are linted on their own.
+      - run: |
+          cargo clippy -p escapement-tickwave-view --no-default-features -- -D warnings
+          cargo clippy -p escapement-tickwave-decode --no-default-features -- -D warnings
+
+      - run: cargo test --workspace --no-fail-fast
+
+      - run: cargo doc --workspace --no-deps --features escapement-tickwave-decode/recipe,escapement-tickwave-decoders/recipe,escapement-tickwave-egui/decode
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      - name: The cores build for wasm32
+        run: |
+          cargo build -p escapement-tickwave-view --target wasm32-unknown-unknown --no-default-features
+          cargo build -p escapement-tickwave-decode --target wasm32-unknown-unknown --no-default-features
+
+  web:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: ./.github/actions/wasm-tools
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: The browser's decoder and converter
+        run: |
+          crates/wasm/build.sh
+          crates/convert-wasm/build.sh
+
+      # The bundled fixtures are written with the converter; without it their tests skip.
+      - run: cargo build --release -p escapement-tickwave-cli
+
+      - working-directory: web
+        run: npm ci
+
+      # The fuzz job's seeds read the SWD annotations this writes, which take the browser's decoder.
+      - working-directory: web
+        run: npm run generate
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: generated-fixtures
+          path: web/fixtures/identify-swd.swd.jsonl
+          if-no-files-found: error
+
+      # The browsers @playwright/test's version in package-lock.json pins.
+      - working-directory: web
+        run: npx playwright install --with-deps chromium firefox
+
+      - working-directory: web
+        run: npm run check
+
+      - if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright
+          path: |
+            web/playwright-report
+            web/test-results
+          if-no-files-found: ignore
+
+  # After the web job has uploaded the generated annotations, whether or not its tests then pass.
+  fuzz:
+    needs: web
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: fuzz
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: generated-fixtures
+          path: web/fixtures
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+
+      - run: cargo install cargo-fuzz --locked
+
+      - run: cargo fuzz build
+
+      - name: Each target over the seeds written from the fixtures and testdata
+        run: |
+          cargo run --no-default-features --bin seeds -- .. seeds
+          for t in $(cargo fuzz list); do
+            [ -d "seeds/$t" ] || continue
+            echo "== $t"
+            cargo fuzz run "$t" "seeds/$t" -- -runs=0 -rss_limit_mb=2048 -malloc_limit_mb=1024 -timeout=60
+          done

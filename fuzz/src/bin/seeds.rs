@@ -45,6 +45,40 @@ impl Corpus {
     }
 }
 
+/// The fixtures this version can't read whole, by design, and what refuses them:
+/// `unavailable.tickwave` (`crates/format/examples/unavailable.rs`) has channels whose feature or
+/// codec this version doesn't know, stated in its footer's header alone. Its own test
+/// (`crates/import/tests/recording.rs`) holds the importer's refusal of it, naming channel V.
+const UNREADABLE: &[(&str, &str)] = &[("unavailable", "channel V is unavailable to this reader")];
+
+/// Panics unless `rebuilt`, the file `original`'s structure builds, is refused as `original` is,
+/// for `why`, a fixture `UNREADABLE` lists: its footer the same, and the importer's refusal of it
+/// the same and naming `why`.
+fn refused_as_original(name: &str, original: &[u8], rebuilt: &[u8], why: &str) {
+    let footer = |file: &[u8]| Footer::parse_file(file).map(|f| f.header);
+    assert_eq!(
+        footer(rebuilt).ok(),
+        footer(original).ok(),
+        "{name}: rebuilt from its structure, another footer"
+    );
+    let refused = |file: &[u8]| {
+        let input: Arc<[u8]> = file.into();
+        match recording::read(Arc::new(input)) {
+            Ok(_) => panic!("{name}: read whole, which this version shouldn't"),
+            Err(e) => e.to_string(),
+        }
+    };
+    let (theirs, ours) = (refused(original), refused(rebuilt));
+    assert!(
+        theirs.contains(why),
+        "{name}: refused for another reason: {theirs}"
+    );
+    assert_eq!(
+        ours, theirs,
+        "{name}: rebuilt from its structure, refused otherwise"
+    );
+}
+
 /// Panics unless `rebuilt`, the file `original`'s structure builds, reads as `original` does: its
 /// index, every block and overview block, in order to its end, and matching `original`'s items.
 fn reads_as_original(name: &str, original: &[u8], rebuilt: &[u8]) {
@@ -292,8 +326,10 @@ fn main() {
         let (name, bytes, crafted) = (name.as_str(), &bytes[..], *crafted);
         let s = fz::structure(bytes).expect("a fixture structures");
         let rebuilt = fz::file(&s);
-        if !crafted {
-            reads_as_original(name, bytes, &rebuilt);
+        match UNREADABLE.iter().find(|(n, _)| *n == name) {
+            Some(&(_, why)) => refused_as_original(name, bytes, &rebuilt, why),
+            None if !crafted => reads_as_original(name, bytes, &rebuilt),
+            None => {}
         }
         let mut cut = Vec::new();
         // Cut before its footer, and at a few bytes inside a record.

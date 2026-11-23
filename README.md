@@ -136,6 +136,11 @@ The converter carries the viewer for `tickwave open` when it's built after the w
 cargo build --release -p escapement-tickwave-cli --features viewer
 ```
 
+CI runs all of this on every push to main and every pull request, in `.github/workflows/ci.yml`,
+with the browser tests in Chromium and Firefox. A release runs it again before it publishes. Each
+commit's checks on GitHub show its results. There, the tests that need the ignored
+`web/fixtures-local/` or `web/dev/vendor/` skip, and the fuzz targets only replay their seeds.
+
 ## Licence
 
 MIT or Apache-2.0, at your choice: `LICENSE-MIT` and `LICENSE-APACHE`.
