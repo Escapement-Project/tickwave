@@ -14,12 +14,14 @@ import { wasm } from "../scripts/node-wasm.ts";
 import { layout, partRows } from "./layout.ts";
 
 const at = (p: string) => new URL(`../${p}`, import.meta.url);
-const FILE = new Uint8Array(readFileSync(at("fixtures/identify-swd.bundle.tickwave")));
+const BUNDLE = at("fixtures/identify-swd.bundle.tickwave");
+const NO_BUNDLE = !existsSync(BUNDLE) && "needs target/release/tickwave: scripts/generate.ts bundles with it";
+const FILE = NO_BUNDLE ? new Uint8Array() : new Uint8Array(readFileSync(BUNDLE));
 
 /** Whether any read of `bytes` took any byte of `[from, to)`. */
 const readAny = (bytes: MemoryBytes, [from, to]: readonly [number, number]) => bytes.reads.some(([a, b]) => a < to && b > from);
 
-test("a span reads the parts it meets and no other, each once; every part read, it is the sidecar resolved whole", async () => {
+test("a span reads the parts it meets and no other, each once; every part read, it is the sidecar resolved whole", { skip: NO_BUNDLE }, async () => {
   const l = layout(FILE);
   const rows = partRows(FILE, l.parts!);
   assert.deepEqual(
