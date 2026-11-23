@@ -86,6 +86,16 @@ jobs:
       - working-directory: web
         run: npm ci
 
+      # The fuzz job's seeds read the SWD annotations this writes, which take the browser's decoder.
+      - working-directory: web
+        run: npm run generate
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: generated-fixtures
+          path: web/fixtures/identify-swd.swd.jsonl
+          if-no-files-found: error
+
       # The browsers @playwright/test's version in package-lock.json pins.
       - working-directory: web
         run: npx playwright install --with-deps chromium firefox
@@ -102,7 +112,10 @@ jobs:
             web/test-results
           if-no-files-found: ignore
 
+  # After the web job has uploaded the generated annotations, whether or not its tests then pass.
   fuzz:
+    needs: web
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     defaults:
@@ -110,6 +123,11 @@ jobs:
         working-directory: fuzz
     steps:
       - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: generated-fixtures
+          path: web/fixtures
 
       - uses: dtolnay/rust-toolchain@nightly
 
